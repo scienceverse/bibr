@@ -178,31 +178,14 @@ def test_topical_philosophy_sections_are_retrieval_only():
     shadow_resolution, shadow = _resolve_apply(contents, "shadow")
     resolution, active = _resolve_apply(contents, "active")
 
-    expected_legacy = "\n\n".join(
-        " ".join(
-            sentence.text
-            for sentence in contents.sentences
-            if sentence.section_id == section.section_id
-        )
-        for section in contents.sections
-    )
-    assert legacy.ethics_statement == expected_legacy
-    assert shadow.ethics_statement == expected_legacy
+    # Each section is a four-paragraph chapter typed ETHICS by the section
+    # model with no ethics declaration cue: a mistyped essay section, so the
+    # compatibility value falls back to the lexical path, which finds nothing.
+    assert legacy.ethics_statement is None
+    assert shadow.ethics_statement is None
     assert active.ethics_statement is None
     assert legacy_resolution.issues == ()
-    issue = next(
-        issue
-        for issue in shadow_resolution.issues
-        if issue.code == "VAL_STATEMENT_SUSPECT" and "ethics_statement" in issue.evidence_ids
-    )
-    assert issue.evidence_ids[:4] == (
-        "ethics_statement",
-        "section:1",
-        "section:2",
-        "section:3",
-    )
-    assert len(issue.evidence_ids) <= 20
-    assert len(issue.evidence_ids) == len(set(issue.evidence_ids))
+    assert not any("ethics_statement" in issue.evidence_ids for issue in shadow_resolution.issues)
     assert tuple(vars(sentence).copy() for sentence in contents.sentences) == original_body
     section_candidates = {
         candidate.section_ids[0]: candidate
@@ -223,6 +206,37 @@ def test_topical_philosophy_sections_are_retrieval_only():
     assert section_candidates[3].classification_score == 0.96
 
 
+def test_shadow_comparison_evidence_names_every_implicated_section():
+    contents = _synthetic_contents("topical_ethics")
+    first_paragraph = {}
+    for sentence in contents.sentences:
+        first_paragraph.setdefault(sentence.section_id, sentence.paragraph_id)
+    contents.sentences = [
+        sentence
+        for sentence in contents.sentences
+        if sentence.paragraph_id == first_paragraph[sentence.section_id]
+    ]
+
+    shadow_resolution, shadow = _resolve_apply(contents, "shadow")
+
+    # One short paragraph per model-typed section is still copied, while the
+    # bounded selection rejects the topical prose.
+    assert shadow.ethics_statement is not None
+    issue = next(
+        issue
+        for issue in shadow_resolution.issues
+        if issue.code == "VAL_STATEMENT_SUSPECT" and "ethics_statement" in issue.evidence_ids
+    )
+    assert issue.evidence_ids[:4] == (
+        "ethics_statement",
+        "section:1",
+        "section:2",
+        "section:3",
+    )
+    assert len(issue.evidence_ids) <= 20
+    assert len(issue.evidence_ids) == len(set(issue.evidence_ids))
+
+
 def test_model_classified_topical_funding_prose_needs_a_declaration_predicate():
     contents = _contents(
         [
@@ -240,7 +254,7 @@ def test_model_classified_topical_funding_prose_needs_a_declaration_predicate():
     assert metadata.funding_statement is None
 
 
-def test_shadow_uses_exact_legacy_section_snapshot_but_selected_funding_is_bounded():
+def test_section_copy_stops_at_the_next_statement_label():
     contents = _contents(
         [
             (
@@ -261,9 +275,10 @@ def test_shadow_uses_exact_legacy_section_snapshot_but_selected_funding_is_bound
     shadow_resolution, shadow = _resolve_apply(contents, "shadow")
     active_resolution, active = _resolve_apply(contents, "active")
 
-    exact_legacy = "This work was supported by NSF grant 123. Ethics: Not applicable."
-    assert legacy.funding_statement == exact_legacy
-    assert shadow.funding_statement == exact_legacy
+    # "Ethics:" opens another statement, so the FUNDING copy ends before it
+    # and agrees with the bounded selection.
+    assert legacy.funding_statement == "This work was supported by NSF grant 123."
+    assert shadow.funding_statement == legacy.funding_statement
     assert active.funding_statement == "This work was supported by NSF grant 123."
     assert active.ethics_statement == "Ethics: Not applicable."
     assert (
@@ -272,21 +287,13 @@ def test_shadow_uses_exact_legacy_section_snapshot_but_selected_funding_is_bound
         )
         == "This work was supported by NSF grant 123."
     )
-    funding_issues = [
-        issue
+    assert not any(
+        issue.code == "VAL_STATEMENT_SUSPECT" and "funding_statement" in issue.evidence_ids
         for issue in shadow_resolution.issues
-        if issue.code == "VAL_STATEMENT_SUSPECT" and "funding_statement" in issue.evidence_ids
-    ]
-    assert len(funding_issues) == 1
-    assert funding_issues[0].evidence_ids == (
-        "funding_statement",
-        "section:1",
-        "text:1",
-        "text:2",
     )
 
 
-def test_legacy_snapshot_preserves_pre_finalize_bytes_while_selected_renders_final_clean():
+def test_shadow_value_renders_from_final_clean_text_like_the_selection():
     contents = _contents(
         [
             (
@@ -309,16 +316,19 @@ def test_legacy_snapshot_preserves_pre_finalize_bytes_while_selected_renders_fin
 
     module.apply_integrity_resolution(contents, metadata, resolution)
 
-    assert metadata.funding_statement == (
-        "This work was supported by NSF grant $^{123}$ . Ethics: Not applicable."
-    )
+    assert metadata.funding_statement == "This work was supported by NSF grant 123 ."
     assert (
         module.render_selected_integrity_statement(contents, resolution, "funding_statement")
         == "This work was supported by NSF grant 123 ."
     )
+    # The resolve-time snapshot (the shadow comparison baseline) keeps the
+    # pre-cleaning text.
+    assert dict(resolution.legacy_statement_snapshots)["funding_statement"] == (
+        "This work was supported by NSF grant $^{123}$ ."
+    )
 
 
-def test_legacy_section_snapshot_preserves_internal_sentence_whitespace():
+def test_legacy_section_copy_collapses_raw_line_breaks():
     contents = _contents(
         [
             (
@@ -328,21 +338,22 @@ def test_legacy_section_snapshot_preserves_internal_sentence_whitespace():
                 "exact_alias",
                 1.0,
                 [
-                    "  This work was supported by NSF grant 123.  ",
-                    "  Ethics: Not applicable.  ",
+                    "  This work was supported by the NSF\r\nunder grant 123.  ",
+                    "  Additional support came from the\r\n  Wellcome Trust.  ",
                 ],
             )
         ]
     )
 
-    _resolution, metadata = _resolve_apply(contents, "legacy")
+    for mode in ("legacy", "shadow"):
+        _resolution, metadata = _resolve_apply(contents, mode)
+        assert metadata.funding_statement == (
+            "This work was supported by the NSF under grant 123. "
+            "Additional support came from the Wellcome Trust."
+        )
 
-    assert metadata.funding_statement == (
-        "This work was supported by NSF grant 123.     Ethics: Not applicable."
-    )
 
-
-def test_formatting_only_final_clean_change_keeps_frozen_shadow_comparison_issue_free():
+def test_formatting_only_final_clean_change_keeps_shadow_comparison_issue_free():
     contents = _contents(
         [
             (
@@ -369,7 +380,7 @@ def test_formatting_only_final_clean_change_keeps_frozen_shadow_comparison_issue
     module.apply_integrity_resolution(contents, metadata, resolution)
     module.apply_integrity_resolution(contents, metadata, resolution)
 
-    assert metadata.funding_statement == "This work was supported by NSF grant $^{123}$ ."
+    assert metadata.funding_statement == "This work was supported by NSF grant 123 ."
     assert (
         module.render_selected_integrity_statement(contents, resolution, "funding_statement")
         == "This work was supported by NSF grant 123 ."
@@ -1902,7 +1913,8 @@ def test_only_independently_accepted_adjacent_declarations_are_joined():
     )
     _resolution, metadata = _resolve_apply(contents, "active")
     assert metadata.funding_statement == (
-        "Supported by NSF grant 123.\n\nAdditional support came from the Wellcome Trust."
+        "Funding: Supported by NSF grant 123.\n\n"
+        "Financial support: Additional support came from the Wellcome Trust."
     )
 
 
@@ -2188,3 +2200,1578 @@ def test_legacy_preserves_canonical_scalar_when_heading_points_to_another_field(
         issue.code == "VAL_STATEMENT_SUSPECT" and "funding_statement" in issue.evidence_ids
         for issue in shadow_resolution.issues
     )
+
+
+# ── Compatibility-value bounds (tester-reported cases, synthetic text) ──────
+
+
+def _shadow_values(contents: PaperContents) -> PaperMetadata:
+    module = _resolver_module()
+    resolution = module.resolve_integrity_statements(contents, mode="shadow")
+    contents.finalize_text()
+    metadata = PaperMetadata(doi="", title="T")
+    module.apply_integrity_resolution(contents, metadata, resolution)
+    return metadata
+
+
+def _statement_values(metadata: PaperMetadata) -> list[str]:
+    return [
+        value
+        for field in ("funding_statement", "coi_statement", "ethics_statement", "data_availability")
+        if (value := getattr(metadata, field)) is not None
+    ]
+
+
+def test_front_matter_block_statements_stop_at_the_next_label_and_lose_raw_breaks():
+    # An F1000-style block the parser put under Keywords: each statement
+    # ran on into the next label ("Grant information:", "Copyright: ©").
+    contents = _contents(
+        [
+            (
+                1,
+                "Keywords",
+                CanonicalSection.KEYWORDS,
+                "exact_alias",
+                1.0,
+                [
+                    ("Competing interests: No competing interests were disclosed.", 13),
+                    ("Grant information:", 13),
+                    (
+                        "This project has received funding from the Example Framework Programme"
+                        " as\r\npart of the COST Action CA00000, as supported by the COST"
+                        " Association.",
+                        13,
+                    ),
+                    (
+                        "The funders had no role in study design, data collection and analysis,"
+                        " decision to publish, or preparation of the manuscript.",
+                        13,
+                    ),
+                    ("Copyright: © 2026 Author A.", 13),
+                    (
+                        "This is an open access article distributed under the terms of the"
+                        " Creative Commons Attribution License.",
+                        13,
+                    ),
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement == "Competing interests: No competing interests were disclosed."
+    assert metadata.funding_statement == (
+        "This project has received funding from the Example Framework Programme as part of the"
+        " COST Action CA00000, as supported by the COST Association. The funders had no role in"
+        " study design, data collection and analysis, decision to publish, or preparation of the"
+        " manuscript."
+    )
+    assert not any("\r" in value or "\n" in value for value in _statement_values(metadata))
+
+
+def test_funding_capture_stops_before_a_thanks_sentence():
+    contents = _contents(
+        [
+            (
+                1,
+                "Acknowledgements",
+                CanonicalSection.ACKNOWLEDGMENT,
+                "exact_alias",
+                1.0,
+                [
+                    (
+                        "This research was supported by the Example Postdoctoral Fellowship"
+                        " Program.",
+                        40,
+                    ),
+                    ("Additionally, we thank A. Author and B. Author for their leadership.", 40),
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == (
+        "This research was supported by the Example Postdoctoral Fellowship Program."
+    )
+
+
+def test_data_capture_stops_at_a_preprint_sidebar():
+    contents = _contents(
+        [
+            (
+                1,
+                "Results",
+                CanonicalSection.RESULTS,
+                "exact_alias",
+                1.0,
+                [
+                    (
+                        "Data are available for review and are being deposited into a public"
+                        " repository.",
+                        50,
+                    ),
+                    ("All rights reserved. No reuse allowed without permission.", 51),
+                    ("The copyright holder for this preprint is the author/funder.", 52),
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.data_availability == (
+        "Data are available for review and are being deposited into a public repository."
+    )
+
+
+def test_statement_section_holding_only_a_licence_is_not_exported():
+    contents = _contents(
+        [
+            (
+                1,
+                "Competing interests",
+                CanonicalSection.COI,
+                "model",
+                0.998,
+                [
+                    ("Open Access", 67),
+                    (
+                        "This article is licensed under a Creative\r\nCommons Attribution 4.0"
+                        " International License, which permits use and sharing in any medium.",
+                        67,
+                    ),
+                    (
+                        "To view a copy of this licence, visit"
+                        " http://creativecommons.org/licenses/by/4.0/.",
+                        68,
+                    ),
+                    ("© The Author(s) 2026", 69),
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement is None
+
+
+def test_declaration_then_licence_in_one_row_keeps_only_the_declaration():
+    contents = _contents(
+        [
+            (
+                1,
+                "Competing interests",
+                CanonicalSection.COI,
+                "exact_alias",
+                1.0,
+                [
+                    "The authors declare no competing interests. This article is licensed"
+                    " under a Creative Commons Attribution 4.0 International License."
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement == "The authors declare no competing interests."
+
+
+def test_leading_watermark_row_of_a_statement_section_is_skipped():
+    contents = _contents(
+        [
+            (
+                1,
+                "Funding sources",
+                CanonicalSection.FUNDING,
+                "exact_alias",
+                1.0,
+                [
+                    (
+                        "Disclaimer: The manuscript and its contents are confidential, intended"
+                        " for journal review purposes only.",
+                        30,
+                    ),
+                    ("This work was funded by the Example Research Council (grant 123).", 30),
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == (
+        "This work was funded by the Example Research Council (grant 123)."
+    )
+
+
+def test_data_statement_keeps_its_request_to_the_corresponding_author():
+    contents = _contents(
+        [
+            (
+                1,
+                "Data sharing",
+                CanonicalSection.OPEN_DATA,
+                "exact_alias",
+                1.0,
+                [
+                    (
+                        "Individual participant data will be made available beginning 9 months"
+                        " after publication.",
+                        70,
+                    ),
+                    (
+                        "Proposals should be directed to the corresponding author and requesters"
+                        " will need to sign a data access agreement.",
+                        70,
+                    ),
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.data_availability == (
+        "Individual participant data will be made available beginning 9 months after"
+        " publication. Proposals should be directed to the corresponding author and requesters"
+        " will need to sign a data access agreement."
+    )
+
+
+def test_first_page_footnote_keeps_the_funding_after_the_history_line():
+    contents = _contents(
+        [
+            (
+                1,
+                "Footnote 1",
+                CanonicalSection.FOOTNOTE,
+                "exact_alias",
+                1.0,
+                [
+                    "Manuscript received May 1, 2020; revised June 2, 2020; accepted July 3,"
+                    " 2020. This work was supported by the Example Science Foundation under"
+                    " Grant 123."
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == (
+        "This work was supported by the Example Science Foundation under Grant 123."
+    )
+
+
+def test_line_broken_anchor_is_matched_on_collapsed_text():
+    contents = _contents(
+        [
+            (
+                1,
+                "Methods",
+                CanonicalSection.METHODS,
+                "exact_alias",
+                1.0,
+                ["Ethics \r\napproval was obtained from the University Ethics Board (2020/01)."],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.ethics_statement == (
+        "Ethics approval was obtained from the University Ethics Board (2020/01)."
+    )
+
+
+def test_label_led_capture_is_preferred_over_an_earlier_prose_mention():
+    contents = _contents(
+        [
+            (
+                1,
+                "Introduction",
+                CanonicalSection.INTRODUCTION,
+                "exact_alias",
+                1.0,
+                ["Earlier trials were funded by industry grants, which raised concerns."],
+            ),
+            (
+                2,
+                "Declarations",
+                CanonicalSection.UNKNOWN,
+                None,
+                0.0,
+                ["Funding: This study was funded by the Example Research Council (grant 123)."],
+            ),
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == (
+        "Funding: This study was funded by the Example Research Council (grant 123)."
+    )
+
+
+def test_long_model_typed_ethics_chapter_falls_back_to_a_lexical_capture():
+    # A thesis chapter typed ETHICS by the section model is not a statement.
+    filler = (
+        "Ethical issues that may surface during data collection include confidentiality,"
+        " deception and covert activities, and each step of the study was planned to avoid"
+        " them while keeping the analysis transparent for later readers of this chapter."
+    )
+    rows: list[str | tuple[str, int]] = [
+        (filler, paragraph) for paragraph in range(8) for _ in (0, 1, 2)
+    ]
+    rows.append(("Data collection began after IRB approval (approval no. 12-34-56).", 8))
+    contents = _contents([(1, "Ethical Procedures", CanonicalSection.ETHICS, "model", 0.999, rows)])
+    assert sum(len(row[0]) for row in rows if isinstance(row, tuple)) > 3000
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.ethics_statement == (
+        "Data collection began after IRB approval (approval no. 12-34-56)."
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Uno achieves a 2x speedup at the largest batch size supported by the base AR model.",
+        "Smart homes are increasingly supported by AI and IoT services.",
+        # A raw line break used to hide this anchor; collapsed, it must not
+        # pass on the bare acronyms that follow it.
+        "The cluster was defined as glomerular and supported \r\nby expression of the markers"
+        " NPHS1, NPHS2, and PODXL.",
+    ],
+)
+def test_supported_by_needs_a_funder_not_just_an_acronym(text: str):
+    contents = _contents([(1, "Results", CanonicalSection.RESULTS, "exact_alias", 1.0, [text])])
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The first author was supported by a CONICET fellowship.",
+        "This study was supported by FAPESP (process # 2011/14143-2).",
+        "The project was supported by NSFC.",
+        "Data collection was supported by the Example Science Society.",
+    ],
+)
+def test_supported_by_a_named_funder_is_still_funding(text: str):
+    contents = _contents(
+        [(1, "Acknowledgements", CanonicalSection.ACKNOWLEDGMENT, "exact_alias", 1.0, [text])]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == text
+
+
+def test_limitations_sentence_about_conflicts_of_interest_is_not_a_coi_statement():
+    contents = _contents(
+        [
+            (
+                1,
+                "Limitations",
+                CanonicalSection.DISCUSSION,
+                "exact_alias",
+                1.0,
+                [
+                    "To maintain credibility, avoid conflicts of interest, and ensure that only"
+                    " nonproprietary data were used, I retrieved storm surveys from public"
+                    " portals.",
+                    "Researchers in the literature on conflicts of interest note that"
+                    " disclosure alone is not enough.",
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The authors declare no conflict of interest.",
+        "Conflict of interest statement: The authors report consulting fees from Example Ltd.",
+        "This study was carried out without any conflict of interest.",
+    ],
+)
+def test_declared_coi_sentence_is_kept(text: str):
+    contents = _contents(
+        [(1, "Discussion", CanonicalSection.DISCUSSION, "exact_alias", 1.0, [text])]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement == text
+
+
+def test_consent_listed_as_a_topic_is_not_an_ethics_statement():
+    contents = _contents(
+        [
+            (
+                1,
+                "Methods",
+                CanonicalSection.METHODS,
+                "exact_alias",
+                1.0,
+                [
+                    "Ethical issues during data collection can include informed consent"
+                    " procedures, confidentiality, or deception.",
+                    "Written informed consent was obtained from all participants.",
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.ethics_statement == (
+        "Written informed consent was obtained from all participants."
+    )
+
+
+def test_role_of_the_funding_source_section_is_not_the_funding_statement():
+    contents = _contents(
+        [
+            (
+                1,
+                "Role of the funding source",
+                CanonicalSection.FUNDING,
+                "llm",
+                0.85,
+                [
+                    "The funders of the study had no role in study design, data collection,"
+                    " data analysis, data interpretation, or writing of the report."
+                ],
+            ),
+            (
+                2,
+                "Acknowledgments",
+                CanonicalSection.ACKNOWLEDGMENT,
+                "exact_alias",
+                1.0,
+                [
+                    "The study was funded by the National Institute for Health and Care"
+                    " Research (NIHR) Health Technology Assessment programme under grant"
+                    " agreement 12/173/14."
+                ],
+            ),
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == (
+        "The study was funded by the National Institute for Health and Care Research (NIHR)"
+        " Health Technology Assessment programme under grant agreement 12/173/14."
+    )
+
+
+def test_ai_use_disclosure_section_is_not_joined_to_ethics():
+    contents = _contents(
+        [
+            (
+                1,
+                "Ethics and consent",
+                CanonicalSection.ETHICS,
+                "model",
+                0.999,
+                ["Ethical approval and consent were not required for this study."],
+            ),
+            (
+                2,
+                "AI Tool disclosure",
+                CanonicalSection.ETHICS,
+                "model",
+                0.775,
+                ["No AI-assisted writing or revision tools were used."],
+            ),
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.ethics_statement == (
+        "Ethical approval and consent were not required for this study."
+    )
+
+
+def test_topical_ethics_heading_is_not_copied_as_a_statement():
+    contents = _contents(
+        [
+            (
+                1,
+                "Time Discounting: An Ethical Problem",
+                CanonicalSection.ETHICS,
+                "model",
+                0.999,
+                ["This section discusses the ethics of discounting climate harms."],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.ethics_statement is None
+
+
+@pytest.mark.parametrize(
+    ("field", "text"),
+    [
+        (
+            "funding_statement",
+            "Moreover, developing countries have failed to manage the financial support"
+            " provided by donors when national priorities and the GCF priorities conflict.",
+        ),
+        (
+            "data_availability",
+            "In Experiment 2, we included all public schools regardless of their school type"
+            " or data availability.",
+        ),
+    ],
+)
+def test_label_noun_in_running_prose_is_not_a_statement(field: str, text: str):
+    contents = _contents(
+        [(1, "Discussion", CanonicalSection.DISCUSSION, "exact_alias", 1.0, [text])]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert getattr(metadata, field) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "A. Author acknowledges the financial support of the European Research Council"
+        " (grant 123456).",
+        "We received financial support from the Example Science Foundation.",
+        "Financial support: This research received no external funding.",
+    ],
+)
+def test_financial_support_declaration_is_still_funding(text: str):
+    contents = _contents(
+        [(1, "Acknowledgments", CanonicalSection.ACKNOWLEDGMENT, "exact_alias", 1.0, [text])]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == text
+
+
+def test_labelled_human_and_animal_rights_statement_is_ethics():
+    text = (
+        "Human and Animal Rights and Informed Consent This article does not contain any"
+        " studies with human or animal subjects performed by any of the authors."
+    )
+    contents = _contents([(1, "Declarations", CanonicalSection.UNKNOWN, None, 0.0, [text])])
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.ethics_statement == text
+
+
+def test_labelled_coi_after_the_reference_list_is_found():
+    # The layout model typed the last-page end matter as reference content.
+    statement = (
+        "Conflict of interest statement: The authors declare that the article content was"
+        " composed in the absence of any commercial or financial relationships that could"
+        " be construed as a potential conflict of interest."
+    )
+    contents = _contents(
+        [
+            (
+                1,
+                "References",
+                CanonicalSection.REFERENCES,
+                "exact_alias",
+                1.0,
+                [
+                    "1. Doe J, Roe R. A study of outcomes. J Example. 2017;12:1-9.",
+                    statement,
+                    "Received 3 May 2019; accepted 5 June 2019",
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement == statement
+
+
+def test_reference_entries_that_mention_statement_topics_are_not_statements():
+    contents = _contents(
+        [
+            (
+                1,
+                "References",
+                CanonicalSection.REFERENCES,
+                "exact_alias",
+                1.0,
+                [
+                    "2. Roe R. Conflicts of interest in clinical research: the authors declare"
+                    " a problem. J Example. 2010;5:3-8.",
+                    "3. Poe P. Research supported by the National Science Foundation."
+                    " Example Press; 2012.",
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement is None
+    assert metadata.funding_statement is None
+
+
+def test_statement_fused_into_its_heading_region_is_recovered():
+    contents = _contents(
+        [
+            (
+                1,
+                "Disclosure and competing interests statement The authors declare no"
+                " competing interests.",
+                CanonicalSection.COI,
+                "model",
+                0.998,
+                [
+                    "Open Access This article is licensed under a Creative Commons Attribution"
+                    " 4.0 International License."
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement == "The authors declare no competing interests."
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "Conflict of Interest Statement",
+        "Competing Interests and Their Management in Peer Review",
+        "Funding and Support",
+    ],
+)
+def test_heading_without_a_declaration_sentence_has_no_tail(header: str):
+    module = _resolver_module()
+
+    fields = ("funding_statement", "coi_statement", "ethics_statement", "data_availability")
+    assert all(module._heading_declaration_tail(field, header) is None for field in fields)
+
+
+def test_joined_statement_sections_keep_their_headings():
+    contents = _contents(
+        [
+            (
+                1,
+                "Availability of data and materials",
+                CanonicalSection.OPEN_DATA,
+                "exact_alias",
+                1.0,
+                [
+                    "The datasets used in this study are available from the corresponding"
+                    " author on reasonable request."
+                ],
+            ),
+            (
+                2,
+                "Materials availability",
+                CanonicalSection.OPEN_DATA,
+                "exact_alias",
+                1.0,
+                ["Not applicable."],
+            ),
+            (
+                3,
+                "Code availability",
+                CanonicalSection.OPEN_DATA,
+                "exact_alias",
+                1.0,
+                ["Not applicable."],
+            ),
+            (
+                4,
+                "Ethics approval and consent to participate",
+                CanonicalSection.ENDNOTE,
+                "model",
+                0.993,
+                ["Not applicable."],
+            ),
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.data_availability == (
+        "Availability of data and materials: The datasets used in this study are available"
+        " from the corresponding author on reasonable request.\n\n"
+        "Materials availability: Not applicable.\n\n"
+        "Code availability: Not applicable."
+    )
+    assert metadata.ethics_statement == "Not applicable."
+
+
+def test_single_statement_section_is_not_prefixed_with_its_heading():
+    contents = _contents(
+        [
+            (
+                1,
+                "5.2 Data availability",
+                CanonicalSection.OPEN_DATA,
+                "exact_alias",
+                1.0,
+                ["Data are available on OSF."],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.data_availability == "Data are available on OSF."
+
+
+_FURNITURE_WORDS_INSIDE_STATEMENTS = [
+    (
+        CanonicalSection.OPEN_DATA,
+        "Data availability statement",
+        [
+            "Due to copyright restrictions, the stimuli cannot be shared publicly.",
+            "Anonymised trial data are on OSF.",
+        ],
+        "data_availability",
+    ),
+    (
+        CanonicalSection.OPEN_DATA,
+        "Data availability statement",
+        [
+            "The data are available at https://osf.io/abc.",
+            "The questionnaire items cannot be shared for copyright reasons.",
+        ],
+        "data_availability",
+    ),
+    (
+        CanonicalSection.OPEN_DATA,
+        "Data availability",
+        ["All data are shared on OSF under a Creative Commons Attribution 4.0 licence."],
+        "data_availability",
+    ),
+    (
+        CanonicalSection.OPEN_DATA,
+        "Data availability",
+        [
+            "The dataset is published under a CC BY licence at Zenodo"
+            " (https://doi.org/10.5281/zenodo.1)."
+        ],
+        "data_availability",
+    ),
+    (
+        CanonicalSection.COI,
+        "Competing interests",
+        [
+            "MW is the copyright holder of the Pain Catastrophizing Scale and receives royalties.",
+            "The other authors declare no competing interests.",
+        ],
+        "coi_statement",
+    ),
+    (
+        CanonicalSection.COI,
+        "Conflict of interest",
+        [
+            "JS has received license fees from Pearson for the WAIS-IV.",
+            "The remaining authors declare no conflicts.",
+        ],
+        "coi_statement",
+    ),
+    (
+        CanonicalSection.COI,
+        "Competing interests",
+        [
+            "AB is an employee of Springer Nature, the publisher of this journal;"
+            " she was not involved in peer review."
+        ],
+        "coi_statement",
+    ),
+    (
+        CanonicalSection.COI,
+        "Competing interests",
+        [
+            "AB receives royalties for the BDI-II, published by Pearson.",
+            "The other authors declare no conflicts of interest.",
+        ],
+        "coi_statement",
+    ),
+    (
+        CanonicalSection.OPEN_DATA,
+        "Data availability",
+        [
+            "The questionnaire is available under license from the publisher.",
+            "All other data are on OSF.",
+        ],
+        "data_availability",
+    ),
+    (
+        CanonicalSection.FUNDING,
+        "Funding",
+        [
+            "This work was supported by the Swiss National Science Foundation.",
+            "The first author received 15,000 CHF from the University of Bern.",
+        ],
+        "funding_statement",
+    ),
+    (
+        CanonicalSection.FUNDING,
+        "Funding",
+        [
+            "Each author received separate funding from the European Research Council"
+            " (ERC-2020-StG)."
+        ],
+        "funding_statement",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("section_type", "heading", "rows", "field"), _FURNITURE_WORDS_INSIDE_STATEMENTS
+)
+def test_furniture_words_inside_a_statement_sentence_keep_the_statement_whole(
+    section_type, heading, rows, field
+):
+    contents = _contents([(1, heading, section_type, "exact_alias", 1.0, rows)])
+
+    metadata = _shadow_values(contents)
+
+    assert getattr(metadata, field) == " ".join(rows)
+
+
+def test_lexical_capture_keeps_a_sentence_holding_a_furniture_word_whole():
+    row = "The authors declare no competing interests; JS holds the copyright of the ABC scale."
+    contents = _contents(
+        [
+            (1, "Introduction", CanonicalSection.INTRODUCTION, "model", 0.9, ["We study things."]),
+            (2, "Notes", CanonicalSection.ENDNOTE, "model", 0.9, [row]),
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement == row
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected"),
+    [
+        (
+            [
+                "The authors declare no competing interests.",
+                "Copyright © 2024 The Authors.",
+            ],
+            "The authors declare no competing interests.",
+        ),
+        (
+            [
+                "The authors declare no competing interests."
+                " This article is licensed under a Creative Commons Attribution 4.0 licence."
+            ],
+            "The authors declare no competing interests.",
+        ),
+        (
+            [
+                "The authors declare no competing interests. Received: 3 May 2019; accepted 1 June 2019"
+            ],
+            "The authors declare no competing interests.",
+        ),
+    ],
+)
+def test_furniture_shapes_still_end_a_statement(rows, expected):
+    contents = _contents(
+        [(1, "Competing interests", CanonicalSection.COI, "exact_alias", 1.0, rows)]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement == expected
+
+
+@pytest.mark.parametrize(
+    ("section_type", "heading", "field", "rows"),
+    [
+        (
+            CanonicalSection.COI,
+            "Conflict of interest",
+            "coi_statement",
+            [
+                ("The authors declare no conflict of interest.", 1),
+                (
+                    "All claims expressed in this article are solely those of the authors and do"
+                    " not necessarily represent those of the publisher.",
+                    2,
+                ),
+            ],
+        ),
+        (
+            CanonicalSection.OPEN_DATA,
+            "Open Practices Statement",
+            "data_availability",
+            [
+                ("The data are available at https://osf.io/abc.", 1),
+                (
+                    "A CC-BY license is applied to the Author Accepted Manuscript (AAM) arising"
+                    " from this submission.",
+                    1,
+                ),
+                ("CRediT taxonomy of author contributions, in alphabetical order:", 2),
+            ],
+        ),
+    ],
+)
+def test_publisher_note_and_rights_retention_sentences_end_a_statement(
+    section_type, heading, field, rows
+):
+    contents = _contents([(1, heading, section_type, "exact_alias", 1.0, rows)])
+
+    metadata = _shadow_values(contents)
+
+    assert getattr(metadata, field) == rows[0][0]
+
+
+def test_grant_information_label_is_the_funding_label_not_furniture():
+    row = (
+        "Grant information: The author(s) declared that no grants were involved in"
+        " supporting this work."
+    )
+    contents = _contents(
+        [
+            (1, "Introduction", CanonicalSection.INTRODUCTION, "model", 0.9, ["We study things."]),
+            (2, "Grant information", CanonicalSection.FUNDING, "exact_alias", 1.0, [row]),
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == row
+
+
+def test_grant_information_label_still_ends_a_competing_interests_statement():
+    contents = _contents(
+        [
+            (
+                1,
+                "Competing interests",
+                CanonicalSection.COI,
+                "exact_alias",
+                1.0,
+                [
+                    "No competing interests were disclosed.",
+                    "Grant information: This work was supported by the Wellcome Trust [208].",
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement == "No competing interests were disclosed."
+
+
+def test_model_typed_data_section_with_four_short_paragraphs_is_copied_whole():
+    rows: list[str | tuple[str, int]] = [
+        (
+            "Single-cell RNA-seq data have been deposited at GEO as GSE123456 and are publicly"
+            " available as of the date of publication.",
+            1,
+        ),
+        (
+            "Microscopy data reported in this paper will be shared by the lead contact upon request.",
+            2,
+        ),
+        (
+            "All original code has been deposited at Zenodo and is publicly available at"
+            " https://doi.org/10.5281/zenodo.1.",
+            3,
+        ),
+        (
+            "Any additional information required to reanalyze the data reported in this paper is"
+            " available from the lead contact upon request.",
+            4,
+        ),
+    ]
+    contents = _contents(
+        [(1, "Data and code availability", CanonicalSection.OPEN_DATA, "model", 0.97, rows)]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.data_availability == " ".join(text for text, _ in rows)
+
+
+def test_long_model_typed_section_without_an_anchor_keeps_its_opening_paragraphs():
+    filler = (
+        "Ethical issues that may surface during data collection include confidentiality,"
+        " deception and covert activities, and each step of the study was planned to avoid"
+        " them while keeping the analysis transparent for later readers of this chapter."
+    )
+    rows: list[str | tuple[str, int]] = [
+        (f"{filler} ({paragraph})", paragraph) for paragraph in range(20)
+    ]
+    rows[1] = ("The procedures were discussed with the review board of the department.", 1)
+    contents = _contents([(1, "Ethical Procedures", CanonicalSection.ETHICS, "model", 0.999, rows)])
+    without_cue = _contents(
+        [
+            (
+                1,
+                "Ethical Procedures",
+                CanonicalSection.ETHICS,
+                "model",
+                0.999,
+                [(f"{filler} ({paragraph})", paragraph) for paragraph in range(20)],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.ethics_statement == " ".join(
+        str(text) for text, _paragraph in rows[:3] if isinstance(text, str)
+    )
+    assert _shadow_values(without_cue).ethics_statement is None
+
+
+def test_statement_sharing_a_paragraph_with_a_licence_line_is_kept():
+    contents = _contents(
+        [
+            (
+                1,
+                "Funding",
+                CanonicalSection.FUNDING,
+                "exact_alias",
+                1.0,
+                [
+                    ("© The Author(s) 2024.", 7),
+                    ("This research received no external funding.", 7),
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == "This research received no external funding."
+
+
+def test_licence_paragraph_rows_are_skipped_up_to_the_statement():
+    contents = _contents(
+        [
+            (
+                1,
+                "Competing interests",
+                CanonicalSection.COI,
+                "exact_alias",
+                1.0,
+                [
+                    ("Open Access This article is licensed under a Creative Commons", 3),
+                    ("Attribution 4.0 International License, which permits use, sharing,", 3),
+                    ("adaptation, distribution and reproduction in any medium.", 3),
+                    ("The authors declare no competing interests.", 3),
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement == "The authors declare no competing interests."
+
+
+def test_licence_block_continuing_into_the_next_paragraph_is_skipped():
+    contents = _contents(
+        [
+            (
+                1,
+                "Disclosure and competing interests statement The authors declare no competing"
+                " interests.",
+                CanonicalSection.COI,
+                "model",
+                0.99,
+                [
+                    ("Open Access", 67),
+                    (
+                        "This article is licensed under a Creative Commons Attribution 4.0"
+                        " International License, which permits use, sharing, adaptation,"
+                        " distribution and reproduction in any medium or format, as long as you"
+                        " give appropriate credit to the original author(s)",
+                        67,
+                    ),
+                    (
+                        "and the source, provide a link to the Creative Commons licence, and"
+                        " indicate if changes were made.",
+                        68,
+                    ),
+                    (
+                        "The images or other third party material in this article are included in"
+                        " the article's Creative Commons licence.",
+                        68,
+                    ),
+                    (
+                        "Creative Commons Public Domain Dedication waiver applies to the data"
+                        " associated with this article.",
+                        68,
+                    ),
+                    ("This waiver removes legal barriers to the re-use of research data.", 68),
+                    (
+                        "According to standard scholarly practice, it is recommended to provide"
+                        " appropriate citation and attribution whenever technically possible.",
+                        68,
+                    ),
+                    ("© The Author(s) 2026", 69),
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement == "The authors declare no competing interests."
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Funding: This study was supported by the BMBF (01GL1234).",
+        "Funding: The project was supported by the regional programme.",
+        "This study was supported by FCT (UIDB/04501/2020).",
+        "This research was partly supported by JST CREST.",
+        "The trial was supported by grant 01KG2104 to the first author.",
+    ],
+)
+def test_supported_by_with_a_label_grant_id_or_funder_acronym_is_funding(text: str):
+    contents = _contents(
+        [
+            (1, "Introduction", CanonicalSection.INTRODUCTION, "model", 0.9, ["We study things."]),
+            (2, "Notes", CanonicalSection.ENDNOTE, "model", 0.9, [text]),
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == text
+
+
+def test_body_section_under_a_strong_funding_heading_is_not_copied():
+    contents = _contents(
+        [
+            (
+                1,
+                "Financial support",
+                CanonicalSection.RESULTS,
+                "heading",
+                0.9,
+                [
+                    "Students who received financial support from parents reported lower stress"
+                    " (b = 0.3).",
+                    "This effect was larger for first-generation students.",
+                    "Table 3 shows the full model.",
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement is None
+
+
+def test_methods_typed_bmc_data_section_under_a_strong_heading_is_still_copied():
+    contents = _contents(
+        [
+            (
+                1,
+                "Availability of data and materials",
+                CanonicalSection.METHODS,
+                "exact_alias",
+                1.0,
+                ["Not applicable."],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.data_availability == "Not applicable."
+
+
+def test_endnote_under_a_strong_funding_heading_is_still_copied():
+    contents = _contents(
+        [
+            (
+                1,
+                "Financial support",
+                CanonicalSection.ENDNOTE,
+                "model",
+                0.9,
+                ["The study received no specific grant from any funding agency."],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == (
+        "The study received no specific grant from any funding agency."
+    )
+
+
+def test_thanks_sentence_naming_funding_continues_the_funding_statement():
+    rows = [
+        "This research was funded by the Swiss National Science Foundation (grant 100014_123).",
+        "We also thank the Jacobs Foundation for financial support (grant 2018-1234).",
+    ]
+    contents = _contents([(1, "Funding", CanonicalSection.FUNDING, "exact_alias", 1.0, rows)])
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == " ".join(rows)
+
+
+def test_thanks_sentence_without_funding_still_ends_the_funding_statement():
+    contents = _contents(
+        [
+            (
+                1,
+                "Funding",
+                CanonicalSection.FUNDING,
+                "exact_alias",
+                1.0,
+                [
+                    "This research was funded by the Swiss National Science Foundation.",
+                    "We thank our participants for their time.",
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == (
+        "This research was funded by the Swiss National Science Foundation."
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "field"),
+    [
+        (
+            "The authors declare that there is no conflict of interest between the authors and"
+            " the funding body.",
+            "coi_statement",
+        ),
+        ("The authors are unaware of any conflicts of interest.", "coi_statement"),
+        ("This study is free of any conflict of interest.", "coi_statement"),
+        ("Written informed consent was collected from all participants.", "ethics_statement"),
+        ("Informed consent was taken from the parents of every child.", "ethics_statement"),
+    ],
+)
+def test_declarations_with_less_common_wording_are_captured(text: str, field: str):
+    contents = _contents(
+        [
+            (1, "Introduction", CanonicalSection.INTRODUCTION, "model", 0.9, ["We study things."]),
+            (2, "Notes", CanonicalSection.ENDNOTE, "model", 0.9, [text]),
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert getattr(metadata, field) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "In the literature on conflicts of interest there is no consensus on disclosure rules.",
+        "Researchers note that declarations of conflicts of interest between sponsors and"
+        " authors vary widely.",
+    ],
+)
+def test_topical_conflict_of_interest_prose_stays_rejected(text: str):
+    contents = _contents(
+        [(1, "Discussion", CanonicalSection.DISCUSSION, "model", 0.9, ["We discuss.", text])]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement is None
+
+
+def test_reference_title_that_opens_with_a_statement_label_is_not_a_statement():
+    contents = _contents(
+        [
+            (
+                1,
+                "References",
+                CanonicalSection.REFERENCES,
+                "exact_alias",
+                1.0,
+                [
+                    "1. Smith J, Doe A.",
+                    "Conflicts of interest: a hidden threat to science.",
+                    "J Ethics. 2019;3:1-9.",
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement is None
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected"),
+    [
+        (
+            [
+                (
+                    "This article is licensed under a Creative Commons Attribution 4.0"
+                    " International License.",
+                    7,
+                ),
+                (
+                    "The data that support the findings of this study are openly available in"
+                    " OSF at https://osf.io/xyz.",
+                    8,
+                ),
+            ],
+            "The data that support the findings of this study are openly available in OSF at"
+            " https://osf.io/xyz.",
+        ),
+        (
+            [
+                ("© The Author(s) 2024.", 7),
+                ("All scripts needed to reproduce the analyses can be downloaded from GitHub.", 7),
+            ],
+            "All scripts needed to reproduce the analyses can be downloaded from GitHub.",
+        ),
+        (
+            [
+                ("Copyright restrictions prevent sharing the raw videos.", 7),
+                ("Coded data and scripts can be downloaded from https://osf.io/abc.", 7),
+            ],
+            "Coded data and scripts can be downloaded from https://osf.io/abc.",
+        ),
+    ],
+)
+def test_data_statement_after_a_licence_or_copyright_row_is_kept(rows, expected):
+    contents = _contents(
+        [(1, "Data availability", CanonicalSection.OPEN_DATA, "heading", 0.9, rows)]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.data_availability == expected
+
+
+@pytest.mark.parametrize(
+    ("heading", "section_type", "source", "rows", "field"),
+    [
+        (
+            "Financial support",
+            CanonicalSection.RESULTS,
+            "heading",
+            [
+                "Parental contributions predicted lower stress (b = 0.3, p < .01).",
+                "This effect was larger for first-generation students.",
+            ],
+            "funding_statement",
+        ),
+        (
+            "Competing interests",
+            CanonicalSection.DISCUSSION,
+            "model",
+            [
+                "Stakeholders often disagree about land use.",
+                "We discuss how planners mediate such disagreements.",
+            ],
+            "coi_statement",
+        ),
+    ],
+)
+def test_body_section_under_a_strong_heading_without_a_declaration_is_not_copied(
+    heading, section_type, source, rows, field
+):
+    contents = _contents([(1, heading, section_type, source, 0.9, rows)])
+
+    metadata = _shadow_values(contents)
+
+    assert getattr(metadata, field) is None
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        "The datasets used during the current study are available from the corresponding"
+        " author on reasonable request.",
+        "All data generated or analyzed during this study are included in this published"
+        " article and its supplementary information files.",
+    ],
+)
+def test_methods_typed_bmc_data_section_with_a_data_statement_is_copied(row: str):
+    contents = _contents(
+        [
+            (
+                1,
+                "Availability of data and materials",
+                CanonicalSection.METHODS,
+                "exact_alias",
+                1.0,
+                [row],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.data_availability == row
+
+
+_ESSAY = "Each interview lasted about an hour and was transcribed verbatim afterwards."
+
+
+@pytest.mark.parametrize(
+    ("heading", "section_type", "rows", "field"),
+    [
+        (
+            "Financial support",
+            CanonicalSection.RESULTS,
+            [
+                "The effect of family income on stress was not significant (p = .21).",
+                "Older students reported less stress overall.",
+            ],
+            "funding_statement",
+        ),
+        (
+            "Financial support",
+            CanonicalSection.RESULTS,
+            [
+                "Parental support predicted lower stress (b = 0.3).",
+                "The effect held across cohorts.",
+            ],
+            "funding_statement",
+        ),
+        (
+            "Competing interests",
+            CanonicalSection.DISCUSSION,
+            [
+                "Stakeholders do not agree about land use.",
+                "We discuss how planners mediate such disagreements.",
+            ],
+            "coi_statement",
+        ),
+        (
+            "Competing interests",
+            CanonicalSection.DISCUSSION,
+            [
+                "Residents reported tensions between farming and tourism.",
+                "Planners rarely resolved them.",
+            ],
+            "coi_statement",
+        ),
+        (
+            "Data collection",
+            CanonicalSection.OPEN_DATA,
+            [
+                ("Students were included if they were enrolled full time.", 1),
+                (_ESSAY, 2),
+                ("Sessions took place in a quiet room on campus.", 3),
+                ("Two researchers coded every transcript independently.", 4),
+            ],
+            "data_availability",
+        ),
+        (
+            "Moral judgement",
+            CanonicalSection.ETHICS,
+            [
+                ("Social approval shapes moral choices.", 1),
+                ("People weigh fairness against loyalty in many settings.", 2),
+                ("These weights shift with group membership.", 3),
+                ("We return to this tension in the next chapter.", 4),
+            ],
+            "ethics_statement",
+        ),
+    ],
+)
+def test_section_under_a_statement_heading_needs_a_phrase_level_cue(
+    heading, section_type, rows, field
+):
+    contents = _contents([(1, heading, section_type, "model", 0.9, rows)])
+
+    metadata = _shadow_values(contents)
+
+    assert getattr(metadata, field) is None
+
+
+@pytest.mark.parametrize(
+    ("heading", "section_type", "source", "row", "field"),
+    [
+        (
+            "Financial support",
+            CanonicalSection.RESULTS,
+            "heading",
+            "Students without parental funding reported more stress.",
+            "funding_statement",
+        ),
+        (
+            "Financial support",
+            CanonicalSection.RESULTS,
+            "heading",
+            "Students receiving Pell grants worked fewer hours.",
+            "funding_statement",
+        ),
+        (
+            "Financial support",
+            CanonicalSection.DISCUSSION,
+            "model",
+            "Clubs with corporate sponsors kept more members.",
+            "funding_statement",
+        ),
+        (
+            "Competing interests",
+            CanonicalSection.RESULTS,
+            "heading",
+            "Residents consulted planners before every vote.",
+            "coi_statement",
+        ),
+        (
+            "Competing interests",
+            CanonicalSection.DISCUSSION,
+            "heading",
+            "Farming and tourism can coexist, and there is no conflict between the two goals.",
+            "coi_statement",
+        ),
+    ],
+)
+def test_topic_like_strong_heading_over_body_text_is_not_copied(
+    heading, section_type, source, row, field
+):
+    contents = _contents([(1, heading, section_type, source, 0.9, [row])])
+
+    metadata = _shadow_values(contents)
+
+    assert getattr(metadata, field) is None

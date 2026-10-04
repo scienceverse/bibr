@@ -1376,7 +1376,13 @@ async def post_parse(
             # text IDs are rendered from the cleaned sentence objects here.
             await asyncio.to_thread(contents.finalize_text)
             apply_integrity_resolution(contents, paper_metadata, integrity_resolution)
-            metadata_issues.extend(integrity_resolution.issues)
+            # The shadow comparison (legacy copy vs bounded selection) is a
+            # development signal, not a problem with the paper: keep it out of
+            # the exported validation issues.
+            for issue in integrity_resolution.issues:
+                logger.debug(
+                    "%s: %s (%s)", issue.code, issue.message, ", ".join(issue.evidence_ids)
+                )
 
             if not no_llm:
                 await extract_structured_integrity(

@@ -1966,8 +1966,9 @@ class PipelineOptions(_BibrSettings):
     )
     integrity_statement_mode: Literal["legacy", "shadow", "active"] = Field(
         "shadow",
-        description="Research-integrity statement resolver rollout mode. Shadow preserves "
-        "compatibility scalars while emitting typed comparison evidence.",
+        description="Research-integrity statement resolver rollout mode. Shadow exports the "
+        "compatibility statements and logs the comparison with the bounded selection at "
+        "debug level.",
     )
     # Experimental: proximity alone does not establish the correct title in
     # multilingual front matter. Keep off until validated for the target inputs.

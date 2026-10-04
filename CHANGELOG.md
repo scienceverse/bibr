@@ -8,6 +8,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Funding, conflict-of-interest, ethics and data-availability statements no
+  longer keep raw PDF line breaks, and they end where the statement ends: a
+  following thanks sentence, the next label ("Grant information:",
+  "Copyright: ©"), a licence block or a preprint sidebar is no longer appended,
+  a statement section that holds only a licence is no longer exported, and a
+  long chapter typed as a statement section (a thesis's "Ethical Procedures")
+  is no longer copied whole. A sentence that only mentions copyright, a
+  licence or a publisher ("Due to copyright restrictions, the stimuli cannot
+  be shared.") is kept whole. A phrase split by a line break ("supported
+  by") is now found. (#127)
+- Prose that only mentions a statement topic is no longer exported as the
+  statement: "supported by" followed only by an acronym ("supported by the
+  base AR model") is not funding, a sentence about avoiding conflicts of
+  interest is not a conflict-of-interest declaration, informed consent named
+  as a topic is not an ethics statement, "financial support" or "data
+  availability" inside a sentence about something else is not a statement,
+  and a "Role of the funding source"
+  section, an essay section titled like ethics ("Time Discounting: An Ethical
+  Problem") or an AI-tool disclosure is no longer copied into the funding or
+  ethics statement. (#128)
+- The structured funder list (`funding[]`) is now parsed from the exported
+  funding statement. It was parsed from different text, so it was often empty
+  while the statement named a funder, or listed funders from another
+  paragraph. (#130)
+- A labelled statement printed after the reference list ("Conflict of
+  interest statement: …" on the last page) is now found, and a one-line
+  statement that the layout model merged into its heading ("Disclosure and
+  competing interests statement The authors declare no competing interests.")
+  is recovered from the heading. (#129)
+- A statement joined from several sections now keeps each section's heading
+  ("Materials availability: Not applicable."), so parts such as "Not
+  applicable." keep their meaning, and a section under a standard statement
+  heading ("Ethics approval and consent to participate") is exported even
+  when the section model typed it as something else, such as an endnote.
+  (#131)
+- Exports no longer carry a `VAL_STATEMENT_SUSPECT` warning. It compared
+  two internal statement resolvers, said nothing about the paper, and fired on
+  many papers; it is now a debug log message. (#146)
 - References in the F1000Research / Open Research style ("Surname AB: Title")
   and entries with hyphenated initials ("Barabási A-L") are recognised as
   separate entries, so consecutive single-author entries no longer merge
