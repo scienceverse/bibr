@@ -303,3 +303,44 @@ def alnum_text_covered(needle: str, haystack: str) -> bool:
     # after the one the entry boxes sort it after, or hold a numbered list's
     # labels as one column before the entries.
     return _covered_in_any_order(needle, haystack)
+
+
+# Most words on a line that ``drop_edge_fragments`` treats as a stray fragment.
+_EDGE_FRAGMENT_MAX_WORDS = 3
+
+
+def drop_edge_fragments(text: str, haystack: str) -> str:
+    """*text* without its leading and trailing short lines that *haystack* holds.
+
+    A diagonal watermark crosses an aggregate reference box and the entry boxes
+    inside it. The aggregate box reads the whole stamp, and each entry box a
+    few of its words on lines of their own around the entry ("ts contents are",
+    "view purposes", "osed."). The aggregate holds those words, but not next to
+    the entry, so ``alnum_text_covered`` finds the entry box holding text the
+    aggregate lacks. A line of at most three words at either end of *text*
+    counts as such a fragment only when *haystack* (``alnum_key`` output)
+    contains it, so no text the haystack lacks is dropped.
+    """
+    lines = text.splitlines()
+
+    def fragment(line: str) -> bool:
+        return len(line.split()) <= _EDGE_FRAGMENT_MAX_WORDS and alnum_key(line) in haystack
+
+    start, end = 0, len(lines)
+    while start < end and fragment(lines[start]):
+        start += 1
+    while end > start and fragment(lines[end - 1]):
+        end -= 1
+    return "\n".join(lines[start:end])
+
+
+def covered_without_edge_fragments(text: str, haystack: str) -> bool:
+    """Whether *haystack* holds *text* once its edge fragments are set aside.
+
+    ``alnum_text_covered`` on ``drop_edge_fragments(text, haystack)``, but only
+    when at least 30 letters and digits remain: short keys ("nature2019") turn
+    up in a long haystack by chance, and a box of short lines only ("Smith J,",
+    "Ibid.", "Nature 2019.") would otherwise lose every line and count as held.
+    """
+    rest = alnum_key(drop_edge_fragments(text, haystack))
+    return len(rest) >= _COVERED_MIN_CHARS and alnum_text_covered(rest, haystack)
