@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from bibr.document.harvest import RenderBudget, build_document_layer
-from bibr.document.model import COLUMN_DTYPES, Block, DocumentLayer, Page
+from bibr.document.model import COLUMN_DTYPES, Block, DocumentLayer, Page, as_box
 
 if TYPE_CHECKING:
     from bibr.ocr.types import OcrRegionResult
@@ -149,7 +149,7 @@ def attach_blocks(layer: DocumentLayer, ocr_regions: list[list[OcrRegionResult]]
                 Block(
                     block_id=block_id,
                     page=page.index,
-                    bbox_pdf=tuple(float(value) for value in box),
+                    bbox_pdf=as_box(box),
                     label=region.label,
                     native_label=region.native_label,
                     read_order=position,

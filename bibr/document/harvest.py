@@ -20,6 +20,7 @@ import hashlib
 import math
 from collections import Counter
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -50,6 +51,7 @@ from bibr.document.model import (
     Presence,
     RenderRecipe,
     RoleTag,
+    as_box,
 )
 from bibr.ocr import native_text as nt
 
@@ -169,6 +171,10 @@ class _Api:
         self.c = pdfium_c
         for name in _HARVEST_APIS:
             setattr(self, name, getattr(pdfium_c, name, None))
+
+    if TYPE_CHECKING:
+        # The functions are set by name in __init__.
+        def __getattr__(self, name: str) -> Any: ...
 
 
 class FontTable:
@@ -648,7 +654,7 @@ def read_page(
         Furniture(
             page_index,
             kind,
-            None if box is None else tuple(float(v) for v in box),
+            None if box is None else as_box(box),
             text,
             _FURNITURE_DECIDED[kind],
         )

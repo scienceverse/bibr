@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from bibr.ocr.pdf_inspection import inspect_pdf
 
@@ -87,7 +87,7 @@ class NativeTextStage:
         eligible_labels = resolve_eligible_labels(bool(settings.ocr.native_text_header_footer))
         # The document layer's arguments are passed only when it is on, so the
         # default call is unchanged.
-        layer_kwargs = {}
+        layer_kwargs: dict[str, Any] = {}
         if settings.pipeline.document_layer is True:
             from bibr.document.rebuild import render_budget
 

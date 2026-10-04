@@ -37,6 +37,13 @@ INDEX_FRAME = "post_strip"
 
 Box = tuple[float, float, float, float]
 
+
+def as_box(values) -> Box:
+    """*values* (four numbers) as a :data:`Box` of floats."""
+    left, bottom, right, top = values
+    return (float(left), float(bottom), float(right), float(top))
+
+
 # --- PageColumns.gflags: one bit set per glyph fact ------------------------
 # pdfium generated the char (an inferred space or line break).
 GLYPH_GENERATED = 1 << 0
