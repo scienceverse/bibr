@@ -2103,3 +2103,180 @@ def test_author_information_table_is_available_as_front_matter(label):
     table.page_number = 1
     table.caption = "Table 1. Authors in the reviewed literature"
     assert author_table_context(contents, resolution) == ""
+
+
+def _with_first_page_notes(contents: PaperContents, notes, *, page: int = 1) -> PaperContents:
+    """*contents* plus one synthetic footnote section per note, as the parser makes them."""
+    next_section = max(section.section_id for section in contents.sections) + 1
+    next_text = max(sentence.text_id for sentence in contents.sentences) + 1
+    for offset, note in enumerate(notes):
+        contents.sections.append(
+            PaperSection(
+                next_section + offset,
+                f"Footnote {offset + 1}",
+                1,
+                0,
+                CanonicalSection.FOOTNOTE,
+                1.0,
+            )
+        )
+        contents.sentences.append(
+            PaperSentence(
+                text_id=next_text + offset,
+                text=note,
+                section_id=next_section + offset,
+                paragraph_id=next_text + offset,
+                page_number=page,
+            )
+        )
+    return contents
+
+
+_KEYWORD_NOTES = (
+    "Key words",
+    "- Sleep",
+    "- Memory consolidation",
+    "■ Young adults",
+    "Abbreviations and Acronyms REM: rapid eye movement; SWS: slow-wave sleep",
+    "Department of Psychology, Example University",
+)
+
+
+def test_a_keyword_list_printed_as_first_page_footnotes_is_one_block():
+    from bibr.extract.core_metadata import first_page_keyword_footnote
+
+    contents = _with_first_page_notes(
+        _paper_contents([(1, "Selected title", 0), (2, "Body", 1)]), _KEYWORD_NOTES
+    )
+
+    assert first_page_keyword_footnote(contents) == (
+        "[Keywords printed in a first-page footnote]\n"
+        "Key words\n- Sleep\n- Memory consolidation\n■ Young adults"
+    )
+
+
+@pytest.mark.parametrize(
+    ("notes", "page", "keywords_section"),
+    [
+        (_KEYWORD_NOTES, 2, False),  # not on the first page
+        (_KEYWORD_NOTES, 1, True),  # the paper has a keywords section
+        (("Key words", "Abbreviations: REM, rapid eye movement"), 1, False),  # no items
+        (("Department of Psychology, Example University",), 1, False),  # no label
+    ],
+)
+def test_no_keyword_block_without_a_first_page_keyword_footnote(notes, page, keywords_section):
+    from bibr.extract.core_metadata import first_page_keyword_footnote
+
+    contents = _paper_contents([(1, "Selected title", 0), (2, "Body", 1)])
+    if keywords_section:
+        contents.sections.append(
+            PaperSection(7, "Keywords", 1, None, CanonicalSection.KEYWORDS, 1.0)
+        )
+    contents = _with_first_page_notes(contents, notes, page=page)
+
+    assert first_page_keyword_footnote(contents) == ""
+
+
+def test_an_inline_keyword_footnote_is_kept_whole():
+    from bibr.extract.core_metadata import first_page_keyword_footnote
+
+    contents = _with_first_page_notes(
+        _paper_contents([(1, "Selected title", 0), (2, "Body", 1)]),
+        ("Keywords: sleep; memory consolidation; young adults",),
+    )
+
+    assert first_page_keyword_footnote(contents).endswith(
+        "\nKeywords: sleep; memory consolidation; young adults"
+    )
+
+
+@pytest.mark.parametrize(
+    ("notes", "block"),
+    [
+        pytest.param(
+            (
+                "Keywords: anxiety; depression; sleep",
+                "* These authors contributed equally.",
+                "1 Department of Psychology, Example University, Town",
+                "© 2020 Example Publisher. All rights reserved.",
+                "Received 3 May 2020",
+            ),
+            "Keywords: anxiety; depression; sleep",
+            id="inline-label",
+        ),
+        pytest.param(
+            ("Key words", "Choroid plexus", "Corresponding author.", "Funded by the Example Trust"),
+            "Key words\nChoroid plexus",
+            id="bare-label-then-a-sentence",
+        ),
+        pytest.param(
+            ("Key words", "Choroid plexus", "† Deceased", "Sleep"),
+            "Key words\nChoroid plexus",
+            id="bare-label-then-a-marker",
+        ),
+        pytest.param(
+            ("Key words", "Choroid plexus", "Funded by the Example Trust"),
+            "Key words\nChoroid plexus",
+            id="bare-label-then-a-funding-line",
+        ),
+        pytest.param(
+            ("Key words", "5-HT receptors", "Sleep", "1 Department of Psychology"),
+            "Key words\n5-HT receptors\nSleep",
+            id="keyword-opening-with-a-digit",
+        ),
+    ],
+)
+def test_the_keyword_block_stops_before_other_first_page_footnotes(notes, block):
+    from bibr.extract.core_metadata import first_page_keyword_footnote
+
+    contents = _with_first_page_notes(
+        _paper_contents([(1, "Selected title", 0), (2, "Body", 1)]), notes
+    )
+
+    assert first_page_keyword_footnote(contents) == (
+        "[Keywords printed in a first-page footnote]\n" + block
+    )
+
+
+def test_the_keyword_block_stops_at_a_row_from_elsewhere_in_the_text():
+    from dataclasses import replace
+
+    from bibr.extract.core_metadata import first_page_keyword_footnote
+
+    contents = _with_first_page_notes(
+        _paper_contents([(1, "Selected title", 0), (2, "Body", 1)]),
+        ("Key words", "Choroid plexus", "Sleep"),
+    )
+    contents.sentences[-1] = replace(contents.sentences[-1], text_id=99)
+
+    assert first_page_keyword_footnote(contents).endswith("\nKey words\nChoroid plexus")
+
+
+def test_no_keyword_block_without_page_numbers():
+    from dataclasses import replace
+
+    from bibr.extract.core_metadata import first_page_keyword_footnote
+
+    contents = _with_first_page_notes(
+        _paper_contents([(1, "Selected title", 0), (2, "Body", 1)]), ("Keywords: a; b",)
+    )
+    contents.sentences[:] = [replace(s, page_number=None) for s in contents.sentences]
+
+    assert first_page_keyword_footnote(contents) == ""
+
+
+async def test_only_the_title_and_keywords_call_reads_the_keyword_footnote(monkeypatch):
+    title = _candidate("c1", "Selected title", roles=frozenset({"title"}), text_ids=(1,))
+    byline = _candidate("c2", "Alice Example", roles=frozenset({"byline"}), text_ids=(2,))
+    extractor, llm = make_extractor_with_captured_core_call(_resolution(title, byline), monkeypatch)
+    _with_first_page_notes(extractor.contents, _KEYWORD_NOTES)
+
+    await extractor.extract()
+
+    call = llm.extract_core_metadata.await_args
+    assert call.args[0].endswith(
+        "\n\n[Keywords printed in a first-page footnote]\n"
+        "Key words\n- Sleep\n- Memory consolidation\n■ Young adults"
+    )
+    assert "Memory consolidation" not in call.kwargs["authors_text"]
+    assert "Memory consolidation" not in call.kwargs["classification_text"]
