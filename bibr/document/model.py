@@ -367,15 +367,18 @@ class Presence:
 class Block:
     """A post-OCR region placed in the layer.
 
-    D1 ids are ``p{page}.r{region index}`` and ``region_key`` is the
-    ``(1-based page, region index)`` pair that region summaries carry. D3
-    moves the ids to the layout slot before OCR renumbering and fills the
-    layout provenance and lineage.
+    Every region of a page becomes a block, in region order. ``region_index``
+    is the region's position in the page's post-OCR region list, which region
+    summaries carry as ``RegionSummary.index``, and the D1 id is
+    ``p{page}.r{region_index}``. D3 moves the ids to the layout slot before
+    OCR renumbering and fills the layout provenance and lineage.
     """
 
     block_id: str
     page: int
-    bbox_pdf: Box
+    region_index: int
+    # None for a region without a layout box.
+    bbox_pdf: Box | None
     label: str
     native_label: str
     layout: Decided | None = None
@@ -395,7 +398,6 @@ class Block:
     # Indexes of the page lines assigned to the block (PageColumns.line_block).
     lines: tuple[int, ...] = ()
     source_block_ids: tuple[str, ...] = ()
-    region_key: tuple[int, int] | None = None
 
 
 @dataclass(slots=True)
@@ -443,7 +445,12 @@ class DocumentLayer:
 
     def page(self, index: int) -> Page | None:
         """The page with absolute 0-based *index*, if the layer covers it."""
-        for page in self.pages:
+        pages = self.pages
+        # Pages are a contiguous run unless the layout skipped some.
+        offset = index - pages[0].index if pages else -1
+        if 0 <= offset < len(pages) and pages[offset].index == index:
+            return pages[offset]
+        for page in pages:
             if page.index == index:
                 return page
         return None

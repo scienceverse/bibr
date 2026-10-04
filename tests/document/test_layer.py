@@ -160,7 +160,7 @@ def test_block_text_and_boxes_reproduce_the_native_fill(name):
     for page_index, regions in enumerate(inspection.layout_results):
         page = layer.page(page_index)
         for slot, region in enumerate(regions):
-            block = views.block_for_region(layer, page_index + 1, slot)
+            block = views.block_for_region(layer, page_no=page_index + 1, region_index=slot)
             assert block is not None and block.block_id == f"p{page_index}.r{slot}"
             assert views.bbox_pdf_pts(page, block) == region["_bbox_pdf_pts"]
             if region.get("_native_text_used"):
@@ -170,6 +170,61 @@ def test_block_text_and_boxes_reproduce_the_native_fill(name):
                 assert block.chosen == "native"
     if name in {"synthetic_paper.pdf", "sample_paper.pdf", "native_text_sample.pdf"}:
         assert filled > 0
+
+
+def test_every_region_gets_a_block_at_its_position():
+    _inspection, layer = _synthetic_layer()
+    page = layer.page(0)
+    box = [0.0, 0.0, 1000.0, 500.0]
+    regions = [
+        OcrRegionResult.from_layout_region(
+            {"label": "text", "bbox_2d": box}, slot_idx=0, content="first"
+        ),
+        # No layout box.
+        OcrRegionResult.from_layout_region({"label": "text"}, slot_idx=1, content="second"),
+        # A region index seen before.
+        OcrRegionResult.from_layout_region(
+            {"label": "text", "bbox_2d": box}, slot_idx=0, content="third"
+        ),
+    ]
+
+    attach_blocks(layer, [regions])
+
+    assert [block.block_id for block in page.blocks] == ["p0.r0", "p0.r1", "p0.r2"]
+    assert [block.region_index for block in page.blocks] == [0, 1, 2]
+    for position, block in enumerate(page.blocks):
+        assert views.block_for_region(layer, page_no=1, region_index=position) is block
+        assert views.find_block(layer, block.block_id) == (page, block)
+    unboxed = page.blocks[1]
+    assert unboxed.bbox_pdf is None
+    assert unboxed.text == {"ocr": "second"}
+    assert unboxed.lines == ()
+    assert views.bbox_pdf_pts(page, unboxed) is None
+    assert views.block_text(layer, unboxed.block_id) is None
+    assert views.block_text(layer, unboxed.block_id, "ocr") == "second"
+    assert views.block_for_region(layer, page_no=1, region_index=3) is None
+    assert views.block_for_region(layer, page_no=0, region_index=0) is None
+    assert views.find_block(layer, "p0.r3") is None
+    assert views.find_block(layer, "p99.r0") is None
+    assert views.find_block(layer, "r0") is None
+
+
+def test_the_region_lookup_takes_its_page_by_keyword_only():
+    _inspection, layer = _synthetic_layer()
+
+    with pytest.raises(TypeError):
+        views.block_for_region(layer, 1, 0)
+
+
+def test_pages_are_found_in_a_layer_with_gaps():
+    pdf_bytes = _pdfs.synthetic_paper()
+    layer = build_document_layer(pdf_bytes, [1, 3, 4], budget=_BUDGET)
+
+    assert [page.index for page in layer.pages] == [1, 3, 4]
+    assert [layer.page(index) for index in (1, 3, 4)] == layer.pages
+    assert layer.page(0) is None
+    assert layer.page(2) is None
+    assert layer.page(5) is None
 
 
 @pytest.mark.parametrize("reject", [False, True])

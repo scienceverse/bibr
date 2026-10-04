@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from bibr.document import ids
 from bibr.document.harvest import RenderBudget, build_document_layer
 from bibr.document.model import COLUMN_DTYPES, Block, DocumentLayer, Page
 from bibr.document.views import from_layout_bbox
@@ -120,7 +121,7 @@ def _chosen_source(region: OcrRegionResult, page: Page) -> str | None:
 
 
 def attach_blocks(layer: DocumentLayer, ocr_regions: list[list[OcrRegionResult]]) -> None:
-    """Place the post-OCR regions on the layer's pages as blocks.
+    """Place the post-OCR regions on the layer's pages as blocks, one per region.
 
     ``ocr_regions`` is indexed by absolute page (the OCR stage pads the pages
     before a ``start_page`` with empty lists). Replaces earlier blocks, and
@@ -129,27 +130,20 @@ def attach_blocks(layer: DocumentLayer, ocr_regions: list[list[OcrRegionResult]]
     for page in layer.pages:
         regions = ocr_regions[page.index] if page.index < len(ocr_regions) else []
         blocks: list[Block] = []
-        seen: set[str] = set()
         for position, region in enumerate(regions):
-            if not region.bbox_2d:
-                continue
-            block_id = f"p{page.index}.r{region.index}"
-            if block_id in seen:
-                block_id = f"{block_id}.{position}"
-            seen.add(block_id)
             chosen = _chosen_source(region, page)
             blocks.append(
                 Block(
-                    block_id=block_id,
+                    block_id=ids.block(page.index, position),
                     page=page.index,
-                    bbox_pdf=from_layout_bbox(page, region.bbox_2d),
+                    region_index=position,
+                    bbox_pdf=from_layout_bbox(page, region.bbox_2d) if region.bbox_2d else None,
                     label=region.label,
                     native_label=region.native_label,
                     read_order=position,
                     text={chosen: region.content} if chosen is not None else {},
                     chosen=chosen,
                     finish_reason=region.finish_reason,
-                    region_key=(page.index + 1, region.index),
                 )
             )
         page.blocks = blocks
@@ -171,6 +165,8 @@ def _assign_lines(page: Page) -> None:
         valid = (record_line >= 0) & ~cols.rec_newline
         counts = np.zeros((n_lines, len(page.blocks)), dtype=np.int64)
         for position, block in enumerate(page.blocks):
+            if block.bbox_pdf is None:
+                continue
             left, bottom, right, top = block.bbox_pdf
             inside = (
                 valid

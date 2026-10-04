@@ -13,6 +13,7 @@ from typing import Any
 
 import numpy as np
 
+from bibr.document import ids
 from bibr.document.model import (
     GLYPH_EXCLUDED,
     GLYPH_HYPHEN,
@@ -46,22 +47,35 @@ def from_layout_bbox(page: Page, bbox_2d) -> Box:
 
 
 def find_block(layer: DocumentLayer, block_id: str) -> tuple[Page, Block] | None:
-    for page in layer.pages:
-        for block in page.blocks:
-            if block.block_id == block_id:
-                return page, block
-    return None
-
-
-def block_for_region(layer: DocumentLayer, region_page: int, region_index: int) -> Block | None:
-    """The block of the region a region summary names (1-based page, region index)."""
-    page = layer.page(region_page - 1)
+    """The page and block with *block_id*; None when the layer has no such block."""
+    try:
+        parsed = ids.parse(block_id)
+    except ValueError:
+        return None
+    page = layer.page(parsed.page)
     if page is None:
         return None
+    if parsed.kind == ids.BLOCK and parsed.n < len(page.blocks):
+        block = page.blocks[parsed.n]
+        if block.block_id == block_id:
+            return page, block
     for block in page.blocks:
-        if block.region_key == (region_page, region_index):
-            return block
+        if block.block_id == block_id:
+            return page, block
     return None
+
+
+def block_for_region(layer: DocumentLayer, *, page_no: int, region_index: int) -> Block | None:
+    """The block of the region a region summary names.
+
+    *page_no* is ``RegionSummary.page``: the absolute page, 1-based, unlike
+    every other page in the layer. *region_index* is ``RegionSummary.index``,
+    the region's position in the page's post-OCR region list.
+    """
+    page = layer.page(page_no - 1)
+    if page is None or not 0 <= region_index < len(page.blocks):
+        return None
+    return page.blocks[region_index]
 
 
 def page_records(page: Page) -> list[tuple[str, float, float, bool]]:
@@ -133,7 +147,7 @@ def block_text(layer: DocumentLayer, block_id: str, source: str = "native") -> s
     page, block = found
     if source == "ocr":
         return block.text.get("ocr")
-    if page.cols is None or page.text_source != source:
+    if page.cols is None or page.text_source != source or block.bbox_pdf is None:
         return None
     text = text_in_box(page, block.bbox_pdf)
     if "\x02" in text:
@@ -143,8 +157,13 @@ def block_text(layer: DocumentLayer, block_id: str, source: str = "native") -> s
     return text
 
 
-def bbox_pdf_pts(page: Page, block: Block) -> list[float]:
-    """The block's ``_bbox_pdf_pts``: its box relative to the CropBox origin, rounded."""
+def bbox_pdf_pts(page: Page, block: Block) -> list[float] | None:
+    """The block's ``_bbox_pdf_pts``: its box relative to the CropBox origin, rounded.
+
+    None for a block without a box, as for its region.
+    """
+    if block.bbox_pdf is None:
+        return None
     left, bottom, right, top = block.bbox_pdf
     cx0, cy0, _cx1, _cy1 = page.crop_box
     return [
