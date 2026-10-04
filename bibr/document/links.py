@@ -65,6 +65,13 @@ _DEST_VALUE_TYPES = {3, 4, 5, 6}
 # pdfium's action types as the layer names them; anything else is "other".
 _ACTIONS = {1: "goto", 2: "remote", 3: "uri", 4: "launch", 5: "remote"}
 
+# A document with more link annotations than this is read to this many (the busiest
+# gate192 paper has 920, the busiest manuscript 1,340), and a link with more
+# quadrilaterals than MAX_QUADS is read to that many (the most any has is 2), so a
+# hostile PDF cannot hold the lock for long.
+MAX_LINKS = 50_000
+MAX_QUADS = 256
+
 # The kind prefix of a link's id (``p3.lk4``).
 KIND = "lk"
 RULE_VERSION = "link_target/1"
@@ -117,6 +124,19 @@ class RawLink:
     target_xy: destinations.Position | None
 
 
+@dataclass(slots=True)
+class PageLinks:
+    """What reading one page's link annotations gave."""
+
+    found: list[RawLink]
+    # The annotations gone through, those that failed included.
+    enumerated: int
+    # Whether the page has annotations the document's allowance of them left unread.
+    stopped: bool
+    # The first thing that went wrong: a link left out, a link cut short, or the stop.
+    note: str | None
+
+
 def read_page_links(
     api: _Api,
     doc,
@@ -126,26 +146,35 @@ def read_page_links(
     n_pages: int,
     *,
     with_names: bool,
-) -> tuple[list[RawLink], str | None]:
-    """The page's link annotations, and the first error of a link that could not be read.
+    limit: int = MAX_LINKS,
+) -> PageLinks:
+    """The page's link annotations: at most *limit*, what the document's allowance has left.
 
     A link that fails is left out; the others are kept.
     """
     found: list[RawLink] = []
-    error: str | None = None
+    note: str | None = None
+    stopped = False
     position = ctypes.c_int(0)
     link = api.c.FPDF_LINK()
     number = -1
     while api.FPDFLink_Enumerate(page.raw, ctypes.byref(position), ctypes.byref(link)):
+        if number + 1 >= limit:
+            stopped = True
+            note = f"more than {MAX_LINKS} link annotations, the rest unread"
+            break
         number += 1
         try:
-            raw = _read_link(api, doc, page, link, (page_index, number), names, n_pages, with_names)
+            raw, cut = _read_link(
+                api, doc, page, link, (page_index, number), names, n_pages, with_names
+            )
         except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
-            error = error or f"{type(exc).__name__}: {exc}"[:500]
+            note = note or f"{type(exc).__name__}: {exc}"[:500]
             continue
+        note = note or cut
         if raw is not None:
             found.append(raw)
-    return found, error
+    return PageLinks(found, number + 1, stopped, note)
 
 
 def _read_link(
@@ -157,15 +186,17 @@ def _read_link(
     names: destinations.NamedDests | None,
     n_pages: int,
     with_names: bool,
-) -> RawLink | None:
+) -> tuple[RawLink | None, str | None]:
+    """The link, and a note when it was cut short; None for a link with no rectangle."""
     pdfium_c = api.c
     rect = pdfium_c.FS_RECTF()
     if not api.FPDFLink_GetAnnotRect(link, ctypes.byref(rect)):
-        return None
+        return None, None
     left, right = sorted((float(rect.left), float(rect.right)))
     bottom, top = sorted((float(rect.bottom), float(rect.top)))
     quads = []
-    for index in range(api.FPDFLink_CountQuadPoints(link)):
+    n_quads = api.FPDFLink_CountQuadPoints(link)
+    for index in range(min(n_quads, MAX_QUADS)):
         quad = pdfium_c.FS_QUADPOINTSF()
         if api.FPDFLink_GetQuadPoints(link, index, ctypes.byref(quad)):
             quads.append(
@@ -203,7 +234,7 @@ def _read_link(
         target_page = destinations.dest_page(api, doc, dest, n_pages)
         if target_page is not None:
             target_xy = destinations.dest_position(api, dest)
-    return RawLink(
+    raw = RawLink(
         page=where[0],
         number=where[1],
         rect=(left, bottom, right, top),
@@ -215,6 +246,8 @@ def _read_link(
         target_page=target_page,
         target_xy=target_xy,
     )
+    cut = f"a link with more than {MAX_QUADS} quadrilaterals, the rest unread"
+    return raw, (cut if n_quads > MAX_QUADS else None)
 
 
 def _annotation_dest(api: _Api, page, link) -> tuple[str | None, bool]:
