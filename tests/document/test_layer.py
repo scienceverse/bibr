@@ -574,8 +574,8 @@ def test_a_schema_change_comes_with_a_new_layer_version():
     # column dtypes. A change to any of them changes what a stored layer
     # decodes to: bump LAYER_VERSION with it and pin the new pair here.
     assert (LAYER_VERSION, _schema_digest()) == (
-        "doclayer/2",
-        "8411a09080217e7b56828954a8699cbe9aa9843cd2dc06f57ac65959373e5e78",
+        "doclayer/3",
+        "c232818f5c85b6136147ac892198ff4c03380773bced402e34730d75af545969",
     )
 
 

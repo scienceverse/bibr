@@ -20,11 +20,15 @@ from bibr.document.model import (
     DocumentLayer,
     Font,
     Furniture,
+    Link,
+    OutlineEntry,
+    OutlineGuard,
     Page,
     PageColumns,
     Presence,
     RenderRecipe,
     RoleTag,
+    StructElem,
 )
 
 __all__ = [
@@ -35,9 +39,13 @@ __all__ = [
     "DocumentLayer",
     "Font",
     "Furniture",
+    "Link",
+    "OutlineEntry",
+    "OutlineGuard",
     "Page",
     "PageColumns",
     "Presence",
     "RenderRecipe",
     "RoleTag",
+    "StructElem",
 ]
