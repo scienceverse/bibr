@@ -93,8 +93,10 @@ def from_dict(data: dict[str, Any]) -> model.DocumentLayer:
     """The layer *data* encodes.
 
     Raises ValueError for anything but a layer of this :data:`LAYER_VERSION`
-    and :data:`INDEX_FRAME`: under other strip rules the same PDF has other
-    glyph indexes, so such a layer must be rebuilt, not loaded.
+    and :data:`INDEX_FRAME` (under other strip rules the same PDF has other
+    glyph indexes, so such a layer must be rebuilt, not loaded), and for
+    data that does not decode: an unknown class, a missing or unknown field,
+    a malformed array.
     """
     if not isinstance(data, dict) or data.get("@") != "DocumentLayer":
         raise ValueError("not a document layer")
@@ -103,7 +105,10 @@ def from_dict(data: dict[str, Any]) -> model.DocumentLayer:
         raise ValueError(f"document layer version {version!r}, not {model.LAYER_VERSION!r}")
     if frame != model.INDEX_FRAME:
         raise ValueError(f"document layer index frame {frame!r}, not {model.INDEX_FRAME!r}")
-    layer = _decode(data)
+    try:
+        layer = _decode(data)
+    except Exception as exc:
+        raise ValueError(f"malformed document layer: {type(exc).__name__}: {exc}") from exc
     if not isinstance(layer, model.DocumentLayer):
         raise ValueError("not a document layer")
     return layer

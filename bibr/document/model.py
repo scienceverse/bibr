@@ -1,4 +1,4 @@
-"""Data model of the lossless document layer (``doclayer/1``).
+"""Data model of the lossless document layer (:data:`LAYER_VERSION`).
 
 The layer keeps what bibr reads from a PDF and what it decides about it, so
 later stages and models can use facts the string pipeline drops: glyph fonts,
@@ -35,7 +35,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-LAYER_VERSION = "doclayer/1"
+# The layer's schema version: bump it with any change to a serialised class,
+# its fields or COLUMN_DTYPES (tests/document/test_layer.py pins the pair).
+LAYER_VERSION = "doclayer/2"
 # The furniture strip's rule versions (bibr.ocr.native_text._find_furniture).
 # The strip removes objects before the text page is built, so a rule change
 # moves every glyph, span and line index on the pages it touches: bump the

@@ -8,6 +8,7 @@ pipeline reads (region text, page lines, region boxes) from its own columns.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import math
 from copy import deepcopy
@@ -515,7 +516,7 @@ def test_layer_is_deterministic_and_round_trips(name):
 
 @pytest.mark.parametrize(
     ("key", "value"),
-    [("version", "doclayer/0"), ("index_frame", "post_strip"), ("@", "Page"), (None, None)],
+    [("version", "doclayer/1"), ("index_frame", "post_strip"), ("@", "Page"), (None, None)],
 )
 def test_a_layer_of_another_version_or_frame_is_not_loaded(key, value):
     data = json.loads(
@@ -528,6 +529,54 @@ def test_a_layer_of_another_version_or_frame_is_not_loaded(key, value):
 
     with pytest.raises(ValueError):
         serialize.from_dict(data)
+
+
+def _damage(data: dict, damage: str) -> None:
+    page = data["pages"][0]
+    if damage == "unknown class":
+        page["@"] = "Bogus"
+    elif damage == "no class":
+        del page["@"]
+    elif damage == "unknown field":
+        page["extra"] = 1
+    elif damage == "missing field":
+        del page["width"]
+    elif damage == "bad dtype":
+        page["cols"]["cp"]["@a"][0] = "<bogus"
+    elif damage == "bad shape":
+        page["cols"]["cp"]["@a"][1] = [10**6]
+
+
+@pytest.mark.parametrize(
+    "damage",
+    ["unknown class", "no class", "unknown field", "missing field", "bad dtype", "bad shape"],
+)
+def test_a_layer_that_does_not_decode_raises_value_error(damage):
+    data = json.loads(serialize.canonical_bytes(_synthetic_layer()[1]))
+    assert data["pages"][0]["cols"] is not None
+    _damage(data, damage)
+
+    with pytest.raises(ValueError, match="malformed document layer"):
+        serialize.from_dict(data)
+
+
+def _schema_digest() -> str:
+    schema: dict = {
+        name: [[item.name, str(item.type)] for item in dataclasses.fields(cls)]
+        for name, cls in serialize._TYPES.items()
+    }
+    schema["COLUMN_DTYPES"] = COLUMN_DTYPES
+    return hashlib.sha256(json.dumps(schema, sort_keys=True).encode()).hexdigest()
+
+
+def test_a_schema_change_comes_with_a_new_layer_version():
+    # The serialised classes, their fields with their annotations, and the
+    # column dtypes. A change to any of them changes what a stored layer
+    # decodes to: bump LAYER_VERSION with it and pin the new pair here.
+    assert (LAYER_VERSION, _schema_digest()) == (
+        "doclayer/2",
+        "8411a09080217e7b56828954a8699cbe9aa9843cd2dc06f57ac65959373e5e78",
+    )
 
 
 # --- What the layer reads ---------------------------------------------------------

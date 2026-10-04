@@ -91,10 +91,10 @@ def test_blocks_sit_where_their_regions_are(rotation):
 
 
 def _layer_of(page: Page):
-    from bibr.document.model import DocumentLayer
+    from bibr.document.model import LAYER_VERSION, DocumentLayer
 
     return DocumentLayer(
-        version="doclayer/1",
+        version=LAYER_VERSION,
         pdfium="test",
         source_sha256="0" * 64,
         index_frame="post_strip",
