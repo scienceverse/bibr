@@ -123,6 +123,7 @@ class ParseSegmentStage:
                 # The document layer, with this run's regions as blocks
                 # (rebuilt from the PDF when an OCR-bundle hit skipped
                 # NativeTextStage). Internal only; it never fails the paper.
+                # "is True" keeps it off under Mock settings in tests.
                 if (
                     contents is not None
                     and native_parser is None

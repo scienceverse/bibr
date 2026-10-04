@@ -86,7 +86,8 @@ class NativeTextStage:
         )[0]
         eligible_labels = resolve_eligible_labels(bool(settings.ocr.native_text_header_footer))
         # The document layer's arguments are passed only when it is on, so the
-        # default call is unchanged.
+        # default call is unchanged. "is True", not truthiness: tests run
+        # stages with Mock settings, whose attributes are all truthy.
         layer_kwargs: dict[str, Any] = {}
         if settings.pipeline.document_layer is True:
             from bibr.document.rebuild import render_budget
