@@ -132,11 +132,21 @@ def attach_blocks(layer: DocumentLayer, ocr_regions: list[list[OcrRegionResult]]
     assigns every line to the block holding most of its records' centres. A
     block's ``bbox_pdf`` is None for a region without a layout box and on a
     page without finite geometry: never a NaN box.
+
+    Blocks are keyed on their position, which the OCR stage makes each
+    region's ``index``. A page where the two differ is recorded under
+    ``blocks:{page}`` in ``component_errors``: there
+    :func:`~bibr.document.views.block_for_region`, which takes
+    ``RegionSummary.index``, can return the wrong block.
     """
     for page in layer.pages:
         regions = ocr_regions[page.index] if page.index < len(ocr_regions) else []
+        key = f"blocks:{page.index}"
+        layer.component_errors.pop(key, None)
         blocks: list[Block] = []
         for position, region in enumerate(regions):
+            if region.index != position and key not in layer.component_errors:
+                layer.component_errors[key] = f"region index {region.index} at position {position}"
             chosen = _chosen_source(region, page)
             blocks.append(
                 Block(

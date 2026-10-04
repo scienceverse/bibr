@@ -316,6 +316,8 @@ def test_every_region_gets_a_block_at_its_position():
 
     assert [block.block_id for block in page.blocks] == ["p0.r0", "p0.r1", "p0.r2"]
     assert [block.region_index for block in page.blocks] == [0, 1, 2]
+    # The third region's index is not its position: the page says so.
+    assert layer.component_errors == {"blocks:0": "region index 0 at position 2"}
     for position, block in enumerate(page.blocks):
         assert views.block_for_region(layer, page_no=1, region_index=position) is block
         assert views.find_block(layer, block.block_id) == (page, block)
@@ -331,6 +333,9 @@ def test_every_region_gets_a_block_at_its_position():
     assert views.find_block(layer, "p0.r3") is None
     assert views.find_block(layer, "p99.r0") is None
     assert views.find_block(layer, "r0") is None
+    # Attaching regions whose indexes are their positions clears the error.
+    attach_blocks(layer, [regions[:2]])
+    assert layer.component_errors == {}
 
 
 def test_the_region_lookup_takes_its_page_by_keyword_only():
