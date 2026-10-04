@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from bibr.document import ids
+from bibr.document import destinations, ids
 from bibr.document.model import (
     COLUMN_DTYPES,
     GLYPH_EXCLUDED,
@@ -90,6 +90,8 @@ _HARVEST_APIS = (
     "FPDFFont_GetWeight",
     "FPDFFont_GetItalicAngle",
     "FPDFFont_GetIsEmbedded",
+    "FPDF_GetPageLabel",
+    *destinations.APIS,
 )
 
 # How the layout stage renders a page (bibr.ocr.image_utils.iter_pdf_pages_with_index):
@@ -935,6 +937,37 @@ class LayerBuilder:
         self.errors: dict[str, str] = {}
         self.missing = missing_apis()
         self._api = _Api()
+        # The open document, from :meth:`start` until :meth:`finish`.
+        self.doc = None
+        self.n_pages = 0
+        self.names: destinations.NamedDests | None = None
+        self.labels: dict[int, str | None] = {}
+
+    def start(self, doc) -> None:
+        """Read what the document declares as a whole: call right after opening *doc*.
+
+        Needs the caller's ``pdfium_lock``, held until :meth:`finish`.
+        """
+        self.doc = doc
+        try:
+            self.n_pages = len(doc)
+            if not self._lacks(destinations.APIS):
+                self.names = destinations.NamedDests(self._api, doc)
+        except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
+            self.errors["named_dests"] = _error_text(exc)
+
+    def _lacks(self, apis: tuple[str, ...]) -> bool:
+        return any(name in self.missing for name in apis)
+
+    def _read_label(self, page_index: int) -> None:
+        if self.doc is None or self._lacks(("FPDF_GetPageLabel",)):
+            return
+        try:
+            self.labels[page_index] = destinations.utf16_text(
+                self._api.FPDF_GetPageLabel, self.doc.raw, page_index
+            )
+        except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
+            self.errors[f"label:{page_index}"] = _error_text(exc)
 
     def records(
         self, textpage, page_index: int
@@ -960,6 +993,7 @@ class LayerBuilder:
         furniture: list[tuple],
         walk: list | None = None,
     ) -> None:
+        self._read_label(page_index)
         failed = [text for kind, _box, text in furniture if kind == "error"]
         if failed:
             self.errors[f"furniture:{page_index}"] = failed[0]
@@ -1037,6 +1071,8 @@ class LayerBuilder:
                 continue
             pages.append(built)
             roles.extend(tags)
+        for page in pages:
+            page.label = self.labels.get(page.index)
         # A fact no examined page shows is unknown, not absent, while another
         # page was not examined. A page's text source counts once decided, even
         # if the page failed later; marked content needs the page's columns.
@@ -1063,8 +1099,12 @@ class LayerBuilder:
             has_mcids=(
                 None if "FPDFPageObj_GetMarkedContentID" in self.missing else seen(mcids, read)
             ),
+            has_named_dests=self.names.count > 0 if self.names is not None else None,
             missing_apis=self.missing,
         )
+        if self.names is not None and self.names.error is not None:
+            self.errors["named_dests"] = self.names.error
+        self.doc = self.names = None
         return DocumentLayer(
             version=LAYER_VERSION,
             pdfium=self.version,
@@ -1115,6 +1155,7 @@ def build_document_layer(
         try:
             if callable(page_indices):
                 page_indices = page_indices(len(doc))
+            builder.start(doc)
             for page_index in page_indices:
                 try:
                     page = doc[page_index]
