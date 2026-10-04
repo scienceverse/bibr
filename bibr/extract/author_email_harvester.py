@@ -205,6 +205,97 @@ def _authors_named(name: str, index: dict[str, list]) -> list[PaperAuthor]:
     return fits
 
 
+# --- the gate for sentences the page-1 widening adds ---------------------------
+# An address in a sentence outside the front-matter block is assigned only when it sits
+# right after the author's surname, or when its own local part names exactly one author.
+_GATE_CHARS = 45
+_LOCAL_SPLIT_RE = re.compile(r"[._\-+]+")
+
+
+def _authors_named_before(text: str, start: int, index: dict[str, list]) -> set[int]:
+    """ids of authors whose surname is within 45 characters before *start*.
+
+    Nothing before an earlier address counts: the window is cut after that address. When
+    given names or initials stand right before a surname that several authors share, only
+    the authors they fit are returned ("Mei Tan" names one of two Tans); a bare surname
+    returns every author who carries it, and the caller decides what to do with the tie.
+    """
+    segment = text[max(0, start - _GATE_CHARS) : start]
+    at = segment.rfind("@")
+    if at != -1:
+        # drop the rest of the earlier address (its domain), keep what follows it
+        parts = segment[at + 1 :].split(None, 1)
+        segment = parts[1] if len(parts) == 2 else ""
+    raw = [t for t in re.split(r"[\W_]+", segment) if t]
+    folded = [_fold(t) for t in raw]
+    found: set[int] = set()
+    for first in range(len(raw)):
+        for last in range(first + 1, min(len(raw), first + 4) + 1):
+            entries = index.get("".join(folded[first:last]))
+            if not entries:
+                continue
+            # a given name or initials directly before the surname, if any
+            fitting = [
+                author
+                for author, initials in entries
+                if any(
+                    _initials_compatible(_initials(raw[max(0, first - n) : first]), initials)
+                    for n in (1, 2, 3)
+                    if first - n >= 0
+                )
+            ]
+            found.update(id(a) for a in fitting or [author for author, _ in entries])
+    return found
+
+
+def _local_initials(tokens: list[str]) -> list[str]:
+    """Initials from local-part tokens: "hk" -> h, k; "hui" -> h (a given name, not initials)."""
+    out: list[str] = []
+    for token in tokens:
+        out.extend(token if len(token) <= 2 else token[0])
+    return out
+
+
+def _authors_named_by_local(local: str, index: dict[str, list]) -> list[PaperAuthor]:
+    """Authors whose name the address's local part spells: "hk.tan", "tan_h", "htan", "tan".
+
+    The local part is split on ".", "_" and "-" (digits dropped). A run of tokens must equal an
+    author's folded family name and the remaining tokens must be compatible with the author's
+    initials; a single token is also tried as initials+surname, surname+initials or
+    given name+surname ("hktan", "tanhk", "ingridlindqvist"). A surname alone fits every author
+    who carries it.
+    """
+    tokens = [t for t in (_fold(re.sub(r"\d+", "", t)) for t in _LOCAL_SPLIT_RE.split(local)) if t]
+    if not tokens:
+        return []
+    fits: list[PaperAuthor] = []
+
+    def add(family_key: str, initials: list[str], given_prefix: str = "") -> None:
+        for author, author_initials in index.get(family_key, ()):
+            if any(author is f for f in fits):
+                continue
+            if given_prefix:
+                fit = len(given_prefix) >= 3 and any(
+                    _fold(token).startswith(given_prefix) for token in _given_tokens(author.given)
+                )
+            else:
+                fit = not initials or _initials_compatible(initials, author_initials)
+            if fit:
+                fits.append(author)
+
+    for first in range(len(tokens)):
+        for last in range(first + 1, min(len(tokens), first + 3) + 1):
+            add("".join(tokens[first:last]), _local_initials([*tokens[:first], *tokens[last:]]))
+    if len(tokens) == 1:
+        word = tokens[0]
+        for cut in range(1, min(4, len(word))):
+            add(word[cut:], list(word[:cut]))  # initials + surname
+            add(word[: len(word) - cut], list(word[len(word) - cut :]))  # surname + initials
+        for cut in range(3, len(word) - 1):
+            add(word[cut:], [], given_prefix=word[:cut])  # given name + surname
+    return fits
+
+
 class AuthorEmailHarvester:
     """Promote corresponding authors and attach their emails.
 
@@ -212,15 +303,25 @@ class AuthorEmailHarvester:
     ``PaperAuthor`` (modified in place).
     """
 
-    def __init__(self, contents: PaperContents, document: PaperContents | None = None):
+    def __init__(
+        self,
+        contents: PaperContents,
+        document: PaperContents | None = None,
+        widened_text_ids: frozenset[int] | None = None,
+    ):
         """``contents`` is what the extractor scoped to the selected front-matter block.
 
         ``document`` is the whole paper. Only the name-paired footnote pass reads it,
         because the footnote carrying a corresponding author's address sits outside
         the front-matter block on most layouts. Everything else stays scoped.
+
+        ``widened_text_ids`` names the sentences of ``contents`` that the extractor added
+        beyond the front-matter block (the rest of page 1). The front-matter sentences are
+        harvested exactly as without them; the added ones get a second, gated pass.
         """
         self.contents = contents
         self._document = document if document is not None else contents
+        self._widened_text_ids = frozenset(widened_text_ids or ())
 
     @staticmethod
     def demote_implausible_flags(authors: list[PaperAuthor]) -> None:
@@ -295,6 +396,15 @@ class AuthorEmailHarvester:
              Anything else is skipped, leaving the author emailless for
              their real address instead of blocking it with someone else's.
 
+        The rest of page 1 outside the front-matter block (``widened_text_ids``) is read
+        in a second pass over what the first left open, so the front-matter results are
+        exactly what they are without it. An address from those added sentences is
+        assigned only when an author's surname sits within 45 characters before it (no
+        other address between; a given name or initials before the surname narrow a
+        shared surname), or when its local part spells exactly one author's name
+        ("hk.tan", "tan_hk", "hktan"). A tie between authors that nothing separates is
+        left open rather than settled by author order.
+
         Name-paired footnotes ("E-mail address(es): x@y (Initials Surname)") are read
         last, from the whole paper rather than the scoped block, and only for authors
         still without an address after everything above. Each pair is attached to the
@@ -315,11 +425,18 @@ class AuthorEmailHarvester:
 
         # Skip references section so reference URLs/DOIs/emails don't bleed in.
         section_type_by_id = {s.section_id: s.section_type for s in self.contents.sections}
-        sentences = [
+        all_sentences = [
             s
             for s in self.contents.sentences
             if section_type_by_id.get(s.section_id) != CanonicalSection.REFERENCES
         ]
+        widened_ids = self._widened_text_ids
+        # The front-matter pass never sees the added sentences, so widening cannot change it.
+        sentences = (
+            [s for s in all_sentences if getattr(s, "text_id", None) not in widened_ids]
+            if widened_ids
+            else all_sentences
+        )
 
         # Only fill gaps — never overwrite an LLM-extracted email.
         # Surname → every still-emailless author carrying it. Keeping a single
@@ -331,16 +448,57 @@ class AuthorEmailHarvester:
             if author.family and not author.email:
                 authors_by_family.setdefault(author.family.lower().strip(), []).append(author)
         if not authors_by_family:
-            self._finish(authors, sentences)
+            self._finish(authors, sentences, all_sentences, widened_ids)
             return
 
         strict_emails = self._marker_sentence_emails(sentences)
 
         claimed_emails: set[str] = {a.email.lower() for a in authors if a.email}
 
+        harvested = self._assign_by_proximity(
+            sentences, authors_by_family, strict_emails, claimed_emails
+        )
+        if widened_ids and authors_by_family:
+            # The page-1 sentences outside the front-matter block get a second, gated pass
+            # over what the front-matter pass left open (see _gate_widened_candidate).
+            harvested += self._assign_by_proximity(
+                all_sentences,
+                authors_by_family,
+                self._marker_sentence_emails(all_sentences),
+                claimed_emails,
+                widened_ids=widened_ids,
+                index=_index_authors_by_family(authors),
+            )
+
+        if harvested:
+            logger.info(
+                "Harvested %d corresponding-author email(s) from body text",
+                harvested,
+            )
+
+        self._finish(authors, sentences, all_sentences, widened_ids)
+
+    def _assign_by_proximity(
+        self,
+        sentences: list,
+        authors_by_family: dict[str, list[PaperAuthor]],
+        strict_emails: set[str],
+        claimed_emails: set[str],
+        widened_ids: frozenset[int] | None = None,
+        index: dict[str, list] | None = None,
+    ) -> int:
+        """Assign addresses to still-emailless authors by sentence proximity; return the count.
+
+        With *widened_ids*, only the sentences those ids name are read (the page-1 sentences
+        the widening added) and every assignment must pass :meth:`_gate_widened_candidate`.
+        Mutates *authors_by_family* and *claimed_emails*.
+        """
         harvested = 0
+        gated = widened_ids is not None
         for i, sent in enumerate(sentences):
             if "@" not in sent.text:
+                continue
+            if gated and getattr(sent, "text_id", None) not in widened_ids:
                 continue
             window_indices = [
                 j
@@ -393,6 +551,21 @@ class AuthorEmailHarvester:
                         )
                         order_idx += 1
 
+                named_before: set[int] = set()
+                named_by_local: set[int] = set()
+                if gated:
+                    # Only the added page-1 sentences are gated: the address must sit right
+                    # after the author's surname, or its local part must name exactly one author.
+                    named_before = _authors_named_before(
+                        email_match.string, email_match.start(), index or {}
+                    )
+                    by_local = _authors_named_by_local(local, index or {})
+                    if len(by_local) == 1:
+                        named_by_local = {id(by_local[0])}
+                    candidates = [
+                        c for c in candidates if id(c[4]) in named_before | named_by_local
+                    ]
+
                 if candidates:
                     candidates.sort(key=lambda c: (c[0], c[1], c[2]))
                     _passing = [
@@ -416,7 +589,11 @@ class AuthorEmailHarvester:
                     # surname; otherwise leave them emailless for their real
                     # one instead of blocking it with someone else's.
                     best_dist = candidates[0][0]
-                    if (
+                    # A tie for first place (same surname, same distance, nothing in the
+                    # address to tell the authors apart) is not resolved by author order
+                    # on an added sentence.
+                    tied = gated and len(candidates) > 1 and candidates[0][:2] == candidates[1][:2]
+                    if not tied and (
                         email.lower() in strict_emails
                         or best_dist == 0
                         or _email_name_affinity(author.given, author.family, local_compact)
@@ -441,7 +618,9 @@ class AuthorEmailHarvester:
                         # marker with explicit email(s), those pairings are
                         # exhaustive and a bare window marker no longer counts.
                         candidate = fallback[0]
-                        if (
+                        if gated and id(candidate) not in named_by_local:
+                            candidate = None
+                        if candidate is not None and (
                             email.lower() in strict_emails
                             or (
                                 not strict_emails
@@ -468,15 +647,15 @@ class AuthorEmailHarvester:
             if not authors_by_family:
                 break
 
-        if harvested:
-            logger.info(
-                "Harvested %d corresponding-author email(s) from body text",
-                harvested,
-            )
+        return harvested
 
-        self._finish(authors, sentences)
-
-    def _finish(self, authors: list[PaperAuthor], sentences: list) -> None:
+    def _finish(
+        self,
+        authors: list[PaperAuthor],
+        sentences: list,
+        all_sentences: list,
+        widened_ids: frozenset[int],
+    ) -> None:
         """Name-paired footnote addresses, then the promotions, in order.
 
         Footnote pairs are attached only now, after every in-scope rule above had its
@@ -487,6 +666,10 @@ class AuthorEmailHarvester:
         """
         footnote_groups = self._harvest_named_footnote_emails(authors)
         self._promote_corresponding_from_anchors(authors, sentences)
+        if widened_ids:
+            self._promote_corresponding_from_anchors(
+                authors, all_sentences, widened_ids=widened_ids
+            )
         self._flag_named_footnote_authors(authors, footnote_groups)
         self._promote_sole_author(authors)
 
@@ -588,13 +771,19 @@ class AuthorEmailHarvester:
             logger.info("Marked %d author(s) corresponding from name-paired footnotes", promoted)
 
     def _promote_corresponding_from_anchors(
-        self, authors: list[PaperAuthor], sentences: list
+        self,
+        authors: list[PaperAuthor],
+        sentences: list,
+        widened_ids: frozenset[int] | None = None,
     ) -> None:
         """Set ``corresponding=True`` on any author whose (already-attached)
         email appears next to an explicit corresponding-author anchor.
 
         When a marker-bearing sentence itself names email(s), those pairings are
         exhaustive (strict mode) and window/header/footnote proximity is ignored.
+
+        With *widened_ids*, only the email sentences those ids name are examined (the
+        windows and the strict set still come from *sentences*, the page-1 list).
         """
         if not authors:
             return
@@ -609,6 +798,8 @@ class AuthorEmailHarvester:
         promoted = 0
         for i, sent in enumerate(sentences):
             if "@" not in sent.text:
+                continue
+            if widened_ids is not None and getattr(sent, "text_id", None) not in widened_ids:
                 continue
             window_indices = [
                 j

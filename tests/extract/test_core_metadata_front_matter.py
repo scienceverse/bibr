@@ -1144,7 +1144,11 @@ async def test_unresolved_resolution_skips_core_llm_and_returns_empty_scalars():
     assert metadata.keywords == []
 
 
-async def test_selected_block_does_not_harvest_email_from_unowned_page_one(monkeypatch):
+async def test_selected_block_does_not_harvest_an_unrelated_email_from_unowned_page_one(
+    monkeypatch,
+):
+    # Page 1 outside the block is read, but gated: an address naming people who are not
+    # authors of the selected record (another article's record on the page) is not taken.
     from bibr.extract.core_metadata import CoreMetadataExtractor
     from bibr.schemas import AuthorLLM, CoreMetadataLLM
 
@@ -1152,7 +1156,7 @@ async def test_selected_block_does_not_harvest_email_from_unowned_page_one(monke
         [
             (1, "Selected title", 0),
             (2, "Alice Example", 0),
-            (3, "Corresponding author: Alice Example alice@outside.test", 0),
+            (3, "Corresponding author: Jane Other jane.other@outside.test", 0),
             (4, "Body begins", 1),
         ]
     )
@@ -1160,7 +1164,7 @@ async def test_selected_block_does_not_harvest_email_from_unowned_page_one(monke
     byline = _candidate("c2", "Alice Example", roles=frozenset({"byline"}), text_ids=(2,))
     outside = _candidate(
         "c3",
-        "Corresponding author: Alice Example alice@outside.test",
+        "Corresponding author: Jane Other jane.other@outside.test",
         roles=frozenset(),
         text_ids=(3,),
     )
