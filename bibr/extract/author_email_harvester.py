@@ -205,6 +205,56 @@ def _authors_named(name: str, index: dict[str, list]) -> list[PaperAuthor]:
     return fits
 
 
+# --- a bare corresponding marker next to an address -----------------------------
+# Many journals mark the corresponding author with a glyph and no word: "* E-mail: a@x.org;
+# c@y.org" (the star stands for "corresponding"). The reading only flags an author who already
+# holds the address (see _flag_from_marker_glyphs); it never attaches or moves an address.
+_GLYPH = r"(?:\\\(\s*\^\s*\{\s*\*\s*\}\s*\\\)|[*∗⁎✉])"  # * ∗ ⁎ ✉ and LaTeX ^{*}
+# An address, optionally followed by the initials PLOS prints after it: "a@x.org (AB)".
+_ITEM = _EMAIL_RE.pattern + r"(?:\s*\(\s*(?:[A-Z]\.?[\s\-]?){2,4}\s*\))?"
+_ITEM_RE = re.compile(_ITEM)
+# The glyph directly followed by an address list (an "E-mail:" label may sit between).
+_BARE_LIST_RE = re.compile(
+    r"(?:^|(?<=[\s.;:,]))"
+    + _GLYPH
+    + r"\s*(?i:e-?\s?mail(?:\s+address(?:es)?)?\s*:?\s*)?"
+    + _ITEM
+    + r"(?:\s*(?:[;,]|\band\b)\s*"
+    + _ITEM
+    + r")*"
+)
+_WORD_RE = re.compile(r"[^\W\d_]+(?:[-'’][^\W\d_]+)*")
+# The ORCID badge text a PLOS byline prints glued to the surname: "SmithID1" -> "Smith1".
+_ORCID_BADGE_RE = re.compile(r"(?<=[^\W\d_])ID(?=\d)")
+
+
+def _byline_stars(sentences: list, index: dict[str, list]) -> tuple[set[int], set[int]]:
+    """(ids of authors a star follows, ids of authors named without one) in address-free sentences.
+
+    An author is read from a word that is exactly their surname; a name the extraction ran
+    together ("AliceLee") or a surname shared by two authors is skipped, so the caller can
+    only act on authors it positively saw without a star.
+    """
+    starred: set[int] = set()
+    seen: set[int] = set()
+    for sent in sentences:
+        text = sent.text or ""
+        if "@" in text or not re.search(r"[*∗⁎]", text):
+            continue
+        text = _ORCID_BADGE_RE.sub("", text)
+        for word in _WORD_RE.finditer(text):
+            entries = index.get(_fold(word.group()), [])
+            if len(entries) != 1:
+                continue
+            author = entries[0][0]
+            seen.add(id(author))
+            # the run of non-letters right after the surname: "1,*," or "\\(^{1,*}\\)" or " "
+            after = re.match(r"[\W\d_]*", text[word.end() :]).group()
+            if re.search(r"[*∗⁎]", after):
+                starred.add(id(author))
+    return starred, seen - starred
+
+
 class AuthorEmailHarvester:
     """Promote corresponding authors and attach their emails.
 
@@ -304,6 +354,10 @@ class AuthorEmailHarvester:
         author(s)" / "Correspondence" phrase opens the sentence or one of the three
         before it, the phrase is plural or the window holds a single pair, and no other
         author is already flagged (by the LLM, a marker sentence or the envelope glyph).
+
+        A bare corresponding marker is read last (:meth:`_flag_from_marker_glyphs`): a star
+        directly before an address flags the author who already holds it. That pass only
+        flags; it never attaches or moves an address.
 
         Mutates ``authors`` in place.  Skips silently when no authors or no
         email-bearing text are available.
@@ -488,6 +542,7 @@ class AuthorEmailHarvester:
         footnote_groups = self._harvest_named_footnote_emails(authors)
         self._promote_corresponding_from_anchors(authors, sentences)
         self._flag_named_footnote_authors(authors, footnote_groups)
+        self._flag_from_marker_glyphs(authors, sentences)
         self._promote_sole_author(authors)
 
     @staticmethod
@@ -586,6 +641,73 @@ class AuthorEmailHarvester:
                     promoted += 1
         if promoted:
             logger.info("Marked %d author(s) corresponding from name-paired footnotes", promoted)
+
+    def _flag_from_marker_glyphs(self, authors: list[PaperAuthor], sentences: list) -> None:
+        """Flag the authors who hold an address a bare corresponding glyph points to.
+
+        ``* E-mail: a@x.org (AB); c@y.org`` over the scoped front-matter sentences that print an
+        address flags the authors who already own the listed addresses (the star stands for
+        "corresponding"). The glyph must be directly followed by the address or an "E-mail:"
+        label, so "* These authors contributed equally" never counts. Several owners are taken
+        only from one list; separate glyph lines for different owners are left alone.
+
+        This pass only sets ``corresponding``. It never attaches, moves or replaces an address,
+        so an address an author holds (or lacks) is the same before and after.
+
+        Guards: a star that follows author names in the byline must follow this author too;
+        an owner is never added next to a different author who is already flagged (by the LLM or
+        another marker); and a 3+ author paper never ends with every author flagged.
+        """
+        if not authors:
+            return
+        printing = [s for s in sentences if "@" in (s.text or "")]
+        if not printing:
+            return
+        owner_by_email = {a.email.lower(): a for a in authors if a.email}
+        if not owner_by_email:
+            return
+
+        groups: list[list[PaperAuthor]] = []
+        for sent in printing:
+            text = _PG_PREFIX_RE.sub("", sent.text)
+            for m in _BARE_LIST_RE.finditer(text):
+                owners: list[PaperAuthor] = []
+                for item in _ITEM_RE.finditer(m.group(0)):
+                    owner = owner_by_email.get(item.group(1).lower())
+                    if owner is not None and all(owner is not o for o in owners):
+                        owners.append(owner)
+                if owners:
+                    groups.append(owners)
+
+        starred, unstarred = _byline_stars(sentences, _index_authors_by_family(authors))
+        if starred:
+            # a star in the byline marks other authors, and this owner is printed without one
+            blocked = unstarred - starred
+            groups = [[a for a in g if id(a) not in blocked] for g in groups]
+            groups = [g for g in groups if g]
+        owner_ids = {id(a) for g in groups for a in g}
+        if len(owner_ids) >= 2 and not any(
+            len({id(a) for a in g}) == len(owner_ids) for g in groups
+        ):
+            groups = []  # owners spread over separate lines: no single co-corresponding list
+
+        chosen: list[PaperAuthor] = []
+        for group in groups:
+            chosen.extend(a for a in group if all(a is not c for c in chosen))
+        if not chosen:
+            return
+        flagged = {id(a) for a in authors if a.corresponding}
+        if flagged - {id(a) for a in chosen}:
+            return
+        added = [a for a in chosen if not a.corresponding]
+        for author in added:
+            author.corresponding = True
+        if len(authors) >= 3 and all(a.corresponding for a in authors):
+            for author in added:
+                author.corresponding = False
+            return
+        if added:
+            logger.info("Marked %d author(s) corresponding from bare marker glyphs", len(added))
 
     def _promote_corresponding_from_anchors(
         self, authors: list[PaperAuthor], sentences: list
