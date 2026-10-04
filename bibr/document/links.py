@@ -33,8 +33,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from bibr.document import destinations
-from bibr.document._ids import page_id
+from bibr.document import destinations, ids
 from bibr.document.model import Box, Decided, Link, Page
 
 if TYPE_CHECKING:
@@ -66,6 +65,8 @@ _DEST_VALUE_TYPES = {3, 4, 5, 6}
 # pdfium's action types as the layer names them; anything else is "other".
 _ACTIONS = {1: "goto", 2: "remote", 3: "uri", 4: "launch", 5: "remote"}
 
+# The kind prefix of a link's id (``p3.lk4``).
+KIND = "lk"
 RULE_VERSION = "link_target/1"
 _BY_ACTION = Decided("link_target.action", RULE_VERSION, calibrated=False)
 _BY_NAME = Decided("link_target.name", RULE_VERSION, calibrated=False)
@@ -327,9 +328,7 @@ def _span_of(cols, records: np.ndarray) -> np.ndarray:
 
 def _span_ids(page_index: int, cols, records: np.ndarray) -> tuple[str, ...]:
     spans = _span_of(cols, records)
-    return tuple(
-        page_id("sp", page_index, span) for span in sorted({int(s) for s in spans if s >= 0})
-    )
+    return tuple(ids.span(page_index, span) for span in sorted({int(s) for s in spans if s >= 0}))
 
 
 def covered_spans(page: Page, link: RawLink) -> tuple[str, ...]:
@@ -363,7 +362,7 @@ def build_links(raws: list[RawLink], pages: list[Page]) -> list[Link]:
         target_class, decided = _classify(raw, by_index, words)
         links.append(
             Link(
-                link_id=page_id("lk", raw.page, raw.number),
+                link_id=ids.make(raw.page, KIND, raw.number),
                 page=raw.page,
                 rect=raw.rect,
                 quads=raw.quads,

@@ -30,8 +30,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from bibr.document import destinations
-from bibr.document._ids import page_id
+from bibr.document import destinations, ids
 from bibr.document.model import StructElem
 
 if TYPE_CHECKING:
@@ -50,6 +49,9 @@ APIS = (
     "FPDF_StructElement_GetActualText",
     "FPDF_StructElement_GetLang",
 )
+# The kind prefix of a structure element's id (``p3.st12``).
+KIND = "st"
+
 # Whether the catalog's /MarkInfo says the PDF is tagged.
 CATALOG_APIS = ("FPDFCatalog_IsTagged",)
 
@@ -111,7 +113,7 @@ def _element(
     pending: list[tuple[Any, str | None, tuple[int, ...]]],
 ) -> StructElem:
     """The element at *handle*; its element kids are pushed onto *pending*."""
-    elem_id = page_id("st", page_index, number)
+    elem_id = ids.make(page_index, KIND, number)
     mcrs: list[tuple[int, int]] = []
     kids = []
     for index in range(api.FPDF_StructElement_CountChildren(handle)):

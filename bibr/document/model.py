@@ -41,8 +41,6 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from bibr.document._ids import document_id
-
 # The layer's schema version: bump it with any change to a serialised class,
 # its fields or COLUMN_DTYPES (tests/document/test_layer.py pins the pair).
 LAYER_VERSION = "doclayer/3"
@@ -314,7 +312,7 @@ class OutlineEntry:
 
     @property
     def entry_id(self) -> str:
-        return document_id("ol", self.idx)
+        return f"ol{self.idx}"
 
 
 @dataclass(frozen=True, slots=True)
