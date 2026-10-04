@@ -137,10 +137,10 @@ def page_chars(page: Page) -> list[tuple[str, Box]]:
     """The ``(char, tight box)`` stream ``ref_geometry._extract_page_chars`` reads.
 
     ``get_text_range(i, 1)`` per char: empty for a char pdfium leaves out of
-    the page text and for a UTF-16 surrogate half (pypdfium2 decodes with
-    ``errors="ignore"``), U+FFFE for pdfium's line-end hyphen, otherwise the
-    char itself. Raises where that read raises (a char beyond the BMP, a
-    missing box).
+    the page text, for a UTF-16 surrogate half and for a char beyond the BMP
+    (its one-unit buffer holds only the high surrogate, and pypdfium2 decodes
+    with ``errors="ignore"``), U+FFFE for pdfium's line-end hyphen, otherwise
+    the char itself. Raises where that read raises (a missing box).
     """
     from bibr.ocr.native_text import compose_spacing_accents
 
@@ -154,10 +154,8 @@ def page_chars(page: Page) -> list[tuple[str, Box]]:
             continue
         if code == 0x2 and flags & GLYPH_HYPHEN:
             ch = "￾"
-        elif 0xD800 <= code <= 0xDFFF:
+        elif 0xD800 <= code <= 0xDFFF or code > 0xFFFF:
             continue
-        elif code > 0xFFFF:
-            raise ValueError(f"char {index} is beyond the BMP, which get_text_range cannot read")
         else:
             ch = chr(code)
         if flags & GLYPH_NO_BOX:

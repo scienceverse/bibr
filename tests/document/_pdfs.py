@@ -20,6 +20,12 @@ PAGE_W, PAGE_H = 612.0, 792.0
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 SAMPLE_PAPER = Path(__file__).resolve().parents[2] / "bibr" / "data" / "sample_paper.pdf"
 
+# /F4 is Helvetica whose encoding names code 30 ``u1D6FC``, MATHEMATICAL
+# ITALIC SMALL ALPHA: a char beyond the BMP, which pdfium reads as one char,
+# as it does for the math fonts of born-digital papers.
+MATH_ALPHA = "\U0001d6fc"
+MATH_ALPHA_CODE = "\x1e"
+
 
 def _num(value: float) -> bytes:
     return f"{value:.4f}".encode()
@@ -79,7 +85,8 @@ class PageSpec:
 
 
 def build_pdf(pages: list[PageSpec]) -> bytes:
-    """A PDF with fonts /F1 Helvetica, /F2 Times-Roman, /F3 Helvetica-Bold and image /Im1."""
+    """A PDF with fonts /F1 Helvetica, /F2 Times-Roman, /F3 Helvetica-Bold, /F4
+    (Helvetica reading :data:`MATH_ALPHA_CODE` as :data:`MATH_ALPHA`) and image /Im1."""
     objects: list[bytes] = [b"", b""]
 
     def add(body: bytes) -> int:
@@ -89,6 +96,10 @@ def build_pdf(pages: list[PageSpec]) -> bytes:
     fonts = b" ".join(
         b"/F%d %d 0 R" % (number, add(b"<< /Type /Font /Subtype /Type1 /BaseFont /%s >>" % name))
         for number, name in ((1, b"Helvetica"), (2, b"Times-Roman"), (3, b"Helvetica-Bold"))
+    )
+    fonts += b" /F4 %d 0 R" % add(
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /Type /Encoding "
+        b"/BaseEncoding /WinAnsiEncoding /Differences [30 /u1D6FC] >> >>"
     )
     picture = add(
         b"<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceGray "
