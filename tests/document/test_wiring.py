@@ -187,6 +187,7 @@ async def test_native_text_stage_asks_for_the_layer_only_when_on(monkeypatch, on
     await NativeTextStage().run(ctx)
 
     assert len(calls) == 1
+    assert fs.doc_layer_attempted is on
     if on:
         assert calls[0]["include_doc_layer"] is True
         assert calls[0]["render_budget"] == render_budget(ctx.settings)
@@ -195,6 +196,37 @@ async def test_native_text_stage_asks_for_the_layer_only_when_on(monkeypatch, on
         assert "include_doc_layer" not in calls[0]
         assert "render_budget" not in calls[0]
         assert fs.doc_layer is None
+
+
+@pytest.mark.parametrize("raises", [False, True])
+async def test_a_failed_inline_build_is_not_rebuilt(monkeypatch, raises):
+    import bibr.pipeline.stages.native_text as stage_mod
+    from bibr.pipeline.stages.native_text import NativeTextStage
+
+    monkeypatch.setattr(Settings.pipeline, "document_layer", True)
+
+    def failed_inspect(pdf_bytes, layout_results, **kwargs):
+        if raises:
+            raise RuntimeError("the PDF does not open")
+        # The layer failed to finish: the inspection carries no document.
+        return PdfInspection((), deepcopy(layout_results), {}, [], [])
+
+    def no_rebuild(*_args, **_kwargs):
+        raise AssertionError("a failed inline build must not be rebuilt")
+
+    monkeypatch.setattr(stage_mod, "inspect_pdf", failed_inspect)
+    monkeypatch.setattr(rebuild_mod, "rebuild_document_layer", no_rebuild)
+    fs = FileState(path=Path("paper.pdf"), pdf_bytes=b"%PDF")
+    fs.layout_results = [[{"label": "text", "content": ""}]]
+    ctx = PipelineContext(
+        file_states=[fs], progress=NullProgress(), resources=MagicMock(), config=RunConfig()
+    )
+
+    await NativeTextStage().run(ctx)
+
+    assert fs.doc_layer is None
+    assert fs.doc_layer_attempted is True
+    assert ensure_document_layer(fs, GlobalSettings(), start_page=None, end_page=None) is None
 
 
 def _parse_context(fs: FileState, contents):
@@ -369,15 +401,20 @@ def test_no_layer_without_the_processed_pdf(tmp_path):
 
 def test_a_rebuild_failure_is_logged_not_raised(tmp_path, monkeypatch, caplog):
     fs = _bundle_hit(tmp_path, _pdfs.synthetic_paper())
+    calls = []
 
     def broken(*_args, **_kwargs):
+        calls.append(1)
         raise RuntimeError("rebuild failed")
 
     monkeypatch.setattr(rebuild_mod, "rebuild_document_layer", broken)
     with caplog.at_level(logging.WARNING):
         result = ensure_document_layer(fs, GlobalSettings(), start_page=None, end_page=None)
+        again = ensure_document_layer(fs, GlobalSettings(), start_page=None, end_page=None)
 
     assert result is None
+    assert again is None
+    assert calls == [1]
     assert fs.doc_layer is None
     assert "Could not build the document layer" in caplog.text
 

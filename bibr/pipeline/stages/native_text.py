@@ -97,6 +97,8 @@ class NativeTextStage:
         for fs in ctx.alive():
             if not fs.pdf_bytes or fs.layout_results is None:
                 continue
+            if layer_kwargs:
+                fs.doc_layer_attempted = True
             try:
                 inspection = await asyncio.to_thread(
                     inspect_pdf,

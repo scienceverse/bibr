@@ -114,6 +114,9 @@ class FileState:
     # Outlives the OCR stage; handed on as ``PaperContents.document`` and
     # dropped after PostParse unless the memory mode is ``keep_all``.
     doc_layer: "DocumentLayer | None" = field(default=None, compare=False, repr=False, kw_only=True)
+    # The layer was asked for once, inline or rebuilt; a failed build leaves
+    # doc_layer None and is not tried again.
+    doc_layer_attempted: bool = field(default=False, compare=False, repr=False, kw_only=True)
 
     def free_pre_ocr(self):
         """Free data consumed by OCR stage."""

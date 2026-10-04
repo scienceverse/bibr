@@ -79,14 +79,19 @@ def ensure_document_layer(
     start_page: int | None,
     end_page: int | None,
 ) -> DocumentLayer | None:
-    """*fs*'s layer, rebuilt if NativeTextStage did not build it, with blocks attached.
+    """*fs*'s layer, rebuilt if NativeTextStage did not try to build it, with blocks attached.
 
-    None for inputs that are not PDFs and when the processed bytes are gone
-    (an input file that changed since the run read it). Never raises.
+    None for inputs that are not PDFs, when the processed bytes are gone (an
+    input file that changed since the run read it) and when a build was
+    already tried and failed: a rebuild would parse the same bytes again
+    under the lock. Never raises.
     """
     try:
         layer = fs.doc_layer
         if layer is None:
+            if fs.doc_layer_attempted:
+                return None
+            fs.doc_layer_attempted = True
             from bibr.extract.pdf_doi_evidence import is_pdf
             from bibr.pipeline.stages.identity import _processed_bytes
 
