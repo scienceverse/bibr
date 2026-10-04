@@ -6,6 +6,7 @@ server exposes:
   - ``POST /papers/jobs``              — submit an async extraction job (202)
   - ``GET  /papers/jobs/{id}``         — poll job status
   - ``GET  /papers/jobs/{id}/result``  — fetch the paper_json once succeeded
+  - ``DELETE /papers/jobs/{id}``       — cancel a job that is still queued
   - ``GET  /health``                   — LitServe's built-in liveness check
   - ``GET  /ready``                    — custom readiness probe (OCR + Redis + job store)
 

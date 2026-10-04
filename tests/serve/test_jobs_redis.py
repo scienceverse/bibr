@@ -375,9 +375,12 @@ async def test_dispatcher_worker_survives_a_store_that_raises(harness, caplog):
     tracker = _FakeTracker(result={"paper_id": "p"})
     dispatcher = jobs_mod.JobDispatcher(store=store, tracker=tracker, max_running=1)
     try:
+        job_ids = []
         for index in range(2):
+            job = await store.create(filename=f"{index}.pdf")
+            job_ids.append(job.job_id)
             await dispatcher.submit(
-                str(index), jobs_mod.JobPayload(descriptor={"upload_id": index})
+                job.job_id, jobs_mod.JobPayload(descriptor={"upload_id": index})
             )
         await asyncio.wait_for(dispatcher.join(), timeout=5)
     finally:
@@ -385,8 +388,7 @@ async def test_dispatcher_worker_survives_a_store_that_raises(harness, caplog):
     # Both jobs were dispatched: the first crash did not take the worker down.
     assert [d["upload_id"] for d in tracker.descriptors] == [0, 1]
     assert [r.getMessage() for r in caplog.records if "runner failed" in r.getMessage()] == [
-        "job 0: runner failed outside the job's own handling",
-        "job 1: runner failed outside the job's own handling",
+        f"job {job_id}: runner failed outside the job's own handling" for job_id in job_ids
     ]
 
 
