@@ -356,7 +356,8 @@ class DecisionRecord:
 class Presence:
     """What the document has, so a consumer can tell "absent" from "not read".
 
-    None means the fact was not read (D2 and D3 fill the rest).
+    None means the fact was not read (D2 and D3 fill the rest). A fact no
+    read page shows is None, not False, when some page could not be read.
     """
 
     has_text_layer: bool | None = None
@@ -419,6 +420,10 @@ class Page:
     layer) or ``ocr`` (no text layer). A native page whose text a corruption
     gate rejected (``min_printable_ratio``) was still OCR'd; ``Block.chosen``
     says which source each region used.
+
+    A page the harvest failed on stays in the layer with the failure in
+    ``error`` and ``cols`` None. When it failed before its text layer was
+    read, ``text_source`` is ``unread`` and its geometry NaN (rotation 0).
     """
 
     index: int
@@ -428,9 +433,9 @@ class Page:
     height: float
     crop_box: Box
     rotation: int
-    # native | invisible_layer | ocr
+    # native | invisible_layer | ocr | unread
     text_source: str
-    # None when the page has no text layer.
+    # None when the page has no text layer or could not be read.
     cols: PageColumns | None
     blocks: list[Block] = field(default_factory=list)
     suppressed: list[Suppressed] = field(default_factory=list)
@@ -442,6 +447,8 @@ class Page:
     text_source_decided: Decided | None = None
     # The share of the CropBox that images cover, read when the share qualifies.
     image_coverage: float | None = None
+    # Why the harvest failed on the page (also in DocumentLayer.component_errors).
+    error: str | None = None
 
 
 @dataclass(slots=True)

@@ -363,7 +363,7 @@ def _harvest_page(
             walk=walk,
         )
     except Exception as exc:  # noqa: BLE001
-        builder.error(f"harvest:{page_index}", exc)
+        builder.page_failed(page_index, f"harvest:{page_index}", exc)
 
 
 def _harvest_unread_page(
@@ -395,7 +395,7 @@ def _harvest_unread_page(
         finally:
             textpage.close()
     except Exception as exc:  # noqa: BLE001
-        builder.error(f"harvest:{page_index}", exc)
+        builder.page_failed(page_index, f"harvest:{page_index}", exc)
 
 
 def _keep_layer_text_as_ocr_fallback(textpage, crop_box, regions: list[dict], **fill) -> None:

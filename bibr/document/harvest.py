@@ -909,7 +909,9 @@ class LayerBuilder:
         self.source_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
         self.budget = budget
         self.fonts = FontTable()
-        self.drafts: deque[_PackedDraft] = deque()
+        # Drafted pages, and the pages that failed before a draft, in page order.
+        self.drafts: deque[_PackedDraft | Page] = deque()
+        self._added: set[int] = set()
         self.errors: dict[str, str] = {}
         self.missing = missing_apis()
         self._api = _Api()
@@ -960,12 +962,17 @@ class LayerBuilder:
             )
             packed = _pack(draft)
         except Exception as exc:  # noqa: BLE001 - a layer page never fails the paper
-            self.errors[f"harvest:{page_index}"] = _error_text(exc)
+            self.page_failed(page_index, f"harvest:{page_index}", exc)
             return
         self.drafts.append(packed)
+        self._added.add(page_index)
 
-    def error(self, key: str, exc: BaseException) -> None:
+    def page_failed(self, page_index: int, key: str, exc: BaseException) -> None:
+        """Record *exc* under *key*, and keep the page as unread unless it was added."""
         self.errors[key] = _error_text(exc)
+        if page_index not in self._added:
+            self._added.add(page_index)
+            self.drafts.append(_unread_page(page_index, self.errors[key]))
 
     def finish(self) -> DocumentLayer:
         """Complete the drafted pages; needs no pdfium, so call it after the lock."""
@@ -974,25 +981,36 @@ class LayerBuilder:
         # Each draft is released once its page is complete.
         while self.drafts:
             packed = self.drafts.popleft()
+            if isinstance(packed, Page):
+                pages.append(packed)
+                continue
             try:
                 built, tags = _complete(_unpack(packed))
             except Exception as exc:  # noqa: BLE001 - a layer page never fails the paper
-                self.errors[f"harvest:{packed.page.index}"] = _error_text(exc)
+                key = f"harvest:{packed.page.index}"
+                self.errors[key] = _error_text(exc)
+                packed.page.cols = None
+                packed.page.error = self.errors[key]
+                pages.append(packed.page)
                 continue
             pages.append(built)
             roles.extend(tags)
-        has_mcids = None
-        if "FPDFPageObj_GetMarkedContentID" not in self.missing:
-            has_mcids = any(
-                page.cols is not None and bool((page.cols.obj_mcid >= 0).any()) for page in pages
-            )
+        read = [page for page in pages if page.error is None]
+        # Unknown, not absent, while a page that could not be read might hold it.
+        unknown = None if len(read) < len(pages) or not pages else False
+
+        def seen(found: bool) -> bool | None:
+            return True if found else unknown
+
+        native = seen(any(page.text_source == "native" for page in read))
+        mcids = any(
+            page.cols is not None and bool((page.cols.obj_mcid >= 0).any()) for page in read
+        )
         presence = Presence(
-            has_text_layer=any(page.cols is not None for page in pages) if pages else None,
-            is_scan=(not any(page.text_source == "native" for page in pages)) if pages else None,
-            has_invisible_layer=(
-                any(page.text_source == "invisible_layer" for page in pages) if pages else None
-            ),
-            has_mcids=has_mcids if pages else None,
+            has_text_layer=seen(any(page.cols is not None for page in read)),
+            is_scan=None if native is None else not native,
+            has_invisible_layer=seen(any(page.text_source == "invisible_layer" for page in read)),
+            has_mcids=None if "FPDFPageObj_GetMarkedContentID" in self.missing else seen(mcids),
             missing_apis=self.missing,
         )
         return DocumentLayer(
@@ -1006,6 +1024,21 @@ class LayerBuilder:
             presence=presence,
             component_errors=dict(self.errors),
         )
+
+
+def _unread_page(page_index: int, reason: str) -> Page:
+    """A page the harvest failed on before reading its text layer."""
+    return Page(
+        index=page_index,
+        label=None,
+        width=_NAN,
+        height=_NAN,
+        crop_box=_NAN_BOX,
+        rotation=0,
+        text_source="unread",
+        cols=None,
+        error=reason,
+    )
 
 
 def build_document_layer(
@@ -1035,7 +1068,7 @@ def build_document_layer(
                 try:
                     page = doc[page_index]
                 except Exception as exc:  # noqa: BLE001
-                    builder.error(f"page:{page_index}", exc)
+                    builder.page_failed(page_index, f"page:{page_index}", exc)
                     continue
                 try:
                     crop_box = nt._page_crop_box(page)
@@ -1059,7 +1092,7 @@ def build_document_layer(
                     finally:
                         textpage.close()
                 except Exception as exc:  # noqa: BLE001
-                    builder.error(f"page:{page_index}", exc)
+                    builder.page_failed(page_index, f"page:{page_index}", exc)
                 finally:
                     page.close()
         finally:

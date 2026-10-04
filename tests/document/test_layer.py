@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 from copy import deepcopy
 
 import numpy as np
@@ -130,7 +131,72 @@ def test_a_harvest_failure_stays_in_the_layer(monkeypatch):
     text_pages = [i for i, source in enumerate(_pdfs.SYNTHETIC_TEXT_SOURCES) if source != "ocr"]
     assert sorted(errors) == sorted(f"harvest:{i}" for i in text_pages)
     assert all(value == "RuntimeError: objects unreadable" for value in errors.values())
-    assert [page.index for page in on.document.pages] == [5]
+    # Every page stays; the failed ones are unread and say why.
+    pages = on.document.pages
+    assert [page.index for page in pages] == list(range(len(_pdfs.SYNTHETIC_TEXT_SOURCES)))
+    for page in pages:
+        if page.index in text_pages:
+            assert page.text_source == "unread"
+            assert page.cols is None
+            assert page.error == "RuntimeError: objects unreadable"
+            assert math.isnan(page.width)
+        else:
+            assert page.text_source == "ocr"
+            assert page.error is None
+    # What no read page shows is unknown, not absent.
+    presence = on.document.presence
+    assert presence.has_text_layer is None
+    assert presence.is_scan is None
+    assert presence.has_invisible_layer is None
+    assert presence.has_mcids is None
+
+
+def test_a_page_that_fails_after_its_read_keeps_what_was_read(monkeypatch):
+    pdf_bytes = _pdfs.synthetic_paper()
+    whole = _inspect(pdf_bytes, layer=True).document
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("no spans")
+
+    monkeypatch.setattr(harvest, "_spans_and_lines", broken)
+    layer = _inspect(pdf_bytes, layer=True).document
+
+    assert [page.index for page in layer.pages] == [page.index for page in whole.pages]
+    for page, read in zip(layer.pages, whole.pages, strict=True):
+        assert page.text_source == read.text_source
+        assert page.text_source_decided == read.text_source_decided
+        assert (page.width, page.crop_box, page.furniture) == (
+            read.width,
+            read.crop_box,
+            read.furniture,
+        )
+        assert page.cols is None
+        failed = read.cols is not None
+        assert page.error == ("RuntimeError: no spans" if failed else None)
+        assert (f"harvest:{page.index}" in layer.component_errors) is failed
+
+
+def test_a_page_the_rebuild_cannot_open_is_kept_once():
+    pdf_bytes = _pdfs.synthetic_paper()
+    builder = harvest.LayerBuilder(pdf_bytes, _BUDGET)
+    builder.page_failed(7, "page:7", RuntimeError("first"))
+    builder.page_failed(7, "other:7", RuntimeError("second"))
+    layer = builder.finish()
+
+    assert [(page.index, page.text_source, page.error) for page in layer.pages] == [
+        (7, "unread", "RuntimeError: first")
+    ]
+    assert layer.component_errors == {
+        "page:7": "RuntimeError: first",
+        "other:7": "RuntimeError: second",
+    }
+
+    rebuilt = build_document_layer(pdf_bytes, [0, 99], budget=_BUDGET)
+    assert [page.index for page in rebuilt.pages] == [0, 99]
+    assert rebuilt.page(99).text_source == "unread"
+    assert rebuilt.page(99).error == rebuilt.component_errors["page:99"]
+    assert rebuilt.presence.has_text_layer is True
+    assert rebuilt.presence.is_scan is False
 
 
 def test_a_failure_to_finish_the_layer_leaves_the_inspection(monkeypatch):
