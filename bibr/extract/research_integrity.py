@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from typing import TYPE_CHECKING
 
 from bibr.exceptions import ProcessingError
@@ -162,9 +163,31 @@ def _apply_contributions(
     return added
 
 
+def affiliation_key(text: str) -> str:
+    """Comparison form of an affiliation string.
+
+    Accents, case, "&" versus "and", spacing and punctuation are folded away,
+    so the same printed institution compares equal whether it was copied with
+    its line breaks ("...London,\r\nLondonUK") or cleaned ("...London, UK").
+    Word characters of every script are kept.
+    """
+    folded = unicodedata.normalize("NFKD", text or "")
+    folded = "".join(ch for ch in folded if not unicodedata.combining(ch)).casefold()
+    return re.sub(r"[\W_]+", "", folded.replace("&", " and "))
+
+
+def _separator_count(text: str) -> int:
+    return len(re.findall(r"[\W_]", text))
+
+
 def collect_affiliations(authors: list[PaperAuthor]) -> tuple[list[str], list[list[int]]]:
-    """Split each author's ``affiliation`` on "; " into verbatim components and
-    dedupe across authors, preserving first-seen order.
+    """Split each author's ``affiliation`` on "; " into components and dedupe
+    across authors, preserving first-seen order.
+
+    Components are whitespace-collapsed and compared by :func:`affiliation_key`,
+    so variants of one institution that differ only in line breaks, spacing,
+    punctuation, accents or "&"/"and" become one row. Of such variants the one
+    with more separators is kept ("London, UK" over "LondonUK").
 
     Returns ``(unique, author_ids)``: ``unique[k]`` is the k-th distinct
     affiliation string, and ``author_ids[k]`` is the ``author_id``s (in author
@@ -176,15 +199,18 @@ def collect_affiliations(authors: list[PaperAuthor]) -> tuple[list[str], list[li
     for author in authors:
         seen_for_author: set[str] = set()
         for raw in author.affiliation.split("; "):
-            comp = raw.strip()
-            if not comp or comp in seen_for_author:
+            comp = " ".join(raw.split())
+            key = affiliation_key(comp)
+            if not key or key in seen_for_author:
                 continue
-            seen_for_author.add(comp)
-            if comp not in index_of:
-                index_of[comp] = len(unique)
+            seen_for_author.add(key)
+            if key not in index_of:
+                index_of[key] = len(unique)
                 unique.append(comp)
                 author_ids.append([])
-            ids = author_ids[index_of[comp]]
+            elif _separator_count(comp) > _separator_count(unique[index_of[key]]):
+                unique[index_of[key]] = comp
+            ids = author_ids[index_of[key]]
             if author.author_id not in ids:
                 ids.append(author.author_id)
     return unique, author_ids
@@ -214,7 +240,9 @@ async def extract_structured_integrity(
     elif integrity_resolution is not None and integrity_resolution.mode in {"shadow", "active"}:
         from bibr.extract.integrity_statements import render_selected_integrity_statement
 
-        funding_text = render_selected_integrity_statement(
+        # funding[] is parsed from the exported statement, so the two agree;
+        # the bounded selection is the fallback when nothing was exported.
+        funding_text = metadata.funding_statement or render_selected_integrity_statement(
             contents,
             integrity_resolution,
             "funding_statement",
@@ -225,11 +253,7 @@ async def extract_structured_integrity(
             integrity_resolution.candidates[index].method == "legacy_section_copy"
             for index in legacy_indices
         )
-        funding_text = (
-            dict(integrity_resolution.legacy_statement_snapshots).get("funding_statement")
-            if canonical_legacy
-            else None
-        )
+        funding_text = metadata.funding_statement if canonical_legacy else None
     contributions_text = _text_for_type(contents, text_map, CanonicalSection.AUTHOR_CONTRIBUTIONS)
     unique_affils, affil_author_ids = collect_affiliations(metadata.authors)
     if not funding_text and not contributions_text and not unique_affils:

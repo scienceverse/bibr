@@ -20,6 +20,7 @@ from bibr.structure.text_repair import (
     bbox_to_tuple,
     collapse_numbered_prefix_spaces,
     repair_heading_artifacts,
+    strip_heading_watermark_text,
     strip_markdown_emphasis,
 )
 from bibr.utils.text import normalize_text
@@ -64,13 +65,47 @@ _HINT_REUSE_ALIASES: dict[str, frozenset[str]] = {
             "cited literature",
             "works cited",
             "bibliography",
+            # The reference list's name in other languages ("BIBLIOGRAFIA",
+            # "Literaturverzeichnis"); without them the printed heading stood
+            # empty beside the synthetic "References" holding the entries.
+            "bibliografi",
+            "bibliografia",
+            "bibliografía",
+            "bibliographie",
+            "daftar pustaka",
+            "kaynakça",
+            "literatur",
+            "literatura",
+            "literaturverzeichnis",
+            "literatuur",
+            "literatuurlijst",
+            "referencias",
+            "referencias bibliográficas",
+            "referências",
+            "referências bibliográficas",
+            "références",
+            "riferimenti bibliografici",
+            "литература",
+            "список литературы",
+            "список використаних джерел",
+            "参考文献",
+            "참고문헌",
         }
     ),
 }
 # A printed heading directly before a front-page abstract region may also
 # read "Summary" (Lancet style); a "Summary" after the abstract region (a
-# discussion subsection, a lay summary box) is its own section.
+# discussion subsection, a lay summary box) is its own section. Abstract
+# names in other languages ("RIASSUNTO", "Resumen") do not take the region:
+# on papers whose layout labels body regions as abstract, the printed heading
+# then pulled body text into the front matter and split the metadata record.
+# The empty printed twin is resolved after parsing instead.
 _FRONT_ABSTRACT_HEADING_ALIASES = frozenset({"abstract", "summary"})
+# What a reference entry carries and a back-matter paragraph usually does not:
+# a year, "et al." or a DOI.
+_REFERENCE_ENTRY_SIGNAL_RE = re.compile(
+    r"(?<!\d)(?:1[5-9]\d\d|20\d\d)(?!\d)|\bet al\b|\bdoi\b", re.IGNORECASE
+)
 _HINT_ALIAS_PUNCT_RE = re.compile(r"[^\w\s]")
 
 
@@ -113,6 +148,47 @@ _REF_LEADIN_RE = re.compile(r"^[A-Z][\w'’\-]+\s*(?:\[\d{4}\]|\(\d{4}\))\s*[:.]
 # JOURNAL OF ...", a URL, an ISSN) is not the start of a split title, so the
 # next doc_title region is not appended to it.
 _SPLIT_TITLE_MASTHEAD_RE = re.compile(r"\bjournal\b|https?://|www\.|\bISSN\b", re.IGNORECASE)
+
+# Nor is an article-type kicker the layout model labelled ``doc_title`` above
+# the title ("Retraction" over "Retracted: …", "ARTICLES" on an old scan,
+# "Original Article"): the next doc_title region is the title, and the kicker
+# stays out of it.
+_TITLE_KICKER_RE = re.compile(
+    r"(?:articles?|retraction(?:\s+notice)?|retracted\s+article|errat(?:um|a)|corrigendum"
+    r"|correction|expression\s+of\s+concern|editorial|commentary|perspectives?|letters?"
+    r"|review(?:\s+article)?|research(?:\s+(?:article|paper|letter|report))?"
+    r"|original(?:\s+(?:article|research|paper|investigation))?"
+    r"|(?:brief|short)\s+(?:report|communication)|case\s+report|news\s*(?:&|and)\s*views)",
+    re.IGNORECASE,
+)
+
+
+def _is_title_kicker(text: str) -> bool:
+    """Whether a captured page-1 title is only an article-type kicker."""
+    return bool(_TITLE_KICKER_RE.fullmatch(" ".join(text.split()).strip(" .:")))
+
+
+# A notice kicker ("Erratum", "Retraction", "Expression of Concern") may be the
+# notice's own title, the notice signal ``_apply_correction_notice_guard`` and
+# the model read. It gives way only to a title that is a notice too
+# ("Retraction" over "Retracted: …"); over any other doc_title it stays the
+# start of the title, as before.
+_NOTICE_KICKER_RE = re.compile(
+    r"retract|errat|corrigend|correction|expression\s+of\s+concern", re.IGNORECASE
+)
+_NOTICE_TITLE_RE = re.compile(
+    r"\W*(?:retracted|retraction|withdrawn|erratum|errata|corrigendum|correction"
+    r"|expression\s+of\s+concern|notice\s+of)\b",
+    re.IGNORECASE,
+)
+
+
+def _kicker_gives_way_to(kicker: str, title: str) -> bool:
+    """Whether a captured kicker gives way to the doc_title *title* after it."""
+    if _SPLIT_TITLE_MASTHEAD_RE.search(title):
+        return False
+    return not _NOTICE_KICKER_RE.search(kicker) or bool(_NOTICE_TITLE_RE.match(title))
+
 
 # A byline the layout model labelled ``doc_title`` ("ADRIAN LARNER" under an
 # all-caps title on an old scan) is not a title continuation: joined into the
@@ -212,6 +288,9 @@ class HeadingHandlersMixin:
     _title_bbox: list | tuple | None
     _title_page: int | None
     _title_assembler_len: int
+    # Reading-order positions of printed references headings, computed on
+    # first use by ``_printed_reference_heading_positions``.
+    _reference_heading_positions: list[int] | None = None
 
     def _handle_structural(self, label: str, content: str) -> None:
         """Record headers/footers as metadata."""
@@ -242,6 +321,9 @@ class HeadingHandlersMixin:
         # Normalize Markdown-wrapped headings emitted by OCR (e.g.
         # "**References**" → "References") before hint-section deduplication.
         text = strip_markdown_emphasis(text)
+        # Watermark letters, gutter line numbers, letter spacing and
+        # overprinted repeats caught inside the heading box (see text_repair).
+        text = strip_heading_watermark_text(text)
         text = repair_heading_artifacts(text)
         if not text:
             return
@@ -298,6 +380,43 @@ class HeadingHandlersMixin:
             self._detected_title = text
             logger.debug("Detected doc_title on page 1: %s", self._detected_title[:80])
             captured_title = True
+
+        # A captured title that is only a kicker gives way to the next
+        # front-page doc_title, which is the title: still on the title
+        # section, nothing emitted since, vertically adjacent, and the new
+        # region is no masthead, byline or copyright notice, nor (under a
+        # notice kicker) a title that is not itself a notice. The title
+        # section takes its text, box and page.
+        if (
+            label == "doc_title"
+            and not captured_title
+            and self._is_front_page(page_number)
+            and self._detected_title is not None
+            and _is_title_kicker(self._detected_title)
+            and _kicker_gives_way_to(self._detected_title, text)
+            and self._title_section_id is not None
+            and self._current_section_id == self._title_section_id
+            and len(self.assembler) == self._title_assembler_len
+            and self._title_bbox is not None
+            and self._is_bbox_nearby(self._title_bbox, self._title_page, bbox, page_number)
+            and not self._is_byline_continuation(text)
+            and not self._is_copyright_notice(text)
+        ):
+            kicker = self._detected_title
+            self._detected_title = _TITLE_BADGE_GLYPH_RE.sub("", text)
+            for section in self.sections:
+                if section.section_id == self._title_section_id:
+                    section.header = self._detected_title
+                    section.provenance = [Provenance(page_no=page_number, bbox=bbox_to_tuple(bbox))]
+                    break
+            self._title_bbox = bbox_to_tuple(bbox)
+            self._title_page = page_number
+            logger.debug(
+                "Title kicker %r gave way to doc_title on page 1: %s",
+                kicker,
+                self._detected_title[:80],
+            )
+            return
 
         # A front-page title split across doc_title regions continues the
         # title instead of opening a stray level-1 section: still on the
@@ -524,6 +643,14 @@ class HeadingHandlersMixin:
                     )
                 return
 
+        if hint_name == "References" and self._reference_region_is_section_text(content):
+            text = content.strip()
+            if text:
+                self._handle_content(
+                    text, page_number, bbox, region_meta=region_meta, from_ocr=from_ocr
+                )
+            return
+
         # Explicit Endnotes/Footnotes headings own their rows; layout hints must not create an
         # early References section that captures the later printed heading.
         if (
@@ -647,6 +774,63 @@ class HeadingHandlersMixin:
                 self._handle_content(
                     text, page_number, bbox, region_meta=region_meta, from_ocr=from_ocr
                 )
+
+    def _printed_reference_heading_positions(self) -> list[int]:
+        """Reading-order positions of the printed references headings.
+
+        A position counts regions in dispatch order, as
+        ``_source_region_index`` does. Running heads are left out.
+        """
+        if self._reference_heading_positions is None:
+            positions: list[int] = []
+            position = 0
+            reference_names = _HINT_REUSE_ALIASES["references"]
+            for page_idx, regions in enumerate(self.json_result):
+                for region_idx, region in enumerate(regions):
+                    if (region.native_label or region.label) in _HEADING_LEVELS and (
+                        page_idx,
+                        region_idx,
+                    ) not in self._running_header_regions:
+                        text = re.sub(r"^#{1,6}\s*", "", (region.content or "").strip())
+                        if _hint_alias_key(strip_markdown_emphasis(text)) in reference_names:
+                            positions.append(position)
+                    position += 1
+            self._reference_heading_positions = positions
+        return self._reference_heading_positions
+
+    def _reference_region_is_section_text(self, content: str) -> bool:
+        """Whether a ``reference`` region is prose of the printed section it follows.
+
+        The layout model sometimes labels a back-matter paragraph
+        ``reference`` (a Lancet "Contributors" statement). Opening the
+        References section there made the paragraph a bibliography entry,
+        moved the reference list ahead of the remaining back matter and left
+        the printed heading empty. The region stays in the current section
+        when no reference hint section exists yet, the current section opened
+        at a printed heading that does not name the references, a printed
+        references heading follows later in reading order, and the text has
+        no year, "et al." or DOI that a reference entry would carry.
+        """
+        if "References" in self._created_hint_sections:
+            return False
+        current_id = self._current_section_id
+        if not current_id or current_id in self._hint_section_ids:
+            return False
+        if _REFERENCE_ENTRY_SIGNAL_RE.search(content):
+            return False
+        current = next(
+            (section for section in reversed(self.sections) if section.section_id == current_id),
+            None,
+        )
+        if current is None or current.level <= 0 or current.header_is_synthetic:
+            return False
+        from bibr.structure.section_classifier import _classify_lookup
+
+        current_type, _score = _classify_lookup(normalize_text(current.header))
+        if current_type == CanonicalSection.REFERENCES:
+            return False
+        here = self._source_region_index
+        return any(position > here for position in self._printed_reference_heading_positions())
 
     def _promotable_content_heading(self, text: str, region_meta: dict | None = None) -> str | None:
         """Return repaired heading text when a body row is a trusted section.

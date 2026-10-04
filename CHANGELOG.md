@@ -16,6 +16,241 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   corresponding only when a "Corresponding author" or "Correspondence" phrase opens the
   sentence or one of the three before it, the phrase is plural or the footnote prints a
   single pair, and no other author is already flagged. No prompt or LLM input changes.
+- Section levels and parents follow the paper's numbering and the order of
+  its headings: "3 Results" is a top-level section, "3.2" sits under "3",
+  Roman-numbered and "Chapter N" parts are recognised, and a subsection stays
+  in the part where it is printed instead of folding back under an earlier
+  heading of the same type ("2.1" under "2 Study 1", never under another
+  part). Back matter after the body sits at the top level, statements
+  printed under "Declarations" are its subsections, headings set in
+  capitals at two levels nest, and a general discussion after "Part 1" /
+  "Part 2" is not inside the last part (#119).
+- Subsections take the type of the numbered or named part they are printed
+  in (untyped subsections of an untyped "Study 1" scope follow the sibling
+  printed before them; a results or discussion guess under an introduction
+  or methods part keeps its type), the
+  introduction guesses in the body of a review or commentary with no methods
+  or results heading are typed discussion (setting
+  `PIPELINE_NON_IMRAD_BODY_AS_DISCUSSION`, on by default; not for systematic
+  or scoping reviews and meta-analyses), and body headings are no longer
+  typed as the paper title: the title-typed heading that matches the
+  extracted title best keeps that type (a short title included) and a
+  masthead before it loses it (#120).
+- Declaration blocks ("Declarations", "Contributors", "Consent for
+  publication", "Availability of data and materials") and box headings
+  ("Research in context", "Clinical Perspective", "What this study adds") get
+  the right type or none, conclusions-and-outlook headings are typed
+  discussion instead of endnotes, and non-English headings such as
+  "Riassunto", "Bibliografia" and "Literatuur" are recognised (#121).
+- Cover-sheet labels ("Posted Date", "Word count", "Running title",
+  "Manuscript Number", "Corresponding author") no longer become typed
+  sections, and section headings lose watermark letters (a trailing letter
+  only under a heading in capitals), gutter line numbers,
+  overprinted repeats and letter spacing ("A B S T R A C T") (#123).
+- A paper no longer exports two references sections when its references
+  heading is not in English or a back-matter block sits before the reference
+  list, and the implicit introduction stops at the next printed heading
+  instead of swallowing a case report (#124, #108).
+- A structured abstract whose "Background", "Methods", "Results" and
+  "Conclusions" subheadings are printed as separate rows keeps all its parts
+  (#125).
+- Affiliations no longer gain fake rows from a ";" printed inside one affiliation
+  ("..., Cambridge, MA, USA; Basel, Switzerland" stays one affiliation, and a
+  list's "; and" no longer becomes an affiliation called "and"). Affiliation
+  text loses line breaks, printed markers, e-mail and telephone tails, the
+  "Full list of author information is available ..." pointer and trailing
+  punctuation, and one institution no longer appears twice because of spacing,
+  punctuation, accent or "&"/"and" differences (#114).
+- An affiliation whose institution is printed nowhere in the paper is no longer
+  exported. When the affiliations were outside the text the model saw, it could
+  fill them in from general knowledge (a university the paper never names);
+  such a part is now dropped, an unprinted institution added to a printed one is
+  removed, and a `VAL_AFFILIATION_UNGROUNDED` warning lists what was dropped
+  (#115). Common abbreviations ("Dept.", "Univ.", "Inst.", ...) count as
+  printed in either form.
+- Numbered affiliations are matched for authors whose byline prints symbols,
+  degrees or a stray comma before the number ("Name#*1", "Name MSci1,2",
+  "Name ,1,2,3"), whose name the model wrote without a printed period, or whose
+  name has an abbreviated part ("Kristen St. John", "J.-P. Martin"), and
+  affiliation lists printed at the end of the article (BMC, Springer) are read
+  for the numbers page 1 does not define, when the list was filed under
+  acknowledgments, funding, competing interests, ethics or data availability
+  rather than author information and each line opens with its number (#116).
+  Contact details ("Correspondence: Jane Doe ,2 Main Street",
+  "jane.doe2@...") are never read as a byline marker.
+- A byline's group tail that the model returned as a person ("..., for the
+  ABC/1234 Study Collaborators" as a person named "ABC/1234") becomes a
+  group author named as printed, and a group the model returned correctly
+  as an organisation is no longer dropped when its name ends in
+  "Collaborators", "Contributors" or "Trialists" (#118).
+- A numbered affiliation list whose markers are glued to the institution
+  ("1 Institute of ..., 2University of ..., 3Example Tech") no longer gives
+  every author the first institution plus the rest of the line; each glued
+  number now ends the previous definition, and a definition that still runs
+  into another one is not used (#107).
+- Affiliations printed as a first-page footnote now reach the model that reads
+  the authors, as a labelled block after the author context (copyright,
+  publication-history, licence and correspondence footnotes excluded, at most
+  2,000 characters). Papers whose only affiliation list was such a footnote
+  came back with every affiliation empty (#117).
+- Diagonal watermarks ("For Review Only", review disclaimers, "RETRACTED",
+  "ARTICLE IN PRESS") no longer leak stray letters into abstracts, headings,
+  statements, author lines and references, no longer inflate region font
+  sizes, and no longer make the text layer break lines inside words
+  ("Buyer -Supplier"). Large off-axis text is removed before the PDF's text
+  layer is read; the removed strings are kept in the page inspection (#111).
+- Word spaces that went missing ("arterialand", "SeeOnline/Comment") and line
+  breaks inserted in the middle of a line ("Buyer -Supplier", a break before
+  ", are") when a PDF draws each glyph or word group as its own object are
+  repaired from the glyph positions. Printed spaces and line breaks,
+  superscripts and letter-spaced headings are left as they are, and no space
+  is put into a URL, DOI or e-mail address (#142).
+- A heading in the middle of a later page that the layout model labels as a
+  document title, such as a sidebar or box heading ("When No Default Is Your
+  Best Option"), is no longer dropped as a running head, so the sidebar no
+  longer merges into the section around it. A later-page title in the top or
+  bottom margin, one repeated on other pages, a copyright line, the title
+  printed again behind a cover sheet and a title that heads its own abstract,
+  keywords or byline (the title in a second language) are still dropped, so
+  such a title does not open a second front-matter record (part of #122).
+- A preprint banner longer than 200 characters that repeats in the top or
+  bottom margin of several pages, such as the medRxiv rights, licence and DOI
+  lines, is now dropped as page furniture. Copies the layout model labelled
+  as text used to land in the body, the figure legends and the references
+  (#112).
+- Line numbers printed in the margin of a submitted manuscript no longer end
+  up in headings, paragraphs and references ("38 References", "668
+  References"). A rising column of bare numbers in the outer margin, aligned
+  on one edge and set one per text line, is removed before the PDF's text
+  layer is read when the document numbers its lines on at least two pages
+  and on 40% of its pages with text. Numbered reference lists, numbers set
+  against their text, such as row ids, and a numbered list or table on a few
+  pages of a longer document are kept (#113).
+- Accented letters that a PDF draws as a letter plus a separate spacing
+  accent no longer come out split in names, titles and references
+  ("Bas¸kaya", "Brˇci´c", "Ca´rcel"). An accent set over or under a
+  neighbouring letter in the PDF's text layer is now composed with it
+  ("Başkaya", "Brčić", "Cárcel", "Peña", "Côté"); an accent between two
+  letters, typed for an apostrophe, is left as it is (part of #138).
+- A figure or table caption is no longer lost when a figure or table on the
+  previous page scores higher for it: captions are matched only to figures and
+  tables on their own page, which is the only match the parser ever kept (#133).
+- A multi-panel figure is exported as one figure instead of one object per
+  panel: panel boxes inside a whole-figure box are dropped as duplicates, the
+  panels printed around one numbered caption are grouped under it, and panel
+  letters inside the group no longer take the figure's caption. Figures printed
+  with their own captions side by side or stacked stay separate, and a badge or
+  icon on a page without captions no longer shifts the figure numbers captions
+  are matched by. Figures with their captions printed above them keep their own
+  captions, a Scheme or Box beside a figure keeps its own float, and printed
+  figure numbers are compared with each page's offset, so a figure the paper
+  does not number no longer swaps the captions of the figures after it (#132).
+- A caption the layout split in two (a two-column caption under a full-width
+  figure, or a bare "FIGURE 1" label above its title line) is joined, so its
+  second half no longer ends up in the body text or the footnotes (#134).
+- A table that continues at the top of the next page, or in a second block
+  directly under the first, without repeating its caption is merged into the
+  captioned table instead of being exported as a separate uncaptioned table (#135).
+- Small caption fixes: a full "Table 1: …" caption the layout read as a note
+  now captions its table; "Sup. Fig. NAME", "Sup. Table 1" and "Fig.2" are
+  read as labels; a caption that opens with "Table" never captions a figure;
+  and licence or open-access icons on later pages are no longer exported as
+  figures (#136).
+- Funding, conflict-of-interest, ethics and data-availability statements no
+  longer keep raw PDF line breaks, and they end where the statement ends: a
+  following thanks sentence, the next label ("Grant information:",
+  "Copyright: ©"), a licence block or a preprint sidebar is no longer appended,
+  a statement section that holds only a licence is no longer exported, and a
+  long chapter typed as a statement section (a thesis's "Ethical Procedures")
+  is no longer copied whole. A sentence that only mentions copyright, a
+  licence or a publisher ("Due to copyright restrictions, the stimuli cannot
+  be shared.") is kept whole. A phrase split by a line break ("supported
+  by") is now found. (#127)
+- Prose that only mentions a statement topic is no longer exported as the
+  statement: "supported by" followed only by an acronym ("supported by the
+  base AR model") is not funding, a sentence about avoiding conflicts of
+  interest is not a conflict-of-interest declaration, informed consent named
+  as a topic is not an ethics statement, "financial support" or "data
+  availability" inside a sentence about something else is not a statement,
+  and a "Role of the funding source"
+  section, an essay section titled like ethics ("Time Discounting: An Ethical
+  Problem") or an AI-tool disclosure is no longer copied into the funding or
+  ethics statement. (#128)
+- The structured funder list (`funding[]`) is now parsed from the exported
+  funding statement. It was parsed from different text, so it was often empty
+  while the statement named a funder, or listed funders from another
+  paragraph. (#130)
+- A labelled statement printed after the reference list ("Conflict of
+  interest statement: …" on the last page) is now found, and a one-line
+  statement that the layout model merged into its heading ("Disclosure and
+  competing interests statement The authors declare no competing interests.")
+  is recovered from the heading. (#129)
+- A statement joined from several sections now keeps each section's heading
+  ("Materials availability: Not applicable."), so parts such as "Not
+  applicable." keep their meaning, and a section under a standard statement
+  heading ("Ethics approval and consent to participate") is exported even
+  when the section model typed it as something else, such as an endnote.
+  (#131)
+- Exports no longer carry a `VAL_STATEMENT_SUSPECT` warning. It compared
+  two internal statement resolvers, said nothing about the paper, and fired on
+  many papers; it is now a debug log message. (#146)
+- References in the F1000Research / Open Research style ("Surname AB: Title")
+  and entries with hyphenated initials ("Barabási A-L") are recognised as
+  separate entries, so consecutive single-author entries no longer merge
+  into one (#137).
+- An IEEE-style "[n]" entry glued to the one before it is split off again,
+  and splitting a merged reference no longer creates a second copy of an
+  entry that was already extracted on its own (#137).
+- Reference fields are cleaner: the last author keeps a single initial
+  ("Newnham M", not "Newnham"), a colon closing the author list is dropped,
+  a title no longer ends in its closing quote, a short quoted title right
+  after the authors is kept as the title, "Surname, I. et al." tagged as a
+  title becomes the authors, and a list number before a name particle
+  ("11 van Nieuwenhuizen D") stays out of the authors (#138).
+- A bibliography entry no longer carries the paper's own DOI, which a
+  repeated preprint banner or a "cite this article" line inside the
+  reference list used to attach to it (#139).
+- On a PDF whose text layer was read but whose References header was not
+  recognised (a line-numbered manuscript's "668 References"), the reference
+  segmentation warning now says that, instead of calling the PDF a DOCX or
+  non-native input (#140).
+- On a watermarked review copy, a reference entry is no longer extracted
+  twice when a few words of the diagonal stamp land in the entry's own
+  layout box (#140).
+- When a paper's notes stand in for its reference list, a single-author
+  note in the old Nature/Science style ("Surname, I. Journal 81, 286-300
+  (1981).") is now kept as a reference (#146).
+- The DOI is no longer left empty when the article's own citation block names it a few
+  sentences after "How to cite this article" (version 2 and later of F1000-family
+  articles, which also print the version 1 DOI), when a "Citation:" line in the front
+  matter names it, or
+  when the first page prints it next to a linked article's DOI while the running footer
+  repeats only the article's own (#141).
+- The abstract no longer keeps the printed line breaks of the PDF when the model copies
+  them (the default model often does): a line break inside a paragraph becomes one
+  space, while a blank line between paragraphs and a break before a list item stay
+  (#144).
+- `VAL_ABSTRACT_MISSING` no longer warns on an essay or commentary that prints no
+  abstract when the model found none and the only abstract section is the layout's
+  unlabelled opening column (#144).
+- An article-type kicker printed above the title ("Retraction", "ARTICLES", "Original
+  Article") is no longer taken as the title when the layout labels both as the title:
+  the title that follows it is used (#143).
+- A title that starts with "A " ("A genetic pathway for …") is no longer re-typed as a
+  lettered appendix when page 1 opens with the end of the previous article and its
+  reference list; the paper's byline and front matter stayed out of the extraction
+  (#143).
+- Keywords printed as first-page footnotes (a "Key words" label over one keyword per
+  line, as in some Elsevier journals) now reach the title and keywords call; before,
+  footnote rows never joined the front matter and the keywords came back empty (#144).
+- `bibr serve`: a client that gives up on a job can now cancel it. `DELETE
+  /papers/jobs/{id}` fails a job that is still queued (`error_code`
+  `job_cancelled`), frees its place under `JOBS_MAX_ACTIVE` and deletes its
+  upload; a job that is already running answers `409` for now (#145).
+- `bibr serve`: with `JOBS_DEDUPE_INFLIGHT=true`, uploading the same file under
+  the same name with the same options while that paper is still queued or running returns the
+  existing job instead of running the paper twice. Off by default, because every
+  caller of a serve shares one API key (#145).
 
 ## [0.6.0] - 2026-09-30
 

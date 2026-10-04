@@ -423,15 +423,26 @@ def _header_key(label: object) -> str:
 
 def _concat_continuation(survivor: PaperTable, continuation: PaperTable) -> bool:
     """Append *continuation*'s rows to *survivor*; False when shapes differ."""
-    s_df, c_df = survivor.df, continuation.df
-    if len(s_df.columns) != len(c_df.columns):
+    merged = continuation_frame(survivor.df, continuation.df)
+    if merged is None:
         logger.debug(
             "table continuation on page %s not merged: %d vs %d columns",
             continuation.page_number,
-            len(c_df.columns),
-            len(s_df.columns),
+            len(continuation.df.columns),
+            len(survivor.df.columns),
         )
         return False
+    survivor.df = merged
+    survivor.tbl_html = f"{survivor.tbl_html}\n{continuation.tbl_html}"
+    survivor.provenance.extend(continuation.provenance)
+    survivor.parts.extend(continuation.parts)
+    return True
+
+
+def continuation_frame(s_df: pd.DataFrame, c_df: pd.DataFrame) -> pd.DataFrame | None:
+    """*s_df* with a continuation part's rows appended; None when the column counts differ."""
+    if len(s_df.columns) != len(c_df.columns):
+        return None
     body = c_df.copy()
     body.columns = s_df.columns
     if [_header_key(c) for c in c_df.columns] == [_header_key(c) for c in s_df.columns]:
@@ -447,8 +458,4 @@ def _concat_continuation(survivor: PaperTable, continuation: PaperTable) -> bool
         # row would lose printed cells.
         header_row = pd.DataFrame([[str(c) for c in c_df.columns]], columns=s_df.columns)
         merged = pd.concat([s_df, header_row, body], ignore_index=True)
-    survivor.df = merged
-    survivor.tbl_html = f"{survivor.tbl_html}\n{continuation.tbl_html}"
-    survivor.provenance.extend(continuation.provenance)
-    survivor.parts.extend(continuation.parts)
-    return True
+    return merged

@@ -204,7 +204,7 @@ def read_pdf_doi_evidence(pdf_bytes: bytes, pages: Iterable[int]) -> PdfDoiEvide
     """
     import pypdfium2
 
-    from bibr.ocr.native_text import _page_crop_box, _page_rotation
+    from bibr.ocr.native_text import _page_crop_box, _page_rotation, open_text_page
     from bibr.ocr.pdf_links import doi_from_uri, page_uri_links
     from bibr.ocr.utils import pdfium_lock
 
@@ -223,7 +223,7 @@ def read_pdf_doi_evidence(pdf_bytes: bytes, pages: Iterable[int]) -> PdfDoiEvide
                     continue
                 page = document[page_number - 1]
                 try:
-                    textpage = page.get_textpage()
+                    textpage = open_text_page(page)
                     try:
                         records = _printed_char_records(textpage)
                     finally:

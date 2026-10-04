@@ -24,8 +24,8 @@ FIGURE_WORD = r"(?:Figures?|Figs?\.?)"
 TABLE_WORD = r"(?:Tables?|Tab\.?|Tbl\.?)"
 _WORDS: dict[str, str] = {"figure": FIGURE_WORD, "table": TABLE_WORD}
 
-# "Supplementary Table 4", "Supplemental Figure 2", "Suppl. Fig. 1".
-SUPPLEMENT_WORD = r"(?:(?:Online\s+)?(?:Supplementa(?:ry|l)\s+|Suppl?\.\s*))"
+# "Supplementary Table 4", "Supplemental Figure 2", "Suppl. Fig. 1", "Sup. Fig. 1".
+SUPPLEMENT_WORD = r"(?:(?:Online\s+)?(?:Supplementa(?:ry|l)\s+|Sup(?:pl?)?\.\s*))"
 
 # One printed label. A numbered label is a number, possibly dotted ("3.1"),
 # with an optional letter prefix ("S2", "S 2", "A1", "A.1", "A-1") and an
@@ -46,9 +46,21 @@ _NOT_A_SUPPLEMENT_OF = (
     r"(?!\s*[—–-]\s*(?-i:(?:figure|table)\s+supplement|source\s+(?:data|code)|video|animation)\b)"
 )
 
+# Preprints name supplementary figures instead of numbering them ("Sup. Fig.
+# PSEUDOTIME", "Sup. Fig. PT - …"). A name is a label only after a supplement
+# word and a singular figure or table word, in capitals, and followed by the
+# caption's separator, its end, or a capitalised title word or panel marker,
+# so an all-capitals heading ("SUPPLEMENTARY TABLE OF CONTENTS") is no label.
+_NAMED_SUPPLEMENT_LABEL = (
+    r"(?-i:(?!(?:AND|OF|FOR|THE|LEGENDS?|CAPTIONS?)\b)[A-Z][A-Z0-9]{1,15})"
+    r"(?=\s*(?:[:.–\-—|]|$)|\s+(?-i:[A-Z][a-z]|\())"
+)
+_SINGULAR_WORDS: dict[str, str] = {"figure": r"(?:Figure|Fig\.?)", "table": r"(?:Table|Tab\.?)"}
+
 _CAPTION_LABEL_RES = {
     kind: re.compile(
-        rf"(?P<supplement>{SUPPLEMENT_WORD})?{word}\s*(?P<label>{LABEL}){_NOT_A_SUPPLEMENT_OF}",
+        rf"(?P<supplement>{SUPPLEMENT_WORD})?{word}\s*(?P<label>{LABEL}){_NOT_A_SUPPLEMENT_OF}"
+        rf"|{SUPPLEMENT_WORD}{_SINGULAR_WORDS[kind]}\s*(?P<named>{_NAMED_SUPPLEMENT_LABEL})",
         re.IGNORECASE,
     )
     for kind, word in _WORDS.items()
@@ -81,14 +93,17 @@ def caption_label(caption: str | None, kind: FloatKind) -> str | None:
     """The label *caption* prints after its figure or table word, or ``None``.
 
     "Table 3.1. Descriptives" → "3.1"; "TABLE IV" → "IV"; "Supplementary Table
-    4" → "S4"; "Figure A1:" → "A1". A caption that opens with the other kind's
-    word ("Table 2" for a figure) has no label of this kind.
+    4" → "S4"; "Figure A1:" → "A1"; "Sup. Fig. PSEUDOTIME" → "PSEUDOTIME". A
+    caption that opens with the other kind's word ("Table 2" for a figure) has
+    no label of this kind.
     """
     if not caption:
         return None
     match = _CAPTION_LABEL_RES[kind].match(caption.strip())
     if match is None:
         return None
+    if match.group("named") is not None:
+        return match.group("named")
     return printed_label(match.group("label"), supplement=bool(match.group("supplement")))
 
 

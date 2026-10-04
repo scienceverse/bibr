@@ -578,6 +578,17 @@ def _apply_boundaries(
 
     # Sort front_matter by text_id for boundary slicing.
     fm_sorted = sorted(front_matter, key=lambda s: s.text_id)
+    # Sections that open at a printed heading already typed: a segment ends
+    # where one starts. The selected front-matter record can reach past such a
+    # heading (a case report's "OSSERVAZIONE PERSONALE" before its first body
+    # anchor), and the implicit Introduction must not take its rows.
+    printed_typed_ids = {
+        section.section_id
+        for section in contents.sections
+        if section.level > 0
+        and not section.header_is_synthetic
+        and section.section_type not in (None, CanonicalSection.UNKNOWN, CanonicalSection.TITLE)
+    }
 
     for i, seg in enumerate(result.segments):
         seg_start = seg.first_text_id
@@ -590,6 +601,13 @@ def _apply_boundaries(
         ]
         if not seg_sentences:
             continue
+        for k, sentence in enumerate(seg_sentences):
+            if (
+                sentence.section_id != seg_sentences[0].section_id
+                and sentence.section_id in printed_typed_ids
+            ):
+                seg_sentences = seg_sentences[:k]
+                break
 
         # "keywords" and "metadata" are left in place — no new section created.
         if seg.section_type in ("keywords", "metadata"):

@@ -73,7 +73,7 @@ from bibr.export.models import (
 from bibr.export.normalize import arxiv_id, credit_roles, iso_date, license_ids
 from bibr.export.spans import SpanLocator, equation_span, url_span, xref_span
 from bibr.export.structure_ids import ExportIds, export_ids
-from bibr.extract.research_integrity import collect_affiliations
+from bibr.extract.research_integrity import affiliation_key, collect_affiliations
 from bibr.models import ORGANIZATION_ROLE, BibType, canonicalize_orcid, migrate_bib_type
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.text import normalize_doi
@@ -330,13 +330,19 @@ def _export_affiliations(paper: Paper) -> list[AffiliationExport]:
     if metadata is None:
         return []
     texts, author_ids = collect_affiliations(metadata.authors)
-    parsed = {a.text: a for a in metadata.affiliations}
+    # Joined on the folded key, the one collect_affiliations dedupes on, so a
+    # parse keyed by a differently spaced copy of the same text still matches.
+    parsed = {affiliation_key(a.text): a for a in metadata.affiliations}
     rows: list[tuple[str, list[int]]] = list(zip(texts, author_ids, strict=True))
-    seen = set(texts)
-    rows.extend((a.text, list(a.author_ids)) for a in metadata.affiliations if a.text not in seen)
+    seen = {affiliation_key(text) for text in texts}
+    rows.extend(
+        (a.text, list(a.author_ids))
+        for a in metadata.affiliations
+        if affiliation_key(a.text) not in seen
+    )
     exported = []
     for position, (text, ids) in enumerate(rows, start=1):
-        parse = parsed.get(text)
+        parse = parsed.get(affiliation_key(text))
         exported.append(
             AffiliationExport(
                 affiliation_id=position,
