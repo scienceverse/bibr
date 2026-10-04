@@ -1069,3 +1069,402 @@ def test_correspondence_used_as_a_label_still_counts(opener):
         authors,
     )
     assert [a.corresponding for a in authors] == [False, True]
+
+
+# --- the page-1 widening and its gate ------------------------------------------------
+
+
+def _harvest_wide(sections, authors, front: int = 1):
+    """Harvest with the first *front* sections as the front-matter block and the rest of
+    page 1 added by the widening (gated), the way the extractor builds it."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    document = _contents_by_section(sections)
+    widened = frozenset(s.text_id for s in document.sentences if s.section_id >= front)
+    AuthorEmailHarvester(document, document=document, widened_text_ids=widened).harvest(authors)
+    return authors
+
+
+def test_widened_sentence_naming_the_author_right_before_the_address_is_assigned():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    _harvest_wide(
+        [
+            ("title", ["Alice Lee, Hui-Kai Tan"]),
+            (
+                "unknown",
+                [
+                    "Correspondence: Hui-Kai Tan, who wrote most of this long paper and answers all mail, hk@example.edu"
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert authors[1].email is None  # the surname is more than 45 characters away
+
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    _harvest_wide(
+        [
+            ("title", ["Alice Lee, Hui-Kai Tan"]),
+            ("unknown", ["Correspondence: Hui-Kai Tan, hk@example.edu"]),
+        ],
+        authors,
+    )
+    assert authors[1].email == "hk@example.edu"
+    assert [a.corresponding for a in authors] == [False, True]
+
+
+@pytest.mark.parametrize(
+    "address",
+    ["hk.tan@example.edu", "tan_hk@example.edu", "hktan@example.edu", "tan@example.edu"],
+)
+def test_widened_address_far_from_the_surname_is_assigned_when_its_local_part_names_one_author(
+    address,
+):
+    """The surname is in the window but more than 45 characters before the address."""
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    _harvest_wide(
+        [
+            ("title", ["Alice Lee, Hui-Kai Tan"]),
+            (
+                "unknown",
+                [
+                    "Hui-Kai Tan.",
+                    f"Please send any mail about this long article and its many files to {address}",
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert authors[1].email == address
+    assert authors[0].email is None
+
+
+def test_widened_address_whose_local_part_fits_two_authors_is_not_assigned():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Mei", "Tan"))
+    _harvest_wide(
+        [
+            ("title", ["Alice Lee, Hui-Kai Tan, Mei Tan"]),
+            (
+                "unknown",
+                [
+                    "Tan.",
+                    "Please send any mail about this long article and its many files to tan@example.edu",
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert [a.email for a in authors] == [None, None, None]
+
+
+def test_widened_address_that_names_nobody_and_follows_no_surname_is_not_assigned():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    far = "Contact for this very long article and its many supplementary files: office@example.edu"
+    _harvest_wide([("title", ["Alice Lee, Hui-Kai Tan"]), ("unknown", [far])], authors)
+    assert [a.email for a in authors] == [None, None]
+    assert not any(a.corresponding for a in authors)
+
+
+def test_widened_shared_surname_is_not_settled_by_author_order():
+    """Two Tans, a bare surname before the address: the first author must not win by default."""
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Mei", "Tan"))
+    _harvest_wide(
+        [
+            ("title", ["Alice Lee, Hui-Kai Tan, Mei Tan"]),
+            ("unknown", ["* Correspondence: Tan, office@example.edu"]),
+        ],
+        authors,
+    )
+    assert [a.email for a in authors] == [None, None, None]
+    assert not any(a.corresponding for a in authors)
+
+
+def test_widened_shared_surname_is_settled_by_the_printed_given_name():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Mei", "Tan"))
+    _harvest_wide(
+        [
+            ("title", ["Alice Lee, Hui-Kai Tan, Mei Tan"]),
+            ("unknown", ["* Correspondence: Mei Tan, office@example.edu"]),
+        ],
+        authors,
+    )
+    assert [a.email for a in authors] == [None, None, "office@example.edu"]
+    assert [a.corresponding for a in authors] == [False, False, True]
+
+
+def test_widened_address_next_to_a_co_first_author_note_is_not_assigned():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    note = "† Alice Lee and Omar Reyes contributed equally to this work. E-mail: lab@example.org"
+    _harvest_wide([("title", ["Alice Lee, Hui-Kai Tan, Omar Reyes"]), ("unknown", [note])], authors)
+    assert [a.email for a in authors] == [None, None, None]
+
+
+def test_the_same_co_first_author_note_inside_the_front_matter_is_not_gated():
+    """The gate is for added sentences only: front-matter behaviour is what it always was."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    note = "† Alice Lee and Omar Reyes contributed equally to this work. E-mail: lab@example.org"
+    document = _contents_by_section([("title", ["Alice Lee, Hui-Kai Tan, Omar Reyes", note])])
+    AuthorEmailHarvester(document, document=document).harvest(authors)
+    assert [a.email for a in authors] != [None, None, None]
+
+
+def test_added_marker_sentence_does_not_change_front_matter_results():
+    """Window-marker flagging in the front matter survives an added sentence that is itself a
+    marker sentence (which would switch the whole pass to strict mode if it were shared)."""
+    front = [
+        "Alice Lee, Hui-Kai Tan",
+        "Corresponding author",
+        "Hui-Kai Tan hk.tan@example.edu",
+    ]
+    plain = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    _harvest_wide([("title", front)], plain, front=1)
+    widened = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    _harvest_wide(
+        [("title", front), ("unknown", ["Correspondence: office@journal.example.org"])],
+        widened,
+        front=1,
+    )
+    assert [(a.email, a.corresponding) for a in widened] == [
+        (a.email, a.corresponding) for a in plain
+    ]
+    assert plain[1].email == "hk.tan@example.edu" and plain[1].corresponding is True
+
+
+def test_widened_pass_only_fills_authors_the_front_matter_left_open():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    authors[1].email = "own@example.edu"
+    _harvest_wide(
+        [
+            ("title", ["Alice Lee, Hui-Kai Tan"]),
+            ("unknown", ["Correspondence: Hui-Kai Tan, hk@example.edu"]),
+        ],
+        authors,
+    )
+    assert authors[1].email == "own@example.edu"
+
+
+def test_gate_evidence_ignores_surnames_before_an_earlier_address():
+    from bibr.extract.author_email_harvester import (
+        _authors_named_before,
+        _index_authors_by_family,
+    )
+
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    index = _index_authors_by_family(authors)
+    text = "Alice Lee lee@tan-lab.example.org, office@example.edu"
+    named = _authors_named_before(text, text.index("office"), index)
+    assert named == set()  # neither the earlier address's domain nor what precedes it counts
+    text = "lee@tan-lab.example.org, Hui-Kai Tan office@example.edu"
+    assert _authors_named_before(text, text.index("office"), index) == {id(authors[1])}
+
+
+def test_widened_pass_with_many_authors_is_fast():
+    import time
+
+    authors = _authors(*[(f"Given{i}", f"Family{i}") for i in range(800)])
+    lines = [f"Given{i} Family{i} contact{i}@example.org" for i in range(0, 800, 8)]
+    started = time.perf_counter()
+    _harvest_wide([("title", ["Byline"]), ("unknown", lines)], authors)
+    assert time.perf_counter() - started < 2.0
+
+
+def test_widened_local_part_with_given_name_and_surname_names_one_author():
+    authors = _authors(("Ingrid", "Lindqvist"), ("Marco", "Rossi"))
+    _harvest_wide(
+        [
+            ("title", ["Ingrid Lindqvist, Marco Rossi"]),
+            (
+                "unknown",
+                [
+                    "Lindqvist.",
+                    "Please send any mail about this long article and its many files to "
+                    "ingridlindqvist@example.edu",
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert [a.email for a in authors] == ["ingridlindqvist@example.edu", None]
+
+
+# --- the contact-block layout (one address per author in the added text) -------------
+
+
+def _harvest_wide_with_header(sections, authors, header: str, front: int = 1):
+    """Like `_harvest_wide`, with *header* as the heading of every added section."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    document = _contents_by_section(sections)
+    for section in document.sections[front:]:
+        section.header = header
+    widened = frozenset(s.text_id for s in document.sentences if s.section_id >= front)
+    AuthorEmailHarvester(document, document=document, widened_text_ids=widened).harvest(authors)
+    return authors
+
+
+_BYLINE = ("title", ["Alice Lee, Hui-Kai Tan, Omar Reyes"])
+
+
+def test_contact_block_footnotes_beside_each_name_do_not_flag_anyone():
+    """Three footnotes, each a name and its own address, and nothing saying who corresponds."""
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest_wide(
+        [
+            _BYLINE,
+            (
+                "footnote",
+                [
+                    "1 Alice Lee, alee@example.org",
+                    "2 Hui-Kai Tan, hk.tan@example.org",
+                    "3 Omar Reyes, oreyes@example.org",
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert [a.email for a in authors] == [
+        "alee@example.org",
+        "hk.tan@example.org",
+        "oreyes@example.org",
+    ]
+    assert [a.corresponding for a in authors] == [False, False, False]
+
+
+def test_a_single_footnote_address_beside_a_name_is_still_flagged():
+    """With only one author's address in the added text there is no layout to confuse."""
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest_wide([_BYLINE, ("footnote", ["2 Hui-Kai Tan, hk.tan@example.org"])], authors)
+    assert [a.corresponding for a in authors] == [False, True, False]
+
+
+def test_a_singular_section_header_over_several_authors_addresses_flags_nobody():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest_wide_with_header(
+        [
+            _BYLINE,
+            (
+                "unknown",
+                [
+                    "Alice Lee: alee@example.org",
+                    "Hui-Kai Tan: hk.tan@example.org",
+                    "Omar Reyes: oreyes@example.org",
+                ],
+            ),
+        ],
+        authors,
+        header="Corresponding author",
+    )
+    assert [a.email for a in authors] == [
+        "alee@example.org",
+        "hk.tan@example.org",
+        "oreyes@example.org",
+    ]
+    assert [a.corresponding for a in authors] == [False, False, False]
+
+
+def test_a_singular_section_header_over_one_authors_address_still_flags_that_author():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest_wide_with_header(
+        [_BYLINE, ("unknown", ["Hui-Kai Tan: hk.tan@example.org"])],
+        authors,
+        header="Corresponding author",
+    )
+    assert [a.corresponding for a in authors] == [False, True, False]
+
+
+def test_a_plural_section_header_over_several_authors_addresses_flags_them_all():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest_wide_with_header(
+        [
+            _BYLINE,
+            ("unknown", ["Alice Lee: alee@example.org", "Hui-Kai Tan: hk.tan@example.org"]),
+        ],
+        authors,
+        header="Corresponding authors",
+    )
+    assert [a.corresponding for a in authors] == [True, True, False]
+
+
+def test_a_marker_in_the_addresss_own_sentence_flags_only_that_author_in_a_contact_block():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest_wide(
+        [
+            _BYLINE,
+            (
+                "unknown",
+                [
+                    "Alice Lee: alee@example.org",
+                    "Hui-Kai Tan (corresponding author): hk.tan@example.org",
+                    "Omar Reyes: oreyes@example.org",
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, True, False]
+
+
+def test_a_plural_marker_in_the_window_flags_every_address_in_a_contact_block():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest_wide(
+        [
+            _BYLINE,
+            (
+                "unknown",
+                [
+                    "Corresponding authors:",
+                    "Alice Lee: alee@example.org",
+                    "Omar Reyes: oreyes@example.org",
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [True, False, True]
+
+
+def test_the_front_matter_flags_its_own_addresses_as_it_always_did():
+    """The contact-block rule is for added sentences only."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    document = _contents_by_section(
+        [
+            (
+                "title",
+                [
+                    "Alice Lee, Hui-Kai Tan, Omar Reyes",
+                    "Correspondence: Hui-Kai Tan, hk.tan@example.org",
+                    "Omar Reyes, oreyes@example.org",
+                ],
+            )
+        ]
+    )
+    AuthorEmailHarvester(document, document=document).harvest(authors)
+    assert authors[1].corresponding is True
+
+
+def test_a_front_matter_flag_survives_an_added_contact_block():
+    """The contact-block rule reads the added sentences only: a flag the front matter sets stays."""
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest_wide(
+        [
+            (
+                "title",
+                [
+                    "Alice Lee, Hui-Kai Tan, Omar Reyes",
+                    "Correspondence: Hui-Kai Tan, hk.tan@example.org",
+                ],
+            ),
+            ("footnote", ["Alice Lee, alee@example.org", "Omar Reyes, oreyes@example.org"]),
+        ],
+        authors,
+    )
+    assert [a.email for a in authors] == [
+        "alee@example.org",
+        "hk.tan@example.org",
+        "oreyes@example.org",
+    ]
+    assert [a.corresponding for a in authors] == [False, True, False]
