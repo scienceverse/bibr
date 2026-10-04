@@ -31,6 +31,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Keywords printed as first-page footnotes (a "Key words" label over one keyword per
   line, as in some Elsevier journals) now reach the title and keywords call; before,
   footnote rows never joined the front matter and the keywords came back empty (#144).
+- `bibr serve`: a client that gives up on a job can now cancel it. `DELETE
+  /papers/jobs/{id}` fails a job that is still queued (`error_code`
+  `job_cancelled`), frees its place under `JOBS_MAX_ACTIVE` and deletes its
+  upload; a job that is already running answers `409` for now (#145).
+- `bibr serve`: with `JOBS_DEDUPE_INFLIGHT=true`, uploading the same file under
+  the same name with the same options while that paper is still queued or running returns the
+  existing job instead of running the paper twice. Off by default, because every
+  caller of a serve shares one API key (#145).
 
 ## [0.6.0] - 2026-09-30
 
