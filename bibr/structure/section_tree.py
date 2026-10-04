@@ -405,8 +405,16 @@ def repair_appendix_hierarchy(sections: list[PaperSection]) -> set[int]:
         references_idx = first_references_idx
 
     # Level-0 sections (title/root) never participate; treat them as gaps that
-    # break an appendix block.
-    infos = [_appendix_head_info(s.header) if s.level > 0 else (None, None) for s in sections]
+    # break an appendix block. Nor does the paper's title section: a title
+    # such as "A genetic pathway for ..." reads as root letter A, and on a
+    # page 1 that opens with the end of the previous article it follows that
+    # article's reference list.
+    infos = [
+        _appendix_head_info(s.header)
+        if s.level > 0 and s.section_type != CanonicalSection.TITLE
+        else (None, None)
+        for s in sections
+    ]
 
     i = 0
     while i < n:
