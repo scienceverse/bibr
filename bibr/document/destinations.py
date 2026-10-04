@@ -12,7 +12,7 @@ Everything here calls pdfium and needs the caller's ``pdfium_lock``.
 from __future__ import annotations
 
 import ctypes
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from bibr.document.harvest import _Api
@@ -31,6 +31,12 @@ MAX_NAMED_DESTS = 100_000
 
 Position = tuple[float | None, float | None]
 
+# What a destination points at is read in a band of the target page: from this many
+# points above the destination's y to this many below it, by the top edge of what lies
+# there (y grows upwards). Tools put a destination a little above its target.
+BAND_ABOVE = 6.0
+BAND_BELOW = 40.0
+
 
 def address(pointer) -> int:
     return ctypes.addressof(pointer.contents)
@@ -45,9 +51,11 @@ def utf16_text(function, *args) -> str | None:
     size = function(*args, None, 0)
     if size <= 0:
         return None
-    buffer = ctypes.create_string_buffer(size)
+    # An array of 16-bit units suits the getters that type their buffer as void*
+    # and those that type it as ushort*.
+    buffer = (ctypes.c_ushort * ((size + 1) // 2))()
     function(*args, buffer, size)
-    return buffer.raw[: max(size - 2, 0)].decode("utf-16-le", "replace")
+    return bytes(buffer)[: max(size - 2, 0)].decode("utf-16-le", "replace")
 
 
 class NamedDests:
@@ -63,6 +71,7 @@ class NamedDests:
         self.count = int(api.FPDF_CountNamedDests(doc.raw))
         self.error: str | None = None
         self._by_address: dict[int, str] | None = None
+        self._by_name: dict[str, Any] = {}
 
     def name_of(self, dest) -> str | None:
         """The name whose destination is *dest* (the first, if several share it)."""
@@ -71,6 +80,17 @@ class NamedDests:
         if self._by_address is None:
             self._by_address = self._read()
         return self._by_address.get(address(dest))
+
+    def dest_of(self, name: str):
+        """The destination the table gives *name*, or None.
+
+        pdfium's own lookup by name searches the name tree and misses names a tree
+        not sorted as it expects holds (a non-ASCII name among them), while the
+        table lists all of them.
+        """
+        if self._by_address is None:
+            self._by_address = self._read()
+        return self._by_name.get(name)
 
     def _read(self) -> dict[int, str]:
         found: dict[int, str] = {}
@@ -90,6 +110,7 @@ class NamedDests:
             if dest:
                 name = buffer.raw[: size.value - 2].decode("utf-16-le", "replace")
                 found.setdefault(address(dest), name)
+                self._by_name.setdefault(name, dest)
         return found
 
 

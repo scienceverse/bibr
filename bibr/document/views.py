@@ -20,7 +20,7 @@ from typing import Any
 
 import numpy as np
 
-from bibr.document import ids
+from bibr.document import destinations, ids
 from bibr.document.model import (
     GLYPH_EXCLUDED,
     GLYPH_HYPHEN,
@@ -249,3 +249,41 @@ def line_text(page: Page, line: int) -> str:
         return ""
     first, end = cols.line_span[line].tolist()
     return "".join(span_text(page, span) for span in range(first, end))
+
+
+def block_at(
+    layer: DocumentLayer, page: int, xy: tuple[float | None, float | None] | None
+) -> Block | None:
+    """The block a destination at *xy* (PDF points, as ``Link.target_xy``) lands in on 0-based *page*.
+
+    The smallest block whose box holds the point; failing that the first block,
+    reading from the top down, whose top edge lies in the band under the
+    point (``destinations.BAND_ABOVE`` points above it to ``BAND_BELOW`` below)
+    and whose box reaches the point's x: a destination sits a little above
+    what it points at. An open x matches any block; an open y, which is a
+    whole page or its left margin, lands in none.
+    """
+    target = layer.page(page)
+    if target is None or xy is None:
+        return None
+    x, y = xy
+    if y is None:
+        return None
+    above, below = destinations.BAND_ABOVE, destinations.BAND_BELOW
+
+    def reaches(box: Box, slack: float) -> bool:
+        return x is None or box[0] - slack <= x <= box[2] + slack
+
+    holding = [
+        b for b in target.blocks if b.bbox_pdf[1] <= y <= b.bbox_pdf[3] and reaches(b.bbox_pdf, 0.0)
+    ]
+    if holding:
+        return min(
+            holding, key=lambda b: (b.bbox_pdf[2] - b.bbox_pdf[0]) * (b.bbox_pdf[3] - b.bbox_pdf[1])
+        )
+    under = [
+        b
+        for b in target.blocks
+        if y - below <= b.bbox_pdf[3] <= y + above and reaches(b.bbox_pdf, above)
+    ]
+    return min(under, key=lambda b: (-b.bbox_pdf[3], b.bbox_pdf[0])) if under else None

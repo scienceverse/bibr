@@ -22,6 +22,7 @@ PAGE_LABELS = ["i", "1", "2", "3", "A-1", ""]
 
 BODY = 11.0
 HEAD = 14.0
+BLUE = (0.0, 0.0, 1.0)
 
 FIGURE_CAPTION = "Figure 1: Overview of the linked pipeline."
 TABLE_CAPTION = "Table 1: Results of the linked study."
@@ -68,13 +69,19 @@ class Placed:
         return (left, top, right, top, left, bottom, right, bottom)
 
 
-def line(parts: list[str], x: float, y: float, size: float = BODY) -> tuple[bytes, list[Placed]]:
-    """*parts* drawn one text object each, side by side from x; the content and each part's place."""
+def line(
+    parts: list[str], x: float, y: float, linked=(), size: float = BODY
+) -> tuple[bytes, list[Placed]]:
+    """*parts* drawn one text object each, side by side from x; the content and each part's place.
+
+    The parts at the indexes in *linked* are drawn blue, as links are, which
+    also makes each one a span of its own.
+    """
     content = b""
     placed = []
-    for part in parts:
+    for index, part in enumerate(parts):
         run = Placed(part, x, y, size)
-        content += text(part, x, y, size=size)
+        content += text(part, x, y, size=size, rgb=BLUE if index in linked else None)
         placed.append(run)
         x = run.right
     return content, placed
@@ -120,6 +127,10 @@ DESTS = {
     "view.xyz_y": (1, "/XYZ null 66 null"),
     "view.xyz_open": (1, "/XYZ null null null"),
 }
+# A name written out of order in the /Names tree. pdfium's lookup by name stops at the
+# first name that sorts after the one it wants, so it never finds this one; the table
+# of named destinations lists it.
+UNSORTED = {"aaa.unsorted": (3, "/XYZ 72 582 null")}
 # The position each of them gives (x, y); None is a coordinate the view leaves open.
 DEST_XY = {
     "figure.1": (72.0, 662.0),
@@ -141,6 +152,7 @@ DEST_XY = {
     "view.xyz_x": (55.0, None),
     "view.xyz_y": (None, 66.0),
     "view.xyz_open": (None, None),
+    "aaa.unsorted": (72.0, 582.0),
 }
 FILLER_LINES = 30
 FILLER = "The study reads every page of the paper and reports what the pages declare."
@@ -151,7 +163,7 @@ def _pages() -> tuple[list[bytes], dict[str, Placed]]:
     runs: dict[str, Placed] = {}
 
     def draw(key_parts: dict[int, str], parts: list[str], x: float, y: float):
-        content, placed = line(parts, x, y)
+        content, placed = line(parts, x, y, linked=set(key_parts))
         for index, key in key_parts.items():
             runs[key] = placed[index]
         return content
@@ -229,18 +241,18 @@ def _pages() -> tuple[list[bytes], dict[str, Placed]]:
     out += marked(
         "P",
         draw(
-            {1: "table_ref", 3: "second_ref"},
-            ["The introduction reads ", "Table 1", " and ", "Smith [1]", "."],
+            {1: "table_ref", 3: "second_ref", 5: "late_ref"},
+            ["The introduction reads ", "Table 1", " and ", "Smith [1]", " and ", "late", "."],
             72.0,
             700.0,
         ),
         mcid=1,
     )
-    # A link over two lines: one run per line.
+    # A link over two lines: one run on each.
     out += marked(
         "P",
-        draw({2: "wrap_a"}, ["It continues, as shown in ", "the", " first line of"], 72.0, 682.0)
-        + draw({0: "wrap_b"}, ["the second figure, and ends."], 72.0, 666.0),
+        draw({1: "wrap_a"}, ["It continues, as shown in the ", "first line of"], 72.0, 682.0)
+        + draw({0: "wrap_b"}, ["the second figure", ", and ends."], 72.0, 666.0),
         mcid=2,
     )
     out += marked("H2", text("1.1 Background", 72.0, 640.0, size=12.0, font="F3"), mcid=3)
@@ -294,6 +306,9 @@ def _names(page_ids: list[int]) -> bytes:
         _name(name) + b" " + _dest(page_ids, *place)
         for name, place in sorted(DESTS.items())
         if name != "old.dest"
+    )
+    tree += b" " + b" ".join(
+        _name(name) + b" " + _dest(page_ids, *place) for name, place in UNSORTED.items()
     )
     old = _dest(page_ids, *DESTS["old.dest"])
     return b" /Names << /Dests << /Names [" + tree + b"] >> >> /Dests << /old.dest " + old + b" >>"
@@ -437,6 +452,77 @@ def _outline(table: Table, page_ids: list[int], bookmarks: list[Bookmark], *, lo
     return root
 
 
+@dataclass(frozen=True)
+class LinkSpec:
+    """A link annotation as the fixture writes it: the runs it covers and where it points.
+
+    *target* is ``("dest", name)`` the annotation's /Dest as a name,
+    ``("array", page, view)`` its /Dest as an explicit destination,
+    ``("goto", name)`` a GoTo action, ``("uri", uri)``, ``("remote", file)``,
+    ``("launch", file)``, ``("named", action)`` or ``("none",)``. With *quads*
+    the annotation also lists the quadrilateral of each run it covers.
+    """
+
+    page: int
+    runs: tuple[str, ...]
+    target: tuple
+    quads: bool = False
+
+
+# In annotation order; the keys are the runs of ``_pages``.
+LINKS = [
+    LinkSpec(0, ("fig_ref",), ("dest", "figure.1")),
+    LinkSpec(0, ("cite_ref",), ("goto", "cite.smith2020"), quads=True),
+    LinkSpec(0, ("sec_ref",), ("dest", "section.2")),
+    LinkSpec(0, ("note_ref",), ("dest", "Hfootnote.1")),
+    LinkSpec(0, ("eq_ref",), ("dest", "equation.3")),
+    LinkSpec(0, ("doi_ref",), ("uri", "https://doi.org/10.1000/xyz123")),
+    LinkSpec(0, ("remote_ref",), ("remote", "other.pdf")),
+    LinkSpec(0, ("launch_ref",), ("launch", "run.sh")),
+    LinkSpec(0, ("named_ref",), ("named", "NextPage")),
+    LinkSpec(0, ("broken_ref",), ("dest", "nowhere")),
+    LinkSpec(0, ("bare_ref",), ("none",)),
+    LinkSpec(0, ("old_ref",), ("dest", "old.dest")),
+    LinkSpec(0, ("array_bib_ref",), ("array", 4, "/XYZ 72 704 null")),
+    LinkSpec(0, ("array_fig_ref",), ("array", 3, "/XYZ 72 662 null")),
+    LinkSpec(0, ("fit_ref",), ("array", 3, "/Fit")),
+    LinkSpec(1, ("table_ref",), ("dest", "table.1")),
+    LinkSpec(1, ("second_ref",), ("dest", "page.4")),
+    LinkSpec(1, ("late_ref",), ("dest", "aaa.unsorted")),
+    LinkSpec(1, ("wrap_a", "wrap_b"), ("goto", "figure.1"), quads=True),
+]
+NOTE_ANNOTATION = b"<< /Type /Annot /Subtype /Text /Rect [400 700 420 720] /Contents (A note) >>"
+
+
+def _annotation(spec: LinkSpec, runs: dict[str, Placed], page_ids: list[int]) -> bytes:
+    placed = [runs[key] for key in spec.runs]
+    rect = (
+        min(run.rect[0] for run in placed),
+        min(run.rect[1] for run in placed),
+        max(run.rect[2] for run in placed),
+        max(run.rect[3] for run in placed),
+    )
+    body = b"<< /Type /Annot /Subtype /Link /Rect [" + _numbers(rect) + b"] /Border [0 0 0]"
+    if spec.quads:
+        body += b" /QuadPoints [" + b" ".join(_numbers(run.quad) for run in placed) + b"]"
+    kind, *args = spec.target
+    if kind == "dest":
+        body += b" /Dest " + _name(args[0])
+    elif kind == "array":
+        body += b" /Dest " + _dest(page_ids, args[0], args[1])
+    elif kind == "goto":
+        body += b" /A << /S /GoTo /D " + _name(args[0]) + b" >>"
+    elif kind == "uri":
+        body += b" /A << /S /URI /URI " + _name(args[0]) + b" >>"
+    elif kind == "remote":
+        body += b" /A << /S /GoToR /F " + _name(args[0]) + b" /D [0 /Fit] >>"
+    elif kind == "launch":
+        body += b" /A << /S /Launch /F " + _name(args[0]) + b" >>"
+    elif kind == "named":
+        body += b" /A << /S /Named /N /" + args[0].encode() + b" >>"
+    return body + b" >>"
+
+
 def linked_paper(*, outline: list[Bookmark] | None = OUTLINE, loop: bool = False) -> bytes:
     """The six-page paper: page labels, named destinations, an outline and the text they point at.
 
@@ -448,16 +534,23 @@ def linked_paper(*, outline: list[Bookmark] | None = OUTLINE, loop: bool = False
         % (number, table.add(b"<< /Type /Font /Subtype /Type1 /BaseFont /%s >>" % name))
         for number, name in ((1, b"Helvetica"), (2, b"Times-Roman"), (3, b"Helvetica-Bold"))
     )
-    contents, _runs = _pages()
+    contents, runs = _pages()
     page_ids = [table.add() for _ in range(N_PAGES)]
-    for page_id, content in zip(page_ids, contents, strict=True):
+    annots: dict[int, list[int]] = {}
+    for spec in LINKS:
+        annots.setdefault(spec.page, []).append(table.add(_annotation(spec, runs, page_ids)))
+    annots[0].append(table.add(NOTE_ANNOTATION))
+    for number, (page_id, content) in enumerate(zip(page_ids, contents, strict=True)):
         stream = table.add(b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream")
+        listed = b" ".join(b"%d 0 R" % annot for annot in annots.get(number, []))
         table.fill(
             page_id,
             b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %d %d] " % (PAGE_W, PAGE_H)
             + b"/Resources << /Font << "
             + fonts
-            + b" >> >> /Contents %d 0 R >>" % stream,
+            + b" >> >> /Contents %d 0 R" % stream
+            + (b" /Annots [" + listed + b"]" if listed else b"")
+            + b" >>",
         )
     table.fill(
         2,

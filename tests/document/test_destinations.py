@@ -97,10 +97,26 @@ def test_the_named_destination_table_finds_a_name_by_the_destination_it_holds():
     with _Doc(_linked.linked_paper()) as opened:
         names = destinations.NamedDests(opened.api, opened.doc)
 
-        assert names.count == len(_linked.DESTS)
+        assert names.count == len(_linked.DESTS) + len(_linked.UNSORTED)
         for name in _linked.DESTS:
             assert names.name_of(opened.named(name)) == name
         assert names.error is None
+
+
+def test_the_table_finds_a_destination_pdfiums_lookup_by_name_misses():
+    with _Doc(_linked.linked_paper()) as opened:
+        names = destinations.NamedDests(opened.api, opened.doc)
+        n_pages = len(opened.doc)
+
+        for name, (page, _view) in _linked.UNSORTED.items():
+            # pdfium's search stops at the first name that sorts after the one it wants.
+            assert not opened.named(name)
+            dest = names.dest_of(name)
+            assert destinations.dest_page(opened.api, opened.doc, dest, n_pages) == page
+            assert destinations.dest_position(opened.api, dest) == _linked.DEST_XY[name]
+            assert names.name_of(dest) == name
+        assert names.dest_of("figure.1") is not None
+        assert names.dest_of("no.such.name") is None
 
 
 def test_a_destination_the_table_does_not_hold_has_no_name():
