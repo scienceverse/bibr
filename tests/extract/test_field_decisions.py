@@ -643,6 +643,88 @@ def test_abstract_rule(incumbent, fallback, absent, printed, value, rule):
     assert (decision.value, decision.rule) == (value, rule)
 
 
+@pytest.mark.parametrize("source", ["llm", "abstract_section"])
+def test_the_abstract_is_one_line_per_paragraph(source):
+    # A model that copies the printed lines of a PDF text layer keeps their
+    # breaks, with the trailing space of each line.
+    printed = (
+        "Background: Sleep supports the consolidation of \n"
+        "recently learned material. \r\n"
+        "Methods: We tested 40 adults in a cross-\n"
+        "over design.\n"
+        "\n"
+        "  Results: Recall improved after sleep.\n"
+    )
+    candidate = FieldCandidate("abstract", source, printed)
+    if source == "llm":
+        decision = decide_abstract(
+            candidate,
+            fallback=None,
+            explicitly_absent=False,
+            printed_abstract=False,
+            abstained=False,
+        )
+    else:
+        decision = decide_abstract(
+            _abstract(""),
+            fallback=candidate,
+            explicitly_absent=False,
+            printed_abstract=False,
+            abstained=False,
+        )
+    assert decision.value == (
+        "Background: Sleep supports the consolidation of recently learned material. "
+        "Methods: We tested 40 adults in a cross-over design.\n\n"
+        "Results: Recall improved after sleep."
+    )
+    assert decision.selected.transforms == ("line_breaks_joined",)
+
+
+@pytest.mark.parametrize(
+    ("printed", "joined"),
+    [
+        ("A COVID-\n19 cohort", "A COVID-19 cohort"),
+        ("SARS-CoV-\n2 infection", "SARS-CoV-2 infection"),
+        ("adults aged 18-\n65 years", "adults aged 18-65 years"),
+        ("Aims:\n\u2022 recall\n\u2022 insight", "Aims:\n\u2022 recall\n\u2022 insight"),
+        ("Aims:\n- recall,\n- insight", "Aims:\n- recall,\n- insight"),
+        ("Aims: (1) recall;\n(2) insight", "Aims: (1) recall;\n(2) insight"),
+    ],
+)
+def test_joining_keeps_hyphenated_numbers_and_list_items(printed, joined):
+    decision = decide_abstract(
+        _abstract(printed),
+        fallback=None,
+        explicitly_absent=False,
+        printed_abstract=False,
+        abstained=False,
+    )
+    assert decision.value == joined
+
+
+def test_an_abstained_abstract_is_joined_too():
+    decision = decide_abstract(
+        _abstract("Sleep supports \nrecall."),
+        fallback=None,
+        explicitly_absent=False,
+        printed_abstract=False,
+        abstained=True,
+    )
+    assert (decision.value, decision.rule) == ("Sleep supports recall.", "abstained")
+
+
+def test_an_abstract_on_one_line_records_no_repair():
+    decision = decide_abstract(
+        _abstract("Sleep supports recall.\n\nIt also supports insight."),
+        fallback=None,
+        explicitly_absent=False,
+        printed_abstract=False,
+        abstained=False,
+    )
+    assert decision.value == "Sleep supports recall.\n\nIt also supports insight."
+    assert decision.selected.transforms == ()
+
+
 def test_abstention_decides_no_abstract():
     decision = decide_abstract(
         _abstract(""),
