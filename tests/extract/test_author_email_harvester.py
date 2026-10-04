@@ -1444,3 +1444,27 @@ def test_the_front_matter_flags_its_own_addresses_as_it_always_did():
     )
     AuthorEmailHarvester(document, document=document).harvest(authors)
     assert authors[1].corresponding is True
+
+
+def test_a_front_matter_flag_survives_an_added_contact_block():
+    """The contact-block rule reads the added sentences only: a flag the front matter sets stays."""
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest_wide(
+        [
+            (
+                "title",
+                [
+                    "Alice Lee, Hui-Kai Tan, Omar Reyes",
+                    "Correspondence: Hui-Kai Tan, hk.tan@example.org",
+                ],
+            ),
+            ("footnote", ["Alice Lee, alee@example.org", "Omar Reyes, oreyes@example.org"]),
+        ],
+        authors,
+    )
+    assert [a.email for a in authors] == [
+        "alee@example.org",
+        "hk.tan@example.org",
+        "oreyes@example.org",
+    ]
+    assert [a.corresponding for a in authors] == [False, True, False]
