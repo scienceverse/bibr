@@ -175,7 +175,7 @@ class PageText:
         probes = keys | {key[:30] for key in keys if len(key) > 30}
         if entry.page is None:
             return any(probe in self.whole for probe in probes)
-        # A page window of the 1-based target page: pages target - 1 to target + 1.
+        # The target page and the page before and after it (0-based indices).
         pages = self.folded
         window = "".join(pages[max(0, entry.page - 1) : min(len(pages), entry.page + 2)])
         return any(probe in window for probe in probes)
