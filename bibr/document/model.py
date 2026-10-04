@@ -19,14 +19,17 @@ Conventions:
   made it.
 - Ids are deterministic and page-scoped (:mod:`bibr.document.ids`): blocks
   ``p3.r12`` (page, post-OCR region index), lines ``p3.l40``, spans
-  ``p3.sp210``.
+  ``p3.sp210``, links ``lk17`` and structure elements ``st230``. Outline
+  entries are numbered in document order (``ol5``).
 
 D1 fills the PDF-native part: glyphs, text objects, fonts, records, spans,
 lines, superscript tags, furniture, render recipes and presence flags, plus
-blocks attached from the post-OCR regions. :class:`Suppressed`,
-:class:`OutlineEntry`, :class:`OutlineGuard`, :class:`Link`,
-:class:`StructElem` and :class:`DecisionRecord` are declared for D2 (links,
-tags, outline) and D3 (layout provenance) and stay empty until then.
+blocks attached from the post-OCR regions. D2 adds what the PDF declares
+about its structure: link annotations with their targets, the structure
+tree, the outline with the outline guard's verdict, page labels and the
+presence flags that tell each of them apart from "absent". :class:`Suppressed`
+and :class:`DecisionRecord` are declared for D3 (layout provenance) and stay
+empty until then.
 """
 
 from __future__ import annotations
@@ -37,7 +40,7 @@ import numpy as np
 
 # The layer's schema version: bump it with any change to a serialised class,
 # its fields or COLUMN_DTYPES (tests/document/test_layer.py pins the pair).
-LAYER_VERSION = "doclayer/2"
+LAYER_VERSION = "doclayer/3"
 # The furniture strip's rule versions (bibr.ocr.native_text._find_furniture).
 # The strip removes objects before the text page is built, so a rule change
 # moves every glyph, span and line index on the pages it touches: bump the
@@ -285,7 +288,13 @@ class Suppressed:
 
 @dataclass(frozen=True, slots=True)
 class OutlineEntry:
-    """A PDF outline (bookmark) entry (D2)."""
+    """A PDF outline (bookmark) entry, in document order (D2).
+
+    ``level`` is the 0-based depth and ``parent`` the ``idx`` of the entry
+    above. ``page`` is the 0-based target page (None when the entry names no
+    page of this document) and ``x``, ``y`` the destination's position on it
+    in PDF points, where the destination gives one.
+    """
 
     idx: int
     parent: int | None
@@ -294,44 +303,77 @@ class OutlineEntry:
     page: int | None
     x: float | None
     y: float | None
+    # The named destination the entry points at, if it uses one.
     dest_name: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class OutlineGuard:
-    """The outline guard's verdict on the outline (D2)."""
+    """The outline guard's verdict on the outline (D2).
 
+    ``decided.score`` is the share of entries printed on their target page
+    when the guard looked at the text layer (None otherwise); its evidence
+    lists the entries that were not.
+    """
+
+    # outline_guard/v1: the guard frozen on 2026-10-03.
     version: str
     passed: bool
+    # R1_too_few | R2_targets | R3_ungrounded; None when the outline passed.
     reject: str | None
-    dropped: tuple[int, ...]
+    # (entry idx, rule) of each entry the cleanup drops before the verdict:
+    # C1_blank | C2_page | C3_nav | C4_float | C5_title | C6_wrapper.
+    dropped: tuple[tuple[int, str], ...]
+    decided: Decided
 
 
 @dataclass(frozen=True, slots=True)
 class Link:
-    """A link annotation and where it points (D2)."""
+    """A link annotation and where it points (D2).
+
+    ``rect`` and ``quads`` (8 numbers each, the corners of the linked text)
+    are in PDF points on the link's page. ``target_page`` is the 0-based page
+    an internal link lands on and ``target_xy`` the destination's position
+    there in PDF points (a coordinate the destination leaves open is None).
+    """
 
     link_id: str
     page: int
     rect: Box
     quads: tuple[tuple[float, ...], ...]
-    # goto | dest | uri | remote | launch | named
+    # dest (the annotation's /Dest) | goto | remote | uri | launch | other (an
+    # action pdfium does not read) | none
     action: str
+    # The URI of a URI action; the file a remote or launch action names.
     uri: str | None
+    # The named destination the link points at, if it uses one, and where
+    # the name came from: annot (the annotation's own /Dest) | table (the
+    # document's named destination with the link's destination).
     dest_name: str | None
     name_source: str | None
     target_page: int | None
-    target_xy: tuple[float, float] | None
-    # bib | float | section | other | external | unresolved
+    target_xy: tuple[float | None, float | None] | None
+    # bib | float | section | footnote | equation | other | external | unresolved
     target_class: str | None
     target: Decided | None
+    # The spans of the text the link covers.
     source_span_ids: tuple[str, ...]
+    # Filled with the target's block once blocks are attached (D3 and C3).
     target_block_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class StructElem:
-    """A structure-tree element of a tagged PDF (D2)."""
+    """An element of a tagged PDF's structure tree, as one page sees it (D2).
+
+    pdfium reads the tree page by page: an element with content on several
+    pages, and each ancestor of such content, appears once per page, carrying
+    that page's marked-content ids. Ids run in (page, document) order, and
+    ``parent`` is the element above it on the same page. ``role`` is the
+    structure type after /RoleMap as pdfium resolves it (one mapping step).
+    ``mcids`` are the ids of the marked content the element holds directly;
+    the text objects carrying them are the ones ``obj_mcid`` names.
+    """
 
     elem_id: str
     parent: str | None
@@ -358,8 +400,8 @@ class DecisionRecord:
 class Presence:
     """What the document has, so a consumer can tell "absent" from "not read".
 
-    None means the fact was not read (D2 and D3 fill the rest). A fact no
-    read page shows is None, not False, when some page could not be read.
+    None means the fact was not read (D3 fills the rest). A fact no read page
+    shows is None, not False, when some page could not be read.
     """
 
     has_text_layer: bool | None = None
@@ -431,7 +473,7 @@ class Page:
     """
 
     index: int
-    # The PDF page label (D2).
+    # The page's label from the PDF's /PageLabels; None when it defines none.
     label: str | None
     # Geometry: None only for a page that could not be opened or sized.
     width: float | None
