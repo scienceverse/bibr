@@ -47,7 +47,8 @@ import numpy as np
 
 from bibr.document.model import Decided, OutlineEntry, OutlineGuard, Page, PageColumns
 
-GUARD_VERSION = "outline_guard/v1"
+# The rule version is the one the popo evaluation froze as outline-guard-v1.
+GUARD_VERSION = "outline_guard/1"
 
 _PAGE_RX = re.compile(
     r"^\s*(?:(?:page|pages|pg|pp|p|seite|pagina|página)\.?\s*)?"
@@ -233,11 +234,10 @@ def judge(
         elif text is not None and text.chars >= 2000:
             misses = [entry for entry in kept if not text.grounded(entry)]
             score = (n - len(misses)) / n
-            ungrounded = tuple(f"ol{entry.idx}" for entry in misses)
+            ungrounded = tuple(entry.entry_id for entry in misses)
             if (n - len(misses)) * 2 < n:
                 reject = "R3_ungrounded"
     return OutlineGuard(
-        version=GUARD_VERSION,
         passed=reject is None,
         reject=reject,
         dropped=tuple(dropped),

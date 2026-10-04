@@ -16,7 +16,7 @@ Everything here calls pdfium and needs the caller's ``pdfium_lock``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from bibr.document import destinations
 from bibr.document.model import OutlineEntry
@@ -56,7 +56,9 @@ def read_outline(
     note: str | None = None
     # Bookmarks still to visit, as (bookmark, depth, parent entry); the next
     # sibling goes below its subtree, so a subtree is read before it.
-    pending = [(api.FPDFBookmark_GetFirstChild(doc.raw, None), 0, None)]
+    pending: list[tuple[Any, int, int | None]] = [
+        (api.FPDFBookmark_GetFirstChild(doc.raw, None), 0, None)
+    ]
     try:
         while pending:
             bookmark, level, parent = pending.pop()

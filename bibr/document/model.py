@@ -10,17 +10,20 @@ Conventions:
   ``crop_box`` and ``/Rotate`` kept on :class:`Page`. Convert to and from the
   layout frame with ``bibr.document.views.to_layout_bbox`` and
   ``from_layout_bbox``.
-- Page indices are absolute and 0-based.
+- Page indices are absolute and 0-based. Pages in other sources count from 1
+  (``RegionSummary.page``, ``OutlineItem.page_no``); the layer never does.
 - Glyph indices are pdfium char indices of the text page built after
   ``strip_furniture_objects`` ran, under the strip rules :data:`INDEX_FRAME`
   names.
 - Per-page data is held as numpy columns (:class:`PageColumns`).
 - Every derived fact carries a :class:`Decided` saying which rule or model
   made it.
-- Ids are deterministic and page-scoped (:mod:`bibr.document.ids`): blocks
-  ``p3.r12`` (page, post-OCR region index), lines ``p3.l40``, spans
-  ``p3.sp210``, links ``lk17`` and structure elements ``st230``. Outline
-  entries are numbered in document order (``ol5``).
+- Ids are deterministic and do not move when a layer is built for another page
+  range (:mod:`bibr.document.ids`): blocks ``p3.r12`` (page, post-OCR region
+  index), lines ``p3.l40``, spans ``p3.sp210``, links ``p3.lk4`` (page,
+  position among the page's link annotations), structure elements ``p3.st12``
+  (page, position in that page's tree), outline entries ``ol5`` (position in
+  the outline, which is always read whole).
 
 D1 fills the PDF-native part: glyphs, text objects, fonts, records, spans,
 lines, superscript tags, furniture, render recipes and presence flags, plus
@@ -37,6 +40,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
+
+from bibr.document._ids import document_id
 
 # The layer's schema version: bump it with any change to a serialised class,
 # its fields or COLUMN_DTYPES (tests/document/test_layer.py pins the pair).
@@ -290,9 +295,10 @@ class Suppressed:
 class OutlineEntry:
     """A PDF outline (bookmark) entry, in document order (D2).
 
-    ``level`` is the 0-based depth and ``parent`` the ``idx`` of the entry
-    above. ``page`` is the 0-based target page (None when the entry names no
-    page of this document) and ``x``, ``y`` the destination's position on it
+    ``idx`` is the entry's position in :attr:`DocumentLayer.outline` (its id is
+    ``ol{idx}``), ``level`` the 0-based depth and ``parent`` the ``idx`` of the
+    entry above. ``page`` is the 0-based target page (None when the entry names
+    no page of this document) and ``x``, ``y`` the destination's position on it
     in PDF points, where the destination gives one.
     """
 
@@ -306,18 +312,21 @@ class OutlineEntry:
     # The named destination the entry points at, if it uses one.
     dest_name: str | None
 
+    @property
+    def entry_id(self) -> str:
+        return document_id("ol", self.idx)
+
 
 @dataclass(frozen=True, slots=True)
 class OutlineGuard:
     """The outline guard's verdict on the outline (D2).
 
-    ``decided.score`` is the share of entries printed on their target page
-    when the guard looked at the text layer (None otherwise); its evidence
-    lists the entries that were not.
+    The rule version is ``decided.version``. ``decided.score`` is the share of
+    the entries the guard kept that are printed on their target page, when it
+    looked at the text layer (None otherwise); its evidence lists the entries
+    that were not.
     """
 
-    # outline_guard/v1: the guard frozen on 2026-10-03.
-    version: str
     passed: bool
     # R1_too_few | R2_targets | R3_ungrounded; None when the outline passed.
     reject: str | None
@@ -331,10 +340,14 @@ class OutlineGuard:
 class Link:
     """A link annotation and where it points (D2).
 
-    ``rect`` and ``quads`` (8 numbers each, the corners of the linked text)
-    are in PDF points on the link's page. ``target_page`` is the 0-based page
-    an internal link lands on and ``target_xy`` the destination's position
-    there in PDF points (a coordinate the destination leaves open is None).
+    ``link_id`` is ``p{page}.lk{n}``, ``n`` the link's position among the page's
+    link annotations; a link that cannot be read leaves its number unused, so
+    the others keep theirs. ``rect`` and ``quads`` (8 numbers each, the corners
+    of the linked text) are in PDF points on the link's page. ``target_page``
+    is the 0-based page an internal link lands on and ``target_xy`` the
+    destination's position there in PDF points (a coordinate the destination
+    leaves open is None); ``bibr.document.views.block_at`` finds the block it
+    lands in once blocks are attached.
     """
 
     link_id: str
@@ -358,28 +371,33 @@ class Link:
     target: Decided | None
     # The spans of the text the link covers.
     source_span_ids: tuple[str, ...]
-    # Filled with the target's block once blocks are attached (D3 and C3).
-    target_block_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class StructElem:
-    """An element of a tagged PDF's structure tree, as one page sees it (D2).
+    """An element of a tagged PDF's structure tree, as one page's tree holds it (D2).
 
     pdfium reads the tree page by page: an element with content on several
-    pages, and each ancestor of such content, appears once per page, carrying
-    that page's marked-content ids. Ids run in (page, document) order, and
-    ``parent`` is the element above it on the same page. ``role`` is the
-    structure type after /RoleMap as pdfium resolves it (one mapping step).
-    ``mcids`` are the ids of the marked content the element holds directly;
-    the text objects carrying them are the ones ``obj_mcid`` names.
+    pages, and each ancestor of such content, appears once per page and holds
+    only that page's marked content. The id ``p{page}.st{n}`` numbers the
+    page's elements in document order and ``parent`` is the element above on
+    the same page. ``path`` is the element's place in the whole tree (its
+    index among its parent's kids, from the root down); it is the same in
+    every page's copy, so copies of one element can be grouped by it.
+
+    ``role`` is the structure type after /RoleMap as pdfium resolves it (one
+    mapping step). ``mcrs`` are the ``(page, mcid)`` pairs of the marked content
+    the element holds directly: an mcid is unique only within its page's
+    content stream, so the page is part of the key, and the text objects that
+    carry it are those whose ``obj_mcid`` is that mcid on that page.
     """
 
     elem_id: str
     parent: str | None
     role: str
-    mcids: tuple[int, ...]
-    page: int | None
+    mcrs: tuple[tuple[int, int], ...]
+    page: int
+    path: tuple[int, ...]
     alt: str | None
     actual: str | None
     lang: str | None
