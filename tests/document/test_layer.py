@@ -420,6 +420,49 @@ def test_text_sources_and_presence():
     assert layer.links == [] and layer.struct == [] and layer.outline == []
 
 
+@pytest.mark.parametrize("name", ["synthetic_paper.pdf", "scanned_sample.pdf"])
+def test_the_text_source_is_the_inspections_invisible_layer_rule(name):
+    import pypdfium2
+
+    from bibr.ocr import native_text as nt
+    from bibr.ocr.utils import pdfium_lock
+
+    pdf_bytes = _FIXTURES[name]
+    layer = _inspect(pdf_bytes, layer=True).document
+    found = []
+    with pdfium_lock:
+        doc = pypdfium2.PdfDocument(pdf_bytes)
+        try:
+            for page in layer.pages:
+                pdf_page = doc[page.index]
+                textpage = nt.open_text_page(pdf_page)
+                try:
+                    if textpage.count_chars():
+                        share = nt._invisible_text_share(textpage)
+                        flagged = nt._is_invisible_text_layer_page(
+                            pdf_page, textpage, page.crop_box
+                        )
+                        found.append((page.index, share, flagged))
+                finally:
+                    textpage.close()
+                    pdf_page.close()
+        finally:
+            doc.close()
+
+    with_text = {index for index, _share, _flagged in found}
+    for page in layer.pages:
+        if page.index not in with_text:
+            assert page.text_source == "ocr"
+            assert page.text_source_decided is None
+    for index, share, flagged in found:
+        page = layer.page(index)
+        assert page.text_source_decided == Decided("text_source", "invisible_layer/1", score=share)
+        assert (page.text_source == "invisible_layer") is flagged
+    if name == "synthetic_paper.pdf":
+        assert layer.page(3).text_source_decided.score >= 0.5
+        assert layer.page(0).text_source_decided.score == 0.0
+
+
 def test_a_scan_without_a_text_layer_is_flagged_as_one():
     layer = _inspect(_FIXTURES["scanned_sample.pdf"], layer=True).document
 

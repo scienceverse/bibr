@@ -27,6 +27,7 @@ import re
 import unicodedata
 import weakref
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from bibr.input.consolidate_text import DOI_URL_CONTEXT_RE, fix_ocr_artifacts
@@ -2117,13 +2118,51 @@ def _page_image_coverage(page, crop_box: tuple[float, float, float, float]) -> f
     return min(1.0, _union_area(clipped[:_SCAN_PAGE_MAX_IMAGE_BOXES]) / area)
 
 
-def _invisible_text_share(textpage) -> float | None:
-    """Share of the page's characters drawn in an invisible text render mode.
+# The invisible-layer rule has one implementation, shared with the document
+# layer (bibr.document.harvest), which reads the same facts from its columns:
+# _invisible_share, _share_qualifies and _coverage_qualifies. Bump
+# INVISIBLE_LAYER_RULE in bibr.document.model when the rule changes.
+def _invisible_share(
+    n_chars: int,
+    code_of: Callable[[int], int],
+    is_generated: Callable[[int], bool],
+    render_mode_of: Callable[[int], int | None],
+) -> float | None:
+    """Share of the countable chars drawn in an invisible text render mode.
 
     Whitespace and the characters PDFium generates (inferred spaces and line
-    breaks) are not counted. ``None`` when nothing is countable. Raises when
-    this PDFium build cannot map a character to its text object, so the caller
-    keeps the text layer and reports the rule as unavailable.
+    breaks) are not counted, nor are chars without a text object
+    (*render_mode_of* gives None). ``None`` when nothing is countable.
+    """
+    counted = invisible = 0
+    for index in range(n_chars):
+        code = code_of(index)
+        if code in _UNCOUNTED_CHAR_CODES or (code <= 0x10FFFF and chr(code).isspace()):
+            continue
+        if is_generated(index):
+            continue
+        mode = render_mode_of(index)
+        if mode is None:
+            continue
+        counted += 1
+        if mode in _INVISIBLE_TEXT_RENDER_MODES:
+            invisible += 1
+    return invisible / counted if counted else None
+
+
+def _share_qualifies(share: float | None) -> bool:
+    return share is not None and share >= _SCAN_PAGE_MIN_INVISIBLE_SHARE
+
+
+def _coverage_qualifies(coverage: float) -> bool:
+    return coverage >= _SCAN_PAGE_MIN_IMAGE_COVERAGE
+
+
+def _invisible_text_share(textpage) -> float | None:
+    """:func:`_invisible_share` of a text page, read through PDFium.
+
+    Raises when this PDFium build cannot map a character to its text object,
+    so the caller keeps the text layer and reports the rule as unavailable.
     """
     import pypdfium2.raw as pdfium_c
 
@@ -2132,20 +2171,17 @@ def _invisible_text_share(textpage) -> float | None:
         raise RuntimeError("this PDFium build has no FPDFText_GetTextObject")
     is_generated = getattr(pdfium_c, "FPDFText_IsGenerated", None)
     handle = textpage.raw
-    counted = invisible = 0
-    for index in range(textpage.count_chars()):
-        code = pdfium_c.FPDFText_GetUnicode(handle, index)
-        if code in _UNCOUNTED_CHAR_CODES or (code <= 0x10FFFF and chr(code).isspace()):
-            continue
-        if is_generated is not None and is_generated(handle, index) == 1:
-            continue
+
+    def render_mode_of(index: int) -> int | None:
         obj = text_object_of(handle, index)
-        if not obj:
-            continue
-        counted += 1
-        if pdfium_c.FPDFTextObj_GetTextRenderMode(obj) in _INVISIBLE_TEXT_RENDER_MODES:
-            invisible += 1
-    return invisible / counted if counted else None
+        return pdfium_c.FPDFTextObj_GetTextRenderMode(obj) if obj else None
+
+    return _invisible_share(
+        textpage.count_chars(),
+        lambda index: pdfium_c.FPDFText_GetUnicode(handle, index),
+        lambda index: is_generated is not None and is_generated(handle, index) == 1,
+        render_mode_of,
+    )
 
 
 def _is_invisible_text_layer_page(
@@ -2159,10 +2195,9 @@ def _is_invisible_text_layer_page(
     keeps its visible text, and a figure-sized image never qualifies. Operates
     on a caller-provided (lock-held) page and textpage.
     """
-    if _page_image_coverage(page, crop_box) < _SCAN_PAGE_MIN_IMAGE_COVERAGE:
+    if not _coverage_qualifies(_page_image_coverage(page, crop_box)):
         return False
-    share = _invisible_text_share(textpage)
-    return share is not None and share >= _SCAN_PAGE_MIN_INVISIBLE_SHARE
+    return _share_qualifies(_invisible_text_share(textpage))
 
 
 def fill_regions_from_native_text(

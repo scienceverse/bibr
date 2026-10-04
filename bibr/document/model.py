@@ -43,6 +43,9 @@ LAYER_VERSION = "doclayer/1"
 WATERMARK_RULE = "watermark/1"
 LINE_NUMBER_RULE = "line_number/1"
 INDEX_FRAME = f"post_strip:{WATERMARK_RULE}+{LINE_NUMBER_RULE}"
+# The invisible-layer rule (bibr.ocr.native_text._is_invisible_text_layer_page)
+# behind Page.text_source.
+INVISIBLE_LAYER_RULE = "invisible_layer/1"
 
 Box = tuple[float, float, float, float]
 
@@ -409,6 +412,15 @@ class Block:
 
 @dataclass(slots=True)
 class Page:
+    """One page of the layer.
+
+    ``text_source`` describes the page's PDF text layer, not the source bibr
+    used: ``native`` (born-digital), ``invisible_layer`` (a scan's hidden OCR
+    layer) or ``ocr`` (no text layer). A native page whose text a corruption
+    gate rejected (``min_printable_ratio``) was still OCR'd; ``Block.chosen``
+    says which source each region used.
+    """
+
     index: int
     # The PDF page label (D2).
     label: str | None
@@ -424,9 +436,11 @@ class Page:
     suppressed: list[Suppressed] = field(default_factory=list)
     furniture: list[Furniture] = field(default_factory=list)
     render: RenderRecipe | None = None
-    # The evidence for text_source: the share of countable glyphs drawn
-    # invisibly and, when that share qualifies, the image coverage.
-    invisible_share: float | None = None
+    # The invisible-layer rule's decision on a page with a text layer; its
+    # score is the share of countable glyphs drawn invisibly (None when no
+    # glyph counts).
+    text_source_decided: Decided | None = None
+    # The share of the CropBox that images cover, read when the share qualifies.
     image_coverage: float | None = None
 
 

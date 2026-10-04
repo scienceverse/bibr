@@ -37,6 +37,7 @@ from bibr.document.model import (
     GLYPH_NO_LOOSE_BOX,
     GLYPH_NO_ORIGIN,
     INDEX_FRAME,
+    INVISIBLE_LAYER_RULE,
     LAYER_VERSION,
     LINE_NUMBER_RULE,
     OBJ_NO_FILL,
@@ -428,29 +429,26 @@ def _read_glyphs(api: _Api, textpage, n_chars: int, boxes: list) -> tuple[list, 
 
 def _text_source(
     page, crop_box: Box, codes: list[int], rows: list[int], gflags: list[int], modes: list[int]
-) -> tuple[str, float | None, float | None]:
-    """``native`` or ``invisible_layer``, with the invisible share and image coverage.
+) -> tuple[str, Decided, float | None]:
+    """``native`` or ``invisible_layer``, its decision, and the image coverage if read.
 
-    The rule of ``_is_invisible_text_layer_page``, read from the harvested
-    columns: whitespace, generated chars and chars without a text object do
-    not count.
+    The inspection's own invisible-layer rule (the ``bibr.ocr.native_text``
+    helpers ``_is_invisible_text_layer_page`` uses), on the harvested
+    columns. The decision's score is the invisible share.
     """
-    counted = invisible = 0
-    for code, row, flags in zip(codes, rows, gflags, strict=True):
-        if code in nt._UNCOUNTED_CHAR_CODES or (code <= 0x10FFFF and chr(code).isspace()):
-            continue
-        if flags & GLYPH_GENERATED or row < 0:
-            continue
-        counted += 1
-        if modes[row] in nt._INVISIBLE_TEXT_RENDER_MODES:
-            invisible += 1
-    share = invisible / counted if counted else None
-    if share is None or share < nt._SCAN_PAGE_MIN_INVISIBLE_SHARE:
-        return "native", share, None
+    share = nt._invisible_share(
+        len(codes),
+        codes.__getitem__,
+        lambda index: bool(gflags[index] & GLYPH_GENERATED),
+        lambda index: modes[rows[index]] if rows[index] >= 0 else None,
+    )
+    decided = Decided("text_source", INVISIBLE_LAYER_RULE, score=share)
+    if not nt._share_qualifies(share):
+        return "native", decided, None
     coverage = nt._page_image_coverage(page, crop_box)
-    if coverage >= nt._SCAN_PAGE_MIN_IMAGE_COVERAGE:
-        return "invisible_layer", share, coverage
-    return "native", share, coverage
+    if nt._coverage_qualifies(coverage):
+        return "invisible_layer", decided, coverage
+    return "native", decided, coverage
 
 
 @dataclass(slots=True)
@@ -703,7 +701,7 @@ def read_page(
     for i, row in enumerate(rows):
         if row >= 0 and objects.mode[row] in nt._INVISIBLE_TEXT_RENDER_MODES:
             gflags[i] |= GLYPH_INVISIBLE_RENDER
-    built.text_source, built.invisible_share, built.image_coverage = _text_source(
+    built.text_source, built.text_source_decided, built.image_coverage = _text_source(
         page, crop_box, trace.codes, rows, gflags, objects.mode
     )
     return _PageDraft(
