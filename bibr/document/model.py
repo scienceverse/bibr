@@ -1,0 +1,439 @@
+"""Data model of the lossless document layer (``doclayer/1``).
+
+The layer keeps what bibr reads from a PDF and what it decides about it, so
+later stages and models can use facts the string pipeline drops: glyph fonts,
+sizes and baselines, superscripts, furniture, page render recipes.
+
+Conventions:
+
+- Geometry is in unrotated PDF user space (points, y up), with each page's
+  ``crop_box`` and ``/Rotate`` kept on :class:`Page`. Convert to the layout
+  frame with ``bibr.ocr.native_text._pdf_points_to_normalized_bbox``.
+- Page indices are absolute and 0-based.
+- Glyph indices are pdfium char indices of the text page built after
+  ``strip_furniture_objects`` ran (``index_frame="post_strip"``).
+- Per-page data is held as numpy columns (:class:`PageColumns`).
+- Every derived fact carries a :class:`Decided` saying which rule or model
+  made it.
+- Ids are deterministic: blocks ``p3.r12`` (page, post-OCR region index),
+  lines ``p3.l40``, spans ``p3.sp210``.
+
+D1 fills the PDF-native part: glyphs, text objects, fonts, records, spans,
+lines, superscript tags, furniture, render recipes and presence flags, plus
+blocks attached from the post-OCR regions. :class:`Suppressed`,
+:class:`OutlineEntry`, :class:`OutlineGuard`, :class:`Link`,
+:class:`StructElem` and :class:`DecisionRecord` are declared for D2 (links,
+tags, outline) and D3 (layout provenance) and stay empty until then.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import numpy as np
+
+LAYER_VERSION = "doclayer/1"
+INDEX_FRAME = "post_strip"
+
+Box = tuple[float, float, float, float]
+
+# --- PageColumns.gflags: one bit set per glyph fact ------------------------
+# pdfium generated the char (an inferred space or line break).
+GLYPH_GENERATED = 1 << 0
+# pdfium marked a line-end hyphen (code 0x2, read as U+FFFE in the page text).
+GLYPH_HYPHEN = 1 << 1
+# The font's ToUnicode map failed for the char.
+GLYPH_MAP_ERROR = 1 << 2
+# The char's text object draws in an invisible render mode (3 or 7).
+GLYPH_INVISIBLE_RENDER = 1 << 3
+# pdfium leaves the char out of the page text (text index -1).
+GLYPH_EXCLUDED = 1 << 4
+# No tight box, loose box or origin could be read (the value is NaN).
+GLYPH_NO_BOX = 1 << 5
+GLYPH_NO_LOOSE_BOX = 1 << 6
+GLYPH_NO_ORIGIN = 1 << 7
+
+# --- PageColumns.obj_flags: values pdfium could not read for an object -----
+OBJ_NO_MATRIX = 1 << 0
+OBJ_NO_FONT_SIZE = 1 << 1
+OBJ_NO_FILL = 1 << 2
+OBJ_NO_STROKE = 1 << 3
+# pdfium named the object for a char, but the walk of the page and its forms
+# did not reach it, so its matrix is not composed with any form matrix.
+OBJ_NOT_IN_WALK = 1 << 4
+
+# The dtype of every PageColumns array, for validation and round trips. Tight
+# char boxes and record centres stay float64: they are pdfium's doubles, and
+# the views reproduce bibr's native text and line geometry from them exactly.
+COLUMN_DTYPES: dict[str, str] = {
+    # Raw stream: one row per pdfium char index.
+    "cp": "<u4",
+    "box": "<f8",
+    "loose": "<f4",
+    "origin": "<f4",
+    "obj": "<i4",
+    "gflags": "<u2",
+    # Text objects: one row per object any char belongs to.
+    "obj_font": "<i4",
+    "obj_tf": "<f4",
+    "obj_size_eff": "<f4",
+    "obj_matrix": "<f4",
+    "obj_fill": "<u4",
+    "obj_stroke": "<u4",
+    "obj_render_mode": "|i1",
+    "obj_mcid": "<i4",
+    "obj_artifact": "|b1",
+    "obj_flags": "|u1",
+    # Reading records: what _build_page_char_records returns, in order.
+    "rec_cp": "<u4",
+    "rec_cx": "<f8",
+    "rec_cy": "<f8",
+    "rec_newline": "|b1",
+    "rec_src": "<i4",
+    "rec_flags": "|u1",
+    # Spans and lines over the records.
+    "span_rec": "<i4",
+    "span_obj": "<i4",
+    "span_bbox": "<f4",
+    "span_baseline": "<f4",
+    "line_span": "<i4",
+    "line_bbox": "<f4",
+    "line_block": "<i4",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class Decided:
+    """Provenance of a derived fact."""
+
+    # layout_onnx | furniture.watermark | furniture.line_number | span_rules | ...
+    component: str
+    # Model sha or rule version, e.g. "superscript/1".
+    version: str
+    score: float | None = None
+    # False for scores that are not probabilities (rule margins, constant LLM scores).
+    calibrated: bool = True
+    # Layer ids the decision rests on.
+    evidence: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
+class PageColumns:
+    """One page's glyph, object, record, span and line columns.
+
+    Raw stream (row = pdfium char index): ``cp`` the FPDFText_GetUnicode code,
+    ``box`` the tight char box and ``loose`` the loose one (left, bottom,
+    right, top), ``origin`` the glyph origin, ``obj`` the row of its text
+    object (-1 for generated chars), ``gflags`` the ``GLYPH_*`` bits.
+
+    Text objects (row = object): ``obj_font`` the index into
+    :attr:`DocumentLayer.fonts` (-1 unknown), ``obj_tf`` the nominal Tf size,
+    ``obj_size_eff`` the effective size Tf·√|det M| of the matrix composed
+    through the forms that hold the object (use this one: Tf is 1 in many
+    PDFs, with the scale in the matrix), ``obj_matrix`` that matrix's
+    (a, b, c, d), ``obj_fill``/``obj_stroke`` RGBA packed as 0xRRGGBBAA,
+    ``obj_render_mode`` (-1 unknown), ``obj_mcid`` the marked-content id
+    (-1 none), ``obj_artifact`` inside /Artifact marked content, and
+    ``obj_flags`` the ``OBJ_*`` bits.
+
+    Records (row = what ``_build_page_char_records`` returned): the first
+    code point of the char in ``rec_cp`` (a char of several code points also
+    sits whole in ``rec_text``), the centre bibr's native text assigns by,
+    ``rec_newline``, ``rec_src`` the pdfium index the record starts at (-1
+    for a space the word-boundary repair inserted) and the ``REC_*`` flags of
+    ``bibr.ocr.native_text``.
+
+    Spans: ``span_rec`` the half-open record range, ``span_obj`` the object
+    row of its first glyph, ``span_bbox`` the union of its glyphs' tight
+    boxes and ``span_baseline`` its baseline along the text's up direction.
+    Lines: ``line_span`` the half-open span range, ``line_bbox`` and
+    ``line_block`` the index into :attr:`Page.blocks` (-1 outside every
+    block, or before blocks are attached).
+    """
+
+    cp: np.ndarray
+    box: np.ndarray
+    loose: np.ndarray
+    origin: np.ndarray
+    obj: np.ndarray
+    gflags: np.ndarray
+    obj_font: np.ndarray
+    obj_tf: np.ndarray
+    obj_size_eff: np.ndarray
+    obj_matrix: np.ndarray
+    obj_fill: np.ndarray
+    obj_stroke: np.ndarray
+    obj_render_mode: np.ndarray
+    obj_mcid: np.ndarray
+    obj_artifact: np.ndarray
+    obj_flags: np.ndarray
+    rec_cp: np.ndarray
+    rec_cx: np.ndarray
+    rec_cy: np.ndarray
+    rec_newline: np.ndarray
+    rec_src: np.ndarray
+    rec_flags: np.ndarray
+    span_rec: np.ndarray
+    span_obj: np.ndarray
+    span_bbox: np.ndarray
+    span_baseline: np.ndarray
+    line_span: np.ndarray
+    line_bbox: np.ndarray
+    line_block: np.ndarray
+    # Record index -> the record's char when it is not one code point.
+    rec_text: dict[int, str] = field(default_factory=dict)
+
+    @property
+    def nbytes(self) -> int:
+        return sum(getattr(self, name).nbytes for name in COLUMN_DTYPES)
+
+    def record_char(self, index: int) -> str:
+        text = self.rec_text.get(index)
+        return text if text is not None else chr(int(self.rec_cp[index]))
+
+
+@dataclass(frozen=True, slots=True)
+class RenderRecipe:
+    """How the layout stage rendered the page, so it can be rendered again.
+
+    ``dpi`` is the DPI the layout render used (reduced for pages over the
+    render budget; None when the page could not be rendered within it).
+    ``flags`` names the pypdfium2 render options in effect. ``rgb_sha256``,
+    the digest of the rendered RGB bytes, is filled once rendering from the
+    recipe is wired up (D4). A re-render must open a fresh document: the
+    furniture strip edits the inspected document's pages in memory.
+    """
+
+    pdfium: str
+    dpi: int | None
+    crop_box: Box
+    rotation: int
+    flags: tuple[str, ...]
+    rgb_sha256: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Font:
+    font_id: int
+    base_name: str
+    family: str
+    # PDF font-descriptor flags (/Flags).
+    pdf_flags: int
+    weight: int
+    italic_angle: int
+    embedded: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RoleTag:
+    """A role given to a layer object (``target`` is its id)."""
+
+    target: str
+    # superscript | subscript (D1); running_header, page_number, ... later.
+    role: str
+    decided: Decided
+
+
+@dataclass(frozen=True, slots=True)
+class Furniture:
+    """A page object removed before the text layer was read."""
+
+    page: int
+    # watermark | line_number
+    kind: str
+    bbox_pdf: Box | None
+    text: str
+    decided: Decided
+
+
+@dataclass(frozen=True, slots=True)
+class Suppressed:
+    """A layout box the layout post-processing removed (D3)."""
+
+    page: int
+    bbox_pdf: Box
+    label: str
+    score: float
+    query: int | None
+    # threshold | nms | full_page | containment | ocr_dedupe
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class OutlineEntry:
+    """A PDF outline (bookmark) entry (D2)."""
+
+    idx: int
+    parent: int | None
+    level: int
+    title: str
+    page: int | None
+    x: float | None
+    y: float | None
+    dest_name: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class OutlineGuard:
+    """The outline guard's verdict on the outline (D2)."""
+
+    version: str
+    passed: bool
+    reject: str | None
+    dropped: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Link:
+    """A link annotation and where it points (D2)."""
+
+    link_id: str
+    page: int
+    rect: Box
+    quads: tuple[tuple[float, ...], ...]
+    # goto | dest | uri | remote | launch | named
+    action: str
+    uri: str | None
+    dest_name: str | None
+    name_source: str | None
+    target_page: int | None
+    target_xy: tuple[float, float] | None
+    # bib | float | section | other | external | unresolved
+    target_class: str | None
+    target: Decided | None
+    source_span_ids: tuple[str, ...]
+    target_block_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class StructElem:
+    """A structure-tree element of a tagged PDF (D2)."""
+
+    elem_id: str
+    parent: str | None
+    role: str
+    mcids: tuple[int, ...]
+    page: int | None
+    alt: str | None
+    actual: str | None
+    lang: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionRecord:
+    """A decision with its full distribution (D3)."""
+
+    subject: str
+    decided: Decided
+    chosen: str | None
+    distribution: tuple[tuple[str, float], ...]
+    extra: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class Presence:
+    """What the document has, so a consumer can tell "absent" from "not read".
+
+    None means the fact was not read (D2 and D3 fill the rest).
+    """
+
+    has_text_layer: bool | None = None
+    is_scan: bool | None = None
+    has_invisible_layer: bool | None = None
+    has_outline: bool | None = None
+    outline_guard_pass: bool | None = None
+    is_tagged: bool | None = None
+    has_mcids: bool | None = None
+    has_internal_links: bool | None = None
+    has_named_dests: bool | None = None
+    has_layout_provenance: bool | None = None
+    # pdfium functions this pypdfium2 build lacks; the fields they feed are unread.
+    missing_apis: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
+class Block:
+    """A post-OCR region placed in the layer.
+
+    D1 ids are ``p{page}.r{region index}`` and ``region_key`` is the
+    ``(1-based page, region index)`` pair that region summaries carry. D3
+    moves the ids to the layout slot before OCR renumbering and fills the
+    layout provenance and lineage.
+    """
+
+    block_id: str
+    page: int
+    bbox_pdf: Box
+    label: str
+    native_label: str
+    layout: Decided | None = None
+    class_topk: tuple[tuple[str, float], ...] = ()
+    # Position in the page's region list (the regions' reading order).
+    read_order: int | None = None
+    # Region text by source: native | ocr. Text-layer text of any block is
+    # read with bibr.document.views.block_text.
+    text: dict[str, str] = field(default_factory=dict)
+    chosen: str | None = None
+    # min_chars | usability | private_use | ineligible_label (D3)
+    native_gate: str | None = None
+    finish_reason: str | None = None
+    # Indexes of the page lines assigned to the block (PageColumns.line_block).
+    lines: tuple[int, ...] = ()
+    source_block_ids: tuple[str, ...] = ()
+    region_key: tuple[int, int] | None = None
+
+
+@dataclass(slots=True)
+class Page:
+    index: int
+    # The PDF page label (D2).
+    label: str | None
+    width: float
+    height: float
+    crop_box: Box
+    rotation: int
+    # native | invisible_layer | ocr
+    text_source: str
+    # None when the page has no text layer.
+    cols: PageColumns | None
+    blocks: list[Block] = field(default_factory=list)
+    suppressed: list[Suppressed] = field(default_factory=list)
+    furniture: list[Furniture] = field(default_factory=list)
+    render: RenderRecipe | None = None
+    # The evidence for text_source: the share of countable glyphs drawn
+    # invisibly and, when that share qualifies, the image coverage.
+    invisible_share: float | None = None
+    image_coverage: float | None = None
+
+
+@dataclass(slots=True)
+class DocumentLayer:
+    version: str
+    # pypdfium2 and pdfium versions the layer was read with.
+    pdfium: str
+    source_sha256: str
+    index_frame: str
+    pages: list[Page]
+    fonts: list[Font]
+    outline: list[OutlineEntry] = field(default_factory=list)
+    outline_guard: OutlineGuard | None = None
+    links: list[Link] = field(default_factory=list)
+    struct: list[StructElem] = field(default_factory=list)
+    roles: list[RoleTag] = field(default_factory=list)
+    decisions: list[DecisionRecord] = field(default_factory=list)
+    presence: Presence = field(default_factory=Presence)
+    # Failures of layer components, keyed like "harvest:3"; they never fail
+    # the paper and never reach PdfInspection.component_errors.
+    component_errors: dict[str, str] = field(default_factory=dict)
+
+    def page(self, index: int) -> Page | None:
+        """The page with absolute 0-based *index*, if the layer covers it."""
+        for page in self.pages:
+            if page.index == index:
+                return page
+        return None
+
+    @property
+    def nbytes(self) -> int:
+        """Bytes held in numpy columns (the bulk of the layer)."""
+        return sum(page.cols.nbytes for page in self.pages if page.cols is not None)
