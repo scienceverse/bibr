@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from bibr.document import destinations, ids, outline, outline_guard
+from bibr.document import destinations, ids, links, outline, outline_guard
 from bibr.document.model import (
     COLUMN_DTYPES,
     GLYPH_EXCLUDED,
@@ -51,6 +51,7 @@ from bibr.document.model import (
     DocumentLayer,
     Font,
     Furniture,
+    Link,
     OutlineEntry,
     OutlineGuard,
     Page,
@@ -95,6 +96,8 @@ _HARVEST_APIS = (
     "FPDF_GetPageLabel",
     *destinations.APIS,
     *outline.APIS,
+    *links.APIS,
+    *links.NAME_APIS,
 )
 
 # How the layout stage renders a page (bibr.ocr.image_utils.iter_pdf_pages_with_index):
@@ -948,6 +951,7 @@ class LayerBuilder:
         # The outline's entries; None until it is read, and when it cannot be.
         self.outline: list[OutlineEntry] | None = None
         self.meta_title: str | None = None
+        self.raw_links: list[links.RawLink] = []
 
     def start(self, doc) -> None:
         """Read what the document declares as a whole: call right after opening *doc*.
@@ -984,6 +988,26 @@ class LayerBuilder:
         except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
             self.errors[f"label:{page_index}"] = _error_text(exc)
 
+    def _read_links(self, page, page_index: int) -> None:
+        if self.doc is None or self._lacks(links.APIS + destinations.APIS):
+            return
+        try:
+            found, error = links.read_page_links(
+                self._api,
+                self.doc,
+                page,
+                page_index,
+                self.names,
+                self.n_pages,
+                with_names=not self._lacks(links.NAME_APIS),
+            )
+        except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
+            self.errors[f"links:{page_index}"] = _error_text(exc)
+            return
+        self.raw_links.extend(found)
+        if error is not None:
+            self.errors[f"links:{page_index}"] = error
+
     def records(
         self, textpage, page_index: int
     ) -> tuple[nt.PageCharTrace | None, list[tuple[str, float, float, bool]] | None]:
@@ -1009,6 +1033,7 @@ class LayerBuilder:
         walk: list | None = None,
     ) -> None:
         self._read_label(page_index)
+        self._read_links(page, page_index)
         failed = [text for kind, _box, text in furniture if kind == "error"]
         if failed:
             self.errors[f"furniture:{page_index}"] = failed[0]
@@ -1059,6 +1084,16 @@ class LayerBuilder:
             self.errors["outline_guard"] = _error_text(exc)
             return None
 
+    def _build_links(self, pages: list[Page]) -> list[Link] | None:
+        """The links with their classes; None when they could not be read or built."""
+        if self._lacks(links.APIS + destinations.APIS):
+            return None
+        try:
+            return links.build_links(self.raw_links, pages)
+        except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
+            self.errors["links"] = _error_text(exc)
+            return None
+
     def page_failed(
         self, page_index: int, key: str, exc: BaseException, page: Page | None = None
     ) -> None:
@@ -1102,6 +1137,7 @@ class LayerBuilder:
         for page in pages:
             page.label = self.labels.get(page.index)
         guard = self._judge_outline(pages)
+        built_links = self._build_links(pages)
         # A fact no examined page shows is unknown, not absent, while another
         # page was not examined. A page's text source counts once decided, even
         # if the page failed later; marked content needs the page's columns.
@@ -1127,6 +1163,11 @@ class LayerBuilder:
             ),
             has_outline=len(self.outline) > 0 if self.outline is not None else None,
             outline_guard_pass=guard.passed if guard is not None else None,
+            has_internal_links=(
+                None
+                if built_links is None
+                else seen(any(link.action in ("dest", "goto") for link in built_links), read)
+            ),
             has_mcids=(
                 None if "FPDFPageObj_GetMarkedContentID" in self.missing else seen(mcids, read)
             ),
@@ -1145,6 +1186,7 @@ class LayerBuilder:
             fonts=list(self.fonts.fonts),
             outline=self.outline or [],
             outline_guard=guard,
+            links=built_links or [],
             roles=roles,
             presence=presence,
             component_errors=dict(self.errors),
