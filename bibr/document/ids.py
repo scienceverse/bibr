@@ -2,11 +2,19 @@
 
 An id names one object on one page: the absolute 0-based page index, a
 lowercase kind prefix, and the object's index among that page's objects of
-the kind. The same PDF and page range always give the same ids. D1's kinds
-are spans ``sp`` (rows of ``PageColumns.span_rec``), lines ``l``
-(``PageColumns.line_span``), blocks ``r`` (the page's post-OCR regions, in
-order) and furniture ``f`` (``Page.furniture``). :func:`make` and
-:func:`parse` take any lowercase prefix, so later kinds need no new parser.
+the kind. D1's kinds are spans ``sp`` (rows of ``PageColumns.span_rec``),
+lines ``l`` (``PageColumns.line_span``), blocks ``r`` (the page's post-OCR
+regions, in order) and furniture ``f`` (``Page.furniture``). :func:`make`
+and :func:`parse` take any lowercase prefix, so later kinds need no new
+parser.
+
+Span, line and furniture ids come from the PDF alone: the same PDF read
+under the same :data:`~bibr.document.model.INDEX_FRAME` and pdfium gives the
+same ids. Block ids do not: a block's index is its position in the post-OCR
+region list, which depends on the layout model and on OCR merges, and D3
+moves block ids to the layout slot. Resolve blocks through
+:mod:`bibr.document.views`, and do not build block ids from region indexes
+or persist them before then.
 """
 
 from __future__ import annotations

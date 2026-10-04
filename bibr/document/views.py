@@ -5,6 +5,12 @@ the layer alone: :func:`block_text` the native fill of a region,
 :func:`page_lines` the reference line stream's page lines and
 :func:`bbox_pdf_pts` a region's ``_bbox_pdf_pts``. The tests hold them to
 byte equality with the pipeline's own values.
+
+The views that read a page's glyph columns give empty results ("", [] or
+None) for a page without them: a page with no text layer, a page the
+harvest failed on (``Page.error`` is set) and every page once the layer's
+columns were freed (``DocumentLayer.columns_freed``). Check those two
+before reading an empty result as a page without text.
 """
 
 from __future__ import annotations
@@ -184,6 +190,9 @@ def page_chars(page: Page) -> list[tuple[str, Box]]:
     (its one-unit buffer holds only the high surrogate, and pypdfium2 decodes
     with ``errors="ignore"``), U+FFFE for pdfium's line-end hyphen, otherwise
     the char itself. Raises where that read raises (a missing box).
+
+    [] for a page without columns, including a failed page: check
+    ``page.error`` and ``DocumentLayer.columns_freed``.
     """
     from bibr.ocr.native_text import compose_spacing_accents
 
@@ -208,7 +217,11 @@ def page_chars(page: Page) -> list[tuple[str, Box]]:
 
 
 def page_lines(page: Page) -> list[dict[str, Any]]:
-    """The page's text-layer lines as ``PdfInspection.page_lines`` holds them."""
+    """The page's text-layer lines as ``PdfInspection.page_lines`` holds them.
+
+    [] for a page without columns, including a failed page: check
+    ``page.error`` and ``DocumentLayer.columns_freed``.
+    """
     from bibr.ocr.pdf_inspection import _break_wrapped_lines, _page_line_dicts
     from bibr.ocr.ref_geometry import group_chars_into_lines
 
