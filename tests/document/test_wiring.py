@@ -100,6 +100,22 @@ def test_layer_fields_stay_out_of_equality_and_repr(cls, name):
     assert found.repr is False
 
 
+def test_the_cached_page_inspection_keeps_its_fields():
+    # OCR bundles store PdfPageInspection, and the bundle reader deletes any
+    # entry it cannot decode: the layer rides on PdfInspection, never here.
+    from bibr.ocr.pdf_inspection import PdfPageInspection
+
+    assert [item.name for item in dataclasses.fields(PdfPageInspection)] == [
+        "index",
+        "width",
+        "height",
+        "crop_box",
+        "char_count",
+        "invisible_text_layer",
+        "watermarks",
+    ]
+
+
 def test_file_state_ignores_its_layer_and_frees_it():
     first, second = FileState(path=Path("a.pdf")), FileState(path=Path("a.pdf"))
     second.doc_layer = object()
