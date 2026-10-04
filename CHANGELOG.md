@@ -24,8 +24,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   document title, such as a sidebar or box heading ("When No Default Is Your
   Best Option"), is no longer dropped as a running head, so the sidebar no
   longer merges into the section around it. A later-page title in the top or
-  bottom margin, one repeated on other pages, a copyright line and the title
-  printed again behind a cover sheet are still dropped (part of #122).
+  bottom margin, one repeated on other pages, a copyright line, the title
+  printed again behind a cover sheet and a title that heads its own abstract,
+  keywords or byline (the title in a second language) are still dropped, so
+  such a title does not open a second front-matter record (part of #122).
 - A preprint banner longer than 200 characters that repeats in the top or
   bottom margin of several pages, such as the medRxiv rights, licence and DOI
   lines, is now dropped as page furniture. Copies the layout model labelled

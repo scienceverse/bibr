@@ -7,6 +7,8 @@ swallow the body — see eyecolor.pdf, where a page-2 author-line ``doc_title``
 swallowed the entire Introduction.
 """
 
+import pytest
+
 from bibr.structure.pdf_parser import PDFParser
 
 
@@ -444,6 +446,79 @@ def test_mid_page_copyright_doc_title_on_a_later_page_stays_demoted():
     parser._mark_running_headers()
 
     assert (2, 1) in parser._running_header_regions
+
+
+_TRANSLATED_TITLE = "Mémoire de l’humidité du sol dans les pâturages d’altitude"
+
+
+def _two_language_pages(record_rows: list[dict]) -> list[list[dict]]:
+    """An article printed with its title and front matter again in a second language.
+
+    Page 2 ends the body, then a mid-page ``doc_title`` heads *record_rows*.
+    """
+    return [
+        [
+            _heading("doc_title", "Soil Moisture Memory in Upland Pastures", y=150),
+            _text("Ada Field and Ben Moor", y=200),
+            {
+                "label": "abstract",
+                "content": "Pastures keep the moisture of a wet spring well into summer.",
+                "bbox_2d": [50, 260, 500, 360],
+            },
+            _text("Upland pastures dry out late in the season.", y=420),
+        ],
+        [
+            _text("We thank the farmers who let us sample their fields.", y=150),
+            _heading("doc_title", _TRANSLATED_TITLE, y=420),
+            *record_rows,
+        ],
+    ]
+
+
+@pytest.mark.parametrize(
+    "record_rows",
+    [
+        [
+            _heading("paragraph_title", "Résumé", y=470),
+            _text("Les pâturages gardent l’humidité d’un printemps humide.", y=500),
+        ],
+        [
+            _text("Les pâturages gardent l’humidité d’un printemps humide.", y=470),
+            _text("Mots-clés : sol · pâturage · été", y=560),
+        ],
+        [
+            {
+                "label": "abstract",
+                "content": "Les pâturages gardent l’humidité d’un printemps humide.",
+                "bbox_2d": [50, 470, 500, 560],
+            }
+        ],
+        [
+            _heading("paragraph_title", "A. Field", y=470),
+            _text("Upland Soil Institute, Northtown. E-mail: a.field@example.org", y=500),
+        ],
+    ],
+    ids=["abstract-heading", "keywords-lead-in", "abstract-region", "byline-e-mail"],
+)
+def test_later_page_title_heading_its_own_record_stays_demoted(record_rows):
+    """Kept as a sidebar heading, the translated title opened a second title
+    section and front matter could not choose between the two records."""
+    parser = PDFParser(json_result=_two_language_pages(record_rows))
+    parser._mark_running_headers()
+
+    assert (1, 1) in parser._running_header_regions
+
+    contents = PDFParser(json_result=_two_language_pages(record_rows)).parse()
+    assert not any(s.header == _TRANSLATED_TITLE for s in contents.sections)
+
+
+def test_sidebar_prose_that_mentions_an_abstract_keeps_its_heading():
+    pages = _sidebar_pages("When No Default Is Your Best Option")
+    pages[2][2] = _text("Abstract defaults rarely help a customer decide.", y=600)
+    parser = PDFParser(json_result=pages)
+    parser._mark_running_headers()
+
+    assert (2, 1) not in parser._running_header_regions
 
 
 # A preprint server banner: the rights line plus the licence and DOI lines, one

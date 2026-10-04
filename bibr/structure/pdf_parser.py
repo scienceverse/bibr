@@ -38,6 +38,7 @@ from bibr.input.consolidate_text import fix_ocr_artifacts
 from bibr.ocr.ref_patterns import alnum_key, alnum_text_covered
 from bibr.ocr.types import OcrRegionResult
 from bibr.paper_contents import (
+    CANONICAL_SECTION_ALIASES,
     FRONT_MATTER_MASTHEAD_RE,
     CanonicalSection,
     PaperContents,
@@ -137,6 +138,30 @@ _RUNNING_HEADER_MAX_LEN = 200
 # however often it repeats.
 _RUNNING_HEADER_TOP_Y = 100.0
 _RUNNING_HEADER_BOTTOM_Y = 900.0
+
+# A row that opens an abstract or a keyword list, in any language the section
+# aliases know: the bare heading ("RÉSUMÉ") or its lead-in ("Key words: …").
+_RECORD_LEAD_IN_RE = re.compile(
+    r"(?:"
+    + "|".join(
+        re.escape(alias)
+        for alias in sorted(
+            {
+                *CANONICAL_SECTION_ALIASES[CanonicalSection.ABSTRACT],
+                *CANONICAL_SECTION_ALIASES[CanonicalSection.KEYWORDS],
+            },
+            key=len,
+            reverse=True,
+        )
+    )
+    + r")\s*(?:[:.—–-]|$)",
+    re.IGNORECASE,
+)
+# A byline's contact line: an e-mail address or an ORCID.
+_RECORD_CONTACT_RE = re.compile(
+    r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+|\borcid\b|\b\d{4}-\d{4}-\d{4}-\d{3}[\dX]\b",
+    re.IGNORECASE,
+)
 
 
 def _bbox_containment_fraction(inner: list | tuple | None, outer: list | tuple | None) -> float:
@@ -760,7 +785,8 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
            a later page is usually the layout model misclassifying a
            running-header (page-2+ author line, banner, journal name), and
            is demoted when it has furniture's geometry or text (see
-           :meth:`_is_later_doc_title_furniture`); a mid-page one is a
+           :meth:`_is_later_doc_title_furniture`) or heads a record of its
+           own (see :meth:`_heads_own_record`); a mid-page one is otherwise a
            sidebar heading and stays.
         """
         # Heuristic 1: multi-page repeats (any heading label).
@@ -900,8 +926,11 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 (pi, ri)
                 for pi, ri, text in doc_title_occurrences[anchor + 1 :]
                 if pi != anchor_page
-                and self._is_later_doc_title_furniture(
-                    pi, ri, text, anchor_page, doc_title_occurrences, seen
+                and (
+                    self._is_later_doc_title_furniture(
+                        pi, ri, text, anchor_page, doc_title_occurrences, seen
+                    )
+                    or self._heads_own_record(pi, ri)
                 )
             )
 
@@ -940,6 +969,37 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         return bool(key and title_key) and (
             alnum_text_covered(key, title_key) or alnum_text_covered(title_key, key)
         )
+
+    def _heads_own_record(self, page_idx: int, region_idx: int) -> bool:
+        """Whether a later-page ``doc_title`` heads an article record of its own.
+
+        The article's title in a second language (over its translated
+        abstract and keywords, or over the byline again) and the article's
+        title page behind a cover sheet are followed on their page by record
+        anatomy: an abstract region, an abstract or keywords heading or
+        lead-in, or a byline's e-mail or ORCID. A sidebar heading is followed
+        by the sidebar's prose. Kept as a heading, such a title opens a second
+        title section, and front matter then cannot choose between the two
+        records, so it stays demoted as before. The rows read are the body
+        rows after it on its page, up to the next ``doc_title``.
+        """
+        for row_idx in range(region_idx + 1, len(self.json_result[page_idx])):
+            region = self.json_result[page_idx][row_idx]
+            label = region.native_label if region.native_label in LABEL_TREATMENT else region.label
+            if label == "doc_title":
+                return False
+            if label == "abstract":
+                return True
+            if (page_idx, row_idx) in self._running_header_regions or (
+                label != "paragraph_title" and LABEL_TREATMENT.get(label) != "content"
+            ):
+                continue
+            row = self._clean_region_content.get((page_idx, row_idx), "")
+            row = strip_markdown_emphasis(re.sub(r"^#{1,6}\s*", "", row.strip()))
+            row = " ".join(row.split())
+            if _RECORD_LEAD_IN_RE.match(row) or _RECORD_CONTACT_RE.search(row):
+                return True
+        return False
 
     def _mark_reference_envelopes(self) -> None:
         """Shadow whichever of an aggregate reference box and its entries is redundant.
