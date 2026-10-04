@@ -264,7 +264,8 @@ def block_at(
     point (``destinations.BAND_ABOVE`` points above it to ``BAND_BELOW`` below)
     and whose box reaches the point's x: a destination sits a little above
     what it points at. An open x matches any block; an open y, which is a
-    whole page or its left margin, lands in none.
+    whole page or its left margin, lands in none. A block without a box (a
+    region the layout gave none) is never the one it lands in.
     """
     target = layer.page(page)
     if target is None or xy is None:
@@ -277,17 +278,14 @@ def block_at(
     def reaches(box: Box, slack: float) -> bool:
         return x is None or box[0] - slack <= x <= box[2] + slack
 
-    holding = [
-        b for b in target.blocks if b.bbox_pdf[1] <= y <= b.bbox_pdf[3] and reaches(b.bbox_pdf, 0.0)
-    ]
+    boxed = [b for b in target.blocks if b.bbox_pdf is not None]
+    holding = [b for b in boxed if b.bbox_pdf[1] <= y <= b.bbox_pdf[3] and reaches(b.bbox_pdf, 0.0)]
     if holding:
         return min(
             holding, key=lambda b: (b.bbox_pdf[2] - b.bbox_pdf[0]) * (b.bbox_pdf[3] - b.bbox_pdf[1])
         )
     under = [
-        b
-        for b in target.blocks
-        if y - below <= b.bbox_pdf[3] <= y + above and reaches(b.bbox_pdf, above)
+        b for b in boxed if y - below <= b.bbox_pdf[3] <= y + above and reaches(b.bbox_pdf, above)
     ]
     return min(under, key=lambda b: (-b.bbox_pdf[3], b.bbox_pdf[0])) if under else None
 

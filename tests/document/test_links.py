@@ -418,6 +418,16 @@ def test_a_destination_far_from_every_block_lands_in_none():
     assert views.block_at(layer, 3, (30.0, 662.0)) is None
 
 
+def test_a_block_without_a_box_lands_nothing():
+    layer = _with_blocks()
+    page = layer.page(3)
+    # A region the layout gave no box (D1 keeps it as a block with bbox_pdf None).
+    page.blocks.insert(0, replace(_block(9, None, "Text"), block_id="p3.r9"))
+
+    assert views.block_at(layer, 3, (72.0, 662.0)).block_id == "p3.r1"
+    assert views.block_at(layer, 3, (72.0, 400.0)) is None
+
+
 def test_a_destination_with_an_open_coordinate_is_placed_by_the_other_one_or_not_at_all():
     layer = _with_blocks()
 
