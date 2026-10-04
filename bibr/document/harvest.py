@@ -1032,7 +1032,9 @@ class LayerBuilder:
         if self._lacks(structure.APIS):
             return
         try:
-            found, has_tree, note = structure.read_page_tree(self._api, page, page_index)
+            found, has_tree, note = structure.read_page_tree(
+                self._api, page, page_index, limit=structure.MAX_ELEMENTS - len(self.struct)
+            )
         except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
             self.errors[f"struct:{page_index}"] = _error_text(exc)
             return

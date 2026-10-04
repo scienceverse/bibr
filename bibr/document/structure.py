@@ -55,18 +55,24 @@ KIND = "st"
 # Whether the catalog's /MarkInfo says the PDF is tagged.
 CATALOG_APIS = ("FPDFCatalog_IsTagged",)
 
-# A page's tree with more elements than this is read to this many (the busiest
-# page of gate192 has a few hundred), so a hostile tree cannot hold the lock
-# for long.
-MAX_ELEMENTS = 50_000
+# A document with more structure elements than this is read to this many (the busiest
+# gate192 paper has 3,560, its busiest page 803), and an element with more kids than
+# MAX_KIDS is read to that many (the busiest holds 411 marked-content references), so a
+# hostile tree cannot hold the lock for long.
+MAX_ELEMENTS = 100_000
+MAX_KIDS = 10_000
 
 
-def read_page_tree(api: _Api, page, page_index: int) -> tuple[list[StructElem], bool, str | None]:
+def read_page_tree(
+    api: _Api, page, page_index: int, *, limit: int = MAX_ELEMENTS
+) -> tuple[list[StructElem], bool, str | None]:
     """The page's structure elements in document order, whether it has a tree, and a note.
 
     A page has a tree when the PDF has a structure tree root that reaches pages
-    (a page with no tagged content has a tree and no elements). The note says
-    why the walk ended early; the elements read before then are kept.
+    (a page with no tagged content has a tree and no elements). At most *limit*
+    elements are read: what the document's allowance of them has left. The note says
+    why the walk ended early or an element was cut short; the elements read before
+    then are kept.
     """
     tree = api.FPDF_StructTree_GetForPage(page.raw)
     if not tree:
@@ -74,12 +80,15 @@ def read_page_tree(api: _Api, page, page_index: int) -> tuple[list[StructElem], 
     elements: list[StructElem] = []
     note: str | None = None
     try:
+        tops = api.FPDF_StructTree_CountChildren(tree)
+        if tops > MAX_KIDS:
+            note = f"a tree with more than {MAX_KIDS} top-level elements, the rest unread"
         # Elements still to visit, as (element, parent id, path). An element's
         # kids go on the stack in reverse, so they come off in order, each with
         # its subtree before the next one.
         pending: list[tuple[Any, str | None, tuple[int, ...]]] = [
             (api.FPDF_StructTree_GetChildAtIndex(tree, index), None, (index,))
-            for index in reversed(range(api.FPDF_StructTree_CountChildren(tree)))
+            for index in reversed(range(min(tops, MAX_KIDS)))
         ]
         seen: set[int] = set()
         while pending:
@@ -91,11 +100,14 @@ def read_page_tree(api: _Api, page, page_index: int) -> tuple[list[StructElem], 
             if address in seen:
                 note = "circular structure reference"
                 continue
-            if len(elements) >= MAX_ELEMENTS:
+            if len(elements) >= limit:
                 note = f"more than {MAX_ELEMENTS} structure elements, the rest unread"
                 break
             seen.add(address)
-            elements.append(_element(api, handle, page_index, len(elements), parent, path, pending))
+            element, cut = _element(api, handle, page_index, len(elements), parent, path, pending)
+            elements.append(element)
+            if cut:
+                note = note or f"an element with more than {MAX_KIDS} kids, the rest unread"
     except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
         note = f"{type(exc).__name__}: {exc}"[:500]
     finally:
@@ -111,12 +123,16 @@ def _element(
     parent: str | None,
     path: tuple[int, ...],
     pending: list[tuple[Any, str | None, tuple[int, ...]]],
-) -> StructElem:
-    """The element at *handle*; its element kids are pushed onto *pending*."""
+) -> tuple[StructElem, bool]:
+    """The element at *handle*, and whether it has more kids than were read.
+
+    Its element kids are pushed onto *pending*.
+    """
     elem_id = ids.make(page_index, KIND, number)
     mcrs: list[tuple[int, int]] = []
     kids = []
-    for index in range(api.FPDF_StructElement_CountChildren(handle)):
+    count = api.FPDF_StructElement_CountChildren(handle)
+    for index in range(min(count, MAX_KIDS)):
         kid = api.FPDF_StructElement_GetChildAtIndex(handle, index)
         if kid:
             kids.append((kid, elem_id, (*path, index)))
@@ -126,7 +142,7 @@ def _element(
         if mcid >= 0:
             mcrs.append((page_index, int(mcid)))
     pending.extend(reversed(kids))
-    return StructElem(
+    element = StructElem(
         elem_id=elem_id,
         parent=parent,
         role=destinations.utf16_text(api.FPDF_StructElement_GetType, handle) or "",
@@ -137,3 +153,4 @@ def _element(
         actual=destinations.utf16_text(api.FPDF_StructElement_GetActualText, handle),
         lang=destinations.utf16_text(api.FPDF_StructElement_GetLang, handle),
     )
+    return element, count > MAX_KIDS
