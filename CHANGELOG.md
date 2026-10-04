@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- An optional document layer (`pipeline.document_layer`, environment variable
+  `PIPELINE_DOCUMENT_LAYER`; off by default) keeps what the PDF itself says about each
+  page, so later stages can use it as evidence: text spans and lines with their fonts,
+  effective sizes and superscripts, the page furniture the strip removes (line numbers,
+  watermarks) with ids, the text source chosen for each page, and a block for every
+  layout region. Pages that fail to read stay in the layer with their error. Nothing
+  reads the layer yet, so exports do not change.
+
 ### Fixed
 
 - Corresponding authors whose address sits in a footnote are now found without the
