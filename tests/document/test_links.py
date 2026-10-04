@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 
 import pytest
@@ -492,6 +493,17 @@ def test_a_block_without_a_box_lands_nothing():
     assert views.block_at(layer, 3, (72.0, 400.0)) is None
 
 
+def test_a_block_whose_box_is_not_finite_lands_nothing():
+    # A box with NaN in it compares false with any point, so such a block is never the one a
+    # destination lands in, and nothing raises.
+    layer = _with_blocks()
+    nan = float("nan")
+    layer.page(3).blocks.insert(0, _block(9, (nan, nan, nan, nan), "Text"))
+
+    assert views.block_at(layer, 3, (72.0, 662.0)).block_id == "p3.r1"
+    assert views.block_at(layer, 3, (72.0, 400.0)) is None
+
+
 def test_a_destination_with_an_open_coordinate_is_placed_by_the_other_one_or_not_at_all():
     layer = _with_blocks()
 
@@ -506,3 +518,74 @@ def test_a_destination_on_a_page_the_layer_lacks_lands_in_none():
 
     assert views.block_at(layer, 9, (72.0, 662.0)) is None
     assert views.block_at(_layer(pages=[0]), 3, (72.0, 662.0)) is None
+
+
+# --- Pages the harvest could not read ---------------------------------------------------
+
+
+def _numbers(layer) -> list[float]:
+    """Every number the layer's links and outline hold, to see that none is NaN."""
+    found = []
+    for link in layer.links:
+        found.extend(link.rect)
+        found.extend(value for quad in link.quads for value in quad)
+        found.extend(value for value in link.target_xy or () if value is not None)
+    for entry in layer.outline:
+        found.extend(value for value in (entry.x, entry.y) if value is not None)
+    return found
+
+
+@pytest.mark.parametrize("failing", ["_read_objects", "_spans_and_lines"])
+def test_links_and_the_rest_survive_pages_whose_text_could_not_be_read(monkeypatch, failing):
+    whole = _layer()
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("no text")
+
+    monkeypatch.setattr(harvest, failing, broken)
+    layer = _layer()
+
+    assert all(page.cols is None and page.error for page in layer.pages)
+    # What the PDF declares is read from pdfium's page and not from its text: it stays.
+    assert layer.struct == whole.struct and layer.outline == whole.outline
+    assert [page.label for page in layer.pages] == _linked.PAGE_LABELS
+    for link, read in zip(layer.links, whole.links, strict=True):
+        assert (link.link_id, link.rect, link.quads, link.action, link.uri) == (
+            read.link_id,
+            read.rect,
+            read.quads,
+            read.action,
+            read.uri,
+        )
+        assert (link.dest_name, link.target_page, link.target_xy) == (
+            read.dest_name,
+            read.target_page,
+            read.target_xy,
+        )
+        # The text it covers and the text under its destination are unavailable.
+        assert link.source_span_ids == ()
+    # A class a name or an action gives stands; one the text under the destination gave does not.
+    for link, spec in zip(layer.links, _linked.LINKS, strict=True):
+        *_, target_class, component = EXPECTED[spec.runs[0]]
+        assert link.target_class == ("other" if component == "text" else target_class), spec.runs[0]
+    assert all(math.isfinite(value) for value in _numbers(layer))
+    assert all(
+        views.block_at(layer, link.target_page, link.target_xy) is None
+        for link in layer.links
+        if link.target_page is not None
+    )
+    presence = layer.presence
+    assert presence.has_internal_links is True
+    assert (presence.is_tagged, presence.has_outline, presence.has_named_dests) == (True,) * 3
+    # The outline guard's R3 reads the text, so a pass cannot be judged.
+    assert layer.outline_guard is None and presence.outline_guard_pass is None
+
+
+def test_a_page_that_could_not_be_opened_leaves_internal_links_unknown():
+    # Pages 2 and 3 hold no link; page 99 does not exist, so it might have held one.
+    assert {spec.page for spec in _linked.LINKS}.isdisjoint({2, 3})
+    layer = _layer(pages=[2, 3, 99])
+
+    assert layer.links == [] and layer.page(99).error is not None
+    assert layer.presence.has_internal_links is None
+    assert _layer(pages=[2, 3]).presence.has_internal_links is False
