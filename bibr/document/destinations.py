@@ -28,6 +28,9 @@ APIS = (
 # A document with more named destinations than this keeps its names unread, so
 # a hostile name tree cannot hold the lock for long.
 MAX_NAMED_DESTS = 100_000
+# A string over this many bytes reads as absent, so a hostile one is never copied whole
+# (the longest URI or alt text on gate192 and the manuscripts is 872 characters).
+MAX_TEXT = 1 << 16
 
 Position = tuple[float | None, float | None]
 
@@ -46,10 +49,11 @@ def utf16_text(function, *args) -> str | None:
     """The string a pdfium getter of ``(*args, buffer, size)`` returns, or None if it is absent.
 
     The getters return UTF-16LE with a terminating NUL, and their size
-    includes it, so an absent string is 0 bytes and an empty one is 2.
+    includes it, so an absent string is 0 bytes and an empty one is 2. A string
+    over :data:`MAX_TEXT` bytes is absent too.
     """
     size = function(*args, None, 0)
-    if size <= 0:
+    if size <= 0 or size > MAX_TEXT:
         return None
     # An array of 16-bit units suits the getters that type their buffer as void*
     # and those that type it as ushort*.
@@ -103,7 +107,7 @@ class NamedDests:
             size = ctypes.c_long(0)
             if not api.FPDF_GetNamedDest(self._doc.raw, index, None, ctypes.byref(size)):
                 continue
-            if size.value <= 2:
+            if size.value <= 2 or size.value > MAX_TEXT:
                 continue
             buffer = ctypes.create_string_buffer(size.value)
             dest = api.FPDF_GetNamedDest(self._doc.raw, index, buffer, ctypes.byref(size))
