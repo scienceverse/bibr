@@ -76,7 +76,8 @@ def find_block(layer: DocumentLayer, block_id: str) -> tuple[Page, Block] | None
         parsed = ids.parse(block_id)
     except ValueError:
         return None
-    page = layer.page(parsed.page)
+    # A document id (an outline entry, a structure element) names no page.
+    page = None if parsed.page is None else layer.page(parsed.page)
     if page is None:
         return None
     if parsed.kind == ids.BLOCK and parsed.n < len(page.blocks):
