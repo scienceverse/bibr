@@ -71,8 +71,9 @@ def test_appendix_aliases_moved_out_of_endnote():
         "supporting information",
     ):
         assert moved not in endnote, f"{moved!r} should have moved to APPENDIX"
-    # Conclusion/future-work-flavoured aliases stay in ENDNOTE.
-    assert "conclusions and future work" in endnote
+    # Conclusion/future-work-flavoured aliases are discussion, not endnotes.
+    assert "conclusions and future work" not in endnote
+    assert "conclusions and future work" in CANONICAL_SECTION_ALIASES[CanonicalSection.DISCUSSION]
     assert "extended data" in endnote
 
 

@@ -24,6 +24,8 @@ from bibr.paper_contents import (
     CANONICAL_SECTION_ALIASES,
     CanonicalSection,
     is_exact_front_matter_furniture,
+    is_section_container_heading,
+    is_section_furniture_heading,
 )
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 
@@ -356,7 +358,9 @@ def _classify_lookup_full(header_text: str) -> tuple[CanonicalSection, float, bo
     0.95 but are only *trusted* when the alias covers most of the header
     (``_SUBSTRING_TRUST_COVERAGE``); generic one-word aliases ("model",
     "limitations") inside longer headers are returned untrusted so the
-    caller can confirm them with the trained model / LLM.
+    caller can confirm them with the trained model / LLM. Coverage counts
+    every hit of the chosen type: "ethics approval and consent to
+    participate" is covered by "ethics" and "consent to participate" together.
     """
     header = header_text.lower()  # defensive: never trust the caller to normalize
 
@@ -371,16 +375,19 @@ def _classify_lookup_full(header_text: str) -> tuple[CanonicalSection, float, bo
     # Uses \b word boundaries to prevent partial-word matches
     # (e.g. "preferences" must not match the "references" alias).
     best: tuple[CanonicalSection, int] | None = None
+    covered: dict[CanonicalSection, int] = {}
     for m in _ALIAS_SUBSTRING_RE.finditer(header):
         alias = m.group(0)
         section = _ALIAS_TO_SECTION.get(alias)
         if section is None:
             continue
+        # finditer hits never overlap, so their lengths add up.
+        covered[section] = covered.get(section, 0) + len(alias)
         if best is None or len(alias) > best[1]:
             best = (section, len(alias))
 
     if best is not None:
-        coverage = best[1] / max(len(header), 1)
+        coverage = covered[best[0]] / max(len(header), 1)
         return best[0], 0.95, coverage >= _SUBSTRING_TRUST_COVERAGE
 
     return CanonicalSection.UNKNOWN, 0.0, False
@@ -640,13 +647,20 @@ async def classify_headers_batch_async(
 
     for i, text in enumerate(header_texts):
         clean_text = normalize_text(text)
-        if is_exact_front_matter_furniture(clean_text):
+        if (
+            is_exact_front_matter_furniture(clean_text)
+            or is_section_furniture_heading(text)
+            or is_section_container_heading(clean_text)
+        ):
             # Printed page furniture ("OPEN ACCESS", "SHORT COMMUNICATION",
-            # "Check for updates"). There is no vocabulary member for it, so
-            # the model/LLM tiers are forced to guess and confidently answer
-            # TITLE — which then seeds a false front-matter record. UNKNOWN is
-            # the honest answer and still reaches front matter, where
-            # ``_is_false_title_seed`` vetoes it by the same list.
+            # "Check for updates"), cover-sheet labels ("Word count") and
+            # container headings ("Declarations", "Research in context").
+            # There is no vocabulary member for them, so the model/LLM tiers
+            # are forced to guess and confidently answer TITLE or an IMRaD
+            # type — which then seeds a false front-matter record or anchors
+            # the body. UNKNOWN is the honest answer and still reaches front
+            # matter, where ``_is_false_title_seed`` vetoes furniture by the
+            # same list.
             results[i] = (CanonicalSection.UNKNOWN, 0.0, None, None)
             continue
         section, score, trusted = _classify_lookup_full(clean_text)
@@ -873,5 +887,8 @@ def classify_headers_batch(
     results = []
     for text in header_texts:
         clean_text = normalize_text(text)
+        if is_section_furniture_heading(text) or is_section_container_heading(clean_text):
+            results.append((CanonicalSection.UNKNOWN, 0.0))
+            continue
         results.append(_classify_lookup(clean_text))
     return results

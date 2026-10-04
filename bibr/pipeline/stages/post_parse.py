@@ -49,10 +49,68 @@ _REF_DEFICIT_RATIO = 0.5
 # inflate the count.
 _NUMBERED_CITE_MIN_DENSITY = 0.5
 
-_RESULTS_CHILD_CUE_RE = re.compile(
-    r"\b(?:results?|findings?|outcomes?|views?|perspectives?|experiences?|themes?|engagement)\b",
+# Section-type tiers that read the heading itself; their type is kept when
+# the heading's context says otherwise.
+_HEADING_TYPE_SOURCES = frozenset({"exact_alias", "substring_alias", "title"})
+# Subheadings a structured abstract prints as rows of their own.
+_STRUCTURED_ABSTRACT_LABEL_RE = re.compile(
+    r"^(?:background(?: and (?:aims?|objectives?|purpose))?|context|objectives?"
+    r"|aims?(?: and objectives)?|purpose|methods?|methodology|materials and methods|design"
+    r"|study design|setting|participants|patients|population studied|interventions?"
+    r"|(?:main )?outcome measures?|measurements|results?|findings|conclusions?"
+    r"|conclusions? and relevance|interpretation|limitations|significance|implications)$",
     re.IGNORECASE,
 )
+_ABSTRACT_LABEL_MAX_SENTENCES = 8
+_ABSTRACT_CLOSE_RE = re.compile(r"^(?:\d+(?:\.\d+)*\.?\s+\S|introduction$)", re.IGNORECASE)
+# Paper types whose body is argument, not an IMRaD report. Case studies are
+# left out: they print their methods and results like a research paper.
+_NON_IMRAD_PAPER_TYPES = frozenset({"review", "commentary"})
+# A heading that names its own part ("Treatment Methods", "Historical
+# Background") keeps its type in a review body, and so do its subsections.
+_GUESSED_SOURCES = frozenset({"model", "llm", "alias_prior"})
+_ALIAS_SOURCES = _HEADING_TYPE_SOURCES - {"title"}
+_SYSTEMATIC_REVIEW_RE = re.compile(
+    r"\b(?:systematic(?:\s+literature)?\s+review|scoping\s+review|umbrella\s+review"
+    r"|meta-?\s?analys[ie]s|meta-?\s?analytic)",
+    re.IGNORECASE,
+)
+# The printed title heading may carry the subtitle's first line or the byline,
+# so a heading counts as the paper's title when one text starts the other. A
+# body heading that only opens the title ("Geographical accessibility") is
+# too short a share of it to count, and neither text may be under 20
+# characters unless the two are the same ("On Bullshit").
+_TITLE_MATCH_MIN_CHARS = 20
+_TITLE_MATCH_MIN_SHARE = 0.5
+
+
+def _title_key(text: str | None) -> str:
+    return re.sub(r"[\W_]+", " ", (text or "").casefold()).strip()
+
+
+def _title_match_share(header: str, paper_title: str | None) -> float:
+    """How much of the paper title the heading prints from the start: 1.0 for
+    the whole title (alone or with a byline after it), the covered share (at
+    least half) for a heading that holds only its first lines, else 0.0."""
+    heading, title = _title_key(header), _title_key(paper_title)
+    if not heading or not title:
+        return 0.0
+    if heading == title:
+        return 1.0
+    if min(len(heading), len(title)) < _TITLE_MATCH_MIN_CHARS:
+        return 0.0
+    if heading.startswith(title):
+        return 1.0
+    if title.startswith(heading) and len(heading) >= _TITLE_MATCH_MIN_SHARE * len(title):
+        return len(heading) / len(title)
+    return 0.0
+
+
+_PART_WORD_RES = {
+    "intro": re.compile(r"introduc|background|antecedentes", re.IGNORECASE),
+    "method": re.compile(r"method|metodolog|métod", re.IGNORECASE),
+    "results": re.compile(r"result|finding|hallazgo", re.IGNORECASE),
+}
 
 
 def _references_from_notes(contents) -> bool:
@@ -63,73 +121,284 @@ def _references_from_notes(contents) -> bool:
     )
 
 
-def _reconcile_result_subsection_types(sections) -> None:
-    """Repair weak METHOD predictions for result-oriented child headings.
+def _inherit_child_section_types(sections, only_ids: set[int] | None = None) -> None:
+    """Give a subsection the IMRaD type of the part it is printed in.
 
-    The trained classifier can over-weight procedural vocabulary in a body
-    snippet even when layout hierarchy and the heading identify a subsection
-    of Results (for example, ``Professional view on engagement``). Only weak
-    model predictions are changed; aliases, LLM decisions, and strongly scored
-    method subsections remain untouched.
+    The classifier and the LLM type each heading alone, so "3.2 Structural
+    characterization" under "3 Results" reads as methods. A child that is
+    ENDNOTE or IMRaD-typed by the model, the LLM or a parent takes its
+    parent's IMRaD type when the parent is confirmed: by numbering (3.2 -> 3)
+    or as a part-name heading ("Results"). An untyped child takes the type of
+    any IMRaD-typed parent. Under an untyped parent (a "Study 1" scope or a
+    topic heading) an untyped child takes the methods, results or discussion
+    type of the sibling printed just before it, so "Virtual reality scenario"
+    after "Participants" stays methods. Children typed from their own heading text (alias hits) keep
+    their type. Runs in document order, so a grandchild sees its parent's
+    inherited type. ``only_ids`` limits the children considered.
     """
     from bibr.paper_contents import CanonicalSection
+    from bibr.structure.section_tree import (
+        IMRAD_ANCHORS,
+        is_part_heading,
+        numbering_parent_ids,
+    )
 
+    inheriting = IMRAD_ANCHORS | {CanonicalSection.UNKNOWN, CanonicalSection.ENDNOTE, None}
+    # A results or discussion guess is not pulled back into the introduction
+    # or the methods: "3.1 Effect of treatment" after "2.1 Data" (its "3
+    # Results" heading lost) is not a method. Between results and discussion
+    # the part decides ("Principal findings" under "Discussion").
+    late_types = (CanonicalSection.RESULTS, CanonicalSection.DISCUSSION)
+    early_types = (CanonicalSection.INTRODUCTION, CanonicalSection.METHODS)
+    untyped_types = (CanonicalSection.UNKNOWN, None)
     by_id = {section.section_id: section for section in sections}
+    numbered_parents = numbering_parent_ids(sections)
+    last_child: dict[int, object] = {}
     for section in sections:
-        parent = by_id.get(section.parent_section_id)
+        previous = None
+        if section.level > 0 and section.parent_section_id is not None:
+            previous = last_child.get(section.parent_section_id)
+            last_child[section.parent_section_id] = section
+        if only_ids is not None and section.section_id not in only_ids:
+            continue
+        if section.level == 0 or section.section_type not in inheriting:
+            continue
+        if section.classification_source in _HEADING_TYPE_SOURCES:
+            continue
+        untyped = section.section_type in untyped_types
+        parent_id = numbered_parents.get(section.section_id)
+        if parent_id is not None:
+            parent = by_id.get(parent_id)
+        else:
+            parent = by_id.get(section.parent_section_id)
+            if parent is None or not (untyped or is_part_heading(parent.header or "")):
+                continue
+        source = parent
         if (
-            parent is not None
-            and parent.section_type == CanonicalSection.RESULTS
-            and section.section_type == CanonicalSection.METHODS
-            and section.classification_source == "model"
-            and section.classification_score < 0.8
-            and _RESULTS_CHILD_CUE_RE.search(section.header)
+            untyped
+            and parent is not None
+            and parent.level > 0
+            and parent.section_type in untyped_types
         ):
-            section.section_type = CanonicalSection.RESULTS
-            section.classification_score = max(section.classification_score, 0.8)
-            section.classification_source = "parent_context"
+            # An "Overview" or "Opening remarks" heading in a later part reads
+            # as introduction to the model; following it would spread one
+            # wrong guess over the whole part.
+            source = previous
+            if source is not None and source.section_type == CanonicalSection.INTRODUCTION:
+                source = None
+        if (
+            source is None
+            or source.section_type not in IMRAD_ANCHORS
+            or source.section_type == section.section_type
+            or (section.section_type in late_types and source.section_type in early_types)
+        ):
+            continue
+        section.section_type = source.section_type
+        section.classification_score = min(float(source.classification_score or 0.7), 0.75)
+        section.classification_source = "parent_context"
 
 
-def _inherit_unknown_child_section_types(sections) -> None:
-    """Fill UNKNOWN child section types from their body-section parent.
+def _structured_abstract_labels(contents):
+    """The printed subheadings of a structured abstract, with their Abstract.
 
-    This is a conservative fallback for subsections that are structurally
-    inside Methods/Results/etc. but whose own heading is too specific for the
-    classifier. Explicit child classifications are preserved.
+    Some layouts print "Background" / "Methods" / "Results" / "Conclusions"
+    as rows of their own inside the abstract. They open sections the
+    classifier types as body parts, so the front-matter collector, which
+    reads only front-matter sections, cut the abstract at the first of them,
+    and the hierarchy made them anchors for the body's Results and
+    Discussion. A run of at least two distinct labels right after a printed
+    Abstract heading, each over a short text, closed by a Keywords heading, a
+    numbered heading or an Introduction on the same or the next page, belongs
+    to the abstract. Sections between the labels that are not labels (a
+    sidebar) are skipped; an IMRaD-typed section that is not a label, or the
+    references, ends the scan. Returns ``(abstract, labels)`` or ``None``.
     """
     from bibr.paper_contents import CanonicalSection
-    from bibr.structure.section_tree import INTERLUDE_TYPES
 
-    inheritable = {
-        CanonicalSection.INTRODUCTION,
-        CanonicalSection.METHODS,
-        CanonicalSection.RESULTS,
-        CanonicalSection.DISCUSSION,
-    }
-    by_id = {section.section_id: section for section in sections}
-    pos_by_id = {section.section_id: idx for idx, section in enumerate(sections)}
-    for section in sections:
-        if section.section_type not in (CanonicalSection.UNKNOWN, None):
+    sections = [s for s in contents.sections if s.level > 0 and not s.synthetic_kind]
+    counts: dict[int, int] = {}
+    for sentence in contents.sentences:
+        counts[sentence.section_id] = counts.get(sentence.section_id, 0) + 1
+    start = next(
+        (
+            i
+            for i, s in enumerate(sections)
+            if s.section_type == CanonicalSection.ABSTRACT
+            and s.header.strip()
+            and not s.header_is_synthetic
+        ),
+        None,
+    )
+    if start is None:
+        return None
+    abstract = sections[start]
+    pages = [item.page_no for item in abstract.provenance if item.page_no is not None]
+    abstract_page = min(pages) if pages else None
+    labels = []
+    seen: set[str] = set()
+    closed = False
+    for section in sections[start + 1 :]:
+        header = " ".join(section.header.split()).strip(" :.")
+        page = min((item.page_no for item in section.provenance if item.page_no), default=None)
+        if abstract_page is not None and page is not None and page > abstract_page + 1:
+            break
+        if section.section_type == CanonicalSection.KEYWORDS or _ABSTRACT_CLOSE_RE.match(header):
+            closed = True
+            break
+        if _STRUCTURED_ABSTRACT_LABEL_RE.fullmatch(header):
+            key = header.casefold()
+            if key in seen or counts.get(section.section_id, 0) > _ABSTRACT_LABEL_MAX_SENTENCES:
+                break
+            seen.add(key)
+            labels.append(section)
             continue
-        parent = by_id.get(section.parent_section_id)
-        if parent is None or parent.section_type not in inheritable:
-            continue
-        parent_pos = pos_by_id.get(parent.section_id)
-        child_pos = pos_by_id.get(section.section_id)
-        if parent_pos is None or child_pos is None or parent_pos >= child_pos:
-            continue
-        if any(
-            intervening.section_type in INTERLUDE_TYPES
-            for intervening in sections[parent_pos + 1 : child_pos]
+        if section.section_type in {
+            CanonicalSection.INTRODUCTION,
+            CanonicalSection.METHODS,
+            CanonicalSection.RESULTS,
+            CanonicalSection.DISCUSSION,
+            CanonicalSection.REFERENCES,
+        }:
+            break
+    if not closed or len(seen) < 2:
+        return None
+    return abstract, labels
+
+
+def _gate_non_imrad_section_types(
+    sections,
+    paper_type: str | None,
+    *,
+    review_body: bool,
+    title_abstract: str = "",
+    paper_title: str | None = None,
+) -> None:
+    """Retype section guesses that only fit an IMRaD research paper.
+
+    - A model or LLM ``title`` on any heading but the paper's title (a body
+      heading in capitals, a cover label, an author name) becomes UNKNOWN and
+      then takes its part's type, if any. The heading the title pass found
+      when it matches the extracted paper title, else the title-typed heading
+      that matches it best (the first on a tie, none after the first alias
+      heading that follows a title-typed one), keeps it, also after a
+      masthead or cover label; a running head before it, or the title
+      repeated later, does not.
+    - With ``review_body`` on, in a review or commentary with no methods or
+      results heading (alias-, model- or LLM-typed), the introduction guesses
+      after the first introduction become discussion: the body of such a
+      paper is argument, not a report. The paper-type label is a guess, so a
+      paper with a methods or results heading is left alone, and so is a
+      systematic, scoping or umbrella review or a meta-analysis (named in the
+      title or abstract). The subsections of an introduction, and a heading
+      that names its own part ("Historical Background"), keep their type.
+    """
+    from bibr.paper_contents import CanonicalSection
+    from bibr.structure.section_tree import numbering_parent_ids
+
+    body = [section for section in sections if section.level > 0]
+    # The heading the paper's title is printed in: the heading the title pass
+    # found when it matches the extracted title (it is a cover label when it
+    # does not), else the title-typed heading that matches it best (the first
+    # on a tie). That search stops at the first heading typed from its own
+    # words ("Abstract", "Methods") once a title-typed heading has been seen:
+    # a repeat after it is a running head. The heading keeps its type. The
+    # first heading is exempt (it may be the title itself) unless the title
+    # heading is a title guess too, then a masthead before it is a cover label.
+    has_title = any(section.classification_source == "title" for section in body)
+    title_heading = next(
+        (
+            section
+            for section in body
+            if section.classification_source == "title"
+            and _title_match_share(section.header, paper_title) > 0
+        ),
+        None,
+    )
+    if title_heading is None:
+        best_share = 0.0
+        seen_title = False
+        for section in body:
+            if seen_title and section.classification_source in _ALIAS_SOURCES:
+                break
+            if section.section_type != CanonicalSection.TITLE:
+                continue
+            seen_title = True
+            share = _title_match_share(section.header, paper_title)
+            if share > best_share:
+                title_heading, best_share = section, share
+    title_found = title_heading is not None
+    retitled: set[int] = set()
+    for index, section in enumerate(body):
+        if (
+            section.section_type == CanonicalSection.TITLE
+            and section.classification_source not in _HEADING_TYPE_SOURCES
+            and (has_title or index > 0 or title_found)
+            and section is not title_heading
         ):
+            section.section_type = CanonicalSection.UNKNOWN
+            section.classification_score = 0.0
+            retitled.add(section.section_id)
+    if retitled:
+        _inherit_child_section_types(sections, only_ids=retitled)
+
+    if not review_body:
+        return
+    kind = re.sub(r"[\s-]+", "_", (paper_type or "").strip().lower())
+    if kind not in _NON_IMRAD_PAPER_TYPES:
+        return
+    if any(
+        section.section_type in (CanonicalSection.METHODS, CanonicalSection.RESULTS)
+        and section.classification_source in _HEADING_TYPE_SOURCES | _GUESSED_SOURCES
+        for section in body
+    ):
+        return
+    if _SYSTEMATIC_REVIEW_RE.search(title_abstract or ""):
+        return
+    guessed = {CanonicalSection.INTRODUCTION, CanonicalSection.METHODS, CanonicalSection.RESULTS}
+    first_intro = next(
+        (s.section_id for s in body if s.section_type == CanonicalSection.INTRODUCTION), None
+    )
+    # An introduction that stays one holds the subsections numbered under it
+    # ("4. Literature review" > "4.1") or guessed introduction on their own
+    # ("Introduction" > "Scope of this review"). A heading that only follows
+    # the Introduction in an unnumbered commentary got its type from that
+    # parent, and is body.
+    intro_roots = {
+        s.section_id
+        for s in body
+        if s.section_type == CanonicalSection.INTRODUCTION
+        and (s.section_id == first_intro or s.classification_source in _HEADING_TYPE_SOURCES)
+    }
+    numbered_parents = numbering_parent_ids(sections)
+    kept: set[int] = set(intro_roots)
+    for section in body:
+        if section.parent_section_id in intro_roots:
+            if (
+                numbered_parents.get(section.section_id) == section.parent_section_id
+                or section.classification_source in _GUESSED_SOURCES
+            ):
+                kept.add(section.section_id)
             continue
-        section.section_type = parent.section_type
-        parent_score = float(parent.classification_score or 0.7)
-        section.classification_score = max(
-            float(section.classification_score or 0.0),
-            min(parent_score, 0.75),
-        )
-        section.classification_source = "parent_context"
+        if section.parent_section_id in kept or (
+            section.section_id != first_intro
+            and section.section_type in guessed
+            and section.classification_source not in _HEADING_TYPE_SOURCES
+            and _PART_WORD_RES[section.section_type.value].search(section.header or "")
+        ):
+            kept.add(section.section_id)
+    seen_intro = False
+    for section in body:
+        if section.section_type == CanonicalSection.INTRODUCTION and not seen_intro:
+            seen_intro = True
+            continue
+        if (
+            seen_intro
+            and section.section_type in guessed
+            and section.classification_source not in _HEADING_TYPE_SOURCES
+            and section.section_id not in kept
+        ):
+            section.section_type = CanonicalSection.DISCUSSION
+            section.classification_source = "positional"
 
 
 def _count_distinct_intext_citations(text: str) -> int:
@@ -337,28 +606,40 @@ async def _classify_sections(
                 section.classification_source = "title"
                 break
 
-    _reconcile_result_subsection_types(contents.sections)
-
     if layout_hints:
         contents.layout_hints = layout_hints
+
+    # A structured abstract's printed subheadings are the abstract's.
+    structured_abstract = _structured_abstract_labels(contents)
+    if structured_abstract is not None:
+        for section in structured_abstract[1]:
+            if section.section_type != CanonicalSection.ABSTRACT:
+                logger.info("Structured-abstract label %r folded into the abstract", section.header)
+            section.section_type = CanonicalSection.ABSTRACT
+            section.classification_source = "parent_context"
+            section.classification_score = max(float(section.classification_score or 0.0), 0.8)
 
     # Scope closing needs the final section types: General Discussion and
     # back matter revert themselves and all followers to scope 0.
     scope_ids = close_scopes(contents.sections, provisional_scopes, markers)
 
-    # Section hierarchy: assign levels + parents using the alias-driven
-    # `is_top_level_predicted` signal (when set) plus a positional rule
-    # that folds UNKNOWN sections into the most-recent IMRaD anchor —
-    # both per study scope, so Study 2's Methods doesn't fold under
-    # Study 1's. Numbered headings keep the level/parent inferred from
-    # their numbering prefix in `pdf_parser._handle_heading`.
+    # Section hierarchy: numbered headings take their depth and numbered
+    # parent; unnumbered ones follow document order (part names open level-1
+    # sections, other headings sit under the most recent body section, back
+    # matter never contains what follows it), with first-of-type anchors kept
+    # per study scope.
     #
     # Runs for DOCX too: it intentionally canonicalizes the native Word
     # hierarchy that `docx_native` builds, flattening unnumbered headings to
     # the same IMRaD 1-2 shape as the PDF path (output uniformity by design —
     # see specs/2026-06-15-docx-hierarchy-flattening-issue.md).
     assign_hierarchy_from_top_level(contents.sections, scope_ids=scope_ids, marker_ids=set(markers))
-    _inherit_unknown_child_section_types(contents.sections)
+    if structured_abstract is not None:
+        abstract, labels = structured_abstract
+        for section in labels:
+            section.level = min(abstract.level + 1, 6)
+            section.parent_section_id = abstract.section_id
+    _inherit_child_section_types(contents.sections)
 
 
 async def _normalize_section_structure(
@@ -389,7 +670,8 @@ async def _normalize_section_structure(
             settings=settings,
         )
 
-    enforce_imrad_order(contents.sections)
+    populated_ids = {s.section_id for s in contents.sentences if s.section_id is not None}
+    enforce_imrad_order(contents.sections, populated_ids)
     enforce_section_sanity(contents.sections)
 
 
@@ -1453,6 +1735,21 @@ async def post_parse(
                     if terminal_processing_error is None:
                         raise
                     logger.warning("LLM client cleanup failed after terminal processing error")
+
+    # Section types that only fit an IMRaD paper, once the paper type is
+    # known and the title and statements no longer read the section types.
+    _gate_non_imrad_section_types(
+        contents.sections,
+        paper_metadata.paper_type,
+        review_body=effective_settings.pipeline.non_imrad_body_as_discussion,
+        title_abstract=" ".join(
+            filter(
+                None,
+                (getattr(paper_metadata, "title", None), getattr(paper_metadata, "abstract", None)),
+            )
+        ),
+        paper_title=getattr(paper_metadata, "title", None),
+    )
 
     # Populate Section.children from parent_section_id pointers, after all
     # section list mutations (implicit detection, re-parenting, IMRaD ordering).
