@@ -101,6 +101,9 @@ _FURNITURE_DECIDED = {
     "line_number": Decided("furniture.line_number", LINE_NUMBER_RULE),
 }
 
+# The Page.text_source values of a page with a text layer.
+_TEXT_LAYER_SOURCES = ("native", "invisible_layer")
+
 # Spans: a glyph continues the open span while its baseline stays within
 # this share of the size and the size within _SPAN_SIZE_TOLERANCE of it.
 _SPAN_BASELINE_TOLERANCE = 0.1
@@ -632,29 +635,22 @@ class _PageDraft:
     objects: _Objects
 
 
-def read_page(
+def page_header(
     page,
-    textpage,
     *,
     page_index: int,
     crop_box: Box,
     rotation: int,
-    trace: nt.PageCharTrace | None,
-    records: list[tuple[str, float, float, bool]] | None,
     furniture: list[tuple],
-    fonts: FontTable,
     budget: RenderBudget | None,
     version: str,
-    api: _Api | None = None,
-    walk: list | None = None,
-) -> _PageDraft:
-    """Read one page for the layer: everything that needs pdfium.
+) -> Page:
+    """The page as known before its text layer is read: size, furniture and render recipe.
 
-    *trace* and *records* come from ``_build_page_char_records(textpage,
-    trace)``; *furniture* and *walk* from ``open_text_page(page, ...,
-    furniture, walk)``. Called under ``pdfium_lock``.
+    *furniture* comes from ``open_text_page(page, ..., furniture)``. The
+    ``text_source`` stays ``unread`` until :func:`read_page` decides it, so a
+    page whose read fails keeps the rest. Called under ``pdfium_lock``.
     """
-    api = api or _Api()
     width, height = page.get_size()
     render = None
     if budget is not None:
@@ -676,21 +672,45 @@ def read_page(
         )
         for n, (kind, box, text) in enumerate(furniture)
     ]
-    n_chars = textpage.count_chars()
-    built = Page(
+    return Page(
         index=page_index,
         label=None,
         width=float(width),
         height=float(height),
         crop_box=crop_box,
         rotation=rotation,
-        text_source="ocr",
+        text_source="unread",
         cols=None,
         furniture=removed,
         render=render,
     )
+
+
+def read_page(
+    built: Page,
+    page,
+    textpage,
+    *,
+    trace: nt.PageCharTrace | None,
+    records: list[tuple[str, float, float, bool]] | None,
+    fonts: FontTable,
+    api: _Api | None = None,
+    walk: list | None = None,
+) -> _PageDraft:
+    """Read the text layer of *built*, the :func:`page_header` of *page*: the rest that needs pdfium.
+
+    Decides ``built.text_source``. *trace* and *records* come from
+    ``_build_page_char_records(textpage, trace)``, and *walk* from
+    ``open_text_page(page, ..., walk)``. Called under ``pdfium_lock``.
+    """
+    api = api or _Api()
+    crop_box = built.crop_box
+    if crop_box is None:
+        raise ValueError("the page has no size")
+    n_chars = textpage.count_chars()
     empty = _Objects([], [], [], [], [], [], [], [], [], [])
     if n_chars == 0:
+        built.text_source = "ocr"
         return _PageDraft(built, [], [], [], [], [], [], [], [], [], empty)
     if trace is None or records is None or not trace.complete or len(trace.codes) != n_chars:
         raise RuntimeError("the page's char records are unavailable")
@@ -944,35 +964,57 @@ class LayerBuilder:
         if failed:
             self.errors[f"furniture:{page_index}"] = failed[0]
             furniture = [item for item in furniture if item[0] != "error"]
+        key = f"harvest:{page_index}"
         try:
-            draft = read_page(
+            built = page_header(
                 page,
-                textpage,
                 page_index=page_index,
                 crop_box=crop_box,
                 rotation=rotation,
-                trace=trace,
-                records=records,
                 furniture=furniture,
-                fonts=self.fonts,
                 budget=self.budget,
                 version=self.version,
-                api=self._api,
-                walk=walk,
             )
-            packed = _pack(draft)
         except Exception as exc:  # noqa: BLE001 - a layer page never fails the paper
-            self.page_failed(page_index, f"harvest:{page_index}", exc)
+            self.page_failed(page_index, key, exc)
+            return
+        try:
+            packed = _pack(
+                read_page(
+                    built,
+                    page,
+                    textpage,
+                    trace=trace,
+                    records=records,
+                    fonts=self.fonts,
+                    api=self._api,
+                    walk=walk,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - a layer page never fails the paper
+            self.page_failed(page_index, key, exc, built)
             return
         self.drafts.append(packed)
         self._added.add(page_index)
 
-    def page_failed(self, page_index: int, key: str, exc: BaseException) -> None:
-        """Record *exc* under *key*, and keep the page as unread unless it was added."""
+    def page_failed(
+        self, page_index: int, key: str, exc: BaseException, page: Page | None = None
+    ) -> None:
+        """Record *exc* under *key*, and keep the page with the error unless it was added.
+
+        *page* is what was read of it before the failure (a :func:`page_header`
+        and, once decided, its text source); without it the page could not be
+        opened or sized and is kept unread, with None geometry.
+        """
         self.errors[key] = _error_text(exc)
-        if page_index not in self._added:
-            self._added.add(page_index)
-            self.drafts.append(_unread_page(page_index, self.errors[key]))
+        if page_index in self._added:
+            return
+        self._added.add(page_index)
+        if page is None:
+            page = _unread_page(page_index)
+        page.cols = None
+        page.error = self.errors[key]
+        self.drafts.append(page)
 
     def finish(self) -> DocumentLayer:
         """Complete the drafted pages; needs no pdfium, so call it after the lock."""
@@ -995,22 +1037,32 @@ class LayerBuilder:
                 continue
             pages.append(built)
             roles.extend(tags)
+        # A fact no examined page shows is unknown, not absent, while another
+        # page was not examined. A page's text source counts once decided, even
+        # if the page failed later; marked content needs the page's columns.
+        decided = [page for page in pages if page.text_source != "unread"]
         read = [page for page in pages if page.error is None]
-        # Unknown, not absent, while a page that could not be read might hold it.
-        unknown = None if len(read) < len(pages) or not pages else False
 
-        def seen(found: bool) -> bool | None:
-            return True if found else unknown
+        def seen(found: bool, examined: list[Page]) -> bool | None:
+            if found:
+                return True
+            return False if pages and len(examined) == len(pages) else None
 
-        native = seen(any(page.text_source == "native" for page in read))
+        native = seen(any(page.text_source == "native" for page in decided), decided)
         mcids = any(
             page.cols is not None and bool((page.cols.obj_mcid >= 0).any()) for page in read
         )
         presence = Presence(
-            has_text_layer=seen(any(page.cols is not None for page in read)),
+            has_text_layer=seen(
+                any(page.text_source in _TEXT_LAYER_SOURCES for page in decided), decided
+            ),
             is_scan=None if native is None else not native,
-            has_invisible_layer=seen(any(page.text_source == "invisible_layer" for page in read)),
-            has_mcids=None if "FPDFPageObj_GetMarkedContentID" in self.missing else seen(mcids),
+            has_invisible_layer=seen(
+                any(page.text_source == "invisible_layer" for page in decided), decided
+            ),
+            has_mcids=(
+                None if "FPDFPageObj_GetMarkedContentID" in self.missing else seen(mcids, read)
+            ),
             missing_apis=self.missing,
         )
         return DocumentLayer(
@@ -1026,18 +1078,17 @@ class LayerBuilder:
         )
 
 
-def _unread_page(page_index: int, reason: str) -> Page:
-    """A page the harvest failed on before reading its text layer."""
+def _unread_page(page_index: int) -> Page:
+    """A page that could not be opened or sized: unread, with None geometry."""
     return Page(
         index=page_index,
         label=None,
-        width=_NAN,
-        height=_NAN,
-        crop_box=_NAN_BOX,
-        rotation=0,
+        width=None,
+        height=None,
+        crop_box=None,
+        rotation=None,
         text_source="unread",
         cols=None,
-        error=reason,
     )
 
 

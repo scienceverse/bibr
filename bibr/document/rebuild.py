@@ -129,7 +129,9 @@ def attach_blocks(layer: DocumentLayer, ocr_regions: list[list[OcrRegionResult]]
 
     ``ocr_regions`` is indexed by absolute page (the OCR stage pads the pages
     before a ``start_page`` with empty lists). Replaces earlier blocks, and
-    assigns every line to the block holding most of its records' centres.
+    assigns every line to the block holding most of its records' centres. A
+    block's ``bbox_pdf`` is None for a region without a layout box and on a
+    page without finite geometry: never a NaN box.
     """
     for page in layer.pages:
         regions = ocr_regions[page.index] if page.index < len(ocr_regions) else []

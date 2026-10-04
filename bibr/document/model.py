@@ -422,20 +422,24 @@ class Page:
     says which source each region used.
 
     A page the harvest failed on stays in the layer with the failure in
-    ``error`` and ``cols`` None. When it failed before its text layer was
-    read, ``text_source`` is ``unread`` and its geometry NaN (rotation 0).
+    ``error`` and ``cols`` None, and keeps what was read before the failure:
+    its geometry, furniture and render recipe, and its ``text_source`` once
+    decided (``unread`` before). A page that could not be opened or sized is
+    ``unread`` with None geometry.
     """
 
     index: int
     # The PDF page label (D2).
     label: str | None
-    width: float
-    height: float
-    crop_box: Box
-    rotation: int
+    # Geometry: None only for a page that could not be opened or sized.
+    width: float | None
+    height: float | None
+    crop_box: Box | None
+    rotation: int | None
     # native | invisible_layer | ocr | unread
     text_source: str
-    # None when the page has no text layer or could not be read.
+    # None when the page has no text layer, could not be read, or the
+    # layer's columns were freed (DocumentLayer.columns_freed).
     cols: PageColumns | None
     blocks: list[Block] = field(default_factory=list)
     suppressed: list[Suppressed] = field(default_factory=list)

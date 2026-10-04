@@ -9,6 +9,7 @@ byte equality with the pipeline's own values.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -28,22 +29,36 @@ from bibr.document.model import (
 TEXT_SOURCES = ("native", "invisible_layer", "ocr")
 
 
-def to_layout_bbox(page: Page, box: Box) -> Box:
+def _finite(values) -> Box | None:
+    box = as_box(values)
+    return box if all(math.isfinite(value) for value in box) else None
+
+
+def to_layout_bbox(page: Page, box: Box) -> Box | None:
     """*box* (PDF points) in the layout frame: ``bbox_2d``'s 0..1000 image space.
 
     The frame of the rendered page image, so the page's ``/Rotate`` applies;
-    the result is ``(x1, y1, x2, y2)`` with y down.
+    the result is ``(x1, y1, x2, y2)`` with y down. None, never a NaN box,
+    when the page has no geometry or *box* is not finite.
     """
     from bibr.ocr.native_text import _pdf_points_to_normalized_bbox
 
-    return as_box(_pdf_points_to_normalized_bbox(box, page.crop_box, page.rotation))
+    if page.crop_box is None or page.rotation is None:
+        return None
+    return _finite(_pdf_points_to_normalized_bbox(box, page.crop_box, page.rotation))
 
 
-def from_layout_bbox(page: Page, bbox_2d) -> Box:
-    """A layout ``bbox_2d`` (0..1000 image space) in the page's PDF points."""
+def from_layout_bbox(page: Page, bbox_2d) -> Box | None:
+    """A layout ``bbox_2d`` (0..1000 image space) in the page's PDF points.
+
+    None, never a NaN box, when the page has no geometry or the result is not
+    finite.
+    """
     from bibr.ocr.native_text import _normalized_bbox_to_pdf_points
 
-    return as_box(_normalized_bbox_to_pdf_points(list(bbox_2d), page.crop_box, page.rotation))
+    if page.crop_box is None or page.rotation is None:
+        return None
+    return _finite(_normalized_bbox_to_pdf_points(list(bbox_2d), page.crop_box, page.rotation))
 
 
 def find_block(layer: DocumentLayer, block_id: str) -> tuple[Page, Block] | None:
@@ -149,7 +164,7 @@ def bbox_pdf_pts(page: Page, block: Block) -> list[float] | None:
 
     None for a block without a box, as for its region.
     """
-    if block.bbox_pdf is None:
+    if block.bbox_pdf is None or page.crop_box is None:
         return None
     left, bottom, right, top = block.bbox_pdf
     cx0, cy0, _cx1, _cy1 = page.crop_box
@@ -197,6 +212,8 @@ def page_lines(page: Page) -> list[dict[str, Any]]:
     from bibr.ocr.pdf_inspection import _break_wrapped_lines, _page_line_dicts
     from bibr.ocr.ref_geometry import group_chars_into_lines
 
+    if page.cols is None or page.crop_box is None or page.rotation is None:
+        return []
     return _page_line_dicts(
         group_chars_into_lines(_break_wrapped_lines(page_chars(page)), page.index),
         page.index + 1,

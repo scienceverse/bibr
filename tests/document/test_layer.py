@@ -115,9 +115,14 @@ def test_pages_the_inspection_does_not_read_are_harvested_alike():
     assert [page.text_source for page in on.document.pages] == _pdfs.SYNTHETIC_TEXT_SOURCES
 
 
+def _geometry(page: Page) -> tuple:
+    return (page.width, page.height, page.crop_box, page.rotation)
+
+
 def test_a_harvest_failure_stays_in_the_layer(monkeypatch):
     pdf_bytes = _pdfs.synthetic_paper()
     off = _inspect(pdf_bytes, layer=False)
+    whole = _inspect(pdf_bytes, layer=True).document
 
     def broken(*_args, **_kwargs):
         raise RuntimeError("objects unreadable")
@@ -127,53 +132,69 @@ def test_a_harvest_failure_stays_in_the_layer(monkeypatch):
 
     assert json.dumps(inspection_to_dict(on)) == json.dumps(inspection_to_dict(off))
     assert on == off
-    errors = on.document.component_errors
+    layer = on.document
+    errors = layer.component_errors
     text_pages = [i for i, source in enumerate(_pdfs.SYNTHETIC_TEXT_SOURCES) if source != "ocr"]
     assert sorted(errors) == sorted(f"harvest:{i}" for i in text_pages)
     assert all(value == "RuntimeError: objects unreadable" for value in errors.values())
-    # Every page stays; the failed ones are unread and say why.
-    pages = on.document.pages
-    assert [page.index for page in pages] == list(range(len(_pdfs.SYNTHETIC_TEXT_SOURCES)))
-    for page in pages:
+    # Every page stays. A failed one is unread and says why, and keeps its
+    # size, furniture and render recipe, read before the failure.
+    assert [page.index for page in layer.pages] == list(range(len(_pdfs.SYNTHETIC_TEXT_SOURCES)))
+    for page, read in zip(layer.pages, whole.pages, strict=True):
+        assert _geometry(page) == _geometry(read)
+        assert page.furniture == read.furniture
+        assert page.render == read.render
         if page.index in text_pages:
             assert page.text_source == "unread"
+            assert page.text_source_decided is None
             assert page.cols is None
             assert page.error == "RuntimeError: objects unreadable"
-            assert math.isnan(page.width)
         else:
             assert page.text_source == "ocr"
             assert page.error is None
-    # What no read page shows is unknown, not absent.
-    presence = on.document.presence
+    assert any(page.furniture for page in layer.pages)
+    # Blocks get the page's own boxes, and the layer loads back equal: no NaN.
+    attach_blocks(layer, _regions(on.layout_results))
+    boxes = [block.bbox_pdf for page in layer.pages for block in page.blocks]
+    assert boxes
+    assert all(box is not None and all(map(math.isfinite, box)) for box in boxes)
+    assert serialize.from_dict(json.loads(serialize.canonical_bytes(layer))) == layer
+    # What no page with a decided text source shows is unknown, not absent.
+    presence = layer.presence
     assert presence.has_text_layer is None
     assert presence.is_scan is None
     assert presence.has_invisible_layer is None
     assert presence.has_mcids is None
 
 
-def test_a_page_that_fails_after_its_read_keeps_what_was_read(monkeypatch):
+@pytest.mark.parametrize(("patched", "every_page"), [("_spans_and_lines", False), ("_pack", True)])
+def test_a_page_that_fails_after_its_read_keeps_what_was_read(monkeypatch, patched, every_page):
     pdf_bytes = _pdfs.synthetic_paper()
     whole = _inspect(pdf_bytes, layer=True).document
 
     def broken(*_args, **_kwargs):
         raise RuntimeError("no spans")
 
-    monkeypatch.setattr(harvest, "_spans_and_lines", broken)
+    monkeypatch.setattr(harvest, patched, broken)
     layer = _inspect(pdf_bytes, layer=True).document
 
     assert [page.index for page in layer.pages] == [page.index for page in whole.pages]
     for page, read in zip(layer.pages, whole.pages, strict=True):
         assert page.text_source == read.text_source
         assert page.text_source_decided == read.text_source_decided
-        assert (page.width, page.crop_box, page.furniture) == (
-            read.width,
-            read.crop_box,
-            read.furniture,
-        )
+        assert _geometry(page) == _geometry(read)
+        assert (page.furniture, page.render) == (read.furniture, read.render)
         assert page.cols is None
-        failed = read.cols is not None
+        failed = every_page or read.cols is not None
         assert page.error == ("RuntimeError: no spans" if failed else None)
         assert (f"harvest:{page.index}" in layer.component_errors) is failed
+    # Every text source was decided, so presence knows the text layers; marked
+    # content needs the columns the failed pages lack.
+    presence = layer.presence
+    assert presence.has_text_layer is True
+    assert presence.is_scan is False
+    assert presence.has_invisible_layer is True
+    assert presence.has_mcids is None
 
 
 def test_a_page_the_rebuild_cannot_open_is_kept_once():
@@ -186,6 +207,7 @@ def test_a_page_the_rebuild_cannot_open_is_kept_once():
     assert [(page.index, page.text_source, page.error) for page in layer.pages] == [
         (7, "unread", "RuntimeError: first")
     ]
+    assert _geometry(layer.page(7)) == (None, None, None, None)
     assert layer.component_errors == {
         "page:7": "RuntimeError: first",
         "other:7": "RuntimeError: second",
@@ -193,10 +215,41 @@ def test_a_page_the_rebuild_cannot_open_is_kept_once():
 
     rebuilt = build_document_layer(pdf_bytes, [0, 99], budget=_BUDGET)
     assert [page.index for page in rebuilt.pages] == [0, 99]
-    assert rebuilt.page(99).text_source == "unread"
-    assert rebuilt.page(99).error == rebuilt.component_errors["page:99"]
+    missing = rebuilt.page(99)
+    assert missing.text_source == "unread"
+    assert missing.error == rebuilt.component_errors["page:99"]
+    assert _geometry(missing) == (None, None, None, None)
     assert rebuilt.presence.has_text_layer is True
     assert rebuilt.presence.is_scan is False
+    assert rebuilt.presence.has_invisible_layer is None
+    # A page without geometry gives its blocks no box, and the views None or nothing.
+    regions = [[] for _page in range(100)]
+    regions[99] = [
+        OcrRegionResult.from_layout_region(
+            {"label": "text", "bbox_2d": [0.0, 0.0, 1000.0, 500.0]}, slot_idx=0, content="text"
+        )
+    ]
+    attach_blocks(rebuilt, regions)
+    [block] = missing.blocks
+    assert block.bbox_pdf is None
+    assert views.bbox_pdf_pts(missing, block) is None
+    assert views.to_layout_bbox(missing, (0.0, 0.0, 10.0, 10.0)) is None
+    assert views.from_layout_bbox(missing, [0.0, 0.0, 1000.0, 500.0]) is None
+    assert views.page_lines(missing) == []
+    assert views.block_text(rebuilt, block.block_id) is None
+    restored = serialize.from_dict(json.loads(serialize.canonical_bytes(rebuilt)))
+    assert serialize.digest(restored) == serialize.digest(rebuilt)
+    assert _geometry(restored.page(99)) == (None, None, None, None)
+
+
+def test_views_give_none_for_boxes_that_are_not_finite():
+    _inspection, layer = _synthetic_layer()
+    page = layer.page(0)
+    nan = float("nan")
+
+    assert views.to_layout_bbox(page, (nan, 0.0, 10.0, 10.0)) is None
+    assert views.from_layout_bbox(page, [nan, 0.0, 1000.0, 500.0]) is None
+    assert views.to_layout_bbox(page, (0.0, 0.0, 10.0, 10.0)) is not None
 
 
 def test_a_failure_to_finish_the_layer_leaves_the_inspection(monkeypatch):
