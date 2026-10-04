@@ -223,9 +223,27 @@ _BARE_LIST_RE = re.compile(
     + _ITEM
     + r")*"
 )
+# A footnote symbol that follows the star in a series (* † ‡ § ¶ ‖) directly before an address:
+# the star is then only the first of the series, not "corresponding".
+_SERIES_ADDRESS_RE = re.compile(
+    r"(?:^|(?<=[\s.;:,]))(?:[†‡§¶‖]|\\\(\s*\^\s*\{\s*\\d?dagger\s*\}\s*\\\))"
+    r"\s*(?i:e-?\s?mail(?:\s+address(?:es)?)?\s*:?\s*)?" + _EMAIL_RE.pattern
+)
+_STAR_RE = re.compile(r"[*∗⁎]")
+_NON_LETTERS_RE = re.compile(r"[\W\d_]*")
 _WORD_RE = re.compile(r"[^\W\d_]+(?:[-'’][^\W\d_]+)*")
 # The ORCID badge text a PLOS byline prints glued to the surname: "SmithID1" -> "Smith1".
 _ORCID_BADGE_RE = re.compile(r"(?<=[^\W\d_])ID(?=\d)")
+
+
+def _names_another_author(owner: PaperAuthor, email: str, authors: list[PaperAuthor]) -> bool:
+    """Whether the address's local part spells another author but not its holder."""
+    local_compact = re.sub(r"[^a-z0-9]", "", email.split("@", 1)[0].lower())
+    if _email_name_affinity(owner.given, owner.family, local_compact):
+        return False
+    return any(
+        a is not owner and _email_name_affinity(a.given, a.family, local_compact) for a in authors
+    )
 
 
 def _byline_stars(sentences: list, index: dict[str, list]) -> tuple[set[int], set[int]]:
@@ -239,7 +257,7 @@ def _byline_stars(sentences: list, index: dict[str, list]) -> tuple[set[int], se
     seen: set[int] = set()
     for sent in sentences:
         text = sent.text or ""
-        if "@" in text or not re.search(r"[*∗⁎]", text):
+        if "@" in text or not _STAR_RE.search(text):
             continue
         text = _ORCID_BADGE_RE.sub("", text)
         for word in _WORD_RE.finditer(text):
@@ -249,8 +267,8 @@ def _byline_stars(sentences: list, index: dict[str, list]) -> tuple[set[int], se
             author = entries[0][0]
             seen.add(id(author))
             # the run of non-letters right after the surname: "1,*," or "\\(^{1,*}\\)" or " "
-            after = re.match(r"[\W\d_]*", text[word.end() :]).group()
-            if re.search(r"[*∗⁎]", after):
+            after = _NON_LETTERS_RE.match(text, word.end()).group()
+            if _STAR_RE.search(after):
                 starred.add(id(author))
     return starred, seen - starred
 
@@ -651,6 +669,12 @@ class AuthorEmailHarvester:
         label, so "* These authors contributed equally" never counts. Several owners are taken
         only from one list; separate glyph lines for different owners are left alone.
 
+        A star is not read when it is only the first of a footnote series (another of
+        ``† ‡ § ¶ ‖`` directly before an address in scope), when another address follows the
+        matched list in the same sentence (a list cut short by a parenthetical that is not
+        initials), or for an owner whose address spells a different author's name and not
+        their own (an address attached to the wrong author upstream).
+
         This pass only sets ``corresponding``. It never attaches, moves or replaces an address,
         so an address an author holds (or lacks) is the same before and after.
 
@@ -667,17 +691,28 @@ class AuthorEmailHarvester:
         if not owner_by_email:
             return
 
+        in_series = any(_SERIES_ADDRESS_RE.search(_PG_PREFIX_RE.sub("", s.text)) for s in printing)
         groups: list[list[PaperAuthor]] = []
         for sent in printing:
             text = _PG_PREFIX_RE.sub("", sent.text)
             for m in _BARE_LIST_RE.finditer(text):
+                if in_series and not m.group(0).startswith("✉"):
+                    continue  # the star is the first of a * † ‡ series, not "corresponding"
+                if _EMAIL_RE.search(text, m.end()):
+                    continue  # the list was cut short (a parenthetical that is not initials)
                 owners: list[PaperAuthor] = []
                 for item in _ITEM_RE.finditer(m.group(0)):
-                    owner = owner_by_email.get(item.group(1).lower())
-                    if owner is not None and all(owner is not o for o in owners):
-                        owners.append(owner)
+                    email = item.group(1)
+                    owner = owner_by_email.get(email.lower())
+                    if owner is None or any(owner is o for o in owners):
+                        continue
+                    if _names_another_author(owner, email, authors):
+                        continue  # the address spells someone else: probably attached wrongly
+                    owners.append(owner)
                 if owners:
                     groups.append(owners)
+        if not groups:
+            return
 
         starred, unstarred = _byline_stars(sentences, _index_authors_by_family(authors))
         if starred:

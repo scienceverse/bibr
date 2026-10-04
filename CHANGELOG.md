@@ -257,8 +257,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   line); a list of addresses after one star marks each owner. This reading only flags: it never
   assigns, moves or replaces an address. A star that follows author names in the byline must
   follow this author too, a flag is not added next to a different flagged author, and a paper of
-  three or more authors never ends with all of them flagged. Equal-contribution stars, other
-  symbols and prose that merely contains "corresponding" are not read.
+  three or more authors never ends with all of them flagged. A star that is only the first of a
+  footnote-symbol series (another of `†`, `‡`, `§`, `¶`, `‖` directly before an address) is not read,
+  nor is a list that another address follows in the same sentence (a parenthetical that is not
+  initials cut it short), nor an owner whose address spells a different author's name and not
+  their own. Equal-contribution stars, other symbols and prose that merely contains
+  "corresponding" are not read.
 
 ## [0.6.0] - 2026-09-30
 

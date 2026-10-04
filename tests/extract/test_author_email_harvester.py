@@ -1331,6 +1331,111 @@ def test_the_marker_pass_only_sets_flags_in_a_whole_harvest(monkeypatch):
     assert _flags(with_pass) == [True, True, False]
 
 
+_SERIES_BYLINE = "Alice Lee∗ Hui-Kai Tan† Omar Reyes‡"
+
+
+def _trio_with_addresses():
+    authors = _trio()
+    authors[0].email = "alee@example.org"
+    authors[1].email = "hk.tan@example.org"
+    authors[2].email = "oreyes@example.org"
+    return authors
+
+
+def test_a_star_that_only_starts_a_footnote_symbol_series_is_not_corresponding():
+    authors = _trio_with_addresses()
+    line = "∗alee@example.org †hk.tan@example.org ‡oreyes@example.org"
+    _harvest_all([("title", [_SERIES_BYLINE]), ("unknown", [line])], authors)
+    assert _flags(authors) == [False, False, False]
+
+
+def test_a_footnote_symbol_series_split_over_sentences_is_not_corresponding():
+    authors = _trio_with_addresses()
+    _harvest_all(
+        [
+            ("title", [_SERIES_BYLINE]),
+            (
+                "unknown",
+                [
+                    "∗alee@example.org",
+                    "†hk.tan@example.org",
+                    "‡ E-mail: oreyes@example.org",
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert _flags(authors) == [False, False, False]
+
+
+@pytest.mark.parametrize("symbol", ["†", "‡", "§", "¶", "‖", "\\(^{\\dagger}\\)"])
+def test_any_series_symbol_before_another_address_stops_the_star(symbol):
+    authors = _trio_with_addresses()
+    _marker_pass(authors, f"* alee@example.org {symbol} E-mail: hk.tan@example.org")
+    assert _flags(authors) == [False, False, False]
+
+
+def test_a_star_stays_corresponding_when_a_dagger_does_not_precede_an_address():
+    authors = _trio_with_addresses()
+    _marker_pass(
+        authors,
+        "† These authors contributed equally.",
+        "* E-mail: alee@example.org",
+        "† Current address: Example Institute, 5 Main Street",
+    )
+    assert _flags(authors) == [True, False, False]
+
+
+def test_an_envelope_is_still_read_next_to_a_footnote_series():
+    authors = _trio_with_addresses()
+    _marker_pass(authors, "✉ alee@example.org", "† hk.tan@example.org")
+    assert _flags(authors) == [True, False, False]
+
+
+def test_a_star_is_not_added_to_an_owner_whose_address_names_another_author():
+    authors = _trio()
+    authors[0].email = "hk.tan@example.org"  # attached to the wrong author upstream
+    _marker_pass(authors, "* E-mail: hk.tan@example.org")
+    assert _flags(authors) == [False, False, False]
+
+
+def test_a_star_still_flags_an_owner_whose_address_names_nobody():
+    authors = _trio()
+    authors[0].email = "corresponding.office@example.org"
+    _marker_pass(authors, "* E-mail: corresponding.office@example.org")
+    assert _flags(authors) == [True, False, False]
+
+
+def test_a_list_keeps_the_owner_the_address_fits_and_drops_the_misattached_one():
+    authors = _trio()
+    authors[0].email = "hk.tan@example.org"  # wrong owner
+    authors[2].email = "oreyes@example.org"
+    _marker_pass(authors, "* E-mail: hk.tan@example.org; oreyes@example.org")
+    assert _flags(authors) == [False, False, True]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "* E-mail addresses: alee@example.org (A. Lee), hk.tan@example.org (H.-K. Tan)",
+        "* E-mail: alee@example.org (Alice Lee) and hk.tan@example.org (Hui-Kai Tan)",
+        "* E-mail: alee@example.org (A. Lee); hk.tan@example.org (H.-K. Tan)",
+    ],
+)
+def test_a_list_cut_short_by_a_parenthetical_that_is_not_initials_flags_nobody(line):
+    authors = _trio_with_addresses()
+    _harvest_all([("title", [_TRIO_BYLINE]), ("unknown", [line])], authors)
+    assert _flags(authors) == [False, False, False]
+
+
+def test_a_complete_list_followed_by_other_text_without_an_address_still_flags():
+    authors = _trio_with_addresses()
+    _marker_pass(
+        authors, "* E-mail: alee@example.org (AL); hk.tan@example.org (HKT). Funding: none"
+    )
+    assert _flags(authors) == [True, True, False]
+
+
 def test_marker_rules_leave_a_paper_without_authors_alone():
     from bibr.extract.author_email_harvester import AuthorEmailHarvester
 
