@@ -16,6 +16,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   corresponding only when a "Corresponding author" or "Correspondence" phrase opens the
   sentence or one of the three before it, the phrase is plural or the footnote prints a
   single pair, and no other author is already flagged. No prompt or LLM input changes.
+- The corresponding-author e-mail harvester also reads the rest of page 1 outside the selected
+  front-matter block (sidebars, footers, byline notes). An address from those added sentences
+  is assigned only when an author's surname sits within 45 characters before it, or when its
+  local part spells exactly one author's name; a tie between authors sharing a surname is left
+  open. The front-matter sentences are harvested exactly as before.
 
 ## [0.6.0] - 2026-09-30
 

@@ -1737,19 +1737,32 @@ class CoreMetadataExtractor:
             selected_section_ids = {
                 candidate.section_id for candidate in selected if candidate.section_id is not None
             }
+            # Page 1 beyond the selected block (sidebars, footers, byline notes) often carries
+            # the corresponding author's address. Those sentences are added to the scope, and
+            # the harvester gates every address it takes from them.
+            widened_text_ids = frozenset(
+                sentence.text_id
+                for sentence in contents.sentences
+                if sentence.text_id not in allowed_text_ids
+                and getattr(sentence, "page_number", None) == 1
+            )
+            scoped_sentences = [
+                sentence
+                for sentence in contents.sentences
+                if sentence.text_id in allowed_text_ids or sentence.text_id in widened_text_ids
+            ]
+            scoped_section_ids = selected_section_ids | {s.section_id for s in scoped_sentences}
             scoped_contents = SimpleNamespace(
-                sentences=[
-                    sentence
-                    for sentence in contents.sentences
-                    if sentence.text_id in allowed_text_ids
-                ],
+                sentences=scoped_sentences,
                 sections=[
                     section
                     for section in contents.sections
-                    if section.section_id in selected_section_ids
+                    if section.section_id in scoped_section_ids
                 ],
             )
-            self._email_harvester = AuthorEmailHarvester(scoped_contents, document=contents)
+            self._email_harvester = AuthorEmailHarvester(
+                scoped_contents, document=contents, widened_text_ids=widened_text_ids
+            )
 
     async def extract(self) -> PaperMetadata:
         """Extract metadata from text before the cutoff section and ORCID lines."""
