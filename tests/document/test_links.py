@@ -267,6 +267,24 @@ def test_pages_the_inspection_does_not_read_give_the_layer_a_rebuild_gives():
     assert serialize.digest(unread) == serialize.digest(_layer())
 
 
+def test_a_layer_that_never_started_leaves_what_it_could_not_read_unknown(monkeypatch):
+    # The links need the open document: with no start, "no internal links" would
+    # be a claim the layer cannot make, so the flags stay None, not False.
+    def broken(_self, _doc):
+        raise RuntimeError("start failed")
+
+    monkeypatch.setattr(harvest.LayerBuilder, "start", broken)
+    layer = _inspect(_linked.linked_paper(), layer=True).document
+
+    assert layer.component_errors == {"start": "RuntimeError: start failed"}
+    assert not layer.links and not layer.outline
+    presence = layer.presence
+    assert presence.has_outline is None
+    assert presence.has_internal_links is None
+    assert presence.has_named_dests is None
+    assert presence.outline_guard_pass is None
+
+
 # --- The rules ------------------------------------------------------------------
 
 
