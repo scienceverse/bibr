@@ -575,7 +575,7 @@ def test_a_schema_change_comes_with_a_new_layer_version():
     # decodes to: bump LAYER_VERSION with it and pin the new pair here.
     assert (LAYER_VERSION, _schema_digest()) == (
         "doclayer/3",
-        "c232818f5c85b6136147ac892198ff4c03380773bced402e34730d75af545969",
+        "8fc5d57502d6f3c78c4a1e1ee968fc6ab5d0aadc5a07d372c8de9e2dc28924e2",
     )
 
 

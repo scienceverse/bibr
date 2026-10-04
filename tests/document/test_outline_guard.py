@@ -63,9 +63,8 @@ def test_the_guard_gives_the_verdict_the_frozen_guard_gave(name):
     assert [[rule, titles[idx]] for idx, rule in verdict.dropped] == case["dropped"]
     kept = [title for idx, title in enumerate(titles) if idx not in {d[0] for d in verdict.dropped}]
     assert kept == case["kept"]
-    assert verdict.version == "outline_guard/v1"
     assert verdict.decided.component == "outline_guard"
-    assert verdict.decided.version == verdict.version
+    assert verdict.decided.version == "outline_guard/1"
     assert verdict.decided.calibrated is False
 
 

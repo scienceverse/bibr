@@ -36,6 +36,16 @@ def test_every_bookmark_is_read_with_its_depth_parent_and_target():
     assert layer.component_errors == {}
 
 
+def test_an_entry_is_named_by_its_position_in_the_outline():
+    layer = _layer()
+
+    assert [entry.entry_id for entry in layer.outline] == [
+        f"ol{n}" for n in range(len(_linked.OUTLINE))
+    ]
+    # The ids the guard cites are these.
+    assert set(layer.outline_guard.decided.evidence) <= {entry.entry_id for entry in layer.outline}
+
+
 def test_blank_titles_and_entries_the_guard_drops_stay_in_the_outline():
     titles = [entry.title for entry in _layer().outline]
 
