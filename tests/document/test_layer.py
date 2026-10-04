@@ -219,6 +219,11 @@ def test_invisible_layer_text_is_read_only_on_scanned_pages():
                 views.block_text(layer, block.block_id, "invisible_layer")
                 == block.text["invisible_layer"]
             )
+    assert scan.blocks
+    for block in scan.blocks:
+        # The hidden layer is third-party OCR, never born-digital text.
+        assert views.block_text(layer, block.block_id) is None
+        assert views.block_text(layer, block.block_id, "native") is None
     for block in born_digital.blocks:
         assert views.block_text(layer, block.block_id, "invisible_layer") is None
     with pytest.raises(ValueError):

@@ -115,10 +115,15 @@ def block_text(layer: DocumentLayer, block_id: str, source: str = "native") -> s
 
     ``native`` reads the text layer in the block's box as the native-text
     fill does (centre containment, then the fill's line-end hyphen repair), so
-    for a region the fill took it equals the region's content.
+    for a region the fill took it equals the region's content. It reads only
+    born-digital text layers: None unless ``Page.text_source`` is ``native``.
     ``invisible_layer`` is the same read, only on pages whose text layer is a
-    hidden OCR layer. ``ocr`` is the region's OCR text. None when the block or
-    the source is absent.
+    hidden OCR layer. ``ocr`` is the region's OCR text, which exists only when
+    OCR was the region's chosen source. None when the block or the source is
+    absent.
+
+    ``Block.text`` keeps only the chosen source's text; this is how the text
+    layer under any block is read.
     """
     if source not in TEXT_SOURCES:
         raise ValueError(f"unknown text source {source!r}")
@@ -128,9 +133,7 @@ def block_text(layer: DocumentLayer, block_id: str, source: str = "native") -> s
     page, block = found
     if source == "ocr":
         return block.text.get("ocr")
-    if page.cols is None:
-        return None
-    if source == "invisible_layer" and page.text_source != "invisible_layer":
+    if page.cols is None or page.text_source != source:
         return None
     text = text_in_box(page, block.bbox_pdf)
     if "\x02" in text:

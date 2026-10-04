@@ -383,8 +383,9 @@ class Block:
     # Position in the page's region list (the regions' reading order).
     read_order: int | None = None
     # The post-OCR region text under the source it came from: native,
-    # invisible_layer (the text layer of a scanned page) or ocr. The text
-    # layer inside any block is read with bibr.document.views.block_text.
+    # invisible_layer (the text layer of a scanned page) or ocr. Only the
+    # chosen source is kept; bibr.document.views.block_text reads the text
+    # layer under any block.
     text: dict[str, str] = field(default_factory=dict)
     # The key of ``text`` (None for an empty region).
     chosen: str | None = None
