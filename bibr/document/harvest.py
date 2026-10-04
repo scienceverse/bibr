@@ -18,7 +18,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import math
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -703,6 +703,120 @@ def read_page(
     )
 
 
+@dataclass(slots=True)
+class _PackedDraft:
+    """A :class:`_PageDraft` held as numpy arrays from the locked read until ``finish``.
+
+    The draft's per-glyph Python lists cost about 760 bytes a glyph, and
+    every page of the document waited in them for ``finish``. Packed, a
+    glyph costs about 110 bytes; :func:`_unpack` gives back the exact lists.
+    A char with no tight box is the one flagged ``GLYPH_NO_BOX``, and a
+    record whose char is not one code point keeps it in ``rec_text``.
+    """
+
+    page: Page
+    codes: np.ndarray
+    boxes: np.ndarray
+    rec_cp: np.ndarray
+    rec_text: dict[int, str]
+    rec_cx: np.ndarray
+    rec_cy: np.ndarray
+    rec_newline: np.ndarray
+    record_src: np.ndarray
+    record_flags: np.ndarray
+    rows: np.ndarray
+    origins: np.ndarray
+    loose: np.ndarray
+    gflags: np.ndarray
+    objects: dict[str, np.ndarray]
+
+
+# The packed dtype of each _Objects list: float64 where the value feeds a
+# computation in _complete, the column's own dtype elsewhere.
+_OBJECT_DTYPES = {
+    "font": np.int32,
+    "tf": np.float64,
+    "size_eff": np.float64,
+    "matrix": np.float64,
+    "fill": np.uint32,
+    "stroke": np.uint32,
+    "mode": np.int8,
+    "mcid": np.int32,
+    "artifact": np.bool_,
+    "flags": np.uint8,
+}
+
+
+def _pack(draft: _PageDraft) -> _PackedDraft:
+    rec_cp: list[int] = []
+    rec_text: dict[int, str] = {}
+    for index, record in enumerate(draft.records):
+        if len(record[0]) == 1:
+            rec_cp.append(ord(record[0]))
+        else:
+            rec_cp.append(0)
+            rec_text[index] = record[0]
+    objects = draft.objects
+    return _PackedDraft(
+        page=draft.page,
+        codes=np.asarray(draft.codes, dtype=np.uint32),
+        boxes=np.asarray(
+            [_NAN_BOX if box is None else box for box in draft.boxes], dtype=np.float64
+        ).reshape(-1, 4),
+        rec_cp=np.asarray(rec_cp, dtype=np.uint32),
+        rec_text=rec_text,
+        rec_cx=np.asarray([record[1] for record in draft.records], dtype=np.float64),
+        rec_cy=np.asarray([record[2] for record in draft.records], dtype=np.float64),
+        rec_newline=np.asarray([record[3] for record in draft.records], dtype=np.bool_),
+        record_src=np.asarray(draft.record_src, dtype=np.int32),
+        record_flags=np.asarray(draft.record_flags, dtype=np.uint8),
+        rows=np.asarray(draft.rows, dtype=np.int32),
+        origins=np.asarray(draft.origins, dtype=np.float64),
+        # Only ever stored as float32.
+        loose=np.asarray(draft.loose, dtype=np.float32),
+        gflags=np.asarray(draft.gflags, dtype=np.uint16),
+        objects={
+            name: np.asarray(getattr(objects, name), dtype=dtype)
+            for name, dtype in _OBJECT_DTYPES.items()
+        },
+    )
+
+
+def _unpack(packed: _PackedDraft) -> _PageDraft:
+    gflags = packed.gflags.tolist()
+    rec_text = packed.rec_text
+    records = [
+        (rec_text[index] if index in rec_text else chr(code), cx, cy, newline)
+        for index, (code, cx, cy, newline) in enumerate(
+            zip(
+                packed.rec_cp.tolist(),
+                packed.rec_cx.tolist(),
+                packed.rec_cy.tolist(),
+                packed.rec_newline.tolist(),
+                strict=True,
+            )
+        )
+    ]
+    columns = {name: array.tolist() for name, array in packed.objects.items()}
+    columns["matrix"] = [tuple(matrix) for matrix in columns["matrix"]]
+    return _PageDraft(
+        packed.page,
+        packed.codes.tolist(),
+        [
+            None if flags & GLYPH_NO_BOX else tuple(box)
+            for box, flags in zip(packed.boxes.tolist(), gflags, strict=True)
+        ],
+        records,
+        packed.record_src.tolist(),
+        packed.record_flags.tolist(),
+        packed.rows.tolist(),
+        packed.origins.tolist(),
+        packed.loose.tolist(),
+        gflags,
+        _Objects(**columns),
+    )
+
+
 def _complete(draft: _PageDraft) -> tuple[Page, list[RoleTag]]:
     """Columns, spans, lines and script tags of a drafted page (no pdfium calls)."""
     built = draft.page
@@ -779,7 +893,7 @@ class LayerBuilder:
         self.source_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
         self.budget = budget
         self.fonts = FontTable()
-        self.drafts: list[_PageDraft] = []
+        self.drafts: deque[_PackedDraft] = deque()
         self.errors: dict[str, str] = {}
         self.missing = missing_apis()
         self._api = _Api()
@@ -826,10 +940,11 @@ class LayerBuilder:
                 version=self.version,
                 api=self._api,
             )
+            packed = _pack(draft)
         except Exception as exc:  # noqa: BLE001 - a layer page never fails the paper
             self.errors[f"harvest:{page_index}"] = _error_text(exc)
             return
-        self.drafts.append(draft)
+        self.drafts.append(packed)
 
     def error(self, key: str, exc: BaseException) -> None:
         self.errors[key] = _error_text(exc)
@@ -838,15 +953,16 @@ class LayerBuilder:
         """Complete the drafted pages; needs no pdfium, so call it after the lock."""
         pages: list[Page] = []
         roles: list[RoleTag] = []
-        for draft in self.drafts:
+        # Each draft is released once its page is complete.
+        while self.drafts:
+            packed = self.drafts.popleft()
             try:
-                built, tags = _complete(draft)
+                built, tags = _complete(_unpack(packed))
             except Exception as exc:  # noqa: BLE001 - a layer page never fails the paper
-                self.errors[f"harvest:{draft.page.index}"] = _error_text(exc)
+                self.errors[f"harvest:{packed.page.index}"] = _error_text(exc)
                 continue
             pages.append(built)
             roles.extend(tags)
-        self.drafts = []
         has_mcids = None
         if "FPDFPageObj_GetMarkedContentID" not in self.missing:
             has_mcids = any(

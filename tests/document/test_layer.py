@@ -7,6 +7,7 @@ pipeline reads (region text, page lines, region boxes) from its own columns.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from copy import deepcopy
 
@@ -18,10 +19,13 @@ from bibr.document import harvest, serialize, views
 from bibr.document.harvest import build_document_layer, layout_render_dpi
 from bibr.document.model import (
     COLUMN_DTYPES,
+    GLYPH_GENERATED,
+    GLYPH_NO_BOX,
     INDEX_FRAME,
     LAYER_VERSION,
     Decided,
     Furniture,
+    Page,
 )
 from bibr.document.rebuild import _page_count, attach_blocks, render_budget
 from bibr.ocr.image_utils import iter_pdf_pages_with_index
@@ -243,6 +247,63 @@ def test_rebuild_of_a_page_range_matches_the_inline_layer():
 
     assert [page.index for page in inline.pages] == pages
     assert serialize.digest(rebuilt) == serialize.digest(inline)
+
+
+@pytest.mark.parametrize("name", sorted(_FIXTURES))
+def test_a_packed_draft_unpacks_to_the_lists_read(name, monkeypatch):
+    # The builder keeps each page's draft as arrays until finish().
+    drafts = []
+    read = harvest.read_page
+
+    def keep(*args, **kwargs):
+        drafts.append(read(*args, **kwargs))
+        return drafts[-1]
+
+    monkeypatch.setattr(harvest, "read_page", keep)
+    build_document_layer(_FIXTURES[name], range(_page_count(_FIXTURES[name])), budget=_BUDGET)
+
+    assert drafts
+    for draft in drafts:
+        unpacked = harvest._unpack(harvest._pack(draft))
+        for item in dataclasses.fields(draft):
+            if item.name == "loose":
+                # Kept as the float32 column it becomes.
+                expected = np.asarray(draft.loose, dtype=np.float32).tolist()
+                assert unpacked.loose == expected
+            elif item.name == "objects":
+                assert json.dumps(dataclasses.asdict(unpacked.objects)) == json.dumps(
+                    dataclasses.asdict(draft.objects)
+                )
+            else:
+                value = getattr(draft, item.name)
+                assert json.dumps(getattr(unpacked, item.name), default=repr) == json.dumps(
+                    value, default=repr
+                ), item.name
+
+
+def test_packing_keeps_missing_boxes_and_records_of_other_lengths():
+    page = Page(0, None, 10.0, 10.0, (0.0, 0.0, 10.0, 10.0), 0, "native", None)
+    objects = harvest._Objects(
+        [0], [1.0], [2.0], [(2.0, 0.0, 0.0, 2.0)], [0xFF0000FF], [0], [3], [-1], [True], [0]
+    )
+    nan = float("nan")
+    draft = harvest._PageDraft(
+        page,
+        [0x41, 0xD835, 0xDEFC],
+        [(1.0, 2.0, 3.0, 4.0), None, None],
+        [("A", 2.0, 3.0, False), ("\U0001d6fc", 5.0, 3.0, False), ("", 0.0, 0.0, False)],
+        [0, 1, -1],
+        [0, 1, 0],
+        [0, 0, -1],
+        [1.0, 2.0, nan, nan, 0.5, 0.5],
+        [1.0, 2.0, 3.0, 4.0] * 3,
+        [0, GLYPH_NO_BOX, GLYPH_NO_BOX | GLYPH_GENERATED],
+        objects,
+    )
+
+    unpacked = harvest._unpack(harvest._pack(draft))
+
+    assert repr(unpacked) == repr(draft)
 
 
 @pytest.mark.parametrize("name", sorted(_FIXTURES))
