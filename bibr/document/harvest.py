@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from bibr.document import destinations, ids
+from bibr.document import destinations, ids, outline, outline_guard
 from bibr.document.model import (
     COLUMN_DTYPES,
     GLYPH_EXCLUDED,
@@ -51,6 +51,8 @@ from bibr.document.model import (
     DocumentLayer,
     Font,
     Furniture,
+    OutlineEntry,
+    OutlineGuard,
     Page,
     PageColumns,
     Presence,
@@ -92,6 +94,7 @@ _HARVEST_APIS = (
     "FPDFFont_GetIsEmbedded",
     "FPDF_GetPageLabel",
     *destinations.APIS,
+    *outline.APIS,
 )
 
 # How the layout stage renders a page (bibr.ocr.image_utils.iter_pdf_pages_with_index):
@@ -942,6 +945,9 @@ class LayerBuilder:
         self.n_pages = 0
         self.names: destinations.NamedDests | None = None
         self.labels: dict[int, str | None] = {}
+        # The outline's entries; None until it is read, and when it cannot be.
+        self.outline: list[OutlineEntry] | None = None
+        self.meta_title: str | None = None
 
     def start(self, doc) -> None:
         """Read what the document declares as a whole: call right after opening *doc*.
@@ -955,6 +961,15 @@ class LayerBuilder:
                 self.names = destinations.NamedDests(self._api, doc)
         except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
             self.errors["named_dests"] = _error_text(exc)
+        if self._lacks(destinations.APIS + outline.APIS):
+            return
+        try:
+            self.meta_title = outline.meta_title(self._api, doc)
+            self.outline, note = outline.read_outline(self._api, doc, self.names, self.n_pages)
+            if note is not None:
+                self.errors["outline"] = note
+        except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
+            self.errors["outline"] = _error_text(exc)
 
     def _lacks(self, apis: tuple[str, ...]) -> bool:
         return any(name in self.missing for name in apis)
@@ -1031,6 +1046,19 @@ class LayerBuilder:
         self.drafts.append(packed)
         self._added.add(page_index)
 
+    def _judge_outline(self, pages: list[Page]) -> OutlineGuard | None:
+        """The outline guard's verdict, grounded in the text of the pages built."""
+        if self.outline is None:
+            return None
+        try:
+            text = outline_guard.PageText(pages, self.n_pages) if pages else None
+            return outline_guard.judge(
+                self.outline, meta_title=self.meta_title, n_pages=self.n_pages, text=text
+            )
+        except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
+            self.errors["outline_guard"] = _error_text(exc)
+            return None
+
     def page_failed(
         self, page_index: int, key: str, exc: BaseException, page: Page | None = None
     ) -> None:
@@ -1073,6 +1101,7 @@ class LayerBuilder:
             roles.extend(tags)
         for page in pages:
             page.label = self.labels.get(page.index)
+        guard = self._judge_outline(pages)
         # A fact no examined page shows is unknown, not absent, while another
         # page was not examined. A page's text source counts once decided, even
         # if the page failed later; marked content needs the page's columns.
@@ -1096,6 +1125,8 @@ class LayerBuilder:
             has_invisible_layer=seen(
                 any(page.text_source == "invisible_layer" for page in decided), decided
             ),
+            has_outline=len(self.outline) > 0 if self.outline is not None else None,
+            outline_guard_pass=guard.passed if guard is not None else None,
             has_mcids=(
                 None if "FPDFPageObj_GetMarkedContentID" in self.missing else seen(mcids, read)
             ),
@@ -1112,6 +1143,8 @@ class LayerBuilder:
             index_frame=INDEX_FRAME,
             pages=pages,
             fonts=list(self.fonts.fonts),
+            outline=self.outline or [],
+            outline_guard=guard,
             roles=roles,
             presence=presence,
             component_errors=dict(self.errors),

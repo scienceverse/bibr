@@ -153,8 +153,11 @@ def build_pdf(pages: list[PageSpec]) -> bytes:
     return serialize_pdf(objects)
 
 
-def serialize_pdf(objects: list[bytes]) -> bytes:
-    """A PDF of *objects* (object number = position + 1), the catalog first."""
+def serialize_pdf(objects: list[bytes], trailer: bytes = b"") -> bytes:
+    """A PDF of *objects* (object number = position + 1), the catalog first.
+
+    *trailer* adds entries to the trailer dictionary (``/Info 7 0 R``).
+    """
     out = bytearray(b"%PDF-1.4\n")
     offsets = []
     for number, body in enumerate(objects, start=1):
@@ -164,8 +167,9 @@ def serialize_pdf(objects: list[bytes]) -> bytes:
     out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
     for offset in offsets:
         out += b"%010d 00000 n \n" % offset
-    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (
+    out += b"trailer\n<< /Size %d /Root 1 0 R%s >>\nstartxref\n%d\n%%%%EOF\n" % (
         len(objects) + 1,
+        b" " + trailer if trailer else b"",
         xref,
     )
     return bytes(out)
