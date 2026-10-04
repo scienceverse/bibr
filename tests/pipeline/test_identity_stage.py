@@ -389,3 +389,57 @@ def test_only_the_identity_stage_writes_the_paper_doi():
     assert {module for module, _line in writers} - evidence_writers - reference_writers == {
         "pipeline/stages/identity.py"
     }
+
+
+def _ref(bib_id: int, *, title: str = "", doi: str | None = None, **fields):
+    from bibr.models import PaperReference
+
+    base = {"first_page": None, "volume": None, "authors": None, "year": None, "container": None}
+    return PaperReference(bib_id=bib_id, title=title, doi=doi, **(base | fields))
+
+
+async def test_identity_stage_takes_the_papers_own_doi_off_its_bibliography():
+    from bibr.pipeline.stages.identity import IdentityValidationStage
+
+    own = "10.1101/2026.01.02.12345678"
+    paper = _paper(f"medRxiv preprint doi: https://doi.org/{own}; this version posted")
+    paper.metadata.title = "Soluble markers of kidney injury"
+    paper.metadata.references = [
+        # the repeated preprint banner glued onto a printed entry's tail
+        _ref(
+            1,
+            doi=own,
+            url=f"https://doi.org/{own}",
+            container="Kidney Int",
+            year=2017,
+            volume="91",
+            first_page="1014",
+        ),
+        _ref(2, title="An atlas of healthy kidney cells", doi="10.1038/s41586-023-05769-3"),
+        # an earlier version of this very work, cited by title
+        _ref(3, title="Soluble markers of kidney injury", doi=own, year=2025),
+    ]
+    state = FileState(path=Path("paper.pdf"), paper=paper)
+
+    await IdentityValidationStage().run(_ctx(state))
+
+    assert paper.metadata.doi == own
+    refs = paper.metadata.references
+    assert [ref.bib_id for ref in refs] == [1, 2, 3]
+    assert refs[0].doi is None and refs[0].url is None
+    assert refs[0].container == "Kidney Int" and refs[0].first_page == "1014"
+    assert refs[1].doi == "10.1038/s41586-023-05769-3"
+    assert refs[2].doi == own
+
+
+async def test_identity_stage_leaves_bibliography_dois_alone_without_an_own_doi():
+    from bibr.pipeline.stages.identity import IdentityValidationStage
+
+    paper = _paper("A paper with no source-visible DOI", doi="10.1234/stale")
+    paper.metadata.references = [_ref(1, title="A study", doi="10.1234/stale")]
+    state = FileState(path=Path("paper.pdf"), paper=paper)
+
+    await IdentityValidationStage().run(_ctx(state))
+
+    assert paper.metadata.doi == ""
+    assert paper.metadata.references[0].doi == "10.1234/stale"

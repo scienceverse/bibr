@@ -7,6 +7,22 @@ routes offer a fire-and-poll alternative:
   - ``POST /papers/jobs``            → 202 ``{job_id, status, status_url}``
   - ``GET  /papers/jobs/{id}``       → job status (no result body)
   - ``GET  /papers/jobs/{id}/result`` → the paper_json once succeeded
+  - ``DELETE /papers/jobs/{id}``     → cancel a job that is still queued
+
+**Cancelling.** A queued job is failed at once with ``error_code``
+``job_cancelled``: it stops counting against ``JOBS_MAX_ACTIVE``, its upload is
+deleted (on the replica that holds it; another replica's worker skips it when it
+dequeues it), and its result answers ``410``. A cancelled job reports
+``status: failed``, so a client that polls for ``succeeded``/``failed`` stops
+like it does for any failure. A running job cannot be stopped between pipeline
+stages yet, so ``DELETE`` answers ``409`` for it.
+
+**Duplicate uploads.** With ``JOBS_DEDUPE_INFLIGHT=true`` a ``POST`` whose file
+(sha256), filename and options match a job this replica still has queued or
+running returns that job instead of queueing the paper again. The active-job cap
+is checked first, so at ``JOBS_MAX_ACTIVE`` a duplicate is refused with 429 too.
+bibr serve has one principal (the shared API key), so this suits a single-tenant deployment; a
+multi-user front end must deduplicate per user itself.
 
 **Architecture.** Jobs persist their uploads through the same disk-backed
 ingress as ``/papers/extract`` and queue only its opaque descriptor. The job
@@ -42,6 +58,7 @@ import re
 import socket
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
@@ -77,6 +94,10 @@ _STORE_UNAVAILABLE_DETAIL = "job store unavailable"
 # Recorded on jobs the owning replica abandons at shutdown (queued ones lose their
 # upload; running ones lose their inference task). 503 tells the client to resubmit.
 _SHUTDOWN_ERROR = {"detail": "replica shut down before the job finished"}
+# Recorded on a job cancelled while it waited in the queue. It is an ordinary failure,
+# so every client that polls for succeeded/failed stops; its result answers 410 Gone.
+CANCELLED_ERROR = {"detail": "job cancelled before it started", "error_code": "job_cancelled"}
+CANCELLED_HTTP_STATUS = 410
 
 
 class JobCapacityError(Exception):
@@ -181,6 +202,15 @@ class Job:
         return out
 
 
+def is_cancelled(job: Job) -> bool:
+    """Whether ``job`` is a queued job that ``DELETE /papers/jobs/{id}`` cancelled."""
+    return (
+        job.status == "failed"
+        and isinstance(job.error, dict)
+        and job.error.get("error_code") == CANCELLED_ERROR["error_code"]
+    )
+
+
 def encode_result(result: dict) -> bytes:
     """Render a job result the way ``JSONResponse`` does, once, at completion."""
     return json.dumps(result, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode(
@@ -214,11 +244,32 @@ class JobStore(Protocol):
         """Remove a job that failed before it could be admitted to dispatch."""
         ...
 
-    async def set_running(self, job_id: str) -> None: ...
+    async def set_running(self, job_id: str) -> bool:
+        """Claim a dequeued job for execution.
+
+        ``False`` means the runner must skip the job: it is no longer queued (it was
+        cancelled while it waited) or its record is gone (a finished record, such as
+        a cancelled one, that retention already evicted). A store that cannot be
+        reached returns ``True``, so an outage does not stop the work.
+        """
+        ...
+
+    async def cancel(self, job_id: str) -> Job | None:
+        """Fail a *queued* job as cancelled and return the job as it now stands.
+
+        The cancelled job stops counting against the active cap at once. A running or
+        finished job is returned unchanged; ``None`` if unknown/expired. Shared stores
+        raise :class:`JobStoreUnavailableError` when the backend cannot be reached.
+        """
+        ...
 
     async def set_succeeded(self, job_id: str, result: dict) -> None: ...
 
-    async def set_failed(self, job_id: str, *, http_status: int | None, error: dict) -> None: ...
+    async def set_failed(
+        self, job_id: str, *, http_status: int | None, error: dict, required: str = ""
+    ) -> None:
+        """Record a failure; with ``required`` set, only a job in that status changes."""
+        ...
 
     async def close(self) -> None: ...
 
@@ -313,14 +364,29 @@ class MemoryJobStore:
         async with self._lock:
             self._jobs.pop(job_id, None)
 
-    async def set_running(self, job_id: str) -> None:
+    async def set_running(self, job_id: str) -> bool:
         async with self._lock:
             job = self._jobs.get(job_id)
-            if job is None:
-                return
+            if job is None or job.status != "queued":
+                return False
             job.status = "running"
             job.started_mono = self._clock()
             job.started_wall = self._wall_clock()
+            return True
+
+    async def cancel(self, job_id: str) -> Job | None:
+        async with self._lock:
+            self._purge_locked()
+            job = self._jobs.get(job_id)
+            if job is None or job.status != "queued":
+                return job
+            job.status = "failed"
+            job.http_status = CANCELLED_HTTP_STATUS
+            job.error = dict(CANCELLED_ERROR)
+            job.finished_mono = self._clock()
+            job.finished_wall = self._wall_clock()
+            self._purge_locked()
+            return job
 
     async def set_succeeded(self, job_id: str, result: dict) -> None:
         # Encode outside the lock: a large export takes real CPU time to render.
@@ -335,10 +401,12 @@ class MemoryJobStore:
             job.finished_wall = self._wall_clock()
             self._purge_locked()
 
-    async def set_failed(self, job_id: str, *, http_status: int | None, error: dict) -> None:
+    async def set_failed(
+        self, job_id: str, *, http_status: int | None, error: dict, required: str = ""
+    ) -> None:
         async with self._lock:
             job = self._jobs.get(job_id)
-            if job is None:
+            if job is None or (required and job.status != required):
                 return
             job.status = "failed"
             job.http_status = http_status
@@ -401,6 +469,36 @@ def _sanitize_request_id(raw: str | None) -> str | None:
     return cleaned or None
 
 
+_BOOLEAN_OPTIONS = frozenset({"include_figures", "include_regions", "crossref"})
+_INTEGER_OPTIONS = frozenset({"start_page", "end_page"})
+
+
+def _canonical_option(name: str, value: object) -> str:
+    text = str(value).strip()
+    if name in _BOOLEAN_OPTIONS:
+        return "true" if text.lower() in ("true", "1", "yes") else "false"
+    if name in _INTEGER_OPTIONS:
+        try:
+            return str(int(text))
+        except ValueError:
+            return text
+    return text.lower()
+
+
+def upload_fingerprint(sha256_hex: str, filename: str, options: Mapping[str, object]) -> str:
+    """What makes two uploads the same request: the file's sha256, name and options.
+
+    The name counts because the export carries it (``source.file_name``): a renamed
+    copy of a file runs again rather than receiving a result named after the first
+    upload. Options compare by meaning (``1``/``yes``/``true``, ``03``/``3``); an
+    option left out is not the same as its default spelled out, so such a pair just
+    runs twice.
+    """
+    canonical = {name: _canonical_option(name, value) for name, value in options.items()}
+    material = {"filename": filename, "options": canonical}
+    return sha256_hex + ":" + json.dumps(material, sort_keys=True, separators=(",", ":"))
+
+
 @dataclass(frozen=True)
 class JobPayload:
     """Small queue descriptor for one disk-backed job upload."""
@@ -409,7 +507,12 @@ class JobPayload:
 
 
 class JobDispatcher:
-    """Process-local FIFO dispatcher with bounded descriptor dispatch concurrency."""
+    """Process-local FIFO dispatcher with bounded descriptor dispatch concurrency.
+
+    It also knows which of its jobs still wait in the queue (so a cancelled one's
+    upload can be deleted at once) and, for ``JOBS_DEDUPE_INFLIGHT``, the upload
+    fingerprint of every job it has queued or running.
+    """
 
     def __init__(
         self,
@@ -424,6 +527,11 @@ class JobDispatcher:
         self._queue: asyncio.Queue[tuple[str, JobPayload]] = asyncio.Queue()
         self._workers: list[asyncio.Task] = []
         self._closed = False
+        # Jobs in the queue that no worker has taken yet.
+        self._waiting: dict[str, JobPayload] = {}
+        # Upload fingerprint -> job id (and back) for jobs queued or running here.
+        self._by_fingerprint: dict[str, str] = {}
+        self._fingerprint_of: dict[str, str] = {}
 
     async def start(self) -> None:
         if self._closed:
@@ -434,9 +542,32 @@ class JobDispatcher:
                 for index in range(self._max_running)
             ]
 
-    async def submit(self, job_id: str, payload: JobPayload) -> None:
+    async def submit(
+        self, job_id: str, payload: JobPayload, *, fingerprint: str | None = None
+    ) -> None:
         await self.start()
+        self._waiting[job_id] = payload
+        if fingerprint is not None:
+            self._by_fingerprint[fingerprint] = job_id
+            self._fingerprint_of[job_id] = fingerprint
         self._queue.put_nowait((job_id, payload))
+
+    def job_for_fingerprint(self, fingerprint: str) -> str | None:
+        """The job this dispatcher holds (queued or running) for an upload fingerprint."""
+        return self._by_fingerprint.get(fingerprint)
+
+    async def release_cancelled(self, job_id: str) -> None:
+        """Delete the upload of a job cancelled while it waited here, without waiting
+        for a worker to dequeue it (the worker then skips it)."""
+        self._forget_fingerprint(job_id)
+        payload = self._waiting.pop(job_id, None)
+        if payload is not None:
+            await self._tracker.discard(payload.descriptor)
+
+    def _forget_fingerprint(self, job_id: str) -> None:
+        fingerprint = self._fingerprint_of.pop(job_id, None)
+        if fingerprint is not None and self._by_fingerprint.get(fingerprint) == job_id:
+            del self._by_fingerprint[fingerprint]
 
     async def join(self) -> None:
         await self._queue.join()
@@ -446,6 +577,7 @@ class JobDispatcher:
         # Closing must still stop this worker before it waits for another job.
         while not self._closed:
             job_id, payload = await self._queue.get()
+            self._waiting.pop(job_id, None)
             try:
                 await _run_job(
                     store=self._store,
@@ -459,6 +591,7 @@ class JobDispatcher:
                 # and silently stranding every job queued behind it.
                 logger.exception("job %s: runner failed outside the job's own handling", job_id)
             finally:
+                self._forget_fingerprint(job_id)
                 self._queue.task_done()
 
     async def close(self) -> None:
@@ -476,12 +609,19 @@ class JobDispatcher:
                 job_id, payload = self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+            # A job cancelled here already left _waiting and has its final record.
+            cancelled = self._waiting.pop(job_id, None) is None
+            self._forget_fingerprint(job_id)
             try:
                 await self._tracker.discard(payload.descriptor)
                 # The upload is gone, so the job can never run: say so instead of
                 # leaving a "queued" record (in a shared store, one that would hold
                 # a cap slot until its safety TTL).
-                await self._store.set_failed(job_id, http_status=503, error=_SHUTDOWN_ERROR)
+                # Only a job still queued: another replica may have cancelled it.
+                if not cancelled:
+                    await self._store.set_failed(
+                        job_id, http_status=503, error=_SHUTDOWN_ERROR, required="queued"
+                    )
             finally:
                 self._queue.task_done()
 
@@ -495,7 +635,13 @@ async def _run_job(
 ) -> None:
     """Execute one job through LitServe's in-process descriptor adapter."""
 
-    await store.set_running(job_id)
+    if await store.set_running(job_id) is False:
+        # Cancelled while it waited (its record is final, or already evicted as a
+        # finished one): only the upload is left, and that is already gone when the
+        # cancel reached the replica that holds it.
+        logger.info("job %s: cancelled or expired before it started; skipped", job_id)
+        await tracker.discard(descriptor)
+        return
     try:
         result = await tracker.submit(descriptor)
     except asyncio.CancelledError:
@@ -537,7 +683,7 @@ def register_job_routes(
     upload_store: UploadStore,
     tracker: InferenceDispatchTracker,
 ) -> None:
-    """Mount the three async-job routes on ``app``.
+    """Mount the async-job routes on ``app``.
 
     Routes are NOT added to ``PUBLIC_PATHS`` — the app-wide ``_auth_gate``
     middleware covers them like any other route. Jobs share the public
@@ -563,6 +709,15 @@ def register_job_routes(
             app.state.job_dispatcher = dispatcher
         return dispatcher
 
+    async def _active_duplicate(dispatcher: JobDispatcher, fingerprint: str) -> Job | None:
+        existing_id = dispatcher.job_for_fingerprint(fingerprint)
+        if existing_id is None:
+            return None
+        existing = await store.get(existing_id, include_result=False)
+        if existing is None or existing.status not in _ACTIVE_STATUSES:
+            return None  # finished or cancelled since: run this upload afresh
+        return existing
+
     def _store_unavailable(job_id: str | None, exc: JobStoreUnavailableError) -> JSONResponse:
         logger.error("job store unavailable (job %s): %s", job_id or "-", exc)
         return JSONResponse({"detail": _STORE_UNAVAILABLE_DETAIL}, status_code=503)
@@ -574,6 +729,7 @@ def register_job_routes(
         descriptor: dict[str, object] | None = None
         job: Job | None = None
         stored: StoredUpload | None = None
+        duplicate_of: Job | None = None
 
         async def _discard_submission() -> None:
             if descriptor is not None:
@@ -601,10 +757,22 @@ def register_job_routes(
             # The job id links the worker-side extract record to the job the
             # client polls; the handoff ignores unknown keys.
             descriptor["job_id"] = job.job_id
-            await _job_dispatcher().submit(
-                job.job_id,
-                JobPayload(descriptor=descriptor),
-            )
+            dispatcher = _job_dispatcher()
+            fingerprint: str | None = None
+            if Settings.jobs.dedupe_inflight:
+                fingerprint = upload_fingerprint(stored.sha256_hex, job.filename, form_values)
+                duplicate_of = await _active_duplicate(dispatcher, fingerprint)
+            if duplicate_of is not None:
+                # The same file with the same options is already queued or running
+                # here: hand back that job and drop this copy.
+                logger.info("job %s: duplicate upload, answered with that job", duplicate_of.job_id)
+                await _discard_submission()
+            else:
+                await dispatcher.submit(
+                    job.job_id,
+                    JobPayload(descriptor=descriptor),
+                    fingerprint=fingerprint,
+                )
         except EmptyUploadError:
             await _discard_submission()
             return JSONResponse({"detail": "Empty or missing file"}, status_code=400)
@@ -634,6 +802,16 @@ def register_job_routes(
             raise
 
         assert job is not None and descriptor is not None
+        if duplicate_of is not None:
+            return JSONResponse(
+                {
+                    "job_id": duplicate_of.job_id,
+                    "status": duplicate_of.status,
+                    "status_url": f"/papers/jobs/{duplicate_of.job_id}",
+                    "duplicate": True,
+                },
+                status_code=202,
+            )
         return JSONResponse(
             {
                 "job_id": job.job_id,
@@ -679,3 +857,24 @@ def register_job_routes(
             return JSONResponse({"detail": "job result no longer available"}, status_code=404)
         # succeeded — the body was rendered once at completion.
         return Response(content=job.result_json, media_type="application/json")
+
+    @app.delete("/papers/jobs/{job_id}")
+    async def cancel_job(job_id: str):  # pyright: ignore[reportUnusedFunction]
+        """Cancel a queued job: 200 with its (failed, ``job_cancelled``) status, also
+        when it was already cancelled; 409 for a running or finished job."""
+        try:
+            job = await store.cancel(job_id)
+        except JobStoreUnavailableError as exc:
+            return _store_unavailable(job_id, exc)
+        if job is None:
+            return JSONResponse({"detail": "job not found"}, status_code=404)
+        if is_cancelled(job):
+            dispatcher = getattr(app.state, "job_dispatcher", None)
+            if isinstance(dispatcher, JobDispatcher):
+                await dispatcher.release_cancelled(job.job_id)
+            return JSONResponse(job.status_dict())
+        if job.status == "running":
+            detail = "job is already running; only a queued job can be cancelled"
+        else:
+            detail = "job already finished"
+        return JSONResponse({"detail": detail, "status": job.status}, status_code=409)
