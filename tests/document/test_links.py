@@ -6,7 +6,7 @@ from dataclasses import replace
 
 import pytest
 
-from bibr.document import destinations, harvest, links, views
+from bibr.document import destinations, harvest, links, serialize, views
 from bibr.document.harvest import build_document_layer
 from bibr.document.model import Block
 from tests.document import _linked, _pdfs
@@ -251,6 +251,20 @@ def test_the_inline_build_reads_the_same_links():
     pdf_bytes = _linked.linked_paper()
 
     assert _inspect(pdf_bytes, layer=True).document.links == _layer().links
+
+
+def test_pages_the_inspection_does_not_read_give_the_layer_a_rebuild_gives():
+    # With neither the native fill nor reference geometry the inspection opens no
+    # text page and the builder reads each page itself, labels, links and tree
+    # included.
+    pdf_bytes = _linked.linked_paper()
+    unread = _inspect(
+        pdf_bytes, layer=True, fill_native_text=False, include_ref_geometry=False
+    ).document
+
+    assert unread.links and unread.struct and unread.outline
+    assert [page.label for page in unread.pages] == _linked.PAGE_LABELS
+    assert serialize.digest(unread) == serialize.digest(_layer())
 
 
 # --- The rules ------------------------------------------------------------------

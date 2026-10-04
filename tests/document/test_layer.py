@@ -267,6 +267,22 @@ def test_a_failure_to_finish_the_layer_leaves_the_inspection(monkeypatch):
     assert json.dumps(inspection_to_dict(on)) == json.dumps(inspection_to_dict(off))
 
 
+def test_a_failure_to_start_the_layer_stays_in_the_layer(monkeypatch):
+    pdf_bytes = _pdfs.synthetic_paper()
+    off = _inspect(pdf_bytes, layer=False)
+    whole = _inspect(pdf_bytes, layer=True).document
+
+    def broken(_self, _doc):
+        raise RuntimeError("start failed")
+
+    monkeypatch.setattr(harvest.LayerBuilder, "start", broken)
+    on = _inspect(pdf_bytes, layer=True)
+
+    assert json.dumps(inspection_to_dict(on)) == json.dumps(inspection_to_dict(off))
+    assert on.document.component_errors == {"start": "RuntimeError: start failed"}
+    assert [page.index for page in on.document.pages] == [page.index for page in whole.pages]
+
+
 # --- Parity with the pipeline's own reads ---------------------------------------
 
 

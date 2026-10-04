@@ -147,7 +147,10 @@ def inspect_pdf(
                 component_errors["metadata"] = _error_text(exc)
 
             if layer_builder is not None:
-                layer_builder.start(doc)
+                try:
+                    layer_builder.start(doc)
+                except Exception as exc:  # noqa: BLE001 - the layer is optional
+                    layer_builder.errors["start"] = _error_text(exc)
 
             page_heights: dict[int, float] = {}
             for layout_slot, page_index in page_pairs:
