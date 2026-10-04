@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 
 from bibr.paper_contents import CaptionAssignment, CaptionCandidate
@@ -115,7 +116,14 @@ def _score_edge(
     caption: CaptionCandidate,
     target: CaptionTarget,
     targets: tuple[CaptionTarget, ...],
+    *,
+    number_offset: int | None = 0,
 ) -> _ScoredEdge | None:
+    """Score one caption-target edge.
+
+    The printed number is compared with the target's id plus *number_offset*;
+    with ``None`` it is not compared at all (geometry only).
+    """
     if caption.object_type != target.object_type:
         return None
     if (
@@ -202,8 +210,8 @@ def _score_edge(
         target_suffix = target.object_id.rsplit(":", 1)[-1]
         caption_number = _roman_value(number_match.group("number"))
         target_number = _roman_value(target_suffix)
-        if caption_number is not None and target_number is not None:
-            if caption_number == target_number:
+        if number_offset is not None and caption_number is not None and target_number is not None:
+            if caption_number == target_number + number_offset:
                 score += 2.5
                 reasons += ("explicit_number_match",)
             else:
@@ -269,18 +277,72 @@ def _maximum_weight_assignment(weights: list[list[float]]) -> list[int]:
     return selected
 
 
+def _number_offsets(
+    captions: tuple[CaptionCandidate, ...], targets: tuple[CaptionTarget, ...]
+) -> dict[tuple[int | None, str], int]:
+    """Per page and kind, how far printed numbers run ahead of provisional ids.
+
+    Provisional ids count every float, so a figure the parser keeps but the
+    paper does not number shifts every later one. Each numbered caption whose
+    geometrically best same-page target is clear (by 1.0) and its own (no other
+    caption's best) votes with its number minus that target's id. A page's
+    single most common vote is the offset the number bonus applies there; a
+    tie, or no vote, leaves it at zero. A leftover offset of one would
+    otherwise pull each caption onto its neighbour's figure.
+    """
+    votes: dict[tuple[int | None, str], list[tuple[int, str]]] = defaultdict(list)
+    for caption in captions:
+        number_match = _NUMBERED_CAPTION_RE.match(caption.text.strip())
+        caption_number = _roman_value(number_match.group("number")) if number_match else None
+        if caption_number is None:
+            continue
+        scored = sorted(
+            (
+                (edge.score, target.object_id)
+                for target in targets
+                if target.page_number == caption.page_number
+                and (edge := _score_edge(caption, target, targets, number_offset=None)) is not None
+            ),
+            key=lambda item: -item[0],
+        )
+        if not scored or (len(scored) > 1 and scored[0][0] - scored[1][0] < 1.0):
+            continue
+        target_number = _roman_value(scored[0][1].rsplit(":", 1)[-1])
+        if target_number is not None:
+            votes[(caption.page_number, caption.object_type)].append(
+                (caption_number - target_number, scored[0][1])
+            )
+    offsets: dict[tuple[int | None, str], int] = {}
+    for key, page_votes in votes.items():
+        best_of = Counter(target_id for _offset, target_id in page_votes)
+        ranked = Counter(
+            offset for offset, target_id in page_votes if best_of[target_id] == 1
+        ).most_common(2)
+        if ranked and (len(ranked) == 1 or ranked[0][1] > ranked[1][1]):
+            offsets[key] = ranked[0][0]
+    return offsets
+
+
 def assign_captions(
     captions: list[CaptionCandidate] | tuple[CaptionCandidate, ...],
     targets: list[CaptionTarget] | tuple[CaptionTarget, ...],
     *,
     ambiguity_margin: float = 0.25,
+    same_page_only: bool = False,
 ) -> tuple[CaptionAssignment, ...]:
-    """Assign captions globally with strict type compatibility and geometry abstention."""
+    """Assign captions globally with strict type compatibility and geometry abstention.
+
+    With *same_page_only*, adjacent-page edges are never built. A caller that
+    refuses every cross-page assignment afterwards must pass it: an edge it
+    would veto still wins targets in the solve and narrows the abstention
+    margin, so the same-page caption it beat is lost too.
+    """
 
     ordered_captions = tuple(
         sorted(captions, key=lambda item: (item.source_index, item.caption_id))
     )
     ordered_targets = tuple(sorted(targets, key=lambda item: (item.source_index, item.object_id)))
+    offsets = _number_offsets(ordered_captions, ordered_targets)
     edges: list[dict[int, _ScoredEdge]] = []
     forced_ambiguous: set[int] = set()
     unmatched_reasons: dict[int, tuple[str, ...]] = {}
@@ -288,7 +350,16 @@ def assign_captions(
         row = {
             target_index: edge
             for target_index, target in enumerate(ordered_targets)
-            if (edge := _score_edge(caption, target, ordered_targets)) is not None
+            if not (same_page_only and caption.page_number != target.page_number)
+            and (
+                edge := _score_edge(
+                    caption,
+                    target,
+                    ordered_targets,
+                    number_offset=offsets.get((target.page_number, target.object_type), 0),
+                )
+            )
+            is not None
         }
         compatible = [
             target for target in ordered_targets if target.object_type == caption.object_type
