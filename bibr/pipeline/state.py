@@ -140,10 +140,15 @@ class FileState:
         self._native_parser = None
 
     def free_document_layer(self):
-        """Free the document layer once PostParse, its last reader, is done."""
+        """Free the document layer once PostParse, its last reader, is done.
+
+        Runs for every file, layer or not, so it must not raise: contents that
+        hold no layer are left alone.
+        """
         self.doc_layer = None
-        if self.contents is not None:
-            self.contents.document = None
+        contents = self.contents
+        if contents is not None and getattr(contents, "document", None) is not None:
+            contents.document = None
 
     def set_error(
         self,

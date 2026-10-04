@@ -152,6 +152,25 @@ def test_the_layer_is_freed_after_post_parse_unless_keep_all(mode, kept):
     assert (fs.contents.document is layer) is kept
 
 
+@pytest.mark.parametrize("contents", [object(), "parsed text"])
+def test_freeing_the_layer_leaves_contents_without_one_alone(contents):
+    # The streaming back-half tests stand plain objects in for PaperContents,
+    # and the free runs for every file whether or not it has a layer.
+    fs = FileState(path=Path("a.pdf"))
+    fs.contents = contents
+    ctx = PipelineContext(
+        file_states=[fs],
+        progress=NullProgress(),
+        resources=MagicMock(),
+        config=RunConfig(memory_mode="balanced"),
+    )
+
+    ctx.free_after_stage("extract")
+
+    assert fs.contents is contents
+    assert fs.doc_layer is None
+
+
 def test_paper_contents_takes_the_layer_by_keyword_only():
     fields = dataclasses.fields(PaperContents)
     positional = [item.name for item in fields if not item.kw_only]
