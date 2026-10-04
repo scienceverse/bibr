@@ -370,9 +370,11 @@ class Block:
     class_topk: tuple[tuple[str, float], ...] = ()
     # Position in the page's region list (the regions' reading order).
     read_order: int | None = None
-    # Region text by source: native | ocr. Text-layer text of any block is
-    # read with bibr.document.views.block_text.
+    # The post-OCR region text under the source it came from: native,
+    # invisible_layer (the text layer of a scanned page) or ocr. The text
+    # layer inside any block is read with bibr.document.views.block_text.
     text: dict[str, str] = field(default_factory=dict)
+    # The key of ``text`` (None for an empty region).
     chosen: str | None = None
     # min_chars | usability | private_use | ineligible_label (D3)
     native_gate: str | None = None
