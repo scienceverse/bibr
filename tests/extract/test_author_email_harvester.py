@@ -572,7 +572,7 @@ def test_distant_opaque_email_without_marker_is_dropped():
     assert all(a.email in (None, "") for a in authors)
 
 
-# --- name-paired footnote e-mails and affiliation-block e-mails ---------------------
+# --- name-paired footnote e-mails ----------------------------------------------------
 
 
 def _contents_by_section(sections: list[tuple[str, list[str]]]):
@@ -746,7 +746,7 @@ def test_footnote_with_two_tans_is_resolved_by_conflicting_initials():
     assert [a.corresponding for a in authors] == [True, False, False]
 
 
-def test_footnote_pair_without_a_correspondence_phrase_is_ignored():
+def test_footnote_pair_without_a_correspondence_phrase_attaches_but_does_not_flag():
     authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
     _harvest(
         [
@@ -759,7 +759,7 @@ def test_footnote_pair_without_a_correspondence_phrase_is_ignored():
         authors,
     )
     assert [a.corresponding for a in authors] == [False, False]
-    assert [a.email for a in authors] == [None, None]
+    assert [a.email for a in authors] == [None, "x@example.org"]
 
 
 def test_footnote_pair_does_not_overwrite_or_steal_an_address():
@@ -801,76 +801,7 @@ def test_footnote_outside_the_front_matter_scope_is_still_read():
     assert authors[1].email == "t@example.org"
 
 
-def test_wiley_affiliation_block_email_is_attached_to_the_named_author_and_promoted():
-    authors = _authors(("Carla", "Bianchi"), ("Marco", "Rossi"), ("Omar", "Reyes"))
-    _harvest(
-        [
-            (
-                "title",
-                [
-                    "Prof. M. Rossi, Dr. C. Bianchi Department of Physics, Example University, "
-                    "Milan 20100, Italy E-mail: marco.rossi@example.it",
-                ],
-            )
-        ],
-        authors,
-    )
-    assert [a.corresponding for a in authors] == [False, True, False]
-    assert authors[1].email == "marco.rossi@example.it"
-
-
-def test_wiley_affiliation_email_with_no_surname_match_is_ignored():
-    authors = _authors(("Carla", "Bianchi"), ("Marco", "Rossi"))
-    _harvest(
-        [
-            (
-                "title",
-                [
-                    "M. Rossi, C. Bianchi Department of Physics, Example University E-mail: lab@example.it"
-                ],
-            )
-        ],
-        authors,
-    )
-    assert [a.corresponding for a in authors] == [False, False]
-
-
-def test_wiley_block_naming_one_author_with_an_address_lacking_the_surname_is_ignored():
-    authors = _authors(("Ingrid", "Lindqvist"), ("Marco", "Rossi"))
-    _harvest(
-        [
-            (
-                "title",
-                ["Ingrid M. Lindqvist, Example University, Oslo, Norway. Email: iml@example.no"],
-            )
-        ],
-        authors,
-    )
-    assert [a.corresponding for a in authors] == [False, False]
-
-
-def test_wiley_every_author_layout_is_not_promoted():
-    authors = _authors(
-        ("Carla", "Bianchi"), ("Marco", "Rossi"), ("Omar", "Reyes"), ("Mia", "Novak")
-    )
-    _harvest(
-        [
-            (
-                "title",
-                [
-                    "C. Bianchi Example University E-mail: bianchi@example.it",
-                    "M. Rossi Example University E-mail: rossi@example.it",
-                    "O. Reyes Example University E-mail: reyes@example.it",
-                    "M. Novak Example University E-mail: novak@example.it",
-                ],
-            )
-        ],
-        authors,
-    )
-    assert not any(a.corresponding for a in authors)
-
-
-def test_no_footnote_and_no_affiliation_email_changes_nothing():
+def test_no_footnote_changes_nothing():
     authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
     _harvest(
         [("title", ["A Study of Things", "Alice Lee, Hui-Kai Tan"]), ("body", ["Some text."])],
@@ -878,3 +809,184 @@ def test_no_footnote_and_no_affiliation_email_changes_nothing():
     )
     assert [a.corresponding for a in authors] == [False, False]
     assert [a.email for a in authors] == [None, None]
+
+
+def test_singular_marker_with_several_pairs_attaches_all_and_flags_none():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest(
+        [
+            (
+                "footnote",
+                [
+                    "* Corresponding author at: Department of Things, Example University.",
+                    "E-mail addresses: alee@example.org (A. Lee), hktan@example.org (H.-K. Tan), "
+                    "oreyes@example.org (O. Reyes).",
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert [a.email for a in authors] == [
+        "alee@example.org",
+        "hktan@example.org",
+        "oreyes@example.org",
+    ]
+    assert not any(a.corresponding for a in authors)
+
+
+def test_singular_marker_with_one_pair_flags_that_author():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest(
+        [
+            (
+                "footnote",
+                ["* Corresponding author.", "E-mail address: hktan@example.org (H.-K. Tan)."],
+            )
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, True, False]
+    assert authors[1].email == "hktan@example.org"
+
+
+def test_plural_marker_with_several_pairs_flags_each_paired_author():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest(
+        [
+            (
+                "footnote",
+                [
+                    "* Corresponding authors.",
+                    "E-mail addresses: alee@example.org (A. Lee), oreyes@example.org (O. Reyes).",
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [True, False, True]
+
+
+def test_footnote_does_not_add_a_second_flag_next_to_an_llm_flagged_author():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    authors[0].corresponding = True
+    _harvest(
+        [
+            (
+                "footnote",
+                ["* Corresponding author.", "E-mail address: hktan@example.org (H.-K. Tan)."],
+            )
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [True, False, False]
+    assert authors[1].email == "hktan@example.org"  # still attached
+
+
+def test_footnote_keeps_the_flag_when_the_paired_author_is_the_flagged_one():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    authors[1].corresponding = True
+    _harvest(
+        [
+            (
+                "footnote",
+                ["* Corresponding author.", "E-mail address: hktan@example.org (H.-K. Tan)."],
+            )
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, True]
+    assert authors[1].email == "hktan@example.org"
+
+
+def test_footnote_does_not_add_a_second_flag_next_to_a_marker_sentence_flag():
+    """An in-scope "* Correspondence: x@y" line flags its author; the footnote adds nobody."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    authors[0].email = "alee@example.org"
+    sections = [
+        ("title", ["A Study of Things", "* Correspondence: alee@example.org"]),
+        ("footnote", ["* Corresponding author.", "E-mail address: hktan@example.org (H.-K. Tan)."]),
+    ]
+    AuthorEmailHarvester(
+        _contents_by_section(sections[:1]), document=_contents_by_section(sections)
+    ).harvest(authors)
+    assert [a.corresponding for a in authors] == [True, False, False]
+    assert authors[1].email == "hktan@example.org"
+
+
+def test_body_prose_with_a_mid_sentence_correspondence_phrase_flags_nobody():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    _harvest(
+        [
+            (
+                "body",
+                [
+                    "We ran a multiple correspondence analysis and report the first axis "
+                    "(e-mail: hk@example.org (H.K. Tan)).",
+                ],
+            )
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, False]
+
+
+def test_body_sentence_that_opens_with_correspondence_analysis_flags_nobody():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    _harvest(
+        [
+            (
+                "body",
+                [
+                    "Correspondence analysis was applied to the table.",
+                    "E-mail address: hk@example.org (H.K. Tan).",
+                ],
+            )
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, False]
+
+
+@pytest.mark.parametrize(
+    ("given", "printed"),
+    [
+        ("Hendrik Jan", "H. de Vries"),  # lower-case particle is not an initial
+        ("Hendrik van", "H.J. de Vries"),  # particle left in the given name
+        ("Łukasz", "Ł. de Vries"),  # transliterated letters fold the same on both sides
+        ("Søren", "S. de Vries"),
+    ],
+)
+def test_footnote_particles_and_transliterated_letters(given, printed):
+    authors = _authors(("Alice", "Lee"), (given, "de Vries"))
+    _harvest(
+        [("footnote", ["* Corresponding author.", f"E-mail address: x@example.org ({printed})."])],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, True]
+
+
+def test_footnote_surname_with_a_stroked_letter_folds_to_ascii():
+    authors = _authors(("Piotr", "Wałęsa"), ("Alice", "Lee"))
+    _harvest(
+        [("footnote", ["* Corresponding author.", "E-mail address: p@example.org (P. Walesa)."])],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [True, False]
+
+
+def test_footnote_pass_with_many_authors_is_fast():
+    import time
+
+    names = [(f"Given{i}", f"Family{i}") for i in range(800)]
+    authors = _authors(*names)
+    footnote = [
+        "* Corresponding author.",
+        "E-mail address: x@example.org (G. Family799).",
+        *[f"E-mail: u{i}@example.org (G. Nobody{i})." for i in range(200)],
+    ]
+    started = time.perf_counter()
+    _harvest([("title", ["Byline"]), ("footnote", footnote)], authors)
+    assert time.perf_counter() - started < 1.0
+    assert authors[799].email == "x@example.org"
