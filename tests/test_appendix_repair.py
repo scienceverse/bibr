@@ -262,14 +262,12 @@ class TestAppendixNeedsARealAnchor:
             1,
             0,
         )
-        # Known limitation of the positional hierarchy, not of this repair:
-        # "B. Implementation Details" reads as METHODS by keyword and folds
-        # under the first METHODS heading, "III. METHOD", not under
-        # "IV. EXPERIMENTS" where it is printed.
+        # "B. Implementation Details" reads as METHODS by keyword but stays
+        # under "IV. EXPERIMENTS", where it is printed.
         assert (by[11].section_type, by[11].level, by[11].parent_section_id) == (
             CanonicalSection.METHODS,
             2,
-            6,
+            9,
         )
 
     def test_lettered_subsections_of_results_and_discussion_untouched(self):

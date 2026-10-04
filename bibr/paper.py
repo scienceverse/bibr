@@ -110,14 +110,20 @@ _SOURCE_TRUST: dict[str, int] = {
 }
 
 
-def enforce_imrad_order(sections: list[PaperSection]) -> None:
+def enforce_imrad_order(
+    sections: list[PaperSection], populated_ids: set[int] | None = None
+) -> None:
     """Reset duplicate section classifications to UNKNOWN.
 
     Resets duplicates of types that should appear at most once (Abstract,
     References). Among duplicates the section with the highest-trust
     ``classification_source`` keeps its type (document order breaks ties) —
     a corrupted-header section that classified first must not outrank a
-    later clean exact-alias heading. Sections like Methods, Results, and
+    later clean exact-alias heading. When ``populated_ids`` (the ids of the
+    sections that hold text) is given, an empty duplicate never outranks a
+    populated synthetic section: a printed "BIBLIOGRAFIA" heading left empty
+    beside the layout hint's "References" holding every entry must not take
+    the type from it. Sections like Methods, Results, and
     Discussion are allowed to repeat (subsections with those labels are
     common) and sections are allowed in any order — many real papers deviate
     from strict IMRaD.
@@ -138,14 +144,26 @@ def enforce_imrad_order(sections: list[PaperSection]) -> None:
     for indices in duplicates.values():
         if len(indices) < 2:
             continue
+        populated = {i for i in indices if sections[i].section_id in (populated_ids or ())}
+        # An empty duplicate never outranks a populated synthetic section.
+        by_content = len(populated) < len(indices) and any(
+            sections[i].header_is_synthetic for i in populated
+        )
         winner = max(
             indices,
-            key=lambda i: (_SOURCE_TRUST.get(sections[i].classification_source or "", 0), -i),
+            key=lambda i: (
+                not by_content or i in populated,
+                _SOURCE_TRUST.get(sections[i].classification_source or "", 0),
+                -i,
+            ),
         )
         for i in indices:
             if i == winner:
                 continue
             section = sections[i]
+            if section.parent_section_id == sections[winner].section_id:
+                # A structured abstract's subheading, nested under it.
+                continue
             logger.debug(
                 f"IMRaD dedup: resetting '{section.header}' from "
                 f"{section.section_type.value} to UNKNOWN (duplicate)"

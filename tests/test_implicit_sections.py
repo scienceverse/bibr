@@ -1728,3 +1728,36 @@ class TestSectionsStayInDocumentOrder:
             abstract.classification_score > 0,
         ) == (CanonicalSection.ABSTRACT, "implicit", True)
         assert {s.section_id for s in sentences[:2]} == {8}
+
+
+def test_implicit_intro_stops_at_a_printed_heading_section():
+    """A case report's "OSSERVAZIONE PERSONALE" keeps its rows (#108).
+
+    The selected front-matter record reached up to the first body anchor
+    ("DISCUSSIONE E CONCLUSIONI"), so the implicit Introduction took the rows
+    of the printed case-presentation section before it and left it empty.
+    """
+    from types import SimpleNamespace
+
+    title = PaperSection(1, "Paper Title", 1, 0, CanonicalSection.TITLE, 1.0, "title")
+    case = PaperSection(2, "OSSERVAZIONE PERSONALE", 1, 0, CanonicalSection.ABSTRACT, 0.9, "model")
+    discussion = PaperSection(
+        3, "DISCUSSIONE", 1, 0, CanonicalSection.DISCUSSION, 1.0, "exact_alias"
+    )
+    sentences = [
+        PaperSentence(1, "Sotto il profilo tassonomico l'accordo e recente.", 1, 1, page_number=2),
+        PaperSentence(2, "Si tratta di neoplasia polmonare primitiva.", 1, 2, page_number=2),
+        PaperSentence(3, "Paziente di 46 anni, fumatore.", 2, 3, page_number=3),
+        PaperSentence(4, "Fu sottoposto a lobectomia.", 2, 4, page_number=4),
+        PaperSentence(10, "L'osservazione descritta e tipica.", 3, 5, page_number=5),
+    ]
+    contents = _make_contents([title, case, discussion], sentences)
+    contents.front_matter_resolution = SimpleNamespace(
+        selected_block_id="selected", allowed_text_ids=frozenset({1, 2, 3, 4})
+    )
+    result = FrontMatterResult(segments=[FrontMatterSegment(first_text_id=1, section_type="intro")])
+
+    assert _apply_boundaries(contents, result, sentences[:4])
+
+    intro = next(s for s in contents.sections if s.section_type == CanonicalSection.INTRODUCTION)
+    assert [s.section_id for s in sentences[:4]] == [intro.section_id, intro.section_id, 2, 2]

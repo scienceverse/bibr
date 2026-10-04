@@ -8,6 +8,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Section levels and parents follow the paper's numbering and the order of
+  its headings: "3 Results" is a top-level section, "3.2" sits under "3",
+  Roman-numbered and "Chapter N" parts are recognised, and a subsection stays
+  in the part where it is printed instead of folding back under an earlier
+  heading of the same type ("2.1" under "2 Study 1", never under another
+  part). Back matter after the body sits at the top level, statements
+  printed under "Declarations" are its subsections, headings set in
+  capitals at two levels nest, and a general discussion after "Part 1" /
+  "Part 2" is not inside the last part (#119).
+- Subsections take the type of the numbered or named part they are printed
+  in (untyped subsections of an untyped "Study 1" scope follow the sibling
+  printed before them; a results or discussion guess under an introduction
+  or methods part keeps its type), the
+  introduction guesses in the body of a review or commentary with no methods
+  or results heading are typed discussion (setting
+  `PIPELINE_NON_IMRAD_BODY_AS_DISCUSSION`, on by default; not for systematic
+  or scoping reviews and meta-analyses), and body headings are no longer
+  typed as the paper title: the title-typed heading that matches the
+  extracted title best keeps that type (a short title included) and a
+  masthead before it loses it (#120).
+- Declaration blocks ("Declarations", "Contributors", "Consent for
+  publication", "Availability of data and materials") and box headings
+  ("Research in context", "Clinical Perspective", "What this study adds") get
+  the right type or none, conclusions-and-outlook headings are typed
+  discussion instead of endnotes, and non-English headings such as
+  "Riassunto", "Bibliografia" and "Literatuur" are recognised (#121).
+- Cover-sheet labels ("Posted Date", "Word count", "Running title",
+  "Manuscript Number", "Corresponding author") no longer become typed
+  sections, and section headings lose watermark letters (a trailing letter
+  only under a heading in capitals), gutter line numbers,
+  overprinted repeats and letter spacing ("A B S T R A C T") (#123).
+- A paper no longer exports two references sections when its references
+  heading is not in English or a back-matter block sits before the reference
+  list, and the implicit introduction stops at the next printed heading
+  instead of swallowing a case report (#124, #108).
+- A structured abstract whose "Background", "Methods", "Results" and
+  "Conclusions" subheadings are printed as separate rows keeps all its parts
+  (#125).
 - Affiliations no longer gain fake rows from a ";" printed inside one affiliation
   ("..., Cambridge, MA, USA; Basel, Switzerland" stays one affiliation, and a
   list's "; and" no longer becomes an affiliation called "and"). Affiliation
