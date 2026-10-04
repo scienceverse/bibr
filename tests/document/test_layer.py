@@ -376,7 +376,7 @@ def test_layer_is_deterministic_and_round_trips(name):
     assert serialize.canonical_bytes(second) == text
     assert serialize.canonical_bytes(restored) == text
     assert first.version == LAYER_VERSION
-    assert first.index_frame == INDEX_FRAME
+    assert first.index_frame == INDEX_FRAME == "post_strip:watermark/1+line_number/1"
     for page in first.pages:
         if page.cols is None:
             continue
@@ -491,6 +491,8 @@ def test_the_removed_watermark_is_kept_as_furniture():
         text="For Review Only",
         decided=Decided("furniture.watermark", "watermark/1"),
     )
+    # The rule that removed it is part of the key of the page's glyph indexes.
+    assert found.decided.version in layer.index_frame
     left, bottom, right, top = found.bbox_pdf
     assert 0 <= left < right <= _pdfs.PAGE_W and 0 <= bottom < top <= _pdfs.PAGE_H
     assert not any(
@@ -507,6 +509,7 @@ def test_removed_line_numbers_get_page_scoped_ids():
     assert all(page.furniture for page in layer.pages)
     for page in layer.pages:
         assert {item.kind for item in page.furniture} == {"line_number"}
+        assert {item.decided.version for item in page.furniture} == {"line_number/1"}
         assert [item.furniture_id for item in page.furniture] == [
             ids.furniture(page.index, n) for n in range(len(page.furniture))
         ]

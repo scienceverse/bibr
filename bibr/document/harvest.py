@@ -38,11 +38,13 @@ from bibr.document.model import (
     GLYPH_NO_ORIGIN,
     INDEX_FRAME,
     LAYER_VERSION,
+    LINE_NUMBER_RULE,
     OBJ_NO_FILL,
     OBJ_NO_FONT_SIZE,
     OBJ_NO_MATRIX,
     OBJ_NO_STROKE,
     OBJ_NOT_IN_WALK,
+    WATERMARK_RULE,
     Box,
     Decided,
     DocumentLayer,
@@ -94,8 +96,8 @@ _HARVEST_APIS = (
 _RENDER_FLAGS = ("pypdfium2.render", "FPDF_ANNOT", "fill=255,255,255,255", "no_forms")
 
 _FURNITURE_DECIDED = {
-    "watermark": Decided("furniture.watermark", "watermark/1"),
-    "line_number": Decided("furniture.line_number", "line_number/1"),
+    "watermark": Decided("furniture.watermark", WATERMARK_RULE),
+    "line_number": Decided("furniture.line_number", LINE_NUMBER_RULE),
 }
 
 # Spans: a glyph continues the open span while its baseline stays within

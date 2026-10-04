@@ -1811,6 +1811,8 @@ def _remove_objects(pdfium_c, page, found: list, outcomes: list[bool] | None = N
             pdfium_c.FPDFPageObj_Destroy(obj)
 
 
+# A change to what the strip removes moves the document layer's glyph
+# indexes: bump WATERMARK_RULE or LINE_NUMBER_RULE in bibr.document.model.
 def _find_furniture(
     page, *, watermark_text: bool = True, details: list | None = None, walk: list | None = None
 ) -> tuple[list, list[str], list, int]:

@@ -12,7 +12,8 @@ Conventions:
   ``from_layout_bbox``.
 - Page indices are absolute and 0-based.
 - Glyph indices are pdfium char indices of the text page built after
-  ``strip_furniture_objects`` ran (``index_frame="post_strip"``).
+  ``strip_furniture_objects`` ran, under the strip rules :data:`INDEX_FRAME`
+  names.
 - Per-page data is held as numpy columns (:class:`PageColumns`).
 - Every derived fact carries a :class:`Decided` saying which rule or model
   made it.
@@ -35,7 +36,13 @@ from dataclasses import dataclass, field
 import numpy as np
 
 LAYER_VERSION = "doclayer/1"
-INDEX_FRAME = "post_strip"
+# The furniture strip's rule versions (bibr.ocr.native_text._find_furniture).
+# The strip removes objects before the text page is built, so a rule change
+# moves every glyph, span and line index on the pages it touches: bump the
+# rule's version with it, and INDEX_FRAME, the key of those indexes, changes.
+WATERMARK_RULE = "watermark/1"
+LINE_NUMBER_RULE = "line_number/1"
+INDEX_FRAME = f"post_strip:{WATERMARK_RULE}+{LINE_NUMBER_RULE}"
 
 Box = tuple[float, float, float, float]
 
