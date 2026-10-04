@@ -224,9 +224,10 @@ class TestExpandedAliases:
         assert score == 1.0
 
     def test_conclusions_and_future_work(self):
-        section, score = _classify_lookup("conclusions and future work")
-        assert section == CanonicalSection.ENDNOTE
-        assert score == 1.0
+        for header in ("conclusions and future work", "outlook", "final remarks"):
+            section, score = _classify_lookup(header)
+            assert section == CanonicalSection.DISCUSSION, header
+            assert score == 1.0
 
     def test_funding(self):
         section, score = _classify_lookup("funding")

@@ -10,7 +10,14 @@ from __future__ import annotations
 from bibr.paper_contents import CanonicalSection, PaperContents, PaperSection
 from bibr.pipeline.stages.post_parse import (
     _classify_sections,
-    _reconcile_result_subsection_types,
+    _gate_non_imrad_section_types,
+    _inherit_child_section_types,
+)
+from bibr.structure.section_tree import (
+    assign_hierarchy_from_top_level,
+    assign_provisional_scopes,
+    close_scopes,
+    detect_study_markers,
 )
 
 
@@ -107,52 +114,625 @@ async def test_parent_context_inheritance_preserves_explicit_child_type():
     assert by[2].classification_source == "exact_alias"
 
 
-def test_weak_method_prediction_under_results_uses_parent_context():
-    parent = PaperSection(
-        section_id=9,
-        header="Results",
-        level=1,
-        parent_section_id=0,
-        section_type=CanonicalSection.RESULTS,
-        classification_score=1.0,
-        classification_source="exact_alias",
-    )
-    child = PaperSection(
-        section_id=11,
-        header="Professional view on engagement",
-        level=2,
-        parent_section_id=9,
-        section_type=CanonicalSection.METHODS,
-        classification_score=0.704,
-        classification_source="model",
+def _typed(sid, header, type_, source, parent=0, level=1, score=0.9):
+    return PaperSection(
+        section_id=sid,
+        header=header,
+        level=level,
+        parent_section_id=parent,
+        section_type=type_,
+        classification_score=score,
+        classification_source=source,
     )
 
-    _reconcile_result_subsection_types([parent, child])
 
-    assert child.section_type == CanonicalSection.RESULTS
-    assert child.classification_score == 0.8
-    assert child.classification_source == "parent_context"
+def test_guessed_child_types_follow_a_part_heading_parent():
+    secs = [
+        _typed(9, "Results", CanonicalSection.RESULTS, "exact_alias", score=1.0),
+        _typed(10, "Professional view on engagement", CanonicalSection.METHODS, "model", 9, 2),
+        _typed(11, "Engagement measurement method", CanonicalSection.METHODS, "llm", 9, 2),
+        _typed(12, "Statistical analysis", CanonicalSection.METHODS, "exact_alias", 9, 2),
+        _typed(13, "Further notes", CanonicalSection.UNKNOWN, None, 9, 2, score=0.0),
+    ]
+    _inherit_child_section_types(secs)
+    assert [(s.section_type, s.classification_source) for s in secs[1:]] == [
+        (CanonicalSection.RESULTS, "parent_context"),
+        (CanonicalSection.RESULTS, "parent_context"),
+        # The heading names its own type.
+        (CanonicalSection.METHODS, "exact_alias"),
+        (CanonicalSection.RESULTS, "parent_context"),
+    ]
+    assert secs[1].classification_score == 0.75
 
 
-def test_strong_method_prediction_under_results_is_preserved():
-    parent = PaperSection(
-        section_id=9,
-        header="Results",
-        level=1,
-        parent_section_id=0,
-        section_type=CanonicalSection.RESULTS,
+def test_numbered_children_follow_their_numbered_part():
+    """A preprint's "3.2" and "4.1" subsections, typed alone by the LLM."""
+    secs = [
+        _typed(3, "3 Results", CanonicalSection.RESULTS, "substring_alias"),
+        _typed(4, "3.2 Structural characterization", CanonicalSection.METHODS, "llm", 3, 2),
+        _typed(5, "4 Discussion", CanonicalSection.DISCUSSION, "substring_alias"),
+        _typed(6, "4.1 Adsorption mechanism", CanonicalSection.RESULTS, "llm", 5, 2),
+        _typed(7, "4.2 Comparison", CanonicalSection.METHODS, "llm", 5, 2),
+    ]
+    _inherit_child_section_types(secs)
+    assert [s.section_type for s in secs] == [
+        CanonicalSection.RESULTS,
+        CanonicalSection.RESULTS,
+        CanonicalSection.DISCUSSION,
+        CanonicalSection.DISCUSSION,
+        CanonicalSection.DISCUSSION,
+    ]
+
+
+def test_a_keyword_heading_parent_does_not_retype_its_children():
+    secs = [
+        _typed(1, "Overview of the findings", CanonicalSection.RESULTS, "model"),
+        _typed(2, "Sampling frame", CanonicalSection.METHODS, "model", 1, 2),
+    ]
+    _inherit_child_section_types(secs)
+    assert secs[1].section_type == CanonicalSection.METHODS
+
+
+def test_guessed_title_on_a_body_heading_becomes_its_parts_type():
+    secs = [
+        _typed(1, "A Review of Treatment", CanonicalSection.TITLE, "title"),
+        _typed(2, "Discussion", CanonicalSection.DISCUSSION, "exact_alias"),
+        _typed(3, "CURATIVE EMBOLIZATION", CanonicalSection.TITLE, "model", 2, 2),
+        _typed(4, "Walden University", CanonicalSection.TITLE, "model"),
+    ]
+    _gate_non_imrad_section_types(secs, "empirical", review_body=True)
+    assert [(s.section_type, s.classification_source) for s in secs] == [
+        (CanonicalSection.TITLE, "title"),
+        (CanonicalSection.DISCUSSION, "exact_alias"),
+        (CanonicalSection.DISCUSSION, "parent_context"),
+        (CanonicalSection.UNKNOWN, "model"),
+    ]
+
+
+def test_guessed_title_on_the_printed_paper_title_is_kept():
+    """A masthead before the title heading does not cost the title its type
+    (and does not keep it either); a body heading that opens the title and a
+    running-head repeat do not get it."""
+    secs = [
+        _typed(1, "SCIENTIFIC JOURNAL", CanonicalSection.TITLE, "model"),
+        _typed(
+            2,
+            "Stable magnetite nanocrystals from a single domain Ann Author",
+            CanonicalSection.TITLE,
+            "model",
+        ),
+        _typed(3, "Results", CanonicalSection.RESULTS, "exact_alias"),
+        _typed(4, "Stable magnetite growth", CanonicalSection.TITLE, "model"),
+        _typed(5, "Stable magnetite nanocrystals", CanonicalSection.TITLE, "model"),
+        _typed(
+            6, "STABLE MAGNETITE NANOCRYSTALS FROM A SINGLE DOMAIN", CanonicalSection.TITLE, "llm"
+        ),
+    ]
+    _gate_non_imrad_section_types(
+        secs,
+        "empirical",
+        review_body=True,
+        paper_title="Stable Magnetite Nanocrystals from a Single Domain",
     )
-    child = PaperSection(
-        section_id=11,
-        header="Engagement measurement method",
-        level=2,
-        parent_section_id=9,
-        section_type=CanonicalSection.METHODS,
-        classification_score=0.91,
-        classification_source="model",
+    assert [s.section_type for s in secs] == [
+        CanonicalSection.UNKNOWN,
+        CanonicalSection.TITLE,
+        CanonicalSection.RESULTS,
+        CanonicalSection.UNKNOWN,
+        CanonicalSection.UNKNOWN,
+        CanonicalSection.UNKNOWN,
+    ]
+    secs = [
+        _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _typed(2, "Geographical accessibility", CanonicalSection.TITLE, "model", 1, 2),
+    ]
+    _gate_non_imrad_section_types(
+        secs,
+        "empirical",
+        review_body=True,
+        paper_title="Geographical accessibility of eye care services in rural districts",
+    )
+    assert secs[1].section_type == CanonicalSection.INTRODUCTION
+
+
+def _title_gate(headers, paper_title):
+    """Gate a run of level-1 model-typed title guesses followed by an
+    introduction; return the types of the guesses."""
+    secs = [_typed(i, header, CanonicalSection.TITLE, "model") for i, header in headers]
+    secs.append(_typed(99, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"))
+    _gate_non_imrad_section_types(secs, "empirical", review_body=True, paper_title=paper_title)
+    assert secs[-1].section_type == CanonicalSection.INTRODUCTION
+    return [s.section_type for s in secs[:-1]]
+
+
+def test_a_masthead_before_the_printed_title_is_retyped():
+    """The first heading is exempt only while no heading prints the title: a
+    masthead before the real title heading is a cover label."""
+    title = "Social capital and trust in post-Soviet cities"
+    assert _title_gate([(1, "SCIENTIFIC REPORTS"), (2, title)], title) == [
+        CanonicalSection.UNKNOWN,
+        CanonicalSection.TITLE,
+    ]
+    # No heading prints the title (a translated title): the first heading is
+    # still exempt, the later guesses are retyped.
+    assert _title_gate([(1, "Journal masthead"), (2, "Another label")], title) == [
+        CanonicalSection.TITLE,
+        CanonicalSection.UNKNOWN,
+    ]
+    # The first heading is the title itself.
+    assert _title_gate([(1, title), (2, "SCIENTIFIC REPORTS")], title) == [
+        CanonicalSection.TITLE,
+        CanonicalSection.UNKNOWN,
+    ]
+    # The title heading is untyped: the first heading may still be the title
+    # (a letter-spaced one), so it keeps its type; a repeat after the
+    # introduction heading is no title heading and does not take the type.
+    secs = [
+        _typed(1, "Journal masthead", CanonicalSection.TITLE, "model"),
+        _typed(2, title, CanonicalSection.UNKNOWN, "model"),
+        _typed(3, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _typed(4, title.upper(), CanonicalSection.TITLE, "llm"),
+    ]
+    _gate_non_imrad_section_types(secs, "empirical", review_body=True, paper_title=title)
+    assert [s.section_type for s in secs] == [
+        CanonicalSection.TITLE,
+        CanonicalSection.UNKNOWN,
+        CanonicalSection.INTRODUCTION,
+        CanonicalSection.UNKNOWN,
+    ]
+
+
+def test_the_best_matching_heading_keeps_the_title_type():
+    """A running head before the title that holds over half of it does not
+    win over the heading that prints all of it; among equal matches the first
+    wins."""
+    title = "Mindfulness training and test anxiety in adolescents: a randomized trial"
+    running = "Mindfulness training and test anxiety in adolescents"
+    assert _title_gate([(1, running), (2, title)], title) == [
+        CanonicalSection.UNKNOWN,
+        CanonicalSection.TITLE,
+    ]
+    # The title with a byline counts as the whole title.
+    assert _title_gate([(1, running), (2, title + " Ann Author")], title) == [
+        CanonicalSection.UNKNOWN,
+        CanonicalSection.TITLE,
+    ]
+    # With no full match the longer partial one wins.
+    assert _title_gate(
+        [(1, "Mindfulness training and test anxiety"), (2, running)],
+        title,
+    ) == [CanonicalSection.UNKNOWN, CanonicalSection.TITLE]
+    # The title repeated later: the first full match keeps the type.
+    assert _title_gate([(1, title), (2, title.upper())], title) == [
+        CanonicalSection.TITLE,
+        CanonicalSection.UNKNOWN,
+    ]
+
+
+def test_the_title_heading_is_looked_for_before_the_first_alias_heading():
+    """A full-title repeat after the Methods or Abstract heading is a running
+    head: it does not beat a title heading that prints only part of the
+    title, whatever its type."""
+    title = "Mindfulness training and test anxiety in adolescents: a randomized trial"
+    part = "Mindfulness training and test anxiety in adolescents"
+    T, U = CanonicalSection.TITLE, CanonicalSection.UNKNOWN
+    for repeat_type, repeat_source in ((U, "model"), (T, "llm")):
+        secs = [
+            _typed(1, "SCIENTIFIC REPORTS", T, "model"),
+            _typed(2, part, T, "model"),
+            _typed(3, "Method", CanonicalSection.METHODS, "exact_alias"),
+            _typed(4, title.upper(), repeat_type, repeat_source),
+            _typed(5, "Results", CanonicalSection.RESULTS, "exact_alias"),
+        ]
+        _gate_non_imrad_section_types(secs, "empirical", review_body=True, paper_title=title)
+        assert [s.section_type for s in secs] == [
+            U,
+            T,
+            CanonicalSection.METHODS,
+            U,
+            CanonicalSection.RESULTS,
+        ]
+    # The heading the title pass found is the title heading when it matches
+    # the title, even when it holds half of it and a full model-typed repeat
+    # follows the abstract.
+    secs = [
+        _typed(1, part, T, "title"),
+        _typed(2, "Abstract", CanonicalSection.ABSTRACT, "exact_alias"),
+        _typed(3, title, T, "model"),
+        _typed(4, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+    ]
+    _gate_non_imrad_section_types(secs, "empirical", review_body=True, paper_title=title)
+    assert [s.section_type for s in secs] == [
+        T,
+        CanonicalSection.ABSTRACT,
+        U,
+        CanonicalSection.INTRODUCTION,
+    ]
+
+
+def test_known_residual_a_title_after_an_alias_heading_loses_its_type_to_the_masthead():
+    """Documents current behaviour, not a goal: a title-typed masthead, then a
+    heading typed from its own words, then the real title heading. The search
+    stops at the alias heading, so the masthead keeps the exemption and the
+    real title heading is retyped (b49da32 kept both)."""
+    title = "Social capital and trust in post-Soviet cities"
+    T, U = CanonicalSection.TITLE, CanonicalSection.UNKNOWN
+    secs = [
+        _typed(1, "SCIENTIFIC REPORTS", T, "model"),
+        _typed(2, "Corresponding author", U, "exact_alias"),
+        _typed(3, title, T, "model"),
+        _typed(4, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+    ]
+    _gate_non_imrad_section_types(secs, "empirical", review_body=True, paper_title=title)
+    assert [s.section_type for s in secs[:3]] == [T, U, U]
+
+
+def test_the_heading_found_by_the_title_pass_is_a_cover_label_when_it_does_not_match():
+    """A title-pass heading that shares nothing with the extracted title (a
+    journal masthead) leaves the title heading to the best-matching guess; an
+    abstract label before the title heading does not end the search."""
+    title = "Social capital and trust in post-Soviet cities"
+    T, U = CanonicalSection.TITLE, CanonicalSection.UNKNOWN
+    secs = [
+        _typed(1, "SCIENTIFIC REPORTS", T, "title"),
+        _typed(2, title, T, "model"),
+        _typed(3, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+    ]
+    _gate_non_imrad_section_types(secs, "empirical", review_body=True, paper_title=title)
+    assert [s.section_type for s in secs[:2]] == [T, T]
+    secs = [
+        _typed(1, "Abstract", CanonicalSection.ABSTRACT, "exact_alias"),
+        _typed(2, title, T, "model"),
+        _typed(3, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _typed(4, title.upper(), T, "llm"),
+    ]
+    _gate_non_imrad_section_types(secs, "empirical", review_body=True, paper_title=title)
+    assert [s.section_type for s in secs] == [
+        CanonicalSection.ABSTRACT,
+        T,
+        CanonicalSection.INTRODUCTION,
+        U,
+    ]
+
+
+def test_a_short_title_keeps_its_type_on_an_exact_match():
+    """Under 20 characters a heading counts only when it is the title (case
+    and punctuation aside); a longer heading that opens it does not."""
+    assert _title_gate([(1, "SCIENTIFIC REPORTS"), (2, "On Bullshit")], "On bullshit") == [
+        CanonicalSection.UNKNOWN,
+        CanonicalSection.TITLE,
+    ]
+    assert _title_gate([(1, "SCIENTIFIC REPORTS"), (2, "ON BULLSHIT.")], "On Bullshit") == [
+        CanonicalSection.UNKNOWN,
+        CanonicalSection.TITLE,
+    ]
+    assert _title_gate([(1, "Journal masthead"), (2, "On Bullshit and Lies")], "On Bullshit") == [
+        CanonicalSection.TITLE,
+        CanonicalSection.UNKNOWN,
+    ]
+    assert _title_gate([(1, "Journal masthead")], "") == [CanonicalSection.TITLE]
+
+
+def _review_sections():
+    return [
+        _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _typed(2, "Scope of this review", CanonicalSection.INTRODUCTION, "model", 1, 2),
+        _typed(3, "Definitions", CanonicalSection.INTRODUCTION, "parent_context", 1, 2),
+        _typed(4, "Embolization in practice", CanonicalSection.INTRODUCTION, "llm"),
+        _typed(5, "Future directions", CanonicalSection.DISCUSSION, "exact_alias"),
+        _typed(6, "State of the field", CanonicalSection.INTRODUCTION, "model"),
+    ]
+
+
+def test_review_body_guesses_become_discussion():
+    """Introduction guesses after the introduction become discussion. A
+    subsection the model itself read as introduction stays one; a heading
+    that only took the Introduction's type from its parent is body."""
+    secs = _review_sections()
+    _gate_non_imrad_section_types(secs, "review", review_body=True)
+    assert [(s.section_type, s.classification_source) for s in secs] == [
+        (CanonicalSection.INTRODUCTION, "exact_alias"),
+        (CanonicalSection.INTRODUCTION, "model"),
+        (CanonicalSection.DISCUSSION, "positional"),
+        (CanonicalSection.DISCUSSION, "positional"),
+        (CanonicalSection.DISCUSSION, "exact_alias"),
+        (CanonicalSection.DISCUSSION, "positional"),
+    ]
+
+
+def test_review_body_gate_needs_the_setting_the_paper_type_and_no_methods_heading():
+    for paper_type, review_body in (("review", False), ("empirical", True), (None, True)):
+        secs = _review_sections()
+        _gate_non_imrad_section_types(secs, paper_type, review_body=review_body)
+        assert secs[3].section_type == CanonicalSection.INTRODUCTION
+    # Any methods or results heading, printed or guessed, means the paper
+    # reports a study: "Data" / "Empirical strategy" / "Estimates".
+    for source in ("exact_alias", "model", "llm"):
+        secs = _review_sections()
+        secs.append(_typed(7, "Empirical strategy", CanonicalSection.METHODS, source))
+        _gate_non_imrad_section_types(secs, "commentary", review_body=True)
+        assert secs[3].section_type == CanonicalSection.INTRODUCTION
+    # Systematic and scoping reviews and meta-analyses report a search.
+    for text in (
+        "Bleeding risk: a systematic review",
+        "A scoping review of embolization outcomes",
+        "We ran a meta-analysis of 40 trials.",
+        "An umbrella review",
+    ):
+        secs = _review_sections()
+        _gate_non_imrad_section_types(secs, "review", review_body=True, title_abstract=text)
+        assert secs[3].section_type == CanonicalSection.INTRODUCTION
+    # Case studies report methods and results like a research paper.
+    secs = _review_sections()
+    _gate_non_imrad_section_types(secs, "case-study", review_body=True)
+    assert secs[3].section_type == CanonicalSection.INTRODUCTION
+
+
+def test_review_headings_naming_their_part_keep_it_with_their_subsections():
+    secs = [
+        _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _typed(2, "Background of the debate", CanonicalSection.INTRODUCTION, "model"),
+        _typed(3, "Historical Background", CanonicalSection.INTRODUCTION, "alias_prior"),
+        _typed(4, "Early accounts", CanonicalSection.INTRODUCTION, "parent_context", 3, 2),
+        _typed(5, "4. Literature review", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _typed(6, "4.1 Supply chains", CanonicalSection.INTRODUCTION, "model", 5, 2),
+        _typed(7, "Remaining gaps", CanonicalSection.INTRODUCTION, "model"),
+    ]
+    _gate_non_imrad_section_types(secs, "review", review_body=True)
+    assert [s.section_type for s in secs] == [
+        CanonicalSection.INTRODUCTION,
+        CanonicalSection.INTRODUCTION,
+        CanonicalSection.INTRODUCTION,
+        CanonicalSection.INTRODUCTION,
+        CanonicalSection.INTRODUCTION,
+        CanonicalSection.INTRODUCTION,
+        CanonicalSection.DISCUSSION,
+    ]
+
+
+def test_a_results_or_discussion_guess_is_not_pulled_back_into_methods():
+    """A lost "3 Results" heading: 3.1/3.2 sit after "2 Methods" but keep
+    their results guess; a methods guess under "4 Results" still follows it,
+    and between results and discussion the part decides."""
+    secs = [
+        _typed(1, "2 Methods", CanonicalSection.METHODS, "exact_alias"),
+        _typed(2, "2.1 Data", CanonicalSection.METHODS, "model", 1, 2),
+        _typed(3, "3.1 Effect of treatment on recovery", CanonicalSection.RESULTS, "model", 1, 2),
+        _typed(4, "3.2 Subgroup analyses", CanonicalSection.RESULTS, "model", 1, 2),
+        _typed(5, "4 Results", CanonicalSection.RESULTS, "exact_alias"),
+        _typed(6, "4.1 Structural characterization", CanonicalSection.METHODS, "model", 5, 2),
+        _typed(7, "4.2 What the trend implies", CanonicalSection.DISCUSSION, "model", 5, 2),
+        _typed(8, "5 Discussion", CanonicalSection.DISCUSSION, "exact_alias"),
+        _typed(9, "5.1 Principal findings", CanonicalSection.RESULTS, "model", 8, 2),
+        _typed(10, "Methods", CanonicalSection.METHODS, "exact_alias"),
+        _typed(11, "Effect of treatment", CanonicalSection.RESULTS, "model", 10, 2),
+    ]
+    _inherit_child_section_types(secs)
+    assert [s.section_type for s in secs[1:]] == [
+        CanonicalSection.METHODS,
+        CanonicalSection.RESULTS,
+        CanonicalSection.RESULTS,
+        CanonicalSection.RESULTS,
+        CanonicalSection.RESULTS,
+        CanonicalSection.RESULTS,
+        CanonicalSection.DISCUSSION,
+        CanonicalSection.DISCUSSION,
+        CanonicalSection.METHODS,
+        CanonicalSection.RESULTS,
+    ]
+
+
+def test_an_untyped_child_takes_any_imrad_parents_type():
+    """The model typed the part from a keyword; its untyped subsections follow
+    it, while a model guess for a subsection needs a confirmed part."""
+    secs = [
+        _typed(1, "Engaging the panel in the design work", CanonicalSection.METHODS, "alias_prior"),
+        _typed(2, "Recruitment of the panel", CanonicalSection.UNKNOWN, None, 1, 2, score=0.0),
+        _typed(3, "Overall experience", CanonicalSection.RESULTS, "model", 1, 2),
+    ]
+    _inherit_child_section_types(secs)
+    assert [(s.section_type, s.classification_source) for s in secs[1:]] == [
+        (CanonicalSection.METHODS, "parent_context"),
+        (CanonicalSection.RESULTS, "model"),
+    ]
+
+
+def test_an_untyped_child_of_an_untyped_scope_follows_the_sibling_before_it():
+    """Under "Study 1" (untyped), the model left some method subsections
+    untyped; each takes the IMRaD type of the sibling printed just before it.
+    The first child, and a child after an untyped sibling, stay untyped."""
+    secs = [
+        _typed(1, "Study 1: a pilot study", CanonicalSection.UNKNOWN, None, score=0.0),
+        _typed(2, "Overview", CanonicalSection.UNKNOWN, None, 1, 2, score=0.0),
+        _typed(3, "Participants", CanonicalSection.METHODS, "exact_alias", 1, 2),
+        _typed(4, "Virtual reality scenario", CanonicalSection.UNKNOWN, None, 1, 2, score=0.0),
+        _typed(5, "Interview", CanonicalSection.UNKNOWN, None, 1, 2, score=0.0),
+        _typed(6, "Research in context", CanonicalSection.UNKNOWN, "exact_alias", 1, 2),
+        _typed(7, "Evidence before this study", CanonicalSection.UNKNOWN, None, 1, 2, score=0.0),
+    ]
+    _inherit_child_section_types(secs)
+    assert [(s.section_type, s.classification_source) for s in secs[1:]] == [
+        (CanonicalSection.UNKNOWN, None),
+        (CanonicalSection.METHODS, "exact_alias"),
+        (CanonicalSection.METHODS, "parent_context"),
+        (CanonicalSection.METHODS, "parent_context"),
+        (CanonicalSection.UNKNOWN, "exact_alias"),
+        (CanonicalSection.UNKNOWN, None),
+    ]
+    # An introduction guess is not followed: "Overview" in a later part is
+    # not introduction.
+    secs = [
+        _typed(1, "4. Proposed scheme", CanonicalSection.UNKNOWN, None, score=0.0),
+        _typed(2, "4.1. Overview", CanonicalSection.INTRODUCTION, "model", 1, 2),
+        _typed(3, "4.2. Processing of requests", CanonicalSection.UNKNOWN, None, 1, 2, score=0.0),
+    ]
+    _inherit_child_section_types(secs)
+    assert secs[2].section_type == CanonicalSection.UNKNOWN
+    # Top-level headings are not siblings in a scope: the level-0 root is not
+    # a parent to follow.
+    secs = [
+        _typed(0, "", None, None, level=0, score=0.0),
+        _typed(1, "Methods", CanonicalSection.METHODS, "exact_alias"),
+        _typed(2, "Conceptual revisions", CanonicalSection.UNKNOWN, None, score=0.0),
+    ]
+    _inherit_child_section_types(secs)
+    assert secs[2].section_type == CanonicalSection.UNKNOWN
+
+
+def _typed_hierarchy(secs):
+    """The hierarchy with study scopes, then the type inheritance."""
+    markers = detect_study_markers(secs)
+    scopes = close_scopes(secs, assign_provisional_scopes(secs, markers), markers)
+    assign_hierarchy_from_top_level(secs, scope_ids=scopes, marker_ids=set(markers))
+    _inherit_child_section_types(secs)
+    return {s.section_id: s for s in secs}
+
+
+def test_a_study_marker_ends_the_guessed_back_matter_after_a_discussion():
+    """Study 2's "Materials and stimuli" and "Exploratory analyses" are not
+    level-1 back matter after Study 1's Discussion: they sit in their part,
+    and the endnote guess takes the part's type."""
+    secs = [
+        _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias", level=2),
+        _typed(2, "Study 1", CanonicalSection.UNKNOWN, None, level=2, score=0.0),
+        _typed(3, "Method", CanonicalSection.METHODS, "exact_alias", level=2),
+        _typed(4, "Results", CanonicalSection.RESULTS, "exact_alias", level=2),
+        _typed(5, "Discussion", CanonicalSection.DISCUSSION, "exact_alias", level=2),
+        _typed(6, "Study 2", CanonicalSection.UNKNOWN, None, level=2, score=0.0),
+        _typed(7, "Method", CanonicalSection.METHODS, "exact_alias", level=2),
+        _typed(8, "Materials and stimuli", CanonicalSection.APPENDIX, "model", level=2),
+        _typed(9, "Results", CanonicalSection.RESULTS, "exact_alias", level=2),
+        _typed(10, "Exploratory analyses", CanonicalSection.ENDNOTE, "model", level=2),
+        _typed(11, "Discussion", CanonicalSection.DISCUSSION, "exact_alias", level=2),
+    ]
+    by = _typed_hierarchy(secs)
+    assert (by[8].level, by[8].parent_section_id) == (2, 7)
+    # An appendix guess is not a type that subsections inherit: unchanged.
+    assert by[8].section_type == CanonicalSection.APPENDIX
+    assert (by[10].level, by[10].parent_section_id, by[10].section_type) == (
+        2,
+        9,
+        CanonicalSection.RESULTS,
     )
 
-    _reconcile_result_subsection_types([parent, child])
 
-    assert child.section_type == CanonicalSection.METHODS
-    assert child.classification_source == "model"
+def test_a_results_and_discussion_part_does_not_open_the_back_matter():
+    """A "Results and discussion" part (typed results) is no discussion part: a
+    guessed endnote inside it stays a subsection with the part's type. A
+    discussion part still lifts the guesses after it."""
+    secs = [
+        _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias", level=2),
+        _typed(2, "Results and discussion", CanonicalSection.RESULTS, "exact_alias", level=2),
+        _typed(3, "Synthesis of the ligands", CanonicalSection.METHODS, "model", level=2),
+        _typed(4, "Supplementary characterization", CanonicalSection.ENDNOTE, "model", level=2),
+        _typed(5, "Catalytic activity", CanonicalSection.RESULTS, "model", level=2),
+        _typed(6, "Conclusions", CanonicalSection.DISCUSSION, "exact_alias", level=2),
+        _typed(7, "Experimental", CanonicalSection.METHODS, "exact_alias", level=2),
+    ]
+    by = _typed_hierarchy(secs)
+    assert (by[4].level, by[4].parent_section_id, by[4].section_type) == (
+        2,
+        2,
+        CanonicalSection.RESULTS,
+    )
+    secs = [
+        _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias", level=2),
+        _typed(2, "Discussion", CanonicalSection.UNKNOWN, None, level=2, score=0.0),
+        _typed(3, "Supplementary characterization", CanonicalSection.ENDNOTE, "model", level=2),
+    ]
+    by = _typed_hierarchy(secs)
+    assert (by[3].level, by[3].parent_section_id) == (1, 0)
+
+
+def test_a_study_marker_that_is_a_discussion_opens_the_back_matter():
+    """ "Study 2: Discussion" resets the flag and sets it again from its own
+    name or type, so the author note and the open-practices statement after
+    it sit at level 1."""
+    for marker_type in (CanonicalSection.UNKNOWN, CanonicalSection.DISCUSSION):
+        secs = [
+            _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias", level=2),
+            _typed(2, "Study 1", CanonicalSection.UNKNOWN, None, level=2, score=0.0),
+            _typed(3, "Method", CanonicalSection.METHODS, "exact_alias", level=2),
+            _typed(4, "Results", CanonicalSection.RESULTS, "exact_alias", level=2),
+            _typed(5, "Discussion", CanonicalSection.DISCUSSION, "exact_alias", level=2),
+            _typed(6, "Study 2", CanonicalSection.UNKNOWN, None, level=2, score=0.0),
+            _typed(7, "Method", CanonicalSection.METHODS, "exact_alias", level=2),
+            _typed(8, "Results", CanonicalSection.RESULTS, "exact_alias", level=2),
+            _typed(9, "Study 2: Discussion", marker_type, "model", level=2),
+            _typed(10, "Author note", CanonicalSection.ENDNOTE, "model", level=2),
+            _typed(11, "Open practices statement", CanonicalSection.APPENDIX, "model", level=2),
+        ]
+        by = _typed_hierarchy(secs)
+        assert (by[9].level, by[9].parent_section_id) == (1, 0)
+        assert [(by[i].level, by[i].parent_section_id) for i in (10, 11)] == [(1, 0), (1, 0)]
+
+
+def test_a_part_that_names_results_does_not_open_the_back_matter_whatever_its_type():
+    """ "Findings and discussion", "Experiments and discussion" and a
+    "Results and Discussions" the LLM typed discussion report results: a
+    guessed endnote inside them stays a subsection of the part."""
+    for header, part_type, source in (
+        ("Findings and discussion", CanonicalSection.RESULTS, "model"),
+        ("Experiments and discussion", CanonicalSection.RESULTS, "model"),
+        ("Evaluation and discussion", CanonicalSection.RESULTS, "model"),
+        ("Observations and discussion", CanonicalSection.RESULTS, "model"),
+        ("Results/Discussion", CanonicalSection.RESULTS, "model"),
+        ("Results and Discussions", CanonicalSection.DISCUSSION, "llm"),
+    ):
+        secs = [
+            _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias", level=2),
+            _typed(2, header, part_type, source, level=2),
+            _typed(3, "Synthesis of the ligands", CanonicalSection.METHODS, "model", level=2),
+            _typed(4, "Supplementary characterization", CanonicalSection.ENDNOTE, "model", level=2),
+            _typed(5, "Conclusions", CanonicalSection.DISCUSSION, "exact_alias", level=2),
+            _typed(6, "Experimental", CanonicalSection.METHODS, "exact_alias", level=2),
+        ]
+        by = _typed_hierarchy(secs)
+        assert (by[2].level, by[4].level, by[4].parent_section_id) == (1, 2, 2), header
+    # A heading that only mentions the results is a discussion part.
+    secs = [
+        _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias", level=2),
+        _typed(2, "Discussion of the results", CanonicalSection.DISCUSSION, "model", level=2),
+        _typed(3, "Author note", CanonicalSection.ENDNOTE, "model", level=2),
+    ]
+    by = _typed_hierarchy(secs)
+    assert (by[3].level, by[3].parent_section_id) == (1, 0)
+
+
+def test_a_study_marker_is_judged_by_the_words_after_its_prefix():
+    """ "Study 1: Results and Discussion" reports results (the digit is gone
+    once the heading is normalised), so the guessed endnote after it stays in
+    the study; a bare "Study 2" the model typed discussion is no discussion,
+    so Study 2's guessed appendix and endnote stay in their parts."""
+    secs = [
+        _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias", level=2),
+        _typed(2, "Study 1: Method", CanonicalSection.UNKNOWN, None, level=2, score=0.0),
+        _typed(3, "Participants", CanonicalSection.METHODS, "model", level=2),
+        _typed(4, "Study 1: Results and Discussion", CanonicalSection.UNKNOWN, None, level=2),
+        _typed(5, "Manipulation check", CanonicalSection.RESULTS, "model", level=2),
+        _typed(6, "Exploratory analyses", CanonicalSection.ENDNOTE, "model", level=2),
+        _typed(7, "Study 2: Method", CanonicalSection.UNKNOWN, None, level=2, score=0.0),
+        _typed(8, "General Discussion", CanonicalSection.DISCUSSION, "exact_alias", level=2),
+    ]
+    by = _typed_hierarchy(secs)
+    assert by[6].level == 2 and by[6].parent_section_id != 0
+    secs = [
+        _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias", level=2),
+        _typed(2, "Study 1", CanonicalSection.UNKNOWN, None, level=2, score=0.0),
+        _typed(3, "Method", CanonicalSection.METHODS, "exact_alias", level=2),
+        _typed(4, "Results", CanonicalSection.RESULTS, "exact_alias", level=2),
+        _typed(5, "Discussion", CanonicalSection.DISCUSSION, "exact_alias", level=2),
+        _typed(6, "Study 2", CanonicalSection.DISCUSSION, "model", level=2),
+        _typed(7, "Method", CanonicalSection.METHODS, "exact_alias", level=2),
+        _typed(8, "Materials and stimuli", CanonicalSection.APPENDIX, "model", level=2),
+        _typed(9, "Results", CanonicalSection.RESULTS, "exact_alias", level=2),
+        _typed(10, "Exploratory analyses", CanonicalSection.ENDNOTE, "model", level=2),
+        _typed(11, "Discussion", CanonicalSection.DISCUSSION, "exact_alias", level=2),
+    ]
+    by = _typed_hierarchy(secs)
+    assert (by[8].level, by[8].parent_section_id) == (2, 7)
+    assert (by[10].level, by[10].parent_section_id, by[10].section_type) == (
+        2,
+        9,
+        CanonicalSection.RESULTS,
+    )

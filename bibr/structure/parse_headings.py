@@ -20,6 +20,7 @@ from bibr.structure.text_repair import (
     bbox_to_tuple,
     collapse_numbered_prefix_spaces,
     repair_heading_artifacts,
+    strip_heading_watermark_text,
     strip_markdown_emphasis,
 )
 from bibr.utils.text import normalize_text
@@ -64,13 +65,47 @@ _HINT_REUSE_ALIASES: dict[str, frozenset[str]] = {
             "cited literature",
             "works cited",
             "bibliography",
+            # The reference list's name in other languages ("BIBLIOGRAFIA",
+            # "Literaturverzeichnis"); without them the printed heading stood
+            # empty beside the synthetic "References" holding the entries.
+            "bibliografi",
+            "bibliografia",
+            "bibliografía",
+            "bibliographie",
+            "daftar pustaka",
+            "kaynakça",
+            "literatur",
+            "literatura",
+            "literaturverzeichnis",
+            "literatuur",
+            "literatuurlijst",
+            "referencias",
+            "referencias bibliográficas",
+            "referências",
+            "referências bibliográficas",
+            "références",
+            "riferimenti bibliografici",
+            "литература",
+            "список литературы",
+            "список використаних джерел",
+            "参考文献",
+            "참고문헌",
         }
     ),
 }
 # A printed heading directly before a front-page abstract region may also
 # read "Summary" (Lancet style); a "Summary" after the abstract region (a
-# discussion subsection, a lay summary box) is its own section.
+# discussion subsection, a lay summary box) is its own section. Abstract
+# names in other languages ("RIASSUNTO", "Resumen") do not take the region:
+# on papers whose layout labels body regions as abstract, the printed heading
+# then pulled body text into the front matter and split the metadata record.
+# The empty printed twin is resolved after parsing instead.
 _FRONT_ABSTRACT_HEADING_ALIASES = frozenset({"abstract", "summary"})
+# What a reference entry carries and a back-matter paragraph usually does not:
+# a year, "et al." or a DOI.
+_REFERENCE_ENTRY_SIGNAL_RE = re.compile(
+    r"(?<!\d)(?:1[5-9]\d\d|20\d\d)(?!\d)|\bet al\b|\bdoi\b", re.IGNORECASE
+)
 _HINT_ALIAS_PUNCT_RE = re.compile(r"[^\w\s]")
 
 
@@ -253,6 +288,9 @@ class HeadingHandlersMixin:
     _title_bbox: list | tuple | None
     _title_page: int | None
     _title_assembler_len: int
+    # Reading-order positions of printed references headings, computed on
+    # first use by ``_printed_reference_heading_positions``.
+    _reference_heading_positions: list[int] | None = None
 
     def _handle_structural(self, label: str, content: str) -> None:
         """Record headers/footers as metadata."""
@@ -283,6 +321,9 @@ class HeadingHandlersMixin:
         # Normalize Markdown-wrapped headings emitted by OCR (e.g.
         # "**References**" → "References") before hint-section deduplication.
         text = strip_markdown_emphasis(text)
+        # Watermark letters, gutter line numbers, letter spacing and
+        # overprinted repeats caught inside the heading box (see text_repair).
+        text = strip_heading_watermark_text(text)
         text = repair_heading_artifacts(text)
         if not text:
             return
@@ -602,6 +643,14 @@ class HeadingHandlersMixin:
                     )
                 return
 
+        if hint_name == "References" and self._reference_region_is_section_text(content):
+            text = content.strip()
+            if text:
+                self._handle_content(
+                    text, page_number, bbox, region_meta=region_meta, from_ocr=from_ocr
+                )
+            return
+
         # Explicit Endnotes/Footnotes headings own their rows; layout hints must not create an
         # early References section that captures the later printed heading.
         if (
@@ -725,6 +774,63 @@ class HeadingHandlersMixin:
                 self._handle_content(
                     text, page_number, bbox, region_meta=region_meta, from_ocr=from_ocr
                 )
+
+    def _printed_reference_heading_positions(self) -> list[int]:
+        """Reading-order positions of the printed references headings.
+
+        A position counts regions in dispatch order, as
+        ``_source_region_index`` does. Running heads are left out.
+        """
+        if self._reference_heading_positions is None:
+            positions: list[int] = []
+            position = 0
+            reference_names = _HINT_REUSE_ALIASES["references"]
+            for page_idx, regions in enumerate(self.json_result):
+                for region_idx, region in enumerate(regions):
+                    if (region.native_label or region.label) in _HEADING_LEVELS and (
+                        page_idx,
+                        region_idx,
+                    ) not in self._running_header_regions:
+                        text = re.sub(r"^#{1,6}\s*", "", (region.content or "").strip())
+                        if _hint_alias_key(strip_markdown_emphasis(text)) in reference_names:
+                            positions.append(position)
+                    position += 1
+            self._reference_heading_positions = positions
+        return self._reference_heading_positions
+
+    def _reference_region_is_section_text(self, content: str) -> bool:
+        """Whether a ``reference`` region is prose of the printed section it follows.
+
+        The layout model sometimes labels a back-matter paragraph
+        ``reference`` (a Lancet "Contributors" statement). Opening the
+        References section there made the paragraph a bibliography entry,
+        moved the reference list ahead of the remaining back matter and left
+        the printed heading empty. The region stays in the current section
+        when no reference hint section exists yet, the current section opened
+        at a printed heading that does not name the references, a printed
+        references heading follows later in reading order, and the text has
+        no year, "et al." or DOI that a reference entry would carry.
+        """
+        if "References" in self._created_hint_sections:
+            return False
+        current_id = self._current_section_id
+        if not current_id or current_id in self._hint_section_ids:
+            return False
+        if _REFERENCE_ENTRY_SIGNAL_RE.search(content):
+            return False
+        current = next(
+            (section for section in reversed(self.sections) if section.section_id == current_id),
+            None,
+        )
+        if current is None or current.level <= 0 or current.header_is_synthetic:
+            return False
+        from bibr.structure.section_classifier import _classify_lookup
+
+        current_type, _score = _classify_lookup(normalize_text(current.header))
+        if current_type == CanonicalSection.REFERENCES:
+            return False
+        here = self._source_region_index
+        return any(position > here for position in self._printed_reference_heading_positions())
 
     def _promotable_content_heading(self, text: str, region_meta: dict | None = None) -> str | None:
         """Return repaired heading text when a body row is a trusted section.

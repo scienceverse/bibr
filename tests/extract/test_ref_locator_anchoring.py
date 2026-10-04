@@ -147,7 +147,7 @@ def test_header_alias_override_retypes_the_misclassified_body_section():
         ("Introduction", CanonicalSection.INTRODUCTION, 1.0, "exact_alias"),
         ("General Discussion", CanonicalSection.DISCUSSION, 1.0, "exact_alias"),
         ("Limitations of the study", CanonicalSection.DISCUSSION, 0.95, "substring_alias"),
-        ("References", CanonicalSection.REFERENCES, 0.0, None),
+        ("References", CanonicalSection.REFERENCES, 1.0, "exact_alias"),
     ]
     assert contents.reference_boundary_reason_flags == ["classifier_references_demoted"]
 
@@ -181,7 +181,7 @@ def test_header_alias_override_keeps_a_second_reference_list_typed():
     assert list(rows["text_id"]) == [2]
     assert _types(contents) == [
         ("Supplementary References", CanonicalSection.REFERENCES, 0.95, "substring_alias"),
-        ("References", CanonicalSection.REFERENCES, 0.0, None),
+        ("References", CanonicalSection.REFERENCES, 1.0, "exact_alias"),
     ]
     assert contents.reference_boundary_reason_flags == []
 
@@ -262,7 +262,7 @@ def test_front_role_override_retypes_the_misclassified_body_section():
     assert _types(contents) == [
         ("Введение", CanonicalSection.INTRODUCTION, 1.0, "exact_alias"),
         ("Flipped preferences", CanonicalSection.UNKNOWN, 0.0, None),
-        ("Список литературы", CanonicalSection.REFERENCES, 0.0, None),
+        ("Список литературы", CanonicalSection.REFERENCES, 1.0, "exact_alias"),
     ]
     assert contents.reference_boundary_reason_flags == [
         "front_role_ref_header",
