@@ -2695,11 +2695,6 @@ _FINGERPRINT_EXCLUDED_SECTIONS = frozenset(
     {"redis", "auth", "cors", "cache", "cb", "jobs", "metering", "mcp"}
 )
 
-# Single fields that change no output. ``pipeline.document_layer`` builds an
-# internal structure that nothing exports, so switching it must not move the
-# cache namespace.
-_FINGERPRINT_EXCLUDED_FIELDS = frozenset({("pipeline", "document_layer")})
-
 
 # Excluded so credential rotation doesn't wipe the cache. Covers both nested
 # fields (``api_key``/``password``) and top-level un-sectioned secrets whose
@@ -2728,10 +2723,6 @@ def compute_behavior_fingerprint(settings: "GlobalSettings") -> str:
         for k, v in dump.items()
         if k not in _FINGERPRINT_EXCLUDED_SECTIONS and not _is_secret_fingerprint_key(k)
     }
-    for section, name in _FINGERPRINT_EXCLUDED_FIELDS:
-        values = scrubbed.get(section)
-        if isinstance(values, dict):
-            values.pop(name, None)
     payload = json.dumps(scrubbed, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()[:8]
 
