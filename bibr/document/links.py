@@ -266,7 +266,7 @@ def _annotation_dest(api: _Api, page, link) -> tuple[str | None, bool]:
 def _action_uri(api: _Api, doc, action) -> str | None:
     # The URI is 7-bit ASCII with a terminating NUL; the first call sizes it.
     size = api.FPDFAction_GetURIPath(doc.raw, action, None, 0)
-    if size <= 1:
+    if size <= 1 or size > destinations.MAX_TEXT:
         return None
     buffer = ctypes.create_string_buffer(size)
     api.FPDFAction_GetURIPath(doc.raw, action, buffer, size)
@@ -276,7 +276,7 @@ def _action_uri(api: _Api, doc, action) -> str | None:
 def _action_file(api: _Api, action) -> str | None:
     # The file path is UTF-8 with a terminating NUL.
     size = api.FPDFAction_GetFilePath(action, None, 0)
-    if size <= 1:
+    if size <= 1 or size > destinations.MAX_TEXT:
         return None
     buffer = ctypes.create_string_buffer(size)
     api.FPDFAction_GetFilePath(action, buffer, size)

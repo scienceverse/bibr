@@ -289,6 +289,28 @@ def test_a_link_with_too_many_quadrilaterals_is_kept_and_read_to_the_limit(monke
     assert layer.component_errors == {f"links:{wrap.page}": note}
 
 
+def test_a_string_over_the_text_limit_is_left_unread_and_the_link_kept(monkeypatch):
+    monkeypatch.setattr(destinations, "MAX_TEXT", 20)
+    layer = _layer()
+
+    doi, cite = _link(layer, "doi_ref"), _link(layer, "cite_ref")
+    assert (doi.action, doi.uri, doi.target_class) == ("uri", None, "external")
+    # A name over the limit is missing from the table: the link is still resolved.
+    assert (cite.dest_name, cite.name_source, cite.target_page) == (None, None, 4)
+    assert len(layer.links) == len(_linked.LINKS)
+
+
+def test_a_string_the_getter_sizes_over_the_limit_is_never_read():
+    asked = []
+
+    def getter(*args):
+        asked.append(args)
+        return destinations.MAX_TEXT + 2
+
+    assert destinations.utf16_text(getter) is None
+    assert asked == [(None, 0)]
+
+
 def test_the_inline_build_reads_the_same_links():
     pdf_bytes = _linked.linked_paper()
 
