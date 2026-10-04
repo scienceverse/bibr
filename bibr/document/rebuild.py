@@ -52,19 +52,6 @@ def layout_page_range(
     return range(start, end + 1)
 
 
-def _page_count(pdf_bytes: bytes) -> int:
-    import pypdfium2
-
-    from bibr.ocr.utils import pdfium_lock
-
-    with pdfium_lock:
-        doc = pypdfium2.PdfDocument(pdf_bytes)
-        try:
-            return len(doc)
-        finally:
-            doc.close()
-
-
 def rebuild_document_layer(
     pdf_bytes: bytes,
     settings: Any,
@@ -73,12 +60,15 @@ def rebuild_document_layer(
     end_page: int | None,
 ) -> DocumentLayer:
     """The layer ``inspect_pdf`` builds inline, from the PDF bytes alone."""
-    pages = layout_page_range(
-        _page_count(pdf_bytes),
-        start_page=start_page,
-        end_page=end_page,
-        max_pages=settings.pipeline.max_pages,
-    )
+
+    def pages(n_pages: int) -> range:
+        return layout_page_range(
+            n_pages,
+            start_page=start_page,
+            end_page=end_page,
+            max_pages=settings.pipeline.max_pages,
+        )
+
     return build_document_layer(pdf_bytes, pages, budget=render_budget(settings))
 
 

@@ -19,6 +19,7 @@ import ctypes
 import hashlib
 import math
 from collections import Counter, deque
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -1007,15 +1008,16 @@ class LayerBuilder:
 
 def build_document_layer(
     pdf_bytes: bytes,
-    page_indices: list[int] | range,
+    page_indices: Iterable[int] | Callable[[int], Iterable[int]],
     *,
     budget: RenderBudget | None,
 ) -> DocumentLayer:
     """Build the layer for *page_indices* of a PDF, as ``inspect_pdf`` does inline.
 
-    Opens the document under ``pdfium_lock`` and reads each page through
-    ``open_text_page``, in page order, so the glyph indexes match the inline
-    build.
+    *page_indices* may be a function of the document's page count, so the
+    PDF is parsed once. Opens the document under ``pdfium_lock`` and reads
+    each page through ``open_text_page``, in page order, so the glyph
+    indexes match the inline build.
     """
     import pypdfium2
 
@@ -1025,6 +1027,8 @@ def build_document_layer(
     with pdfium_lock:
         doc = pypdfium2.PdfDocument(pdf_bytes)
         try:
+            if callable(page_indices):
+                page_indices = page_indices(len(doc))
             for page_index in page_indices:
                 try:
                     page = doc[page_index]

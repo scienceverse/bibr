@@ -14,6 +14,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import pypdfium2
+
+from bibr.ocr.utils import pdfium_lock
 from tests.ocr.test_watermark_text import _REVIEW_WATERMARK, _body, _width
 
 PAGE_W, PAGE_H = 612.0, 792.0
@@ -272,6 +275,15 @@ def band_layout(n_pages: int, bands: int = 6) -> list[list[dict]]:
         ]
         for _ in range(n_pages)
     ]
+
+
+def page_count(pdf_bytes: bytes) -> int:
+    with pdfium_lock:
+        doc = pypdfium2.PdfDocument(pdf_bytes)
+        try:
+            return len(doc)
+        finally:
+            doc.close()
 
 
 def fixture_pdfs() -> dict[str, bytes]:

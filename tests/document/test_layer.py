@@ -27,7 +27,7 @@ from bibr.document.model import (
     Furniture,
     Page,
 )
-from bibr.document.rebuild import _page_count, attach_blocks, render_budget
+from bibr.document.rebuild import attach_blocks, render_budget
 from bibr.ocr.image_utils import iter_pdf_pages_with_index
 from bibr.ocr.pdf_inspection import inspect_pdf, inspection_to_dict
 from bibr.ocr.types import OcrRegionResult
@@ -39,7 +39,7 @@ _BUDGET = render_budget(_SETTINGS)
 
 
 def _inspect(pdf_bytes: bytes, *, layer: bool, layout=None, **overrides):
-    layout = layout if layout is not None else _pdfs.band_layout(_page_count(pdf_bytes))
+    layout = layout if layout is not None else _pdfs.band_layout(_pdfs.page_count(pdf_bytes))
     kwargs = {
         "fill_native_text": True,
         "include_outline": True,
@@ -105,7 +105,7 @@ def test_pages_the_inspection_does_not_read_are_harvested_alike():
     pdf_bytes = _pdfs.synthetic_paper()
     off = _inspect(pdf_bytes, layer=False, fill_native_text=False, include_ref_geometry=False)
     on = _inspect(pdf_bytes, layer=True, fill_native_text=False, include_ref_geometry=False)
-    rebuilt = build_document_layer(pdf_bytes, range(_page_count(pdf_bytes)), budget=_BUDGET)
+    rebuilt = build_document_layer(pdf_bytes, range(_pdfs.page_count(pdf_bytes)), budget=_BUDGET)
 
     assert json.dumps(inspection_to_dict(on)) == json.dumps(inspection_to_dict(off))
     assert on == off
@@ -232,7 +232,7 @@ def test_invisible_layer_text_is_read_only_on_scanned_pages():
 def test_rebuild_from_the_bytes_matches_the_inline_layer(name):
     pdf_bytes = _FIXTURES[name]
     inline = _inspect(pdf_bytes, layer=True).document
-    rebuilt = build_document_layer(pdf_bytes, range(_page_count(pdf_bytes)), budget=_BUDGET)
+    rebuilt = build_document_layer(pdf_bytes, range(_pdfs.page_count(pdf_bytes)), budget=_BUDGET)
 
     assert serialize.canonical_bytes(rebuilt) == serialize.canonical_bytes(inline)
 
@@ -260,7 +260,7 @@ def test_a_packed_draft_unpacks_to_the_lists_read(name, monkeypatch):
         return drafts[-1]
 
     monkeypatch.setattr(harvest, "read_page", keep)
-    build_document_layer(_FIXTURES[name], range(_page_count(_FIXTURES[name])), budget=_BUDGET)
+    build_document_layer(_FIXTURES[name], range(_pdfs.page_count(_FIXTURES[name])), budget=_BUDGET)
 
     assert drafts
     for draft in drafts:
