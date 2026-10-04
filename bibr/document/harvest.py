@@ -1113,7 +1113,7 @@ class LayerBuilder:
 
     def _build_links(self, pages: list[Page]) -> list[Link] | None:
         """The links with their classes; None when they could not be read or built."""
-        if self._lacks(links.APIS + destinations.APIS):
+        if self.doc is None or self._lacks(links.APIS + destinations.APIS):
             return None
         try:
             return links.build_links(self.raw_links, pages)
