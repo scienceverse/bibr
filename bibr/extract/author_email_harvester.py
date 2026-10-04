@@ -115,9 +115,11 @@ _EMAIL_LABEL_RE = re.compile(r"\be-?\s?mail(?:\s+address(?:es)?)?\s*:", re.IGNOR
 _NAMED_EMAIL_RE = re.compile(_EMAIL_RE.pattern + r"\s*\(\s*([^()@;:]{3,70}?)\s*\)")
 # A "Corresponding author(s)" / "Correspondence" / envelope phrase that OPENS a line or
 # sentence, as a footnote marker does ("* Corresponding author at: ..."). Anchoring it keeps
-# body prose ("multiple correspondence analysis ... (e-mail: x@y.org (H.K. Tan))") out.
+# body prose ("multiple correspondence analysis ... (e-mail: x@y.org (H.K. Tan))") out, and
+# "Correspondence" counts only as a label: followed by ":" or "*", or by "to", "concerning"
+# or "should" ("Correspondence between the two raters was high" is prose).
 _CORRESPONDENCE_PHRASE_RE = re.compile(
-    r"^[\W\d_]*(?:(?:co-?)?corresponding\s+authors?\b|correspondence\b(?!\s+analys[ei]s)|✉)",
+    r"^[\W\d_]*(?:(?:co-?)?corresponding\s+authors?\b|correspondence(?=\s*[:*]|\s+(?:to|concerning|should)\b)|✉)",
     re.IGNORECASE | re.MULTILINE,
 )
 _PLURAL_CORRESPONDENCE_RE = re.compile(
@@ -294,9 +296,10 @@ class AuthorEmailHarvester:
              their real address instead of blocking it with someone else's.
 
         Name-paired footnotes ("E-mail address(es): x@y (Initials Surname)") are read
-        first, from the whole paper rather than the scoped block. Each pair is attached
-        to the one author whose surname and initials fit (none or two fit: nothing),
-        whether or not the footnote says "Corresponding author". The author is also
+        last, from the whole paper rather than the scoped block, and only for authors
+        still without an address after everything above. Each pair is attached to the
+        one author whose surname and initials fit (none or two fit: nothing), whether or
+        not the footnote says "Corresponding author". The author is also
         flagged corresponding, after the steps above, only when a "Corresponding
         author(s)" / "Correspondence" phrase opens the sentence or one of the three
         before it, the phrase is plural or the window holds a single pair, and no other
@@ -318,11 +321,6 @@ class AuthorEmailHarvester:
             if section_type_by_id.get(s.section_id) != CanonicalSection.REFERENCES
         ]
 
-        # Name-paired addresses first: an explicit "x@y (Initials Surname)" pairing is the
-        # strongest evidence, and an author who gets an address here drops out of the
-        # proximity matching below. Their corresponding flags are decided last (_finish).
-        footnote_groups = self._harvest_named_footnote_emails(authors)
-
         # Only fill gaps — never overwrite an LLM-extracted email.
         # Surname → every still-emailless author carrying it. Keeping a single
         # author per surname let same-surname co-authors clobber each other:
@@ -333,7 +331,7 @@ class AuthorEmailHarvester:
             if author.family and not author.email:
                 authors_by_family.setdefault(author.family.lower().strip(), []).append(author)
         if not authors_by_family:
-            self._finish(authors, sentences, footnote_groups)
+            self._finish(authors, sentences)
             return
 
         strict_emails = self._marker_sentence_emails(sentences)
@@ -476,15 +474,18 @@ class AuthorEmailHarvester:
                 harvested,
             )
 
-        self._finish(authors, sentences, footnote_groups)
+        self._finish(authors, sentences)
 
-    def _finish(
-        self, authors: list[PaperAuthor], sentences: list, footnote_groups: list[list[PaperAuthor]]
-    ) -> None:
-        """Promotions, in order: anchors, name-paired footnote flags, then the sole author.
+    def _finish(self, authors: list[PaperAuthor], sentences: list) -> None:
+        """Name-paired footnote addresses, then the promotions, in order.
 
-        The footnote flags go after the anchor promotion so they can see who is flagged.
+        Footnote pairs are attached only now, after every in-scope rule above had its
+        turn, and only to authors still without an address, so they can never displace
+        an address those rules assigned. The anchor promotion then sees them (an in-scope
+        "Correspondence to: x@y" line that names no one flags the author a footnote pairs
+        with x@y), and the footnote flags go after it so they can see who is flagged.
         """
+        footnote_groups = self._harvest_named_footnote_emails(authors)
         self._promote_corresponding_from_anchors(authors, sentences)
         self._flag_named_footnote_authors(authors, footnote_groups)
         self._promote_sole_author(authors)
