@@ -348,3 +348,52 @@ def test_reference_title_mentioning_publisher_note_does_not_end_section():
         title,
     ]
     assert _section_texts(contents, "Publisher's Note") == []
+
+
+# A review copy's diagonal stamp crosses the aggregate box, which reads it
+# whole, and the entry boxes, which read a few of its words on lines of their
+# own. The text layer runs the aggregate's entries together ("…om.1043.12 Thorn").
+_STAMP = "Notice: this copy and its contents are private, meant for peer review purposes only, and not to be disclosed."
+_STAMPED_ENTRIES = [
+    "11 Lind J, Abbot A, Toms F. A privacy-protecting data platform. Open Med. 2020;10:e1043. "
+    "doi: 10.1000/om.1043.",
+    "12 Thorn J, Tamm C, Holl S, Mize M. Linked records of thrombosis after infection. "
+    "Circ Res. 2021;128:2017-36. doi: 10.1000/cr.2017.",
+    "13 Clay T, Gask M, Mead T. Recent respiratory infection and venous thrombosis. "
+    "Int J Epi. 2011;40:819-27. doi: 10.1000/ije.819.",
+]
+
+
+def test_watermark_words_around_an_entry_box_do_not_keep_it_beside_the_aggregate():
+    envelope = _STAMP + "\n" + "".join(_STAMPED_ENTRIES)
+    stamped_child = "ts contents are\nview purposes\nosed.\n" + _STAMPED_ENTRIES[1][3:]
+    contents = _parse(
+        [
+            [
+                _region(0, "paragraph_title", "References", [100, 60, 300, 90]),
+                _region(1, "reference", envelope, [100, 100, 900, 400]),
+                _region(2, "reference_content", stamped_child, [100, 150, 900, 230]),
+                _region(3, "reference_content", _STAMPED_ENTRIES[2][3:], [100, 240, 900, 300]),
+            ]
+        ]
+    )
+
+    assert _section_texts(contents, "References") == [envelope]
+
+
+def test_entry_box_whose_short_first_line_the_aggregate_lacks_is_kept():
+    # The entry box reaches above the aggregate box, whose read starts below
+    # the entry's first line: that line is text only the entry box has.
+    envelope = "".join(_STAMPED_ENTRIES[1:])
+    child = "Rees P, Pyle Q,\n" + _STAMPED_ENTRIES[1][3:]
+    contents = _parse(
+        [
+            [
+                _region(0, "paragraph_title", "References", [100, 60, 300, 90]),
+                _region(1, "reference", envelope, [100, 120, 900, 400]),
+                _region(2, "reference_content", child, [100, 100, 900, 230]),
+            ]
+        ]
+    )
+
+    assert _section_texts(contents, "References") == [envelope, child]

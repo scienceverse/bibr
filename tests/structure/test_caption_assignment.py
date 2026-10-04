@@ -191,3 +191,69 @@ def test_losing_caption_retains_target_contention_evidence():
 
     assert unassigned.ambiguous is True
     assert "target_contention" in unassigned.reasons
+
+
+def _split_panel_page_then_numbered_caption():
+    """A page of ten split panels (one large box around them, second in
+    reading order), then "Figure 2" at the top of the next page above its own
+    figure (a preprint's figure pages; issue #133)."""
+    captions = [
+        _caption(
+            "fig2", "Figure 2 Hazard ratios (log scale)", "figure", 2, (80, 152, 894, 219), 20
+        ),
+    ]
+    panels = [
+        (121, 156, 473, 316),
+        (112, 148, 806, 893),
+        (478, 155, 805, 307),
+        (108, 333, 474, 485),
+        (478, 339, 804, 476),
+        (109, 496, 474, 654),
+        (479, 520, 803, 641),
+        (122, 670, 805, 863),
+        (124, 673, 476, 860),
+        (477, 670, 803, 854),
+    ]
+    targets = [
+        _target(f"figure:{index}", "figure", 1, box, index) for index, box in enumerate(panels, 1)
+    ]
+    targets.append(_target("figure:11", "figure", 2, (87, 227, 787, 854), 21))
+    return captions, targets
+
+
+def test_the_page_offset_keeps_a_cross_page_id_match_from_winning():
+    """The #133 defect: the previous page's panel that happens to carry id 2
+    won on the number bonus. The number is now compared with ids shifted by the
+    caption page's offset (read off its clear geometric owner, id 11), so even
+    without the option the same-page figure wins."""
+    captions, targets = _split_panel_page_then_numbered_caption()
+
+    assert _assigned(captions, targets)["fig2"].object_id == "figure:11"
+
+
+def test_a_leftover_offset_of_one_does_not_swap_stacked_captions():
+    """Two stacked figures, each captioned directly below, whose provisional
+    ids run one ahead of the printed numbers (an uncaptioned figure earlier in
+    the paper). A raw number bonus pulled each caption onto the figure above."""
+    captions = [
+        _caption("fig9", "Fig. 9. First example", "figure", 6, (70, 400, 926, 440), 2),
+        _caption("fig10", "Fig. 10. Second example", "figure", 6, (70, 717, 926, 757), 4),
+    ]
+    targets = [
+        _target("figure:10", "figure", 6, (71, 284, 925, 397), 1),
+        _target("figure:11", "figure", 6, (70, 599, 926, 714), 3),
+    ]
+
+    assigned = _assigned(captions, targets, same_page_only=True)
+
+    assert assigned["fig9"].object_id == "figure:10"
+    assert assigned["fig10"].object_id == "figure:11"
+
+
+def test_same_page_only_leaves_the_same_page_figure_to_its_caption():
+    captions, targets = _split_panel_page_then_numbered_caption()
+
+    assignment = _assigned(captions, targets, same_page_only=True)["fig2"]
+
+    assert assignment.object_id == "figure:11"
+    assert "same_page" in assignment.reasons

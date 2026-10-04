@@ -506,13 +506,25 @@ def _check_unicode_canonical(payload: dict) -> list[ValidationIssue]:
 
 
 def _check_abstract_missing(payload: dict) -> list[ValidationIssue]:
-    abstract_ids = {
-        s.get("section_id")
+    abstract_sections = [
+        s
         for s in _as_list(payload, "section")
         if isinstance(s, dict) and s.get("section_type") == "abstract"
-    }
-    if not abstract_ids:
+    ]
+    if not abstract_sections:
         return []
+    # The model found no abstract and the selected record prints no Abstract
+    # heading (the abstract decision's "explicitly_absent" rule), and every
+    # abstract section carries the layout's own "Abstract" header: an essay or
+    # commentary whose opening column the layout labelled "abstract" lacks
+    # one, and nothing is missing. A printed box header ("Summary box") still
+    # warns: the model may have overlooked a real summary.
+    fields = _as_dict(_as_dict(payload, "extraction"), "fields")
+    if _as_dict(fields, "abstract").get("rule") == "explicitly_absent" and all(
+        s.get("header") == "Abstract" for s in abstract_sections
+    ):
+        return []
+    abstract_ids = {s.get("section_id") for s in abstract_sections}
     n = sum(
         1
         for t in _as_list(payload, "text")
