@@ -384,6 +384,23 @@ def test_layer_is_deterministic_and_round_trips(name):
             assert getattr(page.cols, column).dtype == np.dtype(dtype), column
 
 
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("version", "doclayer/0"), ("index_frame", "post_strip"), ("@", "Page"), (None, None)],
+)
+def test_a_layer_of_another_version_or_frame_is_not_loaded(key, value):
+    data = json.loads(
+        serialize.canonical_bytes(_inspect(_pdfs.synthetic_paper(), layer=True).document)
+    )
+    if key is None:
+        data = [data]
+    else:
+        data[key] = value
+
+    with pytest.raises(ValueError):
+        serialize.from_dict(data)
+
+
 # --- What the layer reads ---------------------------------------------------------
 
 

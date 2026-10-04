@@ -90,6 +90,19 @@ def to_dict(layer: model.DocumentLayer) -> dict[str, Any]:
 
 
 def from_dict(data: dict[str, Any]) -> model.DocumentLayer:
+    """The layer *data* encodes.
+
+    Raises ValueError for anything but a layer of this :data:`LAYER_VERSION`
+    and :data:`INDEX_FRAME`: under other strip rules the same PDF has other
+    glyph indexes, so such a layer must be rebuilt, not loaded.
+    """
+    if not isinstance(data, dict) or data.get("@") != "DocumentLayer":
+        raise ValueError("not a document layer")
+    version, frame = data.get("version"), data.get("index_frame")
+    if version != model.LAYER_VERSION:
+        raise ValueError(f"document layer version {version!r}, not {model.LAYER_VERSION!r}")
+    if frame != model.INDEX_FRAME:
+        raise ValueError(f"document layer index frame {frame!r}, not {model.INDEX_FRAME!r}")
     layer = _decode(data)
     if not isinstance(layer, model.DocumentLayer):
         raise ValueError("not a document layer")
