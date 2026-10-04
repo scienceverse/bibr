@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import replace
 
@@ -10,8 +11,10 @@ import pytest
 from bibr.document import destinations, harvest, links, serialize, views
 from bibr.document.harvest import build_document_layer
 from bibr.document.model import Block
+from bibr.document.rebuild import attach_blocks
+from bibr.ocr.types import OcrRegionResult
 from tests.document import _linked, _pdfs
-from tests.document.test_layer import _BUDGET, _inspect
+from tests.document.test_layer import _BUDGET, _geometry, _inspect
 
 # Each fixture link, by its first run: (action, uri, dest_name, name_source,
 # target_page, target_xy, target_class, the component that decided the class).
@@ -535,7 +538,7 @@ def _numbers(layer) -> list[float]:
     return found
 
 
-@pytest.mark.parametrize("failing", ["_read_objects", "_spans_and_lines"])
+@pytest.mark.parametrize("failing", ["_read_objects", "_pack", "_spans_and_lines"])
 def test_links_and_the_rest_survive_pages_whose_text_could_not_be_read(monkeypatch, failing):
     whole = _layer()
 
@@ -546,6 +549,9 @@ def test_links_and_the_rest_survive_pages_whose_text_could_not_be_read(monkeypat
     layer = _layer()
 
     assert all(page.cols is None and page.error for page in layer.pages)
+    # A page that failed after its size was read keeps its size.
+    assert [_geometry(page) for page in layer.pages] == [_geometry(page) for page in whole.pages]
+    assert all(page.crop_box is not None for page in layer.pages)
     # What the PDF declares is read from pdfium's page and not from its text: it stays.
     assert layer.struct == whole.struct and layer.outline == whole.outline
     assert [page.label for page in layer.pages] == _linked.PAGE_LABELS
@@ -589,3 +595,138 @@ def test_a_page_that_could_not_be_opened_leaves_internal_links_unknown():
     assert layer.links == [] and layer.page(99).error is not None
     assert layer.presence.has_internal_links is None
     assert _layer(pages=[2, 3]).presence.has_internal_links is False
+
+
+def test_pages_that_failed_after_their_size_still_show_a_paper_has_no_internal_links(monkeypatch):
+    # The links are read from pdfium's page, ahead of its text: a page whose text failed was
+    # examined for them all the same.
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("no text")
+
+    monkeypatch.setattr(harvest, "_spans_and_lines", broken)
+    layer = _layer(_pdfs.synthetic_paper(), range(7))
+
+    assert any(page.error for page in layer.pages)
+    assert layer.links == [] and layer.presence.has_internal_links is False
+
+
+@pytest.mark.parametrize("unsized", [1, 3])
+def test_a_page_that_could_not_be_sized_keeps_its_links_and_gives_no_text(monkeypatch, unsized):
+    whole = _layer()
+    real = harvest.page_header
+
+    def fail_on_one_page(page, *, page_index, **kwargs):
+        if page_index == unsized:
+            raise RuntimeError("no size")
+        return real(page, page_index=page_index, **kwargs)
+
+    monkeypatch.setattr(harvest, "page_header", fail_on_one_page)
+    layer = _layer()
+
+    page = layer.page(unsized)
+    assert (page.text_source, page.cols, _geometry(page)) == ("unread", None, (None,) * 4)
+    assert page.error == "RuntimeError: no size"
+    assert layer.component_errors == {f"harvest:{unsized}": "RuntimeError: no size"}
+    assert len(layer.links) == len(whole.links)
+    assert layer.presence.has_internal_links is True
+    assert all(math.isfinite(value) for value in _numbers(layer))
+    for link, read in zip(layer.links, whole.links, strict=True):
+        assert (link.link_id, link.rect, link.target_page, link.target_xy) == (
+            read.link_id,
+            read.rect,
+            read.target_page,
+            read.target_xy,
+        )
+        # What the text rule or the covered spans needed from the unsized page is gone.
+        if link.page == unsized:
+            assert link.source_span_ids == ()
+        if read.target_page == unsized and read.target.component == "link_target.text":
+            assert link.target_class == "other"
+        else:
+            assert link.target_class == read.target_class
+    assert whole.page(unsized).crop_box is not None
+
+
+def test_a_page_without_a_size_has_no_words():
+    page = replace(_layer().page(4), crop_box=None)
+
+    with pytest.raises(ValueError):
+        links.PageWords(page)
+
+
+def test_a_target_page_without_a_size_is_not_read_for_text():
+    layer = _layer()
+    references = layer.page(4)
+    raw = links.RawLink(
+        page=0,
+        number=0,
+        rect=(0.0, 0.0, 1.0, 1.0),
+        quads=(),
+        action="dest",
+        uri=None,
+        dest_name=None,
+        name_source=None,
+        target_page=4,
+        target_xy=(72.0, 704.0),
+    )
+
+    [sized] = links.build_links([raw], [layer.page(0), references])
+    [unsized] = links.build_links([raw], [layer.page(0), replace(references, crop_box=None)])
+
+    assert sized.target_class == "bib" and sized.target.evidence
+    assert (unsized.target_class, unsized.target.component) == ("other", "link_target.default")
+
+
+def test_blocks_on_a_page_without_a_size_have_no_box_and_nothing_lands_in_them():
+    layer = _layer(pages=[3, 99])
+    regions: list[list] = [[] for _page in range(100)]
+    regions[99] = [
+        OcrRegionResult.from_layout_region(
+            {"label": "text", "bbox_2d": [0.0, 0.0, 1000.0, 500.0]}, slot_idx=0, content="text"
+        )
+    ]
+    attach_blocks(layer, regions)
+
+    [block] = layer.page(99).blocks
+    assert layer.page(99).crop_box is None and block.bbox_pdf is None
+    assert views.block_at(layer, 99, (72.0, 662.0)) is None
+    assert views.block_at(layer, 99, (None, 662.0)) is None
+
+
+# --- Numbers too large for a float ---------------------------------------------------------
+
+
+def test_a_link_that_cannot_be_placed_is_left_out_and_nothing_infinite_is_kept():
+    layer = _layer(_linked.huge_numbers_pdf(), [0])
+
+    # Link 0 has an infinite rectangle: left out, with its number unused.
+    assert [link.link_id for link in layer.links] == ["p0.lk1", "p0.lk2"]
+    assert layer.component_errors == {
+        "links:0": "a link annotation with a rectangle that is not finite, left out"
+    }
+    first, second = layer.links
+    # The infinite quadrilateral is dropped and the finite one kept.
+    assert first.quads == ((10.0, 40.0, 100.0, 40.0, 10.0, 20.0, 100.0, 20.0),)
+    # An infinite coordinate is an open one: pdfium's FitR gave the left and top at infinity.
+    assert first.target_xy == (None, None) and second.target_xy == (72.0, None)
+    assert (first.target_page, second.target_page) == (0, 0)
+    [entry] = layer.outline
+    assert (entry.page, entry.x, entry.y) == (0, None, None)
+    assert all(math.isfinite(value) for value in _numbers(layer))
+    assert layer.presence.has_internal_links is True
+    restored = serialize.from_dict(json.loads(serialize.canonical_bytes(layer)))
+    assert serialize.digest(restored) == serialize.digest(layer)
+
+
+def test_a_left_out_link_leaves_internal_links_unknown_when_nothing_else_shows_one():
+    layer = _layer(_linked.huge_numbers_pdf(internal_rest=False), [0])
+
+    # The link left out was the only internal one: "none" would be wrong.
+    assert [link.action for link in layer.links] == ["uri", "uri"]
+    assert layer.presence.has_internal_links is None
+
+
+def test_a_destination_at_infinity_is_open_and_a_finite_one_is_not():
+    assert destinations.finite(72.0) == 72.0 and destinations.finite(0.0) == 0.0
+    for value in (float("inf"), float("-inf"), float("nan")):
+        assert destinations.finite(value) is None

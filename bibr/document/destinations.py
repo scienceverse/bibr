@@ -12,6 +12,7 @@ Everything here calls pdfium and needs the caller's ``pdfium_lock``.
 from __future__ import annotations
 
 import ctypes
+import math
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -124,26 +125,32 @@ def dest_page(api: _Api, doc, dest, n_pages: int) -> int | None:
     return int(index) if 0 <= index < n_pages else None
 
 
+def finite(value: float) -> float | None:
+    """*value*, or None when it is not finite: pdfium reads a number too large for a float as infinity."""
+    return value if math.isfinite(value) else None
+
+
 def dest_position(api: _Api, dest) -> Position:
     """The ``(x, y)`` a destination gives on its page, in PDF points; an open coordinate is None.
 
     ``[page /XYZ x y zoom]`` says which of x and y it leaves open. The Fit
     variants fix one coordinate (FitH and FitBH the top, FitV and FitBV the
-    left, FitR the left and top of its rectangle); Fit and FitB fix none.
+    left, FitR the left and top of its rectangle); Fit and FitB fix none. A
+    coordinate that is not finite is open too.
     """
     pdfium_c = api.c
     has_x, has_y, has_zoom = ctypes.c_int(0), ctypes.c_int(0), ctypes.c_int(0)
     x, y, zoom = ctypes.c_float(0.0), ctypes.c_float(0.0), ctypes.c_float(0.0)
     if api.FPDFDest_GetLocationInPage(dest, has_x, has_y, has_zoom, x, y, zoom):
-        return (x.value if has_x.value else None, y.value if has_y.value else None)
+        return (finite(x.value) if has_x.value else None, finite(y.value) if has_y.value else None)
     count = ctypes.c_ulong(0)
     params = (ctypes.c_float * 4)()
     mode = api.FPDFDest_GetView(dest, count, params)
     n = count.value
     if mode in (pdfium_c.PDFDEST_VIEW_FITH, pdfium_c.PDFDEST_VIEW_FITBH) and n >= 1:
-        return (None, params[0])
+        return (None, finite(params[0]))
     if mode in (pdfium_c.PDFDEST_VIEW_FITV, pdfium_c.PDFDEST_VIEW_FITBV) and n >= 1:
-        return (params[0], None)
+        return (finite(params[0]), None)
     if mode == pdfium_c.PDFDEST_VIEW_FITR and n >= 4:
-        return (params[0], params[3])
+        return (finite(params[0]), finite(params[3]))
     return (None, None)

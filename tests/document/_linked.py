@@ -746,3 +746,38 @@ def linked_paper(
     table.fill(1, b"<< /Type /Catalog /Pages 2 0 R" + extras + b" >>")
     info = table.add(b"<< /Title " + _pdf_string(TITLE) + b" >>")
     return serialize_pdf(table.bodies, b"/Info %d 0 R" % info)
+
+
+# --- Numbers too large for a float -----------------------------------------------
+
+# A real of sixty digits: pdfium reads it as infinity, where an integer that large reads as 0.
+HUGE = b"9" * 60 + b".5"
+
+
+def huge_numbers_pdf(*, internal_rest: bool = True) -> bytes:
+    """A one-page PDF with numbers too large for a float in its links and its bookmark.
+
+    Link 0 has an infinite rectangle and a destination at infinity, so it cannot be placed;
+    link 1 a finite rectangle with one finite and one infinite quadrilateral and a
+    fit-rectangle destination at infinity; link 2 a destination at x 72 and y infinity.
+    The bookmark's destination is at infinity too. With *internal_rest* False links 1 and 2
+    go by URI, which leaves link 0 the only internal one.
+    """
+    quads = b"[10 40 100 40 10 20 100 20 10 40 %s 40 10 20 %s 20]" % (HUGE, HUGE)
+    uri = b"/A << /S /URI /URI (https://example.org/a) >>"
+    fit = b"/Dest [3 0 R /FitR %s %s %s %s]" % (HUGE, HUGE, HUGE, HUGE)
+    xyz = b"/Dest [3 0 R /XYZ 72 %s 0]" % HUGE
+    second, third = (fit, xyz) if internal_rest else (uri, uri)
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R /Outlines 7 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [4 0 R 5 0 R 6 0 R] >>",
+        b"<< /Type /Annot /Subtype /Link /Rect [10 10 %s 100] /Border [0 0 0] "
+        b"/Dest [3 0 R /XYZ %s %s 0] >>" % (HUGE, HUGE, HUGE),
+        b"<< /Type /Annot /Subtype /Link /Rect [10 20 100 40] /Border [0 0 0] "
+        b"/QuadPoints %s %s >>" % (quads, second),
+        b"<< /Type /Annot /Subtype /Link /Rect [10 50 100 70] /Border [0 0 0] %s >>" % third,
+        b"<< /Type /Outlines /First 8 0 R /Last 8 0 R /Count 1 >>",
+        b"<< /Title (Huge) /Parent 7 0 R /Dest [3 0 R /XYZ %s %s 0] >>" % (HUGE, HUGE),
+    ]
+    return serialize_pdf(objects)

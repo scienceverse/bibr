@@ -21,12 +21,17 @@ decided afterwards, from the layer's own text, by :func:`build_links`:
 
 The text rule reads the target page in its unrotated frame, where the census
 read it as displayed, so on a rotated target page it sees another band. A
-page the layer lacks (a layer built for a page range) gives it no text.
+target page without text gives it none: a page the layer lacks (a layer built
+for a page range), one the harvest failed on and one that could not be sized.
+
+A link is read from pdfium's page, not from its text, so a page whose text
+could not be read keeps its links, without the spans they cover.
 """
 
 from __future__ import annotations
 
 import ctypes
+import math
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -131,8 +136,10 @@ class PageLinks:
     found: list[RawLink]
     # The annotations gone through, those that failed included.
     enumerated: int
-    # Whether the page has annotations the document's allowance of them left unread.
-    stopped: bool
+    # Whether every link annotation of the page was read and kept. It is not when one
+    # was left out (it failed, or has no rectangle that is finite) or the document's
+    # allowance of annotations ran out; a link cut short is kept, so it does not count.
+    complete: bool
     # The first thing that went wrong: a link left out, a link cut short, or the stop.
     note: str | None
 
@@ -154,13 +161,13 @@ def read_page_links(
     """
     found: list[RawLink] = []
     note: str | None = None
-    stopped = False
+    complete = True
     position = ctypes.c_int(0)
     link = api.c.FPDF_LINK()
     number = -1
     while api.FPDFLink_Enumerate(page.raw, ctypes.byref(position), ctypes.byref(link)):
         if number + 1 >= limit:
-            stopped = True
+            complete = False
             note = f"more than {MAX_LINKS} link annotations, the rest unread"
             break
         number += 1
@@ -170,11 +177,14 @@ def read_page_links(
             )
         except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
             note = note or f"{type(exc).__name__}: {exc}"[:500]
+            complete = False
             continue
         note = note or cut
-        if raw is not None:
-            found.append(raw)
-    return PageLinks(found, number + 1, stopped, note)
+        if raw is None:
+            complete = False
+            continue
+        found.append(raw)
+    return PageLinks(found, number + 1, complete, note)
 
 
 def _read_link(
@@ -187,21 +197,31 @@ def _read_link(
     n_pages: int,
     with_names: bool,
 ) -> tuple[RawLink | None, str | None]:
-    """The link, and a note when it was cut short; None for a link with no rectangle."""
+    """The link and a note when it was cut short; None, with a note, for a link left out.
+
+    A link is left out when it has no rectangle, or one with a coordinate that is not
+    finite (pdfium reads a number too large for a float as infinity): it cannot be placed.
+    A quadrilateral that is not finite is dropped.
+    """
     pdfium_c = api.c
     rect = pdfium_c.FS_RECTF()
     if not api.FPDFLink_GetAnnotRect(link, ctypes.byref(rect)):
-        return None, None
-    left, right = sorted((float(rect.left), float(rect.right)))
-    bottom, top = sorted((float(rect.bottom), float(rect.top)))
+        return None, "a link annotation with no rectangle, left out"
+    corners = (float(rect.left), float(rect.right), float(rect.bottom), float(rect.top))
+    if not all(map(math.isfinite, corners)):
+        return None, "a link annotation with a rectangle that is not finite, left out"
+    left, right = sorted(corners[:2])
+    bottom, top = sorted(corners[2:])
     quads = []
     n_quads = api.FPDFLink_CountQuadPoints(link)
     for index in range(min(n_quads, MAX_QUADS)):
         quad = pdfium_c.FS_QUADPOINTSF()
         if api.FPDFLink_GetQuadPoints(link, index, ctypes.byref(quad)):
-            quads.append(
-                tuple(float(getattr(quad, f"{axis}{n}")) for n in (1, 2, 3, 4) for axis in "xy")
+            points = tuple(
+                float(getattr(quad, f"{axis}{n}")) for n in (1, 2, 3, 4) for axis in "xy"
             )
+            if all(map(math.isfinite, points)):
+                quads.append(points)
 
     raw_name, has_dest_entry = _annotation_dest(api, page, link) if with_names else (None, False)
     action = api.FPDFLink_GetAction(link)
@@ -310,8 +330,8 @@ class PageWords:
 
     def __init__(self, page: Page) -> None:
         cols = page.cols
-        if cols is None:
-            raise ValueError("a page without a text layer has no words")
+        if cols is None or page.crop_box is None:
+            raise ValueError("a page without a text layer or a size has no words")
         self._cols = cols
         self._cy1 = page.crop_box[3]
         blank = (cols.rec_cp <= 32) | (cols.rec_cp == 0xA0) | cols.rec_newline
@@ -426,7 +446,14 @@ def _classify(
     if raw.target_page is None:
         return "unresolved", _BY_DEFAULT
     target = pages.get(raw.target_page)
-    if target is not None and target.cols is not None and raw.target_xy is not None:
+    # A target page the layer lacks, one that failed and one without a text layer or a
+    # size has no words: the text rule has nothing to read.
+    if (
+        target is not None
+        and target.cols is not None
+        and target.crop_box is not None
+        and raw.target_xy is not None
+    ):
         y = raw.target_xy[1]
         if y is not None:
             if raw.target_page not in words:

@@ -955,10 +955,10 @@ class LayerBuilder:
         self.outline: list[OutlineEntry] | None = None
         self.meta_title: str | None = None
         self.raw_links: list[links.RawLink] = []
-        # The link annotations gone through so far, and whether any were left unread
-        # for want of an allowance (``links.MAX_LINKS``).
+        # The link annotations gone through so far (``links.MAX_LINKS`` caps them), and
+        # the pages whose link annotations were all read and kept.
         self.links_enumerated = 0
-        self.links_stopped = False
+        self.links_read: set[int] = set()
         self.struct: list[StructElem] = []
         # Whether /MarkInfo says the PDF is tagged (None until read), and whether
         # any page was given a structure tree.
@@ -1024,7 +1024,8 @@ class LayerBuilder:
             return
         self.raw_links.extend(page_links.found)
         self.links_enumerated += page_links.enumerated
-        self.links_stopped = self.links_stopped or page_links.stopped
+        if page_links.complete:
+            self.links_read.add(page_index)
         if page_links.note is not None:
             self.errors[f"links:{page_index}"] = page_links.note
 
@@ -1220,10 +1221,9 @@ class LayerBuilder:
 
         internal = None
         if built_links is not None:
-            internal = seen(any(link.action in ("dest", "goto") for link in built_links), read)
-            # A link left unread might have been one.
-            if internal is not True and self.links_stopped:
-                internal = None
+            # A page whose links were not all read, or that could not be opened, might hold one.
+            linked = [page for page in pages if page.index in self.links_read]
+            internal = seen(any(link.action in ("dest", "goto") for link in built_links), linked)
 
         native = seen(any(page.text_source == "native" for page in decided), decided)
         mcids = any(
