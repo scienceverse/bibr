@@ -1812,7 +1812,7 @@ def _remove_objects(pdfium_c, page, found: list, outcomes: list[bool] | None = N
 
 
 def _find_furniture(
-    page, *, watermark_text: bool = True, details: list | None = None
+    page, *, watermark_text: bool = True, details: list | None = None, walk: list | None = None
 ) -> tuple[list, list[str], list, int]:
     """The watermark entries, their strings, the line-number entries and the text-object count.
 
@@ -1822,6 +1822,7 @@ def _find_furniture(
     text)`` for every returned watermark and line-number entry: ``kind`` is
     ``"watermark"`` or ``"line_number"``, ``box`` the object's page-space box
     (PDF points, y up; None when pdfium has none) and ``text`` its string.
+    *walk*, when given, gets every entry collected.
     """
     import pypdfium2.raw as pdfium_c
 
@@ -1831,6 +1832,8 @@ def _find_furniture(
         for index in range(pdfium_c.FPDFPage_CountObjects(page.raw))
     ]
     _collect_text_objects(pdfium_c, top_level, None, None, 0, objects)
+    if walk is not None:
+        walk.extend(objects)
     watermarks = []
     candidates = []
     boxes: list[_Box | None] = []
@@ -1986,7 +1989,9 @@ def _document_is_line_numbered(pdf) -> bool:
     return numbered
 
 
-def strip_furniture_objects(page, furniture: list | None = None) -> tuple[list[str], int]:
+def strip_furniture_objects(
+    page, furniture: list | None = None, walk: list | None = None
+) -> tuple[list[str], int]:
     """Remove diagonal watermark text and manuscript line numbers from *page* in memory.
 
     Returns the removed watermark strings (whitespace-normalised, one per
@@ -2002,23 +2007,38 @@ def strip_furniture_objects(page, furniture: list | None = None) -> tuple[list[s
     ``text`` its whitespace-normalised string (the digits of a line number).
     Recording them never changes what is removed: when they cannot be read,
     *furniture* gets one ``("error", None, message)`` entry instead.
+
+    *walk*, when given, gets the ``(parent, object, matrix)`` entry of every
+    text object left on the page (see :func:`_collect_text_objects`), so the
+    document layer need not walk the page again. It stays empty when the
+    strip fails.
     """
     import pypdfium2.raw as pdfium_c
 
     details: list | None = [] if furniture is not None else None
-    watermarks, texts, line_numbers, _n_text = _find_furniture(page, details=details)
+    found: list | None = [] if walk is not None else None
+    watermarks, texts, line_numbers, _n_text = _find_furniture(page, details=details, walk=found)
     pdf = getattr(page, "pdf", None)
     if line_numbers and (pdf is None or not _document_is_line_numbered(pdf)):
         line_numbers = []
     entries = watermarks + line_numbers
-    outcomes: list[bool] | None = [] if furniture is not None else None
+    outcomes: list[bool] | None = [] if furniture is not None or walk is not None else None
     _remove_objects(pdfium_c, page, [(parent, obj) for parent, obj, _ in entries], outcomes)
     if furniture is not None and details is not None and outcomes is not None:
         furniture.extend(_removed_furniture(entries, outcomes, details))
+    if walk is not None and found is not None and outcomes is not None:
+        # A removed object is destroyed; its entry must not outlive it.
+        removed = {id(entry) for entry, done in zip(entries, outcomes, strict=True) if done}
+        walk.extend(entry for entry in found if id(entry) not in removed)
     return texts, len(line_numbers)
 
 
-def open_text_page(page, watermarks: list[str] | None = None, furniture: list | None = None):
+def open_text_page(
+    page,
+    watermarks: list[str] | None = None,
+    furniture: list | None = None,
+    walk: list | None = None,
+):
     """Build *page*'s pdfium text page without its watermark text and line numbers.
 
     Every native-text reader goes through this, so region text, font
@@ -2026,18 +2046,21 @@ def open_text_page(page, watermarks: list[str] | None = None, furniture: list | 
     The removed watermark strings are appended to *watermarks* when it is
     given, and the removed objects to *furniture* as ``(kind, box, text)``
     (see :func:`strip_furniture_objects`; a failed pass adds one ``("error",
-    None, message)`` entry).
+    None, message)`` entry). *walk* gets the text objects left on the page,
+    and stays empty when the pass fails.
     """
     try:
-        if furniture is None:
+        if furniture is None and walk is None:
             removed, _line_numbers = strip_furniture_objects(page)
         else:
-            removed, _line_numbers = strip_furniture_objects(page, furniture)
+            removed, _line_numbers = strip_furniture_objects(page, furniture, walk)
     except Exception as exc:  # noqa: BLE001 - never lose the text layer to the furniture pass
         logger.debug("Page furniture removal failed; reading the page as it is", exc_info=True)
         removed = []
         if furniture is not None:
             furniture.append(("error", None, _furniture_error(exc)))
+        if walk is not None:
+            walk.clear()
     if watermarks is not None:
         watermarks.extend(removed)
     return page.get_textpage()

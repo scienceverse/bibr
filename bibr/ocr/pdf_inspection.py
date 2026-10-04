@@ -165,12 +165,14 @@ def inspect_pdf(
                     # The document layer's furniture, and the char records it
                     # shares with the native fill.
                     furniture: list[tuple] = []
+                    walk: list[tuple] | None = None
                     trace = records = None
                     if needs_text:
                         if layer_builder is None:
                             textpage = open_text_page(page, watermarks)
                         else:
-                            textpage = open_text_page(page, watermarks, furniture)
+                            walk = []
+                            textpage = open_text_page(page, watermarks, furniture, walk)
                         try:
                             if layer_builder is not None:
                                 trace, records = layer_builder.records(textpage, page_index)
@@ -252,6 +254,7 @@ def inspect_pdf(
                                     trace,
                                     records,
                                     furniture,
+                                    walk,
                                 )
                         finally:
                             textpage.close()
@@ -344,6 +347,7 @@ def _harvest_page(
     trace,
     records,
     furniture: list[tuple],
+    walk: list[tuple] | None,
 ) -> None:
     """Add a page to the document layer; a failure stays in the layer's errors."""
     try:
@@ -356,6 +360,7 @@ def _harvest_page(
             trace=trace,
             records=records,
             furniture=furniture,
+            walk=walk,
         )
     except Exception as exc:  # noqa: BLE001
         builder.error(f"harvest:{page_index}", exc)
@@ -371,11 +376,21 @@ def _harvest_unread_page(
     """Harvest a page the inspection itself does not read the text layer of."""
     try:
         furniture: list[tuple] = []
-        textpage = open_text_page(page, [], furniture)
+        walk: list[tuple] = []
+        textpage = open_text_page(page, [], furniture, walk)
         try:
             trace, records = builder.records(textpage, page_index)
             _harvest_page(
-                builder, page, textpage, page_index, crop_box, rotation, trace, records, furniture
+                builder,
+                page,
+                textpage,
+                page_index,
+                crop_box,
+                rotation,
+                trace,
+                records,
+                furniture,
+                walk,
             )
         finally:
             textpage.close()

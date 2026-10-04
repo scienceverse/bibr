@@ -1,9 +1,9 @@
 """The native text reader's document-layer hooks only append to side lists.
 
 ``_build_page_char_records(textpage, trace)`` and ``open_text_page(page,
-watermarks, furniture)`` feed the document layer. With or without the hook
-argument they return the same records and leave the same text page, and a
-failure while recording never changes what the furniture strip removes.
+watermarks, furniture, walk)`` feed the document layer. With or without the
+hook arguments they return the same records and leave the same text page, and
+a failure while recording never changes what the furniture strip removes.
 """
 
 from __future__ import annotations
@@ -11,6 +11,8 @@ from __future__ import annotations
 import pypdfium2
 import pytest
 
+from bibr.document import harvest, serialize
+from bibr.document.harvest import build_document_layer
 from bibr.ocr import native_text
 from bibr.ocr.native_text import (
     DEFAULT_ELIGIBLE_LABELS,
@@ -22,6 +24,7 @@ from bibr.ocr.native_text import (
     open_text_page,
 )
 from bibr.ocr.utils import pdfium_lock
+from tests.document import _pdfs
 from tests.document._pdfs import band_layout, fixture_pdfs
 from tests.ocr.test_line_number_column import _reference_page
 from tests.ocr.test_watermark_text import _REVIEW_WATERMARK, _body, _pdf
@@ -125,7 +128,7 @@ def test_furniture_list_leaves_the_text_page_unchanged(case):
     for _index, page in _pages(pdf_bytes):
         watermarks = []
         furniture: list[tuple] = []
-        textpage = open_text_page(page, watermarks, furniture)
+        textpage = open_text_page(page, watermarks, furniture, [])
         try:
             hooked_runs.append((watermarks, _text_page_state(textpage)))
         finally:
@@ -198,3 +201,59 @@ def test_a_failed_furniture_pass_reads_the_page_as_it_is_and_says_so(monkeypatch
         assert states[0] == states[1]
         assert "Review" in states[0][1]
         assert furniture == [("error", None, "RuntimeError: scan failed")]
+
+
+@pytest.mark.parametrize("case", sorted(_furniture_cases()))
+def test_the_walk_holds_the_text_objects_left_after_the_strip(case):
+    api = harvest._Api()
+    for _index, page in _pages(_furniture_cases()[case]):
+        before: list = []
+        native_text._find_furniture(page, walk=before)
+        walk: list = []
+        furniture: list[tuple] = []
+        textpage = open_text_page(page, [], furniture, walk)
+        textpage.close()
+
+        reused = {harvest._address(obj): matrix for _parent, obj, matrix in walk}
+        assert reused == harvest._objects_in_page(api, page)
+        assert len(walk) == len(before) - len(furniture)
+        assert walk if case == "clean" else len(walk) < len(before)
+
+
+def test_the_layer_reads_its_objects_from_the_strip_walk(monkeypatch):
+    pdf_bytes = _pdfs.synthetic_paper()
+    pages = range(len(_pdfs.SYNTHETIC_TEXT_SOURCES))
+    reused = build_document_layer(pdf_bytes, pages, budget=None)
+    read = harvest._read_objects
+
+    def walk_again(api, page, handles, fonts, found=None):
+        return read(api, page, handles, fonts, None)
+
+    monkeypatch.setattr(harvest, "_read_objects", walk_again)
+    walked_again = build_document_layer(pdf_bytes, pages, budget=None)
+    monkeypatch.setattr(harvest, "_read_objects", read)
+
+    def no_second_walk(*_args):
+        raise AssertionError("the page was walked again")
+
+    monkeypatch.setattr(harvest, "_objects_in_page", no_second_walk)
+    without_fallback = build_document_layer(pdf_bytes, pages, budget=None)
+
+    assert serialize.digest(walked_again) == serialize.digest(reused)
+    assert without_fallback.component_errors == {}
+    assert serialize.digest(without_fallback) == serialize.digest(reused)
+
+
+def test_a_failed_strip_leaves_the_walk_empty(monkeypatch):
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("removal failed")
+
+    monkeypatch.setattr(native_text, "_remove_objects", broken)
+    for _index, page in _pages(_pdf(_REVIEW_WATERMARK + _body())):
+        walk: list = []
+        furniture: list[tuple] = []
+        textpage = open_text_page(page, [], furniture, walk)
+        textpage.close()
+
+        assert walk == []
+        assert furniture == [("error", None, "RuntimeError: removal failed")]

@@ -308,8 +308,20 @@ class _Objects:
     flags: list[int]
 
 
-def _read_objects(api: _Api, page, handles: list, fonts: FontTable) -> _Objects:
-    walk = _objects_in_page(api, page) if handles else {}
+def _read_objects(
+    api: _Api, page, handles: list, fonts: FontTable, found: list | None = None
+) -> _Objects:
+    """The columns of the text objects in *handles*.
+
+    *found* is the furniture strip's walk of the page (``open_text_page``'s
+    *walk*); without it the page is walked again.
+    """
+    if not handles:
+        walk = {}
+    elif found:
+        walk = {_address(obj): matrix for _parent, obj, matrix in found}
+    else:
+        walk = _objects_in_page(api, page)
     out = _Objects([], [], [], [], [], [], [], [], [], [])
     font_memo: dict[int, int] = {}
     size = ctypes.c_float(0.0)
@@ -632,12 +644,13 @@ def read_page(
     budget: RenderBudget | None,
     version: str,
     api: _Api | None = None,
+    walk: list | None = None,
 ) -> _PageDraft:
     """Read one page for the layer: everything that needs pdfium.
 
     *trace* and *records* come from ``_build_page_char_records(textpage,
-    trace)``; *furniture* from ``open_text_page(page, ..., furniture)``.
-    Called under ``pdfium_lock``.
+    trace)``; *furniture* and *walk* from ``open_text_page(page, ...,
+    furniture, walk)``. Called under ``pdfium_lock``.
     """
     api = api or _Api()
     width, height = page.get_size()
@@ -681,7 +694,7 @@ def read_page(
     if len(trace.record_src) != len(records):
         raise RuntimeError("the char trace does not match the records")
     rows, handles, origins, loose, gflags = _read_glyphs(api, textpage, n_chars, trace.boxes)
-    objects = _read_objects(api, page, handles, fonts)
+    objects = _read_objects(api, page, handles, fonts, walk)
     for i, row in enumerate(rows):
         if row >= 0 and objects.mode[row] in nt._INVISIBLE_TEXT_RENDER_MODES:
             gflags[i] |= GLYPH_INVISIBLE_RENDER
@@ -920,6 +933,7 @@ class LayerBuilder:
         trace: nt.PageCharTrace | None,
         records: list[tuple[str, float, float, bool]] | None,
         furniture: list[tuple],
+        walk: list | None = None,
     ) -> None:
         failed = [text for kind, _box, text in furniture if kind == "error"]
         if failed:
@@ -939,6 +953,7 @@ class LayerBuilder:
                 budget=self.budget,
                 version=self.version,
                 api=self._api,
+                walk=walk,
             )
             packed = _pack(draft)
         except Exception as exc:  # noqa: BLE001 - a layer page never fails the paper
@@ -1020,7 +1035,8 @@ def build_document_layer(
                     crop_box = nt._page_crop_box(page)
                     rotation = nt._page_rotation(page)
                     furniture: list[tuple] = []
-                    textpage = nt.open_text_page(page, [], furniture)
+                    walk: list[tuple] = []
+                    textpage = nt.open_text_page(page, [], furniture, walk)
                     try:
                         trace, records = builder.records(textpage, page_index)
                         builder.add_page(
@@ -1032,6 +1048,7 @@ def build_document_layer(
                             trace=trace,
                             records=records,
                             furniture=furniture,
+                            walk=walk,
                         )
                     finally:
                         textpage.close()
