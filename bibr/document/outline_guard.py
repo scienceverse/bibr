@@ -31,9 +31,13 @@ The outline is rejected when:
   catches issue tables of contents and renamed bookmarks
 
 Differences from the evaluation, which a reader comparing numbers must know:
-the text is the layer's records, not MuPDF's page text, and a layer built for a
-page range holds only those pages' text (the others count as empty, and the
-2,000-character gate sees only theirs).
+the text is the layer's records, not MuPDF's page text, and the layer gives a
+verdict only where it holds the text of every page of the document. On a layer
+built for a page range (or with a page it could not read) R3 would see too
+little: of the gate192 outlines that pass on the whole document it rejected 30
+of 97 with the first half of the pages built and 47 of 90 with the first five,
+and the 2,000-character gate lets a junk outline through. Such a layer keeps a
+rejection by R1 or R2, which read no text, and leaves a pass at None.
 """
 
 from __future__ import annotations
