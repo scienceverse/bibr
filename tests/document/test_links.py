@@ -247,6 +247,48 @@ def test_a_name_pdfiums_lookup_misses_is_found_in_the_table():
     assert lost.target_class == "unresolved"
 
 
+def test_a_document_over_the_link_limit_is_read_to_the_limit_and_says_so(monkeypatch):
+    monkeypatch.setattr(links, "MAX_LINKS", 5)
+    layer = _layer()
+
+    assert [link.link_id for link in layer.links] == [f"p0.lk{n}" for n in range(5)]
+    # The allowance runs out on the first page; every later page with a link says so.
+    note = "more than 5 link annotations, the rest unread"
+    pages = {spec.page for spec in _linked.LINKS}
+    assert pages == {0, 1}
+    assert layer.component_errors == {f"links:{page}": note for page in pages}
+    # The first of those five is internal, so the answer is yes.
+    assert layer.presence.has_internal_links is True
+
+
+def test_links_cut_short_do_not_say_the_document_has_none(monkeypatch):
+    monkeypatch.setattr(links, "MAX_LINKS", 0)
+    layer = _layer()
+
+    assert layer.links == []
+    assert layer.presence.has_internal_links is None
+
+
+def test_a_document_with_exactly_the_link_limit_is_read_whole_and_says_nothing(monkeypatch):
+    whole = _layer().links
+    monkeypatch.setattr(links, "MAX_LINKS", len(whole))
+    layer = _layer()
+
+    assert layer.links == whole
+    assert layer.component_errors == {}
+
+
+def test_a_link_with_too_many_quadrilaterals_is_kept_and_read_to_the_limit(monkeypatch):
+    monkeypatch.setattr(links, "MAX_QUADS", 1)
+    layer = _layer()
+    wrap = _link(layer, "wrap_a")
+
+    assert len(layer.links) == len(_linked.LINKS)
+    assert len(wrap.quads) == 1 and (wrap.action, wrap.target_class) == ("goto", "float")
+    note = "a link with more than 1 quadrilaterals, the rest unread"
+    assert layer.component_errors == {f"links:{wrap.page}": note}
+
+
 def test_the_inline_build_reads_the_same_links():
     pdf_bytes = _linked.linked_paper()
 

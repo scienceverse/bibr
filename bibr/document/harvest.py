@@ -955,6 +955,10 @@ class LayerBuilder:
         self.outline: list[OutlineEntry] | None = None
         self.meta_title: str | None = None
         self.raw_links: list[links.RawLink] = []
+        # The link annotations gone through so far, and whether any were left unread
+        # for want of an allowance (``links.MAX_LINKS``).
+        self.links_enumerated = 0
+        self.links_stopped = False
         self.struct: list[StructElem] = []
         # Whether /MarkInfo says the PDF is tagged (None until read), and whether
         # any page was given a structure tree.
@@ -1005,7 +1009,7 @@ class LayerBuilder:
         if self.doc is None or self._lacks(links.APIS + destinations.APIS):
             return
         try:
-            found, error = links.read_page_links(
+            page_links = links.read_page_links(
                 self._api,
                 self.doc,
                 page,
@@ -1013,13 +1017,16 @@ class LayerBuilder:
                 self.names,
                 self.n_pages,
                 with_names=not self._lacks(links.NAME_APIS),
+                limit=links.MAX_LINKS - self.links_enumerated,
             )
         except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
             self.errors[f"links:{page_index}"] = _error_text(exc)
             return
-        self.raw_links.extend(found)
-        if error is not None:
-            self.errors[f"links:{page_index}"] = error
+        self.raw_links.extend(page_links.found)
+        self.links_enumerated += page_links.enumerated
+        self.links_stopped = self.links_stopped or page_links.stopped
+        if page_links.note is not None:
+            self.errors[f"links:{page_index}"] = page_links.note
 
     def _read_struct(self, page, page_index: int) -> None:
         if self._lacks(structure.APIS):
@@ -1185,6 +1192,13 @@ class LayerBuilder:
                 return True
             return False if pages and len(examined) == len(pages) else None
 
+        internal = None
+        if built_links is not None:
+            internal = seen(any(link.action in ("dest", "goto") for link in built_links), read)
+            # A link left unread might have been one.
+            if internal is not True and self.links_stopped:
+                internal = None
+
         native = seen(any(page.text_source == "native" for page in decided), decided)
         mcids = any(
             page.cols is not None and bool((page.cols.obj_mcid >= 0).any()) for page in read
@@ -1199,11 +1213,7 @@ class LayerBuilder:
             ),
             has_outline=len(self.outline) > 0 if self.outline is not None else None,
             outline_guard_pass=guard.passed if guard is not None else None,
-            has_internal_links=(
-                None
-                if built_links is None
-                else seen(any(link.action in ("dest", "goto") for link in built_links), read)
-            ),
+            has_internal_links=internal,
             is_tagged=self._is_tagged(),
             has_mcids=(
                 None if "FPDFPageObj_GetMarkedContentID" in self.missing else seen(mcids, read)
