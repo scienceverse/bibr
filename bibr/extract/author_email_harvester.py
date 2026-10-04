@@ -41,6 +41,9 @@ _CORRESPONDING_MARKER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "Corresponding authors" / "co-corresponding": a marker that covers several addresses.
+_PLURAL_MARKER_RE = re.compile(r"\b(?:co-?)?corresponding\s+authors\b", re.IGNORECASE)
+
 # Window of adjacent sentences to consider when matching an email to an
 # author name — the "Corresponding Author: <Name> ... E-mail: <addr>" line
 # is often emitted as two separate sentences by the segmenter.
@@ -403,7 +406,11 @@ class AuthorEmailHarvester:
         other address between; a given name or initials before the surname narrow a
         shared surname), or when its local part spells exactly one author's name
         ("hk.tan", "tan_hk", "hktan"). A tie between authors that nothing separates is
-        left open rather than settled by author order.
+        left open rather than settled by author order. When two or more authors each print
+        their own address in the added sentences (one contact line or footnote per author),
+        an author is flagged corresponding only by a marker in that address's own sentence
+        or a plural one ("Corresponding authors"): a singular header or window marker, or a
+        footnote beside the name, cannot pick one of several.
 
         Name-paired footnotes ("E-mail address(es): x@y (Initials Surname)") are read
         last, from the whole paper rather than the scoped block, and only for authors
@@ -602,7 +609,11 @@ class AuthorEmailHarvester:
                         claimed_emails.add(email.lower())
                         # Strict mode: when some sentence pairs the marker with
                         # explicit email(s), only those emails are corresponding.
-                        if email.lower() in strict_emails if strict_emails else window_has_marker:
+                        # Added sentences are only attached here; their flags are
+                        # decided by the anchor promotion, which sees the whole layout.
+                        if not gated and (
+                            email.lower() in strict_emails if strict_emails else window_has_marker
+                        ):
                             author.corresponding = True
                         _drop_filled_author(authors_by_family, family, author)
                         harvested += 1
@@ -770,6 +781,27 @@ class AuthorEmailHarvester:
         if promoted:
             logger.info("Marked %d author(s) corresponding from name-paired footnotes", promoted)
 
+    @staticmethod
+    def _is_multi_contact_layout(
+        authors: list[PaperAuthor], sentences: list, widened_ids: frozenset[int]
+    ) -> bool:
+        """Whether two or more authors have their own address printed in the added sentences.
+
+        That is the "contact block per author" layout (one footnote or line per author,
+        each with an address), where nothing but a marker in the address's own sentence says
+        which author is the corresponding one.
+        """
+        owner_by_email = {a.email.lower(): id(a) for a in authors if a.email}
+        owners: set[int] = set()
+        for sent in sentences:
+            if "@" not in (sent.text or "") or getattr(sent, "text_id", None) not in widened_ids:
+                continue
+            for m in _EMAIL_RE.finditer(_PG_PREFIX_RE.sub("", sent.text)):
+                owner = owner_by_email.get(m.group(1).lower())
+                if owner is not None:
+                    owners.add(owner)
+        return len(owners) >= 2
+
     def _promote_corresponding_from_anchors(
         self,
         authors: list[PaperAuthor],
@@ -794,6 +826,10 @@ class AuthorEmailHarvester:
         strict_emails = self._marker_sentence_emails(sentences)
 
         section_meta = {s.section_id: s for s in self.contents.sections}
+
+        multi_contact = widened_ids is not None and self._is_multi_contact_layout(
+            authors, sentences, widened_ids
+        )
 
         promoted = 0
         for i, sent in enumerate(sentences):
@@ -840,6 +876,14 @@ class AuthorEmailHarvester:
 
                 if strict_emails:
                     promote = email in strict_emails
+                elif multi_contact:
+                    # Several authors each print their own address in the added text: one
+                    # singular marker, or a footnote beside a name, cannot pick one of them.
+                    # The marker must be in the address's own sentence, or be plural.
+                    promote = bool(_CORRESPONDING_MARKER_RE.search(sent.text)) or bool(
+                        _PLURAL_MARKER_RE.search(joined_window)
+                        or _PLURAL_MARKER_RE.search(section_header)
+                    )
                 else:
                     promote = anchor_in_window or anchor_in_header or footnote_affinity
                 if promote:

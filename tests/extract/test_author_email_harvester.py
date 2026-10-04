@@ -1287,3 +1287,160 @@ def test_widened_local_part_with_given_name_and_surname_names_one_author():
         authors,
     )
     assert [a.email for a in authors] == ["ingridlindqvist@example.edu", None]
+
+
+# --- the contact-block layout (one address per author in the added text) -------------
+
+
+def _harvest_wide_with_header(sections, authors, header: str, front: int = 1):
+    """Like `_harvest_wide`, with *header* as the heading of every added section."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    document = _contents_by_section(sections)
+    for section in document.sections[front:]:
+        section.header = header
+    widened = frozenset(s.text_id for s in document.sentences if s.section_id >= front)
+    AuthorEmailHarvester(document, document=document, widened_text_ids=widened).harvest(authors)
+    return authors
+
+
+_BYLINE = ("title", ["Alice Lee, Hui-Kai Tan, Omar Reyes"])
+
+
+def test_contact_block_footnotes_beside_each_name_do_not_flag_anyone():
+    """Three footnotes, each a name and its own address, and nothing saying who corresponds."""
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest_wide(
+        [
+            _BYLINE,
+            (
+                "footnote",
+                [
+                    "1 Alice Lee, alee@example.org",
+                    "2 Hui-Kai Tan, hk.tan@example.org",
+                    "3 Omar Reyes, oreyes@example.org",
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert [a.email for a in authors] == [
+        "alee@example.org",
+        "hk.tan@example.org",
+        "oreyes@example.org",
+    ]
+    assert [a.corresponding for a in authors] == [False, False, False]
+
+
+def test_a_single_footnote_address_beside_a_name_is_still_flagged():
+    """With only one author's address in the added text there is no layout to confuse."""
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest_wide([_BYLINE, ("footnote", ["2 Hui-Kai Tan, hk.tan@example.org"])], authors)
+    assert [a.corresponding for a in authors] == [False, True, False]
+
+
+def test_a_singular_section_header_over_several_authors_addresses_flags_nobody():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest_wide_with_header(
+        [
+            _BYLINE,
+            (
+                "unknown",
+                [
+                    "Alice Lee: alee@example.org",
+                    "Hui-Kai Tan: hk.tan@example.org",
+                    "Omar Reyes: oreyes@example.org",
+                ],
+            ),
+        ],
+        authors,
+        header="Corresponding author",
+    )
+    assert [a.email for a in authors] == [
+        "alee@example.org",
+        "hk.tan@example.org",
+        "oreyes@example.org",
+    ]
+    assert [a.corresponding for a in authors] == [False, False, False]
+
+
+def test_a_singular_section_header_over_one_authors_address_still_flags_that_author():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest_wide_with_header(
+        [_BYLINE, ("unknown", ["Hui-Kai Tan: hk.tan@example.org"])],
+        authors,
+        header="Corresponding author",
+    )
+    assert [a.corresponding for a in authors] == [False, True, False]
+
+
+def test_a_plural_section_header_over_several_authors_addresses_flags_them_all():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest_wide_with_header(
+        [
+            _BYLINE,
+            ("unknown", ["Alice Lee: alee@example.org", "Hui-Kai Tan: hk.tan@example.org"]),
+        ],
+        authors,
+        header="Corresponding authors",
+    )
+    assert [a.corresponding for a in authors] == [True, True, False]
+
+
+def test_a_marker_in_the_addresss_own_sentence_flags_only_that_author_in_a_contact_block():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest_wide(
+        [
+            _BYLINE,
+            (
+                "unknown",
+                [
+                    "Alice Lee: alee@example.org",
+                    "Hui-Kai Tan (corresponding author): hk.tan@example.org",
+                    "Omar Reyes: oreyes@example.org",
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, True, False]
+
+
+def test_a_plural_marker_in_the_window_flags_every_address_in_a_contact_block():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest_wide(
+        [
+            _BYLINE,
+            (
+                "unknown",
+                [
+                    "Corresponding authors:",
+                    "Alice Lee: alee@example.org",
+                    "Omar Reyes: oreyes@example.org",
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [True, False, True]
+
+
+def test_the_front_matter_flags_its_own_addresses_as_it_always_did():
+    """The contact-block rule is for added sentences only."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    document = _contents_by_section(
+        [
+            (
+                "title",
+                [
+                    "Alice Lee, Hui-Kai Tan, Omar Reyes",
+                    "Correspondence: Hui-Kai Tan, hk.tan@example.org",
+                    "Omar Reyes, oreyes@example.org",
+                ],
+            )
+        ]
+    )
+    AuthorEmailHarvester(document, document=document).harvest(authors)
+    assert authors[1].corresponding is True

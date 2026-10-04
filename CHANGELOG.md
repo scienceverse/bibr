@@ -20,7 +20,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   front-matter block (sidebars, footers, byline notes). An address from those added sentences
   is assigned only when an author's surname sits within 45 characters before it, or when its
   local part spells exactly one author's name; a tie between authors sharing a surname is left
-  open. The front-matter sentences are harvested exactly as before.
+  open. When several authors each print their own address there (a contact line or footnote per
+  author), an author is flagged corresponding only by a marker in that address's own sentence or
+  a plural one, not by a singular header or a footnote beside the name. The front-matter
+  sentences are harvested exactly as before.
 
 ## [0.6.0] - 2026-09-30
 
