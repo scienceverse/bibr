@@ -1447,3 +1447,460 @@ def test_a_pnas_supplement_link_names_the_paper_without_its_supplement_path():
     assert {c.normalized for c in candidates} == {"10.1073/pnas.2501823122"}
     assert selection.selected is not None
     assert selection.selected.normalized == "10.1073/pnas.2501823122"
+
+
+def _paragraph_contents(
+    rows: list[tuple[int, CanonicalSection, int, str, int]],
+    *,
+    footers: list[str] | None = None,
+) -> PaperContents:
+    """Rows of (section_id, section type, paragraph_id, text, page), in text order."""
+
+    sections = [PaperSection(0, "Root", 0, None, CanonicalSection.TITLE)]
+    for section_id, section_type, *_ in rows:
+        if all(section.section_id != section_id for section in sections):
+            sections.append(PaperSection(section_id, section_type.value, 1, 0, section_type))
+    sentences = [
+        PaperSentence(
+            text_id=index,
+            text=text,
+            section_id=section_id,
+            paragraph_id=paragraph_id,
+            page_number=page,
+        )
+        for index, (section_id, _type, paragraph_id, text, page) in enumerate(rows, start=1)
+    ]
+    return PaperContents(
+        sentences=sentences,
+        sections=sections,
+        tables=[],
+        links=[],
+        sections_text={},
+        detected_headers=[],
+        detected_footers=list(footers or []),
+    )
+
+
+def _f1000_version_two(cue: str) -> PaperContents:
+    """An F1000-family version 2: both version DOIs on page 1, the citation block on page 3."""
+
+    return _paragraph_contents(
+        [
+            (
+                1,
+                CanonicalSection.TITLE,
+                1,
+                "First published: 08 Sep 2026, 6:335 https://doi.org/10.12345/openres.2386.1 v2",
+                1,
+            ),
+            (
+                1,
+                CanonicalSection.TITLE,
+                1,
+                "Latest published: 28 Sep 2026, 6:335 https://doi.org/10.12345/openres.2386.2",
+                1,
+            ),
+            (2, CanonicalSection.KEYWORDS, 2, f"{cue}: Doe J.", 3),
+            (
+                2,
+                CanonicalSection.KEYWORDS,
+                2,
+                "A study of things [version 2; peer review: 1 approved]",
+                3,
+            ),
+            (
+                2,
+                CanonicalSection.KEYWORDS,
+                2,
+                "Open Research 2026, 6:335 https://doi.org/10.12345/openres.2386.2",
+                3,
+            ),
+            (
+                2,
+                CanonicalSection.KEYWORDS,
+                2,
+                "First published: 08 Sep 2026, 6:335 https://doi.org/10.12345/openres.2386.1",
+                3,
+            ),
+        ]
+    )
+
+
+def test_the_first_doi_after_a_how_to_cite_cue_names_the_paper():
+    """Both version DOIs tie on page 1; the citation block names version 2 sentences later."""
+
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    candidates = collect_doi_candidates(_f1000_version_two("How to cite this article"))
+    selection = select_doi_candidates(candidates)
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.12345/openres.2386.2"
+    assert (selection.selected.page, selection.selected.marker_kind) == (3, "self_citation")
+    assert selection.selected.selection_tier == 3
+    assert selection.issues == ()
+    # The block closes at its first DOI: the "First published" one after it stays tier 2.
+    assert [c.selection_tier for c in candidates if c.normalized.endswith(".1")] == [2, 2]
+
+
+def test_a_referee_report_citation_cue_promotes_nothing():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    selection = select_doi_candidates(
+        collect_doi_candidates(_f1000_version_two("How to cite this report"))
+    )
+
+    assert selection.selected is None
+    assert [issue.code for issue in selection.issues] == ["VAL_DOI_AMBIGUOUS"]
+    assert all(c.marker_kind != "self_citation" for c in selection.candidates)
+
+
+def test_a_citation_cue_in_another_paragraph_promotes_nothing():
+    from bibr.extract.doi_identity import collect_doi_candidates
+
+    contents = _paragraph_contents(
+        [
+            (1, CanonicalSection.TITLE, 1, "How to cite this article: Doe J. A study.", 1),
+            (1, CanonicalSection.TITLE, 2, "https://doi.org/10.1234/other.5", 1),
+        ]
+    )
+
+    (candidate,) = collect_doi_candidates(contents)
+
+    assert (candidate.marker_kind, candidate.selection_tier) == ("doi_url", 2)
+
+
+def test_a_citation_line_names_the_paper_over_a_misread_footer_twin():
+    """ "Citation: Journal (2019) …. https://doi.org/…" with OCR misreading the footer DOI."""
+
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _paragraph_contents(
+        [
+            (
+                1,
+                CanonicalSection.UNKNOWN,
+                1,
+                "Citation: World Neurosurg. (2019) 129:467-486. "
+                "https://doi.org/10.1016/j.wneu.2019.01.166",
+                1,
+            ),
+        ],
+        footers=["https://doi.org/10.1016/4.wneu.2019.01.166"] * 3,
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1016/j.wneu.2019.01.166"
+    assert selection.selected.marker_kind == "self_citation"
+
+
+def test_a_cited_work_after_a_citation_cue_is_not_promoted():
+    from bibr.extract.doi_identity import collect_doi_candidates
+
+    contents = _paragraph_contents(
+        [
+            (1, CanonicalSection.METHODS, 1, "Please cite this article as follows.", 5),
+            (
+                1,
+                CanonicalSection.METHODS,
+                1,
+                "Smith, J. (2019). A title. Journal, 1, 1-2. doi: 10.1037/xge0000123",
+                5,
+            ),
+        ]
+    )
+
+    (candidate,) = collect_doi_candidates(contents)
+
+    assert candidate.semantic_context == "cited_work"
+    assert candidate.selection_tier == 1
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        pytest.param(
+            [
+                (
+                    2,
+                    CanonicalSection.METHODS,
+                    3,
+                    "Models were fitted with brms (please cite as: Burkner, P. (2017). brms: "
+                    "An R package. Journal of Statistical Software, 80(1), 1-28. "
+                    "https://doi.org/10.18637/jss.v080.i01).",
+                    5,
+                )
+            ],
+            id="software-please-cite-as",
+        ),
+        pytest.param(
+            [
+                (
+                    2,
+                    CanonicalSection.METHODS,
+                    3,
+                    "If you use the task, please cite this paper as follows.",
+                    6,
+                ),
+                (
+                    2,
+                    CanonicalSection.METHODS,
+                    3,
+                    "Jones A. The task. Behav Res Methods. 2018;50:1-9. "
+                    "https://doi.org/10.3758/s13428-017-0001-1",
+                    6,
+                ),
+            ],
+            id="task-please-cite-this-paper",
+        ),
+        pytest.param(
+            [
+                (
+                    3,
+                    CanonicalSection.UNKNOWN,
+                    9,
+                    "Citation: Smith J. The companion protocol. Trials. 2018;19:1. "
+                    "https://doi.org/10.1186/s13063-018-0001-1",
+                    12,
+                )
+            ],
+            id="back-matter-citation-line",
+        ),
+    ],
+)
+def test_a_weak_citation_cue_outside_the_front_matter_promotes_nothing(rows):
+    """ "Please cite … as" or "Citation:" past page 2 names software or a companion paper."""
+
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    own = "10.1234/own.2020.1"
+    contents = _paragraph_contents(
+        [(1, CanonicalSection.TITLE, 1, f"https://doi.org/{own}", 1), *rows]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == own
+    assert all(c.marker_kind != "self_citation" for c in selection.candidates)
+
+
+def test_a_how_to_cite_block_on_the_last_page_still_names_the_paper():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _paragraph_contents(
+        [
+            (1, CanonicalSection.TITLE, 1, "https://doi.org/10.1234/linked.7", 1),
+            (1, CanonicalSection.TITLE, 2, "https://doi.org/10.1234/own.8", 1),
+            (
+                5,
+                CanonicalSection.UNKNOWN,
+                9,
+                "How to cite this article: Doe, J. (2026). A study. Journal, 1, 1-9. "
+                "https://doi.org/10.1234/own.8",
+                22,
+            ),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert (selection.selected.normalized, selection.selected.page) == ("10.1234/own.8", 22)
+    assert selection.selected.marker_kind == "self_citation"
+
+
+@pytest.mark.parametrize(
+    ("own_line", "linked_line", "selected"),
+    [
+        pytest.param(
+            "DOI: 10.1234/own.2020.1",
+            "This is a commentary on https://doi.org/10.1234/target.2019.9",
+            "10.1234/own.2020.1",
+            id="labelled-own-doi",
+        ),
+        pytest.param(
+            "https://doi.org/10.1234/own.2020.1",
+            "Commentary on: https://doi.org/10.1234/target.2019.9",
+            None,
+            id="own-doi-as-url",
+        ),
+        pytest.param(
+            "https://doi.org/10.1234/own.2020.1",
+            "See Comment page 12 https://doi.org/10.1234/target.2019.9",
+            None,
+            id="see-comment",
+        ),
+        pytest.param(
+            "https://doi.org/10.1234/own.2020.1",
+            "Linked: https://doi.org/10.1234/target.2019.9",
+            None,
+            id="linked-label",
+        ),
+    ],
+)
+def test_a_citation_block_ends_at_a_sentence_naming_another_work(own_line, linked_line, selected):
+    """A reply's citation block prints no DOI; the next sentence names the target's."""
+
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _paragraph_contents(
+        [
+            (1, CanonicalSection.TITLE, 1, own_line, 1),
+            (
+                1,
+                CanonicalSection.TITLE,
+                2,
+                "How to cite this article: Doe J. A reply. J Things 2020;1:1-2.",
+                1,
+            ),
+            (1, CanonicalSection.TITLE, 2, linked_line, 1),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert (selection.selected.normalized if selection.selected else None) == selected
+    assert all(c.marker_kind != "self_citation" for c in selection.candidates)
+
+
+def test_a_related_inside_the_cited_title_does_not_end_the_citation_block():
+    from bibr.extract.doi_identity import collect_doi_candidates
+
+    rows = [
+        (1, CanonicalSection.UNKNOWN, 1, "How to cite this article: Doe J.", 1),
+        (1, CanonicalSection.UNKNOWN, 1, "Health-related quality of life in adults.", 1),
+        (1, CanonicalSection.UNKNOWN, 1, "J Things 2020 https://doi.org/10.1234/x.9", 1),
+    ]
+
+    (candidate,) = collect_doi_candidates(_paragraph_contents(rows))
+
+    assert candidate.marker_kind == "self_citation"
+
+
+@pytest.mark.parametrize(("title_sentences", "promoted"), [(2, True), (3, False)])
+def test_a_citation_block_runs_three_sentences_past_its_cue(title_sentences, promoted):
+    from bibr.extract.doi_identity import collect_doi_candidates
+
+    rows = [(1, CanonicalSection.UNKNOWN, 1, "Citation: Doe JH. 2018.", 1)]
+    rows += [
+        (1, CanonicalSection.UNKNOWN, 1, f"Part {index} of a title with full stops.", 1)
+        for index in range(title_sentences)
+    ]
+    rows.append((1, CanonicalSection.UNKNOWN, 1, "PeerJ 6:e1234 https://doi.org/10.1234/x.9", 1))
+
+    (candidate,) = collect_doi_candidates(_paragraph_contents(rows))
+
+    assert (candidate.marker_kind == "self_citation") is promoted
+
+
+def test_a_doi_both_the_body_and_the_running_footer_print_breaks_the_tie():
+    """A first page printing the article DOI beside a linked Comment's DOI."""
+
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    own = "10.1016/S0140-6736(26)90001-1"
+    contents = _paragraph_contents(
+        [
+            (
+                1,
+                CanonicalSection.INTRODUCTION,
+                1,
+                f"Published Online September 25, 2026 https://doi.org/{own}",
+                1,
+            ),
+            (1, CanonicalSection.INTRODUCTION, 2, "See Online/Comment", 1),
+            (
+                1,
+                CanonicalSection.INTRODUCTION,
+                2,
+                "https://doi.org/10.1016/S0140-6736(26)90002-3",
+                1,
+            ),
+        ],
+        footers=[f"www.example.com Vol 408 October 2026 https://doi.org/{own}"] * 4,
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == own.casefold()
+    assert [issue.code for issue in selection.issues] == ["VAL_DOI_AMBIGUOUS"]
+    assert selection.issues[0].message.endswith(
+        f"resolved by source provenance to {own.casefold()}"
+    )
+
+
+def test_a_running_footer_misreading_the_doi_still_corroborates_it():
+    """The footer repeats the DOI with "S0140" read as "50140"; one page prints it right."""
+
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    own = "10.1016/S0140-6736(26)90001-1"
+    contents = _paragraph_contents(
+        [
+            (1, CanonicalSection.INTRODUCTION, 1, f"Published Online https://doi.org/{own}", 1),
+            (
+                1,
+                CanonicalSection.INTRODUCTION,
+                2,
+                "See Comment https://doi.org/10.1016/S0140-6736(26)90002-3",
+                1,
+            ),
+        ],
+        footers=["www.example.com Vol 408 https://doi.org/10.1016/50140-6736(26)90001-1"] * 4
+        + [f"www.example.com Vol 408 https://doi.org/{own}"],
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == own.casefold()
+
+
+def test_a_footer_printed_once_does_not_corroborate_a_linked_doi():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _paragraph_contents(
+        [
+            (
+                1,
+                CanonicalSection.INTRODUCTION,
+                1,
+                "Published Online https://doi.org/10.1234/own.1",
+                1,
+            ),
+            (
+                1,
+                CanonicalSection.INTRODUCTION,
+                2,
+                "See Comment https://doi.org/10.1234/linked.2",
+                1,
+            ),
+        ],
+        footers=["See Comment page 12 https://doi.org/10.1234/linked.2"],
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is None
+    assert [issue.code for issue in selection.issues] == ["VAL_DOI_AMBIGUOUS"]
+
+
+def test_a_tie_both_dois_of_which_are_corroborated_still_abstains():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _paragraph_contents(
+        [
+            (1, CanonicalSection.TITLE, 1, "https://doi.org/10.1234/one", 1),
+            (1, CanonicalSection.TITLE, 2, "https://doi.org/10.1234/two", 1),
+        ],
+        footers=["https://doi.org/10.1234/one", "https://doi.org/10.1234/two"] * 2,
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is None
+    assert [issue.code for issue in selection.issues] == ["VAL_DOI_AMBIGUOUS"]

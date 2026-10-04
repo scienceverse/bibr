@@ -35,9 +35,14 @@ if TYPE_CHECKING:
     from bibr.input.pdf_outline import OutlineItem
 
 from bibr.input.consolidate_text import fix_ocr_artifacts
-from bibr.ocr.ref_patterns import alnum_key, alnum_text_covered
+from bibr.ocr.ref_patterns import (
+    alnum_key,
+    alnum_text_covered,
+    covered_without_edge_fragments,
+)
 from bibr.ocr.types import OcrRegionResult
 from bibr.paper_contents import (
+    CANONICAL_SECTION_ALIASES,
     FRONT_MATTER_MASTHEAD_RE,
     CanonicalSection,
     PaperContents,
@@ -52,6 +57,7 @@ from bibr.paper_contents import (
 )
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.structure.assembler import DocumentAssembler
+from bibr.structure.caption_continuations import find_caption_continuations
 from bibr.structure.carry_over_manager import CarryOverState
 from bibr.structure.float_labels import LABEL, SUPPLEMENT_WORD
 from bibr.structure.floats_normalize import (
@@ -138,6 +144,46 @@ _RUNNING_HEADER_MAX_LEN = 200
 _RUNNING_HEADER_TOP_Y = 100.0
 _RUNNING_HEADER_BOTTOM_Y = 900.0
 
+# A row that opens an abstract or a keyword list, in any language the section
+# aliases know: the bare heading ("RÉSUMÉ") or its lead-in ("Key words: …",
+# "キーワード：…"). CJK headings are often letter-spaced ("摘 要"), so CJK
+# aliases are matched against the row with its spaces removed.
+_RECORD_LEAD_IN_ALIASES = {
+    *CANONICAL_SECTION_ALIASES[CanonicalSection.ABSTRACT],
+    *CANONICAL_SECTION_ALIASES[CanonicalSection.KEYWORDS],
+    "palabras claves",
+    "schlüsselwörter",
+}
+_CJK_CHAR_RE = re.compile(r"[\u1100-\u11ff\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
+_RECORD_LEAD_IN_END = r"\s*(?:[:：.．—–-]|$)"
+
+
+def _lead_in_re(aliases: set[str]) -> re.Pattern[str]:
+    alternatives = "|".join(re.escape(alias) for alias in sorted(aliases, key=len, reverse=True))
+    return re.compile(rf"(?:{alternatives}){_RECORD_LEAD_IN_END}", re.IGNORECASE)
+
+
+_RECORD_LEAD_IN_RE = _lead_in_re(
+    {alias for alias in _RECORD_LEAD_IN_ALIASES if not _CJK_CHAR_RE.search(alias)}
+)
+_CJK_RECORD_LEAD_IN_RE = _lead_in_re(
+    {alias for alias in _RECORD_LEAD_IN_ALIASES if _CJK_CHAR_RE.search(alias)}
+)
+
+
+def _opens_record_lead_in(row: str) -> bool:
+    """Whether a row is an abstract or keywords heading or lead-in."""
+    return bool(
+        _RECORD_LEAD_IN_RE.match(row) or _CJK_RECORD_LEAD_IN_RE.match(re.sub(r"\s+", "", row))
+    )
+
+
+# A byline's contact line: an e-mail address or an ORCID.
+_RECORD_CONTACT_RE = re.compile(
+    r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+|\borcid\b|\b\d{4}-\d{4}-\d{4}-\d{3}[\dX]\b",
+    re.IGNORECASE,
+)
+
 
 def _bbox_containment_fraction(inner: list | tuple | None, outer: list | tuple | None) -> float:
     """Fraction of *inner* covered by *outer*; zero for malformed boxes."""
@@ -200,7 +246,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         re.IGNORECASE | re.DOTALL,
     )
     _FIGURE_CAPTION_RE = re.compile(
-        rf"^({SUPPLEMENT_WORD}?(?:Figure|Fig\.?)\s+{LABEL}\s*(?:[:–\-—|]|\.(?!\d)).*)$",
+        rf"^({SUPPLEMENT_WORD}?(?:Figure\s+|Fig\.\s*|Fig\s+){LABEL}\s*(?:[:–\-—|]|\.(?!\d)).*)$",
         re.IGNORECASE | re.DOTALL,
     )
 
@@ -364,6 +410,12 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         # entries inside them can carry the same text. Whichever side the other
         # already covers is shadowed (see ``_mark_reference_envelopes``).
         self._shadowed_reference_regions: set[tuple[int, int]] = set()
+        # Caption regions continued by other regions (a second column, a title
+        # under a bare label), and those continuation regions, which dispatch
+        # skips: each caption is parsed as one region (see
+        # ``_mark_caption_continuations``).
+        self._caption_continuation_parts: dict[tuple[int, int], list[tuple[int, int]]] = {}
+        self._caption_continuation_regions: set[tuple[int, int]] = set()
 
         # PDF outline (bookmarks) — the document's own declared heading
         # hierarchy. When present AND the feature is enabled, matched headings
@@ -433,6 +485,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         # ``paragraph_title``.
         self._mark_running_headers()
         self._mark_reference_envelopes()
+        self._mark_caption_continuations()
 
         for page_idx, page_regions in enumerate(self.json_result):
             page_number = page_idx + 1  # 1-based
@@ -733,6 +786,18 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         _, y1, _, y2 = bbox
         return y1 <= _RUNNING_HEADER_TOP_Y or y2 >= _RUNNING_HEADER_BOTTOM_Y
 
+    def _is_inside_margin_band(self, page_idx: int, region_idx: int) -> bool:
+        """True if the whole region lies in a page's top or bottom margin band.
+
+        Stricter than :meth:`_is_in_margin_band`: a paragraph that starts
+        near the top of a page touches the band, a banner sits inside it.
+        """
+        bbox = bbox_to_tuple(self.json_result[page_idx][region_idx].bbox_2d)
+        if bbox is None:
+            return False
+        _, y1, _, y2 = bbox
+        return y2 <= _RUNNING_HEADER_TOP_Y or y1 >= _RUNNING_HEADER_BOTTOM_Y
+
     def _mark_running_headers(self) -> None:
         """Detect heading regions that are actually per-page running headers.
 
@@ -744,10 +809,13 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
            headers (Methods, References, Discussion) appear exactly once.
 
         2. **Extra ``doc_title`` regions** — academic papers have exactly
-           one ``doc_title`` (the paper title, on page 1). Any subsequent
-           ``doc_title`` region is the layout model misclassifying a
-           running-header (page-2+ author line, banner, journal name).
-           Demoting these prevents later author-line regions from splitting the body.
+           one ``doc_title`` (the paper title, on page 1). A ``doc_title`` on
+           a later page is usually the layout model misclassifying a
+           running-header (page-2+ author line, banner, journal name), and
+           is demoted when it has furniture's geometry or text (see
+           :meth:`_is_later_doc_title_furniture`) or heads a record of its
+           own (see :meth:`_heads_own_record`); a mid-page one is otherwise a
+           sidebar heading and stays.
         """
         # Heuristic 1: multi-page repeats (any heading label).
         seen: dict[str, list[tuple[int, int]]] = {}
@@ -756,7 +824,12 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         # banner) bypasses the heading-only heuristics and leaks into whatever
         # section is active at the page break — corrupting the References
         # block. Page furniture is short; the length cap keeps a genuine
-        # paragraph that happens to repeat from being demoted.
+        # paragraph that happens to repeat from being demoted. A longer
+        # region counts only when it lies wholly inside the margin band: a
+        # preprint banner (the medRxiv rights, licence and DOI lines run to
+        # about 340 chars) that the layout model labels ``text`` on some
+        # pages. A manuscript that prints its body twice repeats long
+        # paragraphs that start or end in the band.
         seen_body: dict[str, list[tuple[int, int]]] = {}
         # Heuristic 2: track doc_title occurrences so all but the first
         # can be demoted regardless of repetition. Content is kept so
@@ -775,7 +848,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                     continue
                 if effective in _BODY_TEXT_LABELS:
                     normalized = re.sub(r"\s+", " ", content).lower().strip()
-                    if normalized and len(normalized) <= _RUNNING_HEADER_MAX_LEN:
+                    if normalized and (
+                        len(normalized) <= _RUNNING_HEADER_MAX_LEN
+                        or self._is_inside_margin_band(page_idx, region_idx)
+                    ):
                         seen_body.setdefault(normalized, []).append((page_idx, region_idx))
                     continue
                 if effective not in ("doc_title", "paragraph_title"):
@@ -821,8 +897,9 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 )
         repeated_body = {
             occurrence
-            for occurrences in seen_body.values()
-            if len({pi for pi, _ in occurrences}) >= 2
+            for normalized, occurrences in seen_body.items()
+            if len(normalized) <= _RUNNING_HEADER_MAX_LEN
+            and len({pi for pi, _ in occurrences}) >= 2
             for occurrence in occurrences
         }
 
@@ -874,7 +951,15 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             # to its first region.
             anchor_page = doc_title_occurrences[anchor][0]
             self._running_header_regions.update(
-                (pi, ri) for pi, ri, _ in doc_title_occurrences[anchor + 1 :] if pi != anchor_page
+                (pi, ri)
+                for pi, ri, text in doc_title_occurrences[anchor + 1 :]
+                if pi != anchor_page
+                and (
+                    self._is_later_doc_title_furniture(
+                        pi, ri, text, anchor_page, doc_title_occurrences, seen
+                    )
+                    or self._heads_own_record(pi, ri)
+                )
             )
 
         if self._running_header_regions:
@@ -882,6 +967,73 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 "Demoted %d heading regions detected as running headers",
                 len(self._running_header_regions),
             )
+
+    def _is_later_doc_title_furniture(
+        self,
+        page_idx: int,
+        region_idx: int,
+        text: str,
+        anchor_page: int,
+        doc_title_occurrences: list[tuple[int, int, str]],
+        seen: dict[str, list[tuple[int, int]]],
+    ) -> bool:
+        """Whether a ``doc_title`` on a page after the title's is page furniture.
+
+        A running head, a journal banner or a copyright line sits in the
+        margin band, repeats on other pages, or is the title again (the
+        article page behind a cover sheet). A ``doc_title`` in the middle of
+        a later page that is none of these is a sidebar or box heading ("When
+        No Default Is Your Best Option") and stays a heading; demoting it
+        dropped the heading and merged the sidebar into the section around it.
+        """
+        if self._is_in_margin_band(page_idx, region_idx) or self._is_copyright_notice(text):
+            return True
+        if len({pi for pi, _ in seen.get(text, ())}) >= 2:
+            return True
+        key = alnum_key(text)
+        title_key = alnum_key(
+            " ".join(t for pi, _, t in doc_title_occurrences if pi == anchor_page)
+        )
+        return bool(key and title_key) and (
+            alnum_text_covered(key, title_key) or alnum_text_covered(title_key, key)
+        )
+
+    def _heads_own_record(self, page_idx: int, region_idx: int) -> bool:
+        """Whether a later-page ``doc_title`` heads an article record of its own.
+
+        The article's title in a second language (over its translated
+        abstract and keywords, or over the byline again) and the article's
+        title page behind a cover sheet are followed on their page by record
+        anatomy: an abstract region, an abstract or keywords heading or
+        lead-in, or a byline's e-mail or ORCID. A sidebar heading is followed
+        by the sidebar's prose. Kept as a heading, such a title opens a second
+        title section, and front matter then cannot choose between the two
+        records, so it stays demoted as before. The rows read are the body
+        rows after it on its page, up to the next ``doc_title``. The
+        ``doc_title`` rows directly after it continue the same title (a title
+        split across regions), so the scan reads past them.
+        """
+        in_title = True
+        for row_idx in range(region_idx + 1, len(self.json_result[page_idx])):
+            region = self.json_result[page_idx][row_idx]
+            label = region.native_label if region.native_label in LABEL_TREATMENT else region.label
+            if label == "doc_title":
+                if in_title:
+                    continue
+                return False
+            in_title = False
+            if label == "abstract":
+                return True
+            if (page_idx, row_idx) in self._running_header_regions or (
+                label != "paragraph_title" and LABEL_TREATMENT.get(label) != "content"
+            ):
+                continue
+            row = self._clean_region_content.get((page_idx, row_idx), "")
+            row = strip_markdown_emphasis(re.sub(r"^#{1,6}\s*", "", row.strip()))
+            row = " ".join(row.split())
+            if _opens_record_lead_in(row) or _RECORD_CONTACT_RE.search(row):
+                return True
+        return False
 
     def _mark_reference_envelopes(self) -> None:
         """Shadow whichever of an aggregate reference box and its entries is redundant.
@@ -897,7 +1049,8 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         its place in reading order, where it keys the References section even
         when the OCR stage blanked its text, and a separate short entry
         elsewhere on the page ("PubMed") is never hidden because the aggregate
-        box's text happens to contain it.
+        box's text happens to contain it. Short lines of a watermark stamp at
+        the ends of an entry box do not keep it (``covered_without_edge_fragments``).
         """
         for page_idx, regions in enumerate(self.json_result):
             children = [
@@ -926,6 +1079,8 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                     (page_idx, child_idx)
                     for child_idx, child in contained
                     if alnum_text_covered(alnum_key(child.content or ""), envelope_text)
+                    # or once the watermark words around the entry are set aside
+                    or covered_without_edge_fragments(child.content or "", envelope_text)
                 )
 
         if self._shadowed_reference_regions:
@@ -933,6 +1088,74 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 "Shadowing %d duplicate reference region(s)",
                 len(self._shadowed_reference_regions),
             )
+
+    def _mark_caption_continuations(self) -> None:
+        """Find regions that continue an explicit caption (a split caption).
+
+        The detector lives in :mod:`bibr.structure.caption_continuations`.
+        Dispatch then parses each caption with its continuations' text and
+        box, and skips the continuation regions, so a caption's second column
+        is neither replayed into the body, made a footnote, nor joined to the
+        paragraph before the figure. Region summaries keep every region.
+        """
+        self._caption_continuation_parts = find_caption_continuations(
+            self.json_result,
+            lambda key: self._clean_region_content.get(key, ""),
+            lambda region: (
+                region.native_label if region.native_label in LABEL_TREATMENT else region.label
+            ),
+            self._running_header_regions | self._shadowed_reference_regions,
+            lambda text: bool(
+                self._TABLE_CAPTION_RE.match(text) or self._FIGURE_CAPTION_RE.match(text)
+            ),
+        )
+        self._caption_continuation_regions = {
+            key for keys in self._caption_continuation_parts.values() for key in keys
+        }
+
+    def _is_footnote_caption(self, page_idx: int, text: str) -> bool:
+        """Is a ``vision_footnote`` region a full caption of a float on its page?
+
+        The layout model reads some captions as notes ("Table 1: Characteristics
+        of …" under its table, a rotated table's caption beside it). A note that
+        opens with a label, a separator and a title is the caption when its
+        page has a float of that kind; ordinary notes ("Data are n (%)") never
+        open with a label.
+        """
+        if self._TABLE_CAPTION_RE.match(text):
+            kinds = {"table"}
+        elif self._FIGURE_CAPTION_RE.match(text):
+            kinds = {"image", "chart"}
+        else:
+            return False
+        return any(
+            (region.native_label if region.native_label in LABEL_TREATMENT else region.label)
+            in kinds
+            for region in self.json_result[page_idx]
+        )
+
+    def _joined_caption_region(
+        self, key: tuple[int, int], content: str, bbox: list | None
+    ) -> tuple[str, list | None]:
+        """A caption region's text and box with its continuations appended."""
+        parts = self._caption_continuation_parts.get(key)
+        if not parts:
+            return content, bbox
+        page_idx, region_idx = key
+        regions = [self.json_result[page_idx][region_idx]]
+        regions.extend(self.json_result[part_page][part_idx] for part_page, part_idx in parts)
+        # Joined as lines, so a word wrapped across the columns is mended like
+        # any line wrap.
+        joined = fix_ocr_artifacts("\n".join(region.content.strip() for region in regions))
+        boxes = [box for region in regions if (box := bbox_to_tuple(region.bbox_2d)) is not None]
+        if boxes:
+            bbox = [
+                min(box[0] for box in boxes),
+                min(box[1] for box in boxes),
+                max(box[2] for box in boxes),
+                max(box[3] for box in boxes),
+            ]
+        return joined, bbox
 
     def _process_page(
         self, regions: list[OcrRegionResult], page_number: int, page_idx: int = -1
@@ -1000,9 +1223,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             self.region_summaries.append(region_summary)
             self._source_region_index = len(self.region_summaries) - 1
 
-            if key in self._shadowed_reference_regions:
+            if key in self._shadowed_reference_regions or key in self._caption_continuation_regions:
                 region_summary.section_id = self._current_section_id or None
                 continue
+            content, bbox = self._joined_caption_region(key, content, bbox)
 
             # Prefer native_label for treatment dispatch — glmocr's _map_label()
             # collapses specific labels (e.g. "abstract" → "text"); native_label
@@ -1017,6 +1241,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 # "Table S1") is safe to promote; ordinary statistical notes
                 # remain footnotes.
                 treatment = "table_caption"
+            elif effective_label == "vision_footnote" and self._is_footnote_caption(
+                page_idx, content.strip()
+            ):
+                treatment = "caption"
             dispatch_treatment = (
                 "structural"
                 if (page_idx, region_idx) in self._running_header_regions
