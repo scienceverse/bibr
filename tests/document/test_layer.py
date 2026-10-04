@@ -95,6 +95,21 @@ def test_inspection_is_byte_identical_with_the_layer_on(name, reject):
     assert on == off
 
 
+def test_pages_the_inspection_does_not_read_are_harvested_alike():
+    # With neither the native fill nor reference geometry, the inspection opens
+    # no text page; the layer reads each page through the same furniture strip.
+    pdf_bytes = _pdfs.synthetic_paper()
+    off = _inspect(pdf_bytes, layer=False, fill_native_text=False, include_ref_geometry=False)
+    on = _inspect(pdf_bytes, layer=True, fill_native_text=False, include_ref_geometry=False)
+    rebuilt = build_document_layer(pdf_bytes, range(_page_count(pdf_bytes)), budget=_BUDGET)
+
+    assert json.dumps(inspection_to_dict(on)) == json.dumps(inspection_to_dict(off))
+    assert on == off
+    assert on.document.component_errors == {}
+    assert serialize.digest(on.document) == serialize.digest(rebuilt)
+    assert [page.text_source for page in on.document.pages] == _pdfs.SYNTHETIC_TEXT_SOURCES
+
+
 def test_a_harvest_failure_stays_in_the_layer(monkeypatch):
     pdf_bytes = _pdfs.synthetic_paper()
     off = _inspect(pdf_bytes, layer=False)
