@@ -16,6 +16,7 @@ before reading an empty result as a page without text.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
@@ -28,7 +29,9 @@ from bibr.document.model import (
     Block,
     Box,
     DocumentLayer,
+    Link,
     Page,
+    StructElem,
     as_box,
 )
 
@@ -287,3 +290,62 @@ def block_at(
         if y - below <= b.bbox_pdf[3] <= y + above and reaches(b.bbox_pdf, above)
     ]
     return min(under, key=lambda b: (-b.bbox_pdf[3], b.bbox_pdf[0])) if under else None
+
+
+class StructIndex:
+    """A layer's structure elements by id and by the marked content they hold.
+
+    An mcid names marked content on one page only, so an element is found by
+    ``(page, mcid)``: the mcid a text object carries in ``PageColumns.obj_mcid``
+    with the object's page.
+    """
+
+    def __init__(self, layer: DocumentLayer) -> None:
+        self.layer = layer
+        self.by_id = {elem.elem_id: elem for elem in layer.struct}
+        self.by_mcr: dict[tuple[int, int], StructElem] = {}
+        self.by_path: dict[tuple[int, ...], list[StructElem]] = {}
+        for elem in layer.struct:
+            self.by_path.setdefault(elem.path, []).append(elem)
+            for mcr in elem.mcrs:
+                self.by_mcr.setdefault(mcr, elem)
+
+    def ancestors(self, elem: StructElem) -> Iterator[StructElem]:
+        """The elements above *elem* on its page, nearest first."""
+        while elem.parent is not None:
+            elem = self.by_id[elem.parent]
+            yield elem
+
+    def copies(self, elem: StructElem) -> list[StructElem]:
+        """*elem* as each page that holds content of it reads it, in page order (itself included)."""
+        return self.by_path[elem.path]
+
+    def span_element(self, page: Page, span: int) -> StructElem | None:
+        """The element that holds the marked content the span's text is in.
+
+        None for text in no marked content and for text inside an artifact.
+        """
+        cols = page.cols
+        if cols is None:
+            return None
+        obj = int(cols.span_obj[span])
+        if obj < 0 or cols.obj_artifact[obj] or cols.obj_mcid[obj] < 0:
+            return None
+        return self.by_mcr.get((page.index, int(cols.obj_mcid[obj])))
+
+    def link_element(self, link: Link) -> StructElem | None:
+        """The Link element that wraps the text a link annotation covers, or None.
+
+        pdfium names no annotation for an element's object reference, so the
+        pair is found through the text: the first covered span that sits in a
+        Link element, or under one.
+        """
+        page = self.layer.page(link.page)
+        if page is None:
+            return None
+        for span_id in link.source_span_ids:
+            elem = self.span_element(page, int(span_id.rsplit(".sp", 1)[1]))
+            for candidate in () if elem is None else (elem, *self.ancestors(elem)):
+                if candidate.role == "Link":
+                    return candidate
+        return None

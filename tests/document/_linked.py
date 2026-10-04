@@ -6,6 +6,11 @@ the catalog's old-style /Dests, and the pages' text as the targets the
 destinations point at: a figure and a table caption, a reference list, a
 numbered equation and a section heading. The outline, the link annotations and
 the structure tree are added by the builders below as the layer reads them.
+
+The structure tree tags every marked-content sequence of the pages: a custom
+heading type that /RoleMap turns into H1, a paragraph that crosses a page
+break, an element with alternate and actual text and a language, a figure
+whose marked content draws nothing, a table, and a last page with no tags.
 """
 
 from __future__ import annotations
@@ -69,22 +74,30 @@ class Placed:
         return (left, top, right, top, left, bottom, right, bottom)
 
 
-def line(
+def line_chunks(
     parts: list[str], x: float, y: float, linked=(), size: float = BODY
-) -> tuple[bytes, list[Placed]]:
-    """*parts* drawn one text object each, side by side from x; the content and each part's place.
+) -> tuple[list[bytes], list[Placed]]:
+    """*parts* drawn one text object each, side by side from x; each part's content and place.
 
     The parts at the indexes in *linked* are drawn blue, as links are, which
     also makes each one a span of its own.
     """
-    content = b""
+    chunks = []
     placed = []
     for index, part in enumerate(parts):
         run = Placed(part, x, y, size)
-        content += text(part, x, y, size=size, rgb=BLUE if index in linked else None)
+        chunks.append(text(part, x, y, size=size, rgb=BLUE if index in linked else None))
         placed.append(run)
         x = run.right
-    return content, placed
+    return chunks, placed
+
+
+def line(
+    parts: list[str], x: float, y: float, linked=(), size: float = BODY
+) -> tuple[bytes, list[Placed]]:
+    """:func:`line_chunks` as one content stream."""
+    chunks, placed = line_chunks(parts, x, y, linked, size)
+    return b"".join(chunks), placed
 
 
 def _name(value: str) -> bytes:
@@ -168,6 +181,15 @@ def _pages() -> tuple[list[bytes], dict[str, Placed]]:
             runs[key] = placed[index]
         return content
 
+    def draw_marked(key_parts: dict[int, str], parts: list[str], x: float, y: float, marks: list):
+        """:func:`draw` with each part in a marked-content sequence of its own: *marks* are (tag, mcid)."""
+        chunks, placed = line_chunks(parts, x, y, linked=set(key_parts))
+        for index, key in key_parts.items():
+            runs[key] = placed[index]
+        return b"".join(
+            marked(tag, chunk, mcid=mcid) for chunk, (tag, mcid) in zip(chunks, marks, strict=True)
+        )
+
     # Page 0, label "i": the abstract, with the links of every kind.
     out = marked("Artifact", text("Linked Paper Fixture 2026", 72.0, 760.0, size=8.0))
     out += marked("Heading", text("Abstract", 72.0, 700.0, size=HEAD, font="F3"), mcid=0)
@@ -238,15 +260,13 @@ def _pages() -> tuple[list[bytes], dict[str, Placed]]:
     # Page 1, label "1": the introduction.
     out = marked("Artifact", text("Linked Paper Fixture 2026", 72.0, 760.0, size=8.0))
     out += marked("Heading", text("1 Introduction", 72.0, 720.0, size=HEAD, font="F3"), mcid=0)
-    out += marked(
-        "P",
-        draw(
-            {1: "table_ref", 3: "second_ref", 5: "late_ref"},
-            ["The introduction reads ", "Table 1", " and ", "Smith [1]", " and ", "late", "."],
-            72.0,
-            700.0,
-        ),
-        mcid=1,
+    # Three links, each text in its own marked content under a Link element.
+    out += draw_marked(
+        {1: "table_ref", 3: "second_ref", 5: "late_ref"},
+        ["The introduction reads ", "Table 1", " and ", "Smith [1]", " and ", "late", "."],
+        72.0,
+        700.0,
+        [("P", 1), ("Link", 5), ("P", 8), ("Link", 6), ("P", 9), ("Link", 7), ("P", 10)],
     )
     # A link over two lines: one run on each.
     out += marked(
@@ -278,6 +298,8 @@ def _pages() -> tuple[list[bytes], dict[str, Placed]]:
     out += marked("Caption", text(TABLE_CAPTION, 72.0, 564.0, size=10.0), mcid=2)
     out += marked("TD", text("Arm", 72.0, 540.0), mcid=3)
     out += marked("TD", text("Score", 200.0, 540.0), mcid=4)
+    # The figure's own marked content: the picture is not drawn.
+    out += marked("Figure", b"", mcid=5)
     fourth = out
 
     # Page 4, label "A-1": the references.
@@ -453,6 +475,149 @@ def _outline(table: Table, page_ids: list[int], bookmarks: list[Bookmark], *, lo
 
 
 @dataclass(frozen=True)
+class Tag:
+    """A structure element as the fixture writes it: its type /S, its kids and its text attributes.
+
+    A kid is a ``Tag`` or a ``(page, mcid)`` pair, the marked content it holds.
+    """
+
+    role: str
+    kids: tuple = ()
+    alt: str | None = None
+    actual: str | None = None
+    lang: str | None = None
+
+
+# /RoleMap: the custom heading type is an H1.
+ROLE_MAP = {"Heading": "H1"}
+
+
+def _paragraphs(page: int, mcids, role: str = "P") -> list[Tag]:
+    return [Tag(role, ((page, mcid),)) for mcid in mcids]
+
+
+# The tree over the pages' marked content: sections, then the elements in each.
+TREE = Tag(
+    "Document",
+    (
+        Tag(
+            "Sect",
+            (
+                Tag("Heading", ((0, 0),), lang="en-US"),
+                *_paragraphs(0, range(1, 7)),
+            ),
+        ),
+        Tag(
+            "Sect",
+            (
+                Tag("H1", ((1, 0),)),
+                Tag(
+                    "P",
+                    (
+                        (1, 1),
+                        Tag("Link", ((1, 5),)),
+                        (1, 8),
+                        Tag("Link", ((1, 6),)),
+                        (1, 9),
+                        Tag("Link", ((1, 7),)),
+                        (1, 10),
+                    ),
+                ),
+                Tag("P", ((1, 2),), lang="de-DE"),
+                Tag("H2", ((1, 3),)),
+                # Crosses the page break: one element, content on pages 1 and 2.
+                Tag("P", ((1, 4), (2, 0))),
+            ),
+        ),
+        Tag(
+            "Sect",
+            (
+                Tag("Heading", ((2, 1),)),
+                *_paragraphs(2, range(2, 2 + FILLER_LINES)),
+                Tag("P", ((2, 2 + FILLER_LINES),), actual="E = mc squared (3)"),
+            ),
+        ),
+        Tag(
+            "Sect",
+            (
+                Tag("H1", ((3, 0),)),
+                Tag("Figure", ((3, 5),), alt="A diagram of the linked pipeline."),
+                Tag("Caption", ((3, 1),)),
+                Tag("Caption", ((3, 2),)),
+                Tag("Table", (Tag("TR", (Tag("TD", ((3, 3),)), Tag("TD", ((3, 4),)))),)),
+            ),
+        ),
+        Tag(
+            "Sect",
+            (
+                Tag("H1", ((4, 0),)),
+                *_paragraphs(4, range(1, 1 + len(REFERENCES)), role="Reference"),
+            ),
+        ),
+    ),
+)
+
+
+def _structure(
+    table: Table, page_ids: list[int], tree: Tag, role_map: dict[str, str]
+) -> tuple[int, dict[int, int]]:
+    """The tree's /StructTreeRoot object, and each tagged page's /StructParents key."""
+    root = table.add()
+    parents: dict[int, dict[int, int]] = {}
+
+    def emit(tag: Tag, parent: int) -> int:
+        obj = table.add()
+        own = next((kid[0] for kid in tag.kids if isinstance(kid, tuple)), None)
+        kids = []
+        for kid in tag.kids:
+            if isinstance(kid, Tag):
+                kids.append(b"%d 0 R" % emit(kid, obj))
+                continue
+            page, mcid = kid
+            parents.setdefault(page, {})[mcid] = obj
+            # Content on the element's own page is a bare mcid; on another, an /MCR.
+            kids.append(
+                b"%d" % mcid
+                if page == own
+                else b"<< /Type /MCR /Pg %d 0 R /MCID %d >>" % (page_ids[page], mcid)
+            )
+        body = b"<< /Type /StructElem /S /" + tag.role.encode() + b" /P %d 0 R" % parent
+        if own is not None:
+            body += b" /Pg %d 0 R" % page_ids[own]
+        if len(kids) == 1:
+            body += b" /K " + kids[0]
+        elif kids:
+            body += b" /K [" + b" ".join(kids) + b"]"
+        for key, value in (("Alt", tag.alt), ("ActualText", tag.actual), ("Lang", tag.lang)):
+            if value is not None:
+                body += b" /" + key.encode() + b" " + _pdf_string(value)
+        table.fill(obj, body + b" >>")
+        return obj
+
+    top = emit(tree, root)
+    # The parent tree: for each page, the element of each mcid, by mcid.
+    nums = b" ".join(
+        b"%d [" % page
+        + b" ".join(
+            b"%d 0 R" % by_mcid[mcid] if mcid in by_mcid else b"null"
+            for mcid in range(max(by_mcid) + 1)
+        )
+        + b"]"
+        for page, by_mcid in sorted(parents.items())
+    )
+    mapped = b" ".join(b"/%s /%s" % (a.encode(), b.encode()) for a, b in role_map.items())
+    table.fill(
+        root,
+        b"<< /Type /StructTreeRoot /K %d 0 R /RoleMap << " % top
+        + mapped
+        + b" >> /ParentTree << /Nums ["
+        + nums
+        + b"] >> >>",
+    )
+    return root, {page: page for page in parents}
+
+
+@dataclass(frozen=True)
 class LinkSpec:
     """A link annotation as the fixture writes it: the runs it covers and where it points.
 
@@ -523,10 +688,20 @@ def _annotation(spec: LinkSpec, runs: dict[str, Placed], page_ids: list[int]) ->
     return body + b" >>"
 
 
-def linked_paper(*, outline: list[Bookmark] | None = OUTLINE, loop: bool = False) -> bytes:
+def linked_paper(
+    *,
+    outline: list[Bookmark] | None = OUTLINE,
+    loop: bool = False,
+    tagging: str = "full",
+    tree: Tag = TREE,
+    role_map: dict[str, str] = ROLE_MAP,
+) -> bytes:
     """The six-page paper: page labels, named destinations, an outline and the text they point at.
 
-    *outline* are the bookmarks (None for a paper without an outline).
+    *outline* are the bookmarks (None for a paper without an outline). *tagging*
+    is how the paper declares its structure: ``full`` (/MarkInfo and a structure
+    tree), ``tree`` (the tree alone), ``marked`` (/MarkInfo alone) or ``none``;
+    the tree is *tree* with the type mapping *role_map*.
     """
     table = Table()
     fonts = b" ".join(
@@ -540,6 +715,9 @@ def linked_paper(*, outline: list[Bookmark] | None = OUTLINE, loop: bool = False
     for spec in LINKS:
         annots.setdefault(spec.page, []).append(table.add(_annotation(spec, runs, page_ids)))
     annots[0].append(table.add(NOTE_ANNOTATION))
+    tree_root, struct_parents = (
+        _structure(table, page_ids, tree, role_map) if tagging in ("full", "tree") else (0, {})
+    )
     for number, (page_id, content) in enumerate(zip(page_ids, contents, strict=True)):
         stream = table.add(b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream")
         listed = b" ".join(b"%d 0 R" % annot for annot in annots.get(number, []))
@@ -550,6 +728,7 @@ def linked_paper(*, outline: list[Bookmark] | None = OUTLINE, loop: bool = False
             + fonts
             + b" >> >> /Contents %d 0 R" % stream
             + (b" /Annots [" + listed + b"]" if listed else b"")
+            + (b" /StructParents %d" % struct_parents[number] if number in struct_parents else b"")
             + b" >>",
         )
     table.fill(
@@ -558,6 +737,10 @@ def linked_paper(*, outline: list[Bookmark] | None = OUTLINE, loop: bool = False
         % (b" ".join(b"%d 0 R" % page_id for page_id in page_ids), N_PAGES),
     )
     extras = _names(page_ids) + _page_labels()
+    if tagging in ("full", "marked"):
+        extras += b" /MarkInfo << /Marked true >>"
+    if tree_root:
+        extras += b" /StructTreeRoot %d 0 R" % tree_root
     if outline is not None:
         extras += b" /Outlines %d 0 R" % _outline(table, page_ids, outline, loop=loop)
     table.fill(1, b"<< /Type /Catalog /Pages 2 0 R" + extras + b" >>")
