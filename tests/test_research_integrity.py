@@ -835,3 +835,28 @@ def test_export_affiliations_roundtrips():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_export_joins_the_parse_on_the_folded_key():
+    """The parse keyed by a differently spaced, accented or "&" copy of a
+    byline string still fills that row, and adds no second row."""
+    from bibr.models import Affiliation
+
+    contents = _contents([(1, "Intro", CanonicalSection.INTRODUCTION, ["Hello."])])
+    metadata = PaperMetadata(
+        doi="10.1/x",
+        title="T",
+        authors=[_author(1, "Ann", "Lee", "Dept of Public Health & Care, Universitat Bern")],
+        affiliations=[
+            Affiliation(
+                text="Dept of Public Health and Care,\r\nUniversität  Bern.",
+                institution="Universität Bern",
+                department="Dept of Public Health and Care",
+                author_ids=[1],
+            )
+        ],
+    )
+    out = export_paper_to_json(_paper(metadata, contents))
+    assert [(row["text"], row["institution"], row["author_ids"]) for row in out["affiliation"]] == [
+        ("Dept of Public Health & Care, Universitat Bern", "Universität Bern", [1])
+    ]
