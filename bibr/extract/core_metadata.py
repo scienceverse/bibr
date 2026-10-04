@@ -2115,7 +2115,7 @@ class CoreMetadataExtractor:
                     if section.section_id in selected_section_ids
                 ],
             )
-            self._email_harvester = AuthorEmailHarvester(scoped_contents)
+            self._email_harvester = AuthorEmailHarvester(scoped_contents, document=contents)
 
     async def extract(self) -> PaperMetadata:
         """Extract metadata from text before the cutoff section and ORCID lines."""
