@@ -127,6 +127,15 @@ class NativeTextStage:
             invisible_layer_pages += sum(
                 1 for page in inspection.pages if page.invisible_text_layer
             )
+            watermark_pages = [page for page in inspection.pages if page.watermarks]
+            if watermark_pages:
+                logger.info(
+                    "%s: removed diagonal watermark text on %d pages before reading the "
+                    "text layer: %r",
+                    fs.path.name,
+                    len(watermark_pages),
+                    sorted({text for page in watermark_pages for text in page.watermarks})[:5],
+                )
             _log_invisible_layer_errors(fs.path.name, inspection.component_errors)
 
         if native_skip_total:

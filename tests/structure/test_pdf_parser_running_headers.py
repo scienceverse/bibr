@@ -7,6 +7,8 @@ swallow the body — see eyecolor.pdf, where a page-2 author-line ``doc_title``
 swallowed the entire Introduction.
 """
 
+import pytest
+
 from bibr.structure.pdf_parser import PDFParser
 
 
@@ -353,3 +355,300 @@ def test_repeated_legend_rows_printed_together_stay_demoted():
 
     assert {(0, 1), (0, 2), (1, 1), (1, 2)} <= parser._running_header_regions
     assert not any("com interface" in t[0] for t in parser._deferred_texts)
+
+
+def _sidebar_pages(sidebar_heading: str) -> list[list[dict]]:
+    """A magazine article: a boxed sidebar headed by a mid-page ``doc_title`` on page 3."""
+    return [
+        [
+            _heading("doc_title", "Nudge Your Customers Toward Better Choices", y=80),
+            _text("Defaults are the options a customer gets without acting.", y=200),
+        ],
+        [
+            _heading("paragraph_title", "Mass Defaults", y=300),
+            _text("Mass defaults apply to every customer alike.", y=350),
+        ],
+        [
+            _text("Most firms set them once and never revisit them.", y=300),
+            _heading("doc_title", sidebar_heading, y=538),
+            _text("Sometimes the best default is no default at all.", y=600),
+        ],
+    ]
+
+
+def test_mid_page_doc_title_on_a_later_page_is_a_sidebar_heading():
+    """Every later-page doc_title used to be demoted, which dropped the sidebar
+    heading and merged the sidebar into the section around it."""
+    sidebar = "When No Default Is Your Best Option"
+    parser = PDFParser(json_result=_sidebar_pages(sidebar))
+    parser._mark_running_headers()
+
+    assert (2, 1) not in parser._running_header_regions
+
+    full = PDFParser(json_result=_sidebar_pages(sidebar))
+    contents = full.parse()
+    sidebar_section = next(s for s in contents.sections if s.header == sidebar)
+    by_section = {text: section_id for text, _page, section_id, *_ in full._deferred_texts}
+    assert by_section["Sometimes the best default is no default at all."] == (
+        sidebar_section.section_id
+    )
+    assert by_section["Most firms set them once and never revisit them."] != (
+        sidebar_section.section_id
+    )
+
+
+def test_later_page_doc_title_in_the_margin_band_stays_demoted():
+    pages = _sidebar_pages("Harvard Business Review")
+    pages[2][1] = _heading("doc_title", "Harvard Business Review", y=20)
+    parser = PDFParser(json_result=pages)
+    parser._mark_running_headers()
+
+    assert (2, 1) in parser._running_header_regions
+
+
+def test_title_behind_a_cover_sheet_stays_demoted_mid_page():
+    """A submission cover sheet prints the title; the article page repeats it mid-page."""
+    pages = [
+        [
+            _heading("doc_title", "Supplier Opportunism in Buyer-Supplier NPD", y=150),
+            _text("Manuscript ID DS-2026-0001. Manuscript type: Original Article.", y=300),
+        ],
+        [
+            _heading("doc_title", "SUPPLIER OPPORTUNISM IN BUYER-SUPPLIER NPD:", y=420),
+            _text("Collaborating with a supplier exposes the buyer to opportunism.", y=520),
+        ],
+    ]
+    parser = PDFParser(json_result=pages)
+    parser._mark_running_headers()
+
+    assert (1, 0) in parser._running_header_regions
+
+
+def test_mid_page_doc_title_repeated_on_later_pages_stays_demoted():
+    pages = _sidebar_pages("Author A, Author B, Author C")
+    pages.append(
+        [
+            _heading("doc_title", "Author A, Author B, Author C", y=450),
+            _text("Page 4 body.", y=520),
+        ]
+    )
+    parser = PDFParser(json_result=pages)
+    parser._mark_running_headers()
+
+    assert {(2, 1), (3, 0)} <= parser._running_header_regions
+
+
+def test_mid_page_copyright_doc_title_on_a_later_page_stays_demoted():
+    pages = _sidebar_pages(
+        "Copyright 2026 Harvard Business School Publishing. All rights reserved."
+    )
+    parser = PDFParser(json_result=pages)
+    parser._mark_running_headers()
+
+    assert (2, 1) in parser._running_header_regions
+
+
+_TRANSLATED_TITLE = "Mémoire de l’humidité du sol dans les pâturages d’altitude"
+
+
+def _two_language_pages(record_rows: list[dict]) -> list[list[dict]]:
+    """An article printed with its title and front matter again in a second language.
+
+    Page 2 ends the body, then a mid-page ``doc_title`` heads *record_rows*.
+    """
+    return [
+        [
+            _heading("doc_title", "Soil Moisture Memory in Upland Pastures", y=150),
+            _text("Ada Field and Ben Moor", y=200),
+            {
+                "label": "abstract",
+                "content": "Pastures keep the moisture of a wet spring well into summer.",
+                "bbox_2d": [50, 260, 500, 360],
+            },
+            _text("Upland pastures dry out late in the season.", y=420),
+        ],
+        [
+            _text("We thank the farmers who let us sample their fields.", y=150),
+            _heading("doc_title", _TRANSLATED_TITLE, y=420),
+            *record_rows,
+        ],
+    ]
+
+
+@pytest.mark.parametrize(
+    "record_rows",
+    [
+        [
+            _heading("paragraph_title", "Résumé", y=470),
+            _text("Les pâturages gardent l’humidité d’un printemps humide.", y=500),
+        ],
+        [
+            _text("Les pâturages gardent l’humidité d’un printemps humide.", y=470),
+            _text("Mots-clés : sol · pâturage · été", y=560),
+        ],
+        [
+            {
+                "label": "abstract",
+                "content": "Les pâturages gardent l’humidité d’un printemps humide.",
+                "bbox_2d": [50, 470, 500, 560],
+            }
+        ],
+        [
+            _heading("paragraph_title", "A. Field", y=470),
+            _text("Upland Soil Institute, Northtown. E-mail: a.field@example.org", y=500),
+        ],
+    ],
+    ids=["abstract-heading", "keywords-lead-in", "abstract-region", "byline-e-mail"],
+)
+def test_later_page_title_heading_its_own_record_stays_demoted(record_rows):
+    """Kept as a sidebar heading, the translated title opened a second title
+    section and front matter could not choose between the two records."""
+    parser = PDFParser(json_result=_two_language_pages(record_rows))
+    parser._mark_running_headers()
+
+    assert (1, 1) in parser._running_header_regions
+
+    contents = PDFParser(json_result=_two_language_pages(record_rows)).parse()
+    assert not any(s.header == _TRANSLATED_TITLE for s in contents.sections)
+
+
+def test_sidebar_prose_that_mentions_an_abstract_keeps_its_heading():
+    pages = _sidebar_pages("When No Default Is Your Best Option")
+    pages[2][2] = _text("Abstract defaults rarely help a customer decide.", y=600)
+    parser = PDFParser(json_result=pages)
+    parser._mark_running_headers()
+
+    assert (2, 1) not in parser._running_header_regions
+
+
+@pytest.mark.parametrize(
+    "lead_in",
+    [
+        "キーワード：土壌・牧草地・夏",
+        "摘 要",
+        "キ ー ワ ー ド: 土壌",
+        "Palabras claves: suelo, pastizal",
+        "Schlüsselwörter: Boden · Weide",
+    ],
+    ids=["fullwidth-colon", "spaced-cjk-heading", "spaced-cjk-lead-in", "es-variant", "de-variant"],
+)
+def test_record_lead_in_forms_keep_the_title_demoted(lead_in):
+    parser = PDFParser(json_result=_two_language_pages([_text(lead_in, y=470)]))
+    parser._mark_running_headers()
+
+    assert (1, 1) in parser._running_header_regions
+
+
+def test_title_split_across_doc_title_regions_stays_demoted_whole():
+    """The scan used to stop at the title's second region and keep the first."""
+    pages = _two_language_pages(
+        [
+            _heading("doc_title", "dans les pâturages d’altitude", y=450),
+            _heading("paragraph_title", "Résumé", y=490),
+            _text("Les pâturages gardent l’humidité d’un printemps humide.", y=520),
+        ]
+    )
+    pages[1][1] = _heading("doc_title", "Mémoire de l’humidité du sol", y=420)
+    parser = PDFParser(json_result=pages)
+    parser._mark_running_headers()
+
+    assert {(1, 1), (1, 2)} <= parser._running_header_regions
+
+
+def test_sidebar_heading_before_another_title_record_keeps_its_heading():
+    """Only the doc_title rows directly after a title continue it."""
+    pages = _two_language_pages(
+        [
+            _text("Sometimes the best default is no default at all.", y=470),
+            _heading("doc_title", _TRANSLATED_TITLE, y=560),
+            _heading("paragraph_title", "Résumé", y=600),
+        ]
+    )
+    pages[1][1] = _heading("doc_title", "When No Default Is Your Best Option", y=420)
+    parser = PDFParser(json_result=pages)
+    parser._mark_running_headers()
+
+    assert (1, 1) not in parser._running_header_regions
+    assert (1, 3) in parser._running_header_regions
+
+
+# A preprint server banner: the rights line plus the licence and DOI lines, one
+# region of about 340 characters at the top of every page.
+_PREPRINT_BANNER = (
+    "Example preprint doi: https://doi.org/10.0000/2026.01.01.000001; this version posted "
+    "January 1, 2026. The copyright holder for this preprint (which was not certified by "
+    "peer review) is the author/funder, who has granted the server a license to display "
+    "the preprint in perpetuity. It is made available under a CC-BY 4.0 International license."
+)
+
+
+def _banner(y1: int = 0, y2: int = 36) -> dict:
+    return {"label": "text", "content": _PREPRINT_BANNER, "bbox_2d": [50, y1, 950, y2]}
+
+
+def _banner_pages(banner_pages: set[int], *, y1: int = 0, y2: int = 36) -> list[list[dict]]:
+    pages = [
+        [_heading("doc_title", "A Cohort Study of Venous Disease", y=120)],
+        [_heading("paragraph_title", "Data availability", y=300)],
+        [_heading("paragraph_title", "References", y=300)],
+    ]
+    bodies = [
+        "Participants were recruited from three hospitals.",
+        "Data are available from the authors on request.",
+        "Smith, J. (2020). A real reference. Journal of Examples, 1, 1-9.",
+    ]
+    for page_idx, page in enumerate(pages):
+        if page_idx in banner_pages:
+            page.insert(0, _banner(y1, y2))
+        page.append(_text(bodies[page_idx], y=400))
+    return pages
+
+
+def test_long_preprint_banner_in_the_margin_band_is_demoted():
+    """The banner is longer than the 200-character furniture cap, so it was
+    never counted and its ``text``-labelled copies landed in the body."""
+    assert len(_PREPRINT_BANNER) > 300
+    parser = PDFParser(json_result=_banner_pages({1, 2}))
+    parser._mark_running_headers()
+
+    assert {(1, 0), (2, 0)} <= parser._running_header_regions
+
+    full = PDFParser(json_result=_banner_pages({1, 2}))
+    full.parse()
+    deferred = " ".join(t[0] for t in full._deferred_texts)
+    assert "copyright holder" not in deferred
+    assert "Data are available from the authors on request." in deferred
+
+
+def test_long_repeated_region_in_mid_page_is_kept():
+    parser = PDFParser(json_result=_banner_pages({1, 2}, y1=400, y2=436))
+    parser._mark_running_headers()
+
+    assert not {(1, 0), (2, 0)} & parser._running_header_regions
+
+
+def test_long_repeated_paragraph_reaching_into_the_band_is_kept():
+    """A manuscript that prints its body twice: the same paragraph starts at the
+    top of two pages, inside the band, and runs down the page."""
+    parser = PDFParser(json_result=_banner_pages({1, 2}, y1=91, y2=437))
+    parser._mark_running_headers()
+
+    assert not {(1, 0), (2, 0)} & parser._running_header_regions
+
+
+def test_long_band_region_on_one_page_only_is_kept():
+    parser = PDFParser(json_result=_banner_pages({1}))
+    parser._mark_running_headers()
+
+    assert (1, 0) not in parser._running_header_regions
+
+
+def test_long_repeated_region_without_geometry_is_kept():
+    """A missing bbox falls back to demotion only for short rows."""
+    pages = _banner_pages({1, 2})
+    for page in (pages[1], pages[2]):
+        page[0] = {"label": "text", "content": _PREPRINT_BANNER}
+    parser = PDFParser(json_result=pages)
+    parser._mark_running_headers()
+
+    assert not {(1, 0), (2, 0)} & parser._running_header_regions

@@ -8,6 +8,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Diagonal watermarks ("For Review Only", review disclaimers, "RETRACTED",
+  "ARTICLE IN PRESS") no longer leak stray letters into abstracts, headings,
+  statements, author lines and references, no longer inflate region font
+  sizes, and no longer make the text layer break lines inside words
+  ("Buyer -Supplier"). Large off-axis text is removed before the PDF's text
+  layer is read; the removed strings are kept in the page inspection (#111).
+- Word spaces that went missing ("arterialand", "SeeOnline/Comment") and line
+  breaks inserted in the middle of a line ("Buyer -Supplier", a break before
+  ", are") when a PDF draws each glyph or word group as its own object are
+  repaired from the glyph positions. Printed spaces and line breaks,
+  superscripts and letter-spaced headings are left as they are, and no space
+  is put into a URL, DOI or e-mail address (#142).
+- A heading in the middle of a later page that the layout model labels as a
+  document title, such as a sidebar or box heading ("When No Default Is Your
+  Best Option"), is no longer dropped as a running head, so the sidebar no
+  longer merges into the section around it. A later-page title in the top or
+  bottom margin, one repeated on other pages, a copyright line, the title
+  printed again behind a cover sheet and a title that heads its own abstract,
+  keywords or byline (the title in a second language) are still dropped, so
+  such a title does not open a second front-matter record (part of #122).
+- A preprint banner longer than 200 characters that repeats in the top or
+  bottom margin of several pages, such as the medRxiv rights, licence and DOI
+  lines, is now dropped as page furniture. Copies the layout model labelled
+  as text used to land in the body, the figure legends and the references
+  (#112).
+- Line numbers printed in the margin of a submitted manuscript no longer end
+  up in headings, paragraphs and references ("38 References", "668
+  References"). A rising column of bare numbers in the outer margin, aligned
+  on one edge and set one per text line, is removed before the PDF's text
+  layer is read when the document numbers its lines on at least two pages
+  and on 40% of its pages with text. Numbered reference lists, numbers set
+  against their text, such as row ids, and a numbered list or table on a few
+  pages of a longer document are kept (#113).
+- Accented letters that a PDF draws as a letter plus a separate spacing
+  accent no longer come out split in names, titles and references
+  ("Bas¸kaya", "Brˇci´c", "Ca´rcel"). An accent set over or under a
+  neighbouring letter in the PDF's text layer is now composed with it
+  ("Başkaya", "Brčić", "Cárcel", "Peña", "Côté"); an accent between two
+  letters, typed for an apostrophe, is left as it is (part of #138).
 - A figure or table caption is no longer lost when a figure or table on the
   previous page scores higher for it: captions are matched only to figures and
   tables on their own page, which is the only match the parser ever kept (#133).
