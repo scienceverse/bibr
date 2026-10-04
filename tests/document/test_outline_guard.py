@@ -6,7 +6,7 @@ import re
 
 import pytest
 
-from bibr.document import outline_guard
+from bibr.document import harvest, outline_guard
 from bibr.document.harvest import build_document_layer
 from bibr.document.model import OutlineEntry
 from bibr.document.outline_guard import PageText, judge
@@ -181,13 +181,40 @@ def test_a_paper_without_an_outline_is_rejected_as_too_short():
     assert layer.presence.outline_guard_pass is False
 
 
-def test_a_page_range_grounds_titles_in_its_own_pages_only():
+def test_a_page_range_leaves_a_pass_unjudged():
+    # The outline is junk, and the two pages hold under 2,000 letters and digits: on
+    # their text alone the grounding rule would not run and the outline would pass.
     outline = _bookmarks(("Zebra", 0), ("Quokka", 1), ("Yak", 2), ("Walrus", 3))
     layer = build_document_layer(_linked.linked_paper(outline=outline), [0, 1], budget=_BUDGET)
 
-    # The two pages hold under 2,000 letters and digits: the grounding rule is not applied.
-    assert layer.outline_guard.passed
-    assert layer.outline_guard.decided.score is None
+    assert layer.outline_guard is None
+    assert layer.presence.outline_guard_pass is None
+    # The outline itself is read whole.
+    assert len(layer.outline) == 4 and layer.presence.has_outline is True
+
+
+def test_a_page_range_keeps_a_rejection_that_reads_no_text():
+    every_entry_on_one_page = _bookmarks(
+        ("Abstract", 1), ("Methods", 1), ("Results", 1), ("References", 1)
+    )
+    for outline, reject in ((every_entry_on_one_page, "R2_targets"), (None, "R1_too_few")):
+        layer = build_document_layer(_linked.linked_paper(outline=outline), [2, 3], budget=_BUDGET)
+
+        assert layer.outline_guard.reject == reject
+        assert layer.presence.outline_guard_pass is False
+
+
+def test_a_page_that_could_not_be_read_leaves_a_pass_unjudged(monkeypatch):
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("objects unreadable")
+
+    monkeypatch.setattr(harvest, "_read_objects", broken)
+    layer = _layer()
+
+    assert all(page.text_source == "unread" for page in layer.pages)
+    assert layer.outline_guard is None
+    assert layer.presence.outline_guard_pass is None
+    assert layer.presence.has_outline is True
 
 
 def test_page_text_is_the_records_folded_to_letters_and_digits():

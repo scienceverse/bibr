@@ -1108,17 +1108,27 @@ class LayerBuilder:
         self._added.add(page_index)
 
     def _judge_outline(self, pages: list[Page]) -> OutlineGuard | None:
-        """The outline guard's verdict, grounded in the text of the pages built."""
+        """The outline guard's verdict; None when the layer cannot reach it.
+
+        R3 grounds the entries in the text of the whole document, so it runs only
+        on a layer that holds every page, read. On less, a rejection by R1 or R2
+        (which read no text) stands and a pass does not: a part of a document may
+        hold too little text for the 2,000-character gate, and R3 might reject.
+        """
         if self.outline is None:
             return None
+        complete = {page.index for page in pages} == set(range(self.n_pages)) and all(
+            page.error is None for page in pages
+        )
         try:
-            text = outline_guard.PageText(pages, self.n_pages) if pages else None
-            return outline_guard.judge(
+            text = outline_guard.PageText(pages, self.n_pages) if complete and pages else None
+            guard = outline_guard.judge(
                 self.outline, meta_title=self.meta_title, n_pages=self.n_pages, text=text
             )
         except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
             self.errors["outline_guard"] = _error_text(exc)
             return None
+        return guard if complete or not guard.passed else None
 
     def _build_links(self, pages: list[Page]) -> list[Link] | None:
         """The links with their classes; None when they could not be read or built."""
