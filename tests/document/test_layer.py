@@ -593,10 +593,11 @@ def test_text_sources_and_presence():
     assert presence.has_invisible_layer is True
     assert presence.has_mcids is True
     assert presence.missing_apis == ()
-    # The paper has no outline; its links and structure are not read yet.
+    # The paper declares no outline, links or structure: each is absent, not unread.
     assert presence.has_outline is False and presence.outline_guard_pass is False
     assert layer.outline == [] and layer.outline_guard.reject == "R1_too_few"
-    assert presence.is_tagged is None
+    assert presence.is_tagged is False
+    assert presence.has_internal_links is False
     assert layer.links == [] and layer.struct == []
 
 

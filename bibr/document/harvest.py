@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from bibr.document import destinations, ids, links, outline, outline_guard
+from bibr.document import destinations, ids, links, outline, outline_guard, structure
 from bibr.document.model import (
     COLUMN_DTYPES,
     GLYPH_EXCLUDED,
@@ -59,6 +59,7 @@ from bibr.document.model import (
     Presence,
     RenderRecipe,
     RoleTag,
+    StructElem,
     as_box,
 )
 from bibr.ocr import native_text as nt
@@ -98,6 +99,8 @@ _HARVEST_APIS = (
     *outline.APIS,
     *links.APIS,
     *links.NAME_APIS,
+    *structure.APIS,
+    *structure.CATALOG_APIS,
 )
 
 # How the layout stage renders a page (bibr.ocr.image_utils.iter_pdf_pages_with_index):
@@ -952,6 +955,11 @@ class LayerBuilder:
         self.outline: list[OutlineEntry] | None = None
         self.meta_title: str | None = None
         self.raw_links: list[links.RawLink] = []
+        self.struct: list[StructElem] = []
+        # Whether /MarkInfo says the PDF is tagged (None until read), and whether
+        # any page was given a structure tree.
+        self.marked: bool | None = None
+        self.struct_tree = False
 
     def start(self, doc) -> None:
         """Read what the document declares as a whole: call right after opening *doc*.
@@ -965,6 +973,11 @@ class LayerBuilder:
                 self.names = destinations.NamedDests(self._api, doc)
         except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
             self.errors["named_dests"] = _error_text(exc)
+        if not self._lacks(structure.CATALOG_APIS):
+            try:
+                self.marked = bool(self._api.FPDFCatalog_IsTagged(doc.raw))
+            except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
+                self.errors["tagged"] = _error_text(exc)
         if self._lacks(destinations.APIS + outline.APIS):
             return
         try:
@@ -1008,6 +1021,19 @@ class LayerBuilder:
         if error is not None:
             self.errors[f"links:{page_index}"] = error
 
+    def _read_struct(self, page, page_index: int) -> None:
+        if self._lacks(structure.APIS):
+            return
+        try:
+            found, has_tree, note = structure.read_page_tree(self._api, page, page_index)
+        except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
+            self.errors[f"struct:{page_index}"] = _error_text(exc)
+            return
+        self.struct.extend(found)
+        self.struct_tree = self.struct_tree or has_tree
+        if note is not None:
+            self.errors[f"struct:{page_index}"] = note
+
     def records(
         self, textpage, page_index: int
     ) -> tuple[nt.PageCharTrace | None, list[tuple[str, float, float, bool]] | None]:
@@ -1034,6 +1060,7 @@ class LayerBuilder:
     ) -> None:
         self._read_label(page_index)
         self._read_links(page, page_index)
+        self._read_struct(page, page_index)
         failed = [text for kind, _box, text in furniture if kind == "error"]
         if failed:
             self.errors[f"furniture:{page_index}"] = failed[0]
@@ -1093,6 +1120,15 @@ class LayerBuilder:
         except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
             self.errors["links"] = _error_text(exc)
             return None
+
+    def _is_tagged(self) -> bool | None:
+        """Whether the PDF is tagged: its /MarkInfo says so, as pdfium reads it.
+
+        pdfium gives a page a structure tree only in a PDF whose /MarkInfo says
+        it is tagged (a structure tree root without it reads as no tree), so
+        that a tree was given says the same as the flag does.
+        """
+        return True if self.struct_tree else self.marked
 
     def page_failed(
         self, page_index: int, key: str, exc: BaseException, page: Page | None = None
@@ -1168,6 +1204,7 @@ class LayerBuilder:
                 if built_links is None
                 else seen(any(link.action in ("dest", "goto") for link in built_links), read)
             ),
+            is_tagged=self._is_tagged(),
             has_mcids=(
                 None if "FPDFPageObj_GetMarkedContentID" in self.missing else seen(mcids, read)
             ),
@@ -1187,6 +1224,7 @@ class LayerBuilder:
             outline=self.outline or [],
             outline_guard=guard,
             links=built_links or [],
+            struct=self.struct,
             roles=roles,
             presence=presence,
             component_errors=dict(self.errors),
