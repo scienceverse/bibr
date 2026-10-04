@@ -298,7 +298,9 @@ class StructIndex:
     ``(page, mcid)``: the mcid a text object carries in ``PageColumns.obj_mcid``
     with the object's page. The join runs both ways: :meth:`span_element` from
     text to the element that holds it, :meth:`spans_of` from an element to its
-    text.
+    text. A page without columns (see the module docstring) holds no text to
+    join: :meth:`span_element` gives None for it, :meth:`spans_of` no spans of
+    it, and the elements and their marked content stay.
     """
 
     def __init__(self, layer: DocumentLayer) -> None:

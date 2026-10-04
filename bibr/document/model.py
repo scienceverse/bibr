@@ -299,7 +299,8 @@ class OutlineEntry:
     ``ol{idx}``), ``level`` the 0-based depth and ``parent`` the ``idx`` of the
     entry above. ``page`` is the 0-based target page (None when the entry names
     no page of this document) and ``x``, ``y`` the destination's position on it
-    in PDF points, where the destination gives one.
+    in PDF points, where the destination gives one (a coordinate it leaves open,
+    or gives as a number too large for a float, is None).
     """
 
     idx: int
@@ -341,13 +342,16 @@ class Link:
     """A link annotation and where it points (D2).
 
     ``link_id`` is ``p{page}.lk{n}``, ``n`` the link's position among the page's
-    link annotations; a link that cannot be read leaves its number unused, so
-    the others keep theirs. ``rect`` and ``quads`` (8 numbers each, the corners
-    of the linked text) are in PDF points on the link's page. ``target_page``
-    is the 0-based page an internal link lands on and ``target_xy`` the
-    destination's position there in PDF points (a coordinate the destination
-    leaves open is None); ``bibr.document.views.block_at`` finds the block it
-    lands in once blocks are attached.
+    link annotations; a link left out leaves its number unused, so the others
+    keep theirs. One is left out when it cannot be read or has no rectangle that
+    is finite (pdfium reads a number too large for a float as infinity).
+    ``rect`` and ``quads`` (8 numbers each, the corners of the linked text; a
+    quadrilateral that is not finite is dropped) are in PDF points on the
+    link's page. ``target_page`` is the 0-based page an internal link lands on
+    and ``target_xy`` the destination's position there in PDF points (a
+    coordinate the destination leaves open, or gives as infinity, is None);
+    ``bibr.document.views.block_at`` finds the block it lands in once blocks
+    are attached.
     """
 
     link_id: str

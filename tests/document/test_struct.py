@@ -422,6 +422,26 @@ def test_a_page_without_a_text_layer_joins_nothing():
     assert index.span_element(blank, 0) is None
 
 
+def test_a_layer_whose_columns_were_freed_joins_no_text_and_keeps_the_tree():
+    layer = _layer()
+    index = views.StructIndex(layer)
+    paragraph, cell = index.by_mcr[(1, 1)], index.by_mcr[(3, 3)]
+    link = _link(layer, "table_ref")
+    tree = list(layer.struct)
+    assert index.spans_of(paragraph) and index.link_element(link) is not None
+
+    layer.free_columns()
+    freed = views.StructIndex(layer)
+
+    assert layer.struct == tree
+    assert freed.spans_of(paragraph) == []
+    assert all(freed.span_element(page, 0) is None for page in layer.pages)
+    assert freed.link_element(link) is None
+    assert [e.role for e in freed.ancestors(freed.by_mcr[(3, 3)])] == [
+        e.role for e in index.ancestors(cell)
+    ]
+
+
 def _span_texts(layer, span_ids: list[str]) -> list[str]:
     return [
         views.span_text(
