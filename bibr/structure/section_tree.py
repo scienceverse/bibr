@@ -933,9 +933,9 @@ def assign_hierarchy_from_top_level(
             sec.parent_section_id = 0
             last_body = sec
             anchor = None
-            # Only what the marker names after "Study 2:" counts, not its
-            # type: a bare "Study 2" is no discussion, and "Study 1: Results
-            # and Discussion" reports results.
+            # Only the words after the marker prefix ("Study 2:") count, not
+            # the section type: a bare "Study 2" is no discussion, and "Study
+            # 1: Results and Discussion" reports results.
             after_discussion = _names_discussion_part(_marker_remainder(sec.header or ""))
             if number is not None:
                 numbered.append((sec, number.path))
