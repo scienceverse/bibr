@@ -667,13 +667,14 @@ def read_page(
         )
     removed = [
         Furniture(
-            page_index,
-            kind,
-            None if box is None else as_box(box),
-            text,
-            _FURNITURE_DECIDED[kind],
+            furniture_id=ids.furniture(page_index, n),
+            page=page_index,
+            kind=kind,
+            bbox_pdf=None if box is None else as_box(box),
+            text=text,
+            decided=_FURNITURE_DECIDED[kind],
         )
-        for kind, box, text in furniture
+        for n, (kind, box, text) in enumerate(furniture)
     ]
     n_chars = textpage.count_chars()
     built = Page(

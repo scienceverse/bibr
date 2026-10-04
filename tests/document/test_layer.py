@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from bibr.config import GlobalSettings
-from bibr.document import harvest, serialize, views
+from bibr.document import harvest, ids, serialize, views
 from bibr.document.harvest import build_document_layer, layout_render_dpi
 from bibr.document.model import (
     COLUMN_DTYPES,
@@ -424,11 +424,12 @@ def test_the_removed_watermark_is_kept_as_furniture():
     assert len(page.furniture) == 1
     found = page.furniture[0]
     assert found == Furniture(
-        6,
-        "watermark",
-        found.bbox_pdf,
-        "For Review Only",
-        Decided("furniture.watermark", "watermark/1"),
+        furniture_id="p6.f0",
+        page=6,
+        kind="watermark",
+        bbox_pdf=found.bbox_pdf,
+        text="For Review Only",
+        decided=Decided("furniture.watermark", "watermark/1"),
     )
     left, bottom, right, top = found.bbox_pdf
     assert 0 <= left < right <= _pdfs.PAGE_W and 0 <= bottom < top <= _pdfs.PAGE_H
@@ -436,6 +437,19 @@ def test_the_removed_watermark_is_kept_as_furniture():
         "Review" in views.line_text(page, line) for line in range(len(page.cols.line_span))
     )
     assert all(not other.furniture for other in layer.pages if other.index != 6)
+
+
+def test_removed_line_numbers_get_page_scoped_ids():
+    from tests.ocr.test_line_number_column import _reference_page
+
+    layer = _inspect(_reference_page(), layer=True).document
+
+    assert all(page.furniture for page in layer.pages)
+    for page in layer.pages:
+        assert {item.kind for item in page.furniture} == {"line_number"}
+        assert [item.furniture_id for item in page.furniture] == [
+            ids.furniture(page.index, n) for n in range(len(page.furniture))
+        ]
 
 
 def test_rule_decisions_do_not_claim_calibration():

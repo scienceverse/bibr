@@ -248,6 +248,8 @@ class RoleTag:
 class Furniture:
     """A page object removed before the text layer was read."""
 
+    # p{page}.f{n}: the n-th object the furniture strip removed from the page.
+    furniture_id: str
     page: int
     # watermark | line_number
     kind: str
