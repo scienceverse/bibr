@@ -56,6 +56,7 @@ from bibr.paper_contents import (
 )
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.structure.assembler import DocumentAssembler
+from bibr.structure.caption_continuations import find_caption_continuations
 from bibr.structure.carry_over_manager import CarryOverState
 from bibr.structure.float_labels import LABEL, SUPPLEMENT_WORD
 from bibr.structure.floats_normalize import (
@@ -204,7 +205,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         re.IGNORECASE | re.DOTALL,
     )
     _FIGURE_CAPTION_RE = re.compile(
-        rf"^({SUPPLEMENT_WORD}?(?:Figure|Fig\.?)\s+{LABEL}\s*(?:[:–\-—|]|\.(?!\d)).*)$",
+        rf"^({SUPPLEMENT_WORD}?(?:Figure\s+|Fig\.\s*|Fig\s+){LABEL}\s*(?:[:–\-—|]|\.(?!\d)).*)$",
         re.IGNORECASE | re.DOTALL,
     )
 
@@ -368,6 +369,12 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         # entries inside them can carry the same text. Whichever side the other
         # already covers is shadowed (see ``_mark_reference_envelopes``).
         self._shadowed_reference_regions: set[tuple[int, int]] = set()
+        # Caption regions continued by other regions (a second column, a title
+        # under a bare label), and those continuation regions, which dispatch
+        # skips: each caption is parsed as one region (see
+        # ``_mark_caption_continuations``).
+        self._caption_continuation_parts: dict[tuple[int, int], list[tuple[int, int]]] = {}
+        self._caption_continuation_regions: set[tuple[int, int]] = set()
 
         # PDF outline (bookmarks) — the document's own declared heading
         # hierarchy. When present AND the feature is enabled, matched headings
@@ -437,6 +444,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         # ``paragraph_title``.
         self._mark_running_headers()
         self._mark_reference_envelopes()
+        self._mark_caption_continuations()
 
         for page_idx, page_regions in enumerate(self.json_result):
             page_number = page_idx + 1  # 1-based
@@ -941,6 +949,74 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 len(self._shadowed_reference_regions),
             )
 
+    def _mark_caption_continuations(self) -> None:
+        """Find regions that continue an explicit caption (a split caption).
+
+        The detector lives in :mod:`bibr.structure.caption_continuations`.
+        Dispatch then parses each caption with its continuations' text and
+        box, and skips the continuation regions, so a caption's second column
+        is neither replayed into the body, made a footnote, nor joined to the
+        paragraph before the figure. Region summaries keep every region.
+        """
+        self._caption_continuation_parts = find_caption_continuations(
+            self.json_result,
+            lambda key: self._clean_region_content.get(key, ""),
+            lambda region: (
+                region.native_label if region.native_label in LABEL_TREATMENT else region.label
+            ),
+            self._running_header_regions | self._shadowed_reference_regions,
+            lambda text: bool(
+                self._TABLE_CAPTION_RE.match(text) or self._FIGURE_CAPTION_RE.match(text)
+            ),
+        )
+        self._caption_continuation_regions = {
+            key for keys in self._caption_continuation_parts.values() for key in keys
+        }
+
+    def _is_footnote_caption(self, page_idx: int, text: str) -> bool:
+        """Is a ``vision_footnote`` region a full caption of a float on its page?
+
+        The layout model reads some captions as notes ("Table 1: Characteristics
+        of …" under its table, a rotated table's caption beside it). A note that
+        opens with a label, a separator and a title is the caption when its
+        page has a float of that kind; ordinary notes ("Data are n (%)") never
+        open with a label.
+        """
+        if self._TABLE_CAPTION_RE.match(text):
+            kinds = {"table"}
+        elif self._FIGURE_CAPTION_RE.match(text):
+            kinds = {"image", "chart"}
+        else:
+            return False
+        return any(
+            (region.native_label if region.native_label in LABEL_TREATMENT else region.label)
+            in kinds
+            for region in self.json_result[page_idx]
+        )
+
+    def _joined_caption_region(
+        self, key: tuple[int, int], content: str, bbox: list | None
+    ) -> tuple[str, list | None]:
+        """A caption region's text and box with its continuations appended."""
+        parts = self._caption_continuation_parts.get(key)
+        if not parts:
+            return content, bbox
+        page_idx, region_idx = key
+        regions = [self.json_result[page_idx][region_idx]]
+        regions.extend(self.json_result[part_page][part_idx] for part_page, part_idx in parts)
+        # Joined as lines, so a word wrapped across the columns is mended like
+        # any line wrap.
+        joined = fix_ocr_artifacts("\n".join(region.content.strip() for region in regions))
+        boxes = [box for region in regions if (box := bbox_to_tuple(region.bbox_2d)) is not None]
+        if boxes:
+            bbox = [
+                min(box[0] for box in boxes),
+                min(box[1] for box in boxes),
+                max(box[2] for box in boxes),
+                max(box[3] for box in boxes),
+            ]
+        return joined, bbox
+
     def _process_page(
         self, regions: list[OcrRegionResult], page_number: int, page_idx: int = -1
     ) -> None:
@@ -1007,9 +1083,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             self.region_summaries.append(region_summary)
             self._source_region_index = len(self.region_summaries) - 1
 
-            if key in self._shadowed_reference_regions:
+            if key in self._shadowed_reference_regions or key in self._caption_continuation_regions:
                 region_summary.section_id = self._current_section_id or None
                 continue
+            content, bbox = self._joined_caption_region(key, content, bbox)
 
             # Prefer native_label for treatment dispatch — glmocr's _map_label()
             # collapses specific labels (e.g. "abstract" → "text"); native_label
@@ -1024,6 +1101,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 # "Table S1") is safe to promote; ordinary statistical notes
                 # remain footnotes.
                 treatment = "table_caption"
+            elif effective_label == "vision_footnote" and self._is_footnote_caption(
+                page_idx, content.strip()
+            ):
+                treatment = "caption"
             dispatch_treatment = (
                 "structural"
                 if (page_idx, region_idx) in self._running_header_regions
