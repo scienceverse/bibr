@@ -288,6 +288,75 @@ def test_a_page_without_a_text_layer_joins_nothing():
     assert index.span_element(blank, 0) is None
 
 
+def _span_texts(layer, span_ids: list[str]) -> list[str]:
+    return [
+        views.span_text(
+            layer.page(int(span_id[1:].split(".")[0])), int(span_id.rsplit(".sp", 1)[1])
+        )
+        for span_id in span_ids
+    ]
+
+
+def test_an_element_finds_its_own_text_and_that_of_the_elements_below_it():
+    layer = _layer()
+    index = views.StructIndex(layer)
+
+    assert _span_texts(layer, index.spans_of(index.by_mcr[(0, 0)])) == ["Abstract"]
+    paragraph = index.by_mcr[(1, 1)]
+    assert "".join(_span_texts(layer, index.spans_of(paragraph))) == (
+        "The introduction reads Table 1 and Smith [1] and late."
+    )
+    # A Link element inside the paragraph holds only its own text.
+    assert _span_texts(layer, index.spans_of(index.by_mcr[(1, 5)])) == ["Table 1 "]
+
+
+def test_an_element_across_a_page_break_finds_the_text_on_both_pages():
+    layer = _layer()
+    index = views.StructIndex(layer)
+
+    spans = index.spans_of(index.by_mcr[(1, 4)])
+    assert [span_id.split(".")[0] for span_id in spans] == ["p1", "p2"]
+    assert _span_texts(layer, spans)[1] == "finishes here, then Methods begin."
+    assert index.spans_of(index.by_mcr[(2, 0)]) == spans
+
+
+def test_an_elements_spans_are_the_spans_that_join_to_it_or_to_an_element_below_it():
+    layer = _layer()
+    index = views.StructIndex(layer)
+
+    for elem in layer.struct:
+        below = {elem.elem_id}
+        pending = [elem.elem_id]
+        while pending:
+            for child in index.children.get(pending.pop(), ()):
+                below.add(child.elem_id)
+                pending.append(child.elem_id)
+        page = layer.page(elem.page)
+        # The copy on this page alone: the spans of this page that join to the copy or below it.
+        expected = [
+            f"p{page.index}.sp{span}"
+            for span in range(len(page.cols.span_rec))
+            if (joined := index.span_element(page, span)) is not None and joined.elem_id in below
+        ]
+        here = [
+            span_id for span_id in index.spans_of(elem) if span_id.startswith(f"p{page.index}.")
+        ]
+        assert here == expected, elem.elem_id
+
+
+def test_the_root_holds_every_tagged_span():
+    layer = _layer()
+    index = views.StructIndex(layer)
+    root = next(e for e in layer.struct if e.parent is None)
+
+    tagged = sum(
+        index.span_element(page, span) is not None
+        for page in layer.pages
+        for span in range(len(page.cols.span_rec))
+    )
+    assert len(index.spans_of(root)) == tagged
+
+
 def test_an_elements_ancestors_run_from_its_parent_up_to_the_root():
     layer = _layer()
     index = views.StructIndex(layer)

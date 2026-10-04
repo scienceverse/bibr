@@ -297,7 +297,9 @@ class StructIndex:
 
     An mcid names marked content on one page only, so an element is found by
     ``(page, mcid)``: the mcid a text object carries in ``PageColumns.obj_mcid``
-    with the object's page.
+    with the object's page. The join runs both ways: :meth:`span_element` from
+    text to the element that holds it, :meth:`spans_of` from an element to its
+    text.
     """
 
     def __init__(self, layer: DocumentLayer) -> None:
@@ -305,8 +307,12 @@ class StructIndex:
         self.by_id = {elem.elem_id: elem for elem in layer.struct}
         self.by_mcr: dict[tuple[int, int], StructElem] = {}
         self.by_path: dict[tuple[int, ...], list[StructElem]] = {}
+        self.children: dict[str, list[StructElem]] = {}
+        self._mcr_spans: dict[tuple[int, int], list[int]] | None = None
         for elem in layer.struct:
             self.by_path.setdefault(elem.path, []).append(elem)
+            if elem.parent is not None:
+                self.children.setdefault(elem.parent, []).append(elem)
             for mcr in elem.mcrs:
                 self.by_mcr.setdefault(mcr, elem)
 
@@ -332,6 +338,34 @@ class StructIndex:
         if obj < 0 or cols.obj_artifact[obj] or cols.obj_mcid[obj] < 0:
             return None
         return self.by_mcr.get((page.index, int(cols.obj_mcid[obj])))
+
+    def spans_of(self, elem: StructElem) -> list[str]:
+        """The ids of the spans of the text *elem* holds, with that of the elements below it.
+
+        Every page that holds content of the element is read through its copy of
+        it (:meth:`copies`); the ids come in page order and, on a page, in the
+        order the text was drawn.
+        """
+        if self._mcr_spans is None:
+            self._mcr_spans = {}
+            for page in self.layer.pages:
+                cols = page.cols
+                if cols is None:
+                    continue
+                for span in range(len(cols.span_rec)):
+                    obj = int(cols.span_obj[span])
+                    if obj >= 0 and not cols.obj_artifact[obj] and cols.obj_mcid[obj] >= 0:
+                        key = (page.index, int(cols.obj_mcid[obj]))
+                        self._mcr_spans.setdefault(key, []).append(span)
+        found: set[tuple[int, int]] = set()
+        for copy in self.copies(elem):
+            pending = [copy]
+            while pending:
+                member = pending.pop()
+                pending.extend(self.children.get(member.elem_id, ()))
+                for mcr in member.mcrs:
+                    found.update((mcr[0], span) for span in self._mcr_spans.get(mcr, ()))
+        return [ids.span(page, span) for page, span in sorted(found)]
 
     def link_element(self, link: Link) -> StructElem | None:
         """The Link element that wraps the text a link annotation covers, or None.
