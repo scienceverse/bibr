@@ -590,6 +590,8 @@ def test_a_study_marker_ends_the_guessed_back_matter_after_a_discussion():
     ]
     by = _typed_hierarchy(secs)
     assert (by[8].level, by[8].parent_section_id) == (2, 7)
+    # An appendix guess is not a type that subsections inherit: unchanged.
+    assert by[8].section_type == CanonicalSection.APPENDIX
     assert (by[10].level, by[10].parent_section_id, by[10].section_type) == (
         2,
         9,
@@ -620,6 +622,58 @@ def test_a_results_and_discussion_part_does_not_open_the_back_matter():
         _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias", level=2),
         _typed(2, "Discussion", CanonicalSection.UNKNOWN, None, level=2, score=0.0),
         _typed(3, "Supplementary characterization", CanonicalSection.ENDNOTE, "model", level=2),
+    ]
+    by = _typed_hierarchy(secs)
+    assert (by[3].level, by[3].parent_section_id) == (1, 0)
+
+
+def test_a_study_marker_that_is_a_discussion_opens_the_back_matter():
+    """ "Study 2: Discussion" resets the flag and sets it again from its own
+    name or type, so the author note and the open-practices statement after
+    it sit at level 1."""
+    for marker_type in (CanonicalSection.UNKNOWN, CanonicalSection.DISCUSSION):
+        secs = [
+            _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias", level=2),
+            _typed(2, "Study 1", CanonicalSection.UNKNOWN, None, level=2, score=0.0),
+            _typed(3, "Method", CanonicalSection.METHODS, "exact_alias", level=2),
+            _typed(4, "Results", CanonicalSection.RESULTS, "exact_alias", level=2),
+            _typed(5, "Discussion", CanonicalSection.DISCUSSION, "exact_alias", level=2),
+            _typed(6, "Study 2", CanonicalSection.UNKNOWN, None, level=2, score=0.0),
+            _typed(7, "Method", CanonicalSection.METHODS, "exact_alias", level=2),
+            _typed(8, "Results", CanonicalSection.RESULTS, "exact_alias", level=2),
+            _typed(9, "Study 2: Discussion", marker_type, "model", level=2),
+            _typed(10, "Author note", CanonicalSection.ENDNOTE, "model", level=2),
+            _typed(11, "Open practices statement", CanonicalSection.APPENDIX, "model", level=2),
+        ]
+        by = _typed_hierarchy(secs)
+        assert (by[9].level, by[9].parent_section_id) == (1, 0)
+        assert [(by[i].level, by[i].parent_section_id) for i in (10, 11)] == [(1, 0), (1, 0)]
+
+
+def test_a_part_that_names_results_does_not_open_the_back_matter_whatever_its_type():
+    """ "Findings and discussion", "Experiments and discussion" and a
+    "Results and Discussions" the LLM typed discussion report results: a
+    guessed endnote inside them stays a subsection of the part."""
+    for header, part_type, source in (
+        ("Findings and discussion", CanonicalSection.RESULTS, "model"),
+        ("Experiments and discussion", CanonicalSection.RESULTS, "model"),
+        ("Results and Discussions", CanonicalSection.DISCUSSION, "llm"),
+    ):
+        secs = [
+            _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias", level=2),
+            _typed(2, header, part_type, source, level=2),
+            _typed(3, "Synthesis of the ligands", CanonicalSection.METHODS, "model", level=2),
+            _typed(4, "Supplementary characterization", CanonicalSection.ENDNOTE, "model", level=2),
+            _typed(5, "Conclusions", CanonicalSection.DISCUSSION, "exact_alias", level=2),
+            _typed(6, "Experimental", CanonicalSection.METHODS, "exact_alias", level=2),
+        ]
+        by = _typed_hierarchy(secs)
+        assert (by[2].level, by[4].level, by[4].parent_section_id) == (1, 2, 2), header
+    # A heading that only mentions the results is a discussion part.
+    secs = [
+        _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias", level=2),
+        _typed(2, "Discussion of the results", CanonicalSection.DISCUSSION, "model", level=2),
+        _typed(3, "Author note", CanonicalSection.ENDNOTE, "model", level=2),
     ]
     by = _typed_hierarchy(secs)
     assert (by[3].level, by[3].parent_section_id) == (1, 0)

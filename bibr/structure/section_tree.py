@@ -613,11 +613,43 @@ def _names_part(key: str) -> bool:
     )
 
 
-def _names_discussion_only(text: str) -> bool:
-    """Whether a heading names a discussion part without a results part:
-    "Discussion", "General discussion", not "Results and discussion"."""
-    key = _part_name_key(text)
-    return "discussion" in key and "result" not in key
+# Words that name a results part on their own or beside another part
+# ("Findings and discussion", "Experiments and discussion").
+_RESULTS_PART_NAMES = frozenset(
+    {
+        "result",
+        "results",
+        "finding",
+        "findings",
+        "experiment",
+        "experiments",
+        "experimental results",
+        "empirical results",
+        "resultaten",
+        "résultats",
+        "ergebnisse",
+        "resultados",
+        "risultati",
+        "bulgular",
+    }
+)
+
+
+def _names_results_part(text: str) -> bool:
+    """Whether a heading is, or joins, a results part name ("Results and
+    discussion", "Findings and discussion"; not "Discussion of the results")."""
+    pieces = [piece for piece in _PART_NAME_JOIN_RE.split(_part_name_key(text)) if piece]
+    return any(piece in _RESULTS_PART_NAMES for piece in pieces)
+
+
+def _opens_discussion(sec: PaperSection) -> bool:
+    """Whether a heading opens a discussion part. A part that also reports
+    results ("Results and discussion") is where the results are, not the
+    discussion that ends the body."""
+    header = sec.header or ""
+    if _names_results_part(header):
+        return False
+    return sec.section_type == CanonicalSection.DISCUSSION or "discussion" in _part_name_key(header)
 
 
 def _is_part_name(text: str) -> bool:
@@ -842,7 +874,8 @@ def assign_hierarchy_from_top_level(
     anchor: PaperSection | None = None
     # A discussion part has opened: guessed back matter after it is back
     # matter, not a subsection of the discussion. A study marker ends it:
-    # Study 2's own parts follow.
+    # Study 2's own parts follow (unless the marker is itself a discussion,
+    # "Study 2: Discussion").
     after_discussion = False
 
     for sec in sections:
@@ -881,7 +914,7 @@ def assign_hierarchy_from_top_level(
             sec.parent_section_id = 0
             last_body = sec
             anchor = None
-            after_discussion = False
+            after_discussion = _opens_discussion(sec)
             if number is not None:
                 numbered.append((sec, number.path))
             continue
@@ -982,9 +1015,7 @@ def assign_hierarchy_from_top_level(
             sec.parent_section_id = last_body.section_id
         if sec.level == 1 and sec.section_type in IMRAD_ANCHORS:
             seen.add(sec.section_type)
-        if sec.level == 1 and (
-            sec.section_type == CanonicalSection.DISCUSSION or _names_discussion_only(header)
-        ):
+        if sec.level == 1 and _opens_discussion(sec):
             after_discussion = True
 
 
