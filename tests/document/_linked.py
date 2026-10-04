@@ -102,6 +102,7 @@ DESTS = {
     "figure.1": (3, "/XYZ 72 662 null"),
     "table.1": (3, "/XYZ 72 582 null"),
     "cite.smith2020": (4, "/XYZ 72 704 null"),
+    "section.1": (1, "/XYZ 72 724 null"),
     "section.2": (2, "/XYZ 72 722 null"),
     "equation.3": (2, "/XYZ 72 252 null"),
     "Hfootnote.1": (0, "/XYZ 72 110 null"),
@@ -124,6 +125,7 @@ DEST_XY = {
     "figure.1": (72.0, 662.0),
     "table.1": (72.0, 582.0),
     "cite.smith2020": (72.0, 704.0),
+    "section.1": (72.0, 724.0),
     "section.2": (72.0, 722.0),
     "equation.3": (72.0, 252.0),
     "Hfootnote.1": (72.0, 110.0),
@@ -274,7 +276,7 @@ def _pages() -> tuple[list[bytes], dict[str, Placed]]:
     fifth = out
 
     # Page 5, label "": a closing page.
-    out = text("Supplementary material", 72.0, 700.0)
+    out = text("Appendix: Supplementary material", 72.0, 700.0)
     sixth = out
     return [first, second, third, fourth, fifth, sixth], runs
 
@@ -304,8 +306,142 @@ def _page_labels() -> bytes:
     )
 
 
-def linked_paper() -> bytes:
-    """The six-page paper: page labels, named destinations and the text they point at."""
+TITLE = "Linked Paper Fixture 2026"
+
+
+@dataclass(frozen=True)
+class Bookmark:
+    """An outline entry as the fixture writes it.
+
+    *target* is how the entry points: ``("array", page, view)`` an explicit
+    destination, ``("name", name)`` a named one in /Dest, ``("action", name)``
+    one through a GoTo action, ``("remote", file)`` a jump into another file,
+    ``("number", page)`` a destination whose page is a bare number, or
+    ``("none",)``.
+    """
+
+    title: str
+    level: int
+    target: tuple
+
+
+# The fixture's outline, and what the layer must read of it. The entries the
+# guard drops are the paper's own title (C5), a float (C4), "Contents" (C3), a
+# blank one (C1) and a page number (C2).
+OUTLINE = [
+    Bookmark(TITLE, 0, ("array", 0, "/Fit")),
+    Bookmark("Abstract", 0, ("array", 0, "/XYZ 72 712 null")),
+    Bookmark("1 Introduction", 0, ("name", "section.1")),
+    Bookmark("1.1 Background", 1, ("array", 1, "/FitH 650")),
+    Bookmark("2 Methods", 0, ("action", "section.2")),
+    Bookmark("Figure 1", 1, ("array", 3, "/Fit")),
+    Bookmark("3 Results", 0, ("array", 3, "/XYZ 72 736 null")),
+    Bookmark("References", 0, ("array", 4, "/XYZ 72 744 null")),
+    Bookmark("Contents", 0, ("array", 0, "/Fit")),
+    Bookmark("", 0, ("array", 0, "/Fit")),
+    Bookmark("Supplement", 0, ("remote", "supp.pdf")),
+    Bookmark("Appendix", 0, ("number", 99)),
+    Bookmark("12", 1, ("array", 5, "/Fit")),
+]
+# What each of them reads as: (parent, page, x, y, name).
+OUTLINE_READ = [
+    (None, 0, None, None, None),
+    (None, 0, 72.0, 712.0, None),
+    (None, 1, 72.0, 724.0, "section.1"),
+    (2, 1, None, 650.0, None),
+    (None, 2, 72.0, 722.0, "section.2"),
+    (4, 3, None, None, None),
+    (None, 3, 72.0, 736.0, None),
+    (None, 4, 72.0, 744.0, None),
+    (None, 0, None, None, None),
+    (None, 0, None, None, None),
+    (None, None, None, None, None),
+    (None, None, None, None, None),
+    (11, 5, None, None, None),
+]
+OUTLINE_DROPPED = (
+    (0, "C5_title"),
+    (5, "C4_float"),
+    (8, "C3_nav"),
+    (9, "C1_blank"),
+    (12, "C2_page"),
+)
+
+
+def _pdf_string(value: str) -> bytes:
+    """*value* as a PDF text string: Latin-1 when it fits, UTF-16BE otherwise."""
+    try:
+        raw = value.encode("latin-1")
+    except UnicodeEncodeError:
+        return b"<" + (b"\xfe\xff" + value.encode("utf-16-be")).hex().encode() + b">"
+    return b"(" + raw.replace(b"\\", b"\\\\").replace(b"(", b"\\(").replace(b")", b"\\)") + b")"
+
+
+def _target(target: tuple, page_ids: list[int]) -> bytes:
+    kind = target[0]
+    if kind == "array":
+        return b" /Dest " + _dest(page_ids, target[1], target[2])
+    if kind == "name":
+        return b" /Dest " + _name(target[1])
+    if kind == "action":
+        return b" /A << /S /GoTo /D " + _name(target[1]) + b" >>"
+    if kind == "remote":
+        return b" /A << /S /GoToR /F " + _name(target[1]) + b" /D [0 /Fit] >>"
+    if kind == "number":
+        return b" /Dest [%d /Fit]" % target[1]
+    return b""
+
+
+def _outline(table: Table, page_ids: list[int], bookmarks: list[Bookmark], *, loop: bool) -> int:
+    """The outline's root object; with *loop*, the last top-level entry's /Next is the first."""
+    root = table.add()
+    nodes = [table.add() for _ in bookmarks]
+    parent_of: list[int | None] = []
+    children: dict[int | None, list[int]] = {}
+    stack: list[int] = []
+    for index, bookmark in enumerate(bookmarks):
+        del stack[bookmark.level :]
+        parent = stack[-1] if stack else None
+        parent_of.append(parent)
+        children.setdefault(parent, []).append(index)
+        stack.append(index)
+    for index, bookmark in enumerate(bookmarks):
+        parent = parent_of[index]
+        siblings = children[parent]
+        place = siblings.index(index)
+        body = b"<< /Title " + _pdf_string(bookmark.title)
+        body += b" /Parent %d 0 R" % (nodes[parent] if parent is not None else root)
+        if place > 0:
+            body += b" /Prev %d 0 R" % nodes[siblings[place - 1]]
+        if place < len(siblings) - 1:
+            body += b" /Next %d 0 R" % nodes[siblings[place + 1]]
+        elif loop and parent is None:
+            body += b" /Next %d 0 R" % nodes[siblings[0]]
+        kids = children.get(index)
+        if kids:
+            body += b" /First %d 0 R /Last %d 0 R /Count %d" % (
+                nodes[kids[0]],
+                nodes[kids[-1]],
+                len(kids),
+            )
+        table.fill(nodes[index], body + _target(bookmark.target, page_ids) + b" >>")
+    top = children.get(None, [])
+    if top:
+        table.fill(
+            root,
+            b"<< /Type /Outlines /First %d 0 R /Last %d 0 R /Count %d >>"
+            % (nodes[top[0]], nodes[top[-1]], len(top)),
+        )
+    else:
+        table.fill(root, b"<< /Type /Outlines /Count 0 >>")
+    return root
+
+
+def linked_paper(*, outline: list[Bookmark] | None = OUTLINE, loop: bool = False) -> bytes:
+    """The six-page paper: page labels, named destinations, an outline and the text they point at.
+
+    *outline* are the bookmarks (None for a paper without an outline).
+    """
     table = Table()
     fonts = b" ".join(
         b"/F%d %d 0 R"
@@ -328,8 +464,9 @@ def linked_paper() -> bytes:
         b"<< /Type /Pages /Kids [%s] /Count %d >>"
         % (b" ".join(b"%d 0 R" % page_id for page_id in page_ids), N_PAGES),
     )
-    table.fill(
-        1,
-        b"<< /Type /Catalog /Pages 2 0 R" + _names(page_ids) + _page_labels() + b" >>",
-    )
-    return serialize_pdf(table.bodies)
+    extras = _names(page_ids) + _page_labels()
+    if outline is not None:
+        extras += b" /Outlines %d 0 R" % _outline(table, page_ids, outline, loop=loop)
+    table.fill(1, b"<< /Type /Catalog /Pages 2 0 R" + extras + b" >>")
+    info = table.add(b"<< /Title " + _pdf_string(TITLE) + b" >>")
+    return serialize_pdf(table.bodies, b"/Info %d 0 R" % info)

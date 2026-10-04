@@ -593,9 +593,11 @@ def test_text_sources_and_presence():
     assert presence.has_invisible_layer is True
     assert presence.has_mcids is True
     assert presence.missing_apis == ()
-    # D2 and D3 facts are not read yet.
-    assert presence.has_outline is None and presence.is_tagged is None
-    assert layer.links == [] and layer.struct == [] and layer.outline == []
+    # The paper has no outline; its links and structure are not read yet.
+    assert presence.has_outline is False and presence.outline_guard_pass is False
+    assert layer.outline == [] and layer.outline_guard.reject == "R1_too_few"
+    assert presence.is_tagged is None
+    assert layer.links == [] and layer.struct == []
 
 
 @pytest.mark.parametrize("name", ["synthetic_paper.pdf", "scanned_sample.pdf"])
