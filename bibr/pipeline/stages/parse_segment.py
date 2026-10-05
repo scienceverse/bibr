@@ -36,13 +36,26 @@ def _parse_pdf(ocr_regions, outline=None, *, settings=None, first_page_index=0, 
 
 
 def _page_roles(ocr_regions, layer, *, first_page_index, page_lines):
-    """The document's page roles, also written onto its layer when it has one."""
+    """The document's page roles, from its layer's evidence when it has one, also written onto it.
+
+    The layer is internal: when the writer fails on its evidence, the roles
+    are decided without it.
+    """
     from bibr.structure.page_roles import write_page_roles
 
-    roles = write_page_roles(ocr_regions, first_page_index=first_page_index, page_lines=page_lines)
     if layer is not None:
-        layer.roles.extend(roles.tags)
-    return roles
+        try:
+            roles = write_page_roles(
+                ocr_regions, first_page_index=first_page_index, page_lines=page_lines, layer=layer
+            )
+        except Exception:  # noqa: BLE001 - the internal layer must never fail parsing
+            logger.warning(
+                "Page roles failed on the document layer; continuing without it", exc_info=True
+            )
+        else:
+            layer.roles.extend(roles.tags)
+            return roles
+    return write_page_roles(ocr_regions, first_page_index=first_page_index, page_lines=page_lines)
 
 
 async def _document_layer(fs, settings, *, start_page, end_page):
