@@ -33,7 +33,7 @@ from bibr.document.rebuild import attach_blocks, render_budget
 from bibr.ocr.image_utils import iter_pdf_pages_with_index
 from bibr.ocr.pdf_inspection import inspect_pdf, inspection_to_dict
 from bibr.ocr.types import OcrRegionResult
-from tests.document import _pdfs
+from tests.document import _linked, _pdfs
 
 _FIXTURES = _pdfs.fixture_pdfs()
 _SETTINGS = GlobalSettings()
@@ -241,6 +241,27 @@ def test_a_page_the_rebuild_cannot_open_is_kept_once():
     restored = serialize.from_dict(json.loads(serialize.canonical_bytes(rebuilt)))
     assert serialize.digest(restored) == serialize.digest(rebuilt)
     assert _geometry(restored.page(99)) == (None, None, None, None)
+
+
+def test_the_builder_lets_go_of_what_it_read_page_by_page_once_the_layer_is_finished(monkeypatch):
+    built = []
+
+    class Recording(harvest.LayerBuilder):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            built.append(self)
+
+    monkeypatch.setattr(harvest, "LayerBuilder", Recording)
+    layer = build_document_layer(_linked.linked_paper(), range(_linked.N_PAGES), budget=_BUDGET)
+
+    [builder] = built
+    # The layer holds the result of each of these...
+    assert layer.links and layer.struct and any(page.label for page in layer.pages)
+    assert layer.outline and layer.presence.has_named_dests
+    # ...and the builder none of what they were made from: the raw links, the copies of the
+    # structure elements and the labels (megabytes at the limits), nor the open document.
+    assert builder.raw_links == [] and builder.struct == [] and builder.labels == {}
+    assert builder.doc is None and builder.names is None and builder.resolver is None
 
 
 def test_views_give_none_for_boxes_that_are_not_finite():
