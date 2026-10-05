@@ -1,0 +1,126 @@
+"""The PDF outline (bookmarks), as the PDF declares it.
+
+An entry keeps its title as written, blank or not, its depth and parent, and
+where it points: the 0-based page, the position on it in PDF points and the
+name of the destination when the entry goes by one. Nothing is filtered here:
+:mod:`bibr.document.outline_guard` decides whether the outline is usable.
+
+The walk is bibr's own (first child, next sibling). ``bibr.input.pdf_outline``
+reads the same bookmarks for the heading matcher through pypdfium2's
+``get_toc``, which stops at depth 15 and has the matcher's own filters; this one
+keeps every depth, and a bookmark chain that loops back ends where the loop
+is found.
+
+Everything here calls pdfium and needs the caller's ``pdfium_lock``.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, NamedTuple
+
+from bibr.document import destinations
+from bibr.document.model import OutlineEntry
+
+if TYPE_CHECKING:
+    from bibr.document.harvest import _Api
+
+APIS = (
+    "FPDFBookmark_GetFirstChild",
+    "FPDFBookmark_GetNextSibling",
+    "FPDFBookmark_GetTitle",
+    "FPDFBookmark_GetDest",
+    "FPDFBookmark_GetAction",
+    "FPDFAction_GetType",
+    "FPDF_GetMetaText",
+)
+
+# An outline longer than this is read to this many entries, so a hostile one cannot hold the
+# lock for long: 5,000 take 0.05 s to read. Books have a few thousand entries, and the
+# longest outline on gate192 has 94.
+MAX_ENTRIES = 5_000
+
+
+def meta_title(api: _Api, doc) -> str | None:
+    """The document information dictionary's /Title (None when it has none)."""
+    return destinations.utf16_text(api.FPDF_GetMetaText, doc.raw, b"Title")
+
+
+class Outline(NamedTuple):
+    """What reading the bookmarks gave."""
+
+    entries: list[OutlineEntry]
+    # Why the walk was cut short or failed; None when it read every bookmark.
+    note: str | None
+    # The idx of each entry whose destination was left unresolved because the resolver's
+    # allowance of destinations that point at no page was spent: its page is unknown, not absent.
+    unresolved: list[int]
+
+
+def read_outline(
+    api: _Api, doc, names: destinations.NamedDests | None, resolver: destinations.Resolver
+) -> Outline:
+    """The document's bookmarks in document order, with a note when the walk was cut short.
+
+    A failure partway keeps the entries read so far and says so in the note. The pages
+    the bookmarks point at come from *resolver*, the outline's own.
+    """
+    entries: list[OutlineEntry] = []
+    unresolved: list[int] = []
+    seen: set[int] = set()
+    note: str | None = None
+    # Bookmarks still to visit, as (bookmark, depth, parent entry); the next
+    # sibling goes below its subtree, so a subtree is read before it.
+    pending: list[tuple[Any, int, int | None]] = [
+        (api.FPDFBookmark_GetFirstChild(doc.raw, None), 0, None)
+    ]
+    try:
+        while pending:
+            bookmark, level, parent = pending.pop()
+            if not bookmark:
+                continue
+            address = destinations.address(bookmark)
+            if address in seen:
+                note = "circular bookmark reference"
+                continue
+            if len(entries) >= MAX_ENTRIES:
+                note = f"more than {MAX_ENTRIES} bookmarks, the rest unread"
+                break
+            seen.add(address)
+            idx = len(entries)
+            skipped = resolver.skipped
+            entries.append(_entry(api, doc, bookmark, names, resolver, idx, level, parent))
+            if resolver.skipped != skipped:
+                unresolved.append(idx)
+            pending.append((api.FPDFBookmark_GetNextSibling(doc.raw, bookmark), level, parent))
+            pending.append((api.FPDFBookmark_GetFirstChild(doc.raw, bookmark), level + 1, idx))
+    except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
+        note = f"{type(exc).__name__}: {exc}"[:500]
+    return Outline(entries, note, unresolved)
+
+
+def _entry(
+    api: _Api,
+    doc,
+    bookmark,
+    names: destinations.NamedDests | None,
+    resolver: destinations.Resolver,
+    idx: int,
+    level: int,
+    parent: int | None,
+) -> OutlineEntry:
+    title = destinations.utf16_text(api.FPDFBookmark_GetTitle, bookmark) or ""
+    page = x = y = name = None
+    # An action that is not a jump inside this document (a remote jump, a
+    # URI) names no page of it: pdfium would read its destination all the same.
+    action = api.FPDFBookmark_GetAction(bookmark)
+    internal = not action or api.FPDFAction_GetType(action) == api.c.PDFACTION_GOTO
+    dest = api.FPDFBookmark_GetDest(doc.raw, bookmark) if internal else None
+    if dest:
+        page = resolver.page(dest)
+        if page is not None:
+            x, y = destinations.dest_position(api, dest)
+        if names is not None:
+            name = names.name_of(dest)
+    return OutlineEntry(
+        idx=idx, parent=parent, level=level, title=title, page=page, x=x, y=y, dest_name=name
+    )

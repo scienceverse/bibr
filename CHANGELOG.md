@@ -15,6 +15,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   watermarks) with ids, the text source chosen for each page, and a block for every
   layout region. Pages that fail to read stay in the layer with their error. Nothing
   reads the layer yet, so exports do not change.
+- The document layer also keeps what the PDF declares about its structure: each link
+  annotation with where it points (a page and position, or an address outside the
+  document) and what it points at (a bibliography entry, a float, a section, a footnote
+  or an equation), the structure tree of a tagged PDF joined to the text it holds, the
+  outline with a verdict on whether it is a usable heading tree, and the page labels.
+  Nothing reads them yet, so exports do not change.
 
 ### Fixed
 

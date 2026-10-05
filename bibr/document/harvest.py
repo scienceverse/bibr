@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from bibr.document import ids
+from bibr.document import destinations, ids, links, outline, outline_guard, structure
 from bibr.document.model import (
     COLUMN_DTYPES,
     GLYPH_EXCLUDED,
@@ -51,11 +51,15 @@ from bibr.document.model import (
     DocumentLayer,
     Font,
     Furniture,
+    Link,
+    OutlineEntry,
+    OutlineGuard,
     Page,
     PageColumns,
     Presence,
     RenderRecipe,
     RoleTag,
+    StructElem,
     as_box,
 )
 from bibr.ocr import native_text as nt
@@ -90,6 +94,13 @@ _HARVEST_APIS = (
     "FPDFFont_GetWeight",
     "FPDFFont_GetItalicAngle",
     "FPDFFont_GetIsEmbedded",
+    "FPDF_GetPageLabel",
+    *destinations.APIS,
+    *outline.APIS,
+    *links.APIS,
+    *links.NAME_APIS,
+    *structure.APIS,
+    *structure.CATALOG_APIS,
 )
 
 # How the layout stage renders a page (bibr.ocr.image_utils.iter_pdf_pages_with_index):
@@ -935,6 +946,162 @@ class LayerBuilder:
         self.errors: dict[str, str] = {}
         self.missing = missing_apis()
         self._api = _Api()
+        # The open document, from :meth:`start` until :meth:`finish`.
+        self.doc = None
+        self.n_pages = 0
+        self.names: destinations.NamedDests | None = None
+        # The pages destinations point at. The outline and the links each have an allowance
+        # of destinations that point at no page, so a dead outline cannot starve the links.
+        self.outline_resolver: destinations.Resolver | None = None
+        self.link_resolver: destinations.Resolver | None = None
+        self.labels: dict[int, str | None] = {}
+        # The outline's entries; None until it is read, and when it cannot be.
+        self.outline: list[OutlineEntry] | None = None
+        # The idx of the entries whose destination was left unresolved (their page is unknown).
+        self.outline_unresolved: frozenset[int] = frozenset()
+        self.meta_title: str | None = None
+        self.raw_links: list[links.RawLink] = []
+        # The link annotations gone through so far (``links.MAX_LINKS`` caps them), and
+        # the pages whose link annotations were all read and kept.
+        self.links_enumerated = 0
+        self.links_read: set[int] = set()
+        # Whether the allowance of link annotations ran out: no later page is read.
+        self.links_stopped = False
+        # Where the first link whose destination was left unresolved is (its id).
+        self.links_unresolved_from: str | None = None
+        self.struct: list[structure.Copy] = []
+        # Whether the allowance of structure elements ran out: no later page is given to pdfium.
+        self.struct_stopped = False
+        # Whether /MarkInfo says the PDF is tagged (None until read), and whether
+        # any page was given a structure tree.
+        self.marked: bool | None = None
+        self.struct_tree = False
+
+    def start(self, doc) -> None:
+        """Read what the document declares as a whole: call right after opening *doc*.
+
+        Needs the caller's ``pdfium_lock``, held until :meth:`finish`.
+        """
+        self.doc = doc
+        try:
+            self.n_pages = len(doc)
+            self.outline_resolver = destinations.Resolver(self._api, doc, self.n_pages)
+            self.link_resolver = destinations.Resolver(self._api, doc, self.n_pages)
+            if not self._lacks(destinations.APIS):
+                self.names = destinations.NamedDests(self._api, doc)
+        except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
+            self.errors["named_dests"] = _error_text(exc)
+        if not self._lacks(structure.CATALOG_APIS):
+            try:
+                self.marked = bool(self._api.FPDFCatalog_IsTagged(doc.raw))
+            except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
+                self.errors["tagged"] = _error_text(exc)
+        if self.outline_resolver is None or self._lacks(destinations.APIS + outline.APIS):
+            return
+        try:
+            self.meta_title = outline.meta_title(self._api, doc)
+            read = outline.read_outline(self._api, doc, self.names, self.outline_resolver)
+            self.outline = read.entries
+            self.outline_unresolved = frozenset(read.unresolved)
+            if read.note is not None:
+                self.errors["outline"] = read.note
+            if read.unresolved:
+                first = ids.outline_entry(read.unresolved[0])
+                self.errors["outline_unresolved"] = destinations.unresolved_note(
+                    self.outline_resolver, first
+                )
+        except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
+            self.errors["outline"] = _error_text(exc)
+
+    def _lacks(self, apis: tuple[str, ...]) -> bool:
+        return any(name in self.missing for name in apis)
+
+    def _note(self, key: str, text: str) -> None:
+        """Say *text* under *key* once: a different text for the same key follows the first."""
+        kept = self.errors.get(key)
+        if kept is None:
+            self.errors[key] = text
+        elif text not in kept.split("; "):
+            self.errors[key] = f"{kept}; {text}"
+
+    def _read_label(self, page_index: int) -> None:
+        if self.doc is None or self._lacks(("FPDF_GetPageLabel",)):
+            return
+        try:
+            self.labels[page_index] = destinations.utf16_text(
+                self._api.FPDF_GetPageLabel, self.doc.raw, page_index
+            )
+        except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
+            self.errors[f"label:{page_index}"] = _error_text(exc)
+
+    def _read_links(self, page, page_index: int) -> None:
+        # With the allowance of annotations spent, a later page is not even enumerated.
+        if (
+            self.doc is None
+            or self.link_resolver is None
+            or self.links_stopped
+            or self._lacks(links.APIS + destinations.APIS)
+        ):
+            return
+        try:
+            page_links = links.read_page_links(
+                self._api,
+                self.doc,
+                page,
+                page_index,
+                self.names,
+                self.link_resolver,
+                with_names=not self._lacks(links.NAME_APIS),
+                limit=links.MAX_LINKS - self.links_enumerated,
+            )
+        except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
+            self.errors[f"links:{page_index}"] = _error_text(exc)
+            return
+        self.raw_links.extend(page_links.found)
+        self.links_enumerated += page_links.enumerated
+        self.links_stopped = page_links.stopped
+        if page_links.stopped:
+            self._note(
+                "links",
+                f"more than {links.MAX_LINKS} link annotations, the rest unread from page {page_index}",
+            )
+        if self.links_unresolved_from is None and page_links.first_unresolved is not None:
+            self.links_unresolved_from = ids.make(
+                page_index, links.KIND, page_links.first_unresolved
+            )
+        if page_links.complete:
+            self.links_read.add(page_index)
+        # A link left out or cut short is said under the key of its page, so a page without one
+        # was read whole, if it comes before the page a limit stopped on.
+        for text in (page_links.failure, *page_links.cuts):
+            if text is not None:
+                self._note(f"links:{page_index}", text)
+
+    def _read_struct(self, page, page_index: int) -> None:
+        # pdfium builds a page's whole tree in one call, however little of it is kept, so
+        # once the allowance of elements has run out no later page is given to it.
+        if self._lacks(structure.APIS) or self.struct_stopped:
+            return
+        try:
+            tree = structure.read_page_tree(
+                self._api, page, page_index, limit=structure.MAX_ELEMENTS - len(self.struct)
+            )
+        except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
+            self.errors[f"struct:{page_index}"] = _error_text(exc)
+            return
+        self.struct.extend(tree.copies)
+        self.struct_tree = self.struct_tree or tree.has_tree
+        self.struct_stopped = tree.stopped
+        if tree.stopped:
+            self._note(
+                "struct",
+                f"more than {structure.MAX_ELEMENTS} structure elements, "
+                f"the rest unread from page {page_index}",
+            )
+        for text in tree.cuts:
+            self._note("struct", text)
+        if tree.failure is not None:
+            self.errors[f"struct:{page_index}"] = tree.failure
 
     def records(
         self, textpage, page_index: int
@@ -960,6 +1127,9 @@ class LayerBuilder:
         furniture: list[tuple],
         walk: list | None = None,
     ) -> None:
+        self._read_label(page_index)
+        self._read_links(page, page_index)
+        self._read_struct(page, page_index)
         failed = [text for kind, _box, text in furniture if kind == "error"]
         if failed:
             self.errors[f"furniture:{page_index}"] = failed[0]
@@ -996,6 +1166,67 @@ class LayerBuilder:
             return
         self.drafts.append(packed)
         self._added.add(page_index)
+
+    def _judge_outline(self, pages: list[Page]) -> OutlineGuard | None:
+        """The outline guard's verdict; None when the layer cannot reach it.
+
+        R3 grounds the entries in the text of the whole document, so it runs only
+        on a layer that holds every page, read. On less, a rejection by R1 or R2
+        (which read no text) stands and a pass does not: a part of a document may
+        hold too little text for the 2,000-character gate, and R3 might reject.
+        The same holds for the entries whose destination was left unresolved: only a
+        rejection that does not depend on their pages stands.
+        """
+        if self.outline is None:
+            return None
+        complete = {page.index for page in pages} == set(range(self.n_pages)) and all(
+            page.error is None for page in pages
+        )
+        try:
+            text = outline_guard.PageText(pages, self.n_pages) if complete and pages else None
+            guard = outline_guard.judge(
+                self.outline,
+                meta_title=self.meta_title,
+                n_pages=self.n_pages,
+                text=text,
+                unresolved=self.outline_unresolved,
+            )
+        except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
+            self.errors["outline_guard"] = _error_text(exc)
+            return None
+        if guard is None:
+            return None
+        return guard if complete or not guard.passed else None
+
+    def _build_links(self, pages: list[Page]) -> list[Link] | None:
+        """The links with their classes; None when they could not be read or built."""
+        if self.doc is None or self._lacks(links.APIS + destinations.APIS):
+            return None
+        try:
+            return links.build_links(self.raw_links, pages)
+        except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
+            self.errors["links_build"] = _error_text(exc)
+            return None
+
+    def _merge_struct(self) -> list[StructElem]:
+        """The structure elements, one for each place in the tree; none if they cannot be joined."""
+        try:
+            merged, differing = structure.merge(self.struct)
+        except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
+            self.errors["struct_merge"] = _error_text(exc)
+            return []
+        if differing:
+            self._note("struct", f"{differing} copies of a structure element differ from its first")
+        return merged
+
+    def _is_tagged(self) -> bool | None:
+        """Whether the PDF is tagged: its /MarkInfo says so, as pdfium reads it.
+
+        pdfium gives a page a structure tree only in a PDF whose /MarkInfo says
+        it is tagged (a structure tree root without it reads as no tree), so
+        that a tree was given says the same as the flag does.
+        """
+        return True if self.struct_tree else self.marked
 
     def page_failed(
         self, page_index: int, key: str, exc: BaseException, page: Page | None = None
@@ -1037,6 +1268,17 @@ class LayerBuilder:
                 continue
             pages.append(built)
             roles.extend(tags)
+        # What is read page by page is released once it is merged: the layer holds the result
+        # and the builder is not, so the raw links and the copies of the structure elements
+        # (1.4 MB at the link limit, 4 MB at the element limit) do not outlive their use.
+        for page in pages:
+            page.label = self.labels.get(page.index)
+        self.labels = {}
+        guard = self._judge_outline(pages)
+        built_links = self._build_links(pages)
+        self.raw_links = []
+        struct = self._merge_struct()
+        self.struct = []
         # A fact no examined page shows is unknown, not absent, while another
         # page was not examined. A page's text source counts once decided, even
         # if the page failed later; marked content needs the page's columns.
@@ -1047,6 +1289,12 @@ class LayerBuilder:
             if found:
                 return True
             return False if pages and len(examined) == len(pages) else None
+
+        internal = None
+        if built_links is not None:
+            # A page whose links were not all read, or that could not be opened, might hold one.
+            linked = [page for page in pages if page.index in self.links_read]
+            internal = seen(any(link.action in ("dest", "goto") for link in built_links), linked)
 
         native = seen(any(page.text_source == "native" for page in decided), decided)
         mcids = any(
@@ -1060,11 +1308,23 @@ class LayerBuilder:
             has_invisible_layer=seen(
                 any(page.text_source == "invisible_layer" for page in decided), decided
             ),
+            has_outline=len(self.outline) > 0 if self.outline is not None else None,
+            outline_guard_pass=guard.passed if guard is not None else None,
+            has_internal_links=internal,
+            is_tagged=self._is_tagged(),
             has_mcids=(
                 None if "FPDFPageObj_GetMarkedContentID" in self.missing else seen(mcids, read)
             ),
+            has_named_dests=self.names.count > 0 if self.names is not None else None,
             missing_apis=self.missing,
         )
+        if self.names is not None and self.names.error is not None:
+            self.errors["named_dests"] = self.names.error
+        if self.link_resolver is not None and self.links_unresolved_from is not None:
+            self.errors["links_unresolved"] = destinations.unresolved_note(
+                self.link_resolver, self.links_unresolved_from
+            )
+        self.doc = self.names = self.outline_resolver = self.link_resolver = None
         return DocumentLayer(
             version=LAYER_VERSION,
             pdfium=self.version,
@@ -1072,6 +1332,10 @@ class LayerBuilder:
             index_frame=INDEX_FRAME,
             pages=pages,
             fonts=list(self.fonts.fonts),
+            outline=self.outline or [],
+            outline_guard=guard,
+            links=built_links or [],
+            struct=struct,
             roles=roles,
             presence=presence,
             component_errors=dict(self.errors),
@@ -1115,6 +1379,7 @@ def build_document_layer(
         try:
             if callable(page_indices):
                 page_indices = page_indices(len(doc))
+            builder.start(doc)
             for page_index in page_indices:
                 try:
                     page = doc[page_index]

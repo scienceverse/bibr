@@ -10,23 +10,29 @@ Conventions:
   ``crop_box`` and ``/Rotate`` kept on :class:`Page`. Convert to and from the
   layout frame with ``bibr.document.views.to_layout_bbox`` and
   ``from_layout_bbox``.
-- Page indices are absolute and 0-based.
+- Page indices are absolute and 0-based. Pages in other sources count from 1
+  (``RegionSummary.page``, ``OutlineItem.page_no``); the layer never does.
 - Glyph indices are pdfium char indices of the text page built after
   ``strip_furniture_objects`` ran, under the strip rules :data:`INDEX_FRAME`
   names.
 - Per-page data is held as numpy columns (:class:`PageColumns`).
 - Every derived fact carries a :class:`Decided` saying which rule or model
   made it.
-- Ids are deterministic and page-scoped (:mod:`bibr.document.ids`): blocks
-  ``p3.r12`` (page, post-OCR region index), lines ``p3.l40``, spans
-  ``p3.sp210``.
+- Ids are deterministic and do not move when a layer is built for another page
+  range (:mod:`bibr.document.ids`): blocks ``p3.r12`` (page, post-OCR region
+  index), lines ``p3.l40``, spans ``p3.sp210``, links ``p3.lk4`` (page,
+  position among the page's link annotations). An object of the whole PDF
+  names no page: outline entries ``ol5`` (position in the outline, which is
+  always read whole) and structure elements ``st0.3.2`` (place in the tree).
 
 D1 fills the PDF-native part: glyphs, text objects, fonts, records, spans,
 lines, superscript tags, furniture, render recipes and presence flags, plus
-blocks attached from the post-OCR regions. :class:`Suppressed`,
-:class:`OutlineEntry`, :class:`OutlineGuard`, :class:`Link`,
-:class:`StructElem` and :class:`DecisionRecord` are declared for D2 (links,
-tags, outline) and D3 (layout provenance) and stay empty until then.
+blocks attached from the post-OCR regions. D2 adds what the PDF declares
+about its structure: link annotations with their targets, the structure
+tree, the outline with the outline guard's verdict, page labels and the
+presence flags that tell each of them apart from "absent". :class:`Suppressed`
+and :class:`DecisionRecord` are declared for D3 (layout provenance) and stay
+empty until then.
 """
 
 from __future__ import annotations
@@ -35,9 +41,11 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from bibr.document import ids
+
 # The layer's schema version: bump it with any change to a serialised class,
 # its fields or COLUMN_DTYPES (tests/document/test_layer.py pins the pair).
-LAYER_VERSION = "doclayer/2"
+LAYER_VERSION = "doclayer/3"
 # The furniture strip's rule versions (bibr.ocr.native_text._find_furniture).
 # The strip removes objects before the text page is built, so a rule change
 # moves every glyph, span and line index on the pages it touches: bump the
@@ -285,7 +293,15 @@ class Suppressed:
 
 @dataclass(frozen=True, slots=True)
 class OutlineEntry:
-    """A PDF outline (bookmark) entry (D2)."""
+    """A PDF outline (bookmark) entry, in document order (D2).
+
+    ``idx`` is the entry's position in :attr:`DocumentLayer.outline` (its id is
+    ``ol{idx}``), ``level`` the 0-based depth and ``parent`` the ``idx`` of the
+    entry above. ``page`` is the 0-based target page (None when the entry names
+    no page of this document) and ``x``, ``y`` the destination's position on it
+    in PDF points, where the destination gives one (a coordinate it leaves open,
+    or gives as a number too large for a float, is None).
+    """
 
     idx: int
     parent: int | None
@@ -294,50 +310,99 @@ class OutlineEntry:
     page: int | None
     x: float | None
     y: float | None
+    # The named destination the entry points at, if it uses one.
     dest_name: str | None
+
+    @property
+    def entry_id(self) -> str:
+        return ids.outline_entry(self.idx)
 
 
 @dataclass(frozen=True, slots=True)
 class OutlineGuard:
-    """The outline guard's verdict on the outline (D2)."""
+    """The outline guard's verdict on the outline (D2).
 
-    version: str
+    The rule version is ``decided.version``. ``decided.score`` is the share of
+    the entries the guard kept that are printed on their target page, when it
+    looked at the text layer (None otherwise); its evidence lists the entries
+    that were not.
+    """
+
     passed: bool
+    # R1_too_few | R2_targets | R3_ungrounded; None when the outline passed.
     reject: str | None
-    dropped: tuple[int, ...]
+    # (entry idx, rule) of each entry the cleanup drops before the verdict:
+    # C1_blank | C2_page | C3_nav | C4_float | C5_title | C6_wrapper.
+    dropped: tuple[tuple[int, str], ...]
+    decided: Decided
 
 
 @dataclass(frozen=True, slots=True)
 class Link:
-    """A link annotation and where it points (D2)."""
+    """A link annotation and where it points (D2).
+
+    ``link_id`` is ``p{page}.lk{n}``, ``n`` the link's position among the page's
+    link annotations; a link left out leaves its number unused, so the others
+    keep theirs. One is left out when it cannot be read or has no rectangle that
+    is finite (pdfium reads a number too large for a float as infinity).
+    ``rect`` and ``quads`` (8 numbers each, the corners of the linked text; a
+    quadrilateral that is not finite is dropped) are in PDF points on the
+    link's page. ``target_page`` is the 0-based page an internal link lands on
+    and ``target_xy`` the destination's position there in PDF points (a
+    coordinate the destination leaves open, or gives as infinity, is None);
+    ``bibr.document.views.block_at`` finds the block it lands in once blocks
+    are attached.
+    """
 
     link_id: str
     page: int
     rect: Box
     quads: tuple[tuple[float, ...], ...]
-    # goto | dest | uri | remote | launch | named
+    # dest (the annotation's /Dest) | goto | remote | uri | launch | other (an
+    # action pdfium does not read) | none
     action: str
+    # The URI of a URI action; the file a remote or launch action names.
     uri: str | None
+    # The named destination the link points at, if it uses one, and where
+    # the name came from: annot (the annotation's own /Dest) | table (the
+    # document's named destination with the link's destination).
     dest_name: str | None
     name_source: str | None
     target_page: int | None
-    target_xy: tuple[float, float] | None
-    # bib | float | section | other | external | unresolved
+    target_xy: tuple[float | None, float | None] | None
+    # bib | float | section | footnote | equation | other | external | unresolved
     target_class: str | None
     target: Decided | None
+    # The spans of the text the link covers.
     source_span_ids: tuple[str, ...]
-    target_block_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class StructElem:
-    """A structure-tree element of a tagged PDF (D2)."""
+    """An element of a tagged PDF's structure tree (D2).
+
+    ``path`` is the element's place in the whole tree: its index among its
+    parent's kids, from the root down. The id is ``st`` and the path joined
+    by dots (``st0.3.2``), so it depends on the PDF alone, and ``parent`` is
+    the id of the element above (None for a top-level element). pdfium reads
+    the tree page by page: an element with content on several pages, and each
+    ancestor of such content, comes from each page's tree holding only that
+    page's marked content, and the layer joins those copies into the one
+    element (:func:`bibr.document.structure.merge`).
+
+    ``role`` is the structure type after /RoleMap as pdfium resolves it (one
+    mapping step). ``mcrs`` are the ``(page, mcid)`` pairs of the marked content
+    the element holds directly, from every page read, in page order: an mcid is
+    unique only within its page's content stream, so the page is part of the
+    key, and the text objects that carry it are those whose ``obj_mcid`` is
+    that mcid on that page.
+    """
 
     elem_id: str
     parent: str | None
     role: str
-    mcids: tuple[int, ...]
-    page: int | None
+    mcrs: tuple[tuple[int, int], ...]
+    path: tuple[int, ...]
     alt: str | None
     actual: str | None
     lang: str | None
@@ -358,8 +423,8 @@ class DecisionRecord:
 class Presence:
     """What the document has, so a consumer can tell "absent" from "not read".
 
-    None means the fact was not read (D2 and D3 fill the rest). A fact no
-    read page shows is None, not False, when some page could not be read.
+    None means the fact was not read (D3 fills the rest). A fact no read page
+    shows is None, not False, when some page could not be read.
     """
 
     has_text_layer: bool | None = None
@@ -431,7 +496,7 @@ class Page:
     """
 
     index: int
-    # The PDF page label (D2).
+    # The page's label from the PDF's /PageLabels; None when it defines none.
     label: str | None
     # Geometry: None only for a page that could not be opened or sized.
     width: float | None
@@ -457,6 +522,57 @@ class Page:
     error: str | None = None
 
 
+# The keys of DocumentLayer.component_errors, each with what its text says. A key with {page}
+# is one page's own (the absolute 0-based index); the others are the document's. A failure of a
+# component has a key of its own, apart from the limits and cuts: an empty list under a limit's
+# key was cut short, and under a failure's key was lost. The note of a limit that stopped a read
+# (links, struct) names the first page left unread.
+COMPONENT_ERROR_KEYS: dict[str, str] = {
+    # The layer did not start, or a page did not build.
+    "start": "the layer could not start; none of the PDF's own structure was read",
+    "page:{page}": "the page could not be opened or read; the layer keeps it unread (Page.error)",
+    "harvest:{page}": "the page's data could not be built; kept without its columns (Page.error)",
+    "records:{page}": "the page's char records could not be built",
+    "furniture:{page}": "the page's furniture could not be described",
+    "blocks:{page}": "a post-OCR region of the page has an index other than its position",
+    # Labels, the tagged flag, the named destinations and the outline.
+    "label:{page}": "the page's label could not be read",
+    "tagged": "the catalog's tagged flag could not be read",
+    "named_dests": (
+        "the named destinations could not be opened, are over MAX_NAMED_DESTS and left unread, "
+        "or hold names over MAX_TEXT bytes, counted and left unread"
+    ),
+    "outline": (
+        "the bookmarks were cut short: a failure, a circular reference or more than MAX_ENTRIES"
+    ),
+    "outline_unresolved": (
+        "the outline's allowance of destinations that point at no page was spent; names the "
+        "first entry left unresolved and counts them"
+    ),
+    "outline_guard": "judging the outline failed",
+    # The link annotations.
+    "links": "more than MAX_LINKS link annotations; the rest unread from the page named",
+    "links:{page}": (
+        "a link of the page failed to read, was left out (no rectangle, or one that is not "
+        "finite) or was cut short (more than MAX_QUADS quadrilaterals); a page before the one "
+        "that 'links' names, with no such key, has every link annotation kept whole"
+    ),
+    "links_build": "classing the links failed; links is empty",
+    "links_unresolved": (
+        "the links' allowance of destinations that point at no page was spent; names the first "
+        "link left unresolved and counts them"
+    ),
+    # The structure tree.
+    "struct": (
+        "more than MAX_ELEMENTS structure elements (the rest unread from the page named), an "
+        "element with more than MAX_KIDS kids, a circular reference, or copies of an element "
+        "that differ from its first"
+    ),
+    "struct:{page}": "the page's structure tree failed to read",
+    "struct_merge": "joining the page copies of the structure elements failed; struct is empty",
+}
+
+
 @dataclass(slots=True)
 class DocumentLayer:
     version: str
@@ -467,14 +583,18 @@ class DocumentLayer:
     pages: list[Page]
     fonts: list[Font]
     outline: list[OutlineEntry] = field(default_factory=list)
+    # None when the outline could not be read, the layer lacks the text of some page to
+    # judge it by, or the destinations of some entries were left unresolved and no rule that
+    # needs no page rejects (see :mod:`bibr.document.outline_guard`).
     outline_guard: OutlineGuard | None = None
     links: list[Link] = field(default_factory=list)
     struct: list[StructElem] = field(default_factory=list)
     roles: list[RoleTag] = field(default_factory=list)
     decisions: list[DecisionRecord] = field(default_factory=list)
     presence: Presence = field(default_factory=Presence)
-    # Failures of layer components, keyed like "harvest:3"; they never fail
-    # the paper and never reach PdfInspection.component_errors.
+    # Failures of layer components, and what a limit cut short; they never fail the
+    # paper and never reach PdfInspection.component_errors. COMPONENT_ERROR_KEYS lists the
+    # keys and what each says.
     component_errors: dict[str, str] = field(default_factory=dict)
     # Set by free_columns: every page's cols is then None because the
     # columns were dropped, not because a page has no text layer or failed.

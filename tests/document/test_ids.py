@@ -49,6 +49,75 @@ def test_make_rejects_what_parse_could_not_read(page, kind, n):
         ids.make(page, kind, n)
 
 
+def test_a_document_id_names_no_page():
+    parsed = ids.parse("ol5")
+
+    assert parsed == ids.LayerId(None, "ol", 5)
+    assert parsed.path == (5,)
+    assert str(parsed) == ids.outline_entry(5) == ids.make_document("ol", 5) == "ol5"
+
+
+def test_an_outline_entry_id_is_one_number_and_a_structure_id_a_path():
+    assert ids.parse("ol0") == ids.LayerId(None, "ol", 0)
+    assert ids.parse("ol12").path == (12,)
+    # A path of one level is a structure id too, and a deeper one is not an outline id.
+    assert ids.parse("st0") == ids.LayerId(None, "st", 0)
+    assert ids.parse("st1.2").path == (1, 2)
+    assert ids.make_document("st", 1, 2) == "st1.2"
+    with pytest.raises(ValueError):
+        ids.make_document("ol", 1, 2)
+
+
+def test_a_structure_element_id_is_its_path_in_the_tree():
+    made = ids.struct_element((0, 3, 2))
+    parsed = ids.parse(made)
+
+    assert made == ids.make_document("st", 0, 3, 2) == "st0.3.2"
+    assert parsed == ids.LayerId(None, "st", 2, (0, 3))
+    assert parsed.path == (0, 3, 2)
+    assert str(parsed) == made
+
+
+def test_the_path_of_a_page_id_is_its_index():
+    assert ids.parse("p2.lk17").path == (17,)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        *["ol", "ol05", "ol-1", "ol5.", "ol.5", "ol5x", "OL5", " ol5", "xx5", "r5", "p3", "p3.ol5"],
+        *["st", "st0.", "st0..1", "st.1", "st0.01", "st0.3x", "st0 .3", "p3.st5"],
+        # An outline entry is one number: the tree is in OutlineEntry.parent.
+        *["ol1.2", "ol0.0", "ol1.2.3", "ol5.0"],
+    ],
+)
+def test_parse_rejects_what_is_not_a_document_id_either(text):
+    with pytest.raises(ValueError):
+        ids.parse(text)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [("r", 5), ("ol",), ("ol", -1), ("OL", 1), ("", 1), ("st",), ("st", 0, -1)]
+    + [("ol", 1, 2), ("ol", 0, 0), ("ol", 1, 2, 3)],
+)
+def test_make_document_rejects_what_parse_could_not_read(args):
+    with pytest.raises(ValueError):
+        ids.make_document(*args)
+
+
+@pytest.mark.parametrize("kind", ["ol", "st"])
+def test_a_kind_is_a_page_kind_or_a_document_kind_never_both(kind):
+    with pytest.raises(ValueError):
+        ids.make(3, kind, 5)
+
+
+def test_a_document_id_names_no_block():
+    layer = _layer_of(_page(0))
+
+    assert views.find_block(layer, "ol0") is None
+
+
 def _page(rotation: int) -> Page:
     return Page(
         index=0,
