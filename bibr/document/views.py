@@ -10,17 +10,21 @@ The views that read a page's glyph columns give empty results ("", [] or
 None) for a page without them: a page with no text layer, a page the
 harvest failed on (``Page.error`` is set) and every page once the layer's
 columns were freed (``DocumentLayer.columns_freed``). Check those two
-before reading an empty result as a page without text.
+before reading an empty result as a page without text. The joins of
+:class:`StructIndex` are the exception for a freed layer: an empty join
+would read as a paper without tagged text, so they raise
+:class:`ColumnsFreedError`.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
 
-from bibr.document import ids
+from bibr.document import destinations, ids
 from bibr.document.model import (
     GLYPH_EXCLUDED,
     GLYPH_HYPHEN,
@@ -28,11 +32,24 @@ from bibr.document.model import (
     Block,
     Box,
     DocumentLayer,
+    Link,
     Page,
+    StructElem,
     as_box,
 )
 
 TEXT_SOURCES = ("native", "invisible_layer", "ocr")
+
+
+class ColumnsFreedError(RuntimeError):
+    """The layer's glyph columns were freed, so the text the structure joins to is gone.
+
+    :meth:`StructIndex.span_element`, :meth:`StructIndex.spans_of` and
+    :meth:`StructIndex.link_element` raise it once ``DocumentLayer.columns_freed``
+    is set, whatever the index was asked before and whether it was built before
+    or after the columns were freed. Join before the pipeline frees them (after
+    the last stage that requires the layer), or not at all.
+    """
 
 
 def _finite(values) -> Box | None:
@@ -73,7 +90,8 @@ def find_block(layer: DocumentLayer, block_id: str) -> tuple[Page, Block] | None
         parsed = ids.parse(block_id)
     except ValueError:
         return None
-    page = layer.page(parsed.page)
+    # A document id (an outline entry, a structure element) names no page.
+    page = None if parsed.page is None else layer.page(parsed.page)
     if page is None:
         return None
     if parsed.kind == ids.BLOCK and parsed.n < len(page.blocks):
@@ -249,3 +267,146 @@ def line_text(page: Page, line: int) -> str:
         return ""
     first, end = cols.line_span[line].tolist()
     return "".join(span_text(page, span) for span in range(first, end))
+
+
+def block_at(
+    layer: DocumentLayer, page: int, xy: tuple[float | None, float | None] | None
+) -> Block | None:
+    """The block a destination at *xy* (PDF points, as ``Link.target_xy``) lands in on 0-based *page*.
+
+    The smallest block whose box holds the point; failing that the first block,
+    reading from the top down, whose top edge lies in the band under the
+    point (``destinations.BAND_ABOVE`` points above it to ``BAND_BELOW`` below)
+    and whose box reaches the point's x: a destination sits a little above
+    what it points at. An open x matches any block; an open y, which is a
+    whole page or its left margin, lands in none. A block without a box (a
+    region the layout gave none) is never the one it lands in.
+    """
+    target = layer.page(page)
+    if target is None or xy is None:
+        return None
+    x, y = xy
+    if y is None:
+        return None
+    above, below = destinations.BAND_ABOVE, destinations.BAND_BELOW
+
+    def reaches(box: Box, slack: float) -> bool:
+        return x is None or box[0] - slack <= x <= box[2] + slack
+
+    boxed = [b for b in target.blocks if b.bbox_pdf is not None]
+    holding = [b for b in boxed if b.bbox_pdf[1] <= y <= b.bbox_pdf[3] and reaches(b.bbox_pdf, 0.0)]
+    if holding:
+        return min(
+            holding, key=lambda b: (b.bbox_pdf[2] - b.bbox_pdf[0]) * (b.bbox_pdf[3] - b.bbox_pdf[1])
+        )
+    under = [
+        b for b in boxed if y - below <= b.bbox_pdf[3] <= y + above and reaches(b.bbox_pdf, above)
+    ]
+    return min(under, key=lambda b: (-b.bbox_pdf[3], b.bbox_pdf[0])) if under else None
+
+
+class StructIndex:
+    """A layer's structure elements by id and by the marked content they hold.
+
+    An mcid names marked content on one page only, so an element is found by
+    ``(page, mcid)``: the mcid a text object carries in ``PageColumns.obj_mcid``
+    with the object's page. The join runs both ways: :meth:`span_element` from
+    text to the element that holds it, :meth:`spans_of` from an element to its
+    text. A page without columns (see the module docstring) holds no text to
+    join: :meth:`span_element` gives None for it, :meth:`spans_of` no spans of
+    it, and the elements and their marked content stay.
+
+    A layer whose columns were freed (``DocumentLayer.columns_freed``) has no
+    text on any page, so the three joins (:meth:`span_element`,
+    :meth:`spans_of` and :meth:`link_element`) raise :class:`ColumnsFreedError`
+    on every call, whenever the index was built and whatever it answered
+    before. The tree itself (``by_id``, ``by_mcr``, ``children``,
+    :meth:`ancestors`) stays.
+    """
+
+    def __init__(self, layer: DocumentLayer) -> None:
+        self.layer = layer
+        self.by_id = {elem.elem_id: elem for elem in layer.struct}
+        self.by_mcr: dict[tuple[int, int], StructElem] = {}
+        self.children: dict[str, list[StructElem]] = {}
+        self._mcr_spans: dict[tuple[int, int], list[int]] | None = None
+        for elem in layer.struct:
+            if elem.parent is not None:
+                self.children.setdefault(elem.parent, []).append(elem)
+            for mcr in elem.mcrs:
+                self.by_mcr.setdefault(mcr, elem)
+
+    def ancestors(self, elem: StructElem) -> Iterator[StructElem]:
+        """The elements above *elem*, nearest first."""
+        while elem.parent is not None:
+            elem = self.by_id[elem.parent]
+            yield elem
+
+    def _need_columns(self) -> None:
+        if self.layer.columns_freed:
+            raise ColumnsFreedError(
+                "the layer's glyph columns were freed, so no text joins to the structure tree"
+            )
+
+    def span_element(self, page: Page, span: int) -> StructElem | None:
+        """The element that holds the marked content the span's text is in.
+
+        None for text in no marked content and for text inside an artifact.
+        Raises :class:`ColumnsFreedError` on a layer whose columns were freed.
+        """
+        self._need_columns()
+        cols = page.cols
+        if cols is None:
+            return None
+        obj = int(cols.span_obj[span])
+        if obj < 0 or cols.obj_artifact[obj] or cols.obj_mcid[obj] < 0:
+            return None
+        return self.by_mcr.get((page.index, int(cols.obj_mcid[obj])))
+
+    def spans_of(self, elem: StructElem) -> list[str]:
+        """The ids of the spans of the text *elem* holds, with that of the elements below it.
+
+        The ids come in page order and, on a page, in span order: the order of the
+        page's spans, which is not always the order the text was drawn. Raises
+        :class:`ColumnsFreedError` on a layer whose columns were freed, even when
+        an earlier call found the spans.
+        """
+        self._need_columns()
+        if self._mcr_spans is None:
+            self._mcr_spans = {}
+            for page in self.layer.pages:
+                cols = page.cols
+                if cols is None:
+                    continue
+                for span in range(len(cols.span_rec)):
+                    obj = int(cols.span_obj[span])
+                    if obj >= 0 and not cols.obj_artifact[obj] and cols.obj_mcid[obj] >= 0:
+                        key = (page.index, int(cols.obj_mcid[obj]))
+                        self._mcr_spans.setdefault(key, []).append(span)
+        found: set[tuple[int, int]] = set()
+        pending = [elem]
+        while pending:
+            member = pending.pop()
+            pending.extend(self.children.get(member.elem_id, ()))
+            for mcr in member.mcrs:
+                found.update((mcr[0], span) for span in self._mcr_spans.get(mcr, ()))
+        return [ids.span(page, span) for page, span in sorted(found)]
+
+    def link_element(self, link: Link) -> StructElem | None:
+        """The Link element that wraps the text a link annotation covers, or None.
+
+        pdfium names no annotation for an element's object reference, so the
+        pair is found through the text: the first covered span that sits in a
+        Link element, or under one. Raises :class:`ColumnsFreedError` on a layer
+        whose columns were freed.
+        """
+        self._need_columns()
+        page = self.layer.page(link.page)
+        if page is None:
+            return None
+        for span_id in link.source_span_ids:
+            elem = self.span_element(page, int(span_id.rsplit(".sp", 1)[1]))
+            for candidate in () if elem is None else (elem, *self.ancestors(elem)):
+                if candidate.role == "Link":
+                    return candidate
+        return None

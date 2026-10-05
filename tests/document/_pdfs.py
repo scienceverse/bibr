@@ -150,6 +150,14 @@ def build_pdf(pages: list[PageSpec]) -> bytes:
         b" ".join(b"%d 0 R" % kid for kid in kids),
         len(kids),
     )
+    return serialize_pdf(objects)
+
+
+def serialize_pdf(objects: list[bytes], trailer: bytes = b"") -> bytes:
+    """A PDF of *objects* (object number = position + 1), the catalog first.
+
+    *trailer* adds entries to the trailer dictionary (``/Info 7 0 R``).
+    """
     out = bytearray(b"%PDF-1.4\n")
     offsets = []
     for number, body in enumerate(objects, start=1):
@@ -159,8 +167,9 @@ def build_pdf(pages: list[PageSpec]) -> bytes:
     out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
     for offset in offsets:
         out += b"%010d 00000 n \n" % offset
-    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (
+    out += b"trailer\n<< /Size %d /Root 1 0 R%s >>\nstartxref\n%d\n%%%%EOF\n" % (
         len(objects) + 1,
+        b" " + trailer if trailer else b"",
         xref,
     )
     return bytes(out)
@@ -295,4 +304,8 @@ def fixture_pdfs() -> dict[str, bytes]:
     found[SAMPLE_PAPER.name] = SAMPLE_PAPER.read_bytes()
     found["synthetic_paper.pdf"] = synthetic_paper()
     found["line_numbered_reference.pdf"] = _reference_page()
+    # Imported here: the module builds on this one.
+    from tests.document._linked import linked_paper
+
+    found["linked_paper.pdf"] = linked_paper()
     return found

@@ -33,7 +33,7 @@ from bibr.document.rebuild import attach_blocks, render_budget
 from bibr.ocr.image_utils import iter_pdf_pages_with_index
 from bibr.ocr.pdf_inspection import inspect_pdf, inspection_to_dict
 from bibr.ocr.types import OcrRegionResult
-from tests.document import _pdfs
+from tests.document import _linked, _pdfs
 
 _FIXTURES = _pdfs.fixture_pdfs()
 _SETTINGS = GlobalSettings()
@@ -243,6 +243,28 @@ def test_a_page_the_rebuild_cannot_open_is_kept_once():
     assert _geometry(restored.page(99)) == (None, None, None, None)
 
 
+def test_the_builder_lets_go_of_what_it_read_page_by_page_once_the_layer_is_finished(monkeypatch):
+    built = []
+
+    class Recording(harvest.LayerBuilder):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            built.append(self)
+
+    monkeypatch.setattr(harvest, "LayerBuilder", Recording)
+    layer = build_document_layer(_linked.linked_paper(), range(_linked.N_PAGES), budget=_BUDGET)
+
+    [builder] = built
+    # The layer holds the result of each of these...
+    assert layer.links and layer.struct and any(page.label for page in layer.pages)
+    assert layer.outline and layer.presence.has_named_dests
+    # ...and the builder none of what they were made from: the raw links, the copies of the
+    # structure elements and the labels (megabytes at the limits), nor the open document.
+    assert builder.raw_links == [] and builder.struct == [] and builder.labels == {}
+    assert builder.doc is None and builder.names is None
+    assert builder.outline_resolver is None and builder.link_resolver is None
+
+
 def test_views_give_none_for_boxes_that_are_not_finite():
     _inspection, layer = _synthetic_layer()
     page = layer.page(0)
@@ -265,6 +287,22 @@ def test_a_failure_to_finish_the_layer_leaves_the_inspection(monkeypatch):
 
     assert on.document is None
     assert json.dumps(inspection_to_dict(on)) == json.dumps(inspection_to_dict(off))
+
+
+def test_a_failure_to_start_the_layer_stays_in_the_layer(monkeypatch):
+    pdf_bytes = _pdfs.synthetic_paper()
+    off = _inspect(pdf_bytes, layer=False)
+    whole = _inspect(pdf_bytes, layer=True).document
+
+    def broken(_self, _doc):
+        raise RuntimeError("start failed")
+
+    monkeypatch.setattr(harvest.LayerBuilder, "start", broken)
+    on = _inspect(pdf_bytes, layer=True)
+
+    assert json.dumps(inspection_to_dict(on)) == json.dumps(inspection_to_dict(off))
+    assert on.document.component_errors == {"start": "RuntimeError: start failed"}
+    assert [page.index for page in on.document.pages] == [page.index for page in whole.pages]
 
 
 # --- Parity with the pipeline's own reads ---------------------------------------
@@ -574,9 +612,25 @@ def test_a_schema_change_comes_with_a_new_layer_version():
     # column dtypes. A change to any of them changes what a stored layer
     # decodes to: bump LAYER_VERSION with it and pin the new pair here.
     assert (LAYER_VERSION, _schema_digest()) == (
-        "doclayer/2",
-        "8411a09080217e7b56828954a8699cbe9aa9843cd2dc06f57ac65959373e5e78",
+        "doclayer/3",
+        "9b04d13d0fe391a4bf899a1a87ccabfb84a85a2ce5d71c9914d3df97698e1798",
     )
+
+
+def test_the_readers_limits_are_the_ones_a_shared_pdfium_lock_can_carry():
+    # What a hostile PDF may hold the process-wide pdfium lock for: each count is far above
+    # the busiest gate192 paper (607 named destinations, 920 links, 94 outline entries, 3,560
+    # structure elements, 411 kids) and costs a quarter of a second or less to read.
+    # Raising one is a decision about every request waiting on the lock.
+    from bibr.document import destinations, links, outline, structure
+
+    assert destinations.MAX_NAMED_DESTS == 2_000
+    assert links.MAX_LINKS == 10_000
+    assert outline.MAX_ENTRIES == 5_000
+    assert structure.MAX_ELEMENTS == 20_000
+    assert structure.MAX_KIDS == 2_000
+    assert links.MAX_QUADS == 256
+    assert destinations.MAX_TEXT == 1 << 16
 
 
 # --- What the layer reads ---------------------------------------------------------
@@ -593,9 +647,12 @@ def test_text_sources_and_presence():
     assert presence.has_invisible_layer is True
     assert presence.has_mcids is True
     assert presence.missing_apis == ()
-    # D2 and D3 facts are not read yet.
-    assert presence.has_outline is None and presence.is_tagged is None
-    assert layer.links == [] and layer.struct == [] and layer.outline == []
+    # The paper declares no outline, links or structure: each is absent, not unread.
+    assert presence.has_outline is False and presence.outline_guard_pass is False
+    assert layer.outline == [] and layer.outline_guard.reject == "R1_too_few"
+    assert presence.is_tagged is False
+    assert presence.has_internal_links is False
+    assert layer.links == [] and layer.struct == []
 
 
 @pytest.mark.parametrize("name", ["synthetic_paper.pdf", "scanned_sample.pdf"])
