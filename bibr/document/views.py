@@ -2,7 +2,8 @@
 
 Each view reproduces a string or record bibr's pipeline already computes, from
 the layer alone: :func:`block_text` the native fill of a region,
-:func:`page_lines` the reference line stream's page lines and
+:func:`page_lines` the reference line stream's page lines,
+:func:`printed_char_records` the DOI evidence's char records and
 :func:`bbox_pdf_pts` a region's ``_bbox_pdf_pts``. The tests hold them to
 byte equality with the pipeline's own values.
 
@@ -28,6 +29,7 @@ from bibr.document import destinations, ids
 from bibr.document.model import (
     GLYPH_EXCLUDED,
     GLYPH_HYPHEN,
+    GLYPH_INVISIBLE_RENDER,
     GLYPH_NO_BOX,
     Block,
     Box,
@@ -232,6 +234,46 @@ def page_chars(page: Page) -> list[tuple[str, Box]]:
             raise ValueError(f"char {index} has no box")
         chars.append((ch, tuple(boxes[index])))
     return compose_spacing_accents(chars)
+
+
+def printed_char_records(page: Page) -> list[tuple[str, float, float, bool]]:
+    """The ``(char, centre x, centre y, is_newline)`` records the DOI evidence reads.
+
+    ``bibr.extract.pdf_doi_evidence._printed_char_records`` on the page's text
+    page: a UTF-16 surrogate pair joined into one char (U+FFFD for a lone
+    half or a code beyond Unicode), a line break as a newline record at
+    (0, 0), and every other char at the centre of its tight box, except a
+    char of a text object drawn in an unpainted render mode (3 or 7) and a
+    char without a box.
+
+    [] for a page without columns, including a failed page: check
+    ``page.error`` and ``DocumentLayer.columns_freed``.
+    """
+    cols = page.cols
+    if cols is None:
+        return []
+    codes = cols.cp.tolist()
+    flags = cols.gflags.tolist()
+    boxes = cols.box.tolist()
+    records: list[tuple[str, float, float, bool]] = []
+    count = len(codes)
+    index = 0
+    while index < count:
+        code = codes[index]
+        width = 1
+        if 0xD800 <= code <= 0xDBFF and index + 1 < count:
+            low = codes[index + 1]
+            if 0xDC00 <= low <= 0xDFFF:
+                code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
+                width = 2
+        ch = "\ufffd" if 0xD800 <= code <= 0xDFFF or code > 0x10FFFF else chr(code)
+        if ch in ("\n", "\r"):
+            records.append((ch, 0.0, 0.0, True))
+        elif not flags[index] & (GLYPH_INVISIBLE_RENDER | GLYPH_NO_BOX):
+            left, bottom, right, top = boxes[index]
+            records.append((ch, (left + right) / 2.0, (bottom + top) / 2.0, False))
+        index += width
+    return records
 
 
 def page_lines(page: Page) -> list[dict[str, Any]]:
