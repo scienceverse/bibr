@@ -21,6 +21,7 @@ from bibr.structure.page_roles import (
     WATERMARK,
     write_page_roles,
 )
+from bibr.structure.pdf_parser import PDFParser
 from tests.document._pdfs import PageSpec, build_pdf, marked, text
 from tests.ocr.test_line_number_column import _reference_page
 from tests.ocr.test_watermark_text import _REVIEW_WATERMARK, _body
@@ -318,3 +319,28 @@ def test_a_footer_role_follows_the_position_of_the_block():
     roles = write_page_roles(pages)
 
     assert roles.block(0, 1).role == RUNNING_FOOTER
+
+
+# --- The parser reads the roles ------------------------------------------------------
+
+
+def test_the_parser_drops_a_page_number_without_filing_it_as_a_running_head():
+    pages = [
+        [
+            _region(HEADER, (60, 20, 600, 40)),
+            _region("The first page opens the study.", (60, 200, 940, 800)),
+            _region("11", (480, 950, 520, 970)),
+        ],
+        [
+            _region(HEADER, (60, 20, 600, 40)),
+            _region("The second page reports its results.", (60, 200, 940, 800)),
+            _region("12", (480, 950, 520, 970)),
+        ],
+    ]
+    roles = write_page_roles(pages)
+    assert roles.block(0, 2).role == PAGE_NUMBER
+
+    contents = PDFParser(json_result=pages, page_roles=roles).parse()
+
+    assert contents.detected_headers == [HEADER, HEADER]
+    assert not any(sentence.text.strip() in {"11", "12"} for sentence in contents.sentences)
