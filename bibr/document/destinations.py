@@ -119,16 +119,25 @@ class NamedDests:
         # One call for each name, into a buffer that holds the longest name read: asking
         # for the size first would walk the name tree twice.
         buffer = ctypes.create_string_buffer(MAX_TEXT)
+        too_long = 0
         for index in range(self.count):
             size = ctypes.c_long(MAX_TEXT)
             dest = api.FPDF_GetNamedDest(self._doc.raw, index, buffer, ctypes.byref(size))
             # No destination at the index: nothing. A name too long for the buffer: pdfium
-            # still returns the destination, with a size of -1. The size includes the NUL.
-            if not dest or not 2 < size.value <= MAX_TEXT:
+            # still returns the destination, with a size of -1; the name is left unread, and
+            # counted. The size includes the NUL.
+            if not dest:
                 continue
-            name = ctypes.string_at(buffer, size.value - 2).decode("utf-16-le", "replace")
-            found.setdefault(address(dest), name)
-            self._by_name.setdefault(name, dest)
+            if not 0 <= size.value <= MAX_TEXT:
+                too_long += 1
+            elif size.value > 2:
+                name = ctypes.string_at(buffer, size.value - 2).decode("utf-16-le", "replace")
+                found.setdefault(address(dest), name)
+                self._by_name.setdefault(name, dest)
+        if too_long:
+            self.error = (
+                f"{too_long} named destinations with a name over {MAX_TEXT} bytes, left unread"
+            )
         return found
 
 

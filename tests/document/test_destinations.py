@@ -231,7 +231,47 @@ def test_a_name_too_long_for_the_buffer_is_skipped_and_the_others_are_read(monke
         assert read == {name for name in every if 2 * len(name) + 2 <= limit}
         assert 0 < len(read) < len(every)
         assert all(names.name_of(names.dest_of(name)) == name for name in read)
-        assert names.error is None
+        # The names left unread are counted, not lost without a word.
+        assert names.error == (
+            f"{len(every) - len(read)} named destinations with a name over {limit} bytes, left unread"
+        )
+
+
+def _paper_with_a_long_name(*, link: bool) -> bytes:
+    """A one-page PDF with two named destinations, the second with a name of 40,000 characters
+    (80,002 bytes as the UTF-16 pdfium returns it), and, with *link*, a link to an explicit
+    destination: the kind a name is looked up for in the table."""
+    names = b"(a) [3 0 R /Fit] (" + b"x" * 40_000 + b") [3 0 R /Fit]"
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R /Names << /Dests << /Names [" + names + b"] >> >> >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]%s >>"
+        % (b" /Annots [4 0 R]" if link else b""),
+    ]
+    if link:
+        objects.append(
+            b"<< /Type /Annot /Subtype /Link /Rect [10 10 100 20] /Border [0 0 0] "
+            b"/Dest [3 0 R /Fit] >>"
+        )
+    return _pdfs.serialize_pdf(objects)
+
+
+def test_a_name_over_the_limit_is_counted_in_the_note_of_the_layer():
+    layer = build_document_layer(_paper_with_a_long_name(link=True), [0], budget=_BUDGET)
+
+    assert layer.component_errors == {
+        "named_dests": f"1 named destinations with a name over {destinations.MAX_TEXT} bytes, left unread"
+    }
+    assert layer.presence.has_named_dests is True
+    assert [link.target_page for link in layer.links] == [0]
+
+
+def test_the_names_of_a_document_nothing_looks_one_up_in_are_not_read_or_counted():
+    layer = build_document_layer(_paper_with_a_long_name(link=False), [0], budget=_BUDGET)
+
+    # The table is read when a link or a bookmark needs a name, and not otherwise.
+    assert layer.component_errors == {}
+    assert layer.presence.has_named_dests is True
 
 
 # --- Destinations that point at no page --------------------------------------------
