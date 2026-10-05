@@ -134,10 +134,19 @@ LABEL_TREATMENT: dict[str, str] = {
     "aside_text": "abandon",
 }
 
-# The treatments of the regions a page-role tag demotes: the parser would
+# The treatments of the regions a running-head tag demotes: the parser would
 # otherwise read them as text or as a heading. A region the layout labels as
 # furniture is dispatched by its label already.
 _DEMOTED_TREATMENTS = frozenset({"content", "heading"})
+# A page number, a watermark or a line number is no text of the article under
+# any label that reads text: a margin line-number column the layout labels
+# ``figure_title`` would otherwise land in the body as a row of numbers.
+_FURNITURE_DEMOTED_TREATMENTS = _DEMOTED_TREATMENTS | {
+    "section_hint",
+    "footnote",
+    "caption",
+    "table_caption",
+}
 # The page roles whose demoted regions ``detected_headers`` keeps. A page
 # number, a watermark or a line number is dropped: its tag holds it.
 _RUNNING_HEAD_ROLES = frozenset({RUNNING_HEADER, RUNNING_FOOTER})
@@ -816,9 +825,11 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 effective = native_label if native_label in LABEL_TREATMENT else label
                 clean_content = fix_ocr_artifacts(region.content)
                 self._clean_region_content[(page_idx, region_idx)] = clean_content
-                if (
-                    roles.block(page_idx, region_idx) is not None
-                    and LABEL_TREATMENT.get(effective) in _DEMOTED_TREATMENTS
+                tag = roles.block(page_idx, region_idx)
+                if tag is not None and LABEL_TREATMENT.get(effective) in (
+                    _DEMOTED_TREATMENTS
+                    if tag.role in _RUNNING_HEAD_ROLES
+                    else _FURNITURE_DEMOTED_TREATMENTS
                 ):
                     self._running_header_regions.add((page_idx, region_idx))
                 if effective != "doc_title":

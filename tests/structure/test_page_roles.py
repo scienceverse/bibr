@@ -256,7 +256,11 @@ def test_a_number_the_label_does_not_give_the_page_is_left_alone():
 # --- The furniture strip -----------------------------------------------------------
 
 
-def test_the_strip_furniture_and_a_line_number_column_read_by_ocr_are_tagged():
+def _line_number_column(label: str = "text"):
+    """A line-numbered page: its PDF, the strip's numbers, and regions for the column and the body.
+
+    The column's OCR text is the numbers the strip removed from the text layer.
+    """
     pdf_bytes = _reference_page()
     probe = build_document_layer(pdf_bytes, range(1), budget=None)
     numbers = probe.page(0).furniture
@@ -268,7 +272,14 @@ def test_the_strip_furniture_and_a_line_number_column_read_by_ocr_are_tagged():
     column = _layout_box(probe, 0, (left, bottom, right, top))
     body = _layout_box(probe, 0, (right + 4.0, bottom, 560.0, top))
     printed = " ".join(item.text for item in numbers)
-    pages = [[_region(printed, column), _region("References", body)]]
+    pages = [[_region(printed, column, label), _region("References", body)]]
+    return pdf_bytes, numbers, pages
+
+
+def test_the_strip_furniture_and_a_line_number_column_read_by_ocr_are_tagged():
+    pdf_bytes, numbers, pages = _line_number_column()
+    printed = pages[0][0]["content"]
+    column = pages[0][0]["bbox_2d"]
     layer = _layer(pdf_bytes, pages)
 
     roles = write_page_roles(pages, layer=layer)
@@ -344,3 +355,18 @@ def test_the_parser_drops_a_page_number_without_filing_it_as_a_running_head():
 
     assert contents.detected_headers == [HEADER, HEADER]
     assert not any(sentence.text.strip() in {"11", "12"} for sentence in contents.sentences)
+
+
+def test_the_parser_drops_a_line_number_column_the_layout_calls_a_caption():
+    pdf_bytes, numbers, pages = _line_number_column("figure_title")
+    roles = write_page_roles(pages, layer=_layer(pdf_bytes, pages))
+    assert roles.block(0, 0).role == LINE_NUMBER
+
+    contents = PDFParser(json_result=pages, page_roles=roles).parse()
+
+    # Not a caption candidate, which an unassigned caption would leave in the body.
+    receipt = contents.caption_assignment_receipt
+    candidates = receipt.candidates if receipt is not None else ()
+    assert not any(numbers[0].text in candidate.text for candidate in candidates)
+    assert not any(numbers[0].text in sentence.text for sentence in contents.sentences)
+    assert contents.detected_headers == []
