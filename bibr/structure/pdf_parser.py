@@ -65,7 +65,13 @@ from bibr.structure.floats_normalize import (
     remap_caption_receipt,
 )
 from bibr.structure.footnote_buffer import FootnoteBuffer, printed_marker
-from bibr.structure.page_roles import REPEAT_MAX_LEN, heading_key, write_page_roles
+from bibr.structure.page_roles import (
+    REPEAT_MAX_LEN,
+    RUNNING_FOOTER,
+    RUNNING_HEADER,
+    heading_key,
+    write_page_roles,
+)
 from bibr.structure.parse_headings import HeadingHandlersMixin
 from bibr.structure.parse_media import MediaHandlersMixin
 from bibr.structure.parse_text import TextHandlersMixin
@@ -128,10 +134,13 @@ LABEL_TREATMENT: dict[str, str] = {
     "aside_text": "abandon",
 }
 
-# The treatments of the regions a page-role tag demotes to running heads: the
-# parser would otherwise read them as text or as a heading. A region the
-# layout labels as furniture is dispatched by its label already.
+# The treatments of the regions a page-role tag demotes: the parser would
+# otherwise read them as text or as a heading. A region the layout labels as
+# furniture is dispatched by its label already.
 _DEMOTED_TREATMENTS = frozenset({"content", "heading"})
+# The page roles whose demoted regions ``detected_headers`` keeps. A page
+# number, a watermark or a line number is dropped: its tag holds it.
+_RUNNING_HEAD_ROLES = frozenset({RUNNING_HEADER, RUNNING_FOOTER})
 
 # A row that opens an abstract or a keyword list, in any language the section
 # aliases know: the bare heading ("RÉSUMÉ") or its lead-in ("Key words: …",
@@ -771,10 +780,11 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         """Demote the regions that are page furniture, or that act like it.
 
         The page-role writer (:mod:`bibr.structure.page_roles`) decides which
-        regions are running heads and feet, and tags them; a tagged region is
-        demoted, whatever label the layout model gave it (``header`` and
-        ``footer`` regions are furniture by their label already). Two
-        demotions here are not page roles:
+        regions are page furniture (running heads and feet, page numbers,
+        watermarks, line numbers), and tags them; a tagged region is demoted,
+        whatever label the layout model gave it (``header`` and ``footer``
+        regions are furniture by their label already). Two demotions here are
+        not page roles:
 
         1. **Repeated legend rows** — two or more repeated body rows printed
            together (a chart legend or a table key reprinted with each float)
@@ -874,6 +884,12 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 "Demoted %d heading regions detected as running headers",
                 len(self._running_header_regions),
             )
+
+    def _is_running_head(self, page_idx: int, region_idx: int) -> bool:
+        """Whether a demoted region is a running head or foot (or demoted without a tag)."""
+        roles = self._page_roles
+        tag = roles.block(page_idx, region_idx) if roles is not None else None
+        return tag is None or tag.role in _RUNNING_HEAD_ROLES
 
     def _is_later_doc_title_furniture(
         self,
@@ -1192,9 +1208,11 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             # paragraph_title heading OR body ``text``). Routing to
             # ``_handle_structural`` keeps the furniture out of section
             # content (so it never pollutes the References block) while
-            # preserving it via ``detected_headers``.
+            # preserving it via ``detected_headers``; other page furniture
+            # is kept by its page-role tag only.
             if (page_idx, region_idx) in self._running_header_regions:
-                self._handle_structural("header", content)
+                if self._is_running_head(page_idx, region_idx):
+                    self._handle_structural("header", content)
                 continue
 
             if treatment == "structural":
