@@ -33,13 +33,15 @@ APIS = (
 # 0.24 s in the worst shape (one name to a leaf under one root). The most on gate192 is
 # 607 names, and its p90 is 199.
 MAX_NAMED_DESTS = 2_000
-# The document's destinations that point at no page are resolved at most this many times,
-# the outline's and the links' together; after that none is resolved. pdfium finds the page
-# of a destination whose object is not a page by walking the page tree, so each costs time
-# in proportion to the page count (1,000 of them in a 20,000-page file take 1.1 s under
-# the lock), and a hostile file can hold thousands. A destination that resolves to a
-# page is cheap and does not count.
-MAX_UNRESOLVED = 256
+# pdfium finds the page of a destination whose object is not a page by walking the page
+# tree, so each costs time in proportion to the page count (about 54 ns a page: 1,000 of them
+# in a 20,000-page file took 1.1 s under the lock), and a hostile file can hold thousands. A
+# reader may resolve destinations that point at no page until its walks times the page count
+# would pass MAX_PAGE_CHECKS (about 0.3 s), and at least MIN_UNRESOLVED of them whatever the
+# page count: 256 in a file of 20,000 pages, 250,000 in one of 20, which no paper reaches. A
+# destination that resolves to a page is cheap and does not count.
+MAX_PAGE_CHECKS = 5_000_000
+MIN_UNRESOLVED = 256
 # A string over this many bytes reads as absent, so a hostile one is never copied whole
 # (the longest URI or alt text on gate192 and the manuscripts is 872 characters).
 MAX_TEXT = 1 << 16
@@ -136,27 +138,37 @@ def dest_page(api: _Api, doc, dest, n_pages: int) -> int | None:
     return int(index) if 0 <= index < n_pages else None
 
 
-class Resolver:
-    """The page each destination of a document points at, with a limit on those that point at none.
+def unresolved_allowance(n_pages: int) -> int:
+    """How many destinations that point at no page a reader may resolve in a document of *n_pages*.
 
-    The outline and the link reader share one, so the limit is the document's.
-    After :data:`MAX_UNRESOLVED` destinations that point at no page no further
-    destination is resolved: :meth:`page` gives None for it without asking pdfium.
+    As many as keep their walks times the page count within :data:`MAX_PAGE_CHECKS`, and at
+    least :data:`MIN_UNRESOLVED`: ``max(MIN_UNRESOLVED, MAX_PAGE_CHECKS // n_pages)``.
+    """
+    return max(MIN_UNRESOLVED, MAX_PAGE_CHECKS // max(n_pages, 1))
+
+
+class Resolver:
+    """The page each destination of one reader points at, with a limit on those that point at none.
+
+    The limit is :func:`unresolved_allowance` of the document's page count. Once that many
+    destinations have pointed at no page no further destination is resolved: :meth:`page`
+    gives None for it without asking pdfium, and counts it in :attr:`skipped`.
     """
 
     def __init__(self, api: _Api, doc, n_pages: int) -> None:
         self._api = api
         self._doc = doc
         self._n_pages = n_pages
+        self.allowance = unresolved_allowance(n_pages)
         # The destinations that resolved to no page.
         self.unresolved = 0
-        # Whether a destination was left unresolved because the limit was spent.
-        self.skipped = False
+        # The destinations left unresolved because the allowance was spent.
+        self.skipped = 0
 
     def page(self, dest) -> int | None:
-        """The 0-based page *dest* points at; None when it names none or the limit is spent."""
-        if self.unresolved >= MAX_UNRESOLVED:
-            self.skipped = True
+        """The 0-based page *dest* points at; None when it names none or the allowance is spent."""
+        if self.unresolved >= self.allowance:
+            self.skipped += 1
             return None
         page = dest_page(self._api, self._doc, dest, self._n_pages)
         if page is None:
@@ -168,7 +180,7 @@ class Resolver:
         """Why destinations were left unresolved; None when none were."""
         if not self.skipped:
             return None
-        return f"after {MAX_UNRESOLVED} destinations that point at no page, the rest are left unresolved"
+        return f"after {self.allowance} destinations that point at no page, the rest are left unresolved"
 
 
 def finite(value: float) -> float | None:
