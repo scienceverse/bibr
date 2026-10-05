@@ -74,7 +74,7 @@ def _pdf_doi_evidence(fs: FileState) -> PdfDoiEvidence | None:
     if data is None or not is_pdf(data):
         return None
     try:
-        return read_pdf_doi_evidence(data, pages)
+        return read_pdf_doi_evidence(data, pages, layer=fs.doc_layer)
     except Exception:  # noqa: BLE001 - the parsed-text pool stands on its own
         logger.warning("Could not read DOI evidence from %s", fs.path.name, exc_info=True)
         return None
@@ -125,7 +125,10 @@ def doi_field_source(source_kind: str) -> str:
 
 class IdentityValidationStage:
     name = "identity"
-    requires = ("paper",)
+    # The document layer's text layer feeds the PDF's DOI evidence; its glyph
+    # columns are freed after this stage
+    # (``bibr.pipeline.context.LAYER_COLUMNS_FREED_AFTER``).
+    requires = ("paper", "doc_layer")
     produces = ("doi_selection",)
 
     async def run(self, ctx) -> None:

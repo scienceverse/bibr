@@ -288,6 +288,27 @@ async def test_identity_stage_reads_an_upload_that_has_no_file():
     assert state.paper.metadata.doi == "10.1234/banner.7"
 
 
+async def test_identity_stage_reads_the_text_layer_from_the_document_layer(monkeypatch):
+    from bibr.document.harvest import build_document_layer
+    from bibr.ocr import native_text
+    from bibr.pipeline.stages.identity import IdentityValidationStage
+
+    pdf = _banner_pdf()
+    state = FileState(path=Path("upload.pdf"), caller_bytes=pdf, paper=_banner_paper())
+    state.doc_layer = build_document_layer(pdf, range, budget=None)
+
+    def strip_again(*_args, **_kwargs):
+        raise AssertionError("the text page was built again")
+
+    # The layer's text layer is the one the furniture strip left: no text page is built.
+    monkeypatch.setattr(native_text, "open_text_page", strip_again)
+    await IdentityValidationStage().run(_ctx(state))
+
+    assert state.error is None
+    assert state.paper is not None and state.paper.metadata is not None
+    assert state.paper.metadata.doi == "10.1234/banner.7"
+
+
 async def test_process_file_keeps_upload_bytes_past_ocr_for_identity():
     from bibr.pipeline.pipeline import Pipeline
 

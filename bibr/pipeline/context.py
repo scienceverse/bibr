@@ -22,7 +22,7 @@ RefSegStrategy = Literal["geom", "region", "llm", "crf"]
 
 # The stage after which the document layer's glyph columns are freed: the last
 # stage whose ``requires`` names ``doc_layer`` (a test holds the two together).
-LAYER_COLUMNS_FREED_AFTER = "extract"
+LAYER_COLUMNS_FREED_AFTER = "identity"
 
 _figure_tier_warned = False
 

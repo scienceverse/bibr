@@ -6,7 +6,9 @@ parse never reads. Text-layer lines the layout did not turn into a region (a
 repository banner rotated into the page margin, a masthead) never reach the
 text. Link annotations and the document-information dictionary are not text
 at all. :func:`read_pdf_doi_evidence` reads those, best effort, from the input
-bytes. ``doi_identity`` decides what each is worth: a
+bytes, and the text layer from the document layer when the run has one, so
+the DOI evidence sees the characters the furniture strip left, as every
+other native-text reader does. ``doi_identity`` decides what each is worth: a
 DOI the pages print can name the paper, one found only in metadata or in a
 link target can only agree with a printed one.
 
@@ -19,8 +21,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from bibr.utils.text import DOI_CANDIDATE_RE
+
+if TYPE_CHECKING:
+    from bibr.document.model import DocumentLayer
 
 # Document-information keys publishers put a DOI in: Elsevier and Springer a
 # citation line in Subject ("… doi:10.1016/…"), Elsevier also a ``/doi`` key,
@@ -157,6 +163,26 @@ def _printed_char_records(textpage) -> list[tuple[str, float, float, bool]]:
     return records
 
 
+def _layer_records(
+    layer: DocumentLayer | None, pages: Iterable[int]
+) -> dict[int, list[tuple[str, float, float, bool]]]:
+    """The char records of the *pages* (1-based) the document layer read, by page.
+
+    A page the layer lacks or failed on, and every page once its columns
+    were freed, is left to the PDF.
+    """
+    if layer is None or layer.columns_freed:
+        return {}
+    from bibr.document import views
+
+    found: dict[int, list[tuple[str, float, float, bool]]] = {}
+    for page_number in pages:
+        page = layer.page(page_number - 1)
+        if page is not None and page.error is None:
+            found[page_number] = views.printed_char_records(page)
+    return found
+
+
 def _page_lines(records, to_layout) -> list[tuple[str, tuple[tuple[float, float] | None, ...]]]:
     """Split the page's character records into lines, as the text layer breaks them."""
     lines: list[tuple[str, tuple[tuple[float, float] | None, ...]]] = []
@@ -194,10 +220,15 @@ def _text_near(records, rect_pts: tuple[float, float, float, float]) -> str:
     return "".join(parts).strip()
 
 
-def read_pdf_doi_evidence(pdf_bytes: bytes, pages: Iterable[int]) -> PdfDoiEvidence:
+def read_pdf_doi_evidence(
+    pdf_bytes: bytes, pages: Iterable[int], *, layer: DocumentLayer | None = None
+) -> PdfDoiEvidence:
     """Read the text-layer DOI lines and DOI links of *pages*, and the Info DOIs.
 
-    *pages* are 1-based; pages the PDF does not have are skipped. Only the
+    *pages* are 1-based; pages the PDF does not have are skipped. With the
+    run's document *layer*, the text layer of a page it read comes from its
+    columns (:func:`bibr.document.views.printed_char_records`); the links and
+    the Info dictionary are always read from the PDF. Only the PDF's
     character and link records are read under the process-wide PDFium lock;
     lines and link texts are built after it is released. Raises on an
     unreadable PDF; the caller treats that as no evidence.
@@ -208,6 +239,8 @@ def read_pdf_doi_evidence(pdf_bytes: bytes, pages: Iterable[int]) -> PdfDoiEvide
     from bibr.ocr.pdf_links import doi_from_uri, page_uri_links
     from bibr.ocr.utils import pdfium_lock
 
+    wanted = sorted(set(pages))
+    from_layer = _layer_records(layer, wanted)
     metadata: list[MetadataDoi] = []
     read: list[tuple[int, tuple, int, list, list]] = []
     with pdfium_lock:
@@ -218,16 +251,18 @@ def read_pdf_doi_evidence(pdf_bytes: bytes, pages: Iterable[int]) -> PdfDoiEvide
                 if DOI_CANDIDATE_RE.search(value):
                     metadata.append(MetadataDoi("pdf_info", key, " ".join(value.split())[:300]))
             count = len(document)
-            for page_number in sorted(set(pages)):
+            for page_number in wanted:
                 if not 1 <= page_number <= count:
                     continue
                 page = document[page_number - 1]
                 try:
-                    textpage = open_text_page(page)
-                    try:
-                        records = _printed_char_records(textpage)
-                    finally:
-                        textpage.close()
+                    records = from_layer.get(page_number)
+                    if records is None:
+                        textpage = open_text_page(page)
+                        try:
+                            records = _printed_char_records(textpage)
+                        finally:
+                            textpage.close()
                     page_links = page_uri_links(document, page, page_number - 1)
                     read.append(
                         (

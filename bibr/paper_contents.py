@@ -895,7 +895,7 @@ class PaperContents:
     structure_validation_issues: list["ValidationIssue"] = field(default_factory=list)
     # The internal document layer (``bibr.document``) when
     # ``pipeline.document_layer`` is on; its glyph columns are freed after
-    # PostParse (``DocumentLayer.columns_freed``). Keyword-only so positional
+    # the identity stage (``DocumentLayer.columns_freed``). Keyword-only so positional
     # callers and the receipt staying last are unaffected; never exported.
     document: "DocumentLayer | None" = field(default=None, compare=False, repr=False, kw_only=True)
     # The page roles (``bibr.structure.page_roles``): running heads and feet,
