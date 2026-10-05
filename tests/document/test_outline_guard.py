@@ -92,6 +92,91 @@ def test_without_text_the_grounding_rule_is_not_applied():
     assert verdict.passed and verdict.reject is None
 
 
+# --- Entries whose destination was left unresolved -----------------------------------
+
+
+def _entry(idx: int, title: str, page: int | None) -> OutlineEntry:
+    return OutlineEntry(
+        idx=idx, parent=None, level=0, title=title, page=page, x=None, y=None, dest_name=None
+    )
+
+
+def _sections(pages: list[int | None]) -> list[OutlineEntry]:
+    return [_entry(idx, f"Section {idx}", page) for idx, page in enumerate(pages)]
+
+
+class _NothingGrounded:
+    """A text that holds none of the titles."""
+
+    chars = 5_000
+
+    def grounded(self, entry: OutlineEntry) -> bool:
+        return False
+
+
+def test_an_entry_left_unresolved_leaves_the_verdict_unknown_where_its_page_matters():
+    entries = _sections([0, 1, 2, 3, None, None])
+    kwargs = {"meta_title": None, "n_pages": 10, "text": None}
+
+    # Counted as without a page, the last two are a third of the entries: a pass.
+    assert judge(entries, **kwargs).passed
+    # Left unresolved they may point anywhere, at no page included.
+    assert judge(entries, unresolved={4, 5}, **kwargs) is None
+    assert judge(entries, unresolved=frozenset(), **kwargs).passed
+
+
+def test_a_majority_known_to_have_no_page_rejects_whatever_the_unresolved_point_at():
+    kwargs = {"meta_title": None, "n_pages": 10, "text": None}
+    # Six of the ten are known to have none: more than half, if the other four had pages.
+    entries = _sections([None] * 10)
+    verdict = judge(entries, unresolved={6, 7, 8, 9}, **kwargs)
+
+    assert verdict is not None and verdict.reject == "R2_targets"
+    # With only four known, the six left unresolved decide: unknown, where counting them as
+    # without a page would have rejected.
+    assert judge(entries, unresolved={4, 5, 6, 7, 8, 9}, **kwargs) is None
+    assert judge(entries, **kwargs).reject == "R2_targets"
+
+
+def test_too_few_entries_reject_whatever_the_unresolved_point_at():
+    entries = [
+        _entry(0, "Cover", None),
+        _entry(1, "Section 1", 1),
+        _entry(2, "Section 2", None),
+        _entry(3, "12", None),
+    ]
+    verdict = judge(entries, meta_title=None, n_pages=10, text=None, unresolved={2})
+
+    # Cover and 12 are dropped: two stay, and R1 reads no page.
+    assert verdict is not None and verdict.reject == "R1_too_few"
+    assert verdict.dropped == ((0, "C3_nav"), (3, "C2_page"))
+
+
+def test_the_rules_that_read_every_page_wait_for_an_entry_left_unresolved():
+    kwargs = {"meta_title": None, "n_pages": 10}
+    # Four entries on one page and one left unresolved: R2 would reject if it were on that
+    # page too, and not if it were elsewhere.
+    one_page = _sections([1, 1, 1, 1, 1])
+    assert judge(one_page, text=None, **kwargs).reject == "R2_targets"
+    assert judge(one_page[:4] + [_entry(4, "Section 4", None)], text=None, **kwargs).passed
+    assert (
+        judge(one_page[:4] + [_entry(4, "Section 4", None)], text=None, unresolved={4}, **kwargs)
+        is None
+    )
+    # R3 grounds each title on the page it names, or anywhere when it names none.
+    entries = _sections([0, 1, 2, 3, None])
+    assert judge(entries, text=_NothingGrounded(), **kwargs).reject == "R3_ungrounded"
+    assert judge(entries, text=_NothingGrounded(), unresolved={4}, **kwargs) is None
+
+
+def test_an_entry_the_cleanup_drops_does_not_leave_the_verdict_unknown():
+    entries = [*_sections([0, 1, 2, 3]), _entry(4, "Contents", None)]
+    verdict = judge(entries, meta_title=None, n_pages=10, text=None, unresolved={4})
+
+    assert verdict is not None and verdict.passed
+    assert verdict.dropped == ((4, "C3_nav"),)
+
+
 def test_the_letters_and_digits_of_every_code_point_are_those_of_str_isalnum():
     every = "".join(chr(code) for code in range(0x110000))
     expected = "".join(char for char in every if char.isalnum())
