@@ -522,6 +522,57 @@ class Page:
     error: str | None = None
 
 
+# The keys of DocumentLayer.component_errors, each with what its text says. A key with {page}
+# is one page's own (the absolute 0-based index); the others are the document's. A failure of a
+# component has a key of its own, apart from the limits and cuts: an empty list under a limit's
+# key was cut short, and under a failure's key was lost. The note of a limit that stopped a read
+# (links, struct) names the first page left unread.
+COMPONENT_ERROR_KEYS: dict[str, str] = {
+    # The layer did not start, or a page did not build.
+    "start": "the layer could not start; none of the PDF's own structure was read",
+    "page:{page}": "the page could not be opened or read; the layer keeps it unread (Page.error)",
+    "harvest:{page}": "the page's data could not be built; kept without its columns (Page.error)",
+    "records:{page}": "the page's char records could not be built",
+    "furniture:{page}": "the page's furniture could not be described",
+    "blocks:{page}": "a post-OCR region of the page has an index other than its position",
+    # Labels, the tagged flag, the named destinations and the outline.
+    "label:{page}": "the page's label could not be read",
+    "tagged": "the catalog's tagged flag could not be read",
+    "named_dests": (
+        "the named destinations could not be opened, are over MAX_NAMED_DESTS and left unread, "
+        "or hold names over MAX_TEXT bytes, counted and left unread"
+    ),
+    "outline": (
+        "the bookmarks were cut short: a failure, a circular reference or more than MAX_ENTRIES"
+    ),
+    "outline_unresolved": (
+        "the outline's allowance of destinations that point at no page was spent; names the "
+        "first entry left unresolved and counts them"
+    ),
+    "outline_guard": "judging the outline failed",
+    # The link annotations.
+    "links": "more than MAX_LINKS link annotations; the rest unread from the page named",
+    "links:{page}": (
+        "a link of the page failed to read, was left out (no rectangle, or one that is not "
+        "finite) or was cut short (more than MAX_QUADS quadrilaterals); a page before the one "
+        "that 'links' names, with no such key, has every link annotation kept whole"
+    ),
+    "links_build": "classing the links failed; links is empty",
+    "links_unresolved": (
+        "the links' allowance of destinations that point at no page was spent; names the first "
+        "link left unresolved and counts them"
+    ),
+    # The structure tree.
+    "struct": (
+        "more than MAX_ELEMENTS structure elements (the rest unread from the page named), an "
+        "element with more than MAX_KIDS kids, a circular reference, or copies of an element "
+        "that differ from its first"
+    ),
+    "struct:{page}": "the page's structure tree failed to read",
+    "struct_merge": "joining the page copies of the structure elements failed; struct is empty",
+}
+
+
 @dataclass(slots=True)
 class DocumentLayer:
     version: str
@@ -542,9 +593,8 @@ class DocumentLayer:
     decisions: list[DecisionRecord] = field(default_factory=list)
     presence: Presence = field(default_factory=Presence)
     # Failures of layer components, and what a limit cut short; they never fail the
-    # paper and never reach PdfInspection.component_errors. A page's is keyed like
-    # "harvest:3". A limit is said once for the document, under the component:
-    # "links", "struct", "outline", "named_dests" or "unresolved_dests".
+    # paper and never reach PdfInspection.component_errors. COMPONENT_ERROR_KEYS lists the
+    # keys and what each says.
     component_errors: dict[str, str] = field(default_factory=dict)
     # Set by free_columns: every page's cols is then None because the
     # columns were dropped, not because a page has no text layer or failed.
