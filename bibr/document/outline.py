@@ -46,11 +46,12 @@ def meta_title(api: _Api, doc) -> str | None:
 
 
 def read_outline(
-    api: _Api, doc, names: destinations.NamedDests | None, n_pages: int
+    api: _Api, doc, names: destinations.NamedDests | None, resolver: destinations.Resolver
 ) -> tuple[list[OutlineEntry], str | None]:
     """The document's bookmarks in document order, and a note when the walk was cut short.
 
-    A failure partway keeps the entries read so far and says so in the note.
+    A failure partway keeps the entries read so far and says so in the note. The pages
+    the bookmarks point at come from *resolver*, which the links share.
     """
     entries: list[OutlineEntry] = []
     seen: set[int] = set()
@@ -74,7 +75,7 @@ def read_outline(
                 break
             seen.add(address)
             idx = len(entries)
-            entries.append(_entry(api, doc, bookmark, names, n_pages, idx, level, parent))
+            entries.append(_entry(api, doc, bookmark, names, resolver, idx, level, parent))
             pending.append((api.FPDFBookmark_GetNextSibling(doc.raw, bookmark), level, parent))
             pending.append((api.FPDFBookmark_GetFirstChild(doc.raw, bookmark), level + 1, idx))
     except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
@@ -87,7 +88,7 @@ def _entry(
     doc,
     bookmark,
     names: destinations.NamedDests | None,
-    n_pages: int,
+    resolver: destinations.Resolver,
     idx: int,
     level: int,
     parent: int | None,
@@ -100,7 +101,7 @@ def _entry(
     internal = not action or api.FPDFAction_GetType(action) == api.c.PDFACTION_GOTO
     dest = api.FPDFBookmark_GetDest(doc.raw, bookmark) if internal else None
     if dest:
-        page = destinations.dest_page(api, doc, dest, n_pages)
+        page = resolver.page(dest)
         if page is not None:
             x, y = destinations.dest_position(api, dest)
         if names is not None:
