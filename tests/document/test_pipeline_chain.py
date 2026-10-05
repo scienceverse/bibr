@@ -2,8 +2,9 @@
 
 NativeTextStage builds the layer inside ``inspect_pdf``, ParseSegmentStage
 attaches the post-OCR regions as blocks and hands it on as
-``PaperContents.document``, PostParse reads it, and its glyph columns are
-freed after PostParse, as in every memory mode. Only layout, segmentation,
+``PaperContents.document``, PostParse and the identity stage read it, and its
+glyph columns are freed after the identity stage, as in every memory mode.
+Only layout, segmentation,
 OCR and the LLM are faked, as in ``tests/test_pipeline_smoke.py``.
 """
 
@@ -34,7 +35,7 @@ async def test_the_local_pipeline_hands_the_layer_of_its_page_range_to_post_pars
 ):
     import bibr.pipeline.stages.post_parse as post_parse_mod
     from bibr.local.pipeline import LocalPipeline
-    from bibr.pipeline.context import PipelineContext
+    from bibr.pipeline.context import LAYER_COLUMNS_FREED_AFTER, PipelineContext
     from bibr.pipeline.resources import ResourceManager
 
     monkeypatch.setattr(Settings.pipeline, "document_layer", True)
@@ -60,7 +61,8 @@ async def test_the_local_pipeline_hands_the_layer_of_its_page_range_to_post_pars
         seen["layer"] = layer
         seen["summaries"] = list(contents.region_summaries)
         if layer is not None:
-            # The columns are freed after PostParse: read the text layer under each block now.
+            # The columns are freed after the identity stage: read the text layer under
+            # each block now.
             seen["native_text"] = {
                 block.block_id: views.block_text(layer, block.block_id)
                 for page in layer.pages
@@ -72,7 +74,7 @@ async def test_the_local_pipeline_hands_the_layer_of_its_page_range_to_post_pars
 
     def free_after_stage(self, stage_name):
         real_free(self, stage_name)
-        if stage_name == "extract":
+        if stage_name == LAYER_COLUMNS_FREED_AFTER:
             seen["freed"] = [
                 (fs.doc_layer, fs.doc_layer_attempted, fs.contents.document)
                 for fs in self.file_states
@@ -127,8 +129,8 @@ async def test_the_local_pipeline_hands_the_layer_of_its_page_range_to_post_pars
     assert native
     for block in native:
         assert seen["native_text"][block.block_id] == block.text["native"]
-    # After PostParse only the glyph columns go; the layer, built once, and its
-    # blocks stay with the file and its contents.
+    # After the identity stage only the glyph columns go; the layer, built
+    # once, and its blocks stay with the file and its contents.
     [(kept, attempted, handed_on)] = seen["freed"]
     assert kept is layer
     assert handed_on is layer

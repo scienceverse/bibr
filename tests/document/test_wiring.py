@@ -28,7 +28,7 @@ from bibr.document.rebuild import (
 from bibr.ocr.pdf_inspection import PdfInspection, inspect_pdf
 from bibr.ocr.types import OcrRegionResult
 from bibr.paper_contents import PaperContents
-from bibr.pipeline.context import PipelineContext, RunConfig
+from bibr.pipeline.context import LAYER_COLUMNS_FREED_AFTER, PipelineContext, RunConfig
 from bibr.pipeline.progress import NullProgress
 from bibr.pipeline.state import FileState
 from bibr.structure.page_roles import PageRoles
@@ -141,7 +141,7 @@ def _layer_with_blocks():
 
 
 @pytest.mark.parametrize("mode", ["aggressive", "balanced", "keep_all"])
-def test_every_memory_mode_frees_only_the_columns_after_post_parse(mode):
+def test_every_memory_mode_frees_only_the_columns_after_identity(mode):
     layer = _layer_with_blocks()
     expected = serialize.to_dict(layer)
     for page in expected["pages"]:
@@ -158,12 +158,14 @@ def test_every_memory_mode_frees_only_the_columns_after_post_parse(mode):
         config=RunConfig(memory_mode=mode),
     )
 
-    # ParseSegment attaches the blocks and PostParse may read the columns.
-    ctx.free_after_stage("parse")
-    assert not layer.columns_freed
-    assert any(page.cols is not None for page in layer.pages)
+    # ParseSegment attaches the blocks, and PostParse and the identity stage
+    # may read the columns.
+    for stage_name in ("parse", "extract"):
+        ctx.free_after_stage(stage_name)
+        assert not layer.columns_freed
+        assert any(page.cols is not None for page in layer.pages)
 
-    ctx.free_after_stage("extract")
+    ctx.free_after_stage("identity")
     assert fs.doc_layer is layer
     assert fs.contents.document is layer
     assert layer.nbytes == 0
@@ -177,7 +179,6 @@ def test_every_memory_mode_frees_only_the_columns_after_post_parse(mode):
 
 @pytest.mark.parametrize("mode", ["local", "serve"])
 def test_the_columns_are_freed_after_the_last_stage_that_requires_the_layer(mode):
-    from bibr.pipeline.context import LAYER_COLUMNS_FREED_AFTER
     from bibr.pipeline.plans import build_stage_plan
 
     stages = build_stage_plan(mode=mode, stream_backhalf=False, enrichers=[])
@@ -200,7 +201,7 @@ def test_freeing_the_columns_leaves_stand_ins_alone(stand_in):
         config=RunConfig(memory_mode="balanced"),
     )
 
-    ctx.free_after_stage("extract")
+    ctx.free_after_stage(LAYER_COLUMNS_FREED_AFTER)
 
     assert fs.contents is stand_in
     assert fs.doc_layer is stand_in
