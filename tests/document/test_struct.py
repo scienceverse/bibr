@@ -5,12 +5,14 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 
+import pypdfium2
 import pypdfium2.raw as pdfium_raw
 import pytest
 
 from bibr.document import harvest, ids, structure, views
 from bibr.document.harvest import build_document_layer
 from bibr.document.model import StructElem
+from bibr.ocr.utils import pdfium_lock
 from tests.document import _linked
 from tests.document._linked import ROLE_MAP, TREE, Tag
 from tests.document.test_layer import _BUDGET, _inspect
@@ -228,8 +230,8 @@ def test_a_page_whose_tree_cannot_be_read_is_left_out_and_the_rest_kept(monkeypa
     assert layer.presence.is_tagged is True
 
 
-def _copy(path, role="P", mcrs=()) -> StructElem:
-    return StructElem(
+def _copy(path, role="P", mcrs=(), kids=0) -> structure.Copy:
+    elem = StructElem(
         elem_id=ids.struct_element(path),
         parent=ids.struct_element(path[:-1]) if len(path) > 1 else None,
         role=role,
@@ -239,6 +241,7 @@ def _copy(path, role="P", mcrs=()) -> StructElem:
         actual=None,
         lang=None,
     )
+    return structure.Copy(elem, kids)
 
 
 def test_the_copies_of_an_element_are_joined_in_the_order_of_the_first():
@@ -273,16 +276,65 @@ def test_a_copy_that_differs_from_the_first_is_counted_and_its_content_kept():
     assert [(e.role, e.mcrs) for e in merged] == [("P", ((0, 0), (1, 0), (2, 0)))]
 
 
-def test_copies_that_differ_are_noted_in_the_layer(monkeypatch):
+def test_a_copy_with_another_number_of_kids_is_counted_though_it_reads_the_same():
+    merged, differing = structure.merge(
+        [
+            _copy((0, 1), "P", ((0, 0),), kids=2),
+            _copy((0, 1), "P", ((1, 0),), kids=3),
+            _copy((0, 1), "P", ((2, 0),), kids=2),
+        ]
+    )
+
+    assert differing == 1
+    assert [(e.role, e.mcrs) for e in merged] == [("P", ((0, 0), (1, 0), (2, 0)))]
+
+
+def _tag_at(path: tuple[int, ...]) -> Tag:
+    """The fixture's tag at *path*: (0,) is the root and each later index a place in ``kids``."""
+    tag = TREE
+    for index in path[1:]:
+        tag = tag.kids[index]
+    return tag
+
+
+def test_every_copy_counts_the_kids_the_fixture_gave_the_element_on_every_page():
+    pdf_bytes = _linked.linked_paper()
+    with pdfium_lock:
+        doc = pypdfium2.PdfDocument(pdf_bytes)
+        try:
+            api = harvest._Api()
+            trees = [
+                structure.read_page_tree(api, doc[index], index) for index in range(_linked.N_PAGES)
+            ]
+        finally:
+            doc.close()
+
+    copies = [copy for tree in trees for copy in tree.copies]
+    assert len(copies) > 20
+    # Each page's copy has a slot for every kid of the element: the marked content of
+    # other pages and the elements without content on this page included.
+    assert [(c.elem.path, c.kids) for c in copies] == [
+        (c.elem.path, len(_tag_at(c.elem.path).kids)) for c in copies
+    ]
+    # The paragraph across a page break is counted whole on both pages, each holding its own.
+    across = [c for c in copies if c.elem.path == (0, 1, 4)]
+    assert [(c.elem.mcrs, c.kids) for c in across] == [(((1, 4),), 2), (((2, 0),), 2)]
+
+
+@pytest.mark.parametrize("change", ["type", "number of kids"])
+def test_copies_that_differ_are_noted_in_the_layer(monkeypatch, change):
     real = structure.read_page_tree
 
-    def rename_on_page_2(api, page, page_index, **kwargs):
+    def change_on_page_2(api, page, page_index, **kwargs):
         tree = real(api, page, page_index, **kwargs)
         if page_index == 2:
-            tree.copies = [replace(elem, role="Other") for elem in tree.copies]
+            if change == "type":
+                tree.copies = [c._replace(elem=replace(c.elem, role="Other")) for c in tree.copies]
+            else:
+                tree.copies = [c._replace(kids=c.kids + 1) for c in tree.copies]
         return tree
 
-    monkeypatch.setattr(structure, "read_page_tree", rename_on_page_2)
+    monkeypatch.setattr(structure, "read_page_tree", change_on_page_2)
     layer = _layer()
 
     assert set(layer.component_errors) == {"struct"}
