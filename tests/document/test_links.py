@@ -6,6 +6,7 @@ import json
 import math
 from dataclasses import replace
 
+import pypdfium2.raw as pdfium_raw
 import pytest
 
 from bibr.document import destinations, harvest, links, serialize, views
@@ -251,17 +252,55 @@ def test_a_name_pdfiums_lookup_misses_is_found_in_the_table():
     assert lost.target_class == "unresolved"
 
 
-def test_a_document_over_the_link_limit_is_read_to_the_limit_and_says_so(monkeypatch):
+def _enumerations(monkeypatch) -> list[int]:
+    """One item for each call of FPDFLink_Enumerate, the call that walks a page's annotations."""
+    real = pdfium_raw.FPDFLink_Enumerate
+    calls: list[int] = []
+
+    def counted(*args):
+        calls.append(len(calls))
+        return real(*args)
+
+    monkeypatch.setattr(pdfium_raw, "FPDFLink_Enumerate", counted)
+    return calls
+
+
+def test_a_document_over_the_link_limit_is_read_to_the_limit_and_says_so_once(monkeypatch):
     monkeypatch.setattr(links, "MAX_LINKS", 5)
     layer = _layer()
 
     assert [link.link_id for link in layer.links] == [f"p0.lk{n}" for n in range(5)]
-    # The allowance runs out on the first page; every later page with a link says so.
-    note = "more than 5 link annotations, the rest unread"
-    pages = {spec.page for spec in _linked.LINKS}
-    assert pages == {0, 1}
-    assert layer.component_errors == {f"links:{page}": note for page in pages}
+    # The allowance runs out on the first page, and the note is the document's: the
+    # fixture has links on a second page too.
+    assert {spec.page for spec in _linked.LINKS} == {0, 1}
+    assert layer.component_errors == {"links": "more than 5 link annotations, the rest unread"}
     # The first of those five is internal, so the answer is yes.
+    assert layer.presence.has_internal_links is True
+
+
+def test_once_the_allowance_is_spent_no_later_page_is_enumerated(monkeypatch):
+    monkeypatch.setattr(links, "MAX_LINKS", 5)
+    calls = _enumerations(monkeypatch)
+    layer = _layer()
+
+    # Five links and the sixth, which is the stop; the other five pages are left alone.
+    assert len(calls) == 6
+    assert len(layer.links) == 5
+
+
+def test_an_allowance_spent_exactly_at_the_end_of_a_page_is_stopped_by_the_next_one(monkeypatch):
+    first = sum(1 for spec in _linked.LINKS if spec.page == 0)
+    monkeypatch.setattr(links, "MAX_LINKS", first)
+    calls = _enumerations(monkeypatch)
+    layer = _layer()
+
+    # The first page is read whole, with the call that finds no more; the second page has a
+    # link, which is the stop, and the four pages after it are not enumerated.
+    assert len(calls) == first + 1 + 1
+    assert [link.page for link in layer.links] == [0] * first
+    assert layer.component_errors == {
+        "links": f"more than {first} link annotations, the rest unread"
+    }
     assert layer.presence.has_internal_links is True
 
 
@@ -290,7 +329,7 @@ def test_a_link_with_too_many_quadrilaterals_is_kept_and_read_to_the_limit(monke
     assert len(layer.links) == len(_linked.LINKS)
     assert len(wrap.quads) == 1 and (wrap.action, wrap.target_class) == ("goto", "float")
     note = "a link with more than 1 quadrilaterals, the rest unread"
-    assert layer.component_errors == {f"links:{wrap.page}": note}
+    assert layer.component_errors == {"links": note}
 
 
 def test_a_string_over_the_text_limit_is_left_unread_and_the_link_kept(monkeypatch):
@@ -702,7 +741,7 @@ def test_a_link_that_cannot_be_placed_is_left_out_and_nothing_infinite_is_kept()
     # Link 0 has an infinite rectangle: left out, with its number unused.
     assert [link.link_id for link in layer.links] == ["p0.lk1", "p0.lk2"]
     assert layer.component_errors == {
-        "links:0": "a link annotation with a rectangle that is not finite, left out"
+        "links": "a link annotation with a rectangle that is not finite, left out"
     }
     first, second = layer.links
     # The infinite quadrilateral is dropped and the finite one kept.
