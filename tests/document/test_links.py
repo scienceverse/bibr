@@ -224,6 +224,41 @@ def test_a_link_that_cannot_be_read_is_left_out_and_the_rest_keep_their_ids(monk
     assert layer.presence.has_internal_links is True
 
 
+def _failing_read(monkeypatch, where: tuple[int, int]) -> None:
+    """Make the read of the link *where* (page, number) raise; every other link reads as it does."""
+    real = links._read_link
+
+    def read(*args, **kwargs):
+        if args[4] == where:
+            raise RuntimeError("bad annotation")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(links, "_read_link", read)
+
+
+def test_what_leaves_a_link_out_or_cuts_one_short_is_said_under_the_key_of_its_page(monkeypatch):
+    monkeypatch.setattr(links, "MAX_QUADS", 1)
+    _failing_read(monkeypatch, (0, 1))
+    layer = _layer()
+
+    # Page 0 lost a link and page 1 cut one short: each says so under its own key.
+    assert layer.component_errors == {
+        "links:0": "RuntimeError: bad annotation",
+        "links:1": "a link with more than 1 quadrilaterals, the rest unread",
+    }
+
+
+def test_a_page_with_a_link_left_out_and_one_cut_short_says_both_under_its_key(monkeypatch):
+    monkeypatch.setattr(links, "MAX_QUADS", 1)
+    _failing_read(monkeypatch, (1, 0))
+    layer = _layer()
+
+    assert layer.component_errors == {
+        "links:1": "RuntimeError: bad annotation; "
+        "a link with more than 1 quadrilaterals, the rest unread"
+    }
+
+
 def test_classing_that_fails_leaves_the_links_empty_and_says_so(monkeypatch):
     def fail(*args, **kwargs):
         raise RuntimeError("cannot class")
@@ -342,8 +377,9 @@ def test_a_link_with_too_many_quadrilaterals_is_kept_and_read_to_the_limit(monke
 
     assert len(layer.links) == len(_linked.LINKS)
     assert len(wrap.quads) == 1 and (wrap.action, wrap.target_class) == ("goto", "float")
+    # The cut is the page's to say: page 1 holds the link, and page 0, complete, says nothing.
     note = "a link with more than 1 quadrilaterals, the rest unread"
-    assert layer.component_errors == {"links": note}
+    assert layer.component_errors == {"links:1": note}
 
 
 def test_a_string_over_the_text_limit_is_left_unread_and_the_link_kept(monkeypatch):
@@ -755,7 +791,7 @@ def test_a_link_that_cannot_be_placed_is_left_out_and_nothing_infinite_is_kept()
     # Link 0 has an infinite rectangle: left out, with its number unused.
     assert [link.link_id for link in layer.links] == ["p0.lk1", "p0.lk2"]
     assert layer.component_errors == {
-        "links": "a link annotation with a rectangle that is not finite, left out"
+        "links:0": "a link annotation with a rectangle that is not finite, left out"
     }
     first, second = layer.links
     # The infinite quadrilateral is dropped and the finite one kept.

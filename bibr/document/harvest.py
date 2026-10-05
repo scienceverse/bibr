@@ -1071,10 +1071,11 @@ class LayerBuilder:
             )
         if page_links.complete:
             self.links_read.add(page_index)
-        for text in page_links.cuts:
-            self._note("links", text)
-        if page_links.failure is not None:
-            self.errors[f"links:{page_index}"] = page_links.failure
+        # A link left out or cut short is said under the key of its page, so a page without one
+        # was read whole, if it comes before the page a limit stopped on.
+        for text in (page_links.failure, *page_links.cuts):
+            if text is not None:
+                self._note(f"links:{page_index}", text)
 
     def _read_struct(self, page, page_index: int) -> None:
         # pdfium builds a page's whole tree in one call, however little of it is kept, so
