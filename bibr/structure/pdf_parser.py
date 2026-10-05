@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from bibr.input.pdf_outline import OutlineItem
+    from bibr.structure.page_roles import PageRoles
 
 from bibr.input.consolidate_text import fix_ocr_artifacts
 from bibr.ocr.ref_patterns import (
@@ -43,7 +44,6 @@ from bibr.ocr.ref_patterns import (
 from bibr.ocr.types import OcrRegionResult
 from bibr.paper_contents import (
     CANONICAL_SECTION_ALIASES,
-    FRONT_MATTER_MASTHEAD_RE,
     CanonicalSection,
     PaperContents,
     PaperFigure,
@@ -53,7 +53,6 @@ from bibr.paper_contents import (
     PaperURLLink,
     PaperXref,
     RegionSummary,
-    is_exact_front_matter_furniture,
 )
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.structure.assembler import DocumentAssembler
@@ -66,6 +65,7 @@ from bibr.structure.floats_normalize import (
     remap_caption_receipt,
 )
 from bibr.structure.footnote_buffer import FootnoteBuffer, printed_marker
+from bibr.structure.page_roles import REPEAT_MAX_LEN, heading_key, write_page_roles
 from bibr.structure.parse_headings import HeadingHandlersMixin
 from bibr.structure.parse_media import MediaHandlersMixin
 from bibr.structure.parse_text import TextHandlersMixin
@@ -127,22 +127,6 @@ LABEL_TREATMENT: dict[str, str] = {
     "footer_image": "abandon",
     "aside_text": "abandon",
 }
-
-# Body-text labels eligible for running-header de-duplication. A running
-# header misclassified as body text repeats verbatim across pages; demoting it
-# keeps page furniture out of section content (notably the References block).
-_BODY_TEXT_LABELS: frozenset[str] = frozenset({"text", "content", "vertical_text"})
-
-# Max normalized length of a body region treated as a candidate running
-# header. Furniture (banners, footers, watermarks) is short; a real paragraph
-# that happens to repeat across pages is longer and must be preserved.
-_RUNNING_HEADER_MAX_LEN = 200
-# Running heads are page furniture: they sit in the top or bottom margin band.
-# ``bbox_2d`` is 0..1000 image space, matching the page-edge test in
-# ``parse_media``. A heading in the middle of a column is never furniture,
-# however often it repeats.
-_RUNNING_HEADER_TOP_Y = 100.0
-_RUNNING_HEADER_BOTTOM_Y = 900.0
 
 # A row that opens an abstract or a keyword list, in any language the section
 # aliases know: the bare heading ("RÉSUMÉ") or its lead-in ("Key words: …",
@@ -265,6 +249,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         *,
         settings=None,
         first_page_index: int = 0,
+        page_roles: "PageRoles | None" = None,
     ) -> None:
         from bibr.config import snapshot_settings
 
@@ -401,10 +386,14 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         self._title_page: int | None = None
         self._title_assembler_len: int = 0
 
+        # The document's page roles (bibr.structure.page_roles): the pipeline
+        # hands over the writer's tags, read from the run's whole evidence;
+        # otherwise ``_mark_running_headers`` runs the writer on the regions.
+        self._page_roles = page_roles
         # Running-header de-dupe: set of (page_idx_0based, region_index_within_page)
-        # tuples for heading regions whose normalized content appears on multiple
-        # pages — those are running headers misclassified as ``doc_title`` /
-        # ``paragraph_title`` and must not produce sections.
+        # tuples for the regions tagged as page furniture, and the regions that
+        # act like it (see ``_mark_running_headers``); they must not produce
+        # sections.
         self._running_header_regions: set[tuple[int, int]] = set()
         # Page-level ``reference`` envelopes and the ``reference_content``
         # entries inside them can carry the same text. Whichever side the other
@@ -773,67 +762,36 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
     # Page processing
     # ------------------------------------------------------------------
 
-    def _is_in_margin_band(self, page_idx: int, region_idx: int) -> bool:
-        """True if the region sits in a page's top or bottom margin band.
-
-        A missing bbox is unknown rather than disqualifying — falling back to
-        the pre-geometry behaviour keeps genuine furniture demoted on inputs
-        whose layout carries no coordinates.
-        """
-        bbox = bbox_to_tuple(self.json_result[page_idx][region_idx].bbox_2d)
-        if bbox is None:
-            return True
-        _, y1, _, y2 = bbox
-        return y1 <= _RUNNING_HEADER_TOP_Y or y2 >= _RUNNING_HEADER_BOTTOM_Y
-
-    def _is_inside_margin_band(self, page_idx: int, region_idx: int) -> bool:
-        """True if the whole region lies in a page's top or bottom margin band.
-
-        Stricter than :meth:`_is_in_margin_band`: a paragraph that starts
-        near the top of a page touches the band, a banner sits inside it.
-        """
-        bbox = bbox_to_tuple(self.json_result[page_idx][region_idx].bbox_2d)
-        if bbox is None:
-            return False
-        _, y1, _, y2 = bbox
-        return y2 <= _RUNNING_HEADER_TOP_Y or y1 >= _RUNNING_HEADER_BOTTOM_Y
-
     def _mark_running_headers(self) -> None:
-        """Detect heading regions that are actually per-page running headers.
+        """Demote the regions that are page furniture, or that act like it.
 
-        Two heuristics together catch the cases the layout model
-        confuses:
+        The page-role writer (:mod:`bibr.structure.page_roles`) decides which
+        regions are running heads and feet, and tags them; a tagged region is
+        demoted, whatever label the layout model gave it (``header`` and
+        ``footer`` regions are furniture by their label already). Two
+        demotions here are not page roles:
 
-        1. **Multi-page repeats** — a normalized heading content string
-           appearing on ≥2 pages is a running header. Real section
-           headers (Methods, References, Discussion) appear exactly once.
+        1. **Repeated legend rows** — two or more repeated body rows printed
+           together (a chart legend or a table key reprinted with each float)
+           are float furniture, wherever on the page they sit.
 
         2. **Extra ``doc_title`` regions** — academic papers have exactly
            one ``doc_title`` (the paper title, on page 1). A ``doc_title`` on
            a later page is usually the layout model misclassifying a
            running-header (page-2+ author line, banner, journal name), and
-           is demoted when it has furniture's geometry or text (see
+           is demoted when it has furniture's tag or text (see
            :meth:`_is_later_doc_title_furniture`) or heads a record of its
            own (see :meth:`_heads_own_record`); a mid-page one is otherwise a
            sidebar heading and stays.
         """
-        # Heuristic 1: multi-page repeats (any heading label).
-        seen: dict[str, list[tuple[int, int]]] = {}
-        # Heuristic 1b: multi-page repeats among *body-text* regions. A running
-        # header GLM-OCR tags ``text`` (e.g. a wide-letter-spaced preprint
-        # banner) bypasses the heading-only heuristics and leaks into whatever
-        # section is active at the page break — corrupting the References
-        # block. Page furniture is short; the length cap keeps a genuine
-        # paragraph that happens to repeat from being demoted. A longer
-        # region counts only when it lies wholly inside the margin band: a
-        # preprint banner (the medRxiv rights, licence and DOI lines run to
-        # about 340 chars) that the layout model labels ``text`` on some
-        # pages. A manuscript that prints its body twice repeats long
-        # paragraphs that start or end in the band.
-        seen_body: dict[str, list[tuple[int, int]]] = {}
-        # Heuristic 2: track doc_title occurrences so all but the first
-        # can be demoted regardless of repetition. Content is kept so
-        # copyright blurbs can be excluded from anchoring.
+        if self._page_roles is None:
+            self._page_roles = write_page_roles(
+                self.json_result, first_page_index=self._first_page_index
+            )
+        roles = self._page_roles
+        # Track doc_title occurrences so all but the first can be demoted
+        # regardless of repetition. Content is kept so copyright blurbs can be
+        # excluded from anchoring.
         doc_title_occurrences: list[tuple[int, int, str]] = []
 
         for page_idx, regions in enumerate(self.json_result):
@@ -843,89 +801,33 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 effective = native_label if native_label in LABEL_TREATMENT else label
                 clean_content = fix_ocr_artifacts(region.content)
                 self._clean_region_content[(page_idx, region_idx)] = clean_content
-                content = clean_content.strip()
-                if not content:
+                if (
+                    roles.block(page_idx, region_idx) is not None
+                    and LABEL_TREATMENT.get(effective) != "structural"
+                ):
+                    self._running_header_regions.add((page_idx, region_idx))
+                if effective != "doc_title":
                     continue
-                if effective in _BODY_TEXT_LABELS:
-                    normalized = re.sub(r"\s+", " ", content).lower().strip()
-                    if normalized and (
-                        len(normalized) <= _RUNNING_HEADER_MAX_LEN
-                        or self._is_inside_margin_band(page_idx, region_idx)
-                    ):
-                        seen_body.setdefault(normalized, []).append((page_idx, region_idx))
-                    continue
-                if effective not in ("doc_title", "paragraph_title"):
-                    continue
-                # Strip markdown prefix + emphasis so identical text at
-                # different layout levels still de-dupes.
-                normalized = re.sub(r"^#{1,6}\s*", "", content)
-                normalized = strip_markdown_emphasis(normalized).lower()
-                normalized = re.sub(r"\s+", " ", normalized).strip()
-                if not normalized:
-                    continue
-                seen.setdefault(normalized, []).append((page_idx, region_idx))
-                if effective == "doc_title":
+                normalized = heading_key(clean_content.strip())
+                if normalized:
                     doc_title_occurrences.append((page_idx, region_idx, normalized))
 
-        for normalized, occurrences in seen.items():
-            if len({pi for pi, _ in occurrences}) >= 2:
-                demoted = occurrences
-                # Preserve the first printed title occurrence even when the same text is
-                # repeated as a running header on later pages.
-                first_page, _ = occurrences[0]
-                if (
-                    first_page == self._first_page_index
-                    and not self._is_copyright_notice(normalized)
-                    and not is_exact_front_matter_furniture(normalized)
-                    and not FRONT_MATTER_MASTHEAD_RE.match(normalized)
-                ):
-                    demoted = occurrences[1:]
-                # Repetition alone is not evidence: multi-study papers
-                # legitimately repeat ``Method``/``Results``/``Participants``
-                # per study, and demoting those deletes the heading and folds
-                # its body into the preceding section. Require the geometry of
-                # actual page furniture.
-                demoted = [occ for occ in demoted if self._is_in_margin_band(*occ)]
-                if not demoted:
-                    continue
-                self._running_header_regions.update(demoted)
-                logger.debug(
-                    "Demoting repeated heading %r as running header (%d of %d occurrences)",
-                    normalized,
-                    len(demoted),
-                    len(occurrences),
-                )
-        repeated_body = {
+        # Two or more repeated rows printed together (a chart legend or a
+        # table key reprinted with each float) are float furniture.
+        repeated_rows = {
             occurrence
-            for normalized, occurrences in seen_body.items()
-            if len(normalized) <= _RUNNING_HEADER_MAX_LEN
-            and len({pi for pi, _ in occurrences}) >= 2
-            for occurrence in occurrences
+            for occurrence, repeat in roles.repeats.items()
+            if repeat.kind == "body" and len(repeat.key) <= REPEAT_MAX_LEN
         }
-
-        def in_repeated_block(page_idx: int, region_idx: int) -> bool:
-            # Two or more repeated rows printed together (a chart legend or
-            # a table key reprinted with each float) are float furniture.
-            return (page_idx, region_idx - 1) in repeated_body or (
-                page_idx,
-                region_idx + 1,
-            ) in repeated_body
-
-        for occurrences in seen_body.values():
-            if len({pi for pi, _ in occurrences}) >= 2:
-                # Repetition alone is not evidence (see the heading path
-                # above): papers legitimately repeat a short body row
-                # mid-column ("where", "(TIF)"). Require the geometry of
-                # actual page furniture, or a block of repeated rows; a
-                # missing bbox still falls back to demotion.
-                demoted = [
-                    occ
-                    for occ in occurrences
-                    if self._is_in_margin_band(*occ) or in_repeated_block(*occ)
-                ]
-                if not demoted:
-                    continue
-                self._running_header_regions.update(demoted)
+        self._running_header_regions.update(
+            (page_idx, region_idx)
+            for (page_idx, region_idx), repeat in roles.repeats.items()
+            if repeat.kind == "body"
+            and (
+                (page_idx, region_idx - 1) in repeated_rows
+                or (page_idx, region_idx + 1) in repeated_rows
+            )
+        )
 
         # All ``doc_title`` regions after the *real* title are running
         # headers. The anchor is the first doc_title that is not a
@@ -956,7 +858,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 if pi != anchor_page
                 and (
                     self._is_later_doc_title_furniture(
-                        pi, ri, text, anchor_page, doc_title_occurrences, seen
+                        pi, ri, text, anchor_page, doc_title_occurrences
                     )
                     or self._heads_own_record(pi, ri)
                 )
@@ -975,20 +877,21 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         text: str,
         anchor_page: int,
         doc_title_occurrences: list[tuple[int, int, str]],
-        seen: dict[str, list[tuple[int, int]]],
     ) -> bool:
         """Whether a ``doc_title`` on a page after the title's is page furniture.
 
-        A running head, a journal banner or a copyright line sits in the
-        margin band, repeats on other pages, or is the title again (the
-        article page behind a cover sheet). A ``doc_title`` in the middle of
-        a later page that is none of these is a sidebar or box heading ("When
-        No Default Is Your Best Option") and stays a heading; demoting it
-        dropped the heading and merged the sidebar into the section around it.
+        A running head, a journal banner or a copyright line has a page role
+        (it sits in a margin band), repeats on other pages, or is the title
+        again (the article page behind a cover sheet). A ``doc_title`` in the
+        middle of a later page that is none of these is a sidebar or box
+        heading ("When No Default Is Your Best Option") and stays a heading;
+        demoting it dropped the heading and merged the sidebar into the
+        section around it.
         """
-        if self._is_in_margin_band(page_idx, region_idx) or self._is_copyright_notice(text):
+        roles = self._page_roles
+        if roles.block(page_idx, region_idx) is not None or self._is_copyright_notice(text):
             return True
-        if len({pi for pi, _ in seen.get(text, ())}) >= 2:
+        if roles.repeat(page_idx, region_idx) is not None:
             return True
         key = alnum_key(text)
         title_key = alnum_key(
