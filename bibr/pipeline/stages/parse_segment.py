@@ -13,13 +13,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _parse_pdf(ocr_regions, outline=None, *, settings=None, first_page_index=0):
+def _parse_pdf(ocr_regions, outline=None, *, settings=None, first_page_index=0, page_roles=None):
     """Build PDFParser and run parse() — sync, CPU-heavy.
 
     ``outline`` (PDF bookmarks) is threaded through only when present, so the
     default (outline-off) construction stays ``PDFParser(ocr_regions)``.
     ``first_page_index`` tells the parser which absolute page the slice starts
     at, so front-matter heuristics keep firing under ``--pages``/``start_page``.
+    ``page_roles`` are the document's page-role tags (:func:`_page_roles`).
     """
     from bibr.structure.pdf_parser import PDFParser
 
@@ -28,9 +29,20 @@ def _parse_pdf(ocr_regions, outline=None, *, settings=None, first_page_index=0):
         outline=outline,
         settings=settings,
         first_page_index=first_page_index,
+        page_roles=page_roles,
     )
     contents = parser.parse()
     return parser, contents
+
+
+def _page_roles(ocr_regions, layer, *, first_page_index):
+    """The document's page roles, also written onto its layer when it has one."""
+    from bibr.structure.page_roles import write_page_roles
+
+    roles = write_page_roles(ocr_regions, first_page_index=first_page_index)
+    if layer is not None:
+        layer.roles.extend(roles.tags)
+    return roles
 
 
 async def _document_layer(fs, settings, *, start_page, end_page):
@@ -98,6 +110,25 @@ class ParseSegmentStage:
                     parser = native_parser
                     contents = fs.contents
                 else:
+                    # The document layer, with this run's regions as blocks
+                    # (rebuilt from the PDF when an OCR-bundle hit skipped
+                    # NativeTextStage), comes before the parse: the page-role
+                    # writer reads it. Internal only; it never fails the paper.
+                    # "is True" keeps it off under Mock settings in tests.
+                    layer = None
+                    if ctx.settings.pipeline.document_layer is True:
+                        layer = await _document_layer(
+                            fs,
+                            ctx.settings,
+                            start_page=ctx.config.start_page,
+                            end_page=ctx.config.end_page,
+                        )
+                    page_roles = await asyncio.to_thread(
+                        _page_roles,
+                        fs.ocr_regions,
+                        layer,
+                        first_page_index=ctx.config.start_page or 0,
+                    )
                     # Offload sync CPU-heavy parse to a thread so concurrent
                     # files can interleave on the event loop and the thread
                     # pool can fan out across cores. The PDF outline (when
@@ -111,30 +142,18 @@ class ParseSegmentStage:
                         *parse_args,
                         settings=ctx.settings,
                         first_page_index=ctx.config.start_page or 0,
+                        page_roles=page_roles,
                     )
                     fs.contents = contents
+                    if contents is not None:
+                        contents.document = layer
+                        contents.page_roles = page_roles
 
                 # Hand captured reference-line geometry to the extract stage.
                 if contents is not None:
                     contents.ref_line_geometry = getattr(fs, "ref_line_geometry", None)
                     contents.ref_page_lines = getattr(fs, "ref_page_lines", None)
                     contents.pdf_uri_links = getattr(fs, "pdf_uri_links", None)
-
-                # The document layer, with this run's regions as blocks
-                # (rebuilt from the PDF when an OCR-bundle hit skipped
-                # NativeTextStage). Internal only; it never fails the paper.
-                # "is True" keeps it off under Mock settings in tests.
-                if (
-                    contents is not None
-                    and native_parser is None
-                    and ctx.settings.pipeline.document_layer is True
-                ):
-                    contents.document = await _document_layer(
-                        fs,
-                        ctx.settings,
-                        start_page=ctx.config.start_page,
-                        end_page=ctx.config.end_page,
-                    )
 
                 # Score every OCR region's front-matter role while the raw
                 # regions are still resident (they are freed after this

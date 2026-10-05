@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from bibr.extract.front_matter import FrontMatterResolution
     from bibr.extract.front_role import FrontRolePredictions
     from bibr.models import PaperMetadata, PaperReference
+    from bibr.structure.page_roles import PageRoles
     from bibr.validation import ValidationIssue
 
 
@@ -897,6 +898,11 @@ class PaperContents:
     # PostParse (``DocumentLayer.columns_freed``). Keyword-only so positional
     # callers and the receipt staying last are unaffected; never exported.
     document: "DocumentLayer | None" = field(default=None, compare=False, repr=False, kw_only=True)
+    # The page roles (``bibr.structure.page_roles``): running heads and feet,
+    # page numbers, watermarks and line numbers, as tags on the layer's ids.
+    # Written with the document layer on or off; the layer, when there is one,
+    # holds the same tags in ``DocumentLayer.roles``. Never exported.
+    page_roles: "PageRoles | None" = field(default=None, compare=False, repr=False, kw_only=True)
     caption_assignment_receipt: CaptionAssignmentReceipt | None = None
 
     def invalidate_text_caches(self) -> None:
