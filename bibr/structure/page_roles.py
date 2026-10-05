@@ -3,9 +3,10 @@
 Running heads and feet, page numbers, watermarks and line numbers are printed
 by the page, not by the article. This module decides them once per document
 and writes each decision as a :class:`~bibr.document.model.RoleTag` whose
-target is a layer id (:mod:`bibr.document.ids`): a block, the post-OCR region
-of that position on its page. Consumers that keep furniture out of the text
-read the tags; none re-derives furniture with a margin band of its own.
+target is a layer id (:mod:`bibr.document.ids`): a block (the post-OCR region
+of that position on its page), a text-layer line, or an object the furniture
+strip removed. Consumers that keep furniture out of the text read the tags;
+none re-derives furniture with a margin band of its own.
 
 A role is evidence, never a gate. A tagged block stays on the layer and in the
 region summaries; a consumer that drops furniture from text drops it by tag,
@@ -13,40 +14,60 @@ so the drop can be traced to the tag's :class:`~bibr.document.model.Decided`
 record (the rule, its score and the ids of the objects it rests on).
 
 The writer runs with the document layer on or off, on the evidence the run
-has. Its rules for a block, in the order they are tried:
+has: the layer's evidence comes first, and without the layer the writer reads
+the regions alone. Its rules for a block, in the order they are tried (the
+first rule that tags a block decides its role):
 
-1. The layout label: a ``header``, ``footer`` or page-number region is the
+1. Artifacts (layer): a block whose centre lies in a margin band and whose
+   text-layer lines are all drawn inside ``/Artifact`` marked content, on a
+   page that also prints text outside it. Tagged PDFs mark their running
+   heads, feet and page numbers as pagination artifacts.
+2. The furniture strip (layer): a block without text-layer lines of its own
+   whose text the strip's removed objects (``Page.furniture``) print inside
+   its box: a margin line-number column or a watermark the OCR read from the
+   image. The objects themselves are tagged with their kind.
+3. The layout label: a ``header``, ``footer`` or page-number region is the
    layout model's own running head, foot or page number.
-2. Recurrence: a heading or a short body row whose normalised text is printed
+4. Recurrence: a heading or a short body row whose normalised text is printed
    on two or more pages, in a margin band. The first printed occurrence of a
    heading on the first page is the title, not its running head, unless it
    reads as furniture itself (a copyright line, a masthead).
-3. A later title: a ``doc_title`` in a margin band on a page after the
+5. A later title: a ``doc_title`` in a margin band on a page after the
    title's, which the layout model gives to running heads and banners.
-4. Band recurrence: a block wholly inside a margin band whose digit-masked
+6. Page labels (layer): a block wholly inside a margin band that prints a
+   lone number equal to its page's ``/PageLabels`` label.
+7. Band recurrence: a block wholly inside a margin band whose digit-masked
    text (:func:`furniture_key`) recurs inside the bands of two or more pages,
-   with rule 2's exception for the title. The numbers must recur too, or,
+   with rule 4's exception for the title. The numbers must recur too, or,
    outside headings, one of them run with the page (a running head's page
    number): "Appendix 1" and "Appendix 2" opening two pages are headings,
    even on consecutive pages.
-5. Band page numbers: a block wholly inside a margin band that prints a lone
+8. Band page numbers: a block wholly inside a margin band that prints a lone
    page number, at an offset from its page that recurs on two or more pages.
 
+A block's role is the page number when it prints one (rules 1, 6 and 8), the
+layout's (rule 3) or the furniture's kind (rule 2), and otherwise follows its
+position: a running header above the middle of the page, a footer below.
+
 The margin bands (``_TOP_BAND`` / ``_BOTTOM_BAND``, 0..1000 layout space) are
-the position evidence; a block without a box has none, and counts as in a
-band for rules 2 and 3, the behaviour from before regions carried
-coordinates.
+position evidence, never enough alone; a block without a box has none, and
+counts as in a band for rules 4 and 5, the behaviour from before regions
+carried coordinates.
 
 Text-layer lines (``PdfInspection.page_lines``, which the reference line
-stream reads; ids ``p{page}.pl{n}``) get roles too:
+stream reads; ids ``p{page}.pl{n}``) get roles by the same evidence:
 
-6. A line whose centre lies in the box of a block the layout labels as
-   furniture (rule 1) has that block's role.
-7. Edge recurrence: among the top and bottom two lines of each page, a line
-   whose digit-masked text recurs at the edge of two or more pages is a
-   running head or foot.
-8. Page numbers: a lone number at a page edge whose offset from the page
-   number recurs on two or more pages, as in rule 5.
+9. Artifacts (layer): a line whose centre lies in a margin band and whose
+   glyphs' layer lines are all drawn inside ``/Artifact`` marked content.
+10. A line whose centre lies in the box of a block the layout labels as
+    furniture (rule 3) has that block's role.
+11. Edge recurrence: among the top and bottom two lines of each page, a line
+    whose digit-masked text recurs at the edge of two or more pages is a
+    running head or foot.
+12. Page labels (layer): a lone number at a page edge equal to the page's
+    label.
+13. Page numbers: a lone number at a page edge whose offset from the page
+    number recurs on two or more pages, as in rule 8.
 """
 
 from __future__ import annotations
@@ -55,7 +76,9 @@ import re
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
 
 from bibr.document import ids
 from bibr.document.model import Decided, RoleTag
@@ -66,6 +89,9 @@ from bibr.structure.parse_text import TextHandlersMixin
 from bibr.structure.text_repair import bbox_to_tuple, strip_markdown_emphasis
 from bibr.utils.text import collapse_ws
 
+if TYPE_CHECKING:
+    from bibr.document.model import Block, DocumentLayer, Page
+
 RUNNING_HEADER = "running_header"
 RUNNING_FOOTER = "running_footer"
 PAGE_NUMBER = "page_number"
@@ -75,13 +101,19 @@ PAGE_ROLES = frozenset({RUNNING_HEADER, RUNNING_FOOTER, PAGE_NUMBER, WATERMARK, 
 
 # The writer's rule version, on every tag it writes.
 PAGE_ROLES_RULE = "page_roles/1"
+_ARTIFACT = "page_roles.artifact"
+_STRIP = "page_roles.strip"
 _LABEL = "page_roles.label"
 _REPEAT = "page_roles.repeat"
 _LATER_TITLE = "page_roles.later_title"
+_PAGE_LABEL = "page_roles.page_label"
 _BAND_REPEAT = "page_roles.band_repeat"
 _IN_LABEL_BOX = "page_roles.in_label_box"
 _EDGE_REPEAT = "page_roles.edge_repeat"
 _PAGE_NUMBER_RUN = "page_roles.page_number_run"
+
+# The furniture strip's object kinds (``Furniture.kind``) and their roles.
+_FURNITURE_ROLES = {"watermark": WATERMARK, "line_number": LINE_NUMBER}
 
 # Labels whose boxes hold page furniture, never text: the layout model's own
 # page role for the block, and for the text-layer lines inside its box.
@@ -276,14 +308,119 @@ def _inside(point: tuple[float, float], box: Box) -> bool:
     return box[0] <= x <= box[2] and box[1] <= y <= box[3]
 
 
+def _center_in_band(box: Box | None) -> bool:
+    """Whether a box's centre lies in the top or bottom margin band; False without a box."""
+    if box is None:
+        return False
+    center_y = (box[1] + box[3]) / 2.0
+    return center_y <= _TOP_BAND or center_y >= _BOTTOM_BAND
+
+
+def _letters_and_digits(text: str) -> str:
+    return "".join(ch for ch in text.casefold() if ch.isalnum())
+
+
+def _evidence_ids(evidence: Iterable[Occurrence | str], target: str) -> tuple[str, ...]:
+    """Layer ids of *evidence* (block occurrences or ids), without the tag's own *target*."""
+    found = (item if isinstance(item, str) else ids.block(*item) for item in evidence)
+    return tuple(evidence_id for evidence_id in found if evidence_id != target)
+
+
+def _artifact_lines(page: Page) -> np.ndarray | None:
+    """Per text-layer line of *page*, whether it is drawn inside ``/Artifact`` marked content.
+
+    A line is when every span of it that has a text object is (the spans of
+    generated chars have none). None when the page has no columns or no
+    artifact text, and when all of its text is artifact, which then says
+    nothing about which lines are furniture.
+    """
+    cols = page.cols
+    if cols is None or not len(cols.line_span) or not cols.obj_artifact.any():
+        return None
+    span_obj = cols.span_obj.astype(np.int64)
+    has_obj = span_obj >= 0
+    span_artifact = np.zeros(len(span_obj), dtype=bool)
+    span_artifact[has_obj] = cols.obj_artifact[span_obj[has_obj]]
+    lines = np.zeros(len(cols.line_span), dtype=bool)
+    for line, (first, end) in enumerate(cols.line_span.tolist()):
+        own = has_obj[first:end]
+        lines[line] = bool(own.any()) and bool(span_artifact[first:end][own].all())
+    return None if lines.all() else lines
+
+
+def _label_value(page: Page | None) -> int | None:
+    """The number a page's ``/PageLabels`` label gives it, when it is one."""
+    if page is None or not page.label:
+        return None
+    return page_number_value(page.label)
+
+
+def _printed_furniture(page: Page, block: Block, text: str) -> tuple[str, list[str]] | None:
+    """The role and ids of the strip's objects that print *block*'s *text*, if they do.
+
+    The block has no text-layer line of its own, so its text was read from
+    the page image. A line-number column prints only numbers the strip
+    removed inside its box; a watermark block's letters and digits run inside
+    the text of the watermarks removed there.
+    """
+    if block.lines or block.bbox_pdf is None or not page.furniture:
+        return None
+    inside = [
+        item
+        for item in page.furniture
+        if item.bbox_pdf is not None and _inside(_center(item.bbox_pdf), block.bbox_pdf)
+    ]
+    numbers = [item for item in inside if _FURNITURE_ROLES.get(item.kind) == LINE_NUMBER]
+    tokens = text.split()
+    if (
+        len(numbers) >= 2
+        and tokens
+        and all(token.isdigit() for token in tokens)
+        and set(tokens) <= {item.text.strip() for item in numbers}
+    ):
+        return LINE_NUMBER, [item.furniture_id for item in numbers]
+    marks = [item for item in inside if _FURNITURE_ROLES.get(item.kind) == WATERMARK]
+    printed = _letters_and_digits(text)
+    if (
+        marks
+        and len(printed) >= 3
+        and printed in _letters_and_digits(" ".join(item.text for item in marks))
+    ):
+        return WATERMARK, [item.furniture_id for item in marks]
+    return None
+
+
+def _artifact_page_line(page: Page, artifact: np.ndarray, bbox: Sequence[float]) -> list[str]:
+    """The ids of the layer lines inside a page line's layout *bbox*, when all are artifacts.
+
+    [] when none lies inside, or one that does is not an artifact.
+    """
+    from bibr.document.views import from_layout_bbox
+
+    cols = page.cols
+    box = from_layout_bbox(page, bbox)
+    if cols is None or box is None:
+        return []
+    left, bottom, right, top = box
+    line_box = cols.line_bbox.astype(np.float64)
+    center_x = (line_box[:, 0] + line_box[:, 2]) / 2.0
+    center_y = (line_box[:, 1] + line_box[:, 3]) / 2.0
+    inside = (center_x >= left) & (center_x <= right) & (center_y >= bottom) & (center_y <= top)
+    if not inside.any() or not artifact[inside].all():
+        return []
+    return [ids.line(page.index, int(line)) for line in np.flatnonzero(inside)]
+
+
 def _line_roles(
     page_lines: Sequence[Mapping[str, Any]],
     label_boxes: Mapping[int, Sequence[tuple[str, str, Box]]],
+    layer: DocumentLayer | None,
+    artifacts: Mapping[int, np.ndarray],
 ) -> list[RoleTag]:
-    """Rules 6-8: the page roles of the text-layer lines.
+    """Rules 9-13: the page roles of the text-layer lines.
 
     *label_boxes* holds, per 0-based page, ``(block id, role, box)`` for the
-    blocks rule 1 tagged.
+    blocks rule 3 tagged; *artifacts* the layer pages' :func:`_artifact_lines`.
     """
     targets = page_line_targets(page_lines)
     by_page: dict[int, list[int]] = defaultdict(list)
@@ -305,14 +442,32 @@ def _line_roles(
             target=target,
             role=role,
             decided=Decided(
-                component,
-                PAGE_ROLES_RULE,
-                score=score,
-                evidence=tuple(evidence_id for evidence_id in evidence if evidence_id != target),
+                component, PAGE_ROLES_RULE, score=score, evidence=_evidence_ids(evidence, target)
             ),
         )
 
-    # Rule 6: inside a furniture block's box, by the line's centre.
+    def edge_role(position: int) -> str:
+        text = str(page_lines[position]["text"])
+        if page_number_value(text) is not None:
+            return PAGE_NUMBER
+        center_y = _center(page_lines[position]["bbox"])[1]
+        return RUNNING_FOOTER if center_y >= 500.0 else RUNNING_HEADER
+
+    # Rule 9: drawn inside /Artifact marked content, in a margin band.
+    for page, positions in by_page.items():
+        artifact = artifacts.get(page - 1)
+        layer_page = layer.page(page - 1) if layer is not None else None
+        if artifact is None or layer_page is None:
+            continue
+        for position in positions:
+            bbox = page_lines[position]["bbox"]
+            if not _center_in_band(bbox):
+                continue
+            line_ids = _artifact_page_line(layer_page, artifact, bbox)
+            if line_ids:
+                tag(position, edge_role(position), _ARTIFACT, evidence=line_ids)
+
+    # Rule 10: inside a furniture block's box, by the line's centre.
     for page, positions in by_page.items():
         boxes = label_boxes.get(page - 1, ())
         for position in positions if boxes else ():
@@ -322,20 +477,24 @@ def _line_roles(
                     tag(position, role, _IN_LABEL_BOX, evidence=(block_id,))
                     break
 
-    # Rules 7 and 8 read the top and bottom two lines of each page only, as
+    # Rules 11-13 read the top and bottom two lines of each page only, as
     # the geometry segmenter's own capture does (``bibr.ocr.ref_geometry``).
     pages_by_key: dict[str, set[int]] = defaultdict(set)
     keyed: dict[str, list[int]] = defaultdict(list)
     numbered: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    labelled: list[int] = []
     for page, positions in by_page.items():
         ordered = sorted(positions, key=lambda position: page_lines[position]["bbox"][1])
         edge = set(ordered[:_EDGE_LINES] + ordered[-_EDGE_LINES:])
+        label_value = _label_value(layer.page(page - 1)) if layer is not None else None
         for position in positions:
             if position not in edge:
                 continue
             text = str(page_lines[position]["text"])
             value = page_number_value(text)
             if value is not None:
+                if value == label_value:
+                    labelled.append(position)
                 numbered[value - page].append((position, page))
                 continue
             key = furniture_key(text)
@@ -343,18 +502,26 @@ def _line_roles(
                 pages_by_key[key].add(page)
                 keyed[key].append(position)
     n_pages = max(1, len(by_page))
+    # Rule 11.
     for key, positions in keyed.items():
         pages = len(pages_by_key[key])
         if pages < 2:
             continue
         evidence = [targets[position] for position in positions]
         for position in positions:
-            center_y = _center(page_lines[position]["bbox"])[1]
-            role = RUNNING_FOOTER if center_y >= 500.0 else RUNNING_HEADER
-            tag(position, role, _EDGE_REPEAT, score=round(pages / n_pages, 3), evidence=evidence)
-    # A lone number is a page number when another page carries one at the
-    # same offset from its page number; a year or a volume that happens to
-    # stand alone on an edge line does not.
+            tag(
+                position,
+                edge_role(position),
+                _EDGE_REPEAT,
+                score=round(pages / n_pages, 3),
+                evidence=evidence,
+            )
+    # Rule 12: the number the page's label gives it.
+    for position in labelled:
+        tag(position, PAGE_NUMBER, _PAGE_LABEL)
+    # Rule 13: a lone number is a page number when another page carries one
+    # at the same offset from its page number; a year or a volume that
+    # happens to stand alone on an edge line does not.
     for members in numbered.values():
         pages = len({page for _, page in members})
         if pages < 2:
@@ -418,18 +585,24 @@ def write_page_roles(
     *,
     first_page_index: int = 0,
     page_lines: Sequence[Mapping[str, Any]] | None = None,
+    layer: DocumentLayer | None = None,
 ) -> PageRoles:
-    """Decide the page roles of one document's blocks and text-layer lines.
+    """Decide the page roles of one document's blocks, text-layer lines and furniture.
 
     *regions* is indexed by absolute page, as the OCR stage hands it over
     (pages before a ``start_page`` are empty), in the region IR or its wire
     format, as ``PDFParser`` takes it; *first_page_index* is the first page
     the run processed. *page_lines* are the text-layer lines
-    (``PdfInspection.page_lines``), when the run read a text layer.
+    (``PdfInspection.page_lines``), when the run read a text layer. *layer*
+    is the document layer with *regions* attached as its blocks
+    (:func:`bibr.document.rebuild.attach_blocks`) and its columns not yet
+    freed, when the run has one: its artifacts, furniture and page labels
+    are the first evidence.
     """
     from bibr.structure.pdf_parser import LABEL_TREATMENT
 
     boxes: dict[Occurrence, Box | None] = {}
+    texts: dict[Occurrence, str] = {}
     labelled: dict[Occurrence, str] = {}
     label_boxes: dict[int, list[tuple[str, str, Box]]] = defaultdict(list)
     headings: dict[str, list[Occurrence]] = {}
@@ -446,7 +619,7 @@ def write_page_roles(
                 region = OcrRegionResult.from_dict(region)
             native_label = region.native_label
             box = bbox_to_tuple(region.bbox_2d)
-            # Rule 1 reads the label the region summaries carry.
+            # Rule 3 reads the label the region summaries carry.
             label_role = _LABEL_ROLES.get(native_label or region.label or "")
             if label_role is not None:
                 labelled[(page, index)] = label_role
@@ -459,9 +632,9 @@ def write_page_roles(
                 continue
             pages_with_text.add(page)
             boxes[(page, index)] = box
+            # The text the region summaries carry, which the band rules read.
+            texts[(page, index)] = text = collapse_ws(clean[:200])
             if _inside_band(box):
-                # Rules 4 and 5 read the text the region summaries carry.
-                text = collapse_ws(clean[:200])
                 value = page_number_value(text)
                 if value is not None:
                     band_numbers[value - page].append((page, index))
@@ -486,12 +659,12 @@ def write_page_roles(
 
     repeats: dict[Occurrence, TextRepeat] = {}
     for kind, groups in (("heading", headings), ("body", bodies)):
-        for key, members in groups.items():
-            n_pages = len({page for page, _ in members})
+        for key, printed in groups.items():
+            n_pages = len({page for page, _ in printed})
             if n_pages < 2:
                 continue
-            repeat = TextRepeat(kind=kind, key=key, members=tuple(members), pages=n_pages)
-            for occurrence in members:
+            repeat = TextRepeat(kind=kind, key=key, members=tuple(printed), pages=n_pages)
+            for occurrence in printed:
                 repeats[occurrence] = repeat
 
     tags: dict[Occurrence, RoleTag] = {}
@@ -499,33 +672,67 @@ def write_page_roles(
     def tag(occurrence: Occurrence, component: str, *, role=None, score=None, evidence=()) -> None:
         if occurrence in tags:
             return
-        page, index = occurrence
-        target = ids.block(page, index)
+        target = ids.block(*occurrence)
         tags[occurrence] = RoleTag(
             target=target,
             role=role or _edge_role(boxes[occurrence]),
             decided=Decided(
-                component,
-                PAGE_ROLES_RULE,
-                score=score,
-                evidence=tuple(ids.block(p, i) for p, i in evidence if (p, i) != occurrence),
+                component, PAGE_ROLES_RULE, score=score, evidence=_evidence_ids(evidence, target)
             ),
         )
 
-    # Rule 1: the layout label.
+    def number_role(occurrence: Occurrence) -> str | None:
+        """The page number for a block printing one; None leaves the role to the position."""
+        return PAGE_NUMBER if page_number_value(texts[occurrence]) is not None else None
+
+    # Rules 1 and 2, from the layer: artifacts and the strip's furniture.
+    layer_pages = list(layer.pages) if layer is not None else []
+    artifacts: dict[int, np.ndarray] = {}
+    furniture_tags: list[RoleTag] = []
+    for layer_page in layer_pages:
+        artifact = _artifact_lines(layer_page)
+        if artifact is not None:
+            artifacts[layer_page.index] = artifact
+        for block in layer_page.blocks:
+            occurrence = (layer_page.index, block.region_index)
+            if occurrence not in texts:
+                continue
+            if (
+                artifact is not None
+                and block.lines
+                and _center_in_band(boxes[occurrence])
+                and all(artifact[line] for line in block.lines)
+            ):
+                line_ids = [ids.line(layer_page.index, line) for line in block.lines]
+                tag(occurrence, _ARTIFACT, role=number_role(occurrence), evidence=line_ids)
+            furniture = _printed_furniture(layer_page, block, texts[occurrence])
+            if furniture is not None:
+                furniture_role, furniture_ids = furniture
+                tag(occurrence, _STRIP, role=furniture_role, evidence=furniture_ids)
+        for item in layer_page.furniture:
+            kind_role = _FURNITURE_ROLES.get(item.kind)
+            if kind_role is not None:
+                furniture_tags.append(
+                    RoleTag(
+                        target=item.furniture_id,
+                        role=kind_role,
+                        decided=Decided(_STRIP, PAGE_ROLES_RULE),
+                    )
+                )
+
+    # Rule 3: the layout label.
     for occurrence, label_role in labelled.items():
         tag(occurrence, _LABEL, role=label_role)
 
-    # Rule 2: recurrence in a margin band. Repetition alone is not evidence:
+    # Rule 4: recurrence in a margin band. Repetition alone is not evidence:
     # multi-study papers legitimately repeat ``Method``/``Results`` per study,
     # and papers repeat a short body row mid-column ("where", "(TIF)").
     for occurrence, repeat in repeats.items():
-        members = repeat.members
         # The first printed title occurrence stays the title even when the
         # same text is repeated as a running header on later pages.
         if (
             repeat.kind == "heading"
-            and occurrence == members[0]
+            and occurrence == repeat.members[0]
             and occurrence[0] == first_page_index
             and not _is_title_furniture(repeat.key)
         ):
@@ -533,9 +740,9 @@ def write_page_roles(
         if not _touches_band(boxes[occurrence]):
             continue
         score = round(repeat.pages / max(1, len(pages_with_text)), 3)
-        tag(occurrence, _REPEAT, score=score, evidence=members)
+        tag(occurrence, _REPEAT, score=score, evidence=repeat.members)
 
-    # Rule 3: a doc_title in a margin band on a page after the title's. The
+    # Rule 5: a doc_title in a margin band on a page after the title's. The
     # title is the first doc_title that is not a copyright or permission blurb
     # (publishers sometimes print one above it); a title split over several
     # doc_title rows of its own page is not a running head.
@@ -553,15 +760,29 @@ def write_page_roles(
             if page != anchor_page and _touches_band(boxes[(page, index)]):
                 tag((page, index), _LATER_TITLE, evidence=((anchor_page, anchor_index),))
 
-    # Rule 4: digit-masked recurrence wholly inside a margin band, the test
-    # rule 7 makes for text-layer lines, for blocks (a scan has no text layer).
+    # Rule 6, from the layer: the number the page's label gives it.
+    for layer_page in layer_pages:
+        label_value = _label_value(layer_page)
+        if label_value is None:
+            continue
+        for block in layer_page.blocks:
+            occurrence = (layer_page.index, block.region_index)
+            if (
+                occurrence in texts
+                and _inside_band(boxes[occurrence])
+                and page_number_value(texts[occurrence]) == label_value
+            ):
+                tag(occurrence, _PAGE_LABEL, role=PAGE_NUMBER)
+
+    # Rule 7: digit-masked recurrence wholly inside a margin band, the test
+    # rule 11 makes for text-layer lines, for blocks (a scan has no text layer).
     n_pages = max(1, len(pages_with_text))
     for band_key, members in band_keys.items():
         members = _running_members(members, band_numbers_of, band_headings)
         pages = len({page for page, _ in members})
         if pages < 2:
             continue
-        # As in rule 2, the first heading printed on the first page stays
+        # As in rule 4, the first heading printed on the first page stays
         # the title.
         title = next((occurrence for occurrence in members if occurrence in band_headings), None)
         for occurrence in members:
@@ -573,7 +794,7 @@ def write_page_roles(
                 continue
             tag(occurrence, _BAND_REPEAT, score=round(pages / n_pages, 3), evidence=members)
 
-    # Rule 5: a lone number in a band whose offset from its page recurs.
+    # Rule 8: a lone number in a band whose offset from its page recurs.
     for members in band_numbers.values():
         pages = len({page for page, _ in members})
         if pages < 2:
@@ -588,5 +809,6 @@ def write_page_roles(
             )
 
     ordered = [tags[occurrence] for occurrence in sorted(tags)]
-    ordered.extend(_line_roles(page_lines or (), label_boxes))
+    ordered.extend(_line_roles(page_lines or (), label_boxes, layer, artifacts))
+    ordered.extend(furniture_tags)
     return PageRoles(ordered, repeats)

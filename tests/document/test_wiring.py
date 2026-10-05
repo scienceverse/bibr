@@ -306,7 +306,7 @@ async def test_parse_stage_keeps_the_layer_only_when_on(monkeypatch, on):
 
     monkeypatch.setattr(Settings.pipeline, "document_layer", on)
     calls = []
-    layer = SimpleNamespace(roles=[])
+    layer = SimpleNamespace(roles=[], pages=[])
 
     def fake_ensure(fs, settings, *, start_page, end_page):
         calls.append((fs, start_page, end_page))
@@ -359,6 +359,31 @@ async def test_a_layer_failure_never_fails_the_parse(monkeypatch, caplog):
     assert fs.contents is contents
     assert contents.document is None
     assert "Document layer failed" in caplog.text
+
+
+async def test_page_roles_that_fail_on_the_layer_are_decided_without_it(monkeypatch, caplog):
+    from bibr.pipeline.stages.parse_segment import ParseSegmentStage
+
+    monkeypatch.setattr(Settings.pipeline, "document_layer", True)
+    # A layer without pages: the writer fails on its evidence.
+    layer = SimpleNamespace(roles=[])
+    monkeypatch.setattr(rebuild_mod, "ensure_document_layer", lambda *_a, **_k: layer)
+    fs = FileState(path=Path("x.pdf"))
+    fs.ocr_regions = [[{"content": "hello world.", "task_type": "text"}]]
+    contents = MagicMock()
+    contents.document = None
+    ctx, parser = _parse_context(fs, contents)
+
+    with (
+        caplog.at_level(logging.WARNING),
+        patch("bibr.structure.pdf_parser.PDFParser", return_value=parser),
+    ):
+        await ParseSegmentStage().run(ctx)
+
+    assert fs.error is None
+    assert isinstance(contents.page_roles, PageRoles)
+    assert layer.roles == []
+    assert "Page roles failed on the document layer" in caplog.text
 
 
 # --- ensure_document_layer ------------------------------------------------------------
