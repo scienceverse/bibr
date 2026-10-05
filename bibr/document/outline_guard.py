@@ -53,6 +53,14 @@ Differences from the evaluation, which a reader comparing numbers must know:
   and 47 of 90 with the first five, and the 2,000-character gate lets a junk
   outline through. Such a layer keeps a rejection by R1 or R2, which read no
   text, and leaves a pass at None.
+- Entries left unresolved. The evaluation read the page of every entry. The layer stops
+  resolving the destinations of an outline once as many point at no page as the allowance
+  in :mod:`bibr.document.destinations` allows (256 in a file of 20,000 pages, 250,000 in one
+  of 20: only a stale or hostile outline in a long file reaches it), and an entry it left so
+  has an unknown page, which is not the same as none. While such an entry stays after the
+  cleanup the verdict is None, unless a rejection holds whatever that page is: R1, and R2's
+  majority of entries without a page when those known to have none already outnumber the
+  rest. R2's single target page and R3 read the page of every entry, so they wait.
 
 The evaluation's measured precision is therefore the evaluation's: measure the
 guard again on the layer's outline before quoting it.
@@ -62,7 +70,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import Protocol
 
 import numpy as np
@@ -223,11 +231,18 @@ def judge(
     meta_title: str | None,
     n_pages: int,
     text: Text | None,
-) -> OutlineGuard:
+    unresolved: Collection[int] = frozenset(),
+) -> OutlineGuard | None:
     """The guard's verdict on *entries* of a document of *n_pages* pages.
 
     *meta_title* is the PDF's /Title; *text* is the document's text, None when
     there is none to ground the titles in (R3 is then not applied).
+
+    *unresolved* holds the ``idx`` of the entries whose destination was left unresolved: their
+    page is unknown, not absent. While one of them stays after the cleanup the verdict is None
+    (unknown) unless a rule that does not depend on those pages rejects: R1, and R2's more than
+    half without a page counted from the entries known to have none. Nothing is None when
+    *unresolved* is empty.
     """
     title_keys = {key for key in (alnum(meta_title),) if len(key) >= 10}
     kept: list[OutlineEntry] = []
@@ -251,10 +266,15 @@ def judge(
     if n < 3:
         reject = "R1_too_few"
     else:
-        no_page = sum(1 for entry in kept if entry.page is None)
+        # An entry left unresolved has a page nobody knows, not none: it is not counted among
+        # those without one, and the rules that read every page wait for it.
+        unknown = any(entry.idx in unresolved for entry in kept)
+        no_page = sum(1 for entry in kept if entry.page is None and entry.idx not in unresolved)
         pages = {entry.page for entry in kept if entry.page is not None}
-        if no_page * 2 > n or (n_pages > 2 and len(pages) == 1 and no_page == 0):
+        if no_page * 2 > n or (not unknown and n_pages > 2 and len(pages) == 1 and no_page == 0):
             reject = "R2_targets"
+        elif unknown:
+            return None
         elif text is not None and text.chars >= 2000:
             misses = [entry for entry in kept if not text.grounded(entry)]
             score = (n - len(misses)) / n

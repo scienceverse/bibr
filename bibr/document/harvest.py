@@ -957,6 +957,8 @@ class LayerBuilder:
         self.labels: dict[int, str | None] = {}
         # The outline's entries; None until it is read, and when it cannot be.
         self.outline: list[OutlineEntry] | None = None
+        # The idx of the entries whose destination was left unresolved (their page is unknown).
+        self.outline_unresolved: frozenset[int] = frozenset()
         self.meta_title: str | None = None
         self.raw_links: list[links.RawLink] = []
         # The link annotations gone through so far (``links.MAX_LINKS`` caps them), and
@@ -1000,6 +1002,7 @@ class LayerBuilder:
             self.meta_title = outline.meta_title(self._api, doc)
             read = outline.read_outline(self._api, doc, self.names, self.outline_resolver)
             self.outline = read.entries
+            self.outline_unresolved = frozenset(read.unresolved)
             if read.note is not None:
                 self.errors["outline"] = read.note
             if read.unresolved:
@@ -1159,6 +1162,8 @@ class LayerBuilder:
         on a layer that holds every page, read. On less, a rejection by R1 or R2
         (which read no text) stands and a pass does not: a part of a document may
         hold too little text for the 2,000-character gate, and R3 might reject.
+        The same holds for the entries whose destination was left unresolved: only a
+        rejection that does not depend on their pages stands.
         """
         if self.outline is None:
             return None
@@ -1168,10 +1173,16 @@ class LayerBuilder:
         try:
             text = outline_guard.PageText(pages, self.n_pages) if complete and pages else None
             guard = outline_guard.judge(
-                self.outline, meta_title=self.meta_title, n_pages=self.n_pages, text=text
+                self.outline,
+                meta_title=self.meta_title,
+                n_pages=self.n_pages,
+                text=text,
+                unresolved=self.outline_unresolved,
             )
         except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
             self.errors["outline_guard"] = _error_text(exc)
+            return None
+        if guard is None:
             return None
         return guard if complete or not guard.passed else None
 

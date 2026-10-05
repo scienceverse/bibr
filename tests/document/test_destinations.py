@@ -478,6 +478,20 @@ def test_bookmarks_that_spend_their_allowance_do_not_starve_the_links(monkeypatc
         "outline_unresolved": "the allowance of 256 destinations that point at no page was spent; "
         "left unresolved: 304, the first at ol256"
     }
+    # The guard does not take those 304 for entries without a page: 256 of 560 are known to
+    # have none, which is under half, so it gives no verdict (R2 would have rejected it).
+    assert layer.outline_guard is None and layer.presence.outline_guard_pass is None
+    assert layer.presence.has_outline is True
+
+
+def test_a_rejection_that_holds_whatever_the_unresolved_bookmarks_point_at_stands(monkeypatch):
+    _floor_allowance(monkeypatch, 4)
+    layer = build_document_layer(_paper_with_destinations("", "d" * 6), [0], budget=_BUDGET)
+
+    # Four are known to have no page and two are unresolved: four of six is over half.
+    assert list(layer.component_errors) == ["outline_unresolved"]
+    assert layer.outline_guard.reject == "R2_targets"
+    assert layer.presence.outline_guard_pass is False
 
 
 def test_links_that_spend_their_allowance_do_not_starve_the_outline(monkeypatch):

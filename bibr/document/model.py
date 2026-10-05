@@ -532,8 +532,9 @@ class DocumentLayer:
     pages: list[Page]
     fonts: list[Font]
     outline: list[OutlineEntry] = field(default_factory=list)
-    # None when the outline could not be read, or the layer lacks the text of
-    # some page to judge it by (see :mod:`bibr.document.outline_guard`).
+    # None when the outline could not be read, the layer lacks the text of some page to
+    # judge it by, or the destinations of some entries were left unresolved and no rule that
+    # needs no page rejects (see :mod:`bibr.document.outline_guard`).
     outline_guard: OutlineGuard | None = None
     links: list[Link] = field(default_factory=list)
     struct: list[StructElem] = field(default_factory=list)
