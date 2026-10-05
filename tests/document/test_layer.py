@@ -411,6 +411,56 @@ def test_page_lines_reproduce_the_reference_line_stream(name, reject):
         assert views.page_lines(page) == by_page.get(page.index + 1, [])
 
 
+def _doi_evidence_records(pdf_bytes: bytes) -> list[list[tuple[str, float, float, bool]]]:
+    """``pdf_doi_evidence._printed_char_records`` of every page, read from the PDF."""
+    import pypdfium2
+
+    from bibr.extract.pdf_doi_evidence import _printed_char_records
+    from bibr.ocr.native_text import open_text_page
+    from bibr.ocr.utils import pdfium_lock
+
+    pages = []
+    with pdfium_lock:
+        doc = pypdfium2.PdfDocument(pdf_bytes)
+        try:
+            for index in range(len(doc)):
+                page = doc[index]
+                try:
+                    textpage = open_text_page(page)
+                    try:
+                        pages.append(_printed_char_records(textpage))
+                    finally:
+                        textpage.close()
+                finally:
+                    page.close()
+        finally:
+            doc.close()
+    return pages
+
+
+@pytest.mark.parametrize("name", sorted(_FIXTURES))
+def test_printed_char_records_reproduce_the_doi_evidence_records(name):
+    pdf_bytes = _FIXTURES[name]
+    layer = build_document_layer(pdf_bytes, range, budget=_BUDGET)
+
+    assert [views.printed_char_records(page) for page in layer.pages] == _doi_evidence_records(
+        pdf_bytes
+    )
+
+
+def test_printed_char_records_keep_chars_beyond_the_bmp():
+    line = f"Let {_pdfs.MATH_ALPHA_CODE} be the angle"
+    pdf = _pdfs.build_pdf([_pdfs.PageSpec(_pdfs.text(line, 72.0, 700.0, size=12.0, font="F4"))])
+    page = build_document_layer(pdf, range, budget=_BUDGET).page(0)
+
+    records = views.printed_char_records(page)
+
+    assert records == _doi_evidence_records(pdf)[0]
+    assert "".join(ch for ch, _x, _y, newline in records if not newline) == line.replace(
+        _pdfs.MATH_ALPHA_CODE, _pdfs.MATH_ALPHA
+    )
+
+
 def test_page_lines_drop_chars_beyond_the_bmp_as_the_line_stream_does():
     # pdfium reads such a char one UTF-16 unit at a time: the high surrogate
     # alone, which decodes to nothing, so the line stream leaves it out.
