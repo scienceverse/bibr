@@ -23,21 +23,30 @@ has. Its rules for a block, in the order they are tried:
    reads as furniture itself (a copyright line, a masthead).
 3. A later title: a ``doc_title`` in a margin band on a page after the
    title's, which the layout model gives to running heads and banners.
+4. Band recurrence: a block wholly inside a margin band whose digit-masked
+   text (:func:`furniture_key`) recurs inside the bands of two or more pages,
+   with rule 2's exception for the title. The numbers must recur too, or,
+   outside headings, one of them run with the page (a running head's page
+   number): "Appendix 1" and "Appendix 2" opening two pages are headings,
+   even on consecutive pages.
+5. Band page numbers: a block wholly inside a margin band that prints a lone
+   page number, at an offset from its page that recurs on two or more pages.
 
 The margin bands (``_TOP_BAND`` / ``_BOTTOM_BAND``, 0..1000 layout space) are
 the position evidence; a block without a box has none, and counts as in a
-band, the behaviour from before regions carried coordinates.
+band for rules 2 and 3, the behaviour from before regions carried
+coordinates.
 
 Text-layer lines (``PdfInspection.page_lines``, which the reference line
 stream reads; ids ``p{page}.pl{n}``) get roles too:
 
-4. A line whose centre lies in the box of a block the layout labels as
+6. A line whose centre lies in the box of a block the layout labels as
    furniture (rule 1) has that block's role.
-5. Edge recurrence: among the top and bottom two lines of each page, a line
-   whose digit-masked text (:func:`furniture_key`) recurs at the edge of two
-   or more pages is a running head or foot.
-6. Page numbers: a lone number at a page edge whose offset from the page
-   number recurs on two or more pages.
+7. Edge recurrence: among the top and bottom two lines of each page, a line
+   whose digit-masked text recurs at the edge of two or more pages is a
+   running head or foot.
+8. Page numbers: a lone number at a page edge whose offset from the page
+   number recurs on two or more pages, as in rule 5.
 """
 
 from __future__ import annotations
@@ -55,6 +64,7 @@ from bibr.ocr.types import OcrRegionResult
 from bibr.paper_contents import FRONT_MATTER_MASTHEAD_RE, is_exact_front_matter_furniture
 from bibr.structure.parse_text import TextHandlersMixin
 from bibr.structure.text_repair import bbox_to_tuple, strip_markdown_emphasis
+from bibr.utils.text import collapse_ws
 
 RUNNING_HEADER = "running_header"
 RUNNING_FOOTER = "running_footer"
@@ -68,6 +78,7 @@ PAGE_ROLES_RULE = "page_roles/1"
 _LABEL = "page_roles.label"
 _REPEAT = "page_roles.repeat"
 _LATER_TITLE = "page_roles.later_title"
+_BAND_REPEAT = "page_roles.band_repeat"
 _IN_LABEL_BOX = "page_roles.in_label_box"
 _EDGE_REPEAT = "page_roles.edge_repeat"
 _PAGE_NUMBER_RUN = "page_roles.page_number_run"
@@ -269,7 +280,7 @@ def _line_roles(
     page_lines: Sequence[Mapping[str, Any]],
     label_boxes: Mapping[int, Sequence[tuple[str, str, Box]]],
 ) -> list[RoleTag]:
-    """Rules 4-6: the page roles of the text-layer lines.
+    """Rules 6-8: the page roles of the text-layer lines.
 
     *label_boxes* holds, per 0-based page, ``(block id, role, box)`` for the
     blocks rule 1 tagged.
@@ -301,7 +312,7 @@ def _line_roles(
             ),
         )
 
-    # Rule 4: inside a furniture block's box, by the line's centre.
+    # Rule 6: inside a furniture block's box, by the line's centre.
     for page, positions in by_page.items():
         boxes = label_boxes.get(page - 1, ())
         for position in positions if boxes else ():
@@ -311,7 +322,7 @@ def _line_roles(
                     tag(position, role, _IN_LABEL_BOX, evidence=(block_id,))
                     break
 
-    # Rules 5 and 6 read the top and bottom two lines of each page only, as
+    # Rules 7 and 8 read the top and bottom two lines of each page only, as
     # the geometry segmenter's own capture does (``bibr.ocr.ref_geometry``).
     pages_by_key: dict[str, set[int]] = defaultdict(set)
     keyed: dict[str, list[int]] = defaultdict(list)
@@ -360,6 +371,39 @@ def _line_roles(
     return [tags[position] for position in sorted(tags)]
 
 
+def _running_members(
+    members: Sequence[Occurrence],
+    numbers: Mapping[Occurrence, tuple[int, ...]],
+    headings: set[Occurrence],
+) -> list[Occurrence]:
+    """The *members* of a digit-masked repeat whose numbers repeat or run with the page.
+
+    Two members match when they print the same numbers, or, unless one is a
+    heading, the same numbers but one, which differs from the page index by
+    the same offset in both: a numbered heading ("Appendix 4", "Appendix 5")
+    runs with the page when each section fills one. A member matching one on
+    another page is kept.
+    """
+    pages_by_signature: dict[tuple, set[int]] = defaultdict(set)
+    signatures: dict[Occurrence, list[tuple]] = {}
+    for occurrence in members:
+        page = occurrence[0]
+        values = numbers.get(occurrence, ())
+        own: list[tuple] = [(None, values)]
+        if occurrence not in headings:
+            own.extend(
+                (k, (*values[:k], values[k] - page, *values[k + 1 :])) for k in range(len(values))
+            )
+        signatures[occurrence] = own
+        for signature in own:
+            pages_by_signature[signature].add(page)
+    return [
+        occurrence
+        for occurrence in members
+        if any(len(pages_by_signature[signature]) >= 2 for signature in signatures[occurrence])
+    ]
+
+
 def _is_title_furniture(key: str) -> bool:
     """Text that is furniture even where a title would be: a copyright line, a masthead."""
     return (
@@ -391,6 +435,10 @@ def write_page_roles(
     headings: dict[str, list[Occurrence]] = {}
     bodies: dict[str, list[Occurrence]] = {}
     doc_titles: list[tuple[int, int, str]] = []
+    band_keys: dict[str, list[Occurrence]] = {}
+    band_headings: set[Occurrence] = set()
+    band_numbers_of: dict[Occurrence, tuple[int, ...]] = {}
+    band_numbers: dict[int, list[Occurrence]] = defaultdict(list)
     pages_with_text: set[int] = set()
     for page, page_regions in enumerate(regions):
         for index, region in enumerate(page_regions):
@@ -405,11 +453,23 @@ def write_page_roles(
                 if box is not None:
                     label_boxes[page].append((ids.block(page, index), label_role, box))
             label = native_label if native_label in LABEL_TREATMENT else region.label
-            content = fix_ocr_artifacts(region.content).strip()
+            clean = fix_ocr_artifacts(region.content)
+            content = clean.strip()
             if not content:
                 continue
             pages_with_text.add(page)
             boxes[(page, index)] = box
+            if _inside_band(box):
+                # Rules 4 and 5 read the text the region summaries carry.
+                text = collapse_ws(clean[:200])
+                value = page_number_value(text)
+                if value is not None:
+                    band_numbers[value - page].append((page, index))
+                elif (band_key := furniture_key(text)) is not None:
+                    band_keys.setdefault(band_key, []).append((page, index))
+                    band_numbers_of[(page, index)] = tuple(map(int, _DIGITS.findall(text)))
+                    if label in _HEADING_LABELS:
+                        band_headings.add((page, index))
             if label in _BODY_TEXT_LABELS:
                 key = body_key(content)
                 if key and (len(key) <= REPEAT_MAX_LEN or _inside_band(box)):
@@ -492,6 +552,40 @@ def write_page_roles(
         for page, index, _ in doc_titles[anchor + 1 :]:
             if page != anchor_page and _touches_band(boxes[(page, index)]):
                 tag((page, index), _LATER_TITLE, evidence=((anchor_page, anchor_index),))
+
+    # Rule 4: digit-masked recurrence wholly inside a margin band, the test
+    # rule 7 makes for text-layer lines, for blocks (a scan has no text layer).
+    n_pages = max(1, len(pages_with_text))
+    for band_key, members in band_keys.items():
+        members = _running_members(members, band_numbers_of, band_headings)
+        pages = len({page for page, _ in members})
+        if pages < 2:
+            continue
+        # As in rule 2, the first heading printed on the first page stays
+        # the title.
+        title = next((occurrence for occurrence in members if occurrence in band_headings), None)
+        for occurrence in members:
+            if (
+                occurrence == title
+                and occurrence[0] == first_page_index
+                and not _is_title_furniture(band_key)
+            ):
+                continue
+            tag(occurrence, _BAND_REPEAT, score=round(pages / n_pages, 3), evidence=members)
+
+    # Rule 5: a lone number in a band whose offset from its page recurs.
+    for members in band_numbers.values():
+        pages = len({page for page, _ in members})
+        if pages < 2:
+            continue
+        for occurrence in members:
+            tag(
+                occurrence,
+                _PAGE_NUMBER_RUN,
+                role=PAGE_NUMBER,
+                score=round(pages / n_pages, 3),
+                evidence=members,
+            )
 
     ordered = [tags[occurrence] for occurrence in sorted(tags)]
     ordered.extend(_line_roles(page_lines or (), label_boxes))
