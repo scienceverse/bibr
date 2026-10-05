@@ -963,7 +963,7 @@ class LayerBuilder:
         self.links_read: set[int] = set()
         # Whether the allowance of link annotations ran out: no later page is read.
         self.links_stopped = False
-        self.struct: list[StructElem] = []
+        self.struct: list[structure.Copy] = []
         # Whether the allowance of structure elements ran out: no later page is given to pdfium.
         self.struct_stopped = False
         # Whether /MarkInfo says the PDF is tagged (None until read), and whether

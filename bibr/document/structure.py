@@ -9,8 +9,8 @@ index of the element among its parent's kids from the root down
 (:attr:`StructElem.path`), because pdfium leaves a slot for every kid and
 fills those that belong to the page. On gate192 and the manuscripts it is the
 same on every copy and tells the elements apart (no two elements with one path
-had a different type, alternate text, actual text or language). The path is
-the element's id (``st0.3.2``), so the id depends on the PDF alone.
+had a different type, alternate text, actual text, language or number of kids).
+The path is the element's id (``st0.3.2``), so the id depends on the PDF alone.
 
 What is read of an element is what pdfium offers: its type with /RoleMap
 applied for one step (a type mapped through a chain stops at the middle
@@ -31,7 +31,7 @@ Everything here calls pdfium and needs the caller's ``pdfium_lock``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from bibr.document import destinations, ids
 from bibr.document.model import StructElem
@@ -67,12 +67,24 @@ MAX_ELEMENTS = 20_000
 MAX_KIDS = 2_000
 
 
+class Copy(NamedTuple):
+    """The page's copy of a structure element, and the number of kids pdfium counts in it.
+
+    The kid count is read for :func:`merge` to compare and is not kept in the layer: pdfium
+    gives every copy of an element a slot for each kid of its /K, so it is the same on
+    every page.
+    """
+
+    elem: StructElem
+    kids: int
+
+
 @dataclass(slots=True)
 class PageTree:
     """What was read of the structure tree of one page."""
 
     # The page's copies of the elements in document order.
-    copies: list[StructElem] = field(default_factory=list)
+    copies: list[Copy] = field(default_factory=list)
     # Whether pdfium gave the page a tree. It does when the PDF has a structure tree
     # root that reaches pages; a page with no tagged content has a tree and no elements.
     has_tree: bool = False
@@ -148,7 +160,7 @@ def _element(
     page_index: int,
     path: tuple[int, ...],
     pending: list[tuple[Any, tuple[int, ...]]],
-) -> tuple[StructElem, bool]:
+) -> tuple[Copy, bool]:
     """The page's copy of the element at *handle*, and whether it has more kids than were read.
 
     Its element kids are pushed onto *pending*.
@@ -176,30 +188,34 @@ def _element(
         actual=destinations.utf16_text(api.FPDF_StructElement_GetActualText, handle),
         lang=destinations.utf16_text(api.FPDF_StructElement_GetLang, handle),
     )
-    return element, count > MAX_KIDS
+    return Copy(element, int(count)), count > MAX_KIDS
 
 
-def merge(copies: list[StructElem]) -> tuple[list[StructElem], int]:
+def merge(copies: list[Copy]) -> tuple[list[StructElem], int]:
     """The elements the page-by-page *copies* are of, one each, and how many copies differ from the first of theirs.
 
     The copies of an element agree in everything but the marked content, which
     is each page's own; the element holds all of it, in the order the pages
     were read. An element comes in the place of its first copy, so it follows
     the element above it. The first copy gives the type, the text and the
-    language; a copy that differs from it (none on gate192 or the manuscripts)
-    is counted, and its marked content is added all the same.
+    language; a copy that differs from it in those or in its number of kids
+    (none on gate192 or the manuscripts) is counted, and its marked content is
+    added all the same.
     """
-    first: dict[str, StructElem] = {}
+    first: dict[str, Copy] = {}
     held: dict[str, list[tuple[int, int]]] = {}
     differing = 0
     for copy in copies:
-        known = first.setdefault(copy.elem_id, copy)
-        held.setdefault(copy.elem_id, []).extend(copy.mcrs)
-        if (copy.role, copy.alt, copy.actual, copy.lang) != (
-            known.role,
-            known.alt,
-            known.actual,
-            known.lang,
-        ):
+        known = first.setdefault(copy.elem.elem_id, copy)
+        held.setdefault(copy.elem.elem_id, []).extend(copy.elem.mcrs)
+        if _signature(copy) != _signature(known):
             differing += 1
-    return [replace(elem, mcrs=tuple(held[elem_id])) for elem_id, elem in first.items()], differing
+    return [
+        replace(copy.elem, mcrs=tuple(held[elem_id])) for elem_id, copy in first.items()
+    ], differing
+
+
+def _signature(copy: Copy) -> tuple[str, str | None, str | None, str | None, int]:
+    """What the copies of one element must agree on."""
+    elem = copy.elem
+    return (elem.role, elem.alt, elem.actual, elem.lang, copy.kids)
