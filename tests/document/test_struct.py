@@ -366,8 +366,25 @@ def test_a_failure_to_join_the_copies_leaves_the_elements_out_and_the_paper_alon
     layer = _layer()
 
     assert layer.struct == []
-    assert layer.component_errors == {"struct": "RuntimeError: bad copies"}
+    assert layer.component_errors == {"struct_merge": "RuntimeError: bad copies"}
     assert layer.presence.is_tagged is True
+
+
+def test_a_failure_to_join_the_copies_and_a_limit_are_said_under_keys_of_their_own(monkeypatch):
+    def broken(copies):
+        raise RuntimeError("bad copies")
+
+    monkeypatch.setattr(structure, "MAX_ELEMENTS", 4)
+    monkeypatch.setattr(structure, "merge", broken)
+    layer = _layer()
+
+    # The elements are empty because the join failed, not because of the limit; the limit still
+    # says where the read stopped.
+    assert layer.struct == []
+    assert layer.component_errors == {
+        "struct": "more than 4 structure elements, the rest unread from page 0",
+        "struct_merge": "RuntimeError: bad copies",
+    }
 
 
 def _tree_calls(monkeypatch) -> list[int]:
