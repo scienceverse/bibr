@@ -148,6 +148,9 @@ class PageLinks:
     stopped: bool
     # Why a link failed (the first on the page): it is left out, and the others are kept.
     failure: str | None
+    # The number of the first link of the page whose destination was left unresolved because the
+    # resolver's allowance of destinations that point at no page was spent.
+    first_unresolved: int | None
 
 
 def read_page_links(
@@ -170,6 +173,7 @@ def read_page_links(
     found: list[RawLink] = []
     cuts: list[str] = []
     failure: str | None = None
+    first_unresolved: int | None = None
     complete = True
     stopped = False
     position = ctypes.c_int(0)
@@ -182,6 +186,7 @@ def read_page_links(
             _say(cuts, f"more than {MAX_LINKS} link annotations, the rest unread")
             break
         number += 1
+        skipped = resolver.skipped
         try:
             raw, cut = _read_link(
                 api, doc, page, link, (page_index, number), names, resolver, with_names
@@ -190,12 +195,14 @@ def read_page_links(
             failure = failure or f"{type(exc).__name__}: {exc}"[:500]
             complete = False
             continue
+        if first_unresolved is None and resolver.skipped != skipped:
+            first_unresolved = number
         _say(cuts, cut)
         if raw is None:
             complete = False
             continue
         found.append(raw)
-    return PageLinks(found, number + 1, complete, cuts, stopped, failure)
+    return PageLinks(found, number + 1, complete, cuts, stopped, failure, first_unresolved)
 
 
 def _say(cuts: list[str], text: str | None) -> None:
