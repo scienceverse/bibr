@@ -273,7 +273,9 @@ def test_a_document_over_the_link_limit_is_read_to_the_limit_and_says_so_once(mo
     # The allowance runs out on the first page, and the note is the document's: the
     # fixture has links on a second page too.
     assert {spec.page for spec in _linked.LINKS} == {0, 1}
-    assert layer.component_errors == {"links": "more than 5 link annotations, the rest unread"}
+    assert layer.component_errors == {
+        "links": "more than 5 link annotations, the rest unread from page 0"
+    }
     # The first of those five is internal, so the answer is yes.
     assert layer.presence.has_internal_links is True
 
@@ -299,9 +301,21 @@ def test_an_allowance_spent_exactly_at_the_end_of_a_page_is_stopped_by_the_next_
     assert len(calls) == first + 1 + 1
     assert [link.page for link in layer.links] == [0] * first
     assert layer.component_errors == {
-        "links": f"more than {first} link annotations, the rest unread"
+        "links": f"more than {first} link annotations, the rest unread from page 1"
     }
     assert layer.presence.has_internal_links is True
+
+
+def test_the_limit_note_names_the_page_the_read_stopped_on_which_is_read_in_part(monkeypatch):
+    first = sum(1 for spec in _linked.LINKS if spec.page == 0)
+    monkeypatch.setattr(links, "MAX_LINKS", first + 1)
+    layer = _layer()
+
+    # Page 0 is read whole, page 1 to its first link: the pages from 1 on are the unread ones.
+    assert [link.page for link in layer.links] == [0] * first + [1]
+    assert layer.component_errors == {
+        "links": f"more than {first + 1} link annotations, the rest unread from page 1"
+    }
 
 
 def test_links_cut_short_do_not_say_the_document_has_none(monkeypatch):

@@ -89,10 +89,11 @@ class PageTree:
     # root that reaches pages; a page with no tagged content has a tree and no elements.
     has_tree: bool = False
     # What cut the read short, each once: a tree or an element with more kids than
-    # MAX_KIDS, a circular reference, the allowance of elements. The reader of the
-    # document says each once for all its pages, not once for each page.
+    # MAX_KIDS, a circular reference. The reader of the document says each once for all its
+    # pages, not once for each page.
     cuts: list[str] = field(default_factory=list)
     # Whether the allowance of elements ran out on this page: another element was there.
+    # The caller says so, with this page, and gives pdfium no later one.
     stopped: bool = False
     # Why the walk failed, and the elements read before then are kept.
     failure: str | None = None
@@ -139,7 +140,6 @@ def read_page_tree(api: _Api, page, page_index: int, *, limit: int = MAX_ELEMENT
                 read.cut("circular structure reference")
                 continue
             if len(read.copies) >= limit:
-                read.cut(f"more than {MAX_ELEMENTS} structure elements, the rest unread")
                 read.stopped = True
                 break
             seen.add(address)

@@ -140,11 +140,10 @@ class PageLinks:
     # was left out (it failed, or has no rectangle that is finite) or the document's
     # allowance of annotations ran out; a link cut short is kept, so it does not count.
     complete: bool
-    # What left a link out, cut one short or stopped the read, each once: the reader of
-    # the document says each once for all its pages, not once for each page.
+    # What left a link out or cut one short, each once.
     cuts: list[str]
     # Whether the document's allowance of annotations ran out on this page: another
-    # annotation was there. The caller reads no later page then.
+    # annotation was there. The caller says so, with this page, and reads no later one.
     stopped: bool
     # Why a link failed (the first on the page): it is left out, and the others are kept.
     failure: str | None
@@ -183,7 +182,6 @@ def read_page_links(
         if number + 1 >= limit:
             complete = False
             stopped = True
-            _say(cuts, f"more than {MAX_LINKS} link annotations, the rest unread")
             break
         number += 1
         skipped = resolver.skipped
