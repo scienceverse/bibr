@@ -960,6 +960,8 @@ class LayerBuilder:
         self.links_enumerated = 0
         self.links_read: set[int] = set()
         self.struct: list[StructElem] = []
+        # Whether the allowance of structure elements ran out: no later page is given to pdfium.
+        self.struct_stopped = False
         # Whether /MarkInfo says the PDF is tagged (None until read), and whether
         # any page was given a structure tree.
         self.marked: bool | None = None
@@ -994,6 +996,14 @@ class LayerBuilder:
 
     def _lacks(self, apis: tuple[str, ...]) -> bool:
         return any(name in self.missing for name in apis)
+
+    def _note(self, key: str, text: str) -> None:
+        """Say *text* under *key* once: a different text for the same key follows the first."""
+        kept = self.errors.get(key)
+        if kept is None:
+            self.errors[key] = text
+        elif text not in kept.split("; "):
+            self.errors[key] = f"{kept}; {text}"
 
     def _read_label(self, page_index: int) -> None:
         if self.doc is None or self._lacks(("FPDF_GetPageLabel",)):
@@ -1030,19 +1040,24 @@ class LayerBuilder:
             self.errors[f"links:{page_index}"] = page_links.note
 
     def _read_struct(self, page, page_index: int) -> None:
-        if self._lacks(structure.APIS):
+        # pdfium builds a page's whole tree in one call, however little of it is kept, so
+        # once the allowance of elements has run out no later page is given to it.
+        if self._lacks(structure.APIS) or self.struct_stopped:
             return
         try:
-            found, has_tree, note = structure.read_page_tree(
+            tree = structure.read_page_tree(
                 self._api, page, page_index, limit=structure.MAX_ELEMENTS - len(self.struct)
             )
         except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
             self.errors[f"struct:{page_index}"] = _error_text(exc)
             return
-        self.struct.extend(found)
-        self.struct_tree = self.struct_tree or has_tree
-        if note is not None:
-            self.errors[f"struct:{page_index}"] = note
+        self.struct.extend(tree.copies)
+        self.struct_tree = self.struct_tree or tree.has_tree
+        self.struct_stopped = tree.stopped
+        for text in tree.cuts:
+            self._note("struct", text)
+        if tree.failure is not None:
+            self.errors[f"struct:{page_index}"] = tree.failure
 
     def records(
         self, textpage, page_index: int
@@ -1146,12 +1161,10 @@ class LayerBuilder:
         try:
             merged, differing = structure.merge(self.struct)
         except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
-            self.errors["struct"] = _error_text(exc)
+            self._note("struct", _error_text(exc))
             return []
         if differing:
-            self.errors["struct"] = (
-                f"{differing} copies of a structure element differ from its first"
-            )
+            self._note("struct", f"{differing} copies of a structure element differ from its first")
         return merged
 
     def _is_tagged(self) -> bool | None:

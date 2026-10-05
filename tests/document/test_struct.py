@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 
+import pypdfium2.raw as pdfium_raw
 import pytest
 
 from bibr.document import harvest, ids, structure, views
@@ -276,10 +277,10 @@ def test_copies_that_differ_are_noted_in_the_layer(monkeypatch):
     real = structure.read_page_tree
 
     def rename_on_page_2(api, page, page_index, **kwargs):
-        found, has_tree, note = real(api, page, page_index, **kwargs)
+        tree = real(api, page, page_index, **kwargs)
         if page_index == 2:
-            found = [replace(elem, role="Other") for elem in found]
-        return found, has_tree, note
+            tree.copies = [replace(elem, role="Other") for elem in tree.copies]
+        return tree
 
     monkeypatch.setattr(structure, "read_page_tree", rename_on_page_2)
     layer = _layer()
@@ -291,6 +292,18 @@ def test_copies_that_differ_are_noted_in_the_layer(monkeypatch):
     )
     # The first copy gives the element's type; the content of the other is kept.
     assert views.StructIndex(layer).by_mcr[(2, 0)].role == "P"
+
+
+def test_a_note_for_the_document_is_said_once_and_a_different_one_follows_it():
+    builder = harvest.LayerBuilder(b"%PDF-1.4\n", None)
+
+    builder._note("struct", "a tree")
+    builder._note("struct", "a tree")
+    builder._note("struct", "an element")
+    builder._note("struct", "a tree")
+    builder._note("links", "a tree")
+
+    assert builder.errors == {"struct": "a tree; an element", "links": "a tree"}
 
 
 def test_a_failure_to_join_the_copies_leaves_the_elements_out_and_the_paper_alone(monkeypatch):
@@ -305,15 +318,88 @@ def test_a_failure_to_join_the_copies_leaves_the_elements_out_and_the_paper_alon
     assert layer.presence.is_tagged is True
 
 
-def test_a_document_over_the_limit_is_read_to_the_limit_and_says_so(monkeypatch):
+def _tree_calls(monkeypatch) -> list[int]:
+    """One item for each page pdfium is asked a structure tree for (FPDF_StructTree_GetForPage)."""
+    real = pdfium_raw.FPDF_StructTree_GetForPage
+    calls: list[int] = []
+
+    def counted(page):
+        calls.append(len(calls))
+        return real(page)
+
+    monkeypatch.setattr(pdfium_raw, "FPDF_StructTree_GetForPage", counted)
+    return calls
+
+
+def test_a_document_over_the_limit_is_read_to_the_limit_and_says_so_once(monkeypatch):
     monkeypatch.setattr(structure, "MAX_ELEMENTS", 4)
     layer = _layer()
 
-    # The allowance runs out on the first page; every later page that has a tree says so.
+    # The allowance runs out on the first page, and the note is the document's.
     assert _rows(layer) == _expected([0])[:4]
-    note = "more than 4 structure elements, the rest unread"
-    assert layer.component_errors == {f"struct:{page}": note for page in range(5)}
+    assert layer.component_errors == {"struct": "more than 4 structure elements, the rest unread"}
     assert layer.presence.is_tagged is True
+
+
+def test_once_the_allowance_is_spent_no_later_page_is_given_to_pdfium(monkeypatch):
+    monkeypatch.setattr(structure, "MAX_ELEMENTS", 4)
+    calls = _tree_calls(monkeypatch)
+    layer = _layer()
+
+    # pdfium builds a page's whole tree in one call, so the pages after the first, which
+    # would keep nothing, are not asked for.
+    assert len(calls) == 1
+    assert _rows(layer) == _expected([0])[:4]
+    # The inline build hands its pages to the same builder.
+    del calls[:]
+    inline = _inspect(_linked.linked_paper(), layer=True).document
+    assert len(calls) == 1
+    assert len(inline.struct) == 4
+
+
+def test_an_allowance_spent_exactly_at_the_end_of_a_page_is_stopped_by_the_next_one(monkeypatch):
+    first = len(_expected([0]))
+    monkeypatch.setattr(structure, "MAX_ELEMENTS", first)
+    calls = _tree_calls(monkeypatch)
+    layer = _layer()
+
+    # Whether another element is there is known only from the next page's tree: one more
+    # call, which finds an element and stops the rest.
+    assert len(calls) == 2
+    assert _rows(layer) == _expected([0])
+    assert layer.component_errors == {
+        "struct": f"more than {first} structure elements, the rest unread"
+    }
+
+
+def test_an_allowance_spent_exactly_with_no_element_after_it_says_nothing(monkeypatch):
+    tree = Tag("Document", (Tag("P", ((0, 0),)),))
+    monkeypatch.setattr(structure, "MAX_ELEMENTS", 2)
+    calls = _tree_calls(monkeypatch)
+    layer = _layer(tree=tree)
+
+    # The later pages have a tree and no element: they are asked, and nothing is cut.
+    assert len(calls) == _linked.N_PAGES
+    assert [element.role for element in layer.struct] == ["Document", "P"]
+    assert layer.component_errors == {}
+
+
+def test_a_page_that_fails_does_not_stop_the_pages_after_it(monkeypatch):
+    real = structure.read_page_tree
+
+    def fail_on_page_0(api, page, page_index, **kwargs):
+        if page_index == 0:
+            raise RuntimeError("bad tree")
+        return real(api, page, page_index, **kwargs)
+
+    monkeypatch.setattr(structure, "read_page_tree", fail_on_page_0)
+    calls = _tree_calls(monkeypatch)
+    layer = _layer()
+
+    # The failure is raised before pdfium is asked, so four pages are.
+    assert len(calls) == _linked.N_PAGES - 1
+    assert layer.component_errors == {"struct:0": "RuntimeError: bad tree"}
+    assert _rows(layer) == _expected([1, 2, 3, 4])
 
 
 def test_a_document_with_exactly_the_limit_is_read_whole_and_says_nothing(monkeypatch):
@@ -342,7 +428,7 @@ def test_an_element_with_too_many_kids_is_read_to_the_limit_and_says_so(monkeypa
         ("P", ((0, 0), (0, 1))),
         ("P", ((0, 4),)),
     ]
-    assert layer.component_errors["struct:0"] == "an element with more than 2 kids, the rest unread"
+    assert layer.component_errors == {"struct": "an element with more than 2 kids, the rest unread"}
 
 
 def test_a_tree_with_too_many_top_level_elements_is_read_to_the_limit_and_says_so(monkeypatch):
@@ -351,7 +437,7 @@ def test_a_tree_with_too_many_top_level_elements_is_read_to_the_limit_and_says_s
 
     assert layer.struct == []
     note = "a tree with more than 0 top-level elements, the rest unread"
-    assert layer.component_errors == {f"struct:{page}": note for page in range(_linked.N_PAGES)}
+    assert layer.component_errors == {"struct": note}
 
 
 def test_the_inline_build_reads_the_same_tree():
