@@ -508,24 +508,67 @@ def test_a_page_without_a_text_layer_joins_nothing():
     assert index.span_element(blank, 0) is None
 
 
-def test_a_layer_whose_columns_were_freed_joins_no_text_and_keeps_the_tree():
+def test_a_layer_whose_columns_were_freed_keeps_the_tree():
     layer = _layer()
     index = views.StructIndex(layer)
-    paragraph, cell = index.by_mcr[(1, 1)], index.by_mcr[(3, 3)]
-    link = _link(layer, "table_ref")
+    cell = index.by_mcr[(3, 3)]
     tree = list(layer.struct)
-    assert index.spans_of(paragraph) and index.link_element(link) is not None
+    roles = [e.role for e in index.ancestors(cell)]
 
     layer.free_columns()
     freed = views.StructIndex(layer)
 
     assert layer.struct == tree
-    assert freed.spans_of(paragraph) == []
-    assert all(freed.span_element(page, 0) is None for page in layer.pages)
-    assert freed.link_element(link) is None
-    assert [e.role for e in freed.ancestors(freed.by_mcr[(3, 3)])] == [
-        e.role for e in index.ancestors(cell)
-    ]
+    assert (
+        freed.by_mcr.keys() == index.by_mcr.keys()
+        and freed.children.keys() == index.children.keys()
+    )
+    assert [e.role for e in freed.ancestors(freed.by_mcr[(3, 3)])] == roles
+
+
+def _join_args(layer, index):
+    """What the joins are asked about, found while the layer still holds its columns."""
+    page = layer.page(1)
+    span = next(n for n in range(len(page.cols.span_rec)) if index.span_element(page, n))
+    return page, span, _link(layer, "table_ref"), index.by_mcr[(1, 1)]
+
+
+def _joins(index, page, span, link, paragraph):
+    """The three joins of *index* as calls."""
+    return {
+        "span_element": lambda: index.span_element(page, span),
+        "spans_of": lambda: index.spans_of(paragraph),
+        "link_element": lambda: index.link_element(link),
+    }
+
+
+def test_the_joins_answer_on_a_layer_that_holds_its_columns():
+    layer = _layer()
+    index = views.StructIndex(layer)
+
+    assert not layer.columns_freed
+    assert all(call() for call in _joins(index, *_join_args(layer, index)).values())
+
+
+@pytest.mark.parametrize("join", ["span_element", "spans_of", "link_element"])
+@pytest.mark.parametrize("order", ["answered before", "built before, not used", "built after"])
+def test_a_join_on_a_layer_whose_columns_were_freed_raises_whatever_the_call_order(join, order):
+    layer = _layer()
+    index = views.StructIndex(layer)
+    args = _join_args(layer, index)
+    if order == "answered before":
+        # Every join answers, and spans_of keeps what it found: that must not outlive the columns.
+        assert all(call() for call in _joins(index, *args).values())
+    layer.free_columns()
+    if order == "built after":
+        index = views.StructIndex(layer)
+
+    with pytest.raises(views.ColumnsFreedError, match="glyph columns were freed"):
+        _joins(index, *args)[join]()
+
+
+def test_the_error_of_a_freed_layer_is_a_runtime_error():
+    assert issubclass(views.ColumnsFreedError, RuntimeError)
 
 
 def _span_texts(layer, span_ids: list[str]) -> list[str]:
