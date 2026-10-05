@@ -832,6 +832,13 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                     else _FURNITURE_DEMOTED_TREATMENTS
                 ):
                     self._running_header_regions.add((page_idx, region_idx))
+                    logger.debug(
+                        "Demoting %s %r as %s (%s)",
+                        tag.target,
+                        clean_content.strip()[:200],
+                        tag.role.replace("_", " "),
+                        tag.decided.component,
+                    )
                 if effective != "doc_title":
                     continue
                 normalized = heading_key(clean_content.strip())
