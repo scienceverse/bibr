@@ -30,7 +30,7 @@ Everything here calls pdfium and needs the caller's ``pdfium_lock``.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from bibr.document import destinations, ids
@@ -67,26 +67,48 @@ MAX_ELEMENTS = 20_000
 MAX_KIDS = 2_000
 
 
-def read_page_tree(
-    api: _Api, page, page_index: int, *, limit: int = MAX_ELEMENTS
-) -> tuple[list[StructElem], bool, str | None]:
-    """The page's copies of the structure elements in document order, whether it has a tree, and a note.
+@dataclass(slots=True)
+class PageTree:
+    """What was read of the structure tree of one page."""
 
-    A page has a tree when the PDF has a structure tree root that reaches pages
-    (a page with no tagged content has a tree and no elements). At most *limit*
-    elements are read: what the document's allowance of them has left. The note says
-    why the walk ended early or an element was cut short; the elements read before
-    then are kept.
+    # The page's copies of the elements in document order.
+    copies: list[StructElem] = field(default_factory=list)
+    # Whether pdfium gave the page a tree. It does when the PDF has a structure tree
+    # root that reaches pages; a page with no tagged content has a tree and no elements.
+    has_tree: bool = False
+    # What cut the read short, each once: a tree or an element with more kids than
+    # MAX_KIDS, a circular reference, the allowance of elements. The reader of the
+    # document says each once for all its pages, not once for each page.
+    cuts: list[str] = field(default_factory=list)
+    # Whether the allowance of elements ran out on this page: another element was there.
+    stopped: bool = False
+    # Why the walk failed, and the elements read before then are kept.
+    failure: str | None = None
+
+    def cut(self, text: str) -> None:
+        if text not in self.cuts:
+            self.cuts.append(text)
+
+
+def read_page_tree(api: _Api, page, page_index: int, *, limit: int = MAX_ELEMENTS) -> PageTree:
+    """The page's copies of the structure elements in document order, and what the read found.
+
+    At most *limit* elements are read: what the document's allowance of them has
+    left. When the allowance is spent and another element is there, the result
+    says so (:attr:`PageTree.stopped`) and the caller gives pdfium no later page:
+    pdfium builds the whole tree of a page in one call that cannot be cut short,
+    so a document over its allowance would pay for every page for nothing. A
+    document whose elements are exactly the allowance is read whole and says
+    nothing.
     """
     tree = api.FPDF_StructTree_GetForPage(page.raw)
     if not tree:
-        return [], False, None
-    elements: list[StructElem] = []
-    note: str | None = None
+        return PageTree()
+    read = PageTree(has_tree=True)
     try:
         tops = api.FPDF_StructTree_CountChildren(tree)
         if tops > MAX_KIDS:
-            note = f"a tree with more than {MAX_KIDS} top-level elements, the rest unread"
+            read.cut(f"a tree with more than {MAX_KIDS} top-level elements, the rest unread")
         # Elements still to visit, as (element, path). An element's kids go on
         # the stack in reverse, so they come off in order, each with its subtree
         # before the next one.
@@ -102,21 +124,22 @@ def read_page_tree(
                 continue
             address = destinations.address(handle)
             if address in seen:
-                note = "circular structure reference"
+                read.cut("circular structure reference")
                 continue
-            if len(elements) >= limit:
-                note = f"more than {MAX_ELEMENTS} structure elements, the rest unread"
+            if len(read.copies) >= limit:
+                read.cut(f"more than {MAX_ELEMENTS} structure elements, the rest unread")
+                read.stopped = True
                 break
             seen.add(address)
-            element, cut = _element(api, handle, page_index, path, pending)
-            elements.append(element)
-            if cut:
-                note = note or f"an element with more than {MAX_KIDS} kids, the rest unread"
+            element, wide = _element(api, handle, page_index, path, pending)
+            read.copies.append(element)
+            if wide:
+                read.cut(f"an element with more than {MAX_KIDS} kids, the rest unread")
     except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
-        note = f"{type(exc).__name__}: {exc}"[:500]
+        read.failure = f"{type(exc).__name__}: {exc}"[:500]
     finally:
         api.FPDF_StructTree_Close(tree)
-    return elements, True, note
+    return read
 
 
 def _element(
