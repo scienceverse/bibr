@@ -57,9 +57,10 @@ def _contents(regions: list[tuple[int, tuple[float, float, float, float], str, s
     summaries = []
     page_count = max([page for page, *_ in regions] + [line["page"] for line in lines], default=0)
     page_regions: list[list[dict]] = [[] for _ in range(page_count)]
-    for page, bbox, label, text in regions:
-        page_regions[page - 1].append({"label": label, "bbox_2d": list(bbox), "content": text})
     for index, (page, bbox, label, text) in enumerate(regions):
+        # A summary's index is the region's position on its page.
+        position = len(page_regions[page - 1])
+        page_regions[page - 1].append({"label": label, "bbox_2d": list(bbox), "content": text})
         sentences.append(
             PaperSentence(
                 text_id=index,
@@ -68,10 +69,10 @@ def _contents(regions: list[tuple[int, tuple[float, float, float, float], str, s
                 paragraph_id=index,
                 page_number=page,
                 provenance=[Provenance(page_no=page, bbox=bbox)],
-                region_meta={"region_type": label, "region_page": page, "region_index": index},
+                region_meta={"region_type": label, "region_page": page, "region_index": position},
             )
         )
-        summaries.append(RegionSummary(page=page, index=index, label=label, bbox=bbox))
+        summaries.append(RegionSummary(page=page, index=position, label=label, bbox=bbox))
     sections = [
         PaperSection(section_id=0, header="Root", level=0, parent_section_id=None),
         PaperSection(
@@ -198,6 +199,29 @@ def test_region_without_text_layer_lines_is_read_from_its_row():
         "Adams, P. (2001). Scanned. J, 1.",
         "Baker, Q. (2002). Also scanned.",
     ]
+
+
+def test_band_running_head_and_page_number_of_a_scan_are_furniture():
+    # No text layer: every region is read from its row. The running head
+    # recurs, digits masked, inside the margin bands of both pages, and the
+    # lone page numbers run with the page.
+    regions = [
+        (1, (45.0, 20.0, 560.0, 40.0), "text", "Journal of Tests 12 (2020) 1-20"),
+        (1, (45.0, 100.0, 560.0, 140.0), "reference_content", "Adams, P. (2001). Scanned."),
+        (1, (480.0, 950.0, 520.0, 970.0), "text", "12"),
+        (2, (45.0, 20.0, 560.0, 40.0), "text", "Journal of Tests 13 (2020) 1-20"),
+        (2, (45.0, 100.0, 560.0, 140.0), "reference_content", "Baker, Q. (2002). Also scanned."),
+        (2, (480.0, 950.0, 520.0, 970.0), "text", "13"),
+    ]
+    contents = _contents(regions, [])
+    stream = build_line_stream(contents, _ref_df(contents))
+
+    assert stream is not None
+    assert [line.text for line in stream.lines] == [
+        "Adams, P. (2001). Scanned.",
+        "Baker, Q. (2002). Also scanned.",
+    ]
+    assert stream.furniture_removed == 4
 
 
 def test_text_layer_lines_the_rows_do_not_hold_are_left_out():

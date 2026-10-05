@@ -11,12 +11,12 @@ thrown away. This module works on the printed lines instead:
    region's box, or, for a region without a usable text layer (OCR, scans),
    the region text split at its line breaks with the region box as
    approximate geometry.
-2. **Furniture removal** on the stream: the lines the page roles tag
-   (:mod:`bibr.structure.page_roles`: lines inside layout header, footer and
-   page-number boxes, page-edge lines whose digit-masked text repeats at the
-   edge of two or more pages, standalone page numbers and roman numerals at a
-   page edge), and the end of the list (acknowledgements, funding, appendix
-   and the like).
+2. **Furniture removal** on the stream: the lines and regions the page roles
+   tag (:mod:`bibr.structure.page_roles`: lines inside layout header, footer
+   and page-number boxes, page-edge lines whose digit-masked text repeats at
+   the edge of two or more pages, standalone page numbers and roman numerals
+   at a page edge, and the margin-band regions the same two tests find), and
+   the end of the list (acknowledgements, funding, appendix and the like).
 3. **Pooled start votes.** Every line collects evidence that it opens an
    entry: the geometry model's per-line probability where the line has
    geometry (even when the model is unconfident overall), author/year and
@@ -60,7 +60,7 @@ from bibr.extract.region_seg import (
 )
 from bibr.input.consolidate_text import fix_ocr_artifacts
 from bibr.ocr.pdf_links import doi_from_uri
-from bibr.structure.page_roles import furniture_key, page_line_targets, page_number_value
+from bibr.structure.page_roles import page_line_targets
 from bibr.utils.text import DOI_BODY, YEARISH_RE, collapse_ws, normalize_doi
 
 if TYPE_CHECKING:
@@ -78,10 +78,6 @@ logger = logging.getLogger(__name__)
 # text-layer line to it by its centre: region boxes are tight around the ink.
 _REGION_BOX_TOLERANCE = 3.0
 
-# Layout-space margin bands for regions without text-layer lines, matching the
-# running-header bands in ``bibr.structure.pdf_parser``.
-_TOP_BAND = 100.0
-_BOTTOM_BAND = 900.0
 
 # Headings that end a reference list. Whole-heading shaped: the cue opens a
 # short line and ends it, or is followed by a colon ("Funding: ...").
@@ -170,19 +166,6 @@ def _alnum(text: str) -> str:
     return "".join(ch for ch in text.lower() if ch.isalnum())
 
 
-def _confirmed_page_numbers(candidates: list[tuple[int, int, int]]) -> set[int]:
-    """Candidates ``(key, page, value)`` whose value runs with the page number.
-
-    A lone number is a page number when another page carries one at the same
-    offset from its page index; a year or a volume that happens to stand alone
-    on an edge line does not.
-    """
-    pages_by_offset: dict[int, set[int]] = defaultdict(set)
-    for _key, page, value in candidates:
-        pages_by_offset[value - page].add(page)
-    return {key for key, page, value in candidates if len(pages_by_offset[value - page]) >= 2}
-
-
 def _box(values: Sequence[float]) -> tuple[float, float, float, float]:
     return (float(values[0]), float(values[1]), float(values[2]), float(values[3]))
 
@@ -205,6 +188,9 @@ class _SectionRegion:
     bbox: tuple[float, float, float, float] | None
     label: str
     rejected_native: bool = False
+    # The region's position on its page (``RegionSummary.index``), when its
+    # summary was found: the page roles' block id.
+    index: int | None = None
     # Rows whose first source region this is: the region text read when the
     # region has no usable text-layer lines.
     rows: list[str] = field(default_factory=list)
@@ -257,6 +243,7 @@ def _section_regions(
                         summary is not None
                         and getattr(summary, "native_text_rejection_reason", None)
                     ),
+                    index=summary.index if summary is not None else None,
                 )
                 by_key[key] = region
                 regions.append(region)
@@ -289,34 +276,12 @@ def _furniture_lines(contents: PaperContents, page_lines: Sequence[dict[str, Any
     }
 
 
-def _in_band(bbox: Sequence[float] | None) -> bool:
-    return bbox is not None and (bbox[3] <= _TOP_BAND or bbox[1] >= _BOTTOM_BAND)
-
-
-def _band_furniture(contents: PaperContents) -> tuple[set[str], set[int]]:
-    """Running-head keys and page-number offsets from the margin-band regions.
-
-    The page roles' two tests for edge lines, for regions read without
-    text-layer lines (scans): a furniture key recurring in the bands of two
-    pages, and the offsets at which lone numbers there run with the page.
-    """
-    pages_by_key: dict[str, set[int]] = defaultdict(set)
-    numbered: list[tuple[int, int, int]] = []
-    for summary in getattr(contents, "region_summaries", None) or []:
-        if not _in_band(summary.bbox):
-            continue
-        text = collapse_ws(summary.content or "")
-        value = page_number_value(text)
-        if value is not None:
-            numbered.append((len(numbered), summary.page, value))
-            continue
-        key = furniture_key(text)
-        if key is not None:
-            pages_by_key[key].add(summary.page)
-    keys = {key for key, pages in pages_by_key.items() if len(pages) >= 2}
-    confirmed = _confirmed_page_numbers(numbered)
-    offsets = {value - page for index, page, value in numbered if index in confirmed}
-    return keys, offsets
+def _furniture_region(contents: PaperContents, region: _SectionRegion) -> bool:
+    """Whether the page roles tag the region read from its rows as page furniture."""
+    roles = getattr(contents, "page_roles", None)
+    if roles is None or region.index is None or region.page < 1:
+        return False
+    return roles.block(region.page - 1, region.index) is not None
 
 
 def _region_text_lines(region: _SectionRegion) -> list[str]:
@@ -444,7 +409,6 @@ def build_line_stream(contents: PaperContents, ref_df: pd.DataFrame) -> LineStre
     page_lines = getattr(contents, "ref_page_lines", None) or []
     by_page = _page_lines_by_page(page_lines)
     furniture = _furniture_lines(contents, page_lines)
-    band_keys, band_page_offsets = _band_furniture(contents)
 
     # The section's own text is what the cascade's and the stream's entries are
     # both measured against, furniture and text after the list included: text
@@ -513,16 +477,11 @@ def build_line_stream(contents: PaperContents, ref_df: pd.DataFrame) -> LineStre
             # The same text read again through an overlapping region box.
             continue
         stream.region_text_regions += 1
-        in_band = _in_band(region.bbox)
-        if in_band and furniture_key(collapse_ws(" ".join(region.rows))) in band_keys:
+        if _furniture_region(contents, region):
             stream.furniture_removed += len(region.rows)
             continue
         first = True
         for text in _region_text_lines(region):
-            value = page_number_value(text) if in_band else None
-            if value is not None and value - region.page in band_page_offsets:
-                stream.furniture_removed += 1
-                continue
             stream.lines.append(
                 StreamLine(
                     text=text,
