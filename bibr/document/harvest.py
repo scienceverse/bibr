@@ -959,6 +959,8 @@ class LayerBuilder:
         # the pages whose link annotations were all read and kept.
         self.links_enumerated = 0
         self.links_read: set[int] = set()
+        # Whether the allowance of link annotations ran out: no later page is read.
+        self.links_stopped = False
         self.struct: list[StructElem] = []
         # Whether the allowance of structure elements ran out: no later page is given to pdfium.
         self.struct_stopped = False
@@ -1016,7 +1018,8 @@ class LayerBuilder:
             self.errors[f"label:{page_index}"] = _error_text(exc)
 
     def _read_links(self, page, page_index: int) -> None:
-        if self.doc is None or self._lacks(links.APIS + destinations.APIS):
+        # With the allowance of annotations spent, a later page is not even enumerated.
+        if self.doc is None or self.links_stopped or self._lacks(links.APIS + destinations.APIS):
             return
         try:
             page_links = links.read_page_links(
@@ -1034,10 +1037,13 @@ class LayerBuilder:
             return
         self.raw_links.extend(page_links.found)
         self.links_enumerated += page_links.enumerated
+        self.links_stopped = page_links.stopped
         if page_links.complete:
             self.links_read.add(page_index)
-        if page_links.note is not None:
-            self.errors[f"links:{page_index}"] = page_links.note
+        for text in page_links.cuts:
+            self._note("links", text)
+        if page_links.failure is not None:
+            self.errors[f"links:{page_index}"] = page_links.failure
 
     def _read_struct(self, page, page_index: int) -> None:
         # pdfium builds a page's whole tree in one call, however little of it is kept, so
@@ -1153,7 +1159,7 @@ class LayerBuilder:
         try:
             return links.build_links(self.raw_links, pages)
         except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
-            self.errors["links"] = _error_text(exc)
+            self._note("links", _error_text(exc))
             return None
 
     def _merge_struct(self) -> list[StructElem]:

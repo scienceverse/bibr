@@ -140,8 +140,14 @@ class PageLinks:
     # was left out (it failed, or has no rectangle that is finite) or the document's
     # allowance of annotations ran out; a link cut short is kept, so it does not count.
     complete: bool
-    # The first thing that went wrong: a link left out, a link cut short, or the stop.
-    note: str | None
+    # What left a link out, cut one short or stopped the read, each once: the reader of
+    # the document says each once for all its pages, not once for each page.
+    cuts: list[str]
+    # Whether the document's allowance of annotations ran out on this page: another
+    # annotation was there. The caller reads no later page then.
+    stopped: bool
+    # Why a link failed (the first on the page): it is left out, and the others are kept.
+    failure: str | None
 
 
 def read_page_links(
@@ -157,18 +163,23 @@ def read_page_links(
 ) -> PageLinks:
     """The page's link annotations: at most *limit*, what the document's allowance has left.
 
-    A link that fails is left out; the others are kept.
+    A link that fails is left out; the others are kept. When the allowance is spent and
+    another annotation is there, the read stops and says so (:attr:`PageLinks.stopped`). A
+    document with exactly the allowance is read whole and says nothing.
     """
     found: list[RawLink] = []
-    note: str | None = None
+    cuts: list[str] = []
+    failure: str | None = None
     complete = True
+    stopped = False
     position = ctypes.c_int(0)
     link = api.c.FPDF_LINK()
     number = -1
     while api.FPDFLink_Enumerate(page.raw, ctypes.byref(position), ctypes.byref(link)):
         if number + 1 >= limit:
             complete = False
-            note = f"more than {MAX_LINKS} link annotations, the rest unread"
+            stopped = True
+            _say(cuts, f"more than {MAX_LINKS} link annotations, the rest unread")
             break
         number += 1
         try:
@@ -176,15 +187,21 @@ def read_page_links(
                 api, doc, page, link, (page_index, number), names, n_pages, with_names
             )
         except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
-            note = note or f"{type(exc).__name__}: {exc}"[:500]
+            failure = failure or f"{type(exc).__name__}: {exc}"[:500]
             complete = False
             continue
-        note = note or cut
+        _say(cuts, cut)
         if raw is None:
             complete = False
             continue
         found.append(raw)
-    return PageLinks(found, number + 1, complete, note)
+    return PageLinks(found, number + 1, complete, cuts, stopped, failure)
+
+
+def _say(cuts: list[str], text: str | None) -> None:
+    """Add *text* to *cuts* unless it is None or already there."""
+    if text is not None and text not in cuts:
+        cuts.append(text)
 
 
 def _read_link(
