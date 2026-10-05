@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
 
+    from bibr.document.model import DocumentLayer
     from bibr.input.docx_native import DocxParser
     from bibr.input.epub_native import EpubParser
     from bibr.input.html_native import HtmlParser
@@ -108,6 +109,15 @@ class FileState:
     error_outage: bool = False
     stage_times: dict = field(default_factory=dict)
     warnings: "list[ProcessingWarning]" = field(default_factory=list)
+    # The document layer (``bibr.document``), built by NativeTextStage or
+    # rebuilt at the parse hand-off when ``pipeline.document_layer`` is on,
+    # and handed on as ``PaperContents.document``. In every memory mode its
+    # glyph columns are freed after the last stage that requires it, and the
+    # rest of it lives until ``free_all``.
+    doc_layer: "DocumentLayer | None" = field(default=None, compare=False, repr=False, kw_only=True)
+    # The layer was asked for once, inline or rebuilt; a failed build leaves
+    # doc_layer None and is not tried again.
+    doc_layer_attempted: bool = field(default=False, compare=False, repr=False, kw_only=True)
 
     def free_pre_ocr(self):
         """Free data consumed by OCR stage."""
@@ -129,6 +139,18 @@ class FileState:
         # Native parser is held across its handling stage →
         # ParseSegmentStage so the parser can be reused; release after parse.
         self._native_parser = None
+
+    def free_layer_columns(self):
+        """Free the document layer's glyph columns after the last stage that requires it.
+
+        The layer stays, in ``doc_layer`` and ``contents.document``, with
+        ``columns_freed`` set. Runs for every file, layer or not, so it must
+        not raise, and it is duck-typed so that a run with the layer off never
+        imports ``bibr.document``.
+        """
+        free_columns = getattr(self.doc_layer, "free_columns", None)
+        if free_columns is not None:
+            free_columns()
 
     def set_error(
         self,
@@ -176,6 +198,7 @@ class FileState:
         self.pdf_uri_links = None
         self.pdf_outline = None
         self.native_validation_artifact = None
+        self.doc_layer = None
         self.contents = None
         self.paper = None
 

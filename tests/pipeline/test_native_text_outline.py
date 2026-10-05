@@ -37,6 +37,9 @@ def _adapt_outline_mock(monkeypatch):
         min_printable_ratio,
         eligible_labels=None,
         reject_invisible_text_layer=False,
+        # Passed only with pipeline.document_layer on; the adapter builds no layer.
+        include_doc_layer=False,
+        render_budget=None,
     ):
         import bibr.input.pdf_metadata as metadata_mod
         import bibr.input.pdf_outline as outline_mod
