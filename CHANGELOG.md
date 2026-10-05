@@ -22,6 +22,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   outline with a verdict on whether it is a usable heading tree, and the page labels.
   Nothing reads them yet, so exports do not change.
 
+### Changed
+
+- Page furniture (running heads and feet, page numbers, watermarks and line numbers)
+  is decided once per document, by one page-role writer (`bibr.structure.page_roles`).
+  The parser and the reference line stream drop furniture by its tags instead of each
+  testing margin bands of its own, and each tag keeps the rule that decided it and the
+  evidence it rests on. Page numbers, watermarks and line numbers are dropped, under any
+  layout label that reads text, instead of being kept as running heads. A running head
+  no longer splits a sentence or a reference into several rows, and one printed after
+  the references no longer opens an empty section. With the document layer on, the
+  writer first reads what the PDF itself says: text drawn as a pagination artifact, the
+  line numbers and watermarks the furniture strip removed, and the page labels. Artifact
+  text printed on one page only counts as furniture only when it is as short as a
+  running head and holds no DOI or URL, so a figure's source line stays in the body.
+  The DOI evidence then reads the page text from the layer.
+
 ### Fixed
 
 - Corresponding authors whose address sits in a footnote are now found without the
