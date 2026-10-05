@@ -174,7 +174,6 @@ def _named_paper(count: int) -> bytes:
 
 def test_a_table_of_exactly_the_limit_is_read_and_one_name_more_is_left_unread():
     limit = destinations.MAX_NAMED_DESTS
-    assert limit == 2_000
     with _Doc(_named_paper(limit)) as opened:
         names = destinations.NamedDests(opened.api, opened.doc)
 

@@ -70,11 +70,11 @@ _DEST_VALUE_TYPES = {3, 4, 5, 6}
 # pdfium's action types as the layer names them; anything else is "other".
 _ACTIONS = {1: "goto", 2: "remote", 3: "uri", 4: "launch", 5: "remote"}
 
-# A document with more link annotations than this is read to this many (the busiest
-# gate192 paper has 920, the busiest manuscript 1,340), and a link with more
-# quadrilaterals than MAX_QUADS is read to that many (the most any has is 2), so a
-# hostile PDF cannot hold the lock for long.
-MAX_LINKS = 50_000
+# A document with more link annotations than this is read to this many, and a link with more
+# quadrilaterals than MAX_QUADS is read to that many, so a hostile PDF cannot hold the lock
+# for long: 10,000 links take 0.2 s to read. The busiest gate192 paper has 920 links, the
+# busiest manuscript 1,340, and the most quadrilaterals any link has is 2.
+MAX_LINKS = 10_000
 MAX_QUADS = 256
 
 # The kind prefix of a link's id (``p3.lk4``).
