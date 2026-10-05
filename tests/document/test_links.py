@@ -267,7 +267,24 @@ def test_classing_that_fails_leaves_the_links_empty_and_says_so(monkeypatch):
     layer = _layer()
 
     assert layer.links == [] and layer.presence.has_internal_links is None
-    assert layer.component_errors == {"links": "RuntimeError: cannot class"}
+    assert layer.component_errors == {"links_build": "RuntimeError: cannot class"}
+
+
+def test_a_failure_to_build_the_links_and_a_limit_are_said_under_keys_of_their_own(monkeypatch):
+    def fail(*args, **kwargs):
+        raise RuntimeError("cannot class")
+
+    monkeypatch.setattr(links, "MAX_LINKS", 5)
+    monkeypatch.setattr(links, "build_links", fail)
+    layer = _layer()
+
+    # The links are empty because the build failed, not because of the limit; the limit still
+    # says where the read stopped.
+    assert layer.links == []
+    assert layer.component_errors == {
+        "links": "more than 5 link annotations, the rest unread from page 0",
+        "links_build": "RuntimeError: cannot class",
+    }
 
 
 def test_a_name_pdfiums_lookup_misses_is_found_in_the_table():

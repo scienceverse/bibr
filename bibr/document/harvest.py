@@ -1205,7 +1205,7 @@ class LayerBuilder:
         try:
             return links.build_links(self.raw_links, pages)
         except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
-            self._note("links", _error_text(exc))
+            self.errors["links_build"] = _error_text(exc)
             return None
 
     def _merge_struct(self) -> list[StructElem]:
@@ -1213,7 +1213,7 @@ class LayerBuilder:
         try:
             merged, differing = structure.merge(self.struct)
         except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
-            self._note("struct", _error_text(exc))
+            self.errors["struct_merge"] = _error_text(exc)
             return []
         if differing:
             self._note("struct", f"{differing} copies of a structure element differ from its first")
