@@ -8,6 +8,8 @@ regions alone; a role is never decided from a margin band alone.
 
 from __future__ import annotations
 
+import pytest
+
 from bibr.document import ids, views
 from bibr.document.harvest import build_document_layer
 from bibr.document.rebuild import attach_blocks
@@ -19,6 +21,7 @@ from bibr.structure.page_roles import (
     RUNNING_FOOTER,
     RUNNING_HEADER,
     WATERMARK,
+    page_line_targets,
     write_page_roles,
 )
 from bibr.structure.pdf_parser import PDFParser
@@ -205,6 +208,142 @@ def test_artifact_text_outside_the_bands_keeps_its_place():
     roles = write_page_roles(pages, layer=layer)
 
     assert roles.tags == ()
+
+
+# A figure's source line drawn inside /Artifact in the bottom margin of one
+# page: longer than a running head, with its DOI after the 200th char.
+SOURCE_LINES = (
+    "Adapted from: Example A, Sample B, Placeholder C, Invented D and the Writing Group. "
+    "A reporting checklist",
+    "for synthetic reviews of invented studies, with an explanation of each item. "
+    "Example Journal 4(2): e100. doi:10.1234/example.0042",
+)
+# A preprint banner every page draws inside /Artifact in its bottom margin.
+BANNER_LINES = (
+    "Example Preprints, doi: 10.1234/2024.01.02.123456, posted 2 January 2024. "
+    "The copyright holder is the author or funder,",
+    "who granted the archive a licence to display the preprint in perpetuity. "
+    "It is made available under an open licence.",
+)
+
+
+def _artifact_foot_pages(foot: tuple[str, ...], n_pages: int = 1):
+    """Pages that draw an artifact head, two body lines and *foot* as artifact lines at the bottom.
+
+    Returns the PDF and its regions: the head, the body and the foot, one
+    block each.
+    """
+    content = marked("Artifact", text(HEADER, 72.0, 760.0, size=8.0))
+    content += text(BODY, 72.0, 600.0)
+    content += text("A second line of the body follows.", 72.0, 585.0)
+    content += marked(
+        "Artifact",
+        b"".join(text(line, 60.0, 50.0 - 10.0 * i, size=7.0) for i, line in enumerate(foot)),
+    )
+    pdf_bytes = build_pdf([PageSpec(content) for _ in range(n_pages)])
+    probe = build_document_layer(pdf_bytes, range(n_pages), budget=None)
+    foot_box = (55.0, 50.0 - 10.0 * len(foot), 590.0, 62.0)
+    pages = [
+        [
+            _region(HEADER, _layout_box(probe, page, (60.0, 750.0, 420.0, 772.0))),
+            _region(BODY, _layout_box(probe, page, (60.0, 570.0, 560.0, 615.0))),
+            _region(" ".join(foot), _layout_box(probe, page, foot_box)),
+        ]
+        for page in range(n_pages)
+    ]
+    return pdf_bytes, pages
+
+
+def test_an_artifact_source_line_printed_once_is_not_a_running_footer():
+    pdf_bytes, pages = _artifact_foot_pages(SOURCE_LINES)
+    assert pages[0][2]["content"].index("doi:") > 200
+    layer = _layer(pdf_bytes, pages)
+    page_lines = views.page_lines(layer.page(0))
+
+    roles = write_page_roles(pages, page_lines=page_lines, layer=layer)
+
+    # The head printed once is short and holds no locator: a running head.
+    head = roles.block(0, 0)
+    assert head is not None and head.role == RUNNING_HEADER
+    assert head.decided.component == "page_roles.artifact"
+    # The source line is longer than a running head and holds a DOI.
+    assert roles.block(0, 2) is None
+    assert roles.tag(ids.page_line(0, _line_position(page_lines, SOURCE_LINES[1]))) is None
+    # So the parser files no running foot whose DOI would read as the paper's own.
+    contents = PDFParser(json_result=pages, page_roles=roles).parse()
+    assert contents.detected_headers == [HEADER]
+
+
+@pytest.mark.parametrize(
+    "foot",
+    [
+        pytest.param(
+            (
+                SOURCE_LINES[0],
+                "for synthetic reviews of invented studies, with an explanation of each item "
+                "and an example of good reporting.",
+            ),
+            id="longer-than-a-running-head",
+        ),
+        pytest.param(("Data available at https://example.org/archive/42",), id="url"),
+    ],
+)
+def test_an_artifact_printed_once_must_read_as_furniture(foot):
+    pdf_bytes, pages = _artifact_foot_pages(foot)
+    layer = _layer(pdf_bytes, pages)
+
+    roles = write_page_roles(pages, layer=layer)
+
+    assert roles.block(0, 0) is not None
+    assert roles.block(0, 2) is None
+
+
+def test_a_long_artifact_footer_every_page_prints_is_a_running_footer():
+    pdf_bytes, pages = _artifact_foot_pages(BANNER_LINES, n_pages=2)
+    assert len(pages[0][2]["content"]) > 200
+    layer = _layer(pdf_bytes, pages)
+    page_lines = [line for page in range(2) for line in views.page_lines(layer.page(page))]
+
+    roles = write_page_roles(pages, page_lines=page_lines, layer=layer)
+
+    # Recurrence outweighs the length and the DOI.
+    for page in range(2):
+        foot = roles.block(page, 2)
+        assert foot is not None and foot.role == RUNNING_FOOTER
+        assert foot.decided.component == "page_roles.artifact"
+    doi_lines = [
+        target
+        for target, line in zip(page_line_targets(page_lines), page_lines, strict=True)
+        if target is not None and line["text"] == BANNER_LINES[0]
+    ]
+    assert len(doi_lines) == 2
+    for target in doi_lines:
+        line_tag = roles.tag(target)
+        assert line_tag is not None and line_tag.role == RUNNING_FOOTER
+        assert line_tag.decided.component == "page_roles.artifact"
+
+
+def test_an_artifact_page_number_printed_once_is_a_page_number():
+    content = text(BODY, 72.0, 600.0) + marked("Artifact", text("7", 300.0, 30.0))
+    pdf_bytes = build_pdf([PageSpec(content)])
+    probe = build_document_layer(pdf_bytes, range(1), budget=None)
+    pages = [
+        [
+            _region(BODY, _layout_box(probe, 0, (60.0, 590.0, 560.0, 615.0))),
+            _region("7", _layout_box(probe, 0, (290.0, 24.0, 320.0, 44.0))),
+        ]
+    ]
+    layer = _layer(pdf_bytes, pages)
+    page_lines = views.page_lines(layer.page(0))
+
+    roles = write_page_roles(pages, page_lines=page_lines, layer=layer)
+
+    number = roles.block(0, 1)
+    assert number is not None and number.role == PAGE_NUMBER
+    assert number.decided.component == "page_roles.artifact"
+    line_tag = roles.tag(ids.page_line(0, _line_position(page_lines, "7")))
+    assert line_tag is not None and line_tag.role == PAGE_NUMBER
+    assert line_tag.decided.component == "page_roles.artifact"
 
 
 # --- Page labels -----------------------------------------------------------------
