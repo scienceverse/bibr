@@ -1232,7 +1232,7 @@ class LayerBuilder:
             roles.extend(tags)
         # What is read page by page is released once it is merged: the layer holds the result
         # and the builder is not, so the raw links and the copies of the structure elements
-        # (7 MB at the link limit, 14 MB at the element limit) do not outlive their use.
+        # (1.4 MB at the link limit, 4 MB at the element limit) do not outlive their use.
         for page in pages:
             page.label = self.labels.get(page.index)
         self.labels = {}
