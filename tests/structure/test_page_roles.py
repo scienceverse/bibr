@@ -276,7 +276,7 @@ def _line_number_column(label: str = "text"):
     return pdf_bytes, numbers, pages
 
 
-def test_the_strip_furniture_and_a_line_number_column_read_by_ocr_are_tagged():
+def test_a_line_number_column_read_by_ocr_is_tagged_with_the_strip_objects():
     pdf_bytes, numbers, pages = _line_number_column()
     printed = pages[0][0]["content"]
     column = pages[0][0]["bbox_2d"]
@@ -284,10 +284,8 @@ def test_the_strip_furniture_and_a_line_number_column_read_by_ocr_are_tagged():
 
     roles = write_page_roles(pages, layer=layer)
 
-    for item in layer.page(0).furniture:
-        tag = roles.tag(item.furniture_id)
-        assert tag is not None and tag.role == LINE_NUMBER
-        assert tag.decided.component == "page_roles.strip"
+    # The strip's objects keep their own record; only the block is tagged.
+    assert all(roles.tag(item.furniture_id) is None for item in layer.page(0).furniture)
     column_tag = roles.block(0, 0)
     assert column_tag is not None and column_tag.role == LINE_NUMBER
     assert column_tag.decided.component == "page_roles.strip"
@@ -316,7 +314,6 @@ def test_a_watermark_read_by_ocr_is_tagged_with_the_strip_object():
     stamp_tag = roles.block(0, 1)
     assert stamp_tag is not None and stamp_tag.role == WATERMARK
     assert stamp_tag.decided.evidence == (mark.furniture_id,)
-    assert roles.tag(mark.furniture_id).role == WATERMARK
     assert roles.block(0, 0) is None
 
 
