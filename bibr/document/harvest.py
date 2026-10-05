@@ -950,8 +950,10 @@ class LayerBuilder:
         self.doc = None
         self.n_pages = 0
         self.names: destinations.NamedDests | None = None
-        # The pages destinations point at, for the outline and the links together.
-        self.resolver: destinations.Resolver | None = None
+        # The pages destinations point at. The outline and the links each have an allowance
+        # of destinations that point at no page, so a dead outline cannot starve the links.
+        self.outline_resolver: destinations.Resolver | None = None
+        self.link_resolver: destinations.Resolver | None = None
         self.labels: dict[int, str | None] = {}
         # The outline's entries; None until it is read, and when it cannot be.
         self.outline: list[OutlineEntry] | None = None
@@ -963,6 +965,8 @@ class LayerBuilder:
         self.links_read: set[int] = set()
         # Whether the allowance of link annotations ran out: no later page is read.
         self.links_stopped = False
+        # Where the first link whose destination was left unresolved is (its id).
+        self.links_unresolved_from: str | None = None
         self.struct: list[structure.Copy] = []
         # Whether the allowance of structure elements ran out: no later page is given to pdfium.
         self.struct_stopped = False
@@ -979,7 +983,8 @@ class LayerBuilder:
         self.doc = doc
         try:
             self.n_pages = len(doc)
-            self.resolver = destinations.Resolver(self._api, doc, self.n_pages)
+            self.outline_resolver = destinations.Resolver(self._api, doc, self.n_pages)
+            self.link_resolver = destinations.Resolver(self._api, doc, self.n_pages)
             if not self._lacks(destinations.APIS):
                 self.names = destinations.NamedDests(self._api, doc)
         except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
@@ -989,13 +994,19 @@ class LayerBuilder:
                 self.marked = bool(self._api.FPDFCatalog_IsTagged(doc.raw))
             except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
                 self.errors["tagged"] = _error_text(exc)
-        if self.resolver is None or self._lacks(destinations.APIS + outline.APIS):
+        if self.outline_resolver is None or self._lacks(destinations.APIS + outline.APIS):
             return
         try:
             self.meta_title = outline.meta_title(self._api, doc)
-            self.outline, note = outline.read_outline(self._api, doc, self.names, self.resolver)
-            if note is not None:
-                self.errors["outline"] = note
+            read = outline.read_outline(self._api, doc, self.names, self.outline_resolver)
+            self.outline = read.entries
+            if read.note is not None:
+                self.errors["outline"] = read.note
+            if read.unresolved:
+                first = ids.outline_entry(read.unresolved[0])
+                self.errors["outline_unresolved"] = destinations.unresolved_note(
+                    self.outline_resolver, first
+                )
         except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
             self.errors["outline"] = _error_text(exc)
 
@@ -1024,7 +1035,7 @@ class LayerBuilder:
         # With the allowance of annotations spent, a later page is not even enumerated.
         if (
             self.doc is None
-            or self.resolver is None
+            or self.link_resolver is None
             or self.links_stopped
             or self._lacks(links.APIS + destinations.APIS)
         ):
@@ -1036,7 +1047,7 @@ class LayerBuilder:
                 page,
                 page_index,
                 self.names,
-                self.resolver,
+                self.link_resolver,
                 with_names=not self._lacks(links.NAME_APIS),
                 limit=links.MAX_LINKS - self.links_enumerated,
             )
@@ -1046,6 +1057,10 @@ class LayerBuilder:
         self.raw_links.extend(page_links.found)
         self.links_enumerated += page_links.enumerated
         self.links_stopped = page_links.stopped
+        if self.links_unresolved_from is None and page_links.first_unresolved is not None:
+            self.links_unresolved_from = ids.make(
+                page_index, links.KIND, page_links.first_unresolved
+            )
         if page_links.complete:
             self.links_read.add(page_index)
         for text in page_links.cuts:
@@ -1282,9 +1297,11 @@ class LayerBuilder:
         )
         if self.names is not None and self.names.error is not None:
             self.errors["named_dests"] = self.names.error
-        if self.resolver is not None and self.resolver.note is not None:
-            self.errors["unresolved_dests"] = self.resolver.note
-        self.doc = self.names = self.resolver = None
+        if self.link_resolver is not None and self.links_unresolved_from is not None:
+            self.errors["links_unresolved"] = destinations.unresolved_note(
+                self.link_resolver, self.links_unresolved_from
+            )
+        self.doc = self.names = self.outline_resolver = self.link_resolver = None
         return DocumentLayer(
             version=LAYER_VERSION,
             pdfium=self.version,

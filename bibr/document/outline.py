@@ -16,7 +16,7 @@ Everything here calls pdfium and needs the caller's ``pdfium_lock``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from bibr.document import destinations
 from bibr.document.model import OutlineEntry
@@ -45,15 +45,27 @@ def meta_title(api: _Api, doc) -> str | None:
     return destinations.utf16_text(api.FPDF_GetMetaText, doc.raw, b"Title")
 
 
+class Outline(NamedTuple):
+    """What reading the bookmarks gave."""
+
+    entries: list[OutlineEntry]
+    # Why the walk was cut short or failed; None when it read every bookmark.
+    note: str | None
+    # The idx of each entry whose destination was left unresolved because the resolver's
+    # allowance of destinations that point at no page was spent: its page is unknown, not absent.
+    unresolved: list[int]
+
+
 def read_outline(
     api: _Api, doc, names: destinations.NamedDests | None, resolver: destinations.Resolver
-) -> tuple[list[OutlineEntry], str | None]:
-    """The document's bookmarks in document order, and a note when the walk was cut short.
+) -> Outline:
+    """The document's bookmarks in document order, with a note when the walk was cut short.
 
     A failure partway keeps the entries read so far and says so in the note. The pages
-    the bookmarks point at come from *resolver*, which the links share.
+    the bookmarks point at come from *resolver*, the outline's own.
     """
     entries: list[OutlineEntry] = []
+    unresolved: list[int] = []
     seen: set[int] = set()
     note: str | None = None
     # Bookmarks still to visit, as (bookmark, depth, parent entry); the next
@@ -75,12 +87,15 @@ def read_outline(
                 break
             seen.add(address)
             idx = len(entries)
+            skipped = resolver.skipped
             entries.append(_entry(api, doc, bookmark, names, resolver, idx, level, parent))
+            if resolver.skipped != skipped:
+                unresolved.append(idx)
             pending.append((api.FPDFBookmark_GetNextSibling(doc.raw, bookmark), level, parent))
             pending.append((api.FPDFBookmark_GetFirstChild(doc.raw, bookmark), level + 1, idx))
     except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
         note = f"{type(exc).__name__}: {exc}"[:500]
-    return entries, note
+    return Outline(entries, note, unresolved)
 
 
 def _entry(

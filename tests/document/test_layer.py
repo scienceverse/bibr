@@ -261,7 +261,8 @@ def test_the_builder_lets_go_of_what_it_read_page_by_page_once_the_layer_is_fini
     # ...and the builder none of what they were made from: the raw links, the copies of the
     # structure elements and the labels (megabytes at the limits), nor the open document.
     assert builder.raw_links == [] and builder.struct == [] and builder.labels == {}
-    assert builder.doc is None and builder.names is None and builder.resolver is None
+    assert builder.doc is None and builder.names is None
+    assert builder.outline_resolver is None and builder.link_resolver is None
 
 
 def test_views_give_none_for_boxes_that_are_not_finite():

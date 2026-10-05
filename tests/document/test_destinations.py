@@ -337,7 +337,6 @@ def test_a_resolver_in_a_large_document_stops_at_the_floor_and_in_a_small_one_go
     # 256 destinations were looked up; the other 744 were not asked for.
     assert len(large_calls) == 256 and (large.unresolved, large.skipped) == (256, 744)
     assert len(small_calls) == 1_000 and (small.unresolved, small.skipped) == (1_000, 0)
-    assert large.note is not None and small.note is None
 
 
 def test_a_resolver_counts_the_destinations_that_point_at_no_page_and_stops_at_the_limit(
@@ -356,15 +355,16 @@ def test_a_resolver_counts_the_destinations_that_point_at_no_page_and_stops_at_t
         assert resolver.page(on_page) == 2
         assert resolver.page(past_the_end) is None and resolver.unresolved == 1
         assert resolver.page(on_page) == 2 and resolver.unresolved == 1
-        assert resolver.note is None and not resolver.skipped
+        assert not resolver.skipped
         assert resolver.page(past_the_end) is None and resolver.unresolved == 2
-        assert len(calls) == 4 and resolver.note is None
+        assert len(calls) == 4 and not resolver.skipped
 
         # The allowance is spent: nothing more is resolved, one that has a page included.
         assert resolver.page(on_page) is None and resolver.page(past_the_end) is None
         assert len(calls) == 4 and resolver.skipped == 2
-        assert resolver.note == (
-            "after 2 destinations that point at no page, the rest are left unresolved"
+        assert destinations.unresolved_note(resolver, "ol7") == (
+            "the allowance of 2 destinations that point at no page was spent; "
+            "left unresolved: 2, the first at ol7"
         )
 
 
@@ -380,7 +380,8 @@ def test_a_document_stops_resolving_after_256_destinations_that_point_at_no_page
     assert [link.target_page for link in layer.links] == [None] * 301
     assert {link.target_class for link in layer.links} == {"unresolved"}
     assert layer.component_errors == {
-        "unresolved_dests": "after 256 destinations that point at no page, the rest are left unresolved"
+        "links_unresolved": "the allowance of 256 destinations that point at no page was spent; "
+        "left unresolved: 45, the first at p0.lk256"
     }
     # With room for them all the last link has its page.
     with monkeypatch.context() as patch:
@@ -409,17 +410,88 @@ def test_a_paper_never_reaches_the_allowance(monkeypatch):
     assert layer.component_errors == {}
 
 
-def test_the_outline_and_the_links_share_the_limit(monkeypatch):
-    monkeypatch.setattr(destinations, "MIN_UNRESOLVED", 3)
+def _floor_allowance(monkeypatch, walks: int) -> None:
+    """Give every document an allowance of *walks* destinations that point at no page."""
+    monkeypatch.setattr(destinations, "MIN_UNRESOLVED", walks)
     monkeypatch.setattr(destinations, "MAX_PAGE_CHECKS", 0)
+
+
+def test_the_outline_and_the_links_have_an_allowance_each(monkeypatch):
+    _floor_allowance(monkeypatch, 3)
     calls = _page_lookups(monkeypatch)
     layer = build_document_layer(_paper_with_destinations("dddv", "dd"), [0], budget=_BUDGET)
 
-    # The outline is read first and spends two of the three; the links get the third.
-    assert len(calls) == 3
+    # The outline spends two of its three, and the links three of theirs: the outline's
+    # leftover is not the links', and the links' fourth, a valid one, is left unresolved.
+    assert len(calls) == 2 + 3
     assert [entry.page for entry in layer.outline] == [None, None]
     assert [link.target_page for link in layer.links] == [None] * 4
-    assert list(layer.component_errors) == ["unresolved_dests"]
+    assert layer.component_errors == {
+        "links_unresolved": "the allowance of 3 destinations that point at no page was spent; "
+        "left unresolved: 1, the first at p0.lk3"
+    }
+
+
+def test_two_readers_that_spend_their_allowance_leave_a_note_each_with_their_first_item(
+    monkeypatch,
+):
+    _floor_allowance(monkeypatch, 256)
+    calls = _page_lookups(monkeypatch)
+    layer = build_document_layer(
+        _paper_with_destinations("d" * 300, "d" * 270), [0], budget=_BUDGET
+    )
+
+    assert len(calls) == 2 * 256
+    assert layer.component_errors == {
+        "outline_unresolved": "the allowance of 256 destinations that point at no page was spent; "
+        "left unresolved: 14, the first at ol256",
+        "links_unresolved": "the allowance of 256 destinations that point at no page was spent; "
+        "left unresolved: 44, the first at p0.lk256",
+    }
+
+
+# 260 bookmarks that point at no page, then 300 that do, and 10 links that do.
+_STALE_THEN_VALID = ("v" * 10, "d" * 260 + "v" * 300)
+
+
+def test_stale_bookmarks_in_a_paper_leave_every_later_destination_resolved():
+    layer = build_document_layer(_paper_with_destinations(*_STALE_THEN_VALID), [0], budget=_BUDGET)
+
+    # The allowance of a paper (5,000,000 walks of its page) is never spent.
+    assert [link.target_page for link in layer.links] == [0] * 10
+    assert [entry.page for entry in layer.outline] == [None] * 260 + [0] * 300
+    assert layer.outline_guard.passed is True
+    assert layer.component_errors == {}
+
+
+def test_bookmarks_that_spend_their_allowance_do_not_starve_the_links(monkeypatch):
+    _floor_allowance(monkeypatch, 256)
+    layer = build_document_layer(_paper_with_destinations(*_STALE_THEN_VALID), [0], budget=_BUDGET)
+
+    # The links have an allowance of their own: all ten resolve.
+    assert [link.target_page for link in layer.links] == [0] * 10
+    assert {link.target_class for link in layer.links} == {"other"}
+    # The outline stops at its 256th dead end: the 4 dead and 300 valid bookmarks after it are
+    # not resolved, so none of the 560 has a page.
+    assert [entry.page for entry in layer.outline] == [None] * 560
+    assert layer.component_errors == {
+        "outline_unresolved": "the allowance of 256 destinations that point at no page was spent; "
+        "left unresolved: 304, the first at ol256"
+    }
+
+
+def test_links_that_spend_their_allowance_do_not_starve_the_outline(monkeypatch):
+    _floor_allowance(monkeypatch, 256)
+    layer = build_document_layer(
+        _paper_with_destinations("d" * 260 + "v" * 10, "v" * 20), [0], budget=_BUDGET
+    )
+
+    assert [entry.page for entry in layer.outline] == [0] * 20
+    assert [link.target_page for link in layer.links] == [None] * 270
+    assert layer.component_errors == {
+        "links_unresolved": "the allowance of 256 destinations that point at no page was spent; "
+        "left unresolved: 14, the first at p0.lk256"
+    }
 
 
 def test_destinations_that_have_a_page_do_not_count_against_the_limit(monkeypatch):

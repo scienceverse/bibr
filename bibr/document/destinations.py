@@ -150,9 +150,10 @@ def unresolved_allowance(n_pages: int) -> int:
 class Resolver:
     """The page each destination of one reader points at, with a limit on those that point at none.
 
-    The limit is :func:`unresolved_allowance` of the document's page count. Once that many
-    destinations have pointed at no page no further destination is resolved: :meth:`page`
-    gives None for it without asking pdfium, and counts it in :attr:`skipped`.
+    The outline and the link reader each have one, so that neither spends the other's
+    allowance. The limit is :func:`unresolved_allowance` of the document's page count. Once
+    that many destinations have pointed at no page no further destination is resolved:
+    :meth:`page` gives None for it without asking pdfium, and counts it in :attr:`skipped`.
     """
 
     def __init__(self, api: _Api, doc, n_pages: int) -> None:
@@ -175,12 +176,13 @@ class Resolver:
             self.unresolved += 1
         return page
 
-    @property
-    def note(self) -> str | None:
-        """Why destinations were left unresolved; None when none were."""
-        if not self.skipped:
-            return None
-        return f"after {self.allowance} destinations that point at no page, the rest are left unresolved"
+
+def unresolved_note(resolver: Resolver, first: str) -> str:
+    """What to say of the destinations *resolver* left unresolved, the first of them at *first*."""
+    return (
+        f"the allowance of {resolver.allowance} destinations that point at no page was spent; "
+        f"left unresolved: {resolver.skipped}, the first at {first}"
+    )
 
 
 def finite(value: float) -> float | None:
