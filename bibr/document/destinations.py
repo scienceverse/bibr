@@ -26,9 +26,13 @@ APIS = (
     "FPDFDest_GetView",
 )
 
-# A document with more named destinations than this keeps its names unread, so
-# a hostile name tree cannot hold the lock for long.
-MAX_NAMED_DESTS = 100_000
+# A document with more named destinations than this keeps its names unread. pdfium walks
+# the name tree from its root for every name it is asked for, so reading the table costs
+# the square of the count, and the count is the only bound on the time: 2,000 names take
+# 0.04 s in a tree shaped like pdfTeX's (six names to a leaf, six leaves to a node) and
+# 0.24 s in the worst shape (one name to a leaf under one root). The most on gate192 is
+# 607 names, and its p90 is 199.
+MAX_NAMED_DESTS = 2_000
 # A string over this many bytes reads as absent, so a hostile one is never copied whole
 # (the longest URI or alt text on gate192 and the manuscripts is 872 characters).
 MAX_TEXT = 1 << 16
@@ -103,19 +107,19 @@ class NamedDests:
             self.error = f"{self.count} named destinations, over the limit of {MAX_NAMED_DESTS}"
             return found
         api = self._api
+        # One call for each name, into a buffer that holds the longest name read: asking
+        # for the size first would walk the name tree twice.
+        buffer = ctypes.create_string_buffer(MAX_TEXT)
         for index in range(self.count):
-            # pdfium leaves the size alone when the index has no destination.
-            size = ctypes.c_long(0)
-            if not api.FPDF_GetNamedDest(self._doc.raw, index, None, ctypes.byref(size)):
-                continue
-            if size.value <= 2 or size.value > MAX_TEXT:
-                continue
-            buffer = ctypes.create_string_buffer(size.value)
+            size = ctypes.c_long(MAX_TEXT)
             dest = api.FPDF_GetNamedDest(self._doc.raw, index, buffer, ctypes.byref(size))
-            if dest:
-                name = buffer.raw[: size.value - 2].decode("utf-16-le", "replace")
-                found.setdefault(address(dest), name)
-                self._by_name.setdefault(name, dest)
+            # No destination at the index: nothing. A name too long for the buffer: pdfium
+            # still returns the destination, with a size of -1. The size includes the NUL.
+            if not dest or not 2 < size.value <= MAX_TEXT:
+                continue
+            name = buffer[: size.value - 2].decode("utf-16-le", "replace")
+            found.setdefault(address(dest), name)
+            self._by_name.setdefault(name, dest)
         return found
 
 

@@ -160,6 +160,79 @@ def test_named_destinations_over_the_limit_stay_unread(monkeypatch):
         assert names.error is not None and "over the limit" in names.error
 
 
+def _named_paper(count: int) -> bytes:
+    """A one-page PDF with *count* named destinations, in one flat /Names array."""
+    pairs = b" ".join(b"(n%05d) [3 0 R /Fit]" % index for index in range(count))
+    return _pdfs.serialize_pdf(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R /Names << /Dests << /Names [" + pairs + b"] >> >> >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+        ]
+    )
+
+
+def test_a_table_of_exactly_the_limit_is_read_and_one_name_more_is_left_unread():
+    limit = destinations.MAX_NAMED_DESTS
+    assert limit == 2_000
+    with _Doc(_named_paper(limit)) as opened:
+        names = destinations.NamedDests(opened.api, opened.doc)
+
+        assert names.count == limit
+        assert names.dest_of("n00000") is not None
+        assert names.dest_of(f"n{limit - 1:05d}") is not None
+        assert names.error is None
+    with _Doc(_named_paper(limit + 1)) as opened:
+        names = destinations.NamedDests(opened.api, opened.doc)
+
+        assert names.count == limit + 1
+        assert names.dest_of("n00000") is None
+        assert names.error == f"{limit + 1} named destinations, over the limit of {limit}"
+
+
+def test_each_name_is_read_with_one_call_into_a_buffer():
+    with _Doc(_linked.linked_paper()) as opened:
+        real = opened.api.FPDF_GetNamedDest
+        calls = []
+
+        def counted(doc, index, buffer, size):
+            calls.append((index, buffer is not None))
+            return real(doc, index, buffer, size)
+
+        opened.api.FPDF_GetNamedDest = counted
+        names = destinations.NamedDests(opened.api, opened.doc)
+
+        assert names.name_of(opened.named("figure.1")) == "figure.1"
+        # pdfium walks the name tree for every call, so a second call for the size would
+        # double the time the table takes.
+        assert calls == [(index, True) for index in range(names.count)]
+
+
+def test_a_name_too_long_for_the_buffer_is_skipped_and_the_others_are_read(monkeypatch):
+    # A name of 11 characters and the NUL fill 24 bytes.
+    limit = 24
+    monkeypatch.setattr(destinations, "MAX_TEXT", limit)
+    with _Doc(_linked.linked_paper()) as opened:
+        # What the read relies on: pdfium gives the destination of a name that does not
+        # fit the buffer all the same, with a size of -1.
+        buffer = ctypes.create_string_buffer(limit)
+        sizes = []
+        for index in range(opened.api.FPDF_CountNamedDests(opened.doc.raw)):
+            size = ctypes.c_long(limit)
+            assert opened.api.FPDF_GetNamedDest(opened.doc.raw, index, buffer, ctypes.byref(size))
+            sizes.append(size.value)
+        assert -1 in sizes
+
+        names = destinations.NamedDests(opened.api, opened.doc)
+        every = [*_linked.DESTS, *_linked.UNSORTED]
+        read = {name for name in every if names.dest_of(name) is not None}
+
+        assert read == {name for name in every if 2 * len(name) + 2 <= limit}
+        assert 0 < len(read) < len(every)
+        assert all(names.name_of(names.dest_of(name)) == name for name in read)
+        assert names.error is None
+
+
 def test_a_missing_pdfium_function_leaves_its_fact_unread(monkeypatch):
     monkeypatch.setattr(
         harvest, "missing_apis", lambda: ("FPDF_GetPageLabel", "FPDF_CountNamedDests")
