@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+from types import SimpleNamespace
 
 import pypdfium2
 import pypdfium2.raw as pdfium_raw
@@ -236,44 +237,45 @@ def test_a_name_too_long_for_the_buffer_is_skipped_and_the_others_are_read(monke
 # --- Destinations that point at no page --------------------------------------------
 
 
-def _dead_end_paper(links: int, marks: int = 0, *, last_to_page: bool = False) -> bytes:
-    """A one-page PDF whose *links* and *marks* point at an object that is no page (a font).
+def _paper_with_destinations(links: str = "", marks: str = "", *, pages: int = 1) -> bytes:
+    """A PDF of *pages* blank pages, with a link on the first for each letter of *links* and a
+    bookmark for each letter of *marks*.
 
-    With *last_to_page* one more link, the last, points at the page.
+    "d" is a dead end: its destination is an object that is no page (a font). "v" is valid: it
+    points at the first page.
     """
-    first_link, to_page = 5, last_to_page
-    root = first_link + links + to_page
+    font = 3 + pages
+    first_link = font + 1
+    root = first_link + len(links)
     outlines = b" /Outlines %d 0 R" % root if marks else b""
     annots = b" ".join(b"%d 0 R" % number for number in range(first_link, root))
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R%s >>" % outlines,
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Pages /Kids [%s] /Count %d >>"
+        % (b" ".join(b"%d 0 R" % number for number in range(3, 3 + pages)), pages),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [%s] >>" % annots,
+        *(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>" for _ in range(pages - 1)),
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     ]
-    for number in range(links):
+    for number, kind in enumerate(links):
         objects.append(
             b"<< /Type /Annot /Subtype /Link /Rect [10 %d 100 %d] /Border [0 0 0] "
-            b"/Dest [4 0 R /XYZ 0 700 0] >>" % (10 + number, 19 + number)
-        )
-    if to_page:
-        objects.append(
-            b"<< /Type /Annot /Subtype /Link /Rect [10 5 100 9] /Border [0 0 0] "
-            b"/Dest [3 0 R /XYZ 0 700 0] >>"
+            b"/Dest [%d 0 R /XYZ 0 700 0] >>"
+            % (10 + number, 19 + number, font if kind == "d" else 3)
         )
     if marks:
         first = root + 1
         objects.append(
             b"<< /Type /Outlines /First %d 0 R /Last %d 0 R /Count %d >>"
-            % (first, first + marks - 1, marks)
+            % (first, first + len(marks) - 1, len(marks))
         )
-        for number in range(marks):
+        for number, kind in enumerate(marks):
             links_to = b"/Prev %d 0 R " % (first + number - 1) if number else b""
-            if number < marks - 1:
+            if number < len(marks) - 1:
                 links_to += b"/Next %d 0 R " % (first + number + 1)
             objects.append(
-                b"<< /Title (Mark %d) /Parent %d 0 R %s/Dest [4 0 R /Fit] >>"
-                % (number, root, links_to)
+                b"<< /Title (Mark %d) /Parent %d 0 R %s/Dest [%d 0 R /Fit] >>"
+                % (number, root, links_to, font if kind == "d" else 3)
             )
     return _pdfs.serialize_pdf(objects)
 
@@ -293,7 +295,8 @@ def _page_lookups(monkeypatch) -> list[int]:
 
 
 def test_the_dead_end_fixture_points_at_no_page_and_the_last_link_at_the_page():
-    layer = build_document_layer(_dead_end_paper(2, 2, last_to_page=True), [0], budget=_BUDGET)
+    paper = _paper_with_destinations("ddv", "dd")
+    layer = build_document_layer(paper, [0], budget=_BUDGET)
 
     assert [link.target_page for link in layer.links] == [None, None, 0]
     assert [link.target_class for link in layer.links] == ["unresolved", "unresolved", "other"]
@@ -301,10 +304,47 @@ def test_the_dead_end_fixture_points_at_no_page_and_the_last_link_at_the_page():
     assert layer.component_errors == {}
 
 
+def test_the_allowance_for_destinations_that_point_at_no_page_falls_as_the_page_count_grows():
+    allowance = destinations.unresolved_allowance
+
+    assert (destinations.MAX_PAGE_CHECKS, destinations.MIN_UNRESOLVED) == (5_000_000, 256)
+    # A paper never reaches it: 5,000,000 page checks are 250,000 walks of 20 pages.
+    assert allowance(20) == 250_000
+    assert allowance(1) == allowance(0) == 5_000_000
+    assert allowance(1_000) == 5_000
+    assert allowance(19_000) == 263
+    # From about 19,500 pages the floor holds.
+    assert allowance(20_000) == 256
+    assert allowance(1_000_000) == 256
+    for pages in (1, 2, 20, 500, 5_000, 10_000, 19_000):
+        assert allowance(pages) * pages <= destinations.MAX_PAGE_CHECKS
+
+
+def _stub_resolver(n_pages: int):
+    """A resolver whose destinations all point at no page, and the calls pdfium would get."""
+    calls: list[object] = []
+    api = SimpleNamespace(FPDFDest_GetDestPageIndex=lambda _raw, dest: calls.append(dest) or -1)
+    return destinations.Resolver(api, SimpleNamespace(raw=None), n_pages), calls
+
+
+def test_a_resolver_in_a_large_document_stops_at_the_floor_and_in_a_small_one_goes_on():
+    large, large_calls = _stub_resolver(20_000)
+    small, small_calls = _stub_resolver(20)
+
+    assert (large.allowance, small.allowance) == (256, 250_000)
+    for number in range(1_000):
+        assert large.page(number) is None and small.page(number) is None
+    # 256 destinations were looked up; the other 744 were not asked for.
+    assert len(large_calls) == 256 and (large.unresolved, large.skipped) == (256, 744)
+    assert len(small_calls) == 1_000 and (small.unresolved, small.skipped) == (1_000, 0)
+    assert large.note is not None and small.note is None
+
+
 def test_a_resolver_counts_the_destinations_that_point_at_no_page_and_stops_at_the_limit(
     monkeypatch,
 ):
-    monkeypatch.setattr(destinations, "MAX_UNRESOLVED", 2)
+    monkeypatch.setattr(destinations, "MIN_UNRESOLVED", 2)
+    monkeypatch.setattr(destinations, "MAX_PAGE_CHECKS", 0)
     with _Doc(_linked.linked_paper()) as opened:
         calls = []
         real = opened.api.FPDFDest_GetDestPageIndex
@@ -320,22 +360,21 @@ def test_a_resolver_counts_the_destinations_that_point_at_no_page_and_stops_at_t
         assert resolver.page(past_the_end) is None and resolver.unresolved == 2
         assert len(calls) == 4 and resolver.note is None
 
-        # The limit is spent: nothing more is resolved, one that has a page included.
+        # The allowance is spent: nothing more is resolved, one that has a page included.
         assert resolver.page(on_page) is None and resolver.page(past_the_end) is None
-        assert len(calls) == 4 and resolver.skipped
+        assert len(calls) == 4 and resolver.skipped == 2
         assert resolver.note == (
             "after 2 destinations that point at no page, the rest are left unresolved"
         )
 
 
 def test_a_document_stops_resolving_after_256_destinations_that_point_at_no_page(monkeypatch):
-    assert destinations.MAX_UNRESOLVED == 256
     calls = _page_lookups(monkeypatch)
-    paper = _dead_end_paper(300, last_to_page=True)
+    paper = _paper_with_destinations("d" * 300 + "v", pages=20_000)
     layer = build_document_layer(paper, [0], budget=_BUDGET)
 
-    # 256 were resolved, with a walk of the pages each; the other 44 and the one that has
-    # a page were not asked for, so they point at none.
+    # 256 were resolved, with a walk of the 20,000 pages each; the other 44 and the one that
+    # has a page were not asked for, so they point at none.
     assert len(calls) == 256
     assert len(layer.links) == 301
     assert [link.target_page for link in layer.links] == [None] * 301
@@ -343,9 +382,9 @@ def test_a_document_stops_resolving_after_256_destinations_that_point_at_no_page
     assert layer.component_errors == {
         "unresolved_dests": "after 256 destinations that point at no page, the rest are left unresolved"
     }
-    # Without the limit the last link has its page.
+    # With room for them all the last link has its page.
     with monkeypatch.context() as patch:
-        patch.setattr(destinations, "MAX_UNRESOLVED", 10_000)
+        patch.setattr(destinations, "MAX_PAGE_CHECKS", 10**12)
         unlimited = build_document_layer(paper, [0], budget=_BUDGET)
     assert unlimited.links[-1].target_page == 0 and unlimited.component_errors == {}
 
@@ -354,16 +393,27 @@ def test_exactly_256_destinations_that_point_at_no_page_are_all_resolved_and_say
     monkeypatch,
 ):
     calls = _page_lookups(monkeypatch)
-    layer = build_document_layer(_dead_end_paper(256), [0], budget=_BUDGET)
+    paper = _paper_with_destinations("d" * 256, pages=20_000)
+    layer = build_document_layer(paper, [0], budget=_BUDGET)
 
     assert len(calls) == 256 and len(layer.links) == 256
     assert layer.component_errors == {}
 
 
-def test_the_outline_and_the_links_share_the_limit(monkeypatch):
-    monkeypatch.setattr(destinations, "MAX_UNRESOLVED", 3)
+def test_a_paper_never_reaches_the_allowance(monkeypatch):
+    # In a document of 20 pages 257 destinations that point at no page are far from the 250,000.
     calls = _page_lookups(monkeypatch)
-    layer = build_document_layer(_dead_end_paper(3, 2, last_to_page=True), [0], budget=_BUDGET)
+    layer = build_document_layer(_paper_with_destinations("d" * 257, pages=20), [0], budget=_BUDGET)
+
+    assert len(calls) == 257
+    assert layer.component_errors == {}
+
+
+def test_the_outline_and_the_links_share_the_limit(monkeypatch):
+    monkeypatch.setattr(destinations, "MIN_UNRESOLVED", 3)
+    monkeypatch.setattr(destinations, "MAX_PAGE_CHECKS", 0)
+    calls = _page_lookups(monkeypatch)
+    layer = build_document_layer(_paper_with_destinations("dddv", "dd"), [0], budget=_BUDGET)
 
     # The outline is read first and spends two of the three; the links get the third.
     assert len(calls) == 3
@@ -381,7 +431,8 @@ def test_destinations_that_have_a_page_do_not_count_against_the_limit(monkeypatc
 
     # A limit one over those few, which the many do not use up, leaves everything as it was
     # read, with no note: the limit stops the destinations after the last of its count.
-    monkeypatch.setattr(destinations, "MAX_UNRESOLVED", dead_ends + 1)
+    monkeypatch.setattr(destinations, "MIN_UNRESOLVED", dead_ends + 1)
+    monkeypatch.setattr(destinations, "MAX_PAGE_CHECKS", 0)
     limited = _layer(_linked.linked_paper())
 
     assert limited.links == whole.links and limited.outline == whole.outline
