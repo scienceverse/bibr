@@ -23,7 +23,10 @@ first rule that tags a block decides its role):
 1. Artifacts (layer): a block whose centre lies in a margin band and whose
    text-layer lines are all drawn inside ``/Artifact`` marked content, on a
    page that also prints text outside it. Tagged PDFs mark their running
-   heads, feet and page numbers as pagination artifacts.
+   heads, feet and page numbers as pagination artifacts, and some draw other
+   margin text as artifacts too, such as a figure's source line: artifact
+   text that no artifact on another page prints must read as furniture on
+   its own (:func:`_once_printed_furniture`).
 2. The furniture strip (layer): a block without text-layer lines of its own
    whose text the strip's removed objects (``Page.furniture``) print inside
    its box: a margin line-number column or a watermark the OCR read from the
@@ -60,7 +63,8 @@ Text-layer lines (``PdfInspection.page_lines``, which the reference line
 stream reads; ids ``p{page}.pl{n}``) get roles by the same evidence:
 
 9. Artifacts (layer): a line whose centre lies in a margin band and whose
-   glyphs' layer lines are all drawn inside ``/Artifact`` marked content.
+   glyphs' layer lines are all drawn inside ``/Artifact`` marked content,
+   with rule 1's test for artifact text printed on one page only.
 10. A line whose centre lies in the box of a block the layout labels as
     furniture (rule 3) has that block's role.
 11. Edge recurrence: among the top and bottom two lines of each page, a line
@@ -256,10 +260,34 @@ def furniture_key(text: str) -> str | None:
     """
     if _LOCATOR_TEXT.search(text):
         return None
-    key = _DIGITS.sub("#", _WS.sub(" ", text.casefold()).strip())
+    key = _masked_key(text)
     if sum(ch.isalpha() for ch in key) < _FURNITURE_MIN_LETTERS:
         return None
     return key
+
+
+def _masked_key(text: str) -> str:
+    return _DIGITS.sub("#", _WS.sub(" ", text.casefold()).strip())
+
+
+def _once_printed_furniture(text: str) -> bool:
+    """Whether artifact *text* that no other page prints reads as furniture on its own.
+
+    A running head or a page number is short (``REPEAT_MAX_LEN``) and holds
+    no locator (``_LOCATOR_TEXT``). Longer text, or text with a DOI or URL in
+    it, is a figure's source line or a licence block the PDF happens to draw
+    as an artifact; filed as a running foot, its DOI would read as the
+    paper's own.
+    """
+    return len(collapse_ws(text)) <= REPEAT_MAX_LEN and not _LOCATOR_TEXT.search(text)
+
+
+def _recurring_keys(printed: Iterable[tuple[int, str]]) -> set[str]:
+    """The digit-masked keys of the ``(page, text)`` items of *printed* on two or more pages."""
+    pages: dict[str, set[int]] = defaultdict(set)
+    for page, text in printed:
+        pages[_masked_key(text)].add(page)
+    return {key for key, on in pages.items() if len(on) >= 2}
 
 
 def _roman_value(token: str) -> int | None:
@@ -455,7 +483,9 @@ def _line_roles(
         center_y = _center(page_lines[position]["bbox"])[1]
         return RUNNING_FOOTER if center_y >= 500.0 else RUNNING_HEADER
 
-    # Rule 9: drawn inside /Artifact marked content, in a margin band.
+    # Rule 9: drawn inside /Artifact marked content, in a margin band, and
+    # printed by an artifact line of another page or furniture on its own.
+    artifact_lines: list[tuple[int, list[str]]] = []
     for page, positions in by_page.items():
         artifact = artifacts.get(page - 1)
         layer_page = layer.page(page - 1) if layer is not None else None
@@ -467,7 +497,15 @@ def _line_roles(
                 continue
             line_ids = _artifact_page_line(layer_page, artifact, bbox)
             if line_ids:
-                tag(position, edge_role(position), _ARTIFACT, evidence=line_ids)
+                artifact_lines.append((position, line_ids))
+    recurring = _recurring_keys(
+        (int(page_lines[position]["page"]), str(page_lines[position]["text"]))
+        for position, _ in artifact_lines
+    )
+    for position, line_ids in artifact_lines:
+        text = str(page_lines[position]["text"])
+        if _masked_key(text) in recurring or _once_printed_furniture(text):
+            tag(position, edge_role(position), _ARTIFACT, evidence=line_ids)
 
     # Rule 10: inside a furniture block's box, by the line's centre.
     for page, positions in by_page.items():
@@ -614,6 +652,7 @@ def write_page_roles(
     band_headings: set[Occurrence] = set()
     band_numbers_of: dict[Occurrence, tuple[int, ...]] = {}
     band_numbers: dict[int, list[Occurrence]] = defaultdict(list)
+    once_furniture: set[Occurrence] = set()
     pages_with_text: set[int] = set()
     for page, page_regions in enumerate(regions):
         for index, region in enumerate(page_regions):
@@ -636,6 +675,9 @@ def write_page_roles(
             boxes[(page, index)] = box
             # The text the region summaries carry, which the band rules read.
             texts[(page, index)] = text = collapse_ws(clean[:200])
+            # Rule 1 reads the whole text: a locator can follow the cut.
+            if _once_printed_furniture(content):
+                once_furniture.add((page, index))
             if _inside_band(box):
                 value = page_number_value(text)
                 if value is not None:
@@ -687,9 +729,12 @@ def write_page_roles(
         """The page number for a block printing one; None leaves the role to the position."""
         return PAGE_NUMBER if page_number_value(texts[occurrence]) is not None else None
 
-    # Rules 1 and 2, from the layer: artifacts and the strip's furniture.
+    # Rules 1 and 2, from the layer: artifacts and the strip's furniture. A
+    # rule-1 block has text-layer lines and a rule-2 block none, so rule 1 can
+    # wait for the artifacts of every page.
     layer_pages = list(layer.pages) if layer is not None else []
     artifacts: dict[int, np.ndarray] = {}
+    artifact_blocks: list[tuple[Occurrence, list[str]]] = []
     for layer_page in layer_pages:
         artifact = _artifact_lines(layer_page)
         if artifact is not None:
@@ -705,11 +750,18 @@ def write_page_roles(
                 and all(artifact[line] for line in block.lines)
             ):
                 line_ids = [ids.line(layer_page.index, line) for line in block.lines]
-                tag(occurrence, _ARTIFACT, role=number_role(occurrence), evidence=line_ids)
+                artifact_blocks.append((occurrence, line_ids))
             furniture = _printed_furniture(layer_page, block, texts[occurrence])
             if furniture is not None:
                 furniture_role, furniture_ids = furniture
                 tag(occurrence, _STRIP, role=furniture_role, evidence=furniture_ids)
+    # Rule 1: artifact text another page prints too, or furniture on its own.
+    recurring = _recurring_keys(
+        (page, texts[(page, index)]) for (page, index), _ in artifact_blocks
+    )
+    for occurrence, line_ids in artifact_blocks:
+        if _masked_key(texts[occurrence]) in recurring or occurrence in once_furniture:
+            tag(occurrence, _ARTIFACT, role=number_role(occurrence), evidence=line_ids)
 
     # Rule 3: the layout label.
     for occurrence, label_role in labelled.items():
