@@ -34,9 +34,10 @@ APIS = (
     "FPDF_GetMetaText",
 )
 
-# An outline longer than this is read to this many entries (books have a few
-# thousand), so a hostile one cannot hold the lock for long.
-MAX_ENTRIES = 20_000
+# An outline longer than this is read to this many entries, so a hostile one cannot hold the
+# lock for long: 5,000 take 0.05 s to read. Books have a few thousand entries, and the
+# longest outline on gate192 has 94.
+MAX_ENTRIES = 5_000
 
 
 def meta_title(api: _Api, doc) -> str | None:

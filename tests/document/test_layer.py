@@ -595,6 +595,22 @@ def test_a_schema_change_comes_with_a_new_layer_version():
     )
 
 
+def test_the_readers_limits_are_the_ones_a_shared_pdfium_lock_can_carry():
+    # What a hostile PDF may hold the process-wide pdfium lock for: each count is far above
+    # the busiest gate192 paper (607 named destinations, 920 links, 94 outline entries, 3,560
+    # structure elements, 411 kids) and costs a quarter of a second or less to read.
+    # Raising one is a decision about every request waiting on the lock.
+    from bibr.document import destinations, links, outline, structure
+
+    assert destinations.MAX_NAMED_DESTS == 2_000
+    assert links.MAX_LINKS == 10_000
+    assert outline.MAX_ENTRIES == 5_000
+    assert structure.MAX_ELEMENTS == 20_000
+    assert structure.MAX_KIDS == 2_000
+    assert links.MAX_QUADS == 256
+    assert destinations.MAX_TEXT == 1 << 16
+
+
 # --- What the layer reads ---------------------------------------------------------
 
 

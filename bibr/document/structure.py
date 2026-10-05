@@ -56,12 +56,15 @@ APIS = (
 # Whether the catalog's /MarkInfo says the PDF is tagged.
 CATALOG_APIS = ("FPDFCatalog_IsTagged",)
 
-# A document with more structure elements than this is read to this many (the busiest
-# gate192 paper has 3,560, its busiest page 803), and an element with more kids than
-# MAX_KIDS is read to that many (the busiest holds 411 marked-content references), so a
-# hostile tree cannot hold the lock for long.
-MAX_ELEMENTS = 100_000
-MAX_KIDS = 10_000
+# A document with more structure elements than this is read to this many (each page's
+# copy of an element counts: the busiest gate192 paper has 3,560, its busiest page 803),
+# and an element with more kids than MAX_KIDS is read to that many (the busiest holds 411
+# marked-content references), so a hostile tree cannot hold the lock for long: 20,000
+# elements take 0.2 s to read. The caps bound what is read, not pdfium, which builds a
+# page's whole tree in one call that cannot be cut short: a page with 40,000 kids under
+# one parent takes it 0.7 s.
+MAX_ELEMENTS = 20_000
+MAX_KIDS = 2_000
 
 
 def read_page_tree(
