@@ -540,8 +540,10 @@ class DocumentLayer:
     roles: list[RoleTag] = field(default_factory=list)
     decisions: list[DecisionRecord] = field(default_factory=list)
     presence: Presence = field(default_factory=Presence)
-    # Failures of layer components, keyed like "harvest:3"; they never fail
-    # the paper and never reach PdfInspection.component_errors.
+    # Failures of layer components, and what a limit cut short; they never fail the
+    # paper and never reach PdfInspection.component_errors. A page's is keyed like
+    # "harvest:3". A limit is said once for the document, under the component:
+    # "links", "struct", "outline", "named_dests" or "unresolved_dests".
     component_errors: dict[str, str] = field(default_factory=dict)
     # Set by free_columns: every page's cols is then None because the
     # columns were dropped, not because a page has no text layer or failed.

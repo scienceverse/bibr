@@ -156,7 +156,7 @@ def read_page_links(
     page,
     page_index: int,
     names: destinations.NamedDests | None,
-    n_pages: int,
+    resolver: destinations.Resolver,
     *,
     with_names: bool,
     limit: int = MAX_LINKS,
@@ -184,7 +184,7 @@ def read_page_links(
         number += 1
         try:
             raw, cut = _read_link(
-                api, doc, page, link, (page_index, number), names, n_pages, with_names
+                api, doc, page, link, (page_index, number), names, resolver, with_names
             )
         except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
             failure = failure or f"{type(exc).__name__}: {exc}"[:500]
@@ -211,7 +211,7 @@ def _read_link(
     link,
     where: tuple[int, int],
     names: destinations.NamedDests | None,
-    n_pages: int,
+    resolver: destinations.Resolver,
     with_names: bool,
 ) -> tuple[RawLink | None, str | None]:
     """The link and a note when it was cut short; None, with a note, for a link left out.
@@ -268,7 +268,7 @@ def _read_link(
         if name is None and names is not None:
             name = names.name_of(dest)
             source = "table" if name is not None else None
-        target_page = destinations.dest_page(api, doc, dest, n_pages)
+        target_page = resolver.page(dest)
         if target_page is not None:
             target_xy = destinations.dest_position(api, dest)
     raw = RawLink(
