@@ -10,7 +10,10 @@ The views that read a page's glyph columns give empty results ("", [] or
 None) for a page without them: a page with no text layer, a page the
 harvest failed on (``Page.error`` is set) and every page once the layer's
 columns were freed (``DocumentLayer.columns_freed``). Check those two
-before reading an empty result as a page without text.
+before reading an empty result as a page without text. The joins of
+:class:`StructIndex` are the exception for a freed layer: an empty join
+would read as a paper without tagged text, so they raise
+:class:`ColumnsFreedError`.
 """
 
 from __future__ import annotations
@@ -36,6 +39,17 @@ from bibr.document.model import (
 )
 
 TEXT_SOURCES = ("native", "invisible_layer", "ocr")
+
+
+class ColumnsFreedError(RuntimeError):
+    """The layer's glyph columns were freed, so the text the structure joins to is gone.
+
+    :meth:`StructIndex.span_element`, :meth:`StructIndex.spans_of` and
+    :meth:`StructIndex.link_element` raise it once ``DocumentLayer.columns_freed``
+    is set, whatever the index was asked before and whether it was built before
+    or after the columns were freed. Join before the pipeline frees them (after
+    the last stage that requires the layer), or not at all.
+    """
 
 
 def _finite(values) -> Box | None:
@@ -301,6 +315,13 @@ class StructIndex:
     text. A page without columns (see the module docstring) holds no text to
     join: :meth:`span_element` gives None for it, :meth:`spans_of` no spans of
     it, and the elements and their marked content stay.
+
+    A layer whose columns were freed (``DocumentLayer.columns_freed``) has no
+    text on any page, so the three joins (:meth:`span_element`,
+    :meth:`spans_of` and :meth:`link_element`) raise :class:`ColumnsFreedError`
+    on every call, whenever the index was built and whatever it answered
+    before. The tree itself (``by_id``, ``by_mcr``, ``children``,
+    :meth:`ancestors`) stays.
     """
 
     def __init__(self, layer: DocumentLayer) -> None:
@@ -321,11 +342,19 @@ class StructIndex:
             elem = self.by_id[elem.parent]
             yield elem
 
+    def _need_columns(self) -> None:
+        if self.layer.columns_freed:
+            raise ColumnsFreedError(
+                "the layer's glyph columns were freed, so no text joins to the structure tree"
+            )
+
     def span_element(self, page: Page, span: int) -> StructElem | None:
         """The element that holds the marked content the span's text is in.
 
         None for text in no marked content and for text inside an artifact.
+        Raises :class:`ColumnsFreedError` on a layer whose columns were freed.
         """
+        self._need_columns()
         cols = page.cols
         if cols is None:
             return None
@@ -337,8 +366,12 @@ class StructIndex:
     def spans_of(self, elem: StructElem) -> list[str]:
         """The ids of the spans of the text *elem* holds, with that of the elements below it.
 
-        The ids come in page order and, on a page, in the order the text was drawn.
+        The ids come in page order and, on a page, in span order: the order of the
+        page's spans, which is not always the order the text was drawn. Raises
+        :class:`ColumnsFreedError` on a layer whose columns were freed, even when
+        an earlier call found the spans.
         """
+        self._need_columns()
         if self._mcr_spans is None:
             self._mcr_spans = {}
             for page in self.layer.pages:
@@ -364,8 +397,10 @@ class StructIndex:
 
         pdfium names no annotation for an element's object reference, so the
         pair is found through the text: the first covered span that sits in a
-        Link element, or under one.
+        Link element, or under one. Raises :class:`ColumnsFreedError` on a layer
+        whose columns were freed.
         """
+        self._need_columns()
         page = self.layer.page(link.page)
         if page is None:
             return None
