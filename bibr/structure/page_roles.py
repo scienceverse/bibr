@@ -4,9 +4,11 @@ Running heads and feet, page numbers, watermarks and line numbers are printed
 by the page, not by the article. This module decides them once per document
 and writes each decision as a :class:`~bibr.document.model.RoleTag` whose
 target is a layer id (:mod:`bibr.document.ids`): a block (the post-OCR region
-of that position on its page), a text-layer line, or an object the furniture
-strip removed. Consumers that keep furniture out of the text read the tags;
-none re-derives furniture with a margin band of its own.
+of that position on its page) or a text-layer line. Consumers that keep
+furniture out of the text read the tags; none re-derives furniture with a
+margin band of its own. The objects the furniture strip removed keep their own
+kind and :class:`~bibr.document.model.Decided` record (``Page.furniture``);
+the tags of the blocks that print them cite their ids.
 
 A role is evidence, never a gate. A tagged block stays on the layer and in the
 region summaries; a consumer that drops furniture from text drops it by tag,
@@ -25,7 +27,7 @@ first rule that tags a block decides its role):
 2. The furniture strip (layer): a block without text-layer lines of its own
    whose text the strip's removed objects (``Page.furniture``) print inside
    its box: a margin line-number column or a watermark the OCR read from the
-   image. The objects themselves are tagged with their kind.
+   image.
 3. The layout label: a ``header``, ``footer`` or page-number region is the
    layout model's own running head, foot or page number.
 4. Recurrence: a heading or a short body row whose normalised text is printed
@@ -587,7 +589,7 @@ def write_page_roles(
     page_lines: Sequence[Mapping[str, Any]] | None = None,
     layer: DocumentLayer | None = None,
 ) -> PageRoles:
-    """Decide the page roles of one document's blocks, text-layer lines and furniture.
+    """Decide the page roles of one document's blocks and text-layer lines.
 
     *regions* is indexed by absolute page, as the OCR stage hands it over
     (pages before a ``start_page`` are empty), in the region IR or its wire
@@ -688,7 +690,6 @@ def write_page_roles(
     # Rules 1 and 2, from the layer: artifacts and the strip's furniture.
     layer_pages = list(layer.pages) if layer is not None else []
     artifacts: dict[int, np.ndarray] = {}
-    furniture_tags: list[RoleTag] = []
     for layer_page in layer_pages:
         artifact = _artifact_lines(layer_page)
         if artifact is not None:
@@ -709,16 +710,6 @@ def write_page_roles(
             if furniture is not None:
                 furniture_role, furniture_ids = furniture
                 tag(occurrence, _STRIP, role=furniture_role, evidence=furniture_ids)
-        for item in layer_page.furniture:
-            kind_role = _FURNITURE_ROLES.get(item.kind)
-            if kind_role is not None:
-                furniture_tags.append(
-                    RoleTag(
-                        target=item.furniture_id,
-                        role=kind_role,
-                        decided=Decided(_STRIP, PAGE_ROLES_RULE),
-                    )
-                )
 
     # Rule 3: the layout label.
     for occurrence, label_role in labelled.items():
@@ -810,5 +801,4 @@ def write_page_roles(
 
     ordered = [tags[occurrence] for occurrence in sorted(tags)]
     ordered.extend(_line_roles(page_lines or (), label_boxes, layer, artifacts))
-    ordered.extend(furniture_tags)
     return PageRoles(ordered, repeats)
