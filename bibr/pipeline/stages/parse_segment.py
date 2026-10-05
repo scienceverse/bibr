@@ -33,6 +33,19 @@ def _parse_pdf(ocr_regions, outline=None, *, settings=None, first_page_index=0):
     return parser, contents
 
 
+async def _document_layer(fs, settings, *, start_page, end_page):
+    """The file's document layer with its regions as blocks; never raise."""
+    try:
+        from bibr.document.rebuild import ensure_document_layer
+
+        return await asyncio.to_thread(
+            ensure_document_layer, fs, settings, start_page=start_page, end_page=end_page
+        )
+    except Exception:  # noqa: BLE001 - the internal layer must never fail parsing
+        logger.warning("Document layer failed; continuing without it", exc_info=True)
+        return None
+
+
 async def _predict_front_roles(rm, ocr_regions, *, first_page_index: int):
     """Run the optional front-role classifier off the event loop; never raise."""
     from bibr.extract.front_role import FrontRolePredictions
@@ -106,6 +119,22 @@ class ParseSegmentStage:
                     contents.ref_line_geometry = getattr(fs, "ref_line_geometry", None)
                     contents.ref_page_lines = getattr(fs, "ref_page_lines", None)
                     contents.pdf_uri_links = getattr(fs, "pdf_uri_links", None)
+
+                # The document layer, with this run's regions as blocks
+                # (rebuilt from the PDF when an OCR-bundle hit skipped
+                # NativeTextStage). Internal only; it never fails the paper.
+                # "is True" keeps it off under Mock settings in tests.
+                if (
+                    contents is not None
+                    and native_parser is None
+                    and ctx.settings.pipeline.document_layer is True
+                ):
+                    contents.document = await _document_layer(
+                        fs,
+                        ctx.settings,
+                        start_page=ctx.config.start_page,
+                        end_page=ctx.config.end_page,
+                    )
 
                 # Score every OCR region's front-matter role while the raw
                 # regions are still resident (they are freed after this

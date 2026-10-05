@@ -2060,6 +2060,15 @@ class PipelineOptions(_BibrSettings):
         description="Use the PDF outline (bookmarks) as a heading-level signal for section "
         "hierarchy. Ships dark pending an eval gate.",
     )
+    # Build the internal lossless document layer (bibr.document): glyph fonts,
+    # effective sizes, baselines, spans, lines, superscripts, furniture and
+    # render recipes, read from the PDF text layer next to the native-text
+    # pass. Changes no output; costs pdfium lock time per glyph.
+    document_layer: bool = Field(
+        False,
+        description="Build the internal document layer (glyph fonts, sizes, spans, lines, "
+        "superscripts, furniture) from the PDF text layer. Internal only; changes no output.",
+    )
     # Reviews and commentaries argue rather than report: their body headings
     # are discussion, not the introduction/methods/results the classifier
     # guesses one heading at a time. Applies only when the paper type says so

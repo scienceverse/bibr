@@ -27,11 +27,43 @@ import re
 import unicodedata
 import weakref
 from collections import Counter
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
 from bibr.input.consolidate_text import DOI_URL_CONTEXT_RE, fix_ocr_artifacts
 from bibr.ocr.utils import pdfium_lock
 
 logger = logging.getLogger(__name__)
+
+# Flags of a char record in a PageCharTrace (see _build_page_char_records).
+# A space the word-boundary repair inserted; it has no pdfium char.
+REC_SYNTH_SPACE = 1
+# A flat whitespace box that _settle placed against the glyph before it.
+REC_SETTLED_RAISED = 2
+# A letter with a spacing accent merged into it.
+REC_COMPOSED_ACCENT = 4
+# A non-BMP char read from a UTF-16 surrogate pair (two pdfium chars).
+REC_SURROGATE_PAIR = 8
+
+
+@dataclass(slots=True)
+class PageCharTrace:
+    """What :func:`_build_page_char_records` read and produced, for the document layer.
+
+    ``codes`` and ``boxes`` are indexed by pdfium char index: the raw
+    ``FPDFText_GetUnicode`` value and the tight char box (None when pdfium had
+    none). ``record_src`` and ``record_flags`` run parallel to the returned
+    records: the pdfium index each record starts at (-1 for an inserted space)
+    and its ``REC_*`` flags. ``complete`` turns True once the records are
+    returned. Filling a trace never changes the records.
+    """
+
+    codes: list[int] = field(default_factory=list)
+    boxes: list[tuple[float, float, float, float] | None] = field(default_factory=list)
+    record_src: list[int] = field(default_factory=list)
+    record_flags: list[int] = field(default_factory=list)
+    complete: bool = False
+
 
 # A private-use glyph in prose or references is especially dangerous: many
 # publisher PDFs encode old-style digits in the PUA, so accepting the native
@@ -328,6 +360,7 @@ def _repair_word_boundaries(
     generated_breaks: set[int],
     blank: frozenset[int] = frozenset(),
     generated_spaces: frozenset[int] = frozenset(),
+    meta: list[tuple[int, int]] | None = None,
 ) -> list[tuple[str, float, float, bool]]:
     """Fix pdfium's whitespace between consecutive glyphs of one line.
 
@@ -344,7 +377,9 @@ def _repair_word_boundaries(
     loose box of every non-whitespace glyph, in order; the records in
     *blank* (accents merged into their letter) count as absent, and so does a
     generated space next to one, which pdfium set for the accent; at a word gap
-    the space comes back as an inserted one.
+    the space comes back as an inserted one. *meta*, when given, runs parallel
+    to *records* and is rebuilt in place with the same drops and inserts
+    (``(-1, REC_SYNTH_SPACE)`` for an inserted space).
     """
     pairs: list[tuple[str | None, float]] = []
     # Whether two glyphs belong to one link run (see _link_kind).
@@ -419,13 +454,20 @@ def _repair_word_boundaries(
     if not drop and not insert:
         return records
     repaired: list[tuple[str, float, float, bool]] = []
+    repaired_meta: list[tuple[int, int]] = []
     for index, record in enumerate(records):
         if index in drop:
             continue
         repaired.append(record)
+        if meta is not None:
+            repaired_meta.append(meta[index])
         if index in insert:
             x, y = insert[index]
             repaired.append((" ", x, y, False))
+            if meta is not None:
+                repaired_meta.append((-1, REC_SYNTH_SPACE))
+    if meta is not None:
+        meta[:] = repaired_meta
     return repaired
 
 
@@ -565,7 +607,9 @@ def compose_spacing_accents(
     ]
 
 
-def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
+def _build_page_char_records(
+    textpage, trace: PageCharTrace | None = None
+) -> list[tuple[str, float, float, bool]]:
     """Precompute ``(char, center_x, center_y, is_newline)`` for every char on the page.
 
     ``get_text_bounded`` assigns a glyph to a region whenever its char box merely
@@ -598,6 +642,10 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
     Computing this once per page (rather than once per region) avoids
     O(regions × chars) pdfium calls in :func:`_fill_page_regions_from_textpage`,
     which queries one region at a time over the same page.
+
+    *trace*, when given, receives every pdfium code and tight box the loop
+    reads and, parallel to the returned records, where each record came from
+    (see :class:`PageCharTrace`). The records are the same either way.
     """
     import pypdfium2 as pdfium
 
@@ -609,6 +657,15 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
 
     n_chars = textpage.count_chars()
     records: list[tuple[str, float, float, bool]] = []
+    # (pdfium index, REC_* flags) of each record, parallel to *records*, when
+    # tracing for the document layer.
+    meta: list[tuple[int, int]] | None = None
+    codes: list[int] = []
+    char_boxes: list[tuple[float, float, float, float] | None] = []
+    if trace is not None:
+        meta = []
+        codes = trace.codes = [0] * n_chars
+        char_boxes = trace.boxes = [None] * n_chars
     # Index, box and ligature flag of the last non-whitespace glyph on the line.
     line_glyph: tuple[int, tuple[float, float, float, float], bool] | None = None
     # Raised spaces waiting for the glyph after them: (record index, the
@@ -633,6 +690,8 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
                 if nb + _RAISED_BASELINE_RATIO * (nt - nb) < own_y <= nt:
                     limit = min(glyph_y, (nb + nt) / 2.0)
             records[index] = (ch, x, max(own_y, limit), is_newline)
+            if meta is not None:
+                meta[index] = (meta[index][0], meta[index][1] | REC_SETTLED_RAISED)
         raised.clear()
 
     i = 0
@@ -640,6 +699,9 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
         code_unit = pdfium.raw.FPDFText_GetUnicode(textpage.raw, i)
         consumed = 1
         boxes = [_charbox(i)]
+        if meta is not None:
+            codes[i] = code_unit
+            char_boxes[i] = boxes[0]
 
         # PDFium exposes non-BMP text as UTF-16 code units. Joining each unit
         # independently creates lone-surrogate Python strings that cannot be
@@ -651,6 +713,9 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
                 ch = chr(scalar)
                 consumed = 2
                 boxes.append(_charbox(i + 1))
+                if meta is not None:
+                    codes[i + 1] = low
+                    char_boxes[i + 1] = boxes[1]
             else:
                 ch = "\ufffd"
         elif 0xD800 <= code_unit <= 0xDFFF or code_unit > 0x10FFFF:
@@ -663,6 +728,8 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
             if pdfium.raw.FPDFText_IsGenerated(textpage.raw, i) == 1:
                 generated_breaks.add(len(records))
             records.append((ch, 0.0, 0.0, True))
+            if meta is not None:
+                meta.append((i, 0))
             line_glyph = None
             i += consumed
             continue
@@ -701,24 +768,50 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
         if ch == " " and pdfium.raw.FPDFText_IsGenerated(textpage.raw, i) == 1:
             generated_spaces.add(len(records))
         records.append((ch, (cl + cr) / 2.0, center_y, False))
+        if meta is not None:
+            meta.append((i, REC_SURROGATE_PAIR if consumed == 2 else 0))
         i += consumed
     _settle(None)
     accents = _spacing_accent_targets(glyph_boxes)
     if not accents:
-        return _repair_word_boundaries(
-            records, glyphs, generated_breaks, generated_spaces=frozenset(generated_spaces)
+        repaired = _repair_word_boundaries(
+            records,
+            glyphs,
+            generated_breaks,
+            generated_spaces=frozenset(generated_spaces),
+            meta=meta,
         )
+        if trace is not None and meta is not None:
+            _finish_trace(trace, meta)
+        return repaired
     for accent, letter in accents.items():
         at = glyphs[letter][0]
         ch, x, y, is_newline = records[at]
         records[at] = (_with_accent(ch, glyphs[accent][1]), x, y, is_newline)
         records[glyphs[accent][0]] = ("", 0.0, 0.0, False)
+        if meta is not None:
+            meta[at] = (meta[at][0], meta[at][1] | REC_COMPOSED_ACCENT)
     kept = [glyph for index, glyph in enumerate(glyphs) if index not in accents]
     blank = frozenset(glyphs[accent][0] for accent in accents)
     repaired = _repair_word_boundaries(
-        records, kept, generated_breaks, blank, frozenset(generated_spaces)
+        records, kept, generated_breaks, blank, frozenset(generated_spaces), meta=meta
     )
-    return [record for record in repaired if record[0]]
+    if trace is None or meta is None:
+        return [record for record in repaired if record[0]]
+    kept_records: list[tuple[str, float, float, bool]] = []
+    kept_meta: list[tuple[int, int]] = []
+    for record, record_meta in zip(repaired, meta, strict=True):
+        if record[0]:
+            kept_records.append(record)
+            kept_meta.append(record_meta)
+    _finish_trace(trace, kept_meta)
+    return kept_records
+
+
+def _finish_trace(trace: PageCharTrace, meta: list[tuple[int, int]]) -> None:
+    trace.record_src = [src for src, _flags in meta]
+    trace.record_flags = [flags for _src, flags in meta]
+    trace.complete = True
 
 
 def _reconstruct_text_from_records(
@@ -1119,6 +1212,7 @@ def _fill_page_regions_from_textpage(
     min_printable_ratio: float,
     page_idx: int,
     rotation: int = 0,
+    records: list[tuple[str, float, float, bool]] | None = None,
 ) -> None:
     """Pre-fill eligible regions' ``content`` from an already-open textpage.
 
@@ -1127,9 +1221,11 @@ def _fill_page_regions_from_textpage(
 
     Per-page char records (center coordinates for center-containment) are
     computed ONCE and reused across every region on the page, avoiding
-    O(regions × chars) pdfium calls.
+    O(regions × chars) pdfium calls. A caller that already built them from
+    *textpage* (the document layer does) passes them as *records*.
     """
-    records = _build_page_char_records(textpage)
+    if records is None:
+        records = _build_page_char_records(textpage)
     for region in regions:
         label = region.get("label")
         if label not in eligible_labels:
@@ -1696,7 +1792,11 @@ def _line_number_column(
     return found
 
 
-def _remove_objects(pdfium_c, page, found: list) -> None:
+def _remove_objects(pdfium_c, page, found: list, outcomes: list[bool] | None = None) -> None:
+    """Remove the ``(parent, object)`` entries in *found* from *page*.
+
+    *outcomes*, when given, gets one bool per entry: whether it was removed.
+    """
     remove_from_form = getattr(pdfium_c, "FPDFFormObj_RemoveObject", None)
     for parent, obj in found:
         if parent is None:
@@ -1705,17 +1805,27 @@ def _remove_objects(pdfium_c, page, found: list) -> None:
             removed = remove_from_form(parent, obj)
         else:
             removed = False
+        if outcomes is not None:
+            outcomes.append(bool(removed))
         if removed:
             # Removal hands the object to the caller.
             pdfium_c.FPDFPageObj_Destroy(obj)
 
 
-def _find_furniture(page, *, watermark_text: bool = True) -> tuple[list, list[str], list, int]:
+# A change to what the strip removes moves the document layer's glyph
+# indexes: bump WATERMARK_RULE or LINE_NUMBER_RULE in bibr.document.model.
+def _find_furniture(
+    page, *, watermark_text: bool = True, details: list | None = None, walk: list | None = None
+) -> tuple[list, list[str], list, int]:
     """The watermark entries, their strings, the line-number entries and the text-object count.
 
     Nothing is removed. Entries are ``(parent, object, matrix)`` as collected
     by ``_collect_text_objects``; the strings are only read when
-    *watermark_text* is set.
+    *watermark_text* is set. *details*, when given, gets ``(kind, entry, box,
+    text)`` for every returned watermark and line-number entry: ``kind`` is
+    ``"watermark"`` or ``"line_number"``, ``box`` the object's page-space box
+    (PDF points, y up; None when pdfium has none) and ``text`` its string.
+    *walk*, when given, gets every entry collected.
     """
     import pypdfium2.raw as pdfium_c
 
@@ -1725,6 +1835,8 @@ def _find_furniture(page, *, watermark_text: bool = True) -> tuple[list, list[st
         for index in range(pdfium_c.FPDFPage_CountObjects(page.raw))
     ]
     _collect_text_objects(pdfium_c, top_level, None, None, 0, objects)
+    if walk is not None:
+        walk.extend(objects)
     watermarks = []
     candidates = []
     boxes: list[_Box | None] = []
@@ -1744,10 +1856,15 @@ def _find_furniture(page, *, watermark_text: bool = True) -> tuple[list, list[st
             candidates.append(len(boxes) - 1)
     read_watermarks = watermark_text and bool(watermarks)
     if not read_watermarks and len(candidates) < _LINE_NUMBER_MIN_COUNT:
+        _extend_details(
+            details, lambda: _watermark_details(pdfium_c, watermarks, [""] * len(watermarks))
+        )
         return watermarks, [], [], len(objects)
     texts: list[str] = []
+    watermark_texts: list[str] = []
     numbers: list[tuple[int, _Box]] = []
     number_entries: list[int] = []
+    number_texts: list[str] = []
     # The strings need a text page of the unstripped page; only pages that
     # carry a watermark or enough margin candidates pay for it.
     textpage = page.get_textpage()
@@ -1755,6 +1872,7 @@ def _find_furniture(page, *, watermark_text: bool = True) -> tuple[list, list[st
         if read_watermarks:
             for _parent, obj, _matrix in watermarks:
                 text = " ".join(_text_object_text(pdfium_c, obj, textpage).split())
+                watermark_texts.append(text)
                 if text:
                     texts.append(text)
         if len(candidates) >= _LINE_NUMBER_MIN_COUNT:
@@ -1763,15 +1881,75 @@ def _find_furniture(page, *, watermark_text: bool = True) -> tuple[list, list[st
                 if _LINE_NUMBER_RE.fullmatch(text):
                     numbers.append((int(text), boxes[index]))
                     number_entries.append(index)
+                    number_texts.append(text)
     finally:
         textpage.close()
     line_numbers: list = []
+    column: set[int] = set()
     if len(numbers) >= _LINE_NUMBER_MIN_COUNT:
         taken = set(number_entries)
         others = [box for index, box in enumerate(boxes) if box is not None and index not in taken]
         column = _line_number_column(numbers, others, page_left, page_right)
         line_numbers = [objects[number_entries[i]] for i in sorted(column)]
+    if details is not None:
+        if len(watermark_texts) != len(watermarks):
+            watermark_texts = [""] * len(watermarks)
+
+        def found() -> list[tuple]:
+            numbered = [
+                ("line_number", objects[number_entries[i]], numbers[i][1], number_texts[i])
+                for i in sorted(column)
+            ]
+            return _watermark_details(pdfium_c, watermarks, watermark_texts) + numbered
+
+        _extend_details(details, found)
     return watermarks, texts, line_numbers, len(objects)
+
+
+def _watermark_details(pdfium_c, watermarks: list, texts: list[str]) -> list[tuple]:
+    """``("watermark", entry, page-space box, text)`` for each watermark entry."""
+    details = []
+    for entry, text in zip(watermarks, texts, strict=True):
+        _parent, obj, matrix = entry
+        bounds = _object_bounds(pdfium_c, obj)
+        box = None if bounds is None else _transform_box(matrix, bounds) if matrix else bounds
+        details.append(("watermark", entry, box, text))
+    return details
+
+
+def _furniture_error(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {exc}"[:500]
+
+
+def _extend_details(details: list | None, build) -> None:
+    """Append ``build()``'s furniture details to *details*.
+
+    The details are bookkeeping for the document layer, so a failure to read
+    them never stops the scan: *details* then holds a single ``("error",
+    None, None, message)`` entry.
+    """
+    if details is None:
+        return
+    try:
+        found = list(build())
+    except Exception as exc:  # noqa: BLE001 - bookkeeping never costs the furniture scan
+        logger.debug("Could not describe the page furniture", exc_info=True)
+        details[:] = [("error", None, None, _furniture_error(exc))]
+        return
+    details.extend(found)
+
+
+def _removed_furniture(entries: list, outcomes: list[bool], details: list) -> list[tuple]:
+    """``(kind, box, text)`` of each removed entry, or one ``("error", None, message)``."""
+    try:
+        for kind, _entry, _box, text in details:
+            if kind == "error":
+                return [("error", None, text)]
+        removed = {id(entry) for entry, ok in zip(entries, outcomes, strict=True) if ok}
+        return [(kind, box, text) for kind, entry, box, text in details if id(entry) in removed]
+    except Exception as exc:  # noqa: BLE001 - bookkeeping never costs the removal
+        logger.debug("Could not record the removed furniture", exc_info=True)
+        return [("error", None, _furniture_error(exc))]
 
 
 # Documents already checked for line-numbered pages. Callers hold
@@ -1814,7 +1992,9 @@ def _document_is_line_numbered(pdf) -> bool:
     return numbered
 
 
-def strip_furniture_objects(page) -> tuple[list[str], int]:
+def strip_furniture_objects(
+    page, furniture: list | None = None, walk: list | None = None
+) -> tuple[list[str], int]:
     """Remove diagonal watermark text and manuscript line numbers from *page* in memory.
 
     Returns the removed watermark strings (whitespace-normalised, one per
@@ -1823,30 +2003,67 @@ def strip_furniture_objects(page) -> tuple[list[str], int]:
     column on at least _LINE_NUMBER_MIN_PAGES pages. Only the loaded page
     changes: nothing is written back, and the callers open the document from
     bytes for their own pass. Operates on a caller-provided (lock-held) page.
+
+    *furniture*, when given, gets ``(kind, box, text)`` for every object
+    removed: ``kind`` is ``"watermark"`` or ``"line_number"``, ``box`` its
+    page-space box (PDF points, y up; None when pdfium has none) and
+    ``text`` its whitespace-normalised string (the digits of a line number).
+    Recording them never changes what is removed: when they cannot be read,
+    *furniture* gets one ``("error", None, message)`` entry instead.
+
+    *walk*, when given, gets the ``(parent, object, matrix)`` entry of every
+    text object left on the page (see :func:`_collect_text_objects`), so the
+    document layer need not walk the page again. It stays empty when the
+    strip fails.
     """
     import pypdfium2.raw as pdfium_c
 
-    watermarks, texts, line_numbers, _n_text = _find_furniture(page)
+    details: list | None = [] if furniture is not None else None
+    found: list | None = [] if walk is not None else None
+    watermarks, texts, line_numbers, _n_text = _find_furniture(page, details=details, walk=found)
     pdf = getattr(page, "pdf", None)
     if line_numbers and (pdf is None or not _document_is_line_numbered(pdf)):
         line_numbers = []
-    _remove_objects(pdfium_c, page, [(parent, obj) for parent, obj, _ in watermarks + line_numbers])
+    entries = watermarks + line_numbers
+    outcomes: list[bool] | None = [] if furniture is not None or walk is not None else None
+    _remove_objects(pdfium_c, page, [(parent, obj) for parent, obj, _ in entries], outcomes)
+    if furniture is not None and details is not None and outcomes is not None:
+        furniture.extend(_removed_furniture(entries, outcomes, details))
+    if walk is not None and found is not None and outcomes is not None:
+        # A removed object is destroyed; its entry must not outlive it.
+        removed = {id(entry) for entry, done in zip(entries, outcomes, strict=True) if done}
+        walk.extend(entry for entry in found if id(entry) not in removed)
     return texts, len(line_numbers)
 
 
-def open_text_page(page, watermarks: list[str] | None = None):
+def open_text_page(
+    page,
+    watermarks: list[str] | None = None,
+    furniture: list | None = None,
+    walk: list | None = None,
+):
     """Build *page*'s pdfium text page without its watermark text and line numbers.
 
     Every native-text reader goes through this, so region text, font
     metadata, reference geometry and DOI evidence see the same characters.
     The removed watermark strings are appended to *watermarks* when it is
-    given.
+    given, and the removed objects to *furniture* as ``(kind, box, text)``
+    (see :func:`strip_furniture_objects`; a failed pass adds one ``("error",
+    None, message)`` entry). *walk* gets the text objects left on the page,
+    and stays empty when the pass fails.
     """
     try:
-        removed, _line_numbers = strip_furniture_objects(page)
-    except Exception:  # noqa: BLE001 - never lose the text layer to the furniture pass
+        if furniture is None and walk is None:
+            removed, _line_numbers = strip_furniture_objects(page)
+        else:
+            removed, _line_numbers = strip_furniture_objects(page, furniture, walk)
+    except Exception as exc:  # noqa: BLE001 - never lose the text layer to the furniture pass
         logger.debug("Page furniture removal failed; reading the page as it is", exc_info=True)
         removed = []
+        if furniture is not None:
+            furniture.append(("error", None, _furniture_error(exc)))
+        if walk is not None:
+            walk.clear()
     if watermarks is not None:
         watermarks.extend(removed)
     return page.get_textpage()
@@ -1901,13 +2118,51 @@ def _page_image_coverage(page, crop_box: tuple[float, float, float, float]) -> f
     return min(1.0, _union_area(clipped[:_SCAN_PAGE_MAX_IMAGE_BOXES]) / area)
 
 
-def _invisible_text_share(textpage) -> float | None:
-    """Share of the page's characters drawn in an invisible text render mode.
+# The invisible-layer rule has one implementation, shared with the document
+# layer (bibr.document.harvest), which reads the same facts from its columns:
+# _invisible_share, _share_qualifies and _coverage_qualifies. Bump
+# INVISIBLE_LAYER_RULE in bibr.document.model when the rule changes.
+def _invisible_share(
+    n_chars: int,
+    code_of: Callable[[int], int],
+    is_generated: Callable[[int], bool],
+    render_mode_of: Callable[[int], int | None],
+) -> float | None:
+    """Share of the countable chars drawn in an invisible text render mode.
 
     Whitespace and the characters PDFium generates (inferred spaces and line
-    breaks) are not counted. ``None`` when nothing is countable. Raises when
-    this PDFium build cannot map a character to its text object, so the caller
-    keeps the text layer and reports the rule as unavailable.
+    breaks) are not counted, nor are chars without a text object
+    (*render_mode_of* gives None). ``None`` when nothing is countable.
+    """
+    counted = invisible = 0
+    for index in range(n_chars):
+        code = code_of(index)
+        if code in _UNCOUNTED_CHAR_CODES or (code <= 0x10FFFF and chr(code).isspace()):
+            continue
+        if is_generated(index):
+            continue
+        mode = render_mode_of(index)
+        if mode is None:
+            continue
+        counted += 1
+        if mode in _INVISIBLE_TEXT_RENDER_MODES:
+            invisible += 1
+    return invisible / counted if counted else None
+
+
+def _share_qualifies(share: float | None) -> bool:
+    return share is not None and share >= _SCAN_PAGE_MIN_INVISIBLE_SHARE
+
+
+def _coverage_qualifies(coverage: float) -> bool:
+    return coverage >= _SCAN_PAGE_MIN_IMAGE_COVERAGE
+
+
+def _invisible_text_share(textpage) -> float | None:
+    """:func:`_invisible_share` of a text page, read through PDFium.
+
+    Raises when this PDFium build cannot map a character to its text object,
+    so the caller keeps the text layer and reports the rule as unavailable.
     """
     import pypdfium2.raw as pdfium_c
 
@@ -1916,20 +2171,17 @@ def _invisible_text_share(textpage) -> float | None:
         raise RuntimeError("this PDFium build has no FPDFText_GetTextObject")
     is_generated = getattr(pdfium_c, "FPDFText_IsGenerated", None)
     handle = textpage.raw
-    counted = invisible = 0
-    for index in range(textpage.count_chars()):
-        code = pdfium_c.FPDFText_GetUnicode(handle, index)
-        if code in _UNCOUNTED_CHAR_CODES or (code <= 0x10FFFF and chr(code).isspace()):
-            continue
-        if is_generated is not None and is_generated(handle, index) == 1:
-            continue
+
+    def render_mode_of(index: int) -> int | None:
         obj = text_object_of(handle, index)
-        if not obj:
-            continue
-        counted += 1
-        if pdfium_c.FPDFTextObj_GetTextRenderMode(obj) in _INVISIBLE_TEXT_RENDER_MODES:
-            invisible += 1
-    return invisible / counted if counted else None
+        return pdfium_c.FPDFTextObj_GetTextRenderMode(obj) if obj else None
+
+    return _invisible_share(
+        textpage.count_chars(),
+        lambda index: pdfium_c.FPDFText_GetUnicode(handle, index),
+        lambda index: is_generated is not None and is_generated(handle, index) == 1,
+        render_mode_of,
+    )
 
 
 def _is_invisible_text_layer_page(
@@ -1943,10 +2195,9 @@ def _is_invisible_text_layer_page(
     keeps its visible text, and a figure-sized image never qualifies. Operates
     on a caller-provided (lock-held) page and textpage.
     """
-    if _page_image_coverage(page, crop_box) < _SCAN_PAGE_MIN_IMAGE_COVERAGE:
+    if not _coverage_qualifies(_page_image_coverage(page, crop_box)):
         return False
-    share = _invisible_text_share(textpage)
-    return share is not None and share >= _SCAN_PAGE_MIN_INVISIBLE_SHARE
+    return _share_qualifies(_invisible_text_share(textpage))
 
 
 def fill_regions_from_native_text(
