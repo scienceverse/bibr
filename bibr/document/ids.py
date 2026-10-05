@@ -6,9 +6,12 @@ the kind. D1's kinds are spans ``sp`` (rows of ``PageColumns.span_rec``),
 lines ``l`` (``PageColumns.line_span``), blocks ``r`` (the page's post-OCR
 regions, in order) and furniture ``f`` (``Page.furniture``). :func:`make`
 and :func:`parse` take any lowercase prefix that is not a document kind, so
-later kinds need no new parser.
+later kinds need no new parser. The page roles (``bibr.structure.page_roles``)
+add page lines ``pl``: the text-layer lines the reference line stream reads
+(``bibr.document.views.page_lines``, ``PdfInspection.page_lines``), by their
+position among the page's lines.
 
-Span, line and furniture ids come from the PDF alone: the same PDF read
+Span, line, page-line and furniture ids come from the PDF alone: the same PDF read
 under the same :data:`~bibr.document.model.INDEX_FRAME` and pdfium gives the
 same ids. Block ids do not: a block's index is its position in the post-OCR
 region list, which depends on the layout model and on OCR merges, and D3
@@ -35,6 +38,7 @@ SPAN = "sp"
 LINE = "l"
 BLOCK = "r"
 FURNITURE = "f"
+PAGE_LINE = "pl"
 OUTLINE = "ol"
 STRUCT = "st"
 
@@ -114,6 +118,10 @@ def block(page: int, n: int) -> str:
 
 def furniture(page: int, n: int) -> str:
     return make(page, FURNITURE, n)
+
+
+def page_line(page: int, n: int) -> str:
+    return make(page, PAGE_LINE, n)
 
 
 def outline_entry(n: int) -> str:

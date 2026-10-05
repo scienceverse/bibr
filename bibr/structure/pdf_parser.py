@@ -128,6 +128,11 @@ LABEL_TREATMENT: dict[str, str] = {
     "aside_text": "abandon",
 }
 
+# The treatments of the regions a page-role tag demotes to running heads: the
+# parser would otherwise read them as text or as a heading. A region the
+# layout labels as furniture is dispatched by its label already.
+_DEMOTED_TREATMENTS = frozenset({"content", "heading"})
+
 # A row that opens an abstract or a keyword list, in any language the section
 # aliases know: the bare heading ("RÉSUMÉ") or its lead-in ("Key words: …",
 # "キーワード：…"). CJK headings are often letter-spaced ("摘 要"), so CJK
@@ -803,7 +808,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 self._clean_region_content[(page_idx, region_idx)] = clean_content
                 if (
                     roles.block(page_idx, region_idx) is not None
-                    and LABEL_TREATMENT.get(effective) != "structural"
+                    and LABEL_TREATMENT.get(effective) in _DEMOTED_TREATMENTS
                 ):
                     self._running_header_regions.add((page_idx, region_idx))
                 if effective != "doc_title":

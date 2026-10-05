@@ -25,6 +25,7 @@ from bibr.paper_contents import (
     Provenance,
     RegionSummary,
 )
+from bibr.structure.page_roles import write_page_roles
 
 # ---------------------------------------------------------------------------
 # Fixture builders: a page is 1000 x 1000 in both the layout frame (y down) and
@@ -47,9 +48,17 @@ def _line(text: str, page: int, x0: float, top: float, height: float = 10.0) -> 
 
 
 def _contents(regions: list[tuple[int, tuple[float, float, float, float], str, str]], lines):
-    """Contents with one reference row per ``(page, bbox, label, row_text)`` region."""
+    """Contents with one reference row per ``(page, bbox, label, row_text)`` region.
+
+    The page roles are written over the same regions and lines, as the parse
+    stage writes them.
+    """
     sentences = []
     summaries = []
+    page_count = max([page for page, *_ in regions] + [line["page"] for line in lines], default=0)
+    page_regions: list[list[dict]] = [[] for _ in range(page_count)]
+    for page, bbox, label, text in regions:
+        page_regions[page - 1].append({"label": label, "bbox_2d": list(bbox), "content": text})
     for index, (page, bbox, label, text) in enumerate(regions):
         sentences.append(
             PaperSentence(
@@ -81,6 +90,7 @@ def _contents(regions: list[tuple[int, tuple[float, float, float, float], str, s
         sections_text={},
         region_summaries=summaries,
         ref_page_lines=lines,
+        page_roles=write_page_roles(page_regions, page_lines=lines),
     )
 
 

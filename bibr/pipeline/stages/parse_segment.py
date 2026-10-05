@@ -35,11 +35,11 @@ def _parse_pdf(ocr_regions, outline=None, *, settings=None, first_page_index=0, 
     return parser, contents
 
 
-def _page_roles(ocr_regions, layer, *, first_page_index):
+def _page_roles(ocr_regions, layer, *, first_page_index, page_lines):
     """The document's page roles, also written onto its layer when it has one."""
     from bibr.structure.page_roles import write_page_roles
 
-    roles = write_page_roles(ocr_regions, first_page_index=first_page_index)
+    roles = write_page_roles(ocr_regions, first_page_index=first_page_index, page_lines=page_lines)
     if layer is not None:
         layer.roles.extend(roles.tags)
     return roles
@@ -128,6 +128,7 @@ class ParseSegmentStage:
                         fs.ocr_regions,
                         layer,
                         first_page_index=ctx.config.start_page or 0,
+                        page_lines=getattr(fs, "ref_page_lines", None),
                     )
                     # Offload sync CPU-heavy parse to a thread so concurrent
                     # files can interleave on the event loop and the thread
