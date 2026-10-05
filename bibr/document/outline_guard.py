@@ -2,10 +2,11 @@
 
 A port of the junk-outline guard the popo evaluation froze on 2026-10-03
 (``outline-guard-v1``, scripts/outline_guard.py), with its rules, patterns and
-order unchanged. The evaluation ran it on PyMuPDF's table of contents and page
-text; here it runs on the layer's outline (pdfium's bookmarks) and the layer's
-own text, with the PDF's /Title as the only title: the pipeline's extracted
-title is not known when the layer is built.
+order unchanged. The evaluation ran it on what pypdfium2 reads: bibr's own
+outline reader (``bibr.input.pdf_outline.extract_pdf_outline``, on pypdfium2's
+table of contents) and each page's ``get_text_bounded()``. Here it runs on the
+layer's outline (pdfium's bookmarks, walked by :mod:`bibr.document.outline`) and
+the layer's own text.
 
 Entry cleanup drops an entry (its children are not re-parented: the guard only
 counts the entries that stay):
@@ -31,13 +32,30 @@ The outline is rejected when:
   catches issue tables of contents and renamed bookmarks
 
 Differences from the evaluation, which a reader comparing numbers must know:
-the text is the layer's records, not MuPDF's page text, and the layer gives a
-verdict only where it holds the text of every page of the document. On a layer
-built for a page range (or with a page it could not read) R3 would see too
-little: of the gate192 outlines that pass on the whole document it rejected 30
-of 97 with the first half of the pages built and 47 of 90 with the first five,
-and the 2,000-character gate lets a junk outline through. Such a layer keeps a
-rejection by R1 or R2, which read no text, and leaves a pass at None.
+
+- The grounding key. The evaluation grounded an entry on both the letters and
+  digits of its title and those of its title with the leading numbering marker
+  stripped (``bibr.input.pdf_outline._strip_marker``: "1.2 ", "Section 3",
+  "(a)"); this port grounds on the title's letters and digits alone. An entry
+  whose printed form lacks the marker its bookmark carries is grounded there and
+  not here, so the port can reject (R3) an outline the evaluation kept.
+- No pipeline title. The evaluation's C5 also dropped an entry that repeats the
+  title the pipeline extracted; the layer is built before any title is
+  extracted, so the PDF's /Title is the only title it knows, and an entry that
+  repeats the extracted title but not the /Title stays.
+- The input. The text is the layer's records, not pypdfium2's page text, and
+  the entries are the layer's own walk of the bookmarks (every depth, none
+  filtered), not ``extract_pdf_outline``'s.
+- The scope. The layer gives a verdict only where it holds the text of every
+  page of the document. On a layer built for a page range (or with a page it
+  could not read) R3 would see too little: of the gate192 outlines that pass on
+  the whole document it rejected 30 of 97 with the first half of the pages built
+  and 47 of 90 with the first five, and the 2,000-character gate lets a junk
+  outline through. Such a layer keeps a rejection by R1 or R2, which read no
+  text, and leaves a pass at None.
+
+The evaluation's measured precision is therefore the evaluation's: measure the
+guard again on the layer's outline before quoting it.
 """
 
 from __future__ import annotations
@@ -175,6 +193,8 @@ class PageText:
         return sum(len(text) for text in self.folded)
 
     def grounded(self, entry: OutlineEntry) -> bool:
+        # The evaluation also probed the title without its leading numbering marker; see the
+        # module docstring.
         keys = {key for key in {alnum(entry.title)} - {""} if len(key) >= 3}
         probes = keys | {key[:30] for key in keys if len(key) > 30}
         if entry.page is None:
