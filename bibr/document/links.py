@@ -140,7 +140,8 @@ class PageLinks:
     # was left out (it failed, or has no rectangle that is finite) or the document's
     # allowance of annotations ran out; a link cut short is kept, so it does not count.
     complete: bool
-    # What left a link out or cut one short, each once.
+    # What left a link out or cut one short, each once on the page. The reader of the document
+    # says them under the page's key, ``links:{page}``.
     cuts: list[str]
     # Whether the document's allowance of annotations ran out on this page: another
     # annotation was there. The caller says so, with this page, and reads no later one.
