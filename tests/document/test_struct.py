@@ -389,7 +389,9 @@ def test_a_document_over_the_limit_is_read_to_the_limit_and_says_so_once(monkeyp
 
     # The allowance runs out on the first page, and the note is the document's.
     assert _rows(layer) == _expected([0])[:4]
-    assert layer.component_errors == {"struct": "more than 4 structure elements, the rest unread"}
+    assert layer.component_errors == {
+        "struct": "more than 4 structure elements, the rest unread from page 0"
+    }
     assert layer.presence.is_tagged is True
 
 
@@ -420,7 +422,22 @@ def test_an_allowance_spent_exactly_at_the_end_of_a_page_is_stopped_by_the_next_
     assert len(calls) == 2
     assert _rows(layer) == _expected([0])
     assert layer.component_errors == {
-        "struct": f"more than {first} structure elements, the rest unread"
+        "struct": f"more than {first} structure elements, the rest unread from page 1"
+    }
+
+
+def test_the_limit_note_names_the_page_the_read_stopped_on_which_is_read_in_part(monkeypatch):
+    first = len(_expected([0]))
+    assert len(_expected([1])) > 1
+    monkeypatch.setattr(structure, "MAX_ELEMENTS", first + 1)
+    calls = _tree_calls(monkeypatch)
+    layer = _layer()
+
+    # Page 0's tree is kept whole and page 1's to its first element (the root, which holds no
+    # content on page 1); no page after it is asked.
+    assert len(calls) == 2 and _pages_of(layer) == {0}
+    assert layer.component_errors == {
+        "struct": f"more than {first + 1} structure elements, the rest unread from page 1"
     }
 
 

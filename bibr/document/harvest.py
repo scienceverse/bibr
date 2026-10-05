@@ -1060,6 +1060,11 @@ class LayerBuilder:
         self.raw_links.extend(page_links.found)
         self.links_enumerated += page_links.enumerated
         self.links_stopped = page_links.stopped
+        if page_links.stopped:
+            self._note(
+                "links",
+                f"more than {links.MAX_LINKS} link annotations, the rest unread from page {page_index}",
+            )
         if self.links_unresolved_from is None and page_links.first_unresolved is not None:
             self.links_unresolved_from = ids.make(
                 page_index, links.KIND, page_links.first_unresolved
@@ -1086,6 +1091,12 @@ class LayerBuilder:
         self.struct.extend(tree.copies)
         self.struct_tree = self.struct_tree or tree.has_tree
         self.struct_stopped = tree.stopped
+        if tree.stopped:
+            self._note(
+                "struct",
+                f"more than {structure.MAX_ELEMENTS} structure elements, "
+                f"the rest unread from page {page_index}",
+            )
         for text in tree.cuts:
             self._note("struct", text)
         if tree.failure is not None:
