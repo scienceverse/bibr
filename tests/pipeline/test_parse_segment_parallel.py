@@ -45,7 +45,7 @@ async def test_parse_runs_concurrently_across_files(monkeypatch):
     parse_started = []
     parse_finished = []
 
-    def slow_parse(ocr_regions, *, settings, first_page_index=0):  # noqa: ARG001
+    def slow_parse(ocr_regions, *, settings, first_page_index=0, page_roles=None):  # noqa: ARG001
         parse_started.append(time.monotonic())
         time.sleep(0.1)  # synchronous sleep — runs on the thread-pool worker
         parse_finished.append(time.monotonic())
@@ -78,7 +78,7 @@ async def test_parse_isolates_per_file_errors(monkeypatch):
     bad = _make_fs()
     ctx = _make_ctx([good, bad])
 
-    def parse_fn(ocr_regions, *, settings, first_page_index=0):  # noqa: ARG001
+    def parse_fn(ocr_regions, *, settings, first_page_index=0, page_roles=None):  # noqa: ARG001
         if ocr_regions is bad.ocr_regions:
             raise RuntimeError("simulated parse failure")
         parser = MagicMock()

@@ -11,6 +11,7 @@ import subprocess
 import sys
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -30,6 +31,7 @@ from bibr.paper_contents import PaperContents
 from bibr.pipeline.context import PipelineContext, RunConfig
 from bibr.pipeline.progress import NullProgress
 from bibr.pipeline.state import FileState
+from bibr.structure.page_roles import PageRoles
 from tests.document import _pdfs
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -90,7 +92,12 @@ def test_importing_every_export_module_leaves_the_document_layer_unloaded():
 
 @pytest.mark.parametrize(
     ("cls", "name"),
-    [(FileState, "doc_layer"), (PaperContents, "document"), (PdfInspection, "document")],
+    [
+        (FileState, "doc_layer"),
+        (PaperContents, "document"),
+        (PaperContents, "page_roles"),
+        (PdfInspection, "document"),
+    ],
 )
 def test_layer_fields_stay_out_of_equality_and_repr(cls, name):
     found = {item.name: item for item in dataclasses.fields(cls)}[name]
@@ -204,7 +211,9 @@ def test_paper_contents_takes_the_layer_by_keyword_only():
     positional = [item.name for item in fields if not item.kw_only]
 
     assert {item.name: item for item in fields}["document"].kw_only
+    assert {item.name: item for item in fields}["page_roles"].kw_only
     assert "document" not in positional
+    assert "page_roles" not in positional
     assert positional[-1] == "caption_assignment_receipt"
 
 
@@ -297,7 +306,7 @@ async def test_parse_stage_keeps_the_layer_only_when_on(monkeypatch, on):
 
     monkeypatch.setattr(Settings.pipeline, "document_layer", on)
     calls = []
-    layer = object()
+    layer = SimpleNamespace(roles=[])
 
     def fake_ensure(fs, settings, *, start_page, end_page):
         calls.append((fs, start_page, end_page))
@@ -314,9 +323,12 @@ async def test_parse_stage_keeps_the_layer_only_when_on(monkeypatch, on):
         await ParseSegmentStage().run(ctx)
 
     assert fs.error is None
+    # The page roles are written either way, onto the layer when there is one.
+    assert isinstance(contents.page_roles, PageRoles)
     if on:
         assert calls == [(fs, 2, 5)]
         assert contents.document is layer
+        assert layer.roles == list(contents.page_roles.tags)
     else:
         assert calls == []
         assert contents.document is None

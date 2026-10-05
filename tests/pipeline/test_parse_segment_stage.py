@@ -9,6 +9,7 @@ from bibr.pipeline.context import PipelineContext, RunConfig
 from bibr.pipeline.progress import NullProgress
 from bibr.pipeline.stages.parse_segment import ParseSegmentStage
 from bibr.pipeline.state import FileState
+from bibr.structure.page_roles import PageRoles
 
 
 def _ctx(file_states, rm):
@@ -36,9 +37,18 @@ async def test_pdf_path_calls_parser_then_segmenter():
     with patch("bibr.structure.pdf_parser.PDFParser", return_value=parser) as PP:
         await ParseSegmentStage().run(ctx)
 
-    PP.assert_called_once_with(ocr_regions, outline=None, settings=ctx.settings, first_page_index=0)
+    page_roles = PP.call_args.kwargs["page_roles"]
+    assert isinstance(page_roles, PageRoles)
+    PP.assert_called_once_with(
+        ocr_regions,
+        outline=None,
+        settings=ctx.settings,
+        first_page_index=0,
+        page_roles=page_roles,
+    )
     parser.create_content_sections.assert_called_once_with(contents)
     assert fs.contents is contents
+    assert contents.page_roles is page_roles
 
 
 @pytest.mark.asyncio
