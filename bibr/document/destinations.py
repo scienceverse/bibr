@@ -124,7 +124,7 @@ class NamedDests:
             # still returns the destination, with a size of -1. The size includes the NUL.
             if not dest or not 2 < size.value <= MAX_TEXT:
                 continue
-            name = buffer[: size.value - 2].decode("utf-16-le", "replace")
+            name = ctypes.string_at(buffer, size.value - 2).decode("utf-16-le", "replace")
             found.setdefault(address(dest), name)
             self._by_name.setdefault(name, dest)
         return found
