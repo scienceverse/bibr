@@ -19,11 +19,11 @@ or persist them before then.
 An object that belongs to the whole PDF, not to a page, has no page in its
 id: ``{kind}{n}``, with a ``.{n}`` more for each level of its place in a
 tree. D2's document kinds are outline entries ``ol`` (``ol5``, the entry's
-position in the outline) and structure elements ``st`` (``st0.3.2``, the
-element's path from the structure tree's root down). Such an id depends on the
-PDF alone: not on the page range a layer is built for, nor on a page that
-failed. A kind is a page kind or a document kind, never both
-(:data:`DOCUMENT_KINDS`).
+position in the outline, one number: the tree is in ``OutlineEntry.parent``) and
+structure elements ``st`` (``st0.3.2``, the element's path from the structure
+tree's root down). Such an id depends on the PDF alone: not on the page range a
+layer is built for, nor on a page that failed. A kind is a page kind or a
+document kind, never both (:data:`DOCUMENT_KINDS`).
 """
 
 from __future__ import annotations
@@ -40,6 +40,8 @@ STRUCT = "st"
 
 # The kinds of the ids that name no page, so that "r5" or "p3" is no id.
 DOCUMENT_KINDS = frozenset({OUTLINE, STRUCT})
+# The document kinds whose id is one number, with no levels: "ol1.2" is no id.
+_FLAT_KINDS = frozenset({OUTLINE})
 
 _KIND = re.compile(r"[a-z]+")
 _ID = re.compile(r"p(0|[1-9][0-9]*)\.([a-z]+)(0|[1-9][0-9]*)")
@@ -74,7 +76,12 @@ def make(page: int, kind: str, n: int) -> str:
 
 def make_document(kind: str, *path: int) -> str:
     """The id of the document object of *kind* at *path*, one index for each level of its tree."""
-    if kind not in DOCUMENT_KINDS or not path or min(path) < 0:
+    if (
+        kind not in DOCUMENT_KINDS
+        or not path
+        or min(path) < 0
+        or (kind in _FLAT_KINDS and len(path) != 1)
+    ):
         raise ValueError(f"no document id for kind {kind!r}, path {path!r}")
     return kind + ".".join(map(str, path))
 
@@ -88,7 +95,8 @@ def parse(layer_id: str) -> LayerId:
     match = _DOCUMENT_ID.fullmatch(layer_id)
     if match is not None and match.group(1) in DOCUMENT_KINDS:
         *above, n = (int(part) for part in match.group(2).split("."))
-        return LayerId(None, match.group(1), n, tuple(above))
+        if not above or match.group(1) not in _FLAT_KINDS:
+            return LayerId(None, match.group(1), n, tuple(above))
     raise ValueError(f"not a layer id: {layer_id!r}")
 
 
