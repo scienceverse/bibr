@@ -1230,11 +1230,17 @@ class LayerBuilder:
                 continue
             pages.append(built)
             roles.extend(tags)
+        # What is read page by page is released once it is merged: the layer holds the result
+        # and the builder is not, so the raw links and the copies of the structure elements
+        # (7 MB at the link limit, 14 MB at the element limit) do not outlive their use.
         for page in pages:
             page.label = self.labels.get(page.index)
+        self.labels = {}
         guard = self._judge_outline(pages)
         built_links = self._build_links(pages)
+        self.raw_links = []
         struct = self._merge_struct()
+        self.struct = []
         # A fact no examined page shows is unknown, not absent, while another
         # page was not examined. A page's text source counts once decided, even
         # if the page failed later; marked content needs the page's columns.
