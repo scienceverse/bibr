@@ -140,21 +140,47 @@ class GpuBatcher(Generic[T, R]):
         batch = [entry for entry in batch if not entry.future.done()]
         if not batch:
             return
-        items = [e.item for e in batch]
         try:
-            results = await loop.run_in_executor(self._executor, self._fn, items)
-            if len(results) != len(batch):
-                raise RuntimeError(  # noqa: TRY301
-                    f"GpuBatcher fn returned {len(results)} results for {len(batch)} items"
-                )
-        except Exception as exc:  # noqa: BLE001 — fan the failure out to callers
+            results = await self._call(loop, [e.item for e in batch])
+        except Exception as exc:  # noqa: BLE001 — resolved per caller below
+            if len(batch) == 1:
+                if not batch[0].future.done():
+                    batch[0].future.set_exception(exc)
+                return
+            # The batch mixes concurrent requests' items, so one poison item
+            # must not fail the others: rerun each item alone (at most one
+            # extra call per item, still on this collector, so GPU access stays
+            # serialized) and give each caller its own result or error.
+            logger.warning(
+                "batcher %s: batch of %d failed (%s: %s); retrying items one at a time",
+                self._name,
+                len(batch),
+                type(exc).__name__,
+                exc,
+            )
             for e in batch:
-                if not e.future.done():
-                    e.future.set_exception(exc)
+                if e.future.done():
+                    continue
+                try:
+                    (result,) = await self._call(loop, [e.item])
+                except Exception as item_exc:  # noqa: BLE001 — this caller's failure
+                    if not e.future.done():
+                        e.future.set_exception(item_exc)
+                else:
+                    if not e.future.done():
+                        e.future.set_result(result)
             return
         for e, result in zip(batch, results, strict=True):
             if not e.future.done():
                 e.future.set_result(result)
+
+    async def _call(self, loop: asyncio.AbstractEventLoop, items: list[T]) -> list[R]:
+        results = await loop.run_in_executor(self._executor, self._fn, items)
+        if len(results) != len(items):
+            raise RuntimeError(
+                f"GpuBatcher fn returned {len(results)} results for {len(items)} items"
+            )
+        return results
 
     async def close(self) -> None:
         """Cancel the collector and fail any still-pending submissions."""

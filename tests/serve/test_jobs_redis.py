@@ -465,10 +465,13 @@ def test_submit_returns_503_and_keeps_no_upload_when_redis_is_down():
 
 
 def test_readiness_reports_the_job_store(monkeypatch):
+    from bibr.serve import app as app_mod
     from bibr.serve.app import _register_readiness_route
 
     harness = _RedisHarness()
     store = harness.make()
+    # Re-probe on every call, so the outage shows on the very next /ready.
+    monkeypatch.setattr(app_mod, "_READINESS_PROBE_TTL_SECONDS", 0.0)
     monkeypatch.setattr(Settings.jobs, "enabled", True)
     monkeypatch.setattr(Settings.jobs, "store", "redis")
     monkeypatch.setattr(Settings.auth, "api_key", None)

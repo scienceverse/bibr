@@ -34,6 +34,11 @@ logger = logging.getLogger(__name__)
 #: path (no model load there), while failures are retried after this interval.
 _CLASSIFIER_CHECK_RETRY_SECONDS = 30.0
 
+#: How long one round of ``/ready``'s network probes (OCR, Redis, job store)
+#: answers later probes. ``/ready`` is public, so without this every anonymous
+#: request cost two OCR requests and the store pings.
+_READINESS_PROBE_TTL_SECONDS = 2.0
+
 
 def classifier_artifact_readiness(settings, *, snapshot_download=None) -> tuple[str, bool]:
     """Verify configured classifier snapshots exist locally without downloading."""
@@ -180,12 +185,14 @@ def _build_server(upload_stores):
     import litserve as ls
     import litserve.server as litserve_server
     from fastapi.middleware.cors import CORSMiddleware
+    from starlette.middleware.gzip import GZipMiddleware
 
     from bibr.config import Settings, validate_production_settings
-    from bibr.serve.admission import base64_envelope
+    from bibr.serve.admission import base64_envelope, route_path
     from bibr.serve.auth import PUBLIC_PATHS, check_bearer, check_keyless_request
     from bibr.serve.deployments.pipeline import BibrPipelineAPI
     from bibr.serve.ingress import (
+        GZIP_COMPRESSLEVEL,
         INTERNAL_INFERENCE_PATH,
         InferenceDispatchTracker,
         UploadStore,
@@ -260,6 +267,12 @@ def _build_server(upload_stores):
     server.app.state.upload_store = upload_store
     server.app.state.inference_tracker = inference_tracker
     register_extract_route(server.app, upload_store, inference_tracker)
+    # LitServe installs GZipMiddleware at Starlette's default level 9, and it
+    # compresses on the event loop. The stack is built on the first request,
+    # so the level can still be lowered here.
+    for middleware in server.app.user_middleware:
+        if middleware.cls is GZipMiddleware:
+            middleware.kwargs["compresslevel"] = GZIP_COMPRESSLEVEL
 
     # Gate every other route too (/info, /openapi.json, /docs, …) — LitServe
     # and FastAPI metadata endpoints leak deployment details. Middleware so
@@ -287,14 +300,17 @@ def _build_server(upload_stores):
 
     @server.app.middleware("http")
     async def _auth_gate(request, call_next):  # pyright: ignore[reportUnusedFunction]
-        if request.url.path == INTERNAL_INFERENCE_PATH:
+        # Gate on the path the router dispatches, never on request.url, which
+        # older Starlette rebuilds from the client's Host header.
+        path = route_path(request.scope)
+        if path == INTERNAL_INFERENCE_PATH:
             return JSONResponse({"detail": "Not Found"}, status_code=404)
         # Keyless (loopback-only) serve: refuse DNS-rebound hosts and cross-site
         # browser requests on every path, /mcp and the probes included.
         refusal = check_keyless_request(request.method, request.headers)
         if refusal is not None:
             return JSONResponse({"detail": refusal[1]}, status_code=refusal[0])
-        if request.url.path not in PUBLIC_PATHS:
+        if path not in PUBLIC_PATHS:
             detail = check_bearer(request.headers.get("authorization"))
             if detail is not None:
                 return JSONResponse(
@@ -313,7 +329,7 @@ def _build_server(upload_stores):
 
     @server.app.middleware("http")
     async def _metering(request, call_next):  # pyright: ignore[reportUnusedFunction]
-        if not Settings.metering.enabled or request.url.path in ("/health", "/ready"):
+        if not Settings.metering.enabled or route_path(request.scope) in ("/health", "/ready"):
             return await call_next(request)
         request_id = _sanitize_request_id(request.headers.get("x-request-id")) or uuid.uuid4().hex
         request.state.request_id = request_id
@@ -495,13 +511,8 @@ def _register_readiness_route(server, Settings) -> None:
             logger.warning("Readiness cache init failed: %s", e)
         return state.get("cache")
 
-    @server.app.get("/ready")
-    async def ready(request: Request):
-        # Disclose per-service health + build_sha only to authenticated callers.
-        # check_bearer returns None both when auth is disabled (dev, single-tenant)
-        # and when a valid bearer is presented; a non-None detail string means the
-        # anonymous caller gets status-only (audit L1).
-        include_detail = check_bearer(request.headers.get("authorization")) is None
+    async def _probe_services() -> tuple[dict[str, str], list[bool]]:
+        """Check OCR, Redis and the job store: the probes that cost requests."""
         checks: dict[str, str] = {}
         check_results: list[bool] = []
         client = await _get_http_client()
@@ -544,27 +555,6 @@ def _register_readiness_route(server, Settings) -> None:
             checks["ocr"] = "unreachable"
             check_results.append(False)
 
-        classifier_check = state.get("classifier_check")
-        classifier_checked_at = state.get("classifier_check_at")
-        # A cached ``ok`` stands: re-probing it on every request would put
-        # model resolution on the probe path. Anything else is retried after a
-        # bounded interval, so a probe that raced worker startup (or a local
-        # path that has since appeared) recovers without a restart.
-        if (
-            not isinstance(classifier_check, tuple)
-            or not isinstance(classifier_checked_at, float)
-            or (
-                classifier_check[0] != "ok"
-                and time.monotonic() - classifier_checked_at >= _CLASSIFIER_CHECK_RETRY_SECONDS
-            )
-        ):
-            classifier_check = await asyncio.to_thread(classifier_artifact_readiness, Settings)
-            state["classifier_check"] = classifier_check
-            state["classifier_check_at"] = time.monotonic()
-        classifier_status, classifier_ok = classifier_check
-        checks["classifiers"] = classifier_status
-        check_results.append(classifier_ok)
-
         cache = await _get_cache()
         if cache is not None:
             try:
@@ -591,8 +581,60 @@ def _register_readiness_route(server, Settings) -> None:
                 logger.warning("Readiness job-store check failed", exc_info=True)
                 checks["jobs_store"] = "error"
                 check_results.append(False)
+        return checks, check_results
 
-        all_ok = all(check_results)
+    async def _refresh_services() -> tuple[dict[str, str], list[bool]]:
+        result = await _probe_services()
+        state["services"] = (time.monotonic(), result)
+        return result
+
+    async def _cached_services() -> tuple[dict[str, str], list[bool]]:
+        # /ready is public, so anonymous traffic must not multiply requests to
+        # OCR and the stores: one probe round answers every call for a short
+        # while, and concurrent calls share the round in flight. The round is
+        # the same for both views; what a caller sees is decided per request.
+        cached: tuple[float, tuple[dict[str, str], list[bool]]] | None = state.get("services")
+        if cached is not None and time.monotonic() - cached[0] < _READINESS_PROBE_TTL_SECONDS:
+            return cached[1]
+        probe = state.get("services_probe")
+        if probe is None or probe.done() or probe.get_loop() is not asyncio.get_running_loop():
+            probe = asyncio.ensure_future(_refresh_services())
+            state["services_probe"] = probe
+        # A caller that disconnects must not cancel the round others wait on.
+        return await asyncio.shield(probe)
+
+    @server.app.get("/ready")
+    async def ready(request: Request):
+        # Disclose per-service health + build_sha only to authenticated callers.
+        # check_bearer returns None both when auth is disabled (dev, single-tenant)
+        # and when a valid bearer is presented; a non-None detail string means the
+        # anonymous caller gets status-only (audit L1).
+        include_detail = check_bearer(request.headers.get("authorization")) is None
+        service_checks, service_results = await _cached_services()
+
+        classifier_check = state.get("classifier_check")
+        classifier_checked_at = state.get("classifier_check_at")
+        # A cached ``ok`` stands: re-probing it on every request would put
+        # model resolution on the probe path. Anything else is retried after a
+        # bounded interval, so a probe that raced worker startup (or a local
+        # path that has since appeared) recovers without a restart.
+        if (
+            not isinstance(classifier_check, tuple)
+            or not isinstance(classifier_checked_at, float)
+            or (
+                classifier_check[0] != "ok"
+                and time.monotonic() - classifier_checked_at >= _CLASSIFIER_CHECK_RETRY_SECONDS
+            )
+        ):
+            classifier_check = await asyncio.to_thread(classifier_artifact_readiness, Settings)
+            state["classifier_check"] = classifier_check
+            state["classifier_check_at"] = time.monotonic()
+        classifier_status, classifier_ok = classifier_check
+
+        # A fresh dict (the probe round is shared), in the usual order: ocr,
+        # classifiers, then the stores.
+        checks = {"ocr": service_checks["ocr"], "classifiers": classifier_status, **service_checks}
+        all_ok = classifier_ok and all(service_results)
         status = "ready" if all_ok else "not_ready"
         return Response(
             content=json.dumps(

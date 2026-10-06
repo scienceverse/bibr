@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import gzip
 import hashlib
 import hmac
 import os
@@ -20,12 +21,19 @@ from typing import Any
 
 from starlette.datastructures import UploadFile
 from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
 
 from bibr.serve.admission import UploadAdmission
 
 INTERNAL_INFERENCE_PATH = "/_bibr/inference"
 PUBLIC_EXTRACT_PATH = "/papers/extract"
 _CHUNK_SIZE = 64 * 1024
+#: The gzip level for responses: Starlette's default 9 takes about 2.5x the
+#: time of 6 on JSON text for about 2% fewer bytes, and LitServe's
+#: GZipMiddleware compresses on the event loop.
+GZIP_COMPRESSLEVEL = 6
+#: Bodies from this size are gzipped (LitServe's GZipMiddleware minimum_size).
+_GZIP_MIN_BYTES = 1000
 FORM_OPTION_MAX_BYTES = 64
 _FORM_OPTION_NAMES = (
     "start_page",
@@ -38,6 +46,11 @@ _FORM_OPTION_NAMES = (
     "refs",
     "ref_seg",
 )
+#: Text parts one request may carry. Unknown names are ignored but still
+#: counted by the parser, so they get an allowance of their own on top of the
+#: options: every option plus a few names this server does not know (a newer
+#: client's options) must still fit.
+_MAX_FORM_FIELDS = len(_FORM_OPTION_NAMES) + 16
 _VALID_REF_PARSE = frozenset({"ner", "llm", "llm-chunked", "off"})
 _VALID_REF_SEG = frozenset({"geom", "region", "llm", "crf"})
 
@@ -345,7 +358,7 @@ async def parse_multipart_request(request: Request):
         request.headers,
         request.stream(),
         max_files=1,
-        max_fields=len(_FORM_OPTION_NAMES),
+        max_fields=_MAX_FORM_FIELDS,
         max_part_size=FORM_OPTION_MAX_BYTES,
     )
     form = None
@@ -507,13 +520,33 @@ class InferenceDispatchTracker:
                     raise result
 
 
+def render_json_response(content: object, accept_encoding: str) -> Response:
+    """Render ``content`` as FastAPI's default response, gzipped as the middleware would.
+
+    Blocking, so routes call it in a thread: for a large export (figure data
+    URIs) the JSON encoding and the compression take about a second, which
+    FastAPI and GZipMiddleware would otherwise spend on the event loop. The
+    middleware passes a body that is already gzipped through untouched.
+    """
+    from fastapi.encoders import jsonable_encoder
+
+    response = JSONResponse(jsonable_encoder(content))
+    # Starlette's own test for whether the client takes gzip.
+    if "gzip" not in accept_encoding or len(response.body) < _GZIP_MIN_BYTES:
+        return response
+    return Response(
+        gzip.compress(response.body, compresslevel=GZIP_COMPRESSLEVEL),
+        media_type=response.media_type,
+        headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"},
+    )
+
+
 def register_extract_route(
     app,
     store: UploadStore,
     tracker: InferenceDispatchTracker,
 ) -> None:
     """Mount the public multipart ingress route around private LitServe dispatch."""
-    from fastapi.responses import JSONResponse
 
     @app.post(PUBLIC_EXTRACT_PATH, openapi_extra=MULTIPART_OPENAPI_EXTRA)
     async def extract(  # pyright: ignore[reportUnusedFunction]
@@ -528,7 +561,7 @@ def register_extract_route(
                 # per-request metering record (serve-8); the handoff ignores
                 # unknown keys, and decode_request re-sanitizes the value.
                 descriptor["request_id"] = request_id
-            return await tracker.submit(
+            result = await tracker.submit(
                 descriptor,
                 request_state=request.state,
                 admission=getattr(request.state, "upload_admission", None),
@@ -547,6 +580,11 @@ def register_extract_route(
             )
         except UploadStorageError:
             return JSONResponse({"detail": "Insufficient temporary storage"}, status_code=507)
+        if isinstance(result, Response):
+            return result
+        return await asyncio.to_thread(
+            render_json_response, result, request.headers.get("accept-encoding", "")
+        )
 
 
 def _canonical_upload_id(upload_id: object) -> str | None:

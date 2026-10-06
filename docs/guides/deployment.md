@@ -38,7 +38,9 @@ is documented in the [REST API reference](../reference/rest-api.md); this
 page focuses on running the server. `/ready` checks the OCR endpoint,
 configured classifier artifacts, and Redis when response caching is enabled.
 Without a valid bearer token, it reports only the overall status; authenticated
-callers also receive the individual checks and `BIBR_BUILD_SHA`.
+callers also receive the individual checks and `BIBR_BUILD_SHA`. The OCR, Redis
+and job-store results are reused for 2 seconds, so probe traffic, which needs
+no credentials, cannot multiply requests to those services.
 
 ## Upload ingress and worker handoff
 
@@ -46,12 +48,13 @@ callers also receive the individual checks and `BIBR_BUILD_SHA`.
 underlying `POST /_bibr/inference` route is private descriptor dispatch, not a
 second upload API; direct HTTP requests to it always receive `404`.
 
-The API process accepts exactly one `file` part and at most the eight documented
-option fields. Duplicate/unknown fields, a second file, or any option value over
-64 bytes is rejected with `400` before descriptor creation. Starlette retains at
-most 1 MiB of the one file in API memory by default before its multipart spool
-rolls to disk, then bibr streams it into an owner-only temporary directory. The
-default limits are separate:
+The API process accepts exactly one `file` part and the nine documented option
+fields, each at most once; text fields it does not know are ignored, up to 25
+text parts in all. A duplicate field, a second file, more text parts or any
+option value over 64 bytes is rejected with `400` before descriptor creation.
+Starlette retains at most 1 MiB of the one file in API memory by default before
+its multipart spool rolls to disk, then bibr streams it into an owner-only
+temporary directory. The default limits are separate:
 
 | Variable | Default | Applies to |
 |---|---:|---|
@@ -102,7 +105,9 @@ duplicate this way: they route through a shared `GpuBatcher` (one
 collector coroutine + one worker thread per model) that serializes
 forward passes and coalesces concurrent requests' pages/texts into fuller
 batches, so peak VRAM stays bounded to one batch regardless of how many
-requests are in flight.
+requests are in flight. When a batch fails, each of its items is run once on
+its own, so a page or text that breaks the model fails only the request it
+came from.
 
 Scale concurrency with these settings:
 
