@@ -32,6 +32,7 @@ _FORM_OPTION_NAMES = (
     "end_page",
     "include_figures",
     "include_regions",
+    "include_region_meta",
     "crossref",
     "consolidate",
     "refs",
@@ -55,6 +56,15 @@ MULTIPART_OPENAPI_EXTRA = {
                         "end_page": {"type": "string"},
                         "include_figures": {"type": "string"},
                         "include_regions": {"type": "string"},
+                        "include_region_meta": {
+                            "type": "string",
+                            "description": (
+                                "Boolean (true/false, 1/0, yes/no): emit "
+                                "extraction.text_regions, each text row's page, box "
+                                "(PDF points from the top-left), font and region type. "
+                                "Off by default; it adds about a fifth to the output."
+                            ),
+                        },
                         "crossref": {
                             "type": "string",
                             "description": (
@@ -294,7 +304,7 @@ def _validate_upload_options(values: Mapping[str, str]) -> dict[str, str]:
             f"start_page ({start_page}) must be <= end_page ({end_page})"
         )
 
-    for name in ("include_figures", "include_regions", "crossref"):
+    for name in ("include_figures", "include_regions", "include_region_meta", "crossref"):
         value = bounded.get(name)
         if value is None:
             continue
@@ -356,9 +366,9 @@ async def parse_multipart_request(request: Request):
                     continue
                 if name not in _FORM_OPTION_NAMES:
                     # FastAPI's prior Form(None) dependency dropped unrecognized
-                    # text fields. Clients depend on that: the Platform worker
-                    # always sends include_region_meta, which this route has
-                    # never accepted. Ignore them — max_fields and max_part_size
+                    # text fields, and clients may depend on that (the Platform
+                    # worker sent include_region_meta long before this route
+                    # accepted it). Ignore them — max_fields and max_part_size
                     # still bound what an unknown name can cost us.
                     continue
                 if name in raw_options:

@@ -21,6 +21,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   or an equation), the structure tree of a tagged PDF joined to the text it holds, the
   outline with a verdict on whether it is a usable heading tree, and the page labels.
   Nothing reads them yet, so exports do not change.
+- `bibr serve`: `POST /papers/extract` and `POST /papers/jobs` accept
+  `include_region_meta`, so `extraction.text_regions` (the page, box, font and region
+  type of each text row, which a viewer needs to highlight a sentence on the source PDF)
+  is available over HTTP too, not only from Python and `bibr chew --region-meta`. It is
+  off by default, and results with it are cached apart from results without it. Before,
+  the field was ignored like any unknown one. `bibr batch` with a serve URL forwards
+  `--region-meta` instead of warning that the serve ignores it.
 
 ### Fixed
 
