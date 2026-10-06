@@ -341,7 +341,9 @@ file changed — so the PyTorch path still loads byte-identical weights.
 
 Execution providers come from the same chain the sentence segmenter uses
 (CUDA → CoreML → CPU), so `bibr[gpu]` accelerates all four models, not just
-segmentation.
+segmentation. `--device cpu` runs these models on the CPU provider alone (no
+CoreML, which may compute in FP16), and `device="cuda:1"` in the Python API puts
+them on that GPU.
 
 `Dockerfile.serve` sets `ML_RUNTIME=torch` explicitly. That image exists for the
 PyTorch stack — `torch.compile` on the layout model in particular — and since the
