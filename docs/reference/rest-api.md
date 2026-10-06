@@ -145,7 +145,11 @@ a load-balanced deployment answers the polls for a job another replica accepted
 and the active-job cap spans all replicas — see
 [Multiple bibr-serve replicas](../guides/deployment.md#multiple-bibr-serve-replicas).
 Each status carries `replica`, the instance executing the job; with the Redis
-store unreachable the job routes answer `503`. The service always pins one HTTP
+store unreachable the job routes answer `503`. A job whose replica stopped before
+it finished is failed with `503`, so the client resubmits it: with `error_code`
+`job_lost` when the replica died (by the first upload after its one-minute lease in
+Redis runs out), or `{"detail": "replica shut down before the job finished"}` after
+a clean shutdown. The service always pins one HTTP
 API process per instance—even with jobs disabled—because upload ownership and
 dispatch tracking are process-local. `PIPELINE_RESTART_WORKERS=false`
 fail-stops on worker death; `true` is an unsupported opt-in until the locked
