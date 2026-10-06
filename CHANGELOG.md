@@ -336,6 +336,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a supplement later prints its own "References": the empty layout region that opens
   each later page of the list starts the References section instead of being read as
   text of the "Reference" section, which left only the supplement's references.
+- A release tag with a pre-release version (`v0.7.0rc1`) becomes a GitHub pre-release
+  and is never marked Latest. PyPI already hides pre-releases from unpinned installs,
+  so `pip install bibr` keeps resolving to the last final release.
 - A structured abstract whose "Background", "Methods", "Results" and
   "Conclusions" subheadings are printed as separate rows keeps all its parts
   (#125).
