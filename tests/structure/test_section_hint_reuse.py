@@ -387,3 +387,51 @@ def test_reference_region_without_a_later_printed_heading_opens_references():
         ("Discussion", False),
         ("References", True),
     ]
+
+
+def test_empty_reference_region_after_a_singular_reference_heading_opens_references():
+    """A printed "Reference" heading names the list even though it classifies as nothing.
+
+    osf_p736e: the list runs from a singular "Reference" heading over five pages,
+    an empty ``reference`` region opens each later page, and the supplement prints
+    its own "References" much later. The region must open the References section
+    instead of being read as prose of "Reference"; otherwise the list stays untyped
+    and only the supplement's references are parsed.
+    """
+    parser, _ = _parse(
+        [
+            [
+                _region("paragraph_title", "Acknowledgments", 60),
+                _region("text", "The authors thank the participants.", 100),
+                _region("paragraph_title", "Reference", 200),
+                _region(
+                    "text",
+                    "Areh, I., & Umek, P. (2007). Predicting recall. Studia Psychologica.",
+                    240,
+                ),
+            ],
+            [
+                _region("reference", "", 40),
+                _region("text", "Evans, J. R., & Fisher, R. P. (2011). Eyewitness memory.", 60),
+                _region("paragraph_title", "Data Availability Statement", 300),
+                _region("text", "This research is part of a larger project.", 340),
+            ],
+            [
+                _region("paragraph_title", "Supplementary Material", 60),
+                _region("text", "Additional analyses follow.", 100),
+                _region("paragraph_title", "References", 400),
+                _region("text", "Ashton, M. C., & Lee, K. (2009). The HEXACO-60.", 440),
+            ],
+        ]
+    )
+    # The supplement's printed "References" takes over the section the region opened.
+    assert _headers(parser) == [
+        "Acknowledgments",
+        "Reference",
+        "References",
+        "Data Availability Statement",
+        "Supplementary Material",
+    ]
+    entries = _entry_headers(parser)
+    assert ("References", "Evans, J. R., & Fisher, R. P. (2011). Eyewitness memory.") in entries
+    assert not any(h == "Reference" and t.startswith("Evans") for h, t in entries)
