@@ -322,7 +322,10 @@ MPS path, and the `torch.compile` path `bibr serve` uses for layout.
 
 A bundle resolves from a local directory containing `onnx/` (point the model's
 existing `*_MODEL_ID` / `NER_PARSER_CKPT` setting at it) or from the Hub at the
-pinned revision, offline-tolerant through the Hub cache. Layout is the one model
+pinned revision, offline-tolerant through the Hub cache. A value shaped like a
+Hub id (`org/name`) is always fetched from the Hub, even when a directory of
+that name exists in the working directory; write a local directory as a path —
+absolute, or starting with `./`, `../` or `~`. Layout is the one model
 whose PyTorch weights live in a third-party repo, so its ONNX artifact has its
 own pair of settings, `LAYOUT_ONNX_MODEL_ID` and `LAYOUT_ONNX_REVISION`.
 

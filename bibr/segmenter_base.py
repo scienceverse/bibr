@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from bibr.config import GlobalSettings, snapshot_settings
+from bibr.utils.ml_runtime import is_hub_repo_id
 
 logger = logging.getLogger(__name__)
 _FALLBACK_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
@@ -294,10 +295,12 @@ def resolve_wtpsplit_model(model_name: str, revision: str | None = None) -> Reso
     """Resolve a short wtpsplit name, full Hub ID, or existing local bundle.
 
     ``revision`` pins a Hub model to a commit; unset, the default short name
-    resolves to its audited commit and anything else to the repo head.
+    resolves to its audited commit and anything else to the repo head. A
+    ``name`` or ``org/name`` is always a Hub id, never a directory of that
+    name in the working directory (see :func:`is_hub_repo_id`).
     """
     local_path = Path(model_name).expanduser()
-    if local_path.is_dir():
+    if not is_hub_repo_id(model_name, bare_name=True) and local_path.is_dir():
         if local_path.is_symlink():
             raise ValueError(f"Sentence-segmenter bundle {local_path} uses a symlink")
         if (local_path / _SEGMENTER_STAGING_MANIFEST).is_file() and not (

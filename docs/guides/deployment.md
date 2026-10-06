@@ -438,7 +438,7 @@ Set these in `.env` (run `bibr config example --full` or see the
 | `OCR_PROFILE` | `paddle` or `glm`; required for custom aliases | inferred for known names |
 | `OCR_API_KEY` | Bearer credential sent to a protected OCR server | — |
 | `OCR_ALLOW_INSECURE_HTTP` | Permit non-loopback plain HTTP (private networks only) | `false` (Compose: `true`) |
-| `WTPSPLIT_MODEL` | Short wtpsplit name, full Hugging Face repo ID, or existing local bundle directory | `sat-6l-sm` |
+| `WTPSPLIT_MODEL` | Short wtpsplit name, full Hugging Face repo ID, or existing local bundle directory written as a path (absolute, or starting with `./`, `../` or `~`) | `sat-6l-sm` |
 | `WTPSPLIT_THRESHOLD` | Optional explicit sentence-boundary threshold in `[0, 1]` | wtpsplit model default |
 | `WTPSPLIT_BLOCK_SIZE` | Optional explicit inference block size; set with `WTPSPLIT_STRIDE` | wtpsplit model default |
 | `WTPSPLIT_STRIDE` | Optional explicit inference stride; set with `WTPSPLIT_BLOCK_SIZE` | wtpsplit model default |
