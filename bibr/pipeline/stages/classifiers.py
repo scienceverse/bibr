@@ -34,20 +34,48 @@ class ClassifierStage:
                 "Classifier startup failed; papers use the fallback classification",
                 exc_info=True,
             )
-        failures = {
-            name: status
-            for name, status in ctx.resources.classifiers.status().items()
-            if status.state is ClassifierState.FAILED_REQUIRED
-        }
-        if not failures:
-            return
-        detail = "; ".join(
-            f"{name}: {status.error or 'load failed'}" for name, status in failures.items()
-        )
-        message = (
-            f"Required classifier(s) failed to start with ML_CLASSIFIERS_REQUIRED=true "
-            f"({detail}); set ML_CLASSIFIERS_REQUIRED=false to allow the run to continue without them"
-        )
-        for fs in ctx.file_states:
-            if fs.error is None:
-                fs.set_error(message, code="classifier_required_failed", stage=self.name)
+        _fail_on_required_failure(ctx)
+
+
+class RequiredClassifierGate:
+    """Fail a chunk before render/OCR once a required classifier is known broken.
+
+    In the local barrier plan the classifiers start after OCR, and their
+    startup state is sticky: after the first chunk a required failure is
+    known, and every later chunk would render and OCR its files only to fail
+    them. Starts nothing, so the first chunk still reaches ClassifierStage.
+    """
+
+    name = "classifier_gate"
+    requires = ()
+    produces = ()
+
+    async def run(self, ctx: PipelineContext) -> None:
+        _fail_on_required_failure(ctx)
+
+
+def _fail_on_required_failure(ctx: PipelineContext) -> None:
+    failures = {
+        name: status
+        for name, status in ctx.resources.classifiers.status().items()
+        if status.state is ClassifierState.FAILED_REQUIRED
+    }
+    if not failures:
+        return
+    detail = "; ".join(
+        f"{name}: {status.error or 'load failed'}" for name, status in failures.items()
+    )
+    message = (
+        f"Required classifier(s) failed to start with ML_CLASSIFIERS_REQUIRED=true "
+        f"({detail}); set ML_CLASSIFIERS_REQUIRED=false to allow the run to continue without them"
+    )
+    for fs in ctx.file_states:
+        if fs.error is None:
+            # An outage: the model, not the file, is at fault, so bibr batch
+            # runs the paper again on resume.
+            fs.set_error(
+                message,
+                code="classifier_required_failed",
+                stage=ClassifierStage.name,
+                outage=True,
+            )
