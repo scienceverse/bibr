@@ -107,6 +107,10 @@ _REFERENCE_ENTRY_SIGNAL_RE = re.compile(
     r"(?<!\d)(?:1[5-9]\d\d|20\d\d)(?!\d)|\bet al\b|\bdoi\b", re.IGNORECASE
 )
 _HINT_ALIAS_PUNCT_RE = re.compile(r"[^\w\s]")
+# A printed "Reference" heading names the reference list, but the singular is
+# no section alias: as a substring alias it would type "Reference group" or
+# "Frame of reference" as references.
+_SINGULAR_REFERENCE_HEADINGS = frozenset({"reference"})
 
 
 _HINT_CANONICAL: dict[str, CanonicalSection] = {
@@ -809,7 +813,9 @@ class HeadingHandlersMixin:
         when no reference hint section exists yet, the current section opened
         at a printed heading that does not name the references, a printed
         references heading follows later in reading order, and the text has
-        no year, "et al." or DOI that a reference entry would carry.
+        no year, "et al." or DOI that a reference entry would carry. A singular
+        "Reference" heading names the references: an empty region after it
+        opens the section on the next page of the list (osf_p736e).
         """
         if "References" in self._created_hint_sections:
             return False
@@ -828,6 +834,8 @@ class HeadingHandlersMixin:
 
         current_type, _score = _classify_lookup(normalize_text(current.header))
         if current_type == CanonicalSection.REFERENCES:
+            return False
+        if _hint_alias_key(current.header) in _SINGULAR_REFERENCE_HEADINGS:
             return False
         here = self._source_region_index
         return any(position > here for position in self._printed_reference_heading_positions())
