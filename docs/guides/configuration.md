@@ -202,7 +202,11 @@ Windows or CUDA cards below 11 GB; and vLLM on Linux/CUDA systems with at
 least 11 GB (or when VRAM detection is unavailable).
 Explicit choices are `vllm`, `vllm-mlx`, `rapid-mlx`, `llama-cpp`, and `llmster`.
 The OCR and LLM choices are independent, so local OCR with a cloud LLM is a
-supported hybrid configuration.
+supported hybrid configuration. A managed vLLM LLM server and the managed
+`paddle-vllm` OCR server each reserve a share of GPU memory (0.85 and 0.92 by
+default) and cannot run together, so bibr stops the one that is running before
+starting the other: in a batch, each chunk's OCR stops the LLM server and that
+chunk's LLM stage starts it again.
 
 bibr stops the managed servers it started when the command ends, including on
 Ctrl-C, SIGTERM (`kill`, `docker stop`, `timeout`, an MCP host stopping
