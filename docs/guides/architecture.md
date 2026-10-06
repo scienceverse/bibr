@@ -51,6 +51,15 @@ console or the export; for a long document, compare the length of the export's
 limits reject oversized pages before rasterization. Size memory for the
 processed pages and concurrent files.
 
+**DOCX limits.** A table cell spanning more than 1,000 grid columns is read as
+1,000 wide. A table of more than 1,000,000 grid cells (rows × widest row, a
+merged cell counting once per grid cell it covers), or one that takes the
+document past 4,000,000, is dropped with a `DOCX_TABLE_DROPPED` warning; its
+caption stays in the body text. Pictures past the first 1,000 are dropped
+(`DOCX_FIGURES_DROPPED`). Figures carry at most 128 MiB of image data in
+total, an image counting once per figure that shows it; the figures past that
+keep their caption without an image (`DOCX_FIGURE_IMAGES_OMITTED`).
+
 **Native text bypass and recognition.** `bibr/ocr/pdf_inspection.py` inspects
 embedded PDF text, metadata, outline headings, and reference-line geometry
 under one PDFium walk. With `OCR_NATIVE_TEXT_ENABLED=true` (the default),

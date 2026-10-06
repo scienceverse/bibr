@@ -41,6 +41,7 @@ from bibr.paper_contents import (
     PaperURLLink,
     PaperXref,
 )
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.structure.assembler import DeferredText, DocumentAssembler
 from bibr.structure.float_labels import FIGURE_WORD, SUPPLEMENT_WORD, TABLE_WORD, caption_label
 from bibr.structure.section_tree import infer_level_from_numbering
@@ -74,6 +75,55 @@ _RUN_SEPARATORS: frozenset[str] = frozenset(
         f"{{{_NS['w']}}}cr",
     }
 )
+
+# Inline containers whose runs are paragraph text: hyperlinks, tracked
+# insertions and moves, content controls (Word's citation tool and Mendeley
+# Cite put each citation in one; its runs sit under w:sdtContent), simple
+# fields, smart tags, custom XML and bidi embeddings. Their text was dropped,
+# so "(Smith, 2020)" vanished from the sentence citing it. Deleted text
+# (w:del, w:moveFrom) stays out.
+_INLINE_WRAPPERS: frozenset[str] = frozenset(
+    f"{{{_NS['w']}}}{tag}"
+    for tag in (
+        "hyperlink",
+        "ins",
+        "moveTo",
+        "sdt",
+        "sdtContent",
+        "fldSimple",
+        "smartTag",
+        "customXml",
+        "dir",
+        "bdo",
+    )
+)
+
+# Table grid limits. gridSpan is a free integer that python-docx's row.cells
+# repeated a cell for, one copy per column, so a 36 KB file spanning 2e9
+# columns ran for days; it is read as at most this wide, as the HTML table
+# reader caps colspan.
+_MAX_GRID_SPAN = 1000
+# A table of more grid cells (rows x widest row), or one taking the document
+# past the second limit, is dropped with a warning: a few-byte vMerge
+# continuation repeats the merged cell's full width, so clamped spans still
+# multiply. Unmerged cells cannot reach the document limit within the 64 MiB
+# document.xml the validator admits.
+_MAX_TABLE_CELLS = 1_000_000
+_MAX_DOCUMENT_TABLE_CELLS = 4_000_000
+_W_VAL = f"{{{_NS['w']}}}val"
+_GRID_BEFORE = f"{{{_NS['w']}}}trPr/{{{_NS['w']}}}gridBefore"
+_GRID_SPAN = f"{{{_NS['w']}}}tcPr/{{{_NS['w']}}}gridSpan"
+_V_MERGE = f"{{{_NS['w']}}}tcPr/{{{_NS['w']}}}vMerge"
+
+# Figure limits. Every picture showing one image part got its own base64 copy,
+# though the package stores the image once: a 1 MB file gave 300 figures and
+# 412 MiB of image data. The copy is now shared, but the export still writes it
+# once per figure, so image data is counted per figure. Past the validator's
+# 128 MiB ceiling on the whole package, which distinct images cannot pass,
+# figures keep their caption without an image. Pictures past the first
+# _MAX_FIGURES are dropped.
+_MAX_FIGURES = 1000
+_MAX_FIGURE_IMAGE_BYTES = 128 * 1024 * 1024
 
 _HEADING_STYLE_LEVELS: dict[str, int] = {
     "Title": 1,
@@ -141,9 +191,10 @@ def _heading_level_from_style(style_name: str | None) -> int | None:
     return _HEADING_STYLE_LEVELS.get(style_name)
 
 
-def _extract_image_blobs(paragraph, doc) -> list[tuple[bytes, str]]:
-    """Find inline ``<w:drawing>`` images in a paragraph; return ``(blob, ext)`` list."""
-    out: list[tuple[bytes, str]] = []
+def _image_parts(paragraph, doc) -> list:
+    """The image parts shown by a paragraph's inline ``<w:drawing>`` pictures,
+    in order; a part shown twice is listed twice."""
+    out = []
     blips = paragraph._element.findall(f".//{{{_NS['w']}}}drawing//{{{_NS['a']}}}blip")
     related = doc.part.related_parts
     for blip in blips:
@@ -151,16 +202,52 @@ def _extract_image_blobs(paragraph, doc) -> list[tuple[bytes, str]]:
         if rid is None:
             continue
         image_part = related.get(rid)
-        if image_part is None:
+        if image_part is None or not getattr(image_part, "blob", None):
             continue
-        blob = getattr(image_part, "blob", None)
-        if not blob:
-            continue
-        # python-docx ImagePart exposes .partname like "/word/media/image1.png"
-        partname = str(getattr(image_part, "partname", "image"))
-        ext = partname.rsplit(".", 1)[-1].lower() if "." in partname else "bin"
-        out.append((blob, ext))
+        out.append(image_part)
     return out
+
+
+def _decimal(el, default: int) -> int:
+    """The ``w:val`` number of a decimal-number element, or *default* when it
+    is absent or not a number."""
+    if el is None:
+        return default
+    try:
+        return int(el.get(_W_VAL))
+    except (TypeError, ValueError):
+        return default
+
+
+def _table_rows(tbl) -> list[list[tuple[object, int]]]:
+    """Each ``w:tr`` of a table as ``(w:tc, columns)`` pairs: the cell whose
+    text fills that many grid columns of the row.
+
+    Mirrors python-docx's ``row.cells`` (a cell repeated across its gridSpan, a
+    vMerge continuation showing the cell its column continues) without its
+    costs: that resolved each continuation by recursing up the column, so tall
+    merged columns took quadratic time and then raised RecursionError. Here a
+    row resolves against the one above it. A continuation with no cell above
+    at its offset reads as a cell of its own, where python-docx raised.
+    """
+    rows: list[list[tuple[object, int]]] = []
+    above: dict[int, tuple[object, int]] = {}
+    for tr in tbl.tr_lst:
+        row: list[tuple[object, int]] = []
+        here: dict[int, tuple[object, int]] = {}
+        offset = _decimal(tr.find(_GRID_BEFORE), 0)
+        for tc in tr.tc_lst:
+            span = min(max(_decimal(tc.find(_GRID_SPAN), 1), 1), _MAX_GRID_SPAN)
+            cell = (tc, span)
+            v_merge = tc.find(_V_MERGE)
+            if v_merge is not None and v_merge.get(_W_VAL, "continue") == "continue":
+                cell = above.get(offset, cell)
+            here[offset] = cell
+            row.append(cell)
+            offset += span
+        rows.append(row)
+        above = here
+    return rows
 
 
 def _is_caption_style(style) -> bool:
@@ -220,8 +307,8 @@ def _is_table_caption(blocks: list[_Block], index: int) -> bool:
     )
 
 
-def _table_caption_blocks(blocks: list[_Block]) -> dict[int, int]:
-    """Map each table block's index to that of its caption paragraph.
+def _table_caption_blocks(blocks: list[_Block], kept_tables: set[int]) -> dict[int, int]:
+    """Map each kept table block's index to that of its caption paragraph.
 
     A table's caption is the Caption-styled paragraph directly above or below
     it (empty paragraphs between are skipped). A caption between two tables
@@ -230,10 +317,8 @@ def _table_caption_blocks(blocks: list[_Block]) -> dict[int, int]:
     """
     above: dict[int, int] = {}
     below: dict[int, int] = {}
-    for index, block in enumerate(blocks):
-        # A table without cells is dropped, and must not take its caption along.
-        if block.kind != "table" or not any(row.cells for row in block.obj.rows):
-            continue
+    # A dropped table (no cells, or too large) must not take its caption along.
+    for index in sorted(kept_tables):
         for side, step in ((above, -1), (below, 1)):
             neighbour = _nearest_block(blocks, index, step)
             if neighbour is not None and _is_table_caption(blocks, neighbour):
@@ -294,6 +379,16 @@ class DocxParser:
         # Figures awaiting a Caption-styled paragraph immediately after
         self._unfilled_caption_figures: list[PaperFigure] = []
 
+        # Resource limits: each image part is encoded once and shared by the
+        # figures showing it; the counters feed the warnings parse() records.
+        self.processing_warnings: list[ProcessingWarning] = []
+        self._image_b64: dict[object, str] = {}
+        self._figure_image_bytes = 0
+        self._figures_dropped = 0
+        self._figure_images_omitted = 0
+        self._table_cells = 0
+        self._tables_dropped = 0
+
     # ------------------------------------------------------------------
     # Public API (mirrors PDFParser)
     # ------------------------------------------------------------------
@@ -337,23 +432,36 @@ class DocxParser:
         self._endnotes_map = _load_endnotes(doc)
 
         blocks = _iter_blocks(doc)
+        # Read every table's cells first: which tables are kept decides which
+        # paragraphs are table captions.
+        table_cells = {
+            index: self._table_cells_of(block.obj)
+            for index, block in enumerate(blocks)
+            if block.kind == "table"
+        }
         # A table's caption paragraph leaves the body text, as a figure's does.
-        table_captions = _table_caption_blocks(blocks)
+        table_captions = _table_caption_blocks(
+            blocks, {index for index, cells in table_cells.items() if cells is not None}
+        )
         caption_blocks = set(table_captions.values())
         for index, block in enumerate(blocks):
             if block.kind == "paragraph":
                 if index not in caption_blocks:
                     self._handle_paragraph(block.obj)
             elif block.kind == "table":
+                cells = table_cells[index]
+                if cells is None:
+                    continue
                 caption_index = table_captions.get(index)
                 caption = (
                     (blocks[caption_index].obj.text or "").strip()
                     if caption_index is not None
                     else None
                 )
-                self._handle_table(block.obj, caption=caption)
+                self._handle_table(cells, caption=caption)
             elif block.kind == "math_para":
                 self._handle_math_para(block.obj)
+        self._record_limit_warnings()
 
         return PaperContents(
             sentences=[],
@@ -367,7 +475,35 @@ class DocxParser:
             detected_headers=self.detected_headers,
             detected_footers=self.detected_footers,
             layout_hints=self.layout_hints,
+            processing_warnings=self.processing_warnings,
         )
+
+    def _record_limit_warnings(self) -> None:
+        """Record what the table and figure limits left out of the parse."""
+        if self._tables_dropped:
+            self.processing_warnings.append(
+                ProcessingWarning(
+                    WarningCode.DOCX_TABLE_DROPPED,
+                    f"Dropped {self._tables_dropped} table(s) over the cell limit "
+                    f"({_MAX_TABLE_CELLS:,} per table, {_MAX_DOCUMENT_TABLE_CELLS:,} per document)",
+                )
+            )
+        if self._figures_dropped:
+            self.processing_warnings.append(
+                ProcessingWarning(
+                    WarningCode.DOCX_FIGURES_DROPPED,
+                    f"Dropped {self._figures_dropped} picture(s) past the first "
+                    f"{_MAX_FIGURES:,} figures",
+                )
+            )
+        if self._figure_images_omitted:
+            self.processing_warnings.append(
+                ProcessingWarning(
+                    WarningCode.DOCX_FIGURE_IMAGES_OMITTED,
+                    f"Kept {self._figure_images_omitted} figure(s) without their image: the "
+                    f"figures' image data would pass {_MAX_FIGURE_IMAGE_BYTES // 2**20} MiB",
+                )
+            )
 
     def _make_sentence(
         self,
@@ -698,7 +834,8 @@ class DocxParser:
                                 extra_buf.append(boxed)
 
         def walk_runs_in_wrapper(wrapper_el, into_buf: list[str] | None = None) -> None:
-            """Walk ``w:r`` children of a wrapper (``w:hyperlink``, ``w:ins``).
+            """Walk ``w:r`` children of an inline wrapper (``_INLINE_WRAPPERS``),
+            and of the wrappers nested in it.
 
             ``into_buf``, if provided, mirrors text from each contained run via
             ``walk_run``'s ``extra_buf`` parameter — used to capture hyperlink
@@ -709,7 +846,7 @@ class DocxParser:
                 ctag = child.tag
                 if ctag == f"{{{w}}}r":
                     walk_run(child, into_buf)
-                elif ctag in (f"{{{w}}}hyperlink", f"{{{w}}}ins"):
+                elif ctag in _INLINE_WRAPPERS:
                     walk_runs_in_wrapper(child, into_buf)
 
         for child in paragraph._element.iterchildren():
@@ -763,14 +900,18 @@ class DocxParser:
                             len(self.assembler),
                         )
                     )
-            elif tag == f"{{{w}}}ins":
-                # Tracked-change insertion: walk its runs as paragraph-level text.
+            elif tag in _INLINE_WRAPPERS:
+                # Tracked insertion, content control, field, smart tag...:
+                # walk its runs as paragraph-level text.
                 walk_runs_in_wrapper(child)
 
         # Images: extract after the text walk so we know section context
         if had_image:
-            for blob, _ext in _extract_image_blobs(paragraph, self._doc):
-                image_b64 = base64.b64encode(blob).decode("ascii")
+            for image_part in _image_parts(paragraph, self._doc):
+                if len(self.figures) >= _MAX_FIGURES:
+                    self._figures_dropped += 1
+                    continue
+                image_b64 = self._figure_image(image_part)
                 fig = PaperFigure(
                     figure_id=self._figure_counter,
                     section_id=self._current_section_id,
@@ -837,22 +978,38 @@ class DocxParser:
             is_formula=True,
         )
 
-    def _handle_table(self, table, *, caption: str | None = None) -> None:
-        rows = list(table.rows)
-        if not rows:
-            return
+    def _table_cells_of(self, table) -> list[list[str]] | None:
+        """A table's cell texts, one list per row padded to the widest row, or
+        ``None`` when the table has no cells or is over the cell limits."""
+        rows = _table_rows(table._tbl)
+        width = max((sum(columns for _, columns in row) for row in rows), default=0)
+        if not width:
+            return None
+        size = len(rows) * width
+        if size > _MAX_TABLE_CELLS or self._table_cells + size > _MAX_DOCUMENT_TABLE_CELLS:
+            self._tables_dropped += 1
+            return None
+        self._table_cells += size
 
-        cell_rows = [[cell.text.strip() for cell in row.cells] for row in rows]
-        # Pad ragged rows so DataFrame construction is uniform
-        width = max(len(r) for r in cell_rows)
-        cell_rows = [r + [""] * (width - len(r)) for r in cell_rows]
+        # A merged cell's text is read once, however many grid cells it fills.
+        texts: dict[object, str] = {}
+        cell_rows: list[list[str]] = []
+        for row in rows:
+            cells: list[str] = []
+            for tc, columns in row:
+                text = texts.get(tc)
+                if text is None:
+                    text = texts[tc] = "\n".join(p.text for p in tc.p_lst).strip()
+                cells.extend([text] * columns)
+            # Pad ragged rows so DataFrame construction is uniform
+            cells.extend([""] * (width - len(cells)))
+            cell_rows.append(cells)
+        return cell_rows
 
+    def _handle_table(self, cell_rows: list[list[str]], *, caption: str | None = None) -> None:
         header_row = cell_rows[0]
         data_rows = cell_rows[1:] if len(cell_rows) > 1 else []
         df = pd.DataFrame(data_rows, columns=header_row)
-        if df.empty and not header_row:
-            return
-
         html = df.to_html(index=False)
         self.tables.append(
             PaperTable(
@@ -878,6 +1035,21 @@ class DocxParser:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _figure_image(self, image_part) -> str | None:
+        """The base64 image for a new figure showing *image_part*, or ``None``
+        once the figures' image data would pass the limit."""
+        size = len(image_part.blob)
+        if self._figure_image_bytes + size > _MAX_FIGURE_IMAGE_BYTES:
+            self._figure_images_omitted += 1
+            return None
+        self._figure_image_bytes += size
+        image_b64 = self._image_b64.get(image_part)
+        if image_b64 is None:
+            image_b64 = self._image_b64[image_part] = base64.b64encode(image_part.blob).decode(
+                "ascii"
+            )
+        return image_b64
 
     def _detect_urls(
         self,
