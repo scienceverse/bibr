@@ -316,6 +316,10 @@ class BibrPipelineAPI(ls.LitAPI):
       - ``include_regions`` (optional bool, default false): emit the
         ``extraction.regions`` layout debug payload; off by default since standard
         consumers (Metacheck) don't read it.
+      - ``include_region_meta`` (optional bool, default false): emit
+        ``extraction.text_regions``, the page, box, font and region type of each
+        text row (what a viewer needs to point at the source PDF); off by
+        default, since it adds about a fifth to the output.
       - ``crossref`` (optional bool): run Crossref/resolver reference
         enrichment for this request (``true``) or skip it (``false``);
         absent → the server-side CROSSREF_ENRICH setting, which is off by
@@ -540,6 +544,9 @@ class BibrPipelineAPI(ls.LitAPI):
 
         include_figures = _opt_bool("include_figures", request.get("include_figures", "false"))
         include_regions = _opt_bool("include_regions", request.get("include_regions", "false"))
+        include_region_meta = _opt_bool(
+            "include_region_meta", request.get("include_region_meta", "false")
+        )
         # Tri-state: absent/empty → None (defer to CROSSREF_ENRICH at run time).
         crossref_raw = request.get("crossref")
         crossref = None if crossref_raw in (None, "") else _opt_bool("crossref", crossref_raw)
@@ -573,6 +580,7 @@ class BibrPipelineAPI(ls.LitAPI):
             "end_page": end_page,
             "include_figures": include_figures,
             "include_regions": include_regions,
+            "include_region_meta": include_region_meta,
             "crossref": crossref,
             "consolidate": consolidate,
             "refs": refs,
@@ -600,6 +608,8 @@ class BibrPipelineAPI(ls.LitAPI):
         end_page = inputs["end_page"]
         include_figures = inputs["include_figures"]
         include_regions = inputs["include_regions"]
+        # Optional key: direct embedders' inputs predate the field.
+        include_region_meta = bool(inputs.get("include_region_meta", False))
         # Effective mode (request field wins, else server-side setting) is used
         # for the cache key so cached entries can't leak across deployments that
         # differ only in CROSSREF_CONSOLIDATE. The RunConfig keeps the raw
@@ -643,6 +653,7 @@ class BibrPipelineAPI(ls.LitAPI):
             ref_seg=eff_ref_seg,
             crossref=effective_crossref,
             input_format=Path(filename).suffix,
+            include_region_meta=include_region_meta,
         )
 
         if not self._cache:
@@ -978,6 +989,7 @@ class BibrPipelineAPI(ls.LitAPI):
         end_page = inputs["end_page"]
         include_figures = inputs["include_figures"]
         include_regions = inputs["include_regions"]
+        include_region_meta = bool(inputs.get("include_region_meta", False))
         consolidate = inputs["consolidate"]
         refs = inputs.get("refs")
         ref_seg = inputs.get("ref_seg")
@@ -989,6 +1001,7 @@ class BibrPipelineAPI(ls.LitAPI):
             "end_page": end_page,
             "include_figures": include_figures,
             "include_regions": include_regions,
+            "include_region_meta": include_region_meta,
             "consolidate": consolidate,
             "ref_seg_strategy": ref_seg,
             "ref_parse_strategy": refs,
@@ -1125,9 +1138,12 @@ class BibrPipelineAPI(ls.LitAPI):
         ref_seg: str | None = None,
         crossref: bool = False,
         input_format: str | None = None,
+        include_region_meta: bool = False,
     ) -> str:
         """Response-cache key: the full SHA-256 of the upload (never the 16-hex
-        ``file_hash`` display id) plus every option that changes the export."""
+        ``file_hash`` display id) plus every option that changes the export.
+        An option at its default adds nothing, so a new option leaves every
+        existing key — and the results cached under it — as it was."""
         key = f"json:{content_hash}"
         if start_page is not None:
             key += f":sp{start_page}"
@@ -1137,6 +1153,8 @@ class BibrPipelineAPI(ls.LitAPI):
             key += ":fig"
         if include_regions:
             key += ":reg"
+        if include_region_meta:
+            key += ":rmeta"
         if consolidate and consolidate != "off":
             key += f":con:{consolidate}"
         if refs:

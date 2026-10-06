@@ -469,7 +469,9 @@ def _sanitize_request_id(raw: str | None) -> str | None:
     return cleaned or None
 
 
-_BOOLEAN_OPTIONS = frozenset({"include_figures", "include_regions", "crossref"})
+_BOOLEAN_OPTIONS = frozenset(
+    {"include_figures", "include_regions", "include_region_meta", "crossref"}
+)
 _INTEGER_OPTIONS = frozenset({"start_page", "end_page"})
 
 
