@@ -173,4 +173,8 @@ Three differences from the stdio server:
   oldest evicted) and dropped when the session ends. A session that goes
   quiet for `MCP_SESSION_IDLE_TIMEOUT_SECONDS` (default 1800) is closed by
   the server and its papers are dropped, so clients that disconnect without
-  `DELETE` do not pin memory. Re-chew after a disconnect.
+  `DELETE` do not pin memory. The server as a whole keeps the papers of at
+  most 64 sessions and at most 256 MiB of export JSON: beyond either, the
+  least recently used session's or paper's data is dropped first, however
+  many sessions are open. A query for a dropped paper fails with
+  `unknown paper_id`; re-chew it, as after a disconnect.

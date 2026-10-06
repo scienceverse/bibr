@@ -125,7 +125,11 @@ Scale concurrency with these settings:
 
 `PIPELINE_MAX_PAGES` caps the requested processing range; raise it explicitly
 for longer documents and size memory for the concurrent file count.
-`PIPELINE_TIMEOUT` defaults to 300 seconds.
+`PIPELINE_TIMEOUT` (default 300 seconds) bounds a whole extraction request,
+not only the pipeline run: time spent waiting for a
+`PIPELINE_MAX_INFLIGHT_REQUESTS` slot or for an identical extraction (the
+response cache's single-flight) counts against it, and a request that runs
+out answers `504`.
 
 ### Why there is no worker-count setting
 
