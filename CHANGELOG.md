@@ -67,6 +67,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   heading is not in English or a back-matter block sits before the reference
   list, and the implicit introduction stops at the next printed heading
   instead of swallowing a case report (#124, #108).
+- A reference list printed under a singular "Reference" heading is parsed again when
+  a supplement later prints its own "References": the empty layout region that opens
+  each later page of the list starts the References section instead of being read as
+  text of the "Reference" section, which left only the supplement's references.
 - A structured abstract whose "Background", "Methods", "Results" and
   "Conclusions" subheadings are printed as separate rows keeps all its parts
   (#125).
