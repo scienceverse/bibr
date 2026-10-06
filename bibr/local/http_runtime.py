@@ -5,6 +5,9 @@ from __future__ import annotations
 import http.client
 import json
 import logging
+import os
+import secrets
+import signal
 import socket
 import threading
 import time
@@ -53,6 +56,47 @@ MANAGED_LOCAL_LLM_RATE_LIMIT_RPM = 600
 
 class LocalHttpError(OSError):
     """Raised when a managed local-runtime HTTP request cannot complete."""
+
+
+def new_server_api_key() -> str:
+    """A random API key for one managed server launch.
+
+    Runtimes that read their key from the environment (vLLM's
+    ``VLLM_API_KEY``, llama.cpp's ``LLAMA_API_KEY``) get one, so another local
+    user cannot drive the server bibr started.
+    """
+    return secrets.token_urlsafe(32)
+
+
+def env_with_api_key(variable: str, api_key: str) -> dict[str, str]:
+    """This process's environment plus a server key in *variable*.
+
+    The key never goes on the command line, where ``ps`` shows it to every
+    local user; a process's environment is readable only by its owner.
+    """
+    return {**os.environ, variable: api_key}
+
+
+def bearer_headers(api_key: str | None) -> dict[str, str]:
+    """``Authorization`` header for a managed server's key; empty without one."""
+    return {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+
+def kill_process_group(pid: int) -> None:
+    """SIGKILL whatever is left of a ``start_new_session`` child's process group.
+
+    When the server exits during startup, ``shutdown()`` finds no live process
+    to signal, but its workers (vLLM's EngineCore) can outlive it and keep
+    their VRAM. Best effort: never masks the startup error. No-op on Windows.
+    """
+    if os.name == "nt" or not hasattr(os, "killpg"):
+        return
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except Exception:  # noqa: BLE001 - cleanup must not replace the startup error
+        logger.debug("Could not kill process group %s", pid, exc_info=True)
 
 
 def request_bytes(
@@ -125,8 +169,12 @@ def guard_managed_server_port(
     Probe ``/v1/models`` on the configured port first:
 
     - Nothing listening → return ``False`` (spawn normally).
-    - Listener already serves *model* → return ``True`` (reuse it; the caller
-      must not spawn, and must not kill a process it does not own).
+    - Listener already serves *model* → return ``True`` (reuse it, with a
+      warning that this process does not own it; the caller must not spawn,
+      must not kill a process it does not own, and must not send it a key).
+    - Listener rejects the keyless probe (401/403) → raise
+      ``UpstreamServiceError``: it is most likely another bibr process's
+      server, keyed with a per-launch key this process does not have.
     - Listener serves other model(s) → raise ``UpstreamServiceError`` naming
       both models.
     - Listener with an unusable ``/v1/models`` → raise ``UpstreamServiceError``
@@ -157,8 +205,12 @@ def guard_managed_server_port(
             served_ids = []
 
     if model in served_ids:
-        logger.info(
-            "Reusing already-running %s server at %s (already serves %s)",
+        # Anything on loopback can list a model id, so say plainly that this
+        # listener is not ours: it receives the documents bibr sends it.
+        logger.warning(
+            "Reusing a %s server already listening at %s (it serves %s). This bibr "
+            "process did not start it and cannot tell who did; it will receive the "
+            "document content bibr sends. Stop it if you did not start it.",
             server_label,
             base_url,
             model,
@@ -168,6 +220,16 @@ def guard_managed_server_port(
     from bibr.exceptions import UpstreamServiceError
 
     port = urllib.parse.urlsplit(base_url).port
+
+    if status in (401, 403):
+        raise UpstreamServiceError(
+            service,
+            f"port {port} is held by a server that requires an API key (its /v1/models "
+            f"returned HTTP {status}), most likely a {server_label} server started by "
+            "another bibr process with its own per-launch key. bibr does not share a "
+            f"server it cannot authenticate to. Stop it (`lsof -ti :{port} | xargs kill`) "
+            "or configure a free port, then retry.",
+        )
 
     if not served_ids:
         if not _port_is_held(base_url):

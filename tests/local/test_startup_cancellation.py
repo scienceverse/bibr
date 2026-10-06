@@ -36,7 +36,7 @@ def spawned(monkeypatch):
     children: list[subprocess.Popen] = []
 
     def fake_popen(cmd, *args, **kwargs):
-        if not _FAKE_LAUNCHERS.intersection(cmd[:3]):
+        if not _FAKE_LAUNCHERS.intersection(cmd[:4]):
             return real_popen(cmd, *args, **kwargs)
         proc = real_popen(  # noqa: S603 — fixed test double, not a model server
             _NEVER_HEALTHY,

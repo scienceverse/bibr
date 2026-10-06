@@ -1039,6 +1039,7 @@ class _FakeLlamaServer:
     """Stand-in for ``LlamaCppServer`` — no subprocess, no HTTP."""
 
     base_url = "http://localhost:8771"
+    api_key = ""
 
     @property
     def loaded(self):

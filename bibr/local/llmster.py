@@ -202,8 +202,10 @@ class LlmsterLlmServer:
             str(self._context_length),
         ]
         command.extend(shlex.split(self._load_args or ""))
-        self._runner(command)
+        # Own the identifier before the load returns: `lms load` can time out
+        # while the daemon keeps loading, and shutdown() must still unload it.
         self._loaded_identifier = self._identifier
+        self._runner(command)
 
     def _check_reused_identifier(self, item: dict[str, Any]) -> None:
         """Reject a pre-existing identifier that provably serves another model.

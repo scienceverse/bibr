@@ -21,6 +21,7 @@ from bibr.local.http_runtime import (
     LocalHttpError,
     check_startup_stop,
     guard_managed_server_port,
+    kill_process_group,
     pause_startup_poll,
     request_bytes,
 )
@@ -99,7 +100,8 @@ class MlxVlmOcrServer:
         except ModuleNotFoundError:
             installed = False
         if installed:
-            return [sys.executable, "-m", "mlx_vlm.server", "--model", model]
+            # -P: never import from the user's working directory.
+            return [sys.executable, "-P", "-m", "mlx_vlm.server", "--model", model]
         if shutil.which("uv") is not None:
             return [
                 "uv",
@@ -137,6 +139,7 @@ class MlxVlmOcrServer:
             if self._process.poll() is not None:
                 rc = self._process.returncode
                 tail = self._read_stderr_tail()
+                kill_process_group(self._process.pid)
                 self._process = None
                 self._close_stderr_fh()
                 raise RuntimeError(
@@ -171,8 +174,9 @@ class MlxVlmOcrServer:
             # second ``asyncio.run`` raised "Event loop is closed" out of the
             # ``finally``, replacing a successful smoke result and making the
             # backend impossible to start.
+            # MLX-VLM runs without a key: never send it the user's OCR_API_KEY.
             client = PaddleHttpOcrClient(
-                base_url=self.base_url, model=self._model, settings=self._settings
+                base_url=self.base_url, model=self._model, settings=self._settings, api_key=""
             )
             try:
                 return await client.recognize(image, "OCR:")
@@ -265,6 +269,7 @@ class PaddleMlxVlmOcrClient:
                 model=requested_model or effective.ocr.paddle_mlx_model,
                 profile=profile,
                 settings=effective,
+                api_key="",
             )
         except BaseException:
             self._server.shutdown()

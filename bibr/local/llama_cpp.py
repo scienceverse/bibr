@@ -19,7 +19,10 @@ from bibr.local.http_runtime import (
     MANAGED_LOCAL_LLM_RATE_LIMIT_RPM,
     LocalHttpError,
     check_startup_stop,
+    env_with_api_key,
     guard_managed_server_port,
+    kill_process_group,
+    new_server_api_key,
     pause_startup_poll,
     request_bytes,
 )
@@ -759,6 +762,9 @@ class LlamaCppServer:
 
     # Set by the owner to stop the startup wait early (see ResourceManager).
     _stop_event: threading.Event | None = None
+    # Per-launch key of a server this process started; a reused listener has
+    # none bibr could know.
+    api_key = ""
 
     def __init__(
         self,
@@ -831,9 +837,12 @@ class LlamaCppServer:
 
         self._stderr_log, self._stderr_fh = open_subprocess_log("llama", port)
 
+        # /health stays public, so the readiness poll needs no key.
+        self.api_key = new_server_api_key()
         popen_kwargs: dict = {
             "stdout": subprocess.DEVNULL,
             "stderr": self._stderr_fh,
+            "env": env_with_api_key("LLAMA_API_KEY", self.api_key),
         }
         if os.name == "nt":
             popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -904,6 +913,7 @@ class LlamaCppServer:
             if self._process.poll() is not None:
                 rc = self._process.returncode
                 tail = self._read_stderr_tail()
+                kill_process_group(self._process.pid)
                 raise RuntimeError(f"llama.cpp exited during startup (code {rc}): {tail[-1000:]}")
             try:
                 status, _reason, _body = request_bytes(f"{self.base_url}/health", timeout=5)
@@ -916,6 +926,7 @@ class LlamaCppServer:
                     if self._process.poll() is not None:
                         rc = self._process.returncode
                         tail = self._read_stderr_tail()
+                        kill_process_group(self._process.pid)
                         raise RuntimeError(
                             f"llama.cpp exited during startup (code {rc}): {tail[-1000:]}"
                         )
@@ -995,7 +1006,7 @@ class LlamaCppLlmServer:
     def configure_llm_client(self) -> None:
         self._settings.llm.provider = "openai"
         self._settings.llm.base_url = self.base_url + "/v1"
-        self._settings.llm.api_key = "not-needed"
+        self._settings.llm.api_key = self._server.api_key or "not-needed"
         self._settings.llm.model = self._server.model
         # Concurrency follows the server's slot count (1, or 2 when the probed
         # multi-slot args are active), unless the user pinned it explicitly.
