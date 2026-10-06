@@ -204,6 +204,11 @@ Explicit choices are `vllm`, `vllm-mlx`, `rapid-mlx`, `llama-cpp`, and `llmster`
 The OCR and LLM choices are independent, so local OCR with a cloud LLM is a
 supported hybrid configuration.
 
+bibr stops the managed servers it started when the command ends, including on
+Ctrl-C, SIGTERM (`kill`, `docker stop`, `timeout`, an MCP host stopping
+`bibr mcp`) and SIGHUP (a closed terminal or SSH session). A `bibr chew` or
+`bibr mcp` stopped by a signal exits with 128 plus its number (143 for SIGTERM).
+
 Run `bibr setup` to choose the model as well as the runtime. Its recommended
 model is NuExtract 3, with runtime-specific weights:
 

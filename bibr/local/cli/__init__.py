@@ -16,9 +16,12 @@ consumed elsewhere in ``bibr`` (and by the test suite) under the historical
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import os
+import signal
 import sys
+import threading
 
 from bibr.exceptions import BibrError, ConfigurationError
 from bibr.local.cli import ui
@@ -167,8 +170,56 @@ def _suppress_progress_bars_if_not_tty() -> None:
     os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 
 
+@contextlib.contextmanager
+def _interrupt_on_termination():
+    """Make SIGTERM and SIGHUP take Ctrl-C's path while a command runs.
+
+    Managed inference servers run in their own session, so a closed terminal
+    or SSH session never sends them SIGHUP, and Python's default SIGTERM exits
+    without running ``finally`` blocks: ``kill``, ``docker stop``, ``timeout``
+    or an MCP host stopping ``bibr mcp`` left vLLM or llama.cpp holding VRAM
+    and the port. Raising SIGINT reaches whatever handles Ctrl-C right then
+    (KeyboardInterrupt, ``asyncio.run`` cancelling its main task, the batch
+    runner's graceful stop), so the same shutdown paths run. An interrupt that
+    began as one of these signals then exits 128 + its number.
+    """
+    received: list[int] = []
+
+    def handler(signum, _frame) -> None:
+        received.append(signum)
+        if callable(signal.getsignal(signal.SIGINT)):
+            signal.raise_signal(signal.SIGINT)
+        else:
+            # SIGINT is ignored (a background job): interrupt directly.
+            raise KeyboardInterrupt
+
+    previous = {}
+    if os.name == "posix" and threading.current_thread() is threading.main_thread():
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            # Keep an inherited SIG_IGN (nohup) or an embedder's own handler.
+            if signal.getsignal(signum) is signal.SIG_DFL:
+                previous[signum] = signal.signal(signum, handler)
+    try:
+        yield
+    except KeyboardInterrupt:
+        if not received:
+            raise
+        sys.exit(128 + received[0])
+    finally:
+        for signum, old in previous.items():
+            signal.signal(signum, old)
+
+
 def main():
     """Entry point for ``bibr`` CLI command."""
+    # serve runs under LitServe and uvicorn, which install, restore and
+    # re-raise their own SIGINT/SIGTERM handlers.
+    serving = len(sys.argv) >= 2 and sys.argv[1] == "serve"
+    with contextlib.nullcontext() if serving else _interrupt_on_termination():
+        _main()
+
+
+def _main():
     ui.configure_output_streams()
     _suppress_progress_bars_if_not_tty()
     parser = _build_parser()
