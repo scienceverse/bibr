@@ -431,19 +431,21 @@ def test_release_repeats_linux_and_cross_platform_critical_tests() -> None:
 
 
 @pytest.mark.parametrize(
-    ("event", "ref", "on_main", "accepted"),
+    ("event", "ref", "version", "on_main", "accepted"),
     [
-        ("push", "refs/tags/v0.5.0", True, True),
-        ("push", "refs/tags/v0.4.0", True, False),
-        ("push", "refs/tags/v0.5.0", False, False),
-        ("push", "refs/heads/main", True, False),
-        ("workflow_dispatch", "refs/heads/main", True, True),
-        ("workflow_dispatch", "refs/heads/feature", True, False),
-        ("workflow_dispatch", "refs/tags/v0.5.0", True, False),
+        ("push", "refs/tags/v0.5.0", "0.5.0", True, True),
+        ("push", "refs/tags/v0.4.0", "0.5.0", True, False),
+        ("push", "refs/tags/v0.5.0", "0.5.0", False, False),
+        ("push", "refs/heads/main", "0.5.0", True, False),
+        ("workflow_dispatch", "refs/heads/main", "0.5.0", True, True),
+        ("workflow_dispatch", "refs/heads/feature", "0.5.0", True, False),
+        ("workflow_dispatch", "refs/tags/v0.5.0", "0.5.0", True, False),
+        ("push", "refs/tags/v0.7.0rc1", "0.7.0rc1", True, True),
+        ("push", "refs/tags/v0.7.0", "0.7.0rc1", True, False),
     ],
 )
 def test_release_source_validation_executes_against_git_history(
-    tmp_path: Path, event: str, ref: str, on_main: bool, accepted: bool
+    tmp_path: Path, event: str, ref: str, version: str, on_main: bool, accepted: bool
 ) -> None:
     git_bin = shutil.which("git")
     bash_bin = shutil.which("bash")
@@ -465,7 +467,7 @@ def test_release_source_validation_executes_against_git_history(
     git("update-ref", "refs/remotes/origin/main", "HEAD")
     if not on_main:
         git("-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "unmerged")
-    (tmp_path / "pyproject.toml").write_text('[project]\nversion = "0.5.0"\n')
+    (tmp_path / "pyproject.toml").write_text(f'[project]\nversion = "{version}"\n')
     output = tmp_path / "outputs"
     env = {
         **os.environ,
@@ -487,7 +489,8 @@ def test_release_source_validation_executes_against_git_history(
     )
     assert (result.returncode == 0) is accepted, result.stdout + result.stderr
     if accepted:
-        assert output.read_text().strip() == "version=0.5.0"
+        prerelease = "false" if version == "0.5.0" else "true"
+        assert output.read_text().split() == [f"version={version}", f"prerelease={prerelease}"]
     else:
         assert not output.exists()
 
@@ -607,3 +610,15 @@ def test_pages_deployment_verifies_public_access_and_exact_revision() -> None:
     assert "--access=public" in smoke["run"]
     assert smoke["env"] == {"SITE_URL": "https://bibr.org/"}
     assert job["environment"]["url"] == smoke["env"]["SITE_URL"]
+
+
+def test_github_release_marks_pre_releases_and_never_makes_them_latest() -> None:
+    validate = workflow("release.yml")["jobs"]["validate"]
+    assert validate["outputs"]["prerelease"] == "${{ steps.version.outputs.prerelease }}"
+    step = next(
+        step
+        for step in workflow("release.yml")["jobs"]["github-release"]["steps"]
+        if "gh release create" in step.get("run", "")
+    )
+    assert step["env"]["PRERELEASE"] == "${{ needs.validate.outputs.prerelease }}"
+    assert "--prerelease --latest=false" in step["run"]
