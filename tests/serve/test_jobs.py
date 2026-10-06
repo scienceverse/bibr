@@ -1221,6 +1221,8 @@ class TestInflightDedupe:
             "ab", {"crossref": "true", "start_page": "2"}
         )
         assert fp("ab", {"refs": "LLM"}) == fp("ab", {"refs": "llm"})
+        assert fp("ab", {"include_region_meta": "1"}) == fp("ab", {"include_region_meta": "true"})
+        assert fp("ab", {"include_region_meta": "yes"}) != fp("ab", {"include_region_meta": "no"})
         assert fp("ab", {"start_page": "2"}) != fp("ab", {"start_page": "3"})
         assert fp("ab", {}) != fp("ab", {"include_figures": "false"})
         assert fp("ab", {}) != fp("cd", {})
