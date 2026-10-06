@@ -1647,7 +1647,7 @@ async def post_parse(
             if not no_llm:
                 from bibr.structure.citation_linker import strip_citation_superscripts
 
-                strip_citation_superscripts(
+                contents.citation_receipt = strip_citation_superscripts(
                     contents.sentences,
                     contents.sections,
                     contents.citation_receipt,
@@ -1657,6 +1657,14 @@ async def post_parse(
             # acceptance and provenance were frozen above; only their selected
             # text IDs are rendered from the cleaned sentence objects here.
             await asyncio.to_thread(contents.finalize_text)
+            if contents.citation_receipt is not None:
+                from bibr.structure.citation_linker import reanchor_citation_receipt
+
+                # The receipt's offsets index the sentences as cleaned.
+                contents.citation_receipt = reanchor_citation_receipt(
+                    contents.citation_receipt,
+                    {sent.text_id: sent.text for sent in contents.sentences},
+                )
             apply_integrity_resolution(contents, paper_metadata, integrity_resolution)
             # The shadow comparison (legacy copy vs bounded selection) is a
             # development signal, not a problem with the paper: keep it out of

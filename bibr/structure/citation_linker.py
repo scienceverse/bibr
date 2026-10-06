@@ -10,7 +10,9 @@ import asyncio
 import logging
 import re
 import unicodedata
+from bisect import bisect_left
 from dataclasses import replace
+from itertools import accumulate
 
 from bibr.exceptions import ProcessingError
 from bibr.models import PaperReference
@@ -143,17 +145,20 @@ def _llm_pick_fits_candidate(candidate: CitationCandidate, reference: PaperRefer
 #   [.59, .72]  [-.12, .04]  [0.000, 0.114]  — confidence intervals
 #   [Item 5]    [Item 7]                     — survey-item references
 #   [IRR]       [OR]         [missed opportunity]  — uppercase abbreviations
+# The runs are possessive: what follows each never starts with what it holds,
+# so the matches are unchanged, but a failed match no longer hands whitespace
+# back and forth between neighbouring runs (quadratic in its length).
 _NON_CITATION_BRACKET_RE = re.compile(
-    r"^\s*(?:"
-    r"[-+]?\s*\.?\d+(?:\.\d+)?\s*[,;–\-]\s*[-+]?\s*\.?\d+(?:\.\d+)?\s*"  # CI / range
+    r"^\s*+(?:"
+    r"[-+]?\s*+\.?\d+(?:\.\d+)?\s*+[,;–\-]\s*+[-+]?\s*+\.?\d+(?:\.\d+)?"  # CI / range
     r"|"
     r"item\s+\d+"  # [Item 5]
     r"|"
     r"(?-i:[A-Z]{2,5})"  # [IRR], [OR], [SE]
     r"|"
-    r"(?-i:[a-z])[A-Za-z\s\-']*"  # [sic], [missed opportunity]
+    r"(?-i:[a-z])[A-Za-z\s\-']*+"  # [sic], [missed opportunity]
     r"|"
-    r"[A-Za-z][A-Za-z\-']*\s[A-Za-z\s\-']+"  # [Emphasis Added] — but not [Smith]
+    r"[A-Za-z][A-Za-z\-']*\s[A-Za-z\s\-']++"  # [Emphasis Added] — but not [Smith]
     r")\s*$",
     re.IGNORECASE,
 )
@@ -176,6 +181,19 @@ def _looks_like_non_citation_bracket(content: str) -> bool:
 NUMERIC_CITE_RE = re.compile(
     r"\[(\d+(?:\s*[-\u2013]\s*\d+)?(?:\s*[,;]\s*\d+(?:\s*[-\u2013]\s*\d+)?)*)\]"
 )
+
+# Any bracketed span, up to the first "]".
+_BRACKET_SPAN_RE = re.compile(r"\[([^\]]+)\]")
+
+
+def _bracket_spans(text: str):
+    """Iterate ``_BRACKET_SPAN_RE`` matches in *text*.
+
+    The search stops at the last "]": no span closes after it, and each "["
+    there was scanned to the end of the text (quadratic in a run of them).
+    """
+    return _BRACKET_SPAN_RE.finditer(text, 0, text.rfind("]") + 1)
+
 
 # Tier 1b: Superscript citations ^{3}, ^{15,16}, ^{1-3}, ^{8,9}
 # Produced by OCR engines that render superscripts as LaTeX.  Note: unwrapping
@@ -220,6 +238,10 @@ _COUNT_CONTAINER_BEFORE_RE = re.compile(
     r"\b(?:domain|subdomain|category|group|class|sector)\s*$",
     re.IGNORECASE,
 )
+# The longest word of _PROCEDURAL_LABEL_BEFORE_RE and _COUNT_CONTAINER_BEFORE_RE
+# ("criterion", "subdomain"): a match starts at most this far before the
+# trailing whitespace, so the search starts there.
+_LABEL_WORD_MAX_LEN = 9
 
 # Tier 1d: OCR-flattened superscript citations \u2014 digits glued to the END of a
 # word or after punctuation where GLM-OCR dropped the superscript markup:
@@ -227,7 +249,12 @@ _COUNT_CONTAINER_BEFORE_RE = re.compile(
 # group(1) is the trailing word (with optional trailing punctuation), group(2)
 # is the citation digit run.  The lookahead requires the run to be followed by
 # whitespace/punctuation/end so mid-word or measurement digits are skipped.
+# A match only ever starts at the first letter of a run of word characters
+# (letters, ")" and "]"), so the search is anchored at the run's start: tried
+# from every letter, a long run ("ACGT" * 5000) was rescanned to its end each
+# time. The anchor consumes any leading ")" or "]"; group(1) is unchanged.
 FLATTENED_SUP_CITE_RE = re.compile(
+    r"(?<![a-zA-Z\)\]])[\)\]]*"
     r"([a-zA-Z][a-zA-Z\)\]]*[.,;:]?)(\d{1,3}(?:[,\u2013-]\d{1,3})*)(?=[\s.,;:)\]]|$)"
 )
 
@@ -431,9 +458,11 @@ PAREN_AUTHOR_YEAR_RE = re.compile(
 )
 
 # Tier 3: Narrative author-year — Smith (2020), Smith et al. (2020)
+# A name is at most 64 characters: unbounded, a long capitalised run was
+# rescanned to its end from each of its capitals (quadratic in its length).
 NARRATIVE_AUTHOR_YEAR_RE = re.compile(
-    r"([A-Z][a-zA-Z\u00C0-\u024F'\-]+"
-    r"(?:\s+(?:&|and)\s+[A-Z][a-zA-Z\u00C0-\u024F'\-]+)?"
+    r"([A-Z][a-zA-Z\u00C0-\u024F'\-]{1,64}"
+    r"(?:\s+(?:&|and)\s+[A-Z][a-zA-Z\u00C0-\u024F'\-]{1,64})?"
     r"(?:\s+et\s+al\.?)?)"
     r"\s*\((\d{4}[a-z]?)\)"
 )
@@ -840,7 +869,7 @@ def strip_citation_superscripts(
     sentences,
     sections,
     receipt: CitationLinkingReceipt | None = None,
-) -> None:
+) -> CitationLinkingReceipt | None:
     """Remove superscript citation markers from body text in-place.
 
     Must run **after** citation linking (which needs the ``^{N}`` patterns)
@@ -849,6 +878,9 @@ def strip_citation_superscripts(
 
     Preserves single-letter-variable exponents (``x^{2}``, ``p^{2}``)
     while stripping multi-letter-word superscripts (``effective^{9}``).
+
+    Returns *receipt* with its candidate offsets moved onto the stripped
+    text: a removed marker gets an empty span where it was.
     """
     body_sents = _get_body_sentences(sentences, sections)
     if receipt is None:
@@ -856,7 +888,7 @@ def strip_citation_superscripts(
         # so production cleanup is constrained to accepted detector spans.
         for sent in body_sents:
             sent.text = _STRIP_CITE_SUP_RE.sub(_is_citation_superscript, sent.text)
-        return
+        return None
 
     accepted_by_text: dict[int, list[CitationCandidate]] = {}
     for candidate in receipt.candidates:
@@ -866,11 +898,132 @@ def strip_citation_superscripts(
             and "superscript_marker" in candidate.evidence
         ):
             accepted_by_text.setdefault(candidate.text_id, []).append(candidate)
+    removed_by_text: dict[int, tuple[list[tuple[int, int]], list[int]]] = {}
     for sent in body_sents:
-        spans = accepted_by_text.get(sent.text_id, [])
-        for candidate in sorted(spans, key=lambda item: (item.start, item.end), reverse=True):
-            if sent.text[candidate.start : candidate.end] == candidate.raw:
-                sent.text = sent.text[: candidate.start] + sent.text[candidate.end :]
+        removed: list[tuple[int, int]] = []
+        for candidate in sorted(
+            accepted_by_text.get(sent.text_id, []), key=lambda item: (item.start, item.end)
+        ):
+            overlaps = bool(removed) and candidate.start < removed[-1][1]
+            if not overlaps and sent.text[candidate.start : candidate.end] == candidate.raw:
+                removed.append((candidate.start, candidate.end))
+        if removed:
+            kept_from = [0] + [end for _start, end in removed]
+            kept_to = [start for start, _end in removed] + [len(sent.text)]
+            sent.text = "".join(sent.text[a:b] for a, b in zip(kept_from, kept_to, strict=True))
+            removed_by_text[sent.text_id] = (
+                removed,
+                list(accumulate((end - start for start, end in removed), initial=0)),
+            )
+    if not removed_by_text:
+        return receipt
+    candidates = []
+    for candidate in receipt.candidates:
+        if candidate.text_id in removed_by_text:
+            removed, removed_before = removed_by_text[candidate.text_id]
+            candidate = replace(
+                candidate,
+                start=_offset_after_removal(candidate.start, removed, removed_before),
+                end=_offset_after_removal(candidate.end, removed, removed_before),
+            )
+        candidates.append(candidate)
+    return replace(receipt, candidates=tuple(candidates))
+
+
+def _offset_after_removal(
+    offset: int, removed: list[tuple[int, int]], removed_before: list[int]
+) -> int:
+    """Map *offset* onto a text whose sorted, disjoint *removed* spans were cut out.
+
+    ``removed_before[i]`` is the length of ``removed[:i]``; an offset inside a
+    removed span maps to where the span was.
+    """
+    index = bisect_left(removed, (offset,))
+    if index == 0:
+        return offset
+    return offset - removed_before[index] + max(0, removed[index - 1][1] - offset)
+
+
+# How far before its expected offset a candidate is looked for. Late cleaning
+# deletes a few characters between two candidates (collapsed whitespace,
+# unwrapped "$" and LaTeX commands); the bound keeps the search linear.
+_REANCHOR_WINDOW = 512
+
+
+def reanchor_citation_receipt(
+    receipt: CitationLinkingReceipt, texts: dict[int, str]
+) -> CitationLinkingReceipt:
+    """Move candidate offsets onto *texts*, the current sentence texts by ``text_id``.
+
+    Late text cleaning (``finalize_text``) only deletes characters, keeping
+    their order, so a candidate still printed (whitespace collapsed) starts at
+    or before its offset moved as far as the candidate before it moved, and
+    not before that candidate. One no longer printed (a marker the cleaning
+    rewrote) gets an empty span there. Sentences missing from *texts* keep
+    their offsets.
+    """
+    candidates = list(receipt.candidates)
+    by_text: dict[int, list[int]] = {}
+    for index, candidate in enumerate(candidates):
+        by_text.setdefault(candidate.text_id, []).append(index)
+    for text_id, indices in by_text.items():
+        text = texts.get(text_id)
+        if text is None:
+            continue
+        indices.sort(key=lambda index: (candidates[index].start, candidates[index].end))
+        spans = _reanchored_spans(text, [candidates[index] for index in indices])
+        for index, (start, end) in zip(indices, spans, strict=True):
+            if (candidates[index].start, candidates[index].end) != (start, end):
+                candidates[index] = replace(candidates[index], start=start, end=end)
+    return replace(receipt, candidates=tuple(candidates))
+
+
+def _reanchored_spans(text: str, candidates: list[CitationCandidate]) -> list[tuple[int, int]]:
+    """Spans in *text* of one sentence's candidates, given in order of their offsets."""
+    spans: list[tuple[int, int]] = []
+    shift = floor = 0
+    taken_to: dict[str, int] = {}
+    for candidate in candidates:
+        printed = " ".join(candidate.raw.split())
+        expected = candidate.start + shift
+        span = None
+        if candidate.end > candidate.start and printed:
+            lowest = max(floor, expected - _REANCHOR_WINDOW, taken_to.get(printed, 0))
+            span = _print_span(text, candidate, printed, expected, lowest)
+        if span is None:
+            spans.append((min(expected, len(text)),) * 2)
+            continue
+        spans.append(span)
+        taken_to[printed] = span[1]
+        shift, floor = span[0] - candidate.start, span[0]
+    # An empty span stays before the candidates found after it.
+    ceiling = len(text)
+    for index in range(len(spans) - 1, -1, -1):
+        start, end = spans[index]
+        if start == end:
+            spans[index] = (min(start, ceiling),) * 2
+        else:
+            ceiling = min(ceiling, start)
+    return spans
+
+
+def _print_span(
+    text: str, candidate: CitationCandidate, printed: str, expected: int, lowest: int
+) -> tuple[int, int] | None:
+    """Where *text* prints *candidate*: at *expected*, else from *lowest* up to it."""
+    if text.startswith(candidate.raw, expected):
+        return expected, expected + len(candidate.raw)
+    if text.startswith(printed, expected):
+        return expected, expected + len(printed)
+    if candidate.style == "flattened-superscript":
+        # Its raw text is the bare digits, which other numbers print too: the
+        # print nearest the offset.
+        found = text.rfind(printed, lowest, expected + len(printed))
+    else:
+        # Other citation texts are printed by citations only: the first print
+        # not taken by a candidate before it.
+        found = text.find(printed, lowest, expected + len(printed))
+    return (found, found + len(printed)) if found >= 0 else None
 
 
 # ---------------------------------------------------------------------------
@@ -1047,7 +1200,7 @@ def _numeric_candidates(body_sents, valid_bib_ids: set[int]) -> list[CitationCan
         # Retain locally rejected bracket-shaped negatives in the receipt.
         # They are deliberately excluded from LLM fallback, but silently
         # dropping them would make candidate-resolution diagnostics dishonest.
-        for match in re.finditer(r"\[([^\]]+)\]", sent.text):
+        for match in _bracket_spans(sent.text):
             if (match.start(), match.end()) in handled_bracket_spans:
                 continue
             if not _looks_like_non_citation_bracket(match.group(1)):
@@ -1144,10 +1297,34 @@ def _fallback_style_reasons(
     return tuple(reasons), recurrence_score * printed_score
 
 
+# A label ending in digits right before the parentheses: the text before them
+# matches ``(?:[A-Za-z]{2,}[)\]]?\d+|[A-Z][A-Z0-9-]{2,}\s+\d+)\s*$``. Searched
+# there, that pattern was tried from every position of the sentence prefix,
+# once per candidate (quadratic in a long run of letters); this mirror image
+# is matched at the candidate in the reversed sentence, so it reads only the
+# label. Two letters stand for ``{2,}``: only whether it matches is used.
+_ADJACENT_NUMERIC_LABEL_REVERSED_RE = re.compile(
+    r"\s*(?:\d+[)\]]?[A-Za-z]{2}|\d+\s+[A-Z0-9-]{2,}[A-Z])"
+)
+
+
+def _is_small_contiguous_sequence(sentence_matches: list[re.Match]) -> bool:
+    """Return whether a sentence's parentheses number a short list: (1) ... (2) ..."""
+    sentence_numbers = [_expand_numeric_range(candidate.group(1)) for candidate in sentence_matches]
+    flat_sequence = [numbers[0] for numbers in sentence_numbers if len(numbers) == 1]
+    return (
+        len(flat_sequence) >= 2
+        and len(flat_sequence) == len(sentence_matches)
+        and flat_sequence == list(range(flat_sequence[0], flat_sequence[0] + len(flat_sequence)))
+        and flat_sequence[0] <= 3
+    )
+
+
 def _parenthetical_local_reasons(
     text: str,
     match: re.Match,
-    sentence_matches: list[re.Match],
+    reversed_text: str,
+    is_small_contiguous_sequence: bool,
 ) -> tuple[str, ...]:
     """Reject locally evidenced list, count, label, equation and statistic parentheses.
 
@@ -1160,19 +1337,12 @@ def _parenthetical_local_reasons(
     before = text[: match.start()]
     after = text[match.end() :]
     window = before[-160:]
+    label_from = max(0, len(before.rstrip()) - _LABEL_WORD_MAX_LEN)
     reasons: list[str] = []
 
-    sentence_numbers = [_expand_numeric_range(candidate.group(1)) for candidate in sentence_matches]
-    flat_sequence = [numbers[0] for numbers in sentence_numbers if len(numbers) == 1]
-    is_small_contiguous_sequence = (
-        len(flat_sequence) >= 2
-        and len(flat_sequence) == len(sentence_matches)
-        and flat_sequence == list(range(flat_sequence[0], flat_sequence[0] + len(flat_sequence)))
-        and flat_sequence[0] <= 3
-    )
     if (
         not before.strip()
-        or _PROCEDURAL_LABEL_BEFORE_RE.search(before)
+        or _PROCEDURAL_LABEL_BEFORE_RE.search(before, label_from)
         or is_small_contiguous_sequence
     ):
         reasons.append("list_enumeration")
@@ -1180,7 +1350,10 @@ def _parenthetical_local_reasons(
     if (
         _AGGREGATE_COUNT_CUE_RE.search(window)
         and _AGGREGATE_COUNT_NOUN_RE.search(window)
-        and (_COUNT_COPULA_AFTER_RE.match(after) or _COUNT_CONTAINER_BEFORE_RE.search(before))
+        and (
+            _COUNT_COPULA_AFTER_RE.match(after)
+            or _COUNT_CONTAINER_BEFORE_RE.search(before, label_from)
+        )
     ):
         reasons.append("parenthetical_count")
 
@@ -1188,7 +1361,7 @@ def _parenthetical_local_reasons(
     # not a second citation grammar. The immediately preceding digit is
     # candidate-local evidence and does not suppress parenthetical citations
     # elsewhere in a mixed-style document.
-    if re.search(r"(?:[A-Za-z]{2,}[)\]]?\d+|[A-Z][A-Z0-9-]{2,}\s+\d+)\s*$", before):
+    if _ADJACENT_NUMERIC_LABEL_REVERSED_RE.match(reversed_text, len(text) - match.start()):
         reasons.append("adjacent_numeric_label")
 
     if _EQUATION_LABEL_BEFORE_RE.search(window):
@@ -1208,9 +1381,18 @@ def _parenthetical_candidates(
     candidates: list[CitationCandidate] = []
     for sent in body_sents:
         sentence_matches = list(PAREN_NUMERIC_CITE_RE.finditer(sent.text))
+        if not sentence_matches:
+            continue
+        # Once per sentence: both are linear in it.
+        is_small_contiguous_sequence = _is_small_contiguous_sequence(sentence_matches)
+        reversed_text = sent.text[::-1]
         for match in sentence_matches:
             nums = _expand_numeric_range(match.group(1))
-            reasons = list(_parenthetical_local_reasons(sent.text, match, sentence_matches))
+            reasons = list(
+                _parenthetical_local_reasons(
+                    sent.text, match, reversed_text, is_small_contiguous_sequence
+                )
+            )
             if not nums:
                 reasons.append("empty_numeric_marker")
             if any(num >= 1900 for num in nums):
@@ -1239,6 +1421,10 @@ def _parenthetical_candidates(
         candidates,
         printed_numeric_ids,
     )
+    style_evidence = (
+        f"recurring_sentences:{len({c.text_id for c in candidates if not c.rejection_reasons})}",
+        f"printed_reference_prefixes:{len(printed_numeric_ids)}",
+    )
     resolved = [
         replace(
             candidate,
@@ -1247,11 +1433,7 @@ def _parenthetical_candidates(
             rejection_reasons=(
                 candidate.rejection_reasons if candidate.rejection_reasons else style_reasons
             ),
-            evidence=candidate.evidence
-            + (
-                f"recurring_sentences:{len({c.text_id for c in candidates if not c.rejection_reasons})}",
-                f"printed_reference_prefixes:{len(printed_numeric_ids)}",
-            ),
+            evidence=candidate.evidence + style_evidence,
         )
         for candidate in candidates
     ]
@@ -1602,7 +1784,7 @@ async def detect_bib_xrefs_with_receipt(
                 ambiguous.append((candidate.text_id, candidate.raw, candidate.start, candidate.end))
         for sent in body_sents:
             sent_linked = linked_spans.get(sent.text_id, [])
-            for match in re.finditer(r"\[([^\]]+)\]", sent.text):
+            for match in _bracket_spans(sent.text):
                 match_text = match.group(1)
                 if NUMERIC_CITE_RE.fullmatch(f"[{match_text.strip()}]"):
                     continue
@@ -1629,26 +1811,32 @@ async def detect_bib_xrefs_with_receipt(
 
         if ambiguous:
             ambiguous = list(dict.fromkeys(ambiguous))
+            # Drop each occurrence nested in another span of its sentence. In
+            # (start, -end) order a span is nested exactly when an earlier,
+            # different span reaches at least as far.
+            spans_by_text: dict[int, set[tuple[int, int]]] = {}
+            for text_id, _cite_text, start, end in ambiguous:
+                spans_by_text.setdefault(text_id, set()).add((start, end))
+            nested: set[tuple[int, int, int]] = set()
+            for text_id, spans in spans_by_text.items():
+                reach = -1
+                for start, end in sorted(spans, key=lambda span: (span[0], -span[1])):
+                    if end <= reach:
+                        nested.add((text_id, start, end))
+                    reach = max(reach, end)
             ambiguous = [
                 occurrence
                 for occurrence in ambiguous
-                if not any(
-                    other[0] == occurrence[0]
-                    and other[2] <= occurrence[2]
-                    and other[3] >= occurrence[3]
-                    and (other[2], other[3]) != (occurrence[2], occurrence[3])
-                    for other in ambiguous
-                )
+                if (occurrence[0], occurrence[2], occurrence[3]) not in nested
             ]
             source_by_id = {sent.text_id: sent.text for sent in body_sents}
+            candidate_spans = {
+                (candidate.text_id, candidate.start, candidate.end) for candidate in candidates
+            }
             for text_id, cite_text, start, end in ambiguous:
-                if any(
-                    candidate.text_id == text_id
-                    and candidate.start == start
-                    and candidate.end == end
-                    for candidate in candidates
-                ):
+                if (text_id, start, end) in candidate_spans:
                     continue
+                candidate_spans.add((text_id, start, end))
                 source = source_by_id.get(text_id, "")
                 candidates.append(
                     CitationCandidate(
@@ -1702,6 +1890,12 @@ async def detect_bib_xrefs_with_receipt(
                 matches = resolved_map.setdefault(_normalize_citation_text(xref.contents), [])
                 if xref.xref_id not in matches:
                     matches.append(xref.xref_id)
+            # Candidates appended below are accepted, so they never match here.
+            indices_by_span: dict[tuple[int, int, int], list[int]] = {}
+            for index, candidate in enumerate(candidates):
+                indices_by_span.setdefault(
+                    (candidate.text_id, candidate.start, candidate.end), []
+                ).append(index)
             llm_xrefs: list[PaperXref] = []
             for text_id, cite_text, start, end in ambiguous:
                 normalized_contents = _normalize_citation_text(cite_text)
@@ -1711,13 +1905,11 @@ async def detect_bib_xrefs_with_receipt(
                 one_work = _names_one_work(normalized_contents)
                 linked: set[int] = set()
                 matched_candidate = False
-                for index, candidate in enumerate(candidates):
-                    if not (
-                        candidate.text_id == text_id
-                        and candidate.start == start
-                        and candidate.end == end
-                        and not candidate.accepted
-                        and _normalize_citation_text(candidate.raw) == normalized_contents
+                for index in indices_by_span.get((text_id, start, end), ()):
+                    candidate = candidates[index]
+                    if (
+                        candidate.accepted
+                        or _normalize_citation_text(candidate.raw) != normalized_contents
                     ):
                         continue
                     matched_candidate = True

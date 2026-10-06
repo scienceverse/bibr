@@ -247,6 +247,12 @@ accepted/rejected decisions, and coverage; this makes unresolved citations
 visible alongside the successful `xref` rows. Rejected numeric candidates
 do not automatically become LLM requests.
 
+A candidate's `start` and `end` are offsets into the exported `text[].text`
+of its sentence, like the `xref` spans, and follow the text cleaning that
+runs after linking. A citation the exported sentence no longer prints, such
+as a superscript marker removed from the text, has an empty span (`start`
+equals `end`) at about the place it stood; its `raw` keeps the printed form.
+
 `refs="off"` skips bibliographic citation linking along with reference
 extraction. `no_llm=True` skips citation linking as part of its reduced
 post-processing path.
