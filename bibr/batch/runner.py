@@ -2,8 +2,8 @@
 
 The runner is executor-agnostic. The **local** executor feeds chunks of
 ``--batch-size`` files to one warm :class:`bibr.api.Chewer` (stage-major
-inside a chunk, models load once) and writes ledger lines as each chunk
-finishes; the **remote** executor (:mod:`bibr.batch.remote`) submits papers
+inside a chunk, models load once) and writes a ``started`` line per paper as
+each chunk begins, the verdicts as it finishes; the **remote** executor (:mod:`bibr.batch.remote`) submits papers
 to a ``bibr serve`` job API with adaptive concurrency. Both report through
 the same :func:`Ledger.record` path, so ``outcomes.jsonl`` has one shape.
 """
@@ -11,25 +11,31 @@ the same :func:`Ledger.record` path, so ``outcomes.jsonl`` has one shape.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import dataclasses
+import hashlib
 import itertools
 import json
 import logging
 import random
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from stat import S_ISREG
+from typing import IO, Any
 
 from bibr.batch.ledger import (
     CHUNK_ERROR,
     INTERRUPTED,
     LEDGER_FILENAME,
+    OUTPUT_WRITE_FAILED,
     UPSTREAM_UNAVAILABLE,
     Ledger,
     LedgerContext,
@@ -53,6 +59,7 @@ logger = logging.getLogger(__name__)
 
 RUN_INFO_FILENAME = "run_info.json"
 RUN_HISTORY_FILENAME = "runs.jsonl"
+LOCK_FILENAME = ".lock"
 EXIT_OK = 0
 EXIT_FAILURES = 1
 EXIT_USAGE = 2
@@ -126,10 +133,71 @@ def parse_deadline(text: str) -> float:
     return parsed.timestamp()
 
 
-def build_plan(options: BatchOptions, ledger: Ledger) -> BatchPlan:
-    """Discover inputs, assign ids, apply resume rules, shuffle and limit."""
-    discovery = discover_inputs(options.inputs)
-    entries = ledger.read()
+class OutDirBusy(RuntimeError):
+    """Another ``bibr batch`` run holds ``<out>/.lock``."""
+
+
+def _try_lock(handle: IO[bytes]) -> bool:
+    """Lock *handle* exclusively without waiting; False when another process holds it."""
+    if sys.platform == "win32":
+        import msvcrt
+
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
+    import fcntl
+
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+@contextlib.contextmanager
+def out_dir_lock(out_dir: Path) -> Iterator[None]:
+    """Hold ``<out>/.lock`` for one run: two runs on one out dir would both
+    process the same papers and race on the ledger, ``run_info.json`` and
+    the tables.
+
+    Raises :class:`OutDirBusy` at once when another run holds it. The lock
+    is the OS's, so a killed run never leaves a stale one; the file stays.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with (out_dir / LOCK_FILENAME).open("a+b") as handle:
+        locked: bool | None
+        try:
+            locked = _try_lock(handle)
+        except OSError as exc:  # a filesystem without locks: run unguarded
+            logger.warning(
+                "cannot lock %s (%s); a concurrent run is not detected", handle.name, exc
+            )
+            locked = None
+        if locked is False:
+            raise OutDirBusy(
+                f"another bibr batch run is using {out_dir} (it holds {out_dir / LOCK_FILENAME})"
+            )
+        try:
+            yield
+        finally:
+            if locked and sys.platform == "win32":
+                import msvcrt
+
+                handle.seek(0)
+                with contextlib.suppress(OSError):
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def build_plan(
+    options: BatchOptions, ledger: Ledger, *, discovery: Discovery | None = None
+) -> BatchPlan:
+    """Discover inputs (unless *discovery* is given), assign ids, apply resume
+    rules, shuffle and limit."""
+    discovery = discover_inputs(options.inputs) if discovery is None else discovery
+    entries = ledger.read(started=True)
     items = assign_paper_ids(discovery.files, recorded=entries, reserved=RESERVED_IDS)
     resume = ledger.plan(
         items, force=options.force, retry_failed=options.retry_failed, entries=entries
@@ -208,6 +276,17 @@ def export_path(out_dir: Path, item: BatchItem) -> Path:
 
 
 TABLES_DIRNAME = "tables"
+# What <out>/tables/ was last built from (JSON); neither a ``*.json`` file nor
+# visible, so no reader of exports or tables takes it for one.
+TABLES_SOURCE_FILENAME = ".batch-source"
+
+
+def _read_tables_source(path: Path) -> dict[str, Any]:
+    try:
+        stamp = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return stamp if isinstance(stamp, dict) else {}
 
 
 def write_batch_tables(
@@ -218,19 +297,41 @@ def write_batch_tables(
     Best-effort: the JSON exports are the run's result, so a table failure is
     a warning, never a failed run. Exports of another schema major — left by
     an older bibr in a resumed out dir — are left out and counted, since one
-    would otherwise fail the whole rebuild on every run.
+    would otherwise fail the whole rebuild on every run. Skipped when the
+    tables were built from these very exports (``tables/.batch-source``):
+    a resumed run with no new result would re-read the whole corpus.
     """
     from bibr.export.schema_artifact import SCHEMA_MAJOR
     from bibr.export.tables import ExportFile, write_tables
+    from bibr.local.artifacts import atomic_write_json
     from bibr.local.cli import ui
     from bibr.local.cli.tables import report_tables
 
-    files = [
-        path
-        for paper_id, entry in sorted(ledger.latest(entries).items())
-        if entry.get("status") == "ok" and (path := out_dir / f"{paper_id}.json").is_file()
-    ]
+    files: list[Path] = []
+    source = hashlib.sha256(bibr_version().encode())
+    for paper_id, entry in sorted(ledger.latest(entries).items()):
+        path = out_dir / f"{paper_id}.json"
+        try:
+            info = path.stat()
+        except OSError:
+            continue
+        if entry.get("status") != "ok" or not S_ISREG(info.st_mode):
+            continue
+        files.append(path)
+        identity = [paper_id, entry.get("run_id"), entry.get("attempt")]
+        source.update(json.dumps([*identity, info.st_size, info.st_mtime_ns]).encode())
     if not files:
+        return
+    tables_dir = out_dir / TABLES_DIRNAME
+    stamp_path = tables_dir / TABLES_SOURCE_FILENAME
+    stamp = _read_tables_source(stamp_path)
+    built = stamp.get("files")
+    if (
+        stamp.get("source") == source.hexdigest()
+        and isinstance(built, list)
+        and all(isinstance(name, str) and (tables_dir / name).is_file() for name in built)
+    ):
+        console.print(f"  [dim]{tables_dir}/ up to date[/dim]", soft_wrap=True)
         return
     other_major: list[tuple[str, str]] = []
 
@@ -253,11 +354,16 @@ def write_batch_tables(
     report = None
     if first is not None:  # else keep whatever tables an older bibr wrote
         try:
-            report = write_tables(itertools.chain([first], exports), out_dir / TABLES_DIRNAME)
+            report = write_tables(itertools.chain([first], exports), tables_dir)
         except Exception as exc:  # noqa: BLE001 - tables are a derived convenience
             logger.warning("writing Parquet tables failed", exc_info=True)
             ui.warn(console, f"Parquet tables not written: {exc}")
             return
+        names = sorted(path.name for path in report.files.values())
+        try:
+            atomic_write_json(stamp_path, {"source": source.hexdigest(), "files": names})
+        except OSError:  # the next run just builds them again
+            logger.warning("writing %s failed", stamp_path, exc_info=True)
     if other_major:
         name, version = other_major[0]
         ui.warn(
@@ -323,15 +429,23 @@ class LocalExecutor:
         deadline: float | None = None,
         stop: threading.Event | None = None,
         on_chunk: Callable[[int, int, Sequence[BatchItem]], None] | None = None,
+        alone: Collection[str] = (),
     ) -> str:
-        """Returns ``completed`` | ``deadline`` | ``stopped`` | ``interrupted``."""
-        total_chunks = (len(items) + self.batch_size - 1) // self.batch_size
-        for index, start in enumerate(range(0, len(items), self.batch_size), start=1):
+        """Returns ``completed`` | ``deadline`` | ``stopped`` | ``interrupted``.
+
+        Papers whose ids are in *alone* (their last attempt killed the run)
+        come last, each in a chunk of its own: one that kills the run again
+        takes no chunk neighbours, and no other paper's turn, with it.
+        """
+        rest = [item for item in items if item.paper_id not in alone]
+        chunks = [rest[i : i + self.batch_size] for i in range(0, len(rest), self.batch_size)]
+        chunks += [[item] for item in items if item.paper_id in alone]
+        total_chunks = len(chunks)
+        for index, chunk in enumerate(chunks, start=1):
             if stop is not None and stop.is_set():
                 return "stopped"
             if deadline is not None and self._wall() >= deadline:
                 return "deadline"
-            chunk = list(items[start : start + self.batch_size])
             if on_chunk is not None:
                 on_chunk(index, total_chunks, chunk)
             started_at = utc_now_iso()
@@ -445,7 +559,7 @@ def _print_plan(options: BatchOptions, plan: BatchPlan, ledger: Ledger) -> None:
     )
 
     ui.section(console, "Resume")
-    n_lines = len(ledger.read()) if ledger.path.is_file() else 0
+    n_lines = len(ledger.read(started=True)) if ledger.path.is_file() else 0
     console.print(kv("ledger", f"{ledger.path} ({n_lines} lines)"), soft_wrap=True)
     console.print(kv("skip ok", str(len(plan.resume.skipped_ok))))
     hint = " (use --retry-failed)" if plan.resume.skipped_failed else ""
@@ -557,7 +671,6 @@ def run_batch(
     stop: Any = None,
 ) -> int:
     """Execute one ``bibr batch`` run end to end; returns the process exit code."""
-    from bibr.local.artifacts import atomic_write_json
     from bibr.local.cli import ui
 
     if console is None:
@@ -565,10 +678,7 @@ def run_batch(
 
         console = Console(stderr=True)
 
-    ledger = Ledger(options.out / LEDGER_FILENAME)
-    plan = build_plan(options, ledger)
-    discovery = plan.discovery
-
+    discovery = discover_inputs(options.inputs)
     for missing in discovery.missing:
         ui.warn(console, f"not found: {missing}")
     for unsupported in discovery.unsupported:
@@ -585,27 +695,65 @@ def run_batch(
         )
         return EXIT_USAGE
 
-    if options.dry_run:
-        _print_plan(options, plan, ledger)
-        # Same preflight the real run does below: without it the preview
-        # exits 0 for runs that fail immediately, contradicting the plan
-        # check ``docs/guides/batch.md`` promises.
-        if options.local is not None and options.local.preflight is not None and plan.to_run:
-            problem = options.local.preflight([item.path for item in plan.to_run])
-            if problem:
-                ui.error(console, problem)
-                return EXIT_FAILURES
-        return EXIT_OK
-
-    if options.local is not None and options.local.preflight is not None and plan.to_run:
+    def preflight_fails(plan: BatchPlan) -> bool:
+        if options.local is None or options.local.preflight is None or not plan.to_run:
+            return False
         problem = options.local.preflight([item.path for item in plan.to_run])
         if problem:
             ui.error(console, problem)
-            return EXIT_FAILURES
+        return bool(problem)
+
+    ledger = Ledger(options.out / LEDGER_FILENAME)
+    ledger_state = _file_state(ledger.path)
+    plan = build_plan(options, ledger, discovery=discovery)
+    if options.dry_run:
+        _print_plan(options, plan, ledger)
+    # The dry run's preflight too: without it the preview exits 0 for runs
+    # that fail immediately, contradicting the plan check
+    # ``docs/guides/batch.md`` promises. Before the lock, so a run that
+    # cannot start leaves no out dir behind.
+    if preflight_fails(plan):
+        return EXIT_FAILURES
+    if options.dry_run:
+        return EXIT_OK
+
+    with contextlib.ExitStack() as held:
+        try:
+            held.enter_context(out_dir_lock(options.out))
+        except OutDirBusy as exc:
+            ui.error(console, f"{exc}.", hint="Wait for it to finish, or pass another --out.")
+            return EXIT_USAGE
+        if _file_state(ledger.path) != ledger_state:
+            # Another run wrote the ledger before this one got the lock.
+            plan = build_plan(options, ledger, discovery=discovery)
+            if preflight_fails(plan):
+                return EXIT_FAILURES
+        return _execute(options, plan, ledger, console=console, transport=transport, stop=stop)
+
+
+def _file_state(path: Path) -> tuple[int, int] | None:
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return info.st_size, info.st_mtime_ns
+
+
+def _execute(
+    options: BatchOptions,
+    plan: BatchPlan,
+    ledger: Ledger,
+    *,
+    console: Any,
+    transport: Any,
+    stop: Any,
+) -> int:
+    """The run itself, under ``<out>/.lock``: execute, ledger, report."""
+    from bibr.local.artifacts import atomic_write_json
+    from bibr.local.cli import ui
 
     run_id = uuid.uuid4().hex[:12]
     started_at = utc_now_iso()
-    options.out.mkdir(parents=True, exist_ok=True)
     context_holder: dict[str, LedgerContext] = {
         "context": LedgerContext(
             run_id=run_id,
@@ -659,10 +807,23 @@ def run_batch(
         nonlocal n_ok, n_failed, done
         if outcome.ok and outcome.export is not None:
             # The batch's own id is the corpus key: unique by construction and
-            # the name of the JSON file, where the export's default (the DOI,
-            # else the file name) can collide across a corpus.
+            # the name of the JSON file, where the export's default (the input
+            # file's stem) can collide across a corpus.
             export = {**outcome.export, "paper_id": item.paper_id}
-            atomic_write_json(export_path(options.out, item), export, indent=2)
+            try:
+                atomic_write_json(export_path(options.out, item), export, indent=2)
+            except Exception as exc:  # noqa: BLE001 — one paper's failure, not the run's
+                # A full disk, a permission, a NaN that JSON rejects: raised
+                # from here it would end the run and drop the chunk's other
+                # results.
+                logger.warning("writing the export of %s failed", item.paper_id, exc_info=True)
+                outcome = dataclasses.replace(
+                    outcome,
+                    status="failed",
+                    error_code=OUTPUT_WRITE_FAILED,
+                    error=f"{type(exc).__name__}: {exc}",
+                    export=None,
+                )
         entry = ledger.record(item, outcome, context=context_holder["context"])
         done += 1
         if outcome.ok:
@@ -752,6 +913,9 @@ def run_batch(
                 console.print(f"\n[bold]Chunk {index}/{total_chunks}[/bold]")
             for item in chunk:
                 console.print(f"  [dim]{item.path.name}[/dim]", soft_wrap=True)
+                # On the ledger before the chunk runs: a run killed outright
+                # (out of memory, a native crash) leaves no verdict to resume by.
+                ledger.start(item, context=context_holder["context"])
 
         try:
             reason = LocalExecutor(chew_many, batch_size=batch_size).run(
@@ -760,6 +924,7 @@ def run_batch(
                 deadline=options.deadline,
                 stop=stop,
                 on_chunk=on_chunk,
+                alone=plan.resume.unfinished,
             )
         finally:
             close = getattr(chew_many, "close", None)
