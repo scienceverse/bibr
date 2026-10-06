@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0rc1] - 2026-10-06
+
 ### Added
 
 - An optional document layer (`pipeline.document_layer`, environment variable
