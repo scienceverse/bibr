@@ -347,7 +347,10 @@ def _build_parser() -> argparse.ArgumentParser:
     chew.add_argument(
         "-o",
         "--output",
-        help="Output path (file for single input, directory for batch)",
+        help=(
+            "Output path: a file for one input file, a directory for a directory, "
+            "a glob or several inputs (batch)"
+        ),
     )
     _add_pipeline_options(chew)
     chew.add_argument(
@@ -373,8 +376,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "reference strategies, enrichment, memory mode, models that would "
             "need downloading, output destinations) without processing anything. "
             "No network calls, no model loads. Prints a Blockers section and "
-            "exits 1 when missing inputs or failing preflights would fail the "
-            "real run."
+            "exits 1 when missing inputs, failing preflights or an -o that cannot "
+            "be written would fail the real run."
         ),
     )
 
@@ -707,7 +710,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "tables and the extraction_* processing lists — each row keyed by "
             "paper_id. Column types come from the export schema, so every file has "
             "the same columns however many papers it holds. Directories are "
-            "searched recursively for *.json; other JSON files are skipped."
+            "searched recursively for *.json, leaving out what 'bibr chew -o' writes "
+            "beside each export (x.core.json next to x.json, *.receipt.json, "
+            "*.enrichment.json, _quarantine/); other JSON files and exports of "
+            "another schema major are skipped."
         ),
     )
     tables_parser.add_argument(

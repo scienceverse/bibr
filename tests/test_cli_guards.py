@@ -287,17 +287,15 @@ async def test_paper_id_with_single_file_still_works(tmp_path, monkeypatch):
     await _run_process(args)
 
 
-async def test_paper_id_with_single_file_directory_still_works(tmp_path, monkeypatch):
-    """Documents the resolved is_batch edge case: a directory that collects
-    to exactly ONE file is NOT batch mode (``is_batch = len(files) > 1`` is
-    purely file-count based, not directory-vs-file), so --paper-id must still
-    apply rather than being rejected."""
+async def test_paper_id_with_single_file_directory_exits_2(tmp_path, monkeypatch):
+    """A directory is batch input however many files it holds (it writes
+    ``<dir>/<stem>.json`` with one paper as with two), so --paper-id is
+    rejected for a directory that collects to exactly ONE file too."""
     from bibr.local.cli import _build_parser, _run_process
-
-    _disable_ocr_runtime_preflight(monkeypatch)
-    monkeypatch.setattr("bibr.local.pipeline.LocalPipeline", _FakePipeline)
 
     (tmp_path / "only.pdf").write_bytes(b"%PDF-1.4\n")
 
     args = _build_parser().parse_args(["chew", str(tmp_path), "--paper-id", "my-id", "--no-llm"])
-    await _run_process(args)
+    with pytest.raises(SystemExit) as exc_info:
+        await _run_process(args)
+    assert exc_info.value.code == 2

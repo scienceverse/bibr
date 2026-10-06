@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, Union, get_args, get_
 from pydantic import BaseModel
 
 from bibr.export import models as m
+from bibr.export.schema_artifact import SCHEMA_MAJOR
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -246,13 +247,31 @@ class ExportFile:
     data: Mapping[str, Any]
 
 
+def _not_an_export(payload: Any) -> str | None:
+    """Why JSON read from a file is not an export these tables read, or None.
+
+    A directory of exports holds other JSON too (``bibr chew``'s receipts,
+    ``bibr batch``'s ``run_info.json``) and may hold exports an older bibr
+    wrote: each is skipped rather than failing the whole corpus.
+    """
+    if not isinstance(payload, Mapping) or "schema_version" not in payload:
+        return "not a bibr export (no root schema_version)"
+    version = payload["schema_version"]
+    if not isinstance(version, str) or version.split(".")[0] != SCHEMA_MAJOR:
+        return f"not a bibr {SCHEMA_MAJOR}.x export (schema_version {version!r})"
+    if "paper_id" not in payload:
+        return "not a bibr export (no paper_id)"
+    return None
+
+
 def _payloads(sources: Iterable[Any]) -> Iterator[tuple[str, Mapping[str, Any] | None, str | None]]:
     """``(label, payload, skip_reason)`` for each source: a dict, a
     :class:`bibr.Result`, an :class:`ExportFile`, or a path to an export JSON
     file."""
     for source in sources:
         if isinstance(source, ExportFile):
-            yield str(source.path), source.data, None
+            reason = _not_an_export(source.data)
+            yield str(source.path), None if reason else source.data, reason
             continue
         if isinstance(source, Mapping):
             yield "<dict>", source, None
@@ -275,10 +294,8 @@ def _payloads(sources: Iterable[Any]) -> Iterator[tuple[str, Mapping[str, Any] |
         except (OSError, ValueError) as exc:
             yield str(path), None, f"not readable as JSON: {exc}"
             continue
-        if not isinstance(payload, Mapping) or "schema_version" not in payload:
-            yield str(path), None, "not a bibr export (no root schema_version)"
-            continue
-        yield str(path), payload, None
+        reason = _not_an_export(payload)
+        yield str(path), None if reason else payload, reason
 
 
 def _flush_tables(tables: list[_Table], labels: list[str]) -> None:
@@ -302,10 +319,11 @@ def write_tables(sources: Iterable[Any], out_dir: str | Path) -> TablesReport:
 
     *sources* are export dicts, :class:`bibr.Result` objects, or paths to
     export JSON files (or :class:`ExportFile`, a path with its parsed data);
-    files that are not bibr exports, and the :class:`bibr.ChewFailure` slots
+    files that are not bibr exports of this major version (no ``paper_id``,
+    another root ``schema_version``), and the :class:`bibr.ChewFailure` slots
     of a batch, are skipped and listed in the report. Every export is
     validated with the lenient 12.x reader, and rows are converted from that
-    validated model, so one from another major version raises
+    validated model, so a dict or result from another major version raises
     :class:`pydantic.ValidationError`.
     A ``paper_id`` seen twice raises :class:`ValueError`: it is the key that
     joins the tables. The files are written to a temporary directory and

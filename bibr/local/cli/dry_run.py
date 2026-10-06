@@ -8,6 +8,8 @@ ones the real run already does via ``resolve_run_config``/``_default_memory_mode
 
 from pathlib import Path
 
+from rich.markup import escape
+
 from bibr.local.cli import ui
 from bibr.local.cli.inputs import _resolve_single_output_path
 from bibr.local.cli.run_config import (
@@ -454,7 +456,7 @@ def _print_dry_run_plan(
     if blockers:
         ui.section(out, f"Blockers ({len(blockers)})")
         for blocker in blockers:
-            out.print(f"  [red]{ui.FAIL}[/red] {blocker}", soft_wrap=True)
+            out.print(f"  [red]{ui.FAIL}[/red] {escape(blocker)}", soft_wrap=True)
         out.print("[dim]The real run exits 1 on these; fix them before processing.[/dim]")
 
     out.print("\n[dim]Dry run — no files were processed.[/dim]")

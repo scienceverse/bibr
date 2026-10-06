@@ -9,10 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from rich.markup import escape
+
 from bibr.local.cli import ui
 from bibr.local.cli.dry_run import _dry_run_blockers, _print_dry_run_plan
 from bibr.local.cli.inputs import (
     _find_stem_collisions,
+    _output_path_problem,
     _prepare_output_path,
     _resolve_single_output_path,
 )
@@ -92,7 +95,7 @@ def _print_validation_line(console, result_json: dict | None) -> None:
     """Print the dim validation-summary line for *result_json*, if any."""
     line = _format_validation_line(result_json)
     if line:
-        console.print(f"[dim]{line}[/dim]")
+        console.print(f"[dim]{escape(line)}[/dim]")
 
 
 def _format_run_summary(config: ResolvedRunConfig) -> str:
@@ -103,11 +106,11 @@ def _format_run_summary(config: ResolvedRunConfig) -> str:
     if backend == "paddle":
         backend = "paddle (automatic; use --dry-run for ordered candidates)"
     return (
-        f"  [dim]OCR backend:[/dim] {backend}\n"
-        f"  [dim]OCR model:[/dim] {model}\n"
-        f"  [dim]OCR profile:[/dim] {profile}\n"
-        f"  [dim]llm[/dim] {config.llm_backend} [dim]{ui.SEP}[/dim] "
-        f"[dim]memory[/dim] {config.memory_mode}"
+        f"  [dim]OCR backend:[/dim] {escape(str(backend))}\n"
+        f"  [dim]OCR model:[/dim] {escape(str(model))}\n"
+        f"  [dim]OCR profile:[/dim] {escape(str(profile))}\n"
+        f"  [dim]llm[/dim] {escape(str(config.llm_backend))} [dim]{ui.SEP}[/dim] "
+        f"[dim]memory[/dim] {escape(str(config.memory_mode))}"
     )
 
 
@@ -116,12 +119,18 @@ def _print_actual_ocr_summary(console, resources) -> None:
     identity = getattr(resources, "ocr_runtime_identity", None)
     if identity is None:
         return
-    console.print(f"  [dim]OCR backend:[/dim] {identity.backend}")
-    console.print(f"  [dim]OCR model:[/dim] {identity.model}")
-    console.print(f"  [dim]OCR profile:[/dim] {identity.profile}")
+    console.print(f"  [dim]OCR backend:[/dim] {escape(str(identity.backend))}")
+    console.print(f"  [dim]OCR model:[/dim] {escape(str(identity.model))}")
+    console.print(f"  [dim]OCR profile:[/dim] {escape(str(identity.profile))}")
     fallback_reason = getattr(resources, "ocr_fallback_reason", None)
     if fallback_reason:
-        console.print(f"  [dim]Fallback reason:[/dim] {fallback_reason}")
+        console.print(f"  [dim]Fallback reason:[/dim] {escape(str(fallback_reason))}")
+
+
+def _names_a_batch(inputs: list[str]) -> bool:
+    """Do the ``chew`` inputs name a batch whatever they match: several inputs,
+    or a directory or glob rather than one file (``-`` is one file)?"""
+    return len(inputs) > 1 or any(raw != "-" and not Path(raw).is_file() for raw in inputs)
 
 
 def _write_stdout_json(json_str: str) -> None:
@@ -207,7 +216,7 @@ def _write_chunk_results(
         if fs.error:
             err_msg = str(fs.error)
             hint = _hint_for_file_error(fs)
-            console.print(f"  [red]✗ {fs.path.name}:[/red] {err_msg}{hint}")
+            console.print(f"  [red]✗ {escape(fs.path.name)}:[/red] {escape(err_msg)}{hint}")
             errors += 1
             continue
 
@@ -222,17 +231,21 @@ def _write_chunk_results(
             # Rewriting here would allow unverified in-memory state to bypass
             # that protocol, so the CLI is reporting-only for sink-bound files.
             if is_batch or fs.manifest_output_path is not None:
-                console.print(f"  [green]✓ {fs.path.name}[/green] → {sink_path}")
+                console.print(
+                    f"  [green]✓ {escape(fs.path.name)}[/green] → {escape(str(sink_path))}"
+                )
             else:
                 total_elapsed = time.monotonic() - total_t0
-                console.print(f"  [green]✓[/green] Wrote {sink_path} ({total_elapsed:.1f}s)")
+                console.print(
+                    f"  [green]✓[/green] Wrote {escape(str(sink_path))} ({total_elapsed:.1f}s)"
+                )
             _print_validation_line(console, fs.result_json)
             continue
 
         if fs.manifest_output_path is not None:
             out_file = sink_path or fs.manifest_output_path
             atomic_write_json(out_file, fs.result_json, **json_kwargs)
-            console.print(f"  [green]✓ {fs.path.name}[/green] → {out_file}")
+            console.print(f"  [green]✓ {escape(fs.path.name)}[/green] → {escape(str(out_file))}")
             _print_validation_line(console, fs.result_json)
         elif output_path is None:
             _write_stdout_json(json_str)
@@ -243,13 +256,15 @@ def _write_chunk_results(
         elif is_batch:
             out_file = sink_path or output_path / f"{fs.path.stem}.json"
             atomic_write_json(out_file, fs.result_json, **json_kwargs)
-            console.print(f"  [green]✓ {fs.path.name}[/green] → {out_file}")
+            console.print(f"  [green]✓ {escape(fs.path.name)}[/green] → {escape(str(out_file))}")
             _print_validation_line(console, fs.result_json)
         else:
             out_file = sink_path or _resolve_single_output_path(output_path, fs.path)
             atomic_write_json(out_file, fs.result_json, **json_kwargs)
             total_elapsed = time.monotonic() - total_t0
-            console.print(f"  [green]✓[/green] Wrote {out_file} ({total_elapsed:.1f}s)")
+            console.print(
+                f"  [green]✓[/green] Wrote {escape(str(out_file))} ({total_elapsed:.1f}s)"
+            )
             _print_validation_line(console, fs.result_json)
 
     return processed, errors
@@ -387,7 +402,7 @@ async def _run_process(args) -> None:
             )
         manifest_records = load_manifest(args.manifest) if source_mode == "manifest" else []
     except ManifestError as exc:
-        ui.error(console, str(exc))
+        ui.error(console, escape(str(exc)))
         sys.exit(2)
 
     _apply_runtime_settings(args)
@@ -395,7 +410,7 @@ async def _run_process(args) -> None:
     try:
         config = resolve_run_config(args)
     except ValueError as e:
-        ui.error(console, f"Invalid option: {e}")
+        ui.error(console, f"Invalid option: {escape(str(e))}")
         sys.exit(2)
 
     console.print(_format_run_summary(config))
@@ -413,7 +428,7 @@ async def _run_process(args) -> None:
         except ValueError as e:
             ui.error(
                 console,
-                str(e),
+                escape(str(e)),
                 hint="Run [cyan]bibr setup[/cyan] to configure an LLM provider, "
                 "or pass [cyan]--no-llm[/cyan] for structural output only.",
             )
@@ -428,7 +443,7 @@ async def _run_process(args) -> None:
     if not args.dry_run and not config.no_llm and config.llm_backend in LOCAL_LLM_BACKENDS:
         err = _preflight_local_backend(config.llm_backend)
         if err:
-            ui.error(console, err)
+            ui.error(console, escape(err))
             sys.exit(1)
 
     # Collect files
@@ -439,32 +454,36 @@ async def _run_process(args) -> None:
     else:
         files, missing_count = _collect_files(args.input)
         work_items = list(files)
-    is_batch = len(files) > 1
+    # Batch mode follows the kind of input, not how many files it matched: a
+    # directory holding one paper still writes <dir>/<stem>.json, as it does
+    # with two, instead of a file named after the directory.
+    is_batch = source_mode == "manifest" or len(files) > 1 or _names_a_batch(args.input)
 
     # --paper-id only makes sense when writing a single result — silently
     # discarding it for batch input used to hide the mistake entirely.
     if is_batch and args.paper_id:
         ui.error(
-            console, f"--paper-id is only valid for single-file input (got {len(files)} files)."
+            console,
+            "--paper-id is only valid for single-file input, not for a directory, "
+            "glob, manifest or several inputs.",
         )
         sys.exit(2)
 
-    # Batch output writes <dir>/<stem>.json — files from different
-    # directories sharing a stem would silently overwrite each other.
+    # Batch output writes <dir>/<stem>.json and its sidecars — files from
+    # different directories sharing a stem would silently overwrite each other.
     if is_batch and source_mode != "manifest":
         collisions = _find_stem_collisions(files)
         if collisions:
             ui.error(
                 console,
-                "Output filename collision: multiple input files "
-                "would write to the same <stem>.json:",
+                "Output filename collision: multiple input files would write the same output file:",
             )
             # Plain print (not console.print) for the paths themselves —
             # Rich hard-wraps long lines at the terminal width with no
             # regard for word boundaries, which can split a long absolute
             # path mid-character.
-            for stem, paths in sorted(collisions.items()):
-                print(f"  {stem}.json would be written by:", file=sys.stderr)
+            for name, paths in sorted(collisions.items()):
+                print(f"  {name} would be written by:", file=sys.stderr)
                 for p in paths:
                     print(f"    {p}", file=sys.stderr)
             console.print(
@@ -477,7 +496,7 @@ async def _run_process(args) -> None:
         opencv_problem = _preflight_opencv()
         if opencv_problem is not None:
             message, repair = opencv_problem
-            ui.error(console, message, hint=f"Repair with: [cyan]{repair}[/cyan]")
+            ui.error(console, escape(message), hint=f"Repair with: [cyan]{repair}[/cyan]")
             sys.exit(1)
         # Fail fast when no local OCR runtime can start here (no suitable GPU
         # for paddle-vllm, no llama-server on PATH) — otherwise the run loads
@@ -485,7 +504,7 @@ async def _run_process(args) -> None:
         # transactional chain reports the same thing.
         ocr_reason = _preflight_ocr_runtime(config)
         if ocr_reason is not None:
-            ui.error(console, ocr_reason)
+            ui.error(console, escape(ocr_reason))
             sys.exit(1)
 
     # --dry-run: print the fully-resolved plan and exit — no pipeline is
@@ -497,6 +516,10 @@ async def _run_process(args) -> None:
     # without them the preview exits 0 for runs that fail immediately.
     if args.dry_run:
         blockers = _dry_run_blockers(config, files, missing_count)
+        if source_mode != "manifest":
+            output_problem = _output_path_problem(args.output, is_batch=is_batch)
+            if output_problem is not None:
+                blockers.append(output_problem)
         _print_dry_run_plan(
             args,
             config,
@@ -519,7 +542,7 @@ async def _run_process(args) -> None:
         try:
             output_path = _prepare_output_path(args.output, is_batch=is_batch)
         except OSError as exc:
-            ui.error(console, f"Cannot write output {args.output!r}: {exc}")
+            ui.error(console, escape(f"Cannot write output {args.output!r}: {exc}"))
             sys.exit(2)
 
     # Create pipeline
@@ -591,7 +614,7 @@ async def _run_process(args) -> None:
             for i, item in enumerate(chunk_items):
                 fp = item.input_path if source_mode == "manifest" else item
                 file_num = chunk_start + i + 1
-                console.print(f"  [dim]\\[{file_num}/{len(files)}][/dim] {fp.name}")
+                console.print(f"  [dim]\\[{file_num}/{len(files)}][/dim] {escape(fp.name)}")
 
             file_states = await chunk_processor.run(
                 chunk_items,
@@ -641,7 +664,7 @@ async def _run_process(args) -> None:
         if counts.get("total_tokens", 0) <= 0:
             continue
         console.print(
-            f"  [dim]LLM tokens · {model}: "
+            f"  [dim]LLM tokens · {escape(str(model))}: "
             f"in={counts.get('input_tokens', 0):,} "
             f"out={counts.get('output_tokens', 0):,} "
             f"total={counts.get('total_tokens', 0):,}[/dim]"

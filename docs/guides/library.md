@@ -98,7 +98,9 @@ JSON files as one Parquet file per table: `paper.parquet` (one row per paper),
 one file per record and match table (`author`, `bib`, `text`, `bib_match`, …)
 and `extraction_*` files for the processing lists. Every row starts with
 `paper_id`, and the column types come from the schema, so every file has the
-same columns however many papers it holds. Failed slots of a batch are skipped.
+same columns however many papers it holds. Failed slots of a batch are skipped,
+and so are JSON files that are not 12.x exports (a receipt, an export of
+another major version); the report lists them in `skipped`.
 
 ```python
 report = bibr.write_tables(bibr.chew("papers/"), "tables/")
@@ -109,10 +111,14 @@ papers = pd.read_parquet("tables/paper.parquet")    # titles, DOIs, file hashes,
 ```
 
 In R: `arrow::read_parquet("tables/bib.parquet")`. The CLI equivalent is
-`bibr tables results/ --out tables/`, and `bibr batch` writes the same files to
-`<out>/tables/` after every run. `paper_id` joins the tables, so it must be
-unique across the corpus; pass `paper_id=` (or use `bibr batch`, which names
-each paper after its file) when several papers share a DOI.
+`bibr tables results/ --out tables/`, which leaves out what `bibr chew -o`
+writes beside each export (`x.core.json`, the `.receipt.json` and
+`.enrichment.json` files, `_quarantine/`), and `bibr batch` writes the same
+files to `<out>/tables/` after every run. `paper_id` joins the tables, so it
+must be unique across the corpus. It defaults to the input file's name without
+its extension, so `a/paper.pdf` and `b/paper.pdf` clash: chew them in one batch
+call (or with `bibr batch`), which gives such files `<stem>-<sha256[:8]>` ids,
+or pass `paper_id=` to a single-file call.
 
 ## Options
 
@@ -137,7 +143,7 @@ chew` CLI flags:
 | `ocr_url` | `--ocr-url` | URL for an external OCR server: Paddle (`paddle-http`) unless `ocr` (or, without `ocr`, `OCR_BACKEND`) names a GLM backend, then `glm-http`; an explicit cloud vision `ocr` ignores it |
 | `ocr_model` | `--ocr-model` | OCR model path or served model alias |
 | `ocr_profile` | `--ocr-profile` | `"paddle"` or `"glm"`; required when a custom model alias does not identify its family |
-| `start_page`, `end_page` | `--pages` | Lower-level zero-based, inclusive page indices; use these or `pages`, not both |
+| `start_page`, `end_page` | `--pages` | Lower-level zero-based, inclusive page indices; use these or `pages`, not both (both raise `TypeError`) |
 | `paper_id` | `--paper-id` | Paper ID override (single-file calls only) |
 | `batch_size` | `--batch-size` | Files per chunk in batch processing (batch calls only) |
 | `consolidate` | `--consolidate` | Merge accepted Crossref matches into `bib` before export: `True` / `"fill"` fills only missing fields, `"replace"` also overwrites disagreeing ones, but only from a match carrying the reference's printed DOI (a match's catch-all `bib_type` `other` fills a missing type but never replaces a printed one); `False` forces it off |
