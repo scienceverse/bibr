@@ -97,6 +97,9 @@ LEASE_TTL_SECONDS = 60
 TRANSITION_RETRY_SECONDS = 60.0
 _RETRY_FIRST_DELAY = 0.1
 _RETRY_MAX_DELAY = 5.0
+#: Heartbeat delay after a failed renew: once Redis answers again, a create on another
+#: replica fails every leased job whose lease lapsed meanwhile, so renew promptly.
+_RENEW_RETRY_SECONDS = 1.0
 #: Recorded on a leased job whose lease lapsed: 503 tells the client to resubmit.
 LOST_HTTP_STATUS = 503
 LOST_ERROR = {"detail": "replica lost the job before it finished", "error_code": "job_lost"}
@@ -312,6 +315,7 @@ class RedisJobStore:
         # their leases.
         self._owned: set[str] = set()
         self._heartbeat: asyncio.Task | None = None
+        self._renew_failing = False
         self._closed = False
 
     def _default_client(self, url: str):
@@ -382,7 +386,10 @@ class RedisJobStore:
                 return await self._bounded(what, call())
             except JobStoreUnavailableError as exc:
                 remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                task = asyncio.current_task()
+                # A task cancelled while a dependency consumed the CancelledError must
+                # not sit out the budget: shutdown waits for it, the lease covers the job.
+                if remaining <= 0 or (task is not None and task.cancelling()):
                     raise
                 if delay == _RETRY_FIRST_DELAY:
                     logger.warning("%s; retrying for up to %.1fs", exc, remaining)
@@ -399,18 +406,25 @@ class RedisJobStore:
             self._heartbeat = loop.create_task(self._heartbeat_loop(), name="bibr-job-leases")
 
     async def _heartbeat_loop(self) -> None:
+        interval = self._lease_ttl / 4
+        delay = interval
         while True:
-            await asyncio.sleep(self._lease_ttl / 4)
+            await asyncio.sleep(delay)
             try:
-                await self._renew_leases()
+                renewed = await self._renew_leases()
             except Exception:
                 # A dead heartbeat would let every lease lapse under live jobs.
                 logger.exception("job lease heartbeat failed")
+                renewed = False
+            delay = interval if renewed else min(interval, _RENEW_RETRY_SECONDS)
 
-    async def _renew_leases(self) -> None:
-        """Renew the lease of every job this replica holds; forget the ones that ended."""
+    async def _renew_leases(self) -> bool:
+        """Renew the lease of every job this replica holds; forget the ones that ended.
+
+        Returns False when Redis did not answer.
+        """
         if not self._owned:
-            return
+            return True
         held = sorted(self._owned)
         try:
             gone = await self._bounded(
@@ -418,10 +432,15 @@ class RedisJobStore:
                 self._renew_script(args=[self._prefix, self._lease_ttl, *held]),
             )
         except JobStoreUnavailableError as exc:
-            logger.warning("could not renew %d job lease(s) (%s)", len(held), exc)
-            return
+            # Retried every second during an outage: warn once per outage.
+            log = logger.debug if self._renew_failing else logger.warning
+            log("could not renew %d job lease(s) (%s)", len(held), exc)
+            self._renew_failing = True
+            return False
+        self._renew_failing = False
         for job_id in gone:
             self._owned.discard(_text(job_id))
+        return True
 
     def _job_from_fields(self, job_id: str, fields: dict) -> Job:
         decoded = {_text(key): value for key, value in fields.items()}

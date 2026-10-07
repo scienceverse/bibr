@@ -7,12 +7,15 @@
   landed, within a bounded time.
 - A job cancelled while queued leaves the dispatcher's queue at once (or, when
   cancelled through another replica, once the queue reaches the active cap).
-- Results are rendered and compressed off the event loop.
+- Results are rendered and compressed off the event loop, in memory close to
+  ``json.dumps``' and at any depth ``json.dumps`` reaches.
 """
 
 import asyncio
 import gzip
 import json
+import logging
+import tracemalloc
 
 import pytest
 
@@ -238,6 +241,73 @@ async def test_the_heartbeat_runs_in_the_background_until_close(redis_harness, m
     assert heartbeat.done()
 
 
+async def test_the_heartbeat_retries_a_failed_renew_soon_and_warns_once(
+    redis_harness, monkeypatch, caplog
+):
+    from types import SimpleNamespace
+
+    from bibr.serve import jobs_redis
+
+    real_sleep = asyncio.sleep
+    delays = []
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+        if len(delays) == 1:
+            redis_harness.server.connected = False  # two renews fail
+        elif len(delays) == 3:
+            redis_harness.server.connected = True
+        elif len(delays) == 4:
+            raise asyncio.CancelledError
+        await real_sleep(0)
+
+    # Only this module's sleeps: the heartbeat's interval is 15 s here.
+    monkeypatch.setattr(
+        jobs_redis, "asyncio", SimpleNamespace(**{**vars(asyncio), "sleep": fake_sleep})
+    )
+    store = redis_harness.make(lease_ttl_seconds=60)
+    job = await store.create(filename="a.pdf")
+    await store._redis.delete(store.lease_key(job.job_id))  # lapsed during the outage
+    with caplog.at_level(logging.DEBUG, logger="bibr.serve.jobs.redis"):
+        await asyncio.gather(store._heartbeat, return_exceptions=True)
+
+    assert delays == [15.0, 1.0, 1.0, 15.0]
+    assert await store._redis.ttl(store.lease_key(job.job_id)) > 15  # restored
+    warnings = [r for r in caplog.records if "could not renew" in r.getMessage()]
+    assert [r.levelno for r in warnings] == [logging.WARNING, logging.DEBUG]
+
+
+async def test_a_transition_in_a_task_whose_cancellation_was_consumed_is_not_retried(
+    redis_harness, monkeypatch
+):
+    store = redis_harness.make(transition_retry_seconds=1.0)
+    job = await store.create(filename="a.pdf")
+    attempts = []
+    real_bounded = store._bounded
+
+    async def counting_bounded(what, awaitable):
+        attempts.append(what)
+        return await real_bounded(what, awaitable)
+
+    monkeypatch.setattr(store, "_bounded", counting_bounded)
+
+    async def finish_after_a_swallowed_cancel():
+        task = asyncio.current_task()
+        task.cancel()
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass  # a dependency swallows it without uncancel()
+        assert task.cancelling() == 1
+        redis_harness.server.connected = False
+        await store.set_failed(job.job_id, http_status=503, error={"detail": "x"})
+
+    await asyncio.wait_for(asyncio.create_task(finish_after_a_swallowed_cancel()), timeout=5)
+    # One attempt, not one per backoff step: shutdown is waiting for this task.
+    assert len(attempts) == 1
+    assert store._owned == set()
+
+
 # --------------------------------------------------------------------------- #
 # Shutdown records the jobs that cancelled workers held
 # --------------------------------------------------------------------------- #
@@ -357,6 +427,64 @@ async def test_a_dispatch_cancelled_under_its_worker_fails_the_job_and_the_queue
     assert (await store.get(second.job_id)).result == {"paper_id": "second.pdf"}
 
 
+async def test_a_job_whose_runner_failed_outside_its_own_handling_is_failed(harness, monkeypatch):
+    monkeypatch.setattr(Settings.jobs, "max_active", 1)
+    store = harness.make()
+
+    async def broken_set_succeeded(job_id, result):
+        raise RuntimeError("store bug")
+
+    monkeypatch.setattr(store, "set_succeeded", broken_set_succeeded)
+    dispatcher = jobs_mod.JobDispatcher(
+        store=store, tracker=_FakeTracker(result={"paper_id": "p"}), max_running=1
+    )
+    job = await store.create(filename="a.pdf")
+    await dispatcher.submit(job.job_id, _payload("a"))
+    await asyncio.wait_for(dispatcher.join(), timeout=5)
+    await dispatcher.close()
+
+    got = await store.get(job.job_id)
+    assert got.status == "failed"
+    assert got.http_status == 500
+    assert got.error == {"detail": "internal job error"}
+    if harness.backend == "redis":
+        assert store._owned == set()  # nobody renews a lease for a job no one runs
+    assert (await store.create(filename="b.pdf")).status == "queued"  # the slot is free
+
+
+async def test_a_dispatcher_closed_during_the_stale_check_refuses_the_job(monkeypatch):
+    monkeypatch.setattr(Settings.jobs, "max_active", 2)
+    store = MemoryJobStore()
+    tracker = _BlockingTracker(result={"paper_id": "held"})
+    dispatcher = jobs_mod.JobDispatcher(store=store, tracker=tracker, max_running=1)
+    held = await store.create(filename="held.pdf")
+    await dispatcher.submit(held.job_id, _payload("held"))
+    await asyncio.wait_for(tracker.entered.wait(), timeout=5)
+    waiting = await store.create(filename="waiting.pdf")
+    await dispatcher.submit(waiting.job_id, _payload("waiting"))
+    monkeypatch.setattr(Settings.jobs, "max_active", 1)  # the queue is at the cap
+
+    checking = asyncio.Event()
+    answer = asyncio.Event()
+    real_get = store.get
+
+    async def slow_get(job_id, **kwargs):
+        checking.set()
+        await answer.wait()
+        return await real_get(job_id, **kwargs)
+
+    monkeypatch.setattr(store, "get", slow_get)
+    late = asyncio.create_task(dispatcher.submit("late", _payload("late")))
+    await asyncio.wait_for(checking.wait(), timeout=5)
+    await asyncio.wait_for(dispatcher.close(), timeout=5)
+    answer.set()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        await asyncio.wait_for(late, timeout=5)
+    # Refused, so the route discards it, instead of stranded in a closed queue.
+    assert dispatcher._waiting == {}
+
+
 # --------------------------------------------------------------------------- #
 # Cancelled jobs leave the queue
 # --------------------------------------------------------------------------- #
@@ -455,6 +583,64 @@ def test_encode_result_matches_json_dumps_without_the_gil_holding_c_encoder(monk
         jobs_mod.encode_result({"x": float("nan")})
     with pytest.raises(TypeError):
         jobs_mod.encode_result({"x": object()})
+
+
+def test_encode_result_peak_memory_stays_near_the_body():
+    # Token-heavy, like an export's text rows: numbers, bboxes and flags. The
+    # pure-Python encoder yields a small str per token; holding all of them at once
+    # peaked at about 12x the body.
+    rows = [
+        {"id": i, "page": i % 30, "bbox": [1.25, 2.5, 3.75, 4.0], "flags": [True, False, None]}
+        for i in range(6000)
+    ]
+    payload = {"text": rows}
+    tracemalloc.start()
+    try:
+        body = jobs_mod.encode_result(payload)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert body == json.dumps(
+        payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+    ).encode("utf-8")
+    assert peak < 3 * len(body)  # json.dumps itself needs 2x (one str, one bytes)
+
+
+def _nested(depth: int) -> dict:
+    out: dict = {"leaf": 1}
+    for _ in range(depth):
+        out = {"a": [out]}
+    return out
+
+
+def test_encode_result_renders_what_json_dumps_renders_however_deep():
+    # Past the pure-Python encoder's frames (about 500 levels) and, on Python 3.12+,
+    # within the C encoder's reach (about 5000).
+    payload = _nested(1500)
+    try:
+        expected = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    except RecursionError:
+        with pytest.raises(RecursionError):
+            jobs_mod.encode_result(payload)
+    else:
+        assert jobs_mod.encode_result(payload) == expected.encode("utf-8")
+
+
+async def test_a_result_too_deep_to_render_fails_the_job(harness):
+    store = harness.make()
+    job = await store.create(filename="a.pdf")
+    await jobs_mod._run_job(
+        store=store,
+        job_id=job.job_id,
+        descriptor={"upload_id": "a"},
+        tracker=_FakeTracker(result=_nested(200_000)),  # beyond any encoder
+    )
+    got = await store.get(job.job_id)
+    assert got.status == "failed"
+    assert got.http_status == 500
+    assert got.error == {"detail": "internal job error"}
+    if harness.backend == "redis":
+        assert store._owned == set()
 
 
 async def test_set_succeeded_renders_the_result_off_the_event_loop(harness, monkeypatch):

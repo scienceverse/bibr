@@ -115,7 +115,10 @@ deleted, and `/result` answers `410`. Clients that poll for `succeeded` or
 `failed` therefore stop as they do for any failed job. Returns `200` with the
 job's status (also when it was already cancelled), `409` with
 `{"detail", "status"}` for a job that is `running` or finished (a running
-extraction cannot be stopped yet), and `404` for an unknown job.
+extraction cannot be stopped yet), and `404` for an unknown job. With the
+Redis job store, a job cancelled through a replica other than the one that
+accepted it keeps its upload on that replica's disk until a job worker there
+reaches it or that replica's queue fills up to `JOBS_MAX_ACTIVE` entries.
 
 With `JOBS_DEDUPE_INFLIGHT=true` (default `false`), a `POST /papers/jobs`
 whose file (SHA-256), filename and options match a job the same server still

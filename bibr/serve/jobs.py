@@ -216,6 +216,10 @@ def is_cancelled(job: Job) -> bool:
 
 
 _RESULT_ENCODER = json.JSONEncoder(ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+# iterencode yields a small str per token (several per number or key). Joining a
+# bounded batch at a time keeps the peak near json.dumps' (one str, one bytes); a
+# list of every token costs several times the body.
+_ENCODE_BATCH_CHUNKS = 8192
 
 
 def encode_result(result: dict) -> bytes:
@@ -225,7 +229,22 @@ def encode_result(result: dict) -> bytes:
     (the same bytes as ``json.dumps``): the C one holds the GIL for the whole call, so
     a large export would stall the event loop even from a thread.
     """
-    return "".join(_RESULT_ENCODER.iterencode(result)).encode("utf-8")
+    parts: list[bytes] = []
+    batch: list[str] = []
+    try:
+        for chunk in _RESULT_ENCODER.iterencode(result):
+            batch.append(chunk)
+            if len(batch) >= _ENCODE_BATCH_CHUNKS:
+                parts.append("".join(batch).encode("utf-8"))
+                batch.clear()
+    except RecursionError:
+        # Nested deeper than the pure-Python encoder's generator frames reach. encode()
+        # takes the C encoder, which goes about ten times deeper (and raises
+        # RecursionError past that).
+        parts.clear()
+        return _RESULT_ENCODER.encode(result).encode("utf-8")
+    parts.append("".join(batch).encode("utf-8"))
+    return b"".join(parts)
 
 
 class JobStore(Protocol):
@@ -570,9 +589,11 @@ class JobDispatcher:
     async def submit(
         self, job_id: str, payload: JobPayload, *, fingerprint: str | None = None
     ) -> None:
-        await self.start()
         if len(self._waiting) >= Settings.jobs.max_active:
             await self._release_stale()
+        # After the awaits above: close() may have run meanwhile, and a closed
+        # dispatcher must refuse the job rather than strand it in the queue.
+        await self.start()
         self._waiting[job_id] = payload
         if fingerprint is not None:
             self._by_fingerprint[fingerprint] = job_id
@@ -649,15 +670,20 @@ class JobDispatcher:
                     # This worker is cancelled (shutdown), possibly in the middle of a
                     # store transition: the job stays in _running for close() to record.
                     raise
-                # A task the job awaited was cancelled under it: record the loss and
-                # keep serving the queue.
+                # A task the job awaited was cancelled under it (the tracker closing
+                # its inference tasks at shutdown, say): record the loss and keep
+                # serving the queue.
                 logger.error("job %s: a task it awaited was cancelled under it", job_id)
                 await self._record_abandoned([job_id], [])
             except Exception:
                 # _run_job records every expected failure itself; this fence keeps
                 # an unexpected one (a store bug, say) from killing the worker loop
-                # and silently stranding every job queued behind it.
+                # and silently stranding every job queued behind it. The job is failed
+                # too, so its record does not hold a cap slot nobody will free.
                 logger.exception("job %s: runner failed outside the job's own handling", job_id)
+                await self._record_abandoned(
+                    [job_id], [], http_status=500, error={"detail": "internal job error"}
+                )
             self._running.discard(job_id)
             self._forget_fingerprint(job_id)
             self._note_progress()
@@ -685,12 +711,19 @@ class JobDispatcher:
         for _job_id, payload in waiting:
             await self._tracker.discard(payload.descriptor)
 
-    async def _record_abandoned(self, held: list[str], waiting: list[str]) -> None:
+    async def _record_abandoned(
+        self,
+        held: list[str],
+        waiting: list[str],
+        *,
+        http_status: int = 503,
+        error: dict = _SHUTDOWN_ERROR,
+    ) -> None:
         """Fail jobs this dispatcher will not finish instead of leaving queued/running
         records (in a shared store, cap slots) behind, so their clients know to resubmit.
 
         Best effort: shielded from a second cancellation and bounded, so an
-        unreachable store cannot stall shutdown.
+        unreachable store cannot stall shutdown (or a worker).
         """
 
         async def fail(job_id: str, statuses: tuple[str, ...]) -> None:
@@ -699,7 +732,7 @@ class JobDispatcher:
             # a waiting one.
             for status in statuses:
                 await self._store.set_failed(
-                    job_id, http_status=503, error=_SHUTDOWN_ERROR, required=status
+                    job_id, http_status=http_status, error=error, required=status
                 )
 
         calls = [fail(job_id, ("running", "queued")) for job_id in held]
@@ -713,7 +746,7 @@ class JobDispatcher:
                     outcomes = await asyncio.gather(*calls, return_exceptions=True)
             except TimeoutError:
                 logger.error(
-                    "could not record %d abandoned job(s) within %.0fs of shutdown",
+                    "could not record %d abandoned job(s) within %.0fs",
                     len(calls),
                     _SHUTDOWN_RECORD_SECONDS,
                 )
@@ -768,7 +801,7 @@ async def _run_job(
     else:
         try:
             await store.set_succeeded(job_id, result)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
             logger.exception("job %s produced a result that cannot be rendered as JSON", job_id)
             await store.set_failed(
                 job_id,
