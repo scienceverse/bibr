@@ -766,3 +766,52 @@ async def test_demo_current_env_choice_undoes_the_preset(
     assert len(built) == 3
     built[1].aclose.assert_awaited_once()
     assert original_model in status and "preset-model" not in status
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        # dotenv reads "LLM_BASE_URL =" as LLM_BASE_URL, yet the name is unknown
+        # to the endpoint notice and to validation.
+        {"LLM_BASE_URL ": "https://theirs.example/v1"},
+        # Rich markup in a name could hide the names the notice prints.
+        {"A[conceal]_URL": "x", "LLM_BASE_URL": "https://theirs.example/v1"},
+        {"LLM\nBASE_URL": "x"},
+        {"LLM_MAX_TOKENS": 100},
+    ],
+)
+def test_preset_use_refuses_crafted_setting_names(tmp_path, monkeypatch, capsys, settings):
+    import json
+
+    from bibr.presets import InvalidPresetError, PresetManager
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("LLM_BASE_URL=https://mine.example/v1\n")
+    presets_dir = tmp_path / "presets"
+    presets_dir.mkdir()
+    (presets_dir / "crafted.json").write_text(
+        json.dumps({"schema_version": 1, "settings": settings})
+    )
+    monkeypatch.setenv("BIBR_ENV_FILE", str(env_path))
+    monkeypatch.setenv("BIBR_PRESETS_DIR", str(presets_dir))
+
+    with pytest.raises(InvalidPresetError, match="crafted"):
+        PresetManager(presets_dir).load("crafted")
+    code, _out = _preset(capsys, "use", name="crafted")
+    assert code != 0
+    assert env_path.read_text() == "LLM_BASE_URL=https://mine.example/v1\n"
+
+
+def test_preset_values_print_literally(tmp_path, monkeypatch, capsys):
+    from bibr.presets import PresetManager
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("")
+    presets = PresetManager(tmp_path / "presets")
+    presets.save("p", {"LLM_MODEL": "[conceal]hidden[/conceal]"})
+    monkeypatch.setenv("BIBR_ENV_FILE", str(env_path))
+    monkeypatch.setenv("BIBR_PRESETS_DIR", str(presets.directory))
+
+    code, out = _preset(capsys, "show", name="p")
+    assert code == 0
+    assert "[conceal]hidden[/conceal]" in out

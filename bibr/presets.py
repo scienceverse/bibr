@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 _DEFAULT_DIR = Path.home() / ".bibr" / "presets"
 _PRESETS_DIR_VAR = "BIBR_PRESETS_DIR"
 _NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+_ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _SCHEMA_VERSION = 1
 
 # Secret filtering: known bibr settings use the settings metadata
@@ -298,7 +299,23 @@ class PresetManager:
                 f"Preset {name!r} at {path} is not valid JSON: {exc}. "
                 "Fix or delete the file, then retry."
             ) from exc
-        return self._unwrap(raw)
+        data = self._unwrap(raw)
+        # A shared preset is untrusted input. Every key must be a plain
+        # environment variable name: "LLM_BASE_URL " would pass the endpoint
+        # notice and validation as an unknown name, yet dotenv still reads it
+        # as LLM_BASE_URL; markup or newlines in a key garble what is printed.
+        for key, value in data.items():
+            if not isinstance(key, str) or not _ENV_KEY_RE.fullmatch(key):
+                raise InvalidPresetError(
+                    f"Preset {name!r} at {path} has an invalid setting name {key!r}; "
+                    "names must be letters, digits and underscores. Fix or delete the file."
+                )
+            if not isinstance(value, str):
+                raise InvalidPresetError(
+                    f"Preset {name!r} at {path} sets {key} to a non-string value. "
+                    "Fix or delete the file."
+                )
+        return data
 
     def delete(self, name: str) -> None:
         self._validate_name(name)

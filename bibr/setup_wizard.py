@@ -1457,7 +1457,7 @@ class SetupWizard:
         except Exception as e:  # noqa: BLE001
             from rich.markup import escape
 
-            ui.error(self.console, f"Local server test failed: {escape(str(e))}")
+            ui.error(self.console, f"Local server test failed: {escape(self._redact(str(e)))}")
             self.console.print(
                 "[dim]Config kept — fix and retry with `bibr chew --llm local`.[/dim]"
             )
@@ -1522,7 +1522,9 @@ class SetupWizard:
             except ConfigurationError as exc:
                 # An invalid value already in .env, ~/.bibr/.env or the
                 # environment, not in the answers: chew stops on it too.
-                ui.error(self.console, f"Can't test the connection: {escape(str(exc))}")
+                ui.error(
+                    self.console, f"Can't test the connection: {escape(self._redact(str(exc)))}"
+                )
                 self.console.print(
                     "[dim]That value comes from your existing configuration, not from "
                     "this setup. `bibr chew` stops on it too until it is fixed or "

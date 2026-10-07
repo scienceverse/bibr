@@ -3,6 +3,8 @@
 import argparse
 import sys
 
+from rich.markup import escape
+
 from bibr.local.cli import ui
 
 
@@ -58,7 +60,7 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
         prefix = "  [dim]" if dim else "  "
         suffix = "[/dim]" if dim else ""
         for k, v in sorted(data.items()):
-            console.print(f"{prefix}{k}={redact_value(k, v)}{suffix}")
+            console.print(f"{prefix}{escape(k)}={escape(redact_value(k, v))}{suffix}")
 
     if cmd == "list":
         presets = manager.list_presets()
@@ -129,7 +131,7 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
             if redirected := endpoint_changes(data, before):
                 ui.warn(
                     console,
-                    f"Preset [cyan]{args.name}[/cyan] changed {', '.join(redirected)}.",
+                    f"Preset [cyan]{args.name}[/cyan] changed {escape(', '.join(redirected))}.",
                     hint="These decide where bibr sends requests, with the API keys in "
                     ".env, and what it launches; check them if the preset came from "
                     "someone else.",
