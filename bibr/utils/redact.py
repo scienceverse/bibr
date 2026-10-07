@@ -19,27 +19,52 @@ from __future__ import annotations
 import logging
 import re
 
-# Query-string credential params: ``?key=...``, ``&api_key=...``, ``token=...``.
+# Query-string credential params: ``?key=...``, ``&api_key=...``, ``token=...``,
+# and signed-URL signatures (Azure SAS ``sig=``, S3/GCS ``X-Amz-Signature=``).
 _QUERY_SECRET_RE = re.compile(
-    r"((?:[?&])(?:key|api[_-]?key|access[_-]?token|token|password|passwd|pwd)=)[^&\s\"'<>]+",
+    r"((?:[?&])(?:key|api[_-]?key|access[_-]?token|refresh[_-]?token|token|client[_-]?secret"
+    r"|password|passwd|pwd|sig|signature|x-amz-signature|x-amz-security-token"
+    r"|x-goog-signature)=)[^&\s\"'<>]+",
+    re.IGNORECASE,
+)
+# A quoted JSON/dict entry: ``"api_key": "…"``, ``'token': '…'``. Same-line
+# only, and the value must close with the quote that opened the key.
+_MAPPING_SECRET_RE = re.compile(
+    r"""((["'])(?:(?:x-(?:goog-)?)?api[_-]?key|access[_-]?token|refresh[_-]?token|token"""
+    r"""|client[_-]?secret|secret|password|passwd|pwd|authorization)\2[ \t]*:[ \t]*\2)"""
+    r"""(?:(?!\2)[^\\\n]|\\.)*\2""",
     re.IGNORECASE,
 )
 # ``Authorization: Bearer <token>`` / ``Basic <b64>``.
 _BEARER_RE = re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/\-]{8,}=*", re.IGNORECASE)
-# URL user-info credentials: ``https://user:pass@host`` — used by OCR/LLM SDKs
-# that embed credentials in the base URL. The user may be empty: the
-# compose-style ``redis://:password@redis:6379/0`` carries only a password.
-_URL_USERINFO_RE = re.compile(r"(://)[^/\s:@]*:[^/\s:@]+@")
-# Just the password of URL user-info, keeping the user name visible.
-_URL_PASSWORD_RE = re.compile(r"(://[^/\s:@]*:)[^/\s:@]+@")
+# API-key headers quoted in error text: ``x-api-key: …`` (Anthropic),
+# ``x-goog-api-key: …`` (Google), ``api-key: …`` (Azure OpenAI).
+_HEADER_SECRET_RE = re.compile(
+    r"\b((?:x-(?:goog-)?)?api-key[ \t]*:[ \t]*)[^\s\"'<>,;]+", re.IGNORECASE
+)
+# URL user-info: ``https://user:pass@host`` — used by OCR/LLM SDKs that embed
+# credentials in the base URL — and a token used as the user name
+# (``https://<token>@github.com``). The user may be empty: the compose-style
+# ``redis://:password@redis:6379/0`` carries only a password. Split as urllib
+# does: the authority ends at ``/``, ``?`` or ``#`` (so ``?mailto=you@example.com``
+# is left alone) and the user-info at its last ``@``, as clients accept an
+# unencoded ``@`` or ``:`` in the password.
+_URL_USERINFO_RE = re.compile(r"(://)[^/?#\s\"'<>]*@")
+# Just the password of URL user-info (after the first ``:``, to the last ``@``),
+# keeping the user name visible.
+_URL_PASSWORD_RE = re.compile(r"(://[^/?#\s\"'<>:]*:)[^/?#\s\"'<>]*@")
 # Any ``scheme://…`` URL, for text that must not name endpoints at all. A match
 # takes the whole run of scheme characters before ``://`` (so ``-https://`` loses
 # the dash too) and starts only where such a run starts: a long run without
 # ``://`` is scanned once, not once per word boundary inside it.
 _URL_RE = re.compile(r"(?<![a-z0-9+.\-])[a-z0-9+.\-]+://[^\s'\"<>]+", re.IGNORECASE)
-# Vendor key shapes: Google (AIza…), OpenAI/Anthropic (sk-…), Groq (gsk_…).
+# Vendor key shapes: Google (AIza…), OpenAI/Anthropic (sk-…), Groq (gsk_…),
+# Hugging Face (hf_…), GitHub (ghp_…, gho_…, ghs_…, github_pat_…) and AWS
+# access key ids (AKIA…, ASIA…).
 _VENDOR_KEY_RE = re.compile(
-    r"\b(?:AIza[0-9A-Za-z_\-]{20,}|sk-(?:ant-)?[0-9A-Za-z_\-]{16,}|gsk_[0-9A-Za-z_\-]{16,})"
+    r"\b(?:AIza[0-9A-Za-z_\-]{20,}|sk-(?:ant-)?[0-9A-Za-z_\-]{16,}|gsk_[0-9A-Za-z_\-]{16,}"
+    r"|hf_[0-9A-Za-z]{20,}|gh[pousr]_[0-9A-Za-z]{20,}|github_pat_[0-9A-Za-z_]{20,}"
+    r"|(?:AKIA|ASIA)[0-9A-Z]{16}\b)"
 )
 
 _REDACTED = "***"
@@ -64,13 +89,16 @@ def redact_key(text: str, api_key: str) -> str:
 def scrub_secrets(text: str) -> str:
     """Mask credential-shaped substrings without knowing the specific key.
 
-    Redacts query-string secret params, ``Bearer``/``Basic`` auth values, and
-    known vendor key shapes. Leaves clean text untouched.
+    Redacts query-string secret params, quoted ``"api_key": "…"`` entries,
+    ``Bearer``/``Basic`` auth values, API-key headers, URL user-info and known
+    vendor key shapes. Leaves clean text untouched.
     """
     if not text:
         return text
     out = _QUERY_SECRET_RE.sub(rf"\1{_REDACTED}", text)
+    out = _MAPPING_SECRET_RE.sub(rf"\g<1>{_REDACTED}\2", out)
     out = _BEARER_RE.sub(rf"\1 {_REDACTED}", out)
+    out = _HEADER_SECRET_RE.sub(rf"\1{_REDACTED}", out)
     out = _URL_USERINFO_RE.sub(rf"\1{_REDACTED}@", out)
     out = _VENDOR_KEY_RE.sub(_REDACTED, out)
     return out
@@ -80,12 +108,14 @@ def redact_url_secrets(text: str) -> str:
     """Mask a URL's user-info password and query-string secrets, keeping the rest.
 
     For showing configured URLs (``REDIS_URL``, ``LLM_BASE_URL``, …) to their
-    operator: host, port, path and user name stay readable.
+    operator: host, port, path and user name stay readable, unless the user
+    name is a known token shape (``https://ghp_…@github.com``).
     """
     if not text:
         return text
     out = _URL_PASSWORD_RE.sub(rf"\1{_REDACTED}@", text)
-    return _QUERY_SECRET_RE.sub(rf"\1{_REDACTED}", out)
+    out = _QUERY_SECRET_RE.sub(rf"\1{_REDACTED}", out)
+    return _VENDOR_KEY_RE.sub(_REDACTED, out)
 
 
 def redact_urls(text: str) -> str:

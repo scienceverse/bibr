@@ -1,8 +1,9 @@
-"""Audit regressions: enrichment warning redaction, ROR robustness."""
+"""Audit regressions: enrichment warning redaction, ROR robustness, secret patterns."""
 
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from unittest import mock
 
@@ -14,6 +15,7 @@ from bibr.clients.ror import RorClient, chosen_organization
 from bibr.config import GlobalSettings, ResolverOptions
 from bibr.models import PaperAuthor, PaperMetadata, PaperReference
 from bibr.processing_warnings import WarningCode
+from bibr.utils.redact import redact_url_secrets, redact_urls, scrub_secrets
 
 # --- enrichment warnings never quote the request URL (report 2.3) ------------
 
@@ -227,3 +229,102 @@ def test_ror_enricher_stays_complete_on_a_malformed_answer(monkeypatch):
     assert outcome.status is EnrichmentStatus.COMPLETE
     assert outcome.warnings == ()
     assert set(metadata.affiliation_match) == {"Uni Two"}
+
+
+# --- secret shapes the scrubbers missed (report 2.6) --------------------------
+
+_GHP = "ghp_" + "a1B2" * 9
+_HF = "hf_" + "QwErTy12" * 4
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # A ``:`` or ``@`` in the password; a token as the user name.
+        ("redis://:pa:ss@redis:6379/0", "redis://***@redis:6379/0"),
+        ("https://user:p@ss@host.internal/v1 down", "https://***@host.internal/v1 down"),
+        (f"git clone https://{_GHP}@github.com/o/r", "git clone https://***@github.com/o/r"),
+        # Vendor token shapes.
+        (f"token {_HF} rejected", "token *** rejected"),
+        ("as AKIAIOSFODNN7EXAMPLE denied", "as *** denied"),
+        (f"{_GHP} gho_{'x' * 36} ghs_{'y' * 36}", "*** *** ***"),
+        (f"pat github_pat_11ABCDEFG0_{'z' * 40} bad", "pat *** bad"),
+        # JSON / dict entries and API-key headers.
+        ('body {"api_key": "abc123", "model": "m"}', 'body {"api_key": "***", "model": "m"}'),
+        ("{'token': 'tok-1', 'n': 'v'}", "{'token': '***', 'n': 'v'}"),
+        ('{"client_secret": "a\\"b", "x": 1}', '{"client_secret": "***", "x": 1}'),
+        ("sent x-api-key: k-123abc, accept: json", "sent x-api-key: ***, accept: json"),
+        ("x-goog-api-key: AIzaShort api-key: azure1", "x-goog-api-key: *** api-key: ***"),
+        # Query parameters.
+        (
+            "GET https://idp.example/token?client_id=a&client_secret=s3cr3t&x=1",
+            "GET https://idp.example/token?client_id=a&client_secret=***&x=1",
+        ),
+        (
+            "GET https://acct.blob.core.windows.net/c/b?sv=2020&sig=ab%2Bcd&se=1",
+            "GET https://acct.blob.core.windows.net/c/b?sv=2020&sig=***&se=1",
+        ),
+    ],
+)
+def test_scrub_secrets_masks_the_missed_shapes(text, expected):
+    assert scrub_secrets(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("redis://:pa:ss@redis:6379/0", "redis://:***@redis:6379/0"),
+        ("https://user:p@ss@host/v1", "https://user:***@host/v1"),
+        ("redis://default:a:b@c@redis:6379/0", "redis://default:***@redis:6379/0"),
+        (f"https://{_GHP}@github.com/o/r", "https://***@github.com/o/r"),
+        ("https://idp/x?client_secret=abc", "https://idp/x?client_secret=***"),
+        # The user name stays readable; no password, nothing to mask.
+        ("https://user@host:8080/path", "https://user@host:8080/path"),
+    ],
+)
+def test_redact_url_secrets_handles_the_missed_shapes(text, expected):
+    assert redact_url_secrets(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Contact john.doe@uni.edu or mailto:jane@uni.edu; doi 10.1000/xyz123",
+        "https://doi.org/10.1002/(SICI)1097-4636(199606)31:2<213::AID-JBM9>3.0.CO;2-K",
+        "GET https://api.crossref.org/works?mailto=you@example.com",
+        "GET https://api.crossref.org?mailto=you@example.com",
+        "connecting to http://gpu-box:2010/search/batch",
+        "the token and the key: tokenizers split words; signature=1 in prose",
+        "hf_hub_download(repo) failed; ghp_short is not a token",
+        'def f(api_key: str | None) -> None:\n    if verdict == "password":',
+        "{'title': 'A token-free paper', 'key': 'value'}",
+    ],
+)
+def test_scrubbers_leave_ordinary_text_alone(text):
+    assert scrub_secrets(text) == text
+    assert redact_url_secrets(text) == text
+
+
+def test_describe_error_masks_a_quoted_key_in_an_error_body():
+    from bibr.utils.redact import describe_error
+
+    exc = RuntimeError('upstream 401: {"error": "bad", "api_key": "sk-short"}')
+    assert describe_error(exc) == 'RuntimeError: upstream 401: {"error": "bad", "api_key": "***"}'
+
+
+def test_new_patterns_stay_linear_on_pathological_input():
+    """Every log record passes through these; unclosed quotes, user-info
+    without a host and repeated headers must not rescan the rest of the line."""
+    texts = [
+        '"token": \'' * 6_000,
+        '"token": "\\' * 6_000,
+        "x-api-key:" * 6_000,
+        "https://" + "a:" * 30_000,
+        "://" + "@" * 60_000,
+    ]
+    started = time.perf_counter()
+    for text in texts:
+        scrub_secrets(text)
+        redact_url_secrets(text)
+        redact_urls(text)
+    assert time.perf_counter() - started < 2.0
