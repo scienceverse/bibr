@@ -127,6 +127,17 @@ disabled for the initial public 0.5.0 launch; users can build the containers
 from the public source. CI still builds the serve image and blocks fixable
 HIGH/CRITICAL vulnerabilities before `CI / required` passes.
 
+A manual container workflow run publishes only a commit that is on `main`. A
+`release` run also needs the `vX.Y.Z` tag on that commit and a matching
+`project.version`, and it refuses to move an already published `vX.Y.Z` image
+tag to a different digest. The `X.Y`, `X` and `latest` image tags move only
+when `X.Y.Z` is the newest release tag on `main` in that series, so publishing
+a backport or an older release never moves them backwards. Release images are
+built without any layer cache, so a rebuild never reproduces a published
+digest: if promotion fails after `vX.Y.Z` was pushed, point the remaining tags
+at that digest by hand with `docker buildx imagetools create` instead of
+rerunning the job.
+
 Before enabling GHCR, configure a clean package with the intended visibility
 and repository Actions access, then verify anonymous pulls for public images.
 Do not expose a legacy private package's old versions as part of that setup.
@@ -142,8 +153,9 @@ See [Docker deployment](../guides/deployment.md#docker-deployment).
    cannot publish to PyPI, GHCR, or GitHub Releases.
 3. After release approval, create and push an annotated `vX.Y.Z` tag on the
    verified commit, with `X.Y.Z` matching `project.version`. The workflow rejects
-   mismatched tags and commits
-   that are not reachable from `main`.
+   mismatched tags, pre-release versions such as `1.2.0rc1` (the container
+   channel publishes only `X.Y.Z`), and commits that are not reachable from
+   `main`.
 4. Watch the tag-triggered Release workflow to completion. PyPI receives the
    verified distributions and GitHub Release assets are attached after each
    enabled delivery channel succeeds. If GHCR is enabled, the release container

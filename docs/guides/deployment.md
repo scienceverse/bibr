@@ -382,7 +382,10 @@ or `#` work.
 **Split deployment** (bibr-serve and the OCR server on different hosts):
 the bundled OCR container has no published host port. Expose it through a
 reverse proxy or an explicit Compose override before pointing another host at
-it. For example, publish port 8080 only on the GPU host's private interface:
+it, and set the same `OCR_API_KEY` in the `.env` on both hosts: `bibr-ocr`
+then rejects requests without it as a bearer token (its `/health` stays open
+for health checks), and `bibr-serve` sends it. For example, publish port 8080
+only on the GPU host's private interface:
 
 ```yaml
 # compose.ocr-port.yml — replace the address with your GPU host's private IP
@@ -393,6 +396,8 @@ services:
 ```
 
 ```bash
+# Both hosts, in .env: OCR_API_KEY=<output of: openssl rand -hex 32>
+
 # GPU host — OCR only
 docker compose -f docker-compose.yml -f compose.ocr-port.yml --profile ocr up -d
 
@@ -413,8 +418,8 @@ a Redis port to a host-side `bibr chew` process.
 the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/)
 on the host. `bibr-serve`'s own GPU models (layout detector, sentence
 segmenter) are lighter; building with `--build-arg WITH_GPU=true` swaps in
-`onnxruntime-gpu`, but the compose file only declares a GPU device
-reservation for `bibr-ocr` — add one to `bibr-serve` too (or rely on
+the `onnxruntime-gpu` build `uv.lock` pins, but the compose file only
+declares a GPU device reservation for `bibr-ocr` — add one to `bibr-serve` too (or rely on
 `nvidia` as the Docker default runtime) if you want its models on GPU as
 well. Without a GPU, `bibr-serve` still runs — the layout detector and
 segmenter fall back to CPU (see `LAYOUT_USE_GPU` / `SEGMENTER_USE_GPU`
@@ -436,7 +441,7 @@ Set these in `.env` (run `bibr config example --full` or see the
 | `OCR_BASE_URL` | External OCR server root URL, without a `/v1` suffix | `http://localhost:8080` (Compose: private `bibr-ocr`) |
 | `OCR_MODEL` | Served model name | `glm-ocr`; `paddle-ocr-vl-1.6` under `OCR_BACKEND=paddle-http` |
 | `OCR_PROFILE` | `paddle` or `glm`; required for custom aliases | inferred for known names |
-| `OCR_API_KEY` | Bearer credential sent to a protected OCR server | — |
+| `OCR_API_KEY` | Bearer credential sent to a protected OCR server; Compose's `bibr-ocr` requires it when set | — |
 | `OCR_ALLOW_INSECURE_HTTP` | Permit non-loopback plain HTTP (private networks only) | `false` (Compose: `true`) |
 | `WTPSPLIT_MODEL` | Short wtpsplit name, full Hugging Face repo ID, or existing local bundle directory | `sat-6l-sm` |
 | `WTPSPLIT_THRESHOLD` | Optional explicit sentence-boundary threshold in `[0, 1]` | wtpsplit model default |
