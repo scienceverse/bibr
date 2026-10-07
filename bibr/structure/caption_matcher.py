@@ -231,6 +231,12 @@ def _maximum_weight_assignment(rows: list[dict[int, float]], column_count: int) 
     and the lowest column on a tie (``argmin`` returns the first minimum),
     so it selects exactly what the loop did, without its per-cell Python
     cost or a dense rows x columns matrix.
+
+    The worst case is still cubic. A row without edges takes the lowest
+    free column, often one a later row's edge needs, and every later row
+    then steps through all matched columns to push it along. Solving each
+    connected component of the edges on its own would avoid that walk but
+    breaks ties differently: those rows' zero cells link every component.
     """
 
     row_count = len(rows)

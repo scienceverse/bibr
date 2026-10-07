@@ -436,6 +436,24 @@ def _two_per_page(count):
     return captions, targets
 
 
+@pytest.mark.parametrize("same_page_only", [True, False])
+def test_captions_without_a_target_keep_the_reference_assignment(same_page_only):
+    """A caption whose figure is missing has no edges and parks on later
+    captions' columns, so each later row walks every matched column (the
+    solve's cubic worst case). The walk can decide ties, so it is kept and
+    such layouts still match the reference exactly."""
+    captions, targets = _two_per_page(60)
+    missing = {"figure:1", "figure:8", "figure:9", "figure:30"}
+    targets = [target for target in targets if target.object_id not in missing]
+
+    assignments = assign_captions(captions, targets, same_page_only=same_page_only)
+
+    assert assignments == _reference_assign_captions(
+        captions, targets, same_page_only=same_page_only
+    )
+    assert sum(item.object_id is not None for item in assignments) == 56
+
+
 def test_captions_are_scored_only_against_targets_on_nearby_pages(monkeypatch):
     """Every caption used to be scored against every target in the document
     (1,000 captions: 1M edge scores and 5.8 s); only the targets on its own
