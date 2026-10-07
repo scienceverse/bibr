@@ -236,8 +236,8 @@ def test_hub_checkpoint_id_ignores_a_cwd_path(tmp_path, monkeypatch):
 
     assert resolve_checkpoint("org/repo", revision="abc") == "/cache/org/repo@abc/best.pt"
     # Written as a path (or passed as a Path), the local file still loads.
-    assert resolve_checkpoint("./org/repo/best.pt") == "org/repo/best.pt"
-    assert resolve_checkpoint(Path("org/repo/best.pt")) == "org/repo/best.pt"
+    assert Path(resolve_checkpoint("./org/repo/best.pt")) == Path("org/repo/best.pt")
+    assert Path(resolve_checkpoint(Path("org/repo/best.pt"))) == Path("org/repo/best.pt")
     (tmp_path / "best.pt").write_bytes(b"local")
     assert resolve_checkpoint("best.pt") == "best.pt"
 
@@ -275,6 +275,7 @@ def test_tilde_checkpoint_path_expands(tmp_path, monkeypatch):
     from bibr.ner.checkpoint import resolve_checkpoint
 
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # what expanduser reads on Windows
     (tmp_path / "best.pt").write_bytes(b"weights")
 
     assert resolve_checkpoint("~/best.pt") == str(tmp_path / "best.pt")

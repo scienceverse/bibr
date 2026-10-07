@@ -19,7 +19,10 @@ import pytest
 
 from bibr.local import cli
 
-pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX signals")
+# Skip before the module body runs: Windows has no SIGHUP, so the constants
+# below would fail at collection, not just in the tests.
+if os.name != "posix":
+    pytest.skip("POSIX signals", allow_module_level=True)
 
 _SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
 
