@@ -63,8 +63,9 @@ are dropped (`DOCX_FIGURES_DROPPED`). Figures carry at most 128 MiB of image dat
 total, an image counting once per figure that shows it; the figures past that
 keep their caption without an image (`DOCX_FIGURE_IMAGES_OMITTED`). A footnote
 or endnote referenced more than once is read once, with one `foot` reference
-from each paragraph that cites it. A note, hyperlink or text box nested inside
-another of its kind is read as part of the outermost one.
+from each paragraph that cites it. A note, hyperlink, text box or equation
+nested inside another of its kind is read as part of the outermost one, and a
+picture inside nested drawings is one figure.
 
 **HTML and ePub limits.** An HTML file over 48 MiB is rejected at validation
 as invalid input, before the pure-Python html5lib parser reads it. HTML is

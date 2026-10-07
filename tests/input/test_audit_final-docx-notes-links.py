@@ -2,17 +2,21 @@
 
 - A footnote or endnote referenced N times was queued N times, text and all:
   one note referenced 20,000 times in a 34 KB file made 1 GB of sentences.
-  Notes nested in notes, hyperlinks in hyperlinks and text boxes in text boxes
-  likewise kept one copy of the innermost text per level.
+  Notes nested in notes, hyperlinks in hyperlinks, text boxes in text boxes
+  and equations in equations likewise kept one copy of the innermost text per
+  level, and a picture inside nested drawings was listed once per drawing.
 - Each hyperlink scanned the sentences for its paragraph, each heading scanned
   the sections for its parent, and python-docx searched the styles part for
   every paragraph's style: quadratic, up to a minute on files of 6-142 KB.
+  Each link and note reference also walked back over the entries that made no
+  sentence.
 
 The scale tests count the work done rather than time it.
 """
 
 from __future__ import annotations
 
+import base64
 import io
 import zipfile
 
@@ -28,14 +32,20 @@ from bibr.input.docx_native import DocxParser
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+M = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 _RELS = "http://schemas.openxmlformats.org/package/2006/relationships"
 _WML = "application/vnd.openxmlformats-officedocument.wordprocessingml"
 URL = "https://example.org/x"
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
 
 
 def _docx(body: str, **parts: str) -> bytes:
     """A package whose ``w:body`` holds *body*, with the given ``footnotes``,
-    ``endnotes`` or ``styles`` parts and a hyperlink relationship ``rIdLink``."""
+    ``endnotes`` or ``styles`` parts, a hyperlink relationship ``rIdLink`` and
+    an image relationship ``rIdImg``."""
     overrides = "".join(
         f'<Override PartName="/word/{name}.xml" ContentType="{_WML}.{name}+xml"/>' for name in parts
     )
@@ -49,6 +59,7 @@ def _docx(body: str, **parts: str) -> bytes:
             '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
             '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
             '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Default Extension="png" ContentType="image/png"/>'
             f'<Override PartName="/word/document.xml" ContentType="{_WML}.document.main+xml"/>'
             f"{overrides}</Types>",
         )
@@ -60,11 +71,14 @@ def _docx(body: str, **parts: str) -> bytes:
         z.writestr(
             "word/_rels/document.xml.rels",
             f'<Relationships xmlns="{_RELS}">{rels}<Relationship Id="rIdLink" '
-            f'Type="{R}/hyperlink" Target="{URL}" TargetMode="External"/></Relationships>',
+            f'Type="{R}/hyperlink" Target="{URL}" TargetMode="External"/><Relationship '
+            f'Id="rIdImg" Type="{R}/image" Target="media/image1.png"/></Relationships>',
         )
+        z.writestr("word/media/image1.png", _PNG)
         z.writestr(
             "word/document.xml",
-            f'<w:document xmlns:w="{W}" xmlns:r="{R}"><w:body>{body}</w:body></w:document>',
+            f'<w:document xmlns:w="{W}" xmlns:r="{R}" xmlns:m="{M}" xmlns:a="{A}">'
+            f"<w:body>{body}</w:body></w:document>",
         )
         for name, xml in parts.items():
             z.writestr(f"word/{name}.xml", xml)
@@ -244,6 +258,57 @@ def test_a_text_box_nested_in_text_boxes_is_read_once():
     assert [entry.text for entry in parser.assembler.entries] == ["Before. Boxed text."]
 
 
+@pytest.mark.parametrize("in_paragraph", [True, False], ids=["in-paragraph", "body-block"])
+def test_an_equation_nested_in_equations_is_read_once(in_paragraph):
+    """Every equation in a display equation was read, each with the equations
+    inside it: 250 levels around 1 MB of math made a 250 MB formula."""
+    depth = 50
+    math = (
+        "<m:oMathPara>"
+        + "<m:oMath>" * depth
+        + "<m:r><m:t>x+y</m:t></m:r>"
+        + "</m:oMath>" * depth
+        + "<m:oMath><m:r><m:t>z</m:t></m:r></m:oMath>"
+        + "</m:oMathPara>"
+    )
+    parser = DocxParser(_docx(f"<w:p>{math}</w:p>" if in_paragraph else math))
+    parser.parse()
+
+    assert [entry.text for entry in parser.assembler.entries] == ["$$x+y z$$"]
+
+
+def _picture() -> str:
+    return '<w:drawing><a:blip r:embed="rIdImg"/></w:drawing>'
+
+
+def test_a_picture_in_a_text_box_is_one_figure():
+    body = (
+        "<w:p><w:r><w:t>Before.</w:t></w:r><w:r><w:drawing><w:txbxContent><w:p><w:r>"
+        + _picture()
+        + "</w:r></w:p></w:txbxContent></w:drawing></w:r></w:p>"
+    )
+    _, contents = _run(_docx(body))
+
+    assert len(contents.figures) == 1
+
+
+def test_pictures_inside_nested_drawings_are_listed_once():
+    """A picture was listed once per drawing around it: 250 nested drawings
+    made 25 million matches of 100,000 pictures."""
+    depth, pictures = 50, 20
+    body = (
+        "<w:p><w:r>"
+        + "<w:drawing>" * depth
+        + _picture() * pictures
+        + "</w:drawing>" * depth
+        + "</w:r></w:p>"
+    )
+    parser, contents = _run(_docx(body))
+
+    assert len(contents.figures) == pictures
+    assert not parser.processing_warnings
+
+
 # ----- Linear lookups -----
 
 
@@ -273,6 +338,47 @@ def test_hyperlinks_resolve_without_a_scan_per_link(monkeypatch):
     }
     # A scan per link visited 2,000 x 301 sentences.
     assert emitted[0].visits < 20 * len(contents.sentences)
+
+
+class _CountingIndexList(_CountingList):
+    """A :class:`_CountingList` that also counts indexing."""
+
+    def __getitem__(self, index):
+        self.visits += 1
+        return list.__getitem__(self, index)
+
+
+def test_references_after_entries_without_sentences_resolve_without_a_walk_back(monkeypatch):
+    """Each link and note reference walked back over the entries that made no
+    sentence (a segmenter returning nothing for them) to find its text_id."""
+    count = 300
+    link = '<w:hyperlink r:id="rIdLink"><w:r><w:t>x</w:t></w:r></w:hyperlink>'
+    body = _para("First.") + f"<w:p>{link}{_ref('1')}</w:p>" * count
+    parser = DocxParser(_docx(body, footnotes=_notes("footnote", {"1": "The note."})))
+    contents = parser.parse()
+    emit = parser.assembler.emit
+    trails: list[_CountingIndexList] = []
+
+    def counting_emit(*args, **kwargs):
+        result = emit(*args, **kwargs)
+        trails.append(_CountingIndexList(parser.assembler.last_text_id))
+        parser.assembler.last_text_id = trails[-1]
+        return result
+
+    monkeypatch.setattr(parser.assembler, "emit", counting_emit)
+    parser.apply_segmentation(contents, [["First."]] + [[]] * count)
+    parser.create_content_sections(contents)
+
+    first = contents.sentences[0]
+    assert len(contents.links) == count
+    assert {(lk.text_id, lk.paragraph_id) for lk in contents.links} == {
+        (first.text_id, first.paragraph_id)
+    }
+    foot = [x for x in contents.xrefs if x.xref_type == "foot"]
+    assert len(foot) == count
+    assert {x.text_id for x in foot} == {first.text_id}
+    # Walking back visited 2 x 300 x 150 entries.
+    assert trails[0].visits < 10 * count
 
 
 def _heading_styles() -> str:

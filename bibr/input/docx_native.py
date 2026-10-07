@@ -99,6 +99,9 @@ _INLINE_WRAPPERS: frozenset[str] = frozenset(
     )
 )
 _W_R = f"{{{_NS['w']}}}r"
+_W_DRAWING = f"{{{_NS['w']}}}drawing"
+_A_BLIP = f"{{{_NS['a']}}}blip"
+_M_OMATH = f"{{{_NS['m']}}}oMath"
 _W_TXBX_CONTENT = f"{{{_NS['w']}}}txbxContent"
 _W_STYLE = f"{{{_NS['w']}}}style"
 _W_STYLE_ID = f"{{{_NS['w']}}}styleId"
@@ -216,9 +219,8 @@ def _image_parts(paragraph, doc) -> list:
     """The image parts shown by a paragraph's inline ``<w:drawing>`` pictures,
     in order; a part shown twice is listed twice."""
     out = []
-    blips = paragraph._element.findall(f".//{{{_NS['w']}}}drawing//{{{_NS['a']}}}blip")
     related = doc.part.related_parts
-    for blip in blips:
+    for blip in _drawing_blips(paragraph._element):
         rid = blip.get(f"{{{_NS['r']}}}embed")
         if rid is None:
             continue
@@ -335,8 +337,29 @@ def _style_name(style) -> str | None:
     return None if value is None else BabelFish.internal2ui(value)
 
 
+def _drawing_blips(p):
+    """The ``a:blip`` pictures inside a body paragraph's ``w:drawing`` elements,
+    each once. A ``.//w:drawing//a:blip`` search lists a picture once per
+    drawing around it: a picture in a text box's drawing became two figures,
+    and 250 nested drawings made 25 million matches of 100,000 pictures."""
+    for blip in p.iter(_A_BLIP):
+        if next(blip.iterancestors(_W_DRAWING), None) is not None:
+            yield blip
+
+
 def _has_picture(paragraph) -> bool:
-    return bool(paragraph._element.findall(f".//{{{_NS['w']}}}drawing//{{{_NS['a']}}}blip"))
+    return next(_drawing_blips(paragraph._element), None) is not None
+
+
+def _display_math_text(omath_para_el) -> str:
+    """A display equation's text: each ``m:oMath`` in the ``m:oMathPara``, read
+    once. An equation nested in another is read as part of the outer one: read
+    again on its own, a nest 250 deep turned 1 MB of math into 250 MB."""
+    return " ".join(
+        _omml_to_text(om)
+        for om in omath_para_el.iter(_M_OMATH)
+        if next(om.iterancestors(_M_OMATH), None) is None
+    ).strip()
 
 
 def _paragraph_text(p) -> str:
@@ -474,6 +497,8 @@ class DocxParser:
         # Hyperlink captures awaiting text_id resolution at segmentation time.
         # Each entry: (url, link_text, section_id, deferred_text_index)
         self._pending_url_links: list[tuple[str, str, int, int]] = []
+        # The latest text_id at or before each deferred entry, set at segmentation.
+        self._nearest_text_ids: list[int | None] = []
         # Figures awaiting a Caption-styled paragraph immediately after
         self._unfilled_caption_figures: list[PaperFigure] = []
 
@@ -654,6 +679,13 @@ class DocxParser:
             sentence_counter=self._sentence_counter,
             paragraph_counter=self._paragraph_counter,
         )
+        # Each link and note reference walked back over the entries that made
+        # no sentence to find its text_id; carrying it forward once is linear.
+        latest: int | None = None
+        self._nearest_text_ids = []
+        for text_id in self.assembler.last_text_id:
+            latest = latest if text_id is None else text_id
+            self._nearest_text_ids.append(latest)
 
         # Resolve pending hyperlink captures: the deferred index points to the
         # paragraph entry; use its last emitted sentence's text_id (or the next
@@ -810,14 +842,11 @@ class DocxParser:
 
     def _find_nearest_text_id(self, deferred_idx: int) -> int:
         """Last text_id at or before ``deferred_idx`` in the deferred-texts stream."""
-        last_text_id = self.assembler.last_text_id
-        if not last_text_id:
-            return self.sentences[0].text_id if self.sentences else 1
-        clamped = min(max(0, deferred_idx), len(last_text_id) - 1)
-        for i in range(clamped, -1, -1):
-            tid = last_text_id[i]
-            if tid is not None:
-                return tid
+        nearest = self._nearest_text_ids
+        if nearest:
+            text_id = nearest[min(max(0, deferred_idx), len(nearest) - 1)]
+            if text_id is not None:
+                return text_id
         return self.sentences[0].text_id if self.sentences else 1
 
     # ------------------------------------------------------------------
@@ -966,8 +995,7 @@ class DocxParser:
                 if tag == f"{{{m}}}oMathPara":
                     # Display math — flush any text so far, then emit math as own entry
                     flush_body()
-                    math_text = " ".join(_omml_to_text(om) for om in child.iter(f"{{{m}}}oMath"))
-                    math_text = math_text.strip()
+                    math_text = _display_math_text(child)
                     if math_text:
                         self.assembler.append(
                             f"$${math_text}$$",
@@ -1084,9 +1112,7 @@ class DocxParser:
 
     def _handle_math_para(self, omath_para_el) -> None:
         """Block-level OMML — emit as a non-segmented formula deferred entry."""
-        m = _NS["m"]
-        math_text = " ".join(_omml_to_text(om) for om in omath_para_el.iter(f"{{{m}}}oMath"))
-        math_text = math_text.strip()
+        math_text = _display_math_text(omath_para_el)
         if not math_text:
             return
         self.assembler.append(
