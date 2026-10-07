@@ -572,7 +572,7 @@ def _check_llm_local_backend(backend: str, model: str, ok, fail) -> None:
     if backend == "vllm" and importlib.util.find_spec("vllm") is None:
         # Honest about the cost: the first chew bootstraps vLLM through uv
         # (several GB), and on Python 3.14 — where the vllm extra installs
-        # nothing because vllm==0.27.0 has no 3.14 wheels — inside a
+        # nothing because vllm==0.31.0 has no 3.14 wheels — inside a
         # managed Python 3.13.
         hint = "Install with: uv sync --extra vllm, or install uv (https://astral.sh/uv)"
         note = "uv-managed vLLM runner; the first run downloads several GB"
