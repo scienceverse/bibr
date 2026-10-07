@@ -252,6 +252,9 @@ of its sentence, like the `xref` spans, and follow the text cleaning that
 runs after linking. A citation the exported sentence no longer prints, such
 as a superscript marker removed from the text, has an empty span (`start`
 equals `end`) at about the place it stood; its `raw` keeps the printed form.
+A `flattened-superscript` candidate, whose `raw` is bare digits, points at
+digits glued to a word as the tier read them ("CD4", "cells2,3"), never at
+the same digits inside a number or another citation.
 
 `refs="off"` skips bibliographic citation linking along with reference
 extraction. `no_llm=True` skips citation linking as part of its reduced

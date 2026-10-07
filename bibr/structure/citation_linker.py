@@ -10,7 +10,8 @@ import asyncio
 import logging
 import re
 import unicodedata
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
+from collections.abc import Iterator
 from dataclasses import replace
 from itertools import accumulate
 
@@ -186,7 +187,7 @@ NUMERIC_CITE_RE = re.compile(
 _BRACKET_SPAN_RE = re.compile(r"\[([^\]]+)\]")
 
 
-def _bracket_spans(text: str):
+def _bracket_spans(text: str) -> Iterator[re.Match[str]]:
     """Iterate ``_BRACKET_SPAN_RE`` matches in *text*.
 
     The search stops at the last "]": no span closes after it, and each "["
@@ -214,8 +215,9 @@ SUPERSCRIPT_CITE_RE = re.compile(r"(?<!\w)(?<!\$)(?<!\})\^\{(\d+(?:\s*[-\u2013,;
 # its own local guards and the recurring-style gate.
 PAREN_NUMERIC_CITE_RE = re.compile(r"\((\d{1,3}(?:\s*[,\u2013-]\s*\d{1,3})*)\)")
 
+_PROCEDURAL_LABEL_WORDS = ("step", "phase", "stage", "criterion", "criteria", "option", "item")
 _PROCEDURAL_LABEL_BEFORE_RE = re.compile(
-    r"(?:^|\b)(?:step|phase|stage|criterion|criteria|option|item)\s*$",
+    rf"(?:^|\b)(?:{'|'.join(_PROCEDURAL_LABEL_WORDS)})\s*$",
     re.IGNORECASE,
 )
 # "Eq. (3)", "Eqs (4)", "Equation (5)" name an equation, never a reference, and
@@ -233,15 +235,16 @@ _AGGREGATE_COUNT_NOUN_RE = re.compile(
     r"\b(?:participants?|respondents?|indicators?|cases?|samples?|observations?|records?)\b",
     re.IGNORECASE,
 )
-_COUNT_COPULA_AFTER_RE = re.compile(r"^\s*(?:was|were|is|are|had|have|has)\b", re.IGNORECASE)
+# Matched at the end of the candidate.
+_COUNT_COPULA_AFTER_RE = re.compile(r"\s*(?:was|were|is|are|had|have|has)\b", re.IGNORECASE)
+_COUNT_CONTAINER_WORDS = ("domain", "subdomain", "category", "group", "class", "sector")
 _COUNT_CONTAINER_BEFORE_RE = re.compile(
-    r"\b(?:domain|subdomain|category|group|class|sector)\s*$",
+    rf"\b(?:{'|'.join(_COUNT_CONTAINER_WORDS)})\s*$",
     re.IGNORECASE,
 )
-# The longest word of _PROCEDURAL_LABEL_BEFORE_RE and _COUNT_CONTAINER_BEFORE_RE
-# ("criterion", "subdomain"): a match starts at most this far before the
+# A match of either label pattern starts at most its longest word before the
 # trailing whitespace, so the search starts there.
-_LABEL_WORD_MAX_LEN = 9
+_LABEL_WORD_MAX_LEN = max(map(len, _PROCEDURAL_LABEL_WORDS + _COUNT_CONTAINER_WORDS))
 
 # Tier 1d: OCR-flattened superscript citations \u2014 digits glued to the END of a
 # word or after punctuation where GLM-OCR dropped the superscript markup:
@@ -944,10 +947,14 @@ def _offset_after_removal(
     return offset - removed_before[index] + max(0, removed[index - 1][1] - offset)
 
 
-# How far before its expected offset a candidate is looked for. Late cleaning
-# deletes a few characters between two candidates (collapsed whitespace,
-# unwrapped "$" and LaTeX commands); the bound keeps the search linear.
+# How far before its expected offset a candidate is looked for first. Late
+# cleaning deletes a few characters between two candidates (collapsed
+# whitespace, unwrapped "$" and LaTeX commands); the bound keeps the search
+# linear. A citation not found there is looked for back to the citation
+# before it, within a budget of a few passes over the sentence: one not
+# printed any more (a rewritten superscript) is looked for in vain.
 _REANCHOR_WINDOW = 512
+_REANCHOR_LOOK_BACK_PASSES = 8
 
 
 def reanchor_citation_receipt(
@@ -957,10 +964,11 @@ def reanchor_citation_receipt(
 
     Late text cleaning (``finalize_text``) only deletes characters, keeping
     their order, so a candidate still printed (whitespace collapsed) starts at
-    or before its offset moved as far as the candidate before it moved, and
-    not before that candidate. One no longer printed (a marker the cleaning
+    or before its offset moved as far as the citation before it moved, and
+    not before that citation. One no longer printed (a marker the cleaning
     rewrote) gets an empty span there. Sentences missing from *texts* keep
-    their offsets.
+    their offsets, and so do sentences whose candidates all print their text
+    at their offsets already, which makes re-anchoring twice a no-op.
     """
     candidates = list(receipt.candidates)
     by_text: dict[int, list[int]] = {}
@@ -980,22 +988,52 @@ def reanchor_citation_receipt(
 
 def _reanchored_spans(text: str, candidates: list[CitationCandidate]) -> list[tuple[int, int]]:
     """Spans in *text* of one sentence's candidates, given in order of their offsets."""
+    # Bare digits are printed by other numbers too: a flattened superscript
+    # is printed only where the tier could read it, glued to a word.
+    prints = (
+        [m.span(2) for m in FLATTENED_SUP_CITE_RE.finditer(text)]
+        if any(candidate.style == "flattened-superscript" for candidate in candidates)
+        else []
+    )
+    if _spans_index(text, candidates, set(prints)):
+        # Nothing before them changed, or they were re-anchored already.
+        return [(candidate.start, candidate.end) for candidate in candidates]
     spans: list[tuple[int, int]] = []
     shift = floor = 0
     taken_to: dict[str, int] = {}
-    for candidate in candidates:
+    budget = _REANCHOR_LOOK_BACK_PASSES * len(text)
+    # Only citation texts anchor: flattened superscripts are placed between
+    # them afterwards.
+    flattened: dict[int, tuple[int, int]] = {}
+    previous = None
+    for index, candidate in enumerate(candidates):
+        if (candidate.start, candidate.end) == previous:
+            # The same span again (Tier 2 keeps one per year of
+            # "(Smith, 2010, 2012)"): the same print.
+            spans.append(spans[-1])
+            continue
+        previous = candidate.start, candidate.end
         printed = " ".join(candidate.raw.split())
         expected = candidate.start + shift
         span = None
         if candidate.end > candidate.start and printed:
-            lowest = max(floor, expected - _REANCHOR_WINDOW, taken_to.get(printed, 0))
-            span = _print_span(text, candidate, printed, expected, lowest)
+            if candidate.style == "flattened-superscript":
+                flattened[index] = (expected, floor)
+            else:
+                lowest = max(floor, taken_to.get(printed, 0))
+                window = max(lowest, expected - _REANCHOR_WINDOW)
+                span = _print_span(text, candidate, printed, expected, window)
+                if span is None and window > lowest and budget > 0:
+                    budget -= min(expected, len(text)) - lowest
+                    span = _print_span(text, candidate, printed, expected, lowest)
         if span is None:
             spans.append((min(expected, len(text)),) * 2)
             continue
         spans.append(span)
         taken_to[printed] = span[1]
         shift, floor = span[0] - candidate.start, span[0]
+    if flattened:
+        _place_flattened(text, candidates, spans, flattened, prints)
     # An empty span stays before the candidates found after it.
     ceiling = len(text)
     for index in range(len(spans) - 1, -1, -1):
@@ -1007,23 +1045,75 @@ def _reanchored_spans(text: str, candidates: list[CitationCandidate]) -> list[tu
     return spans
 
 
+def _spans_index(
+    text: str, candidates: list[CitationCandidate], prints: set[tuple[int, int]]
+) -> bool:
+    """Whether each candidate prints its text at its span in *text*, or has an empty one."""
+    for candidate in candidates:
+        start, end = candidate.start, candidate.end
+        if not 0 <= start <= end <= len(text):
+            return False
+        if start == end:
+            continue
+        if candidate.style == "flattened-superscript" and (start, end) not in prints:
+            return False
+        if text[start:end] not in (candidate.raw, " ".join(candidate.raw.split())):
+            return False
+    return True
+
+
+def _place_flattened(
+    text: str,
+    candidates: list[CitationCandidate],
+    spans: list[tuple[int, int]],
+    flattened: dict[int, tuple[int, int]],
+    prints: list[tuple[int, int]],
+) -> None:
+    """Give each flattened superscript in *flattened* (index: expected, floor) a print.
+
+    *prints* are the digit runs the tier reads in *text*, in order. Going
+    backwards, a candidate takes the last print of its digits before the
+    candidate after it and its expected offset, no further back than the
+    next citation found moved (cleaning between the two only deletes) and
+    within the window below that bound.
+    """
+    after = len(text)
+    after_shift: int | None = None
+    for index in range(len(candidates) - 1, -1, -1):
+        candidate = candidates[index]
+        if index not in flattened:
+            if spans[index][1] > spans[index][0]:
+                after, after_shift = spans[index][0], spans[index][0] - candidate.start
+            continue
+        expected, floor = flattened[index]
+        highest = min(expected, after - len(candidate.raw))
+        lowest = max(floor, highest - _REANCHOR_WINDOW)
+        if after_shift is not None:
+            lowest = max(lowest, candidate.start + after_shift)
+        position = bisect_right(prints, (highest, len(text))) - 1
+        while position >= 0 and prints[position][0] >= lowest:
+            start, end = prints[position]
+            if text[start:end] == candidate.raw:
+                spans[index] = (start, end)
+                after = start
+                break
+            position -= 1
+
+
 def _print_span(
     text: str, candidate: CitationCandidate, printed: str, expected: int, lowest: int
 ) -> tuple[int, int] | None:
-    """Where *text* prints *candidate*: at *expected*, else from *lowest* up to it."""
-    if text.startswith(candidate.raw, expected):
-        return expected, expected + len(candidate.raw)
-    if text.startswith(printed, expected):
-        return expected, expected + len(printed)
-    if candidate.style == "flattened-superscript":
-        # Its raw text is the bare digits, which other numbers print too: the
-        # print nearest the offset.
-        found = text.rfind(printed, lowest, expected + len(printed))
-    else:
-        # Other citation texts are printed by citations only: the first print
-        # not taken by a candidate before it.
-        found = text.find(printed, lowest, expected + len(printed))
-    return (found, found + len(printed)) if found >= 0 else None
+    """The first print of *candidate* in *text* from *lowest* up to *expected*.
+
+    A citation text is printed by citations only, so the first print not
+    taken by a candidate before it is this one's, even where a later print
+    happens to sit at *expected*.
+    """
+    for form in dict.fromkeys((candidate.raw, printed)):
+        found = text.find(form, lowest, expected + len(form))
+        if found >= 0:
+            return found, found + len(form)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1334,15 +1424,20 @@ def _parenthetical_local_reasons(
     parenthetical citation style elsewhere in the document.
     """
 
-    before = text[: match.start()]
-    after = text[match.end() :]
-    window = before[-160:]
-    label_from = max(0, len(before.rstrip()) - _LABEL_WORD_MAX_LEN)
+    start, end = match.span()
+    # The guards read the sentence in place: copying the text before and after
+    # every candidate is quadratic in a sentence of many. ``before_end`` is
+    # where the text before the candidate ends without trailing whitespace.
+    before_end = start
+    while before_end and text[before_end - 1].isspace():
+        before_end -= 1
+    window = text[max(0, start - 160) : start]
+    label_from = max(0, before_end - _LABEL_WORD_MAX_LEN)
     reasons: list[str] = []
 
     if (
-        not before.strip()
-        or _PROCEDURAL_LABEL_BEFORE_RE.search(before, label_from)
+        not before_end
+        or _PROCEDURAL_LABEL_BEFORE_RE.search(text, label_from, start)
         or is_small_contiguous_sequence
     ):
         reasons.append("list_enumeration")
@@ -1351,8 +1446,8 @@ def _parenthetical_local_reasons(
         _AGGREGATE_COUNT_CUE_RE.search(window)
         and _AGGREGATE_COUNT_NOUN_RE.search(window)
         and (
-            _COUNT_COPULA_AFTER_RE.match(after)
-            or _COUNT_CONTAINER_BEFORE_RE.search(before, label_from)
+            _COUNT_COPULA_AFTER_RE.match(text, end)
+            or _COUNT_CONTAINER_BEFORE_RE.search(text, label_from, start)
         )
     ):
         reasons.append("parenthetical_count")
@@ -1361,12 +1456,12 @@ def _parenthetical_local_reasons(
     # not a second citation grammar. The immediately preceding digit is
     # candidate-local evidence and does not suppress parenthetical citations
     # elsewhere in a mixed-style document.
-    if _ADJACENT_NUMERIC_LABEL_REVERSED_RE.match(reversed_text, len(text) - match.start()):
+    if _ADJACENT_NUMERIC_LABEL_REVERSED_RE.match(reversed_text, len(text) - start):
         reasons.append("adjacent_numeric_label")
 
     if _EQUATION_LABEL_BEFORE_RE.search(window):
         reasons.append("equation_tag")
-    if _is_statistic_group(text, match.start(), match.end()):
+    if _is_statistic_group(text, start, end):
         reasons.append("statistic_context")
 
     return tuple(reasons)

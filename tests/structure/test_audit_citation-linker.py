@@ -199,6 +199,17 @@ def test_parenthetical_guards_are_linear_in_the_sentence():
     assert elapsed < 2.0
 
 
+def test_parenthetical_guards_read_the_sentence_in_place():
+    # Each candidate copied and stripped the whole text before it: 8,000
+    # candidates after a 4,000,000-letter run took about 48 s.
+    text = "Sequence " + "ACGT" * 1_000_000 + " (1)" * 8_000 + "."
+
+    elapsed, results = _elapsed(lambda: _paren_reasons(text))
+
+    assert len(results) == 8_000
+    assert elapsed < 2.0
+
+
 class _CountingCandidate(CitationCandidate):
     """A candidate that counts reads of its ``text_id`` and ``rejection_reasons``."""
 
@@ -531,6 +542,116 @@ def test_reanchoring_takes_the_nearest_print_of_bare_digits():
     [moved] = citation_linker.reanchor_citation_receipt(receipt, {1: text}).candidates
 
     assert (moved.start, moved.end) == (18, 19)
+
+
+async def _linked_and_cleaned(texts, refs=None):
+    """Link, strip and clean *texts*; return the final texts and the re-anchored receipt."""
+    sentences, numbered_refs = _numbered(texts)
+    contents = PaperContents(
+        sentences=sentences, sections=_sections(), tables=[], links=[], sections_text={}
+    )
+    _xrefs, receipt = await citation_linker.detect_bib_xrefs_with_receipt(
+        sentences, _sections(), refs or numbered_refs
+    )
+    receipt = citation_linker.strip_citation_superscripts(sentences, _sections(), receipt)
+    contents.finalize_text()
+    texts = {sentence.text_id: sentence.text for sentence in sentences}
+    return texts, citation_linker.reanchor_citation_receipt(receipt, texts)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "In $\\alpha$-treated mice, CD4 [4] cells expanded.",
+        "The $\\alpha$ subunit of cells2 [2] was expressed.",
+        "$\\beta$see$ ^{2} $$\\beta$,see2.5\n[2, 4][2, 4]cells3and",
+    ],
+    ids=["CD4", "cells2", "repeated"],
+)
+async def test_glued_digits_do_not_take_the_print_of_a_later_citation(text):
+    # The digits glued to "CD4" were re-anchored onto the "4" inside "[4]"
+    # and moved the search for "[4]" past its print: an accepted citation
+    # the sentence still prints got an empty span.
+    texts, receipt = await _linked_and_cleaned([text])
+
+    final = texts[1]
+    rows = _offsets(receipt, 1, final)
+    _assert_indexes(rows, final)
+    citations = [c for c in receipt.candidates if c.text_id == 1 and c.raw.startswith("[")]
+    assert citations and all(c.accepted for c in citations)
+    assert all(final[c.start : c.end] == c.raw for c in citations)
+    assert sorted((c.start, c.end) for c in citations) == sorted(
+        {(m.start(), m.end()) for m in re.finditer(r"\[[^\]]+\]", final)}
+    )
+
+
+async def test_glued_digits_point_at_the_digits_after_their_word():
+    texts, receipt = await _linked_and_cleaned(
+        ["In $\\alpha$-treated mice, CD4 [4] cells expanded."]
+    )
+
+    assert texts[1] == "In α-treated mice, CD4 [4] cells expanded."
+    assert _offsets(receipt, 1, texts[1]) == [("4", 21, 22, "4"), ("[4]", 23, 26, "[4]")]
+
+
+async def test_repeated_citation_keeps_its_own_print():
+    # Cleaning deleted exactly as much before the first "[6]" as separates
+    # the two: its old offset held the second print, which it took, and the
+    # second "[6]" was left with an empty span.
+    texts, receipt = await _linked_and_cleaned(["Both $\\alpha$ studies [6] or [6] agreed."])
+
+    assert texts[1] == "Both α studies [6] or [6] agreed."
+    assert _offsets(receipt, 1, texts[1]) == [("[6]", 15, 18, "[6]"), ("[6]", 22, 25, "[6]")]
+
+
+async def test_one_span_linked_twice_keeps_one_print():
+    # Tier 2 keeps a candidate per year of "(Smith, 2010, 2012)", all with
+    # the same span.
+    refs = [_ref(1, authors="Smith, A.", year=2010), _ref(2, authors="Smith, A.", year=2012)]
+    texts, receipt = await _linked_and_cleaned(
+        ["Both $\\alpha$ reviews (Smith, 2010, 2012) agree."], refs=refs
+    )
+
+    rows = _offsets(receipt, 1, texts[1])
+    assert len(rows) == 2
+    assert {row[1:] for row in rows} == {(15, 34, "(Smith, 2010, 2012)")}
+
+
+async def test_citations_after_a_long_formula_keep_their_print():
+    # Flattening the formula deleted more than the first look-back: every
+    # citation after it got an empty span.
+    texts, receipt = await _linked_and_cleaned(
+        ["See [3] $" + "\\mathrm{a}" * 80 + "$ and cells2 [4] then [6]."]
+    )
+
+    final = texts[1]
+    assert final == "See [3] " + "a" * 80 + " and cells2 [4] then [6]."
+    assert [row[0] for row in _offsets(receipt, 1, final)] == ["[3]", "2", "[4]", "[6]"]
+    assert [row[3] for row in _offsets(receipt, 1, final)] == ["[3]", "2", "[4]", "[6]"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "In $\\alpha$-treated mice, CD4 [4] cells expanded and CD4 [4] again.",
+        # More deleted between two citations than the search first looks back.
+        "See [3] $"
+        + "\\mathrm{a}" * 80
+        + "$ cells2 [3] and [1,2] and [1,2] cells2 [2]. x"
+        + " " * 700
+        + "[2] and type2 [6].",
+        "Then cells3 x^{2}^{4,5},   \\alphaIL6    $"
+        + "\\mathrm{a}" * 55
+        + "$[2, 4]^{3}and[4] x^{2}[2, 4]and[4][2]",
+    ],
+    ids=["glued-digits", "long-cleaning", "long-formula-repeats"],
+)
+async def test_reanchoring_twice_changes_nothing(text):
+    # The exporter re-anchors the receipt post_parse re-anchored already.
+    texts, receipt = await _linked_and_cleaned([text])
+
+    assert citation_linker.reanchor_citation_receipt(receipt, texts) == receipt
+    _assert_indexes(_offsets(receipt, 1, texts[1]), texts[1])
 
 
 def _input_file():
