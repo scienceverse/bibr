@@ -59,12 +59,14 @@ the encoding its byte-order mark or XML declaration names.
 
 **HTML table limits** (HTML and ePub tables, and the table HTML OCR returns).
 A `rowspan` ends at the table's last row, as a browser draws it, and more
-than 100 header rows are read as data rows. A table whose spans would expand
-it far past its own markup (wider than twice its widest row of cells plus 20
-columns, or more than 20 slots for each cell and row it has plus 1,000) gets
-no `contents`. Like a table without cells, an HTML table then keeps its
-caption and markup when the caption labels it ("Table 3. …") and is dropped
-otherwise.
+than 100 header rows are read as data rows. A table may be at most twice as
+wide as its widest row of cells plus 20 columns, and hold at most 20 slots for
+each cell and row it has plus 1,000. A `colspan` ends at that width, so a
+footnote row with `colspan="100"` under five columns gives 30 columns. A
+table wider than that all the same (one wide row padding many short rows, or
+rowspans piling up row after row) gets no `contents`. Like a table without
+cells, an HTML table then keeps its caption and markup when the caption labels
+it ("Table 3. …") and is dropped otherwise.
 
 **Native text bypass and recognition.** `bibr/ocr/pdf_inspection.py` inspects
 embedded PDF text, metadata, outline headings, and reference-line geometry

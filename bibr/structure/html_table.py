@@ -31,14 +31,17 @@ header instead of raising IndexError.
 Spans are capped at the HTML limits (1000 columns, 65534 rows), and a
 ``rowspan`` ends at the table's last row, as a browser draws it, where
 ``read_html`` added a row of copies for each row it reached past the end.
-The expanded table must also stay in proportion to its markup, or it is not
-read: at most twice as wide as its widest row of cells (plus
-``_FREE_COLUMNS``), and at most ``_SLOTS_PER_ITEM`` slots for each of its
-cells and rows (plus ``_FREE_SLOTS``). Spans, or one wide row padding many
-short ones, otherwise made a few bytes allocate millions of slots, from a
-garbled OCR span or crafted HTML alike; every column costs pandas about what
-html5lib spends parsing a cell. More than ``_MAX_HEADER_ROWS`` header rows
-are read as data rather than as that many MultiIndex levels.
+The expanded table must also stay in proportion to its markup: at most twice
+as wide as its widest row of cells (plus ``_FREE_COLUMNS``), and at most
+``_SLOTS_PER_ITEM`` slots for each of its cells and rows (plus
+``_FREE_SLOTS``). A ``colspan`` ends where its row would grow wider than
+that, so the "span every column" ``colspan="100"`` over five columns still
+reads; a table that is wider all the same (one wide row padding many short
+ones, or rowspans piling up row after row) is not read. Spans and padding
+otherwise made a few bytes allocate millions of slots, from a garbled OCR
+span or crafted HTML alike; every column costs pandas about what html5lib
+spends parsing a cell. More than ``_MAX_HEADER_ROWS`` header rows are read
+as data rather than as that many MultiIndex levels.
 """
 
 from __future__ import annotations
@@ -86,7 +89,7 @@ def html_table_frame(source: str | Tag) -> pd.DataFrame | None:
     *source* is HTML markup, or a ``<table>`` element already parsed with
     html5lib (which is read from a copy, never modified). Returns ``None``
     when there is no table with text and at least one row, or when that table
-    expands out of proportion to its markup.
+    is out of proportion to its markup even with its colspans ended.
     """
     if isinstance(source, Tag):
         root: Tag = copy.copy(source)
@@ -150,15 +153,22 @@ def _sections(table: Tag) -> tuple[list[list[str]], list[list[str]], list[list[s
 
 def _span(value: Any, limit: int) -> int:
     match = _SPAN_RE.match(str(value or ""))
-    return min(max(int(match.group(1)), 1), limit) if match else 1
+    if not match:
+        return 1
+    # Seven significant digits are past either limit already, and int()
+    # raises on more than 4,300.
+    digits = match.group(1).lstrip("0")[:7]
+    return min(max(int(digits or "0"), 1), limit)
 
 
 def _expand_spans(rows: list[Tag]) -> list[list[str]]:
     """Rows of cell text, each spanned cell copied into every slot it covers.
 
-    A rowspan still open after the last row ends there. Raises
-    :class:`_TooManyCells` as soon as a row grows wider than the table may
-    be, so the padded frame is never built past its bounds.
+    A rowspan still open after the last row ends there, and a colspan where
+    its row would grow wider than the table may be. Raises
+    :class:`_TooManyCells` when a row's own cells and the rowspans it carries
+    are wider than that already, so the padded frame is never built past its
+    bounds.
     """
     row_cells = [_cells(tr) for tr in rows]
     items = len(rows) + sum(map(len, row_cells))
@@ -170,11 +180,13 @@ def _expand_spans(rows: list[Tag]) -> list[list[str]]:
     # The rowspans still open from the rows above, in column order.
     pending: list[_Pending] = []
     for cells in row_cells:
+        if len(cells) + len(pending) > max_width:
+            raise _TooManyCells
         texts: list[str] = []
         still_open: list[_Pending] = []
         index = 0
         placed = 0
-        for td in cells:
+        for k, td in enumerate(cells):
             # A cell spanning down from an earlier row takes its slot first.
             while placed < len(pending) and pending[placed][0] <= index:
                 prev_index, prev_text, prev_rows = pending[placed]
@@ -185,19 +197,20 @@ def _expand_spans(rows: list[Tag]) -> list[list[str]]:
                 index += 1
             text = _WHITESPACE_RE.sub(" ", td.text.strip())
             rowspan = _span(td.get("rowspan"), _MAX_ROWSPAN)
-            for _ in range(_span(td.get("colspan"), _MAX_COLSPAN)):
+            # A colspan past the table's width ("span every column" over a
+            # narrow table) ends there, leaving a slot for each cell and
+            # rowspan still to come in the row; the check above keeps that
+            # room at least 1.
+            room = max_width - len(texts) - (len(cells) - k - 1) - (len(pending) - placed)
+            for _ in range(min(_span(td.get("colspan"), _MAX_COLSPAN), room)):
                 texts.append(text)
                 if rowspan > 1:
                     still_open.append((index, text, rowspan - 1))
                 index += 1
-            if len(texts) > max_width:
-                raise _TooManyCells
         for prev_index, prev_text, prev_rows in pending[placed:]:
             texts.append(prev_text)
             if prev_rows > 1:
                 still_open.append((prev_index, prev_text, prev_rows - 1))
-        if len(texts) > max_width:
-            raise _TooManyCells
         grid.append(texts)
         pending = still_open
     return grid

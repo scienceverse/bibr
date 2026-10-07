@@ -188,13 +188,11 @@ class TestMarkupReadHtmlCouldNotRead:
         assert df.values.tolist() == [["1", "x"]]
 
     def test_spans_are_capped_at_the_html_limits(self):
-        # 500 cells in a row hold a 1000-column span in proportion; a span
-        # that wide over a narrow table is not read (test_audit_html-epub.py).
+        # Capped at 1000 columns, the span then ends at the width the table's
+        # markup allows: twice its widest row plus 20 (test_audit_html-epub.py).
         df = html_table_frame(
-            '<table><tr><td colspan="99999999">a</td></tr><tr>'
-            + "<td>b</td>" * 500
-            + "</tr></table>"
+            '<table><tr><td colspan="99999999">a</td></tr><tr><td>b</td></tr></table>'
         )
 
         assert df is not None
-        assert df.shape == (2, 1000)
+        assert df.shape == (2, 22)
