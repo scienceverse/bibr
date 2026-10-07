@@ -143,6 +143,10 @@ def test_main_installs_the_handler_for_commands_that_own_servers(monkeypatch):
     _fake_module(monkeypatch, "bibr.demo.server", main=record("demo"))
     _fake_module(monkeypatch, "bibr.setup_wizard", main=record("setup"))
 
+    def fake_mcp(args):
+        record("mcp")()
+        return 0
+
     async def fake_process(args):
         record("chew")()
 
@@ -150,12 +154,14 @@ def test_main_installs_the_handler_for_commands_that_own_servers(monkeypatch):
         record("batch")()
         return 0
 
+    _fake_module(monkeypatch, "bibr.mcp_server", run_mcp=fake_mcp)
     monkeypatch.setattr(cli, "_run_process", fake_process)
     import bibr.local.cli.batch as cli_batch
 
     monkeypatch.setattr(cli_batch, "_run_batch", fake_batch)
 
-    for argv in (["serve"], ["demo"], ["setup"], ["chew", "paper.pdf"], ["batch", "papers"]):
+    commands = (["serve"], ["demo"], ["setup"], ["mcp"], ["chew", "paper.pdf"], ["batch", "papers"])
+    for argv in commands:
         monkeypatch.setattr("sys.argv", ["bibr", *argv])
         try:
             cli.main()
@@ -165,6 +171,6 @@ def test_main_installs_the_handler_for_commands_that_own_servers(monkeypatch):
 
     # serve's LitServe/uvicorn own their signal handling.
     assert seen.pop("serve") is signal.SIG_DFL
-    assert set(seen) == {"demo", "setup", "chew", "batch"}
+    assert set(seen) == {"demo", "setup", "mcp", "chew", "batch"}
     for name, handler in seen.items():
         assert callable(handler), name

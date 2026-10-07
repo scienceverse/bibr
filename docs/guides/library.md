@@ -217,6 +217,10 @@ async with bibr.Chewer() as chewer:
     r1 = await chewer.achew("a.pdf")
 ```
 
+Run one call at a time on an instance that manages local servers (local OCR,
+`llm="local"`): await each `achew()` before starting the next, because bibr may
+stop one managed server to free GPU memory for the next stage.
+
 ## Async
 
 Inside Jupyter or any other already-running event loop, `chew()` raises —

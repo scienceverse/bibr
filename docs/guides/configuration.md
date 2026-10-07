@@ -208,10 +208,13 @@ default) and cannot run together, so bibr stops the one that is running before
 starting the other: in a batch, each chunk's OCR stops the LLM server and that
 chunk's LLM stage starts it again.
 
-bibr stops the managed servers it started when the command ends, including on
-Ctrl-C, SIGTERM (`kill`, `docker stop`, `timeout`, an MCP host stopping
-`bibr mcp`) and SIGHUP (a closed terminal or SSH session). A `bibr chew` or
-`bibr mcp` stopped by a signal exits with 128 plus its number (143 for SIGTERM).
+`bibr chew`, `bibr batch` and `bibr mcp` stop the managed servers they started
+when the command ends, including on Ctrl-C, SIGTERM (`kill`, `docker stop`,
+`timeout`, an MCP host stopping `bibr mcp`) and SIGHUP (a closed terminal or SSH
+session). A `bibr chew` or `bibr mcp` stopped by a signal exits with 128 plus its
+number (143 for SIGTERM) and `bibr batch` exits 130 as after Ctrl-C; in a systemd
+unit, set `SuccessExitStatus=130 143` so that `systemctl stop` counts as a clean
+stop.
 
 Run `bibr setup` to choose the model as well as the runtime. Its recommended
 model is NuExtract 3, with runtime-specific weights:
