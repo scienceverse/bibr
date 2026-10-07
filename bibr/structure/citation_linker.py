@@ -1022,10 +1022,13 @@ def _reanchored_spans(text: str, candidates: list[CitationCandidate]) -> list[tu
             else:
                 lowest = max(floor, taken_to.get(printed, 0))
                 window = max(lowest, expected - _REANCHOR_WINDOW)
-                span = _print_span(text, candidate, printed, expected, window)
-                if span is None and window > lowest and budget > 0:
+                if window > lowest and budget > 0:
+                    # The first print after the citation before it, even
+                    # beyond the window: a later print of the same text may
+                    # sit inside the window.
                     budget -= min(expected, len(text)) - lowest
-                    span = _print_span(text, candidate, printed, expected, lowest)
+                    window = lowest
+                span = _print_span(text, candidate, printed, expected, window)
         if span is None:
             spans.append((min(expected, len(text)),) * 2)
             continue

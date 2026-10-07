@@ -630,6 +630,27 @@ async def test_citations_after_a_long_formula_keep_their_print():
     assert [row[3] for row in _offsets(receipt, 1, final)] == ["[3]", "2", "[4]", "[6]"]
 
 
+async def test_a_repeated_citation_after_a_long_formula_keeps_its_own_print():
+    # The formula's cleaning moved "[4]" further back than the first search
+    # looks, and its second print sat inside that window: the first "[4]"
+    # took the second print, leaving "[5]" and the second "[4]" empty.
+    texts, receipt = await _linked_and_cleaned(
+        [
+            "Given $"
+            + "\\mathrm{a}" * 60
+            + "$ as in [4], the model of [5] and the later work [4] agree."
+        ]
+    )
+
+    final = texts[1]
+    assert (
+        final == "Given " + "a" * 60 + " as in [4], the model of [5] and the later work [4] agree."
+    )
+    rows = _offsets(receipt, 1, final)
+    assert [row[3] for row in rows] == ["[4]", "[5]", "[4]"]
+    assert [row[1] for row in rows] == [73, 91, 114]
+
+
 @pytest.mark.parametrize(
     "text",
     [
