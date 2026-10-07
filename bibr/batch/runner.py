@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import errno
 import hashlib
 import itertools
 import json
@@ -145,8 +146,13 @@ def _try_lock(handle: IO[bytes]) -> bool:
         handle.seek(0)
         try:
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        except OSError:
-            return False
+        except OSError as exc:
+            # A held region is EACCES (EDEADLK in the retrying modes); anything
+            # else, e.g. EINVAL from a share without byte-range locks, means
+            # "cannot lock" and runs unguarded, as on POSIX.
+            if exc.errno in (errno.EACCES, errno.EDEADLK):
+                return False
+            raise
         return True
     import fcntl
 
