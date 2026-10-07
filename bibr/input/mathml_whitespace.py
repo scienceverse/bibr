@@ -62,9 +62,15 @@ class FlatText:
     ``parts`` holds the pieces. A gap is stored as ``" "`` so that a caller's
     "does the text end in whitespace" check reads it as the whitespace it was,
     and :meth:`join` decides what it becomes.
+
+    ``settled`` counts the leading pieces whose rendering no later piece can
+    change: a gap after the last prose piece is still open, since one at the
+    end waits for the piece after it and one between tokens reads the tokens
+    after it (:meth:`_side`). ``text_end`` is the index after the last piece
+    that is not a gap.
     """
 
-    __slots__ = ("_gaps", "_groups", "_words", "parts")
+    __slots__ = ("_gaps", "_groups", "_words", "parts", "settled", "text_end")
 
     def __init__(self) -> None:
         self.parts: list[str] = []
@@ -74,10 +80,12 @@ class FlatText:
         self._groups: dict[int, Hashable] = {}
         # Token pieces that are words by themselves (mtext/ms with a letter).
         self._words: set[int] = set()
+        self.settled = self.text_end = 0
 
     def add(self, text: str) -> None:
         """Add text read outside ``<math>``."""
         self.parts.append(text)
+        self.settled = self.text_end = len(self.parts)
 
     def add_math(self, text: str, token: str | None, group: Hashable) -> None:
         """Add text read inside ``<math>``.
@@ -94,7 +102,12 @@ class FlatText:
             self._groups[len(self.parts)] = group
             if token in _TEXT_TOKENS and any(ch.isalpha() for ch in text):
                 self._words.add(len(self.parts))
+            if self.settled < len(self.parts):  # a token after an open gap
+                self.parts.append(text)
+                self.text_end = len(self.parts)
+                return
         self.parts.append(text)
+        self.settled = self.text_end = len(self.parts)
 
     def separate(self) -> None:
         """Append a word separator unless the text already ends in whitespace.
@@ -109,6 +122,9 @@ class FlatText:
             self._gaps.discard(last)
         elif not self.parts[last][-1:].isspace():
             self.parts.append(" ")
+        else:
+            return
+        self.settled = self.text_end = len(self.parts)
 
     def _side(self, index: int, step: int) -> int:
         """How the text next to a gap reads, from piece *index* outward
@@ -147,13 +163,16 @@ class FlatText:
             return True
         return max(sides) >= _LETTERS and before.isalnum() and after.isalnum()
 
-    def join(self) -> str:
+    def join(self, start: int = 0, stop: int | None = None) -> str:
+        """The text, or what the pieces from *start* to *stop* add to it when
+        neither bound follows a gap (as ``settled`` and ``text_end`` do not)."""
         if not self._gaps:
-            return "".join(self.parts)
+            return "".join(self.parts[start:stop])
         out: list[str] = []
-        left = -1  # the last piece that is not a gap
+        left = start - 1  # the last piece that is not a gap
         pending = False  # a run of gaps waits for the piece after it
-        for index, text in enumerate(self.parts):
+        for index in range(start, len(self.parts) if stop is None else stop):
+            text = self.parts[index]
             if index in self._gaps:
                 pending = True
                 continue

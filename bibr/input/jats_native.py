@@ -22,6 +22,7 @@ match on the local name so both namespaced and bare documents parse.
 
 from __future__ import annotations
 
+import bisect
 import itertools
 import logging
 import re
@@ -52,7 +53,7 @@ from bibr.paper_contents import (
 from bibr.structure.assembler import DocumentAssembler
 from bibr.structure.float_labels import FloatKind, caption_label, label_element_label
 from bibr.structure.xref_utils import URL_RE, detect_xrefs
-from bibr.utils.text import clean_extracted_url, collapse_ws
+from bibr.utils.text import CollapsedLength, clean_extracted_url, collapse_ws
 
 logger = logging.getLogger(__name__)
 
@@ -478,42 +479,49 @@ def _choose_alternative(alt) -> tuple[object | None, str | None]:
     return target, None
 
 
-def _anchor_offset(pre_raw: str, lead_raw: str | None, link_text: str) -> int:
+def _anchor_offset(pre_len: int, trail: bool, lead_raw: str | None, link_text: str) -> int:
     """Character offset where an anchor's display text starts in entry text.
 
-    *pre_raw* is the walker's raw accumulation before the anchor child;
-    entry text is that accumulation collapsed, so the collapsed prefix length
-    is the anchor's start, plus one separator space when the source spells
-    whitespace on either side of the anchor.
+    Entry text is the walker's raw accumulation collapsed, so *pre_len*, the
+    collapsed length of the accumulation before the anchor child, is the
+    anchor's start, plus one separator space when the source spells
+    whitespace on either side of the anchor (*trail*: the accumulation ends
+    in whitespace).
     """
-    pre = collapse_ws(pre_raw)
-    if not pre or not link_text:
-        return len(pre)
-    trail = pre_raw[-1:].isspace()
+    if not pre_len or not link_text:
+        return pre_len
     lead = bool(lead_raw and lead_raw[:1].isspace())
-    return len(pre) + (1 if trail or lead else 0)
+    return pre_len + (1 if trail or lead else 0)
 
 
-def _sentence_at_offset(candidates, entry_text: str, offset: int):
-    """Return the candidate sentence covering *offset* in *entry_text*.
+def _sentence_starts(candidates, entry_text: str) -> list[int]:
+    """Where each candidate sentence starts in *entry_text*, in order.
 
     Sentence spans are recovered with the same progressive ``find`` the
     assembler uses at emission, so externally-segmented sentences map back
     onto the entry they were split from.
     """
-    if not candidates:
-        return None
-    chosen = candidates[0]
+    starts = []
     cursor = 0
     for sent in candidates:
         found = entry_text.find(sent.text, cursor)
         start = found if found >= 0 else cursor
-        if start <= offset:
-            chosen = sent
-        else:
-            break
+        starts.append(start)
         cursor = start + len(sent.text)
-    return chosen
+    return starts
+
+
+def _sentence_at_offset(candidates, entry_text: str, offset: int, starts: list[int] | None = None):
+    """Return the candidate sentence covering *offset* in *entry_text*.
+
+    *starts* is :func:`_sentence_starts` of the candidates, which a caller
+    resolving many anchors in one entry computes once.
+    """
+    if not candidates:
+        return None
+    if starts is None:
+        starts = _sentence_starts(candidates, entry_text)
+    return candidates[max(bisect.bisect_right(starts, offset) - 1, 0)]
 
 
 def _resolve_link_sentence(
@@ -523,6 +531,7 @@ def _resolve_link_sentence(
     fallback_id: int | None,
     entry_text: str = "",
     anchor_offset: int | None = None,
+    starts: list[int] | None = None,
 ):
     """Pick the sentence of one deferred entry that holds an anchor.
 
@@ -534,9 +543,10 @@ def _resolve_link_sentence(
     the fallback for links recorded without one. A plain substring search
     would land a short anchor on the wrong sentence ('here' inside 'There'),
     so an offset pick stands only when it carries the anchor's evidence.
+    *starts* is passed on to :func:`_sentence_at_offset`.
     """
     if anchor_offset is not None and entry_text:
-        picked = _sentence_at_offset(candidates, entry_text, anchor_offset)
+        picked = _sentence_at_offset(candidates, entry_text, anchor_offset, starts)
         if picked is not None:
             needle = (link_text or "").strip()
             if not needle or needle in picked.text or url in picked.text:
@@ -557,6 +567,10 @@ def _resolve_link_sentence(
     return candidates[-1] if candidates else None
 
 
+# The most unsettled MathML pieces an anchor's offset joins again (_Walker._pre_link).
+_MAX_OPEN_PIECES = 64
+
+
 class _Walker:
     """One text-flattening pass over an element.
 
@@ -570,7 +584,7 @@ class _Walker:
     """
 
     def __init__(self, exclude, on_block=None, on_link=None, boundaries=None) -> None:
-        self.flat = FlatText()
+        self.reset()
         self.serials = itertools.count()
         self.exclude = exclude
         self.on_block = on_block
@@ -583,6 +597,34 @@ class _Walker:
 
     def reset(self) -> None:
         self.flat = FlatText()
+        self._pre = CollapsedLength()
+        self._pre_from = 0  # the pieces before it are in _pre
+        # The last _pre_link result, keyed by what the text had then.
+        self._pre_cached: tuple[tuple[int, int], tuple[int, bool]] | None = None
+
+    def _pre_link(self) -> tuple[int, bool]:
+        """The collapsed length of the text so far, and whether it ends in whitespace.
+
+        Joining and collapsing all of it again at every anchor is quadratic,
+        so the pieces whose rendering is settled are collapsed once and only
+        the rest (MathML tokens after a gap) is joined again. A rest longer
+        than :data:`_MAX_OPEN_PIECES` is taken as it stands, which is exact
+        unless a gap in it reads tokens added later.
+        """
+        flat = self.flat
+        key = (len(flat.parts), flat.text_end)
+        if self._pre_cached is not None and self._pre_cached[0] == key:
+            return self._pre_cached[1]  # nothing added since the last anchor
+        settled = flat.settled
+        if flat.text_end - settled > _MAX_OPEN_PIECES:
+            settled = flat.text_end
+        if settled > self._pre_from:
+            self._pre.add(flat.join(self._pre_from, settled))
+            self._pre_from = settled
+        rest = flat.join(self._pre_from, flat.text_end)  # trailing gaps render nothing
+        pre = self._pre.length(rest), (rest[-1:] or self._pre.last).isspace()
+        self._pre_cached = key, pre
+        return pre
 
     def _add(self, text: str, in_math: bool, owner: str | None, group: int) -> None:
         if in_math:
@@ -620,9 +662,9 @@ class _Walker:
                     self.flat.separate()
                 # An anchor's offset is the accumulation before it is walked;
                 # entry text is that accumulation collapsed.
-                pre_raw = None
+                pre = None
                 if self.on_link is not None and child_ln in ("ext-link", "uri"):
-                    pre_raw = self.flat.join()
+                    pre = self._pre_link()
                 if child_ln == "alternatives":
                     self._walk_alternative(child, in_math, serial)
                 elif child_ln == "tex-math":
@@ -635,7 +677,7 @@ class _Walker:
                     self.walk(child, in_math, serial, False)
                 if child_ln in _TEXT_BOUNDARY_AFTER:
                     self.flat.separate()
-                if pre_raw is not None:
+                if pre is not None:
                     href = _attr(child, "href")
                     if href:
                         url = _normalize_ext_href(child, href)
@@ -644,7 +686,7 @@ class _Walker:
                             self.on_link(
                                 url,
                                 link_text,
-                                _anchor_offset(pre_raw, child.text, link_text),
+                                _anchor_offset(*pre, child.text, link_text),
                             )
             if child.tail:
                 self._add(child.tail, in_math, None, serial)
@@ -842,6 +884,8 @@ class JatsParser:
         for sent in self.sentences:
             by_paragraph.setdefault(sent.paragraph_id, []).append(sent)
         covered: set[tuple[str, int]] = set()
+        # Sentence starts per entry, found once for all of the entry's anchors.
+        entry_starts: dict[int, list[int]] = {}
         for url, link_text, section_id, deferred_index, anchor_offset in self._pending_url_links:
             if deferred_index >= len(self.assembler.last_text_id):
                 continue
@@ -855,8 +899,11 @@ class JatsParser:
             entry_text = ""
             if 0 <= deferred_index < len(self.assembler.entries):
                 entry_text = self.assembler.entries[deferred_index].text
+            starts = entry_starts.get(deferred_index)
+            if starts is None:
+                starts = entry_starts[deferred_index] = _sentence_starts(candidates, entry_text)
             sentence = _resolve_link_sentence(
-                candidates, url, link_text, fallback_id, entry_text, anchor_offset
+                candidates, url, link_text, fallback_id, entry_text, anchor_offset, starts
             )
             if sentence is None:
                 continue

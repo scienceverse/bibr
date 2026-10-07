@@ -38,7 +38,10 @@ _ZIPF_VALID_WORD = 2.5
 
 # Unicode letter class (no digits, no underscore) \u2014 same class the word-linewrap
 # patterns below use. ASCII-only fragments match exactly what "[A-Za-z]+" did.
-_STX_ALPHA_BEFORE_RE = re.compile(r"[^\W\d_]+$")
+# The lookbehind starts a match only where a run of letters starts: tried from
+# inside a long run that does not reach the mark, ``[^\W\d_]+$`` backtracks
+# quadratically.
+_STX_ALPHA_BEFORE_RE = re.compile(r"(?<![^\W\d_])[^\W\d_]+$")
 _STX_ALPHA_AFTER_RE = re.compile(r"[^\W\d_]+")
 
 # Script \u2192 the wordfreq lexicons that can actually adjudicate it.  Nothing
@@ -208,13 +211,23 @@ def _resolve_stx_marks(text: str) -> str:
     context_langs = _detect_langs(text) or ()
     parts: list[str] = []
     pos = 0
+    # The token (back to the last space, newline or tab) is tracked across
+    # marks, and each stretch between two marks searched once: re-scanning the
+    # token for every mark is quadratic in a long one. Neither a DOI/URL
+    # starter nor a letter run can span a mark.
+    token_start = 0
+    in_doi_or_url = False
     while (i := text.find("\x02", pos)) != -1:
-        token_start = max(text.rfind(" ", 0, i), text.rfind("\n", 0, i), text.rfind("\t", 0, i)) + 1
-        in_doi_or_url = bool(DOI_URL_CONTEXT_RE.search(text[token_start:i]))
+        space = max(text.rfind(" ", pos, i), text.rfind("\n", pos, i), text.rfind("\t", pos, i))
+        if space >= 0:
+            token_start = space + 1
+            in_doi_or_url = False
+        lo = max(token_start, pos)
+        in_doi_or_url = in_doi_or_url or bool(DOI_URL_CONTEXT_RE.search(text, lo, i))
         between_digits = i > 0 and text[i - 1].isdigit() and text[i + 1 : i + 2].isdigit()
         keep = in_doi_or_url or between_digits
         if not keep:
-            before = _STX_ALPHA_BEFORE_RE.search(text[token_start:i])
+            before = _STX_ALPHA_BEFORE_RE.search(text, lo, i)
             after = _STX_ALPHA_AFTER_RE.match(text, i + 1)
             if before and after:
                 keep = _stx_alpha_keep_hyphen(
