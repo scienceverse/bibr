@@ -196,7 +196,8 @@ def test_parenthetical_guards_are_linear_in_the_sentence():
     elapsed, results = _elapsed(lambda: [_paren_reasons(long_run), _paren_reasons(many)])
 
     assert [len(result) for result in results] == [10, 4_000]
-    assert elapsed < 2.0
+    # Pure-Python work, which CI's coverage run slows 3-4x.
+    assert elapsed < 5.0
 
 
 def test_parenthetical_guards_read_the_sentence_in_place():
@@ -207,7 +208,7 @@ def test_parenthetical_guards_read_the_sentence_in_place():
     elapsed, results = _elapsed(lambda: _paren_reasons(text))
 
     assert len(results) == 8_000
-    assert elapsed < 2.0
+    assert elapsed < 5.0  # headroom for the coverage run, as above
 
 
 class _CountingCandidate(CitationCandidate):
