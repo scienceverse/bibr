@@ -177,3 +177,24 @@ def test_main_installs_the_handler_for_commands_that_own_servers(monkeypatch):
     assert set(seen) == {"demo", "setup", "mcp", "chew", "batch"}
     for name, handler in seen.items():
         assert callable(handler), name
+
+
+def test_the_terminating_signal_is_known_until_the_command_ends():
+    """``bibr mcp`` reads it to exit once its cleanup has run."""
+    seen = []
+    with pytest.raises(SystemExit):
+        with cli._interrupt_on_termination():
+            try:
+                _send(signal.SIGHUP)
+            finally:
+                seen.append(cli._terminating_signal())
+    assert seen == [signal.SIGHUP]
+    assert cli._terminating_signal() is None
+
+    with pytest.raises(KeyboardInterrupt):
+        with cli._interrupt_on_termination():
+            try:
+                raise KeyboardInterrupt
+            finally:
+                seen.append(cli._terminating_signal())
+    assert seen[-1] is None  # a plain Ctrl-C

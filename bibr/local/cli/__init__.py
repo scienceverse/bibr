@@ -170,6 +170,19 @@ def _suppress_progress_bars_if_not_tty() -> None:
     os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 
 
+# Signals the active ``_interrupt_on_termination`` has turned into an interrupt.
+_received_signals: list[int] = []
+
+
+def _terminating_signal() -> int | None:
+    """The SIGTERM or SIGHUP stopping the running command, if one arrived.
+
+    ``bibr mcp`` exits with it as soon as its cleanup has run, since its stdio
+    transport cannot finish unwinding while the client keeps stdin open.
+    """
+    return _received_signals[0] if _received_signals else None
+
+
 @contextlib.contextmanager
 def _interrupt_on_termination():
     """Make SIGTERM and SIGHUP take Ctrl-C's path while a command runs.
@@ -183,7 +196,8 @@ def _interrupt_on_termination():
     runner's graceful stop), so the same shutdown paths run. An interrupt that
     began as one of these signals then exits 128 + its number.
     """
-    received: list[int] = []
+    received = _received_signals
+    received.clear()
 
     def handler(signum, _frame) -> None:
         received.append(signum)
@@ -206,6 +220,7 @@ def _interrupt_on_termination():
             raise
         sys.exit(128 + received[0])
     finally:
+        received.clear()
         for signum, old in previous.items():
             signal.signal(signum, old)
 

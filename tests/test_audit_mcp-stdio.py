@@ -15,7 +15,11 @@ import asyncio
 import json
 import logging
 import os
+import select
 import shutil
+import signal
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -461,3 +465,107 @@ def test_paper_store_rechew_moves_paper_to_newest():
     store.add({"paper_id": "one"}, source="one.pdf")  # re-chewed
     store.add({"paper_id": "three"}, source="three.pdf")
     assert [pid for pid, _ in store.items()] == ["one", "three"]
+
+
+# ---------------------------------------------------------------------------
+# Shutdown on SIGTERM / SIGHUP
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def shutdown(monkeypatch):
+    """Record the pipeline close and the process exit instead of exiting."""
+    events: list[object] = []
+
+    async def aclose(self):
+        events.append("aclose")
+
+    monkeypatch.setattr(bibr.api.Chewer, "aclose", aclose)
+    monkeypatch.setattr(os, "_exit", events.append)
+    return events
+
+
+# Plain numbers: Windows has no signal.SIGHUP, and the lifespan never checks the platform.
+@pytest.mark.parametrize("signum", [15, 1], ids=["SIGTERM", "SIGHUP"])
+async def test_a_termination_signal_exits_once_the_pipeline_is_closed(
+    monkeypatch, shutdown, root, signum
+):
+    monkeypatch.setattr("bibr.local.cli._terminating_signal", lambda: signum)
+    server = build_server(allowed_dirs=[root], no_llm=True)
+    async with server.settings.lifespan(server):
+        pass
+    assert shutdown == ["aclose", 128 + signum]
+
+
+async def test_a_failed_close_still_exits_and_is_logged(monkeypatch, caplog, shutdown, root):
+    async def aclose(self):
+        shutdown.append("aclose")
+        raise RuntimeError("teardown broke")
+
+    monkeypatch.setattr(bibr.api.Chewer, "aclose", aclose)
+    monkeypatch.setattr("bibr.local.cli._terminating_signal", lambda: signal.SIGTERM)
+    server = build_server(allowed_dirs=[root], no_llm=True)
+    with pytest.raises(RuntimeError):  # the stand-in exit returns
+        async with server.settings.lifespan(server):
+            pass
+    assert shutdown == ["aclose", 128 + signal.SIGTERM]
+    assert "error while shutting down" in caplog.text
+    assert "teardown broke" in caplog.text
+
+
+async def test_no_exit_without_a_termination_signal(shutdown, root):
+    """An embedded server, or ``bibr mcp`` whose client closed stdin, returns."""
+    server = build_server(allowed_dirs=[root], no_llm=True)
+    async with server.settings.lifespan(server):
+        pass
+    assert shutdown == ["aclose"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX signals")
+def test_sigterm_stops_bibr_mcp_while_the_client_keeps_stdin_open(tmp_path):
+    """SIGTERM became an interrupt whose unwinding waited on the SDK's blocking
+    stdin read, so a host that sends SIGTERM before closing the pipe (or
+    ``kill``, ``timeout``) left the server running until SIGKILL."""
+    repo = Path(__file__).resolve().parents[1]
+    env = {**os.environ, "PYTHONPATH": str(repo), "BIBR_DISABLE_DOTENV": "1"}
+    code = "import sys; from bibr.local.cli import main; sys.argv[1:] = ['mcp', '--no-llm']; main()"
+    stderr_path = tmp_path / "stderr.txt"
+    with stderr_path.open("wb") as stderr:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=stderr,
+            cwd=tmp_path,
+            env=env,
+        )
+    try:
+        initialize = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"},
+            },
+        }
+        proc.stdin.write(json.dumps(initialize).encode() + b"\n")
+        proc.stdin.flush()
+        # The reply means the server is serving, its stdin reader blocked on the next line.
+        ready, _, _ = select.select([proc.stdout], [], [], 120)
+        assert ready, stderr_path.read_text(errors="replace")
+        assert b'"id":1' in proc.stdout.readline(), stderr_path.read_text(errors="replace")
+
+        proc.send_signal(signal.SIGTERM)
+        try:
+            returncode = proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            pytest.fail("bibr mcp still running 60 s after SIGTERM with stdin open")
+        assert returncode == 128 + signal.SIGTERM, stderr_path.read_text(errors="replace")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        proc.stdin.close()
+        proc.stdout.close()
