@@ -26,14 +26,28 @@ too. Three inputs that made ``read_html`` fail or lose a cell are read
 instead: a span that is not a plain integer ("2px") counts from its leading
 digits, as a browser counts it; ``colspan="0"`` counts as 1 instead of
 deleting the cell; and several header rows with no text at all are read as no
-header instead of raising IndexError. Spans are capped at the HTML limits
-(1000 columns, 65534 rows), so a garbled OCR span cannot allocate millions of
-cells.
+header instead of raising IndexError.
+
+Spans are capped at the HTML limits (1000 columns, 65534 rows), and a
+``rowspan`` ends at the table's last row, as a browser draws it, where
+``read_html`` added a row of copies for each row it reached past the end.
+The expanded table must also stay in proportion to its markup: at most twice
+as wide as its widest row of cells (plus ``_FREE_COLUMNS``), and at most
+``_SLOTS_PER_ITEM`` slots for each of its cells and rows (plus
+``_FREE_SLOTS``). A ``colspan`` ends where its row would grow wider than
+that, so the "span every column" ``colspan="100"`` over five columns still
+reads; a table that is wider all the same (one wide row padding many short
+ones, or rowspans piling up row after row) is not read. Spans and padding
+otherwise made a few bytes allocate millions of slots, from a garbled OCR
+span or crafted HTML alike; every column costs pandas about what html5lib
+spends parsing a cell. More than ``_MAX_HEADER_ROWS`` header rows are read
+as data rather than as that many MultiIndex levels.
 """
 
 from __future__ import annotations
 
 import copy
+import logging
 import re
 from typing import Any
 
@@ -41,6 +55,8 @@ import pandas as pd
 from bs4 import BeautifulSoup, Tag
 from pandas.errors import EmptyDataError
 from pandas.io.parsers import TextParser  # type: ignore[attr-defined]  # no stub
+
+logger = logging.getLogger(__name__)
 
 # ``read_html``'s cell whitespace rule: newlines and runs of whitespace
 # become one space, after stripping the ends.
@@ -52,6 +68,16 @@ _ANY_TEXT_RE = re.compile(".+")
 _SPAN_RE = re.compile(r"\s*\+?(\d+)")
 _MAX_COLSPAN = 1000
 _MAX_ROWSPAN = 65534
+# How far spans and padding may expand a table past its markup (see the
+# module docstring). Generous for any printed table: its widest row holds
+# nearly every column as a cell, and spans merge cells rather than add them.
+_FREE_COLUMNS = 20
+_FREE_SLOTS = 1000
+_SLOTS_PER_ITEM = 20
+# Header rows a table may name its columns with. Each one is a MultiIndex
+# level, which costs pandas about a millisecond however narrow the table:
+# 8,000 one-cell <th> rows (150 KB) took 9 s.
+_MAX_HEADER_ROWS = 100
 
 # One pending rowspan: (column index, cell text, rows still covered).
 _Pending = tuple[int, str, int]
@@ -62,7 +88,8 @@ def html_table_frame(source: str | Tag) -> pd.DataFrame | None:
 
     *source* is HTML markup, or a ``<table>`` element already parsed with
     html5lib (which is read from a copy, never modified). Returns ``None``
-    when there is no table with text and at least one row.
+    when there is no table with text and at least one row, or when that table
+    is out of proportion to its markup even with its colspans ended.
     """
     if isinstance(source, Tag):
         root: Tag = copy.copy(source)
@@ -87,6 +114,9 @@ def html_table_frame(source: str | Tag) -> pd.DataFrame | None:
             return _frame(*_sections(table))
         except EmptyDataError:  # no rows: ``read_html`` moves on to the next table
             continue
+        except _TooManyCells:
+            logger.warning("HTML table spans expand far past its markup; its contents are not read")
+            return None
     return None
 
 
@@ -96,71 +126,94 @@ def is_hidden_table(table: Tag) -> bool:
     return "display:none" in str(table.get("style") or "").replace(" ", "")
 
 
+class _TooManyCells(Exception):
+    """The table expands out of proportion to its markup."""
+
+
 def _cells(row: Tag) -> list[Tag]:
     return row.find_all(("td", "th"), recursive=False)
 
 
 def _sections(table: Tag) -> tuple[list[list[str]], list[list[str]], list[list[str]]]:
     """Header, body and footer rows of *table* as text, spans expanded."""
-    head_rows = table.select("thead tr")
+    head_rows: list[Tag] = table.select("thead tr")
     body_rows = table.select("tbody tr") + table.find_all("tr", recursive=False)
     foot_rows = table.select("tfoot tr")
     if not head_rows:
         # No <thead>: the leading rows made only of <th> are the header.
-        while body_rows and all(cell.name == "th" for cell in _cells(body_rows[0])):
-            head_rows.append(body_rows.pop(0))
-    head, pending = _expand_spans(head_rows, [])
-    body, pending = _expand_spans(body_rows, pending)
-    foot, pending = _expand_spans(foot_rows, pending)
-    # Rows that exist only because a rowspan runs past the last <tr> come
-    # last: ``read_html`` adds them after the body when there is no footer
-    # and after the footer otherwise.
-    while pending:
-        foot.append([text for _, text, _ in pending])
-        pending = [(i, text, left - 1) for i, text, left in pending if left > 1]
-    return head, body, foot
+        lead = 0
+        while lead < len(body_rows) and all(cell.name == "th" for cell in _cells(body_rows[lead])):
+            lead += 1
+        head_rows, body_rows = body_rows[:lead], body_rows[lead:]
+    # A rowspan carries on from one section into the next, as in read_html.
+    grid = _expand_spans(head_rows + body_rows + foot_rows)
+    body_end = len(head_rows) + len(body_rows)
+    return grid[: len(head_rows)], grid[len(head_rows) : body_end], grid[body_end:]
 
 
 def _span(value: Any, limit: int) -> int:
     match = _SPAN_RE.match(str(value or ""))
-    return min(max(int(match.group(1)), 1), limit) if match else 1
+    if not match:
+        return 1
+    # Seven significant digits are past either limit already, and int()
+    # raises on more than 4,300.
+    digits = match.group(1).lstrip("0")[:7]
+    return min(max(int(digits or "0"), 1), limit)
 
 
-def _expand_spans(
-    rows: list[Tag], pending: list[_Pending]
-) -> tuple[list[list[str]], list[_Pending]]:
+def _expand_spans(rows: list[Tag]) -> list[list[str]]:
     """Rows of cell text, each spanned cell copied into every slot it covers.
 
-    *pending* holds the rowspans still open from the rows above; the ones
-    still open after *rows* are returned to carry into the next section.
+    A rowspan still open after the last row ends there, and a colspan where
+    its row would grow wider than the table may be. Raises
+    :class:`_TooManyCells` when a row's own cells and the rowspans it carries
+    are wider than that already, so the padded frame is never built past its
+    bounds.
     """
+    row_cells = [_cells(tr) for tr in rows]
+    items = len(rows) + sum(map(len, row_cells))
+    max_width = min(
+        2 * max(map(len, row_cells), default=0) + _FREE_COLUMNS,
+        (_SLOTS_PER_ITEM * items + _FREE_SLOTS) // max(len(rows), 1),
+    )
     grid: list[list[str]] = []
-    for tr in rows:
+    # The rowspans still open from the rows above, in column order.
+    pending: list[_Pending] = []
+    for cells in row_cells:
+        if len(cells) + len(pending) > max_width:
+            raise _TooManyCells
         texts: list[str] = []
         still_open: list[_Pending] = []
         index = 0
-        for td in _cells(tr):
+        placed = 0
+        for k, td in enumerate(cells):
             # A cell spanning down from an earlier row takes its slot first.
-            while pending and pending[0][0] <= index:
-                prev_index, prev_text, prev_rows = pending.pop(0)
+            while placed < len(pending) and pending[placed][0] <= index:
+                prev_index, prev_text, prev_rows = pending[placed]
+                placed += 1
                 texts.append(prev_text)
                 if prev_rows > 1:
                     still_open.append((prev_index, prev_text, prev_rows - 1))
                 index += 1
             text = _WHITESPACE_RE.sub(" ", td.text.strip())
             rowspan = _span(td.get("rowspan"), _MAX_ROWSPAN)
-            for _ in range(_span(td.get("colspan"), _MAX_COLSPAN)):
+            # A colspan past the table's width ("span every column" over a
+            # narrow table) ends there, leaving a slot for each cell and
+            # rowspan still to come in the row; the check above keeps that
+            # room at least 1.
+            room = max_width - len(texts) - (len(cells) - k - 1) - (len(pending) - placed)
+            for _ in range(min(_span(td.get("colspan"), _MAX_COLSPAN), room)):
                 texts.append(text)
                 if rowspan > 1:
                     still_open.append((index, text, rowspan - 1))
                 index += 1
-        for prev_index, prev_text, prev_rows in pending:
+        for prev_index, prev_text, prev_rows in pending[placed:]:
             texts.append(prev_text)
             if prev_rows > 1:
                 still_open.append((prev_index, prev_text, prev_rows - 1))
         grid.append(texts)
         pending = still_open
-    return grid, pending
+    return grid
 
 
 def _frame(head: list[list[str]], body: list[list[str]], foot: list[list[str]]) -> pd.DataFrame:
@@ -168,6 +221,10 @@ def _frame(head: list[list[str]], body: list[list[str]], foot: list[list[str]]) 
         # Several header rows and none with text name nothing: read the table
         # as one without a header (``read_html`` raised IndexError).
         head = []
+    elif len(head) > _MAX_HEADER_ROWS:
+        # More rows than a printed header has are not one: they are read as
+        # data under integer column labels.
+        head, body = [], head + body
     # One header row names the columns; several give MultiIndex columns,
     # leaving out the rows with no text.
     header: int | list[int] | None = None

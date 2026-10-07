@@ -58,10 +58,27 @@ A table of more than 1,000,000 grid cells, or one that takes the document past
 4,000,000 grid cells or 64 MiB of table HTML, is dropped with a
 `DOCX_TABLE_DROPPED` warning; its caption stays in the body text. The HTML is
 measured as rendered: escaped text and cell markup in every grid cell, at the
-bytes per character its widest character needs. Pictures past the first 1,000 are dropped
-(`DOCX_FIGURES_DROPPED`). Figures carry at most 128 MiB of image data in
+bytes per character its widest character needs. Pictures past the first 1,000
+are dropped (`DOCX_FIGURES_DROPPED`). Figures carry at most 128 MiB of image data in
 total, an image counting once per figure that shows it; the figures past that
 keep their caption without an image (`DOCX_FIGURE_IMAGES_OMITTED`).
+
+**HTML and ePub limits.** An HTML file over 48 MiB is rejected at validation
+as invalid input, before the pure-Python html5lib parser reads it. HTML is
+read in the encoding its byte-order mark names (UTF-8, or UTF-16 as Word's
+"Save as Unicode" writes it), else its `<meta charset>`; an ePub chapter in
+the encoding its byte-order mark or XML declaration names.
+
+**HTML table limits** (HTML and ePub tables, and the table HTML OCR returns).
+A `rowspan` ends at the table's last row, as a browser draws it, and more
+than 100 header rows are read as data rows. A table may be at most twice as
+wide as its widest row of cells plus 20 columns, and hold at most 20 slots for
+each cell and row it has plus 1,000. A `colspan` ends at that width, so a
+footnote row with `colspan="100"` under five columns gives 30 columns. A
+table wider than that all the same (one wide row padding many short rows, or
+rowspans piling up row after row) gets no `contents`. Like a table without
+cells, an HTML table then keeps its caption and markup when the caption labels
+it ("Table 3. …") and is dropped otherwise.
 
 **Native text bypass and recognition.** `bibr/ocr/pdf_inspection.py` inspects
 embedded PDF text, metadata, outline headings, and reference-line geometry
