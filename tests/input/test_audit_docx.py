@@ -3,10 +3,12 @@
 - Table cells came from python-docx ``row.cells``, which repeats a cell once
   per spanned grid column (``w:gridSpan`` is a free integer) and resolves each
   ``w:vMerge`` continuation by recursing up its column: a 36 KB file ran for
-  days, and tall merged columns ended in RecursionError.
+  days, and tall merged columns ended in RecursionError. With spans clamped, a
+  wide table's columns and a merged cell's repeated text still multiplied.
 - Every picture showing one image part got its own base64 copy of the image.
 - Text inside inline content controls, simple fields, smart tags, custom XML
-  and moves was dropped.
+  and moves was dropped, from body paragraphs and from headings, captions and
+  table cells.
 """
 
 from __future__ import annotations
@@ -31,6 +33,9 @@ from bibr.input.docx_native import DocxParser
 from bibr.processing_warnings import WarningCode
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+M = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+HYPERLINK = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
 
 _PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -128,10 +133,60 @@ def test_table_over_the_cell_limit_is_dropped_with_its_caption_kept_as_text():
 
 
 def test_tables_past_the_document_cell_limit_are_dropped(monkeypatch):
-    monkeypatch.setattr(docx_native, "_MAX_TABLE_CELLS", 100)
-    monkeypatch.setattr(docx_native, "_MAX_DOCUMENT_TABLE_CELLS", 250)
+    # A 10 x 10 table counts its 100 cells and _COLUMN_CELLS for each column.
+    size = (10 + docx_native._COLUMN_CELLS) * 10
+    monkeypatch.setattr(docx_native, "_MAX_TABLE_CELLS", size)
+    monkeypatch.setattr(docx_native, "_MAX_DOCUMENT_TABLE_CELLS", size * 5 // 2)
     row = "<w:tr>" + _tc("c") * 10 + "</w:tr>"
     _, contents = _parse(_doc_with_table(row * 10, tables=3))
+
+    assert len(contents.tables) == 2
+    (warning,) = contents.processing_warnings
+    assert warning.code == WarningCode.DOCX_TABLE_DROPPED
+    assert warning.message.startswith("Dropped 1 table(s)")
+
+
+def test_a_wide_table_is_charged_for_its_columns():
+    """pandas pays per column what it pays for some 20 cells: one row of 1,000
+    cells spanning 1,000 columns each (36 KB) passed the cell limit as
+    1,000,000 cells and took three minutes. Twenty such cells pass it now."""
+    row = "<w:tr>" + _tc("", _span(1000)) * 20 + "</w:tr>"
+    _, contents = _parse(_doc_with_table(row))
+
+    assert contents.tables == []
+    assert _codes(contents) == [WarningCode.DOCX_TABLE_DROPPED]
+
+
+def test_wide_tables_are_charged_for_their_columns_per_document(monkeypatch):
+    """Spread over one-cell tables, the same columns passed the document limit:
+    4,000 tables of one 1,000-column cell (340 KB) took eight minutes."""
+    monkeypatch.setattr(docx_native, "_MAX_DOCUMENT_TABLE_CELLS", 250_000)
+    row = f"<w:tr>{_tc('', _span(1000))}</w:tr>"
+    _, contents = _parse(_doc_with_table(row, tables=5))
+
+    assert [table.df.shape for table in contents.tables] == [(0, 1000)] * 2
+    (warning,) = contents.processing_warnings
+    assert warning.message.startswith("Dropped 3 table(s)")
+
+
+def test_merged_cell_text_counts_in_every_grid_cell_it_fills():
+    """The HTML and the export write a merged cell's text into each grid cell
+    it covers: 10 KB of text spanning 1,000 columns and merged down 7 rows (an
+    11 KB document.xml) made 70 MB of table HTML."""
+    restart = _tc("x" * 10_000, _span(1000) + '<w:vMerge w:val="restart"/>')
+    cont = _tc("", _span(1000) + "<w:vMerge/>")
+    rows = f"<w:tr>{restart}</w:tr>" + f"<w:tr>{cont}</w:tr>" * 6
+    _, contents = _parse(_doc_with_table(rows))
+
+    assert contents.tables == []
+    assert _codes(contents) == [WarningCode.DOCX_TABLE_DROPPED]
+
+
+def test_tables_past_the_document_text_limit_are_dropped(monkeypatch):
+    monkeypatch.setattr(docx_native, "_MAX_DOCUMENT_TABLE_CHARS", 250)
+    # 3 rows of 10 four-character cells: 120 characters a table.
+    row = "<w:tr>" + _tc("cell") * 10 + "</w:tr>"
+    _, contents = _parse(_doc_with_table(row * 3, tables=3))
 
     assert len(contents.tables) == 2
     (warning,) = contents.processing_warnings
@@ -252,11 +307,17 @@ def test_figures_past_the_limit_are_dropped(monkeypatch):
 # ----- Inline wrappers -----
 
 
+def _append(paragraph, fragment: str) -> None:
+    root = etree.fromstring(
+        f'<w:root xmlns:w="{W}" xmlns:m="{M}" xmlns:r="{R}">{fragment}</w:root>'
+    )
+    for element in root:
+        paragraph._p.append(element)
+
+
 def _paragraph_with(fragment: str) -> list[str]:
     doc = Document()
-    paragraph = doc.add_paragraph("Prior work ")
-    for element in etree.fromstring(f'<w:root xmlns:w="{W}">{fragment}</w:root>'):
-        paragraph._p.append(element)
+    _append(doc.add_paragraph("Prior work "), fragment)
     parser, _ = _parse(_save(doc))
     return [e.text for e in parser.assembler.entries]
 
@@ -325,3 +386,79 @@ def test_hyperlink_text_inside_a_wrapper_counts_toward_its_link_text():
     assert [(link.url, link.link_text) for link in contents.links] == [
         ("https://example.org/data", "the data")
     ]
+
+
+def test_math_inside_inline_wrappers_is_kept():
+    omath = "<m:oMath><m:r><m:t>x=1</m:t></m:r></m:oMath>"
+    fragment = (
+        f"<w:ins w:id='1'>{omath}</w:ins>"
+        '<w:r><w:t xml:space="preserve"> and </w:t></w:r>'
+        f"<w:sdt><w:sdtContent><w:hyperlink w:anchor='a'>{omath}</w:hyperlink>"
+        "</w:sdtContent></w:sdt>"
+        f"<w:sdt><w:sdtContent><m:oMathPara>{omath}</m:oMathPara></w:sdtContent></w:sdt>"
+    )
+    assert _paragraph_with(fragment) == ["Prior work $x=1$ and $x=1$", "$$x=1$$"]
+
+
+def test_a_hyperlink_inside_a_wrapper_keeps_its_url():
+    """Reference managers put a citation, link included, in a content control."""
+    doc = Document()
+    paragraph = doc.add_paragraph("See ")
+    rel_id = paragraph.part.relate_to("https://example.org/data", HYPERLINK, is_external=True)
+    _append(
+        paragraph,
+        f'<w:sdt><w:sdtContent><w:hyperlink r:id="{rel_id}"><w:r><w:t>the data</w:t></w:r>'
+        "</w:hyperlink></w:sdtContent></w:sdt>",
+    )
+    parser, contents = _parse(_save(doc))
+    parser.apply_segmentation(contents, [["See the data"]])
+
+    assert [(link.url, link.link_text) for link in contents.links] == [
+        ("https://example.org/data", "the data")
+    ]
+
+
+def test_heading_text_inside_a_wrapper_is_kept():
+    """A title in a content control (Word's Title quick part) was lost, with
+    its section."""
+    doc = Document()
+    _append(
+        doc.add_paragraph(style="Title"),
+        "<w:sdt><w:sdtPr><w:alias w:val='Title'/></w:sdtPr><w:sdtContent>"
+        "<w:r><w:t>Cognitive load and recall</w:t></w:r></w:sdtContent></w:sdt>",
+    )
+    doc.add_paragraph("Body.")
+    _, contents = _parse(_save(doc))
+
+    assert contents.detected_title == "Cognitive load and recall"
+    assert "Cognitive load and recall" in [section.header for section in contents.sections]
+
+
+def test_caption_number_in_a_simple_field_is_kept():
+    """A caption numbered by a SEQ field, "Table 1: Results", read "Table :
+    Results", without a label."""
+    doc = Document()
+    _append(
+        doc.add_paragraph("Table ", style="Caption"),
+        '<w:fldSimple w:instr=" SEQ Table \\* ARABIC "><w:r><w:t>1</w:t></w:r></w:fldSimple>'
+        "<w:r><w:t>: Results</w:t></w:r>",
+    )
+    doc.add_table(rows=1, cols=1).cell(0, 0).text = "a"
+    _, contents = _parse(_save(doc))
+
+    assert [(table.caption, table.label) for table in contents.tables] == [
+        ("Table 1: Results", "1")
+    ]
+
+
+def test_cell_text_inside_a_wrapper_is_kept():
+    doc = Document()
+    table = doc.add_table(rows=2, cols=1)
+    table.cell(0, 0).text = "Head"
+    _append(
+        table.cell(1, 0).paragraphs[0],
+        "<w:ins w:id='9'><w:r><w:t>inserted</w:t></w:r></w:ins>",
+    )
+    _, contents = _parse(_save(doc))
+
+    assert contents.tables[0].df.to_numpy().tolist() == [["inserted"]]

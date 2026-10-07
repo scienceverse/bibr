@@ -76,7 +76,7 @@ _RUN_SEPARATORS: frozenset[str] = frozenset(
     }
 )
 
-# Inline containers whose runs are paragraph text: hyperlinks, tracked
+# Inline containers whose content is paragraph text: hyperlinks, tracked
 # insertions and moves, content controls (Word's citation tool and Mendeley
 # Cite put each citation in one; its runs sit under w:sdtContent), simple
 # fields, smart tags, custom XML and bidi embeddings. Their text was dropped,
@@ -97,19 +97,27 @@ _INLINE_WRAPPERS: frozenset[str] = frozenset(
         "bdo",
     )
 )
+_W_R = f"{{{_NS['w']}}}r"
 
 # Table grid limits. gridSpan is a free integer that python-docx's row.cells
 # repeated a cell for, one copy per column, so a 36 KB file spanning 2e9
 # columns ran for days; it is read as at most this wide, as the HTML table
 # reader caps colspan.
 _MAX_GRID_SPAN = 1000
-# A table of more grid cells (rows x widest row), or one taking the document
-# past the second limit, is dropped with a warning: a few-byte vMerge
-# continuation repeats the merged cell's full width, so clamped spans still
-# multiply. Unmerged cells cannot reach the document limit within the 64 MiB
-# document.xml the validator admits.
+# A table over the per-table limit, or one taking the document past a
+# per-document one, is dropped with a warning. Clamped spans still multiply: a
+# 50-byte cell fills 1,000 columns, and a few-byte vMerge continuation repeats
+# the merged cell, text included, across its full width. A table's grid cells
+# are rows x widest row plus _COLUMN_CELLS per column: pandas pays per column
+# what it pays for some 20 cells, and a 36 KB one-row table 1,000,000 columns
+# wide took three minutes. The document limit bounds table work to a minute or
+# two. Cell text counts in every grid cell that repeats it, as the HTML and the
+# export write it there; text without merges cannot pass the limit within the
+# 64 MiB document.xml the validator admits.
 _MAX_TABLE_CELLS = 1_000_000
 _MAX_DOCUMENT_TABLE_CELLS = 4_000_000
+_COLUMN_CELLS = 100
+_MAX_DOCUMENT_TABLE_CHARS = 64 * 1024 * 1024
 _W_VAL = f"{{{_NS['w']}}}val"
 _GRID_BEFORE = f"{{{_NS['w']}}}trPr/{{{_NS['w']}}}gridBefore"
 _GRID_SPAN = f"{{{_NS['w']}}}tcPr/{{{_NS['w']}}}gridSpan"
@@ -266,6 +274,23 @@ def _has_picture(paragraph) -> bool:
     return bool(paragraph._element.findall(f".//{{{_NS['w']}}}drawing//{{{_NS['a']}}}blip"))
 
 
+def _paragraph_text(p) -> str:
+    """A ``w:p``'s text as python-docx's ``CT_P.text`` reads it, but with the
+    runs inside inline wrappers: that read only direct runs and hyperlinks, so
+    a title in a content control lost the heading, and a caption numbered by a
+    simple field lost its number."""
+    return "".join(run.text for run in _wrapped_runs(p))
+
+
+def _wrapped_runs(el):
+    """The ``w:r`` children of *el* and of the inline wrappers in it, in order."""
+    for child in el.iterchildren():
+        if child.tag == _W_R:
+            yield child
+        elif child.tag in _INLINE_WRAPPERS:
+            yield from _wrapped_runs(child)
+
+
 def _nearest_block(blocks: list[_Block], index: int, step: int) -> int | None:
     """Index of the nearest block before (``step=-1``) or after (``step=1``)
     *index* that is not an empty paragraph."""
@@ -274,7 +299,7 @@ def _nearest_block(blocks: list[_Block], index: int, step: int) -> int | None:
         block = blocks[index]
         if not (
             block.kind == "paragraph"
-            and not (block.obj.text or "").strip()
+            and not _paragraph_text(block.obj._p).strip()
             and not _has_picture(block.obj)
         ):
             return index
@@ -296,7 +321,7 @@ def _is_table_caption(blocks: list[_Block], index: int) -> bool:
         or _has_picture(block.obj)
     ):
         return False
-    text = (block.obj.text or "").strip()
+    text = _paragraph_text(block.obj._p).strip()
     if not text or _FIGURE_CAPTION_START_RE.match(text):
         return False
     if _TABLE_CAPTION_START_RE.match(text):
@@ -387,6 +412,7 @@ class DocxParser:
         self._figures_dropped = 0
         self._figure_images_omitted = 0
         self._table_cells = 0
+        self._table_chars = 0
         self._tables_dropped = 0
 
     # ------------------------------------------------------------------
@@ -454,7 +480,7 @@ class DocxParser:
                     continue
                 caption_index = table_captions.get(index)
                 caption = (
-                    (blocks[caption_index].obj.text or "").strip()
+                    _paragraph_text(blocks[caption_index].obj._p).strip()
                     if caption_index is not None
                     else None
                 )
@@ -484,8 +510,10 @@ class DocxParser:
             self.processing_warnings.append(
                 ProcessingWarning(
                     WarningCode.DOCX_TABLE_DROPPED,
-                    f"Dropped {self._tables_dropped} table(s) over the cell limit "
-                    f"({_MAX_TABLE_CELLS:,} per table, {_MAX_DOCUMENT_TABLE_CELLS:,} per document)",
+                    f"Dropped {self._tables_dropped} table(s) over the size limits "
+                    f"({_MAX_TABLE_CELLS:,} grid cells per table; {_MAX_DOCUMENT_TABLE_CELLS:,} "
+                    f"grid cells and {_MAX_DOCUMENT_TABLE_CHARS // 2**20} Mi characters of "
+                    "cell text per document)",
                 )
             )
         if self._figures_dropped:
@@ -720,7 +748,7 @@ class DocxParser:
         style_name = getattr(paragraph.style, "name", None)
 
         # Quick path: heading paragraphs cannot host inline math/images/refs we care about.
-        plain = (paragraph.text or "").strip()
+        plain = _paragraph_text(paragraph._p).strip()
         level = _heading_level_from_style(style_name)
         if level is not None:
             if plain:
@@ -769,6 +797,15 @@ class DocxParser:
                     )
             pending_note_refs.clear()
 
+        def inline_math(math_el, extra_buf: list[str] | None) -> None:
+            """Emit an inline equation as ``$…$`` text."""
+            inline = _omml_to_text(math_el)
+            if inline:
+                math_buf.append(f"${inline}$")
+                text_buf.append(math_buf[-1])
+                if extra_buf is not None:
+                    extra_buf.append(math_buf[-1])
+
         def walk_run(run_el, extra_buf: list[str] | None = None) -> None:
             """Pull text/footnotes/math from a single ``w:r`` run.
 
@@ -812,12 +849,7 @@ class DocxParser:
                     if en_id is not None:
                         pending_note_refs.append(("endnote", en_id))
                 elif rt == f"{{{m}}}oMath":
-                    inline = _omml_to_text(run_child)
-                    if inline:
-                        math_buf.append(f"${inline}$")
-                        text_buf.append(math_buf[-1])
-                        if extra_buf is not None:
-                            extra_buf.append(math_buf[-1])
+                    inline_math(run_child, extra_buf)
                 elif rt == f"{{{w}}}drawing":
                     had_image = True
                     # A drawing can be a text box rather than a picture, and
@@ -833,77 +865,72 @@ class DocxParser:
                             if extra_buf is not None:
                                 extra_buf.append(boxed)
 
-        def walk_runs_in_wrapper(wrapper_el, into_buf: list[str] | None = None) -> None:
-            """Walk ``w:r`` children of an inline wrapper (``_INLINE_WRAPPERS``),
-            and of the wrappers nested in it.
+        def walk_content(parent_el, into_buf: list[str] | None = None) -> None:
+            """Walk a paragraph's inline content in document order: runs, math,
+            hyperlinks, and the inline wrappers (``_INLINE_WRAPPERS``) at any
+            depth, which hold the same content as the paragraph itself.
 
-            ``into_buf``, if provided, mirrors text from each contained run via
-            ``walk_run``'s ``extra_buf`` parameter — used to capture hyperlink
-            display text for ``PaperURLLink.link_text`` while still keeping the
-            text inline in the paragraph stream.
+            ``into_buf``, if provided, mirrors the text emitted — used to
+            capture hyperlink display text for ``PaperURLLink.link_text`` while
+            still keeping the text inline in the paragraph stream.
             """
-            for child in wrapper_el.iterchildren():
-                ctag = child.tag
-                if ctag == f"{{{w}}}r":
-                    walk_run(child, into_buf)
-                elif ctag in _INLINE_WRAPPERS:
-                    walk_runs_in_wrapper(child, into_buf)
-
-        for child in paragraph._element.iterchildren():
-            tag = child.tag
-            if tag == f"{{{m}}}oMathPara":
-                # Display math — flush any text so far, then emit math as own entry
-                flush_body()
-                math_text = " ".join(_omml_to_text(om) for om in child.iter(f"{{{m}}}oMath"))
-                math_text = math_text.strip()
-                if math_text:
-                    self.assembler.append(
-                        f"$${math_text}$$",
-                        None,
-                        self._current_section_id,
-                        needs_segmentation=False,
-                        is_formula=True,
-                    )
-            elif tag == f"{{{m}}}oMath":
-                inline = _omml_to_text(child)
-                if inline:
-                    math_buf.append(f"${inline}$")
-                    text_buf.append(math_buf[-1])
-            elif tag == f"{{{w}}}r":
-                # Run: walk for w:t, note references, m:oMath, w:drawing
-                walk_run(child)
-            elif tag == f"{{{w}}}hyperlink":
-                # Hyperlink: capture the URL from the relationship target, then
-                # walk nested runs so their text contributes to paragraph flow.
-                rel_id = child.get(f"{{{_NS['r']}}}id")
-                target_url: str | None = None
-                if rel_id is not None:
-                    rel = self._doc.part.rels.get(rel_id)
-                    if rel is not None:
-                        target_url = getattr(rel, "target_ref", None) or getattr(
-                            rel, "target", None
-                        )
-                link_text_buf: list[str] = []
-                walk_runs_in_wrapper(child, link_text_buf)
-                if target_url:
-                    link_text = "".join(link_text_buf).strip() or target_url
-                    # text_id is unknown until segmentation; record the deferred
-                    # entry index that *will* hold this paragraph's text. Since
-                    # we have not yet flushed, the next deferred index is
-                    # ``len(self._deferred_texts)`` — apply_segmentation resolves
-                    # it once sentences exist.
-                    self._pending_url_links.append(
-                        (
-                            target_url,
-                            link_text,
+            for child in parent_el.iterchildren():
+                tag = child.tag
+                if tag == f"{{{m}}}oMathPara":
+                    # Display math — flush any text so far, then emit math as own entry
+                    flush_body()
+                    math_text = " ".join(_omml_to_text(om) for om in child.iter(f"{{{m}}}oMath"))
+                    math_text = math_text.strip()
+                    if math_text:
+                        self.assembler.append(
+                            f"$${math_text}$$",
+                            None,
                             self._current_section_id,
-                            len(self.assembler),
+                            needs_segmentation=False,
+                            is_formula=True,
                         )
+                elif tag == f"{{{m}}}oMath":
+                    inline_math(child, into_buf)
+                elif tag == f"{{{w}}}r":
+                    # Run: walk for w:t, note references, m:oMath, w:drawing
+                    walk_run(child, into_buf)
+                elif tag == f"{{{w}}}hyperlink":
+                    walk_hyperlink(child, into_buf)
+                elif tag in _INLINE_WRAPPERS:
+                    # Tracked insertion, content control, field, smart tag...:
+                    # walk its content as paragraph-level text.
+                    walk_content(child, into_buf)
+
+        def walk_hyperlink(link_el, into_buf: list[str] | None) -> None:
+            """Capture a hyperlink's URL from its relationship target, then walk
+            its content so the text contributes to paragraph flow."""
+            rel_id = link_el.get(f"{{{_NS['r']}}}id")
+            target_url: str | None = None
+            if rel_id is not None:
+                rel = self._doc.part.rels.get(rel_id)
+                if rel is not None:
+                    target_url = getattr(rel, "target_ref", None) or getattr(rel, "target", None)
+            link_text_buf: list[str] = []
+            walk_content(link_el, link_text_buf)
+            if into_buf is not None:
+                into_buf.extend(link_text_buf)
+            if target_url:
+                link_text = "".join(link_text_buf).strip() or target_url
+                # text_id is unknown until segmentation; record the deferred
+                # entry index that *will* hold this paragraph's text. Since
+                # we have not yet flushed, the next deferred index is
+                # ``len(self._deferred_texts)`` — apply_segmentation resolves
+                # it once sentences exist.
+                self._pending_url_links.append(
+                    (
+                        target_url,
+                        link_text,
+                        self._current_section_id,
+                        len(self.assembler),
                     )
-            elif tag in _INLINE_WRAPPERS:
-                # Tracked insertion, content control, field, smart tag...:
-                # walk its runs as paragraph-level text.
-                walk_runs_in_wrapper(child)
+                )
+
+        walk_content(paragraph._element)
 
         # Images: extract after the text walk so we know section context
         if had_image:
@@ -980,27 +1007,37 @@ class DocxParser:
 
     def _table_cells_of(self, table) -> list[list[str]] | None:
         """A table's cell texts, one list per row padded to the widest row, or
-        ``None`` when the table has no cells or is over the cell limits."""
+        ``None`` when the table has no cells or is over the size limits."""
         rows = _table_rows(table._tbl)
         width = max((sum(columns for _, columns in row) for row in rows), default=0)
         if not width:
             return None
-        size = len(rows) * width
+        size = (len(rows) + _COLUMN_CELLS) * width
         if size > _MAX_TABLE_CELLS or self._table_cells + size > _MAX_DOCUMENT_TABLE_CELLS:
             self._tables_dropped += 1
             return None
-        self._table_cells += size
 
-        # A merged cell's text is read once, however many grid cells it fills.
+        # A merged cell's text is read once, however many grid cells it fills,
+        # and counted in each of them.
         texts: dict[object, str] = {}
+        chars = 0
+        for row in rows:
+            for tc, columns in row:
+                text = texts.get(tc)
+                if text is None:
+                    text = texts[tc] = "\n".join(_paragraph_text(p) for p in tc.p_lst).strip()
+                chars += len(text) * columns
+        if self._table_chars + chars > _MAX_DOCUMENT_TABLE_CHARS:
+            self._tables_dropped += 1
+            return None
+        self._table_cells += size
+        self._table_chars += chars
+
         cell_rows: list[list[str]] = []
         for row in rows:
             cells: list[str] = []
             for tc, columns in row:
-                text = texts.get(tc)
-                if text is None:
-                    text = texts[tc] = "\n".join(p.text for p in tc.p_lst).strip()
-                cells.extend([text] * columns)
+                cells.extend([texts[tc]] * columns)
             # Pad ragged rows so DataFrame construction is uniform
             cells.extend([""] * (width - len(cells)))
             cell_rows.append(cells)

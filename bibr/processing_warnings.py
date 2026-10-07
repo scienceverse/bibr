@@ -204,8 +204,9 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     "the URL is lost from the payload.",
     WarningCode.EPUB_SPINE_MEMBER_SKIPPED: "An ePub spine member was missing from the "
     "archive; its text is absent from the export.",
-    WarningCode.DOCX_TABLE_DROPPED: "A DOCX table had more grid cells than the per-table or "
-    "per-document limit (a merged cell counts once per grid cell it covers) and was dropped.",
+    WarningCode.DOCX_TABLE_DROPPED: "A DOCX table had more grid cells than the per-table "
+    "limit, or took the document past its limit on grid cells or cell text (a merged cell "
+    "counts once per grid cell it covers), and was dropped.",
     WarningCode.DOCX_FIGURES_DROPPED: "A DOCX had more pictures than the figure limit; the "
     "pictures past it were dropped.",
     WarningCode.DOCX_FIGURE_IMAGES_OMITTED: "The images of a DOCX's figures passed the image "
