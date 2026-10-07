@@ -1,9 +1,9 @@
 """``bibr preset`` subcommand — save/load named .env snapshots."""
 
 import argparse
-import os
 import sys
-from pathlib import Path
+
+from rich.markup import escape
 
 from bibr.local.cli import ui
 
@@ -17,19 +17,16 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
     from bibr.presets import (
         InvalidPresetError,
         PresetManager,
+        carries_credentials,
         effective_env_file,
+        endpoint_changes,
+        is_secret_key,
         redact_value,
     )
 
     console = Console()
-    # NOTE: ``Path("") or None`` evaluates to ``Path('.')`` because Path
-    # objects are always truthy. Check the env var explicitly so an unset
-    # ``BIBR_PRESETS_DIR`` falls back to the PresetManager default
-    # (``~/.bibr/presets/``) instead of writing presets to the cwd.
-    presets_dir_str = os.environ.get("BIBR_PRESETS_DIR", "").strip()
-    manager = (
-        PresetManager(presets_dir=Path(presets_dir_str)) if presets_dir_str else PresetManager()
-    )
+    # ``BIBR_PRESETS_DIR``, else ``~/.bibr/presets`` (see ``default_presets_dir``).
+    manager = PresetManager()
     env_path = effective_env_file()
 
     cmd = args.preset_command
@@ -41,6 +38,19 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
             parser.print_help()
         sys.exit(1)
 
+    if env_path is None and cmd in ("save", "use", "deactivate", "diff"):
+        # These read or write the .env in effect, and none is read now.
+        from bibr.config import ENV_FILE_OVERRIDE_VAR, dotenv_disabled_by, dotenv_enable_hint
+
+        variable = dotenv_disabled_by() or ENV_FILE_OVERRIDE_VAR
+        ui.error(
+            console,
+            f"Dotenv loading is disabled by {variable}.",
+            hint=f"{dotenv_enable_hint(variable)}, or apply a preset for one run with "
+            "[cyan]bibr chew --preset NAME[/cyan].",
+        )
+        sys.exit(1)
+
     def _suggest_available(missing: str) -> None:
         names = manager.list_presets()
         ui.error(console, f"Preset [cyan]{missing}[/cyan] not found.")
@@ -50,7 +60,7 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
         prefix = "  [dim]" if dim else "  "
         suffix = "[/dim]" if dim else ""
         for k, v in sorted(data.items()):
-            console.print(f"{prefix}{k}={redact_value(k, v)}{suffix}")
+            console.print(f"{prefix}{escape(k)}={escape(redact_value(k, v))}{suffix}")
 
     if cmd == "list":
         presets = manager.list_presets()
@@ -60,7 +70,7 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
                 "Run [cyan]bibr preset save <name>[/cyan] to create one."
             )
             return
-        active = manager.get_active(env_path) if env_path.exists() else None
+        active = manager.get_active(env_path) if env_path is not None else None
         table = ui.minimal_table("Preset", "Active")
         for name in presets:
             marker = "[green]●[/green]" if name == active else ""
@@ -89,6 +99,17 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
                 f"Saved preset [cyan]{args.name}[/cyan] from {env_path} "
                 f"({len(data)} settings; secrets excluded)",
             )
+            # Name what the secret filter took beyond the obvious keys.
+            withheld = sorted(
+                key
+                for key, value in parse_env(env_path).items()
+                if not is_secret_key(key) and carries_credentials(value)
+            )
+            if withheld:
+                console.print(
+                    f"  [dim]Left out {', '.join(withheld)}: a URL with a password or key "
+                    "stays only in .env.[/dim]"
+                )
         except InvalidPresetError as e:
             ui.error(console, str(e))
             sys.exit(1)
@@ -98,6 +119,7 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
             ui.error(console, "No .env file found.", hint="Run [cyan]bibr setup[/cyan] first.")
             sys.exit(1)
         try:
+            before = parse_env(env_path)
             manager.apply(args.name, env_path)
             data = manager.load(args.name)
             ui.ok(
@@ -106,6 +128,14 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
                 f"(also wrote BIBR_ACTIVE_PRESET marker)",
             )
             _print_settings(data, dim=True)
+            if redirected := endpoint_changes(data, before):
+                ui.warn(
+                    console,
+                    f"Preset [cyan]{args.name}[/cyan] changed {escape(', '.join(redirected))}.",
+                    hint="These decide where bibr sends requests, with the API keys in "
+                    ".env, and what it launches; check them if the preset came from "
+                    "someone else.",
+                )
         except FileNotFoundError:
             _suggest_available(args.name)
             sys.exit(1)

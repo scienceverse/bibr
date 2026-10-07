@@ -34,6 +34,12 @@ Set `BIBR_DISABLE_DOTENV=1` to skip both `.env` files entirely. Benchmark
 harnesses and CI should do this so every setting a run records came from the
 process environment, not from whatever `.env` happened to be in the checkout.
 
+While `BIBR_DISABLE_DOTENV` or an empty `BIBR_ENV_FILE` turns `.env` loading
+off, the configuration tools follow it: `bibr config show --sources` and
+`bibr config path` report no `.env` file, and `bibr config set`, `bibr preset
+save/use/deactivate/diff` and `bibr setup` refuse to run, naming the variable,
+instead of writing a file bibr would not read.
+
 ```bash
 bibr setup
 ```
@@ -56,6 +62,14 @@ values it does not ask about. When you choose an LLM provider, it also writes
 `LLM_BACKEND=cloud`, and a blank `LLM_API_KEY` or `LLM_BASE_URL` where you
 entered none, so that a key or server left by an earlier setup, in `./.env`
 or `~/.bibr/.env`, cannot override the one you entered.
+
+`bibr setup` writes `./.env`, or the last file `BIBR_ENV_FILE` lists, since
+that file's values win; it stops before asking anything when that file's
+folder does not exist. Environment variables still override it: when your
+shell exports a setting the wizard writes (`LLM_API_KEY`, `LLM_BASE_URL`,
+`LLM_PROVIDER`, ...), or another name bibr reads it under (`GEMINI_API_KEY`
+for `GOOGLE_API_KEY`), with a different value, the wizard names it, so you
+can unset or update it before running bibr.
 
 ## Namespaces
 
@@ -256,10 +270,20 @@ directory has one, otherwise `~/.bibr/.env` (or the last existing file in
 `BIBR_ENV_FILE`). `save`, `use` and `deactivate` name the file they read or
 changed.
 
-Presets are stored as JSON under `~/.bibr/presets/`. Secrets (API keys and
-similar) are excluded by default when saving; endpoint URLs and other private
-configuration may still be present. You can also apply a preset for a single run
-without touching `.env`:
+Presets are stored as JSON under `~/.bibr/presets/` (or `BIBR_PRESETS_DIR`),
+readable only by you when bibr creates them. Secrets (API keys and similar,
+and URLs such as `REDIS_URL` that carry a password or `?key=`) are excluded
+when saving, and `save` names the URL settings it left out; endpoint URLs and
+other private configuration may still be present. `show`, `diff` and `use`
+mask secrets and URL credentials when they print values.
+
+A preset can change where bibr sends requests while your API keys stay in
+`.env`, or what it launches. When `bibr preset use` changes a `*_URL`,
+`*_ARGS` or `*_EXECUTABLE` setting (`LLM_BASE_URL`, `OCR_BASE_URL`,
+`LLM_LLAMA_CPP_EXTRA_ARGS`, ...), it names those settings; check them before
+running bibr with a preset someone else gave you.
+
+You can also apply a preset for a single run without touching `.env`:
 
 ```bash
 bibr chew paper.pdf --preset fast-gemini

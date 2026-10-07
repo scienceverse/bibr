@@ -58,6 +58,12 @@ def _env_chain() -> tuple[Path, ...]:
     return tuple(path.absolute() for path in reversed(_default_env_files()))
 
 
+def _dotenv_disabled_by() -> str:
+    from bibr.config import ENV_FILE_OVERRIDE_VAR, dotenv_disabled_by
+
+    return dotenv_disabled_by() or ENV_FILE_OVERRIDE_VAR
+
+
 def resolve_provenance(doc: SettingDoc) -> Provenance:
     """Resolve where *doc*'s current value comes from.
 
@@ -386,7 +392,7 @@ def _cmd_path(console) -> int:
 
     paths = _env_chain()
     if not paths:
-        console.print("[dim]Dotenv loading is disabled by BIBR_ENV_FILE.[/dim]")
+        console.print(f"[dim]Dotenv loading is disabled by {_dotenv_disabled_by()}.[/dim]")
         return 0
     any_exists = False
     for path in paths:
@@ -422,14 +428,19 @@ def _cmd_set(args: argparse.Namespace, console) -> int:
 
     paths = _env_chain()
     if not paths:
+        from bibr.config import dotenv_enable_hint
+
+        variable = _dotenv_disabled_by()
         ui.error(
             console,
-            "Dotenv loading is disabled by BIBR_ENV_FILE.",
-            hint="Set BIBR_ENV_FILE to a file path or unset it before editing configuration.",
+            f"Dotenv loading is disabled by {variable}.",
+            hint=f"{dotenv_enable_hint(variable)} before editing configuration.",
         )
         return 2
     target = next((path for path in paths if path.exists()), paths[0])
-    set_key(str(target), key, args.value)
+    # python-dotenv replaces a symlink with a regular file and leaves the real
+    # dotfile unchanged; write through the link, like ``write_env_text``.
+    set_key(os.path.realpath(target), key, args.value)
 
     display_value = format_value(doc, args.value)
     ui.ok(
