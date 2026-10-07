@@ -148,8 +148,12 @@ class Pipeline:
             if isinstance(fs.original_error, ProcessingError):
                 # PostParseStage clears retained tracebacks for the safe
                 # invalid-output failure. Re-raise every typed processing
-                # error unchanged so its code and diagnostics survive.
-                raise fs.original_error from fs.original_error.__cause__
+                # error itself so its code and diagnostics survive, adding
+                # only the stage that recorded it (serve's client-safe
+                # message names the stage).
+                error = fs.original_error
+                error.failed_stage = error.failed_stage or fs.failed_stage
+                raise error from error.__cause__
             raise ProcessingError(
                 fs.error,
                 error_code=fs.error_code,

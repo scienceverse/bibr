@@ -156,7 +156,8 @@ Concurrency adapts to the serve:
   the paper up again.
 - Every success grows in-flight by one, back toward `--max-concurrency`.
 - A job the serve failed with **504** ran out of the serve's
-  `PIPELINE_TIMEOUT`: the serve is up and the paper was too slow. It is
+  `PIPELINE_TIMEOUT`, which counts the wait for a free pipeline slot as well
+  as the run: the serve is up and the paper was too slow. It is
   submitted once more (the serve's OCR and LLM are shared with other jobs)
   without shrinking in-flight, then recorded as `pipeline_timeout`.
 - Other 4xx answers are the paper's own problem — recorded once, no retry. A
