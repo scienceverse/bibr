@@ -76,9 +76,11 @@ class TestReadHtmlLayoutIsKept:
             # Multi-level header with a stub rowspan and a group colspan.
             '<table><tr><th rowspan="2">Var</th><th colspan="2">Group A</th></tr>'
             "<tr><th>M</th><th>SD</th></tr><tr><td>Age</td><td>x</td><td>y</td></tr></table>",
-            # Explicit sections, footer and a rowspan running past the body.
+            # Explicit sections, footer and a rowspan running past the body
+            # into the footer. (One reaching past the last row ends there,
+            # where read_html added rows: test_audit_html-epub.py.)
             "<table><thead><tr><th>A</th><th></th></tr></thead>"
-            '<tbody><tr><td rowspan="3">a</td><td>b</td></tr></tbody>'
+            '<tbody><tr><td rowspan="2">a</td><td>b</td></tr></tbody>'
             "<tfoot><tr><td>f</td></tr></tfoot></table>",
             # No header row; ragged rows are padded.
             "<table><tr><td>a</td></tr><tr><td>b</td><td>c</td></tr></table>",
@@ -186,8 +188,12 @@ class TestMarkupReadHtmlCouldNotRead:
         assert df.values.tolist() == [["1", "x"]]
 
     def test_spans_are_capped_at_the_html_limits(self):
+        # 500 cells in a row hold a 1000-column span in proportion; a span
+        # that wide over a narrow table is not read (test_audit_html-epub.py).
         df = html_table_frame(
-            '<table><tr><td colspan="99999999">a</td></tr><tr><td>b</td></tr></table>'
+            '<table><tr><td colspan="99999999">a</td></tr><tr>'
+            + "<td>b</td>" * 500
+            + "</tr></table>"
         )
 
         assert df is not None

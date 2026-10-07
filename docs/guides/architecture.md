@@ -51,6 +51,15 @@ console or the export; for a long document, compare the length of the export's
 limits reject oversized pages before rasterization. Size memory for the
 processed pages and concurrent files.
 
+**HTML table limits** (HTML and ePub tables, and the table HTML OCR returns).
+A `rowspan` ends at the table's last row, as a browser draws it, and more
+than 100 header rows are read as data rows. A table whose spans would expand
+it far past its own markup (wider than twice its widest row of cells plus 20
+columns, or more than 20 slots for each cell and row it has plus 1,000) gets
+no `contents`. Like a table without cells, an HTML table then keeps its
+caption and markup when the caption labels it ("Table 3. …") and is dropped
+otherwise.
+
 **Native text bypass and recognition.** `bibr/ocr/pdf_inspection.py` inspects
 embedded PDF text, metadata, outline headings, and reference-line geometry
 under one PDFium walk. With `OCR_NATIVE_TEXT_ENABLED=true` (the default),
