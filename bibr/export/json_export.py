@@ -76,6 +76,7 @@ from bibr.export.structure_ids import ExportIds, export_ids
 from bibr.extract.research_integrity import affiliation_key, collect_affiliations
 from bibr.models import ORGANIZATION_ROLE, BibType, canonicalize_orcid, migrate_bib_type
 from bibr.processing_warnings import ProcessingWarning, WarningCode
+from bibr.structure.citation_linker import reanchor_citation_receipt
 from bibr.utils.text import normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
@@ -969,9 +970,15 @@ def _export_paper_payload(
                 )
             )
 
+    # Spans of xrefs, links, expressions and citation candidates are offsets
+    # into the exported text.
+    texts = {row.text_id: row.text for row in text_data}
+
     citation_linking: CitationLinkingExport | None = None
     if paper.contents.citation_receipt is not None:
-        receipt = paper.contents.citation_receipt
+        # Checked against the exported text, as xref spans are: text cleaning
+        # after linking moves or removes the printed citations.
+        receipt = reanchor_citation_receipt(paper.contents.citation_receipt, texts)
         citation_linking = CitationLinkingExport(
             style_scores=dict(receipt.style_scores),
             candidates=[
@@ -1066,8 +1073,6 @@ def _export_paper_payload(
         )
 
     meta = paper.metadata
-    # Spans of xrefs, links and expressions are offsets into the exported text.
-    texts = {row.text_id: row.text for row in text_data}
     xref_locator = SpanLocator(texts, shared=True)
     url_locator = SpanLocator(texts, shared=False)
     eq_locator = SpanLocator(texts, shared=False)
