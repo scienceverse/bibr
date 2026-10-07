@@ -51,6 +51,12 @@ console or the export; for a long document, compare the length of the export's
 limits reject oversized pages before rasterization. Size memory for the
 processed pages and concurrent files.
 
+**HTML and ePub limits.** An HTML file over 48 MiB is rejected at validation
+as invalid input, before the pure-Python html5lib parser reads it. HTML is
+read in the encoding its byte-order mark names (UTF-8, or UTF-16 as Word's
+"Save as Unicode" writes it), else its `<meta charset>`; an ePub chapter in
+the encoding its byte-order mark or XML declaration names.
+
 **HTML table limits** (HTML and ePub tables, and the table HTML OCR returns).
 A `rowspan` ends at the table's last row, as a browser draws it, and more
 than 100 header rows are read as data rows. A table whose spans would expand

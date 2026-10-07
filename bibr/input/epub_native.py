@@ -10,9 +10,12 @@ import html
 import io
 import logging
 import posixpath
+import re
 import zipfile
 from dataclasses import dataclass, field
 from urllib.parse import unquote
+
+import webencodings  # type: ignore[import-untyped]  # html5lib's encoding table, no stub
 
 from bibr.input.html_native import HtmlParser
 from bibr.input.xml_entities import parse_xml
@@ -37,6 +40,10 @@ _EPUB_MAX_MEMBER_BYTES = 64 * 1024 * 1024
 # accumulates, independently of how the archive is packed.
 _EPUB_MAX_SPINE_DOCUMENTS = 2_000
 _EPUB_MAX_SPINE_BYTES = 64 * 1024 * 1024
+# The encoding an XML declaration names, when the declaration reads as ASCII.
+_XML_DECLARED_ENCODING_RE = re.compile(
+    rb"""\s*<\?xml\s[^>]*?\bencoding\s*=\s*["']([A-Za-z0-9._:-]+)["']"""
+)
 
 
 @dataclass
@@ -71,6 +78,30 @@ def _text(el) -> str:
     if el is None:
         return ""
     return " ".join("".join(el.itertext()).split()).strip()
+
+
+def _decode_spine_document(data: bytes) -> str:
+    """A spine document's text, in the encoding it is written in.
+
+    Content Documents are XML, which EPUB lets be UTF-16 as well as UTF-8:
+    decoding every one as UTF-8 turned a UTF-16 chapter into NULs and
+    replacement characters. A BOM decides first, then an XML declaration,
+    either spelled in UTF-16 or naming an encoding (looked up in the WHATWG
+    table html5lib uses, so only a real text encoding is honoured). A
+    declaration that reads as ASCII cannot be in UTF-16, so naming UTF-16
+    there is ignored, as HTML ignores it in ``<meta charset>``.
+    """
+    encoding = "utf-8"
+    if data.startswith(b"<\x00?\x00"):
+        encoding = "utf-16le"
+    elif data.startswith(b"\x00<\x00?"):
+        encoding = "utf-16be"
+    elif match := _XML_DECLARED_ENCODING_RE.match(data, 0, 1024):
+        declared = webencodings.lookup(match.group(1).decode("ascii"))
+        if declared is not None and not declared.name.startswith("utf-16"):
+            encoding = declared.name
+    text: str = webencodings.decode(data, encoding, errors="replace")[0]
+    return text
 
 
 def _read_zip_member(zf: zipfile.ZipFile, name: str) -> bytes:
@@ -199,7 +230,7 @@ def read_epub_document(epub_bytes: bytes) -> EpubDocument:
             spine_bytes += len(data)
             if spine_bytes > _EPUB_MAX_SPINE_BYTES:
                 raise ValueError("ePub archive exceeds expansion limits")
-            body_parts.append(data.decode("utf-8", errors="replace"))
+            body_parts.append(_decode_spine_document(data))
         if not body_parts:
             raise ValueError(
                 "ePub package has no readable spine documents"
