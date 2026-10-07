@@ -1,9 +1,7 @@
 """``bibr preset`` subcommand — save/load named .env snapshots."""
 
 import argparse
-import os
 import sys
-from pathlib import Path
 
 from bibr.local.cli import ui
 
@@ -25,14 +23,8 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
     )
 
     console = Console()
-    # NOTE: ``Path("") or None`` evaluates to ``Path('.')`` because Path
-    # objects are always truthy. Check the env var explicitly so an unset
-    # ``BIBR_PRESETS_DIR`` falls back to the PresetManager default
-    # (``~/.bibr/presets/``) instead of writing presets to the cwd.
-    presets_dir_str = os.environ.get("BIBR_PRESETS_DIR", "").strip()
-    manager = (
-        PresetManager(presets_dir=Path(presets_dir_str)) if presets_dir_str else PresetManager()
-    )
+    # ``BIBR_PRESETS_DIR``, else ``~/.bibr/presets`` (see ``default_presets_dir``).
+    manager = PresetManager()
     env_path = effective_env_file()
 
     cmd = args.preset_command

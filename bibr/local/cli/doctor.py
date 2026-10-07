@@ -674,6 +674,22 @@ def _check_llm_connection(settings, console, ok, fail) -> None:
         )
 
 
+def _check_redis(ok, warn) -> None:
+    import bibr.config
+
+    try:
+        redis_url = bibr.config.Settings.redis.url
+        if redis_url and bibr.config.Settings.redis.password:
+            host = redis_url.split("@")[-1] if "@" in redis_url else redis_url
+            ok(f"Redis: configured ({redact_url_secrets(host)})")
+        elif redis_url:
+            warn("Redis: configured (no password)", hint="Set REDIS_PASSWORD for production")
+        else:
+            warn("Redis: not configured", hint="Only needed for bibr serve with caching")
+    except Exception:
+        warn("Redis: not configured", hint="Only needed for bibr serve with caching")
+
+
 def _run_doctor() -> None:
     """Validate the bibr setup and print a diagnostic report."""
     from rich.console import Console
@@ -817,17 +833,7 @@ def _run_doctor() -> None:
     # --- Services --------------------------------------------------------------
     if config_ok:
         ui.section(console, "Services")
-        try:
-            redis_url = bibr.config.Settings.redis.url
-            if redis_url and bibr.config.Settings.redis.password:
-                host = redis_url.split("@")[-1] if "@" in redis_url else redis_url
-                ok(f"Redis: configured ({redact_url_secrets(host)})")
-            elif redis_url:
-                warn("Redis: configured (no password)", hint="Set REDIS_PASSWORD for production")
-            else:
-                warn("Redis: not configured", hint="Only needed for bibr serve with caching")
-        except Exception:
-            warn("Redis: not configured", hint="Only needed for bibr serve with caching")
+        _check_redis(ok, warn)
 
     # --- Summary ---------------------------------------------------------------
     console.print()

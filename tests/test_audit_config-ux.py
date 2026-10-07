@@ -23,6 +23,9 @@ from bibr.config_introspect import iter_setting_docs
 
 _DOCS_BY_NAME = {d.env_name: d for d in iter_setting_docs()}
 
+# Windows reports 0o666/0o777 modes, and creating a symlink needs a privilege.
+_POSIX = pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits and symlinks")
+
 
 @pytest.fixture()
 def env_chain(tmp_path, monkeypatch):
@@ -237,6 +240,67 @@ def test_connection_test_warns_that_exported_settings_win_at_runtime(monkeypatch
     assert "LLM_BASE_URL" in line
 
 
+def _google_setup(tmp_path, monkeypatch, **exported: str):
+    """Write a google setup with *exported* as the only key spellings in the shell."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BIBR_ENV_FILE", str(tmp_path / ".env"))
+    for name in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "LANGEXTRACT_API_KEY", "LLM_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in exported.items():
+        monkeypatch.setenv(name, value)
+
+    wizard = _wizard()
+    wizard.env_vars = {"LLM_PROVIDER": "google", "GOOGLE_API_KEY": "AIzaTYPEDtypedTYPED12345"}
+    with patch("bibr.setup_wizard.Confirm.ask", return_value=False):
+        wizard._step_write_env()
+    return wizard.console.export_text()
+
+
+@pytest.mark.parametrize("alias", ["GEMINI_API_KEY", "LANGEXTRACT_API_KEY"])
+def test_setup_names_an_exported_alias_of_a_setting_it_writes(tmp_path, monkeypatch, alias):
+    from bibr.config import GlobalSettings
+
+    text = _google_setup(tmp_path, monkeypatch, **{alias: "AIzaSHELLshellSHELL12345"})
+
+    # The settings read the exported alias over GOOGLE_API_KEY in .env.
+    assert GlobalSettings().GOOGLE_API_KEY == "AIzaSHELLshellSHELL12345"
+    [line] = _exported_lines(text)
+    assert alias in line and "GOOGLE_API_KEY" not in line
+    assert "AIzaSHELL" not in text
+
+
+def test_setup_ignores_an_alias_the_exported_setting_outranks(tmp_path, monkeypatch):
+    from bibr.config import GlobalSettings
+
+    text = _google_setup(
+        tmp_path,
+        monkeypatch,
+        GOOGLE_API_KEY="AIzaTYPEDtypedTYPED12345",
+        GEMINI_API_KEY="AIzaSHELLshellSHELL12345",
+    )
+
+    assert GlobalSettings().GOOGLE_API_KEY == "AIzaTYPEDtypedTYPED12345"
+    assert _exported_lines(text) == []
+
+
+def test_setup_refuses_a_bibr_env_file_in_a_missing_folder(tmp_path, monkeypatch, capsys):
+    from bibr.setup_wizard import main
+
+    ran = []
+    monkeypatch.setattr("bibr.setup_wizard.SetupWizard.run", lambda self: ran.append(self))
+    monkeypatch.setattr("bibr.setup_wizard.sys.argv", ["bibr"])
+    monkeypatch.delenv("BIBR_DISABLE_DOTENV", raising=False)
+    monkeypatch.setenv("BIBR_ENV_FILE", str(tmp_path / "missing" / "app.env"))
+
+    with pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 2
+    assert "BIBR_ENV_FILE" in capsys.readouterr().out
+    # Refused before the interview, not after it.
+    assert ran == []
+
+
 # ---------------------------------------------------------------------------
 # The setup wizard masks every configured secret
 # ---------------------------------------------------------------------------
@@ -325,6 +389,20 @@ def test_doctor_llm_hint_masks_the_server_url_credentials(provider):
     assert "hunter2pw" not in hint and "sekrit-query-key" not in hint
 
 
+def test_doctor_masks_the_redis_url_query_password(monkeypatch):
+    from bibr.config import Settings
+    from bibr.local.cli.doctor import _check_redis
+
+    monkeypatch.setattr(Settings.redis, "url", "rediss://cache.example:6380/0?password=hunter2pw")
+    monkeypatch.setattr(Settings.redis, "password", "hunter2pw")
+    rec = _Recorder()
+
+    _check_redis(rec.ok, rec.warn)
+
+    [line] = rec.lines
+    assert "cache.example:6380" in line and "hunter2pw" not in line
+
+
 # ---------------------------------------------------------------------------
 # Presets: URL credentials, file mode, endpoint changes, markers, directory
 # ---------------------------------------------------------------------------
@@ -389,6 +467,7 @@ def test_preset_cli_masks_url_credentials_and_names_what_save_left_out(
         assert "sekrit-query-key" not in out and "hunter2pw" not in out
 
 
+@_POSIX
 def test_preset_files_are_owner_only(tmp_path):
     from bibr.presets import PresetManager
 
@@ -489,6 +568,9 @@ def test_setup_saves_presets_into_bibr_presets_dir(tmp_path, monkeypatch):
     text = saved.read_text()
     assert '"LLM_MODEL": "m"' in text
     assert "AIza" not in text and "hunter2pw" not in text
+    # Like ``bibr preset save``, it names the URL it left out.
+    [note] = [line for line in wizard.console.export_text().splitlines() if "Left out" in line]
+    assert "OCR_BASE_URL" in note and "GOOGLE_API_KEY" not in note
 
 
 # ---------------------------------------------------------------------------
@@ -496,6 +578,7 @@ def test_setup_saves_presets_into_bibr_presets_dir(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@_POSIX
 def test_config_set_writes_through_a_symlinked_env(env_chain, monkeypatch, tmp_path):
     from bibr.config import LlmOptions
 
@@ -591,6 +674,13 @@ def test_demo_rejects_an_unknown_log_level(demo_modules, capsys):
     assert exc.value.code == 2
     assert "invalid choice" in capsys.readouterr().err
     assert server.build_parser().parse_args(["--log-level", "DEBUG"]).log_level == "debug"
+
+
+@pytest.mark.parametrize("level", ["WARN", "fatal", "notset"])
+def test_demo_keeps_accepting_the_logging_aliases(demo_modules, monkeypatch, level):
+    local_app, server = demo_modules
+
+    assert _run_demo(monkeypatch, local_app, server, "--log-level", level)
 
 
 def test_demo_upload_limit_follows_env_at_start(demo_modules, monkeypatch):

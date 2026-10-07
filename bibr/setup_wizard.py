@@ -1751,24 +1751,30 @@ class SetupWizard:
         """Name the settings this setup writes that the shell exports differently.
 
         Exported variables beat ``.env`` at runtime, so ``bibr chew`` would
-        keep using them (an older ``LLM_API_KEY`` or ``LLM_BASE_URL``), while
-        the connection test uses the answers. Values are not shown: most are
-        keys. Each name is reported once.
+        keep using them (an older ``LLM_API_KEY`` or ``LLM_BASE_URL``, or a
+        ``GEMINI_API_KEY`` for ``GOOGLE_API_KEY``), while the connection test
+        uses the answers. The exported spelling is named; values are not
+        shown: most are keys. Each name is reported once.
         """
+        from bibr.config_introspect import iter_setting_docs
+
+        spellings = {
+            doc.env_name.upper(): (doc.env_name, *doc.aliases) for doc in iter_setting_docs()
+        }
         exported = {key.upper(): value for key, value in os.environ.items()}
-        shadowed = sorted(
-            key
-            for key, value in _with_llm_routing(self.env_vars).items()
-            if key.upper() in exported
-            and exported[key.upper()] != value
-            and key not in self._warned_env_overrides
-        )
+        shadowed: set[str] = set()
+        for key, value in _with_llm_routing(self.env_vars).items():
+            # The first exported spelling is the one the settings read.
+            names = spellings.get(key.upper(), (key,))
+            name = next((n.upper() for n in names if n.upper() in exported), None)
+            if name and exported[name] != value and name not in self._warned_env_overrides:
+                shadowed.add(name)
         if not shadowed:
             return
         self._warned_env_overrides.update(shadowed)
         ui.warn(
             self.console,
-            f"Your shell exports {', '.join(shadowed)} with a different value.",
+            f"Your shell exports {', '.join(sorted(shadowed))} with a different value.",
             hint="Environment variables override .env, so bibr keeps using the exported "
             "values. Unset or update them before running bibr.",
         )
@@ -1786,7 +1792,7 @@ class SetupWizard:
 
     def _save_preset(self, name: str) -> None:
         try:
-            from bibr.presets import is_secret_setting
+            from bibr.presets import carries_credentials, is_secret_key, is_secret_setting
 
             # Strip secrets — presets are intended to be shareable, so API keys
             # / tokens / passwords, and URLs carrying one, stay only in .env.
@@ -1799,6 +1805,18 @@ class SetupWizard:
                 f"({len(shareable)} settings; secrets stay in .env). "
                 f"Switch with [cyan]bibr preset use {name}[/cyan]",
             )
+            # Name what the secret filter took beyond the obvious keys, as
+            # ``bibr preset save`` does.
+            withheld = sorted(
+                k
+                for k, v in self.env_vars.items()
+                if not is_secret_key(k) and carries_credentials(v)
+            )
+            if withheld:
+                self.console.print(
+                    f"  [dim]Left out {', '.join(withheld)}: a URL with a password or key "
+                    "stays only in .env.[/dim]"
+                )
         except Exception as exc:
             from rich.markup import escape
 
@@ -2024,6 +2042,19 @@ def main() -> None:
             f"Dotenv loading is disabled by {variable}, so bibr would not read the "
             ".env this setup writes.",
             hint=f"{dotenv_enable_hint(variable)}, then run bibr setup again.",
+        )
+        raise SystemExit(2)
+    env_file = _setup_env_file()
+    if not env_file.parent.is_dir():
+        from rich.markup import escape
+
+        # Only a BIBR_ENV_FILE path can lack its folder; say so before the
+        # interview rather than fail writing at its end.
+        ui.error(
+            Console(),
+            f"The folder for {escape(str(env_file))} does not exist, so this setup "
+            "cannot write it.",
+            hint="Create the folder, or point BIBR_ENV_FILE at a file in an existing one.",
         )
         raise SystemExit(2)
     try:

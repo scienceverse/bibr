@@ -64,10 +64,12 @@ entered none, so that a key or server left by an earlier setup, in `./.env`
 or `~/.bibr/.env`, cannot override the one you entered.
 
 `bibr setup` writes `./.env`, or the last file `BIBR_ENV_FILE` lists, since
-that file's values win. Environment variables still override it: when your
+that file's values win; it stops before asking anything when that file's
+folder does not exist. Environment variables still override it: when your
 shell exports a setting the wizard writes (`LLM_API_KEY`, `LLM_BASE_URL`,
-`LLM_PROVIDER`, ...) with a different value, the wizard names it, so you can
-unset or update it before running bibr.
+`LLM_PROVIDER`, ...), or another name bibr reads it under (`GEMINI_API_KEY`
+for `GOOGLE_API_KEY`), with a different value, the wizard names it, so you
+can unset or update it before running bibr.
 
 ## Namespaces
 

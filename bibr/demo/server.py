@@ -9,7 +9,8 @@ import logging
 import os
 import sys
 
-_LOG_LEVELS = ("debug", "info", "warning", "error", "critical")
+# With logging's own aliases, so every value that worked before still does.
+_LOG_LEVELS = ("debug", "info", "warning", "warn", "error", "critical", "fatal", "notset")
 
 
 def build_parser() -> argparse.ArgumentParser:
