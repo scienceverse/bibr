@@ -73,6 +73,7 @@ class WarningCode(StrEnum):
     REF_PARSE_LOST = "REF_PARSE_LOST"
     REF_PARSE_SALVAGE_RECOVERY = "REF_PARSE_SALVAGE_RECOVERY"
     REF_PARSE_SPLIT_RECOVERY = "REF_PARSE_SPLIT_RECOVERY"
+    REF_PARSE_FINALIZE_FAILED = "REF_PARSE_FINALIZE_FAILED"
     REF_EXTRACTION_ERROR = "REF_EXTRACTION_ERROR"
     REF_UNDER_EXTRACTION_SUSPECTED = "REF_UNDER_EXTRACTION_SUSPECTED"
     # Enrichment
@@ -177,6 +178,8 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     "LLM completion.",
     WarningCode.REF_PARSE_SPLIT_RECOVERY: "References were re-parsed in smaller LLM batches "
     "after a batch failed.",
+    WarningCode.REF_PARSE_FINALIZE_FAILED: "Cleaning up a parsed reference's fields (page "
+    "range, DOI, Vancouver tail) raised an error; that reference keeps its fields as parsed.",
     WarningCode.REF_EXTRACTION_ERROR: "Reference extraction raised an unexpected error; the "
     "references are missing.",
     WarningCode.REF_UNDER_EXTRACTION_SUSPECTED: "Far fewer references were parsed than the body "
