@@ -87,12 +87,25 @@ _ACCESS_PHRASE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Mirrors bibr.extract.ref_extractor._IN_PRESS_RE / _VANCOUVER_YEAR_RE (not
-# imported: ref_extractor imports this module).
+# A reference marked in press prints the status as a field of its own: in
+# brackets ("(in press)", "[Epub ahead of print]"), between field punctuation
+# (". In press.", ", forthcoming,"), opening "Forthcoming in <venue>" or a dated
+# "In press 2002", or at the very end ("J Synth Garden Res in press."). A bare
+# substring search also read "caveats in press releases" and "The Darwin Press"
+# as in press, which cost those references their year. ref_extractor imports
+# this pattern; it cannot be imported the other way.
+_IN_PRESS_STATUS = (
+    r"(?:article\s+)?in\s*press(?:-?[a-z])?|forthcoming|advance\s*online(?:\s+publication)?"
+    r"|manuscript\s*submitted(?:\s+for\s+publication)?|epub\s*ahead(?:\s+of\s+print)?"
+)
 _IN_PRESS_RE = re.compile(
-    r"in\s*press|forthcoming|advance\s*online|manuscript\s*submitted|epub\s*ahead",
+    rf"(?:^|[(\[.,;:/])\s*(?:{_IN_PRESS_STATUS})"
+    r"(?=\s*(?:[.,;:()\[\]]|$)|\s+in\b|\s+(?:19|20)\d\d\b)"
+    rf"|\b(?:{_IN_PRESS_STATUS})[\s.)\]]*$",
     re.IGNORECASE,
 )
+# Mirrors bibr.extract.ref_extractor._VANCOUVER_YEAR_RE (not imported:
+# ref_extractor imports this module).
 _VANCOUVER_YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})\s*[;:]\s*[eE]?\d")
 
 _YEAR_TOKEN_RE = re.compile(r"(?<![\w.,/-])(1[5-9]\d\d|20\d\d)(?!\d)")

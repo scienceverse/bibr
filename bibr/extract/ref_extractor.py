@@ -43,7 +43,7 @@ from bibr.extract.footnote_citations import (
     year_led_title,
 )
 from bibr.extract.merge_split import _onset_finder_for_bibliography, split_merged_refs
-from bibr.extract.ref_field_repair import repair_ner_reference_fields
+from bibr.extract.ref_field_repair import _IN_PRESS_RE, repair_ner_reference_fields
 from bibr.extract.ref_line_stream import (
     StreamSegmentation,
     _match_key,
@@ -747,12 +747,6 @@ def _resolve_ref_strategies(
     if parse is None:
         parse = "ner"
     return seg.lower(), parse.lower()
-
-
-_IN_PRESS_RE = re.compile(
-    r"in\s*press|forthcoming|advance\s*online|manuscript\s*submitted|epub\s*ahead",
-    re.IGNORECASE,
-)
 
 
 def _is_in_press(year_str: str | None) -> bool:

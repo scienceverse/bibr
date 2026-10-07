@@ -1,9 +1,13 @@
-"""Reference-extraction audit fixes: the finalize crash.
+"""Reference-extraction audit fixes: the finalize crash and the in-press
+detector.
 
-A superscript or circled digit in a page ("4²", "①") passed the ``isdigit()``
-guard of the compact page-range expansion and crashed ``int()``; with no
-per-reference guard, that one entry made the paper's whole reference list
-incomplete.
+* A superscript or circled digit in a page ("4²", "①") passed the
+  ``isdigit()`` guard of the compact page-range expansion and crashed
+  ``int()``; with no per-reference guard, that one entry made the paper's
+  whole reference list incomplete.
+* The in-press detector matched "in press" anywhere: "caveats in press
+  releases" and "The Darwin Press" read as in press, which suppressed the
+  Vancouver year backfill and the year-from-text repair.
 """
 
 from __future__ import annotations
@@ -18,7 +22,9 @@ from bibr.extract.ref_extractor import (
     ReferenceExtractor,
     _expand_compact_last_page,
     _finalize_reference_fields,
+    _is_in_press,
 )
+from bibr.extract.ref_field_repair import _rule_year_from_text
 from bibr.paper_contents import PaperContents
 from bibr.processing_warnings import WarningCode
 from bibr.schemas import PaperReferenceLLM
@@ -139,3 +145,68 @@ class TestOneFailingFinalizeKeepsTheOthers:
 
         assert [(r.title, r.last_page) for r in refs] == [("Broken", "92"), ("Fine", "792")]
         assert len(_finalize_warnings(ext)) == 1
+
+
+SUMNER = (
+    "Sumner P, Vivian-Griffiths S, Boivin J, Williams A, Bott L, Adams R, et al. "
+    "Exaggerations and caveats in press releases and health-related science news. "
+    "PLoS One. 2016;11(12):e0168217."
+)
+
+
+class TestInPressNeedsAStatusPosition:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            SUMNER,
+            "Darwin, C. (1859). On the origin of species. London: The Darwin Press.",
+            "Smith, J. 2007. A book. Berlin Press.",
+            "Smith, J. (2019). A book. New York: Penguin Press.",
+            "Smith, J. (2020). The forthcoming election. Journal of Politics, 3, 1-2.",
+            "Smith, J. (2020). Women in press photography. Journal, 2, 3.",
+            "Smith J. Advance online learning in schools. J Ed. 2019;3:1-2.",
+        ],
+    )
+    def test_the_words_inside_a_title_or_name_are_not_a_status(self, text):
+        assert not _is_in_press(text)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "in press",
+            "In  Press",
+            "forthcoming",
+            "advance online",
+            "manuscript submitted",
+            "epub ahead",
+            "Robertson, C. E., & Van Bavel, J. J. (in press). Inside the funhouse mirror factory.",
+            "Smith, J. (in press-a). Title. Journal.",
+            "Smith, J. (2021, in press). Title. Journal.",
+            "Smith J. A forthcoming study. J Synth Garden Res in press.",
+            "Smith J. Title. J Med. In press. doi:10.1000/xyz",
+            "Smith J. Title. Proc Natl Acad Sci U S A. In press 2002.",
+            "Smith, J. (2020). Title. Journal. Advance online publication. https://doi.org/10.1/x",
+            "Smith, J. (2020). Title. Manuscript submitted for publication.",
+            "Smith J. Title. Nature. 2020 Jan 5. [Epub ahead of print]",
+            "Smith, J. Title. Forthcoming in Journal of Philosophy.",
+            "Smith, J. Title. Journal of X, Article in Press.",
+        ],
+    )
+    def test_a_status_of_its_own_is_in_press(self, text):
+        assert _is_in_press(text)
+
+    def test_a_title_mentioning_press_releases_keeps_its_vancouver_year(self):
+        fields = {"title": "Exaggerations", "year": None, "volume": None, "first_page": None}
+        assert _finalize_reference_fields(fields, SUMNER)["year"] == 2016
+
+    def test_a_publisher_named_press_keeps_its_year_from_the_text(self):
+        fields = {"authors": "Smith, J.", "title": "A book"}
+        assert _rule_year_from_text(fields, "Smith, J. A book. Berlin: Berlin Press, 2007.")
+        assert fields["year"] == 2007
+
+    def test_the_ner_path_does_not_flag_it(self):
+        with _ner_parser({"title": "Exaggerations and caveats", "authors": "Sumner P"}):
+            (ref,) = _extractor()._parse_references_ner([SUMNER])
+
+        assert ref.is_in_press is False
+        assert ref.year == 2016
