@@ -23,6 +23,7 @@ import io
 import logging
 import re
 from dataclasses import dataclass
+from typing import Any
 
 import pandas as pd
 
@@ -98,6 +99,17 @@ _INLINE_WRAPPERS: frozenset[str] = frozenset(
     )
 )
 _W_R = f"{{{_NS['w']}}}r"
+_W_DRAWING = f"{{{_NS['w']}}}drawing"
+_A_BLIP = f"{{{_NS['a']}}}blip"
+_M_OMATH = f"{{{_NS['m']}}}oMath"
+_W_TXBX_CONTENT = f"{{{_NS['w']}}}txbxContent"
+_W_STYLE = f"{{{_NS['w']}}}style"
+_W_STYLE_ID = f"{{{_NS['w']}}}styleId"
+_W_TYPE = f"{{{_NS['w']}}}type"
+_W_DEFAULT = f"{{{_NS['w']}}}default"
+_W_NAME = f"{{{_NS['w']}}}name"
+_W_BASED_ON = f"{{{_NS['w']}}}basedOn"
+_ON = frozenset({"1", "true", "on"})  # true ST_OnOff values
 
 # Table grid limits. gridSpan is a free integer that python-docx's row.cells
 # repeated a cell for, one copy per column, so a 36 KB file spanning 2e9
@@ -207,9 +219,8 @@ def _image_parts(paragraph, doc) -> list:
     """The image parts shown by a paragraph's inline ``<w:drawing>`` pictures,
     in order; a part shown twice is listed twice."""
     out = []
-    blips = paragraph._element.findall(f".//{{{_NS['w']}}}drawing//{{{_NS['a']}}}blip")
     related = doc.part.related_parts
-    for blip in blips:
+    for blip in _drawing_blips(paragraph._element):
         rid = blip.get(f"{{{_NS['r']}}}embed")
         if rid is None:
             continue
@@ -272,20 +283,83 @@ def _table_rows(tbl) -> list[list[tuple[object, int]]]:
     return rows
 
 
-def _is_caption_style(style) -> bool:
-    """True for Word's Caption style and styles based on it (pandoc's "Table
-    Caption" and "Image Caption")."""
-    for _ in range(8):  # base-style chains are short; a malformed cycle must end
-        if style is None:
-            return False
-        if getattr(style, "name", None) == "Caption":
-            return True
-        style = getattr(style, "base_style", None)
-    return False
+class _Styles:
+    """A document's paragraph styles, each looked up once.
+
+    python-docx searches the whole styles part on every ``paragraph.style`` and
+    every ``base_style`` step, so the parse cost paragraphs x styles: a 56 KB
+    file of 10,000 paragraphs and 10,000 styles took 52 s. A paragraph's style
+    is found as python-docx finds it: the first style with the id its
+    ``w:pStyle`` names if that is a paragraph style, else the last default
+    paragraph style.
+    """
+
+    def __init__(self, doc) -> None:
+        self._by_id: dict[str, Any] = {}  # w:style elements
+        self._default: Any = None
+        for style in doc.styles.element.iterchildren(_W_STYLE):
+            style_id = style.get(_W_STYLE_ID)
+            if style_id is not None:
+                self._by_id.setdefault(style_id, style)
+            if style.get(_W_TYPE) == "paragraph" and style.get(_W_DEFAULT) in _ON:
+                self._default = style
+        self._resolved: dict[str | None, tuple[str | None, bool]] = {}
+
+    def of(self, paragraph) -> tuple[str | None, bool]:
+        """A paragraph's style name, and whether that is Word's Caption style
+        or one based on it (pandoc's "Table Caption" and "Image Caption")."""
+        style_id = paragraph._p.style
+        resolved = self._resolved.get(style_id)
+        if resolved is None:
+            style = self._by_id.get(style_id) if style_id else None
+            if style is None or style.get(_W_TYPE) != "paragraph":
+                style = self._default
+            resolved = self._resolved[style_id] = (_style_name(style), self._is_caption(style))
+        return resolved
+
+    def _is_caption(self, style) -> bool:
+        for _ in range(8):  # base-style chains are short; a malformed cycle must end
+            if style is None:
+                return False
+            if _style_name(style) == "Caption":
+                return True
+            based_on = style.find(_W_BASED_ON)
+            style = None if based_on is None else self._by_id.get(based_on.get(_W_VAL))
+        return False
+
+
+def _style_name(style) -> str | None:
+    """A ``w:style``'s name as python-docx shows it ("heading 1" as "Heading 1")."""
+    from docx.styles import BabelFish
+
+    name = None if style is None else style.find(_W_NAME)
+    value = None if name is None else name.get(_W_VAL)
+    return None if value is None else BabelFish.internal2ui(value)
+
+
+def _drawing_blips(p):
+    """The ``a:blip`` pictures inside a body paragraph's ``w:drawing`` elements,
+    each once. A ``.//w:drawing//a:blip`` search lists a picture once per
+    drawing around it: a picture in a text box's drawing became two figures,
+    and 250 nested drawings made 25 million matches of 100,000 pictures."""
+    for blip in p.iter(_A_BLIP):
+        if next(blip.iterancestors(_W_DRAWING), None) is not None:
+            yield blip
 
 
 def _has_picture(paragraph) -> bool:
-    return bool(paragraph._element.findall(f".//{{{_NS['w']}}}drawing//{{{_NS['a']}}}blip"))
+    return next(_drawing_blips(paragraph._element), None) is not None
+
+
+def _display_math_text(omath_para_el) -> str:
+    """A display equation's text: each ``m:oMath`` in the ``m:oMathPara``, read
+    once. An equation nested in another is read as part of the outer one: read
+    again on its own, a nest 250 deep turned 1 MB of math into 250 MB."""
+    return " ".join(
+        _omml_to_text(om)
+        for om in omath_para_el.iter(_M_OMATH)
+        if next(om.iterancestors(_M_OMATH), None) is None
+    ).strip()
 
 
 def _paragraph_text(p) -> str:
@@ -321,7 +395,7 @@ def _nearest_block(blocks: list[_Block], index: int, step: int) -> int | None:
     return None
 
 
-def _is_table_caption(blocks: list[_Block], index: int) -> bool:
+def _is_table_caption(blocks: list[_Block], index: int, styles: _Styles) -> bool:
     """Can the block at *index*, found next to a table, be that table's caption?
 
     It must be a Caption-styled paragraph, without a picture of its own, that
@@ -329,11 +403,7 @@ def _is_table_caption(blocks: list[_Block], index: int) -> bool:
     the picture's caption.
     """
     block = blocks[index]
-    if (
-        block.kind != "paragraph"
-        or not _is_caption_style(getattr(block.obj, "style", None))
-        or _has_picture(block.obj)
-    ):
+    if block.kind != "paragraph" or not styles.of(block.obj)[1] or _has_picture(block.obj):
         return False
     text = _paragraph_text(block.obj._p).strip()
     if not text or _FIGURE_CAPTION_START_RE.match(text):
@@ -346,7 +416,9 @@ def _is_table_caption(blocks: list[_Block], index: int) -> bool:
     )
 
 
-def _table_caption_blocks(blocks: list[_Block], kept_tables: set[int]) -> dict[int, int]:
+def _table_caption_blocks(
+    blocks: list[_Block], kept_tables: set[int], styles: _Styles
+) -> dict[int, int]:
     """Map each kept table block's index to that of its caption paragraph.
 
     A table's caption is the Caption-styled paragraph directly above or below
@@ -360,16 +432,18 @@ def _table_caption_blocks(blocks: list[_Block], kept_tables: set[int]) -> dict[i
     for index in sorted(kept_tables):
         for side, step in ((above, -1), (below, 1)):
             neighbour = _nearest_block(blocks, index, step)
-            if neighbour is not None and _is_table_caption(blocks, neighbour):
+            if neighbour is not None and _is_table_caption(blocks, neighbour, styles):
                 side[index] = neighbour
     shared = set(above.values()) & set(below.values())
     votes_above = sum(caption not in shared for caption in above.values())
     votes_below = sum(caption not in shared for caption in below.values())
     captions: dict[int, int] = {}
+    taken: set[int] = set()  # a scan of captions.values() per table was quadratic
     for side in (above, below) if votes_above >= votes_below else (below, above):
         for table_index, caption_index in side.items():
-            if table_index not in captions and caption_index not in captions.values():
+            if table_index not in captions and caption_index not in taken:
                 captions[table_index] = caption_index
+                taken.add(caption_index)
     return captions
 
 
@@ -403,6 +477,8 @@ class DocxParser:
         self._figure_counter = 1
         self._current_section_id = 0
         self._detected_title: str | None = None
+        # Headings that can still parent the next one, levels increasing.
+        self._open_headings: list[PaperSection] = []
 
         # Notes: text maps from footnotes.xml / endnotes.xml + deferred
         # references for xref linking. The two id spaces are independent (both
@@ -410,11 +486,19 @@ class DocxParser:
         # records which kind it came from.
         self._footnotes_map: dict[str, str] = {}
         self._endnotes_map: dict[str, str] = {}
-        # Each entry: (note_text, body_section_id, deferred_text_index, kind)
-        self._pending_footnotes: list[tuple[str, int, int, str]] = []
+        # Each referenced note once, in first-reference order: (note_text, kind).
+        # A note referenced again was queued again, text and all, so one note
+        # referenced 20,000 times in a 34 KB file made 1 GB of sentences.
+        self._pending_footnotes: list[tuple[str, str]] = []
+        self._note_index: dict[tuple[str, str], int] = {}  # (kind, id) -> queue index
+        # One xref per (queue index, deferred_text_index) pair: each deferred
+        # entry referencing a note links to it once, however many marks it holds.
+        self._note_refs: dict[tuple[int, int], None] = {}
         # Hyperlink captures awaiting text_id resolution at segmentation time.
         # Each entry: (url, link_text, section_id, deferred_text_index)
         self._pending_url_links: list[tuple[str, str, int, int]] = []
+        # The latest text_id at or before each deferred entry, set at segmentation.
+        self._nearest_text_ids: list[int | None] = []
         # Figures awaiting a Caption-styled paragraph immediately after
         self._unfilled_caption_figures: list[PaperFigure] = []
 
@@ -468,6 +552,7 @@ class DocxParser:
             raise ProcessingError(f"Failed to open DOCX: {exc}") from exc
 
         self._doc = doc  # needed by image/footnote helpers
+        self._styles = _Styles(doc)
         self._footnotes_map = _load_footnotes(doc)
         self._endnotes_map = _load_endnotes(doc)
 
@@ -481,7 +566,9 @@ class DocxParser:
         }
         # A table's caption paragraph leaves the body text, as a figure's does.
         table_captions = _table_caption_blocks(
-            blocks, {index for index, cells in table_cells.items() if cells is not None}
+            blocks,
+            {index for index, cells in table_cells.items() if cells is not None},
+            self._styles,
         )
         caption_blocks = set(table_captions.values())
         for index, block in enumerate(blocks):
@@ -592,17 +679,25 @@ class DocxParser:
             sentence_counter=self._sentence_counter,
             paragraph_counter=self._paragraph_counter,
         )
+        # Each link and note reference walked back over the entries that made
+        # no sentence to find its text_id; carrying it forward once is linear.
+        latest: int | None = None
+        self._nearest_text_ids = []
+        for text_id in self.assembler.last_text_id:
+            latest = latest if text_id is None else text_id
+            self._nearest_text_ids.append(latest)
 
         # Resolve pending hyperlink captures: the deferred index points to the
         # paragraph entry; use its last emitted sentence's text_id (or the next
-        # one if the entry itself produced no sentences).
+        # one if the entry itself produced no sentences). Each link scanned the
+        # sentences for its paragraph, so 100,000 links after 20,000
+        # paragraphs took 53 s; the paragraphs are now indexed once.
+        paragraph_of: dict[int, int] = {}
+        for sent in self.sentences:
+            paragraph_of.setdefault(sent.text_id, sent.paragraph_id)
         for url, link_text, sec_id, deferred_idx in self._pending_url_links:
             text_id = self._find_nearest_text_id(deferred_idx)
-            link_paragraph_id: int | None = None
-            for sent in self.sentences:
-                if sent.text_id == text_id:
-                    link_paragraph_id = sent.paragraph_id
-                    break
+            link_paragraph_id = paragraph_of.get(text_id)
             self.links.append(
                 PaperURLLink(
                     url=url,
@@ -700,7 +795,8 @@ class DocxParser:
         # marker is each note's position within its own kind. ``xref_id`` is the
         # note's own text row (``text_id``), unique across both kinds.
         printed_counts: dict[str, int] = {}
-        for fn_text, _orig_section, deferred_idx, kind in self._pending_footnotes:
+        note_rows: list[tuple[int, int]] = []  # (text_id, printed number) per note
+        for fn_text, kind in self._pending_footnotes:
             printed_counts[kind] = printed_counts.get(kind, 0) + 1
             printed_num = printed_counts[kind]
             label = "Endnote" if kind == "endnote" else "Footnote"
@@ -731,27 +827,26 @@ class DocxParser:
                 )
             )
             self._sentence_counter += 1
+            note_rows.append((footnote_text_id, printed_num))
 
-            nearest_text_id = self._find_nearest_text_id(deferred_idx)
+        for index, deferred_idx in self._note_refs:
+            footnote_text_id, printed_num = note_rows[index]
             contents.xrefs.append(
                 PaperXref(
                     xref_id=footnote_text_id,
                     xref_type="foot",
                     contents=str(printed_num),
-                    text_id=nearest_text_id,
+                    text_id=self._find_nearest_text_id(deferred_idx),
                 )
             )
 
     def _find_nearest_text_id(self, deferred_idx: int) -> int:
         """Last text_id at or before ``deferred_idx`` in the deferred-texts stream."""
-        last_text_id = self.assembler.last_text_id
-        if not last_text_id:
-            return self.sentences[0].text_id if self.sentences else 1
-        clamped = min(max(0, deferred_idx), len(last_text_id) - 1)
-        for i in range(clamped, -1, -1):
-            tid = last_text_id[i]
-            if tid is not None:
-                return tid
+        nearest = self._nearest_text_ids
+        if nearest:
+            text_id = nearest[min(max(0, deferred_idx), len(nearest) - 1)]
+            if text_id is not None:
+                return text_id
         return self.sentences[0].text_id if self.sentences else 1
 
     # ------------------------------------------------------------------
@@ -759,7 +854,7 @@ class DocxParser:
     # ------------------------------------------------------------------
 
     def _handle_paragraph(self, paragraph) -> None:
-        style_name = getattr(paragraph.style, "name", None)
+        style_name, caption_style = self._styles.of(paragraph)
 
         # Quick path: heading paragraphs cannot host inline math/images/refs we care about.
         plain = _paragraph_text(paragraph._p).strip()
@@ -770,7 +865,7 @@ class DocxParser:
             return
 
         # Caption-styled paragraph: drain pending images, attach text as caption.
-        if self._unfilled_caption_figures and plain and _is_caption_style(paragraph.style):
+        if self._unfilled_caption_figures and plain and caption_style:
             fig = self._unfilled_caption_figures.pop(0)
             fig.caption = plain
             fig.label = caption_label(plain, "figure")
@@ -803,12 +898,15 @@ class DocxParser:
                 txt, None, self._current_section_id, True, False, inline_math=inline_math
             )
             for kind, note_id in pending_note_refs:
-                source = self._footnotes_map if kind == "footnote" else self._endnotes_map
-                note_text = source.get(note_id, "").strip()
-                if note_text:
-                    self._pending_footnotes.append(
-                        (note_text, self._current_section_id, deferred_idx, kind)
-                    )
+                index = self._note_index.get((kind, note_id))
+                if index is None:
+                    source = self._footnotes_map if kind == "footnote" else self._endnotes_map
+                    note_text = source.get(note_id, "").strip()
+                    if not note_text:
+                        continue
+                    index = self._note_index[kind, note_id] = len(self._pending_footnotes)
+                    self._pending_footnotes.append((note_text, kind))
+                self._note_refs[index, deferred_idx] = None
             pending_note_refs.clear()
 
         def inline_math(math_el, extra_buf: list[str] | None) -> None:
@@ -869,8 +967,12 @@ class DocxParser:
                     # A drawing can be a text box rather than a picture, and
                     # its paragraphs are real document text — pull quotes,
                     # boxed methods notes, poster-style layouts. Nothing walked
-                    # into it, so that text was lost entirely.
-                    for txbx in run_child.iter(f"{{{w}}}txbxContent"):
+                    # into it, so that text was lost entirely. A text box in a
+                    # text box is read with it: read again on its own, a nest
+                    # 240 deep made 240 MB of text from 1 MB.
+                    for txbx in run_child.iter(_W_TXBX_CONTENT):
+                        if next(txbx.iterancestors(_W_TXBX_CONTENT), None) is not None:
+                            continue
                         boxed = " ".join(
                             t.text.strip() for t in txbx.iter(f"{{{w}}}t") if t.text
                         ).strip()
@@ -893,8 +995,7 @@ class DocxParser:
                 if tag == f"{{{m}}}oMathPara":
                     # Display math — flush any text so far, then emit math as own entry
                     flush_body()
-                    math_text = " ".join(_omml_to_text(om) for om in child.iter(f"{{{m}}}oMath"))
-                    math_text = math_text.strip()
+                    math_text = _display_math_text(child)
                     if math_text:
                         self.assembler.append(
                             f"$${math_text}$$",
@@ -924,25 +1025,29 @@ class DocxParser:
                 rel = self._doc.part.rels.get(rel_id)
                 if rel is not None:
                     target_url = getattr(rel, "target_ref", None) or getattr(rel, "target", None)
+            if not target_url or into_buf is not None:
+                # A link without a URL is paragraph text, and a link inside a
+                # link (Word never nests them) more of the outer link's text:
+                # each level of a nest kept a copy of all the text under it,
+                # 250 MB of link text from a 1 MB paragraph 250 deep.
+                walk_content(link_el, into_buf)
+                return
             link_text_buf: list[str] = []
             walk_content(link_el, link_text_buf)
-            if into_buf is not None:
-                into_buf.extend(link_text_buf)
-            if target_url:
-                link_text = "".join(link_text_buf).strip() or target_url
-                # text_id is unknown until segmentation; record the deferred
-                # entry index that *will* hold this paragraph's text. Since
-                # we have not yet flushed, the next deferred index is
-                # ``len(self._deferred_texts)`` — apply_segmentation resolves
-                # it once sentences exist.
-                self._pending_url_links.append(
-                    (
-                        target_url,
-                        link_text,
-                        self._current_section_id,
-                        len(self.assembler),
-                    )
+            link_text = "".join(link_text_buf).strip() or target_url
+            # text_id is unknown until segmentation; record the deferred
+            # entry index that *will* hold this paragraph's text. Since
+            # we have not yet flushed, the next deferred index is
+            # ``len(self._deferred_texts)`` — apply_segmentation resolves
+            # it once sentences exist.
+            self._pending_url_links.append(
+                (
+                    target_url,
+                    link_text,
+                    self._current_section_id,
+                    len(self.assembler),
                 )
+            )
 
         walk_content(paragraph._element)
 
@@ -987,28 +1092,27 @@ class DocxParser:
         if inferred is not None and inferred > level:
             level = inferred
 
+        # The parent is the latest heading shallower than this one. Searching
+        # back through every section for it was quadratic in a run of
+        # same-level headings (20,000 Heading 1 paragraphs: 6 s), so the open
+        # headings are kept as a stack, shallowest first.
+        open_headings = self._open_headings
+        while open_headings and open_headings[-1].level >= level:
+            open_headings.pop()
         self._section_counter += 1
-        parent_id = 0
-        for sec in reversed(self.sections):
-            if 0 < sec.level < level:
-                parent_id = sec.section_id
-                break
-
-        self.sections.append(
-            PaperSection(
-                section_id=self._section_counter,
-                header=text,
-                level=level,
-                parent_section_id=parent_id,
-            )
+        section = PaperSection(
+            section_id=self._section_counter,
+            header=text,
+            level=level,
+            parent_section_id=open_headings[-1].section_id if open_headings else 0,
         )
+        self.sections.append(section)
+        open_headings.append(section)
         self._current_section_id = self._section_counter
 
     def _handle_math_para(self, omath_para_el) -> None:
         """Block-level OMML — emit as a non-segmented formula deferred entry."""
-        m = _NS["m"]
-        math_text = " ".join(_omml_to_text(om) for om in omath_para_el.iter(f"{{{m}}}oMath"))
-        math_text = math_text.strip()
+        math_text = _display_math_text(omath_para_el)
         if not math_text:
             return
         self.assembler.append(
