@@ -28,6 +28,7 @@ import pytest
 
 from bibr.config import GlobalSettings
 from bibr.exceptions import UpstreamServiceError
+from bibr.utils.secure_temp import close_shared_log
 
 _POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
 # The launch tests below stub the module-wide Popen; the planted-module test
@@ -905,6 +906,7 @@ def test_rapid_mlx_closes_its_log_when_popen_fails(monkeypatch):
         server._spawn_and_wait(["rapid-mlx", "serve"])
 
     assert handles and all(handle.closed for _path, handle in handles)
+    close_shared_log("rapid-mlx", server._port)  # Windows cannot delete an open file
     for path, _handle in handles:
         path.unlink(missing_ok=True)
 
@@ -932,6 +934,7 @@ async def test_rapid_mlx_recycles_keep_one_log(monkeypatch):
     await client.shutdown()
 
     assert len(logs) == 1
+    close_shared_log("rapid-mlx", 18772)
     logs.pop().unlink(missing_ok=True)
 
 
@@ -948,7 +951,33 @@ def test_shared_log_appends_instead_of_truncating():
         assert second_path == first_path
         assert first_path.read_bytes() == b"first\nsecond\n"
     finally:
+        close_shared_log("audit-append", 9001)
         first_path.unlink(missing_ok=True)
+
+
+def test_closing_a_shared_log_releases_its_last_handle():
+    """Windows cannot delete a file this process still holds open."""
+    from bibr.utils import secure_temp
+
+    path, handle = secure_temp.open_subprocess_log("audit-close", 9005, shared=True)
+    handle.close()
+    kept = secure_temp._SHARED_LOGS[("audit-close", 9005)][1]
+    try:
+        close_shared_log("audit-close", 9005)
+        close_shared_log("audit-close", 9005)  # a second close is a no-op
+
+        assert kept.closed
+        assert ("audit-close", 9005) not in secure_temp._SHARED_LOGS
+        if os.path.isdir("/proc/self/fd"):  # no descriptor of this process holds it
+            held = {os.path.realpath(f"/proc/self/fd/{fd}") for fd in os.listdir("/proc/self/fd")}
+            assert os.path.realpath(path) not in held
+        new_path, new_handle = secure_temp.open_subprocess_log("audit-close", 9005, shared=True)
+        new_handle.close()
+        close_shared_log("audit-close", 9005)
+        new_path.unlink()
+        assert new_path != path  # the closed log is not reused
+    finally:
+        path.unlink(missing_ok=True)
 
 
 @_POSIX_ONLY
@@ -968,6 +997,7 @@ def test_shared_log_never_follows_a_replaced_path(tmp_path):
 
         assert new_path != path
         assert target.read_bytes() == b""
+        close_shared_log("audit-link", 9002)
         new_path.unlink(missing_ok=True)
     finally:
         path.unlink(missing_ok=True)
@@ -993,6 +1023,7 @@ def test_shared_log_never_writes_through_a_hard_link_in_its_place():
 
         assert new_path != path
         assert os.path.getsize(victim) == 0
+        close_shared_log("audit-hardlink", 9003)
         new_path.unlink(missing_ok=True)
     finally:
         path.unlink(missing_ok=True)
@@ -1021,6 +1052,7 @@ def test_shared_log_never_blocks_on_a_fifo_in_its_place():
         new_path, new_handle = opened[0]
         new_handle.close()
         assert new_path != path
+        close_shared_log("audit-fifo", 9004)
         new_path.unlink(missing_ok=True)
     finally:
         if worker.is_alive():  # release the blocked open (and the lock it holds)
@@ -1050,6 +1082,7 @@ def test_rapid_mlx_startup_error_reports_only_its_own_generation(monkeypatch):
         assert not mod._is_mtp_unsupported_error(excinfo.value)  # no bogus MTP fallback
         assert server._stderr_log == path
     finally:
+        close_shared_log("rapid-mlx", port)
         path.unlink(missing_ok=True)
 
 
