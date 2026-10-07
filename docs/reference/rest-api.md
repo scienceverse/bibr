@@ -22,6 +22,9 @@ bearer token as extraction when authentication is enabled.
 The probes are public. With authentication enabled, an anonymous `/ready`
 response contains only `{"status": "ready"}` or `{"status": "not_ready"}`.
 A valid bearer token also exposes `checks` and the deployment `build_sha`.
+`/ready` reuses its OCR, Redis and job-store results for 2 seconds, and
+concurrent probes share one round of checks, so a change in those services
+shows within 2 seconds and probe traffic does not multiply requests to them.
 
 ### Papers
 
@@ -39,8 +42,9 @@ At most 1 MiB of the upload remains in API memory before the multipart spool
 rolls to disk.
 Exactly one `file` part is accepted. The nine optional fields below must each
 appear at most once and are capped at 64 bytes; duplicate parts, a second file,
-a file part under another name or more text parts than there are fields return
-`400`. A text field the route does not know is ignored.
+a file part under another name or more than 25 text parts in all return `400`.
+A text field the route does not know is ignored, and up to 16 of them fit
+alongside every field below.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
@@ -171,7 +175,9 @@ curl -X POST http://localhost:8000/papers/extract \
 ```
 
 A missing or wrong token gets a `401` with a `WWW-Authenticate: Bearer`
-header. When `AUTH_API_KEY` is unset, the CLI permits loopback-only serving,
+header. A key with non-ASCII characters matches whether the client sends it
+UTF-8-encoded (curl) or latin-1-encoded (browsers, Python's `http.client`).
+When `AUTH_API_KEY` is unset, the CLI permits loopback-only serving,
 and the server then refuses non-loopback `Host` headers (`421`) and
 state-changing requests from other sites (`403`); network-visible binds
 require a key at least 32 characters long.
@@ -222,7 +228,7 @@ do not count the original extraction's LLM tokens as new usage.
 
 | Status | Meaning |
 |---|---|
-| `400` | Invalid input (missing filename, malformed/bounded option, duplicate or unknown multipart part) |
+| `400` | Invalid input (missing filename, malformed/bounded option, duplicate multipart part, an unexpected file part, too many text parts) |
 | `401` | Missing or invalid bearer token (`AUTH_API_KEY` set) |
 | `404` | Unknown job id (expired past `JOBS_TTL_SECONDS`, evicted by the retention limits, or never existed) |
 | `409` | Job result requested before the job finished |
