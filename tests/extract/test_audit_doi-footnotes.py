@@ -1,9 +1,10 @@
-"""Audit fixes: DOI provenance and note citation splitting.
+"""Audit fixes: DOI provenance, note citation splitting and email affinity.
 
 The DOI provenance diff ran in time quadratic in a sentence's length and the
 note citation split in time cubic in a note's length; a resolver host printed
 in capitals hid the label in front of a DOI; casefolding a text-layer line
-moved the end of its DOI.
+moved the end of its DOI; an accented surname matched unrelated email
+addresses through its ASCII fragments ("Šimić" -> "imi").
 """
 
 from __future__ import annotations
@@ -12,9 +13,11 @@ from difflib import SequenceMatcher
 
 import pytest
 
+from bibr.extract import author_email_harvester as harvester
 from bibr.extract import doi_identity
 from bibr.extract import footnote_citations as fc
 from bibr.extract.pdf_doi_evidence import TextLayerLine
+from bibr.models import PaperAuthor
 from bibr.paper_contents import CanonicalSection, PaperContents, PaperSection, PaperSentence
 
 # ---------------------------------------------------------------------------
@@ -216,3 +219,74 @@ def test_a_hand_over_at_the_end_of_a_long_note_still_leads_to_its_citation():
     assert fc._split_citations(note) == [
         "W. Stoczkowski, Aux origines de l'humanité, Paris, Le Pommier, 2001, p. 12."
     ]
+
+
+# ---------------------------------------------------------------------------
+# Email affinity
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("given", "family", "local", "names"),
+    [
+        # Accented names: their ASCII fragments ("imi", "dvo") name nobody.
+        ("Ivan", "Šimić", "jimiller", False),
+        ("Jan", "Dvořák", "dvoretsky", False),
+        ("Jan", "Dvořák", "dvorak", True),
+        ("Jiří", "Novák", "jirinovak", True),
+        ("Xiaohong", "Lü", "luxh", True),
+        # ASCII names as before.
+        ("Xiang-Min", "Yang", "yxiangmind", True),
+        ("Xiaohong", "Li", "lixh", True),
+        ("Jane", "Doe", "editor", False),
+    ],
+)
+def test_email_name_affinity_folds_accents_before_matching(given, family, local, names):
+    assert harvester._email_name_affinity(given, family, local) is names
+
+
+def test_given_name_affinity_folds_accents():
+    assert harvester._given_name_affinity("Jiří", "jirisimic") == 2
+    assert harvester._given_name_affinity("Šimon", "imonx") == 0
+
+
+def test_an_accented_surname_does_not_take_an_unrelated_address():
+    # The lab manager's "jimiller" holds "imi", the ASCII letters of "Šimić":
+    # it was handed to Šimić and blocked his own address.
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    lines = [
+        "Ivan Šimić and John Roe",
+        "Department of X",
+        "Lab manager: jimiller@appliedthings.org",
+        "Filler sentence one.",
+        "Filler sentence two.",
+        "Corresponding author: Ivan Šimić, ivan.simic@uni.hr",
+    ]
+    contents = SimpleNamespace(
+        sentences=[
+            SimpleNamespace(text=t, section_id=0, text_id=i, page_number=1)
+            for i, t in enumerate(lines)
+        ],
+        sections=[SimpleNamespace(section_id=0, section_type="abstract", header="")],
+        sentences_df=pd.DataFrame(
+            [
+                {"text_id": i, "text": t, "page_number": 1, "section_id": 0}
+                for i, t in enumerate(lines)
+            ]
+        ),
+        detected_headers=[],
+        detected_footers=[],
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Ivan", family="Šimić", affiliation="X", corresponding=True),
+        PaperAuthor(author_id=2, given="John", family="Roe", affiliation="X"),
+    ]
+
+    harvester.AuthorEmailHarvester(contents).harvest(authors)
+
+    assert authors[0].email == "ivan.simic@uni.hr"
+    assert authors[0].corresponding is True
+    assert authors[1].email in (None, "")

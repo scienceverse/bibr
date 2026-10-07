@@ -70,7 +70,7 @@ def _given_name_affinity(given: str | None, local_compact: str) -> int:
     itself cannot discriminate. A full given name inside the local part
     ("jane.smith") is strong; a leading initial ("jsmith") is weak.
     """
-    token = re.sub(r"[^a-z0-9]", "", (given or "").lower())
+    token = _fold(given)
     if not token or not local_compact:
         return 0
     if len(token) >= 3 and token in local_compact:
@@ -92,7 +92,9 @@ def _email_name_affinity(given: str | None, family: str | None, local_compact: s
     if not local_compact or len(local_compact) < 3:
         return False
     for name in (given or "", family or ""):
-        for token in re.findall(r"[a-z0-9]+", name.lower()):
+        # Accents folded first: the bare letters of "Šimić" are "imi", which
+        # turns up in unrelated addresses.
+        for token in re.findall(r"[a-z0-9]+", _fold_letters(name)):
             if len(token) >= 3 and (token in local_compact or local_compact in token):
                 return True
     # A 2-letter family name (Li, Wu, He) cannot match by containment — it
@@ -100,7 +102,7 @@ def _email_name_affinity(given: str | None, family: str | None, local_compact: s
     # for Xiaohong Li) it still names the author. Given names stay at 3+
     # chars: a 2-letter given token ('Yu' in Yu-Zhong) prefix-matches far too
     # often and breaks same-surname disambiguation.
-    family_compact = re.sub(r"[^a-z0-9]", "", (family or "").lower())
+    family_compact = _fold(family)
     return len(family_compact) == 2 and local_compact.startswith(family_compact)
 
 
@@ -137,11 +139,16 @@ _NAME_PARTICLES = frozenset(
 _FOLD_EXTRA = str.maketrans({"ł": "l", "ı": "i", "ø": "o", "đ": "d"})
 
 
-def _fold(text: str | None) -> str:
-    """Lower-case, accent-free, letters and digits only ("Al-Tammemi" -> "altammemi")."""
+def _fold_letters(text: str | None) -> str:
+    """Lower-case and accent-free ("Šimić-Dvořák" -> "simic-dvorak")."""
     decomposed = unicodedata.normalize("NFKD", text or "")
     base = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
-    return re.sub(r"[\W_]+", "", base.casefold().translate(_FOLD_EXTRA))
+    return base.casefold().translate(_FOLD_EXTRA)
+
+
+def _fold(text: str | None) -> str:
+    """Lower-case, accent-free, letters and digits only ("Al-Tammemi" -> "altammemi")."""
+    return re.sub(r"[\W_]+", "", _fold_letters(text))
 
 
 def _initials(tokens: list[str]) -> list[str]:
@@ -449,7 +456,7 @@ class AuthorEmailHarvester:
                     if best_dist is None:
                         order_idx += len(family_authors)
                         continue
-                    family_compact = re.sub(r"[^a-z0-9]", "", family.lower())
+                    family_compact = _fold(family)
                     affinity = 1 if family_compact and family_compact in local_compact else 0
                     for author in family_authors:
                         # Only disambiguate on the given name when the surname
@@ -799,7 +806,7 @@ class AuthorEmailHarvester:
                     if family_pat.search(joined_window):
                         footnote_affinity = True
                     else:
-                        family_compact = re.sub(r"[^a-z0-9]", "", author.family.lower())
+                        family_compact = _fold(author.family)
                         local_compact = re.sub(r"[^a-z0-9]", "", email.split("@", 1)[0])
                         if family_compact and family_compact in local_compact:
                             footnote_affinity = True
