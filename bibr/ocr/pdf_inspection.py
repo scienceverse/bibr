@@ -194,9 +194,6 @@ def inspect_pdf(
                                     )
                             if fill_native_text and not invisible_text_layer:
                                 try:
-                                    _sample_page_font_metadata(
-                                        textpage, crop_box, char_count, regions, rotation
-                                    )
                                     _fill_page_regions_from_textpage(
                                         textpage,
                                         crop_box,
@@ -210,6 +207,16 @@ def inspect_pdf(
                                     )
                                 except Exception as exc:  # noqa: BLE001
                                     component_errors[f"native_text:{page_index}"] = _error_text(exc)
+                                # Best-effort, as in fill_native_text_and_fonts: a
+                                # font sampling failure never discards the fill.
+                                try:
+                                    _sample_page_font_metadata(
+                                        textpage, crop_box, char_count, regions, rotation
+                                    )
+                                except Exception as exc:  # noqa: BLE001
+                                    component_errors[f"font_metadata:{page_index}"] = _error_text(
+                                        exc
+                                    )
                             elif fill_native_text:
                                 try:
                                     _keep_layer_text_as_ocr_fallback(
