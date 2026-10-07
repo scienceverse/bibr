@@ -68,8 +68,9 @@ examples:
       --serve-url https://bibr.example.org --concurrency 2 --max-concurrency 4
   bibr batch report results/                          # ledger summary (--json for JSON)
 
-ledger: <out>/outcomes.jsonl — one JSON line per attempt (status, error_code,
-timings, stage times, LLM tokens, reference counts, warnings, build sha).
+ledger: <out>/outcomes.jsonl — one JSON verdict line per attempt (status,
+error_code, timings, stage times, LLM tokens, reference counts, warnings, build
+sha); a local run also writes a 'started' line before each paper.
 tables: <out>/tables/*.parquet — every successful paper as one Parquet file per
 table, keyed by paper_id (rewritten after each run; --no-tables to skip).
 """
@@ -388,8 +389,9 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Process a corpus — manifest text files (one path per line, '#' comments), "
             "directories (recursive) or files — writing <out>/<paper_id>.json per paper "
-            "and an append-only <out>/outcomes.jsonl ledger (one line per attempt). "
-            "Re-running the same command resumes: papers whose latest ledger line is "
+            "and an append-only <out>/outcomes.jsonl ledger (one verdict line per "
+            "attempt; a local run writes a 'started' line first). "
+            "Re-running the same command resumes: papers whose latest verdict is "
             "'ok' are skipped, failed ones too unless --retry-failed, everything runs "
             "again with --force. A paper that was interrupted, or refused by the serve's "
             "token, runs again anyway, and so does one that crashed or hit a service "
@@ -439,7 +441,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--retry-failed",
         action="store_true",
         help=(
-            "Also re-run papers whose latest ledger line is 'failed' (without it, an "
+            "Also re-run papers whose latest verdict is 'failed' (without it, an "
             "interruption or a rejected token runs again anyway, and a crash or a service "
             "outage until the paper has failed that way three times)"
         ),

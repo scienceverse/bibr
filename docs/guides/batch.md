@@ -67,7 +67,7 @@ The ledger's latest line per `paper_id` decides what a new run does with it:
 | `failed` | skip | run | run |
 | `failed` before the paper got a verdict: `error_code` `interrupted`, `http_401` or `http_403` | run | run | run |
 | `failed` on a crash or a service outage: `error_code` `chunk_error`, `upstream_unavailable` or `output_write_failed`, or `transient_exhausted: true` | run until the paper has failed this way 3 times, then skip | run | run |
-| `started` with no verdict after it: the run was killed outright | as a crash: run (alone) until it happened 3 times, then skip | run | run |
+| `started` with no verdict after it: the run was killed outright (after an `ok`, the `ok` row applies: its export is intact) | as a crash: run (alone) until it happened 3 times, then skip | run | run |
 
 A paper the run was interrupted on (Ctrl-C), or whose upload the serve refused
 because of the token, never got a verdict, so it always runs again. A crash or
@@ -89,10 +89,11 @@ after all the others, so a paper that kills the run takes neither its chunk
 neighbours nor the rest of the batch with it, and waits for `--retry-failed`
 once it has done so three times.
 
-Every attempt appends a new line with an incremented `attempt` counter —
-nothing is ever rewritten, so `outcomes.jsonl` is a full history. A run killed
-mid-write (out of memory, a full disk) can leave a torn last line; it is
-skipped with a warning and the next run starts on a fresh line.
+Every attempt appends a new verdict line with an incremented `attempt`
+counter (a local run writes the attempt's `started` line first, with the same
+counter) — nothing is ever rewritten, so `outcomes.jsonl` is a full history.
+A run killed mid-write (out of memory, a full disk) can leave a torn last
+line; it is skipped with a warning and the next run starts on a fresh line.
 
 One run at a time uses an out dir: a run holds an exclusive lock on
 `<out>/.lock` (released when it ends, also when it is killed), and a second
@@ -190,7 +191,7 @@ in-flight much above that only lengthens the queue.
 <out>/
   <paper_id>.json     the export, one per successful paper
   tables/*.parquet    every successful paper as one Parquet file per table
-  outcomes.jsonl      the ledger — one JSON object per attempt
+  outcomes.jsonl      the ledger — a verdict line per attempt (local: a started line first)
   run_info.json       the latest run: options, executor, redacted settings, counts
   runs.jsonl          run_info of every run, appended
   .lock               held by the running run
@@ -238,7 +239,7 @@ One JSON object per line of `outcomes.jsonl`:
 | `n_validation_errors`, `n_validation_warnings` | int | from the export's `validation` block |
 | `bibr_version`, `build_sha` | str | producing bibr; remote runs record the serve's build |
 | `executor` | `local` / `remote` | |
-| `attempt` | int | 1 for the first line of this paper, +1 per further attempt |
+| `attempt` | int | 1 for the paper's first attempt, +1 per further attempt; a `started` line and its verdict share one |
 | `run_id` | str | the run that wrote the line (matches `run_info.json`) |
 | `job_id`, `retries`, `http_status`, `transient_exhausted` | remote only | serve job id, transient retries used, the failure's HTTP status |
 

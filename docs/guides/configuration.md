@@ -264,9 +264,11 @@ with local OCR when local LLM throughput is insufficient.
 The provider SDK sends each LLM request once and gives it up after twice
 `LLM_TIMEOUT_SECONDS`. bibr retries rate limits (429), server errors (5xx),
 request timeouts and conflicts (408, 409) and dropped connections itself, up
-to three attempts per call, so every retry waits for `LLM_RATE_LIMIT_RPM` and
-counts toward the circuit breaker; a `Retry-After` hint is honoured up to 60
-seconds. The `anthropic` provider does
+to three attempts per call, so every retry waits for `LLM_RATE_LIMIT_RPM`; a
+`Retry-After` hint is honoured up to 60 seconds. An attempt that fails with a
+server error, a 408, a timeout or a dropped connection counts toward the
+circuit breaker; a 429 or 409, like any other 4xx answer, does not, since the
+provider is up. The `anthropic` provider does
 not stream, so it caps the output of one call at 16,384 tokens (8,192 for
 Claude Opus 4 and 4.1) even when `LLM_MAX_TOKENS` is higher. A
 `LLM_THINKING_BUDGET` above that cap less 1,024 tokens leaves too little room
