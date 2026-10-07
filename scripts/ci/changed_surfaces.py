@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from collections.abc import Iterable
@@ -18,6 +19,16 @@ _GENERATED_DOC_INPUTS = {
     "bibr/export/schema_artifact.py",
     "bibr/input/supported_files.py",
     "bibr/demo/server.py",
+    "bibr/processing_warnings.py",
+}
+# Root pages the MkDocs build renders or its public-content guard scans.
+_DOCS_PAGES = {
+    "mkdocs.yml",
+    "README.md",
+    "LIMITATIONS.md",
+    "LLM_POLICY.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
 }
 _PACKAGE_INPUTS = {
     "LICENSE.md",
@@ -25,6 +36,8 @@ _PACKAGE_INPUTS = {
     "pyproject.toml",
     "uv.lock",
     "scripts/check_dist_contents.py",
+    # The dist-contents gate imports its dataset suffixes from the tree guard.
+    "scripts/check_public_tree.py",
 }
 _WORKFLOW_INPUTS = {
     ".pre-commit-config.yaml",
@@ -40,9 +53,9 @@ def _matches_prefix(path: str, *prefixes: str) -> bool:
 def classify_paths(paths: Iterable[str]) -> dict[str, bool]:
     """Return the CI surfaces affected by *paths*.
 
-    Unknown root build inputs fail safe into Python/package/workflow validation. Workflow
-    changes deliberately select every surface so edits to job conditions exercise the
-    complete graph.
+    Any path no rule recognises, in any directory, fails safe into Python/package/workflow
+    validation. Workflow changes deliberately select every surface so edits to job
+    conditions exercise the complete graph.
     """
 
     result = dict.fromkeys(SURFACES, False)
@@ -56,7 +69,10 @@ def classify_paths(paths: Iterable[str]) -> dict[str, bool]:
 
     for path in normalized:
         recognized = False
-        if _matches_prefix(path, "bibr/", "tests/", "evaluation/", "scripts/"):
+        # The suite also executes the public notebooks and examples.
+        if _matches_prefix(
+            path, "bibr/", "tests/", "evaluation/", "scripts/", "notebooks/", "examples/"
+        ):
             result["python"] = True
             recognized = True
         if _matches_prefix(path, "bibr/") or path in _PACKAGE_INPUTS:
@@ -64,23 +80,24 @@ def classify_paths(paths: Iterable[str]) -> dict[str, bool]:
             recognized = True
         if (
             _matches_prefix(path, "docs/")
-            or path in {"mkdocs.yml", "README.md", "LIMITATIONS.md", "LLM_POLICY.md"}
+            or path in _DOCS_PAGES
             or _matches_prefix(path, "bibr/local/cli/")
             or _matches_prefix(path, "scripts/docs_", "scripts/gen_docs_reference.py")
             or path in _GENERATED_DOC_INPUTS
         ):
             result["docs"] = True
             recognized = True
+        # The serve image copies bibr/ and runs the segmenter prefetch while building.
         if (
-            path.startswith("Dockerfile")
+            path.startswith(("Dockerfile", "docker-compose", "entrypoint"))
             or path == ".dockerignore"
-            or path.startswith("docker-compose")
-            or path in {"pyproject.toml", "uv.lock"}
+            or path in {"pyproject.toml", "uv.lock", "scripts/prefetch_segmenter.py"}
+            or _matches_prefix(path, "bibr/")
         ):
             result["container"] = True
             recognized = True
 
-        if "/" not in path and not path.endswith(".md") and not recognized:
+        if not recognized:
             result["python"] = True
             result["package"] = True
             result["workflow"] = True
@@ -105,23 +122,39 @@ def is_commit(ref: str) -> bool:
 
 
 def changed_paths(base: str, head: str) -> list[str]:
-    """List paths changed between explicit Git object IDs using a merge-base diff."""
+    """List paths changed between explicit Git object IDs using a merge-base diff.
+
+    A detected rename names only its destination, and quoted output hides non-ASCII
+    paths from every prefix rule, so moves are listed as a deletion plus an addition
+    and paths are read verbatim from NUL-separated records.
+    """
 
     if not base.strip() or not head.strip():
         raise ValueError("base and head SHAs must be non-empty")
     result = subprocess.run(  # noqa: S603 - arguments are passed without a shell
         [  # noqa: S607 - Git is an explicit CI runner prerequisite
             "git",
+            "-c",
+            "core.quotePath=false",
             "diff",
-            "--name-only",
+            "--name-status",
+            "-z",
+            "--no-renames",
             "--diff-filter=ACDMRT",
             f"{base}...{head}",
         ],
         check=True,
         capture_output=True,
-        text=True,
     )
-    return [line for line in result.stdout.splitlines() if line]
+    fields = [os.fsdecode(field) for field in result.stdout.split(b"\0")]
+    paths: list[str] = []
+    index = 0
+    while index < len(fields) and fields[index]:
+        # Copy and rename records carry a source and a destination path.
+        count = 2 if fields[index][0] in "CR" else 1
+        paths.extend(field for field in fields[index + 1 : index + 1 + count] if field)
+        index += 1 + count
+    return paths
 
 
 def _parser() -> argparse.ArgumentParser:

@@ -55,6 +55,12 @@ jobs:
               echo "tag $GITHUB_REF_NAME does not match project version $version" >&2
               exit 1
             fi
+            # The container channel publishes X.Y.Z only; a pre-release would
+            # reach PyPI and then fail the container, leaving it part-published.
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "release version $version must be X.Y.Z; pre-releases are not published" >&2
+              exit 1
+            fi
           elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$GITHUB_REF" == refs/heads/main ]]; then
             echo "Rehearsing $version on main; all publishing jobs are disabled."
           else

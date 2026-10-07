@@ -58,7 +58,8 @@ def test_ci_has_read_only_defaults_and_stale_run_cancellation() -> None:
     assert ci["permissions"] == {"contents": "read"}
     assert "github.workflow" in ci["concurrency"]["group"]
     assert "github.event.pull_request.number" in ci["concurrency"]["group"]
-    assert "refs/tags/" in ci["concurrency"]["cancel-in-progress"]
+    # Main pushes queue rather than cancel: each run diffs only its own push.
+    assert ci["concurrency"]["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
 
 
 def test_every_ci_job_has_a_timeout() -> None:

@@ -48,6 +48,8 @@ env:
   IMAGE_NAME: ${{ github.repository }}
   CHANNEL: ${{ inputs.channel }}
   CI_BUILDX_CACHE: ${{ vars.CI_BUILDX_CACHE || '/mnt/data/ci/buildx-cache' }}
+  UV_VERSION: "0.9.8"
+  PYTHON_VERSION: "3.12"
 
 jobs:
   publish:
@@ -60,7 +62,8 @@ jobs:
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
       && vars.CI_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 60
+    # Release builds run cold (see the build step), which roughly doubles their time.
+    timeout-minutes: ${{ inputs.channel == 'release' && 120 || 60 }}
     environment: ${{ inputs.channel == 'release' && 'ghcr-release' || 'ghcr-edge' }}
     outputs:
       digest: ${{ steps.build.outputs.digest }}
@@ -86,11 +89,46 @@ jobs:
           echo "sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      # Full history brings origin/main and the release tags for the checks below.
       - name: Checkout exact source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
         with:
+          fetch-depth: 0
           persist-credentials: false
           ref: ${{ steps.source.outputs.sha }}
+
+      - name: Install locked uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: false
+
+      # The same source checks as release.yml's validate job, so a manual dispatch
+      # cannot publish an unmerged commit (any SHA GitHub serves, including a fork
+      # pull request's head) or label a commit with a version it does not carry.
+      - name: Require a main commit and, for releases, its version tag
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          if ! git merge-base --is-ancestor "$SOURCE_SHA" origin/main; then
+            echo "source commit $SOURCE_SHA is not reachable from origin/main" >&2
+            exit 1
+          fi
+          if [[ "$CHANNEL" == "release" ]]; then
+            project_version=$(python -c \
+              "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+            if [[ "$project_version" != "$VERSION" ]]; then
+              echo "version $VERSION does not match project version $project_version" >&2
+              exit 1
+            fi
+            if ! tag_sha=$(git rev-parse --verify --quiet "refs/tags/v$VERSION^{commit}") ||
+                [[ "$tag_sha" != "$SOURCE_SHA" ]]; then
+              echo "tag v$VERSION does not exist or does not point at $SOURCE_SHA" >&2
+              exit 1
+            fi
+          fi
 
       - name: Free runner disk space
         if: runner.environment == 'github-hosted'
@@ -111,6 +149,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Read CI's shared layer cache through a hard-linked snapshot taken under the
+      # lock CI's swap holds, so a concurrent swap cannot remove blobs mid-build.
+      - name: Snapshot the shared layer cache
+        id: cache
+        if: runner.environment == 'self-hosted' && inputs.channel != 'release'
+        shell: bash
+        env:
+          CACHE_DIR: ${{ env.CI_BUILDX_CACHE }}
+        run: |
+          CACHE_DIR="${CACHE_DIR%/}"
+          job_dir="${CACHE_DIR}.job-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}"
+          mkdir -p "$CACHE_DIR"
+          exec 9>"${CACHE_DIR}.lock"
+          flock 9
+          rm -rf "${job_dir:?}"
+          mkdir -p "$job_dir"
+          cp -R -l "$CACHE_DIR" "$job_dir/read"
+          echo "dir=$job_dir" >> "$GITHUB_OUTPUT"
+
       - name: Build and push only the quarantine identity
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.0.0
@@ -127,10 +184,19 @@ jobs:
             BIBR_BUILD_SHA=${{ steps.source.outputs.sha }}
           provenance: mode=max
           sbom: true
-          # CI already exports the GPU build's local cache. Delivery only reads
-          # it: uploading another multi-GB cache after pushing the image can
-          # consume the job timeout before the mandatory scan starts.
-          cache-from: ${{ runner.environment == 'self-hosted' && format('type=local,src={0}', env.CI_BUILDX_CACHE) || 'type=gha' }}
+          # CI already exports the GPU build's local cache. Edge delivery only
+          # reads it: uploading another multi-GB cache after pushing the image can
+          # consume the job timeout before the mandatory scan starts. Release
+          # builds read no cache at all, because pull request jobs share the hosts
+          # and the cache that CI exports.
+          no-cache: ${{ inputs.channel == 'release' }}
+          cache-from: ${{ inputs.channel != 'release' && (runner.environment == 'self-hosted' && format('type=local,src={0}/read', steps.cache.outputs.dir) || 'type=gha') || '' }}
+
+      - name: Release the layer cache snapshot
+        if: always() && steps.cache.outputs.dir != ''
+        env:
+          JOB_DIR: ${{ steps.cache.outputs.dir }}
+        run: rm -rf "${JOB_DIR:?}"
 
       - name: Scan the exact registry digest
         id: trivy
@@ -210,6 +276,19 @@ jobs:
             echo "tags=edge" >> "$GITHUB_OUTPUT"
           else
             IFS=. read -r major minor patch <<< "$VERSION"
+            # A published version tag is immutable. The quarantine push above
+            # created the package, so any lookup error but "not found" stops here.
+            if published=$(docker buildx imagetools inspect "$image:v$VERSION" 2>&1); then
+              published=$(awk '$1 == "Digest:" { print $2; exit }' <<< "$published")
+              if [[ "$published" != "$DIGEST" ]]; then
+                echo "$image:v$VERSION already names ${published:-another image};" \
+                  "refusing to move it to $DIGEST" >&2
+                exit 1
+              fi
+            elif [[ "$published" != *": not found"* ]]; then
+              echo "cannot check whether $image:v$VERSION exists: $published" >&2
+              exit 1
+            fi
             docker buildx imagetools create \
               --tag "$image:v$major.$minor.$patch" \
               --tag "$image:$major.$minor" \
