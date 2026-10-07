@@ -31,6 +31,12 @@ def _strip_root(name: str) -> str:
     return name.split("/", 1)[1] if "/" in name else name
 
 
+def _escapes(name: str) -> bool:
+    # bibr/../x.pth passes a prefix check but installs at the archive root.
+    path = PurePosixPath(name)
+    return path.is_absolute() or ".." in path.parts or "\\" in name
+
+
 def _payload_violation(kind: str, name: str, shown: str) -> str | None:
     suffixes = {suffix.casefold() for suffix in PurePosixPath(name).suffixes}
     if DATASET_SUFFIXES & suffixes:
@@ -42,12 +48,18 @@ def _payload_violation(kind: str, name: str, shown: str) -> str | None:
 
 def find_violations(sdist_names: list[str], wheel_names: list[str]) -> list[str]:
     violations: list[str] = []
+    # Every member shares the first member's bibr-<version>/ root.
+    sdist_root = sdist_names[0].split("/", 1)[0] if sdist_names else ""
     for raw in sdist_names:
         name = _strip_root(raw)
         if not name:  # the root dir entry itself
             continue
-        ok = SDIST_ROOT.fullmatch(raw.split("/", 1)[0]) is not None and (
-            name in SDIST_ALLOWED_FILES or name.startswith(SDIST_ALLOWED_PREFIXES)
+        root = raw.split("/", 1)[0]
+        ok = (
+            root == sdist_root
+            and SDIST_ROOT.fullmatch(root) is not None
+            and not _escapes(name)
+            and (name in SDIST_ALLOWED_FILES or name.startswith(SDIST_ALLOWED_PREFIXES))
         )
         if not ok:
             violations.append(f"sdist: unexpected member {raw}")
@@ -56,11 +68,15 @@ def find_violations(sdist_names: list[str], wheel_names: list[str]) -> list[str]
     dist_info_dirs = set()
     for name in wheel_names:
         top = name.split("/", 1)[0]
+        if _escapes(name):
+            violations.append(f"wheel: unexpected member {name}")
+            continue
         if "/" in name and WHEEL_DIST_INFO.fullmatch(top):
             dist_info_dirs.add(top)
         elif not name.startswith(WHEEL_ALLOWED_PREFIXES):
             violations.append(f"wheel: unexpected member {name}")
-        elif violation := _payload_violation("wheel", name, name):
+            continue
+        if violation := _payload_violation("wheel", name, name):
             violations.append(violation)
     if len(dist_info_dirs) != 1:
         violations.append(

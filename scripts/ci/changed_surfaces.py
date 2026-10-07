@@ -39,6 +39,7 @@ _PACKAGE_INPUTS = {
     # The dist-contents gate imports its dataset suffixes from the tree guard.
     "scripts/check_public_tree.py",
 }
+_CONTAINER_FILES = ("Dockerfile", "docker-compose", "entrypoint")
 _WORKFLOW_INPUTS = {
     ".pre-commit-config.yaml",
     "pyproject.toml",
@@ -69,8 +70,10 @@ def classify_paths(paths: Iterable[str]) -> dict[str, bool]:
 
     for path in normalized:
         recognized = False
-        # The suite also executes the public notebooks and examples.
-        if _matches_prefix(
+        container_file = path.startswith(_CONTAINER_FILES) or path == ".dockerignore"
+        # The suite also executes the public notebooks and examples, and tests the
+        # container files (compose wiring, pins, the OCR entrypoint).
+        if container_file or _matches_prefix(
             path, "bibr/", "tests/", "evaluation/", "scripts/", "notebooks/", "examples/"
         ):
             result["python"] = True
@@ -89,8 +92,7 @@ def classify_paths(paths: Iterable[str]) -> dict[str, bool]:
             recognized = True
         # The serve image copies bibr/ and runs the segmenter prefetch while building.
         if (
-            path.startswith(("Dockerfile", "docker-compose", "entrypoint"))
-            or path == ".dockerignore"
+            container_file
             or path in {"pyproject.toml", "uv.lock", "scripts/prefetch_segmenter.py"}
             or _matches_prefix(path, "bibr/")
         ):

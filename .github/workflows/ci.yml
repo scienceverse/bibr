@@ -649,9 +649,10 @@ jobs:
         run: |
           CACHE_DIR="${CACHE_DIR%/}"
           job_dir="${CACHE_DIR}.job-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}"
-          mkdir -p "$CACHE_DIR"
+          mkdir -p "$(dirname "$CACHE_DIR")"
           exec 9>"${CACHE_DIR}.lock"
           flock 9
+          mkdir -p "$CACHE_DIR"
           # A cancelled or killed job can leave a snapshot or a half-written export
           # behind (".new" is the shared export directory earlier runs used). None
           # is in use after 4 h, longer than any build job may run.
@@ -744,7 +745,7 @@ jobs:
           if [[ "$SOURCE_REF" == refs/heads/main && "$BUILD_OUTCOME" == "success" &&
                 -d "$JOB_DIR/export" ]]; then
             rm -rf "${CACHE_DIR:?}"
-            mv "$JOB_DIR/export" "$CACHE_DIR"
+            mv -T "$JOB_DIR/export" "$CACHE_DIR"
             echo "layer cache now $(du -sh "$CACHE_DIR" | cut -f1)"
           else
             # A failed or cancelled build leaves a partial export; discarding it

@@ -65,10 +65,10 @@ def test_lockfile_selects_all_surfaces() -> None:
     assert all(changed_surfaces.classify_paths(["uv.lock"]).values())
 
 
-def test_dockerfile_selects_only_container() -> None:
+def test_dockerfile_selects_container_and_the_suite_that_tests_it() -> None:
     changed_surfaces = load_changed_surfaces()
     assert changed_surfaces.classify_paths(["Dockerfile.serve"]) == {
-        "python": False,
+        "python": True,
         "package": False,
         "docs": False,
         "container": True,

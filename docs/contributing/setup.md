@@ -128,10 +128,15 @@ from the public source. CI still builds the serve image and blocks fixable
 HIGH/CRITICAL vulnerabilities before `CI / required` passes.
 
 A manual container workflow run publishes only a commit that is on `main`. A
-`release` run also needs the annotated `vX.Y.Z` tag on that commit and a
-matching `project.version`, and it refuses to move an already published
-`vX.Y.Z` image tag to a different digest. Release images are built without any
-layer cache.
+`release` run also needs the `vX.Y.Z` tag on that commit and a matching
+`project.version`, and it refuses to move an already published `vX.Y.Z` image
+tag to a different digest. The `X.Y`, `X` and `latest` image tags move only
+when `X.Y.Z` is the newest release tag on `main` in that series, so publishing
+a backport or an older release never moves them backwards. Release images are
+built without any layer cache, so a rebuild never reproduces a published
+digest: if promotion fails after `vX.Y.Z` was pushed, point the remaining tags
+at that digest by hand with `docker buildx imagetools create` instead of
+rerunning the job.
 
 Before enabling GHCR, configure a clean package with the intended visibility
 and repository Actions access, then verify anonymous pulls for public images.

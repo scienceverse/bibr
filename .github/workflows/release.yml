@@ -67,7 +67,8 @@ jobs:
             echo "expected a pushed v* tag or a manual rehearsal on main" >&2
             exit 1
           fi
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+          # Fully qualified: a pushed tag named origin/main would win the short name.
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
             echo "release commit is not reachable from origin/main" >&2
             exit 1
           fi

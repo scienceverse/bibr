@@ -84,10 +84,24 @@ def test_payload_checks_ignore_case_and_cover_datasets(member: str) -> None:
     assert dist_violations(SDIST, [*WHEEL, member])
 
 
-def test_sdist_members_must_share_the_release_root() -> None:
-    violations = dist_violations([*SDIST, "other-1.0/bibr/__init__.py"], WHEEL)
+@pytest.mark.parametrize("member", ["other-1.0/bibr/__init__.py", "bibr-9/bibr/__init__.py"])
+def test_sdist_members_must_share_the_release_root(member: str) -> None:
+    violations = dist_violations([*SDIST, member], WHEEL)
 
-    assert violations == ["sdist: unexpected member other-1.0/bibr/__init__.py"]
+    assert violations == [f"sdist: unexpected member {member}"]
+
+
+@pytest.mark.parametrize("member", ["bibr/../bibr-hook.pth", "bibr/data/../../x.pth"])
+def test_members_cannot_climb_out_of_the_package(member: str) -> None:
+    assert dist_violations(SDIST, [*WHEEL, member]) == [f"wheel: unexpected member {member}"]
+    assert dist_violations([*SDIST, f"bibr-0.7.0/{member}"], WHEEL) == [
+        f"sdist: unexpected member bibr-0.7.0/{member}"
+    ]
+
+
+@pytest.mark.parametrize("member", ["corpus.parquet", "paper.pdf"])
+def test_metadata_directory_gets_the_payload_checks_too(member: str) -> None:
+    assert dist_violations(SDIST, [*WHEEL, f"bibr-0.7.0.dist-info/{member}"])
 
 
 # --- check_public_tree.py -------------------------------------------------------
@@ -170,8 +184,9 @@ def test_gpu_runtime_reinstall_is_constrained_to_the_locked_versions() -> None:
 
 def run_ocr_entrypoint(tmp_path: Path, **env: str) -> list[str]:
     bash = shutil.which("bash")
-    if not bash:
-        pytest.skip("needs bash")
+    # The entrypoint runs in a Linux container; a Windows checkout may give it CRLF.
+    if not bash or sys.platform == "win32":
+        pytest.skip("needs a POSIX bash")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake_python = bin_dir / "python"

@@ -107,17 +107,21 @@ jobs:
       # The same source checks as release.yml's validate job, so a manual dispatch
       # cannot publish an unmerged commit (any SHA GitHub serves, including a fork
       # pull request's head) or label a commit with a version it does not carry.
+      # The fully qualified ref matters: a pushed tag named origin/main would win
+      # the short name's lookup.
       - name: Require a main commit and, for releases, its version tag
         env:
           SOURCE_SHA: ${{ steps.source.outputs.sha }}
           VERSION: ${{ steps.source.outputs.version }}
+        shell: bash
         run: |
-          if ! git merge-base --is-ancestor "$SOURCE_SHA" origin/main; then
+          if ! git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/main; then
             echo "source commit $SOURCE_SHA is not reachable from origin/main" >&2
             exit 1
           fi
           if [[ "$CHANNEL" == "release" ]]; then
-            project_version=$(python -c \
+            # setup-uv only selects UV_PYTHON; uv runs that interpreter.
+            project_version=$(uv run --no-project python -c \
               "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
             if [[ "$project_version" != "$VERSION" ]]; then
               echo "version $VERSION does not match project version $project_version" >&2
@@ -160,9 +164,10 @@ jobs:
         run: |
           CACHE_DIR="${CACHE_DIR%/}"
           job_dir="${CACHE_DIR}.job-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}"
-          mkdir -p "$CACHE_DIR"
+          mkdir -p "$(dirname "$CACHE_DIR")"
           exec 9>"${CACHE_DIR}.lock"
           flock 9
+          mkdir -p "$CACHE_DIR"
           rm -rf "${job_dir:?}"
           mkdir -p "$job_dir"
           cp -R -l "$CACHE_DIR" "$job_dir/read"
@@ -268,6 +273,7 @@ jobs:
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
           VERSION: ${{ steps.source.outputs.version }}
+        shell: bash
         run: |
           image="$REGISTRY/$IMAGE_NAME"
           source="$image@$DIGEST"
@@ -289,13 +295,29 @@ jobs:
               echo "cannot check whether $image:v$VERSION exists: $published" >&2
               exit 1
             fi
-            docker buildx imagetools create \
-              --tag "$image:v$major.$minor.$patch" \
-              --tag "$image:$major.$minor" \
-              --tag "$image:$major" \
-              --tag "$image:latest" \
-              "$source"
-            echo "tags=v$VERSION,$major.$minor,$major,latest" >> "$GITHUB_OUTPUT"
+            # X.Y, X and latest follow the newest release on main in their series,
+            # so publishing an older or backported release never moves them back.
+            releases=$(git tag --list --merged refs/remotes/origin/main 'v[0-9]*' |
+              grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V)
+            newest() {
+              awk -v prefix="$1" 'index($0, prefix) == 1' <<< "$releases" | tail -1
+            }
+            tags=("$image:v$major.$minor.$patch")
+            if [[ "$(newest "v$major.$minor.")" == "v$VERSION" ]]; then
+              tags+=("$image:$major.$minor")
+            fi
+            if [[ "$(newest "v$major.")" == "v$VERSION" ]]; then
+              tags+=("$image:$major")
+            fi
+            if [[ "$(newest v)" == "v$VERSION" ]]; then
+              tags+=("$image:latest")
+            fi
+            args=()
+            for tag in "${tags[@]}"; do
+              args+=(--tag "$tag")
+            done
+            docker buildx imagetools create "${args[@]}" "$source"
+            echo "tags=$(IFS=,; echo "${tags[*]#"$image:"}")" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Summarize verified artifact

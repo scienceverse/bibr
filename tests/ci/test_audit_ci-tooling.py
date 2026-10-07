@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import importlib.util
 import os
 import re
@@ -21,9 +20,13 @@ ROOT = Path(__file__).parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
 GIT = shutil.which("git")
 BASH = shutil.which("bash")
-needs_git = pytest.mark.skipif(not GIT or not BASH, reason="needs git and bash")
+needs_git = pytest.mark.skipif(not GIT, reason="needs git")
+# Workflow steps run under bash on Linux runners only. Windows' Git Bash lacks
+# the GNU tools they call, so the cross-platform suites skip them.
+needs_bash = pytest.mark.skipif(not BASH or sys.platform == "win32", reason="needs a POSIX bash")
 needs_flock = pytest.mark.skipif(
-    not BASH or not shutil.which("flock"), reason="needs bash and flock"
+    not BASH or sys.platform == "win32" or not shutil.which("flock"),
+    reason="needs a POSIX bash and flock",
 )
 
 
@@ -233,6 +236,25 @@ def test_serve_image_inputs_select_the_container_build(path: str) -> None:
     assert load_script("changed_surfaces").classify_paths([path])["container"] is True
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "entrypoint.sh",
+        "entrypoint-ocr.sh",
+        "Dockerfile.serve",
+        "Dockerfile.ocr",
+        "docker-compose.yml",
+        ".dockerignore",
+    ],
+)
+def test_container_files_also_run_the_suite_that_tests_them(path: str) -> None:
+    """The image build never runs entrypoint-ocr.sh; only the suite's tests check it."""
+    surfaces = load_script("changed_surfaces").classify_paths([path])
+
+    assert surfaces["python"] is True
+    assert surfaces["container"] is True
+
+
 # --- ci.yml / docker.yml / release.yml policy -----------------------------------
 
 
@@ -381,6 +403,7 @@ def test_cache_swap_waits_for_the_shared_lock(tmp_path: Path) -> None:
         tmp_path, JOB_DIR=str(job_dir), BUILD_OUTCOME="failure", SOURCE_REF="refs/heads/main"
     )
 
+    fcntl = pytest.importorskip("fcntl")
     with open(tmp_path / "buildx-cache.lock", "w") as lock:  # noqa: PTH123 - fcntl needs a file
         fcntl.flock(lock, fcntl.LOCK_EX)
         process = subprocess.Popen(  # noqa: S603 - executes the checked-in workflow step
@@ -400,6 +423,24 @@ def test_cache_swap_waits_for_the_shared_lock(tmp_path: Path) -> None:
     assert not job_dir.exists()
 
 
+UV_SHIM = """#!/usr/bin/env bash
+# Stands in for setup-uv's uv: the step must run its Python through uv.
+[[ "$1 $2 $3" == "run --no-project python" ]] || exit 97
+shift 3
+exec "$SHIM_PYTHON" "$@"
+"""
+
+
+def with_tools(tmp_path: Path, env: dict[str, str]) -> dict[str, str]:
+    bin_dir = tmp_path / "tools"
+    bin_dir.mkdir(exist_ok=True)
+    uv = bin_dir / "uv"
+    uv.write_text(UV_SHIM, encoding="utf-8")
+    uv.chmod(0o755)
+    path = os.pathsep.join([str(bin_dir), str(Path(sys.executable).parent), env["PATH"]])
+    return {**env, "PATH": path, "SHIM_PYTHON": sys.executable}
+
+
 def docker_validation_repo(tmp_path: Path) -> tuple[Path, dict[str, str], str, str]:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -417,7 +458,24 @@ def docker_validation_repo(tmp_path: Path) -> tuple[Path, dict[str, str], str, s
     return repo, env, released, unmerged
 
 
+def origin_main_tag_repo(tmp_path: Path) -> tuple[Path, dict[str, str], str]:
+    """An unmerged 0.7.1 commit carrying v0.7.1 and a tag named origin/main.
+
+    Both are tags any write-access user can push. git resolves the short name
+    origin/main to refs/tags/origin/main before refs/remotes/origin/main.
+    """
+
+    repo, env, _released, _unmerged = docker_validation_repo(tmp_path)
+    (repo / "pyproject.toml").write_text('[project]\nversion = "0.7.1"\n', encoding="utf-8")
+    run_git(repo, env, "commit", "-q", "-am", "unmerged 0.7.1")
+    source = run_git(repo, env, "rev-parse", "HEAD")
+    run_git(repo, env, "tag", "origin/main", source)
+    run_git(repo, env, "tag", "-a", "v0.7.1", "-m", "v0.7.1", source)
+    return repo, env, source
+
+
 @needs_git
+@needs_bash
 @pytest.mark.parametrize(
     ("channel", "source", "version", "accepted"),
     [
@@ -437,13 +495,7 @@ def test_container_dispatch_requires_main_ancestry_version_and_tag(
     check = step(
         "docker.yml", "publish", "Require a main commit and, for releases, its version tag"
     )
-    env = {
-        **env,
-        "CHANNEL": channel,
-        "SOURCE_SHA": sha,
-        "VERSION": version,
-        "PATH": f"{Path(sys.executable).parent}{os.pathsep}{env['PATH']}",
-    }
+    env = with_tools(tmp_path, {**env, "CHANNEL": channel, "SOURCE_SHA": sha, "VERSION": version})
 
     result = run_bash(check["run"], repo, env)
 
@@ -451,6 +503,27 @@ def test_container_dispatch_requires_main_ancestry_version_and_tag(
 
 
 @needs_git
+@needs_bash
+@pytest.mark.parametrize(("channel", "version"), [("edge", ""), ("release", "0.7.1")])
+def test_container_dispatch_ignores_a_tag_named_origin_main(
+    tmp_path: Path, channel: str, version: str
+) -> None:
+    repo, env, source = origin_main_tag_repo(tmp_path)
+    check = step(
+        "docker.yml", "publish", "Require a main commit and, for releases, its version tag"
+    )
+    env = with_tools(
+        tmp_path, {**env, "CHANNEL": channel, "SOURCE_SHA": source, "VERSION": version}
+    )
+
+    result = run_bash(check["run"], repo, env)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"source commit {source} is not reachable from origin/main" in result.stderr
+
+
+@needs_git
+@needs_bash
 @pytest.mark.parametrize("tag", ["deleted", "on an earlier main commit"])
 def test_release_dispatch_requires_the_version_tag_on_the_source_commit(
     tmp_path: Path, tag: str
@@ -467,13 +540,9 @@ def test_release_dispatch_requires_the_version_tag_on_the_source_commit(
     check = step(
         "docker.yml", "publish", "Require a main commit and, for releases, its version tag"
     )
-    env = {
-        **env,
-        "CHANNEL": "release",
-        "SOURCE_SHA": source,
-        "VERSION": "0.7.0",
-        "PATH": f"{Path(sys.executable).parent}{os.pathsep}{env['PATH']}",
-    }
+    env = with_tools(
+        tmp_path, {**env, "CHANNEL": "release", "SOURCE_SHA": source, "VERSION": "0.7.0"}
+    )
 
     result = run_bash(check["run"], repo, env)
 
@@ -489,7 +558,7 @@ def test_container_checkout_fetches_main_and_tags_for_the_source_checks() -> Non
     assert steps.index("Require a main commit and, for releases, its version tag") < steps.index(
         "Build and push only the quarantine identity"
     )
-    # The version check reads pyproject.toml with the release job's Python, uncached.
+    # The version check runs the release job's Python through uv, uncached.
     setup = step("docker.yml", "publish", "Install locked uv")
     assert setup["with"]["enable-cache"] in (False, "false")
     assert steps.index("Install locked uv") < steps.index(
@@ -511,6 +580,55 @@ fi
 DIGEST = "sha256:" + "a" * 64
 
 
+def promote_release(
+    tmp_path: Path, version: str, *, published: str = "missing", tags: tuple[str, ...] = ()
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """Run the promotion step for *version* in a checkout whose main carries *tags*."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = git_env(tmp_path)
+    run_git(repo, env, "init", "-q", "-b", "main")
+    for tag in (*tags, f"v{version}"):
+        run_git(repo, env, "commit", "-q", "--allow-empty", "-m", tag)
+        run_git(repo, env, "tag", tag)
+    run_git(repo, env, "update-ref", "refs/remotes/origin/main", "HEAD")
+    # Neither a tag off main nor a pre-release names a release of the series.
+    run_git(repo, env, "checkout", "-q", "-b", "unmerged")
+    run_git(repo, env, "commit", "-q", "--allow-empty", "-m", "unmerged")
+    run_git(repo, env, "tag", "v9.9.9")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text(FAKE_DOCKER, encoding="utf-8")
+    docker.chmod(0o755)
+    created = tmp_path / "created"
+    output = tmp_path / "output"
+    promote = step("docker.yml", "publish", "Promote the verified digest without rebuilding")
+    env = {
+        **env,
+        "PATH": f"{bin_dir}{os.pathsep}{env['PATH']}",
+        "REGISTRY": "ghcr.io",
+        "IMAGE_NAME": "scienceverse/bibr",
+        "CHANNEL": "release",
+        "DIGEST": DIGEST,
+        "VERSION": version,
+        "GITHUB_OUTPUT": str(output),
+        "FAKE_PUBLISHED": published,
+        "FAKE_CREATED": str(created),
+    }
+
+    result = run_bash(promote["run"], repo, env)
+
+    moved: list[str] = []
+    if created.exists():
+        moved = re.findall(r"--tag ghcr\.io/scienceverse/bibr:(\S+)", created.read_text())
+        assert f"tags={','.join(moved)}" in output.read_text().splitlines()
+    return result, moved
+
+
+@needs_git
+@needs_bash
 @pytest.mark.parametrize(
     ("published", "promoted"),
     [("missing", True), (DIGEST, True), ("sha256:" + "b" * 64, False), ("error", False)],
@@ -518,37 +636,57 @@ DIGEST = "sha256:" + "a" * 64
 def test_release_promotion_never_moves_a_published_version_tag(
     tmp_path: Path, published: str, promoted: bool
 ) -> None:
-    if not BASH:
-        pytest.skip("needs bash")
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    docker = bin_dir / "docker"
-    docker.write_text(FAKE_DOCKER, encoding="utf-8")
-    docker.chmod(0o755)
-    created = tmp_path / "created"
-    promote = step("docker.yml", "publish", "Promote the verified digest without rebuilding")
-    env = {
-        **os.environ,
-        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
-        "REGISTRY": "ghcr.io",
-        "IMAGE_NAME": "scienceverse/bibr",
-        "CHANNEL": "release",
-        "DIGEST": DIGEST,
-        "VERSION": "0.7.0",
-        "GITHUB_OUTPUT": str(tmp_path / "output"),
-        "FAKE_PUBLISHED": published,
-        "FAKE_CREATED": str(created),
-    }
-
-    result = run_bash(promote["run"], tmp_path, env)
+    result, moved = promote_release(tmp_path, "0.7.0", published=published)
 
     assert (result.returncode == 0) is promoted, result.stderr
-    assert created.exists() is promoted
-    if promoted:
-        assert "--tag ghcr.io/scienceverse/bibr:v0.7.0" in created.read_text()
+    assert moved == (["v0.7.0", "0.7", "0", "latest"] if promoted else [])
 
 
 @needs_git
+@needs_bash
+@pytest.mark.parametrize(
+    ("version", "moved"),
+    [
+        ("0.7.2", ["v0.7.2", "0.7", "0", "latest"]),
+        # A backport moves its own minor series only.
+        ("0.6.4", ["v0.6.4", "0.6"]),
+        # An older release that was never published keeps every series tag where it is.
+        ("0.5.0", ["v0.5.0"]),
+    ],
+)
+def test_release_promotion_moves_series_tags_only_to_their_newest_release(
+    tmp_path: Path, version: str, moved: list[str]
+) -> None:
+    released = ("v0.5.1", "v0.6.3", "v0.7.0", "v0.7.1", "v1.0.0rc1")
+
+    result, promoted = promote_release(tmp_path, version, tags=released)
+
+    assert result.returncode == 0, result.stderr
+    assert promoted == moved
+
+
+def release_validation(
+    repo: Path, env: dict[str, str], version: str, sha: str, output: Path
+) -> subprocess.CompletedProcess[str]:
+    script = next(
+        entry["run"]
+        for entry in workflow("release.yml")["jobs"]["validate"]["steps"]
+        if entry.get("id") == "version"
+    )
+    env = {
+        **env,
+        "GITHUB_EVENT_NAME": "push",
+        "GITHUB_REF": f"refs/tags/v{version}",
+        "GITHUB_REF_NAME": f"v{version}",
+        "GITHUB_SHA": sha,
+        "GITHUB_OUTPUT": str(output),
+        "PATH": f"{Path(sys.executable).parent}{os.pathsep}{env['PATH']}",
+    }
+    return run_bash(script, repo, env)
+
+
+@needs_git
+@needs_bash
 @pytest.mark.parametrize(("version", "accepted"), [("0.7.0", True), ("0.7.0rc1", False)])
 def test_release_tags_must_name_a_final_version(
     tmp_path: Path, version: str, accepted: bool
@@ -562,25 +700,25 @@ def test_release_tags_must_name_a_final_version(
     run_git(repo, env, "update-ref", "refs/remotes/origin/main", "HEAD")
     (repo / "pyproject.toml").write_text(f'[project]\nversion = "{version}"\n', encoding="utf-8")
     output = tmp_path / "outputs"
-    env = {
-        **env,
-        "GITHUB_EVENT_NAME": "push",
-        "GITHUB_REF": f"refs/tags/v{version}",
-        "GITHUB_REF_NAME": f"v{version}",
-        "GITHUB_SHA": run_git(repo, env, "rev-parse", "HEAD"),
-        "GITHUB_OUTPUT": str(output),
-        "PATH": f"{Path(sys.executable).parent}{os.pathsep}{env['PATH']}",
-    }
-    script = next(
-        entry["run"]
-        for entry in workflow("release.yml")["jobs"]["validate"]["steps"]
-        if entry.get("id") == "version"
-    )
+    sha = run_git(repo, env, "rev-parse", "HEAD")
 
-    result = run_bash(script, repo, env)
+    result = release_validation(repo, env, version, sha, output)
 
     assert (result.returncode == 0) is accepted, result.stdout + result.stderr
     assert output.exists() is accepted
+
+
+@needs_git
+@needs_bash
+def test_release_validation_ignores_a_tag_named_origin_main(tmp_path: Path) -> None:
+    repo, env, source = origin_main_tag_repo(tmp_path)
+    output = tmp_path / "outputs"
+
+    result = release_validation(repo, env, "0.7.1", source, output)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "release commit is not reachable from origin/main" in result.stderr
+    assert not output.exists()
 
 
 # --- audit_dependencies.py ------------------------------------------------------
