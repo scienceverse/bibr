@@ -58,6 +58,7 @@ class BaseHttpOcrClient:
         max_tokens: int | None = None,
         profile: OcrProfile | None = None,
         settings: GlobalSettings | None = None,
+        api_key: str | None = None,
         **_kw: object,
     ):
         import httpx
@@ -77,9 +78,12 @@ class BaseHttpOcrClient:
             ),
             temperature=self._settings.ocr.generation_temperature,
         )
+        # A given *api_key* replaces OCR_API_KEY: managed local servers pass
+        # their own per-launch key, or "" for none, so the user's key for a
+        # configured OCR endpoint never reaches a local listener.
         headers = ocr_request_headers(
             self._base_url,
-            self._settings.ocr.api_key,
+            api_key if api_key is not None else self._settings.ocr.api_key,
             allow_insecure_http=self._settings.ocr.allow_insecure_http,
         )
 

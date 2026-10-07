@@ -100,7 +100,9 @@ def test_readiness_requires_the_exact_served_alias(monkeypatch):
     server._wait_until_ready()
 
     assert vllm_ocr.request_bytes.call_count == 2
-    vllm_ocr.request_bytes.assert_called_with("http://localhost:9123/v1/models", timeout=5)
+    vllm_ocr.request_bytes.assert_called_with(
+        "http://localhost:9123/v1/models", headers={}, timeout=5
+    )
 
 
 def test_shutdown_terminates_the_vllm_process_group(monkeypatch):

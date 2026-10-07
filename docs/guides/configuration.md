@@ -249,6 +249,44 @@ Validate the fields you need on representative papers before choosing a model
 for a large run. Cloud LLMs or an external OpenAI-compatible server can be used
 with local OCR when local LLM throughput is insufficient.
 
+### Managed local servers
+
+The local OCR backends and `--llm local` start their model server as a child
+process that listens on `127.0.0.1` at a fixed port. The vLLM and llama.cpp
+servers get a new random API key at every launch. bibr passes the key through
+the server's environment, not its command line, so other users on the machine
+cannot call them. Rapid-MLX, vllm-mlx and MLX-VLM servers run without a key.
+`OCR_API_KEY` goes only to an OCR endpoint you configure (`--ocr-url` or
+`OCR_BASE_URL`), never to a server that bibr manages.
+
+If the port already has a server that lists the requested model, bibr reuses
+it and logs a warning that it did not start that server. A reused server
+receives your documents, so stop any server there that you did not start
+yourself. Two pipelines in one Python process, such as an open `bibr.Chewer`
+and a `bibr.chew()` call, share the vLLM or llama.cpp server that the first one
+started; it stops when the pipeline that started it closes. bibr does not share
+a server that rejects its unauthenticated probe with HTTP 401 and was not
+started by this process, which is usually a server that another bibr process
+started with its own key. Stop that server or configure a free port.
+
+The Rapid-MLX OCR backends (`glm-rapid-mlx`, `paddle-rapid-mlx`) restart their
+server every `OCR_RAPID_MLX_RECYCLE_AFTER` regions (default 80). This releases
+memory that Rapid-MLX's vision cache would otherwise leak. bibr can restart only
+a server it started, so these backends refuse a server that is already running
+on their port, including one that another pipeline in the same process started.
+`paddle-mlx-vlm` shares its port and model with `paddle-rapid-mlx`, so it
+refuses a Rapid-MLX or vllm-mlx server it finds there too; an MLX-VLM server is
+still reused. To fix this, stop that server, move the port
+(`OCR_RAPID_MLX_PORT`, or `OCR_PADDLE_MLX_PORT` for the Paddle backends), or set
+`OCR_RAPID_MLX_RECYCLE_AFTER=0` so that the Rapid-MLX backends reuse the server
+without restarts. Each refusal is logged as a warning that names the port. The
+automatic `paddle` chain reports only which candidates failed, and then tries
+the next one.
+
+Each server writes its stderr to a private log file in the system temp
+directory, and bibr logs the path when the server starts. A Rapid-MLX server
+keeps a single log file for the whole run, across all of its restarts.
+
 ## Presets
 
 If you switch between setups often — cloud vs. local, different models for different

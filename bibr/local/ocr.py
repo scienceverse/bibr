@@ -103,6 +103,9 @@ class VllmMlxServer:
         # path loads the full model into unified memory without explicit cap.
         cmd = [
             sys.executable,
+            # -P: never import from the user's working directory, where a
+            # stray vllm_mlx.py or json.py would shadow the real module.
+            "-P",
             "-m",
             # Stable shim around ``vllm_mlx.server``. It keeps conservative
             # hybrid-cache handling for stale environments while matching the
@@ -110,6 +113,10 @@ class VllmMlxServer:
             "bibr.local._vllm_mlx_server",
             "--model",
             model,
+            # Loopback only, like every other managed runtime: the server has
+            # no authentication.
+            "--host",
+            "127.0.0.1",
             "--port",
             str(port),
         ]
@@ -133,11 +140,15 @@ class VllmMlxServer:
 
         logger.info("Starting vllm-mlx server: %s", " ".join(cmd))
         logger.info("vllm-mlx stderr -> %s", self._stderr_log)
-        self._process = subprocess.Popen(  # noqa: S603
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=self._stderr_fh,
-        )
+        try:
+            self._process = subprocess.Popen(  # noqa: S603
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=self._stderr_fh,
+            )
+        except BaseException:
+            self._close_stderr_fh()
+            raise
 
         # Poll /health until ready or timeout
         self._wait_until_ready()
@@ -423,6 +434,7 @@ class LlamaCppOcrClient:
             model=model,
             max_tokens=min(4096, effective.ocr.llama_cpp_context_size // 2),
             settings=effective,
+            api_key=self._server.api_key,
         )
 
     @property

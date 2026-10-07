@@ -22,9 +22,15 @@ from bibr.local.http_runtime import (
     MANAGED_LOCAL_LLM_RATE_LIMIT_RPM,
     LocalHttpError,
     check_startup_stop,
+    env_with_api_key,
     guard_managed_server_port,
+    kill_process_group,
+    new_server_api_key,
+    own_server_key,
     pause_startup_poll,
+    register_server_key,
     request_bytes,
+    unregister_server_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,6 +54,9 @@ class VllmLlmServer:
 
     # Set by the owner to stop the startup wait early (see ResourceManager).
     _stop_event: threading.Event | None = None
+    # Per-launch key of the server this process started, which a sibling
+    # pipeline reusing it shares; another process's listener has none.
+    api_key = ""
 
     def __init__(
         self,
@@ -77,6 +86,8 @@ class VllmLlmServer:
             request_fn=request_bytes,
         )
         if self._reused:
+            # Another pipeline in this process may have started it.
+            self.api_key = own_server_key(self.base_url)
             return
 
         cmd = self._resolve_launch_cmd(self._model)
@@ -111,6 +122,8 @@ class VllmLlmServer:
 
         logger.info("Starting vLLM LLM server: %s", " ".join(cmd))
         logger.info("vLLM stderr -> %s", self._stderr_log)
+        # /health stays public, so the readiness poll needs no key.
+        self.api_key = new_server_api_key()
         # New session so shutdown() can kill the whole process group — vLLM
         # spawns worker children that would otherwise survive the launcher and
         # hold VRAM.
@@ -125,11 +138,13 @@ class VllmLlmServer:
                 stdout=subprocess.DEVNULL,
                 stderr=self._stderr_fh,
                 start_new_session=True,
+                env=env_with_api_key("VLLM_API_KEY", self.api_key),
             )
             self._wait_until_healthy()
         except BaseException:
             self.shutdown()
             raise
+        register_server_key(self.base_url, self.api_key)
 
     @staticmethod
     def _resolve_launch_cmd(model: str) -> list[str]:
@@ -144,6 +159,8 @@ class VllmLlmServer:
         if importlib.util.find_spec("vllm") is not None:
             return [
                 sys.executable,
+                # -P: never import from the user's working directory.
+                "-P",
                 "-m",
                 "vllm.entrypoints.openai.api_server",
                 "--model",
@@ -210,6 +227,7 @@ class VllmLlmServer:
             if self._process.poll() is not None:
                 rc = self._process.returncode
                 tail = self._read_stderr_tail()
+                kill_process_group(self._process.pid)
                 self._close_stderr_fh()
                 self._process = None
                 raise RuntimeError(f"vLLM process exited during startup (code {rc}): {tail[-500:]}")
@@ -250,7 +268,7 @@ class VllmLlmServer:
         settings = self._effective_settings
         settings.llm.provider = "openai"
         settings.llm.base_url = self.base_url + "/v1"
-        settings.llm.api_key = "not-needed"
+        settings.llm.api_key = self.api_key or "not-needed"
         settings.llm.model = self._model
         if "rate_limit_rpm" not in settings.llm.model_fields_set:
             settings.llm.rate_limit_rpm = MANAGED_LOCAL_LLM_RATE_LIMIT_RPM
@@ -287,6 +305,8 @@ class VllmLlmServer:
             self._close_stderr_fh()
             return
         proc, self._process = self._process, None
+        if self.api_key:
+            unregister_server_key(self.base_url, self.api_key)
         try:
             try:
                 os.killpg(proc.pid, signal.SIGTERM)
