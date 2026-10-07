@@ -1,10 +1,11 @@
 """Content-addressed disk cache for structured LLM responses.
 
-The key covers everything that determines the answer — model, response schema,
-system prompt, and the flattened user text — so an entry can only ever serve a
-request that would have produced it. Nothing about the paper, the run, or the
-call site enters the key, which is what lets one entry serve an identical
-prompt across papers, runs, and machines.
+The key covers everything that determines the answer — provider, endpoint,
+model, the resolved call parameters, response schema, system prompt, and the
+flattened user text — so an entry can only ever serve a request that would have
+produced it. Nothing about the paper, the run, or the call site enters the
+key, which is what lets one entry serve an identical prompt across papers,
+runs, and machines.
 
 That property would make this a safe *prefill* target, but no offline path
 writes here today: the Anthropic Message Batches layer
@@ -16,9 +17,11 @@ call, so a prefill that is stale, partial, or absent costs correctness
 nothing.
 
 Storage is one JSON file per key, fanned out by the first two hex characters to
-keep directory sizes sane. Writes are atomic (tmp + ``os.replace``) and every
-failure degrades to "uncached" rather than raising — same contract as the OCR
-disk cache.
+keep directory sizes sane. Entries hold the metadata of papers that may be
+unpublished, so directories bibr creates are private to the user (0700) and
+every entry is 0600. Writes are atomic (tmp + ``os.replace``) and every failure
+degrades to "uncached" rather than raising — same contract as the OCR disk
+cache.
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ import re
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
     from bibr.config import GlobalSettings
@@ -40,6 +44,10 @@ logger = logging.getLogger(__name__)
 # Bump when the stored payload shape changes. Entries carrying a different
 # version are ignored (and rewritten on the next put) rather than migrated.
 _CACHE_FORMAT_VERSION = 1
+
+# Owner-only (see the module docstring); the umask can only narrow these.
+_DIR_MODE = 0o700
+_FILE_MODE = 0o600
 
 # 32 hex chars of SHA-256. Collision risk is negligible at any corpus size bibr
 # will see, and short keys keep the batch custom_id well inside Anthropic's
@@ -68,6 +76,19 @@ def canonical_user_text(text: str) -> str:
     return text
 
 
+def endpoint_identity(url: str | None) -> str:
+    """``scheme://host[:port]/path`` of an endpoint URL, without credentials.
+
+    User-info and the query string can carry secrets and do not say which
+    server answers; a rotated key must not empty the cache.
+    """
+    if not url or not url.strip():
+        return ""
+    parts = urlsplit(url.strip())
+    host = parts.netloc.rpartition("@")[2].lower()
+    return f"{parts.scheme.lower()}://{host}{parts.path.rstrip('/')}"
+
+
 def request_key(
     *,
     model: str,
@@ -79,6 +100,7 @@ def request_key(
     mode: str | None = None,
     schema_json: str | None = None,
     chat_template_json: str | None = None,
+    call_json: str | None = None,
 ) -> str:
     """Stable identity for one structured request.
 
@@ -86,7 +108,11 @@ def request_key(
     ``reasoning_effort`` vary per task, and ``mode`` separates transports that
     are handed byte-identical text but are expected to answer differently — the
     JSON-mode re-roll resends the classification prompt verbatim precisely
-    because the default transport returned something unusable.
+    because the default transport returned something unusable. ``call_json``
+    names who answers and how: the provider, its endpoint, and the call
+    parameters as resolved from the settings (temperature, the effective
+    output cap and reasoning effort, thinking budget). A model name alone does
+    not: two servers can serve different weights as ``default``.
 
     Fields are length-prefixed rather than concatenated so no rearrangement of
     adjacent fields can collide.
@@ -102,6 +128,7 @@ def request_key(
         mode or "",
         schema_json or "",
         chat_template_json or "",
+        call_json or "",
     )
     for field in fields:
         encoded = field.encode("utf-8")
@@ -184,9 +211,15 @@ class LlmResponseCache:
         }
         tmp = None
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
+            # ``mode`` applies to the directory named, not to missing parents
+            # (~/.cache), so the root and the fan-out level are made apart.
+            self.root.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
+            path.parent.mkdir(mode=_DIR_MODE, exist_ok=True)
+            data = json.dumps(payload)
             tmp = path.with_suffix(f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
-            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _FILE_MODE)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(data)
             os.replace(tmp, path)
             return True
         except (OSError, TypeError, ValueError) as e:

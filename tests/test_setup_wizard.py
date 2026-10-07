@@ -337,7 +337,12 @@ def test_connection_test_sends_the_google_adapter_request(monkeypatch):
     assert fake.clients == [
         (
             "google/gemini-3.5-flash-lite",
-            {"async_client": True, "api_key": "AIza-typed-key-1234567890"},
+            {
+                "async_client": True,
+                "api_key": "AIza-typed-key-1234567890",
+                # Twice LLM_TIMEOUT_SECONDS, in milliseconds.
+                "http_options": {"timeout": 60000},
+            },
         )
     ]
     assert fake.requests == [

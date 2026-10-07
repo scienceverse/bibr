@@ -363,7 +363,8 @@ def test_anthropic_provider_thinking_budget(monkeypatch):
     monkeypatch.setattr(Settings.llm, "thinking_budget", 2048)
     provider = providers.get("anthropic")
     kwargs = provider.call_kwargs(reasoning_effort=None)
-    assert kwargs["max_tokens"] == Settings.llm.max_tokens
+    # LLM_MAX_TOKENS (65536), capped for a non-streaming call.
+    assert kwargs["max_tokens"] == min(Settings.llm.max_tokens, 16384)
     assert kwargs["thinking"] == {"type": "enabled", "budget_tokens": 2048}
 
 
