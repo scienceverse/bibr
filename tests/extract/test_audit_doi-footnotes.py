@@ -314,6 +314,9 @@ def test_a_hand_over_at_the_end_of_a_long_note_still_leads_to_its_citation():
         ("Jan", "Dvořák", "dvorak", True),
         ("Jiří", "Novák", "jirinovak", True),
         ("Xiaohong", "Lü", "luxh", True),
+        # Letters NFKD leaves whole, spelled out as the address does.
+        ("Ivar", "Bræin", "braein", True),
+        ("Jon", "Þór", "thorj", True),
         # ASCII names as before.
         ("Xiang-Min", "Yang", "yxiangmind", True),
         ("Xiaohong", "Li", "lixh", True),

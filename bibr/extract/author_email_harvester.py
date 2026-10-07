@@ -135,8 +135,10 @@ _NAME_PARTICLES = frozenset(
     {"de", "den", "der", "des", "di", "da", "del", "della", "dos", "das", "du", "la", "le"}
     | {"ter", "ten", "van", "von"}
 )
-# Letters NFKD leaves whole.
-_FOLD_EXTRA = str.maketrans({"ł": "l", "ı": "i", "ø": "o", "đ": "d"})
+# Letters NFKD leaves whole, spelled as addresses spell them ("Bræin" -> "braein").
+_FOLD_EXTRA = str.maketrans(
+    {"ł": "l", "ı": "i", "ø": "o", "đ": "d", "ð": "d", "æ": "ae", "œ": "oe", "þ": "th"}
+)
 
 
 def _fold_letters(text: str | None) -> str:
