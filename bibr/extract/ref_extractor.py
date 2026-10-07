@@ -750,7 +750,8 @@ def _resolve_ref_strategies(
 
 
 def _is_in_press(year_str: str | None) -> bool:
-    """True if the year text looks like 'in press' / 'forthcoming' / etc."""
+    """True if the text (a year field or a whole reference) prints an
+    'in press' / 'forthcoming' / etc. status; see ``_IN_PRESS_RE``."""
     return bool(year_str and _IN_PRESS_RE.search(year_str))
 
 
@@ -2590,6 +2591,8 @@ class ReferenceExtractor:
         """Log and persist a segmentation/parse fallback, recovery or loss so
         eval tooling can count it."""
         logger.warning("Reference extraction warning %s: %s", code, message)
+        # Also called from asyncio.to_thread workers (geom/CRF segmentation,
+        # the NER parse); a single list.append is atomic under the GIL.
         # Mock(spec=PaperContents) doubles don't expose default_factory
         # dataclass fields — create the sink on first write if missing.
         if not hasattr(self.contents, "processing_warnings"):

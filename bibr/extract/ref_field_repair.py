@@ -88,20 +88,24 @@ _ACCESS_PHRASE_RE = re.compile(
 )
 
 # A reference marked in press prints the status as a field of its own: in
-# brackets ("(in press)", "[Epub ahead of print]"), between field punctuation
-# (". In press.", ", forthcoming,"), opening "Forthcoming in <venue>" or a dated
-# "In press 2002", or at the very end ("J Synth Garden Res in press."). A bare
-# substring search also read "caveats in press releases" and "The Darwin Press"
-# as in press, which cost those references their year. ref_extractor imports
-# this pattern; it cannot be imported the other way.
+# brackets ("(in press)", "(2021 in press)", "[Epub ahead of print]"), between
+# field punctuation (". In press.", ", forthcoming,"), opening "Forthcoming in
+# <venue>" or a dated "In press 2002", or last before any DOI/URL ("J Synth
+# Garden Res in press."). A bare substring search also read "caveats in press
+# releases" and "The Darwin Press" as in press, which cost those references
+# their year. The APA "in press-a" suffix may be set off by any dash or a space
+# in PDF text. ref_extractor imports this pattern; it cannot be imported the
+# other way.
 _IN_PRESS_STATUS = (
-    r"(?:article\s+)?in\s*press(?:-?[a-z])?|forthcoming|advance\s*online(?:\s+publication)?"
+    r"(?:article\s+)?in\s*press(?:\s*[-‐-―−]?\s*[a-z](?![^\W\d_]))?"
+    r"|forthcoming|advance\s*online(?:\s+publication)?"
     r"|manuscript\s*submitted(?:\s+for\s+publication)?|epub\s*ahead(?:\s+of\s+print)?"
 )
 _IN_PRESS_RE = re.compile(
-    rf"(?:^|[(\[.,;:/])\s*(?:{_IN_PRESS_STATUS})"
-    r"(?=\s*(?:[.,;:()\[\]]|$)|\s+in\b|\s+(?:19|20)\d\d\b)"
-    rf"|\b(?:{_IN_PRESS_STATUS})[\s.)\]]*$",
+    rf"(?:^|[(\[.,;:/]|(?<!\d)(?:19|20)\d\d[a-z]?)\s*(?:{_IN_PRESS_STATUS})"
+    r"(?=\s*(?:[.,;:()\[\]]|$)|\s+in\b|\s+(?:19|20)\d\d\b"
+    rf"|\s+\d{{1,2}}\s+(?:{_EN_MONTHS})\b)"
+    rf"|\b(?:{_IN_PRESS_STATUS})[\s.)\]]*(?:$|doi\b|https?:)",
     re.IGNORECASE,
 )
 # Mirrors bibr.extract.ref_extractor._VANCOUVER_YEAR_RE (not imported:

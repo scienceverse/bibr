@@ -171,6 +171,12 @@ class TestInPressNeedsAStatusPosition:
             "Smith, J. (2020). The forthcoming election. Journal of Politics, 3, 1-2.",
             "Smith, J. (2020). Women in press photography. Journal, 2, 3.",
             "Smith J. Advance online learning in schools. J Ed. 2019;3:1-2.",
+            "Smith, J. (2020). In press and online. Journal, 2, 3.",
+            "Smith, J. (2020). Freedom: in press a free voice. Journal, 2, 3.",
+            "Smith, J. (2020). In press A study of things. Journal, 2, 3.",
+            "Smith, J. (2016) in press releases. Journal, 2, 3.",
+            "Smith, J. (2020). Elections 2020 in press coverage. J, 2, 3.",
+            "Smith, J. (2020). A book. Berlin: Berlin Press. doi:10.1000/xyz",
         ],
     )
     def test_the_words_inside_a_title_or_name_are_not_a_status(self, text):
@@ -187,7 +193,17 @@ class TestInPressNeedsAStatusPosition:
             "epub ahead",
             "Robertson, C. E., & Van Bavel, J. J. (in press). Inside the funhouse mirror factory.",
             "Smith, J. (in press-a). Title. Journal.",
+            # PDF text keeps the typographic hyphen or dash, or a space.
+            "Smith, J. (in press‐a). Title. Journal.",
+            "Smith, J. (in press‑b). Title. Journal.",
+            "Smith, J. (in press–a). Title. Journal.",
+            "Smith, J. (In Press B). Title. Journal.",
             "Smith, J. (2021, in press). Title. Journal.",
+            "Smith, J. (2021 in press). Title. Journal.",
+            "Smith, J. (2021 forthcoming). Title. Journal.",
+            "Smith J. Title. J Med in press. doi:10.1000/xyz",
+            "Smith J. Title. J Med. 2021 Epub ahead of print. doi:10.1000/xyz",
+            "Smith, J. (2021). Title. Journal. Advance online publication 12 March 2021.",
             "Smith J. A forthcoming study. J Synth Garden Res in press.",
             "Smith J. Title. J Med. In press. doi:10.1000/xyz",
             "Smith J. Title. Proc Natl Acad Sci U S A. In press 2002.",
@@ -216,6 +232,14 @@ class TestInPressNeedsAStatusPosition:
 
         assert ref.is_in_press is False
         assert ref.year == 2016
+
+    def test_the_ner_path_flags_a_dash_suffixed_status(self):
+        segment = "Robertson, C. E. (in press‐a). Inside the funhouse mirror factory. Journal."
+        with _ner_parser({"title": "Inside the funhouse mirror factory", "authors": "Robertson"}):
+            (ref,) = _extractor()._parse_references_ner([segment])
+
+        assert ref.is_in_press is True
+        assert ref.year is None
 
 
 def _author_date_entry(i: int) -> str:
@@ -273,7 +297,8 @@ class TestMergedSplitIsLinear:
 
 
 class _CountingText(str):
-    """Reference text that counts the characters ``find`` scans."""
+    """Reference text that counts the characters ``find`` scans and slicing
+    reads, whichever way the aligner walks it."""
 
     scanned: int
 
@@ -287,6 +312,12 @@ class _CountingText(str):
         pos = super().find(sub, start, stop)
         self.scanned += (stop if pos == -1 else pos + len(sub)) - start
         return pos
+
+    def __getitem__(self, key):  # type: ignore[override]
+        part = super().__getitem__(key)
+        if isinstance(key, slice):
+            self.scanned += len(part)
+        return part
 
 
 def _layout(count: int) -> tuple[str, list[str], list[bool], list[int]]:
@@ -308,8 +339,10 @@ class TestLineAlignmentIsLinear:
         text = _CountingText(raw)
 
         assert align_line_starts(text, lines, bounds) == expected
-        # The old walk searched the whole text for every one of the 3000 lines.
-        assert text.scanned <= 2 * len(text)
+        # One pass reads a probe-sized window at each offset (30x the text);
+        # the old walk searched the whole text for every one of the 3000 lines
+        # (3000x).
+        assert text.scanned <= 2 * anchor_snap.ANCHOR_LEN * len(text)
 
     @pytest.mark.parametrize(
         ("text", "lines", "bounds"),
