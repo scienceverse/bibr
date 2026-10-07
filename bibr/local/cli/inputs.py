@@ -225,14 +225,15 @@ def _batch_output_names(stem: str) -> tuple[str, ...]:
     return (export, f"{stem}.core.json", f"{export}.receipt.json", f"{export}.enrichment.json")
 
 
-def _find_stem_collisions(files: list[Path]) -> dict[str, list[Path]]:
+def _find_stem_collisions(files: list[Path], *, sidecars: bool = False) -> dict[str, list[Path]]:
     """Group batch input files by the output files they write, returning one
     name per group of 2+ files that would write the same file.
 
     Batch output writes ``<dir>/<stem>.json``, so files from different
     directories that share a stem (``a/x.pdf`` + ``b/x.pdf``) would silently
-    overwrite one result with the other. The sidecars count too: the core
-    ``x.core.json`` of ``x.pdf`` is the export of ``x.core.pdf``.
+    overwrite one result with the other. With *sidecars* (a run that writes
+    files, so ``LocalArtifactSink`` puts them beside each export) those count
+    too: the core ``x.core.json`` of ``x.pdf`` is the export of ``x.core.pdf``.
 
     Names are compared case-insensitively: on the default macOS/Windows
     filesystems ``x.json`` and ``X.json`` are the same directory entry, so
@@ -240,7 +241,8 @@ def _find_stem_collisions(files: list[Path]) -> dict[str, list[Path]]:
     """
     by_name: dict[str, list[Path]] = {}
     for f in files:
-        for name in _batch_output_names(f.stem):
+        names = _batch_output_names(f.stem) if sidecars else (f"{f.stem}.json",)
+        for name in names:
             by_name.setdefault(name.casefold(), []).append(f)
     # Files sharing a stem share every sidecar name too: name the export only.
     collisions: dict[str, list[Path]] = {}

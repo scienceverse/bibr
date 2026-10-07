@@ -396,7 +396,9 @@ def _print_dry_run_plan(
     if len(files) > 5:
         print(f"  … and {len(files) - 5} more")
 
-    model_label, _ = _dry_run_ocr_model(config)
+    # Model names and paths come from the user: a "[/x]" in one would raise
+    # MarkupError.
+    model_label = escape(_dry_run_ocr_model(config)[0])
     ui.section(out, "Plan")
     out.print(
         ui.kv(
@@ -408,12 +410,14 @@ def _print_dry_run_plan(
     if config.ocr_backend == "paddle":
         out.print("  OCR backend: paddle (automatic)")
         for index, candidate in enumerate(candidates, start=1):
-            out.print(f"  {index}. {candidate.backend} | {candidate.model} | {candidate.profile}")
+            out.print(
+                escape(f"  {index}. {candidate.backend} | {candidate.model} | {candidate.profile}")
+            )
     else:
         candidate = candidates[0]
-        out.print(f"  OCR backend: {candidate.backend}")
+        out.print(f"  OCR backend: {escape(candidate.backend)}")
     out.print(f"  OCR model: {model_label}")
-    out.print(f"  OCR profile: {config.ocr_profile or candidates[0].profile}")
+    out.print(f"  OCR profile: {escape(config.ocr_profile or candidates[0].profile)}")
     out.print(ui.kv("llm", _dry_run_llm_label(config)))
     refs_value = "disabled (--no-llm)"
     if not config.no_llm:
@@ -442,7 +446,7 @@ def _print_dry_run_plan(
             mark = "[yellow]↓[/yellow]"
         else:
             mark = "[dim]?[/dim]"
-        out.print(f"  {mark} {label}: {repo_id} — {status}", soft_wrap=True)
+        out.print(f"  {mark} {escape(f'{label}: {repo_id} — {status}')}", soft_wrap=True)
 
     ui.section(out, "Output")
     for line in _dry_run_output_destinations(

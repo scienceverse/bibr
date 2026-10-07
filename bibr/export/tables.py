@@ -259,7 +259,7 @@ def _not_an_export(payload: Any) -> str | None:
     version = payload["schema_version"]
     if not isinstance(version, str) or version.split(".")[0] != SCHEMA_MAJOR:
         return f"not a bibr {SCHEMA_MAJOR}.x export (schema_version {version!r})"
-    if "paper_id" not in payload:
+    if not isinstance(payload.get("paper_id"), str) or not payload["paper_id"]:
         return "not a bibr export (no paper_id)"
     return None
 

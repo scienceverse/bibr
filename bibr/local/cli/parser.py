@@ -711,8 +711,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "paper_id. Column types come from the export schema, so every file has "
             "the same columns however many papers it holds. Directories are "
             "searched recursively for *.json, leaving out what 'bibr chew -o' writes "
-            "beside each export (x.core.json next to x.json, *.receipt.json, "
-            "*.enrichment.json, _quarantine/); other JSON files and exports of "
+            "beside each export x.json (x.core.json, x.json.receipt.json, "
+            "x.json.enrichment.json, _quarantine/); other JSON files and exports of "
             "another schema major are skipped."
         ),
     )

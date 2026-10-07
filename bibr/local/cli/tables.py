@@ -9,32 +9,36 @@ from rich.markup import escape
 
 from bibr.local.cli import ui
 
-# What ``bibr chew -o`` writes beside each export (``bibr.local.artifacts``):
-# the run receipt, the enrichment sidecar and the quarantined exports.
-_SIDECAR_SUFFIXES = (".receipt.json", ".enrichment.json")
+# What ``bibr chew -o`` writes beside each export x.json (``bibr.local.artifacts``):
+# its receipt, its enrichment sidecar, its core x.core.json and the quarantined
+# exports.
+_SIDECAR_SUFFIXES = (".json.receipt.json", ".json.enrichment.json")
 _QUARANTINE_DIR = "_quarantine"
 _CORE_SUFFIX = ".core.json"
 
 
-def _is_chew_sidecar(path: Path, root: Path) -> bool:
-    """Is *path*, found under *root*, a file ``bibr chew -o`` wrote beside an
-    export rather than an export of its own?"""
-    if path.name.endswith(_SIDECAR_SUFFIXES):
-        return True
-    if _QUARANTINE_DIR in path.relative_to(root).parts[:-1]:
-        return True
-    # x.core.json is the core of x.json and repeats its paper_id. Without an
-    # x.json beside it, it is an export: bibr batch names x.core.pdf's x.core.
-    if path.name.endswith(_CORE_SUFFIX):
-        return path.with_name(path.name[: -len(_CORE_SUFFIX)] + ".json").is_file()
-    return False
+def _chew_export_of(path: Path) -> Path | None:
+    """The export ``bibr chew -o`` wrote *path* beside as one of its sidecars,
+    or None when *path* is not such a sidecar."""
+    name = path.name
+    for suffix in _SIDECAR_SUFFIXES:
+        if name.endswith(suffix):
+            return path.with_name(name[: -len(suffix)] + ".json")
+    # x.core.json is the core of x.json and repeats its paper_id. The receipt
+    # beside x.json tells it from bibr batch's export of a paper named x.core.
+    if name.endswith(_CORE_SUFFIX):
+        export = path.with_name(name[: -len(_CORE_SUFFIX)] + ".json")
+        if export.is_file() and export.with_name(export.name + ".receipt.json").is_file():
+            return export
+    return None
 
 
 def export_files(inputs: list[str]) -> tuple[list[Path], list[str]]:
     """JSON files named in *inputs*, and the inputs that do not exist.
 
     Directories are searched recursively, leaving out what ``bibr chew -o``
-    writes beside each export; a file named explicitly is always included.
+    writes beside each export. A file named explicitly is read unless it is
+    such a sidecar of an export also read (``bibr tables results/*.json``).
     """
     files: list[Path] = []
     missing: list[str] = []
@@ -45,14 +49,18 @@ def export_files(inputs: list[str]) -> tuple[list[Path], list[str]]:
                 sorted(
                     p
                     for p in path.rglob("*.json")
-                    if not p.name.startswith(".") and not _is_chew_sidecar(p, path)
+                    if not p.name.startswith(".")
+                    and _QUARANTINE_DIR not in p.relative_to(path).parts[:-1]
+                    and _chew_export_of(p) is None
                 )
             )
         elif path.is_file():
             files.append(path)
         else:
             missing.append(raw)
-    return list(dict.fromkeys(files)), missing
+    files = list(dict.fromkeys(files))
+    found = set(files)
+    return [f for f in files if _chew_export_of(f) not in found], missing
 
 
 def report_tables(console: Any, report: Any) -> None:

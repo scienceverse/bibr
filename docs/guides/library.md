@@ -112,8 +112,8 @@ papers = pd.read_parquet("tables/paper.parquet")    # titles, DOIs, file hashes,
 
 In R: `arrow::read_parquet("tables/bib.parquet")`. The CLI equivalent is
 `bibr tables results/ --out tables/`, which leaves out what `bibr chew -o`
-writes beside each export (`x.core.json`, the `.receipt.json` and
-`.enrichment.json` files, `_quarantine/`), and `bibr batch` writes the same
+writes beside each export `x.json` (`x.core.json`, `x.json.receipt.json`,
+`x.json.enrichment.json`, `_quarantine/`), and `bibr batch` writes the same
 files to `<out>/tables/` after every run. `paper_id` joins the tables, so it
 must be unique across the corpus. It defaults to the input file's name without
 its extension, so `a/paper.pdf` and `b/paper.pdf` clash: chew them in one batch

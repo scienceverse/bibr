@@ -469,10 +469,10 @@ async def _run_process(args) -> None:
         )
         sys.exit(2)
 
-    # Batch output writes <dir>/<stem>.json and its sidecars — files from
-    # different directories sharing a stem would silently overwrite each other.
+    # Batch output writes <dir>/<stem>.json (and, with -o, its sidecars) — files
+    # from different directories sharing a stem would overwrite each other.
     if is_batch and source_mode != "manifest":
-        collisions = _find_stem_collisions(files)
+        collisions = _find_stem_collisions(files, sidecars=args.output is not None)
         if collisions:
             ui.error(
                 console,

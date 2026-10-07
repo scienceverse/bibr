@@ -110,3 +110,40 @@ async def test_later_chunks_fail_before_render_ocr_once_the_classifier_failed():
         assert fs.error_code == "classifier_required_failed"
         assert fs.failed_stage == "classifiers"
         assert fs.error_outage is True
+
+
+async def test_a_start_that_raised_part_way_is_not_gated(monkeypatch):
+    """One classifier failed to load, then start() raised before the other:
+    the next chunk's ClassifierStage retries the start, so the gate must not
+    fail that chunk first."""
+    from bibr.pipeline import classifier_resources
+    from bibr.pipeline.context import PipelineContext, RunConfig
+    from bibr.pipeline.progress import NullProgress
+    from bibr.pipeline.stages.classifiers import ClassifierStage, RequiredClassifierGate
+    from bibr.pipeline.state import FileState
+
+    choose = classifier_resources.choose_classifier_device
+    calls = []
+
+    def _choose_then_raise(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 2:
+            raise RuntimeError("device probe failed")
+        return choose(**kwargs)
+
+    monkeypatch.setattr(classifier_resources, "choose_classifier_device", _choose_then_raise)
+    resources = _classifier_resources()
+
+    def _ctx(fs):
+        return PipelineContext(
+            file_states=[fs], progress=NullProgress(), resources=resources, config=RunConfig()
+        )
+
+    first = FileState(path=Path("a.pdf"))
+    await ClassifierStage().run(_ctx(first))
+    assert first.error_code == "classifier_required_failed"
+    assert not resources.classifiers.started
+
+    second = FileState(path=Path("b.pdf"))
+    await RequiredClassifierGate().run(_ctx(second))
+    assert second.error is None

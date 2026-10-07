@@ -40,10 +40,11 @@ class ClassifierStage:
 class RequiredClassifierGate:
     """Fail a chunk before render/OCR once a required classifier is known broken.
 
-    In the local barrier plan the classifiers start after OCR, and their
-    startup state is sticky: after the first chunk a required failure is
-    known, and every later chunk would render and OCR its files only to fail
-    them. Starts nothing, so the first chunk still reaches ClassifierStage.
+    In the local barrier plan the classifiers start after OCR, and once
+    their start completes its state is sticky: after the first chunk a
+    required failure is known, and every later chunk would render and OCR its
+    files only to fail them. Starts nothing, so the first chunk still reaches
+    ClassifierStage.
     """
 
     name = "classifier_gate"
@@ -51,7 +52,10 @@ class RequiredClassifierGate:
     produces = ()
 
     async def run(self, ctx: PipelineContext) -> None:
-        _fail_on_required_failure(ctx)
+        # A start that raised part-way is not sticky: the next ClassifierStage
+        # tries it again, so only a completed one fails the chunk here.
+        if getattr(ctx.resources.classifiers, "started", False):
+            _fail_on_required_failure(ctx)
 
 
 def _fail_on_required_failure(ctx: PipelineContext) -> None:
