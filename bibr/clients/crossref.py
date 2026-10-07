@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import re
 import threading
@@ -179,10 +180,11 @@ class CrossrefClient:
         self.limiter: AsyncRedisRateLimiter | AsyncLocalRateLimiter | None = None
         # Guards lazy-init across concurrent first callers; otherwise both
         # coroutines pass the ``self.limiter is None`` check, both ping
-        # Redis, and one of the two limiters is orphaned. Created
-        # synchronously on first use so its construction itself is race-free.
-        self._limiter_init_lock: asyncio.Lock | None = None
-        self._limiter_init_loop: asyncio.AbstractEventLoop | None = None
+        # Redis, and one of the two limiters is orphaned. One lock per loop,
+        # since an asyncio.Lock must not be shared by threads' loops; across
+        # threads the first limiter installed wins (_limiter_install_lock).
+        self._limiter_init_locks: dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
+        self._limiter_install_lock = threading.Lock()
 
         # Lazily created per running event loop (see enrich_semaphore).
         self._enrich_semaphores: dict[asyncio.AbstractEventLoop, asyncio.Semaphore] = {}
@@ -216,45 +218,55 @@ class CrossrefClient:
         """Create the rate limiter on first request (Redis probe runs off-loop)."""
         if self.limiter is not None:
             return
-        loop = asyncio.get_running_loop()
-        if self._limiter_init_lock is None or self._limiter_init_loop is not loop:
-            self._limiter_init_lock = asyncio.Lock()
-            self._limiter_init_loop = loop
-        async with self._limiter_init_lock:
+        lock = self._limiter_init_locks.setdefault(asyncio.get_running_loop(), asyncio.Lock())
+        async with lock:
             if self.limiter is not None:
                 return
+            limiter = await self._build_limiter()
+            # Another thread's loop may have built one meanwhile: keep the
+            # first, so every thread shares one rate budget.
+            with self._limiter_install_lock:
+                installed = self.limiter is None
+                if installed:
+                    self.limiter = limiter
+                    self._limiter_init_locks.clear()
+            if not installed:
+                await limiter.close()
+
+    async def _build_limiter(self) -> "AsyncRedisRateLimiter | AsyncLocalRateLimiter":
+        """Probe Redis: a limiter shared through it, or a local one without it."""
+        try:
+            if not self._settings.redis.url:
+                raise RuntimeError("Redis URL not configured")
+            from redis.asyncio import Redis as AsyncRedis
+
+            from bibr.utils.rate_limiter import AsyncRedisRateLimiter
+
+            # Bounded like the LLM client's probe: a Redis that accepts the
+            # connection but never answers must not hold the first request.
+            r = AsyncRedis.from_url(
+                self._settings.redis.url, socket_connect_timeout=1, socket_timeout=1
+            )
             try:
-                if not self._settings.redis.url:
-                    raise RuntimeError("Redis URL not configured")
-                from redis.asyncio import Redis as AsyncRedis
+                await asyncio.wait_for(r.ping(), timeout=1)
+            finally:
+                await r.aclose()
 
-                from bibr.utils.rate_limiter import AsyncRedisRateLimiter
+            return AsyncRedisRateLimiter(
+                redis_url=self._settings.redis.url,
+                resource_id="crossref",
+                max_requests=1,
+                window_seconds=self.interval,
+            )
+        except Exception as exc:
+            from bibr.utils.rate_limiter import AsyncLocalRateLimiter
 
-                # Bounded like the LLM client's probe: a Redis that accepts the
-                # connection but never answers must not hold the first request.
-                r = AsyncRedis.from_url(
-                    self._settings.redis.url, socket_connect_timeout=1, socket_timeout=1
-                )
-                try:
-                    await asyncio.wait_for(r.ping(), timeout=1)
-                finally:
-                    await r.aclose()
-
-                self.limiter = AsyncRedisRateLimiter(
-                    redis_url=self._settings.redis.url,
-                    resource_id="crossref",
-                    max_requests=1,
-                    window_seconds=self.interval,
-                )
-            except Exception as exc:
-                from bibr.utils.rate_limiter import AsyncLocalRateLimiter
-
-                logger.info("Redis unavailable, using local Crossref rate limiter: %s", exc)
-                self.limiter = AsyncLocalRateLimiter(
-                    resource_id="crossref",
-                    max_requests=1,
-                    window_seconds=self.interval,
-                )
+            logger.info("Redis unavailable, using local Crossref rate limiter: %s", exc)
+            return AsyncLocalRateLimiter(
+                resource_id="crossref",
+                max_requests=1,
+                window_seconds=self.interval,
+            )
 
     def _make_http_client(self) -> httpx.AsyncClient:
         """Construct a Crossref HTTP client with the configured transport policy."""
@@ -510,10 +522,13 @@ class CrossrefClient:
             if cache is None:
                 cache = self.__dict__["_response_cache"] = OrderedDict()
             entry = cache.get(key)
+            # Threads sharing this client evict from the same LRU, so the key
+            # may be gone again by the time it is dropped or refreshed.
             if entry is not None and _is_expired_not_found(entry):
-                del cache[key]
+                cache.pop(key, None)
             elif entry is not None:
-                cache.move_to_end(key)
+                with contextlib.suppress(KeyError):
+                    cache.move_to_end(key)
                 return self._unless_not_found(entry, not_found_path)
 
         redis_cache = await self._ensure_response_cache()

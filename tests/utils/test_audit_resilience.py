@@ -55,22 +55,52 @@ def _run_in_thread(coro_fn, timeout: float = 5.0):
 # --- Circuit breaker shared across threads' event loops -------------------
 
 
-class TestBreakerAcrossThreadLoops:
-    def test_caller_on_other_loop_during_probe_does_not_spin(self):
-        """A probe in flight on loop A must not leave loop B spinning in HALF_OPEN.
+class _Clock:
+    """Manually advanced monotonic clock: OPEN → HALF_OPEN without racing wall time."""
 
-        The loop switch dropped the probe's event but kept HALF_OPEN, and
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _open_breaker(**kwargs) -> tuple[AsyncCircuitBreaker, _Clock]:
+    """A breaker that is OPEN and past its reset timeout: the next caller probes."""
+    clock = _Clock()
+    cb = AsyncCircuitBreaker(failure_threshold=1, failure_dedup_window=0.0, clock=clock, **kwargs)
+    cb._state = CircuitState.OPEN
+    cb._last_failure_time = clock() - 60
+    return cb, clock
+
+
+def _start_thread(coro_fn) -> tuple[threading.Thread, dict[str, object]]:
+    """Start ``asyncio.run(coro_fn())`` in a daemon thread; the outcome fills in later."""
+    outcome: dict[str, object] = {}
+
+    def target():
+        try:
+            outcome["result"] = asyncio.run(coro_fn())
+        except BaseException as exc:  # noqa: BLE001 — reported to the test
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    return thread, outcome
+
+
+class TestBreakerAcrossThreadLoops:
+    def test_caller_on_other_loop_waits_for_the_probe(self):
+        """Loop B parks while loop A's probe is in flight, then sees its verdict.
+
+        The loop switch used to drop the probe's event but keep HALF_OPEN, and
         ``__aenter__`` then looped without ever awaiting (100% CPU, forever).
         """
-        cb = AsyncCircuitBreaker(failure_threshold=1, reset_timeout=0.05, name="threads")
+        cb, _ = _open_breaker(reset_timeout=0.05)
         probing = threading.Event()
         release = threading.Event()
 
         async def loop_a():
-            with pytest.raises(ConnectionError):
-                async with cb:
-                    raise ConnectionError("down")
-            await asyncio.sleep(0.06)
             with pytest.raises(ConnectionError):
                 async with cb:
                     probing.set()
@@ -78,125 +108,173 @@ class TestBreakerAcrossThreadLoops:
                         await asyncio.sleep(0.005)
                     raise ConnectionError("still down")
 
-        thread_a = threading.Thread(target=lambda: asyncio.run(loop_a()), daemon=True)
-        thread_a.start()
+        thread_a, _ = _start_thread(loop_a)
         assert probing.wait(5)
 
         async def loop_b():
             async with cb:
-                return cb.state
+                return "admitted"
 
-        finished, outcome = _run_in_thread(loop_b)
+        thread_b, outcome = _start_thread(loop_b)
+        # Several patience timeouts pass: B re-waits instead of probing too.
+        thread_b.join(0.3)
+        assert thread_b.is_alive(), f"loop B got past A's probe: {outcome}"
         release.set()
         thread_a.join(5)
+        thread_b.join(5)
 
-        assert finished, "breaker spun in HALF_OPEN on the second loop"
-        # Loop A's probe could no longer report to loop B, so B became the
-        # probe itself, and its success closed the breaker.
-        assert outcome == {"result": CircuitState.HALF_OPEN}
-        assert not thread_a.is_alive()
-        assert cb.state in (CircuitState.OPEN, CircuitState.CLOSED)
+        assert not thread_a.is_alive() and not thread_b.is_alive(), "breaker hung or spun"
+        # A's probe failed: the breaker is OPEN again and B fails fast.
+        assert isinstance(outcome.get("error"), CircuitOpenError)
+        assert cb.state is CircuitState.OPEN
 
-    def test_probe_failing_on_other_loop_leaves_a_usable_breaker(self):
-        """After another loop's probe fails, the breaker is OPEN, not HALF_OPEN with no probe."""
-        cb = AsyncCircuitBreaker(failure_threshold=1, reset_timeout=0.05, name="threads")
-        probing = threading.Event()
-        b_entered = threading.Event()
+    def test_one_probe_for_all_loops(self):
+        """HALF_OPEN admits one caller in total, not one per loop switch.
 
-        async def loop_a():
-            with pytest.raises(ConnectionError):
+        Two threads, each with its own loop and many concurrent callers (two
+        bibr.chew() calls on one shared Crossref client). Each loop switch used
+        to demote the live probe and let the next caller probe too, so every
+        caller on every loop got through within a few patience timeouts.
+        """
+        cb, clock = _open_breaker(reset_timeout=0.05)
+        n = 20
+        lock = threading.Lock()
+        arrived: list[int] = []
+        admitted: list[int] = []
+        release = threading.Event()
+        start = threading.Barrier(2)
+
+        async def caller():
+            with lock:
+                arrived.append(1)
+            try:
                 async with cb:
-                    raise ConnectionError("down")
-            await asyncio.sleep(0.06)
-            with pytest.raises(ConnectionError):
-                async with cb:
-                    probing.set()
-                    while not b_entered.is_set():
+                    with lock:
+                        admitted.append(1)
+                    while not release.is_set():
                         await asyncio.sleep(0.005)
                     raise ConnectionError("still down")
+            except ConnectionError:
+                return "failed"
+            except CircuitOpenError:
+                return "rejected"
 
-        async def loop_b():
-            # Becomes the probe on its own loop, then waits for A to fail.
-            async with cb:
-                b_entered.set()
-                while thread_a.is_alive():
-                    await asyncio.sleep(0.005)
+        async def main():
+            start.wait(5)
+            return await asyncio.gather(*(caller() for _ in range(n)))
 
-        thread_a = threading.Thread(target=lambda: asyncio.run(loop_a()), daemon=True)
-        thread_a.start()
-        assert probing.wait(5)
-        finished, outcome = _run_in_thread(loop_b)
+        threads = [_start_thread(main) for _ in range(2)]
+        deadline = time.monotonic() + 5
+        while len(arrived) < 2 * n and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.2)  # several patience timeouts while the probe hangs
+        with lock:
+            admitted_while_probing = len(admitted)
+        release.set()
+        for thread, _ in threads:
+            thread.join(5)
 
-        assert finished and "error" not in outcome
-        assert cb.state is CircuitState.CLOSED  # B's probe succeeded last
+        assert all(not thread.is_alive() for thread, _ in threads), "breaker hung or spun"
+        assert admitted_while_probing == 1
+        results = sorted(r for _, outcome in threads for r in outcome["result"])
+        assert results == ["failed"] + ["rejected"] * (2 * n - 1)
+        assert cb.state is CircuitState.OPEN
+
+        # Still usable: once the reset timeout passes, a caller on yet
+        # another loop probes and closes it.
+        clock.now += 1.0
 
         async def after():
             async with cb:
                 return cb.state
 
         finished, outcome = _run_in_thread(after)
-        assert finished and outcome == {"result": CircuitState.CLOSED}
+        assert finished and outcome == {"result": CircuitState.HALF_OPEN}
+        assert cb.state is CircuitState.CLOSED
 
-    def test_waiter_on_old_loop_is_woken_when_another_loop_takes_over(self):
-        """Loop A's waiters park on A's probe event; a switch to loop B must wake them."""
-        cb = AsyncCircuitBreaker(failure_threshold=1, reset_timeout=30.0, name="threads")
-        probe_entered = threading.Event()
-        waiter_parked = threading.Event()
-        b_done = threading.Event()
-        results: dict[str, object] = {}
+    def test_probe_success_releases_waiters_on_every_loop(self):
+        """A probe that succeeds on loop A wakes the waiters parked on A and on B."""
+        cb, _ = _open_breaker(reset_timeout=30.0)  # a timeout wake-up would take 30 s
+        probing = threading.Event()
+        release = threading.Event()
 
         async def loop_a():
-            cb._state = CircuitState.OPEN
-            cb._last_failure_time = time.monotonic() - 60
-
             async def probe():
                 async with cb:
-                    probe_entered.set()
-                    while not b_done.is_set():
+                    probing.set()
+                    while not release.is_set():
                         await asyncio.sleep(0.005)
 
             async def waiter():
                 await asyncio.sleep(0)  # let the probe enter first
-                waiter_parked.set()
-                started = time.monotonic()
                 async with cb:
-                    results["waited"] = time.monotonic() - started
+                    return cb.state
 
-            await asyncio.gather(probe(), waiter())
-
-        thread_a = threading.Thread(target=lambda: asyncio.run(loop_a()), daemon=True)
-        thread_a.start()
-        assert probe_entered.wait(5) and waiter_parked.wait(5)
-        time.sleep(0.02)  # the waiter is now parked on loop A's probe event
+            return await asyncio.gather(probe(), waiter())
 
         async def loop_b():
             async with cb:
-                pass
+                return cb.state
 
-        finished, _ = _run_in_thread(loop_b)
-        b_done.set()
+        thread_a, outcome_a = _start_thread(loop_a)
+        assert probing.wait(5)
+        thread_b, outcome_b = _start_thread(loop_b)
+        thread_b.join(0.2)
+        assert thread_b.is_alive(), f"loop B got past A's probe: {outcome_b}"
+        release.set()
         thread_a.join(5)
+        thread_b.join(5)
 
-        assert finished and not thread_a.is_alive()
-        # Woken by the switch, not by the 30 s patience timeout.
-        assert results["waited"] < 10
+        assert not thread_a.is_alive() and not thread_b.is_alive()
+        assert outcome_a == {"result": [None, CircuitState.CLOSED]}
+        assert outcome_b == {"result": CircuitState.CLOSED}
 
-    def test_half_open_without_probe_event_becomes_the_probe(self):
-        """HALF_OPEN with no probe event on this loop: the caller probes instead of spinning."""
+    def test_probe_on_a_loop_that_stopped_does_not_park_waiters_forever(self):
+        """A probe pending on a loop that no longer runs can never report.
+
+        Waiters on other loops must not re-wait for it forever: after one
+        patience timeout they fail fast, as for a probe that died.
+        """
+        cb, _ = _open_breaker(reset_timeout=0.05)
+        loop_a = asyncio.new_event_loop()
+        try:
+            gate = loop_a.create_future()
+
+            async def probe():
+                async with cb:
+                    await gate
+
+            probe_task = loop_a.create_task(probe())
+            loop_a.run_until_complete(asyncio.sleep(0))
+            assert cb.state is CircuitState.HALF_OPEN  # loop A stopped mid-probe
+
+            async def loop_b():
+                async with cb:
+                    return "admitted"
+
+            finished, outcome = _run_in_thread(loop_b)
+            assert finished, "waiter re-waited forever for a probe that cannot run"
+            assert isinstance(outcome.get("error"), CircuitOpenError)
+            assert cb.state is CircuitState.OPEN
+
+            gate.set_result(None)
+            loop_a.run_until_complete(probe_task)
+        finally:
+            loop_a.close()
+
+    def test_half_open_without_a_probe_becomes_the_probe(self):
+        """HALF_OPEN with no probe at all: the caller probes instead of spinning."""
         cb = AsyncCircuitBreaker(failure_threshold=1, reset_timeout=30.0, name="orphan")
 
         async def scenario():
-            async with cb:  # bind the breaker to this loop
-                pass
             cb._state = CircuitState.HALF_OPEN
-            cb._probe_event = None
             cb._probe_task = None
             async with cb:
                 assert cb._probe_task is asyncio.current_task()
             return cb.state
 
         finished, outcome = _run_in_thread(scenario)
-        assert finished, "HALF_OPEN without a probe event spun forever"
+        assert finished, "HALF_OPEN without a probe spun forever"
         assert outcome == {"result": CircuitState.CLOSED}
 
     def test_concurrent_threads_share_one_state_machine(self):
@@ -290,6 +368,30 @@ class TestProviderClientErrors:
             "timeout", request=request, response=httpx.Response(408, request=request)
         )
         assert not _is_client_error(type(http_408), http_408)
+
+    async def test_timeout_cutting_short_an_sdk_retry_counts_as_failure(self):
+        """openai sleeps before a retry inside ``except HTTPStatusError``.
+
+        A hard timeout there chains TimeoutError <- CancelledError <- the 4xx
+        being retried; the call timed out, so it must still count.
+        """
+        request = httpx.Request("POST", "http://localhost:8000/v1/chat/completions")
+        conflict = httpx.HTTPStatusError(
+            "conflict", request=request, response=httpx.Response(409, request=request)
+        )
+
+        async def sdk_call():
+            try:
+                raise conflict
+            except httpx.HTTPStatusError:
+                await asyncio.sleep(10)  # backoff before the retry
+
+        with pytest.raises(TimeoutError) as excinfo:
+            async with asyncio.timeout(0.01):
+                await sdk_call()
+        exc = excinfo.value
+        assert exc.__cause__.__context__ is conflict
+        assert not _is_client_error(type(exc), exc)
 
     def test_httpx_4xx_still_client_error(self):
         request = httpx.Request("GET", "https://api.crossref.org/works/x")

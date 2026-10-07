@@ -9,14 +9,15 @@ thread a fresh rate budget.
 
 import asyncio
 import threading
+from collections import OrderedDict
 from unittest.mock import patch
 
 import httpx
 import pytest
 
-from bibr.clients.crossref import _CROSSREF_API_BASE, CrossrefClient
+from bibr.clients.crossref import _CROSSREF_API_BASE, _NOT_FOUND_UNTIL, CrossrefClient
 from bibr.config import snapshot_settings
-from bibr.utils.rate_limiter import AsyncLocalRateLimiter
+from bibr.utils.rate_limiter import AsyncLocalRateLimiter, AsyncRedisRateLimiter
 
 
 def _client(**crossref) -> CrossrefClient:
@@ -194,3 +195,79 @@ async def test_limiter_redis_probe_is_bounded():
         except TimeoutError:
             pytest.fail("the Redis probe was not bounded")
     assert isinstance(client.limiter, AsyncLocalRateLimiter)
+
+
+def test_threads_racing_to_build_the_limiter_keep_the_first_one():
+    """Two threads' first requests at once: one limiter survives, the loser is closed.
+
+    Each thread swapped in its own init lock, so both probed Redis and the
+    slower one overwrote the limiter the other thread had already used.
+    """
+    a_probing, b_built = threading.Event(), threading.Event()
+    pings: list[int] = []
+    closed: list[object] = []
+    seen: dict[str, object] = {}
+
+    class FakeRedis:
+        async def ping(self):
+            pings.append(1)
+            if len(pings) == 1:  # thread A's probe answers only after B is done
+                a_probing.set()
+                while not b_built.is_set():
+                    await asyncio.sleep(0.005)
+            return True
+
+        async def aclose(self):
+            pass
+
+    async def record_close(limiter):
+        closed.append(limiter)
+
+    client = _client()
+    client._settings.redis.url = "redis://127.0.0.1:6379/0"
+
+    async def loop_a():
+        await client._ensure_limiter()
+        seen["a"] = client.limiter
+
+    async def loop_b():
+        while not a_probing.is_set():
+            await asyncio.sleep(0.005)
+        await client._ensure_limiter()
+        seen["b"] = client.limiter
+        b_built.set()
+
+    with (
+        patch("redis.asyncio.Redis") as redis_cls,
+        patch.object(AsyncRedisRateLimiter, "close", record_close),
+    ):
+        redis_cls.from_url.side_effect = lambda *args, **kwargs: FakeRedis()
+        assert _run_threads(loop_a, loop_b) == []
+
+    assert isinstance(seen["b"], AsyncRedisRateLimiter)
+    assert seen["a"] is seen["b"] is client.limiter
+    assert len(closed) == 1 and closed[0] is not client.limiter
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [{"message": {"DOI": "cached"}}, {_NOT_FOUND_UNTIL: 0.0}],
+    ids=["hit", "expired-not-found"],
+)
+async def test_lru_entry_evicted_by_another_thread_mid_lookup(entry):
+    """Another thread's eviction between get() and the refresh raised KeyError."""
+
+    class RacingLRU(OrderedDict):
+        def get(self, key, default=None):
+            value = super().get(key, default)
+            self.pop(key, None)  # another thread's popitem() lands right here
+            return value
+
+    async def fetch():
+        return {"message": {"DOI": "fetched"}}
+
+    client = _client(cache_size=4)
+    client.__dict__["_response_cache"] = RacingLRU(k=entry)
+
+    result = await client._cached("k", fetch)
+    assert result == (entry if _NOT_FOUND_UNTIL not in entry else await fetch())
