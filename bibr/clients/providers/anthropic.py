@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 from typing import TYPE_CHECKING, ClassVar
 
@@ -38,6 +39,32 @@ _THINKING_OUTPUT_MARGIN = 1024
 _NONSTREAMING_MAX_TOKENS = 16_384
 
 
+def _nonstreaming_cap(model: str) -> int:
+    """Output cap of one non-streaming call to *model*.
+
+    Also within the SDK's own per-model limit (8192 for Opus 4 and 4.1),
+    which it enforces on a client left at its default timeout.
+    """
+    try:
+        from anthropic._constants import MODEL_NONSTREAMING_TOKENS
+    except ImportError:  # a private table; absent from other SDK versions
+        return _NONSTREAMING_MAX_TOKENS
+    return min(
+        _NONSTREAMING_MAX_TOKENS, MODEL_NONSTREAMING_TOKENS.get(model, _NONSTREAMING_MAX_TOKENS)
+    )
+
+
+@functools.cache
+def _warn_budget_never_fits(budget: int, cap: int) -> None:
+    # Once per budget: the configuration, not the call, is at fault.
+    logger.warning(
+        "LLM_THINKING_BUDGET %d leaves no room for an answer within the %d output "
+        "tokens of one Anthropic call; calls are sent without thinking",
+        budget,
+        cap,
+    )
+
+
 @register
 class AnthropicProvider:
     name: ClassVar[str] = "anthropic"
@@ -58,8 +85,9 @@ class AnthropicProvider:
         return bound_sdk_client(client, self._settings)
 
     def call_kwargs(self, reasoning_effort: str | None, max_tokens: int | None = None) -> dict:  # noqa: ARG002
+        cap = _nonstreaming_cap(self._settings.llm.model)
         requested = max_tokens or self._settings.llm.max_tokens
-        kwargs: dict = {"max_tokens": min(requested, _NONSTREAMING_MAX_TOKENS)}
+        kwargs: dict = {"max_tokens": min(requested, cap)}
         budget = self._settings.llm.thinking_budget
         if budget and budget > 0:
             effective = max(int(budget), _MIN_THINKING_BUDGET)
@@ -75,6 +103,8 @@ class AnthropicProvider:
                 # (budgets must stay below max_tokens) — send an ordinary
                 # temperature-0 call rather than a request the API rejects
                 # with a 400 or truncates.
+                if effective + _THINKING_OUTPUT_MARGIN > cap:
+                    _warn_budget_never_fits(effective, cap)
                 logger.debug(
                     "thinking budget %d does not fit max_tokens %d — sending without thinking",
                     effective,

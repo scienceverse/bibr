@@ -966,7 +966,7 @@ def usage_file_context(key: str | None):
 
 
 def track_llm_usage(func):
-    """Decorator that logs per-call token usage by snapshotting the handler before/after."""
+    """Decorator that logs the token usage of each call, labeled with the method name."""
 
     @functools.wraps(func)
     async def wrapper(self, *args, **kwargs):
@@ -1751,6 +1751,9 @@ class LLMClient:
     # Ceiling on a provider's Retry-After hint, as for Crossref: a proxy that
     # asks for an hour would otherwise park the call until the outer timeout.
     _RETRY_AFTER_MAX = 60.0  # seconds
+    # Request timeout and conflict: retried by the SDKs before bibr turned
+    # their own retries off, so retried here with 429 and 5xx.
+    _RETRYABLE_4XX = frozenset({408, 409})
 
     async def _invoke_protocol_with_retries(
         self,
@@ -1874,7 +1877,8 @@ class LLMClient:
                 # (RateLimitError), and Google (ResourceExhausted) shapes —
                 # the SDK exception classes don't all expose .response.
                 is_429 = _is_provider_429(exc)
-                status = _extract_http_status(exc)
+                # Instructor wraps the SDK error, so the status is on the cause.
+                status = http_status_in_chain(exc)
                 # Connection resets, read timeouts and APIConnectionError carry
                 # no HTTP status at all, so a status-only test re-raised them on
                 # the first attempt — worst under the default google provider,
@@ -1882,7 +1886,7 @@ class LLMClient:
                 # physical attempt for a blip.
                 transient = (
                     is_429
-                    or (status is not None and status >= 500)
+                    or (status is not None and (status >= 500 or status in self._RETRYABLE_4XX))
                     or is_transient_network_error(exc)
                 )
                 if not transient:
@@ -2059,26 +2063,27 @@ class LLMClient:
             user_text = "".join(m["content"] for m in flat if isinstance(m.get("content"), str))
             llm = self._settings.llm
             provider = llm.provider.strip().lower()
-            call_json = json.dumps(
-                {
-                    "provider": provider,
-                    "endpoint": endpoint_identity(
-                        llm.ollama_base_url if provider == "ollama" else llm.base_url
-                    ),
-                    "instructor_mode": llm.instructor_mode,
-                    # The native backend sends LLM_TEMPERATURE whatever the provider.
-                    "temperature": llm.temperature,
-                    # As the adapter resolves them: a None cap or effort falls
-                    # back to LLM_MAX_TOKENS / LLM_REASONING_EFFORT here.
-                    "params": _build_call_kwargs(
-                        reasoning_effort=reasoning_effort,
-                        max_tokens=max_tokens,
-                        settings=self._settings,
-                    ),
-                },
-                sort_keys=True,
-                default=str,
-            )
+            fingerprint = {
+                "provider": provider,
+                "endpoint": endpoint_identity(
+                    llm.ollama_base_url if provider == "ollama" else llm.base_url
+                ),
+                "instructor_mode": llm.instructor_mode,
+                # The native backend sends LLM_TEMPERATURE whatever the provider.
+                "temperature": llm.temperature,
+                # As the adapter resolves them: a None cap or effort falls
+                # back to LLM_MAX_TOKENS / LLM_REASONING_EFFORT here.
+                "params": _build_call_kwargs(
+                    reasoning_effort=reasoning_effort,
+                    max_tokens=max_tokens,
+                    settings=self._settings,
+                ),
+            }
+            if llm.model == llm.llmster_model_id:
+                # Managed llmster serves whatever LLM_LLMSTER_MODEL loads under
+                # this one alias, at the same URL.
+                fingerprint["weights"] = llm.llmster_model
+            call_json = json.dumps(fingerprint, sort_keys=True, default=str)
             key = request_key(
                 model=self._settings.llm.model,
                 schema_name=getattr(response_model, "__name__", str(response_model)),
@@ -3063,7 +3068,8 @@ class LLMClient:
             client = getattr(self, attr, None)
             setattr(self, attr, None)
             await _aclose_sdk_client(getattr(client, "client", None))
-        backend = getattr(self, "_backend", None)
+        # An injected backend is the caller's to close.
+        backend = None if getattr(self, "_backend_explicit", True) else self._backend
         native_client = getattr(backend, "_client", None)
         if native_client is not None:
             backend._client = None

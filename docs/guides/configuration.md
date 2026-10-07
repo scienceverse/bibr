@@ -236,19 +236,24 @@ for a large run. Cloud LLMs or an external OpenAI-compatible server can be used
 with local OCR when local LLM throughput is insufficient.
 
 The provider SDK sends each LLM request once and gives it up after twice
-`LLM_TIMEOUT_SECONDS`. bibr retries rate limits, server errors and dropped
-connections itself, up to three attempts per call, so every retry waits for
-`LLM_RATE_LIMIT_RPM` and counts toward the circuit breaker; a `Retry-After`
-hint is honoured up to 60 seconds. The `anthropic` provider does not stream,
-so it caps the output of one call at 16,384 tokens even when `LLM_MAX_TOKENS`
-is higher.
+`LLM_TIMEOUT_SECONDS`. bibr retries rate limits (429), server errors (5xx),
+request timeouts and conflicts (408, 409) and dropped connections itself, up
+to three attempts per call, so every retry waits for `LLM_RATE_LIMIT_RPM` and
+counts toward the circuit breaker; a `Retry-After` hint is honoured up to 60
+seconds. The `anthropic` provider does
+not stream, so it caps the output of one call at 16,384 tokens (8,192 for
+Claude Opus 4 and 4.1) even when `LLM_MAX_TOKENS` is higher. A
+`LLM_THINKING_BUDGET` above that cap less 1,024 tokens leaves too little room
+for the answer, so calls are then sent without thinking and a warning is
+logged.
 
 `CACHE_LLM=true` keeps structured LLM responses on disk (`CACHE_LLM_DIR`,
 default `~/.cache/bibr/llm`), readable by your user only. An entry is reused
 only for the same provider, endpoint, model, call parameters (temperature,
 output cap, reasoning effort, thinking budget) and prompt, so changing any of
-them calls the model again. An endpoint that serves different weights under
-the same model name and URL cannot be told apart: clear the directory after
+them calls the model again; for `--llm llmster`, so does changing
+`LLM_LLMSTER_MODEL`. Another endpoint that serves different weights under the
+same model name and URL cannot be told apart: clear the directory after
 swapping the model behind it.
 
 ## Presets

@@ -144,6 +144,11 @@ _GPU_A = {"provider": "openai", "base_url": "http://gpu-a:8000/v1"}
             {"provider": "ollama", "ollama_base_url": "http://gpu-a:11434"},
             {"provider": "ollama", "ollama_base_url": "http://gpu-b:11434"},
         ),
+        # Managed llmster serves any LLM_LLMSTER_MODEL as "bibr-local".
+        (
+            {**_GPU_A, "model": "bibr-local", "llmster_model": "qwen-a"},
+            {**_GPU_A, "model": "bibr-local", "llmster_model": "qwen-b"},
+        ),
     ],
 )
 def test_a_different_provider_configuration_gets_a_different_key(tmp_path, before, after):
@@ -210,7 +215,8 @@ def test_provider_clients_disable_sdk_retries(monkeypatch, provider):
     providers.get(provider, settings=_settings(provider, timeout_seconds=45)).build_client()
 
     assert raw.max_retries == 0
-    assert raw.timeout == 90.0  # the 2 x LLM_TIMEOUT_SECONDS limit of one call
+    assert raw.timeout.read == 90.0  # the 2 x LLM_TIMEOUT_SECONDS limit of one call
+    assert raw.timeout.connect == 5.0  # the SDKs' own: a host that is down fails fast
 
 
 @pytest.mark.parametrize("provider", ["openai", "anthropic", "ollama"])
@@ -220,7 +226,7 @@ def test_real_sdk_clients_are_bounded(provider):
     client = providers.get(provider, settings=_settings(provider)).build_client()
 
     assert client.client.max_retries == 0
-    assert client.client.timeout == 60.0
+    assert client.client.timeout == httpx.Timeout(60.0, connect=5.0)
 
 
 def test_google_client_gets_a_request_timeout(monkeypatch):
@@ -283,6 +289,82 @@ def test_anthropic_overload_is_one_request(fake_api, monkeypatch):
     with pytest.raises(Exception):  # noqa: B017, PT011 — any provider error
         asyncio.run(call())
     assert len(fake_api.requests) == 1
+
+
+def _chat_completion(body):
+    return 200, {
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "created": 0,
+        "model": body["model"],
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": json.dumps({"reply": "OK"})},
+            }
+        ],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+    }
+
+
+@pytest.fixture
+def backoffs(monkeypatch):
+    """Record the retry loop's backoff waits instead of sleeping them."""
+    real_sleep = asyncio.sleep
+    waits: list[float] = []
+
+    async def fake_sleep(delay, *args, **kwargs):
+        if delay:
+            waits.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr("bibr.clients.llm.asyncio.sleep", fake_sleep)
+    return waits
+
+
+async def _ask(client):
+    client._limiter = _mock_limiter()
+    try:
+        return await client._invoke_structured(_Reply, [{"role": "user", "content": "hi"}], "s")
+    finally:
+        await client.close()
+
+
+# Instructor wraps the SDK error and the status is on its cause. The retry
+# loop read only the wrapper, so with SDK retries off a 5xx failed the call.
+@pytest.mark.parametrize("code", [500, 503, 408, 409])
+async def test_openai_server_error_is_retried_by_bibr(fake_api, backoffs, code):
+    fake_api.replies = [_status(code), _chat_completion]
+    settings = _settings("openai", base_url=fake_api.url + "/v1", instructor_mode="json")
+
+    result = await _ask(LLMClient(settings=settings))
+
+    assert result.reply == "OK"
+    assert len(fake_api.requests) == 2
+    assert len(backoffs) == 1
+
+
+@pytest.mark.parametrize("code", [500, 529])
+async def test_anthropic_overload_is_retried_by_bibr(fake_api, backoffs, monkeypatch, code):
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", fake_api.url)
+    fake_api.replies = [_status(code), _anthropic_tool_reply]
+
+    result = await _ask(LLMClient(settings=_settings("anthropic", model="claude-haiku-4-5")))
+
+    assert result.reply == "OK"
+    assert len(fake_api.requests) == 2
+    assert len(backoffs) == 1
+
+
+async def test_a_rejected_request_is_not_retried(fake_api, backoffs):
+    fake_api.replies = [_status(400), _chat_completion]
+    settings = _settings("openai", base_url=fake_api.url + "/v1", instructor_mode="json")
+
+    with pytest.raises(Exception):  # noqa: B017, PT011 — any provider error
+        await _ask(LLMClient(settings=settings))
+    assert len(fake_api.requests) == 1
+    assert backoffs == []
 
 
 # --- 3. Retry-After is honoured within a ceiling ----------------------------
@@ -358,12 +440,34 @@ def test_openai_shaped_usage_with_cache_fields_is_not_counted_twice():
     assert client.usage["m"]["total_tokens"] == 9150
 
 
-@pytest.mark.parametrize(("requested", "sent"), [(None, 16384), (65536, 16384), (4096, 4096)])
-def test_anthropic_caps_non_streaming_output(requested, sent):
+@pytest.mark.parametrize(
+    ("model", "requested", "sent"),
+    [
+        ("claude-haiku-4-5", None, 16384),
+        ("claude-haiku-4-5", 65536, 16384),
+        ("claude-haiku-4-5", 4096, 4096),
+        # The SDK's own non-streaming limit for this model is lower.
+        ("claude-opus-4-1-20250805", None, 8192),
+    ],
+)
+def test_anthropic_caps_non_streaming_output(model, requested, sent):
     from bibr.clients.providers.anthropic import AnthropicProvider
 
-    provider = AnthropicProvider(settings=_settings("anthropic", max_tokens=65536))
+    provider = AnthropicProvider(settings=_settings("anthropic", model=model, max_tokens=65536))
     assert provider.call_kwargs(None, max_tokens=requested)["max_tokens"] == sent
+
+
+def test_a_thinking_budget_that_never_fits_warns_once(caplog):
+    from bibr.clients.providers import anthropic
+
+    anthropic._warn_budget_never_fits.cache_clear()
+    provider = anthropic.AnthropicProvider(settings=_settings("anthropic", thinking_budget=16000))
+    with caplog.at_level(logging.WARNING, logger="bibr.clients.providers.anthropic"):
+        bodies = [provider.call_kwargs(None) for _ in range(3)]
+
+    assert not any("thinking" in body for body in bodies)
+    [record] = caplog.records
+    assert "LLM_THINKING_BUDGET 16000" in record.getMessage()
 
 
 async def test_uncapped_anthropic_call_goes_through_and_records_cached_input(fake_api, monkeypatch):
@@ -463,6 +567,15 @@ async def test_close_closes_the_native_backend_client():
     await client.close()
 
     assert raw.is_closed()
+
+
+async def test_close_leaves_an_injected_backend_alone():
+    backend = SimpleNamespace(_client=object())
+    client = LLMClient(settings=_settings("openai"), backend=backend)
+
+    await client.close()
+
+    assert backend._client is not None
 
 
 async def test_concurrent_calls_each_log_their_own_usage(caplog):

@@ -15,6 +15,10 @@ if TYPE_CHECKING:
     from bibr.config import GlobalSettings
 
 
+# Connect timeout of the OpenAI, Anthropic and Groq SDKs' default ``Timeout``.
+_CONNECT_TIMEOUT = 5.0
+
+
 def sdk_timeout_seconds(settings: GlobalSettings) -> float:
     """Timeout for one SDK request: the limit ``LLMClient`` puts on a call.
 
@@ -34,10 +38,14 @@ def bound_sdk_client(client: Any, settings: GlobalSettings) -> Any:
     circuit breaker, so SDK retries turned one call into up to nine requests
     that neither saw. These SDKs read both attributes on every request.
     """
+    import httpx
+
     raw = getattr(client, "client", None)
     if raw is not None and hasattr(raw, "max_retries"):
         raw.max_retries = 0
-        raw.timeout = sdk_timeout_seconds(settings)
+        # The SDKs' own 5 s connect timeout stays, so a host that is down
+        # fails fast instead of waiting out the whole request limit.
+        raw.timeout = httpx.Timeout(sdk_timeout_seconds(settings), connect=_CONNECT_TIMEOUT)
     return client
 
 
