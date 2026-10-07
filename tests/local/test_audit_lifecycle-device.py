@@ -198,3 +198,49 @@ def test_the_terminating_signal_is_known_until_the_command_ends():
             finally:
                 seen.append(cli._terminating_signal())
     assert seen[-1] is None  # a plain Ctrl-C
+
+
+class _Exported:
+    ok = True
+
+    def __init__(self, path):
+        self.data = {"info": {"title": path.stem}, "bib": [], "text": []}
+
+
+@pytest.mark.parametrize("stage", ["discover_inputs", "write_batch_tables"])
+@pytest.mark.parametrize("signum", _SIGNALS, ids=lambda signum: signum.name)
+def test_batch_exits_130_when_interrupted_outside_the_executors(
+    monkeypatch, tmp_path, signum, stage
+):
+    """The executors map an interrupt mid-run to 130; one during input
+    discovery or the closing table rebuild exited 128 + the signal (or died
+    with a Ctrl-C traceback), against the documented 130."""
+    import bibr.batch.runner as runner
+
+    real = getattr(runner, stage)
+
+    def interrupted(*args, **kwargs):
+        _send(signum)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(runner, stage, interrupted)
+    monkeypatch.setattr(
+        runner, "open_chew_many", lambda local: lambda paths, size: [_Exported(p) for p in paths]
+    )
+    monkeypatch.setattr(runner, "local_build_sha", lambda: "sha")
+    papers = tmp_path / "papers"
+    papers.mkdir()
+    (papers / "a.html").write_text("<html><body><h1>A</h1><p>Text.</p></body></html>")
+    out = tmp_path / "out"
+    monkeypatch.setattr("sys.argv", ["bibr", "batch", str(papers), "--out", str(out), "--no-llm"])
+
+    try:
+        cli.main()
+    except SystemExit as exc:
+        code = exc.code
+    except KeyboardInterrupt:
+        code = "KeyboardInterrupt"
+    assert code == 130
+    if stage == "write_batch_tables":
+        assert (out / "a.json").is_file()  # the run itself had finished
+    assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL

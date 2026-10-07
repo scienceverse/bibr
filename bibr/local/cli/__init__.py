@@ -323,6 +323,13 @@ def _main():
 
             try:
                 sys.exit(_run_batch(args))
+            except KeyboardInterrupt:
+                # The executors already map an interrupt mid-run to 130; one
+                # during discovery, planning, teardown or the closing table
+                # rebuild exits 130 too, not 128 + the signal or a traceback.
+                from bibr.batch.runner import EXIT_INTERRUPTED
+
+                sys.exit(EXIT_INTERRUPTED)
             except BibrError as e:
                 _print_error(str(e))
                 sys.exit(1)
