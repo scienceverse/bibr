@@ -461,7 +461,7 @@ def _print_dry_run_plan(
         ui.section(out, f"Blockers ({len(blockers)})")
         for blocker in blockers:
             out.print(f"  [red]{ui.FAIL}[/red] {escape(blocker)}", soft_wrap=True)
-        out.print("[dim]The real run exits 1 on these; fix them before processing.[/dim]")
+        out.print("[dim]The real run fails on these; fix them before processing.[/dim]")
 
     out.print("\n[dim]Dry run — no files were processed.[/dim]")
 

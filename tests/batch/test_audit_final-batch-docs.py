@@ -1,5 +1,6 @@
 """Final review, batch: a Windows out dir that cannot be locked runs unguarded
-instead of reporting a phantom concurrent run."""
+instead of reporting a phantom concurrent run, and the help and docs describe
+the ``started`` lines in ``outcomes.jsonl``."""
 
 from __future__ import annotations
 
@@ -7,10 +8,13 @@ import errno
 import logging
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
 from bibr.batch.runner import LOCK_FILENAME, OutDirBusy, out_dir_lock
+
+REPO_ROOT = Path(__file__).parents[2]
 
 
 def _fake_msvcrt(monkeypatch, error: OSError | None) -> list[int]:
@@ -75,3 +79,28 @@ def test_a_windows_lock_is_released_at_the_end(tmp_path, monkeypatch):
         assert calls == [2]
 
     assert calls == [2, 0]
+
+
+# --- outcomes.jsonl holds a started line per local attempt -------------------------
+
+
+def test_batch_help_mentions_the_started_lines(capsys):
+    from bibr.local.cli import _build_parser
+
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["batch", "--help"])
+    text = " ".join(capsys.readouterr().out.split())
+
+    assert "one line per attempt" not in text
+    assert "one JSON line per attempt" not in text
+    assert "outcomes.jsonl ledger (one verdict line per attempt; a local run writes" in text
+    assert "a local run also writes a 'started' line before each paper" in text
+    assert "latest ledger line" not in text  # a started line is not a verdict
+
+
+def test_batch_guide_layout_mentions_the_started_lines():
+    text = " ".join((REPO_ROOT / "docs" / "guides" / "batch.md").read_text("utf-8").split())
+
+    assert "the ledger — one JSON object per attempt" not in text
+    assert "outcomes.jsonl the ledger — a verdict line per attempt (local: a started line" in text
+    assert "Every attempt appends a new line with an incremented" not in text

@@ -1,4 +1,4 @@
-"""The ``outcomes.jsonl`` ledger: one JSON object per attempt, append-only.
+"""The ``outcomes.jsonl`` ledger: one JSON verdict line per attempt, append-only.
 
 Every paper a run touches gets exactly one verdict line per attempt, success
 or failure, so the run is auditable even for papers that produced no export.
