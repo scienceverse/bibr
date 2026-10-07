@@ -14,6 +14,7 @@ import logging
 import math
 import re
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,9 @@ _FALLBACK_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 _SEGMENTER_MANIFEST = "segmenter_manifest.json"
 _SEGMENTER_STAGING_MANIFEST = "segmenter_staging.json"
 _TOKENIZER_MODEL = "FacebookAI/xlm-roberta-base"
+#: SaT's own default tokenizer id, spelled as wtpsplit-lite spells it so the
+#: runtime opens the HF cache entry ``scripts/prefetch_segmenter.py`` bakes.
+_SAT_BASE_TOKENIZER = "facebookAI/xlm-roberta-base"
 _TOKENIZER_FILES = {
     "tokenizer/config.json",
     "tokenizer/tokenizer.json",
@@ -261,17 +265,20 @@ def _read_local_manifest(
     return _validate_sealed_manifest(model_dir, manifest)
 
 
-def materialize_hub_snapshot(repo_id: str, revision: str) -> tuple[str, str | None]:
+@cache
+def materialize_hub_snapshot(repo_id: str, revision: str | None) -> tuple[str, str | None]:
     """Fetch the files wtpsplit-lite opens at ``revision``; return (model dir, tokenizer dir).
 
-    wtpsplit-lite forwards ``from_pretrained_kwargs`` to its own config loader,
-    which takes no ``revision``, so a pinned Hub model cannot be requested
-    through ``SaT`` itself. Download (or, for a commit hash already in the
-    cache, merely locate — no network round-trip) ``model_optimized.onnx``
-    and ``config.json`` at the pinned commit and hand ``SaT`` the snapshot
-    directory instead. The tokenizer directory is ``None`` when the repo
-    ships no ``tokenizer.json`` (the ``sat-*`` repos), in which case
-    wtpsplit-lite loads its XLM-R base tokenizer as it does for any Hub name.
+    ``SaT`` is never given a Hub id: it and its config and tokenizer loaders
+    try any name as a path relative to the working directory first, and its
+    config loader takes no ``revision``. Download (or, for a commit hash
+    already in the cache, merely locate — no network round-trip)
+    ``model_optimized.onnx`` and ``config.json`` at ``revision`` (``None`` =
+    the repo head) and hand ``SaT`` the snapshot directory instead. The
+    tokenizer directory is ``None`` when the repo ships no ``tokenizer.json``
+    (the ``sat-*`` repos); see :func:`base_tokenizer_dir`. Cached per process,
+    as wtpsplit-lite caches its own Hub lookups, so a reloaded segmenter does
+    not ask the Hub again.
     """
     from huggingface_hub import hf_hub_download
     from huggingface_hub.errors import EntryNotFoundError
@@ -289,6 +296,18 @@ def materialize_hub_snapshot(repo_id: str, revision: str) -> tuple[str, str | No
         # that has no tokenizer.json at this commit.
         return str(onnx_path.parent), None
     return str(onnx_path.parent), str(tokenizer_path.parent)
+
+
+@cache
+def base_tokenizer_dir() -> str:
+    """HF cache directory of the XLM-R tokenizer, for models that ship none.
+
+    Fetched here rather than left to ``SaT``'s default, which it would look up
+    as a path relative to the working directory first.
+    """
+    from huggingface_hub import hf_hub_download
+
+    return str(Path(hf_hub_download(_SAT_BASE_TOKENIZER, "tokenizer.json")).parent)
 
 
 def resolve_wtpsplit_model(model_name: str, revision: str | None = None) -> ResolvedSegmenterModel:
@@ -444,10 +463,7 @@ class BaseSentenceSegmenter:
             model_name="wtpsplit-sat",
             gpu_mem_limit=mem_limit,
         )
-        model_kwargs: dict[str, Any] = {
-            "ort_providers": providers,
-            "hub_prefix": self._resolved_model.hub_prefix,
-        }
+        model_kwargs: dict[str, Any] = {"ort_providers": providers, "hub_prefix": None}
         if selected_device(providers) != "cuda":
             # CPU-only SaT session: skip ORT's CPU arena (audit-measured
             # ~2.8 GB after one paper). Unverified for CUDA sessions, where
@@ -455,18 +471,15 @@ class BaseSentenceSegmenter:
             cpu_options = cpu_ort_session_options()
             if cpu_options is not None:
                 model_kwargs["ort_kwargs"] = {"sess_options": cpu_options}
-        if self._resolved_model.tokenizer_name_or_path is not None:
-            model_kwargs["tokenizer_name_or_path"] = self._resolved_model.tokenizer_name_or_path
         sat_target = self._model_name
-        if not self._resolved_model.is_local and self._resolved_model.revision is not None:
-            # Pinned Hub model: materialise the snapshot at that commit and load
-            # it as a directory (see materialize_hub_snapshot for why).
-            sat_target, pinned_tokenizer = materialize_hub_snapshot(
+        tokenizer = self._resolved_model.tokenizer_name_or_path
+        if not self._resolved_model.is_local:
+            # Hub model: load its snapshot as a directory, never by Hub id
+            # (see materialize_hub_snapshot for why).
+            sat_target, tokenizer = materialize_hub_snapshot(
                 self._resolved_model.repo_id, self._resolved_model.revision
             )
-            model_kwargs["hub_prefix"] = None
-            if pinned_tokenizer is not None:
-                model_kwargs["tokenizer_name_or_path"] = pinned_tokenizer
+        model_kwargs["tokenizer_name_or_path"] = tokenizer or base_tokenizer_dir()
         self.model = SaT(sat_target, **model_kwargs)
         # SaT opens the ORT session itself. Report the providers that session
         # got, not the ones requested: ORT drops a CUDA provider that fails to

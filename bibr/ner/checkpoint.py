@@ -39,7 +39,7 @@ def resolve_checkpoint(ckpt: str | Path, revision: str | None = None) -> str:
     else:
         repo_id, filename = ckpt_str, None
 
-    if isinstance(ckpt, Path) or not is_hub_repo_id(repo_id):
+    if isinstance(ckpt, Path) or not is_hub_repo_id(repo_id, filename=filename):
         local = Path(ckpt_str).expanduser()
         if local.exists():
             return str(local)

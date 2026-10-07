@@ -18,7 +18,6 @@ labeled B-REF, and how many of those boundary lines survived alignment onto
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from bibr.extract.anchor_snap import align_line_starts, starts_to_spans
 from bibr.extract.geom_adjacent_features import (
@@ -28,6 +27,7 @@ from bibr.extract.geom_adjacent_features import (
 from bibr.extract.geom_features import PROD_FEATURE_KEYS, line_features
 from bibr.ner.checkpoint import resolve_checkpoint
 from bibr.ocr.ref_geometry import LineRecord, records_from_dicts
+from bibr.utils.ml_runtime import is_hub_repo_id
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,8 @@ MODEL_KIND_ADJACENT_BOUNDARY_V2 = "adjacent_boundary_v2"
 def _resolve_spec(model_spec: str) -> str:
     """A bare ``org/repo`` gets the bundle filename appended; a local path or an
     explicit ``repo:file`` spec passes through unchanged."""
-    if Path(model_spec).exists() or ":" in model_spec:
+    # resolve_checkpoint warns about a same-named cwd path, with the filename.
+    if ":" in model_spec or not is_hub_repo_id(model_spec, warn=False):
         return model_spec
     return f"{model_spec}:{_BUNDLE_FILENAME}"
 

@@ -72,7 +72,9 @@ def read_onnx_manifest(bundle_dir: str | Path) -> dict[str, Any]:
     return manifest
 
 
-def is_hub_repo_id(repo_id: str, *, bare_name: bool = False) -> bool:
+def is_hub_repo_id(
+    repo_id: str, *, bare_name: bool = False, filename: str | None = None, warn: bool = True
+) -> bool:
     """Whether ``repo_id`` is shaped like a Hugging Face Hub repo id.
 
     ``org/name`` always; a bare ``name`` only with ``bare_name`` (the
@@ -80,15 +82,18 @@ def is_hub_repo_id(repo_id: str, *, bare_name: bool = False) -> bool:
     revision and never looked up relative to the working directory, where a
     ``./org/name`` directory would otherwise replace the model. A local copy
     is loaded by writing it as a path: ``./org/name``, absolute, or ``~/...``.
+    When one exists, a warning names the path to write; ``filename``, from an
+    ``org/name:filename`` spec, completes it, and ``warn=False`` leaves the
+    warning to the resolver called next.
     """
     if not _HUB_REPO_ID.fullmatch(repo_id) or ("/" not in repo_id and not bare_name):
         return False
-    if Path(repo_id).exists():
+    if warn and Path(repo_id).exists():
         logger.warning(
             "%s is read as a Hugging Face Hub id, not as the local path of the same "
             "name in the working directory; write ./%s to load the local copy",
             repo_id,
-            repo_id,
+            f"{repo_id}/{filename}" if filename else repo_id,
         )
     return True
 
@@ -123,8 +128,8 @@ def find_onnx_bundle(
     """
     if not model_id:
         return None
-    repo_id = str(model_id).split(":", 1)[0]
-    if not is_hub_repo_id(repo_id):
+    repo_id, _, filename = str(model_id).partition(":")
+    if not is_hub_repo_id(repo_id, filename=filename):
         local = Path(str(model_id)).expanduser()
         return _local_bundle(local) if local.exists() else None
 
@@ -192,6 +197,7 @@ def hub_bundle_hint(setting: str, model_id: str | None, revision: str | None) ->
     """Standard ``bundle_hint`` wording for a Hub-hosted model."""
     where = f"{model_id}@{revision or 'main'}" if model_id else "the configured repo"
     return (
-        f"publish an onnx/ bundle to {where} or point {setting} at a local directory "
-        "containing onnx/model.onnx and onnx/bibr_onnx.json"
+        f"publish an onnx/ bundle to {where} or point {setting} at a local directory, "
+        "written as a path (./dir, /abs/dir or ~/dir), containing onnx/model.onnx and "
+        "onnx/bibr_onnx.json"
     )

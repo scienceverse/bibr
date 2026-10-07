@@ -25,7 +25,6 @@ import logging
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from bibr.extract.front_role_features import (
@@ -34,6 +33,7 @@ from bibr.extract.front_role_features import (
     FrontRegion,
     region_features,
 )
+from bibr.utils.ml_runtime import is_hub_repo_id
 
 if TYPE_CHECKING:
     from bibr.config import GlobalSettings
@@ -88,7 +88,8 @@ class FrontRolePredictions:
 
 
 def _resolve_spec(model_spec: str) -> str:
-    if Path(model_spec).exists() or ":" in model_spec:
+    # resolve_checkpoint warns about a same-named cwd path, with the filename.
+    if ":" in model_spec or not is_hub_repo_id(model_spec, warn=False):
         return model_spec
     return f"{model_spec}:{_BUNDLE_FILENAME}"
 
