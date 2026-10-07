@@ -1,5 +1,5 @@
-"""Reference-extraction audit fixes: the finalize crash and the in-press
-detector.
+"""Reference-extraction audit fixes: the finalize crash, the in-press detector
+and the splitters that rescanned the whole text.
 
 * A superscript or circled digit in a page ("4²", "①") passed the
   ``isdigit()`` guard of the compact page-range expansion and crashed
@@ -8,16 +8,22 @@ detector.
 * The in-press detector matched "in press" anywhere: "caveats in press
   releases" and "The Darwin Press" read as in press, which suppressed the
   Vancouver year backfill and the year-from-text repair.
+* The merged-reference splitter re-tokenised the whole prefix for every date
+  (and searched it for an in-title citation), and the layout-line aligner
+  searched the whole text once per line, so both were quadratic.
 """
 
 from __future__ import annotations
 
+import time
 from unittest import mock
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from bibr.extract import ref_extractor
+from bibr.extract import anchor_snap, ref_extractor
+from bibr.extract.anchor_snap import align_line_starts
+from bibr.extract.merge_split import find_interior_onsets, split_merged_refs
 from bibr.extract.ref_extractor import (
     ReferenceExtractor,
     _expand_compact_last_page,
@@ -210,3 +216,125 @@ class TestInPressNeedsAStatusPosition:
 
         assert ref.is_in_press is False
         assert ref.year == 2016
+
+
+def _author_date_entry(i: int) -> str:
+    return (
+        f"Author{i}, A. B., Other{i}, C. ({1950 + i % 70}). A study of item {i} in the "
+        f"memory literature. Journal of Studies, {i % 90 + 1}(2), {i}-{i + 9}."
+    )
+
+
+def _numbered_entry(i: int) -> str:
+    return (
+        f"{i}. Author{i} A, Other{i} B. A study of item {i} in the memory literature"
+        + " with a title that goes on" * 12
+        + f". J Stud. 2001;{i % 90 + 1}:{i}-{i + 9}."
+    )
+
+
+class TestMergedSplitIsLinear:
+    """The old splitter took ~40 s on the author-date string and ~30 s on the
+    numbered one; both now take a small fraction of a second."""
+
+    @pytest.mark.parametrize(
+        ("entry", "count"), [(_author_date_entry, 2000), (_numbered_entry, 999)]
+    )
+    def test_a_long_merged_string_splits_quickly(self, entry, count):
+        entries = [entry(i) for i in range(1, count + 1)]
+        start = time.perf_counter()
+        split, added = split_merged_refs([" ".join(entries)])
+        elapsed = time.perf_counter() - start
+
+        assert split == entries
+        assert added == count - 1
+        assert elapsed < 2.0
+
+    def test_a_lead_after_a_long_capitalized_url_still_opens_a_reference(self):
+        """The bounded walk reads whole tokens: cutting the text a fixed width
+        before the date would start inside the URL on "Abcdef…", read that
+        fragment as a capitalized name and lose the onset."""
+        url = "https://example.org/" + "Abcdefghij" * 15 + "xx"
+        text = (
+            f"Smith, J. (2001). A long report on things. {url} "
+            "World Health Organization. (2005). Global report on falls."
+        )
+        assert find_interior_onsets(text) == [text.index("World")]
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Smith, J. (2001). A correction to Cousineau (2005). Journal, 1, 2.",
+            "Brown, T. (2018). Beyond Kahneman and Tversky (1979): A reply. Journal, 2, 3.",
+        ],
+    )
+    def test_an_in_title_citation_is_still_not_an_onset(self, text):
+        assert find_interior_onsets(text) == []
+
+
+class _CountingText(str):
+    """Reference text that counts the characters ``find`` scans."""
+
+    scanned: int
+
+    def __new__(cls, value: str) -> _CountingText:
+        text = super().__new__(cls, value)
+        text.scanned = 0
+        return text
+
+    def find(self, sub, start=0, end=None):  # type: ignore[override]
+        stop = len(self) if end is None else end
+        pos = super().find(sub, start, stop)
+        self.scanned += (stop if pos == -1 else pos + len(sub)) - start
+        return pos
+
+
+def _layout(count: int) -> tuple[str, list[str], list[bool], list[int]]:
+    entries = [_author_date_entry(i) for i in range(1, count + 1)]
+    text = "\n".join(entries)
+    lines: list[str] = []
+    bounds: list[bool] = []
+    for entry in entries:
+        for k in range(0, len(entry), 45):
+            lines.append(entry[k : k + 45])
+            bounds.append(k == 0)
+    starts = [text.index(entry) for entry in entries]
+    return text, lines, bounds, starts
+
+
+class TestLineAlignmentIsLinear:
+    def test_a_long_list_is_not_searched_once_per_line(self):
+        raw, lines, bounds, expected = _layout(1000)
+        text = _CountingText(raw)
+
+        assert align_line_starts(text, lines, bounds) == expected
+        # The old walk searched the whole text for every one of the 3000 lines.
+        assert text.scanned <= 2 * len(text)
+
+    @pytest.mark.parametrize(
+        ("text", "lines", "bounds"),
+        [
+            (
+                "Gamma, D., Delta, E. F., & Zeta, I. (2001). One thing. Journal A, 1, 1-9.\n"
+                "Gamma, D., Delta, E. F., & Zeta, I. (2002). Other thing. Journal B, 2, 2-8.\n"
+                "Alpha, B., Gamma, D., Delta, E. F., & Zeta, I. (2003). Third. J C, 3, 3-7.",
+                [
+                    "Gamma, D., Delta, E. F., & Zeta, I. (2002).",
+                    "Other thing. Journal B, 2, 2-8.",
+                    "Gamma, D., Delta, E. F., & Zeta, I. (2001).",
+                    "One thing. Journal A, 1, 1-9.",
+                    "Alpha, B., Gamma, D., Delta, E. F., & Zeta, I.",
+                    "(2003). Third. J C, 3, 3-7.",
+                    "12",
+                    "Gamma, D., Delta, E. F., & Zeta, I. (2004).",
+                ],
+                [True, False, True, False, True, False, False, True],
+            ),
+            _layout(30)[:3],
+        ],
+        ids=["shuffled-repeats", "generated"],
+    )
+    def test_the_index_finds_what_the_per_line_search_found(self, text, lines, bounds, monkeypatch):
+        searched = align_line_starts(text, lines, bounds)
+        monkeypatch.setattr(anchor_snap, "_INDEX_MIN_PROBES", 0)
+        assert align_line_starts(text, lines, bounds) == searched
