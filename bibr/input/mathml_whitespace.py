@@ -64,13 +64,13 @@ class FlatText:
     and :meth:`join` decides what it becomes.
 
     ``settled`` counts the leading pieces whose rendering no later piece can
-    change: a gap after the last prose piece is still open, since one at the
-    end waits for the piece after it and one between tokens reads the tokens
-    after it (:meth:`_side`). ``text_end`` is the index after the last piece
+    change: the last gap is still open, since one at the end waits for the
+    piece after it and one between tokens reads the tokens after it, up to the
+    next gap (:meth:`_side`). ``text_end`` is the index after the last piece
     that is not a gap.
     """
 
-    __slots__ = ("_gaps", "_groups", "_words", "parts", "settled", "text_end")
+    __slots__ = ("_gaps", "_groups", "_lefts", "_words", "parts", "settled", "text_end")
 
     def __init__(self) -> None:
         self.parts: list[str] = []
@@ -80,6 +80,10 @@ class FlatText:
         self._groups: dict[int, Hashable] = {}
         # Token pieces that are words by themselves (mtext/ms with a letter).
         self._words: set[int] = set()
+        # How the text left of a gap reads (:meth:`_side`), by the piece before
+        # the gap: nothing added later changes it, and a caller joining part of
+        # the text again would read a long run of digits again.
+        self._lefts: dict[int, int] = {}
         self.settled = self.text_end = 0
 
     def add(self, text: str) -> None:
@@ -97,6 +101,7 @@ class FlatText:
         if not text.strip(_XML_WHITESPACE):
             self._gaps.add(len(self.parts))
             self.parts.append(" ")
+            self.settled = self.text_end  # the gaps before it read no further
             return
         if token in _TOKENS:
             self._groups[len(self.parts)] = group
@@ -152,7 +157,10 @@ class FlatText:
         before, after = self.parts[left][-1:], self.parts[right][:1]
         if not before or not after or before in _NO_SPACE_AFTER or after in _NO_SPACE_BEFORE:
             return False
-        sides = (self._side(left, -1), self._side(right, 1))
+        side = self._lefts.get(left)
+        if side is None:
+            side = self._lefts[left] = self._side(left, -1)
+        sides = (side, self._side(right, 1))
         if _PROSE in sides:
             return True
         if before in _SPACE_BEFORE_TEXT:

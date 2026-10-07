@@ -59,13 +59,20 @@ def clean_extracted_url(url: str) -> str:
     """Trim trailing chars a regex over prose wrongly captures: sentence
     punctuation and an UNBALANCED trailing ')'. Keeps balanced DOI parens
     (e.g. '…S0140-6736(16)00427-X') and a trailing '/'."""
-    while url:
-        last = url[-1]
-        if last in ".,;:!?" or last == ")" and url.count(")") > url.count("("):
-            url = url[:-1]
+    # The parens are counted once and the end walked back: slicing and counting
+    # again per character is quadratic in a long trailing run.
+    opens, closes = url.count("("), url.count(")")
+    end = len(url)
+    while end:
+        last = url[end - 1]
+        if last in ".,;:!?":
+            end -= 1
+        elif last == ")" and closes > opens:
+            closes -= 1
+            end -= 1
         else:
             break
-    return url
+    return url[:end]
 
 
 # DOI URL prefixes to strip (order matters — longest first)
@@ -236,10 +243,14 @@ class CollapsedLength:
     stretch after the last cut is redone.
     """
 
-    # A stretch with no cut in it (a run of combining marks) is closed at this
-    # length, so an addition redoes a bounded amount of text. That is exact
-    # unless what follows composes with the stretch's end.
+    # The open stretch is closed at this length even with no cut in it (a run
+    # of combining marks, or of starters that compose), so an addition or a
+    # length() redoes a bounded amount of text. That is exact unless what
+    # follows composes with the stretch's end.
     _MAX_OPEN = 1024
+    # The starters tried as a cut, from the last: more than any run of starters
+    # NFC joins into one (Hangul LVT is three).
+    _CUT_TRIES = 4
 
     def __init__(self) -> None:
         self.last = ""  # the last character added
@@ -256,20 +267,25 @@ class CollapsedLength:
         self.last = text[-1]
         stretch = self._open + text
         # Cut before the last character of *text* that decomposes to a starter
-        # (nothing after a starter reorders or composes across it), unless the
-        # starter composes with the character before it.
-        cut = len(stretch) - 1
+        # (nothing after a starter reorders or composes across it) and does not
+        # compose with the character before it.
+        cut = len(stretch)
         floor = max(len(self._open), 1)
-        while cut >= floor and unicodedata.combining(unicodedata.normalize("NFD", stretch[cut])[0]):
+        for _ in range(self._CUT_TRIES):
             cut -= 1
-        if cut >= floor:
+            while cut >= floor and unicodedata.combining(
+                unicodedata.normalize("NFD", stretch[cut])[0]
+            ):
+                cut -= 1
+            if cut < floor:
+                break
             head = unicodedata.normalize("NFC", stretch[:cut])
             before, starter = head[-1], stretch[cut]
             nfc_starter = unicodedata.normalize("NFC", starter)
             if unicodedata.normalize("NFC", before + starter) == before + nfc_starter:
                 self._closed = _collapsed_after(self._closed, head)
-                self._open = stretch[cut:]
-                return
+                stretch = stretch[cut:]
+                break
         if len(stretch) > self._MAX_OPEN:
             self._closed = _collapsed_after(self._closed, unicodedata.normalize("NFC", stretch))
             stretch = ""

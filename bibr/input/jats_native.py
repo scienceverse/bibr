@@ -567,8 +567,10 @@ def _resolve_link_sentence(
     return candidates[-1] if candidates else None
 
 
-# The most unsettled MathML pieces an anchor's offset joins again (_Walker._pre_link).
+# The most unsettled MathML pieces, and characters, an anchor's offset joins
+# again (_Walker._pre_link).
 _MAX_OPEN_PIECES = 64
+_MAX_OPEN_CHARS = 1024
 
 
 class _Walker:
@@ -599,31 +601,35 @@ class _Walker:
         self.flat = FlatText()
         self._pre = CollapsedLength()
         self._pre_from = 0  # the pieces before it are in _pre
-        # The last _pre_link result, keyed by what the text had then.
-        self._pre_cached: tuple[tuple[int, int], tuple[int, bool]] | None = None
+        # The last _pre_link result, keyed by the text's end then.
+        self._pre_cached: tuple[int, tuple[int, bool]] | None = None
 
     def _pre_link(self) -> tuple[int, bool]:
         """The collapsed length of the text so far, and whether it ends in whitespace.
 
         Joining and collapsing all of it again at every anchor is quadratic,
         so the pieces whose rendering is settled are collapsed once and only
-        the rest (MathML tokens after a gap) is joined again. A rest longer
-        than :data:`_MAX_OPEN_PIECES` is taken as it stands, which is exact
-        unless a gap in it reads tokens added later.
+        the rest (the last MathML gap and the tokens after it) is joined again.
+        A rest of more than :data:`_MAX_OPEN_PIECES` pieces or
+        :data:`_MAX_OPEN_CHARS` characters is taken as it stands, which is
+        exact unless its gap still reads the tokens added later (sibling
+        tokens of digits with at most one letter among them).
         """
         flat = self.flat
-        key = (len(flat.parts), flat.text_end)
-        if self._pre_cached is not None and self._pre_cached[0] == key:
-            return self._pre_cached[1]  # nothing added since the last anchor
-        settled = flat.settled
-        if flat.text_end - settled > _MAX_OPEN_PIECES:
-            settled = flat.text_end
-        if settled > self._pre_from:
-            self._pre.add(flat.join(self._pre_from, settled))
-            self._pre_from = settled
-        rest = flat.join(self._pre_from, flat.text_end)  # trailing gaps render nothing
+        end = flat.text_end
+        # Gaps added since only trail the text: they render nothing and change
+        # nothing before them.
+        if self._pre_cached is not None and self._pre_cached[0] == end:
+            return self._pre_cached[1]
+        start = max(flat.settled, self._pre_from)
+        if end - start > _MAX_OPEN_PIECES or sum(map(len, flat.parts[start:end])) > _MAX_OPEN_CHARS:
+            start = end
+        if start > self._pre_from:
+            self._pre.add(flat.join(self._pre_from, start))
+            self._pre_from = start
+        rest = flat.join(self._pre_from, end)
         pre = self._pre.length(rest), (rest[-1:] or self._pre.last).isspace()
-        self._pre_cached = key, pre
+        self._pre_cached = end, pre
         return pre
 
     def _add(self, text: str, in_math: bool, owner: str | None, group: int) -> None:

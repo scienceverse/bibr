@@ -2,8 +2,9 @@
 
 Each helper keeps its old output and gets an input on which the old code takes
 tens of seconds: a run of named entities in one element, thousands of ext-links
-in one paragraph, a long junk run after a DOI, STX marks in one long token, and
-a punctuation run inside a bookmark title.
+in one paragraph, a long junk run after a DOI, STX marks in one long token,
+line wraps in one long URL, a run of closing parentheses after a URL, and a
+punctuation run inside a bookmark title.
 """
 
 from __future__ import annotations
@@ -17,7 +18,11 @@ import pytest
 from lxml import etree
 
 from bibr.input import jats_native, pdf_outline
-from bibr.input.consolidate_text import _resolve_stx_marks
+from bibr.input.consolidate_text import (
+    _bridge_url_linewraps,
+    _resolve_stx_marks,
+    fix_ocr_artifacts,
+)
 from bibr.input.mathml_whitespace import FlatText
 from bibr.input.pdf_outline import (
     HeadingRef,
@@ -28,7 +33,7 @@ from bibr.input.pdf_outline import (
 )
 from bibr.input.xml_entities import parse_xml
 from bibr.utils import text as text_utils
-from bibr.utils.text import CollapsedLength, collapse_ws, normalize_doi
+from bibr.utils.text import CollapsedLength, clean_extracted_url, collapse_ws, normalize_doi
 
 _DOCTYPE = b'<?xml version="1.0"?><!DOCTYPE article PUBLIC "-//NLM//DTD JATS (Z39.96)//EN" "x.dtd">'
 
@@ -96,18 +101,24 @@ _LINKS_AMONG_GAPS = _math("<mml:mi>x</mml:mi>" + f"<!--c--> {_link()}" * 4_000)
 
 
 class _Work:
-    """Counts the pieces :meth:`FlatText.join` walks and the characters
+    """Counts the pieces :meth:`FlatText.join` walks, the characters of the
+    pieces a gap's sides are read from, and the characters
     :mod:`bibr.utils.text` normalizes."""
 
     def __init__(self, monkeypatch) -> None:
-        self.pieces = self.chars = 0
-        join = FlatText.join
+        self.pieces = self.sides = self.chars = 0
+        join, side = FlatText.join, FlatText._side
 
         def counted_join(flat, start=0, stop=None):
             self.pieces += (len(flat.parts) if stop is None else stop) - start
             return join(flat, start, stop) if start or stop is not None else join(flat)
 
+        def counted_side(flat, index, step):
+            self.sides += len(flat.parts[index])
+            return side(flat, index, step)
+
         monkeypatch.setattr(FlatText, "join", counted_join)
+        monkeypatch.setattr(FlatText, "_side", counted_side)
         monkeypatch.setattr(text_utils, "unicodedata", self)
 
     def normalize(self, form, text):
@@ -137,6 +148,43 @@ def test_ext_link_offsets_take_linear_work(monkeypatch, body):
     assert work.chars < 100 * 4_000
 
 
+_RUN = 100_000
+_LONG_MATH = {
+    # Every link is preceded by a gap only, which left the text's end where it
+    # was but changed what the last offset was cached under.
+    "gaps after a long token": _math(
+        f"<mml:mi>x</mml:mi> <mml:mi>{'a' * _RUN}</mml:mi>" + f" {_link()}" * 2_000
+    ),
+    "gaps after a long run of marks": "xa" + "\u0301" * _RUN + _math(f" {_link()}" * 2_000),
+    # Every link adds a token after an open gap: the long token was joined
+    # again for each, and the marks normalized again.
+    "tokens after a long token": _math(
+        f"<mml:mi>x</mml:mi> <mml:mi>{'a' * _RUN}</mml:mi>" + f"<mml:mn>1</mml:mn>{_link()}" * 64
+    ),
+    "tokens after a long run of marks": "xa"
+    + "\u0301" * _RUN
+    + _math(" " + f"<mml:mn>1</mml:mn>{_link()}" * 64),
+    # The gap's left side, a long run of digits, was read again for every link.
+    "tokens after a gap after long digits": _math(
+        f"<mml:mn>{'1' * _RUN}</mml:mn> " + f"<mml:mn>2</mml:mn>{_link()}" * 64
+    ),
+}
+
+
+@pytest.mark.parametrize("body", list(_LONG_MATH.values()), ids=list(_LONG_MATH))
+def test_ext_link_offsets_after_long_math_take_linear_work(monkeypatch, body):
+    parser = jats_native.JatsParser(_article(body))
+    work = _Work(monkeypatch)
+
+    parser.parse()
+
+    assert len(parser._pending_url_links) in (64, 2_000)
+    # Each link read or normalized the long run again: 64 to 2,000 times _RUN.
+    assert work.pieces < 10 * len(body)
+    assert work.sides < 10 * len(body)
+    assert work.chars < 10 * len(body)
+
+
 def test_ext_link_offsets_are_where_the_link_text_starts():
     parser = jats_native.JatsParser(_article(_PROSE_LINKS))
     parser.parse()
@@ -147,7 +195,7 @@ def test_ext_link_offsets_are_where_the_link_text_starts():
     assert {entry.text[offset] for offset in offsets} == {"l"}
 
 
-def test_many_ext_links_parse_and_attach_in_linear_time():
+def test_ext_links_within_their_sentences_parse_and_attach_in_linear_time():
     n = 12_000
     body = "".join(f"Sentence {i} has {_link('a link', i)}. " for i in range(n))
 
@@ -228,6 +276,11 @@ _LINK_CASES = {
     "a long rest after a gap": _math(
         "<mml:mi>x</mml:mi> " + f"<mml:mn>1</mml:mn>{_link()}" * 100 + "<mml:mi>y</mml:mi>"
     ),
+    "a long token after a gap": _math(
+        f"<mml:mi>x</mml:mi> <mml:mi>{'a' * 1_500}</mml:mi>{_link()} <mml:mn>2</mml:mn>"
+        + _link()
+        + f"<mml:mn>{'3' * 1_500}</mml:mn> <mml:mi>b</mml:mi>{_link()}<mml:mi>c</mml:mi>{_link()}"
+    ),
     "nested and empty links": f"x {_link('a ' + _link('b') + ' c')} {_link()} y",
     "long CJK run": "\u4e2d" * 1500 + _link("\u6587") + "\u4e2d" * 1500 + _link("x"),
     "block in the paragraph": (
@@ -262,13 +315,13 @@ def test_flat_text_settles_what_later_pieces_cannot_change():
     assert (flat.settled, flat.text_end) == (2, 2)
     flat.add_math(" ", None, 1)
     flat.add_math("a", "mi", 1)
-    # The gap reads the tokens after it: it is open until prose follows.
+    # The gap reads the tokens after it: it is open until a gap or prose follows.
     assert (flat.settled, flat.text_end) == (2, 4)
     assert flat.join() == "Let xa"
     flat.add_math("b", "mi", 1)
     assert flat.join() == "Let x ab"
     flat.add_math("\n ", None, 1)
-    assert (flat.settled, flat.text_end) == (2, 5)
+    assert (flat.settled, flat.text_end) == (5, 5)  # the first gap reads no further
     flat.add("here")
     assert (flat.settled, flat.text_end) == (7, 7)
 
@@ -318,6 +371,25 @@ def test_collapsed_length_is_exact_across_every_composition():
             for piece in split:
                 collapsed.add(piece)
             assert collapsed.length() == len(collapse_ws("".join(split))), repr(split)
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ("a" * 2_000 + "\u1100\u1161", "\u11a8"),  # Hangul L V, then T
+        ("a" * 2_000 + "\u0dd9\u0dcf", "\u0dca"),  # Sinhala o, then virama
+        ("a" * 2_000 + "\u0cc6\u0cc2", "\u0cd5"),  # Kannada e + uu, then length mark
+    ],
+    ids=["Hangul", "Sinhala", "Kannada"],
+)
+def test_collapsed_length_cuts_before_a_pair_that_composes_at_a_long_stretch_end(first, second):
+    collapsed = CollapsedLength()
+    collapsed.add(first)
+    collapsed.add(second)
+
+    # The pair was closed with the long stretch, so the next piece did not
+    # compose with it.
+    assert collapsed.length() == len(collapse_ws(first + second)) == 2_001
 
 
 # --------------------------------------------------------------------------- DOI
@@ -390,6 +462,70 @@ def test_stx_url_context_holds_across_marks_and_ends_with_the_token():
 
 def test_stx_url_context_found_after_an_earlier_mark_in_the_token():
     assert _resolve_stx_marks("ab\x02https://x.org/c\x02d").endswith("https://x.org/c-d")
+
+
+# --------------------------------------------------------------------------- URL cleanup
+
+
+def test_a_url_with_a_long_run_of_closing_parens_is_cleaned_in_linear_time():
+    url = "http://x/" + ")" * 200_000
+
+    result, elapsed = _elapsed(clean_extracted_url, url)
+
+    assert result == "http://x/"
+    # Every stripped paren copied the URL and counted both parens again: ~19 s.
+    assert elapsed < 1.0
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            "https://doi.org/10.1016/S0140-6736(16)00427-X).",
+            "https://doi.org/10.1016/S0140-6736(16)00427-X",
+        ),
+        ("https://x.org/a_(b)),.)", "https://x.org/a_(b)"),
+        ("https://x.org/((a)).", "https://x.org/((a))"),
+        ("https://x.org/a)(", "https://x.org/a)("),
+        ("https://x.org/a/", "https://x.org/a/"),
+        (".,;:!?)", ""),
+        ("", ""),
+    ],
+)
+def test_clean_extracted_url_is_unchanged(raw, expected):
+    assert clean_extracted_url(raw) == expected
+
+
+# --------------------------------------------------------------------------- line wraps
+
+
+def test_hyphen_wraps_in_one_long_url_bridge_in_linear_time():
+    fix_ocr_artifacts("off\x02line")  # load the lexicons outside the timing
+    text = "https://x.org/" + "a-\n" * 8_000 + "b"
+
+    result, elapsed = _elapsed(fix_ocr_artifacts, text)
+
+    assert result == "https://x.org/" + "a-" * 8_000 + "b"
+    # A pass over the whole text bridged one more wrap, and every wrap looked
+    # back to the token start: ~60 s.
+    assert elapsed < 2.0
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("see https://x.org/a-\nb-\nc and ab-\ncd", "see https://x.org/a-b-c and ab-\ncd"),
+        ("10.1234/a\n-b\n-c d\n-e", "10.1234/a-b-c d\n-e"),
+        ("https://x.org/a- \r\n b-\n\nc", "https://x.org/a-b-\n\nc"),
+        ("pages 12-\n13 and ab-\n12", "pages 12-13 and ab-\n12"),
+        ("ab-\nwww.x.org/c-\nd", "ab-\nwww.x.org/c-d"),
+        ("10.12-\n34/a-\nb", "10.12-34/a-\nb"),
+        ("10.1234/ab-\ncd-\nef", "10.1234/ab-cd-ef"),
+        ("x-\nhttps://y.org/a-\nb", "x-\nhttps://y.org/a-b"),
+    ],
+)
+def test_hyphen_wrap_bridging_is_unchanged(raw, expected):
+    assert _bridge_url_linewraps(raw) == expected
 
 
 # --------------------------------------------------------------------------- PDF outline
