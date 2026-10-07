@@ -124,9 +124,12 @@ docs = [
 [project.optional-dependencies]
 cache = ["redis>=5.0.0"]
 # Managed local vLLM server for `--llm local` on Linux/CUDA (`bibr setup` local path).
-# vLLM 0.27 imports NamespaceTool; its declared openai>=2.0 floor is too low.
+# 0.30.0 is the first release clear of 0.27.0's 20 pip-audit advisories (e.g.
+# PYSEC-2026-3985, a trust_remote_code bypass); the `uv tool run` bootstrap in
+# bibr/local/vllm_*.py repeats this pin. vLLM 0.27 imported NamespaceTool under an
+# openai>=2.0 floor that was too low; the openai pair keeps the floor bibr validated.
 vllm = [
-    "vllm==0.27.0; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version < '3.14'",
+    "vllm==0.31.0; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version < '3.14'",
     "openai>=2.54.0,<3; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version < '3.14'",
 ]
 # The PyTorch path. Core installs already run layout, both classifiers and the
@@ -139,10 +142,11 @@ vllm = [
 # MinerU benchmark owns its optional inference environment.
 torch = [
     "transformers>=5.0.0",
-    # torch>=2.10 fixes CVE-2025-3001 (torch.lstm_cell memory corruption);
-    # >=2.6 had fixed CVE-2025-32434 (torch.load RCE). torchvision floor is
-    # the torch-2.6 pairing; the resolver picks the 2.10-matching release.
-    "torch>=2.10.0",
+    # torch>=2.13 fixes CVE-2025-3000 (torch.jit.script memory corruption);
+    # >=2.10 had fixed CVE-2025-3001 (torch.lstm_cell memory corruption) and
+    # >=2.6 CVE-2025-32434 (torch.load RCE). torchvision floor is the
+    # torch-2.6 pairing; the resolver picks the 2.13-matching release.
+    "torch>=2.13.0",
     "torchvision>=0.21.0",
     "pytorch-crf>=0.7.2",
     "opencv-python-headless>=4.8.0",
@@ -207,11 +211,13 @@ environments = [
 # itself: 79.0.1 ships setuptools/_vendor/jaraco.context-5.3.0 (CVE-2026-23949,
 # HIGH) and wheel-0.45.1 (CVE-2026-24049, HIGH), which Trivy finds in the serve
 # image via their dist-info METADATA. 80.10.2 vendors jaraco.context 6.1.0 and
-# wheel 0.46.3 — both fixed — and stays under vllm's setuptools<81.0.0 pin, so
-# the linux/x86_64 branch of the lock still resolves. Do not raise this floor
-# past 81 without checking that pin.
+# wheel 0.46.3 — both fixed — and stays under vllm's setuptools<81.0.0 pin
+# (still in vllm 0.31.0, on Python >3.11), so the linux/x86_64 Python 3.12-3.13
+# branch of the lock still resolves. Do not raise this floor past 81 without
+# checking that pin.
 # (setuptools' own PYSEC-2026-3447 can't be floored — the fix is 83.0.0, above
-# that same vllm pin; tracked in ci/vulnerability-exceptions.toml instead.)
+# that same vllm pin. Every other branch of the lock has 83.0.0; the pinned one
+# is tracked in ci/vulnerability-exceptions.toml instead.)
 constraint-dependencies = [
     "aiohttp>=3.14.3",
     "click>=8.3.3",

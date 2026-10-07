@@ -44,7 +44,7 @@
       automerge: false,
     },
     {
-      description: "vLLM pin is coupled across code + docs + tests (tests/test_docs_sync.py + test_dependency_metadata.py enforce it). Bump manually across every site.",
+      description: "The exact vLLM pin is repeated in the `uv tool run --from vllm==X` bootstrap (bibr/local/vllm_llm.py, vllm_ocr.py), docs/getting-started/install.md and the tests that enforce them, none of which a Renovate PR updates. Bump manually across every site. The CI audit installs --extra all, which excludes vllm, so check new vLLM advisories with pip-audit over the whole lock.",
       matchPackageNames: ["vllm"],
       enabled: false,
     },

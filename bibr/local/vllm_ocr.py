@@ -134,17 +134,17 @@ class VllmOcrServer:
         if shutil.which("uv") is not None:
             logger.warning(
                 "vLLM is not installed in this environment; launching PaddleOCR-VL through an "
-                "isolated `uv tool run --from vllm==0.27.0` environment instead. The first run "
+                "isolated `uv tool run --from vllm==0.31.0` environment instead. The first run "
                 "downloads several GB and can take minutes before OCR starts. Install it once "
                 "with `uv sync --extra vllm` to skip this bootstrap."
             )
             cmd = ["uv", "tool", "run"]
             if sys.version_info >= (3, 14):
-                # vllm==0.27.0 publishes no 3.14 wheels; the isolated tool
+                # vllm==0.31.0 publishes no 3.14 wheels; the isolated tool
                 # environment can run a managed 3.13 interpreter instead.
                 cmd.extend(["--python", "3.13"])
             cmd.extend(
-                ["--from", "vllm==0.27.0", "--with", "openai>=2.54.0,<3", "vllm", "serve", model]
+                ["--from", "vllm==0.31.0", "--with", "openai>=2.54.0,<3", "vllm", "serve", model]
             )
             return cmd
 
