@@ -570,6 +570,10 @@ At volume, Crossref enrichment is rate-limited (`CROSSREF_RATE_LIMIT_RPM`,
 default `200`; raise it once you've set `CROSSREF_API_EMAIL` or have an
 API key) and can optionally be cached in Redis across requests
 (`CROSSREF_REDIS_CACHE`, off by default — falls back to `REDIS_URL`).
+With `REDIS_URL` set, every process that uses it shares one Crossref rate
+limit (and one LLM rate limit) through Redis. If Redis stops answering, each
+process keeps enforcing the limit on its own, logs one warning, and tries
+Redis again every 30 seconds.
 Both cache tiers also remember a DOI lookup's 404 for
 `CROSSREF_NOT_FOUND_TTL_SECONDS` (default one day; `0` disables), so a
 re-run does not spend a request on each DOI Crossref has no record of.

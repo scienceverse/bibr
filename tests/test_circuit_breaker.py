@@ -199,17 +199,32 @@ class TestInjectableClock:
 
 
 def test_loop_state_tracks_loop_objects_not_reusable_ids():
-    cb = AsyncCircuitBreaker()
+    clock = FakeClock()
+    cb = AsyncCircuitBreaker(reset_timeout=30.0, clock=clock)
     seen = []
 
     async def use_breaker():
-        async with cb:
-            seen.append(cb._lock_loop)
+        # HALF_OPEN with a waiter parked on this loop's probe event.
+        cb._state = CircuitState.OPEN
+        cb._last_failure_time = clock() - 60
+
+        async def probe():
+            async with cb:
+                await asyncio.sleep(0.01)
+                seen.append((list(cb._probe_events), asyncio.get_running_loop()))
+
+        async def waiter():
+            await asyncio.sleep(0)
+            async with cb:
+                pass
+
+        await asyncio.gather(probe(), waiter())
 
     asyncio.run(use_breaker())
     asyncio.run(use_breaker())
 
-    assert seen[0] is not seen[1]
+    assert [keys for keys, _ in seen] == [[loop] for _, loop in seen]
+    assert seen[0][1] is not seen[1][1]
 
     async def test_sustained_failures_are_counted_from_last_counted_failure(self):
         """A rapid outage must eventually trip instead of resetting its window forever."""
@@ -507,7 +522,7 @@ class TestNeutralCancellationAndNativeInvalidOutput:
 
         assert cb.state == CircuitState.OPEN
         assert cb._failure_count == 0
-        assert cb._probe_event is None
+        assert cb._probe_events == {}
         assert cb._probe_task is None
 
 
