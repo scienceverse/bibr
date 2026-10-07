@@ -9,6 +9,7 @@ addresses through its ASCII fragments ("Šimić" -> "imi").
 
 from __future__ import annotations
 
+import unicodedata
 from difflib import SequenceMatcher
 
 import pytest
@@ -85,6 +86,84 @@ def test_doi_provenance_maps_as_one_diff_of_the_whole_text_did(source):
     assert doi_identity._cleaned_char_source_ranges(source, cleaned) == _diffed_whole(
         source, cleaned
     )
+
+
+_KOREAN_NFD = unicodedata.normalize(
+    "NFD", "이 연구는 한국 사회의 변화와 정책 효과를 분석하였다 자료는 국가 통계에서 수집되었다"
+)
+_TWO_URLS = " https://doi.org/10. 1016/j.lanwpc.2023. 100933 and https://doi.org/10.1016/j.cell.2020.01.001."
+_TWO_URL_RAWS = ["10. 1016/j.lanwpc.2023. 100933", "10.1016/j.cell.2020.01.001."]
+_GLYPHS = "\x03\x04\x05\x06\x07\x08\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19"
+
+
+@pytest.mark.parametrize(
+    ("source", "raws"),
+    [
+        # Decomposed Korean (a macOS or HWP text layer), which NFC rewrites in
+        # every syllable, before two DOIs under one registrant.
+        (
+            f"{_KOREAN_NFD} {_KOREAN_NFD} doi:10.1234/abc-\n123x; doi:10.1234/abc-123y",
+            ["10.1234/abc-\n123x;", "10.1234/abc-123y"],
+        ),
+        (f"{_KOREAN_NFD} {_KOREAN_NFD}{_TWO_URLS}", _TWO_URL_RAWS),
+        # Control characters filling the window, too few to be set aside.
+        ("Intro su\u00adper text" + "\x00" * 60 + _TWO_URLS, _TWO_URL_RAWS),
+        # Words of unmapped glyphs (PDFium's text of a Type 3 font).
+        (
+            " ".join(_GLYPHS[k % 7 : k % 7 + 3 + k % 5] for k in range(16)) + _TWO_URLS,
+            _TWO_URL_RAWS,
+        ),
+        # A wrap's whitespace taken out, longer than the reach.
+        (
+            "See doi:10.1234/abc-" + " " * 600 + "123x and doi:10.1234/abc-123x here.",
+            ["10.1234/abc-" + " " * 600 + "123x", "10.1234/abc-123x"],
+        ),
+        # A whitespace run taken out before a URL, and a later one kept.
+        (
+            "E\ufb00ect\n"
+            + " " * 120
+            + "https://doi.org/10.1016/j.cell.2020.01.001"
+            + " " * 60
+            + "and doi:10.1234/abc.1",
+            ["10.1016/j.cell.2020.01.001", "10.1234/abc.1"],
+        ),
+        # A ligature just before a wrap whose whitespace was taken out, and
+        # one before a long whitespace run that was kept.
+        (
+            "o\ufb00er\n" + " " * 600 + "https://doi.org/10.1016/j.cell.2020.01.001 and more.",
+            ["10.1016/j.cell.2020.01.001"],
+        ),
+        (
+            "\ufb01" + " " * 700 + "rst https://doi.org/10.1016/j.cell.2020.01.001 and more.",
+            ["10.1016/j.cell.2020.01.001"],
+        ),
+        # Ligatures between control characters: only the controls are deleted.
+        ("\ufb01\x07" * 1000 + _TWO_URLS, _TWO_URL_RAWS),
+    ],
+    ids=[
+        "nfd-korean",
+        "nfd-korean-urls",
+        "nul-run",
+        "glyph-words",
+        "long-wrap",
+        "spaces",
+        "ligature-then-wrap",
+        "ligature-then-kept-spaces",
+        "lig-ctrl",
+    ],
+)
+def test_doi_provenance_resyncs_where_the_two_texts_next_agree(source, raws):
+    # Resyncing at the longest agreement in reach took a later repeat (the
+    # second DOI's prefix, a run of spaces) and mapped the text before it as
+    # one replacement: the first DOI's raw spelling came out of the second.
+    cleaned = doi_identity._repair_doi_text(source)
+    line = TextLayerLine(1, source, tuple((float(i), 500.0) for i in range(len(source))), "")
+
+    assert doi_identity._cleaned_char_source_ranges(source, cleaned) == _diffed_whole(
+        source, cleaned
+    )
+    assert [c.raw for c in doi_identity._candidates_from_text(source, **_PROVENANCE)] == raws
+    assert [c.raw for c, _tail in doi_identity._text_layer_candidates(line, [], {})] == raws
 
 
 def test_doi_provenance_of_a_long_footnote_diffs_only_around_each_repair(monkeypatch):
