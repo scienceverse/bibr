@@ -177,3 +177,96 @@ def test_main_installs_the_handler_for_commands_that_own_servers(monkeypatch):
     assert set(seen) == {"demo", "setup", "mcp", "chew", "batch"}
     for name, handler in seen.items():
         assert callable(handler), name
+
+
+def test_the_terminating_signal_is_known_until_the_command_ends():
+    """``bibr mcp`` reads it to exit once its cleanup has run."""
+    seen = []
+    with pytest.raises(SystemExit):
+        with cli._interrupt_on_termination():
+            try:
+                _send(signal.SIGHUP)
+            finally:
+                seen.append(cli._terminating_signal())
+    assert seen == [signal.SIGHUP]
+    assert cli._terminating_signal() is None
+
+    with pytest.raises(KeyboardInterrupt):
+        with cli._interrupt_on_termination():
+            try:
+                raise KeyboardInterrupt
+            finally:
+                seen.append(cli._terminating_signal())
+    assert seen[-1] is None  # a plain Ctrl-C
+
+
+class _Exited(BaseException):
+    """Raised by a stand-in ``os._exit``: like the real one, it never returns."""
+
+
+def test_a_signal_after_the_cleanup_exits_at_once(monkeypatch):
+    """Once ``bibr mcp`` has shut everything down, an interrupt can no longer
+    stop its stdio transport waiting on an open stdin; the signal exits."""
+
+    def exit_(code):
+        raise _Exited(code)
+
+    monkeypatch.setattr(os, "_exit", exit_)
+    with pytest.raises(_Exited) as exc_info:
+        with cli._interrupt_on_termination():
+            cli._exit_at_once_on_termination()
+            _send(signal.SIGHUP)
+    assert exc_info.value.args == (128 + signal.SIGHUP,)
+    assert not cli._exit_at_once.is_set()
+
+    # The next command takes Ctrl-C's path again.
+    with pytest.raises(SystemExit) as sys_exit:
+        with cli._interrupt_on_termination():
+            _send(signal.SIGTERM)
+    assert sys_exit.value.code == 128 + signal.SIGTERM
+
+
+class _Exported:
+    ok = True
+
+    def __init__(self, path):
+        self.data = {"info": {"title": path.stem}, "bib": [], "text": []}
+
+
+@pytest.mark.parametrize("stage", ["discover_inputs", "write_batch_tables"])
+@pytest.mark.parametrize("signum", _SIGNALS, ids=lambda signum: signum.name)
+def test_batch_exits_130_when_interrupted_outside_the_executors(
+    monkeypatch, tmp_path, signum, stage
+):
+    """The executors map an interrupt mid-run to 130; one during input
+    discovery or the closing table rebuild exited 128 + the signal (or died
+    with a Ctrl-C traceback), against the documented 130."""
+    import bibr.batch.runner as runner
+
+    real = getattr(runner, stage)
+
+    def interrupted(*args, **kwargs):
+        _send(signum)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(runner, stage, interrupted)
+    monkeypatch.setattr(
+        runner, "open_chew_many", lambda local: lambda paths, size: [_Exported(p) for p in paths]
+    )
+    monkeypatch.setattr(runner, "local_build_sha", lambda: "sha")
+    papers = tmp_path / "papers"
+    papers.mkdir()
+    (papers / "a.html").write_text("<html><body><h1>A</h1><p>Text.</p></body></html>")
+    out = tmp_path / "out"
+    monkeypatch.setattr("sys.argv", ["bibr", "batch", str(papers), "--out", str(out), "--no-llm"])
+
+    try:
+        cli.main()
+    except SystemExit as exc:
+        code = exc.code
+    except KeyboardInterrupt:
+        code = "KeyboardInterrupt"
+    assert code == 130
+    if stage == "write_batch_tables":
+        assert (out / "a.json").is_file()  # the run itself had finished
+    assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL

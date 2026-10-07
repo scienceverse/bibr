@@ -526,6 +526,31 @@ def _register_query_tools(server: MCPServer, get_store: Callable[[Context], _Pap
         return {"paper_id": paper_id, "figure": strip(row)}
 
 
+def _exit_if_terminating() -> None:
+    """End ``bibr mcp`` now when SIGTERM or SIGHUP is stopping it.
+
+    Runs once the lifespan cleanup is done. The SDK's stdio transport reads
+    stdin in a worker thread that no cancellation reaches, so the rest of the
+    unwinding (and the interpreter's exit, which joins that thread) would wait
+    for the client's next line or EOF: a host that keeps the pipe open could
+    only stop the server with SIGKILL. That wait also follows a session that
+    ended some other way, so a signal arriving from now on exits at once.
+    """
+    cli = sys.modules.get("bibr.local.cli")
+    if cli is None:  # embedded: no CLI signal handling, nothing recorded
+        return
+    cli._exit_at_once_on_termination()
+    signum = cli._terminating_signal()
+    if signum is None:
+        return
+    try:
+        # os._exit would otherwise swallow a failed close without a word.
+        if isinstance(error := sys.exception(), Exception):
+            logger.error("error while shutting down", exc_info=error)
+    finally:
+        cli._exit_now(128 + signum)
+
+
 def build_server(
     *,
     refs: str | bool | None = None,
@@ -574,8 +599,11 @@ def build_server(
         try:
             yield None
         finally:
-            if chewer is not None:
-                await chewer.aclose()
+            try:
+                if chewer is not None:
+                    await chewer.aclose()
+            finally:
+                _exit_if_terminating()
 
     chew_url_enabled = settings.mcp.chew_url_enabled
     instructions = _INSTRUCTIONS.format(
