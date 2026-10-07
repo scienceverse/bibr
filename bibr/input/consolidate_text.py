@@ -38,7 +38,10 @@ _ZIPF_VALID_WORD = 2.5
 
 # Unicode letter class (no digits, no underscore) \u2014 same class the word-linewrap
 # patterns below use. ASCII-only fragments match exactly what "[A-Za-z]+" did.
-_STX_ALPHA_BEFORE_RE = re.compile(r"[^\W\d_]+$")
+# The lookbehind starts a match only where a run of letters starts: tried from
+# inside a long run that does not reach the mark, ``[^\W\d_]+$`` backtracks
+# quadratically.
+_STX_ALPHA_BEFORE_RE = re.compile(r"(?<![^\W\d_])[^\W\d_]+$")
 _STX_ALPHA_AFTER_RE = re.compile(r"[^\W\d_]+")
 
 # Script \u2192 the wordfreq lexicons that can actually adjudicate it.  Nothing
@@ -208,13 +211,23 @@ def _resolve_stx_marks(text: str) -> str:
     context_langs = _detect_langs(text) or ()
     parts: list[str] = []
     pos = 0
+    # The token (back to the last space, newline or tab) is tracked across
+    # marks, and each stretch between two marks searched once: re-scanning the
+    # token for every mark is quadratic in a long one. Neither a DOI/URL
+    # starter nor a letter run can span a mark.
+    token_start = 0
+    in_doi_or_url = False
     while (i := text.find("\x02", pos)) != -1:
-        token_start = max(text.rfind(" ", 0, i), text.rfind("\n", 0, i), text.rfind("\t", 0, i)) + 1
-        in_doi_or_url = bool(DOI_URL_CONTEXT_RE.search(text[token_start:i]))
+        space = max(text.rfind(" ", pos, i), text.rfind("\n", pos, i), text.rfind("\t", pos, i))
+        if space >= 0:
+            token_start = space + 1
+            in_doi_or_url = False
+        lo = max(token_start, pos)
+        in_doi_or_url = in_doi_or_url or bool(DOI_URL_CONTEXT_RE.search(text, lo, i))
         between_digits = i > 0 and text[i - 1].isdigit() and text[i + 1 : i + 2].isdigit()
         keep = in_doi_or_url or between_digits
         if not keep:
-            before = _STX_ALPHA_BEFORE_RE.search(text[token_start:i])
+            before = _STX_ALPHA_BEFORE_RE.search(text, lo, i)
             after = _STX_ALPHA_AFTER_RE.match(text, i + 1)
             if before and after:
                 keep = _stx_alpha_keep_hyphen(
@@ -248,37 +261,38 @@ def _bridge_url_linewraps(text: str) -> str:
     hyphen is treated as literal ("Lak-\\nens" → "Lak-ens"), and a hyphen
     between digits is always literal — numbers are never syllable-hyphenated
     (bare ORCID iDs, year ranges, page ranges).  Plain-word wraps are left
-    untouched.  Runs repeated passes so a URL wrapped across several lines
-    re-joins fully (the lookback can only see past the previous wrap once it
-    has been bridged).
+    untouched.  A URL wrapped across several lines re-joins fully: the token
+    a wrap looks back over runs through the wraps bridged before it.
     """
     if not _HYPHEN_AT_LINEBREAK_RE.search(text):
         return text
-    while "\n" in text:
-
-        def _bridge(m: re.Match[str], s: str = text) -> str:
-            # Hyphen between digits across the wrap is always literal.
-            pre = s[m.start() - 1 : m.start()]
-            post = s[m.end() : m.end() + 1]
-            if pre.isdigit() and post.isdigit():
-                return "-"
-            token_start = (
-                max(
-                    s.rfind(" ", 0, m.start()),
-                    s.rfind("\n", 0, m.start()),
-                    s.rfind("\t", 0, m.start()),
-                )
-                + 1
-            )
-            if DOI_URL_CONTEXT_RE.search(s[token_start : m.start()]):
-                return "-"
-            return m.group(0)
-
-        bridged = _URL_LINEWRAP_RE.sub(_bridge, text)
-        if bridged == text:
-            return text
-        text = bridged
-    return text
+    parts: list[str] = []
+    pos = 0
+    # One pass carries the token (back to the last space, newline or tab of
+    # the text as bridged so far) and its DOI/URL context from wrap to wrap,
+    # so each stretch between two wraps is searched once; repeated passes over
+    # the whole text bridged one more wrap of a long token each. No DOI/URL
+    # starter has a "-", so none spans a bridged wrap.
+    in_doi_or_url = False
+    for m in _URL_LINEWRAP_RE.finditer(text):
+        start, end = m.span()
+        space = max(
+            text.rfind(" ", pos, start), text.rfind("\n", pos, start), text.rfind("\t", pos, start)
+        )
+        if space >= 0:
+            in_doi_or_url = False
+        lo = max(space + 1, pos)
+        in_doi_or_url = in_doi_or_url or bool(DOI_URL_CONTEXT_RE.search(text, lo, start))
+        parts.append(text[pos:start])
+        # Hyphen between digits across the wrap is always literal.
+        if in_doi_or_url or (text[start - 1 : start].isdigit() and text[end : end + 1].isdigit()):
+            parts.append("-")
+        else:
+            parts.append(m.group(0))
+            in_doi_or_url = False  # the line break it keeps ends the token
+        pos = end
+    parts.append(text[pos:])
+    return "".join(parts)
 
 
 _WORD_LINEWRAP_RE = re.compile(
