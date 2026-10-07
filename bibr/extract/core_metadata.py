@@ -1910,6 +1910,15 @@ _AFFILIATION_ABBREVIATION_RE = re.compile(
     r"\b(?:" + "|".join(sorted(_AFFILIATION_ABBREVIATIONS, key=len, reverse=True)) + r")\b",
     re.IGNORECASE,
 )
+# An ignore-case pattern also takes "İ" and "ı" for "i" and "ſ" for "s", which
+# lower() keeps apart from the ASCII spelling a table is keyed by
+# ("Unıversity").
+_IGNORECASE_I_TRANSLATION = str.maketrans({"İ": "i", "ı": "i"})
+
+
+def _ignorecase_key(word: str) -> str:
+    """The lowercase ASCII key of a word an ignore-case pattern matched."""
+    return word.translate(_IGNORECASE_I_TRANSLATION).casefold()
 
 
 def first_page_keyword_footnote(contents) -> str:
@@ -1970,7 +1979,10 @@ def _grounding_key(text: str) -> str:
     """:func:`affiliation_key` after folding common abbreviations."""
     return affiliation_key(
         _AFFILIATION_ABBREVIATION_RE.sub(
-            lambda match: _AFFILIATION_ABBREVIATIONS[match.group(0).lower()], text
+            lambda match: _AFFILIATION_ABBREVIATIONS.get(
+                _ignorecase_key(match.group(0)), match.group(0)
+            ),
+            text,
         )
     )
 
@@ -3673,13 +3685,14 @@ class CoreMetadataExtractor:
         m = _CORRECTION_NOTICE_TITLE_RE.match(title)
         if not m:
             return False, ""
-        kind = m.group("kind").lower()
         notice_type = {
             "corrigendum": "corrigendum",
             "correction": "corrigendum",
             "erratum": "erratum",
             "retraction": "retraction",
-        }[kind]
+        }.get(_ignorecase_key(m.group("kind")))
+        if notice_type is None:
+            return False, ""
         return True, notice_type
 
     @staticmethod
