@@ -1,11 +1,14 @@
-"""Core metadata on Turkish and long-s case variants.
+"""Core metadata on Turkish and long-s case variants, and affiliation cleaning cost.
 
 An ignore-case pattern matches "Unıversity", "UNİVERSİTY", "ſcience" and
 "APRİL", which lower() and casefold() keep apart from the ASCII keys of the
 tables they are looked up in; the KeyError failed the paper's whole core
-metadata.
+metadata. The affiliation tail patterns retried long runs from every position
+inside them, and trailing punctuation and connectives were stripped one turn
+at a time, which took seconds on a few thousand characters.
 """
 
+import time
 from unittest import mock
 
 import pandas as pd
@@ -13,6 +16,7 @@ import pytest
 
 from bibr.extract.core_metadata import (
     CoreMetadataExtractor,
+    _clean_affiliation_value,
     _grounding_key,
 )
 from bibr.extract.front_matter import FrontMatterBlock, FrontMatterCandidate, FrontMatterResolution
@@ -157,3 +161,63 @@ async def test_extract_keeps_core_metadata_of_a_turkish_paper():
     assert [author.affiliation for author in metadata.authors] == [
         "Department of Physics, Hacettepe University, Ankara, Turkey"
     ]
+
+
+# Each input took the old code 15 s or more (cubic or quadratic in the run);
+# it now takes a few milliseconds.
+@pytest.mark.parametrize(
+    ("value", "clean"),
+    [
+        (
+            "Department of Physics, " + "@." * 1200,
+            "Department of Physics, " + "@." * 1199 + "@",
+        ),
+        ("Department of Physics, " + "a@" * 2000, None),
+        ("Department of Physics " + "," * 3000 + "x", None),
+        ("Department of Physics" + ", " * 10000 + "x", None),
+        ("Department of Physics" + "." * 3000 + "x", None),
+        ("Department of Physics" + ", e" * 16000 + "x", None),
+        ("Department of Physics" + ";e." * 10000, "Department of Physics"),
+    ],
+    ids=["at-dot", "a-at", "commas", "comma-space", "dots", "connectives", "alternating-tail"],
+)
+def test_affiliation_cleaning_is_linear_in_long_runs(value, clean):
+    started = time.perf_counter()
+    cleaned = _clean_affiliation_value(value)
+    elapsed = time.perf_counter() - started
+
+    assert cleaned == (value if clean is None else clean)
+    assert elapsed < 1.0
+
+
+@pytest.mark.parametrize(
+    ("value", "clean"),
+    [
+        (
+            "Department of Physics, Example University, Oslo,jane@example.no",
+            "Department of Physics, Example University",
+        ),
+        # The whole word goes, however many "@" it holds.
+        ("Example University, Oslo, a@@b.org", "Example University, Oslo"),
+        ("Example University, Oslo, x@y@z.org", "Example University, Oslo"),
+        ("Example University, Oslo, @examplelab", "Example University, Oslo, @examplelab"),
+        ("Example University, Oslo, user@localhost", "Example University, Oslo, user@localhost"),
+        (
+            "Example Institute, Washington, D.C., U.S.A.",
+            "Example Institute, Washington, D.C., U.S.A.",
+        ),
+        ("Example Institute, U.S.A.; and", "Example Institute, U.S.A."),
+        ("and Example Institute, Houston, Texas, et", "Example Institute, Houston, Texas"),
+        ("Example Institute, Houston, Texas; and ; e", "Example Institute, Houston, Texas"),
+        ("Example Institute, Houston, Texas; and.", "Example Institute, Houston, Texas"),
+        ("Example Institute, Houston, Texas, et |", "Example Institute, Houston, Texas"),
+        ("Universidad de Example y", "Universidad de Example"),
+        ("Example Institute, Paris, France, et al", "Example Institute, Paris, France, et al"),
+        (
+            "Example Institute. Extended author information available on the last page.",
+            "Example Institute",
+        ),
+    ],
+)
+def test_affiliation_cleaning_cuts_what_it_cut_before(value, clean):
+    assert _clean_affiliation_value(value) == clean

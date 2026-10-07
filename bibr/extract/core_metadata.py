@@ -1837,27 +1837,32 @@ _NOT_A_KEYWORD_ROW_RE = re.compile(
 # connectives and trailing punctuation.
 #
 # A contact field needs its colon or period ("Tel Aviv" is a city); a bare
-# address cuts from the address on.
+# address cuts from the start of its word on.
+#
+# The tail patterns run on printed lines and LLM values of any length, so each
+# starts only where its leftmost match can: not inside a run of what it opens
+# with, and an address only at the start of its word, read up to its first
+# "@". Retried from every position, a run of "," or "@." took seconds.
 _AFFILIATION_CONTACT_TAIL_RE = re.compile(
-    r"[\s,;.]*(?:"
+    r"(?<![\s,;.])[\s,;.]*(?:"
     r"\b(?:e-?mail(?:\s+address(?:es)?)?|tel(?:ephone)?|phone|fax|mob(?:ile)?)\s*[:.]+(?:\s|$)"
     r"|\be-?mail\s+(?=\S+@)"
-    r"|\S+@\S+\.\w"
+    r"|(?<!\S)\S[^\s@]*@\S+\.\w"
     r").*$",
     re.IGNORECASE | re.DOTALL,
 )
 # BMC and Springer print a pointer to the end-of-article list after the last
 # page-1 definition, and it is captured with it.
 _AFFILIATION_BOILERPLATE_TAIL_RE = re.compile(
-    r"[\s,;.]*\b(?:full\s+list\s+of\s+author\s+information\s+is\s+available"
+    r"(?<![\s,;.])[\s,;.]*\b(?:full\s+list\s+of\s+author\s+information\s+is\s+available"
     r"|extended\s+author\s+information\s+(?:is\s+)?available)\b.*$",
     re.IGNORECASE | re.DOTALL,
 )
 # The connective a numbered list prints between two definitions ("...,
-# Houston, Texas; and 2Department of ..."), at either edge of a value.
-_AFFILIATION_EDGE_CONNECTIVE_RE = re.compile(
-    r"^(?:and|&|und|et|y|e)$|^(?:(?:and|&)\s+)+|(?:[\s,;]+(?:and|&|und|et|y|e))+$"
-)
+# Houston, Texas; and 2Department of ..."), at either edge of a value. This
+# takes a bare one and leading ones; trailing ones go with the trailing
+# punctuation below.
+_AFFILIATION_EDGE_CONNECTIVE_RE = re.compile(r"^(?:and|&|und|et|y|e)$|^(?:(?:and|&)\s+)+")
 # A printed marker the LLM kept at the start of a value: "1 Department",
 # "2. NIHR", "1Department", "a School", "* Institute". "3M Company" survives:
 # a glued digit is a marker only before a capitalised word.
@@ -1865,10 +1870,16 @@ _AFFILIATION_LEADING_MARKER_RE = re.compile(
     r"^(?:\d{1,2}(?:\s*[.)]\s*|\s+(?=[A-Z\u00c0-\u00de]))|\d{1,2}(?=[A-Z\u00c0-\u00de][a-z])|[a-h]\s+(?=[A-Z])"
     r"|[*\u2217\u2020\u2021\u00a7\u00b6#%]+\s*(?=[A-Z]))"
 )
-# Trailing punctuation, marker symbols and the "|" some publishers print
-# between affiliations. A final "." after a single capital ("U.S.A.") stays.
+# Trailing punctuation, marker symbols, the "|" some publishers print between
+# affiliations and connectives after a separator ("; and", ", et."), in any
+# mix. A final "." after a single capital ("U.S.A.") stays. One pass takes the
+# whole tail and starts only where it does, after neither a character nor a
+# connective it takes; stripping punctuation and connectives in turns took a
+# pass per ";e." of a long run.
+_AFFILIATION_TRAILING_CHAR = r"[\s,;:|*\u2217\u2020\u2021\u00a7\u00b6#%\u2709]|(?<!\b[A-Z])\."
 _AFFILIATION_TRAILING_RE = re.compile(
-    r"(?:[\s,;:|*\u2217\u2020\u2021\u00a7\u00b6#%\u2709]|(?<!\b[A-Z])\.)+$"
+    rf"(?<!{_AFFILIATION_TRAILING_CHAR})(?<![\s,;][&ye])(?<![\s,;]et)(?<![\s,;](?:and|und))"
+    rf"(?:{_AFFILIATION_TRAILING_CHAR}|(?<=[\s,;])(?:and|&|und|et|y|e))+$"
 )
 # Two letters in a row: a part without them is a bare marker ("1", "2; 3").
 _AFFILIATION_ALPHA_RUN_RE = re.compile(r"[^\W\d_]{2}")
