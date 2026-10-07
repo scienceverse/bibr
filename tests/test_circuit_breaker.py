@@ -197,6 +197,25 @@ class TestInjectableClock:
                 raise ValueError("fail")
         assert cb._failure_count == 2
 
+    async def test_sustained_failures_are_counted_from_last_counted_failure(self):
+        """A rapid outage must eventually trip instead of resetting its window forever."""
+        clock = FakeClock()
+        cb = AsyncCircuitBreaker(
+            failure_threshold=2,
+            reset_timeout=60.0,
+            name="test",
+            failure_dedup_window=2.0,
+            clock=clock,
+        )
+
+        for _ in range(4):
+            with pytest.raises(ValueError):
+                async with cb:
+                    raise ValueError("fail")
+            clock.advance(1.0)
+
+        assert cb.state == CircuitState.OPEN
+
 
 def test_loop_state_tracks_loop_objects_not_reusable_ids():
     clock = FakeClock()
@@ -225,25 +244,6 @@ def test_loop_state_tracks_loop_objects_not_reusable_ids():
 
     assert [keys for keys, _ in seen] == [[loop] for _, loop in seen]
     assert seen[0][1] is not seen[1][1]
-
-    async def test_sustained_failures_are_counted_from_last_counted_failure(self):
-        """A rapid outage must eventually trip instead of resetting its window forever."""
-        clock = FakeClock()
-        cb = AsyncCircuitBreaker(
-            failure_threshold=2,
-            reset_timeout=60.0,
-            name="test",
-            failure_dedup_window=2.0,
-            clock=clock,
-        )
-
-        for _ in range(4):
-            with pytest.raises(ValueError):
-                async with cb:
-                    raise ValueError("fail")
-            clock.advance(1.0)
-
-        assert cb.state == CircuitState.OPEN
 
 
 class TestCircuitBreakerExceptionPropagation:
