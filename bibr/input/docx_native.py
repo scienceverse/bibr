@@ -111,13 +111,17 @@ _MAX_GRID_SPAN = 1000
 # are rows x widest row plus _COLUMN_CELLS per column: pandas pays per column
 # what it pays for some 20 cells, and a 36 KB one-row table 1,000,000 columns
 # wide took three minutes. The document limit bounds table work to a minute or
-# two. Cell text counts in every grid cell that repeats it, as the HTML and the
-# export write it there; text without merges cannot pass the limit within the
-# 64 MiB document.xml the validator admits.
+# two. The table HTML is limited by its rendered size: every grid cell that
+# repeats a merged cell's text writes it again, escaped (pandas turns "&" into
+# "&amp;"), with some _CELL_MARKUP_CHARS of markup, and one character past
+# U+00FF or U+FFFF makes the whole string 2 or 4 bytes a character (PEP 393).
+# Counting raw characters let ten kilobytes of "&" and emoji merged across a
+# table render to over a gigabyte.
 _MAX_TABLE_CELLS = 1_000_000
 _MAX_DOCUMENT_TABLE_CELLS = 4_000_000
 _COLUMN_CELLS = 100
-_MAX_DOCUMENT_TABLE_CHARS = 64 * 1024 * 1024
+_CELL_MARKUP_CHARS = 16
+_MAX_DOCUMENT_TABLE_BYTES = 64 * 1024 * 1024
 _W_VAL = f"{{{_NS['w']}}}val"
 _GRID_BEFORE = f"{{{_NS['w']}}}trPr/{{{_NS['w']}}}gridBefore"
 _GRID_SPAN = f"{{{_NS['w']}}}tcPr/{{{_NS['w']}}}gridSpan"
@@ -225,6 +229,16 @@ def _decimal(el, default: int) -> int:
         return int(el.get(_W_VAL))
     except (TypeError, ValueError):
         return default
+
+
+def _rendered_size(text: str) -> tuple[int, int]:
+    """Characters *text* takes in table HTML (``&``, ``<`` and ``>`` escaped),
+    and the bytes per character it forces on the whole HTML string."""
+    size = len(text) + 4 * text.count("&") + 3 * (text.count("<") + text.count(">"))
+    if text.isascii():
+        return size, 1
+    top = ord(max(text))
+    return size, 4 if top > 0xFFFF else 2 if top > 0xFF else 1
 
 
 def _table_rows(tbl) -> list[list[tuple[object, int]]]:
@@ -412,7 +426,7 @@ class DocxParser:
         self._figures_dropped = 0
         self._figure_images_omitted = 0
         self._table_cells = 0
-        self._table_chars = 0
+        self._table_bytes = 0
         self._tables_dropped = 0
 
     # ------------------------------------------------------------------
@@ -512,8 +526,8 @@ class DocxParser:
                     WarningCode.DOCX_TABLE_DROPPED,
                     f"Dropped {self._tables_dropped} table(s) over the size limits "
                     f"({_MAX_TABLE_CELLS:,} grid cells per table; {_MAX_DOCUMENT_TABLE_CELLS:,} "
-                    f"grid cells and {_MAX_DOCUMENT_TABLE_CHARS // 2**20} Mi characters of "
-                    "cell text per document)",
+                    f"grid cells and {_MAX_DOCUMENT_TABLE_BYTES // 2**20} MiB of "
+                    "table HTML per document)",
                 )
             )
         if self._figures_dropped:
@@ -1018,20 +1032,26 @@ class DocxParser:
             return None
 
         # A merged cell's text is read once, however many grid cells it fills,
-        # and counted in each of them.
+        # and charged at its rendered size in each of them.
         texts: dict[object, str] = {}
+        costs: dict[object, int] = {}
         chars = 0
+        char_width = 1
         for row in rows:
             for tc, columns in row:
-                text = texts.get(tc)
-                if text is None:
+                cost = costs.get(tc)
+                if cost is None:
                     text = texts[tc] = "\n".join(_paragraph_text(p) for p in tc.p_lst).strip()
-                chars += len(text) * columns
-        if self._table_chars + chars > _MAX_DOCUMENT_TABLE_CHARS:
+                    cost, char_bytes = _rendered_size(text)
+                    costs[tc] = cost
+                    char_width = max(char_width, char_bytes)
+                chars += (cost + _CELL_MARKUP_CHARS) * columns
+        html_bytes = chars * char_width
+        if self._table_bytes + html_bytes > _MAX_DOCUMENT_TABLE_BYTES:
             self._tables_dropped += 1
             return None
         self._table_cells += size
-        self._table_chars += chars
+        self._table_bytes += html_bytes
 
         cell_rows: list[list[str]] = []
         for row in rows:

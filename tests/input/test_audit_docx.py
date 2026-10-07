@@ -183,8 +183,8 @@ def test_merged_cell_text_counts_in_every_grid_cell_it_fills():
 
 
 def test_tables_past_the_document_text_limit_are_dropped(monkeypatch):
-    monkeypatch.setattr(docx_native, "_MAX_DOCUMENT_TABLE_CHARS", 250)
-    # 3 rows of 10 four-character cells: 120 characters a table.
+    # 3 rows of 10 four-character cells, each charged with its markup: 600 a table.
+    monkeypatch.setattr(docx_native, "_MAX_DOCUMENT_TABLE_BYTES", 1300)
     row = "<w:tr>" + _tc("cell") * 10 + "</w:tr>"
     _, contents = _parse(_doc_with_table(row * 3, tables=3))
 
@@ -462,3 +462,31 @@ def test_cell_text_inside_a_wrapper_is_kept():
     _, contents = _parse(_save(doc))
 
     assert contents.tables[0].df.to_numpy().tolist() == [["inserted"]]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # pandas writes "&" as "&amp;" in every grid cell that repeats it.
+        "&" * 1000,
+        # One emoji makes the whole HTML string four bytes a character.
+        ("&" * 9 + "\U0001f600") * 100,
+    ],
+)
+def test_merged_text_is_charged_at_its_rendered_size(text):
+    """A 10 KB document.xml: one cell 1,000 columns wide merged down 64 rows.
+    Counted by raw characters it passed the limit and rendered to over 1 GiB."""
+    restart = _tc(text.replace("&", "&amp;"), _span(1000) + '<w:vMerge w:val="restart"/>')
+    cont = _tc("", _span(1000) + "<w:vMerge/>")
+    rows = f"<w:tr>{restart}</w:tr>" + f"<w:tr>{cont}</w:tr>" * 63
+    _, contents = _parse(_doc_with_table(rows))
+
+    assert contents.tables == []
+    assert _codes(contents) == [WarningCode.DOCX_TABLE_DROPPED]
+
+
+def test_rendered_size_counts_escapes_and_character_width():
+    assert docx_native._rendered_size("a&b<c>") == (6 + 4 + 3 + 3, 1)
+    assert docx_native._rendered_size("café") == (4, 1)
+    assert docx_native._rendered_size("naïve Ω") == (7, 2)
+    assert docx_native._rendered_size("x\U0001f600") == (2, 4)
