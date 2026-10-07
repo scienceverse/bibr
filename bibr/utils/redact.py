@@ -46,16 +46,17 @@ _HEADER_SECRET_RE = re.compile(
 # URL user-info: ``https://user:pass@host`` — used by OCR/LLM SDKs that embed
 # credentials in the base URL — and a token used as the user name
 # (``https://<token>@github.com``). The user may be empty: the compose-style
-# ``redis://:password@redis:6379/0`` carries only a password. The user name
-# ends at ``?``, ``#`` or a quote (so ``?mailto=you@example.com`` is left
-# alone), but a password runs over anything but ``/`` and whitespace to the
-# last ``@``: clients accept an unencoded ``'``, ``:`` or ``@`` in it, httpx
-# quotes it verbatim in ``for url '…'``, and one with a stray ``#`` or ``?``
-# is still a secret in the error text of the URL it broke.
-_URL_USERINFO_RE = re.compile(r"(://)(?:[^/?#\s\"'<>:]*:[^/\s]*|[^/?#\s\"'<>]*)@")
+# ``redis://:password@redis:6379/0`` carries only a password. With a password,
+# the user name runs to the first ``:`` and the password over anything but
+# ``/`` and whitespace to the last ``@``: clients accept an unencoded ``'``,
+# ``:`` or ``@`` there (``o'brien:…@``), httpx quotes it verbatim in
+# ``for url '…'``, and a stray ``#`` or ``?`` is still a secret in the error
+# text of the URL it broke. A token used as the user name (no ``:``) ends at
+# ``?``, ``#`` or a quote, so ``?mailto=you@example.com`` is left alone.
+_URL_USERINFO_RE = re.compile(r"(://)(?:[^/\s:]*:[^/\s]*|[^/?#\s\"'<>]*)@")
 # Just the password of URL user-info (after the first ``:``, to the last ``@``),
 # keeping the user name visible.
-_URL_PASSWORD_RE = re.compile(r"(://[^/?#\s\"'<>:]*:)[^/\s]*@")
+_URL_PASSWORD_RE = re.compile(r"(://[^/\s:]*:)[^/\s]*@")
 # Any ``scheme://…`` URL, for text that must not name endpoints at all. A match
 # takes the whole run of scheme characters before ``://`` (so ``-https://`` loses
 # the dash too) and starts only where such a run starts: a long run without

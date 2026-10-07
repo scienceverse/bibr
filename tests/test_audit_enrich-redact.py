@@ -404,3 +404,35 @@ def test_new_patterns_stay_linear_on_pathological_input():
         redact_url_secrets(text)
         redact_urls(text)
     assert time.perf_counter() - started < 2.0
+
+
+@pytest.mark.parametrize("user", ["o'brien", 'us"er', "us<er>", "us#er", "us?er"])
+def test_url_password_is_masked_whatever_the_user_name(user):
+    url = f"redis://{user}:S3cret@redis.internal:6379/0"
+    assert "S3cret" not in scrub_secrets(f"cannot connect to {url}")
+    assert "S3cret" not in redact_url_secrets(url)
+    assert "S3cret" not in redact_urls(f"cannot connect to {url}")
+
+
+def test_httpx_status_error_with_an_apostrophe_in_the_user_name_is_scrubbed():
+    from bibr.utils.redact import describe_error
+
+    request = httpx.Request("GET", "https://o'brien:S3cret@resolver.internal.corp:8080/search")
+    response = httpx.Response(503, request=request)
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        response.raise_for_status()
+    assert "S3cret" not in scrub_secrets(str(caught.value))
+    exc = httpx.ConnectError(
+        "connect to https://o'brien:S3cret@resolver.internal.corp:8080/x failed"
+    )
+    assert describe_error(exc) == "ConnectError: connect to <url> failed"
+
+
+def test_user_name_patterns_stay_linear():
+    texts = ["://" + "'" * 60_000, "://" + "'@" * 30_000, "://" + "a'" * 30_000 + ":"]
+    started = time.perf_counter()
+    for text in texts:
+        scrub_secrets(text)
+        redact_url_secrets(text)
+        redact_urls(text)
+    assert time.perf_counter() - started < 2.0
