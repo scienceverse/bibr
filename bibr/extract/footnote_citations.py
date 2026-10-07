@@ -414,10 +414,16 @@ def _citation_start(clause: str, verdicts: dict[str, bool] | None = None) -> int
         return 0
     if verdicts is None:
         verdicts = {}
+    # Where the first prose word ends: a hand-over has one before it once it
+    # starts there or later. No lowercase run straddles a hand-over's start
+    # (each starts on, or right after, a non-word character), so this equals
+    # searching up to every hand-over, without rescanning the clause each time.
+    first_prose = _PROSE_WORD_RE.search(clause)
+    prose_end = first_prose.end() if first_prose else len(clause) + 1
     for match in _HANDOVER_RE.finditer(clause):
         # A lead-in word marks what precedes it as commentary; other
         # hand-overs need a prose word before them.
-        if match.group("lead") is None and not _PROSE_WORD_RE.search(clause, 0, match.start()):
+        if match.group("lead") is None and prose_end > match.start():
             continue
         rest = clause[match.end() : match.end() + _HANDOVER_READ].strip()
         if rest not in verdicts:

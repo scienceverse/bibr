@@ -284,6 +284,27 @@ def test_a_long_note_of_commentary_is_split_without_rereading_it_at_every_break(
     assert fc._split_citations(note) == [note.removeprefix("12. ")]
 
 
+def test_a_note_without_prose_words_is_split_without_rescanning_it(monkeypatch):
+    # With no lowercase word of four letters, each hand-over searched for one
+    # from the start of the clause again: cubic in the note's length.
+    note = ("1. " + "X 12, J. Smith, 12. " * 400)[:4_000]
+    searched = [0]
+    prose_word = fc._PROSE_WORD_RE
+
+    class _Counted:
+        def search(self, text, *args):
+            searched[0] += len(text)
+            return prose_word.search(text, *args)
+
+        def __getattr__(self, name):
+            return getattr(prose_word, name)
+
+    monkeypatch.setattr(fc, "_PROSE_WORD_RE", _Counted())
+
+    fc._split_citations(note)
+    assert searched[0] < 400 * len(note)
+
+
 def test_a_hand_over_at_the_end_of_a_long_note_still_leads_to_its_citation():
     commentary = " ".join(
         f"The court held in case {k} that the doctrine applies where the parties agreed."
@@ -317,6 +338,11 @@ def test_a_hand_over_at_the_end_of_a_long_note_still_leads_to_its_citation():
         # Letters NFKD leaves whole, spelled out as the address does.
         ("Ivar", "Bræin", "braein", True),
         ("Jon", "Þór", "thorj", True),
+        # Umlauts and ø/å spelled out, as German and Nordic addresses do.
+        ("Thomas", "Müller", "tmueller", True),
+        ("Thomas", "Müller", "tmuller", True),
+        ("Uwe", "Köhler", "ukoehler", True),
+        ("Søren", "Kierkegård", "skierkegaard", True),
         # ASCII names as before.
         ("Xiang-Min", "Yang", "yxiangmind", True),
         ("Xiaohong", "Li", "lixh", True),
@@ -371,4 +397,42 @@ def test_an_accented_surname_does_not_take_an_unrelated_address():
 
     assert authors[0].email == "ivan.simic@uni.hr"
     assert authors[0].corresponding is True
+    assert authors[1].email in (None, "")
+
+
+def test_an_address_that_spells_the_umlaut_out_goes_to_its_author():
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    lines = [
+        "Thomas Müller and John Roe",
+        "Department of Physics, University of Hamburg",
+        "E-mail: t.mueller@physik.uni-hamburg.de",
+    ]
+    contents = SimpleNamespace(
+        sentences=[
+            SimpleNamespace(text=t, section_id=0, text_id=i, page_number=1)
+            for i, t in enumerate(lines)
+        ],
+        sections=[SimpleNamespace(section_id=0, section_type="abstract", header="")],
+        sentences_df=pd.DataFrame(
+            [
+                {"text_id": i, "text": t, "page_number": 1, "section_id": 0}
+                for i, t in enumerate(lines)
+            ]
+        ),
+        detected_headers=[],
+        detected_footers=[],
+    )
+    authors = [
+        PaperAuthor(
+            author_id=1, given="Thomas", family="Müller", affiliation="X", corresponding=True
+        ),
+        PaperAuthor(author_id=2, given="John", family="Roe", affiliation="X"),
+    ]
+
+    harvester.AuthorEmailHarvester(contents).harvest(authors)
+
+    assert authors[0].email == "t.mueller@physik.uni-hamburg.de"
     assert authors[1].email in (None, "")

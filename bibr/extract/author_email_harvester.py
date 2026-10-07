@@ -70,12 +70,12 @@ def _given_name_affinity(given: str | None, local_compact: str) -> int:
     itself cannot discriminate. A full given name inside the local part
     ("jane.smith") is strong; a leading initial ("jsmith") is weak.
     """
-    token = _fold(given)
-    if not token or not local_compact:
+    tokens = [token for token in _folds(given) if token]
+    if not tokens or not local_compact:
         return 0
-    if len(token) >= 3 and token in local_compact:
+    if any(len(token) >= 3 and token in local_compact for token in tokens):
         return 2
-    return 1 if local_compact.startswith(token[0]) else 0
+    return 1 if local_compact.startswith(tokens[0][0]) else 0
 
 
 def _email_name_affinity(given: str | None, family: str | None, local_compact: str) -> bool:
@@ -94,16 +94,19 @@ def _email_name_affinity(given: str | None, family: str | None, local_compact: s
     for name in (given or "", family or ""):
         # Accents folded first: the bare letters of "Šimić" are "imi", which
         # turns up in unrelated addresses.
-        for token in re.findall(r"[a-z0-9]+", _fold_letters(name)):
-            if len(token) >= 3 and (token in local_compact or local_compact in token):
-                return True
+        for spelling in _letter_spellings(name):
+            for token in re.findall(r"[a-z0-9]+", spelling):
+                if len(token) >= 3 and (token in local_compact or local_compact in token):
+                    return True
     # A 2-letter family name (Li, Wu, He) cannot match by containment — it
     # would hit any address — but as the address's leading letters ('lixh@'
     # for Xiaohong Li) it still names the author. Given names stay at 3+
     # chars: a 2-letter given token ('Yu' in Yu-Zhong) prefix-matches far too
     # often and breaks same-surname disambiguation.
-    family_compact = _fold(family)
-    return len(family_compact) == 2 and local_compact.startswith(family_compact)
+    return any(
+        len(family_compact) == 2 and local_compact.startswith(family_compact)
+        for family_compact in _folds(family)
+    )
 
 
 # --- name-paired e-mails -------------------------------------------------------
@@ -151,6 +154,27 @@ def _fold_letters(text: str | None) -> str:
 def _fold(text: str | None) -> str:
     """Lower-case, accent-free, letters and digits only ("Al-Tammemi" -> "altammemi")."""
     return re.sub(r"[\W_]+", "", _fold_letters(text))
+
+
+# German, Danish and Norwegian addresses often spell these letters out
+# ("Müller" -> "mueller", "Kierkegård" -> "kierkegaard"); folding alone gives
+# "muller". A name matches an address in either spelling.
+_SPELLED_OUT = str.maketrans(
+    {"ä": "ae", "ö": "oe", "ü": "ue", "å": "aa", "ø": "oe", "Ä": "Ae", "Ö": "Oe", "Ü": "Ue"}
+    | {"Å": "Aa", "Ø": "Oe"}
+)
+
+
+def _letter_spellings(text: str | None) -> tuple[str, ...]:
+    """:func:`_fold_letters` of *text*, and of it with umlauts and ø/å spelled out."""
+    folded = _fold_letters(text)
+    spelled = _fold_letters(unicodedata.normalize("NFC", text or "").translate(_SPELLED_OUT))
+    return (folded,) if spelled == folded else (folded, spelled)
+
+
+def _folds(text: str | None) -> tuple[str, ...]:
+    """:func:`_fold` of each of *text*'s :func:`_letter_spellings`."""
+    return tuple(re.sub(r"[\W_]+", "", spelling) for spelling in _letter_spellings(text))
 
 
 def _initials(tokens: list[str]) -> list[str]:
@@ -458,8 +482,7 @@ class AuthorEmailHarvester:
                     if best_dist is None:
                         order_idx += len(family_authors)
                         continue
-                    family_compact = _fold(family)
-                    affinity = 1 if family_compact and family_compact in local_compact else 0
+                    affinity = int(any(f and f in local_compact for f in _folds(family)))
                     for author in family_authors:
                         # Only disambiguate on the given name when the surname
                         # is genuinely shared, so ranking between distinct
@@ -808,9 +831,8 @@ class AuthorEmailHarvester:
                     if family_pat.search(joined_window):
                         footnote_affinity = True
                     else:
-                        family_compact = _fold(author.family)
                         local_compact = re.sub(r"[^a-z0-9]", "", email.split("@", 1)[0])
-                        if family_compact and family_compact in local_compact:
+                        if any(f and f in local_compact for f in _folds(author.family)):
                             footnote_affinity = True
 
                 if strict_emails:
