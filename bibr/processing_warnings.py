@@ -74,6 +74,7 @@ class WarningCode(StrEnum):
     REF_PARSE_SALVAGE_RECOVERY = "REF_PARSE_SALVAGE_RECOVERY"
     REF_PARSE_SPLIT_RECOVERY = "REF_PARSE_SPLIT_RECOVERY"
     REF_PARSE_TRUNCATED = "REF_PARSE_TRUNCATED"
+    REF_PARSE_FINALIZE_FAILED = "REF_PARSE_FINALIZE_FAILED"
     REF_EXTRACTION_ERROR = "REF_EXTRACTION_ERROR"
     REF_UNDER_EXTRACTION_SUSPECTED = "REF_UNDER_EXTRACTION_SUSPECTED"
     # Enrichment
@@ -183,6 +184,8 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     "after a batch failed.",
     WarningCode.REF_PARSE_TRUNCATED: "References longer than the NER parser's input window were "
     "parsed from their start only; fields after it (often pages, DOI or URL) may be missing.",
+    WarningCode.REF_PARSE_FINALIZE_FAILED: "Cleaning up a parsed reference's fields (page "
+    "range, DOI, Vancouver tail) raised an error; that reference keeps its fields as parsed.",
     WarningCode.REF_EXTRACTION_ERROR: "Reference extraction raised an unexpected error; the "
     "references are missing.",
     WarningCode.REF_UNDER_EXTRACTION_SUSPECTED: "Far fewer references were parsed than the body "
