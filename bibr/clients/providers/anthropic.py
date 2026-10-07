@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, ClassVar
 import instructor
 
 from bibr.clients.providers import register
+from bibr.clients.providers.base import bound_sdk_client
 from bibr.config import snapshot_settings
 
 if TYPE_CHECKING:
@@ -28,6 +29,14 @@ _MIN_THINKING_BUDGET = 1024
 # the JSON answer and risk truncation.
 _THINKING_OUTPUT_MARGIN = 1024
 
+# The adapter does not stream, so a call's whole answer comes back in one HTTP
+# response. The default LLM_MAX_TOKENS (65536) is above the output cap of
+# Haiku 4.5 (64000; the setup default) and far above the ~16K Anthropic
+# advises for a non-streaming call; on its default timeout the SDK refuses
+# anything above ~21K outright. Calls without a task cap (reference
+# segmentation, merged core metadata) failed under LLM_PROVIDER=anthropic.
+_NONSTREAMING_MAX_TOKENS = 16_384
+
 
 @register
 class AnthropicProvider:
@@ -43,12 +52,14 @@ class AnthropicProvider:
                 "Anthropic API key required. "
                 "Set LLM_API_KEY or ANTHROPIC_API_KEY environment variable."
             )
-        return instructor.from_provider(
+        client = instructor.from_provider(
             f"anthropic/{self._settings.llm.model}", async_client=True, api_key=api_key
         )
+        return bound_sdk_client(client, self._settings)
 
     def call_kwargs(self, reasoning_effort: str | None, max_tokens: int | None = None) -> dict:  # noqa: ARG002
-        kwargs: dict = {"max_tokens": max_tokens or self._settings.llm.max_tokens}
+        requested = max_tokens or self._settings.llm.max_tokens
+        kwargs: dict = {"max_tokens": min(requested, _NONSTREAMING_MAX_TOKENS)}
         budget = self._settings.llm.thinking_budget
         if budget and budget > 0:
             effective = max(int(budget), _MIN_THINKING_BUDGET)

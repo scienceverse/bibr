@@ -235,6 +235,22 @@ Validate the fields you need on representative papers before choosing a model
 for a large run. Cloud LLMs or an external OpenAI-compatible server can be used
 with local OCR when local LLM throughput is insufficient.
 
+The provider SDK sends each LLM request once and gives it up after twice
+`LLM_TIMEOUT_SECONDS`. bibr retries rate limits, server errors and dropped
+connections itself, up to three attempts per call, so every retry waits for
+`LLM_RATE_LIMIT_RPM` and counts toward the circuit breaker; a `Retry-After`
+hint is honoured up to 60 seconds. The `anthropic` provider does not stream,
+so it caps the output of one call at 16,384 tokens even when `LLM_MAX_TOKENS`
+is higher.
+
+`CACHE_LLM=true` keeps structured LLM responses on disk (`CACHE_LLM_DIR`,
+default `~/.cache/bibr/llm`), readable by your user only. An entry is reused
+only for the same provider, endpoint, model, call parameters (temperature,
+output cap, reasoning effort, thinking budget) and prompt, so changing any of
+them calls the model again. An endpoint that serves different weights under
+the same model name and URL cannot be told apart: clear the directory after
+swapping the model behind it.
+
 ## Presets
 
 If you switch between setups often — cloud vs. local, different models for different
