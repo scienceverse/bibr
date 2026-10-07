@@ -82,10 +82,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - `bibr doctor` no longer prints the password or `?key=` value of `OCR_BASE_URL`, `LLM_BASE_URL`,
   the Ollama URL or `REDIS_URL`, and when a connection test or test extraction fails, `bibr setup`
-  masks every configured key, not only the LLM provider's. The LLM response cache (`CACHE_LLM`),
-  which holds the metadata of papers that may be unpublished, creates its directories 0700 and its
-  entries 0600 instead of following the umask; `chmod` or remove directories made by earlier
-  versions.
+  masks every configured key, not only the LLM provider's. The LLM and OCR response caches
+  (`CACHE_LLM`, `CACHE_OCR`), which hold the metadata and text of papers that may be unpublished,
+  create their directories 0700 and their entries 0600 instead of following the umask; `chmod` or
+  remove directories made by earlier versions.
 
 - Managed local model servers are better shut off from other local users. vLLM and llama.cpp servers
   now require a random API key that bibr creates at each launch and passes through the environment.

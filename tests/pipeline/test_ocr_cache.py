@@ -1,6 +1,8 @@
 """Disk cache for OCR stage output (bibr.pipeline.ocr_cache)."""
 
 import json
+import os
+import stat
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1013,3 +1015,22 @@ def test_key_changes_with_the_bibr_version(monkeypatch):
     base = ocr_cache._key(fs, cfg, _identity())
     monkeypatch.setattr(bibr, "__version__", "99.0.0")
     assert ocr_cache._key(fs, cfg, _identity()) != base
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
+def test_cache_directory_and_entries_are_owner_only(tmp_path, monkeypatch):
+    # Entries hold the text of papers that may be unpublished.
+    root = tmp_path / "bibr" / "ocr"
+    monkeypatch.setattr(Settings.cache, "ocr", True)
+    monkeypatch.setattr(Settings.cache, "ocr_dir", str(root))
+    fs, cfg = _fs(), RunConfig(ocr_backend="glm-llama")
+    previous = os.umask(0o022)
+    try:
+        ocr_cache.store(fs, cfg, _identity(), _regions())
+    finally:
+        os.umask(previous)
+
+    [entry] = root.iterdir()
+    assert stat.S_IMODE(entry.stat().st_mode) == 0o600
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    assert ocr_cache.load(fs, cfg, _identity()) is not None
