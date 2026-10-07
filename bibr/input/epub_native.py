@@ -15,7 +15,7 @@ import zipfile
 from dataclasses import dataclass, field
 from urllib.parse import unquote
 
-import webencodings  # type: ignore[import-untyped]  # html5lib's encoding table, no stub
+import webencodings  # html5lib's encoding table (a dependency of html5lib)
 
 from bibr.input.html_native import HtmlParser
 from bibr.input.xml_entities import parse_xml

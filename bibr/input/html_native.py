@@ -17,7 +17,7 @@ from collections.abc import Iterator
 from typing import Any
 
 import pandas as pd
-import webencodings  # type: ignore[import-untyped]  # html5lib's encoding table, no stub
+import webencodings  # html5lib's encoding table (a dependency of html5lib)
 from bs4 import BeautifulSoup, CData, NavigableString, Tag
 
 from bibr.input.mathml_whitespace import FlatText, mspace_separates

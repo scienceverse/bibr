@@ -342,6 +342,7 @@ module = [
     "wordfreq.*",
     "sentencepiece.*",
     "html5lib.*",
+    "webencodings",
     "bs4.*",
     "rapidfuzz.*",
     "redis",
