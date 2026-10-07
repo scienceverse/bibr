@@ -423,8 +423,30 @@ def _llm_rhs_is_grounded(rhs: str | None, source_text: str) -> bool:
 # are only citations or figure/table references
 # ---------------------------------------------------------------------------
 
-# Digit-bearing parenthesized groups: the fallback's candidate pre-filter.
-_PAREN_WITH_NUMS_RE = re.compile(r"\([^)]*\d[^)]*\)")
+_DIGIT_RE = re.compile(r"\d")
+
+
+def _digit_paren_spans(text: str) -> list[Span]:
+    """The digit-bearing parenthesized groups of *text*: the fallback's candidate pre-filter.
+
+    A group runs from a "(" to the first ")" after it, a nested "(" included,
+    as ``\\([^)]*\\d[^)]*\\)`` read it. That regex retried every "(" with no
+    ")" after it against the rest of the text, cubic on "(1 (1 (1 …"; each
+    character is looked at once here.
+    """
+    spans: list[Span] = []
+    position = 0
+    while (start := text.find("(", position)) != -1:
+        end = text.find(")", start + 1)
+        if end == -1:
+            break
+        if _DIGIT_RE.search(text, start + 1, end):
+            spans.append((start, end + 1))
+        # A later "(" before this ")" closes on it too, with no digit the
+        # first one lacked: the next group opens after it.
+        position = end + 1
+    return spans
+
 
 # A digit-bearing parenthetical that may carry a statistic the LLM could
 # extract shows a statistic hint. Groups without one that match the
@@ -458,10 +480,13 @@ _PAREN_YEAR = r"(?:18|19|20)\d{2}[a-z]?"
 # "Smith, 2020, p. 5", "see Smith, 2020". The name part forbids digits and
 # ";" so a piece cannot span years; callers split the parenthetical on ";"
 # and require every piece to match, which keeps the whole check linear
-# (no lazy runs nested inside a repeated group).
+# (no lazy runs nested inside a repeated group). The name runs to the first
+# digit, its comma and spaces included, and the spaces of the lead are taken
+# whole (possessive): retrying each split of a long run of spaces was
+# quadratic.
 _CITATION_PIECE_RE = re.compile(
-    r"^\s*(?:see|cf\.?|e\.g\.?|i\.e\.?)?\.?\s*,?\s*"
-    r"[A-ZÀ-Þ][^;()\d]*?,?\s*" + _PAREN_YEAR + r"(?:\s*,\s*" + _PAREN_YEAR + r")*"
+    r"^\s*+(?:see|cf\.?|e\.g\.?|i\.e\.?)?\.?\s*+,?\s*+"
+    r"[A-ZÀ-ÖØ-Þ][^;()\d]*+" + _PAREN_YEAR + r"(?:\s*,\s*" + _PAREN_YEAR + r")*"
     r"(?:\s*[,;:]\s*(?:pp?\.?\s*)?\d+(?:\s*[–—-]\s*\d+)?)?"
     r"\s*$"
 )
@@ -611,13 +636,17 @@ def _has_statistical_paren(text: str) -> bool:
     digit-bearing group return False, matching the previous bare-presence
     check.
     """
-    groups = _PAREN_WITH_NUMS_RE.findall(text)
-    if not groups:
+    spans = _digit_paren_spans(text)
+    if not spans:
         return False
-    if any(not _is_nonstatistical_paren(group) for group in groups):
+    if any(not _is_nonstatistical_paren(text[start:end]) for start, end in spans):
         return True
-    body = _PAREN_WITH_NUMS_RE.sub(" ", text)
-    return bool(re.search(r"\d", body))
+    previous = 0
+    for start, end in spans:
+        if _DIGIT_RE.search(text, previous, start):
+            return True
+        previous = end
+    return bool(_DIGIT_RE.search(text, previous))
 
 
 # ---------------------------------------------------------------------------
@@ -838,7 +867,7 @@ class EquationExtractor:
                 continue
             if _has_statistical_paren(sent.text):
                 candidates.append((sent.text_id, sent.text))
-            elif _PAREN_WITH_NUMS_RE.search(sent.text):
+            elif _digit_paren_spans(sent.text):
                 n_filtered += 1
         if n_filtered:
             logger.debug(
@@ -1371,8 +1400,11 @@ def _normalize_comp(comp: str) -> str:
 
 
 # Statistic LHS with a trailing parenthesized degrees-of-freedom suffix:
-# "t(28)", "F(2, 47)", "χ²(4, N=200)".  Captures (name, df).
-_LHS_DF_RE = re.compile(r"^(?P<name>.+?)\s*\(\s*(?P<df>[^()]*?)\s*\)\s*$")
+# "t(28)", "F(2, 47)", "χ²(4, N=200)".  Captures (name, df), both stripped by
+# the caller. The name ends on a non-space and the df is read whole: a lazy
+# group that could end anywhere in a run of spaces rescanned the run from
+# each place, quadratic on "t(1 … 2)" or a long LaTeX LHS.
+_LHS_DF_RE = re.compile(r"^(?P<name>.*?\S)\s*\((?P<df>[^()]*)\)\s*$")
 
 
 def _split_lhs_df(lhs: str) -> tuple[str, str]:
