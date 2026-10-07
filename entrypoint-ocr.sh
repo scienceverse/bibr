@@ -13,6 +13,13 @@ else
     echo "[ocr] Starting SGLang on single GPU..."
 fi
 
+# The server listens on every interface, so require the bearer token bibr sends
+# (OCR_API_KEY) whenever one is configured. SGLang leaves /health open.
+AUTH_ARGS=()
+if [ -n "${OCR_API_KEY:-}" ]; then
+    AUTH_ARGS=(--api-key "$OCR_API_KEY")
+fi
+
 # NOTE: NEXTN/MTP speculative decoding (--speculative-algorithm NEXTN ...) is
 # DISABLED. It worked on the old (~April 2026) sglang but device-side-asserts
 # during GLM-OCR warmup on recent sglang — both the floating :dev tag and the
@@ -25,4 +32,5 @@ exec python -m sglang.launch_server \
     --revision "$GLM_OCR_REVISION" \
     --mem-fraction-static "${OCR_MEM_FRACTION_STATIC:-0.60}" \
     --served-model-name glm-ocr \
-    "${TP_ARGS[@]}"
+    "${TP_ARGS[@]}" \
+    "${AUTH_ARGS[@]}"
