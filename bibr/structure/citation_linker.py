@@ -968,12 +968,14 @@ def reanchor_citation_receipt(
     not before that citation. One no longer printed (a marker the cleaning
     rewrote) gets an empty span there. Sentences missing from *texts* keep
     their offsets, and so do sentences whose candidates all print their text
-    at their offsets already, which makes re-anchoring twice a no-op.
+    at their offsets already, which makes re-anchoring twice a no-op: a receipt
+    none of whose candidates moved is returned as it is.
     """
     candidates = list(receipt.candidates)
     by_text: dict[int, list[int]] = {}
     for index, candidate in enumerate(candidates):
         by_text.setdefault(candidate.text_id, []).append(index)
+    moved = False
     for text_id, indices in by_text.items():
         text = texts.get(text_id)
         if text is None:
@@ -983,7 +985,8 @@ def reanchor_citation_receipt(
         for index, (start, end) in zip(indices, spans, strict=True):
             if (candidates[index].start, candidates[index].end) != (start, end):
                 candidates[index] = replace(candidates[index], start=start, end=end)
-    return replace(receipt, candidates=tuple(candidates))
+                moved = True
+    return replace(receipt, candidates=tuple(candidates)) if moved else receipt
 
 
 def _reanchored_spans(text: str, candidates: list[CitationCandidate]) -> list[tuple[int, int]]:

@@ -671,7 +671,7 @@ async def test_reanchoring_twice_changes_nothing(text):
     # The exporter re-anchors the receipt post_parse re-anchored already.
     texts, receipt = await _linked_and_cleaned([text])
 
-    assert citation_linker.reanchor_citation_receipt(receipt, texts) == receipt
+    assert citation_linker.reanchor_citation_receipt(receipt, texts) is receipt
     _assert_indexes(_offsets(receipt, 1, texts[1]), texts[1])
 
 
