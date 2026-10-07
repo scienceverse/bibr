@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import bisect
 import ctypes
+import heapq
 import logging
 import math
 import re
@@ -289,13 +290,12 @@ def _bracket_gap(glyphs: list, k: int) -> bool:
     return glyphs[k + 1][1] in _OPENING_BRACKETS and glyphs[k][1] in _CLOSING_PUNCTUATION
 
 
-def _link_kind(
+def _link_kinds(
     glyphs: list[tuple[int, str, tuple[float, float, float, float] | None]],
     connected: list[bool],
     word_gaps: set[int],
-    k: int,
-) -> str | None:
-    """Which link the gap after glyph *k* lies inside: "url" (URL or DOI), "email" or None.
+) -> Callable[[int], str | None]:
+    """Look up the link the gap after glyph *k* lies inside: "url" (URL or DOI), "email" or None.
 
     The run is the glyphs around the gap with no whitespace between them. It
     reads through pdfium's generated breaks within a line and its generated
@@ -306,32 +306,48 @@ def _link_kind(
     inside the link only when the link has glyphs on both sides of it, so a
     space before "https://" or before an address stays. A gap inside both kinds
     is reported as "url".
+
+    Run ends are found once and each run's links matched once: walking and
+    matching the run again for every gap in it took quadratic time on a long
+    line of inserted spaces.
     """
-    if _bracket_gap(glyphs, k):
+    count = len(glyphs)
+    # Whether a run ends at the gap after each glyph.
+    ends = [not connected[j] or j in word_gaps or _bracket_gap(glyphs, j) for j in range(count - 1)]
+    run_start = list(range(count))
+    for j in range(1, count):
+        if not ends[j - 1]:
+            run_start[j] = run_start[j - 1]
+    run_end = list(range(count))
+    for j in range(count - 2, -1, -1):
+        if not ends[j]:
+            run_end[j] = run_end[j + 1]
+    # (first URL or DOI start, e-mail spans) of each run, in run indexes.
+    links: dict[tuple[int, int], tuple[int | None, list[tuple[int, int]]]] = {}
+
+    def kind(k: int) -> str | None:
+        if _bracket_gap(glyphs, k):
+            return None
+        # The gap itself never ends the run it lies inside.
+        start, end = run_start[k], run_end[k + 1]
+        found = links.get((start, end))
+        if found is None:
+            run = "".join(glyphs[index][1] for index in range(start, end + 1))
+            url = DOI_URL_CONTEXT_RE.search(run)
+            emails = [m.span() for m in _EMAIL_RE.finditer(run)] if "@" in run else []
+            found = links[start, end] = (None if url is None else url.start(), emails)
+        url_start, emails = found
+        at = k + 1 - start  # the run index of the glyph after the gap
+        if url_start is not None and url_start < at:
+            return "url"
+        # The spans are disjoint and in order: only the last one starting
+        # before *at* can hold it.
+        last = bisect.bisect_left(emails, (at,)) - 1
+        if last >= 0 and at < emails[last][1]:
+            return "email"
         return None
-    start = k
-    while (
-        start > 0
-        and connected[start - 1]
-        and start - 1 not in word_gaps
-        and not _bracket_gap(glyphs, start - 1)
-    ):
-        start -= 1
-    end = k + 1
-    while (
-        end < len(connected)
-        and connected[end]
-        and end not in word_gaps
-        and not _bracket_gap(glyphs, end)
-    ):
-        end += 1
-    run = "".join(glyphs[index][1] for index in range(start, end + 1))
-    at = k + 1 - start  # the run index of the glyph after the gap
-    if any(m.start() < at for m in DOI_URL_CONTEXT_RE.finditer(run)):
-        return "url"
-    if any(first < at < stop for first, stop in (m.span() for m in _EMAIL_RE.finditer(run))):
-        return "email"
-    return None
+
+    return kind
 
 
 def _printable_glyph(ch: str) -> bool:
@@ -382,7 +398,7 @@ def _repair_word_boundaries(
     (``(-1, REC_SYNTH_SPACE)`` for an inserted space).
     """
     pairs: list[tuple[str | None, float]] = []
-    # Whether two glyphs belong to one link run (see _link_kind).
+    # Whether two glyphs belong to one link run (see _link_kinds).
     connected: list[bool] = []
     for (ra, ca, la), (rb, cb, lb) in zip(glyphs, glyphs[1:], strict=False):
         between = range(ra + 1, rb)
@@ -447,8 +463,9 @@ def _repair_word_boundaries(
         word_gaps = {
             k for k in spaces.values() if glyphs[k][1].isalnum() and glyphs[k + 1][1].isalnum()
         }
+        link_kind = _link_kinds(glyphs, connected, word_gaps)
         for ra, k in spaces.items():
-            kind = _link_kind(glyphs, connected, word_gaps, k)
+            kind = link_kind(k)
             if kind == "url" or (kind == "email" and k not in marked):
                 del insert[ra]
     if not drop and not insert:
@@ -996,6 +1013,8 @@ _SHORT_NATIVE_TEXT_MIN_CHARS = 3
 
 _FONT_SAMPLE_SIZE = 15
 _FONT_BBOX_TOLERANCE = 5.0  # PDF points
+# Line breaks, space and tab carry no glyph metrics to sample.
+_UNSAMPLED_CODES = frozenset(map(ord, "\n\r \t"))
 
 # PDF font-descriptor "Italic" flag (spec Table 121: bit position 7 → 1 << 6).
 # pypdfium2's ``FPDFText_GetFontInfo`` returns these descriptor flags. Note that
@@ -1077,8 +1096,8 @@ def _sample_font_metadata_in_bbox(
     scan_start = max(0, start_idx - 10)
     scan_end = min(n_chars, start_idx + 40)
     for i in range(scan_start, scan_end):
-        ch = chr(pdfium.raw.FPDFText_GetUnicode(textpage.raw, i))
-        if ch in ("\n", "\r", " ", "\t"):
+        # Compared as a code: past U+10FFFF (a broken ToUnicode map) chr() raises.
+        if pdfium.raw.FPDFText_GetUnicode(textpage.raw, i) in _UNSAMPLED_CODES:
             continue
         try:
             cl, cb, cr, ct = textpage.get_charbox(i)
@@ -1699,6 +1718,38 @@ def _clean_pair_share(centres: list[float], steps: list[int], text_centres: list
     return clean / pairs if pairs else 0.0
 
 
+def _count_with_box_on_line(
+    targets: list[_Box], boxes: list[_Box], qualifies: Callable[[_Box, _Box], bool]
+) -> int:
+    """How many *targets* have a box in *boxes* for which ``qualifies(target, box)``.
+
+    *qualifies* holds only for a box that overlaps its target vertically. A
+    sweep up the page offers each target only the boxes that start below its
+    top and still reach above its bottom, so a column of numbers beside a page
+    of text lines costs a few checks per line, not one per pair.
+    """
+    by_bottom = sorted(boxes, key=lambda box: box[1])
+    # (top, index in by_bottom) of the boxes started so far, lowest top first.
+    active: list[tuple[float, int]] = []
+    added = count = 0
+    for target in sorted(targets, key=lambda box: box[1]):
+        while added < len(by_bottom) and by_bottom[added][1] < target[3]:
+            heapq.heappush(active, (by_bottom[added][3], added))
+            added += 1
+        # Targets come bottom first, so a box that ends below this one's
+        # bottom overlaps no later target either.
+        while active and active[0][0] <= target[1]:
+            heapq.heappop(active)
+        count += any(qualifies(target, by_bottom[index]) for _top, index in active)
+    return count
+
+
+def _on_number_line(number: _Box, box: _Box) -> bool:
+    """Whether *box* covers more than half of *number*'s height."""
+    _, bottom, _, top = number
+    return min(top, box[3]) - max(bottom, box[1]) > 0.5 * (top - bottom)
+
+
 def _outer_share(
     column: list[int], numbers: list[tuple[int, _Box]], others: list[_Box], side: str
 ) -> float:
@@ -1716,18 +1767,17 @@ def _outer_share(
         edge = min(box[2] for box in boxes)
         outside = [box for box in others if (box[0] + box[2]) / 2.0 > edge]
     outside = [box for box in outside if box[3] - box[1] <= height]
-    outer = 0
-    for left, bottom, right, top in boxes:
-        for box in outside:
-            if min(top, box[3]) - max(bottom, box[1]) <= 0.5 * (top - bottom):
-                continue
-            if box[3] - box[1] > 2.0 * (top - bottom):
-                continue
-            centre = (box[0] + box[2]) / 2.0
-            if (centre < left) if side == "left" else (centre > right):
-                outer += 1
-                break
-    return outer / len(boxes)
+
+    def further_out(number: _Box, box: _Box) -> bool:
+        left, bottom, right, top = number
+        if min(top, box[3]) - max(bottom, box[1]) <= 0.5 * (top - bottom):
+            return False
+        if box[3] - box[1] > 2.0 * (top - bottom):
+            return False
+        centre = (box[0] + box[2]) / 2.0
+        return centre < left if side == "left" else centre > right
+
+    return _count_with_box_on_line(boxes, outside, further_out) / len(boxes)
 
 
 def _line_number_column(
@@ -1775,15 +1825,14 @@ def _line_number_column(
         text_centres = sorted((box[1] + box[3]) / 2.0 for box in beside)
         if _clean_pair_share(centres, steps, text_centres) < _LINE_NUMBER_MIN_CLEAN_PAIRS:
             continue
-        touching = 0
-        for index in column:
-            _, nbottom, _, ntop = numbers[index][1]
-            for box in beside:
-                overlaps = min(ntop, box[3]) - max(nbottom, box[1]) > 0.5 * (ntop - nbottom)
-                gap = box[0] - inner if side == "left" else inner - box[2]
-                if overlaps and gap < _LINE_NUMBER_MIN_GAP_PT:
-                    touching += 1
-                    break
+        near = [
+            box
+            for box in beside
+            if (box[0] - inner if side == "left" else inner - box[2]) < _LINE_NUMBER_MIN_GAP_PT
+        ]
+        touching = _count_with_box_on_line(
+            [numbers[index][1] for index in column], near, _on_number_line
+        )
         if touching > _LINE_NUMBER_MAX_TOUCHING * len(column):
             continue
         if _outer_share(column, numbers, others, side) > _LINE_NUMBER_MAX_OUTER:
