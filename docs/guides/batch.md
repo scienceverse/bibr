@@ -150,8 +150,10 @@ Concurrency adapts to the serve:
   `Retry-After`; it is never counted as a failure.
 - **502/503/504** answers to a submit or poll, connection errors, and a job
   the serve failed because of an upstream OCR/LLM outage (circuit breaker open,
-  OCR server unreachable, …) are *transient*: in-flight shrinks by one and the
-  paper is retried with backoff up to `--retries` times (default 3). If it
+  OCR server unreachable, a layout model or LLM server that could not start:
+  the job's error says `"outage": true`) are *transient*: in-flight shrinks
+  by one and the paper is retried with backoff up to `--retries` times
+  (default 3). If it
   never recovers, the last transient code is recorded, and the next run picks
   the paper up again.
 - Every success grows in-flight by one, back toward `--max-concurrency`.

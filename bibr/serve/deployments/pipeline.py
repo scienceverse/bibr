@@ -180,6 +180,10 @@ _ERROR_KIND_TO_HTTP = {
     "unexpected": 500,
 }
 
+# Ends an outage's 422 message. Clients that predate the ``outage`` field
+# match "temporarily unavailable" (``bibr.batch.remote.TRANSIENT_MARKERS``).
+_OUTAGE_SUFFIX = "service temporarily unavailable"
+
 # C0/C1 controls and the Unicode line separators: a caller-chosen file name
 # carrying one (an MCP filename is any JSON string) splits or forges log lines.
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
@@ -200,13 +204,18 @@ def _client_processing_message(exc: ProcessingError) -> str:
     any other becomes its stage and code, and the log keeps the text. That
     includes a ``ConfigurationError`` cause: it is written for the operator
     and names the server's model bundle paths.
+
+    An outage says so in bibr's own words, which every ``bibr batch
+    --serve-url`` release reads as a transient failure to run again.
     """
     # The invalid-output error chains its own filtered diagnostic.
     if exc.__cause__ is None or type(exc.safe_diagnostics) is SafeLlmDiagnostics:
-        return str(exc)
-    stage = f" in {exc.failed_stage}" if exc.failed_stage else ""
-    code = f" ({exc.error_code})" if exc.error_code else ""
-    return f"Processing failed{stage}{code}"
+        message = str(exc)
+    else:
+        stage = f" in {exc.failed_stage}" if exc.failed_stage else ""
+        code = f" ({exc.error_code})" if exc.error_code else ""
+        message = f"Processing failed{stage}{code}"
+    return f"{message}: {_OUTAGE_SUFFIX}" if exc.outage else message
 
 
 # Per-request reference-strategy overrides accepted on the wire. Mirror the
@@ -1179,6 +1188,9 @@ class BibrPipelineAPI(ls.LitAPI):
             message = output.get("error") or "Internal server error"
             error_code = output.get("error_code")
             detail = {"message": message, "error_code": error_code} if error_code else message
+            if output.get("outage") is True:
+                # Says the paper was not at fault: a client may run it again later.
+                detail = {"message": message, "error_code": error_code, "outage": True}
             raise HTTPException(
                 status_code=status,
                 detail=detail,
@@ -1275,6 +1287,8 @@ class BibrPipelineAPI(ls.LitAPI):
             message = "Internal processing error"
         error_code = exc.error_code if isinstance(exc, (ProcessingError, LlmCallError)) else None
         safe_diagnostics = exc.safe_diagnostics if isinstance(exc, ProcessingError) else None
+        # Only a 422 needs this: clients already retry a 502.
+        outage = isinstance(exc, ProcessingError) and exc.outage
         log_name = _escape_controls(filename)
         # An unclassified LLM failure may be a bug in the call path: keep its
         # traceback like any other uncoded error.
@@ -1291,6 +1305,7 @@ class BibrPipelineAPI(ls.LitAPI):
             "error": redact_urls(message),
             "error_kind": kind,
             "error_code": error_code,
+            "outage": outage,
             "safe_diagnostics": (
                 safe_diagnostics.to_dict() if type(safe_diagnostics) is SafeLlmDiagnostics else None
             ),

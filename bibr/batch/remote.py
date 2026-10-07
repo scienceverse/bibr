@@ -477,7 +477,13 @@ class RemoteExecutor:
                 failed_stage=error.get("failed_stage"),
                 job_id=job_id,
             )
-        if http_status in TRANSIENT_HTTP or looks_transient(f"{message} {text}"):
+        # ``outage``: the serve says a service or model it needs was down. An
+        # older serve only says so in the message text.
+        if (
+            error.get("outage") is True
+            or http_status in TRANSIENT_HTTP
+            or looks_transient(f"{message} {text}")
+        ):
             raise TransientError(UPSTREAM_UNAVAILABLE, message, job_id=job_id)
         raise PermanentError(
             str(code) if code else f"job_failed_{http_status or 'unknown'}",
