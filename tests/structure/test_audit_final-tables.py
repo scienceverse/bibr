@@ -166,6 +166,43 @@ class TestHeaderNames:
         assert list(df.columns[:3]) == ["x", "x.1", "x.2"]
         assert list(df.columns[-3:]) == ["x.2999", "Unnamed: 3000", "Unnamed: 3001"]
 
+    @pytest.mark.parametrize(
+        "head",
+        [
+            "<tr>{names}</tr><tr></tr>",
+            "<tr></tr><tr>{names}</tr>",
+            "<tr></tr><tr>{names}</tr><tr></tr>",
+        ],
+        ids=["blank-after", "blank-before", "blank-around"],
+    )
+    def test_a_header_row_among_blank_ones_is_named_as_pandas_names_it(self, monkeypatch, head):
+        # Blank head rows make the header [k], which pandas names with the
+        # same quadratic loop as a header of one row.
+        headers = []
+        text_parser = html_table.TextParser
+
+        def recording(rows, **kwargs):
+            header = kwargs["header"]
+            headers.append(rows[header if isinstance(header, int) else header[0]])
+            return text_parser(rows, **kwargs)
+
+        names = "<th>x</th><th></th><th>x</th><th>x.1</th><th></th><th>y</th>"
+        html = (
+            "<table><thead>" + head.format(names=names) + "</thead>"
+            "<tbody><tr>" + "<td>v</td>" * 6 + "</tr></tbody></table>"
+        )
+        raw = [["x", "", "x", "x.1", "", "y"], ["v"] * 6]
+        with text_parser(raw, header=0, dtype=str, na_filter=False) as parser:
+            expected = list(parser.read().columns)
+
+        monkeypatch.setattr(html_table, "TextParser", recording)
+        df = html_table_frame(html)
+
+        assert df is not None
+        assert list(df.columns) == expected
+        (header,) = headers
+        assert header == expected
+
     def test_one_blank_header_cell_is_still_skipped_as_pandas_skips_it(self):
         html = "<table><thead><tr><th></th></tr></thead><tbody><tr><td>a</td></tr></tbody></table>"
 

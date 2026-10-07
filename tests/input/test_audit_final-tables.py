@@ -247,9 +247,21 @@ class TestJatsTables:
         assert rows[-1] == ["0", "y" * 1_000]
         assert sum(len(v) for row in rows for v in row) == 1_000 + len("".join(map(str, range(29))))
 
-    def test_each_element_of_nested_tables_is_walked_once(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "level",
+        [
+            "<table><tr><td>{depth}</td><td>{inner}</td></tr></table>",
+            "<tr><td>{depth}</td><td>{inner}</td></tr>",
+            "<table><tr><td>{depth}</td><td><tex-math>{inner}</tex-math></td></tr></table>",
+            "<table><tr><td>{depth}</td><td><alternatives><tex-math>{inner}</tex-math>"
+            "</alternatives></td></tr></table>",
+        ],
+        ids=["table-in-cell", "row-in-cell", "in-tex-math", "in-alternatives"],
+    )
+    def test_each_element_of_nested_tables_is_walked_once(self, monkeypatch, level):
         """Every cell up the nesting walked the tables inside it again: 60
-        levels over 200,000 empty elements (800 KB) took 15 s."""
+        levels over 200,000 empty elements (800 KB) took 15 s. A <tr> put
+        straight in a cell, and TeX the walker flattens apart, did the same."""
         calls = 0
         walk = jats_native._Walker.walk
 
@@ -261,12 +273,15 @@ class TestJatsTables:
         monkeypatch.setattr(jats_native._Walker, "walk", counting)
         inner = "<x/>" * 1_000
         for depth in range(30):
-            inner = f"<table><tr><td>{depth}</td><td>{inner}</td></tr></table>"
+            inner = level.format(depth=depth, inner=inner)
+        if not inner.startswith("<table>"):
+            inner = f"<table>{inner}</table>"
 
         contents = JatsParser(_article(_wrap(inner))).parse()
 
         assert contents.tables[0].df.shape == (29, 2)
-        assert calls < 2 * 1_000
+        # (An <alternatives> whose TeX flattens to nothing walks it again.)
+        assert calls < 3 * 1_000
 
     def test_the_nested_table_check_looks_only_at_table_ancestors(self):
         """It walked every ancestor of every <table> in Python: many tables

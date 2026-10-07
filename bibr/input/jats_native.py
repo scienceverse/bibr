@@ -450,12 +450,13 @@ def _trim_tex_math(text: str) -> str:
     return collapse_ws(body.replace("$$", "")).strip()
 
 
-def _choose_alternative(alt) -> tuple[object | None, str | None]:
+def _choose_alternative(alt, cut=()) -> tuple[object | None, str | None]:
     """Pick the single representative child of an ``<alternatives>`` element.
 
     Returns ``(element, None)`` to walk, or ``(None, text)`` to emit — never
     both. MathML first (it is the rendered form), else the TeX body without
-    its document preamble, else the first non-graphic child.
+    its document preamble (and the subtrees in *cut*), else the first
+    non-graphic child.
     """
     math = tex = fallback = first = None
     for child in alt:
@@ -473,7 +474,7 @@ def _choose_alternative(alt) -> tuple[object | None, str | None]:
     if math is not None:
         return math, None
     if tex is not None:
-        body = _trim_tex_math(_flatten(tex))
+        body = _trim_tex_math(_Walker(None, cut=cut).run(tex))
         if body:
             return None, body
     target = fallback if fallback is not None else first
@@ -643,7 +644,7 @@ class _Walker:
             self.flat.add(text)
 
     def _walk_alternative(self, alt, in_math: bool, serial: int) -> None:
-        chosen, text = _choose_alternative(alt)
+        chosen, text = _choose_alternative(alt, self.cut)
         if chosen is not None:
             self.walk(chosen, in_math, serial, False)
         elif text:
@@ -682,7 +683,7 @@ class _Walker:
                 elif child_ln == "tex-math":
                     # A bare TeX formula (no <alternatives> around it) carries
                     # the same Springer preamble — keep only its body.
-                    body = _trim_tex_math(_flatten(child))
+                    body = _trim_tex_math(_Walker(None, cut=self.cut).run(child))
                     if body:
                         self._add(body, False, "tex-math", serial)
                 else:
@@ -1602,11 +1603,12 @@ class JatsParser:
                 return None
 
             def cells(tr) -> list[str]:
-                # A nested table's rows are rows of their own, so its text is
-                # left out of the cell around it: every cell up the nesting
-                # repeated it, and walked it again.
+                # A nested table's rows, and a <tr> put straight in a cell, are
+                # rows of their own, so their text is left out of the cell
+                # around them: every cell up the nesting repeated it, and
+                # walked it again.
                 return [
-                    collapse_ws(_Walker(None, cut=("table",)).run(c)).strip()
+                    collapse_ws(_Walker(None, cut=("table", "tr")).run(c)).strip()
                     for c in tr
                     if _ln(c) in ("td", "th")
                 ]

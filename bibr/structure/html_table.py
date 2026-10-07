@@ -365,9 +365,12 @@ def _frame(head: list[list[str]], body: list[list[str]], foot: list[list[str]]) 
     rows = head + body + foot
     width = max((len(row) for row in rows), default=0)
     rows = [row + [""] * (width - len(row)) for row in rows]
-    if header == 0 and width > 1:
+    # pandas names a header of one row, also one given as [k] (head rows
+    # around it blank), with the same quadratic loop.
+    named = header if isinstance(header, int) else header[0] if len(header or ()) == 1 else None
+    if named is not None and width > 1:
         # (One blank cell is a blank line, which pandas skips.)
-        rows[0] = _header_names(rows[0])
+        rows[named] = _header_names(rows[named])
     # dtype=str keeps every cell a string and na_filter=False keeps "NA" and
     # "" as text, so no cell is rewritten or becomes NaN. dtype=str already
     # exempts every column from thousands-separator stripping; thousands=None
