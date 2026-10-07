@@ -1,8 +1,9 @@
-"""Audit fixes: DOI provenance and DOI markers.
+"""Audit fixes: DOI provenance and note citation splitting.
 
-The DOI provenance diff ran in time quadratic in a sentence's length; a
-resolver host printed in capitals hid the label in front of a DOI;
-casefolding a text-layer line moved the end of its DOI.
+The DOI provenance diff ran in time quadratic in a sentence's length and the
+note citation split in time cubic in a note's length; a resolver host printed
+in capitals hid the label in front of a DOI; casefolding a text-layer line
+moved the end of its DOI.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from difflib import SequenceMatcher
 import pytest
 
 from bibr.extract import doi_identity
+from bibr.extract import footnote_citations as fc
 from bibr.extract.pdf_doi_evidence import TextLayerLine
 from bibr.paper_contents import CanonicalSection, PaperContents, PaperSection, PaperSentence
 
@@ -158,3 +160,59 @@ def test_a_text_layer_doi_ends_where_the_line_prints_it_after_letters_casefoldin
 
     assert candidate.normalized == "10.1234/jex.2026.04.006"
     assert tail == " x."
+
+
+# ---------------------------------------------------------------------------
+# Note citations
+# ---------------------------------------------------------------------------
+
+_FIRST = ["Anna", "John", "Maria", "Pierre", "Carlos", "Luisa", "Hans"]
+_LAST = ["Karenina", "Milius", "Dupont", "Garcia", "Lopez", "Novak", "Rossi"]
+_TOPICS = ["argument", "remarks", "court", "doctrine", "parties", "theory", "account"]
+
+
+def _commentary_note(chars: int) -> str:
+    """A long note of commentary naming people ("by Anna Karenina and others")
+    in every sentence and citing nothing."""
+    sentences: list[str] = []
+    k = 0
+    while sum(len(sentence) + 1 for sentence in sentences) < chars:
+        sentences.append(
+            f"The {_TOPICS[k % 7]} {k} was developed further by {_FIRST[k % 7]} "
+            f"{_LAST[(k * 3) % 7]} and others in their {_TOPICS[(k * 5) % 7]}."
+        )
+        k += 1
+    return "12. " + " ".join(sentences)
+
+
+def test_a_long_note_of_commentary_is_split_without_rereading_it_at_every_break(monkeypatch):
+    # Every break read each hand-over's whole remainder again: about 1,600
+    # characters read per character of this note, 6.7 million in all.
+    note = _commentary_note(4_000)
+    budget = [200 * len(note)]
+    looks_like_citation = fc.looks_like_citation
+
+    def counted(clause: str) -> bool:
+        budget[0] -= len(clause)
+        assert budget[0] >= 0, "the split re-read the note"
+        return looks_like_citation(clause)
+
+    monkeypatch.setattr(fc, "looks_like_citation", counted)
+
+    assert fc._split_citations(note) == [note.removeprefix("12. ")]
+
+
+def test_a_hand_over_at_the_end_of_a_long_note_still_leads_to_its_citation():
+    commentary = " ".join(
+        f"The court held in case {k} that the doctrine applies where the parties agreed."
+        for k in range(40)
+    )
+    note = (
+        f"3. {commentary} Estos autores han demostrado, segun W. Stoczkowski, Aux "
+        "origines de l'humanité, Paris, Le Pommier, 2001, p. 12."
+    )
+    assert len(note) > 3_000
+
+    assert fc._split_citations(note) == [
+        "W. Stoczkowski, Aux origines de l'humanité, Paris, Le Pommier, 2001, p. 12."
+    ]

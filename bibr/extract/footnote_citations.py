@@ -143,6 +143,11 @@ _HANDOVER_RE = re.compile(
     rf"|(?:[,:]\s*|(?<=[{_LOW}])\s+)"
     rf"(?=(?:{_INITIALS_NAME}|{_UPPER_SURNAME},\s{_NAME}(?:\s{_NAME})?)[,:.])"
 )
+# How much of the text after a hand-over is read to tell whether a citation
+# follows: a citation shows its year and cues well within it. Reading each
+# hand-over's whole remainder, at every break of a split, made a long note's
+# split cubic in its length.
+_HANDOVER_READ = 1000
 # A name in running text: "John Milius (1982) con los Hércules ...".
 _NAME_IN_PROSE_RE = re.compile(rf"{_ONSET_BODY}\s\(\s*{_YEAR}\s*\),?\s+[{_LOW}]")
 # A lowercase word of four letters or more: commentary, not a byline.
@@ -387,7 +392,7 @@ def _starts_work(text: str) -> bool:
     return bool(_ONSET_RE.match(text) or _CLASSICAL_RE.match(text))
 
 
-def _citation_start(clause: str) -> int:
+def _citation_start(clause: str, verdicts: dict[str, bool] | None = None) -> int:
     """Where the citation in *clause* starts, past any commentary before it.
 
     "... ejemplos recogidos por W. Stoczkowski, Aux origines ..." starts at
@@ -399,29 +404,35 @@ def _citation_start(clause: str) -> int:
     opening with a name (unless such running text follows it), a classical
     work or a quoted title starts at 0, and so does one where no hand-over
     leads to a citation.
+
+    *verdicts* keeps, across the calls of one split, whether the text after a
+    hand-over leads to a citation.
     """
     if clause[:1] in '“«„‘"' or _CLASSICAL_RE.match(clause):
         return 0
     if _ONSET_RE.match(clause) and not _NAME_IN_PROSE_RE.match(clause):
         return 0
+    if verdicts is None:
+        verdicts = {}
     for match in _HANDOVER_RE.finditer(clause):
-        rest = clause[match.end() :].strip()
         # A lead-in word marks what precedes it as commentary; other
         # hand-overs need a prose word before them.
-        if match.group("lead") is None and not _PROSE_WORD_RE.search(clause[: match.start()]):
+        if match.group("lead") is None and not _PROSE_WORD_RE.search(clause, 0, match.start()):
             continue
-        if _NAME_IN_PROSE_RE.match(rest) or not looks_like_citation(rest):
-            continue
-        return match.end()
+        rest = clause[match.end() : match.end() + _HANDOVER_READ].strip()
+        if rest not in verdicts:
+            verdicts[rest] = not _NAME_IN_PROSE_RE.match(rest) and looks_like_citation(rest)
+        if verdicts[rest]:
+            return match.end()
     return 0
 
 
-def _cut_commentary(clause: str) -> str:
-    return clause[_citation_start(clause) :].strip()
+def _cut_commentary(clause: str, verdicts: dict[str, bool] | None = None) -> str:
+    return clause[_citation_start(clause, verdicts) :].strip()
 
 
-def _clean(piece: str) -> str:
-    return _cut_commentary(_strip_lead_in(piece)).strip(" ,;:")
+def _clean(piece: str, verdicts: dict[str, bool] | None = None) -> str:
+    return _cut_commentary(_strip_lead_in(piece), verdicts).strip(" ,;:")
 
 
 def _quoted_spans(text: str) -> list[tuple[int, int]]:
@@ -487,6 +498,9 @@ def _soft_split(clause: str) -> list[str]:
     )
     pieces: list[str] = []
     start = 0
+    # The breaks read the same hand-overs again and again: what follows each
+    # is judged once.
+    verdicts: dict[str, bool] = {}
     for begin, end, sentence in breaks:
         if begin < start:
             continue
@@ -494,13 +508,14 @@ def _soft_split(clause: str) -> list[str]:
         if sentence and _ABBREVIATION_END_RE.search(left):
             continue
         led = sentence and _LEAD_IN_RE.match(right) is not None
-        left_kind = _citation_kind(_clean(left))
+        left_clean = _clean(left, verdicts)
+        left_kind = _citation_kind(left_clean)
         # A repeat ("ABRAMS, ref. 6.") closes a citation as a full one does.
-        left_cites = left_kind is not None or is_repeat_citation(_clean(left))
-        cleaned = _clean(right)
+        left_cites = left_kind is not None or is_repeat_citation(left_clean)
+        cleaned = _clean(right, verdicts)
         # Commentary that hands over to a citation within its first sentence.
         stripped = _strip_lead_in(right)
-        cited_from = _citation_start(stripped)
+        cited_from = _citation_start(stripped, verdicts)
         handed_over = 0 < cited_from <= len(_next_piece(stripped))
         # After a sentence break the first sentence must read as a citation;
         # "or SURNAME, Name" opens a work whose byline is a sentence of its own.
@@ -508,7 +523,7 @@ def _soft_split(clause: str) -> list[str]:
         if (
             (led and _starts_work(stripped))
             or (led and left_cites and looks_like_citation(cleaned))
-            or (left_cites and _starts_work(right) and _citation_kind(_clean(opened)))
+            or (left_cites and _starts_work(right) and _citation_kind(_clean(opened, verdicts)))
             or (left_cites and handed_over and looks_like_citation(cleaned))
         ):
             pieces.append(left)
