@@ -114,6 +114,13 @@ class RorClient:
         short reason ("HTTP 503", "rate limited", "ConnectError", "invalid
         JSON") when ROR could not be asked or did not answer usefully.
         """
+        try:
+            return await self._lookup(text)
+        except Exception as exc:  # noqa: BLE001 - one bad answer must not fail the paper's lookups
+            logger.debug("ROR lookup failed for %r", text[:80], exc_info=True)
+            return None, type(exc).__name__
+
+    async def _lookup(self, text: str) -> tuple[OrganizationMatch | None, str | None]:
         text = " ".join(text.split())
         if not _MIN_CHARS <= len(text) <= _MAX_CHARS:
             return None, None
@@ -135,7 +142,8 @@ class RorClient:
             return None, type(exc).__name__
         if response.status_code == 429:
             retry_after = response.headers.get("Retry-After", "")
-            delay = float(retry_after) if retry_after.isdigit() else _WINDOW_SECONDS
+            # isdecimal, not isdigit: float() rejects a superscript digit.
+            delay = float(retry_after) if retry_after.isdecimal() else _WINDOW_SECONDS
             self._blocked_until = time.monotonic() + delay
             logger.warning("ROR rate limit reached; skipping ROR lookups for %.0fs", delay)
             return None, "rate limited"
@@ -152,14 +160,20 @@ class RorClient:
 
 
 def chosen_organization(payload: Any) -> OrganizationMatch | None:
-    """The ``chosen`` result of a ROR v2 affiliation response, or ``None``."""
+    """The ``chosen`` result of a ROR v2 affiliation response, or ``None``.
+
+    A field of the wrong JSON type counts as absent, so a malformed record is
+    no match rather than an error.
+    """
     items = payload.get("items") if isinstance(payload, dict) else None
     if not isinstance(items, list):
         return None
     for item in items:
         if not isinstance(item, dict) or item.get("chosen") is not True:
             continue
-        org = item.get("organization") or {}
+        org = item.get("organization")
+        if not isinstance(org, dict):
+            return None
         ror_id = canonical_ror(org.get("id"))
         if ror_id is None:
             return None
@@ -174,19 +188,26 @@ def chosen_organization(payload: Any) -> OrganizationMatch | None:
     return None
 
 
+def _list(record: dict, key: str) -> list:
+    value = record.get(key)
+    return value if isinstance(value, list) else []
+
+
+def _text(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
 def _display_name(org: dict) -> str | None:
-    names = org.get("names")
-    if not isinstance(names, list):
-        names = []
+    names = [name for name in _list(org, "names") if isinstance(name, dict)]
     for wanted in ("ror_display", "label"):
         for name in names:
-            if isinstance(name, dict) and wanted in (name.get("types") or []):
-                return name.get("value") or None
-    return org.get("name") or None  # v1 records
+            if wanted in _list(name, "types"):
+                return _text(name.get("value"))
+    return _text(org.get("name"))  # v1 records
 
 
 def _country_code(org: dict) -> str | None:
-    for location in org.get("locations") or []:
+    for location in _list(org, "locations"):
         details = location.get("geonames_details") if isinstance(location, dict) else None
         code = details.get("country_code") if isinstance(details, dict) else None
         if isinstance(code, str) and len(code) == 2:
@@ -195,10 +216,10 @@ def _country_code(org: dict) -> str | None:
 
 
 def _funder_doi(org: dict) -> str | None:
-    for ext in org.get("external_ids") or []:
+    for ext in _list(org, "external_ids"):
         if not isinstance(ext, dict) or str(ext.get("type", "")).lower() != "fundref":
             continue
-        fundref = ext.get("preferred") or next(iter(ext.get("all") or []), None)
+        fundref = ext.get("preferred") or next(iter(_list(ext, "all")), None)
         if isinstance(fundref, str) and fundref.strip().isdigit():
             return f"10.13039/{fundref.strip()}"
     return None

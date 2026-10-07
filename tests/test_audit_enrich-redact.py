@@ -1,15 +1,18 @@
-"""Audit regressions: enrichment warning redaction."""
+"""Audit regressions: enrichment warning redaction, ROR robustness."""
 
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest import mock
 
 import httpx
+import pytest
 
 from bibr.clients.crossref import CrossrefClient
+from bibr.clients.ror import RorClient, chosen_organization
 from bibr.config import GlobalSettings, ResolverOptions
-from bibr.models import PaperReference
+from bibr.models import PaperAuthor, PaperMetadata, PaperReference
 from bibr.processing_warnings import WarningCode
 
 # --- enrichment warnings never quote the request URL (report 2.3) ------------
@@ -139,3 +142,88 @@ def test_terminal_failure_detail_is_redacted_and_single_line():
         "bib_id=1 DOI lookup failed: HTTPStatusError: HTTP 500 Internal Server Error",
         "bib_id=1 DOI lookup failed: RuntimeError: boom at <url>",
     ]
+
+
+# --- a malformed ROR answer is no match, never a failed paper (report 5.4) ----
+
+_ROR_ID = "https://ror.org/00vtgdb53"
+
+
+def _ror_client(handler) -> RorClient:
+    transport = httpx.MockTransport(handler)
+    return RorClient(settings=GlobalSettings(), client=httpx.AsyncClient(transport=transport))
+
+
+def _chosen(org) -> dict:
+    return {"items": [{"chosen": True, "score": 1.0, "organization": org}]}
+
+
+@pytest.mark.parametrize("org", ["not-an-object", ["list"], 7, True])
+def test_a_non_object_organization_is_no_match(org):
+    assert chosen_organization(_chosen(org)) is None
+
+
+@pytest.mark.parametrize(
+    "org",
+    [
+        {"id": _ROR_ID, "names": "Uni"},
+        {"id": _ROR_ID, "names": [{"types": 3, "value": "Uni"}]},
+        {"id": _ROR_ID, "names": [{"types": ["ror_display"], "value": 12}]},
+        {"id": _ROR_ID, "name": ["v1 name"]},
+        {"id": _ROR_ID, "locations": 5},
+        {"id": _ROR_ID, "external_ids": 5},
+        {"id": _ROR_ID, "external_ids": [{"type": "fundref", "all": 7}]},
+    ],
+)
+def test_malformed_organization_fields_count_as_absent(org):
+    match = chosen_organization(_chosen(org))
+    assert match is not None
+    assert match.service_id == _ROR_ID
+    assert (match.name, match.country_code, match.funder_doi) == (None, None, None)
+
+
+def test_lookup_of_a_malformed_record_is_an_answered_miss():
+    client = _ror_client(lambda request: httpx.Response(200, json=_chosen("not-an-object")))
+    assert asyncio.run(client.lookup("University of Glasgow")) == (None, None)
+
+
+def test_an_unexpected_lookup_error_is_a_failed_lookup_not_an_exception():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise RuntimeError("transport bug")
+
+    client = _ror_client(handler)
+    assert asyncio.run(client.lookup("University of Glasgow")) == (None, "RuntimeError")
+
+
+def test_a_non_ascii_retry_after_still_backs_off():
+    # isdigit() accepts a superscript two, which float() rejects.
+    client = _ror_client(lambda request: httpx.Response(429, headers=[(b"Retry-After", b"\xb2")]))
+    assert asyncio.run(client.lookup("University of Glasgow")) == (None, "rate limited")
+    assert client.blocked
+
+
+def test_ror_enricher_stays_complete_on_a_malformed_answer(monkeypatch):
+    """The AttributeError escaped ``RorEnricher.enrich`` and the enrich stage's
+    generic failure path marked the paper's enrichment partial."""
+    from bibr.clients import ror
+    from bibr.pipeline.enricher import EnrichmentStatus, RorEnricher
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["affiliation"] == "Uni Two":
+            return httpx.Response(200, json=_chosen({"id": _ROR_ID}))
+        return httpx.Response(200, json=_chosen("not-an-object"))
+
+    client = _ror_client(handler)
+    monkeypatch.setattr(ror, "get_client", lambda settings: client)
+    metadata = PaperMetadata(
+        doi="",
+        title="A paper",
+        authors=[PaperAuthor(author_id=1, given="A", family="B", affiliation="Uni One; Uni Two")],
+    )
+    fs = SimpleNamespace(paper=SimpleNamespace(metadata=metadata))
+
+    outcome = asyncio.run(RorEnricher(settings=GlobalSettings()).enrich(fs))
+
+    assert outcome.status is EnrichmentStatus.COMPLETE
+    assert outcome.warnings == ()
+    assert set(metadata.affiliation_match) == {"Uni Two"}
