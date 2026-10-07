@@ -44,6 +44,7 @@ from bibr.paper_contents import (
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.structure.assembler import DeferredText, DocumentAssembler
 from bibr.structure.float_labels import FIGURE_WORD, SUPPLEMENT_WORD, TABLE_WORD, caption_label
+from bibr.structure.html_table import rendered_size as _rendered_size
 from bibr.structure.section_tree import infer_level_from_numbering
 from bibr.structure.xref_utils import URL_RE, detect_xrefs
 from bibr.utils.text import clean_extracted_url
@@ -229,16 +230,6 @@ def _decimal(el, default: int) -> int:
         return int(el.get(_W_VAL))
     except (TypeError, ValueError):
         return default
-
-
-def _rendered_size(text: str) -> tuple[int, int]:
-    """Characters *text* takes in table HTML (``&``, ``<`` and ``>`` escaped),
-    and the bytes per character it forces on the whole HTML string."""
-    size = len(text) + 4 * text.count("&") + 3 * (text.count("<") + text.count(">"))
-    if text.isascii():
-        return size, 1
-    top = ord(max(text))
-    return size, 4 if top > 0xFFFF else 2 if top > 0xFF else 1
 
 
 def _table_rows(tbl) -> list[list[tuple[object, int]]]:

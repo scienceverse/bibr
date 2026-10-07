@@ -22,7 +22,8 @@ none has integer column labels; ``colspan``/``rowspan`` copy the cell's text
 into every position it covers. The rows then go through pandas' own row
 parser (the one ``read_html`` uses) with every conversion turned off, so the
 header naming ("Unnamed: 1", a repeated "Mean" becoming "Mean.1") is pandas'
-too. Three inputs that made ``read_html`` fail or lose a cell are read
+too (a one-row header is named here as pandas names it, in linear time where
+pandas took the square of the width). Three inputs that made ``read_html`` fail or lose a cell are read
 instead: a span that is not a plain integer ("2px") counts from its leading
 digits, as a browser counts it; ``colspan="0"`` counts as 1 instead of
 deleting the cell; and several header rows with no text at all are read as no
@@ -45,9 +46,11 @@ as data rather than as that many MultiIndex levels.
 
 The text is bounded too, since every slot a cell spans holds its text again:
 one long cell spanning 20 columns down 5,000 bare ``<tr>`` made 40 KB of
-HTML into 2 GB of contents. A table holding more than ``MAX_TABLE_CHARS`` of
-slot text is not read, and a :class:`TableBudget` bounds the text and slots
-of all the tables of one document, which the JATS reader charges as well.
+HTML into 2 GB of contents. A table is measured as its HTML renders
+(:func:`rendered_size`, as the DOCX reader measures its tables); one past
+``MAX_TABLE_BYTES`` is not read, and a :class:`TableBudget` bounds the size
+and slots of all the tables of one document, which the JATS reader charges
+as well.
 """
 
 from __future__ import annotations
@@ -55,6 +58,7 @@ from __future__ import annotations
 import copy
 import logging
 import re
+from collections import Counter, defaultdict
 from typing import Any
 
 import pandas as pd
@@ -86,20 +90,62 @@ _SLOTS_PER_ITEM = 20
 # level, which costs pandas about a millisecond however narrow the table:
 # 8,000 one-cell <th> rows (150 KB) took 9 s.
 _MAX_HEADER_ROWS = 100
-# Text a table may hold, a spanned cell's text counted in every slot it fills
-# (2,000 rows of twenty 400-character cells fit), and the text and slots the
-# tables of one document may hold together. The slot limit is the DOCX one:
+# The size a table may render to, and the size and slots the tables of one
+# document may hold together (the DOCX limits). A table is measured as its
+# HTML renders: every slot a spanned cell fills writes its text again,
+# escaped (pandas turns "&" into "&amp;"), with some _CELL_MARKUP_CHARS of
+# markup, and one character past U+00FF or U+FFFF makes the whole string 2 or
+# 4 bytes a character (PEP 393). Counting characters let 274 KB of emoji
+# header cells spanning 1,000 columns take 945 MiB, and an 815 KB JATS file
+# 1.2 GB of table HTML. 2,000 rows of twenty 400-character ASCII cells fit.
 # JATS tables are rendered with DataFrame.to_html at some 8 us a slot.
-MAX_TABLE_CHARS = 16 * 1024 * 1024
-MAX_DOCUMENT_TABLE_CHARS = 64 * 1024 * 1024
+MAX_TABLE_BYTES = 16 * 1024 * 1024
+MAX_DOCUMENT_TABLE_BYTES = 64 * 1024 * 1024
 MAX_DOCUMENT_TABLE_SLOTS = 4_000_000
+_CELL_MARKUP_CHARS = 16
 
 # One pending rowspan: (column index, cell text, rows still covered).
 _Pending = tuple[int, str, int]
 
 
+def rendered_size(text: str) -> tuple[int, int]:
+    """Characters *text* takes in table HTML (``&``, ``<`` and ``>`` escaped),
+    and the bytes per character it forces on the whole HTML string."""
+    size = len(text) + 4 * text.count("&") + 3 * (text.count("<") + text.count(">"))
+    if text.isascii():
+        return size, 1
+    top = ord(max(text))
+    return size, 4 if top > 0xFFFF else 2 if top > 0xFF else 1
+
+
+class TableSize:
+    """The rendered size of a table read slot by slot, within *limit* bytes."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.chars = 0
+        self.char_bytes = 1
+        # A spanned cell repeats one string: it is measured once.
+        self._costs: dict[str, int] = {}
+
+    @property
+    def bytes(self) -> int:
+        return self.chars * self.char_bytes
+
+    def add(self, texts: list[str]) -> bool:
+        """Count a slot for each of *texts*; False once past the limit."""
+        for text in texts:
+            cost = self._costs.get(text)
+            if cost is None:
+                cost, char_bytes = rendered_size(text)
+                cost = self._costs[text] = cost + _CELL_MARKUP_CHARS
+                self.char_bytes = max(self.char_bytes, char_bytes)
+            self.chars += cost
+        return self.bytes <= self.limit
+
+
 class TableBudget:
-    """The text and slots the tables of one document hold together.
+    """The rendered size and slots the tables of one document hold together.
 
     A parser keeps one for its document and charges every table it reads to
     it; a table over the limits is not read, and ``refused`` counts it with
@@ -107,20 +153,20 @@ class TableBudget:
     """
 
     def __init__(self) -> None:
-        self.chars = 0
+        self.bytes = 0
         self.slots = 0
         self.refused = 0
 
-    def max_chars(self) -> int:
-        """The text the next table may hold."""
-        return min(MAX_TABLE_CHARS, MAX_DOCUMENT_TABLE_CHARS - self.chars)
+    def size(self) -> TableSize:
+        """A measure for the next table, limited to what is left."""
+        return TableSize(min(MAX_TABLE_BYTES, MAX_DOCUMENT_TABLE_BYTES - self.bytes))
 
-    def charge(self, chars: int, slots: int) -> bool:
-        """Count a table of *chars* text in *slots* slots, or return False,
+    def charge(self, size: TableSize, slots: int) -> bool:
+        """Count a table of *size* in *slots* slots, or return False,
         counting nothing, when it does not fit."""
-        if chars > self.max_chars() or self.slots + slots > MAX_DOCUMENT_TABLE_SLOTS:
+        if size.bytes > size.limit or self.slots + slots > MAX_DOCUMENT_TABLE_SLOTS:
             return False
-        self.chars += chars
+        self.bytes += size.bytes
         self.slots += slots
         return True
 
@@ -132,9 +178,9 @@ class TableBudget:
             ProcessingWarning(
                 WarningCode.TABLE_CONTENTS_OMITTED,
                 f"Left out the contents of {self.refused} table(s) out of proportion to their "
-                f"markup or over the table limits ({MAX_TABLE_CHARS // 2**20} Mi characters "
-                f"of cell text per table; {MAX_DOCUMENT_TABLE_CHARS // 2**20} Mi characters "
-                f"and {MAX_DOCUMENT_TABLE_SLOTS:,} cells per document)",
+                f"markup or over the table limits ({MAX_TABLE_BYTES // 2**20} MiB of table "
+                f"HTML as rendered per table; {MAX_DOCUMENT_TABLE_BYTES // 2**20} MiB and "
+                f"{MAX_DOCUMENT_TABLE_SLOTS:,} cells per document)",
             )
         ]
 
@@ -245,16 +291,15 @@ def _expand_spans(rows: list[Tag], budget: TableBudget) -> list[list[str]]:
     A rowspan still open after the last row ends there, and a colspan where
     its row would grow wider than the table may be. Raises
     :class:`_TooManyCells` when a row's own cells and the rowspans it carries
-    are wider than that already, or when the slots' text or the padded slots
-    pass what *budget* has left, so the frame is never built past its bounds.
-    The table is charged to *budget* otherwise.
+    are wider than that already, or when the slots' rendered size or the
+    padded slots pass what *budget* has left, so the frame is never built past
+    its bounds. The table is charged to *budget* otherwise.
     """
     row_cells = [_cells(tr) for tr in rows]
     max_width = max_table_width(
         len(rows), sum(map(len, row_cells)), max(map(len, row_cells), default=0)
     )
-    max_chars = budget.max_chars()
-    chars = 0
+    size = budget.size()
     grid: list[list[str]] = []
     # The rowspans still open from the rows above, in column order.
     pending: list[_Pending] = []
@@ -291,13 +336,12 @@ def _expand_spans(rows: list[Tag], budget: TableBudget) -> list[list[str]]:
             if prev_rows > 1:
                 still_open.append((prev_index, prev_text, prev_rows - 1))
         # The grid shares each cell's string, but the frame and the contents
-        # copy it into every slot.
-        chars += sum(map(len, texts))
-        if chars > max_chars:
-            raise _TooManyCells("text passes the table text limits")
+        # copy it into every slot (pandas names repeated header text anew).
+        if not size.add(texts):
+            raise _TooManyCells("text passes the table size limits")
         grid.append(texts)
         pending = still_open
-    if not budget.charge(chars, len(grid) * max(map(len, grid), default=0)):
+    if not budget.charge(size, len(grid) * max(map(len, grid), default=0)):
         raise _TooManyCells("cells pass the document's table cell limit")
     return grid
 
@@ -321,6 +365,9 @@ def _frame(head: list[list[str]], body: list[list[str]], foot: list[list[str]]) 
     rows = head + body + foot
     width = max((len(row) for row in rows), default=0)
     rows = [row + [""] * (width - len(row)) for row in rows]
+    if header == 0 and width > 1:
+        # (One blank cell is a blank line, which pandas skips.)
+        rows[0] = _header_names(rows[0])
     # dtype=str keeps every cell a string and na_filter=False keeps "NA" and
     # "" as text, so no cell is rewritten or becomes NaN. dtype=str already
     # exempts every column from thousands-separator stripping; thousands=None
@@ -329,3 +376,35 @@ def _frame(head: list[list[str]], body: list[list[str]], foot: list[list[str]]) 
     with TextParser(rows, header=header, dtype=str, na_filter=False, thousands=None) as parser:
         frame: pd.DataFrame = parser.read()
     return frame
+
+
+def _header_names(row: list[str]) -> list[str]:
+    """The column names pandas gives a one-row header, named here.
+
+    pandas looks every repeated name up in the list of names, and every
+    column up in the list of blank ones, so the time grew with the square of
+    the width: naming 20,000 columns of one name took 3 s, and twice as many
+    four times as long. These are its names: a blank cell is
+    "Unnamed: <column>", named cells are named before blank ones, and a
+    repeated name takes the first ".<n>" no other column holds. Unique,
+    pandas keeps them.
+    """
+    names = [text or f"Unnamed: {i}" for i, text in enumerate(row)]
+    held = Counter(names)
+    counts: defaultdict[str, int] = defaultdict(int)
+    order = [i for i, text in enumerate(row) if text] + [
+        i for i, text in enumerate(row) if not text
+    ]
+    for i in order:
+        name = old = names[i]
+        count = counts[name]
+        while count > 0:
+            counts[old] = count + 1
+            name = f"{old}.{count}"
+            count = count + 1 if held[name] else counts[name]
+        if name != old:
+            held[old] -= 1
+            held[name] += 1
+            names[i] = name
+        counts[name] = count + 1
+    return names

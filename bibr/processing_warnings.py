@@ -220,9 +220,10 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     "data limit (an image counts once per figure showing it); the figures past it are kept "
     "without an image.",
     WarningCode.TABLE_CONTENTS_OMITTED: "An HTML, ePub or JATS table expanded far past its "
-    "markup, or its cell text (a spanned cell counts once per cell it covers) or cells passed "
-    "the table limits; it is kept without contents when its caption labels it (JATS: when it "
-    "has a label or caption) and dropped otherwise.",
+    "markup, or its size as rendered (escaped text and cell markup in every cell, a spanned "
+    "cell's text once per cell it covers) or its cells passed the table limits; it is kept "
+    "without contents when its caption labels it (JATS: when it has a label or caption) and "
+    "dropped otherwise.",
 }
 
 

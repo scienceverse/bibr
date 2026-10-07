@@ -586,10 +586,13 @@ class _Walker:
     accumulated.
     """
 
-    def __init__(self, exclude, on_block=None, on_link=None, boundaries=None) -> None:
+    def __init__(self, exclude, on_block=None, on_link=None, boundaries=None, cut=()) -> None:
         self.reset()
         self.serials = itertools.count()
         self.exclude = exclude
+        # Subtrees read elsewhere: left out like *exclude*, but still a word
+        # boundary.
+        self.cut = cut
         self.on_block = on_block
         self.on_link = on_link
         self.boundaries = _TEXT_BOUNDARY if boundaries is None else boundaries
@@ -662,6 +665,8 @@ class _Walker:
                 # Dispatched (and flushed) by the caller; the tail still
                 # belongs to the running text that follows the block.
                 pass
+            elif child_ln in self.cut:
+                self.flat.separate()
             elif self.exclude is None or child_ln not in self.exclude:
                 if child_ln in self.boundaries or (
                     child_ln == "mspace" and mspace_separates(child.attrib)
@@ -1570,16 +1575,18 @@ class JatsParser:
 
         Rows are padded to the widest within the HTML table limits
         (:func:`~bibr.structure.html_table.max_table_width`), and the table is
-        charged to *budget* (by default, a budget of its own). A table past
-        either is not read: ``None``, counted in ``budget.refused``.
+        charged to *budget* (by default, a budget of its own) at its rendered
+        size. A table past either is not read: ``None``, counted in
+        ``budget.refused``.
         """
         if budget is None:
             budget = TableBudget()
         tables = [el for el in table_els if el is not None]
         # A <table> nested in another is read with it: reading it again
-        # repeated its rows once for each table around it.
+        # repeated its rows once for each table around it. Only table
+        # ancestors are looked at, so the walk up stays in lxml.
         listed = set(tables)
-        tables = [el for el in tables if not any(a in listed for a in el.iterancestors())]
+        tables = [el for el in tables if not any(a in listed for a in el.iterancestors("{*}table"))]
         if not tables:
             return None
 
@@ -1595,7 +1602,14 @@ class JatsParser:
                 return None
 
             def cells(tr) -> list[str]:
-                return [_text(c) for c in tr if _ln(c) in ("td", "th")]
+                # A nested table's rows are rows of their own, so its text is
+                # left out of the cell around it: every cell up the nesting
+                # repeated it, and walked it again.
+                return [
+                    collapse_ws(_Walker(None, cut=("table",)).run(c)).strip()
+                    for c in tr
+                    if _ln(c) in ("td", "th")
+                ]
 
             thead = _first_desc(tables[0], "thead")
             header_tr = None
@@ -1610,19 +1624,19 @@ class JatsParser:
             header = cells(header_tr) if header_tr is not None else []
             # Later tables repeat the header print; a repeated header row adds
             # no tokens beyond the header itself, so drop exact repeats while
-            # keeping any differing header as a data row. A nested table's
-            # text is in every cell around it too, so the text is counted as
-            # each row is read.
-            max_chars = budget.max_chars()
-            chars = sum(map(len, header))
+            # keeping any differing header as a data row. The table is
+            # measured as to_html renders it, row by row.
+            size = budget.size()
+            if not size.add(header):
+                refuse("text passes the table size limits")
+                return None
             data: list[list[str]] = []
             for tr in body_trs:
                 row = cells(tr)
                 if header and row == header:
                     continue
-                chars += sum(map(len, row))
-                if chars > max_chars:
-                    refuse("text passes the table text limits")
+                if not size.add(row):
+                    refuse("text passes the table size limits")
                     return None
                 data.append(row)
             width = max([len(header), *[len(r) for r in data]], default=0)
@@ -1633,8 +1647,8 @@ class JatsParser:
             if width > max_table_width(rows, len(header) + sum(map(len, data)), width):
                 refuse("pads its rows far past its cells")
                 return None
-            if not budget.charge(chars, rows * width):
-                refuse("text or cells pass the table limits")
+            if not budget.charge(size, rows * width):
+                refuse("cells pass the document's table cell limit")
                 return None
             header = header + [""] * (width - len(header))
             data = [r + [""] * (width - len(r)) for r in data]
