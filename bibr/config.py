@@ -2195,7 +2195,9 @@ class McpOptions(_BibrSettings):
     same chew-then-query tool surface as ``bibr mcp``, with extraction routed
     through the regular serve inference dispatch. Gated by the same bearer
     auth as every other route. Serve-only and purely additive — does not
-    affect extraction output (see ``_FINGERPRINT_EXCLUDED_SECTIONS``).
+    affect extraction output (see ``_FINGERPRINT_EXCLUDED_SECTIONS``). The
+    stdio server (``bibr mcp``) honours ``chew_url_enabled`` and
+    ``url_allowed_hosts`` too.
     """
 
     model_config = _section("MCP_")
@@ -2220,9 +2222,10 @@ class McpOptions(_BibrSettings):
     )
     chew_url_enabled: bool = Field(
         True,
-        description="Expose the chew_url tool on the serve MCP endpoint: a server-side, "
-        "SSRF-guarded download of a public https:// URL routed into extraction. Disable "
-        "to keep the endpoint free of outbound fetches.",
+        description="Expose the chew_url tool on the MCP servers (bibr mcp and the serve "
+        "endpoint): a server-side, SSRF-guarded download of a public https:// URL routed "
+        "into extraction. Disable to keep them free of outbound fetches an agent could "
+        "use to send data out.",
     )
     url_allowed_hosts: Annotated[list[str], NoDecode] = Field(
         [],

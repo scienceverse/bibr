@@ -585,8 +585,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "get_reference_citations, get_tables, get_figures and save_paper "
             "query the result in slices. One warm pipeline serves the whole "
             "session, so pipeline options are fixed at start via the flags "
-            "below (a subset of 'bibr chew'). Requires the 'mcp' extra. "
-            "Register with e.g.: claude mcp add bibr -- uv run bibr mcp"
+            "below (a subset of 'bibr chew'). The file tools reach only the "
+            "--allow-dir directories (default: the current directory). Requires "
+            "the 'mcp' extra. Register with e.g.: claude mcp add bibr -- uv run bibr mcp"
+        ),
+    )
+    mcp_parser.add_argument(
+        "--allow-dir",
+        action="append",
+        metavar="DIR",
+        help=(
+            "Directory chew_paper, load_paper and save_paper may access, with "
+            "symlinks resolved; repeat for several (default: the current directory)"
         ),
     )
     mcp_parser.add_argument(
