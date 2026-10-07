@@ -249,7 +249,8 @@ a killed paper as failed: it waits for `--retry-failed`.
 
 `error_code` values: locally, the pipeline's own code (`ChewFailure.error_code`, e.g.
 an OCR or reference-parse code) or `processing_error`, `upstream_unavailable`
-(an OCR or LLM service was down or could not start: `ChewFailure.outage`),
+(an OCR or LLM service was down or could not start, or a required classifier
+failed to load: `ChewFailure.outage`),
 `chunk_error` (the pipeline crashed on the paper: a chunk that crashes runs its
 papers again one by one, so only a paper that crashes on its own gets it, or
 the whole chunk when the pipeline could not run at all), `interrupted`;

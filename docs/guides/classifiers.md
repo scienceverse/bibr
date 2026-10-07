@@ -28,7 +28,10 @@ relative position and neighboring headings. Predictions below
 If the model is disabled or unavailable, the pipeline uses the LLM path.
 Classifier load and inference failures are recorded as degraded operation;
 `ML_CLASSIFIERS_REQUIRED=true` makes configured classifier availability a
-requirement instead.
+requirement instead. A required classifier that fails to load fails every file
+with `classifier_required_failed`, flagged as an outage (`ChewFailure.outage`),
+so a resumed `bibr batch` runs those papers again. The failure is kept for the
+pipeline's lifetime, so later chunks fail before rendering or OCR.
 
 ### Tier 3: LLM-based classification
 
