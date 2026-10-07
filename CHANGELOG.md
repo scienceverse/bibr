@@ -22,11 +22,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   MiB. Merges are now resolved in linear time, each image is encoded once, and tables and figures
   are bounded by the limits under Changed.
 
-- A few bytes of HTML table spans no longer build millions of cells. `colspan` and `rowspan` were
-  capped per cell only, and a `rowspan` past the last row added a row of copies for every row it
-  reached, so 424 bytes of spans took 10 s and 660 MB. It affected HTML, ePub and OCR table HTML;
-  how spans are read now is under Changed. Native HTML and ePub parsing is also no longer quadratic
-  in the links of a paragraph or the sections of a paper.
+- A small crafted DOCX can no longer turn one footnote, equation or picture into gigabytes of text,
+  or stall the parser on lookups that grew with the square of the file. A note referenced 20,000
+  times in 34 KB became 20,000 footnotes and 1 GB of sentences, each scanned for citations; notes,
+  links, text boxes and equations nested in their own kind repeated their text once per level (1 MB
+  nested 250 deep gave 250 MB); a picture was listed once for every drawing around it; and each
+  hyperlink, heading and paragraph style was found by searching the whole document (142 KB of links
+  took 53 s, 56 KB of styles 52 s). Each note is now read once, with one reference from each
+  paragraph that cites it, a nested element is read as part of the outermost one, and each lookup is
+  made once per document.
+
+- A few bytes of HTML, ePub or JATS table markup no longer build millions of cells or gigabytes of
+  text. HTML `colspan` and `rowspan` were capped per cell only, and a `rowspan` past the last row
+  added a row of copies for every row it reached, so 424 bytes of spans took 10 s and 660 MB; a long
+  cell spanning 20 columns down 5,000 empty rows turned 40 KB into 2 GB of `contents`. A JATS table
+  padded every row to its widest row with no limit (40 KB took 135 s and 2 GB) and read a nested
+  table once for every table around it (100 KB of nesting gave 324 MB). An HTML header repeating one
+  name across thousands of columns took time growing with the square of its width in pandas' header
+  naming, which bibr now does in linear time with the same names. This affected HTML, ePub, JATS and
+  OCR table HTML; the new limits are under Changed. Native HTML and ePub parsing is also no longer
+  quadratic in the links of a paragraph or the sections of a paper.
 
 - JATS and ePub XML, and the text clean-ups every input goes through, are now linear on crafted runs
   that took quadratic time, up to half a minute each: a repeated named entity such as `&alpha;`,
@@ -50,8 +65,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   library or internal error (a missing file under `/app/.hf_cache`, a zip or parser error) now
   reads, for example, "Processing failed in layout (layout_failed)" in the 422 body and the job
   error, and the full text goes only to the server log; messages bibr writes itself, and input, LLM
-  and upstream errors, are unchanged. A file name with a newline or another control character, which
-  an MCP `chew_paper` call can send, is logged escaped and can no longer forge log lines.
+  and upstream errors, are unchanged. When the cause was a service or model the pipeline needs being
+  down, the message ends in ": service temporarily unavailable" and the detail carries
+  `"outage": true`, so `bibr batch --serve-url` still retries the paper. A file name with a newline
+  or another control character, which an MCP `chew_paper` call can send, is logged escaped and can
+  no longer forge log lines.
 
 - The secret scrubber for logs and error text now also masks URL passwords whatever characters they
   or the user name hold (`o'brien:secret@…`), a token used as a URL user name, Hugging Face, GitHub
@@ -132,7 +150,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   after the others, and waits for `--retry-failed` after three. `bibr batch report` and the tables
   ignore `started` lines; filter them out if you read `outcomes.jsonl` yourself. A run also holds a
   lock on `<out>/.lock`, and a second run on the same `--out` stops at once with exit code 2 instead
-  of racing the first.
+  of racing the first. On a filesystem without byte-range locks, Windows shares included, it warns
+  that `<out>` cannot be locked and runs without the guard.
 
 - The LLM response cache (`CACHE_LLM`) key now covers the provider, the endpoint (without
   credentials), the call parameters (temperature, output cap, reasoning effort, thinking budget,
@@ -153,8 +172,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   host stopping the server) now take the Ctrl-C path in `bibr chew`, `bibr batch` and `bibr mcp`, so
   managed vLLM, llama.cpp and Rapid-MLX servers are shut down instead of being left holding GPU
   memory and their port. `bibr chew` and `bibr mcp` then exit with 128 plus the signal number (143
-  for SIGTERM) and `bibr batch` with 130; under systemd, add `SuccessExitStatus=130 143`. A SIGHUP
-  ignored with `nohup` stays ignored, and `bibr serve` keeps its own handling.
+  for SIGTERM); `bibr mcp` exits as soon as its servers are stopped, even while the MCP host keeps
+  its stdin open. `bibr batch` exits 130 wherever the interrupt lands, input discovery and the
+  closing table rebuild included, and Ctrl-C there no longer ends in a traceback. Under systemd, add
+  `SuccessExitStatus=130 143`. A SIGHUP ignored with `nohup` stays ignored, and `bibr serve` keeps
+  its own handling.
 
 - Model settings (`WTPSPLIT_MODEL`, `NER_PARSER_CKPT`, the `*_MODEL_ID` settings) shaped like a
   Hugging Face Hub id, `org/name` or a segmenter short name such as `sat-6l-sm`, are now always
@@ -207,9 +229,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - HTML tables (HTML and ePub input, and the table HTML that OCR returns): a `rowspan` past the last
   row now ends there, as a browser draws it, instead of adding rows of copies to `contents`; a
   `colspan` ends at twice the widest row of cells plus 20 columns (a `colspan="100"` footnote row
-  under five columns gives 30); a table too large even so gets no `contents`, keeping its caption
-  and markup when the caption labels it; and more than 100 header rows are read as data rows. This
-  mostly affects OCR tables, where an overlong span is a common recognition error.
+  under five columns gives 30); a table too large even so gets no `contents` (see the table limits
+  below); and more than 100 header rows are read as data rows. This mostly affects OCR tables, where
+  an overlong span is a common recognition error.
+
+- HTML, ePub and JATS tables now have size limits, measured as DOCX tables are, as the table HTML
+  renders (escaped text and cell markup in every cell, a spanned cell's text once for every cell it
+  covers, wide characters at their byte width): a table may render to at most 16 MiB, which also
+  applies to the table HTML that OCR returns, and the tables of one document, an ePub's chapters
+  counting as one, to 64 MiB and 4,000,000 cells together. JATS tables also follow the HTML rule of
+  at most 20 cells for each cell and row they have, plus 1,000. A table past these limits gets no
+  `contents`; it keeps its caption and markup when the caption labels it (in JATS, when it has a
+  label or caption) and is dropped otherwise, and a new `TABLE_CONTENTS_OMITTED` warning counts it.
+  In JATS, a table nested in another is now read once: its rows follow the row holding it, and its
+  text is no longer repeated in the cell around it.
 
 - `bibr serve`: `PIPELINE_TIMEOUT` now bounds the whole extraction request, including waits for a
   `PIPELINE_MAX_INFLIGHT_REQUESTS` slot or for an identical extraction in this process or another
@@ -246,6 +279,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   off by default, and results with it are cached apart from results without it. Before,
   the field was ignored like any unknown one. `bibr batch` with a serve URL forwards
   `--region-meta` instead of warning that the serve ignores it.
+
+- When `bibr serve` fails a paper because a service or model it needs was down (an OCR server that
+  refused or dropped the connection, a layout model or LLM server that could not start), the 422
+  body and the job error carry `"outage": true`, and library callers can read
+  `ProcessingError.outage`. `bibr batch --serve-url` reads the field and, like the local executor,
+  retries the paper and runs it again on resume; a layout model that could not start used to be
+  recorded as a permanent `layout_failed`.
 
 ### Fixed
 
@@ -657,6 +697,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The GPU serve image installed `onnxruntime-gpu` 1.28.0, a CUDA 13 build, on its CUDA 12 base
   instead of the locked 1.26.0, and a floating `uv:latest` re-resolved a stale lock. It now installs
   the locked wheels with a pinned uv and fails on a stale lock.
+
+- A picture in a DOCX text box was listed once for every drawing around it, so it could be exported
+  as several figures.
 
 ## [0.6.0] - 2026-09-30
 
