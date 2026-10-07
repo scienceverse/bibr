@@ -777,7 +777,6 @@ async def test_demo_current_env_choice_undoes_the_preset(
         # Rich markup in a name could hide the names the notice prints.
         {"A[conceal]_URL": "x", "LLM_BASE_URL": "https://theirs.example/v1"},
         {"LLM\nBASE_URL": "x"},
-        {"LLM_MAX_TOKENS": 100},
     ],
 )
 def test_preset_use_refuses_crafted_setting_names(tmp_path, monkeypatch, capsys, settings):
@@ -815,3 +814,17 @@ def test_preset_values_print_literally(tmp_path, monkeypatch, capsys):
     code, out = _preset(capsys, "show", name="p")
     assert code == 0
     assert "[conceal]hidden[/conceal]" in out
+
+
+def test_preset_show_prints_typed_values(tmp_path, monkeypatch, capsys):
+    from bibr.presets import PresetManager
+
+    presets = PresetManager(tmp_path / "presets")
+    presets.save("typed", {"BIBR_RESOLVER_SOURCES": ["crossref"], "LAYOUT_DPI": 200})
+    monkeypatch.setenv("BIBR_ENV_FILE", str(tmp_path / ".env"))
+    monkeypatch.setenv("BIBR_PRESETS_DIR", str(presets.directory))
+
+    code, out = _preset(capsys, "show", name="typed")
+    assert code == 0
+    assert "LAYOUT_DPI=200" in out
+    assert "crossref" in out

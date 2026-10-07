@@ -160,6 +160,8 @@ def redact_value(name: str, value: str) -> str:
     are shown with any URL password or query-string secret masked
     (``REDIS_URL``, ``LLM_BASE_URL``), the rest verbatim.
     """
+    # A hand-edited JSON preset may hold numbers, lists or booleans.
+    value = value if isinstance(value, str) else str(value)
     if not is_secret_key(name):
         return redact_url_secrets(value)
     if len(value) < 8:
@@ -304,16 +306,11 @@ class PresetManager:
         # environment variable name: "LLM_BASE_URL " would pass the endpoint
         # notice and validation as an unknown name, yet dotenv still reads it
         # as LLM_BASE_URL; markup or newlines in a key garble what is printed.
-        for key, value in data.items():
+        for key in data:
             if not isinstance(key, str) or not _ENV_KEY_RE.fullmatch(key):
                 raise InvalidPresetError(
                     f"Preset {name!r} at {path} has an invalid setting name {key!r}; "
                     "names must be letters, digits and underscores. Fix or delete the file."
-                )
-            if not isinstance(value, str):
-                raise InvalidPresetError(
-                    f"Preset {name!r} at {path} sets {key} to a non-string value. "
-                    "Fix or delete the file."
                 )
         return data
 
