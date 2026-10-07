@@ -160,8 +160,13 @@ class CrossrefClient:
             headers["Crossref-Plus-API-Token"] = f"Bearer {self.api_key}"
 
         self._http_headers = headers
-        self._http: httpx.AsyncClient | None = None
-        self._http_loop: asyncio.AbstractEventLoop | None = None
+        # One HTTP client per event loop. get_client() hands one instance to
+        # every thread that runs its own loop (bibr.chew() from a web
+        # threadpool, two Chewers), and httpx connections belong to the loop
+        # that opened them. Replacing "the" client on each loop switch closed
+        # the other thread's client under its in-flight requests, so a client
+        # is closed only once its own loop has closed, or by close() on it.
+        self._http_clients: dict[asyncio.AbstractEventLoop, httpx.AsyncClient] = {}
 
         # Floor for 429-throttle recovery: never narrow below the configured
         # rate, or below a server-advertised interval (_adapt_rate_limit
@@ -179,10 +184,8 @@ class CrossrefClient:
         self._limiter_init_lock: asyncio.Lock | None = None
         self._limiter_init_loop: asyncio.AbstractEventLoop | None = None
 
-        # Lazily created in the running event loop to avoid binding to the
-        # wrong loop when the singleton is constructed at import time.
-        self._enrich_semaphore: asyncio.Semaphore | None = None
-        self._enrich_loop: asyncio.AbstractEventLoop | None = None
+        # Lazily created per running event loop (see enrich_semaphore).
+        self._enrich_semaphores: dict[asyncio.AbstractEventLoop, asyncio.Semaphore] = {}
         self._enrich_concurrency = self._settings.crossref.enrich_concurrency
         self._breaker: object | None = None
         self._cb_failure_threshold = self._settings.cb.failure_threshold
@@ -227,9 +230,13 @@ class CrossrefClient:
 
                 from bibr.utils.rate_limiter import AsyncRedisRateLimiter
 
-                r = AsyncRedis.from_url(self._settings.redis.url, socket_connect_timeout=1)
+                # Bounded like the LLM client's probe: a Redis that accepts the
+                # connection but never answers must not hold the first request.
+                r = AsyncRedis.from_url(
+                    self._settings.redis.url, socket_connect_timeout=1, socket_timeout=1
+                )
                 try:
-                    await r.ping()
+                    await asyncio.wait_for(r.ping(), timeout=1)
                 finally:
                     await r.aclose()
 
@@ -261,47 +268,49 @@ class CrossrefClient:
         )
 
     async def _get_http_client(self) -> httpx.AsyncClient:
-        """Return an HTTP client bound to the current running event loop."""
+        """Return the HTTP client bound to the current running event loop.
+
+        The rate limiter and breaker stay shared across loops: both handle a
+        loop change themselves, and the rate budget is per process, not per
+        loop.
+        """
         loop = asyncio.get_running_loop()
-        if self._http is not None and self._http_loop is loop and not self._http.is_closed:
-            return self._http
+        http = self._http_clients.get(loop)
+        if http is not None and not http.is_closed:
+            return http
+        http = self._http_clients[loop] = self._make_http_client()
+        await self._close_dead_loop_clients()
+        return http
 
-        old_http = self._http
-        old_limiter = self.limiter
-        self._http = self._make_http_client()
-        self._http_loop = loop
-        self.limiter = None
-        self._limiter_init_lock = None
-        self._limiter_init_loop = None
-
-        if old_http is not None and not old_http.is_closed:
-            try:
-                await old_http.aclose()
-            except RuntimeError:
-                logger.debug("Discarding Crossref HTTP client bound to a closed event loop")
-        if old_limiter is not None:
-            close = getattr(old_limiter, "close", None)
-            if close is not None:
+    async def _close_dead_loop_clients(self) -> None:
+        """Close the HTTP clients of event loops that have closed."""
+        for loop, http in list(self._http_clients.items()):
+            # pop() first: another thread may be pruning the same entry.
+            if not loop.is_closed() or self._http_clients.pop(loop, None) is not http:
+                continue
+            if not http.is_closed:
                 try:
-                    await close()
+                    await http.aclose()
                 except RuntimeError:
-                    logger.debug("Discarding Crossref limiter bound to a closed event loop")
-        return self._http
+                    logger.debug("Discarding Crossref HTTP client bound to a closed event loop")
 
     @property
     def enrich_semaphore(self) -> asyncio.Semaphore:
         """Lazily create the semaphore in the current event loop.
 
-        Recreated whenever the running loop changes — a singleton-held
-        semaphore bound to a finished ``asyncio.run()`` loop raises
-        ``RuntimeError`` on the next acquire (M6). Waiters from the old
-        loop are gone with that loop, so dropping the instance is safe.
+        One per running loop — a singleton-held semaphore bound to a finished
+        ``asyncio.run()`` loop raises ``RuntimeError`` on the next acquire
+        (M6), and one bound to another thread's loop does the same. Waiters
+        from a closed loop are gone with it, so its semaphore is dropped.
         """
         loop = asyncio.get_running_loop()
-        if self._enrich_semaphore is None or self._enrich_loop is not loop:
-            self._enrich_semaphore = asyncio.Semaphore(self._enrich_concurrency)
-            self._enrich_loop = loop
-        return self._enrich_semaphore
+        sem = self._enrich_semaphores.get(loop)
+        if sem is None:
+            for other in list(self._enrich_semaphores):
+                if other.is_closed():
+                    self._enrich_semaphores.pop(other, None)
+            sem = self._enrich_semaphores[loop] = asyncio.Semaphore(self._enrich_concurrency)
+        return sem
 
     def _get_breaker(self):
         """Lazily create the circuit breaker in the current event loop."""
@@ -767,11 +776,15 @@ class CrossrefClient:
         return False
 
     async def close(self):
-        """Close the HTTP client and rate limiter."""
-        if self._http is not None and not self._http.is_closed:
-            await self._http.aclose()
-        self._http = None
-        self._http_loop = None
+        """Close this loop's HTTP client and the rate limiter.
+
+        Other running loops keep their own HTTP clients: closing them here
+        would fail those threads' in-flight requests.
+        """
+        http = self._http_clients.pop(asyncio.get_running_loop(), None)
+        if http is not None and not http.is_closed:
+            await http.aclose()
+        await self._close_dead_loop_clients()
         if self.limiter is not None:
             await self.limiter.close()
         if self._response_cache_backend is not None:

@@ -16,7 +16,9 @@ Usage::
 """
 
 import asyncio
+import contextlib
 import logging
+import threading
 import time
 from collections.abc import Callable
 from enum import Enum
@@ -31,9 +33,17 @@ class CircuitState(Enum):
 
 
 def _exception_status_code(exc_val: BaseException) -> int | None:
-    """Return a provider exception's numeric HTTP status when exposed."""
-    for attr in ("status_code", "code"):
-        value = getattr(exc_val, attr, None)
+    """Return a provider exception's numeric HTTP status when exposed.
+
+    SDK errors carry it on the instance (openai/anthropic ``status_code``,
+    google-genai ``code``); httpx's ``HTTPStatusError`` only on its response.
+    """
+    response = getattr(exc_val, "response", None)
+    for value in (
+        getattr(exc_val, "status_code", None),
+        getattr(exc_val, "code", None),
+        getattr(response, "status_code", None),
+    ):
         if value is None or isinstance(value, bool):
             continue
         try:
@@ -95,6 +105,24 @@ def _is_validation_error(exc_val: BaseException) -> bool:
     return False
 
 
+def _is_http_client_status(exc_val: BaseException) -> bool:
+    """Return True if the exception (or the error it wraps) carries a 4xx status.
+
+    408 Request Timeout is excluded: it reports a slow or overloaded service.
+    The outermost exception that exposes a status decides, so a 5xx wrapping
+    an earlier 4xx still counts as a failure.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc_val
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        status = _exception_status_code(cur)
+        if status is not None:
+            return 400 <= status < 500 and status != 408
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 def _is_client_error(exc_type: type[BaseException], exc_val: BaseException) -> bool:  # noqa: ARG001
     """Return True if the exception represents an HTTP 4xx client error,
     a rate-limit (429) error, or a schema-validation failure.
@@ -103,6 +131,10 @@ def _is_client_error(exc_type: type[BaseException], exc_val: BaseException) -> b
     client errors so they don't trip the circuit breaker — the service is
     responsive, just asking us to slow down. Likewise pydantic validation
     failures: the model answered, the answer just didn't fit the schema (M5).
+    Any other 4xx — httpx's ``HTTPStatusError`` or a provider SDK's own error
+    class (openai ``BadRequestError``, google-genai ``ClientError``) — is a
+    rejected request, not an unhealthy service: five context-length 400s from
+    one oversized paper must not open the breaker shared by every paper.
     """
     # Native parse/schema rejection means the provider answered. Keep the
     # check dependency-free to avoid importing the LLM client stack here.
@@ -115,14 +147,7 @@ def _is_client_error(exc_type: type[BaseException], exc_val: BaseException) -> b
     if _is_validation_error(exc_val):
         return True
 
-    try:
-        import httpx
-
-        if isinstance(exc_val, httpx.HTTPStatusError):
-            return 400 <= exc_val.response.status_code < 500
-    except ImportError:
-        pass
-    return False
+    return _is_http_client_status(exc_val)
 
 
 class CircuitOpenError(Exception):
@@ -163,42 +188,59 @@ class AsyncCircuitBreaker:
         self._failure_count = 0
         self._last_failure_time: float = 0.0
 
-        # ``asyncio.Lock`` and ``asyncio.Event`` lazily bind to the running
-        # loop on first use. If a single ``AsyncCircuitBreaker`` instance is
-        # reused across loops (e.g. test fixtures, LitServe worker spawn) the
-        # second loop hits ``RuntimeError: ... bound to a different event
-        # loop``. Recreate the loop-bound primitives whenever the running
-        # loop changes; ``_rebind_loop_state`` is sync and runs without
-        # yielding so concurrent ``__aenter__`` calls on the same loop never
-        # race.
-        self._lock: asyncio.Lock | None = None
-        self._lock_loop: asyncio.AbstractEventLoop | None = None
+        # One breaker can serve several event loops: test fixtures, LitServe
+        # worker spawn, or a process-wide client used from threads that each
+        # run their own loop (bibr.chew() from a web threadpool). The state
+        # machine is shared by all of them, so it is guarded by a thread
+        # lock. No critical section awaits, so it is never held across a
+        # suspension point and cannot stall a loop.
+        self._lock = threading.Lock()
 
         # HALF_OPEN probe coordination: only one request probes at a time,
-        # others wait on the event for the probe outcome.
+        # others wait on the event for the probe outcome. The event belongs to
+        # ``_lock_loop``, the loop that last used the breaker; see
+        # ``_ensure_loop_state``.
+        self._lock_loop: asyncio.AbstractEventLoop | None = None
         self._probe_event: asyncio.Event | None = None
         self._probe_task: asyncio.Task | None = None
 
     def _ensure_loop_state(self) -> None:
+        """Rebind the probe state to the running loop. Call with ``_lock`` held."""
         loop = asyncio.get_running_loop()
-        if self._lock is None or self._lock_loop is not loop:
-            self._lock = asyncio.Lock()
-            self._lock_loop = loop
-            # Probe state is also loop-bound; reset on loop change so a
-            # stale ``_probe_event`` from a dead loop can't deadlock waiters.
-            self._probe_event = None
-            self._probe_task = None
+        if self._lock_loop is loop:
+            return
+        old_loop, old_event = self._lock_loop, self._probe_event
+        self._lock_loop = loop
+        # Another loop's event can be neither awaited nor set from here, so a
+        # probe in flight there can no longer report to this loop's callers.
+        # Fall back from HALF_OPEN to OPEN, keeping the failure time, so the
+        # next caller becomes the probe; left HALF_OPEN with no event, every
+        # caller had nothing to wait on and spun forever. That loop's waiters
+        # are woken (thread-safely) to re-check.
+        self._probe_event = None
+        self._probe_task = None
+        if self._state == CircuitState.HALF_OPEN:
+            self._state = CircuitState.OPEN
+        if old_event is not None and old_loop is not None:
+            with contextlib.suppress(RuntimeError):  # that loop has closed
+                old_loop.call_soon_threadsafe(old_event.set)
+
+    def _start_probe(self) -> None:
+        """Enter HALF_OPEN with the current task as the single probe."""
+        self._state = CircuitState.HALF_OPEN
+        self._probe_event = asyncio.Event()
+        self._probe_task = asyncio.current_task()
+        self._failure_count = 0
+        logger.info("Circuit breaker '%s': OPEN → HALF_OPEN (probing)", self.name)
 
     @property
     def state(self) -> CircuitState:
         return self._state
 
     async def __aenter__(self):
-        self._ensure_loop_state()
-        assert self._lock is not None  # noqa: S101 — _ensure_loop_state guarantees this
         while True:
-            event_to_wait = None
-            async with self._lock:
+            with self._lock:
+                self._ensure_loop_state()
                 if self._state == CircuitState.CLOSED:
                     return self
 
@@ -206,50 +248,50 @@ class AsyncCircuitBreaker:
                     elapsed = self._clock() - self._last_failure_time
                     if elapsed >= self.reset_timeout:
                         # Transition to HALF_OPEN — this caller is the probe
-                        self._state = CircuitState.HALF_OPEN
-                        self._probe_event = asyncio.Event()
-                        self._probe_task = asyncio.current_task()
-                        self._failure_count = 0
-                        logger.info(
-                            "Circuit breaker '%s': OPEN → HALF_OPEN (probing)",
-                            self.name,
-                        )
+                        self._start_probe()
                         return self
                     else:
                         raise CircuitOpenError(self.name, self.reset_timeout - elapsed)
 
-                # HALF_OPEN with a probe already in flight — grab the event
-                # so we can wait outside the lock.
+                # HALF_OPEN without a probe event: nothing would ever signal a
+                # waiter, so this caller probes instead.
+                if self._probe_event is None:
+                    self._start_probe()
+                    return self
+
+                # HALF_OPEN with a probe already in flight on this loop — grab
+                # the event so we can wait outside the lock.
                 event_to_wait = self._probe_event
 
             # Wait (outside the lock) for the probe to finish, then re-check.
+            # Every pass that loops around awaits here: the section above never
+            # yields, so a pass without this wait would spin the loop.
             # The wait is bounded so a probe task cancelled before its
             # __aexit__ can signal waiters cannot hang them forever — but the
             # timeout is patience, not a verdict: a still-running probe owns
             # the HALF_OPEN → CLOSED/OPEN transition, and a timed-out waiter
             # must not steal it by forcing OPEN underneath a probe that is
             # about to succeed.
-            if event_to_wait is not None:
-                try:
-                    await asyncio.wait_for(event_to_wait.wait(), timeout=self.reset_timeout)
-                except TimeoutError:
-                    async with self._lock:
-                        if self._probe_event is event_to_wait and not event_to_wait.is_set():
-                            probe = self._probe_task
-                            if probe is None or probe.done():
-                                # Probe died without signalling — fail fast so
-                                # later callers see OPEN instead of parking on
-                                # a dead event.
-                                self._state = CircuitState.OPEN
-                                self._last_failure_time = self._clock()
-                                self._signal_waiters()
-                            # Else the probe is still mid-flight: loop around
-                            # and re-wait. Its __aexit__ will signal us.
+            try:
+                await asyncio.wait_for(event_to_wait.wait(), timeout=self.reset_timeout)
+            except TimeoutError:
+                with self._lock:
+                    self._ensure_loop_state()
+                    if self._probe_event is event_to_wait and not event_to_wait.is_set():
+                        probe = self._probe_task
+                        if probe is None or probe.done():
+                            # Probe died without signalling — fail fast so
+                            # later callers see OPEN instead of parking on
+                            # a dead event.
+                            self._state = CircuitState.OPEN
+                            self._last_failure_time = self._clock()
+                            self._signal_waiters()
+                        # Else the probe is still mid-flight: loop around
+                        # and re-wait. Its __aexit__ will signal us.
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        self._ensure_loop_state()
-        assert self._lock is not None  # noqa: S101 — _ensure_loop_state guarantees this
-        async with self._lock:
+        with self._lock:
+            self._ensure_loop_state()
             is_probe = self._probe_task is not None and self._probe_task is asyncio.current_task()
 
             if exc_type is None:
