@@ -816,6 +816,22 @@ def test_preset_values_print_literally(tmp_path, monkeypatch, capsys):
     assert "[conceal]hidden[/conceal]" in out
 
 
+def test_preset_diff_prints_values_literally(tmp_path, monkeypatch, capsys):
+    from bibr.presets import PresetManager
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("LLM_MODEL=[conceal]mine[/conceal]\nBIBR_LOG_LEVEL=[i]1[/i]\n")
+    presets = PresetManager(tmp_path / "presets")
+    presets.save("p", {"LLM_MODEL": "[conceal]theirs[/conceal]", "OCR_DPI": "[u]2[/u]"})
+    monkeypatch.setenv("BIBR_ENV_FILE", str(env_path))
+    monkeypatch.setenv("BIBR_PRESETS_DIR", str(presets.directory))
+
+    code, out = _preset(capsys, "diff", name="p")
+    assert code == 0
+    for printed in ("[conceal]mine[/conceal]", "[conceal]theirs[/conceal]", "[u]2[/u]", "[i]1[/i]"):
+        assert printed in out
+
+
 def test_preset_show_prints_typed_values(tmp_path, monkeypatch, capsys):
     from bibr.presets import PresetManager
 

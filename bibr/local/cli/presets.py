@@ -74,7 +74,7 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
         table = ui.minimal_table("Preset", "Active")
         for name in presets:
             marker = "[green]●[/green]" if name == active else ""
-            table.add_row(name, marker)
+            table.add_row(escape(name), marker)
         console.print(table)
         console.print(f"[dim]Stored in {manager.directory}[/dim]")
 
@@ -202,14 +202,14 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
             console.print(f"[bold]Changed[/bold] ({len(changed)}):")
             for k, (env_v, pre_v) in sorted(changed.items()):
                 console.print(
-                    f"  {k}: [yellow]{redact_value(k, env_v)}[/yellow] "
-                    f"→ [green]{redact_value(k, pre_v)}[/green]"
+                    f"  {escape(k)}: [yellow]{escape(redact_value(k, env_v))}[/yellow] "
+                    f"→ [green]{escape(redact_value(k, pre_v))}[/green]"
                 )
         if only_in_preset:
             console.print(f"[bold]Only in preset[/bold] ({len(only_in_preset)}):")
             for k, v in sorted(only_in_preset.items()):
-                console.print(f"  + {k}={redact_value(k, v)}")
+                console.print(f"  + {escape(k)}={escape(redact_value(k, v))}")
         if only_in_env:
             console.print(f"[bold]Only in .env[/bold] ({len(only_in_env)}):")
             for k, v in sorted(only_in_env.items()):
-                console.print(f"  - {k}={redact_value(k, v)}")
+                console.print(f"  - {escape(k)}={escape(redact_value(k, v))}")
