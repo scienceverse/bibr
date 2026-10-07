@@ -147,7 +147,7 @@ def _marker_kind(text: str, start: int) -> str:
     prefix = text[max(0, start - 100) : start]
     if re.search(rf"journal\s+doi\s*[:.]?\s*{_DOI_HOST}\s*$", prefix, re.IGNORECASE):
         return "journal_doi"
-    marker_prefix = re.sub(rf"{_DOI_HOST}\s*$", "", prefix)
+    marker_prefix = re.sub(rf"{_DOI_HOST}\s*$", "", prefix, flags=re.IGNORECASE)
     for pattern, kind in _NON_SELF_MARKERS:
         if pattern.search(marker_prefix):
             return kind
@@ -412,13 +412,106 @@ def _repair_doi_text(text: str) -> str:
     )
 
 
+# The repairs are local, so the source and the repaired text are walked in step
+# and only the stretch around each repair is diffed: SequenceMatcher over a
+# whole footnote or text-layer line is quadratic in its length. A stretch ends
+# at a run of _RESYNC_RUN equal characters, looked for in a window that widens
+# up to _RESYNC_WIDTH, then up to _RESYNC_REACH characters ahead on one side
+# (a wrap's whitespace taken out).
+_RESYNC_RUN = 8
+_RESYNC_WIDTH = 64
+_RESYNC_REACH = 512
+
+_Opcode = tuple[str, int, int, int, int]
+
+
+def _shifted(ops: list[_Opcode], i: int, j: int) -> list[_Opcode]:
+    return [(tag, i + a1, i + a2, j + b1, j + b2) for tag, a1, a2, b1, b2 in ops]
+
+
+def _repaired_stretch(source: str, i: int, cleaned: str, j: int) -> tuple[list[_Opcode], int, int]:
+    """Opcodes from ``source[i]`` and ``cleaned[j]``, which differ, to where the two agree again."""
+
+    width = _RESYNC_RUN * 2
+    while True:
+        ops = SequenceMatcher(
+            None, source[i : i + width], cleaned[j : j + width], autojunk=False
+        ).get_opcodes()
+        if i + width >= len(source) and j + width >= len(cleaned):
+            return _shifted(ops, i, j), len(source), len(cleaned)
+        equal = [index for index, op in enumerate(ops) if op[0] == "equal"]
+        anchor = max(equal, key=lambda index: ops[index][2] - ops[index][1], default=None)
+        if anchor is not None and ops[anchor][2] - ops[anchor][1] >= _RESYNC_RUN:
+            return _shifted(ops[:anchor], i, j), i + ops[anchor][1], j + ops[anchor][3]
+        if width >= _RESYNC_WIDTH:
+            break
+        width *= 2
+    # Equal runs over half the window, none of them long, are repairs all
+    # through it (a ligature in every word). Otherwise one side runs on past
+    # the window, and the other side's next text is further ahead in it.
+    if 2 * sum(ops[index][2] - ops[index][1] for index in equal) < width:
+        for source_reach, clean_reach in ((_RESYNC_REACH, width), (width, _RESYNC_REACH)):
+            a, b = source[i : i + source_reach], cleaned[j : j + clean_reach]
+            matcher = SequenceMatcher(None, a, b, autojunk=False)
+            if i + source_reach >= len(source) and j + clean_reach >= len(cleaned):
+                return _shifted(matcher.get_opcodes(), i, j), len(source), len(cleaned)
+            found = matcher.find_longest_match(0, len(a), 0, len(b))
+            if found.size >= _RESYNC_RUN:
+                before = SequenceMatcher(None, a[: found.a], b[: found.b], autojunk=False)
+                return _shifted(before.get_opcodes(), i, j), i + found.a, j + found.b
+    # Keep what the window aligned, through its last equal run.
+    if equal:
+        _tag, _a1, a2, _b1, b2 = ops[equal[-1]]
+        return _shifted(ops[: equal[-1] + 1], i, j), i + a2, j + b2
+    a2, b2 = min(width, len(source) - i), min(width, len(cleaned) - j)
+    return [("replace", i, i + a2, j, j + b2)], i + a2, j + b2
+
+
+def _repair_opcodes(source: str, cleaned: str) -> list[_Opcode]:
+    """``SequenceMatcher`` opcodes from *source* to *cleaned*, diffed one repair at a time."""
+
+    ops: list[_Opcode] = []
+    i = j = 0
+    while i < len(source) and j < len(cleaned):
+        k = 0
+        while i + k < len(source) and j + k < len(cleaned) and source[i + k] == cleaned[j + k]:
+            k += 1
+        if k:
+            ops.append(("equal", i, i + k, j, j + k))
+            i, j = i + k, j + k
+            continue
+        stretch, i, j = _repaired_stretch(source, i, cleaned, j)
+        ops.extend(stretch)
+    if i < len(source):
+        ops.append(("delete", i, len(source), j, j))
+    elif j < len(cleaned):
+        ops.append(("insert", i, i, j, len(cleaned)))
+    return ops
+
+
 def _cleaned_char_source_ranges(source: str, cleaned: str) -> list[tuple[int, int]]:
     """Map each cleaned character to its source interval for receipt provenance."""
 
+    if cleaned == source:
+        return [(index, index + 1) for index in range(len(source))]
+    # A long run of characters the repairs drop everywhere (control
+    # characters) is set aside first, so that the diff sees across it.
+    kept = set(cleaned)
+    positions: list[int] = []
+    run: list[int] = []
+    for index, char in enumerate(source):
+        if char not in kept:
+            run.append(index)
+            continue
+        if len(run) < _RESYNC_WIDTH:
+            positions.extend(run)
+        positions.append(index)
+        run = []
+    if len(run) < _RESYNC_WIDTH:
+        positions.extend(run)
+    shown = "".join(source[index] for index in positions)
     ranges: list[tuple[int, int]] = [(0, 0)] * len(cleaned)
-    for tag, source_start, source_end, clean_start, clean_end in SequenceMatcher(
-        None, source, cleaned, autojunk=False
-    ).get_opcodes():
+    for tag, source_start, source_end, clean_start, clean_end in _repair_opcodes(shown, cleaned):
         clean_length = clean_end - clean_start
         source_length = source_end - source_start
         if tag == "equal":
@@ -432,7 +525,11 @@ def _cleaned_char_source_ranges(source: str, cleaned: str) -> list[tuple[int, in
                     source_start + ((offset + 1) * source_length + clean_length - 1) // clean_length
                 )
                 ranges[clean_start + offset] = (interval_start, interval_end)
-    return ranges
+    positions.append(len(source))
+    return [
+        (positions[start], positions[end - 1] + 1 if end > start else positions[start])
+        for start, end in ranges
+    ]
 
 
 def _raw_source_match(
@@ -927,9 +1024,11 @@ def _text_layer_candidates(
                 selection_tier=EXPLICIT_SELF_ID,
             )
         # The line after the DOI, including punctuation normalization dropped.
-        doi_end = cleaned.casefold().find(candidate.normalized, match.start())
-        doi_end = doi_end + len(candidate.normalized) if doi_end >= 0 else match.end()
-        found.append((candidate, cleaned[doi_end:]))
+        # Found in the line itself: casefolding the line can lengthen it ("ß").
+        at = re.compile(re.escape(candidate.normalized), re.IGNORECASE).search(
+            cleaned, match.start()
+        )
+        found.append((candidate, cleaned[at.end() if at is not None else match.end() :]))
     return found
 
 
