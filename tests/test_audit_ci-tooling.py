@@ -184,9 +184,10 @@ def test_gpu_runtime_reinstall_is_constrained_to_the_locked_versions() -> None:
 
 def run_ocr_entrypoint(tmp_path: Path, **env: str) -> list[str]:
     bash = shutil.which("bash")
-    # The entrypoint runs in a Linux container; a Windows checkout may give it CRLF.
-    if not bash or sys.platform == "win32":
-        pytest.skip("needs a POSIX bash")
+    # The entrypoint runs in the Linux SGLang image only; a Windows checkout may
+    # give it CRLF and macOS ships bash 3.2.
+    if not bash or not sys.platform.startswith("linux"):
+        pytest.skip("needs bash on Linux")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake_python = bin_dir / "python"

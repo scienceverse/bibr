@@ -32,5 +32,5 @@ exec python -m sglang.launch_server \
     --revision "$GLM_OCR_REVISION" \
     --mem-fraction-static "${OCR_MEM_FRACTION_STATIC:-0.60}" \
     --served-model-name glm-ocr \
-    "${TP_ARGS[@]}" \
-    "${AUTH_ARGS[@]}"
+    ${TP_ARGS[@]+"${TP_ARGS[@]}"} \
+    ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"}

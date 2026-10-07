@@ -21,12 +21,14 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 GIT = shutil.which("git")
 BASH = shutil.which("bash")
 needs_git = pytest.mark.skipif(not GIT, reason="needs git")
-# Workflow steps run under bash on Linux runners only. Windows' Git Bash lacks
-# the GNU tools they call, so the cross-platform suites skip them.
-needs_bash = pytest.mark.skipif(not BASH or sys.platform == "win32", reason="needs a POSIX bash")
+# Workflow steps run under bash on Linux runners only. Windows' Git Bash and
+# macOS (bash 3.2, BSD tools) lack the GNU tools they call, so the
+# cross-platform suites skip them.
+LINUX = sys.platform.startswith("linux")
+needs_bash = pytest.mark.skipif(not BASH or not LINUX, reason="needs bash on Linux")
 needs_flock = pytest.mark.skipif(
-    not BASH or sys.platform == "win32" or not shutil.which("flock"),
-    reason="needs a POSIX bash and flock",
+    not BASH or not LINUX or not shutil.which("flock"),
+    reason="needs bash and flock on Linux",
 )
 
 
