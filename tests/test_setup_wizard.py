@@ -1763,8 +1763,10 @@ def test_reload_settings_in_place_updates_future_runtime_snapshots(monkeypatch):
         _reload_settings_in_place()
 
 
-def test_main_advanced_runs_advanced_wizard(monkeypatch):
+def test_main_advanced_runs_advanced_wizard(monkeypatch, tmp_path):
     calls = []
+    # The suite disables .env loading, and setup refuses to run then.
+    monkeypatch.setenv("BIBR_ENV_FILE", str(tmp_path / ".env"))
     monkeypatch.setattr("bibr.setup_wizard.sys.argv", ["bibr", "--advanced"])
     monkeypatch.setattr(
         "bibr.setup_wizard.SetupWizard.run_advanced",

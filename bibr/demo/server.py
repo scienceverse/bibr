@@ -9,6 +9,8 @@ import logging
 import os
 import sys
 
+_LOG_LEVELS = ("debug", "info", "warning", "error", "critical")
+
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the ``bibr demo`` argument parser."""
@@ -19,7 +21,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
     parser.add_argument("--port", type=int, default=7860, help="Port to bind to")
     parser.add_argument("--share", action="store_true", help="Create a public Gradio share link")
-    parser.add_argument("--log-level", default="info", help="Log level")
+    parser.add_argument(
+        "--allow-unauthenticated",
+        action="store_true",
+        help=(
+            "Allow --share or a non-loopback --host without GRADIO_PASSWORD. Anyone "
+            "who reaches the demo can then process papers on your LLM quota."
+        ),
+    )
+    parser.add_argument(
+        "--log-level", type=str.lower, choices=_LOG_LEVELS, default="info", help="Log level"
+    )
     parser.add_argument(
         "--ocr",
         default=None,
@@ -88,27 +100,50 @@ def main():
     import gradio as gr
 
     from bibr.demo.local_app import (
-        _MAX_FILE_SIZE_MB,
         _TABLE_SCROLL_CSS,
         _TABLE_SCROLL_JS,
         _cache_lifetime,
+        _max_file_size_mb,
         create_local_demo,
     )
 
-    try:
-        _cache_lifetime()
-    except ValueError as e:
-        from rich.console import Console
-        from rich.markup import escape
+    for read_setting, hint in (
+        (_cache_lifetime, "Leave it unset to delete files after an hour."),
+        (_max_file_size_mb, "Leave it unset for the 10 MB default."),
+    ):
+        try:
+            read_setting()
+        except ValueError as e:
+            from rich.console import Console
+            from rich.markup import escape
 
-        from bibr.local.cli import ui
+            from bibr.local.cli import ui
 
-        ui.error(
-            Console(stderr=True),
-            escape(str(e)),
-            hint="Leave it unset to delete files after an hour.",
-        )
-        sys.exit(1)
+            ui.error(Console(stderr=True), escape(str(e)), hint=hint)
+            sys.exit(1)
+
+    password = os.environ.get("GRADIO_PASSWORD", "")
+    username = os.environ.get("GRADIO_USERNAME", "demo")
+    if not password and not args.allow_unauthenticated:
+        from bibr.utils.hosts import is_loopback_host
+
+        if args.share or not is_loopback_host(args.host):
+            from rich.console import Console
+            from rich.markup import escape
+
+            from bibr.local.cli import ui
+
+            # A share link or a network-visible bind lets anyone run papers on
+            # the operator's LLM quota, and with --presets switch the
+            # server-wide configuration.
+            exposure = "--share" if args.share else f"--host {args.host}"
+            ui.error(
+                Console(stderr=True),
+                escape(f"Refusing to start an unauthenticated demo with {exposure}."),
+                hint="Set GRADIO_PASSWORD (and GRADIO_USERNAME), or pass "
+                "--allow-unauthenticated to run it open to anyone who reaches it.",
+            )
+            sys.exit(2)
 
     launch_kwargs = {
         "server_name": args.host,
@@ -120,11 +155,9 @@ def main():
         "js": _TABLE_SCROLL_JS,
         # Refuse an oversized upload while it arrives (HTTP 413) instead of
         # storing all of it before the size check in the click handler.
-        "max_file_size": f"{_MAX_FILE_SIZE_MB}mb",
+        "max_file_size": f"{_max_file_size_mb()}mb",
     }
 
-    password = os.environ.get("GRADIO_PASSWORD", "")
-    username = os.environ.get("GRADIO_USERNAME", "demo")
     if password:
         launch_kwargs["auth"] = (username, password)
 

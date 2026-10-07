@@ -5,6 +5,7 @@ import sys
 from bibr.exceptions import ConfigurationError
 from bibr.local.cli import ui
 from bibr.local.cli.run_config import _managed_llm_model
+from bibr.utils.redact import redact_url_secrets
 
 
 def _probe_ocr_url(url: str, timeout: float = 2.0) -> bool:
@@ -113,13 +114,15 @@ def _check_paddle_http(backend: str, url: str | None, ok, warn) -> None:
     if not url:
         warn(f"{label}: not set)", hint="Set OCR_BASE_URL in .env")
         return
+    # Doctor output gets pasted into bug reports: never show a URL's password.
+    shown = redact_url_secrets(url)
     if not _probe_ocr_url(url):
         warn(
-            f"{label}: {url} — unreachable)",
+            f"{label}: {shown} — unreachable)",
             hint="Server may be offline; check OCR_BASE_URL and network",
         )
         return
-    ok(f"{label}: {url})")
+    ok(f"{label}: {shown})")
 
 
 _VISION_OCR_KEY_HINTS = {
@@ -339,13 +342,14 @@ def _check_ocr_backend(ok, warn, fail) -> None:
         if not ocr_url:
             warn(f"{label} (remote: not set)", hint="Set OCR_BASE_URL in .env")
             return
+        shown = redact_url_secrets(ocr_url)
         if not _probe_ocr_url(ocr_url):
             warn(
-                f"{label} (remote: {ocr_url} — unreachable)",
+                f"{label} (remote: {shown} — unreachable)",
                 hint="Server may be offline; check OCR_BASE_URL and network",
             )
             return
-        ok(f"{label} (remote: {ocr_url})")
+        ok(f"{label} (remote: {shown})")
         return
     elif resolved in ("gemini", "openai", "anthropic"):
         # Vision-LLM OCR — uses the LLM provider keys, resolved the way the
@@ -622,12 +626,11 @@ def _llm_connection_hint(settings) -> str:
     provider = settings.llm.provider
     model = settings.llm.model
     if provider == "ollama":
-        return (
-            f"Check that Ollama is running at {settings.llm.ollama_base_url} and has the model "
-            f"(ollama pull {model})"
-        )
+        url = redact_url_secrets(settings.llm.ollama_base_url)
+        return f"Check that Ollama is running at {url} and has the model (ollama pull {model})"
     if provider == "openai" and settings.llm.base_url:
-        return f"Check that the server at {settings.llm.base_url} is running and serves {model}"
+        url = redact_url_secrets(settings.llm.base_url)
+        return f"Check that the server at {url} is running and serves {model}"
     return "Check your API key, the model name and your network connection"
 
 
@@ -817,10 +820,8 @@ def _run_doctor() -> None:
         try:
             redis_url = bibr.config.Settings.redis.url
             if redis_url and bibr.config.Settings.redis.password:
-                ok(
-                    f"Redis: configured "
-                    f"({redis_url.split('@')[-1] if '@' in redis_url else redis_url})"
-                )
+                host = redis_url.split("@")[-1] if "@" in redis_url else redis_url
+                ok(f"Redis: configured ({redact_url_secrets(host)})")
             elif redis_url:
                 warn("Redis: configured (no password)", hint="Set REDIS_PASSWORD for production")
             else:

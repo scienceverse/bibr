@@ -2,8 +2,9 @@
 
 A preset is a snapshot of behavior-shaping ``.env`` keys (LLM provider,
 OCR backend, rate limits, ...) — **not** secrets. ``snapshot_from_env``
-filters out anything that looks like an API key, token, or password so
-preset files are safe to share, commit to a dotfiles repo, etc.
+filters out anything that looks like an API key, token, or password, and
+any URL carrying a password or key, so preset files are safe to share,
+commit to a dotfiles repo, etc.
 
 JSON schema (v1)::
 
@@ -19,17 +20,21 @@ writes always emit v1.
 from __future__ import annotations
 
 import json
+import os
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from bibr.env_utils import merge_env
 from bibr.exceptions import ConfigurationError
+from bibr.utils.redact import redact_url_secrets
 
 if TYPE_CHECKING:
     from bibr.config import GlobalSettings
 
 _DEFAULT_DIR = Path.home() / ".bibr" / "presets"
+_PRESETS_DIR_VAR = "BIBR_PRESETS_DIR"
 _NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 _SCHEMA_VERSION = 1
 
@@ -40,9 +45,12 @@ _SCHEMA_VERSION = 1
 # uses a conservative substring rule so a secret that merely fails the
 # end-anchor — ``AWS_SECRET_ACCESS_KEY``, ``OPENROUTER_KEY``, ``DB_PASSWD``,
 # ``*_CREDENTIALS``, ``LLM_API_KEY_2`` — is still excluded from the
-# shareable preset JSON. Values themselves are never inspected — too easy to
-# false-positive on legitimate config strings (URLs, hashes, ...).
+# shareable preset JSON. The only value check is for a URL that carries a
+# password or key (``is_secret_setting``); a broader one would false-positive
+# on legitimate config strings (hashes, ...).
 _ACTIVE_PRESET_KEY = "BIBR_ACTIVE_PRESET"
+# A marker line in either spelling dotenv reads, ``KEY=`` or ``export KEY=``.
+_ACTIVE_PRESET_LINE_RE = re.compile(rf"^\s*(?:export\s+)?{_ACTIVE_PRESET_KEY}\s*=")
 
 _SECRET_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL")
 
@@ -50,6 +58,11 @@ _SECRET_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL")
 # credentials. Compared case-insensitively.
 _NON_SECRET_SUFFIXES = ("_TOKENS", "_RPM")
 _NON_SECRET_KEYS = frozenset({"JOBS_KEY_PREFIX", "CORS_ALLOW_CREDENTIALS"})
+
+# Settings that decide where bibr sends requests (and the keys in ``.env``
+# with them) or what it launches: ``*_EXTRA_ARGS``, ``LLM_LLMSTER_LOAD_ARGS``,
+# ``RAPID_MLX_EXECUTABLE``.
+_ENDPOINT_SUFFIXES = ("_URL", "_ARGS", "_EXECUTABLE")
 
 _known_secret_cache: dict[str, bool] | None = None
 
@@ -78,22 +91,32 @@ class InvalidPresetError(ConfigurationError):
     """
 
 
-def effective_env_file() -> Path:
+def effective_env_file() -> Path | None:
     """The ``.env`` file whose values are in effect: what presets read and write.
 
     Settings merge ``~/.bibr/.env`` and then ``./.env`` (or the files in
     ``BIBR_ENV_FILE``), later files overriding earlier ones, so the last one
     that exists is the file whose values win. With none present it is where
-    the chain would look last; ``./.env`` when the chain is empty. ``bibr
-    preset`` and the demo's preset picker both use it.
+    the chain would look last. None when ``.env`` loading is disabled
+    (``BIBR_DISABLE_DOTENV`` or an empty ``BIBR_ENV_FILE``): a file written
+    then would never be read. ``bibr preset`` and the demo's preset picker
+    both use it.
     """
     from bibr.config import _default_env_files
 
     chain = _default_env_files()
+    if not chain:
+        return None
     existing = [path for path in chain if path.is_file()]
-    if existing:
-        return existing[-1].absolute()
-    return (chain[-1] if chain else Path(".env")).absolute()
+    return (existing[-1] if existing else chain[-1]).absolute()
+
+
+def default_presets_dir() -> Path:
+    """``BIBR_PRESETS_DIR`` when set, else ``~/.bibr/presets``."""
+    # ``Path("")`` is ``Path(".")``: a blank value keeps the default instead of
+    # writing presets to the cwd.
+    configured = os.environ.get(_PRESETS_DIR_VAR, "").strip()
+    return Path(configured) if configured else _DEFAULT_DIR
 
 
 def is_secret_key(name: str) -> bool:
@@ -112,19 +135,59 @@ def is_secret_key(name: str) -> bool:
     return any(marker in upper for marker in _SECRET_MARKERS)
 
 
+def carries_credentials(value: str) -> bool:
+    """True if *value* embeds a URL password or a ``?key=``-style secret."""
+    return redact_url_secrets(value) != value
+
+
+def is_secret_setting(name: str, value: str) -> bool:
+    """True if *name*/*value* must stay out of a shareable preset.
+
+    A secret name (see :func:`is_secret_key`), or a value such as
+    ``REDIS_URL=redis://:pw@host`` or ``LLM_BASE_URL=https://h/v1?key=...``
+    that carries a credential under a non-secret name.
+    """
+    return is_secret_key(name) or carries_credentials(value)
+
+
 def redact_value(name: str, value: str) -> str:
     """Mask *value* if *name* looks like a secret.
 
-    Non-secrets are returned verbatim. Secrets are shown as
-    ``XXXX…YY`` — the first 4 and last 2 characters around an ellipsis,
-    enough to recognize the credential without exposing it. Values shorter
-    than 8 characters are masked entirely.
+    Secrets are shown as ``XXXX…YY`` — the first 4 and last 2 characters
+    around an ellipsis, enough to recognize the credential without exposing
+    it. Values shorter than 8 characters are masked entirely. Other values
+    are shown with any URL password or query-string secret masked
+    (``REDIS_URL``, ``LLM_BASE_URL``), the rest verbatim.
     """
     if not is_secret_key(name):
-        return value
+        return redact_url_secrets(value)
     if len(value) < 8:
         return "***"
     return f"{value[:4]}…{value[-2:]}"
+
+
+def is_endpoint_key(name: str) -> bool:
+    """True for a setting that redirects requests or changes what bibr launches.
+
+    ``*_URL``, ``*_ARGS`` (the managed servers' extra arguments) and
+    ``*_EXECUTABLE``.
+    """
+    return name.upper().endswith(_ENDPOINT_SUFFIXES)
+
+
+def endpoint_changes(preset: Mapping[str, str], env: Mapping[str, str]) -> list[str]:
+    """The endpoint settings (:func:`is_endpoint_key`) *preset* would change in *env*.
+
+    A shared preset can point ``LLM_BASE_URL`` or ``OCR_BASE_URL`` at another
+    server while the user's API keys stay in ``.env``, or change the command
+    line of a managed server; ``bibr preset use`` names these so the change is
+    not silent.
+    """
+    return sorted(
+        key
+        for key, value in preset.items()
+        if key != _ACTIVE_PRESET_KEY and is_endpoint_key(key) and env.get(key) != value
+    )
 
 
 def _setting_lookup() -> dict[str, tuple[str | None, str]]:
@@ -171,8 +234,8 @@ def _resolve_setting(key: str) -> tuple[str | None, str] | None:
 
 
 class PresetManager:
-    def __init__(self, presets_dir: Path = _DEFAULT_DIR) -> None:
-        self._dir = presets_dir
+    def __init__(self, presets_dir: Path | None = None) -> None:
+        self._dir = presets_dir if presets_dir is not None else default_presets_dir()
 
     # ------------------------------------------------------------------
     # Name / path helpers
@@ -214,9 +277,13 @@ class PresetManager:
 
     def save(self, name: str, data: dict[str, str]) -> Path:
         self._validate_name(name)
-        self._dir.mkdir(parents=True, exist_ok=True)
+        self._dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         path = self._path(name)
-        path.write_text(json.dumps(self._wrap(data), indent=2), encoding="utf-8")
+        # Owner-only when new, whatever the umask: a preset may still name
+        # private endpoints. An existing file keeps its mode.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(self._wrap(data), indent=2))
         return path
 
     def load(self, name: str) -> dict[str, str]:
@@ -391,12 +458,10 @@ class PresetManager:
     def get_active(self, env_path: Path) -> str | None:
         if not env_path.exists():
             return None
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if stripped.startswith(f"{_ACTIVE_PRESET_KEY}="):
-                value = stripped.split("=", 1)[1].strip()
-                return value if value else None
-        return None
+        from bibr.env_utils import parse_env
+
+        # The runtime's parser: it reads ``export KEY=``, quotes and comments.
+        return parse_env(env_path).get(_ACTIVE_PRESET_KEY) or None
 
     def deactivate(self, env_path: Path) -> bool:
         """Remove the ``BIBR_ACTIVE_PRESET`` line from *env_path*.
@@ -410,7 +475,7 @@ class PresetManager:
         kept_lines: list[str] = []
         removed = False
         for line in original.splitlines():
-            if line.strip().startswith(f"{_ACTIVE_PRESET_KEY}="):
+            if _ACTIVE_PRESET_LINE_RE.match(line):
                 removed = True
                 continue
             kept_lines.append(line)
@@ -431,8 +496,9 @@ class PresetManager:
         """Return ``{KEY: VALUE}`` for *env_path*, ready to be saved as a preset.
 
         Drops the ``BIBR_ACTIVE_PRESET`` marker and (by default) any key
-        whose name looks like a credential. Pass ``include_secrets=True``
-        to keep them — never the right call for files you intend to share.
+        whose name looks like a credential or whose URL value carries one
+        (see :func:`is_secret_setting`). Pass ``include_secrets=True`` to
+        keep them — never the right call for files you intend to share.
         """
         from bibr.env_utils import parse_env
 
@@ -440,7 +506,7 @@ class PresetManager:
         for k, v in parse_env(env_path).items():
             if k == _ACTIVE_PRESET_KEY:
                 continue
-            if not include_secrets and is_secret_key(k):
+            if not include_secrets and is_secret_setting(k, v):
                 continue
             out[k] = v
         return out
@@ -476,6 +542,6 @@ class PresetManager:
                 # alarmingly suggest "your env has a key the preset is
                 # missing!" for credentials that are intentionally absent
                 # from preset files.
-                if not is_secret_key(k):
+                if not is_secret_setting(k, env[k]):
                     only_in_env[k] = env[k]
         return changed, only_in_preset, only_in_env

@@ -77,6 +77,27 @@ def dotenv_disabled() -> bool:
     return os.environ.get(DOTENV_DISABLE_VAR, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def dotenv_disabled_by() -> str | None:
+    """The variable that turns ``.env`` loading off right now, or None.
+
+    ``BIBR_DISABLE_DOTENV``, or a ``BIBR_ENV_FILE`` that lists no path. The
+    config tools name it when they refuse to write a file nothing would read.
+    """
+    if dotenv_disabled():
+        return DOTENV_DISABLE_VAR
+    override = os.environ.get(ENV_FILE_OVERRIDE_VAR)
+    if override is not None and not any(override.split(os.pathsep)):
+        return ENV_FILE_OVERRIDE_VAR
+    return None
+
+
+def dotenv_enable_hint(variable: str) -> str:
+    """How to turn ``.env`` loading back on after *variable* turned it off."""
+    if variable == DOTENV_DISABLE_VAR:
+        return f"Unset {variable}"
+    return f"Set {variable} to a file path or unset it"
+
+
 def dotenv_files_present() -> list[Path]:
     """The ``.env`` files bibr would read right now, in load order."""
     return [path.resolve() for path in _default_env_files() if path.is_file()]
@@ -99,7 +120,13 @@ def _default_env_files() -> tuple[Path, ...]:
     happens to sit in its CWD or home — the test suite sets it for exactly that
     reason, and it is equally useful for containers and CI. A per-model
     ``_env_file=`` argument still outranks this.
+
+    ``BIBR_DISABLE_DOTENV`` empties the chain too, so ``bibr config``,
+    ``bibr preset`` and ``bibr setup`` neither report nor write a file the
+    settings ignore.
     """
+    if dotenv_disabled():
+        return ()
     override = os.environ.get(ENV_FILE_OVERRIDE_VAR)
     if override is not None:
         return tuple(Path(part) for part in override.split(os.pathsep) if part)

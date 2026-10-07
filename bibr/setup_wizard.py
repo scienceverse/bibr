@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -437,11 +438,58 @@ def _build_recommended_setup(
 # ---------------------------------------------------------------------------
 
 
-def _redact(text: str, api_key: str) -> str:
-    """Replace API-key fragments in *text* with ``***`` (see ``utils.redact``)."""
-    from bibr.utils.redact import redact_key
+def _redact(text: str, *secrets: str) -> str:
+    """Mask each of *secrets* in *text*, then anything credential-shaped (see ``utils.redact``)."""
+    from bibr.utils.redact import redact_key, scrub_secrets
 
-    return redact_key(text, api_key)
+    # Longest first, so a key that contains another is masked whole.
+    for secret in sorted(set(secrets), key=len, reverse=True):
+        text = redact_key(text, secret)
+    return scrub_secrets(text)
+
+
+def _secret_values(answers: Mapping[str, str]) -> list[str]:
+    """Every configured secret: in the answers, the environment and the ``.env`` chain.
+
+    A smoke-test or OCR failure can quote any of them (``?key=`` for
+    ``GOOGLE_API_KEY``, an ``OCR_API_KEY``), not only the LLM provider's key.
+    """
+    from bibr.config import _default_env_files
+    from bibr.config_introspect import iter_setting_docs
+    from bibr.env_utils import read_dotenv
+
+    names = {
+        name.upper()
+        for doc in iter_setting_docs()
+        if doc.is_secret
+        for name in (doc.env_name, *doc.aliases)
+    }
+    sources: list[Mapping[str, str | None]] = [answers, os.environ]
+    for path in _default_env_files():
+        if path.is_file():
+            try:
+                sources.append(read_dotenv(path))
+            except (OSError, UnicodeDecodeError):
+                continue
+    return [
+        value
+        for source in sources
+        for key, value in source.items()
+        if value and key.upper() in names
+    ]
+
+
+def _setup_env_file() -> Path:
+    """The ``.env`` the wizard writes: the file the settings read last, so its values win.
+
+    ``./.env`` by default (it overrides ``~/.bibr/.env``), else the last path
+    in ``BIBR_ENV_FILE``. :func:`main` refuses to run while ``.env`` loading is
+    disabled; ``./.env`` only stands in then.
+    """
+    from bibr.config import _default_env_files
+
+    chain = _default_env_files()
+    return (chain[-1] if chain else Path(".env")).absolute()
 
 
 def _with_llm_routing(env_vars: dict[str, str]) -> dict[str, str]:
@@ -815,7 +863,8 @@ class SetupWizard:
         self._declined_extras: set[str] = set()
         self._extras_installed = False
         self._env_written = False
-        self.env_path = Path.cwd() / ".env"
+        self.env_path = _setup_env_file()
+        self._warned_env_overrides: set[str] = set()
 
     # ---- public -----------------------------------------------------------
 
@@ -1450,6 +1499,7 @@ class SetupWizard:
         key_env = LLM_DEFAULTS[provider]["key_env"] if provider in LLM_DEFAULTS else ""
         api_key = self.env_vars.get(key_env, "") if key_env else ""
         retried_key = False
+        self._warn_environment_overrides()
 
         while True:
             try:
@@ -1480,7 +1530,7 @@ class SetupWizard:
                 )
                 break
             except Exception as exc:
-                msg = _redact(str(exc), api_key)
+                msg = self._redact(str(exc))
                 ui.error(self.console, f"Couldn't connect: {escape(msg)}")
                 if provider == "ollama":
                     # Ollama takes no key; what the user can change is the URL.
@@ -1677,6 +1727,7 @@ class SetupWizard:
                 _merge_env(self.env_path, _with_llm_routing(self.env_vars))
                 self._env_written = True
                 ui.ok(self.console, f"Merged new settings into {self.env_path}")
+                self._warn_environment_overrides()
                 if save_preset_name:
                     self._save_preset(save_preset_name)
                 else:
@@ -1686,10 +1737,41 @@ class SetupWizard:
         _write_env_fresh(self.env_path, _with_llm_routing(self.env_vars))
         self._env_written = True
         ui.ok(self.console, f"Wrote {self.env_path}")
+        self._warn_environment_overrides()
         if save_preset_name:
             self._save_preset(save_preset_name)
         else:
             self._offer_save_preset()
+
+    def _redact(self, text: str) -> str:
+        """*text* with every configured secret and anything key-shaped masked."""
+        return _redact(text, *_secret_values(self.env_vars))
+
+    def _warn_environment_overrides(self) -> None:
+        """Name the settings this setup writes that the shell exports differently.
+
+        Exported variables beat ``.env`` at runtime, so ``bibr chew`` would
+        keep using them (an older ``LLM_API_KEY`` or ``LLM_BASE_URL``), while
+        the connection test uses the answers. Values are not shown: most are
+        keys. Each name is reported once.
+        """
+        exported = {key.upper(): value for key, value in os.environ.items()}
+        shadowed = sorted(
+            key
+            for key, value in _with_llm_routing(self.env_vars).items()
+            if key.upper() in exported
+            and exported[key.upper()] != value
+            and key not in self._warned_env_overrides
+        )
+        if not shadowed:
+            return
+        self._warned_env_overrides.update(shadowed)
+        ui.warn(
+            self.console,
+            f"Your shell exports {', '.join(shadowed)} with a different value.",
+            hint="Environment variables override .env, so bibr keeps using the exported "
+            "values. Unset or update them before running bibr.",
+        )
 
     def _offer_save_preset(self) -> None:
         if not self.env_vars:
@@ -1704,11 +1786,11 @@ class SetupWizard:
 
     def _save_preset(self, name: str) -> None:
         try:
-            from bibr.presets import is_secret_key
+            from bibr.presets import is_secret_setting
 
             # Strip secrets — presets are intended to be shareable, so API keys
-            # / tokens / passwords stay only in .env.
-            shareable = {k: v for k, v in self.env_vars.items() if not is_secret_key(k)}
+            # / tokens / passwords, and URLs carrying one, stay only in .env.
+            shareable = {k: v for k, v in self.env_vars.items() if not is_secret_setting(k, v)}
             manager = PresetManager()
             manager.save(name, shareable)
             ui.ok(
@@ -1772,12 +1854,11 @@ class SetupWizard:
 
         doctor_line = "[dim]Run `bibr doctor` for a full check.[/dim]"
         key_env = self._llm_key_env_hint()
-        api_key = self.env_vars.get(key_env, "") if key_env else ""
 
         if isinstance(exc, ImportError):
             # ml_import_error() (bibr/utils/ml_extra.py) already bakes the
             # exact `uv sync --extra ...` line into the message.
-            return f"[dim]{escape(_redact(str(exc), api_key))}[/dim]\n{doctor_line}"
+            return f"[dim]{escape(self._redact(str(exc)))}[/dim]\n{doctor_line}"
 
         if _caused_by_configuration_error(exc):
             # _step_smoke_test already printed the message in full; say once
@@ -1805,11 +1886,11 @@ class SetupWizard:
                         "[dim]The LLM provider rejected the request — check your "
                         f"local LLM server logs.[/dim]\n{doctor_line}"
                     )
-            return f"[dim]{escape(_redact(str(exc), api_key))}[/dim]\n{doctor_line}"
+            return f"[dim]{escape(self._redact(str(exc)))}[/dim]\n{doctor_line}"
 
         return (
             f"[dim]Unexpected error — your configuration is already saved: "
-            f"{escape(_redact(str(exc), api_key))}[/dim]\n{doctor_line}"
+            f"{escape(self._redact(str(exc)))}[/dim]\n{doctor_line}"
         )
 
     def _step_smoke_test(
@@ -1860,9 +1941,7 @@ class SetupWizard:
                 ):
                     result = chew(sample_path, pages="1", no_llm=True, refs="off")
             except Exception as exc:  # noqa: BLE001 — must never crash the wizard
-                key_env = self._llm_key_env_hint()
-                api_key = self.env_vars.get(key_env, "") if key_env else ""
-                msg = _redact(str(exc), api_key)
+                msg = self._redact(str(exc))
                 ui.error(self.console, f"Test extraction failed: {escape(msg)}")
                 self.console.print(self._smoke_failure_hint(exc))
                 return
@@ -1915,6 +1994,11 @@ and a blank LLM_API_KEY or LLM_BASE_URL where you entered none, so that an
 older key or server cannot override the one you entered. Press Ctrl+C at any
 time to quit without saving.
 
+The wizard writes ./.env, or the last file BIBR_ENV_FILE lists. It does not
+run while BIBR_DISABLE_DOTENV or an empty BIBR_ENV_FILE turns .env loading
+off, and it warns when your shell exports a setting it writes with another
+value, since exported variables override .env.
+
 options:
   -h, --help   show this help message and exit
   --advanced   run the detailed provider/backend picker
@@ -1930,6 +2014,17 @@ def main() -> None:
     unknown = [a for a in args if a != "--advanced"]
     if unknown:
         Console().print(f"[red]Unknown option:[/red] {unknown[0]}")
+        raise SystemExit(2)
+    from bibr.config import dotenv_disabled_by, dotenv_enable_hint
+
+    if variable := dotenv_disabled_by():
+        # The wizard's only output is a .env file; bibr would not read it.
+        ui.error(
+            Console(),
+            f"Dotenv loading is disabled by {variable}, so bibr would not read the "
+            ".env this setup writes.",
+            hint=f"{dotenv_enable_hint(variable)}, then run bibr setup again.",
+        )
         raise SystemExit(2)
     try:
         wizard = SetupWizard()
