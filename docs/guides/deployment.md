@@ -230,9 +230,13 @@ spawned inference worker each write formatted lines (`time level logger:
 message`) to stderr, where Docker and systemd collect them. `SERVE_LOG_LEVEL`
 (default `info`) sets the level for bibr's own loggers and is handed to uvicorn
 and LitServe; HTTP client libraries are held at `warning` so request URLs are
-not logged. Every sink carries the secret scrubber, so bearer tokens, URL
-credentials and `?key=` query strings are masked before they are written,
-tracebacks included.
+not logged. Every sink carries the secret scrubber, so bearer tokens, API-key
+headers, URL credentials, `?key=`-style query strings and URL signatures,
+quoted `"api_key": "…"` entries (any key ending in `api_key`, `token`,
+`secret` or `password`) and known key shapes (Google, OpenAI, Anthropic,
+Groq, Hugging Face, GitHub, AWS access key IDs) are masked before they are
+written, tracebacks included. Enrichment warnings in the export name
+a failed lookup by its error type and HTTP status, not by its request URL.
 
 Metering (`METER_ENABLED`, default on) emits one JSON line per HTTP request
 from the API process and one per extraction — with LLM token usage — from the
