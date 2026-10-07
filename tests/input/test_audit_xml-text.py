@@ -38,6 +38,8 @@ from bibr.utils.text import CollapsedLength, clean_extracted_url, collapse_ws, n
 _DOCTYPE = b'<?xml version="1.0"?><!DOCTYPE article PUBLIC "-//NLM//DTD JATS (Z39.96)//EN" "x.dtd">'
 
 
+# Budgets on pure-Python work leave room for CI's coverage run, which slows it
+# 3-4x; the old code still takes several times the budget without coverage.
 def _elapsed(fn, *args):
     started = time.perf_counter()
     result = fn(*args)
@@ -54,7 +56,7 @@ def test_a_long_run_of_entities_resolves_in_linear_time():
 
     assert root.find("p").text == "\u03b1" * 100_000
     # Appending to the paragraph text entity by entity took ~45 s here.
-    assert elapsed < 2.0
+    assert elapsed < 5.0
 
 
 def test_entity_runs_merge_into_the_text_or_tail_before_them():
@@ -213,8 +215,9 @@ def test_ext_links_within_their_sentences_parse_and_attach_in_linear_time():
     by_id = {s.text_id: s.text for s in contents.sentences}
     assert by_id[contents.links[-1].text_id] == f"Sentence {n - 1} has a link."
     # ~60 s before: the offsets re-collapsed the paragraph per link, and each
-    # link searched the paragraph's sentences from the first.
-    assert elapsed < 2.0
+    # link searched the paragraph's sentences from the first. Over a second
+    # under coverage; the counting tests beside this one pin the linear work.
+    assert elapsed < 10.0
 
 
 def test_sentence_starts_are_found_once_per_entry(monkeypatch):
@@ -441,7 +444,7 @@ def test_stx_marks_in_one_long_token_resolve_in_linear_time():
 
     assert result in ("ab" + "-ab" * 19_999, "ab" * 20_000)
     # Every mark scanned the token back to its start: ~60 s.
-    assert elapsed < 2.0
+    assert elapsed < 10.0
 
 
 def test_a_long_letter_run_before_a_mark_resolves_in_linear_time():
@@ -474,7 +477,7 @@ def test_a_url_with_a_long_run_of_closing_parens_is_cleaned_in_linear_time():
 
     assert result == "http://x/"
     # Every stripped paren copied the URL and counted both parens again: ~19 s.
-    assert elapsed < 1.0
+    assert elapsed < 3.0
 
 
 @pytest.mark.parametrize(

@@ -37,6 +37,19 @@ def open_subprocess_log(label: str, port: int, *, shared: bool = False) -> tuple
         return path, os.fdopen(os.dup(original.fileno()), "ab")
 
 
+def close_shared_log(label: str, port: int) -> None:
+    """Close and forget the handle kept for a shared log.
+
+    The file stays on disk; the next ``shared=True`` call for the same label
+    and port starts a new log. Windows cannot delete a file that is still open,
+    so close the log here before removing it.
+    """
+    with _SHARED_LOGS_LOCK:
+        entry = _SHARED_LOGS.pop((label, port), None)
+    if entry is not None:
+        entry[1].close()
+
+
 def _new_log(label: str, port: int) -> tuple[Path, BinaryIO]:
     handle = tempfile.NamedTemporaryFile(  # noqa: SIM115 - owner closes with subprocess
         mode="w+b",

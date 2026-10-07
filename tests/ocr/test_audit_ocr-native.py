@@ -28,6 +28,8 @@ from tests.ocr.test_native_word_boundaries import _repair_line
 
 # Budget for an input the old code took 15 s or more on.
 _BUDGET_S = 1.0
+# For pure-Python work, which CI's coverage run slows 3-4x (regexes far less).
+_PYTHON_BUDGET_S = 3.0
 _WHOLE_PAGE = {"label": "text", "bbox_2d": [0, 0, 1000, 1000], "content": ""}
 # Around the first line _lines draws, where font sampling finds its glyphs.
 _FIRST_LINE = {"label": "text", "bbox_2d": [100, 95, 700, 125], "content": ""}
@@ -261,14 +263,14 @@ def test_long_line_of_inserted_spaces_is_repaired_in_linear_time():
     # "~" is a word-sized gap with nothing in it; each one re-walked the line.
     line = "x;~" * 8000 + "x"
 
-    assert _seconds(_repair_line, line) < _BUDGET_S
+    assert _seconds(_repair_line, line) < _PYTHON_BUDGET_S
     assert _repair_line(line) == "x; " * 8000 + "x"
 
 
 def test_long_link_run_stays_closed_in_linear_time():
     line = "https://osf.io/" + "a;~" * 6000 + "b"
 
-    assert _seconds(_repair_line, line) < _BUDGET_S
+    assert _seconds(_repair_line, line) < _PYTHON_BUDGET_S
     assert _repair_line(line) == "https://osf.io/" + "a;" * 6000 + "b"
 
 
@@ -306,7 +308,7 @@ def test_line_number_column_is_found_in_linear_time():
     others = [band(i, 40.0, 500.0) for i in range(count)]
     others += [band(i, 2.0, 8.0, shift=0.5) for i in range(count)]
 
-    assert _seconds(_line_number_column, numbers, others, 0.0, 612.0) < _BUDGET_S
+    assert _seconds(_line_number_column, numbers, others, 0.0, 612.0) < _PYTHON_BUDGET_S
     assert _line_number_column(numbers, others, 0.0, 612.0) == set(range(count))
 
 

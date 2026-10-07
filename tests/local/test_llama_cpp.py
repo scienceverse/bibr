@@ -1504,7 +1504,9 @@ def test_health_200_from_foreign_process_is_not_readiness():
 
     with socketserver.TCPServer(("127.0.0.1", 0), Handler) as httpd:
         port = httpd.server_address[1]
-        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread = threading.Thread(
+            target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        )
         thread.start()
         # Our own process: bind fails, exits 1 after 0.3 s (loser of a port race).
         loser = real_subprocess.Popen(
@@ -1551,7 +1553,9 @@ def test_health_200_with_live_process_is_readiness(monkeypatch):
 
     with socketserver.TCPServer(("127.0.0.1", 0), Handler) as httpd:
         port = httpd.server_address[1]
-        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread = threading.Thread(
+            target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        )
         thread.start()
         proc = real_subprocess.Popen(
             ["sleep", "30"],  # noqa: S603, S607 — `sleep` test double, not a model
