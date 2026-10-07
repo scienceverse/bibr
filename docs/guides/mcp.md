@@ -147,16 +147,27 @@ is the canonical SSRF surface — even locally, a hostile link must not reach
 loopback services or a cloud VM's metadata endpoint — the download is
 policy-gated by `bibr.utils.safe_fetch`:
 
-- HTTPS only, port 443 only, no credentials in the URL.
+- HTTPS only, port 443 only, no credentials in the URL. An
+  internationalised host name (`bücher.de`) is fetched by its IDNA form
+  (`xn--bcher-kva.de`).
 - Every DNS answer must be a public unicast address (private, loopback,
-  link-local, CGNAT, multicast, and IPv4-mapped tricks are refused), and the
+  link-local, CGNAT, multicast, IPv4-mapped and IPv4-compatible tricks,
+  6to4, Teredo and site-local IPv6 are refused; a NAT64 `64:ff9b::/96`
+  answer is judged by the IPv4 address it carries), and the
   connection is **pinned to the validated IP** — TLS SNI and certificate
   verification still use the hostname — so a DNS-rebinding race can't
   redirect the connection after validation.
+- The download always connects directly: `HTTPS_PROXY`/`ALL_PROXY` from the
+  environment are ignored, because a proxy would choose the destination
+  itself. Custom CA bundles (`SSL_CERT_FILE`/`SSL_CERT_DIR`) still apply.
 - Redirects are followed manually (bounded) and every hop re-validated, so
   a public URL can't 302 into an internal network or downgrade to HTTP.
 - Downloads are size-capped (100MB on the stdio server; the serve upload
-  limit remotely) under a wall-clock deadline.
+  limit remotely) under a wall-clock deadline. Compressed transfers are
+  refused rather than inflated: the request asks for
+  `Accept-Encoding: identity`, and a server that still answers with a
+  `Content-Encoding` (gzip, br, ...) fails the download, since a few hundred
+  bytes of stacked gzip can expand to gigabytes.
 
 The SSRF guard keeps the download off internal addresses, but any public
 HTTPS host is reachable, with a path and query string the agent chooses. An
