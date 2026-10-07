@@ -94,6 +94,7 @@ class WarningCode(StrEnum):
     DOCX_TABLE_DROPPED = "DOCX_TABLE_DROPPED"
     DOCX_FIGURES_DROPPED = "DOCX_FIGURES_DROPPED"
     DOCX_FIGURE_IMAGES_OMITTED = "DOCX_FIGURE_IMAGES_OMITTED"
+    TABLE_CONTENTS_OMITTED = "TABLE_CONTENTS_OMITTED"
 
 
 DESCRIPTIONS: dict[WarningCode, str] = {
@@ -218,6 +219,11 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.DOCX_FIGURE_IMAGES_OMITTED: "The images of a DOCX's figures passed the image "
     "data limit (an image counts once per figure showing it); the figures past it are kept "
     "without an image.",
+    WarningCode.TABLE_CONTENTS_OMITTED: "An HTML, ePub or JATS table expanded far past its "
+    "markup, or its size as rendered (escaped text and cell markup in every cell, a spanned "
+    "cell's text once per cell it covers) or its cells passed the table limits; it is kept "
+    "without contents when its caption labels it (JATS: when it has a label or caption) and "
+    "dropped otherwise.",
 }
 
 

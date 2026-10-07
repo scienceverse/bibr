@@ -80,9 +80,26 @@ wide as its widest row of cells plus 20 columns, and hold at most 20 slots for
 each cell and row it has plus 1,000. A `colspan` ends at that width, so a
 footnote row with `colspan="100"` under five columns gives 30 columns. A
 table wider than that all the same (one wide row padding many short rows, or
-rowspans piling up row after row) gets no `contents`. Like a table without
-cells, an HTML table then keeps its caption and markup when the caption labels
-it ("Table 3. …") and is dropped otherwise.
+rowspans piling up row after row) gets no `contents`. A table is also
+measured as its HTML renders, as DOCX tables are: escaped text and cell markup
+in every slot, a spanned cell's text once for every slot it fills, at the
+bytes per character its widest character needs. A table of more than 16 MiB
+gets no `contents` either. In HTML and ePub input, neither does a table that
+takes the document past 64 MiB of tables or 4,000,000 table cells (rows ×
+widest row); an ePub's chapters are one document. Like a table without cells,
+an HTML table then keeps its caption and markup when the caption labels it
+("Table 3. …") and is dropped otherwise, and a `TABLE_CONTENTS_OMITTED`
+warning counts these tables. An OCR table that cannot be read is dropped with
+`OCR_TABLE_DROPPED`.
+
+**JATS table limits.** JATS cells are read without their spans, and each row
+is padded to the widest. The HTML table limits apply: at most 20 slots for
+each cell and row plus 1,000, 16 MiB per table measured as rendered, and
+64 MiB and 4,000,000 cells for the document's tables together. A `<table>`
+nested in another is read once: its rows follow the row holding it, and its
+text is left out of the cell around it. A table over the limits gets no
+`contents` and a `TABLE_CONTENTS_OMITTED` warning; its `table-wrap` is kept
+when it has a label or caption and dropped otherwise.
 
 **Native text bypass and recognition.** `bibr/ocr/pdf_inspection.py` inspects
 embedded PDF text, metadata, outline headings, and reference-line geometry
