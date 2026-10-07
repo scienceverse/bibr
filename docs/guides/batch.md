@@ -102,7 +102,8 @@ run on the same `--out` — an overlapping cron job, say — stops at once with
 
 Ctrl-C is graceful in both executors: the local executor records the chunk
 that was running as `interrupted`; the remote executor stops submitting,
-waits up to 30 s for in-flight jobs and records the rest as `interrupted`.
+waits up to 30 s for in-flight jobs, cancels the ones still queued on the
+serve and records the rest as `interrupted`.
 A second Ctrl-C exits immediately. The process exits 130 after an interrupt,
 1 when any paper failed, 0 otherwise.
 
@@ -162,6 +163,17 @@ Concurrency adapts to the serve:
   `llm_invalid_output`, since the same request fails the same way again.
 - `--poll-timeout` (default 2400 s) bounds one paper's wall clock; expiry is
   recorded as `poll_timeout` without a retry.
+- A job that vanished from the serve — while polled, or after it succeeded
+  but before its result was fetched (results expire and are evicted) — is
+  re-submitted like any transient failure and recorded as `job_lost` if it
+  never comes back.
+- A job the run walks away from (re-submitted after errors, past
+  `--poll-timeout`, or still in flight after Ctrl-C) is cancelled with
+  `DELETE /papers/jobs/{id}`, so a job still queued never runs for nothing or
+  holds a `JOBS_MAX_ACTIVE` slot. The serve can only cancel a queued job: one
+  already running finishes, unread.
+- An export of the current schema major that the lenient reader rejects is
+  recorded as `invalid_remote_export` and not written to `<out>`.
 
 The serve dispatches at most `JOBS_MAX_RUNNING` jobs at once, so a client
 in-flight much above that only lengthens the queue.
@@ -246,8 +258,8 @@ in both executors, `output_write_failed` (the export could not be written to
 remotely, the serve's `error_code` when it gave one, else `http_<status>`,
 `connection_error`, `upstream_unavailable`, `job_lost`,
 `submit_wait_exhausted`, `pipeline_timeout`, `poll_timeout`,
-`bad_submit_response`, `bad_result_json`, `client_error`, `unreadable_input`,
-`interrupted`.
+`bad_submit_response`, `bad_result_json`, `invalid_remote_export`,
+`client_error`, `unreadable_input`, `interrupted`.
 
 ## Reading the report
 

@@ -23,12 +23,21 @@ Backpressure and failure policy (mirrors the bibr-training campaign script):
 * A finished result that fails to download (a reset connection, a 5xx, or a
   409 "not finished") is re-fetched from the same job with backoff, up to
   ``MAX_FETCH_ERRORS`` times, before the paper is re-submitted from scratch.
+  A 404 means the result expired or was evicted first: like a job that
+  vanishes while polled, the paper is re-submitted (``job_lost``).
 * **4xx** is a property of the request (rejected upload, bad option): failed
   at once, no retry. 401/403 stops the whole run — every paper would fail —
   and resume runs the papers it failed again by default.
+* An export of this bibr's schema major that the lenient reader rejects is
+  recorded as ``invalid_remote_export`` and never written: in ``<out>`` it
+  would fail every later tables rebuild.
 * Every success grows in-flight by one, back toward ``--max-concurrency``.
 * Ctrl-C stops submitting, waits ``grace`` seconds for in-flight jobs, then
   records the rest as ``failed`` / ``interrupted`` (re-run by default).
+* A job the executor walks away from (re-submitted, past ``poll_timeout``,
+  interrupted) gets a best-effort ``DELETE``, so a still-queued job neither
+  runs for nothing nor holds a ``JOBS_MAX_ACTIVE`` slot. The serve cannot
+  stop a running job yet; it answers 409 and the job finishes unread.
 """
 
 from __future__ import annotations
@@ -79,6 +88,11 @@ MAX_POLL_ERRORS = 5
 # job before the paper is re-submitted from scratch.
 MAX_FETCH_ERRORS = 3
 MAX_POLL_INTERVAL = 15.0
+# Cancelling an abandoned job is best effort: it must never hold up a
+# re-submit or the Ctrl-C shutdown for long.
+CANCEL_TIMEOUT = 5.0
+JOB_LOST = "job_lost"
+INVALID_REMOTE_EXPORT = "invalid_remote_export"
 MIME_TYPES = {
     ".pdf": "application/pdf",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -426,9 +440,21 @@ class RemoteExecutor:
 
     async def _attempt(self, client: httpx.AsyncClient, item: BatchItem, data: bytes) -> Outcome:
         job_id = await self._submit(client, item, data)
-        body = await self._poll(client, job_id)
-        if body.get("status") == "succeeded":
-            export = await self._fetch_result(client, job_id)
+        try:
+            body = await self._poll(client, job_id)
+            succeeded = body.get("status") == "succeeded"
+            export = await self._fetch_result(client, job_id) if succeeded else None
+        except (Exception, asyncio.CancelledError) as exc:
+            # Walking away (re-submit, poll timeout, Ctrl-C): a still-queued job
+            # would run for nothing and hold a JOBS_MAX_ACTIVE slot. A lost job
+            # has nothing left to cancel.
+            if not (isinstance(exc, TransientError) and exc.code == JOB_LOST):
+                await self._cancel(client, job_id)
+            raise
+        if export is not None:
+            problem = _export_problem(export, item.paper_id)
+            if problem:
+                raise PermanentError(INVALID_REMOTE_EXPORT, problem, job_id=job_id)
             return Outcome("ok", export=export, extra={"job_id": job_id})
 
         error = body.get("error")
@@ -524,7 +550,7 @@ class RemoteExecutor:
                 continue
             status = response.status_code
             if status == 404:
-                raise TransientError("job_lost", "job vanished from the serve", shrink=False)
+                raise TransientError(JOB_LOST, "job vanished from the serve", shrink=False)
             if status >= 500:
                 errors += 1
                 if errors > MAX_POLL_ERRORS:
@@ -578,6 +604,12 @@ class RemoteExecutor:
                     )
                 await self._sleep(self._backoff(errors - 1))
                 continue
+            if status == 404:
+                # The result expired or was evicted (a shared store keeps it
+                # under its own key; a memory store drops the oldest first).
+                raise TransientError(
+                    JOB_LOST, "result vanished from the serve", shrink=False, job_id=job_id
+                )
             if status != 200:
                 raise PermanentError(
                     f"http_{status}",
@@ -596,6 +628,22 @@ class RemoteExecutor:
                     "bad_result_json", "result is not a JSON object", job_id=job_id
                 )
             return export
+
+    async def _cancel(self, client: httpx.AsyncClient, job_id: str) -> None:
+        """Best-effort ``DELETE`` of an abandoned job; logs, never raises.
+
+        Only a queued job can be cancelled: a running or finished one answers
+        409, an expired one 404.
+        """
+        try:
+            response = await client.delete(f"/papers/jobs/{job_id}", timeout=CANCEL_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001 — must not replace the error being raised
+            logger.warning("could not cancel job %s: %s: %s", job_id, type(exc).__name__, exc)
+            return
+        if response.status_code in (200, 404, 409):
+            logger.debug("cancel job %s: HTTP %d", job_id, response.status_code)
+        else:
+            logger.warning("could not cancel job %s: HTTP %d", job_id, response.status_code)
 
     # -- the run ---------------------------------------------------------
 
@@ -702,6 +750,36 @@ def _interrupted() -> Outcome:
         error="interrupted before the job finished",
         finished_at=utc_now_iso(),
     )
+
+
+def _export_problem(export: dict[str, Any], paper_id: str) -> str | None:
+    """Why the tables rebuild would reject *export* as the runner writes it, else ``None``.
+
+    Mirrors ``write_batch_tables``: an export without a root
+    ``schema_version`` (pre-11) or of another major is left out of the
+    tables, so it is kept as before; any other is validated with the lenient
+    reader, which a malformed one would fail on every later rebuild.
+    """
+    from pydantic import ValidationError
+
+    from bibr.export.models import PaperExportReader
+    from bibr.export.schema_artifact import SCHEMA_MAJOR
+
+    if "schema_version" not in export:
+        return None
+    version = export["schema_version"]
+    if isinstance(version, str) and version.split(".")[0] != SCHEMA_MAJOR:
+        return None
+    try:
+        PaperExportReader.model_validate({**export, "paper_id": paper_id})
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        where = ".".join(str(part) for part in first["loc"]) or "<root>"
+        return (
+            f"export fails the {SCHEMA_MAJOR}.x schema ({exc.error_count()} error(s)); "
+            f"{where}: {first['msg']}"
+        )
+    return None
 
 
 def _retry_after(response: httpx.Response) -> float | None:
