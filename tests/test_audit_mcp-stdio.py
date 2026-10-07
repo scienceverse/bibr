@@ -4,7 +4,9 @@ File tools are confined to the allowed directories (``--allow-dir``, default
 the working directory), ``save_paper`` never writes through a symlink,
 ``chew_url`` honours the ``MCP_*`` URL settings, ``load_paper`` reads only
 bounded regular files, a malformed export never stays half-loaded, the server
-starts without LLM credentials, and a re-chewed paper is not evicted first.
+starts without LLM credentials, a re-chewed paper is not evicted first, and
+SIGTERM or SIGHUP stops the server once its cleanup has run, even while the
+client keeps stdin open.
 
 Driven through the MCP in-memory client, like ``test_mcp_server.py``.
 """
@@ -20,6 +22,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -521,14 +524,56 @@ async def test_no_exit_without_a_termination_signal(shutdown, root):
     assert shutdown == ["aclose"]
 
 
+class _Exited(BaseException):
+    """Raised by a stand-in ``os._exit``: like the real one, it never returns."""
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX signals")
-def test_sigterm_stops_bibr_mcp_while_the_client_keeps_stdin_open(tmp_path):
-    """SIGTERM became an interrupt whose unwinding waited on the SDK's blocking
-    stdin read, so a host that sends SIGTERM before closing the pipe (or
-    ``kill``, ``timeout``) left the server running until SIGKILL."""
+async def test_a_signal_after_a_session_ended_without_one_exits_at_once(
+    monkeypatch, shutdown, root
+):
+    """A session can end with no signal while the host keeps stdin open (it
+    stopped reading stdout): the transport then waits on stdin, where the
+    interrupt a later SIGTERM raised reached nothing."""
+    from bibr.local import cli
+
+    def exit_(code):
+        raise _Exited(code)
+
+    monkeypatch.setattr(os, "_exit", exit_)
+    previous = signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    try:
+        server = build_server(allowed_dirs=[root], no_llm=True)
+        with cli._interrupt_on_termination():
+            async with server.settings.lifespan(server):
+                pass
+            handler = signal.getsignal(signal.SIGTERM)
+            assert callable(handler)
+            with pytest.raises(_Exited) as exc_info:
+                handler(signal.SIGTERM, None)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert shutdown == ["aclose"]
+    assert exc_info.value.args == (128 + signal.SIGTERM,)
+
+
+async def test_an_embedded_server_does_not_load_the_cli(monkeypatch, shutdown, root):
+    monkeypatch.delitem(sys.modules, "bibr.local.cli", raising=False)
+    server = build_server(allowed_dirs=[root], no_llm=True)
+    async with server.settings.lifespan(server):
+        pass
+    assert shutdown == ["aclose"]
+    assert "bibr.local.cli" not in sys.modules
+
+
+def _start_bibr_mcp(tmp_path: Path, setup: str = "") -> tuple[subprocess.Popen, Path]:
+    """Run ``bibr mcp --no-llm`` after ``setup``; its stderr goes to a file."""
     repo = Path(__file__).resolve().parents[1]
     env = {**os.environ, "PYTHONPATH": str(repo), "BIBR_DISABLE_DOTENV": "1"}
-    code = "import sys; from bibr.local.cli import main; sys.argv[1:] = ['mcp', '--no-llm']; main()"
+    code = (
+        f"import sys\n{setup}"
+        "from bibr.local.cli import main; sys.argv[1:] = ['mcp', '--no-llm']; main()"
+    )
     stderr_path = tmp_path / "stderr.txt"
     with stderr_path.open("wb") as stderr:
         proc = subprocess.Popen(
@@ -539,8 +584,18 @@ def test_sigterm_stops_bibr_mcp_while_the_client_keeps_stdin_open(tmp_path):
             cwd=tmp_path,
             env=env,
         )
-    try:
-        initialize = {
+    return proc, stderr_path
+
+
+def _send_line(proc: subprocess.Popen, message: dict) -> None:
+    proc.stdin.write(json.dumps(message).encode() + b"\n")
+    proc.stdin.flush()
+
+
+def _initialize(proc: subprocess.Popen, stderr_path: Path) -> None:
+    _send_line(
+        proc,
+        {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "initialize",
@@ -549,23 +604,70 @@ def test_sigterm_stops_bibr_mcp_while_the_client_keeps_stdin_open(tmp_path):
                 "capabilities": {},
                 "clientInfo": {"name": "test", "version": "0"},
             },
-        }
-        proc.stdin.write(json.dumps(initialize).encode() + b"\n")
-        proc.stdin.flush()
-        # The reply means the server is serving, its stdin reader blocked on the next line.
-        ready, _, _ = select.select([proc.stdout], [], [], 120)
-        assert ready, stderr_path.read_text(errors="replace")
-        assert b'"id":1' in proc.stdout.readline(), stderr_path.read_text(errors="replace")
+        },
+    )
+    # The reply means the server is serving, its stdin reader blocked on the next line.
+    ready, _, _ = select.select([proc.stdout], [], [], 120)
+    assert ready, stderr_path.read_text(errors="replace")
+    assert b'"id":1' in proc.stdout.readline(), stderr_path.read_text(errors="replace")
 
-        proc.send_signal(signal.SIGTERM)
-        try:
-            returncode = proc.wait(timeout=60)
-        except subprocess.TimeoutExpired:
-            pytest.fail("bibr mcp still running 60 s after SIGTERM with stdin open")
-        assert returncode == 128 + signal.SIGTERM, stderr_path.read_text(errors="replace")
+
+def _assert_exits_on_sigterm(proc: subprocess.Popen, stderr_path: Path) -> None:
+    proc.send_signal(signal.SIGTERM)
+    try:
+        returncode = proc.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        pytest.fail("bibr mcp still running 60 s after SIGTERM with stdin open")
+    assert returncode == 128 + signal.SIGTERM, stderr_path.read_text(errors="replace")
+
+
+def _stop(proc: subprocess.Popen) -> None:
+    if proc.poll() is None:
+        proc.kill()
+    proc.wait()
+    proc.stdin.close()
+    proc.stdout.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX signals")
+def test_sigterm_stops_bibr_mcp_while_the_client_keeps_stdin_open(tmp_path):
+    """SIGTERM became an interrupt whose unwinding waited on the SDK's blocking
+    stdin read, so a host that sends SIGTERM before closing the pipe (or
+    ``kill``, ``timeout``) left the server running until SIGKILL."""
+    proc, stderr_path = _start_bibr_mcp(tmp_path)
+    try:
+        _initialize(proc, stderr_path)
+        _assert_exits_on_sigterm(proc, stderr_path)
     finally:
-        if proc.poll() is None:
-            proc.kill()
-        proc.wait()
-        proc.stdin.close()
+        _stop(proc)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX signals")
+def test_sigterm_stops_bibr_mcp_after_its_session_ended_without_one(tmp_path):
+    """The host stopped reading stdout, so the next reply failed and the
+    session ended, but the transport kept waiting on the stdin the host left
+    open, and neither a first nor a second SIGTERM stopped it."""
+    # Report the end of the lifespan cleanup, so the signal comes after it.
+    setup = (
+        "import bibr.mcp_server as mcp_server\n"
+        "exit_if_terminating = mcp_server._exit_if_terminating\n"
+        "def report():\n"
+        "    exit_if_terminating()\n"
+        "    print('lifespan closed', file=sys.stderr, flush=True)\n"
+        "mcp_server._exit_if_terminating = report\n"
+    )
+    proc, stderr_path = _start_bibr_mcp(tmp_path, setup)
+    try:
+        _initialize(proc, stderr_path)
         proc.stdout.close()
+        _send_line(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+        _send_line(proc, {"jsonrpc": "2.0", "id": 2, "method": "ping"})
+        for _ in range(1200):
+            if b"lifespan closed" in stderr_path.read_bytes() or proc.poll() is not None:
+                break
+            time.sleep(0.1)
+        assert proc.poll() is None, stderr_path.read_text(errors="replace")
+        assert b"lifespan closed" in stderr_path.read_bytes()
+        _assert_exits_on_sigterm(proc, stderr_path)
+    finally:
+        _stop(proc)

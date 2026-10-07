@@ -200,6 +200,32 @@ def test_the_terminating_signal_is_known_until_the_command_ends():
     assert seen[-1] is None  # a plain Ctrl-C
 
 
+class _Exited(BaseException):
+    """Raised by a stand-in ``os._exit``: like the real one, it never returns."""
+
+
+def test_a_signal_after_the_cleanup_exits_at_once(monkeypatch):
+    """Once ``bibr mcp`` has shut everything down, an interrupt can no longer
+    stop its stdio transport waiting on an open stdin; the signal exits."""
+
+    def exit_(code):
+        raise _Exited(code)
+
+    monkeypatch.setattr(os, "_exit", exit_)
+    with pytest.raises(_Exited) as exc_info:
+        with cli._interrupt_on_termination():
+            cli._exit_at_once_on_termination()
+            _send(signal.SIGHUP)
+    assert exc_info.value.args == (128 + signal.SIGHUP,)
+    assert not cli._exit_at_once.is_set()
+
+    # The next command takes Ctrl-C's path again.
+    with pytest.raises(SystemExit) as sys_exit:
+        with cli._interrupt_on_termination():
+            _send(signal.SIGTERM)
+    assert sys_exit.value.code == 128 + signal.SIGTERM
+
+
 class _Exported:
     ok = True
 

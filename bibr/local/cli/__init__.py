@@ -22,6 +22,7 @@ import os
 import signal
 import sys
 import threading
+from typing import NoReturn
 
 from bibr.exceptions import BibrError, ConfigurationError
 from bibr.local.cli import ui
@@ -172,6 +173,8 @@ def _suppress_progress_bars_if_not_tty() -> None:
 
 # Signals the active ``_interrupt_on_termination`` has turned into an interrupt.
 _received_signals: list[int] = []
+# Set once the running command has nothing left to shut down.
+_exit_at_once = threading.Event()
 
 
 def _terminating_signal() -> int | None:
@@ -181,6 +184,27 @@ def _terminating_signal() -> int | None:
     transport cannot finish unwinding while the client keeps stdin open.
     """
     return _received_signals[0] if _received_signals else None
+
+
+def _exit_at_once_on_termination() -> None:
+    """Make a later SIGTERM or SIGHUP end the running command at once.
+
+    For ``bibr mcp`` once its cleanup has run: the session may have ended
+    without one (the host stopped reading stdout) while the stdio transport
+    still waits on a stdin the host keeps open, where an interrupt no longer
+    reaches anything.
+    """
+    _exit_at_once.set()
+
+
+def _exit_now(code: int) -> NoReturn:
+    """Flush stdout and stderr, then exit without unwinding the interpreter."""
+    try:
+        for stream in (sys.stdout, sys.stderr):
+            with contextlib.suppress(Exception):
+                stream.flush()
+    finally:
+        os._exit(code)
 
 
 @contextlib.contextmanager
@@ -194,13 +218,18 @@ def _interrupt_on_termination():
     and the port. Raising SIGINT reaches whatever handles Ctrl-C right then
     (KeyboardInterrupt, ``asyncio.run`` cancelling its main task, the batch
     runner's graceful stop), so the same shutdown paths run. An interrupt that
-    began as one of these signals then exits 128 + its number.
+    began as one of these signals then exits 128 + its number; ``bibr batch``
+    exits 130 for any interrupt, and ``bibr mcp`` exits from its lifespan once
+    its cleanup has run.
     """
     received = _received_signals
     received.clear()
+    _exit_at_once.clear()
 
     def handler(signum, _frame) -> None:
         received.append(signum)
+        if _exit_at_once.is_set():
+            _exit_now(128 + received[0])
         if callable(signal.getsignal(signal.SIGINT)):
             signal.raise_signal(signal.SIGINT)
         else:
@@ -221,6 +250,7 @@ def _interrupt_on_termination():
         sys.exit(128 + received[0])
     finally:
         received.clear()
+        _exit_at_once.clear()
         for signum, old in previous.items():
             signal.signal(signum, old)
 

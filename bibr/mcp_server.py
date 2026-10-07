@@ -43,7 +43,7 @@ import stat
 import sys
 import time
 from collections.abc import Callable, Sequence
-from contextlib import asynccontextmanager, redirect_stdout, suppress
+from contextlib import asynccontextmanager, redirect_stdout
 from pathlib import Path
 from typing import Any, Unpack
 
@@ -533,20 +533,22 @@ def _exit_if_terminating() -> None:
     stdin in a worker thread that no cancellation reaches, so the rest of the
     unwinding (and the interpreter's exit, which joins that thread) would wait
     for the client's next line or EOF: a host that keeps the pipe open could
-    only stop the server with SIGKILL.
+    only stop the server with SIGKILL. That wait also follows a session that
+    ended some other way, so a signal arriving from now on exits at once.
     """
-    from bibr.local.cli import _terminating_signal
-
-    signum = _terminating_signal()
+    cli = sys.modules.get("bibr.local.cli")
+    if cli is None:  # embedded: no CLI signal handling, nothing recorded
+        return
+    cli._exit_at_once_on_termination()
+    signum = cli._terminating_signal()
     if signum is None:
         return
-    # os._exit would otherwise swallow a failed close without a word.
-    if isinstance(error := sys.exception(), Exception):
-        logger.error("error while shutting down", exc_info=error)
-    for stream in (sys.stdout, sys.stderr):
-        with suppress(Exception):
-            stream.flush()
-    os._exit(128 + signum)
+    try:
+        # os._exit would otherwise swallow a failed close without a word.
+        if isinstance(error := sys.exception(), Exception):
+            logger.error("error while shutting down", exc_info=error)
+    finally:
+        cli._exit_now(128 + signum)
 
 
 def build_server(
