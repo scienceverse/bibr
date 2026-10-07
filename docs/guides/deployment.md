@@ -189,14 +189,23 @@ the bearer token, and `/papers/extract` are unchanged. Replicas that share a Red
 but must not see each other's jobs (staging next to production, say) get distinct
 `JOBS_KEY_PREFIX` values.
 
+A Redis blip as a job finishes does not lose its result: the replica retries
+recording the outcome with backoff for up to a minute.
+
 Two consequences of keeping execution on the receiving replica:
 
-- A replica that *crashes* mid-job leaves its queued/running jobs reporting their
-  last status until a 24-hour safety TTL reaps them, and they hold cap slots that
-  long. A clean shutdown is different: the replica marks the jobs it abandons
-  `failed` with `503 replica shut down before the job finished`, so they free their
-  slots at once and clients know to resubmit. Drain a replica before stopping it
-  (stop routing new uploads to it, let its running jobs finish) to avoid even that.
+- Each queued/running job carries a one-minute lease in Redis that the replica
+  executing it keeps renewing. A replica that *crashes* mid-job (or cannot reach
+  Redis for longer than that minute) stops renewing; once the lease runs out, the
+  next upload to any replica marks the job `failed` with `503` and
+  `{"detail": "replica lost the job before it finished", "error_code": "job_lost"}`
+  and frees its cap slot, so clients know to resubmit. Jobs accepted by a replica
+  running a bibr release without job leases still wait for the 24-hour safety TTL
+  (mixed versions during a rolling upgrade are fine). A clean
+  shutdown fails the jobs it abandons at once, with `503 replica shut down before the
+  job finished` (it gives up after five seconds if Redis does not answer, and leaves
+  the rest to the leases). Drain a replica before stopping it (stop routing new
+  uploads to it, let its running jobs finish) to avoid even that.
 - Work spreads by which replica receives the upload, not by queue depth.
 
 **Follow-up (not implemented): a shared queue.** Letting an idle replica execute a
