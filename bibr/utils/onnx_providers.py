@@ -267,6 +267,8 @@ def get_ort_providers(
     enable_cuda: bool = True,
     model_name: str = "",
     gpu_mem_limit: int | None = None,
+    enable_coreml: bool = True,
+    cuda_device_id: int | None = None,
 ) -> list[str | tuple[str, dict]]:
     """Build ONNX Runtime provider list.
 
@@ -277,6 +279,8 @@ def get_ort_providers(
         enable_cuda: Whether to include CUDAExecutionProvider.
         model_name: Human-readable model name for logging and import errors.
         gpu_mem_limit: Optional cap on the CUDA EP arena size in bytes.
+        enable_coreml: Whether to include CoreMLExecutionProvider.
+        cuda_device_id: GPU the CUDA provider runs on (ORT's default is 0).
 
     Returns:
         Ordered list of providers suitable for ``ort.InferenceSession(providers=...)``.
@@ -298,9 +302,11 @@ def get_ort_providers(
         }
         if gpu_mem_limit is not None:
             cuda_opts["gpu_mem_limit"] = gpu_mem_limit
+        if cuda_device_id is not None:
+            cuda_opts["device_id"] = cuda_device_id
         providers.append(("CUDAExecutionProvider", cuda_opts))
 
-    if "CoreMLExecutionProvider" in available:
+    if enable_coreml and "CoreMLExecutionProvider" in available:
         providers.append("CoreMLExecutionProvider")
 
     providers.append("CPUExecutionProvider")
@@ -414,6 +420,14 @@ def enable_cuda_for(device: str | None) -> bool:
     return str(device).split(":", 1)[0].strip().lower() != "cpu"
 
 
+def cuda_device_id_for(device: str | None) -> int | None:
+    """The GPU index in a ``cuda:N`` request, else ``None`` (ORT's default GPU)."""
+    kind, _, index = str(device or "").partition(":")
+    if kind.strip().lower() != "cuda" or not index.strip().isdigit():
+        return None
+    return int(index)
+
+
 def cpu_ort_session_options():
     """``SessionOptions`` with ORT's CPU memory arena disabled, if available.
 
@@ -456,10 +470,15 @@ def create_session(
     measured (layout, SaT), not blindly for every model.
     """
     ort = import_onnxruntime(model_name or "ONNX Runtime inference")
+    allow_accelerators = enable_cuda_for(device)
     providers = get_ort_providers(
-        enable_cuda=enable_cuda_for(device),
+        enable_cuda=allow_accelerators,
         model_name=model_name,
         gpu_mem_limit=gpu_mem_limit,
+        # ``cpu`` means the CPU provider: CoreML may compute in FP16, which
+        # breaks the parity a CPU run is asked for.
+        enable_coreml=allow_accelerators,
+        cuda_device_id=cuda_device_id_for(device),
     )
     options = ort.SessionOptions()
     options.log_severity_level = 3  # errors only; ORT's warnings are noisy at load

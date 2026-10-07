@@ -104,8 +104,11 @@ Ctrl-C is graceful in both executors: the local executor records the chunk
 that was running as `interrupted`; the remote executor stops submitting,
 waits up to 30 s for in-flight jobs, cancels the ones still queued on the
 serve and records the rest as `interrupted`.
-A second Ctrl-C exits immediately. The process exits 130 after an interrupt,
-1 when any paper failed, 0 otherwise.
+A second Ctrl-C exits immediately. SIGTERM and SIGHUP (`kill`, `docker stop`,
+a closed SSH session) are handled the same way, so managed local servers are
+shut down rather than left holding GPU memory. The process exits 130 after
+Ctrl-C (128 plus the signal number after SIGTERM or SIGHUP), 1 when any paper
+failed, 0 otherwise.
 
 ## Local vs remote
 

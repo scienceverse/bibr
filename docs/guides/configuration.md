@@ -216,7 +216,19 @@ Windows or CUDA cards below 11 GB; and vLLM on Linux/CUDA systems with at
 least 11 GB (or when VRAM detection is unavailable).
 Explicit choices are `vllm`, `vllm-mlx`, `rapid-mlx`, `llama-cpp`, and `llmster`.
 The OCR and LLM choices are independent, so local OCR with a cloud LLM is a
-supported hybrid configuration.
+supported hybrid configuration. A managed vLLM LLM server and the managed
+`paddle-vllm` OCR server each reserve a share of GPU memory (0.85 and 0.92 by
+default) and cannot run together, so bibr stops the one that is running before
+starting the other: in a batch, each chunk's OCR stops the LLM server and that
+chunk's LLM stage starts it again.
+
+`bibr chew`, `bibr batch` and `bibr mcp` stop the managed servers they started
+when the command ends, including on Ctrl-C, SIGTERM (`kill`, `docker stop`,
+`timeout`, an MCP host stopping `bibr mcp`) and SIGHUP (a closed terminal or SSH
+session). A `bibr chew` or `bibr mcp` stopped by a signal exits with 128 plus its
+number (143 for SIGTERM) and `bibr batch` exits 130 as after Ctrl-C; in a systemd
+unit, set `SuccessExitStatus=130 143` so that `systemctl stop` counts as a clean
+stop.
 
 Run `bibr setup` to choose the model as well as the runtime. Its recommended
 model is NuExtract 3, with runtime-specific weights:
@@ -375,7 +387,10 @@ MPS path, and the `torch.compile` path `bibr serve` uses for layout.
 
 A bundle resolves from a local directory containing `onnx/` (point the model's
 existing `*_MODEL_ID` / `NER_PARSER_CKPT` setting at it) or from the Hub at the
-pinned revision, offline-tolerant through the Hub cache. Layout is the one model
+pinned revision, offline-tolerant through the Hub cache. A value shaped like a
+Hub id (`org/name`) is always fetched from the Hub, even when a directory of
+that name exists in the working directory; write a local directory as a path —
+absolute, or starting with `./`, `../` or `~`. Layout is the one model
 whose PyTorch weights live in a third-party repo, so its ONNX artifact has its
 own pair of settings, `LAYOUT_ONNX_MODEL_ID` and `LAYOUT_ONNX_REVISION`.
 
@@ -394,7 +409,9 @@ file changed — so the PyTorch path still loads byte-identical weights.
 
 Execution providers come from the same chain the sentence segmenter uses
 (CUDA → CoreML → CPU), so `bibr[gpu]` accelerates all four models, not just
-segmentation.
+segmentation. `--device cpu` runs these models on the CPU provider alone (no
+CoreML, which may compute in FP16), and `device="cuda:1"` in the Python API puts
+them on that GPU.
 
 `Dockerfile.serve` sets `ML_RUNTIME=torch` explicitly. That image exists for the
 PyTorch stack — `torch.compile` on the layout model in particular — and since the

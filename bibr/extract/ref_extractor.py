@@ -3111,6 +3111,13 @@ class ReferenceExtractor:
             ref_parser = _get_ner_parser(self._settings, self._memory_mode)
             parser_inputs = _strip_enum_markers(ref_strings)
             parsed = ref_parser.parse_batch(parser_inputs)
+            truncated = getattr(ref_parser, "last_truncated_count", 0)
+        if isinstance(truncated, int) and truncated > 0:
+            self._record_warning(
+                WarningCode.REF_PARSE_TRUNCATED,
+                f"{truncated} reference(s) longer than the NER parser's input window; "
+                "their trailing fields were not parsed",
+            )
         aligned: list[PaperReference | None] = []
         parsed_count = 0
         for ref_text, parser_text, fields in zip(ref_strings, parser_inputs, parsed, strict=True):
