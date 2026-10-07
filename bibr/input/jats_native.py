@@ -52,6 +52,7 @@ from bibr.paper_contents import (
 )
 from bibr.structure.assembler import DocumentAssembler
 from bibr.structure.float_labels import FloatKind, caption_label, label_element_label
+from bibr.structure.html_table import TableBudget, max_table_width
 from bibr.structure.xref_utils import URL_RE, detect_xrefs
 from bibr.utils.text import CollapsedLength, clean_extracted_url, collapse_ws
 
@@ -795,6 +796,8 @@ class JatsParser:
         self._ref_structured: list[PaperReference] = []
         self._ref_all_structured = True
         self._ref_next_id = 1
+        # The table limits HTML input has, with one budget for the document.
+        self._table_budget = TableBudget()
 
     # ------------------------------------------------------------------
     # Public API (mirrors DocxParser / PDFParser)
@@ -862,6 +865,7 @@ class JatsParser:
             native_references=self._native_references,
             native_ref_strings=self._native_ref_strings,
             native_ref_strings_authoritative=True,
+            processing_warnings=self._table_budget.warnings(),
         )
 
     def _make_sentence(self, entry, text: str, text_id: int, paragraph_id: int) -> PaperSentence:
@@ -1505,17 +1509,18 @@ class JatsParser:
     def _handle_table_wrap(self, table_wrap, section_id: int, in_paragraph: bool = False) -> None:
         caption = self._caption_text(table_wrap)
         table_els = [el for el in table_wrap.iter() if _ln(el) == "table"]
-        df = self._tables_to_df(table_els)
+        df = self._tables_to_df(table_els, self._table_budget)
         if df is not None:
             try:
                 html = df.to_html(index=False)
             except Exception:  # noqa: BLE001 — degrade gracefully, never crash
                 html = ""
         elif caption:
-            # No cell grid: a table printed as an image (<graphic> only). A
-            # table-wrap is a table whatever it holds, so one with a label or
-            # caption is kept with no contents and mentions resolve to it, as
-            # the HTML parser keeps a captioned image-only <table>.
+            # No cell grid: a table printed as an image (<graphic> only), or
+            # one over the table limits. A table-wrap is a table whatever it
+            # holds, so one with a label or caption is kept with no contents
+            # and mentions resolve to it, as the HTML parser keeps a captioned
+            # image-only <table>.
             df = pd.DataFrame()
             html = ""
         else:
@@ -1555,17 +1560,33 @@ class JatsParser:
         return JatsParser._tables_to_df([table_el])
 
     @staticmethod
-    def _tables_to_df(table_els: list) -> pd.DataFrame | None:
+    def _tables_to_df(table_els: list, budget: TableBudget | None = None) -> pd.DataFrame | None:
         """Combine every ``<table>`` of a wrap into one DataFrame.
 
         A wrap split across several <table>s (multi-page print) keeps only the
         first grid's rows when read singly; concatenating every row keeps the
         printed tokens. The first table's header stays the header — later
         headers join as data rows so no cell text is lost.
+
+        Rows are padded to the widest within the HTML table limits
+        (:func:`~bibr.structure.html_table.max_table_width`), and the table is
+        charged to *budget* (by default, a budget of its own). A table past
+        either is not read: ``None``, counted in ``budget.refused``.
         """
+        if budget is None:
+            budget = TableBudget()
         tables = [el for el in table_els if el is not None]
+        # A <table> nested in another is read with it: reading it again
+        # repeated its rows once for each table around it.
+        listed = set(tables)
+        tables = [el for el in tables if not any(a in listed for a in el.iterancestors())]
         if not tables:
             return None
+
+        def refuse(reason: str) -> None:
+            budget.refused += 1
+            logger.warning("JATS table %s; its contents are not read", reason)
+
         try:
             all_trs: list = []
             for table_el in tables:
@@ -1589,12 +1610,31 @@ class JatsParser:
             header = cells(header_tr) if header_tr is not None else []
             # Later tables repeat the header print; a repeated header row adds
             # no tokens beyond the header itself, so drop exact repeats while
-            # keeping any differing header as a data row.
-            if header:
-                body_trs = [tr for tr in body_trs if cells(tr) != header]
-            data = [cells(tr) for tr in body_trs]
+            # keeping any differing header as a data row. A nested table's
+            # text is in every cell around it too, so the text is counted as
+            # each row is read.
+            max_chars = budget.max_chars()
+            chars = sum(map(len, header))
+            data: list[list[str]] = []
+            for tr in body_trs:
+                row = cells(tr)
+                if header and row == header:
+                    continue
+                chars += sum(map(len, row))
+                if chars > max_chars:
+                    refuse("text passes the table text limits")
+                    return None
+                data.append(row)
             width = max([len(header), *[len(r) for r in data]], default=0)
             if width == 0:
+                return None
+            # One wide row padding many short ones, as HTML tables are bounded.
+            rows = len(data) + 1
+            if width > max_table_width(rows, len(header) + sum(map(len, data)), width):
+                refuse("pads its rows far past its cells")
+                return None
+            if not budget.charge(chars, rows * width):
+                refuse("text or cells pass the table limits")
                 return None
             header = header + [""] * (width - len(header))
             data = [r + [""] * (width - len(r)) for r in data]

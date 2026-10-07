@@ -35,7 +35,7 @@ from bibr.paper_contents import (
 )
 from bibr.structure.assembler import DeferredText, DocumentAssembler
 from bibr.structure.float_labels import caption_label
-from bibr.structure.html_table import html_table_frame, is_hidden_table
+from bibr.structure.html_table import TableBudget, html_table_frame, is_hidden_table
 from bibr.structure.xref_utils import URL_RE, detect_xrefs
 from bibr.utils.text import clean_extracted_url, collapse_ws
 
@@ -493,6 +493,9 @@ class HtmlParser:
         self._metadata: PaperMetadata = PaperMetadata(doi="", title="")
         self._native_ref_strings: list[str] | None = None
         self._pending_url_links: list[tuple[str, str, int, int, int]] = []
+        # Spans repeat a cell's text in every slot they cover: the tables of
+        # one document (an ePub's chapters together) share one limit.
+        self._table_budget = TableBudget()
 
     @property
     def _deferred_texts(self) -> list[tuple[str, int | None, int, bool, bool]]:
@@ -553,6 +556,7 @@ class HtmlParser:
             detected_title=self._detected_title,
             preparsed_metadata=self._metadata,
             native_ref_strings=self._native_ref_strings,
+            processing_warnings=self._table_budget.warnings(),
         )
 
     def _make_sentence(
@@ -908,12 +912,13 @@ class HtmlParser:
         caption = _text(caption_tag) or None
         label = caption_label(caption, "table")
         try:
-            df = html_table_frame(tag)
+            df = html_table_frame(tag, self._table_budget)
         except Exception as exc:  # noqa: BLE001
             logger.warning("HTML table parse failed: %s", exc)
             df = None
         if df is None:
-            # No cell grid (an image-only table, say). A table whose caption
+            # No cell grid (an image-only table, say, or one over the table
+            # limits, which the budget's warning records). A table whose caption
             # prints a table label ("Table 3. ...") is still a table that
             # mentions resolve to, so it is kept with its markup and no
             # contents. Any other grid-less table is dropped: a spacer, or a
