@@ -2,10 +2,12 @@
 
 Regression tests for the managed-servers audit findings: Rapid-MLX restarts
 that a cancellation or shutdown() could orphan, recycling a server bibr does
-not own, ``python -m`` children importing from the working directory, the
-unbound vllm-mlx host, keys sent to (or missing from) loopback servers,
-process groups left after a startup failure, leaked/unbounded logs, and an
-`lms load` timeout that was never unloaded.
+not own (including through paddle-mlx-vlm on the shared Paddle port),
+``python -m`` children importing from the working directory, the unbound
+vllm-mlx host, keys sent to (or missing from) loopback servers and keyed
+servers shared within one process, process groups left after a startup
+failure, leaked/unbounded/replaceable logs, and an `lms load` timeout that was
+never unloaded.
 """
 
 from __future__ import annotations
@@ -157,33 +159,71 @@ async def test_closed_client_does_not_start_a_new_server(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _reused_port(monkeypatch):
+_PADDLE_MLX = "olragon/PaddleOCR-VL-1.6-8bit"
+# A Rapid-MLX (vllm-mlx) /health; MLX-VLM's reports a loaded_model instead.
+_RAPID_MLX_HEALTH = {"status": "healthy", "model_loaded": True, "engine_type": "batched"}
+_MLX_VLM_HEALTH = {"status": "healthy", "loaded_model": _PADDLE_MLX}
+
+
+def _listener(models, health, requests):
+    """request_bytes stand-in for a server already listening on the port.
+
+    It lists *models* and answers /health with *health*; the OCR smoke reply
+    passes, so only an ownership check can refuse the listener.
+    """
+
+    def request(url, *, method="GET", **_kwargs):
+        requests.append((method, url.rsplit("/", 1)[-1]))
+        if url.endswith("/v1/models"):
+            return 200, "OK", json.dumps({"data": [{"id": m} for m in models]}).encode()
+        if url.endswith("/health"):
+            return 200, "OK", json.dumps(health).encode()
+        reply = {"model": _PADDLE_MLX, "choices": [{"message": {"content": "OCR OK"}}]}
+        return 200, "OK", json.dumps(reply).encode()
+
+    return request
+
+
+def _reused_port(monkeypatch, models=("mlx-community/GLM-OCR-8bit", _PADDLE_MLX)):
     from bibr.local import rapid_mlx as mod
 
-    requests = MagicMock(side_effect=AssertionError("no request to a refused listener"))
-    monkeypatch.setattr(mod, "guard_managed_server_port", lambda *_a, **_k: True)
+    requests: list[tuple[str, str]] = []
     monkeypatch.setattr(mod.subprocess, "Popen", MagicMock(side_effect=AssertionError("spawn")))
-    monkeypatch.setattr(mod, "request_bytes", requests)
+    monkeypatch.setattr(mod, "request_bytes", _listener(models, _RAPID_MLX_HEALTH, requests))
     return mod, requests
 
 
 @pytest.mark.parametrize(
-    ("client_name", "port_option"),
-    [("RapidMlxOcrClient", "rapid_mlx_port"), ("PaddleRapidMlxOcrClient", "paddle_mlx_port")],
+    ("client_name", "port_option", "port_setting"),
+    [
+        ("RapidMlxOcrClient", "rapid_mlx_port", "OCR_RAPID_MLX_PORT"),
+        ("PaddleRapidMlxOcrClient", "paddle_mlx_port", "OCR_PADDLE_MLX_PORT"),
+    ],
 )
-def test_recycling_client_refuses_a_reused_server(monkeypatch, client_name, port_option):
+def test_recycling_client_refuses_a_reused_server(
+    monkeypatch, caplog, client_name, port_option, port_setting
+):
     mod, requests = _reused_port(monkeypatch)
     settings = GlobalSettings()
     setattr(settings.ocr, port_option, 8799)
 
-    with pytest.raises(UpstreamServiceError) as excinfo:
+    with (
+        caplog.at_level(logging.INFO, logger="bibr.local.http_runtime"),
+        pytest.raises(UpstreamServiceError) as excinfo,
+    ):
         getattr(mod, client_name)(settings=settings)
 
     message = str(excinfo.value)
     assert "8799" in message
     assert "did not start" in message
+    assert port_setting in message
     assert "OCR_RAPID_MLX_RECYCLE_AFTER=0" in message
-    requests.assert_not_called()  # not even the Paddle smoke image
+    assert requests == [("GET", "models")]  # not even the Paddle smoke image
+    # The refusal survives a fallback chain that names only the candidate, and
+    # no log line claims the server is being reused.
+    logged = [r.getMessage() for r in caplog.records]
+    assert any(r.levelno == logging.WARNING and "8799" in r.getMessage() for r in caplog.records)
+    assert not any("Reusing" in line for line in logged)
 
 
 async def test_reused_server_is_still_accepted_with_recycling_off(monkeypatch):
@@ -197,6 +237,79 @@ async def test_reused_server_is_still_accepted_with_recycling_off(monkeypatch):
         assert client.loaded is True
     finally:
         await client.shutdown()
+
+
+def _mlx_vlm_on_listener(monkeypatch, health):
+    from bibr.local import mlx_vlm_ocr as mod
+
+    requests: list[tuple[str, str]] = []
+    smoke = MagicMock()
+    monkeypatch.setattr(mod.subprocess, "Popen", MagicMock(side_effect=AssertionError("spawn")))
+    monkeypatch.setattr(mod, "request_bytes", _listener([_PADDLE_MLX], health, requests))
+    monkeypatch.setattr(mod.MlxVlmOcrServer, "_run_smoke", smoke)
+    return mod, requests, smoke
+
+
+def test_mlx_vlm_refuses_a_rapid_mlx_server_on_the_shared_paddle_port(monkeypatch):
+    mod, requests, smoke = _mlx_vlm_on_listener(monkeypatch, _RAPID_MLX_HEALTH)
+    settings = GlobalSettings()
+    settings.ocr.paddle_mlx_port = 8798
+
+    with pytest.raises(UpstreamServiceError) as excinfo:
+        mod.MlxVlmOcrServer(settings=settings)
+
+    message = str(excinfo.value)
+    assert "8798" in message
+    assert "Rapid-MLX" in message
+    assert "OCR_RAPID_MLX_RECYCLE_AFTER=0" in message
+    smoke.assert_not_called()
+    assert ("GET", "health") in requests
+
+
+def test_mlx_vlm_still_reuses_an_mlx_vlm_server(monkeypatch):
+    mod, _requests, smoke = _mlx_vlm_on_listener(monkeypatch, _MLX_VLM_HEALTH)
+
+    server = mod.MlxVlmOcrServer(settings=GlobalSettings())
+
+    assert server._reused is True
+    smoke.assert_called_once()
+
+
+async def test_stale_paddle_rapid_mlx_server_is_refused_by_the_whole_paddle_chain(
+    monkeypatch, caplog
+):
+    """A leftover paddle-rapid-mlx server on the shared port is never adopted.
+
+    paddle-rapid-mlx refuses it because it cannot recycle it; paddle-mlx-vlm,
+    next in the automatic chain on the same port and model, used to adopt it
+    with no recycling at all, so the vision-cache leak came back.
+    """
+    import bibr.ocr.registry as registry
+    from bibr.local import mlx_vlm_ocr, rapid_mlx
+    from bibr.pipeline.resources import ResourceManager
+
+    requests: list[tuple[str, str]] = []
+    listener = _listener([_PADDLE_MLX], _RAPID_MLX_HEALTH, requests)
+    for mod in (rapid_mlx, mlx_vlm_ocr):
+        monkeypatch.setattr(mod, "request_bytes", listener)
+        monkeypatch.setattr(mod.subprocess, "Popen", MagicMock(side_effect=AssertionError("spawn")))
+    monkeypatch.setattr(
+        registry, "automatic_backend_names", lambda: ("paddle-rapid-mlx", "paddle-mlx-vlm")
+    )
+    settings = GlobalSettings()
+    settings.ocr.paddle_mlx_port = 8797
+    manager = ResourceManager(ocr_backend="paddle", settings=settings)
+
+    with (
+        caplog.at_level(logging.WARNING, logger="bibr.local.http_runtime"),
+        pytest.raises(UpstreamServiceError, match="No OCR startup candidate succeeded"),
+    ):
+        await manager.await_ocr()
+
+    refusals = [r.getMessage() for r in caplog.records if "8797" in r.getMessage()]
+    assert len(refusals) == 2  # one per candidate, each naming the port
+    assert all("OCR_RAPID_MLX_RECYCLE_AFTER=0" in line for line in refusals)
+    assert ("POST", "completions") not in requests  # no OCR ever reached it
 
 
 # ---------------------------------------------------------------------------
@@ -505,6 +618,145 @@ def test_guard_refuses_a_listener_that_requires_a_key(status):
     message = str(excinfo.value)
     assert "8769" in message
     assert "API key" in message
+    assert "taskkill" in message  # llama.cpp is also the Windows runtime
+
+
+class _KeyedListener:
+    """A vLLM / llama.cpp server double: its /v1 needs the key it launched with."""
+
+    def __init__(self, model: str, key_variable: str) -> None:
+        self.model = model
+        self.key_variable = key_variable
+        self.key: str | None = None
+
+    def popen(self, _cmd, **kwargs):
+        self.key = kwargs["env"][self.key_variable]
+        process = MagicMock(pid=424242, returncode=0)
+        process.poll.return_value = None
+        return process
+
+    def request(self, url, *, headers=None, **_kwargs):
+        from bibr.local.http_runtime import LocalHttpError
+
+        if self.key is None:
+            raise LocalHttpError("connection refused")
+        if not url.endswith("/v1/models"):
+            return 200, "OK", b"{}"
+        if (headers or {}).get("Authorization") != f"Bearer {self.key}":
+            return 401, "Unauthorized", b'{"error": "Unauthorized"}'
+        return 200, "OK", json.dumps({"data": [{"id": self.model}]}).encode()
+
+
+def _keyed_runtime(monkeypatch, runtime):
+    """(listener, start) for one keyed runtime; start() builds a server on one port."""
+    module = importlib.import_module(f"bibr.local.{runtime}")
+    monkeypatch.setattr(module.os, "killpg", MagicMock(), raising=False)
+    settings = GlobalSettings()
+    if runtime == "llama_cpp":
+        listener = _KeyedListener("org/m:Q4", "LLAMA_API_KEY")
+        monkeypatch.setattr(module, "find_llama_server", lambda: ["llama-server"])
+        monkeypatch.setattr(module, "supported_flags", lambda _prefix: frozenset())
+        monkeypatch.setattr(module, "_warn_cuda_steering_once", lambda _prefix: None)
+        monkeypatch.setattr(module.LlamaCppServer, "_wait_until_healthy", lambda self, _t: None)
+
+        def start():
+            return module.LlamaCppServer(model="org/m:Q4", port=8770, role="llm")
+
+    elif runtime == "vllm_llm":
+        listener = _KeyedListener("org/m", "VLLM_API_KEY")
+        monkeypatch.setattr(importlib.util, "find_spec", lambda _name, *a, **k: object())
+        monkeypatch.setattr(module.VllmLlmServer, "_wait_until_healthy", lambda self: None)
+
+        def start():
+            return module.VllmLlmServer(model="org/m", port=9999, settings=settings)
+
+    else:
+        listener = _KeyedListener(settings.ocr.paddle_served_model, "VLLM_API_KEY")
+        monkeypatch.setattr("bibr.ocr.registry.paddle_vllm_unavailable_reason", lambda **_k: None)
+        monkeypatch.setattr(importlib.util, "find_spec", lambda _name, *a, **k: object())
+        monkeypatch.setattr(module.VllmOcrServer, "_wait_until_ready", lambda self: None)
+
+        def start():
+            return module.VllmOcrServer(model="org/m", port=9123, settings=settings)
+
+    monkeypatch.setattr(module.subprocess, "Popen", listener.popen)
+    monkeypatch.setattr(module, "request_bytes", listener.request)
+    return listener, start
+
+
+@pytest.mark.parametrize("runtime", ["vllm_llm", "vllm_ocr", "llama_cpp"])
+def test_second_pipeline_in_the_process_shares_its_keyed_server(monkeypatch, caplog, runtime):
+    """A warm Chewer plus bibr.chew(): the second pipeline reuses the first's server."""
+    listener, start = _keyed_runtime(monkeypatch, runtime)
+    first = start()
+    with caplog.at_level(logging.INFO, logger="bibr.local.http_runtime"):
+        second = start()
+
+    assert second._reused is True
+    assert second.api_key == first.api_key == listener.key
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("this process started" in r.getMessage() for r in caplog.records)
+    second.shutdown()  # the sharer stops nothing and keeps the owner's key registered
+    assert start().api_key == first.api_key
+
+    first.shutdown()
+    # Its owner is gone: a keyed listener on the port is no longer ours to use.
+    with pytest.raises(UpstreamServiceError, match="requires an API key"):
+        start()
+
+
+@pytest.mark.parametrize("runtime", ["vllm_llm", "llama_cpp"])
+def test_shared_keyed_llm_server_sends_the_owner_s_key(monkeypatch, runtime):
+    _listener, start = _keyed_runtime(monkeypatch, runtime)
+    first = start()
+    second = start()
+    if runtime == "llama_cpp":
+        from bibr.local import llama_cpp
+
+        llm = llama_cpp.LlamaCppLlmServer.__new__(llama_cpp.LlamaCppLlmServer)
+        llm._settings = GlobalSettings()
+        llm._server = second
+        llm.configure_llm_client()
+        settings = llm._settings
+    else:
+        second.configure_llm_client()
+        settings = second._settings
+
+    assert settings.llm.api_key == first.api_key
+    first.shutdown()
+
+
+def test_guard_refuses_a_keyed_server_its_registered_key_does_not_open():
+    from bibr.local.http_runtime import guard_managed_server_port, register_server_key
+
+    listener = _KeyedListener("org/m", "VLLM_API_KEY")
+    listener.key = "the-real-key"
+    register_server_key("http://localhost:8769", "a-stale-key")
+
+    with pytest.raises(UpstreamServiceError, match="requires an API key"):
+        guard_managed_server_port(
+            "llm",
+            base_url="http://localhost:8769",
+            model="org/m",
+            server_label="vLLM",
+            request_fn=listener.request,
+        )
+
+
+def test_an_old_server_s_shutdown_keeps_a_newer_server_s_key():
+    from bibr.local.http_runtime import (
+        own_server_key,
+        register_server_key,
+        unregister_server_key,
+    )
+
+    register_server_key("http://localhost:8769", "old")
+    register_server_key("http://127.0.0.1:8769", "new")  # same port, other spelling
+    unregister_server_key("http://localhost:8769", "old")
+
+    assert own_server_key("http://localhost:8769") == "new"
+    unregister_server_key("http://localhost:8769", "new")
+    assert own_server_key("http://localhost:8769") == ""
 
 
 # ---------------------------------------------------------------------------
@@ -721,12 +973,93 @@ def test_shared_log_never_follows_a_replaced_path(tmp_path):
         path.unlink(missing_ok=True)
 
 
+@_POSIX_ONLY
+def test_shared_log_never_writes_through_a_hard_link_in_its_place():
+    """A removed log's name, re-linked to another file of the user's, is not followed."""
+    import tempfile
+
+    from bibr.utils.secure_temp import open_subprocess_log
+
+    path, handle = open_subprocess_log("audit-hardlink", 9003, shared=True)
+    handle.close()
+    fd, victim = tempfile.mkstemp(dir=path.parent)  # same filesystem as the log
+    os.close(fd)
+    path.unlink()
+    os.link(victim, path)
+    try:
+        new_path, new_handle = open_subprocess_log("audit-hardlink", 9003, shared=True)
+        new_handle.write(b"log line")
+        new_handle.close()
+
+        assert new_path != path
+        assert os.path.getsize(victim) == 0
+        new_path.unlink(missing_ok=True)
+    finally:
+        path.unlink(missing_ok=True)
+        os.unlink(victim)
+
+
+@_POSIX_ONLY
+def test_shared_log_never_blocks_on_a_fifo_in_its_place():
+    from bibr.utils.secure_temp import open_subprocess_log
+
+    path, handle = open_subprocess_log("audit-fifo", 9004, shared=True)
+    handle.close()
+    path.unlink()
+    os.mkfifo(path)
+    opened: list[tuple] = []
+    # Opening a FIFO for writing blocks until a reader appears: run the call
+    # where a hang fails the test instead of the suite.
+    worker = threading.Thread(
+        target=lambda: opened.append(open_subprocess_log("audit-fifo", 9004, shared=True)),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(5)
+    try:
+        assert opened, "reopening the shared log blocked on a FIFO"
+        new_path, new_handle = opened[0]
+        new_handle.close()
+        assert new_path != path
+        new_path.unlink(missing_ok=True)
+    finally:
+        if worker.is_alive():  # release the blocked open (and the lock it holds)
+            os.close(os.open(path, os.O_RDONLY | os.O_NONBLOCK))
+            worker.join(5)
+        path.unlink(missing_ok=True)
+
+
+def test_rapid_mlx_startup_error_reports_only_its_own_generation(monkeypatch):
+    """The shared log still holds earlier output; a new failure must not quote it."""
+    from bibr.local import rapid_mlx as mod
+    from bibr.utils.secure_temp import open_subprocess_log
+
+    port = 18773  # a log key no other test shares
+    path, earlier = open_subprocess_log("rapid-mlx", port, shared=True)
+    earlier.write(b"ValueError: requires mtp_num_hidden_layers >= 1\n")
+    earlier.close()
+    monkeypatch.setattr(mod.os, "killpg", MagicMock(), raising=False)
+    monkeypatch.setattr(mod.subprocess, "Popen", lambda *_a, **_k: _exited())
+    server = _bare(mod.RapidMlxServer, _process=None, _served_model_name="org/m", _port=port)
+
+    try:
+        with pytest.raises(RuntimeError, match="exited during startup") as excinfo:
+            server._spawn_and_wait(["rapid-mlx", "serve"])
+
+        assert "mtp_num_hidden_layers" not in excinfo.value.stderr_tail
+        assert not mod._is_mtp_unsupported_error(excinfo.value)  # no bogus MTP fallback
+        assert server._stderr_log == path
+    finally:
+        path.unlink(missing_ok=True)
+
+
 # ---------------------------------------------------------------------------
-# 8. A timed-out `lms load` is still unloaded
+# 8. A timed-out `lms load` is still unloaded; a failed one is not
 # ---------------------------------------------------------------------------
 
 
-def test_timed_out_llmster_load_is_unloaded(monkeypatch):
+def _llmster_with_failing_load(monkeypatch, lms_load: MagicMock):
+    """Start an llmster server whose `lms load` goes through run_lms_command."""
     from bibr.local import llmster
 
     calls: list[list[str]] = []
@@ -742,14 +1075,30 @@ def test_timed_out_llmster_load_is_unloaded(monkeypatch):
         if args == ["ps", "--json"]:
             return []
         if args[0] == "load":
-            raise UpstreamServiceError("llmster", "`lms load` timed out after 120s")
+            return llmster.run_lms_command("/usr/local/bin/lms", args)
         if args[0] == "unload":
             return None
         raise AssertionError(f"unexpected command: {args}")
 
     monkeypatch.setattr(llmster, "find_lms", lambda: "/usr/local/bin/lms")
-
-    with pytest.raises(UpstreamServiceError, match="timed out"):
+    monkeypatch.setattr(llmster.subprocess, "run", lms_load)
+    with pytest.raises(UpstreamServiceError) as excinfo:
         llmster.LlmsterLlmServer(model="org/model", identifier="bibr-model", runner=run)
+    return calls, str(excinfo.value)
 
+
+def test_timed_out_llmster_load_is_unloaded(monkeypatch):
+    timeout = subprocess.TimeoutExpired(["lms", "load"], 120)
+    calls, message = _llmster_with_failing_load(monkeypatch, MagicMock(side_effect=timeout))
+
+    assert "timed out" in message
     assert calls[-1] == ["unload", "bibr-model"]
+
+
+def test_failed_llmster_load_is_not_unloaded(monkeypatch):
+    """An outright failure loaded nothing; the identifier may be another process's."""
+    failed = MagicMock(returncode=1, stdout="", stderr="out of memory")
+    calls, message = _llmster_with_failing_load(monkeypatch, MagicMock(return_value=failed))
+
+    assert "out of memory" in message
+    assert ["unload", "bibr-model"] not in calls

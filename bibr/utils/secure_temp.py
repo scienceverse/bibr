@@ -8,8 +8,11 @@ import threading
 from pathlib import Path
 from typing import BinaryIO
 
-# Per-process logs opened with ``shared=True``, by (label, port).
-_SHARED_LOGS: dict[tuple[str, int], Path] = {}
+# Per-process logs opened with ``shared=True``, by (label, port). The handle
+# from creation stays open and each caller gets a duplicate of it: the log is
+# never reopened by path, where a temp cleaner may have removed it and, in a
+# shared /tmp, another user may since have put a link or FIFO in its place.
+_SHARED_LOGS: dict[tuple[str, int], tuple[Path, BinaryIO]] = {}
 _SHARED_LOGS_LOCK = threading.Lock()
 
 
@@ -24,12 +27,14 @@ def open_subprocess_log(label: str, port: int, *, shared: bool = False) -> tuple
     if not shared:
         return _new_log(label, port)
     with _SHARED_LOGS_LOCK:
-        path = _SHARED_LOGS.get((label, port))
-        handle = _reopen_own_log(path) if path is not None else None
-        if path is None or handle is None:
-            path, handle = _new_log(label, port)
-            _SHARED_LOGS[(label, port)] = path
-        return path, handle
+        entry = _SHARED_LOGS.get((label, port))
+        if entry is None or not _still_linked(entry[1]):
+            if entry is not None:
+                entry[1].close()
+            entry = _SHARED_LOGS[(label, port)] = _new_log(label, port)
+        path, original = entry
+        # "ab" positions the duplicate at the end: restarts append.
+        return path, os.fdopen(os.dup(original.fileno()), "ab")
 
 
 def _new_log(label: str, port: int) -> tuple[Path, BinaryIO]:
@@ -42,18 +47,9 @@ def _new_log(label: str, port: int) -> tuple[Path, BinaryIO]:
     return Path(handle.name), handle
 
 
-def _reopen_own_log(path: Path) -> BinaryIO | None:
-    """Append to a log this process created, or ``None`` if it is gone or not ours.
-
-    Never creates the file or follows a link: a temp cleaner may have removed
-    it, and in a shared /tmp another user may since have taken its name.
-    """
-    flags = os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+def _still_linked(handle: BinaryIO) -> bool:
+    """Whether the log still has a name; a removed one would swallow new output."""
     try:
-        fd = os.open(path, flags)
-    except OSError:
-        return None
-    if hasattr(os, "getuid") and os.fstat(fd).st_uid != os.getuid():
-        os.close(fd)
-        return None
-    return os.fdopen(fd, "ab")
+        return os.fstat(handle.fileno()).st_nlink > 0
+    except (OSError, ValueError):
+        return False

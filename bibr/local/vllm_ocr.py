@@ -25,8 +25,11 @@ from bibr.local.http_runtime import (
     guard_managed_server_port,
     kill_process_group,
     new_server_api_key,
+    own_server_key,
     pause_startup_poll,
+    register_server_key,
     request_bytes,
+    unregister_server_key,
 )
 from bibr.local.ocr import PaddleHttpOcrClient
 from bibr.ocr.registry import PADDLE_VLLM_GPU_MEMORY_UTILIZATION, register
@@ -41,8 +44,8 @@ class VllmOcrServer:
 
     # Set by the owner to stop the startup wait early (see ResourceManager).
     _stop_event: threading.Event | None = None
-    # Per-launch key of a server this process started; a reused listener has
-    # none bibr could know.
+    # Per-launch key of the server this process started, which a sibling
+    # pipeline reusing it shares; another process's listener has none.
     api_key = ""
 
     def __init__(
@@ -69,6 +72,8 @@ class VllmOcrServer:
             request_fn=request_bytes,
         )
         if self._reused:
+            # Another pipeline in this process may have started it.
+            self.api_key = own_server_key(self.base_url)
             return
 
         from bibr.ocr.registry import paddle_vllm_unavailable_reason
@@ -128,6 +133,7 @@ class VllmOcrServer:
         except BaseException:
             self.shutdown()
             raise
+        register_server_key(self.base_url, self.api_key)
 
     @staticmethod
     def _resolve_launch_cmd(model: str) -> list[str]:
@@ -248,6 +254,8 @@ class VllmOcrServer:
             self._close_stderr_fh()
             return
         process, self._process = self._process, None
+        if self.api_key:
+            unregister_server_key(self.base_url, self.api_key)
         try:
             try:
                 os.killpg(process.pid, signal.SIGTERM)

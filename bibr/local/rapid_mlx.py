@@ -116,6 +116,8 @@ class RapidMlxServer:
 
     # Set by the owner to stop the startup wait early (see ResourceManager).
     _stop_event: threading.Event | None = None
+    # Where the current generation's output starts in the shared log.
+    _stderr_offset = 0
 
     def __init__(
         self,
@@ -129,7 +131,7 @@ class RapidMlxServer:
         max_tokens: int | None = None,
         extra_args: list[str] | None = None,
         strict_ocr_smoke: bool = False,
-        allow_reuse: bool = True,
+        reuse_refusal: str | None = None,
         settings=None,
         stop_event: threading.Event | None = None,
     ) -> None:
@@ -143,27 +145,17 @@ class RapidMlxServer:
         self._process: subprocess.Popen | None = None
         self._stderr_fh = None
         self._stderr_log: Path | None = None
+        # *reuse_refusal* says why the caller cannot use a listener that
+        # already serves the model; the guard then refuses it by name.
         self._reused = guard_managed_server_port(
             "ocr" if multimodal else "llm",
             base_url=self.base_url,
             model=self._served_model_name,
             server_label="Rapid-MLX",
             request_fn=request_bytes,
+            refuse_reuse=None if reuse_refusal is None else lambda: reuse_refusal,
         )
         if self._reused:
-            if not allow_reuse:
-                from bibr.exceptions import UpstreamServiceError
-
-                raise UpstreamServiceError(
-                    "ocr",
-                    f"port {port} already has a Rapid-MLX server for "
-                    f"{self._served_model_name!r} that this bibr process did not start. "
-                    "The OCR client restarts its server every OCR_RAPID_MLX_RECYCLE_AFTER "
-                    "regions to release Rapid-MLX's vision-cache leak and cannot restart a "
-                    f"server it does not own. Stop it (`lsof -ti :{port} | xargs kill`) or "
-                    "configure a free OCR port, then retry; OCR_RAPID_MLX_RECYCLE_AFTER=0 "
-                    "reuses it without recycling.",
-                )
             # A model-listing match proves only the alias. Paddle candidates
             # still need to prove image+prompt completion support; shutdown()
             # is a no-op here because this process is not ours.
@@ -251,6 +243,10 @@ class RapidMlxServer:
         self._stderr_log, self._stderr_fh = open_subprocess_log(
             "rapid-mlx", self._port, shared=True
         )
+        try:
+            self._stderr_offset = os.fstat(self._stderr_fh.fileno()).st_size
+        except OSError:
+            self._stderr_offset = 0
 
         logger.info("Starting Rapid-MLX server: %s", " ".join(cmd))
         logger.info("Rapid-MLX stderr -> %s", self._stderr_log)
@@ -425,7 +421,9 @@ class RapidMlxServer:
             with open(self._stderr_log, "rb") as f:
                 f.seek(0, 2)
                 size = f.tell()
-                f.seek(max(0, size - n_bytes))
+                # The log is shared across restarts: never report (or match
+                # an MTP error in) an earlier generation's output.
+                f.seek(max(self._stderr_offset, size - n_bytes))
                 return f.read().decode("utf-8", errors="replace")
         except OSError:
             return ""
@@ -527,11 +525,27 @@ class _ManagedRapidMlxOcrClient:
             max_tokens=_RAPID_MLX_OCR_MAX_TOKENS,
             extra_args=shlex.split(getattr(self._settings.ocr, self._extra_args_option) or ""),
             strict_ocr_smoke=self._strict_ocr_smoke,
-            # Recycling restarts the server, which only works on one this
-            # process started: a reused listener would keep leaking.
-            allow_reuse=not self._recycle_after,
+            reuse_refusal=self._reuse_refusal(),
             settings=self._settings,
             stop_event=stop_event,
+        )
+
+    def _reuse_refusal(self) -> str | None:
+        """Why this client cannot adopt a listener already serving its model.
+
+        Recycling restarts the server, which works only on one this client
+        started: a reused listener would keep leaking, whoever started it (a
+        crashed run, another bibr process, another pipeline in this one, or
+        this client's own generation that would not stop).
+        """
+        if not self._recycle_after:
+            return None
+        return (
+            "this OCR client restarts its server every OCR_RAPID_MLX_RECYCLE_AFTER "
+            f"({self._recycle_after}) regions to release Rapid-MLX's vision-cache leak, "
+            "and it cannot restart a server it did not start (or could not stop). Set "
+            f"OCR_{self._port_option.upper()} to a free port, or set "
+            "OCR_RAPID_MLX_RECYCLE_AFTER=0 to reuse that server without restarts."
         )
 
     def _spawn_http_client(self, server: RapidMlxServer) -> HttpOcrClient:

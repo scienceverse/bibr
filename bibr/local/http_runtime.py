@@ -82,6 +82,41 @@ def bearer_headers(api_key: str | None) -> dict[str, str]:
     return {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
 
+# Per-launch keys of the keyed servers this process started, by port. A second
+# pipeline in the same process (a warm ``Chewer`` plus ``bibr.chew()``) finds
+# its sibling's server keyed: the guard authenticates with the key kept here
+# and shares that server, as it did before servers had keys.
+_OWN_SERVER_KEYS: dict[int | None, str] = {}
+_OWN_SERVER_KEYS_LOCK = threading.Lock()
+
+
+def register_server_key(base_url: str, api_key: str) -> None:
+    """Record the key of a server this process started and that is now ready."""
+    with _OWN_SERVER_KEYS_LOCK:
+        _OWN_SERVER_KEYS[urllib.parse.urlsplit(base_url).port] = api_key
+
+
+def unregister_server_key(base_url: str, api_key: str) -> None:
+    """Forget a stopped server's key, unless a newer server took over its port."""
+    port = urllib.parse.urlsplit(base_url).port
+    with _OWN_SERVER_KEYS_LOCK:
+        if _OWN_SERVER_KEYS.get(port) == api_key:
+            del _OWN_SERVER_KEYS[port]
+
+
+def own_server_key(base_url: str) -> str:
+    """The key of the server this process started on *base_url*'s port, or ``""``."""
+    with _OWN_SERVER_KEYS_LOCK:
+        return _OWN_SERVER_KEYS.get(urllib.parse.urlsplit(base_url).port, "")
+
+
+def _stop_hint(port: int | None) -> str:
+    return (
+        f"`lsof -ti :{port} | xargs kill`, or `netstat -ano | findstr :{port}` "
+        "then `taskkill /PID <pid> /F` on Windows"
+    )
+
+
 def kill_process_group(pid: int) -> None:
     """SIGKILL whatever is left of a ``start_new_session`` child's process group.
 
@@ -160,6 +195,7 @@ def guard_managed_server_port(
     model: str,
     server_label: str,
     request_fn: Callable[..., tuple[int, str, bytes]] | None = None,
+    refuse_reuse: Callable[[], str | None] | None = None,
 ) -> bool:
     """Pre-flight a managed local server's port before spawning a subprocess.
 
@@ -169,12 +205,16 @@ def guard_managed_server_port(
     Probe ``/v1/models`` on the configured port first:
 
     - Nothing listening → return ``False`` (spawn normally).
-    - Listener already serves *model* → return ``True`` (reuse it, with a
-      warning that this process does not own it; the caller must not spawn,
-      must not kill a process it does not own, and must not send it a key).
-    - Listener rejects the keyless probe (401/403) → raise
-      ``UpstreamServiceError``: it is most likely another bibr process's
-      server, keyed with a per-launch key this process does not have.
+    - Listener already serves *model* → return ``True`` (reuse it; the caller
+      must not spawn and must not kill a process it does not own). A listener
+      this process did not start is reused with a warning; the caller must
+      not send it a key. *refuse_reuse*, when given, is asked first: a reason
+      it returns is logged and raised as ``UpstreamServiceError`` instead.
+    - Listener rejects the keyless probe (401/403) → retry with the key of the
+      server this process started on that port (see ``register_server_key``);
+      without one, or when it is rejected too, raise ``UpstreamServiceError``:
+      it is most likely another bibr process's server, keyed with a
+      per-launch key this process does not have.
     - Listener serves other model(s) → raise ``UpstreamServiceError`` naming
       both models.
     - Listener with an unusable ``/v1/models`` → raise ``UpstreamServiceError``
@@ -192,6 +232,15 @@ def guard_managed_server_port(
     except LocalHttpError:
         return False
 
+    own_key = own_server_key(base_url)
+    if status in (401, 403) and own_key:
+        try:
+            status, _reason, body = request_fn(
+                models_url, headers=bearer_headers(own_key), timeout=5
+            )
+        except LocalHttpError:
+            pass
+
     served_ids: list[str] = []
     if status == 200:
         try:
@@ -204,22 +253,42 @@ def guard_managed_server_port(
         except (ValueError, AttributeError, TypeError):
             served_ids = []
 
+    from bibr.exceptions import UpstreamServiceError
+
+    port = urllib.parse.urlsplit(base_url).port
+
     if model in served_ids:
+        refusal = refuse_reuse() if refuse_reuse is not None else None
+        if refusal:
+            message = (
+                f"port {port} already has a server for {model!r} that bibr will not use "
+                f"as its managed {server_label} server: {refusal} Stop that server "
+                f"({_stop_hint(port)}) if you did not start it yourself, then retry."
+            )
+            # Logged as well: a fallback chain reports only which candidate
+            # failed, and this names the port and the way out.
+            logger.warning("%s", message)
+            raise UpstreamServiceError(service, message)
+        if own_key:
+            logger.info(
+                "Sharing the %s server this process started at %s (it serves %s)",
+                server_label,
+                base_url,
+                model,
+            )
+            return True
         # Anything on loopback can list a model id, so say plainly that this
         # listener is not ours: it receives the documents bibr sends it.
         logger.warning(
-            "Reusing a %s server already listening at %s (it serves %s). This bibr "
-            "process did not start it and cannot tell who did; it will receive the "
-            "document content bibr sends. Stop it if you did not start it.",
+            "Reusing a %s server already listening at %s (it serves %s) instead of "
+            "starting one. bibr did not start it for this pipeline and cannot check who "
+            "did; it will receive the document content bibr sends. Stop it if neither "
+            "you nor another bibr run started it.",
             server_label,
             base_url,
             model,
         )
         return True
-
-    from bibr.exceptions import UpstreamServiceError
-
-    port = urllib.parse.urlsplit(base_url).port
 
     if status in (401, 403):
         raise UpstreamServiceError(
@@ -227,8 +296,8 @@ def guard_managed_server_port(
             f"port {port} is held by a server that requires an API key (its /v1/models "
             f"returned HTTP {status}), most likely a {server_label} server started by "
             "another bibr process with its own per-launch key. bibr does not share a "
-            f"server it cannot authenticate to. Stop it (`lsof -ti :{port} | xargs kill`) "
-            "or configure a free port, then retry.",
+            f"server it cannot authenticate to. Stop it ({_stop_hint(port)}) or "
+            "configure a free port, then retry.",
         )
 
     if not served_ids:

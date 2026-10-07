@@ -248,17 +248,26 @@ cannot call them. Rapid-MLX, vllm-mlx and MLX-VLM servers run without a key.
 If the port already has a server that lists the requested model, bibr reuses
 it and logs a warning that it did not start that server. A reused server
 receives your documents, so stop any server there that you did not start
-yourself. bibr does not share a server that rejects its unauthenticated
-probe with HTTP 401, which is usually a server that another bibr process
+yourself. Two pipelines in one Python process, such as an open `bibr.Chewer`
+and a `bibr.chew()` call, share the vLLM or llama.cpp server that the first one
+started; it stops when the pipeline that started it closes. bibr does not share
+a server that rejects its unauthenticated probe with HTTP 401 and was not
+started by this process, which is usually a server that another bibr process
 started with its own key. Stop that server or configure a free port.
 
 The Rapid-MLX OCR backends (`glm-rapid-mlx`, `paddle-rapid-mlx`) restart their
 server every `OCR_RAPID_MLX_RECYCLE_AFTER` regions (default 80). This releases
 memory that Rapid-MLX's vision cache would otherwise leak. bibr can restart only
 a server it started, so these backends refuse a server that is already running
-on their port. To fix this, stop that server, move the port
-(`OCR_RAPID_MLX_PORT`, or `OCR_PADDLE_MLX_PORT` for `paddle-rapid-mlx`), or set
-`OCR_RAPID_MLX_RECYCLE_AFTER=0` to reuse the server without restarts.
+on their port, including one that another pipeline in the same process started.
+`paddle-mlx-vlm` shares its port and model with `paddle-rapid-mlx`, so it
+refuses a Rapid-MLX or vllm-mlx server it finds there too; an MLX-VLM server is
+still reused. To fix this, stop that server, move the port
+(`OCR_RAPID_MLX_PORT`, or `OCR_PADDLE_MLX_PORT` for the Paddle backends), or set
+`OCR_RAPID_MLX_RECYCLE_AFTER=0` so that the Rapid-MLX backends reuse the server
+without restarts. Each refusal is logged as a warning that names the port. The
+automatic `paddle` chain reports only which candidates failed, and then tries
+the next one.
 
 Each server writes its stderr to a private log file in the system temp
 directory, and bibr logs the path when the server starts. A Rapid-MLX server

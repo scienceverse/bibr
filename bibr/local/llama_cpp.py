@@ -23,8 +23,11 @@ from bibr.local.http_runtime import (
     guard_managed_server_port,
     kill_process_group,
     new_server_api_key,
+    own_server_key,
     pause_startup_poll,
+    register_server_key,
     request_bytes,
+    unregister_server_key,
 )
 
 try:
@@ -762,8 +765,8 @@ class LlamaCppServer:
 
     # Set by the owner to stop the startup wait early (see ResourceManager).
     _stop_event: threading.Event | None = None
-    # Per-launch key of a server this process started; a reused listener has
-    # none bibr could know.
+    # Per-launch key of the server this process started, which a sibling
+    # pipeline reusing it shares; another process's listener has none.
     api_key = ""
 
     def __init__(
@@ -799,6 +802,8 @@ class LlamaCppServer:
             request_fn=request_bytes,
         )
         if self._reused:
+            # Another pipeline in this process may have started it.
+            self.api_key = own_server_key(self.base_url)
             return
 
         prefix = find_llama_server()
@@ -875,6 +880,7 @@ class LlamaCppServer:
             # of the health wait must still shut it down (mirrors VllmLlmServer).
             self.shutdown()
             raise
+        register_server_key(self.base_url, self.api_key)
         self._n_slots = _n_slots_from_argv(launched)
         # Server is healthy — nudge Vulkan-on-NVIDIA users toward CUDA (log-only,
         # once per process, both roles). Never blocks or fails startup.
@@ -955,6 +961,8 @@ class LlamaCppServer:
 
     def shutdown(self) -> None:
         proc, self._process = self._process, None
+        if proc is not None and self.api_key:
+            unregister_server_key(self.base_url, self.api_key)
         try:
             if proc is not None and proc.poll() is None:
                 if os.name == "nt":

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import logging
 import os
 import shlex
@@ -61,6 +62,7 @@ class MlxVlmOcrServer:
             model=self._model,
             server_label="PaddleOCR-VL MLX-VLM",
             request_fn=request_bytes,
+            refuse_reuse=self._rapid_mlx_listener_refusal,
         )
         if self._reused:
             # A model-listing match alone does not prove image+prompt OCR.
@@ -88,6 +90,30 @@ class MlxVlmOcrServer:
         except BaseException:
             self.shutdown()
             raise
+
+    def _rapid_mlx_listener_refusal(self) -> str | None:
+        """Refuse a Rapid-MLX or vllm-mlx server that holds the shared Paddle port.
+
+        paddle-rapid-mlx uses the same port and model, and refuses a server it
+        did not start because only its restarts relieve Rapid-MLX's vision-cache
+        leak. Adopting that server here, with no restarts, would bring the leak
+        back. Their ``/health`` reports an ``engine_type``; MLX-VLM's does not.
+        """
+        try:
+            status, _reason, body = request_bytes(f"{self.base_url}/health", timeout=5)
+            health = json.loads(body.decode("utf-8")) if status == 200 else None
+        except (LocalHttpError, UnicodeDecodeError, ValueError):
+            return None
+        if not isinstance(health, dict) or "engine_type" not in health:
+            return None
+        return (
+            "it is a Rapid-MLX or vllm-mlx server (its /health reports an engine_type), "
+            "not MLX-VLM, most likely a paddle-rapid-mlx server left over from an earlier "
+            "run. Its vision cache leaks memory until OCR fails unless the server is "
+            "restarted regularly, which only paddle-rapid-mlx does, and only for a server "
+            "it started. `--ocr paddle-rapid-mlx` with OCR_RAPID_MLX_RECYCLE_AFTER=0 uses "
+            "it anyway, without restarts."
+        )
 
     @staticmethod
     def _resolve_launch_cmd(model: str) -> list[str]:
