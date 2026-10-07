@@ -149,14 +149,14 @@ Concurrency adapts to the serve:
 - A **429** on submit is the serve's queue cap (`JOBS_MAX_ACTIVE`) — normal
   under load. In-flight drops to `--min-concurrency` and the submit waits
   `Retry-After`; it is never counted as a failure.
-- **502/503/504** answers to a submit or poll, connection errors, and a job
-  the serve failed because of an upstream OCR/LLM outage (circuit breaker open,
-  OCR server unreachable, a layout model or LLM server that could not start:
-  the job's error says `"outage": true`) are *transient*: in-flight shrinks
-  by one and the paper is retried with backoff up to `--retries` times
-  (default 3). If it
-  never recovers, the last transient code is recorded, and the next run picks
-  the paper up again.
+- **502/503/504** answers to a submit or poll (an open circuit breaker on
+  the serve answers 502), connection errors, and a job the serve failed
+  because a service or model it needs was down (OCR server unreachable, a
+  layout model or LLM server that could not start: the job's error says
+  `"outage": true`) are *transient*: in-flight shrinks by one and the paper
+  is retried with backoff up to `--retries` times (default 3). If it never
+  recovers, the last transient code is recorded, and the next run picks the
+  paper up again.
 - Every success grows in-flight by one, back toward `--max-concurrency`.
 - A job the serve failed with **504** ran out of the serve's
   `PIPELINE_TIMEOUT`, which counts the wait for a free pipeline slot as well
