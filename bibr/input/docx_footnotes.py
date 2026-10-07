@@ -51,7 +51,10 @@ def _load_notes(doc, *, part_attr: str, reltype: str, tag: str) -> dict[str, str
         except Exception:
             return {}
 
-    for note in root.iter(f"{{{_W_NAMESPACE}}}{tag}"):
+    # Notes are the root's children. Searching the whole tree also took notes
+    # nested in notes, each again holding the text of every note inside it: a
+    # nest 250 deep turned 1 MB of note text into 250 MB.
+    for note in root.iterchildren(f"{{{_W_NAMESPACE}}}{tag}"):
         note_type = note.get(f"{{{_W_NAMESPACE}}}type")
         if note_type in ("separator", "continuationSeparator"):
             continue
