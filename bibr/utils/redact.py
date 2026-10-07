@@ -27,12 +27,13 @@ _QUERY_SECRET_RE = re.compile(
     r"|x-goog-signature)=)[^&\s\"'<>]+",
     re.IGNORECASE,
 )
-# A quoted JSON/dict entry: ``"api_key": "…"``, ``'token': '…'``. Same-line
-# only, and the value must close with the quote that opened the key.
+# A quoted JSON/dict entry: ``"api_key": "…"``, ``'token': '…'``. The key is
+# matched by its ending, as config's secret field names are (``ocr_api_key``,
+# ``id_token``, ``client_secret``). Same-line only, and the value must close
+# with the quote that opened the key.
 _MAPPING_SECRET_RE = re.compile(
-    r"""((["'])(?:(?:x-(?:goog-)?)?api[_-]?key|access[_-]?token|refresh[_-]?token|token"""
-    r"""|client[_-]?secret|secret|password|passwd|pwd|authorization)\2[ \t]*:[ \t]*\2)"""
-    r"""(?:(?!\2)[^\\\n]|\\.)*\2""",
+    r"""((["'])[\w-]*(?:api[_-]?key|private[_-]?key|token|secret|password|passwd|pwd"""
+    r"""|authorization)\2[ \t]*:[ \t]*\2)(?:(?!\2)[^\\\n]|\\.)*\2""",
     re.IGNORECASE,
 )
 # ``Authorization: Bearer <token>`` / ``Basic <b64>``.
@@ -45,14 +46,16 @@ _HEADER_SECRET_RE = re.compile(
 # URL user-info: ``https://user:pass@host`` — used by OCR/LLM SDKs that embed
 # credentials in the base URL — and a token used as the user name
 # (``https://<token>@github.com``). The user may be empty: the compose-style
-# ``redis://:password@redis:6379/0`` carries only a password. Split as urllib
-# does: the authority ends at ``/``, ``?`` or ``#`` (so ``?mailto=you@example.com``
-# is left alone) and the user-info at its last ``@``, as clients accept an
-# unencoded ``@`` or ``:`` in the password.
-_URL_USERINFO_RE = re.compile(r"(://)[^/?#\s\"'<>]*@")
+# ``redis://:password@redis:6379/0`` carries only a password. The user name
+# ends at ``?``, ``#`` or a quote (so ``?mailto=you@example.com`` is left
+# alone), but a password runs over anything but ``/`` and whitespace to the
+# last ``@``: clients accept an unencoded ``'``, ``:`` or ``@`` in it, httpx
+# quotes it verbatim in ``for url '…'``, and one with a stray ``#`` or ``?``
+# is still a secret in the error text of the URL it broke.
+_URL_USERINFO_RE = re.compile(r"(://)(?:[^/?#\s\"'<>:]*:[^/\s]*|[^/?#\s\"'<>]*)@")
 # Just the password of URL user-info (after the first ``:``, to the last ``@``),
 # keeping the user name visible.
-_URL_PASSWORD_RE = re.compile(r"(://[^/?#\s\"'<>:]*:)[^/?#\s\"'<>]*@")
+_URL_PASSWORD_RE = re.compile(r"(://[^/?#\s\"'<>:]*:)[^/\s]*@")
 # Any ``scheme://…`` URL, for text that must not name endpoints at all. A match
 # takes the whole run of scheme characters before ``://`` (so ``-https://`` loses
 # the dash too) and starts only where such a run starts: a long run without

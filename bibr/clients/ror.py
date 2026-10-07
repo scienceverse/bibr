@@ -8,7 +8,8 @@ string without one stays unmatched.
 ROR publishes a rate limit of 50 requests per 5 minutes without a client ID
 and 2000 with one (sent as the ``Client-Id`` header). The client keeps to it
 with a sliding window, remembers answers (misses too) in a process-wide
-cache, and backs off entirely after a 429 for the ``Retry-After`` interval.
+cache, and backs off entirely after a 429 for the ``Retry-After`` interval
+(at most one window).
 Every failure degrades to "no match": ROR never fails enrichment.
 """
 
@@ -111,8 +112,9 @@ class RorClient:
         """ROR's chosen organization for *text*, and why the lookup failed if it did.
 
         The failure is ``None`` for an answered lookup, matched or not, and a
-        short reason ("HTTP 503", "rate limited", "ConnectError", "invalid
-        JSON") when ROR could not be asked or did not answer usefully.
+        short reason when ROR could not be asked or did not answer usefully:
+        "HTTP 503", "rate limited", "invalid JSON", or the type name of the
+        error raised ("ConnectError"). It never raises an ``Exception``.
         """
         try:
             return await self._lookup(text)
@@ -142,8 +144,12 @@ class RorClient:
             return None, type(exc).__name__
         if response.status_code == 429:
             retry_after = response.headers.get("Retry-After", "")
-            # isdecimal, not isdigit: float() rejects a superscript digit.
+            # isdecimal, not isdigit: float() rejects a superscript digit. The
+            # back-off is process-wide, so a huge value (float("9" * 400) is
+            # inf) is capped at one rate-limit window rather than ending ROR
+            # matching for the life of the process.
             delay = float(retry_after) if retry_after.isdecimal() else _WINDOW_SECONDS
+            delay = min(delay, _WINDOW_SECONDS)
             self._blocked_until = time.monotonic() + delay
             logger.warning("ROR rate limit reached; skipping ROR lookups for %.0fs", delay)
             return None, "rate limited"

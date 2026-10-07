@@ -204,6 +204,17 @@ def test_a_non_ascii_retry_after_still_backs_off():
     assert client.blocked
 
 
+def test_a_huge_retry_after_backs_off_for_one_window_not_forever():
+    # float("9" * 400) is inf: the back-off is process-wide, so ROR matching
+    # would have stayed off until the process restarted.
+    from bibr.clients.ror import _WINDOW_SECONDS
+
+    client = _ror_client(lambda request: httpx.Response(429, headers={"Retry-After": "9" * 400}))
+    assert asyncio.run(client.lookup("University of Glasgow")) == (None, "rate limited")
+    assert client.blocked
+    assert client._blocked_until <= time.monotonic() + _WINDOW_SECONDS
+
+
 def test_ror_enricher_stays_complete_on_a_malformed_answer(monkeypatch):
     """The AttributeError escaped ``RorEnricher.enrich`` and the enrich stage's
     generic failure path marked the paper's enrichment partial."""
@@ -286,6 +297,66 @@ def test_redact_url_secrets_handles_the_missed_shapes(text, expected):
     assert redact_url_secrets(text) == expected
 
 
+# A password may hold any character but ``/`` and whitespace: httpx accepts a
+# raw ``'`` and quotes it verbatim; urllib and redis-py accept ``"`` and ``<>``;
+# a stray ``#`` or ``?`` breaks the URL but is still the secret.
+_ODD_PASSWORDS = ("pa'ss", 'Xy"9k', "pa#ss", "pa?ss", "pa<ss>", "p'a@ss")
+
+
+@pytest.mark.parametrize("password", _ODD_PASSWORDS)
+def test_scrubbers_mask_a_password_with_quotes_or_url_delimiters(password):
+    url = f"redis://user:{password}@redis.internal:6379/0"
+    assert scrub_secrets(f"cannot connect to {url}") == (
+        "cannot connect to redis://***@redis.internal:6379/0"
+    )
+    assert redact_url_secrets(url) == "redis://user:***@redis.internal:6379/0"
+    assert redact_url_secrets(f"redis://:{password}@redis:6379/0") == "redis://:***@redis:6379/0"
+
+
+def test_scrub_secrets_masks_a_quoted_password_in_httpx_status_text():
+    request = httpx.Request("GET", "https://svc:pa'ss@resolver.internal.corp:8080/search")
+    response = httpx.Response(503, request=request)
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        response.raise_for_status()
+    first_line = str(caught.value).splitlines()[0]
+    assert "pa'ss@" in first_line  # httpx keeps the quote unencoded
+    assert scrub_secrets(first_line) == (
+        "Server error '503 Service Unavailable' for url "
+        "'https://***@resolver.internal.corp:8080/search'"
+    )
+
+
+def test_describe_error_drops_a_url_whose_password_holds_a_quote():
+    from bibr.enrich.references import ResolutionStats, _record_terminal_failure
+    from bibr.utils.redact import describe_error
+
+    exc = httpx.ConnectError(
+        "connect to https://svc:pa'ss@resolver.internal.corp:8080/search failed"
+    )
+    assert describe_error(exc) == "ConnectError: connect to <url> failed"
+    stats = ResolutionStats()
+    _record_terminal_failure(stats, _ref(), "resolver", exc)
+    assert [d.message for d in stats.failure_details] == [
+        "bib_id=1 resolver failed: ConnectError: connect to <url> failed"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('{"ocr_api_key": "k-1", "n": 1}', '{"ocr_api_key": "***", "n": 1}'),
+        ("{'id_token': 'eyJ.x.y'}", "{'id_token': '***'}"),
+        (
+            '{"private_key": "-----BEGIN PRIVATE KEY-----\\nMIIE\\n", "x": 1}',
+            '{"private_key": "***", "x": 1}',
+        ),
+        ('"X-Goog-Api-Key": "abc"', '"X-Goog-Api-Key": "***"'),
+    ],
+)
+def test_scrub_secrets_masks_a_quoted_entry_by_its_key_ending(text, expected):
+    assert scrub_secrets(text) == expected
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -298,6 +369,8 @@ def test_redact_url_secrets_handles_the_missed_shapes(text, expected):
         "hf_hub_download(repo) failed; ghp_short is not a token",
         'def f(api_key: str | None) -> None:\n    if verdict == "password":',
         "{'title': 'A token-free paper', 'key': 'value'}",
+        '{"max_tokens": 512, "tokenizer": "bpe", "sort_key": "year"}',
+        "GET 'https://api.openalex.org/works?mailto=me@uni.edu' -> 'me@uni.edu'",
     ],
 )
 def test_scrubbers_leave_ordinary_text_alone(text):
@@ -321,6 +394,9 @@ def test_new_patterns_stay_linear_on_pathological_input():
         "x-api-key:" * 6_000,
         "https://" + "a:" * 30_000,
         "://" + "@" * 60_000,
+        "://:" + "x'" * 30_000,
+        "://a:" * 15_000,
+        '"' + "a_" * 30_000,
     ]
     started = time.perf_counter()
     for text in texts:
