@@ -336,7 +336,10 @@ def ping_llm(settings: "GlobalSettings | None" = None) -> str:
 
     try:
         return str(asyncio.run(_call()).reply)
-    except TimeoutError:
+    except Exception as exc:
+        # The SDK's own read timeout is the same limit, so it may fire first.
+        if not isinstance(exc, TimeoutError) and _classify_llm_failure(exc) is not LlmTimeoutError:
+            raise
         message = (
             f"No reply within {limit} s, the limit bibr chew sets for one LLM call "
             f"(twice LLM_TIMEOUT_SECONDS={per_request})."
