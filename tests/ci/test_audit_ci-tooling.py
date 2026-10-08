@@ -55,17 +55,22 @@ def step(workflow_name: str, job: str, name: str) -> dict:
 
 
 def evaluate(expression: str, **contexts: object) -> object:
-    """Evaluate a GitHub Actions expression built from && || ! == != and format().
+    """Evaluate a GitHub Actions expression built from && || ! == != and its functions.
 
     Python's `and`/`or` return an operand exactly as Actions' `&&`/`||` do, which
     is what makes `a && b || c` fall through to `c` whenever `b` is falsy.
+    Hyphenated job names (`needs.build-dist`) are read as `needs.build_dist`.
     """
 
-    body = expression.strip()
+    body = " ".join(expression.split())
     if body.startswith("${{"):
         body = body.removeprefix("${{").removesuffix("}}")
     body = re.sub(r"!(?!=)", " not ", body.replace("&&", " and ").replace("||", " or "))
-    names = {"format": lambda template, *args: template.format(*args)}
+    body = re.sub(r"(?<=\.)[A-Za-z_][\w-]*", lambda m: m.group().replace("-", "_"), body)
+    names = {
+        "format": lambda template, *args: template.format(*args),
+        "startsWith": lambda value, prefix: str(value).lower().startswith(prefix.lower()),
+    }
     return eval(body, {"__builtins__": {}, **names}, contexts)  # noqa: S307 - own workflow file
 
 
@@ -689,11 +694,12 @@ def release_validation(
 
 @needs_git
 @needs_bash
-@pytest.mark.parametrize(("version", "accepted"), [("0.7.0", True), ("0.7.0rc1", False)])
-def test_release_tags_must_name_a_final_version(
-    tmp_path: Path, version: str, accepted: bool
-) -> None:
-    """docker.yml refuses pre-releases, so PyPI must not publish them first."""
+@pytest.mark.parametrize(
+    ("version", "prerelease"),
+    [("0.7.0", "false"), ("0.7.0rc1", "true"), ("0.7.0b2", "true"), ("0.7.0.dev1", "true")],
+)
+def test_release_tags_flag_every_pre_release(tmp_path: Path, version: str, prerelease: str) -> None:
+    """Anything but X.Y.Z is flagged, so it skips docker.yml, which refuses it."""
     repo = tmp_path / "repo"
     repo.mkdir()
     env = git_env(tmp_path)
@@ -706,8 +712,49 @@ def test_release_tags_must_name_a_final_version(
 
     result = release_validation(repo, env, version, sha, output)
 
-    assert (result.returncode == 0) is accepted, result.stdout + result.stderr
-    assert output.exists() is accepted
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert output.read_text().split() == [f"version={version}", f"prerelease={prerelease}"]
+
+
+def release_contexts(prerelease: str, ghcr: str, container: str) -> dict[str, object]:
+    return {
+        "github": ns(event_name="push", ref="refs/tags/v0.7.0"),
+        "vars": ns(PUBLISH_GHCR=ghcr, PUBLISH_PYPI="true"),
+        "needs": ns(
+            validate=ns(outputs=ns(prerelease=prerelease)),
+            build_dist=ns(result="success"),
+            publish_pypi=ns(result="success"),
+            publish_container=ns(result=container),
+        ),
+        "cancelled": lambda: False,
+    }
+
+
+@pytest.mark.parametrize(("prerelease", "runs"), [("false", True), ("true", False)])
+def test_pre_releases_skip_the_container_channel(prerelease: str, runs: bool) -> None:
+    condition = workflow("release.yml")["jobs"]["publish-container"]["if"]
+
+    assert evaluate(condition, **release_contexts(prerelease, "true", "pending")) is runs
+
+
+@pytest.mark.parametrize(
+    ("prerelease", "ghcr", "container", "finalized"),
+    [
+        ("false", "true", "success", True),
+        ("false", "true", "failure", False),
+        # An enabled channel that did not run blocks a final release...
+        ("false", "true", "skipped", False),
+        # ...but not a pre-release, which has no container, nor a disabled channel.
+        ("true", "true", "skipped", True),
+        ("false", "false", "skipped", True),
+    ],
+)
+def test_github_release_waits_for_every_channel_a_release_publishes(
+    prerelease: str, ghcr: str, container: str, finalized: bool
+) -> None:
+    condition = workflow("release.yml")["jobs"]["github-release"]["if"]
+
+    assert evaluate(condition, **release_contexts(prerelease, ghcr, container)) is finalized
 
 
 @needs_git

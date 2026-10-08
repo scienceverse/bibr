@@ -153,9 +153,10 @@ See [Docker deployment](../guides/deployment.md#docker-deployment).
    cannot publish to PyPI, GHCR, or GitHub Releases.
 3. After release approval, create and push an annotated `vX.Y.Z` tag on the
    verified commit, with `X.Y.Z` matching `project.version`. The workflow rejects
-   mismatched tags, pre-release versions such as `1.2.0rc1` (the container
-   channel publishes only `X.Y.Z`), and commits that are not reachable from
-   `main`.
+   mismatched tags and commits that are not reachable from `main`. A pre-release
+   version such as `1.2.0rc1` goes to PyPI and becomes a GitHub pre-release that
+   is never marked Latest; it publishes no container image, because the container
+   channel publishes only `X.Y.Z`.
 4. Watch the tag-triggered Release workflow to completion. PyPI receives the
    verified distributions and GitHub Release assets are attached after each
    enabled delivery channel succeeds. If GHCR is enabled, the release container

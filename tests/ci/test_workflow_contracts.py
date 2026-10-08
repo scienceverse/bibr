@@ -541,7 +541,11 @@ def test_github_release_requires_successful_pypi_when_enabled_and_explicit_repos
     assert "needs.publish-pypi.result == 'success'" in job["if"]
     assert "vars.PUBLISH_PYPI != 'true' && needs.publish-pypi.result == 'skipped'" in job["if"]
     assert "needs.publish-container.result == 'success'" in job["if"]
-    assert "vars.PUBLISH_GHCR != 'true' && needs.publish-container.result == 'skipped'" in job["if"]
+    # A pre-release has no container (test_audit_ci-tooling evaluates the condition).
+    assert (
+        "(vars.PUBLISH_GHCR != 'true' || needs.validate.outputs.prerelease == 'true')"
+        " && needs.publish-container.result == 'skipped'"
+    ) in " ".join(job["if"].split())
     release_step = next(step for step in job["steps"] if "gh release" in step.get("run", ""))
     assert release_step["env"]["GH_REPO"] == "${{ github.repository }}"
 

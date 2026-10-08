@@ -338,7 +338,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   text of the "Reference" section, which left only the supplement's references.
 - A release tag with a pre-release version (`v0.7.0rc1`) becomes a GitHub pre-release
   and is never marked Latest. PyPI already hides pre-releases from unpinned installs,
-  so `pip install bibr` keeps resolving to the last final release.
+  so `pip install bibr` keeps resolving to the last final release. A pre-release
+  publishes no container image: the container channel takes only `X.Y.Z`, so the
+  release now skips it instead of failing there after the PyPI upload.
 - A structured abstract whose "Background", "Methods", "Results" and
   "Conclusions" subheadings are printed as separate rows keeps all its parts
   (#125).
