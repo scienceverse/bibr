@@ -34,6 +34,12 @@ Set `BIBR_DISABLE_DOTENV=1` to skip both `.env` files entirely. Benchmark
 harnesses and CI should do this so every setting a run records came from the
 process environment, not from whatever `.env` happened to be in the checkout.
 
+While `BIBR_DISABLE_DOTENV` or an empty `BIBR_ENV_FILE` turns `.env` loading
+off, the configuration tools follow it: `bibr config show --sources` and
+`bibr config path` report no `.env` file, and `bibr config set`, `bibr preset
+save/use/deactivate/diff` and `bibr setup` refuse to run, naming the variable,
+instead of writing a file bibr would not read.
+
 ```bash
 bibr setup
 ```
@@ -56,6 +62,14 @@ values it does not ask about. When you choose an LLM provider, it also writes
 `LLM_BACKEND=cloud`, and a blank `LLM_API_KEY` or `LLM_BASE_URL` where you
 entered none, so that a key or server left by an earlier setup, in `./.env`
 or `~/.bibr/.env`, cannot override the one you entered.
+
+`bibr setup` writes `./.env`, or the last file `BIBR_ENV_FILE` lists, since
+that file's values win; it stops before asking anything when that file's
+folder does not exist. Environment variables still override it: when your
+shell exports a setting the wizard writes (`LLM_API_KEY`, `LLM_BASE_URL`,
+`LLM_PROVIDER`, ...), or another name bibr reads it under (`GEMINI_API_KEY`
+for `GOOGLE_API_KEY`), with a different value, the wizard names it, so you
+can unset or update it before running bibr.
 
 ## Namespaces
 
@@ -202,7 +216,19 @@ Windows or CUDA cards below 11 GB; and vLLM on Linux/CUDA systems with at
 least 11 GB (or when VRAM detection is unavailable).
 Explicit choices are `vllm`, `vllm-mlx`, `rapid-mlx`, `llama-cpp`, and `llmster`.
 The OCR and LLM choices are independent, so local OCR with a cloud LLM is a
-supported hybrid configuration.
+supported hybrid configuration. A managed vLLM LLM server and the managed
+`paddle-vllm` OCR server each reserve a share of GPU memory (0.85 and 0.92 by
+default) and cannot run together, so bibr stops the one that is running before
+starting the other: in a batch, each chunk's OCR stops the LLM server and that
+chunk's LLM stage starts it again.
+
+`bibr chew`, `bibr batch` and `bibr mcp` stop the managed servers they started
+when the command ends, including on Ctrl-C, SIGTERM (`kill`, `docker stop`,
+`timeout`, an MCP host stopping `bibr mcp`) and SIGHUP (a closed terminal or SSH
+session). A `bibr chew` or `bibr mcp` stopped by a signal exits with 128 plus its
+number (143 for SIGTERM) and `bibr batch` exits 130 as after Ctrl-C; in a systemd
+unit, set `SuccessExitStatus=130 143` so that `systemctl stop` counts as a clean
+stop.
 
 Run `bibr setup` to choose the model as well as the runtime. Its recommended
 model is NuExtract 3, with runtime-specific weights:
@@ -235,6 +261,67 @@ Validate the fields you need on representative papers before choosing a model
 for a large run. Cloud LLMs or an external OpenAI-compatible server can be used
 with local OCR when local LLM throughput is insufficient.
 
+The provider SDK sends each LLM request once and gives it up after twice
+`LLM_TIMEOUT_SECONDS`. bibr retries rate limits (429), server errors (5xx),
+request timeouts and conflicts (408, 409) and dropped connections itself, up
+to three attempts per call, so every retry waits for `LLM_RATE_LIMIT_RPM`; a
+`Retry-After` hint is honoured up to 60 seconds. An attempt that fails with a
+server error, a 408, a timeout or a dropped connection counts toward the
+circuit breaker; a 429 or 409, like any other 4xx answer, does not, since the
+provider is up. The `anthropic` provider does
+not stream, so it caps the output of one call at 16,384 tokens (8,192 for
+Claude Opus 4 and 4.1) even when `LLM_MAX_TOKENS` is higher. A
+`LLM_THINKING_BUDGET` above that cap less 1,024 tokens leaves too little room
+for the answer, so calls are then sent without thinking and a warning is
+logged.
+
+`CACHE_LLM=true` keeps structured LLM responses on disk (`CACHE_LLM_DIR`,
+default `~/.cache/bibr/llm`), readable by your user only. An entry is reused
+only for the same provider, endpoint, model, call parameters (temperature,
+output cap, reasoning effort, thinking budget) and prompt, so changing any of
+them calls the model again; for `--llm llmster`, so does changing
+`LLM_LLMSTER_MODEL`. Another endpoint that serves different weights under the
+same model name and URL cannot be told apart: clear the directory after
+swapping the model behind it.
+
+### Managed local servers
+
+The local OCR backends and `--llm local` start their model server as a child
+process that listens on `127.0.0.1` at a fixed port. The vLLM and llama.cpp
+servers get a new random API key at every launch. bibr passes the key through
+the server's environment, not its command line, so other users on the machine
+cannot call them. Rapid-MLX, vllm-mlx and MLX-VLM servers run without a key.
+`OCR_API_KEY` goes only to an OCR endpoint you configure (`--ocr-url` or
+`OCR_BASE_URL`), never to a server that bibr manages.
+
+If the port already has a server that lists the requested model, bibr reuses
+it and logs a warning that it did not start that server. A reused server
+receives your documents, so stop any server there that you did not start
+yourself. Two pipelines in one Python process, such as an open `bibr.Chewer`
+and a `bibr.chew()` call, share the vLLM or llama.cpp server that the first one
+started; it stops when the pipeline that started it closes. bibr does not share
+a server that rejects its unauthenticated probe with HTTP 401 and was not
+started by this process, which is usually a server that another bibr process
+started with its own key. Stop that server or configure a free port.
+
+The Rapid-MLX OCR backends (`glm-rapid-mlx`, `paddle-rapid-mlx`) restart their
+server every `OCR_RAPID_MLX_RECYCLE_AFTER` regions (default 80). This releases
+memory that Rapid-MLX's vision cache would otherwise leak. bibr can restart only
+a server it started, so these backends refuse a server that is already running
+on their port, including one that another pipeline in the same process started.
+`paddle-mlx-vlm` shares its port and model with `paddle-rapid-mlx`, so it
+refuses a Rapid-MLX or vllm-mlx server it finds there too; an MLX-VLM server is
+still reused. To fix this, stop that server, move the port
+(`OCR_RAPID_MLX_PORT`, or `OCR_PADDLE_MLX_PORT` for the Paddle backends), or set
+`OCR_RAPID_MLX_RECYCLE_AFTER=0` so that the Rapid-MLX backends reuse the server
+without restarts. Each refusal is logged as a warning that names the port. The
+automatic `paddle` chain reports only which candidates failed, and then tries
+the next one.
+
+Each server writes its stderr to a private log file in the system temp
+directory, and bibr logs the path when the server starts. A Rapid-MLX server
+keeps a single log file for the whole run, across all of its restarts.
+
 ## Presets
 
 If you switch between setups often — cloud vs. local, different models for different
@@ -256,10 +343,20 @@ directory has one, otherwise `~/.bibr/.env` (or the last existing file in
 `BIBR_ENV_FILE`). `save`, `use` and `deactivate` name the file they read or
 changed.
 
-Presets are stored as JSON under `~/.bibr/presets/`. Secrets (API keys and
-similar) are excluded by default when saving; endpoint URLs and other private
-configuration may still be present. You can also apply a preset for a single run
-without touching `.env`:
+Presets are stored as JSON under `~/.bibr/presets/` (or `BIBR_PRESETS_DIR`),
+readable only by you when bibr creates them. Secrets (API keys and similar,
+and URLs such as `REDIS_URL` that carry a password or `?key=`) are excluded
+when saving, and `save` names the URL settings it left out; endpoint URLs and
+other private configuration may still be present. `show`, `diff` and `use`
+mask secrets and URL credentials when they print values.
+
+A preset can change where bibr sends requests while your API keys stay in
+`.env`, or what it launches. When `bibr preset use` changes a `*_URL`,
+`*_ARGS` or `*_EXECUTABLE` setting (`LLM_BASE_URL`, `OCR_BASE_URL`,
+`LLM_LLAMA_CPP_EXTRA_ARGS`, ...), it names those settings; check them before
+running bibr with a preset someone else gave you.
+
+You can also apply a preset for a single run without touching `.env`:
 
 ```bash
 bibr chew paper.pdf --preset fast-gemini
@@ -313,7 +410,10 @@ MPS path, and the `torch.compile` path `bibr serve` uses for layout.
 
 A bundle resolves from a local directory containing `onnx/` (point the model's
 existing `*_MODEL_ID` / `NER_PARSER_CKPT` setting at it) or from the Hub at the
-pinned revision, offline-tolerant through the Hub cache. Layout is the one model
+pinned revision, offline-tolerant through the Hub cache. A value shaped like a
+Hub id (`org/name`) is always fetched from the Hub, even when a directory of
+that name exists in the working directory; write a local directory as a path —
+absolute, or starting with `./`, `../` or `~`. Layout is the one model
 whose PyTorch weights live in a third-party repo, so its ONNX artifact has its
 own pair of settings, `LAYOUT_ONNX_MODEL_ID` and `LAYOUT_ONNX_REVISION`.
 
@@ -332,7 +432,9 @@ file changed — so the PyTorch path still loads byte-identical weights.
 
 Execution providers come from the same chain the sentence segmenter uses
 (CUDA → CoreML → CPU), so `bibr[gpu]` accelerates all four models, not just
-segmentation.
+segmentation. `--device cpu` runs these models on the CPU provider alone (no
+CoreML, which may compute in FP16), and `device="cuda:1"` in the Python API puts
+them on that GPU.
 
 `Dockerfile.serve` sets `ML_RUNTIME=torch` explicitly. That image exists for the
 PyTorch stack — `torch.compile` on the layout model in particular — and since the

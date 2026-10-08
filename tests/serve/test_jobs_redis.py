@@ -290,6 +290,8 @@ async def test_every_call_is_bounded_by_the_redis_timeouts():
         key_prefix="test:jobs",
         connect_timeout=0.02,
         socket_timeout=0.03,
+        # Terminal transitions retry within this budget instead of a single attempt.
+        transition_retry_seconds=0.2,
         client_factory=lambda _url: _HangingRedis(server=server),
     )
     assert store.operation_timeout == pytest.approx(0.05)
@@ -305,7 +307,8 @@ async def test_every_call_is_bounded_by_the_redis_timeouts():
             with pytest.raises(JobStoreUnavailableError, match="TimeoutError"):
                 await asyncio.wait_for(call(), timeout=5)
             assert time.monotonic() - started < 1.0
-        # Transitions are bounded the same way but never raise.
+        # Transitions are bounded too (the terminal ones by their retry budget) but
+        # never raise.
         swallowing = (
             lambda: store.set_running("x"),
             lambda: store.set_succeeded("x", {"ok": True}),
@@ -336,7 +339,7 @@ async def test_completed_redis_call_does_not_swallow_shutdown_cancellation(harne
 
 
 async def test_runner_logs_and_survives_a_redis_outage(harness, caplog):
-    store = harness.make()
+    store = harness.make(transition_retry_seconds=0.2)
     job = await store.create(filename="a.pdf")
     harness.server.connected = False
     with caplog.at_level(logging.ERROR, logger="bibr.serve.jobs.redis"):
@@ -351,7 +354,8 @@ async def test_runner_logs_and_survives_a_redis_outage(harness, caplog):
     assert any(job.job_id in message and "succeeded" in message for message in messages)
 
     harness.server.connected = True
-    # Nothing was recorded; the TTL will reap the stale record. The runner is intact.
+    # Nothing was recorded; the job's lease lapses and a later create fails the stale
+    # record. The runner is intact.
     assert (await store.get(job.job_id)).status == "queued"
     nxt = await store.create(filename="b.pdf")
     await jobs_mod._run_job(
@@ -465,10 +469,13 @@ def test_submit_returns_503_and_keeps_no_upload_when_redis_is_down():
 
 
 def test_readiness_reports_the_job_store(monkeypatch):
+    from bibr.serve import app as app_mod
     from bibr.serve.app import _register_readiness_route
 
     harness = _RedisHarness()
     store = harness.make()
+    # Re-probe on every call, so the outage shows on the very next /ready.
+    monkeypatch.setattr(app_mod, "_READINESS_PROBE_TTL_SECONDS", 0.0)
     monkeypatch.setattr(Settings.jobs, "enabled", True)
     monkeypatch.setattr(Settings.jobs, "store", "redis")
     monkeypatch.setattr(Settings.auth, "api_key", None)

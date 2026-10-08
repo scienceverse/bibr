@@ -85,6 +85,10 @@ Point the command at a directory to process supported files in that directory:
 uv run bibr chew papers/ -o out/
 ```
 
+A directory, a glob or several inputs always write one `out/<name>.json` per
+paper, even when they hold a single paper; `-o` names a file only for one
+input file named directly.
+
 ## Common variations
 
 | Goal | Command |

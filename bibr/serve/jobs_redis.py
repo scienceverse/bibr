@@ -13,35 +13,45 @@ a different replica than the upload still answers.
 - ``{prefix}:result:{id}`` — the paper JSON, rendered once at completion and
   zlib-compressed. Kept apart from the hash so a status poll never drags the
   body across the wire.
+- ``{prefix}:lease:{id}`` — the owner lease of a queued/running job: a short-TTL
+  key the owning replica renews while it holds the job.
 - ``{prefix}:active`` — SET of queued/running ids, the global cap.
 - ``{prefix}:finished`` — ZSET of finished ids scored by ``finished_at``, the
   global ``JOBS_MAX_RETAINED`` / ``JOBS_MAX_RETAINED_BYTES`` eviction order.
 
 **Atomicity.** ``create`` is one Lua script: it reconciles the active set
-against the job hashes (dropping ids whose record is gone), counts, refuses
-past ``JOBS_MAX_ACTIVE`` or admits and writes the record — no window between
-the check and the insert, whichever replica runs it. Lua was chosen over
+against the job hashes (dropping ids whose record is gone, failing ids whose
+owner lease lapsed), counts, refuses past ``JOBS_MAX_ACTIVE`` or admits and
+writes the record and its lease — no window between the check and the
+insert, whichever replica runs it. Lua was chosen over
 WATCH/MULTI because the reconcile-then-count step is a read-modify-write
 over a whole set, which WATCH cannot express without retries. The finish
 transition (status, TTLs, result, cap release, retention pruning) is a second
 script, so pruning runs under the same global order every replica sees.
 
-**TTLs.** Finished job + result keys expire after ``JOBS_TTL_SECONDS``, the
-same window the memory store uses, and ``get`` treats a record past that
-window as gone even before Redis reaps it. Active records carry a generous
-safety TTL (24 h by default): if a replica dies mid-job its record lingers
-as ``queued``/``running`` until then, after which the next ``create`` drops
-the id from the active set and the cap slot returns. A job owned by another
-replica is reported as-is; no replica ever executes another's job.
+**TTLs and leases.** Finished job + result keys expire after
+``JOBS_TTL_SECONDS``, the same window the memory store uses, and ``get`` treats
+a record past that window as gone even before Redis reaps it. A queued/running
+record carries an owner lease (``LEASE_TTL_SECONDS``, 60 s by default) that the
+owning replica renews from a background heartbeat while it holds the job. When
+the lease lapses — the replica died, or gave up recording the job's outcome —
+the next ``create`` on any replica fails the record (``503``, ``error_code``
+``job_lost``) and its cap slot returns. Lease keys live in Redis, so no replica
+compares its clock with another's. Records also keep a generous safety TTL
+(24 h): records written by a replica without leases (an older release during a
+rolling upgrade) still rely on it. A job owned by another replica is reported
+as-is; no replica ever executes another's job.
 
 **Failure semantics.** Every Redis touch runs under ``asyncio.timeout`` with
 the connect+socket budget from ``REDIS_CONNECT_TIMEOUT_SECONDS`` /
 ``REDIS_SOCKET_TIMEOUT_SECONDS`` (the client carries the same socket timeouts
-as a first fence). ``create``/``get`` raise
+as a first fence). ``create``/``get``/``cancel`` raise
 :class:`~bibr.serve.jobs.JobStoreUnavailableError`, which the routes turn into
-``503``; ``set_*``/``discard`` log the job id and swallow, so a Redis outage
-never unwinds the dispatcher worker loop — the TTLs clean up whatever was
-left half-written.
+``503``. The runner's transitions never raise: ``set_succeeded``/``set_failed``
+retry with backoff for up to ``TRANSITION_RETRY_SECONDS`` (a blip as a job
+finishes must not lose its result), then log and drop the job, whose lease
+lapses so a later ``create`` fails it; ``set_running``/``discard`` log and
+swallow after one attempt (the lease covers what they leave behind).
 
 **Clocks.** The memory store measures durations and TTL on the monotonic
 clock. Replicas cannot share a monotonic clock, so this store records wall
@@ -77,38 +87,83 @@ from bibr.serve.jobs import (
 logger = logging.getLogger("bibr.serve.jobs.redis")
 
 DEFAULT_KEY_PREFIX = "bibr:jobs"
-#: Safety TTL on queued/running records: bounds how long a crashed replica's
-#: jobs can hold cap slots (and report a stale status).
+#: Safety TTL on queued/running records. Leased records are failed long before it;
+#: it still bounds records from replicas that write no lease.
 ACTIVE_SAFETY_TTL_SECONDS = 24 * 3600
+#: Owner lease on queued/running records, renewed every quarter of it: bounds how
+#: long a dead replica's jobs hold cap slots (and report a stale status).
+LEASE_TTL_SECONDS = 60
+#: How long ``set_succeeded``/``set_failed`` keep retrying before giving the job up.
+TRANSITION_RETRY_SECONDS = 60.0
+_RETRY_FIRST_DELAY = 0.1
+_RETRY_MAX_DELAY = 5.0
+#: Heartbeat delay after a failed renew: once Redis answers again, a create on another
+#: replica fails every leased job whose lease lapsed meanwhile, so renew promptly.
+_RENEW_RETRY_SECONDS = 1.0
+#: Recorded on a leased job whose lease lapsed: 503 tells the client to resubmit.
+LOST_HTTP_STATUS = 503
+LOST_ERROR = {"detail": "replica lost the job before it finished", "error_code": "job_lost"}
 
 #: Timeouts matching ``bibr.cache.ResponseCache`` when the settings pass none.
 DEFAULT_CONNECT_TIMEOUT = 2.0
 DEFAULT_SOCKET_TIMEOUT = 5.0
 
-# KEYS[1] = active set, KEYS[2] = job hash
+# KEYS[1] = active set, KEYS[2] = job hash, KEYS[3] = job lease, KEYS[4] = finished zset
 # ARGV[1] = max_active, ARGV[2] = job id, ARGV[3] = active safety TTL (s),
-# ARGV[4] = key prefix, ARGV[5..] = hash field/value pairs
+# ARGV[4] = key prefix, ARGV[5] = lease TTL (s), ARGV[6] = now (wall clock),
+# ARGV[7] = finished-record TTL (s), ARGV[8] = lost-job http_status,
+# ARGV[9] = lost-job error JSON, ARGV[10..] = hash field/value pairs
 # Returns {admitted (0/1), active count after the call}.
 _CREATE_SCRIPT = """
-local active_set = KEYS[1]
-local prefix = ARGV[4]
+local active_set, finished = KEYS[1], KEYS[4]
+local prefix, now = ARGV[4], ARGV[6]
 local active = 0
 for _, id in ipairs(redis.call('SMEMBERS', active_set)) do
-  if redis.call('EXISTS', prefix .. ':job:' .. id) == 1 then
-    active = active + 1
-  else
+  local job_key = prefix .. ':job:' .. id
+  if redis.call('EXISTS', job_key) == 0 then
     redis.call('SREM', active_set, id)
+  elseif redis.call('HEXISTS', job_key, 'leased') == 1
+      and redis.call('EXISTS', prefix .. ':lease:' .. id) == 0 then
+    -- The owner stopped renewing the lease: it died, or gave up recording the
+    -- outcome. Fail the job so it stops holding a slot. (Unleased records come
+    -- from replicas that predate leases and wait for the safety TTL.)
+    redis.call('SREM', active_set, id)
+    redis.call('HSET', job_key,
+      'status', 'failed', 'finished_at', now,
+      'http_status', ARGV[8], 'error', ARGV[9], 'result_size', 0)
+    redis.call('EXPIRE', job_key, ARGV[7])
+    redis.call('ZADD', finished, now, id)
+  else
+    active = active + 1
   end
 end
 if active >= tonumber(ARGV[1]) then
   return {0, active}
 end
 redis.call('SADD', active_set, ARGV[2])
-for i = 5, #ARGV, 2 do
+for i = 10, #ARGV, 2 do
   redis.call('HSET', KEYS[2], ARGV[i], ARGV[i + 1])
 end
 redis.call('EXPIRE', KEYS[2], ARGV[3])
+redis.call('SET', KEYS[3], '1', 'EX', ARGV[5])
 return {1, active + 1}
+"""
+
+# ARGV[1] = key prefix, ARGV[2] = lease TTL (s), ARGV[3..] = ids the replica holds.
+# Renews (or restores, after a blip) the lease of each job that is still active and
+# returns the ids that are not, which the replica stops renewing.
+_RENEW_SCRIPT = """
+local prefix, ttl = ARGV[1], ARGV[2]
+local gone = {}
+for i = 3, #ARGV do
+  local id = ARGV[i]
+  if redis.call('SISMEMBER', prefix .. ':active', id) == 1 then
+    redis.call('SET', prefix .. ':lease:' .. id, '1', 'EX', ttl)
+  else
+    gone[#gone + 1] = id
+  end
+end
+return gone
 """
 
 # KEYS[1] = job hash; ARGV[1] = started_at. Never resurrects a missing record.
@@ -132,7 +187,7 @@ return 1
 # ARGV[9] = key prefix, ARGV[10] = max_retained, ARGV[11] = max_retained_bytes,
 # ARGV[12] = the status the record must have now ('' = any; a cancel passes 'queued')
 # Returns 1, or 0 when ARGV[12] is set and the record is missing or in another status
-# (then nothing changes).
+# (then nothing changes). A transition that applies also drops the job's lease.
 _FINISH_SCRIPT = """
 local job_key, result_key, active_set, finished = KEYS[1], KEYS[2], KEYS[3], KEYS[4]
 local job_id, status, finished_at, ttl = ARGV[1], ARGV[2], ARGV[3], ARGV[4]
@@ -143,6 +198,7 @@ if required and required ~= '' and redis.call('HGET', job_key, 'status') ~= requ
 end
 
 redis.call('SREM', active_set, job_id)
+redis.call('DEL', prefix .. ':lease:' .. job_id)
 if redis.call('EXISTS', job_key) == 1 then
   redis.call('HSET', job_key,
     'status', status, 'finished_at', finished_at,
@@ -229,6 +285,8 @@ class RedisJobStore:
         socket_timeout: float | None = None,
         wall_clock: Callable[[], float] = time.time,
         active_ttl_seconds: int = ACTIVE_SAFETY_TTL_SECONDS,
+        lease_ttl_seconds: int = LEASE_TTL_SECONDS,
+        transition_retry_seconds: float = TRANSITION_RETRY_SECONDS,
         client_factory: Callable[[str], Any] | None = None,
         compress_level: int = 6,
     ) -> None:
@@ -236,6 +294,8 @@ class RedisJobStore:
         self._replica_id = replica_id or default_replica_id()
         self._wall_clock = wall_clock
         self._active_ttl = max(1, int(active_ttl_seconds))
+        self._lease_ttl = max(1, int(lease_ttl_seconds))
+        self._retry_seconds = max(0.0, float(transition_retry_seconds))
         self._compress_level = compress_level
         self._connect_timeout = (
             DEFAULT_CONNECT_TIMEOUT if connect_timeout is None else float(connect_timeout)
@@ -250,6 +310,12 @@ class RedisJobStore:
         self._create_script = self._redis.register_script(_CREATE_SCRIPT)
         self._running_script = self._redis.register_script(_RUNNING_SCRIPT)
         self._finish_script = self._redis.register_script(_FINISH_SCRIPT)
+        self._renew_script = self._redis.register_script(_RENEW_SCRIPT)
+        # Jobs this replica created and has not let go of: the heartbeat renews
+        # their leases.
+        self._owned: set[str] = set()
+        self._heartbeat: asyncio.Task | None = None
+        self._renew_failing = False
         self._closed = False
 
     def _default_client(self, url: str):
@@ -290,6 +356,9 @@ class RedisJobStore:
     def result_key(self, job_id: str) -> str:
         return f"{self._prefix}:result:{job_id}"
 
+    def lease_key(self, job_id: str) -> str:
+        return f"{self._prefix}:lease:{job_id}"
+
     # -- plumbing ------------------------------------------------------------
 
     async def _bounded(self, what: str, awaitable):
@@ -303,6 +372,75 @@ class RedisJobStore:
             raise JobStoreUnavailableError(
                 f"redis job store {what} failed: {type(exc).__name__}: {exc}"
             ) from exc
+
+    async def _retrying(self, what: str, call: Callable[[], Any]):
+        """``_bounded`` with backoff until Redis answers or the retry budget runs out.
+
+        ``call`` makes a fresh awaitable per attempt. Only for idempotent scripts: an
+        attempt whose reply was lost may have run.
+        """
+        deadline = time.monotonic() + self._retry_seconds
+        delay = _RETRY_FIRST_DELAY
+        while True:
+            try:
+                return await self._bounded(what, call())
+            except JobStoreUnavailableError as exc:
+                remaining = deadline - time.monotonic()
+                task = asyncio.current_task()
+                # A task cancelled while a dependency consumed the CancelledError must
+                # not sit out the budget: shutdown waits for it, the lease covers the job.
+                if remaining <= 0 or (task is not None and task.cancelling()):
+                    raise
+                if delay == _RETRY_FIRST_DELAY:
+                    logger.warning("%s; retrying for up to %.1fs", exc, remaining)
+                await asyncio.sleep(min(delay, remaining))
+                delay = min(delay * 2, _RETRY_MAX_DELAY)
+
+    def _start_heartbeat(self) -> None:
+        if self._closed:
+            return
+        loop = asyncio.get_running_loop()
+        task = self._heartbeat
+        # A task left on another (finished) loop no longer runs.
+        if task is None or task.done() or task.get_loop() is not loop:
+            self._heartbeat = loop.create_task(self._heartbeat_loop(), name="bibr-job-leases")
+
+    async def _heartbeat_loop(self) -> None:
+        interval = self._lease_ttl / 4
+        delay = interval
+        while True:
+            await asyncio.sleep(delay)
+            try:
+                renewed = await self._renew_leases()
+            except Exception:
+                # A dead heartbeat would let every lease lapse under live jobs.
+                logger.exception("job lease heartbeat failed")
+                renewed = False
+            delay = interval if renewed else min(interval, _RENEW_RETRY_SECONDS)
+
+    async def _renew_leases(self) -> bool:
+        """Renew the lease of every job this replica holds; forget the ones that ended.
+
+        Returns False when Redis did not answer.
+        """
+        if not self._owned:
+            return True
+        held = sorted(self._owned)
+        try:
+            gone = await self._bounded(
+                "renew leases",
+                self._renew_script(args=[self._prefix, self._lease_ttl, *held]),
+            )
+        except JobStoreUnavailableError as exc:
+            # Retried every second during an outage: warn once per outage.
+            log = logger.debug if self._renew_failing else logger.warning
+            log("could not renew %d job lease(s) (%s)", len(held), exc)
+            self._renew_failing = True
+            return False
+        self._renew_failing = False
+        for job_id in gone:
+            self._owned.discard(_text(job_id))
+        return True
 
     def _job_from_fields(self, job_id: str, fields: dict) -> Job:
         decoded = {_text(key): value for key, value in fields.items()}
@@ -344,17 +482,29 @@ class RedisJobStore:
             "filename": filename,
             "created_at": repr(now),
             "replica": self._replica_id,
+            # Marks a record whose lease create may enforce (see _CREATE_SCRIPT).
+            "leased": "1",
         }
         max_active = Settings.jobs.max_active
-        args: list[Any] = [max_active, job_id, self._active_ttl, self._prefix]
+        args: list[Any] = [
+            max_active,
+            job_id,
+            self._active_ttl,
+            self._prefix,
+            self._lease_ttl,
+            repr(now),
+            max(1, int(Settings.jobs.ttl_seconds)),
+            LOST_HTTP_STATUS,
+            json.dumps(LOST_ERROR),
+        ]
         for key, value in fields.items():
             args.extend((key, value))
-        admitted, active = await self._bounded(
-            "create",
-            self._create_script(keys=[self.active_key, self.job_key(job_id)], args=args),
-        )
+        keys = [self.active_key, self.job_key(job_id), self.lease_key(job_id), self.finished_key]
+        admitted, active = await self._bounded("create", self._create_script(keys=keys, args=args))
         if not int(admitted):
             raise JobCapacityError(f"active job cap reached ({int(active)}/{max_active})")
+        self._owned.add(job_id)
+        self._start_heartbeat()
         return Job(
             job_id=job_id,
             filename=filename,
@@ -384,9 +534,11 @@ class RedisJobStore:
         return job
 
     async def discard(self, job_id: str) -> None:
+        # Let go first: a record left behind is failed once its lease lapses.
+        self._owned.discard(job_id)
         pipe = self._redis.pipeline(transaction=True)
         pipe.srem(self.active_key, job_id)
-        pipe.delete(self.job_key(job_id), self.result_key(job_id))
+        pipe.delete(self.job_key(job_id), self.result_key(job_id), self.lease_key(job_id))
         try:
             await self._bounded("discard", pipe.execute())
         except JobStoreUnavailableError as exc:
@@ -399,10 +551,14 @@ class RedisJobStore:
                 self._running_script(keys=[self.job_key(job_id)], args=[repr(self._wall_clock())]),
             )
         except JobStoreUnavailableError as exc:
+            # Run it anyway; its lease (still renewed) keeps the record from going stale.
             logger.error("job %s: could not record the running state (%s)", job_id, exc)
             return True
         # 1 = claimed; -1 = no longer queued; 0 = the record is gone (evicted).
-        return int(claimed) == 1
+        if int(claimed) != 1:
+            self._owned.discard(job_id)
+            return False
+        return True
 
     async def cancel(self, job_id: str) -> Job | None:
         keys, args = self._finish_call(
@@ -414,14 +570,18 @@ class RedisJobStore:
             result_size=0,
             required="queued",
         )
-        await self._bounded("cancel", self._finish_script(keys=keys, args=args))
+        if int(await self._bounded("cancel", self._finish_script(keys=keys, args=args))):
+            self._owned.discard(job_id)
         return await self.get(job_id, include_result=False)
+
+    def _render(self, result: dict) -> tuple[bytes, bytes]:
+        encoded = encode_result(result)
+        return encoded, zlib.compress(encoded, self._compress_level)
 
     async def set_succeeded(self, job_id: str, result: dict) -> None:
         # Encode first so an unrenderable result raises exactly like the memory
-        # store's; compress off the loop, a large export takes real CPU time.
-        encoded = encode_result(result)
-        compressed = await asyncio.to_thread(zlib.compress, encoded, self._compress_level)
+        # store's; both steps run off the loop, a large export takes real CPU time.
+        encoded, compressed = await asyncio.to_thread(self._render, result)
         await self._finish(
             job_id,
             status="succeeded",
@@ -465,9 +625,22 @@ class RedisJobStore:
             required=required,
         )
         try:
-            await self._bounded(f"set_{status}", self._finish_script(keys=keys, args=args))
+            # The script is idempotent (the same finished_at on every attempt), so a
+            # retry after a lost reply rewrites the same outcome.
+            await self._retrying(
+                f"set_{status} (job {job_id})",
+                lambda: self._finish_script(keys=keys, args=args),
+            )
         except JobStoreUnavailableError as exc:
-            logger.error("job %s: could not record %s (%s)", job_id, status, exc)
+            logger.error(
+                "job %s: could not record %s (%s); its lease lapses and a later create fails it",
+                job_id,
+                status,
+                exc,
+            )
+        finally:
+            # The runner is done with the job either way: stop renewing its lease.
+            self._owned.discard(job_id)
 
     def _finish_call(
         self,
@@ -512,6 +685,15 @@ class RedisJobStore:
         if self._closed:
             return
         self._closed = True
+        heartbeat, self._heartbeat = self._heartbeat, None
+        if heartbeat is not None and not heartbeat.done():
+            try:
+                heartbeat.cancel()
+            except RuntimeError:  # its loop is already closed
+                pass
+            else:
+                if heartbeat.get_loop() is asyncio.get_running_loop():
+                    await asyncio.gather(heartbeat, return_exceptions=True)
         try:
             await self._redis.aclose()
         except Exception as exc:

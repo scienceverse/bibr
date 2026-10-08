@@ -22,7 +22,7 @@ def build_stage_plan(
     render/OCR stages to bound memory, while serve keeps them separate so its
     GPU batchers can coalesce work across requests.
     """
-    from bibr.pipeline.stages.classifiers import ClassifierStage
+    from bibr.pipeline.stages.classifiers import ClassifierStage, RequiredClassifierGate
     from bibr.pipeline.stages.core_checkpoint import CoreCheckpointStage
     from bibr.pipeline.stages.docx import DocxHandlingStage
     from bibr.pipeline.stages.enrich import EnrichmentStage
@@ -61,6 +61,7 @@ def build_stage_plan(
                 ),
             )
         return common_front + (
+            RequiredClassifierGate(),
             InterleavedRenderOcrStage(),
             ClassifierStage(),
             LlmServerStage(),

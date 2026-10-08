@@ -43,7 +43,7 @@ from bibr.extract.footnote_citations import (
     year_led_title,
 )
 from bibr.extract.merge_split import _onset_finder_for_bibliography, split_merged_refs
-from bibr.extract.ref_field_repair import repair_ner_reference_fields
+from bibr.extract.ref_field_repair import _IN_PRESS_RE, repair_ner_reference_fields
 from bibr.extract.ref_line_stream import (
     StreamSegmentation,
     _match_key,
@@ -749,14 +749,9 @@ def _resolve_ref_strategies(
     return seg.lower(), parse.lower()
 
 
-_IN_PRESS_RE = re.compile(
-    r"in\s*press|forthcoming|advance\s*online|manuscript\s*submitted|epub\s*ahead",
-    re.IGNORECASE,
-)
-
-
 def _is_in_press(year_str: str | None) -> bool:
-    """True if the year text looks like 'in press' / 'forthcoming' / etc."""
+    """True if the text (a year field or a whole reference) prints an
+    'in press' / 'forthcoming' / etc. status; see ``_IN_PRESS_RE``."""
     return bool(year_str and _IN_PRESS_RE.search(year_str))
 
 
@@ -785,7 +780,9 @@ def _expand_compact_last_page(first_page: str | None, last_page: str | None) -> 
     if not first_page or not last_page:
         return last_page
     fp, lp = str(first_page).strip(), str(last_page).strip()
-    if not (fp.isdigit() and lp.isdigit()):
+    # isdecimal, not isdigit: superscript and circled digits ("4²", "①") are
+    # digits that int() rejects.
+    if not (fp.isdecimal() and lp.isdecimal()):
         return last_page
     if len(lp) >= len(fp) or int(lp) >= int(fp):
         return last_page
@@ -2594,11 +2591,29 @@ class ReferenceExtractor:
         """Log and persist a segmentation/parse fallback, recovery or loss so
         eval tooling can count it."""
         logger.warning("Reference extraction warning %s: %s", code, message)
+        # Also called from asyncio.to_thread workers (geom/CRF segmentation,
+        # the NER parse); a single list.append is atomic under the GIL.
         # Mock(spec=PaperContents) doubles don't expose default_factory
         # dataclass fields — create the sink on first write if missing.
         if not hasattr(self.contents, "processing_warnings"):
             self.contents.processing_warnings = []
         self.contents.processing_warnings.append(ProcessingWarning(code, message))
+
+    def _finalize_fields(self, fields: dict[str, Any], segment: str | None) -> dict[str, Any]:
+        """:func:`_finalize_reference_fields` for one reference of the list.
+
+        The repairs read the printed text, so an unforeseen shape can make one
+        raise. That reference then keeps its fields as parsed, with a warning,
+        instead of failing every reference of the paper.
+        """
+        try:
+            return _finalize_reference_fields(dict(fields), segment)
+        except Exception as e:  # noqa: BLE001 — one entry must not sink the list
+            self._record_warning(
+                WarningCode.REF_PARSE_FINALIZE_FAILED,
+                f"reference {fields.get('bib_id')} kept as parsed: {e!r}",
+            )
+            return fields
 
     async def _reparse_split(
         self, batch: list[str], offset: int, depth: int
@@ -2850,7 +2865,7 @@ class ReferenceExtractor:
             # ``volume`` *and* defeated the backfill, which anchors its regex on
             # a clean volume.
             volume, issue = _normalize_vol_issue(ref.volume, ref.issue, segment or "")
-            fields = _finalize_reference_fields(
+            fields = self._finalize_fields(
                 {
                     **ref.model_dump(),
                     "bib_id": ref.index,
@@ -3065,7 +3080,7 @@ class ReferenceExtractor:
 
             chunk_refs = []
             for ref in res:
-                fields = _finalize_reference_fields(
+                fields = self._finalize_fields(
                     {
                         **ref.model_dump(),
                         "bib_id": ref.index,
@@ -3111,6 +3126,13 @@ class ReferenceExtractor:
             ref_parser = _get_ner_parser(self._settings, self._memory_mode)
             parser_inputs = _strip_enum_markers(ref_strings)
             parsed = ref_parser.parse_batch(parser_inputs)
+            truncated = getattr(ref_parser, "last_truncated_count", 0)
+        if isinstance(truncated, int) and truncated > 0:
+            self._record_warning(
+                WarningCode.REF_PARSE_TRUNCATED,
+                f"{truncated} reference(s) longer than the NER parser's input window; "
+                "their trailing fields were not parsed",
+            )
         aligned: list[PaperReference | None] = []
         parsed_count = 0
         for ref_text, parser_text, fields in zip(ref_strings, parser_inputs, parsed, strict=True):
@@ -3128,7 +3150,7 @@ class ReferenceExtractor:
             volume, issue = _normalize_vol_issue(
                 fields.get("volume"), fields.get("issue"), ref_text
             )
-            ref_fields = _finalize_reference_fields(
+            ref_fields = self._finalize_fields(
                 {
                     "bib_id": parsed_count + 1,
                     "title": title,

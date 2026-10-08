@@ -202,7 +202,15 @@ class LlmsterLlmServer:
             str(self._context_length),
         ]
         command.extend(shlex.split(self._load_args or ""))
-        self._runner(command)
+        try:
+            self._runner(command)
+        except UpstreamServiceError as exc:
+            # `lms load` can time out while the daemon keeps loading: own the
+            # identifier so shutdown() still unloads it. A load that failed
+            # outright loaded nothing of ours to unload.
+            if isinstance(exc.__cause__, subprocess.TimeoutExpired):
+                self._loaded_identifier = self._identifier
+            raise
         self._loaded_identifier = self._identifier
 
     def _check_reused_identifier(self, item: dict[str, Any]) -> None:

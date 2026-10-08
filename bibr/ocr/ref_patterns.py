@@ -85,11 +85,20 @@ _REF_HEADER_WORDS = (
 # and typographic decoration ("■ REFERENCES"). Letters must carry punctuation so
 # that a stray word cannot be read as an enumerator.
 _REF_HEADER_PREFIX = r"(?:[■▪●◆•*#§]\s*)?(?:(?:\d{1,2}[.)]?|[IVX]{1,5}[.)]|[A-Z][.)])\s+)?"
+# Whitespace within a line: "\n" is the only line boundary ^ and $ see, so a
+# "\r" before it (pdfium's line breaks) still trails the header.
+_LINE_SPACE = r"[^\S\n]"
 # Trailing colon ("Список використаних джерел:") or decoration ("References»»»").
-_REF_HEADER_SUFFIX = r"\s*[:：.．。]?\s*[»«\-–—]*"
+# One whitespace run between tokens: adjacent runs that could share the same
+# spaces backtracked cubically over a long one.
+_REF_HEADER_SUFFIX = rf"{_LINE_SPACE}*(?:[:：.．。]{_LINE_SPACE}*)?(?:[»«\-–—]+{_LINE_SPACE}*)?"
 
+# Leading whitespace crosses blank lines only from the start of the string, as
+# ``match`` callers need; a search that let every line start run over the blank
+# lines below it took quadratic time.
 _REF_HEADER_RE = re.compile(
-    rf"(?im)^\s*{_REF_HEADER_PREFIX}(?:{'|'.join(_REF_HEADER_WORDS)}){_REF_HEADER_SUFFIX}\s*$"
+    rf"(?im)(?:\A\s*|^{_LINE_SPACE}*){_REF_HEADER_PREFIX}"
+    rf"(?:{'|'.join(_REF_HEADER_WORDS)}){_REF_HEADER_SUFFIX}$"
 )
 
 # A line that starts like "Surname," — the classic author-date reference opener.

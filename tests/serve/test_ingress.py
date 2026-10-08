@@ -8,7 +8,7 @@ import time
 import pytest
 from starlette.datastructures import UploadFile
 
-from bibr.serve.ingress import _FORM_OPTION_NAMES
+from bibr.serve.ingress import _FORM_OPTION_NAMES, _MAX_FORM_FIELDS
 
 
 def _upload(content: bytes, filename: str = "paper.pdf") -> UploadFile:
@@ -681,7 +681,7 @@ def test_extract_route_persists_descriptor_and_maps_upload_errors(monkeypatch):
         [
             ("file", ("paper.pdf", b"paper", "application/pdf")),
             # One more text part than the route accepts.
-            *((f"extra_{index}", (None, "x")) for index in range(len(_FORM_OPTION_NAMES) + 1)),
+            *((f"extra_{index}", (None, "x")) for index in range(_MAX_FORM_FIELDS + 1)),
         ],
     ],
 )

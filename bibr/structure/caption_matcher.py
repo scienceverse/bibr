@@ -6,6 +6,8 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 
+import numpy as np
+
 from bibr.paper_contents import CaptionAssignment, CaptionCandidate
 
 _NUMBERED_CAPTION_RE = re.compile(
@@ -220,61 +222,100 @@ def _score_edge(
     return _ScoredEdge(round(score, 6), reasons)
 
 
-def _maximum_weight_assignment(weights: list[list[float]]) -> list[int]:
-    """Return the selected column for each row using deterministic Hungarian matching."""
+def _maximum_weight_assignment(rows: list[dict[int, float]], column_count: int) -> list[int]:
+    """Return the selected column for each row using deterministic Hungarian matching.
 
-    row_count = len(weights)
+    *rows* holds each row's weights by column; every other cell weighs zero.
+    This is the former pure-Python column loop run on whole numpy rows: the
+    same float operations in the same order, a strict ``<`` per relaxation
+    and the lowest column on a tie (``argmin`` returns the first minimum),
+    so it selects exactly what the loop did, without its per-cell Python
+    cost or a dense rows x columns matrix.
+
+    The worst case is still cubic. A row without edges takes the lowest
+    free column, often one a later row's edge needs, and every later row
+    then steps through all matched columns to push it along. Solving each
+    connected component of the edges on its own would avoid that walk but
+    breaks ties differently: those rows' zero cells link every component.
+    """
+
+    row_count = len(rows)
     if row_count == 0:
         return []
-    column_count = len(weights[0])
     # The caller appends one zero-weight dummy column per row, so rows <= columns.
-    potentials_rows = [0.0] * (row_count + 1)
-    potentials_cols = [0.0] * (column_count + 1)
-    matched_row = [0] * (column_count + 1)
-    predecessor = [0] * (column_count + 1)
+    # Column 0 is the algorithm's virtual start column.
+    width = column_count + 1
+    # Minimise the negative weight (-0.0 off the edges, as negating a zero
+    # cell gave); stable row/column order makes equal-weight outcomes
+    # deterministic.
+    row_columns = [np.fromiter(row, dtype=np.intp, count=len(row)) + 1 for row in rows]
+    row_costs = [-np.fromiter(row.values(), dtype=np.float64, count=len(row)) for row in rows]
+    potentials_rows = np.zeros(row_count + 1)
+    potentials_cols = np.zeros(width)
+    matched_row = np.zeros(width, dtype=np.intp)
+    predecessor = np.zeros(width, dtype=np.intp)
+    cost = np.empty(width)
     for row in range(1, row_count + 1):
         matched_row[0] = row
-        min_value = [float("inf")] * (column_count + 1)
-        used = [False] * (column_count + 1)
+        min_value = np.full(width, np.inf)
+        used = np.zeros(width, dtype=bool)
         column = 0
         while True:
             used[column] = True
             current_row = matched_row[column]
-            delta = float("inf")
-            next_column = 0
-            for candidate_column in range(1, column_count + 1):
-                if used[candidate_column]:
-                    continue
-                # Minimise the negative weight; stable row/column iteration
-                # makes equal-weight outcomes deterministic.
-                cost = -weights[current_row - 1][candidate_column - 1]
-                reduced = cost - potentials_rows[current_row] - potentials_cols[candidate_column]
-                if reduced < min_value[candidate_column]:
-                    min_value[candidate_column] = reduced
-                    predecessor[candidate_column] = column
-                if min_value[candidate_column] < delta:
-                    delta = min_value[candidate_column]
-                    next_column = candidate_column
-            for candidate_column in range(column_count + 1):
-                if used[candidate_column]:
-                    potentials_rows[matched_row[candidate_column]] += delta
-                    potentials_cols[candidate_column] -= delta
-                else:
-                    min_value[candidate_column] -= delta
+            cost.fill(-0.0)
+            cost[row_columns[current_row - 1]] = row_costs[current_row - 1]
+            reduced = cost - potentials_rows[current_row] - potentials_cols
+            improved = ~used & (reduced < min_value)
+            np.copyto(min_value, reduced, where=improved)
+            np.copyto(predecessor, column, where=improved)
+            candidates = np.where(used, np.inf, min_value)
+            next_column = int(candidates.argmin())
+            delta = candidates[next_column]
+            potentials_rows[matched_row[used]] += delta
+            np.subtract(potentials_cols, delta, out=potentials_cols, where=used)
+            np.subtract(min_value, delta, out=min_value, where=~used)
             column = next_column
             if matched_row[column] == 0:
                 break
         while True:
-            previous = predecessor[column]
+            previous = int(predecessor[column])
             matched_row[column] = matched_row[previous]
             column = previous
             if column == 0:
                 break
     selected = [-1] * row_count
-    for column in range(1, column_count + 1):
-        if matched_row[column]:
-            selected[matched_row[column] - 1] = column - 1
+    for column in np.flatnonzero(matched_row[1:]) + 1:
+        selected[int(matched_row[column]) - 1] = int(column) - 1
     return selected
+
+
+def _targets_near_pages(
+    captions: tuple[CaptionCandidate, ...],
+    targets: tuple[CaptionTarget, ...],
+    *,
+    adjacent: bool,
+) -> dict[int | None, tuple[tuple[int, ...], tuple[CaptionTarget, ...]]]:
+    """Per caption page, the targets on it (and, if *adjacent*, the pages either side).
+
+    ``_score_edge`` rejects a target more than one page away and only consults
+    other targets on the caption's or the target's page, so scoring against
+    this slice (indices and targets, in *targets* order) gives the same edges
+    as scoring against every target, without a captions x targets scan.
+    """
+    by_page: dict[int, list[int]] = defaultdict(list)
+    for index, target in enumerate(targets):
+        if target.page_number is not None:
+            by_page[target.page_number].append(index)
+    near: dict[int | None, tuple[tuple[int, ...], tuple[CaptionTarget, ...]]] = {}
+    for caption in captions:
+        page = caption.page_number
+        if page is None or page in near:
+            continue
+        pages = (page - 1, page, page + 1) if adjacent else (page,)
+        indices = tuple(sorted(index for other in pages for index in by_page.get(other, ())))
+        near[page] = (indices, tuple(targets[index] for index in indices))
+    return near
 
 
 def _number_offsets(
@@ -291,17 +332,19 @@ def _number_offsets(
     otherwise pull each caption onto its neighbour's figure.
     """
     votes: dict[tuple[int | None, str], list[tuple[int, str]]] = defaultdict(list)
+    same_page = _targets_near_pages(captions, targets, adjacent=False)
     for caption in captions:
         number_match = _NUMBERED_CAPTION_RE.match(caption.text.strip())
         caption_number = _roman_value(number_match.group("number")) if number_match else None
         if caption_number is None:
             continue
+        _indices, page_targets = same_page.get(caption.page_number, ((), ()))
         scored = sorted(
             (
                 (edge.score, target.object_id)
-                for target in targets
-                if target.page_number == caption.page_number
-                and (edge := _score_edge(caption, target, targets, number_offset=None)) is not None
+                for target in page_targets
+                if (edge := _score_edge(caption, target, page_targets, number_offset=None))
+                is not None
             ),
             key=lambda item: -item[0],
         )
@@ -343,31 +386,34 @@ def assign_captions(
     )
     ordered_targets = tuple(sorted(targets, key=lambda item: (item.source_index, item.object_id)))
     offsets = _number_offsets(ordered_captions, ordered_targets)
+    near = _targets_near_pages(ordered_captions, ordered_targets, adjacent=not same_page_only)
+    types_missing_geometry = {
+        target.object_type
+        for target in ordered_targets
+        if target.page_number is None or target.bbox is None
+    }
     edges: list[dict[int, _ScoredEdge]] = []
     forced_ambiguous: set[int] = set()
     unmatched_reasons: dict[int, tuple[str, ...]] = {}
     for caption_index, caption in enumerate(ordered_captions):
+        near_indices, near_targets = near.get(caption.page_number, ((), ()))
         row = {
             target_index: edge
-            for target_index, target in enumerate(ordered_targets)
-            if not (same_page_only and caption.page_number != target.page_number)
-            and (
+            for target_index, target in zip(near_indices, near_targets, strict=True)
+            if (
                 edge := _score_edge(
                     caption,
                     target,
-                    ordered_targets,
+                    near_targets,
                     number_offset=offsets.get((target.page_number, target.object_type), 0),
                 )
             )
             is not None
         }
-        compatible = [
-            target for target in ordered_targets if target.object_type == caption.object_type
-        ]
         missing_geometry = (
             caption.page_number is None
             or caption.bbox is None
-            or any(target.page_number is None or target.bbox is None for target in compatible)
+            or caption.object_type in types_missing_geometry
         )
         if not row and missing_geometry:
             unmatched_reasons[caption_index] = ("missing_geometry", "unmatched")
@@ -379,15 +425,10 @@ def assign_captions(
             row = {}
         edges.append(row)
 
-    weights = [
-        [
-            edges[row].get(column, _ScoredEdge(0.0, ())).score
-            for column in range(len(ordered_targets))
-        ]
-        + [0.0] * len(ordered_captions)
-        for row in range(len(ordered_captions))
-    ]
-    selected = _maximum_weight_assignment(weights)
+    selected = _maximum_weight_assignment(
+        [{column: edge.score for column, edge in row.items()} for row in edges],
+        len(ordered_targets) + len(ordered_captions),
+    )
     assignments: list[CaptionAssignment] = []
     for caption_index, caption in enumerate(ordered_captions):
         column = selected[caption_index]

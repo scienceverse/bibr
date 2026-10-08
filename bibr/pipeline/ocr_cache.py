@@ -65,6 +65,11 @@ logger = logging.getLogger(__name__)
 # Version 21: a link broken inside keeps no space, and CJK punctuation takes none.
 _CACHE_FORMAT_VERSION = 21
 
+# Owner-only, as the LLM response cache: entries hold the text of papers that
+# may be unpublished. The umask can only narrow these.
+_DIR_MODE = 0o700
+_FILE_MODE = 0o600
+
 
 def _effective_settings(settings: GlobalSettings | None) -> GlobalSettings:
     if settings is not None:
@@ -355,9 +360,12 @@ def store(
         },
     }
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
+        data = json.dumps(payload)
         tmp = path.with_suffix(f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _FILE_MODE)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(data)
         os.replace(tmp, path)
     except (OSError, TypeError, ValueError) as e:
         logger.info("OCR cache write failed (%s); continuing uncached", e)

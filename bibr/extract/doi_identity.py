@@ -13,7 +13,7 @@ from bibr.extract.ref_locator import _REF_HEADER_RE, _looks_like_terminal_refere
 from bibr.input.consolidate_text import fix_ocr_artifacts
 from bibr.paper_contents import CanonicalSection
 from bibr.pipeline.identity import DoiCandidate, DoiSelection, ExpectedIdentity
-from bibr.utils.text import DOI_CANDIDATE_RE, normalize_doi
+from bibr.utils.text import CONTROL_CHAR_RE, DOI_CANDIDATE_RE, normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
 if TYPE_CHECKING:
@@ -147,7 +147,7 @@ def _marker_kind(text: str, start: int) -> str:
     prefix = text[max(0, start - 100) : start]
     if re.search(rf"journal\s+doi\s*[:.]?\s*{_DOI_HOST}\s*$", prefix, re.IGNORECASE):
         return "journal_doi"
-    marker_prefix = re.sub(rf"{_DOI_HOST}\s*$", "", prefix)
+    marker_prefix = re.sub(rf"{_DOI_HOST}\s*$", "", prefix, flags=re.IGNORECASE)
     for pattern, kind in _NON_SELF_MARKERS:
         if pattern.search(marker_prefix):
             return kind
@@ -412,13 +412,147 @@ def _repair_doi_text(text: str) -> str:
     )
 
 
+# The repairs are local, so the source and the repaired text are walked in step
+# and only the stretch around each repair is diffed: SequenceMatcher over a
+# whole footnote or text-layer line is quadratic in its length. A stretch ends
+# where _RESYNC_RUN characters agree again: the first such run in a window that
+# widens up to _RESYNC_WIDTH, else the nearest agreement within _RESYNC_REACH.
+# The nearest, never the longest: the longest is often a later repeat (a second
+# DOI under the same resolver and registrant, a run of spaces), which would
+# turn everything before it into one replacement.
+_RESYNC_RUN = 8
+_RESYNC_WIDTH = 64
+_RESYNC_REACH = 512
+# Runs of the control characters fix_ocr_artifacts deletes (STX aside, which
+# can become a hyphen) are set aside before the walk, which cannot see across
+# a long one.
+_DELETED_RUN_RE = re.compile(rf"(?:(?!\x02){CONTROL_CHAR_RE.pattern}){{{_RESYNC_WIDTH},}}")
+_SPACE_RUN_RE = re.compile(r"\s+")
+_LONG_SPACE_RE = re.compile(rf"\s{{{_RESYNC_WIDTH},}}")
+
+_Opcode = tuple[str, int, int, int, int]
+
+
+def _shifted(ops: list[_Opcode], i: int, j: int) -> list[_Opcode]:
+    return [(tag, i + a1, i + a2, j + b1, j + b2) for tag, a1, a2, b1, b2 in ops]
+
+
+def _telling(run: str) -> bool:
+    """Whether *run* has three different characters besides whitespace.
+
+    Only an agreement on such a run resyncs the walk: a run of spaces or dots
+    agrees with any other.
+    """
+
+    return len({char for char in run if not char.isspace()}) >= 3
+
+
+def _nearest_agreement(a: str, b: str) -> tuple[int, int] | None:
+    """Offsets of a ``_RESYNC_RUN``-character run in both *a* and *b*, least far into the two."""
+
+    best: tuple[int, int] | None = None
+    for k in range(len(b) - _RESYNC_RUN + 1):
+        reach = len(a) if best is None else sum(best) - k + _RESYNC_RUN - 1
+        if reach < _RESYNC_RUN:
+            break
+        run = b[k : k + _RESYNC_RUN]
+        if not _telling(run):
+            continue
+        at = a.find(run, 0, reach)
+        if at >= 0:
+            best = (at, k)
+    return best
+
+
+def _repaired_stretch(source: str, i: int, cleaned: str, j: int) -> tuple[list[_Opcode], int, int]:
+    """Opcodes from ``source[i]`` and ``cleaned[j]``, which differ, to where the two agree again."""
+
+    width = _RESYNC_RUN * 2
+    while True:
+        ops = SequenceMatcher(
+            None, source[i : i + width], cleaned[j : j + width], autojunk=False
+        ).get_opcodes()
+        if i + width >= len(source) and j + width >= len(cleaned):
+            return _shifted(ops, i, j), len(source), len(cleaned)
+        for index, (tag, a1, a2, b1, _b2) in enumerate(ops):
+            if tag == "equal" and a2 - a1 >= _RESYNC_RUN and _telling(source[i + a1 : i + a2]):
+                return _shifted(ops[:index], i, j), i + a1, j + b1
+        if width >= _RESYNC_WIDTH:
+            break
+        width *= 2
+    a, b = source[i : i + _RESYNC_REACH], cleaned[j : j + _RESYNC_REACH]
+    found = _nearest_agreement(a, b)
+    if found is not None:
+        before = SequenceMatcher(None, a[: found[0]], b[: found[1]], autojunk=False)
+        return _shifted(before.get_opcodes(), i, j), i + found[0], j + found[1]
+    if i + _RESYNC_REACH >= len(source) and j + _RESYNC_REACH >= len(cleaned):
+        return (
+            _shifted(SequenceMatcher(None, a, b, autojunk=False).get_opcodes(), i, j),
+            len(source),
+            len(cleaned),
+        )
+    # A wrap or URL bridge took out a whitespace run the window cannot see
+    # past: it is deleted whole, and no alignment of the window crosses one
+    # the repaired text lacks.
+    space = _LONG_SPACE_RE.search(source, i, i + width + _RESYNC_WIDTH)
+    if space is not None and space.start() == i and not b[0].isspace():
+        end = _SPACE_RUN_RE.match(source, i).end()
+        return [("delete", i, end, j, j)], end, j
+    cut = len(source)
+    if space is not None and not _LONG_SPACE_RE.search(cleaned, j, j + width + _RESYNC_WIDTH):
+        cut = space.start()
+    # Nothing agrees within reach (a ligature in every word, a script NFC
+    # composes): keep what the window aligned, through its last equal run,
+    # one that could resync the walk if there is such a run.
+    equal = [index for index, op in enumerate(ops) if op[0] == "equal" and i + op[2] <= cut]
+    telling = [index for index in equal if _telling(source[i + ops[index][1] : i + ops[index][2]])]
+    if telling or equal:
+        last = (telling or equal)[-1]
+        _tag, _a1, a2, _b1, b2 = ops[last]
+        return _shifted(ops[: last + 1], i, j), i + a2, j + b2
+    a2, b2 = min(width, len(source) - i), min(width, len(cleaned) - j)
+    if i < cut < i + a2:
+        a2 = cut - i
+        b2 = min(a2, b2)
+    return [("replace", i, i + a2, j, j + b2)], i + a2, j + b2
+
+
+def _repair_opcodes(source: str, cleaned: str) -> list[_Opcode]:
+    """``SequenceMatcher`` opcodes from *source* to *cleaned*, diffed one repair at a time."""
+
+    ops: list[_Opcode] = []
+    i = j = 0
+    while i < len(source) and j < len(cleaned):
+        k = 0
+        while i + k < len(source) and j + k < len(cleaned) and source[i + k] == cleaned[j + k]:
+            k += 1
+        if k:
+            ops.append(("equal", i, i + k, j, j + k))
+            i, j = i + k, j + k
+            continue
+        stretch, i, j = _repaired_stretch(source, i, cleaned, j)
+        ops.extend(stretch)
+    if i < len(source):
+        ops.append(("delete", i, len(source), j, j))
+    elif j < len(cleaned):
+        ops.append(("insert", i, i, j, len(cleaned)))
+    return ops
+
+
 def _cleaned_char_source_ranges(source: str, cleaned: str) -> list[tuple[int, int]]:
     """Map each cleaned character to its source interval for receipt provenance."""
 
+    if cleaned == source:
+        return [(index, index + 1) for index in range(len(source))]
+    # Diffed without its long runs of deleted control characters.
+    kept = [0]
+    for run in _DELETED_RUN_RE.finditer(source):
+        kept.extend(run.span())
+    kept.append(len(source))
+    spans = list(zip(kept[::2], kept[1::2], strict=True))
+    shown = "".join(source[start:end] for start, end in spans)
     ranges: list[tuple[int, int]] = [(0, 0)] * len(cleaned)
-    for tag, source_start, source_end, clean_start, clean_end in SequenceMatcher(
-        None, source, cleaned, autojunk=False
-    ).get_opcodes():
+    for tag, source_start, source_end, clean_start, clean_end in _repair_opcodes(shown, cleaned):
         clean_length = clean_end - clean_start
         source_length = source_end - source_start
         if tag == "equal":
@@ -432,7 +566,14 @@ def _cleaned_char_source_ranges(source: str, cleaned: str) -> list[tuple[int, in
                     source_start + ((offset + 1) * source_length + clean_length - 1) // clean_length
                 )
                 ranges[clean_start + offset] = (interval_start, interval_end)
-    return ranges
+    if len(spans) == 1:
+        return ranges
+    positions = [index for start, end in spans for index in range(start, end)]
+    positions.append(len(source))
+    return [
+        (positions[start], positions[end - 1] + 1 if end > start else positions[start])
+        for start, end in ranges
+    ]
 
 
 def _raw_source_match(
@@ -927,9 +1068,11 @@ def _text_layer_candidates(
                 selection_tier=EXPLICIT_SELF_ID,
             )
         # The line after the DOI, including punctuation normalization dropped.
-        doi_end = cleaned.casefold().find(candidate.normalized, match.start())
-        doi_end = doi_end + len(candidate.normalized) if doi_end >= 0 else match.end()
-        found.append((candidate, cleaned[doi_end:]))
+        # Found in the line itself: casefolding the line can lengthen it ("ß").
+        at = re.compile(re.escape(candidate.normalized), re.IGNORECASE).search(
+            cleaned, match.start()
+        )
+        found.append((candidate, cleaned[at.end() if at is not None else match.end() :]))
     return found
 
 

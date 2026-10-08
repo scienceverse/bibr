@@ -203,11 +203,11 @@ def bbox_pdf_pts(page: Page, block: Block) -> list[float] | None:
 def page_chars(page: Page) -> list[tuple[str, Box]]:
     """The ``(char, tight box)`` stream ``ref_geometry._extract_page_chars`` reads.
 
-    ``get_text_range(i, 1)`` per char: empty for a char pdfium leaves out of
-    the page text, for a UTF-16 surrogate half and for a char beyond the BMP
-    (its one-unit buffer holds only the high surrogate, and pypdfium2 decodes
-    with ``errors="ignore"``), U+FFFE for pdfium's line-end hyphen, otherwise
-    the char itself. Raises where that read raises (a missing box).
+    Nothing for a char pdfium leaves out of the page text and for an unpaired
+    UTF-16 surrogate or a code past U+10FFFF; a char beyond the BMP, held as
+    one code or as a surrogate pair (with the union of the pair's boxes);
+    U+FFFE for pdfium's line-end hyphen; otherwise the char itself. Raises
+    where that read raises (a missing box).
 
     [] for a page without columns, including a failed page: check
     ``page.error`` and ``DocumentLayer.columns_freed``.
@@ -219,18 +219,39 @@ def page_chars(page: Page) -> list[tuple[str, Box]]:
         return []
     chars: list[tuple[str, Box]] = []
     boxes = cols.box.tolist()
-    for index, (code, flags) in enumerate(zip(cols.cp.tolist(), cols.gflags.tolist(), strict=True)):
+    codes = cols.cp.tolist()
+    gflags = cols.gflags.tolist()
+    index = 0
+    while index < len(codes):
+        code, flags = codes[index], gflags[index]
+        rows = [index]
+        if 0xD800 <= code <= 0xDBFF and index + 1 < len(codes):
+            low = codes[index + 1]
+            if 0xDC00 <= low <= 0xDFFF:
+                code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
+                rows.append(index + 1)
+        index += len(rows)
         if flags & GLYPH_EXCLUDED:
             continue
         if code == 0x2 and flags & GLYPH_HYPHEN:
             ch = "\ufffe"
-        elif 0xD800 <= code <= 0xDFFF or code > 0xFFFF:
+        elif 0xD800 <= code <= 0xDFFF or code > 0x10FFFF:
             continue
         else:
             ch = chr(code)
-        if flags & GLYPH_NO_BOX:
-            raise ValueError(f"char {index} has no box")
-        chars.append((ch, tuple(boxes[index])))
+        for row in rows:
+            if gflags[row] & GLYPH_NO_BOX:
+                raise ValueError(f"char {row} has no box")
+        box = tuple(boxes[rows[0]])
+        if len(rows) == 2:
+            other = boxes[rows[1]]
+            box = (
+                min(box[0], other[0]),
+                min(box[1], other[1]),
+                max(box[2], other[2]),
+                max(box[3], other[3]),
+            )
+        chars.append((ch, box))
     return compose_spacing_accents(chars)
 
 

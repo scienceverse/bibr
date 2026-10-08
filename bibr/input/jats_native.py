@@ -22,6 +22,7 @@ match on the local name so both namespaced and bare documents parse.
 
 from __future__ import annotations
 
+import bisect
 import itertools
 import logging
 import re
@@ -51,8 +52,9 @@ from bibr.paper_contents import (
 )
 from bibr.structure.assembler import DocumentAssembler
 from bibr.structure.float_labels import FloatKind, caption_label, label_element_label
+from bibr.structure.html_table import TableBudget, max_table_width
 from bibr.structure.xref_utils import URL_RE, detect_xrefs
-from bibr.utils.text import clean_extracted_url, collapse_ws
+from bibr.utils.text import CollapsedLength, clean_extracted_url, collapse_ws
 
 logger = logging.getLogger(__name__)
 
@@ -448,12 +450,13 @@ def _trim_tex_math(text: str) -> str:
     return collapse_ws(body.replace("$$", "")).strip()
 
 
-def _choose_alternative(alt) -> tuple[object | None, str | None]:
+def _choose_alternative(alt, cut=()) -> tuple[object | None, str | None]:
     """Pick the single representative child of an ``<alternatives>`` element.
 
     Returns ``(element, None)`` to walk, or ``(None, text)`` to emit — never
     both. MathML first (it is the rendered form), else the TeX body without
-    its document preamble, else the first non-graphic child.
+    its document preamble (and the subtrees in *cut*), else the first
+    non-graphic child.
     """
     math = tex = fallback = first = None
     for child in alt:
@@ -471,49 +474,56 @@ def _choose_alternative(alt) -> tuple[object | None, str | None]:
     if math is not None:
         return math, None
     if tex is not None:
-        body = _trim_tex_math(_flatten(tex))
+        body = _trim_tex_math(_Walker(None, cut=cut).run(tex))
         if body:
             return None, body
     target = fallback if fallback is not None else first
     return target, None
 
 
-def _anchor_offset(pre_raw: str, lead_raw: str | None, link_text: str) -> int:
+def _anchor_offset(pre_len: int, trail: bool, lead_raw: str | None, link_text: str) -> int:
     """Character offset where an anchor's display text starts in entry text.
 
-    *pre_raw* is the walker's raw accumulation before the anchor child;
-    entry text is that accumulation collapsed, so the collapsed prefix length
-    is the anchor's start, plus one separator space when the source spells
-    whitespace on either side of the anchor.
+    Entry text is the walker's raw accumulation collapsed, so *pre_len*, the
+    collapsed length of the accumulation before the anchor child, is the
+    anchor's start, plus one separator space when the source spells
+    whitespace on either side of the anchor (*trail*: the accumulation ends
+    in whitespace).
     """
-    pre = collapse_ws(pre_raw)
-    if not pre or not link_text:
-        return len(pre)
-    trail = pre_raw[-1:].isspace()
+    if not pre_len or not link_text:
+        return pre_len
     lead = bool(lead_raw and lead_raw[:1].isspace())
-    return len(pre) + (1 if trail or lead else 0)
+    return pre_len + (1 if trail or lead else 0)
 
 
-def _sentence_at_offset(candidates, entry_text: str, offset: int):
-    """Return the candidate sentence covering *offset* in *entry_text*.
+def _sentence_starts(candidates, entry_text: str) -> list[int]:
+    """Where each candidate sentence starts in *entry_text*, in order.
 
     Sentence spans are recovered with the same progressive ``find`` the
     assembler uses at emission, so externally-segmented sentences map back
     onto the entry they were split from.
     """
-    if not candidates:
-        return None
-    chosen = candidates[0]
+    starts = []
     cursor = 0
     for sent in candidates:
         found = entry_text.find(sent.text, cursor)
         start = found if found >= 0 else cursor
-        if start <= offset:
-            chosen = sent
-        else:
-            break
+        starts.append(start)
         cursor = start + len(sent.text)
-    return chosen
+    return starts
+
+
+def _sentence_at_offset(candidates, entry_text: str, offset: int, starts: list[int] | None = None):
+    """Return the candidate sentence covering *offset* in *entry_text*.
+
+    *starts* is :func:`_sentence_starts` of the candidates, which a caller
+    resolving many anchors in one entry computes once.
+    """
+    if not candidates:
+        return None
+    if starts is None:
+        starts = _sentence_starts(candidates, entry_text)
+    return candidates[max(bisect.bisect_right(starts, offset) - 1, 0)]
 
 
 def _resolve_link_sentence(
@@ -523,6 +533,7 @@ def _resolve_link_sentence(
     fallback_id: int | None,
     entry_text: str = "",
     anchor_offset: int | None = None,
+    starts: list[int] | None = None,
 ):
     """Pick the sentence of one deferred entry that holds an anchor.
 
@@ -534,9 +545,10 @@ def _resolve_link_sentence(
     the fallback for links recorded without one. A plain substring search
     would land a short anchor on the wrong sentence ('here' inside 'There'),
     so an offset pick stands only when it carries the anchor's evidence.
+    *starts* is passed on to :func:`_sentence_at_offset`.
     """
     if anchor_offset is not None and entry_text:
-        picked = _sentence_at_offset(candidates, entry_text, anchor_offset)
+        picked = _sentence_at_offset(candidates, entry_text, anchor_offset, starts)
         if picked is not None:
             needle = (link_text or "").strip()
             if not needle or needle in picked.text or url in picked.text:
@@ -557,6 +569,12 @@ def _resolve_link_sentence(
     return candidates[-1] if candidates else None
 
 
+# The most unsettled MathML pieces, and characters, an anchor's offset joins
+# again (_Walker._pre_link).
+_MAX_OPEN_PIECES = 64
+_MAX_OPEN_CHARS = 1024
+
+
 class _Walker:
     """One text-flattening pass over an element.
 
@@ -569,10 +587,13 @@ class _Walker:
     accumulated.
     """
 
-    def __init__(self, exclude, on_block=None, on_link=None, boundaries=None) -> None:
-        self.flat = FlatText()
+    def __init__(self, exclude, on_block=None, on_link=None, boundaries=None, cut=()) -> None:
+        self.reset()
         self.serials = itertools.count()
         self.exclude = exclude
+        # Subtrees read elsewhere: left out like *exclude*, but still a word
+        # boundary.
+        self.cut = cut
         self.on_block = on_block
         self.on_link = on_link
         self.boundaries = _TEXT_BOUNDARY if boundaries is None else boundaries
@@ -583,6 +604,38 @@ class _Walker:
 
     def reset(self) -> None:
         self.flat = FlatText()
+        self._pre = CollapsedLength()
+        self._pre_from = 0  # the pieces before it are in _pre
+        # The last _pre_link result, keyed by the text's end then.
+        self._pre_cached: tuple[int, tuple[int, bool]] | None = None
+
+    def _pre_link(self) -> tuple[int, bool]:
+        """The collapsed length of the text so far, and whether it ends in whitespace.
+
+        Joining and collapsing all of it again at every anchor is quadratic,
+        so the pieces whose rendering is settled are collapsed once and only
+        the rest (the last MathML gap and the tokens after it) is joined again.
+        A rest of more than :data:`_MAX_OPEN_PIECES` pieces or
+        :data:`_MAX_OPEN_CHARS` characters is taken as it stands, which is
+        exact unless its gap still reads the tokens added later (sibling
+        tokens of digits with at most one letter among them).
+        """
+        flat = self.flat
+        end = flat.text_end
+        # Gaps added since only trail the text: they render nothing and change
+        # nothing before them.
+        if self._pre_cached is not None and self._pre_cached[0] == end:
+            return self._pre_cached[1]
+        start = max(flat.settled, self._pre_from)
+        if end - start > _MAX_OPEN_PIECES or sum(map(len, flat.parts[start:end])) > _MAX_OPEN_CHARS:
+            start = end
+        if start > self._pre_from:
+            self._pre.add(flat.join(self._pre_from, start))
+            self._pre_from = start
+        rest = flat.join(self._pre_from, end)
+        pre = self._pre.length(rest), (rest[-1:] or self._pre.last).isspace()
+        self._pre_cached = end, pre
+        return pre
 
     def _add(self, text: str, in_math: bool, owner: str | None, group: int) -> None:
         if in_math:
@@ -591,7 +644,7 @@ class _Walker:
             self.flat.add(text)
 
     def _walk_alternative(self, alt, in_math: bool, serial: int) -> None:
-        chosen, text = _choose_alternative(alt)
+        chosen, text = _choose_alternative(alt, self.cut)
         if chosen is not None:
             self.walk(chosen, in_math, serial, False)
         elif text:
@@ -613,6 +666,8 @@ class _Walker:
                 # Dispatched (and flushed) by the caller; the tail still
                 # belongs to the running text that follows the block.
                 pass
+            elif child_ln in self.cut:
+                self.flat.separate()
             elif self.exclude is None or child_ln not in self.exclude:
                 if child_ln in self.boundaries or (
                     child_ln == "mspace" and mspace_separates(child.attrib)
@@ -620,22 +675,22 @@ class _Walker:
                     self.flat.separate()
                 # An anchor's offset is the accumulation before it is walked;
                 # entry text is that accumulation collapsed.
-                pre_raw = None
+                pre = None
                 if self.on_link is not None and child_ln in ("ext-link", "uri"):
-                    pre_raw = self.flat.join()
+                    pre = self._pre_link()
                 if child_ln == "alternatives":
                     self._walk_alternative(child, in_math, serial)
                 elif child_ln == "tex-math":
                     # A bare TeX formula (no <alternatives> around it) carries
                     # the same Springer preamble — keep only its body.
-                    body = _trim_tex_math(_flatten(child))
+                    body = _trim_tex_math(_Walker(None, cut=self.cut).run(child))
                     if body:
                         self._add(body, False, "tex-math", serial)
                 else:
                     self.walk(child, in_math, serial, False)
                 if child_ln in _TEXT_BOUNDARY_AFTER:
                     self.flat.separate()
-                if pre_raw is not None:
+                if pre is not None:
                     href = _attr(child, "href")
                     if href:
                         url = _normalize_ext_href(child, href)
@@ -644,7 +699,7 @@ class _Walker:
                             self.on_link(
                                 url,
                                 link_text,
-                                _anchor_offset(pre_raw, child.text, link_text),
+                                _anchor_offset(*pre, child.text, link_text),
                             )
             if child.tail:
                 self._add(child.tail, in_math, None, serial)
@@ -747,6 +802,8 @@ class JatsParser:
         self._ref_structured: list[PaperReference] = []
         self._ref_all_structured = True
         self._ref_next_id = 1
+        # The table limits HTML input has, with one budget for the document.
+        self._table_budget = TableBudget()
 
     # ------------------------------------------------------------------
     # Public API (mirrors DocxParser / PDFParser)
@@ -814,6 +871,7 @@ class JatsParser:
             native_references=self._native_references,
             native_ref_strings=self._native_ref_strings,
             native_ref_strings_authoritative=True,
+            processing_warnings=self._table_budget.warnings(),
         )
 
     def _make_sentence(self, entry, text: str, text_id: int, paragraph_id: int) -> PaperSentence:
@@ -842,6 +900,8 @@ class JatsParser:
         for sent in self.sentences:
             by_paragraph.setdefault(sent.paragraph_id, []).append(sent)
         covered: set[tuple[str, int]] = set()
+        # Sentence starts per entry, found once for all of the entry's anchors.
+        entry_starts: dict[int, list[int]] = {}
         for url, link_text, section_id, deferred_index, anchor_offset in self._pending_url_links:
             if deferred_index >= len(self.assembler.last_text_id):
                 continue
@@ -855,8 +915,11 @@ class JatsParser:
             entry_text = ""
             if 0 <= deferred_index < len(self.assembler.entries):
                 entry_text = self.assembler.entries[deferred_index].text
+            starts = entry_starts.get(deferred_index)
+            if starts is None:
+                starts = entry_starts[deferred_index] = _sentence_starts(candidates, entry_text)
             sentence = _resolve_link_sentence(
-                candidates, url, link_text, fallback_id, entry_text, anchor_offset
+                candidates, url, link_text, fallback_id, entry_text, anchor_offset, starts
             )
             if sentence is None:
                 continue
@@ -1452,17 +1515,18 @@ class JatsParser:
     def _handle_table_wrap(self, table_wrap, section_id: int, in_paragraph: bool = False) -> None:
         caption = self._caption_text(table_wrap)
         table_els = [el for el in table_wrap.iter() if _ln(el) == "table"]
-        df = self._tables_to_df(table_els)
+        df = self._tables_to_df(table_els, self._table_budget)
         if df is not None:
             try:
                 html = df.to_html(index=False)
             except Exception:  # noqa: BLE001 — degrade gracefully, never crash
                 html = ""
         elif caption:
-            # No cell grid: a table printed as an image (<graphic> only). A
-            # table-wrap is a table whatever it holds, so one with a label or
-            # caption is kept with no contents and mentions resolve to it, as
-            # the HTML parser keeps a captioned image-only <table>.
+            # No cell grid: a table printed as an image (<graphic> only), or
+            # one over the table limits. A table-wrap is a table whatever it
+            # holds, so one with a label or caption is kept with no contents
+            # and mentions resolve to it, as the HTML parser keeps a captioned
+            # image-only <table>.
             df = pd.DataFrame()
             html = ""
         else:
@@ -1502,17 +1566,35 @@ class JatsParser:
         return JatsParser._tables_to_df([table_el])
 
     @staticmethod
-    def _tables_to_df(table_els: list) -> pd.DataFrame | None:
+    def _tables_to_df(table_els: list, budget: TableBudget | None = None) -> pd.DataFrame | None:
         """Combine every ``<table>`` of a wrap into one DataFrame.
 
         A wrap split across several <table>s (multi-page print) keeps only the
         first grid's rows when read singly; concatenating every row keeps the
         printed tokens. The first table's header stays the header — later
         headers join as data rows so no cell text is lost.
+
+        Rows are padded to the widest within the HTML table limits
+        (:func:`~bibr.structure.html_table.max_table_width`), and the table is
+        charged to *budget* (by default, a budget of its own) at its rendered
+        size. A table past either is not read: ``None``, counted in
+        ``budget.refused``.
         """
+        if budget is None:
+            budget = TableBudget()
         tables = [el for el in table_els if el is not None]
+        # A <table> nested in another is read with it: reading it again
+        # repeated its rows once for each table around it. Only table
+        # ancestors are looked at, so the walk up stays in lxml.
+        listed = set(tables)
+        tables = [el for el in tables if not any(a in listed for a in el.iterancestors("{*}table"))]
         if not tables:
             return None
+
+        def refuse(reason: str) -> None:
+            budget.refused += 1
+            logger.warning("JATS table %s; its contents are not read", reason)
+
         try:
             all_trs: list = []
             for table_el in tables:
@@ -1521,7 +1603,15 @@ class JatsParser:
                 return None
 
             def cells(tr) -> list[str]:
-                return [_text(c) for c in tr if _ln(c) in ("td", "th")]
+                # A nested table's rows, and a <tr> put straight in a cell, are
+                # rows of their own, so their text is left out of the cell
+                # around them: every cell up the nesting repeated it, and
+                # walked it again.
+                return [
+                    collapse_ws(_Walker(None, cut=("table", "tr")).run(c)).strip()
+                    for c in tr
+                    if _ln(c) in ("td", "th")
+                ]
 
             thead = _first_desc(tables[0], "thead")
             header_tr = None
@@ -1536,12 +1626,31 @@ class JatsParser:
             header = cells(header_tr) if header_tr is not None else []
             # Later tables repeat the header print; a repeated header row adds
             # no tokens beyond the header itself, so drop exact repeats while
-            # keeping any differing header as a data row.
-            if header:
-                body_trs = [tr for tr in body_trs if cells(tr) != header]
-            data = [cells(tr) for tr in body_trs]
+            # keeping any differing header as a data row. The table is
+            # measured as to_html renders it, row by row.
+            size = budget.size()
+            if not size.add(header):
+                refuse("text passes the table size limits")
+                return None
+            data: list[list[str]] = []
+            for tr in body_trs:
+                row = cells(tr)
+                if header and row == header:
+                    continue
+                if not size.add(row):
+                    refuse("text passes the table size limits")
+                    return None
+                data.append(row)
             width = max([len(header), *[len(r) for r in data]], default=0)
             if width == 0:
+                return None
+            # One wide row padding many short ones, as HTML tables are bounded.
+            rows = len(data) + 1
+            if width > max_table_width(rows, len(header) + sum(map(len, data)), width):
+                refuse("pads its rows far past its cells")
+                return None
+            if not budget.charge(size, rows * width):
+                refuse("cells pass the document's table cell limit")
                 return None
             header = header + [""] * (width - len(header))
             data = [r + [""] * (width - len(r)) for r in data]

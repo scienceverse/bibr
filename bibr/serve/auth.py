@@ -92,11 +92,26 @@ def check_bearer(authorization: str | None) -> str | None:
         return "Missing bearer token"
 
     # Compare bytes: ``compare_digest`` refuses str operands with non-ASCII
-    # characters (TypeError), and Starlette decodes header bytes as latin-1,
-    # so a stray high byte in the header would otherwise surface as a 500
-    # instead of a 401. ``surrogateescape`` also covers a transport that hands
-    # us undecodable bytes as lone surrogates. Encoding stays constant-time.
-    if not hmac.compare_digest(token.encode("utf-8", "surrogateescape"), expected.encode("utf-8")):
+    # characters (TypeError), so a stray high byte in the header would
+    # otherwise surface as a 500 instead of a 401. Starlette decodes header
+    # bytes as latin-1, so encoding back to latin-1 recovers the bytes the
+    # client sent; a client sends a non-ASCII key either as UTF-8 (curl, Go)
+    # or as latin-1 (browsers, Python's http.client), so both forms of the
+    # key are accepted. Both comparisons always run. ``surrogatepass`` keeps
+    # a lone surrogate from raising on either side.
+    try:
+        presented = token.encode("latin-1")
+    except UnicodeEncodeError:
+        # Not a decoded header (an in-process caller): compare its UTF-8 form.
+        presented = token.encode("utf-8", "surrogatepass")
+    expected_utf8 = expected.encode("utf-8", "surrogatepass")
+    try:
+        expected_latin1 = expected.encode("latin-1")
+    except UnicodeEncodeError:
+        expected_latin1 = expected_utf8
+    matches_utf8 = hmac.compare_digest(presented, expected_utf8)
+    matches_latin1 = hmac.compare_digest(presented, expected_latin1)
+    if not (matches_utf8 or matches_latin1):
         return "Invalid bearer token"
 
     return None

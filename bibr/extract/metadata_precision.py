@@ -71,10 +71,16 @@ def _date_after_label(text: str) -> str | None:
     try:
         if match["iso"]:
             return date.fromisoformat(match["iso"]).isoformat()
-        month = match["month"] or match["month_first"]
+        # The pattern ignores case, so it also takes "APRİL" and "Aprıl", which
+        # casefold() alone keeps apart from "april".
+        month = _MONTHS.get(
+            _fold(match["month"] or match["month_first"]).replace("ı", "i").rstrip(".")
+        )
+        if month is None:
+            return None
         return date(
             int(match["year"] or match["year_last"]),
-            _MONTHS[month.casefold().rstrip(".")],
+            month,
             int(match["day"] or match["day_second"]),
         ).isoformat()
     except ValueError:

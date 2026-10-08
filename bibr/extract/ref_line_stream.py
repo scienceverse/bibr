@@ -91,10 +91,12 @@ _BOTTOM_BAND = 900.0
 _WS = re.compile(r"\s+")
 _DIGITS = re.compile(r"\d+")
 # A lone page number, arabic or roman, optionally as "page 12", "- 12 -" or
-# "12 of 30".
+# "12 of 30". Each whitespace run is taken whole (possessive): adjacent
+# optional runs otherwise split a long one every way (cubic on a text-layer
+# line of spaces).
 _PAGE_NUMBER_LINE = re.compile(
-    r"^\s*(?:(?:page|p\.|pp\.|seite|página|pagina|str\.)\s*)?[-–—]?\s*(\d{1,4}|[ivxlc]{1,7})\s*"
-    r"[-–—]?\s*(?:(?:/|of|von|de)\s*\d{1,4})?\s*$",
+    r"^\s*+(?:(?:page|p\.|pp\.|seite|página|pagina|str\.)\s*+)?[-–—]?\s*+(\d{1,4}|[ivxlc]{1,7})\s*+"
+    r"[-–—]?\s*+(?:(?:/|of|von|de)\s*+\d{1,4})?\s*+$",
     re.IGNORECASE,
 )
 # Running heads are mostly words. A line holding a DOI, URL, arXiv id or ISBN
@@ -651,7 +653,10 @@ def _assign_columns(stream: LineStream, regions: list[_SectionRegion]) -> None:
 
 # The line before an end-of-list heading closes an entry: it ends on a
 # period, a bracket, a digit or a locator, not mid-sentence ("reported in").
-_CLOSES_ENTRY = re.compile(r"(?:[.)\]\d]|https?://\S+|10\.\d{4,9}/\S+)\s*$")
+# A locator is looked for once per word, from its first one: the run after
+# any of them reaches the same word end, and retrying the word from every
+# "https://" in it was quadratic.
+_CLOSES_ENTRY = re.compile(r"(?:[.)\]\d]|(?<!\S)(?>\S*?(?:https?://|10\.\d{4,9}/)(?=\S))\S++)\s*$")
 
 
 def _cut_end_of_list(stream: LineStream) -> None:
@@ -701,6 +706,8 @@ def _attach_link_dois(stream: LineStream, links: Sequence[dict[str, Any]]) -> No
 # ---------------------------------------------------------------------------
 
 _ROMAN_VALUES = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100}
+# A numeral as it is written, 1 to 199: "iix" and "ic" are not numbers.
+_CANONICAL_ROMAN = re.compile(r"c?(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})")
 _MARKER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("bracket", re.compile(r"^\[\s*(\d{1,4})\s*\]")),
     ("paren", re.compile(r"^\(\s*(\d{1,4})\s*\)")),
@@ -717,12 +724,14 @@ def _roman_value(token: str) -> int | None:
     values = [_ROMAN_VALUES.get(ch) for ch in token.lower()]
     if not values or any(v is None for v in values):
         return None
+    if not _CANONICAL_ROMAN.fullmatch(token.lower()):
+        return None
     total = 0
     for i, value in enumerate(values):
         assert value is not None  # noqa: S101 — checked above
         following = values[i + 1] if i + 1 < len(values) else None
         total += -value if following is not None and following > value else value
-    return total if 0 < total < 200 else None
+    return total
 
 
 def _parse_marker(text: str) -> tuple[str, int] | None:
@@ -765,7 +774,7 @@ def _list_mark(text: str) -> str | None:
 # year, a period/comma or a capital (coauthors, the title).
 _DASH_START = re.compile(
     r"^(?:(?:[—―⸺⸻]+|_{2,})\s*[.,:]?\s*|[–-]{1,6}(?:\s*[.,:]\s*|\s+|(?=[(\[]?\d{4})))"
-    r"(?=[(\[]?\d{4}|[A-ZÀ-Þ]|$|and\b|&)"
+    r"(?=[(\[]?\d{4}|[A-ZÀ-ÖØ-Þ]|$|and\b|&)"
 )
 # All-caps family name opening an ABNT/ISO 690 entry, then an initial or a
 # capitalised word: "SILVA, J." "BRASIL. Ministério". An all-caps journal
@@ -773,7 +782,10 @@ _DASH_START = re.compile(
 _CAPS_SURNAME_START = re.compile(
     r"^[A-ZÀ-ÖØ-Þ][A-ZÀ-ÖØ-Þ'’\-]{1,}(?:\s+[A-ZÀ-ÖØ-Þ][A-ZÀ-ÖØ-Þ'’\-]+){0,3}[,.;]\s*[A-ZÀ-ÖØ-Þ]"
 )
-_NAME_WORD = r"[A-ZÀ-ÖØ-ÞĀ-Ž][^\W\d_]*(?:[-'’][^\W\d_]+)*"
+# Possessive: a word takes all its hyphenated parts. Splitting "A-B-C-…"
+# into words every way, to find the comma after them, was cubic; a part
+# read as its own word only adds to the word count.
+_NAME_WORD = r"[A-ZÀ-ÖØ-ÞĀ-Ž][^\W\d_]*+(?:[-'’][^\W\d_]++)*+"
 _PARTICLE = r"(?:van|von|de|der|den|del|della|di|da|do|dos|das|du|la|le|ten|ter|op|zu|af|al|el)"
 # "Family, I." / "Family, IJ," / "Family-Name, J.-L." / "van der Family, I.":
 # a family name of up to three words, a comma, then initials. A continuation
@@ -786,7 +798,7 @@ _AUTHOR_INITIALS_LINE = re.compile(
 # "Family, Given" needs a date on the line or an author list running on
 # ("Smith, John, and"), since "Oxford, England: Blackwell" has the same shape.
 _AUTHOR_GIVEN_LINE = re.compile(
-    rf"^[\"'“(]?(?:{_PARTICLE}\s+){{0,2}}{_NAME_WORD}(?:[\s-]+{_NAME_WORD}){{0,2}},\s*[A-ZÀ-ÖØ-Þ][a-zß-ÿ]+"
+    rf"^[\"'“(]?(?:{_PARTICLE}\s+){{0,2}}{_NAME_WORD}(?:[\s-]+{_NAME_WORD}){{0,2}},\s*[A-ZÀ-ÖØ-Þ][a-zß-öø-ÿ]+"
 )
 # "Eisenberg A and Spinner-Havel J (eds)": family names with initials joined
 # by a conjunction, no comma (OSCOLA, Vancouver variants).
@@ -815,19 +827,28 @@ _OCR_SPECK_AUTHOR = re.compile(r"^[.,](?=[^\W\d_]{2,},\s*[A-ZÀ-ÖØ-Þ]\.)")
 # The previous line runs on: a word broken at a hyphen, an author list (also
 # one closed by "et al.", whose title follows) or a locator cut mid-way.
 _CONTINUES_NEXT = re.compile(
-    r"(?:[A-Za-zß-ÿ]-|[,&]|\band|\bin|\bIn:?|\bet|\bet\s+al\.?|\bpp\.?|\bvol\.?)\s*$"
+    r"(?:[A-Za-zß-öø-ÿ]-|[,&]|\band|\bin|\bIn:?|\bet|\bet\s+al\.?|\bpp\.?|\bvol\.?)\s*$"
 )
 # The previous line closes a Vancouver author list ("Hoffman BJ, Lance CE." or a
 # lone "12. Twenge JM."), so the title follows, however its opening looks
 # ("Generation Z: …", "Complex I: …"). Two "Surname AB" groups, or one filling
 # the line, so a place before a publisher ("New York NY.") does not count.
-_VANCOUVER_NAME = r"[A-ZÀ-ÖØ-Þ][^\W\d_]*[a-zß-öø-ÿ][^\W\d_]*"
+# A surname is a capital and the rest of its word, holding a lower-case
+# letter: a lookahead checks for one, where trying each lower-case letter in
+# turn as the split was cubic ("AaAa…"). The search starts the first surname
+# at a word's first capital only: from any later capital it ends at the same
+# word end ("Donald" of "McDonald").
+_CAPITAL = r"[A-ZÀ-ÖØ-Þ]"
+_VANCOUVER_NAME = rf"{_CAPITAL}(?=[^\W\d_]*[a-zß-öø-ÿ])[^\W\d_]*+"
+_FIRST_VANCOUVER_NAME = rf"(?<![^\W\d_])(?>[^\W\d_]*?(?={_CAPITAL})){_VANCOUVER_NAME}"
 _ENDS_WITH_BYLINE = re.compile(
-    rf"(?:{_VANCOUVER_NAME}\s+[A-Z]{{1,3}},\s*|^(?:\[?\d{{1,3}}[.\]]?\s+)?)"
+    rf"(?:{_FIRST_VANCOUVER_NAME}\s+[A-Z]{{1,3}},\s*|^(?:\[?\d{{1,3}}[.\]]?\s+)?)"
     rf"{_VANCOUVER_NAME}\s+[A-Z]{{1,3}}\.\s*$"
 )
+# The same once-per-word search for a locator, and "doi: 10.…" across a space.
 _ENDS_WITH_LOCATOR = re.compile(
-    r"(?:https?://\S+|\b" + DOI_BODY + r"\S+|doi:\s*\S+)\s*[.,;]?\s*$", re.I
+    r"(?:(?<!\S)(?>\S*?(?:https?://|\b" + DOI_BODY + r"|doi:)(?=\S))|doi:\s+)\S++\s*[.,;]?\s*$",
+    re.I,
 )
 
 

@@ -209,7 +209,8 @@ def test_cli_preset_save_and_list(tmp_path, monkeypatch):
         capture_output=True,
         text=True,
         cwd=str(tmp_path),
-        env={**os.environ, "BIBR_PRESETS_DIR": str(presets_dir)},
+        # The suite's empty BIBR_ENV_FILE turns .env loading off; name the file.
+        env={**os.environ, "BIBR_PRESETS_DIR": str(presets_dir), "BIBR_ENV_FILE": str(env_path)},
     )
     assert result.returncode == 0
 
@@ -528,9 +529,10 @@ def test_effective_env_file_follows_the_dotenv_chain(tmp_path, monkeypatch):
     (project / ".env").write_text("LLM_PROVIDER=openai\n", encoding="utf-8")
     assert effective_env_file() == project / ".env"
 
-    # BIBR_ENV_FILE replaces the chain; an empty value loads no file at all.
+    # BIBR_ENV_FILE replaces the chain; an empty value loads no file at all,
+    # so there is no file in effect for presets to write.
     listed = tmp_path / "ci.env"
     monkeypatch.setenv("BIBR_ENV_FILE", str(listed))
     assert effective_env_file() == listed
     monkeypatch.setenv("BIBR_ENV_FILE", "")
-    assert effective_env_file() == project / ".env"
+    assert effective_env_file() is None

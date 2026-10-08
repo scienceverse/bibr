@@ -42,7 +42,7 @@ async def test_chew_paper_reports_non_bibr_failure_detail(monkeypatch, tmp_path)
     paper = tmp_path / "paper.pdf"
     paper.write_bytes(b"%PDF-1.4 stub")
 
-    server = build_server()
+    server = build_server(allowed_dirs=[tmp_path])
     async with client_session(server) as client:
         text = _error_text(await client.call_tool("chew_paper", {"path": str(paper)}))
         assert "extraction failed for paper.pdf" in text
@@ -61,7 +61,7 @@ async def test_chew_paper_error_scrubs_secrets(monkeypatch, tmp_path):
     paper = tmp_path / "paper.pdf"
     paper.write_bytes(b"%PDF-1.4 stub")
 
-    server = build_server()
+    server = build_server(allowed_dirs=[tmp_path])
     async with client_session(server) as client:
         text = _error_text(await client.call_tool("chew_paper", {"path": str(paper)}))
         assert "RuntimeError" in text
@@ -130,7 +130,7 @@ async def test_chew_url_bibr_error_reports_filename_without_url(monkeypatch):
 
 
 async def test_save_paper_requires_json_and_refuses_overwrite(tmp_path):
-    server = build_server()
+    server = build_server(allowed_dirs=[tmp_path, FIXTURE.parent])
     async with client_session(server) as client:
         summary = _payload(await client.call_tool("load_paper", {"path": str(FIXTURE)}))
         pid = summary["paper_id"]

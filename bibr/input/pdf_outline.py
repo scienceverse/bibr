@@ -23,6 +23,7 @@ to bibr's normalized 0–1000 layout bboxes (``bbox_y1 / 1000``) at match time.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import re
 from dataclasses import dataclass
@@ -50,7 +51,14 @@ _LEADING_MARKER_RE = re.compile(
     re.IGNORECASE,
 )
 _WHITESPACE_RE = re.compile(r"\s+")
-_OUTER_PUNCT_RE = re.compile(r"^[\W_]+|[\W_]+$")
+# The lookbehind tries the trailing alternative only where a run starts: tried
+# from inside a long run that does not end the title, ``[\W_]+$`` backtracks
+# quadratically.
+_OUTER_PUNCT_RE = re.compile(r"^[\W_]+|(?<![\W_])[\W_]+$")
+# Bookmarks read from one outline, so a hostile one cannot hold the pdfium lock
+# or the matcher for long; the document layer caps its own walk alike
+# (``bibr.document.outline.MAX_ENTRIES``).
+_MAX_ENTRIES = 5_000
 
 
 def _normalize_title(text: str) -> str:
@@ -142,10 +150,14 @@ def _walk_pdfium_outline(pdoc, page_heights: dict[int, float] | None = None) -> 
     page_heights = {} if page_heights is None else dict(page_heights)
 
     try:
-        toc = list(pdoc.get_toc())
+        # One past the cap tells a longer outline apart.
+        toc = list(itertools.islice(pdoc.get_toc(), _MAX_ENTRIES + 1))
     except PdfiumError as exc:
         logger.debug("Could not read PDF outline: %s", exc)
         return []
+    if len(toc) > _MAX_ENTRIES:
+        logger.debug("PDF outline has more than %d bookmarks; the rest unread", _MAX_ENTRIES)
+        del toc[_MAX_ENTRIES:]
     try:
         page_count = len(pdoc)
     except Exception:  # noqa: BLE001 — duck-typed documents (tests); bound checks apply when known
@@ -220,16 +232,20 @@ def extract_pdf_outline(pdf_bytes: bytes) -> list[OutlineItem]:
 # --------------------------------------------------------------------------- matcher
 
 
-def _title_similarity(cand_text: str, bm_title: str) -> float:
-    """Fuzzy similarity in 0..1 between a detected heading and a bookmark title.
+def _title_variants(text: str) -> set[str]:
+    """*text* normalized for matching, with and without its leading numbering marker."""
+    return {_normalize_title(text), _normalize_title(_strip_marker(text))} - {""}
 
-    Both strings are compared with and without their leading numbering marker
+
+def _title_similarity(variants_a: set[str], variants_b: set[str]) -> float:
+    """Fuzzy similarity in 0..1 between a detected heading and a bookmark title,
+    each given as its :func:`_title_variants`.
+
+    Both are compared with and without their leading numbering marker
     (bookmarks often omit or carry a different marker), and containment of one
     normalized title in the other boosts the score (bookmarks are frequently
     truncated).
     """
-    variants_a = {_normalize_title(cand_text), _normalize_title(_strip_marker(cand_text))} - {""}
-    variants_b = {_normalize_title(bm_title), _normalize_title(_strip_marker(bm_title))} - {""}
     best = 0.0
     for a in variants_a:
         for b in variants_b:
@@ -269,12 +285,15 @@ def match_outline_to_headings(
     inf = float("inf")
     claimed: set[int] = set()
     matches: list[tuple[int, int]] = []
+    # Normalized once, not once per bookmark-heading pair.
+    head_variants = [_title_variants(head.text) for head in headings]
 
     for item in outline:
         title = (item.title or "").strip()
         if not title:
             continue
         thr = threshold if item.page_no is not None else min(1.0, threshold + 0.1)
+        title_variants = _title_variants(title)
 
         best_idx: int | None = None
         best_score = 0.0
@@ -288,7 +307,7 @@ def match_outline_to_headings(
                 and abs(head.page_no - item.page_no) > page_tolerance
             ):
                 continue
-            score = _title_similarity(head.text, title)
+            score = _title_similarity(head_variants[idx], title_variants)
             if score < thr:
                 continue
             # Tie-break distance is a lexicographic (page, y) tuple: page wins,

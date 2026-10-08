@@ -40,11 +40,9 @@ def atomic_write_json(path: Path, payload: object, **json_kwargs) -> None:
 
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    fd, raw_temp = tempfile.mkstemp(
-        dir=destination.parent,
-        prefix=f".{destination.name}.",
-        suffix=".tmp",
-    )
+    # A fixed short name: one derived from the destination's would exceed
+    # NAME_MAX (255 bytes) for long, legal destination names.
+    fd, raw_temp = tempfile.mkstemp(dir=destination.parent, prefix=".bibr-", suffix=".tmp")
     temp_path = Path(raw_temp)
     options = {"ensure_ascii": False, "allow_nan": False, **json_kwargs}
     try:

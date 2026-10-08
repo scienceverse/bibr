@@ -135,6 +135,11 @@ class Pipeline:
                 ProcessingError,
                 UpstreamServiceError,
             )
+            from bibr.utils.transient import is_service_outage
+
+            # What ``ChewFailure.outage`` says for the same failure, so serve
+            # can tell a remote ``bibr batch`` the paper was not at fault.
+            outage = fs.error_outage or is_service_outage(fs.original_error)
 
             # Preserve upstream-service semantics (→ HTTP 502) instead of masking
             # an OCR/LLM/Crossref outage as a client-side ProcessingError (422).
@@ -148,12 +153,18 @@ class Pipeline:
             if isinstance(fs.original_error, ProcessingError):
                 # PostParseStage clears retained tracebacks for the safe
                 # invalid-output failure. Re-raise every typed processing
-                # error unchanged so its code and diagnostics survive.
-                raise fs.original_error from fs.original_error.__cause__
+                # error itself so its code and diagnostics survive, adding
+                # only the stage that recorded it (serve's client-safe
+                # message names the stage).
+                error = fs.original_error
+                error.failed_stage = error.failed_stage or fs.failed_stage
+                error.outage = error.outage or outage
+                raise error from error.__cause__
             raise ProcessingError(
                 fs.error,
                 error_code=fs.error_code,
                 failed_stage=fs.failed_stage,
+                outage=outage,
             ) from fs.original_error
         assert fs.result_json is not None  # noqa: S101 — set by export stage on the success path
         return cast(dict[str, Any], fs.result_json)

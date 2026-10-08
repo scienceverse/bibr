@@ -70,7 +70,9 @@ def ollama_like_server():
             pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    )
     thread.start()
     try:
         yield f"http://127.0.0.1:{server.server_port}", paths
@@ -156,7 +158,9 @@ def silent_server():
             pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    )
     thread.start()
     try:
         yield f"http://127.0.0.1:{server.server_port}"
@@ -184,3 +188,24 @@ def test_ping_llm_gives_up_where_chew_would(silent_server):
         "(twice LLM_TIMEOUT_SECONDS=1). Ollama loads the model on its first request, "
         "which can take longer; try again once it has loaded."
     )
+
+
+def test_ping_llm_reports_the_sdk_timeout_the_same_way(silent_server, monkeypatch):
+    """The SDK's own read timeout is the ping's limit too, so it may fire first."""
+    from types import SimpleNamespace
+
+    from bibr.clients import llm
+
+    real_wait_for = asyncio.wait_for
+
+    async def later_wait_for(awaitable, timeout):
+        return await real_wait_for(awaitable, timeout + 5)
+
+    monkeypatch.setattr(
+        llm, "asyncio", SimpleNamespace(**{**vars(asyncio), "wait_for": later_wait_for})
+    )
+    settings = _ollama_settings(silent_server)
+    settings.llm.timeout_seconds = 1
+
+    with pytest.raises(TimeoutError, match=r"^No reply within 2 s, .* once it has loaded\.$"):
+        llm.ping_llm(settings)

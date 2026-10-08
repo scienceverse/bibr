@@ -41,7 +41,8 @@ def test_generated_reference_source_selects_python_package_and_docs() -> None:
     assert surfaces["python"] is True
     assert surfaces["package"] is True
     assert surfaces["docs"] is True
-    assert surfaces["container"] is False
+    # The serve image copies bibr/, so package code is a container input too.
+    assert surfaces["container"] is True
 
 
 def test_cli_package_source_selects_generated_docs() -> None:
@@ -64,10 +65,10 @@ def test_lockfile_selects_all_surfaces() -> None:
     assert all(changed_surfaces.classify_paths(["uv.lock"]).values())
 
 
-def test_dockerfile_selects_only_container() -> None:
+def test_dockerfile_selects_container_and_the_suite_that_tests_it() -> None:
     changed_surfaces = load_changed_surfaces()
     assert changed_surfaces.classify_paths(["Dockerfile.serve"]) == {
-        "python": False,
+        "python": True,
         "package": False,
         "docs": False,
         "container": True,
@@ -128,10 +129,12 @@ def test_changed_paths_uses_merge_base_diff(monkeypatch) -> None:
     changed_surfaces = load_changed_surfaces()
     recorded: dict[str, object] = {}
 
-    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         recorded["command"] = command
         recorded["kwargs"] = kwargs
-        return subprocess.CompletedProcess(command, 0, "docs/index.md\nbibr/config.py\n", "")
+        return subprocess.CompletedProcess(
+            command, 0, b"M\0docs/index.md\0A\0bibr/config.py\0", b""
+        )
 
     monkeypatch.setattr(changed_surfaces.subprocess, "run", fake_run)
 
@@ -141,8 +144,12 @@ def test_changed_paths_uses_merge_base_diff(monkeypatch) -> None:
     ]
     assert recorded["command"] == [
         "git",
+        "-c",
+        "core.quotePath=false",
         "diff",
-        "--name-only",
+        "--name-status",
+        "-z",
+        "--no-renames",
         "--diff-filter=ACDMRT",
         "base...head",
     ]

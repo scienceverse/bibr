@@ -25,6 +25,7 @@ from bibr.enrich.schemas import CrossrefAuthor, CrossrefWorkItem, plain_text
 from bibr.models import BibAuthor, MatchFunder, MatchOrganization, canonicalize_orcid
 from bibr.paper import ExternalMatch, MatchSource, PaperReference, migrate_bib_type
 from bibr.processing_warnings import ProcessingWarning, WarningCode
+from bibr.utils.redact import describe_error
 from bibr.utils.text import normalize_doi
 
 logger = logging.getLogger(__name__)
@@ -109,13 +110,18 @@ def _record_terminal_failure(
     if stats is None:
         return
     stats.failed_bib_ids.add(ref.bib_id)
-    diagnostic = " ".join(str(exc).split())
     stats.failure_details.append(
         ProcessingWarning(
             WarningCode.ENRICHMENT_LOOKUP_FAILED,
-            f"bib_id={ref.bib_id} {operation} failed" + (f": {diagnostic}" if diagnostic else ""),
+            f"bib_id={ref.bib_id} {operation} failed: {_export_diagnostic(exc)}",
         )
     )
+
+
+def _export_diagnostic(exc: BaseException) -> str:
+    # Warnings are exported and returned by serve, and an HTTP error's text
+    # quotes the request URL, credentials included. Callers log the raw error.
+    return " ".join(describe_error(exc).split())
 
 
 def _record_fallback_warning(
@@ -386,7 +392,7 @@ async def enrich_references(
                 _record_fallback_warning(
                     stats,
                     WarningCode.RESOLVER_FALLBACK_FAILED,
-                    f"resolver fallback failed for {len(eligible)} refs: {' '.join(str(e).split())}",
+                    f"resolver fallback failed for {len(eligible)} refs: {_export_diagnostic(e)}",
                 )
     finally:
         await prefetch.aclose()
@@ -1487,12 +1493,11 @@ async def _enrich_resolver_fallback(
         except Exception as e:  # noqa: BLE001 — one bad answer costs only its own reference
             answered += 1
             stats.fallback_errors += 1
-            diagnostic = " ".join(str(e).split())
+            logger.debug("Resolver fallback failed for bib_id=%s: %s", ref.bib_id, e)
             _record_fallback_warning(
                 stats,
                 WarningCode.RESOLVER_FALLBACK_FAILED,
-                f"bib_id={ref.bib_id} resolver fallback failed"
-                + (f": {diagnostic}" if diagnostic else ""),
+                f"bib_id={ref.bib_id} resolver fallback failed: {_export_diagnostic(e)}",
             )
             return
         answered += 1

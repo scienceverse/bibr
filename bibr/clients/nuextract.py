@@ -585,6 +585,9 @@ class NuExtractNativeBackend:
             kwargs: dict[str, Any] = {
                 "api_key": self._settings.llm.api_key or "not-needed",
                 "timeout": self._settings.llm.timeout_seconds * 2,
+                # LLMClient retries transient failures itself, through the
+                # rate limiter and breaker; SDK retries would bypass both.
+                "max_retries": 0,
             }
             if self._settings.llm.base_url:
                 from bibr.utils.hosts import refuse_plaintext_llm_key

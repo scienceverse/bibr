@@ -95,7 +95,9 @@ class _RespondingHandler(BaseHTTPRequestHandler):
 def responding_loopback_server():
     """A real HTTP server answering 200 on loopback (kept quiet on teardown)."""
     server = HTTPServer(("127.0.0.1", 0), _RespondingHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    )
     thread.start()
     yield server.server_address[1]
     server.shutdown()
