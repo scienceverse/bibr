@@ -71,6 +71,8 @@ def evaluate(expression: str, **contexts: object) -> object:
         "format": lambda template, *args: template.format(*args),
         "startsWith": lambda value, prefix: str(value).lower().startswith(prefix.lower()),
     }
+    # Only this repository's committed workflow files reach here, without builtins.
+    # nosemgrep: python.lang.security.audit.eval-detected.eval-detected
     return eval(body, {"__builtins__": {}, **names}, contexts)  # noqa: S307 - own workflow file
 
 
