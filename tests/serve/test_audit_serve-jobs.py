@@ -250,10 +250,14 @@ async def test_the_heartbeat_retries_a_failed_renew_soon_and_warns_once(
 
     real_sleep = asyncio.sleep
     delays = []
+    # The heartbeat starts inside create(), and on Python 3.11 redis-py's
+    # wait_for lets it run before the test's next command is sent.
+    lapsed = asyncio.Event()
 
     async def fake_sleep(delay):
         delays.append(delay)
         if len(delays) == 1:
+            await lapsed.wait()
             redis_harness.server.connected = False  # two renews fail
         elif len(delays) == 3:
             redis_harness.server.connected = True
@@ -268,6 +272,7 @@ async def test_the_heartbeat_retries_a_failed_renew_soon_and_warns_once(
     store = redis_harness.make(lease_ttl_seconds=60)
     job = await store.create(filename="a.pdf")
     await store._redis.delete(store.lease_key(job.job_id))  # lapsed during the outage
+    lapsed.set()
     with caplog.at_level(logging.DEBUG, logger="bibr.serve.jobs.redis"):
         await asyncio.gather(store._heartbeat, return_exceptions=True)
 

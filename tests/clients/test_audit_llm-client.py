@@ -6,6 +6,7 @@ hidden SDK retry shows up as an extra request instead of a slow test.
 """
 
 import asyncio
+import importlib.util
 import json
 import logging
 import os
@@ -25,6 +26,11 @@ from bibr.clients.prompts import PROMPTS
 from bibr.clients.structured_json import recover_structured_object
 from bibr.config import GlobalSettings
 from bibr.schemas import TitleKeywordsLLM
+
+# The Anthropic SDK ships in the batch extra, not in a core install.
+needs_anthropic = pytest.mark.skipif(
+    importlib.util.find_spec("anthropic") is None, reason="needs the anthropic SDK"
+)
 
 
 class _Reply(BaseModel):
@@ -221,7 +227,9 @@ def test_provider_clients_disable_sdk_retries(monkeypatch, provider):
     assert raw.timeout.connect == 5.0  # the SDKs' own: a host that is down fails fast
 
 
-@pytest.mark.parametrize("provider", ["openai", "anthropic", "ollama"])
+@pytest.mark.parametrize(
+    "provider", ["openai", pytest.param("anthropic", marks=needs_anthropic), "ollama"]
+)
 def test_real_sdk_clients_are_bounded(provider):
     from bibr.clients import providers
 
@@ -272,6 +280,7 @@ def test_openai_server_error_is_one_request(fake_api):
     assert len(fake_api.requests) == 1
 
 
+@needs_anthropic
 def test_anthropic_overload_is_one_request(fake_api, monkeypatch):
     from bibr.clients.providers.anthropic import AnthropicProvider
 
@@ -347,6 +356,7 @@ async def test_openai_server_error_is_retried_by_bibr(fake_api, backoffs, code):
     assert len(backoffs) == 1
 
 
+@needs_anthropic
 @pytest.mark.parametrize("code", [500, 529])
 async def test_anthropic_overload_is_retried_by_bibr(fake_api, backoffs, monkeypatch, code):
     monkeypatch.setenv("ANTHROPIC_BASE_URL", fake_api.url)
@@ -406,6 +416,7 @@ async def test_retry_after_wait_is_capped(monkeypatch, value):
 # --- 4 and 5. Anthropic: usage includes cached input; uncapped calls fit ----
 
 
+@needs_anthropic
 def test_anthropic_usage_counts_cache_reads_and_writes_as_input():
     from anthropic.types import Usage
 
@@ -449,7 +460,7 @@ def test_openai_shaped_usage_with_cache_fields_is_not_counted_twice():
         ("claude-haiku-4-5", 65536, 16384),
         ("claude-haiku-4-5", 4096, 4096),
         # The SDK's own non-streaming limit for this model is lower.
-        ("claude-opus-4-1-20250805", None, 8192),
+        pytest.param("claude-opus-4-1-20250805", None, 8192, marks=needs_anthropic),
     ],
 )
 def test_anthropic_caps_non_streaming_output(model, requested, sent):
@@ -472,6 +483,7 @@ def test_a_thinking_budget_that_never_fits_warns_once(caplog):
     assert "LLM_THINKING_BUDGET 16000" in record.getMessage()
 
 
+@needs_anthropic
 async def test_uncapped_anthropic_call_goes_through_and_records_cached_input(fake_api, monkeypatch):
     """Reference segmentation and merged core metadata pass no task cap; the
     Anthropic SDK refused their 65536-token non-streaming request."""
