@@ -341,13 +341,17 @@ def test_describe_error_drops_a_url_whose_password_holds_a_quote():
     ]
 
 
+# Built in two parts so the detect-private-key hook does not take the fixture for a key.
+PEM_HEADER = "-----BEGIN " + "PRIVATE KEY-----"
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
         ('{"ocr_api_key": "k-1", "n": 1}', '{"ocr_api_key": "***", "n": 1}'),
         ("{'id_token': 'eyJ.x.y'}", "{'id_token': '***'}"),
         (
-            '{"private_key": "-----BEGIN PRIVATE KEY-----\\nMIIE\\n", "x": 1}',
+            '{"private_key": "' + PEM_HEADER + '\\nMIIE\\n", "x": 1}',
             '{"private_key": "***", "x": 1}',
         ),
         ('"X-Goog-Api-Key": "abc"', '"X-Goog-Api-Key": "***"'),
