@@ -27,7 +27,10 @@ agents get the same chew-then-query tool surface as ``bibr mcp`` (see
   at ``MCP_MAX_PAPERS_PER_SESSION`` and dropped with the session via weak
   references. Sessions idle for ``MCP_SESSION_IDLE_TIMEOUT_SECONDS`` are
   closed server-side, so a client that vanishes without ``DELETE`` cannot
-  pin its papers for the process lifetime.
+  pin its papers for the process lifetime. Server-wide, the least recently
+  used papers go beyond ``MAX_SESSION_STORES`` stores or
+  ``MAX_STORED_EXPORT_BYTES`` of export JSON, so opening more sessions cannot
+  grow memory.
 
 Auth needs nothing new: the serve app's bearer middleware gates every path
 outside ``PUBLIC_PATHS``, ``/mcp`` included — clients send the same
@@ -45,18 +48,21 @@ pattern as ``app._compose_lifespan_cleanup``.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import io
+import json
 import time
 import weakref
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from bibr.mcp_server import _PaperStore, _register_query_tools, _summarize
+from bibr.mcp_server import _Entry, _PaperStore, _register_query_tools, _summarize
 from bibr.serve.admission import UploadAdmission, UploadAdmissionError, base64_envelope
 from bibr.serve.auth import KEYLESS_HOSTS
 from bibr.serve.ingress import (
@@ -91,10 +97,53 @@ Start with chew_paper: upload one file as base64 and get back a compact summary 
 paper_id for the query tools — get_metadata, get_sections, get_text, search_text,
 get_references, get_reference_citations, get_tables, get_figures. Full exports are large,
 so query the slices you need instead of asking for everything. Papers live in server
-memory for your MCP session only (oldest evicted beyond a cap); re-chew after a
-disconnect, or use the REST API (POST /papers/extract) when you want the full export
-JSON as a file.
+memory for your MCP session only (least recently used evicted beyond the server's
+caps); re-chew after a disconnect or an unknown paper_id, or use the REST API
+(POST /papers/extract) when you want the full export JSON as a file.
 """
+
+
+# Server-wide bounds on the papers sessions retain. The per-session cap alone
+# let one client open session after session, each pinning that many full
+# exports until its idle timeout, and a chew answered from the response cache
+# costs the client nothing. Least recently used sessions and papers go first.
+MAX_SESSION_STORES = 64
+MAX_STORED_EXPORT_BYTES = 256 * 1024 * 1024
+
+
+def _export_size(data: dict[str, Any]) -> int:
+    """A paper's charge against the byte budget: its export's JSON length."""
+    return len(json.dumps(data, ensure_ascii=False, default=str))
+
+
+class _SessionPaperStore(_PaperStore):
+    """One session's papers, each charged to its :class:`_SessionStores` budget."""
+
+    def __init__(self, stores: _SessionStores, key: int) -> None:
+        super().__init__(max_papers=stores.max_papers)
+        self._owner = stores
+        self._key = key
+        self.sizes: dict[str, int] = {}
+
+    def add(
+        self,
+        data: dict[str, Any],
+        *,
+        source: str,
+        requested_id: str | None = None,
+        size: int | None = None,
+    ) -> str:
+        paper_id = super().add(data, source=source, requested_id=requested_id)
+        self._owner.charge(self, paper_id, _export_size(data) if size is None else size)
+        return paper_id
+
+    def get(self, paper_id: str) -> _Entry:
+        entry = super().get(paper_id)
+        self._owner.touch(self._key, paper_id)
+        return entry
+
+    def discard(self, paper_id: str) -> None:
+        self._papers.pop(paper_id, None)
 
 
 class _SessionStores:
@@ -105,23 +154,81 @@ class _SessionStores:
     session. Those Pydantic objects are unhashable, so use identity keys with
     weak references and release the store when the connection is collected.
     All callers run on the server event loop.
+
+    Beyond ``max_sessions`` stores the least recently used session's papers are
+    dropped, and beyond ``max_bytes`` the least recently used papers of any
+    session, so memory stays bounded however many sessions a client opens.
     """
 
-    def __init__(self, max_papers: int) -> None:
-        self._stores: dict[int, tuple[weakref.ReferenceType, _PaperStore]] = {}
-        self._max_papers = max_papers
+    def __init__(
+        self,
+        max_papers: int,
+        *,
+        max_sessions: int = MAX_SESSION_STORES,
+        max_bytes: int = MAX_STORED_EXPORT_BYTES,
+    ) -> None:
+        self.max_papers = max_papers
+        self._max_sessions = max_sessions
+        self._max_bytes = max_bytes
+        # Both least recently used first.
+        self._stores: OrderedDict[int, tuple[weakref.ReferenceType, _SessionPaperStore]] = (
+            OrderedDict()
+        )
+        self._papers: OrderedDict[tuple[int, str], int] = OrderedDict()
+        self.stored_bytes = 0
 
-    def resolve(self, ctx: Context) -> _PaperStore:
+    def resolve(self, ctx: Context) -> _SessionPaperStore:
         client = ctx.session.client_params
         if client is None:
             raise ToolError("initialize a stateful MCP session before using paper tools")
         key = id(client)
         existing = self._stores.get(key)
         if existing is not None and existing[0]() is client:
+            self._stores.move_to_end(key)
             return existing[1]
-        store = _PaperStore(max_papers=self._max_papers)
-        self._stores[key] = (weakref.ref(client, lambda _ref: self._stores.pop(key, None)), store)
+        self._drop(key)
+        store = _SessionPaperStore(self, key)
+        self._stores[key] = (weakref.ref(client, lambda ref: self._drop(key, ref)), store)
+        while len(self._stores) > self._max_sessions:
+            self._drop(next(iter(self._stores)))
         return store
+
+    def charge(self, store: _SessionPaperStore, paper_id: str, size: int) -> None:
+        """Account a paper just added to *store*, then evict down to the budget."""
+        key = store._key
+        if self._stores.get(key, (None, None))[1] is not store:
+            return  # a store already dropped holds nothing the server keeps
+        # add() replaced a re-chewed paper or evicted the session's oldest.
+        kept = {paper for paper, _entry in store.items()}
+        for paper in [p for p in store.sizes if p == paper_id or p not in kept]:
+            self._release(store, paper)
+        store.sizes[paper_id] = size
+        self._papers[(key, paper_id)] = size
+        self.stored_bytes += size
+        # The paper just added stays even when it alone exceeds the budget.
+        while self.stored_bytes > self._max_bytes and len(self._papers) > 1:
+            old_key, old_paper = next(iter(self._papers))
+            old_store = self._stores[old_key][1]
+            old_store.discard(old_paper)
+            self._release(old_store, old_paper)
+
+    def touch(self, key: int, paper_id: str) -> None:
+        if (key, paper_id) in self._papers:
+            self._papers.move_to_end((key, paper_id))
+
+    def _release(self, store: _SessionPaperStore, paper_id: str) -> None:
+        store.sizes.pop(paper_id, None)
+        self.stored_bytes -= self._papers.pop((store._key, paper_id), 0)
+
+    def _drop(self, key: int, ref: weakref.ReferenceType | None = None) -> None:
+        """Forget session *key*'s store; a stale weakref callback is a no-op."""
+        existing = self._stores.get(key)
+        if existing is None or (ref is not None and existing[0] is not ref):
+            return
+        del self._stores[key]
+        store = existing[1]
+        for paper in list(store.sizes):
+            self._release(store, paper)
 
 
 async def _require_session_protocol(ctx, call_next):
@@ -149,13 +256,16 @@ def build_serve_mcp(
     chew_url_enabled: bool = True,
     url_allowed_hosts: list[str] | None = None,
     admission_gate: UploadAdmissionGate | None = None,
+    max_sessions: int = MAX_SESSION_STORES,
+    max_stored_bytes: int = MAX_STORED_EXPORT_BYTES,
 ) -> MCPServer:
     """Build the serve-mounted MCP server around the shared dispatch machinery.
 
     ``admission_gate`` is the serve app's upload gate; each chew tool takes the
     same pair of slots ``POST /papers/extract`` does — a spool slot while the
     bytes are materialised and persisted, and an inflight slot for the whole
-    run. ``None`` (stdio-style tests) skips the gate.
+    run. ``None`` (stdio-style tests) skips the gate. ``max_sessions`` and
+    ``max_stored_bytes`` bound the papers held across all sessions.
     """
     from starlette.datastructures import UploadFile
 
@@ -166,7 +276,9 @@ def build_serve_mcp(
             "Start with chew_paper (upload) or chew_url (public https:// URL):",
         )
 
-    stores = _SessionStores(max_papers_per_session)
+    stores = _SessionStores(
+        max_papers_per_session, max_sessions=max_sessions, max_bytes=max_stored_bytes
+    )
     server = MCPServer(
         "bibr",
         instructions=instructions,
@@ -247,8 +359,10 @@ def build_serve_mcp(
         if not isinstance(result, dict):
             raise ToolError("extraction returned an unexpected response shape")
 
+        # Sized off the loop: serializing a multi-MB export takes a while.
+        size = await asyncio.to_thread(_export_size, result)
         store = stores.resolve(ctx)
-        pid = store.add(result, source=source)
+        pid = store.add(result, source=source, size=size)
         summary = _summarize(pid, result, source)
         summary["seconds"] = round(time.monotonic() - started, 1)
         return summary

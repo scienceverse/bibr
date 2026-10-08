@@ -26,8 +26,30 @@ from .tags import BIO_TAGS
 logger = logging.getLogger(__name__)
 
 
+def count_truncated(texts: list[str], offsets: list, max_seq_len: int) -> int:
+    """How many of ``texts`` the tokenizer cut off at ``max_seq_len`` tokens.
+
+    ``offsets`` holds each text's unpadded token offsets. The parser tags only
+    the first ``max_seq_len`` tokens, so a reference with a long author list
+    loses its trailing fields (pages, DOI, URL); callers report the count.
+    """
+    truncated = 0
+    for text, row in zip(texts, offsets, strict=True):
+        if len(row) >= max_seq_len and text[row[-1][1] :].strip():
+            truncated += 1
+            logger.debug(
+                "NER parser input cut at %d tokens; %d of %d characters not parsed",
+                max_seq_len,
+                len(text) - row[-1][1],
+                len(text),
+            )
+    return truncated
+
+
 class OnnxRefParser:
     runtime = "onnx"
+    #: References the last ``parse_batch`` cut off at ``max_seq_len`` tokens.
+    last_truncated_count = 0
 
     def __init__(
         self,
@@ -75,6 +97,7 @@ class OnnxRefParser:
         slots = [i for i, t in enumerate(ref_texts) if t and t.strip()]
         slots.sort(key=lambda i: len(ref_texts[i]))
         step = max(1, batch_size)
+        truncated = 0
         for start in range(0, len(slots), step):
             chunk_slots = slots[start : start + step]
             texts = [strip_lone_surrogates(ref_texts[i]) for i in chunk_slots]
@@ -83,6 +106,7 @@ class OnnxRefParser:
             )
             if batch.input_ids.shape[1] == 0:
                 continue
+            truncated += count_truncated(texts, batch.offsets, self.max_seq_len)
             emissions = self._emissions(batch.input_ids, batch.attention_mask)
             paths = viterbi_decode(
                 emissions,
@@ -95,6 +119,9 @@ class OnnxRefParser:
                 chunk_slots, paths, batch.offsets, texts, strict=True
             ):
                 results[slot] = self._decode(path, offsets[: len(path)], text)
+        self.last_truncated_count = truncated
+        if truncated:
+            logger.debug("NER parser truncated %d of %d references", truncated, len(slots))
         return results
 
     def _emissions(self, input_ids: np.ndarray, attention_mask: np.ndarray) -> np.ndarray:

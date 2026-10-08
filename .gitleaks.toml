@@ -31,6 +31,8 @@ regexes = [
   '''sk-1234567890abcdef''',
   # tests/serve/test_mcp_endpoint.py
   '''sk_test_0123456789abcdef0123456789abcdef''',
+  # tests/test_audit_config-ux.py
+  '''ocr-secret-0123456789abcdef''',
   # tests/clients/test_nuextract_wire.py
   '''UNIQUE-PYDANTIC-RAW-SECRET-[0-9]+''',
   # tests/test_segmenter_base.py — fake Hub revisions

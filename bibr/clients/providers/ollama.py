@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, ClassVar
 import instructor
 
 from bibr.clients.providers import register
+from bibr.clients.providers.base import bound_sdk_client
 from bibr.config import snapshot_settings
 
 if TYPE_CHECKING:
@@ -35,11 +36,12 @@ class OllamaProvider:
         self._settings = settings if settings is not None else snapshot_settings()
 
     def build_client(self) -> instructor.AsyncInstructor:
-        return instructor.from_provider(
+        client = instructor.from_provider(
             f"ollama/{self._settings.llm.model}",
             async_client=True,
             base_url=ollama_openai_base_url(self._settings.llm.ollama_base_url),
         )
+        return bound_sdk_client(client, self._settings)
 
     def call_kwargs(self, reasoning_effort: str | None, max_tokens: int | None = None) -> dict:
         del reasoning_effort  # Ollama's OpenAI-compatible path has no equivalent setting.

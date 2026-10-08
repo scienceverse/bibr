@@ -73,6 +73,8 @@ class WarningCode(StrEnum):
     REF_PARSE_LOST = "REF_PARSE_LOST"
     REF_PARSE_SALVAGE_RECOVERY = "REF_PARSE_SALVAGE_RECOVERY"
     REF_PARSE_SPLIT_RECOVERY = "REF_PARSE_SPLIT_RECOVERY"
+    REF_PARSE_TRUNCATED = "REF_PARSE_TRUNCATED"
+    REF_PARSE_FINALIZE_FAILED = "REF_PARSE_FINALIZE_FAILED"
     REF_EXTRACTION_ERROR = "REF_EXTRACTION_ERROR"
     REF_UNDER_EXTRACTION_SUSPECTED = "REF_UNDER_EXTRACTION_SUSPECTED"
     # Enrichment
@@ -89,6 +91,10 @@ class WarningCode(StrEnum):
     # Export content
     URL_MALFORMED_DROPPED = "URL_MALFORMED_DROPPED"
     EPUB_SPINE_MEMBER_SKIPPED = "EPUB_SPINE_MEMBER_SKIPPED"
+    DOCX_TABLE_DROPPED = "DOCX_TABLE_DROPPED"
+    DOCX_FIGURES_DROPPED = "DOCX_FIGURES_DROPPED"
+    DOCX_FIGURE_IMAGES_OMITTED = "DOCX_FIGURE_IMAGES_OMITTED"
+    TABLE_CONTENTS_OMITTED = "TABLE_CONTENTS_OMITTED"
 
 
 DESCRIPTIONS: dict[WarningCode, str] = {
@@ -177,6 +183,10 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     "LLM completion.",
     WarningCode.REF_PARSE_SPLIT_RECOVERY: "References were re-parsed in smaller LLM batches "
     "after a batch failed.",
+    WarningCode.REF_PARSE_TRUNCATED: "References longer than the NER parser's input window were "
+    "parsed from their start only; fields after it (often pages, DOI or URL) may be missing.",
+    WarningCode.REF_PARSE_FINALIZE_FAILED: "Cleaning up a parsed reference's fields (page "
+    "range, DOI, Vancouver tail) raised an error; that reference keeps its fields as parsed.",
     WarningCode.REF_EXTRACTION_ERROR: "Reference extraction raised an unexpected error; the "
     "references are missing.",
     WarningCode.REF_UNDER_EXTRACTION_SUSPECTED: "Far fewer references were parsed than the body "
@@ -201,6 +211,19 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     "the URL is lost from the payload.",
     WarningCode.EPUB_SPINE_MEMBER_SKIPPED: "An ePub spine member was missing from the "
     "archive; its text is absent from the export.",
+    WarningCode.DOCX_TABLE_DROPPED: "A DOCX table had more grid cells than the per-table "
+    "limit, or took the document past its limit on grid cells or cell text (a merged cell "
+    "counts once per grid cell it covers), and was dropped.",
+    WarningCode.DOCX_FIGURES_DROPPED: "A DOCX had more pictures than the figure limit; the "
+    "pictures past it were dropped.",
+    WarningCode.DOCX_FIGURE_IMAGES_OMITTED: "The images of a DOCX's figures passed the image "
+    "data limit (an image counts once per figure showing it); the figures past it are kept "
+    "without an image.",
+    WarningCode.TABLE_CONTENTS_OMITTED: "An HTML, ePub or JATS table expanded far past its "
+    "markup, or its size as rendered (escaped text and cell markup in every cell, a spanned "
+    "cell's text once per cell it covers) or its cells passed the table limits; it is kept "
+    "without contents when its caption labels it (JATS: when it has a label or caption) and "
+    "dropped otherwise.",
 }
 
 

@@ -36,9 +36,9 @@ def test_capped_tasks_skip_thinking_instead_of_400():
 
 def test_sub_minimum_budget_is_clamped_not_sent_raw():
     provider, _ = _provider(thinking_budget=512)
-    body = provider.call_kwargs(None)  # default max_tokens 65536
+    body = provider.call_kwargs(None)  # default max_tokens, capped for a non-streaming call
     assert body == {
-        "max_tokens": 65536,
+        "max_tokens": 16384,
         "thinking": {"type": "enabled", "budget_tokens": 1024},
     }
 
@@ -46,7 +46,7 @@ def test_sub_minimum_budget_is_clamped_not_sent_raw():
 def test_valid_requests_are_unchanged():
     provider, _ = _provider(thinking_budget=2048)
     assert provider.call_kwargs(None) == {
-        "max_tokens": 65536,
+        "max_tokens": 16384,
         "thinking": {"type": "enabled", "budget_tokens": 2048},
     }
 

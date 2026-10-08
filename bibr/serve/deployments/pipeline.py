@@ -11,6 +11,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import re
 import time
 import weakref
 from contextlib import asynccontextmanager
@@ -179,6 +180,44 @@ _ERROR_KIND_TO_HTTP = {
     "unexpected": 500,
 }
 
+# Ends an outage's 422 message. Clients that predate the ``outage`` field
+# match "temporarily unavailable" (``bibr.batch.remote.TRANSIENT_MARKERS``).
+_OUTAGE_SUFFIX = "service temporarily unavailable"
+
+# C0/C1 controls and the Unicode line separators: a caller-chosen file name
+# carrying one (an MCP filename is any JSON string) splits or forges log lines.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def _escape_controls(text: str) -> str:
+    """*text* with each control character spelled as its escape (``\\n``, ``\\x1b``)."""
+    return _CONTROL_CHARS_RE.sub(lambda match: repr(match.group())[1:-1], text)
+
+
+def _client_processing_message(exc: ProcessingError) -> str:
+    """What a client may read of a processing failure.
+
+    Stages record a failure as ``f"... failed: {exc}"`` of whatever they
+    caught, so its text can carry model-cache paths, library internals and
+    upstream error text, and the pipeline chains the caught exception as the
+    cause. Only a message with no exception beneath it is bibr's own words;
+    any other becomes its stage and code, and the log keeps the text. That
+    includes a ``ConfigurationError`` cause: it is written for the operator
+    and names the server's model bundle paths.
+
+    An outage says so in bibr's own words, which every ``bibr batch
+    --serve-url`` release reads as a transient failure to run again.
+    """
+    # The invalid-output error chains its own filtered diagnostic.
+    if exc.__cause__ is None or type(exc.safe_diagnostics) is SafeLlmDiagnostics:
+        message = str(exc)
+    else:
+        stage = f" in {exc.failed_stage}" if exc.failed_stage else ""
+        code = f" ({exc.error_code})" if exc.error_code else ""
+        message = f"Processing failed{stage}{code}"
+    return f"{message}: {_OUTAGE_SUFFIX}" if exc.outage else message
+
+
 # Per-request reference-strategy overrides accepted on the wire. Mirror the
 # CLI (`--refs` / `--ref-seg`) and library (`chew(refs=, ref_seg=)`) choices so
 # a caller can, e.g., request `refs=off` for a fast core-metadata-only pass or
@@ -224,7 +263,8 @@ class _KeyedAsyncLockPool:
         self._entries: dict[str, _FlightEntry] = {}
 
     @asynccontextmanager
-    async def hold(self, key: str):
+    async def hold(self, key: str, *, deadline: float | None = None):
+        """Hold *key*'s lock; waiting past *deadline* (``loop.time()``) raises TimeoutError."""
         async with self._guard:
             entry = self._entries.get(key)
             if entry is None:
@@ -233,7 +273,8 @@ class _KeyedAsyncLockPool:
             entry.users += 1
 
         try:
-            await entry.lock.acquire()
+            async with asyncio.timeout_at(deadline):
+                await entry.lock.acquire()
             try:
                 yield
             finally:
@@ -507,7 +548,9 @@ class BibrPipelineAPI(ls.LitAPI):
         # Bound the descriptor filename before it reaches metering/logs (audit
         # L5); 255 matches the common filesystem limit. Task 2 validates
         # descriptor filename shape; this remains a defensive normalization.
-        filename = str(request.get("filename") or "")[:255]
+        # Control characters are escaped here, not at each stage's log line,
+        # so no caller-chosen name splits a log line anywhere downstream.
+        filename = _escape_controls(str(request.get("filename") or ""))[:255]
         if not filename:
             raise HTTPException(status_code=400, detail="Filename required")
 
@@ -601,6 +644,10 @@ class BibrPipelineAPI(ls.LitAPI):
 
     async def predict(self, inputs: dict) -> dict:
         self._ensure_cache()
+        # PIPELINE_TIMEOUT bounds the whole request: the waits for an
+        # identical extraction and for an in-flight slot count against it as
+        # well as the run, or each wait could take the full timeout again.
+        deadline = asyncio.get_running_loop().time() + self._settings.pipeline.timeout
 
         filename = inputs["filename"]
         content = inputs["content"]
@@ -657,7 +704,9 @@ class BibrPipelineAPI(ls.LitAPI):
         )
 
         if not self._cache:
-            return await self._run_pipeline(inputs, file_hash=file_hash, cache_key=cache_key)
+            return await self._run_pipeline(
+                inputs, file_hash=file_hash, cache_key=cache_key, deadline=deadline
+            )
 
         cache_start = time.perf_counter()
         cached_response = await self._read_cached_response(
@@ -679,24 +728,30 @@ class BibrPipelineAPI(ls.LitAPI):
         if flights is None:  # compatibility for tests/embedders that bypass setup()
             flights = _KeyedAsyncLockPool()
             self._cache_flights = flights
-        async with flights.hold(cache_key):
-            cached_response = await self._read_cached_response(
-                cache_key,
-                file_hash=file_hash,
-                filename=filename,
-                started_at=cache_start,
-                request_id=inputs.get("request_id"),
-                job_id=inputs.get("job_id"),
-            )
-            if cached_response is not None:
-                return cached_response
-            return await self._run_distributed_singleflight(
-                inputs,
-                file_hash=file_hash,
-                cache_key=cache_key,
-                filename=filename,
-                started_at=cache_start,
-            )
+        try:
+            async with flights.hold(cache_key, deadline=deadline):
+                cached_response = await self._read_cached_response(
+                    cache_key,
+                    file_hash=file_hash,
+                    filename=filename,
+                    started_at=cache_start,
+                    request_id=inputs.get("request_id"),
+                    job_id=inputs.get("job_id"),
+                )
+                if cached_response is not None:
+                    return cached_response
+                return await self._run_distributed_singleflight(
+                    inputs,
+                    file_hash=file_hash,
+                    cache_key=cache_key,
+                    filename=filename,
+                    started_at=cache_start,
+                    deadline=deadline,
+                )
+        except TimeoutError:
+            # Only the wait for the key lock raises it: _run_pipeline answers
+            # its own expiry with the 504.
+            raise self._timed_out(inputs, file_hash=file_hash, started_at=cache_start) from None
 
     async def _run_distributed_singleflight(
         self,
@@ -706,6 +761,7 @@ class BibrPipelineAPI(ls.LitAPI):
         cache_key: str,
         filename: str,
         started_at: float,
+        deadline: float,
     ) -> dict:
         """Coordinate cache misses across workers while remaining fail-open."""
         if not self._settings.cache.distributed_singleflight:
@@ -714,7 +770,9 @@ class BibrPipelineAPI(ls.LitAPI):
                 cache_key=cache_key,
                 settings=self._settings,
             )
-            return await self._run_pipeline(inputs, file_hash=file_hash, cache_key=cache_key)
+            return await self._run_pipeline(
+                inputs, file_hash=file_hash, cache_key=cache_key, deadline=deadline
+            )
 
         assert self._cache is not None  # predict() returns early without a cache
         try:
@@ -734,7 +792,9 @@ class BibrPipelineAPI(ls.LitAPI):
                 cache_key=cache_key,
                 settings=self._settings,
             )
-            return await self._run_pipeline(inputs, file_hash=file_hash, cache_key=cache_key)
+            return await self._run_pipeline(
+                inputs, file_hash=file_hash, cache_key=cache_key, deadline=deadline
+            )
 
         if lease is not None:
             _emit_singleflight_metric(
@@ -744,7 +804,9 @@ class BibrPipelineAPI(ls.LitAPI):
             )
             renew_task = asyncio.create_task(self._renew_cache_lease(lease, cache_key))
             try:
-                return await self._run_pipeline(inputs, file_hash=file_hash, cache_key=cache_key)
+                return await self._run_pipeline(
+                    inputs, file_hash=file_hash, cache_key=cache_key, deadline=deadline
+                )
             finally:
                 renew_task.cancel()
                 await asyncio.gather(renew_task, return_exceptions=True)
@@ -756,21 +818,22 @@ class BibrPipelineAPI(ls.LitAPI):
                 except Exception:
                     logger.warning("Failed to release distributed cache lease", exc_info=True)
 
-        # A real extraction runs up to PIPELINE_TIMEOUT (plus queueing on the
-        # in-flight semaphore, which the owner holds its lease through), so a
-        # waiter that gives up after the flat singleflight_wait_seconds almost
-        # always pays the wait AND a duplicate extraction. Unless the operator
-        # set an explicit wait, the budget follows the pipeline timeout; the
-        # owner's lease (renewed every 30 s against a 120 s TTL) is the
-        # liveness signal, and its disappearance means the owner died without
-        # publishing — take over at once instead of waiting out the budget.
+        # A real extraction runs up to PIPELINE_TIMEOUT, so a waiter that
+        # gives up after the flat singleflight_wait_seconds almost always pays
+        # the wait AND a duplicate extraction. Unless the operator set an
+        # explicit wait, the budget follows the pipeline timeout; either way
+        # the wait ends at this request's own deadline. The owner's lease
+        # (renewed every 30 s against a 120 s TTL) is the liveness signal, and
+        # its disappearance means the owner died without publishing — take
+        # over at once instead of waiting out the budget.
         if "singleflight_wait_seconds" in self._settings.cache.model_fields_set:
             wait_budget = self._settings.cache.singleflight_wait_seconds
         else:
             wait_budget = float(self._settings.pipeline.timeout)
-        deadline = time.monotonic() + wait_budget
+        loop = asyncio.get_running_loop()
+        wait_until = min(loop.time() + wait_budget, deadline)
         poll_seconds = self._settings.cache.singleflight_poll_interval_ms / 1000
-        while time.monotonic() < deadline:
+        while loop.time() < wait_until:
             await asyncio.sleep(poll_seconds)
             try:
                 cached_response = await self._read_cached_response(
@@ -788,7 +851,9 @@ class BibrPipelineAPI(ls.LitAPI):
                     cache_key=cache_key,
                     settings=self._settings,
                 )
-                return await self._run_pipeline(inputs, file_hash=file_hash, cache_key=cache_key)
+                return await self._run_pipeline(
+                    inputs, file_hash=file_hash, cache_key=cache_key, deadline=deadline
+                )
             if cached_response is not None:
                 _emit_singleflight_metric(
                     "waiter_hit",
@@ -810,7 +875,9 @@ class BibrPipelineAPI(ls.LitAPI):
                     cache_key=cache_key,
                     settings=self._settings,
                 )
-                return await self._run_pipeline(inputs, file_hash=file_hash, cache_key=cache_key)
+                return await self._run_pipeline(
+                    inputs, file_hash=file_hash, cache_key=cache_key, deadline=deadline
+                )
             if not lease_alive:
                 # The owner's publish and lease release may both have landed
                 # between this poll's cache read and the lease check — re-read
@@ -835,7 +902,7 @@ class BibrPipelineAPI(ls.LitAPI):
                         settings=self._settings,
                     )
                     return await self._run_pipeline(
-                        inputs, file_hash=file_hash, cache_key=cache_key
+                        inputs, file_hash=file_hash, cache_key=cache_key, deadline=deadline
                     )
                 if cached_response is not None:
                     _emit_singleflight_metric(
@@ -866,7 +933,7 @@ class BibrPipelineAPI(ls.LitAPI):
                         settings=self._settings,
                     )
                     return await self._run_pipeline(
-                        inputs, file_hash=file_hash, cache_key=cache_key
+                        inputs, file_hash=file_hash, cache_key=cache_key, deadline=deadline
                     )
                 if takeover is None:
                     continue
@@ -878,7 +945,7 @@ class BibrPipelineAPI(ls.LitAPI):
                 renew_task = asyncio.create_task(self._renew_cache_lease(takeover, cache_key))
                 try:
                     return await self._run_pipeline(
-                        inputs, file_hash=file_hash, cache_key=cache_key
+                        inputs, file_hash=file_hash, cache_key=cache_key, deadline=deadline
                     )
                 finally:
                     renew_task.cancel()
@@ -891,12 +958,17 @@ class BibrPipelineAPI(ls.LitAPI):
                     except Exception:
                         logger.warning("Failed to release distributed cache lease", exc_info=True)
 
+        if loop.time() >= deadline:
+            # The request's own time ran out waiting: no fallback extraction.
+            raise self._timed_out(inputs, file_hash=file_hash, started_at=started_at)
         _emit_singleflight_metric(
             "timeout_fallback",
             cache_key=cache_key,
             settings=self._settings,
         )
-        return await self._run_pipeline(inputs, file_hash=file_hash, cache_key=cache_key)
+        return await self._run_pipeline(
+            inputs, file_hash=file_hash, cache_key=cache_key, deadline=deadline
+        )
 
     async def _renew_cache_lease(self, lease, cache_key: str) -> None:
         """Keep an owned lease alive; losing it never cancels extraction."""
@@ -982,7 +1054,25 @@ class BibrPipelineAPI(ls.LitAPI):
             "error_kind": None,
         }
 
-    async def _run_pipeline(self, inputs: dict, *, file_hash: str, cache_key: str) -> dict:
+    def _timed_out(self, inputs: dict, *, file_hash: str, started_at: float) -> HTTPException:
+        """Record a request that ran out of PIPELINE_TIMEOUT; return the 504 to raise."""
+        _emit_extract_metric(
+            file_hash=file_hash,
+            filename=inputs["filename"],
+            duration_ms=int((time.perf_counter() - started_at) * 1000),
+            cache_hit=False,
+            success=False,
+            error_kind="timeout",
+            result_json=None,
+            settings=self._settings,
+            request_id=inputs.get("request_id"),
+            job_id=inputs.get("job_id"),
+        )
+        return HTTPException(status_code=504, detail="Pipeline processing timed out")
+
+    async def _run_pipeline(
+        self, inputs: dict, *, file_hash: str, cache_key: str, deadline: float
+    ) -> dict:
         filename = inputs["filename"]
         content = inputs["content"]
         start_page = inputs["start_page"]
@@ -1020,36 +1110,29 @@ class BibrPipelineAPI(ls.LitAPI):
         # encode happen outside the gate).
         inflight_sem = getattr(self, "_inflight_sem", None)
         gate = inflight_sem if inflight_sem is not None else _NULL_GATE
+        process_kwargs = {
+            "paper_id": file_hash,
+            "content": content,
+            "config": config,
+        }
+        if inputs.get("content_hash") is not None:
+            process_kwargs["content_hash"] = inputs["content_hash"]
+
+        async def _gated_run() -> dict:
+            async with gate:
+                return await self._pipeline.process_file(filename, **process_kwargs)
+
         run_start = time.perf_counter()
         try:
-            async with gate:
-                process_kwargs = {
-                    "paper_id": file_hash,
-                    "content": content,
-                    "config": config,
-                }
-                if inputs.get("content_hash") is not None:
-                    process_kwargs["content_hash"] = inputs["content_hash"]
-                result_json = await asyncio.wait_for(
-                    self._pipeline.process_file(filename, **process_kwargs),
-                    timeout=self._settings.pipeline.timeout,
-                )
+            # The slot wait counts against the request's deadline, and a
+            # deadline already spent waiting upstream never starts the run.
+            result_json = await asyncio.wait_for(
+                _gated_run(), timeout=deadline - asyncio.get_running_loop().time()
+            )
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:  # noqa: UP041  # forward-compat: keep prefixed form
-            _emit_extract_metric(
-                file_hash=file_hash,
-                filename=filename,
-                duration_ms=int((time.perf_counter() - run_start) * 1000),
-                cache_hit=False,
-                success=False,
-                error_kind="timeout",
-                result_json=None,
-                settings=self._settings,
-                request_id=inputs.get("request_id"),
-                job_id=inputs.get("job_id"),
-            )
-            raise HTTPException(status_code=504, detail="Pipeline processing timed out") from None
+            raise self._timed_out(inputs, file_hash=file_hash, started_at=run_start) from None
         except HTTPException:
             raise
         except Exception as e:
@@ -1105,6 +1188,9 @@ class BibrPipelineAPI(ls.LitAPI):
             message = output.get("error") or "Internal server error"
             error_code = output.get("error_code")
             detail = {"message": message, "error_code": error_code} if error_code else message
+            if output.get("outage") is True:
+                # Says the paper was not at fault: a client may run it again later.
+                detail = {"message": message, "error_code": error_code, "outage": True}
             raise HTTPException(
                 status_code=status,
                 detail=detail,
@@ -1180,40 +1266,46 @@ class BibrPipelineAPI(ls.LitAPI):
         )
         from bibr.utils.redact import redact_urls
 
+        detail = str(exc)
         if isinstance(exc, InputValidationError):
             kind = "input_validation"
-            message = str(exc)
+            message = detail
         elif isinstance(exc, (LlmTruncatedError, LlmInvalidOutputError)):
             # The model answered, but the answer was cut off or malformed.
             # The same request fails the same way again, so this is a 422
             # with its code, not a 502 that clients would retry.
             kind = "processing"
-            message = str(exc)
+            message = detail
         elif isinstance(exc, UpstreamServiceError):
             kind = "upstream_service"
-            message = str(exc)
+            message = detail
         elif isinstance(exc, ProcessingError):
             kind = "processing"
-            message = str(exc)
+            message = _client_processing_message(exc)
         else:
             kind = "unexpected"
             message = "Internal processing error"
         error_code = exc.error_code if isinstance(exc, (ProcessingError, LlmCallError)) else None
         safe_diagnostics = exc.safe_diagnostics if isinstance(exc, ProcessingError) else None
+        # Only a 422 needs this: clients already retry a 502.
+        outage = isinstance(exc, ProcessingError) and exc.outage
+        log_name = _escape_controls(filename)
         # An unclassified LLM failure may be a bug in the call path: keep its
         # traceback like any other uncoded error.
         if error_code and type(exc) is not LlmCallError:
-            logger.error("[%s] %s (%s): %s", filename, kind, error_code, message)
+            logger.error("[%s] %s (%s): %s", log_name, kind, error_code, detail)
         else:
-            logger.exception("[%s] %s: %s", filename, kind, exc)
+            logger.exception("[%s] %s: %s", log_name, kind, exc)
         return {
             "success": False,
             "paper_json": None,
             # The 4xx/5xx body and the job error reach the caller: they never
-            # name an internal endpoint (the log line above keeps it).
+            # name an internal endpoint (the log line above keeps it). URLs go
+            # and credential shapes are masked, as describe_error does.
             "error": redact_urls(message),
             "error_kind": kind,
             "error_code": error_code,
+            "outage": outage,
             "safe_diagnostics": (
                 safe_diagnostics.to_dict() if type(safe_diagnostics) is SafeLlmDiagnostics else None
             ),

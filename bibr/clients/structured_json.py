@@ -33,6 +33,7 @@ class StructuredResponseError(ValueError):
 _MAX_RESPONSE_CHARS = 262_144
 _MAX_ESCAPE_REPAIRS = 128
 _MAX_DEPTH = 64
+_LOWERCASE = frozenset("abcdefghijklmnopqrstuvwxyz")
 _FENCE = re.compile(r"\A```(?:json)?[ \t]*\r?\n(?P<body>[\s\S]*?)\r?\n```\Z", re.IGNORECASE)
 _PROSE_FENCE = re.compile(
     r"^```json[ \t]*\r?\n(?P<body>[\s\S]*?)\r?\n```[ \t]*(?=\r?$)",
@@ -84,9 +85,17 @@ def _repair_invalid_backslashes(text: str) -> tuple[str, int]:
     """Escape only a backslash JSON cannot interpret inside a string.
 
     Existing valid escapes, including unicode escapes, are preserved byte for
-    byte. Quotes, commas, keys and incomplete strings are never repaired.
+    byte, with one exception: once an invalid escape shows that the model
+    wrote raw LaTeX, ``\\b \\f \\n \\r \\t`` before a lowercase letter are
+    LaTeX commands too (``\\beta``, ``\\frac``, ``\\nu``, ``\\rho``,
+    ``\\theta``), not a control character glued to a word. A capital still
+    reads as a newline or tab starting a sentence. Quotes, commas, keys and
+    incomplete strings are never repaired.
     """
     output: list[str] = []
+    # Output slots of escapes that are valid JSON but read as LaTeX; filled
+    # with a backslash only if the text turns out to hold raw LaTeX.
+    latex_like: list[int] = []
     in_string = False
     position = repairs = 0
     depth = 0
@@ -103,6 +112,9 @@ def _repair_invalid_backslashes(text: str) -> tuple[str, int]:
                 if repairs > _MAX_ESCAPE_REPAIRS:
                     raise StructuredResponseError("non_json")
                 output.append("\\")
+            elif following in "bfnrt" and text[position + 2 : position + 3] in _LOWERCASE:
+                latex_like.append(len(output))
+                output.append("")
             output.extend((char, following))
             position += 2
             continue
@@ -119,6 +131,10 @@ def _repair_invalid_backslashes(text: str) -> tuple[str, int]:
         position += 1
     if in_string or depth > 0:
         raise StructuredResponseError("truncated")
+    if repairs:
+        for slot in latex_like:
+            output[slot] = "\\"
+        repairs += len(latex_like)
     return "".join(output), repairs
 
 

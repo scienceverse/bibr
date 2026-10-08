@@ -75,14 +75,41 @@ def group_chars_into_lines(
 
 
 def _extract_page_chars(textpage) -> list[tuple[str, tuple[float, float, float, float]]]:
+    import pypdfium2 as pdfium
+
     from bibr.ocr.native_text import compose_spacing_accents
 
     out = []
-    for i in range(textpage.count_chars()):
-        ch = textpage.get_text_range(i, 1)
-        if not ch:
+    n_chars = textpage.count_chars()
+    i = 0
+    while i < n_chars:
+        # get_text_range is UCS-2: it drops a char beyond the BMP, whether
+        # pdfium holds it as one code or as a UTF-16 surrogate pair. Read
+        # those from the codes, as the native char records do.
+        code = pdfium.raw.FPDFText_GetUnicode(textpage.raw, i)
+        width = 1
+        if 0xD800 <= code <= 0xDBFF and i + 1 < n_chars:
+            low = pdfium.raw.FPDFText_GetUnicode(textpage.raw, i + 1)
+            if 0xDC00 <= low <= 0xDFFF:
+                code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
+                width = 2
+        if 0xFFFF < code <= 0x10FFFF:
+            # A char left out of the page text stays out.
+            if pdfium.raw.FPDFText_GetTextIndexFromCharIndex(textpage.raw, i) >= 0:
+                boxes = [textpage.get_charbox(j) for j in range(i, i + width)]
+                box = (
+                    min(b[0] for b in boxes),
+                    min(b[1] for b in boxes),
+                    max(b[2] for b in boxes),
+                    max(b[3] for b in boxes),
+                )
+                out.append((chr(code), box))
+            i += width
             continue
-        out.append((ch, textpage.get_charbox(i)))
+        ch = textpage.get_text_range(i, 1)
+        if ch:
+            out.append((ch, textpage.get_charbox(i)))
+        i += 1
     return compose_spacing_accents(out)
 
 

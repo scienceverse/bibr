@@ -95,11 +95,13 @@ def _build_segmenter(
         return model
 
     monkeypatch.setattr("wtpsplit_lite.SaT", fake_sat)
-    # A pinned Hub model is materialised through the HF cache; never touch it here.
+    # Hub models and the base tokenizer are materialised through the HF cache;
+    # never touch it here.
     monkeypatch.setattr(
         "bibr.segmenter_base.materialize_hub_snapshot",
         lambda repo_id, revision: (f"/pinned/{repo_id}@{revision}", None),
     )
+    monkeypatch.setattr("bibr.segmenter_base.base_tokenizer_dir", lambda: "/base-tokenizer")
     monkeypatch.setattr(
         "bibr.utils.onnx_providers.get_ort_providers",
         lambda **kwargs: requested_providers or ["CPUExecutionProvider"],
@@ -534,14 +536,15 @@ def test_local_manifest_rejects_threshold_outside_unit_interval(tmp_path, monkey
         _build_segmenter(monkeypatch, model_name=str(tmp_path))
 
 
-def test_resolved_hub_prefix_is_passed_to_wtpsplit(monkeypatch):
+def test_unpinned_hub_model_loads_its_snapshot_not_its_id(monkeypatch):
+    """wtpsplit-lite would try a bare Hub id as a cwd path first."""
     monkeypatch.setattr(Settings, "WTPSPLIT_THRESHOLD", None)
 
     _, _, init = _build_segmenter(monkeypatch, model_name="scienceverse/bibr-sat-science-en")
 
-    assert init["name"] == "scienceverse/bibr-sat-science-en"
+    assert init["name"] == "/pinned/scienceverse/bibr-sat-science-en@None"
     assert init["kwargs"]["hub_prefix"] is None
-    assert init["kwargs"]["tokenizer_name_or_path"] == "scienceverse/bibr-sat-science-en"
+    assert init["kwargs"]["tokenizer_name_or_path"] == "/base-tokenizer"
 
 
 def test_remote_model_uses_explicit_setting_windowing(monkeypatch):

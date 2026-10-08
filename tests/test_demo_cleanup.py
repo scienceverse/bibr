@@ -119,8 +119,9 @@ def test_demo_launch_caps_uploads_server_side(monkeypatch):
     monkeypatch.setattr(local_app, "create_local_demo", lambda **_: _Demo())
     monkeypatch.setattr(sys, "argv", ["bibr demo", "--port", "7999"])
     monkeypatch.delenv("DEMO_CACHE_TTL_SECONDS", raising=False)
+    monkeypatch.delenv("DEMO_MAX_FILE_SIZE_MB", raising=False)
 
     server.main()
 
-    assert launched["max_file_size"] == f"{local_app._MAX_FILE_SIZE_MB}mb"
+    assert launched["max_file_size"] == "10mb"
     assert launched["server_port"] == 7999
