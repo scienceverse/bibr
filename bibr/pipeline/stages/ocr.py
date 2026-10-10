@@ -1039,6 +1039,16 @@ class OcrStage:
         ocr_fn = tracked_ocr_fn
         is_remote = _is_remote_ocr(cfg)
 
+        # The scan path's second (and escalation) recognizer, when configured.
+        # Started only when OCR itself runs: a native-only window has no
+        # scanned region to compare.
+        recognizers = None
+        if engine_needed and settings.ocr.consensus_backend:
+            from bibr.scan.consensus import start_recognizers
+
+            recognizers = await start_recognizers(settings)
+        ctx.scratch["scan_recognizers"] = recognizers
+
         try:
             if is_remote:
                 await self._run_remote(ctx, ocr_fn)
@@ -1051,7 +1061,12 @@ class OcrStage:
             self._check_ocr_success(ctx)
             # A native-only window under the automatic chain ran with a static
             # identity that no later probe looks up; storing it would be waste.
-            if cache_on and (engine_needed or not automatic_backend):
+            # A run whose configured consensus recognizer did not start would
+            # store primary-only regions under the consensus key.
+            consensus_missing = (
+                bool(settings.ocr.consensus_backend) and engine_needed and recognizers is None
+            )
+            if cache_on and (engine_needed or not automatic_backend) and not consensus_missing:
                 for fs in pending:
                     # A page read from its text layer while OCR returned
                     # nothing is OCR'd again by the next run, not replayed.
@@ -1065,6 +1080,11 @@ class OcrStage:
             # Always close the Rich Live progress so a CancelledError or
             # mid-stage exception doesn't leave the terminal in alt-screen mode.
             ctx.progress.ocr_end()
+            ctx.scratch.pop("scan_recognizers", None)
+            if recognizers is not None:
+                for recognizer in recognizers:
+                    if recognizer is not None:
+                        await recognizer.shutdown()
             # Tear down the engine between chunks only when something will use
             # the freed VRAM (see ``_should_unload_ocr_after_chunk``); otherwise
             # keep it resident so local engines do not
@@ -1246,6 +1266,8 @@ class OcrStage:
                 )
                 return
 
+            await self._apply_consensus(fs, ctx, clean_pages)
+
             if layer_fallback_pages:
                 logger.warning(
                     "OCR returned no text for regions of %d scanned page(s) of %s (pages %s); "
@@ -1275,6 +1297,54 @@ class OcrStage:
                 f"OCR failed: {describe_error(e)}", code="ocr_failed", stage=self.name, exc=e
             )
             logger.warning("OCR failed for %s", fs.path.name, exc_info=True)
+
+    @staticmethod
+    async def _apply_consensus(fs, ctx, pages: list[list[dict]]) -> None:
+        """Re-read the file's scanned regions with the consensus recognizer, in place.
+
+        A no-op unless ``OCR_CONSENSUS_BACKEND`` started a recognizer. Never
+        fails the file: on any error the primary readings stand.
+        """
+        recognizers = ctx.scratch.get("scan_recognizers")
+        if not recognizers:
+            return
+        from bibr.scan import consensus
+        from bibr.scan.page_kind import ensure_page_kinds
+
+        second, escalation = recognizers
+        try:
+            kinds = {index: kind.value for index, kind in ensure_page_kinds(fs).items()}
+            report = await consensus.apply_consensus(
+                pages,
+                fs.page_images,
+                fs.page_indices,
+                kinds,
+                second=second,
+                escalation=escalation,
+                config=consensus.ConsensusConfig.from_settings(ctx.settings),
+                is_outage=_ocr_server_gone,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - consensus is an addition, never a dependency
+            logger.warning("OCR consensus failed for %s", fs.path.name, exc_info=True)
+            return
+        if report.compared:
+            logger.info(
+                "OCR consensus for %s: %d compared, %d disagree, %d escalated, %d replaced",
+                fs.path.name,
+                report.compared,
+                report.disagreeing,
+                report.escalated,
+                report.replaced,
+            )
+        if report.escalated:
+            fs.warnings.append(
+                ProcessingWarning(
+                    WarningCode.OCR_RECOGNIZERS_DISAGREE,
+                    consensus.describe(report, escalation=escalation is not None),
+                )
+            )
 
     async def _run_remote(self, ctx, ocr_fn) -> None:
         files = self._eligible_files(ctx)

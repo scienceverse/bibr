@@ -198,6 +198,12 @@ def _key(
         f"ocr_paddle_model={effective.ocr.paddle_model}",
         f"ocr_paddle_revision={effective.ocr.paddle_revision}",
     ]
+    # Scan-path consensus rewrites scanned regions. Appended only when it is
+    # on, so turning it on does not invalidate the entries of runs without it.
+    if effective.ocr.consensus_backend:
+        from bibr.scan.consensus import identity as consensus_identity
+
+        parts.append(f"ocr_consensus={consensus_identity(effective)}")
     raw = "\x1f".join(parts)
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 

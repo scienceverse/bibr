@@ -116,6 +116,24 @@ region whose OCR request failed; the page then carries an
 Remaining regions use the selected OCR runtime.
 Disabling the bypass leaves metadata, outline, and geometry inspection available.
 
+**Scan path (`bibr/scan/`).** Each inspected page is classed as born-digital,
+born-digital with a broken text layer (most of its text regions failed the
+corruption gates), or a scan (no text layer, or an invisible OCR layer). Two
+opt-in steps act on scanned pages only. With `OCR_CONSENSUS_BACKEND` set
+(`glm-http` or `paddle-http` with `OCR_CONSENSUS_URL`, or a cloud vision
+provider), a second recognizer re-reads every OCR'd text region of a scanned
+page; regions whose two readings differ by at least `OCR_CONSENSUS_THRESHOLD`
+(normalized edit distance, default 0.15) are ranked and the worst
+`OCR_CONSENSUS_ESCALATE_SHARE` (default 7%) escalated. An
+`OCR_ESCALATION_BACKEND` re-reads those and the reading closest to the other two
+is kept; without one the primary reading stays and the region is flagged. Each
+compared region carries `_ocr_consensus`, and the paper an
+`OCR_RECOGNIZERS_DISAGREE` warning. With `PIPELINE_SCAN_ARTICLE_SPLIT=true`,
+the parse stage drops the regions of neighbouring articles from scanned pages:
+the previous article's tail when it holds that article's references, floats
+above the paper's title, and everything from a later `doc_title` that follows
+the paper's own references (`SCAN_ARTICLE_SPLIT` warning).
+
 ### 3. Structure (`bibr/structure/pdf_parser.py`)
 
 `PDFParser` converts OCR regions into `PaperContents`:

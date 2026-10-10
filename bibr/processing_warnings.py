@@ -33,6 +33,8 @@ class WarningCode(StrEnum):
     OCR_CONTROL_CHARS = "OCR_CONTROL_CHARS"
     OCR_NATIVE_TEXT_PUA_FALLBACK = "OCR_NATIVE_TEXT_PUA_FALLBACK"
     OCR_TEXT_LAYER_FALLBACK = "OCR_TEXT_LAYER_FALLBACK"
+    OCR_RECOGNIZERS_DISAGREE = "OCR_RECOGNIZERS_DISAGREE"
+    SCAN_ARTICLE_SPLIT = "SCAN_ARTICLE_SPLIT"
     LOW_TEXT_QUALITY = "LOW_TEXT_QUALITY"
     PAGE_DPI_REDUCED = "PAGE_DPI_REDUCED"
     # Classifiers
@@ -114,6 +116,12 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.OCR_TEXT_LAYER_FALLBACK: "OCR returned no text for regions of a scanned page "
     "(blank answers or failed requests); they were read from the page's invisible text layer "
     "instead.",
+    WarningCode.OCR_RECOGNIZERS_DISAGREE: "On scanned pages, a second OCR recognizer read some "
+    "regions differently; the regions that disagreed most were escalated or flagged "
+    "(regions[]._ocr_consensus).",
+    WarningCode.SCAN_ARTICLE_SPLIT: "Regions of neighbouring articles on scanned pages (the "
+    "previous article's tail, the next article's start, floats above the title) were dropped "
+    "before parsing.",
     WarningCode.LOW_TEXT_QUALITY: "The text-quality score is below the warning threshold.",
     WarningCode.PAGE_DPI_REDUCED: "A page too large for the render budget at the configured "
     "DPI was rendered at a lower DPI for layout and OCR.",
