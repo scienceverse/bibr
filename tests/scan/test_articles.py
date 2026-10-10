@@ -128,6 +128,16 @@ def test_appendix_after_references_is_not_a_new_article():
     assert not split.changed
 
 
+def test_reply_in_a_discussion_item_is_not_a_new_article():
+    pages = _pages(
+        [_r("doc_title", "A Paper About Things"), _r("reference", "1. A ref.")],
+        [_r("doc_title", "Reply to the Discussants"), _r("reference", "1. Reply ref.")],
+    )
+    for title in ("Reply to the Discussants", "Author's Reply", "Response to Smith"):
+        pages[1][0].content = title
+        assert not split_articles(pages, {0: SCAN, 1: SCAN}).changed, title
+
+
 def test_born_digital_cover_sheet_before_a_scan():
     # A repository cover sheet repeats the title; the paper starts on the scan.
     pages = _pages(

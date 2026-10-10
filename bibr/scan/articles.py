@@ -97,7 +97,9 @@ _REFERENCE_HEADINGS = frozenset(
 _CONTINUATION_RE = re.compile(
     r"^(?:appendi(?:x|ces)|annex|supplementa(?:ry|l)|supporting information|"
     r"acknowledge?ments?|notes?|figure|fig|table|errat(?:um|a)|corrigend(?:um|a)|"
-    r"author information|about the authors?)\b"
+    r"author information|about the authors?|"
+    # A discussion item prints the reply after the paper's references.
+    r"reply|response|rejoinder|discussion|comments? on|author s? reply|authors? reply)\b"
 )
 
 

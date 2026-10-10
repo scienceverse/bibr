@@ -140,3 +140,23 @@ def test_ocr_stage_consensus_is_a_no_op_without_recognizers():
     asyncio.run(OcrStage._apply_consensus(fs, ctx, pages))
     assert "_ocr_consensus" not in pages[0][0]
     assert fs.page_kinds is None
+
+
+def test_page_kinds_survive_freeing_the_inspection():
+    # OCR frees the inspection and layout (also on an OCR-cache hit) before
+    # parse, where the split reads the page classes.
+    fs = FileState(path=Path("scan.pdf"))
+    fs.pdf_inspection = _scan_inspection(2)
+    fs.layout_results = [[{"label": "text"}], [{"label": "text"}]]
+    fs.page_indices = [0, 1]
+    fs.free_pre_ocr()
+    assert fs.pdf_inspection is None
+    assert fs.page_kinds == {0: "scan", 1: "scan"}
+
+
+@pytest.mark.asyncio
+async def test_parse_stage_splits_after_ocr_freed_the_inspection():
+    fs = _scanned_file()
+    fs.free_pre_ocr()
+    parsed = await _parse(fs, _settings(scan_article_split=True))
+    assert [len(page) for page in parsed] == [2, 0]
