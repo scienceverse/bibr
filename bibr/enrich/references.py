@@ -87,6 +87,9 @@ class ResolutionStats:
     fallback_timeouts: int = 0
     fingerprint_attempts: int = 0
     fingerprint_matches: int = 0
+    raw_attempts: int = 0
+    raw_matches: int = 0
+    raw_ambiguous: int = 0
     failed_bib_ids: set[int] = field(default_factory=set)
     failure_details: list[ProcessingWarning] = field(default_factory=list)
 
@@ -291,6 +294,7 @@ async def enrich_references(
     *,
     settings: GlobalSettings | None = None,
     prefetch: EnrichmentPrefetch | None = None,
+    raw_strings: dict[int, str] | None = None,
 ) -> EnrichmentReport:
     """Enrich references with Crossref metadata.
 
@@ -321,6 +325,9 @@ async def enrich_references(
             still running). Its clients replace ``crossref_client`` /
             ``resolver_client`` and its results replace the up-front round-trips;
             ``None`` performs that work inline, exactly as before.
+        raw_strings: Each reference's printed string by ``bib_id``. With
+            ``resolver.raw_search`` on, references still unmatched after the
+            title passes are searched with it (see :func:`_enrich_raw_strings`).
     """
     if not references:
         return EnrichmentReport()
@@ -394,6 +401,18 @@ async def enrich_references(
                     WarningCode.RESOLVER_FALLBACK_FAILED,
                     f"resolver fallback failed for {len(eligible)} refs: {_export_diagnostic(e)}",
                 )
+        if resolver_client is not None and raw_strings and effective.resolver.raw_search:
+            try:
+                await _enrich_raw_strings(
+                    references, resolver_client, stats, raw_strings, settings=effective
+                )
+            except Exception as e:  # noqa: BLE001 — optional pass cannot fail extraction
+                logger.warning("Resolver raw-string search failed: %s", e)
+                _record_fallback_warning(
+                    stats,
+                    WarningCode.RESOLVER_FALLBACK_FAILED,
+                    f"resolver raw-string search failed: {_export_diagnostic(e)}",
+                )
     finally:
         await prefetch.aclose()
 
@@ -401,7 +420,7 @@ async def enrich_references(
     logger.info(
         "Reference enrichment: %d/%d matched "
         "(resolver %d/%d, fallback matches=%d misses=%d errors=%d timeouts=%d attempts=%d, "
-        "crossref doi %d/%d, search %d/%d, fingerprint %d/%d)",
+        "crossref doi %d/%d, search %d/%d, fingerprint %d/%d, raw %d/%d ambiguous=%d)",
         matched,
         len(references),
         stats.resolver_matches,
@@ -417,6 +436,9 @@ async def enrich_references(
         stats.search_attempts,
         stats.fingerprint_matches,
         stats.fingerprint_attempts,
+        stats.raw_matches,
+        stats.raw_attempts,
+        stats.raw_ambiguous,
     )
     # A reference is only "failed" if it ended UNMATCHED. A transient error in
     # an early strategy still lands in ``failed_bib_ids``, so counting that set
@@ -1518,6 +1540,146 @@ async def _enrich_resolver_fallback(
         detail = (
             f"resolver fallback timed out after {settings.resolver.fallback_timeout:g}s "
             f"with {len(eligible) - answered} of {len(eligible)} refs unanswered"
+        )
+        logger.warning(detail)
+        _record_fallback_warning(stats, WarningCode.RESOLVER_FALLBACK_TIMEOUT, detail)
+
+
+# A raw-string candidate's title must be this close to some span of the
+# reference string (partial ratio, 0-100). Stricter than the parsed-title gate:
+# nothing has isolated the title, so a looser bar lets a short candidate title
+# match words that merely occur in a longer one.
+_RAW_TITLE_THRESHOLD = 90
+
+# Two accepted candidates closer than this are two works the string names
+# equally well (a merged entry, or a reprint), so neither is taken.
+_RAW_AMBIGUITY_MARGIN = 3.0
+
+# A printed entry number ("12.", "[12]") or a trailing link is no part of the
+# work's description and would only add query terms.
+_RAW_ENTRY_NUMBER_RE = re.compile(r"^\s*(?:\[\d+\]|\d+\.)\s*")
+_RAW_URL_RE = re.compile(r"(?:https?://|doi:|www\.)\S+", re.IGNORECASE)
+_RAW_YEAR_RE = re.compile(r"(?<!\d)(1[5-9]\d\d|20\d\d)(?!\d)")
+
+
+def _fold(text: str) -> str:
+    """Lowercase, accents dropped, every non-alphanumeric run one space."""
+    decomposed = unicodedata.normalize("NFKD", text)
+    plain = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    return " ".join(re.split(r"[^0-9a-z]+", plain.lower())).strip()
+
+
+def _raw_query(raw: str) -> str:
+    return _RAW_URL_RE.sub(" ", _RAW_ENTRY_NUMBER_RE.sub("", raw)).strip()[:2048]
+
+
+def _token_printed(folded_raw: str, value: str | None) -> bool:
+    folded = _fold(value or "")
+    return bool(folded) and f" {folded} " in f" {folded_raw} "
+
+
+def _raw_candidate_score(raw: str, cand: _TitleCandidate | None) -> float | None:
+    """How well *cand* is printed in the reference string *raw*, or ``None``.
+
+    Validation in the style of Crossref's search-based matching: the string was
+    never split into fields, so each of the candidate's fields is looked for in
+    it. The title must be printed (up to OCR noise), the year within one of a
+    printed year, and the work pinned by its first author's surname or by its
+    volume and first page. A generic title ("Introduction") identifies nothing
+    on its own and is never accepted this way.
+    """
+    if cand is None or not cand.title or cand.work_type in _VETOED_WORK_TYPES:
+        return None
+    title = _fold(plain_text(cand.title) or "")
+    if len(title.split()) <= _GENERIC_TITLE_WORDS:
+        return None
+    folded_raw = _fold(raw)
+    score = float(fuzz.partial_ratio(title, folded_raw))
+    if score < _RAW_TITLE_THRESHOLD:
+        return None
+    years = {int(y) for y in _RAW_YEAR_RE.findall(raw)}
+    if cand.year and years and not any(abs(cand.year - y) <= 1 for y in years):
+        return None
+    first_family = cand.authors[0].family if cand.authors else None
+    pinned = _token_printed(folded_raw, first_family) or (
+        _token_printed(folded_raw, cand.volume) and _token_printed(folded_raw, cand.first_page)
+    )
+    return score if pinned else None
+
+
+def _best_raw_candidate(raw: str, candidates: list[dict]) -> tuple[dict, float] | None | str:
+    """The one candidate *raw* prints, ``None`` for none, or ``"ambiguous"``
+    when two different works are printed about equally well."""
+    scored = []
+    for cand in candidates:
+        score = _raw_candidate_score(raw, _TitleCandidate.from_resolver(cand))
+        if score is not None:
+            scored.append((score, cand))
+    if not scored:
+        return None
+    scored.sort(key=lambda pair: -pair[0])
+    best_score, best = scored[0]
+    for score, other in scored[1:]:
+        if best_score - score >= _RAW_AMBIGUITY_MARGIN:
+            break
+        same = best.get("doi") and _doi_agrees(best.get("doi"), other.get("doi"))
+        if not same:
+            return "ambiguous"
+    return best, best_score
+
+
+def _raw_search_eligible(ref: PaperReference, raw: str | None) -> bool:
+    return not ref.match and bool(raw) and len(raw.split()) >= 5
+
+
+async def _enrich_raw_strings(
+    references: list[PaperReference],
+    resolver_client,
+    stats: ResolutionStats,
+    raw_strings: dict[int, str],
+    *,
+    settings: GlobalSettings,
+) -> None:
+    """Search the resolver with each unmatched reference's whole printed string.
+
+    The title passes depend on the parser having found the title; a reference
+    whose title was missed, cut short or merged with the container never gets
+    a usable query. Its printed string still names the work, so it is the query
+    here, and the candidates are checked against that string rather than
+    against parsed fields (:func:`_raw_candidate_score`). Shares the fallback
+    pass's concurrency and deadline.
+    """
+    eligible = [ref for ref in references if _raw_search_eligible(ref, raw_strings.get(ref.bib_id))]
+    if not eligible:
+        return
+    stats.raw_attempts += len(eligible)
+    semaphore = asyncio.Semaphore(settings.resolver.fallback_search_concurrency)
+
+    async def resolve(ref: PaperReference) -> None:
+        raw = raw_strings[ref.bib_id]
+        async with semaphore:
+            candidates = await resolver_client.search(
+                _raw_query(raw),
+                ref.year,
+                settings.resolver.limit,
+                sources=settings.resolver.sources,
+            )
+        best = _best_raw_candidate(raw, candidates)
+        if best == "ambiguous":
+            stats.raw_ambiguous += 1
+            return
+        if best is None or ref.match:
+            return
+        candidate, score = best
+        ref.match[_resolver_match_source(candidate)] = _build_match_from_candidate(candidate, score)
+        stats.raw_matches += 1
+
+    try:
+        async with asyncio.timeout(settings.resolver.fallback_timeout):
+            await asyncio.gather(*(resolve(ref) for ref in eligible))
+    except TimeoutError:
+        detail = (
+            f"resolver raw-string search timed out after {settings.resolver.fallback_timeout:g}s"
         )
         logger.warning(detail)
         _record_fallback_warning(stats, WarningCode.RESOLVER_FALLBACK_TIMEOUT, detail)

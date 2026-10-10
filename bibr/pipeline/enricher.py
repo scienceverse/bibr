@@ -138,6 +138,15 @@ class CrossrefEnricher:
                 prefetch = await self._await_prefetch(fs, prefetch_handle, enrich_started_at)
                 if prefetch is not None:
                     kwargs["prefetch"] = prefetch
+            if self._settings.resolver.raw_search and paper.contents is not None:
+                text_by_id = {
+                    sent.text_id: sent.text for sent in paper.contents.sentences if sent.text
+                }
+                kwargs["raw_strings"] = {
+                    ref.bib_id: text_by_id[ref.text_id]
+                    for ref in meta.references
+                    if ref.text_id in text_by_id
+                }
             report = await enrich_references(meta.references, **kwargs)
             return (
                 report
