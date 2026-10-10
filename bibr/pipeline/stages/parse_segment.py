@@ -7,6 +7,8 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
+from bibr.processing_warnings import ProcessingWarning, WarningCode
+
 if TYPE_CHECKING:
     from bibr.pipeline.context import PipelineContext
 
@@ -66,6 +68,26 @@ async def _predict_front_roles(rm, ocr_regions, *, first_page_index: int):
     return predictions if isinstance(predictions, FrontRolePredictions) else None
 
 
+def _split_scanned_articles(fs) -> None:
+    """Drop neighbouring articles' regions from the file's scanned pages; never raise."""
+    try:
+        from bibr.scan.articles import describe, split_articles
+        from bibr.scan.page_kind import ensure_page_kinds
+
+        split = split_articles(fs.ocr_regions, ensure_page_kinds(fs))
+    except Exception:  # noqa: BLE001 - the split is an addition, never a dependency
+        logger.warning(
+            "Article split failed for %s; parsing every region", fs.path.name, exc_info=True
+        )
+        return
+    if not split.changed:
+        return
+    fs.ocr_regions = split.pages
+    message = describe(split)
+    logger.info("%s: %s", fs.path.name, message)
+    fs.warnings.append(ProcessingWarning(WarningCode.SCAN_ARTICLE_SPLIT, message))
+
+
 class ParseSegmentStage:
     name = "parse"
     # FileState fields consumed / populated (see validate_stage_contracts).
@@ -98,6 +120,8 @@ class ParseSegmentStage:
                     parser = native_parser
                     contents = fs.contents
                 else:
+                    if ctx.settings.pipeline.scan_article_split is True and fs.ocr_regions:
+                        _split_scanned_articles(fs)
                     # Offload sync CPU-heavy parse to a thread so concurrent
                     # files can interleave on the event loop and the thread
                     # pool can fan out across cores. The PDF outline (when
