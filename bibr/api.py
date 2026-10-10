@@ -304,6 +304,12 @@ class Result:
 
 def _pipeline_kwargs(options: Mapping[str, Any]) -> dict[str, Any]:
     """Translate friendly chew() options into LocalPipeline kwargs."""
+    # Both name the same range, and whichever came later used to win silently
+    # (an unset index too, so pages="2-3", start_page=None read every page).
+    if "pages" in options:
+        if any(options.get(name) is not None for name in ("start_page", "end_page")):
+            raise TypeError("pass pages or start_page/end_page, not both")
+        options = {k: v for k, v in options.items() if k not in ("start_page", "end_page")}
     kwargs: dict[str, Any] = {}
     for name, value in options.items():
         if name == "pages":
@@ -360,7 +366,7 @@ def _collect_batch(path: Any) -> list[Path] | None:
     p = Path(path)
     if not p.is_dir():
         return None
-    from bibr.input.supported_files import SUPPORTED_EXTENSIONS
+    from bibr.input.supported_files import SUPPORTED_EXTENSIONS, SupportedFileType
 
     files = [
         child
@@ -368,7 +374,8 @@ def _collect_batch(path: Any) -> list[Path] | None:
         if child.is_file() and child.suffix.lower() in SUPPORTED_EXTENSIONS
     ]
     if not files:
-        raise ValueError(f"no supported files (.pdf/.docx) in directory: {p}")
+        formats = "/".join(file_type.value for file_type in SupportedFileType)
+        raise ValueError(f"no supported files ({formats}) in directory: {p}")
     return files
 
 

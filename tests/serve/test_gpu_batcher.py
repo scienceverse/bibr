@@ -86,15 +86,23 @@ async def test_only_one_fn_runs_at_a_time_even_with_multithread_executor():
 
 
 async def test_error_propagates_to_each_caller_in_batch():
+    """A failed batch no longer fans its one exception out: each item is
+    retried alone, so a caller fails only when its own item fails, as both
+    do here."""
+    calls: list[list[int]] = []
+
     def fn(items):
+        calls.append(list(items))
         raise ValueError("boom")
 
     batcher = GpuBatcher(fn, max_batch_size=4, batch_timeout=0.05)
     try:
-        with pytest.raises(ValueError, match="boom"):
-            await asyncio.gather(batcher.submit(1), batcher.submit(2))
+        results = await asyncio.gather(batcher.submit(1), batcher.submit(2), return_exceptions=True)
     finally:
         await batcher.close()
+    assert [type(r) for r in results] == [ValueError, ValueError]
+    assert results[0] is not results[1]
+    assert calls == [[1, 2], [1], [2]]
 
 
 async def test_results_map_back_to_correct_caller():

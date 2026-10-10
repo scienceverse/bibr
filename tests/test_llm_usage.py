@@ -159,15 +159,16 @@ class TestProviderUsageShapes:
         assert counts["cached_input_tokens"] == 256
 
     def test_anthropic_cache_read_tokens_recorded(self):
-        """Anthropic reports prompt-cache hits as cache_read_input_tokens."""
+        """Anthropic reports prompt-cache hits as cache_read_input_tokens, beside
+        an input_tokens that leaves them out; the recorded input includes them."""
         from bibr.clients.llm import LLMClient
 
         completion = SimpleNamespace(
             usage=SimpleNamespace(
-                input_tokens=150,
+                input_tokens=60,
                 output_tokens=30,
-                total_tokens=180,
                 cache_read_input_tokens=90,
+                cache_creation_input_tokens=0,
             )
         )
 
@@ -176,6 +177,7 @@ class TestProviderUsageShapes:
 
         counts = client.usage[Settings.llm.model]
         assert counts["input_tokens"] == 150
+        assert counts["total_tokens"] == 180
         assert counts["cached_input_tokens"] == 90
 
     def test_no_cache_info_defaults_to_zero(self):

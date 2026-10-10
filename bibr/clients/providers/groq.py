@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, ClassVar
 import instructor
 
 from bibr.clients.providers import register
+from bibr.clients.providers.base import bound_sdk_client
 from bibr.config import snapshot_settings
 
 if TYPE_CHECKING:
@@ -26,9 +27,10 @@ class GroqProvider:
             raise ValueError(
                 "Groq API key required. Set LLM_API_KEY or GROQ_API_KEY environment variable."
             )
-        return instructor.from_provider(
+        client = instructor.from_provider(
             f"groq/{self._settings.llm.model}", async_client=True, api_key=api_key
         )
+        return bound_sdk_client(client, self._settings)
 
     def call_kwargs(self, reasoning_effort: str | None, max_tokens: int | None = None) -> dict:  # noqa: ARG002
         return {

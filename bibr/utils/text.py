@@ -59,13 +59,20 @@ def clean_extracted_url(url: str) -> str:
     """Trim trailing chars a regex over prose wrongly captures: sentence
     punctuation and an UNBALANCED trailing ')'. Keeps balanced DOI parens
     (e.g. '…S0140-6736(16)00427-X') and a trailing '/'."""
-    while url:
-        last = url[-1]
-        if last in ".,;:!?" or last == ")" and url.count(")") > url.count("("):
-            url = url[:-1]
+    # The parens are counted once and the end walked back: slicing and counting
+    # again per character is quadratic in a long trailing run.
+    opens, closes = url.count("("), url.count(")")
+    end = len(url)
+    while end:
+        last = url[end - 1]
+        if last in ".,;:!?":
+            end -= 1
+        elif last == ")" and closes > opens:
+            closes -= 1
+            end -= 1
         else:
             break
-    return url
+    return url[:end]
 
 
 # DOI URL prefixes to strip (order matters — longest first)
@@ -139,8 +146,11 @@ def is_url_safe_doi(doi: str | None) -> bool:
     return not any(seg in _DOI_TRAVERSAL_SEGMENTS for seg in doi.split("/"))
 
 
-# Trailing punctuation that shouldn't be part of a DOI
-_DOI_TRAILING_JUNK_RE = re.compile(r"[.,;:)\]}>]+$")
+# Trailing punctuation that shouldn't be part of a DOI. The lookbehind starts a
+# match only where a run of it starts: tried from inside a long run that does not
+# end the string, ``[...]+$`` backtracks quadratically. (``rstrip`` would differ
+# where ``$`` matches before a final newline.)
+_DOI_TRAILING_JUNK_RE = re.compile(r"(?<![.,;:)\]}>])[.,;:)\]}>]+$")
 
 # URL-like patterns that get concatenated onto DOIs by OCR (no whitespace between
 # the DOI and the following URL on the page).  Truncate at the first match.
@@ -188,7 +198,10 @@ def normalize_doi(doi: str | None) -> str | None:
         if m:
             cleaned = cleaned[: slash_pos + 1 + m.start()]
 
-    cleaned = _DOI_SUPPLEMENT_PATH_RE.sub("", cleaned)
+    # Only the last line can hold it (".*$" stops at a newline); trying the
+    # pattern from every "/-/DC1" before a newline is quadratic.
+    last_line = cleaned.rfind("\n", 0, len(cleaned) - 1) + 1
+    cleaned = cleaned[:last_line] + _DOI_SUPPLEMENT_PATH_RE.sub("", cleaned[last_line:])
 
     # Strip trailing punctuation again (embedded URL removal may expose new junk)
     cleaned = _DOI_TRAILING_JUNK_RE.sub("", cleaned)
@@ -218,6 +231,87 @@ def collapse_ws(text: str) -> str:
     wraps, NBSPs, and multiple spaces leak in via OCR region joining).
     """
     return _WS_RUN_RE.sub(" ", unicodedata.normalize("NFC", text)).strip()
+
+
+class CollapsedLength:
+    """``len(collapse_ws(text))`` of a text that grows at its end, in linear time.
+
+    Collapsing all of it again after every addition is quadratic. The text is
+    normalized a stretch at a time instead, cut before a starter NFC does not
+    join to the character before it, so that the stretches normalize as the
+    whole text does; a whitespace run across a cut counts once. Only the
+    stretch after the last cut is redone.
+    """
+
+    # The open stretch is closed at this length even with no cut in it (a run
+    # of combining marks, or of starters that compose), so an addition or a
+    # length() redoes a bounded amount of text. That is exact unless what
+    # follows composes with the stretch's end.
+    _MAX_OPEN = 1024
+    # The starters tried as a cut, from the last: more than any run of starters
+    # NFC joins into one (Hangul LVT is three).
+    _CUT_TRIES = 4
+
+    def __init__(self) -> None:
+        self.last = ""  # the last character added
+        self._open = ""
+        # The text before the open stretch, normalized and collapsed but not
+        # stripped: its length, whether it starts with a space (None while it
+        # is empty) and whether it ends with one.
+        self._closed: tuple[int, bool | None, bool] = (0, None, False)
+
+    def add(self, text: str) -> None:
+        """Append *text*."""
+        if not text:
+            return
+        self.last = text[-1]
+        stretch = self._open + text
+        # Cut before the last character of *text* that decomposes to a starter
+        # (nothing after a starter reorders or composes across it) and does not
+        # compose with the character before it.
+        cut = len(stretch)
+        floor = max(len(self._open), 1)
+        for _ in range(self._CUT_TRIES):
+            cut -= 1
+            while cut >= floor and unicodedata.combining(
+                unicodedata.normalize("NFD", stretch[cut])[0]
+            ):
+                cut -= 1
+            if cut < floor:
+                break
+            head = unicodedata.normalize("NFC", stretch[:cut])
+            before, starter = head[-1], stretch[cut]
+            nfc_starter = unicodedata.normalize("NFC", starter)
+            if unicodedata.normalize("NFC", before + starter) == before + nfc_starter:
+                self._closed = _collapsed_after(self._closed, head)
+                stretch = stretch[cut:]
+                break
+        if len(stretch) > self._MAX_OPEN:
+            self._closed = _collapsed_after(self._closed, unicodedata.normalize("NFC", stretch))
+            stretch = ""
+        self._open = stretch
+
+    def length(self, tail: str = "") -> int:
+        """The collapsed length of the text added, followed by *tail*."""
+        size, starts_space, ends_space = _collapsed_after(
+            self._closed, unicodedata.normalize("NFC", self._open + tail)
+        )
+        return max(size - bool(starts_space) - ends_space, 0)
+
+
+def _collapsed_after(
+    closed: tuple[int, bool | None, bool], normalized: str
+) -> tuple[int, bool | None, bool]:
+    """*closed* (see :class:`CollapsedLength`) with *normalized* collapsed after it."""
+    if not normalized:
+        return closed
+    size, starts_space, ends_space = closed
+    done = _WS_RUN_RE.sub(" ", normalized)
+    if starts_space is None:
+        starts_space = done[0] == " "
+    elif ends_space and done[0] == " ":
+        size -= 1  # one whitespace run across the cut
+    return size + len(done), starts_space, done[-1] == " "
 
 
 def normalize_unicode(text: str) -> str:

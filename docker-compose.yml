@@ -4,9 +4,10 @@
 #   docker compose up                              # Redis only (for local dev)
 #   docker compose --profile serve --profile ocr up  # All-in-one (single host)
 #
-# Split deployment (bibr on one host, OCR on another):
-#   GPU host:  docker compose --profile ocr up
-#   CPU host:  OCR_BASE_URL=http://<gpu-host>:8080 docker compose --profile serve up
+# Split deployment (bibr on one host, OCR on another): bibr-ocr publishes no
+# host port, so first publish it on a private interface with a Compose override
+# and set the same OCR_API_KEY on both hosts. The steps are in
+# docs/guides/deployment.md ("Split deployment").
 #
 # Note: Redis has no profile → it always starts. bibr-serve depends on it.
 
@@ -47,6 +48,9 @@ services:
         hard: 65536
     environment:
       - SGLANG_GPUS=${OCR_LOCAL_GPUS:-1}
+      # When set, the server requires it as a bearer token, which bibr-serve
+      # sends from the same variable.
+      - OCR_API_KEY=${OCR_API_KEY:-}
     deploy:
       resources:
         reservations:
@@ -97,6 +101,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - OCR_BASE_URL=${OCR_BASE_URL:-http://bibr-ocr:8080}
+      - OCR_API_KEY=${OCR_API_KEY:-}
       # The bundled OCR hop stays on Docker's private bridge network.
       - OCR_ALLOW_INSECURE_HTTP=${OCR_ALLOW_INSECURE_HTTP:-true}
       # Compose is a network deployment: force fail-closed production checks.

@@ -22,6 +22,9 @@ bearer token as extraction when authentication is enabled.
 The probes are public. With authentication enabled, an anonymous `/ready`
 response contains only `{"status": "ready"}` or `{"status": "not_ready"}`.
 A valid bearer token also exposes `checks` and the deployment `build_sha`.
+`/ready` reuses its OCR, Redis and job-store results for 2 seconds, and
+concurrent probes share one round of checks, so a change in those services
+shows within 2 seconds and probe traffic does not multiply requests to them.
 
 ### Papers
 
@@ -39,8 +42,9 @@ At most 1 MiB of the upload remains in API memory before the multipart spool
 rolls to disk.
 Exactly one `file` part is accepted. The nine optional fields below must each
 appear at most once and are capped at 64 bytes; duplicate parts, a second file,
-a file part under another name or more text parts than there are fields return
-`400`. A text field the route does not know is ignored.
+a file part under another name or more than 25 text parts in all return `400`.
+A text field the route does not know is ignored, and up to 16 of them fit
+alongside every field below.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
@@ -115,7 +119,10 @@ deleted, and `/result` answers `410`. Clients that poll for `succeeded` or
 `failed` therefore stop as they do for any failed job. Returns `200` with the
 job's status (also when it was already cancelled), `409` with
 `{"detail", "status"}` for a job that is `running` or finished (a running
-extraction cannot be stopped yet), and `404` for an unknown job.
+extraction cannot be stopped yet), and `404` for an unknown job. With the
+Redis job store, a job cancelled through a replica other than the one that
+accepted it keeps its upload on that replica's disk until a job worker there
+reaches it or that replica's queue fills up to `JOBS_MAX_ACTIVE` entries.
 
 With `JOBS_DEDUPE_INFLIGHT=true` (default `false`), a `POST /papers/jobs`
 whose file (SHA-256), filename and options match a job the same server still
@@ -145,7 +152,11 @@ a load-balanced deployment answers the polls for a job another replica accepted
 and the active-job cap spans all replicas — see
 [Multiple bibr-serve replicas](../guides/deployment.md#multiple-bibr-serve-replicas).
 Each status carries `replica`, the instance executing the job; with the Redis
-store unreachable the job routes answer `503`. The service always pins one HTTP
+store unreachable the job routes answer `503`. A job whose replica stopped before
+it finished is failed with `503`, so the client resubmits it: with `error_code`
+`job_lost` when the replica died (by the first upload after its one-minute lease in
+Redis runs out), or `{"detail": "replica shut down before the job finished"}` after
+a clean shutdown. The service always pins one HTTP
 API process per instance—even with jobs disabled—because upload ownership and
 dispatch tracking are process-local. `PIPELINE_RESTART_WORKERS=false`
 fail-stops on worker death; `true` is an unsupported opt-in until the locked
@@ -164,7 +175,9 @@ curl -X POST http://localhost:8000/papers/extract \
 ```
 
 A missing or wrong token gets a `401` with a `WWW-Authenticate: Bearer`
-header. When `AUTH_API_KEY` is unset, the CLI permits loopback-only serving,
+header. A key with non-ASCII characters matches whether the client sends it
+UTF-8-encoded (curl) or latin-1-encoded (browsers, Python's `http.client`).
+When `AUTH_API_KEY` is unset, the CLI permits loopback-only serving,
 and the server then refuses non-loopback `Host` headers (`421`) and
 state-changing requests from other sites (`403`); network-visible binds
 require a key at least 32 characters long.
@@ -215,16 +228,16 @@ do not count the original extraction's LLM tokens as new usage.
 
 | Status | Meaning |
 |---|---|
-| `400` | Invalid input (missing filename, malformed/bounded option, duplicate or unknown multipart part) |
+| `400` | Invalid input (missing filename, malformed/bounded option, duplicate multipart part, an unexpected file part, too many text parts) |
 | `401` | Missing or invalid bearer token (`AUTH_API_KEY` set) |
 | `404` | Unknown job id (expired past `JOBS_TTL_SECONDS`, evicted by the retention limits, or never existed) |
 | `409` | Job result requested before the job finished |
 | `413` | Upload limit exceeded (50 MiB file / 51 MiB multipart envelope) |
-| `422` | Extraction processing error, including an LLM response that was truncated at its token limit (`error_code: llm_truncated`) or failed validation (`llm_invalid_output`); retrying the same request fails the same way |
+| `422` | Extraction processing error, including an LLM response that was truncated at its token limit (`error_code: llm_truncated`) or failed validation (`llm_invalid_output`); retrying the same request fails the same way. A failure caused by an internal or library exception only names its stage and code (`Processing failed in layout (layout_failed)`); the exception text goes to the server log, not the response. When a service or model the pipeline needs was down (an OCR server that refused or dropped the connection, a layout model or LLM server that could not start), the detail also carries `"outage": true` and the message ends in `: service temporarily unavailable`: the same request may succeed later |
 | `429` | Upload admission or async-job active cap reached |
 | `500` | Unexpected internal error |
 | `502` | Upstream service failed (OCR server, LLM API); an LLM failure carries `error_code` `llm_timeout` or `llm_failed` |
 | `503` | `/ready` reports an unavailable dependency or required classifier artifact |
-| `504` | Pipeline processing timed out |
+| `504` | The request ran out of `PIPELINE_TIMEOUT`, counted from when the worker took it up: waiting for an in-flight slot or for an identical extraction counts too |
 | `503` | Job store unreachable (`JOBS_STORE=redis`): the upload was dropped and nothing queued — retry later |
 | `507` | Insufficient temporary storage for the disk-backed upload spool |

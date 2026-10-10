@@ -36,6 +36,13 @@ _UNSTUBBED = ("test_server_port_guard", "test_http_runtime")
 
 
 @pytest.fixture(autouse=True)
+def _fresh_own_server_keys(monkeypatch):
+    # A server a test "starts" registers its per-launch key process-wide; a
+    # later test on the same port would otherwise share that server.
+    monkeypatch.setattr("bibr.local.http_runtime._OWN_SERVER_KEYS", {})
+
+
+@pytest.fixture(autouse=True)
 def _force_managed_port_probe_off(monkeypatch, request):
     if request.node.module.__name__.split(".")[-1] in _UNSTUBBED:
         yield

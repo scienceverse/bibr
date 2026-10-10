@@ -31,9 +31,10 @@ def load_exceptions(path: Path, today: date | None = None) -> list[Vulnerability
     with path.open("rb") as policy_file:
         document = tomllib.load(policy_file)
 
-    raw_entries = document.get("exception")
+    # No exceptions at all is the goal state, not a malformed policy.
+    raw_entries = document.get("exception", [])
     if not isinstance(raw_entries, list):
-        raise ValueError("policy must contain at least one [[exception]] entry")
+        raise ValueError("exception entries must be an array of [[exception]] tables")
 
     entries: list[VulnerabilityException] = []
     seen: set[str] = set()

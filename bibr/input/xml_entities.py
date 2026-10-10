@@ -50,17 +50,35 @@ def resolve_entity_refs(root) -> None:
     into the preceding sibling's tail — or the parent's text when it is first.
     Once the nodes are gone, every downstream text helper sees plain characters.
     """
-    for node in list(root.iter(etree.Entity)):
-        parent = node.getparent()
-        if parent is None:  # defensive: an entity cannot be the document root
+    parents = {node.getparent(): None for node in root.iter(etree.Entity)}  # ordered set
+    parents.pop(None, None)  # defensive: an entity cannot be the document root
+    for parent in parents:
+        _splice_entities(parent)
+
+
+def _splice_entities(parent) -> None:
+    # Each text or tail a run of entities merges into is written once:
+    # appending entity by entity copies it again for every entity, which is
+    # quadratic in a long run.
+    target = None  # the sibling whose tail takes the run; None: the parent's text
+    run: list[str] = []
+    for child in list(parent):
+        if child.tag is etree.Entity:
+            run += (_replacement(child), child.tail or "")
+            parent.remove(child)  # its tail goes with it
             continue
-        text = _replacement(node) + (node.tail or "")
-        previous = node.getprevious()
-        if previous is not None:
-            previous.tail = (previous.tail or "") + text
-        else:
-            parent.text = (parent.text or "") + text
-        parent.remove(node)
+        _merge_run(parent, target, run)
+        target, run = child, []
+    _merge_run(parent, target, run)
+
+
+def _merge_run(parent, target, run: list[str]) -> None:
+    if not run:
+        return
+    if target is None:
+        parent.text = (parent.text or "") + "".join(run)
+    else:
+        target.tail = (target.tail or "") + "".join(run)
 
 
 def parse_xml(data: bytes):

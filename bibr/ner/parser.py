@@ -16,6 +16,7 @@ the lowest-margin tags (e.g. URL DOIs).
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from bibr.utils.ml_extra import ml_import_error
@@ -31,12 +32,18 @@ from bibr.utils.text import strip_lone_surrogates
 from .checkpoint import resolve_checkpoint
 from .decode import decode_bio_spans, map_fields_to_paper_ref
 from .model import FeatureGatedEncoderCRF
+from .parser_onnx import count_truncated
 from .tags import BIO_TAGS
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_ENCODER = "answerdotai/ModernBERT-base"
 
 
 class RefParser:
+    #: References the last ``parse_batch`` cut off at ``max_seq_len`` tokens.
+    last_truncated_count = 0
+
     def __init__(
         self,
         ckpt_path: str | Path,
@@ -86,6 +93,7 @@ class RefParser:
         input_ids = enc["input_ids"].to(self.device)
         attn = enc["attention_mask"].to(self.device)
         offsets = enc["offset_mapping"][0].tolist()
+        self.last_truncated_count = count_truncated([ref_text], [offsets], self.max_seq_len)
         # Zeros (not None): the checkpoint's feature_proj.weight is ~0, so the
         # values are inert, but the residual re-applies the learned
         # feature_proj.bias to match the training forward path. None would drop
@@ -109,6 +117,7 @@ class RefParser:
         # length (less wasted compute). Results map back to original positions,
         # so output order is unchanged.
         slots.sort(key=lambda i: len(ref_texts[i]))
+        truncated = 0
         for start in range(0, len(slots), max(1, batch_size)):
             chunk_slots = slots[start : start + max(1, batch_size)]
             texts = [strip_lone_surrogates(ref_texts[i]) for i in chunk_slots]
@@ -129,11 +138,18 @@ class RefParser:
                 device=self.device,
             )
             preds = self.model.predict(input_ids, attn, token_features=token_features)
-            for slot, row_preds, row_offsets, text in zip(
-                chunk_slots, preds, offsets, texts, strict=True
+            # CRF decode trims each row to its mask length; align offsets.
+            row_offsets = [
+                row[: len(row_preds)] for row, row_preds in zip(offsets, preds, strict=True)
+            ]
+            truncated += count_truncated(texts, row_offsets, self.max_seq_len)
+            for slot, row_preds, row_offset, text in zip(
+                chunk_slots, preds, row_offsets, texts, strict=True
             ):
-                # CRF decode trims each row to its mask length; align offsets.
-                results[slot] = self._decode(row_preds, row_offsets[: len(row_preds)], text)
+                results[slot] = self._decode(row_preds, row_offset, text)
+        self.last_truncated_count = truncated
+        if truncated:
+            logger.debug("NER parser truncated %d of %d references", truncated, len(slots))
         return results
 
     def _decode(self, preds: list[int], offsets: list, text: str) -> dict[str, str | int]:

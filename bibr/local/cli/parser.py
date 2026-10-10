@@ -68,8 +68,9 @@ examples:
       --serve-url https://bibr.example.org --concurrency 2 --max-concurrency 4
   bibr batch report results/                          # ledger summary (--json for JSON)
 
-ledger: <out>/outcomes.jsonl — one JSON line per attempt (status, error_code,
-timings, stage times, LLM tokens, reference counts, warnings, build sha).
+ledger: <out>/outcomes.jsonl — one JSON verdict line per attempt (status,
+error_code, timings, stage times, LLM tokens, reference counts, warnings, build
+sha); a local run also writes a 'started' line before each paper.
 tables: <out>/tables/*.parquet — every successful paper as one Parquet file per
 table, keyed by paper_id (rewritten after each run; --no-tables to skip).
 """
@@ -347,7 +348,10 @@ def _build_parser() -> argparse.ArgumentParser:
     chew.add_argument(
         "-o",
         "--output",
-        help="Output path (file for single input, directory for batch)",
+        help=(
+            "Output path: a file for one input file, a directory for a directory, "
+            "a glob or several inputs (batch)"
+        ),
     )
     _add_pipeline_options(chew)
     chew.add_argument(
@@ -373,8 +377,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "reference strategies, enrichment, memory mode, models that would "
             "need downloading, output destinations) without processing anything. "
             "No network calls, no model loads. Prints a Blockers section and "
-            "exits 1 when missing inputs or failing preflights would fail the "
-            "real run."
+            "exits 1 when missing inputs, failing preflights or an -o that cannot "
+            "be written would fail the real run."
         ),
     )
 
@@ -385,8 +389,9 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Process a corpus — manifest text files (one path per line, '#' comments), "
             "directories (recursive) or files — writing <out>/<paper_id>.json per paper "
-            "and an append-only <out>/outcomes.jsonl ledger (one line per attempt). "
-            "Re-running the same command resumes: papers whose latest ledger line is "
+            "and an append-only <out>/outcomes.jsonl ledger (one verdict line per "
+            "attempt; a local run writes a 'started' line first). "
+            "Re-running the same command resumes: papers whose latest verdict is "
             "'ok' are skipped, failed ones too unless --retry-failed, everything runs "
             "again with --force. A paper that was interrupted, or refused by the serve's "
             "token, runs again anyway, and so does one that crashed or hit a service "
@@ -436,7 +441,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--retry-failed",
         action="store_true",
         help=(
-            "Also re-run papers whose latest ledger line is 'failed' (without it, an "
+            "Also re-run papers whose latest verdict is 'failed' (without it, an "
             "interruption or a rejected token runs again anyway, and a crash or a service "
             "outage until the paper has failed that way three times)"
         ),
@@ -585,8 +590,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "get_reference_citations, get_tables, get_figures and save_paper "
             "query the result in slices. One warm pipeline serves the whole "
             "session, so pipeline options are fixed at start via the flags "
-            "below (a subset of 'bibr chew'). Requires the 'mcp' extra. "
-            "Register with e.g.: claude mcp add bibr -- uv run bibr mcp"
+            "below (a subset of 'bibr chew'). The file tools reach only the "
+            "--allow-dir directories (default: the current directory). Requires "
+            "the 'mcp' extra. Register with e.g.: claude mcp add bibr -- uv run bibr mcp"
+        ),
+    )
+    mcp_parser.add_argument(
+        "--allow-dir",
+        action="append",
+        metavar="DIR",
+        help=(
+            "Directory chew_paper, load_paper and save_paper may access, with "
+            "symlinks resolved; repeat for several (default: the current directory)"
         ),
     )
     mcp_parser.add_argument(
@@ -707,7 +722,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "tables and the extraction_* processing lists — each row keyed by "
             "paper_id. Column types come from the export schema, so every file has "
             "the same columns however many papers it holds. Directories are "
-            "searched recursively for *.json; other JSON files are skipped."
+            "searched recursively for *.json, leaving out what 'bibr chew -o' writes "
+            "beside each export x.json (x.core.json, x.json.receipt.json, "
+            "x.json.enrichment.json, _quarantine/); other JSON files and exports of "
+            "another schema major are skipped."
         ),
     )
     tables_parser.add_argument(

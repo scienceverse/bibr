@@ -82,7 +82,7 @@ def test_atomic_writer_preserves_prior_destination_on_pre_replace_failure(tmp_pa
         atomic_write_json(destination, {"bad": object()})
 
     assert destination.read_text(encoding="utf-8") == '{"old":true}'
-    assert list(tmp_path.glob(".paper.json.*.tmp")) == []
+    assert list(tmp_path.glob(".*.tmp")) == []
 
 
 def test_disposition_precedence_prefers_source_then_identity_then_references():

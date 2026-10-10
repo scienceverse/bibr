@@ -51,6 +51,56 @@ console or the export; for a long document, compare the length of the export's
 limits reject oversized pages before rasterization. Size memory for the
 processed pages and concurrent files.
 
+**DOCX limits.** A table cell spanning more than 1,000 grid columns is read as
+1,000 wide. A table's grid cells are its rows × its widest row, plus 100 for
+each column; a merged cell counts once per grid cell it covers, text included.
+A table of more than 1,000,000 grid cells, or one that takes the document past
+4,000,000 grid cells or 64 MiB of table HTML, is dropped with a
+`DOCX_TABLE_DROPPED` warning; its caption stays in the body text. The HTML is
+measured as rendered: escaped text and cell markup in every grid cell, at the
+bytes per character its widest character needs. Pictures past the first 1,000
+are dropped (`DOCX_FIGURES_DROPPED`). Figures carry at most 128 MiB of image data in
+total, an image counting once per figure that shows it; the figures past that
+keep their caption without an image (`DOCX_FIGURE_IMAGES_OMITTED`). A footnote
+or endnote referenced more than once is read once, with one `foot` reference
+from each paragraph that cites it. A note, hyperlink, text box or equation
+nested inside another of its kind is read as part of the outermost one, and a
+picture inside nested drawings is one figure.
+
+**HTML and ePub limits.** An HTML file over 48 MiB is rejected at validation
+as invalid input, before the pure-Python html5lib parser reads it. HTML is
+read in the encoding its byte-order mark names (UTF-8, or UTF-16 as Word's
+"Save as Unicode" writes it), else its `<meta charset>`; an ePub chapter in
+the encoding its byte-order mark or XML declaration names.
+
+**HTML table limits** (HTML and ePub tables, and the table HTML OCR returns).
+A `rowspan` ends at the table's last row, as a browser draws it, and more
+than 100 header rows are read as data rows. A table may be at most twice as
+wide as its widest row of cells plus 20 columns, and hold at most 20 slots for
+each cell and row it has plus 1,000. A `colspan` ends at that width, so a
+footnote row with `colspan="100"` under five columns gives 30 columns. A
+table wider than that all the same (one wide row padding many short rows, or
+rowspans piling up row after row) gets no `contents`. A table is also
+measured as its HTML renders, as DOCX tables are: escaped text and cell markup
+in every slot, a spanned cell's text once for every slot it fills, at the
+bytes per character its widest character needs. A table of more than 16 MiB
+gets no `contents` either. In HTML and ePub input, neither does a table that
+takes the document past 64 MiB of tables or 4,000,000 table cells (rows ×
+widest row); an ePub's chapters are one document. Like a table without cells,
+an HTML table then keeps its caption and markup when the caption labels it
+("Table 3. …") and is dropped otherwise, and a `TABLE_CONTENTS_OMITTED`
+warning counts these tables. An OCR table that cannot be read is dropped with
+`OCR_TABLE_DROPPED`.
+
+**JATS table limits.** JATS cells are read without their spans, and each row
+is padded to the widest. The HTML table limits apply: at most 20 slots for
+each cell and row plus 1,000, 16 MiB per table measured as rendered, and
+64 MiB and 4,000,000 cells for the document's tables together. A `<table>`
+nested in another is read once: its rows follow the row holding it, and its
+text is left out of the cell around it. A table over the limits gets no
+`contents` and a `TABLE_CONTENTS_OMITTED` warning; its `table-wrap` is kept
+when it has a label or caption and dropped otherwise.
+
 **Native text bypass and recognition.** `bibr/ocr/pdf_inspection.py` inspects
 embedded PDF text, metadata, outline headings, and reference-line geometry
 under one PDFium walk. With `OCR_NATIVE_TEXT_ENABLED=true` (the default),
@@ -111,7 +161,7 @@ Opt-in Crossref (and optional bibr-resolver) enrichment of extracted references:
 - Bibliographic search as fallback (fuzzy title matching)
 - Matches stay in `bib_match` and `metadata_match`; explicit `fill`/`replace` consolidation can merge accepted reference fields into `bib`
 - Crossref records also bring identifiers: author ORCIDs and affiliation ROR IDs, funders (Open Funder Registry DOI, ROR ID, awards) and the version-of-record license, which land on the match rows
-- With enrichment on, affiliation strings and funder names are matched to ROR (`bibr/clients/ror.py`, `ROR_ENRICH`, default on) into `affiliation_match` and `funding_match`. Only ROR's own `chosen` match is kept. Set `ROR_CLIENT_ID` for ROR's higher rate limit (2000 instead of 50 requests per 5 minutes); strings not matched within `ROR_ENRICH_TIMEOUT` stay unmatched with a warning
+- With enrichment on, affiliation strings and funder names are matched to ROR (`bibr/clients/ror.py`, `ROR_ENRICH`, default on) into `affiliation_match` and `funding_match`. Only ROR's own `chosen` match is kept. Set `ROR_CLIENT_ID` for ROR's higher rate limit (2000 instead of 50 requests per 5 minutes); strings not matched within `ROR_ENRICH_TIMEOUT`, or whose lookup failed, stay unmatched with a warning, and a malformed ROR record counts as no match. ROR never marks enrichment partial
 - Off by default. `CROSSREF_ENRICH=true` enables it for a deployment; per run, `bibr chew --crossref` / `--no-crossref`, `chew(crossref=True|False)` and the serve API's `crossref` form field override the setting either way (`extraction.settings.crossref_enrich` in the output records the effective value)
 - A served request can enable both reference parsing and Crossref even when
   `REF_PARSE_STRATEGY=off` is the deployment default. Enrichment is skipped when

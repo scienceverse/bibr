@@ -545,18 +545,21 @@ class TextHandlersMixin:
 
         Uses ``bbox_2d`` coordinates (normalised 0–1000) from glmocr regions.
         Returns ``True`` when spatial info is missing so the parser falls back
-        to sequential order (preserving legacy behaviour).
+        to sequential order (preserving legacy behaviour). A malformed box
+        (fewer than four coordinates, from bad OCR JSON or a corrupted cache)
+        counts as missing, as it does for the region's provenance.
         """
         if page_a is None or page_b is None:
             return True  # missing page info → trust sequential order
         if page_a != page_b:
             return False  # different pages → not nearby
-        if bbox_a is None or bbox_b is None:
+        box_a, box_b = bbox_to_tuple(bbox_a), bbox_to_tuple(bbox_b)
+        if box_a is None or box_b is None:
             return True  # no bbox info → trust sequential order
 
         # Vertical gap between the two bboxes (bbox format: [x1, y1, x2, y2])
-        a_top, a_bottom = bbox_a[1], bbox_a[3]
-        b_top, b_bottom = bbox_b[1], bbox_b[3]
+        a_top, a_bottom = box_a[1], box_a[3]
+        b_top, b_bottom = box_b[1], box_b[3]
 
         if a_bottom <= b_top:
             vertical_gap = b_top - a_bottom
@@ -569,16 +572,20 @@ class TextHandlersMixin:
 
     @staticmethod
     def _merge_bboxes(a: list | None, b: list | None) -> list | None:
-        """Return the bounding box that encloses both *a* and *b*."""
-        if a is None:
-            return b
-        if b is None:
-            return a
+        """Return the bounding box that encloses both *a* and *b*.
+
+        A malformed box counts as missing, as in ``_is_bbox_nearby``.
+        """
+        box_a, box_b = bbox_to_tuple(a), bbox_to_tuple(b)
+        if box_a is None:
+            return None if box_b is None else list(box_b)
+        if box_b is None:
+            return list(box_a)
         return [
-            min(a[0], b[0]),
-            min(a[1], b[1]),
-            max(a[2], b[2]),
-            max(a[3], b[3]),
+            min(box_a[0], box_b[0]),
+            min(box_a[1], box_b[1]),
+            max(box_a[2], box_b[2]),
+            max(box_a[3], box_b[3]),
         ]
 
     @staticmethod

@@ -128,6 +128,24 @@ class UploadAdmissionGate:
             admission.release()
 
 
+def route_path(scope) -> str:
+    """The path Starlette routes ``scope`` on: ``scope["path"]`` less ``root_path``.
+
+    Path gates must decide on this rather than ``request.url.path``, which
+    Starlette before 1.x rebuilds from the client's ``Host`` header (a Host of
+    ``x/health?`` made any path read as ``/health``). Mirrors Starlette's
+    ``get_route_path``, which is private.
+    """
+    path: str = scope["path"]
+    root_path: str = scope.get("root_path", "")
+    if root_path and path.startswith(root_path):
+        if path == root_path:
+            return ""
+        if path[len(root_path)] == "/":
+            return path[len(root_path) :]
+    return path
+
+
 def base64_envelope(size: int) -> int:
     """Bytes a ``size``-byte file occupies once base64-encoded (4 per 3, padded)."""
     return 4 * ((max(0, size) + 2) // 3)
@@ -193,7 +211,7 @@ class BodyAdmission:
         if (
             scope["type"] != "http"
             or scope.get("method") != "POST"
-            or scope.get("path") not in self._paths
+            or route_path(scope) not in self._paths
         ):
             await self._app(scope, receive, send)
             return
@@ -290,10 +308,11 @@ def add_upload_admission(
 
     @app.middleware("http")
     async def _upload_admission(request, call_next):
-        if request.method != "POST" or request.url.path not in upload_paths:
+        path = route_path(request.scope)
+        if request.method != "POST" or path not in upload_paths:
             return await call_next(request)
         try:
-            with gate.admit(inflight=request.url.path in inflight_paths) as admission:
+            with gate.admit(inflight=path in inflight_paths) as admission:
                 setattr(request.state, _SPOOL_RELEASE_ATTR, admission.release_spool)
                 request.state.upload_admission = admission
                 return await call_next(request)
