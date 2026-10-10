@@ -82,17 +82,23 @@ def _minimal_paper(**overrides) -> Paper:
     return Paper(**defaults)
 
 
-def test_build_paper_export_matches_dictionary_export():
-    from bibr.export import PaperExport
+def test_build_paper_export_matches_dictionary_export(monkeypatch):
+    from bibr.export import PaperExport, json_export
 
     paper = _minimal_paper()
 
+    # Both builds stamp ``extraction.completed_at`` from the wall clock, so pin
+    # the first real extraction block and reuse it; otherwise the comparison
+    # flakes whenever the two builds straddle a second boundary.
+    pinned = json_export._minimal_extraction()
+    monkeypatch.setattr(json_export, "_minimal_extraction", lambda: dict(pinned))
+
     model = build_paper_export(paper, validate=False)
+    exported = export_paper_to_json(paper, validate=False)
 
     assert isinstance(model, PaperExport)
-    assert model.model_dump(by_alias=True, exclude_unset=True) == export_paper_to_json(
-        paper, validate=False
-    )
+    assert exported["extraction"]["completed_at"] == pinned["completed_at"]
+    assert model.model_dump(by_alias=True, exclude_unset=True) == exported
 
 
 def test_citation_linking_receipt_exports_losslessly_and_round_trips_schema():
