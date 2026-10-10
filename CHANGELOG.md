@@ -259,6 +259,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- A scan path, off by default. It classes each inspected page as born-digital, born-digital with
+  a broken text layer, or a scan. `PIPELINE_SCAN_ARTICLE_SPLIT=true` drops the regions of
+  neighbouring articles from scanned pages before parsing, so the previous or next article's
+  references no longer leak into the reference list (#146). `OCR_CONSENSUS_BACKEND` reads the text
+  regions of scanned pages with a second recognizer and escalates the regions where the two
+  disagree most, to `OCR_ESCALATION_BACKEND` when one is set (`OCR_RECOGNIZERS_DISAGREE`).
+
 - An optional document layer (`pipeline.document_layer`, environment variable
   `PIPELINE_DOCUMENT_LAYER`; off by default) keeps what the PDF itself says about each
   page, so later stages can use it as evidence: text spans and lines with their fonts,
