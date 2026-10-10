@@ -135,6 +135,39 @@ flag, and every candidate records the roles the model contributed (`model_roles`
 top scores (`model_scores`). Native DOCX/JATS/HTML inputs have no OCR regions and are never
 scored.
 
+## Page-level front-matter model
+
+**Module:** `bibr/extract/front_page_model.py` (prompt contract, client), consumed by
+`bibr/extract/front_matter.py`
+
+An optional vision-language model (a Qwen3.5 LoRA trained from publisher JATS
+projected onto cached OCR regions) reads the first `ML_FRONT_PAGE_MODEL_PAGES` pages whole: the
+page images plus every layout region with its id, label, box and OCR text. It answers which regions
+belong to the target article, the one whose full text follows, together with its title, authors
+with affiliation markers, affiliations and DOI. It is served behind any OpenAI-compatible
+`/v1/chat/completions` endpoint (`ML_FRONT_PAGE_MODEL_BASE_URL`, served name
+`ML_FRONT_PAGE_MODEL_NAME`), asked with JSON-schema guided decoding at temperature 0, and runs in
+the parse stage while the OCR regions are resident. Papers served from the OCR cache have no
+rendered pages and are sent as layout and text only.
+
+`ML_FRONT_PAGE_MODEL_MODE` decides what the answer may change in `resolve_front_matter`:
+
+- `off` (default): ignored.
+- `arbiter`: used only when the heuristics abstain on several blocks. The block holding at least
+  `ML_FRONT_PAGE_MODEL_MIN_SHARE` of the target rows is selected.
+- `primary`: the model selects whenever it points at a block. The heuristics' own selection is kept
+  as a disagreement check: if it shares no row with the model's target, the paper abstains
+  (`page_model_disagreement:<method>`), so `VAL_METADATA_MULTI_ITEM` is still raised where it is
+  required.
+
+When the target rows straddle several blocks (an over-split record), they are regrouped into one
+block, provided a title row is among them. When the chosen block also holds a title row the model
+left out (a second article the grouping did not split), it is trimmed to the target rows. A
+supplied expected DOI, title or block hint always outranks the model, and a table-of-contents
+listing is never selected. Every resolution the model touched carries `front_page_model` and a
+`page_model_*` reason flag. An answer that names a region the page does not have is ignored.
+Failures are soft: an unreachable server or a malformed answer leaves the heuristics alone.
+
 ## Paper type classifier
 
 **Module:** `bibr/structure/paper_classifier.py` (taxonomy constants), `bibr/extract/core_metadata.py` (LLM classification, via `CoreMetadataExtractor`; `bibr/extract/extractor.py` delegates to it)
