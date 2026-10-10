@@ -1847,6 +1847,54 @@ class MlOptions(_BibrSettings):
         description="Front-role probability of a non-title role above which a title seed cannot "
         "root a second front-matter record. 1.0 disables the veto.",
     )
+    # Page-level front-matter model (bibr/extract/front_page_model.py): a
+    # vision-language LoRA served behind an OpenAI-compatible endpoint that
+    # reads pages 1-2 whole and names the regions of the target article.
+    # "arbiter" consults it only where the heuristics abstain on several
+    # records; "primary" lets it choose the record and keeps the heuristics
+    # as a disagreement check (VAL_METADATA_MULTI_ITEM when they conflict).
+    front_page_model_mode: Literal["off", "arbiter", "primary"] = Field(
+        "off",
+        description="How the page-level front-matter model selects the target record: off, "
+        "arbiter (only where the heuristics abstain) or primary (the model selects; a "
+        "conflicting heuristic selection abstains).",
+    )
+    front_page_model_base_url: str | None = Field(
+        None,
+        description="OpenAI-compatible server root serving the page-level front-matter model. "
+        "Null keeps the model off whatever the mode.",
+    )
+    front_page_model_name: str = Field(
+        "bibr-front-page",
+        description="Served model name (the LoRA alias on a vLLM server).",
+    )
+    front_page_model_api_key: str | None = Field(
+        None, description="Bearer key for the front-page model server, if it requires one."
+    )
+    front_page_model_timeout: float = Field(
+        60.0, gt=0, description="Per-paper request timeout in seconds for the front-page model."
+    )
+    front_page_model_pages: int = Field(
+        2, ge=1, le=4, description="Leading processed pages shown to the front-page model."
+    )
+    front_page_model_send_images: bool = Field(
+        True,
+        description="Attach the rendered page images. Papers served from the OCR cache have no "
+        "rendered pages and are always sent as layout and text only.",
+    )
+    front_page_model_image_max_side: int = Field(
+        1288,
+        ge=256,
+        le=4096,
+        description="Long side in pixels the page images are downscaled to before sending.",
+    )
+    front_page_model_min_share: float = Field(
+        0.8,
+        gt=0.5,
+        le=1.0,
+        description="Share of the model's target regions that must fall in one front-matter "
+        "block for the model to select that block.",
+    )
     classifiers_required: bool = Field(
         False,
         description="Fail readiness when a configured local classifier cannot be loaded. "
