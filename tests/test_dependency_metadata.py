@@ -10,7 +10,7 @@ def test_vllm_extra_is_limited_to_linux_cuda_python_range():
     optional = _pyproject()["project"]["optional-dependencies"]
 
     assert optional["vllm"] == [
-        "vllm==0.27.0; sys_platform == 'linux' and platform_machine == 'x86_64' "
+        "vllm==0.31.0; sys_platform == 'linux' and platform_machine == 'x86_64' "
         "and python_version < '3.14'",
         "openai>=2.54.0,<3; sys_platform == 'linux' and platform_machine == 'x86_64' "
         "and python_version < '3.14'",

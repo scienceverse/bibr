@@ -170,6 +170,11 @@ class ClassifierResources:
         results = await asyncio.gather(*(self.classify_section(item) for item in items))
         return None if all(result is None for result in results) else list(results)
 
+    @property
+    def started(self) -> bool:
+        """Whether start() completed, after which status() is sticky until close()."""
+        return self._started
+
     def status(self) -> dict[str, ClassifierStatus]:
         return {"paper": self._paper.status, "section": self._section.status}
 

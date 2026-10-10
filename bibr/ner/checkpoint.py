@@ -1,7 +1,8 @@
 """Resolve NER checkpoint identifiers to a local file path.
 
 Accepts either:
-  - a local filesystem path (returned unchanged if it exists)
+  - a local filesystem path: a ``Path``, or a string not shaped like a Hub id
+    (absolute, ``./``, ``../`` or ``~`` paths, bare file names)
   - an HF Hub repo id, with optional filename: ``org/repo`` or
     ``org/repo:filename.pt``. When no filename is given, the resolver
     expects exactly one ``*.pt`` (or ``*.bin``/``*.safetensors``) file in the
@@ -17,26 +18,31 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from bibr.utils.ml_runtime import is_hub_repo_id
+
 _CKPT_SUFFIXES = (".pt", ".bin", ".safetensors")
 
 
 def resolve_checkpoint(ckpt: str | Path, revision: str | None = None) -> str:
     """Return a local path to the checkpoint file.
 
-    If ``ckpt`` already points at an existing local file, return it as a
-    string. Otherwise treat it as ``repo_id[:filename]`` and download via the
-    HF Hub at ``revision`` (defaulting to the Hub's default branch).
+    A ``Path``, or a string that is not shaped like ``org/repo[:filename]``
+    (absolute, ``./``, ``../`` or ``~`` paths, bare file names), names a local
+    file and is returned as a string. A Hub-shaped id is downloaded via the
+    HF Hub at ``revision`` (defaulting to the Hub's default branch) and never
+    looked up relative to the working directory, where a planted
+    ``./org/repo`` would replace the pinned checkpoint.
     """
     ckpt_str = str(ckpt)
-    if Path(ckpt_str).exists():
-        return ckpt_str
-
     if ":" in ckpt_str:
         repo_id, filename = ckpt_str.split(":", 1)
     else:
         repo_id, filename = ckpt_str, None
 
-    if repo_id.count("/") != 1:
+    if isinstance(ckpt, Path) or not is_hub_repo_id(repo_id, filename=filename):
+        local = Path(ckpt_str).expanduser()
+        if local.exists():
+            return str(local)
         raise ValueError(
             f"Checkpoint {ckpt_str!r} is not a local file and not a valid "
             "HF Hub identifier (expected 'org/repo' or 'org/repo:filename')."

@@ -40,6 +40,10 @@ _FUZZY_MIN_SCORE = 85
 # reliably (page numbers, stray markers) — skip it rather than fuzzy-match it
 # somewhere destructive.
 _MIN_LINE_PROBE = 12
+# Below this many distinct line probes, a C-level search of the text per probe
+# beats one Python-level pass over it; from here on the pass is cheaper, and it
+# keeps the cost linear in the text however many lines there are.
+_INDEX_MIN_PROBES = 1024
 
 
 def _anchor(s: str | None) -> str:
@@ -153,33 +157,65 @@ def align_line_starts(ref_text: str, line_texts: list[str], is_boundary: list[bo
     a fuzzy attempt (OCR noise) before being dropped. Line text is
     whitespace-collapsed to match ``_build_ref_text``'s row collapsing.
     """
+    lines = [collapse_ws(line) for line in line_texts]
+    occurrences = _probe_positions(
+        ref_text, {full[:ANCHOR_LEN] for full in lines if len(full) >= _MIN_LINE_PROBE}
+    )
     cursor = 0
     starts: list[int] = []
-    for line, boundary in zip(line_texts, is_boundary, strict=True):
-        full = collapse_ws(line)
+    claimed: set[int] = set()
+    for full, boundary in zip(lines, is_boundary, strict=True):
         probe = full[:ANCHOR_LEN]
         if len(probe) < _MIN_LINE_PROBE:
             continue
-        positions = _all_exact_positions(ref_text, probe)
+        positions = occurrences[probe]
         forward = [p for p in positions if p >= cursor]
-        chosen = _choose_exact_position(ref_text, full, forward, claimed=set(starts))
+        chosen = _choose_exact_position(ref_text, full, forward, claimed=claimed)
         advance = True
         if chosen == -1 and boundary:
             behind = [p for p in positions if p < cursor]
-            chosen = _choose_exact_position(ref_text, full, behind, claimed=set(starts))
+            chosen = _choose_exact_position(ref_text, full, behind, claimed=claimed)
             advance = False
             if chosen == -1:
                 fuzzy = _best_fuzzy_position(ref_text[cursor:], probe)
-                if fuzzy != -1 and cursor + fuzzy not in starts:
+                if fuzzy != -1 and cursor + fuzzy not in claimed:
                     chosen = cursor + fuzzy
                     advance = True
         if chosen == -1:
             continue
         if boundary:
             starts.append(chosen)
+            claimed.add(chosen)
         if advance:
             cursor = chosen + len(probe)
     return starts
+
+
+def _probe_positions(text: str, probes: set[str]) -> dict[str, list[int]]:
+    """Every offset in *text* at which each of *probes* occurs, in order and
+    overlapping occurrences included, as :func:`_all_exact_positions` finds them.
+
+    Searching the whole text once per line made a long reference section
+    quadratic, so past ``_INDEX_MIN_PROBES`` probes one pass over the text
+    serves them all: a full-length probe is looked up whole, a shorter one by
+    its first ``_MIN_LINE_PROBE`` characters and then checked in full.
+    """
+    if len(probes) < _INDEX_MIN_PROBES:
+        return {p: _all_exact_positions(text, p) for p in probes}
+    whole = {p for p in probes if len(p) == ANCHOR_LEN}
+    heads = {p[:_MIN_LINE_PROBE] for p in probes if len(p) < ANCHOR_LEN}
+    by_whole: dict[str, list[int]] = {}
+    by_head: dict[str, list[int]] = {}
+    for i in range(len(text) - _MIN_LINE_PROBE + 1):
+        key = text[i : i + ANCHOR_LEN]
+        if key in whole:
+            by_whole.setdefault(key, []).append(i)
+        if heads and key[:_MIN_LINE_PROBE] in heads:
+            by_head.setdefault(key[:_MIN_LINE_PROBE], []).append(i)
+    found = {p: by_whole.get(p, []) for p in whole}
+    for p in probes - whole:
+        found[p] = [i for i in by_head.get(p[:_MIN_LINE_PROBE], ()) if text.startswith(p, i)]
+    return found
 
 
 def starts_to_spans(ref_text: str, starts: list[int]) -> list[tuple[int, int]]:

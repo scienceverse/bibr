@@ -38,7 +38,9 @@ is documented in the [REST API reference](../reference/rest-api.md); this
 page focuses on running the server. `/ready` checks the OCR endpoint,
 configured classifier artifacts, and Redis when response caching is enabled.
 Without a valid bearer token, it reports only the overall status; authenticated
-callers also receive the individual checks and `BIBR_BUILD_SHA`.
+callers also receive the individual checks and `BIBR_BUILD_SHA`. The OCR, Redis
+and job-store results are reused for 2 seconds, so probe traffic, which needs
+no credentials, cannot multiply requests to those services.
 
 ## Upload ingress and worker handoff
 
@@ -46,12 +48,13 @@ callers also receive the individual checks and `BIBR_BUILD_SHA`.
 underlying `POST /_bibr/inference` route is private descriptor dispatch, not a
 second upload API; direct HTTP requests to it always receive `404`.
 
-The API process accepts exactly one `file` part and at most the eight documented
-option fields. Duplicate/unknown fields, a second file, or any option value over
-64 bytes is rejected with `400` before descriptor creation. Starlette retains at
-most 1 MiB of the one file in API memory by default before its multipart spool
-rolls to disk, then bibr streams it into an owner-only temporary directory. The
-default limits are separate:
+The API process accepts exactly one `file` part and the nine documented option
+fields, each at most once; text fields it does not know are ignored, up to 25
+text parts in all. A duplicate field, a second file, more text parts or any
+option value over 64 bytes is rejected with `400` before descriptor creation.
+Starlette retains at most 1 MiB of the one file in API memory by default before
+its multipart spool rolls to disk, then bibr streams it into an owner-only
+temporary directory. The default limits are separate:
 
 | Variable | Default | Applies to |
 |---|---:|---|
@@ -102,7 +105,9 @@ duplicate this way: they route through a shared `GpuBatcher` (one
 collector coroutine + one worker thread per model) that serializes
 forward passes and coalesces concurrent requests' pages/texts into fuller
 batches, so peak VRAM stays bounded to one batch regardless of how many
-requests are in flight.
+requests are in flight. When a batch fails, each of its items is run once on
+its own, so a page or text that breaks the model fails only the request it
+came from.
 
 Scale concurrency with these settings:
 
@@ -125,7 +130,11 @@ Scale concurrency with these settings:
 
 `PIPELINE_MAX_PAGES` caps the requested processing range; raise it explicitly
 for longer documents and size memory for the concurrent file count.
-`PIPELINE_TIMEOUT` defaults to 300 seconds.
+`PIPELINE_TIMEOUT` (default 300 seconds) bounds a whole extraction request,
+not only the pipeline run: time spent waiting for a
+`PIPELINE_MAX_INFLIGHT_REQUESTS` slot or for an identical extraction (the
+response cache's single-flight) counts against it, and a request that runs
+out answers `504`.
 
 ### Why there is no worker-count setting
 
@@ -189,14 +198,23 @@ the bearer token, and `/papers/extract` are unchanged. Replicas that share a Red
 but must not see each other's jobs (staging next to production, say) get distinct
 `JOBS_KEY_PREFIX` values.
 
+A Redis blip as a job finishes does not lose its result: the replica retries
+recording the outcome with backoff for up to a minute.
+
 Two consequences of keeping execution on the receiving replica:
 
-- A replica that *crashes* mid-job leaves its queued/running jobs reporting their
-  last status until a 24-hour safety TTL reaps them, and they hold cap slots that
-  long. A clean shutdown is different: the replica marks the jobs it abandons
-  `failed` with `503 replica shut down before the job finished`, so they free their
-  slots at once and clients know to resubmit. Drain a replica before stopping it
-  (stop routing new uploads to it, let its running jobs finish) to avoid even that.
+- Each queued/running job carries a one-minute lease in Redis that the replica
+  executing it keeps renewing. A replica that *crashes* mid-job (or cannot reach
+  Redis for longer than that minute) stops renewing; once the lease runs out, the
+  next upload to any replica marks the job `failed` with `503` and
+  `{"detail": "replica lost the job before it finished", "error_code": "job_lost"}`
+  and frees its cap slot, so clients know to resubmit. Jobs accepted by a replica
+  running a bibr release without job leases still wait for the 24-hour safety TTL
+  (mixed versions during a rolling upgrade are fine). A clean
+  shutdown fails the jobs it abandons at once, with `503 replica shut down before the
+  job finished` (it gives up after five seconds if Redis does not answer, and leaves
+  the rest to the leases). Drain a replica before stopping it (stop routing new
+  uploads to it, let its running jobs finish) to avoid even that.
 - Work spreads by which replica receives the upload, not by queue depth.
 
 **Follow-up (not implemented): a shared queue.** Letting an idle replica execute a
@@ -212,9 +230,13 @@ spawned inference worker each write formatted lines (`time level logger:
 message`) to stderr, where Docker and systemd collect them. `SERVE_LOG_LEVEL`
 (default `info`) sets the level for bibr's own loggers and is handed to uvicorn
 and LitServe; HTTP client libraries are held at `warning` so request URLs are
-not logged. Every sink carries the secret scrubber, so bearer tokens, URL
-credentials and `?key=` query strings are masked before they are written,
-tracebacks included.
+not logged. Every sink carries the secret scrubber, so bearer tokens, API-key
+headers, URL credentials, `?key=`-style query strings and URL signatures,
+quoted `"api_key": "…"` entries (any key ending in `api_key`, `token`,
+`secret` or `password`) and known key shapes (Google, OpenAI, Anthropic,
+Groq, Hugging Face, GitHub, AWS access key IDs) are masked before they are
+written, tracebacks included. Enrichment warnings in the export name
+a failed lookup by its error type and HTTP status, not by its request URL.
 
 Metering (`METER_ENABLED`, default on) emits one JSON line per HTTP request
 from the API process and one per extraction — with LLM token usage — from the
@@ -382,7 +404,10 @@ or `#` work.
 **Split deployment** (bibr-serve and the OCR server on different hosts):
 the bundled OCR container has no published host port. Expose it through a
 reverse proxy or an explicit Compose override before pointing another host at
-it. For example, publish port 8080 only on the GPU host's private interface:
+it, and set the same `OCR_API_KEY` in the `.env` on both hosts: `bibr-ocr`
+then rejects requests without it as a bearer token (its `/health` stays open
+for health checks), and `bibr-serve` sends it. For example, publish port 8080
+only on the GPU host's private interface:
 
 ```yaml
 # compose.ocr-port.yml — replace the address with your GPU host's private IP
@@ -393,6 +418,8 @@ services:
 ```
 
 ```bash
+# Both hosts, in .env: OCR_API_KEY=<output of: openssl rand -hex 32>
+
 # GPU host — OCR only
 docker compose -f docker-compose.yml -f compose.ocr-port.yml --profile ocr up -d
 
@@ -413,8 +440,8 @@ a Redis port to a host-side `bibr chew` process.
 the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/)
 on the host. `bibr-serve`'s own GPU models (layout detector, sentence
 segmenter) are lighter; building with `--build-arg WITH_GPU=true` swaps in
-`onnxruntime-gpu`, but the compose file only declares a GPU device
-reservation for `bibr-ocr` — add one to `bibr-serve` too (or rely on
+the `onnxruntime-gpu` build `uv.lock` pins, but the compose file only
+declares a GPU device reservation for `bibr-ocr` — add one to `bibr-serve` too (or rely on
 `nvidia` as the Docker default runtime) if you want its models on GPU as
 well. Without a GPU, `bibr-serve` still runs — the layout detector and
 segmenter fall back to CPU (see `LAYOUT_USE_GPU` / `SEGMENTER_USE_GPU`
@@ -436,9 +463,9 @@ Set these in `.env` (run `bibr config example --full` or see the
 | `OCR_BASE_URL` | External OCR server root URL, without a `/v1` suffix | `http://localhost:8080` (Compose: private `bibr-ocr`) |
 | `OCR_MODEL` | Served model name | `glm-ocr`; `paddle-ocr-vl-1.6` under `OCR_BACKEND=paddle-http` |
 | `OCR_PROFILE` | `paddle` or `glm`; required for custom aliases | inferred for known names |
-| `OCR_API_KEY` | Bearer credential sent to a protected OCR server | — |
+| `OCR_API_KEY` | Bearer credential sent to a protected OCR server; Compose's `bibr-ocr` requires it when set | — |
 | `OCR_ALLOW_INSECURE_HTTP` | Permit non-loopback plain HTTP (private networks only) | `false` (Compose: `true`) |
-| `WTPSPLIT_MODEL` | Short wtpsplit name, full Hugging Face repo ID, or existing local bundle directory | `sat-6l-sm` |
+| `WTPSPLIT_MODEL` | Short wtpsplit name, full Hugging Face repo ID, or existing local bundle directory written as a path (absolute, or starting with `./`, `../` or `~`) | `sat-6l-sm` |
 | `WTPSPLIT_THRESHOLD` | Optional explicit sentence-boundary threshold in `[0, 1]` | wtpsplit model default |
 | `WTPSPLIT_BLOCK_SIZE` | Optional explicit inference block size; set with `WTPSPLIT_STRIDE` | wtpsplit model default |
 | `WTPSPLIT_STRIDE` | Optional explicit inference stride; set with `WTPSPLIT_BLOCK_SIZE` | wtpsplit model default |
@@ -547,6 +574,14 @@ At volume, Crossref enrichment is rate-limited (`CROSSREF_RATE_LIMIT_RPM`,
 default `200`; raise it once you've set `CROSSREF_API_EMAIL` or have an
 API key) and can optionally be cached in Redis across requests
 (`CROSSREF_REDIS_CACHE`, off by default — falls back to `REDIS_URL`).
+With `REDIS_URL` set, every process that uses it shares one Crossref rate
+limit through Redis. The LLM rate limit is shared per provider and model:
+processes with the same `LLM_PROVIDER` and `LLM_MODEL` share one
+`LLM_RATE_LIMIT_RPM` budget, and a process calling another provider or model
+has its own. While a rolling upgrade from an earlier release is in progress,
+old and new replicas meter LLM calls separately. If Redis stops answering, each
+process keeps enforcing the limit on its own, logs one warning, and tries
+Redis again every 30 seconds.
 Both cache tiers also remember a DOI lookup's 404 for
 `CROSSREF_NOT_FOUND_TTL_SECONDS` (default one day; `0` disables), so a
 re-run does not spend a request on each DOI Crossref has no record of.

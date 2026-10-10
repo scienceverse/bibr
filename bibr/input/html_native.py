@@ -12,10 +12,12 @@ from __future__ import annotations
 import itertools
 import logging
 import re
+import unicodedata
 from collections.abc import Iterator
 from typing import Any
 
 import pandas as pd
+import webencodings  # html5lib's encoding table (a dependency of html5lib)
 from bs4 import BeautifulSoup, CData, NavigableString, Tag
 
 from bibr.input.mathml_whitespace import FlatText, mspace_separates
@@ -33,7 +35,7 @@ from bibr.paper_contents import (
 )
 from bibr.structure.assembler import DeferredText, DocumentAssembler
 from bibr.structure.float_labels import caption_label
-from bibr.structure.html_table import html_table_frame, is_hidden_table
+from bibr.structure.html_table import TableBudget, html_table_frame, is_hidden_table
 from bibr.structure.xref_utils import URL_RE, detect_xrefs
 from bibr.utils.text import clean_extracted_url, collapse_ws
 
@@ -121,6 +123,16 @@ _INLINE_TAGS = frozenset(
 # above any real article/JATS/EPUB spine document, below what makes parsing a
 # DoS. Kept below the serve upload cap so it fails fast on the parse path.
 _MAX_HTML_BYTES = 48 * 1024 * 1024
+# How much of a file inspect_html reads for markup before parsing it: far
+# more than a doctype, a licence comment or inline styles ahead of the first
+# element.
+_SNIFF_BYTES = 1024 * 1024
+_ELEMENT_RE = re.compile(
+    r"<\s*(?:html|body|article|main|section|p|h[1-6]|table|figure|div|li|blockquote|ol|ul)\b",
+    re.ASCII | re.IGNORECASE,
+)
+# collapse_ws's whitespace rule: every run of whitespace becomes one space.
+_WS_RUN_RE = re.compile(r"\s+")
 _DOI_RE = re.compile(r"\b10\.\d{4,9}/\S+\b", re.IGNORECASE)
 _DATE_RE = re.compile(r"(\d{4})(?:[-/](\d{1,2})(?:[-/](\d{1,2}))?)?")
 
@@ -310,31 +322,141 @@ def _sentence_at_offset(candidates, entry_text: str, offset: int):
     return chosen
 
 
-def _anchor_offset_in_block(block: Tag, anchor: Tag, display: str) -> int:
-    """Character offset where an anchor's display text starts in the block text.
+def _nfc_cut(text: str, start: int) -> int:
+    """Index of the last character of *text*, from *start* on, that NFC cannot
+    join to what precedes it, or 0 when there is none.
 
-    The strings before the anchor in document order are the anchor's prefix;
+    Normalising each side of that point apart gives the text normalised
+    whole: the character starts with a starter, so canonical reordering stops
+    there and what follows composes with it or later, and it does not compose
+    with what precedes it. Every ASCII character qualifies.
+    """
+    nfc = unicodedata.normalize
+    for at in range(len(text) - 1, max(start, 1) - 1, -1):
+        char = text[at]
+        if char < "\x80":
+            return at
+        if unicodedata.combining(nfc("NFD", char)[0]):
+            continue
+        head = text[:at]
+        if nfc("NFC", head + char) == nfc("NFC", head) + nfc("NFC", char):
+            return at
+    return 0
+
+
+def _without_inert_marks(text: str) -> tuple[str, int]:
+    """*text* in NFD without the marks that cannot change how NFC joins it,
+    and how many were left out.
+
+    NFC composes at most three marks onto one character, so after a starter
+    the fifth and later marks of a combining class never compose, and one of
+    the first four stays to block whatever they would block: each adds one
+    character to the NFC length wherever it stands.
+    """
+    kept: list[str] = []
+    per_class: dict[int, int] = {}
+    decomposed = unicodedata.normalize("NFD", text)
+    for char in decomposed:
+        ccc = unicodedata.combining(char)
+        if not ccc:
+            per_class.clear()
+        elif per_class.get(ccc, 0) < 4:
+            per_class[ccc] = per_class.get(ccc, 0) + 1
+        else:
+            continue
+        kept.append(char)
+    return "".join(kept), len(decomposed) - len(kept)
+
+
+def _with_collapsed(state: tuple[int, bool, bool], text: str) -> tuple[int, bool, bool]:
+    """*state* with *text* appended: the length of the text read so far with
+    collapse_ws applied but not its strip, and whether it starts and ends
+    with a space. The text must start where NFC cannot reach back."""
+    piece = _WS_RUN_RE.sub(" ", unicodedata.normalize("NFC", text))
+    if not piece:
+        return state
+    length, lead, trail = state
+    if not length:
+        lead = piece[0] == " "
+    return length + len(piece) - (trail and piece[0] == " "), lead, piece[-1] == " "
+
+
+class _CollapsedLength:
+    """``len(collapse_ws(text))`` of text that grows piece by piece.
+
+    The text before the last point NFC cannot reach across (:func:`_nfc_cut`)
+    is collapsed once and kept as its length, so each measurement reads only
+    the text after that point instead of the whole text again. Only a run of
+    combining marks has no such point; past a few hundred characters its
+    marks that NFC cannot join are counted and left out
+    (:func:`_without_inert_marks`), so that text stays short too.
+    """
+
+    def __init__(self) -> None:
+        self._done = (0, False, False)
+        self._tail: list[str] = []
+        # Tail positions below this were searched for a cut and hold none.
+        self._searched = 0
+        # Marks left out of the tail, and the tail length that prompts the
+        # next leaving out.
+        self._left_out = 0
+        self._shorten_at = 256
+
+    def add(self, text: str) -> None:
+        self._tail.append(text)
+
+    def measure(self) -> int:
+        tail = "".join(self._tail)
+        cut = _nfc_cut(tail, self._searched)
+        if cut:
+            length, lead, trail = _with_collapsed(self._done, tail[:cut])
+            self._done = (length + self._left_out, lead, trail)
+            tail = tail[cut:]
+            self._left_out, self._shorten_at = 0, 256
+        if len(tail) > self._shorten_at:
+            tail, left_out = _without_inert_marks(tail)
+            self._left_out += left_out
+            self._shorten_at = 2 * len(tail) + 256
+        self._tail = [tail]
+        self._searched = len(tail)
+        length, lead, trail = _with_collapsed(self._done, tail)
+        length += self._left_out - lead
+        return length - 1 if trail and length else length
+
+
+def _anchor_offsets(block: Tag, anchors: list[tuple[Tag, str]]) -> list[int]:
+    """Character offsets where each anchor's display text starts in the block
+    text, for ``(anchor, display text)`` pairs.
+
+    The strings before an anchor in document order are the anchor's prefix;
     block text is that accumulation collapsed, so the collapsed prefix
     length is the anchor's start, plus one separator space when the source
-    spells whitespace on either side of it.
+    spells whitespace on either side of it. One walk measures every prefix:
+    collapsing each from the block start took time links x block size.
     """
-    parts: list[str] = []
+    if not anchors:
+        return []
+    order = {id(anchor): i for i, (anchor, _) in enumerate(anchors)}
+    offsets = [0] * len(anchors)
+    prefix = _CollapsedLength()
+    last = ""
     for node in block.descendants:
-        if node is anchor:
-            break
-        if isinstance(node, (NavigableString, CData)):
-            parts.append(str(node))
-    pre_raw = "".join(parts)
-    pre = collapse_ws(pre_raw)
-    if not pre or not display:
-        return len(pre)
-    first_inside = next(
-        (str(s) for s in anchor.descendants if isinstance(s, (NavigableString, CData))),
-        "",
-    )
-    trail = pre_raw[-1:].isspace()
-    lead = first_inside[:1].isspace()
-    return len(pre) + (1 if trail or lead else 0)
+        i = order.get(id(node))
+        if i is not None:
+            anchor, display = anchors[i]
+            offset = prefix.measure()
+            if offset and display:
+                first_inside = next(
+                    (str(s) for s in anchor.descendants if isinstance(s, (NavigableString, CData))),
+                    "",
+                )
+                if last.isspace() or first_inside[:1].isspace():
+                    offset += 1
+            offsets[i] = offset
+        elif isinstance(node, (NavigableString, CData)) and (text := str(node)):
+            prefix.add(text)
+            last = text[-1]
+    return offsets
 
 
 class HtmlParser:
@@ -364,11 +486,16 @@ class HtmlParser:
         self._table_counter = 1
         self._figure_counter = 1
         self._current_section_id = 0
+        # Each section's type by id, so _in_references is a lookup per block.
+        self._section_types: dict[int, CanonicalSection] = {}
         self._heading_stack: list[tuple[int, int]] = [(0, 0)]
         self._detected_title: str | None = None
         self._metadata: PaperMetadata = PaperMetadata(doi="", title="")
         self._native_ref_strings: list[str] | None = None
         self._pending_url_links: list[tuple[str, str, int, int, int]] = []
+        # Spans repeat a cell's text in every slot they cover: the tables of
+        # one document (an ePub's chapters together) share one limit.
+        self._table_budget = TableBudget()
 
     @property
     def _deferred_texts(self) -> list[tuple[str, int | None, int, bool, bool]]:
@@ -385,7 +512,8 @@ class HtmlParser:
         # html5lib is pure-Python and slow on large/pathological markup; bound the
         # input so a huge document can't tie up the parser (audit L9). Byte size
         # bounds node count, so this caps parse work proportionally. Only applies
-        # when we parse here (a caller-supplied _parsed_soup is already bounded).
+        # when we parse here: a _parsed_soup comes from inspect_html, which
+        # applies the same cap before parsing.
         if self._parsed_soup is None and len(self.html_bytes) > _MAX_HTML_BYTES:
             raise ProcessingError(
                 f"HTML input exceeds the {_MAX_HTML_BYTES}-byte parse limit "
@@ -428,6 +556,7 @@ class HtmlParser:
             detected_title=self._detected_title,
             preparsed_metadata=self._metadata,
             native_ref_strings=self._native_ref_strings,
+            processing_warnings=self._table_budget.warnings(),
         )
 
     def _make_sentence(
@@ -643,7 +772,15 @@ class HtmlParser:
         return text or None
 
     def _process_children(self, parent: Tag) -> None:
-        for child in parent.children:
+        # The walk keeps its own stack, as _flatten does: html5lib does not
+        # bound nesting depth, and recursing per container hit Python's
+        # recursion limit on deeply nested <div>s or unclosed <span>s.
+        stack: list[Iterator[Any]] = [iter(parent.children)]
+        while stack:
+            child = next(stack[-1], None)
+            if child is None:
+                stack.pop()
+                continue
             if not isinstance(child, Tag):
                 continue
             name = _tag_name(child)
@@ -667,8 +804,8 @@ class HtmlParser:
                 self._handle_figure(child)
             else:
                 # Every other element (known containers and unknown tags alike)
-                # may hold text deeper down — recurse rather than drop it.
-                self._process_children(child)
+                # may hold text deeper down — descend rather than drop it.
+                stack.append(iter(child.children))
 
     def _handle_heading(self, tag: Tag) -> None:
         header = _text(tag)
@@ -698,6 +835,7 @@ class HtmlParser:
                 else None,
             )
         )
+        self._section_types[section_id] = section_type
         self._heading_stack.append((level, section_id))
         self._current_section_id = section_id
 
@@ -709,19 +847,15 @@ class HtmlParser:
             self._append_reference(text)
             return
         deferred_index = self.assembler.append(text, None, self._current_section_id, True, False)
+        links: list[tuple[Tag, str, str]] = []
         for a in tag.find_all("a", href=True):
             url = clean_extracted_url(str(a.get("href") or ""))
-            if not url:
-                continue
-            display = _text(a)
+            if url:
+                links.append((a, url, _text(a)))
+        offsets = _anchor_offsets(tag, [(a, display) for a, _, display in links])
+        for (_, url, display), offset in zip(links, offsets, strict=True):
             self._pending_url_links.append(
-                (
-                    url,
-                    display,
-                    self._current_section_id,
-                    deferred_index,
-                    _anchor_offset_in_block(tag, a, display),
-                )
+                (url, display, self._current_section_id, deferred_index, offset)
             )
 
     def _process_list(self, tag: Tag) -> None:
@@ -748,6 +882,7 @@ class HtmlParser:
                 classification_source="exact_alias",
             )
         )
+        self._section_types[section_id] = CanonicalSection.REFERENCES
         self._heading_stack = [(0, 0), (1, section_id)]
         self._current_section_id = section_id
 
@@ -761,10 +896,7 @@ class HtmlParser:
         self.assembler.append(text, None, self._current_section_id, False, False)
 
     def _in_references(self) -> bool:
-        for section in self.sections:
-            if section.section_id == self._current_section_id:
-                return section.section_type == CanonicalSection.REFERENCES
-        return False
+        return self._section_types.get(self._current_section_id) == CanonicalSection.REFERENCES
 
     @staticmethod
     def _looks_like_reference_list(tag: Tag) -> bool:
@@ -780,12 +912,13 @@ class HtmlParser:
         caption = _text(caption_tag) or None
         label = caption_label(caption, "table")
         try:
-            df = html_table_frame(tag)
+            df = html_table_frame(tag, self._table_budget)
         except Exception as exc:  # noqa: BLE001
             logger.warning("HTML table parse failed: %s", exc)
             df = None
         if df is None:
-            # No cell grid (an image-only table, say). A table whose caption
+            # No cell grid (an image-only table, say, or one over the table
+            # limits, which the budget's warning records). A table whose caption
             # prints a table label ("Table 3. ...") is still a table that
             # mentions resolve to, so it is kept with its markup and no
             # contents. Any other grid-less table is dropped: a spacer, or a
@@ -855,12 +988,36 @@ class HtmlParser:
             )
 
 
+def _reads_as_markup(html_bytes: bytes) -> bool:
+    """Whether the start of *html_bytes* holds an HTML element tag.
+
+    The bytes are decoded by their BOM when they have one, as html5lib
+    decodes them (UTF-8, or UTF-16 as Word's "Save as Unicode" writes it),
+    and otherwise as windows-1252: every other encoding html5lib reads,
+    whatever a ``<meta charset>`` names, spells the ASCII tag names in ASCII
+    bytes. A NUL ahead of the first tag means binary data that merely
+    contains ``<p``, such as a gzipped page; the wider window would otherwise
+    let those through.
+    """
+    text, _ = webencodings.decode(html_bytes[:_SNIFF_BYTES], "windows-1252", errors="replace")
+    match = _ELEMENT_RE.search(text)
+    return match is not None and "\x00" not in text[: match.start()]
+
+
 def inspect_html(html_bytes: bytes) -> tuple[bool, BeautifulSoup | None]:
-    """Return whether HTML has article text plus its reusable parsed DOM."""
-    if not re.search(
-        rb"<\s*(?:html|body|article|main|section|p|h[1-6]|table|figure|div|li|blockquote|ol|ul)\b",
-        html_bytes[:4096].lower(),
-    ):
+    """Return whether HTML has article text plus its reusable parsed DOM.
+
+    Raises :class:`~bibr.exceptions.InputValidationError` for input over
+    ``_MAX_HTML_BYTES`` before html5lib parses it: the pipeline hands the DOM
+    returned here to :class:`HtmlParser`, so this is where the cap applies.
+    """
+    if len(html_bytes) > _MAX_HTML_BYTES:
+        from bibr.exceptions import InputValidationError
+
+        raise InputValidationError(
+            f"HTML input exceeds the {_MAX_HTML_BYTES}-byte parse limit ({len(html_bytes)} bytes)"
+        )
+    if not _reads_as_markup(html_bytes):
         return False, None
     try:
         soup = BeautifulSoup(html_bytes, "html5lib")

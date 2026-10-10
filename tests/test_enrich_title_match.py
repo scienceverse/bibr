@@ -600,6 +600,6 @@ class TestMalformedResolverCandidates:
         assert [(d.code, d.message) for d in report.details] == [
             (
                 WarningCode.RESOLVER_FALLBACK_FAILED,
-                "bib_id=1 resolver fallback failed: unexpected candidate shape",
+                "bib_id=1 resolver fallback failed: ValueError: unexpected candidate shape",
             )
         ]

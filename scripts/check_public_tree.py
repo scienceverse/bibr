@@ -26,10 +26,17 @@ PUBLIC_EVALUATION_FILES = frozenset(
     }
 )
 DATASET_SUFFIXES = frozenset({".jsonl", ".parquet", ".arrow"})
-PUBLIC_PDFS = frozenset(
+# Formats a copy of a paper arrives in; each tracked one is reviewed by name.
+DOCUMENT_SUFFIXES = frozenset(
+    {".pdf", ".docx", ".doc", ".odt", ".rtf", ".epub", ".xml", ".nxml", ".html", ".htm", ".xhtml"}
+)
+ARCHIVE_SUFFIXES = frozenset({".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".zst", ".7z", ".rar"})
+PUBLIC_DOCUMENTS = frozenset(
     {
         "bibr/data/sample_paper.pdf",
         "tests/fixtures/cropbox_offset_sample.pdf",
+        "tests/fixtures/footnotes_sample.docx",
+        "tests/fixtures/jats/PMC4383902.xml",
         "tests/fixtures/native_text_bbox_bleed_sample.pdf",
         "tests/fixtures/native_text_sample.pdf",
         "tests/fixtures/ref_geometry_hanging_indent_sample.pdf",
@@ -48,17 +55,17 @@ def find_violations(names: list[str]) -> list[str]:
             continue
         normalized = path.as_posix()
         folded = normalized.casefold()
+        suffixes = {suffix.casefold() for suffix in path.suffixes}
         if folded.startswith(PRIVATE_PREFIXES):
             violations.append(f"private directory: {name}")
         elif folded.startswith("evaluation/") and normalized not in PUBLIC_EVALUATION_FILES:
             violations.append(f"unapproved evaluation file: {name}")
-        elif DATASET_SUFFIXES.intersection(suffix.casefold() for suffix in path.suffixes):
+        elif DATASET_SUFFIXES & suffixes:
             violations.append(f"dataset payload: {name}")
-        elif (
-            ".pdf" in [suffix.casefold() for suffix in path.suffixes]
-            and normalized not in PUBLIC_PDFS
-        ):
-            violations.append(f"unapproved PDF: {name}")
+        elif ARCHIVE_SUFFIXES & suffixes:
+            violations.append(f"archive payload: {name}")
+        elif DOCUMENT_SUFFIXES & suffixes and normalized not in PUBLIC_DOCUMENTS:
+            violations.append(f"unapproved document: {name}")
     return violations
 
 

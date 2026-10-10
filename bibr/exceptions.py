@@ -350,6 +350,10 @@ class ProcessingError(BibrError):
 
     Stable, client-actionable processing codes are exposed as HTTP 422. Errors
     without a stable code retain the legacy generic processing response.
+
+    ``outage`` is True when a service or model the pipeline needs was down
+    (``FileState.set_error(outage=True)``): the failure says nothing about the
+    input, so the same request may well succeed later.
     """
 
     def __init__(
@@ -359,11 +363,13 @@ class ProcessingError(BibrError):
         error_code: str | None = None,
         failed_stage: str | None = None,
         safe_diagnostics: SafeLlmDiagnostics | None = None,
+        outage: bool = False,
     ) -> None:
         super().__init__(message)
         self.error_code = error_code
         self.failed_stage = failed_stage
         self.safe_diagnostics = safe_diagnostics
+        self.outage = outage
 
     def __setattr__(self, name: str, value: object) -> None:
         if (

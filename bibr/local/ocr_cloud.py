@@ -60,9 +60,11 @@ class OcrResult(BaseModel):
 # ---------------------------------------------------------------------------
 
 # Placeholder API keys the managed local LLM backends write into
-# settings.llm.api_key ("not-needed": llama_cpp/llm/rapid_mlx/vllm_llm;
-# "lm-studio": llmster). They authenticate nothing — never forward one as a
-# cloud vision credential.
+# settings.llm.api_key ("not-needed": llm/rapid_mlx, and llama_cpp/vllm_llm
+# on a server bibr did not start; "lm-studio": llmster). They authenticate
+# nothing — never forward one as a cloud vision credential. The per-launch key
+# llama_cpp/vllm_llm write for their own server is never forwarded either:
+# they also set llm.base_url to that server.
 _MANAGED_LOCAL_PLACEHOLDER_KEYS = frozenset({"not-needed", "lm-studio"})
 
 

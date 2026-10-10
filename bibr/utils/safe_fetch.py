@@ -8,24 +8,34 @@ with defense in depth:
 
 - **HTTPS only, port 443 only, no userinfo.** No plaintext hops, no
   ``user:pass@host`` ambiguity, no probing internal services on odd ports.
+  An internationalised hostname is IDNA-encoded, and that ASCII name is the
+  one resolved and presented in ``Host`` and SNI.
 - **Every resolved address must be public.** The hostname is resolved once
   per hop and *all* A/AAAA answers are checked: multicast and anything not
   ``is_global`` (private, loopback, link-local, CGNAT/shared, reserved,
   unspecified) is refused, with IPv4-mapped IPv6 unwrapped first so
   ``::ffff:10.0.0.1`` cannot smuggle a private IPv4 through the v6 check.
-  IP-literal hosts are validated directly.
+  NAT64's well-known prefix is unwrapped the same way; other IPv6 outside
+  global unicast (``2000::/3``) and the 6to4/Teredo tunnel prefixes are
+  refused. IP-literal hosts are validated directly.
 - **The connection is pinned to the validated IP** (URL host swapped for the
   IP; original hostname carried in the ``Host`` header and the
   ``sni_hostname`` request extension, so TLS SNI and certificate
   verification still use the hostname). Validating and then letting the
   HTTP client re-resolve would leave the classic rebinding TOCTOU: a DNS
   answer that is public when checked and 169.254.169.254 when connected.
+  Environment proxies (``HTTPS_PROXY`` and friends) are never used: a proxy
+  would pick the destination itself, and httpcore's CONNECT tunnel drops
+  ``sni_hostname``, so certificate verification would fail anyway.
 - **Redirects are followed manually and re-validated per hop** (bounded),
   so a public URL cannot 302 into the internal network.
 - **Bounded download**: a declared ``Content-Length`` over the cap fails
-  fast, and the body is counted as *decompressed* bytes while streaming, so
-  neither a lying header nor a compressed bomb overshoots ``max_size``. The
-  whole fetch runs under one wall-clock deadline.
+  fast, and the body is counted while streaming, so a lying header cannot
+  overshoot ``max_size``. Nothing is decompressed: the request asks for
+  ``identity`` and a response that declares any other ``Content-Encoding``
+  is refused before its body is read, so a few hundred bytes of stacked
+  gzip cannot inflate to gigabytes before the cap is checked. The whole
+  fetch runs under one wall-clock deadline.
 - **Optional host allowlist** for operators: exact match, with subdomains
   covered (``example.org`` admits ``cdn.example.org``).
 
@@ -72,6 +82,23 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _DEFAULT_MAX_REDIRECTS = 5
 _DEFAULT_TIMEOUT_SECONDS = 90.0
 
+# NAT64's well-known prefix (RFC 6052) carries the IPv4 destination in its low
+# 32 bits. DNS64 synthesises it for IPv4-only hosts on IPv6-only networks, so
+# the embedded address is validated rather than the prefix refused.
+_NAT64_WELL_KNOWN = ipaddress.IPv6Network("64:ff9b::/96")
+# Only 2000::/3 is allocated as global unicast. Outside it, is_global still
+# passes IPv4-compatible ::/96 (::7f00:1), site-local fec0::/10 and the
+# IPv4-translated ::ffff:0:0:0/96, and older Pythons also 64:ff9b:1::/48.
+_IPV6_GLOBAL_UNICAST = ipaddress.IPv6Network("2000::/3")
+# Tunnels to an embedded IPv4 address (6to4, Teredo), refused outright rather
+# than left to each Python's is_global table (6to4 joined it only in 2024).
+_IPV6_TUNNELS = (ipaddress.IPv6Network("2002::/16"), ipaddress.IPv6Network("2001::/32"))
+# A DNS name once IDNA-encoded: letters, digits, hyphen, underscore, dots.
+# Anything else fails deep in the resolver or TLS, and getaddrinfo cuts a name
+# short at NUL, so "evil.example\0.arxiv.org" would pass the allowlist and
+# resolve evil.example.
+_HOSTNAME = re.compile(r"[A-Za-z0-9_.-]+")
+
 # Content-Type → extension for downloads whose URL carries no usable suffix.
 _MIME_TO_EXTENSION = {
     "application/pdf": ".pdf",
@@ -114,9 +141,16 @@ def _validate_ip(ip_text: str, *, url: str, host: str) -> None:
         ip: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(ip_text)
     except ValueError:
         raise _reject(url, f"{host} resolved to an unparseable address {ip_text!r}") from None
-    mapped = getattr(ip, "ipv4_mapped", None)
-    if mapped is not None:
-        ip = mapped
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.scope_id is not None:
+            # A zone index only means something on a link-local address.
+            raise _reject(url, f"{host} resolves to non-public address {ip_text}")
+        if ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        elif ip in _NAT64_WELL_KNOWN:
+            ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        elif ip not in _IPV6_GLOBAL_UNICAST or any(ip in net for net in _IPV6_TUNNELS):
+            raise _reject(url, f"{host} resolves to non-public address {ip_text}")
     # is_global is the closed test (False for private/loopback/link-local/
     # shared CGNAT/reserved/unspecified); globally-scoped multicast still
     # reports is_global, hence the explicit check.
@@ -134,7 +168,11 @@ def _host_allowed(host: str, allowed_hosts: list[str]) -> bool:
 
 
 def _validate_url(url: str, *, allowed_hosts: list[str] | None):
-    parsed = urlsplit(url)
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError as e:  # unbalanced IPv6 brackets, port not in 0-65535
+        raise _reject(url, f"malformed URL ({e})") from None
     if parsed.scheme != "https":
         raise _reject(url, "only https:// URLs are fetched")
     if parsed.username is not None or parsed.password is not None:
@@ -142,11 +180,31 @@ def _validate_url(url: str, *, allowed_hosts: list[str] | None):
     host = parsed.hostname
     if not host:
         raise _reject(url, "no host")
-    if parsed.port not in (None, 443):
+    if port not in (None, 443):
         raise _reject(url, "only port 443 is allowed")
     if allowed_hosts and not _host_allowed(host, allowed_hosts):
         raise _reject(url, f"host {host!r} is not in the configured allowlist")
     return parsed
+
+
+def _ascii_host(host: str, *, url: str) -> str:
+    """*host* as the ASCII name that is resolved and sent in ``Host`` and SNI."""
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        return host  # IP literal, validated by the resolver
+    try:
+        # The codec socket.getaddrinfo applies to a str host, so the name
+        # looked up and the name presented to the server cannot differ. It
+        # also refuses empty and over-long labels.
+        ascii_host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        raise _reject(url, f"cannot IDNA-encode host {host!r}") from None
+    if not _HOSTNAME.fullmatch(ascii_host):
+        raise _reject(url, f"invalid host name {host!r}")
+    return ascii_host
 
 
 async def _resolve_public_ip(host: str, *, url: str) -> str:
@@ -159,14 +217,7 @@ async def _resolve_public_ip(host: str, *, url: str) -> str:
         _validate_ip(host, url=url, host=host)
         return host  # IP-literal host, already validated
 
-    lookup = host
-    try:
-        lookup.encode("ascii")
-    except UnicodeEncodeError:
-        try:
-            lookup = lookup.encode("idna").decode("ascii")
-        except UnicodeError:
-            raise _reject(url, f"cannot IDNA-encode host {host!r}") from None
+    lookup = _ascii_host(host, url=url)
     try:
         infos = await asyncio.get_running_loop().getaddrinfo(lookup, 443, type=socket.SOCK_STREAM)
     except OSError as e:
@@ -228,8 +279,9 @@ async def fetch_url_safely(
     """Download *url* under the SSRF policy documented in the module docstring.
 
     Raises :class:`UnsafeUrlError` for policy refusals,
-    :class:`FetchTooLargeError` past *max_size* (decompressed), and
-    :class:`FetchFailedError` for HTTP/network failures.
+    :class:`FetchTooLargeError` past *max_size*, and
+    :class:`FetchFailedError` for HTTP/network failures (including a
+    compressed response). No other exception escapes for any URL or reply.
     """
     resolve = _resolve or _resolve_public_ip
     try:
@@ -238,18 +290,22 @@ async def fetch_url_safely(
                 transport=_transport,
                 follow_redirects=False,  # every hop re-validates below
                 timeout=httpx.Timeout(30.0),
+                # Always connect directly to the pinned IP: no HTTPS_PROXY.
+                # The CA overrides (SSL_CERT_FILE/SSL_CERT_DIR) still apply.
+                trust_env=False,
+                verify=httpx.create_ssl_context(),
             ) as client:
                 current = url
                 for _ in range(max_redirects + 1):
                     parsed = _validate_url(current, allowed_hosts=allowed_hosts)
-                    host = parsed.hostname
-                    assert host is not None  # noqa: S101 — _validate_url guarantees it
+                    assert parsed.hostname is not None  # noqa: S101 — _validate_url guarantees it
+                    host = _ascii_host(parsed.hostname, url=current)
                     ip = await resolve(host, url=current)
                     pinned = parsed._replace(netloc=_pin_netloc(ip)).geturl()
                     request = client.build_request(
                         "GET",
                         pinned,
-                        headers={"Host": host},
+                        headers={"Host": host, "Accept-Encoding": "identity"},
                         # TLS SNI + certificate verification use the real
                         # hostname even though the TCP connection goes to
                         # the pinned IP.
@@ -261,13 +317,34 @@ async def fetch_url_safely(
                         await response.aclose()
                         if not location:
                             raise FetchFailedError(f"redirect without Location from {host}")
-                        current = urljoin(current, location)
+                        try:
+                            current = urljoin(current, location)
+                        except ValueError as e:
+                            raise FetchFailedError(
+                                f"malformed redirect Location from {host} ({e})"
+                            ) from None
                         continue
                     try:
                         if response.status_code != 200:
                             raise FetchFailedError(f"HTTP {response.status_code} from {host}")
+                        # Inflating is refused, not bounded: httpx's decoders
+                        # expand each chunk in full before any size check, and
+                        # "gzip, gzip, gzip" multiplies that per layer. What
+                        # passes here leaves httpx nothing to decode.
+                        encoding = response.headers.get("content-encoding", "").strip().lower()
+                        if encoding not in ("", "identity"):
+                            raise FetchFailedError(
+                                f"{host} sent a compressed response (Content-Encoding: "
+                                f"{encoding}); only uncompressed downloads are accepted"
+                            )
                         declared = response.headers.get("content-length")
-                        if declared and declared.isdigit() and int(declared) > max_size:
+                        # isascii: "²".isdigit() is True, but int() rejects it.
+                        if (
+                            declared
+                            and declared.isascii()
+                            and declared.isdigit()
+                            and int(declared) > max_size
+                        ):
                             raise FetchTooLargeError(
                                 f"{host} declares {declared} bytes (cap {max_size})"
                             )
@@ -290,5 +367,5 @@ async def fetch_url_safely(
                 raise FetchFailedError(f"more than {max_redirects} redirects")
     except TimeoutError:
         raise FetchFailedError(f"download did not finish within {timeout:.0f}s") from None
-    except httpx.HTTPError as e:
+    except (httpx.HTTPError, httpx.InvalidURL) as e:  # InvalidURL is no HTTPError
         raise FetchFailedError(f"download failed: {e}") from e

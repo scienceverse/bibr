@@ -11,6 +11,7 @@ in a later task). Pure stdlib; no network, no LLM.
 from __future__ import annotations
 
 import re
+from bisect import bisect_left
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -43,7 +44,13 @@ _INTITLE_CITE = re.compile(
     r"\b(?:to|on|of)\b[^.(]{0,40}$",
     re.IGNORECASE,
 )
+# How far before a date an in-title citation can start: it runs at most 77
+# characters past the end of its cue word, so a match is missed only when the
+# cue word runs past 40 letters. Searching just this tail keeps a long string
+# linear.
+_INTITLE_REACH = 120
 
+_TOKEN = re.compile(r"\S+")
 _CAP_TOKEN = re.compile(r"[A-Z][\w.''\-]*$")
 _CONNECTOR = {"and", "of", "for", "the", "&", "de", "van", "von", "der"}
 _MAX_LEAD = 60
@@ -89,6 +96,9 @@ _NUM_ABBREV_BEFORE = re.compile(
     r"|fig|figs|suppl|ser|bd)\.\s*$",
     re.IGNORECASE,
 )
+# Longer than any abbreviation above with its period: how much text before an
+# interior "N." the abbreviation search reads.
+_NUM_ABBREV_REACH = 16
 
 # Edition/volume words printed AFTER the number ("2. Aufl.", "4. Auflage",
 # "3. udg.", "2. uppl.", "2. ed.", "5. baskı") in German, Nordic, Slavic,
@@ -114,19 +124,29 @@ class MergeCandidate:
     contexts: list[str]
 
 
-def _last_cap_run_start(head: str) -> int | None:
+def _last_cap_run_start(
+    s: str, tokens: list[tuple[int, int]], token_starts: list[int], end: int, reach: int
+) -> int | None:
     """Start offset of the trailing run of capitalized author/org tokens in
-    ``head`` (lowercase connectors allowed mid-run), or None if the last token is
+    ``s[:end]`` (lowercase connectors allowed mid-run), or None if the last token is
     not capitalized. Numbers break the run, so an earlier journal/volume cannot be
-    swept in."""
-    toks = [(m.start(), m.group()) for m in re.finditer(r"\S+", head)]
+    swept in.
+
+    ``tokens`` are the whitespace-separated spans of ``s`` and ``token_starts``
+    their starts. A run that reaches back before ``reach`` is None too: its lead
+    is too long to be author-like, so the walk stops there instead of
+    tokenising the whole prefix."""
     start: int | None = None
-    for off, tok in reversed(toks):
-        clean = tok.strip(".,;&")
-        if _CAP_TOKEN.match(clean) or (start is not None and clean.lower() in _CONNECTOR):
-            start = off
-        else:
+    for i in range(bisect_left(token_starts, end) - 1, -1, -1):
+        off, tok_end = tokens[i]
+        if off < reach and start is None:
+            return None
+        clean = s[off : min(tok_end, end)].strip(".,;&")
+        if not (_CAP_TOKEN.match(clean) or (start is not None and clean.lower() in _CONNECTOR)):
             break
+        if off < reach:
+            return None
+        start = off
     return start
 
 
@@ -141,7 +161,9 @@ def _is_author_like(lead: str) -> bool:
     return capped / len(words) >= 0.6
 
 
-def _lead_start(s: str, anchor_pos: int) -> int | None:
+def _lead_start(
+    s: str, anchor_pos: int, tokens: list[tuple[int, int]], token_starts: list[int]
+) -> int | None:
     """Offset where the reference owning the date anchor at ``anchor_pos`` begins,
     or None when the text before the anchor is not an author/org lead.
 
@@ -149,13 +171,27 @@ def _lead_start(s: str, anchor_pos: int) -> int | None:
     trailing capitalized-token run (the softening for URL-ended prior refs like
     "...fungus-strain United Nations. (n.d.)"). Among the candidates whose lead is
     author-like, returns the smallest offset so a leading "U.S." is not dropped.
+    ``tokens``/``token_starts`` are ``s``'s whitespace-separated spans.
+
+    Only the text a lead of ``_MAX_LEAD`` characters can span is read, so a
+    string of many merged references stays linear.
     """
-    head = s[:anchor_pos].rstrip()
+    end = anchor_pos
+    while end > 0 and s[end - 1].isspace():
+        end -= 1
+    # The lead is s[c:anchor_pos].strip(" ."): one that starts before ``reach``
+    # keeps a character more than _MAX_LEAD before its end, too long to qualify.
+    lead_end = anchor_pos
+    while lead_end > 0 and s[lead_end - 1] in " .":
+        lead_end -= 1
+    reach = max(0, lead_end - _MAX_LEAD)
+    while reach > 0 and s[reach - 1] in " .":
+        reach -= 1
     candidates: set[int] = set()
-    term = head.rfind(". ")
+    term = s.rfind(". ", max(0, reach - 2), end)
     if term != -1:
         candidates.add(term + 2)
-    cap = _last_cap_run_start(head)
+    cap = _last_cap_run_start(s, tokens, token_starts, end, reach)
     if cap is not None:
         candidates.add(cap)
     valid = [c for c in candidates if c > 0 and _is_author_like(s[c:anchor_pos].strip(" ."))]
@@ -185,7 +221,7 @@ def _numbered_interior_onsets(ref_string: str) -> list[int]:
     for m in _NUM_ONSET.finditer(ref_string):
         if int(m.group(1)) != expected:
             continue
-        if _NUM_ABBREV_BEFORE.search(ref_string[: m.start()]):
+        if _NUM_ABBREV_BEFORE.search(ref_string, max(0, m.start() - _NUM_ABBREV_REACH), m.start()):
             continue
         if _NUM_EDITION_AFTER.match(ref_string, m.end()):
             continue
@@ -230,18 +266,21 @@ def _parendate_interior_onsets(ref_string: str) -> list[int]:
     anchors = list(_DATE_ANCHOR.finditer(ref_string))
     if len(anchors) < 2:
         return []
+    tokens = [m.span() for m in _TOKEN.finditer(ref_string)]
+    token_starts = [off for off, _ in tokens]
     offsets: list[int] = []
     head = anchors[0]
     for i in range(1, len(anchors)):
-        between = ref_string[anchors[i - 1].end() : anchors[i].start()]
+        at = anchors[i].start()
+        between = ref_string[anchors[i - 1].end() : at]
         if _META_BEFORE.search(between):
             continue
-        if _INTITLE_CITE.search(ref_string[: anchors[i].start()]):
+        if _INTITLE_CITE.search(ref_string, max(0, at - _INTITLE_REACH), at):
             continue
-        start = _lead_start(ref_string, anchors[i].start())
+        start = _lead_start(ref_string, at, tokens, token_starts)
         if start is None or start <= 0 or start in offsets:
             continue
-        if not _LETTER.search(ref_string[head.end() : start]):
+        if not _LETTER.search(ref_string, head.end(), start):
             continue
         offsets.append(start)
         head = anchors[i]

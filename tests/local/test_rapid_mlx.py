@@ -604,7 +604,7 @@ def _recycle_test_client(
         async def shutdown(self):
             return None
 
-    def start_generation():
+    def start_generation(stop_event=None):
         calls["n"] += 1
         if calls["n"] > 1 and calls["n"] - 1 <= fail_restarts:
             if restart_delay:
@@ -754,7 +754,7 @@ async def test_ensure_generation_failure_closes_dead_generation(monkeypatch):
     client._server = DeadServer()
     client._http_client = DeadHttp()
 
-    def boom():
+    def boom(stop_event=None):
         raise RuntimeError("Metal OOM")
 
     client._start_generation = boom

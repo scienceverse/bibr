@@ -10,9 +10,13 @@ on:
 permissions:
   contents: read
 
+# Only a superseded pull request run is cancelled. A main push diffs only its own
+# commits, so cancelling its run would drop that push's docs deploy, edge image
+# and commit-range secret scan. Main runs wait for the one in progress instead,
+# which keeps deploys and edge promotions in commit order.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   UV_VERSION: "0.9.8"
@@ -630,16 +634,32 @@ jobs:
       # a build that trips the floor still has room to run cold. The job checks
       # before every build because other host workloads can consume space. A cold build
       # costs minutes; a full disk costs a red main.
+      #
+      # Fleet runners can share a host, so the shared directory only changes under
+      # its lock. Each job reads a hard-linked snapshot and exports into its own
+      # directory: a concurrent swap can neither remove blobs from under a running
+      # build nor interleave two exports.
       - name: Ensure the cache disk has room for the build
+        id: cache
         if: runner.environment == 'self-hosted'
         shell: bash
         env:
           CACHE_DIR: ${{ env.CI_BUILDX_CACHE }}
           MIN_FREE_GB: "45"
         run: |
+          CACHE_DIR="${CACHE_DIR%/}"
+          job_dir="${CACHE_DIR}.job-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}"
+          mkdir -p "$(dirname "$CACHE_DIR")"
+          exec 9>"${CACHE_DIR}.lock"
+          flock 9
           mkdir -p "$CACHE_DIR"
-          # A cancelled or killed job can leave a half-written export behind.
-          rm -rf "${CACHE_DIR:?}.new"
+          # A cancelled or killed job can leave a snapshot or a half-written export
+          # behind (".new" is the shared export directory earlier runs used). None
+          # is in use after 4 h, longer than any build job may run.
+          cache_name=$(basename "$CACHE_DIR")
+          find "$(dirname "$CACHE_DIR")" -maxdepth 1 \
+            \( -name "$cache_name.job-*" -o -name "$cache_name.new" \) \
+            -mmin +240 -exec rm -rf {} +
           free_gb=$(df -BG --output=avail "$CACHE_DIR" | tail -1 | tr -dc '0-9')
           cache_gb=$(du -sBG "$CACHE_DIR" 2>/dev/null | cut -f1 | tr -d 'G')
           echo "Cache disk free ${free_gb}G, layer cache ${cache_gb:-0}G, floor ${MIN_FREE_GB}G"
@@ -648,6 +668,10 @@ jobs:
             rm -rf "${CACHE_DIR:?}"/*
             df -h "$CACHE_DIR" | tail -1
           fi
+          rm -rf "${job_dir:?}"
+          mkdir -p "$job_dir"
+          cp -R -l "$CACHE_DIR" "$job_dir/read"
+          echo "dir=$job_dir" >> "$GITHUB_OUTPUT"
 
       # Also cap BuildKit explicitly. The proposed rootless fleet deployment
       # bounds the whole user slice at 6 CPUs/48 GiB, including runner, daemon,
@@ -690,10 +714,13 @@ jobs:
           tags: bibr-ci:${{ github.sha }}
           build-args: WITH_GPU=true
           # Fleet builds keep layers on local disk between runs.
-          # Read the live directory, write a fresh one: see the swap step below
+          # Read a snapshot, write a fresh directory: see the swap step below
           # for why the export must not go back into the directory it read.
-          cache-from: ${{ runner.environment == 'self-hosted' && format('type=local,src={0}', env.CI_BUILDX_CACHE) || 'type=gha' }}
-          cache-to: ${{ runner.environment == 'self-hosted' && format('type=local,dest={0}.new,mode=max', env.CI_BUILDX_CACHE) || 'type=gha,mode=max' }}
+          # Only main writes the shared cache that main and edge builds read:
+          # pull requests and dispatches of other branches build unreviewed
+          # code. GitHub scopes a hosted cache to the ref that wrote it.
+          cache-from: ${{ runner.environment == 'self-hosted' && format('type=local,src={0}/read', steps.cache.outputs.dir) || 'type=gha' }}
+          cache-to: ${{ (runner.environment != 'self-hosted' && 'type=gha,mode=max') || (github.ref == 'refs/heads/main' && format('type=local,dest={0}/export,mode=max', steps.cache.outputs.dir)) || '' }}
 
       # This is what actually bounds the cache. `type=local` cannot prune itself,
       # so exporting in place accumulates every layer every build has ever
@@ -701,25 +728,31 @@ jobs:
       # new directory and swapping it in holds the cache at one build's worth
       # (~12G) forever, with no GC to schedule and nothing to chase with a timer.
       #
-      # `mv` within one filesystem is a rename, so the swap is atomic and cannot
-      # leave a half-replaced cache behind.
+      # The swap holds the cache lock, and `mv` within one filesystem is a
+      # rename, so no job can snapshot a half-replaced cache.
       - name: Swap in the freshly exported layer cache
-        if: always() && runner.environment == 'self-hosted'
+        if: always() && runner.environment == 'self-hosted' && steps.cache.outputs.dir != ''
         shell: bash
         env:
           CACHE_DIR: ${{ env.CI_BUILDX_CACHE }}
+          JOB_DIR: ${{ steps.cache.outputs.dir }}
           BUILD_OUTCOME: ${{ steps.build.outcome }}
+          SOURCE_REF: ${{ github.ref }}
         run: |
-          if [[ "$BUILD_OUTCOME" == "success" && -d "${CACHE_DIR}.new" ]]; then
+          CACHE_DIR="${CACHE_DIR%/}"
+          exec 9>"${CACHE_DIR}.lock"
+          flock 9
+          if [[ "$SOURCE_REF" == refs/heads/main && "$BUILD_OUTCOME" == "success" &&
+                -d "$JOB_DIR/export" ]]; then
             rm -rf "${CACHE_DIR:?}"
-            mv "${CACHE_DIR}.new" "$CACHE_DIR"
+            mv -T "$JOB_DIR/export" "$CACHE_DIR"
             echo "layer cache now $(du -sh "$CACHE_DIR" | cut -f1)"
           else
             # A failed or cancelled build leaves a partial export; discarding it
             # keeps the next run reading the last cache known to be complete.
-            echo "build outcome '${BUILD_OUTCOME:-none}' - discarding the partial export"
-            rm -rf "${CACHE_DIR:?}.new"
+            echo "build outcome '${BUILD_OUTCOME:-none}' on $SOURCE_REF - leaving the layer cache as it was"
           fi
+          rm -rf "${JOB_DIR:?}"
           df -h "$CACHE_DIR" | tail -1
 
       - name: Block HIGH and CRITICAL image vulnerabilities

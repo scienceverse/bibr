@@ -29,15 +29,26 @@ Any mix of:
 
 Missing entries are reported (and counted in the dry run) but never abort the
 run. Every file is identified by its **`paper_id`** — the file stem — and its
-export is written to `<out>/<paper_id>.json`. Two inputs that share a stem
-(case-insensitively) would overwrite each other, so colliding files get
-`<stem>-<sha256[:8]>` instead, and so does a file named `run_info`, whose export
-would replace the run's own `run_info.json`; the mapping is printed by
-`--dry-run` and recorded under `collisions` in `run_info.json`, and every
-ledger line carries the original `stem`. A file keeps the id the ledger
-recorded for its path, so a corpus can grow: adding a second `paper.pdf` from
-another directory gives only the newcomer a suffix and never renames, or
-re-processes, the paper already done.
+export is written to `<out>/<paper_id>.json`. Two inputs whose stems a
+filesystem would not tell apart (case-insensitively, as macOS and Windows
+compare, and with NFC and NFD spellings equal, as APFS compares) would
+overwrite each other, so colliding files get `<stem>-<sha256[:8]>` instead.
+So do a file named `run_info`, whose export would replace the run's own
+`run_info.json`, a file named like a Windows device (`CON`, `PRN`, `AUX`,
+`NUL`, `COM1`…`COM9`, `LPT1`…`LPT9`, also before a dot: `nul.tar` becomes
+`nul-<sha256[:8]>.tar`), and a stem longer than 200 bytes, which is cut to fit
+(an export name and its sidecars must stay under the 255-byte file-name
+limit). The mapping is printed by `--dry-run` and recorded under `collisions`
+in `run_info.json`, and every ledger line carries the original `stem`.
+
+A file keeps the id the ledger recorded for it — found by its path, however
+it is spelled (relative or absolute, from another working directory, through
+a manifest's `..`), else by its sha256 — and an id recorded for other bytes is
+never given to another file. So a corpus can grow, and several directories can
+share one `--out`: a second `paper.pdf`, from another directory or another
+run, gets a suffix and never renames, re-processes or overwrites the paper
+already done. A file whose bytes changed (a different size at the same path)
+is a new paper too, with its own suffixed id; the earlier export stays.
 
 Selection flags: `--limit N` processes at most N papers this run (after
 resume filtering), `--shuffle` randomises the order (`--seed` makes it
@@ -55,29 +66,50 @@ The ledger's latest line per `paper_id` decides what a new run does with it:
 | `ok` | skip | skip | run |
 | `failed` | skip | run | run |
 | `failed` before the paper got a verdict: `error_code` `interrupted`, `http_401` or `http_403` | run | run | run |
-| `failed` on a crash or a service outage: `error_code` `chunk_error` or `upstream_unavailable`, or `transient_exhausted: true` | run until the paper has failed this way 3 times, then skip | run | run |
+| `failed` on a crash or a service outage: `error_code` `chunk_error`, `upstream_unavailable` or `output_write_failed`, or `transient_exhausted: true` | run until the paper has failed this way 3 times, then skip | run | run |
+| `started` with no verdict after it: the run was killed outright (after an `ok`, the `ok` row applies: its export is intact) | as a crash: run (alone) until it happened 3 times, then skip | run | run |
 
 A paper the run was interrupted on (Ctrl-C), or whose upload the serve refused
 because of the token, never got a verdict, so it always runs again. A crash or
 a service outage — the OCR or LLM server unreachable or unable to start, a
-serve that kept answering 502/503 until the retries ran out — is usually the
-machine's or the service's, so it runs again too. It can also be the paper's
-own: a bug its content triggers, a prompt that brings the LLM server down, a
-model reply the serve reports as a 502. So a paper that has failed this way
-three times since its last success waits for `--retry-failed`, and a batch
-still finishes. A timeout is in neither group: a paper can be too slow on its
-own, and re-running it by default would never finish.
+serve that kept answering 502/503 until the retries ran out, an export that
+could not be written (a full disk, a permission) — is usually the machine's
+or the service's, so it runs again too. It can also be the paper's own: a bug
+its content triggers, a prompt that brings the LLM server down, a model reply
+the serve reports as a 502. So a paper that has failed this way three times
+since its last success waits for `--retry-failed`, and a batch still
+finishes. A timeout is in neither group: a paper can be too slow on its own,
+and re-running it by default would never finish.
 
-Every attempt appends a new line with an incremented `attempt` counter —
-nothing is ever rewritten, so `outcomes.jsonl` is a full history. A run killed
-mid-write (out of memory, a full disk) can leave a torn last line; it is
-skipped with a warning and the next run starts on a fresh line.
+The local executor appends a `started` line for each paper before its chunk
+runs. A run killed outright — the out-of-memory killer, a native crash in an
+OCR or layout library — leaves that line without a verdict, and the next run
+counts it as a crash: it runs each such paper again in a chunk of its own,
+after all the others, so a paper that kills the run takes neither its chunk
+neighbours nor the rest of the batch with it, and waits for `--retry-failed`
+once it has done so three times.
+
+Every attempt appends a new verdict line with an incremented `attempt`
+counter (a local run writes the attempt's `started` line first, with the same
+counter) — nothing is ever rewritten, so `outcomes.jsonl` is a full history.
+A run killed mid-write (out of memory, a full disk) can leave a torn last
+line; it is skipped with a warning and the next run starts on a fresh line.
+
+One run at a time uses an out dir: a run holds an exclusive lock on
+`<out>/.lock` (released when it ends, also when it is killed), and a second
+run on the same `--out` — an overlapping cron job, say — stops at once with
+"another bibr batch run is using `<out>`" and exit code 2. `--dry-run` and
+`bibr batch report` do not take the lock.
 
 Ctrl-C is graceful in both executors: the local executor records the chunk
 that was running as `interrupted`; the remote executor stops submitting,
-waits up to 30 s for in-flight jobs and records the rest as `interrupted`.
-A second Ctrl-C exits immediately. The process exits 130 after an interrupt,
-1 when any paper failed, 0 otherwise.
+waits up to 30 s for in-flight jobs, cancels the ones still queued on the
+serve and records the rest as `interrupted`.
+A second Ctrl-C exits immediately. SIGTERM and SIGHUP (`kill`, `docker stop`,
+a closed SSH session) are handled the same way, so managed local servers are
+shut down rather than left holding GPU memory. The process exits 130 when
+interrupted (by Ctrl-C, SIGTERM or SIGHUP alike), 1 when any paper failed, 0
+otherwise.
 
 ## Local vs remote
 
@@ -85,7 +117,8 @@ A second Ctrl-C exits immediately. The process exits 130 after an interrupt,
 it chunks of `--batch-size` files (auto-sized from the memory mode like
 `bibr chew`). Inside a chunk the pipeline is stage-major — every file's
 layout, then every file's OCR, and so on — so models load once and OCR batches
-fill up. Ledger lines are written as each chunk finishes. All of `bibr chew`'s
+fill up. Each paper's `started` line is written as its chunk begins, its
+verdict line as the chunk finishes. All of `bibr chew`'s
 pipeline flags apply: `--ocr`, `--ocr-url`, `--llm`, `--refs`, `--ref-seg`,
 `--consolidate`, `--no-crossref`, `--no-llm`, `--pages`, `--memory`,
 `--device`, `--figure-images`, `--include-regions`, `--preset`, …
@@ -116,15 +149,18 @@ Concurrency adapts to the serve:
 - A **429** on submit is the serve's queue cap (`JOBS_MAX_ACTIVE`) — normal
   under load. In-flight drops to `--min-concurrency` and the submit waits
   `Retry-After`; it is never counted as a failure.
-- **502/503/504** answers to a submit or poll, connection errors, and a job
-  the serve failed because of an upstream OCR/LLM outage (circuit breaker open,
-  OCR server unreachable, …) are *transient*: in-flight shrinks by one and the
-  paper is retried with backoff up to `--retries` times (default 3). If it
-  never recovers, the last transient code is recorded, and the next run picks
-  the paper up again.
+- **502/503/504** answers to a submit or poll (an open circuit breaker on
+  the serve answers 502), connection errors, and a job the serve failed
+  because a service or model it needs was down (OCR server unreachable, a
+  layout model or LLM server that could not start: the job's error says
+  `"outage": true`) are *transient*: in-flight shrinks by one and the paper
+  is retried with backoff up to `--retries` times (default 3). If it never
+  recovers, the last transient code is recorded, and the next run picks the
+  paper up again.
 - Every success grows in-flight by one, back toward `--max-concurrency`.
 - A job the serve failed with **504** ran out of the serve's
-  `PIPELINE_TIMEOUT`: the serve is up and the paper was too slow. It is
+  `PIPELINE_TIMEOUT`, which counts the wait for a free pipeline slot as well
+  as the run: the serve is up and the paper was too slow. It is
   submitted once more (the serve's OCR and LLM are shared with other jobs)
   without shrinking in-flight, then recorded as `pipeline_timeout`.
 - Other 4xx answers are the paper's own problem — recorded once, no retry. A
@@ -134,6 +170,17 @@ Concurrency adapts to the serve:
   `llm_invalid_output`, since the same request fails the same way again.
 - `--poll-timeout` (default 2400 s) bounds one paper's wall clock; expiry is
   recorded as `poll_timeout` without a retry.
+- A job that vanished from the serve — while polled, or after it succeeded
+  but before its result was fetched (results expire and are evicted) — is
+  re-submitted like any transient failure and recorded as `job_lost` if it
+  never comes back.
+- A job the run walks away from (re-submitted after errors, past
+  `--poll-timeout`, or still in flight after Ctrl-C) is cancelled with
+  `DELETE /papers/jobs/{id}`, so a job still queued never runs for nothing or
+  holds a `JOBS_MAX_ACTIVE` slot. The serve can only cancel a queued job: one
+  already running finishes, unread.
+- An export of the current schema major that the lenient reader rejects is
+  recorded as `invalid_remote_export` and not written to `<out>`.
 
 The serve dispatches at most `JOBS_MAX_RUNNING` jobs at once, so a client
 in-flight much above that only lengthens the queue.
@@ -144,15 +191,18 @@ in-flight much above that only lengthens the queue.
 <out>/
   <paper_id>.json     the export, one per successful paper
   tables/*.parquet    every successful paper as one Parquet file per table
-  outcomes.jsonl      the ledger — one JSON object per attempt
+  outcomes.jsonl      the ledger — a verdict line per attempt (local: a started line first)
   run_info.json       the latest run: options, executor, redacted settings, counts
   runs.jsonl          run_info of every run, appended
+  .lock               held by the running run
 ```
 
 Each export's `paper_id` is the batch's own id, the name of its JSON file, so it
-is unique across the corpus even when papers share a DOI. `tables/` is rebuilt
-from every paper whose latest attempt is `ok` at the end of each run
-(`--no-tables` skips it); see the
+is unique across the corpus even when papers in different directories share a
+file name. `tables/` is rebuilt from every paper whose latest attempt is `ok`
+at the end of each run (`--no-tables` skips it), unless it was already built
+from exactly those exports (`tables/.batch-source` records which), so a
+resumed run with nothing new does not re-read the corpus; see the
 [Python guide](library.md#corpus-tables-parquet) for its layout. An export of
 another schema major, left in `<out>` by an older bibr, is left out of the
 tables with a warning; `--force` re-runs every paper under the current schema.
@@ -174,7 +224,7 @@ One JSON object per line of `outcomes.jsonl`:
 | `stem` | str | the original file stem |
 | `path` | str | input path as given |
 | `sha256`, `bytes` | str, int | identity and size of the input |
-| `status` | `ok` / `failed` | |
+| `status` | `ok` / `failed` / `started` | `started` lines are described below |
 | `error_code` | str / null | see below |
 | `failed_stage` | str / null | pipeline stage that failed, when known |
 | `error` | str / null | error text, clipped to 800 characters |
@@ -189,21 +239,35 @@ One JSON object per line of `outcomes.jsonl`:
 | `n_validation_errors`, `n_validation_warnings` | int | from the export's `validation` block |
 | `bibr_version`, `build_sha` | str | producing bibr; remote runs record the serve's build |
 | `executor` | `local` / `remote` | |
-| `attempt` | int | 1 for the first line of this paper, +1 per further attempt |
+| `attempt` | int | 1 for the paper's first attempt, +1 per further attempt; a `started` line and its verdict share one |
 | `run_id` | str | the run that wrote the line (matches `run_info.json`) |
 | `job_id`, `retries`, `http_status`, `transient_exhausted` | remote only | serve job id, transient retries used, the failure's HTTP status |
 
+A local run also writes a **`started`** line for each paper just before its
+chunk runs: `paper_id`, `stem`, `path`, `sha256`, `bytes`,
+`status: "started"`, `started_at`, `bibr_version`, `build_sha`, `executor`,
+`attempt` and `run_id`. The verdict line (`ok` or `failed`) that follows
+repeats its `attempt`; a `started` line with no verdict after it is a run
+killed mid-paper (see [Resumability](#resumability)). `bibr batch report`, the
+tables and `Ledger.read()` see only verdict lines; when you read
+`outcomes.jsonl` yourself, drop the `started` lines first
+(`df[df.status != "started"]`). An older bibr resuming such a ledger treats
+a killed paper as failed: it waits for `--retry-failed`.
+
 `error_code` values: locally, the pipeline's own code (`ChewFailure.error_code`, e.g.
 an OCR or reference-parse code) or `processing_error`, `upstream_unavailable`
-(an OCR or LLM service was down or could not start: `ChewFailure.outage`),
+(an OCR or LLM service was down or could not start, or a required classifier
+failed to load: `ChewFailure.outage`),
 `chunk_error` (the pipeline crashed on the paper: a chunk that crashes runs its
 papers again one by one, so only a paper that crashes on its own gets it, or
 the whole chunk when the pipeline could not run at all), `interrupted`;
+in both executors, `output_write_failed` (the export could not be written to
+`<out>`: a full disk, a permission, a value JSON cannot hold);
 remotely, the serve's `error_code` when it gave one, else `http_<status>`,
 `connection_error`, `upstream_unavailable`, `job_lost`,
 `submit_wait_exhausted`, `pipeline_timeout`, `poll_timeout`,
-`bad_submit_response`, `bad_result_json`, `client_error`, `unreadable_input`,
-`interrupted`.
+`bad_submit_response`, `bad_result_json`, `invalid_remote_export`,
+`client_error`, `unreadable_input`, `interrupted`.
 
 ## Reading the report
 
@@ -224,8 +288,9 @@ bibr batch report · results/
   warnings     140 papers · OCR_REGION_FAILED ×212 · STATEMENT_LEXICAL_FALLBACK ×31
 ```
 
-- **papers** counts the *latest* attempt per paper; **attempts** is the raw
-  line count (a resumed run's earlier failures are history, not state).
+- **papers** counts the *latest* attempt per paper; **attempts** is the
+  number of verdict lines (a resumed run's earlier failures are history, not
+  state; `started` lines are not counted).
 - **throughput** is successful papers over the window from the earliest
   `started_at` to the latest `finished_at` — for a directory that holds
   several runs, that window spans all of them.

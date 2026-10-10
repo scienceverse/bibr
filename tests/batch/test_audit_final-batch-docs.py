@@ -1,0 +1,106 @@
+"""Final review, batch: a Windows out dir that cannot be locked runs unguarded
+instead of reporting a phantom concurrent run, and the help and docs describe
+the ``started`` lines in ``outcomes.jsonl``."""
+
+from __future__ import annotations
+
+import errno
+import logging
+import sys
+import types
+from pathlib import Path
+
+import pytest
+
+from bibr.batch.runner import LOCK_FILENAME, OutDirBusy, out_dir_lock
+
+REPO_ROOT = Path(__file__).parents[2]
+
+
+def _fake_msvcrt(monkeypatch, error: OSError | None) -> list[int]:
+    """Pretend to be Windows, with ``msvcrt.locking`` raising *error*; returns the modes used."""
+    calls: list[int] = []
+
+    def locking(fd: int, mode: int, nbytes: int) -> None:
+        calls.append(mode)
+        if error is not None and mode == fake.LK_NBLCK:
+            raise error
+
+    fake = types.ModuleType("msvcrt")
+    fake.LK_UNLCK, fake.LK_NBLCK = 0, 2
+    fake.locking = locking
+    monkeypatch.setitem(sys.modules, "msvcrt", fake)
+    monkeypatch.setattr(sys, "platform", "win32")
+    return calls
+
+
+# --- the out-dir lock on Windows ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError(errno.EINVAL, "Invalid argument"),  # a share without byte-range locks
+        OSError(errno.ENOLCK, "No locks available"),
+    ],
+)
+def test_a_windows_out_dir_without_locks_runs_unguarded(tmp_path, monkeypatch, caplog, error):
+    calls = _fake_msvcrt(monkeypatch, error)
+    out = tmp_path / "out"
+
+    with caplog.at_level(logging.WARNING, logger="bibr.batch.runner"), out_dir_lock(out):
+        ran = True
+
+    assert ran
+    assert f"cannot lock {out / LOCK_FILENAME}" in caplog.text
+    assert "a concurrent run is not detected" in caplog.text
+    assert calls == [2]  # nothing was locked, so nothing is unlocked
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        PermissionError(errno.EACCES, "Permission denied"),  # ERROR_LOCK_VIOLATION
+        OSError(errno.EDEADLK, "Resource deadlock avoided"),
+    ],
+)
+def test_a_windows_out_dir_held_by_another_run_is_busy(tmp_path, monkeypatch, error):
+    _fake_msvcrt(monkeypatch, error)
+    out = tmp_path / "out"
+
+    with pytest.raises(OutDirBusy, match="another bibr batch run is using"), out_dir_lock(out):
+        pytest.fail("the body must not run")
+
+
+def test_a_windows_lock_is_released_at_the_end(tmp_path, monkeypatch):
+    calls = _fake_msvcrt(monkeypatch, None)
+
+    with out_dir_lock(tmp_path / "out"):
+        assert calls == [2]
+
+    assert calls == [2, 0]
+
+
+# --- outcomes.jsonl holds a started line per local attempt -------------------------
+
+
+def test_batch_help_mentions_the_started_lines(capsys):
+    from bibr.local.cli import _build_parser
+
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["batch", "--help"])
+    text = " ".join(capsys.readouterr().out.split())
+
+    assert "one line per attempt" not in text
+    assert "one JSON line per attempt" not in text
+    assert "outcomes.jsonl ledger (one verdict line per attempt; a local run writes" in text
+    assert "a local run also writes a 'started' line before each paper" in text
+    assert "latest ledger line" not in text  # a started line is not a verdict
+
+
+def test_batch_guide_layout_mentions_the_started_lines():
+    text = " ".join((REPO_ROOT / "docs" / "guides" / "batch.md").read_text("utf-8").split())
+
+    assert "the ledger — one JSON object per attempt" not in text
+    assert "outcomes.jsonl the ledger — a verdict line per attempt (local: a started line" in text
+    assert "Every attempt appends a new line with an incremented" not in text
