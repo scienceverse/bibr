@@ -17,6 +17,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
+from bibr.extract.front_page_model import PageRecordPrediction, front_page_mode
 from bibr.paper_contents import (
     CANONICAL_SECTION_ALIASES,
     FRONT_MATTER_FURNITURE_LABELS,
@@ -228,6 +229,9 @@ class FrontMatterCandidate:
     # top scores, for audit trails; empty when the model was absent or silent.
     model_roles: frozenset[str] = frozenset()
     model_scores: tuple[tuple[str, float], ...] = ()
+    # The OCR region (page, index) the row came from, the key the page-level
+    # front-matter model names regions by; None for rows without a region.
+    region_order: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -1830,6 +1834,7 @@ def _collect_candidates(
                     if scores is not None
                     else ()
                 ),
+                region_order=draft.region_order,
             )
         )
     return tuple(candidates)
@@ -3328,6 +3333,105 @@ def _select_agreeing_record(
     return primary.block, tuple(flags)
 
 
+PAGE_MODEL_BLOCK_ID = "front-matter-block-page-model"
+
+
+def _page_model_choice(
+    blocks: tuple[FrontMatterBlock, ...],
+    by_id: dict[str, FrontMatterCandidate],
+    prediction: PageRecordPrediction,
+    *,
+    min_share: float,
+) -> tuple[FrontMatterBlock | None, tuple[str, ...]]:
+    """The block the page-level model's target regions point at, or ``None``.
+
+    The model names OCR regions; candidates carry their region key. When at
+    least *min_share* of the target rows fall in one block, that block is the
+    choice, trimmed to the target rows if it also holds a title row the model
+    left out on a page it read (a second article the grouping did not split).
+    When the target rows straddle several blocks (a record the grouping
+    over-split), they are regrouped into one block, provided a title row is
+    among them. Anything else abstains.
+    """
+
+    if prediction.unknown_region_ids:
+        return None, ("page_model_unknown_regions",)
+    target = prediction.target
+    if not target:
+        return None, ("page_model_no_target",)
+    seen_pages = {page for page, _ in target}
+
+    def in_target(row: FrontMatterCandidate) -> bool:
+        return row.region_order is not None and row.region_order in target
+
+    def judged(row: FrontMatterCandidate) -> bool:
+        return row.region_order is not None and row.region_order[0] in seen_pages
+
+    overlaps = {
+        block.block_id: sum(1 for row in _block_candidates(block, by_id) if in_target(row))
+        for block in blocks
+    }
+    covered = sum(overlaps.values())
+    if covered == 0:
+        return None, ("page_model_no_overlap",)
+    ranked = sorted(blocks, key=lambda block: -overlaps[block.block_id])
+    best = ranked[0]
+    unique = len(ranked) == 1 or overlaps[best.block_id] > overlaps[ranked[1].block_id]
+    if unique and overlaps[best.block_id] / covered >= min_share:
+        best_rows = _block_candidates(best, by_id)
+        foreign_title = any(
+            "title" in row.roles and judged(row) and not in_target(row) for row in best_rows
+        )
+        kept = [row for row in best_rows if in_target(row) or not judged(row)]
+        if foreign_title and any("title" in row.roles for row in kept if in_target(row)):
+            trimmed = replace(_make_block(0, kept), block_id=PAGE_MODEL_BLOCK_ID)
+            return trimmed, (f"page_model_trimmed:{best.block_id}",)
+        return best, (f"page_model_block:{best.block_id}",)
+    rows = [row for block in blocks for row in _block_candidates(block, by_id) if in_target(row)]
+    if not any("title" in row.roles for row in rows):
+        return None, ("page_model_split_without_title",)
+    merged = replace(_make_block(0, rows), block_id=PAGE_MODEL_BLOCK_ID)
+    sources = ",".join(block.block_id for block in blocks if overlaps[block.block_id])
+    return merged, (f"page_model_regrouped:{sources}",)
+
+
+def _apply_page_model(
+    *,
+    mode: str,
+    prediction: PageRecordPrediction,
+    blocks: tuple[FrontMatterBlock, ...],
+    by_id: dict[str, FrontMatterCandidate],
+    selected: FrontMatterBlock | None,
+    method: str,
+    min_share: float,
+) -> tuple[FrontMatterBlock | None, str, tuple[FrontMatterBlock, ...], tuple[str, ...]]:
+    """Let the page model select (``primary``) or break a tie (``arbiter``).
+
+    In ``primary`` mode the heuristics' own selection is kept only as a
+    disagreement check: when it shares no row with the model's target, the
+    paper abstains (``page_model_disagreement``) rather than trust either.
+    """
+
+    choice, flags = _page_model_choice(blocks, by_id, prediction, min_share=min_share)
+    flags = ("front_page_model", *flags)
+    if choice is None:
+        return selected, method, blocks, flags
+    if mode == "arbiter" and selected is not None:
+        return selected, method, blocks, flags
+    if mode == "primary" and selected is not None:
+        target_ids = {
+            row.candidate_id
+            for row in _block_candidates(choice, by_id)
+            if row.region_order is not None and row.region_order in prediction.target
+        }
+        if target_ids.isdisjoint(selected.candidate_ids):
+            return None, "abstained", blocks, (*flags, f"page_model_disagreement:{method}")
+        flags = (*flags, f"page_model_agrees:{method}")
+    if choice.block_id == PAGE_MODEL_BLOCK_ID:
+        blocks = (*blocks, choice)
+    return choice, "page_model", blocks, flags
+
+
 def _multi_item_issue(
     blocks: tuple[FrontMatterBlock, ...],
     expected_identity: ExpectedIdentity | None,
@@ -3424,6 +3528,35 @@ def resolve_front_matter(
             reason_flags.extend(agreement_flags)
     elif not blocks:
         reason_flags.append("no_candidates")
+
+    page_mode = front_page_mode(settings)
+    prediction = getattr(contents, "front_page_prediction", None)
+    if (
+        page_mode != "off"
+        and isinstance(prediction, PageRecordPrediction)
+        and blocks
+        and not toc_listing
+        and expected_selection is None
+        and not _has_expected_selectors(expected_identity)
+    ):
+        try:
+            selected, method, blocks, page_flags = _apply_page_model(
+                mode=page_mode,
+                prediction=prediction,
+                blocks=blocks,
+                by_id=by_id,
+                selected=selected,
+                method=method,
+                min_share=float(
+                    getattr(getattr(settings, "ml", None), "front_page_model_min_share", 0.8)
+                ),
+            )
+        except Exception:  # noqa: BLE001 - optional evidence must never fail a paper
+            logger.warning("Front-page model selection failed; keeping heuristics", exc_info=True)
+            page_flags = ("front_page_model_error",)
+        if selected is not None and "multiple_plausible_blocks" in reason_flags:
+            reason_flags.remove("multiple_plausible_blocks")
+        reason_flags.extend(page_flags)
 
     candidates = _promote_selected_contextual_bylines(
         candidates,

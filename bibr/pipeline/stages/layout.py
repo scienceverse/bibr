@@ -26,6 +26,26 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _front_page_copies(page_images, settings):
+    """Downscaled leading pages kept past OCR for the page-level front-matter model."""
+    from bibr.extract.front_page_model import front_page_mode
+
+    ml = settings.ml
+    if (
+        front_page_mode(settings) == "off"
+        or not getattr(ml, "front_page_model_base_url", None)
+        or not getattr(ml, "front_page_model_send_images", False)
+    ):
+        return None
+    side = int(ml.front_page_model_image_max_side)
+    copies = []
+    for image in page_images[: int(ml.front_page_model_pages)]:
+        copy = image.copy()
+        copy.thumbnail((side, side))
+        copies.append(copy)
+    return copies or None
+
+
 class LayoutStage:
     name = "layout"
     # FileState fields consumed / populated (see validate_stage_contracts).
@@ -127,6 +147,7 @@ class LayoutStage:
                 )
             fs.page_images = [img for _, img in page_tuples]
             fs.page_indices = [idx for idx, _ in page_tuples]
+            fs.front_page_images = _front_page_copies(fs.page_images, settings)
             return fs.page_images
 
         def _start_prepare(fs) -> tuple[asyncio.Task, float]:

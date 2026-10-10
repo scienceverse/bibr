@@ -66,6 +66,19 @@ async def _predict_front_roles(rm, ocr_regions, *, first_page_index: int):
     return predictions if isinstance(predictions, FrontRolePredictions) else None
 
 
+async def _predict_front_page(settings, ocr_regions, page_images):
+    """Ask the optional page-level front-matter model; never raise."""
+    from bibr.extract.front_page_model import front_page_mode, predict_front_page
+
+    if front_page_mode(settings) == "off":
+        return None
+    try:
+        return await asyncio.to_thread(predict_front_page, settings, ocr_regions, page_images)
+    except Exception:  # noqa: BLE001 - optional evidence must never fail parsing
+        logger.warning("Front-page model failed; continuing without it", exc_info=True)
+        return None
+
+
 class ParseSegmentStage:
     name = "parse"
     # FileState fields consumed / populated (see validate_stage_contracts).
@@ -146,6 +159,11 @@ class ParseSegmentStage:
                     )
                     if predictions is not None:
                         contents.front_role_predictions = predictions
+                    page_prediction = await _predict_front_page(
+                        ctx.settings, fs.ocr_regions, fs.front_page_images
+                    )
+                    if page_prediction is not None:
+                        contents.front_page_prediction = page_prediction
 
                 assembler = parser.assembler
                 if len(assembler):

@@ -259,6 +259,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- An optional page-level front-matter model can pick the paper's own record on first pages that
+  print a masthead, a second article or the previous article's tail, where the heuristics fail
+  closed with `VAL_METADATA_MULTI_ITEM`. It reads pages 1-2 (images plus every OCR region) from an
+  OpenAI-compatible server and names the target article's regions. `ML_FRONT_PAGE_MODEL_MODE` is
+  `off` by default; `arbiter` consults it only where the heuristics abstain, and `primary` lets it
+  choose and abstains when the heuristics disagree. Set `ML_FRONT_PAGE_MODEL_BASE_URL` to enable
+  it.
+
 - An optional document layer (`pipeline.document_layer`, environment variable
   `PIPELINE_DOCUMENT_LAYER`; off by default) keeps what the PDF itself says about each
   page, so later stages can use it as evidence: text spans and lines with their fonts,

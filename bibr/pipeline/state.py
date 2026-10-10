@@ -64,6 +64,10 @@ class FileState:
     # the PDF's text layer, links and metadata. The caller holds them anyway.
     caller_bytes: bytes | None = None
     page_images: "list[PILImage] | None" = None
+    # Downscaled copies of the leading page images, kept past OCR for the
+    # page-level front-matter model (``ML_FRONT_PAGE_MODEL_MODE``); freed with
+    # the raw OCR regions after parse. None when that model is off.
+    front_page_images: "list[PILImage] | None" = None
     page_indices: list[int] | None = None
     layout_results: list[list[dict[str, Any]]] | None = None
     pdf_inspection: "PdfInspection | None" = None
@@ -129,6 +133,7 @@ class FileState:
     def free_pre_parse(self):
         """Free data consumed by parse stage."""
         self.ocr_regions = None
+        self.front_page_images = None
         self.ref_line_geometry = None
         self.ref_page_lines = None
         self.pdf_uri_links = None
@@ -189,6 +194,7 @@ class FileState:
         self.pdf_bytes = None
         self.caller_bytes = None
         self.page_images = None
+        self.front_page_images = None
         self.page_indices = None
         self.layout_results = None
         self.pdf_inspection = None

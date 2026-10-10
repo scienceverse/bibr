@@ -18,6 +18,7 @@ from bibr.processing_warnings import ProcessingWarning
 if TYPE_CHECKING:
     from bibr.document.model import DocumentLayer
     from bibr.extract.front_matter import FrontMatterResolution
+    from bibr.extract.front_page_model import PageRecordPrediction
     from bibr.extract.front_role import FrontRolePredictions
     from bibr.models import PaperMetadata, PaperReference
     from bibr.validation import ValidationIssue
@@ -854,6 +855,10 @@ class PaperContents:
     # the same key RegionSummary carries. None when the model is disabled or
     # the input had no OCR regions (native DOCX/JATS/HTML). Internal-only.
     front_role_predictions: "FrontRolePredictions | None" = None
+    # The page-level front-matter model's answer (bibr/extract/front_page_model.py):
+    # which first-page regions belong to the target article. None when the
+    # model is off, unreachable, or the input had no OCR regions. Internal-only.
+    front_page_prediction: "PageRecordPrediction | None" = None
     # Warnings recorded during content-level extraction (e.g. reference
     # segmentation falling back to CRF); surfaced onto
     # ``Paper.processing_warnings`` in post_parse.
