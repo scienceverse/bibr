@@ -588,6 +588,11 @@ re-run does not spend a request on each DOI Crossref has no record of.
 `CROSSREF_CONSOLIDATE` (`off`/`fill`/`replace`, or the `consolidate` form
 field on `/papers/extract`) controls whether accepted Crossref matches get
 merged back into `bib`, or left only in `bib_match`.
+`CROSSREF_VERIFY` (default `true`) checks each reference's parsed volume,
+issue and pages against its confident match before that: a value the parser
+missed or misread is replaced by the match's value only when the reference
+string prints it, and every comparison is recorded in
+`extraction.diagnostics.verification`.
 
 ### Optional external resolver (`BIBR_RESOLVER_URL`)
 
@@ -603,6 +608,7 @@ behavior unchanged.
 | `BIBR_RESOLVER_TIMEOUT` | `10.0` | Per-request timeout (seconds). |
 | `BIBR_RESOLVER_LIMIT` | `20` | Max candidates requested from `/search`. |
 | `BIBR_RESOLVER_SEARCH_CONCURRENCY` | `8` | Max concurrent `/search` calls when prefetching a reference list's title searches. |
+| `BIBR_RESOLVER_RAW_SEARCH` | `false` | Search again with the whole reference string for references the title searches left unmatched, accepting a candidate only when its title, year and first author (or volume and first page) are printed in it. |
 
 A resolver error falls through to Crossref. Misses also fall through by
 default; `BIBR_RESOLVER_AUTHORITATIVE=true` makes a clean resolver miss
