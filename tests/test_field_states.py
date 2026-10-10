@@ -212,7 +212,7 @@ def test_export_outside_the_pipeline_has_no_fields(demo_paper):
     from bibr.export.json_export import export_paper_to_json
 
     payload = export_paper_to_json(demo_paper)
-    assert payload["schema_version"] == "12.1"
+    assert payload["schema_version"] == "12.2"
     assert "fields" not in payload["extraction"]
 
 
@@ -241,7 +241,7 @@ def test_pipeline_export_carries_valid_fields(demo_paper):
     PaperExport.model_validate(payload)
 
 
-@pytest.mark.parametrize("version", ["12.0", "12.1"])
+@pytest.mark.parametrize("version", ["12.0", "12.1", "12.2"])
 def test_readers_accept_old_and_new_minor_exports(version):
     """A 12.0 export has no fields; the reader, the evaluator and
     payload_validation read it exactly as before."""
@@ -252,8 +252,8 @@ def test_readers_accept_old_and_new_minor_exports(version):
 
     new = json.loads((CONFORMANCE / "valid" / "full.json").read_text())
     payload = copy.deepcopy(new)
+    payload["schema_version"] = version
     if version == "12.0":
-        payload["schema_version"] = "12.0"
         del payload["extraction"]["fields"]
 
     model = PaperExportReader.model_validate(payload)
@@ -269,7 +269,7 @@ def test_core_checkpoint_replay_accepts_the_current_minor():
     from bibr.export.models import _SCHEMA_VERSION
     from bibr.pipeline.artifacts import CORE_SCHEMA_VERSION
 
-    assert CORE_SCHEMA_VERSION == _SCHEMA_VERSION == "12.1"
+    assert CORE_SCHEMA_VERSION == _SCHEMA_VERSION == "12.2"
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — export schema 12.2 (additive)
+
+The export moves to schema `12.2`, which adds one optional receipt; every 12.1
+export is still valid input for the 12.x reader.
+
+- With enrichment on, each reference's parsed `volume`, `issue`, `first_page`
+  and `last_page` are checked against its matched record (score 0.9 or more)
+  at export. A value the parser dropped or misread is replaced by the record's
+  value only when the reference string prints that value, so `bib[]` stays what
+  the page says; a record that disagrees with a printed value is reported and
+  `bib[]` keeps the parsed value. A last page printed abbreviated ("1267–89")
+  is kept abbreviated. `extraction.diagnostics.verification[]` records, per
+  checked reference, `agree`, `filled`, `corrected` or `disagree` for each
+  field, and the fields taken are listed in `extraction.diagnostics.consolidation`.
+  On a frozen 120-paper validation snapshot (bibr 0.3.0 with Crossref
+  enrichment) this raises reference volume accuracy from 0.617 to 0.826 and
+  pages from 0.596 to 0.710, with no reference made worse.
+  `CROSSREF_VERIFY=false` turns it off. It runs before `CROSSREF_CONSOLIDATE`.
+- `BIBR_RESOLVER_RAW_SEARCH=true` searches the resolver once more with the
+  whole reference string for references the title searches left unmatched,
+  such as one whose title the parser missed. A candidate is accepted only when
+  its title, a year within one of a printed year, and its first author (or its
+  volume and first page) are printed in the string, and two different works
+  printed equally well are both refused. Off by default until measured against
+  a live resolver.
+
 ### Security
 
 - A crafted or crowded PDF no longer holds the PDF lock, and with it every other `bibr serve`

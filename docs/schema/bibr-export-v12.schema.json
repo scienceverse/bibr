@@ -1182,6 +1182,18 @@
             "null"
           ]
         },
+        "verification": {
+          "default": null,
+          "description": "Per reference with a confident bib_match record, how its parsed volume, issue and pages compare with the record; omitted when verification did not run.",
+          "items": {
+            "$ref": "#/$defs/VerificationExport"
+          },
+          "title": "Verification",
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "xref_tier": {
           "default": null,
           "description": "How each bibliography, figure and table xref that recorded it was linked.",
@@ -4268,6 +4280,103 @@
       "title": "ValidationIssueExport",
       "type": "object"
     },
+    "VerificationExport": {
+      "additionalProperties": false,
+      "description": "How one reference's parsed locators compare with its matched record.\n\nEach field is 'agree' (same value), 'filled' (the parser found none and the\nrecord's value is printed in the reference string, so bib[] now holds it),\n'corrected' (the parsed value differed and the record's value is printed,\nso it replaced the parsed one) or 'disagree' (they differ and the record's\nvalue is not printed; bib[] keeps the parsed value). A field the record\ndoes not carry is omitted.",
+      "properties": {
+        "bib_id": {
+          "description": "bib[].bib_id of the checked entry.",
+          "minimum": 1,
+          "title": "Bib Id",
+          "type": "integer"
+        },
+        "first_page": {
+          "default": null,
+          "description": "bib[].first_page.",
+          "enum": [
+            "agree",
+            "filled",
+            "corrected",
+            "disagree",
+            null
+          ],
+          "title": "First Page",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "issue": {
+          "default": null,
+          "description": "bib[].issue.",
+          "enum": [
+            "agree",
+            "filled",
+            "corrected",
+            "disagree",
+            null
+          ],
+          "title": "Issue",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_page": {
+          "default": null,
+          "description": "bib[].last_page.",
+          "enum": [
+            "agree",
+            "filled",
+            "corrected",
+            "disagree",
+            null
+          ],
+          "title": "Last Page",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "service": {
+          "description": "Service of the bib_match record checked.",
+          "enum": [
+            "crossref",
+            "openalex",
+            "datacite",
+            "doi.org",
+            "openlibrary",
+            "ror",
+            "manual",
+            "other"
+          ],
+          "title": "Service",
+          "type": "string"
+        },
+        "volume": {
+          "default": null,
+          "description": "bib[].volume.",
+          "enum": [
+            "agree",
+            "filled",
+            "corrected",
+            "disagree",
+            null
+          ],
+          "title": "Volume",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "bib_id",
+        "service"
+      ],
+      "title": "VerificationExport",
+      "type": "object"
+    },
     "WarningExport": {
       "additionalProperties": false,
       "description": "One non-fatal processing warning.",
@@ -4519,7 +4628,7 @@
       "type": "string"
     },
     "schema_version": {
-      "const": "12.1",
+      "const": "12.2",
       "description": "Export schema version. Its presence at the root is how readers distinguish v11 and later from all earlier versions.",
       "title": "Schema Version",
       "type": "string"

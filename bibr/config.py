@@ -1361,6 +1361,17 @@ class CrossrefOptions(_BibrSettings):
         "from a match carrying the reference's printed DOI).",
     )
 
+    # Check each reference's parsed volume, issue and pages against its
+    # confident bib_match record at export. A disagreement is reported in
+    # extraction.diagnostics.verification; a missing or misparsed value is
+    # replaced only by the record's value as printed in the reference string.
+    verify: bool = Field(
+        True,
+        description="Check parsed reference volume, issue and pages against the matched record "
+        "at export: report disagreements, and fill or correct a value only when the record's "
+        "value is printed in the reference string. Needs enrichment; off leaves bib[] as parsed.",
+    )
+
     @field_validator("consolidate", mode="before")
     @classmethod
     def _lower_consolidate(cls, v):
@@ -1485,6 +1496,15 @@ class ResolverOptions(_BibrSettings):
         30.0,
         gt=0,
         description="Whole-paper wall-clock deadline in seconds for the resolver fallback pass.",
+    )
+    # A reference the title passes left unmatched is searched once more with its
+    # whole printed string, so a misparsed or missing title can still find its
+    # work. Off by default until measured against a live resolver.
+    raw_search: bool = Field(
+        False,
+        description="Search the resolver with the whole reference string for references the "
+        "title passes left unmatched; a candidate is accepted only when its title, year and "
+        "first author (or volume and first page) are printed in that string.",
     )
 
     @field_validator("sources", "fallback_sources", mode="before")
