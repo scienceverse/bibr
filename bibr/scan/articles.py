@@ -97,10 +97,16 @@ _REFERENCE_HEADINGS = frozenset(
 _CONTINUATION_RE = re.compile(
     r"^(?:appendi(?:x|ces)|annex|supplementa(?:ry|l)|supporting information|"
     r"acknowledge?ments?|notes?|figure|fig|table|errat(?:um|a)|corrigend(?:um|a)|"
-    r"author information|about the authors?|"
-    # A discussion item prints the reply after the paper's references.
-    r"reply|response|rejoinder|discussion|comments? on|author s? reply|authors? reply)\b"
+    r"author information|about the authors?)\b"
 )
+# A discussion item prints its replies after the paper's references: "Reply to
+# the discussants", "Remarks on comments of Prof. X", "Author's response".
+# Searched anywhere in a short title, since the cue is rarely its first word.
+_DISCUSSION_RE = re.compile(
+    r"\b(?:reply|replies|response|rejoinder|discussion|remarks on|"
+    r"comments? (?:on|of|to|by))\b"
+)
+_DISCUSSION_MAX_WORDS = 15
 
 
 def is_reference_heading(text: str) -> bool:
@@ -129,7 +135,10 @@ def _can_start_article(region: OcrRegionResult) -> bool:
     text = region.content.strip()
     if _title_chars(text) < _MIN_TITLE_CHARS or is_reference_heading(text):
         return False
-    return not _CONTINUATION_RE.match(_fold(text))
+    folded = _fold(text)
+    if _CONTINUATION_RE.match(folded):
+        return False
+    return not (len(folded.split()) <= _DISCUSSION_MAX_WORDS and _DISCUSSION_RE.search(folded))
 
 
 def _above(region: OcrRegionResult, title: OcrRegionResult) -> bool:

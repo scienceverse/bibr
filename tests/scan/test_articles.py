@@ -133,7 +133,12 @@ def test_reply_in_a_discussion_item_is_not_a_new_article():
         [_r("doc_title", "A Paper About Things"), _r("reference", "1. A ref.")],
         [_r("doc_title", "Reply to the Discussants"), _r("reference", "1. Reply ref.")],
     )
-    for title in ("Reply to the Discussants", "Author's Reply", "Response to Smith"):
+    for title in (
+        "Reply to the Discussants",
+        "Author's Reply",
+        "Response to Smith",
+        "Remarks on Comments of Prof. Flohn",
+    ):
         pages[1][0].content = title
         assert not split_articles(pages, {0: SCAN, 1: SCAN}).changed, title
 
