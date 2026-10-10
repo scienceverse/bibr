@@ -126,7 +126,9 @@ page; regions whose two readings differ by at least `OCR_CONSENSUS_THRESHOLD`
 (normalized edit distance, default 0.15) are ranked and the worst
 `OCR_CONSENSUS_ESCALATE_SHARE` (default 7%) escalated. An
 `OCR_ESCALATION_BACKEND` re-reads those and the reading closest to the other two
-is kept; without one the primary reading stays and the region is flagged. Each
+is kept; without one the primary reading stays and the region is flagged. A
+GLM-OCR server used this way needs `--max-model-len` above the GLM profile's
+16384 generation tokens, or every request is refused. Each
 compared region carries `_ocr_consensus`, and the paper an
 `OCR_RECOGNIZERS_DISAGREE` warning. With `PIPELINE_SCAN_ARTICLE_SPLIT=true`,
 the parse stage drops the regions of neighbouring articles from scanned pages:

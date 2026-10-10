@@ -160,3 +160,28 @@ async def test_parse_stage_splits_after_ocr_freed_the_inspection():
     fs.free_pre_ocr()
     parsed = await _parse(fs, _settings(scan_article_split=True))
     assert [len(page) for page in parsed] == [2, 0]
+
+
+class _FailingBackend:
+    async def recognize(self, image, prompt):
+        raise RuntimeError("HTTP 400: max_tokens exceeds max-model-len")
+
+    async def shutdown(self):
+        pass
+
+
+def test_ocr_stage_warns_when_every_second_reading_fails(caplog):
+    fs = FileState(path=Path("scan.pdf"))
+    fs.pdf_inspection = _scan_inspection(1)
+    fs.layout_results = [[{"label": "text", "bbox_2d": [0, 0, 500, 100]}]]
+    fs.page_indices = [0]
+    fs.page_images = [Image.new("RGB", (1000, 1000), "white")]
+    pages = [[{"index": 0, "label": "text", "content": "x", "bbox_2d": [0, 0, 500, 100]}]]
+    second = Recognizer(role="consensus", backend=_FailingBackend(), profile=GLM_PROFILE)
+    ctx = SimpleNamespace(
+        scratch={"scan_recognizers": (second, None)}, settings=snapshot_settings()
+    )
+    with caplog.at_level("WARNING"):
+        asyncio.run(OcrStage._apply_consensus(fs, ctx, pages))
+    assert "all 1 second-recognizer calls failed" in caplog.text
+    assert "max-model-len" in caplog.text

@@ -143,6 +143,7 @@ def test_a_failing_second_recognizer_leaves_the_primary_reading():
     report = _run(pages, {0: "scan"}, _recognizer({}, fail=True))
     assert report.compared == 0
     assert report.failed == 1
+    assert report.first_error == "RuntimeError: boom"
     assert pages[0][0]["content"] == "Primary text"
     assert "_ocr_consensus" not in pages[0][0]
 

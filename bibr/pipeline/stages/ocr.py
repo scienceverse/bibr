@@ -1329,6 +1329,25 @@ class OcrStage:
         except Exception:  # noqa: BLE001 - consensus is an addition, never a dependency
             logger.warning("OCR consensus failed for %s", fs.path.name, exc_info=True)
             return
+        if report.failed and not report.compared:
+            # Every second reading failed: the run equals one without
+            # consensus, which must not pass for a clean consensus run.
+            logger.warning(
+                "OCR consensus for %s: all %d second-recognizer calls failed; scan regions keep "
+                "the primary reading (first error: %s). A GLM-OCR server needs a "
+                "--max-model-len above the GLM profile's 16384 generation tokens.",
+                fs.path.name,
+                report.failed,
+                report.first_error,
+            )
+        elif report.failed:
+            logger.warning(
+                "OCR consensus for %s: %d of %d second-recognizer calls failed (first error: %s)",
+                fs.path.name,
+                report.failed,
+                report.failed + report.compared,
+                report.first_error,
+            )
         if report.compared:
             logger.info(
                 "OCR consensus for %s: %d compared, %d disagree, %d escalated, %d replaced",

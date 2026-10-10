@@ -148,6 +148,8 @@ class ConsensusReport:
     escalated: int = 0
     replaced: int = 0
     failed: int = 0
+    # The first second-recognizer error, for the warning when every call fails.
+    first_error: str | None = None
     # (page, region index, score) of the escalated regions, 0-based page.
     escalated_regions: list[tuple[int, int, float]] = field(default_factory=list)
 
@@ -218,6 +220,8 @@ async def apply_consensus(
         except Exception as exc:  # noqa: BLE001 - the primary reading stands
             if is_outage(exc):
                 outage.append(exc)
+            if report.first_error is None:
+                report.first_error = f"{type(exc).__name__}: {exc}"
             logger.debug("Second recognizer failed on a region: %s", exc)
             return None
 
