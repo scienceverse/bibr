@@ -1270,6 +1270,9 @@ def _fill_page_regions_from_textpage(
         ):
             region["_native_text_candidate"] = native_text
             region["_native_text_rejection_reason"] = _PRIVATE_USE_REJECTION_REASON
+            # The gate that set the text layer aside, for page triage
+            # (bibr.scan.page_kind); layout-dict only, never exported.
+            region["_native_gate"] = "private_use"
             logger.debug(
                 "Native text contained a private-use character (page %d), "
                 "falling back to OCR for this region",
@@ -1282,6 +1285,7 @@ def _fill_page_regions_from_textpage(
         if len(native_text.strip()) < effective_min_chars:
             continue
         if not _is_native_text_usable(native_text, min_printable_ratio):
+            region["_native_gate"] = "usability"
             logger.debug(
                 "Native text failed corruption gate (page %d), falling back to OCR for this region",
                 page_idx,
@@ -1289,6 +1293,7 @@ def _fill_page_regions_from_textpage(
             continue
         region.pop("_native_text_candidate", None)
         region.pop("_native_text_rejection_reason", None)
+        region.pop("_native_gate", None)
         region["content"] = native_text
         region["_native_text_used"] = True
 
