@@ -72,7 +72,7 @@ def consolidate_bibs(data: dict, mode: Literal["fill", "replace"] = "fill") -> i
     match for a reference printed without a DOI) only fills, in both modes,
     so a near-miss search hit never rewrites what the paper printed. The field
     names taken per row are recorded in ``extraction.diagnostics.consolidation``
-    (see :func:`_record_consolidation`), never on the bib rows themselves.
+    (see :func:`record_consolidation`), never on the bib rows themselves.
     Returns the number of modified rows.
     """
     if mode not in ("fill", "replace"):
@@ -132,11 +132,11 @@ def consolidate_bibs(data: dict, mode: Literal["fill", "replace"] = "fill") -> i
                     taken.append("published_date")
         if taken:
             taken_by_bib[bib["bib_id"]] = taken
-    _record_consolidation(data, taken_by_bib)
+    record_consolidation(data, taken_by_bib)
     return len(taken_by_bib)
 
 
-def _record_consolidation(data: dict, taken_by_bib: dict[int, list[str]]) -> None:
+def record_consolidation(data: dict, taken_by_bib: dict[int, list[str]]) -> None:
     """Merge *taken_by_bib* into ``extraction.diagnostics.consolidation``.
 
     The receipt is processing provenance, so it lives under ``extraction``

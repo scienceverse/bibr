@@ -11,7 +11,7 @@ from bibr.processing_warnings import ProcessingWarning, WarningCode
 
 def _core_payload(*, title: str = "Café") -> dict:
     return {
-        "schema_version": "12.1",
+        "schema_version": "12.2",
         "metadata": {"title": title},
         "bib": [{"bib_id": 1}],
         "bib_match": [],
@@ -483,6 +483,7 @@ def test_enrichment_settings_digest_includes_resolver_result_settings():
         settings = MagicMock()
         settings.crossref.enrich = True
         settings.crossref.consolidate = "off"
+        settings.crossref.verify = True
         settings.crossref.enrich_concurrency = 4
         settings.crossref.enrich_timeout = 30
         settings.crossref.request_timeout = 10
