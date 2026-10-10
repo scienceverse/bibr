@@ -3,9 +3,11 @@ import contextlib
 import copy
 import functools
 import hashlib
+import inspect
 import itertools
 import json
 import logging
+import math
 import re
 import time
 import uuid
@@ -224,6 +226,24 @@ def _extract_cached_tokens(usage) -> int:
     return getattr(details, "cached_tokens", None) or 0 if details is not None else 0
 
 
+def _is_anthropic_usage(usage) -> bool:
+    """True for Anthropic's usage shape, whose ``input_tokens`` leaves out the
+    prompt-cache reads and writes it reports beside it.
+
+    Proxies that translate Anthropic usage into the OpenAI shape keep the cache
+    fields beside a ``prompt_tokens`` that already includes them; that shape
+    is read as OpenAI's.
+    """
+    return (
+        hasattr(usage, "input_tokens")
+        and (
+            hasattr(usage, "cache_read_input_tokens")
+            or hasattr(usage, "cache_creation_input_tokens")
+        )
+        and not hasattr(usage, "prompt_tokens")
+    )
+
+
 def _create_client(mode_override=None, settings: "GlobalSettings | None" = None):
     """Construct an async Instructor client for the configured provider.
 
@@ -240,6 +260,25 @@ def _create_client(mode_override=None, settings: "GlobalSettings | None" = None)
     if mode_override is not None and getattr(provider, "name", None) == "openai":
         return provider.build_client(mode_override=mode_override)
     return provider.build_client()
+
+
+async def _aclose_sdk_client(raw: Any) -> None:
+    """Close the HTTP pool of an SDK client (best-effort, never raises).
+
+    google-genai closes its async pool through ``aio.aclose()``; the OpenAI,
+    Anthropic and Groq clients through ``close()``.
+    """
+    if raw is None:
+        return
+    try:
+        aio = getattr(raw, "aio", None)
+        close = getattr(aio, "aclose", None) if aio is not None else getattr(raw, "close", None)
+        if close is not None:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+    except Exception:  # noqa: BLE001 — shutdown must not fail on a pool already gone
+        logger.debug("Failed to close an LLM SDK client", exc_info=True)
 
 
 def preflight_credentials(settings: "GlobalSettings | None" = None) -> None:
@@ -262,10 +301,10 @@ def ping_llm(settings: "GlobalSettings | None" = None) -> str:
     differs from the adapter can fail a configuration that extracts fine, or
     pass one that does not. Raises whatever the provider raises, and
     ``TimeoutError`` when no reply arrives within the limit chew puts on one
-    call (twice ``LLM_TIMEOUT_SECONDS``): the SDKs' own timeouts run to
-    minutes, so a server that accepts the connection and never answers would
-    otherwise hang the caller. It runs its own event loop, so call it from
-    synchronous code only.
+    call (twice ``LLM_TIMEOUT_SECONDS``, which also bounds each SDK request),
+    so a server that accepts the connection and never answers cannot hang
+    the caller. It runs its own event loop, so call it from synchronous code
+    only.
     """
     from pydantic import BaseModel, Field
 
@@ -297,7 +336,10 @@ def ping_llm(settings: "GlobalSettings | None" = None) -> str:
 
     try:
         return str(asyncio.run(_call()).reply)
-    except TimeoutError:
+    except Exception as exc:
+        # The SDK's own read timeout is the same limit, so it may fire first.
+        if not isinstance(exc, TimeoutError) and _classify_llm_failure(exc) is not LlmTimeoutError:
+            raise
         message = (
             f"No reply within {limit} s, the limit bibr chew sets for one LLM call "
             f"(twice LLM_TIMEOUT_SECONDS={per_request})."
@@ -763,9 +805,13 @@ def _extract_retry_after_seconds(exc: BaseException) -> float | None:
         ra = headers.get("retry-after") if headers is not None and hasattr(headers, "get") else None
         if ra is not None:
             try:
-                return float(ra)
+                seconds = float(ra)
             except (TypeError, ValueError):
                 pass
+            else:
+                # "inf", "nan" and negative values parse as floats too.
+                if math.isfinite(seconds) and seconds >= 0:
+                    return seconds
     details_attr = getattr(exc, "details", None)
     details = details_attr() if callable(details_attr) else details_attr
     if details:
@@ -895,6 +941,13 @@ _usage_file_hash: ContextVar[str | None] = ContextVar("_usage_file_hash", defaul
 # attributed even though all call sites share one ``LLMClient``.
 _usage_label: ContextVar[str | None] = ContextVar("_usage_label", default=None)
 
+# Usage of the labeled calls in progress in this context, innermost last.
+# Each call logs its own tokens: a delta of the client-wide totals also
+# counted every concurrent call that finished meanwhile.
+_call_usage: ContextVar[tuple[dict[str, dict[str, int]], ...]] = ContextVar(
+    "_call_usage", default=()
+)
+
 _usage_context_counter = itertools.count(1)
 
 
@@ -916,7 +969,7 @@ def usage_file_context(key: str | None):
 
 
 def track_llm_usage(func):
-    """Decorator that logs per-call token usage by snapshotting the handler before/after."""
+    """Decorator that logs the token usage of each call, labeled with the method name."""
 
     @functools.wraps(func)
     async def wrapper(self, *args, **kwargs):
@@ -1313,6 +1366,9 @@ class LLMClient:
                 return
             interval = 60.0 / self._settings.llm.rate_limit_rpm
             window = interval * self._BURST
+            # Providers meter quota per model, so a fleet sharing one Redis
+            # only shares a budget with replicas calling the same model.
+            resource_id = f"llm:{self._settings.llm.provider}:{self._settings.llm.model}"
             try:
                 if not self._settings.redis.url:
                     raise RuntimeError("Redis URL not configured")
@@ -1332,7 +1388,7 @@ class LLMClient:
 
                 self._limiter = AsyncRedisRateLimiter(
                     redis_url=self._settings.redis.url,
-                    resource_id="llm",
+                    resource_id=resource_id,
                     max_requests=self._BURST,
                     window_seconds=window,
                 )
@@ -1341,7 +1397,7 @@ class LLMClient:
 
                 logger.info("Redis unavailable, using local rate limiter: %s", exc)
                 self._limiter = AsyncLocalRateLimiter(
-                    resource_id="llm",
+                    resource_id=resource_id,
                     max_requests=self._BURST,
                     window_seconds=window,
                 )
@@ -1520,7 +1576,8 @@ class LLMClient:
     async def _run_labeled_call(self, label: str, call):
         if not self._track_usage:
             return await call()
-        before = copy.deepcopy(self._usage)
+        call_usage: dict[str, dict[str, int]] = {}
+        usage_token = _call_usage.set((*_call_usage.get(), call_usage))
         label_token = _usage_label.set(label)
         started = time.perf_counter()
         self._record_label_metric("logical_calls", 1)
@@ -1554,7 +1611,8 @@ class LLMClient:
             elapsed_ms = round((time.perf_counter() - started) * 1000)
             self._record_label_metric("total_ms", elapsed_ms)
             _usage_label.reset(label_token)
-            self._log_usage_delta(label, before)
+            _call_usage.reset(usage_token)
+            self._log_call_usage(label, call_usage)
 
     async def _acquire_rate_limit(self) -> None:
         started = time.perf_counter()
@@ -1583,7 +1641,7 @@ class LLMClient:
         total_tokens = max(0, int(total_tokens))
         cached_tokens = max(0, int(cached_input_tokens))
 
-        buckets = [self._usage]
+        buckets = [self._usage, *_call_usage.get()]
         file_hash = _usage_file_hash.get()
         if file_hash:
             buckets.append(self._usage_by_file.setdefault(file_hash, {}))
@@ -1619,7 +1677,8 @@ class LLMClient:
         - OpenAI-style ``completion.usage`` (prompt_tokens/completion_tokens,
           prefix-cache hits in ``prompt_tokens_details.cached_tokens``)
         - Anthropic-style ``completion.usage`` (input_tokens/output_tokens,
-          prompt-cache hits in ``cache_read_input_tokens``)
+          prompt-cache hits in ``cache_read_input_tokens``, cache writes in
+          ``cache_creation_input_tokens``; ``input_tokens`` excludes both)
         - google-genai ``completion.usage_metadata`` (prompt_token_count/
           candidates_token_count, implicit-cache hits in
           ``cached_content_token_count``)
@@ -1645,6 +1704,12 @@ class LLMClient:
             or getattr(usage, "total_token_count", 0)
             or (input_tokens + output_tokens)
         )
+        if _is_anthropic_usage(usage):
+            # Recorded input includes cached tokens, as for the other shapes.
+            input_tokens += (getattr(usage, "cache_read_input_tokens", 0) or 0) + (
+                getattr(usage, "cache_creation_input_tokens", 0) or 0
+            )
+            total_tokens = input_tokens + output_tokens
         self._record_usage_counts(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -1674,24 +1739,24 @@ class LLMClient:
             cached_input_tokens=getattr(error, "cached_input_tokens", 0),
         )
 
-    def _log_usage_delta(self, label: str, before: dict[str, dict[str, int]]) -> None:
-        """Log the per-model token-usage delta between *before* and ``self._usage``."""
-        after = self._usage
-
-        # Compute delta per model
-        for model_name, after_counts in after.items():
-            before_counts = before.get(model_name, {})
-            delta_in = after_counts.get("input_tokens", 0) - before_counts.get("input_tokens", 0)
-            delta_out = after_counts.get("output_tokens", 0) - before_counts.get("output_tokens", 0)
-            delta_total = after_counts.get("total_tokens", 0) - before_counts.get("total_tokens", 0)
-            if delta_total > 0:
+    def _log_call_usage(self, label: str, usage: dict[str, dict[str, int]]) -> None:
+        """Log the per-model token usage of one labeled call (nested calls included)."""
+        for model_name, counts in usage.items():
+            if counts["total_tokens"] > 0:
                 logger.info(
                     f"Token usage [{label}] model={model_name}: "
-                    f"input={delta_in}, output={delta_out}, total={delta_total}"
+                    f"input={counts['input_tokens']}, output={counts['output_tokens']}, "
+                    f"total={counts['total_tokens']}"
                 )
 
     _RETRY_MAX_ATTEMPTS = 3
     _RETRY_BASE_DELAY = 1.0  # seconds
+    # Ceiling on a provider's Retry-After hint, as for Crossref: a proxy that
+    # asks for an hour would otherwise park the call until the outer timeout.
+    _RETRY_AFTER_MAX = 60.0  # seconds
+    # Request timeout and conflict: retried by the SDKs before bibr turned
+    # their own retries off, so retried here with 429 and 5xx.
+    _RETRYABLE_4XX = frozenset({408, 409})
 
     async def _invoke_protocol_with_retries(
         self,
@@ -1815,7 +1880,8 @@ class LLMClient:
                 # (RateLimitError), and Google (ResourceExhausted) shapes —
                 # the SDK exception classes don't all expose .response.
                 is_429 = _is_provider_429(exc)
-                status = _extract_http_status(exc)
+                # Instructor wraps the SDK error, so the status is on the cause.
+                status = http_status_in_chain(exc)
                 # Connection resets, read timeouts and APIConnectionError carry
                 # no HTTP status at all, so a status-only test re-raised them on
                 # the first attempt — worst under the default google provider,
@@ -1823,7 +1889,7 @@ class LLMClient:
                 # physical attempt for a blip.
                 transient = (
                     is_429
-                    or (status is not None and status >= 500)
+                    or (status is not None and (status >= 500 or status in self._RETRYABLE_4XX))
                     or is_transient_network_error(exc)
                 )
                 if not transient:
@@ -1848,7 +1914,10 @@ class LLMClient:
             if retry_after is not None:
                 # Honor the provider's hint, but keep small jitter to avoid
                 # synchronized stampede when many callers hit the same 429.
-                delay = max(backoff, retry_after + random.uniform(0, 0.5))  # noqa: S311
+                delay = max(
+                    backoff,
+                    min(retry_after, self._RETRY_AFTER_MAX) + random.uniform(0, 0.5),  # noqa: S311
+                )
             else:
                 delay = backoff
             logger.warning(
@@ -1990,11 +2059,34 @@ class LLMClient:
         cache = self._response_cache
         if cache is None:
             return None, None
-        from bibr.clients.llm_cache import request_key
+        from bibr.clients.llm_cache import endpoint_identity, request_key
 
         try:
             flat = _flatten_content_parts(messages)
             user_text = "".join(m["content"] for m in flat if isinstance(m.get("content"), str))
+            llm = self._settings.llm
+            provider = llm.provider.strip().lower()
+            fingerprint = {
+                "provider": provider,
+                "endpoint": endpoint_identity(
+                    llm.ollama_base_url if provider == "ollama" else llm.base_url
+                ),
+                "instructor_mode": llm.instructor_mode,
+                # The native backend sends LLM_TEMPERATURE whatever the provider.
+                "temperature": llm.temperature,
+                # As the adapter resolves them: a None cap or effort falls
+                # back to LLM_MAX_TOKENS / LLM_REASONING_EFFORT here.
+                "params": _build_call_kwargs(
+                    reasoning_effort=reasoning_effort,
+                    max_tokens=max_tokens,
+                    settings=self._settings,
+                ),
+            }
+            if llm.model == llm.llmster_model_id:
+                # Managed llmster serves whatever LLM_LLMSTER_MODEL loads under
+                # this one alias, at the same URL.
+                fingerprint["weights"] = llm.llmster_model
+            call_json = json.dumps(fingerprint, sort_keys=True, default=str)
             key = request_key(
                 model=self._settings.llm.model,
                 schema_name=getattr(response_model, "__name__", str(response_model)),
@@ -2009,6 +2101,7 @@ class LLMClient:
                 chat_template_json=json.dumps(
                     self._settings.llm.chat_template_kwargs, sort_keys=True
                 ),
+                call_json=call_json,
             )
         except Exception:  # noqa: BLE001 — caching is best-effort, never fatal
             logger.debug("LLM cache key construction failed; proceeding uncached", exc_info=True)
@@ -2966,10 +3059,21 @@ class LLMClient:
             raise llm_call_error("Failed to extract equations", e) from e
 
     async def close(self):
-        """Close the rate limiter and clean up resources."""
+        """Close the rate limiter and the SDK clients, and clean up resources."""
         self._usage.clear()
         self._usage_by_file.clear()
         self._labels_by_file.clear()
         self._traces_by_file.clear()
         if self._limiter:
             await self._limiter.close()
+        # Rebuilt on next use, so a closed client is never handed out again.
+        for attr in ("_client", "_json_client", "_markdown_json_client"):
+            client = getattr(self, attr, None)
+            setattr(self, attr, None)
+            await _aclose_sdk_client(getattr(client, "client", None))
+        # An injected backend is the caller's to close.
+        backend = None if getattr(self, "_backend_explicit", True) else self._backend
+        native_client = getattr(backend, "_client", None)
+        if native_client is not None:
+            backend._client = None
+            await _aclose_sdk_client(native_client)

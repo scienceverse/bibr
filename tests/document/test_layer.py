@@ -411,9 +411,9 @@ def test_page_lines_reproduce_the_reference_line_stream(name, reject):
         assert views.page_lines(page) == by_page.get(page.index + 1, [])
 
 
-def test_page_lines_drop_chars_beyond_the_bmp_as_the_line_stream_does():
-    # pdfium reads such a char one UTF-16 unit at a time: the high surrogate
-    # alone, which decodes to nothing, so the line stream leaves it out.
+def test_page_lines_keep_chars_beyond_the_bmp_as_the_line_stream_does():
+    # get_text_range reads such a char as one UTF-16 unit, the high surrogate
+    # alone, which decodes to nothing; the line stream reads its code instead.
     line = f"Let {_pdfs.MATH_ALPHA_CODE} be the angle, and {_pdfs.MATH_ALPHA_CODE} is small"
     pdf = _pdfs.build_pdf([_pdfs.PageSpec(_pdfs.text(line, 72.0, 700.0, size=12.0, font="F4"))])
     inspection = _inspect(pdf, layer=True)
@@ -423,7 +423,9 @@ def test_page_lines_drop_chars_beyond_the_bmp_as_the_line_stream_does():
     lines = [found for found in inspection.page_lines if found["page"] == 1]
     assert lines
     assert views.page_lines(page) == lines
-    assert not any(_pdfs.MATH_ALPHA in json.dumps(found, ensure_ascii=False) for found in lines)
+    assert [found["text"] for found in lines] == [
+        line.replace(_pdfs.MATH_ALPHA_CODE, _pdfs.MATH_ALPHA)
+    ]
     assert views.line_text(page, 0) == line.replace(_pdfs.MATH_ALPHA_CODE, _pdfs.MATH_ALPHA)
 
 

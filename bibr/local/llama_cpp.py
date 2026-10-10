@@ -19,9 +19,15 @@ from bibr.local.http_runtime import (
     MANAGED_LOCAL_LLM_RATE_LIMIT_RPM,
     LocalHttpError,
     check_startup_stop,
+    env_with_api_key,
     guard_managed_server_port,
+    kill_process_group,
+    new_server_api_key,
+    own_server_key,
     pause_startup_poll,
+    register_server_key,
     request_bytes,
+    unregister_server_key,
 )
 
 try:
@@ -759,6 +765,9 @@ class LlamaCppServer:
 
     # Set by the owner to stop the startup wait early (see ResourceManager).
     _stop_event: threading.Event | None = None
+    # Per-launch key of the server this process started, which a sibling
+    # pipeline reusing it shares; another process's listener has none.
+    api_key = ""
 
     def __init__(
         self,
@@ -793,6 +802,8 @@ class LlamaCppServer:
             request_fn=request_bytes,
         )
         if self._reused:
+            # Another pipeline in this process may have started it.
+            self.api_key = own_server_key(self.base_url)
             return
 
         prefix = find_llama_server()
@@ -831,9 +842,12 @@ class LlamaCppServer:
 
         self._stderr_log, self._stderr_fh = open_subprocess_log("llama", port)
 
+        # /health stays public, so the readiness poll needs no key.
+        self.api_key = new_server_api_key()
         popen_kwargs: dict = {
             "stdout": subprocess.DEVNULL,
             "stderr": self._stderr_fh,
+            "env": env_with_api_key("LLAMA_API_KEY", self.api_key),
         }
         if os.name == "nt":
             popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -866,6 +880,7 @@ class LlamaCppServer:
             # of the health wait must still shut it down (mirrors VllmLlmServer).
             self.shutdown()
             raise
+        register_server_key(self.base_url, self.api_key)
         self._n_slots = _n_slots_from_argv(launched)
         # Server is healthy — nudge Vulkan-on-NVIDIA users toward CUDA (log-only,
         # once per process, both roles). Never blocks or fails startup.
@@ -904,6 +919,7 @@ class LlamaCppServer:
             if self._process.poll() is not None:
                 rc = self._process.returncode
                 tail = self._read_stderr_tail()
+                kill_process_group(self._process.pid)
                 raise RuntimeError(f"llama.cpp exited during startup (code {rc}): {tail[-1000:]}")
             try:
                 status, _reason, _body = request_bytes(f"{self.base_url}/health", timeout=5)
@@ -916,6 +932,7 @@ class LlamaCppServer:
                     if self._process.poll() is not None:
                         rc = self._process.returncode
                         tail = self._read_stderr_tail()
+                        kill_process_group(self._process.pid)
                         raise RuntimeError(
                             f"llama.cpp exited during startup (code {rc}): {tail[-1000:]}"
                         )
@@ -944,6 +961,8 @@ class LlamaCppServer:
 
     def shutdown(self) -> None:
         proc, self._process = self._process, None
+        if proc is not None and self.api_key:
+            unregister_server_key(self.base_url, self.api_key)
         try:
             if proc is not None and proc.poll() is None:
                 if os.name == "nt":
@@ -995,7 +1014,7 @@ class LlamaCppLlmServer:
     def configure_llm_client(self) -> None:
         self._settings.llm.provider = "openai"
         self._settings.llm.base_url = self.base_url + "/v1"
-        self._settings.llm.api_key = "not-needed"
+        self._settings.llm.api_key = self._server.api_key or "not-needed"
         self._settings.llm.model = self._server.model
         # Concurrency follows the server's slot count (1, or 2 when the probed
         # multi-slot args are active), unless the user pinned it explicitly.

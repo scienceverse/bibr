@@ -29,12 +29,16 @@ def _mock_limiter():
 
 
 def _completion(input_tokens, output_tokens, cached=0):
-    """Anthropic-shaped fake completion (SimpleNamespace so absent attrs raise)."""
+    """Anthropic-shaped fake completion (SimpleNamespace so absent attrs raise).
+
+    *input_tokens* counts the cached ones, as bibr records them; Anthropic
+    reports only the uncached rest as ``input_tokens``.
+    """
     usage = SimpleNamespace(
-        input_tokens=input_tokens,
+        input_tokens=input_tokens - cached,
         output_tokens=output_tokens,
-        total_tokens=input_tokens + output_tokens,
         cache_read_input_tokens=cached,
+        cache_creation_input_tokens=0,
     )
     return SimpleNamespace(usage=usage)
 

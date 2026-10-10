@@ -22,6 +22,9 @@ bearer token as extraction when authentication is enabled.
 The probes are public. With authentication enabled, an anonymous `/ready`
 response contains only `{"status": "ready"}` or `{"status": "not_ready"}`.
 A valid bearer token also exposes `checks` and the deployment `build_sha`.
+`/ready` reuses its OCR, Redis and job-store results for 2 seconds, and
+concurrent probes share one round of checks, so a change in those services
+shows within 2 seconds and probe traffic does not multiply requests to them.
 
 ### Papers
 
@@ -37,9 +40,11 @@ fields; the `file` bytes within it are limited to 50 MiB (with `MCP_ENABLED`
 the body cap grows to fit a 50 MiB file in base64 form — see the MCP guide).
 At most 1 MiB of the upload remains in API memory before the multipart spool
 rolls to disk.
-Exactly one `file` part is accepted. The eight optional fields below must each
-appear at most once and are capped at 64 bytes; duplicate/unknown parts or a
-second file return `400`.
+Exactly one `file` part is accepted. The nine optional fields below must each
+appear at most once and are capped at 64 bytes; duplicate parts, a second file,
+a file part under another name or more than 25 text parts in all return `400`.
+A text field the route does not know is ignored, and up to 16 of them fit
+alongside every field below.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
@@ -48,12 +53,13 @@ second file return `400`.
 | `end_page` | int | No | End page for PDFs (0-indexed, inclusive) |
 | `include_figures` | bool | No | Emit figure images as `data:` URIs (default: `false`) |
 | `include_regions` | bool | No | Emit the `extraction.regions` layout debug payload (default: `false`). Contains per-region geometry and recognition content; response size depends on the document. |
+| `include_region_meta` | bool | No | Emit `extraction.text_regions`: the page, box (PDF points from the top-left), font and region type of each `text` row, keyed by `text_id` (default: `false`). This is what a viewer needs to highlight a sentence on the source PDF; it adds about a fifth to the response. Text without page layout (DOCX input, a scanned PDF without a native text layer) has no row. |
 | `crossref` | bool | No | Run Crossref/resolver reference enrichment for this request (`true`) or skip it (`false`). Omit to follow the server's `CROSSREF_ENRICH` setting, which is off by default. The response cache keys on the effective value. |
 | `consolidate` | `fill` \| `replace` | No | Merge accepted Crossref matches into `bib` before export (`fill` fills only missing fields, `replace` also overwrites disagreeing ones, but only from a match carrying the reference's printed DOI; a match's catch-all `bib_type` `other` fills a missing type but never replaces a printed one). Omit to defer to the server's `CROSSREF_CONSOLIDATE` setting. |
 | `refs` | `ner` \| `llm` \| `llm-chunked` \| `off` | No | Per-request override of the reference-parsing strategy (`REF_PARSE_STRATEGY`). |
 | `ref_seg` | `geom` \| `region` \| `llm` \| `crf` | No | Per-request override of the reference-segmentation strategy (`REF_SEG_STRATEGY`). |
 
-**Response:** JSON conforming to the bibr v{{ schema_version }} schema. Top-level keys, grouped by role: the paper and its input file — `paper_id`, `schema_version` (its presence at the root is how readers dispatch v11 and later from earlier versions), `source` (input-file identity: file name, SHA-256, format); what the paper says — `metadata` (scalar paper-level metadata), `author`, `affiliation`, `funding`, `text`, `section`, `url`, `bib`, `xref`, `figure`, `table`, `footnote`, `eq`; what external registries returned — `metadata_match` (matches for the paper's own identity), `affiliation_match` and `funding_match` (ROR organizations), `bib_match`; how the output was produced — `extraction` (engines, per-run settings, timings, LLM usage, enrichment completeness, identity receipts, qualification provenance, the output-validation result (`extraction.validation`: error/warning counts, promotion disposition and issue list), diagnostics receipts, the state of each tracked field (`extraction.fields`, since 12.1: whether `title`, `author`, `abstract`, `keywords`, `doi`, `published`, `journal`, `funding_statement`, `funding`, `paper_type` and `bib` were `extracted`, `absent`, `abstained`, `failed` or `not_attempted`, with the producing step, the rule of the field's decision and the codes that explain the state), figure/table piece locations and warnings (`{code, message}` objects); `regions` is added there when `include_regions=true`). Every key is always present, and content rows carry no processing fields. Figure and table rows describe the whole object.
+**Response:** JSON conforming to the bibr v{{ schema_version }} schema. Top-level keys, grouped by role: the paper and its input file — `paper_id`, `schema_version` (its presence at the root is how readers dispatch v11 and later from earlier versions), `source` (input-file identity: file name, SHA-256, format); what the paper says — `metadata` (scalar paper-level metadata), `author`, `affiliation`, `funding`, `text`, `section`, `url`, `bib`, `xref`, `figure`, `table`, `footnote`, `eq`; what external registries returned — `metadata_match` (matches for the paper's own identity), `affiliation_match` and `funding_match` (ROR organizations), `bib_match`; how the output was produced — `extraction` (engines, per-run settings, timings, LLM usage, enrichment completeness, identity receipts, qualification provenance, the output-validation result (`extraction.validation`: error/warning counts, promotion disposition and issue list), diagnostics receipts, the state of each tracked field (`extraction.fields`, since 12.1: whether `title`, `author`, `abstract`, `keywords`, `doi`, `published`, `journal`, `funding_statement`, `funding`, `paper_type` and `bib` were `extracted`, `absent`, `abstained`, `failed` or `not_attempted`, with the producing step, the rule of the field's decision and the codes that explain the state), figure/table piece locations and warnings (`{code, message}` objects); `regions` is added there when `include_regions=true`, and `text_regions` when `include_region_meta=true`). Every key is always present, and content rows carry no processing fields. Figure and table rows describe the whole object.
 
 `metadata` is scalar-only by design — pipeline telemetry lives under `extraction` and the input file's identity under `source` — so R consumers can call `as.data.frame(metadata)` cleanly.
 
@@ -113,7 +119,10 @@ deleted, and `/result` answers `410`. Clients that poll for `succeeded` or
 `failed` therefore stop as they do for any failed job. Returns `200` with the
 job's status (also when it was already cancelled), `409` with
 `{"detail", "status"}` for a job that is `running` or finished (a running
-extraction cannot be stopped yet), and `404` for an unknown job.
+extraction cannot be stopped yet), and `404` for an unknown job. With the
+Redis job store, a job cancelled through a replica other than the one that
+accepted it keeps its upload on that replica's disk until a job worker there
+reaches it or that replica's queue fills up to `JOBS_MAX_ACTIVE` entries.
 
 With `JOBS_DEDUPE_INFLIGHT=true` (default `false`), a `POST /papers/jobs`
 whose file (SHA-256), filename and options match a job the same server still
@@ -143,7 +152,11 @@ a load-balanced deployment answers the polls for a job another replica accepted
 and the active-job cap spans all replicas — see
 [Multiple bibr-serve replicas](../guides/deployment.md#multiple-bibr-serve-replicas).
 Each status carries `replica`, the instance executing the job; with the Redis
-store unreachable the job routes answer `503`. The service always pins one HTTP
+store unreachable the job routes answer `503`. A job whose replica stopped before
+it finished is failed with `503`, so the client resubmits it: with `error_code`
+`job_lost` when the replica died (by the first upload after its one-minute lease in
+Redis runs out), or `{"detail": "replica shut down before the job finished"}` after
+a clean shutdown. The service always pins one HTTP
 API process per instance—even with jobs disabled—because upload ownership and
 dispatch tracking are process-local. `PIPELINE_RESTART_WORKERS=false`
 fail-stops on worker death; `true` is an unsupported opt-in until the locked
@@ -162,7 +175,9 @@ curl -X POST http://localhost:8000/papers/extract \
 ```
 
 A missing or wrong token gets a `401` with a `WWW-Authenticate: Bearer`
-header. When `AUTH_API_KEY` is unset, the CLI permits loopback-only serving,
+header. A key with non-ASCII characters matches whether the client sends it
+UTF-8-encoded (curl) or latin-1-encoded (browsers, Python's `http.client`).
+When `AUTH_API_KEY` is unset, the CLI permits loopback-only serving,
 and the server then refuses non-loopback `Host` headers (`421`) and
 state-changing requests from other sites (`403`); network-visible binds
 require a key at least 32 characters long.
@@ -213,16 +228,16 @@ do not count the original extraction's LLM tokens as new usage.
 
 | Status | Meaning |
 |---|---|
-| `400` | Invalid input (missing filename, malformed/bounded option, duplicate or unknown multipart part) |
+| `400` | Invalid input (missing filename, malformed/bounded option, duplicate multipart part, an unexpected file part, too many text parts) |
 | `401` | Missing or invalid bearer token (`AUTH_API_KEY` set) |
 | `404` | Unknown job id (expired past `JOBS_TTL_SECONDS`, evicted by the retention limits, or never existed) |
 | `409` | Job result requested before the job finished |
 | `413` | Upload limit exceeded (50 MiB file / 51 MiB multipart envelope) |
-| `422` | Extraction processing error, including an LLM response that was truncated at its token limit (`error_code: llm_truncated`) or failed validation (`llm_invalid_output`); retrying the same request fails the same way |
+| `422` | Extraction processing error, including an LLM response that was truncated at its token limit (`error_code: llm_truncated`) or failed validation (`llm_invalid_output`); retrying the same request fails the same way. A failure caused by an internal or library exception only names its stage and code (`Processing failed in layout (layout_failed)`); the exception text goes to the server log, not the response. When a service or model the pipeline needs was down (an OCR server that refused or dropped the connection, a layout model or LLM server that could not start), the detail also carries `"outage": true` and the message ends in `: service temporarily unavailable`: the same request may succeed later |
 | `429` | Upload admission or async-job active cap reached |
 | `500` | Unexpected internal error |
 | `502` | Upstream service failed (OCR server, LLM API); an LLM failure carries `error_code` `llm_timeout` or `llm_failed` |
 | `503` | `/ready` reports an unavailable dependency or required classifier artifact |
-| `504` | Pipeline processing timed out |
+| `504` | The request ran out of `PIPELINE_TIMEOUT`, counted from when the worker took it up: waiting for an in-flight slot or for an identical extraction counts too |
 | `503` | Job store unreachable (`JOBS_STORE=redis`): the upload was dropped and nothing queued — retry later |
 | `507` | Insufficient temporary storage for the disk-backed upload spool |

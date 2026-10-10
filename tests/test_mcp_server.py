@@ -42,15 +42,17 @@ def _error_text(result) -> str:
 
 
 @asynccontextmanager
-async def open_session(*, load: bool = False):
+async def open_session(*, load: bool = False, allow: tuple[Path, ...] = ()):
     """Fresh in-memory server + client; optionally pre-load the fixture.
+
+    The file tools reach the fixture directory plus any ``allow`` dirs.
 
     A context manager rather than an async fixture: the MCP memory transport
     is anyio-task-group based, and pytest-asyncio tears async generator
     fixtures down in a different task, which trips anyio's cancel-scope
     ownership check.
     """
-    server = build_server()
+    server = build_server(allowed_dirs=[FIXTURE.parent, *allow])
     async with client_session(server) as client:
         if load:
             _payload(await client.call_tool("load_paper", {"path": str(FIXTURE)}))
@@ -99,7 +101,7 @@ async def test_load_paper_returns_inspect_style_summary():
 
 
 async def test_load_paper_rejects_non_export(tmp_path):
-    async with open_session(load=False) as session:
+    async with open_session(load=False, allow=(tmp_path,)) as session:
         bogus = tmp_path / "openapi.json"
         bogus.write_text(json.dumps({"info": {"title": "Some API"}, "paths": {}}))
         assert "does not look like a bibr export" in _error_text(
@@ -237,7 +239,7 @@ async def test_get_figures_never_inline_image_data():
 
 
 async def test_save_paper_round_trips(tmp_path):
-    async with open_session(load=True) as loaded:
+    async with open_session(load=True, allow=(tmp_path,)) as loaded:
         out = tmp_path / "nested" / "export.json"
         saved = _payload(
             await loaded.call_tool("save_paper", {"paper_id": FIXTURE_ID, "path": str(out)})
@@ -248,7 +250,7 @@ async def test_save_paper_round_trips(tmp_path):
 
 
 async def test_same_id_different_source_gets_suffix(tmp_path):
-    async with open_session(load=False) as session:
+    async with open_session(load=False, allow=(tmp_path,)) as session:
         copy = tmp_path / "copy.json"
         copy.write_text(FIXTURE.read_text())
         first = _payload(await session.call_tool("load_paper", {"path": str(FIXTURE)}))
@@ -274,7 +276,7 @@ async def test_chew_paper_runs_warm_pipeline(monkeypatch, tmp_path):
     paper = tmp_path / "paper.pdf"
     paper.write_bytes(b"%PDF-1.4 stub")
 
-    server = build_server()
+    server = build_server(allowed_dirs=[tmp_path])
     async with client_session(server) as client:
         summary = _payload(
             await client.call_tool("chew_paper", {"path": str(paper), "paper_id": "my-id"})
@@ -294,7 +296,7 @@ async def test_chew_paper_runs_warm_pipeline(monkeypatch, tmp_path):
 
 
 async def test_chew_paper_input_errors(tmp_path):
-    async with open_session(load=False) as session:
+    async with open_session(load=False, allow=(tmp_path,)) as session:
         assert "file not found" in _error_text(
             await session.call_tool("chew_paper", {"path": str(tmp_path / "gone.pdf")})
         )
@@ -362,7 +364,7 @@ async def test_chew_paper_wraps_bibr_errors(monkeypatch, tmp_path):
     paper = tmp_path / "paper.pdf"
     paper.write_bytes(b"%PDF-1.4 stub")
 
-    server = build_server()
+    server = build_server(allowed_dirs=[tmp_path])
     async with client_session(server) as client:
         text = _error_text(await client.call_tool("chew_paper", {"path": str(paper)}))
         assert "extraction failed for paper.pdf" in text
@@ -376,7 +378,7 @@ def test_run_mcp_translates_cli_flags(monkeypatch):
         def run(self, transport):
             captured["transport"] = transport
 
-    def fake_build_server(*, refs=None, settings=None, **options):
+    def fake_build_server(*, refs=None, settings=None, allowed_dirs=None, **options):
         captured["refs"] = refs
         captured["options"] = options
         return FakeServer()
@@ -420,7 +422,7 @@ def test_run_mcp_maps_crossref_flag_to_forced_on(monkeypatch):
         def run(self, transport):
             captured["transport"] = transport
 
-    def fake_build_server(*, refs=None, settings=None, **options):
+    def fake_build_server(*, refs=None, settings=None, allowed_dirs=None, **options):
         captured["options"] = options
         return FakeServer()
 

@@ -17,6 +17,7 @@ Discovery never fails on a missing entry: the path is recorded in
 from __future__ import annotations
 
 import hashlib
+import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,6 +34,15 @@ MANIFEST_SUFFIXES = frozenset({".txt", ".lst", ".list", ".manifest", ""})
 # Stems ``bibr batch`` does not give a paper as its id: ``<out>/<paper_id>.json``
 # would be the runner's own ``run_info.json``.
 RESERVED_IDS = frozenset({"run_info"})
+# Names Windows opens as a device, whatever follows the first dot.
+WINDOWS_DEVICE_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"{port}{n}" for port in ("com", "lpt") for n in "0123456789¹²³"}
+)
+NAME_MAX = 255  # bytes per file name on common filesystems
+# Leaves NAME_MAX room for ``<paper_id>.json``, the longest sidecar name
+# (``<paper_id>.json.enrichment.json``) and an ordinal.
+MAX_ID_BYTES = 200
 
 
 @dataclass(frozen=True)
@@ -42,6 +52,8 @@ class BatchItem:
     path: Path
     paper_id: str
     stem: str
+    # The file's sha256 when :func:`assign_paper_ids` had to read it.
+    sha256: str | None = field(default=None, compare=False, repr=False)
 
     @property
     def disambiguated(self) -> bool:
@@ -181,11 +193,57 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _sha8(path: Path) -> str | None:
+def _sha256(path: Path) -> str | None:
     try:
-        return sha256_file(path)[:8]
+        return sha256_file(path)
     except OSError:  # unreadable: the run reports it; the id only has to be unique
         return None
+
+
+def _size(path: Path) -> int | None:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+def resolved_path(path: object) -> Path | None:
+    """*path* (a ``Path``, or a ledger line's ``path`` text) made absolute; None if it cannot be."""
+    if not isinstance(path, (str, Path)) or not str(path):
+        return None
+    try:
+        return Path(path).resolve()
+    except (OSError, RuntimeError, ValueError):  # a symlink loop, a NUL byte
+        return None
+
+
+def id_key(paper_id: str) -> str:
+    """*paper_id* as filesystems compare names: case-insensitively (macOS,
+    Windows), and with NFC and NFD spellings equal (APFS)."""
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFD", paper_id).casefold())
+
+
+def _nbytes(text: str) -> int:
+    return len(text.encode("utf-8", "surrogateescape"))
+
+
+def _is_device_name(paper_id: str) -> bool:
+    return id_key(paper_id.split(".", 1)[0].rstrip(" ")) in WINDOWS_DEVICE_NAMES
+
+
+def _with_suffix(stem: str, suffix: str) -> str:
+    """``<stem><suffix>``, *stem* clipped so the id fits :data:`MAX_ID_BYTES`.
+
+    On a Windows device name the suffix goes before the first dot
+    (``nul.tar`` → ``nul-1a2b3c4d.tar``): after it, Windows would still open
+    the device.
+    """
+    limit = max(MAX_ID_BYTES - _nbytes(suffix), 1)
+    clipped = stem.encode("utf-8", "surrogateescape")[:limit].decode("utf-8", "ignore")
+    if _is_device_name(clipped):
+        head, dot, rest = clipped.partition(".")
+        return f"{head}{suffix}{dot}{rest}"
+    return f"{clipped}{suffix}"
 
 
 def assign_paper_ids(
@@ -197,52 +255,105 @@ def assign_paper_ids(
     """Map files to ``paper_id`` = stem, disambiguating stem collisions.
 
     Exports are written as ``<out>/<paper_id>.json``, so two inputs sharing a
-    stem (compared case-insensitively — the default macOS/Windows filesystems
-    fold case) would overwrite each other. Colliding files, and a file whose
-    stem is in *reserved* (``bibr batch`` passes :data:`RESERVED_IDS`), get
-    ``<stem>-<sha256[:8]>``; identical bytes under the same stem additionally
-    get an ordinal so every id is unique. Deterministic for a given input
-    order.
+    stem (compared as :func:`id_key` does: the default macOS/Windows
+    filesystems fold case, APFS equates NFC and NFD) would overwrite each
+    other. Colliding files get ``<stem>-<sha256[:8]>``, and so do a file whose
+    stem is in *reserved* (``bibr batch`` passes :data:`RESERVED_IDS`) or is a
+    Windows device name, and a stem longer than :data:`MAX_ID_BYTES` (clipped
+    to fit); identical bytes under the same stem additionally get an ordinal
+    so every id is unique. Deterministic for a given input order.
 
-    *recorded* are the ledger lines of earlier runs. A file whose path has a
-    line keeps the id recorded there (a later line wins), so adding inputs
-    never renames a paper that was already processed; only the newcomer that
-    collides with it gets a suffix.
+    *recorded* are the ledger lines of earlier runs; the latest line of each
+    recorded id names its file. The file at that path (compared resolved; a
+    different size means another file is there now), else one with the same
+    sha256, keeps the id, so adding inputs never renames, or re-runs, a paper
+    that was already processed. A newcomer whose stem an id was recorded under
+    for other bytes gets a suffix, even when that file is not among *files*.
     """
-    by_path: dict[str, str] = {}
+    latest: dict[str, Mapping[str, Any]] = {}
     for entry in recorded:
-        path_text, recorded_id = entry.get("path"), entry.get("paper_id")
-        if isinstance(path_text, str) and isinstance(recorded_id, str) and recorded_id:
-            by_path[path_text] = recorded_id
+        paper_id = entry.get("paper_id")
+        # An id too long for its export name never had an export.
+        if isinstance(paper_id, str) and paper_id and _nbytes(f"{paper_id}.json") <= NAME_MAX:
+            latest.pop(paper_id, None)  # keep the order of each id's latest line
+            latest[paper_id] = entry
+    by_path: dict[Path, str] = {}
+    by_sha: dict[str, list[str]] = {}
+    recorded_shas: dict[str, set[str]] = {}
+    for paper_id, entry in latest.items():
+        path = resolved_path(entry.get("path"))
+        if path is not None:
+            by_path[path] = paper_id
+        sha = entry.get("sha256")
+        if isinstance(sha, str) and sha:
+            by_sha.setdefault(sha, []).append(paper_id)
+            recorded_shas.setdefault(id_key(paper_id), set()).add(sha)
 
-    reserved_ids = {stem.casefold() for stem in reserved}
+    reserved_ids = {id_key(stem) for stem in reserved}
     # A recorded id is kept only while no earlier input, and no reserved stem,
     # has it.
     used: set[str] = set(reserved_ids)
     kept: dict[int, str] = {}
     for index, path in enumerate(files):
-        recorded_id = by_path.get(str(path))
-        if recorded_id is not None and recorded_id.casefold() not in used:
-            kept[index] = recorded_id
-            used.add(recorded_id.casefold())
+        resolved = resolved_path(path)
+        recorded_id = by_path.get(resolved) if resolved is not None else None
+        if recorded_id is None or id_key(recorded_id) in used:
+            continue
+        size = latest[recorded_id].get("bytes")
+        if isinstance(size, int) and _size(path) not in (None, size):
+            continue
+        kept[index] = recorded_id
+        used.add(id_key(recorded_id))
 
-    by_stem: dict[str, list[Path]] = {}
+    # A moved file, or one named another way (another cwd, a manifest's
+    # ``..``), keeps its id by content. Only a file of a size an unclaimed id
+    # was recorded with, or whose stem an id was recorded under, is worth
+    # reading for that.
+    shas: dict[int, str | None] = {}
+    sizes: set[int] = set()
+    for paper_id, entry in latest.items():
+        size = entry.get("bytes")
+        if id_key(paper_id) not in used and isinstance(size, int) and entry.get("sha256"):
+            sizes.add(size)
+    for index, path in enumerate(files):
+        if index in kept:
+            continue
+        if id_key(path.stem) not in recorded_shas and (not sizes or _size(path) not in sizes):
+            continue
+        shas[index] = sha = _sha256(path)
+        for recorded_id in by_sha.get(sha or "", ()):
+            if id_key(recorded_id) not in used:
+                kept[index] = recorded_id
+                used.add(id_key(recorded_id))
+                break
+
+    by_stem: dict[str, int] = {}
     for path in files:
-        by_stem.setdefault(path.stem.casefold(), []).append(path)
+        by_stem[id_key(path.stem)] = by_stem.get(id_key(path.stem), 0) + 1
+
+    def taken(candidate: str, sha: str | None) -> bool:
+        key = id_key(candidate)
+        # Recorded for other bytes; a line without a sha256 cannot tell.
+        elsewhere = bool(recorded_shas.get(key, set()) - {sha})
+        return key in used or elsewhere or _is_device_name(candidate)
 
     items: list[BatchItem] = []
     for index, path in enumerate(files):
         stem = path.stem
         paper_id = kept.get(index)
         if paper_id is None:
-            collides = len(by_stem[stem.casefold()]) > 1 or stem.casefold() in reserved_ids
-            sha8 = _sha8(path) if collides else None
-            paper_id = f"{stem}-{sha8}" if sha8 else stem
+            key = id_key(stem)
+            collides = by_stem[key] > 1 or _nbytes(stem) > MAX_ID_BYTES
+            if index not in shas and (collides or taken(stem, None)):
+                shas[index] = _sha256(path)
+            sha = shas.get(index)
+            collides = collides or taken(stem, sha)
+            paper_id = _with_suffix(stem, f"-{sha[:8]}" if collides and sha else "")
             base = paper_id
             ordinal = 2
-            while paper_id.casefold() in used:
-                paper_id = f"{base}-{ordinal}"
+            while taken(paper_id, sha):
+                paper_id = _with_suffix(base, f"-{ordinal}")
                 ordinal += 1
-            used.add(paper_id.casefold())
-        items.append(BatchItem(path=path, paper_id=paper_id, stem=stem))
+            used.add(id_key(paper_id))
+        items.append(BatchItem(path=path, paper_id=paper_id, stem=stem, sha256=shas.get(index)))
     return items

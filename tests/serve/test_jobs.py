@@ -803,14 +803,16 @@ class TestJobRoutes:
         tracker = _FakeTracker(result={"paper_id": "abc"})
         client = _client(store, tracker=tracker)
         try:
-            response = client.post(
-                "/papers/jobs",
-                files={"file": ("a" * 3_000, b"%PDF-1.4", "application/pdf")},
-            )
+            # The worker must outlive the POST: the result is rendered in a thread.
+            with client:
+                response = client.post(
+                    "/papers/jobs",
+                    files={"file": ("a" * 3_000, b"%PDF-1.4", "application/pdf")},
+                )
 
-            assert response.status_code == 202
-            job_id = response.json()["job_id"]
-            status = _poll_until(client, job_id, "succeeded")
+                assert response.status_code == 202
+                job_id = response.json()["job_id"]
+                status = _poll_until(client, job_id, "succeeded")
             assert status["filename"] == "a" * 255
             assert tracker.descriptors[0]["filename"] == "a" * 255
         finally:
@@ -1221,6 +1223,8 @@ class TestInflightDedupe:
             "ab", {"crossref": "true", "start_page": "2"}
         )
         assert fp("ab", {"refs": "LLM"}) == fp("ab", {"refs": "llm"})
+        assert fp("ab", {"include_region_meta": "1"}) == fp("ab", {"include_region_meta": "true"})
+        assert fp("ab", {"include_region_meta": "yes"}) != fp("ab", {"include_region_meta": "no"})
         assert fp("ab", {"start_page": "2"}) != fp("ab", {"start_page": "3"})
         assert fp("ab", {}) != fp("ab", {"include_figures": "false"})
         assert fp("ab", {}) != fp("cd", {})

@@ -37,11 +37,13 @@ class _File:
         self.error = None
         self.error_code = None
         self.failed_stage = None
+        self.error_outage = False
 
-    def set_error(self, message, *, code=None, stage=None, exc=None):
+    def set_error(self, message, *, code=None, stage=None, exc=None, outage=False):
         self.error = message
         self.error_code = code
         self.failed_stage = stage
+        self.error_outage = outage
 
 
 def _run(*, required, loader):

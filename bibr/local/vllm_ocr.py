@@ -19,10 +19,17 @@ from typing import ClassVar
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.local.http_runtime import (
     LocalHttpError,
+    bearer_headers,
     check_startup_stop,
+    env_with_api_key,
     guard_managed_server_port,
+    kill_process_group,
+    new_server_api_key,
+    own_server_key,
     pause_startup_poll,
+    register_server_key,
     request_bytes,
+    unregister_server_key,
 )
 from bibr.local.ocr import PaddleHttpOcrClient
 from bibr.ocr.registry import PADDLE_VLLM_GPU_MEMORY_UTILIZATION, register
@@ -37,6 +44,9 @@ class VllmOcrServer:
 
     # Set by the owner to stop the startup wait early (see ResourceManager).
     _stop_event: threading.Event | None = None
+    # Per-launch key of the server this process started, which a sibling
+    # pipeline reusing it shares; another process's listener has none.
+    api_key = ""
 
     def __init__(
         self,
@@ -62,6 +72,8 @@ class VllmOcrServer:
             request_fn=request_bytes,
         )
         if self._reused:
+            # Another pipeline in this process may have started it.
+            self.api_key = own_server_key(self.base_url)
             return
 
         from bibr.ocr.registry import paddle_vllm_unavailable_reason
@@ -108,17 +120,20 @@ class VllmOcrServer:
         self._stderr_log, self._stderr_fh = open_subprocess_log("vllm-ocr", self._port)
         logger.info("Starting PaddleOCR-VL vLLM server: %s", " ".join(cmd))
         logger.info("PaddleOCR-VL vLLM stderr -> %s", self._stderr_log)
+        self.api_key = new_server_api_key()
         try:
             self._process = subprocess.Popen(  # noqa: S603
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=self._stderr_fh,
                 start_new_session=True,
+                env=env_with_api_key("VLLM_API_KEY", self.api_key),
             )
             self._wait_until_ready()
         except BaseException:
             self.shutdown()
             raise
+        register_server_key(self.base_url, self.api_key)
 
     @staticmethod
     def _resolve_launch_cmd(model: str) -> list[str]:
@@ -126,6 +141,8 @@ class VllmOcrServer:
         if importlib.util.find_spec("vllm") is not None:
             return [
                 sys.executable,
+                # -P: never import from the user's working directory.
+                "-P",
                 "-m",
                 "vllm.entrypoints.openai.api_server",
                 "--model",
@@ -134,17 +151,17 @@ class VllmOcrServer:
         if shutil.which("uv") is not None:
             logger.warning(
                 "vLLM is not installed in this environment; launching PaddleOCR-VL through an "
-                "isolated `uv tool run --from vllm==0.27.0` environment instead. The first run "
+                "isolated `uv tool run --from vllm==0.31.0` environment instead. The first run "
                 "downloads several GB and can take minutes before OCR starts. Install it once "
                 "with `uv sync --extra vllm` to skip this bootstrap."
             )
             cmd = ["uv", "tool", "run"]
             if sys.version_info >= (3, 14):
-                # vllm==0.27.0 publishes no 3.14 wheels; the isolated tool
+                # vllm==0.31.0 publishes no 3.14 wheels; the isolated tool
                 # environment can run a managed 3.13 interpreter instead.
                 cmd.extend(["--python", "3.13"])
             cmd.extend(
-                ["--from", "vllm==0.27.0", "--with", "openai>=2.54.0,<3", "vllm", "serve", model]
+                ["--from", "vllm==0.31.0", "--with", "openai>=2.54.0,<3", "vllm", "serve", model]
             )
             return cmd
 
@@ -177,13 +194,17 @@ class VllmOcrServer:
             if self._process.poll() is not None:
                 rc = self._process.returncode
                 tail = self._read_stderr_tail()
+                kill_process_group(self._process.pid)
                 self._process = None
                 self._close_stderr_fh()
                 raise RuntimeError(
                     f"PaddleOCR-VL vLLM process exited during startup (code {rc}): {tail[-500:]}"
                 )
             try:
-                status, _reason, body = request_bytes(models_url, timeout=5)
+                # vLLM guards /v1 behind the per-launch key.
+                status, _reason, body = request_bytes(
+                    models_url, headers=bearer_headers(self.api_key), timeout=5
+                )
                 if status == 200:
                     data = json.loads(body.decode("utf-8"))
                     ids = [
@@ -233,6 +254,8 @@ class VllmOcrServer:
             self._close_stderr_fh()
             return
         process, self._process = self._process, None
+        if self.api_key:
+            unregister_server_key(self.base_url, self.api_key)
         try:
             try:
                 os.killpg(process.pid, signal.SIGTERM)
@@ -274,6 +297,7 @@ class PaddleVllmOcrClient:
                 model=model or effective.ocr.paddle_served_model,
                 profile=profile,
                 settings=effective,
+                api_key=self._server.api_key,
             )
         except BaseException:
             self._server.shutdown()
