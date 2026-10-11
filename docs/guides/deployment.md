@@ -608,7 +608,7 @@ behavior unchanged.
 | `BIBR_RESOLVER_TIMEOUT` | `10.0` | Per-request timeout (seconds). |
 | `BIBR_RESOLVER_LIMIT` | `20` | Max candidates requested from `/search`. |
 | `BIBR_RESOLVER_SEARCH_CONCURRENCY` | `8` | Max concurrent `/search` calls when prefetching a reference list's title searches. |
-| `BIBR_RESOLVER_RAW_SEARCH` | `false` | Search again with the whole reference string for references the title searches left unmatched, accepting a candidate only when its title, year and first author (or volume and first page) are printed in it. |
+| `BIBR_RESOLVER_RAW_SEARCH` | `true` | Search again with the whole reference string for references the title searches left unmatched, accepting a candidate only when its title, year and first author (or volume and first page) are printed in it, and never a work another reference of the paper already holds. |
 
 A resolver error falls through to Crossref. Misses also fall through by
 default; `BIBR_RESOLVER_AUTHORITATIVE=true` makes a clean resolver miss
