@@ -39,7 +39,10 @@ node_modules/
 *.Rhistory
 .RData
 .Rhistory
-.claude/
+.claude/*
+!.claude/settings.json
+!.claude/CLAUDE.md
+!.claude/hooks/
 .codex/
 docs/superpowers/
 .paul/
