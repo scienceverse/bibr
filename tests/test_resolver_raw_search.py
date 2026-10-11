@@ -84,11 +84,57 @@ async def test_a_lost_title_is_found_through_the_reference_string():
     assert match.score >= 90
 
 
-async def test_off_by_default():
+def test_on_by_default():
+    from bibr.config import ResolverOptions
+
+    assert ResolverOptions(_env_file=None).raw_search is True
+
+
+async def test_can_be_turned_off():
     ref = _ref()
     resolver = await _enrich(ref, [_candidate()], raw_search=False)
     resolver.search.assert_not_called()
     assert not ref.match
+
+
+async def test_a_work_another_reference_holds_is_not_given_out_again():
+    # A parser split: the fragment row's string finds its sibling's work.
+    from bibr.enrich.references import enrich_references
+    from bibr.paper import ExternalMatch
+
+    sibling = _ref(bib_id=2, title="Impaired immune and acute-phase responses")
+    sibling.match[MatchSource.CROSSREF] = ExternalMatch(doi="10.1038/368339A0", score=100)
+    fragment = _ref()
+    resolver = mock.AsyncMock()
+    resolver.search_many = mock.AsyncMock(return_value=[[]])
+    resolver.search = mock.AsyncMock(return_value=[_candidate()])
+    await enrich_references(
+        [sibling, fragment],
+        crossref_client=_crossref(),
+        resolver_client=resolver,
+        settings=_settings(),
+        raw_strings={1: RAW},
+    )
+    assert not fragment.match
+    assert sibling.match[MatchSource.CROSSREF].doi == "10.1038/368339A0"
+
+
+async def test_two_rows_finding_one_work_give_it_to_the_first():
+    from bibr.enrich.references import enrich_references
+
+    first, second = _ref(), _ref(bib_id=2)
+    resolver = mock.AsyncMock()
+    resolver.search_many = mock.AsyncMock(return_value=[[], []])
+    resolver.search = mock.AsyncMock(return_value=[_candidate()])
+    await enrich_references(
+        [first, second],
+        crossref_client=_crossref(),
+        resolver_client=resolver,
+        settings=_settings(),
+        raw_strings={1: RAW, 2: RAW},
+    )
+    assert first.match[MatchSource.CROSSREF].doi == "10.1038/368339a0"
+    assert not second.match
 
 
 async def test_a_title_the_string_does_not_print_is_rejected():

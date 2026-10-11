@@ -90,6 +90,7 @@ class ResolutionStats:
     raw_attempts: int = 0
     raw_matches: int = 0
     raw_ambiguous: int = 0
+    raw_duplicates: int = 0
     failed_bib_ids: set[int] = field(default_factory=set)
     failure_details: list[ProcessingWarning] = field(default_factory=list)
 
@@ -420,7 +421,7 @@ async def enrich_references(
     logger.info(
         "Reference enrichment: %d/%d matched "
         "(resolver %d/%d, fallback matches=%d misses=%d errors=%d timeouts=%d attempts=%d, "
-        "crossref doi %d/%d, search %d/%d, fingerprint %d/%d, raw %d/%d ambiguous=%d)",
+        "crossref doi %d/%d, search %d/%d, fingerprint %d/%d, raw %d/%d ambiguous=%d duplicates=%d)",
         matched,
         len(references),
         stats.resolver_matches,
@@ -439,6 +440,7 @@ async def enrich_references(
         stats.raw_matches,
         stats.raw_attempts,
         stats.raw_ambiguous,
+        stats.raw_duplicates,
     )
     # A reference is only "failed" if it ended UNMATCHED. A transient error in
     # an early strategy still lands in ``failed_bib_ids``, so counting that set
@@ -1648,12 +1650,18 @@ async def _enrich_raw_strings(
     here, and the candidates are checked against that string rather than
     against parsed fields (:func:`_raw_candidate_score`). Shares the fallback
     pass's concurrency and deadline.
+
+    A work another reference of the paper already holds is not given out again:
+    when the parser splits one reference into two rows, or prints two
+    references in one block, the string search finds the sibling's work for the
+    fragment, which is a duplicate at best and the wrong work at worst.
     """
     eligible = [ref for ref in references if _raw_search_eligible(ref, raw_strings.get(ref.bib_id))]
     if not eligible:
         return
     stats.raw_attempts += len(eligible)
     semaphore = asyncio.Semaphore(settings.resolver.fallback_search_concurrency)
+    found: dict[int, tuple[dict, float]] = {}
 
     async def resolve(ref: PaperReference) -> None:
         raw = raw_strings[ref.bib_id]
@@ -1668,11 +1676,8 @@ async def _enrich_raw_strings(
         if best == "ambiguous":
             stats.raw_ambiguous += 1
             return
-        if best is None or ref.match:
-            return
-        candidate, score = best
-        ref.match[_resolver_match_source(candidate)] = _build_match_from_candidate(candidate, score)
-        stats.raw_matches += 1
+        if best is not None:
+            found[id(ref)] = best
 
     try:
         async with asyncio.timeout(settings.resolver.fallback_timeout):
@@ -1683,6 +1688,29 @@ async def _enrich_raw_strings(
         )
         logger.warning(detail)
         _record_fallback_warning(stats, WarningCode.RESOLVER_FALLBACK_TIMEOUT, detail)
+
+    # Matches are handed out in reference order, after every search has
+    # answered, so the first of two rows that find one work keeps it.
+    held = {
+        doi for ref in references for match in ref.match.values() if (doi := _doi_key(match.doi))
+    }
+    for ref in eligible:
+        if id(ref) not in found or ref.match:
+            continue
+        candidate, score = found[id(ref)]
+        doi = _doi_key(candidate.get("doi"))
+        if doi is not None and doi in held:
+            stats.raw_duplicates += 1
+            continue
+        if doi is not None:
+            held.add(doi)
+        ref.match[_resolver_match_source(candidate)] = _build_match_from_candidate(candidate, score)
+        stats.raw_matches += 1
+
+
+def _doi_key(doi: str | None) -> str | None:
+    normalized = normalize_doi(doi) if doi else None
+    return normalized.lower() if normalized else None
 
 
 async def _prefetch_resolver_searches(
