@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 # "3" (v12) adds the ROR ``affiliation_match`` and ``funding_match`` rows.
 # "4" stores warnings as ``{code, message}`` objects instead of prose.
 ENRICHMENT_SIDECAR_SCHEMA_VERSION = "4"
-CORE_SCHEMA_VERSION = "12.1"
+CORE_SCHEMA_VERSION = "12.2"
 # Each major is a clean break: a v11 core cannot be replayed into a v12
 # payload, so the gate accepts exactly one version.
 SUPPORTED_CORE_SCHEMA_VERSIONS = frozenset({CORE_SCHEMA_VERSION})
@@ -132,6 +132,7 @@ def enrichment_settings_digest(ctx: PipelineContext) -> str:
         "schema_revision": CROSSREF_ENRICHMENT_SCHEMA_REVISION,
         "enabled": ctx.config.enrichment_enabled(ctx.settings),
         "consolidate": ctx.config.consolidate or crossref.consolidate,
+        "verify": crossref.verify,
         "enrich_concurrency": crossref.enrich_concurrency,
         "enrich_timeout": crossref.enrich_timeout,
         "request_timeout": crossref.request_timeout,
