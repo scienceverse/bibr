@@ -147,6 +147,7 @@ def enrichment_settings_digest(ctx: PipelineContext) -> str:
             "limit": resolver.limit,
             "search_concurrency": resolver.search_concurrency,
             "authoritative": resolver.authoritative,
+            "raw_search": resolver.raw_search,
         },
         "ror": {
             "enabled": bool(ror.enrich),

@@ -142,11 +142,13 @@ class CrossrefEnricher:
                 text_by_id = {
                     sent.text_id: sent.text for sent in paper.contents.sentences if sent.text
                 }
-                kwargs["raw_strings"] = {
+                raw_strings = {
                     ref.bib_id: text_by_id[ref.text_id]
                     for ref in meta.references
                     if ref.text_id in text_by_id
                 }
+                if raw_strings:
+                    kwargs["raw_strings"] = raw_strings
             report = await enrich_references(meta.references, **kwargs)
             return (
                 report

@@ -479,7 +479,7 @@ def test_enrichment_settings_digest_includes_resolver_result_settings():
     from bibr.pipeline.context import PipelineContext, RunConfig
     from bibr.pipeline.progress import NullProgress
 
-    def context(*, url, authoritative, limit):
+    def context(*, url, authoritative, limit, raw_search=True):
         settings = MagicMock()
         settings.crossref.enrich = True
         settings.crossref.consolidate = "off"
@@ -497,6 +497,7 @@ def test_enrichment_settings_digest_includes_resolver_result_settings():
         settings.resolver.limit = limit
         settings.resolver.search_concurrency = 8
         settings.resolver.authoritative = authoritative
+        settings.resolver.raw_search = raw_search
         settings.ror.enrich = True
         settings.ror.url = "https://api.ror.org/v2"
         settings.ror.enrich_timeout = 60.0
@@ -519,6 +520,9 @@ def test_enrichment_settings_digest_includes_resolver_result_settings():
     )
     assert baseline != enrichment_settings_digest(
         context(url="http://resolver-a", authoritative=False, limit=5)
+    )
+    assert baseline != enrichment_settings_digest(
+        context(url="http://resolver-a", authoritative=False, limit=20, raw_search=False)
     )
 
 
