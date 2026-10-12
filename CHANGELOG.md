@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [0.7.0rc1] - 2026-10-06
+## [0.7.0rc1] - 2026-10-12
 
 ### Added — export schema 12.2 (additive)
 
