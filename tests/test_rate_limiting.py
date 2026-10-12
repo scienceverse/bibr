@@ -506,14 +506,18 @@ async def test_strict_interval_ttl_covers_queued_horizon():
         return None
 
     with patch.object(asyncio, "sleep", _no_sleep):
+        start_ms = int(time.time() * 1000)
         for _ in range(queued):
             await limiter.acquire()
         stored = int(await fake.get(key))
         pttl = await fake.pttl(key)
         now_ms = int(time.time() * 1000)
 
+    # N intervals out from when the first caller queued. Measured from the
+    # end instead, the time the acquires themselves took (about 200 ms of
+    # Lua evaluation on a slow runner) came off the horizon.
+    assert stored - start_ms >= int(queued * interval * 1000) - 50
     horizon_ms = stored - now_ms
-    assert horizon_ms >= int(queued * interval * 1000) - 50  # N intervals queued
     assert pttl >= horizon_ms, f"pttl {pttl} ms does not cover queued horizon {horizon_ms} ms"
 
 

@@ -103,7 +103,7 @@ def test_reader_artifact_relaxes_only_unknown_keys_enum_values_and_the_minor_ver
     }
     assert reader["properties"].keys() == strict["properties"].keys()
     assert reader["required"] == strict["required"]
-    assert strict["properties"]["schema_version"]["const"] == "12.1"
+    assert strict["properties"]["schema_version"]["const"] == "12.2"
     assert reader["properties"]["schema_version"]["pattern"] == r"^12\.[0-9]+$"
 
 

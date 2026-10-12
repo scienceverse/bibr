@@ -63,6 +63,9 @@ class OcrRegionResult:
     # against the exact alternate source after parsing or a cache round trip.
     native_text_candidate: str | None = None
     native_text_rejection_reason: str | None = None
+    # Two-recognizer consensus on a scanned region (bibr.scan.consensus): the
+    # disagreement score, and whether and how the region was escalated.
+    ocr_consensus: dict[str, Any] | None = None
 
     @classmethod
     def from_layout_region(
@@ -131,6 +134,7 @@ class OcrRegionResult:
             finish_reason=d.get("_ocr_finish_reason"),
             native_text_candidate=d.get("_native_text_candidate"),
             native_text_rejection_reason=d.get("_native_text_rejection_reason"),
+            ocr_consensus=d.get("_ocr_consensus"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -168,4 +172,6 @@ class OcrRegionResult:
             out["_native_text_candidate"] = self.native_text_candidate
         if self.native_text_rejection_reason is not None:
             out["_native_text_rejection_reason"] = self.native_text_rejection_reason
+        if self.ocr_consensus is not None:
+            out["_ocr_consensus"] = self.ocr_consensus
         return out
