@@ -288,6 +288,9 @@ export is still valid input for the 12.x reader.
 
 ### Added
 
+- GitHub issue forms for wrong extractions and for crash or install problems;
+  the tester guide links to them.
+
 - A scan path, off by default. It classes each inspected page as born-digital, born-digital with
   a broken text layer, or a scan. `PIPELINE_SCAN_ARTICLE_SPLIT=true` drops the regions of
   neighbouring articles from scanned pages before parsing, so the previous or next article's
