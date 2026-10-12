@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — export schema 12.2 (additive)
+
+The export moves to schema `12.2`, which adds one optional receipt; every 12.1
+export is still valid input for the 12.x reader.
+
+- With enrichment on, each reference's parsed `volume`, `issue`, `first_page`
+  and `last_page` are checked against its matched record (score 0.9 or more)
+  at export. A value the parser dropped or misread is replaced by the record's
+  value only when the reference string prints that value, so `bib[]` stays what
+  the page says; a record that disagrees with a printed value is reported and
+  `bib[]` keeps the parsed value. A last page printed abbreviated ("1267–89")
+  is kept abbreviated. `extraction.diagnostics.verification[]` records, per
+  checked reference, `agree`, `filled`, `corrected` or `disagree` for each
+  field, and the fields taken are listed in `extraction.diagnostics.consolidation`.
+  On a frozen 120-paper validation snapshot (bibr 0.3.0 with Crossref
+  enrichment) this raises reference volume accuracy from 0.617 to 0.826 and
+  pages from 0.596 to 0.710, with no reference made worse.
+  `CROSSREF_VERIFY=false` turns it off. It runs before `CROSSREF_CONSOLIDATE`.
+- References the title searches left unmatched, such as one whose title the
+  parser missed, are searched once more in the resolver with the whole
+  reference string. A candidate is accepted only when its title, a year within
+  one of a printed year, and its first author (or its volume and first page)
+  are printed in the string; two different works printed equally well are both
+  refused, and a work another reference of the same paper already holds is not
+  given out again. On a 119-paper validation set against a live resolver this
+  matched 115 of 923 previously unmatched references, and on references that
+  were already matched it found the same DOI 98.6% of the time.
+  `BIBR_RESOLVER_RAW_SEARCH=false` turns it off.
+
 ### Security
 
 - A crafted or crowded PDF no longer holds the PDF lock, and with it every other `bibr serve`
@@ -258,6 +287,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   x86_64 with Python 3.11 to 3.13, with or without the `vllm` extra.
 
 ### Added
+
+- GitHub issue forms for wrong extractions and for crash or install problems;
+  the tester guide links to them.
+
+- A scan path, off by default. It classes each inspected page as born-digital, born-digital with
+  a broken text layer, or a scan. `PIPELINE_SCAN_ARTICLE_SPLIT=true` drops the regions of
+  neighbouring articles from scanned pages before parsing, so the previous or next article's
+  references no longer leak into the reference list (#146). `OCR_CONSENSUS_BACKEND` reads the text
+  regions of scanned pages with a second recognizer and escalates the regions where the two
+  disagree most, to `OCR_ESCALATION_BACKEND` when one is set (`OCR_RECOGNIZERS_DISAGREE`).
 
 - An optional document layer (`pipeline.document_layer`, environment variable
   `PIPELINE_DOCUMENT_LAYER`; off by default) keeps what the PDF itself says about each

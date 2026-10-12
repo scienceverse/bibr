@@ -952,6 +952,65 @@ class OcrOptions(_BibrSettings):
         "OCR engine adds to a scan). The legacy layer is often worse than OCR; disable "
         "to trust it as before.",
     )
+    # Scan path (bibr.scan.consensus): a second recognizer re-reads the text
+    # regions of scanned pages and the regions where the two disagree most are
+    # escalated. Off until a backend is named; only server or cloud clients
+    # qualify, so it never starts a second local engine on the OCR GPU.
+    consensus_backend: (
+        Literal["glm-http", "paddle-http", "gemini", "openai", "anthropic"] | None
+    ) = Field(
+        None,
+        description="OCR backend that re-reads scanned regions for two-recognizer consensus "
+        "(glm-http or paddle-http against a running server, or a cloud vision provider). "
+        "Null (default) disables consensus.",
+    )
+    consensus_url: str | None = Field(
+        None, description="Base URL of the consensus recognizer's OpenAI-compatible server."
+    )
+    consensus_model: str | None = Field(
+        None, description="Served model name of the consensus recognizer (backend default if null)."
+    )
+    consensus_profile: Literal["paddle", "glm"] | None = Field(
+        None,
+        description="Prompt/output profile of the consensus recognizer; inferred from its "
+        "backend and model when null.",
+    )
+    consensus_threshold: float = Field(
+        0.15,
+        ge=0.0,
+        le=1.0,
+        description="Normalized edit distance between the two readings of a region at or "
+        "above which the recognizers disagree.",
+    )
+    consensus_escalate_share: float = Field(
+        0.07,
+        gt=0.0,
+        le=1.0,
+        description="Largest share of a paper's compared regions that is escalated, worst "
+        "disagreement first (at least one region when any disagrees).",
+    )
+    consensus_page_kinds: Annotated[
+        list[Literal["scan", "broken_text_layer", "born_digital"]], NoDecode
+    ] = Field(
+        default_factory=lambda: ["scan"],
+        description="Page classes whose OCR'd text regions are compared (comma-separated).",
+    )
+    escalation_backend: (
+        Literal["glm-http", "paddle-http", "gemini", "openai", "anthropic"] | None
+    ) = Field(
+        None,
+        description="OCR backend that re-reads the escalated regions; the reading closest to "
+        "the other two is kept. Null keeps the primary reading and only flags the region.",
+    )
+    escalation_url: str | None = Field(
+        None, description="Base URL of the escalation recognizer's OpenAI-compatible server."
+    )
+    escalation_model: str | None = Field(
+        None, description="Served model name of the escalation recognizer."
+    )
+    escalation_profile: Literal["paddle", "glm"] | None = Field(
+        None, description="Prompt/output profile of the escalation recognizer."
+    )
     local_gpus: int = Field(
         1,
         description="Number of GPUs dedicated to the local OCR server (tensor parallelism). Also "
@@ -1043,6 +1102,12 @@ class OcrOptions(_BibrSettings):
         '(default, keep resident in balanced mode unless a local LLM shares the GPU), "always" '
         '(legacy per-chunk teardown), or "never".',
     )
+
+    @field_validator("consensus_page_kinds", mode="before")
+    @classmethod
+    def _split_consensus_page_kinds(cls, v):
+        """Accept a comma-separated env string or a list."""
+        return _split_csv_env(v, lower=True)
 
     @field_validator("backend", mode="before")
     @classmethod
@@ -1361,6 +1426,17 @@ class CrossrefOptions(_BibrSettings):
         "from a match carrying the reference's printed DOI).",
     )
 
+    # Check each reference's parsed volume, issue and pages against its
+    # confident bib_match record at export. A disagreement is reported in
+    # extraction.diagnostics.verification; a missing or misparsed value is
+    # replaced only by the record's value as printed in the reference string.
+    verify: bool = Field(
+        True,
+        description="Check parsed reference volume, issue and pages against the matched record "
+        "at export: report disagreements, and fill or correct a value only when the record's "
+        "value is printed in the reference string. Needs enrichment; off leaves bib[] as parsed.",
+    )
+
     @field_validator("consolidate", mode="before")
     @classmethod
     def _lower_consolidate(cls, v):
@@ -1485,6 +1561,17 @@ class ResolverOptions(_BibrSettings):
         30.0,
         gt=0,
         description="Whole-paper wall-clock deadline in seconds for the resolver fallback pass.",
+    )
+    # A reference the title passes left unmatched is searched once more with its
+    # whole printed string, so a misparsed or missing title can still find its
+    # work. On a 119-paper validation set it matched 115 of 923 references the
+    # title passes missed, and agreed with the existing DOI on 98.6% of
+    # references that were already matched.
+    raw_search: bool = Field(
+        True,
+        description="Search the resolver with the whole reference string for references the "
+        "title passes left unmatched; a candidate is accepted only when its title, year and "
+        "first author (or volume and first page) are printed in that string.",
     )
 
     @field_validator("sources", "fallback_sources", mode="before")
@@ -2091,6 +2178,12 @@ class PipelineOptions(_BibrSettings):
     # effective sizes, baselines, spans, lines, superscripts, furniture and
     # render recipes, read from the PDF text layer next to the native-text
     # pass. Changes no output; costs pdfium lock time per glyph.
+    scan_article_split: bool = Field(
+        False,
+        description="On scanned pages, drop the regions of neighbouring articles (the "
+        "previous article's tail and references before the paper's title, the next article "
+        "after its references) before parsing. Off by default pending an eval on scans.",
+    )
     document_layer: bool = Field(
         False,
         description="Build the internal document layer (glyph fonts, sizes, spans, lines, "

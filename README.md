@@ -120,13 +120,10 @@ are preserved in the [project history](https://github.com/scienceverse/bibr/tree
 
 ## Acknowledgments
 
-Special thanks to **Daniël Lakens** and **[Lisa DeBruine (@debruine)](https://github.com/debruine)**, for putting faith and patience in the project, and being generous with their time
+Special thanks to **[Daniël Lakens (@Lakens)](https://github.com/Lakens)** and **[Lisa DeBruine (@debruine)](https://github.com/debruine)**, for putting faith and patience in the project, and being generous with their time and insight
  to help make bibr 🦫 better for everyone.
 
-Lisa also contributed to the early paper-structure and metadata design documentation
-preserved in the project history.
-
-Also, to the whole [Metacheck](https://www.scienceverse.org/metacheck/) team, and **TU Eindhoven**.
+Also thanks to the whole [Metacheck](https://www.scienceverse.org/metacheck/) team, and **TU Eindhoven**.
 
 We are grateful to the open-source projects that bibr builds on:
 

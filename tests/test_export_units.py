@@ -82,17 +82,23 @@ def _minimal_paper(**overrides) -> Paper:
     return Paper(**defaults)
 
 
-def test_build_paper_export_matches_dictionary_export():
-    from bibr.export import PaperExport
+def test_build_paper_export_matches_dictionary_export(monkeypatch):
+    from bibr.export import PaperExport, json_export
 
     paper = _minimal_paper()
 
+    # Both builds stamp ``extraction.completed_at`` from the wall clock, so pin
+    # the first real extraction block and reuse it; otherwise the comparison
+    # flakes whenever the two builds straddle a second boundary.
+    pinned = json_export._minimal_extraction()
+    monkeypatch.setattr(json_export, "_minimal_extraction", lambda: dict(pinned))
+
     model = build_paper_export(paper, validate=False)
+    exported = export_paper_to_json(paper, validate=False)
 
     assert isinstance(model, PaperExport)
-    assert model.model_dump(by_alias=True, exclude_unset=True) == export_paper_to_json(
-        paper, validate=False
-    )
+    assert exported["extraction"]["completed_at"] == pinned["completed_at"]
+    assert model.model_dump(by_alias=True, exclude_unset=True) == exported
 
 
 def test_citation_linking_receipt_exports_losslessly_and_round_trips_schema():
@@ -1441,7 +1447,7 @@ class TestExportTopLevel:
     def test_metadata_and_source_blocks(self):
         paper = _minimal_paper()
         result = export_paper_to_json(paper)
-        assert result["schema_version"] == "12.1"
+        assert result["schema_version"] == "12.2"
         assert result["metadata"]["title"] == "Test Paper"
         assert result["metadata"]["doi"] == "10.1234/test"
         # v11 split the input artifact's identity out of the paper's metadata;
@@ -2398,7 +2404,7 @@ class TestExtractionProvenance:
         paper = _minimal_paper()
         paper.extraction = _extraction_block(producer={"name": "bibr", "version": "9.9.9-test"})
         result = export_paper_to_json(paper)
-        assert result["schema_version"] == "12.1"
+        assert result["schema_version"] == "12.2"
         assert result["extraction"]["producer"]["version"] == "9.9.9-test"
         assert "schema_version" not in result["metadata"]
         assert "bibr_version" not in result["metadata"]

@@ -1,0 +1,60 @@
+name: Crash or install problem
+description: bibr failed, errored, hung, or wouldn't install.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Issues are public. Check the output below for API keys or file paths you
+        don't want to share before posting.
+
+  - type: dropdown
+    id: source
+    attributes:
+      label: Where did it happen?
+      options:
+        - The online demo (try.bibr.org)
+        - bibr on my own computer
+        - The bibr API, Pytacheck or Metacheck
+        - Somewhere else
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: What you ran
+      description: The exact command, or what you clicked in the demo.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: error
+    attributes:
+      label: Error output
+      description: The full error message or traceback.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: bibr --version and bibr doctor
+      description: >-
+        Output of `uv run bibr --version` and `uv run bibr doctor`. Add
+        `nvidia-smi` for GPU problems. Not needed for the online demo.
+      render: text
+
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and hardware
+      placeholder: "Windows 11, RTX 4060 8 GB"
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
