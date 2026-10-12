@@ -21,7 +21,10 @@ uv add 'bibr[mcp]'         # add MCP to a project that installed bibr from PyPI
 Keep the extras required by your selected OCR/runtime as well; for example,
 `uv sync --extra all --extra vllm` includes MCP, ML models, and the CUDA vLLM
 runtime. See [Installation](../getting-started/install.md) for platform
-choices. Loading and querying saved exports does not load extraction models.
+choices. Loading and querying saved exports does not load extraction models
+and does not need LLM credentials: if the LLM check at startup fails (no API
+key, no local launcher), the server still starts, logs the problem on
+stderr, and `chew_paper` / `chew_url` return it as a tool error.
 
 Register it with your client — for Claude Code, from your project directory:
 
@@ -36,11 +39,16 @@ or in JSON client configs (Claude Desktop and most others):
   "mcpServers": {
     "bibr": {
       "command": "uv",
-      "args": ["--directory", "/path/to/bibr", "run", "bibr", "mcp"]
+      "args": ["--directory", "/path/to/bibr", "run", "bibr", "mcp",
+               "--allow-dir", "/path/to/papers"]
     }
   }
 }
 ```
+
+`uv --directory` also sets the directory the server starts in, so the second
+example names the papers directory with `--allow-dir`; see
+[File access](#file-access).
 
 Pipeline options are fixed at server start (they configure the shared warm
 pipeline, exactly like `bibr.Chewer`): pass a subset of the `bibr chew`
@@ -68,9 +76,9 @@ summary plus a `paper_id`, and the query tools read slices on demand.
 
 | Tool | What it returns |
 |---|---|
-| `chew_paper(path, paper_id?)` | Runs the pipeline on one file; compact summary (title, DOI, counts, validation, LLM token usage) + `paper_id` |
+| `chew_paper(path, paper_id?)` | Runs the pipeline on one file in an allowed directory; compact summary (title, DOI, counts, validation, LLM token usage) + `paper_id` |
 | `chew_url(url, paper_id?)` | Downloads a public `https://` URL (SSRF-guarded — see below) and runs the same extraction |
-| `load_paper(path)` | Registers an existing bibr export JSON without re-processing; same summary |
+| `load_paper(path)` | Registers an existing bibr export JSON (a regular file of at most 256 MB in an allowed directory) without re-processing; same summary |
 | `list_papers()` | Papers loaded this session (id, title, DOI, source) |
 | `get_paper_summary(paper_id)` | The compact summary again |
 | `get_metadata(paper_id)` | Full metadata block (title, abstract, journal, paper type, integrity statements, …), authors, affiliations, funding |
@@ -81,7 +89,7 @@ summary plus a `paper_id`, and the query tools read slices on demand.
 | `get_reference_citations(paper_id, bib_id)` | Every in-text citation of one reference, with the full source sentence and page |
 | `get_tables(paper_id, table_id?)` | Printed label and caption per table; full HTML + cells for one `table_id` |
 | `get_figures(paper_id, figure_id?)` | Captions and pages; the image is replaced by `has_image` |
-| `save_paper(paper_id, path, compact?, overwrite?)` | Writes the complete export JSON to a `.json` path; refuses to overwrite an existing file unless `overwrite=True` |
+| `save_paper(paper_id, path, compact?, overwrite?)` | Writes the complete export JSON to a `.json` path in an allowed directory; refuses to overwrite an existing file unless `overwrite=True`, and never writes through a symlink |
 
 This maps directly onto bibr's auditability contract: an agent can pull a
 claim from `get_references`, then `get_reference_citations` to see the exact
@@ -98,6 +106,39 @@ zero-based and `page` matches the exported 1-based PDF page number.
 page's HTML for a table continued across pages. `get_figures` replaces the
 figure image with `has_image`, so no image data reaches a tool response.
 
+## File access
+
+An agent reads the papers it processes, and text in a paper can try to
+instruct it (prompt injection). So `chew_paper`, `load_paper` and
+`save_paper` only reach files inside the directories you allow: by default
+the directory `bibr mcp` starts in. Pass `--allow-dir` to choose others; it
+can be repeated, and `~` is expanded:
+
+```bash
+claude mcp add bibr -- uv run bibr mcp --allow-dir ~/papers --allow-dir ~/exports
+```
+
+Each path is checked after `~`, `..` and symlinks are resolved, so a symlink
+inside an allowed directory that points outside it is refused. A refused path
+fails with a tool error that names the allowed directories and this option;
+the server's instructions name them too, so the agent knows where to look.
+A `--allow-dir` that is not an existing directory stops the server at
+startup. If your client starts servers in your home directory or in `/` (as
+Claude Desktop can), the default covers that whole tree: the server logs a
+warning on stderr then, and you should set `--allow-dir` explicitly.
+
+!!! note "Behaviour change"
+    Earlier releases let these tools read and write any file your user
+    account could. Files outside the server's working directory now need
+    `--allow-dir`.
+
+`save_paper` writes only `.json` files and never through a symbolic link: an
+existing link at the target path is refused whether it points inside or
+outside the allowed directories, or nowhere. It replaces an existing regular
+file only with `overwrite=True`. `load_paper` reads only regular files of at
+most 256 MB, so a device or named pipe fails at once instead of exhausting
+memory or blocking the server.
+
 ## URL downloads (`chew_url`)
 
 `chew_url` lets an agent go straight from a link (arXiv, publisher, data
@@ -106,16 +147,37 @@ is the canonical SSRF surface — even locally, a hostile link must not reach
 loopback services or a cloud VM's metadata endpoint — the download is
 policy-gated by `bibr.utils.safe_fetch`:
 
-- HTTPS only, port 443 only, no credentials in the URL.
+- HTTPS only, port 443 only, no credentials in the URL. An
+  internationalised host name (`bücher.de`) is fetched by its IDNA form
+  (`xn--bcher-kva.de`).
 - Every DNS answer must be a public unicast address (private, loopback,
-  link-local, CGNAT, multicast, and IPv4-mapped tricks are refused), and the
+  link-local, CGNAT, multicast, IPv4-mapped and IPv4-compatible tricks,
+  6to4, Teredo and site-local IPv6 are refused; a NAT64 `64:ff9b::/96`
+  answer is judged by the IPv4 address it carries), and the
   connection is **pinned to the validated IP** — TLS SNI and certificate
   verification still use the hostname — so a DNS-rebinding race can't
   redirect the connection after validation.
+- The download always connects directly: `HTTPS_PROXY`/`ALL_PROXY` from the
+  environment are ignored, because a proxy would choose the destination
+  itself. Custom CA bundles (`SSL_CERT_FILE`/`SSL_CERT_DIR`) still apply.
 - Redirects are followed manually (bounded) and every hop re-validated, so
   a public URL can't 302 into an internal network or downgrade to HTTP.
 - Downloads are size-capped (100MB on the stdio server; the serve upload
-  limit remotely) under a wall-clock deadline.
+  limit remotely) under a wall-clock deadline. Compressed transfers are
+  refused rather than inflated: the request asks for
+  `Accept-Encoding: identity`, and a server that still answers with a
+  `Content-Encoding` (gzip, br, ...) fails the download, since a few hundred
+  bytes of stacked gzip can expand to gigabytes.
+
+The SSRF guard keeps the download off internal addresses, but any public
+HTTPS host is reachable, with a path and query string the agent chooses. An
+agent following injected instructions could therefore send text it has read
+(from a paper, or from a file in an allowed directory) to a server of the
+attacker's choosing, encoded in the URL. If that matters for your setup,
+limit downloads to hosts you trust
+(`MCP_URL_ALLOWED_HOSTS=arxiv.org,zenodo.org` — subdomains included) or
+remove the tool with `MCP_CHEW_URL_ENABLED=false`. Both settings apply to
+`bibr mcp` and to the serve endpoint below.
 
 ## Long extractions
 
@@ -163,14 +225,19 @@ Three differences from the stdio server:
   Both MCP and REST use zero-based, inclusive page indices (`0` is the first page).
   `chew_url` avoids the upload entirely: the server downloads a public
   `https://` URL itself under the SSRF policy above, capped at the serve
-  upload limit. Operators can pin it to specific hosts
-  (`MCP_URL_ALLOWED_HOSTS=arxiv.org,zenodo.org` — subdomains included) or
-  remove the tool with `MCP_CHEW_URL_ENABLED=false`.
+  upload limit. Operators can pin it to specific hosts with
+  `MCP_URL_ALLOWED_HOSTS` or remove the tool with
+  `MCP_CHEW_URL_ENABLED=false`, as on the stdio server.
 - **No `load_paper` / `save_paper`** — both are host-filesystem tools; use
   the REST API when you want the full export JSON as a file.
 - **Papers are per-session and bounded** — each MCP client session gets its
-  own in-memory store, capped at `MCP_MAX_PAPERS_PER_SESSION` (default 16,
-  oldest evicted) and dropped when the session ends. A session that goes
+  own in-memory store, capped at `MCP_MAX_PAPERS_PER_SESSION` (default 16;
+  the paper chewed least recently is evicted, and re-chewing a paper counts
+  as recent) and dropped when the session ends. A session that goes
   quiet for `MCP_SESSION_IDLE_TIMEOUT_SECONDS` (default 1800) is closed by
   the server and its papers are dropped, so clients that disconnect without
-  `DELETE` do not pin memory. Re-chew after a disconnect.
+  `DELETE` do not pin memory. The server as a whole keeps the papers of at
+  most 64 sessions and at most 256 MiB of export JSON: beyond either, the
+  least recently used session's or paper's data is dropped first, however
+  many sessions are open. A query for a dropped paper fails with
+  `unknown paper_id`; re-chew it, as after a disconnect.

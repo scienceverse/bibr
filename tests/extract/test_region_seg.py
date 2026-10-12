@@ -112,6 +112,11 @@ class TestRegionAnchorTexts:
             'Mayorga Hernández, María Isabel, "Modelos 3D y levantamiento", 2024.',
             # CJK author lead followed by a year.
             "田中太郎・鈴木花子 2019 認知心理学の展望 心理学評論 62(1) 1-20.",
+            # Colon bylines (F1000Research / Open Research style) and
+            # hyphenated initials.
+            "Moreau A: Party change: The causes and consequences. Oxford University Press; 2017.",
+            "Hirsch AO: Exit and voice: Responses to decline. Harvard University Press; 1970.",
+            "Barabási A-L, Albert R: Emergence of scaling in random networks. Science. 1999.",
         ],
     )
     def test_promotes_non_author_date_reference_onsets(self, onset):
@@ -128,6 +133,12 @@ class TestRegionAnchorTexts:
             # is a pre-existing `_NUMBERED` false positive; that pattern is a
             # trained-GBM feature and is deliberately left byte-stable.)
             "12 patients were enrolled in the trial and followed for two years.",
+            # A colon after capitals is a label, not a colon byline.
+            "KEY WORDS: party reform, digital democracy, 2020",
+            "The WHO reported: cases rose in 2020.",
+            "Vitamin D: evaluation, treatment, and prevention of deficiency. 2011.",
+            "Part II: methods and results of the trial, 2019.",
+            "Smith II: a second look at the data, 2019.",
         ],
     )
     def test_unicode_fallback_does_not_promote_prose(self, prose):

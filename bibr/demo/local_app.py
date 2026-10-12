@@ -21,8 +21,7 @@ from bibr.input.supported_files import SUPPORTED_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 
-_MAX_FILE_SIZE_MB = int(os.environ.get("DEMO_MAX_FILE_SIZE_MB", "10"))
-_MAX_FILE_SIZE_BYTES = _MAX_FILE_SIZE_MB * 1024 * 1024
+_DEFAULT_MAX_FILE_SIZE_MB = 10
 
 # Uploaded papers and the JSON downloads made from them are deleted once they
 # are this old, and all of them when the server stops.
@@ -100,13 +99,32 @@ Accepts {extensions} files.
 """.format(extensions=" and ".join(f"`{ext}`" for ext in _ALLOWED_EXTENSIONS))
 
 
+def _max_file_size_mb() -> int:
+    """The upload limit in MB, from ``DEMO_MAX_FILE_SIZE_MB`` (default 10).
+
+    Any value that is not a positive whole number raises ValueError: ``0`` or
+    a negative limit would refuse every upload.
+    """
+    raw = os.environ.get("DEMO_MAX_FILE_SIZE_MB", str(_DEFAULT_MAX_FILE_SIZE_MB))
+    try:
+        limit = int(raw)
+        if limit <= 0:
+            raise ValueError
+    except ValueError:
+        raise ValueError(
+            f"DEMO_MAX_FILE_SIZE_MB must be a positive whole number of MB; got {raw!r}"
+        ) from None
+    return limit
+
+
 def _check_file_size(file_path: str) -> None:
     """Raise gr.Error if the file exceeds the size limit."""
+    limit_mb = _max_file_size_mb()
     size = os.path.getsize(file_path)
-    if size > _MAX_FILE_SIZE_BYTES:
+    if size > limit_mb * 1024 * 1024:
         size_mb = size / (1024 * 1024)
         raise gr.Error(
-            f"This file is {size_mb:.1f} MB — the limit is {_MAX_FILE_SIZE_MB} MB. "
+            f"This file is {size_mb:.1f} MB — the limit is {limit_mb} MB. "
             f"Try a shorter paper or use the CLI for larger files."
         )
 
@@ -627,13 +645,66 @@ async def _replace_demo_pipeline_with_preset(
     refs: str | None,
 ) -> str:
     """Apply one preset, atomically replace the demo pipeline, and close the old one."""
-    settings_snapshot = copy.deepcopy(vars(settings))
-    try:
+
+    def apply() -> str:
         unknown = manager.apply_to_settings(name, settings)
         if unknown:
             logger.warning("Preset %s has unknown settings: %s", name, ", ".join(sorted(unknown)))
+        return normalize_ocr_backend(settings.ocr.backend)
 
-        new_ocr = normalize_ocr_backend(settings.ocr.backend)
+    return await _swap_demo_pipeline(
+        apply,
+        settings=settings,
+        pipeline_state=pipeline_state,
+        pipeline_factory=pipeline_factory,
+        refs=refs,
+    )
+
+
+async def _restore_demo_pipeline(
+    initial: dict[str, Any],
+    *,
+    settings,
+    pipeline_state: dict[str, Any],
+    pipeline_factory,
+    refs: str | None,
+) -> str:
+    """Put back the settings the demo started with and rebuild its pipeline on them.
+
+    *initial* holds the settings (``vars`` of the singleton) and OCR backend
+    captured when the demo was created. "(current .env)" after a preset must
+    undo the preset, not only the status line.
+    """
+
+    def apply() -> str:
+        vars(settings).clear()
+        vars(settings).update(copy.deepcopy(initial["settings"]))
+        return initial["ocr_backend"]
+
+    return await _swap_demo_pipeline(
+        apply,
+        settings=settings,
+        pipeline_state=pipeline_state,
+        pipeline_factory=pipeline_factory,
+        refs=refs,
+    )
+
+
+async def _swap_demo_pipeline(
+    apply,
+    *,
+    settings,
+    pipeline_state: dict[str, Any],
+    pipeline_factory,
+    refs: str | None,
+) -> str:
+    """Change *settings* with *apply*, replace the demo pipeline, and close the old one.
+
+    *apply* mutates *settings* and returns the OCR backend for the new pipeline.
+    """
+    settings_snapshot = copy.deepcopy(vars(settings))
+    try:
+        new_ocr = apply()
         new_llm = pipeline_state["llm_backend"] or settings.llm.backend
         replacement = pipeline_factory(
             memory_mode=pipeline_state["memory_mode"],
@@ -681,8 +752,10 @@ def create_local_demo(
     from bibr.local.cli import normalize_ocr_backend
     from bibr.local.pipeline import LocalPipeline
 
-    # Read first, so a bad DEMO_CACHE_TTL_SECONDS fails before models load.
+    # Read first, so a bad DEMO_CACHE_TTL_SECONDS or DEMO_MAX_FILE_SIZE_MB
+    # fails before models load.
     cache_lifetime = _cache_lifetime()
+    _max_file_size_mb()
     ocr_backend = normalize_ocr_backend(ocr_backend)
 
     if cache_lifetime is None and "ocr" not in Settings.cache.model_fields_set:
@@ -743,7 +816,13 @@ def create_local_demo(
             preset_names = manager.list_presets()
 
             if preset_names:
-                active = manager.get_active(effective_env_file())
+                env_file = effective_env_file()
+                active = manager.get_active(env_file) if env_file is not None else None
+                # What "(current .env)" goes back to after a preset.
+                initial = {
+                    "settings": copy.deepcopy(vars(Settings)),
+                    "ocr_backend": ocr_backend,
+                }
                 preset_dropdown = gr.Dropdown(
                     choices=["(current .env)"] + preset_names,
                     value=active if active in preset_names else "(current .env)",
@@ -752,11 +831,21 @@ def create_local_demo(
                 )
 
                 async def _switch_preset(name):
-                    if name == "(current .env)" or not name:
-                        return status_md
                     try:
                         async with pipeline_lock:
-                            return await _replace_demo_pipeline_with_preset(
+                            if name == "(current .env)" or not name:
+                                if pipeline_state.get("preset") is None:
+                                    return status_md
+                                status = await _restore_demo_pipeline(
+                                    initial,
+                                    settings=Settings,
+                                    pipeline_state=pipeline_state,
+                                    pipeline_factory=LocalPipeline,
+                                    refs=refs,
+                                )
+                                pipeline_state["preset"] = None
+                                return status
+                            status = await _replace_demo_pipeline_with_preset(
                                 name,
                                 manager=manager,
                                 settings=Settings,
@@ -765,6 +854,8 @@ def create_local_demo(
                                 normalize_ocr_backend=normalize_ocr_backend,
                                 refs=refs,
                             )
+                            pipeline_state["preset"] = name
+                            return status
                     except Exception as e:
                         raise gr.Error(f"Failed to apply preset: {e}") from e
 

@@ -420,6 +420,7 @@ def test_form_fields_map_flags_to_the_job_api(tmp_path):
             "3",
             "--figure-images",
             "--regions",
+            "--region-meta",
             "--form",
             "k=v=w",
         ]
@@ -432,6 +433,7 @@ def test_form_fields_map_flags_to_the_job_api(tmp_path):
         "end_page": "2",
         "include_figures": "true",
         "include_regions": "true",
+        "include_region_meta": "true",
         "k": "v=w",
     }
     assert _form_fields(parse([*base, "--form", "novalue"]), console) is None

@@ -19,15 +19,52 @@ Coordinate systems:
 
 from __future__ import annotations
 
+import bisect
 import ctypes
+import heapq
 import logging
+import math
 import re
 import unicodedata
+import weakref
+from collections import Counter
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
-from bibr.input.consolidate_text import fix_ocr_artifacts
+from bibr.input.consolidate_text import DOI_URL_CONTEXT_RE, fix_ocr_artifacts
 from bibr.ocr.utils import pdfium_lock
 
 logger = logging.getLogger(__name__)
+
+# Flags of a char record in a PageCharTrace (see _build_page_char_records).
+# A space the word-boundary repair inserted; it has no pdfium char.
+REC_SYNTH_SPACE = 1
+# A flat whitespace box that _settle placed against the glyph before it.
+REC_SETTLED_RAISED = 2
+# A letter with a spacing accent merged into it.
+REC_COMPOSED_ACCENT = 4
+# A non-BMP char read from a UTF-16 surrogate pair (two pdfium chars).
+REC_SURROGATE_PAIR = 8
+
+
+@dataclass(slots=True)
+class PageCharTrace:
+    """What :func:`_build_page_char_records` read and produced, for the document layer.
+
+    ``codes`` and ``boxes`` are indexed by pdfium char index: the raw
+    ``FPDFText_GetUnicode`` value and the tight char box (None when pdfium had
+    none). ``record_src`` and ``record_flags`` run parallel to the returned
+    records: the pdfium index each record starts at (-1 for an inserted space)
+    and its ``REC_*`` flags. ``complete`` turns True once the records are
+    returned. Filling a trace never changes the records.
+    """
+
+    codes: list[int] = field(default_factory=list)
+    boxes: list[tuple[float, float, float, float] | None] = field(default_factory=list)
+    record_src: list[int] = field(default_factory=list)
+    record_flags: list[int] = field(default_factory=list)
+    complete: bool = False
+
 
 # A private-use glyph in prose or references is especially dangerous: many
 # publisher PDFs encode old-style digits in the PUA, so accepting the native
@@ -185,6 +222,272 @@ def _loose_charbox(textpage, index: int) -> tuple[float, float, float, float] | 
         return None
 
 
+# Word-boundary repair. Two glyphs are on one line when their loose
+# (font ascent/descent) boxes start and end within this fraction of the line
+# height of each other: same font size, same baseline. Superscript markers and
+# subscripts never qualify.
+_SAME_LINE_TOLERANCE = 0.15
+# Between two such glyphs, a gap of at least this fraction of the line height
+# is a word gap when pdfium put nothing there...
+_WORD_GAP_MIN = 0.12
+# ...and it is this many times the in-word gaps next to it (a letter-spaced
+# heading has no in-word gap smaller than its spacing, so it is never split).
+_WORD_GAP_RATIO = 3.0
+_WORD_GAP_FLOOR = 0.02
+# Gaps outside this range (in line heights) are not neighbours on one line.
+_LINE_GAP_RANGE = (-0.3, 1.5)
+# No space is inserted before closing punctuation, next to a slash, hyphen,
+# underscore or at sign, or between a dot and a lowercase letter or digit:
+# url.sty stretches the space around these in a URL, DOI or e-mail address
+# ("doi.org/10.0000/...", "uni-example.edu"). A sentence still splits
+# ("temperament.As"). Where pdfium set a line break, the gap is already
+# marked, so only the punctuation and slash rules apply there ("Fig. 3",
+# "3-1- Sample") and the link-run check guards links.
+_NO_SPACE_BEFORE = frozenset(".,:;/")
+_NO_SPACE_AFTER = frozenset("/")
+_NO_SPACE_NEXT_TO = frozenset("-\u2010_@")
+# url.sty also stretches around ( ) ? = & #, so no space at all is inserted
+# inside a URL, DOI or e-mail address: from where DOI_URL_CONTEXT_RE matches
+# to the end of its run of glyphs, or over the whole address.
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+# pdfium itself sometimes sets a space next to these inside a link
+# ("https ://", "view _only"), so a link run reads through such a space.
+_LINK_JOINERS = frozenset(":/?=&#_@%~+-\u2010")
+# A link run ends before an opening bracket that follows closing punctuation
+# ("org) [55]", "[77] (http", "s. <https"), but not inside "10.0000/(SICI)".
+_OPENING_BRACKETS = frozenset("([{<")
+_CLOSING_PUNCTUATION = frozenset(".,;)]}>\"'\u201d\u2019")
+
+
+def _is_cjk(ch: str) -> bool:
+    """Han, Hiragana, Katakana and their punctuation: written without word spaces."""
+    code = ord(ch)
+    return (
+        0x3000 <= code <= 0x30FF
+        or 0x31F0 <= code <= 0x31FF
+        or 0x3400 <= code <= 0x4DBF
+        or 0x4E00 <= code <= 0x9FFF
+        or 0xF900 <= code <= 0xFAFF
+        or 0xFF01 <= code <= 0xFF9F
+        or 0x20000 <= code <= 0x3FFFF
+    )
+
+
+def _may_split(before: str, after: str, *, line_break: bool = False) -> bool:
+    if _is_cjk(before) and _is_cjk(after):
+        return False
+    if after in _NO_SPACE_BEFORE or before in _NO_SPACE_AFTER:
+        return False
+    if line_break:
+        return True
+    if before in _NO_SPACE_NEXT_TO or after in _NO_SPACE_NEXT_TO:
+        return False
+    return not (before == "." and (after.islower() or after.isdigit()))
+
+
+def _bracket_gap(glyphs: list, k: int) -> bool:
+    """Whether the gap after glyph *k* opens a bracket after closing punctuation."""
+    return glyphs[k + 1][1] in _OPENING_BRACKETS and glyphs[k][1] in _CLOSING_PUNCTUATION
+
+
+def _link_kinds(
+    glyphs: list[tuple[int, str, tuple[float, float, float, float] | None]],
+    connected: list[bool],
+    word_gaps: set[int],
+) -> Callable[[int], str | None]:
+    """Look up the link the gap after glyph *k* lies inside: "url" (URL or DOI), "email" or None.
+
+    The run is the glyphs around the gap with no whitespace between them. It
+    reads through pdfium's generated breaks within a line and its generated
+    spaces next to a ``_LINK_JOINERS`` char, and ends at printed whitespace,
+    line ends, other generated spaces, the other word gaps between two
+    letters or digits (a glued "seethe" before a link is not part of it) and
+    before an opening bracket that follows closing punctuation. The gap is
+    inside the link only when the link has glyphs on both sides of it, so a
+    space before "https://" or before an address stays. A gap inside both kinds
+    is reported as "url".
+
+    Run ends are found once and each run's links matched once: walking and
+    matching the run again for every gap in it took quadratic time on a long
+    line of inserted spaces.
+    """
+    count = len(glyphs)
+    # Whether a run ends at the gap after each glyph.
+    ends = [not connected[j] or j in word_gaps or _bracket_gap(glyphs, j) for j in range(count - 1)]
+    run_start = list(range(count))
+    for j in range(1, count):
+        if not ends[j - 1]:
+            run_start[j] = run_start[j - 1]
+    run_end = list(range(count))
+    for j in range(count - 2, -1, -1):
+        if not ends[j]:
+            run_end[j] = run_end[j + 1]
+    # (first URL or DOI start, e-mail spans) of each run, in run indexes.
+    links: dict[tuple[int, int], tuple[int | None, list[tuple[int, int]]]] = {}
+
+    def kind(k: int) -> str | None:
+        if _bracket_gap(glyphs, k):
+            return None
+        # The gap itself never ends the run it lies inside.
+        start, end = run_start[k], run_end[k + 1]
+        found = links.get((start, end))
+        if found is None:
+            run = "".join(glyphs[index][1] for index in range(start, end + 1))
+            url = DOI_URL_CONTEXT_RE.search(run)
+            emails = [m.span() for m in _EMAIL_RE.finditer(run)] if "@" in run else []
+            found = links[start, end] = (None if url is None else url.start(), emails)
+        url_start, emails = found
+        at = k + 1 - start  # the run index of the glyph after the gap
+        if url_start is not None and url_start < at:
+            return "url"
+        # The spans are disjoint and in order: only the last one starting
+        # before *at* can hold it.
+        last = bisect.bisect_left(emails, (at,)) - 1
+        if last >= 0 and at < emails[last][1]:
+            return "email"
+        return None
+
+    return kind
+
+
+def _printable_glyph(ch: str) -> bool:
+    return ch != "\ufffd" and unicodedata.category(ch)[0] in "LNPS"
+
+
+def _same_line_gap(
+    a: tuple[float, float, float, float] | None, b: tuple[float, float, float, float] | None
+) -> float | None:
+    """The gap from glyph *a* to glyph *b* in line heights, or None when not on one line."""
+    if a is None or b is None:
+        return None
+    height = max(a[3] - a[1], b[3] - b[1])
+    if height <= 0:
+        return None
+    tolerance = _SAME_LINE_TOLERANCE * height
+    if abs(a[1] - b[1]) > tolerance or abs(a[3] - b[3]) > tolerance:
+        return None
+    gap = (b[0] - a[2]) / height
+    return gap if _LINE_GAP_RANGE[0] <= gap <= _LINE_GAP_RANGE[1] else None
+
+
+def _repair_word_boundaries(
+    records: list[tuple[str, float, float, bool]],
+    glyphs: list[tuple[int, str, tuple[float, float, float, float] | None]],
+    generated_breaks: set[int],
+    blank: frozenset[int] = frozenset(),
+    generated_spaces: frozenset[int] = frozenset(),
+    meta: list[tuple[int, int]] | None = None,
+) -> list[tuple[str, float, float, bool]]:
+    """Fix pdfium's whitespace between consecutive glyphs of one line.
+
+    pdfium decides spaces and line breaks per text object. A PDF that draws
+    each glyph (or each punctuation mark) as its own object can come out with
+    no space at a word gap ("arterialand") or with a generated line break in
+    the middle of a line ("projects\\r\\n, are"). Between two glyphs of the
+    same size on the same baseline, a generated break is dropped (replaced by
+    a space when the gap is word-sized), and a missing space is inserted when
+    the gap is at least ``_WORD_GAP_MIN`` of the line height and
+    ``_WORD_GAP_RATIO`` times an in-word gap next to it. Printed whitespace
+    and printed line breaks are never touched, and no space goes into a
+    URL, DOI or e-mail address. *glyphs* holds the record index, char and
+    loose box of every non-whitespace glyph, in order; the records in
+    *blank* (accents merged into their letter) count as absent, and so does a
+    generated space next to one, which pdfium set for the accent; at a word gap
+    the space comes back as an inserted one. *meta*, when given, runs parallel
+    to *records* and is rebuilt in place with the same drops and inserts
+    (``(-1, REC_SYNTH_SPACE)`` for an inserted space).
+    """
+    pairs: list[tuple[str | None, float]] = []
+    # Whether two glyphs belong to one link run (see _link_kinds).
+    connected: list[bool] = []
+    for (ra, ca, la), (rb, cb, lb) in zip(glyphs, glyphs[1:], strict=False):
+        between = range(ra + 1, rb)
+        gap = _same_line_gap(la, lb) if _printable_glyph(ca) and _printable_glyph(cb) else None
+        after_accent = any(index in blank for index in between)
+        joined = all(
+            index in generated_breaks
+            or index in blank
+            or (after_accent and index in generated_spaces)
+            for index in between
+        )
+        connected.append(
+            all(
+                index in blank
+                or (gap is not None and index in generated_breaks)
+                or (index in generated_spaces and (ca in _LINK_JOINERS or cb in _LINK_JOINERS))
+                for index in between
+            )
+        )
+        kind = None
+        if gap is not None and joined:
+            kind = "adjacent" if all(index in blank for index in between) else "break"
+        pairs.append((kind, gap if gap is not None else 0.0))
+    drop: set[int] = set()
+    insert: dict[int, tuple[float, float]] = {}
+    spaces: dict[int, int] = {}
+    # Word gaps pdfium marked with a line break, or with a space after a merged
+    # accent, between two letters or digits: they stay spaces next to an e-mail
+    # address, whose pattern reaches left over a glued word ("mail jane@uni.edu",
+    # "José jose@uni.es"). A URL or DOI span starts exactly at the link, so the
+    # span check alone keeps the space before it, and a marked gap inside the
+    # link still joins ("10.0000/abc00001|23").
+    marked: set[int] = set()
+    for k, (kind, gap) in enumerate(pairs):
+        if kind is None:
+            continue
+        (ra, ca, la), (rb, cb, lb) = glyphs[k], glyphs[k + 1]
+        if la is None or lb is None:  # kind is only set for two boxed glyphs
+            continue
+        at = ((la[2] + lb[0]) / 2.0, (max(la[1], lb[1]) + min(la[3], lb[3])) / 2.0)
+        if kind == "break":
+            drop.update(
+                index
+                for index in range(ra + 1, rb)
+                if index in generated_breaks or index in generated_spaces
+            )
+            if gap >= _WORD_GAP_MIN and _may_split(ca, cb, line_break=True):
+                insert[ra] = at
+                spaces[ra] = k
+                if ca.isalnum() and cb.isalnum():
+                    marked.add(k)
+        elif gap >= _WORD_GAP_MIN and _may_split(ca, cb):
+            in_word = [
+                pairs[j][1]
+                for j in (k - 1, k + 1)
+                if 0 <= j < len(pairs) and pairs[j][0] == "adjacent" and pairs[j][1] < _WORD_GAP_MIN
+            ]
+            if in_word and gap >= _WORD_GAP_RATIO * max(max(in_word), _WORD_GAP_FLOOR):
+                insert[ra] = at
+                spaces[ra] = k
+    if insert:
+        word_gaps = {
+            k for k in spaces.values() if glyphs[k][1].isalnum() and glyphs[k + 1][1].isalnum()
+        }
+        link_kind = _link_kinds(glyphs, connected, word_gaps)
+        for ra, k in spaces.items():
+            kind = link_kind(k)
+            if kind == "url" or (kind == "email" and k not in marked):
+                del insert[ra]
+    if not drop and not insert:
+        return records
+    repaired: list[tuple[str, float, float, bool]] = []
+    repaired_meta: list[tuple[int, int]] = []
+    for index, record in enumerate(records):
+        if index in drop:
+            continue
+        repaired.append(record)
+        if meta is not None:
+            repaired_meta.append(meta[index])
+        if index in insert:
+            x, y = insert[index]
+            repaired.append((" ", x, y, False))
+            if meta is not None:
+                repaired_meta.append((-1, REC_SYNTH_SPACE))
+    if meta is not None:
+        meta[:] = repaired_meta
+    return repaired
+
+
 def _is_inner_whitespace(
     textpage,
     n_chars: int,
@@ -223,7 +526,107 @@ def _is_inner_whitespace(
     return next_loose[0] - ligature_loose[2] < _INNER_WHITESPACE_MAX_GAP * width
 
 
-def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
+# --- Spacing accents --------------------------------------------------------
+#
+# TeX and some other generators set an accented letter as the letter plus a
+# spacing accent glyph moved over (or under) it. pdfium reports both chars, in
+# either order, so names came out as "Bas¸kaya", "Brˇci´c",
+# "Ca´rcel". An accent that covers most of a neighbouring letter (or that the
+# letter covers), above it (below it for a cedilla or ogonek), is merged into
+# that letter and the result NFC-composed. A spacing accent between two letters,
+# such as an acute typed for an apostrophe ("don´t"), is over neither and
+# stays.
+_SPACING_ACCENTS = {
+    "\u00b4": "\u0301",  # acute
+    "\u02c7": "\u030c",  # caron
+    "\u00a8": "\u0308",  # diaeresis
+    "\u02d8": "\u0306",  # breve
+    "\u02d9": "\u0307",  # dot above
+    "\u02da": "\u030a",  # ring above
+    "\u02dd": "\u030b",  # double acute
+    "\u00b8": "\u0327",  # cedilla
+    "\u02db": "\u0328",  # ogonek
+    "\u02dc": "\u0303",  # tilde
+    "\u02c6": "\u0302",  # circumflex
+    "\u0060": "\u0300",  # grave
+    "\u02cb": "\u0300",  # grave
+    "\u00af": "\u0304",  # macron
+    "\u02c9": "\u0304",  # macron
+}
+_ACCENTS_BELOW = frozenset("\u00b8\u02db")
+# TeX puts an accent over a dotless i or j.
+_DOTLESS = {"\u0131": "i", "\u0237": "j"}
+
+_ACCENT_MIN_OVERLAP = 0.5
+
+_CharBox = tuple[float, float, float, float]
+
+
+def _spacing_accent_targets(glyphs: list[tuple[str, _CharBox | None]]) -> dict[int, int]:
+    """Map the index of each spacing accent set on a neighbouring letter to that letter."""
+    targets: dict[int, int] = {}
+    for index, (ch, box) in enumerate(glyphs):
+        if ch not in _SPACING_ACCENTS or box is None:
+            continue
+        centre_x = (box[0] + box[2]) / 2.0
+        centre_y = (box[1] + box[3]) / 2.0
+        best: tuple[float, int] | None = None
+        for other in (index - 1, index + 1, index - 2, index + 2):
+            if not 0 <= other < len(glyphs):
+                continue
+            letter, letter_box = glyphs[other]
+            if letter_box is None or len(letter) != 1 or not letter.isalpha():
+                continue
+            left, bottom, right, top = letter_box
+            # Most of the narrower ink box lies under (over) the other: a narrow
+            # stem such as a dotless i sits under part of a wider accent.
+            overlap = min(right, box[2]) - max(left, box[0])
+            narrower = min(right - left, box[2] - box[0])
+            if narrower <= 0 or overlap < _ACCENT_MIN_OVERLAP * narrower:
+                continue
+            letter_y = (bottom + top) / 2.0
+            # Within one letter height: not a letter on the line below.
+            if abs(centre_y - letter_y) > top - bottom:
+                continue
+            if (centre_y < letter_y) != (ch in _ACCENTS_BELOW):
+                continue
+            distance = abs(centre_x - (left + right) / 2.0)
+            if best is None or distance < best[0]:
+                best = (distance, other)
+        if best is not None:
+            targets[index] = best[1]
+    return targets
+
+
+def _with_accent(letter: str, accent: str) -> str:
+    if accent not in _ACCENTS_BELOW:
+        letter = _DOTLESS.get(letter, letter)
+    return unicodedata.normalize("NFC", letter + _SPACING_ACCENTS[accent])
+
+
+def compose_spacing_accents(
+    chars: list[tuple[str, _CharBox]],
+) -> list[tuple[str, _CharBox]]:
+    """Merge spacing accents into the letters they are set on, for ``(char, box)`` lists."""
+    positions = [index for index, (ch, _box) in enumerate(chars) if not ch.isspace()]
+    targets = _spacing_accent_targets([chars[index] for index in positions])
+    if not targets:
+        return chars
+    composed: dict[int, str] = {}
+    for accent, letter in targets.items():
+        at = positions[letter]
+        composed[at] = _with_accent(composed.get(at, chars[at][0]), chars[positions[accent]][0])
+    dropped = {positions[accent] for accent in targets}
+    return [
+        (composed.get(index, ch), box)
+        for index, (ch, box) in enumerate(chars)
+        if index not in dropped
+    ]
+
+
+def _build_page_char_records(
+    textpage, trace: PageCharTrace | None = None
+) -> list[tuple[str, float, float, bool]]:
     """Precompute ``(char, center_x, center_y, is_newline)`` for every char on the page.
 
     ``get_text_bounded`` assigns a glyph to a region whenever its char box merely
@@ -256,6 +659,10 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
     Computing this once per page (rather than once per region) avoids
     O(regions × chars) pdfium calls in :func:`_fill_page_regions_from_textpage`,
     which queries one region at a time over the same page.
+
+    *trace*, when given, receives every pdfium code and tight box the loop
+    reads and, parallel to the returned records, where each record came from
+    (see :class:`PageCharTrace`). The records are the same either way.
     """
     import pypdfium2 as pdfium
 
@@ -267,11 +674,29 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
 
     n_chars = textpage.count_chars()
     records: list[tuple[str, float, float, bool]] = []
+    # (pdfium index, REC_* flags) of each record, parallel to *records*, when
+    # tracing for the document layer.
+    meta: list[tuple[int, int]] | None = None
+    codes: list[int] = []
+    char_boxes: list[tuple[float, float, float, float] | None] = []
+    if trace is not None:
+        meta = []
+        codes = trace.codes = [0] * n_chars
+        char_boxes = trace.boxes = [None] * n_chars
     # Index, box and ligature flag of the last non-whitespace glyph on the line.
     line_glyph: tuple[int, tuple[float, float, float, float], bool] | None = None
     # Raised spaces waiting for the glyph after them: (record index, the
     # space's own centre, the centre of the glyph before it).
     raised: list[tuple[int, float, float]] = []
+    # Every non-whitespace glyph (record index, char, loose box) and the
+    # record indexes of pdfium's generated line breaks, for the word-boundary
+    # repair after the loop.
+    glyphs: list[tuple[int, str, tuple[float, float, float, float] | None]] = []
+    generated_breaks: set[int] = set()
+    # pdfium's generated spaces, for link runs and the accent merge.
+    generated_spaces: set[int] = set()
+    # The tight box of each entry of *glyphs*, for the spacing-accent merge.
+    glyph_boxes: list[tuple[str, tuple[float, float, float, float]]] = []
 
     def _settle(next_box: tuple[float, float, float, float] | None) -> None:
         for index, own_y, glyph_y in raised:
@@ -282,6 +707,8 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
                 if nb + _RAISED_BASELINE_RATIO * (nt - nb) < own_y <= nt:
                     limit = min(glyph_y, (nb + nt) / 2.0)
             records[index] = (ch, x, max(own_y, limit), is_newline)
+            if meta is not None:
+                meta[index] = (meta[index][0], meta[index][1] | REC_SETTLED_RAISED)
         raised.clear()
 
     i = 0
@@ -289,6 +716,9 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
         code_unit = pdfium.raw.FPDFText_GetUnicode(textpage.raw, i)
         consumed = 1
         boxes = [_charbox(i)]
+        if meta is not None:
+            codes[i] = code_unit
+            char_boxes[i] = boxes[0]
 
         # PDFium exposes non-BMP text as UTF-16 code units. Joining each unit
         # independently creates lone-surrogate Python strings that cannot be
@@ -300,6 +730,9 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
                 ch = chr(scalar)
                 consumed = 2
                 boxes.append(_charbox(i + 1))
+                if meta is not None:
+                    codes[i + 1] = low
+                    char_boxes[i + 1] = boxes[1]
             else:
                 ch = "\ufffd"
         elif 0xD800 <= code_unit <= 0xDFFF or code_unit > 0x10FFFF:
@@ -309,7 +742,11 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
 
         if ch in ("\n", "\r"):
             _settle(None)
+            if pdfium.raw.FPDFText_IsGenerated(textpage.raw, i) == 1:
+                generated_breaks.add(len(records))
             records.append((ch, 0.0, 0.0, True))
+            if meta is not None:
+                meta.append((i, 0))
             line_glyph = None
             i += consumed
             continue
@@ -342,10 +779,56 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
                 and gb <= cb + _BASELINE_TOLERANCE_RATIO * (gt - gb)
             ):
                 raised.append((len(records), center_y, (gb + gt) / 2.0))
+        if not ch.isspace():
+            glyphs.append((len(records), ch, _loose_charbox(textpage, i)))
+            glyph_boxes.append((ch, box))
+        if ch == " " and pdfium.raw.FPDFText_IsGenerated(textpage.raw, i) == 1:
+            generated_spaces.add(len(records))
         records.append((ch, (cl + cr) / 2.0, center_y, False))
+        if meta is not None:
+            meta.append((i, REC_SURROGATE_PAIR if consumed == 2 else 0))
         i += consumed
     _settle(None)
-    return records
+    accents = _spacing_accent_targets(glyph_boxes)
+    if not accents:
+        repaired = _repair_word_boundaries(
+            records,
+            glyphs,
+            generated_breaks,
+            generated_spaces=frozenset(generated_spaces),
+            meta=meta,
+        )
+        if trace is not None and meta is not None:
+            _finish_trace(trace, meta)
+        return repaired
+    for accent, letter in accents.items():
+        at = glyphs[letter][0]
+        ch, x, y, is_newline = records[at]
+        records[at] = (_with_accent(ch, glyphs[accent][1]), x, y, is_newline)
+        records[glyphs[accent][0]] = ("", 0.0, 0.0, False)
+        if meta is not None:
+            meta[at] = (meta[at][0], meta[at][1] | REC_COMPOSED_ACCENT)
+    kept = [glyph for index, glyph in enumerate(glyphs) if index not in accents]
+    blank = frozenset(glyphs[accent][0] for accent in accents)
+    repaired = _repair_word_boundaries(
+        records, kept, generated_breaks, blank, frozenset(generated_spaces), meta=meta
+    )
+    if trace is None or meta is None:
+        return [record for record in repaired if record[0]]
+    kept_records: list[tuple[str, float, float, bool]] = []
+    kept_meta: list[tuple[int, int]] = []
+    for record, record_meta in zip(repaired, meta, strict=True):
+        if record[0]:
+            kept_records.append(record)
+            kept_meta.append(record_meta)
+    _finish_trace(trace, kept_meta)
+    return kept_records
+
+
+def _finish_trace(trace: PageCharTrace, meta: list[tuple[int, int]]) -> None:
+    trace.record_src = [src for src, _flags in meta]
+    trace.record_flags = [flags for _src, flags in meta]
+    trace.complete = True
 
 
 def _reconstruct_text_from_records(
@@ -458,7 +941,7 @@ def get_native_text_in_bbox(
             try:
                 crop_box = _page_crop_box(page)
                 rotation = _page_rotation(page)
-                textpage = page.get_textpage()
+                textpage = open_text_page(page)
                 try:
                     if textpage.count_chars() == 0:
                         return ""
@@ -530,6 +1013,8 @@ _SHORT_NATIVE_TEXT_MIN_CHARS = 3
 
 _FONT_SAMPLE_SIZE = 15
 _FONT_BBOX_TOLERANCE = 5.0  # PDF points
+# Line breaks, space and tab carry no glyph metrics to sample.
+_UNSAMPLED_CODES = frozenset(map(ord, "\n\r \t"))
 
 # PDF font-descriptor "Italic" flag (spec Table 121: bit position 7 → 1 << 6).
 # pypdfium2's ``FPDFText_GetFontInfo`` returns these descriptor flags. Note that
@@ -611,8 +1096,8 @@ def _sample_font_metadata_in_bbox(
     scan_start = max(0, start_idx - 10)
     scan_end = min(n_chars, start_idx + 40)
     for i in range(scan_start, scan_end):
-        ch = chr(pdfium.raw.FPDFText_GetUnicode(textpage.raw, i))
-        if ch in ("\n", "\r", " ", "\t"):
+        # Compared as a code: past U+10FFFF (a broken ToUnicode map) chr() raises.
+        if pdfium.raw.FPDFText_GetUnicode(textpage.raw, i) in _UNSAMPLED_CODES:
             continue
         try:
             cl, cb, cr, ct = textpage.get_charbox(i)
@@ -746,6 +1231,7 @@ def _fill_page_regions_from_textpage(
     min_printable_ratio: float,
     page_idx: int,
     rotation: int = 0,
+    records: list[tuple[str, float, float, bool]] | None = None,
 ) -> None:
     """Pre-fill eligible regions' ``content`` from an already-open textpage.
 
@@ -754,9 +1240,11 @@ def _fill_page_regions_from_textpage(
 
     Per-page char records (center coordinates for center-containment) are
     computed ONCE and reused across every region on the page, avoiding
-    O(regions × chars) pdfium calls.
+    O(regions × chars) pdfium calls. A caller that already built them from
+    *textpage* (the document layer does) passes them as *records*.
     """
-    records = _build_page_char_records(textpage)
+    if records is None:
+        records = _build_page_char_records(textpage)
     for region in regions:
         label = region.get("label")
         if label not in eligible_labels:
@@ -782,6 +1270,9 @@ def _fill_page_regions_from_textpage(
         ):
             region["_native_text_candidate"] = native_text
             region["_native_text_rejection_reason"] = _PRIVATE_USE_REJECTION_REASON
+            # The gate that set the text layer aside, for page triage
+            # (bibr.scan.page_kind); layout-dict only, never exported.
+            region["_native_gate"] = "private_use"
             logger.debug(
                 "Native text contained a private-use character (page %d), "
                 "falling back to OCR for this region",
@@ -794,6 +1285,7 @@ def _fill_page_regions_from_textpage(
         if len(native_text.strip()) < effective_min_chars:
             continue
         if not _is_native_text_usable(native_text, min_printable_ratio):
+            region["_native_gate"] = "usability"
             logger.debug(
                 "Native text failed corruption gate (page %d), falling back to OCR for this region",
                 page_idx,
@@ -801,6 +1293,7 @@ def _fill_page_regions_from_textpage(
             continue
         region.pop("_native_text_candidate", None)
         region.pop("_native_text_rejection_reason", None)
+        region.pop("_native_gate", None)
         region["content"] = native_text
         region["_native_text_used"] = True
 
@@ -845,7 +1338,7 @@ def fill_font_metadata(
                     crop_box = _page_crop_box(page)
                     rotation = _page_rotation(page)
                     _attach_bbox_pdf_pts(crop_box, regions, rotation)
-                    textpage = page.get_textpage()
+                    textpage = open_text_page(page)
                     try:
                         n_chars = textpage.count_chars()
                         if n_chars == 0:
@@ -1048,6 +1541,588 @@ def _collect_image_boxes(pdfium_c, objects, matrix, depth: int, boxes: list) -> 
             _collect_image_boxes(pdfium_c, children, inner, depth + 1, boxes)
 
 
+# --- Diagonal watermarks ------------------------------------------------
+#
+# Review copies and stamped PDFs draw a large diagonal string over every page
+# ("For Review Only", a review disclaimer, "RETRACTED", "ARTICLE IN PRESS").
+# PP-DocLayoutV3 has no watermark class, so its glyphs land in whatever region
+# box their centres fall in: a few stray letters at the start (drawn first) or
+# end (drawn last) of abstracts, headings and statements, and skewed region font
+# sizes. Drawn first, the object also skews pdfium's line breaking, which then
+# breaks the line before every one-glyph text object ("Buyer -Supplier").
+# Dropping the chars afterwards cannot undo that, so such text objects are
+# removed from the in-memory page before its text page is built.
+#
+# A watermark is a text object whose baseline, composed through the forms that
+# hold it, is more than _WATERMARK_MIN_SKEW_DEG off a multiple of 90 degrees,
+# at an effective size (Tf size times the matrix scale) of at least
+# _WATERMARK_MIN_SIZE_PT. Colour, alpha and /Artifact tags do not separate
+# them (red, grey or light blue; opaque or not; mostly untagged). On the dev
+# PDFs (2026-10-02) watermarks are 24-100 pt and the only other off-axis text,
+# rotated chart tick labels, is 5-9 pt; 90/270 degree text (side stamps,
+# landscape tables) is on-axis and kept. FPDFText_GetCharAngle is not used:
+# it reports the shear of synthetic italics as rotation.
+_WATERMARK_MIN_SKEW_DEG = 3.0
+_WATERMARK_MIN_SIZE_PT = 16.0
+
+
+def _object_matrix(pdfium_c, obj) -> tuple[float, float, float, float, float, float] | None:
+    matrix = pdfium_c.FS_MATRIX()
+    if not pdfium_c.FPDFPageObj_GetMatrix(obj, ctypes.byref(matrix)):
+        return None
+    return (matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f)
+
+
+def _is_watermark_text(pdfium_c, obj, matrix: tuple[float, ...]) -> bool:
+    """True for a large text object set on an off-axis baseline (see above)."""
+    a, b, c, d, _e, _f = matrix
+    skew = math.degrees(math.atan2(b, a)) % 90.0
+    if min(skew, 90.0 - skew) <= _WATERMARK_MIN_SKEW_DEG:
+        return False
+    size = ctypes.c_float(0.0)
+    if not pdfium_c.FPDFTextObj_GetFontSize(obj, ctypes.byref(size)):
+        return False
+    return size.value * math.sqrt(abs(a * d - b * c)) >= _WATERMARK_MIN_SIZE_PT
+
+
+def _collect_text_objects(pdfium_c, objects, parent, matrix, depth: int, found: list) -> None:
+    """Append ``(parent form or None, text object, parent matrix)`` for every text object.
+
+    Like :func:`_collect_image_boxes`, an object inside a Form XObject is
+    judged in page space, through the matrices of the forms that contain it
+    (*matrix*, ``None`` at the top level): a stamp can be upright text inside
+    a rotated form.
+    """
+    for obj in objects:
+        kind = pdfium_c.FPDFPageObj_GetType(obj)
+        if kind == pdfium_c.FPDF_PAGEOBJ_TEXT:
+            found.append((parent, obj, matrix))
+        elif kind == pdfium_c.FPDF_PAGEOBJ_FORM and depth < _SCAN_PAGE_MAX_FORM_DEPTH:
+            own = _object_matrix(pdfium_c, obj)
+            if own is None:
+                continue
+            children = [
+                pdfium_c.FPDFFormObj_GetObject(obj, index)
+                for index in range(pdfium_c.FPDFFormObj_CountObjects(obj))
+            ]
+            _collect_text_objects(pdfium_c, children, obj, _compose(own, matrix), depth + 1, found)
+
+
+def _text_object_text(pdfium_c, obj, textpage) -> str:
+    length = pdfium_c.FPDFTextObj_GetText(obj, textpage.raw, None, 0)
+    if length <= 2:
+        return ""
+    buffer = ctypes.create_string_buffer(length)
+    pdfium_c.FPDFTextObj_GetText(
+        obj, textpage.raw, ctypes.cast(buffer, ctypes.POINTER(pdfium_c.FPDF_WCHAR)), length
+    )
+    return buffer.raw[: length - 2].decode("utf-16-le", "replace")
+
+
+# --- Manuscript line numbers ----------------------------------------------
+#
+# A line-numbered manuscript prints a number in the outer margin beside every
+# text line. Native text assigns glyphs to regions by centre containment, so a
+# layout box that reaches over the margin takes the numbers: headings like
+# "239 References", reference titles with "675" inside them. Each number is
+# its own text object (on every line-numbered dev PDF and the reported
+# preprint), so the column is found among the page's text objects and removed
+# like the watermark, and every reader of the text layer drops it.
+#
+# A column is at least _LINE_NUMBER_MIN_COUNT integer-only objects (1-4
+# digits, no punctuation) wholly inside the outer _LINE_NUMBER_MARGIN of the
+# page width, aligned on the edge that faces the text within
+# _LINE_NUMBER_ALIGN_PT, mostly increasing down the page in steps of 1, 2, 5
+# or 10. Two more rules keep numbered lists out:
+# - one step of the numbers spans one text line: between two consecutive
+#   numbers there is no text line other than the ones a step of 2, 5 or 10
+#   skips, for at least _LINE_NUMBER_MIN_CLEAN_PAIRS of the pairs (a caption
+#   or table between two numbers is not numbered). A bare-numbered reference
+#   list has its entries' continuation lines between the numbers.
+# - the text keeps a gap of at least _LINE_NUMBER_MIN_GAP_PT from the column,
+#   and nothing on the numbers' lines lies further out. Numbers that touch
+#   their text are labels; text further out makes them a table column
+#   ("ID-" before "99").
+# - the document has such a column on at least _LINE_NUMBER_MIN_PAGES pages
+#   and on _LINE_NUMBER_MIN_PAGE_SHARE of its pages with text. A manuscript
+#   numbers nearly every page; a numbered table or list covers a few.
+# Pages read by OCR keep their numbers.
+_LINE_NUMBER_MARGIN = 0.13
+_LINE_NUMBER_MIN_COUNT = 8
+_LINE_NUMBER_MIN_PAGES = 2
+_LINE_NUMBER_MIN_PAGE_SHARE = 0.4
+_LINE_NUMBER_ALIGN_PT = 4.0
+_LINE_NUMBER_MAX_WIDTH_PT = 40.0
+_LINE_NUMBER_MAX_HEIGHT_PT = 20.0
+_LINE_NUMBER_STEPS = frozenset({1, 2, 5, 10})
+_LINE_NUMBER_MIN_INCREASING = 0.9
+_LINE_NUMBER_MIN_CLEAN_PAIRS = 0.75
+_LINE_NUMBER_LINE_TOLERANCE = 0.35
+_LINE_NUMBER_MIN_GAP_PT = 6.0
+_LINE_NUMBER_MAX_TOUCHING = 0.2
+_LINE_NUMBER_MAX_OUTER = 0.2
+_LINE_NUMBER_RE = re.compile(r"\d{1,4}")
+
+_Box = tuple[float, float, float, float]
+
+
+def _line_number_candidate(box: _Box, page_left: float, page_right: float) -> bool:
+    left, bottom, right, top = box
+    if not (0 < right - left <= _LINE_NUMBER_MAX_WIDTH_PT):
+        return False
+    if not (0 < top - bottom <= _LINE_NUMBER_MAX_HEIGHT_PT):
+        return False
+    margin = _LINE_NUMBER_MARGIN * (page_right - page_left)
+    return right <= page_left + margin or left >= page_right - margin
+
+
+def _aligned_cluster(members: list[int], edges: list[float]) -> list[int]:
+    """The largest subset of *members* whose *edges* lie within the alignment tolerance."""
+    ordered = sorted(members, key=lambda index: edges[index])
+    best: list[int] = []
+    start = 0
+    for end in range(len(ordered)):
+        while edges[ordered[end]] - edges[ordered[start]] > _LINE_NUMBER_ALIGN_PT:
+            start += 1
+        if end - start + 1 > len(best):
+            best = ordered[start : end + 1]
+    return best
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def _clean_pair_share(centres: list[float], steps: list[int], text_centres: list[float]) -> float:
+    """Share of consecutive number pairs with no unnumbered text line between them.
+
+    *centres* run down the page with their value *steps*; *text_centres* are
+    the sorted centres of the text beside the column. A step of ``s`` skips
+    ``s - 1`` lines, which sit at multiples of the per-line pitch.
+    """
+    pairs = clean = 0
+    for upper, lower, step in zip(centres, centres[1:], steps, strict=False):
+        if step <= 0:
+            continue
+        pairs += 1
+        pitch = (upper - lower) / step
+        slack = _LINE_NUMBER_LINE_TOLERANCE * pitch
+        first = bisect.bisect_right(text_centres, lower + slack)
+        last = bisect.bisect_left(text_centres, upper - slack)
+        expected = True
+        for centre in text_centres[first:last]:
+            k = round((upper - centre) / pitch)
+            if not (1 <= k < step and abs(upper - k * pitch - centre) <= slack):
+                expected = False
+                break
+        clean += expected
+    return clean / pairs if pairs else 0.0
+
+
+def _count_with_box_on_line(
+    targets: list[_Box], boxes: list[_Box], qualifies: Callable[[_Box, _Box], bool]
+) -> int:
+    """How many *targets* have a box in *boxes* for which ``qualifies(target, box)``.
+
+    *qualifies* holds only for a box that overlaps its target vertically. A
+    sweep up the page offers each target only the boxes that start below its
+    top and still reach above its bottom, so a column of numbers beside a page
+    of text lines costs a few checks per line, not one per pair.
+    """
+    by_bottom = sorted(boxes, key=lambda box: box[1])
+    # (top, index in by_bottom) of the boxes started so far, lowest top first.
+    active: list[tuple[float, int]] = []
+    added = count = 0
+    for target in sorted(targets, key=lambda box: box[1]):
+        while added < len(by_bottom) and by_bottom[added][1] < target[3]:
+            heapq.heappush(active, (by_bottom[added][3], added))
+            added += 1
+        # Targets come bottom first, so a box that ends below this one's
+        # bottom overlaps no later target either.
+        while active and active[0][0] <= target[1]:
+            heapq.heappop(active)
+        count += any(qualifies(target, by_bottom[index]) for _top, index in active)
+    return count
+
+
+def _on_number_line(number: _Box, box: _Box) -> bool:
+    """Whether *box* covers more than half of *number*'s height."""
+    _, bottom, _, top = number
+    return min(top, box[3]) - max(bottom, box[1]) > 0.5 * (top - bottom)
+
+
+def _outer_share(
+    column: list[int], numbers: list[tuple[int, _Box]], others: list[_Box], side: str
+) -> float:
+    """Share of the column's numbers with a line of text further out on their line.
+
+    Only line-sized boxes count: a vertical stamp in the margin is one tall
+    object.
+    """
+    boxes = [numbers[index][1] for index in column]
+    height = 2.0 * max(box[3] - box[1] for box in boxes)
+    if side == "left":
+        edge = max(box[0] for box in boxes)
+        outside = [box for box in others if (box[0] + box[2]) / 2.0 < edge]
+    else:
+        edge = min(box[2] for box in boxes)
+        outside = [box for box in others if (box[0] + box[2]) / 2.0 > edge]
+    outside = [box for box in outside if box[3] - box[1] <= height]
+
+    def further_out(number: _Box, box: _Box) -> bool:
+        left, bottom, right, top = number
+        if min(top, box[3]) - max(bottom, box[1]) <= 0.5 * (top - bottom):
+            return False
+        if box[3] - box[1] > 2.0 * (top - bottom):
+            return False
+        centre = (box[0] + box[2]) / 2.0
+        return centre < left if side == "left" else centre > right
+
+    return _count_with_box_on_line(boxes, outside, further_out) / len(boxes)
+
+
+def _line_number_column(
+    numbers: list[tuple[int, _Box]], others: list[_Box], page_left: float, page_right: float
+) -> set[int]:
+    """Indices of *numbers* that form a manuscript line-number column.
+
+    *numbers* are the page's integer-only text objects in the outer margins
+    as ``(value, box)``, *others* the boxes of its other text objects, all in
+    page space (PDF points, y up).
+    """
+    found: set[int] = set()
+    width = page_right - page_left
+    for side in ("left", "right"):
+        if side == "left":
+            members = [i for i, (_, box) in enumerate(numbers) if box[2] <= page_left + 0.5 * width]
+            edges = [box[2] for _, box in numbers]
+        else:
+            members = [i for i, (_, box) in enumerate(numbers) if box[0] >= page_left + 0.5 * width]
+            edges = [box[0] for _, box in numbers]
+        column = _aligned_cluster(members, edges)
+        if len(column) < _LINE_NUMBER_MIN_COUNT:
+            continue
+        column.sort(key=lambda index: -(numbers[index][1][1] + numbers[index][1][3]))
+        values = [numbers[index][0] for index in column]
+        centres = [(numbers[index][1][1] + numbers[index][1][3]) / 2.0 for index in column]
+        steps = [later - earlier for earlier, later in zip(values, values[1:], strict=False)]
+        rising = [step for step in steps if step > 0]
+        if len(rising) < _LINE_NUMBER_MIN_INCREASING * len(steps):
+            continue
+        if Counter(rising).most_common(1)[0][0] not in _LINE_NUMBER_STEPS:
+            continue
+        height = _median([numbers[index][1][3] - numbers[index][1][1] for index in column])
+        inner = max(edges[i] for i in column) if side == "left" else min(edges[i] for i in column)
+        top, bottom = centres[0] + height, centres[-1] - height
+        # Text beside the column, without the empty and dash-thin objects
+        # some generators set on the baseline between the glyph runs.
+        beside = [
+            box
+            for box in others
+            if bottom <= (box[1] + box[3]) / 2.0 <= top
+            and box[3] - box[1] >= 0.5 * height
+            and (box[0] >= inner if side == "left" else box[2] <= inner)
+        ]
+        text_centres = sorted((box[1] + box[3]) / 2.0 for box in beside)
+        if _clean_pair_share(centres, steps, text_centres) < _LINE_NUMBER_MIN_CLEAN_PAIRS:
+            continue
+        near = [
+            box
+            for box in beside
+            if (box[0] - inner if side == "left" else inner - box[2]) < _LINE_NUMBER_MIN_GAP_PT
+        ]
+        touching = _count_with_box_on_line(
+            [numbers[index][1] for index in column], near, _on_number_line
+        )
+        if touching > _LINE_NUMBER_MAX_TOUCHING * len(column):
+            continue
+        if _outer_share(column, numbers, others, side) > _LINE_NUMBER_MAX_OUTER:
+            continue
+        found.update(column)
+    return found
+
+
+def _remove_objects(pdfium_c, page, found: list, outcomes: list[bool] | None = None) -> None:
+    """Remove the ``(parent, object)`` entries in *found* from *page*.
+
+    *outcomes*, when given, gets one bool per entry: whether it was removed.
+    """
+    remove_from_form = getattr(pdfium_c, "FPDFFormObj_RemoveObject", None)
+    for parent, obj in found:
+        if parent is None:
+            removed = pdfium_c.FPDFPage_RemoveObject(page.raw, obj)
+        elif remove_from_form is not None:
+            removed = remove_from_form(parent, obj)
+        else:
+            removed = False
+        if outcomes is not None:
+            outcomes.append(bool(removed))
+        if removed:
+            # Removal hands the object to the caller.
+            pdfium_c.FPDFPageObj_Destroy(obj)
+
+
+# A change to what the strip removes moves the document layer's glyph
+# indexes: bump WATERMARK_RULE or LINE_NUMBER_RULE in bibr.document.model.
+def _find_furniture(
+    page, *, watermark_text: bool = True, details: list | None = None, walk: list | None = None
+) -> tuple[list, list[str], list, int]:
+    """The watermark entries, their strings, the line-number entries and the text-object count.
+
+    Nothing is removed. Entries are ``(parent, object, matrix)`` as collected
+    by ``_collect_text_objects``; the strings are only read when
+    *watermark_text* is set. *details*, when given, gets ``(kind, entry, box,
+    text)`` for every returned watermark and line-number entry: ``kind`` is
+    ``"watermark"`` or ``"line_number"``, ``box`` the object's page-space box
+    (PDF points, y up; None when pdfium has none) and ``text`` its string.
+    *walk*, when given, gets every entry collected.
+    """
+    import pypdfium2.raw as pdfium_c
+
+    objects: list = []
+    top_level = [
+        pdfium_c.FPDFPage_GetObject(page.raw, index)
+        for index in range(pdfium_c.FPDFPage_CountObjects(page.raw))
+    ]
+    _collect_text_objects(pdfium_c, top_level, None, None, 0, objects)
+    if walk is not None:
+        walk.extend(objects)
+    watermarks = []
+    candidates = []
+    boxes: list[_Box | None] = []
+    page_left, _, page_right, _ = _page_crop_box(page)
+    numbered = _page_rotation(page) == 0
+    for entry in objects:
+        _parent, obj, matrix = entry
+        own = _object_matrix(pdfium_c, obj)
+        if own is not None and _is_watermark_text(pdfium_c, obj, _compose(own, matrix)):
+            watermarks.append(entry)
+            boxes.append(None)
+            continue
+        bounds = _object_bounds(pdfium_c, obj)
+        box = None if bounds is None else _transform_box(matrix, bounds) if matrix else bounds
+        boxes.append(box)
+        if numbered and box is not None and _line_number_candidate(box, page_left, page_right):
+            candidates.append(len(boxes) - 1)
+    read_watermarks = watermark_text and bool(watermarks)
+    if not read_watermarks and len(candidates) < _LINE_NUMBER_MIN_COUNT:
+        _extend_details(
+            details, lambda: _watermark_details(pdfium_c, watermarks, [""] * len(watermarks))
+        )
+        return watermarks, [], [], len(objects)
+    texts: list[str] = []
+    watermark_texts: list[str] = []
+    numbers: list[tuple[int, _Box]] = []
+    number_entries: list[int] = []
+    number_texts: list[str] = []
+    # The strings need a text page of the unstripped page; only pages that
+    # carry a watermark or enough margin candidates pay for it.
+    textpage = page.get_textpage()
+    try:
+        if read_watermarks:
+            for _parent, obj, _matrix in watermarks:
+                text = " ".join(_text_object_text(pdfium_c, obj, textpage).split())
+                watermark_texts.append(text)
+                if text:
+                    texts.append(text)
+        if len(candidates) >= _LINE_NUMBER_MIN_COUNT:
+            for index in candidates:
+                text = _text_object_text(pdfium_c, objects[index][1], textpage).strip()
+                if _LINE_NUMBER_RE.fullmatch(text):
+                    numbers.append((int(text), boxes[index]))
+                    number_entries.append(index)
+                    number_texts.append(text)
+    finally:
+        textpage.close()
+    line_numbers: list = []
+    column: set[int] = set()
+    if len(numbers) >= _LINE_NUMBER_MIN_COUNT:
+        taken = set(number_entries)
+        others = [box for index, box in enumerate(boxes) if box is not None and index not in taken]
+        column = _line_number_column(numbers, others, page_left, page_right)
+        line_numbers = [objects[number_entries[i]] for i in sorted(column)]
+    if details is not None:
+        if len(watermark_texts) != len(watermarks):
+            watermark_texts = [""] * len(watermarks)
+
+        def found() -> list[tuple]:
+            numbered = [
+                ("line_number", objects[number_entries[i]], numbers[i][1], number_texts[i])
+                for i in sorted(column)
+            ]
+            return _watermark_details(pdfium_c, watermarks, watermark_texts) + numbered
+
+        _extend_details(details, found)
+    return watermarks, texts, line_numbers, len(objects)
+
+
+def _watermark_details(pdfium_c, watermarks: list, texts: list[str]) -> list[tuple]:
+    """``("watermark", entry, page-space box, text)`` for each watermark entry."""
+    details = []
+    for entry, text in zip(watermarks, texts, strict=True):
+        _parent, obj, matrix = entry
+        bounds = _object_bounds(pdfium_c, obj)
+        box = None if bounds is None else _transform_box(matrix, bounds) if matrix else bounds
+        details.append(("watermark", entry, box, text))
+    return details
+
+
+def _furniture_error(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {exc}"[:500]
+
+
+def _extend_details(details: list | None, build) -> None:
+    """Append ``build()``'s furniture details to *details*.
+
+    The details are bookkeeping for the document layer, so a failure to read
+    them never stops the scan: *details* then holds a single ``("error",
+    None, None, message)`` entry.
+    """
+    if details is None:
+        return
+    try:
+        found = list(build())
+    except Exception as exc:  # noqa: BLE001 - bookkeeping never costs the furniture scan
+        logger.debug("Could not describe the page furniture", exc_info=True)
+        details[:] = [("error", None, None, _furniture_error(exc))]
+        return
+    details.extend(found)
+
+
+def _removed_furniture(entries: list, outcomes: list[bool], details: list) -> list[tuple]:
+    """``(kind, box, text)`` of each removed entry, or one ``("error", None, message)``."""
+    try:
+        for kind, _entry, _box, text in details:
+            if kind == "error":
+                return [("error", None, text)]
+        removed = {id(entry) for entry, ok in zip(entries, outcomes, strict=True) if ok}
+        return [(kind, box, text) for kind, entry, box, text in details if id(entry) in removed]
+    except Exception as exc:  # noqa: BLE001 - bookkeeping never costs the removal
+        logger.debug("Could not record the removed furniture", exc_info=True)
+        return [("error", None, _furniture_error(exc))]
+
+
+# Documents already checked for line-numbered pages. Callers hold
+# ``pdfium_lock``.
+_LINE_NUMBERED_DOCUMENTS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _document_is_line_numbered(pdf) -> bool:
+    """Whether *pdf* numbers its lines on enough of its pages.
+
+    That is at least _LINE_NUMBER_MIN_PAGES pages and
+    _LINE_NUMBER_MIN_PAGE_SHARE of the pages with text. Pages are loaded
+    fresh, so the check sees them unstripped; a page that fails to load or
+    scan is skipped.
+    """
+    numbered = _LINE_NUMBERED_DOCUMENTS.get(pdf)
+    if numbered is not None:
+        return numbered
+    n_pages = len(pdf)
+    found = with_text = 0
+    for index in range(n_pages):
+        try:
+            page = pdf[index]
+        except Exception:  # noqa: BLE001 - a broken page only drops out of the count
+            logger.debug("Line-number scan could not load page %d", index, exc_info=True)
+            continue
+        try:
+            _watermarks, _texts, line_numbers, n_text = _find_furniture(page, watermark_text=False)
+        except Exception:  # noqa: BLE001
+            logger.debug("Line-number scan failed on page %d", index, exc_info=True)
+            continue
+        finally:
+            page.close()
+        found += bool(line_numbers)
+        with_text += n_text > 0
+        if found >= max(_LINE_NUMBER_MIN_PAGES, _LINE_NUMBER_MIN_PAGE_SHARE * n_pages):
+            break
+    numbered = found >= max(_LINE_NUMBER_MIN_PAGES, _LINE_NUMBER_MIN_PAGE_SHARE * with_text)
+    _LINE_NUMBERED_DOCUMENTS[pdf] = numbered
+    return numbered
+
+
+def strip_furniture_objects(
+    page, furniture: list | None = None, walk: list | None = None
+) -> tuple[list[str], int]:
+    """Remove diagonal watermark text and manuscript line numbers from *page* in memory.
+
+    Returns the removed watermark strings (whitespace-normalised, one per
+    object that had text) and the number of line-number objects removed.
+    Line numbers are removed only when the document has a line-number
+    column on at least _LINE_NUMBER_MIN_PAGES pages. Only the loaded page
+    changes: nothing is written back, and the callers open the document from
+    bytes for their own pass. Operates on a caller-provided (lock-held) page.
+
+    *furniture*, when given, gets ``(kind, box, text)`` for every object
+    removed: ``kind`` is ``"watermark"`` or ``"line_number"``, ``box`` its
+    page-space box (PDF points, y up; None when pdfium has none) and
+    ``text`` its whitespace-normalised string (the digits of a line number).
+    Recording them never changes what is removed: when they cannot be read,
+    *furniture* gets one ``("error", None, message)`` entry instead.
+
+    *walk*, when given, gets the ``(parent, object, matrix)`` entry of every
+    text object left on the page (see :func:`_collect_text_objects`), so the
+    document layer need not walk the page again. It stays empty when the
+    strip fails.
+    """
+    import pypdfium2.raw as pdfium_c
+
+    details: list | None = [] if furniture is not None else None
+    found: list | None = [] if walk is not None else None
+    watermarks, texts, line_numbers, _n_text = _find_furniture(page, details=details, walk=found)
+    pdf = getattr(page, "pdf", None)
+    if line_numbers and (pdf is None or not _document_is_line_numbered(pdf)):
+        line_numbers = []
+    entries = watermarks + line_numbers
+    outcomes: list[bool] | None = [] if furniture is not None or walk is not None else None
+    _remove_objects(pdfium_c, page, [(parent, obj) for parent, obj, _ in entries], outcomes)
+    if furniture is not None and details is not None and outcomes is not None:
+        furniture.extend(_removed_furniture(entries, outcomes, details))
+    if walk is not None and found is not None and outcomes is not None:
+        # A removed object is destroyed; its entry must not outlive it.
+        removed = {id(entry) for entry, done in zip(entries, outcomes, strict=True) if done}
+        walk.extend(entry for entry in found if id(entry) not in removed)
+    return texts, len(line_numbers)
+
+
+def open_text_page(
+    page,
+    watermarks: list[str] | None = None,
+    furniture: list | None = None,
+    walk: list | None = None,
+):
+    """Build *page*'s pdfium text page without its watermark text and line numbers.
+
+    Every native-text reader goes through this, so region text, font
+    metadata, reference geometry and DOI evidence see the same characters.
+    The removed watermark strings are appended to *watermarks* when it is
+    given, and the removed objects to *furniture* as ``(kind, box, text)``
+    (see :func:`strip_furniture_objects`; a failed pass adds one ``("error",
+    None, message)`` entry). *walk* gets the text objects left on the page,
+    and stays empty when the pass fails.
+    """
+    try:
+        if furniture is None and walk is None:
+            removed, _line_numbers = strip_furniture_objects(page)
+        else:
+            removed, _line_numbers = strip_furniture_objects(page, furniture, walk)
+    except Exception as exc:  # noqa: BLE001 - never lose the text layer to the furniture pass
+        logger.debug("Page furniture removal failed; reading the page as it is", exc_info=True)
+        removed = []
+        if furniture is not None:
+            furniture.append(("error", None, _furniture_error(exc)))
+        if walk is not None:
+            walk.clear()
+    if watermarks is not None:
+        watermarks.extend(removed)
+    return page.get_textpage()
+
+
 def _union_area(boxes: list[tuple[float, float, float, float]]) -> float:
     """Exact area of the union of axis-aligned boxes, by vertical slabs."""
     xs = sorted({x for left, _, right, _ in boxes for x in (left, right)})
@@ -1097,13 +2172,51 @@ def _page_image_coverage(page, crop_box: tuple[float, float, float, float]) -> f
     return min(1.0, _union_area(clipped[:_SCAN_PAGE_MAX_IMAGE_BOXES]) / area)
 
 
-def _invisible_text_share(textpage) -> float | None:
-    """Share of the page's characters drawn in an invisible text render mode.
+# The invisible-layer rule has one implementation, shared with the document
+# layer (bibr.document.harvest), which reads the same facts from its columns:
+# _invisible_share, _share_qualifies and _coverage_qualifies. Bump
+# INVISIBLE_LAYER_RULE in bibr.document.model when the rule changes.
+def _invisible_share(
+    n_chars: int,
+    code_of: Callable[[int], int],
+    is_generated: Callable[[int], bool],
+    render_mode_of: Callable[[int], int | None],
+) -> float | None:
+    """Share of the countable chars drawn in an invisible text render mode.
 
     Whitespace and the characters PDFium generates (inferred spaces and line
-    breaks) are not counted. ``None`` when nothing is countable. Raises when
-    this PDFium build cannot map a character to its text object, so the caller
-    keeps the text layer and reports the rule as unavailable.
+    breaks) are not counted, nor are chars without a text object
+    (*render_mode_of* gives None). ``None`` when nothing is countable.
+    """
+    counted = invisible = 0
+    for index in range(n_chars):
+        code = code_of(index)
+        if code in _UNCOUNTED_CHAR_CODES or (code <= 0x10FFFF and chr(code).isspace()):
+            continue
+        if is_generated(index):
+            continue
+        mode = render_mode_of(index)
+        if mode is None:
+            continue
+        counted += 1
+        if mode in _INVISIBLE_TEXT_RENDER_MODES:
+            invisible += 1
+    return invisible / counted if counted else None
+
+
+def _share_qualifies(share: float | None) -> bool:
+    return share is not None and share >= _SCAN_PAGE_MIN_INVISIBLE_SHARE
+
+
+def _coverage_qualifies(coverage: float) -> bool:
+    return coverage >= _SCAN_PAGE_MIN_IMAGE_COVERAGE
+
+
+def _invisible_text_share(textpage) -> float | None:
+    """:func:`_invisible_share` of a text page, read through PDFium.
+
+    Raises when this PDFium build cannot map a character to its text object,
+    so the caller keeps the text layer and reports the rule as unavailable.
     """
     import pypdfium2.raw as pdfium_c
 
@@ -1112,20 +2225,17 @@ def _invisible_text_share(textpage) -> float | None:
         raise RuntimeError("this PDFium build has no FPDFText_GetTextObject")
     is_generated = getattr(pdfium_c, "FPDFText_IsGenerated", None)
     handle = textpage.raw
-    counted = invisible = 0
-    for index in range(textpage.count_chars()):
-        code = pdfium_c.FPDFText_GetUnicode(handle, index)
-        if code in _UNCOUNTED_CHAR_CODES or (code <= 0x10FFFF and chr(code).isspace()):
-            continue
-        if is_generated is not None and is_generated(handle, index) == 1:
-            continue
+
+    def render_mode_of(index: int) -> int | None:
         obj = text_object_of(handle, index)
-        if not obj:
-            continue
-        counted += 1
-        if pdfium_c.FPDFTextObj_GetTextRenderMode(obj) in _INVISIBLE_TEXT_RENDER_MODES:
-            invisible += 1
-    return invisible / counted if counted else None
+        return pdfium_c.FPDFTextObj_GetTextRenderMode(obj) if obj else None
+
+    return _invisible_share(
+        textpage.count_chars(),
+        lambda index: pdfium_c.FPDFText_GetUnicode(handle, index),
+        lambda index: is_generated is not None and is_generated(handle, index) == 1,
+        render_mode_of,
+    )
 
 
 def _is_invisible_text_layer_page(
@@ -1139,10 +2249,9 @@ def _is_invisible_text_layer_page(
     keeps its visible text, and a figure-sized image never qualifies. Operates
     on a caller-provided (lock-held) page and textpage.
     """
-    if _page_image_coverage(page, crop_box) < _SCAN_PAGE_MIN_IMAGE_COVERAGE:
+    if not _coverage_qualifies(_page_image_coverage(page, crop_box)):
         return False
-    share = _invisible_text_share(textpage)
-    return share is not None and share >= _SCAN_PAGE_MIN_INVISIBLE_SHARE
+    return _share_qualifies(_invisible_text_share(textpage))
 
 
 def fill_regions_from_native_text(
@@ -1213,7 +2322,7 @@ def fill_regions_from_native_text(
                     crop_box = _page_crop_box(page)
                     rotation = _page_rotation(page)
                     _attach_bbox_pdf_pts(crop_box, regions, rotation)
-                    textpage = page.get_textpage()
+                    textpage = open_text_page(page)
                     try:
                         if textpage.count_chars() == 0:
                             continue
@@ -1279,7 +2388,7 @@ def fill_native_text_and_fonts(
                     # the char-count gate.
                     _attach_page_dimensions(page, regions)
                     _attach_bbox_pdf_pts(crop_box, regions, rotation)
-                    textpage = page.get_textpage()
+                    textpage = open_text_page(page)
                     try:
                         n_chars = textpage.count_chars()
                         if n_chars == 0:

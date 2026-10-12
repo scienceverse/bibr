@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, ClassVar
 import instructor
 
 from bibr.clients.providers import register
+from bibr.clients.providers.base import bound_sdk_client
 from bibr.config import snapshot_settings
 from bibr.utils.hosts import refuse_plaintext_llm_key
 
@@ -73,7 +74,7 @@ class OpenAIProvider:
         client: instructor.AsyncInstructor = instructor.from_provider(
             f"openai/{self._settings.llm.model}", **kwargs
         )
-        return client
+        return bound_sdk_client(client, self._settings)
 
     def call_kwargs(self, reasoning_effort: str | None, max_tokens: int | None = None) -> dict:
         kwargs: dict = {"temperature": self._settings.llm.temperature}

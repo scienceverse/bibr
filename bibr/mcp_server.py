@@ -24,6 +24,12 @@ so ``chew_paper`` runs the pipeline under ``redirect_stdout(sys.stderr)`` —
 a stray ``print`` in a backend would otherwise corrupt the frame stream. The
 transport keeps its own reference to the original stream from server start,
 so the redirect never touches it.
+
+File access is scoped: the agent driving the tools may be following
+instructions injected by a paper it read, so ``chew_paper``, ``load_paper``
+and ``save_paper`` only reach paths that resolve (symlinks followed) inside
+the allowed directories — ``--allow-dir``, by default the working directory
+at startup — and ``save_paper`` never writes through a symlink.
 """
 
 from __future__ import annotations
@@ -31,9 +37,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
+import os
+import stat
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import asynccontextmanager, redirect_stdout
 from pathlib import Path
 from typing import Any, Unpack
@@ -48,25 +57,82 @@ from bibr.validation import payload_validation
 
 __all__ = ["build_server", "run_mcp"]
 
+logger = logging.getLogger(__name__)
+
 _TEXT_LIMIT_MAX = 500
 _REF_LIMIT_MAX = 200
 _SEARCH_LIMIT_MAX = 100
 _URL_MAX_BYTES = 100 * 1024 * 1024  # chew_url download cap (stdio server)
+_LOAD_MAX_BYTES = 256 * 1024 * 1024  # load_paper cap; exports with figure images stay far below
+# Windows has no O_NONBLOCK or O_NOFOLLOW (the stat checks still run there)
+# and needs O_BINARY so the C runtime adds no newline translation of its own.
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_BINARY = getattr(os, "O_BINARY", 0)
 
 _INSTRUCTIONS = """\
 bibr extracts structured data from scientific papers (PDF, DOCX, JATS XML, HTML, ePub):
 metadata, authors, full text (sentence-level, linked to sections and pages), references,
 in-text citations, tables, figures, and statistical expressions.
 
-Start with chew_paper (a local file), chew_url (a public https:// URL), or load_paper
-(registers an existing bibr JSON export without re-processing). Extraction runs the full
-pipeline — the first call may take minutes while models load. All three return a compact
-summary and a paper_id for the query tools: get_metadata, get_sections, get_text,
-search_text, get_references, get_reference_citations, get_tables, get_figures. Full
-exports are large, so query the slices you need instead of asking for everything;
-save_paper writes the complete export JSON to a .json path (it refuses to
-overwrite an existing file unless overwrite=True).
+Start with {start}. Extraction runs the full pipeline — the first call may take minutes
+while models load. Each returns a compact summary and a paper_id for the query tools:
+get_metadata, get_sections, get_text, search_text, get_references,
+get_reference_citations, get_tables, get_figures. Full exports are large, so query the
+slices you need instead of asking for everything; save_paper writes the complete export
+JSON to a .json path (it refuses to overwrite an existing file unless overwrite=True).
+
+chew_paper, load_paper and save_paper only reach files under {roots}; the user can allow
+another directory by restarting the server with `bibr mcp --allow-dir DIR`.
 """
+_START_LOCAL = (
+    "chew_paper (a local file) or load_paper (registers an existing bibr JSON export "
+    "without re-processing)"
+)
+_START_WITH_URL = (
+    "chew_paper (a local file), chew_url (a public https:// URL), or load_paper "
+    "(registers an existing bibr JSON export without re-processing)"
+)
+
+
+def _allowed_roots(dirs: Sequence[str | os.PathLike[str]] | None) -> tuple[Path, ...]:
+    """Resolve the directories the file tools may reach (default: the cwd)."""
+    roots: list[Path] = []
+    for entry in dirs or [Path.cwd()]:
+        root = Path(entry).expanduser().resolve()
+        if not root.is_dir():
+            raise ValueError(f"--allow-dir {entry}: not an existing directory")
+        if root not in roots:
+            roots.append(root)
+    # Clients may start servers in "/" or the home directory (Claude Desktop
+    # can), where the default scope limits next to nothing.
+    if not dirs and (roots[0].parent == roots[0] or roots[0] == Path.home().resolve()):
+        logger.warning(
+            "the file tools can reach everything under %s; start bibr mcp with "
+            "--allow-dir to limit them",
+            roots[0],
+        )
+    return tuple(roots)
+
+
+def _in_scope(path: Path, roots: tuple[Path, ...]) -> Path:
+    """Resolve *path* and require it inside an allowed root.
+
+    The check runs on the fully resolved path, so neither ``..`` nor a
+    symlink inside a root that points elsewhere gets out.
+    """
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError, ValueError) as e:  # symlink loop, NUL byte
+        raise ToolError(f"cannot resolve {path}: {e}") from None
+    if not any(resolved.is_relative_to(root) for root in roots):
+        allowed = ", ".join(map(str, roots))
+        raise ToolError(
+            f"{path} is outside the directories this server may access ({allowed}); "
+            "to allow another directory, restart the server with "
+            "'bibr mcp --allow-dir DIR'"
+        )
+    return resolved
 
 
 def _drop_empty(row: dict[str, Any]) -> dict[str, Any]:
@@ -89,6 +155,12 @@ def _summarize(paper_id: str, data: dict[str, Any], source: str) -> dict[str, An
     info = data.get("metadata")
     if not isinstance(info, dict):
         info = {}
+    extraction = data.get("extraction")
+    if not isinstance(extraction, dict):
+        # load_paper admits any JSON with one export-shaped key; the helpers
+        # below expect ``extraction`` to be a block or absent.
+        extraction = {}
+        data = {**data, "extraction": None}
 
     def count(key: str) -> int | None:
         value = data.get(key)
@@ -100,7 +172,7 @@ def _summarize(paper_id: str, data: dict[str, Any], source: str) -> dict[str, An
     else:
         validation = "not present"
 
-    llm_usage = (data.get("extraction") or {}).get("usage")
+    llm_usage = extraction.get("usage")
     return {
         "paper_id": paper_id,
         "source": source,
@@ -136,8 +208,8 @@ class _PaperStore:
     """In-memory session store: paper id → export dict + source path.
 
     ``max_papers`` bounds memory for long-lived multi-client deployments
-    (serve): adding beyond it evicts the oldest entry. ``None`` (stdio) keeps
-    everything for the process lifetime.
+    (serve): adding beyond it evicts the least recently added (or re-added)
+    entry. ``None`` (stdio) keeps everything for the process lifetime.
     """
 
     def __init__(self, max_papers: int | None = None) -> None:
@@ -152,7 +224,11 @@ class _PaperStore:
         while paper_id in self._papers and self._papers[paper_id].source != source:
             paper_id = f"{base}-{n}"
             n += 1
-        if self._max_papers is not None and paper_id not in self._papers:
+        if paper_id in self._papers:
+            # Re-insert rather than overwrite in place, so a re-chewed paper
+            # moves to the newest position and is not the next one evicted.
+            del self._papers[paper_id]
+        elif self._max_papers is not None:
             while len(self._papers) >= self._max_papers:
                 self._papers.pop(next(iter(self._papers)))
         self._papers[paper_id] = _Entry(data, source)
@@ -450,25 +526,91 @@ def _register_query_tools(server: MCPServer, get_store: Callable[[Context], _Pap
         return {"paper_id": paper_id, "figure": strip(row)}
 
 
+def _exit_if_terminating() -> None:
+    """End ``bibr mcp`` now when SIGTERM or SIGHUP is stopping it.
+
+    Runs once the lifespan cleanup is done. The SDK's stdio transport reads
+    stdin in a worker thread that no cancellation reaches, so the rest of the
+    unwinding (and the interpreter's exit, which joins that thread) would wait
+    for the client's next line or EOF: a host that keeps the pipe open could
+    only stop the server with SIGKILL. That wait also follows a session that
+    ended some other way, so a signal arriving from now on exits at once.
+    """
+    cli = sys.modules.get("bibr.local.cli")
+    if cli is None:  # embedded: no CLI signal handling, nothing recorded
+        return
+    cli._exit_at_once_on_termination()
+    signum = cli._terminating_signal()
+    if signum is None:
+        return
+    try:
+        # os._exit would otherwise swallow a failed close without a word.
+        if isinstance(error := sys.exception(), Exception):
+            logger.error("error while shutting down", exc_info=error)
+    finally:
+        cli._exit_now(128 + signum)
+
+
 def build_server(
     *,
     refs: str | bool | None = None,
     settings: Any = None,
+    allowed_dirs: Sequence[str | os.PathLike[str]] | None = None,
     **options: Unpack[ChewOptions],
 ) -> MCPServer:
-    """Build the bibr MCP server; options mirror :class:`bibr.api.Chewer`."""
-    chewer = Chewer(refs=refs, settings=settings, **options)
+    """Build the bibr MCP server; options mirror :class:`bibr.api.Chewer`.
+
+    ``allowed_dirs`` are the only directories the file tools may reach
+    (default: the working directory). Raises ``ValueError`` for one that is
+    not an existing directory and for a bad option; a failed LLM preflight
+    only makes the chew tools report it.
+    """
+    from bibr.config import snapshot_settings
+
+    settings = snapshot_settings(settings)
+    roots = _allowed_roots(allowed_dirs)
     store = _PaperStore()
     chew_lock = asyncio.Lock()
+    # Loading and querying saved exports needs no pipeline, so a failed LLM
+    # preflight (no credentials, no local launcher) disables only the chew
+    # tools instead of keeping the whole server from starting.
+    chewer: Chewer | None = None
+    chew_unavailable = ""
+    try:
+        chewer = Chewer(refs=refs, settings=settings, **options)
+    except (ValueError, BibrError) as e:
+        # Only the preflight may fail softly: the same options with it
+        # skipped must build, so a bad option still stops the server.
+        without_llm: ChewOptions = {**options, "no_llm": True}
+        Chewer(refs=refs, settings=settings, **without_llm)
+        chew_unavailable = scrub_secrets(str(e))
+        logger.warning(
+            "extraction is unavailable (%s); load_paper and the query tools still work",
+            chew_unavailable,
+        )
+
+    def _warm_chewer() -> Chewer:
+        if chewer is None:
+            raise ToolError(f"extraction is unavailable: {chew_unavailable}")
+        return chewer
 
     @asynccontextmanager
     async def _lifespan(_server: MCPServer):
         try:
             yield None
         finally:
-            await chewer.aclose()
+            try:
+                if chewer is not None:
+                    await chewer.aclose()
+            finally:
+                _exit_if_terminating()
 
-    server = MCPServer("bibr", instructions=_INSTRUCTIONS, lifespan=_lifespan)
+    chew_url_enabled = settings.mcp.chew_url_enabled
+    instructions = _INSTRUCTIONS.format(
+        start=_START_WITH_URL if chew_url_enabled else _START_LOCAL,
+        roots=", ".join(map(str, roots)),
+    )
+    server = MCPServer("bibr", instructions=instructions, lifespan=_lifespan)
 
     @server.tool()
     async def chew_paper(path: str, paper_id: str | None = None, *, ctx: Context) -> dict[str, Any]:
@@ -477,9 +619,14 @@ def build_server(
         Runs the full bibr pipeline on one file and registers the result for
         the get_*/search_text tools under the returned paper_id. The first
         call loads models and can take minutes; later calls reuse the warm
-        pipeline. Progress is reported via MCP progress notifications.
+        pipeline. Progress is reported via MCP progress notifications. The
+        file must be inside a directory the server was allowed to access.
         """
+        warm = _warm_chewer()
         target = Path(path).expanduser()
+        # The pipeline still gets the path as given: a symlinked input keeps
+        # the link's name as its default paper id.
+        _in_scope(target, roots)
         if target.is_dir():
             raise ToolError(f"{target} is a directory — chew one file at a time")
         if not target.is_file():
@@ -489,7 +636,7 @@ def build_server(
         async with chew_lock:  # one paper at a time on the shared pipeline
             with redirect_stdout(sys.stderr):
                 try:
-                    result = await chewer.achew_file(target, paper_id=paper_id, progress=tracker)
+                    result = await warm.achew_file(target, paper_id=paper_id, progress=tracker)
                 except BibrError as e:
                     raise ToolError(
                         f"extraction failed for {target.name}: {scrub_secrets(str(e))}"
@@ -504,14 +651,13 @@ def build_server(
         summary["seconds"] = round(time.monotonic() - started, 1)
         return summary
 
-    @server.tool()
     async def chew_url(url: str, paper_id: str | None = None, *, ctx: Context) -> dict[str, Any]:
         """Download a paper from a public https:// URL and extract it.
 
         Same pipeline, summary, and registration as chew_paper. The download
         is SSRF-guarded (public HTTPS hosts only — even locally, a hostile
-        link must not reach loopback services or cloud metadata endpoints)
-        and capped at 100MB.
+        link must not reach loopback services or cloud metadata endpoints),
+        capped at 100MB, and limited to the hosts the user configured, if any.
         """
         import tempfile
 
@@ -522,9 +668,14 @@ def build_server(
             fetch_url_safely,
         )
 
+        warm = _warm_chewer()
         started = time.monotonic()
         try:
-            fetched = await fetch_url_safely(url, max_size=_URL_MAX_BYTES)
+            fetched = await fetch_url_safely(
+                url,
+                max_size=_URL_MAX_BYTES,
+                allowed_hosts=settings.mcp.url_allowed_hosts or None,
+            )
         except (UnsafeUrlError, FetchTooLargeError, FetchFailedError) as e:
             raise ToolError(str(e)) from None
         tracker = _McpProgress(ctx, asyncio.get_running_loop())
@@ -537,9 +688,7 @@ def build_server(
             async with chew_lock:  # one paper at a time on the shared pipeline
                 with redirect_stdout(sys.stderr):
                     try:
-                        result = await chewer.achew_file(
-                            target, paper_id=paper_id, progress=tracker
-                        )
+                        result = await warm.achew_file(target, paper_id=paper_id, progress=tracker)
                     except BibrError as e:
                         raise ToolError(
                             f"extraction failed for {fetched.filename}: {scrub_secrets(str(e))}"
@@ -554,60 +703,108 @@ def build_server(
         summary["seconds"] = round(time.monotonic() - started, 1)
         return summary
 
+    if chew_url_enabled:
+        server.tool()(chew_url)
+
     @server.tool()
     async def load_paper(path: str) -> dict[str, Any]:
         """Register an existing bibr export JSON (from `bibr chew`) for querying.
 
         No re-processing — reads the file, checks it looks like a bibr
-        export, and returns the same summary shape as chew_paper.
+        export, and returns the same summary shape as chew_paper. The file
+        must be inside a directory the server was allowed to access.
         """
         from bibr.local.inspect import _looks_like_bibr_export
 
         src = Path(path).expanduser()
+        resolved = _in_scope(src, roots)
+        too_large = f"{src} is over the {_LOAD_MAX_BYTES >> 20} MB load_paper limit"
+
+        def read() -> bytes:
+            # stat first, so a device file is never opened at all; O_NONBLOCK
+            # keeps a FIFO swapped in after the stat from blocking open(), and
+            # the fstat of the open file catches that swap.
+            if not stat.S_ISREG(os.stat(resolved).st_mode):
+                raise ToolError(f"{src} is not a regular file")
+            with open(os.open(resolved, os.O_RDONLY | _O_NONBLOCK | _O_BINARY), "rb") as fh:
+                info = os.fstat(fh.fileno())
+                if not stat.S_ISREG(info.st_mode):
+                    raise ToolError(f"{src} is not a regular file")
+                if info.st_size > _LOAD_MAX_BYTES:
+                    raise ToolError(too_large)
+                raw = fh.read(_LOAD_MAX_BYTES + 1)
+            if len(raw) > _LOAD_MAX_BYTES:  # grew after the fstat
+                raise ToolError(too_large)
+            return raw
+
         try:
-            raw = await asyncio.to_thread(src.read_text, encoding="utf-8")
+            text = (await asyncio.to_thread(read)).decode("utf-8")
         except OSError as e:
             raise ToolError(f"cannot read {src}: {e}") from e
         except UnicodeDecodeError:
             raise ToolError(f"{src} is not valid UTF-8 text (not a bibr export)") from None
         try:
-            data = json.loads(raw)
+            data = json.loads(text)
         except json.JSONDecodeError as e:
             raise ToolError(f"{src} is not valid JSON ({e.msg} at line {e.lineno})") from None
         if not _looks_like_bibr_export(data):
             raise ToolError(f"{src} does not look like a bibr export (no recognizable fields)")
-        pid = store.add(data, source=str(src))
-        return _summarize(pid, data, str(src))
+        # Summarize before registering: an export the summary cannot read
+        # must not stay half-loaded in the store.
+        summary = _summarize("", data, str(src))
+        summary["paper_id"] = store.add(data, source=str(src))
+        return summary
 
     @server.tool()
     async def save_paper(
         paper_id: str, path: str, compact: bool = False, overwrite: bool = False
     ) -> dict[str, Any]:
         """Write a paper's complete export JSON (schema-versioned, everything the
-        query tools slice from) to a `.json` path.
+        query tools slice from) to a `.json` path inside a directory the server
+        was allowed to access.
 
         Refuses to overwrite an existing file unless `overwrite=True` is
-        passed explicitly.
+        passed explicitly, and never writes through a symbolic link.
         """
         entry = store.get(paper_id)
         out = Path(path).expanduser()
         if out.suffix.lower() != ".json":
             raise ToolError(f"refusing to write {out}: save_paper writes only .json files")
+        # Only the parent is resolved: the file itself must not be a symlink,
+        # wherever it points.
+        target = _in_scope(out.parent, roots) / out.name
+        kwargs: dict[str, Any] = {"separators": (",", ":")} if compact else {"indent": 2}
+
+        def write() -> int:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                info = target.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                if stat.S_ISLNK(info.st_mode):
+                    raise ToolError(f"refusing to write {out}: it is a symbolic link")
+                if not stat.S_ISREG(info.st_mode):
+                    raise ToolError(f"refusing to write {out}: not a regular file")
+                if not overwrite:
+                    raise ToolError(
+                        f"refusing to overwrite existing file {out} "
+                        "(pass overwrite=True to replace it)"
+                    )
+            # O_NOFOLLOW and O_EXCL hold the lstat's verdict at open time: a
+            # symlink planted in between fails the open instead of being followed.
+            flags = os.O_WRONLY | os.O_CREAT | _O_NOFOLLOW | _O_BINARY
+            flags |= os.O_TRUNC if overwrite else os.O_EXCL
+            with open(os.open(target, flags, 0o666), "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry.data, ensure_ascii=False, **kwargs))
+                fh.flush()
+                return os.fstat(fh.fileno()).st_size
+
         try:
-            out.parent.mkdir(parents=True, exist_ok=True)
-            if out.exists() and not overwrite:
-                raise ToolError(
-                    f"refusing to overwrite existing file {out} (pass overwrite=True to replace it)"
-                )
-            kwargs: dict[str, Any] = {"separators": (",", ":")} if compact else {"indent": 2}
-            await asyncio.to_thread(
-                out.write_text,
-                json.dumps(entry.data, ensure_ascii=False, **kwargs),
-                encoding="utf-8",
-            )
+            size = await asyncio.to_thread(write)
         except OSError as e:
             raise ToolError(f"cannot write {out}: {e}") from e
-        return {"paper_id": paper_id, "path": str(out), "bytes": out.stat().st_size}
+        return {"paper_id": paper_id, "path": str(out), "bytes": size}
 
     _register_query_tools(server, lambda ctx: store)  # noqa: ARG005 — one shared store
     return server
@@ -636,11 +833,15 @@ def run_mcp(args: argparse.Namespace) -> int:
         options["ref_seg"] = args.ref_seg
 
     try:
-        server = build_server(refs=getattr(args, "refs", None), **options)
+        server = build_server(
+            refs=getattr(args, "refs", None),
+            allowed_dirs=getattr(args, "allow_dir", None),
+            **options,
+        )
     except ValueError as e:
-        # The Chewer preflight raises the provider's ValueError for a missing
-        # cloud credential; report it like the other CLI configuration errors.
-        # Errors from the running session below keep their traceback.
+        # A bad option or --allow-dir; report it like the other CLI
+        # configuration errors. Errors from the running session below keep
+        # their traceback.
         from bibr.exceptions import ConfigurationError
 
         raise ConfigurationError(str(e)) from e

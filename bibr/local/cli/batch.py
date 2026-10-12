@@ -32,7 +32,6 @@ _LOCAL_ONLY_FLAGS = (
     "no_equations",
     "batch_size",
     "preset",
-    "region_meta",
 )
 
 
@@ -123,6 +122,8 @@ def _form_fields(args: Any, console: Any) -> dict[str, str] | None:
         form["include_figures"] = "true"
     if args.regions:
         form["include_regions"] = "true"
+    if args.region_meta:
+        form["include_region_meta"] = "true"
     for raw in args.form:
         key, sep, value = raw.partition("=")
         if not sep or not key:

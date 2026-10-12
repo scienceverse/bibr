@@ -8,6 +8,7 @@ layer, not a dependency of it). ``bibr.local.pipeline`` re-exports it for
 backward compatibility.
 """
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -15,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
 
+    from bibr.document.model import DocumentLayer
     from bibr.input.docx_native import DocxParser
     from bibr.input.epub_native import EpubParser
     from bibr.input.html_native import HtmlParser
@@ -27,6 +29,8 @@ if TYPE_CHECKING:
     from bibr.pipeline.artifacts import ArtifactDisposition, ArtifactSink, RunState
     from bibr.pipeline.identity import DoiSelection, ExpectedIdentity
     from bibr.processing_warnings import ProcessingWarning
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -69,6 +73,8 @@ class FileState:
     # Typed Region IR: OcrStage emits OcrRegionResult objects (wire-format
     # dicts stay stage-internal); ParseSegmentStage hands them to PDFParser.
     ocr_regions: "list[list[OcrRegionResult]] | None" = None
+    # Each inspected page's class (bibr.scan.page_kind), by absolute page index.
+    page_kinds: dict[int, str] | None = None
     # Pages OCR attempted, and pages that failed wholesale. A page that raises
     # substitutes an empty region list, contributing to neither side of the
     # region-level success ratio — so a run where most pages died outright
@@ -108,9 +114,27 @@ class FileState:
     error_outage: bool = False
     stage_times: dict = field(default_factory=dict)
     warnings: "list[ProcessingWarning]" = field(default_factory=list)
+    # The document layer (``bibr.document``), built by NativeTextStage or
+    # rebuilt at the parse hand-off when ``pipeline.document_layer`` is on,
+    # and handed on as ``PaperContents.document``. In every memory mode its
+    # glyph columns are freed after the last stage that requires it, and the
+    # rest of it lives until ``free_all``.
+    doc_layer: "DocumentLayer | None" = field(default=None, compare=False, repr=False, kw_only=True)
+    # The layer was asked for once, inline or rebuilt; a failed build leaves
+    # doc_layer None and is not tried again.
+    doc_layer_attempted: bool = field(default=False, compare=False, repr=False, kw_only=True)
 
     def free_pre_ocr(self):
         """Free data consumed by OCR stage."""
+        # The scan path's page classes are read from the inspection and the
+        # layout, which go here; classify while they are still held.
+        if self.page_kinds is None and self.pdf_inspection is not None:
+            from bibr.scan.page_kind import ensure_page_kinds
+
+            try:
+                ensure_page_kinds(self)
+            except Exception:  # noqa: BLE001 - classes are evidence, never a failure
+                logger.debug("Page classification failed for %s", self.path, exc_info=True)
         self.pdf_bytes = None
         self.page_images = None
         self.layout_results = None
@@ -129,6 +153,18 @@ class FileState:
         # Native parser is held across its handling stage →
         # ParseSegmentStage so the parser can be reused; release after parse.
         self._native_parser = None
+
+    def free_layer_columns(self):
+        """Free the document layer's glyph columns after the last stage that requires it.
+
+        The layer stays, in ``doc_layer`` and ``contents.document``, with
+        ``columns_freed`` set. Runs for every file, layer or not, so it must
+        not raise, and it is duck-typed so that a run with the layer off never
+        imports ``bibr.document``.
+        """
+        free_columns = getattr(self.doc_layer, "free_columns", None)
+        if free_columns is not None:
+            free_columns()
 
     def set_error(
         self,
@@ -176,6 +212,7 @@ class FileState:
         self.pdf_uri_links = None
         self.pdf_outline = None
         self.native_validation_artifact = None
+        self.doc_layer = None
         self.contents = None
         self.paper = None
 

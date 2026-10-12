@@ -49,7 +49,26 @@ logger = logging.getLogger(__name__)
 # Version 12: native-text spacing + page box. Bundles store the regions after
 # the native-text fill, which now places spaces against the glyph before them
 # and maps regions through the page box pdfium renders.
-_CACHE_FORMAT_VERSION = 12
+# Version 13: diagonal watermark text is removed before the native-text fill
+# (the regions change), and the page inspection records the removed strings.
+# Version 14: the native-text fill repairs missing word spaces and generated
+# mid-line breaks from the glyph positions.
+# Version 15: manuscript line numbers are removed before the native-text fill.
+# Version 16: the native-text fill composes spacing accents with their letters.
+# Version 17: line numbers are removed only from documents numbered on at least
+# two pages, and not when text lies further out than the numbers.
+# Version 18: no spaces inside links, more spacing accents, and line numbers
+# only from documents numbered on 40% of their pages with text.
+# Version 19: link runs end before a bracket after punctuation, and a line break
+# keeps its space after a dot or hyphen outside links.
+# Version 20: the link check vetoes a space only inside the link itself.
+# Version 21: a link broken inside keeps no space, and CJK punctuation takes none.
+_CACHE_FORMAT_VERSION = 21
+
+# Owner-only, as the LLM response cache: entries hold the text of papers that
+# may be unpublished. The umask can only narrow these.
+_DIR_MODE = 0o700
+_FILE_MODE = 0o600
 
 
 def _effective_settings(settings: GlobalSettings | None) -> GlobalSettings:
@@ -179,6 +198,12 @@ def _key(
         f"ocr_paddle_model={effective.ocr.paddle_model}",
         f"ocr_paddle_revision={effective.ocr.paddle_revision}",
     ]
+    # Scan-path consensus rewrites scanned regions. Appended only when it is
+    # on, so turning it on does not invalidate the entries of runs without it.
+    if effective.ocr.consensus_backend:
+        from bibr.scan.consensus import identity as consensus_identity
+
+        parts.append(f"ocr_consensus={consensus_identity(effective)}")
     raw = "\x1f".join(parts)
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
@@ -341,9 +366,12 @@ def store(
         },
     }
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
+        data = json.dumps(payload)
         tmp = path.with_suffix(f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _FILE_MODE)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(data)
         os.replace(tmp, path)
     except (OSError, TypeError, ValueError) as e:
         logger.info("OCR cache write failed (%s); continuing uncached", e)

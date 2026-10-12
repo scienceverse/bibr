@@ -72,6 +72,31 @@ async def test_geom_absent_geometry_cascades_to_llm():
     assert any(w.code == WarningCode.REF_SEG_GEOM_CASCADE for w in ex.contents.processing_warnings)
 
 
+async def test_geom_absent_geometry_warning_names_the_missing_header_on_a_native_pdf():
+    # A line-numbered manuscript prints "668 References": the text layer was
+    # read (page lines exist), but no line was taken for the header, so no
+    # geometry was captured. The warning must not call the PDF non-native.
+    native = _extractor(None)
+    native.contents.ref_page_lines = [{"text": "668 References", "page": 26}]
+    docx = _extractor(None)
+    for ex in (native, docx):
+        with (
+            patch("bibr.extract.ref_extractor.segment_by_anchors", return_value=[_REF1]),
+            patch.object(ex, "_save_seg_training_data"),
+        ):
+            await ex._segment_references("ref blob", "geom")
+
+    def geom_messages(ex):
+        return [
+            w.message
+            for w in ex.contents.processing_warnings
+            if w.code == WarningCode.REF_SEG_GEOM_CASCADE
+        ]
+
+    assert geom_messages(native) == ["no reference header line found in the text layer"]
+    assert geom_messages(docx) == ["no ref-line geometry (DOCX/non-native)"]
+
+
 async def test_geom_low_confidence_cascades_to_llm():
     ex = _extractor(_GEO)
     seg = MagicMock()

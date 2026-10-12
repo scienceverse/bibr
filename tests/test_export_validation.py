@@ -327,6 +327,36 @@ def test_abstract_missing():
     assert "VAL_ABSTRACT_MISSING" in _codes(validate_export(p))
 
 
+@pytest.mark.parametrize(
+    ("rule", "header", "fires"),
+    [
+        ("explicitly_absent", "Abstract", False),
+        ("none", "Abstract", True),
+        ("explicitly_absent", "Summary box", True),
+    ],
+)
+def test_abstract_missing_not_raised_when_the_model_found_no_abstract(rule, header, fires):
+    """An essay without an abstract whose opening column the layout labelled "abstract"."""
+    p = _base()
+    p["section"] = [
+        {
+            "section_id": 1,
+            "header": header,
+            "section_type": "abstract",
+            "parent_section_id": None,
+        }
+    ]
+    p["text"] = [
+        {"text_id": 1, "section_id": 1, "text": "In this essay, we set out how it began."},
+        {"text_id": 2, "section_id": 1, "text": "Then it went on."},
+    ]
+    p["metadata"]["abstract"] = None
+    p["extraction"] = {
+        "fields": {"abstract": {"state": "absent", "source": None, "issues": [], "rule": rule}}
+    }
+    assert ("VAL_ABSTRACT_MISSING" in _codes(validate_export(p))) is fires
+
+
 def test_abstract_suspect_when_ungrounded_against_abstract_section():
     p = _base()
     p["section"].append(

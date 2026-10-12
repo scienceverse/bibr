@@ -3,24 +3,28 @@
 Section classifications are retrieval evidence, not permission to copy.  The
 resolver builds section and anchored-paragraph candidates together, records
 their source IDs, and delays rendering until callers have finished late text
-cleaning.  ``shadow`` keeps compatibility values while surfacing typed
-comparison evidence; ``active`` materializes the bounded selection.
+cleaning.  ``shadow`` exports the compatibility values while keeping typed
+comparison evidence for debugging; ``active`` materializes the bounded
+selection.
 """
 
 from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 from bibr.extract.statement_scan import (
     _ANCHORS,
     _BARE_CATEGORY_LABELS,
+    _BOILERPLATE_BOUNDARY,
+    _COI_TOPICAL_PROSE,
     _FUNDING_AMBIGUOUS_ANCHOR,
     _FUNDING_STRONG_ANCHORS,
     _author_aliases,
     _boilerplate_boundary_for_field,
+    _boundary_is_declaration_text,
     _bounded_sentence_for_field,
     _categories_in,
     _has_assertive_declaration,
@@ -150,6 +154,23 @@ _TOPICAL_ETHICS_HEADING = re.compile(
     re.IGNORECASE,
 )
 _PUBLICATION_CONSENT = re.compile(r"^consent for publication$", re.IGNORECASE)
+# End-matter types a strong statement heading is copied from as is; under a
+# body type ("Financial support" typed as results) the copy must be compact
+# and pass the lexical prose guards.
+# Strong headings that also name a topic of body text: never copied from a
+# body-typed section.
+_TOPIC_LIKE_STRONG_HEADING = re.compile(
+    r"^(?:financial support|competing interests?)$", re.IGNORECASE
+)
+_STRONG_HEADING_COPY_TYPES = frozenset(
+    {
+        None,
+        CanonicalSection.ENDNOTE,
+        CanonicalSection.FOOTNOTE,
+        CanonicalSection.UNKNOWN,
+        CanonicalSection.ACKNOWLEDGMENT,
+    }
+)
 _AMBIGUOUS_CLASSIFICATION_SOURCES = frozenset(
     {"model", "llm", "alias_prior", "substring_alias", "parent_context"}
 )
@@ -161,8 +182,12 @@ def _legacy_compile(*phrases: str) -> tuple[re.Pattern[str], ...]:
     return tuple(re.compile(r"\b" + phrase, re.IGNORECASE) for phrase in phrases)
 
 
-# Frozen pre-resolver lexical behavior.  Shadow compares against this exact
-# snapshot; it must not inherit bounded anchors, predicates, or rendering.
+# Compatibility ("legacy") ownership, which legacy and shadow mode export: a
+# copy of each statement-typed section, else the first anchored row plus up to
+# two following rows of its section. The anchors are the pre-resolver ones; the
+# copies are matched on whitespace-collapsed rows, bounded at publisher
+# furniture, licence blocks, the next label and thanks (the _legacy_* guards
+# below), and rendered from the final, late-cleaned sentence text.
 _LEGACY_ANCHORS: dict[str, tuple[re.Pattern[str], ...]] = {
     "funding_statement": _legacy_compile(
         r"this work was supported",
@@ -211,6 +236,305 @@ _LEGACY_FUNDER_STRONG = re.compile(
     r"#\d|\b[A-Z]{2,}\b|\b[A-Z][A-Za-z]+\s+"
     r"(?:Foundation|Council|Trust|Institute|Fund|Agency)\b"
 )
+# "supported by" is the one ambiguous funding anchor: what follows it must name
+# a funder ("supported by the base AR model" and "supported by expression of
+# PODXL" do not), so a bare capitalised acronym is not enough.
+_SUPPORTED_BY_FUNDER_WORD = re.compile(
+    r"\b(?:grants?|foundation|council|university|ministry|fellowships?|scholarships?|"
+    r"endowment|funded|funding|funds|awards?|awarded|contract|charity|"
+    r"fundação|fundación|fondazione|fondation|stiftung|fonds|fondo|consejo|"
+    r"conselho|ministerio|ministère|agencia|agência|universidad|universidade|"
+    r"università|université|universität)\b",
+    re.IGNORECASE,
+)
+_SUPPORTED_BY_FUNDER_NAME = re.compile(
+    r"\b(?:Programme|Program|Association|Society|Academy|Commission|Department|Agency|"
+    r"Institute|Trust|Fund|Centre|Center)\b"
+)
+_SUPPORTED_BY_GRANT_ID = re.compile(
+    r"#\s?\d|\b[A-Z]{2,}[\s_-]?\d{4,}|\b\d{1,4}/\d{1,4}/\d{1,6}\b|"
+    r"\bNo\.?\s+[A-Z0-9][\w./-]*\d|\b[Nn]o\.\s*\d{3,}|\b[Nn]o\s+\d{4,}|"
+    r"\b[A-Z]{1,6}\d{2,}(?:[-/_][A-Z0-9]+)+|"
+    # digit-led ("01GL1234") and slash ("UIDB/04501/2020") grant IDs
+    r"\b\d{2,}[A-Z]{1,4}\d{2,}\b|\b[A-Z]{2,}/\d{3,}(?:/\d{2,4})?\b"
+)
+# Funder acronyms that are rarely anything else (the bounded scan's own list
+# covers NSF, ERC, NIH, NSERC and DFG).
+_SUPPORTED_BY_FUNDER_ACRONYM = re.compile(
+    r"\b(?:NSFC|JSPS|KAKENHI|AMED|CONICET|FAPESP|FAPERJ|FAPEMIG|CNPq|CAPES|ANR|SNSF|NHMRC|"
+    r"ESRC|EPSRC|BBSRC|AHRC|MRC|NERC|UKRI|NIHR|CIHR|SSHRC|NWO|FWF|DAAD|NCN|NCBiR|"
+    r"BMBF|FCT|JST|CREST)\b"
+)
+
+# Row-start statement labels: "Funding:", "Conflict of interest statement:",
+# run-in "Ethics approval The study was ...". A label-led row is tried before a
+# row that only mentions an anchor in prose, and another field's label ends a
+# copy.
+_STATEMENT_LABEL_WORDS: dict[str, str] = {
+    "funding_statement": (
+        r"funding(?: sources?| information)?|sources? of funding|financial support|"
+        r"grant information|grant support"
+    ),
+    "coi_statement": (
+        r"conflicts? of interests?|competing (?:financial )?interests?|"
+        r"conflicting interests?|declarations? of (?:conflicting |competing )?interests?|"
+        r"(?:financial )?disclosures?|duality of interests?"
+    ),
+    "ethics_statement": (
+        r"ethics(?: approval| statement)?|ethical approval|"
+        r"ethics approval and consent to participate|"
+        r"human and animal rights(?: and informed consent)?|"
+        r"institutional review board(?: statement)?|informed consent(?: statement)?|"
+        r"patient consent|human subjects|ethical considerations?"
+    ),
+    "data_availability": (
+        r"data (?:availability|sharing)|availability of data(?: and materials?)?|"
+        r"data and code availability|code availability|materials availability"
+    ),
+}
+_STATEMENT_LABEL: dict[str, re.Pattern[str]] = {
+    field: re.compile(
+        rf"^\W*(?:{words})(?:\s+statements?)?"
+        r"(?:\s*[:.—–/-]|\s+(?-i:[A-Z])|\s*$)",
+        re.IGNORECASE,
+    )
+    for field, words in _STATEMENT_LABEL_WORDS.items()
+}
+# Inside the reference list only a row that opens with a punctuated label
+# ("Conflict of interest statement: ...") is a statement: end matter that
+# the layout model put after the last reference.
+_REFERENCE_STATEMENT_LABEL: dict[str, re.Pattern[str]] = {
+    field: re.compile(rf"^\W*(?:{words})(?:\s+statements?)?\s*[:.—–-]", re.IGNORECASE)
+    for field, words in _STATEMENT_LABEL_WORDS.items()
+}
+# ... and only when the text after the label declares something: a reference
+# title split into rows ("Conflicts of interest: a hidden threat to science.")
+# is not a statement.
+_REFERENCE_STATEMENT_CUE = {
+    "funding_statement": re.compile(
+        r"\b(?:fund\w*|grants?|support\w*|award\w*|sponsor\w*|none|no|not)\b", re.IGNORECASE
+    ),
+    "coi_statement": re.compile(
+        r"\b(?:no|not|none|nothing|declare[sd]?|report\w*|disclose[sd]?|receive[sd]?|"
+        r"consult\w*|honorari\w*|employee|shareholder|unaware|free of)\b",
+        re.IGNORECASE,
+    ),
+    "ethics_statement": re.compile(
+        r"\b(?:approv\w*|consent\w*|waive[sd]?|exempt\w*|committee|review board|irb|"
+        r"helsinki|not (?:applicable|required))\b",
+        re.IGNORECASE,
+    ),
+    "data_availability": re.compile(
+        r"\b(?:availab\w*|deposit\w*|request|access\w*|repositor\w*|osf|zenodo|github|doi|"
+        r"shared|not applicable|included|supplementa\w*|additional files?)\b|https?://",
+        re.IGNORECASE,
+    ),
+}
+# Phrase-level cues that a section under a statement heading declares the
+# field. Unlike the after-label check above, bare words of running prose
+# ("no", "not", "support", "reported", "approval", "included") do not count.
+_STATES_FIELD_CUE = {
+    "funding_statement": re.compile(
+        r"\b(?:fund(?:ed|ing|ers?)|grants?|awards?|awarded|sponsor(?:ed|s|ship)?|"
+        r"fellowships?|scholarships?)\b",
+        re.IGNORECASE,
+    ),
+    "coi_statement": re.compile(
+        r"\b(?:declare[sd]?|declaring|disclos\w*|honorari\w*|consultan\w*|"
+        r"consulting (?:fees|for)|employee|"
+        r"shareholder|none declared)\b|\bno (?:\w+ ){0,2}(?:conflicts?|competing)\b|"
+        r"^\W*none\W*$",
+        re.IGNORECASE,
+    ),
+    "ethics_statement": re.compile(
+        r"\b(?:ethics|ethical (?:approval|committee|review|clearance)|"
+        r"committee approv\w*|approv\w* by (?:the|an?) (?:[\w-]+ ){0,6}(?:committee|board)|"
+        r"(?:informed|written|verbal|oral) consent|irb|review board|helsinki|waive[sd]?)\b",
+        re.IGNORECASE,
+    ),
+    "data_availability": re.compile(
+        r"\b(?:availab\w*|deposit\w*|repositor\w*|osf|zenodo|github|figshare|dryad)\b|"
+        r"https?://|\bincluded (?:with)?in (?:this|the) (?:published )?article\b|"
+        r"\bsupplementary (?:information|materials?|data|files?)\b|\badditional files?\b",
+        re.IGNORECASE,
+    ),
+}
+_NOT_APPLICABLE = re.compile(r"\bnot applicable\b", re.IGNORECASE)
+# A heading region that also holds the one-line statement ("Disclosure and
+# competing interests statement The authors declare no competing interests.").
+_HEADING_TAIL_START = re.compile(r"\s(?=[A-Z][a-z]*\s+[a-z])")
+_MAX_HEADING_LABEL_CHARS = 80
+_HEADING_NUMBER = re.compile(r"^\s*(?:\d+(?:[.-]\d+)*(?:[.-]\s*|\s+)|[IVX]+\.\s+)")
+# Rows that open other end matter (or are page furniture) end a statement copy.
+_END_MATTER_LABEL = re.compile(
+    r"^\W*(?:(?:patient )?consent for publication|patient and public involvement|"
+    r"provenance and peer review|transparency(?: declaration)?|acknowledg(?:e)?ments?|"
+    r"authors?'? contributions?|author's contributions?|contributors|credit authorship|"
+    r"keywords?|key words|e-?mail|correspondence|how to cite|cite this article|"
+    r"open access(?!\s+(?:funding|publication|fees?|charges?|costs?|was|is|has)\b)|"
+    r"copyright(?=\s*(?:©|\(c\)|:|\d{4}|notice|holder))|abbreviations|supplementary (?:material|information|data)|orcid|"
+    r"article history|disclaimer|publisher'?s note|additional information|"
+    r"ai tool disclosure|use of (?:ai|artificial intelligence)|declaration of generative ai|"
+    r"all rights reserved|no reuse allowed|the copyright holder)\b|^\W*©",
+    re.IGNORECASE,
+)
+_THANKS = re.compile(
+    r"^\W*(?:additionally,?\s+|also,?\s+|finally,?\s+|further(?:more)?,?\s+|"
+    r"moreover,?\s+)?(?:we|the authors?|i)\s+(?:would\s+(?:also\s+)?like\s+to\s+)?"
+    r"(?:also\s+)?(?:thank|are\s+(?:very\s+|deeply\s+|also\s+)?grateful|is\s+grateful|"
+    r"am\s+grateful|wish\s+to\s+thank|express\s+(?:our|my)\s+(?:sincere\s+|deep\s+)?"
+    r"(?:gratitude|thanks))\b",
+    re.IGNORECASE,
+)
+# Furniture boundaries the statement-scan list lacks: licence and preprint
+# sidebars, BMJ end-matter labels, F1000 "Grant information:".
+_EXTRA_BOUNDARY = re.compile(
+    r"\bopen access\b(?=\s+this\b)|\ball rights reserved\b|\bno reuse allowed\b|"
+    r"\bthe copyright holder\b|\bpatient consent for publication\b|"
+    r"\bprovenance and peer review\b|\bpatient and public involvement\b|"
+    r"\bgrant information\s*:|\bpublisher[’']s note\b|\ball claims expressed in this article\b",
+    re.IGNORECASE,
+)
+# Furniture words ("copyright", "licence", "published by", "received ...") also
+# occur inside statements ("Due to copyright restrictions ...", "MW is the
+# copyright holder of ...", "published under a CC BY licence"). They end a
+# statement only at a row or sentence start, inside a licence sentence ("This
+# article is licensed under ..."), or in an unmistakable furniture shape: "©",
+# "Copyright © 2024", "Open Access This ...", "Received: 3 May 2019".
+_MONTH = (
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
+    r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b\.?"
+)
+_DATE = (
+    rf"(?:\d{{1,2}}(?:st|nd|rd|th)?\s+{_MONTH}\s*,?\s+\d{{4}}|"
+    rf"{_MONTH}\s+\d{{1,2}}(?:st|nd|rd|th)?\s*,?\s+\d{{4}}|"
+    r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})(?!\w)"
+)
+# "received"/"accepted" followed by a day, a whole month name or a year (not
+# "received separate funding" or "received 15,000 CHF").
+_HISTORY_WORD = re.compile(
+    rf"(?:received|accepted)\s*(?:on\b|:)?\s*(?:\d{{1,2}}(?![\d,])|{_MONTH}|(?:19|20)\d{{2}}\b)",
+    re.IGNORECASE,
+)
+_HISTORY_SHAPE = re.compile(
+    rf"(?:received|accepted|revised|published(?:\s+online)?)\s*(?:on\s+|:\s*)?{_DATE}",
+    re.IGNORECASE,
+)
+_FURNITURE_SHAPE = re.compile(
+    r"©|copyright\s*(?:©|\(c\)|:|\d{4})|(?-i:Open Access\s+This)\b", re.IGNORECASE
+)
+_LICENCE_SENTENCE = re.compile(
+    r"\W*(?:open access(?=\s*$|\s+this\b|\s*[:.])|this is an open[- ]access|"
+    r"it is made available under|licensee\b|"
+    r"this (?:article|work|paper|chapter|manuscript|preprint|version) is (?:an open[- ]access|"
+    r"licensed|distributed|published under|made available under)|"
+    r"(?:published|distributed|licensed) under\b|to view a copy of this licen[cs]e|"
+    r"the images or other third[- ]party material|which permits (?:unrestricted )?use|"
+    # the rest of the Springer Nature licence block
+    r"if material is not included in the article[’']?s creative commons|"
+    r"creative commons public domain dedication|this waiver\b|"
+    r"according to standard scholarly practice|"
+    # rights-retention statements: "For the purpose of open access, the author
+    # has applied a CC BY licence ...", "A CC-BY license is applied to the Author
+    # Accepted Manuscript ..."
+    r"for the purpose of open access|(?=[^.]{0,200}\bauthor accepted manuscript))",
+    re.IGNORECASE,
+)
+# "correspond..." is furniture only as a contact line; a statement may point to
+# the corresponding author ("Proposals should be directed to the corresponding
+# author").
+_CONTACT_FURNITURE = re.compile(
+    r"correspondence\s+(?:may|should|concerning|regarding|to|address)\b|"
+    r"correspond(?:ence|ing authors?)\s*(?::|\*)|"
+    r"corresponding authors?'?s?\s+(?:e-?mail|address)",
+    re.IGNORECASE,
+)
+_LICENCE_TEXT = re.compile(
+    r"\b(?:open access(?!\s+(?:funding|publication|fees?|charges?|costs?|was|is|has)\b)|"
+    r"creative commons|licen[cs]ed?|copyright|all rights reserved)\b|©",
+    re.IGNORECASE,
+)
+# A section copy from a classifier source that can be wrong (model, LLM, prior)
+# that is longer than this is a chapter, not a statement: use the lexical path.
+_MAX_AMBIGUOUS_SECTION_CHARS = 3000
+# A lexical COI row must declare something, not just mention conflicts of
+# interest ("To maintain credibility, avoid conflicts of interest, ..."): it is
+# label-led, or a declaration cue sits near the anchor.
+_LEGACY_COI_LABEL = re.compile(
+    r"^\W*(?:statement re:? |declarations? of |disclosure of )?(?:potential )?"
+    r"(?:conflicts? of interests?|competing (?:financial )?interests?|conflicting interests?|"
+    r"declarations? of (?:conflicting|competing) interests?|declaration of interests?|"
+    r"(?:financial )?disclosures?|duality of interest)\b",
+    re.IGNORECASE,
+)
+_LEGACY_COI_CUE = re.compile(
+    r"\b(?:no|not|none|nothing|without|declares?|declared|declaring|reports?|reported|"
+    r"discloses?|disclosed|affirms?|absence of|received|receives|has served|serves? as|"
+    r"consult\w*|honorari\w*|personal fees|employee|shareholder|stock|unaware|free of)\b",
+    re.IGNORECASE,
+)
+# A cue that declares even in a sentence that reads like topical prose
+# ("... no conflict of interest between the authors and the funding body").
+_LEGACY_COI_STRONG_CUE = re.compile(
+    r"\b(?:declare[sd]?|declaring|unaware|free (?:of|from)|"
+    r"nothing to (?:disclose|declare|report)|"
+    r"(?:has|have|had|there (?:is|are|was|were)) no (?:\w+ ){0,3}?"
+    r"(?:conflicts?|competing|financial|relevant|known|potential|interests?)\b)",
+    re.IGNORECASE,
+)
+_COI_CUE_WINDOW = 100
+# "financial support" and "data/code availability" are label nouns: in running
+# prose ("failed to manage the financial support provided by donors", "regardless
+# of their school type or data availability") they are not a statement. Outside
+# a label they need the paper's own funding (a recipient, a grant number or a
+# named funder) or must open a sentence.
+_LABEL_NOUN_ANCHORS = {
+    "funding_statement": re.compile(r"\bfinancial support", re.IGNORECASE),
+    "data_availability": re.compile(r"\b(?:data|code) availability", re.IGNORECASE),
+}
+_LABEL_NOUN_PATTERNS = frozenset(
+    {r"\bfinancial support", r"\bdata availability", r"\bcode availability"}
+)
+_FUNDING_RECIPIENT = re.compile(
+    r"\b(?:we|our|us|the authors?|this (?:work|study|research|project|paper|article|"
+    r"publication|trial|review)|the (?:study|research|project|work) (?:was|is|has|received)|"
+    r"acknowledg\w*|grateful(?:ly)?|thanks?)\b",
+    re.IGNORECASE,
+)
+_NAMED_FUNDER_BODY = re.compile(
+    r"\b[A-Z][A-Za-z]+\s+(?:Foundation|Council|Trust|Institute|Fund|Agency|Ministry|"
+    r"Programme|Program|Commission|Society|Academy)\b"
+)
+# An ethics row whose only anchor is "informed consent" must say the consent
+# was obtained, given or waived, not list it among topics.
+_LEGACY_CONSENT_ACTION = re.compile(
+    r"\b(?:obtained|obtain|provided|provide|gave|given|give|signed|sign|received|receive|"
+    r"waived|required|sought|secured|documented|approved|consented|conforms?|accordance|"
+    r"helsinki|voluntar\w*|collected|collect|taken|acquired)\b",
+    re.IGNORECASE,
+)
+# Statement-typed sections that are not that statement: the Lancet-style
+# "Role of the funding source" (what the funder did not do), AI-use
+# disclosures, and topical ethics chapters.
+_ROLE_OF_FUNDER_HEADING = re.compile(
+    r"^\W*(?:\d+(?:\.\d+)*\.?\s*)?(?:the )?role of (?:the )?"
+    r"(?:funding sources?|funders?|sponsors?)\b",
+    re.IGNORECASE,
+)
+_AI_USE_HEADING = re.compile(
+    r"\b(?:ai|artificial intelligence|generative|large language models?|llms?|chatgpt)\b",
+    re.IGNORECASE,
+)
+# An AI-use heading still names the statement it holds when it carries the
+# field's own words ("Data and code availability for the LLM benchmark").
+_FIELD_HEADING_WORD = {
+    "funding_statement": re.compile(r"\b(?:fund\w*|grants?|financ\w*)\b", re.IGNORECASE),
+    "coi_statement": re.compile(r"\b(?:interests?|conflicts?|duality)\b", re.IGNORECASE),
+    "ethics_statement": re.compile(
+        r"\b(?:ethic\w*|consent|approval|review board|irb)\b", re.IGNORECASE
+    ),
+    "data_availability": re.compile(r"\b(?:data|code|materials?|availability)\b", re.IGNORECASE),
+}
 
 
 @dataclass(frozen=True)
@@ -230,6 +554,13 @@ class IntegrityStatementCandidate:
 
 @dataclass(frozen=True)
 class IntegrityStatementResolution:
+    """Candidate IDs per field; values are rendered later, from cleaned text.
+
+    ``legacy_statement_snapshots`` holds the compatibility values rendered at
+    resolve time, before late cleaning. Shadow mode compares them with the
+    bounded selection; exports render the same IDs after late cleaning.
+    """
+
     mode: IntegrityStatementMode
     candidates: tuple[IntegrityStatementCandidate, ...]
     legacy_candidate_indices: tuple[tuple[str, tuple[int, ...]], ...]
@@ -273,9 +604,386 @@ def _legacy_has_funder_hint(text: str) -> bool:
     return bool(_LEGACY_FUNDER_KEYWORD.search(text) or _LEGACY_FUNDER_STRONG.search(text))
 
 
-def _legacy_section_text(rows: list[PaperSentence]) -> str:
-    """Reproduce the pre-resolver canonical-section join byte for byte."""
-    return " ".join(row.text for row in rows if not row.is_display_formula).strip()
+def _supported_by_names_funder(text: str) -> bool:
+    """Whether the text after "supported by" names a funder."""
+    return bool(
+        _SUPPORTED_BY_FUNDER_WORD.search(text)
+        or _SUPPORTED_BY_FUNDER_NAME.search(text)
+        or _SUPPORTED_BY_GRANT_ID.search(text)
+        or _SUPPORTED_BY_FUNDER_ACRONYM.search(text)
+        or _has_funder_hint(text)
+    )
+
+
+def _collapse_whitespace(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _matching_rows(contents: PaperContents) -> list[PaperSentence]:
+    """Whitespace-collapsed copies of the sentence rows (same IDs) to match on.
+
+    Rows still carry raw PDF line breaks here, and a break inside a phrase
+    ("supported \\r\\nby") would hide the anchor.
+    """
+    return [
+        replace(sentence, text=_collapse_whitespace(sentence.text))
+        for sentence in contents.sentences
+    ]
+
+
+def _sentence_start(text: str, position: int) -> int:
+    """Where the sentence holding ``text[position]`` starts."""
+    head = max(
+        text.rfind(". ", 0, position), text.rfind("? ", 0, position), text.rfind("! ", 0, position)
+    )
+    return head + 2 if head >= 0 else 0
+
+
+def _history_shape_at(text: str, position: int) -> bool:
+    """A dated "Received ...", "Manuscript received ...; accepted ..." line."""
+    if not _HISTORY_SHAPE.match(text, position):
+        return False
+    before = text[:position].rstrip()
+    return bool(
+        text[position].isupper()
+        or not before
+        or before.endswith((";", ","))
+        or re.search(r"\b(?:manuscript|article|paper)$", before, re.IGNORECASE)
+    )
+
+
+def _furniture_boundaries(field: str, text: str) -> list[tuple[int, int]]:
+    """Publisher-furniture boundaries ``(start, end)`` in one row, in order."""
+    candidates: list[tuple[int, int]] = []
+    for match in _BOILERPLATE_BOUNDARY.finditer(text):
+        if _boundary_is_declaration_text(field, match, text):
+            continue
+        word = match.group().casefold()
+        if word.startswith("correspond"):
+            if _CONTACT_FURNITURE.match(text, match.start()):
+                candidates.append((match.start(), match.end()))
+            continue
+        if word.startswith(("received", "accepted")) and not (
+            _HISTORY_WORD.match(text, match.start()) or _history_shape_at(text, match.start())
+        ):
+            continue
+        candidates.append((match.start(), match.end()))
+    candidates.extend(
+        (match.start(), match.end())
+        for match in _EXTRA_BOUNDARY.finditer(text)
+        # "Grant information:" is the funding label of F1000-family journals.
+        if not (field == "funding_statement" and match.group().casefold().startswith("grant"))
+    )
+    candidates.extend((match.start(), match.end()) for match in _FURNITURE_SHAPE.finditer(text))
+    found = set()
+    for start, end in candidates:
+        sentence = _sentence_start(text, start)
+        if (
+            not re.search(r"\w", text[sentence:start])
+            or _FURNITURE_SHAPE.match(text, start)
+            or _history_shape_at(text, start)
+        ):
+            found.add((start, end))
+        elif _LICENCE_SENTENCE.match(text, sentence):
+            found.add((sentence, end))
+    return sorted(found)
+
+
+def _opens_other_end_matter(field: str, text: str) -> bool:
+    """Whether a row starts end matter other than ``field``'s own statement."""
+    return bool(
+        _END_MATTER_LABEL.match(text)
+        or any(label.match(text) for other, label in _STATEMENT_LABEL.items() if other != field)
+    )
+
+
+def _legacy_follow_stops(field: str, text: str) -> bool:
+    """Whether a row after an anchored row is no longer part of its statement."""
+    return bool(
+        _furniture_boundaries(field, text)
+        or _opens_other_end_matter(field, text)
+        or _thanks_ends(field, text)
+    )
+
+
+def _thanks_ends(field: str, text: str) -> bool:
+    """A thanks sentence ends a statement unless it states the field itself
+    ("We also thank the Jacobs Foundation for financial support (grant ...)")."""
+    return bool(_THANKS.match(text)) and field not in _legacy_categories_in(text)
+
+
+def _legacy_section_rows(field: str, rows: list[PaperSentence]) -> list[PaperSentence]:
+    """The rows of a statement-typed section that belong to the statement.
+
+    Leading furniture rows (a review watermark, a licence block) are skipped;
+    once a row is kept, the copy ends at the next furniture boundary, end-matter
+    label or thanks sentence. A row holding the declaration and then furniture
+    is kept and clipped when rendered.
+    """
+    kept: list[PaperSentence] = []
+    licence: PaperSentence | None = None
+    for row in rows:
+        text = row.text
+        if not text:
+            continue
+        if not kept and licence is not None and _continues_licence(licence, row):
+            licence = row
+            continue
+        # The licence block ends at the first row that does not continue it
+        # ("© The Author(s) 2024." then "This research received no external
+        # funding.").
+        licence = None
+        if not kept and _licence_shaped(text):
+            licence = row
+            continue
+        boundaries = _furniture_boundaries(field, text)
+        label = _opens_other_end_matter(field, text)
+        if not boundaries and not label:
+            if kept and _thanks_ends(field, text):
+                break
+            kept.append(row)
+            continue
+        if kept:
+            break
+        if not label and boundaries[0][0] > 0:
+            kept.append(row)
+            break
+        if label and not boundaries and field in _legacy_categories_in(text):
+            # "Acknowledgements This work was supported by ...": the label
+            # introduces this field's own anchored sentence.
+            kept.append(row)
+    return kept
+
+
+def _licence_shaped(text: str) -> bool:
+    """A row that is licence text from its start ("This article is licensed ...", "©")."""
+    start = len(text) - len(text.lstrip())
+    return bool(_LICENCE_SENTENCE.match(text) or _FURNITURE_SHAPE.match(text, start))
+
+
+def _continues_licence(previous: PaperSentence, row: PaperSentence) -> bool:
+    """Whether ``row`` continues the licence block that ``previous`` belongs to.
+
+    A licence-shaped row does; so does a lower-case continuation in the same
+    paragraph, or the rest of a licence sentence the previous row left open
+    ("... appropriate credit to the original author(s)" / "and the source,
+    ...").
+    """
+    text = row.text.strip()
+    if _licence_shaped(text):
+        return True
+    lower = text[:1].islower()
+    if lower and row.paragraph_id == previous.paragraph_id:
+        return True
+    left_open = not re.search(r"[.!?][\W]*$", previous.text.strip())
+    return left_open and (lower or bool(_LICENCE_TEXT.search(text)))
+
+
+def _text_before_boundary(text: str, start: int, boundary: int) -> str:
+    """``text[start:boundary]``, ending at the last full sentence when there is one.
+
+    Boundaries sit at a sentence start or at a furniture shape, so the text
+    before one is whole sentences, or a declaration that runs into furniture
+    without a full stop ("... no competing interests Copyright: © 2024").
+    """
+    segment = text[start:boundary]
+    cut = max(segment.rfind(". "), segment.rfind("? "), segment.rfind("! "))
+    return (segment[: cut + 1] if cut >= 0 else segment).strip()
+
+
+def _clip_legacy_row(field: str, text: str) -> str:
+    """Keep a row's declaration: from its anchor to the next furniture boundary.
+
+    Furniture before the anchor ("Manuscript received ...; This work was
+    supported by ...") is cut off from the sentence that holds the anchor.
+    """
+    boundaries = _furniture_boundaries(field, text)
+    if not boundaries:
+        return text
+    anchors = [
+        match.start()
+        for pattern in (*_LEGACY_ANCHORS[field], *_ANCHORS[field])
+        if (match := pattern.search(text))
+    ]
+    if not anchors:
+        if boundaries[0][0] == 0:
+            return text
+        return _text_before_boundary(text, 0, boundaries[0][0])
+    anchor = min(anchors)
+    before = [boundary for boundary in boundaries if boundary[0] < anchor]
+    after = [boundary for boundary in boundaries if boundary[0] >= anchor]
+    start = 0
+    if before:
+        floor = before[-1][1]
+        if text[anchor : anchor + 1].isupper() or _STATEMENT_LABEL[field].match(text[anchor:]):
+            start = anchor
+        else:
+            segment = text[floor:anchor]
+            cut = max(segment.rfind(". "), segment.rfind("; "))
+            start = floor + (cut + 2 if cut >= 0 else 0)
+    if not after:
+        return text[start:].strip()
+    return _text_before_boundary(text, start, after[0][0])
+
+
+def _legacy_coi_declares(text: str) -> bool:
+    """Whether a row with a COI anchor declares interests, not just names them."""
+    if _LEGACY_COI_LABEL.match(text):
+        return True
+    windows = [
+        text[max(0, match.start() - _COI_CUE_WINDOW) : match.end() + _COI_CUE_WINDOW]
+        for pattern in _LEGACY_ANCHORS["coi_statement"]
+        for match in pattern.finditer(text)
+    ]
+    if any(_LEGACY_COI_STRONG_CUE.search(window) for window in windows):
+        return True
+    if _COI_TOPICAL_PROSE.search(text):
+        return False
+    return any(_LEGACY_COI_CUE.search(window) for window in windows)
+
+
+def _sentence_around(text: str, start: int, end: int) -> str:
+    """The sentence of ``text`` that holds ``text[start:end]``."""
+    head = max(text.rfind(". ", 0, start), text.rfind("? ", 0, start), text.rfind("! ", 0, start))
+    tail = min(
+        (i for i in (text.find(". ", end), text.find("? ", end), text.find("! ", end)) if i >= 0),
+        default=len(text),
+    )
+    return text[head + 2 if head >= 0 else 0 : tail + 1]
+
+
+def _label_noun_only_in_prose(field: str, text: str) -> bool:
+    """A row whose only anchor is a label noun used inside running prose."""
+    noun = _LABEL_NOUN_ANCHORS.get(field)
+    if noun is None or _STATEMENT_LABEL[field].match(text):
+        return False
+    if any(
+        pattern.search(text)
+        for pattern in _LEGACY_ANCHORS[field]
+        if pattern.pattern not in _LABEL_NOUN_PATTERNS
+    ):
+        return False
+    for match in noun.finditer(text):
+        sentence = _sentence_around(text, match.start(), match.end())
+        if sentence.lower().startswith(match.group().lower()):
+            return False
+        if field == "data_availability" and re.match(
+            r"\s*(?:statement|section|:)", text[match.end() :], re.IGNORECASE
+        ):
+            return False
+        if field == "funding_statement" and (
+            _FUNDING_RECIPIENT.search(sentence)
+            or _SUPPORTED_BY_GRANT_ID.search(sentence)
+            or _NAMED_FUNDER_BODY.search(sentence)
+            or _SUPPORTED_BY_FUNDER_ACRONYM.search(sentence)
+        ):
+            return False
+    return True
+
+
+def _legacy_ethics_declares(text: str) -> bool:
+    """Whether an ethics-anchored row states an approval or consent."""
+    if _STATEMENT_LABEL["ethics_statement"].match(text):
+        return True
+    matched = [pattern for pattern in _LEGACY_ANCHORS["ethics_statement"] if pattern.search(text)]
+    if [pattern.pattern for pattern in matched] != [r"\binformed consent"]:
+        return True
+    return bool(_LEGACY_CONSENT_ACTION.search(text))
+
+
+def _legacy_anchor_row_passes(field: str, text: str) -> bool:
+    """Whether a row holding a legacy anchor of ``field`` passes the prose guards."""
+    if field == "coi_statement" and not _legacy_coi_declares(text):
+        return False
+    if field == "ethics_statement" and not _legacy_ethics_declares(text):
+        return False
+    if _label_noun_only_in_prose(field, text):
+        return False
+    if field == "funding_statement" and not (
+        any(pattern.search(text) for pattern in _LEGACY_FUNDING_STRONG_ANCHORS)
+        # A "Funding:" label already says what the sentence is.
+        or _STATEMENT_LABEL[field].match(text)
+    ):
+        ambiguous = _LEGACY_FUNDING_AMBIGUOUS_ANCHOR.search(text)
+        if ambiguous is None or not _supported_by_names_funder(text[ambiguous.end() :]):
+            return False
+    return True
+
+
+def _legacy_body_copy_passes(field: str, rows: list[PaperSentence]) -> bool:
+    """Whether a body section under a strong heading reads as the statement.
+
+    It is compact, every row holding an anchor of the field passes the lexical
+    prose guards ("Students who received financial support from parents ..."
+    under "Financial support" does not), and some row declares the field.
+    """
+    if (
+        len({row.paragraph_id for row in rows}) > _MAX_COMPACT_PARAGRAPHS
+        or len(" ".join(row.text for row in rows)) > _MAX_COMPACT_CHARS
+    ):
+        return False
+    anchored = [
+        row.text
+        for row in rows
+        if any(pattern.search(row.text) for pattern in _LEGACY_ANCHORS[field])
+    ]
+    if not all(_legacy_anchor_row_passes(field, text) for text in anchored):
+        return False
+    # Something in it must declare the field, not just sit under the heading.
+    return bool(anchored) or _states_field(field, rows)
+
+
+def _states_field(field: str, rows: list[PaperSentence]) -> bool:
+    """Whether the rows carry a phrase-level declaration cue of the field."""
+    text = " ".join(row.text for row in rows)
+    if _STATES_FIELD_CUE[field].search(text) or _NOT_APPLICABLE.search(text):
+        return True
+    return field == "funding_statement" and bool(
+        _SUPPORTED_BY_FUNDER_ACRONYM.search(text)
+        or re.search(r"\b[A-Z][A-Za-z]+\s+(?:Foundation|Council|Trust|Agency)\b", text)
+    )
+
+
+def _legacy_capture_at(
+    field: str,
+    rows: list[PaperSentence],
+    index: int,
+    section_by_id: dict[int, PaperSection],
+) -> list[PaperSentence]:
+    """The lexical capture anchored at ``rows[index]``, or ``[]``."""
+    sentence = rows[index]
+    section = section_by_id.get(sentence.section_id)
+    in_references = section is not None and section.section_type == CanonicalSection.REFERENCES
+    if in_references:
+        label = _REFERENCE_STATEMENT_LABEL[field].match(sentence.text)
+        if not label or not _REFERENCE_STATEMENT_CUE[field].search(sentence.text[label.end() :]):
+            return []
+    if not any(pattern.search(sentence.text) for pattern in _LEGACY_ANCHORS[field]):
+        return []
+    if not _legacy_anchor_row_passes(field, sentence.text):
+        return []
+    strong_funding_anchor = field == "funding_statement" and any(
+        pattern.search(sentence.text) for pattern in _LEGACY_FUNDING_STRONG_ANCHORS
+    )
+
+    captured = [sentence]
+    for following in rows[index + 1 : index + 3]:
+        if in_references or following.section_id != sentence.section_id:
+            break
+        if _legacy_categories_in(following.text) - {field}:
+            break
+        if _legacy_follow_stops(field, following.text):
+            break
+        captured.append(following)
+
+    joined = " ".join(row.text.strip() for row in captured if row.text.strip())
+    if (
+        field == "funding_statement"
+        and strong_funding_anchor
+        and not _legacy_has_funder_hint(joined)
+    ):
+        return []
+    return captured if joined else []
 
 
 def _legacy_lexical_rows(
@@ -283,86 +991,164 @@ def _legacy_lexical_rows(
     rows: list[PaperSentence],
     section_by_id: dict[int, PaperSection],
 ) -> list[PaperSentence]:
-    """Return the first pre-delta lexical capture, including cross-paragraph rows."""
-    patterns = _LEGACY_ANCHORS[field]
+    """The first label-led lexical capture, else the first in reading order.
+
+    A capture may run on into the next paragraph of the same section.
+    """
+    label = _STATEMENT_LABEL[field]
     for index, sentence in enumerate(rows):
-        section = section_by_id.get(sentence.section_id)
-        if section is not None and section.section_type == CanonicalSection.REFERENCES:
-            continue
-        if not any(pattern.search(sentence.text) for pattern in patterns):
-            continue
-
-        strong_funding_anchor = False
-        if field == "funding_statement":
-            strong_funding_anchor = any(
-                pattern.search(sentence.text) for pattern in _LEGACY_FUNDING_STRONG_ANCHORS
-            )
-            if not strong_funding_anchor:
-                ambiguous = _LEGACY_FUNDING_AMBIGUOUS_ANCHOR.search(sentence.text)
-                if ambiguous is None or not _legacy_has_funder_hint(
-                    sentence.text[ambiguous.end() :]
-                ):
-                    continue
-
-        captured = [sentence]
-        for following in rows[index + 1 : index + 3]:
-            if following.section_id != sentence.section_id:
-                break
-            if _legacy_categories_in(following.text) - {field}:
-                break
-            captured.append(following)
-
-        joined = " ".join(row.text.strip() for row in captured if row.text.strip())
-        if (
-            field == "funding_statement"
-            and strong_funding_anchor
-            and not _legacy_has_funder_hint(joined)
+        if label.match(sentence.text) and (
+            captured := _legacy_capture_at(field, rows, index, section_by_id)
         ):
-            continue
-        if joined:
+            return captured
+    for index in range(len(rows)):
+        if captured := _legacy_capture_at(field, rows, index, section_by_id):
             return captured
     return []
 
 
+def _heading_declaration_tail(field: str, header: str | None) -> str | None:
+    """The declaration sentence a heading region carries after its label, if any."""
+    header = _collapse_whitespace(header or "")
+    for match in _HEADING_TAIL_START.finditer(header):
+        label, tail = header[: match.start()], header[match.end() :]
+        if len(label) > _MAX_HEADING_LABEL_CHARS:
+            return None
+        if re.search(r"[.!?]", label) or not _FIELD_HEADING_WORD[field].search(label):
+            continue
+        if not tail.endswith(".") or not any(
+            pattern.search(tail) for pattern in _LEGACY_ANCHORS[field]
+        ):
+            return None
+        if field == "coi_statement" and not _legacy_coi_declares(tail):
+            return None
+        if field == "ethics_statement" and not _legacy_ethics_declares(tail):
+            return None
+        return tail
+    return None
+
+
+def _heading_label(heading: str | None) -> str:
+    """A heading as a statement-part label: no numbering, fused tail or colon."""
+    label = _collapse_whitespace(heading or "")
+    for field in _FIELDS:
+        tail = _heading_declaration_tail(field, label)
+        if tail:
+            label = label[: -len(tail)]
+            break
+    label = _HEADING_NUMBER.sub("", label)
+    return label.rstrip(" :.-–—")
+
+
+def _legacy_section_qualifies(field: str, section: PaperSection) -> bool:
+    """Whether a section is copied as ``field``'s statement.
+
+    Its type is the field's statement type, or the heading is one of the
+    field's strong headings and the section has no other statement type
+    ("Ethics approval and consent to participate" typed as an endnote). A body
+    section under such a heading must also pass ``_legacy_body_copy_passes``.
+    """
+    if section.section_type == _FIELD_SECTION_TYPES[field]:
+        return not _legacy_section_is_other_matter(field, section)
+    if section.section_type in _SECTION_TYPE_FIELDS or section.section_type in {
+        CanonicalSection.REFERENCES,
+        CanonicalSection.TITLE,
+        CanonicalSection.ABSTRACT,
+    }:
+        return False
+    heading_field, _normalized, strong, _consent = _heading_field(section)
+    return heading_field == field and strong
+
+
+def _legacy_section_is_other_matter(field: str, section: PaperSection) -> bool:
+    """A statement-typed section whose heading says it is something else."""
+    heading = section.header or ""
+    if field == "funding_statement" and _ROLE_OF_FUNDER_HEADING.search(heading):
+        return True
+    if field == "ethics_statement" and _TOPICAL_ETHICS_HEADING.search(heading):
+        return True
+    return bool(_AI_USE_HEADING.search(heading) and not _FIELD_HEADING_WORD[field].search(heading))
+
+
+def _legacy_section_is_long(field: str, section: PaperSection, rows: list[PaperSentence]) -> bool:
+    """A long copy of a section whose type may be wrong (a thesis chapter).
+
+    Over the character cap, or more than a few paragraphs without any
+    declaration cue of the field (a model-typed essay section).
+    """
+    if section.classification_source not in _AMBIGUOUS_CLASSIFICATION_SOURCES:
+        return False
+    return len(" ".join(row.text for row in rows)) > _MAX_AMBIGUOUS_SECTION_CHARS or (
+        len({row.paragraph_id for row in rows}) > _MAX_COMPACT_PARAGRAPHS
+        and not _states_field(field, rows)
+    )
+
+
+def _leading_paragraph_rows(rows: list[PaperSentence]) -> list[PaperSentence]:
+    """The rows of the first ``_MAX_COMPACT_PARAGRAPHS`` paragraphs."""
+    paragraph_ids: list[int] = []
+    kept = []
+    for row in rows:
+        if row.paragraph_id not in paragraph_ids:
+            if len(paragraph_ids) == _MAX_COMPACT_PARAGRAPHS:
+                break
+            paragraph_ids.append(row.paragraph_id)
+        kept.append(row)
+    return kept
+
+
 def _build_legacy_snapshot_candidates(
-    contents: PaperContents,
-    rows_by_section: dict[int, list[PaperSentence]],
+    sentences: list[PaperSentence],
+    sections: list[PaperSection],
     section_by_id: dict[int, PaperSection],
 ) -> list[IntegrityStatementCandidate]:
-    """Freeze exact pre-delta section-copy then lexical-fallback ownership."""
+    """Compatibility ownership: bounded section copies, else a lexical capture.
+
+    ``sentences`` are the whitespace-collapsed matching rows.
+    """
     candidates: list[IntegrityStatementCandidate] = []
-    linear_rows = [sentence for sentence in contents.sentences if not sentence.is_display_formula]
-    for field, section_type in _FIELD_SECTION_TYPES.items():
-        canonical_sections = [
-            section for section in contents.sections if section.section_type == section_type
-        ]
+    linear_rows = [sentence for sentence in sentences if not sentence.is_display_formula]
+    rows_by_section: dict[int, list[PaperSentence]] = {}
+    for sentence in linear_rows:
+        rows_by_section.setdefault(sentence.section_id, []).append(sentence)
+    for field in _FIELDS:
         canonical_start = len(candidates)
-        if canonical_sections:
-            for section in canonical_sections:
-                rows = rows_by_section.get(section.section_id, [])
-                text_ids, paragraph_ids, pages = _candidate_location(rows)
-                if not _legacy_section_text(rows):
-                    continue
-                candidates.append(
-                    IntegrityStatementCandidate(
-                        field=field,
-                        method="legacy_section_copy",
-                        heading=section.header,
-                        section_ids=(section.section_id,),
-                        text_ids=text_ids,
-                        paragraph_ids=paragraph_ids,
-                        pages=pages,
-                        classification_source=section.classification_source,
-                        classification_score=section.classification_score,
-                        reason_flags=("legacy_snapshot", "canonical_type"),
-                        accepted=True,
-                    )
-                )
-            if len(candidates) > canonical_start:
+        long_copies: list[tuple[PaperSection, list[PaperSentence], str | None]] = []
+        for section in sections:
+            if not _legacy_section_qualifies(field, section):
                 continue
+            rows = _legacy_section_rows(field, rows_by_section.get(section.section_id, []))
+            heading_tail = _heading_declaration_tail(field, section.header)
+            if not rows and not heading_tail:
+                continue
+            if (
+                section.section_type != _FIELD_SECTION_TYPES[field]
+                and section.section_type not in _STRONG_HEADING_COPY_TYPES
+                and (
+                    _TOPIC_LIKE_STRONG_HEADING.match(_heading_label(section.header))
+                    or not _legacy_body_copy_passes(field, rows)
+                )
+            ):
+                continue
+            if _legacy_section_is_long(field, section, rows):
+                long_copies.append((section, rows, heading_tail))
+                continue
+            candidates.append(_legacy_section_candidate(field, section, rows, heading_tail))
+        if len(candidates) > canonical_start:
+            continue
 
         rows = _legacy_lexical_rows(field, linear_rows, section_by_id)
         if not rows:
+            # No statement sentence in a long, possibly mistyped section: keep
+            # its opening paragraphs rather than nothing, if they declare
+            # something of the field.
+            for section, rows, heading_tail in long_copies:
+                opening = _leading_paragraph_rows(rows)
+                if _states_field(field, opening):
+                    candidates.append(
+                        _legacy_section_candidate(field, section, opening, heading_tail)
+                    )
+                    break
             continue
         section = section_by_id.get(rows[0].section_id)
         text_ids, paragraph_ids, pages = _candidate_location(rows)
@@ -386,6 +1172,34 @@ def _build_legacy_snapshot_candidates(
             )
         )
     return candidates
+
+
+def _legacy_section_candidate(
+    field: str,
+    section: PaperSection,
+    rows: list[PaperSentence],
+    heading_tail: str | None,
+) -> IntegrityStatementCandidate:
+    text_ids, paragraph_ids, pages = _candidate_location(rows)
+    return IntegrityStatementCandidate(
+        field=field,
+        method="legacy_section_copy",
+        heading=section.header,
+        section_ids=(section.section_id,),
+        text_ids=text_ids,
+        paragraph_ids=paragraph_ids,
+        pages=pages,
+        classification_source=section.classification_source,
+        classification_score=section.classification_score,
+        reason_flags=(
+            "legacy_snapshot",
+            "canonical_type"
+            if section.section_type == _FIELD_SECTION_TYPES[field]
+            else "strong_heading",
+            *(("heading_tail",) if heading_tail else ()),
+        ),
+        accepted=True,
+    )
 
 
 def _candidate_location(
@@ -685,16 +1499,41 @@ def _render_candidate(contents: PaperContents, candidate: IntegrityStatementCand
 def _render_legacy_candidate(
     contents: PaperContents, candidate: IntegrityStatementCandidate
 ) -> str:
-    """Render a frozen compatibility snapshot without active-mode clipping."""
+    """Render a compatibility value from the current sentence text.
+
+    Each row is clipped at publisher furniture around the field's anchor, and
+    rendering stops at the first clipped row.
+    """
     by_id = {sentence.text_id: sentence for sentence in contents.sentences}
-    rows = [
-        sentence
-        for text_id in candidate.text_ids
-        if (sentence := by_id.get(text_id)) is not None and not sentence.is_display_formula
-    ]
-    if candidate.method == "legacy_section_copy":
-        return _legacy_section_text(rows)
-    return " ".join(sentence.text.strip() for sentence in rows if sentence.text.strip()).strip()
+    parts = []
+    if "heading_tail" in candidate.reason_flags:
+        section = next(
+            (s for s in contents.sections if s.section_id in candidate.section_ids), None
+        )
+        tail = _heading_declaration_tail(
+            candidate.field, section.header if section is not None else candidate.heading
+        )
+        if tail:
+            parts.append(tail)
+    for text_id in candidate.text_ids:
+        sentence = by_id.get(text_id)
+        if sentence is None or sentence.is_display_formula:
+            continue
+        text = _collapse_whitespace(sentence.text)
+        clipped = _clip_legacy_row(candidate.field, text)
+        if clipped:
+            parts.append(clipped)
+        if clipped != text:
+            break
+    return " ".join(parts)
+
+
+def _with_heading(candidate: IntegrityStatementCandidate, text: str) -> str:
+    """``text`` led by its section heading, for one part of a joined statement."""
+    label = _heading_label(candidate.heading)
+    if not label or text.casefold().startswith(label.casefold()):
+        return text
+    return f"{label}: {text}"
 
 
 def _render_indices(
@@ -703,7 +1542,7 @@ def _render_indices(
     indices: tuple[int, ...],
 ) -> str | None:
     parts = [
-        rendered
+        (resolution.candidates[index], rendered)
         for index in indices
         if (
             rendered := (
@@ -713,7 +1552,11 @@ def _render_indices(
             )
         )
     ]
-    return "\n\n".join(parts) if parts else None
+    if len(parts) > 1:
+        # Joined sections keep their headings, or "Not applicable." parts
+        # lose their meaning.
+        return "\n\n".join(_with_heading(candidate, text) for candidate, text in parts)
+    return parts[0][1] if parts else None
 
 
 def render_integrity_statement(
@@ -725,7 +1568,7 @@ def render_integrity_statement(
 ) -> str | None:
     """Render a resolved field from current sentence text (after late cleaning)."""
     if resolution.mode != "active" or not effective:
-        return dict(resolution.legacy_statement_snapshots).get(field)
+        return _render_indices(contents, resolution, resolution.legacy_indices(field))
     return _render_indices(
         contents, resolution, resolution.candidate_indices(field, effective=effective)
     )
@@ -892,7 +1735,9 @@ def resolve_integrity_statements(
     author_aliases = _author_aliases(author_names)
     rows_by_section = _section_rows(contents)
     section_by_id = {section.section_id: section for section in contents.sections}
-    candidates = _build_legacy_snapshot_candidates(contents, rows_by_section, section_by_id)
+    candidates = _build_legacy_snapshot_candidates(
+        _matching_rows(contents), contents.sections, section_by_id
+    )
     for section in contents.sections:
         candidates.extend(
             _build_section_candidates(

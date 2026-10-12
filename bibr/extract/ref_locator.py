@@ -939,13 +939,47 @@ class RefLocator:
 
         This ensures downstream helpers like ``_map_bib_text_ids`` can locate
         reference sentences even when the section was found via a fallback path.
+        A promoted section's diagnostics say why: its heading's alias tier, or
+        ``positional`` when the heading names no reference list. Any other
+        REFERENCES section that holds no rows is the empty duplicate of the
+        promoted one (a printed "BIBLIOGRAFIA" beside the layout hint's
+        "References") and is reset the way IMRaD dedup resets duplicates, so
+        the export carries one references section.
         """
         if "section_id" not in ref_df.columns:
             return
+        from bibr.structure.section_classifier import _classify_lookup
+
         fallback_ids = set(ref_df["section_id"].dropna().unique())
         for section in self.contents.sections:
-            if section.section_id in fallback_ids:
-                section.section_type = CanonicalSection.REFERENCES
+            if section.section_id not in fallback_ids:
+                continue
+            if section.section_type != CanonicalSection.REFERENCES or (
+                section.classification_source == "imrad_dedup"
+            ):
+                section_type, score = _classify_lookup(normalize_text(str(section.header or "")))
+                if section_type == CanonicalSection.REFERENCES:
+                    section.classification_score = score
+                    section.classification_source = (
+                        "exact_alias" if score >= 1.0 else "substring_alias"
+                    )
+                else:
+                    section.classification_score = None
+                    section.classification_source = "positional"
+            section.section_type = CanonicalSection.REFERENCES
+
+        if "section_id" not in self.sentences_df.columns:
+            return
+        holding_rows = set(self.sentences_df["section_id"].dropna().unique())
+        for section in self.contents.sections:
+            if (
+                section.section_type == CanonicalSection.REFERENCES
+                and section.section_id not in fallback_ids
+                and section.section_id not in holding_rows
+            ):
+                section.section_type = CanonicalSection.UNKNOWN
+                section.classification_score = 0.0
+                section.classification_source = "imrad_dedup"
 
     def _collect_last_unknown_section_rows(self) -> pd.DataFrame:
         """Collect rows from the last UNKNOWN-typed section as a reference fallback.

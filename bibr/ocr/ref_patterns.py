@@ -85,11 +85,20 @@ _REF_HEADER_WORDS = (
 # and typographic decoration ("■ REFERENCES"). Letters must carry punctuation so
 # that a stray word cannot be read as an enumerator.
 _REF_HEADER_PREFIX = r"(?:[■▪●◆•*#§]\s*)?(?:(?:\d{1,2}[.)]?|[IVX]{1,5}[.)]|[A-Z][.)])\s+)?"
+# Whitespace within a line: "\n" is the only line boundary ^ and $ see, so a
+# "\r" before it (pdfium's line breaks) still trails the header.
+_LINE_SPACE = r"[^\S\n]"
 # Trailing colon ("Список використаних джерел:") or decoration ("References»»»").
-_REF_HEADER_SUFFIX = r"\s*[:：.．。]?\s*[»«\-–—]*"
+# One whitespace run between tokens: adjacent runs that could share the same
+# spaces backtracked cubically over a long one.
+_REF_HEADER_SUFFIX = rf"{_LINE_SPACE}*(?:[:：.．。]{_LINE_SPACE}*)?(?:[»«\-–—]+{_LINE_SPACE}*)?"
 
+# Leading whitespace crosses blank lines only from the start of the string, as
+# ``match`` callers need; a search that let every line start run over the blank
+# lines below it took quadratic time.
 _REF_HEADER_RE = re.compile(
-    rf"(?im)^\s*{_REF_HEADER_PREFIX}(?:{'|'.join(_REF_HEADER_WORDS)}){_REF_HEADER_SUFFIX}\s*$"
+    rf"(?im)(?:\A\s*|^{_LINE_SPACE}*){_REF_HEADER_PREFIX}"
+    rf"(?:{'|'.join(_REF_HEADER_WORDS)}){_REF_HEADER_SUFFIX}$"
 )
 
 # A line that starts like "Surname," — the classic author-date reference opener.
@@ -303,3 +312,44 @@ def alnum_text_covered(needle: str, haystack: str) -> bool:
     # after the one the entry boxes sort it after, or hold a numbered list's
     # labels as one column before the entries.
     return _covered_in_any_order(needle, haystack)
+
+
+# Most words on a line that ``drop_edge_fragments`` treats as a stray fragment.
+_EDGE_FRAGMENT_MAX_WORDS = 3
+
+
+def drop_edge_fragments(text: str, haystack: str) -> str:
+    """*text* without its leading and trailing short lines that *haystack* holds.
+
+    A diagonal watermark crosses an aggregate reference box and the entry boxes
+    inside it. The aggregate box reads the whole stamp, and each entry box a
+    few of its words on lines of their own around the entry ("ts contents are",
+    "view purposes", "osed."). The aggregate holds those words, but not next to
+    the entry, so ``alnum_text_covered`` finds the entry box holding text the
+    aggregate lacks. A line of at most three words at either end of *text*
+    counts as such a fragment only when *haystack* (``alnum_key`` output)
+    contains it, so no text the haystack lacks is dropped.
+    """
+    lines = text.splitlines()
+
+    def fragment(line: str) -> bool:
+        return len(line.split()) <= _EDGE_FRAGMENT_MAX_WORDS and alnum_key(line) in haystack
+
+    start, end = 0, len(lines)
+    while start < end and fragment(lines[start]):
+        start += 1
+    while end > start and fragment(lines[end - 1]):
+        end -= 1
+    return "\n".join(lines[start:end])
+
+
+def covered_without_edge_fragments(text: str, haystack: str) -> bool:
+    """Whether *haystack* holds *text* once its edge fragments are set aside.
+
+    ``alnum_text_covered`` on ``drop_edge_fragments(text, haystack)``, but only
+    when at least 30 letters and digits remain: short keys ("nature2019") turn
+    up in a long haystack by chance, and a box of short lines only ("Smith J,",
+    "Ibid.", "Nature 2019.") would otherwise lose every line and count as held.
+    """
+    rest = alnum_key(drop_edge_fragments(text, haystack))
+    return len(rest) >= _COVERED_MIN_CHARS and alnum_text_covered(rest, haystack)

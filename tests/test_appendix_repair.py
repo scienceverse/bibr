@@ -262,14 +262,12 @@ class TestAppendixNeedsARealAnchor:
             1,
             0,
         )
-        # Known limitation of the positional hierarchy, not of this repair:
-        # "B. Implementation Details" reads as METHODS by keyword and folds
-        # under the first METHODS heading, "III. METHOD", not under
-        # "IV. EXPERIMENTS" where it is printed.
+        # "B. Implementation Details" reads as METHODS by keyword but stays
+        # under "IV. EXPERIMENTS", where it is printed.
         assert (by[11].section_type, by[11].level, by[11].parent_section_id) == (
             CanonicalSection.METHODS,
             2,
-            6,
+            9,
         )
 
     def test_lettered_subsections_of_results_and_discussion_untouched(self):
@@ -397,6 +395,21 @@ class TestAppendixNeedsARealAnchor:
             CanonicalSection.APPENDIX,
             CanonicalSection.APPENDIX,
         ]
+
+    def test_a_title_after_the_previous_articles_references_is_no_appendix(self):
+        # Page 1 opens with the end of the previous article, its reference
+        # list, and then this paper's title, which starts with "A ".
+        secs = [
+            _sec(1, "References", CanonicalSection.REFERENCES, level=1),
+            _sec(2, "A genetic pathway for the development of a small worm", level=1),
+            _sec(3, "Abstract", CanonicalSection.ABSTRACT, level=1),
+        ]
+        secs[1].section_type = CanonicalSection.TITLE
+        secs[1].classification_source = "title"
+
+        assert repair_appendix_hierarchy(secs) == set()
+        assert secs[1].section_type == CanonicalSection.TITLE
+        assert secs[1].classification_source == "title"
 
 
 class TestTocAnchorGuard:

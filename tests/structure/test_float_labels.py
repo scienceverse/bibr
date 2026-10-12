@@ -255,3 +255,24 @@ class TestPositionFallback:
             ("table", 0, "label"),
             ("table", 2, "label"),
         ]
+
+
+@pytest.mark.parametrize(
+    ("caption", "kind", "label"),
+    [
+        # A preprint's supplement: "Sup." and named supplementary figures (#136).
+        ("Sup. Fig. PSEUDOTIME. Pseudotime trajectory.", "figure", "PSEUDOTIME"),
+        ("Sup. Fig. PSEUDOTIME2", "figure", "PSEUDOTIME2"),
+        ("Sup. Fig. PT - Proximal tubule injury states", "figure", "PT"),
+        ("Sup. Fig. COMP1 (a) Per-glomerulus module scores", "figure", "COMP1"),
+        ("Sup. Table 1 – Patient characteristics", "table", "S1"),
+        ("Sup. Fig. 2a", "figure", "S2a"),
+        # A name is a label only after a supplement word, in capitals.
+        ("Figure PSEUDO", "figure", None),
+        ("SUPPLEMENTARY TABLE OF CONTENTS", "table", None),
+        ("SUPPLEMENTARY FIGURE LEGENDS", "figure", None),
+        ("Supplementary Figures and tables", "figure", None),
+    ],
+)
+def test_named_and_abbreviated_supplementary_labels(caption, kind, label):
+    assert caption_label(caption, kind) == label

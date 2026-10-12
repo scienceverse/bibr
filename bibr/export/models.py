@@ -24,11 +24,19 @@ from typing import Annotated, Any, ClassVar, Literal, Union, cast, get_args, get
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 from pydantic.fields import FieldInfo
 
-_SCHEMA_VERSION = "12.1"
+_SCHEMA_VERSION = "12.2"
 
 
 # ---------------------------------------------------------------------------
-# Pydantic v12.1 export schema — single source of truth for validation
+# Pydantic v12.2 export schema — single source of truth for validation
+#
+# v12.2 (vs 12.1) — additive:
+#   - New ``extraction.diagnostics.verification[]``: per reference with a
+#     confident ``bib_match`` record, whether its parsed ``volume``, ``issue``,
+#     ``first_page`` and ``last_page`` ``agree`` with the record, were
+#     ``filled`` or ``corrected`` from it (only with a value printed in the
+#     reference string), or ``disagree``. Omitted when verification did not
+#     run, so every 12.1 export is still a valid 12.2 reader input.
 #
 # v12.1 (vs 12.0) — additive:
 #   - New ``extraction.fields``: for each tracked field (``title``, ``author``,
@@ -1612,6 +1620,44 @@ class ConsolidationExport(BaseModel):
     fields: list[str] = Field(description="bib[] field names filled or replaced, in field order.")
 
 
+VerificationOutcomeLiteral = Literal["agree", "filled", "corrected", "disagree"]
+
+
+class VerificationExport(BaseModel):
+    """How one reference's parsed locators compare with its matched record.
+
+    Each field is 'agree' (same value), 'filled' (the parser found none and the
+    record's value is printed in the reference string, so bib[] now holds it),
+    'corrected' (the parsed value differed and the record's value is printed,
+    so it replaced the parsed one) or 'disagree' (they differ and the record's
+    value is not printed; bib[] keeps the parsed value). A field the record
+    does not carry is omitted.
+    """
+
+    model_config = _STRICT
+
+    bib_id: Id = Field(description="bib[].bib_id of the checked entry.")
+    service: MatchServiceLiteral = Field(description="Service of the bib_match record checked.")
+    volume: VerificationOutcomeLiteral | None = Field(default=None, description="bib[].volume.")
+    issue: VerificationOutcomeLiteral | None = Field(default=None, description="bib[].issue.")
+    first_page: VerificationOutcomeLiteral | None = Field(
+        default=None, description="bib[].first_page."
+    )
+    last_page: VerificationOutcomeLiteral | None = Field(
+        default=None, description="bib[].last_page."
+    )
+
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("volume", "issue", "first_page", "last_page")
+
+    @model_serializer(mode="wrap")
+    def _omit_unchecked(self, handler):
+        data = handler(self)
+        for key in self.OMITTED_WHEN_ABSENT:
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
+
+
 class FieldRecordExport(BaseModel):
     """What happened to one field (``extraction.fields``)."""
 
@@ -1722,6 +1768,11 @@ class DiagnosticsExport(BaseModel):
         description="Per modified reference, the bib[] fields consolidation took from bib_match; "
         "omitted when consolidation did not run.",
     )
+    verification: list[VerificationExport] | None = Field(
+        default=None,
+        description="Per reference with a confident bib_match record, how its parsed volume, "
+        "issue and pages compare with the record; omitted when verification did not run.",
+    )
 
     OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = (
         "section_classification",
@@ -1731,6 +1782,7 @@ class DiagnosticsExport(BaseModel):
         "caption_assignment",
         "reference_yield",
         "consolidation",
+        "verification",
     )
 
     @model_serializer(mode="wrap")
@@ -2125,7 +2177,7 @@ class PaperExport(BaseModel):
         "(bibr batch writes its corpus-unique id, the name of the JSON file). A converter uses "
         "the name of source.file_name without its extension.",
     )
-    schema_version: Literal["12.1"] = Field(
+    schema_version: Literal["12.2"] = Field(
         description="Export schema version. Its presence at the root is how readers "
         "distinguish v11 and later from all earlier versions.",
     )

@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -38,6 +39,10 @@ ONNX_DIRNAME = "onnx"
 ONNX_MANIFEST = "bibr_onnx.json"
 ONNX_MODEL = "model.onnx"
 MANIFEST_SCHEMA_VERSION = 1
+
+# ``name`` or ``org/name`` with each part starting with a word character, so
+# absolute, ``./``, ``../`` and ``~`` paths never match.
+_HUB_REPO_ID = re.compile(r"(?:\w[\w.-]*/)?\w[\w.-]*", re.ASCII)
 
 
 def torch_available() -> bool:
@@ -67,6 +72,32 @@ def read_onnx_manifest(bundle_dir: str | Path) -> dict[str, Any]:
     return manifest
 
 
+def is_hub_repo_id(
+    repo_id: str, *, bare_name: bool = False, filename: str | None = None, warn: bool = True
+) -> bool:
+    """Whether ``repo_id`` is shaped like a Hugging Face Hub repo id.
+
+    ``org/name`` always; a bare ``name`` only with ``bare_name`` (the
+    segmenter's short names). Such an id is fetched from the Hub at its pinned
+    revision and never looked up relative to the working directory, where a
+    ``./org/name`` directory would otherwise replace the model. A local copy
+    is loaded by writing it as a path: ``./org/name``, absolute, or ``~/...``.
+    When one exists, a warning names the path to write; ``filename``, from an
+    ``org/name:filename`` spec, completes it, and ``warn=False`` leaves the
+    warning to the resolver called next.
+    """
+    if not _HUB_REPO_ID.fullmatch(repo_id) or ("/" not in repo_id and not bare_name):
+        return False
+    if warn and Path(repo_id).exists():
+        logger.warning(
+            "%s is read as a Hugging Face Hub id, not as the local path of the same "
+            "name in the working directory; write ./%s to load the local copy",
+            repo_id,
+            f"{repo_id}/{filename}" if filename else repo_id,
+        )
+    return True
+
+
 def _local_bundle(path: Path) -> Path | None:
     if path.is_dir():
         bundle = path if path.name == ONNX_DIRNAME else path / ONNX_DIRNAME
@@ -84,25 +115,23 @@ def find_onnx_bundle(
 ) -> Path | None:
     """Locate the ``onnx/`` bundle for ``model_id``, or ``None``.
 
-    ``model_id`` may be a local directory (the bundle is ``<dir>/onnx``, or
-    the directory itself when it is already named ``onnx``), a local file (a
-    sibling ``onnx/`` directory, for ``NER_PARSER_CKPT`` style checkpoint
-    paths), or a Hub repo id — optionally ``org/repo:filename`` — resolved at
-    ``revision``. Hub lookups download the manifest first and then every file
-    it lists, so a fully cached bundle resolves offline; a repo, revision or
-    file that does not exist, or an unreachable Hub with nothing cached, yields
-    ``None`` (logged at INFO — this is the normal state until the artifacts
-    are published).
+    ``model_id`` may be a Hub repo id — optionally ``org/repo:filename`` —
+    resolved at ``revision``, or a local directory (the bundle is
+    ``<dir>/onnx``, or the directory itself when it is already named
+    ``onnx``) or file (a sibling ``onnx/`` directory, for ``NER_PARSER_CKPT``
+    style checkpoint paths); see :func:`is_hub_repo_id` for which is which.
+    Hub lookups download the manifest first and then every file it lists, so
+    a fully cached bundle resolves offline; a repo, revision or file that does
+    not exist, or an unreachable Hub with nothing cached, yields ``None``
+    (logged at INFO — this is the normal state until the artifacts are
+    published).
     """
     if not model_id:
         return None
-    local = Path(str(model_id)).expanduser()
-    if local.exists():
-        return _local_bundle(local)
-
-    repo_id = str(model_id).split(":", 1)[0]
-    if repo_id.count("/") != 1:
-        return None
+    repo_id, _, filename = str(model_id).partition(":")
+    if not is_hub_repo_id(repo_id, filename=filename):
+        local = Path(str(model_id)).expanduser()
+        return _local_bundle(local) if local.exists() else None
 
     from bibr.utils.hf_cache import hf_download_or_cached
 
@@ -168,6 +197,7 @@ def hub_bundle_hint(setting: str, model_id: str | None, revision: str | None) ->
     """Standard ``bundle_hint`` wording for a Hub-hosted model."""
     where = f"{model_id}@{revision or 'main'}" if model_id else "the configured repo"
     return (
-        f"publish an onnx/ bundle to {where} or point {setting} at a local directory "
-        "containing onnx/model.onnx and onnx/bibr_onnx.json"
+        f"publish an onnx/ bundle to {where} or point {setting} at a local directory, "
+        "written as a path (./dir, /abs/dir or ~/dir), containing onnx/model.onnx and "
+        "onnx/bibr_onnx.json"
     )

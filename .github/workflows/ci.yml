@@ -10,9 +10,13 @@ on:
 permissions:
   contents: read
 
+# Only a superseded pull request run is cancelled. A main push diffs only its own
+# commits, so cancelling its run would drop that push's docs deploy, edge image
+# and commit-range secret scan. Main runs wait for the one in progress instead,
+# which keeps deploys and edge promotions in commit order.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   UV_VERSION: "0.9.8"
@@ -85,7 +89,7 @@ jobs:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PRIMARY_PYTHON }}
@@ -155,7 +159,7 @@ jobs:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: ${{ env.UV_VERSION }}
           python-version: "3.12"
@@ -176,7 +180,7 @@ jobs:
           github.actor != 'dependabot[bot]' &&
           (github.event_name != 'pull_request' ||
           github.event.pull_request.head.repo.full_name == github.repository)
-        uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.0.2
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.0.2
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: scienceverse/bibr
@@ -219,7 +223,7 @@ jobs:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ matrix.python-version }}
@@ -256,7 +260,7 @@ jobs:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PRIMARY_PYTHON }}
@@ -311,7 +315,7 @@ jobs:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PRIMARY_PYTHON }}
@@ -369,7 +373,7 @@ jobs:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PRIMARY_PYTHON }}
@@ -410,7 +414,7 @@ jobs:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PRIMARY_PYTHON }}
@@ -534,7 +538,7 @@ jobs:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PRIMARY_PYTHON }}
@@ -630,16 +634,32 @@ jobs:
       # a build that trips the floor still has room to run cold. The job checks
       # before every build because other host workloads can consume space. A cold build
       # costs minutes; a full disk costs a red main.
+      #
+      # Fleet runners can share a host, so the shared directory only changes under
+      # its lock. Each job reads a hard-linked snapshot and exports into its own
+      # directory: a concurrent swap can neither remove blobs from under a running
+      # build nor interleave two exports.
       - name: Ensure the cache disk has room for the build
+        id: cache
         if: runner.environment == 'self-hosted'
         shell: bash
         env:
           CACHE_DIR: ${{ env.CI_BUILDX_CACHE }}
           MIN_FREE_GB: "45"
         run: |
+          CACHE_DIR="${CACHE_DIR%/}"
+          job_dir="${CACHE_DIR}.job-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}"
+          mkdir -p "$(dirname "$CACHE_DIR")"
+          exec 9>"${CACHE_DIR}.lock"
+          flock 9
           mkdir -p "$CACHE_DIR"
-          # A cancelled or killed job can leave a half-written export behind.
-          rm -rf "${CACHE_DIR:?}.new"
+          # A cancelled or killed job can leave a snapshot or a half-written export
+          # behind (".new" is the shared export directory earlier runs used). None
+          # is in use after 4 h, longer than any build job may run.
+          cache_name=$(basename "$CACHE_DIR")
+          find "$(dirname "$CACHE_DIR")" -maxdepth 1 \
+            \( -name "$cache_name.job-*" -o -name "$cache_name.new" \) \
+            -mmin +240 -exec rm -rf {} +
           free_gb=$(df -BG --output=avail "$CACHE_DIR" | tail -1 | tr -dc '0-9')
           cache_gb=$(du -sBG "$CACHE_DIR" 2>/dev/null | cut -f1 | tr -d 'G')
           echo "Cache disk free ${free_gb}G, layer cache ${cache_gb:-0}G, floor ${MIN_FREE_GB}G"
@@ -648,6 +668,10 @@ jobs:
             rm -rf "${CACHE_DIR:?}"/*
             df -h "$CACHE_DIR" | tail -1
           fi
+          rm -rf "${job_dir:?}"
+          mkdir -p "$job_dir"
+          cp -R -l "$CACHE_DIR" "$job_dir/read"
+          echo "dir=$job_dir" >> "$GITHUB_OUTPUT"
 
       # Also cap BuildKit explicitly. The proposed rootless fleet deployment
       # bounds the whole user slice at 6 CPUs/48 GiB, including runner, daemon,
@@ -670,13 +694,13 @@ jobs:
           fi
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.0.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.0.0
         with:
           driver-opts: ${{ steps.buildx-limits.outputs.opts }}
 
       - name: Build unprivileged validation image
         id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.0.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.0.0
         with:
           context: .
           file: Dockerfile.serve
@@ -690,10 +714,13 @@ jobs:
           tags: bibr-ci:${{ github.sha }}
           build-args: WITH_GPU=true
           # Fleet builds keep layers on local disk between runs.
-          # Read the live directory, write a fresh one: see the swap step below
+          # Read a snapshot, write a fresh directory: see the swap step below
           # for why the export must not go back into the directory it read.
-          cache-from: ${{ runner.environment == 'self-hosted' && format('type=local,src={0}', env.CI_BUILDX_CACHE) || 'type=gha' }}
-          cache-to: ${{ runner.environment == 'self-hosted' && format('type=local,dest={0}.new,mode=max', env.CI_BUILDX_CACHE) || 'type=gha,mode=max' }}
+          # Only main writes the shared cache that main and edge builds read:
+          # pull requests and dispatches of other branches build unreviewed
+          # code. GitHub scopes a hosted cache to the ref that wrote it.
+          cache-from: ${{ runner.environment == 'self-hosted' && format('type=local,src={0}/read', steps.cache.outputs.dir) || 'type=gha' }}
+          cache-to: ${{ (runner.environment != 'self-hosted' && 'type=gha,mode=max') || (github.ref == 'refs/heads/main' && format('type=local,dest={0}/export,mode=max', steps.cache.outputs.dir)) || '' }}
 
       # This is what actually bounds the cache. `type=local` cannot prune itself,
       # so exporting in place accumulates every layer every build has ever
@@ -701,25 +728,31 @@ jobs:
       # new directory and swapping it in holds the cache at one build's worth
       # (~12G) forever, with no GC to schedule and nothing to chase with a timer.
       #
-      # `mv` within one filesystem is a rename, so the swap is atomic and cannot
-      # leave a half-replaced cache behind.
+      # The swap holds the cache lock, and `mv` within one filesystem is a
+      # rename, so no job can snapshot a half-replaced cache.
       - name: Swap in the freshly exported layer cache
-        if: always() && runner.environment == 'self-hosted'
+        if: always() && runner.environment == 'self-hosted' && steps.cache.outputs.dir != ''
         shell: bash
         env:
           CACHE_DIR: ${{ env.CI_BUILDX_CACHE }}
+          JOB_DIR: ${{ steps.cache.outputs.dir }}
           BUILD_OUTCOME: ${{ steps.build.outcome }}
+          SOURCE_REF: ${{ github.ref }}
         run: |
-          if [[ "$BUILD_OUTCOME" == "success" && -d "${CACHE_DIR}.new" ]]; then
+          CACHE_DIR="${CACHE_DIR%/}"
+          exec 9>"${CACHE_DIR}.lock"
+          flock 9
+          if [[ "$SOURCE_REF" == refs/heads/main && "$BUILD_OUTCOME" == "success" &&
+                -d "$JOB_DIR/export" ]]; then
             rm -rf "${CACHE_DIR:?}"
-            mv "${CACHE_DIR}.new" "$CACHE_DIR"
+            mv -T "$JOB_DIR/export" "$CACHE_DIR"
             echo "layer cache now $(du -sh "$CACHE_DIR" | cut -f1)"
           else
             # A failed or cancelled build leaves a partial export; discarding it
             # keeps the next run reading the last cache known to be complete.
-            echo "build outcome '${BUILD_OUTCOME:-none}' - discarding the partial export"
-            rm -rf "${CACHE_DIR:?}.new"
+            echo "build outcome '${BUILD_OUTCOME:-none}' on $SOURCE_REF - leaving the layer cache as it was"
           fi
+          rm -rf "${JOB_DIR:?}"
           df -h "$CACHE_DIR" | tail -1
 
       - name: Block HIGH and CRITICAL image vulnerabilities
@@ -776,7 +809,7 @@ jobs:
           name: coverage-${{ github.sha }}
 
       - name: Analyse and publish to SonarQube
-        uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v8.2.1
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           # Use a scanner-accessible URL that accepts token authentication.

@@ -13,7 +13,7 @@ from bibr.extract.ref_locator import _REF_HEADER_RE, _looks_like_terminal_refere
 from bibr.input.consolidate_text import fix_ocr_artifacts
 from bibr.paper_contents import CanonicalSection
 from bibr.pipeline.identity import DoiCandidate, DoiSelection, ExpectedIdentity
-from bibr.utils.text import DOI_CANDIDATE_RE, normalize_doi
+from bibr.utils.text import CONTROL_CHAR_RE, DOI_CANDIDATE_RE, normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
 if TYPE_CHECKING:
@@ -147,7 +147,7 @@ def _marker_kind(text: str, start: int) -> str:
     prefix = text[max(0, start - 100) : start]
     if re.search(rf"journal\s+doi\s*[:.]?\s*{_DOI_HOST}\s*$", prefix, re.IGNORECASE):
         return "journal_doi"
-    marker_prefix = re.sub(rf"{_DOI_HOST}\s*$", "", prefix)
+    marker_prefix = re.sub(rf"{_DOI_HOST}\s*$", "", prefix, flags=re.IGNORECASE)
     for pattern, kind in _NON_SELF_MARKERS:
         if pattern.search(marker_prefix):
             return kind
@@ -174,6 +174,32 @@ _SOURCE_NOTE_RE = re.compile(
 _SELF_CITATION_RE = re.compile(
     r"\b(?:cite\s+(?:this|as)\b|cite\s*:|how\s+to\s+cite|please\s+cite"
     r"|(?:recommended|suggested)\s+citation|citation\s*:)",
+    re.IGNORECASE,
+)
+# The cue that opens the article's own citation block, which may print the DOI
+# sentences later: "How to cite this article: Author A. Title [version 2; peer
+# review: 1 approved]. Journal 2026, 6:335 https://doi.org/…" (F1000-family
+# platforms), "Please cite this article as: …", or a line opening "Citation:
+# Journal (2019) 129:467-486. https://doi.org/…". A referee report's "How to
+# cite this report" names the report, not the article.
+#
+# The strong form names this article wherever it is printed: "How to cite this
+# article", or a line opening "Cite this article" / "To cite this article"
+# (a back-matter "How to cite this article" block names the article on its
+# last page). The weak form is also how a methods section asks readers to cite
+# software or a task ("please cite this paper as follows"), and how back matter
+# introduces a companion paper or dataset ("Citation: …"), so it names the
+# article only in the front matter.
+_STRONG_CITATION_CUE_RE = re.compile(
+    r"\bhow\s+to\s+cite\s+this\s+(?:article|paper|preprint|chapter|work)\b"
+    r"|^\W*(?:to\s+)?cite\s+this\s+(?:article|paper|preprint|chapter)\b",
+    re.IGNORECASE,
+)
+_WEAK_CITATION_CUE_RE = re.compile(
+    r"\b(?:cite\s+this\s+(?:article|paper|preprint|chapter)"
+    r"|please\s+cite\s+(?:in\s+press\s+)?as"
+    r"|(?:recommended|suggested)\s+citation)\b"
+    r"|^\s*citation\s*:",
     re.IGNORECASE,
 )
 
@@ -220,6 +246,20 @@ def _reads_as_citation(text: str) -> bool:
     return _looks_like_terminal_reference_start(_SOURCE_NOTE_RE.sub("", text, count=1))
 
 
+def _in_front_matter(
+    *, source_kind: str, section_type: str | None, page: int | None, front_block: bool
+) -> bool:
+    """Where a paper names itself: the page furniture, the title, abstract and
+    keywords sections, pages 1-2, and an unpaged input's front block."""
+
+    return (
+        source_kind in {"header", "footer"}
+        or str(section_type or "").casefold() in _FRONT_MATTER_SECTIONS
+        or (page is not None and page <= 2)
+        or front_block
+    )
+
+
 def _candidate_from_match(
     text: str,
     match: re.Match[str],
@@ -245,14 +285,9 @@ def _candidate_from_match(
     # sentence still is (a Zenodo DOI beside it marks a software citation).
     context = text.replace(match.group(0), " ")
     section_value = str(section_type or "").casefold()
-    # Where a paper names itself: the page furniture, the title, abstract and
-    # keywords sections, pages 1-2, and an unpaged input's front block. A DOI
-    # label anywhere else is how a cited work's DOI is printed.
-    in_front = (
-        source_kind in {"header", "footer"}
-        or section_value in _FRONT_MATTER_SECTIONS
-        or (page is not None and page <= 2)
-        or front_block
+    # A DOI label outside the front matter is how a cited work's DOI is printed.
+    in_front = _in_front_matter(
+        source_kind=source_kind, section_type=section_value, page=page, front_block=front_block
     )
 
     rejection_reason = None
@@ -377,13 +412,147 @@ def _repair_doi_text(text: str) -> str:
     )
 
 
+# The repairs are local, so the source and the repaired text are walked in step
+# and only the stretch around each repair is diffed: SequenceMatcher over a
+# whole footnote or text-layer line is quadratic in its length. A stretch ends
+# where _RESYNC_RUN characters agree again: the first such run in a window that
+# widens up to _RESYNC_WIDTH, else the nearest agreement within _RESYNC_REACH.
+# The nearest, never the longest: the longest is often a later repeat (a second
+# DOI under the same resolver and registrant, a run of spaces), which would
+# turn everything before it into one replacement.
+_RESYNC_RUN = 8
+_RESYNC_WIDTH = 64
+_RESYNC_REACH = 512
+# Runs of the control characters fix_ocr_artifacts deletes (STX aside, which
+# can become a hyphen) are set aside before the walk, which cannot see across
+# a long one.
+_DELETED_RUN_RE = re.compile(rf"(?:(?!\x02){CONTROL_CHAR_RE.pattern}){{{_RESYNC_WIDTH},}}")
+_SPACE_RUN_RE = re.compile(r"\s+")
+_LONG_SPACE_RE = re.compile(rf"\s{{{_RESYNC_WIDTH},}}")
+
+_Opcode = tuple[str, int, int, int, int]
+
+
+def _shifted(ops: list[_Opcode], i: int, j: int) -> list[_Opcode]:
+    return [(tag, i + a1, i + a2, j + b1, j + b2) for tag, a1, a2, b1, b2 in ops]
+
+
+def _telling(run: str) -> bool:
+    """Whether *run* has three different characters besides whitespace.
+
+    Only an agreement on such a run resyncs the walk: a run of spaces or dots
+    agrees with any other.
+    """
+
+    return len({char for char in run if not char.isspace()}) >= 3
+
+
+def _nearest_agreement(a: str, b: str) -> tuple[int, int] | None:
+    """Offsets of a ``_RESYNC_RUN``-character run in both *a* and *b*, least far into the two."""
+
+    best: tuple[int, int] | None = None
+    for k in range(len(b) - _RESYNC_RUN + 1):
+        reach = len(a) if best is None else sum(best) - k + _RESYNC_RUN - 1
+        if reach < _RESYNC_RUN:
+            break
+        run = b[k : k + _RESYNC_RUN]
+        if not _telling(run):
+            continue
+        at = a.find(run, 0, reach)
+        if at >= 0:
+            best = (at, k)
+    return best
+
+
+def _repaired_stretch(source: str, i: int, cleaned: str, j: int) -> tuple[list[_Opcode], int, int]:
+    """Opcodes from ``source[i]`` and ``cleaned[j]``, which differ, to where the two agree again."""
+
+    width = _RESYNC_RUN * 2
+    while True:
+        ops = SequenceMatcher(
+            None, source[i : i + width], cleaned[j : j + width], autojunk=False
+        ).get_opcodes()
+        if i + width >= len(source) and j + width >= len(cleaned):
+            return _shifted(ops, i, j), len(source), len(cleaned)
+        for index, (tag, a1, a2, b1, _b2) in enumerate(ops):
+            if tag == "equal" and a2 - a1 >= _RESYNC_RUN and _telling(source[i + a1 : i + a2]):
+                return _shifted(ops[:index], i, j), i + a1, j + b1
+        if width >= _RESYNC_WIDTH:
+            break
+        width *= 2
+    a, b = source[i : i + _RESYNC_REACH], cleaned[j : j + _RESYNC_REACH]
+    found = _nearest_agreement(a, b)
+    if found is not None:
+        before = SequenceMatcher(None, a[: found[0]], b[: found[1]], autojunk=False)
+        return _shifted(before.get_opcodes(), i, j), i + found[0], j + found[1]
+    if i + _RESYNC_REACH >= len(source) and j + _RESYNC_REACH >= len(cleaned):
+        return (
+            _shifted(SequenceMatcher(None, a, b, autojunk=False).get_opcodes(), i, j),
+            len(source),
+            len(cleaned),
+        )
+    # A wrap or URL bridge took out a whitespace run the window cannot see
+    # past: it is deleted whole, and no alignment of the window crosses one
+    # the repaired text lacks.
+    space = _LONG_SPACE_RE.search(source, i, i + width + _RESYNC_WIDTH)
+    if space is not None and space.start() == i and not b[0].isspace():
+        end = _SPACE_RUN_RE.match(source, i).end()
+        return [("delete", i, end, j, j)], end, j
+    cut = len(source)
+    if space is not None and not _LONG_SPACE_RE.search(cleaned, j, j + width + _RESYNC_WIDTH):
+        cut = space.start()
+    # Nothing agrees within reach (a ligature in every word, a script NFC
+    # composes): keep what the window aligned, through its last equal run,
+    # one that could resync the walk if there is such a run.
+    equal = [index for index, op in enumerate(ops) if op[0] == "equal" and i + op[2] <= cut]
+    telling = [index for index in equal if _telling(source[i + ops[index][1] : i + ops[index][2]])]
+    if telling or equal:
+        last = (telling or equal)[-1]
+        _tag, _a1, a2, _b1, b2 = ops[last]
+        return _shifted(ops[: last + 1], i, j), i + a2, j + b2
+    a2, b2 = min(width, len(source) - i), min(width, len(cleaned) - j)
+    if i < cut < i + a2:
+        a2 = cut - i
+        b2 = min(a2, b2)
+    return [("replace", i, i + a2, j, j + b2)], i + a2, j + b2
+
+
+def _repair_opcodes(source: str, cleaned: str) -> list[_Opcode]:
+    """``SequenceMatcher`` opcodes from *source* to *cleaned*, diffed one repair at a time."""
+
+    ops: list[_Opcode] = []
+    i = j = 0
+    while i < len(source) and j < len(cleaned):
+        k = 0
+        while i + k < len(source) and j + k < len(cleaned) and source[i + k] == cleaned[j + k]:
+            k += 1
+        if k:
+            ops.append(("equal", i, i + k, j, j + k))
+            i, j = i + k, j + k
+            continue
+        stretch, i, j = _repaired_stretch(source, i, cleaned, j)
+        ops.extend(stretch)
+    if i < len(source):
+        ops.append(("delete", i, len(source), j, j))
+    elif j < len(cleaned):
+        ops.append(("insert", i, i, j, len(cleaned)))
+    return ops
+
+
 def _cleaned_char_source_ranges(source: str, cleaned: str) -> list[tuple[int, int]]:
     """Map each cleaned character to its source interval for receipt provenance."""
 
+    if cleaned == source:
+        return [(index, index + 1) for index in range(len(source))]
+    # Diffed without its long runs of deleted control characters.
+    kept = [0]
+    for run in _DELETED_RUN_RE.finditer(source):
+        kept.extend(run.span())
+    kept.append(len(source))
+    spans = list(zip(kept[::2], kept[1::2], strict=True))
+    shown = "".join(source[start:end] for start, end in spans)
     ranges: list[tuple[int, int]] = [(0, 0)] * len(cleaned)
-    for tag, source_start, source_end, clean_start, clean_end in SequenceMatcher(
-        None, source, cleaned, autojunk=False
-    ).get_opcodes():
+    for tag, source_start, source_end, clean_start, clean_end in _repair_opcodes(shown, cleaned):
         clean_length = clean_end - clean_start
         source_length = source_end - source_start
         if tag == "equal":
@@ -397,7 +566,14 @@ def _cleaned_char_source_ranges(source: str, cleaned: str) -> list[tuple[int, in
                     source_start + ((offset + 1) * source_length + clean_length - 1) // clean_length
                 )
                 ranges[clean_start + offset] = (interval_start, interval_end)
-    return ranges
+    if len(spans) == 1:
+        return ranges
+    positions = [index for start, end in spans for index in range(start, end)]
+    positions.append(len(source))
+    return [
+        (positions[start], positions[end - 1] + 1 if end > start else positions[start])
+        for start, end in ranges
+    ]
 
 
 def _raw_source_match(
@@ -589,6 +765,107 @@ def _section_type(section, page: int | None) -> str | None:
     return section.section_type.value if section.section_type else None
 
 
+# Contexts a self-citation cue does not promote: a DOI that reads as a cited
+# work's, or a journal's own DOI.
+_NOT_PROMOTED_CONTEXTS = frozenset({"cited_work", "journal_identity"})
+# How many sentences after its cue a citation block may print its DOI: an
+# F1000 "How to cite this article: … [version 2; …]" prints it two sentences
+# on, and a "Citation:" line whose title holds full stops three.
+_CITATION_BLOCK_SENTENCES = 3
+# A sentence naming another work ("This is a commentary on https://doi.org/…",
+# "See Comment page 12 https://doi.org/…") ends the citation block before its
+# DOI: the block printed none of its own.
+_ANOTHER_WORK_RE = re.compile(
+    r"\b(?:(?:commentary|comments?)\s+on"
+    r"|(?:reply|response|rebuttal)\s+to"
+    r"|(?:retraction|correction|erratum|corrigendum)\s+(?:to|of|for)"
+    r"|original\s+(?:article|paper|research|publication)"
+    r"|linked\s+(?:article|paper)"
+    r"|refers?\s+to"
+    r"|see\s+(?:also|(?:online\s*/\s*)?comments?))\b"
+    r"|\blinked\s*:"
+    r"|(?<!-)\brelated\s+(?:article|content|commentary)\b|\brelated\s*:",
+    re.IGNORECASE,
+)
+
+
+def _citation_cue(text: str) -> tuple[re.Match[str] | None, bool]:
+    """The self-citation cue in *text*, and whether it is the strong form."""
+
+    strong = _STRONG_CITATION_CUE_RE.search(text)
+    if strong is not None:
+        return strong, True
+    return _WEAK_CITATION_CUE_RE.search(text), False
+
+
+def _promote_self_citation(
+    sentence,
+    found: list[DoiCandidate],
+    open_cues: dict[tuple[int | None, int | None], tuple[bool, int]],
+    *,
+    in_front: bool,
+) -> list[DoiCandidate]:
+    """Make the first DOI after a self-citation cue an explicit self-identification.
+
+    The cue (``_citation_cue``) opens the article's citation block in
+    its paragraph, and the block's first DOI is the article's, in the cue's own
+    sentence or a later one: a version-2 F1000 article prints "How to cite this
+    article: … [version 2; …]", then its ``.2`` DOI two sentences on, then
+    "First published: … ….1". *open_cues* maps the paragraphs whose cue no
+    DOI has followed yet to whether the cue is the strong form and how many
+    more sentences the block may run; a sentence naming another work ends it.
+    The first DOI closes the block; it is promoted to tier 3 unless it is
+    rejected, already tier 3, or reads as another work's, or the cue is the
+    weak form and the DOI is printed outside the front matter (*in_front*).
+    """
+
+    text = sentence.text or ""
+    key = (sentence.section_id, sentence.paragraph_id)
+    cue, strong = _citation_cue(text)
+    carried = open_cues.pop(key, None)
+    if carried is not None and cue is None and _ANOTHER_WORK_RE.search(text):
+        return found
+    target = None
+    if carried is not None and found:
+        target = 0
+        strong = carried[0]
+    elif cue is None:
+        if carried is not None and carried[1] > 1:
+            open_cues[key] = (carried[0], carried[1] - 1)
+        return found
+    else:
+        position = 0
+        for index, candidate in enumerate(found):
+            at = text.find(candidate.raw, position)
+            if at < 0:
+                # A DOI the sentence does not spell as read: which DOI
+                # follows the cue is unknown, so none is promoted.
+                return found
+            if at >= cue.end():
+                target = index
+                break
+            position = at + len(candidate.raw)
+    if target is None:
+        open_cues[key] = (strong, _CITATION_BLOCK_SENTENCES)
+        return found
+    first = found[target]
+    if (
+        not (strong or in_front)
+        or first.rejection_reason is not None
+        or first.selection_tier >= EXPLICIT_SELF_ID
+        or first.semantic_context in _NOT_PROMOTED_CONTEXTS
+    ):
+        return found
+    promoted = list(found)
+    promoted[target] = replace(
+        first,
+        marker_kind="self_citation",
+        semantic_context="article_self",
+        selection_tier=EXPLICIT_SELF_ID,
+    )
+    return promoted
+
+
 def collect_doi_candidates(
     contents, pdf_evidence: PdfDoiEvidence | None = None
 ) -> tuple[DoiCandidate, ...]:
@@ -602,22 +879,30 @@ def collect_doi_candidates(
     section_map = {section.section_id: section for section in contents.sections}
     front_block_end = _pageless_front_block_end(contents, section_map)
     candidates: list[DoiCandidate] = []
+    open_cues: dict[tuple[int | None, int | None], tuple[bool, int]] = {}
     for sentence in contents.sentences:
         section = section_map.get(sentence.section_id)
         region_meta = sentence.region_meta or {}
-        candidates.extend(
-            _candidates_from_text(
-                sentence.text,
-                source_kind="sentence",
-                page=sentence.page_number,
-                section_id=sentence.section_id,
-                section_type=_section_type(section, sentence.page_number),
-                region_index=_sentence_region_index(sentence),
-                region_type=region_meta.get("region_type"),
-                text_id=sentence.text_id,
-                front_block=front_block_end is not None and sentence.text_id < front_block_end,
-            )
+        section_type = _section_type(section, sentence.page_number)
+        front_block = front_block_end is not None and sentence.text_id < front_block_end
+        found = _candidates_from_text(
+            sentence.text,
+            source_kind="sentence",
+            page=sentence.page_number,
+            section_id=sentence.section_id,
+            section_type=section_type,
+            region_index=_sentence_region_index(sentence),
+            region_type=region_meta.get("region_type"),
+            text_id=sentence.text_id,
+            front_block=front_block,
         )
+        in_front = _in_front_matter(
+            source_kind="sentence",
+            section_type=section_type,
+            page=sentence.page_number,
+            front_block=front_block,
+        )
+        candidates.extend(_promote_self_citation(sentence, found, open_cues, in_front=in_front))
 
     furniture = [("header", line) for line in contents.detected_headers] + [
         ("footer", line) for line in contents.detected_footers
@@ -783,9 +1068,11 @@ def _text_layer_candidates(
                 selection_tier=EXPLICIT_SELF_ID,
             )
         # The line after the DOI, including punctuation normalization dropped.
-        doi_end = cleaned.casefold().find(candidate.normalized, match.start())
-        doi_end = doi_end + len(candidate.normalized) if doi_end >= 0 else match.end()
-        found.append((candidate, cleaned[doi_end:]))
+        # Found in the line itself: casefolding the line can lengthen it ("ß").
+        at = re.compile(re.escape(candidate.normalized), re.IGNORECASE).search(
+            cleaned, match.start()
+        )
+        found.append((candidate, cleaned[at.end() if at is not None else match.end() :]))
     return found
 
 
@@ -1009,7 +1296,7 @@ def _prefer_body_sources(candidates: list[DoiCandidate]) -> list[DoiCandidate]:
     A header or footer printed once may be an OCR twin or a stray reference line.
     One the running furniture repeats on several pages is the paper's own and is
     kept, so a DOI cited in an early footnote cannot displace it: the tie then
-    abstains.
+    abstains, unless ``_prefer_corroborated`` finds one DOI the body prints too.
     """
 
     body = [
@@ -1027,6 +1314,50 @@ def _prefer_lowest_page(candidates: list[DoiCandidate]) -> list[DoiCandidate]:
         return candidates
     lowest = min(c.page for c in candidates)  # type: ignore[type-var]
     return [c for c in candidates if c.page == lowest]
+
+
+# OCR reads a DOI's letters as the digits they resemble: a running footer
+# repeats "S0140-6736(…)" as "50140-6736(…)".
+_OCR_DIGIT_FOLD = str.maketrans("oils", "0115")
+
+
+def _ocr_folded(value: str) -> str:
+    return value.casefold().translate(_OCR_DIGIT_FOLD)
+
+
+def _prefer_corroborated(
+    resolved: list[DoiCandidate], candidates: tuple[DoiCandidate, ...]
+) -> list[DoiCandidate]:
+    """Prefer the one tied DOI that both the page body and the running furniture print.
+
+    The last rung, for a tie the ladder leaves. A first page can print the
+    article's DOI beside a linked article's ("See Online/Comment
+    https://doi.org/…"), and only the article's own also runs in the header or
+    footer. Only printed sources count: the body (sentences, the text layer, a
+    publication box) and header/footer lines repeated on several pages, which
+    may misread letters as digits. A line printed once may be a stray
+    reference or a linked article's, as for ``_prefer_body_sources``. Link
+    targets and the document information never break a tie, so a DOI no second
+    printed source names never wins.
+    """
+
+    body: set[str] = set()
+    running: set[str] = set()
+    for candidate in candidates:
+        if candidate.rejection_reason is not None:
+            continue
+        if candidate.source_kind not in _FURNITURE_SOURCES:
+            body.add(candidate.normalized.casefold())
+        elif candidate.repeated_header_footer_count > 1:
+            running.add(_ocr_folded(candidate.normalized))
+    corroborated = [
+        value
+        for value in _distinct_dois(resolved)
+        if value in body and _ocr_folded(value) in running
+    ]
+    if len(corroborated) != 1:
+        return resolved
+    return [c for c in resolved if c.normalized.casefold() == corroborated[0]]
 
 
 # Lowest tier that can name the paper without an expected DOI.
@@ -1095,13 +1426,16 @@ def _select_without_expected(
         )
         # A tier tie is real ambiguity and is always reported, but one spurious
         # co-tier candidate must not suppress a correctly read DOI: walk a
-        # deterministic provenance ladder and take the winner only if the tie
-        # collapses to a single DOI. Otherwise abstain, as before.
+        # deterministic provenance ladder, then printed corroboration, and take
+        # the winner only if the tie collapses to a single DOI. Otherwise
+        # abstain, as before.
         resolved = highest
         for rule in _TIE_BREAK_LADDER:
             if len(_distinct_dois(resolved)) == 1:
                 break
             resolved = rule(resolved)
+        if len(_distinct_dois(resolved)) > 1:
+            resolved = _prefer_corroborated(resolved, candidates)
         selected = resolved[0] if len(_distinct_dois(resolved)) == 1 else None
         message = f"Conflicting source-visible DOI candidates at tier {highest_tier}"
         if selected is not None:
@@ -1124,7 +1458,8 @@ def select_doi_candidates(
 
     An equal-tier conflict always raises ``VAL_DOI_AMBIGUOUS``; it resolves to a
     candidate only when the provenance ladder in ``_select_without_expected``
-    collapses it to a single DOI, and abstains otherwise.
+    (and, last, printed corroboration: ``_prefer_corroborated``) collapses it
+    to a single DOI, and abstains otherwise.
 
     Without a matching expected DOI only tiers 2 and 3 can name the paper. A
     tier-1 candidate is a DOI that no label names the article's (a bare DOI or

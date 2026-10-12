@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from bibr.models import PaperAuthor
 
@@ -569,3 +570,874 @@ def test_distant_opaque_email_without_marker_is_dropped():
     AuthorEmailHarvester(contents).harvest(authors)
 
     assert all(a.email in (None, "") for a in authors)
+
+
+# --- name-paired footnote e-mails ----------------------------------------------------
+
+
+def _contents_by_section(sections: list[tuple[str, list[str]]]):
+    """Stub contents whose sentences are grouped into (section_type, texts) sections."""
+    sentences, section_rows = [], []
+    for section_id, (section_type, texts) in enumerate(sections):
+        section_rows.append(
+            SimpleNamespace(section_id=section_id, section_type=section_type, header="")
+        )
+        for text in texts:
+            sentences.append(
+                SimpleNamespace(
+                    text=text, section_id=section_id, text_id=len(sentences), page_number=1
+                )
+            )
+    return SimpleNamespace(sentences=sentences, sections=section_rows)
+
+
+def _authors(*names: tuple[str, str]) -> list[PaperAuthor]:
+    return [
+        PaperAuthor(author_id=i, given=given, family=family, affiliation="")
+        for i, (given, family) in enumerate(names, start=1)
+    ]
+
+
+def _harvest(sections, authors, scope: int = 1):
+    """Harvest as the extractor does: scoped to the first *scope* sections, whole paper as document.
+
+    The first section stands for the selected front-matter block; footnotes and body
+    sections after it are outside the scope, as they are in a real paper.
+    """
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    if sections[0][0] != "title":
+        sections = [("title", ["A Study of Things"]), *sections]
+    document = _contents_by_section(sections)
+    scoped = _contents_by_section(sections[:scope])
+    AuthorEmailHarvester(scoped, document=document).harvest(authors)
+    return authors
+
+
+def test_elsevier_footnote_single_email_is_attached_and_promoted():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest(
+        [
+            ("title", ["A Study of Things", "Alice Lee, Hui-Kai Tan, Omar Reyes"]),
+            (
+                "footnote",
+                [
+                    "* Corresponding author at: Department of Things, Example University.",
+                    "E-mail address: hk.tan@example.edu (H.K. Tan).",
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, True, False]
+    assert authors[1].email == "hk.tan@example.edu"
+    assert authors[0].email is None and authors[2].email is None
+
+
+def test_elsevier_footnote_in_the_same_sentence_as_the_marker():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    _harvest(
+        [
+            ("title", ["Byline"]),
+            (
+                "footnote",
+                [
+                    "* Corresponding author. Example University.\r\nE-mail address: t@example.edu (H. Tan)."
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, True]
+
+
+def test_footnote_label_after_a_telephone_number_on_the_same_line():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    _harvest(
+        [
+            (
+                "footnote",
+                [
+                    "* Corresponding author. Tel.: +1 555 0100. E-mail address: t@example.edu (H.K. Tan)."
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, True]
+
+
+def test_footnote_with_several_pairs_separated_by_commas_and_semicolons():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"), ("Mia", "Novak"))
+    _harvest(
+        [
+            ("title", ["Byline"]),
+            (
+                "footnote",
+                [
+                    "* Corresponding authors.",
+                    "E-mail addresses: lee@example.org (A. Lee), t@example.org (H.K. Tan); "
+                    "mnovak@example.org (M. Novak).",
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [True, True, False, True]
+    assert authors[3].email == "mnovak@example.org"
+    assert authors[2].email is None
+
+
+@pytest.mark.parametrize(
+    "printed",
+    ["H.-K. Tan", "H.K. Tan", "HK Tan", "H. K. Tan", "H. Tan", "Hui-Kai Tan", "Hui Kai Tan"],
+)
+def test_footnote_initials_variants_match_the_author(printed):
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    _harvest(
+        [
+            (
+                "footnote",
+                ["* Corresponding author.", f"E-mail address: x@example.org ({printed})."],
+            ),
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, True]
+
+
+@pytest.mark.parametrize("printed", ["M. Tan", "H.K. Lim", "Tan"])
+def test_footnote_with_conflicting_initials_or_another_surname_attaches_nothing(printed):
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    _harvest(
+        [
+            ("title", ["A Study of Things"]),
+            (
+                "footnote",
+                ["* Corresponding author.", f"E-mail address: x@example.org ({printed})."],
+            ),
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, False]
+    assert [a.email for a in authors] == [None, None]
+
+
+def test_footnote_with_two_authors_named_tan_is_ambiguous_and_fails_closed():
+    authors = _authors(("Hui-Kai", "Tan"), ("Hao-Kun", "Tan"), ("Alice", "Lee"))
+    _harvest(
+        [
+            ("footnote", ["* Corresponding author.", "E-mail address: x@example.org (H.K. Tan)."]),
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, False, False]
+    assert [a.email for a in authors] == [None, None, None]
+
+
+def test_footnote_with_two_tans_is_resolved_by_conflicting_initials():
+    authors = _authors(("Hui-Kai", "Tan"), ("Mei", "Tan"), ("Alice", "Lee"))
+    _harvest(
+        [
+            ("footnote", ["* Corresponding author.", "E-mail address: x@example.org (H.K. Tan)."]),
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [True, False, False]
+
+
+def test_footnote_pair_without_a_correspondence_phrase_attaches_but_does_not_flag():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    _harvest(
+        [
+            (
+                "footnote",
+                ["1 Present address: Example University.", "E-mail: x@example.org (H.K. Tan)."],
+            ),
+            ("body", ["The estimate corresponds to the mean."]),
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, False]
+    assert [a.email for a in authors] == [None, "x@example.org"]
+
+
+def test_footnote_pair_does_not_overwrite_or_steal_an_address():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    authors[1].email = "own@example.org"
+    authors[0].email = "x@example.org"
+    _harvest(
+        [
+            ("footnote", ["* Corresponding author.", "E-mail address: x@example.org (H.K. Tan)."]),
+        ],
+        authors,
+    )
+    assert authors[1].email == "own@example.org"
+    assert authors[1].corresponding is False
+
+
+def test_footnote_pair_marks_an_author_whose_address_the_llm_already_attached():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    authors[1].email = "t@example.org"
+    _harvest(
+        [
+            ("footnote", ["* Corresponding author.", "E-mail address: t@example.org (H.K. Tan)."]),
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, True]
+
+
+def test_footnote_outside_the_front_matter_scope_is_still_read():
+    """The extractor scopes the harvester to the front-matter block; the footnote lives elsewhere."""
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    paper = [
+        ("title", ["A Study of Things", "Alice Lee, Hui-Kai Tan"]),
+        ("references", ["1. Doe J. A thing. 2020."]),
+        ("footnote", ["* Corresponding author.", "E-mail address: t@example.org (H.K. Tan)."]),
+    ]
+    _harvest(paper, authors)
+    assert [a.corresponding for a in authors] == [False, True]
+    assert authors[1].email == "t@example.org"
+
+
+def test_no_footnote_changes_nothing():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    _harvest(
+        [("title", ["A Study of Things", "Alice Lee, Hui-Kai Tan"]), ("body", ["Some text."])],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, False]
+    assert [a.email for a in authors] == [None, None]
+
+
+def test_singular_marker_with_several_pairs_attaches_all_and_flags_none():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest(
+        [
+            (
+                "footnote",
+                [
+                    "* Corresponding author at: Department of Things, Example University.",
+                    "E-mail addresses: alee@example.org (A. Lee), hktan@example.org (H.-K. Tan), "
+                    "oreyes@example.org (O. Reyes).",
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert [a.email for a in authors] == [
+        "alee@example.org",
+        "hktan@example.org",
+        "oreyes@example.org",
+    ]
+    assert not any(a.corresponding for a in authors)
+
+
+def test_singular_marker_with_one_pair_flags_that_author():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest(
+        [
+            (
+                "footnote",
+                ["* Corresponding author.", "E-mail address: hktan@example.org (H.-K. Tan)."],
+            )
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, True, False]
+    assert authors[1].email == "hktan@example.org"
+
+
+def test_plural_marker_with_several_pairs_flags_each_paired_author():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest(
+        [
+            (
+                "footnote",
+                [
+                    "* Corresponding authors.",
+                    "E-mail addresses: alee@example.org (A. Lee), oreyes@example.org (O. Reyes).",
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [True, False, True]
+
+
+def test_footnote_does_not_add_a_second_flag_next_to_an_llm_flagged_author():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    authors[0].corresponding = True
+    _harvest(
+        [
+            (
+                "footnote",
+                ["* Corresponding author.", "E-mail address: hktan@example.org (H.-K. Tan)."],
+            )
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [True, False, False]
+    assert authors[1].email == "hktan@example.org"  # still attached
+
+
+def test_footnote_keeps_the_flag_when_the_paired_author_is_the_flagged_one():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    authors[1].corresponding = True
+    _harvest(
+        [
+            (
+                "footnote",
+                ["* Corresponding author.", "E-mail address: hktan@example.org (H.-K. Tan)."],
+            )
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, True]
+    assert authors[1].email == "hktan@example.org"
+
+
+def test_footnote_does_not_add_a_second_flag_next_to_a_marker_sentence_flag():
+    """An in-scope "* Correspondence: x@y" line flags its author; the footnote adds nobody."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    authors[0].email = "alee@example.org"
+    sections = [
+        ("title", ["A Study of Things", "* Correspondence: alee@example.org"]),
+        ("footnote", ["* Corresponding author.", "E-mail address: hktan@example.org (H.-K. Tan)."]),
+    ]
+    AuthorEmailHarvester(
+        _contents_by_section(sections[:1]), document=_contents_by_section(sections)
+    ).harvest(authors)
+    assert [a.corresponding for a in authors] == [True, False, False]
+    assert authors[1].email == "hktan@example.org"
+
+
+def test_body_prose_with_a_mid_sentence_correspondence_phrase_flags_nobody():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    _harvest(
+        [
+            (
+                "body",
+                [
+                    "We ran a multiple correspondence analysis and report the first axis "
+                    "(e-mail: hk@example.org (H.K. Tan)).",
+                ],
+            )
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, False]
+
+
+def test_body_sentence_that_opens_with_correspondence_analysis_flags_nobody():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    _harvest(
+        [
+            (
+                "body",
+                [
+                    "Correspondence analysis was applied to the table.",
+                    "E-mail address: hk@example.org (H.K. Tan).",
+                ],
+            )
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, False]
+
+
+@pytest.mark.parametrize(
+    ("given", "printed"),
+    [
+        ("Hendrik Jan", "H. de Vries"),  # lower-case particle is not an initial
+        ("Hendrik van", "H.J. de Vries"),  # particle left in the given name
+        ("Łukasz", "Ł. de Vries"),  # transliterated letters fold the same on both sides
+        ("Søren", "S. de Vries"),
+    ],
+)
+def test_footnote_particles_and_transliterated_letters(given, printed):
+    authors = _authors(("Alice", "Lee"), (given, "de Vries"))
+    _harvest(
+        [("footnote", ["* Corresponding author.", f"E-mail address: x@example.org ({printed})."])],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, True]
+
+
+def test_footnote_surname_with_a_stroked_letter_folds_to_ascii():
+    authors = _authors(("Piotr", "Wałęsa"), ("Alice", "Lee"))
+    _harvest(
+        [("footnote", ["* Corresponding author.", "E-mail address: p@example.org (P. Walesa)."])],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [True, False]
+
+
+def test_footnote_pass_with_many_authors_is_fast():
+    import time
+
+    names = [(f"Given{i}", f"Family{i}") for i in range(800)]
+    authors = _authors(*names)
+    footnote = [
+        "* Corresponding author.",
+        "E-mail address: x@example.org (G. Family799).",
+        *[f"E-mail: u{i}@example.org (G. Nobody{i})." for i in range(200)],
+    ]
+    started = time.perf_counter()
+    _harvest([("title", ["Byline"]), ("footnote", footnote)], authors)
+    assert time.perf_counter() - started < 1.0
+    assert authors[799].email == "x@example.org"
+
+
+def test_footnote_address_does_not_displace_a_marker_sentence_address():
+    """A phrase-less footnote pair must not take the address an in-scope marker line gives."""
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    _harvest(
+        [
+            ("title", ["Alice Lee, Hui-Kai Tan", "* Correspondence: hk.tan@uni.example.edu"]),
+            (
+                "footnote",
+                [
+                    "E-mail addresses: tan.hk@mail.example.com (H.K. Tan), alee@example.org (A. Lee)."
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert authors[1].email == "hk.tan@uni.example.edu"
+    assert [a.corresponding for a in authors] == [False, True]
+    assert authors[0].email == "alee@example.org"  # still attached: Lee had no address
+
+
+def test_in_scope_correspondence_address_that_names_no_one_is_flagged_via_the_footnote_pair():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest(
+        [
+            (
+                "title",
+                [
+                    "Alice Lee, Hui-Kai Tan, Omar Reyes",
+                    "First abstract sentence.",
+                    "Second abstract sentence.",
+                    "Third abstract sentence.",
+                    "Fourth abstract sentence.",
+                    "Correspondence to: x@example.org",
+                ],
+            ),
+            ("footnote", ["E-mail address: x@example.org (H.K. Tan)."]),
+        ],
+        authors,
+    )
+    assert authors[1].email == "x@example.org"
+    assert [a.corresponding for a in authors] == [False, True, False]
+
+
+def test_body_sentence_that_opens_with_correspondence_between_flags_nobody():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    _harvest(
+        [
+            (
+                "body",
+                [
+                    "Correspondence between the two raters was high.",
+                    "Coding was checked by a second rater (e-mail: hk@example.org (H.K. Tan)).",
+                ],
+            )
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, False]
+
+
+@pytest.mark.parametrize(
+    "opener",
+    [
+        "Correspondence: hk@example.org",
+        "*Correspondence:",
+        "Correspondence to Department of Things.",
+        "Correspondence concerning this article should be addressed to the author.",
+        "Correspondence should be addressed to Department of Things.",
+    ],
+)
+def test_correspondence_used_as_a_label_still_counts(opener):
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    _harvest(
+        [("footnote", [opener, "E-mail address: t@example.org (H.K. Tan)."])],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, True]
+
+
+# --- a bare corresponding marker next to an address ----------------------------------
+
+
+def _harvest_all(sections, authors):
+    """Harvest with every section inside the front-matter scope."""
+    return _harvest(sections, authors, scope=len(sections))
+
+
+def _flags(authors):
+    return [a.corresponding for a in authors]
+
+
+def _trio():
+    return _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+
+
+_TRIO_BYLINE = "Alice Lee, Hui-Kai Tan, Omar Reyes"
+
+
+@pytest.mark.parametrize("glyph", ["*", "∗", "⁎", "\\(^{*}\\)"])
+@pytest.mark.parametrize("label", ["", "E-mail: ", "Email: ", "E-mail address: "])
+def test_bare_glyph_before_an_owned_address_flags_the_owner(glyph, label):
+    authors = _trio()
+    _harvest([("title", [_TRIO_BYLINE, f"{glyph} {label}hk.tan@example.org"])], authors, scope=1)
+    assert authors[1].email == "hk.tan@example.org"
+    assert _flags(authors) == [False, True, False]
+
+
+def test_bare_glyph_without_a_space_and_mid_sentence_still_flags():
+    authors = _trio()
+    _harvest(
+        [
+            (
+                "title",
+                [_TRIO_BYLINE, "\\(^{*}\\)hk.tan@example.org Data availability: all in the paper"],
+            )
+        ],
+        authors,
+    )
+    assert _flags(authors) == [False, True, False]
+    authors = _trio()
+    _harvest([("title", [_TRIO_BYLINE, "Received: May 3, 2021 * hk.tan@example.org"])], authors)
+    assert _flags(authors) == [False, True, False]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "* E-mail: alee@example.org (AL); hk.tan@example.org (HKT)",
+        "* alee@example.org (AL); hk.tan@example.org (HKT)",
+        "* alee@example.org; hk.tan@example.org",
+        "* alee@example.org and hk.tan@example.org",
+    ],
+)
+def test_bare_glyph_list_with_two_addresses_flags_both_owners(line):
+    authors = _trio()
+    authors[0].email = "alee@example.org"  # attached upstream
+    authors[1].email = "hk.tan@example.org"
+    _harvest_all([("title", [_TRIO_BYLINE]), ("unknown", [line])], authors)
+    assert _flags(authors) == [True, True, False]
+    assert [a.email for a in authors] == ["alee@example.org", "hk.tan@example.org", None]
+
+
+def test_glyph_not_directly_before_an_address_flags_nobody():
+    for line in (
+        "* These authors contributed equally. E-mail: hk.tan@example.org",
+        "* Equal contribution",
+        "† hk.tan@example.org",
+        "‡ E-mail: hk.tan@example.org",
+    ):
+        authors = _trio()
+        _harvest([("title", [_TRIO_BYLINE, line])], authors)
+        assert _flags(authors) == [False, False, False], line
+
+
+def test_separate_glyph_lines_for_different_owners_are_left_alone():
+    authors = _trio()
+    _harvest(
+        [("title", [_TRIO_BYLINE, "* alee@example.org", "* hk.tan@example.org"])],
+        authors,
+    )
+    assert _flags(authors) == [False, False, False]
+
+
+def test_bare_glyph_list_naming_every_author_is_not_flagged():
+    authors = _trio()
+    for author, address in zip(
+        authors, ["alee@example.org", "hk.tan@example.org", "oreyes@example.org"], strict=True
+    ):
+        author.email = address
+    _harvest_all(
+        [
+            ("title", [_TRIO_BYLINE]),
+            (
+                "unknown",
+                ["* alee@example.org (AL); hk.tan@example.org (HKT); oreyes@example.org (OR)"],
+            ),
+        ],
+        authors,
+    )
+    assert _flags(authors) == [False, False, False]
+
+
+@pytest.mark.parametrize(
+    ("byline", "expected"),
+    [
+        ("Alice Lee*, Hui-Kai Tan, Omar Reyes", [False, False, False]),
+        ("Alice Lee1, Hui-Kai Tan1,*, Omar Reyes2", [False, True, False]),
+        ("Alice Lee, Hui-Kai Tan\\(^{1,*}\\), Omar Reyes", [False, True, False]),
+        ("Alice Lee, Hui-Kai Tan, Omar Reyes", [False, True, False]),
+    ],
+)
+def test_a_star_after_other_names_in_the_byline_must_agree_with_the_owner(byline, expected):
+    authors = _trio()
+    _harvest([("title", [byline, "* E-mail: hk.tan@example.org"])], authors)
+    assert _flags(authors) == expected
+
+
+@pytest.mark.parametrize(
+    ("byline", "expected"),
+    [
+        ("Alice Lee, Hui-Kai TanID1  *, Omar Reyes", [False, True, False]),
+        ("Alice LeeID1  *, Hui-Kai Tan, Omar Reyes", [False, False, False]),
+        ("Alice Lee1\u2021, Hui-Kai Tan2\u00a4  *, Omar Reyes", [False, True, False]),
+    ],
+)
+def test_byline_stars_are_read_through_orcid_badge_text_and_footnote_symbols(byline, expected):
+    authors = _trio()
+    _harvest([("title", [byline, "* E-mail: hk.tan@example.org"])], authors)
+    assert _flags(authors) == expected
+
+
+def test_byline_guard_only_blocks_an_owner_seen_without_the_star():
+    """A name the extraction ran together is not read, so it cannot be blocked by the others'
+    stars: every owner whose name is not positively seen unstarred keeps the flag."""
+    authors = _trio()
+    authors[0].email = "alee@example.org"  # attached upstream
+    _harvest(
+        [("title", ["AliceLee *, Hui-Kai Tan *, Omar Reyes *", "* E-mail: alee@example.org"])],
+        authors,
+    )
+    assert _flags(authors) == [True, False, False]
+
+
+def test_byline_guard_ignores_a_surname_shared_by_two_authors():
+    authors = _authors(("Alice", "Tan"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    authors[1].email = "hk.tan@example.org"
+    _harvest(
+        [
+            (
+                "title",
+                ["Alice Tan, Hui-Kai Tan, Omar Reyes*", "* E-mail: hk.tan@example.org"],
+            )
+        ],
+        authors,
+    )
+    assert _flags(authors) == [False, True, False]
+
+
+def test_bare_glyph_is_not_added_next_to_a_different_flagged_author():
+    authors = _trio()
+    authors[0].corresponding = True  # flagged upstream
+    _harvest([("title", [_TRIO_BYLINE, "* E-mail: hk.tan@example.org"])], authors)
+    assert _flags(authors) == [True, False, False]
+
+
+def test_bare_glyph_next_to_the_same_flagged_author_changes_nothing():
+    authors = _trio()
+    authors[1].corresponding = True
+    _harvest([("title", [_TRIO_BYLINE, "* E-mail: hk.tan@example.org"])], authors)
+    assert _flags(authors) == [False, True, False]
+
+
+def test_bare_glyph_on_an_unowned_address_flags_nobody():
+    authors = _trio()
+    _harvest([("title", [_TRIO_BYLINE, "* E-mail: office@example.org"])], authors)
+    assert [a.email for a in authors] == [None, None, None]
+    assert _flags(authors) == [False, False, False]
+
+
+def test_bare_glyph_reads_a_later_in_scope_section():
+    authors = _trio()
+    _harvest_all(
+        [("title", [_TRIO_BYLINE]), ("unknown", ["* E-mail: hk.tan@example.org"])], authors
+    )
+    assert _flags(authors) == [False, True, False]
+
+
+def _marker_pass(authors, *lines):
+    """Run only the marker pass over *lines* (one sentence each), after the other rules."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    document = _contents_by_section([("title", [_TRIO_BYLINE, *lines])])
+    AuthorEmailHarvester(document, document=document)._flag_from_marker_glyphs(
+        authors, document.sentences
+    )
+    return authors
+
+
+def test_star_list_flags_its_owners_and_never_assigns_or_moves_an_address():
+    authors = _trio()
+    authors[0].email = "alee@example.org"
+    authors[1].email = "hk.tan@example.org"
+    _marker_pass(
+        authors, "* E-mail: alee@example.org (AL); hk.tan@example.org (HKT); office@example.org"
+    )
+    assert [a.email for a in authors] == ["alee@example.org", "hk.tan@example.org", None]
+    assert _flags(authors) == [True, True, False]
+
+
+def test_star_before_an_address_nobody_holds_does_not_assign_it_even_by_local_part():
+    authors = _trio()
+    _marker_pass(authors, "* E-mail: oreyes@example.org")
+    assert [a.email for a in authors] == [None, None, None]
+    assert _flags(authors) == [False, False, False]
+
+
+def test_a_correspondence_label_without_a_glyph_is_not_read_by_the_marker_pass():
+    authors = _trio()
+    _marker_pass(authors, "Corresponding author: Example Institute. oreyes@example.org.")
+    assert [a.email for a in authors] == [None, None, None]
+    assert _flags(authors) == [False, False, False]
+
+
+def test_star_list_is_added_to_an_owner_who_is_already_flagged():
+    authors = _trio()
+    authors[0].email = "alee@example.org"
+    authors[1].email = "hk.tan@example.org"
+    authors[0].corresponding = True  # flagged upstream, and listed too
+    _marker_pass(authors, "* E-mail: alee@example.org (AL); hk.tan@example.org (HKT)")
+    assert _flags(authors) == [True, True, False]
+
+
+def test_star_list_is_not_added_when_a_listed_owner_is_not_the_flagged_author():
+    authors = _trio()
+    authors[0].email = "alee@example.org"
+    authors[1].email = "hk.tan@example.org"
+    authors[2].corresponding = True  # flagged upstream, not in the list
+    _marker_pass(authors, "* E-mail: alee@example.org (AL); hk.tan@example.org (HKT)")
+    assert _flags(authors) == [False, False, True]
+
+
+def test_the_marker_pass_only_sets_flags_in_a_whole_harvest(monkeypatch):
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    sections = [
+        ("title", [_TRIO_BYLINE]),
+        ("unknown", ["* E-mail: alice.lee@example.org (AL); hk.tan@example.org (HKT)"]),
+    ]
+    with_pass = _trio()
+    _harvest_all(sections, with_pass)
+    monkeypatch.setattr(AuthorEmailHarvester, "_flag_from_marker_glyphs", lambda *args: None)
+    without_pass = _trio()
+    _harvest_all(sections, without_pass)
+    assert [a.email for a in with_pass] == [a.email for a in without_pass]
+    assert [a.email for a in with_pass] == ["alice.lee@example.org", "hk.tan@example.org", None]
+    assert _flags(without_pass) == [False, False, False]
+    assert _flags(with_pass) == [True, True, False]
+
+
+_SERIES_BYLINE = "Alice Lee∗ Hui-Kai Tan† Omar Reyes‡"
+
+
+def _trio_with_addresses():
+    authors = _trio()
+    authors[0].email = "alee@example.org"
+    authors[1].email = "hk.tan@example.org"
+    authors[2].email = "oreyes@example.org"
+    return authors
+
+
+def test_a_star_that_only_starts_a_footnote_symbol_series_is_not_corresponding():
+    authors = _trio_with_addresses()
+    line = "∗alee@example.org †hk.tan@example.org ‡oreyes@example.org"
+    _harvest_all([("title", [_SERIES_BYLINE]), ("unknown", [line])], authors)
+    assert _flags(authors) == [False, False, False]
+
+
+def test_a_footnote_symbol_series_split_over_sentences_is_not_corresponding():
+    authors = _trio_with_addresses()
+    _harvest_all(
+        [
+            ("title", [_SERIES_BYLINE]),
+            (
+                "unknown",
+                [
+                    "∗alee@example.org",
+                    "†hk.tan@example.org",
+                    "‡ E-mail: oreyes@example.org",
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert _flags(authors) == [False, False, False]
+
+
+@pytest.mark.parametrize("symbol", ["†", "‡", "§", "¶", "‖", "\\(^{\\dagger}\\)"])
+def test_any_series_symbol_before_another_address_stops_the_star(symbol):
+    authors = _trio_with_addresses()
+    _marker_pass(authors, f"* alee@example.org {symbol} E-mail: hk.tan@example.org")
+    assert _flags(authors) == [False, False, False]
+
+
+def test_a_star_stays_corresponding_when_a_dagger_does_not_precede_an_address():
+    authors = _trio_with_addresses()
+    _marker_pass(
+        authors,
+        "† These authors contributed equally.",
+        "* E-mail: alee@example.org",
+        "† Current address: Example Institute, 5 Main Street",
+    )
+    assert _flags(authors) == [True, False, False]
+
+
+def test_an_envelope_is_still_read_next_to_a_footnote_series():
+    authors = _trio_with_addresses()
+    _marker_pass(authors, "✉ alee@example.org", "† hk.tan@example.org")
+    assert _flags(authors) == [True, False, False]
+
+
+def test_a_star_is_not_added_to_an_owner_whose_address_names_another_author():
+    authors = _trio()
+    authors[0].email = "hk.tan@example.org"  # attached to the wrong author upstream
+    _marker_pass(authors, "* E-mail: hk.tan@example.org")
+    assert _flags(authors) == [False, False, False]
+
+
+def test_a_star_still_flags_an_owner_whose_address_names_nobody():
+    authors = _trio()
+    authors[0].email = "corresponding.office@example.org"
+    _marker_pass(authors, "* E-mail: corresponding.office@example.org")
+    assert _flags(authors) == [True, False, False]
+
+
+def test_a_list_keeps_the_owner_the_address_fits_and_drops_the_misattached_one():
+    authors = _trio()
+    authors[0].email = "hk.tan@example.org"  # wrong owner
+    authors[2].email = "oreyes@example.org"
+    _marker_pass(authors, "* E-mail: hk.tan@example.org; oreyes@example.org")
+    assert _flags(authors) == [False, False, True]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "* E-mail addresses: alee@example.org (A. Lee), hk.tan@example.org (H.-K. Tan)",
+        "* E-mail: alee@example.org (Alice Lee) and hk.tan@example.org (Hui-Kai Tan)",
+        "* E-mail: alee@example.org (A. Lee); hk.tan@example.org (H.-K. Tan)",
+    ],
+)
+def test_a_list_cut_short_by_a_parenthetical_that_is_not_initials_flags_nobody(line):
+    authors = _trio_with_addresses()
+    _harvest_all([("title", [_TRIO_BYLINE]), ("unknown", [line])], authors)
+    assert _flags(authors) == [False, False, False]
+
+
+def test_a_complete_list_followed_by_other_text_without_an_address_still_flags():
+    authors = _trio_with_addresses()
+    _marker_pass(
+        authors, "* E-mail: alee@example.org (AL); hk.tan@example.org (HKT). Funding: none"
+    )
+    assert _flags(authors) == [True, True, False]
+
+
+def test_marker_rules_leave_a_paper_without_authors_alone():
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    document = _contents_by_section([("title", ["* E-mail: hk.tan@example.org"])])
+    AuthorEmailHarvester(document, document=document).harvest([])

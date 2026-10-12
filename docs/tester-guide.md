@@ -367,7 +367,8 @@ with `GRADIO_PASSWORD` below. In PowerShell, for example:
 `$env:DEMO_CACHE_TTL_SECONDS="1800"`.
 
 - `DEMO_MAX_FILE_SIZE_MB` (default 10) limits uploads. A larger upload is
-  refused while it arrives.
+  refused while it arrives. A value that is not a positive whole number stops
+  the demo at start.
 - `DEMO_CACHE_TTL_SECONDS` (default 3600) is how long uploaded papers and JSON
   downloads are kept. Gradio looks for old files every five minutes, so a file
   is deleted at most five minutes after it reaches that age. All of them are
@@ -391,6 +392,12 @@ $env:GRADIO_USERNAME="supervisor"
 $env:GRADIO_PASSWORD="replace-with-a-long-random-password"
 uv run bibr demo --share --memory aggressive
 ```
+
+Without `GRADIO_PASSWORD`, `bibr demo` refuses to start with `--share` or a
+`--host` other than a loopback address: anyone who reaches an open demo can
+process papers on your LLM quota and, with `--presets`, switch the
+configuration for everyone. Pass `--allow-unauthenticated` only for a network
+you trust.
 
 Send the printed HTTPS link and password separately. The host downloads the
 models and processes uploaded papers; the supervisor only needs a browser.

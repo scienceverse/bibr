@@ -195,7 +195,7 @@ def test_install_doc_version_pins_match_pyproject():
 
     # extra -> exact token the doc must cite (and that pyproject must declare).
     cited = {
-        "vllm": "vllm==0.27.0",
+        "vllm": "vllm==0.31.0",
         "cache": "redis>=5.0.0",
         "demo": "gradio>=6.15.0",
         "batch": "anthropic>=0.40.0",
@@ -205,7 +205,7 @@ def test_install_doc_version_pins_match_pyproject():
         assert token in bases, f"pyproject extra '{extra}' no longer declares '{token}': {bases}"
         assert token in install, f"install.md no longer cites '{token}' for extra '{extra}'"
 
-    # The `uv tool run --from vllm==0.27.0` fallback line must match the pin too.
+    # The `uv tool run --from vllm==0.31.0` fallback line must match the pin too.
     vllm_pin = _base_req(opt["vllm"][0])
     sdk_floor = _base_req(opt["vllm"][1])
     assert f"uv tool run --from {vllm_pin} --with '{sdk_floor}' vllm serve" in install

@@ -1,6 +1,7 @@
 """PostParseStage — extractor invocation (post_parse helper)."""
 
 import asyncio
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -497,12 +498,12 @@ async def test_integrity_resolution_receives_available_author_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_default_shadow_preserves_legacy_statement_and_emits_typed_issue(monkeypatch):
+async def test_default_shadow_comparison_is_logged_not_exported(monkeypatch, caplog):
     contents = PaperContents(
         sentences=[
             PaperSentence(
                 text_id=1,
-                text="This section discusses the ethics of discounting climate harms.",
+                text="This section discusses the choices people make in shared spaces.",
                 section_id=200,
                 paragraph_id=1,
                 page_number=12,
@@ -512,7 +513,7 @@ async def test_default_shadow_preserves_legacy_statement_and_emits_typed_issue(m
             PaperSection(section_id=0, header="Root", level=0, parent_section_id=None),
             PaperSection(
                 section_id=200,
-                header="Time Discounting: An Ethical Problem",
+                header="Ethics in Shared Spaces",
                 level=1,
                 parent_section_id=0,
                 section_type=CanonicalSection.ETHICS,
@@ -532,26 +533,28 @@ async def test_default_shadow_preserves_legacy_statement_and_emits_typed_issue(m
     monkeypatch.setattr(
         "bibr.pipeline.stages.post_parse._classify_sections", preserve_classification
     )
-    paper = await post_parse(
-        contents=contents,
-        file_name="synthetic-topical-ethics.pdf",
-        file_hash="synthetic-topical-ethics",
-        no_llm=True,
-    )
+    with caplog.at_level(logging.DEBUG, logger="bibr.pipeline.stages.post_parse"):
+        paper = await post_parse(
+            contents=contents,
+            file_name="synthetic-topical-ethics.pdf",
+            file_hash="synthetic-topical-ethics",
+            no_llm=True,
+        )
 
     assert paper.metadata.ethics_statement == contents.sentences[0].text
-    issue = next(
-        issue for issue in paper.validation_issues if issue.code == "VAL_STATEMENT_SUSPECT"
+    assert not any(issue.code == "VAL_STATEMENT_SUSPECT" for issue in paper.validation_issues)
+    assert any(
+        record.getMessage().startswith("VAL_STATEMENT_SUSPECT:")
+        and "ethics_statement" in record.getMessage()
+        for record in caplog.records
     )
-    assert issue.origin_stage == "post_parse"
-    assert "ethics_statement" in issue.evidence_ids
     assert not any(
         "VAL_STATEMENT_SUSPECT" in f"{w.code}: {w.message}" for w in paper.processing_warnings
     )
 
 
 @pytest.mark.asyncio
-async def test_default_shadow_keeps_pre_finalize_scalar_bytes_through_post_parse(monkeypatch):
+async def test_default_shadow_renders_statement_from_final_text_through_post_parse(monkeypatch):
     contents = PaperContents(
         sentences=[
             PaperSentence(
@@ -600,16 +603,8 @@ async def test_default_shadow_keeps_pre_finalize_scalar_bytes_through_post_parse
         no_llm=True,
     )
 
-    assert paper.metadata.funding_statement == (
-        "This work was supported by NSF grant $^{123}$ . Ethics: Not applicable."
-    )
-    assert paper.contents.sentences[0].text == "This work was supported by NSF grant 123 ."
-    funding_issues = [
-        issue
-        for issue in paper.validation_issues
-        if issue.code == "VAL_STATEMENT_SUSPECT" and "funding_statement" in issue.evidence_ids
-    ]
-    assert len(funding_issues) == 1
+    assert paper.metadata.funding_statement == "This work was supported by NSF grant 123 ."
+    assert paper.contents.sentences[0].text == paper.metadata.funding_statement
 
 
 @pytest.mark.asyncio

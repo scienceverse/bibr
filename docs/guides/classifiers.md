@@ -28,7 +28,10 @@ relative position and neighboring headings. Predictions below
 If the model is disabled or unavailable, the pipeline uses the LLM path.
 Classifier load and inference failures are recorded as degraded operation;
 `ML_CLASSIFIERS_REQUIRED=true` makes configured classifier availability a
-requirement instead.
+requirement instead. A required classifier that fails to load fails every file
+with `classifier_required_failed`, flagged as an outage (`ChewFailure.outage`),
+so a resumed `bibr batch` runs those papers again. The failure is kept for the
+pipeline's lifetime, so later chunks fail before rendering or OCR.
 
 ### Tier 3: LLM-based classification
 
@@ -246,6 +249,15 @@ The exported `extraction.diagnostics.citation_linking` receipt records candidate
 accepted/rejected decisions, and coverage; this makes unresolved citations
 visible alongside the successful `xref` rows. Rejected numeric candidates
 do not automatically become LLM requests.
+
+A candidate's `start` and `end` are offsets into the exported `text[].text`
+of its sentence, like the `xref` spans, and follow the text cleaning that
+runs after linking. A citation the exported sentence no longer prints, such
+as a superscript marker removed from the text, has an empty span (`start`
+equals `end`) at about the place it stood; its `raw` keeps the printed form.
+A `flattened-superscript` candidate, whose `raw` is bare digits, points at
+digits glued to a word as the tier read them ("CD4", "cells2,3"), never at
+the same digits inside a number or another citation.
 
 `refs="off"` skips bibliographic citation linking along with reference
 extraction. `no_llm=True` skips citation linking as part of its reduced

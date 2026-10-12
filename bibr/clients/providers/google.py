@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, ClassVar
 import instructor
 
 from bibr.clients.providers import register
+from bibr.clients.providers.base import sdk_timeout_seconds
 from bibr.config import snapshot_settings
 
 if TYPE_CHECKING:
@@ -85,7 +86,14 @@ class GoogleProvider:
                 "Google API key required. Set LLM_API_KEY or GOOGLE_API_KEY environment variable."
             )
         model_string = f"google/{self._settings.llm.model}"
-        return instructor.from_provider(model_string, async_client=True, api_key=api_key)
+        # google-genai does not retry unless asked to, but sets no request
+        # timeout either; its timeout is in milliseconds.
+        return instructor.from_provider(
+            model_string,
+            async_client=True,
+            api_key=api_key,
+            http_options={"timeout": int(sdk_timeout_seconds(self._settings) * 1000)},
+        )
 
     def call_kwargs(self, reasoning_effort: str | None, max_tokens: int | None = None) -> dict:  # noqa: ARG002
         # gemini-3 family models default to thinking-on, which causes the

@@ -8,6 +8,8 @@ import time
 import pytest
 from starlette.datastructures import UploadFile
 
+from bibr.serve.ingress import _FORM_OPTION_NAMES, _MAX_FORM_FIELDS
+
 
 def _upload(content: bytes, filename: str = "paper.pdf") -> UploadFile:
     return UploadFile(file=io.BytesIO(content), filename=filename)
@@ -678,8 +680,8 @@ def test_extract_route_persists_descriptor_and_maps_upload_errors(monkeypatch):
         ],
         [
             ("file", ("paper.pdf", b"paper", "application/pdf")),
-            # One more text part than the route accepts (len(_FORM_OPTION_NAMES)).
-            *((f"extra_{index}", (None, "x")) for index in range(9)),
+            # One more text part than the route accepts.
+            *((f"extra_{index}", (None, "x")) for index in range(_MAX_FORM_FIELDS + 1)),
         ],
     ],
 )
@@ -1092,7 +1094,9 @@ def test_extract_route_passes_crossref_option_through():
         asyncio.run(store.close())
 
 
-@pytest.mark.parametrize("field", ["include_figures", "include_regions", "crossref"])
+@pytest.mark.parametrize(
+    "field", ["include_figures", "include_regions", "include_region_meta", "crossref"]
+)
 def test_extract_route_treats_empty_optional_boolean_as_absent(field):
     """Catches explicit form parsing changing FastAPI Form(None) empty-value semantics."""
     import asyncio
@@ -1135,9 +1139,9 @@ def test_extract_route_treats_empty_optional_boolean_as_absent(field):
 def test_extract_route_ignores_unrecognized_option_field():
     """Catches strict parsing 400ing clients that FastAPI Form(None) served fine.
 
-    The Scienceverse Platform worker has always sent ``include_region_meta``,
-    which this route never accepted; the FastAPI dependency dropped it silently.
-    Rejecting it instead took every deployed extraction down.
+    The Scienceverse Platform worker sent ``include_region_meta`` long before
+    this route accepted it; the FastAPI dependency dropped it silently.
+    Rejecting such a field instead took every deployed extraction down.
     """
     import asyncio
 
@@ -1165,7 +1169,7 @@ def test_extract_route_ignores_unrecognized_option_field():
             "/papers/extract",
             files=[
                 ("file", ("paper.pdf", b"content", "application/pdf")),
-                ("include_region_meta", (None, "true")),
+                ("client_hint", (None, "true")),
                 ("start_page", (None, "3")),
             ],
         )
@@ -1173,7 +1177,52 @@ def test_extract_route_ignores_unrecognized_option_field():
         assert response.status_code == 200
         assert response.json() == {"ok": True}
         assert received[0]["start_page"] == "3"
-        assert "include_region_meta" not in received[0]
+        assert "client_hint" not in received[0]
+    finally:
+        asyncio.run(tracker.close())
+        asyncio.run(store.close())
+
+
+def test_extract_route_passes_region_meta_option_through():
+    """Catches the route dropping the field a source viewer needs for its boxes."""
+    import asyncio
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from bibr.serve.ingress import (
+        InferenceDispatchTracker,
+        UploadStore,
+        register_extract_route,
+    )
+
+    received = []
+
+    async def dispatch(descriptor):
+        received.append(descriptor)
+        return {"ok": True}
+
+    app = FastAPI()
+    store = UploadStore.create(max_size=100, spool_memory_bytes=4, stale_after_seconds=120)
+    tracker = InferenceDispatchTracker(dispatch=dispatch, store=store)
+    register_extract_route(app, store, tracker)
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/papers/extract",
+                files={"file": ("paper.pdf", b"content", "application/pdf")},
+                data={"include_region_meta": "true"},
+            )
+            assert response.status_code == 200
+            assert received[-1]["include_region_meta"] == "true"
+
+            rejected = client.post(
+                "/papers/extract",
+                files={"file": ("paper.pdf", b"content", "application/pdf")},
+                data={"include_region_meta": "sometimes"},
+            )
+            assert rejected.status_code == 400
+            assert "include_region_meta must be a boolean" in rejected.json()["detail"]
     finally:
         asyncio.run(tracker.close())
         asyncio.run(store.close())
@@ -1240,19 +1289,12 @@ def test_extract_route_openapi_retains_multipart_contract():
             multipart = app.openapi()["components"]["schemas"][multipart["$ref"].rsplit("/", 1)[-1]]
         assert multipart["required"] == ["file"]
         assert multipart["additionalProperties"] is False
-        assert set(multipart["properties"]) == {
-            "file",
-            "start_page",
-            "end_page",
-            "include_figures",
-            "include_regions",
-            "crossref",
-            "consolidate",
-            "refs",
-            "ref_seg",
-        }
+        # The schema documents exactly the fields the parser accepts.
+        assert set(multipart["properties"]) == {"file", *_FORM_OPTION_NAMES}
+        assert "include_region_meta" in multipart["properties"]
         assert multipart["properties"]["file"]["format"] == "binary"
         assert "CROSSREF_ENRICH" in multipart["properties"]["crossref"]["description"]
+        assert "text_regions" in multipart["properties"]["include_region_meta"]["description"]
     finally:
         asyncio.run(tracker.close())
         asyncio.run(store.close())

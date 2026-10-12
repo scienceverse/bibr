@@ -77,6 +77,27 @@ def dotenv_disabled() -> bool:
     return os.environ.get(DOTENV_DISABLE_VAR, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def dotenv_disabled_by() -> str | None:
+    """The variable that turns ``.env`` loading off right now, or None.
+
+    ``BIBR_DISABLE_DOTENV``, or a ``BIBR_ENV_FILE`` that lists no path. The
+    config tools name it when they refuse to write a file nothing would read.
+    """
+    if dotenv_disabled():
+        return DOTENV_DISABLE_VAR
+    override = os.environ.get(ENV_FILE_OVERRIDE_VAR)
+    if override is not None and not any(override.split(os.pathsep)):
+        return ENV_FILE_OVERRIDE_VAR
+    return None
+
+
+def dotenv_enable_hint(variable: str) -> str:
+    """How to turn ``.env`` loading back on after *variable* turned it off."""
+    if variable == DOTENV_DISABLE_VAR:
+        return f"Unset {variable}"
+    return f"Set {variable} to a file path or unset it"
+
+
 def dotenv_files_present() -> list[Path]:
     """The ``.env`` files bibr would read right now, in load order."""
     return [path.resolve() for path in _default_env_files() if path.is_file()]
@@ -99,7 +120,13 @@ def _default_env_files() -> tuple[Path, ...]:
     happens to sit in its CWD or home — the test suite sets it for exactly that
     reason, and it is equally useful for containers and CI. A per-model
     ``_env_file=`` argument still outranks this.
+
+    ``BIBR_DISABLE_DOTENV`` empties the chain too, so ``bibr config``,
+    ``bibr preset`` and ``bibr setup`` neither report nor write a file the
+    settings ignore.
     """
+    if dotenv_disabled():
+        return ()
     override = os.environ.get(ENV_FILE_OVERRIDE_VAR)
     if override is not None:
         return tuple(Path(part) for part in override.split(os.pathsep) if part)
@@ -925,6 +952,65 @@ class OcrOptions(_BibrSettings):
         "OCR engine adds to a scan). The legacy layer is often worse than OCR; disable "
         "to trust it as before.",
     )
+    # Scan path (bibr.scan.consensus): a second recognizer re-reads the text
+    # regions of scanned pages and the regions where the two disagree most are
+    # escalated. Off until a backend is named; only server or cloud clients
+    # qualify, so it never starts a second local engine on the OCR GPU.
+    consensus_backend: (
+        Literal["glm-http", "paddle-http", "gemini", "openai", "anthropic"] | None
+    ) = Field(
+        None,
+        description="OCR backend that re-reads scanned regions for two-recognizer consensus "
+        "(glm-http or paddle-http against a running server, or a cloud vision provider). "
+        "Null (default) disables consensus.",
+    )
+    consensus_url: str | None = Field(
+        None, description="Base URL of the consensus recognizer's OpenAI-compatible server."
+    )
+    consensus_model: str | None = Field(
+        None, description="Served model name of the consensus recognizer (backend default if null)."
+    )
+    consensus_profile: Literal["paddle", "glm"] | None = Field(
+        None,
+        description="Prompt/output profile of the consensus recognizer; inferred from its "
+        "backend and model when null.",
+    )
+    consensus_threshold: float = Field(
+        0.15,
+        ge=0.0,
+        le=1.0,
+        description="Normalized edit distance between the two readings of a region at or "
+        "above which the recognizers disagree.",
+    )
+    consensus_escalate_share: float = Field(
+        0.07,
+        gt=0.0,
+        le=1.0,
+        description="Largest share of a paper's compared regions that is escalated, worst "
+        "disagreement first (at least one region when any disagrees).",
+    )
+    consensus_page_kinds: Annotated[
+        list[Literal["scan", "broken_text_layer", "born_digital"]], NoDecode
+    ] = Field(
+        default_factory=lambda: ["scan"],
+        description="Page classes whose OCR'd text regions are compared (comma-separated).",
+    )
+    escalation_backend: (
+        Literal["glm-http", "paddle-http", "gemini", "openai", "anthropic"] | None
+    ) = Field(
+        None,
+        description="OCR backend that re-reads the escalated regions; the reading closest to "
+        "the other two is kept. Null keeps the primary reading and only flags the region.",
+    )
+    escalation_url: str | None = Field(
+        None, description="Base URL of the escalation recognizer's OpenAI-compatible server."
+    )
+    escalation_model: str | None = Field(
+        None, description="Served model name of the escalation recognizer."
+    )
+    escalation_profile: Literal["paddle", "glm"] | None = Field(
+        None, description="Prompt/output profile of the escalation recognizer."
+    )
     local_gpus: int = Field(
         1,
         description="Number of GPUs dedicated to the local OCR server (tensor parallelism). Also "
@@ -1016,6 +1102,12 @@ class OcrOptions(_BibrSettings):
         '(default, keep resident in balanced mode unless a local LLM shares the GPU), "always" '
         '(legacy per-chunk teardown), or "never".',
     )
+
+    @field_validator("consensus_page_kinds", mode="before")
+    @classmethod
+    def _split_consensus_page_kinds(cls, v):
+        """Accept a comma-separated env string or a list."""
+        return _split_csv_env(v, lower=True)
 
     @field_validator("backend", mode="before")
     @classmethod
@@ -1334,6 +1426,17 @@ class CrossrefOptions(_BibrSettings):
         "from a match carrying the reference's printed DOI).",
     )
 
+    # Check each reference's parsed volume, issue and pages against its
+    # confident bib_match record at export. A disagreement is reported in
+    # extraction.diagnostics.verification; a missing or misparsed value is
+    # replaced only by the record's value as printed in the reference string.
+    verify: bool = Field(
+        True,
+        description="Check parsed reference volume, issue and pages against the matched record "
+        "at export: report disagreements, and fill or correct a value only when the record's "
+        "value is printed in the reference string. Needs enrichment; off leaves bib[] as parsed.",
+    )
+
     @field_validator("consolidate", mode="before")
     @classmethod
     def _lower_consolidate(cls, v):
@@ -1458,6 +1561,17 @@ class ResolverOptions(_BibrSettings):
         30.0,
         gt=0,
         description="Whole-paper wall-clock deadline in seconds for the resolver fallback pass.",
+    )
+    # A reference the title passes left unmatched is searched once more with its
+    # whole printed string, so a misparsed or missing title can still find its
+    # work. On a 119-paper validation set it matched 115 of 923 references the
+    # title passes missed, and agreed with the existing DOI on 98.6% of
+    # references that were already matched.
+    raw_search: bool = Field(
+        True,
+        description="Search the resolver with the whole reference string for references the "
+        "title passes left unmatched; a candidate is accepted only when its title, year and "
+        "first author (or volume and first page) are printed in that string.",
     )
 
     @field_validator("sources", "fallback_sources", mode="before")
@@ -1966,8 +2080,9 @@ class PipelineOptions(_BibrSettings):
     )
     integrity_statement_mode: Literal["legacy", "shadow", "active"] = Field(
         "shadow",
-        description="Research-integrity statement resolver rollout mode. Shadow preserves "
-        "compatibility scalars while emitting typed comparison evidence.",
+        description="Research-integrity statement resolver rollout mode. Shadow exports the "
+        "compatibility statements and logs the comparison with the bounded selection at "
+        "debug level.",
     )
     # Experimental: proximity alone does not establish the correct title in
     # multilingual front matter. Keep off until validated for the target inputs.
@@ -2059,12 +2174,36 @@ class PipelineOptions(_BibrSettings):
         description="Use the PDF outline (bookmarks) as a heading-level signal for section "
         "hierarchy. Ships dark pending an eval gate.",
     )
+    # Build the internal lossless document layer (bibr.document): glyph fonts,
+    # effective sizes, baselines, spans, lines, superscripts, furniture and
+    # render recipes, read from the PDF text layer next to the native-text
+    # pass. Changes no output; costs pdfium lock time per glyph.
+    scan_article_split: bool = Field(
+        False,
+        description="On scanned pages, drop the regions of neighbouring articles (the "
+        "previous article's tail and references before the paper's title, the next article "
+        "after its references) before parsing. Off by default pending an eval on scans.",
+    )
+    document_layer: bool = Field(
+        False,
+        description="Build the internal document layer (glyph fonts, sizes, spans, lines, "
+        "superscripts, furniture) from the PDF text layer. Internal only; changes no output.",
+    )
+    # Reviews and commentaries argue rather than report: their body headings
+    # are discussion, not the introduction/methods/results the classifier
+    # guesses one heading at a time. Applies only when the paper type says so
+    # and no heading is alias-typed methods or results.
+    non_imrad_body_as_discussion: bool = Field(
+        True,
+        description="Type the model/LLM-typed body headings of reviews and commentaries with no "
+        "Methods or Results heading as discussion.",
+    )
 
 
 class JobsOptions(_BibrSettings):
     """Async job API (serve). Env: ``JOBS_ENABLED``, ``JOBS_TTL_SECONDS``, ``JOBS_MAX_ACTIVE``,
     ``JOBS_MAX_RUNNING``, ``JOBS_MAX_RETAINED``, ``JOBS_MAX_RETAINED_BYTES``, ``JOBS_STORE``,
-    ``JOBS_REDIS_URL``, ``JOBS_KEY_PREFIX``, ``JOBS_REPLICA_ID``.
+    ``JOBS_REDIS_URL``, ``JOBS_KEY_PREFIX``, ``JOBS_REPLICA_ID``, ``JOBS_DEDUPE_INFLIGHT``.
 
     By default jobs are held in an in-process store on the single HTTP API-server
     process (``serve.app.main`` always pins ``num_api_servers=1`` because upload
@@ -2125,6 +2264,14 @@ class JobsOptions(_BibrSettings):
         "that an export larger than the budget can still be fetched once. 0 disables the "
         "budget (count-only retention).",
     )
+    dedupe_inflight: bool = Field(
+        False,
+        description="Answer a job upload whose file (sha256), filename and options match a "
+        "job this replica still has queued or running with that job, instead of running the "
+        "paper twice. bibr serve has a single principal (the shared API key), so enable it only "
+        "when every caller may share jobs; a multi-user front end should deduplicate per "
+        "user itself.",
+    )
 
 
 class MeteringOptions(_BibrSettings):
@@ -2168,7 +2315,9 @@ class McpOptions(_BibrSettings):
     same chew-then-query tool surface as ``bibr mcp``, with extraction routed
     through the regular serve inference dispatch. Gated by the same bearer
     auth as every other route. Serve-only and purely additive — does not
-    affect extraction output (see ``_FINGERPRINT_EXCLUDED_SECTIONS``).
+    affect extraction output (see ``_FINGERPRINT_EXCLUDED_SECTIONS``). The
+    stdio server (``bibr mcp``) honours ``chew_url_enabled`` and
+    ``url_allowed_hosts`` too.
     """
 
     model_config = _section("MCP_")
@@ -2193,9 +2342,10 @@ class McpOptions(_BibrSettings):
     )
     chew_url_enabled: bool = Field(
         True,
-        description="Expose the chew_url tool on the serve MCP endpoint: a server-side, "
-        "SSRF-guarded download of a public https:// URL routed into extraction. Disable "
-        "to keep the endpoint free of outbound fetches.",
+        description="Expose the chew_url tool on the MCP servers (bibr mcp and the serve "
+        "endpoint): a server-side, SSRF-guarded download of a public https:// URL routed "
+        "into extraction. Disable to keep them free of outbound fetches an agent could "
+        "use to send data out.",
     )
     url_allowed_hosts: Annotated[list[str], NoDecode] = Field(
         [],

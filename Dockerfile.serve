@@ -17,7 +17,8 @@ ARG WITH_GPU=true
 # ===========================================================================
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS builder
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# The uv CI uses (UV_VERSION in .github/workflows/ci.yml), pinned by digest.
+COPY --from=ghcr.io/astral-sh/uv:0.9.8@sha256:08f409e1d53e77dfb5b65c788491f8ca70fe1d2d459f41c89afa2fcbef998abe /uv /uvx /bin/
 
 ENV DEBIAN_FRONTEND=noninteractive TZ=UTC
 RUN apt-get update && \
@@ -50,17 +51,18 @@ ARG WITH_GPU
 # --extra mcp ships the optional MCP server so an operator can flip
 # MCP_ENABLED=true on the Compose stack without a custom image; it is a small
 # pure-Python dependency and stays inert unless enabled.
+# --locked fails the build when uv.lock is stale instead of re-resolving it.
 COPY pyproject.toml uv.lock README.md ./
 RUN if [ "$WITH_GPU" = "true" ]; then \
-      uv sync --no-install-project --extra cache --extra gpu --extra ml --extra mcp --no-dev; \
+      uv sync --locked --no-install-project --extra cache --extra gpu --extra ml --extra mcp --no-dev; \
     else \
-      uv sync --no-install-project --extra cache --extra ml --extra mcp --no-dev; \
+      uv sync --locked --no-install-project --extra cache --extra ml --extra mcp --no-dev; \
     fi
 
 # Install the project, then swap onnxruntime → onnxruntime-gpu on GPU builds.
 COPY bibr ./bibr
 RUN if [ "$WITH_GPU" = "true" ]; then \
-      uv sync --extra cache --extra gpu --extra ml --extra mcp --no-dev && \
+      uv sync --locked --extra cache --extra gpu --extra ml --extra mcp --no-dev && \
       # onnxruntime (CPU) and onnxruntime-gpu share an `onnxruntime/` import
       # namespace, so installing both leaves a broken venv where the CPU
       # pybind11_state.so shadows the GPU one. Uninstall both and reinstall just
@@ -72,11 +74,14 @@ RUN if [ "$WITH_GPU" = "true" ]; then \
       # /app/.venv — which is the only thing the runtime stage copies.
       uv pip uninstall --python /app/.venv/bin/python onnxruntime && \
       uv pip uninstall --python /app/.venv/bin/python onnxruntime-gpu && \
-      # Pinned: this install is outside the lock, so unpinned it silently drifts
-      # to whatever is newest on PyPI and two builds of the same commit can ship
-      # different ORT binaries (and different bundled CUDA/cuDNN wheels). Bump
-      # deliberately, and rebuild the serve image to pick it up.
-      uv pip install --python /app/.venv/bin/python 'onnxruntime-gpu[cuda,cudnn]==1.28.0' && \
+      # Constrained to uv.lock: this install bypasses `uv sync`, so unpinned it
+      # would drift to whatever is newest on PyPI, and two builds of the same
+      # commit could ship different ORT binaries and CUDA/cuDNN wheels. The
+      # export pins onnxruntime-gpu and its nvidia-* wheels to the locked versions.
+      uv export --quiet --locked --no-dev --no-emit-project --no-hashes \
+        --extra cache --extra gpu --extra ml --extra mcp -o /tmp/locked-requirements.txt && \
+      uv pip install --python /app/.venv/bin/python \
+        --constraint /tmp/locked-requirements.txt 'onnxruntime-gpu[cuda,cudnn]' && \
       # Assert the swap actually took. get_available_providers() can't be used
       # here (registering the CUDA EP needs a driver; build containers have no
       # /dev/nvidia*) and get_all_providers() is a static list that never fails,
@@ -87,7 +92,7 @@ RUN if [ "$WITH_GPU" = "true" ]; then \
         assert got == ['onnxruntime-gpu'], \
         f'GPU build must ship onnxruntime-gpu alone — got {got}.'"; \
     else \
-      uv sync --extra cache --extra ml --extra mcp --no-dev; \
+      uv sync --locked --extra cache --extra ml --extra mcp --no-dev; \
     fi
 
 # ===========================================================================

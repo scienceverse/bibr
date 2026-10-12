@@ -7,13 +7,14 @@ Pure string / bbox utilities extracted verbatim from
 
 The cross-module helpers (:func:`bbox_to_tuple`,
 :func:`collapse_numbered_prefix_spaces`, :func:`repair_heading_artifacts`,
-:func:`strip_markdown_emphasis`) are public; ``_display_alias`` and
-``_repair_study_marker_spacing`` remain private module-internal helpers.
+:func:`strip_heading_watermark_text`, :func:`strip_markdown_emphasis`) are
+public; ``_display_alias`` and ``_repair_study_marker_spacing`` remain private
+module-internal helpers.
 """
 
 import re
 
-from bibr.paper_contents import CANONICAL_SECTION_ALIASES
+from bibr.paper_contents import CANONICAL_SECTION_ALIASES, FRONT_MATTER_FURNITURE_LABELS
 
 
 def bbox_to_tuple(bbox: list | None) -> tuple[float, float, float, float] | None:
@@ -123,6 +124,146 @@ def repair_heading_artifacts(text: str) -> str:
             return _display_alias(alias)
 
     return text
+
+
+# A heading line that holds a single letter is usually a watermark glyph the
+# heading box caught: "IV PROPOSED METHOD\nR" under a diagonal "RETRACTED",
+# "m\nPotential confounding variables" beside an accepted-manuscript stamp.
+# Only a first (lowercase) or last line counts: a letter inside the heading is
+# part of it ("TOWARDS\nA\nFORMALISM", "Weighted L\np\nspaces"). A last
+# line is kept after a word that takes a letter ("Appendix\nA", "Study\nB")
+# or after a single character.
+_LETTER_TAKING_WORD_RE = re.compile(
+    r"\b(?:appendix|study|experiment|part|chapter|section|phase|panel|box|group|type|"
+    r"model|case|sample|table|figure|supplement|vitamin|hepatitis|class|grade|stage|"
+    r"cohort|wave|trial|series|scenario|condition|option|plan|factor|protein|category|"
+    r"level|hypothesis|arm|lemma|theorem|proposition|corollary|step|task|session)$",
+    re.IGNORECASE,
+)
+# A manuscript line number caught from the gutter ("668 References"): a
+# leading integer above any plausible section number.
+_GUTTER_NUMBER_RE = re.compile(r"^(\d{2,4})\s+(?=[^\W\d])")
+_MAX_SECTION_NUMBER = 50
+# Section names and furniture labels by their letters alone, for closing up a
+# letter-spaced heading whose word gaps were lost ("A R T I C L E I N F O").
+# Where two names share their letters ("key words", "keywords"), the one with
+# fewer words wins.
+_COMPACT_HEADING_NAMES: dict[str, str] = {
+    _HEADING_COMPACT_RE.sub("", name): name
+    for name in sorted(
+        {*_ALIAS_LOWER_SET, *FRONT_MATTER_FURNITURE_LABELS},
+        key=lambda name: (-name.count(" "), name),
+    )
+}
+
+
+def _is_alias(text: str) -> bool:
+    return text.strip(" :.").lower() in _ALIAS_LOWER_SET
+
+
+def _despace_letters(line: str) -> str:
+    """Close up a letter-spaced line ("A B S T R A C T" → "ABSTRACT").
+
+    Words stay apart where the line has two or more spaces between letters;
+    with single spaces only, the letters must spell a known section name or
+    furniture label, whose word breaks are then restored ("A R T I C L E I N
+    F O" → "ARTICLE INFO"). Anything else is returned unchanged.
+    """
+    tokens = line.split()
+    if len(tokens) < 4 or not all(len(token) == 1 and token.isalpha() for token in tokens):
+        return line
+    words = re.split(r"\s{2,}", line.strip())
+    if len(words) > 1:
+        return " ".join(word.replace(" ", "") for word in words)
+    letters = "".join(tokens)
+    name = _COMPACT_HEADING_NAMES.get(letters.lower())
+    if name is None:
+        return line
+    out: list[str] = []
+    pos = 0
+    for word in name.split():
+        size = len(_HEADING_COMPACT_RE.sub("", word))
+        out.append(letters[pos : pos + size])
+        pos += size
+    return " ".join(out)
+
+
+def _is_watermark_glyph(lines: list[str], i: int) -> bool:
+    line = lines[i]
+    if len(line) != 1 or not line.isalpha():
+        return False
+    if i == 0:
+        return line.islower()
+    if i != len(lines) - 1:
+        return False
+    # A trailing letter is a watermark only under a heading set in capitals
+    # ("IV PROPOSED METHOD\nR") or a bare section name ("Results\nR"); under
+    # a mixed-case heading it is a label ("Results for Hypothesis\nA",
+    # "Treatment arm\nB").
+    letters = [char for line in lines[:i] for char in line if char.isalpha()]
+    capitals = bool(letters) and all(char.isupper() for char in letters)
+    if not capitals and not _is_alias(" ".join(lines[:i])):
+        return False
+    before = lines[i - 1].split()[-1]
+    return len(before) > 1 and not _LETTER_TAKING_WORD_RE.search(before)
+
+
+def strip_heading_watermark_text(text: str) -> str:
+    """Remove watermark letters, gutter numbers, letter spacing and overprints.
+
+    Runs on a heading region's raw text, before its lines are joined:
+
+    - a lowercase first line, or a last line holding a single letter under a
+      heading set in capitals, is dropped when the rest of the heading holds
+      two or more words or is a known section name (``"V MODULE
+      DESCRIPTION\\nT"`` → ``"V MODULE DESCRIPTION"``, ``"o\\nStatistical
+      Analyses"`` → ``"Statistical Analyses"``), unless the line before ends
+      in a word that takes a letter (``"APPENDIX\\nA"``); a mixed-case
+      heading keeps its trailing letter (``"Treatment arm\\nB"``);
+    - a leading integer above 50 is dropped when the rest is a known section
+      name (``"668 References"`` → ``"References"``);
+    - letter-spaced lines are closed up (``"A B S T R A C T"`` →
+      ``"ABSTRACT"``);
+    - a heading printed several times over (``"2.1. Loading Tests 2.1.
+      Loading Tests"``) is kept once.
+
+    Text without any of these shapes is returned unchanged.
+    """
+    lines = [line.strip() for line in re.split(r"[\r\n]+", text)]
+    lines = [line for line in lines if line]
+    if not lines:
+        return text
+    changed = False
+
+    if len(lines) >= 2:
+        kept = [line for i, line in enumerate(lines) if not _is_watermark_glyph(lines, i)]
+        rest = " ".join(kept)
+        if len(kept) < len(lines) and (len(rest.split()) >= 2 or _is_alias(rest)):
+            lines = kept
+            changed = True
+
+    despaced = [_despace_letters(line) for line in lines]
+    if despaced != lines:
+        lines = despaced
+        changed = True
+    joined = " ".join(lines)
+
+    m = _GUTTER_NUMBER_RE.match(joined)
+    if m and int(m.group(1)) > _MAX_SECTION_NUMBER and _is_alias(joined[m.end() :]):
+        joined = joined[m.end() :]
+        changed = True
+
+    words = joined.split()
+    for period in range(1, len(words) // 2 + 1):
+        if len(words) % period:
+            continue
+        unit = words[:period]
+        if words == unit * (len(words) // period) and (period >= 2 or _is_alias(unit[0])):
+            joined = " ".join(unit)
+            changed = True
+            break
+
+    return joined if changed else text
 
 
 def strip_markdown_emphasis(text: str) -> str:

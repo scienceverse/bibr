@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from bibr.input.pdf_metadata import harvest_docinfo
 from bibr.input.pdf_outline import OutlineItem, _walk_pdfium_outline
@@ -18,6 +19,7 @@ from bibr.ocr.native_text import (
     _page_rotation,
     _pdf_points_to_normalized_bbox,
     _sample_page_font_metadata,
+    open_text_page,
 )
 from bibr.ocr.pdf_links import PdfUriLink, page_uri_links
 from bibr.ocr.ref_geometry import (
@@ -29,6 +31,12 @@ from bibr.ocr.ref_geometry import (
 )
 from bibr.ocr.ref_patterns import _REF_HEADER_RE
 from bibr.ocr.utils import pdfium_lock
+
+if TYPE_CHECKING:
+    from bibr.document.harvest import LayerBuilder, RenderBudget
+    from bibr.document.model import DocumentLayer
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -42,6 +50,9 @@ class PdfPageInspection:
     # ``_is_invisible_text_layer_page``): no text-layer data is read from it,
     # apart from the regions' OCR fallback text (``_invisible_layer_text``).
     invisible_text_layer: bool = False
+    # Diagonal watermark strings removed before the text layer was read
+    # ("For Review Only", "RETRACTED"; see ``strip_furniture_objects``).
+    watermarks: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -63,6 +74,9 @@ class PdfInspection:
     # URI link annotations (``page``, layout-space ``bbox``, ``uri``), same
     # frame and capture condition as ``page_lines``.
     uri_links: list[dict[str, Any]] = field(default_factory=list)
+    # The PDF-native document layer (``bibr.document``), built with
+    # ``include_doc_layer``. Never serialized with the inspection.
+    document: DocumentLayer | None = field(default=None, compare=False, repr=False)
 
 
 def inspect_pdf(
@@ -78,6 +92,8 @@ def inspect_pdf(
     min_printable_ratio: float,
     eligible_labels: frozenset[str] = DEFAULT_ELIGIBLE_LABELS,
     reject_invisible_text_layer: bool = False,
+    include_doc_layer: bool = False,
+    render_budget: RenderBudget | None = None,
 ) -> PdfInspection:
     """Inspect a PDF under one lock/open and return plain detached values.
 
@@ -86,6 +102,12 @@ def inspect_pdf(
     metadata or text lines come from it, so OCR reads its regions. The text
     the fill would have taken stays on each region as the fallback OcrStage
     uses when OCR returns nothing for the page.
+
+    With *include_doc_layer*, every page's text layer is also harvested into
+    ``PdfInspection.document`` (see ``bibr.document``), with render recipes
+    for *render_budget*. The harvest only reads: every other field is the
+    same with it on or off, and its failures go to the layer's own
+    ``component_errors``.
     """
     import pypdfium2
 
@@ -98,6 +120,8 @@ def inspect_pdf(
     uri_links: list[dict[str, Any]] = []
     docinfo: dict[str, Any] = {}
     outline: list[OutlineItem] = []
+    layer_builder = _layer_builder(pdf_bytes, render_budget) if include_doc_layer else None
+    document: DocumentLayer | None = None
 
     with pdfium_lock:
         doc = pypdfium2.PdfDocument(pdf_bytes)
@@ -122,6 +146,12 @@ def inspect_pdf(
             except Exception as exc:  # noqa: BLE001 - best-effort component
                 component_errors["metadata"] = _error_text(exc)
 
+            if layer_builder is not None:
+                try:
+                    layer_builder.start(doc)
+                except Exception as exc:  # noqa: BLE001 - the layer is optional
+                    layer_builder.errors["start"] = _error_text(exc)
+
             page_heights: dict[int, float] = {}
             for layout_slot, page_index in page_pairs:
                 page = doc[page_index]
@@ -137,9 +167,21 @@ def inspect_pdf(
                     needs_text = fill_native_text or include_ref_geometry
                     char_count = 0
                     invisible_text_layer = False
+                    watermarks: list[str] = []
+                    # The document layer's furniture, and the char records it
+                    # shares with the native fill.
+                    furniture: list[tuple] = []
+                    walk: list[tuple] | None = None
+                    trace = records = None
                     if needs_text:
-                        textpage = page.get_textpage()
+                        if layer_builder is None:
+                            textpage = open_text_page(page, watermarks)
+                        else:
+                            walk = []
+                            textpage = open_text_page(page, watermarks, furniture, walk)
                         try:
+                            if layer_builder is not None:
+                                trace, records = layer_builder.records(textpage, page_index)
                             char_count = textpage.count_chars()
                             if reject_invisible_text_layer and char_count:
                                 try:
@@ -152,9 +194,6 @@ def inspect_pdf(
                                     )
                             if fill_native_text and not invisible_text_layer:
                                 try:
-                                    _sample_page_font_metadata(
-                                        textpage, crop_box, char_count, regions, rotation
-                                    )
                                     _fill_page_regions_from_textpage(
                                         textpage,
                                         crop_box,
@@ -164,9 +203,20 @@ def inspect_pdf(
                                         min_printable_ratio=min_printable_ratio,
                                         page_idx=page_index,
                                         rotation=rotation,
+                                        records=records,
                                     )
                                 except Exception as exc:  # noqa: BLE001
                                     component_errors[f"native_text:{page_index}"] = _error_text(exc)
+                                # Best-effort, as in fill_native_text_and_fonts: a
+                                # font sampling failure never discards the fill.
+                                try:
+                                    _sample_page_font_metadata(
+                                        textpage, crop_box, char_count, regions, rotation
+                                    )
+                                except Exception as exc:  # noqa: BLE001
+                                    component_errors[f"font_metadata:{page_index}"] = _error_text(
+                                        exc
+                                    )
                             elif fill_native_text:
                                 try:
                                     _keep_layer_text_as_ocr_fallback(
@@ -178,6 +228,7 @@ def inspect_pdf(
                                         min_printable_ratio=min_printable_ratio,
                                         page_idx=page_index,
                                         rotation=rotation,
+                                        records=records,
                                     )
                                 except Exception as exc:  # noqa: BLE001
                                     component_errors[f"native_text:{page_index}"] = _error_text(exc)
@@ -205,8 +256,25 @@ def inspect_pdf(
                                     component_errors[f"ref_geometry:{page_index}"] = _error_text(
                                         exc
                                     )
+                            if layer_builder is not None:
+                                _harvest_page(
+                                    layer_builder,
+                                    page,
+                                    textpage,
+                                    page_index,
+                                    crop_box,
+                                    rotation,
+                                    trace,
+                                    records,
+                                    furniture,
+                                    walk,
+                                )
                         finally:
                             textpage.close()
+                    elif layer_builder is not None:
+                        # Nothing else reads this page's text layer; the layer
+                        # still does, through the same furniture strip.
+                        _harvest_unread_page(layer_builder, page, page_index, crop_box, rotation)
                     if include_ref_geometry:
                         try:
                             uri_links.extend(
@@ -227,10 +295,14 @@ def inspect_pdf(
                             crop_box=crop_box,
                             char_count=char_count,
                             invisible_text_layer=invisible_text_layer,
+                            watermarks=tuple(watermarks),
                         )
                     )
                 finally:
                     page.close()
+            # The last page's char records and object walk would otherwise
+            # stay alive through the layer's finish().
+            trace = records = walk = None
 
             if include_outline:
                 try:
@@ -239,6 +311,13 @@ def inspect_pdf(
                     component_errors["outline"] = _error_text(exc)
         finally:
             doc.close()
+
+    if layer_builder is not None:
+        # Spans, lines and tags need no pdfium: built after the lock is released.
+        try:
+            document = layer_builder.finish()
+        except Exception:  # noqa: BLE001 - the layer is optional
+            logger.warning("Could not finish the document layer", exc_info=True)
 
     verification_text = first_page_text
     if not verification_text and layouts:
@@ -256,11 +335,83 @@ def inspect_pdf(
         component_errors=component_errors,
         page_lines=stream_lines,
         uri_links=uri_links,
+        document=document,
     )
 
 
 def _error_text(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"[:500]
+
+
+def _layer_builder(pdf_bytes: bytes, render_budget: RenderBudget | None) -> LayerBuilder | None:
+    try:
+        from bibr.document.harvest import LayerBuilder
+
+        return LayerBuilder(pdf_bytes, render_budget)
+    except Exception:  # noqa: BLE001 - the layer is optional
+        logger.warning("Could not start the document layer", exc_info=True)
+        return None
+
+
+def _harvest_page(
+    builder: LayerBuilder,
+    page,
+    textpage,
+    page_index: int,
+    crop_box: tuple[float, float, float, float],
+    rotation: int,
+    trace,
+    records,
+    furniture: list[tuple],
+    walk: list[tuple] | None,
+) -> None:
+    """Add a page to the document layer; a failure stays in the layer's errors."""
+    try:
+        builder.add_page(
+            page,
+            textpage,
+            page_index=page_index,
+            crop_box=crop_box,
+            rotation=rotation,
+            trace=trace,
+            records=records,
+            furniture=furniture,
+            walk=walk,
+        )
+    except Exception as exc:  # noqa: BLE001
+        builder.page_failed(page_index, f"harvest:{page_index}", exc)
+
+
+def _harvest_unread_page(
+    builder: LayerBuilder,
+    page,
+    page_index: int,
+    crop_box: tuple[float, float, float, float],
+    rotation: int,
+) -> None:
+    """Harvest a page the inspection itself does not read the text layer of."""
+    try:
+        furniture: list[tuple] = []
+        walk: list[tuple] = []
+        textpage = open_text_page(page, [], furniture, walk)
+        try:
+            trace, records = builder.records(textpage, page_index)
+            _harvest_page(
+                builder,
+                page,
+                textpage,
+                page_index,
+                crop_box,
+                rotation,
+                trace,
+                records,
+                furniture,
+                walk,
+            )
+        finally:
+            textpage.close()
+    except Exception as exc:  # noqa: BLE001
+        builder.page_failed(page_index, f"harvest:{page_index}", exc)
 
 
 def _keep_layer_text_as_ocr_fallback(textpage, crop_box, regions: list[dict], **fill) -> None:
@@ -370,7 +521,13 @@ def inspection_from_dict(
         return None
     return PdfInspection(
         pages=tuple(
-            PdfPageInspection(**{**page, "crop_box": tuple(page["crop_box"])})
+            PdfPageInspection(
+                **{
+                    **page,
+                    "crop_box": tuple(page["crop_box"]),
+                    "watermarks": tuple(page.get("watermarks", ())),
+                }
+            )
             for page in data.get("pages", [])
         ),
         layout_results=[],

@@ -66,6 +66,7 @@ class InterleavedRenderOcrStage:
         "pdf_uri_links",
         "native_metadata",
         "pdf_outline",
+        "doc_layer",
         "ocr_regions",
     )
 

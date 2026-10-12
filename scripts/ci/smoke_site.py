@@ -20,6 +20,25 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
+def _origin(url: str) -> tuple[str, str | None, int | None]:
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    return scheme, parsed.hostname, parsed.port or {"http": 80, "https": 443}.get(scheme)
+
+
+class SameOriginRedirect(HTTPRedirectHandler):
+    """Follow redirects only within the original origin.
+
+    urllib copies every request header onto the redirected request, so leaving
+    the origin would hand the Access service token to another host or scheme.
+    """
+
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        if _origin(new_url) != _origin(request.full_url):
+            return None
+        return super().redirect_request(request, file_pointer, code, message, headers, new_url)
+
+
 def anonymous_is_challenged(status: int, location: str | None) -> bool:
     """Return whether an anonymous response proves an Access challenge."""
 
@@ -43,7 +62,7 @@ def verify_build_marker(body: str, expected_sha: str) -> None:
 def _fetch(
     url: str, *, headers: dict[str, str] | None = None, follow_redirects: bool
 ) -> tuple[int, str | None, str]:
-    opener = build_opener() if follow_redirects else build_opener(NoRedirect)
+    opener = build_opener(SameOriginRedirect if follow_redirects else NoRedirect)
     # Identify both probes so Cloudflare does not reject Python's default client.
     request = Request(  # noqa: S310 - URL is validated
         url, headers={"User-Agent": USER_AGENT, **(headers or {})}, method="GET"

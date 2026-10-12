@@ -11,6 +11,7 @@ in a later task). Pure stdlib; no network, no LLM.
 from __future__ import annotations
 
 import re
+from bisect import bisect_left
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -43,7 +44,13 @@ _INTITLE_CITE = re.compile(
     r"\b(?:to|on|of)\b[^.(]{0,40}$",
     re.IGNORECASE,
 )
+# How far before a date an in-title citation can start: it runs at most 77
+# characters past the end of its cue word, so a match is missed only when the
+# cue word runs past 40 letters. Searching just this tail keeps a long string
+# linear.
+_INTITLE_REACH = 120
 
+_TOKEN = re.compile(r"\S+")
 _CAP_TOKEN = re.compile(r"[A-Z][\w.''\-]*$")
 _CONNECTOR = {"and", "of", "for", "the", "&", "de", "van", "von", "der"}
 _MAX_LEAD = 60
@@ -70,6 +77,17 @@ _MAX_BYLINE_LEAD = 120
 # precedes it); the increment check (below) excludes volume/page/year integers.
 _NUM_ONSET = re.compile(r"(?<=[.)])\s+(\d{1,3})\.\s+(?=[^\W\d_])")
 _NUMBERED_ENTRY_START = re.compile(r"\s*(\d{1,3})\.\s+(?=[^\W\d_])")
+# Bracketed numbering (IEEE/ACM "[11] R. Aishwarya, …"). The marker is its
+# own boundary, so nothing has to close the entry before it: an entry can end
+# "Springer, Berlin, Heidelberg" with no period. Group 1 is the marker (the new
+# reference keeps it), group 2 the number; at most 3 digits, so a bracketed
+# year ("[2019]") never matches. The next entry opens on its author's initial,
+# a quote or a parenthesis that does not hold a number ("[4] (2001)" is a
+# date); ``_bracketed_interior_onsets`` also rejects a lowercase letter in any
+# script, which keeps an in-title citation ("… of [3] in …") out, and the
+# increment check keeps the remaining in-entry brackets out.
+_BRACKET_ONSET = re.compile(r"(?<=\S)\s+(\[(\d{1,3})\])\s*(?=[^\W\d_]|[\"“‘']|\((?!\d))")
+_BRACKETED_ENTRY_START = re.compile(r"\s*\[(\d{1,3})\]\s*(?=[^\W\d_]|[\"“‘'(])")
 
 # Abbreviations that legitimately precede an interior "N." inside ONE reference
 # (volume/edition/page/section markers) — a number after these is not a new ref.
@@ -78,6 +96,9 @@ _NUM_ABBREV_BEFORE = re.compile(
     r"|fig|figs|suppl|ser|bd)\.\s*$",
     re.IGNORECASE,
 )
+# Longer than any abbreviation above with its period: how much text before an
+# interior "N." the abbreviation search reads.
+_NUM_ABBREV_REACH = 16
 
 # Edition/volume words printed AFTER the number ("2. Aufl.", "4. Auflage",
 # "3. udg.", "2. uppl.", "2. ed.", "5. baskı") in German, Nordic, Slavic,
@@ -103,19 +124,29 @@ class MergeCandidate:
     contexts: list[str]
 
 
-def _last_cap_run_start(head: str) -> int | None:
+def _last_cap_run_start(
+    s: str, tokens: list[tuple[int, int]], token_starts: list[int], end: int, reach: int
+) -> int | None:
     """Start offset of the trailing run of capitalized author/org tokens in
-    ``head`` (lowercase connectors allowed mid-run), or None if the last token is
+    ``s[:end]`` (lowercase connectors allowed mid-run), or None if the last token is
     not capitalized. Numbers break the run, so an earlier journal/volume cannot be
-    swept in."""
-    toks = [(m.start(), m.group()) for m in re.finditer(r"\S+", head)]
+    swept in.
+
+    ``tokens`` are the whitespace-separated spans of ``s`` and ``token_starts``
+    their starts. A run that reaches back before ``reach`` is None too: its lead
+    is too long to be author-like, so the walk stops there instead of
+    tokenising the whole prefix."""
     start: int | None = None
-    for off, tok in reversed(toks):
-        clean = tok.strip(".,;&")
-        if _CAP_TOKEN.match(clean) or (start is not None and clean.lower() in _CONNECTOR):
-            start = off
-        else:
+    for i in range(bisect_left(token_starts, end) - 1, -1, -1):
+        off, tok_end = tokens[i]
+        if off < reach and start is None:
+            return None
+        clean = s[off : min(tok_end, end)].strip(".,;&")
+        if not (_CAP_TOKEN.match(clean) or (start is not None and clean.lower() in _CONNECTOR)):
             break
+        if off < reach:
+            return None
+        start = off
     return start
 
 
@@ -130,7 +161,9 @@ def _is_author_like(lead: str) -> bool:
     return capped / len(words) >= 0.6
 
 
-def _lead_start(s: str, anchor_pos: int) -> int | None:
+def _lead_start(
+    s: str, anchor_pos: int, tokens: list[tuple[int, int]], token_starts: list[int]
+) -> int | None:
     """Offset where the reference owning the date anchor at ``anchor_pos`` begins,
     or None when the text before the anchor is not an author/org lead.
 
@@ -138,13 +171,27 @@ def _lead_start(s: str, anchor_pos: int) -> int | None:
     trailing capitalized-token run (the softening for URL-ended prior refs like
     "...fungus-strain United Nations. (n.d.)"). Among the candidates whose lead is
     author-like, returns the smallest offset so a leading "U.S." is not dropped.
+    ``tokens``/``token_starts`` are ``s``'s whitespace-separated spans.
+
+    Only the text a lead of ``_MAX_LEAD`` characters can span is read, so a
+    string of many merged references stays linear.
     """
-    head = s[:anchor_pos].rstrip()
+    end = anchor_pos
+    while end > 0 and s[end - 1].isspace():
+        end -= 1
+    # The lead is s[c:anchor_pos].strip(" ."): one that starts before ``reach``
+    # keeps a character more than _MAX_LEAD before its end, too long to qualify.
+    lead_end = anchor_pos
+    while lead_end > 0 and s[lead_end - 1] in " .":
+        lead_end -= 1
+    reach = max(0, lead_end - _MAX_LEAD)
+    while reach > 0 and s[reach - 1] in " .":
+        reach -= 1
     candidates: set[int] = set()
-    term = head.rfind(". ")
+    term = s.rfind(". ", max(0, reach - 2), end)
     if term != -1:
         candidates.add(term + 2)
-    cap = _last_cap_run_start(head)
+    cap = _last_cap_run_start(s, tokens, token_starts, end, reach)
     if cap is not None:
         candidates.add(cap)
     valid = [c for c in candidates if c > 0 and _is_author_like(s[c:anchor_pos].strip(" ."))]
@@ -163,18 +210,37 @@ def _numbered_interior_onsets(ref_string: str) -> list[int]:
     number (``_NUM_EDITION_AFTER``, e.g. "2. Aufl."), and continues the
     sequence (``M == previous + 1``). The strict increment is the precision
     safeguard: volume/page/year integers don't form a run, so they can't be
-    onsets. Empty unless the string starts with a number followed by a letter."""
+    onsets. A string that starts with a bracketed number ("[10] …") gets the
+    same treatment for "[M]" markers (``_bracketed_interior_onsets``). Empty
+    unless the string starts with a number followed by a letter."""
     m0 = _NUMBERED_ENTRY_START.match(ref_string)
     if m0 is None:
-        return []
+        return _bracketed_interior_onsets(ref_string)
     expected = int(m0.group(1)) + 1
     offsets: list[int] = []
     for m in _NUM_ONSET.finditer(ref_string):
         if int(m.group(1)) != expected:
             continue
-        if _NUM_ABBREV_BEFORE.search(ref_string[: m.start()]):
+        if _NUM_ABBREV_BEFORE.search(ref_string, max(0, m.start() - _NUM_ABBREV_REACH), m.start()):
             continue
         if _NUM_EDITION_AFTER.match(ref_string, m.end()):
+            continue
+        offsets.append(m.start(1))
+        expected += 1
+    return offsets
+
+
+def _bracketed_interior_onsets(ref_string: str) -> list[int]:
+    """Char offsets (>0) where a new "[N]"-numbered reference begins inside
+    ``ref_string``: an interior "[M]" with ``M == previous + 1``. Empty unless
+    the string starts with a bracketed number."""
+    m0 = _BRACKETED_ENTRY_START.match(ref_string)
+    if m0 is None:
+        return []
+    expected = int(m0.group(1)) + 1
+    offsets: list[int] = []
+    for m in _BRACKET_ONSET.finditer(ref_string):
+        if int(m.group(2)) != expected or ref_string[m.end() : m.end() + 1].islower():
             continue
         offsets.append(m.start(1))
         expected += 1
@@ -200,18 +266,21 @@ def _parendate_interior_onsets(ref_string: str) -> list[int]:
     anchors = list(_DATE_ANCHOR.finditer(ref_string))
     if len(anchors) < 2:
         return []
+    tokens = [m.span() for m in _TOKEN.finditer(ref_string)]
+    token_starts = [off for off, _ in tokens]
     offsets: list[int] = []
     head = anchors[0]
     for i in range(1, len(anchors)):
-        between = ref_string[anchors[i - 1].end() : anchors[i].start()]
+        at = anchors[i].start()
+        between = ref_string[anchors[i - 1].end() : at]
         if _META_BEFORE.search(between):
             continue
-        if _INTITLE_CITE.search(ref_string[: anchors[i].start()]):
+        if _INTITLE_CITE.search(ref_string, max(0, at - _INTITLE_REACH), at):
             continue
-        start = _lead_start(ref_string, anchors[i].start())
+        start = _lead_start(ref_string, at, tokens, token_starts)
         if start is None or start <= 0 or start in offsets:
             continue
-        if not _LETTER.search(ref_string[head.end() : start]):
+        if not _LETTER.search(ref_string, head.end(), start):
             continue
         offsets.append(start)
         head = anchors[i]
@@ -327,8 +396,14 @@ def split_merged_refs(ref_strings: list[str]) -> tuple[list[str], int]:
     on a single string leaves that string unchanged (never raises). A split is
     accepted only when every resulting piece is non-empty after stripping; an
     all-non-empty check keeps the count strictly non-decreasing.
+
+    A split-off piece that repeats an entry segmented on its own elsewhere
+    (same list marker, same opening words) is a copy the segmenter carried
+    over from overlapping regions; it is cut off the entry it was glued to and
+    not kept, so splitting never creates a duplicate reference.
     """
     find_onsets = _onset_finder_for_bibliography(ref_strings)
+    listed = _entries_by_marker(ref_strings)
     out: list[str] = []
     for s in ref_strings:
         try:
@@ -341,7 +416,54 @@ def split_merged_refs(ref_strings: list[str]) -> tuple[list[str], int]:
         bounds = [0, *offsets, len(s)]
         pieces = [s[a:b].strip() for a, b in zip(bounds, bounds[1:], strict=False)]
         if all(pieces):
-            out.extend(pieces)
+            out.append(pieces[0])
+            out.extend(piece for piece in pieces[1:] if not _repeats_listed_entry(piece, listed))
         else:
             out.append(s)
     return out, len(out) - len(ref_strings)
+
+
+# A segment's list marker ("[12] " or "12. ") and how much text two segments
+# must share: one that opens with the same marker as another and the same first
+# 20-60 letters and digits is a copy of that entry, unless the two part at a
+# number both of them print. Carried-over copies agree on their opening and then
+# break off or turn to OCR junk; two entries of a restarted list that open alike
+# ("[2] Centers for Disease Control … Report 2016;65" and "… 2021;70") part at
+# their year, volume or pages and stay apart.
+_MARKER_START = re.compile(r"\s*(?:\[(\d{1,3})\]|(\d{1,3})\.)\s")
+_REPEAT_PREFIX_CHARS = 60
+_REPEAT_MIN_CHARS = 20
+
+
+def _match_text(segment: str) -> str:
+    return re.sub(r"\W+", "", segment).casefold()
+
+
+def _entries_by_marker(ref_strings: list[str]) -> dict[str, list[str]]:
+    """Comparison text of every segment that opens with a list marker, by marker number."""
+    listed: dict[str, list[str]] = {}
+    for segment in ref_strings:
+        m = _MARKER_START.match(segment)
+        if m is not None:
+            listed.setdefault(m.group(1) or m.group(2), []).append(_match_text(segment))
+    return listed
+
+
+def _part_at_a_number(a: str, b: str) -> bool:
+    """Whether *a* and *b* first differ where both have a digit."""
+    i = next((i for i, (x, y) in enumerate(zip(a, b, strict=False)) if x != y), None)
+    return i is not None and a[i].isdigit() and b[i].isdigit()
+
+
+def _repeats_listed_entry(piece: str, listed: dict[str, list[str]]) -> bool:
+    """Whether ``piece`` opens with the marker and the first words of an entry
+    that already starts its own segment, and does not part from it at a number."""
+    m = _MARKER_START.match(piece)
+    if m is None:
+        return False
+    text = _match_text(piece)
+    for other in listed.get(m.group(1) or m.group(2), ()):
+        n = min(len(text), len(other), _REPEAT_PREFIX_CHARS)
+        if n >= _REPEAT_MIN_CHARS and text[:n] == other[:n] and not _part_at_a_number(text, other):
+            return True
+    return False

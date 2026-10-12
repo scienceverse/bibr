@@ -1,3 +1,5 @@
+import pytest
+
 from bibr.extract import merge_split
 from bibr.extract.merge_split import detect_merges, find_interior_onsets, split_merged_refs
 
@@ -490,6 +492,154 @@ def test_split_is_best_effort_on_error(monkeypatch):
     out, n_new = split_merged_refs([P_CORP2, N_CLEAN_SINGLE])
     assert out == [P_CORP2, N_CLEAN_SINGLE]
     assert n_new == 0
+
+
+# --- "[n]"-numbered (IEEE/ACM) lists ---
+# The segmenter missed the start of "[11]": it sits at the continuation lines'
+# x0 and the entry before it ends without a period.
+P_BRACKET_MERGE = (
+    "[10] Hu Z., Liu Q. Fast single image dehazing. In: Advances in Image and Graphics "
+    "Technologies, Springer, Berlin, Heidelberg [11] R. Aishwarya, Yogitha. R, Kiruthiga. V, "
+    "“Smart road surface monitoring with privacy preserved scene detection,” in Proc. "
+    "ICOEI, 2020, pp. 1-5."
+)
+
+
+def test_bracket_numbered_merge_splits_at_the_next_marker():
+    out, n_new = split_merged_refs([P_BRACKET_MERGE])
+
+    assert n_new == 1
+    assert out[0].endswith("Springer, Berlin, Heidelberg")
+    assert out[1].startswith("[11] R. Aishwarya, Yogitha. R,")
+
+
+def test_bracket_numbered_list_splits_only_on_the_next_number():
+    # "[3]" and "[2019]" inside entry 7 are no markers of entry 8.
+    single = (
+        "[7] A. Author, “Revisiting the method of [3],” IEEE Trans. Ind. Electron., "
+        "vol. 4, pp. 1-9, [2019] 2020."
+    )
+    out, n_new = split_merged_refs([single])
+
+    assert out == [single]
+    assert n_new == 0
+
+
+@pytest.mark.parametrize(
+    "single",
+    [
+        # a bracketed volume or note number before a dated parenthesis
+        "[3] J. Doe, “Title,” Ann. Phys., vol. 12 [4] (2001), pp. 3-9.",
+        "[9] S. Freud, Totem und Tabu [10] (1913).",
+        # an in-text citation before a lowercase word outside Latin-1
+        "[2] Иванов И.И. Комментарий к [3] работе о методах. М., 2001.",
+        "[5] J. Nowak, Analiza [6] średnich wartości. Warszawa, 2010.",
+    ],
+)
+def test_bracket_marker_inside_one_entry_does_not_split_it(single):
+    out, n_new = split_merged_refs([single])
+
+    assert out == [single]
+    assert n_new == 0
+
+
+def test_bracket_bibliography_keeps_single_entries():
+    refs = [
+        "[1] G. Caetano, Los retos de una nueva institucionalidad, 2004.",
+        "[2] B. Author and C. Author, “A title [3] in brackets,” in Proc. X, 2010.",
+        "[3] D. Author, “Another title,” J. Y, vol. 2, no. 3, 2011.",
+    ]
+    out, n_new = split_merged_refs(refs)
+
+    assert out == refs
+    assert n_new == 0
+
+
+# --- a split must not duplicate an entry the segmenter already produced ---
+# Overlapping regions carried the head of entry 34 into entry 33's segment;
+# the full entry 34 follows as its own segment.
+P_CARRIED_COPY = [
+    (
+        "[33] K.B. Chen, M. Novak, Sourcing under uncertainty, Manuf. Serv. Oper. Manag. "
+        "12 (2) (2010) 226–254. [34] Z.G. Liu, T.D. Anderson and J.M. Cruz, Consumer "
+        "environmental awareness and competition in two-stage supply chains, Eur."
+    ),
+    (
+        "[34] Z.G. Liu, T.D. Anderson and J.M. Cruz, Consumer environmental awareness and "
+        "competition in two-stage supply chains, Eur. J. Oper. Res. 218 (3) (2012) 602–613."
+    ),
+]
+
+
+def test_split_drops_a_piece_that_repeats_a_listed_entry():
+    out, n_new = split_merged_refs(P_CARRIED_COPY)
+
+    assert out == [
+        "[33] K.B. Chen, M. Novak, Sourcing under uncertainty, Manuf. Serv. Oper. Manag. "
+        "12 (2) (2010) 226–254.",
+        P_CARRIED_COPY[1],
+    ]
+    assert n_new == 0
+
+
+def test_split_drops_a_dot_numbered_copy_of_a_listed_entry():
+    refs = [
+        "6. Bateson P. Mate choice. Cambridge University Press; 1983. 7. ten Cate C, Vos DR. "
+        "Sexual imprinting and evolutionary",
+        "7. ten Cate C, Vos DR. Sexual imprinting and evolutionary processes in birds. "
+        "Adv Study Behav. 1999;28:1-31.",
+    ]
+    out, n_new = split_merged_refs(refs)
+
+    assert out == ["6. Bateson P. Mate choice. Cambridge University Press; 1983.", refs[1]]
+    assert n_new == 0
+
+
+def test_split_keeps_an_entry_of_a_restarted_list_that_only_opens_like_another():
+    # A second list restarts at [1]; its [2] opens like the first list's [2]
+    # but is a different report.
+    refs = [
+        "[1] Doe J. Annual surveillance summary. 2019.",
+        "[2] Centers for Disease Control and Prevention. Morbidity and Mortality Weekly "
+        "Report 2016;65:1-3.",
+        "[1] Smith J. Supplement list. 2020. [2] Centers for Disease Control and Prevention. "
+        "Morbidity and Mortality Weekly Report 2021;70:9-12.",
+    ]
+    out, n_new = split_merged_refs(refs)
+
+    assert out[-1] == (
+        "[2] Centers for Disease Control and Prevention. Morbidity and Mortality Weekly "
+        "Report 2021;70:9-12."
+    )
+    assert n_new == 1
+
+
+def test_split_drops_a_carried_over_copy_that_turns_to_ocr_noise_after_its_opening():
+    refs = [
+        "4. Bell Y, Tessier A, Cachia C, Giroud M, Mossiat C, Bertrand N, Garnier P, Marie C. "
+        "Time-dependent contribution of glial cells to BDNF production. Neurochem Int. "
+        "2011;58:102-11.",
+        "3. Lee TH, Kato H. Hypertension and BDNF. Brain Res. 2006;1101:1-9. 4. Bell Y, "
+        "Tessier A, Cachia C, Giroud M, Mossiat C, Bertrand N, Garnier P, Marie C. "
+        "Time-dependent contributlon of glial cells to BDNF",
+    ]
+    out, n_new = split_merged_refs(refs)
+
+    assert out == [refs[0], "3. Lee TH, Kato H. Hypertension and BDNF. Brain Res. 2006;1101:1-9."]
+    assert n_new == 0
+
+
+def test_split_keeps_a_piece_whose_marker_is_listed_with_other_text():
+    refs = [
+        "6. Bateson P. Mate choice. Cambridge University Press; 1983. 7. ten Cate C, Vos DR. "
+        "Sexual imprinting and evolutionary processes in birds. Adv Study Behav. 1999.",
+        "7. Bereczkei T, Gyuris P. Sexual imprinting in human mate choice. Proc Biol Sci. 2004.",
+    ]
+    out, n_new = split_merged_refs(refs)
+
+    assert n_new == 1
+    assert out[1].startswith("7. ten Cate C")
+    assert out[2] == refs[1]
 
 
 from unittest.mock import Mock

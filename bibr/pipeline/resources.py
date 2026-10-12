@@ -144,6 +144,7 @@ class ResourceManager:
         self._ocr_preload_stop: threading.Event | None = None
         self._ocr_init_lock = asyncio.Lock()
         self._llm_server: VllmMlxLlmServer | None = None
+        self._llm_server_backend: str | None = None
         self._llm_init_lock = asyncio.Lock()
         self._llm_client: LLMClient | None = None
         if classifier_resources is None:
@@ -480,6 +481,9 @@ class ResourceManager:
             # A fallback chain is transactional only after the candidate has
             # passed readiness checks, so preload cannot safely select one.
             return
+        if self._llm_server_blocks_ocr(candidates[0].backend):
+            # await_ocr stops the LLM server first; a preload would start beside it.
+            return
         # Import the backend module on the main thread before submitting to
         # the worker so registration completes before the client factory runs.
         backend_name = self._resolve_ocr_backend_name(candidates[0].backend)
@@ -594,6 +598,12 @@ class ResourceManager:
                 client = None
                 published = False
                 try:
+                    if self._llm_server_blocks_ocr(candidate.backend):
+                        logger.info(
+                            "Stopping the managed vLLM LLM server to free VRAM for "
+                            "PaddleOCR-VL vLLM; the LLM stage restarts it"
+                        )
+                        await self.close_llm_server()
                     client = await self._construct_ocr_candidate(candidate)
                     if client is None:
                         raise RuntimeError("factory returned no client")
@@ -725,6 +735,32 @@ class ResourceManager:
 
     # -- LLM server (vllm-mlx on Apple Silicon, vllm on Linux/CUDA) --
 
+    def _vllm_shares_overcommit(self) -> bool:
+        """Whether the managed vLLM LLM and PaddleOCR-VL servers cannot run together.
+
+        Each vLLM server claims a fixed share of total VRAM when it starts and
+        refuses to start while less is free, so with shares summing above 1
+        (the defaults, 0.85 + 0.92) the one starting must stop the other.
+        """
+        from bibr.ocr.registry import PADDLE_VLLM_GPU_MEMORY_UTILIZATION
+
+        llm_share = self._managed_vllm_fraction or self._settings.llm.local_mem_fraction
+        return llm_share + PADDLE_VLLM_GPU_MEMORY_UTILIZATION > 1.0
+
+    def _llm_server_blocks_ocr(self, ocr_backend: str) -> bool:
+        """Whether starting ``ocr_backend`` must first stop the managed LLM server.
+
+        The LLM server outlives a chunk while a balanced run tears OCR down
+        after each one, so a later chunk's ``paddle-vllm`` restart found the
+        LLM still holding its share: explicit ``paddle-vllm`` failed every file
+        and the automatic chain fell back to GLM mid-batch.
+        """
+        return (
+            ocr_backend == "paddle-vllm"
+            and self._llm_server_backend == "vllm"
+            and self._vllm_shares_overcommit()
+        )
+
     async def _construct_llm_server(self, factory):
         """Run *factory(stop_event)* off the loop; cancellation sets the event."""
         stop_event = threading.Event()
@@ -738,11 +774,25 @@ class ResourceManager:
         """Start local LLM server if backend requires one (idempotent).
 
         A managed server binds the pipeline's fixed port and is long-lived:
-        ``process_chunk`` reuses it across chunks and never tears it down. Re-
-        invoking for an already-running server would spawn a second subprocess
-        that fails to bind the port — hard-failing every file in later chunks —
-        so no-op when a server is already up.
+        ``process_chunk`` reuses it across chunks and never tears it down
+        (only a ``paddle-vllm`` OCR start that cannot fit beside it stops it,
+        see ``_llm_server_blocks_ocr``). Re-invoking for an already-running
+        server would spawn a second subprocess that fails to bind the port —
+        hard-failing every file in later chunks — so no-op when a server is
+        already up.
         """
+        if (
+            backend == "vllm"
+            and self._llm_server is None
+            and self._ocr is not None
+            and self.ocr_backend == "paddle-vllm"
+            and self._vllm_shares_overcommit()
+        ):
+            # OCR kept resident (keep_all, OCR_UNLOAD_BETWEEN_CHUNKS=never)
+            # holds its share, and vLLM would refuse to start beside it. Done
+            # outside the LLM lock: await_ocr takes the locks the other way.
+            logger.info("Stopping PaddleOCR-VL vLLM to free VRAM for the vLLM LLM server")
+            await self.shutdown_ocr()
         async with self._llm_init_lock:
             if self._llm_server is not None:
                 return
@@ -799,12 +849,14 @@ class ResourceManager:
                 server.shutdown()
                 raise
             self._llm_server = server
+            self._llm_server_backend = backend
 
     def shutdown_llm_server(self) -> None:
         """Synchronous finalizer; async owners should use close_llm_server."""
         if self._llm_server is None:
             return
         server, self._llm_server = self._llm_server, None
+        self._llm_server_backend = None
         server.shutdown()
 
     async def close_llm_server(self) -> None:

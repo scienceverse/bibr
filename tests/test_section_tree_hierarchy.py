@@ -36,21 +36,21 @@ def test_subsection_attaches_to_most_recent_top_level():
     assert secs[2].parent_section_id == 1
 
 
-def test_subsection_with_no_prior_top_level_falls_back_to_root():
+def test_first_heading_with_no_section_before_it_opens_a_top_level_section():
     secs = [_section(1, "Stray", CanonicalSection.UNKNOWN, False)]
     assign_hierarchy_from_top_level(secs)
-    assert secs[0].level == 2
+    assert secs[0].level == 1
     assert secs[0].parent_section_id == 0
 
 
-def test_numbered_headings_are_skipped():
-    """Headings whose header text starts with '1.', '1.1', etc. keep their existing level/parent."""
+def test_numbered_heading_level_is_its_depth():
+    """The parser's level (depth + 1 under the title) gives way to the depth."""
     sec = _section(1, "1.1 Encoder", CanonicalSection.UNKNOWN, False)
     sec.level = 3
     sec.parent_section_id = 5
     assign_hierarchy_from_top_level([sec])
-    assert sec.level == 3
-    assert sec.parent_section_id == 5
+    assert sec.level == 2
+    assert sec.parent_section_id == 0
 
 
 def test_top_level_resets_recent_anchor():
@@ -103,17 +103,15 @@ def test_unknown_after_imrad_anchor_folds_into_anchor():
     assert secs[2].level == 2 and secs[2].parent_section_id == 1
 
 
-def test_unknown_before_any_anchor_stays_orphan():
-    """An UNKNOWN section with no prior IMRaD anchor is not folded."""
+def test_unknown_before_any_anchor_opens_a_top_level_section():
+    """An UNKNOWN section with no section before it is level 1, not folded."""
     secs = [
         _typed_section(1, "Mystery Heading", CanonicalSection.UNKNOWN),
         _typed_section(2, "Method", CanonicalSection.METHODS),
     ]
     assign_hierarchy_from_top_level(secs)
-    # Mystery section had no anchor to attach to — left at original level/parent.
-    assert secs[0].level == 2
-    assert secs[0].parent_section_id == 0
-    assert secs[1].level == 1
+    assert (secs[0].level, secs[0].parent_section_id) == (1, 0)
+    assert (secs[1].level, secs[1].parent_section_id) == (1, 0)
 
 
 def test_interlude_does_not_reset_anchor():
@@ -123,6 +121,7 @@ def test_interlude_does_not_reset_anchor():
         _typed_section(2, "Open Practices", CanonicalSection.OPEN_DATA),
         _typed_section(3, "Apparatus", CanonicalSection.UNKNOWN),
     ]
+    secs[1].classification_source = "substring_alias"
     assign_hierarchy_from_top_level(secs)
     # OPEN_DATA stays as level=1 interlude.
     assert secs[1].level == 1
@@ -133,14 +132,31 @@ def test_interlude_does_not_reset_anchor():
 
 
 def test_interlude_promoted_to_top_level():
-    """COI/funding/etc. with no is_top hint become level=1 (top-level)."""
+    """Alias-typed COI/funding/etc. become level=1 (top-level)."""
     secs = [
         _typed_section(1, "Funding", CanonicalSection.FUNDING),
         _typed_section(2, "Conflict of Interest", CanonicalSection.COI),
     ]
+    for sec in secs:
+        sec.classification_source = "exact_alias"
     assign_hierarchy_from_top_level(secs)
     assert secs[0].level == 1
     assert secs[1].level == 1
+
+
+def test_guessed_back_matter_type_does_not_lift_a_body_heading():
+    """A model guess of a back-matter type for a heading printed inside
+    Methods keeps it a subsection of Methods."""
+    secs = [
+        _typed_section(1, "Methods", CanonicalSection.METHODS),
+        _typed_section(2, "Ethical considerations of the design", CanonicalSection.ETHICS),
+        _typed_section(3, "History", CanonicalSection.ABSTRACT),
+    ]
+    secs[0].classification_source = "exact_alias"
+    secs[1].classification_source = "model"
+    secs[2].classification_source = "llm"
+    assign_hierarchy_from_top_level(secs)
+    assert [(s.level, s.parent_section_id) for s in secs] == [(1, 0), (2, 1), (2, 1)]
 
 
 def test_imrad_anchor_progresses_through_sections():
@@ -158,7 +174,7 @@ def test_imrad_anchor_progresses_through_sections():
 
 def test_repeat_imrad_type_folds_under_first():
     """A second METHODS-typed section (e.g. 'Statistical Analysis' aliased to
-    METHODS) folds under the first METHODS section, not as a new anchor."""
+    METHODS) is a subsection of the Methods part it is printed in."""
     secs = [
         _typed_section(1, "Method", CanonicalSection.METHODS),
         _typed_section(2, "Statistical Analysis", CanonicalSection.METHODS),
@@ -197,11 +213,11 @@ def test_exact_alias_heading_outranks_an_earlier_keyword_anchor():
     assign_hierarchy_from_top_level(secs)
     assert [(s.section_id, s.level, s.parent_section_id) for s in secs] == [
         (1, 1, 0),
-        (2, 1, 0),
+        # A keyword heading stays in the part where it is printed.
+        (2, 2, 1),
         (3, 1, 0),
         (4, 1, 0),
         (5, 2, 4),
-        # A later keyword heading folds under the exact one.
         (6, 2, 4),
     ]
 
@@ -226,7 +242,7 @@ def test_exact_part_name_experimental_section_outranks_a_keyword_anchor():
     assign_hierarchy_from_top_level(secs)
     assert [(s.section_id, s.level, s.parent_section_id) for s in secs] == [
         (1, 1, 0),
-        (2, 1, 0),
+        (2, 2, 1),
         (3, 1, 0),
         (4, 1, 0),
         (5, 2, 4),
@@ -334,16 +350,19 @@ def test_part_headings_are_exact_imrad_aliases():
     assert not_parts == []
 
 
-def test_repeat_exact_alias_heading_still_folds_under_the_first():
+def test_repeated_part_name_opens_a_new_part():
+    """A part name printed again (a second study's "Methods") opens a level-1
+    section where it is printed instead of folding back under the first."""
     secs = [
         _typed_section(1, "Methods", CanonicalSection.METHODS),
         _typed_section(2, "Results", CanonicalSection.RESULTS),
         _typed_section(3, "Methods", CanonicalSection.METHODS),
+        _typed_section(4, "Procedure", CanonicalSection.UNKNOWN),
     ]
     for sec in secs:
         sec.classification_source = "exact_alias"
     assign_hierarchy_from_top_level(secs)
-    assert (secs[2].level, secs[2].parent_section_id) == (2, 1)
+    assert [(s.level, s.parent_section_id) for s in secs] == [(1, 0), (1, 0), (1, 0), (2, 3)]
 
 
 def test_explicit_is_top_overrides_type_based_rule():
@@ -355,3 +374,443 @@ def test_explicit_is_top_overrides_type_based_rule():
     assign_hierarchy_from_top_level(secs)
     assert secs[1].level == 1
     assert secs[1].parent_section_id == 0
+
+
+# ---------------------------------------------------------------------------
+# Numbering and document order (modelled on tester papers, #119)
+# ---------------------------------------------------------------------------
+
+
+def _parsed(sid: int, header: str, type_=CanonicalSection.UNKNOWN, source=None, level=2):
+    """A section as the parser leaves it: numbered headings at depth + 1 under
+    the title, everything else at its layout level."""
+    sec = PaperSection(section_id=sid, header=header, level=level, parent_section_id=1)
+    sec.section_type = type_
+    sec.classification_source = source
+    return sec
+
+
+def _title(sid: int = 1) -> PaperSection:
+    sec = PaperSection(section_id=sid, header="A Paper Title", level=1, parent_section_id=0)
+    sec.section_type = CanonicalSection.TITLE
+    sec.classification_source = "title"
+    return sec
+
+
+def _tree(secs):
+    return [(s.section_id, s.level, s.parent_section_id) for s in secs]
+
+
+def test_numbered_preprint_sections_take_their_depth_and_prefix_parent():
+    """A preprint numbers its parts 1-4 and their subsections 3.1-4.2: the
+    parser put every part at level 2 under the title."""
+    secs = [
+        _title(),
+        _parsed(2, "Abstract", CanonicalSection.ABSTRACT, "exact_alias"),
+        _parsed(3, "1 Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _parsed(4, "2 Materials and methods", CanonicalSection.METHODS, "exact_alias"),
+        _parsed(5, "2.1 Synthesis", CanonicalSection.METHODS, "model", level=3),
+        _parsed(6, "3 Results", CanonicalSection.RESULTS, "exact_alias"),
+        _parsed(7, "3.1 Morphology", CanonicalSection.RESULTS, "llm", level=3),
+        _parsed(8, "3.2 Structural characterization", CanonicalSection.METHODS, "llm", level=3),
+        _parsed(9, "Statistical note", CanonicalSection.UNKNOWN, None),
+        _parsed(10, "4 Discussion", CanonicalSection.DISCUSSION, "exact_alias"),
+        _parsed(11, "4.1 Mechanism", CanonicalSection.RESULTS, "llm", level=3),
+        _parsed(12, "Declarations", CanonicalSection.UNKNOWN, None),
+        _parsed(13, "Funding", CanonicalSection.FUNDING, "exact_alias"),
+        _parsed(14, "References", CanonicalSection.REFERENCES, "exact_alias"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    assert _tree(secs) == [
+        (1, 1, 0),
+        (2, 1, 0),
+        (3, 1, 0),
+        (4, 1, 0),
+        (5, 2, 4),
+        (6, 1, 0),
+        (7, 2, 6),
+        (8, 2, 6),
+        # An unnumbered heading after 3.2 is its subsection.
+        (9, 3, 8),
+        (10, 1, 0),
+        (11, 2, 10),
+        (12, 1, 0),
+        # A statement printed under "Declarations" is its subsection.
+        (13, 2, 12),
+        (14, 1, 0),
+    ]
+
+
+def test_roman_numbered_parts_parent_their_arabic_and_lettered_subsections():
+    """An IEEE-style paper: Roman parts, "4.2" under "IV", lettered and
+    "ii)" items under the section they are printed in."""
+    secs = [
+        _title(),
+        _parsed(2, "I INTRODUCTION", CanonicalSection.INTRODUCTION, "substring_alias"),
+        _parsed(3, "II RELATED WORK", CanonicalSection.INTRODUCTION, "substring_alias"),
+        _parsed(4, "III EXISTING SYSTEM", CanonicalSection.METHODS, "llm"),
+        _parsed(5, "IV PROPOSED METHOD", CanonicalSection.METHODS, "substring_alias"),
+        _parsed(6, "4.1 Haze model", CanonicalSection.METHODS, "llm", level=3),
+        _parsed(7, "i) Dark channel", CanonicalSection.METHODS, "llm"),
+        _parsed(8, "ii) Fading Section", CanonicalSection.UNKNOWN, None),
+        _parsed(9, "4.2 CONTRACT IN HRF", CanonicalSection.METHODS, "llm", level=3),
+        _parsed(10, "V MODULE DESCRIPTION", CanonicalSection.METHODS, "llm"),
+        _parsed(11, "A. Input module", CanonicalSection.METHODS, "llm"),
+        _parsed(12, "VI CONCLUSION", CanonicalSection.DISCUSSION, "substring_alias"),
+        _parsed(13, "REFERENCES", CanonicalSection.REFERENCES, "exact_alias"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    assert _tree(secs) == [
+        (1, 1, 0),
+        (2, 1, 0),
+        (3, 1, 0),
+        (4, 1, 0),
+        (5, 1, 0),
+        (6, 2, 5),
+        (7, 3, 6),
+        (8, 3, 6),
+        (9, 2, 5),
+        (10, 1, 0),
+        (11, 2, 10),
+        (12, 1, 0),
+        (13, 1, 0),
+    ]
+
+
+def test_a_lone_roman_looking_word_and_large_integers_are_not_numbers():
+    secs = [
+        _parsed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _parsed(2, "V Model Design", CanonicalSection.UNKNOWN, None),
+        _parsed(3, "75 Years of Screening", CanonicalSection.UNKNOWN, None),
+        _parsed(4, "Methods", CanonicalSection.METHODS, "exact_alias"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    assert _tree(secs) == [(1, 1, 0), (2, 2, 1), (3, 2, 1), (4, 1, 0)]
+
+
+def test_chapters_number_a_thesis_and_contain_their_part_names():
+    """A dissertation: "Chapter N" is level 1 and the "Introduction" or
+    "Methodology" printed inside a chapter is its subsection."""
+    secs = [
+        _title(),
+        _parsed(2, "Table of Contents", CanonicalSection.RESULTS, "model"),
+        _parsed(3, "Chapter 1: Introduction to the Study", CanonicalSection.INTRODUCTION, "llm"),
+        _parsed(4, "Problem Statement", CanonicalSection.INTRODUCTION, "model"),
+        _parsed(5, "Nature of the Study", CanonicalSection.METHODS, "model"),
+        _parsed(
+            6, "Chapter 2: Literature Review", CanonicalSection.INTRODUCTION, "substring_alias"
+        ),
+        _parsed(7, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _parsed(8, "Chapter 3: Research Method", CanonicalSection.METHODS, "substring_alias"),
+        _parsed(9, "Methodology", CanonicalSection.METHODS, "exact_alias"),
+        _parsed(10, "Chapter 4: Results", CanonicalSection.RESULTS, "substring_alias"),
+        _parsed(11, "Data Collection", CanonicalSection.METHODS, "exact_alias"),
+        _parsed(12, "References", CanonicalSection.REFERENCES, "exact_alias"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    assert _tree(secs) == [
+        (1, 1, 0),
+        (2, 1, 0),
+        (3, 1, 0),
+        (4, 2, 3),
+        (5, 2, 3),
+        (6, 1, 0),
+        (7, 2, 6),
+        (8, 1, 0),
+        (9, 2, 8),
+        (10, 1, 0),
+        (11, 2, 10),
+        (12, 1, 0),
+    ]
+
+
+def test_all_caps_headings_are_parts_when_the_part_names_are_all_caps():
+    """A review prints its parts in capitals and repeats "Overview" in each;
+    every Overview belongs to the part it is printed in."""
+    secs = [
+        _title(),
+        _parsed(2, "INTRODUCTION", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _parsed(3, "HISTORY", CanonicalSection.ABSTRACT, "model"),
+        _parsed(4, "Overview", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _parsed(5, "CURATIVE EMBOLIZATION OF DEEP LESIONS", CanonicalSection.TITLE, "model"),
+        _parsed(6, "Overview", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _parsed(7, "Technique", CanonicalSection.METHODS, "llm"),
+        _parsed(8, "CONCLUSIONS", CanonicalSection.DISCUSSION, "exact_alias"),
+        _parsed(9, "REFERENCES", CanonicalSection.REFERENCES, "exact_alias"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    assert _tree(secs) == [
+        (1, 1, 0),
+        (2, 1, 0),
+        (3, 1, 0),
+        (4, 2, 3),
+        (5, 1, 0),
+        (6, 2, 5),
+        (7, 2, 5),
+        (8, 1, 0),
+        (9, 1, 0),
+    ]
+
+
+def test_back_matter_printed_inside_methods_does_not_take_its_subsections():
+    secs = [
+        _parsed(1, "Methods", CanonicalSection.METHODS, "exact_alias"),
+        _parsed(2, "Participants", CanonicalSection.METHODS, "exact_alias"),
+        _parsed(3, "Data sharing", CanonicalSection.OPEN_DATA, "exact_alias"),
+        _parsed(4, "Statistical analysis", CanonicalSection.METHODS, "exact_alias"),
+        _parsed(5, "Running title: Short", CanonicalSection.UNKNOWN, None),
+        _parsed(6, "Results", CanonicalSection.RESULTS, "exact_alias"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    assert _tree(secs) == [(1, 1, 0), (2, 2, 1), (3, 1, 0), (4, 2, 1), (5, 1, 0), (6, 1, 0)]
+
+
+def test_first_heading_of_a_type_is_a_part_only_when_no_part_name_exists():
+    """With "Introduction" printed but no Methods or Results part names, the
+    first method- and results-typed headings open the parts."""
+    secs = [
+        _parsed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _parsed(2, "Prior accounts", CanonicalSection.INTRODUCTION, "model"),
+        _parsed(3, "Participants", CanonicalSection.METHODS, "exact_alias"),
+        _parsed(4, "Procedure", CanonicalSection.UNKNOWN, None),
+        _parsed(5, "Accuracy improved with practice", CanonicalSection.RESULTS, "model"),
+        _parsed(6, "Speed", CanonicalSection.RESULTS, "model"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    assert _tree(secs) == [(1, 1, 0), (2, 2, 1), (3, 1, 0), (4, 2, 3), (5, 1, 0), (6, 2, 5)]
+
+
+def test_cover_sheet_labels_sit_at_level_one_and_contain_nothing():
+    """A preprint cover page: the label rows are front matter, so the
+    affiliation line after them opens its own section instead of nesting."""
+    secs = [
+        _parsed(1, "Research Article", CanonicalSection.UNKNOWN, None),
+        _parsed(2, "Posted Date: September 29th, 2026", CanonicalSection.UNKNOWN, None),
+        _parsed(3, "Corresponding author", CanonicalSection.UNKNOWN, None),
+        _parsed(4, "Universidade Federal", CanonicalSection.UNKNOWN, None),
+        _parsed(5, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    assert _tree(secs) == [(1, 1, 0), (2, 1, 0), (3, 1, 0), (4, 1, 0), (5, 1, 0)]
+
+
+def test_guessed_back_matter_after_the_numbered_body_sits_at_level_one():
+    """In a numbered paper, an unnumbered heading after the last numbered body
+    heading with a guessed back-matter type is back matter, not part of the
+    conclusions, and holds the unnumbered headings printed under it. Numbered
+    points after the reference list (a peer-review report) do not extend the
+    body."""
+    secs = [
+        _parsed(1, "1. Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _parsed(2, "2. Methods", CanonicalSection.METHODS, "exact_alias"),
+        _parsed(3, "Ethics in the sampling frame", CanonicalSection.ETHICS, "model"),
+        _parsed(4, "3. Conclusions", CanonicalSection.DISCUSSION, "exact_alias"),
+        _parsed(5, "Policy outlook", CanonicalSection.UNKNOWN, None),
+        _parsed(6, "Ethics and consent", CanonicalSection.ETHICS, "model"),
+        _parsed(7, "Data availability", CanonicalSection.OPEN_DATA, "exact_alias"),
+        _parsed(8, "Underlying data", CanonicalSection.UNKNOWN, None),
+        _parsed(9, "References", CanonicalSection.REFERENCES, "exact_alias"),
+        _parsed(10, "Reviewer report", CanonicalSection.UNKNOWN, None),
+        _parsed(11, "1. Clarify the sampling", CanonicalSection.METHODS, "model"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    assert _tree(secs)[:9] == [
+        (1, 1, 0),
+        (2, 1, 0),
+        (3, 2, 2),
+        (4, 1, 0),
+        (5, 2, 4),
+        (6, 1, 0),
+        (7, 1, 0),
+        (8, 2, 7),
+        (9, 1, 0),
+    ]
+
+
+def test_lettered_appendices_do_not_end_the_numbered_body():
+    """Lettered appendix numbers are not body numbering: guessed back matter
+    between the conclusions and "A.1" still sits at level 1."""
+    secs = [
+        _parsed(1, "1 Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _parsed(2, "2 Results", CanonicalSection.RESULTS, "exact_alias"),
+        _parsed(3, "3 Conclusions", CanonicalSection.DISCUSSION, "exact_alias"),
+        _parsed(4, "Author statement", CanonicalSection.AUTHOR_CONTRIBUTIONS, "model"),
+        _parsed(5, "A.1 Proofs", CanonicalSection.APPENDIX, "substring_alias"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    assert _tree(secs)[3] == (4, 1, 0)
+
+
+def test_statements_under_a_declarations_heading_are_its_subsections():
+    """BMC prints its statements under "Declarations"; the reference list
+    after them is level 1 again."""
+    secs = [
+        _parsed(1, "Discussion", CanonicalSection.DISCUSSION, "exact_alias"),
+        _parsed(2, "Declarations", CanonicalSection.UNKNOWN, None),
+        _parsed(
+            3, "Ethics approval and consent to participate", CanonicalSection.ETHICS, "exact_alias"
+        ),
+        _parsed(4, "Competing interests", CanonicalSection.COI, "exact_alias"),
+        _parsed(5, "References", CanonicalSection.REFERENCES, "exact_alias"),
+        _parsed(6, "Funding", CanonicalSection.FUNDING, "exact_alias"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    assert _tree(secs) == [(1, 1, 0), (2, 1, 0), (3, 2, 2), (4, 2, 2), (5, 1, 0), (6, 1, 0)]
+
+
+def test_numbered_study_markers_parent_their_subsections():
+    """'2 Study 1' is a study marker and the numbered parent of 2.1; no
+    sub-number crosses back to '1 Introduction'."""
+    headers = [
+        "1 Introduction",
+        "1.1 Theoretical background",
+        "2 Study 1",
+        "2.1 Method",
+        "2.2 Results",
+        "3 Study 2",
+        "3.1 Method",
+        "3.2 Results",
+        "4 General discussion",
+    ]
+    for markers in ({4, 7}, None):
+        secs = [_title()] + [_parsed(i + 2, h) for i, h in enumerate(headers)]
+        assign_hierarchy_from_top_level(secs, marker_ids=markers)
+        assert _tree(secs) == [
+            (1, 1, 0),
+            (2, 1, 0),
+            (3, 2, 2),
+            (4, 1, 0),
+            (5, 2, 4),
+            (6, 2, 4),
+            (7, 1, 0),
+            (8, 2, 7),
+            (9, 2, 7),
+            (10, 1, 0),
+        ]
+
+
+def test_a_sub_number_never_crosses_into_another_part():
+    """'3 Results' was not read: 3.1 and 3.2 do not go under '2 Methods'."""
+    secs = [
+        _title(),
+        _parsed(2, "1 Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _parsed(3, "2 Methods", CanonicalSection.METHODS, "exact_alias"),
+        _parsed(4, "2.1 Data", CanonicalSection.METHODS, "model"),
+        _parsed(5, "3.1 Effect of treatment on recovery", CanonicalSection.RESULTS, "model"),
+        _parsed(6, "3.2 Subgroup analyses", CanonicalSection.RESULTS, "model"),
+        _parsed(7, "4 Discussion", CanonicalSection.DISCUSSION, "exact_alias"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    parents = {s.section_id: s.parent_section_id for s in secs}
+    assert parents[5] not in (3, 4) and parents[6] not in (3, 4, 5)
+    assert (parents[4], parents[7]) == (3, 0)
+
+
+def test_capitals_used_for_two_levels_nest_under_the_part():
+    """'METHOD' > 'PARTICIPANTS': capitals that name no part go under the
+    methods, results or discussion part before them."""
+    secs = [
+        _title(),
+        _parsed(2, "INTRODUCTION", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _parsed(3, "METHOD", CanonicalSection.METHODS, "exact_alias"),
+        _parsed(4, "PARTICIPANTS", CanonicalSection.METHODS, "exact_alias"),
+        _parsed(5, "STIMULI AND APPARATUS"),
+        _parsed(6, "Eye-tracking settings"),
+        _parsed(7, "RESULTS", CanonicalSection.RESULTS, "exact_alias"),
+        _parsed(8, "MANIPULATION CHECK"),
+        _parsed(9, "Exploratory analyses"),
+        _parsed(10, "DISCUSSION", CanonicalSection.DISCUSSION, "exact_alias"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    parents = {s.section_id: s.parent_section_id for s in secs}
+    assert [parents[i] for i in (2, 3, 4, 5, 6, 7, 8, 9, 10)] == [0, 0, 3, 3, 3, 0, 7, 7, 0]
+
+
+def test_a_singular_or_plural_part_name_in_capitals_opens_its_part():
+    """'RESULT AND DISCUSSIONS' names a part: it does not go under 'METHODS'."""
+    secs = [
+        _title(),
+        _parsed(2, "INTRODUCTION", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _parsed(3, "METHODS", CanonicalSection.METHODS, "exact_alias"),
+        _parsed(4, "Research Design", CanonicalSection.METHODS, "model"),
+        _parsed(5, "RESULT AND DISCUSSIONS", CanonicalSection.RESULTS, "model"),
+        _parsed(6, "Validity Test", CanonicalSection.RESULTS, "model"),
+        _parsed(7, "CONCLUSION", CanonicalSection.DISCUSSION, "exact_alias"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    parents = {s.section_id: s.parent_section_id for s in secs}
+    assert [parents[i] for i in (2, 3, 4, 5, 6, 7)] == [0, 0, 3, 0, 5, 0]
+
+
+def test_a_closing_conclusion_does_not_switch_off_the_first_of_type_rule():
+    secs = [
+        _title(),
+        _parsed(2, "Abstract", CanonicalSection.ABSTRACT, "exact_alias"),
+        _parsed(3, "The Social Functions of Attitudes"),
+        _parsed(4, "Empirical Support for the Model"),
+        _parsed(5, "Testing the Functions"),
+        _parsed(6, "Implications for Theory and Research", CanonicalSection.DISCUSSION, "model"),
+        _parsed(7, "Intersectionality"),
+        _parsed(8, "Prototypicality"),
+        _parsed(9, "Conclusion", CanonicalSection.DISCUSSION, "exact_alias"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    by_id = {s.section_id: s for s in secs}
+    assert (by_id[6].level, by_id[6].parent_section_id) == (1, 0)
+    assert by_id[7].parent_section_id == 6 and by_id[9].parent_section_id == 0
+
+
+def test_a_general_discussion_closes_part_n_headings():
+    """Two 'Part N' headings are not a thesis's chapters: the general
+    discussion and the conclusion belong to the whole paper."""
+    secs = [
+        _title(),
+        _parsed(2, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _parsed(3, "Part 1: Pilot survey"),
+        _parsed(4, "Method", CanonicalSection.METHODS, "exact_alias"),
+        _parsed(5, "Results", CanonicalSection.RESULTS, "exact_alias"),
+        _parsed(6, "Part 2: Main survey"),
+        _parsed(7, "Method", CanonicalSection.METHODS, "exact_alias"),
+        _parsed(8, "Results", CanonicalSection.RESULTS, "exact_alias"),
+        _parsed(9, "General discussion", CanonicalSection.DISCUSSION, "exact_alias"),
+        _parsed(10, "Conclusion", CanonicalSection.DISCUSSION, "exact_alias"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    parents = {s.section_id: s.parent_section_id for s in secs}
+    assert [parents[i] for i in range(2, 11)] == [0, 0, 3, 3, 0, 6, 6, 0, 0]
+
+
+def test_a_panel_heading_does_not_take_the_body_after_it():
+    secs = [
+        _title(),
+        _parsed(2, "Methods", CanonicalSection.METHODS, "exact_alias"),
+        _parsed(3, "Study design and participants", CanonicalSection.METHODS, "model"),
+        _parsed(4, "Research in context", CanonicalSection.UNKNOWN, "exact_alias"),
+        _parsed(5, "Evidence before this study", CanonicalSection.UNKNOWN, "exact_alias"),
+        _parsed(6, "Procedures", CanonicalSection.METHODS, "model"),
+        _parsed(7, "Statistical analysis", CanonicalSection.METHODS, "exact_alias"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    parents = {s.section_id: s.parent_section_id for s in secs}
+    assert (parents[4], parents[6], parents[7]) == (0, 2, 2)
+
+
+def test_guessed_back_matter_after_an_unnumbered_discussion_sits_at_level_one():
+    secs = [
+        _title(),
+        _parsed(2, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _parsed(3, "Discussion", CanonicalSection.DISCUSSION, "exact_alias"),
+        _parsed(4, "Limitations", CanonicalSection.DISCUSSION, "exact_alias"),
+        _parsed(5, "Supplementary data", CanonicalSection.ENDNOTE, "model"),
+        _parsed(6, "Declaration of interests", CanonicalSection.COI, "model"),
+        _parsed(7, "Abbreviations", CanonicalSection.ENDNOTE, "llm"),
+        _parsed(8, "References", CanonicalSection.REFERENCES, "exact_alias"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    assert [(s.level, s.parent_section_id) for s in secs[3:]] == [
+        (2, 3),
+        (1, 0),
+        (1, 0),
+        (1, 0),
+        (1, 0),
+    ]

@@ -73,9 +73,10 @@ from bibr.export.models import (
 from bibr.export.normalize import arxiv_id, credit_roles, iso_date, license_ids
 from bibr.export.spans import SpanLocator, equation_span, url_span, xref_span
 from bibr.export.structure_ids import ExportIds, export_ids
-from bibr.extract.research_integrity import collect_affiliations
+from bibr.extract.research_integrity import affiliation_key, collect_affiliations
 from bibr.models import ORGANIZATION_ROLE, BibType, canonicalize_orcid, migrate_bib_type
 from bibr.processing_warnings import ProcessingWarning, WarningCode
+from bibr.structure.citation_linker import reanchor_citation_receipt
 from bibr.utils.text import normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
@@ -330,13 +331,19 @@ def _export_affiliations(paper: Paper) -> list[AffiliationExport]:
     if metadata is None:
         return []
     texts, author_ids = collect_affiliations(metadata.authors)
-    parsed = {a.text: a for a in metadata.affiliations}
+    # Joined on the folded key, the one collect_affiliations dedupes on, so a
+    # parse keyed by a differently spaced copy of the same text still matches.
+    parsed = {affiliation_key(a.text): a for a in metadata.affiliations}
     rows: list[tuple[str, list[int]]] = list(zip(texts, author_ids, strict=True))
-    seen = set(texts)
-    rows.extend((a.text, list(a.author_ids)) for a in metadata.affiliations if a.text not in seen)
+    seen = {affiliation_key(text) for text in texts}
+    rows.extend(
+        (a.text, list(a.author_ids))
+        for a in metadata.affiliations
+        if affiliation_key(a.text) not in seen
+    )
     exported = []
     for position, (text, ids) in enumerate(rows, start=1):
-        parse = parsed.get(text)
+        parse = parsed.get(affiliation_key(text))
         exported.append(
             AffiliationExport(
                 affiliation_id=position,
@@ -963,9 +970,15 @@ def _export_paper_payload(
                 )
             )
 
+    # Spans of xrefs, links, expressions and citation candidates are offsets
+    # into the exported text.
+    texts = {row.text_id: row.text for row in text_data}
+
     citation_linking: CitationLinkingExport | None = None
     if paper.contents.citation_receipt is not None:
-        receipt = paper.contents.citation_receipt
+        # Checked against the exported text, as xref spans are: text cleaning
+        # after linking moves or removes the printed citations.
+        receipt = reanchor_citation_receipt(paper.contents.citation_receipt, texts)
         citation_linking = CitationLinkingExport(
             style_scores=dict(receipt.style_scores),
             candidates=[
@@ -1060,8 +1073,6 @@ def _export_paper_payload(
         )
 
     meta = paper.metadata
-    # Spans of xrefs, links and expressions are offsets into the exported text.
-    texts = {row.text_id: row.text for row in text_data}
     xref_locator = SpanLocator(texts, shared=True)
     url_locator = SpanLocator(texts, shared=False)
     eq_locator = SpanLocator(texts, shared=False)

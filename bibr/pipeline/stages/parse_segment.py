@@ -7,6 +7,8 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
+from bibr.processing_warnings import ProcessingWarning, WarningCode
+
 if TYPE_CHECKING:
     from bibr.pipeline.context import PipelineContext
 
@@ -33,6 +35,19 @@ def _parse_pdf(ocr_regions, outline=None, *, settings=None, first_page_index=0):
     return parser, contents
 
 
+async def _document_layer(fs, settings, *, start_page, end_page):
+    """The file's document layer with its regions as blocks; never raise."""
+    try:
+        from bibr.document.rebuild import ensure_document_layer
+
+        return await asyncio.to_thread(
+            ensure_document_layer, fs, settings, start_page=start_page, end_page=end_page
+        )
+    except Exception:  # noqa: BLE001 - the internal layer must never fail parsing
+        logger.warning("Document layer failed; continuing without it", exc_info=True)
+        return None
+
+
 async def _predict_front_roles(rm, ocr_regions, *, first_page_index: int):
     """Run the optional front-role classifier off the event loop; never raise."""
     from bibr.extract.front_role import FrontRolePredictions
@@ -51,6 +66,26 @@ async def _predict_front_roles(rm, ocr_regions, *, first_page_index: int):
         logger.warning("Front-role classification failed; continuing without it", exc_info=True)
         return None
     return predictions if isinstance(predictions, FrontRolePredictions) else None
+
+
+def _split_scanned_articles(fs) -> None:
+    """Drop neighbouring articles' regions from the file's scanned pages; never raise."""
+    try:
+        from bibr.scan.articles import describe, split_articles
+        from bibr.scan.page_kind import ensure_page_kinds
+
+        split = split_articles(fs.ocr_regions, ensure_page_kinds(fs))
+    except Exception:  # noqa: BLE001 - the split is an addition, never a dependency
+        logger.warning(
+            "Article split failed for %s; parsing every region", fs.path.name, exc_info=True
+        )
+        return
+    if not split.changed:
+        return
+    fs.ocr_regions = split.pages
+    message = describe(split)
+    logger.info("%s: %s", fs.path.name, message)
+    fs.warnings.append(ProcessingWarning(WarningCode.SCAN_ARTICLE_SPLIT, message))
 
 
 class ParseSegmentStage:
@@ -85,6 +120,8 @@ class ParseSegmentStage:
                     parser = native_parser
                     contents = fs.contents
                 else:
+                    if ctx.settings.pipeline.scan_article_split is True and fs.ocr_regions:
+                        _split_scanned_articles(fs)
                     # Offload sync CPU-heavy parse to a thread so concurrent
                     # files can interleave on the event loop and the thread
                     # pool can fan out across cores. The PDF outline (when
@@ -106,6 +143,22 @@ class ParseSegmentStage:
                     contents.ref_line_geometry = getattr(fs, "ref_line_geometry", None)
                     contents.ref_page_lines = getattr(fs, "ref_page_lines", None)
                     contents.pdf_uri_links = getattr(fs, "pdf_uri_links", None)
+
+                # The document layer, with this run's regions as blocks
+                # (rebuilt from the PDF when an OCR-bundle hit skipped
+                # NativeTextStage). Internal only; it never fails the paper.
+                # "is True" keeps it off under Mock settings in tests.
+                if (
+                    contents is not None
+                    and native_parser is None
+                    and ctx.settings.pipeline.document_layer is True
+                ):
+                    contents.document = await _document_layer(
+                        fs,
+                        ctx.settings,
+                        start_page=ctx.config.start_page,
+                        end_page=ctx.config.end_page,
+                    )
 
                 # Score every OCR region's front-matter role while the raw
                 # regions are still resident (they are freed after this

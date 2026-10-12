@@ -168,6 +168,7 @@ def _apply_runtime_settings(args) -> None:
     sees the final values.
     """
     from rich.console import Console
+    from rich.markup import escape
 
     import bibr.config
 
@@ -185,7 +186,8 @@ def _apply_runtime_settings(args) -> None:
             if unknown:
                 Console(stderr=True).print(
                     f"[yellow]![/yellow] Preset [cyan]{args.preset}[/cyan] has "
-                    f"{len(unknown)} unknown setting(s) (skipped): " + ", ".join(sorted(unknown))
+                    f"{len(unknown)} unknown setting(s) (skipped): "
+                    + escape(", ".join(sorted(unknown)))
                 )
         except FileNotFoundError:
             console = Console(stderr=True)

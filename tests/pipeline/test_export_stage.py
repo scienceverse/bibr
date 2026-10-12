@@ -346,3 +346,44 @@ def test_enrichment_replay_carries_enrich_timings():
     assert out["bib_match"] == enriched["bib_match"]  # replay succeeded, no fallback
     assert out["extraction"]["timings"] == enriched["extraction"]["timings"]
     assert stored["payload"]["extraction"]["timings"] == enriched["extraction"]["timings"]
+
+
+def _verifiable_payload() -> dict:
+    payload = _checkpoint_core()
+    payload["text"] = [{"text_id": 3, "text": "Kopf M. Impaired responses. Nature. 1994;368:339."}]
+    payload["bib"] = [{"bib_id": 1, "text_id": 3, "doi": None, "volume": None}]
+    payload["bib_match"] = [
+        {"bib_id": 1, "service": "crossref", "score": 1.0, "volume": "368", "first_page": "339"}
+    ]
+    return payload
+
+
+def _unsinked_fs(payload):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        paper=_CannedPaper(payload),
+        warnings=[],
+        result_json=None,
+        path=Path("x.pdf"),
+        free_all=lambda: None,
+        set_error=_boom_on_error,
+    )
+
+
+def test_export_verifies_locators_before_consolidating():
+    out = _sinked_run(_unsinked_fs(_verifiable_payload()), RunConfig(crossref=True))
+
+    assert out["bib"][0]["volume"] == "368"
+    assert out["bib"][0]["first_page"] == "339"
+    assert out["extraction"]["diagnostics"]["verification"] == [
+        {"bib_id": 1, "service": "crossref", "volume": "filled", "first_page": "filled"}
+    ]
+
+
+def test_export_leaves_bib_as_parsed_when_verification_is_off(monkeypatch):
+    monkeypatch.setenv("CROSSREF_VERIFY", "false")
+    out = _sinked_run(_unsinked_fs(_verifiable_payload()), RunConfig(crossref=True))
+
+    assert out["bib"][0]["volume"] is None
+    assert "verification" not in out["extraction"].get("diagnostics", {})
