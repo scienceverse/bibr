@@ -2479,6 +2479,27 @@ class GlobalSettings(_BibrSettings):
     # "off" disables reference extraction entirely (no segmentation, no
     # parsing, empty bib/bib_match/xref tables) while keeping core metadata,
     # sections, and equations. --no-llm also skips metadata LLM calls and equations.
+    REF_NER_LLM_FALLBACK: bool = Field(
+        True,
+        description="Review flagged NER reference parses with the configured fine-tuned endpoint; retain NER on failed or weaker reviews.",
+    )
+    REF_NER_LLM_MIN_COVERAGE: float = Field(
+        0.8,
+        ge=0,
+        le=1,
+        allow_inf_nan=False,
+        description="Route references below this source-word coverage to fine-tuned review; this is a routing check, not confidence.",
+    )
+    REF_NER_LLM_LONG_CHARS: int = Field(
+        1200,
+        ge=1,
+        description="Route longer reference strings to fine-tuned review to check NER input-window loss.",
+    )
+    REF_NER_LLM_MAX_REVIEWS: int = Field(
+        32,
+        ge=0,
+        description="Maximum fine-tuned NER reviews per reference list; unrevised entries retain their NER parse.",
+    )
     REF_LLM_BASE_URL: str | None = Field(
         None,
         description="OpenAI-compatible /v1 endpoint for the dedicated fine-tuned reference parser.",

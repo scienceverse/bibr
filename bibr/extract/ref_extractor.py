@@ -1110,6 +1110,10 @@ def _finalize_reference_fields(fields: dict[str, Any], segment: str | None) -> d
     """
     _backfill_vancouver_tail(fields, segment)
     _backfill_page_range(fields, segment)
+    if fields.get("year") is not None and not fields.get("year_suffix") and segment:
+        suffixes = set(re.findall(rf"(?<!\d){fields['year']}([a-z])(?!\w)", segment))
+        if len(suffixes) == 1:
+            fields["year_suffix"] = suffixes.pop()
     fields["doi"] = normalize_doi(fields.get("doi")) or _rescue_doi_from_segment(segment)
     fields["last_page"] = _expand_compact_last_page(
         fields.get("first_page"), fields.get("last_page")
@@ -1663,6 +1667,13 @@ async def _parse_refs_via_ner(
     # Offload the synchronous ModernBERT-CRF forward pass to a worker thread so
     # it does not block the shared serve event loop (BibrPipelineAPI runs
     # enable_async=True, one loop for many concurrent requests).
+    if (
+        ext._settings.REF_NER_LLM_FALLBACK
+        and ext._settings.REF_LLM_BASE_URL
+        and ext._settings.REF_LLM_MODEL
+    ):
+        aligned = await ext._parse_references_ner_review_aligned(ref_strings)
+        return _sequence_references([ref for ref in aligned if ref is not None])
     return await asyncio.to_thread(ext._parse_references_ner, ref_strings)
 
 
@@ -1788,6 +1799,7 @@ class ReferenceExtractor:
         (≤``REF_PARSE_BATCH_SIZE`` refs/call) or per-ref NER.
         """
         self.contents.reference_yield_receipt = None
+        self.contents.reference_review_receipt = None
         self.validation_issues.clear()
         self._stream_reason_flags = set()
         self._segmentation_attempts.clear()
@@ -1863,8 +1875,17 @@ class ReferenceExtractor:
 
         parser = REF_PARSE_STRATEGIES.get(parse_strategy, REF_PARSE_STRATEGIES["llm"])
         later_refs: list[PaperReference] = []
-        if parse_strategy == "ref-llm":
-            aligned = await self._parse_references_ref_llm_aligned(ref_strings)
+        if parse_strategy == "ref-llm" or (
+            parse_strategy == "ner"
+            and self._settings.REF_NER_LLM_FALLBACK
+            and self._settings.REF_LLM_BASE_URL
+            and self._settings.REF_LLM_MODEL
+        ):
+            aligned = (
+                await self._parse_references_ref_llm_aligned(ref_strings)
+                if parse_strategy == "ref-llm"
+                else await self._parse_references_ner_review_aligned(ref_strings)
+            )
             if link_dois is not None:
                 self._fill_link_dois(aligned, link_dois)
             if later_works:
@@ -1954,7 +1975,7 @@ class ReferenceExtractor:
             aligned = (
                 await self._parse_references_ref_llm_aligned(strings)
                 if parse_strategy == "ref-llm"
-                else await asyncio.to_thread(self._parse_references_ner_aligned, strings)
+                else await self._parse_references_ner_review_aligned(strings)
             )
             parsed: list[PaperReference] = []
             for citation, ref in zip(found.citations, aligned, strict=True):
@@ -3123,6 +3144,98 @@ class ReferenceExtractor:
 
         return _sequence_references(ordered_refs)
 
+    def _ref_llm_record(self, segment: str, fields: dict, index: int) -> PaperReference:
+        finalized = self._finalize_fields(
+            dict(
+                fields,
+                title=fields.get("title") or "",
+                bib_id=index + 1,
+                is_in_press=_is_in_press(segment),
+            ),
+            segment,
+        )
+        return PaperReference.model_validate(finalized)
+
+    async def _parse_references_ner_review_aligned(
+        self, ref_strings: list[str]
+    ) -> list[PaperReference | None]:
+        from collections import Counter
+
+        from bibr.clients.ref_llm import parse_batch
+        from bibr.extract.ref_review import fold, improves, reasons
+
+        aligned = await asyncio.to_thread(self._parse_references_ner_aligned, ref_strings)
+        if not self._settings.REF_NER_LLM_FALLBACK:
+            return aligned
+        kwargs: dict[str, Any] = {
+            "min_coverage": self._settings.REF_NER_LLM_MIN_COVERAGE,
+            "long_chars": self._settings.REF_NER_LLM_LONG_CHARS,
+        }
+        flagged = [
+            (i, reasons(text, ref, **kwargs))
+            for i, (text, ref) in enumerate(zip(ref_strings, aligned, strict=True))
+        ]
+        flagged = [(i, flags) for i, flags in flagged if flags]
+        configured = bool(self._settings.REF_LLM_BASE_URL and self._settings.REF_LLM_MODEL)
+        selected = flagged[: self._settings.REF_NER_LLM_MAX_REVIEWS] if configured else []
+        receipt: dict[str, Any] = {
+            "model": self._settings.REF_LLM_MODEL,
+            "status": "configured" if configured else "not_configured",
+            "flagged": len(flagged),
+            "attempted": len(selected),
+            "accepted": 0,
+            "failed": 0,
+            "rejected": 0,
+            "skipped": len(flagged) - len(selected),
+            "reasons": dict(Counter(flag for _, flags in flagged for flag in flags)),
+        }
+        if selected:
+            recorder = getattr(self.llm_client, "record_reference_usage", None)
+            records = await parse_batch(
+                _strip_enum_markers([ref_strings[i] for i, _ in selected]),
+                self._settings,
+                usage_recorder=recorder if callable(recorder) else None,
+            )
+            for (index, _flags), fields in zip(selected, records, strict=True):
+                if fields is None:
+                    receipt["failed"] += 1
+                    continue
+                try:
+                    candidate = self._ref_llm_record(ref_strings[index], fields, index)
+                except (ValueError, TypeError):
+                    receipt["failed"] += 1
+                    continue
+                current = aligned[index]
+                if not improves(ref_strings[index], current, candidate, **kwargs):
+                    receipt["rejected"] += 1
+                    continue
+                if current is not None:
+                    # These source-backed fields are outside the fine-tune's
+                    # contract. Preserve them without voting on its 14 fields.
+                    for key in ("arxiv", "pmid", "series", "access_date", "note"):
+                        value = getattr(current, key)
+                        if value and fold(value) in fold(ref_strings[index]):
+                            setattr(candidate, key, value)
+                aligned[index] = candidate
+                receipt["accepted"] += 1
+            self._stream_reason_flags.add("ner_ref_llm_review")
+        previous = getattr(self.contents, "reference_review_receipt", None)
+        if isinstance(previous, dict):
+            for key in ("flagged", "attempted", "accepted", "failed", "rejected", "skipped"):
+                receipt[key] += previous[key]
+            receipt["reasons"] = dict(Counter(previous["reasons"]) + Counter(receipt["reasons"]))
+        self.contents.reference_review_receipt = receipt
+        logger.info(
+            "NER reference review: %d flagged, %d attempted, %d accepted, %d failed, %d rejected, %d skipped",
+            receipt["flagged"],
+            receipt["attempted"],
+            receipt["accepted"],
+            receipt["failed"],
+            receipt["rejected"],
+            receipt["skipped"],
+        )
+        return aligned
+
     async def _parse_references_ref_llm(self, ref_strings: list[str]) -> list[PaperReference]:
         aligned = await self._parse_references_ref_llm_aligned(ref_strings)
         return _sequence_references([ref for ref in aligned if ref is not None])
@@ -3143,18 +3256,7 @@ class ReferenceExtractor:
             if fields is None:
                 continue
             try:
-                # Keep the fine-tune's fields together, including year_suffix.
-                # NER-specific field repairs must not alter the model's output.
-                finalized = self._finalize_fields(
-                    dict(
-                        fields,
-                        title=fields.get("title") or "",
-                        bib_id=index + 1,
-                        is_in_press=_is_in_press(segment),
-                    ),
-                    segment,
-                )
-                aligned[index] = PaperReference.model_validate(finalized)
+                aligned[index] = self._ref_llm_record(segment, fields, index)
             except (ValueError, TypeError):
                 continue
         missing = [i for i, ref in enumerate(aligned) if ref is None]

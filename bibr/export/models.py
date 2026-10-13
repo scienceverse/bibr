@@ -1546,6 +1546,40 @@ class ReferenceSegmentationAttemptExport(BaseModel):
     reason_flags: list[str] = Field(description="Why the attempt was or was not selected.")
 
 
+class ReferenceReviewExport(BaseModel):
+    """Bounded fine-tuned review of flagged NER references; no confidence claim."""
+
+    model_config = _STRICT
+
+    model: str | None = Field(description="Served fine-tuned model or immutable adapter alias.")
+    status: Literal["configured", "not_configured"] = Field(
+        description="Whether a dedicated reference endpoint was configured."
+    )
+    flagged: int = Field(ge=0, description="NER references carrying at least one routing signal.")
+    attempted: int = Field(ge=0, description="References submitted for fine-tuned review.")
+    accepted: int = Field(ge=0, description="Reviews accepted as improved source-supported parses.")
+    failed: int = Field(
+        ge=0, description="Invalid, truncated or failed reviews; original NER retained."
+    )
+    rejected: int = Field(
+        ge=0, description="Valid reviews that did not improve the routing checks."
+    )
+    skipped: int = Field(
+        ge=0, description="Flagged references left on NER due to configuration or budget."
+    )
+    reasons: dict[str, Annotated[int, Field(ge=0)]] = Field(
+        description="Counts by routing signal; signals are not calibrated confidence."
+    )
+
+    @model_validator(mode="after")
+    def counts_reconcile(self):
+        if self.attempted != self.accepted + self.failed + self.rejected:
+            raise ValueError("review attempts must equal accepted + failed + rejected")
+        if self.flagged != self.attempted + self.skipped:
+            raise ValueError("flagged references must equal attempted + skipped")
+        return self
+
+
 class ReferenceYieldExport(BaseModel):
     """How many references were found, and how the reference section was split."""
 
@@ -1763,6 +1797,10 @@ class DiagnosticsExport(BaseModel):
     reference_yield: ReferenceYieldExport | None = Field(
         default=None, description="Receipt for reference segmentation and yield."
     )
+    reference_review: ReferenceReviewExport | None = Field(
+        default=None,
+        description="Receipt for automatic fine-tuned review of NER references.",
+    )
     consolidation: list[ConsolidationExport] | None = Field(
         default=None,
         description="Per modified reference, the bib[] fields consolidation took from bib_match; "
@@ -1781,6 +1819,7 @@ class DiagnosticsExport(BaseModel):
         "citation_linking",
         "caption_assignment",
         "reference_yield",
+        "reference_review",
         "consolidation",
         "verification",
     )

@@ -595,7 +595,9 @@ def test_chew_refs_accepts_whitelisted_values(stub_pipeline, refs_value):
 
 
 def test_chew_refs_invalid_raises():
-    with pytest.raises(ValueError, match="refs must be 'ner', 'llm', 'llm-chunked', or 'off'"):
+    with pytest.raises(
+        ValueError, match="refs must be 'ner', 'llm', 'llm-chunked', 'ref-llm', or 'off'"
+    ):
         bibr.chew("paper.pdf", refs="bogus")
 
 

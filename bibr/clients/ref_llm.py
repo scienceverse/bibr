@@ -83,6 +83,13 @@ def validate_record(raw: str, reference: str) -> dict[str, Any] | None:
                 return None
         elif not isinstance(value, str) or not value.strip() or _fold(value) not in source:
             return None
+    suffix = record["year_suffix"]
+    if suffix is not None and (
+        record["year"] is None
+        or not re.fullmatch(r"[a-z]", suffix)
+        or not re.search(rf"(?<!\d){record['year']}{suffix}(?!\w)", reference)
+    ):
+        return None
     if not record["title"] and not record["authors"]:
         return None
     if record["doi"] and not re.fullmatch(r"10\.\d{4,9}/\S+", record["doi"]):
