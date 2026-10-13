@@ -46,11 +46,12 @@ _NONSTREAMING_MAX_TOKENS = 16_384
 # adaptive thinking with an effort level, which bibr does not send yet.
 # Prefixes, so dated snapshot ids match too; a new family is a one-line
 # addition. Checked against the live API on 2026-10-13 (the thinking
-# rejection on Haiku 5.5 only).
+# rejection on Haiku 5.5 and Fable 5.1 only).
 _SAMPLING_FREE_MODELS: tuple[str, ...] = (
     "claude-haiku-5-5",
     "claude-sonnet-5-5",
     "claude-opus-5-5",
+    "claude-fable-5-1",
 )
 
 

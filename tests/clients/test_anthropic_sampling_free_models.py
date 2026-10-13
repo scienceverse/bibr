@@ -1,4 +1,4 @@
-"""Claude models that reject sampling parameters (Haiku, Sonnet and Opus 5.5).
+"""Claude models that reject sampling parameters (Haiku, Sonnet, Opus 5.5, Fable 5.1).
 
 Their API answers any ``temperature`` (even 0) with a 400 ("`temperature` is
 deprecated for this model.") and rejects budget-style thinking, so every call
@@ -18,6 +18,7 @@ SAMPLING_FREE = [
     "claude-haiku-5-5",
     "claude-sonnet-5-5",
     "claude-opus-5-5",
+    "claude-fable-5-1",
     "claude-haiku-5-5-20261001",  # dated snapshot ids match by prefix
 ]
 
