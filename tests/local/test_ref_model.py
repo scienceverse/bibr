@@ -1,12 +1,20 @@
+import contextlib
 import hashlib
 import io
 import json
 import zipfile
 
+import httpx
 import pytest
 
 from bibr.exceptions import BibrError
 from bibr.local import ref_model
+
+
+def _response(data):
+    return contextlib.nullcontext(
+        httpx.Response(200, content=data, request=httpx.Request("GET", ref_model.MODEL_URL))
+    )
 
 
 @pytest.fixture
@@ -31,16 +39,14 @@ def bundle(monkeypatch):
             archive.writestr(name, data)
     data = stream.getvalue()
     monkeypatch.setattr(ref_model, "MODEL_SHA256", hashlib.sha256(data).hexdigest())
-    monkeypatch.setattr(ref_model.urllib.request, "urlopen", lambda *a, **kw: io.BytesIO(data))
+    monkeypatch.setattr(ref_model.httpx, "stream", lambda *a, **kw: _response(data))
     return data
 
 
 def test_download_verifies_existing_install_without_network(bundle, tmp_path, monkeypatch):
     destination = tmp_path / "adapter"
     assert ref_model.download(destination) == destination
-    monkeypatch.setattr(
-        ref_model.urllib.request, "urlopen", lambda *a, **kw: pytest.fail("network")
-    )
+    monkeypatch.setattr(ref_model.httpx, "stream", lambda *a, **kw: pytest.fail("network"))
     assert ref_model.download(destination) == destination
     (destination / "tokenizer.json").write_text("tampered")
     with pytest.raises(BibrError, match="checksum mismatch"):
@@ -61,7 +67,7 @@ def test_untrusted_manifest_cannot_certify_modified_tokenizer(bundle, tmp_path):
 
 
 def test_bad_download_is_not_installed(bundle, tmp_path, monkeypatch):
-    monkeypatch.setattr(ref_model.urllib.request, "urlopen", lambda *a, **kw: io.BytesIO(b"bad"))
+    monkeypatch.setattr(ref_model.httpx, "stream", lambda *a, **kw: _response(b"bad"))
     with pytest.raises(BibrError, match="download checksum"):
         ref_model.download(tmp_path / "adapter")
     assert not (tmp_path / "adapter").exists()

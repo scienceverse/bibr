@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
-import urllib.request
 import zipfile
 from pathlib import Path
+
+import httpx
 
 from bibr.exceptions import BibrError
 
@@ -89,16 +90,19 @@ def download(output: Path) -> Path:
         with tempfile.TemporaryDirectory(prefix=".bibr-ref-", dir=output.parent) as temporary:
             root = Path(temporary)
             archive = root / "model.zip"
-            # The immutable download URL is HTTPS; no user-supplied URL is accepted.
-            request = urllib.request.Request(  # noqa: S310
-                MODEL_URL, headers={"User-Agent": "bibr-ref-model"}
-            )
             with (
-                urllib.request.urlopen(request, timeout=30) as response,  # noqa: S310
+                httpx.stream(
+                    "GET",
+                    MODEL_URL,
+                    headers={"User-Agent": "bibr-ref-model"},
+                    timeout=30,
+                    follow_redirects=True,
+                ) as response,
                 archive.open("wb") as stream,
             ):
+                response.raise_for_status()
                 total = 0
-                while chunk := response.read(1024 * 1024):
+                for chunk in response.iter_bytes(chunk_size=1024 * 1024):
                     total += len(chunk)
                     if total > _MAX_BYTES:
                         raise ValueError("adapter download exceeds the size limit")
@@ -113,7 +117,7 @@ def download(output: Path) -> Path:
                 raise ValueError("destination was created during download")
             staging.rename(output)
         return output
-    except (OSError, ValueError, TypeError, KeyError, zipfile.BadZipFile) as exc:
+    except (OSError, ValueError, TypeError, KeyError, zipfile.BadZipFile, httpx.HTTPError) as exc:
         raise BibrError(
             "Could not install the pinned reference adapter. Check network access and "
             "the destination; existing files are preserved. " + str(exc)
