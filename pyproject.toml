@@ -158,7 +158,10 @@ ml = ["bibr[torch]"]
 demo = ["gradio>=6.15.0"]  # fixes CVE-2026-48545 shared-client cookie injection
 # Offline batch LLM layer (Anthropic Message Batches) — see bibr/clients/batch.py.
 # Message Batches is not exposed by Instructor, so we use the official SDK directly.
-batch = ["anthropic>=0.40.0"]
+# The same SDK serves LLM_PROVIDER=anthropic. Below 1.0: anthropic 1.x dropped
+# `temperature` from `messages.create` and moved to httpx2, and every call through
+# the Anthropic adapter failed (bibr/clients/providers/anthropic.py).
+batch = ["anthropic>=0.40.0,<1"]
 # NOTE: onnxruntime-gpu and the core onnxruntime dep are separate packages that
 # write the same `onnxruntime/` directory, and when one install writes both,
 # either build can end up loaded. After `uv sync --extra gpu`, reinstall the GPU

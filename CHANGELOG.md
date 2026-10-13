@@ -13,6 +13,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Calls to them now carry no temperature and sample at the model's own default. They also
   reject a thinking budget, so `LLM_THINKING_BUDGET` is ignored for them with a warning.
   Requests to every other model are unchanged.
+- `LLM_PROVIDER=anthropic` failed every call with anthropic SDK 1.0 or later, which a fresh
+  install of the `batch` extra picked up. anthropic 1.0 dropped `temperature` from
+  `messages.create`, so calls that sent one raised a `TypeError`. It also moved to httpx2,
+  which can't use the timeout bibr sets, so the rest failed as "Connection error.". The
+  `batch` extra now installs `anthropic<1`, and with 1.0 or later bibr stops before the first
+  call with an error that names the fix. With bibr 0.7.0, run `pip install "anthropic>=0.40,<1"`.
 
 ## [0.7.0] - 2026-10-13
 

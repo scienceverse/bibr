@@ -61,6 +61,28 @@ def _rejects_sampling(model: str) -> bool:
     return any(model.startswith(p) for p in _SAMPLING_FREE_MODELS)
 
 
+def _check_sdk_version() -> None:
+    """Refuse the anthropic SDK from 1.0 on, which this adapter can't call through.
+
+    anthropic 1.0 dropped ``temperature`` and ``top_p`` from ``messages.create``
+    and moved to httpx2, whose clients fail on the ``httpx.Timeout`` that
+    ``bound_sdk_client`` sets. Every call failed: with a ``TypeError`` when it
+    carried a temperature, as "Connection error." otherwise. The ``batch``
+    extra pins the SDK below 1.0.
+    """
+    try:
+        import anthropic
+    except ImportError:  # instructor names the missing package itself
+        return
+    version = str(getattr(anthropic, "__version__", ""))
+    major = version.split(".", 1)[0]
+    if major.isdigit() and int(major) >= 1:
+        raise ValueError(
+            f"LLM_PROVIDER=anthropic needs the anthropic SDK below 1.0; {version} is "
+            'installed. Install a supported one with: pip install "anthropic>=0.40,<1"'
+        )
+
+
 def _nonstreaming_cap(model: str) -> int:
     """Output cap of one non-streaming call to *model*.
 
@@ -111,6 +133,7 @@ class AnthropicProvider:
                 "Anthropic API key required. "
                 "Set LLM_API_KEY or ANTHROPIC_API_KEY environment variable."
             )
+        _check_sdk_version()
         client = instructor.from_provider(
             f"anthropic/{self._settings.llm.model}", async_client=True, api_key=api_key
         )

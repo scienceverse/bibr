@@ -73,7 +73,7 @@ extra syntax is `uv add 'bibr[<extra>]'`.
 | `gpu` | `onnxruntime-gpu[cuda,cudnn]` (Linux/Windows) | GPU execution providers for ONNX Runtime — sentence segmentation, and on a core install layout, the classifiers and the NER parser too. It needs one more command after syncing; see [GPU ONNX Runtime](#gpu-onnx-runtime). |
 | `cache` | `redis>=5.0.0` | Redis-backed response caching — set `REDIS_URL` to enable it (the result cache is on by default, but only uses Redis once a URL is configured). |
 | `demo` | `gradio>=6.15.0` | The interactive Gradio demo app. |
-| `batch` | `anthropic>=0.40.0` | Offline processing via the Anthropic Message Batches API — bulk paper-type/OECD labeling and similar bulk LLM workflows. |
+| `batch` | `anthropic>=0.40.0,<1` | Offline processing via the Anthropic Message Batches API — bulk paper-type/OECD labeling and similar bulk LLM workflows. It is also the SDK `LLM_PROVIDER=anthropic` needs. |
 | `mcp` | `mcp>=2.2.0,<3` | The `bibr mcp` server — extraction as [Model Context Protocol tools](../guides/mcp.md) for agents (Claude Code, Claude Desktop, any MCP client). |
 | `all` | `batch` + `cache` + `demo` + `mcp` + `torch` | The cloud + ML set for a full local-dev setup. Does **not** include `vllm`, `local`, `local-mlx`, or `gpu` — add whichever match your hardware. |
 
