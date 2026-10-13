@@ -1789,7 +1789,7 @@ class MlOptions(_BibrSettings):
         "classification path.",
     )
     section_classifier_revision: str = Field(
-        "ee1a83db01ce947e3a5eb87dfde7221328f4b207",
+        "cf7c2d8530f8b596ccb0a4c67c1db82537121100",
         description="HF Hub revision (commit SHA or branch) for the section classifier. Pinned "
         "to the audited commit (plus the additive ONNX bundle) so a hub push cannot change "
         "output; 'main' tracks the repo head.",

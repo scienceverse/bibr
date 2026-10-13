@@ -452,7 +452,7 @@ All four bundles are published, so a core install needs no configuration:
 | Model | Repo | Pinned revision |
 |---|---|---|
 | Layout | `scienceverse/bibr-layout-onnx` | `2bcb16a6` |
-| Section classifier | `scienceverse/bibr-section-classifier` | `ee1a83db` |
+| Section classifier | `scienceverse/bibr-section-classifier` | `cf7c2d85` |
 | Paper classifier | `scienceverse/bibr-paper-classifier` | `6046171b` |
 | Reference parser | `scienceverse/bibr-parser-v4-5-gold` | `ff50a83e` |
 
