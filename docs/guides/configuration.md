@@ -372,14 +372,16 @@ Reference parsing has its own strategy knob, `--refs` (or `REF_PARSE_STRATEGY`):
   segmentation of the section's printed lines replaces a fallback,
   under-yielding or clearly weaker result. A local ModernBERT-CRF model parses
   the resulting entries. The core install
-  supports geometry and ONNX parsing; parsing has no per-reference LLM cost.
+  supports geometry and ONNX parsing. When a dedicated fine-tuned endpoint is
+  configured, flagged entries receive bounded model review with NER retention
+  on failed or weaker results. Without that endpoint, parsing is local.
   `REF_SEG_STRATEGY=crf` requires the `torch` extra.
 - **`llm`** — parses references with the configured LLM in batches of up to
   `REF_PARSE_BATCH_SIZE` entries (default 15), with NER recovery for failed
   batches when available.
 - **`llm-chunked`** (experimental) — lets the LLM find reference boundaries and
   fields inside region-aligned chunks instead of requiring one entry per input.
-- **`ref-llm`** (experimental) — sends one printed reference at a time to a
+- **`ref-llm`** — sends one printed reference at a time to a
   dedicated fine-tuned Qwen3.5-0.8B server using the `ref-llm-sft@1` prompt
   and 14-field JSON contract. It retains the entry's language and year suffix.
   Invalid, truncated, unsupported or timed-out responses recover through NER
@@ -395,38 +397,25 @@ covered in [Architecture](architecture.md).
 
 ### Dedicated fine-tuned reference parser
 
-Configure an OpenAI-compatible server exposing the **fine-tuned** model or its
-LoRA alias, with constrained JSON output and `enable_thinking=false` support:
+To enable automatic NER-to-Qwen review, configure both the dedicated endpoint
+and the trained adapter alias:
 
 ```dotenv
-REF_PARSE_STRATEGY=ref-llm
+REF_PARSE_STRATEGY=ner
 REF_LLM_BASE_URL=http://127.0.0.1:30210/v1
-REF_LLM_MODEL=bibr-reference-qwen35-0.8b
-# REF_LLM_API_KEY=your-server-key
-REF_LLM_MAX_CONCURRENCY=4
-REF_LLM_TIMEOUT_SECONDS=30
-REF_LLM_TOTAL_TIMEOUT_SECONDS=120
-REF_LLM_MAX_TOKENS=512
+REF_LLM_MODEL=bibr-ref-qwen35-08b-balanced
+REF_NER_LLM_FALLBACK=true
 ```
 
-Select it per run with `bibr chew paper.pdf --refs ref-llm`,
-`chew("paper.pdf", refs="ref-llm")`, or the REST/MCP `refs` option. NER remains
-the default. Both endpoint and model alias must be set explicitly. Keep the
-served weights immutable, and change the alias when changing an adapter so
-cached exports cannot be reused across model versions.
+Review is on by default when that endpoint and alias are configured. Failed or
+weaker reviews retain NER results. Set `REF_NER_LLM_FALLBACK=false` for local NER
+only, or select `--refs ref-llm` to parse all entries with the dedicated model and
+aligned NER recovery. This server is separate from the metadata LLM.
 
-The base `Qwen/Qwen3.5-0.8B` checkpoint alone is not this parser. The runtime
-ships the inference contract, not model weights or a managed second LLM server.
-If serving a text-only LoRA through vLLM's multimodal Qwen3.5 loader, ensure the
-adapter keys use `model.language_model.layers.*`; unconverted
-`model.layers.*` keys can leave the adapter unapplied. Verify a known reference
-against the training evaluation before enabling the endpoint.
-
-Requests use greedy decoding and decline inputs longer than
-`REF_LLM_MAX_INPUT_CHARS` (default 4000) without cutting their source text.
-Source-grounding checks reject invented values; they do not establish calibrated
-confidence or correct field assignment. An automatic NER-to-Qwen confidence
-cascade needs separate routing calibration and end-to-end validation.
+See [Fine-tuned reference model](reference-model.md) for the pinned adapter
+download, serving command, request limits and export diagnostics. The base
+Qwen3.5-0.8B checkpoint alone is not the fine-tuned parser. Routing checks are
+observable source signals, not calibrated confidence.
 
 ## Local model runtime
 

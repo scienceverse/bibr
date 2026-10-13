@@ -708,6 +708,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     # --- doctor subcommand ---
+    ref_model = sub.add_parser("ref-model", help="download the pinned fine-tuned reference adapter")
+    ref_commands = ref_model.add_subparsers(dest="ref_model_command", required=True)
+    ref_download = ref_commands.add_parser(
+        "download", help="verify and install the reference adapter"
+    )
+    ref_download.add_argument("--output", required=True, type=str, help="new adapter directory")
+
     sub.add_parser(
         "doctor",
         help="validate your environment",

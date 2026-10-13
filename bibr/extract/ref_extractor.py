@@ -3191,8 +3191,9 @@ class ReferenceExtractor:
         }
         if selected:
             recorder = getattr(self.llm_client, "record_reference_usage", None)
+            parser_inputs = _strip_enum_markers(ref_strings)
             records = await parse_batch(
-                _strip_enum_markers([ref_strings[i] for i, _ in selected]),
+                [parser_inputs[i] for i, _ in selected],
                 self._settings,
                 usage_recorder=recorder if callable(recorder) else None,
             )

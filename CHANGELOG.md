@@ -14,11 +14,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   JSON contract, source-grounded validation, bounded asynchronous requests, and
   aligned NER recovery. Retains completed entries, printed year suffixes,
   note ownership, link-annotation DOI evidence and model-specific usage accounting.
+- Automatic bounded NER-to-Qwen review when the dedicated endpoint is configured,
+  retaining NER on failed or weaker reviews and exporting routing diagnostics.
+  `bibr ref-model download` installs the checksum-pinned trained adapter; a serving
+  guide covers the pinned base revision and separate vLLM runtime.
 
 
 ### Added — export schema 12.2 (additive)
 
-The export moves to schema `12.2`, which adds one optional receipt; every 12.1
+The export moves to schema `12.2`, which adds optional receipts; every 12.1
 export is still valid input for the 12.x reader.
 
 - With enrichment on, each reference's parsed `volume`, `issue`, `first_page`
