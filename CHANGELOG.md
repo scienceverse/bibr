@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-13
+
 ### Added — export schema 12.2 (additive)
 
 The export moves to schema `12.2`, which adds one optional receipt; every 12.1

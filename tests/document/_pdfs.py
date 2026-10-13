@@ -31,6 +31,25 @@ MATH_ALPHA = "\U0001d6fc"
 MATH_ALPHA_CODE = "\x1e"
 
 
+def full_scalar_math_font(monkeypatch) -> None:
+    """Make the synthetic /F4 glyph exercise the full-scalar Unicode path.
+
+    Windows PDFium truncates the non-BMP Adobe glyph name through its 16-bit
+    wchar_t mapping. The reader tests target handling of a scalar returned by
+    FPDFText_GetUnicode, independent of that platform font-mapping behavior.
+    Surrogate-pair decoding is covered separately with an explicit ToUnicode map.
+    """
+    import pypdfium2
+
+    get_unicode = pypdfium2.raw.FPDFText_GetUnicode
+
+    def read_unicode(raw, index):
+        value = get_unicode(raw, index)
+        return ord(MATH_ALPHA) if value == ord(MATH_ALPHA) & 0xFFFF else value
+
+    monkeypatch.setattr(pypdfium2.raw, "FPDFText_GetUnicode", read_unicode)
+
+
 def _num(value: float) -> bytes:
     return f"{value:.4f}".encode()
 

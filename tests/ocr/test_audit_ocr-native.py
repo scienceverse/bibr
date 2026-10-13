@@ -342,7 +342,8 @@ def test_reference_lines_keep_a_char_held_as_a_surrogate_pair():
     assert [line.text for line in lines] == [f"Smith, J. (2020). The {_MATH_S} statistic."]
 
 
-def test_reference_chars_keep_a_char_held_as_one_code():
+def test_reference_chars_keep_a_char_held_as_one_code(monkeypatch):
+    _pdfs.full_scalar_math_font(monkeypatch)
     line = f"Let {_pdfs.MATH_ALPHA_CODE} be small"
     pdf = _pdfs.build_pdf([_pdfs.PageSpec(_pdfs.text(line, 72.0, 700.0, size=12.0, font="F4"))])
     doc = pypdfium2.PdfDocument(pdf)

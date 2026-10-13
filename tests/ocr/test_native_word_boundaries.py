@@ -172,7 +172,9 @@ def test_loosely_set_doi_link_gets_no_extra_space():
 
 
 def test_glued_sentence_after_a_full_stop_still_splits():
-    pdf_bytes = _pdf(_glyph_line("of toddler temperament. As a part", 72, 700, gap=1.6))
+    # Substitute Helvetica metrics differ by platform, particularly at "f".
+    # Use a clear word gap here; the 1.6 pt boundary is covered separately.
+    pdf_bytes = _pdf(_glyph_line("of toddler temperament. As a part", 72, 700, gap=2.9))
 
     assert get_native_text_in_bbox(pdf_bytes, 0, _WHOLE_PAGE) == "of toddler temperament. As a part"
 

@@ -411,7 +411,8 @@ def test_page_lines_reproduce_the_reference_line_stream(name, reject):
         assert views.page_lines(page) == by_page.get(page.index + 1, [])
 
 
-def test_page_lines_keep_chars_beyond_the_bmp_as_the_line_stream_does():
+def test_page_lines_keep_chars_beyond_the_bmp_as_the_line_stream_does(monkeypatch):
+    _pdfs.full_scalar_math_font(monkeypatch)
     # get_text_range reads such a char as one UTF-16 unit, the high surrogate
     # alone, which decodes to nothing; the line stream reads its code instead.
     line = f"Let {_pdfs.MATH_ALPHA_CODE} be the angle, and {_pdfs.MATH_ALPHA_CODE} is small"
