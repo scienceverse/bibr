@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.7.0] - 2026-10-13
 
+### Added
+
+- Fine-tuned Qwen3.5-0.8B reference parsing with the training prompt and fixed
+  JSON contract, source-grounded validation, bounded asynchronous requests, and
+  aligned NER recovery. Retains completed entries, printed year suffixes,
+  note ownership, link-annotation DOI evidence and model-specific usage accounting.
+
+
 ### Added — export schema 12.2 (additive)
 
 The export moves to schema `12.2`, which adds one optional receipt; every 12.1

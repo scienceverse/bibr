@@ -1474,17 +1474,19 @@ class LLMClient:
         """The structured backend actually in effect (``instructor`` | ``nuextract-native``)."""
         return self._backend_kind or _structured_backend_kind(self._settings)
 
-    def _label_bucket(self) -> dict[str, int] | None:
+    def _label_bucket(
+        self, *, label: str | None = None, provider: str | None = None, model: str | None = None
+    ) -> dict[str, int] | None:
         if not self._track_usage:
             return None
         file_key = _usage_file_hash.get()
         if not file_key:
             return None
-        label = _usage_label.get() or "unlabeled"
+        label = label or _usage_label.get() or "unlabeled"
         # Keyed by the full (label, provider, model) triple — not just label —
         # so a label used under two engines within one file gets two buckets
         # instead of one bucket whose provider/model stamp goes stale mid-file.
-        key = (label, self._settings.llm.provider, self._settings.llm.model)
+        key = (label, provider or self._settings.llm.provider, model or self._settings.llm.model)
         return self._labels_by_file.setdefault(file_key, {}).setdefault(
             key,
             {
@@ -1626,6 +1628,25 @@ class LLMClient:
                 round((time.perf_counter() - started) * 1000),
             )
 
+    def record_reference_usage(self, usage: dict) -> None:
+        """Attribute dedicated reference-server usage to its own model and label."""
+        if not self._track_usage or not self._settings.REF_LLM_MODEL:
+            return
+        inp, out = usage.get("prompt_tokens"), usage.get("completion_tokens")
+        if type(inp) is not int or type(out) is not int or min(inp, out) < 0:
+            return
+        details = usage.get("prompt_tokens_details")
+        cached = details.get("cached_tokens", 0) if isinstance(details, dict) else 0
+        self._record_usage_counts(
+            input_tokens=inp,
+            output_tokens=out,
+            total_tokens=inp + out,
+            cached_input_tokens=cached if type(cached) is int else 0,
+            model_name=self._settings.REF_LLM_MODEL,
+            provider="openai",
+            label="parse_reference_finetuned",
+        )
+
     def _record_usage_counts(
         self,
         *,
@@ -1633,9 +1654,12 @@ class LLMClient:
         output_tokens: int,
         total_tokens: int,
         cached_input_tokens: int,
+        model_name: str | None = None,
+        provider: str | None = None,
+        label: str | None = None,
     ) -> None:
         """Record already-normalized numeric usage for one completion."""
-        model_name = self._settings.llm.model
+        model_name = model_name or self._settings.llm.model
         input_tokens = max(0, int(input_tokens))
         output_tokens = max(0, int(output_tokens))
         total_tokens = max(0, int(total_tokens))
@@ -1662,7 +1686,7 @@ class LLMClient:
             counts["cached_input_tokens"] += cached_tokens
 
         if file_hash:
-            lbucket = self._label_bucket()
+            lbucket = self._label_bucket(label=label, provider=provider, model=model_name)
             assert lbucket is not None  # noqa: S101 — file hash + tracking guarantee a bucket
             lbucket["input_tokens"] += input_tokens
             lbucket["output_tokens"] += output_tokens

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 ConsolidationMode = Literal["off", "fill", "replace"]
 FigureExtractTier = Literal["off", "meta"]
 MemoryMode = Literal["aggressive", "balanced", "keep_all"]
-RefParseStrategy = Literal["ner", "llm", "llm-chunked", "off"]
+RefParseStrategy = Literal["ner", "llm", "llm-chunked", "ref-llm", "off"]
 RefSegStrategy = Literal["geom", "region", "llm", "crf"]
 
 # The stage after which the document layer's glyph columns are freed: the last

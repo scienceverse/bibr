@@ -222,7 +222,7 @@ def _client_processing_message(exc: ProcessingError) -> str:
 # CLI (`--refs` / `--ref-seg`) and library (`chew(refs=, ref_seg=)`) choices so
 # a caller can, e.g., request `refs=off` for a fast core-metadata-only pass or
 # `refs=llm` for full-precision parsing without redeploying the server.
-_VALID_REF_PARSE = frozenset({"ner", "llm", "llm-chunked", "off"})
+_VALID_REF_PARSE = frozenset({"ner", "llm", "llm-chunked", "ref-llm", "off"})
 _VALID_REF_SEG = frozenset({"geom", "region", "llm", "crf"})
 
 # Default in-flight LLM concurrency for serve. The library default
@@ -369,7 +369,7 @@ class BibrPipelineAPI(ls.LitAPI):
       - ``consolidate`` (optional, ``fill``/``replace``): merge accepted
         bib_match data into bib rows (absent → server-side
         CROSSREF_CONSOLIDATE setting; no per-request 'off' override)
-      - ``refs`` (optional, ``ner``/``llm``/``llm-chunked``/``off``): per-request
+      - ``refs`` (optional, ``ner``/``llm``/``llm-chunked``/``ref-llm``/``off``): per-request
         reference parse strategy (absent → server-side REF_PARSE_STRATEGY).
         ``off`` skips reference extraction entirely for a fast core-metadata pass.
       - ``ref_seg`` (optional, ``geom``/``region``/``llm``/``crf``): per-request
