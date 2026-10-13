@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `LLM_PROVIDER=anthropic` works with Claude Haiku 5.5, Sonnet 5.5 and Opus 5.5. Their API
+  rejects any `temperature`, which bibr sent on every call, so each call failed with a 400.
+  Calls to them now carry no temperature and sample at the model's own default. They also
+  reject a thinking budget, so `LLM_THINKING_BUDGET` is ignored for them with a warning.
+  Requests to every other model are unchanged.
+
 ## [0.7.0] - 2026-10-13
 
 ### Added

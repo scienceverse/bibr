@@ -38,6 +38,27 @@ _THINKING_OUTPUT_MARGIN = 1024
 # segmentation, merged core metadata) failed under LLM_PROVIDER=anthropic.
 _NONSTREAMING_MAX_TOKENS = 16_384
 
+# Claude models that reject every sampling parameter. The API answers any
+# ``temperature`` other than its default (0 included) or any ``top_p`` with a
+# 400 ("`temperature` is deprecated for this model."), so requests to them
+# carry neither and the model samples at its own default. They also reject
+# budget-style thinking ("thinking.type.enabled" is not supported) in favour of
+# adaptive thinking with an effort level, which bibr does not send yet.
+# Prefixes, so dated snapshot ids match too; a new family is a one-line
+# addition. Checked against the live API on 2026-10-13 (the thinking
+# rejection on Haiku 5.5 only).
+_SAMPLING_FREE_MODELS: tuple[str, ...] = (
+    "claude-haiku-5-5",
+    "claude-sonnet-5-5",
+    "claude-opus-5-5",
+)
+
+
+def _rejects_sampling(model: str) -> bool:
+    """Whether ``model`` rejects ``temperature`` and budget-style thinking."""
+    model = (model or "").strip()
+    return any(model.startswith(p) for p in _SAMPLING_FREE_MODELS)
+
 
 def _nonstreaming_cap(model: str) -> int:
     """Output cap of one non-streaming call to *model*.
@@ -65,6 +86,16 @@ def _warn_budget_never_fits(budget: int, cap: int) -> None:
     )
 
 
+@functools.cache
+def _warn_thinking_budget_ignored(model: str) -> None:
+    # Once per model: the configuration, not the call, is at fault.
+    logger.warning(
+        "LLM_THINKING_BUDGET is ignored for %s, which takes adaptive thinking "
+        "instead of a token budget; calls are sent without thinking",
+        model,
+    )
+
+
 @register
 class AnthropicProvider:
     name: ClassVar[str] = "anthropic"
@@ -85,10 +116,17 @@ class AnthropicProvider:
         return bound_sdk_client(client, self._settings)
 
     def call_kwargs(self, reasoning_effort: str | None, max_tokens: int | None = None) -> dict:  # noqa: ARG002
-        cap = _nonstreaming_cap(self._settings.llm.model)
+        model = self._settings.llm.model
+        cap = _nonstreaming_cap(model)
         requested = max_tokens or self._settings.llm.max_tokens
         kwargs: dict = {"max_tokens": min(requested, cap)}
         budget = self._settings.llm.thinking_budget
+        if _rejects_sampling(model):
+            # Neither a temperature nor a thinking budget: either one makes
+            # the API answer a 400 for these models (see _SAMPLING_FREE_MODELS).
+            if budget and budget > 0:
+                _warn_thinking_budget_ignored(model)
+            return kwargs
         if budget and budget > 0:
             effective = max(int(budget), _MIN_THINKING_BUDGET)
             if int(budget) < _MIN_THINKING_BUDGET:

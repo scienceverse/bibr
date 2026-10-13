@@ -273,7 +273,11 @@ not stream, so it caps the output of one call at 16,384 tokens (8,192 for
 Claude Opus 4 and 4.1) even when `LLM_MAX_TOKENS` is higher. A
 `LLM_THINKING_BUDGET` above that cap less 1,024 tokens leaves too little room
 for the answer, so calls are then sent without thinking and a warning is
-logged.
+logged. Claude Haiku 5.5, Sonnet 5.5 and Opus 5.5 reject any `temperature`, so
+calls to them carry none and the model samples at its own default; the same
+paper can then come back slightly different between runs. They take adaptive
+thinking instead of a token budget, which bibr does not send yet, so
+`LLM_THINKING_BUDGET` is ignored for them and a warning is logged.
 
 `CACHE_LLM=true` keeps structured LLM responses on disk (`CACHE_LLM_DIR`,
 default `~/.cache/bibr/llm`), readable by your user only. An entry is reused
