@@ -49,3 +49,14 @@ def test_sdk_below_1_0_builds_the_client(monkeypatch, version):
     _provider().build_client()
 
     assert raw.max_retries == 0
+
+
+def test_missing_sdk_is_left_to_instructor(monkeypatch):
+    """Without the SDK the check steps aside: instructor's own error names the package."""
+    raw = SimpleNamespace(max_retries=2, timeout=600.0)
+    monkeypatch.setitem(sys.modules, "anthropic", None)  # ``import anthropic`` now fails
+    monkeypatch.setattr("instructor.from_provider", lambda *a, **k: SimpleNamespace(client=raw))
+
+    _provider().build_client()
+
+    assert raw.max_retries == 0
