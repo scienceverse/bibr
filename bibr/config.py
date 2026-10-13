@@ -2470,15 +2470,49 @@ class GlobalSettings(_BibrSettings):
         'region anchors -> LLM -> CRF), "region" (zero-cost layout-region anchors as primary tier), '
         '"llm" (force the LLM segmenter), or "crf" (ModernBERT+CRF segmenter).',
     )
-    REF_PARSE_STRATEGY: Literal["llm", "ner", "llm-chunked", "off"] | None = Field(
+    REF_PARSE_STRATEGY: Literal["llm", "ner", "llm-chunked", "ref-llm", "off"] | None = Field(
         "ner",
         description='Reference-parsing strategy: "ner" (default; local ModernBERT-CRF parser, no '
-        'per-reference LLM cost), "llm" (batched LLM), "llm-chunked" (chunk-tolerant '
+        'per-reference LLM cost), "ref-llm" (dedicated fine-tuned reference model), "llm" (batched LLM), "llm-chunked" (chunk-tolerant '
         'LLM parse over region-aligned chunks), or "off" (disable reference extraction entirely).',
     )
     # "off" disables reference extraction entirely (no segmentation, no
     # parsing, empty bib/bib_match/xref tables) while keeping core metadata,
     # sections, and equations. --no-llm also skips metadata LLM calls and equations.
+    REF_LLM_BASE_URL: str | None = Field(
+        None,
+        description="OpenAI-compatible /v1 endpoint for the dedicated fine-tuned reference parser.",
+    )
+    REF_LLM_MODEL: str | None = Field(
+        None,
+        description="Served fine-tuned model or LoRA alias implementing ref-llm-sft@1; not the base model.",
+    )
+    REF_LLM_API_KEY: str | None = Field(
+        None,
+        repr=False,
+        description="Bearer credential for the dedicated reference parser endpoint.",
+    )
+    REF_LLM_MAX_CONCURRENCY: int = Field(
+        4, ge=1, le=64, description="Concurrent reference-parser requests per paper."
+    )
+    REF_LLM_TIMEOUT_SECONDS: float = Field(
+        30, gt=0, allow_inf_nan=False, description="Deadline for one reference-parser request."
+    )
+    REF_LLM_TOTAL_TIMEOUT_SECONDS: float = Field(
+        120,
+        gt=0,
+        allow_inf_nan=False,
+        description="Total reference-parser request budget per paper; unfinished entries use NER.",
+    )
+    REF_LLM_MAX_TOKENS: int = Field(
+        512, ge=1, le=8192, description="Output-token cap for one fine-tuned reference parse."
+    )
+    REF_LLM_MAX_INPUT_CHARS: int = Field(
+        4000,
+        ge=1,
+        description="Maximum reference input size; longer entries use NER without silent truncation.",
+    )
+
     # llm-chunked: chunk-tolerant LLM parse over region-aligned chunks (no
     # numbered-list contract) — seg-error-immune on the generative path since
     # the model finds its own reference boundaries. Opt-in pending judge gate.

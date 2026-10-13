@@ -1678,12 +1678,21 @@ async def _parse_refs_via_llm_chunked(
     return await ext._parse_references_llm_chunked(ref_text, ref_strings)
 
 
+async def _parse_refs_via_ref_llm(
+    ext: "ReferenceExtractor",
+    ref_text: str,  # noqa: ARG001
+    ref_strings: list[str],
+) -> list[PaperReference]:
+    return await ext._parse_references_ref_llm(ref_strings)
+
+
 # Parse-strategy registry: adding a strategy (e.g. NuExtract) is one adapter +
 # one entry; unknown names fall back to "llm" at the dispatch site.
 REF_PARSE_STRATEGIES: dict[str, Any] = {
     "ner": _parse_refs_via_ner,
     "llm": _parse_refs_via_llm,
     "llm-chunked": _parse_refs_via_llm_chunked,
+    "ref-llm": _parse_refs_via_ref_llm,
 }
 
 
@@ -1829,7 +1838,7 @@ class ReferenceExtractor:
                     )
                 )
         logger.info(f"Segmented {len(ref_strings)} references")
-        if parse_strategy == "ner":
+        if parse_strategy in ("ner", "ref-llm"):
             # The receipt keeps the segmentation's spans; only the parser
             # input gains the dash entries run on inside a segment, the
             # later works of a same-byline entry and the works of a numbered
@@ -1854,7 +1863,14 @@ class ReferenceExtractor:
 
         parser = REF_PARSE_STRATEGIES.get(parse_strategy, REF_PARSE_STRATEGIES["llm"])
         later_refs: list[PaperReference] = []
-        if later_works:
+        if parse_strategy == "ref-llm":
+            aligned = await self._parse_references_ref_llm_aligned(ref_strings)
+            if link_dois is not None:
+                self._fill_link_dois(aligned, link_dois)
+            if later_works:
+                later_refs = [ref for ref in aligned[-later_works:] if ref is not None]
+            all_refs = _sequence_references([ref for ref in aligned if ref is not None])
+        elif later_works:
             all_refs, later_refs = await asyncio.to_thread(
                 self._parse_references_ner_with_later_works, ref_strings, link_dois, later_works
             )
@@ -1934,8 +1950,12 @@ class ReferenceExtractor:
             found.citing_notes,
             parse_strategy,
         )
-        if parse_strategy == "ner":
-            aligned = await asyncio.to_thread(self._parse_references_ner_aligned, strings)
+        if parse_strategy in ("ner", "ref-llm"):
+            aligned = (
+                await self._parse_references_ref_llm_aligned(strings)
+                if parse_strategy == "ref-llm"
+                else await asyncio.to_thread(self._parse_references_ner_aligned, strings)
+            )
             parsed: list[PaperReference] = []
             for citation, ref in zip(found.citations, aligned, strict=True):
                 decision = _decision_reference(citation.text)
@@ -3102,6 +3122,62 @@ class ReferenceExtractor:
             ) from cause
 
         return _sequence_references(ordered_refs)
+
+    async def _parse_references_ref_llm(self, ref_strings: list[str]) -> list[PaperReference]:
+        aligned = await self._parse_references_ref_llm_aligned(ref_strings)
+        return _sequence_references([ref for ref in aligned if ref is not None])
+
+    async def _parse_references_ref_llm_aligned(
+        self, ref_strings: list[str]
+    ) -> list[PaperReference | None]:
+        from bibr.clients.ref_llm import parse_batch
+
+        recorder = getattr(self.llm_client, "record_reference_usage", None)
+        records = await parse_batch(
+            _strip_enum_markers(ref_strings),
+            self._settings,
+            usage_recorder=recorder if callable(recorder) else None,
+        )
+        aligned: list[PaperReference | None] = [None] * len(ref_strings)
+        for index, (segment, fields) in enumerate(zip(ref_strings, records, strict=True)):
+            if fields is None:
+                continue
+            try:
+                # Keep the fine-tune's fields together, including year_suffix.
+                # NER-specific field repairs must not alter the model's output.
+                finalized = self._finalize_fields(
+                    dict(
+                        fields,
+                        title=fields.get("title") or "",
+                        bib_id=index + 1,
+                        is_in_press=_is_in_press(segment),
+                    ),
+                    segment,
+                )
+                aligned[index] = PaperReference.model_validate(finalized)
+            except (ValueError, TypeError):
+                continue
+        missing = [i for i, ref in enumerate(aligned) if ref is None]
+        if missing:
+            self._record_warning(
+                WarningCode.REF_PARSE_NER_FALLBACK,
+                f"Dedicated reference parser declined or failed {len(missing)} of "
+                f"{len(ref_strings)} entries; attempting aligned NER recovery",
+            )
+            try:
+                recovered = await asyncio.to_thread(
+                    self._parse_references_ner_aligned, [ref_strings[i] for i in missing]
+                )
+                for index, ref in zip(missing, recovered, strict=True):
+                    aligned[index] = ref
+            except Exception:  # noqa: BLE001 — keep successful model entries
+                self._record_warning(
+                    WarningCode.REF_PARSE_LOST,
+                    "NER recovery failed after dedicated reference parsing; "
+                    "completed reference entries were retained",
+                )
+        self._stream_reason_flags.add("ref_llm_parser_selected")
+        return aligned
 
     def _parse_references_ner(self, ref_strings: list[str]) -> list[PaperReference]:
         """Parse pre-segmented reference strings with the NER parser (batched).

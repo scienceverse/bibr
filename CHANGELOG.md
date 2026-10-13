@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Experimental `ref-llm` reference parsing via a dedicated fine-tuned
+  Qwen3.5-0.8B-compatible endpoint. Uses the training prompt and fixed JSON
+  contract, source-grounded validation, bounded asynchronous requests, and
+  aligned NER recovery while retaining completed entries, printed year suffixes,
+  note ownership and link-annotation DOI evidence. NER remains the default.
+
 ### Added — export schema 12.2 (additive)
 
 The export moves to schema `12.2`, which adds one optional receipt; every 12.1
