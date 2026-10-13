@@ -369,6 +369,16 @@ def _main():
                 sys.exit(1)
         elif args.command == "doctor":
             _run_doctor()
+        elif args.command == "ref-model":
+            from pathlib import Path
+
+            from bibr.local.ref_model import download
+
+            try:
+                print(str(download(Path(args.output))))
+            except BibrError as e:
+                _print_error(str(e))
+                sys.exit(1)
         elif args.command == "inspect":
             from bibr.local.inspect import run_inspect
 

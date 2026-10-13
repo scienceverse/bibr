@@ -3585,6 +3585,9 @@ class TestRefParseStrategyRegistry:
 
         ext = mock.Mock()
         ext._parse_references_ner.side_effect = fake_parse
+        # This test exercises the local-only NER branch. An unconstrained Mock
+        # invents truthy endpoint/model settings and accidentally enables review.
+        ext._settings = GlobalSettings(REF_NER_LLM_FALLBACK=False)
         out = await _parse_refs_via_ner(ext, "full text", ["r1", "r2"])
         assert out is sentinel
         assert recorded["arg"] == ["r1", "r2"]

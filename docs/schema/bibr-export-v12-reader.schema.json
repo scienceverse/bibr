@@ -1078,6 +1078,18 @@
           "title": "Ref Seg Fallback Used",
           "type": "boolean"
         },
+        "reference_review": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReferenceReviewExportReader"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Receipt for automatic fine-tuned review of NER references."
+        },
         "reference_yield": {
           "anyOf": [
             {
@@ -3127,6 +3139,87 @@
         "version"
       ],
       "title": "ProducerExportReader",
+      "type": "object"
+    },
+    "ReferenceReviewExportReader": {
+      "additionalProperties": true,
+      "description": "Bounded fine-tuned review of flagged NER references; no confidence claim.",
+      "properties": {
+        "accepted": {
+          "description": "Reviews accepted as improved source-supported parses.",
+          "minimum": 0,
+          "title": "Accepted",
+          "type": "integer"
+        },
+        "attempted": {
+          "description": "References submitted for fine-tuned review.",
+          "minimum": 0,
+          "title": "Attempted",
+          "type": "integer"
+        },
+        "failed": {
+          "description": "Invalid, truncated or failed reviews; original NER retained.",
+          "minimum": 0,
+          "title": "Failed",
+          "type": "integer"
+        },
+        "flagged": {
+          "description": "NER references carrying at least one routing signal.",
+          "minimum": 0,
+          "title": "Flagged",
+          "type": "integer"
+        },
+        "model": {
+          "description": "Served fine-tuned model or immutable adapter alias.",
+          "title": "Model",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasons": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "Counts by routing signal; signals are not calibrated confidence.",
+          "title": "Reasons",
+          "type": "object"
+        },
+        "rejected": {
+          "description": "Valid reviews that did not improve the routing checks.",
+          "minimum": 0,
+          "title": "Rejected",
+          "type": "integer"
+        },
+        "skipped": {
+          "description": "Flagged references left on NER due to configuration or budget.",
+          "minimum": 0,
+          "title": "Skipped",
+          "type": "integer"
+        },
+        "status": {
+          "description": "Whether a dedicated reference endpoint was configured.",
+          "examples": [
+            "configured",
+            "not_configured"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "status",
+        "flagged",
+        "attempted",
+        "accepted",
+        "failed",
+        "rejected",
+        "skipped",
+        "reasons"
+      ],
+      "title": "ReferenceReviewExportReader",
       "type": "object"
     },
     "ReferenceSegmentationAttemptExportReader": {

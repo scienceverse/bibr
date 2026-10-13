@@ -23,6 +23,36 @@ class _Recorder:
         self.calls.append(("fail", msg, hint))
 
 
+@pytest.mark.parametrize("endpoint,model", [("http://reference.test/v1", None), (None, "trained")])
+def test_reference_model_doctor_rejects_partial_configuration(monkeypatch, endpoint, model):
+    from bibr.config import Settings
+    from bibr.local.cli.doctor import _check_reference_model
+
+    monkeypatch.setattr(Settings, "REF_PARSE_STRATEGY", "ner")
+    monkeypatch.setattr(Settings, "REF_NER_LLM_FALLBACK", True)
+    monkeypatch.setattr(Settings, "REF_LLM_BASE_URL", endpoint)
+    monkeypatch.setattr(Settings, "REF_LLM_MODEL", model)
+    rec = _Recorder()
+    _check_reference_model(rec.ok, rec.fail)
+    assert rec.calls[0][0] == "fail"
+    assert "both REF_LLM_BASE_URL and REF_LLM_MODEL" in rec.calls[0][2]
+
+
+def test_reference_model_doctor_does_not_claim_adapter_probe(monkeypatch):
+    from bibr.config import Settings
+    from bibr.local.cli.doctor import _check_reference_model
+
+    monkeypatch.setattr(Settings, "REF_PARSE_STRATEGY", "ner")
+    monkeypatch.setattr(Settings, "REF_NER_LLM_FALLBACK", True)
+    monkeypatch.setattr(Settings, "REF_LLM_BASE_URL", "http://reference.test/v1")
+    monkeypatch.setattr(Settings, "REF_LLM_MODEL", "trained")
+    rec = _Recorder()
+    _check_reference_model(rec.ok, rec.fail)
+    assert rec.calls[0][0] == "ok"
+    assert "unverified" in rec.calls[0][1]
+    assert "automatic NER review=on" in rec.calls[0][1]
+
+
 def _run_check_device(rec: _Recorder) -> None:
     from bibr.local.cli import _check_device
 

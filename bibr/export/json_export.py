@@ -52,6 +52,7 @@ from bibr.export.models import (
     PaperClassificationExport,
     PaperExport,
     PaperTypeLiteral,
+    ReferenceReviewExport,
     ReferenceSegmentationAttemptExport,
     ReferenceYieldExport,
     RegionExport,
@@ -1178,6 +1179,9 @@ def _export_paper_payload(
             diagnostics["caption_assignment"] = caption_assignment
         if reference_yield is not None:
             diagnostics["reference_yield"] = reference_yield
+        review = getattr(paper.contents, "reference_review_receipt", None)
+        if isinstance(review, dict):
+            diagnostics["reference_review"] = ReferenceReviewExport.model_validate(review)
         extraction_data["diagnostics"] = diagnostics
         if identity := extraction_data.get("identity"):
             extraction_data["identity"] = _export_identity_sections(identity, ids)

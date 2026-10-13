@@ -230,12 +230,13 @@ def _add_pipeline_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--refs",
-        choices=["llm", "ner", "llm-chunked", "off"],
+        choices=["llm", "ner", "llm-chunked", "ref-llm", "off"],
         help=(
             "Reference parser: 'ner' (default) uses the local ModernBERT-CRF model "
             "through ONNX Runtime or the optional PyTorch runtime. "
             "'llm' parses references with the configured LLM in batches. "
             "'llm-chunked' parses region-aligned chunks of the reference list. "
+            "'ref-llm' uses a dedicated fine-tuned reference endpoint with NER recovery. "
             "Choose segmentation separately with --ref-seg. "
             "'off' skips references and their citation links while keeping core metadata, "
             "sections, and equations. Overrides REF_PARSE_STRATEGY."
@@ -647,7 +648,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     mcp_parser.add_argument(
         "--refs",
-        choices=["llm", "ner", "llm-chunked", "off"],
+        choices=["llm", "ner", "llm-chunked", "ref-llm", "off"],
         help="Reference extraction strategy (as for 'bibr chew')",
     )
     mcp_parser.add_argument(
@@ -707,6 +708,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     # --- doctor subcommand ---
+    ref_model = sub.add_parser("ref-model", help="download the pinned fine-tuned reference adapter")
+    ref_commands = ref_model.add_subparsers(dest="ref_model_command", required=True)
+    ref_download = ref_commands.add_parser(
+        "download", help="verify and install the reference adapter"
+    )
+    ref_download.add_argument("--output", required=True, type=str, help="new adapter directory")
+
     sub.add_parser(
         "doctor",
         help="validate your environment",

@@ -51,7 +51,7 @@ _FORM_OPTION_NAMES = (
 #: options: every option plus a few names this server does not know (a newer
 #: client's options) must still fit.
 _MAX_FORM_FIELDS = len(_FORM_OPTION_NAMES) + 16
-_VALID_REF_PARSE = frozenset({"ner", "llm", "llm-chunked", "off"})
+_VALID_REF_PARSE = frozenset({"ner", "llm", "llm-chunked", "ref-llm", "off"})
 _VALID_REF_SEG = frozenset({"geom", "region", "llm", "crf"})
 
 MULTIPART_OPENAPI_EXTRA = {

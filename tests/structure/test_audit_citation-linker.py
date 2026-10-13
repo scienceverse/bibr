@@ -103,7 +103,9 @@ def test_flattened_superscript_matches_are_unchanged():
         assert _flattened_matches(pattern, text) == _flattened_matches(_FLATTENED_BEFORE, text)
 
 
-@pytest.mark.parametrize("run", ["ACGT" * 10_000, "a)" * 20_000])
+@pytest.mark.parametrize(
+    "run", ["ACGT" * 10_000, "a)" * 20_000], ids=["dna-run", "enumeration-run"]
+)
 def test_flattened_superscript_scan_is_linear_in_a_long_word_run(run):
     # Tried from every letter, the run was rescanned to its end each time:
     # tens of seconds for these 40,000 characters.

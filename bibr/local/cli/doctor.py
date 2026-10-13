@@ -524,6 +524,8 @@ def _check_ref_strategies(ok, fail) -> None:
         ok("References: extraction disabled (parse=off)")
         return
     label = f"References: seg={seg_strategy}, parse={parse_strategy}"
+    from bibr.config import Settings
+
     torch_missing = importlib.util.find_spec("torch") is None
     if seg_strategy == "crf" and torch_missing:
         # The CRF segmenter has no ONNX export; it is a torch-only opt-in.
@@ -533,8 +535,6 @@ def _check_ref_strategies(ok, fail) -> None:
         )
         return
     if parse_strategy == "ner" and torch_missing:
-        from bibr.config import Settings
-
         if Settings.ml.runtime == "torch":
             fail(
                 f"{label}: ML_RUNTIME=torch but torch is not installed",
@@ -554,6 +554,29 @@ def _check_ref_strategies(ok, fail) -> None:
         )
         return
     ok(label)
+
+
+def _check_reference_model(ok, fail) -> None:
+    """Describe optional reference review without claiming an endpoint probe."""
+    from bibr.config import Settings
+    from bibr.extract.extractor import _resolve_ref_strategies
+
+    _, parse_strategy = _resolve_ref_strategies()
+    settings = Settings
+    if parse_strategy == "ref-llm" or (parse_strategy == "ner" and settings.REF_NER_LLM_FALLBACK):
+        endpoint, model = settings.REF_LLM_BASE_URL, settings.REF_LLM_MODEL
+        if bool(endpoint) != bool(model) or (parse_strategy == "ref-llm" and not endpoint):
+            fail(
+                "Reference model: incomplete configuration",
+                hint="Set both REF_LLM_BASE_URL and REF_LLM_MODEL to the fine-tuned server",
+            )
+        elif endpoint and model:
+            ok(
+                f"Reference model: {model} configured (reachability and adapter loading unverified); "
+                f"automatic NER review={'on' if parse_strategy == 'ner' else 'off'}"
+            )
+        else:
+            ok("Reference model: not configured; local NER only")
 
 
 def _check_llm_local_backend(backend: str, model: str, ok, fail) -> None:
@@ -829,6 +852,7 @@ def _run_doctor() -> None:
     _check_onnx_runtime(ok, warn, fail)
     if config_ok:
         _check_ref_strategies(ok, fail)
+        _check_reference_model(ok, fail)
 
     # --- Services --------------------------------------------------------------
     if config_ok:

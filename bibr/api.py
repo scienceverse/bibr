@@ -524,7 +524,8 @@ def _refs_kwargs(refs: str | bool | None) -> dict[str, Any]:
 
     ``refs`` selects the parse strategy ("ner" = local NER parser, "llm" =
     full-precision LLM parsing, "llm-chunked" = chunk-tolerant LLM parse over
-    region-aligned chunks, "off" / ``False`` = skip reference extraction
+    region-aligned chunks, "ref-llm" = dedicated fine-tuned reference endpoint,
+    "off" / ``False`` = skip reference extraction
     entirely); segmentation keeps its configured default. Carried on the
     pipeline's ``RunConfig`` — never mutates the process-global ``Settings``,
     so concurrent Chewers with different ``refs`` can't clobber each other.
@@ -533,8 +534,10 @@ def _refs_kwargs(refs: str | bool | None) -> dict[str, Any]:
         return {}
     if refs is False:
         refs = "off"
-    if refs not in ("ner", "llm", "llm-chunked", "off"):
-        raise ValueError(f"refs must be 'ner', 'llm', 'llm-chunked', or 'off', got {refs!r}")
+    if refs not in ("ner", "llm", "llm-chunked", "ref-llm", "off"):
+        raise ValueError(
+            f"refs must be 'ner', 'llm', 'llm-chunked', 'ref-llm', or 'off', got {refs!r}"
+        )
     return {"ref_parse_strategy": refs}
 
 
@@ -784,7 +787,7 @@ def chew(
     load once) and return an order-aligned ``list[Result | ChewFailure]``.
     Options mirror the ``bibr chew`` CLI flags / ``LocalPipeline`` arguments:
     ``ocr`` (backend), ``llm`` (backend), ``memory`` (mode), ``refs``
-    (``"llm"``/``"ner"``/``"llm-chunked"``, or ``"off"``/``False`` to skip
+    (``"llm"``/``"ner"``/``"llm-chunked"``/``"ref-llm"``, or ``"off"``/``False`` to skip
     reference extraction entirely), ``ref_seg`` (segmentation strategy:
     ``"geom"``/``"region"``/``"llm"``/``"crf"``), ``no_llm``, ``device``,
     ``crossref`` (tri-state: ``True`` runs Crossref/resolver reference

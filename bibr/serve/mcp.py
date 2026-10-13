@@ -386,7 +386,7 @@ def build_serve_mcp(
         registered for the get_*/search_text tools under the returned
         paper_id. Optional per-call knobs match POST /papers/extract:
         start_page/end_page (0-indexed, inclusive — the first page is 0),
-        refs (ner|llm|llm-chunked|off), consolidate (fill|replace), and
+        refs (ner|llm|llm-chunked|ref-llm|off), consolidate (fill|replace), and
         crossref (true runs Crossref/resolver reference enrichment, false skips
         it; omit for the server default, which is off). Large papers can take
         minutes.

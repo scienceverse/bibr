@@ -372,13 +372,21 @@ Reference parsing has its own strategy knob, `--refs` (or `REF_PARSE_STRATEGY`):
   segmentation of the section's printed lines replaces a fallback,
   under-yielding or clearly weaker result. A local ModernBERT-CRF model parses
   the resulting entries. The core install
-  supports geometry and ONNX parsing; parsing has no per-reference LLM cost.
+  supports geometry and ONNX parsing. When a dedicated fine-tuned endpoint is
+  configured, flagged entries receive bounded model review with NER retention
+  on failed or weaker results. Without that endpoint, parsing is local.
   `REF_SEG_STRATEGY=crf` requires the `torch` extra.
 - **`llm`** — parses references with the configured LLM in batches of up to
   `REF_PARSE_BATCH_SIZE` entries (default 15), with NER recovery for failed
   batches when available.
 - **`llm-chunked`** (experimental) — lets the LLM find reference boundaries and
   fields inside region-aligned chunks instead of requiring one entry per input.
+- **`ref-llm`** — sends one printed reference at a time to a
+  dedicated fine-tuned Qwen3.5-0.8B server using the `ref-llm-sft@1` prompt
+  and 14-field JSON contract. It retains the entry's language and year suffix.
+  Invalid, truncated, unsupported or timed-out responses recover through NER
+  in their original positions; successful model entries survive a recovery
+  failure. This endpoint is configured separately from the metadata LLM.
 - **`off`** — skips reference extraction entirely (empty bibliography/match/
   citation-link tables) while keeping everything else — titles, authors,
   sections, equations.
@@ -386,6 +394,28 @@ Reference parsing has its own strategy knob, `--refs` (or `REF_PARSE_STRATEGY`):
 `--ref-seg` (or `REF_SEG_STRATEGY`) overrides just the segmentation step
 independently of parsing. The full set of strategies and how they cascade is
 covered in [Architecture](architecture.md).
+
+### Dedicated fine-tuned reference parser
+
+To enable automatic NER-to-Qwen review, configure both the dedicated endpoint
+and the trained adapter alias:
+
+```dotenv
+REF_PARSE_STRATEGY=ner
+REF_LLM_BASE_URL=http://127.0.0.1:30210/v1
+REF_LLM_MODEL=bibr-ref-qwen35-08b-balanced
+REF_NER_LLM_FALLBACK=true
+```
+
+Review is on by default when that endpoint and alias are configured. Failed or
+weaker reviews retain NER results. Set `REF_NER_LLM_FALLBACK=false` for local NER
+only, or select `--refs ref-llm` to parse all entries with the dedicated model and
+aligned NER recovery. This server is separate from the metadata LLM.
+
+See [Fine-tuned reference model](reference-model.md) for the pinned adapter
+download, serving command, request limits and export diagnostics. The base
+Qwen3.5-0.8B checkpoint alone is not the fine-tuned parser. Routing checks are
+observable source signals, not calibrated confidence.
 
 ## Local model runtime
 

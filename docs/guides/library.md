@@ -130,7 +130,7 @@ chew` CLI flags:
 | `ocr` | `--ocr` | OCR backend, e.g. `"paddle"` (default selector), `"paddle-http"`, `"paddle-vllm"`, or an explicit `"glm-*"` compatibility backend |
 | `llm` | `--llm` | LLM backend: `"cloud"`, or a managed local server (`"local"`, `"vllm"`, `"vllm-mlx"`, `"rapid-mlx"`, `"llama-cpp"`, `"llmster"`) |
 | `memory` | `--memory` | Memory mode: `"aggressive"`, `"balanced"`, `"keep_all"` (default: selected from hardware) |
-| `refs` | `--refs` | Reference parser: `"ner"` (default), `"llm"` (batched LLM), `"llm-chunked"` (region-aligned chunk parsing), or `"off"` / `False` to skip references |
+| `refs` | `--refs` | Reference parser: `"ner"` (default), `"llm"` (batched LLM), `"llm-chunked"` (region-aligned chunk parsing), `"ref-llm"` (dedicated fine-tuned parser), or `"off"` / `False` to skip references |
 | `ref_seg` | `--ref-seg` | Reference segmentation strategy: `"geom"` (default), `"region"`, `"llm"`, `"crf"` |
 | `no_llm` | `--no-llm` | Skip metadata LLM calls, equation extraction, citation linking, and Crossref; native metadata survives. OCR still uses the selected backend |
 | `device` | `--device` | Force compute device: `"cuda"`, `"mps"`, `"cpu"` |
