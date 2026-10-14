@@ -783,7 +783,7 @@ def _run_doctor() -> None:
     else:
         warn(
             "No .env file found; settings come from the environment and defaults",
-            hint="Run bibr setup or cp .env.example .env",
+            hint="Run bibr setup, or bibr config example > .env and edit it",
         )
 
     # Settings validity — a bad .env value would otherwise crash every check
