@@ -7,6 +7,8 @@ routes offer a fire-and-poll alternative:
   - ``POST /papers/jobs``            → 202 ``{job_id, status, status_url}``
   - ``GET  /papers/jobs/{id}``       → job status (no result body)
   - ``GET  /papers/jobs/{id}/result`` → the paper_json once succeeded
+  - ``GET  /papers/jobs/{id}/references?format=`` → its reference list as
+    CSL-JSON, BibTeX or RIS
   - ``DELETE /papers/jobs/{id}``     → cancel a job that is still queued
 
 **Cancelling.** A queued job is failed at once with ``error_code``
@@ -62,9 +64,9 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 from bibr.config import Settings
@@ -101,6 +103,8 @@ CANCELLED_ERROR = {"detail": "job cancelled before it started", "error_code": "j
 CANCELLED_HTTP_STATUS = 410
 # Results from this size up are gzipped by the result route itself (see job_result).
 _RESULT_GZIP_MIN_BYTES = 64 * 1024
+# A job id fit for a download's file name (ids are uuid hex).
+_SAFE_FILE_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
 class JobCapacityError(Exception):
@@ -965,8 +969,8 @@ def register_job_routes(
             return JSONResponse({"detail": "job not found"}, status_code=404)
         return JSONResponse(job.status_dict())
 
-    @app.get("/papers/jobs/{job_id}/result")
-    async def job_result(job_id: str, request: Request):  # pyright: ignore[reportUnusedFunction]
+    async def _succeeded_job(job_id: str) -> tuple[Job, bytes] | JSONResponse:
+        """The job and its result body, or the response that says why there is none."""
         # No per-job ownership check (L2): bibr authenticates with a single shared
         # API key, so every authenticated caller is the same principal — there is no
         # "other user" to isolate against. The 128-bit random job_id is the boundary
@@ -989,8 +993,15 @@ def register_job_routes(
             # A shared store keeps the body under its own key: it can expire (or be
             # pruned) a moment before the status record does.
             return JSONResponse({"detail": "job result no longer available"}, status_code=404)
+        return job, job.result_json
+
+    @app.get("/papers/jobs/{job_id}/result")
+    async def job_result(job_id: str, request: Request):  # pyright: ignore[reportUnusedFunction]
+        found = await _succeeded_job(job_id)
+        if isinstance(found, JSONResponse):
+            return found
         # succeeded — the body was rendered once at completion.
-        body = job.result_json
+        _, body = found
         if len(body) >= _RESULT_GZIP_MIN_BYTES and "gzip" in request.headers.get(
             "accept-encoding", ""
         ):
@@ -1004,6 +1015,38 @@ def register_job_routes(
                 headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"},
             )
         return Response(content=body, media_type="application/json")
+
+    @app.get("/papers/jobs/{job_id}/references")
+    async def job_references(  # pyright: ignore[reportUnusedFunction]
+        job_id: str,
+        fmt: Literal["csl-json", "bibtex", "ris"] = Query("csl-json", alias="format"),
+        prefer: Literal["printed", "record"] = "printed",
+        check_note: bool = True,
+    ):
+        """The job's reference list as CSL-JSON, BibTeX or RIS (see
+        :mod:`bibr.export.citations`); answers like ``/result`` while there is none."""
+        found = await _succeeded_job(job_id)
+        if isinstance(found, JSONResponse):
+            return found
+        job, body = found
+
+        def render() -> str:
+            from bibr.export.citations import render_references
+
+            text, _ = render_references(
+                [json.loads(body)], fmt, prefer=prefer, check_note=check_note
+            )
+            return text
+
+        from bibr.export.citations import CONTENT_TYPES, EXTENSIONS
+
+        text = await asyncio.to_thread(render)
+        name = job.job_id if _SAFE_FILE_NAME.fullmatch(job.job_id) else "references"
+        return Response(
+            content=text.encode("utf-8"),
+            media_type=f"{CONTENT_TYPES[fmt]}; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{name}{EXTENSIONS[fmt]}"'},
+        )
 
     @app.delete("/papers/jobs/{job_id}")
     async def cancel_job(job_id: str):  # pyright: ignore[reportUnusedFunction]

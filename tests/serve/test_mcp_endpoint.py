@@ -100,6 +100,8 @@ async def test_serve_surface_has_no_filesystem_tools():
         assert "chew_url" in tools
         assert "load_paper" not in tools
         assert "save_paper" not in tools
+        assert "save_references" not in tools
+        assert "export_references" in tools
 
 
 async def test_chew_url_can_be_disabled():

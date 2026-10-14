@@ -41,6 +41,7 @@ examples:
     bibr chew paper.pdf --preset NAME            # apply a saved preset for this run
     bibr inspect result.json                     # summarize an extraction-output JSON
     bibr tables results/ --out tables/           # exports → one Parquet file per table
+    bibr references results/ -o refs.bib         # exports → BibTeX (.ris, CSL-JSON .json)
 
   presets & config:
     bibr preset list                             # show all saved presets
@@ -746,6 +747,52 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     tables_parser.add_argument(
         "--out", required=True, help="Output directory for the .parquet files"
+    )
+
+    # --- references subcommand ---
+    references_parser = sub.add_parser(
+        "references",
+        help="write the reference lists of JSON exports as CSL-JSON, BibTeX or RIS",
+        description=(
+            "Write the references of bibr JSON exports as one file for a reference "
+            "manager: CSL-JSON (Zotero, Mendeley, Pandoc), BibTeX or RIS. Values are "
+            "as printed; what a reference does not print is filled from the record "
+            "Crossref enrichment matched to it, but only when the reference check "
+            "found the two agree (bib_check status matched). A note on each reference "
+            "says what the check found when it is not matched, and names a retraction "
+            "or withdrawal of its record. Cite keys are unique across the file. "
+            "Directories are searched recursively for *.json as for 'bibr tables'."
+        ),
+    )
+    references_parser.add_argument(
+        "inputs", nargs="+", help="Export JSON files or directories containing them"
+    )
+    references_parser.add_argument(
+        "--format",
+        choices=["csl-json", "bibtex", "ris"],
+        default=None,
+        help="Output format (default: from the output file's extension: .json, .bib, .ris)",
+    )
+    references_parser.add_argument(
+        "-o",
+        "--out",
+        default=None,
+        help="Output file (default: standard output, which needs --format)",
+    )
+    references_parser.add_argument(
+        "--prefer",
+        choices=["printed", "record"],
+        default="printed",
+        help=(
+            "printed: the reference's values, gaps filled from its matched record; "
+            "record: a matched record's values first (a record whose check did not "
+            "match is never used)"
+        ),
+    )
+    references_parser.add_argument(
+        "--no-check-note",
+        action="store_true",
+        help="Leave out the note saying what the reference check found",
     )
 
     # --- inspect subcommand ---

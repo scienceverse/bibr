@@ -10,7 +10,9 @@ follows a chew-once / query-granularly contract: ``chew_paper`` runs the
 pipeline and returns only a compact summary; the ``get_*`` and
 ``search_text`` tools then read slices of the stored export on demand.
 ``load_paper`` admits exports produced earlier (CLI, HTTP API) without
-re-processing, and ``save_paper`` persists a chewed result as JSON.
+re-processing, ``save_paper`` persists a chewed result as JSON, and
+``export_references``/``save_references`` give its reference list as CSL-JSON,
+BibTeX or RIS.
 
 State is in-memory per server process: papers live in a dict keyed by paper
 id and vanish on exit. The pipeline is a single warm :class:`bibr.api.Chewer`
@@ -26,10 +28,11 @@ transport keeps its own reference to the original stream from server start,
 so the redirect never touches it.
 
 File access is scoped: the agent driving the tools may be following
-instructions injected by a paper it read, so ``chew_paper``, ``load_paper``
-and ``save_paper`` only reach paths that resolve (symlinks followed) inside
-the allowed directories — ``--allow-dir``, by default the working directory
-at startup — and ``save_paper`` never writes through a symlink.
+instructions injected by a paper it read, so ``chew_paper``, ``load_paper``,
+``save_paper`` and ``save_references`` only reach paths that resolve (symlinks
+followed) inside the allowed directories — ``--allow-dir``, by default the
+working directory at startup — and the save tools never write through a
+symlink.
 """
 
 from __future__ import annotations
@@ -45,7 +48,7 @@ import time
 from collections.abc import Callable, Sequence
 from contextlib import asynccontextmanager, redirect_stdout
 from pathlib import Path
-from typing import Any, Unpack
+from typing import Any, Literal, Unpack
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -58,6 +61,11 @@ from bibr.validation import payload_validation
 __all__ = ["build_server", "run_mcp"]
 
 logger = logging.getLogger(__name__)
+
+# bibr.export.citations' formats and value preferences, spelled out here so that
+# importing this module does not load the export package.
+ReferenceFormat = Literal["csl-json", "bibtex", "ris"]
+Prefer = Literal["printed", "record"]
 
 _TEXT_LIMIT_MAX = 500
 _REF_LIMIT_MAX = 200
@@ -81,8 +89,10 @@ get_metadata, get_sections, get_text, search_text, get_references,
 get_reference_citations, get_tables, get_figures. Full exports are large, so query the
 slices you need instead of asking for everything; save_paper writes the complete export
 JSON to a .json path (it refuses to overwrite an existing file unless overwrite=True).
+export_references gives the reference list as CSL-JSON, BibTeX or RIS text, and
+save_references writes it to a .json, .bib or .ris path (same overwrite rule).
 
-chew_paper, load_paper and save_paper only reach files under {roots}; the user can allow
+chew_paper, load_paper, save_paper and save_references only reach files under {roots}; the user can allow
 another directory by restarting the server with `bibr mcp --allow-dir DIR`.
 """
 _START_LOCAL = (
@@ -525,6 +535,77 @@ def _register_query_tools(server: MCPServer, get_store: Callable[[Context], _Pap
             raise ToolError(f"no figure with figure_id {figure_id} in paper {paper_id!r}")
         return {"paper_id": paper_id, "figure": strip(row)}
 
+    @server.tool()
+    async def export_references(
+        paper_id: str,
+        format: ReferenceFormat = "csl-json",
+        prefer: Prefer = "printed",
+        *,
+        ctx: Context,
+    ) -> dict[str, Any]:
+        """The paper's reference list as one file's text for a reference manager:
+        CSL-JSON (Zotero, Mendeley, Pandoc), BibTeX or RIS. Values are as printed;
+        what a reference does not print is filled from its registry record only when
+        the reference check matched the two (prefer="record" takes a matched record's
+        values first). A note on each reference says what the check found when it is
+        not matched, and names a retraction or withdrawal of its record."""
+        entry = get_store(ctx).get(paper_id)
+        return await asyncio.to_thread(_render_reference_list, paper_id, entry.data, format, prefer)
+
+
+def _render_reference_list(
+    paper_id: str, data: dict[str, Any], fmt: str, prefer: str
+) -> dict[str, Any]:
+    from bibr.export.citations import CONTENT_TYPES, normalize_format, render_references
+
+    try:
+        fmt = normalize_format(fmt)
+        text, count = render_references([data], fmt, prefer=prefer)  # type: ignore[arg-type]
+    except ValueError as e:
+        raise ToolError(str(e)) from None
+    return {
+        "paper_id": paper_id,
+        "format": fmt,
+        "content_type": CONTENT_TYPES[fmt],
+        "references": count,
+        "text": text,
+    }
+
+
+def _write_file(
+    out: Path, roots: tuple[Path, ...], text: str, *, overwrite: bool, newline: str | None = None
+) -> int:
+    """Write *text* to *out* inside an allowed root; returns the bytes written.
+
+    Refuses to overwrite an existing file unless *overwrite*, and never writes
+    through a symbolic link.
+    """
+    # Only the parent is resolved: the file itself must not be a symlink,
+    # wherever it points.
+    target = _in_scope(out.parent, roots) / out.name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        if stat.S_ISLNK(info.st_mode):
+            raise ToolError(f"refusing to write {out}: it is a symbolic link")
+        if not stat.S_ISREG(info.st_mode):
+            raise ToolError(f"refusing to write {out}: not a regular file")
+        if not overwrite:
+            raise ToolError(
+                f"refusing to overwrite existing file {out} (pass overwrite=True to replace it)"
+            )
+    # O_NOFOLLOW and O_EXCL hold the lstat's verdict at open time: a
+    # symlink planted in between fails the open instead of being followed.
+    flags = os.O_WRONLY | os.O_CREAT | _O_NOFOLLOW | _O_BINARY
+    flags |= os.O_TRUNC if overwrite else os.O_EXCL
+    with open(os.open(target, flags, 0o666), "w", encoding="utf-8", newline=newline) as fh:
+        fh.write(text)
+        fh.flush()
+        return os.fstat(fh.fileno()).st_size
+
 
 def _exit_if_terminating() -> None:
     """End ``bibr mcp`` now when SIGTERM or SIGHUP is stopping it.
@@ -770,41 +851,63 @@ def build_server(
         out = Path(path).expanduser()
         if out.suffix.lower() != ".json":
             raise ToolError(f"refusing to write {out}: save_paper writes only .json files")
-        # Only the parent is resolved: the file itself must not be a symlink,
-        # wherever it points.
-        target = _in_scope(out.parent, roots) / out.name
+        _in_scope(out.parent, roots)
         kwargs: dict[str, Any] = {"separators": (",", ":")} if compact else {"indent": 2}
 
         def write() -> int:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                info = target.lstat()
-            except FileNotFoundError:
-                pass
-            else:
-                if stat.S_ISLNK(info.st_mode):
-                    raise ToolError(f"refusing to write {out}: it is a symbolic link")
-                if not stat.S_ISREG(info.st_mode):
-                    raise ToolError(f"refusing to write {out}: not a regular file")
-                if not overwrite:
-                    raise ToolError(
-                        f"refusing to overwrite existing file {out} "
-                        "(pass overwrite=True to replace it)"
-                    )
-            # O_NOFOLLOW and O_EXCL hold the lstat's verdict at open time: a
-            # symlink planted in between fails the open instead of being followed.
-            flags = os.O_WRONLY | os.O_CREAT | _O_NOFOLLOW | _O_BINARY
-            flags |= os.O_TRUNC if overwrite else os.O_EXCL
-            with open(os.open(target, flags, 0o666), "w", encoding="utf-8") as fh:
-                fh.write(json.dumps(entry.data, ensure_ascii=False, **kwargs))
-                fh.flush()
-                return os.fstat(fh.fileno()).st_size
+            text = json.dumps(entry.data, ensure_ascii=False, **kwargs)
+            return _write_file(out, roots, text, overwrite=overwrite)
 
         try:
             size = await asyncio.to_thread(write)
         except OSError as e:
             raise ToolError(f"cannot write {out}: {e}") from e
         return {"paper_id": paper_id, "path": str(out), "bytes": size}
+
+    @server.tool()
+    async def save_references(
+        paper_id: str,
+        path: str,
+        format: ReferenceFormat | None = None,
+        prefer: Prefer = "printed",
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Write a paper's reference list for a reference manager to a `.bib`
+        (BibTeX), `.ris` (RIS) or `.json` (CSL-JSON) path inside a directory the
+        server was allowed to access; `format`, when given, must fit the extension.
+        Values and notes are as for export_references.
+
+        Refuses to overwrite an existing file unless `overwrite=True` is
+        passed explicitly, and never writes through a symbolic link.
+        """
+        from bibr.export.citations import format_for_path, normalize_format
+
+        entry = store.get(paper_id)
+        out = Path(path).expanduser()
+        implied = format_for_path(out)
+        if implied is None:
+            raise ToolError(
+                f"refusing to write {out}: save_references writes only .bib, .ris or .json files"
+            )
+        try:
+            fmt = normalize_format(format) if format else implied
+        except ValueError as e:
+            raise ToolError(str(e)) from None
+        if fmt != implied:
+            raise ToolError(f"refusing to write {fmt} to {out}: its extension means {implied}")
+        _in_scope(out.parent, roots)
+
+        def write() -> dict[str, Any]:
+            rendered = _render_reference_list(paper_id, entry.data, fmt, prefer)
+            # newline="" keeps RIS's CRLF line endings as they are.
+            size = _write_file(out, roots, rendered["text"], overwrite=overwrite, newline="")
+            return {"references": rendered["references"], "bytes": size}
+
+        try:
+            written = await asyncio.to_thread(write)
+        except OSError as e:
+            raise ToolError(f"cannot write {out}: {e}") from e
+        return {"paper_id": paper_id, "path": str(out), "format": fmt, **written}
 
     _register_query_tools(server, lambda ctx: store)  # noqa: ARG005 — one shared store
     return server
