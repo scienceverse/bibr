@@ -430,6 +430,11 @@ class CrossrefClient:
                     logger.debug("Discarding Crossref HTTP client bound to a closed event loop")
 
     @property
+    def user_agent(self) -> str:
+        """The User-Agent this client sends, contact address included."""
+        return self._http_headers["User-Agent"]
+
+    @property
     def enrich_semaphore(self) -> asyncio.Semaphore:
         """Lazily create the semaphore in the current event loop.
 

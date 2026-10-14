@@ -192,6 +192,26 @@ def _export_doi(value: str | None, field: str) -> str | None:
     return _conformed(bare.lower(), _DOI_RE, field)
 
 
+def _lookup_rows(references) -> list[dict] | None:
+    """``extraction.enrichment.lookups``: how each reference's lookup ended.
+    ``None`` when enrichment recorded none (a Paper enriched elsewhere)."""
+    from bibr.enrich.lookup import recorded_lookup
+
+    lookups = [recorded_lookup(ref) for ref in references]
+    if not any(lookups):
+        return None
+    rows = []
+    for ref, lookup in zip(references, lookups, strict=True):
+        row: dict[str, Any] = {
+            "bib_id": ref.bib_id,
+            "outcome": lookup.outcome(bool(ref.match)) if lookup else "not_attempted",
+        }
+        if lookup is not None and row["outcome"] == "doi_404" and lookup.registration_agency:
+            row["registration_agency"] = lookup.registration_agency
+        rows.append(row)
+    return rows
+
+
 def _export_service_id(value: str | None) -> str | None:
     """A match row's ``service_id``, with a DOI identifier lowercased like every DOI."""
     if value and normalize_doi(value) == value.strip():
@@ -956,6 +976,7 @@ def _export_paper_payload(
             complete=paper.metadata.enrichment_complete,
             refs_enriched=sum(1 for r in _refs if r.match),
             refs_total=len(_refs),
+            lookups=_lookup_rows(_refs),
         )
 
     regions_data: list[RegionExport] | None = None

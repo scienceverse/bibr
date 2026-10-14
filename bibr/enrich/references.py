@@ -22,6 +22,7 @@ from rapidfuzz import fuzz
 
 from bibr.clients.crossref import CrossrefRequestTally, count_requests
 from bibr.config import GlobalSettings, snapshot_settings
+from bibr.enrich.lookup import lookup_of
 from bibr.enrich.schemas import (
     CrossrefAuthor,
     CrossrefWorkItem,
@@ -135,6 +136,7 @@ def _record_terminal_failure(
     operation: str,
     exc: BaseException,
 ) -> None:
+    lookup_of(ref).errored = True
     if stats is None:
         return
     stats.failed_bib_ids.add(ref.bib_id)
@@ -407,6 +409,7 @@ async def enrich_references(
                 resolver_authoritative=resolver_authoritative,
                 settings=effective,
             )
+            lookup_of(ref).finished = True
             if outcome is not None:
                 source, match = outcome
                 ref.match[source] = match
@@ -425,6 +428,7 @@ async def enrich_references(
                         "Reference enrichment raised for bib_id=%s: %s", ref.bib_id, result
                     )
                     _record_terminal_failure(stats, ref, "reference enrichment", result)
+                    lookup_of(ref).finished = True
 
             if resolver_client is not None:
                 try:
@@ -460,6 +464,8 @@ async def enrich_references(
             await prefetch.aclose()
     stats.add_requests(tally)
     stats.add_requests(prefetch.requests)
+    if effective.crossref.doi_agency_lookup:
+        await _classify_unknown_dois(references, crossref_client)
 
     matched = sum(1 for ref in references if ref.match)
     logger.info(
@@ -510,6 +516,34 @@ async def enrich_references(
         failed=len(stats.failed_bib_ids & unresolved),
         details=tuple(dict.fromkeys(stats.failure_details)),
     )
+
+
+async def _classify_unknown_dois(references: list[PaperReference], crossref_client) -> None:
+    """Ask doi.org which agency registered each printed DOI the registry had
+    no record of, in one request: a DataCite DOI is unknown to Crossref but
+    exists, and a DOI no agency registered does not."""
+    from bibr.enrich.lookup import recorded_lookup, registration_agencies
+
+    unknown = [
+        (ref, lookup)
+        for ref in references
+        if ref.doi
+        and (lookup := recorded_lookup(ref)) is not None
+        and lookup.outcome(bool(ref.match)) == "doi_404"
+    ]
+    if not unknown:
+        return
+    user_agent = getattr(crossref_client, "user_agent", None)
+    try:
+        agencies = await registration_agencies(
+            [ref.doi for ref, _ in unknown if ref.doi],
+            user_agent=user_agent if isinstance(user_agent, str) else None,
+        )
+    except Exception as e:  # noqa: BLE001 — the agency only refines the outcome
+        logger.debug("DOI registration-agency lookup failed: %s", e)
+        return
+    for ref, lookup in unknown:
+        lookup.registration_agency = agencies.get((ref.doi or "").casefold())
 
 
 def _year_from_published(published: str | None) -> int | None:
@@ -614,28 +648,33 @@ async def _fetch_crossref_item(
     Returns:
         (CrossrefWorkItem, score) tuple or None if no match found.
     """
+    lookup = lookup_of(ref)
     # Strategy 1: DOI lookup
     if ref.doi:
         if stats is not None:
             stats.doi_attempts += 1
+        lookup.queried = True
         try:
             result = await client.works(ids=ref.doi)
             if result and "message" in result:
                 cr_item = CrossrefWorkItem.from_raw(result["message"])
-                if ref.year and cr_item.year and abs(ref.year - cr_item.year) > 1:
+                if _doi_year_conflicts(ref.year, cr_item.year, cr_item.work_type):
                     logger.warning(
                         "DOI %s year mismatch: ref=%d, crossref=%d — discarding match",
                         ref.doi,
                         ref.year,
                         cr_item.year,
                     )
+                    lookup.doi_status = "rejected"
                     return None
                 if stats is not None:
                     stats.doi_matches += 1
+                lookup.doi_status, lookup.hit = "found", "doi"
                 return cr_item, 100.0
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 logger.debug("DOI not found in Crossref (404): %s", ref.doi)
+                lookup.doi_status = "not_found"
                 return None
             logger.debug("Crossref DOI lookup HTTP error for %s: %s", ref.doi, e)
             _record_terminal_failure(stats, ref, "DOI lookup", e)
@@ -655,6 +694,7 @@ async def _fetch_crossref_item(
             query_parts.append(str(ref.year))
 
         query_str = " ".join(query_parts)
+        lookup.queried = True
         try:
             result = await client.search(query=query_str, limit=3)
             if result and "message" in result and "items" in result["message"]:
@@ -666,8 +706,10 @@ async def _fetch_crossref_item(
                     ref_authors=ref.authors,
                     **_printed_fields(ref),
                 )
-                if match is not None and stats is not None:
-                    stats.search_matches += 1
+                if match is not None:
+                    lookup.hit = "search"
+                    if stats is not None:
+                        stats.search_matches += 1
                 return match
         except Exception as e:
             logger.debug(f"Crossref search failed for '{ref.title[:50]}...': {e}")
@@ -690,6 +732,7 @@ async def _fetch_crossref_item(
     if not title_usable and fingerprint_usable:
         if stats is not None:
             stats.fingerprint_attempts += 1
+        lookup.queried = True
         try:
             # Deeper than the title path's 3: a title-less fingerprint query is
             # bag-of-words over author+journal+volume+page, so the correct record
@@ -699,14 +742,43 @@ async def _fetch_crossref_item(
             result = await client.search(query=_fingerprint_query(ref), limit=_FINGERPRINT_ROWS)
             if result and "message" in result and "items" in result["message"]:
                 match = _find_best_fingerprint_match(ref, result["message"]["items"])
-                if match is not None and stats is not None:
-                    stats.fingerprint_matches += 1
+                if match is not None:
+                    lookup.hit = "search"
+                    if stats is not None:
+                        stats.fingerprint_matches += 1
                 return match
         except Exception as e:
             logger.debug(f"Crossref fingerprint search failed for bib_id={ref.bib_id}: {e}")
             _record_terminal_failure(stats, ref, "fingerprint search", e)
 
     return None
+
+
+# Crossref types whose DOI registers one edition of a book. Its record carries
+# that edition's year, often a reprint or e-book long after the printed one
+# (Cohen's 1988 "Statistical Power Analysis" is 10.4324/9780203771587, issued
+# 2013), so for them a year difference is no evidence against the DOI.
+_EDITION_DATED_TYPES = frozenset(
+    {
+        "book",
+        "edited-book",
+        "monograph",
+        "reference-book",
+        "book-set",
+        "book-chapter",
+        "book-section",
+        "book-part",
+        "book-track",
+    }
+)
+
+
+def _doi_year_conflicts(ref_year: int | None, record_year: int | None, work_type) -> bool:
+    """True when the record a printed DOI resolves to is dated too far from the
+    printed year (more than a year) to be the cited work."""
+    if not ref_year or not record_year or abs(ref_year - record_year) <= 1:
+        return False
+    return work_type not in _EDITION_DATED_TYPES
 
 
 def _fingerprint_query(ref) -> str:
@@ -1576,6 +1648,7 @@ async def _enrich_resolver_fallback(
 
     async def resolve(ref: PaperReference) -> None:
         nonlocal answered
+        lookup_of(ref).queried = True
         try:
             async with semaphore:
                 candidates = await resolver_client.search(
@@ -1610,6 +1683,7 @@ async def _enrich_resolver_fallback(
         if ref.match:
             return
         ref.match[_resolver_match_source(candidate)] = _build_match_from_candidate(candidate, score)
+        lookup_of(ref).hit = "search"
         stats.fallback_matches += 1
 
     try:
@@ -1743,6 +1817,7 @@ async def _enrich_raw_strings(
 
     async def resolve(ref: PaperReference) -> None:
         raw = raw_strings[ref.bib_id]
+        lookup_of(ref).queried = True
         async with semaphore:
             candidates = await resolver_client.search(
                 _raw_query(raw),
@@ -1783,6 +1858,7 @@ async def _enrich_raw_strings(
         if doi is not None:
             held.add(doi)
         ref.match[_resolver_match_source(candidate)] = _build_match_from_candidate(candidate, score)
+        lookup_of(ref).hit = "search"
         stats.raw_matches += 1
 
 
@@ -1848,25 +1924,35 @@ async def _try_resolver(
     if stats is not None:
         stats.resolver_attempts += 1
     effective = settings if settings is not None else snapshot_settings()
+    lookup = lookup_of(ref)
 
     if ref.doi:
+        lookup.queried = True
         cand = await resolver_client.lookup_doi(ref.doi, raise_on_error=raise_on_error)
         if cand is None:
+            # Provisional when the resolver is not authoritative: Crossref is
+            # asked next, and its answer replaces this one.
+            lookup.doi_status = "not_found"
             return None
         cand_year = cand.get("year")
-        if ref.year and cand_year and abs(ref.year - cand_year) > 1:
+        if _doi_year_conflicts(
+            ref.year, cand_year if isinstance(cand_year, int) else None, cand.get("type")
+        ):
             logger.warning(
                 "Resolver DOI %s year mismatch: ref=%d, resolver=%d — discarding match",
                 ref.doi,
                 ref.year,
                 cand_year,
             )
+            lookup.doi_status = "rejected"
             return None
         if stats is not None:
             stats.resolver_matches += 1
+        lookup.doi_status, lookup.hit = "found", "doi"
         return _resolver_match_source(cand), _build_match_from_candidate(cand, 100.0)
 
     if ref.title and len(ref.title) >= 10:
+        lookup.queried = True
         if prefetch is not None:
             candidates = prefetch.get(id(ref), [])
             if isinstance(candidates, Exception):
@@ -1892,6 +1978,7 @@ async def _try_resolver(
             cand, score = best
             if stats is not None:
                 stats.resolver_matches += 1
+            lookup.hit = "search"
             return _resolver_match_source(cand), _build_match_from_candidate(cand, score)
 
     return None

@@ -188,6 +188,9 @@ class CrossrefEnricher:
         except TimeoutError:
             if meta.references:
                 meta.enrichment_complete = False
+                from bibr.enrich.lookup import finish_unfinished
+
+                finish_unfinished(meta.references, timed_out=True)
             warning = ProcessingWarning(
                 WarningCode.CROSSREF_ENRICHMENT_TIMEOUT,
                 f"Crossref enrichment timed out after {timeout:g}s",
@@ -202,6 +205,9 @@ class CrossrefEnricher:
         except Exception as e:  # noqa: BLE001
             if meta.references:
                 meta.enrichment_complete = False
+                from bibr.enrich.lookup import finish_unfinished
+
+                finish_unfinished(meta.references, timed_out=False)
             # Both strings are exported: they name the error, not the request
             # URL an HTTP error quotes. The log line keeps the raw text.
             reason = describe_error(e)

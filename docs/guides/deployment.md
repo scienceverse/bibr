@@ -586,6 +586,11 @@ how many references are resolved at once. Without an email the client is
 also capped at 60 requests a minute. Every reference printed without a DOI
 costs one search, so in the anonymous pool a long reference list can use
 most of the 120-second per-paper budget (`CROSSREF_ENRICH_TIMEOUT`).
+`extraction.enrichment.lookups` records how each reference's lookup ended.
+References still waiting when the budget runs out are `timed_out`, so many
+of them on one paper usually mean the email is missing or the limits are
+being hit. The log line `Reference enrichment: ...` counts the paper's
+Crossref requests and the ones answered with 429 (too many requests).
 
 `CROSSREF_RATE_LIMIT_RPM` (default `200`) is a ceiling on top of
 Crossref's limits. Raising it above them gains nothing. Crossref responses

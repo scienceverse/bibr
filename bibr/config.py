@@ -1458,6 +1458,14 @@ class CrossrefOptions(_BibrSettings):
         "at export: report disagreements, and fill or correct a value only when the record's "
         "value is printed in the reference string. Needs enrichment; off leaves bib[] as parsed.",
     )
+    # A printed DOI Crossref has no record of may be registered elsewhere
+    # (DataCite, mEDRA) or nowhere. One batched doi.org request per paper tells
+    # which; extraction.enrichment.lookups and bib_check report it.
+    doi_agency_lookup: bool = Field(
+        True,
+        description="Ask doi.org which agency registered each printed DOI that Crossref has no "
+        "record of (one request per paper), so a DataCite DOI is not reported as unregistered.",
+    )
 
     @field_validator("consolidate", mode="before")
     @classmethod

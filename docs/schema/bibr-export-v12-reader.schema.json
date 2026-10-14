@@ -1295,6 +1295,18 @@
           "title": "Complete",
           "type": "boolean"
         },
+        "lookups": {
+          "default": null,
+          "description": "One row per reference: how its registry lookup ended. Omitted when the export was made without recording lookups.",
+          "items": {
+            "$ref": "#/$defs/LookupExportReader"
+          },
+          "title": "Lookups",
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "refs_enriched": {
           "description": "References with at least one bib_match row.",
           "title": "Refs Enriched",
@@ -2330,6 +2342,48 @@
         "parsed_ok"
       ],
       "title": "LlmTraceExportReader",
+      "type": "object"
+    },
+    "LookupExportReader": {
+      "additionalProperties": true,
+      "description": "How the registry lookup of one reference ended.",
+      "properties": {
+        "bib_id": {
+          "description": "bib[].bib_id of the reference.",
+          "minimum": 1,
+          "title": "Bib Id",
+          "type": "integer"
+        },
+        "outcome": {
+          "description": "doi_hit: the printed DOI resolved to the accepted record. doi_404: the registry has no record of the printed DOI. doi_rejected: the printed DOI resolved to a work dated more than a year from the printed year. search_hit: a search found the work. clean_miss: every search answered and none found it. error: a lookup failed and nothing found the work. timed_out: the enrichment time budget ran out first. not_attempted: the reference gave nothing to look up (no DOI, title or volume).",
+          "examples": [
+            "doi_hit",
+            "doi_404",
+            "doi_rejected",
+            "search_hit",
+            "clean_miss",
+            "error",
+            "timed_out",
+            "not_attempted"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "registration_agency": {
+          "default": null,
+          "description": "For doi_404: the agency doi.org names for the printed DOI, lowercase (crossref, datacite, medra, ...), or 'none' when doi.org says the DOI does not exist. Omitted when doi.org was not asked or did not answer.",
+          "title": "Registration Agency",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "bib_id",
+        "outcome"
+      ],
+      "title": "LookupExportReader",
       "type": "object"
     },
     "MatchFunderExportReader": {

@@ -281,6 +281,9 @@ class PaperReference(_Base):
     access_date: str | None = None  # "Accessed 12 March 2020", verbatim
     note: str | None = None  # trailing free text no other field claims
     match: dict[MatchSource, ExternalMatch] = Field(default_factory=dict)
+    # What enrichment asked about this reference and how it was answered
+    # (bibr.enrich.lookup.ReferenceLookup); None until enrichment touches it.
+    _lookup: Any = PrivateAttr(default=None)
 
 
 class FundingEntry(_Base):

@@ -37,6 +37,10 @@ _SCHEMA_VERSION = "12.3"
 #     when the record lists none.
 #   - An organization author or editor of a matched record ("Open Science
 #     Collaboration") is written as ``{literal}``; it was dropped before.
+#   - New ``extraction.enrichment.lookups[]``: per reference, how its registry
+#     lookup ended (``outcome``: doi_hit, doi_404, doi_rejected, search_hit,
+#     clean_miss, error, timed_out, not_attempted) and, for a doi_404, the
+#     ``registration_agency`` doi.org names. Omitted when not recorded.
 #
 # v12.2 (vs 12.1) — additive:
 #   - New ``extraction.diagnostics.verification[]``: per reference with a
@@ -1511,6 +1515,49 @@ class IdentityExport(BaseModel):
         return data
 
 
+LookupOutcomeLiteral = Literal[
+    "doi_hit",
+    "doi_404",
+    "doi_rejected",
+    "search_hit",
+    "clean_miss",
+    "error",
+    "timed_out",
+    "not_attempted",
+]
+
+
+class LookupExport(BaseModel):
+    """How the registry lookup of one reference ended."""
+
+    model_config = _STRICT
+
+    bib_id: Id = Field(description="bib[].bib_id of the reference.")
+    outcome: LookupOutcomeLiteral = Field(
+        description="doi_hit: the printed DOI resolved to the accepted record. doi_404: the "
+        "registry has no record of the printed DOI. doi_rejected: the printed DOI resolved to a "
+        "work dated more than a year from the printed year. search_hit: a search found the "
+        "work. clean_miss: every search answered and none found it. error: a lookup failed "
+        "and nothing found the work. timed_out: the enrichment time budget ran out first. "
+        "not_attempted: the reference gave nothing to look up (no DOI, title or volume)."
+    )
+    registration_agency: str | None = Field(
+        default=None,
+        description="For doi_404: the agency doi.org names for the printed DOI, lowercase "
+        "(crossref, datacite, medra, ...), or 'none' when doi.org says the DOI does not exist. "
+        "Omitted when doi.org was not asked or did not answer.",
+    )
+
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("registration_agency",)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent(self, handler):
+        data = handler(self)
+        if data.get("registration_agency") is None:
+            data.pop("registration_agency", None)
+        return data
+
+
 class EnrichmentExport(BaseModel):
     """Reference-enrichment completeness — lets a consumer distinguish a
     partial (timed-out) enrichment from a complete one without scanning
@@ -1524,6 +1571,20 @@ class EnrichmentExport(BaseModel):
     )
     refs_enriched: int = Field(description="References with at least one bib_match row.")
     refs_total: int = Field(description="References in bib[].")
+    lookups: list[LookupExport] | None = Field(
+        default=None,
+        description="One row per reference: how its registry lookup ended. Omitted when the "
+        "export was made without recording lookups.",
+    )
+
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("lookups",)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent(self, handler):
+        data = handler(self)
+        if data.get("lookups") is None:
+            data.pop("lookups", None)
+        return data
 
 
 class CitationCandidateExport(BaseModel):
