@@ -1918,11 +1918,15 @@ class StageMemoryExport(BaseModel):
         "peak_rss_mib this stage's own."
     )
 
+    # Written only when tracemalloc ran (PIPELINE_MEMORY_PROFILE_TRACEMALLOC).
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("python_peak_mib",)
+
     @model_serializer(mode="wrap")
     def _omit_absent_python_peak(self, handler):
         data = handler(self)
-        if data.get("python_peak_mib") is None:
-            data.pop("python_peak_mib", None)
+        for key in self.OMITTED_WHEN_ABSENT:
+            if data.get(key) is None:
+                data.pop(key, None)
         return data
 
 
@@ -1959,11 +1963,16 @@ class TimingsExport(BaseModel):
         "PIPELINE_MEMORY_PROFILE is on. Added in 12.3.",
     )
 
+    # Written only with PIPELINE_MEMORY_PROFILE on, so a default run's timings
+    # stay exactly what 12.2 wrote.
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("memory",)
+
     @model_serializer(mode="wrap")
     def _omit_absent_memory(self, handler):
         data = handler(self)
-        if data.get("memory") is None:
-            data.pop("memory", None)
+        for key in self.OMITTED_WHEN_ABSENT:
+            if data.get(key) is None:
+                data.pop(key, None)
         return data
 
 

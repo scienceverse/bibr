@@ -3914,7 +3914,6 @@
         "rss_mib",
         "rss_delta_mib",
         "swap_mib",
-        "python_peak_mib",
         "files",
         "overlapped",
         "peak_reset"
@@ -4196,8 +4195,7 @@
       },
       "required": [
         "stages",
-        "total_seconds",
-        "memory"
+        "total_seconds"
       ],
       "title": "TimingsExport",
       "type": "object"
