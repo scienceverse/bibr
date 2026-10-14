@@ -23,6 +23,7 @@ once) and return an order-aligned ``list[Result | ChewFailure]``:
     results = bibr.chew("papers/")
     good = [r for r in results if r.ok]
     bibr.write_tables(good, "tables/")   # one Parquet file per table, keyed by paper_id
+    bibr.write_references(good, "refs.bib")  # reference lists: BibTeX, RIS or CSL-JSON
 
 For repeated calls over time (notebooks, queue workers), :class:`Chewer`
 keeps models warm across calls:
@@ -72,6 +73,7 @@ if TYPE_CHECKING:
     )
     from bibr.config import GlobalSettings, Settings
     from bibr.export import PaperExport
+    from bibr.export.citations import write_references
     from bibr.export.tables import write_tables
     from bibr.local.pipeline import LocalPipeline
     from bibr.pipeline.pipeline import Pipeline
@@ -98,6 +100,7 @@ __all__ = [
     "chew",
     "chew_file",
     "chew_many",
+    "write_references",
     "write_tables",
 ]
 
@@ -116,6 +119,7 @@ _LAZY = {
     "ChewFailure": "bibr.api",
     "Chewer": "bibr.api",
     "write_tables": "bibr.export.tables",
+    "write_references": "bibr.export.citations",
     "LocalPipeline": "bibr.local.pipeline",
     "Pipeline": "bibr.pipeline.pipeline",
     "PaperExport": "bibr.export",

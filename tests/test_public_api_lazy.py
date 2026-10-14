@@ -18,7 +18,7 @@ from bibr.api import Result
 
 FIXTURE = Path(__file__).parent / "fixtures" / "inspect_full_export.json"
 
-PUBLIC = ("chew", "Chewer", "Result", "write_tables")
+PUBLIC = ("chew", "Chewer", "Result", "write_tables", "write_references")
 
 
 def test_dir_lists_public_api_without_prior_access():
