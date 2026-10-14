@@ -102,7 +102,7 @@ def test_cpu_builds_are_experimental():
 
 
 def test_gguf_builds_are_pinned_to_a_hub_commit():
-    from bibr.local.llm_models import pinned_gguf_url
+    from bibr.local.llm_models import PinnedGguf, pinned_gguf
 
     gguf = [v for m in REGISTRY for v in m.variants if v.runtime == "llama-cpp"]
     assert gguf
@@ -110,25 +110,20 @@ def test_gguf_builds_are_pinned_to_a_hub_commit():
         repo, quant = v.hf_id.split(":")
         assert len(v.gguf_revision or "") == 40  # a commit, not a branch
         assert v.gguf_file == f"{repo.split('/')[1].removesuffix('-GGUF')}-{quant}.gguf"
-        assert pinned_gguf_url(v.hf_id) == (
-            f"https://huggingface.co/{repo}/resolve/{v.gguf_revision}/{v.gguf_file}"
-        )
+        assert pinned_gguf(v.hf_id) == PinnedGguf(repo, v.gguf_file, v.gguf_revision)
     # The 2B Q4_K_M, the CPU default, at the commit that added it.
-    assert pinned_gguf_url("scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M") == (
-        "https://huggingface.co/scienceverse/bibr-extract-qwen35-2b-GGUF/resolve/"
-        "8e1a5823c4290cd583feb470556967df7259050a/bibr-extract-qwen35-2b-Q4_K_M.gguf"
+    assert pinned_gguf("scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M") == PinnedGguf(
+        "scienceverse/bibr-extract-qwen35-2b-GGUF",
+        "bibr-extract-qwen35-2b-Q4_K_M.gguf",
+        "8e1a5823c4290cd583feb470556967df7259050a",
     )
 
 
-def test_pinned_gguf_url_unknown_model_and_mirror(monkeypatch):
-    from bibr.local.llm_models import pinned_gguf_url
+def test_pinned_gguf_unknown_model():
+    from bibr.local.llm_models import pinned_gguf
 
-    assert pinned_gguf_url("someone/custom-GGUF:Q4_K_M") is None
-    assert pinned_gguf_url("scienceverse/bibr-extract-qwen35-4b") is None  # vLLM build
-    monkeypatch.setenv("HF_ENDPOINT", "https://hf-mirror.example/")
-    assert pinned_gguf_url("scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0").startswith(
-        "https://hf-mirror.example/scienceverse/bibr-extract-qwen35-4b-GGUF/resolve/"
-    )
+    assert pinned_gguf("someone/custom-GGUF:Q4_K_M") is None
+    assert pinned_gguf("scienceverse/bibr-extract-qwen35-4b") is None  # vLLM build
 
 
 def test_students_are_merged_vllm_checkpoints_with_thinking_off():

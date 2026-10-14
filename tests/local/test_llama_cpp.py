@@ -2,13 +2,16 @@
 
 import contextlib
 import logging
+import sys
 import types
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
-from bibr.local.llama_cpp import runs_on_cpu as _real_runs_on_cpu  # before the conftest stub
+# Imported before the conftest stubs replace them.
+from bibr.local.llama_cpp import download_pinned_gguf as _real_download_pinned_gguf
+from bibr.local.llama_cpp import runs_on_cpu as _real_runs_on_cpu
 
 
 @contextlib.contextmanager
@@ -1419,6 +1422,8 @@ def test_startup_no_retry_on_load_failure(monkeypatch):
         "-hfr other/repo",
         "-mu https://example.org/other.gguf",
         "--model-url=https://example.org/other.gguf",
+        "-m /home/u/models/my-finetune.gguf",
+        "--model=/home/u/models/my-finetune.gguf",
     ],
 )
 def test_build_server_argv_rejects_identity_override(flag):
@@ -1426,7 +1431,9 @@ def test_build_server_argv_rejects_identity_override(flag):
     from bibr.exceptions import UpstreamServiceError
     from bibr.local.llama_cpp import build_server_argv
 
-    with pytest.raises(UpstreamServiceError, match="LLM_LLAMA_CPP_PORT"):
+    # The model flags point at the model setting instead.
+    setting = "LLM_LLAMA_CPP_PORT" if flag.startswith(("--port", "--alias")) else "LLM_LOCAL_MODEL"
+    with pytest.raises(UpstreamServiceError, match=setting):
         build_server_argv(
             ["llama-server"],
             model="m",
@@ -1723,10 +1730,10 @@ def test_build_server_argv_user_gpu_layers_survive_a_cpu_build():
     assert argv[argv.index("-ngl") + 1] == "10"
 
 
-def test_build_server_argv_model_url_downloads_the_pinned_file():
+def test_build_server_argv_loads_the_pinned_file_by_path():
     from bibr.local.llama_cpp import build_server_argv
 
-    url = "https://huggingface.co/org/m-GGUF/resolve/abc123/m-Q4_K_M.gguf"
+    path = "/cache/models--org--m-GGUF/snapshots/abc123/m-Q4_K_M.gguf"
     argv = build_server_argv(
         ["llama-server"],
         model="org/m-GGUF:Q4_K_M",
@@ -1734,12 +1741,40 @@ def test_build_server_argv_model_url_downloads_the_pinned_file():
         context_size=8192,
         role="llm",
         available=frozenset(),
-        model_url=url,
+        model_path=path,
     )
-    assert argv[1:3] == ["--model-url", url]
+    assert argv[1:3] == ["-m", path]
     assert "-hf" not in argv
+    assert "--model-url" not in argv
     # bibr still asks the server for the model by its registry name.
     assert argv[argv.index("--alias") + 1] == "org/m-GGUF:Q4_K_M"
+
+
+@pytest.mark.parametrize("model_path", [None, "/cache/m-Q4_K_M.gguf"])
+@pytest.mark.parametrize("role", ["llm", "ocr"])
+@pytest.mark.parametrize("cpu_only", [False, True])
+def test_build_server_argv_always_names_a_model_to_load(model_path, role, cpu_only):
+    """Without -m or -hf, llama-server starts as a router that loads nothing."""
+    from bibr.local.llama_cpp import build_server_argv
+
+    full = frozenset({"--kv-unified", "--spec-type", "--no-mmproj", "--no-context-shift"})
+    for available in (full, frozenset()):
+        argv = build_server_argv(
+            ["llama-server"],
+            model="org/m-GGUF:Q4_K_M",
+            port=8770,
+            context_size=8192,
+            extra_args="-t 2 --temp 0",
+            role=role,
+            available=available,
+            model_path=model_path,
+            cpu_only=cpu_only,
+            cpu_threads=4,
+        )
+        sources = [flag for flag in argv if flag in ("-m", "-hf")]
+        assert sources == (["-m"] if model_path else ["-hf"])
+        assert argv[argv.index(sources[0]) + 1] == (model_path or "org/m-GGUF:Q4_K_M")
+        assert "--model-url" not in argv
 
 
 def test_empty_device_table_is_a_cpu_build(monkeypatch):
@@ -1838,7 +1873,10 @@ def test_cpu_list_parses_ranges():
 def test_cpu_install_hint_points_at_the_cpu_builds():
     from bibr.local.llama_cpp import cpu_install_hint, missing_binary_message
 
-    assert "win-cpu-x64" in cpu_install_hint(platform_name="win32")
+    windows = cpu_install_hint(platform_name="win32")
+    assert "win-cpu-x64" in windows
+    # winget installs the Vulkan build, which offloads to an integrated GPU.
+    assert "winget" not in windows
     assert "brew install llama.cpp" in cpu_install_hint(platform_name="darwin")
     linux = cpu_install_hint(platform_name="linux")
     assert "ubuntu-x64" in linux
@@ -1891,7 +1929,7 @@ def test_gpu_build_keeps_the_offload(monkeypatch):
 def test_llm_server_on_a_cpu_build_uses_the_fastest_pinned_build(monkeypatch):
     from bibr.config import Settings
     from bibr.local import llama_cpp
-    from bibr.local.llm_models import pinned_gguf_url
+    from bibr.local.llm_models import pinned_gguf
 
     fake = MagicMock(base_url="http://127.0.0.1:8770", model="x", n_slots=1)
     ctor = MagicMock(return_value=fake)
@@ -1902,11 +1940,11 @@ def test_llm_server_on_a_cpu_build_uses_the_fastest_pinned_build(monkeypatch):
     model = "scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M"
     assert ctor.call_args.kwargs["model"] == model
     assert ctor.call_args.kwargs["cpu_only"] is True
-    assert ctor.call_args.kwargs["model_url"] == pinned_gguf_url(model)
-    assert "/resolve/" in ctor.call_args.kwargs["model_url"]
+    assert ctor.call_args.kwargs["gguf"] == pinned_gguf(model)
+    assert ctor.call_args.kwargs["gguf"].filename == "bibr-extract-qwen35-2b-Q4_K_M.gguf"
 
 
-def test_llm_server_passes_no_url_for_a_model_outside_the_registry(monkeypatch):
+def test_llm_server_pins_no_file_for_a_model_outside_the_registry(monkeypatch):
     from bibr.config import Settings
     from bibr.local import llama_cpp
 
@@ -1915,26 +1953,30 @@ def test_llm_server_passes_no_url_for_a_model_outside_the_registry(monkeypatch):
     monkeypatch.setattr(llama_cpp, "LlamaCppServer", ctor)
     monkeypatch.setattr(Settings.llm, "local_model", "someone/else-GGUF:Q4_K_M")
     llama_cpp.LlamaCppLlmServer()
-    assert ctor.call_args.kwargs["model_url"] is None
+    assert ctor.call_args.kwargs["gguf"] is None
     assert ctor.call_args.kwargs["cpu_only"] is False
 
 
-def test_llm_server_on_a_cpu_build_raises_timeout_and_turns_equations_off(caplog):
+def test_llm_server_on_a_cpu_build_raises_timeout_and_skips_the_equation_llm(caplog):
     server = _llm_server_with_isolated_settings()
     server._cpu_only = True
     with caplog.at_level(logging.INFO, logger="bibr.local.llama_cpp"):
         server.configure_llm_client()
     assert server._settings.llm.timeout_seconds == 900
-    assert server._settings.EQUATION_EXTRACTION is False
-    assert "EQUATION_EXTRACTION=true" in caplog.text
+    # Only the LLM fallback: the regex equations need no LLM and stay.
+    assert server._settings.EQUATION_LLM_FALLBACK is False
+    assert server._settings.EQUATION_EXTRACTION is True
+    assert "EQUATION_LLM_FALLBACK=true" in caplog.text
 
 
 def test_llm_server_on_a_cpu_build_respects_explicit_settings():
-    server = _llm_server_with_isolated_settings(EQUATION_EXTRACTION="true", LLM_TIMEOUT_SECONDS=120)
+    server = _llm_server_with_isolated_settings(
+        EQUATION_LLM_FALLBACK="true", LLM_TIMEOUT_SECONDS=120
+    )
     server._cpu_only = True
     server.configure_llm_client()
     assert server._settings.llm.timeout_seconds == 120
-    assert server._settings.EQUATION_EXTRACTION is True
+    assert server._settings.EQUATION_LLM_FALLBACK is True
 
 
 def test_llm_server_on_a_gpu_build_keeps_equations():
@@ -1942,3 +1984,254 @@ def test_llm_server_on_a_gpu_build_keeps_equations():
     server.configure_llm_client()
     assert server._settings.llm.timeout_seconds == 300
     assert server._settings.EQUATION_EXTRACTION is True
+    assert server._settings.EQUATION_LLM_FALLBACK is True
+
+
+# ---------------------------------------------------------------------------
+# Pinned GGUF builds: fetched into the Hugging Face cache and loaded with -m,
+# and a server that loads no model is never reported ready.
+# ---------------------------------------------------------------------------
+
+
+def _pinned():
+    from bibr.local.llm_models import PinnedGguf
+
+    return PinnedGguf("org/m-GGUF", "m-Q4_K_M.gguf", "a" * 40)
+
+
+def test_pinned_build_launches_with_the_downloaded_file(monkeypatch):
+    import threading
+
+    from bibr.local import llama_cpp
+
+    launched = _healthy_stub_server(
+        monkeypatch, available=frozenset(), wait_side_effect=lambda self, t: None
+    )
+    download = MagicMock(return_value="/hf/snapshots/aaa/m-Q4_K_M.gguf")
+    monkeypatch.setattr(llama_cpp, "download_pinned_gguf", download)
+    stop = threading.Event()
+
+    server = llama_cpp.LlamaCppServer(
+        model="org/m-GGUF:Q4_K_M",
+        port=8770,
+        role="llm",
+        gguf=_pinned(),
+        startup_timeout=123,
+        stop_event=stop,
+    )
+    argv = launched[0]
+    assert argv[argv.index("-m") + 1] == "/hf/snapshots/aaa/m-Q4_K_M.gguf"
+    assert "-hf" not in argv and "--model-url" not in argv
+    assert argv[argv.index("--alias") + 1] == "org/m-GGUF:Q4_K_M"
+    download.assert_called_once()
+    assert download.call_args.args == (_pinned(),)
+    assert download.call_args.kwargs["timeout"] == 123
+    assert download.call_args.kwargs["stop_event"] is stop
+    assert download.call_args.kwargs["timeout_setting"] == "LLM_LLAMA_CPP_STARTUP_TIMEOUT"
+    server._process = None
+    server.shutdown()
+
+
+def test_pinned_build_downloads_nothing_before_the_checks_pass(monkeypatch):
+    """No binary, a reused server or bad extra args: refused before any download."""
+    from bibr.exceptions import UpstreamServiceError
+    from bibr.local import llama_cpp
+
+    download = MagicMock(side_effect=AssertionError("must not download"))
+    monkeypatch.setattr(llama_cpp, "download_pinned_gguf", download)
+
+    monkeypatch.setattr(llama_cpp, "find_llama_server", lambda: None)
+    with pytest.raises(UpstreamServiceError, match="not installed"):
+        llama_cpp.LlamaCppServer(model="org/m-GGUF:Q4_K_M", port=8770, role="llm", gguf=_pinned())
+
+    _healthy_stub_server(monkeypatch, available=frozenset(), wait_side_effect=lambda s, t: None)
+    with pytest.raises(UpstreamServiceError, match="LLM_LOCAL_MODEL"):
+        llama_cpp.LlamaCppServer(
+            model="org/m-GGUF:Q4_K_M",
+            port=8770,
+            role="llm",
+            gguf=_pinned(),
+            extra_args="-m /home/u/custom.gguf",
+        )
+
+    monkeypatch.setattr(llama_cpp, "guard_managed_server_port", lambda *a, **k: True)
+    reused = llama_cpp.LlamaCppServer(
+        model="org/m-GGUF:Q4_K_M", port=8770, role="llm", gguf=_pinned()
+    )
+    assert reused.loaded
+    download.assert_not_called()
+
+
+def _fake_hub(monkeypatch, *, cached=None, fetch=None):
+    """Stub ``hf_hub_download_no_symlink``: *cached* for cache lookups, *fetch* otherwise."""
+    calls: list[dict] = []
+
+    def download(**kwargs):
+        calls.append(kwargs)
+        if kwargs.get("local_files_only"):
+            if cached is None:
+                raise FileNotFoundError("not cached")
+            return cached
+        return fetch(**kwargs)
+
+    monkeypatch.setattr("bibr.utils.hf_cache.hf_hub_download_no_symlink", download)
+    return calls
+
+
+def test_download_pinned_gguf_returns_a_cached_file_without_downloading(monkeypatch):
+    calls = _fake_hub(monkeypatch, cached="/hf/m.gguf", fetch=None)
+    assert _real_download_pinned_gguf(_pinned(), timeout=5) == "/hf/m.gguf"
+    assert calls == [
+        {
+            "repo_id": "org/m-GGUF",
+            "filename": "m-Q4_K_M.gguf",
+            "revision": "a" * 40,
+            "local_files_only": True,
+        }
+    ]
+
+
+def test_download_pinned_gguf_fetches_the_file_at_its_commit(monkeypatch, caplog):
+    calls = _fake_hub(monkeypatch, fetch=lambda **_k: "/hf/fresh.gguf")
+    with caplog.at_level(logging.INFO, logger="bibr.local.llama_cpp"):
+        assert _real_download_pinned_gguf(_pinned(), timeout=5) == "/hf/fresh.gguf"
+    assert calls[-1] == {"repo_id": "org/m-GGUF", "filename": "m-Q4_K_M.gguf", "revision": "a" * 40}
+    assert "Downloading m-Q4_K_M.gguf from org/m-GGUF" in caplog.text
+
+
+def test_download_pinned_gguf_failure_names_the_file(monkeypatch):
+    from bibr.exceptions import UpstreamServiceError
+
+    def offline(**_k):
+        raise OSError("offline mode is enabled")
+
+    _fake_hub(monkeypatch, fetch=offline)
+    with pytest.raises(UpstreamServiceError, match="m-Q4_K_M.gguf from org/m-GGUF") as exc:
+        _real_download_pinned_gguf(_pinned(), timeout=5)
+    assert "offline mode is enabled" in str(exc.value)
+
+
+def test_download_pinned_gguf_stops_waiting_on_timeout_and_on_stop(monkeypatch):
+    import threading
+
+    from bibr.local.http_runtime import StartupCancelled
+
+    release = threading.Event()
+
+    def slow(**_k):
+        release.wait(10)
+        return "/hf/late.gguf"
+
+    _fake_hub(monkeypatch, fetch=slow)
+    try:
+        with pytest.raises(TimeoutError, match="OCR_LLAMA_CPP_STARTUP_TIMEOUT") as exc:
+            _real_download_pinned_gguf(
+                _pinned(), timeout=0.2, timeout_setting="OCR_LLAMA_CPP_STARTUP_TIMEOUT"
+            )
+        assert f"hf download org/m-GGUF m-Q4_K_M.gguf --revision {'a' * 40}" in str(exc.value)
+
+        stop = threading.Event()
+        stop.set()
+        with pytest.raises(StartupCancelled):
+            _real_download_pinned_gguf(_pinned(), timeout=30, stop_event=stop)
+    finally:
+        release.set()
+
+
+class _ModelsHandler:
+    """``/health`` 200, ``/v1/models`` answering *models_body*."""
+
+    @staticmethod
+    def make(models_body: bytes):
+        import http.server
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(models_body if self.path == "/v1/models" else b'{"status":"ok"}')
+
+            def log_message(self, *args):
+                pass
+
+        return Handler
+
+
+def _wait_against(monkeypatch, models_body: bytes):
+    """Run the real health wait against a stub server; return (error, child process)."""
+    import socketserver
+    import subprocess as real_subprocess
+    import threading
+
+    from bibr.local import http_runtime, llama_cpp
+
+    monkeypatch.setattr(llama_cpp, "request_bytes", http_runtime.request_bytes)
+    with socketserver.TCPServer(("127.0.0.1", 0), _ModelsHandler.make(models_body)) as httpd:
+        thread = threading.Thread(
+            target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        )
+        thread.start()
+        proc = real_subprocess.Popen(
+            ["sleep", "30"],  # noqa: S603, S607 — `sleep` test double, not a model
+            stdout=real_subprocess.DEVNULL,
+            stderr=real_subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        server = object.__new__(llama_cpp.LlamaCppServer)
+        server._process = proc
+        server._port = httpd.server_address[1]
+        server._model = "org/m-GGUF:Q4_K_M"
+        server._stderr_fh = None
+        server._stderr_log = None
+        server._reused = False
+        server._cpu_only = True
+        error = None
+        try:
+            llama_cpp.LlamaCppServer._wait_until_healthy(server, timeout=30)
+        except RuntimeError as exc:
+            error = exc
+        finally:
+            httpd.shutdown()
+        try:
+            proc.wait(timeout=5)
+        except real_subprocess.TimeoutExpired:
+            pass
+        return error, proc
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+def test_a_server_that_loads_no_model_is_not_ready(monkeypatch):
+    """llama-server with no model is a router: /health 200, no models listed."""
+    error, proc = _wait_against(monkeypatch, b'{"object": "list", "data": []}')
+    try:
+        assert error is not None
+        assert "does not serve 'org/m-GGUF:Q4_K_M'" in str(error)
+        assert "lists: none" in str(error)
+        # No conservative retry: this is not an argument error.
+        from bibr.local.llama_cpp import _looks_like_arg_error
+
+        assert not _looks_like_arg_error(str(error))
+        assert proc.poll() is not None  # killed, not left running
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"object": "list", "data": [{"id": "org/m-GGUF:Q4_K_M"}]}',
+        b'{"data": [{"id": "m-Q4_K_M.gguf", "aliases": ["org/m-GGUF:Q4_K_M"]}]}',
+        # Not a model list: proves nothing, so /health decides as before.
+        b"ok",
+    ],
+)
+def test_a_server_serving_the_model_is_ready(monkeypatch, body):
+    error, proc = _wait_against(monkeypatch, body)
+    try:
+        assert error is None
+        assert proc.poll() is None
+    finally:
+        proc.kill()
+        proc.wait()

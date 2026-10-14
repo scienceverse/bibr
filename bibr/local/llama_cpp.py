@@ -15,11 +15,13 @@ import threading
 import time
 from collections.abc import Iterable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from bibr.exceptions import UpstreamServiceError
 from bibr.local.http_runtime import (
     MANAGED_LOCAL_LLM_RATE_LIMIT_RPM,
     LocalHttpError,
+    bearer_headers,
     check_startup_stop,
     env_with_api_key,
     guard_managed_server_port,
@@ -31,6 +33,9 @@ from bibr.local.http_runtime import (
     request_bytes,
     unregister_server_key,
 )
+
+if TYPE_CHECKING:
+    from bibr.local.llm_models import PinnedGguf
 
 try:
     import winreg
@@ -87,6 +92,7 @@ _OPTION_ALIASES: dict[str, frozenset[str]] = {
     "--alias": frozenset({"--alias"}),
     "-hf": frozenset({"-hf", "-hfr", "--hf-repo"}),
     "--model-url": frozenset({"--model-url", "-mu"}),
+    "--model": frozenset({"--model", "-m"}),
 }
 
 # Cache of ``--help`` text keyed by ``tuple(prefix)`` so repeated launches in
@@ -253,10 +259,11 @@ def cpu_install_hint(*, platform_name: str | None = None) -> str:
     """Install guidance for a machine with no GPU, where llama.cpp runs on the CPU."""
     plat = platform_name if platform_name is not None else sys.platform
     if plat == "win32" or plat.startswith("win"):
+        # Not ``winget install llama.cpp``: winget ships the Vulkan build,
+        # which offloads to an integrated GPU and so skips the CPU defaults.
         return (
-            "Install with: winget install llama.cpp, or extract "
-            f"llama-<ver>-bin-win-cpu-x64.zip from {_LLAMA_CPP_RELEASES_URL} and put the folder "
-            "on PATH"
+            f"Extract llama-<ver>-bin-win-cpu-x64.zip (the CPU build) from "
+            f"{_LLAMA_CPP_RELEASES_URL} and put the folder on PATH"
         )
     if plat == "darwin":
         return (
@@ -556,7 +563,11 @@ def _n_slots_from_argv(argv: list[str]) -> int:
 # the configured port/alias and would lose (then kill) a server that moved.
 # `--host` is deliberately allowed: the base argv binds loopback and a user
 # `--host` (e.g. 0.0.0.0, as on main) still answers the loopback health poll.
-_IDENTITY_OPTIONS = frozenset({"--port", "--alias", "-hf", "--model-url"})
+# The model flags are identity too: the server answers to the registry name
+# (``--alias``) whatever file it loads, and a user ``-m`` next to bibr's own
+# would become llama.cpp's download target, overwriting that file.
+_MODEL_OPTIONS = frozenset({"-hf", "--model-url", "--model"})
+_IDENTITY_OPTIONS = frozenset({"--port", "--alias"}) | _MODEL_OPTIONS
 
 
 def _check_no_identity_override(extra: list[str], *, role: str) -> None:
@@ -564,12 +575,22 @@ def _check_no_identity_override(extra: list[str], *, role: str) -> None:
     if role == "llm":
         extra_setting = "LLM_LLAMA_CPP_EXTRA_ARGS"
         port_setting = "LLM_LLAMA_CPP_PORT"
+        model_setting = "LLM_LOCAL_MODEL"
     else:
         extra_setting = "OCR_LLAMA_CPP_EXTRA_ARGS"
         port_setting = "OCR_LLAMA_CPP_PORT"
+        model_setting = "OCR_LLAMA_CPP_MODEL"
     for token in extra:
         bare = token.split("=", 1)[0]
-        if _canonical_option(bare) in _IDENTITY_OPTIONS:
+        canonical = _canonical_option(bare)
+        if canonical in _MODEL_OPTIONS:
+            raise UpstreamServiceError(
+                "local inference",
+                f"{extra_setting} must not set {bare}: bibr chooses the model the managed "
+                f"server loads and asks for it by name. Set {model_setting} to another "
+                "Hugging Face GGUF (repo:quant) instead.",
+            )
+        if canonical in _IDENTITY_OPTIONS:
             raise UpstreamServiceError(
                 "local inference",
                 f"{extra_setting} must not set {bare}: the managed server's port, "
@@ -577,6 +598,14 @@ def _check_no_identity_override(extra: list[str], *, role: str) -> None:
                 f"time out and kill a healthy server that moved. Set {port_setting} to move "
                 "the server instead.",
             )
+
+
+def _validated_extra_args(extra_args: str, *, role: str) -> list[str]:
+    """*extra_args* split into tokens, refusing any that move the server."""
+    setting = "LLM_LLAMA_CPP_EXTRA_ARGS" if role == "llm" else "OCR_LLAMA_CPP_EXTRA_ARGS"
+    extra = split_extra_args(extra_args, setting=setting)
+    _check_no_identity_override(extra, role=role)
+    return extra
 
 
 def build_server_argv(
@@ -591,7 +620,7 @@ def build_server_argv(
     # semantics; the "llm" role must be opted into explicitly.
     role: str = "ocr",
     available: frozenset[str] | None = None,
-    model_url: str | None = None,
+    model_path: str | None = None,
     cpu_only: bool = False,
     cpu_threads: int | None = None,
 ) -> list[str]:
@@ -600,16 +629,16 @@ def build_server_argv(
     *available* is the set of ``--long-option`` flags the installed server
     supports; ``None`` probes it via ``supported_flags(prefix)``. Pass an
     explicit set (e.g. ``frozenset()``) to keep tests subprocess-free.
-    *model_url* downloads the weights from that URL (``-mu``, a pinned
-    revision) instead of ``-hf model``; the server still answers to *model*.
+    *model_path* loads that local GGUF file (``-m``, see
+    :func:`download_pinned_gguf`) instead of ``-hf model``; the server still
+    answers to *model*. Every launch names its model with one of the two:
+    without either, llama-server starts as a router that loads nothing.
     *cpu_only* and *cpu_threads*: see :func:`_role_runtime_args`.
     """
     if available is None:
         available = supported_flags(prefix)
-    setting = "LLM_LLAMA_CPP_EXTRA_ARGS" if role == "llm" else "OCR_LLAMA_CPP_EXTRA_ARGS"
-    extra = split_extra_args(extra_args, setting=setting)
-    _check_no_identity_override(extra, role=role)
-    source = ["--model-url", model_url] if model_url else ["-hf", model]
+    extra = _validated_extra_args(extra_args, role=role)
+    source = ["-m", model_path] if model_path else ["-hf", model]
     fixed = [
         *prefix,
         *source,
@@ -906,6 +935,84 @@ def _looks_like_arg_error(text: str) -> bool:
     return any(marker in lowered for marker in _ARG_ERROR_MARKERS)
 
 
+def download_pinned_gguf(
+    gguf: PinnedGguf,
+    *,
+    timeout: float,
+    stop_event: threading.Event | None = None,
+    timeout_setting: str = "LLM_LLAMA_CPP_STARTUP_TIMEOUT",
+) -> str:
+    """Local path of a pinned GGUF file, fetched into the Hugging Face cache.
+
+    llama-server is then started with ``-m <path>``. It cannot fetch the file
+    itself from a pinned URL: given only ``--model-url``, it starts as a
+    router that loads no model. ``huggingface_hub`` keeps the file in the
+    cache ``bibr chew --dry-run`` reads and honours ``HF_ENDPOINT``,
+    ``HF_TOKEN`` and offline mode. A cached file returns at once. Otherwise
+    the download runs in a worker thread, so a stop request or *timeout*
+    ends the wait; the worker carries on in the background, and the next
+    run resumes a partial download.
+    """
+    from bibr.utils.hf_cache import hf_hub_download_no_symlink
+
+    request = {"repo_id": gguf.repo_id, "filename": gguf.filename, "revision": gguf.revision}
+    try:
+        return hf_hub_download_no_symlink(**request, local_files_only=True)
+    except Exception as exc:  # noqa: BLE001 - not in the cache yet: download it below
+        logger.debug("%s is not in the Hugging Face cache: %s", gguf.filename, exc)
+    logger.info(
+        "Downloading %s from %s (commit %s)", gguf.filename, gguf.repo_id, gguf.revision[:12]
+    )
+    outcome: dict[str, object] = {}
+
+    def fetch() -> None:
+        try:
+            outcome["path"] = hf_hub_download_no_symlink(**request)
+        except BaseException as exc:  # noqa: BLE001 - handed to the waiting thread
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=fetch, name="bibr-gguf-download", daemon=True)
+    worker.start()
+    deadline = time.monotonic() + timeout
+    while worker.is_alive():
+        check_startup_stop(stop_event, "llama.cpp")
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"Downloading {gguf.filename} from {gguf.repo_id} did not finish within "
+                f"{timeout:.0f}s. Raise {timeout_setting}, or fetch it first with: hf download "
+                f"{gguf.repo_id} {gguf.filename} --revision {gguf.revision}"
+            )
+        worker.join(timeout=0.5)
+    error = outcome.get("error")
+    if isinstance(error, BaseException):
+        raise UpstreamServiceError(
+            "local inference",
+            f"Could not download {gguf.filename} from {gguf.repo_id} at commit "
+            f"{gguf.revision[:12]}: {error}",
+        ) from error
+    return str(outcome["path"])
+
+
+def _served_model_ids(body: bytes) -> set[str] | None:
+    """Model ids and aliases in a ``/v1/models`` body, or None when it is not that list."""
+    try:
+        data = json.loads(body.decode("utf-8")).get("data")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(data, list):
+        return None
+    served: set[str] = set()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        if "id" in item:
+            served.add(str(item["id"]))
+        aliases = item.get("aliases")
+        if isinstance(aliases, list):
+            served.update(str(alias) for alias in aliases)
+    return served
+
+
 class LlamaCppServer:
     """Own a llama.cpp OpenAI-compatible server subprocess.
 
@@ -936,12 +1043,14 @@ class LlamaCppServer:
         # opted into explicitly.
         role: str = "ocr",
         stop_event: threading.Event | None = None,
-        model_url: str | None = None,
+        gguf: PinnedGguf | None = None,
         cpu_only: bool | None = None,
     ) -> None:
-        """*model_url*: download the weights from there (a pinned revision)
-        rather than ``-hf model``. *cpu_only*: whether the build runs on the
-        CPU; ``None`` probes it (:func:`runs_on_cpu`)."""
+        """*gguf*: load that file at its pinned commit rather than ``-hf model``,
+        which follows the repo's main branch; a download
+        (:func:`download_pinned_gguf`) gets *startup_timeout* of its own.
+        *cpu_only*: whether the build runs on the CPU; ``None`` probes it
+        (:func:`runs_on_cpu`)."""
         self._stop_event = stop_event
         self._model = model
         self._port = port
@@ -980,15 +1089,29 @@ class LlamaCppServer:
                 model,
                 cpu_threads or "llama.cpp's default",
             )
-        # Build both argvs BEFORE opening the log handle: extra-args parsing
-        # (shlex errors, identity-flag overrides) must fail without leaking it.
+        # Check the extra args before a download and before opening the log
+        # handle: shlex errors and identity-flag overrides must fail at once,
+        # without leaking it.
+        _validated_extra_args(extra_args, role=role)
+        model_path = None
+        if gguf is not None:
+            model_path = download_pinned_gguf(
+                gguf,
+                timeout=startup_timeout,
+                stop_event=stop_event,
+                timeout_setting=(
+                    "LLM_LLAMA_CPP_STARTUP_TIMEOUT"
+                    if role == "llm"
+                    else "OCR_LLAMA_CPP_STARTUP_TIMEOUT"
+                ),
+            )
         launch_args = {
             "model": model,
             "port": port,
             "context_size": context_size,
             "extra_args": extra_args,
             "role": role,
-            "model_url": model_url,
+            "model_path": model_path,
             "cpu_only": self._cpu_only,
             "cpu_threads": cpu_threads,
         }
@@ -1108,6 +1231,7 @@ class LlamaCppServer:
                             self._stderr_fh.flush()
                         except OSError:
                             pass
+                    self._check_serves_model()
                     if not self._cpu_only:
                         # A CPU build offloads nothing by design.
                         log_offload_status(self._read_stderr_tail(n=12_000))
@@ -1117,6 +1241,31 @@ class LlamaCppServer:
                 pass
             pause_startup_poll(2, self._stop_event, "llama.cpp")
         raise TimeoutError(f"llama.cpp did not become ready within {timeout}s")
+
+    def _check_serves_model(self) -> None:
+        """Fail a healthy server whose ``/v1/models`` lists models but not ours.
+
+        llama-server given no model starts as a router: ``/health`` answers 200
+        at once while every request for the model fails. A ``/v1/models`` that
+        cannot be read or parsed proves nothing and is let through.
+        """
+        assert self._process is not None  # noqa: S101
+        try:
+            status, _reason, body = request_bytes(
+                f"{self.base_url}/v1/models", headers=bearer_headers(self.api_key), timeout=5
+            )
+        except LocalHttpError:
+            return
+        served = _served_model_ids(body) if status == 200 else None
+        if served is None or self._model in served:
+            return
+        kill_process_group(self._process.pid)
+        listed = ", ".join(sorted(served)) or "none"
+        raise RuntimeError(
+            f"llama.cpp started but does not serve {self._model!r} (its /v1/models lists: "
+            f"{listed}), so every request would fail. llama-server loads no model when "
+            "none is named; check the model arguments in its command line above."
+        )
 
     def _read_stderr_tail(self, n: int = 4000) -> str:
         if self._stderr_log is None:
@@ -1164,7 +1313,7 @@ class LlamaCppLlmServer:
 
     def __init__(self, settings=None, *, stop_event: threading.Event | None = None) -> None:
         from bibr.config import snapshot_settings
-        from bibr.local.llm_models import default_local_model, pinned_gguf_url
+        from bibr.local.llm_models import default_local_model, pinned_gguf
 
         self._settings = settings if settings is not None else snapshot_settings()
         self._cpu_only = runs_on_cpu()
@@ -1179,7 +1328,7 @@ class LlamaCppLlmServer:
             extra_args=self._settings.llm.llama_cpp_extra_args,
             role="llm",
             stop_event=stop_event,
-            model_url=pinned_gguf_url(model),
+            gguf=pinned_gguf(model),
             cpu_only=self._cpu_only,
         )
 
@@ -1248,13 +1397,14 @@ class LlamaCppLlmServer:
                 "Local llama.cpp backend — raising llm.timeout_seconds 30s->%ds",
                 self._settings.llm.timeout_seconds,
             )
-        if self._cpu_only and "EQUATION_EXTRACTION" not in self._settings.model_fields_set:
+        if self._cpu_only and "EQUATION_LLM_FALLBACK" not in self._settings.model_fields_set:
             # Most equation LLM calls find nothing, and on a CPU each one
-            # holds a server slot the front-matter calls are waiting for.
-            self._settings.EQUATION_EXTRACTION = False
+            # holds a server slot the front-matter calls are waiting for. The
+            # regex equations need no LLM and stay.
+            self._settings.EQUATION_LLM_FALLBACK = False
             logger.info(
-                "Local llama.cpp backend on the CPU — equation extraction off "
-                "(set EQUATION_EXTRACTION=true to keep it)"
+                "Local llama.cpp backend on the CPU — equation LLM fallback off, regex "
+                "equations kept (set EQUATION_LLM_FALLBACK=true to keep it)"
             )
 
     def shutdown(self) -> None:

@@ -2479,8 +2479,11 @@ def test_cpu_local_setup_reads_the_text_layer_and_runs_the_2b_on_llama_cpp(monke
     assert setup.env["LLM_BACKEND"] == "llama-cpp"
     assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M"
     assert setup.env["LLM_CHAT_TEMPLATE_KWARGS"] == '{"enable_thinking": false}'
-    assert setup.env["EQUATION_EXTRACTION"] == "false"
-    assert setup.env["LLM_TIMEOUT_SECONDS"] == "900"
+    # No global timeout or equation overrides: the CPU build of llama.cpp
+    # sets its own when unset, and these would outlive a later cloud setup.
+    assert not {"EQUATION_EXTRACTION", "EQUATION_LLM_FALLBACK", "LLM_TIMEOUT_SECONDS"} & set(
+        setup.env
+    )
     assert setup.env["PIPELINE_MEMORY_MODE"] == "aggressive"
     # The core install's ONNX runtime is enough; torch would only add GBs.
     assert setup.extras == {"demo"}
@@ -2493,6 +2496,7 @@ def test_cpu_local_setup_reads_the_text_layer_and_runs_the_2b_on_llama_cpp(monke
     assert "82" in runtime and "9.6" in runtime
     assert "born-digital PDFs" in runtime
     assert "scanned papers need cloud OCR or a GPU" in runtime
+    assert "regex pass only" in runtime
     assert "Install llama.cpp" not in runtime
 
 
@@ -2586,7 +2590,8 @@ def test_weak_hardware_cpu_tier_after_the_cloud_is_declined(tmp_path, monkeypatc
     assert "LLM_BACKEND=llama-cpp" in content
     assert "LLM_LOCAL_MODEL=scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M" in content
     assert "PIPELINE_MEMORY_MODE=aggressive" in content
-    assert "EQUATION_EXTRACTION=false" in content
+    assert "EQUATION_EXTRACTION" not in content
+    assert "LLM_TIMEOUT_SECONDS" not in content
     assert "ANTHROPIC_API_KEY" not in content
     text = " ".join(wizard.console.export_text().split())
     # Shown as an option, not advertised as the recommendation.

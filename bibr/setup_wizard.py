@@ -338,11 +338,7 @@ def _cpu_local_setup(
     base_env: dict[str, str], system_memory_gb: float | None, sys_platform_name: str
 ) -> RecommendedSetup:
     """The experimental tier for a machine with no GPU: everything on the CPU."""
-    from bibr.local.llama_cpp import (
-        _LLAMA_CPP_CPU_TIMEOUT_SECONDS,
-        cpu_install_hint,
-        find_llama_server,
-    )
+    from bibr.local.llama_cpp import cpu_install_hint, find_llama_server
 
     picked = recommended_variant("cpu", system_memory_gb, "llama-cpp") or recommended_variant(
         "cpu", None, "llama-cpp"
@@ -359,10 +355,8 @@ def _cpu_local_setup(
         "LLM_BACKEND": "llama-cpp",
         "LLM_LOCAL_MODEL": variant.hf_id,
         **model.env,
-        # What a CPU build of llama.cpp gets by default, written down so a
-        # build that offloads to an integrated GPU keeps them too.
-        "EQUATION_EXTRACTION": "false",
-        "LLM_TIMEOUT_SECONDS": str(_LLAMA_CPP_CPU_TIMEOUT_SECONDS),
+        # No timeout or equation overrides: a CPU build of llama.cpp sets its
+        # own when unset, and global values here would outlive this tier.
     }
     # The one CPU measurement so far is bibr's 4B student at Q8_0: about
     # 9.1k prompt and 1.5k output tokens a paper at 82 and 9.6 tokens/s.
@@ -370,9 +364,9 @@ def _cpu_local_setup(
         "Experimental: not yet timed or scored end to end. The extraction model runs on "
         "the CPU through llama.cpp, so expect minutes per paper: bibr's 4B model read 82 "
         "and wrote 9.6 tokens/s on 4 CPU threads, roughly 4-5 minutes of LLM time for a "
-        f"typical paper; the {name} build is smaller and should be faster. Equation "
-        "extraction is off. Only born-digital PDFs can be read; scanned papers need cloud "
-        "OCR or a GPU."
+        f"typical paper; the {name} build is smaller and should be faster. Equations come "
+        "from the regex pass only, with no LLM fallback. Only born-digital PDFs can be "
+        "read; scanned papers need cloud OCR or a GPU."
     )
     if find_llama_server() is None:
         runtime += (

@@ -9,10 +9,10 @@ escape hatch covers staleness in between.
 from __future__ import annotations
 
 import logging
-import os
 import platform
 import subprocess
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ class LocalLLMVariant:
     server_args: tuple[str, ...] = ()
     runtime: str | None = None
     # llama.cpp builds: the GGUF file in the ``hf_id`` repo and the Hub commit
-    # it is downloaded from (``pinned_gguf_url``), since llama.cpp's ``-hf``
+    # it is downloaded from (``pinned_gguf``), since llama.cpp's ``-hf``
     # always follows the repo's main branch.
     gguf_file: str | None = None
     gguf_revision: str | None = None
@@ -315,19 +315,24 @@ def registry_server_args(model: str) -> tuple[str, ...]:
     return ()
 
 
-def pinned_gguf_url(model: str) -> str | None:
-    """Download URL of a registry GGUF build at its pinned Hub commit, by exact ``hf_id``.
+class PinnedGguf(NamedTuple):
+    """One GGUF file of a Hub repo at a fixed commit."""
+
+    repo_id: str
+    filename: str
+    revision: str
+
+
+def pinned_gguf(model: str) -> PinnedGguf | None:
+    """The file and Hub commit of a registry GGUF build, by exact ``hf_id``.
 
     ``None`` for an id outside the registry or a build with no pinned file,
     which llama.cpp then fetches with ``-hf`` from the repo's main branch.
-    ``HF_ENDPOINT`` (a Hub mirror) is honoured, as llama.cpp does for ``-hf``.
     """
     for m in REGISTRY:
         for v in m.variants:
             if v.hf_id == model and v.gguf_file and v.gguf_revision:
-                repo = model.split(":", 1)[0]
-                endpoint = (os.environ.get("HF_ENDPOINT") or "https://huggingface.co").rstrip("/")
-                return f"{endpoint}/{repo}/resolve/{v.gguf_revision}/{v.gguf_file}"
+                return PinnedGguf(model.split(":", 1)[0], v.gguf_file, v.gguf_revision)
     return None
 
 

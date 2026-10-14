@@ -39,7 +39,10 @@ the card. The
 MLX builds have only been smoke-tested, so setup marks them experimental. There
 are no 4-bit MLX builds: in their smoke tests the 4B's duplicated a funding
 entry and the 2B's returned award IDs as numbers. bibr downloads each GGUF build
-from the Hub commit it was published at, not from the repository's newest files.
+from the Hub commit it was published at, not from the repository's newest files,
+into the Hugging Face cache, and starts llama.cpp on that file. A first download
+counts against its own `LLM_LLAMA_CPP_STARTUP_TIMEOUT`; on a slow connection,
+fetch the file first with `hf download <repo> <file> --revision <commit>`.
 
 The hosted setup uses Claude for OCR as well (`OCR_BACKEND=anthropic`,
 `OCR_VISION_MODEL=claude-haiku-5-5`), so it needs one Anthropic key. The 221/252
@@ -89,20 +92,22 @@ When the installed llama.cpp build sees no GPU:
   CPUs). `-t` in `LLM_LLAMA_CPP_EXTRA_ARGS` overrides the count.
 - With `LLM_LOCAL_MODEL` unset, it loads the 2B Q4_K_M.
 - An unset `LLM_TIMEOUT_SECONDS` becomes 900 seconds rather than 300, and an
-  unset `EQUATION_EXTRACTION` becomes `false`: most equation calls find nothing,
-  and on a CPU each one keeps the server busy.
+  unset `EQUATION_LLM_FALLBACK` becomes `false`: equations come from the regex
+  pass alone, because most equation LLM calls find nothing and on a CPU each
+  one keeps the server busy.
 
 If you decline the hosted setup on such a machine, `bibr setup` can show this
 as an experimental option, never as its recommendation: no OCR model
 (`OCR_BACKEND=text-layer`, which reads born-digital PDFs from their text layer;
-scanned papers need cloud OCR or a GPU), the 2B Q4_K_M on llama.cpp, the memory
-mode from the system RAM, `EQUATION_EXTRACTION=false` and
-`LLM_TIMEOUT_SECONDS=900`. bibr does not install llama.cpp. Install a CPU build
-and put `llama-server` on your `PATH`:
+scanned papers need cloud OCR or a GPU), the 2B Q4_K_M on llama.cpp and the
+memory mode from the system RAM. It writes no timeout or equation settings, so
+a later switch to another LLM does not inherit the CPU defaults. bibr does not
+install llama.cpp. Install a CPU build and put `llama-server` on your `PATH`:
 
-- Windows: `winget install llama.cpp`, or extract
-  `llama-<version>-bin-win-cpu-x64.zip` from the
+- Windows: extract `llama-<version>-bin-win-cpu-x64.zip` from the
   [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases).
+  `winget install llama.cpp` installs the Vulkan build instead, which runs the
+  model on an integrated GPU and so gets none of the CPU defaults above.
 - macOS: `brew install llama.cpp`.
 - Linux: extract `llama-<version>-bin-ubuntu-x64.tar.gz` from the releases, or
   `brew install llama.cpp`.

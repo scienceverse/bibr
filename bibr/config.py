@@ -757,7 +757,9 @@ class LlmOptions(_BibrSettings):
         "24,000-char input cap plus the 4,096-token completion cap with headroom on 6 GB cards.",
     )
     llama_cpp_startup_timeout: int = Field(
-        600, description="Startup timeout in seconds for the managed llama.cpp LLM server."
+        600,
+        description="Startup timeout in seconds for the managed llama.cpp LLM server. "
+        "Downloading one of bibr's own GGUF builds on first use gets the same time again.",
     )
     llama_cpp_extra_args: str = Field(
         "",
@@ -2453,10 +2455,12 @@ class GlobalSettings(_BibrSettings):
         gt=0,
         description="Optional explicit wtpsplit inference stride.",
     )
-    EQUATION_EXTRACTION: bool = Field(
+    EQUATION_EXTRACTION: bool = Field(True, description="Extract equations from OCR output.")
+    EQUATION_LLM_FALLBACK: bool = Field(
         True,
-        description="Extract equations from OCR output. Unset, it is off when the managed "
-        "llama.cpp LLM server runs on the CPU.",
+        description="Send sentences the regex equation pass missed to the LLM. False keeps "
+        "only the regex equations. Unset, it is off when the managed llama.cpp LLM server "
+        "runs on the CPU.",
     )
     EQUATION_EXTRACTION_TIMEOUT_SECONDS: int = Field(
         90, description="Timeout in seconds for equation extraction."

@@ -25,20 +25,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Silicon, `--llm local` picks llama.cpp when `llama-server` is installed, and a llama.cpp
   build that sees no GPU starts without GPU offload, with `--threads` set to the physical
   cores bibr may use. It loads the 2B model's Q4_K_M GGUF, raises an unset
-  `LLM_TIMEOUT_SECONDS` to 900 and turns an unset `EQUATION_EXTRACTION` off. The registry
+  `LLM_TIMEOUT_SECONDS` to 900 and turns the equation LLM fallback off unless
+  `EQUATION_LLM_FALLBACK` is set (a new setting; the regex equations stay). The registry
   lists CPU builds by system RAM, fastest first: 2B Q4_K_M (6 GB), 2B Q8_0 (7 GB) and 4B
   Q4_K_M (8 GB). After the cloud is declined on such a machine, `bibr setup` can offer
   this as an experimental option, with no OCR model (`OCR_BACKEND=text-layer`,
-  born-digital PDFs only) and llama.cpp CPU install hints. None of it has been timed or
-  scored end to end; the one CPU measurement, the 4B at Q8_0 on 4 threads, read 82 and
-  wrote 9.6 tokens a second, which is minutes per paper. See
+  born-digital PDFs only) and llama.cpp CPU install hints. It writes no timeout or equation
+  settings, so they do not carry over to a later cloud setup. On Windows the hints name the
+  `win-cpu-x64` release archive: winget installs the Vulkan build, which offloads to an
+  integrated GPU. None of it has been timed or scored end to end; the one CPU measurement,
+  the 4B at Q8_0 on 4 threads, read 82 and wrote 9.6 tokens a second, which is minutes per
+  paper. See
   [choosing an extraction model](docs/guides/extraction-models.md#without-a-gpu-experimental).
 
 ### Changed
 
-- llama.cpp downloads bibr's GGUF builds from the Hub commit each was published at
-  (`--model-url`) instead of the repository's newest files, so a build already fetched
-  with `-hf` is downloaded once more. A model outside bibr's registry still uses `-hf`.
+- bibr's GGUF builds now come from the Hub commit each was published at, instead of the
+  repository's newest files: bibr downloads the file into the Hugging Face cache and starts
+  llama.cpp with `-m` on it. Recent llama.cpp builds keep their `-hf` downloads in the same
+  cache, so a file fetched earlier at that commit is reused; one in an older llama.cpp cache
+  is downloaded once more. `bibr chew --dry-run` reports whether that exact file is cached.
+  A model outside bibr's registry still uses `-hf`. The managed llama.cpp server is ready
+  only once `/v1/models` lists the requested model, and `-m`/`--model` in
+  `LLM_LLAMA_CPP_EXTRA_ARGS` or `OCR_LLAMA_CPP_EXTRA_ARGS` is refused like the other
+  model flags (set `LLM_LOCAL_MODEL` instead).
 
 - `bibr setup` recommends a new extraction model by hardware. On Linux with an
   NVIDIA GPU it picks bibr's fine-tuned Qwen3.5-4B (12 GB or more) or Qwen3.5-2B

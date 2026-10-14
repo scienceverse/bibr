@@ -280,12 +280,13 @@ Optional overrides (already the managed defaults for low-VRAM) live in `.env`:
 Without an NVIDIA GPU or Apple Silicon, the recommended setup is the hosted
 model. bibr can also run its 2B extraction model on the CPU through llama.cpp,
 but this path has not been timed or scored end to end: expect minutes per
-paper. Install a CPU build of llama.cpp (`winget install llama.cpp` on Windows,
-`brew install llama.cpp` on macOS, or the `ubuntu-x64` archive from the
-[llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases) on Linux),
-put `llama-server` on your `PATH`, and use `--llm local`. bibr then drops the
-GPU offload, sets the thread count, loads the 2B Q4_K_M and turns equation
-extraction off. Born-digital PDFs can skip OCR with `OCR_BACKEND=text-layer`;
+paper. Install a CPU build of llama.cpp (the `win-cpu-x64` archive from the
+[llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases) on Windows,
+not the winget package, which is the Vulkan build; `brew install llama.cpp` on
+macOS; the `ubuntu-x64` archive on Linux), put `llama-server` on your `PATH`,
+and use `--llm local`. bibr then drops the GPU offload, sets the thread count,
+loads the 2B Q4_K_M and keeps only the regex equations, with no equation LLM
+calls. Born-digital PDFs can skip OCR with `OCR_BACKEND=text-layer`;
 scanned papers still need cloud OCR or a GPU. See
 [Without a GPU](guides/extraction-models.md#without-a-gpu-experimental).
 
