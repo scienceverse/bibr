@@ -115,6 +115,25 @@ class TestAbstractText:
         assert text.startswith("Objectives To study older people")
         assert "Design Qualitative interviews within primary care." in text
 
+    def test_drops_a_conflict_of_interest_footnote_printed_inside_the_abstract(self):
+        source = (
+            "Objectives To study older people. Criterion validities of the measures\n"
+            "(GME), GW Pharmaceuticals, Janssen and Merck. R.S.E.K. receives royalties\r\n"
+            "from the BACS battery. S.B. and C.C. are employees of Zinfandel.\n"
+            "were tested within primary care.\n"
+        )
+        text = self._text(source)
+        assert "royalties" not in text and "Zinfandel" not in text
+        assert "measures\nwere tested within primary care." in text
+
+    def test_keeps_a_block_with_one_kind_of_disclosure_wording(self):
+        source = (
+            "Objectives To study older people who\n"
+            "are employees of 12 hospitals, and the conflicts of interest they face.\n"
+            "Results were stable within primary care.\n"
+        )
+        assert "are employees of 12 hospitals" in self._text(source)
+
     def test_keeps_a_wrapped_line_that_merely_starts_with_a_furniture_word(self):
         source = (
             "Objectives To study older people and the level of\n"

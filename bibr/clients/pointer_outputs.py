@@ -73,6 +73,21 @@ _BLOCK_BREAK_RE = re.compile(r"(?<!\r)\n")
 _REPEAT_PROBE = 60
 _REPEAT_LEAD = 40
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+# A conflict-of-interest footnote that the page prints inside the abstract.
+# Each pattern is one kind of statement about the authors. One kind alone also
+# turns up in abstracts about employment or company ownership; two do not.
+_DISCLOSURE_KINDS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\b(?:is|are|was|were)\s+(?:an?\s+)?(?:employees?\s+of|employed\s+by)\b",
+        r"\breceive[sd]?\s+royalties\b|\broyalties\s+from\b",
+        r"\b(?:is|are)\s+(?:also\s+)?(?:an?\s+)?(?:share|stock)holders?\s+(?:in|of)\b",
+        r"\b(?:personal|consulting|speaker|speaking)\s+fees\b|\bhonoraria\b",
+        r"\b(?:advisory|scientific)\s+boards?\s+(?:of|for)\b"
+        r"|\bserved?\s+as\s+(?:an?\s+)?(?:paid\s+)?consultant\b",
+        r"\b(?:declares?|reports?|ha(?:ve|s))\s+no\s+(?:conflicts?\s+of\s+interest|competing\s+interests?)\b",
+    )
+)
 # A word broken at a line end with a non-breaking or Unicode hyphen, which the
 # OCR cleanup's dehyphenation (ASCII "-" only) would otherwise leave as is.
 _WRAP_HYPHEN_RE = re.compile(r"[\u2010\u2011](?=[ \t]*\r?\n)")
@@ -214,20 +229,28 @@ def abstract_text(source: str, span: AbstractSpan) -> str:
     The anchors fix the first and last blocks as abstract text. A block between
     them is dropped when it is page furniture printed beside the abstract (a
     correspondence sidebar, an email address, a copyright line, submission
-    dates), and a block that opens by repeating the end of the one before it, as
-    a doubled text layer does, loses the repeat. A leading "Abstract" heading
-    is dropped, words broken at a line end are rejoined as the OCR cleanup
-    rejoins them, and unusual spaces become plain ones.
+    dates, a conflict-of-interest footnote), and a block that opens by repeating
+    the end of the one before it, as a doubled text layer does, loses the
+    repeat. A leading "Abstract" heading is dropped, words broken at a line end
+    are rejoined as the OCR cleanup rejoins them, and unusual spaces become
+    plain ones.
     """
     blocks = _BLOCK_BREAK_RE.split(_LEADING_LABEL_RE.sub("", source[span.start : span.end]))
     kept: list[str] = []
     for index, block in enumerate(blocks):
         inner = 0 < index < len(blocks) - 1
-        if inner and (_FURNITURE_BLOCK_RE.match(block) or _EMAIL_RE.search(block)):
+        if inner and (
+            _FURNITURE_BLOCK_RE.match(block) or _EMAIL_RE.search(block) or _is_disclosure(block)
+        ):
             continue
         kept.append(_without_repeat(kept[-1], block) if kept else block)
     text = fix_ocr_artifacts(_WRAP_HYPHEN_RE.sub("-", "\n".join(kept)))
     return _ODD_SPACE_RE.sub(" ", text).strip()
+
+
+def _is_disclosure(block: str) -> bool:
+    """Whether *block* reads as a conflict-of-interest statement."""
+    return sum(1 for kind in _DISCLOSURE_KINDS if kind.search(block)) >= 2
 
 
 def _without_repeat(previous: str, block: str) -> str:
