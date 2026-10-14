@@ -1,0 +1,33 @@
+{
+ "status": "ok",
+ "message-type": "work",
+ "message": {
+  "DOI": "10.4324/9780203771587",
+  "type": "book",
+  "title": [
+   "Statistical Power Analysis for the Behavioral Sciences"
+  ],
+  "subtitle": [],
+  "author": [
+   {
+    "given": "Jacob",
+    "family": "Cohen",
+    "sequence": "first",
+    "affiliation": []
+   }
+  ],
+  "issued": {
+   "date-parts": [
+    [
+     2013,
+     5,
+     13
+    ]
+   ]
+  },
+  "container-title": [],
+  "publisher": "Routledge",
+  "URL": "https://doi.org/10.4324/9780203771587",
+  "score": 1
+ }
+}

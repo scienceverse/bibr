@@ -22,8 +22,19 @@ from rapidfuzz import fuzz
 
 from bibr.clients.crossref import CrossrefRequestTally, count_requests
 from bibr.config import GlobalSettings, snapshot_settings
-from bibr.enrich.schemas import CrossrefAuthor, CrossrefWorkItem, plain_text
-from bibr.models import BibAuthor, MatchFunder, MatchOrganization, canonicalize_orcid
+from bibr.enrich.schemas import (
+    CrossrefAuthor,
+    CrossrefWorkItem,
+    plain_text,
+    strip_notice_prefix,
+)
+from bibr.models import (
+    BibAuthor,
+    MatchFunder,
+    MatchOrganization,
+    MatchUpdate,
+    canonicalize_orcid,
+)
 from bibr.paper import ExternalMatch, MatchSource, PaperReference, migrate_bib_type
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.redact import describe_error
@@ -1186,6 +1197,11 @@ class _TitleCandidate:
     container: str | None
     volume: str | None
     first_page: str | None
+    # The record lists update notices (a retraction, a withdrawal), so a
+    # "RETRACTED:"-style prefix on its title is the registry's marker, not
+    # part of the title. A notice about the work carries the same prefix and
+    # lists none.
+    updated: bool = False
 
     @classmethod
     def from_crossref(cls, item: CrossrefWorkItem) -> _TitleCandidate:
@@ -1198,7 +1214,15 @@ class _TitleCandidate:
             container=item.container_title,
             volume=item.volume,
             first_page=_split_page_range(item.page)[0],
+            updated=bool(item.updates),
         )
+
+    @property
+    def scoring_title(self) -> str | None:
+        """The title compared with the printed one."""
+        if self.title and self.updated:
+            return strip_notice_prefix(self.title)
+        return self.title
 
     @classmethod
     def from_resolver(cls, cand: object) -> _TitleCandidate | None:
@@ -1319,7 +1343,12 @@ def _best_title_candidate(
         if _initials_conflict(ref_authors, list(cand.authors)):
             continue
         score = _score_candidate(
-            title, cand.title, ref_year, cand.year, ref_authors, [a.family for a in cand.authors]
+            title,
+            cand.scoring_title or cand.title,
+            ref_year,
+            cand.year,
+            ref_authors,
+            [a.family for a in cand.authors],
         )
         if score > best_score:
             best_score = score
@@ -1366,29 +1395,29 @@ def _build_match(cr_item: CrossrefWorkItem, score: float) -> ExternalMatch:
     """Build an ExternalMatch from a parsed CrossrefWorkItem."""
     bib_type = migrate_bib_type(cr_item.work_type) if cr_item.work_type else None
 
-    authors = None
-    if cr_item.authors:
-        author_list = [
-            BibAuthor(
-                given=a.given,
-                family=a.family,
-                orcid=canonicalize_orcid(a.orcid),
-                affiliation=[
-                    MatchOrganization(name=org.name, ror=org.ror) for org in a.affiliations
-                ]
-                or None,
-            )
-            for a in cr_item.authors
-            if a.family
-        ]
-        authors = author_list if author_list else None
-
-    editors = None
-    if cr_item.editors:
-        editor_list = [
-            BibAuthor(given=e.given, family=e.family) for e in cr_item.editors if e.family
-        ]
-        editors = editor_list if editor_list else None
+    # A person needs a family name; an organization (a ``name`` without one)
+    # is kept whole as ``literal``.
+    authors = [
+        BibAuthor(
+            given=a.given if a.family else "",
+            family=a.family,
+            literal=None if a.family else a.name,
+            orcid=canonicalize_orcid(a.orcid),
+            affiliation=[MatchOrganization(name=org.name, ror=org.ror) for org in a.affiliations]
+            or None,
+        )
+        for a in cr_item.authors
+        if a.family or a.name
+    ] or None
+    editors = [
+        BibAuthor(
+            given=e.given if e.family else "",
+            family=e.family,
+            literal=None if e.family else e.name,
+        )
+        for e in cr_item.editors
+        if e.family or e.name
+    ] or None
 
     first_page, last_page = _split_page_range(cr_item.page)
 
@@ -1413,6 +1442,11 @@ def _build_match(cr_item: CrossrefWorkItem, score: float) -> ExternalMatch:
         funders=[
             MatchFunder(name=f.name, funder_doi=f.funder_doi, ror=f.ror, award_ids=f.award_ids)
             for f in cr_item.funders
+        ]
+        or None,
+        updated_by=[
+            MatchUpdate(type=u.type, doi=u.doi, date=u.date, source=u.source, label=u.label)
+            for u in cr_item.updates
         ]
         or None,
     )
@@ -1636,7 +1670,7 @@ def _raw_candidate_score(raw: str, cand: _TitleCandidate | None) -> float | None
     """
     if cand is None or not cand.title or cand.work_type in _VETOED_WORK_TYPES:
         return None
-    title = _fold(plain_text(cand.title) or "")
+    title = _fold(plain_text(cand.scoring_title) or "")
     if len(title.split()) <= _GENERIC_TITLE_WORDS:
         return None
     folded_raw = _fold(raw)

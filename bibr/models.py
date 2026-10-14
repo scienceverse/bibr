@@ -64,6 +64,20 @@ class BibAuthor(_Base):
     # External matches only: identifiers the service records for the person.
     orcid: str | None = None
     affiliation: list[MatchOrganization] | None = None
+    # An organization's whole name ("Open Science Collaboration"), with
+    # ``given`` and ``family`` empty.
+    literal: str | None = None
+
+
+class MatchUpdate(_Base):
+    """A notice that updates a matched work: a retraction, correction,
+    expression of concern or withdrawal, as the registry records it."""
+
+    type: str  # lowercase snake_case: retraction, correction, expression_of_concern, ...
+    doi: str | None = None  # the notice's DOI, lowercase
+    date: str | None = None  # ISO 8601
+    source: str | None = None  # publisher, retraction-watch
+    label: str | None = None  # the record's wording ("Retraction")
 
 
 def format_bib_authors(authors: list[BibAuthor]) -> str:
@@ -72,6 +86,8 @@ def format_bib_authors(authors: list[BibAuthor]) -> str:
     for a in authors:
         if a.family:
             parts.append(f"{a.family}, {a.given}" if a.given else a.family)
+        elif a.literal:
+            parts.append(a.literal)
     return "; ".join(parts) if parts else ""
 
 
@@ -224,6 +240,9 @@ class ExternalMatch(_Base):
     version: str | None = None
     license_url: str | None = None
     funders: list[MatchFunder] | None = None
+    # Notices that update the work (Crossref ``updated-by``): a retraction,
+    # correction, expression of concern or withdrawal.
+    updated_by: list[MatchUpdate] | None = None
 
 
 class PaperReference(_Base):

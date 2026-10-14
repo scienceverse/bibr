@@ -775,7 +775,13 @@ def _export_paper_payload(
             return None
         rows = []
         for a in authors:
-            row: dict[str, Any] = {"given": a.given, "family": a.family}
+            literal = getattr(a, "literal", None)
+            # An organization author is one whole name, with no given/family.
+            row: dict[str, Any] = (
+                {"literal": literal}
+                if literal and not a.family
+                else {"given": a.given, "family": a.family}
+            )
             if orcid := _conformed(getattr(a, "orcid", None), _ORCID_RE, "orcid"):
                 row["orcid"] = orcid
             if getattr(a, "affiliation", None):
@@ -787,7 +793,7 @@ def _export_paper_payload(
         return rows
 
     def _record_ids(m) -> dict[str, Any]:
-        """License and funder identifiers of one external record."""
+        """License, funder and update-notice identifiers of one external record."""
         # Taken from the external record as deposited, like its ``url``.
         license_url = _without_active_scheme(getattr(m, "license_url", None))
         funders = getattr(m, "funders", None)
@@ -805,6 +811,17 @@ def _export_paper_payload(
             ]
             if funders
             else None,
+            "updated_by": [
+                {
+                    "type": u.type,
+                    "doi": _export_doi(u.doi, "updated_by.doi"),
+                    "date": _conformed(u.date, _ISO_DATE_RE, "updated_by.date"),
+                    "source": u.source,
+                    "label": u.label,
+                }
+                for u in getattr(m, "updated_by", None) or []
+            ]
+            or None,
         }
 
     # bib (flat, no nested match) and bib_match (top-level)

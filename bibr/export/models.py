@@ -24,11 +24,19 @@ from typing import Annotated, Any, ClassVar, Literal, Union, cast, get_args, get
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 from pydantic.fields import FieldInfo
 
-_SCHEMA_VERSION = "12.2"
+_SCHEMA_VERSION = "12.3"
 
 
 # ---------------------------------------------------------------------------
-# Pydantic v12.2 export schema — single source of truth for validation
+# Pydantic v12.3 export schema — single source of truth for validation
+#
+# v12.3 (vs 12.2) — additive:
+#   - ``bib_match[]`` and ``metadata_match[]`` gain ``updated_by``: the notices
+#     that update the matched work (retraction, correction, expression of
+#     concern, withdrawal), each ``{type, doi, date, source, label}``. Omitted
+#     when the record lists none.
+#   - An organization author or editor of a matched record ("Open Science
+#     Collaboration") is written as ``{literal}``; it was dropped before.
 #
 # v12.2 (vs 12.1) — additive:
 #   - New ``extraction.diagnostics.verification[]``: per reference with a
@@ -1053,6 +1061,44 @@ class PersonNameExport(BaseModel):
         return {k: v for k, v in data.items() if v is not None}
 
 
+class UpdateNoticeExport(BaseModel):
+    """A notice that updates a matched work, as the registry records it."""
+
+    model_config = _STRICT
+
+    type: str = Field(
+        description="Kind of notice, lowercase snake_case as the registry names it: "
+        "retraction, correction, expression_of_concern, withdrawal, erratum, addendum, ..."
+    )
+    doi: str | None = Field(
+        default=None, pattern=DOI_PATTERN, description="DOI of the notice, lowercase."
+    )
+    date: str | None = Field(
+        default=None,
+        pattern=ISO_DATE_PATTERN,
+        description="Date of the notice as ISO 8601 (YYYY, YYYY-MM or YYYY-MM-DD).",
+    )
+    source: str | None = Field(
+        default=None,
+        description="Who reported the notice to the registry: publisher, retraction-watch.",
+    )
+    label: str | None = Field(
+        default=None, description="The kind of notice as the record words it ('Retraction')."
+    )
+
+
+_UPDATED_BY_DESCRIPTION = (
+    "Notices that update the matched work (Crossref updated-by): retractions, corrections, "
+    "expressions of concern, withdrawals. Omitted when the record lists none."
+)
+
+
+def _omit_absent_updates(data: dict) -> dict:
+    if data.get("updated_by") is None:
+        data.pop("updated_by", None)
+    return data
+
+
 class BibMatchExport(BaseModel):
     """One external-service record matched to a reference-list entry."""
 
@@ -1109,6 +1155,15 @@ class BibMatchExport(BaseModel):
     funder: list[MatchFunderExport] | None = Field(
         default=None, description="Funders and awards the record lists."
     )
+    updated_by: list[UpdateNoticeExport] | None = Field(
+        default=None, description=_UPDATED_BY_DESCRIPTION
+    )
+
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("updated_by",)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent(self, handler):
+        return _omit_absent_updates(handler(self))
 
 
 class MetadataMatchExport(BaseModel):
@@ -1166,6 +1221,15 @@ class MetadataMatchExport(BaseModel):
     funder: list[MatchFunderExport] | None = Field(
         default=None, description="Funders and awards the record lists."
     )
+    updated_by: list[UpdateNoticeExport] | None = Field(
+        default=None, description=_UPDATED_BY_DESCRIPTION
+    )
+
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("updated_by",)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent(self, handler):
+        return _omit_absent_updates(handler(self))
 
 
 class AffiliationMatchExport(BaseModel):
@@ -2216,7 +2280,7 @@ class PaperExport(BaseModel):
         "(bibr batch writes its corpus-unique id, the name of the JSON file). A converter uses "
         "the name of source.file_name without its extension.",
     )
-    schema_version: Literal["12.2"] = Field(
+    schema_version: Literal["12.3"] = Field(
         description="Export schema version. Its presence at the root is how readers "
         "distinguish v11 and later from all earlier versions.",
     )

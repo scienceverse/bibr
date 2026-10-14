@@ -1,0 +1,64 @@
+{
+ "status": "ok",
+ "message-type": "work",
+ "message": {
+  "DOI": "10.1177/0956797610383437",
+  "type": "journal-article",
+  "title": [
+   "Power Posing"
+  ],
+  "subtitle": [
+   "Brief Nonverbal Displays Affect Neuroendocrine Levels and Risk Tolerance"
+  ],
+  "author": [
+   {
+    "given": "Dana R.",
+    "family": "Carney",
+    "sequence": "first",
+    "affiliation": [
+     {
+      "name": "Columbia University"
+     }
+    ]
+   },
+   {
+    "given": "Amy J.C.",
+    "family": "Cuddy",
+    "sequence": "additional",
+    "affiliation": [
+     {
+      "name": "Harvard University"
+     }
+    ]
+   },
+   {
+    "given": "Andy J.",
+    "family": "Yap",
+    "sequence": "additional",
+    "affiliation": [
+     {
+      "name": "Columbia University"
+     }
+    ]
+   }
+  ],
+  "issued": {
+   "date-parts": [
+    [
+     2010,
+     9,
+     20
+    ]
+   ]
+  },
+  "container-title": [
+   "Psychological Science"
+  ],
+  "volume": "21",
+  "issue": "10",
+  "page": "1363-1368",
+  "publisher": "SAGE Publications",
+  "URL": "https://doi.org/10.1177/0956797610383437",
+  "score": 1
+ }
+}

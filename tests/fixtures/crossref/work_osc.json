@@ -1,0 +1,36 @@
+{
+ "status": "ok",
+ "message-type": "work",
+ "message": {
+  "DOI": "10.1126/science.aac4716",
+  "type": "journal-article",
+  "title": [
+   "Estimating the reproducibility of psychological science"
+  ],
+  "subtitle": [],
+  "author": [
+   {
+    "name": "Open Science Collaboration",
+    "sequence": "first",
+    "affiliation": []
+   }
+  ],
+  "issued": {
+   "date-parts": [
+    [
+     2015,
+     8,
+     28
+    ]
+   ]
+  },
+  "container-title": [
+   "Science"
+  ],
+  "volume": "349",
+  "issue": "6251",
+  "publisher": "American Association for the Advancement of Science (AAAS)",
+  "URL": "https://doi.org/10.1126/science.aac4716",
+  "score": 1
+ }
+}

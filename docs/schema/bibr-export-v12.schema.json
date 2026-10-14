@@ -735,6 +735,18 @@
             "null"
           ]
         },
+        "updated_by": {
+          "default": null,
+          "description": "Notices that update the matched work (Crossref updated-by): retractions, corrections, expressions of concern, withdrawals. Omitted when the record lists none.",
+          "items": {
+            "$ref": "#/$defs/UpdateNoticeExport"
+          },
+          "title": "Updated By",
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "url": {
           "default": null,
           "description": "URL of the record.",
@@ -3049,6 +3061,18 @@
             "null"
           ]
         },
+        "updated_by": {
+          "default": null,
+          "description": "Notices that update the matched work (Crossref updated-by): retractions, corrections, expressions of concern, withdrawals. Omitted when the record lists none.",
+          "items": {
+            "$ref": "#/$defs/UpdateNoticeExport"
+          },
+          "title": "Updated By",
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "url": {
           "default": null,
           "description": "URL of the record.",
@@ -4076,6 +4100,64 @@
       "title": "TimingsExport",
       "type": "object"
     },
+    "UpdateNoticeExport": {
+      "additionalProperties": false,
+      "description": "A notice that updates a matched work, as the registry records it.",
+      "properties": {
+        "date": {
+          "default": null,
+          "description": "Date of the notice as ISO 8601 (YYYY, YYYY-MM or YYYY-MM-DD).",
+          "pattern": "^[0-9]{4}(-[0-9]{2}(-[0-9]{2})?)?$",
+          "title": "Date",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "doi": {
+          "default": null,
+          "description": "DOI of the notice, lowercase.",
+          "pattern": "^10\\.[0-9]{4,9}/[^\\sA-Z]+$",
+          "title": "Doi",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "default": null,
+          "description": "The kind of notice as the record words it ('Retraction').",
+          "title": "Label",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "default": null,
+          "description": "Who reported the notice to the registry: publisher, retraction-watch.",
+          "title": "Source",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "description": "Kind of notice, lowercase snake_case as the registry names it: retraction, correction, expression_of_concern, withdrawal, erratum, addendum, ...",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "doi",
+        "date",
+        "source",
+        "label"
+      ],
+      "title": "UpdateNoticeExport",
+      "type": "object"
+    },
     "UrlExport": {
       "additionalProperties": false,
       "description": "One hyperlink found in the text.",
@@ -4721,7 +4803,7 @@
       "type": "string"
     },
     "schema_version": {
-      "const": "12.2",
+      "const": "12.3",
       "description": "Export schema version. Its presence at the root is how readers distinguish v11 and later from all earlier versions.",
       "title": "Schema Version",
       "type": "string"

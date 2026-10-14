@@ -16,6 +16,8 @@ _FUNDER_DOI = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/)?(?P<doi>10\.13039/\S
 # The license of the article itself, best first. "tdm" licenses grant text
 # mining, not reuse of the work, so they never stand for the article's license.
 _LICENSE_VERSIONS = ("vor", "unspecified", "am")
+# A notice DOI the export can carry (bare, no whitespace).
+_NOTICE_DOI = re.compile(r"^10\.[0-9]{4,9}/\S+$")
 # An inline element of a deposited title: JATS/HTML face markup (<i>, <sub>,
 # <scp>) and MathML (<mml:msub>). Its text is part of the title; the tag is not.
 # Attributes must be name="value", as XML requires, so a title's own "<y and z>"
@@ -38,6 +40,23 @@ _FORMULA_SYMBOL = re.compile(r"[A-Z][a-z]?(?![^\W\d_])")
 _JOINING_MARKS = "-‐‑‒–—―/"
 _ATTACHES_BEFORE = frozenset(",.;:!?)]}’”»'" + _JOINING_MARKS)
 _ATTACHES_AFTER = frozenset("([{‘“«'" + _JOINING_MARKS)
+
+
+# Registries mark a retracted or withdrawn work by prefixing its title
+# ("RETRACTED: ...", "RETRACTED ARTICLE: ...", "WITHDRAWN: ...", "Expression
+# of concern: ..."). A reference prints the work's own title.
+_NOTICE_TITLE_PREFIX = re.compile(
+    r"^\s*(?:retracted(?:\s+article)?|withdrawn(?:\s+article)?|expression\s+of\s+concern)"
+    r"\s*[:.\-\u2013\u2014]\s*",
+    re.IGNORECASE,
+)
+
+
+def strip_notice_prefix(title: str) -> str:
+    """*title* without a leading "RETRACTED:"-style marker, for comparing it
+    with a printed title. The deposited title is what gets exported."""
+    stripped = _NOTICE_TITLE_PREFIX.sub("", title, count=1)
+    return stripped or title
 
 
 def plain_text(value: object) -> str | None:
@@ -127,13 +146,113 @@ class CrossrefFunder(BaseModel):
 
 
 class CrossrefAuthor(BaseModel):
-    """Author as returned by Crossref API."""
+    """Author as returned by Crossref API.
+
+    An organization author ("Open Science Collaboration") has a ``name`` and
+    no ``given``/``family``.
+    """
 
     given: str = ""
     family: str = ""
+    name: str | None = None
     orcid: str | None = None
     sequence: str | None = None
     affiliations: list[CrossrefOrganization] = []
+
+
+class CrossrefUpdate(BaseModel):
+    """A notice that updates a work: a retraction, correction, expression of
+    concern or withdrawal (Crossref ``updated-by``)."""
+
+    type: str  # lowercase snake_case: retraction, correction, expression_of_concern, ...
+    doi: str | None = None  # the notice's DOI, lowercase
+    date: str | None = None  # ISO 8601, as precise as the record
+    source: str | None = None  # who reported it: publisher, retraction-watch
+    label: str | None = None  # the type as the record words it ("Retraction")
+
+
+def _person(raw: dict) -> CrossrefAuthor:
+    # Mistyped parts fail validation, so a malformed record is skipped whole.
+    return CrossrefAuthor(
+        given=raw.get("given", ""),
+        family=raw.get("family", ""),
+        name=_text(raw.get("name")),
+        orcid=raw.get("ORCID"),
+        sequence=raw.get("sequence"),
+        affiliations=_organizations(raw.get("affiliation")),
+    )
+
+
+def _text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return " ".join(value.split()) or None
+
+
+def _iso_date(date_parts: object) -> tuple[int | None, str | None]:
+    """Year and ISO date (``YYYY-MM`` or ``YYYY-MM-DD``) of a Crossref
+    ``date-parts`` value; the date is ``None`` when only the year is known."""
+    parts = date_parts[0] if isinstance(date_parts, list) and date_parts else None
+    if not isinstance(parts, list):
+        return None, None
+    numbers = [_int(part) for part in parts[:3]]
+    year = numbers[0] if numbers else None
+    if not year:
+        return None, None
+    # Crossref emits ``[year, 0]`` (and occasionally ``[year, m, 0]``) for
+    # year-only / year-and-month-only records. Treat those zero placeholders
+    # as "missing" rather than formatting them as the invalid month/day "00".
+    month = numbers[1] if len(numbers) >= 2 and 1 <= (numbers[1] or 0) <= 12 else None
+    day = numbers[2] if len(numbers) >= 3 and 1 <= (numbers[2] or 0) <= 31 else None
+    if not 1000 <= year <= 9999:
+        return year, None
+    if month and day:
+        return year, f"{year:04d}-{month:02d}-{day:02d}"
+    if month:
+        return year, f"{year:04d}-{month:02d}"
+    return year, None
+
+
+def _int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return int(value) if isinstance(value, str) and value.strip().isdigit() else None
+
+
+def _updates(raw: object) -> list[CrossrefUpdate]:
+    """The notices in a Crossref ``updated-by`` list, without repeats.
+
+    A notice can be listed by the publisher and by Retraction Watch; both rows
+    are kept, since they name different sources.
+    """
+    out: list[CrossrefUpdate] = []
+    seen: set[tuple[str, str | None, str | None]] = set()
+    for entry in raw if isinstance(raw, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        kind = _text(entry.get("type"))
+        if not kind:
+            continue
+        kind = re.sub(r"[\s-]+", "_", kind.lower())
+        doi = _text(entry.get("DOI"))
+        doi = doi.lower() if doi and _NOTICE_DOI.match(doi) else None
+        source = _text(entry.get("source"))
+        key = (kind, doi, source)
+        if key in seen:
+            continue
+        seen.add(key)
+        updated = entry.get("updated")
+        year, date = _iso_date(updated.get("date-parts") if isinstance(updated, dict) else None)
+        if date is None and year is not None and 1000 <= year <= 9999:
+            date = f"{year:04d}"
+        out.append(
+            CrossrefUpdate(
+                type=kind, doi=doi, date=date, source=source, label=_text(entry.get("label"))
+            )
+        )
+    return out
 
 
 def _organizations(raw: object) -> list[CrossrefOrganization]:
@@ -198,6 +317,7 @@ class CrossrefWorkItem(BaseModel):
     api_score: float | None = None
     license_url: str | None = None
     funders: list[CrossrefFunder] = []
+    updates: list[CrossrefUpdate] = []  # retraction, correction and other notices
 
     @classmethod
     def from_raw(cls, raw: dict) -> CrossrefWorkItem:
@@ -208,43 +328,12 @@ class CrossrefWorkItem(BaseModel):
         containers = raw.get("container-title", [])
         container_title = plain_text(containers[0]) if containers else None
 
-        authors = [
-            CrossrefAuthor(
-                given=a.get("given", ""),
-                family=a.get("family", ""),
-                orcid=a.get("ORCID"),
-                sequence=a.get("sequence"),
-                affiliations=_organizations(a.get("affiliation")),
-            )
-            for a in raw.get("author", [])
-        ]
-
+        authors = [_person(a) for a in raw.get("author", [])]
         editors = [
-            CrossrefAuthor(
-                given=e.get("given", ""),
-                family=e.get("family", ""),
-            )
-            for e in raw.get("editor", [])
+            CrossrefAuthor(given=e.given, family=e.family, name=e.name)
+            for e in map(_person, raw.get("editor", []))
         ]
-
-        pub_year = None
-        pub_date = None
-        issued = raw.get("issued", {})
-        date_parts = issued.get("date-parts", [[]])
-        if date_parts and date_parts[0]:
-            parts = date_parts[0]
-            if parts and parts[0]:
-                pub_year = int(parts[0])
-                # Crossref emits ``[year, 0]`` (and occasionally ``[year, m, 0]``)
-                # for year-only / year-and-month-only records. Treat those
-                # zero placeholders as "missing" rather than formatting them
-                # as the invalid month/day ``"00"``.
-                month = parts[1] if len(parts) >= 2 else None
-                day = parts[2] if len(parts) >= 3 else None
-                if month and day:
-                    pub_date = f"{parts[0]:04d}-{month:02d}-{day:02d}"
-                elif month:
-                    pub_date = f"{parts[0]:04d}-{month:02d}"
+        pub_year, pub_date = _iso_date((raw.get("issued") or {}).get("date-parts"))
 
         return cls(
             doi=raw.get("DOI"),
@@ -263,4 +352,5 @@ class CrossrefWorkItem(BaseModel):
             api_score=raw.get("score"),
             license_url=_license_url(raw.get("license")),
             funders=_funders(raw.get("funder")),
+            updates=_updates(raw.get("updated-by")),
         )
