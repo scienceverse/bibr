@@ -207,6 +207,7 @@ class ExternalMatch(_Base):
     id: str | None = None  # DOI, OpenAlex ID, etc.
     score: float | None = None
     title: str | None = None
+    subtitle: str | None = None  # kept apart from title by Crossref
     authors: list[BibAuthor] | None = None
     year: int | None = None
     container: str | None = None  # journal or book title

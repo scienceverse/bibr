@@ -387,3 +387,64 @@ def test_export_leaves_bib_as_parsed_when_verification_is_off(monkeypatch):
 
     assert out["bib"][0]["volume"] is None
     assert "verification" not in out["extraction"].get("diagnostics", {})
+
+
+def _identity_payload() -> dict:
+    payload = _checkpoint_core()
+    payload["metadata"] = {"title": "Printed title", "doi": "10.1234/self"}
+    payload["author"] = [{"given": "Jane", "family": "Smith", "literal": None}]
+    payload["metadata_match"] = [
+        {
+            "service": "crossref",
+            "score": 1.0,
+            "doi": "10.1234/self",
+            "title": "Another title",
+            "author": [{"given": "Jane", "family": "Smith"}],
+        }
+    ]
+    payload["extraction"]["fields"] = {
+        name: {"state": "extracted", "source": "llm", "issues": []} for name in ("title", "author")
+    }
+    return payload
+
+
+def test_export_compares_title_and_authors_with_the_paper_record():
+    out = _sinked_run(_unsinked_fs(_identity_payload()), RunConfig(crossref_identity=True))
+
+    fields = out["extraction"]["fields"]
+    assert fields["title"]["registry"] == {"service": "crossref", "outcome": "disagree"}
+    assert fields["author"]["registry"] == {"service": "crossref", "outcome": "agree"}
+    # Reported only: the printed title stays.
+    assert out["metadata"]["title"] == "Printed title"
+
+
+def test_export_skips_the_record_comparison_when_verification_is_off(monkeypatch):
+    monkeypatch.setenv("CROSSREF_VERIFY", "false")
+    out = _sinked_run(_unsinked_fs(_identity_payload()), RunConfig(crossref_identity=True))
+
+    assert "registry" not in out["extraction"]["fields"]["title"]
+    assert "registry" not in out["extraction"]["fields"]["author"]
+
+
+def test_checkpoint_path_rematerializes_after_the_record_comparison():
+    """A core that already holds the record (a saved result read back as the
+    checkpoint) gets the comparison too, and the -o file is rewritten."""
+    import copy
+    from types import SimpleNamespace
+
+    calls = []
+    fs = SimpleNamespace(
+        paper=_CannedPaper(_identity_payload()),
+        warnings=[],
+        result_json=copy.deepcopy(_identity_payload()),
+        artifact_sink=SimpleNamespace(materialize=lambda fs, p: calls.append(copy.deepcopy(p))),
+        core_sha256="deadbeef",
+        enrichment_state=None,
+        path=Path("x.pdf"),
+        free_all=lambda: None,
+        set_error=_boom_on_error,
+    )
+    out = _sinked_run(fs, RunConfig())
+
+    assert out["extraction"]["fields"]["title"]["registry"]["outcome"] == "disagree"
+    assert calls and calls[-1]["extraction"]["fields"] == out["extraction"]["fields"]

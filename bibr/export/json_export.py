@@ -902,6 +902,7 @@ def _export_paper_payload(
                     bib_type=_export_bib_type(d.get("bib_type")),
                     doi=_export_doi(d.get("doi"), "metadata_match.doi"),
                     title=d.get("title"),
+                    subtitle=d.get("subtitle"),
                     author=_authors_to_dicts(m.authors),
                     editor=_authors_to_dicts(m.editors),
                     publisher=d.get("publisher"),

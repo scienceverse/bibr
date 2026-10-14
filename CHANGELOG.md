@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Added
+### Added — export schema 12.3 (additive)
 
 - `LLM_POINTER_OUTPUTS=true` (experimental, off by default) stops the two front-matter calls
   from retyping text that is already in their prompt. The title/keywords call names the
@@ -21,6 +21,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   parse, bibr asks for the verbatim answer instead. A stand-in the model writes for an
   affiliation the text does not print ("Affiliation 3") is left empty.
   The merged call, the JSON re-roll and the NuExtract native backend stay verbatim.
+The export moves to schema `12.3`, which adds two optional keys; every 12.2
+export is still valid input for the 12.x reader.
+
+- When the paper's own registry record is known (`metadata_match`, from reference
+  enrichment or the identity lookup below), the export says whether bibr's title and author
+  list agree with it. `extraction.fields.title.registry` and
+  `extraction.fields.author.registry` are `{service, outcome}`, with `outcome` `agree` or
+  `disagree`. Titles are compared ignoring case and punctuation, and also against the record's
+  title followed by its subtitle. Author lists are compared as full names, so a different
+  split into given and family names still agrees. Only a record that scores 0.9 or more and
+  carries the paper's DOI is used, and it never changes the exported values. On a 120-paper
+  development set (exports from bibr 0.3.0), 91 papers had a record: every title (78) and
+  author list (81) that agreed with it was right, and the 17 papers with a disagreement held
+  all 12 papers with a wrong title or author list. `CROSSREF_VERIFY=false` turns the
+  comparison off. The outcome `corrected` is reserved for a later release.
+- `metadata_match[].subtitle` holds the record's subtitle, which Crossref keeps apart from the
+  title. It is omitted when the record has none.
 - `CROSSREF_IDENTITY=true` looks up the paper's own DOI when reference enrichment is off: one
   request per paper that has a DOI, about half a second, in place of a lookup per reference. The
   record goes to `metadata_match` as it does with full enrichment, and `refs=off` does not stop

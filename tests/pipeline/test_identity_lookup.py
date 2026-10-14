@@ -226,7 +226,7 @@ async def test_stage_without_identity_enricher_skips_identity_mode():
 
 def _core_payload(doi: str | None) -> dict:
     return {
-        "schema_version": "12.2",
+        "schema_version": "12.3",
         "metadata": {"title": "Printed title", "doi": doi},
         "bib": [{"bib_id": 1}],
         "bib_match": [],
@@ -322,6 +322,56 @@ async def test_identity_sidecar_replay_carries_the_record_and_no_reference_recei
     assert "enrichment" not in fs.result_json["extraction"]
     assert not _pending(fs.result_json)
     assert fs.result_json["extraction"]["validation"]["promotable"] is True
+
+
+async def test_identity_replay_compares_the_front_matter_with_the_record(tmp_path):
+    """The replayed export, and the -o file on disk, say whether the title and
+    authors agree with the record; the printed values stay."""
+    import copy
+
+    from bibr.local.artifacts import LocalArtifactSink
+    from bibr.pipeline.artifacts import RunState
+    from bibr.pipeline.stages.core_checkpoint import CoreCheckpointStage
+    from bibr.pipeline.stages.export import ExportStage
+
+    core = _core_payload("10.1234/self")
+    core["author"] = [{"given": "Leila", "family": "Ben Ammar Elgaaied", "literal": None}]
+    core["extraction"]["fields"] = {
+        name: {"state": "extracted", "source": "llm", "issues": []} for name in ("title", "author")
+    }
+    enriched = copy.deepcopy(core)
+    enriched["metadata_match"] = [
+        {
+            "service": "crossref",
+            "doi": "10.1234/self",
+            "score": 1.0,
+            "title": "Printed",
+            "subtitle": "Title",
+            "author": [{"given": "Leila Ben Ammar", "family": "Elgaaied"}],
+        }
+    ]
+    fs = _fs("paper.pdf", "10.1234/self")
+    fs.path = tmp_path / "paper.pdf"
+    fs.paper.validation_issues = []
+    fs.paper.export_to_json.side_effect = [core, enriched]
+    fs.artifact_sink = LocalArtifactSink(tmp_path / "paper.json")
+    ctx = _ctx([fs], RunConfig(crossref_identity=True, consolidate="off"), _settings())
+
+    await CoreCheckpointStage(identity_requested=True).run(ctx)
+    fs.enrichment_state = RunState.ENRICHMENT_COMPLETE
+    await ExportStage().run(ctx)
+
+    assert fs.error is None
+    expected = {"service": "crossref", "outcome": "agree"}
+    fields = fs.result_json["extraction"]["fields"]
+    assert fields["title"]["registry"] == expected
+    assert fields["author"]["registry"] == expected
+    assert fs.result_json["metadata"]["title"] == "Printed title"
+    on_disk = json.loads((tmp_path / "paper.json").read_text(encoding="utf-8"))
+    assert on_disk["extraction"]["fields"] == fields
+    # The immutable core predates the lookup.
+    stored_core = json.loads(fs.artifact_sink.core_path(fs).read_text(encoding="utf-8"))
+    assert "registry" not in stored_core["extraction"]["fields"]["title"]
 
 
 def test_settings_digest_separates_identity_from_off():

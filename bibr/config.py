@@ -1457,11 +1457,16 @@ class CrossrefOptions(_BibrSettings):
     # confident bib_match record at export. A disagreement is reported in
     # extraction.diagnostics.verification; a missing or misparsed value is
     # replaced only by the record's value as printed in the reference string.
+    # The paper's own title and authors are compared with its metadata_match
+    # record too, but that comparison is only reported, never applied.
     verify: bool = Field(
         True,
         description="Check parsed reference volume, issue and pages against the matched record "
         "at export: report disagreements, and fill or correct a value only when the record's "
-        "value is printed in the reference string. Needs enrichment; off leaves bib[] as parsed.",
+        "value is printed in the reference string. Also compares the paper's title and authors "
+        "with its own record (`extraction.fields.title.registry`, "
+        "`extraction.fields.author.registry`) without changing them. Needs enrichment or the "
+        "identity lookup; off leaves bib[] as parsed.",
     )
 
     @field_validator("consolidate", mode="before")

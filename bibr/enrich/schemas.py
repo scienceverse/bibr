@@ -184,6 +184,9 @@ class CrossrefWorkItem(BaseModel):
 
     doi: str | None = None
     title: str | None = None
+    # Crossref deposits a subtitle apart from the title ("title": ["Main"],
+    # "subtitle": ["The rest"]); the paper prints them as one title.
+    subtitle: str | None = None
     container_title: str | None = None
     volume: str | None = None
     issue: str | None = None
@@ -204,6 +207,8 @@ class CrossrefWorkItem(BaseModel):
         """Parse a raw Crossref API work item dict into a typed model."""
         titles = raw.get("title", [])
         title = plain_text(titles[0]) if titles else None
+        subtitles = raw.get("subtitle") or []
+        subtitle = plain_text(subtitles[0]) if subtitles else None
 
         containers = raw.get("container-title", [])
         container_title = plain_text(containers[0]) if containers else None
@@ -249,6 +254,7 @@ class CrossrefWorkItem(BaseModel):
         return cls(
             doi=raw.get("DOI"),
             title=title,
+            subtitle=subtitle or None,
             container_title=container_title,
             volume=raw.get("volume"),
             issue=raw.get("issue"),

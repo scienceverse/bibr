@@ -1,6 +1,6 @@
 {
   "paper_id": "demo",
-  "schema_version": "12.2",
+  "schema_version": "12.3",
   "source": {
     "file_name": "demo.pdf",
     "sha256": "3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7",
@@ -273,6 +273,7 @@
       "bib_type": null,
       "doi": "10.1234/demo",
       "title": "A Demonstration Paper",
+      "subtitle": "Methods and Results",
       "author": [
         {
           "family": "Smith",
@@ -422,13 +423,21 @@
         "state": "extracted",
         "source": "llm",
         "issues": [],
-        "rule": "extracted"
+        "rule": "extracted",
+        "registry": {
+          "service": "crossref",
+          "outcome": "agree"
+        }
       },
       "author": {
         "state": "extracted",
         "source": "llm",
         "issues": [],
-        "rule": "extracted"
+        "rule": "extracted",
+        "registry": {
+          "service": "crossref",
+          "outcome": "agree"
+        }
       },
       "abstract": {
         "state": "extracted",

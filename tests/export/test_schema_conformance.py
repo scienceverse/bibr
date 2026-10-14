@@ -91,6 +91,8 @@ def test_the_full_example_has_every_root_key_in_order():
     # carries every v12 feature
     assert example["xref"][0]["start"] is not None
     assert example["extraction"]["fields"]["title"]["state"] == "extracted"
+    assert example["extraction"]["fields"]["title"]["registry"]["outcome"] == "agree"
+    assert example["metadata_match"][0]["subtitle"]
     assert example["extraction"]["pages"] and example["affiliation_match"]
     assert example["funding_match"] and example["metadata_match"][0]["funder"]
     assert example["extraction"]["warnings"][0]["code"] == "STATEMENT_LEXICAL_FALLBACK"
@@ -99,6 +101,7 @@ def test_the_full_example_has_every_root_key_in_order():
 
 def _regenerate_full_example() -> None:
     """Rewrite ``valid/full.json`` from the shared demo paper (run this module)."""
+    from bibr.enrich.verify_identity import verify_identity
     from bibr.export.json_export import _export_paper_payload
     from bibr.extract.field_decisions import FieldCandidate, FieldDecision, FieldDecisions
     from bibr.extract.statement_scan import lexical_fallback_warning
@@ -136,7 +139,12 @@ def _regenerate_full_example() -> None:
         PaperFigurePart(page_number=2, bbox=(96.0, 410.0, 512.0, 688.0), image_b64=None)
     ]
     paper.processing_warnings = [lexical_fallback_warning("data_availability")]
+    # The registry keeps a subtitle apart (12.3); the export compares the
+    # title and authors with that record, as the pipeline's export does.
+    (match,) = paper.metadata.match.values()
+    match.subtitle = "Methods and Results"
     payload = _export_paper_payload(paper)
+    verify_identity(payload)
     payload["extraction"]["completed_at"] = "2026-09-22T12:00:00Z"
     (ROOT / "valid" / "full.json").write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n"

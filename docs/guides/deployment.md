@@ -605,7 +605,9 @@ merged back into `bib`, or left only in `bib_match`.
 issue and pages against its confident match before that: a value the parser
 missed or misread is replaced by the match's value only when the reference
 string prints it, and every comparison is recorded in
-`extraction.diagnostics.verification`.
+`extraction.diagnostics.verification`. The same setting compares the
+paper's title and authors with its own `metadata_match` record and records
+the outcome in `extraction.fields.<field>.registry`, without changing them.
 
 ### Optional external resolver (`BIBR_RESOLVER_URL`)
 
