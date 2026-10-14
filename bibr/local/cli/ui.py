@@ -45,6 +45,7 @@ _COMMAND_ORDER = (
     "doctor",
     "inspect",
     "tables",
+    "references",
     "preset",
     "config",
     "serve",

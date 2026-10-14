@@ -18,7 +18,8 @@ agents get the same chew-then-query tool surface as ``bibr mcp`` (see
   mean nothing on the server (and serving host-filesystem reads to
   bearer-token holders would be a new capability the REST API deliberately
   does not have), so ``chew_paper`` takes base64 file content and the stdio
-  server's ``load_paper``/``save_paper`` filesystem tools are not registered.
+  server's ``load_paper``/``save_paper``/``save_references`` filesystem tools are
+  not registered.
   ``chew_url`` downloads a public HTTPS URL server-side under
   :mod:`bibr.utils.safe_fetch`'s SSRF policy — operators can restrict it to
   ``MCP_URL_ALLOWED_HOSTS`` or remove it with ``MCP_CHEW_URL_ENABLED=false``.
@@ -95,8 +96,9 @@ in-text citations, tables, figures, and statistical expressions.
 
 Start with chew_paper: upload one file as base64 and get back a compact summary plus a
 paper_id for the query tools — get_metadata, get_sections, get_text, search_text,
-get_references, get_reference_citations, get_tables, get_figures. Full exports are large,
-so query the slices you need instead of asking for everything. Papers live in server
+get_references, get_reference_citations, get_tables, get_figures, and export_references
+(the reference list as CSL-JSON, BibTeX or RIS text). Full exports are large, so query
+the slices you need instead of asking for everything. Papers live in server
 memory for your MCP session only (least recently used evicted beyond the server's
 caps); re-chew after a disconnect or an unknown paper_id, or use the REST API
 (POST /papers/extract) when you want the full export JSON as a file.
