@@ -11,6 +11,9 @@ cd paper-extraction
 uv add bibr
 ```
 
+On macOS and Linux, install the system libmagic library first (see
+[Installation](install.md#system-prerequisites)).
+
 This installs core bibr, including the ONNX runtime for its trained models.
 The setup wizard offers any additional runtime extras your hardware needs;
 see [Installation](install.md) for prerequisites, the optional demo, and source installs.
@@ -23,8 +26,8 @@ uv run bibr setup
 
 The wizard detects your hardware, then shows a plan — OCR backend, LLM, extras, memory mode, privacy, and expected speed — for one confirmation. Decline it and the wizard offers to switch into `bibr setup --advanced` for exact provider/backend control instead. Two common outcomes:
 
-- **Capable hardware (Apple Silicon, or an NVIDIA GPU with enough VRAM):** the plan uses local OCR and a managed local LLM. On Apple Silicon, the OCR selector tries Paddle Rapid-MLX before Paddle MLX-VLM, with GLM startup fallbacks. Windows and small CUDA GPUs use GLM-OCR through llama.cpp. The preview shows the requested backends, model, and memory mode. Crossref enrichment remains a separate network service; use `--no-crossref` to disable it.
-- **Weaker hardware:** the wizard asks whether you have a private OCR/LLM server; if not, it offers cloud processing via {{ default_llm_provider }}, with an explicit consent step (document content leaves your machine) and an API key prompt.
+- **Capable hardware (Apple Silicon, or an NVIDIA GPU with enough VRAM):** the plan uses local OCR and a managed local LLM. On Apple Silicon, the OCR selector tries Paddle Rapid-MLX before Paddle MLX-VLM, with GLM startup fallbacks. Windows and small CUDA GPUs use GLM-OCR through llama.cpp. The preview shows the requested backends, model, and memory mode. Crossref enrichment, a network service, stays off unless you enable it (`--crossref` or `CROSSREF_ENRICH=true`).
+- **Weaker hardware:** the wizard asks whether you have a private OCR/LLM server; if not, it offers cloud processing via Google Gemini, with a consent question that defaults to No (document content leaves your machine) and an API key prompt. PDFs always need an OCR backend, even with `--no-llm`, so on such a machine they need that server or cloud, or a separately installed llama.cpp, which is slow on a CPU (see [Installation](install.md#choosing-serving-extras)). DOCX, JATS, HTML and ePub need no OCR.
 
 It writes `.env`, saves a preset, and offers to install the extras the plan
 needs. Validation includes an optional connection/server check and a one-page

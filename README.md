@@ -33,7 +33,7 @@ uv init --python 3.12 paper-extraction
 cd paper-extraction
 uv add bibr
 uv run bibr setup
-uv run bibr chew paper.pdf -o result.json
+uv run bibr chew paper.pdf -o result.json   # any PDF you copied into the folder
 ```
 
 In an existing Python environment, you can also install with
@@ -63,6 +63,10 @@ uv run bibr demo                       # Open it locally
 
 References are parsed locally by default. Use `--refs llm` to parse them with the
 LLM, or `--refs off` to skip them. More options: [CLI reference](https://bibr.org/reference/cli/).
+
+Unless `bibr setup` configures a local or private LLM, metadata extraction uses Google
+Gemini, which receives text extracted from the paper and needs `GOOGLE_API_KEY`.
+`bibr chew paper.pdf --dry-run` shows where each stage runs before anything is sent.
 
 ### Python
 

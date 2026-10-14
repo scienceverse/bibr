@@ -117,7 +117,6 @@ Scale concurrency with these settings:
 | `PIPELINE_MAX_INFLIGHT_REQUESTS` | `8` | Max requests running the pipeline concurrently per worker (`0` = unlimited). Bounds peak host RAM (page images) under an upload flood. |
 | `PIPELINE_RESTART_WORKERS` | `false` | Fail-stop on worker death. `true` is an unsupported opt-in until the locked death-path gate proves reliable completion notification. |
 | `PIPELINE_MAX_PAGES` | `200` | Hard per-file processing cap for compact many-page PDF protection. |
-| `PIPELINE_PAGE_WINDOW_SIZE` | `8` | Maximum PDF pages rendered per file at once. Images are released after each window's layout, native-text reconstruction, and OCR work. This bounds memory without shortening the document. |
 | `LAYOUT_MAX_RENDER_PIXELS` | `25000000` | Pixel budget for one rasterized PDF page. A page over it (or over `LAYOUT_MAX_RENDER_DIMENSION` on a side) at the configured DPI renders at the largest DPI that fits, down to 24, with a `PAGE_DPI_REDUCED` warning; a page that does not fit even at 24 DPI is rejected before rasterization. |
 | `LAYOUT_MAX_RENDER_DIMENSION` | `10000` | Largest rasterized width or height for one PDF page, handled like `LAYOUT_MAX_RENDER_PIXELS`. |
 | `LAYOUT_BATCH_TIMEOUT_MS` | `5` | Coalescing window for the layout `GpuBatcher` — how long it waits for more concurrent pages before flushing a partial batch. |
@@ -599,7 +598,9 @@ string prints it, and every comparison is recorded in
 bibr can query the optional bibr-resolver service before falling back to
 Crossref, to speed up reference resolution and reduce Crossref load. It's
 off by default — leaving `BIBR_RESOLVER_URL` unset keeps bibr's enrichment
-behavior unchanged.
+behavior unchanged. bibr-resolver is not publicly released yet, so leave
+`BIBR_RESOLVER_URL` unset unless you run one. It is only queried when Crossref
+enrichment is on (`--crossref` or `CROSSREF_ENRICH=true`).
 
 | Env var | Default | Meaning |
 |---|---|---|
