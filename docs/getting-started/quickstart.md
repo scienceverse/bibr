@@ -27,7 +27,7 @@ uv run bibr setup
 The wizard detects your hardware, then shows a plan — OCR backend, LLM, extras, memory mode, privacy, and expected speed — for one confirmation. Decline it and the wizard offers to switch into `bibr setup --advanced` for exact provider/backend control instead. Two common outcomes:
 
 - **Capable hardware (Apple Silicon, or an NVIDIA GPU with enough VRAM):** the plan uses local OCR and a managed local LLM. On Apple Silicon, the OCR selector tries Paddle Rapid-MLX before Paddle MLX-VLM, with GLM startup fallbacks. Windows and small CUDA GPUs use GLM-OCR through llama.cpp. The preview shows the requested backends, model, and memory mode. Crossref enrichment, a network service, stays off unless you enable it (`--crossref` or `CROSSREF_ENRICH=true`).
-- **Weaker hardware:** the wizard asks whether you have a private OCR/LLM server; if not, it offers cloud processing via Google Gemini, with a consent question that defaults to No (document content leaves your machine) and an API key prompt. PDFs always need an OCR backend, even with `--no-llm`, so on such a machine they need that server or cloud, or a separately installed llama.cpp, which is slow on a CPU (see [Installation](install.md#choosing-serving-extras)). DOCX, JATS, HTML and ePub need no OCR.
+- **Weaker hardware:** the wizard asks whether you have a private OCR/LLM server; if not, it offers cloud processing via Google Gemini, with a consent question that defaults to No (document content leaves your machine) and an API key prompt. Scanned PDFs always need an OCR backend, even with `--no-llm`, so on such a machine they need that server or cloud, or a separately installed llama.cpp, which is slow on a CPU (see [Installation](install.md#choosing-serving-extras)). Born-digital PDFs can instead be read from their embedded text layer with no OCR model (`--ocr text-layer`; see [Reading the text layer without OCR](../guides/configuration.md#reading-the-text-layer-without-ocr)). DOCX, JATS, HTML and ePub need no OCR.
 
 It writes `.env`, saves a preset, and offers to install the extras the plan
 needs. Validation includes an optional connection/server check and a one-page
@@ -82,6 +82,8 @@ exits 0.
 The same command accepts DOCX, JATS XML (`.xml`), HTML (`.html`/`.htm`), and ePub
 files. These formats are parsed natively without OCR. PDF text layers also supply
 usable text directly; regions needing recognition still use the OCR backend.
+Without an OCR backend, `--ocr text-layer` reads born-digital PDFs from their
+text layer alone, and a scanned PDF fails with `scan_needs_ocr`.
 Point the command at a directory to process supported files in that directory:
 
 ```bash
@@ -101,6 +103,7 @@ input file named directly.
 | Parse reference fields with the configured LLM | `uv run bibr chew paper.pdf --refs llm` |
 | Try only the first three PDF pages | `uv run bibr chew paper.pdf --pages 1-3` |
 | Preview resolved settings without processing | `uv run bibr chew paper.pdf --dry-run` |
+| Read a born-digital PDF with no OCR model | `uv run bibr chew paper.pdf --ocr text-layer` |
 | Check your setup | `uv run bibr doctor` |
 
 `--no-llm` leaves the configured OCR route active, including cloud vision OCR if

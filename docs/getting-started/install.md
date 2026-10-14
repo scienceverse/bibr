@@ -105,6 +105,13 @@ therefore installs nothing, both launchers run the bootstrap
 inside a managed Python 3.13, and `bibr doctor` says so; a 3.11-3.13
 interpreter for the project avoids the detour.
 
+A core install with no OCR runtime still reads born-digital PDFs: the
+`text-layer` OCR backend (`--ocr text-layer`, or `OCR_TEXT_LAYER_FALLBACK=auto`
+to use it only when no OCR backend can start) runs no OCR model and reads the
+PDF's embedded text layer. Scanned PDFs need OCR and fail with
+`scan_needs_ocr`; see
+[Reading the text layer without OCR](../guides/configuration.md#reading-the-text-layer-without-ocr).
+
 ## GPU ONNX Runtime
 
 The `gpu` extra installs `onnxruntime-gpu` next to the core `onnxruntime`

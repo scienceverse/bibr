@@ -109,6 +109,7 @@ runtime when OCR starts:
 | `paddle-http` | Explicit external Paddle server, addressed by the served alias `paddle-ocr-vl-1.6`. |
 | `glm-rapid-mlx`, `glm-llama`, `glm-http` | Explicit GLM-OCR compatibility choices. They are also the ordered startup fallback candidates for `paddle` where listed above. The older `glm-mlx` (vllm-mlx) backend is disabled and refuses to start; use `glm-rapid-mlx`. |
 | `gemini` / `openai` / `anthropic` | Vision-LLM OCR via a cloud provider — no local GPU needed, useful for a laptop or a low-resource box. |
+| `text-layer` | No OCR model. Born-digital PDFs are read from their embedded text layer; scanned PDFs fail. See [Reading the text layer without OCR](#reading-the-text-layer-without-ocr). |
 
 The fallback is **startup-only**: a candidate must construct and pass its
 readiness check before it is selected. Once one has started, bibr records its
@@ -126,6 +127,49 @@ For example:
 bibr chew paper.pdf --ocr paddle-http --ocr-url https://ocr.example.org
 bibr chew paper.pdf --ocr glm-http --ocr-url https://ocr.example.org
 ```
+
+### Reading the text layer without OCR
+
+A born-digital PDF (one exported from a word processor or a publisher's
+typesetting system) carries its text in an embedded text layer. A scanned PDF
+is a picture of each page and needs OCR. On a machine that cannot run an OCR
+model (CPU only, no llama.cpp, no OCR server and no cloud provider), the
+`text-layer` backend reads born-digital PDFs from that text layer alone:
+
+```bash
+bibr chew paper.pdf --ocr text-layer
+```
+
+The layout model still runs (on the CPU through ONNX Runtime), and every
+region it finds is read from the text layer: running text, headings, headers
+and footers, captions, display formulas and their numbers (as plain text, not
+LaTeX), and tables, which are rebuilt from the positions of their words. A
+page whose text layer cannot be trusted loses its text instead of exporting
+wrong text: no text layer at all, a hidden OCR layer over a scanned image,
+text that does not sit on the printed ink, or text that does not read as
+words (a broken font encoding). Each such page and each region left empty is
+named in the export's warnings (`TEXT_LAYER_PAGE_UNUSABLE`,
+`TEXT_LAYER_REGION_UNREAD`), and rebuilt tables and plain-text formulas are
+flagged too (`TEXT_LAYER_TABLE_REBUILT`, `TEXT_LAYER_FORMULA_TEXT`). A file
+whose text regions are mostly unread fails with code `scan_needs_ocr`: it is
+a scanned PDF and needs an OCR backend. The threshold is
+`OCR_MIN_SUCCESS_RATE`. The export records `extraction.ocr.backend` as
+`text-layer`, with model `pdf-text-layer` and no profile.
+
+To keep the automatic `paddle` selector and fall back only where it cannot
+start, set:
+
+```bash
+# .env
+OCR_TEXT_LAYER_FALLBACK=auto
+```
+
+`bibr chew`, `bibr batch`, `--dry-run` and `bibr doctor` then print one
+warning instead of refusing the run, and the library switches the same way
+when OCR startup fails; each file read this way carries the warning
+`OCR_BACKEND_UNAVAILABLE`. The default, `off`, refuses the run as before, and
+the refusal names `--ocr text-layer`. The fallback never replaces an explicit
+backend or an OCR server named with `--ocr-url`.
 
 Remote OCR requires HTTPS by default. For a trusted private network without
 TLS, explicitly set `OCR_ALLOW_INSECURE_HTTP=true`; loopback HTTP is allowed.
