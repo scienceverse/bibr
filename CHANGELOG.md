@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   affiliation the text does not print ("Affiliation 3") is left empty.
   The merged call, the JSON re-roll and the NuExtract native backend stay verbatim.
 The export moves to schema `12.3`, which adds two optional keys; every 12.2
+The export moves to schema `12.3`, which adds three optional keys; every 12.2
 export is still valid input for the 12.x reader.
 
 - When the paper's own registry record is known (`metadata_match`, from reference
@@ -35,7 +36,8 @@ export is still valid input for the 12.x reader.
   development set (exports from bibr 0.3.0), 91 papers had a record: every title (78) and
   author list (81) that agreed with it was right, and the 17 papers with a disagreement held
   all 12 papers with a wrong title or author list. `CROSSREF_VERIFY=false` turns the
-  comparison off. The outcome `corrected` is reserved for a later release.
+  comparison off. The outcome `corrected` marks a printed value chosen over the first
+  extracted one because it agrees with the record (the two settings below).
 - `metadata_match[].subtitle` holds the record's subtitle, which Crossref keeps apart from the
   title. It is omitted when the record has none.
 - `CROSSREF_IDENTITY=true` looks up the paper's own DOI when reference enrichment is off: one
@@ -48,6 +50,32 @@ export is still valid input for the 12.x reader.
   the paper's DOI to Crossref (or to your resolver). It never runs with `--no-llm`. A failed or
   timed-out lookup leaves the paper without a record and adds a warning. It does not hold the
   result back.
+- `FRONT_MATTER_REGISTRY_TITLE=true` (off by default) lets the paper's record choose its title
+  among the printed rows: when the extracted title disagrees with the record, the selected front
+  matter's title row whose text is the record's title (with its subtitle, when the record keeps
+  one) is used instead, as printed. A record title no row prints, a row the extracted title
+  extends, and a translation printed after the extracted title are refused. The title's source is
+  `registry_printed`, with the issue `VAL_TITLE_REGISTRY_PRINTED`. Authors are never taken from
+  the record. On two development sets (252 papers), a simulation of the rule gained no paper on
+  balance for a 4B extraction model and five for a 2B one.
+- `LLM_REVIEW_TRIGGER=registry_disagree` with `LLM_REVIEW_MODEL` (off by default) asks the
+  title or author call again on a second model when its answer disagrees with the paper's record.
+  The review's answer is used only when it is printed in the front matter and either agrees with
+  the record or the first answer was not printed; a failed or timed-out review keeps the first
+  answer. `LLM_REVIEW_PROVIDER`, `LLM_REVIEW_BASE_URL`, `LLM_REVIEW_API_KEY`,
+  `LLM_REVIEW_MAX_CONCURRENCY` and `LLM_REVIEW_TIMEOUT_SECONDS` configure its endpoint; another
+  endpoint never receives `LLM_API_KEY`. A value the review supplied has the source `llm_review`.
+  The new `extraction.diagnostics.front_matter_review` counts the routed, attempted, accepted,
+  rejected, failed and skipped calls with their reasons, the review's usage is reported under
+  `review_` labels, and `extraction.qualification.review_model_id` names the model. On two
+  development sets (252 papers), a simulation with a 27B model's answers lost no paper and raised
+  the papers that passed every field check from 216 to 219 for a 4B extraction model and from 207
+  to 216 for a 2B one, re-asking one or two calls on 8-12% of the papers.
+- Both settings need the paper's record, so they act only when the run looks its DOI up
+  (`CROSSREF_IDENTITY` or `CROSSREF_ENRICH`). That lookup then starts as soon as the sections are
+  known and runs under the metadata LLM call, using the DOI only when the front matter names a
+  single one. If the paper's final DOI is another one, bibr drops the record, restores the title
+  chosen without it, looks the final DOI up as before, and adds `VAL_REGISTRY_DOI_CHANGED`.
 
 ### Changed
 
