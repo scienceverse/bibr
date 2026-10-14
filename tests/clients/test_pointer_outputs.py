@@ -240,8 +240,11 @@ class TestAnchorChecks:
         resolved = self._resolve(source, "Most copies end well.")
         assert (resolved.response, resolved.status) == (None, "cut_short")
 
-    def test_last_words_that_stop_inside_a_sentence_are_cut_short(self):
-        source = f"{self._OPENING} Most copies end well in all clinics.\n"
+    @pytest.mark.parametrize(
+        "rest", [" in all clinics.", " (in all clinics) and labs.", ' "in all clinics".']
+    )
+    def test_last_words_that_stop_inside_a_sentence_are_cut_short(self, rest):
+        source = f"{self._OPENING} Most copies end well{rest}\n"
         resolved = self._resolve(source, "Most copies end well")
         assert (resolved.response, resolved.status) == (None, "cut_short")
 

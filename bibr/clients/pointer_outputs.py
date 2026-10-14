@@ -362,12 +362,13 @@ def resolve_title_keywords(answer: TitleKeywordsPointerLLM, source: str) -> Reso
 def _runs_on(source: str, end: int) -> bool:
     """Whether the paragraph that holds the abstract's end goes on after *end*
     with more of a sentence: a lowercase word (the last words stopped inside a
-    sentence), or a capitalised word and a lowercase one (another sentence). A
-    copyright, citation or keyword line can follow on the same line."""
+    sentence, also before a parenthesis or a quote), or a capitalised word and
+    a lowercase one (another sentence). A copyright, citation or keyword line
+    can follow on the same line."""
     rest = _BLOCK_BREAK_RE.split(source[end:], maxsplit=1)[0].lstrip()
     if _FURNITURE_BLOCK_RE.match(rest) or _AFTER_ABSTRACT_RE.match(rest):
         return False
-    words = [word.strip(",;:.") for word in rest.split(maxsplit=2)[:2]]
+    words = [word.strip(_OPENING_MARKS + _CLOSING_MARKS) for word in rest.split(maxsplit=2)[:2]]
     if not words or not words[0].isalpha():
         return False
     if words[0].islower():
