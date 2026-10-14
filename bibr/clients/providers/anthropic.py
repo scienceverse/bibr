@@ -61,6 +61,23 @@ def _rejects_sampling(model: str) -> bool:
     return any(model.startswith(p) for p in _SAMPLING_FREE_MODELS)
 
 
+# Anthropic models that answer a forced tool choice (``tool_choice`` of type
+# ``tool`` or ``any``) with a 400, on the Messages and the Message Batches API
+# alike; ``auto`` and ``none`` still work. Haiku 5.5 accepts a forced choice.
+# Prefixes, as for _SAMPLING_FREE_MODELS.
+_FORCED_TOOL_CHOICE_REJECTED: tuple[str, ...] = (
+    "claude-sonnet-5-5",
+    "claude-opus-5-5",
+    "claude-fable-5-1",
+)
+
+
+def rejects_forced_tool_choice(model: str) -> bool:
+    """Whether ``model`` rejects a forced ``tool_choice`` (``tool`` or ``any``)."""
+    model = (model or "").strip()
+    return any(model.startswith(p) for p in _FORCED_TOOL_CHOICE_REJECTED)
+
+
 def _check_sdk_version() -> None:
     """Refuse the anthropic SDK from 1.0 on, which this adapter can't call through.
 
