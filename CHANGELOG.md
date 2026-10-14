@@ -21,6 +21,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   parse, bibr asks for the verbatim answer instead. A stand-in the model writes for an
   affiliation the text does not print ("Affiliation 3") is left empty.
   The merged call, the JSON re-roll and the NuExtract native backend stay verbatim.
+- Reference lists for reference managers: `Result.to_csl_json()`,
+  `Result.to_bibtex()` and `Result.to_ris()`, and `bibr.write_references()`,
+  which writes the references of one or many results to one `.json`
+  (CSL-JSON), `.bib` or `.ris` file with cite keys unique across it. Values are
+  the printed ones; what a reference does not print (DOI, pages, journal,
+  names split into family and given) comes from its Crossref record only when
+  the two agree, and `prefer="record"` takes a matched record's values first.
+  Printed author lists are split into names (APA, Vancouver, given-first,
+  particles, suffixes, organizations), with a list that fits no style kept as
+  one name. A note names the fields where a reference and its record differ.
+  The same lists come from `bibr references results/ -o refs.bib`, from
+  `GET /papers/jobs/{id}/references?format=csl-json|bibtex|ris` on bibr serve,
+  and from the MCP tools `export_references` and, over stdio,
+  `save_references`. The export schema does not change.
 
 ### Changed
 

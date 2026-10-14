@@ -87,9 +87,11 @@ summary plus a `paper_id`, and the query tools read slices on demand.
 | `search_text(paper_id, query, limit?)` | Case-insensitive substring search over sentences |
 | `get_references(paper_id, offset?, limit?)` | Parsed bibliography entries, paginated, empty fields omitted |
 | `get_reference_citations(paper_id, bib_id)` | Every in-text citation of one reference, with the full source sentence and page |
+| `export_references(paper_id, format?, prefer?)` | The reference list as the text of one CSL-JSON (default), BibTeX or RIS file, with its content type and reference count (see [Reference-manager files](library.md#reference-manager-files)) |
 | `get_tables(paper_id, table_id?)` | Printed label and caption per table; full HTML + cells for one `table_id` |
 | `get_figures(paper_id, figure_id?)` | Captions and pages; the image is replaced by `has_image` |
 | `save_paper(paper_id, path, compact?, overwrite?)` | Writes the complete export JSON to a `.json` path in an allowed directory; refuses to overwrite an existing file unless `overwrite=True`, and never writes through a symlink |
+| `save_references(paper_id, path, format?, prefer?, overwrite?)` | Writes the reference list to a `.bib`, `.ris` or `.json` (CSL-JSON) path in an allowed directory, under the same rules as `save_paper` |
 
 This maps directly onto bibr's auditability contract: an agent can pull a
 claim from `get_references`, then `get_reference_citations` to see the exact
@@ -109,8 +111,8 @@ figure image with `has_image`, so no image data reaches a tool response.
 ## File access
 
 An agent reads the papers it processes, and text in a paper can try to
-instruct it (prompt injection). So `chew_paper`, `load_paper` and
-`save_paper` only reach files inside the directories you allow: by default
+instruct it (prompt injection). So `chew_paper`, `load_paper`, `save_paper`
+and `save_references` only reach files inside the directories you allow: by default
 the directory `bibr mcp` starts in. Pass `--allow-dir` to choose others; it
 can be repeated, and `~` is expanded:
 
@@ -138,6 +140,10 @@ outside the allowed directories, or nowhere. It replaces an existing regular
 file only with `overwrite=True`. `load_paper` reads only regular files of at
 most 256 MB, so a device or named pipe fails at once instead of exhausting
 memory or blocking the server.
+
+`save_references` writes only `.bib`, `.ris` and `.json` files, in the
+format the extension names (a `format` that names another fails), under the
+same symlink and overwrite rules.
 
 ## URL downloads (`chew_url`)
 
@@ -228,8 +234,10 @@ Three differences from the stdio server:
   upload limit. Operators can pin it to specific hosts with
   `MCP_URL_ALLOWED_HOSTS` or remove the tool with
   `MCP_CHEW_URL_ENABLED=false`, as on the stdio server.
-- **No `load_paper` / `save_paper`** — both are host-filesystem tools; use
-  the REST API when you want the full export JSON as a file.
+- **No `load_paper` / `save_paper` / `save_references`** — these are
+  host-filesystem tools; use the REST API when you want the full export JSON
+  or the reference list as a file (`export_references` returns the list's
+  text).
 - **Papers are per-session and bounded** — each MCP client session gets its
   own in-memory store, capped at `MCP_MAX_PAPERS_PER_SESSION` (default 16;
   the paper chewed least recently is evicted, and re-chewing a paper counts
