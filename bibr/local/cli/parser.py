@@ -223,8 +223,10 @@ def _add_pipeline_options(parser: argparse.ArgumentParser) -> None:
         "--no-llm",
         action="store_true",
         help=(
-            "Skip downstream LLM extraction, citation linking, equations, and Crossref. "
-            "Preserves document structure and preparsed native metadata. "
+            "Skip downstream LLM extraction, reference parsing, citation linking, equations, "
+            "and Crossref. Preserves document structure, plus the metadata a JATS or HTML "
+            "input already carries and JATS references; PDF and DOCX output has no authors "
+            "or references. "
             "OCR still uses the selected backend, including cloud vision providers."
         ),
     )

@@ -22,6 +22,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `batch` extra now installs `anthropic<1`, and with 1.0 or later bibr stops before the first
   call with an error that names the fix. With bibr 0.7.0 or 0.7.1, run
   `pip install "anthropic>=0.40,<1"`.
+- A fresh install no longer needs a C compiler. `numind>=0.3,<0.4` let pip and uv pick
+  numind 0.3.2, which depends on cdifflib, and cdifflib publishes wheels only for macOS on
+  Apple Silicon, so Windows and Linux installs built it from source. numind 0.3.1 also changed
+  the template converter's return value, and every `LLM_STRUCTURED_BACKEND=nuextract-native`
+  call failed. bibr now requires `numind<0.3.1`, the version CI tests. With bibr 0.7.1 or
+  earlier, run `pip install bibr "numind==0.3.0"`.
+- `bibr chew --help` says that `--no-llm` also skips reference parsing, `bibr serve --help`
+  shows the default host and port, and `bibr doctor` no longer suggests copying an
+  `.env.example` that pip and uv installs don't have.
 
 ## [0.7.1] - 2026-10-14
 

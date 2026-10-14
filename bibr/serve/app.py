@@ -653,8 +653,12 @@ def main():
         prog="bibr serve",
         description="bibr HTTP API — scientific paper extraction pipeline (LitServe)",
     )
-    parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
-    parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
+    parser.add_argument(
+        "--host", default="127.0.0.1", help="Host to bind to (default: %(default)s)"
+    )
+    parser.add_argument(
+        "--port", type=int, default=8000, help="Port to bind to (default: %(default)s)"
+    )
 
     args = parser.parse_args()
 
