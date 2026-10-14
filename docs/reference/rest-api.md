@@ -110,6 +110,34 @@ Returns the extracted paper JSON once the job has `succeeded` (same shape
 as `/papers/extract`'s response). Responds `409` while the job is still
 queued/running, or the job's original error and status code if it failed.
 
+#### `GET /papers/jobs/{id}/references`
+
+Returns the job's reference list as a file a reference manager imports, and
+answers like `/result` while there is no result (`404`, `409`, or the job's
+error). The query parameters are:
+
+| Parameter | Default | Values |
+|---|---|---|
+| `format` | `csl-json` | `csl-json`, `bibtex`, `ris` |
+| `prefer` | `printed` | `printed`, `record` |
+| `check_note` | `true` | `false` leaves out the reference-check note |
+
+| `format` | `Content-Type` | File name |
+|---|---|---|
+| `csl-json` | `application/vnd.citationstyles.csl+json; charset=utf-8` | `{id}.json` |
+| `bibtex` | `application/x-bibtex; charset=utf-8` | `{id}.bib` |
+| `ris` | `application/x-research-info-systems; charset=utf-8` | `{id}.ris` |
+
+The file name comes in a `Content-Disposition: attachment` header. Any other
+`format` or `prefer` answers `422`. The values written, and when the matched
+Crossref record fills or replaces them, are those of
+[`Result.to_bibtex()`](../guides/library.md#reference-manager-files):
+
+```bash
+curl -H "Authorization: Bearer $KEY" -o refs.bib \
+  "http://localhost:8000/papers/jobs/$JOB/references?format=bibtex"
+```
+
 #### `DELETE /papers/jobs/{id}`
 
 Cancels a job that is still `queued`. The job is failed at once with the
