@@ -24,6 +24,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- An `LLM_BASE_URL` on this machine, a private network or a tailnet (a vLLM, SGLang or
+  llama.cpp server bibr did not start) now gets the 600 requests per minute that bibr's own
+  local servers get, instead of the 60 that guard a cloud provider's quota. The front-matter
+  calls go out together and outnumber the limiter's three slots, so at 60 they waited for each
+  other; on the 9 Oct 27B harness that wait was about 30% of the time after parsing. Set
+  `LLM_RATE_LIMIT_RPM` to keep a lower limit.
 - The vLLM servers bibr starts get `VLLM_NO_USAGE_STATS=1`, and `bibr demo` sets
   `GRADIO_ANALYTICS_ENABLED=False`, so neither sends usage statistics to its
   maintainers. A value already in your environment wins.

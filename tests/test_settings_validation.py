@@ -1188,3 +1188,44 @@ def test_config_set_rejects_new_failure_despite_unrelated_breakage(monkeypatch):
     docs = {doc.env_name: doc for doc in iter_setting_docs()}
     with pytest.raises(ValueError, match="LLM_PROVIDER"):
         config_cli.validate_value(docs["LLM_PROVIDER"], "bogus")
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("http://127.0.0.1:30000/v1", 600),
+        ("http://localhost:8000/v1", 600),
+        ("http://10.0.0.5:8000/v1", 600),
+        ("http://gpu-box:8000/v1", 600),
+        ("http://fridge.panda-pythagorean.ts.net:8001/v1", 600),
+        ("http://100.94.155.12:8001/v1", 600),
+        ("https://api.openai.com/v1", 60),
+        ("https://openrouter.ai/api/v1", 60),
+    ],
+)
+def test_self_hosted_base_url_raises_llm_rate_limit(monkeypatch, base_url, expected):
+    """A loopback, LAN or tailnet LLM_BASE_URL has no provider quota to guard."""
+    from bibr.config import GlobalSettings
+
+    monkeypatch.delenv("LLM_RATE_LIMIT_RPM", raising=False)
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("LLM_BASE_URL", base_url)
+    assert GlobalSettings().llm.rate_limit_rpm == expected
+
+
+def test_self_hosted_base_url_keeps_an_explicit_llm_rate_limit(monkeypatch):
+    from bibr.config import GlobalSettings
+
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:30000/v1")
+    monkeypatch.setenv("LLM_RATE_LIMIT_RPM", "60")
+    assert GlobalSettings().llm.rate_limit_rpm == 60
+
+
+def test_ollama_keeps_its_lower_llm_rate_limit_on_loopback(monkeypatch):
+    from bibr.config import GlobalSettings
+
+    monkeypatch.delenv("LLM_RATE_LIMIT_RPM", raising=False)
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:11434/v1")
+    assert GlobalSettings().llm.rate_limit_rpm == 10
