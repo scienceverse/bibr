@@ -27,7 +27,7 @@ bibr now has a native Windows path; WSL2 is not required. On Windows it uses
 the local LLM. For a 6 GB GPU, setup selects:
 
 - GLM-OCR Q8 (about 950 MB downloaded) for `glm-llama`;
-- NuExtract 3 Q4 GGUF (about 2.7 GB downloaded) for a fully local LLM; and
+- the bibr extract 4B Q4_K_M GGUF (about 2.7 GB downloaded) for a fully local LLM; and
 - `aggressive` memory mode, which unloads one model before loading the next.
 
 The code and automated tests explicitly cover the 6 GB selection, but this is a
@@ -199,7 +199,7 @@ Run setup again. If the plan preview already recommends a fully local setup
 for this GPU, accept it. Otherwise decline and continue into the advanced
 flow (or run `bibr setup --advanced` directly) to pick the **local** LLM
 explicitly — on this GPU it should select the `llama-cpp` backend and
-`numind/NuExtract3-GGUF:Q4_K_M` model. Keep `glm-llama` for OCR. When asked
+`scienceverse/bibr-extract-qwen35-4b-GGUF:Q4_K_M` model. Keep `glm-llama` for OCR. When asked
 about the existing `.env`, keep the default (merge) so earlier settings like
 the Crossref email carry over.
 
@@ -291,8 +291,8 @@ from the platform and detected memory. The current defaults are:
 
 The setup wizard defaults to bibr's fine-tuned Qwen3.5 models for local
 structured extraction on Linux with an NVIDIA GPU: the 4B from 12 GB and the 2B
-from 8 GB. Windows, Apple Silicon and GPUs below 8 GB use
-[NuExtract 3](https://huggingface.co/numind/NuExtract3) through llama.cpp or MLX.
+from 8 GB. Windows, Apple Silicon and GPUs below 8 GB use GGUF (llama.cpp) or
+MLX builds of the same models.
 Without a suitable GPU it recommends Claude Haiku 5.5 as a hosted model, for
 OCR and extraction alike. See
 [choosing an extraction model](guides/extraction-models.md). These thresholds are

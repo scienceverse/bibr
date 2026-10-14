@@ -214,6 +214,39 @@ def test_build_server_argv_llm_role_enables_jinja_when_supported():
     )
 
     assert "--jinja" in cmd
+    assert "--chat-template-kwargs" not in cmd  # only when the build supports it
+
+
+def test_build_server_argv_llm_role_turns_thinking_off_when_supported():
+    from bibr.local.llama_cpp import build_server_argv
+
+    cmd = build_server_argv(
+        ["llama-server"],
+        model="org/model:Q4",
+        port=8770,
+        context_size=16384,
+        role="llm",
+        available=frozenset({"--jinja", "--chat-template-kwargs"}),
+    )
+
+    assert cmd[cmd.index("--chat-template-kwargs") + 1] == '{"enable_thinking": false}'
+
+
+def test_build_server_argv_user_chat_template_kwargs_replace_the_default():
+    from bibr.local.llama_cpp import build_server_argv
+
+    cmd = build_server_argv(
+        ["llama-server"],
+        model="org/model:Q4",
+        port=8770,
+        context_size=16384,
+        extra_args="--chat-template-kwargs '{\"enable_thinking\": true}'",
+        role="llm",
+        available=frozenset({"--jinja", "--chat-template-kwargs"}),
+    )
+
+    assert cmd.count("--chat-template-kwargs") == 1
+    assert cmd[cmd.index("--chat-template-kwargs") + 1] == '{"enable_thinking": true}'
 
 
 def test_build_server_argv_ocr_role_single_slot():
@@ -716,7 +749,7 @@ def test_llm_server_defaults_to_the_gguf_variant_when_local_model_is_unset(monke
     monkeypatch.setattr(llama_cpp, "LlamaCppServer", ctor)
     monkeypatch.setattr(Settings.llm, "local_model", None)
     llama_cpp.LlamaCppLlmServer()
-    assert ctor.call_args.kwargs["model"] == "numind/NuExtract3-GGUF:Q4_K_M"
+    assert ctor.call_args.kwargs["model"] == "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
 
 
 def test_llm_server_concurrency_follows_slot_count(monkeypatch):

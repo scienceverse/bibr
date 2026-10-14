@@ -77,7 +77,7 @@ def test_llm_server_continuous_batching_opt_in(monkeypatch):
     assert constructor.call_args.kwargs["continuous_batching"] is True
 
 
-def test_nuextract_llm_server_uses_llm_role_settings(monkeypatch):
+def test_mlx_llm_server_uses_llm_role_settings(monkeypatch):
     """The text LLM server must read its own ``vllm_mlx_*`` settings, not the
     (permanently disabled — see ``raise_vllm_mlx_ocr_disabled``) OCR role's.
     """
@@ -107,7 +107,7 @@ def test_nuextract_llm_server_uses_llm_role_settings(monkeypatch):
 
     llm_mod.VllmMlxLlmServer()
 
-    assert calls[0]["model"] == "numind/NuExtract3-mlx-8bits"
+    assert calls[0]["model"] == "scienceverse/bibr-extract-qwen35-4b-mlx-8bit"
     assert calls[0]["port"] == 8767
     assert calls[0]["multimodal"] is False
 

@@ -298,7 +298,7 @@ def _registry_short_label(hf_id: str) -> str | None:
     """Friendly display name for a registry model, matched by exact ``hf_id``.
 
     Returns the leading name of the model's registry label (before the first
-    ``" — "`` blurb or ``" ("`` qualifier), e.g. ``"NuExtract 3"``; ``None`` for
+    ``" — "`` blurb or ``" ("`` qualifier), e.g. ``"bibr extract 4B"``; ``None`` for
     an id not in the curated registry.
     """
     for model in REGISTRY:
@@ -1001,7 +1001,7 @@ class SetupWizard:
             )
             self.env_vars["LLM_MODEL"] = Prompt.ask(
                 "Private LLM model name",
-                default="nuextract",
+                default="scienceverse/bibr-extract-qwen35-4b",
             )
 
         if "cloud_api_key" in setup.required_prompts:

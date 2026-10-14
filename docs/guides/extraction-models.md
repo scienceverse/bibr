@@ -14,15 +14,27 @@ machine can run:
 | Linux, NVIDIA GPU with 8–11 GB | **bibr extract 2B**, Qwen3.5-2B fine-tuned for bibr (`scienceverse/bibr-extract-qwen35-2b`) | vLLM, about 8 GB VRAM | 207/252, −6.3 points [−9.9, −3.2] |
 | No suitable GPU, or you prefer a hosted model | **Claude Haiku 5.5** (`claude-haiku-5-5`) | an Anthropic API key, about $0.004 a paper | 221/252, −0.8 points [−2.4, +0.8] |
 
+Windows, NVIDIA cards below 8 GB and Apple Silicon run the same two models
+through llama.cpp (GGUF) or MLX, with the largest build that fits:
+
+| Runtime | Builds, largest first | Memory |
+|---|---|---|
+| llama.cpp | 4B Q8_0, 4B Q4_K_M, 2B Q8_0, 2B Q4_K_M (`scienceverse/bibr-extract-qwen35-4b-GGUF`, `-2b-GGUF`) | from 7 GB down to 3 GB of VRAM |
+| MLX (Apple Silicon) | 4B 8-bit, 4B 4-bit, 2B 8-bit, 2B 4-bit (`scienceverse/bibr-extract-qwen35-4b-mlx-8bit` and so on) | from 6 GB down to 2 GB of memory |
+
+The quantized builds are made from the same merged weights, but the scores in
+the tables on this page were measured with the bf16 weights on vLLM; the
+quantized builds have not been scored on their own yet. The MLX builds have only
+been smoke-tested, so setup marks them experimental.
+
 The hosted setup uses Claude for OCR as well (`OCR_BACKEND=anthropic`,
 `OCR_VISION_MODEL=claude-haiku-5-5`), so it needs one Anthropic key. The 221/252
 above was measured with bibr's local OCR; Claude's OCR has not been scored on
 these papers yet, and the per-paper cost excludes it.
 
-Windows, Apple Silicon and NVIDIA cards below 8 GB keep
-[NuExtract 3](https://huggingface.co/numind/NuExtract3) through llama.cpp or
-MLX, because the fine-tuned models have no GGUF or MLX build yet. On the same
-papers NuExtract 3 passes 200/252, −9.1 points [−12.7, −5.6].
+bibr used to recommend [NuExtract 3](https://huggingface.co/numind/NuExtract3)
+for llama.cpp and MLX. On the same papers it passes 200/252, −9.1 points
+[−12.7, −5.6], behind both fine-tuned models, so bibr no longer offers it.
 
 Run `bibr setup --advanced` to choose another model, or set `LLM_LOCAL_MODEL`
 (local) or `LLM_PROVIDER` and `LLM_MODEL` (hosted) yourself; see

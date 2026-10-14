@@ -47,10 +47,13 @@ class LocalLLMModel:
 # v5 scorer, gate192 + ci60 = 252 dev papers), paired against Qwen3.8-27B's
 # 223/252; see docs/guides/extraction-models.md.
 #
-# Sizes are estimates until the checkpoints are on the Hub: bf16 weights of the
-# Qwen3.5 base, with min_vram_gb rounded up from the measured 11.7 GB peak of
-# a low-memory 4B vLLM serve on a 24 GB card. Pin --revision and re-check the
-# sizes against the HF API when the repos are published.
+# Sizes are estimates until the checkpoints are on the Hub. bf16: weights of the
+# Qwen3.5 base, with min_vram_gb rounded up from the measured 11.7 GB peak of a
+# low-memory 4B vLLM serve on a 24 GB card. GGUF and MLX: the quantized text
+# model, with min_vram_gb = ceil(size * 1.25) plus about 2 GB of context and
+# compute buffers, the margin the NuExtract 3 Q4_K_M build needed on 6 GB
+# cards. Pin --revision and re-check the sizes against the HF API when the
+# repos are published.
 _QWEN35_STUDENT_SERVER_ARGS: tuple[str, ...] = (
     # Text only: the vision tower is never used for extraction.
     "--language-model-only",
@@ -63,11 +66,10 @@ _QWEN35_STUDENT_SERVER_ARGS: tuple[str, ...] = (
     "32768",
 )
 
-# Numbers below are pinned from the HF API (Task 1 Step 1; re-verified 2026-09-02 —
-# NuExtract 3 bf16 is 4.539B params, every listed artifact is within 0.3 GB of the Hub).
-# bf16 variants: approx_download_gb = param_count * 2 / 2**30 (rounded 1 dp);
-# the nvfp4 variant uses its on-disk safetensors size. min_vram_gb =
-# ceil(approx_download_gb * 1.25).
+#: Thinking off per request too, for llama.cpp and MLX servers, which do not
+#: read ``server_args``.
+_QWEN35_STUDENT_ENV: dict[str, str] = {"LLM_CHAT_TEMPLATE_KWARGS": '{"enable_thinking": false}'}
+
 REGISTRY: tuple[LocalLLMModel, ...] = (
     LocalLLMModel(
         key="bibr-extract-4b",
@@ -83,9 +85,41 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 server_args=_QWEN35_STUDENT_SERVER_ARGS,
                 runtime="vllm",
             ),
+            # llama.cpp (Windows, cards below 8 GB): Q8_0 first, as the
+            # closest to the evaluated bf16 weights.
+            LocalLLMVariant(
+                hf_id="scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0",
+                platform="cuda",
+                quant="gguf-q8_0",
+                min_vram_gb=7,
+                approx_download_gb=4.5,
+                runtime="llama-cpp",
+            ),
+            LocalLLMVariant(
+                hf_id="scienceverse/bibr-extract-qwen35-4b-GGUF:Q4_K_M",
+                platform="cuda",
+                quant="gguf-q4_k_m",
+                min_vram_gb=5,
+                approx_download_gb=2.7,
+                runtime="llama-cpp",
+            ),
+            LocalLLMVariant(
+                hf_id="scienceverse/bibr-extract-qwen35-4b-mlx-8bit",
+                platform="mlx",
+                quant="8bit",
+                min_vram_gb=6,
+                approx_download_gb=4.5,
+            ),
+            LocalLLMVariant(
+                hf_id="scienceverse/bibr-extract-qwen35-4b-mlx-4bit",
+                platform="mlx",
+                quant="4bit",
+                min_vram_gb=4,
+                approx_download_gb=2.5,
+            ),
         ),
-        env={},
-        experimental_platforms=frozenset(),
+        env=_QWEN35_STUDENT_ENV,
+        experimental_platforms=frozenset({"mlx"}),  # smoke-tested only
     ),
     LocalLLMModel(
         key="bibr-extract-2b",
@@ -101,85 +135,39 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 server_args=_QWEN35_STUDENT_SERVER_ARGS,
                 runtime="vllm",
             ),
-        ),
-        env={},
-        experimental_platforms=frozenset(),
-    ),
-    LocalLLMModel(
-        key="nuextract3",
-        label="NuExtract 3 — extraction-tuned; the llama.cpp and Apple Silicon default",
-        variants=(
             LocalLLMVariant(
-                hf_id="numind/NuExtract3-GGUF:Q4_K_M",
+                hf_id="scienceverse/bibr-extract-qwen35-2b-GGUF:Q8_0",
                 platform="cuda",
-                quant="gguf-q4_k_m",
-                min_vram_gb=5,
-                approx_download_gb=2.7,
+                quant="gguf-q8_0",
+                min_vram_gb=4,
+                approx_download_gb=2.3,
                 runtime="llama-cpp",
             ),
             LocalLLMVariant(
-                hf_id="numind/NuExtract3",
+                hf_id="scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M",
                 platform="cuda",
-                quant="bf16",
-                min_vram_gb=11,  # 8.5 * 1.25 -> ceil 11
-                approx_download_gb=8.5,  # 4.539B params * 2 bytes
-                # --max-model-len 32768 (not the card's 131072) leaves KV
-                # headroom at the 11 GB VRAM floor. MTP deliberately remains
-                # opt-in through LLM_VLLM_EXTRA_ARGS: upstream still disables
-                # prefix caching with MTP and reports an accuracy interaction.
-                server_args=(
-                    "--revision",
-                    "2e9fca82ee641e6bb6e1f5d905241e994be27a07",
-                    "--chat-template-content-format",
-                    "openai",
-                    "--generation-config",
-                    "vllm",
-                    "--max-model-len",
-                    "32768",
-                ),
-                runtime="vllm",
+                quant="gguf-q4_k_m",
+                min_vram_gb=3,
+                approx_download_gb=1.4,
+                runtime="llama-cpp",
             ),
-            # MLX quant ladder (sizes = on-disk safetensors, HF API 2026-07-05).
-            # 8bits first among MLX variants: best quality per M4-16GB benchmark
-            # (21 tok/s single / 50 tok/s batched under continuous batching).
             LocalLLMVariant(
-                hf_id="numind/NuExtract3-mlx-8bits",
+                hf_id="scienceverse/bibr-extract-qwen35-2b-mlx-8bit",
                 platform="mlx",
                 quant="8bit",
-                min_vram_gb=6,  # 4.8 * 1.25 -> ceil 6
-                approx_download_gb=4.8,
+                min_vram_gb=3,
+                approx_download_gb=2.3,
             ),
             LocalLLMVariant(
-                hf_id="numind/NuExtract3-mlx-6bits",
-                platform="mlx",
-                quant="6bit",
-                min_vram_gb=5,  # 3.8 * 1.25 -> ceil 5
-                approx_download_gb=3.8,
-            ),
-            LocalLLMVariant(
-                hf_id="numind/NuExtract3-mlx-5bits",
-                platform="mlx",
-                quant="5bit",
-                min_vram_gb=5,  # 3.3 * 1.25 -> ceil 5
-                approx_download_gb=3.3,
-            ),
-            LocalLLMVariant(
-                hf_id="numind/NuExtract3-mlx-4bits",
+                hf_id="scienceverse/bibr-extract-qwen35-2b-mlx-4bit",
                 platform="mlx",
                 quant="4bit",
-                min_vram_gb=4,  # 2.8 * 1.25 -> ceil 4
-                approx_download_gb=2.8,
-            ),
-            LocalLLMVariant(
-                hf_id="numind/NuExtract3-mlx-nvfp4",
-                platform="mlx",
-                quant="nvfp4",
-                min_vram_gb=4,  # 2.8 * 1.25 -> ceil 4
-                approx_download_gb=2.8,  # on-disk safetensors size
+                min_vram_gb=2,
+                approx_download_gb=1.3,
             ),
         ),
-        env={},  # Auto uses Instructor; native NuExtract templates require explicit opt-in.
-        experimental_platforms=frozenset({"mlx"}),  # pending platform validation
+        env=_QWEN35_STUDENT_ENV,
+        experimental_platforms=frozenset({"mlx"}),  # smoke-tested only
     ),
     LocalLLMModel(
         key="gemma-4-e4b",
@@ -202,10 +190,9 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
 
 
 #: Recommended local models, best first. The first model with a variant that
-#: fits the machine and its runtime is the default. The fine-tuned students are
-#: vLLM-only (no GGUF or MLX build has been evaluated), so llama.cpp, Windows
-#: and Apple Silicon fall through to NuExtract 3.
-RECOMMENDED_MODEL_KEYS: tuple[str, ...] = ("bibr-extract-4b", "bibr-extract-2b", "nuextract3")
+#: fits the machine and its runtime is the default: the 4B wherever one of its
+#: builds fits, else the 2B.
+RECOMMENDED_MODEL_KEYS: tuple[str, ...] = ("bibr-extract-4b", "bibr-extract-2b")
 
 
 def recommended_variant(
@@ -230,10 +217,10 @@ def cuda_llm_backend_for(memory_gb: float | None) -> str:
     """Managed LLM backend for a CUDA card with ``memory_gb`` of VRAM (None = unknown).
 
     vLLM only when a vLLM variant of a recommended model actually fits (the
-    2B student needs 8 GB); otherwise llama.cpp, whose NuExtract 3 GGUF build
-    needs 5 GB. The old rule ("vLLM above 8 GB") handed 9-10 GB cards a plan
-    whose only vLLM variant (NuExtract 3 bf16, 11 GB) OOMed after OCR, because
-    the fit filter was dropped silently when nothing fit.
+    2B student needs 8 GB); otherwise llama.cpp, whose GGUF builds of the
+    students go down to 3 GB. The old rule ("vLLM above 8 GB") handed 9-10 GB
+    cards a plan whose only vLLM variant (NuExtract 3 bf16, 11 GB) OOMed after
+    OCR, because the fit filter was dropped silently when nothing fit.
     """
     if memory_gb is None:
         return "vllm"
@@ -258,8 +245,8 @@ def default_local_model(backend: str) -> str:
     Every managed server used to read one config default — the 8-bit MLX
     build — so a hand-written ``LLM_BACKEND=vllm`` or ``llama-cpp`` downloaded
     weights the runtime could not load. The answer is the best recommended
-    entry that the backend's runtime can serve: the 4B student for vLLM,
-    NuExtract 3 for llama.cpp and MLX.
+    entry that the backend's runtime can serve: the 4B student, as bf16 for
+    vLLM, GGUF Q8_0 for llama.cpp and 8-bit for MLX.
     """
     try:
         platform_key, runtime = _BACKEND_VARIANT_FILTER[backend]

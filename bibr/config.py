@@ -661,10 +661,9 @@ class LlmOptions(_BibrSettings):
         None,
         description="Model id served by the managed local LLM backends. Unset picks the "
         "recommended model the selected backend can load: bibr's fine-tuned Qwen3.5-4B "
-        "(scienceverse/bibr-extract-qwen35-4b) for vLLM, NuExtract 3 GGUF Q4_K_M for "
-        "llama.cpp, the 8-bit NuExtract 3 MLX build for Apple Silicon (8bit runs ~2x faster "
-        "than nvfp4 under MLX, which lacks fast nvfp4 kernels). `bibr setup` writes it "
-        "explicitly and picks the 2B student on 8-11 GB cards.",
+        "(scienceverse/bibr-extract-qwen35-4b): bf16 for vLLM, the GGUF Q8_0 build for "
+        "llama.cpp and the 8-bit MLX build for Apple Silicon. `bibr setup` writes it "
+        "explicitly and picks a smaller build, or the 2B student, when memory is short.",
     )
     local_mem_fraction: float = Field(
         0.85,
@@ -685,7 +684,7 @@ class LlmOptions(_BibrSettings):
         description="Launch the managed vllm-mlx LLM server with --continuous-batching (BatchedEngine) "
         "instead of the serial SimpleEngine. Default ON: bibr launches the server via "
         "bibr.local._vllm_mlx_server, a stable wrapper around the validated vllm-mlx 0.4.x "
-        "entrypoint with conservative hybrid-cache handling for NuExtract3/Qwen3-Next. Managed "
+        "entrypoint with conservative hybrid-cache handling for Qwen3.5/Qwen3-Next. Managed "
         "local LLM calls are still serialized by default through LLM_MAX_CONCURRENCY=1 unless "
         "the operator explicitly raises that cap after validating their runtime/model combo.",
     )
@@ -735,8 +734,8 @@ class LlmOptions(_BibrSettings):
     )
     llama_cpp_context_size: int = Field(
         16384,
-        description="Context size (tokens) for the managed llama.cpp LLM server. NuExtract3's "
-        "hybrid attention (8/32 full-attention layers) makes KV cheap, so 16384 fits the "
+        description="Context size (tokens) for the managed llama.cpp LLM server. Qwen3.5's "
+        "hybrid attention (mostly linear-attention layers) makes KV cheap, so 16384 fits the "
         "24,000-char input cap plus the 4,096-token completion cap with headroom on 6 GB cards.",
     )
     llama_cpp_startup_timeout: int = Field(
@@ -773,7 +772,8 @@ class LlmOptions(_BibrSettings):
         "auto",
         description='Structured-output backend: "auto" (default), "instructor", or '
         '"nuextract-native". Auto uses Instructor; native NuExtract templates are '
-        "experimental and require explicit runtime-specific qualification.",
+        "experimental, require explicit runtime-specific qualification and need "
+        "`pip install 'bibr[nuextract]'`.",
     )
 
     batch_model: str = Field(

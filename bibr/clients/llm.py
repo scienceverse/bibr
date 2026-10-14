@@ -3,6 +3,7 @@ import contextlib
 import copy
 import functools
 import hashlib
+import importlib.util
 import inspect
 import itertools
 import json
@@ -19,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from bibr.clients.prompts import PROMPTS
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.exceptions import (
+    ConfigurationError,
     LlmCallError,
     LlmInvalidOutputError,
     LlmRejectedError,
@@ -1176,6 +1178,13 @@ class LLMClient:
         kind = _structured_backend_kind(self._settings)
         self._backend_kind = kind
         if kind == "nuextract-native":
+            if importlib.util.find_spec("numind") is None:
+                raise ConfigurationError(
+                    "LLM_STRUCTURED_BACKEND=nuextract-native needs the numind package, "
+                    "which bibr no longer installs by default. Install it with "
+                    "`pip install 'bibr[nuextract]'`, or unset LLM_STRUCTURED_BACKEND.",
+                    problems=["LLM_STRUCTURED_BACKEND=nuextract-native needs bibr[nuextract]"],
+                )
             from bibr.clients.nuextract import NuExtractNativeBackend
 
             logger.info(

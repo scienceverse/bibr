@@ -1290,7 +1290,8 @@ def test_recommended_setup_low_vram_cuda_keeps_paddle_automatic_ocr():
     assert setup.tier == "fully_local"
     assert setup.env["OCR_BACKEND"] == "paddle"
     assert setup.env["LLM_BACKEND"] == "llama-cpp"
-    assert setup.env["LLM_LOCAL_MODEL"] == "numind/NuExtract3-GGUF:Q4_K_M"
+    assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-GGUF:Q4_K_M"
+    assert setup.env["LLM_CHAT_TEMPLATE_KWARGS"] == '{"enable_thinking": false}'
     assert "demo" in setup.extras
     assert "ml" in setup.extras
     # At 6 GB the automatic chain runs OCR and the LLM through llama.cpp, so no
@@ -1340,8 +1341,8 @@ def test_recommended_setup_cuda_picks_the_student_that_fits(vram_gb, expected):
     assert "llama-server" not in setup.runtime_summary
 
 
-def test_recommended_setup_windows_keeps_nuextract3_gguf():
-    """The students have no GGUF build yet, so llama.cpp machines keep NuExtract 3."""
+def test_recommended_setup_windows_uses_the_4b_gguf():
+    """Windows runs llama.cpp, so it gets the 4B student's GGUF build."""
     setup = _build_recommended_setup(
         platform_key="cuda",
         accelerator_memory_gb=24.0,
@@ -1350,7 +1351,7 @@ def test_recommended_setup_windows_keeps_nuextract3_gguf():
         machine="AMD64",
     )
     assert setup.env["LLM_BACKEND"] == "llama-cpp"
-    assert setup.env["LLM_LOCAL_MODEL"] == "numind/NuExtract3-GGUF:Q4_K_M"
+    assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
 
 
 def test_recommended_setup_apple_silicon_warns_about_runtime():
@@ -1502,21 +1503,22 @@ def test_local_provider_writes_registry_selection(monkeypatch):
     monkeypatch.setattr("bibr.setup_wizard.sys.platform", "linux")
     wizard = _recording_wizard()
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 24.0))
-    _feed_prompts(monkeypatch, ["local", "nuextract3", "1"])
+    _feed_prompts(monkeypatch, ["local", "bibr-extract-4b", "1"])
     wizard._step_llm_provider()
     assert wizard.env_vars["LLM_BACKEND"] == "vllm"
-    assert wizard.env_vars["LLM_LOCAL_MODEL"].count("/") == 1
+    assert wizard.env_vars["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b"
+    assert wizard.env_vars["LLM_CHAT_TEMPLATE_KWARGS"] == '{"enable_thinking": false}'
     assert "LLM_PROVIDER" not in wizard.env_vars
 
 
-def test_local_provider_cuda_can_select_nuextract_llama_variant(monkeypatch):
+def test_local_provider_cuda_can_select_the_students_llama_variant(monkeypatch):
     monkeypatch.setattr("bibr.setup_wizard.sys.platform", "linux")
     wizard = _recording_wizard()
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 24.0))
-    _feed_prompts(monkeypatch, ["local", "nuextract3", "2"])
+    _feed_prompts(monkeypatch, ["local", "bibr-extract-4b", "2"])
     wizard._step_llm_provider()
     assert wizard.env_vars["LLM_BACKEND"] == "llama-cpp"
-    assert wizard.env_vars["LLM_LOCAL_MODEL"] == "numind/NuExtract3-GGUF:Q4_K_M"
+    assert wizard.env_vars["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
 
 
 def test_local_provider_custom_hf_id(monkeypatch):
@@ -1548,7 +1550,7 @@ def test_local_provider_mac_uses_vllm_mlx_and_warns_experimental(monkeypatch):
         "bibr.local.rapid_mlx.rapid_mlx_unavailable_reason",
         lambda executable=None: "'rapid-mlx' was not found or is not executable",
     )
-    _feed_prompts(monkeypatch, ["local", "nuextract3", "1"])
+    _feed_prompts(monkeypatch, ["local", "bibr-extract-4b", "1"])
     wizard._step_llm_provider()
     assert wizard.env_vars["LLM_BACKEND"] == "vllm-mlx"
     text = wizard.console.export_text().lower()
@@ -1561,20 +1563,20 @@ def test_local_provider_no_hardware_shows_all_variants(monkeypatch):
     monkeypatch.setattr("bibr.setup_wizard.sys.platform", "linux")
     wizard = _recording_wizard()
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: (None, None))
-    _feed_prompts(monkeypatch, ["local", "nuextract3", "1"])
+    _feed_prompts(monkeypatch, ["local", "bibr-extract-4b", "1"])
     wizard._step_llm_provider()
     # Unknown hardware: default to the cuda variant list, unfiltered.
     assert wizard.env_vars["LLM_BACKEND"] == "vllm"
 
 
 def test_local_provider_small_vram_selects_gguf_quant(monkeypatch):
-    """A 6 GB CUDA card picks the llama.cpp backend + fitting NuExtract3 GGUF quant."""
+    """A 6 GB CUDA card picks the llama.cpp backend + the fitting 4B GGUF quant."""
     wizard = _recording_wizard()
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 6.0))
-    _feed_prompts(monkeypatch, ["local", "nuextract3", "1"])
+    _feed_prompts(monkeypatch, ["local", "bibr-extract-4b", "1"])
     wizard._step_llm_provider()
     assert wizard.env_vars["LLM_BACKEND"] == "llama-cpp"
-    assert wizard.env_vars["LLM_LOCAL_MODEL"] == "numind/NuExtract3-GGUF:Q4_K_M"
+    assert wizard.env_vars["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-GGUF:Q4_K_M"
     text = wizard.console.export_text().lower()
     # The 5 GB GGUF quant fits a 6 GB card cleanly — no "doesn't fit" warning.
     assert "no variant fits" not in text
@@ -2084,7 +2086,7 @@ def test_plan_preview_shows_paddle_default_and_model(monkeypatch):
     assert "fully local" in text  # lowercase tier name, not "Fully Local"
     assert "paddle" in text
     assert "GLM fallback" in text
-    assert "NuExtract" in text
+    assert "bibr extract 4B" in text
     assert "vllm-mlx" in text
 
 

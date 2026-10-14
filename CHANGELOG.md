@@ -14,9 +14,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   207 against Qwen3.8-27B's 223, compared with 200 for NuExtract 3. Without a
   suitable GPU the hosted recommendation is Claude Haiku 5.5 (221/252), which
   also does the cloud OCR, so setup needs one Anthropic key. Claude's OCR has
-  not been scored on bibr's papers yet. Windows, Apple Silicon and cards below 8 GB keep
-  NuExtract 3. An unset `LLM_LOCAL_MODEL` with `LLM_BACKEND=vllm` now loads the
-  4B model. See [choosing an extraction model](docs/guides/extraction-models.md).
+  not been scored on bibr's papers yet. Windows, Apple Silicon and cards below
+  8 GB get GGUF (llama.cpp) or MLX builds of the same two models. An unset
+  `LLM_LOCAL_MODEL` now loads the 4B model on every managed runtime. See
+  [choosing an extraction model](docs/guides/extraction-models.md).
+- The managed llama.cpp LLM server starts with thinking off when the installed
+  llama.cpp supports `--chat-template-kwargs`.
+
+### Removed
+
+- NuExtract 3 is no longer offered by `bibr setup` or used as a default; it
+  scored below both fine-tuned models. A `.env` that names a NuExtract model in
+  `LLM_LOCAL_MODEL` still works.
+- bibr no longer installs numind. The experimental
+  `LLM_STRUCTURED_BACKEND=nuextract-native` backend needs
+  `pip install 'bibr[nuextract]'` and otherwise stops with an error that says so.
 
 ## [0.7.2] - 2026-10-14
 
