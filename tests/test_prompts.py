@@ -329,6 +329,7 @@ class TestPointerPrompts:
         instruction = self._instruction("authors_pointers")
         assert "affiliation the fenced text does not print gets no entry" in instruction
         assert 'Never write a stand-in such as "Affiliation 1"' in instruction
+        assert "fill one in from memory" in instruction
 
     @pytest.mark.parametrize(
         ("verbatim", "pointers", "rules"),
