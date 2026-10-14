@@ -47,7 +47,8 @@ class LocalLLMModel:
 # v5 scorer, gate192 + ci60 = 252 dev papers), paired against Qwen3.8-27B's
 # 223/252; see docs/guides/extraction-models.md.
 #
-# Sizes are estimates until the checkpoints are on the Hub. bf16: weights of the
+# GGUF sizes are the built files (llama.cpp 6868a52, 2026-10-14); bf16 and MLX
+# sizes are estimates until the checkpoints are on the Hub. bf16: weights of the
 # Qwen3.5 base, with min_vram_gb rounded up from the measured 11.7 GB peak of a
 # low-memory 4B vLLM serve on a 24 GB card. GGUF and MLX: the quantized text
 # model, with min_vram_gb = ceil(size * 1.25) plus about 2 GB of context and
@@ -92,7 +93,7 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 platform="cuda",
                 quant="gguf-q8_0",
                 min_vram_gb=7,
-                approx_download_gb=4.5,
+                approx_download_gb=4.3,
                 runtime="llama-cpp",
             ),
             LocalLLMVariant(
@@ -100,7 +101,7 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 platform="cuda",
                 quant="gguf-q4_k_m",
                 min_vram_gb=5,
-                approx_download_gb=2.7,
+                approx_download_gb=2.6,
                 runtime="llama-cpp",
             ),
             LocalLLMVariant(
@@ -140,7 +141,7 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 platform="cuda",
                 quant="gguf-q8_0",
                 min_vram_gb=4,
-                approx_download_gb=2.3,
+                approx_download_gb=1.9,
                 runtime="llama-cpp",
             ),
             LocalLLMVariant(
@@ -148,7 +149,7 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 platform="cuda",
                 quant="gguf-q4_k_m",
                 min_vram_gb=3,
-                approx_download_gb=1.4,
+                approx_download_gb=1.2,
                 runtime="llama-cpp",
             ),
             LocalLLMVariant(

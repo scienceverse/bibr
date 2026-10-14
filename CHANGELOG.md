@@ -18,8 +18,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   8 GB get GGUF (llama.cpp) or MLX builds of the same two models. An unset
   `LLM_LOCAL_MODEL` now loads the 4B model on every managed runtime. See
   [choosing an extraction model](docs/guides/extraction-models.md).
-- The managed llama.cpp LLM server starts with thinking off when the installed
-  llama.cpp supports `--chat-template-kwargs`.
+- The managed llama.cpp LLM server starts with thinking off (`--reasoning off`,
+  or `--reasoning-budget 0` on older builds). llama-server's default,
+  `--reasoning auto`, turns thinking on for any model whose template supports it.
 
 ### Removed
 

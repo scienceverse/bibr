@@ -393,6 +393,13 @@ def _role_runtime_args(role: str, available: frozenset[str]) -> list[str]:
             # bibr's Qwen3.5 students were trained and scored with thinking
             # off; templates without the switch ignore it.
             args += ["--chat-template-kwargs", '{"enable_thinking": false}']
+    # With the default ``--reasoning auto``, llama-server passes
+    # enable_thinking=true itself to any template that supports thinking,
+    # whatever the template's own default; turn reasoning off outright.
+    if "--reasoning" in available:
+        args += ["--reasoning", "off"]
+    elif "--reasoning-budget" in available:
+        args += ["--reasoning-budget", "0"]
     return args
 
 

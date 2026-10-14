@@ -252,7 +252,8 @@ advanced wizard also offers Gemma 4 E4B on CUDA, and custom model IDs.
 select the provider model. When `LLM_LOCAL_MODEL` is unset, every managed
 runtime uses the 4B model: bf16 on vLLM, the Q8_0 GGUF on llama.cpp and the
 8-bit build on vllm-mlx. The managed llama.cpp server starts with thinking off
-(`--chat-template-kwargs '{"enable_thinking": false}'`) when the installed
+(`--reasoning off`, or `--reasoning-budget 0` on older builds, plus
+`--chat-template-kwargs '{"enable_thinking": false}'`) when the installed
 build supports it, and `bibr setup` also writes
 `LLM_CHAT_TEMPLATE_KWARGS='{"enable_thinking": false}'` for the students. Rapid-MLX
 has a separate `LLM_RAPID_MLX_MODEL` default (`qwen3.5-4b-4bit`) when no local
