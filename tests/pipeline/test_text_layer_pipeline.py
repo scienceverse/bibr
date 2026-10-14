@@ -7,6 +7,7 @@ backend that would run one.
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -52,7 +53,7 @@ def no_ocr_runtime(monkeypatch):
     )
 
 
-def _pipeline(monkeypatch, **kwargs):
+def _pipeline(monkeypatch, layout=None, **kwargs):
     from bibr.local.pipeline import LocalPipeline
     from bibr.pipeline.resources import ResourceManager
 
@@ -65,7 +66,7 @@ def _pipeline(monkeypatch, **kwargs):
         ocr_model=pipeline.ocr_model,
         device=pipeline.device,
         settings=pipeline.settings,
-        layout=smoke.FakeLayout(),
+        layout=layout or smoke.FakeLayout(),
         segmenter=smoke.FakeSegmenter(),
     )
     pipeline._resources = rm
@@ -118,6 +119,74 @@ async def test_text_layer_run_reads_every_region_without_ocr(
     assert not [code for code in _codes(result) if code.startswith("TEXT_LAYER_")]
     rm.start_ocr_preload.assert_not_called()
     assert set(created_backends) <= {registry.TEXT_LAYER_BACKEND}
+
+
+# The smoke paper with a numbered display formula and a three-column table
+# between the introduction and the references.
+_FORMULA_LINES = [
+    *smoke._LINES[:8],
+    (200, 540, 10, "y = a + b x"),
+    (480, 540, 10, "(1)"),
+    (100, 500, 10, "Name"),
+    (250, 500, 10, "Age"),
+    (400, 500, 10, "Score"),
+    (100, 486, 10, "Ann"),
+    (250, 486, 10, "34"),
+    (400, 486, 10, "12.5"),
+    (100, 472, 10, "Bob"),
+    (250, 472, 10, "41"),
+    (400, 472, 10, "9.0"),
+    (72, 420, 14, "References"),
+    *[
+        (72, y, 10, text)
+        for y, (_, _, _, text) in zip((400, 386, 366), smoke._LINES[9:], strict=True)
+    ],
+]
+
+
+def _region(index: int, label: str, task: str, box: tuple[float, float, float, float]) -> dict:
+    region = smoke._layout_region(index, label, smoke._norm_bbox(*box))
+    region["task_type"] = task
+    return region
+
+
+_FORMULA_REGIONS = [
+    *smoke._REGIONS[:6],
+    _region(6, "display_formula", "formula", (190, 552, 300, 534)),
+    _region(7, "formula_number", "text", (470, 552, 500, 534)),
+    _region(8, "table", "table", (90, 512, 450, 466)),
+    _region(9, "paragraph_title", "text", (60, 438, 300, 412)),
+    _region(10, "reference", "text", (60, 412, 552, 356)),
+]
+
+
+class _FormulaLayout:
+    loaded = True
+
+    async def detect_batch(self, images_list):
+        return [copy.deepcopy(_FORMULA_REGIONS) for _ in images_list]
+
+
+async def test_a_numbered_formula_and_a_table_are_read_as_printed(
+    tmp_path, monkeypatch, created_backends
+):
+    pdf = tmp_path / "formula.pdf"
+    pdf.write_bytes(smoke._build_pdf(_FORMULA_LINES))
+    pipeline, _ = _pipeline(monkeypatch, layout=_FormulaLayout(), ocr_backend="text-layer")
+
+    result = await _run(pipeline, pdf)
+
+    # Plain text with its number, not LaTeX ("y = a + b x \\tag{1}").
+    [equation] = [entry for entry in result["text"] if entry["text"] == "[equation]"]
+    assert equation["formatted"] == "y = a + b x (1)"
+    [table] = result["table"]
+    assert table["contents"] == [
+        ["Name", "Age", "Score"],
+        ["Ann", "34", "12.5"],
+        ["Bob", "41", "9.0"],
+    ]
+    codes = _codes(result)
+    assert "TEXT_LAYER_FORMULA_TEXT" in codes and "TEXT_LAYER_TABLE_REBUILT" in codes
 
 
 async def test_scanned_pdf_fails_as_needing_ocr(tmp_path, monkeypatch, created_backends):
