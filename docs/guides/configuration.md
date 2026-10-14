@@ -247,6 +247,15 @@ and vllm-mlx choose a compatible NuExtract 3 variant from the registry. Rapid-ML
 has a separate `LLM_RAPID_MLX_MODEL` default (`qwen3.5-4b-4bit`) when no local
 model was explicitly configured.
 
+`LLM_SPEED_PROFILE` tunes the managed vLLM server, and `bibr setup` asks for it
+in plain words. `latency` (one paper at a time, the default) turns on the
+speculative decoding the registry lists for the model, which drafts several
+tokens per step and stops drafting once more than 16 requests are in flight.
+`throughput` (many papers at once) never speculates. With greedy decoding,
+which bibr uses, speculation changes speed but not the answers. Registry models
+without a listed speculative config run the same under both profiles, and
+`LLM_VLLM_EXTRA_ARGS` can still pass your own `--speculative-config`.
+
 `LLM_STRUCTURED_BACKEND=auto` uses Instructor, including with NuExtract 3.
 The `nuextract-native` backend is experimental and explicit-only; it is not
 automatically enabled by choosing a NuExtract model.

@@ -683,6 +683,7 @@ def _write_env_fresh(path: Path, env_vars: dict[str, str]) -> None:
             "LLM_MODEL",
             "LLM_BACKEND",
             "LLM_LOCAL_MODEL",
+            "LLM_SPEED_PROFILE",
             "LLM_INSTRUCTOR_MODE",
             "GOOGLE_API_KEY",
             "LLM_API_KEY",
@@ -953,6 +954,7 @@ class SetupWizard:
         self.env_vars.update(setup.env)
         self.selected_extras.update(setup.extras)
 
+        self._step_speed_profile()
         self._collect_required_prompts(setup)
         self._step_write_env(save_preset_name=setup.preset_name, header="Save configuration")
         self._offer_extras_install()
@@ -1392,6 +1394,7 @@ class SetupWizard:
             hf_id = Prompt.ask("HF model id (org/name)")
             self.env_vars["LLM_BACKEND"] = backend
             self.env_vars["LLM_LOCAL_MODEL"] = hf_id
+            self._step_speed_profile()
             return
 
         model = get_model(choice)
@@ -1425,6 +1428,24 @@ class SetupWizard:
                 "[yellow]Note: this platform is experimental for this model — "
                 "extraction quality is not yet eval-gated.[/yellow]"
             )
+        self._step_speed_profile()
+
+    def _step_speed_profile(self) -> None:
+        """Ask whether the managed vLLM server should favour one paper or big batches.
+
+        Only the managed vLLM server reads ``LLM_SPEED_PROFILE`` (speculative
+        decoding on or off), so other backends are not asked.
+        """
+        if self.env_vars.get("LLM_BACKEND") != "vllm":
+            return
+        self.console.print(
+            "\nHow will you mostly use bibr?\n"
+            "  1. One paper at a time — each result comes back as fast as possible\n"
+            "  2. Many papers at once — big batches finish sooner, each paper waits a "
+            "little longer"
+        )
+        choice = Prompt.ask("Choice", choices=["1", "2"], default="1")
+        self.env_vars["LLM_SPEED_PROFILE"] = "latency" if choice == "1" else "throughput"
 
     def _test_local_server(self) -> None:
         """Launch the managed server once, confirm it comes up, shut it down."""

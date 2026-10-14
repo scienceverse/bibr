@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `bibr setup` asks whether you mostly process one paper at a time or many at once, and
+  saves the answer as `LLM_SPEED_PROFILE` (`latency` or `throughput`). Under `latency`, the
+  managed vLLM server turns on the speculative decoding the model registry lists for the
+  model (DFlash, MTP or prompt lookup), which backs off as more requests run at once.
+  `throughput` never speculates. Only the managed vLLM server reads the setting, so other
+  backends are not asked.
+
 ## [0.7.2] - 2026-10-14
 
 ### Fixed

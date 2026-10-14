@@ -49,6 +49,45 @@ def test_registry_server_args_unknown_model_empty():
     assert registry_server_args("someone/custom-model") == ()
 
 
+def test_registry_server_args_adds_latency_args_only_under_latency(monkeypatch):
+    variant = LocalLLMVariant(
+        hf_id="org/fast",
+        platform="cuda",
+        quant="bf16",
+        min_vram_gb=10,
+        approx_download_gb=8,
+        server_args=("--max-model-len", "32768"),
+        latency_server_args=llm_models.ngram_spec_args(),
+        runtime="vllm",
+    )
+    model = LocalLLMModel(key="fast", label="Fast", variants=(variant,))
+    monkeypatch.setattr(llm_models, "REGISTRY", (model,))
+    assert registry_server_args("org/fast", "throughput") == ("--max-model-len", "32768")
+    latency = registry_server_args("org/fast", "latency")
+    assert latency[:2] == ("--max-model-len", "32768")
+    assert latency[2] == "--speculative-config"
+
+
+def test_spec_args_back_off_as_requests_pile_up():
+    import json
+
+    flag, raw = llm_models.dflash_spec_args("z-lab/Qwen3.5-4B-DFlash")
+    assert flag == "--speculative-config"
+    config = json.loads(raw)
+    assert config["method"] == "dflash"
+    assert config["model"] == "z-lab/Qwen3.5-4B-DFlash"
+    assert config["num_speculative_tokens"] == 8
+    assert config["num_speculative_tokens_per_batch_size"] == [
+        [1, 4, 8],
+        [5, 16, 4],
+        [17, 4096, 0],
+    ]
+    mtp = json.loads(llm_models.mtp_spec_args()[1])
+    assert mtp["method"] == "mtp"
+    assert mtp["num_speculative_tokens_per_batch_size"][1] == [5, 16, 1]
+    assert json.loads(llm_models.ngram_spec_args()[1])["method"] == "ngram"
+
+
 def test_registry_keys_unique():
     keys = [m.key for m in REGISTRY]
     assert len(keys) == len(set(keys))

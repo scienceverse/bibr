@@ -107,11 +107,12 @@ class VllmLlmServer:
                 '{"backend":"xgrammar"}',
             ]
         )
-        # Registry-supplied args for this model (e.g. NuExtract3 MTP config),
-        # before user extra args so user flags win on repeated keys.
+        # Registry-supplied args for this model (and, under the latency speed
+        # profile, its speculative decoding config), before user extra args so
+        # user flags win on repeated keys.
         from bibr.local.llm_models import registry_server_args
 
-        cmd.extend(registry_server_args(self._model))
+        cmd.extend(registry_server_args(self._model, self._settings.llm.speed_profile))
         cmd.extend(shlex.split(self._settings.llm.vllm_extra_args or ""))
 
         # stderr to a file, never PIPE — an unread pipe deadlocks the server
