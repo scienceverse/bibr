@@ -14,15 +14,19 @@ decides which of two readings of the page to keep.
 
 Titles are compared loosely for routing: as in
 :mod:`bibr.enrich.verify_identity`, and also equal once spaces are dropped,
-so a spacing or subtitle difference does not cost a call. On two development
-sets (252 papers), a simulation of this routing that took a 27B model's
-answer only when it agreed with the record lost no paper: a 4B extraction
-model went from 216 to 219 papers with title, authors and the rest right,
-and a 2B one from 207 to 216, re-asking one or two calls on 8-12% of the
-papers. Multilingual papers are over half of the routed ones, because the
+so a spacing or subtitle difference does not cost a call. Whether a title is
+printed, and which of two titles is, is judged on the title grounded the way
+the extractor grounds it (a near-copy of a printed row, a title over two
+rows). Multilingual papers are a large share of the routed ones, because the
 registry often holds a parallel English title, so a review title that is a
-translation printed after the first one is refused even when it agrees with
-the record.
+version in another language of a title printed before it is refused, even
+when it agrees with the record and whatever the first answer was.
+
+On two development sets (252 papers), a simulation of a simpler variant of
+this routing, which took a 27B model's whole answer only when it agreed with
+the record, lost no paper; it did not model the printed-form acceptance, the
+printed requirement or the translation guard, and the review as shipped has
+not been measured end to end yet.
 
 ``extraction.diagnostics.front_matter_review`` counts the outcomes. The
 review's token usage is recorded under its own labels (``review_`` prefixed)
@@ -159,8 +163,9 @@ class ReviewOutcome:
     """What the review did to the core call's answer."""
 
     llm_metadata: Any
-    # Fields whose review answer was used, and of them the ones chosen because
-    # they agree with the record (undone when the final DOI is another one).
+    # Fields whose review answer was used, and of them the ones chosen over a
+    # printed first answer because they agree with the record (undone when the
+    # final DOI is another one).
     accepted: set[str] = field(default_factory=set)
     record_backed: set[str] = field(default_factory=set)
     receipt: dict | None = None
@@ -236,19 +241,41 @@ async def review_front_matter(
     convert_authors: Callable[[Any], list[PaperAuthor]],
     title_printed: Callable[[str], bool],
     authors_printed: Callable[[list[PaperAuthor]], bool],
+    ground_title: Callable[[str], str] | None = None,
+    later_version: Callable[[str, str], bool] | None = None,
 ) -> ReviewOutcome:
     """Re-ask the core calls whose answer disagrees with *record*; keep a better answer.
 
     *convert_authors* turns the model's author rows into ``PaperAuthor``s the
     way the extractor does; *title_printed* and *authors_printed* say whether
-    a value is printed in the front matter the call read. A review title that
-    is a translation printed after a printed first title is refused, even when
-    the record holds it. Never raises for a failed review; the caller's
+    a value is printed in the front matter the call read. *ground_title*
+    grounds a title the way the extractor will (identity by default): both
+    titles are judged grounded, so a first answer that drops a diacritic or
+    joins two printed rows still counts as printed. *later_version(answer,
+    first)* says whether the review title is a version in another language
+    of a title printed before it; by default, whether it is one of the first
+    answer printed after it in *title_text* (or not found there). Such a
+    review title is refused, even when the record holds it.
+
+    A field is record-backed (``ReviewOutcome.record_backed``) when the
+    review's answer was used because it agrees with the record over a printed
+    first answer; one used because the first answer was not printed stands on
+    the page alone. Never raises for a failed review; the caller's
     cancellation propagates.
     """
     from bibr.enrich.verify_identity import authors_agree
     from bibr.input.consolidate_text import strip_affiliation_markers
     from bibr.pipeline.registry_check import author_rows
+
+    if ground_title is None:
+
+        def ground_title(text: str) -> str:
+            return text
+
+    if later_version is None:
+
+        def later_version(answer: str, first: str) -> bool:
+            return bool(first) and later_language_version(first, answer, title_text)
 
     primary_title = strip_affiliation_markers(llm_metadata.title or "").strip()
     primary_authors = convert_authors(llm_metadata.authors)
@@ -300,20 +327,20 @@ async def review_front_matter(
             continue
         if name == TITLE:
             answer = strip_affiliation_markers(getattr(result, "title", None) or "").strip()
-            agrees = titles_agree_loosely(answer, record)
-            answer_key, primary_key = _title_key(answer), _title_key(primary_title)
-            primary_printed = bool(primary_title) and title_printed(primary_title)
+            grounded = ground_title(answer).strip() if answer else ""
+            first = ground_title(primary_title).strip() if primary_title else ""
+            agrees = bool(grounded) and titles_agree_loosely(grounded, record)
+            answer_key, primary_key = _title_key(grounded), _title_key(first)
+            primary_printed = bool(first) and title_printed(first)
             usable = (
                 bool(answer_key)
                 and answer_key != primary_key
                 # A shorter answer the first one extends drops a printed part.
                 and not primary_key.startswith(answer_key + " ")
-                and title_printed(answer)
+                and title_printed(grounded)
                 and (agrees or not primary_printed)
                 # The record often holds a later-printed English version.
-                and not (
-                    primary_printed and later_language_version(primary_title, answer, title_text)
-                )
+                and not later_version(grounded, first)
             )
             if usable:
                 update["title"] = answer
@@ -322,18 +349,20 @@ async def review_front_matter(
             answer_authors = convert_authors(raw)
             rows = author_rows(answer_authors)
             agrees = bool(rows) and authors_agree(rows, record_authors)
+            primary_printed = bool(primary_authors) and authors_printed(primary_authors)
             usable = (
                 bool(answer_authors)
                 and rows != author_rows(primary_authors)
                 and authors_printed(answer_authors)
-                and (agrees or not (primary_authors and authors_printed(primary_authors)))
+                and (agrees or not primary_printed)
             )
             if usable:
                 update["authors"] = raw
         if usable:
             receipt["accepted"] += 1
             outcome.accepted.add(name)
-            if agrees:
+            if agrees and primary_printed:
+                # Used over a printed first answer because the record agrees.
                 outcome.record_backed.add(name)
         else:
             receipt["rejected"] += 1

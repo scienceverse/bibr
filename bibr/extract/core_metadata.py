@@ -2385,13 +2385,17 @@ class CoreMetadataExtractor:
             title, title_transforms, title_evidence, title_issues = self._ground_title(
                 model_title, resolution, full_text, authors=usable
             )
-            self.validation_issues.extend(title_issues)
+            # A reviewed title's issues ride its candidate: they are recorded
+            # when it is the title used, and leave with it when the identity
+            # stage restores the first answer.
+            reviewed_title_issues: tuple[ValidationIssue, ...] = ()
             if "title" in reviewed and self._registry_check is not None:
+                reviewed_title_issues = tuple(title_issues)
                 # The first answer, grounded the same way: the title the
                 # identity stage restores when the record turns out to be
                 # another paper's.
                 first_title = strip_affiliation_markers(primary_llm_title or "")
-                grounded, transforms_, evidence, _issues = self._ground_title(
+                grounded, transforms_, evidence, first_issues = self._ground_title(
                     first_title, resolution, full_text, authors=usable
                 )
                 self._registry_check.primary_title = FieldCandidate(
@@ -2400,7 +2404,10 @@ class CoreMetadataExtractor:
                     grounded,
                     evidence_ids=tuple(evidence),
                     transforms=tuple(transforms_),
+                    issues=tuple(first_issues),
                 )
+            else:
+                self.validation_issues.extend(title_issues)
             abstract = (llm_metadata.abstract or "").strip()
             keywords = llm_metadata.keywords
             classification_context = classification_text or full_text
@@ -2526,6 +2533,7 @@ class CoreMetadataExtractor:
                     title,
                     evidence_ids=tuple(title_evidence),
                     transforms=tuple(title_transforms),
+                    issues=reviewed_title_issues,
                 )
             )
             ledger.propose(FieldCandidate("abstract", "llm", abstract, veto=notice_veto))
@@ -2619,8 +2627,17 @@ class CoreMetadataExtractor:
         None when the review is off or there is no confident record to compare
         with. Writes ``contents.front_matter_review_receipt`` otherwise.
         """
-        from bibr.extract.front_matter_review import review_front_matter, review_wanted
-        from bibr.extract.title_candidates import _normalize_for_match, grounded_in_selected_title
+        from bibr.extract.front_matter_review import (
+            later_language_version,
+            review_front_matter,
+            review_wanted,
+        )
+        from bibr.extract.title_candidates import (
+            _normalize_for_match,
+            grounded_in_selected_title,
+            printed_after_language_version,
+            printed_title_rows,
+        )
 
         check = self._registry_check
         if check is None or not review_wanted(self._settings):
@@ -2628,12 +2645,32 @@ class CoreMetadataExtractor:
         record = check.record()
         if record is None:
             return None
+        first_authors = self._convert_llm_authors(llm_metadata.authors)
 
         def title_printed(title: str) -> bool:
             if resolution is not None:
-                return grounded_in_selected_title(title, resolution)
+                return (
+                    grounded_in_selected_title(title, resolution)
+                    or printed_title_rows(title, resolution) is not None
+                )
             wanted = _normalize_for_match(title)
             return bool(wanted) and wanted in _normalize_for_match(full_text)
+
+        def ground_title(title: str) -> str:
+            # The chain the title used goes through, judged before it is used.
+            return self._ground_title(title, resolution, full_text, authors=first_authors)[0]
+
+        def later_version(answer: str, first: str) -> bool:
+            # By the rows of the selected record where it prints the answer;
+            # else against the first answer in the text the call read.
+            if resolution is not None and printed_title_rows(answer, resolution) is not None:
+                return printed_after_language_version(
+                    answer,
+                    resolution,
+                    journal=llm_metadata.journal,
+                    publisher=llm_metadata.publisher,
+                )
+            return bool(first) and later_language_version(first, answer, llm_text)
 
         def authors_printed(authors: list[PaperAuthor]) -> bool:
             _grounded, missing = grounded_authors_in_context(authors, authors_text)
@@ -2651,6 +2688,8 @@ class CoreMetadataExtractor:
             convert_authors=self._convert_llm_authors,
             title_printed=title_printed,
             authors_printed=authors_printed,
+            ground_title=ground_title,
+            later_version=later_version,
         )
         check.record_backed |= outcome.record_backed
         check.review_receipt = outcome.receipt

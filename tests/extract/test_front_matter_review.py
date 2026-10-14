@@ -107,6 +107,7 @@ async def _review(
     settings=None,
     record=RECORD,
     title_text="TITLE TEXT",
+    **guards,
 ):
     outcome = await review_front_matter(
         primary,
@@ -120,6 +121,7 @@ async def _review(
         convert_authors=_convert,
         title_printed=lambda title: title in printed_titles,
         authors_printed=lambda authors: all(a.family in printed_names for a in authors),
+        **guards,
     )
     # Every receipt reconciles under the export model.
     FrontMatterReviewExport.model_validate(outcome.receipt)
@@ -281,11 +283,77 @@ async def test_printed_review_answer_replaces_an_unprinted_first_answer():
         _primary("Sleep & memory of the old"),
         FakeReview(title=printed),
         printed_titles=(printed,),
+        # The rows print no version of it before it.
+        later_version=lambda answer, first: False,
     )
     assert outcome.llm_metadata.title == printed
     assert outcome.accepted == {"title"}
     # Chosen because it is printed, not because the record agrees.
     assert outcome.record_backed == set()
+
+
+async def test_without_rows_a_version_the_text_cannot_place_is_refused():
+    """The default guard compares with the first answer in the text the call
+    read; a first answer the text does not print cannot show which version is
+    printed first, so the review's other-language title is refused."""
+    primary = _primary("Sleep & memory of the old")
+    outcome = await _review(
+        primary,
+        FakeReview(title="Schlaf und Gedächtnis im Alter"),
+        printed_titles=("Schlaf und Gedächtnis im Alter",),
+        title_text="Schlaf und Gedächtnis im Alter\nAda Lovelace, Alan Turing",
+    )
+    assert outcome.llm_metadata is primary
+    assert outcome.receipt["rejected"] == 1
+
+
+async def test_agreeing_review_over_an_unprinted_first_answer_is_not_record_backed():
+    """The record did not decide: the first answer was not printed."""
+    outcome = await _review(
+        _primary("Sleep in olders adult"), FakeReview(title=TITLE), printed_titles=(TITLE,)
+    )
+    assert outcome.llm_metadata.title == TITLE
+    assert outcome.accepted == {"title"} and outcome.record_backed == set()
+
+
+async def test_first_answer_counts_as_printed_once_grounded():
+    """A first answer that drops a printed character grounds to its printed row,
+    so a review that disagrees with the record cannot replace it."""
+    printed = "Sleep in older adults"
+    primary = _primary("Sleep in older adult")
+    outcome = await _review(
+        primary,
+        FakeReview(title="Memory in older adults"),
+        printed_titles=(printed, "Memory in older adults"),
+        ground_title=lambda title: printed if title == "Sleep in older adult" else title,
+    )
+    assert outcome.llm_metadata is primary
+    assert outcome.receipt["rejected"] == 1
+
+
+async def test_review_answer_grounding_to_the_first_one_is_rejected():
+    outcome = await _review(
+        _primary("Sleep in older adults"),
+        FakeReview(title="Sleep in older adult"),
+        printed_titles=("Sleep in older adults",),
+        ground_title=lambda title: "Sleep in older adults",
+    )
+    assert outcome.accepted == set() and outcome.receipt["rejected"] == 1
+
+
+async def test_a_later_version_is_refused_whatever_the_first_answer():
+    """The rows say the review title is printed after another version: refused,
+    even though the first answer is not printed and the record agrees."""
+    primary = _primary("Wirkung des Schlafs bei alteren Erwachsenen")
+    outcome = await _review(
+        primary,
+        FakeReview(title=ENGLISH),
+        printed_titles=(ENGLISH,),
+        record={**RECORD, "title": ENGLISH},
+        later_version=lambda answer, first: answer == ENGLISH,
+    )
+    assert outcome.llm_metadata is primary
+    assert outcome.receipt["rejected"] == 1
 
 
 async def test_unprinted_review_answer_is_rejected():
@@ -400,6 +468,15 @@ async def test_author_review_agreeing_with_the_record_is_kept():
     assert client.calls == [("authors", "AUTHORS TEXT", "h")]
     assert [a.family for a in outcome.llm_metadata.authors] == ["Lovelace", "Turing"]
     assert outcome.record_backed == {"author"}
+
+
+async def test_author_review_over_an_unprinted_first_list_is_not_record_backed():
+    outcome = await _review(
+        _primary(authors=(("Ada", "Lovelance"),)),
+        FakeReview(authors=(ADA, ALAN)),
+    )
+    assert [a.family for a in outcome.llm_metadata.authors] == ["Lovelace", "Turing"]
+    assert outcome.accepted == {"author"} and outcome.record_backed == set()
 
 
 async def test_unprinted_author_review_is_rejected():
@@ -727,6 +804,157 @@ async def test_core_extractor_without_the_trigger_writes_no_receipt(monkeypatch)
     assert contents.front_matter_review_receipt is None
 
 
+# --- the printed-first rule over the selected record's rows ----------------------
+
+GERMAN_MAIN = "Die Wirkung von Schlaf auf das Gedächtnis"
+GERMAN_SUB = "eine Studie bei älteren Erwachsenen in der Pflege"
+ENGLISH_FULL = "The effect of sleep on memory: a study in older adults in care"
+
+
+def _title_rows(*texts, roles=frozenset({"title"})):
+    from tests.extract.test_core_metadata_front_matter import _candidate, _resolution
+
+    rows = [_candidate(f"c{index}", text, roles=roles) for index, text in enumerate(texts, 1)]
+    return _resolution(*rows)
+
+
+def test_a_title_over_two_rows_is_printed():
+    from bibr.extract.title_candidates import grounded_in_selected_title, printed_title_rows
+
+    resolution = _title_rows(GERMAN_MAIN, GERMAN_SUB, ENGLISH_FULL)
+    joined = f"{GERMAN_MAIN}: {GERMAN_SUB}"
+    assert not grounded_in_selected_title(joined, resolution)
+    assert [row.candidate_id for row in printed_title_rows(joined, resolution)] == ["c1", "c2"]
+    assert [row.candidate_id for row in printed_title_rows(ENGLISH_FULL, resolution)] == ["c3"]
+    assert printed_title_rows("A title the page never prints", resolution) is None
+
+
+@pytest.mark.parametrize(
+    ("texts", "title", "later"),
+    [
+        # The original over two rows, its translation on a later row.
+        ((GERMAN_MAIN, GERMAN_SUB, ENGLISH_FULL), ENGLISH_FULL, True),
+        ((GERMAN_MAIN, GERMAN_SUB, ENGLISH_FULL), f"{GERMAN_MAIN}: {GERMAN_SUB}", False),
+        ((GERMAN, ENGLISH), ENGLISH, True),
+        ((ENGLISH, GERMAN), ENGLISH, False),
+        ((ENGLISH, GERMAN), GERMAN, True),
+        # Both versions on one row.
+        ((f"{GERMAN} / {ENGLISH}",), ENGLISH, True),
+        ((f"{GERMAN} / {ENGLISH}",), GERMAN, False),
+        # Same language: not a version.
+        (("Sleep and memory in shift workers", ENGLISH), ENGLISH, False),
+        # Not printed: nothing to say.
+        ((GERMAN,), ENGLISH, False),
+    ],
+)
+def test_a_version_printed_after_another_is_found(texts, title, later):
+    from bibr.extract.title_candidates import printed_after_language_version
+
+    assert printed_after_language_version(title, _title_rows(*texts)) is later
+
+
+DOI_RECORD = {**RECORD, "title": ENGLISH}
+
+
+def _bilingual_extractor(monkeypatch, rows, *, first_title, review_title):
+    """The core extractor over a front matter of *rows* (title rows, then a byline)."""
+    from bibr.config import snapshot_settings
+    from bibr.extract.core_metadata import CoreMetadataExtractor
+    from tests.extract.test_core_metadata_front_matter import (
+        _candidate,
+        _paper_contents,
+        _resolution,
+    )
+
+    byline = "Ada Lovelace and Alan Turing"
+    candidates = [
+        _candidate(f"c{index}", text, roles=frozenset({"title"}), text_ids=(index,))
+        for index, text in enumerate(rows, 1)
+    ]
+    candidates.append(
+        _candidate(
+            f"c{len(rows) + 1}", byline, roles=frozenset({"byline"}), text_ids=(len(rows) + 1,)
+        )
+    )
+    contents = _paper_contents(
+        [*((index, text, 0) for index, text in enumerate([*rows, byline], 1)), (99, "Body", 1)]
+    )
+    llm = mock.MagicMock()
+    llm.extract_core_metadata = mock.AsyncMock(
+        return_value=CoreMetadataLLM(title=first_title, authors=_authors(ADA, ALAN))
+    )
+    settings = snapshot_settings()
+    settings.llm.review_trigger = "registry_disagree"
+    settings.llm.review_model = "review-27b"
+    settings.llm.per_task_context = True
+    settings.llm.merged_core_metadata = False
+    check = SettledCheck(DOI_RECORD)
+    review = FakeReview(title=review_title)
+    extractor = CoreMetadataExtractor(
+        contents,
+        llm_client=llm,
+        settings=settings,
+        front_matter_resolution=_resolution(*candidates),
+        registry_check=check,
+        review_client=review,
+    )
+    monkeypatch.setattr(
+        extractor, "_classify_paper", mock.AsyncMock(return_value=("", "", "", None, None))
+    )
+    return extractor, check, review
+
+
+async def test_review_keeps_a_near_copy_of_the_original_over_the_records_translation(
+    monkeypatch,
+):
+    """The first answer drops a diacritic of the German title printed first; the
+    record holds the English title printed second. The review's English answer
+    is refused and the grounded German title stays."""
+    extractor, check, review = _bilingual_extractor(
+        monkeypatch,
+        [GERMAN, ENGLISH],
+        first_title=GERMAN.replace("älteren", "alteren"),
+        review_title=ENGLISH,
+    )
+    metadata = await extractor.extract()
+
+    assert [call[0] for call in review.calls] == ["title"]
+    assert metadata.title == GERMAN
+    assert check.review_receipt["rejected"] == 1
+    assert check.record_backed == set()
+
+
+async def test_review_keeps_an_original_printed_over_two_rows(monkeypatch):
+    """The German title is printed as a main title and a subtitle row, the
+    English one on a later row that the record holds."""
+    first = f"{GERMAN_MAIN}: {GERMAN_SUB}"
+    extractor, check, _review = _bilingual_extractor(
+        monkeypatch,
+        [GERMAN_MAIN, GERMAN_SUB, ENGLISH_FULL],
+        first_title=first,
+        review_title=ENGLISH_FULL,
+    )
+    check._record = {**DOI_RECORD, "title": ENGLISH_FULL}
+    metadata = await extractor.extract()
+
+    assert metadata.title == first
+    assert check.review_receipt["rejected"] == 1
+
+
+async def test_review_takes_the_original_printed_first(monkeypatch):
+    """The English title is printed first and the record holds it; the first
+    answer took the German translation printed after it."""
+    extractor, check, _review = _bilingual_extractor(
+        monkeypatch, [ENGLISH, GERMAN], first_title=GERMAN, review_title=ENGLISH
+    )
+    metadata = await extractor.extract()
+
+    assert metadata.title == ENGLISH
+    assert check.review_receipt["accepted"] == 1
+    assert check.record_backed == {"title"}
+    assert check.primary_title.value == GERMAN
+
+
 # --- export --------------------------------------------------------------------
 
 
@@ -745,6 +973,43 @@ def test_title_kept_from_an_agreeing_review_is_reported_corrected():
         },
     }
     assert verify_identity(payload) == {"title": "corrected", "author": "corrected"}
+
+
+def test_a_value_whose_record_was_dropped_is_not_reported_corrected():
+    """After the final DOI turned out to be another one, the kept review list
+    is compared with the final record like any extracted value."""
+    from bibr.enrich.verify_identity import verify_identity
+
+    dropped = ["VAL_REGISTRY_DOI_CHANGED"]
+    payload = {
+        "metadata": {"title": TITLE, "doi": DOI},
+        "author": [{"given": "Ada", "family": "Lovelace", "literal": None}],
+        "metadata_match": [{**RECORD, "author": RECORD["author"][:1]}],
+        "extraction": {
+            "fields": {
+                "title": {"state": "extracted", "source": "llm", "issues": dropped},
+                "author": {"state": "extracted", "source": "llm_review", "issues": dropped},
+            }
+        },
+    }
+    assert verify_identity(payload) == {"title": "agree", "author": "agree"}
+
+
+def test_dropped_record_issue_qualifies_the_title_and_the_author_list():
+    from bibr.field_states import FieldScope, build_field_states
+    from bibr.validation import IssueSeverity, ValidationIssue
+
+    issue = ValidationIssue("VAL_REGISTRY_DOI_CHANGED", IssueSeverity.WARNING, "changed")
+    records = build_field_states(
+        present={"title": True, "author": True, "abstract": True},
+        sources={"title": "llm", "author": "llm_review", "abstract": "llm"},
+        scope=FieldScope(),
+        issues=[issue],
+        warnings=[],
+    )
+    assert records["title"].issues == ("VAL_REGISTRY_DOI_CHANGED",)
+    assert records["author"].issues == ("VAL_REGISTRY_DOI_CHANGED",)
+    assert records["abstract"].issues == ()
 
 
 def test_receipt_reaches_the_export_diagnostics():

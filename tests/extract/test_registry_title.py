@@ -118,6 +118,23 @@ def test_record_subtitle_must_be_printed_with_the_title():
     assert _rejection(decision) == "no printed row is the record's title"
 
 
+def test_record_subtitle_on_the_row_below_is_joined_as_printed():
+    rows = [
+        _candidate("t1", "Sleep and memory"),
+        _candidate("t2", "A meta-analysis", roles=("other",), reading_order=1),
+        _candidate("byline", "Ada Lovelace", roles=("byline",), reading_order=2),
+    ]
+    record = _record("Sleep and Memory", subtitle="a meta-analysis")
+    decision = _decide(rows, "Memory, sleep and the ageing brain", record)
+    assert decision.value == "Sleep and memory: A meta-analysis"
+    assert decision.selected.evidence_ids == ("t1", "t2", "metadata_match:crossref")
+
+    # The row below must print the record's subtitle.
+    rows[1] = _candidate("t2", "A systematic review", roles=("other",), reading_order=1)
+    decision = _decide(rows, "Memory, sleep and the ageing brain", record)
+    assert _rejection(decision) == "no printed row is the record's title"
+
+
 def test_agreeing_title_is_kept():
     decision = _decide([_candidate("t1", ENGLISH)], ENGLISH, _record())
     assert decision.value == ENGLISH and decision.rule == "extracted"
@@ -158,6 +175,31 @@ def test_translation_not_printed_first_is_refused():
     decision = _decide(rows, extracted, _record())
     assert decision.value == extracted
     assert _rejection(decision) == "the row is a translation not printed first"
+
+
+def test_row_printed_after_another_version_is_refused_whatever_was_extracted():
+    """The extracted title is neither printed nor a version of the record's; the
+    record's English row still follows the German title printed first."""
+    rows = [
+        _candidate("de", GERMAN),
+        _candidate("en", ENGLISH, reading_order=1),
+    ]
+    decision = _decide(rows, "Sleep, memory and ageing", _record())
+    assert decision.value == "Sleep, memory and ageing"
+    assert _rejection(decision) == "the row is a translation not printed first"
+
+
+def test_same_language_title_printed_before_the_row_is_kept():
+    """The printed-first rule is not limited to translations: a series line the
+    model took, printed above the record's title row, stays."""
+    series = "Lecture notes on the cognitive science of everyday reasoning"
+    rows = [
+        _candidate("s", series),
+        _candidate("t", ENGLISH, reading_order=1),
+    ]
+    decision = _decide(rows, series, _record())
+    assert decision.value == series
+    assert _rejection(decision) == "the title is printed before the row"
 
 
 def test_title_printed_before_the_row_outside_title_rows_is_kept():
@@ -279,7 +321,7 @@ def _resolution(rows):
     )
 
 
-async def _post_parse_with_record(*, rule_on: bool):
+async def _post_parse_with_record(*, rule_on: bool, extract=None):
     from unittest.mock import AsyncMock, MagicMock, patch
 
     from bibr.models import PaperMetadata
@@ -292,8 +334,10 @@ async def _post_parse_with_record(*, rule_on: bool):
         contents.front_matter_resolution = resolution
         return ()
 
-    async def extract(contents, file_hash, no_llm, llm_client, **kwargs):  # noqa: ARG001
+    async def extracted(contents, file_hash, no_llm, llm_client, **kwargs):  # noqa: ARG001
         return PaperMetadata(doi="", title="Sleep in older adults", published="2021")
+
+    extract = extract or extracted
 
     async def lookup(metadata, **_kwargs):
         from bibr.enrich.references import EnrichmentReport
@@ -359,3 +403,50 @@ async def test_post_parse_without_the_rule_keeps_the_extracted_title():
     assert paper.registry_check.record_backed == set()
     # The record is still there for the comparison at export.
     assert paper.metadata.match
+
+
+async def test_post_parse_keeps_the_first_answer_of_a_record_backed_review():
+    """The review's title won over a printed first answer because the record
+    agreed; a final DOI other than the early one restores the first answer
+    with its own issues, and the review title's issues leave with it."""
+    from pathlib import Path
+
+    from bibr.extract.field_decisions import FieldCandidate, field_decisions_of
+    from bibr.models import PaperMetadata
+    from bibr.pipeline.stages.identity import IdentityValidationStage
+    from bibr.pipeline.state import FileState
+    from bibr.validation import IssueSeverity, ValidationIssue
+    from tests.pipeline.test_registry_check import _contents
+
+    first_issue = ValidationIssue("VAL_TITLE_REGROUNDED", IssueSeverity.WARNING, "first answer")
+    review_issue = ValidationIssue("VAL_TITLE_REGROUNDED", IssueSeverity.WARNING, "review")
+
+    async def reviewed(contents, file_hash, no_llm, llm_client, **kwargs):  # noqa: ARG001
+        check = kwargs["registry_check"]
+        await check.settle("2021")
+        # What the core extractor leaves when the review's answer was kept.
+        check.record_backed.add("title")
+        check.primary_title = FieldCandidate(
+            "title", "llm", "Sleep in older adults", issues=(first_issue,)
+        )
+        metadata = PaperMetadata(doi="", title=ENGLISH, published="2021")
+        field_decisions_of(metadata).propose(
+            FieldCandidate("title", "llm_review", ENGLISH, issues=(review_issue,))
+        )
+        return metadata
+
+    paper = await _post_parse_with_record(rule_on=False, extract=reviewed)
+    assert paper.metadata.title == ENGLISH
+    assert paper.field_decisions.get("title").source == "llm_review"
+    assert paper.registry_check.title_fallback.value == "Sleep in older adults"
+    assert review_issue in paper.validation_issues
+
+    paper.contents = _contents("https://doi.org/10.5555/final.9")
+    fs = FileState(path=Path("x.txt"))
+    fs.paper = paper
+    IdentityValidationStage._validate(fs)
+    assert paper.metadata.title == "Sleep in older adults"
+    assert paper.field_decisions.get("title").source == "llm"
+    assert review_issue not in paper.validation_issues
+    assert first_issue in paper.validation_issues
+    assert any(i.code == "VAL_REGISTRY_DOI_CHANGED" for i in paper.validation_issues)
