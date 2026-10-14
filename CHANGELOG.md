@@ -20,6 +20,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `batch` extra now installs `anthropic<1`, and with 1.0 or later bibr stops before the first
   call with an error that names the fix. With bibr 0.7.0, run `pip install "anthropic>=0.40,<1"`.
 
+## [0.7.1] - 2026-10-14
+
+### Changed
+
+- The section classifier is retrained on a larger, re-labelled corpus of
+  section headings with the same model, input template and labels, and the
+  default pin moves to `scienceverse/bibr-section-classifier@cf7c2d85`. On
+  bibr's section gold, macro-F1 on the headings the alias lookup sends to the
+  model rises from 0.42 to 0.68 for English and from 0.17 to 0.22 for other
+  languages. Speed and download size are unchanged. Set
+  `ML_SECTION_CLASSIFIER_REVISION=ee1a83db01ce947e3a5eb87dfde7221328f4b207`
+  to keep the previous model.
+
 ## [0.7.0] - 2026-10-13
 
 ### Added
