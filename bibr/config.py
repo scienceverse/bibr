@@ -625,6 +625,18 @@ class LlmOptions(_BibrSettings):
         description="Experimental: merge title/abstract/keywords + authors + classification into "
         "one LLM call instead of three, saving repeated front-matter tokens. Off until quality-gated.",
     )
+    # Experimental: the front-matter calls stop retyping text the prompt already
+    # holds. Decoding time follows output tokens, and the abstract is most of the
+    # title/keywords call's (bibr.clients.pointer_outputs).
+    pointer_outputs: bool = Field(
+        False,
+        description="Experimental: the title/keywords call names the abstract's first and last "
+        "words and bibr copies the abstract from the front matter, and the authors call lists "
+        "each affiliation once and numbers it. Cuts the output tokens the slower of the two "
+        "calls writes by about a third. Falls back to the verbatim call when the abstract "
+        "cannot be placed. Not used by the merged call or the NuExtract native backend. Off "
+        "until quality-gated.",
+    )
     validation_attempts: int | None = Field(
         None,
         ge=1,
