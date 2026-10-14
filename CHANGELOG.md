@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-14
+
 ### Fixed
 
 - `LLM_PROVIDER=anthropic` works with Claude Haiku 5.5, Sonnet 5.5, Opus 5.5 and Fable 5.1.
@@ -18,7 +20,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `messages.create`, so calls that sent one raised a `TypeError`. It also moved to httpx2,
   which can't use the timeout bibr sets, so the rest failed as "Connection error.". The
   `batch` extra now installs `anthropic<1`, and with 1.0 or later bibr stops before the first
-  call with an error that names the fix. With bibr 0.7.0, run `pip install "anthropic>=0.40,<1"`.
+  call with an error that names the fix. With bibr 0.7.0 or 0.7.1, run
+  `pip install "anthropic>=0.40,<1"`.
 
 ## [0.7.1] - 2026-10-14
 
