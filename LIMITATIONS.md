@@ -38,6 +38,10 @@ next. Every result has a date, because bibr changes every week.
 
 ### Reading the paper
 
+These results use Qwen3.8-27B, a large open model, to read the front matter
+(title, authors, abstract and so on). The smaller local models that `bibr setup`
+picks score lower there; see [Choosing an extraction model](#choosing-an-extraction-model).
+
 | Part | What it does | Rating | How we know | Latest result |
 |---|---|---|---|---|
 | Whole paper | Gets the title, DOI, author names and the reference list right, all at once | 🟢 Strong | Answer key | 96.0% of 200 social-science papers (GROBID 0.9.1: 52.5%). 89.1% of 192 papers sampled across fields (GROBID: 46.4%). With a 27B open model; see [Choosing an extraction model](#choosing-an-extraction-model). Oct 2026 |
