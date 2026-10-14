@@ -154,6 +154,11 @@ def test_full_names_are_never_merged_into_one_person(printed, expected):
         ("Sheffi, Y., & Rice Jr., J. B.", [P("Sheffi", "Y."), P("Rice", "J. B.", "Jr.")]),
         # given name first
         ("Martin Luther King Jr.", [P("King", "Martin Luther", "Jr.")]),
+        ("Doe, Jane, and John Roe, Jr.", [P("Doe", "Jane"), P("Roe", "John", "Jr.")]),
+        (
+            "Doe, Jane, John Roe, Jr., Ann Lee",
+            [P("Doe", "Jane"), P("Roe", "John", "Jr."), P("Lee", "Ann")],
+        ),
     ],
 )
 def test_suffixes_and_initials_that_look_like_them(printed, expected):
