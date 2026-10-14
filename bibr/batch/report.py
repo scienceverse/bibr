@@ -133,6 +133,18 @@ def compute_report(
                 warning_counts[str(key)] = warning_counts.get(str(key), 0) + int(n)
     top_warnings = sorted(warning_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:TOP_WARNINGS]
 
+    # Ledger lines carry memory only when the run had PIPELINE_MEMORY_PROFILE on.
+    peak_rss = [p for p in (_number(r.get("peak_rss_mib")) for r in ok_attempts) if p is not None]
+    stage_peaks: dict[str, list[float]] = {}
+    for row in ok_attempts:
+        peaks = row.get("stage_peak_rss_mib")
+        if not isinstance(peaks, Mapping):
+            continue
+        for stage, value in peaks.items():
+            peak = _number(value)
+            if peak is not None:
+                stage_peaks.setdefault(str(stage), []).append(peak)
+
     return {
         "run_id": run_id,
         "papers": {
@@ -174,11 +186,31 @@ def compute_report(
             "papers_with_warnings": papers_with_warnings,
             "top": [{"warning": key, "count": count} for key, count in top_warnings],
         },
+        "memory": {
+            "papers": len(peak_rss),
+            "overlapped_papers": sum(1 for r in ok_attempts if r.get("memory_overlapped") is True),
+            "peak_rss_mib": _spread(peak_rss),
+            "stages": {stage: _spread(values) for stage, values in stage_peaks.items()},
+        },
     }
 
 
 def _round(value: float | None, digits: int = 3) -> float | None:
     return None if value is None else round(value, digits)
+
+
+def _spread(values: Sequence[float]) -> dict[str, Any]:
+    """``n``, ``p50``, ``p90`` and ``max`` of *values* (MiB, one decimal)."""
+    return {
+        "n": len(values),
+        "p50": _round(_percentile(values, 0.5), 1),
+        "p90": _round(_percentile(values, 0.9), 1),
+        "max": _round(max(values), 1) if values else None,
+    }
+
+
+def _fmt_mib(value: float | None) -> str:
+    return "—" if value is None else f"{value:,.0f}"
 
 
 def _fmt_seconds(value: float | None) -> str:
@@ -263,7 +295,32 @@ def render_report(report: Mapping[str, Any], *, title: str = "bibr batch report"
         )
     )
 
+    memory = report.get("memory") or {}
+    peak = memory.get("peak_rss_mib") or {}
+    if memory.get("papers"):
+        rows.append(
+            (
+                "peak rss",
+                f"p50 {_fmt_mib(peak['p50'])} MiB · p90 {_fmt_mib(peak['p90'])} MiB · "
+                f"max {_fmt_mib(peak['max'])} MiB (n={peak['n']})",
+            )
+        )
+
     width = max(len(label) for label, _ in rows)
     lines = [title]
     lines.extend(f"  {label:<{width}}  {value}" for label, value in rows)
+    stages = memory.get("stages") or {}
+    if stages:
+        stage_width = max(len(stage) for stage in stages)
+        lines.append("  peak rss by stage (MiB: p50 / p90 / max)")
+        lines.extend(
+            f"    {stage:<{stage_width}}  {_fmt_mib(spread['p50'])} / "
+            f"{_fmt_mib(spread['p90'])} / {_fmt_mib(spread['max'])}"
+            for stage, spread in stages.items()
+        )
+        if memory.get("overlapped_papers"):
+            lines.append(
+                f"    {memory['overlapped_papers']} papers had stages that ran beside another "
+                "stage, so those peaks are shared (PIPELINE_STREAM_BACKHALF=false separates them)"
+            )
     return "\n".join(lines)

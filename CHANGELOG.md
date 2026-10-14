@@ -28,6 +28,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   with model servers or other runs. Both default to `0`, ONNX Runtime's own
   sizing, so nothing changes unless you set them.
 
+### Added — export schema 12.3 (additive)
+
+The export moves to schema `12.3`, which adds one optional block; every 12.2
+export is still valid input for the 12.x reader.
+
+- `PIPELINE_MEMORY_PROFILE=true` measures the process's memory around every
+  pipeline stage: the peak resident memory during the stage, resident memory
+  and swap at its end, the change in resident memory, and how many files were
+  in the stage. The record is exported as `extraction.timings.memory`, next to
+  the stage timings, and is absent when the setting is off (the default). On
+  Linux the peak is reset at the start of each stage; elsewhere the peak is the
+  process's lifetime peak and the record says so (`peak_reset: false`). A stage
+  that ran while another stage was running, as with back-half streaming, is
+  flagged `overlapped`. `PIPELINE_MEMORY_PROFILE_TRACEMALLOC=true` adds the
+  peak of Python's own allocations per stage, at a large speed cost.
+- With profiling on, `bibr batch` ledger lines carry `peak_rss_mib`,
+  `stage_peak_rss_mib` and `memory_overlapped`, and `bibr batch report` prints
+  the p50, p90 and maximum peak resident memory per paper and per stage.
+- Loading the layout model, the sentence segmenter, the NER reference parser
+  or a classifier logs the change in resident memory and the load time, at
+  DEBUG, or at INFO with profiling on. The batch guide's new "Measuring memory"
+  section covers all of it.
+
 ### Changed
 
 - The vLLM servers bibr starts get `VLLM_NO_USAGE_STATS=1`, and `bibr demo` sets

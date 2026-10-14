@@ -232,6 +232,7 @@ One JSON object per line of `outcomes.jsonl`:
 | `duration_s` | float | remote: submit-to-result wall clock; local: the export's own pipeline time, else the chunk's |
 | `pipeline_seconds` | float / null | `extraction.timings.total_seconds` from the export |
 | `stage_times` | {stage: seconds} / null | `extraction.timings.stages` from the export |
+| `peak_rss_mib`, `stage_peak_rss_mib`, `memory_overlapped` | float, {stage: MiB}, bool | only with `PIPELINE_MEMORY_PROFILE` on: from `extraction.timings.memory` (see [Measuring memory](#measuring-memory)) |
 | `llm_tokens`, `llm_input_tokens`, `llm_output_tokens` | int | from `extraction.usage.totals` (legacy: `llm_usage`) |
 | `n_refs`, `n_matched` | int | `bib` rows and accepted `bib_match` rows (falls back to `extraction.enrichment.refs_enriched`) |
 | `n_sentences` | int | `text` rows |
@@ -305,6 +306,87 @@ bibr batch report · results/
   (`extraction.warnings[].code`). An export older than 12.0 has prose warnings,
   counted by the text before the first colon (`VALIDATION:<severity>:<CODE>`
   for validation findings).
+- **peak rss** and the per-stage block below the table appear only when the
+  run recorded memory; see [Measuring memory](#measuring-memory).
 
 The ledger is plain JSONL, so anything else is one `pandas.read_json(...,
 lines=True)` away.
+
+## Measuring memory
+
+To see where a run's memory goes, set `PIPELINE_MEMORY_PROFILE=true`. Every
+pipeline stage then records the bibr process's memory while it ran. The setting
+only measures: it changes nothing about how memory is used, and with it off
+(the default) nothing is read or recorded.
+
+```bash
+PIPELINE_MEMORY_PROFILE=true PIPELINE_STREAM_BACKHALF=false \
+  bibr batch corpus/ --out results/ --batch-size 8
+bibr batch report results/
+```
+
+Each export then carries `extraction.timings.memory`. For every stage it gives
+`peak_rss_mib`, the highest resident memory while the stage ran; `rss_mib` and
+`swap_mib` when it ended; `rss_delta_mib`, what the stage left resident after
+its boundary freed what it frees (page images after OCR, for example);
+`files`, the papers that went through it together; and two flags. The fused
+local render/OCR stage also reports its `layout`, `native_text` and `ocr`
+passes on their own.
+
+Memory belongs to the process, not to one paper:
+
+- A stage runs over a whole chunk (`--batch-size`) or OCR window at once, so
+  its peak is for its `files` papers together.
+- `overlapped: true` means another stage ran at the same time, and the peak
+  covers both. With a cloud LLM, a local run streams each OCR window's parse,
+  extract and export under the next window's OCR, so most stages overlap.
+  `PIPELINE_STREAM_BACKHALF=false` runs the stages one after another, which
+  gives each stage its own peak but makes the run slower. Use it for a
+  measuring run.
+- `peak_reset: false` means the peak could not be reset when the stage
+  started, so it is the process's highest so far. Only Linux allows the
+  reset; on macOS every peak is the process's.
+
+The ledger copies `peak_rss_mib`, `stage_peak_rss_mib` and `memory_overlapped`
+from each export, and `bibr batch report` adds the spread over papers:
+
+```
+  peak rss     p50 2,141 MiB · p90 2,610 MiB · max 2,702 MiB (n=50)
+  peak rss by stage (MiB: p50 / p90 / max)
+    validate         1,288 / 1,301 / 1,305
+    …
+    layout           2,090 / 2,577 / 2,661
+    native_text      1,702 / 1,740 / 1,751
+    ocr              1,698 / 1,733 / 1,745
+    render_ocr       2,141 / 2,610 / 2,702
+    classifiers      1,720 / 1,744 / 1,760
+    …
+```
+
+Stages are listed in the order they finished, so the render/OCR passes come
+before the fused stage that holds them.
+
+Model loads log the memory they add, at INFO with the setting on (DEBUG
+otherwise): `NER parser loaded: RSS +690 MiB (now 2310 MiB, 3.2 s)`. The
+layout model, the sentence segmenter, the section and paper classifiers and the
+NER reference parser are each logged once, when they load.
+
+`PIPELINE_MEMORY_PROFILE_TRACEMALLOC=true` adds `python_peak_mib`, the peak of
+Python's own allocations, NumPy arrays included. ONNX Runtime's memory and image
+buffers allocated in C are not counted, and tracing slows allocation-heavy
+stages.
+
+What the memory settings trade:
+
+- `--memory aggressive` unloads the layout model after every OCR window and
+  the sentence segmenter after every chunk (each reloads for the next),
+  auto-sizes chunks to 3 files and turns back-half streaming off. Each of
+  those costs throughput, so use it only on a machine that cannot hold the
+  models; it is auto-selected with 8 GB of RAM or less, or a CUDA GPU with
+  8 GB of VRAM or less.
+- `--batch-size` sets how many papers share one pass through each stage;
+  `OCR_MAX_CONCURRENT_FILES` sets how many papers' page images are held at
+  once with a remote OCR engine.
+- `ML_ORT_INTRA_OP_THREADS` caps the CPU threads each ONNX Runtime session
+  uses (see [Configuration](configuration.md#local-model-runtime)), for a host
+  shared with model servers or other runs.

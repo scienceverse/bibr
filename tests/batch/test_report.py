@@ -159,3 +159,67 @@ def test_render_report_is_compact_and_json_roundtrips():
     )
     assert any("VALIDATION:warning:X ×3" in line for line in lines)
     assert json.loads(json.dumps(report)) == report
+
+
+# --- memory (PIPELINE_MEMORY_PROFILE) -----------------------------------------
+
+
+def _memory_ledger():
+    return [
+        _row(
+            "a",
+            peak_rss_mib=1000.0,
+            stage_peak_rss_mib={"layout": 900.0, "extract": 1000.0},
+            memory_overlapped=False,
+        ),
+        _row(
+            "b",
+            peak_rss_mib=2000.0,
+            stage_peak_rss_mib={"layout": 1500.0, "extract": 2000.0},
+            memory_overlapped=True,
+        ),
+        _row(
+            "c",
+            peak_rss_mib=3000.0,
+            stage_peak_rss_mib={"layout": 2400.0},
+            memory_overlapped=False,
+        ),
+        # Failed attempts carry no export, so no memory.
+        _row("d", status="failed", error_code="REF_PARSE"),
+    ]
+
+
+def test_memory_percentiles_over_papers_and_stages():
+    memory = compute_report(_memory_ledger())["memory"]
+
+    assert memory["papers"] == 3
+    assert memory["overlapped_papers"] == 1
+    assert memory["peak_rss_mib"] == {"n": 3, "p50": 2000.0, "p90": 2800.0, "max": 3000.0}
+    assert memory["stages"] == {
+        "layout": {"n": 3, "p50": 1500.0, "p90": 2220.0, "max": 2400.0},
+        "extract": {"n": 2, "p50": 1500.0, "p90": 1900.0, "max": 2000.0},
+    }
+
+
+def test_memory_rows_are_rendered_only_when_the_run_recorded_memory():
+    text = render_report(compute_report(_memory_ledger()))
+    lines = text.splitlines()
+
+    assert any(
+        line.strip().startswith("peak rss")
+        and "p50 2,000 MiB · p90 2,800 MiB · max 3,000 MiB (n=3)" in line
+        for line in lines
+    )
+    assert "  peak rss by stage (MiB: p50 / p90 / max)" in lines
+    assert "    layout   1,500 / 2,220 / 2,400" in lines
+    assert "    extract  1,500 / 1,900 / 2,000" in lines
+    assert any("1 papers had stages that ran beside another stage" in line for line in lines)
+
+    plain = render_report(compute_report(_ledger()))
+    assert "peak rss" not in plain
+    assert compute_report(_ledger())["memory"] == {
+        "papers": 0,
+        "overlapped_papers": 0,
+        "peak_rss_mib": {"n": 0, "p50": None, "p90": None, "max": None},
+        "stages": {},
+    }

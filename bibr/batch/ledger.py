@@ -21,7 +21,9 @@ Schema (see ``docs/guides/batch.md`` for the table):
 error, started_at, finished_at, duration_s, stage_times, llm_tokens,
 llm_input_tokens, llm_output_tokens, n_refs, n_matched, n_sentences,
 warnings, bibr_version, build_sha, executor, attempt, run_id`` plus, for the
-remote executor, ``job_id`` and ``retries``.
+remote executor, ``job_id`` and ``retries``, and, when the export carries
+per-stage memory (``PIPELINE_MEMORY_PROFILE``), ``peak_rss_mib``,
+``stage_peak_rss_mib`` and ``memory_overlapped``.
 """
 
 from __future__ import annotations
@@ -64,6 +66,9 @@ NEVER_RAN_CODES = frozenset({INTERRUPTED, "http_401", "http_403"})
 # success; then it waits for ``--retry-failed``, so a batch still converges.
 # Timeouts are not here at all: a paper can be too slow on its own.
 MAX_UNSETTLED_FAILURES = 3
+# Ledger fields copied from ``extraction.timings.memory``; present only when
+# the run had PIPELINE_MEMORY_PROFILE on.
+MEMORY_FIELDS = ("peak_rss_mib", "stage_peak_rss_mib", "memory_overlapped")
 
 
 def is_unsettled_failure(entry: Mapping[str, Any]) -> bool:
@@ -157,6 +162,38 @@ def _llm_tokens(usage: object) -> tuple[int, int, int]:
     return total_in, total_out, total
 
 
+def _number_or_none(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def summarize_memory(timings: object) -> dict[str, Any]:
+    """Ledger memory fields from ``extraction.timings.memory`` (12.3+).
+
+    Empty when the export has no memory block (``PIPELINE_MEMORY_PROFILE``
+    was off), so a ledger line carries these keys only when it was on.
+    """
+    memory = timings.get("memory") if isinstance(timings, Mapping) else None
+    if not isinstance(memory, Mapping):
+        return {}
+    stages = memory.get("stages")
+    rows = stages if isinstance(stages, Mapping) else {}
+    stage_peaks = {
+        str(stage): peak
+        for stage, row in rows.items()
+        if isinstance(row, Mapping)
+        and (peak := _number_or_none(row.get("peak_rss_mib"))) is not None
+    }
+    return {
+        "peak_rss_mib": _number_or_none(memory.get("peak_rss_mib")),
+        "stage_peak_rss_mib": stage_peaks or None,
+        "memory_overlapped": any(
+            isinstance(row, Mapping) and row.get("overlapped") is True for row in rows.values()
+        ),
+    }
+
+
 def summarize_export(data: Mapping[str, Any] | None) -> dict[str, Any]:
     """Per-paper facts for the ledger — never the export itself."""
     if not isinstance(data, Mapping):
@@ -211,6 +248,7 @@ def summarize_export(data: Mapping[str, Any] | None) -> dict[str, Any]:
 
     return {
         "stage_times": stage_times,
+        **summarize_memory(timings),
         "total_seconds": float(total_seconds)
         if isinstance(total_seconds, (int, float)) and not isinstance(total_seconds, bool)
         else None,
@@ -536,6 +574,8 @@ class Ledger:
             "duration_s": round(duration, 3) if isinstance(duration, (int, float)) else None,
             "pipeline_seconds": summary.get("total_seconds"),
             "stage_times": summary.get("stage_times"),
+            # Only with PIPELINE_MEMORY_PROFILE on (the export has timings.memory).
+            **{key: summary[key] for key in MEMORY_FIELDS if key in summary},
             "llm_tokens": summary.get("llm_tokens"),
             "llm_input_tokens": summary.get("llm_input_tokens"),
             "llm_output_tokens": summary.get("llm_output_tokens"),
