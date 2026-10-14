@@ -250,6 +250,37 @@ class TestExpandAuthors:
         authors = expand_authors(self._answer(["U1", "string", "U3"], [2, 3])).authors
         assert authors[0].affiliation == "U3"
 
+    @pytest.mark.parametrize(
+        "stand_in",
+        [
+            "<UNKNOWN>",
+            "Affiliation 2",
+            "Affiliation 1 (A0, A1)",
+            "Affiliation 3 not printed on this page",
+            "Unknown affiliation 4 (not printed in the supplied text)",
+            "N/A",
+        ],
+    )
+    def test_a_stand_in_for_an_unprinted_affiliation_is_left_empty(self, stand_in, caplog):
+        with caplog.at_level(logging.WARNING, logger="bibr.clients.pointer_outputs"):
+            authors = expand_authors(self._answer(["U1", stand_in], [1, 2], [2])).authors
+        assert [a.affiliation for a in authors] == ["U1", ""]
+        assert "1 stand-in(s)" in caplog.text
+
+    @pytest.mark.parametrize(
+        "name",
+        ["Institute for Affiliation Studies", "Affiliation 1: University of Twente", "Nonesuch"],
+    )
+    def test_an_institution_is_not_taken_for_a_stand_in(self, name):
+        assert expand_authors(self._answer([name], [1])).authors[0].affiliation == name
+
+    def test_numbers_without_a_list_give_no_answer(self):
+        assert expand_authors(self._answer([], [1], [1, 2])) is None
+
+    def test_no_numbers_and_no_list_is_an_answer(self):
+        authors = expand_authors(self._answer([], [], [])).authors
+        assert [a.affiliation for a in authors] == ["", ""]
+
     @pytest.mark.parametrize("field", ["email", "corresponding", "orcid"])
     def test_contact_fields_are_carried_over(self, field):
         value = {"email": "a@b.org", "corresponding": True, "orcid": "0000-0002-1825-0097"}[field]

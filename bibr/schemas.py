@@ -606,7 +606,7 @@ class AuthorPointerLLM(BaseModel):
         default_factory=list,
         description=(
             "The numbers of this author's affiliations in the affiliations list "
-            "(1 is the first entry), in printed order"
+            "(1 is the first entry), in printed order. [] when none is printed"
         ),
     )
     email: str | None = _same_field(AuthorLLM, "email")
@@ -636,9 +636,9 @@ class AuthorsPointerLLM(LLMResponse):
     affiliations: list[str] = Field(
         default_factory=list,
         description=(
-            "Every distinct affiliation of the authors, each written once as the "
-            "full institution name(s), in printed order. Authors refer to them by "
-            "number: 1 is the first entry"
+            "Every distinct affiliation printed for the authors, each written once "
+            "as the full institution name(s), in printed order. Authors refer to "
+            "them by number: 1 is the first entry. [] when none is printed"
         ),
     )
     authors: list[AuthorPointerLLM] = Field(description="The authors of the paper")

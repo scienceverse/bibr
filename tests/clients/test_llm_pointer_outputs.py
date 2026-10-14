@@ -145,6 +145,24 @@ async def test_invalid_pointer_authors_fall_back_to_the_verbatim_call(monkeypatc
     assert result.authors[0].family == "Doe"
 
 
+async def test_numbered_affiliations_without_a_list_fall_back_to_the_verbatim_call(monkeypatch):
+    unlisted = AuthorsPointerLLM.model_validate(
+        {
+            "affiliations": [],
+            "authors": [
+                {"given": "Jane", "family": "Doe", "affiliation_ids": [1]},
+                {"given": "John", "family": "Smith", "affiliation_ids": [1, 2]},
+            ],
+        }
+    )
+    client, calls = _client(
+        monkeypatch, {AuthorsPointerLLM: unlisted, AuthorsLLM: _VERBATIM_AUTHORS}
+    )
+    result = await client.extract_authors(_TEXT)
+    assert calls == [AuthorsPointerLLM, AuthorsLLM]
+    assert result is _VERBATIM_AUTHORS
+
+
 async def test_a_service_failure_raises_without_a_second_call(monkeypatch):
     client, calls = _client(
         monkeypatch, {TitleKeywordsPointerLLM: TimeoutError("LLM call timed out after 30s")}

@@ -325,6 +325,11 @@ class TestPointerPrompts:
         assert "affiliation_ids: [1, 2]" in instruction
         assert 'join them with "; "' not in instruction
 
+    def test_author_prompt_lists_only_printed_affiliations(self):
+        instruction = self._instruction("authors_pointers")
+        assert "affiliation the fenced text does not print gets no entry" in instruction
+        assert 'Never write a stand-in such as "<UNKNOWN>"' in instruction
+
     @pytest.mark.parametrize(
         ("verbatim", "pointers", "rules"),
         [

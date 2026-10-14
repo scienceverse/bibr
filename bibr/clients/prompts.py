@@ -209,11 +209,15 @@ _AUTHOR_AFFILIATION_RULES = """Affiliation rules:
 # by number (bibr.clients.pointer_outputs.expand_authors), instead of the full
 # institution name being written out again for every author who shares it.
 _AUTHOR_AFFILIATION_POINTER_RULES = """Affiliation rules:
-- affiliations: every distinct affiliation of the authors, each written once as
-  the actual institution name(s), in the order the page prints them.
+- affiliations: every distinct affiliation the fenced text prints for the authors,
+  each written once as the actual institution name(s), in the order the page
+  prints them. [] when it prints none.
 - Authors often have superscript numbers/symbols (e.g. "1,2" or "†") that map to a
   numbered affiliation list elsewhere on the page. Resolve these to entries of your
   affiliations list. Never put raw numbers or symbols in an affiliation.
+- A marker whose affiliation the fenced text does not print gets no entry and no
+  number. Never write a stand-in such as "<UNKNOWN>" or "Affiliation 1", and never
+  fill an affiliation in from memory or from where the study took place.
 - affiliation_ids: the numbers of the author's entries in your affiliations list,
   counting from 1, in printed order. [] when no affiliation is printed for the author.
 - Example: author has superscripts "1,2", and the list says

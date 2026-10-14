@@ -11,7 +11,8 @@ the abstract and the per-author affiliations are most of those tokens:
 * authors lists each affiliation once and gives every author the numbers of
   its affiliations (:class:`~bibr.schemas.AuthorsPointerLLM`).
   :func:`expand_authors` writes each author's affiliation string back out,
-  joined with "; " as the verbatim prompt asks for.
+  joined with "; " as the verbatim prompt asks for. A stand-in written for an
+  affiliation the text does not print ("<UNKNOWN>") is left empty.
 
 Both return the verbatim response models (:class:`~bibr.schemas.TitleKeywordsLLM`,
 :class:`~bibr.schemas.AuthorsLLM`), so nothing downstream changes.
@@ -73,6 +74,18 @@ _BLOCK_BREAK_RE = re.compile(r"(?<!\r)\n")
 _REPEAT_PROBE = 60
 _REPEAT_LEAD = 40
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+# A stand-in the model wrote for an affiliation the text does not print. Matched
+# on the whole entry, so an institution's own name is never caught: "<UNKNOWN>",
+# "Affiliation 3", "Affiliation 1 (Jane Doe, John Smith)", "N/A".
+_STAND_IN_RE = re.compile(
+    r"<[^<>]*>|(?:unknown\s+)?affiliation\s*#?\s*\d+(?:\s*\(.*\))?|unknown|n/?a|none|null|\W*",
+    re.IGNORECASE | re.DOTALL,
+)
+# ... or a note saying so: "Affiliation 3 not printed on this page".
+_NOT_PRINTED_RE = re.compile(
+    r"\bnot\s+(?:printed|given|provided|shown|listed|stated|specified|available)\b",
+    re.IGNORECASE,
+)
 # A conflict-of-interest footnote that the page prints inside the abstract.
 # Each pattern is one kind of statement about the authors. One kind alone also
 # turns up in abstracts about employment or company ownership; two do not.
@@ -303,14 +316,27 @@ def resolve_title_keywords(answer: TitleKeywordsPointerLLM, source: str) -> Reso
     )
 
 
-def expand_authors(answer: AuthorsPointerLLM) -> AuthorsLLM:
+def _is_stand_in(entry: str) -> bool:
+    return bool(_STAND_IN_RE.fullmatch(entry.strip()) or _NOT_PRINTED_RE.search(entry))
+
+
+def expand_authors(answer: AuthorsPointerLLM) -> AuthorsLLM | None:
     """Write each author's affiliations back out from the numbered list.
 
     Numbers count from 1. A list that uses 0 and never the last number was
-    counted from 0, so it is shifted. A number outside the list is dropped.
+    counted from 0, so it is shifted. A number outside the list is dropped, and
+    so is one that points at a stand-in the model wrote for an affiliation the
+    text does not print ("<UNKNOWN>", "Affiliation 3"): the verbatim answer
+    leaves such an affiliation empty too.
+
+    ``None`` when authors give numbers but the list is empty: the answer lost
+    its affiliations, and the verbatim call is asked instead.
     """
-    names = [name.strip() for name in answer.affiliations]
     numbers = [n for author in answer.authors for n in author.affiliation_ids]
+    if numbers and not answer.affiliations:
+        return None
+    names = ["" if _is_stand_in(name) else name.strip() for name in answer.affiliations]
+    stand_ins = sum(1 for name in answer.affiliations if name.strip() and _is_stand_in(name))
     shift = 1 if 0 in numbers and len(names) not in numbers else 0
     authors: list[AuthorLLM] = []
     dropped = 0
@@ -318,11 +344,10 @@ def expand_authors(answer: AuthorsPointerLLM) -> AuthorsLLM:
         affiliation: list[str] = []
         for number in author.affiliation_ids:
             index = number + shift - 1
-            if 0 <= index < len(names) and names[index]:
-                if names[index] not in affiliation:
-                    affiliation.append(names[index])
-            else:
+            if not 0 <= index < len(names):
                 dropped += 1
+            elif names[index] and names[index] not in affiliation:
+                affiliation.append(names[index])
         authors.append(
             AuthorLLM(
                 given=author.given,
@@ -338,5 +363,11 @@ def expand_authors(answer: AuthorsPointerLLM) -> AuthorsLLM:
             "Author answer named %d affiliation number(s) outside its list of %d",
             dropped,
             len(names),
+        )
+    if stand_ins:
+        logger.warning(
+            "Author answer wrote %d stand-in(s) for affiliations the text does not print; "
+            "left empty",
+            stand_ins,
         )
     return AuthorsLLM(authors=authors)

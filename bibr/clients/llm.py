@@ -2447,9 +2447,9 @@ class LLMClient:
         author.
 
         ``None`` hands the paper to the verbatim call, which can also salvage a
-        cut-off byline: the answer was cut off or did not parse. A failure a
-        re-ask cannot fix (the service did not answer) raises as the verbatim
-        call would.
+        cut-off byline: the answer was cut off, did not parse, or numbered
+        affiliations without listing any. A failure a re-ask cannot fix (the
+        service did not answer) raises as the verbatim call would.
         """
         spec = PROMPTS["authors_pointers"]
         capped_text = self._cap_input(text, self._settings)
@@ -2481,8 +2481,16 @@ class LLMClient:
                 file_hash,
             )
             return None
+        expanded = expand_authors(cast("AuthorsPointerLLM", answer))
+        if expanded is None:
+            logger.warning(
+                "The pointer author answer numbered affiliations it did not list; "
+                "asking for the verbatim answer (hash=%s)",
+                file_hash,
+            )
+            return None
         logger.info(f"Successfully extracted authors (hash={file_hash})")
-        return expand_authors(cast("AuthorsPointerLLM", answer))
+        return expanded
 
     @track_llm_usage
     async def extract_paper_classification(
