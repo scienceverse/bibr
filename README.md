@@ -20,7 +20,7 @@
 - Lets you choose local or cloud models, limit page ranges, and skip extraction stages.
 
 > **Alpha:** Expect bugs and uneven extraction quality. Current evaluation is strongest
-> for English-language social science papers. See [known limitations](https://bibr.org/limitations/).
+> for English-language social science papers. See [where bibr is strong and where it isn't](https://bibr.org/limitations/).
 
 ## Get started
 

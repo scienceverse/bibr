@@ -1,6 +1,6 @@
 # Known limitations
 
-Last updated: 2026-09-10
+Last updated: 2026-10-14
 
 bibr is alpha software. It already exports rich paper structure, metadata,
 references, cross-references, tables, figures, equations, and provenance fields,
@@ -9,6 +9,93 @@ but not every exported field has the same level of empirical validation.
 This file is deliberately conservative. A capability listed here may work well
 on many papers, but it should not yet be treated as fully verified across the
 range of scholarly publishing.
+
+## Where bibr is strong, and where it isn't
+
+We rate each part of bibr on two things: **how well it works** on the papers we
+tested, and **how we know**, meaning how strong that evidence is.
+
+Most results come from development sets: papers we looked at while building
+bibr. That flatters bibr. A sealed test on papers nobody has looked at comes
+next. Every result has a date, because bibr changes every week.
+
+**How well it works**
+
+- 🟢 **Strong**: right on nearly every paper we tested (about 9 in 10 or better)
+- 🟡 **Good**: right on most papers, with known weak spots
+- 🟠 **Fair**: useful, but check what it gives you
+- 🔴 **Weak**: often wrong or missing, so treat it as a first draft
+- ⚪ **Not measured**: bibr exports it, but we have no answer key for it yet
+
+**How we know**
+
+- **Sealed test**: scored on papers that were kept out of development.
+- **Answer key**: scored against a labelled answer key. Our answer keys were
+  transcribed from the PDFs by language models (Claude and Gemini) and
+  spot-checked by people, not checked line by line.
+- **Spot checks**: a small sample checked by hand.
+- **None yet**: no systematic measurement.
+
+### Reading the paper
+
+| Part | What it does | Rating | How we know | Latest result |
+|---|---|---|---|---|
+| Whole paper | Gets the title, DOI, author names and the reference list right, all at once | 🟢 Strong | Answer key | 96.0% of 200 social-science papers (GROBID 0.9.1: 52.5%). 89.1% of 192 papers sampled across fields (GROBID: 46.4%). With a 27B open model; see [Choosing an extraction model](#choosing-an-extraction-model). Oct 2026 |
+| Title and DOI | The paper's own title and DOI | 🟢 Strong | Answer key | Title exactly right 98.4%, DOI 100%, on 192 papers. Oct 2026 |
+| Author names | Every author's full name, in order | 🟢 Strong | Answer key | 0.99 F1 on 192 papers. Oct 2026 |
+| Abstract | The abstract text | 🟢 Strong | Answer key | 0.94 text overlap (ROUGE-L) on 178 papers. Oct 2026 |
+| Affiliations | Which institution each author belongs to | 🟡 Good | Answer key | Author–affiliation pairs: 0.90 F1 on 120 papers that weren't used to build this part, 0.96 on 99 that were. Oct 2026 |
+| Corresponding author | Who to write to | 🟠 Fair | Answer key | 0.74 F1 on 300 biomedical papers; finds about half on social-science papers. Oct 2026 |
+| Reference list | Finds and splits every printed reference | 🟢 Strong | Answer key | 0.96 F1 on 188 papers, 0.98 on 200. Oct 2026 |
+| Reference details | Authors, title, year, DOI, journal and pages of each reference | 🟢 Strong for authors, titles and years · 🟡 Good for DOIs · 🟠 Fair for journal names and pages | Answer key; sealed test for footnote styles | Authors 0.98, titles 0.96, years 0.98, DOIs 0.93, journals 0.73 on 192 papers (Oct 2026); pages 0.65 (Sep 2026). Footnote styles and other languages are harder: every field right on 42% of 9,728 German, Italian and English footnote references (sealed test) and 56% of 10,000 RenoBench references |
+| Reference reviewer (opt-in, experimental) | A small fine-tuned model (0.8B) double-checks the parsed references. Needs a GPU server | 🟡 Good, for the model on its own | Sealed test | Every field right on 82.6% of the sealed footnote references above (built-in parser: 42.4%), and on 68.0% of RenoBench references it never saw (55.7%). Not yet measured inside bibr. Oct 2026 |
+| Scanned papers | Papers from before 2000, read with bibr's own OCR | 🟡 Good | Answer key | 82.5% of 80 scans pass (GROBID: 23.8%). On the 8 scans with no text layer at all, bibr passes all 8 and GROBID none. Slower than born-digital PDFs. Oct 2026 |
+| Body text and headings | The running text, its headings and how they nest | 🟡 Good | Answer key | Sections recovered 0.81, headings found 0.85, nesting right 0.89. Oct 2026 |
+| Section types | Labels sections as introduction, methods, results and so on | 🟡 Good in English · 🔴 Weak in other languages | Answer key | 88% of sections typed right on 119 papers (Oct 2026). The classifier retrained for 0.7.1 mostly helps unusual English headings; other languages still lag |
+| Tables | Finds each table and its caption | 🟡 Good · 🟠 Fair for captions | Answer key, not yet checked by people | Tables found: 0.92 F1. Captions 0.56 similarity. Cell structure not measured. Oct 2026 |
+| Figures | Finds each figure and its caption | 🟡 Good | Answer key, not yet checked by people | Figures found: 0.88 F1. Captions 0.73 similarity. Oct 2026 |
+| Equations | Equation regions and their text | ⚪ Not measured | None yet | Exported, no answer key |
+| In-text citations | Links "(Smith, 2020)" to the right reference | 🟡 Good | Answer key | 0.80 F1 on 89 papers. Links to tables 0.85, links to figures 0.51. Oct 2026 |
+| URLs | Every URL printed in the paper | 🟡 Good | Answer key | 0.81 F1 on 92 papers. Oct 2026 |
+| Statements | Funding, conflicts of interest, ethics approval, data availability | ⚪ Not measured | None yet | Exported, no answer key |
+| Paper type | Research article, review and so on | 🟡 Good | Answer key (MEDLINE labels) | 0.94 macro F1. Jul 2026 |
+| Research field | OECD field of science | 🟠 Fair | Rough labels only | About 0.68 macro F1 at the top level, against OpenAlex labels. Jul 2026 |
+| Word, JATS, HTML and ePub files | Read natively, without OCR | ⚪ Not measured | None yet | All our benchmarks are PDFs |
+
+Most of these papers are in English, and most are from the social sciences.
+Other languages and fields are less tested. On the 29 non-English papers in our
+model comparison, the smaller models trailed the 27B by about 7 points.
+
+### Checking references against the record
+
+| Part | What it does | Rating | How we know | Latest result |
+|---|---|---|---|---|
+| Crossref enrichment (opt-in) | Looks each reference up and fills in missing DOIs, volumes and pages | 🟡 Good | Answer key, partial | On 630 papers it left the parsed reference list unchanged and raised correct volumes from 86% to 93% and pages from 81% to 84%. DOI precision stayed at about 96%. Most filled-in values can't be checked against our key, which only has the DOIs papers print. Sep 2026 |
+| Whole-reference search (needs a bibr resolver) | Searches with the full reference text when a title search finds nothing | 🟡 Good | Spot checks | Found a record for 106 of 923 previously unmatched references on 119 papers; a hand check of the riskiest found one wrong version. Where a match already existed, it agreed on the DOI 98.6% of the time. Oct 2026 |
+
+### Choosing an extraction model
+
+A language model reads the title, authors and other front matter. We scored
+three of them the same way on 252 development papers in October 2026. A paper
+passes when its title, DOI, author names and reference list are all right.
+
+| Model | Runs on | Papers passed | Compared with the 27B |
+|---|---|---|---|
+| Qwen3.8-27B | Your own model server on a 24 GB GPU | 223 of 252 (88.5%) | Reference |
+| Claude Haiku 5.5 | Anthropic's API, with your key (bibr 0.7.2 or later). Text from your papers goes to Anthropic | 221 of 252 | −0.8 points |
+| NuExtract 3 | bibr's default local model, on NVIDIA GPUs, Apple Silicon Macs or llama.cpp | 200 of 252 | −9.1 points |
+
+`bibr setup` picks NuExtract 3 when you run locally. To use another model, point
+bibr at your own OpenAI-compatible server
+([configuration guide](docs/guides/configuration.md)).
+
+On a computer with only a CPU, PDFs need llama.cpp (which is slow there), your
+own OCR and model server, or cloud processing. Word, JATS, HTML and ePub files
+work without any of them.
+
+**Found a paper bibr gets wrong?** Please tell us with the
+[wrong-extraction form](https://github.com/scienceverse/bibr/issues/new?template=wrong-extraction.yml).
+Papers that break bibr are the most useful thing you can send us.
 
 ## Accuracy and scope
 
