@@ -448,6 +448,62 @@ def test_text_layer_without_word_spaces_fails():
     assert read.pages[0].reason == "implausible_text"
 
 
+def _minus_29(line: str) -> str:
+    """A font whose codes sit 29 below Unicode: "The" reads as "7KH"."""
+    return "".join(chr(ord(ch) - 29) if 61 < ord(ch) < 127 else ch for ch in line)
+
+
+def test_text_layer_29_code_points_down_fails():
+    pdf = _prose_pdf([_minus_29(line) for line in _PROSE])
+
+    read = read_text_layer(pdf, [[_region("text", _paragraph_box(6))]], page_images=_render(pdf))
+
+    page = read.pages[0]
+    assert (page.ok, page.reason) == (False, "implausible_text")
+    assert page.metrics["common_letter_share"] < 0.3
+
+
+_NAMES = (
+    "Charles R. Ebersole, Olivia E. Atherton, Aimee L. Belanger, Hayley M. Skulborstad, "
+    "Jill M. Allen, Jonathan B. Banks, Erica Baranski, Michael J. Bernstein, Diane B. V. "
+    "Bonfiglio, Leanne Boucher, Elizabeth R. Brown, Nancy I. Budiman, Athena H. Cairo, "
+    "Colin A. Capaldi, Christopher R. Chartier, Joanne M. Chung, David C. Cicero, Jennifer "
+    "A. Coleman, John G. Conway, William E. Davis, Thierry Devos, Melody M. Fletcher, "
+    "Komi German, Jon E. Grahe, Anthony D. Hermann, Joshua A. Hicks, Nathan Honeycutt"
+)
+_WORD_LIST = (
+    "apple chair river candle window garden pencil bottle mirror basket ladder blanket "
+    "hammer pillow kettle saddle wallet button carpet helmet lemon rocket violin tunnel "
+    "planet castle silver orange anchor feather magnet bucket jacket lantern statue "
+    "cabinet harbor trumpet compass meadow"
+)
+
+
+@pytest.mark.parametrize("text_", [_NAMES, _WORD_LIST], ids=["author-names", "word-list"])
+def test_text_without_function_words_still_passes(text_):
+    lexical = lexical_profile([text_])
+
+    assert lexical["stopword_share"] < 0.04
+    assert judge_page(coverage=1.0, rejected_regions=0, read_regions=1, ink={}, lexical=lexical).ok
+
+
+def test_a_region_the_text_layer_has_nothing_for_leaves_the_page_read():
+    # A large block of printed matter drawn as paths (a screenshot of a form)
+    # under six lines of prose: its region is unread, the prose is read.
+    pdf = _prose_pdf(_PROSE, b"q 0 g 72 80 450 500 re f Q\n")
+    layout = [[_region("text", _paragraph_box(6)), _region("text", _box(60, 70, 560, 590))]]
+
+    read = read_text_layer(pdf, layout, page_images=_render(pdf))
+
+    page = read.pages[0]
+    assert page.ok, page.metrics
+    assert page.metrics["coverage"] < 0.5 and page.metrics["region_coverage"] == 0.5
+    prose, block = read.layout_results[0]
+    assert prose["content"].startswith("We measured the reading speed")
+    assert block["_text_layer_unread"] is True
+    assert [w.code for w in read.warnings] == [WarningCode.TEXT_LAYER_REGION_UNREAD]
+
+
 def test_scanned_fixture_has_no_text_layer():
     pdf = (FIXTURES / "scanned_sample.pdf").read_bytes()
 
@@ -541,6 +597,21 @@ def test_judge_page_names_the_first_failing_gate():
     assert low.reason == "low_coverage"
     one_bad = judge_page(coverage=1.0, rejected_regions=1, read_regions=1, ink={}, lexical={})
     assert one_bad.ok
+    # Little area but most regions covered: one large region without text.
+    assert judge_page(
+        coverage=0.3, rejected_regions=0, read_regions=3, ink={}, lexical={}, region_coverage=0.75
+    ).ok
+    assert (
+        judge_page(
+            coverage=0.3,
+            rejected_regions=0,
+            read_regions=1,
+            ink={},
+            lexical={},
+            region_coverage=0.25,
+        ).reason
+        == "low_coverage"
+    )
 
 
 @pytest.mark.parametrize(

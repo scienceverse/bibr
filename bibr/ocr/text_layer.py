@@ -387,6 +387,7 @@ def _judge(
     """Gate one page whose readable regions *outcomes* records."""
     from bibr.ocr.text_layer_quality import (
         PageGateResult,
+        covered_regions,
         ink_agreement,
         judge_page,
         lexical_profile,
@@ -404,12 +405,17 @@ def _judge(
     prose_boxes = [tuple(float(v) for v in r["bbox_2d"][:4]) for r in prose]
     glyph_boxes = [box for _, box in page.glyphs if 0 <= box[0] <= 1000 and 0 <= box[1] <= 1000]
     coverage = text_coverage(prose_boxes, glyph_boxes)
+    covered = covered_regions(prose_boxes, glyph_boxes)
+    region_coverage = sum(covered) / len(covered) if covered else None
+    # The ink gate reads the regions the layer has text for: a region it has
+    # none for (text drawn as an image) is left unread on its own.
+    covered_boxes = [box for box, hit in zip(prose_boxes, covered, strict=True) if hit]
     read = [id(r) for r in prose if outcomes.get(id(r)) in ("filled", "rejected")]
     rejected = sum(1 for key in read if outcomes.get(key) == "rejected")
     ink: dict[str, float] = {}
     if page_image is not None:
         try:
-            ink = ink_agreement(page_image, glyph_boxes, prose_boxes)
+            ink = ink_agreement(page_image, glyph_boxes, covered_boxes)
         except Exception:  # noqa: BLE001 - the ink gate is advisory without an image
             logger.debug("Ink gate failed on page %d", page.index, exc_info=True)
     lexical = lexical_profile(
@@ -421,6 +427,7 @@ def _judge(
         read_regions=len(read),
         ink=ink,
         lexical=lexical,
+        region_coverage=region_coverage,
     )
 
 

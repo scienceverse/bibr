@@ -5,18 +5,24 @@ With no OCR model to fall back on, the text-layer backend
 can stand in for what is printed. Each gate measures one way a text layer
 lies:
 
-- **coverage**: the share of the text-labelled layout area that holds any
-  text-layer glyph. A scan with a stray text stamp ("Downloaded from ...")
-  has text, but not where the page's text is.
+- **coverage**: the share of the text regions, by area and by count, that
+  hold any text-layer glyph. A scan with a stray text stamp ("Downloaded
+  from ...") has text, but not where the page's text is. Both shares must be
+  low: one large region the layer has no text for (a screenshot of a
+  questionnaire) lowers the area share of a born-digital page, but not the
+  share of its regions, and is left unread on its own.
 - **ink**: on the page image the layout model already saw, glyph boxes
-  should sit on ink, and the ink inside text regions should be under glyph
-  boxes. A text layer shifted off its page, or one drawn over a different
-  image, fails the first; text drawn as an image or as paths fails the
-  second.
-- **lexical**: Latin-script text should have word lengths and function
-  words like prose. A broken font encoding that maps every letter to another
-  one (a Caesar shift) passes the character gates but has no function words;
-  a layer with no word spaces glues whole lines into one token.
+  should sit on ink, and the ink inside the text regions that hold glyphs
+  should be under glyph boxes. A text layer shifted off its page, or one
+  drawn over a different image, fails the first; a region whose text is
+  partly drawn as an image or as paths fails the second.
+- **lexical**: Latin-script text should have the letters and function words
+  of prose. A broken font encoding that maps every letter to another one (a
+  Caesar shift, or the common offset of 29 code points that turns "The" into
+  "7KH") moves the most common letters away; a layer with no word spaces
+  glues whole lines into one token. Few function words alone is not enough
+  to fail a page: a table, a list of author names or of stimulus words has
+  none, but its letters are still those of a language.
 
 The thresholds are deliberately loose: a page that fails loses all its text,
 so a gate only fires on a layer that is wrong, not on one that is unusual.
@@ -39,15 +45,15 @@ Box = tuple[float, float, float, float]
 
 # --- Thresholds ---------------------------------------------------------------
 
-#: A page fails when less than this share of its text-labelled layout area
-#: holds text-layer glyphs.
+#: A page fails when less than this share of its text regions holds
+#: text-layer glyphs, both by area and by count.
 MIN_TEXT_COVERAGE = 0.5
 #: A text region counts as covered when it holds at least this many glyphs.
 MIN_REGION_GLYPHS = 2
 #: A page fails when less than this share of its glyph boxes touch ink.
 MIN_GLYPHS_ON_INK = 0.6
-#: ... or when less than this share of the ink in its text regions lies
-#: under glyph boxes.
+#: ... or when less than this share of the ink in its text regions that hold
+#: glyphs lies under glyph boxes.
 MIN_INK_UNDER_GLYPHS = 0.35
 #: The ink gates need at least this many glyphs / ink pixels to say anything.
 MIN_INK_GLYPHS = 40
@@ -66,8 +72,22 @@ MIN_LEXICAL_TOKENS = 30
 #: at least GLUED_TOKEN_LETTERS letters (a layer without word spaces) ...
 MAX_GLUED_LETTER_SHARE = 0.5
 GLUED_TOKEN_LETTERS = 25
-#: ... or when fewer than this share of its tokens are common function words.
+#: ... or when fewer than this share of its Latin letters (accents removed)
+#: are the eight most common letters of its languages, COMMON_LETTERS ...
+MIN_COMMON_LETTER_SHARE = 0.30
+COMMON_LETTERS = frozenset("eaointsr")
+#: ... or when fewer than this share of its tokens are common function words
+#: and fewer than this share of its letters are common ones.
 MIN_STOPWORD_SHARE = 0.04
+MIN_COMMON_LETTER_SHARE_WITH_FEW_STOPWORDS = 0.45
+# Checked on every page of the development sets (7,466 pages of Latin-script
+# text, full-page text): 0.55 or more of their letters are common (1st
+# percentile; 0.39 on the lowest page, dense mathematics), and the only
+# pages that fail are the seven of one paper whose font maps every letter 29
+# code points down. Function words alone failed 37 more pages: statistics
+# tables, author lists, word lists and variable lists, many of them in
+# appendices. With the letters of every fifth page Caesar-shifted, the gate
+# catches 91% of the pages over the 25 shifts (every shift: 48% or more).
 
 # Common function words of the Latin-script languages bibr's corpora carry.
 # A text layer in any of them clears MIN_STOPWORD_SHARE many times over; a
@@ -120,14 +140,8 @@ def _area(box: Box) -> float:
     return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
 
 
-def text_coverage(region_boxes: Sequence[Box], glyph_boxes: Sequence[Box]) -> float | None:
-    """Area-weighted share of *region_boxes* holding text-layer glyph centres.
-
-    None when there is no text-labelled area to cover.
-    """
-    total = sum(_area(box) for box in region_boxes)
-    if total <= 0:
-        return None
+def covered_regions(region_boxes: Sequence[Box], glyph_boxes: Sequence[Box]) -> list[bool]:
+    """Per region of *region_boxes*, whether it holds text-layer glyph centres."""
     import numpy as np
 
     if glyph_boxes:
@@ -136,12 +150,23 @@ def text_coverage(region_boxes: Sequence[Box], glyph_boxes: Sequence[Box]) -> fl
         cy = (glyphs[:, 1] + glyphs[:, 3]) / 2.0
     else:
         cx = cy = np.zeros(0, dtype=np.float32)
-    covered = 0.0
+    covered: list[bool] = []
     for box in region_boxes:
         inside = (cx >= box[0]) & (cx <= box[2]) & (cy >= box[1]) & (cy <= box[3])
-        if int(inside.sum()) >= MIN_REGION_GLYPHS:
-            covered += _area(box)
-    return covered / total
+        covered.append(int(inside.sum()) >= MIN_REGION_GLYPHS)
+    return covered
+
+
+def text_coverage(region_boxes: Sequence[Box], glyph_boxes: Sequence[Box]) -> float | None:
+    """Area-weighted share of *region_boxes* holding text-layer glyph centres.
+
+    None when there is no text-labelled area to cover.
+    """
+    total = sum(_area(box) for box in region_boxes)
+    if total <= 0:
+        return None
+    covered = covered_regions(region_boxes, glyph_boxes)
+    return sum(_area(box) for box, hit in zip(region_boxes, covered, strict=True) if hit) / total
 
 
 def _pixel_box(box: Box, width: int, height: int, pad: int) -> tuple[int, int, int, int]:
@@ -161,7 +186,8 @@ def ink_agreement(
 
     Returns ``glyphs_on_ink`` (share of glyph boxes touching ink) and
     ``ink_under_glyphs`` (share of the ink inside *region_boxes* under a
-    glyph box). A measure is left out when there is too little to measure.
+    glyph box; callers pass the regions that hold glyphs). A measure is left
+    out when there is too little to measure.
     """
     import numpy as np
 
@@ -206,26 +232,51 @@ def _is_latin_letter(ch: str) -> bool:
         return False
 
 
+def _base_letter(ch: str) -> str:
+    """The letter without its accents, lower case ("É" -> "e")."""
+    decomposed = unicodedata.normalize("NFKD", ch)
+    return (decomposed[0] if decomposed else ch).lower()
+
+
 def lexical_profile(texts: Iterable[str]) -> dict[str, float]:
     """Token statistics of Latin-script text; empty when there is too little.
 
     ``glued_letter_share``: share of letters in tokens of at least
-    :data:`GLUED_TOKEN_LETTERS` letters. ``stopword_share``: share of tokens
-    of two or more letters that are common function words.
+    :data:`GLUED_TOKEN_LETTERS` letters. ``common_letter_share``: share of
+    the Latin letters that are :data:`COMMON_LETTERS`. ``stopword_share``:
+    share of tokens of two or more letters that are common function words.
     """
     tokens = [token for text in texts for token in _TOKEN_RE.findall(text)]
     letters = sum(len(token) for token in tokens)
     if letters < MIN_LEXICAL_LETTERS:
         return {}
-    latin = sum(1 for token in tokens for ch in token if _is_latin_letter(ch))
-    if latin / letters < MIN_LATIN_LETTER_SHARE:
+    latin = [ch for token in tokens for ch in token if _is_latin_letter(ch)]
+    if len(latin) / letters < MIN_LATIN_LETTER_SHARE:
         return {}
     glued = sum(len(token) for token in tokens if len(token) >= GLUED_TOKEN_LETTERS)
-    profile = {"tokens": float(len(tokens)), "glued_letter_share": glued / letters}
+    profile = {
+        "tokens": float(len(tokens)),
+        "glued_letter_share": glued / letters,
+        "common_letter_share": sum(1 for ch in latin if _base_letter(ch) in COMMON_LETTERS)
+        / len(latin),
+    }
     words = [token.lower() for token in tokens if len(token) >= 2]
     if len(words) >= MIN_LEXICAL_TOKENS:
         profile["stopword_share"] = sum(1 for word in words if word in _STOPWORDS) / len(words)
     return profile
+
+
+def is_implausible(lexical: dict[str, float]) -> bool:
+    """Whether a :func:`lexical_profile` reads as a broken encoding, not words."""
+    common = lexical.get("common_letter_share", 1.0)
+    return (
+        lexical.get("glued_letter_share", 0.0) > MAX_GLUED_LETTER_SHARE
+        or common < MIN_COMMON_LETTER_SHARE
+        or (
+            lexical.get("stopword_share", 1.0) < MIN_STOPWORD_SHARE
+            and common < MIN_COMMON_LETTER_SHARE_WITH_FEW_STOPWORDS
+        )
+    )
 
 
 def judge_page(
@@ -235,9 +286,13 @@ def judge_page(
     read_regions: int,
     ink: dict[str, float],
     lexical: dict[str, float],
+    region_coverage: float | None = None,
 ) -> PageGateResult:
     """Combine the gate measures into one verdict, the first failing gate named.
 
+    ``coverage`` is the area share of the text regions holding glyphs and
+    ``region_coverage`` the share of them by count; the page is a scan only
+    when both are low (a missing count share counts as low).
     ``rejected_regions`` of ``read_regions`` text regions with text-layer
     text failed the character gates (CID codes, U+FFFD, control or
     private-use characters); most of them failing is a broken font encoding,
@@ -246,9 +301,15 @@ def judge_page(
     metrics: dict[str, float] = {**ink, **lexical}
     if coverage is not None:
         metrics["coverage"] = coverage
+    if region_coverage is not None:
+        metrics["region_coverage"] = region_coverage
     if read_regions:
         metrics["rejected_share"] = rejected_regions / read_regions
-    if coverage is not None and coverage < MIN_TEXT_COVERAGE:
+    if (
+        coverage is not None
+        and coverage < MIN_TEXT_COVERAGE
+        and (region_coverage is None or region_coverage < MIN_TEXT_COVERAGE)
+    ):
         return PageGateResult("low_coverage", metrics)
     if rejected_regions >= 2 and rejected_regions >= 0.5 * read_regions:
         return PageGateResult("corrupt_text", metrics)
@@ -256,9 +317,6 @@ def judge_page(
         return PageGateResult("text_off_ink", metrics)
     if ink.get("ink_under_glyphs", 1.0) < MIN_INK_UNDER_GLYPHS:
         return PageGateResult("ink_without_text", metrics)
-    if (
-        lexical.get("glued_letter_share", 0.0) > MAX_GLUED_LETTER_SHARE
-        or lexical.get("stopword_share", 1.0) < MIN_STOPWORD_SHARE
-    ):
+    if is_implausible(lexical):
         return PageGateResult("implausible_text", metrics)
     return PageGateResult(None, metrics)
