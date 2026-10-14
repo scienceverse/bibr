@@ -279,8 +279,11 @@ papers, spooled requests, requests sent, answers cached, unanswered requests
 by error type, and the replay's hits, misses, hit rate and fallbacks (the
 verbatim calls of `LLM_POINTER_OUTPUTS` above).
 
-**The saving is small.** On Haiku 4.5 the front matter of a paper costs about
-a cent at the live price, and the batch halves that. The other LLM calls
+**The saving is small.** On Haiku 5.5 the front matter of a paper costs about
+a fifth of a cent at the live price, and the batch halves that (measured on ten
+papers: $0.020 live, $0.010 through the batch). Haiku 5.5 takes no temperature,
+so its answers vary from run to run; a batch answer differs from a live one about
+as often as two live answers differ from each other. The other LLM calls
 (references, sections, …) stay live, and the deferred papers go through the
 pipeline twice; the OCR cache keeps the second pass short, and the LLM cache
 serves round 2 the calls round 1 already made. Round 1 lets a paper's
