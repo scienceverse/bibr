@@ -302,6 +302,39 @@ class Result:
         consolidate_bibs(data, mode=mode)
         return Result(data)
 
+    def to_csl_json(
+        self, *, prefer: Literal["printed", "record"] = "printed", check_note: bool = True
+    ) -> list[dict[str, Any]]:
+        """The references as CSL-JSON items, for Zotero, Mendeley or Pandoc.
+
+        Values are as printed, with what a reference does not print filled
+        from its record when the reference check matched it;
+        ``prefer="record"`` takes a matched record's values over the printed
+        ones. ``check_note`` adds a note saying when the check found a
+        difference, an unregistered DOI, no record, or a retraction. See
+        :mod:`bibr.export.citations`; ``bibr.write_references()`` writes a file.
+        """
+        from bibr.export.citations import to_csl_json
+
+        return to_csl_json(self._data, prefer=prefer, check_note=check_note)
+
+    def to_bibtex(
+        self, *, prefer: Literal["printed", "record"] = "printed", check_note: bool = True
+    ) -> str:
+        """The references as BibTeX text; options as for :meth:`to_csl_json`."""
+        from bibr.export.citations import to_bibtex
+
+        return to_bibtex(self._data, prefer=prefer, check_note=check_note)
+
+    def to_ris(
+        self, *, prefer: Literal["printed", "record"] = "printed", check_note: bool = True
+    ) -> str:
+        """The references as RIS text (CRLF line endings); options as for
+        :meth:`to_csl_json`."""
+        from bibr.export.citations import to_ris
+
+        return to_ris(self._data, prefer=prefer, check_note=check_note)
+
 
 def _pipeline_kwargs(options: Mapping[str, Any]) -> dict[str, Any]:
     """Translate friendly chew() options into LocalPipeline kwargs."""

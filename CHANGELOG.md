@@ -52,6 +52,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   slow doi.org never makes an enrichment partial.
   `CROSSREF_DOI_AGENCY_LOOKUP=false` turns it off.
 - `bibr.write_tables()` also writes `extraction_enrichment_lookups.parquet`.
+- Reference lists for reference managers: `Result.to_csl_json()`,
+  `Result.to_bibtex()` and `Result.to_ris()`, and `bibr.write_references()`,
+  which writes the references of one or many results to one `.json`
+  (CSL-JSON), `.bib` or `.ris` file with cite keys unique across it. Values are
+  the printed ones; what a reference does not print (DOI, pages, journal,
+  names split into family and given) comes from its Crossref record only when
+  the reference check matched the two, and `prefer="record"` takes a matched
+  record's values first. Printed author lists are split into names
+  (APA, Vancouver, given-first, Chicago, particles, suffixes, organizations),
+  never merging two full names into one person, with a list that fits no
+  style kept as one name. A note gives the check's status
+  when it is not `matched` and names a retraction notice. The same lists come
+  from `bibr references results/ -o refs.bib`, from
+  `GET /papers/jobs/{id}/references?format=csl-json|bibtex|ris` on bibr serve,
+  and from the MCP tools `export_references` and, over stdio,
+  `save_references`.
 
 ### Changed
 

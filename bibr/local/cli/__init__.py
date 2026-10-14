@@ -387,6 +387,10 @@ def _main():
             from bibr.local.cli.tables import run_tables
 
             sys.exit(run_tables(args))
+        elif args.command == "references":
+            from bibr.local.cli.references import run_references
+
+            sys.exit(run_references(args))
         elif args.command == "mcp":
             try:
                 from bibr.mcp_server import run_mcp
