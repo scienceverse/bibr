@@ -41,10 +41,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - The Message Batches client builds each request the way the live `LLM_PROVIDER=anthropic`
   call does: the same temperature or thinking budget, output cap, prompt-cache marks and
-  Instructor tool schema, parsed and validated by the same code. It used to send no
-  temperature (so Haiku 4.5 sampled at 1.0), a 1024-token cap, flattened prompts and a tool
-  schema of its own. For Sonnet 5.5, Opus 5.5 and Fable 5.1, which reject a forced tool
-  choice, it leaves the choice to the model.
+  Instructor tool schema, parsed and validated by the same code and as strictly. It used to
+  send no temperature (so Haiku 4.5 sampled at 1.0), a 1024-token cap, flattened prompts and
+  a tool schema of its own. For Sonnet 5.5, Opus 5.5 and Fable 5.1, which reject a forced
+  tool choice, it leaves the choice to the model.
 - The vLLM servers bibr starts get `VLLM_NO_USAGE_STATS=1`, and `bibr demo` sets
   `GRADIO_ANALYTICS_ENABLED=False`, so neither sends usage statistics to its
   maintainers. A value already in your environment wins.

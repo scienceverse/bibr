@@ -234,7 +234,9 @@ report over both rounds goes to stdout, with the run ids of both rounds under
 
 A batch request is the live call: the same model (`LLM_MODEL`), temperature
 or thinking budget, output cap, prompt-cache marks and tool schema, and its
-answer goes through the same validation. One difference: Sonnet 5.5, Opus 5.5
+answer goes through the same strict validation: an answer the live call would
+reject (a number or a true/false given as text) is not cached, and round 2
+makes that call live. One difference: Sonnet 5.5, Opus 5.5
 and Fable 5.1 reject a forced tool choice, so their batch requests leave the
 choice to the model and ask for the tool call in the system prompt.
 

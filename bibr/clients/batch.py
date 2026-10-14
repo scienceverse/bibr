@@ -309,6 +309,11 @@ class AnthropicBatchAdapter:
             message,
             response_model=model,
             stream=False,
+            # Instructor's create(), which the live call goes through, defaults
+            # to strict validation (no "1" for an int, no "true" for a bool).
+            # process_response() defaults to lax, which would cache answers
+            # the live path rejects under the live cache key.
+            strict=True,
             mode=mode,
             provider=provider_name,
         )

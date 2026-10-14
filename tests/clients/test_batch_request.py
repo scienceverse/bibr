@@ -15,6 +15,7 @@ import asyncio
 import httpx
 import instructor
 import pytest
+from instructor.core.exceptions import InstructorRetryException
 
 from bibr.clients.batch import (
     _TOOL_ONLY_INSTRUCTION,
@@ -24,7 +25,13 @@ from bibr.clients.batch import (
 )
 from bibr.clients.llm import LLMClient, _task_max_tokens
 from bibr.config import GlobalSettings
-from bibr.schemas import AuthorsLLM, PaperClassificationLLM, PaperTypeLabel, TitleKeywordsLLM
+from bibr.schemas import (
+    AuthorsLLM,
+    AuthorsPointerLLM,
+    PaperClassificationLLM,
+    PaperTypeLabel,
+    TitleKeywordsLLM,
+)
 
 # The SDK comes with the `batch` extra, which the core CI environments leave out.
 anthropic = pytest.importorskip("anthropic")
@@ -278,6 +285,74 @@ def test_a_truncated_answer_is_a_row_error_not_a_result():
 
     result = adapter.retrieve("batch_x", [request])["a"]
 
+    assert isinstance(result, BatchError)
+    assert result.error_type == "validation_error"
+
+
+# Answers a lax parse accepts and a strict one rejects, each with the answer it
+# stands in for.
+_STRICT_ONLY = {
+    "affiliation-number-as-string": (
+        AuthorsPointerLLM,
+        {
+            "affiliations": ["University of Somewhere"],
+            "authors": [{"given": "Jane", "family": "Doe", "affiliation_ids": [1]}],
+        },
+        {
+            "affiliations": ["University of Somewhere"],
+            "authors": [{"given": "Jane", "family": "Doe", "affiliation_ids": ["1"]}],
+        },
+    ),
+    "bool-as-string": (
+        AuthorsLLM,
+        {"authors": [{"given": "Jane", "family": "Doe", "corresponding": True}]},
+        {"authors": [{"given": "Jane", "family": "Doe", "corresponding": "true"}]},
+    ),
+}
+
+
+def _live_create(schema, payload):
+    """Instructor's ``create()`` with the defaults the live client calls it with."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_message(schema.__name__, payload))
+
+    raw = anthropic.AsyncAnthropic(
+        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(answer))
+    )
+    live = instructor.from_anthropic(raw, model="claude-haiku-4-5")
+    return asyncio.run(
+        live.create(
+            response_model=schema,
+            messages=[{"role": "user", "content": "u"}],
+            max_tokens=256,
+            max_retries=1,
+        )
+    )
+
+
+def _batch_row(schema, payload):
+    message = anthropic.types.Message.model_validate(_message(schema.__name__, payload))
+    adapter = AnthropicBatchAdapter(client=_Rows([_row("r", message)]), settings=_settings())
+    request = BatchRequest(custom_id="r", schema=schema, system="s", user_text="u")
+    return adapter.retrieve("batch_x", [request])["r"]
+
+
+@pytest.mark.parametrize(
+    ("schema", "valid", "lax"), list(_STRICT_ONLY.values()), ids=list(_STRICT_ONLY)
+)
+def test_a_row_validates_as_strictly_as_the_live_call(schema, valid, lax):
+    """The live call's ``create()`` validates strictly, so a batch row does too.
+
+    A laxer parse would cache, under the live cache key, an answer the live
+    call rejects and asks again for, and every later run would reuse it.
+    """
+    assert isinstance(_live_create(schema, valid), schema)
+    assert isinstance(_batch_row(schema, valid), schema)
+
+    with pytest.raises(InstructorRetryException):
+        _live_create(schema, lax)
+    result = _batch_row(schema, lax)
     assert isinstance(result, BatchError)
     assert result.error_type == "validation_error"
 

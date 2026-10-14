@@ -13,6 +13,7 @@ import hashlib
 import json
 import shutil
 import time
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -883,3 +884,55 @@ def test_the_replay_exports_what_a_live_run_exports(tmp_path, corpus, monkeypatc
     assert exports["beta"]["abstract_given"] is False
     assert exports["beta"]["abstract_explicitly_absent"] is False
     assert exports["gamma"]["info"]["abstract"] == _abstract("gamma")
+
+
+def _strict_invalid_answer(tool: str, request_text: str) -> dict:
+    """:func:`_paper_answer`, but the pointer authors answer numbers each
+    affiliation with a string, which only a lax parse accepts."""
+    if tool == "AuthorsPointerLLM":
+        return {
+            "affiliations": ["Pointer Univ"],
+            "authors": [{"given": "Jane", "family": "Doe", "affiliation_ids": ["1"]}],
+        }
+    return _paper_answer(tool, request_text)
+
+
+def test_an_answer_the_live_call_rejects_is_not_cached_from_the_batch(
+    tmp_path, corpus, monkeypatch
+):
+    """The batch validates as strictly as the live call: the authors rows the
+    live call would reject go live in the replay, and the exports match."""
+    from bibr.batch.runner import run_batch
+
+    llm = {"pointer_outputs": True, "rate_limit_rpm": 60_000}
+    live_settings = _settings(tmp_path / "live", **llm)
+    live = Live(_strict_invalid_answer)
+    _install(monkeypatch, live_settings, live, chew=PaperChew)
+    assert run_batch(_options(corpus, tmp_path / "out-live")) == 0
+    # Every pointer authors answer is rejected; the verbatim call answers.
+    assert live.calls.count("AuthorsLLM") == 3
+
+    settings = _settings(tmp_path / "batch", **llm)
+    replay = Live(_strict_invalid_answer)
+    _install(monkeypatch, settings, replay, chew=PaperChew)
+    batches = FakeBatches({}, answers=_strict_invalid_answer)
+    out = tmp_path / "out-batch"
+    assert (
+        run_llm_batch(_options(corpus, out), settings=settings, batch_client=_batch_client(batches))
+        == 0
+    )
+
+    summary = json.loads((out / "llm_batch" / "summary.json").read_text())
+    assert summary["fill"]["errors"] == {"validation_error": 3}
+    assert summary["round2"]["unanswered"] == 3
+    # The replay asks live exactly what the live run asked, less the answers
+    # the batch gave.
+    assert Counter(live.calls) - Counter(replay.calls) == Counter(
+        {"TitleKeywordsPointerLLM": 3, "PaperClassificationLLM": 3}
+    )
+    assert not Counter(replay.calls) - Counter(live.calls)
+    for paper in _PAPERS:
+        reference = (tmp_path / "out-live" / f"{paper}.json").read_bytes()
+        assert (out / f"{paper}.json").read_bytes() == reference
+        export = json.loads(reference)
+        assert export["info"]["authors"][0]["affiliation"] == "University of Somewhere"

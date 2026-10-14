@@ -1,7 +1,13 @@
 from types import SimpleNamespace
 
+import pytest
+
 from bibr.clients.batch import AnthropicBatchAdapter, BatchError, BatchRequest
 from bibr.schemas import PaperTypeLabel
+
+# Instructor's Anthropic parser imports the SDK, which comes with the `batch`
+# extra; the core CI environments leave it out.
+pytest.importorskip("anthropic")
 
 
 def _succeeded(custom_id, payload):
