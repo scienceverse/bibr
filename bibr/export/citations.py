@@ -387,8 +387,9 @@ def _printed_names(
 def _entry_type(bib: Mapping[str, Any], record: Mapping[str, Any] | None) -> str:
     printed = str(bib["bib_type"]) if bib.get("bib_type") in _TYPES else None
     recorded = str(record["bib_type"]) if record and record.get("bib_type") in _TYPES else None
-    # The registry's catch-all "other" does not replace a printed type.
-    if recorded and not (recorded == "other" and printed):
+    # The registry's catch-all "other" says nothing: the printed type, or a
+    # printed journal with a locator, comes first.
+    if recorded and recorded != "other":
         return recorded
     if printed:
         return printed
@@ -560,7 +561,10 @@ def _collision_suffix(index: int) -> str:
 
 def _assign_keys(entries: list[_Entry]) -> None:
     """Deterministic, unique cite keys: first author's family name and the
-    year ("Smith2020"), then "Smith2020a", "Smith2020b" for the next ones."""
+    year ("Smith2020"), then "Smith2020a", "Smith2020b" for the next ones.
+
+    Keys are unique ignoring case, as BibTeX compares them: "BRASILnd" and
+    "Brasilnd" would be one entry repeated."""
     next_suffix: dict[str, int] = {}
     emitted: set[str] = set()
     for entry in entries:
@@ -569,13 +573,14 @@ def _assign_keys(entries: list[_Entry]) -> None:
         base_name = _key_part(name)[:40] or "ref"
         when = str(entry.year) if entry.year else ("inpress" if entry.in_press else "nd")
         base = f"{base_name}{when}"
-        collision = next_suffix.get(base, 0)
+        folded = base.casefold()
+        collision = next_suffix.get(folded, 0)
         key = base + _collision_suffix(collision)
-        while key in emitted:
+        while key.casefold() in emitted:
             collision += 1
             key = base + _collision_suffix(collision)
-        next_suffix[base] = collision + 1
-        emitted.add(key)
+        next_suffix[folded] = collision + 1
+        emitted.add(key.casefold())
         entry.key = key
 
 

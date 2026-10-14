@@ -299,13 +299,15 @@ The export itself is never changed. Which values are written:
 | `preprint` | `article` | `@misc` | `UNPB` |
 | `other` | `document` | `@misc` | `GEN` |
 
-A matched reference takes its record's type, unless the record's type is
-`other` and the reference printed one; a reference without a type that names a
-journal with a volume, issue or page is a journal article. Dates, bare
+A matched reference takes its record's type unless that type is the catch-all
+`other`; then, as for any other reference, the printed type is used, and a
+reference without a type that names a journal with a volume, issue or page is a
+journal article. Dates, bare
 lowercase DOIs, URLs, editors, edition, series, PMID, arXiv identifiers and
 "in press" (CSL `status`, BibTeX `pubstate`) are written too. Cite keys are
 the first author's family name and the year (`Smith2020`, then `Smith2020a`,
-`Smith2020b`), folded to ASCII.
+`Smith2020b`), folded to ASCII; keys that differ only in case count as the same
+key, as they do in BibTeX.
 
 The CLI equivalent is `bibr references results/ -o refs.bib` (`--format`,
 `--prefer record`, `--no-check-note`; without `-o` it writes to standard
