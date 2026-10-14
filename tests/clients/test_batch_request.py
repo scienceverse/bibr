@@ -35,6 +35,18 @@ _ANSWERS = {
     "AuthorsLLM": {"authors": [{"given": "Jane", "family": "Doe"}]},
     "PaperClassificationLLM": {"paper_type": None},
     "PaperTypeLabel": {"paper_type": "review", "confidence": 0.8},
+    # LLM_POINTER_OUTPUTS: answers bibr can copy back out of TEXT, so the
+    # live call makes no verbatim re-ask.
+    "TitleKeywordsPointerLLM": {
+        "title": "A Study of Things",
+        "abstract_first_words": "We studied things.",
+        "abstract_last_words": "We studied things.",
+        "keywords": [],
+    },
+    "AuthorsPointerLLM": {
+        "affiliations": ["University of Somewhere"],
+        "authors": [{"given": "Jane", "family": "Doe", "affiliation_ids": [1]}],
+    },
 }
 
 
@@ -79,14 +91,19 @@ def live_kwargs(settings: GlobalSettings, call, *, client: LLMClient | None = No
 
 
 def _front_matter_requests(settings: GlobalSettings) -> dict[str, tuple]:
-    """(live call, equivalent batch request) per front-matter task."""
+    """(live call, equivalent batch request) per front-matter task.
+
+    With ``LLM_POINTER_OUTPUTS`` the title/keywords and authors calls send
+    their pointer prompts and response models.
+    """
     llm = settings.llm
+    pointers = "_pointers" if llm.pointer_outputs else ""
     return {
         "title_keywords": (
             lambda c: c.extract_title_keywords(TEXT, boundary=BOUNDARY),
             BatchRequest.from_spec(
                 "t",
-                "title_keywords",
+                f"title_keywords{pointers}",
                 boundary=BOUNDARY,
                 text=TEXT,
                 max_tokens=_task_max_tokens(settings, llm.title_max_tokens),
@@ -96,7 +113,7 @@ def _front_matter_requests(settings: GlobalSettings) -> dict[str, tuple]:
             lambda c: c.extract_authors(TEXT, boundary=BOUNDARY),
             BatchRequest.from_spec(
                 "a",
-                "authors",
+                f"authors{pointers}",
                 boundary=BOUNDARY,
                 text=TEXT,
                 max_tokens=_task_max_tokens(settings, llm.authors_max_tokens),
@@ -126,16 +143,31 @@ SETTINGS_VARIANTS = {
 }
 
 
+@pytest.mark.parametrize("pointers", [False, True], ids=["verbatim", "pointers"])
 @pytest.mark.parametrize("variant", sorted(SETTINGS_VARIANTS))
 @pytest.mark.parametrize("task", ["title_keywords", "authors", "classification"])
-def test_batch_params_equal_the_live_call(variant, task):
-    settings = _settings(**SETTINGS_VARIANTS[variant])
+def test_batch_params_equal_the_live_call(variant, task, pointers):
+    settings = _settings(**SETTINGS_VARIANTS[variant], pointer_outputs=pointers)
     call, request = _front_matter_requests(settings)[task]
 
     live = live_kwargs(settings, call)
     adapter = AnthropicBatchAdapter(model=settings.llm.model, settings=settings)
 
     assert adapter.build_params(request) == live
+
+
+@pytest.mark.parametrize(
+    "task, tool",
+    [("title_keywords", "TitleKeywordsPointerLLM"), ("authors", "AuthorsPointerLLM")],
+)
+def test_pointer_outputs_send_the_pointer_request(task, tool):
+    """The parity above is not two verbatim requests compared: the flag is on."""
+    settings = _settings(pointer_outputs=True)
+    call, _ = _front_matter_requests(settings)[task]
+
+    live = live_kwargs(settings, call)
+
+    assert live["tool_choice"] == {"type": "tool", "name": tool}
 
 
 def test_live_parity_keeps_the_prompt_cache_marks_and_temperature():

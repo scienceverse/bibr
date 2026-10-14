@@ -32,7 +32,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `LLM_PROVIDER=anthropic`, `CACHE_LLM` and `CACHE_OCR`, and it may wait up to 24 hours. The
   saving is about half a cent per paper on Haiku 4.5, so it is meant for hosted runs of
   100,000 papers or more. A deferred paper is recorded as `llm_deferred`, which resume runs
-  again like an interruption, and `bibr batch report` counts it as deferred.
+  again like an interruption, and `bibr batch report` counts it as deferred. With
+  `LLM_POINTER_OUTPUTS=true` the batch answers the pointer calls, and the second round copies
+  the abstract and affiliations back as a live run does. When bibr can't use a pointer answer,
+  the verbatim call it makes instead goes live and is counted as a fallback, not as a miss.
 
 ### Changed
 

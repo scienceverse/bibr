@@ -238,6 +238,21 @@ answer goes through the same validation. One difference: Sonnet 5.5, Opus 5.5
 and Fable 5.1 reject a forced tool choice, so their batch requests leave the
 choice to the model and ask for the tool call in the system prompt.
 
+With `LLM_POINTER_OUTPUTS=true` the title/keywords and authors calls ask for
+pointer answers (the abstract's first and last words, each affiliation once
+and numbered), and those are the requests round 1 spools and the batch
+answers. The LLM cache holds a pointer answer as the model gave it, and bibr
+copies the abstract and the affiliations back each time it reads one, so a
+batch answer in round 2 gives the export a live answer would. The flag is not
+part of the cache key, but the prompt and response schema it changes are: a
+pointer answer never stands in for a verbatim one, and after the flag changes
+round 1 spools the calls again. When bibr cannot use a pointer answer (its
+words are not in the text, or mark the wrong span) it asks for the verbatim
+answer. No batch was asked for that call, so it goes live in round 2 at the
+full price; the run reports it as a fallback, apart from the hit rate that
+must reach 95 %. On Claude Haiku 5.5 about one paper in twelve needed the
+verbatim answer.
+
 The run refuses to start without the local executor (no `--serve-url`),
 `LLM_PROVIDER=anthropic` on the cloud LLM backend with an API key
 (`LLM_API_KEY` or `ANTHROPIC_API_KEY`), the `batch` extra, `CACHE_LLM=true`
@@ -259,7 +274,8 @@ goes live. A run *without* `--llm-batch` processes papers still marked
 
 `<out>/llm_batch/summary.json` holds the latest run's numbers: deferred
 papers, spooled requests, requests sent, answers cached, unanswered requests
-by error type, and the replay's hits, misses and hit rate.
+by error type, and the replay's hits, misses, hit rate and fallbacks (the
+verbatim calls of `LLM_POINTER_OUTPUTS` above).
 
 **The saving is small.** On Haiku 4.5 the front matter of a paper costs about
 a cent at the live price, and the batch halves that. The other LLM calls

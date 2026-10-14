@@ -21,6 +21,9 @@ Three phases, each resumable by running the same command again:
    should now hit the cache; the run reports the hit rate and stops loudly
    under 95 %, because then the replay's requests no longer match what the
    batch answered and every miss would be paid for again at the full price.
+   With ``LLM_POINTER_OUTPUTS`` the batch answers the pointer calls, and a
+   verbatim re-ask after a pointer answer bibr cannot use goes live in this
+   round: it is reported as a fallback, outside the hit rate.
 
 The exit code and the ``--json`` report cover both rounds.
 
@@ -385,14 +388,15 @@ def _deferred_papers(out: Path, run_id: str) -> set[str]:
     }
 
 
-def _deferred_calls(spool: Path, since: int) -> set[tuple[str, str]]:
-    """``(file hash, label)`` of every call round 1 deferred (spooled from byte *since*)."""
+def _deferred_calls(spool: Path, since: int) -> set[tuple[str, str, str]]:
+    """``(file hash, label, schema)`` of every call round 1 deferred (spooled from byte *since*)."""
     return {
-        (row["file_hash"], row["label"])
+        (row["file_hash"], row["label"], row["schema"])
         for offset, row in iter_spool(spool)
         if offset >= since
         and isinstance(row.get("file_hash"), str)
         and isinstance(row.get("label"), str)
+        and isinstance(row.get("schema"), str)
     }
 
 
@@ -636,6 +640,7 @@ def run_llm_batch(
         "hits": stats.hits,
         "misses": stats.misses,
         "unanswered": stats.unanswered,
+        "fallbacks": stats.fallbacks,
         "hit_rate": stats.hit_rate,
         "stopped_early": stop.is_set(),
     }
@@ -644,6 +649,7 @@ def run_llm_batch(
         f"  replay {ui.SEP} {stats.hits}/{stats.lookups} deferred calls hit the cache "
         f"({_rate(stats)})"
         + (f" {ui.SEP} {stats.unanswered} unanswered went live" if stats.unanswered else "")
+        + (f" {ui.SEP} {stats.fallbacks} verbatim re-asks went live" if stats.fallbacks else "")
     )
     if stats.hit_rate is not None and stats.hit_rate < MIN_REPLAY_HIT_RATE:
         ui.error(

@@ -71,17 +71,26 @@ def _tool(body: str) -> str:
     return next(name for name in _ANSWERS if f'"name":"{name}"' in body.replace(" ", ""))
 
 
-class Live:
-    """The provider behind the live client: every request it sees is a paid call."""
+def _default_answer(tool: str, request_text: str) -> dict:
+    return _ANSWERS[tool]
 
-    def __init__(self):
+
+class Live:
+    """The provider behind the live client: every request it sees is a paid call.
+
+    *answers* maps a tool name and the request's text to the tool input.
+    """
+
+    def __init__(self, answers=_default_answer):
         self.calls: list[str] = []
+        self.answers = answers
 
     def client(self, settings) -> LLMClient:
         def answer(request: httpx.Request) -> httpx.Response:
-            name = _tool(request.read().decode())
+            body = request.read().decode()
+            name = _tool(body)
             self.calls.append(name)
-            return httpx.Response(200, json=_message(name, _ANSWERS[name]))
+            return httpx.Response(200, json=_message(name, self.answers(name, body)))
 
         raw = anthropic.AsyncAnthropic(
             api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(answer))
@@ -103,6 +112,14 @@ class FakeChew:
         self.live = live
         self.fail = fail or {}
 
+    def text(self, name: str) -> str:
+        """The front matter of the paper *name*."""
+        return f"Front matter of {name}\nJane Doe\nAbstract."
+
+    def export(self, meta) -> dict:
+        """The export of a paper with core metadata *meta*."""
+        return {"info": {"title": meta.title}, "bib": []}
+
     def __call__(self, paths, batch_size):
         client = self.live.client(self.settings)
 
@@ -111,13 +128,13 @@ class FakeChew:
                 return ChewFailure(path, "failed on its own", error_code=self.fail[path.stem])
             data = path.read_bytes()
             file_hash = hashlib.sha256(data).hexdigest()[:16]
-            text = f"Front matter of {data.decode().split()[-1]}\nJane Doe\nAbstract."
+            text = self.text(data.decode().split()[-1])
             with usage_file_context(f"{file_hash}#1"):
                 try:
                     meta = await client.extract_core_metadata(text, file_hash=file_hash)
                 except ProcessingError as exc:
                     return ChewFailure(path, str(exc), error_code=exc.error_code)
-            return SimpleNamespace(ok=True, data={"info": {"title": meta.title}, "bib": []})
+            return SimpleNamespace(ok=True, data=self.export(meta))
 
         async def chunk():
             return [await one(path) for path in paths]
@@ -138,8 +155,10 @@ class FakeBatches:
         fail_one: str | None = None,
         fail_all: str | None = None,
         interrupt_polls: int = 0,
+        answers=_default_answer,
     ):
         self.server = server
+        self.answers = answers
         self.fail_one = fail_one  # error the first request for this tool
         self.fail_all = fail_all  # error every request with this error type
         self.errored: set[str] = set()
@@ -182,7 +201,8 @@ class FakeBatches:
                 result = SimpleNamespace(type="errored", error=error)
             else:
                 name = request["params"]["tools"][0]["name"]
-                message = anthropic.types.Message.model_validate(_message(name, _ANSWERS[name]))
+                answer = self.answers(name, json.dumps(request["params"]))
+                message = anthropic.types.Message.model_validate(_message(name, answer))
                 result = SimpleNamespace(type="succeeded", message=message)
             yield SimpleNamespace(custom_id=custom_id, result=result)
 
@@ -202,9 +222,12 @@ def _options(corpus: Path, out: Path, **overrides) -> BatchOptions:
     return BatchOptions(**base)
 
 
-def _install(monkeypatch, settings, live: Live, fail: dict[str, str] | None = None) -> None:
+def _install(
+    monkeypatch, settings, live: Live, fail: dict[str, str] | None = None, *, chew=None
+) -> None:
+    chew = chew or FakeChew
     monkeypatch.setattr(
-        "bibr.batch.runner.open_chew_many", lambda local: FakeChew(settings, live, fail)
+        "bibr.batch.runner.open_chew_many", lambda local: chew(settings, live, fail)
     )
 
 
@@ -720,3 +743,141 @@ def test_the_replay_runs_only_what_this_round_deferred(tmp_path, corpus, monkeyp
     assert third.created == []
     assert {e["status"] for e in _latest(out).values()} == {"ok"}
     assert live.calls == []
+
+
+# ---------------------------------------------------------------------------
+# LLM_POINTER_OUTPUTS: the batch answers the pointer calls, and round 2 copies
+# the abstract and affiliations back exactly as a live answer is copied back.
+# ---------------------------------------------------------------------------
+
+_PAPERS = ("alpha", "beta", "gamma")
+
+
+def _abstract(paper: str) -> str:
+    return f"We studied {paper} in depth. It went well."
+
+
+class PaperChew(FakeChew):
+    """Front matter with an abstract and an affiliation, and an export of every
+    core field, including what tells an omitted abstract from a missing one."""
+
+    def text(self, name: str) -> str:
+        return (
+            f"A Study of {name}\nJane Doe\nUniversity of Somewhere\n\n"
+            f"Abstract. {_abstract(name)}\n\nKeywords: {name}; things"
+        )
+
+    def export(self, meta) -> dict:
+        return {
+            "info": meta.model_dump(mode="json"),
+            "abstract_given": "abstract" in meta.model_fields_set,
+            "abstract_explicitly_absent": meta._abstract_explicitly_absent,
+            "field_failures": meta._field_failures,
+            "bib": [],
+        }
+
+
+def _paper_answer(tool: str, request_text: str) -> dict:
+    """The same model answer for a request, live or batched.
+
+    alpha's pointer answer is copied back; beta's omits the abstract; gamma's
+    names words its text does not hold, so bibr asks for the verbatim answer.
+    """
+    paper = next(p for p in _PAPERS if f"A Study of {p}" in request_text)
+    keywords = [paper, "things"]
+    if tool == "TitleKeywordsPointerLLM":
+        anchors = {
+            "alpha": {
+                "abstract_first_words": f"We studied {paper} in depth.",
+                "abstract_last_words": "It went well.",
+            },
+            "beta": {},
+            "gamma": {
+                "abstract_first_words": "Nothing like this",
+                "abstract_last_words": "appears in the text.",
+            },
+        }[paper]
+        return {"title": f"A Study of {paper}", "keywords": keywords, **anchors}
+    if tool == "TitleKeywordsLLM":
+        abstract = {} if paper == "beta" else {"abstract": _abstract(paper)}
+        return {"title": f"A Study of {paper}", "keywords": keywords, **abstract}
+    if tool == "AuthorsPointerLLM":
+        return {
+            "affiliations": ["University of Somewhere"],
+            "authors": [{"given": "Jane", "family": "Doe", "affiliation_ids": [1]}],
+        }
+    if tool == "AuthorsLLM":
+        return {
+            "authors": [
+                {"given": "Jane", "family": "Doe", "affiliation": "University of Somewhere"}
+            ]
+        }
+    return _ANSWERS[tool]
+
+
+@pytest.mark.parametrize("pointers", [False, True], ids=["verbatim", "pointers"])
+def test_the_replay_exports_what_a_live_run_exports(tmp_path, corpus, monkeypatch, pointers):
+    """Byte for byte, with LLM_POINTER_OUTPUTS off and on: a live run, a run
+    from the cache that live run filled, and an --llm-batch run whose cache
+    the batch filled."""
+    from bibr.batch.runner import run_batch
+    from bibr.clients.llm_cache import LlmResponseCache
+
+    # The live runs make 9 or 10 calls; LLM_RATE_LIMIT_RPM's default would pace them.
+    llm = {"pointer_outputs": pointers, "rate_limit_rpm": 60_000}
+    live_settings = _settings(tmp_path / "live", **llm)
+    live = Live(_paper_answer)
+    _install(monkeypatch, live_settings, live, chew=PaperChew)
+    assert run_batch(_options(corpus, tmp_path / "out-live")) == 0
+    # gamma's pointer answer cannot be placed: one verbatim re-ask.
+    assert len(live.calls) == (10 if pointers else 9)
+
+    cached = Live(_paper_answer)
+    _install(monkeypatch, live_settings, cached, chew=PaperChew)
+    assert run_batch(_options(corpus, tmp_path / "out-cached")) == 0
+    assert cached.calls == []
+
+    settings = _settings(tmp_path / "batch", **llm)
+    replay = Live(_paper_answer)
+    _install(monkeypatch, settings, replay, chew=PaperChew)
+    batches = FakeBatches({}, answers=_paper_answer)
+    out = tmp_path / "out-batch"
+    assert (
+        run_llm_batch(_options(corpus, out), settings=settings, batch_client=_batch_client(batches))
+        == 0
+    )
+
+    (submitted,) = batches.created
+    title, authors = (
+        ("TitleKeywordsPointerLLM", "AuthorsPointerLLM")
+        if pointers
+        else ("TitleKeywordsLLM", "AuthorsLLM")
+    )
+    assert sorted(r["params"]["tools"][0]["name"] for r in submitted) == sorted(
+        [title, authors, "PaperClassificationLLM"] * 3
+    )
+    # The verbatim re-ask was never batched: it goes live, as a fallback that
+    # does not count against the replay's hit rate.
+    assert replay.calls == (["TitleKeywordsLLM"] if pointers else [])
+    round2 = json.loads((out / "llm_batch" / "summary.json").read_text())["round2"]
+    assert (round2["hits"], round2["misses"], round2["fallbacks"]) == (9, 0, int(pointers))
+    assert round2["hit_rate"] == 1.0
+
+    for paper in _PAPERS:
+        reference = (tmp_path / "out-live" / f"{paper}.json").read_bytes()
+        assert (tmp_path / "out-cached" / f"{paper}.json").read_bytes() == reference
+        assert (out / f"{paper}.json").read_bytes() == reference
+    # The batch stored each answer as the live call stored the same answer.
+    live_cache, batch_cache = (
+        LlmResponseCache(settings=live_settings),
+        LlmResponseCache(settings=settings),
+    )
+    for row in read_spool(out / "llm_batch" / "spool.jsonl"):
+        assert batch_cache.get(row["key"]) == live_cache.get(row["key"]) is not None
+
+    exports = {p: json.loads((out / f"{p}.json").read_text()) for p in _PAPERS}
+    assert exports["alpha"]["info"]["abstract"] == _abstract("alpha")
+    assert exports["alpha"]["info"]["authors"][0]["affiliation"] == "University of Somewhere"
+    assert exports["beta"]["abstract_given"] is False
+    assert exports["beta"]["abstract_explicitly_absent"] is False
+    assert exports["gamma"]["info"]["abstract"] == _abstract("gamma")

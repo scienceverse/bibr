@@ -14,6 +14,20 @@ The hook is :func:`on_cache_lookup`, called by
 ``LLMClient._invoke_structured`` right after its cache lookup. Outside the two
 modes it does nothing. The mode is process-wide (not a context variable)
 because the local pipeline runs a paper's calls on worker threads.
+
+``LLM_POINTER_OUTPUTS`` needs nothing of its own here. Its title/keywords and
+authors calls run under the same usage labels, so :data:`FRONT_MATTER_LABELS`
+is the same in both modes, and the hook sees the request they send: the
+pointer prompt and response model are spooled, and the cache key (schema,
+prompts, request parameters; not the flag) is the one the live pointer call
+looks up. The cache holds the pointer answer as the model gave it, and the
+client copies the abstract and the affiliations back after the lookup, from a
+hit as from a live answer, so a batch answer and a live one end the same way.
+When bibr cannot use a pointer answer it asks for the verbatim answer under
+the same label. Round 1 never gets there (the pointer call was deferred), so
+in round 2 that call goes live; it is counted as a fallback
+(:attr:`ReplayStats.fallbacks`), not as a miss, because no batch was asked
+for it.
 """
 
 from __future__ import annotations
@@ -26,7 +40,7 @@ import re
 import threading
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -67,6 +81,10 @@ class ReplayStats:
     # Misses on a key the batch did not answer (an errored or expired row):
     # the expected live fallback, not a sign of a request mismatch.
     unanswered: int = 0
+    # Misses of a deferred call's paper and label in a form round 1 did not
+    # spool: under LLM_POINTER_OUTPUTS, the verbatim call bibr makes when it
+    # cannot use the batch's pointer answer. Live, and outside the hit rate.
+    fallbacks: int = 0
 
     @property
     def lookups(self) -> int:
@@ -88,12 +106,19 @@ class _Collect:
 
 @dataclass
 class _Observe:
-    expected: frozenset[tuple[str, str]]
+    # ``(file hash, label, schema)`` of every call round 1 deferred.
+    expected: frozenset[tuple[str, str, str]]
     labels: frozenset[str]
     unanswered_keys: frozenset[str]
     on_update: Callable[[ReplayStats], None] | None
     stats: ReplayStats = field(default_factory=ReplayStats)
     lock: threading.Lock = field(default_factory=threading.Lock)
+    calls: frozenset[tuple[str, str]] = field(init=False)
+    forms: frozenset[tuple[str, str]] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.calls = frozenset((file_hash, label) for file_hash, label, _ in self.expected)
+        self.forms = frozenset((label, schema) for _, label, schema in self.expected)
 
 
 _mode_lock = threading.Lock()
@@ -124,16 +149,18 @@ def collecting(path: Path, labels: Iterable[str] = FRONT_MATTER_LABELS) -> Itera
 
 @contextmanager
 def observing(
-    expected: Iterable[tuple[str, str]],
+    expected: Iterable[tuple[str, str, str]],
     *,
     labels: Iterable[str] = FRONT_MATTER_LABELS,
     unanswered_keys: Iterable[str] = (),
     on_update: Callable[[ReplayStats], None] | None = None,
 ) -> Iterator[ReplayStats]:
-    """Round 2: count lookups of the ``(file hash, label)`` pairs round 1 deferred.
+    """Round 2: count lookups of the ``(file hash, label, schema)`` calls round 1 deferred.
 
-    A call of a deferred label from a paper with no file hash in context is
-    counted too. *on_update* sees the stats after each counted lookup.
+    A call of a deferred label and schema from a paper with no file hash in
+    context is counted too. A miss of a deferred paper and label under another
+    schema is a fallback (:attr:`ReplayStats.fallbacks`). *on_update* sees the
+    stats after each counted lookup.
     """
     mode = _Observe(
         expected=frozenset(expected),
@@ -179,7 +206,8 @@ def on_cache_lookup(
     if label not in mode.labels:
         return
     if isinstance(mode, _Observe):
-        _observe(mode, key, hit=hit, label=label, file_hash=file_hash)
+        schema = _schema_name(request[0])
+        _observe(mode, key, hit=hit, label=label, file_hash=file_hash, schema=schema)
         return
     if hit:
         return
@@ -192,19 +220,36 @@ def on_cache_lookup(
     raise LlmDeferred(f"{label} deferred to an Anthropic Message Batch (key {key})")
 
 
-def _observe(mode: _Observe, key: str, *, hit: bool, label: str, file_hash: str | None) -> None:
-    if file_hash is not None and (file_hash, label) not in mode.expected:
-        return  # not a call round 1 deferred (a later fallback call, say)
+def _observe(
+    mode: _Observe, key: str, *, hit: bool, label: str, file_hash: str | None, schema: str
+) -> None:
+    if file_hash is not None and (file_hash, label) not in mode.calls:
+        return  # round 1 deferred no call of this label for this paper
+    if file_hash is None:
+        deferred = (label, schema) in mode.forms
+    else:
+        deferred = (file_hash, label, schema) in mode.expected
+    if not deferred and hit:
+        return  # another form of the call, answered by the cache: nothing paid
     with mode.lock:
-        if hit:
+        if not deferred:
+            # The deferred call's verbatim re-ask after a pointer answer bibr
+            # could not use (LLM_POINTER_OUTPUTS): no batch was asked for it.
+            mode.stats.fallbacks += 1
+        elif hit:
             mode.stats.hits += 1
         elif key in mode.unanswered_keys:
             mode.stats.unanswered += 1
         else:
             mode.stats.misses += 1
-        snapshot = ReplayStats(mode.stats.hits, mode.stats.misses, mode.stats.unanswered)
+        snapshot = replace(mode.stats)
     if mode.on_update is not None:
         mode.on_update(snapshot)
+
+
+def _schema_name(response_model: Any) -> str:
+    """The schema a spool row records for *response_model* (``spool_row``'s ``schema``)."""
+    return getattr(response_model, "__name__", str(response_model))
 
 
 def response_model_path(model: type) -> str:
@@ -231,7 +276,7 @@ def spool_row(
         "file_hash": file_hash,
         "provider": settings.llm.provider.strip().lower(),
         "model": settings.llm.model,
-        "schema": getattr(response_model, "__name__", str(response_model)),
+        "schema": _schema_name(response_model),
         "response_model": response_model_path(response_model),
         "system": system_prompt,
         # With the prompt builders' content parts, so the batch request keeps
