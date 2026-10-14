@@ -269,13 +269,15 @@ The export itself is never changed. Which values are written:
   enrichment, every value is the printed one.
 - **Names.** A matched record lists its authors and editors as family and
   given names, and those are used. Otherwise the printed list is split: "Smith,
-  J. A., & Doe, B.", "Smith JA, Doe B", "J. A. Smith and B. Doe" and
-  "Smith, J.; Doe, A." are read, with particles ("van der Berg") and suffixes
-  ("Jr.") kept with their name. An organization ("World Health Organization")
-  is one name: a CSL `literal`, a braced BibTeX name, one RIS `AU` line. A list
-  that fits none of these styles is written as one such name rather than split
-  wrongly. "et al." becomes "and others" in BibTeX and is left out of CSL-JSON
-  and RIS. A rule ("——") repeats the previous reference's authors.
+  J. A., & Doe, B.", "Smith JA, Doe B", "J. A. Smith and B. Doe", "John Smith,
+  Jane Doe", Chicago's "Smith, John, and Jane Doe" and "Smith, J.; Doe, A." are
+  read, with particles ("van der Berg") and suffixes ("Jr.") kept with their
+  name. Two full names in a row are always two people. An organization ("World
+  Health Organization") is one name: a CSL `literal`, a braced BibTeX name, one
+  RIS `AU` line. A list that fits none of these styles is written as one such
+  name rather than split wrongly. "et al." becomes "and others" in BibTeX and
+  is left out of CSL-JSON and RIS. A rule ("——") repeats the previous
+  reference's authors.
 - **Pages.** An abbreviated last page is written in full ("1267–89" as
   1267–1289); an article number ("e0123456") is the first page only.
 - **Notes.** A note says what the check found when it is not `matched` or
