@@ -856,12 +856,15 @@ class OcrOptions(_BibrSettings):
         '"openai", and "anthropic", and "text-layer", which runs no OCR model and reads '
         "born-digital PDFs from their embedded text layer (scanned pages stay unread).",
     )
-    text_layer_fallback: Literal["off", "auto"] = Field(
+    fallback_to_text_layer: Literal["off", "auto"] = Field(
         "off",
-        description='When the automatic OCR backend ("paddle") cannot start on this machine: '
-        '"off" (default) stops with an error; "auto" warns once and reads born-digital PDFs '
-        "from their embedded text layer instead, as the text-layer backend does. Scanned PDFs "
-        "then fail, since they need OCR.",
+        description='When no runtime of the automatic OCR backend ("paddle") can start on this '
+        "machine (no NVIDIA GPU for vLLM, no llama.cpp, no Apple silicon for MLX; checked "
+        'without starting one): "off" (default) stops with an error; "auto" warns once and '
+        "reads born-digital PDFs from their embedded text layer instead, as the text-layer "
+        "backend does, and marks each export OCR_BACKEND_UNAVAILABLE. Scanned PDFs then fail, "
+        "since they need OCR. A runtime that is installed but fails to start is still an "
+        "error. Not the OCR_TEXT_LAYER_FALLBACK warning, which is about scanned pages.",
     )
     model: str | None = Field(None, description="OCR model name override.")
     profile: Literal["paddle", "glm"] | None = Field(

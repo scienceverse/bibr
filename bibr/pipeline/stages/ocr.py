@@ -132,33 +132,6 @@ def _text_layer_fallback_identity() -> OcrRuntimeIdentity:
     return text_layer_identity()
 
 
-def _fall_back_to_text_layer(ctx, exc: BaseException) -> OcrRuntimeIdentity | None:
-    """Switch the run to the text layer after the automatic OCR chain failed.
-
-    Only with ``OCR_TEXT_LAYER_FALLBACK=auto`` and no OCR server URL (a named
-    server that fails is an error to report, not a machine without OCR).
-    The reason is kept on the resources, so later chunks read the text layer
-    too, and every file read this way carries ``OCR_BACKEND_UNAVAILABLE``.
-    Returns the text-layer identity, or None to fail the files as before.
-    """
-    cfg = ctx.config
-    if getattr(ctx.settings.ocr, "text_layer_fallback", "off") != "auto" or cfg.ocr_url:
-        return None
-    reason = describe_error(exc)
-    try:
-        ctx.resources.ocr_text_layer_fallback = reason
-    except AttributeError:  # resources without the slot still fall back for this window
-        logger.debug("Resources cannot record the text-layer fallback", exc_info=True)
-    identity = _text_layer_fallback_identity()
-    ctx.scratch["ocr_runtime_identity"] = identity
-    logger.warning(
-        "The OCR backend could not start (%s). OCR_TEXT_LAYER_FALLBACK=auto: reading "
-        "born-digital PDFs from their embedded text layer instead; scanned PDFs will fail.",
-        reason,
-    )
-    return identity
-
-
 def fail_ocr_targets(targets: list, exc: BaseException, *, stage: str, log: bool = True) -> None:
     """Mark OCR-needing files failed instead of aborting the chunk.
 
@@ -215,9 +188,9 @@ async def resolve_ocr_identity(
         from bibr.ocr.text_layer import text_layer_fallback_reason
 
         if text_layer_fallback_reason(rm) is not None:
-            # An earlier window or chunk found that no OCR engine starts here
-            # and switched to the text layer (OCR_TEXT_LAYER_FALLBACK=auto):
-            # every later file is read the same way, without another attempt.
+            # No runtime of the automatic chain can start on this machine and
+            # OCR_FALLBACK_TO_TEXT_LAYER=auto: every file is read from its text
+            # layer, and no engine start is attempted.
             identity = _text_layer_fallback_identity()
             ctx.scratch["ocr_runtime_identity"] = identity
             return OcrIdentityResolution(identity, False)
@@ -261,9 +234,6 @@ async def resolve_ocr_identity(
         try:
             await rm.await_ocr()
         except Exception as e:  # noqa: BLE001
-            fallback = _fall_back_to_text_layer(ctx, e)
-            if fallback is not None:
-                return OcrIdentityResolution(fallback, False)
             ctx.signals.ocr_init_error = e
             fail_ocr_targets(fail_targets, e, stage=stage)
             return OcrIdentityResolution(None, False)
@@ -1011,6 +981,13 @@ class OcrStage:
                 cached = ocr_cache.load(fs, cfg, identity, settings)
                 if cached is not None:
                     fs.ocr_regions = cached
+                    if identity.backend == TEXT_LAYER_BACKEND:
+                        from bibr.ocr.text_layer import (
+                            note_text_layer_fallback,
+                            text_layer_fallback_reason,
+                        )
+
+                        note_text_layer_fallback(fs, text_layer_fallback_reason(rm))
             self._check_ocr_success(ctx)
             alive = ctx.alive()
             if not alive:
@@ -1189,13 +1166,15 @@ class OcrStage:
                         region["_text_layer_unread"] = True
 
     @staticmethod
-    def _check_text_layer_success(fs, threshold: float) -> None:
+    def _check_text_layer_success(fs, threshold: float, fallback_reason: str | None) -> None:
         """Fail a file read from its text layer whose text regions are mostly empty.
 
         The share counts the running-text regions (``bibr.scan.page_kind``'s
         text labels); formulas and tables drawn as paths do not make a file a
         scan. Below ``OCR_MIN_SUCCESS_RATE`` the file is a scanned PDF (or one
-        with a broken text layer), which needs OCR.
+        with a broken text layer), which needs OCR. With *fallback_reason* (the
+        automatic backend fell back because no OCR runtime starts here) that is
+        an outage, which a resumed batch retries.
         """
         from bibr.scan.page_kind import _TEXT_LABELS
 
@@ -1220,7 +1199,11 @@ class OcrStage:
             "scanned PDF, which needs OCR: install llama.cpp for local OCR, pass --ocr-url "
             "for an OCR server, or use a cloud OCR backend (--ocr gemini, openai or anthropic)"
         )
-        fs.set_error(msg, code="scan_needs_ocr", stage="ocr")
+        # Read this way only because no OCR runtime could start here
+        # (OCR_FALLBACK_TO_TEXT_LAYER=auto): an outage, not the file's own
+        # failure, so a resumed batch reads it again once OCR is installed.
+        outage = fallback_reason is not None
+        fs.set_error(msg, code="scan_needs_ocr", stage="ocr", outage=outage)
         logger.warning("%s: %s", fs.path.name, msg)
 
     @staticmethod
@@ -1238,14 +1221,15 @@ class OcrStage:
         threshold = ctx.settings.ocr.min_success_rate
         if threshold <= 0:
             return
-        from bibr.ocr.text_layer import is_text_layer_mode
+        from bibr.ocr.text_layer import is_text_layer_mode, text_layer_fallback_reason
 
         text_layer = is_text_layer_mode(ctx)
+        fallback_reason = text_layer_fallback_reason(ctx.resources) if text_layer else None
         for fs in ctx.alive():
             if fs.ocr_regions is None:
                 continue
             if text_layer:
-                OcrStage._check_text_layer_success(fs, threshold)
+                OcrStage._check_text_layer_success(fs, threshold, fallback_reason)
                 continue
             # A page that failed wholesale yields no regions at all, so it
             # lands in neither the numerator nor the denominator below: a file

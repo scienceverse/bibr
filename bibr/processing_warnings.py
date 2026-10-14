@@ -125,9 +125,9 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.OCR_RECOGNIZERS_DISAGREE: "On scanned pages, a second OCR recognizer read some "
     "regions differently; the regions that disagreed most were escalated or flagged "
     "(regions[]._ocr_consensus).",
-    WarningCode.OCR_BACKEND_UNAVAILABLE: "The OCR backend could not start, so the PDF was read "
-    "from its embedded text layer alone (OCR_TEXT_LAYER_FALLBACK=auto); scanned pages are "
-    "missing.",
+    WarningCode.OCR_BACKEND_UNAVAILABLE: "No OCR backend can start on this machine, so the PDF "
+    "was read from its embedded text layer alone (OCR_FALLBACK_TO_TEXT_LAYER=auto); scanned "
+    "pages are missing.",
     WarningCode.TEXT_LAYER_PAGE_UNUSABLE: "A page has no usable text layer (a scan, or text "
     "that is missing, corrupt or misplaced); with no OCR its text regions are empty.",
     WarningCode.TEXT_LAYER_REGION_UNREAD: "Layout regions had no text in the PDF text layer "

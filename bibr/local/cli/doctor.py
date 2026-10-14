@@ -155,13 +155,13 @@ def _check_ocr_backend(ok, warn, fail) -> None:
             "embedded text layer, scanned PDFs fail"
         )
         return
-    # OCR_TEXT_LAYER_FALLBACK=auto: an automatic chain that cannot start here
+    # OCR_FALLBACK_TO_TEXT_LAYER=auto: an automatic chain that cannot start here
     # is not fatal, since chew and batch then read the text layer instead.
     fallback_auto = (
-        backend == "paddle" and getattr(Settings.ocr, "text_layer_fallback", "off") == "auto"
+        backend == "paddle" and getattr(Settings.ocr, "fallback_to_text_layer", "off") == "auto"
     )
     fallback_note = (
-        "OCR_TEXT_LAYER_FALLBACK=auto: born-digital PDFs will be read from their text layer; "
+        "OCR_FALLBACK_TO_TEXT_LAYER=auto: born-digital PDFs will be read from their text layer; "
         "scanned PDFs need OCR."
     )
 

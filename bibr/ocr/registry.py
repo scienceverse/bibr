@@ -184,6 +184,63 @@ def automatic_backend_names() -> tuple[str, ...]:
     return ("glm-llama",)
 
 
+def local_runtime_unavailable_reason(backend: str) -> str | None:
+    """Cheap, start-nothing check that a managed local OCR runtime can launch.
+
+    Returns ``None`` for backends this function does not vet (HTTP and cloud
+    backends validate themselves at startup) and for runtimes whose launcher
+    and hardware are present. The ``bibr chew`` preflight, ``bibr doctor``
+    and the text-layer fallback (:func:`automatic_chain_blockers`) all ask
+    here.
+    """
+    if backend == "paddle-vllm":
+        import importlib.util
+        import shutil
+
+        reason = paddle_vllm_unavailable_reason()
+        if reason is not None:
+            return reason
+        if importlib.util.find_spec("vllm") is None and shutil.which("uv") is None:
+            return (
+                "vllm is not installed and uv is unavailable to bootstrap it "
+                "(install with: uv sync --extra vllm)"
+            )
+        return None
+    if backend == "glm-llama":
+        from bibr.local.llama_cpp import find_llama_server, missing_binary_message
+
+        if find_llama_server() is None:
+            return missing_binary_message()
+        return None
+    if backend in {"paddle-rapid-mlx", "glm-rapid-mlx"}:
+        from bibr.local.rapid_mlx import rapid_mlx_unavailable_reason
+
+        reason = rapid_mlx_unavailable_reason()
+        if reason is not None:
+            return f"rapid-mlx launcher not available ({reason}); pip install 'rapid-mlx[guided]'"
+        return None
+    if backend == "glm-mlx":
+        return "this backend is disabled (vllm-mlx produced corrupted text); use glm-rapid-mlx"
+    return None
+
+
+def automatic_chain_blockers(settings: GlobalSettings) -> list[str]:
+    """Why no candidate of the automatic ``paddle`` chain can start here.
+
+    One ``"<backend>: <reason>"`` per candidate, checked without starting
+    anything; empty when any candidate can start (or is not vetted here).
+    With ``OCR_FALLBACK_TO_TEXT_LAYER=auto`` a non-empty answer switches the
+    run to the text layer (:mod:`bibr.ocr.text_layer`).
+    """
+    blockers: list[str] = []
+    for candidate in resolve_backend_candidates("paddle", settings):
+        reason = local_runtime_unavailable_reason(candidate.backend)
+        if reason is None:
+            return []
+        blockers.append(f"{candidate.backend}: {reason}")
+    return blockers
+
+
 #: The cloud vision-LLM OCR backends. They call their provider's API (set
 #: ``OCR_VISION_BASE_URL`` to move it), never an OCR server, and hold no local
 #: weights. The one definition every OCR module imports.

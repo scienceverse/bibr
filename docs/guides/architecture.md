@@ -117,8 +117,9 @@ Remaining regions use the selected OCR runtime.
 Disabling the bypass leaves metadata, outline, and geometry inspection available.
 
 **Text-layer backend (`bibr/ocr/text_layer.py`).** With `--ocr text-layer`
-(or when `OCR_TEXT_LAYER_FALLBACK=auto` and the automatic backend cannot
-start) no OCR model runs. The native-text stage then reads every region OCR
+(or with `OCR_FALLBACK_TO_TEXT_LAYER=auto` on a machine where no runtime of
+the automatic backend can start, `ResourceManager.check_text_layer_fallback`)
+no OCR model runs. The native-text stage then reads every region OCR
 would read from the text layer: page furniture, captions (cut to the caption's
 own lines, so axis labels above "Figure 2" stay out), formulas as plain text,
 and tables rebuilt from word positions (`bibr/ocr/text_layer_tables.py`).

@@ -42,7 +42,9 @@ def chew_options_from_config(config: Any) -> dict[str, Any]:
     field, through the public option names ``bibr.api`` accepts.
     """
     options: dict[str, Any] = {
-        "ocr_backend": config.ocr_backend,
+        # The automatic backend after the text-layer fallback, so the pipeline
+        # marks the files it reads from the text layer (ResolvedRunConfig).
+        "ocr_backend": config.pipeline_ocr_backend,
         "llm_backend": config.llm_backend,
         "memory_mode": config.memory_mode,
         "ocr_url": config.ocr_url,
@@ -202,7 +204,7 @@ def _local_options(args: Any, console: Any) -> Any:
     except ValueError as exc:
         ui.error(console, f"Invalid option: {exc}")
         return None
-    # OCR_TEXT_LAYER_FALLBACK=auto, decided before the options are built; the
+    # OCR_FALLBACK_TO_TEXT_LAYER=auto, decided before the options are built; the
     # warning waits for the preflight, which knows whether there are PDFs.
     config, fallback_warning = apply_text_layer_fallback(config, _preflight_ocr_runtime)
     warned = False

@@ -30,9 +30,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a scan, text off the printed ink, or text that does not read as words) loses its text,
   and the export's warnings name it. A scanned PDF fails with code `scan_needs_ocr`. The
   export records `extraction.ocr.backend` as `text-layer`.
-- `OCR_TEXT_LAYER_FALLBACK=auto` switches to the text layer, with one warning, when the
-  automatic OCR backend cannot start on the machine, instead of refusing the run. The
-  default is `off`, and the refusal now names `--ocr text-layer`.
+- `OCR_FALLBACK_TO_TEXT_LAYER=auto` switches to the text layer, with one warning, when no
+  runtime of the automatic OCR backend can start on the machine (checked without starting
+  one), instead of refusing the run. Exports read this way carry `OCR_BACKEND_UNAVAILABLE`,
+  from `bibr chew`, `bibr batch` and the library alike, and a scanned PDF among them fails
+  as an outage, which re-running the same `bibr batch` command retries. The default is
+  `off`, and the refusal now names `--ocr text-layer`.
 
 ### Changed
 

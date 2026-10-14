@@ -124,9 +124,16 @@ class InterleavedRenderOcrStage:
             # so there is no bundle to look up here.
             return []
         if cache_on:
+            from bibr.ocr.registry import TEXT_LAYER_BACKEND
+            from bibr.ocr.text_layer import note_text_layer_fallback, text_layer_fallback_reason
+
             for fs in pending:
                 if ocr_cache.load_bundle(fs, ctx.config, identity, ctx.settings):
                     fs.free_pre_ocr()
+                    if identity.backend == TEXT_LAYER_BACKEND:
+                        # Read through OCR_FALLBACK_TO_TEXT_LAYER=auto: say so,
+                        # as a fresh read does (the cache entry does not).
+                        note_text_layer_fallback(fs, text_layer_fallback_reason(ctx.resources))
             # Cached output must satisfy this run's quality policy too. In
             # particular, failed pages cannot become invisible on a cache hit.
             OcrStage._check_ocr_success(ctx)

@@ -1,7 +1,7 @@
-"""``--ocr text-layer`` and ``OCR_TEXT_LAYER_FALLBACK`` in the CLI and the OCR registry.
+"""``--ocr text-layer`` and ``OCR_FALLBACK_TO_TEXT_LAYER`` in the CLI and the OCR registry.
 
 The text-layer backend runs no OCR model, so it has no runtime to vet; with
-``OCR_TEXT_LAYER_FALLBACK=auto`` an automatic backend that cannot start here
+``OCR_FALLBACK_TO_TEXT_LAYER=auto`` an automatic backend that cannot start here
 becomes the text layer with one warning instead of refusing the run.
 """
 
@@ -15,7 +15,14 @@ from bibr.config import GlobalSettings, Settings
 from bibr.local.cli import _build_parser
 from bibr.local.cli.run_config import ResolvedRunConfig, apply_text_layer_fallback
 
-_BLOCKER = "OCR backend cannot start here — glm-llama: llama.cpp not installed"
+# The automatic chain's refusal, as run_config._ocr_runtime_blocker words it.
+_BLOCKER = (
+    "No local OCR runtime can start on this machine for PDF input:\n"
+    "  - glm-llama: llama.cpp not installed\n"
+    "Alternatives: point --ocr-url at an external OCR server, use a cloud vision backend "
+    "(--ocr gemini|openai|anthropic), or read born-digital PDFs from their text layer "
+    "without OCR (--ocr text-layer, or OCR_FALLBACK_TO_TEXT_LAYER=auto)."
+)
 
 
 def _config(backend: str = "paddle", url: str | None = None) -> ResolvedRunConfig:
@@ -36,7 +43,7 @@ def _blocked(config) -> str | None:
 
 @pytest.fixture
 def auto(monkeypatch):
-    monkeypatch.setattr(Settings.ocr, "text_layer_fallback", "auto")
+    monkeypatch.setattr(Settings.ocr, "fallback_to_text_layer", "auto")
 
 
 # --- Registry and identity -----------------------------------------------------
@@ -88,12 +95,12 @@ def test_settings_accept_the_backend_and_the_fallback(monkeypatch):
     from bibr.config import OcrOptions
 
     monkeypatch.setenv("OCR_BACKEND", "text-layer")
-    monkeypatch.setenv("OCR_TEXT_LAYER_FALLBACK", "auto")
+    monkeypatch.setenv("OCR_FALLBACK_TO_TEXT_LAYER", "auto")
 
     options = OcrOptions()
 
-    assert (options.backend, options.text_layer_fallback) == ("text-layer", "auto")
-    assert OcrOptions.model_fields["text_layer_fallback"].default == "off"
+    assert (options.backend, options.fallback_to_text_layer) == ("text-layer", "auto")
+    assert OcrOptions.model_fields["fallback_to_text_layer"].default == "off"
 
 
 def test_registry_creates_a_client_that_never_starts():
@@ -146,7 +153,7 @@ def test_the_refusal_names_the_text_layer_backend(monkeypatch):
     message = run_config._preflight_ocr_runtime(SimpleNamespace(ocr_backend="paddle", ocr_url=None))
 
     assert message is not None
-    assert "--ocr text-layer" in message and "OCR_TEXT_LAYER_FALLBACK=auto" in message
+    assert "--ocr text-layer" in message and "OCR_FALLBACK_TO_TEXT_LAYER=auto" in message
 
 
 def test_fallback_swaps_a_blocked_automatic_backend(auto):
@@ -155,9 +162,32 @@ def test_fallback_swaps_a_blocked_automatic_backend(auto):
     assert config.ocr_backend == "text-layer"
     assert (config.ocr_model, config.ocr_profile) == (None, None)
     assert config.ocr_summary_model == "pdf-text-layer"
+    assert config.ocr_text_layer_fallback == "glm-llama: llama.cpp not installed"
     assert warning is not None
     assert "text layer" in warning and "scanned PDFs fail" in warning
-    assert _BLOCKER in warning
+    assert "  - glm-llama: llama.cpp not installed" in warning
+    # The refusal's alternatives suggest the very setting that is on: dropped.
+    assert "Alternatives" not in warning
+    assert warning.count("OCR_FALLBACK_TO_TEXT_LAYER=auto") == 1
+
+
+def test_the_pipeline_gets_the_automatic_backend_back_after_the_fallback(auto):
+    """So the library finds the same blocker and marks each export it reads."""
+    swapped, _ = apply_text_layer_fallback(_config(), _blocked)
+
+    assert swapped.pipeline_ocr_backend == "paddle"
+    assert _config("text-layer").pipeline_ocr_backend == "text-layer"
+    assert _config().pipeline_ocr_backend == "paddle"
+
+
+def test_a_refusal_without_a_list_is_kept_up_to_its_alternatives(auto):
+    def single(config):
+        return None if config.ocr_backend == "text-layer" else "cannot start. Alternatives: x"
+
+    config, warning = apply_text_layer_fallback(_config(), single)
+
+    assert config.ocr_text_layer_fallback == "cannot start."
+    assert warning is not None and "Alternatives" not in warning
 
 
 @pytest.mark.parametrize(
@@ -208,10 +238,35 @@ async def test_chew_falls_back_with_one_warning(tmp_path, monkeypatch, capsys, a
     with pytest.raises(_Recorded):
         await _run_process(_build_parser().parse_args(["chew", str(pdf), "--no-llm"]))
 
-    assert seen["ocr_backend"] == "text-layer"
-    err = capsys.readouterr().err
-    assert err.count("OCR_TEXT_LAYER_FALLBACK=auto") == 1
-    assert "llama.cpp not installed" in err
+    # The pipeline gets the automatic backend: it falls back itself and marks
+    # each export with OCR_BACKEND_UNAVAILABLE, as a library run does.
+    assert seen["ocr_backend"] == "paddle"
+    captured = capsys.readouterr()
+    printed = captured.out + captured.err
+    assert printed.count("OCR_FALLBACK_TO_TEXT_LAYER=auto") == 1
+    assert "llama.cpp not installed" in printed
+    assert "Alternatives" not in printed
+    # The run summary names the backend the run will use, not paddle.
+    assert "text-layer (no OCR backend can start here)" in printed
+    assert "paddle (automatic" not in printed
+
+
+async def test_chew_summary_comes_before_the_fallback_warning(tmp_path, monkeypatch, capsys, auto):
+    from bibr.local.cli import _run_process
+
+    monkeypatch.setattr("bibr.local.cli._opencv_unavailable_reason", lambda: None)
+    monkeypatch.setattr("bibr.local.cli.process._preflight_ocr_runtime", _blocked)
+    monkeypatch.setattr("bibr.local.pipeline.LocalPipeline", _recording_pipeline({}))
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+
+    with pytest.raises(_Recorded):
+        await _run_process(_build_parser().parse_args(["chew", str(pdf), "--no-llm"]))
+
+    printed = capsys.readouterr().err
+    assert printed.index("text-layer (no OCR backend can start here)") < printed.index(
+        "No OCR backend can start on this machine"
+    )
 
 
 async def test_chew_without_fallback_refuses_and_names_the_option(tmp_path, monkeypatch, capsys):
@@ -234,7 +289,7 @@ async def test_chew_without_fallback_refuses_and_names_the_option(tmp_path, monk
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "--ocr text-layer" in err
-    assert "OCR_TEXT_LAYER_FALLBACK=auto: reading" not in err
+    assert "OCR_FALLBACK_TO_TEXT_LAYER=auto: reading" not in err
 
 
 async def test_chew_dry_run_shows_the_text_layer_plan(tmp_path, monkeypatch, capsys, auto):
@@ -253,7 +308,7 @@ async def test_chew_dry_run_shows_the_text_layer_plan(tmp_path, monkeypatch, cap
     assert "OCR backend: text-layer" in printed
     assert "OCR model: pdf-text-layer" in printed
     assert "none (no OCR model)" in printed
-    assert printed.count("OCR_TEXT_LAYER_FALLBACK=auto") == 1
+    assert printed.count("OCR_FALLBACK_TO_TEXT_LAYER=auto") == 1
 
 
 def test_batch_falls_back_and_warns_once(monkeypatch, capsys, auto, tmp_path):
@@ -268,12 +323,13 @@ def test_batch_falls_back_and_warns_once(monkeypatch, capsys, auto, tmp_path):
 
     options = _local_options(args, console)
 
-    assert options.chew_options["ocr_backend"] == "text-layer"
+    assert options.chew_options["ocr_backend"] == "paddle"
+    assert any(line.startswith("ocr text-layer") for line in options.summary)
     pdfs = [tmp_path / "a.pdf"]
     assert options.preflight([tmp_path / "a.docx"]) is None
     assert options.preflight(pdfs) is None
     assert options.preflight(pdfs) is None
-    assert capsys.readouterr().err.count("OCR_TEXT_LAYER_FALLBACK=auto") == 1
+    assert capsys.readouterr().err.count("OCR_FALLBACK_TO_TEXT_LAYER=auto") == 1
 
 
 # --- doctor -------------------------------------------------------------------------
@@ -312,7 +368,7 @@ def test_doctor_warns_instead_of_failing_with_the_fallback(monkeypatch, fallback
     from bibr.ocr.registry import OcrBackendCandidate
 
     monkeypatch.setattr(Settings.ocr, "backend", "paddle")
-    monkeypatch.setattr(Settings.ocr, "text_layer_fallback", fallback)
+    monkeypatch.setattr(Settings.ocr, "fallback_to_text_layer", fallback)
     monkeypatch.setattr(
         "bibr.ocr.registry.resolve_backend_candidates",
         lambda backend, settings: (OcrBackendCandidate("glm-llama", "glm-ocr", "glm"),),
@@ -329,4 +385,4 @@ def test_doctor_warns_instead_of_failing_with_the_fallback(monkeypatch, fallback
     else:
         assert kind == "warn"
         assert "falling back to the PDF text layer" in message
-        assert "OCR_TEXT_LAYER_FALLBACK=auto" in hint and "Install llama.cpp" in hint
+        assert "OCR_FALLBACK_TO_TEXT_LAYER=auto" in hint and "Install llama.cpp" in hint

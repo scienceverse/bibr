@@ -156,20 +156,28 @@ a scanned PDF and needs an OCR backend. The threshold is
 `OCR_MIN_SUCCESS_RATE`. The export records `extraction.ocr.backend` as
 `text-layer`, with model `pdf-text-layer` and no profile.
 
-To keep the automatic `paddle` selector and fall back only where it cannot
-start, set:
+To keep the automatic `paddle` selector and fall back only on a machine
+where none of its runtimes can start, set:
 
 ```bash
 # .env
-OCR_TEXT_LAYER_FALLBACK=auto
+OCR_FALLBACK_TO_TEXT_LAYER=auto
 ```
 
-`bibr chew`, `bibr batch`, `--dry-run` and `bibr doctor` then print one
-warning instead of refusing the run, and the library switches the same way
-when OCR startup fails; each file read this way carries the warning
-`OCR_BACKEND_UNAVAILABLE`. The default, `off`, refuses the run as before, and
-the refusal names `--ocr text-layer`. The fallback never replaces an explicit
-backend or an OCR server named with `--ocr-url`.
+The check starts nothing: it asks, for each runtime the selector would try,
+whether its launcher and hardware are there (an NVIDIA GPU for vLLM, the
+llama.cpp server binary, Apple silicon for MLX). When none is, `bibr chew`,
+`bibr batch`, `--dry-run` and `bibr doctor` print one warning instead of
+refusing the run, and the library makes the same check. Every file read this
+way, by the CLI or the library and from the OCR cache too, carries the
+warning `OCR_BACKEND_UNAVAILABLE`, and a scanned PDF fails with
+`scan_needs_ocr` as an outage, so re-running the same `bibr batch` command
+reads it again once an OCR runtime is installed. A runtime that is installed but fails to start
+is still an error. The default, `off`, refuses the run as before, and the
+refusal names `--ocr text-layer`. The fallback never replaces an explicit
+backend or an OCR server named with `--ocr-url`. (The setting is not the
+`OCR_TEXT_LAYER_FALLBACK` warning, which marks scanned-page regions read from
+their text layer when OCR returned nothing.)
 
 Remote OCR requires HTTPS by default. For a trusted private network without
 TLS, explicitly set `OCR_ALLOW_INSECURE_HTTP=true`; loopback HTTP is allowed.

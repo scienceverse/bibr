@@ -15,7 +15,7 @@ not the fill, so they run regardless of that flag — each behind its own
 best-effort guard.
 
 With the text-layer OCR backend (``--ocr text-layer``, or the automatic
-backend's ``OCR_TEXT_LAYER_FALLBACK=auto`` fallback) this stage also reads
+backend's ``OCR_FALLBACK_TO_TEXT_LAYER=auto`` fallback) this stage also reads
 every other region OCR would read from the text layer, page-gated
 (:mod:`bibr.ocr.text_layer`), so the OCR stage has nothing left to send to a
 model.

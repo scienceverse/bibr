@@ -120,11 +120,12 @@ class ResourceManager:
         self.ocr_profile = ocr_profile
         self.ocr_runtime_identity = None
         self.ocr_fallback_reason: str | None = None
-        # Why the automatic OCR chain could not start when it fell back to
-        # reading the PDF text layer (OCR_TEXT_LAYER_FALLBACK=auto). Kept for
-        # the life of these resources, so every later chunk reads the text
-        # layer too instead of retrying an engine that cannot start.
+        # Why no candidate of the automatic OCR chain can start on this
+        # machine, when OCR_FALLBACK_TO_TEXT_LAYER=auto switched the run to
+        # the PDF text layer (see check_text_layer_fallback). Kept for the
+        # life of these resources: every chunk reads the text layer.
         self.ocr_text_layer_fallback: str | None = None
+        self._text_layer_fallback_checked = False
         self.device = device
 
         self.http_client = http_client
@@ -304,6 +305,41 @@ class ResourceManager:
         return self._front_role
 
     # -- OCR --
+
+    def check_text_layer_fallback(self) -> str | None:
+        """Why the run reads the PDF text layer instead of OCR, or None.
+
+        With ``OCR_FALLBACK_TO_TEXT_LAYER=auto``, the automatic ``paddle``
+        backend and no OCR server URL, a machine where no candidate of the
+        automatic chain can start (no NVIDIA GPU for vLLM, no llama.cpp, ...;
+        :func:`bibr.ocr.registry.automatic_chain_blockers`, the check the
+        ``bibr chew`` preflight makes) reads born-digital PDFs from their text
+        layer. The check starts nothing and runs once; its answer holds for
+        the life of these resources. A runtime that is installed but fails
+        to start is not a reason: its files fail as they do without the
+        setting, and a resumed batch retries them.
+        """
+        if self._text_layer_fallback_checked or self.ocr_text_layer_fallback is not None:
+            return self.ocr_text_layer_fallback
+        self._text_layer_fallback_checked = True
+        if (
+            getattr(self._settings.ocr, "fallback_to_text_layer", "off") != "auto"
+            or self._requested_ocr_backend != "paddle"
+            or self.ocr_url
+        ):
+            return None
+        from bibr.ocr.registry import automatic_chain_blockers
+
+        blockers = automatic_chain_blockers(self._settings)
+        if not blockers:
+            return None
+        self.ocr_text_layer_fallback = "; ".join(blockers)
+        logger.info(
+            "No OCR backend can start on this machine (%s). OCR_FALLBACK_TO_TEXT_LAYER=auto: "
+            "reading born-digital PDFs from their embedded text layer; scanned PDFs fail.",
+            self.ocr_text_layer_fallback,
+        )
+        return self.ocr_text_layer_fallback
 
     def _resolve_ocr_candidates(self):
         """Resolve startup candidates, retaining explicit request overrides."""

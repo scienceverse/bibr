@@ -106,6 +106,8 @@ def _format_run_summary(config: ResolvedRunConfig) -> str:
     backend = config.ocr_backend
     if backend == "text-layer":
         profile = "none (no OCR model; reads the PDF text layer)"
+        if config.ocr_text_layer_fallback:
+            backend = "text-layer (no OCR backend can start here)"
     if backend == "paddle":
         backend = "paddle (automatic; use --dry-run for ordered candidates)"
     return (
@@ -421,6 +423,11 @@ async def _run_process(args) -> None:
         ui.error(console, f"Invalid option: {escape(str(e))}")
         sys.exit(2)
 
+    # OCR_FALLBACK_TO_TEXT_LAYER=auto: an automatic OCR backend that cannot
+    # start here becomes the text layer before the summary names the backend;
+    # the warning waits until the inputs show there are PDFs to read.
+    config, fallback_warning = apply_text_layer_fallback(config, _preflight_ocr_runtime)
+
     console.print(_format_run_summary(config))
 
     # Fail fast on missing LLM credentials — the provider would otherwise
@@ -500,13 +507,8 @@ async def _run_process(args) -> None:
             )
             sys.exit(2)
 
-    if any(p.suffix.lower() == ".pdf" for p in files):
-        # OCR_TEXT_LAYER_FALLBACK=auto: an automatic OCR backend that cannot
-        # start here becomes the text layer, with one warning, before the
-        # preflights below (and the --dry-run plan) see the config.
-        config, fallback_warning = apply_text_layer_fallback(config, _preflight_ocr_runtime)
-        if fallback_warning is not None:
-            ui.warn(console, escape(fallback_warning))
+    if fallback_warning is not None and any(p.suffix.lower() == ".pdf" for p in files):
+        ui.warn(console, escape(fallback_warning))
 
     if not args.dry_run and any(p.suffix.lower() == ".pdf" for p in files):
         opencv_problem = _preflight_opencv()
@@ -566,7 +568,7 @@ async def _run_process(args) -> None:
 
     pipeline = LocalPipeline(
         memory_mode=config.memory_mode,
-        ocr_backend=config.ocr_backend,
+        ocr_backend=config.pipeline_ocr_backend,
         ocr_url=config.ocr_url,
         ocr_model=config.ocr_model,
         ocr_profile=config.ocr_profile,
