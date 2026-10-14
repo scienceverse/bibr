@@ -109,6 +109,10 @@ _HANDED_TO = {
     # Adds contribution roles to the decided authors in place; the author
     # receipt lists the "contribution_roles" transform (record_transforms).
     ("extract/research_integrity.py", "_apply_contributions"),
+    # Read the model's pointer answer, before it becomes a verbatim response:
+    # its keywords and the entries of its affiliation list.
+    ("clients/pointer_outputs.py", "_runs_past"),
+    ("clients/pointer_outputs.py", "_is_stand_in"),
 }
 
 
