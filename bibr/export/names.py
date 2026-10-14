@@ -417,9 +417,10 @@ def _segments(text: str) -> list[_Segment]:
 
 def _inverted_pair(segments: list[_Segment], i: int) -> PrintedName | None:
     """Segments *i* and *i + 1* read as "Family, Given", or None. A given
-    name never follows an "and"; a suffix may end the family part ("Spiro
-    III, A.", but not Vancouver's "Kim II, Lee SR")."""
-    if i + 1 >= len(segments) or segments[i + 1].joined:
+    name never follows an "and" and is never a suffix on its own ("John Roe,
+    Jr."); a suffix may end the family part ("Spiro III, A.", but not
+    Vancouver's "Kim II, Lee SR")."""
+    if i + 1 >= len(segments) or segments[i + 1].joined or _is_suffix(segments[i + 1].text):
         return None
     family, given = segments[i].text, segments[i + 1].text
     if _looks_corporate(family) or _looks_corporate(given):
