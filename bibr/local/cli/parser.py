@@ -342,7 +342,10 @@ def _build_parser() -> argparse.ArgumentParser:
     chew.add_argument(
         "input",
         nargs="*",
-        help="Input file(s) or directory containing PDF/DOCX/XML files (use '-' for stdin)",
+        help=(
+            "Input file(s) or directory of PDF, DOCX, JATS XML, HTML or ePub files "
+            "(use '-' for stdin)"
+        ),
     )
     chew.add_argument(
         "--manifest",

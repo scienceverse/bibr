@@ -1243,7 +1243,7 @@ released.
   2020", "Data Availability") is admitted on none of these grounds. Only
   the words outside an e-mail address make a line editorial, so an author
   whose address names a history department or an ethics centre
-  (jane.smith@history.ox.ac.uk) still counts as a name over her address.
+  (jane.smith@history.example.edu) still counts as a name over her address.
 - On a first page that prints no byline ahead of its abstract, an author's
   name set above the title that layout labels a page header ("Hubert
   Heinen" over "German-Texan Attitudes toward the Civil War") now reaches
