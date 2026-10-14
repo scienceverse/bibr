@@ -9,7 +9,6 @@ import asyncio
 import json
 import stat
 
-import anthropic
 import httpx
 import instructor
 import pytest
@@ -32,6 +31,9 @@ from bibr.config import GlobalSettings
 from bibr.exceptions import LlmDeferred, ProcessingError
 from bibr.schemas import AuthorsLLM, TitleKeywordsLLM, TitleKeywordsPointerLLM
 from tests.clients.test_batch_request import _ANSWERS, BOUNDARY, TEXT, _message, live_kwargs
+
+# The SDK comes with the `batch` extra, which the core CI environments leave out.
+anthropic = pytest.importorskip("anthropic")
 
 FILE_HASH = "0123456789abcdef"
 

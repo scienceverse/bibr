@@ -12,7 +12,6 @@ capture the arguments of the SDK call through Instructor's
 
 import asyncio
 
-import anthropic
 import httpx
 import instructor
 import pytest
@@ -26,6 +25,9 @@ from bibr.clients.batch import (
 from bibr.clients.llm import LLMClient, _task_max_tokens
 from bibr.config import GlobalSettings
 from bibr.schemas import AuthorsLLM, PaperClassificationLLM, PaperTypeLabel, TitleKeywordsLLM
+
+# The SDK comes with the `batch` extra, which the core CI environments leave out.
+anthropic = pytest.importorskip("anthropic")
 
 BOUNDARY = "b" * 32
 TEXT = "A Study of Things\nJane Doe, University of Somewhere\nAbstract. We studied things."
