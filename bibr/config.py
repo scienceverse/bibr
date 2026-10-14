@@ -643,7 +643,11 @@ class LlmOptions(_BibrSettings):
         description="Instructor schema-validation attempts. None auto-selects 1 for deterministic "
         "custom OpenAI-compatible endpoints and 3 for cloud providers.",
     )
-    timeout_seconds: int = Field(30, description="Per-request LLM timeout in seconds.")
+    timeout_seconds: int = Field(
+        30,
+        description="Per-request LLM timeout in seconds. The managed llama.cpp, MLX and "
+        "LM Studio servers raise an unset value to 300, and llama.cpp on a CPU build to 900.",
+    )
     track_usage: bool = Field(True, description="Track LLM token usage.")
     capture_trace: bool = Field(
         False,
@@ -674,8 +678,10 @@ class LlmOptions(_BibrSettings):
         description="Model id served by the managed local LLM backends. Unset picks the "
         "recommended model the selected backend can load: bibr's fine-tuned Qwen3.5-4B "
         "(scienceverse/bibr-extract-qwen35-4b): bf16 for vLLM, the GGUF Q8_0 build for "
-        "llama.cpp and the 8-bit MLX build for Apple Silicon. `bibr setup` writes it "
-        "explicitly and picks a smaller build, or the 2B student, when memory is short.",
+        "llama.cpp and the 8-bit MLX build for Apple Silicon. A llama.cpp build that sees "
+        "no GPU gets the 2B student's GGUF Q4_K_M build, the fastest on a CPU. `bibr setup` "
+        "writes it explicitly and picks a smaller build, or the 2B student, when memory is "
+        "short.",
     )
     local_mem_fraction: float = Field(
         0.85,
@@ -761,7 +767,8 @@ class LlmOptions(_BibrSettings):
             "value as separate tokens (--flag value, not --flag=value). Role-based LLM defaults include "
             "--flash-attn on, --cache-type-k/v q8_0, --n-gpu-layers 999, plus probe-gated "
             "--parallel 2 --kv-unified, --spec-type ngram-mod, and --no-mmproj when supported "
-            "(else --parallel 1)."
+            "(else --parallel 1). A build that sees no GPU gets --threads set to the physical "
+            "cores bibr may use instead of --n-gpu-layers."
         ),
     )
     # Instructor structured-output mode for custom-base_url (local) servers.
@@ -2446,7 +2453,11 @@ class GlobalSettings(_BibrSettings):
         gt=0,
         description="Optional explicit wtpsplit inference stride.",
     )
-    EQUATION_EXTRACTION: bool = Field(True, description="Extract equations from OCR output.")
+    EQUATION_EXTRACTION: bool = Field(
+        True,
+        description="Extract equations from OCR output. Unset, it is off when the managed "
+        "llama.cpp LLM server runs on the CPU.",
+    )
     EQUATION_EXTRACTION_TIMEOUT_SECONDS: int = Field(
         90, description="Timeout in seconds for equation extraction."
     )

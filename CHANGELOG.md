@@ -21,8 +21,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   parse, bibr asks for the verbatim answer instead. A stand-in the model writes for an
   affiliation the text does not print ("Affiliation 3") is left empty.
   The merged call, the JSON re-roll and the NuExtract native backend stay verbatim.
+- Experimental: the extraction model can run on a CPU. With no NVIDIA GPU or Apple
+  Silicon, `--llm local` picks llama.cpp when `llama-server` is installed, and a llama.cpp
+  build that sees no GPU starts without GPU offload, with `--threads` set to the physical
+  cores bibr may use. It loads the 2B model's Q4_K_M GGUF, raises an unset
+  `LLM_TIMEOUT_SECONDS` to 900 and turns an unset `EQUATION_EXTRACTION` off. The registry
+  lists CPU builds by system RAM, fastest first: 2B Q4_K_M (6 GB), 2B Q8_0 (7 GB) and 4B
+  Q4_K_M (8 GB). After the cloud is declined on such a machine, `bibr setup` can offer
+  this as an experimental option, with no OCR model (`OCR_BACKEND=text-layer`,
+  born-digital PDFs only) and llama.cpp CPU install hints. None of it has been timed or
+  scored end to end; the one CPU measurement, the 4B at Q8_0 on 4 threads, read 82 and
+  wrote 9.6 tokens a second, which is minutes per paper. See
+  [choosing an extraction model](docs/guides/extraction-models.md#without-a-gpu-experimental).
 
 ### Changed
+
+- llama.cpp downloads bibr's GGUF builds from the Hub commit each was published at
+  (`--model-url`) instead of the repository's newest files, so a build already fetched
+  with `-hf` is downloaded once more. A model outside bibr's registry still uses `-hf`.
 
 - `bibr setup` recommends a new extraction model by hardware. On Linux with an
   NVIDIA GPU it picks bibr's fine-tuned Qwen3.5-4B (12 GB or more) or Qwen3.5-2B
