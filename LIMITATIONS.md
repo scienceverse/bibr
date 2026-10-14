@@ -63,8 +63,9 @@ next. Every result has a date, because bibr changes every week.
 | Word, JATS, HTML and ePub files | Read natively, without OCR | ⚪ Not measured | None yet | All our benchmarks are PDFs |
 
 Most of these papers are in English, and most are from the social sciences.
-Other languages and fields are less tested. On the 29 non-English papers in our
-model comparison, the smaller models trailed the 27B by about 7 points.
+Other languages and fields are less tested. Of the 29 non-English papers in our
+model comparison, Claude Haiku 5.5 passed 2 fewer than the 27B and NuExtract 3
+passed 6 fewer.
 
 ### Checking references against the record
 
