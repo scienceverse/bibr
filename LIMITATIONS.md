@@ -96,7 +96,7 @@ bibr at your own OpenAI-compatible server
 
 On a computer with only a CPU, PDFs need llama.cpp (which is slow there), your
 own OCR and model server, or cloud processing. Word, JATS, HTML and ePub files
-work without any of them.
+need no OCR.
 
 **Found a paper bibr gets wrong?** Please tell us with the
 [wrong-extraction form](https://github.com/scienceverse/bibr/issues/new?template=wrong-extraction.yml).
@@ -139,9 +139,10 @@ Less is known about performance on:
   extra care; see the next section.
 
 - Inputs that are not PDFs. DOCX, JATS XML, HTML, and ePub files are parsed
-  natively and skip OCR and the core LLM extraction, which makes them fast and
-  cheap, but the benchmark sets are PDF-only, so their field coverage is less
-  measured.
+  natively and skip OCR, which makes them fast and cheap. JATS, HTML and ePub
+  files also skip the core LLM extraction: their metadata comes from the file's
+  own markup. DOCX metadata still goes through the LLM. The benchmark sets are
+  PDF-only, so field coverage for these inputs is less measured.
 
 If you use bibr in a new domain, treat the first batch as a validation run:
 inspect representative JSON output manually, run `bibr inspect`, and keep an
