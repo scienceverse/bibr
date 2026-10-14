@@ -70,6 +70,9 @@ class OcrRegionResult:
     # A text-layer header/footer whose box cuts a printed line, so its text
     # may end mid-token (native_text._box_cuts_a_line).
     native_text_edge_cut: bool | None = None
+    # "text_layer" for a formula read from the PDF text layer by the
+    # text-layer backend (bibr.ocr.text_layer): plain text, not LaTeX.
+    formula_source: str | None = None
 
     @classmethod
     def from_layout_region(
@@ -109,6 +112,7 @@ class OcrRegionResult:
             native_text_candidate=layout.get("_native_text_candidate"),
             native_text_rejection_reason=layout.get("_native_text_rejection_reason"),
             native_text_edge_cut=layout.get("_native_text_edge_cut"),
+            formula_source=layout.get("_formula_source"),
         )
 
     @classmethod
@@ -141,6 +145,7 @@ class OcrRegionResult:
             native_text_rejection_reason=d.get("_native_text_rejection_reason"),
             ocr_consensus=d.get("_ocr_consensus"),
             native_text_edge_cut=d.get("_native_text_edge_cut"),
+            formula_source=d.get("_formula_source"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -182,4 +187,6 @@ class OcrRegionResult:
             out["_ocr_consensus"] = self.ocr_consensus
         if self.native_text_edge_cut is not None:
             out["_native_text_edge_cut"] = self.native_text_edge_cut
+        if self.formula_source is not None:
+            out["_formula_source"] = self.formula_source
         return out

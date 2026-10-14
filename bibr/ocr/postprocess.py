@@ -250,6 +250,11 @@ def clean_formula_number(number_content: str) -> str:
     return number_clean
 
 
+def _with_plain_number(formula: str, number: str) -> str:
+    """A text-layer formula (plain text, no LaTeX) with its number appended."""
+    return f"{formula.rstrip()} ({number})" if number else formula
+
+
 def merge_formula_numbers(json_page_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     r"""Merge formula_number into adjacent formula block using \tag{}.
 
@@ -286,6 +291,8 @@ def merge_formula_numbers(json_page_results: list[dict[str, Any]]) -> list[dict[
                         # Handle formulas ending with $$ without a preceding newline
                         stripped = formula_content.rstrip()
                         merged_block["content"] = stripped[:-2] + f" \\tag{{{number_clean}}}$$"
+                    elif merged_block.get("_formula_source") == "text_layer":
+                        merged_block["content"] = _with_plain_number(formula_content, number_clean)
 
                     merged_results.append(merged_block)
                     skip_indices.add(i + 1)
@@ -314,6 +321,8 @@ def merge_formula_numbers(json_page_results: list[dict[str, Any]]) -> list[dict[
                     elif formula_content.rstrip().endswith("$$"):
                         stripped = formula_content.rstrip()
                         merged_block["content"] = stripped[:-2] + f" \\tag{{{number_clean}}}$$"
+                    elif merged_block.get("_formula_source") == "text_layer":
+                        merged_block["content"] = _with_plain_number(formula_content, number_clean)
 
                     merged_results.append(merged_block)
                     skip_indices.add(i + 1)
