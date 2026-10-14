@@ -36,6 +36,7 @@ from bibr.batch.ledger import (
     CHUNK_ERROR,
     INTERRUPTED,
     LEDGER_FILENAME,
+    LLM_DEFERRED,
     OUTPUT_WRITE_FAILED,
     UPSTREAM_UNAVAILABLE,
     Ledger,
@@ -97,6 +98,10 @@ class BatchOptions:
     cli_options: dict[str, Any] = field(default_factory=dict)
     report_json: bool = False
     tables: bool = True  # write <out>/tables/*.parquet after the run
+    # Run only these papers of the resume plan (the replay of --llm-batch).
+    only_paper_ids: frozenset[str] | None = None
+    # Print the end-of-run report (--llm-batch prints one JSON report, not two).
+    print_report: bool = True
 
     @property
     def executor(self) -> str:
@@ -209,6 +214,8 @@ def build_plan(
         items, force=options.force, retry_failed=options.retry_failed, entries=entries
     )
     to_run = list(resume.to_run)
+    if options.only_paper_ids is not None:
+        to_run = [item for item in to_run if item.paper_id in options.only_paper_ids]
     seed = options.seed
     if options.shuffle:
         if seed is None:
@@ -675,8 +682,13 @@ def run_batch(
     console: Any = None,
     transport: Any = None,
     stop: Any = None,
+    on_run_id: Callable[[str], None] | None = None,
 ) -> int:
-    """Execute one ``bibr batch`` run end to end; returns the process exit code."""
+    """Execute one ``bibr batch`` run end to end; returns the process exit code.
+
+    *on_run_id* sees the run's id once the run starts (after the plan, the
+    preflight and the lock); a run that never starts does not call it.
+    """
     from bibr.local.cli import ui
 
     if console is None:
@@ -734,7 +746,15 @@ def run_batch(
             plan = build_plan(options, ledger, discovery=discovery)
             if preflight_fails(plan):
                 return EXIT_FAILURES
-        return _execute(options, plan, ledger, console=console, transport=transport, stop=stop)
+        return _execute(
+            options,
+            plan,
+            ledger,
+            console=console,
+            transport=transport,
+            stop=stop,
+            on_run_id=on_run_id,
+        )
 
 
 def _file_state(path: Path) -> tuple[int, int] | None:
@@ -753,12 +773,15 @@ def _execute(
     console: Any,
     transport: Any,
     stop: Any,
+    on_run_id: Callable[[str], None] | None = None,
 ) -> int:
     """The run itself, under ``<out>/.lock``: execute, ledger, report."""
     from bibr.local.artifacts import atomic_write_json
     from bibr.local.cli import ui
 
     run_id = uuid.uuid4().hex[:12]
+    if on_run_id is not None:
+        on_run_id(run_id)
     started_at = utc_now_iso()
     context_holder: dict[str, LedgerContext] = {
         "context": LedgerContext(
@@ -842,6 +865,13 @@ def _execute(
             console.print(
                 f"  [green]{ui.OK}[/green] [dim]\\[{done}/{total}][/dim] {item.paper_id}"
                 f"  [dim]{detail}[/dim]",
+                soft_wrap=True,
+            )
+        elif outcome.error_code == LLM_DEFERRED:
+            n_failed += 1
+            console.print(
+                f"  [yellow]{ui.ARROW}[/yellow] [dim]\\[{done}/{total}][/dim] {item.paper_id}"
+                "  [dim]LLM calls deferred to the batch[/dim]",
                 soft_wrap=True,
             )
         else:
@@ -958,9 +988,11 @@ def _execute(
         write_batch_tables(options.out, ledger, entries, console=console)
     report = compute_report(entries, run_id=run_id)
     if options.report_json:
-        print(json.dumps(report, indent=2))
+        if options.print_report:
+            print(json.dumps(report, indent=2))
     else:
-        print(render_report(report, title=f"bibr batch {ui.SEP} run {run_id} ({reason})"))
+        if options.print_report:
+            print(render_report(report, title=f"bibr batch {ui.SEP} run {run_id} ({reason})"))
         if reason == "deadline":
             console.print("  [dim]deadline reached — re-run the same command to continue[/dim]")
         elif reason in ("stopped", "interrupted"):

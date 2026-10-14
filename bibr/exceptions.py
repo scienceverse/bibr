@@ -14,7 +14,9 @@ answer (``LlmServiceError``; ``LlmUnreachableError`` when it could not be
 reached at all; ``LlmTimeoutError``), refused the request
 (``LlmRejectedError``), or answered with a truncated or invalid response
 (``LlmTruncatedError``, ``LlmInvalidOutputError``). Serve maps the last two to
-422, because retrying the same request cannot help.
+422, because retrying the same request cannot help. ``LlmDeferred`` is the
+``ProcessingError`` of a call that ``bibr batch --llm-batch`` spooled for an
+Anthropic Message Batch instead of sending it.
 
 Most call sites catch the bare ``Exception`` and surface a structured
 ``ProcessingStatus`` instead. The specific catches are the degrade sites that
@@ -379,6 +381,22 @@ class ProcessingError(BibrError):
         ):
             raise TypeError("safe_diagnostics must be exact SafeLlmDiagnostics or None")
         super().__setattr__(name, value)
+
+
+class LlmDeferred(ProcessingError):
+    """A structured LLM call was not sent: ``bibr batch --llm-batch`` spooled it
+    for an Anthropic Message Batch instead (:mod:`bibr.clients.batch_defer`).
+
+    A ``ProcessingError`` so it passes every degrade site that keeps a paper
+    when an optional call fails: the paper fails softly with ``error_code``
+    ``llm_deferred``, the batch ledger runs it again, and the replay finds
+    the batch's answer in the LLM response cache.
+    """
+
+    error_code_value = "llm_deferred"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, error_code=self.error_code_value)
 
 
 class ConfigurationError(BibrError):

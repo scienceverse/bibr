@@ -288,6 +288,10 @@ def _run_batch(args: Any) -> int:
         report_json=args.json,
         tables=not args.no_tables,
     )
+    llm_batch = getattr(args, "llm_batch", None)
+    if llm_batch and args.serve_url:
+        ui.error(console, "--llm-batch runs locally; drop --serve-url.")
+        return 2
     if args.serve_url:
         options.remote = _remote_options(args, console)
         if options.remote is None:
@@ -296,4 +300,8 @@ def _run_batch(args: Any) -> int:
         options.local = _local_options(args, console)
         if options.local is None:
             return 2
+    if llm_batch:
+        from bibr.batch.llm_batch import run_llm_batch
+
+        return run_llm_batch(options, scope=llm_batch, console=console)
     return run_batch(options, console=console)

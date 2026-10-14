@@ -21,9 +21,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   parse, bibr asks for the verbatim answer instead. A stand-in the model writes for an
   affiliation the text does not print ("Affiliation 3") is left empty.
   The merged call, the JSON re-roll and the NuExtract native backend stay verbatim.
+- `bibr batch --llm-batch front-matter` sends each paper's front-matter LLM calls (title,
+  abstract and keywords; authors; classification) through Anthropic's Message Batches API at
+  half the token price. A first round defers those calls and spools them, the batch answers
+  go into the LLM response cache, and a second round replays the deferred papers from it. The
+  run reports how many deferred calls hit the cache and stops with an error below 95 %, or
+  before the replay when the batch left more than 5 % of the requests unanswered. The exit
+  code and the `--json` report cover both rounds, and `--deadline` also bounds the wait for
+  the batch, which the next run collects. It needs the local executor,
+  `LLM_PROVIDER=anthropic`, `CACHE_LLM` and `CACHE_OCR`, and it may wait up to 24 hours. The
+  batch halves the front matter's cost, which on Haiku 5.5 is about a fifth of a cent per paper,
+  so it is meant for hosted runs of 100,000 papers or more. A deferred paper is recorded as `llm_deferred`, which resume runs
+  again like an interruption, and `bibr batch report` counts it as deferred. With
+  `LLM_POINTER_OUTPUTS=true` the batch answers the pointer calls, and the second round copies
+  the abstract and affiliations back as a live run does. When bibr can't use a pointer answer,
+  the verbatim call it makes instead goes live and is counted as a fallback, not as a miss.
 
 ### Changed
 
+- The Message Batches client builds each request the way the live `LLM_PROVIDER=anthropic`
+  call does: the same temperature or thinking budget, output cap, prompt-cache marks and
+  Instructor tool schema, parsed and validated by the same code and as strictly. It used to
+  send no temperature (so Haiku 4.5 sampled at 1.0), a 1024-token cap, flattened prompts and
+  a tool schema of its own. For Sonnet 5.5, Opus 5.5 and Fable 5.1, which reject a forced
+  tool choice, it leaves the choice to the model.
 - The vLLM servers bibr starts get `VLLM_NO_USAGE_STATS=1`, and `bibr demo` sets
   `GRADIO_ANALYTICS_ENABLED=False`, so neither sends usage statistics to its
   maintainers. A value already in your environment wins.

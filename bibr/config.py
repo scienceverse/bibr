@@ -787,11 +787,14 @@ class LlmOptions(_BibrSettings):
     )
 
     batch_model: str = Field(
-        "claude-haiku-4-5", description="Model name for the offline batch LLM layer."
+        "claude-haiku-4-5",
+        description="Model of the Anthropic Message Batches client when its caller names none. "
+        "`bibr batch --llm-batch` sends LLM_MODEL instead, the model its replay calls.",
     )
     batch_poll_interval_s: int = Field(
         60,
-        description="Poll interval in seconds for the offline batch LLM layer's job status checks.",
+        description="Seconds between status checks of a running Anthropic Message Batch "
+        "(`bibr batch --llm-batch`).",
     )
 
     @field_validator("provider", "backend", "structured_backend", mode="before")
@@ -1661,16 +1664,16 @@ class CacheOptions(_BibrSettings):
         "(else ~/.cache/bibr/ocr).",
     )
     # Opt-in disk cache for structured LLM responses, keyed on model + schema +
-    # system + user text. A hit costs no tokens and no rate-limit slot. This is
-    # not written by the offline Message Batches path (bibr/clients/batch.py
-    # has no CLI or pipeline caller), so nothing prefills it today.
+    # system + user text. A hit costs no tokens and no rate-limit slot.
+    # `bibr batch --llm-batch` (bibr/batch/llm_batch.py) prefills it from
+    # Anthropic Message Batches before it replays the deferred papers.
     # Off by default — like the OCR cache, it never silently changes
     # results unless opted in. Env: CACHE_LLM.
     llm: bool = Field(
         False,
         description="Opt-in disk cache for structured LLM responses, keyed on model, schema, "
-        "system prompt and user text. Not written by the offline batch layer. Off by "
-        "default.",
+        "system prompt and user text. `bibr batch --llm-batch` fills it from Anthropic "
+        "Message Batches. Off by default.",
     )
     # Directory for the LLM response cache. None → $XDG_CACHE_HOME/bibr/llm
     # (else ~/.cache/bibr/llm). Env: CACHE_LLM_DIR.

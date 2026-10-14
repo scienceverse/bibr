@@ -354,7 +354,13 @@ def test_started_lines_are_on_disk_but_not_in_verdict_readers(tmp_path, monkeypa
     assert started["sha256"] == sha256_file(papers / f"{started['paper_id']}.pdf")
     verdicts = Ledger(out / LEDGER_FILENAME).read()
     assert STARTED not in {row["status"] for row in verdicts}
-    assert compute_report(verdicts)["papers"] == {"total": 2, "ok": 1, "failed": 1, "attempts": 4}
+    assert compute_report(verdicts)["papers"] == {
+        "total": 2,
+        "ok": 1,
+        "failed": 1,
+        "deferred": 0,
+        "attempts": 4,
+    }
 
 
 def test_papers_of_a_killed_run_run_again_alone_and_last(tmp_path, monkeypatch):

@@ -2160,16 +2160,11 @@ class LLMClient:
 
     def _cache_store(self, cache, key: str, result: Any, response_model: Any) -> None:
         try:
-            body = result.model_dump(mode="json")
-            # Blank/omitted model output is sanitized to None, but is not an
-            # explicit refusal. Preserve that distinction when validating a hit.
-            if getattr(result, "_abstract_explicitly_absent", None) is False:
-                for name in getattr(result, "_abstract_fields", ()):
-                    if body.get(name) is None:
-                        body.pop(name, None)
+            from bibr.clients.llm_cache import response_body
+
             cache.put(
                 key,
-                body,
+                response_body(result),
                 model=self._settings.llm.model,
                 schema_name=getattr(response_model, "__name__", str(response_model)),
                 label=_usage_label.get(),
@@ -2212,6 +2207,17 @@ class LLMClient:
         )
         if cache is not None and cache_key is not None:
             hit = self._cached_result(cache, cache_key, response_model)
+            from bibr.clients.batch_defer import on_cache_lookup
+
+            # ``bibr batch --llm-batch``: spool this miss for a Message Batch
+            # (raises LlmDeferred), or count the replay's hit or miss.
+            on_cache_lookup(
+                self,
+                cache_key,
+                hit=hit is not None,
+                deferrable=client_override is None and protocol == "instructor",
+                request=(response_model, messages, system_prompt, reasoning_effort, max_tokens),
+            )
             if hit is not None:
                 return hit
 

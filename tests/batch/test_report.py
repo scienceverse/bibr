@@ -60,7 +60,7 @@ def _ledger():
 
 def test_compute_report_counts_latest_attempt_per_paper():
     report = compute_report(_ledger())
-    assert report["papers"] == {"total": 5, "ok": 3, "failed": 2, "attempts": 6}
+    assert report["papers"] == {"total": 5, "ok": 3, "failed": 2, "deferred": 0, "attempts": 6}
 
 
 def test_compute_report_window_and_throughput():
@@ -130,7 +130,7 @@ def test_compute_report_failure_breakdown_and_warning_top():
 def test_compute_report_filters_by_run_id():
     report = compute_report(_ledger(), run_id="r2")
     assert report["run_id"] == "r2"
-    assert report["papers"] == {"total": 2, "ok": 1, "failed": 1, "attempts": 2}
+    assert report["papers"] == {"total": 2, "ok": 1, "failed": 1, "deferred": 0, "attempts": 2}
 
 
 def test_compute_report_on_empty_ledger():
