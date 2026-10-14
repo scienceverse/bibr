@@ -426,7 +426,7 @@ requires-dist = [
     { name = "jsonref", specifier = ">=1.1.0" },
     { name = "litserve", specifier = ">=0.2.16,<0.3" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.2.0,<3" },
-    { name = "numind", specifier = ">=0.3,<0.4" },
+    { name = "numind", specifier = ">=0.3,<0.3.1" },
     { name = "onnxruntime", specifier = ">=1.19.0" },
     { name = "onnxruntime-gpu", extras = ["cuda", "cudnn"], marker = "(sys_platform == 'linux' and extra == 'gpu') or (sys_platform == 'win32' and extra == 'gpu')" },
     { name = "openai", marker = "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", specifier = ">=2.54.0,<3" },

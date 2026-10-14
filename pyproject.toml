@@ -45,7 +45,10 @@ dependencies = [
     "litserve>=0.2.16,<0.3",
     "uvicorn[standard]>=0.30.0",
     "python-docx>=1.1.0",
-    "numind>=0.3,<0.4",
+    # numind 0.3.1 changed convert_json_schema_to_nuextract_template to return a
+    # dict instead of (template, dropped_branches), and every native NuExtract
+    # contract (LLM_STRUCTURED_BACKEND=nuextract-native) failed to build.
+    "numind>=0.3,<0.3.1",
     # The torch-free ML runtime. Every bibr-owned model is served through ONNX
     # Runtime with its own `tokenizers` tokenizer, resolved from the Hub cache;
     # scikit-learn/joblib carry the geom sentence segmenter's model bundle.

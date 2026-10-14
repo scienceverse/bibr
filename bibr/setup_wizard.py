@@ -927,7 +927,7 @@ class SetupWizard:
             "Haiku 5.5 in the cloud. This sends document-derived content (page images and "
             "extracted text) to Anthropic."
         )
-        if not Confirm.ask("Send document-derived content to Anthropic Claude?", default=True):
+        if not Confirm.ask("Send document-derived content to Anthropic Claude?", default=False):
             self._handle_decline()
             return
 

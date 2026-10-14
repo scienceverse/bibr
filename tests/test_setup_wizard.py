@@ -1927,6 +1927,26 @@ def test_weak_hardware_cloud_consent_writes_claude_for_ocr_and_extraction(tmp_pa
     assert "GOOGLE_API_KEY" not in content
 
 
+def test_cloud_consent_defaults_to_no(monkeypatch):
+    """Pressing Enter at the cloud consent question must not send content to Anthropic."""
+    wizard = _recording_wizard()
+    monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: (None, None))
+    monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 8.0)
+    monkeypatch.setattr(wizard, "run_advanced", lambda: None)
+    defaults = {}
+
+    def confirm(prompt, **k):
+        defaults[prompt] = k.get("default")
+        return False
+
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", confirm)
+
+    wizard.run()
+
+    assert defaults["Send document-derived content to Anthropic Claude?"] is False
+    assert wizard.env_vars == {}
+
+
 def test_cloud_consent_declined_offers_advanced_handoff(monkeypatch):
     """Declining cloud consent must offer --advanced, not SystemExit; yes → run_advanced."""
     wizard = _recording_wizard()
