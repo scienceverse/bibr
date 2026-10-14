@@ -17,13 +17,13 @@ machine can run:
 Windows and NVIDIA cards below 8 GB run the models through llama.cpp (GGUF),
 with the largest build that fits. `bibr setup` recommends a local model only
 from 5 GB of VRAM, so in practice that is the 4B; the 2B builds are there for
-smaller cards through `bibr setup --advanced`. Apple Silicon runs the 2B
-through MLX:
+smaller cards through `bibr setup --advanced`. Apple Silicon runs the 4B, or
+the 2B on a Mac with less memory, through MLX:
 
 | Runtime | Builds, largest first | Memory |
 |---|---|---|
 | llama.cpp | 4B Q8_0, 4B Q4_K_M, 2B Q8_0, 2B Q4_K_M (`scienceverse/bibr-extract-qwen35-4b-GGUF`, `-2b-GGUF`) | from 7 GB down to 3 GB of VRAM |
-| MLX (Apple Silicon) | 2B 8-bit (`scienceverse/bibr-extract-qwen35-2b-mlx-8bit`) | 3 GB of memory |
+| MLX (Apple Silicon) | 4B 8-bit, 2B 8-bit (`scienceverse/bibr-extract-qwen35-4b-mlx-8bit`, `-2b-mlx-8bit`) | from 6 GB down to 3 GB of memory |
 
 The quantized builds are made from the same merged weights. Served by
 llama.cpp on the same 252 papers, the 4B Q8_0 passes 218 (bf16 on vLLM: 216),
@@ -36,9 +36,9 @@ vLLM too, and bibr can hand VRAM between two vLLM servers but not yet between
 vLLM and llama.cpp. `bibr setup --advanced` offers the 4B Q8_0 build on
 llama.cpp there, but it may run out of memory while OCR and extraction share
 the card. The
-2B MLX build has only been smoke-tested, so setup marks it experimental. There
-is no MLX build of the 4B yet: the 4-bit build duplicated a funding entry in its
-smoke test.
+MLX builds have only been smoke-tested, so setup marks them experimental. There
+are no 4-bit MLX builds: in their smoke tests the 4B's duplicated a funding
+entry and the 2B's returned award IDs as numbers.
 
 The hosted setup uses Claude for OCR as well (`OCR_BACKEND=anthropic`,
 `OCR_VISION_MODEL=claude-haiku-5-5`), so it needs one Anthropic key. The 221/252

@@ -240,7 +240,7 @@ has the measurements):
 | vLLM, 12 GB or more | `scienceverse/bibr-extract-qwen35-4b` (Qwen3.5-4B fine-tuned for bibr, bf16) | 12 GB VRAM |
 | vLLM, 8–11 GB | `scienceverse/bibr-extract-qwen35-2b` (Qwen3.5-2B fine-tuned for bibr, bf16) | 8 GB VRAM |
 | llama.cpp (Windows, cards below 8 GB) | `scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0`, else `:Q4_K_M`, else the 2B's `scienceverse/bibr-extract-qwen35-2b-GGUF` builds | 7 GB for the 4B Q8_0, down to 3 GB for the 2B Q4_K_M |
-| Rapid-MLX / vllm-mlx | `scienceverse/bibr-extract-qwen35-2b-mlx-8bit` (there is no MLX build of the 4B yet) | 3 GB |
+| Rapid-MLX / vllm-mlx | `scienceverse/bibr-extract-qwen35-4b-mlx-8bit`, else the 2B's `-2b-mlx-8bit` | 6 GB for the 4B, 3 GB for the 2B |
 
 When no local model fits, the recommended hosted model is Claude Haiku 5.5
 (`LLM_PROVIDER=anthropic`, `LLM_MODEL=claude-haiku-5-5`), which `bibr setup`

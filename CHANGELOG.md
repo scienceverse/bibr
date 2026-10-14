@@ -32,9 +32,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   also does the cloud OCR, so setup needs one Anthropic key. Claude's OCR has
   not been scored on bibr's papers yet. Windows and cards below 8 GB get GGUF
   (llama.cpp) builds of the same two models, which pass 204–218 of the 252
-  papers, and Apple Silicon gets an MLX build of the 2B. An unset
-  `LLM_LOCAL_MODEL` now loads the 4B model on vLLM and llama.cpp and the 2B on
-  MLX. See
+  papers, and Apple Silicon gets their 8-bit MLX builds. An unset
+  `LLM_LOCAL_MODEL` now loads the 4B model on every managed runtime. See
   [choosing an extraction model](docs/guides/extraction-models.md).
 - The managed llama.cpp LLM server starts with thinking off (`--reasoning off`,
   or `--reasoning-budget 0` on older builds). llama-server's default,

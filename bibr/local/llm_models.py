@@ -107,10 +107,17 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 approx_download_gb=2.6,
                 runtime="llama-cpp",
             ),
-            # No MLX build: the 4-bit duplicated a funding entry in its smoke
-            # test and the 8-bit has not passed one yet, so Macs get the 2B.
+            LocalLLMVariant(
+                hf_id="scienceverse/bibr-extract-qwen35-4b-mlx-8bit",
+                platform="mlx",
+                quant="8bit",
+                min_vram_gb=6,
+                approx_download_gb=4.5,
+            ),
+            # No 4-bit MLX build: it duplicated a funding entry in its smoke test.
         ),
         env=_QWEN35_STUDENT_ENV,
+        experimental_platforms=frozenset({"mlx"}),  # smoke-tested only
     ),
     LocalLLMModel(
         key="bibr-extract-2b",
@@ -230,7 +237,7 @@ def default_local_model(backend: str) -> str:
     build — so a hand-written ``LLM_BACKEND=vllm`` or ``llama-cpp`` downloaded
     weights the runtime could not load. The answer is the best recommended
     entry that the backend's runtime can serve: the 4B student, as bf16 for
-    vLLM and GGUF Q8_0 for llama.cpp, and the 2B student's 8-bit build for MLX.
+    vLLM, GGUF Q8_0 for llama.cpp and 8-bit for MLX.
     """
     try:
         platform_key, runtime = _BACKEND_VARIANT_FILTER[backend]
