@@ -40,8 +40,7 @@ def test_cuda_llm_backend_follows_the_registry_fit():
         ("cuda", 6.0, "llama-cpp", "scienceverse/bibr-extract-qwen35-4b-GGUF:Q4_K_M"),
         ("cuda", 4.0, "llama-cpp", "scienceverse/bibr-extract-qwen35-2b-GGUF:Q8_0"),
         ("cuda", 3.0, "llama-cpp", "scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M"),
-        ("mlx", 32.0, None, "scienceverse/bibr-extract-qwen35-4b-mlx-8bit"),
-        ("mlx", 5.0, None, "scienceverse/bibr-extract-qwen35-4b-mlx-4bit"),
+        ("mlx", 32.0, None, "scienceverse/bibr-extract-qwen35-2b-mlx-8bit"),
         ("mlx", 3.0, None, "scienceverse/bibr-extract-qwen35-2b-mlx-8bit"),
     ],
 )
@@ -64,7 +63,7 @@ def test_students_are_merged_vllm_checkpoints_with_thinking_off():
     for key in ("bibr-extract-4b", "bibr-extract-2b"):
         model = get_model(key)
         assert [v.runtime for v in model.variants][:3] == ["vllm", "llama-cpp", "llama-cpp"]
-        assert {v.platform for v in model.variants[3:]} == {"mlx"}
+        assert {v.platform for v in model.variants[3:]} <= {"mlx"}
         # llama.cpp and MLX servers do not read server_args: thinking goes off per request.
         assert model.env == {"LLM_CHAT_TEMPLATE_KWARGS": '{"enable_thinking": false}'}
         args = registry_server_args(model.variants[0].hf_id)
@@ -80,8 +79,8 @@ def test_default_local_model_follows_the_backend_runtime():
     """An unset LLM_LOCAL_MODEL must never hand vLLM or llama.cpp the MLX build."""
     assert default_local_model("vllm") == "scienceverse/bibr-extract-qwen35-4b"
     assert default_local_model("llama-cpp") == "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
-    assert default_local_model("vllm-mlx") == "scienceverse/bibr-extract-qwen35-4b-mlx-8bit"
-    assert default_local_model("rapid-mlx") == "scienceverse/bibr-extract-qwen35-4b-mlx-8bit"
+    assert default_local_model("vllm-mlx") == "scienceverse/bibr-extract-qwen35-2b-mlx-8bit"
+    assert default_local_model("rapid-mlx") == "scienceverse/bibr-extract-qwen35-2b-mlx-8bit"
     with pytest.raises(ValueError, match="cloud"):
         default_local_model("cloud")
 
@@ -128,10 +127,11 @@ def test_students_have_low_vram_llama_cpp_quants():
 
 
 def test_students_mlx_is_experimental():
-    for key in ("bibr-extract-4b", "bibr-extract-2b"):
-        m = get_model(key)
-        assert m.experimental_platforms == frozenset({"mlx"})
-        assert any(v.platform == "mlx" for v in m.variants)
+    m = get_model("bibr-extract-2b")
+    assert m.experimental_platforms == frozenset({"mlx"})
+    assert any(v.platform == "mlx" for v in m.variants)
+    # No 4B MLX build has passed a smoke test, so the 4B offers none.
+    assert not any(v.platform == "mlx" for v in get_model("bibr-extract-4b").variants)
 
 
 def test_get_model_unknown_key_raises():

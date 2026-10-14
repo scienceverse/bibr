@@ -662,7 +662,7 @@ class LlmOptions(_BibrSettings):
         description="Model id served by the managed local LLM backends. Unset picks the "
         "recommended model the selected backend can load: bibr's fine-tuned Qwen3.5-4B "
         "(scienceverse/bibr-extract-qwen35-4b): bf16 for vLLM, the GGUF Q8_0 build for "
-        "llama.cpp and the 8-bit MLX build for Apple Silicon. `bibr setup` writes it "
+        "llama.cpp, and the 2B student's 8-bit MLX build on Apple Silicon. `bibr setup` writes it "
         "explicitly and picks a smaller build, or the 2B student, when memory is short.",
     )
     local_mem_fraction: float = Field(

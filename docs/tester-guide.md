@@ -291,8 +291,8 @@ from the platform and detected memory. The current defaults are:
 
 The setup wizard defaults to bibr's fine-tuned Qwen3.5 models for local
 structured extraction on Linux with an NVIDIA GPU: the 4B from 12 GB and the 2B
-from 8 GB. Windows, Apple Silicon and GPUs below 8 GB use GGUF (llama.cpp) or
-MLX builds of the same models.
+from 8 GB. Windows and GPUs below 8 GB use GGUF (llama.cpp) builds of the same
+models, and Apple Silicon an MLX build of the 2B.
 Without a suitable GPU it recommends Claude Haiku 5.5 as a hosted model, for
 OCR and extraction alike. See
 [choosing an extraction model](guides/extraction-models.md). These thresholds are

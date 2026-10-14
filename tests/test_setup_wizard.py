@@ -1550,9 +1550,10 @@ def test_local_provider_mac_uses_vllm_mlx_and_warns_experimental(monkeypatch):
         "bibr.local.rapid_mlx.rapid_mlx_unavailable_reason",
         lambda executable=None: "'rapid-mlx' was not found or is not executable",
     )
-    _feed_prompts(monkeypatch, ["local", "bibr-extract-4b", "1"])
+    _feed_prompts(monkeypatch, ["local", "bibr-extract-2b", "1"])
     wizard._step_llm_provider()
     assert wizard.env_vars["LLM_BACKEND"] == "vllm-mlx"
+    assert wizard.env_vars["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-2b-mlx-8bit"
     text = wizard.console.export_text().lower()
     assert "experimental" in text
     assert "hosted model" in text
@@ -2086,7 +2087,7 @@ def test_plan_preview_shows_paddle_default_and_model(monkeypatch):
     assert "fully local" in text  # lowercase tier name, not "Fully Local"
     assert "paddle" in text
     assert "GLM fallback" in text
-    assert "bibr extract 4B" in text
+    assert "bibr extract 2B" in text  # no 4B MLX build yet
     assert "vllm-mlx" in text
 
 

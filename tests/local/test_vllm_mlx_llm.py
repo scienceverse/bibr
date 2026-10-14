@@ -107,7 +107,7 @@ def test_mlx_llm_server_uses_llm_role_settings(monkeypatch):
 
     llm_mod.VllmMlxLlmServer()
 
-    assert calls[0]["model"] == "scienceverse/bibr-extract-qwen35-4b-mlx-8bit"
+    assert calls[0]["model"] == "scienceverse/bibr-extract-qwen35-2b-mlx-8bit"
     assert calls[0]["port"] == 8767
     assert calls[0]["multimodal"] is False
 
