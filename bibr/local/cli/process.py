@@ -25,6 +25,7 @@ from bibr.local.cli.run_config import (
     _preflight_local_backend,
     _preflight_ocr_runtime,
     _preflight_opencv,
+    apply_text_layer_fallback,
     resolve_run_config,
 )
 from bibr.validation import payload_validation
@@ -103,6 +104,8 @@ def _format_run_summary(config: ResolvedRunConfig) -> str:
     model = config.ocr_model or config.ocr_summary_model or "(resolved at startup)"
     profile = config.ocr_profile or "(resolved at startup)"
     backend = config.ocr_backend
+    if backend == "text-layer":
+        profile = "none (no OCR model; reads the PDF text layer)"
     if backend == "paddle":
         backend = "paddle (automatic; use --dry-run for ordered candidates)"
     return (
@@ -121,7 +124,7 @@ def _print_actual_ocr_summary(console, resources) -> None:
         return
     console.print(f"  [dim]OCR backend:[/dim] {escape(str(identity.backend))}")
     console.print(f"  [dim]OCR model:[/dim] {escape(str(identity.model))}")
-    console.print(f"  [dim]OCR profile:[/dim] {escape(str(identity.profile))}")
+    console.print(f"  [dim]OCR profile:[/dim] {escape(str(identity.profile or 'none'))}")
     fallback_reason = getattr(resources, "ocr_fallback_reason", None)
     if fallback_reason:
         console.print(f"  [dim]Fallback reason:[/dim] {escape(str(fallback_reason))}")
@@ -172,6 +175,11 @@ def _hint_for_file_error(fs) -> str:
         return "\n         [dim]Remove the password and try again[/dim]"
     if code in ("ocr_failed", "ocr_mostly_failed"):
         return "\n         [dim]Check your OCR backend with: bibr doctor[/dim]"
+    if code == "scan_needs_ocr":
+        return (
+            "\n         [dim]A scanned PDF needs an OCR backend; see which can run here "
+            "with: bibr doctor[/dim]"
+        )
     if code == "llm_server_failed":
         return "\n         [dim]Check your LLM backend with: bibr doctor[/dim]"
     if code is not None:
@@ -491,6 +499,14 @@ async def _run_process(args) -> None:
                 "runs with different -o targets.[/dim]"
             )
             sys.exit(2)
+
+    if any(p.suffix.lower() == ".pdf" for p in files):
+        # OCR_TEXT_LAYER_FALLBACK=auto: an automatic OCR backend that cannot
+        # start here becomes the text layer, with one warning, before the
+        # preflights below (and the --dry-run plan) see the config.
+        config, fallback_warning = apply_text_layer_fallback(config, _preflight_ocr_runtime)
+        if fallback_warning is not None:
+            ui.warn(console, escape(fallback_warning))
 
     if not args.dry_run and any(p.suffix.lower() == ".pdf" for p in files):
         opencv_problem = _preflight_opencv()

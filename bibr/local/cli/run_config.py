@@ -2,8 +2,8 @@
 
 import os
 import sys
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from bibr.local.cli.parser import normalize_ocr_backend
@@ -377,7 +377,51 @@ def _preflight_ocr_runtime(config: ResolvedRunConfig) -> str | None:
     """
     if config.ocr_url:
         return None
+    from bibr.ocr.registry import TEXT_LAYER_BACKEND
+
+    if config.ocr_backend == TEXT_LAYER_BACKEND:
+        # Reads the PDF's own text layer: there is no runtime to start.
+        return None
     return _ocr_runtime_blocker(config.ocr_backend)
+
+
+def apply_text_layer_fallback(
+    config: ResolvedRunConfig, preflight: Callable[[ResolvedRunConfig], str | None]
+) -> tuple[ResolvedRunConfig, str | None]:
+    """Swap an automatic OCR backend that cannot start for the text layer.
+
+    Only with ``OCR_TEXT_LAYER_FALLBACK=auto``, the automatic ``paddle``
+    selector and no ``--ocr-url``. *preflight* is the caller's
+    :func:`_preflight_ocr_runtime` (each command module holds its own
+    reference). Returns the config to run and, when it was swapped, the
+    warning to print once; otherwise the config unchanged and None, and the
+    caller's own preflight refuses the run as before.
+    """
+    from bibr.config import Settings
+    from bibr.ocr.registry import TEXT_LAYER_BACKEND, TEXT_LAYER_MODEL
+
+    if (
+        Settings.ocr.text_layer_fallback != "auto"
+        or config.ocr_url
+        or config.ocr_backend != "paddle"
+    ):
+        return config, None
+    reason = preflight(config)
+    if reason is None:
+        return config, None
+    swapped = replace(
+        config,
+        ocr_backend=TEXT_LAYER_BACKEND,
+        ocr_model=None,
+        ocr_profile=None,
+        ocr_summary_model=TEXT_LAYER_MODEL,
+    )
+    warning = (
+        "No OCR backend can start on this machine, so PDFs are read from their embedded "
+        "text layer (OCR_TEXT_LAYER_FALLBACK=auto). Born-digital PDFs work; scanned PDFs "
+        f"fail, since they need OCR.\n{reason}"
+    )
+    return swapped, warning
 
 
 def _ocr_runtime_blocker(ocr_backend: str) -> str | None:
@@ -398,8 +442,9 @@ def _ocr_runtime_blocker(ocr_backend: str) -> str | None:
     if not blockers:
         return None
     alternatives = (
-        "Alternatives: point --ocr-url at an external OCR server, or use a cloud vision "
-        "backend (--ocr gemini|openai|anthropic)."
+        "Alternatives: point --ocr-url at an external OCR server, use a cloud vision "
+        "backend (--ocr gemini|openai|anthropic), or read born-digital PDFs from their "
+        "text layer without OCR (--ocr text-layer, or OCR_TEXT_LAYER_FALLBACK=auto)."
     )
     if len(blockers) == 1 and ocr_backend != "paddle":
         return f"OCR backend cannot start here — {blockers[0]}. {alternatives}"

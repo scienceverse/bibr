@@ -154,11 +154,13 @@ def _add_pipeline_options(parser: argparse.ArgumentParser) -> None:
             "gemini",
             "openai",
             "anthropic",
+            "text-layer",
         ],
         default=None,
         help=(
             "OCR backend (default: paddle, automatically tries Paddle runtimes before the "
-            "explicit GLM fallback chain)"
+            "explicit GLM fallback chain). text-layer runs no OCR model: it reads "
+            "born-digital PDFs from their embedded text layer, and scanned PDFs fail"
         ),
     )
     parser.add_argument(
@@ -625,6 +627,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "gemini",
             "openai",
             "anthropic",
+            "text-layer",
         ],
         default=None,
         help="OCR backend (as for 'bibr chew')",

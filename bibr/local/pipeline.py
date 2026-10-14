@@ -270,6 +270,7 @@ class LocalPipeline(Pipeline):
         # accepts everything `bibr chew --ocr` does.
         from bibr.ocr.registry import (
             CLOUD_VISION_OCR_BACKENDS,
+            TEXT_LAYER_BACKEND,
             resolve_backend_name,
             resolve_url_backend,
             url_request,
@@ -304,6 +305,12 @@ class LocalPipeline(Pipeline):
                     ocr_backend,
                 )
                 # Unused, so it must not split the OCR cache key either.
+                ocr_url = None
+            elif ocr_backend == TEXT_LAYER_BACKEND:
+                logger.warning(
+                    "ocr_url is ignored by the text-layer OCR backend, which reads the PDF's "
+                    "embedded text layer and runs no OCR model."
+                )
                 ocr_url = None
         else:
             automatic_paddle = ocr_backend == "paddle" or (

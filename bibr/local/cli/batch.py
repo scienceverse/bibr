@@ -192,6 +192,7 @@ def _local_options(args: Any, console: Any) -> Any:
         _apply_runtime_settings,
         _preflight_ocr_runtime,
         _preflight_opencv,
+        apply_text_layer_fallback,
         resolve_run_config,
     )
 
@@ -201,14 +202,22 @@ def _local_options(args: Any, console: Any) -> Any:
     except ValueError as exc:
         ui.error(console, f"Invalid option: {exc}")
         return None
+    # OCR_TEXT_LAYER_FALLBACK=auto, decided before the options are built; the
+    # warning waits for the preflight, which knows whether there are PDFs.
+    config, fallback_warning = apply_text_layer_fallback(config, _preflight_ocr_runtime)
+    warned = False
 
     def preflight(files: Sequence[Path]) -> str | None:
+        nonlocal warned
         if not any(f.suffix.lower() == ".pdf" for f in files):
             return None
         opencv_problem = _preflight_opencv()
         if opencv_problem is not None:
             message, repair = opencv_problem
             return f"{message} (repair with: {repair})"
+        if fallback_warning is not None and not warned:
+            warned = True
+            ui.warn(console, fallback_warning)
         return _preflight_ocr_runtime(config)
 
     return LocalOptions(
