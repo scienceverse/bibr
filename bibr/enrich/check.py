@@ -21,15 +21,15 @@ whatever its status. Each difference is a note ``{field, printed, record,
 severity}``; ``printed`` is the reference's value and ``record`` the
 registry's, as they are.
 
-The comparators follow the Scienceverse reference checker: a title is
-compared after folding case, diacritics and punctuation, and a record title
-printed verbatim inside the reference counts as agreement when it is long
-enough to identify a work (or the DOI or volume and first page already
-identify it); the record's first author must be named, and its other
-authors too unless the reference says "et al."; the year may differ by one,
-or by two when the reference is the later (print after online-first); a
-journal abbreviation agrees with the full name it abbreviates (ISO 4). The
-volume, issue and page comparisons are :mod:`bibr.enrich.verify`'s.
+How fields are compared: a title is compared after folding case, diacritics
+and punctuation, and a record title printed verbatim inside the reference
+counts as agreement when it is long enough to identify a work (or the DOI or
+volume and first page already identify it); the record's first author must
+be named, and its other authors too unless the reference says "et al."; the
+year may differ by one, or by two when the reference is the later (print
+after online-first); a journal abbreviation agrees with the full name it
+abbreviates (ISO 4). The volume, issue and page comparisons are
+:mod:`bibr.enrich.verify`'s.
 
 On top of that, differences that live Crossref answers for printed
 references showed to be noise, not citing errors, are let through: a
