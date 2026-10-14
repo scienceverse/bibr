@@ -13,6 +13,8 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterable
+from pathlib import Path
 
 from bibr.exceptions import UpstreamServiceError
 from bibr.local.http_runtime import (
@@ -43,16 +45,21 @@ _TERM_GRACE_S = 10
 # is about to fail. Short enough to be noise against a 30-600 s startup.
 _HEALTH_GRACE_S = 1.0
 _LLAMA_CPP_DEFAULT_TIMEOUT_SECONDS = 300
+# On a CPU the slowest call can take several minutes: the one measured CPU run
+# (bibr's 4B student at Q8_0, 4 threads) read 82 and wrote 9.6 tokens/s, and
+# two server slots share the cores. A timeout would discard the whole call.
+_LLAMA_CPP_CPU_TIMEOUT_SECONDS = 900
 _LLAMA_CPP_RELEASES_URL = "https://github.com/ggml-org/llama.cpp/releases"
 
 # Flags applied for every managed server regardless of role. llama.cpp is
 # bibr's low-memory path (Windows + ≤8 GB CUDA), so flash-attn + quantized KV
 # are on by default. User ``extra_args`` can override any of these
 # (see ``_merge_cli_args``). Role- and probe-specific flags are added by
-# ``_role_runtime_args``.
+# ``_role_runtime_args``; a build that sees no GPU drops the layer offload
+# (``_GPU_OFFLOAD_ARGS``) and gets a thread count instead.
+_GPU_OFFLOAD_ARGS: tuple[str, ...] = ("--n-gpu-layers", "999")
 _COMMON_RUNTIME_ARGS: tuple[str, ...] = (
-    "--n-gpu-layers",
-    "999",
+    *_GPU_OFFLOAD_ARGS,
     "--flash-attn",
     "on",
     "--cache-type-k",
@@ -64,7 +71,8 @@ _COMMON_RUNTIME_ARGS: tuple[str, ...] = (
 # Canonical option names (longest form) → all aliases llama.cpp accepts.
 # Used so user ``-ctk f16`` suppresses the default ``--cache-type-k q8_0``.
 _OPTION_ALIASES: dict[str, frozenset[str]] = {
-    "--n-gpu-layers": frozenset({"--n-gpu-layers", "-ngl"}),
+    "--n-gpu-layers": frozenset({"--n-gpu-layers", "-ngl", "--gpu-layers"}),
+    "--threads": frozenset({"--threads", "-t"}),
     "--parallel": frozenset({"--parallel", "-np"}),
     "--flash-attn": frozenset({"--flash-attn", "-fa"}),
     "--cache-type-k": frozenset({"--cache-type-k", "-ctk"}),
@@ -78,6 +86,7 @@ _OPTION_ALIASES: dict[str, frozenset[str]] = {
     "--port": frozenset({"--port"}),
     "--alias": frozenset({"--alias"}),
     "-hf": frozenset({"-hf", "-hfr", "--hf-repo"}),
+    "--model-url": frozenset({"--model-url", "-mu"}),
 }
 
 # Cache of ``--help`` text keyed by ``tuple(prefix)`` so repeated launches in
@@ -129,6 +138,9 @@ _OFFLOAD_RE = re.compile(
     r"offloaded\s+(\d+)\s*/\s*(\d+)\s+layers?\s+to\s+GPU",
     re.IGNORECASE,
 )
+# ``--list-devices`` of a build that sees no GPU (lowercased): the header
+# followed by the "(none)" entry current builds print, or by nothing at all.
+_EMPTY_DEVICE_TABLE_RE = re.compile(r"available devices:\s*(?:\(none\)|\Z)")
 _GPU_DEVICE_HINTS = (
     "cuda",
     "metal",
@@ -237,9 +249,102 @@ def install_hint(*, platform_name: str | None = None) -> str:
     )
 
 
-def missing_binary_message(*, platform_name: str | None = None) -> str:
-    """Error text when no llama-server executable is on PATH."""
-    return f"llama.cpp is not installed. {install_hint(platform_name=platform_name)}."
+def cpu_install_hint(*, platform_name: str | None = None) -> str:
+    """Install guidance for a machine with no GPU, where llama.cpp runs on the CPU."""
+    plat = platform_name if platform_name is not None else sys.platform
+    if plat == "win32" or plat.startswith("win"):
+        return (
+            "Install with: winget install llama.cpp, or extract "
+            f"llama-<ver>-bin-win-cpu-x64.zip from {_LLAMA_CPP_RELEASES_URL} and put the folder "
+            "on PATH"
+        )
+    if plat == "darwin":
+        return (
+            "Install with: brew install llama.cpp, or extract llama-<ver>-bin-macos-x64.tar.gz "
+            f"from {_LLAMA_CPP_RELEASES_URL} and put `llama-server` on PATH"
+        )
+    return (
+        f"Extract llama-<ver>-bin-ubuntu-x64.tar.gz (the CPU build) from {_LLAMA_CPP_RELEASES_URL} "
+        "and put `llama-server` on PATH, or install with Homebrew: brew install llama.cpp"
+    )
+
+
+def missing_binary_message(*, platform_name: str | None = None, cpu: bool = False) -> str:
+    """Error text when no llama-server executable is on PATH.
+
+    ``cpu`` gives the install guidance for a machine with no GPU.
+    """
+    hint = cpu_install_hint if cpu else install_hint
+    return f"llama.cpp is not installed. {hint(platform_name=platform_name)}."
+
+
+def _cpu_list(text: str) -> set[int]:
+    """CPU numbers of a sysfs cpulist such as ``0-3,8-11``."""
+    cpus: set[int] = set()
+    for part in text.strip().split(","):
+        if not part:
+            continue
+        first, _, last = part.partition("-")
+        cpus.update(range(int(first), int(last or first) + 1))
+    return cpus
+
+
+def _linux_physical_cores(
+    cpus: Iterable[int], *, sysfs: Path = Path("/sys/devices/system/cpu")
+) -> int | None:
+    """Distinct (package, core) pairs among *cpus*, or None when sysfs cannot tell."""
+    cores: set[tuple[str, str]] = set()
+    for cpu in cpus:
+        topology = sysfs / f"cpu{cpu}" / "topology"
+        try:
+            package = (topology / "physical_package_id").read_text().strip()
+            core = (topology / "core_id").read_text().strip()
+        except OSError:
+            return None
+        cores.add((package, core))
+    return len(cores) or None
+
+
+def physical_core_count(
+    *,
+    sysfs: Path = Path("/sys/devices/system/cpu"),
+    performance_cores: Path = Path("/sys/devices/cpu_core/cpus"),
+) -> int | None:
+    """Physical cores this process may run on, or None when that is unknown.
+
+    The thread count for llama.cpp on a CPU. llama.cpp's own default counts
+    every physical core of the machine, so a run confined to fewer CPUs (a
+    container, ``taskset``, a cgroup cpuset) would oversubscribe them. On
+    hybrid Intel CPUs only the performance cores count, as in llama.cpp:
+    threads that wait on the slower efficiency cores slow every step. None
+    on Windows and wherever the topology cannot be read; llama.cpp then
+    picks the count itself.
+    """
+    if sys.platform.startswith("linux"):
+        try:
+            allowed = set(os.sched_getaffinity(0))
+        except (AttributeError, OSError):
+            return None
+        try:
+            performance = _cpu_list(performance_cores.read_text()) & allowed
+        except (OSError, ValueError):
+            performance = set()
+        return _linux_physical_cores(sorted(performance or allowed), sysfs=sysfs)
+    if sys.platform == "darwin":
+        for key in ("hw.perflevel0.physicalcpu", "hw.physicalcpu"):
+            try:
+                result = subprocess.run(  # noqa: S603
+                    ["sysctl", "-n", key],  # noqa: S607
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                return None
+            if result.returncode == 0 and result.stdout.strip().isdigit():
+                return int(result.stdout.strip()) or None
+    return None
 
 
 def _strip_one_quote_pair(token: str) -> str:
@@ -341,7 +446,13 @@ def _merge_cli_args(base: list[str], extra: list[str]) -> list[str]:
     return merged
 
 
-def _role_runtime_args(role: str, available: frozenset[str]) -> list[str]:
+def _role_runtime_args(
+    role: str,
+    available: frozenset[str],
+    *,
+    cpu_only: bool = False,
+    cpu_threads: int | None = None,
+) -> list[str]:
     """Runtime flags for *role*, gating optional features on *available*.
 
     The startup retry strips every optional flag added here when the stderr
@@ -349,10 +460,17 @@ def _role_runtime_args(role: str, available: frozenset[str]) -> list[str]:
     build whose ``--help`` lists a flag it does not actually accept still
     recovers to a safe launch. Anything else — a crash, an OOM, any message
     outside those markers — fails fast with no retry.
+
+    *cpu_only* is a build that sees no GPU (:func:`runs_on_cpu`): it gets no
+    layer offload and, when *cpu_threads* is known, that many threads.
     """
     if role not in ("ocr", "llm"):
         raise ValueError(f"unknown llama.cpp server role {role!r} (expected 'ocr' or 'llm')")
     args = list(_COMMON_RUNTIME_ARGS)
+    if cpu_only:
+        args = args[len(_GPU_OFFLOAD_ARGS) :]
+        if cpu_threads:
+            args += ["--threads", str(cpu_threads)]
     if role == "ocr":
         # Image encode serializes across slots; extra slots only add queueing.
         args += ["--parallel", "1"]
@@ -438,7 +556,7 @@ def _n_slots_from_argv(argv: list[str]) -> int:
 # the configured port/alias and would lose (then kill) a server that moved.
 # `--host` is deliberately allowed: the base argv binds loopback and a user
 # `--host` (e.g. 0.0.0.0, as on main) still answers the loopback health poll.
-_IDENTITY_OPTIONS = frozenset({"--port", "--alias", "-hf"})
+_IDENTITY_OPTIONS = frozenset({"--port", "--alias", "-hf", "--model-url"})
 
 
 def _check_no_identity_override(extra: list[str], *, role: str) -> None:
@@ -473,22 +591,28 @@ def build_server_argv(
     # semantics; the "llm" role must be opted into explicitly.
     role: str = "ocr",
     available: frozenset[str] | None = None,
+    model_url: str | None = None,
+    cpu_only: bool = False,
+    cpu_threads: int | None = None,
 ) -> list[str]:
     """Assemble the full ``llama-server`` argv including role-based optim defaults.
 
     *available* is the set of ``--long-option`` flags the installed server
     supports; ``None`` probes it via ``supported_flags(prefix)``. Pass an
     explicit set (e.g. ``frozenset()``) to keep tests subprocess-free.
+    *model_url* downloads the weights from that URL (``-mu``, a pinned
+    revision) instead of ``-hf model``; the server still answers to *model*.
+    *cpu_only* and *cpu_threads*: see :func:`_role_runtime_args`.
     """
     if available is None:
         available = supported_flags(prefix)
     setting = "LLM_LLAMA_CPP_EXTRA_ARGS" if role == "llm" else "OCR_LLAMA_CPP_EXTRA_ARGS"
     extra = split_extra_args(extra_args, setting=setting)
     _check_no_identity_override(extra, role=role)
+    source = ["--model-url", model_url] if model_url else ["-hf", model]
     fixed = [
         *prefix,
-        "-hf",
-        model,
+        *source,
         "--alias",
         model,
         "--host",
@@ -497,7 +621,7 @@ def build_server_argv(
         str(port),
         "--ctx-size",
         str(context_size),
-        *_role_runtime_args(role, available),
+        *_role_runtime_args(role, available, cpu_only=cpu_only, cpu_threads=cpu_threads),
     ]
     return _merge_cli_args(fixed, extra)
 
@@ -525,9 +649,9 @@ def _text_suggests_gpu_backend(text: str) -> bool | None:
         or "no cuda-capable device" in lower
         or ("cuda error" in lower and "no cuda" in lower)
         or re.search(r"available devices:\s*cpu\s*$", lower, re.MULTILINE) is not None
-        # A header followed by a real device table is not an empty list. Match
-        # only when whitespace after the header reaches end-of-output.
-        or re.search(r"available devices:\s*\Z", lower) is not None
+        # An empty device table. A header followed by a real device table is
+        # not one: only "(none)" or the end of the output may follow it.
+        or _EMPTY_DEVICE_TABLE_RE.search(lower) is not None
     )
     if cpu_only_markers:
         return False
@@ -608,7 +732,8 @@ def _classify_backend_kind(text: str) -> str | None:
     """Classify llama.cpp probe output into a backend kind, or None if unknown.
 
     Precedence cuda > hip > sycl > metal > vulkan > cpu; the first backend whose
-    marker appears wins.
+    marker appears wins. An empty device table with no backend named (what a
+    current CPU-only build prints) is ``"cpu"``.
     """
     if not text or not text.strip():
         return None
@@ -616,6 +741,8 @@ def _classify_backend_kind(text: str) -> str | None:
     for kind, markers in _BACKEND_KIND_MARKERS:
         if any(marker in lower for marker in markers):
             return kind
+    if _EMPTY_DEVICE_TABLE_RE.search(lower) is not None:
+        return "cpu"
     return None
 
 
@@ -667,6 +794,18 @@ def probe_backend_kind(
             break
     _BACKEND_KIND_CACHE[key] = kind
     return kind
+
+
+def runs_on_cpu(prefix: list[str] | None = None) -> bool:
+    """Whether the installed llama.cpp build sees no GPU, so models run on the CPU.
+
+    From the cached :func:`probe_backend_kind`; False when no build is
+    installed or the probe cannot tell, which keeps the GPU launch flags.
+    """
+    try:
+        return probe_backend_kind(prefix) == "cpu"
+    except Exception:  # noqa: BLE001 - a probe must never fail a launch
+        return False
 
 
 def cuda_steering_hint(kind: str | None) -> str | None:
@@ -780,6 +919,8 @@ class LlamaCppServer:
     # Per-launch key of the server this process started, which a sibling
     # pipeline reusing it shares; another process's listener has none.
     api_key = ""
+    # Whether the installed build sees no GPU (see ``cpu_only``).
+    _cpu_only = False
 
     def __init__(
         self,
@@ -795,7 +936,12 @@ class LlamaCppServer:
         # opted into explicitly.
         role: str = "ocr",
         stop_event: threading.Event | None = None,
+        model_url: str | None = None,
+        cpu_only: bool | None = None,
     ) -> None:
+        """*model_url*: download the weights from there (a pinned revision)
+        rather than ``-hf model``. *cpu_only*: whether the build runs on the
+        CPU; ``None`` probes it (:func:`runs_on_cpu`)."""
         self._stop_event = stop_event
         self._model = model
         self._port = port
@@ -826,28 +972,30 @@ class LlamaCppServer:
             )
 
         available = supported_flags(prefix)
+        self._cpu_only = runs_on_cpu(prefix) if cpu_only is None else cpu_only
+        cpu_threads = physical_core_count() if self._cpu_only else None
+        if self._cpu_only:
+            logger.info(
+                "llama.cpp sees no GPU: %s runs on the CPU (%s threads)",
+                model,
+                cpu_threads or "llama.cpp's default",
+            )
         # Build both argvs BEFORE opening the log handle: extra-args parsing
         # (shlex errors, identity-flag overrides) must fail without leaking it.
-        cmd = build_server_argv(
-            prefix,
-            model=model,
-            port=port,
-            context_size=context_size,
-            extra_args=extra_args,
-            role=role,
-            available=available,
-        )
+        launch_args = {
+            "model": model,
+            "port": port,
+            "context_size": context_size,
+            "extra_args": extra_args,
+            "role": role,
+            "model_url": model_url,
+            "cpu_only": self._cpu_only,
+            "cpu_threads": cpu_threads,
+        }
+        cmd = build_server_argv(prefix, available=available, **launch_args)
         # Conservative launch = role defaults minus every probed optional
         # feature flag; used as the single startup-retry fallback.
-        conservative_cmd = build_server_argv(
-            prefix,
-            model=model,
-            port=port,
-            context_size=context_size,
-            extra_args=extra_args,
-            role=role,
-            available=frozenset(),
-        )
+        conservative_cmd = build_server_argv(prefix, available=frozenset(), **launch_args)
         has_optional_features = cmd != conservative_cmd
 
         from bibr.utils.secure_temp import open_subprocess_log
@@ -920,6 +1068,11 @@ class LlamaCppServer:
         return self._n_slots
 
     @property
+    def cpu_only(self) -> bool:
+        """Whether the server was launched for a build that sees no GPU."""
+        return self._cpu_only
+
+    @property
     def loaded(self) -> bool:
         return self._reused or (self._process is not None and self._process.poll() is None)
 
@@ -955,7 +1108,9 @@ class LlamaCppServer:
                             self._stderr_fh.flush()
                         except OSError:
                             pass
-                    log_offload_status(self._read_stderr_tail(n=12_000))
+                    if not self._cpu_only:
+                        # A CPU build offloads nothing by design.
+                        log_offload_status(self._read_stderr_tail(n=12_000))
                     logger.info("llama.cpp ready (model=%s, port=%d)", self._model, self._port)
                     return
             except (LocalHttpError, json.JSONDecodeError):
@@ -1002,21 +1157,30 @@ class LlamaCppServer:
 
 
 class LlamaCppLlmServer:
-    """Managed GGUF extraction-model server for Windows and small CUDA GPUs."""
+    """Managed GGUF extraction-model server for Windows, small CUDA GPUs and CPUs."""
+
+    # Whether the installed llama.cpp build sees no GPU; set per launch.
+    _cpu_only = False
 
     def __init__(self, settings=None, *, stop_event: threading.Event | None = None) -> None:
         from bibr.config import snapshot_settings
-        from bibr.local.llm_models import default_local_model
+        from bibr.local.llm_models import default_local_model, pinned_gguf_url
 
         self._settings = settings if settings is not None else snapshot_settings()
+        self._cpu_only = runs_on_cpu()
+        model = self._settings.llm.local_model or default_local_model(
+            "llama-cpp", cpu=self._cpu_only
+        )
         self._server = LlamaCppServer(
-            model=self._settings.llm.local_model or default_local_model("llama-cpp"),
+            model=model,
             port=self._settings.llm.llama_cpp_port,
             context_size=self._settings.llm.llama_cpp_context_size,
             startup_timeout=self._settings.llm.llama_cpp_startup_timeout,
             extra_args=self._settings.llm.llama_cpp_extra_args,
             role="llm",
             stop_event=stop_event,
+            model_url=pinned_gguf_url(model),
+            cpu_only=self._cpu_only,
         )
 
     @property
@@ -1075,10 +1239,22 @@ class LlamaCppLlmServer:
                 MANAGED_LOCAL_LLM_RATE_LIMIT_RPM,
             )
         if "timeout_seconds" not in self._settings.llm.model_fields_set:
-            self._settings.llm.timeout_seconds = _LLAMA_CPP_DEFAULT_TIMEOUT_SECONDS
+            self._settings.llm.timeout_seconds = (
+                _LLAMA_CPP_CPU_TIMEOUT_SECONDS
+                if self._cpu_only
+                else _LLAMA_CPP_DEFAULT_TIMEOUT_SECONDS
+            )
             logger.info(
                 "Local llama.cpp backend — raising llm.timeout_seconds 30s->%ds",
                 self._settings.llm.timeout_seconds,
+            )
+        if self._cpu_only and "EQUATION_EXTRACTION" not in self._settings.model_fields_set:
+            # Most equation LLM calls find nothing, and on a CPU each one
+            # holds a server slot the front-matter calls are waiting for.
+            self._settings.EQUATION_EXTRACTION = False
+            logger.info(
+                "Local llama.cpp backend on the CPU — equation extraction off "
+                "(set EQUATION_EXTRACTION=true to keep it)"
             )
 
     def shutdown(self) -> None:
