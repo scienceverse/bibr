@@ -39,6 +39,30 @@ class LocalLLMModel:
     experimental_platforms: frozenset[str] = frozenset()
 
 
+# bibr's fine-tuned extraction students (2026-10-14). Each is a Qwen3.5 base
+# with a LoRA trained on licence-filtered Qwen3.8-27B answers to bibr's own
+# prompts, merged into a full checkpoint so the base model's MTP layers stay
+# usable for speculative decoding (vLLM's spec decoding does not combine well
+# with unmerged LoRA). Scores are from the 9 Oct harness (bibr 0.7.0 prompts,
+# v5 scorer, gate192 + ci60 = 252 dev papers), paired against Qwen3.8-27B's
+# 223/252; see docs/guides/extraction-models.md.
+#
+# Sizes are estimates until the checkpoints are on the Hub: bf16 weights of the
+# Qwen3.5 base, with min_vram_gb rounded up from the measured 11.7 GB peak of
+# a low-memory 4B vLLM serve on a 24 GB card. Pin --revision and re-check the
+# sizes against the HF API when the repos are published.
+_QWEN35_STUDENT_SERVER_ARGS: tuple[str, ...] = (
+    # Text only: the vision tower is never used for extraction.
+    "--language-model-only",
+    # Thinking off, as in training and in the eval harness.
+    "--default-chat-template-kwargs",
+    '{"enable_thinking": false}',
+    "--generation-config",
+    "vllm",
+    "--max-model-len",
+    "32768",
+)
+
 # Numbers below are pinned from the HF API (Task 1 Step 1; re-verified 2026-09-02 —
 # NuExtract 3 bf16 is 4.539B params, every listed artifact is within 0.3 GB of the Hub).
 # bf16 variants: approx_download_gb = param_count * 2 / 2**30 (rounded 1 dp);
@@ -46,8 +70,44 @@ class LocalLLMModel:
 # ceil(approx_download_gb * 1.25).
 REGISTRY: tuple[LocalLLMModel, ...] = (
     LocalLLMModel(
+        key="bibr-extract-4b",
+        label="bibr extract 4B (recommended) — Qwen3.5-4B fine-tuned on bibr's tasks, "
+        "2.8 points behind Qwen3.8-27B",
+        variants=(
+            LocalLLMVariant(
+                hf_id="scienceverse/bibr-extract-qwen35-4b",
+                platform="cuda",
+                quant="bf16",
+                min_vram_gb=12,
+                approx_download_gb=8.5,
+                server_args=_QWEN35_STUDENT_SERVER_ARGS,
+                runtime="vllm",
+            ),
+        ),
+        env={},
+        experimental_platforms=frozenset(),
+    ),
+    LocalLLMModel(
+        key="bibr-extract-2b",
+        label="bibr extract 2B (low memory) — Qwen3.5-2B fine-tuned on bibr's tasks, "
+        "6.3 points behind Qwen3.8-27B",
+        variants=(
+            LocalLLMVariant(
+                hf_id="scienceverse/bibr-extract-qwen35-2b",
+                platform="cuda",
+                quant="bf16",
+                min_vram_gb=8,
+                approx_download_gb=4.3,
+                server_args=_QWEN35_STUDENT_SERVER_ARGS,
+                runtime="vllm",
+            ),
+        ),
+        env={},
+        experimental_platforms=frozenset(),
+    ),
+    LocalLLMModel(
         key="nuextract3",
-        label="NuExtract 3 (recommended) — extraction-tuned, validated on bibr evals",
+        label="NuExtract 3 — extraction-tuned; the llama.cpp and Apple Silicon default",
         variants=(
             LocalLLMVariant(
                 hf_id="numind/NuExtract3-GGUF:Q4_K_M",
@@ -141,18 +201,43 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
 )
 
 
+#: Recommended local models, best first. The first model with a variant that
+#: fits the machine and its runtime is the default. The fine-tuned students are
+#: vLLM-only (no GGUF or MLX build has been evaluated), so llama.cpp, Windows
+#: and Apple Silicon fall through to NuExtract 3.
+RECOMMENDED_MODEL_KEYS: tuple[str, ...] = ("bibr-extract-4b", "bibr-extract-2b", "nuextract3")
+
+
+def recommended_variant(
+    platform_key: str,
+    memory_gb: float | None,
+    runtime: str | None = None,
+) -> tuple[LocalLLMModel, LocalLLMVariant] | None:
+    """The recommended model and its best variant for a machine (None = nothing fits).
+
+    ``memory_gb`` None means unknown memory: the best model for the platform
+    and runtime wins.
+    """
+    for key in RECOMMENDED_MODEL_KEYS:
+        model = get_model(key)
+        fitting = variants_for(model, platform_key, memory_gb, runtime)
+        if fitting:
+            return model, fitting[0]
+    return None
+
+
 def cuda_llm_backend_for(memory_gb: float | None) -> str:
     """Managed LLM backend for a CUDA card with ``memory_gb`` of VRAM (None = unknown).
 
-    vLLM only when a vLLM variant of the recommended model actually fits;
-    otherwise llama.cpp, whose GGUF build needs 5 GB. The old rule ("vLLM
-    above 8 GB") handed 9-10 GB cards a plan whose only vLLM variant (bf16,
-    11 GB) OOMed after OCR, because the fit filter was dropped silently when
-    nothing fit.
+    vLLM only when a vLLM variant of a recommended model actually fits (the
+    2B student needs 8 GB); otherwise llama.cpp, whose NuExtract 3 GGUF build
+    needs 5 GB. The old rule ("vLLM above 8 GB") handed 9-10 GB cards a plan
+    whose only vLLM variant (NuExtract 3 bf16, 11 GB) OOMed after OCR, because
+    the fit filter was dropped silently when nothing fit.
     """
     if memory_gb is None:
         return "vllm"
-    if variants_for(get_model("nuextract3"), "cuda", memory_gb, "vllm"):
+    if recommended_variant("cuda", memory_gb, "vllm") is not None:
         return "vllm"
     return "llama-cpp"
 
@@ -172,17 +257,18 @@ def default_local_model(backend: str) -> str:
 
     Every managed server used to read one config default — the 8-bit MLX
     build — so a hand-written ``LLM_BACKEND=vllm`` or ``llama-cpp`` downloaded
-    weights the runtime could not load. The answer is the registry's
-    best-quality NuExtract 3 entry that the backend's runtime can serve.
+    weights the runtime could not load. The answer is the best recommended
+    entry that the backend's runtime can serve: the 4B student for vLLM,
+    NuExtract 3 for llama.cpp and MLX.
     """
     try:
         platform_key, runtime = _BACKEND_VARIANT_FILTER[backend]
     except KeyError:
         raise ValueError(f"no default local model for LLM backend {backend!r}") from None
-    variants = variants_for(get_model("nuextract3"), platform_key, None, runtime)
-    if not variants:  # pragma: no cover - registry invariant
-        raise ValueError(f"the registry has no {platform_key}/{runtime} NuExtract 3 variant")
-    return variants[0].hf_id
+    picked = recommended_variant(platform_key, None, runtime)
+    if picked is None:  # pragma: no cover - registry invariant
+        raise ValueError(f"the registry has no recommended {platform_key}/{runtime} variant")
+    return picked[1].hf_id
 
 
 def registry_server_args(model: str) -> tuple[str, ...]:

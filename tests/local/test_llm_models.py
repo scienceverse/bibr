@@ -21,14 +21,53 @@ def test_cuda_llm_backend_follows_the_registry_fit():
     from bibr.local.llm_models import cuda_llm_backend_for
 
     assert cuda_llm_backend_for(None) == "vllm"  # unknown VRAM keeps the fast path
-    assert cuda_llm_backend_for(8.0) == "llama-cpp"
-    assert cuda_llm_backend_for(10.0) == "llama-cpp"
+    assert cuda_llm_backend_for(6.0) == "llama-cpp"
+    assert cuda_llm_backend_for(7.9) == "llama-cpp"
+    assert cuda_llm_backend_for(8.0) == "vllm"  # the 2B student fits
     assert cuda_llm_backend_for(11.0) == "vllm"
+
+
+@pytest.mark.parametrize(
+    ("platform_key", "memory_gb", "runtime", "expected"),
+    [
+        ("cuda", None, "vllm", "scienceverse/bibr-extract-qwen35-4b"),
+        ("cuda", 24.0, "vllm", "scienceverse/bibr-extract-qwen35-4b"),
+        ("cuda", 12.0, "vllm", "scienceverse/bibr-extract-qwen35-4b"),
+        ("cuda", 11.0, "vllm", "scienceverse/bibr-extract-qwen35-2b"),
+        ("cuda", 8.0, "vllm", "scienceverse/bibr-extract-qwen35-2b"),
+        ("cuda", 6.0, None, "numind/NuExtract3-GGUF:Q4_K_M"),
+        ("cuda", 24.0, "llama-cpp", "numind/NuExtract3-GGUF:Q4_K_M"),
+        ("mlx", 32.0, None, "numind/NuExtract3-mlx-8bits"),
+    ],
+)
+def test_recommended_variant_picks_by_scenario(platform_key, memory_gb, runtime, expected):
+    from bibr.local.llm_models import recommended_variant
+
+    picked = recommended_variant(platform_key, memory_gb, runtime)
+    assert picked is not None
+    assert picked[1].hf_id == expected
+
+
+def test_recommended_variant_none_when_nothing_fits():
+    from bibr.local.llm_models import recommended_variant
+
+    assert recommended_variant("cuda", 2.0, "vllm") is None
+
+
+def test_students_are_merged_vllm_checkpoints_with_thinking_off():
+    for key in ("bibr-extract-4b", "bibr-extract-2b"):
+        model = get_model(key)
+        assert [v.runtime for v in model.variants] == ["vllm"]
+        args = registry_server_args(model.variants[0].hf_id)
+        assert "--enable-lora" not in args  # merged, so spec decoding stays usable
+        assert "--language-model-only" in args
+        kwargs_idx = args.index("--default-chat-template-kwargs")
+        assert args[kwargs_idx + 1] == '{"enable_thinking": false}'
 
 
 def test_default_local_model_follows_the_backend_runtime():
     """An unset LLM_LOCAL_MODEL must never hand vLLM or llama.cpp the MLX build."""
-    assert default_local_model("vllm") == "numind/NuExtract3"
+    assert default_local_model("vllm") == "scienceverse/bibr-extract-qwen35-4b"
     assert default_local_model("llama-cpp") == "numind/NuExtract3-GGUF:Q4_K_M"
     assert default_local_model("vllm-mlx") == "numind/NuExtract3-mlx-8bits"
     assert default_local_model("rapid-mlx") == "numind/NuExtract3-mlx-8bits"
@@ -66,9 +105,10 @@ def test_registry_invariants():
         assert model.experimental_platforms <= {"cuda", "mlx"}
 
 
-def test_nuextract3_is_first_and_recommended():
-    assert REGISTRY[0].key == "nuextract3"
+def test_4b_student_is_first_and_recommended():
+    assert REGISTRY[0].key == "bibr-extract-4b"
     assert "recommended" in REGISTRY[0].label.lower()
+    assert [m.key for m in REGISTRY[:3]] == list(llm_models.RECOMMENDED_MODEL_KEYS)
 
 
 def test_nuextract3_has_low_vram_llama_cpp_quant():

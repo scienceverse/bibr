@@ -1286,9 +1286,10 @@ def test_recommended_setup_low_vram_cuda_keeps_paddle_automatic_ocr():
     assert "llama.cpp" in setup.runtime_summary
 
 
-def test_recommended_setup_mid_vram_cuda_splits_ocr_and_llm_runtimes():
-    """8-11 GB: paddle-vllm OCR fits (8 GB gate) but NuExtract 3's vLLM build (11 GB)
-    does not — the old plan picked vLLM anyway and OOMed after OCR."""
+def test_recommended_setup_mid_vram_cuda_runs_the_2b_student_on_vllm():
+    """8-11 GB: paddle-vllm OCR (8 GB gate) and the 2B student's vLLM build (8 GB)
+    both fit, so no llama.cpp split is needed. Under NuExtract 3 (11 GB) these
+    cards had to run the LLM through llama.cpp."""
     setup = _build_recommended_setup(
         platform_key="cuda",
         accelerator_memory_gb=10.0,
@@ -1297,24 +1298,44 @@ def test_recommended_setup_mid_vram_cuda_splits_ocr_and_llm_runtimes():
         machine="x86_64",
     )
     assert setup.env["OCR_BACKEND"] == "paddle"
-    assert setup.env["LLM_BACKEND"] == "llama-cpp"
-    assert setup.env["LLM_LOCAL_MODEL"] == "numind/NuExtract3-GGUF:Q4_K_M"
-    assert "vllm" in setup.extras  # OCR still runs through paddle-vllm
-    assert "llama.cpp for the LLM" in setup.runtime_summary
-    assert "llama-server" in setup.runtime_summary
+    assert setup.env["LLM_BACKEND"] == "vllm"
+    assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-2b"
+    assert "vllm" in setup.extras
+    assert "llama-server" not in setup.runtime_summary
 
 
-def test_recommended_setup_cuda_picks_vllm_once_the_bf16_variant_fits():
+@pytest.mark.parametrize(
+    ("vram_gb", "expected"),
+    [
+        (11.0, "scienceverse/bibr-extract-qwen35-2b"),
+        (12.0, "scienceverse/bibr-extract-qwen35-4b"),
+        (24.0, "scienceverse/bibr-extract-qwen35-4b"),
+    ],
+)
+def test_recommended_setup_cuda_picks_the_student_that_fits(vram_gb, expected):
     setup = _build_recommended_setup(
         platform_key="cuda",
-        accelerator_memory_gb=11.0,
+        accelerator_memory_gb=vram_gb,
         system_memory_gb=32.0,
         sys_platform="linux",
         machine="x86_64",
     )
     assert setup.env["LLM_BACKEND"] == "vllm"
-    assert setup.env["LLM_LOCAL_MODEL"] == "numind/NuExtract3"
+    assert setup.env["LLM_LOCAL_MODEL"] == expected
     assert "llama-server" not in setup.runtime_summary
+
+
+def test_recommended_setup_windows_keeps_nuextract3_gguf():
+    """The students have no GGUF build yet, so llama.cpp machines keep NuExtract 3."""
+    setup = _build_recommended_setup(
+        platform_key="cuda",
+        accelerator_memory_gb=24.0,
+        system_memory_gb=32.0,
+        sys_platform="win32",
+        machine="AMD64",
+    )
+    assert setup.env["LLM_BACKEND"] == "llama-cpp"
+    assert setup.env["LLM_LOCAL_MODEL"] == "numind/NuExtract3-GGUF:Q4_K_M"
 
 
 def test_recommended_setup_apple_silicon_warns_about_runtime():
@@ -1408,7 +1429,8 @@ def test_recommended_setup_cloud_requires_explicit_consent():
     )
 
     assert setup.tier == "cloud_fallback"
-    assert setup.env["LLM_PROVIDER"] == "google"
+    assert setup.env["LLM_PROVIDER"] == "anthropic"
+    assert setup.env["LLM_MODEL"] == "claude-haiku-5-5"
     assert setup.env["OCR_BACKEND"] == "gemini"
     assert "demo" in setup.extras
     assert "cloud_api_key" in setup.required_prompts
@@ -1862,7 +1884,7 @@ def test_weak_hardware_private_server_path_writes_urls(tmp_path, monkeypatch):
     assert "GOOGLE_API_KEY" not in content
 
 
-def test_weak_hardware_cloud_consent_writes_gemini(tmp_path, monkeypatch):
+def test_weak_hardware_cloud_consent_writes_gemini_ocr_and_haiku(tmp_path, monkeypatch):
     """Weak machine + no private server + cloud consent → cloud_fallback env."""
     wizard = _recording_wizard()
     wizard.env_path = tmp_path / ".env"
@@ -1876,14 +1898,19 @@ def test_weak_hardware_cloud_consent_writes_gemini(tmp_path, monkeypatch):
         return "Google Gemini" in prompt
 
     monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", confirm)
-    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *a, **k: "test-google-key")
+    keys = {"Google API key (OCR)": "test-google-key", "Anthropic API key (extraction)": "sk-ant"}
+    monkeypatch.setattr(
+        "bibr.setup_wizard.Prompt.ask", lambda prompt, *a, **k: keys.get(prompt, "test-google-key")
+    )
 
     wizard.run()
 
     content = wizard.env_path.read_text()
     assert "OCR_BACKEND=gemini" in content
-    assert "LLM_PROVIDER=google" in content
+    assert "LLM_PROVIDER=anthropic" in content
+    assert "LLM_MODEL=claude-haiku-5-5" in content
     assert "GOOGLE_API_KEY=test-google-key" in content
+    assert "ANTHROPIC_API_KEY=sk-ant" in content
 
 
 def test_cloud_consent_declined_offers_advanced_handoff(monkeypatch):
@@ -2072,7 +2099,7 @@ def _drive_cloud_setup(monkeypatch, tmp_path, wizard, *, first_key, retry_key):
     monkeypatch.setattr("bibr.setup_wizard.PresetManager", MagicMock())
 
     def fake_prompt(prompt, *args, **kwargs):
-        if prompt == "Google API key":
+        if prompt == "Anthropic API key (extraction)":
             return first_key
         if prompt == "API key":
             return retry_key
@@ -2110,27 +2137,27 @@ def test_recommended_cloud_retry_persists_the_corrected_key(tmp_path, monkeypatc
         monkeypatch,
         tmp_path,
         wizard,
-        first_key="AIza-TYPO",
-        retry_key="AIza-CORRECT",
+        first_key="sk-ant-TYPO",
+        retry_key="sk-ant-CORRECT",
     )
 
-    assert wizard.env_vars["GOOGLE_API_KEY"] == "AIza-CORRECT"
+    assert wizard.env_vars["ANTHROPIC_API_KEY"] == "sk-ant-CORRECT"
     lines = [
         line
         for line in wizard.env_path.read_text().splitlines()
-        if line.startswith("GOOGLE_API_KEY")
+        if line.startswith("ANTHROPIC_API_KEY")
     ]
-    assert lines == ["GOOGLE_API_KEY=AIza-CORRECT"]
+    assert lines == ["ANTHROPIC_API_KEY=sk-ant-CORRECT"]
 
 
 def test_cloud_retry_skipped_write_leaves_env_alone(tmp_path, monkeypatch):
     """Choosing 'skip' at the save step still means no .env write on retry."""
     wizard = _recording_wizard()
     wizard.env_path = tmp_path / ".env"
-    wizard.env_path.write_text("GOOGLE_API_KEY=sk-old-key-placeholder\n", encoding="utf-8")
+    wizard.env_path.write_text("ANTHROPIC_API_KEY=sk-old-key-placeholder\n", encoding="utf-8")
     monkeypatch.setattr("bibr.setup_wizard.PresetManager", MagicMock())
 
-    prompts = {"Google API key": "AIza-TYPO", "API key": "AIza-CORRECT"}
+    prompts = {"Anthropic API key (extraction)": "sk-ant-TYPO", "API key": "sk-ant-CORRECT"}
 
     def fake_prompt(prompt, *args, **kwargs):
         if prompt.startswith(str(wizard.env_path)):
@@ -2161,8 +2188,8 @@ def test_cloud_retry_skipped_write_leaves_env_alone(tmp_path, monkeypatch):
     monkeypatch.setattr("bibr.clients.llm.ping_llm", fake_ping)
     wizard._finish_recommended_setup(_cloud_setup())
 
-    assert wizard.env_vars["GOOGLE_API_KEY"] == "AIza-CORRECT"
-    assert wizard.env_path.read_text() == "GOOGLE_API_KEY=sk-old-key-placeholder\n"
+    assert wizard.env_vars["ANTHROPIC_API_KEY"] == "sk-ant-CORRECT"
+    assert wizard.env_path.read_text() == "ANTHROPIC_API_KEY=sk-old-key-placeholder\n"
 
 
 def test_install_command_pins_the_running_interpreter(tmp_path):

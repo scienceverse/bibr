@@ -230,12 +230,11 @@ uv run bibr doctor
 uv run bibr demo
 ```
 
-### Linux, NVIDIA GPU below 11 GB (e.g. GTX 1060)
+### Linux, NVIDIA GPU below 8 GB (e.g. GTX 1060)
 
 Below 8 GB, the automatic selectors use **llama.cpp** for OCR and the local
-LLM. From 8 GB to below 11 GB (an RTX 3080 10 GB, say), OCR tries vLLM but
-the local LLM still uses llama.cpp, because NuExtract 3's vLLM build needs
-11 GB of VRAM. Install a
+LLM. From 8 GB, both run through vLLM, with bibr's fine-tuned 2B model below
+12 GB and its 4B model from 12 GB. Install a
 **CUDA** (or Vulkan) build of llama.cpp separately:
 
 1. Install or build llama.cpp with CUDA support (`GGML_CUDA=ON` for a source
@@ -284,15 +283,18 @@ from the platform and detected memory. The current defaults are:
 | Platform | OCR backend | Local LLM backend |
 |---|---|---|
 | Windows | `glm-llama` (llama.cpp) | llama.cpp |
-| Linux, NVIDIA GPU **≥ 11 GB** (e.g. RTX 3090) | `paddle-vllm` | vLLM |
-| Linux, NVIDIA GPU **8–<11 GB** | `paddle-vllm` | llama.cpp |
+| Linux, NVIDIA GPU **≥ 12 GB** (e.g. RTX 3090) | `paddle-vllm` | vLLM, bibr extract 4B |
+| Linux, NVIDIA GPU **8–<12 GB** | `paddle-vllm` | vLLM, bibr extract 2B |
 | Linux, NVIDIA GPU **< 8 GB** | `glm-llama` (llama.cpp) | llama.cpp |
 | Apple Silicon (M-series) | `paddle-rapid-mlx` (rapid-mlx) | rapid-mlx, else vllm-mlx |
 | No suitable GPU | cloud vision OCR or an external OCR server | a cloud LLM |
 
-The setup wizard defaults to [NuExtract 3](https://huggingface.co/numind/NuExtract3)
-for local structured extraction. Windows and GPUs below 11 GB use llama.cpp;
-the CUDA vLLM variant requires Linux and at least 11 GB. These thresholds are
+The setup wizard defaults to bibr's fine-tuned Qwen3.5 models for local
+structured extraction on Linux with an NVIDIA GPU: the 4B from 12 GB and the 2B
+from 8 GB. Windows, Apple Silicon and GPUs below 8 GB use
+[NuExtract 3](https://huggingface.co/numind/NuExtract3) through llama.cpp or MLX.
+Without a suitable GPU it recommends Claude Haiku 5.5 as a hosted model. See
+[choosing an extraction model](guides/extraction-models.md). These thresholds are
 model-fit estimates, not guarantees that every document fits available memory.
 
 Throughput depends on the model, backend, hardware, and document. Scanned PDFs

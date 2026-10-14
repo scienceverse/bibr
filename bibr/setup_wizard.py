@@ -32,6 +32,7 @@ from bibr.local.llm_models import (
     cuda_llm_backend_for,
     detect_hardware,
     get_model,
+    recommended_variant,
     variants_for,
 )
 from bibr.presets import PresetManager
@@ -64,7 +65,10 @@ _GPU_BUILD_PROBE = (
 LLM_DEFAULTS: dict[str, dict[str, str]] = {
     "google": {"model": "gemini-3.5-flash-lite", "key_env": "GOOGLE_API_KEY"},
     "openai": {"model": "gpt-5-nano", "key_env": "LLM_API_KEY"},
-    "anthropic": {"model": "claude-haiku-4-5-20251001", "key_env": "ANTHROPIC_API_KEY"},
+    # Haiku 5.5 is the recommended hosted extraction model: on the 9 Oct harness
+    # (252 dev papers) it passes 221 against Qwen3.8-27B's 223, at about $0.004
+    # a paper (docs/guides/extraction-models.md).
+    "anthropic": {"model": "claude-haiku-5-5", "key_env": "ANTHROPIC_API_KEY"},
     "groq": {"model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
     "ollama": {"model": "gpt-oss:20b", "key_env": ""},
 }
@@ -213,12 +217,19 @@ def _local_llm_env(
 ) -> dict[str, str]:
     """Choose the default managed local LLM env for easy setup."""
     backend = _default_local_llm_backend(platform_key, memory_gb, sys_platform_name)
-    model = get_model("nuextract3")
-    variants = variants_for(model, platform_key, memory_gb, backend)
-    if not variants:
-        variants = variants_for(model, platform_key, None, backend)
-    variant = variants[0]
+    runtime = _BACKEND_RUNTIME.get(backend)
+    picked = recommended_variant(platform_key, memory_gb, runtime) or recommended_variant(
+        platform_key, None, runtime
+    )
+    if picked is None:  # pragma: no cover - registry invariant
+        raise ValueError(f"no recommended local model for {platform_key}/{backend}")
+    model, variant = picked
     return {"LLM_BACKEND": backend, "LLM_LOCAL_MODEL": variant.hf_id, **model.env}
+
+
+#: Registry runtime filter per managed CUDA backend. MLX variants carry no
+#: runtime, so the MLX backends filter by platform alone.
+_BACKEND_RUNTIME: dict[str, str] = {"vllm": "vllm", "llama-cpp": "llama-cpp"}
 
 
 def _default_local_llm_backend(
@@ -338,8 +349,8 @@ def _build_recommended_setup(
         env.update(_local_llm_env(platform_key, accelerator_memory_gb, sys_platform_name))
         # On Linux each half has its own VRAM gate: the automatic OCR chain
         # runs paddle-vllm from 8 GB (bibr.ocr.registry) and the LLM picks
-        # vLLM only when a vLLM variant of the recommended model fits (11 GB
-        # for NuExtract 3, bibr.local.llm_models). Below its gate a half runs
+        # vLLM only when a vLLM variant of a recommended model fits (8 GB for
+        # the 2B student, bibr.local.llm_models). Below its gate a half runs
         # through llama.cpp, which needs llama-server on PATH — something only
         # the user can install — while the other half may still need the
         # vllm extra.
@@ -361,9 +372,9 @@ def _build_recommended_setup(
             )
         elif llm_on_llama_cpp:
             runtime = (
-                "Uses vLLM for OCR and llama.cpp for the LLM (NuExtract 3's vLLM build needs "
-                "11 GB of VRAM): install a CUDA (or Vulkan) build of llama.cpp separately "
-                "and put llama-server on PATH."
+                "Uses vLLM for OCR and llama.cpp for the LLM (the smallest recommended vLLM "
+                "model needs 8 GB of VRAM): install a CUDA (or Vulkan) build of llama.cpp "
+                "separately and put llama-server on PATH."
             )
         elif platform_key == "mlx" and env.get("LLM_BACKEND") == "rapid-mlx":
             runtime = (
@@ -407,13 +418,16 @@ def _build_recommended_setup(
             tier="cloud_fallback",
             env={
                 **base_env,
+                # Gemini stays the cloud OCR (Claude vision OCR is not evaluated);
+                # extraction uses the recommended hosted model.
                 "OCR_BACKEND": "gemini",
-                "LLM_PROVIDER": "google",
-                "LLM_MODEL": LLM_DEFAULTS["google"]["model"],
+                "LLM_PROVIDER": "anthropic",
+                "LLM_MODEL": LLM_DEFAULTS["anthropic"]["model"],
             },
             extras={"ml", "demo"},
             preset_name="recommended-cloud",
-            privacy_summary="document contents are sent to the approved cloud provider",
+            privacy_summary="document contents are sent to the approved cloud providers "
+            "(Google for OCR, Anthropic for extraction)",
             download_summary=(
                 "downloads local layout/reference models; cloud OCR/LLM need no local model download"
             ),
@@ -904,11 +918,14 @@ class SetupWizard:
 
         # No local, no private server: the only remaining path is the cloud.
         self.console.print(
-            "\nWithout a local or private server, bibr can process papers with Google "
-            "Gemini in the cloud. This sends document-derived content (page images and "
-            "extracted text) to Google."
+            "\nWithout a local or private server, bibr can process papers in the cloud: "
+            "Google Gemini reads the pages and Claude Haiku 5.5 extracts the metadata. "
+            "This sends document-derived content (page images and extracted text) to "
+            "Google and Anthropic."
         )
-        if not Confirm.ask("Send document-derived content to Google Gemini?", default=True):
+        if not Confirm.ask(
+            "Send document-derived content to Google Gemini and Anthropic Claude?", default=True
+        ):
             self._handle_decline()
             return
 
@@ -986,7 +1003,10 @@ class SetupWizard:
             )
 
         if "cloud_api_key" in setup.required_prompts:
-            self.env_vars["GOOGLE_API_KEY"] = Prompt.ask("Google API key", password=True)
+            self.env_vars["GOOGLE_API_KEY"] = Prompt.ask("Google API key (OCR)", password=True)
+            self.env_vars["ANTHROPIC_API_KEY"] = Prompt.ask(
+                "Anthropic API key (extraction)", password=True
+            )
 
     def _offer_extras_install(self) -> None:
         if not self.selected_extras:
@@ -1260,15 +1280,15 @@ class SetupWizard:
     def _step_llm_provider(self) -> None:
         ui.step(self.console, 2, 6, "LLM provider")
         self.console.print(
-            "[dim]tip: bibr's extraction tasks don't need a frontier model — the default\n"
-            "gemini-3.5-flash-lite is fast, cheap, and accurate. self-hosting?\n"
-            "modern small open-source models (e.g. gemma 4 12b, qwen 3.6) generally\n"
-            "work well in early testing.[/dim]"
+            "[dim]tip: bibr's extraction tasks don't need a frontier model. hosted, the\n"
+            "recommended claude-haiku-5-5 is within a point of Qwen3.8-27B on bibr's\n"
+            "dev set, at about $0.004 a paper. self-hosting? choose local for bibr's\n"
+            "fine-tuned 4B (2.8 points behind the 27B) or 2B (6.3 points) model.[/dim]"
         )
         provider = Prompt.ask(
             "Provider",
             choices=["google", "openai", "anthropic", "groq", "ollama", "local"],
-            default="google",
+            default="anthropic",
         )
         if provider == "local":
             self._step_llm_local()
@@ -1382,10 +1402,18 @@ class SetupWizard:
             self.console.print(f"  [bold]{m.key}[/bold] — {m.label}{tag}")
         self.console.print("  [bold]custom[/bold] — any HF model id (you own quant/flags)")
 
+        recommended = recommended_variant(
+            platform_key, memory_gb, _BACKEND_RUNTIME.get(backend)
+        ) or recommended_variant(platform_key, None, _BACKEND_RUNTIME.get(backend))
+        default_key = (
+            recommended[0].key
+            if recommended and recommended[0].key in keys
+            else (keys[0] if keys else "custom")
+        )
         choice = Prompt.ask(
             "Model",
             choices=[*keys, "custom"],
-            default=keys[0] if keys else "custom",
+            default=default_key,
         )
 
         if choice == "custom":

@@ -82,8 +82,10 @@ reusing loaded models with `bibr.Chewer`.
 
 ## LLM use
 
-bibr uses LLMs selectively for tasks such as front-page metadata, with support
-for small models tuned for extraction. You can disable downstream LLM extraction
+bibr uses LLMs selectively for tasks such as front-page metadata. `bibr setup`
+recommends a model for your hardware: bibr's fine-tuned Qwen3.5 4B or 2B model
+on an NVIDIA GPU, or Claude Haiku 5.5 as a hosted model
+([how they compare](https://bibr.org/guides/extraction-models/)). You can disable downstream LLM extraction
 with `--no-llm`, which returns structural output; PDF OCR may still use a
 vision-language model. The [LLM use note](https://bibr.org/llm-use/) covers these choices
 and how agentic LLMs helped develop bibr. It is a work in progress.

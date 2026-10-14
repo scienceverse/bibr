@@ -660,9 +660,11 @@ class LlmOptions(_BibrSettings):
     local_model: str | None = Field(
         None,
         description="Model id served by the managed local LLM backends. Unset picks the "
-        "NuExtract 3 variant the selected backend can load: bf16 for vLLM, GGUF Q4_K_M for "
-        "llama.cpp, the 8-bit MLX build for Apple Silicon (8bit runs ~2x faster than nvfp4 "
-        "under MLX, which lacks fast nvfp4 kernels). `bibr setup` writes it explicitly.",
+        "recommended model the selected backend can load: bibr's fine-tuned Qwen3.5-4B "
+        "(scienceverse/bibr-extract-qwen35-4b) for vLLM, NuExtract 3 GGUF Q4_K_M for "
+        "llama.cpp, the 8-bit NuExtract 3 MLX build for Apple Silicon (8bit runs ~2x faster "
+        "than nvfp4 under MLX, which lacks fast nvfp4 kernels). `bibr setup` writes it "
+        "explicitly and picks the 2B student on 8-11 GB cards.",
     )
     local_mem_fraction: float = Field(
         0.85,

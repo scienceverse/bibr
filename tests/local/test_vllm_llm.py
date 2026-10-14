@@ -177,9 +177,9 @@ def test_unset_local_model_launches_the_cuda_bf16_variant(monkeypatch):
     monkeypatch.setattr(Settings.llm, "local_model", None)
     _server, popen = _mk_server()
     cmd = popen.call_args[0][0]
-    assert "numind/NuExtract3" in cmd
+    assert "scienceverse/bibr-extract-qwen35-4b" in cmd
     assert not any("mlx" in part for part in cmd)
-    assert "--revision" in cmd  # the registry's launch args ride along
+    assert "--language-model-only" in cmd  # the registry's launch args ride along
 
 
 def _bare_server(process=None):

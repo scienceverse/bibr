@@ -212,8 +212,8 @@ LLM_API_KEY=your-endpoint-key
 
 `--llm local` starts a managed server. It resolves to Rapid-MLX on Apple
 Silicon when that executable is available, otherwise vllm-mlx; llama.cpp on
-Windows or CUDA cards below 11 GB; and vLLM on Linux/CUDA systems with at
-least 11 GB (or when VRAM detection is unavailable).
+Windows or CUDA cards below 8 GB; and vLLM on Linux/CUDA systems with at
+least 8 GB (or when VRAM detection is unavailable).
 Explicit choices are `vllm`, `vllm-mlx`, `rapid-mlx`, `llama-cpp`, and `llmster`.
 The OCR and LLM choices are independent, so local OCR with a cloud LLM is a
 supported hybrid configuration. A managed vLLM LLM server and the managed
@@ -230,20 +230,27 @@ number (143 for SIGTERM) and `bibr batch` exits 130 as after Ctrl-C; in a system
 unit, set `SuccessExitStatus=130 143` so that `systemctl stop` counts as a clean
 stop.
 
-Run `bibr setup` to choose the model as well as the runtime. Its recommended
-model is NuExtract 3, with runtime-specific weights:
+Run `bibr setup` to choose the model as well as the runtime. It recommends a
+model for your hardware ([choosing an extraction model](extraction-models.md)
+has the measurements):
 
 | Runtime | Setup model | Registry memory floor |
 |---|---|---|
+| vLLM, 12 GB or more | `scienceverse/bibr-extract-qwen35-4b` (Qwen3.5-4B fine-tuned for bibr, bf16) | 12 GB VRAM |
+| vLLM, 8–11 GB | `scienceverse/bibr-extract-qwen35-2b` (Qwen3.5-2B fine-tuned for bibr, bf16) | 8 GB VRAM |
 | llama.cpp | `numind/NuExtract3-GGUF:Q4_K_M` | 5 GB VRAM |
-| vLLM | `numind/NuExtract3` (bf16) | 11 GB VRAM |
 | Rapid-MLX / vllm-mlx | `numind/NuExtract3-mlx-8bits`, with smaller quantizations available | 6 GB for the 8-bit variant |
 
+When no local model fits, the recommended hosted model is Claude Haiku 5.5
+(`LLM_PROVIDER=anthropic`, `LLM_MODEL=claude-haiku-5-5`).
+
 These are model-fit estimates, not total pipeline memory guarantees. The
-advanced wizard also offers Gemma 4 E4B on CUDA and custom model IDs.
+advanced wizard also offers NuExtract 3 bf16 (11 GB) and Gemma 4 E4B on CUDA,
+and custom model IDs.
 `LLM_LOCAL_MODEL` selects managed local weights; `LLM_MODEL` and `--llm-model`
-select the provider model. When `LLM_LOCAL_MODEL` is unset, vLLM, llama.cpp,
-and vllm-mlx choose a compatible NuExtract 3 variant from the registry. Rapid-MLX
+select the provider model. When `LLM_LOCAL_MODEL` is unset, vLLM uses the 4B
+model and llama.cpp and vllm-mlx use a compatible NuExtract 3 variant from the
+registry. Rapid-MLX
 has a separate `LLM_RAPID_MLX_MODEL` default (`qwen3.5-4b-4bit`) when no local
 model was explicitly configured.
 
