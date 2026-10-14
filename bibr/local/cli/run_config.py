@@ -243,7 +243,15 @@ def _preflight_local_backend(backend: str) -> str | None:
         # that at doctor time rather than hard-failing preflight (users may be
         # smoke-testing install order before swapping in a CUDA binary).
         gpu = probe_gpu_backend(prefix)
-        if gpu is False:
+        if gpu is False and _no_local_gpu():
+            import logging
+
+            # No GPU to switch to: the CPU is the intended target here.
+            logging.getLogger(__name__).info(
+                "llama.cpp runs on the CPU (no NVIDIA GPU or Apple silicon found): "
+                "expect minutes per paper for the LLM steps (experimental, not yet timed)."
+            )
+        elif gpu is False:
             import logging
 
             logging.getLogger(__name__).warning(
@@ -259,6 +267,13 @@ def _preflight_local_backend(backend: str) -> str | None:
 
                 logging.getLogger(__name__).warning("%s", steer)
     return problem
+
+
+def _no_local_gpu() -> bool:
+    """No NVIDIA GPU or Apple silicon here, so local models can only use the CPU."""
+    from bibr.local.llm_models import detect_hardware
+
+    return detect_hardware()[0] is None
 
 
 def _local_llm_backend_blocker(backend: str) -> str | None:
@@ -282,20 +297,23 @@ def _local_llm_backend_blocker(backend: str) -> str | None:
         )
 
     if backend == "llama-cpp":
-        from bibr.local.llama_cpp import find_llama_server, install_hint
+        from bibr.local.llama_cpp import cpu_install_hint, find_llama_server, install_hint
 
         if find_llama_server() is None:
-            return (
-                "llama.cpp backend selected but no server executable was found. " + install_hint()
-            )
+            hint = cpu_install_hint() if _no_local_gpu() else install_hint()
+            return "llama.cpp backend selected but no server executable was found. " + hint
         return None
 
     platform_key, _ = detect_hardware()
     if platform_key is None:
+        from bibr.local.llama_cpp import cpu_install_hint
+
         return (
             "--llm local needs an NVIDIA GPU (vLLM) or Apple Silicon "
             "(vllm-mlx); neither was detected. Use --llm cloud (hosted API) or run "
-            "a local Ollama server (LLM_PROVIDER=ollama, LLM_BACKEND=cloud)."
+            "a local Ollama server (LLM_PROVIDER=ollama, LLM_BACKEND=cloud). "
+            "Or run bibr's small extraction model on the CPU with llama.cpp "
+            f"(experimental; minutes per paper): {cpu_install_hint()}, then use --llm local."
         )
     if backend == "vllm" and (
         importlib.util.find_spec("vllm") is None and shutil.which("uv") is None
@@ -448,6 +466,10 @@ def _managed_llm_model(backend: str, settings) -> str:
         return settings.llm.rapid_mlx_model
     from bibr.local.llm_models import default_local_model
 
+    if backend == "llama-cpp":
+        from bibr.local.llama_cpp import runs_on_cpu
+
+        return default_local_model(backend, cpu=runs_on_cpu())
     return default_local_model(backend)
 
 

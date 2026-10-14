@@ -106,6 +106,9 @@ def resolve_llm_backend(raw: str, settings: GlobalSettings | None = None) -> str
     ``local`` auto-picks rapid-mlx (falling back to vllm-mlx when the
     rapid-mlx executable is missing) on Apple Silicon, llama.cpp on Windows
     and VRAM-constrained CUDA cards, and vLLM on larger Linux CUDA systems.
+    With no NVIDIA GPU or Apple Silicon it picks llama.cpp when a llama-server
+    is installed (the model then runs on the CPU), else vLLM, whose preflight
+    names the alternatives.
     Concrete names pass through unchanged. Any value outside the documented
     backend set raises ``InputValidationError`` rather than silently falling
     through to cloud. Shared by the CLI and ``LocalPipeline`` so the library
@@ -135,6 +138,10 @@ def resolve_llm_backend(raw: str, settings: GlobalSettings | None = None) -> str
         platform_key, memory_gb = detect_hardware()
         if platform_key == "cuda":
             return cuda_llm_backend_for(memory_gb)
+        from bibr.local.llama_cpp import find_llama_server
+
+        if find_llama_server() is not None:
+            return "llama-cpp"
         return "vllm"
 
     if raw not in _VALID_LLM_BACKENDS:

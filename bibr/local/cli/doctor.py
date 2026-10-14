@@ -589,7 +589,7 @@ def _check_llm_local_backend(backend: str, model: str, ok, fail) -> None:
     """
     import importlib.util
 
-    from bibr.local.cli.run_config import _local_llm_backend_blocker
+    from bibr.local.cli.run_config import _local_llm_backend_blocker, _no_local_gpu
 
     problem = _local_llm_backend_blocker(backend)
     if problem is not None:
@@ -622,6 +622,14 @@ def _check_llm_local_backend(backend: str, model: str, ok, fail) -> None:
         # Found: the blocker check above refused a missing server.
         prefix = find_llama_server()
         gpu = probe_gpu_backend(prefix)
+        if gpu is False and _no_local_gpu():
+            # No GPU to switch to: the CPU is the target, so state the cost
+            # instead of an upgrade path.
+            ok(
+                f"LLM backend: {backend} (llama.cpp on the CPU, model={model}) — "
+                "experimental: expect minutes per paper"
+            )
+            return
         if gpu is False:
             # Soft: binary is present but will crawl on CPU. Doctor's ok/fail
             # API has no warn channel here, so encode the upgrade path in the
