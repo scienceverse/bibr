@@ -450,13 +450,14 @@ def ort_thread_caps(settings=None) -> tuple[int, int]:
     """``(intra_op, inter_op)`` thread caps from ``ML_ORT_INTRA_OP_THREADS`` /
     ``ML_ORT_INTER_OP_THREADS``; ``0`` keeps ONNX Runtime's own default.
 
-    ``settings`` is the owner's settings (a pipeline's, a loader's); without
-    one, the process settings (environment and ``.env``) are read in place.
+    ``settings`` is the owner's settings (a pipeline's, a loader's; every
+    bibr loader passes its own). Without one, a snapshot of the process
+    settings (environment and ``.env``) is read.
     """
     if settings is None:
-        from bibr.config import Settings
+        from bibr.config import snapshot_settings
 
-        settings = Settings
+        settings = snapshot_settings()
     ml = settings.ml
     return int(ml.ort_intra_op_threads), int(ml.ort_inter_op_threads)
 
