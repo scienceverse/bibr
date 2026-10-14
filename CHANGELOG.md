@@ -49,7 +49,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   only once `/v1/models` lists the requested model, and `-m`/`--model` in
   `LLM_LLAMA_CPP_EXTRA_ARGS` or `OCR_LLAMA_CPP_EXTRA_ARGS` is refused like the other
   model flags (set `LLM_LOCAL_MODEL` instead).
-
 - `bibr setup` recommends a new extraction model by hardware. On Linux with an
   NVIDIA GPU it picks bibr's fine-tuned Qwen3.5-4B (12 GB or more) or Qwen3.5-2B
   (8–11 GB), served by vLLM. On bibr's 252 development papers they pass 216 and
