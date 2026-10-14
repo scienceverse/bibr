@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Literal
 
-from bibr.ocr.registry import CLOUD_VISION_OCR_BACKENDS
+from bibr.ocr.registry import CLOUD_VISION_OCR_BACKENDS, TEXT_LAYER_BACKEND, TEXT_LAYER_MODEL
 
 if TYPE_CHECKING:
     from bibr.config import GlobalSettings
@@ -108,8 +108,25 @@ class OcrRuntimeIdentity:
 
     backend: str
     model: str
-    profile: OcrProfileName
+    # None only for the text-layer backend, which runs no OCR model.
+    profile: OcrProfileName | None
     normalizer_version: str
+
+
+#: Version of the text-layer reading rules (bibr.ocr.text_layer). It is the
+#: text-layer identity's normalizer version, so the OCR cache drops entries
+#: read under older rules.
+TEXT_LAYER_NORMALIZER_VERSION = "text-layer-v1"
+
+
+def text_layer_identity() -> OcrRuntimeIdentity:
+    """The runtime identity of the text-layer backend: no model, no profile."""
+    return OcrRuntimeIdentity(
+        backend=TEXT_LAYER_BACKEND,
+        model=TEXT_LAYER_MODEL,
+        profile=None,
+        normalizer_version=TEXT_LAYER_NORMALIZER_VERSION,
+    )
 
 
 PADDLE_PROFILE = OcrProfile(
@@ -217,6 +234,8 @@ def resolve_ocr_runtime_identity(cfg: RunConfig, settings: GlobalSettings) -> Oc
         # no request at all is the default ``paddle`` selector.
         requested_backend = url_request(cfg.ocr_backend, settings.ocr.backend) or "paddle"
     backend = resolve_url_backend(requested_backend, cfg.ocr_url)
+    if backend == TEXT_LAYER_BACKEND:
+        return text_layer_identity()
     model = (
         settings.ocr.paddle_served_model
         if backend == "paddle-vllm"
@@ -283,6 +302,8 @@ def resolve_served_model(
     ``ocr_url`` rewrite.
     """
     ocr = settings.ocr
+    if concrete_backend == TEXT_LAYER_BACKEND:
+        return TEXT_LAYER_MODEL
     if concrete_backend in CLOUD_VISION_OCR_BACKENDS:
         return ocr.model or settings.ocr_vision.model
     if concrete_backend == "serve-http":

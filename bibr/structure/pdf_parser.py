@@ -1317,7 +1317,13 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 )
 
             elif treatment == "formula":
-                self._handle_formula(content, page_number, bbox, region_meta=region_meta)
+                self._handle_formula(
+                    content,
+                    page_number,
+                    bbox,
+                    region_meta=region_meta,
+                    plain_text=region.formula_source == "text_layer",
+                )
 
             elif treatment == "table":
                 # A full-width table may sit below a two-column sentence whose

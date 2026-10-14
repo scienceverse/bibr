@@ -34,6 +34,12 @@ class WarningCode(StrEnum):
     OCR_NATIVE_TEXT_PUA_FALLBACK = "OCR_NATIVE_TEXT_PUA_FALLBACK"
     OCR_TEXT_LAYER_FALLBACK = "OCR_TEXT_LAYER_FALLBACK"
     OCR_RECOGNIZERS_DISAGREE = "OCR_RECOGNIZERS_DISAGREE"
+    # Text-layer reading (OCR backend "text-layer", or the fallback to it)
+    OCR_BACKEND_UNAVAILABLE = "OCR_BACKEND_UNAVAILABLE"
+    TEXT_LAYER_PAGE_UNUSABLE = "TEXT_LAYER_PAGE_UNUSABLE"
+    TEXT_LAYER_REGION_UNREAD = "TEXT_LAYER_REGION_UNREAD"
+    TEXT_LAYER_TABLE_REBUILT = "TEXT_LAYER_TABLE_REBUILT"
+    TEXT_LAYER_FORMULA_TEXT = "TEXT_LAYER_FORMULA_TEXT"
     SCAN_ARTICLE_SPLIT = "SCAN_ARTICLE_SPLIT"
     LOW_TEXT_QUALITY = "LOW_TEXT_QUALITY"
     PAGE_DPI_REDUCED = "PAGE_DPI_REDUCED"
@@ -119,6 +125,17 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.OCR_RECOGNIZERS_DISAGREE: "On scanned pages, a second OCR recognizer read some "
     "regions differently; the regions that disagreed most were escalated or flagged "
     "(regions[]._ocr_consensus).",
+    WarningCode.OCR_BACKEND_UNAVAILABLE: "The OCR backend could not start, so the PDF was read "
+    "from its embedded text layer alone (OCR_TEXT_LAYER_FALLBACK=auto); scanned pages are "
+    "missing.",
+    WarningCode.TEXT_LAYER_PAGE_UNUSABLE: "A page has no usable text layer (a scan, or text "
+    "that is missing, corrupt or misplaced); with no OCR its text regions are empty.",
+    WarningCode.TEXT_LAYER_REGION_UNREAD: "Layout regions had no text in the PDF text layer "
+    "(text drawn as an image or as vector paths) and, with no OCR, are empty.",
+    WarningCode.TEXT_LAYER_TABLE_REBUILT: "Tables were rebuilt from text-layer glyph positions, "
+    "not read by an OCR model; merged cells and multi-line cells may be split.",
+    WarningCode.TEXT_LAYER_FORMULA_TEXT: "Display formulas were read from the PDF text layer as "
+    "plain text, not LaTeX; their formatted text may lose sub- and superscripts.",
     WarningCode.SCAN_ARTICLE_SPLIT: "Regions of neighbouring articles on scanned pages (the "
     "previous article's tail, the next article's start, floats above the title) were dropped "
     "before parsing.",
@@ -244,6 +261,10 @@ NOT_FINAL_CODES: frozenset[WarningCode] = frozenset(
         WarningCode.OCR_REGION_FAILED,
         WarningCode.OCR_PAGE_FAILED,
         WarningCode.OCR_TEXT_LAYER_FALLBACK,
+        # An OCR engine that could not start may start next time. The other
+        # TEXT_LAYER_* codes are final: the same text layer gives the same
+        # empty regions on every run of the text-layer backend.
+        WarningCode.OCR_BACKEND_UNAVAILABLE,
         WarningCode.SECTION_CLASSIFIER_LLM_FAILED,
         WarningCode.IMPLICIT_SECTIONS_LLM_FAILED,
         WarningCode.PAPER_CLASSIFICATION_FAILED,

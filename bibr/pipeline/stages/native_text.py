@@ -13,6 +13,12 @@ guarantee. The three read-only harvests this stage also performs (doc-info
 metadata, PDF outline, geom reference-line geometry) need only ``pdf_bytes``,
 not the fill, so they run regardless of that flag — each behind its own
 best-effort guard.
+
+With the text-layer OCR backend (``--ocr text-layer``, or the automatic
+backend's ``OCR_TEXT_LAYER_FALLBACK=auto`` fallback) this stage also reads
+every other region OCR would read from the text layer, page-gated
+(:mod:`bibr.ocr.text_layer`), so the OCR stage has nothing left to send to a
+model.
 """
 
 from __future__ import annotations
@@ -95,6 +101,10 @@ class NativeTextStage:
             layer_kwargs = {"include_doc_layer": True, "render_budget": render_budget(settings)}
         native_skip_total = 0
         invisible_layer_pages = 0
+        from bibr.ocr.text_layer import is_text_layer_mode, text_layer_fallback_reason
+
+        text_layer_mode = is_text_layer_mode(ctx)
+        fallback_reason = text_layer_fallback_reason(getattr(ctx, "resources", None))
         for fs in ctx.alive():
             if not fs.pdf_bytes or fs.layout_results is None:
                 continue
@@ -122,6 +132,8 @@ class NativeTextStage:
                         if region.pop("_native_text_used", False):
                             region["content"] = ""
                 logger.warning("PDF inspection failed for %s", fs.path.name, exc_info=True)
+                if text_layer_mode:
+                    await self._read_text_layer(fs, settings, fallback_reason)
                 continue
             fs.pdf_inspection = inspection
             fs.layout_results = inspection.layout_results
@@ -151,6 +163,8 @@ class NativeTextStage:
                     sorted({text for page in watermark_pages for text in page.watermarks})[:5],
                 )
             _log_invisible_layer_errors(fs.path.name, inspection.component_errors)
+            if text_layer_mode:
+                await self._read_text_layer(fs, settings, fallback_reason)
 
         if native_skip_total:
             logger.info(
@@ -164,3 +178,11 @@ class NativeTextStage:
 
         logger.debug("Native-text stage: %.1fs", time.monotonic() - t0)
         ctx.progress.stage_end(self.name)
+
+    @staticmethod
+    async def _read_text_layer(fs, settings, fallback_reason: str | None) -> None:
+        from bibr.ocr.text_layer import read_file_text_layer
+
+        t0 = time.monotonic()
+        await read_file_text_layer(fs, settings, fallback_reason=fallback_reason)
+        fs.stage_times["text_layer"] = time.monotonic() - t0

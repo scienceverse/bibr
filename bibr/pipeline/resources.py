@@ -18,7 +18,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from bibr.ocr.registry import CLOUD_VISION_OCR_BACKENDS
+from bibr.ocr.registry import CLOUD_VISION_OCR_BACKENDS, TEXT_LAYER_BACKEND
 from bibr.utils.async_tasks import await_owned
 
 if TYPE_CHECKING:
@@ -120,6 +120,11 @@ class ResourceManager:
         self.ocr_profile = ocr_profile
         self.ocr_runtime_identity = None
         self.ocr_fallback_reason: str | None = None
+        # Why the automatic OCR chain could not start when it fell back to
+        # reading the PDF text layer (OCR_TEXT_LAYER_FALLBACK=auto). Kept for
+        # the life of these resources, so every later chunk reads the text
+        # layer too instead of retrying an engine that cannot start.
+        self.ocr_text_layer_fallback: str | None = None
         self.device = device
 
         self.http_client = http_client
@@ -317,6 +322,9 @@ class ResourceManager:
         candidates = resolve_backend_candidates(requested, self._settings)
         if len(candidates) != 1 or requested == "paddle":
             return candidates
+        if candidates[0].backend == TEXT_LAYER_BACKEND:
+            # No model runs: a configured model or profile names nothing here.
+            return candidates
         candidate = candidates[0]
         # A concrete backend is an explicit user choice: preserve its model
         # and profile through construction, identity, cache, and export. The
@@ -407,6 +415,8 @@ class ResourceManager:
         backend_name = backend_name or self._requested_ocr_backend
         if backend_name in self._VISION_BACKENDS:
             from bibr.local import ocr_cloud  # noqa: F401 — triggers @register
+        elif backend_name == TEXT_LAYER_BACKEND:
+            from bibr.ocr import text_layer  # noqa: F401 — triggers @register
         elif backend_name != "serve-http":
             from bibr.local import ocr as _ocr  # noqa: F401 — triggers @register
             from bibr.local import rapid_mlx as _rapid_mlx  # noqa: F401 — triggers @register
@@ -439,6 +449,8 @@ class ResourceManager:
         backend_name = self._resolve_ocr_backend_name(requested_name)
         if backend_name in self._VISION_BACKENDS:
             from bibr.local import ocr_cloud  # noqa: F401 — triggers @register
+        elif backend_name == TEXT_LAYER_BACKEND:
+            from bibr.ocr import text_layer  # noqa: F401 — triggers @register
         else:
             from bibr.local import ocr as _ocr  # noqa: F401 — triggers @register
             from bibr.local import rapid_mlx as _rapid_mlx  # noqa: F401 — triggers @register
@@ -558,8 +570,15 @@ class ResourceManager:
         return f"{candidate.backend}: {remedies.get(candidate.backend, 'check local OCR runtime setup')}"
 
     def _set_ocr_runtime_identity(self, candidate) -> None:
-        from bibr.ocr.profiles import OcrRuntimeIdentity, resolve_ocr_profile
+        from bibr.ocr.profiles import OcrRuntimeIdentity, resolve_ocr_profile, text_layer_identity
 
+        if candidate.backend == TEXT_LAYER_BACKEND:
+            identity = text_layer_identity()
+            self.ocr_backend = identity.backend
+            self.ocr_model = identity.model
+            self.ocr_profile = None
+            self.ocr_runtime_identity = identity
+            return
         profile = resolve_ocr_profile(
             explicit=candidate.profile,
             backend=candidate.backend,

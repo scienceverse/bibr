@@ -853,7 +853,15 @@ class OcrOptions(_BibrSettings):
         '"glm-mlx" (disabled — use glm-rapid-mlx), '
         '"glm-rapid-mlx" (Apple Silicon/Rapid-MLX), "glm-llama" (Windows default; llama.cpp), '
         'or "glm-http" (external GLM server) — plus the cloud vision-LLM providers "gemini", '
-        '"openai", and "anthropic".',
+        '"openai", and "anthropic", and "text-layer", which runs no OCR model and reads '
+        "born-digital PDFs from their embedded text layer (scanned pages stay unread).",
+    )
+    text_layer_fallback: Literal["off", "auto"] = Field(
+        "off",
+        description='When the automatic OCR backend ("paddle") cannot start on this machine: '
+        '"off" (default) stops with an error; "auto" warns once and reads born-digital PDFs '
+        "from their embedded text layer instead, as the text-layer backend does. Scanned PDFs "
+        "then fail, since they need OCR.",
     )
     model: str | None = Field(None, description="OCR model name override.")
     profile: Literal["paddle", "glm"] | None = Field(
@@ -1100,7 +1108,9 @@ class OcrOptions(_BibrSettings):
         ge=0.0,
         le=1.0,
         description="Mark a file failed (code ocr_mostly_failed) when fewer than this fraction of "
-        "OCR-needed regions return content. Set to 0 to disable.",
+        "OCR-needed regions return content. With the text-layer backend, a file whose text "
+        "regions are read below this fraction fails as a scanned PDF (code scan_needs_ocr). "
+        "Set to 0 to disable.",
     )
     # When to tear down a local in-process OCR engine between batch chunks.
     # "auto" (default) keeps it resident in balanced mode unless a local LLM
@@ -1130,7 +1140,8 @@ class OcrOptions(_BibrSettings):
     @model_validator(mode="after")
     def validate_profile(self) -> "OcrOptions":
         """Require an explicit profile when a backend/model has no known OCR family."""
-        if self.backend.lower() in {"gemini", "openai", "anthropic"}:
+        # Cloud vision models take no OCR profile, and the text layer runs no model.
+        if self.backend.lower() in {"gemini", "openai", "anthropic", "text-layer"}:
             return self
 
         from bibr.ocr.profiles import resolve_ocr_profile

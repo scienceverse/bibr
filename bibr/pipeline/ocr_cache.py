@@ -112,13 +112,20 @@ def _key(
 ) -> str:
     effective = _effective_settings(settings)
     layout = effective.layout
-    profile = resolve_ocr_profile(
-        explicit=identity.profile,
-        backend=identity.backend,
-        model=identity.model,
-        max_tokens=effective.ocr.generation_max_tokens,
-        temperature=effective.ocr.generation_temperature,
-    )
+    if identity.profile is None:
+        # The text-layer backend runs no model: its normalizer version names
+        # its reading rules, and a fixed profile keeps the other parts stable.
+        from bibr.ocr.profiles import GLM_PROFILE
+
+        profile = GLM_PROFILE
+    else:
+        profile = resolve_ocr_profile(
+            explicit=identity.profile,
+            backend=identity.backend,
+            model=identity.model,
+            max_tokens=effective.ocr.generation_max_tokens,
+            temperature=effective.ocr.generation_temperature,
+        )
     request = profile.request
     # The incomplete-table retry re-runs truncated Paddle tables at this
     # higher budget, but only on the transports that run it (the paddle-*
@@ -144,7 +151,7 @@ def _key(
         identity.backend,
         cfg.ocr_url or "",
         identity.model,
-        identity.profile,
+        identity.profile or "",
         identity.normalizer_version,
         f"generation_max_tokens_text={request.max_tokens_for('text')}",
         f"generation_max_tokens_table={request.max_tokens_for('table')}",

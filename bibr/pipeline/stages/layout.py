@@ -43,9 +43,13 @@ class LayoutStage:
         any_needs_ocr = any(_needs_ocr(fs) for fs in ctx.alive())
         ctx.signals.any_needs_ocr = any_needs_ocr
 
+        from bibr.ocr.text_layer import is_text_layer_mode
+
         preloading_ocr = False
         can_preload = (
             any_needs_ocr
+            # The text-layer backend has no engine to start.
+            and not is_text_layer_mode(ctx)
             and cfg.memory_mode != "aggressive"
             and cfg.ocr_backend not in ("glm-http", "gemini", "openai", "anthropic")
             and not cfg.ocr_url
