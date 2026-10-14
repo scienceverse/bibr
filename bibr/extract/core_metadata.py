@@ -2294,6 +2294,24 @@ class CoreMetadataExtractor:
             if isinstance(repair_note, str):
                 self._record_metadata_warning(WarningCode.LLM_RESPONSE_REPAIRED, repair_note)
 
+            # Second opinion: a title or author call the paper's registry record
+            # disagrees with is asked again on the review model, whose answer is
+            # kept only when printed and agreeing (or the first one was not
+            # printed). Everything below runs on the answer kept.
+            primary_llm_title = llm_metadata.title
+            review = await self._review_front_matter(
+                llm_metadata,
+                field_failures,
+                llm_text=llm_text,
+                authors_text=authors_text or llm_text,
+                full_text=full_text,
+                resolution=resolution,
+            )
+            reviewed: set[str] = set()
+            if review is not None:
+                llm_metadata = review.llm_metadata
+                reviewed = review.accepted
+
             # Author candidates in precedence order. The recovery and the CRediT
             # harvest are produced only while no usable list is in hand, so they
             # can never replace or reorder what the extraction found.
@@ -2307,7 +2325,11 @@ class CoreMetadataExtractor:
                     veto = "fabricated: absent from the extraction context"
                 elif authors and not self._drop_transliterated_authors(kept, full_text, resolution):
                     veto = "romanised: written in a script the byline does not print"
-            author_trail = [_AuthorProposal("llm", authors, transforms, veto)]
+            author_trail = [
+                _AuthorProposal(
+                    "llm_review" if "author" in reviewed else "llm", authors, transforms, veto
+                )
+            ]
             usable = authors if veto is None else []
             # Gate recovery on the sanitized author list: a nonempty raw response may contain no
             # usable names. Prefer the selected byline over repeating the same wide context.
@@ -2360,36 +2382,25 @@ class CoreMetadataExtractor:
             # decides the title after its fallbacks; the classifier and the
             # correction-notice guard see the extracted one.
             model_title = strip_affiliation_markers(llm_metadata.title or "")
-            title, title_issue = ground_title_to_printed_text(
-                model_title, resolution, full_text, printed_rows=self._printed_rows()
+            title, title_transforms, title_evidence, title_issues = self._ground_title(
+                model_title, resolution, full_text, authors=usable
             )
-            title_transforms: list[str] = []
-            title_evidence: list[str] = []
-            if title_issue is not None:
-                self.validation_issues.append(title_issue)
-                if title != model_title:
-                    title_transforms.append("regrounded")
-                    title_evidence.extend(title_issue.evidence_ids)
-            title, cover_issue = reground_title_off_archive_cover(title, resolution, self.contents)
-            if cover_issue is not None:
-                self.validation_issues.append(cover_issue)
-                title_transforms.append("regrounded")
-                title_evidence.extend(cover_issue.evidence_ids)
-            title, parallel_issue = drop_parallel_title(title, full_text)
-            if parallel_issue is not None:
-                self.validation_issues.append(parallel_issue)
-                title_transforms.append("parallel_version_dropped")
-                title_evidence.extend(parallel_issue.evidence_ids)
-            title, subtitle_issue = fold_printed_subtitle(title, resolution, authors=usable)
-            if subtitle_issue is not None:
-                self.validation_issues.append(subtitle_issue)
-                title_transforms.append("subtitle_folded")
-                title_evidence.extend(subtitle_issue.evidence_ids)
-            title, mark_issue = drop_title_note_marker(title, resolution, self.contents)
-            if mark_issue is not None:
-                self.validation_issues.append(mark_issue)
-                title_transforms.append("note_marker_dropped")
-                title_evidence.extend(mark_issue.evidence_ids)
+            self.validation_issues.extend(title_issues)
+            if "title" in reviewed and self._registry_check is not None:
+                # The first answer, grounded the same way: the title the
+                # identity stage restores when the record turns out to be
+                # another paper's.
+                first_title = strip_affiliation_markers(primary_llm_title or "")
+                grounded, transforms_, evidence, _issues = self._ground_title(
+                    first_title, resolution, full_text, authors=usable
+                )
+                self._registry_check.primary_title = FieldCandidate(
+                    "title",
+                    "llm" if grounded == first_title else "title_grounding",
+                    grounded,
+                    evidence_ids=tuple(evidence),
+                    transforms=tuple(transforms_),
+                )
             abstract = (llm_metadata.abstract or "").strip()
             keywords = llm_metadata.keywords
             classification_context = classification_text or full_text
@@ -2507,7 +2518,11 @@ class CoreMetadataExtractor:
             ledger.propose(
                 FieldCandidate(
                     "title",
-                    "llm" if title == model_title else "title_grounding",
+                    "llm_review"
+                    if "title" in reviewed
+                    else "llm"
+                    if title == model_title
+                    else "title_grounding",
                     title,
                     evidence_ids=tuple(title_evidence),
                     transforms=tuple(title_transforms),
@@ -2540,6 +2555,107 @@ class CoreMetadataExtractor:
         except ValueError as e:
             logger.error(f"Metadata extraction failed: {e}")
             raise
+
+    def _ground_title(
+        self,
+        model_title: str,
+        resolution: FrontMatterResolution | None,
+        full_text: str,
+        *,
+        authors: list[PaperAuthor],
+    ) -> tuple[str, list[str], list[str], list[ValidationIssue]]:
+        """The model's title grounded to the printed one.
+
+        Regrounding to the printed row, off an archive cover, dropping a joined
+        parallel version, folding a printed subtitle, dropping a note marker.
+        Returns the title, the repairs applied, their evidence and the issues
+        to record when this title is used.
+        """
+        transforms: list[str] = []
+        evidence: list[str] = []
+        issues: list[ValidationIssue] = []
+        title, issue = ground_title_to_printed_text(
+            model_title, resolution, full_text, printed_rows=self._printed_rows()
+        )
+        if issue is not None:
+            issues.append(issue)
+            if title != model_title:
+                transforms.append("regrounded")
+                evidence.extend(issue.evidence_ids)
+        for step, transform in (
+            (
+                lambda text: reground_title_off_archive_cover(text, resolution, self.contents),
+                "regrounded",
+            ),
+            (lambda text: drop_parallel_title(text, full_text), "parallel_version_dropped"),
+            (
+                lambda text: fold_printed_subtitle(text, resolution, authors=authors),
+                "subtitle_folded",
+            ),
+            (
+                lambda text: drop_title_note_marker(text, resolution, self.contents),
+                "note_marker_dropped",
+            ),
+        ):
+            title, issue = step(title)
+            if issue is not None:
+                issues.append(issue)
+                transforms.append(transform)
+                evidence.extend(issue.evidence_ids)
+        return title, transforms, evidence, issues
+
+    async def _review_front_matter(
+        self,
+        llm_metadata,
+        field_failures: dict[str, str],
+        *,
+        llm_text: str,
+        authors_text: str,
+        full_text: str,
+        resolution: FrontMatterResolution | None,
+    ):
+        """Re-ask the calls the paper's registry record disagrees with (LLM_REVIEW_*).
+
+        None when the review is off or there is no confident record to compare
+        with. Writes ``contents.front_matter_review_receipt`` otherwise.
+        """
+        from bibr.extract.front_matter_review import review_front_matter, review_wanted
+        from bibr.extract.title_candidates import _normalize_for_match, grounded_in_selected_title
+
+        check = self._registry_check
+        if check is None or not review_wanted(self._settings):
+            return None
+        record = check.record()
+        if record is None:
+            return None
+
+        def title_printed(title: str) -> bool:
+            if resolution is not None:
+                return grounded_in_selected_title(title, resolution)
+            wanted = _normalize_for_match(title)
+            return bool(wanted) and wanted in _normalize_for_match(full_text)
+
+        def authors_printed(authors: list[PaperAuthor]) -> bool:
+            _grounded, missing = grounded_authors_in_context(authors, authors_text)
+            return not missing
+
+        outcome = await review_front_matter(
+            llm_metadata,
+            record=record,
+            client=self._review_client,
+            settings=self._settings,
+            file_hash=self.file_hash,
+            title_text=llm_text,
+            authors_text=authors_text,
+            failed_fields=tuple(field_failures),
+            convert_authors=self._convert_llm_authors,
+            title_printed=title_printed,
+            authors_printed=authors_printed,
+        )
+        check.record_backed |= outcome.record_backed
+        check.review_receipt = outcome.receipt
+        self.contents.front_matter_review_receipt = outcome.receipt
+        return outcome
 
     @staticmethod
     def _undecided(metadata: PaperMetadata, rule: str) -> PaperMetadata:

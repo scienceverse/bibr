@@ -318,6 +318,8 @@ def decide_value(name: str, candidate: FieldCandidate | None) -> FieldDecision:
 
 _AUTHOR_RULES = {
     "llm": "extracted",
+    # The review model's list, kept over the first one (LLM_REVIEW_TRIGGER).
+    "llm_review": "front_matter_review",
     "llm_recovery": "empty_author_recovery",
     "credit_statement": "credit_statement_fallback",
     "native": "native",

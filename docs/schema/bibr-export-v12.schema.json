@@ -1123,6 +1123,18 @@
             "null"
           ]
         },
+        "front_matter_review": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FrontMatterReviewExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Receipt for the second-opinion review of the title and authors where the paper's registry record disagrees (LLM_REVIEW_TRIGGER); omitted when it did not run."
+        },
         "paper_classification": {
           "anyOf": [
             {
@@ -1852,7 +1864,7 @@
           ]
         },
         "source": {
-          "description": "The step that produced the value, e.g. 'llm', 'layout_title', 'front_matter_candidate', 'registry_printed', 'doc_info', 'keywords_section', 'identity', 'classifier', 'native' (declared by the input); for doi, the selected identity candidate's source_kind; for a failed field the step that failed. Null when unknown or when nothing was produced.",
+          "description": "The step that produced the value, e.g. 'llm', 'layout_title', 'front_matter_candidate', 'registry_printed', 'llm_review', 'doc_info', 'keywords_section', 'identity', 'classifier', 'native' (declared by the input); for doi, the selected identity candidate's source_kind; for a failed field the step that failed. Null when unknown or when nothing was produced.",
           "title": "Source",
           "type": [
             "string",
@@ -1885,7 +1897,7 @@
       "description": "How an exported field compares with the paper's own registry record.\n\nThe record is the confident ``metadata_match`` row (score at least 0.9) of\nthe paper's DOI. It never replaces the exported value.",
       "properties": {
         "outcome": {
-          "description": "'agree': the exported value says the same as the record. Titles are compared case- and punctuation-insensitively, and one may be a word-aligned prefix of the other that keeps at least 70% of it; the record's title is also tried with its subtitle appended. Author lists agree when their full names pair up with an F1 of at least 0.9, whatever the given/family split. 'disagree': they differ, and the export keeps its own value. 'corrected': the value agrees and is a printed one chosen over the first extracted value because it agrees with the record (source 'registry_printed', under FRONT_MATTER_REGISTRY_TITLE); the record's own text is never written.",
+          "description": "'agree': the exported value says the same as the record. Titles are compared case- and punctuation-insensitively, and one may be a word-aligned prefix of the other that keeps at least 70% of it; the record's title is also tried with its subtitle appended. Author lists agree when their full names pair up with an F1 of at least 0.9, whatever the given/family split. 'disagree': they differ, and the export keeps its own value. 'corrected': the value agrees and is a printed one chosen over the first extracted value because it agrees with the record (source 'registry_printed' under FRONT_MATTER_REGISTRY_TITLE, or 'llm_review' under LLM_REVIEW_TRIGGER); the record's own text is never written.",
           "enum": [
             "agree",
             "disagree",
@@ -2151,6 +2163,87 @@
         "text_id"
       ],
       "title": "FootnoteExport",
+      "type": "object"
+    },
+    "FrontMatterReviewExport": {
+      "additionalProperties": false,
+      "description": "Second opinion on the title and authors where the paper's registry record disagrees.",
+      "properties": {
+        "accepted": {
+          "description": "Reviews used: printed in the front matter and agreeing with the record, or the first value was not printed.",
+          "minimum": 0,
+          "title": "Accepted",
+          "type": "integer"
+        },
+        "attempted": {
+          "description": "Routed fields asked again on the review model.",
+          "minimum": 0,
+          "title": "Attempted",
+          "type": "integer"
+        },
+        "failed": {
+          "description": "Reviews that failed or timed out; the first value was kept.",
+          "minimum": 0,
+          "title": "Failed",
+          "type": "integer"
+        },
+        "model": {
+          "description": "Review model (LLM_REVIEW_MODEL); null when unset.",
+          "title": "Model",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasons": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "Routed fields by reason: title_disagrees, title_missing, authors_disagree, authors_missing.",
+          "title": "Reasons",
+          "type": "object"
+        },
+        "rejected": {
+          "description": "Valid reviews not used; the first value was kept.",
+          "minimum": 0,
+          "title": "Rejected",
+          "type": "integer"
+        },
+        "routed": {
+          "description": "Fields (the title, the author list) whose first value disagreed with the paper's own registry record, or was empty while the record has one.",
+          "minimum": 0,
+          "title": "Routed",
+          "type": "integer"
+        },
+        "skipped": {
+          "description": "Routed fields not asked again: no review model, or the first call failed.",
+          "minimum": 0,
+          "title": "Skipped",
+          "type": "integer"
+        },
+        "status": {
+          "description": "Whether a review model was configured.",
+          "enum": [
+            "configured",
+            "not_configured"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "status",
+        "routed",
+        "attempted",
+        "accepted",
+        "rejected",
+        "failed",
+        "skipped",
+        "reasons"
+      ],
+      "title": "FrontMatterReviewExport",
       "type": "object"
     },
     "FundingExport": {

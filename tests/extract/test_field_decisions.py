@@ -51,6 +51,7 @@ _OTHER_OBJECTS = {
     ("extract/footnote_citations.py", "ref.authors"),
     # The model's response, before any candidate is built from it.
     ("extract/core_metadata.py", "llm_metadata.model_copy"),
+    ("extract/front_matter_review.py", "llm_metadata.model_copy"),
     # PaperMetadata's own copy, which drops the receipts of the fields an
     # update rewrites.
     ("models.py", "super().model_copy"),
@@ -64,6 +65,7 @@ _OTHER_OBJECTS = {
     ("export/json_export.py", "r.authors"),
     ("extract/core_metadata.py", "llm_metadata.authors"),
     ("extract/core_metadata.py", "recovered.authors"),
+    ("extract/front_matter_review.py", "llm_metadata.authors"),
     ("extract/research_integrity.py", "result.affiliations"),
     ("structure/citation_linker.py", "reference.authors"),
     ("structure/citation_matcher.py", "r.authors"),

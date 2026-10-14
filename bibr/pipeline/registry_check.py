@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from bibr.config import GlobalSettings
-    from bibr.extract.field_decisions import FieldDecision
+    from bibr.extract.field_decisions import FieldCandidate, FieldDecision
     from bibr.models import ExternalMatch, MatchSource, PaperAuthor
     from bibr.pipeline.identity import ExpectedIdentity
     from bibr.validation import ValidationIssue
@@ -126,6 +126,7 @@ class RegistryCheck:
         "early_doi",
         "finished_at",
         "matches",
+        "primary_title",
         "record_backed",
         "review_receipt",
         "started_at",
@@ -144,8 +145,10 @@ class RegistryCheck:
         # Fields whose value was chosen because it agrees with the record.
         self.record_backed: set[str] = set()
         # The title decision without the record, restored when the final DOI
-        # turns out to be another one.
+        # turns out to be another one, and the first extracted title when the
+        # review replaced it because the record agreed with its answer.
         self.title_fallback: FieldDecision | None = None
+        self.primary_title: FieldCandidate | None = None
         # The front-matter review's receipt (``extraction.diagnostics``).
         self.review_receipt: dict | None = None
         task.add_done_callback(self._on_done)

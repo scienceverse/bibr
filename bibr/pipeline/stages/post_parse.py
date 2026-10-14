@@ -1335,15 +1335,25 @@ def _usage_totals_by_label(
 def _note_record_backed_title(check, decision, incumbent, inputs: dict) -> None:
     """Keep the title decision made without the registry record on *check*.
 
-    When the record chose the title (the registry title row), the identity
-    stage restores this decision if the final DOI is not the one the record
-    was looked up for.
+    When the record chose the title (the registry title row, or the review's
+    answer kept because it agrees with the record), the identity stage
+    restores this decision if the final DOI is not the one the record was
+    looked up for.
     """
     from bibr.extract.field_decisions import decide_title
 
     if decision.source == "registry_printed":
         check.record_backed.add("title")
         check.title_fallback = decide_title(incumbent, **inputs)
+    elif (
+        decision.source == "llm_review"
+        and "title" in check.record_backed
+        and check.primary_title is not None
+    ):
+        check.title_fallback = decide_title(check.primary_title, **inputs)
+    else:
+        # A later step chose the title; the record did not.
+        check.record_backed.discard("title")
 
 
 def _build_paper(contents, paper_metadata, file_name: str, file_hash: str, paper_id: str | None):
@@ -1448,6 +1458,7 @@ async def post_parse(
     enrichment_prefetch: bool = False,
     memory_mode: str | None = None,
     registry_lookup: bool = False,
+    review_client=None,
 ):
     """Post-parse pipeline: classification, extraction, linking.
 
@@ -1460,7 +1471,10 @@ async def post_parse(
     starts right after the sections are settled, under the core metadata
     call (:mod:`bibr.pipeline.registry_check`). Its record lands in
     ``metadata.match`` and its handle rides the ``Paper`` as
-    ``paper.registry_check``.
+    ``paper.registry_check``. With ``LLM_REVIEW_TRIGGER=registry_disagree``
+    the core extractor re-asks a title or author call that disagrees with that
+    record on *review_client* (built from ``LLM_REVIEW_*`` when not given);
+    its usage is recorded under ``review_``-prefixed labels.
 
     When ``enrichment_prefetch`` is set (the run will enrich references), the
     enrich stage's up-front network work starts as a task the moment the
@@ -1484,6 +1498,12 @@ async def post_parse(
         decide_title,
         field_decisions_of,
         incumbent_candidate,
+    )
+    from bibr.extract.front_matter_review import (
+        build_review_client,
+        merge_counts,
+        pop_review_usage,
+        review_wanted,
     )
     from bibr.extract.ref_extractor import _resolve_ref_strategies
     from bibr.paper import doc_info_candidates
@@ -1527,6 +1547,14 @@ async def post_parse(
                 prefetch_handle = start_enrichment_prefetch(references, settings=effective_settings)
 
     registry_check = None
+    # The front-matter review's own model; post_parse closes one it built.
+    owns_review_client = False
+    if no_llm or not review_wanted(effective_settings):
+        review_client = None
+    elif review_client is None and registry_lookup:
+        review_client = build_review_client(effective_settings)
+        owns_review_client = review_client is not None
+    review_usage: dict = {}
     extraction_completed = False
     # The client is shared across concurrently-processed files; the contextvar
     # scopes usage attribution to this file's task tree (no snapshot diffing).
@@ -1587,6 +1615,7 @@ async def post_parse(
                 on_references_ready=on_references_ready,
                 memory_mode=memory_mode,
                 registry_check=registry_check,
+                review_client=review_client if registry_check is not None else None,
             )
             if registry_check is not None:
                 # Usually done already: the lookup ran under the core call.
@@ -1801,6 +1830,14 @@ async def post_parse(
                 popped_trace = llm_client.traces_pop_file(usage_key)
                 if getattr(llm_client, "_track_usage", False):
                     file_llm_trace = popped_trace
+            # The review model's calls ran under the same key: record them
+            # under ``review_`` labels next to the core model's.
+            if usage_key is not None and review_client is not None:
+                review_usage = pop_review_usage(review_client, usage_key)
+                merge_counts(file_usage, review_usage["usage"])
+                merge_counts(file_usage_labels, review_usage["labels"])
+                file_protocol_hashes = {**file_protocol_hashes, **review_usage["hashes"]}
+                file_llm_trace = [*file_llm_trace, *review_usage["trace"]]
             if (
                 terminal_processing_error is not None
                 and terminal_processing_error.safe_diagnostics is not None
@@ -1822,6 +1859,13 @@ async def post_parse(
                     if terminal_processing_error is None:
                         raise
                     logger.warning("LLM client cleanup failed after terminal processing error")
+            if owns_review_client:
+                try:
+                    await review_client.close()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning("Review LLM client cleanup failed", exc_info=True)
 
     # Section types that only fit an IMRaD paper, once the paper type is
     # known and the title and statements no longer read the section types.
@@ -1875,6 +1919,9 @@ async def post_parse(
             usage_by_label=_usage_totals_by_label(file_usage_labels),
             protocol_hashes=file_protocol_hashes,
         )
+        if paper.qualification_provenance is not None and review_usage.get("labels"):
+            # The review answered with another model than ``model_id``.
+            paper.qualification_provenance["review_model_id"] = effective_settings.llm.review_model
 
     # Content-level warnings (e.g. reference-segmentation CRF fallback) come
     # first; post-parse-level warnings are appended after them.
@@ -1929,6 +1976,12 @@ class PostParseStage:
         # Whether the run looks the paper's own DOI up (identity or full
         # enrichment): the front-matter rules may then read that record early.
         registry_lookup = ctx.config.enrichment_mode(ctx.settings) in ("full", "identity")
+        # The review model is shared across the run like the core client.
+        from bibr.extract.front_matter_review import review_wanted
+
+        review_client = None
+        if registry_lookup and not ctx.config.no_llm and review_wanted(ctx.settings):
+            review_client = getattr(ctx.resources, "review_llm_client", None)
 
         async def _gated(fs):
             async with sem:
@@ -1952,6 +2005,7 @@ class PostParseStage:
                     enrichment_prefetch=enrichment_prefetch,
                     memory_mode=ctx.config.memory_mode,
                     registry_lookup=registry_lookup,
+                    **({"review_client": review_client} if review_client is not None else {}),
                 )
                 fs.stage_times[self.name] = time.monotonic() - fs_t0
                 return result

@@ -15,8 +15,9 @@ becomes ``{service, outcome}``, with outcome ``agree`` or ``disagree``, or
 ``corrected`` when the value agrees and is a printed one the extraction
 chose over its first reading because it agrees with the record
 (``extraction.fields.<field>.source`` ``registry_printed``: the
-FRONT_MATTER_REGISTRY_TITLE row). It is absent when there is no confident
-record or the record lacks the field.
+FRONT_MATTER_REGISTRY_TITLE row, or ``llm_review``: the front-matter review's
+answer). It is absent when there is no confident record or the record lacks
+the field.
 
 The comparison is the one the validation scorer uses for title and authors,
 ported here because the scorer is not part of the package:
@@ -56,7 +57,7 @@ REGISTRY_FIELDS = ("title", "author")
 
 # ``extraction.fields.<field>.source`` of a printed value chosen because the
 # record agrees with it: an agreeing one is reported ``corrected``.
-RECORD_CHOSEN_SOURCES = frozenset({"registry_printed"})
+RECORD_CHOSEN_SOURCES = frozenset({"registry_printed", "llm_review"})
 
 # A containment match must keep at least this share of the longer title.
 _MIN_CONTAINMENT_LENGTH_RATIO = 0.7
