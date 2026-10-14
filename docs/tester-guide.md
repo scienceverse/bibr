@@ -17,7 +17,7 @@ pipeline with a short PDF, then add fully local inference once that works.
 | Setup | Best for | What runs on the laptop? |
 |---|---|---|
 | **Windows hybrid (recommended first)** | A Windows laptop with a 6 GB NVIDIA GPU | Local OCR and reference ML; a cloud LLM handles metadata |
-| **Windows fully local** | Local inference after the hybrid test passes | Quantized OCR and LLM models, loaded one at a time; disable Crossref for offline runs after model downloads |
+| **Windows fully local** | Local inference after the hybrid test passes | Quantized OCR and LLM models, loaded one at a time; keep Crossref off (the default) for offline runs after model downloads |
 | **Shared demo link** | The quickest evaluation, with no installation | Only the browser; whoever runs `bibr demo --share` (see [Gradio demo](#gradio-demo)) processes the paper |
 
 ### Status of the 6 GB Windows path
@@ -212,8 +212,8 @@ uv run bibr chew .\paper.pdf --pages 1-3 --ocr glm-llama --llm local --memory ag
 OCR and the LLM run in separate llama.cpp processes and are not intended to
 occupy VRAM simultaneously. Close other GPU-heavy applications while testing.
 If this path fails or is uncomfortably slow, return to the hybrid setup;
-OCR and default reference parsing remain local. For a run without Crossref
-requests, also pass `--no-crossref`.
+OCR and default reference parsing remain local. Crossref is off by default; if
+you enabled it, pass `--no-crossref` for a run without Crossref requests.
 
 ## Other platforms
 

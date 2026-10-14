@@ -1135,3 +1135,20 @@ def test_failed_llmster_load_is_not_unloaded(monkeypatch):
 
     assert "out of memory" in message
     assert ["unload", "bibr-model"] not in calls
+
+
+def test_managed_vllm_servers_turn_off_usage_stats(monkeypatch):
+    monkeypatch.delenv("VLLM_NO_USAGE_STATS", raising=False)
+    _server, popen = _launch_vllm_llm(monkeypatch)
+
+    assert popen.call_args.kwargs["env"]["VLLM_NO_USAGE_STATS"] == "1"
+
+
+def test_managed_vllm_servers_keep_a_usage_stats_choice_from_the_environment(monkeypatch):
+    from bibr.local.http_runtime import vllm_server_env
+
+    monkeypatch.setenv("VLLM_NO_USAGE_STATS", "0")
+
+    env = vllm_server_env("k" * 32)
+    assert env["VLLM_NO_USAGE_STATS"] == "0"
+    assert env["VLLM_API_KEY"] == "k" * 32

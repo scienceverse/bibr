@@ -179,7 +179,8 @@ def render_cli_md() -> str:
     parts = [
         _HEADER,
         "# CLI reference\n",
-        "Run these commands as `uv run bibr …` from a source checkout. "
+        "In a uv project (the Quickstart install or a source checkout), run these as "
+        "`uv run bibr …`. "
         "Tables are generated from the CLI parser; a blank default usually means "
         "the command resolves a value from configuration or hardware at runtime. "
         "Use `bibr chew paper.pdf --dry-run` to preview the resolved processing plan.\n",

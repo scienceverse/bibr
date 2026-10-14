@@ -18,7 +18,9 @@ from bibr.schemas import (
     AffiliationLLM,
     AuthorContributionLLM,
     AuthorLLM,
+    AuthorPointerLLM,
     AuthorsLLM,
+    AuthorsPointerLLM,
     CitationMatch,
     CitationResolutionResult,
     CoreMetadataLLM,
@@ -34,6 +36,7 @@ from bibr.schemas import (
     RefAnchors,
     ResearchIntegrityLLM,
     TitleKeywordsLLM,
+    TitleKeywordsPointerLLM,
 )
 from bibr.structure.section_classifier import (
     _LLM_SECTION_TYPE_DESCRIPTIONS,
@@ -159,9 +162,24 @@ REFERENCE_LEAVES = {
     "references[].index": "integer",
 }
 
+TITLE_KEYWORDS_POINTER_LEAVES = {
+    key: value for key, value in TITLE_KEYWORDS_LEAVES.items() if key != "abstract"
+} | {"abstract_first_words": "verbatim-string", "abstract_last_words": "verbatim-string"}
+AUTHORS_POINTER_LEAVES = {
+    "affiliations[]": "string",
+    "authors[].given": "string",
+    "authors[].family": "string",
+    "authors[].affiliation_ids[]": "integer",
+    "authors[].email": "email-address",
+    "authors[].corresponding": "boolean",
+    "authors[].orcid": "verbatim-string",
+}
+
 EXPECTED = {
     TitleKeywordsLLM: TITLE_KEYWORDS_LEAVES,
     AuthorsLLM: AUTHORS_LEAVES,
+    TitleKeywordsPointerLLM: TITLE_KEYWORDS_POINTER_LEAVES,
+    AuthorsPointerLLM: AUTHORS_POINTER_LEAVES,
     PaperClassificationLLM: CLASSIFICATION_LEAVES,
     CoreMetadataLLM: {
         **TITLE_KEYWORDS_LEAVES,
@@ -238,6 +256,9 @@ REFERENCE_NULLABLE = {
 EXPECTED_NULLABLE = {
     TitleKeywordsLLM: TITLE_NULLABLE,
     AuthorsLLM: AUTHOR_NULLABLE,
+    TitleKeywordsPointerLLM: (TITLE_NULLABLE - {"abstract"})
+    | {"abstract_first_words", "abstract_last_words"},
+    AuthorsPointerLLM: (AUTHOR_NULLABLE - {"authors[].affiliation"}),
     PaperClassificationLLM: CLASSIFICATION_NULLABLE,
     CoreMetadataLLM: TITLE_NULLABLE | AUTHOR_NULLABLE | CLASSIFICATION_NULLABLE,
     PaperReferenceList: REFERENCE_NULLABLE,
@@ -265,6 +286,9 @@ POLICY_MODELS = {
     TitleKeywordsLLM,
     AuthorsLLM,
     AuthorLLM,
+    TitleKeywordsPointerLLM,
+    AuthorsPointerLLM,
+    AuthorPointerLLM,
     PaperClassificationLLM,
     CoreMetadataLLM,
     PaperReferenceList,
@@ -340,6 +364,8 @@ def test_registered_prompt_inventory_is_exact():
     assert [(name, spec.response_model) for name, spec in PROMPTS.items()] == [
         ("title_keywords", TitleKeywordsLLM),
         ("authors", AuthorsLLM),
+        ("title_keywords_pointers", TitleKeywordsPointerLLM),
+        ("authors_pointers", AuthorsPointerLLM),
         ("classification", PaperClassificationLLM),
         ("core_metadata", CoreMetadataLLM),
         ("references_parse", PaperReferenceList),

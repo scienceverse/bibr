@@ -77,6 +77,18 @@ def env_with_api_key(variable: str, api_key: str) -> dict[str, str]:
     return {**os.environ, variable: api_key}
 
 
+def vllm_server_env(api_key: str) -> dict[str, str]:
+    """Environment for a managed vLLM server: its key, and vLLM's usage stats off.
+
+    vLLM reports anonymous usage statistics to its maintainers unless
+    ``VLLM_NO_USAGE_STATS`` is set. bibr turns that off for the servers it
+    starts; a value already in the environment wins.
+    """
+    env = env_with_api_key("VLLM_API_KEY", api_key)
+    env.setdefault("VLLM_NO_USAGE_STATS", "1")
+    return env
+
+
 def bearer_headers(api_key: str | None) -> dict[str, str]:
     """``Authorization`` header for a managed server's key; empty without one."""
     return {"Authorization": f"Bearer {api_key}"} if api_key else {}

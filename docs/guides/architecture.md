@@ -424,7 +424,7 @@ Key settings:
 | `EQUATION_EXTRACTION` | Enable equation extraction | `true` |
 | `FIGURE_IMAGES` | Include figure images in output, as `data:` URIs | `false` |
 | `REF_SEG_STRATEGY` | Reference segmentation strategy (`geom`, `region`, `llm`, or `crf`) | `geom` |
-| `REF_PARSE_STRATEGY` | Reference parsing strategy (`ner`, `llm`, `llm-chunked`, or `off`) | `ner` |
+| `REF_PARSE_STRATEGY` | Reference parsing strategy (`ner`, `llm`, `llm-chunked`, `ref-llm`, or `off`) | `ner` |
 | `REF_TRAINING_DATA_DIR` | Save raw bib text + LLM extracts (parser data); LLM segmentation spans in `segmentation/` subdir (segmenter data) | disabled |
 | `ENVIRONMENT` | Runtime mode (`development`/`production`) | `development` |
 
