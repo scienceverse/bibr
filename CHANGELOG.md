@@ -21,6 +21,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   parse, bibr asks for the verbatim answer instead. A stand-in the model writes for an
   affiliation the text does not print ("Affiliation 3") is left empty.
   The merged call, the JSON re-roll and the NuExtract native backend stay verbatim.
+- `ML_ORT_INTRA_OP_THREADS` and `ML_ORT_INTER_OP_THREADS` cap the thread pools of
+  bibr's ONNX Runtime sessions (layout, section and paper classifiers, NER
+  reference parser, sentence segmenter). ONNX Runtime otherwise gives each
+  session one thread per physical core, which oversubscribes a CPU host shared
+  with model servers or other runs. Both default to `0`, ONNX Runtime's own
+  sizing, so nothing changes unless you set them.
 
 ### Changed
 

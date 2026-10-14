@@ -476,6 +476,14 @@ segmentation. `--device cpu` runs these models on the CPU provider alone (no
 CoreML, which may compute in FP16), and `device="cuda:1"` in the Python API puts
 them on that GPU.
 
+ONNX Runtime gives each session a thread pool as large as the machine's
+physical cores, so the four models above and the sentence segmenter can each
+use every core. On a CPU host shared with model servers or other runs, cap them
+with `ML_ORT_INTRA_OP_THREADS` (threads inside one operator, the cap that
+matters) and `ML_ORT_INTER_OP_THREADS`. Both default to `0`, which keeps ONNX
+Runtime's own sizing. The caps are read when a session opens and apply to the
+ONNX Runtime sessions only, not to the PyTorch runtime.
+
 `Dockerfile.serve` sets `ML_RUNTIME=torch` explicitly. That image exists for the
 PyTorch stack — `torch.compile` on the layout model in particular — and since the
 classifier revisions it bakes now also carry an `onnx/` bundle, leaving the

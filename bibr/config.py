@@ -1790,6 +1790,25 @@ class MlOptions(_BibrSettings):
         "or configured, else torch when installed), 'onnx' (require the ONNX bundle), or 'torch' "
         "(require the torch extra).",
     )
+    # ONNX Runtime sizes each session's intra-op thread pool to the physical
+    # cores, so every CPU session a run opens (layout, both classifiers, the
+    # NER parser, the sentence segmenter) may claim every core. On a host
+    # shared with model servers or other runs that oversubscribes the CPU; a
+    # cap trades per-call speed for co-tenancy. Read when a session opens.
+    ort_intra_op_threads: int = Field(
+        0,
+        ge=0,
+        description="Threads each ONNX Runtime session may use inside one operator (layout, "
+        "classifiers, NER parser, sentence segmenter). 0 keeps ONNX Runtime's default (one per "
+        "physical core). Set it on a CPU host shared with model servers or other runs.",
+    )
+    ort_inter_op_threads: int = Field(
+        0,
+        ge=0,
+        description="Threads each ONNX Runtime session may use to run independent operators in "
+        "parallel. 0 keeps ONNX Runtime's default. bibr's sessions run their graphs "
+        "sequentially, so ML_ORT_INTRA_OP_THREADS is the cap that limits CPU use.",
+    )
 
     # Trained section classifier (MiniLM two-head, document-context input
     # template). When ``section_classifier_model_id`` is None, classification

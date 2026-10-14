@@ -408,6 +408,7 @@ class BaseSentenceSegmenter:
             selected_device,
             session_device,
             shrink_arena_after_runs,
+            with_ort_thread_caps,
         )
 
         self._settings = settings if settings is not None else snapshot_settings()
@@ -464,13 +465,17 @@ class BaseSentenceSegmenter:
             gpu_mem_limit=mem_limit,
         )
         model_kwargs: dict[str, Any] = {"ort_providers": providers, "hub_prefix": None}
+        sess_options = None
         if selected_device(providers) != "cuda":
             # CPU-only SaT session: skip ORT's CPU arena (audit-measured
             # ~2.8 GB after one paper). Unverified for CUDA sessions, where
             # the CUDA EP manages its own arena, so those keep the default.
-            cpu_options = cpu_ort_session_options()
-            if cpu_options is not None:
-                model_kwargs["ort_kwargs"] = {"sess_options": cpu_options}
+            sess_options = cpu_ort_session_options()
+        # SaT opens its own session, so the ML_ORT_*_THREADS caps ride in
+        # the options it is handed (none configured: nothing changes).
+        sess_options = with_ort_thread_caps(sess_options, self._settings)
+        if sess_options is not None:
+            model_kwargs["ort_kwargs"] = {"sess_options": sess_options}
         sat_target = self._model_name
         tokenizer = self._resolved_model.tokenizer_name_or_path
         if not self._resolved_model.is_local:
