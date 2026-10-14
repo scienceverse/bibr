@@ -9,7 +9,9 @@ were answered. :meth:`ReferenceLookup.outcome` reduces that to one word:
   (:func:`registration_agencies`): a DataCite DOI is unknown to Crossref
   but exists.
 - ``doi_rejected``: the printed DOI resolved, but to a work published more
-  than a year from the printed year, so it names another work.
+  than a year from the printed year, so it names another work. A record two
+  years before the printed year (an online-first date) and a book's edition
+  are not rejected.
 - ``search_hit``: a title, fingerprint or reference-string search found the
   work.
 - ``clean_miss``: every search answered, and none found the work.

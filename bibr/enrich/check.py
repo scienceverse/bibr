@@ -3,7 +3,7 @@
 For every ``bib`` row, :func:`check_bibs` writes one ``bib_check`` row:
 
 - ``matched``: a record was found, and what the reference printed agrees
-  with it (at most one minor difference).
+  with it (no major difference, and at most one minor one besides the issue).
 - ``fields_disagree``: a record was found, but the reference prints a
   different title, first author, year or DOI (a major difference), or
   several minor ones. A printed DOI that names another work lands here.
@@ -30,6 +30,17 @@ authors too unless the reference says "et al."; the year may differ by one,
 or by two when the reference is the later (print after online-first); a
 journal abbreviation agrees with the full name it abbreviates (ISO 4). The
 volume, issue and page comparisons are :mod:`bibr.enrich.verify`'s.
+
+On top of that, differences that live Crossref answers for printed
+references showed to be noise, not citing errors, are let through: a
+subtitle one side leaves out, one word of a compound family name, an
+acronym for a journal ("BMJ"), a page printed without its supplement or
+electronic prefix ("19" for "S19"), and a record's placeholder "0" volume or
+page. A rule ("——") stands for the previous reference's first author, the
+reference string counts where the parsed author list lost a name, and a page
+range is one difference. A surname spelled slightly differently ("Dehane"
+for Dehaene) and an organization the record lists as its first author are
+minor notes rather than a missing author.
 
 Runs on the export-dict shape after :func:`bibr.enrich.verify.verify_bibs`,
 whose ``extraction.diagnostics.verification`` rows it reads.
@@ -60,6 +71,9 @@ CONTAINMENT_MIN_CHARS = 20
 YEAR_TOLERANCE = 1
 # Record authors compared with the printed author list.
 MAX_AUTHORS = 6
+# A printed word this similar (0-100) to a record surname of four or more
+# letters is that name misspelled or misread, not another author.
+NAME_CLOSE_MIN = 80
 
 # Notice types that withdraw the work itself.
 _RETRACTION_TYPES = ("retraction", "partial_retraction", "withdrawal", "removal")
@@ -68,9 +82,12 @@ _RETRACTION_TYPES = ("retraction", "partial_retraction", "withdrawal", "removal"
 _EDITION_DATED_BIB_TYPES = frozenset({"book", "book_chapter"})
 # Locator fields: a disagreement is minor. A different issue alone is common
 # (combined issues, supplements), so issue notes do not count towards the
-# two minor notes that make a reference disagree.
+# two minor differences that make a reference disagree; and a page range is
+# one difference, however many of its ends differ (an online-first article
+# cited by its own pages "1-14").
 _LOCATOR_FIELDS = ("volume", "issue", "first_page", "last_page")
 _UNCOUNTED_FIELDS = frozenset({"issue"})
+_DIFFERENCE_OF = {"first_page": "pages", "last_page": "pages"}
 
 _ET_AL = re.compile(r"\bet\.?\s*al\b", re.IGNORECASE)
 # Where a subtitle starts: a colon, a question or exclamation mark followed by
@@ -96,6 +113,17 @@ _SPECIAL = str.maketrans(
     }
 )
 _JOURNAL_STOP = frozenset({"of", "and", "the", "for", "in", "on", "a", "an", "de"})
+# Words of a compound family name that a reference does not print alone.
+_NAME_PARTICLES = frozenset(
+    {"van", "von", "der", "den", "del", "della", "dos", "das", "ten", "ter", "bin", "ibn"}
+)
+# A supplement or electronic-locator prefix on a page: "S19", "e1".
+_LOCATOR_PREFIX = re.compile(r"^[a-z]{1,2}(?=[0-9])")
+# A reference that opens with a rule ("——, R. Conti, ...", "———. 1987.")
+# repeats the previous reference's first author, after any number label.
+_REPEATED_AUTHOR = re.compile(r"^\s*(?:\[\d+\]|\d+\.)?\s*[-\u2010-\u2015_]{2,}")
+# Words a registry record sometimes holds as an author's family name.
+_NOT_NAMES = frozenset({"and", "et", "al", "etal", "others"})
 _DOI_PREFIX = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", re.IGNORECASE)
 
 
@@ -165,21 +193,50 @@ def title_score(
     return max(scores) if scores else None
 
 
+def _name_keys(name: str) -> list[str]:
+    """The squashed name and, for a compound family name ("Venkateswar
+    Reddy", "van der Berg"), each of its words other than particles: a
+    reference may print any one of them."""
+    whole = norm_squash(name)
+    words = [norm_squash(w) for w in re.split(r"[\s\-‐]+", fold_diacritics(name or ""))]
+    words = [w for w in words if len(w) >= 3 and w not in _NAME_PARTICLES]
+    return [whole, *(w for w in words if w != whole)] if whole else []
+
+
+def name_state(name: str, text: str) -> str | None:
+    """Is *name* in *text*: ``named``, ``misspelled`` (a printed word close to
+    it, as "Dehane" for Dehaene or "Irtel" for an OCR-damaged Birtel), or
+    ``absent``? ``None`` when that cannot be told: a name with no Latin
+    letters squashes to "", which every text "contains"."""
+    keys = _name_keys(name)
+    if not keys:
+        return None
+    squashed = norm_squash(text)
+    if any(key in squashed for key in keys):
+        return "named"
+    words = re.findall(r"[a-z]+", fold_diacritics((text or "").lower()))
+    for key in keys:
+        if len(key) >= 4 and any(
+            len(w) >= 3 and fuzz.ratio(w, key) >= NAME_CLOSE_MIN for w in words
+        ):
+            return "misspelled"
+    return "absent"
+
+
 def first_author_in_text(record_names: list[str], text: str) -> bool | None:
-    """Is the record's first author named in *text*? ``None`` when that cannot
-    be told: a name with no Latin letters squashes to "", which every text
-    "contains"."""
+    """Is the record's first author named in *text*, if misspelled? ``None``
+    when that cannot be told (see :func:`name_state`)."""
     names = [n for n in record_names if norm_squash(n)]
     if not names:
         return None
-    return norm_squash(names[0]) in norm_squash(text)
+    return name_state(names[0], text) != "absent"
 
 
 def authors_match(record_names: list[str], text: str, max_authors: int = MAX_AUTHORS) -> bool:
-    """Are the record's first *max_authors* authors all named in *text*?"""
+    """Are the record's first *max_authors* authors all named in *text*, if
+    misspelled?"""
     names = [n for n in record_names if norm_squash(n)][:max_authors]
-    squashed = norm_squash(text)
-    return all(norm_squash(n) in squashed for n in names)
+    return all(name_state(n, text) != "absent" for n in names)
 
 
 def year_disagrees(printed: int | None, record: int | None) -> bool:
@@ -214,12 +271,15 @@ def _token_abbreviates(short: str, long: str) -> bool:
 
 def journal_coherent(a: str | None, b: str | None) -> bool:
     """Do the (possibly abbreviated) words of one name match, in order, words
-    of the other? An empty side is no disagreement."""
+    of the other, or is one the other's acronym ("BMJ", "PNAS")? An empty
+    side is no disagreement."""
     ta, tb = _journal_tokens(a or ""), _journal_tokens(b or "")
     if not ta or not tb:
         return True
     if len(ta) > len(tb):
         ta, tb = tb, ta
+    if len(ta) == 1 and len(tb) > 1 and ta[0] == "".join(t[0] for t in tb):
+        return True
     j = 0
     for token in ta:
         while j < len(tb):
@@ -235,6 +295,18 @@ def journal_coherent(a: str | None, b: str | None) -> bool:
 def _norm_number(value: object) -> str | None:
     text = re.sub(r"\s+", "", str(value)).lower() if value is not None else ""
     return (text.lstrip("0") or "0") if text else None
+
+
+def _same_number(printed: object, record: object) -> bool:
+    """Equal once a letter prefix is dropped: a supplement page ("S19") or an
+    electronic locator ("e1") printed as its number."""
+
+    def bare(value: object) -> str | None:
+        text = _norm_number(value)
+        return _norm_number(_LOCATOR_PREFIX.sub("", text)) if text else None
+
+    a, b = bare(printed), bare(record)
+    return a is not None and a == b
 
 
 def locator_identifies(bib: dict, record: dict) -> bool:
@@ -279,14 +351,26 @@ def _note(field_name: str, printed, record, severity: str) -> dict:
     }
 
 
-def _record_names(match: dict) -> list[str]:
-    names = []
+@dataclass(frozen=True)
+class _Author:
+    name: str  # family name, or an organization's whole name
+    given: str = ""
+    organization: bool = False
+
+
+def _record_authors(match: dict) -> list[_Author]:
+    """The record's authors that can be looked for in a reference."""
+    authors = []
     for person in match.get("author") or []:
-        if isinstance(person, dict):
-            name = person.get("family") or person.get("literal")
-            if isinstance(name, str) and name.strip():
-                names.append(name.strip())
-    return names
+        if not isinstance(person, dict):
+            continue
+        family, literal = person.get("family"), person.get("literal")
+        name = family or literal
+        if not isinstance(name, str) or norm_squash(name) in ("", *_NOT_NAMES):
+            continue
+        given = person.get("given") if isinstance(person.get("given"), str) else ""
+        authors.append(_Author(name.strip(), given.strip(), organization=not family))
+    return authors
 
 
 def _score(match: dict) -> float:
@@ -314,7 +398,18 @@ def _retraction(match: dict) -> dict | None:
     return None
 
 
-def _field_notes(bib: dict, match: dict, reference: str, verification: dict | None) -> list[dict]:
+def repeats_previous_author(bib: dict, reference: str) -> bool:
+    """Does the reference stand its first author in with a rule ("——")?"""
+    return any(_REPEATED_AUTHOR.match(text or "") for text in (bib.get("authors"), reference))
+
+
+def _field_notes(
+    bib: dict,
+    match: dict,
+    reference: str,
+    verification: dict | None,
+    previous_authors: str = "",
+) -> list[dict]:
     notes: list[dict] = []
     printed_doi, record_doi = _bare_doi(bib.get("doi")), _bare_doi(match.get("doi"))
     by_doi = printed_doi is not None and printed_doi == record_doi
@@ -331,21 +426,36 @@ def _field_notes(bib: dict, match: dict, reference: str, verification: dict | No
             severity = "major" if score < TITLE_MAJOR_BELOW else "minor"
             notes.append(_note("title", title, match.get("title"), severity))
 
-    names = _record_names(match)
+    authors = _record_authors(match)
     printed_authors = bib.get("authors") or ""
-    author_text = printed_authors or reference
-    if names and author_text:
-        first = first_author_in_text(names, author_text)
-        if first is False:
-            notes.append(_note("author", printed_authors, names[0], "major"))
-        elif first is True:
+    # The reference string is what was printed; the parsed author list can
+    # have lost or mangled a name the string still holds.
+    author_text = " ".join(t for t in (printed_authors, reference) if t)
+    # A rule for the first author names the previous reference's.
+    first_text = previous_authors if repeats_previous_author(bib, reference) else author_text
+    if authors and author_text:
+        lead = authors[0]
+        first = name_state(lead.name, first_text) if first_text else "named"
+        if first == "absent" and lead.given and name_state(lead.given, first_text) == "named":
+            # The record swapped given and family name ("Isabelle" for Carrard).
+            first = "misspelled"
+        if first == "absent":
+            # A record sometimes lists an institution where its authors
+            # belong ("MGIMO University"): an organization missing from the
+            # reference is weaker evidence than a person.
+            severity = "minor" if lead.organization else "major"
+            notes.append(_note("author", printed_authors, lead.name, severity))
+        else:
             # "et al." can hide the record's other authors only when it has
             # more than two: a one- or two-author work is never cut short.
-            excused = bool(_ET_AL.search(author_text)) and len(names) > 2
-            if not excused and not authors_match(names, author_text):
-                notes.append(
-                    _note("author", printed_authors, ", ".join(names[:MAX_AUTHORS]), "minor")
-                )
+            excused = bool(_ET_AL.search(author_text)) and len(authors) > 2
+            every_name = author_text if first_text == author_text else f"{first_text} {author_text}"
+            people = [a.name for a in authors[1:] if not a.organization]
+            if not excused and not authors_match(people, every_name, MAX_AUTHORS - 1):
+                record_names = ", ".join(a.name for a in authors[:MAX_AUTHORS])
+                notes.append(_note("author", printed_authors, record_names, "minor"))
+            elif first == "misspelled":
+                notes.append(_note("author", printed_authors, lead.name, "minor"))
 
     year, record_year = bib.get("year"), match.get("year")
     if isinstance(year, int) and isinstance(record_year, int) and year_disagrees(year, record_year):
@@ -374,13 +484,14 @@ def _locator_notes(bib: dict, match: dict, verification: dict | None) -> list[di
     notes = []
     for field_name in _LOCATOR_FIELDS:
         printed, record = bib.get(field_name), match.get(field_name)
-        if printed in (None, "") or record in (None, ""):
+        # Some records hold "0" for a volume or page they do not know.
+        if printed in (None, "") or record in (None, "") or _norm_number(record) == "0":
             continue
         if verification is not None and field_name in verification:
             differs = verification[field_name] == "disagree"
         else:
             differs = not _same(printed, str(record).strip())
-        if differs:
+        if differs and not _same_number(printed, record):
             notes.append(_note(field_name, printed, record, "minor"))
     return notes
 
@@ -388,7 +499,8 @@ def _locator_notes(bib: dict, match: dict, verification: dict | None) -> list[di
 def _status_of_notes(notes: list[dict]) -> str:
     """Any major difference, or two minor ones, and the reference disagrees."""
     counted = [n for n in notes if n["field"] not in _UNCOUNTED_FIELDS]
-    if any(n["severity"] == "major" for n in counted) or len(counted) >= 2:
+    differences = {_DIFFERENCE_OF.get(n["field"], n["field"]) for n in counted}
+    if any(n["severity"] == "major" for n in counted) or len(differences) >= 2:
         return "fields_disagree"
     return "matched"
 
@@ -404,7 +516,7 @@ def _unmatched(bib: dict, lookup: dict | None) -> tuple[str, list[dict]]:
             return "unchecked", []
         return "not_found", []
     if outcome == "doi_rejected":
-        # The printed DOI resolves, but to a work dated more than a year away.
+        # The printed DOI resolves, but to a work of another year.
         return "fields_disagree", [_note("doi", bib.get("doi"), None, "major")]
     if outcome == "clean_miss":
         return "not_found", []
@@ -417,8 +529,10 @@ def check_bib(
     lookup: dict | None,
     reference: str = "",
     verification: dict | None = None,
+    previous_authors: str = "",
 ) -> dict:
-    """One ``bib_check`` row for *bib*."""
+    """One ``bib_check`` row for *bib*. *previous_authors* is the author list
+    of the reference before it, which a rule ("——") stands in for."""
     match = _record_for(matches)
     if match is None:
         status, notes = _unmatched(bib, lookup)
@@ -432,7 +546,7 @@ def check_bib(
     if verification is not None and verification.get("service") != match.get("service"):
         # Verification checked another record (this one scored below its bar).
         verification = None
-    notes = _field_notes(bib, match, reference, verification)
+    notes = _field_notes(bib, match, reference, verification, previous_authors)
     return {
         "bib_id": bib["bib_id"],
         "status": _status_of_notes(notes),
@@ -472,16 +586,21 @@ def check_bibs(data: dict) -> CheckReport:
 
     report = CheckReport()
     rows = []
+    previous_authors = ""
     for bib in data.get("bib") or []:
         if not isinstance(bib, dict) or bib.get("bib_id") is None:
             continue
+        reference = text_by_id.get(bib.get("text_id"), "")
         row = check_bib(
             bib,
             matches_by_bib.get(bib["bib_id"], []),
             lookups.get(bib["bib_id"]),
-            text_by_id.get(bib.get("text_id"), ""),
+            reference,
             verification.get(bib["bib_id"]),
+            previous_authors,
         )
+        if not repeats_previous_author(bib, reference):
+            previous_authors = bib.get("authors") or reference
         report.statuses[row["status"]] += 1
         report.retracted += row["retraction"] is not None
         rows.append(row)

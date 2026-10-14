@@ -103,6 +103,19 @@ async def test_book_doi_is_not_rejected_for_its_edition_year(doi_org):
     assert await _enrich([ref]) == {1: "doi_hit"}
 
 
+def test_doi_year_guard():
+    """A record two years before the printed year is the online-first date of
+    the print issue cited; other gaps of two or more years name another work,
+    except for a book's edition."""
+    from bibr.enrich.references import _doi_year_conflicts
+
+    assert not _doi_year_conflicts(2019, 2017, "journal-article")
+    assert not _doi_year_conflicts(2019, 2018, "journal-article")
+    assert _doi_year_conflicts(2017, 2019, "journal-article")
+    assert _doi_year_conflicts(2020, 2017, "journal-article")
+    assert not _doi_year_conflicts(1988, 2013, "book")
+
+
 async def test_retracted_work_is_found_by_its_doi(doi_org):
     ref = _ref(1, "Ileal-lymphoid-nodular hyperplasia", doi=WAKEFIELD_DOI, year=1998)
     assert await _enrich([ref]) == {1: "doi_hit"}

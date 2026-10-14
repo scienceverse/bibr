@@ -56,6 +56,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - An organization author or editor of a matched record ("Open Science
   Collaboration") is exported as `{"literal": ...}`; it was dropped, which left
   such matches with no authors.
+- A printed DOI is no longer discarded when its record is dated two years
+  before the printed year, the online-first date of an article cited by its
+  print issue, or when it registers a book, whose record carries the year of
+  the edition registered.
 
 ### Fixed
 

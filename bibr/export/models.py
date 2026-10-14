@@ -1202,7 +1202,8 @@ class CheckNoteExport(BaseModel):
     severity: Literal["major", "minor"] = Field(
         description="major: the difference names another work (title, first author, year more "
         "than a year off, DOI). minor: a difference a correct reference can have (a co-author "
-        "left out, the journal's name, volume, issue or pages, a book's edition year)."
+        "left out, a name spelled differently, an organization the record lists as author, the "
+        "journal's name, volume, issue or pages, a book's edition year)."
     )
 
 
@@ -1213,7 +1214,8 @@ class BibCheckExport(BaseModel):
 
     bib_id: Id = Field(description="bib[].bib_id of the reference.")
     status: CheckStatusLiteral = Field(
-        description="matched: the reference agrees with its record (at most one minor note). "
+        description="matched: the reference agrees with its record (no major note, and at most "
+        "one minor note besides issue notes). "
         "fields_disagree: the reference has a major note or two minor ones (an issue note is "
         "not counted); a printed DOI that names another work lands here. doi_unregistered: "
         "doi.org says the printed DOI does not exist. not_found: every lookup answered and "
@@ -1600,7 +1602,8 @@ class LookupExport(BaseModel):
     outcome: LookupOutcomeLiteral = Field(
         description="doi_hit: the printed DOI resolved to the accepted record. doi_404: the "
         "registry has no record of the printed DOI. doi_rejected: the printed DOI resolved to a "
-        "work dated more than a year from the printed year. search_hit: a search found the "
+        "work dated more than a year from the printed year (other than two years before it, "
+        "an online-first date), and not a book. search_hit: a search found the "
         "work. clean_miss: every search answered and none found it. error: a lookup failed "
         "and nothing found the work. timed_out: the enrichment time budget ran out first. "
         "not_attempted: the reference gave nothing to look up (no DOI, title or volume)."

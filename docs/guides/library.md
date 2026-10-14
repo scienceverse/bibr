@@ -196,7 +196,7 @@ saying whether it agrees with the record it was matched to:
 
 | `status` | Meaning |
 |---|---|
-| `matched` | The reference agrees with its record: at most one minor difference. |
+| `matched` | The reference agrees with its record: no major difference and at most one minor one (a different issue number is not counted). |
 | `fields_disagree` | The title, first author, year or DOI differs (a major note), or two minor things do. A printed DOI that names another work lands here. |
 | `doi_unregistered` | doi.org says the printed DOI does not exist. |
 | `not_found` | Every lookup answered and Crossref has no record of the work. |
@@ -215,13 +215,17 @@ checks[checks.status == "fields_disagree"]
 retracted = [row["bib_id"] for row in result.bib_check if row["retraction"]]
 ```
 
-A title is compared after folding case, accents and punctuation; a subtitle
+A title is compared after folding case, accents and punctuation. A subtitle
 the reference or the record leaves out, a record title printed whole inside
-the reference, an abbreviated journal name ("Psychol. Sci.") and a year one
-off (two when the reference is the later, print-issue year) all agree. The
-first author must be named; the other authors may be cut short by "et al."
+the reference (when it has at least 20 letters and digits, or the DOI or the
+volume and first page identify the work), an abbreviated journal name
+("Psychol. Sci.", "BMJ") and a year one off (two when the reference is the
+later, print-issue year) all agree. The record's first author must be named in
+the reference (a rule such as "——" names the previous reference's first
+author); a name spelled slightly differently is a minor note. The other authors may be cut short by "et al."
 when the record has more than two. Volume, issue and pages come from
-verification (`extraction.diagnostics.verification`).
+verification (`extraction.diagnostics.verification`); a page range is one
+difference, and a page printed without its "S" or "e" prefix agrees.
 `extraction.enrichment.lookups` says how each reference's lookup ended.
 
 ## Warm sessions

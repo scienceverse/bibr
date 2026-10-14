@@ -178,17 +178,19 @@ Crossref", never "fabricated" or "does not exist":
   without a DOI it can only look for in Crossref.
 - A search can miss a work Crossref has, when the reference is cut short,
   garbled by OCR or the parser, or printed in another language than the record.
-  Crossref deposits some subtitles apart from the title, and the search does not
+  Crossref keeps some subtitles apart from the title, and the search does not
   use them, so a reference printing "Title: Subtitle" without a DOI can be
   missed.
 - A reference whose lookup failed, ran out of time or gave nothing to look up
   is `unchecked`, not `not_found`.
-- `fields_disagree` can come from a parsing error as easily as from a citing
-  error, and a correct reference can disagree with a record whose metadata is
-  wrong. The thresholds (title similarity, year tolerance, the author rules) are
+- `fields_disagree` and `doi_unregistered` can come from a parsing error as
+  easily as from a citing error (a DOI cut short where the PDF text lost an
+  underscore reads as one that does not exist), and a correct reference can
+  disagree with a record whose metadata is wrong. The thresholds (title similarity, year tolerance, the author rules) are
   not yet calibrated against hand-checked references.
-- A retraction is reported only when the publisher or Retraction Watch has
-  deposited it with Crossref; `retraction` absent does not mean a work stands.
+- A retraction is reported only when Crossref's record of the work lists it,
+  from the publisher or from the Retraction Watch data Crossref publishes. A
+  missing `retraction` does not mean a work stands.
 
 Check the printed reference and the record before you act on a status.
 

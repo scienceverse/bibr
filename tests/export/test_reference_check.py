@@ -192,7 +192,8 @@ async def test_a_printed_doi_of_another_work_disagrees(doi_org):
     assert row["status"] == "fields_disagree"
     assert [(n["field"], n["severity"]) for n in row["notes"]] == [
         ("title", "major"),
-        ("author", "major"),
+        # The record's author is an organization: weaker evidence than a person.
+        ("author", "minor"),
     ]
     assert row["notes"][1]["record"] == "Open Science Collaboration"
 
@@ -319,10 +320,85 @@ def test_a_name_without_latin_letters_is_not_judged():
     assert _notes({"authors": "Wang, X., & Li, Y."}, record) == []
 
 
+def test_a_misspelled_or_misread_first_author_is_minor():
+    record = _match(author=[{"family": "Dehaene"}, {"family": "Posner"}])
+    assert _notes({"authors": "Dehane, S., & Posner, M. I."}, record) == [("author", "minor")]
+    # OCR dropped a letter; the co-author is named.
+    record = _match(author=[{"family": "Birtel"}, {"family": "Walser"}, {"family": "Pichon"}])
+    assert _notes({"authors": "Irtel J, Walser JC, Pichon S et al"}, record) == [
+        ("author", "minor")
+    ]
+
+
+def test_one_word_of_a_compound_family_name_names_the_author():
+    record = _match(author=[{"family": "Venkateswar Reddy"}, {"family": "Venkata Mohan"}])
+    assert _notes({"authors": "Reddy MV, Mohan SV"}, record) == []
+    record = _match(author=[{"family": "van der Berg"}])
+    assert _notes({"authors": "Berg, A. van der"}, record) == []
+    # A particle alone names nobody.
+    assert _notes({"authors": "Van, A."}, record) == [("author", "major")]
+
+
+def test_a_rule_stands_in_for_the_previous_references_first_author():
+    """ "——, R. Conti, ..." and "——. 1987." repeat the author before."""
+    first = _match(title="The social psychology of creativity", author=[{"family": "Amabile"}])
+    second = {
+        **_match(title="Assessing the work environment for creativity"),
+        "bib_id": 2,
+        "author": [{"family": "Amabile"}, {"family": "Conti"}, {"family": "Coon"}],
+    }
+    third = {
+        **_match(title="Creativity in context"),
+        "bib_id": 3,
+        "author": [{"family": "Amabile"}],
+    }
+    data = {
+        "bib": [
+            {
+                "bib_id": 1,
+                "authors": "Amabile, T. M",
+                "title": "The social psychology of creativity",
+            },
+            {
+                "bib_id": 2,
+                "authors": "——, R. Conti, H. Coon",
+                "title": "Assessing the work environment for creativity",
+            },
+            {"bib_id": 3, "text_id": 9, "title": "Creativity in context"},
+        ],
+        "text": [{"text_id": 9, "text": "———. 1996. Creativity in context. Westview."}],
+        "bib_match": [first, second, third],
+    }
+    check_bibs(data)
+    assert [(row["status"], row["notes"]) for row in data["bib_check"]] == [("matched", [])] * 3
+    # Without a reference before it, the rule names nobody to compare.
+    row = check_bib({"bib_id": 2, "authors": "——, R. Conti, H. Coon"}, [second], None)
+    assert row["notes"] == []
+
+
+def test_a_record_with_given_and_family_swapped_is_minor():
+    record = _match(author=[{"given": "Carrard", "family": "Isabelle"}])
+    assert _notes({"authors": "Carrard, I."}, record) == [("author", "minor")]
+
+
+def test_an_organization_co_author_need_not_be_printed():
+    record = _match(
+        author=[{"family": "Bisquerra Alzina"}, {"literal": "Universitat de Barcelona"}]
+    )
+    assert _notes({"authors": "Bisquerra, R."}, record) == []
+
+
+def test_a_record_author_named_and_is_ignored():
+    record = _match(author=[{"family": "Bradford"}, {"family": "And"}, {"family": "Dodd"}])
+    assert _notes({"authors": "Bradford, A. & Dodd, B"}, record) == []
+
+
 def test_organization_authors_are_compared_by_their_literal():
     record = _match(author=[{"literal": "Open Science Collaboration"}])
     assert _notes({"authors": "Open Science Collaboration"}, record) == []
-    assert _notes({"authors": "Nosek, B. A."}, record) == [("author", "major")]
+    # A missing organization is weaker evidence: records list institutions
+    # as authors.
+    assert _notes({"authors": "Nosek, B. A."}, record) == [("author", "minor")]
 
 
 def test_the_first_author_is_found_in_the_reference_string_when_unparsed():
@@ -361,6 +437,9 @@ def test_a_book_year_difference_is_minor():
         ("J Pers Soc Psychol", "Journal of Personality and Social Psychology", True),
         ("Proc. Natl. Acad. Sci. U.S.A.", "Proceedings of the National Academy of Sciences", True),
         ("The Lancet", "Lancet", True),
+        ("British Medical Journal", "BMJ", True),
+        ("PNAS", "Proceedings of the National Academy of Sciences", True),
+        ("BMC", "British Medical Journal", False),
         ("Nature", "Science", False),
         ("Psychological Bulletin", "Psychological Review", False),
     ],
@@ -386,6 +465,35 @@ def test_verification_decides_the_locator_notes():
     row = check_bib({"bib_id": 1, **bib, "first_page": "99"}, [record], None)
     assert [n["field"] for n in row["notes"]] == ["volume", "issue", "first_page"]
     assert row["status"] == "fields_disagree"
+
+
+def test_supplement_and_electronic_page_prefixes_and_placeholder_zeros_agree():
+    record = _match(volume="0", issue="S1", first_page="S19", last_page="e25")
+    verification = {"bib_id": 1, "service": "crossref", "first_page": "disagree"}
+    bib = {"volume": "10", "first_page": "19", "last_page": "25"}
+    assert _notes(bib, record, verification=verification) == []
+    assert _notes({"first_page": "19"}, _match(first_page="S20")) == [("first_page", "minor")]
+
+
+def test_a_page_range_is_one_difference():
+    """An online-first article cited by its own pages, 1-14."""
+    record = _match(first_page="1423", last_page="1436")
+    row = check_bib({"bib_id": 1, "first_page": "1", "last_page": "14"}, [record], None)
+    assert [n["field"] for n in row["notes"]] == ["first_page", "last_page"]
+    assert row["status"] == "matched"
+    row = check_bib(
+        {"bib_id": 1, "volume": "9", "first_page": "1", "last_page": "14"},
+        [{**record, "volume": "10"}],
+        None,
+    )
+    assert row["status"] == "fields_disagree"
+
+
+def test_an_author_the_parser_mangled_is_read_from_the_reference_string():
+    record = _match(author=[{"family": "van Hoek"}])
+    reference = "van Hoek, R. (2020). Research opportunities. IJOPM."
+    assert _notes({"authors": "van Remko, H"}, record, reference=reference) == []
+    assert _notes({"authors": "van Remko, H"}, record) == [("author", "major")]
 
 
 def test_a_verification_row_of_another_service_is_not_used():

@@ -775,8 +775,13 @@ _EDITION_DATED_TYPES = frozenset(
 
 def _doi_year_conflicts(ref_year: int | None, record_year: int | None, work_type) -> bool:
     """True when the record a printed DOI resolves to is dated too far from the
-    printed year (more than a year) to be the cited work."""
-    if not ref_year or not record_year or abs(ref_year - record_year) <= 1:
+    printed year (more than a year) to be the cited work. A reference dated
+    exactly two years after the record is not: Crossref dates many articles
+    by their online-first year, and references by the print issue's."""
+    if not ref_year or not record_year:
+        return False
+    delta = ref_year - record_year
+    if abs(delta) <= 1 or delta == 2:
         return False
     return work_type not in _EDITION_DATED_TYPES
 
