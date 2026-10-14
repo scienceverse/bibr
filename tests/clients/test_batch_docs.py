@@ -10,10 +10,10 @@ import bibr.clients.llm_cache as llm_cache
 from bibr.config import GlobalSettings
 
 
-def test_llm_cache_docstring_promises_no_batch_prefill():
+def test_llm_cache_docstring_names_the_one_prefill_path():
     doc = llm_cache.__doc__ or ""
-    assert "never touches" in doc
-    assert "writes them here" not in doc
+    assert "``bibr batch --llm-batch``" in doc
+    assert ":func:`response_body`" in doc
     assert "half" not in doc and "price" not in doc
 
 

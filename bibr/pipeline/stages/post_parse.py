@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from bibr.exceptions import LlmCallError, ProcessingError
+from bibr.exceptions import LlmCallError, LlmDeferred, ProcessingError
 from bibr.field_states import FieldScope
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.semaphore import clamped_semaphore
@@ -1913,7 +1913,10 @@ class PostParseStage:
                 # the warning becomes a one-line message and intermittent
                 # bugs (e.g. enum-coercion flakes from LLM responses) lose
                 # all debugging context.
-                if protocol_failure:
+                if isinstance(result, LlmDeferred):
+                    # Expected under ``bibr batch --llm-batch``: no traceback.
+                    logger.info("Post-parse deferred for %s: %s", fs.path.name, result)
+                elif protocol_failure:
                     logger.warning(
                         "Post-parse failed for %s: %s",
                         fs.path.name,

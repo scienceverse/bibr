@@ -7,14 +7,14 @@ produced it. Nothing about the paper, the run, or the call site enters the
 key, which is what lets one entry serve an identical prompt across papers,
 runs, and machines.
 
-That property would make this a safe *prefill* target, but no offline path
-writes here today: the Anthropic Message Batches layer
-(``bibr/clients/batch.py``) has no CLI or pipeline caller and never touches
-this cache, and a batch request does not carry the full request identity
-(``max_tokens``, reasoning effort, mode, schema), so a hand-written prefill
-would miss every live key. A key that misses simply falls through to a live
-call, so a prefill that is stale, partial, or absent costs correctness
-nothing.
+That property makes it a safe *prefill* target. ``bibr batch --llm-batch``
+(:mod:`bibr.batch.llm_batch`) writes Anthropic Message Batches answers here:
+the call that missed spooled its live key and full request
+(:mod:`bibr.clients.batch_defer`), the batch request is the live request
+(:mod:`bibr.clients.batch`), and the answer is stored with
+:func:`response_body` under that key with ``source="batch"``. A key that
+misses simply falls through to a live call, so a prefill that is stale,
+partial, or absent costs correctness nothing; the replay reports its hit rate.
 
 Storage is one JSON file per key, fanned out by the first two hex characters to
 keep directory sizes sane. Entries hold the metadata of papers that may be
@@ -33,7 +33,7 @@ import os
 import re
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
@@ -136,6 +136,22 @@ def request_key(
         digest.update(b"\x00")
         digest.update(encoded)
     return digest.hexdigest()[:_KEY_CHARS]
+
+
+def response_body(result: Any) -> dict:
+    """The stored form of one validated structured response.
+
+    The live client and the Message Batches filler both store through this,
+    so a batch answer is written exactly as the same live answer would be.
+    """
+    body = result.model_dump(mode="json")
+    # Blank/omitted model output is sanitized to None, but is not an
+    # explicit refusal. Preserve that distinction when validating a hit.
+    if getattr(result, "_abstract_explicitly_absent", None) is False:
+        for name in getattr(result, "_abstract_fields", ()):
+            if body.get(name) is None:
+                body.pop(name, None)
+    return body
 
 
 def _effective_settings(settings: GlobalSettings | None) -> GlobalSettings:
