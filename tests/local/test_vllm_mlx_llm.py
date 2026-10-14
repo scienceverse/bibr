@@ -334,3 +334,38 @@ def test_configure_llm_client_respects_explicit_rate_limit(monkeypatch):
         server = mod.VllmMlxLlmServer()
         server.configure_llm_client()
         assert server._settings.llm.rate_limit_rpm == 25
+
+
+def test_configure_llm_client_turns_thinking_off_by_default(monkeypatch):
+    """mlx-lm turns thinking on for any vocab with <think>, whatever the template says."""
+    from bibr.config import Settings
+    from bibr.local import llm as mod
+    from bibr.local import ocr
+
+    monkeypatch.setattr(
+        ocr, "VllmMlxServer", MagicMock(return_value=MagicMock(base_url="http://x"))
+    )
+    monkeypatch.setattr(Settings.llm, "local_model", "org/text-model")
+    monkeypatch.setattr(Settings.llm, "chat_template_kwargs", {})
+
+    with _unset_field(Settings.llm, "chat_template_kwargs"):
+        server = mod.VllmMlxLlmServer()
+        server.configure_llm_client()
+        assert server._settings.llm.chat_template_kwargs == {"enable_thinking": False}
+
+
+def test_configure_llm_client_respects_explicit_chat_template_kwargs(monkeypatch):
+    from bibr.config import Settings
+    from bibr.local import llm as mod
+    from bibr.local import ocr
+
+    monkeypatch.setattr(
+        ocr, "VllmMlxServer", MagicMock(return_value=MagicMock(base_url="http://x"))
+    )
+    monkeypatch.setattr(Settings.llm, "local_model", "org/text-model")
+    monkeypatch.setattr(Settings.llm, "chat_template_kwargs", {"enable_thinking": True})
+
+    with _set_field_explicit(Settings.llm, "chat_template_kwargs"):
+        server = mod.VllmMlxLlmServer()
+        server.configure_llm_client()
+        assert server._settings.llm.chat_template_kwargs == {"enable_thinking": True}

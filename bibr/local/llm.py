@@ -79,6 +79,12 @@ class VllmMlxLlmServer:
                 "Local vllm-mlx backend — capping llm.max_tokens to %d",
                 self._settings.llm.max_tokens,
             )
+        if "chat_template_kwargs" not in self._settings.llm.model_fields_set:
+            # mlx-lm passes enable_thinking=True itself whenever the vocab has
+            # <think>, whatever the template's default, and bibr's Qwen3.5
+            # students then think instead of answering. Turn it off per request.
+            self._settings.llm.chat_template_kwargs = {"enable_thinking": False}
+            self._settings.llm.model_fields_set.add("chat_template_kwargs")
         if "timeout_seconds" not in self._settings.llm.model_fields_set:
             # Default (30s, ->60s hard timeout) is sized for cloud APIs. MLX SimpleEngine
             # on Apple Silicon serializes every request and can run single-digit tok/s
