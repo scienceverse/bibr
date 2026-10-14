@@ -3,8 +3,8 @@
 ``--ocr text-layer`` (``OCR_BACKEND=text-layer``) reads every layout region
 from the PDF's embedded text layer instead of sending page crops to an OCR
 model, so a machine that cannot run one (CPU only, no llama.cpp) can still
-process born-digital PDFs. ``OCR_TEXT_LAYER_FALLBACK=auto`` switches to it
-when the automatic OCR backend cannot start.
+process born-digital PDFs. ``OCR_FALLBACK_TO_TEXT_LAYER=auto`` switches to it
+when no runtime of the automatic OCR backend can start on the machine.
 
 What changes against the native-text pass that runs before OCR:
 
@@ -55,6 +55,7 @@ __all__ = [
     "TextLayerRead",
     "apply_text_layer_read",
     "is_text_layer_mode",
+    "note_text_layer_fallback",
     "read_file_text_layer",
     "read_text_layer",
     "text_layer_fallback_reason",
@@ -112,8 +113,20 @@ def text_layer_requested(config: Any, settings: GlobalSettings) -> bool:
 
 
 def text_layer_fallback_reason(resources: Any) -> str | None:
-    """Why the automatic OCR chain fell back to the text layer, or None."""
+    """Why the automatic OCR backend reads the text layer here, or None.
+
+    ``OCR_FALLBACK_TO_TEXT_LAYER=auto`` on a machine where no OCR runtime can
+    start (``ResourceManager.check_text_layer_fallback``).
+    """
     reason = getattr(resources, "ocr_text_layer_fallback", None)
+    if isinstance(reason, str):
+        return reason
+    # Looked up on the class: a stand-in for the resources (a test double)
+    # answers only if it defines the check.
+    check = getattr(type(resources), "check_text_layer_fallback", None)
+    if not callable(check):
+        return None
+    reason = check(resources)
     return reason if isinstance(reason, str) else None
 
 
@@ -594,6 +607,27 @@ def _mark_all_unread(fs: Any) -> int:
     return count
 
 
+def note_text_layer_fallback(fs: Any, reason: str | None) -> None:
+    """Record on *fs* that OCR could not read it here, once (``OCR_BACKEND_UNAVAILABLE``).
+
+    *reason* is :func:`text_layer_fallback_reason`; None (an explicit
+    ``--ocr text-layer`` run) records nothing. Called for every file the
+    automatic backend's fallback reads, from the text layer or from the OCR
+    cache, so the export says why no OCR model read it.
+    """
+    if reason is None:
+        return
+    if any(warning.code == WarningCode.OCR_BACKEND_UNAVAILABLE for warning in fs.warnings):
+        return
+    fs.warnings.append(
+        ProcessingWarning(
+            WarningCode.OCR_BACKEND_UNAVAILABLE,
+            f"no OCR backend can start on this machine ({reason}); this PDF was read from "
+            "its embedded text layer alone (OCR_FALLBACK_TO_TEXT_LAYER=auto)",
+        )
+    )
+
+
 async def read_file_text_layer(
     fs: Any, settings: GlobalSettings, *, fallback_reason: str | None = None
 ) -> None:
@@ -608,14 +642,7 @@ async def read_file_text_layer(
     if getattr(fs, "text_layer_read", False) or not fs.pdf_bytes or fs.layout_results is None:
         return
     name = getattr(getattr(fs, "path", None), "name", "?")
-    if fallback_reason is not None:
-        fs.warnings.append(
-            ProcessingWarning(
-                WarningCode.OCR_BACKEND_UNAVAILABLE,
-                f"the OCR backend could not start ({fallback_reason}); this PDF was read "
-                "from its embedded text layer alone",
-            )
-        )
+    note_text_layer_fallback(fs, fallback_reason)
     try:
         read = await asyncio.to_thread(
             read_text_layer,
