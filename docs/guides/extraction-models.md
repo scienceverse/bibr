@@ -22,10 +22,12 @@ through llama.cpp (GGUF) or MLX, with the largest build that fits:
 | llama.cpp | 4B Q8_0, 4B Q4_K_M, 2B Q8_0, 2B Q4_K_M (`scienceverse/bibr-extract-qwen35-4b-GGUF`, `-2b-GGUF`) | from 7 GB down to 3 GB of VRAM |
 | MLX (Apple Silicon) | 4B 8-bit, 4B 4-bit, 2B 8-bit (`scienceverse/bibr-extract-qwen35-4b-mlx-8bit` and so on) | from 6 GB down to 3 GB of memory |
 
-The quantized builds are made from the same merged weights, but the scores in
-the tables on this page were measured with the bf16 weights on vLLM; the
-quantized builds have not been scored on their own yet. The MLX builds have only
-been smoke-tested, so setup marks them experimental.
+The quantized builds are made from the same merged weights. Served by
+llama.cpp on the same 252 papers, the 4B Q8_0 passes 218 (bf16 on vLLM: 216),
+the 2B Q8_0 209 (207) and the 2B Q4_K_M 204 (207); the 4B Q4_K_M has not been
+scored yet. These are single runs, and the differences from bf16 have not been
+tested. The MLX builds have only been smoke-tested, so setup marks them
+experimental.
 
 The hosted setup uses Claude for OCR as well (`OCR_BACKEND=anthropic`,
 `OCR_VISION_MODEL=claude-haiku-5-5`), so it needs one Anthropic key. The 221/252
