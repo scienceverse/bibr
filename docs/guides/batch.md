@@ -369,14 +369,61 @@ before the fused stage that holds them.
 Model loads log the memory they add, at INFO with the setting on (DEBUG
 otherwise): `NER parser loaded: RSS +690 MiB (now 2310 MiB, 3.2 s)`. The
 layout model, the sentence segmenter, the section and paper classifiers and the
-NER reference parser are each logged once, when they load.
+NER reference parser are logged each time they load.
 
 `PIPELINE_MEMORY_PROFILE_TRACEMALLOC=true` adds `python_peak_mib`, the peak of
 Python's own allocations, NumPy arrays included. ONNX Runtime's memory and image
 buffers allocated in C are not counted, and tracing slows allocation-heavy
 stages.
 
-What the memory settings trade:
+### Sampling from outside the process
+
+The records above cover the bibr process only. Model servers it calls (a
+local LLM or OCR server) hold memory too, and the host can run short because
+of them. In a source checkout, `scripts/mem_sampler.py` samples whole process
+trees from `/proc` twice a second, with no dependencies beyond Python, on
+Linux only:
+
+```bash
+python scripts/mem_sampler.py sample --match run='bibr batch' \
+    --server llm=12345 --out mem.jsonl &
+bibr batch corpus/ --out results/
+kill %1   # with --match, the sampler runs until stopped
+python scripts/mem_sampler.py join mem.jsonl results/outcomes.jsonl
+```
+
+Each group is a process with everything below it: `--pid PID` (named `run`)
+and `--server NAME=PID` follow fixed processes, and `--match NAME=REGEX`
+finds the processes whose command line matches, again at every sample, so it
+follows a run or server that restarts. Every line of `mem.jsonl` gives each
+group's summed `rss_mib`, `pss_mib` (proportional set size, which splits pages
+shared between processes; empty when the kernel won't show another user's
+processes), `swap_mib` and the highest `hwm_mib` (peak RSS) of any process in
+it, with the host's `mem_available_mib` and `swap_used_mib`. With `--pid` the
+sampler stops when that process exits; otherwise stop it with Ctrl-C or
+`--duration`.
+
+`join` lines the samples up with the ledger's `started_at` and `finished_at`.
+A local run stamps every paper of a chunk with the chunk's times, so the
+peaks are per chunk:
+
+```
+1840 samples (2026-10-14T09:00:01.000+00:00 → 2026-10-14T09:15:20.500+00:00), 48 ledger lines in 6 chunks
+  peak per chunk (MiB: p50 / p90 / max)
+    group  rss                       pss                       swap
+    llm    14,399 / 14,400 / 14,400  14,120 / 14,120 / 14,120  0 / 0 / 0
+    run    3,078 / 3,087 / 3,087     2,958 / 2,967 / 2,967     40 / 40 / 40
+  host: lowest MemAvailable 1,881 MiB, most swap used 2,310 MiB
+```
+
+`--chunks` lists every chunk, and `--json` prints every chunk and paper.
+Ledger times have one-second resolution, so a sample in the second after a
+chunk ends counts toward that chunk and the next. With
+`PIPELINE_MEMORY_PROFILE` on, bibr resets its own peak at every stage, so the
+sampled `hwm_mib` of the bibr process is the peak since its current stage
+started.
+
+### What the memory settings trade
 
 - `--memory aggressive` unloads the layout model after every OCR window and
   the sentence segmenter after every chunk (each reloads for the next),
