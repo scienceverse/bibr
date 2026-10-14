@@ -595,9 +595,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "as agent tools: chew_paper / load_paper register a paper, then "
             "get_metadata, get_sections, get_text, search_text, get_references, "
             "get_reference_citations, get_tables, get_figures and save_paper "
-            "query the result in slices. One warm pipeline serves the whole "
-            "session, so pipeline options are fixed at start via the flags "
-            "below (a subset of 'bibr chew'). The file tools reach only the "
+            "query the result in slices, and export_references / save_references "
+            "give its reference list as CSL-JSON, BibTeX or RIS. One warm "
+            "pipeline serves the whole session, so pipeline options are fixed at "
+            "start via the flags below (a subset of 'bibr chew'). The file tools "
+            "reach only the "
             "--allow-dir directories (default: the current directory). Requires "
             "the 'mcp' extra. Register with e.g.: claude mcp add bibr -- uv run bibr mcp"
         ),
@@ -607,8 +609,9 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         metavar="DIR",
         help=(
-            "Directory chew_paper, load_paper and save_paper may access, with "
-            "symlinks resolved; repeat for several (default: the current directory)"
+            "Directory chew_paper, load_paper, save_paper and save_references may "
+            "access, with symlinks resolved; repeat for several (default: the "
+            "current directory)"
         ),
     )
     mcp_parser.add_argument(

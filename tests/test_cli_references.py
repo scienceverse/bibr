@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
@@ -97,3 +98,14 @@ def test_parser_defaults_and_unknown_formats():
         "printed",
         False,
     )
+
+
+def test_mcp_help_names_the_reference_tools():
+    parser = _build_parser()
+    commands = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    mcp = commands.choices["mcp"]
+    text = " ".join(mcp.format_help().split())
+    assert "export_references" in text
+    assert "save_references" in text
+    allow_dir = next(a for a in mcp._actions if "--allow-dir" in a.option_strings)
+    assert "save_references" in allow_dir.help
