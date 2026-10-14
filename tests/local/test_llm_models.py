@@ -44,6 +44,11 @@ def test_cuda_llm_backend_follows_the_registry_fit():
         ("mlx", 6.0, None, "scienceverse/bibr-extract-qwen35-4b-mlx-8bit"),
         ("mlx", 5.0, None, "scienceverse/bibr-extract-qwen35-2b-mlx-8bit"),
         ("mlx", 3.0, None, "scienceverse/bibr-extract-qwen35-2b-mlx-8bit"),
+        # CPU: memory is system RAM, and the fastest build leads at any size.
+        ("cpu", None, "llama-cpp", "scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M"),
+        ("cpu", 64.0, "llama-cpp", "scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M"),
+        ("cpu", 7.6, "llama-cpp", "scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M"),
+        ("cpu", 6.0, None, "scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M"),
     ],
 )
 def test_recommended_variant_picks_by_scenario(platform_key, memory_gb, runtime, expected):
@@ -59,13 +64,78 @@ def test_recommended_variant_none_when_nothing_fits():
 
     assert recommended_variant("cuda", 2.0, "vllm") is None
     assert recommended_variant("cuda", 2.0, "llama-cpp") is None
+    # 5.9 GB of RAM cannot hold bibr's own models plus the smallest CPU build.
+    assert recommended_variant("cpu", 5.9, "llama-cpp") is None
+
+
+def test_cpu_builds_are_keyed_on_ram_in_speed_order():
+    """2B Q4_K_M first, then 2B Q8_0, then 4B Q4_K_M; each floor is system RAM."""
+    cpu_builds = [
+        (m.key, v.quant, v.min_vram_gb)
+        for key in llm_models.RECOMMENDED_MODEL_KEYS_BY_PLATFORM["cpu"]
+        for m in [get_model(key)]
+        for v in variants_for(m, "cpu", None)
+    ]
+    assert cpu_builds == [
+        ("bibr-extract-2b", "gguf-q4_k_m", 6),
+        ("bibr-extract-2b", "gguf-q8_0", 7),
+        ("bibr-extract-4b", "gguf-q4_k_m", 8),
+    ]
+    # Each CPU build needs its GPU floor plus room for bibr's own CPU models.
+    for m in REGISTRY:
+        for v in variants_for(m, "cpu", None):
+            gpu = next(g for g in variants_for(m, "cuda", None) if g.hf_id == v.hf_id)
+            assert v.min_vram_gb == gpu.min_vram_gb + 3
+            assert v.runtime == "llama-cpp"
+    # A 16 GB laptop is offered all three; an "8 GB" one (7.6 GB usable) the 2B only.
+    assert len(variants_for(get_model("bibr-extract-2b"), "cpu", 16.0)) == 2
+    assert len(variants_for(get_model("bibr-extract-4b"), "cpu", 16.0)) == 1
+    assert len(variants_for(get_model("bibr-extract-2b"), "cpu", 7.6)) == 2
+    assert variants_for(get_model("bibr-extract-4b"), "cpu", 7.6) == []
+
+
+def test_cpu_builds_are_experimental():
+    """The CPU tier is neither timed nor scored, so setup labels it experimental."""
+    for key in ("bibr-extract-4b", "bibr-extract-2b"):
+        assert "cpu" in get_model(key).experimental_platforms
+    assert "cuda" not in get_model("bibr-extract-4b").experimental_platforms
+
+
+def test_gguf_builds_are_pinned_to_a_hub_commit():
+    from bibr.local.llm_models import pinned_gguf_url
+
+    gguf = [v for m in REGISTRY for v in m.variants if v.runtime == "llama-cpp"]
+    assert gguf
+    for v in gguf:
+        repo, quant = v.hf_id.split(":")
+        assert len(v.gguf_revision or "") == 40  # a commit, not a branch
+        assert v.gguf_file == f"{repo.split('/')[1].removesuffix('-GGUF')}-{quant}.gguf"
+        assert pinned_gguf_url(v.hf_id) == (
+            f"https://huggingface.co/{repo}/resolve/{v.gguf_revision}/{v.gguf_file}"
+        )
+    # The 2B Q4_K_M, the CPU default, at the commit that added it.
+    assert pinned_gguf_url("scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M") == (
+        "https://huggingface.co/scienceverse/bibr-extract-qwen35-2b-GGUF/resolve/"
+        "8e1a5823c4290cd583feb470556967df7259050a/bibr-extract-qwen35-2b-Q4_K_M.gguf"
+    )
+
+
+def test_pinned_gguf_url_unknown_model_and_mirror(monkeypatch):
+    from bibr.local.llm_models import pinned_gguf_url
+
+    assert pinned_gguf_url("someone/custom-GGUF:Q4_K_M") is None
+    assert pinned_gguf_url("scienceverse/bibr-extract-qwen35-4b") is None  # vLLM build
+    monkeypatch.setenv("HF_ENDPOINT", "https://hf-mirror.example/")
+    assert pinned_gguf_url("scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0").startswith(
+        "https://hf-mirror.example/scienceverse/bibr-extract-qwen35-4b-GGUF/resolve/"
+    )
 
 
 def test_students_are_merged_vllm_checkpoints_with_thinking_off():
     for key in ("bibr-extract-4b", "bibr-extract-2b"):
         model = get_model(key)
         assert [v.runtime for v in model.variants][:3] == ["vllm", "llama-cpp", "llama-cpp"]
-        assert {v.platform for v in model.variants[3:]} == {"mlx"}
+        assert {v.platform for v in model.variants[3:]} == {"mlx", "cpu"}
         # llama.cpp and MLX servers do not read server_args: thinking goes off per request.
         assert model.env == {"LLM_CHAT_TEMPLATE_KWARGS": '{"enable_thinking": false}'}
         args = registry_server_args(model.variants[0].hf_id)
@@ -87,6 +157,15 @@ def test_default_local_model_follows_the_backend_runtime():
         default_local_model("cloud")
 
 
+def test_default_local_model_on_a_cpu_build_is_the_fastest_cpu_build():
+    assert (
+        default_local_model("llama-cpp", cpu=True)
+        == "scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M"
+    )
+    # Only llama.cpp has CPU builds; the flag changes nothing elsewhere.
+    assert default_local_model("vllm", cpu=True) == "scienceverse/bibr-extract-qwen35-4b"
+
+
 def test_registry_server_args_unknown_model_empty():
     assert registry_server_args("someone/custom-model") == ()
 
@@ -101,11 +180,13 @@ def test_registry_invariants():
         assert model.key and model.label
         assert model.variants, f"{model.key} has no variants"
         for v in model.variants:
-            assert v.platform in ("cuda", "mlx")
+            assert v.platform in ("cuda", "mlx", "cpu")
             assert v.min_vram_gb > 0
             assert v.approx_download_gb > 0
             assert v.hf_id.count("/") == 1  # org/name
-        assert model.experimental_platforms <= {"cuda", "mlx"}
+            if v.platform == "cpu":
+                assert v.runtime == "llama-cpp"  # the only CPU runtime
+        assert model.experimental_platforms <= {"cuda", "mlx", "cpu"}
 
 
 def test_4b_student_is_first_and_recommended():
@@ -131,7 +212,8 @@ def test_students_have_low_vram_llama_cpp_quants():
 def test_students_mlx_is_experimental():
     for key in ("bibr-extract-4b", "bibr-extract-2b"):
         m = get_model(key)
-        assert m.experimental_platforms == frozenset({"mlx"})
+        # MLX: smoke-tested only; CPU: neither timed nor scored.
+        assert m.experimental_platforms == frozenset({"mlx", "cpu"})
         mlx = [v for v in m.variants if v.platform == "mlx"]
         # Only the 8-bit builds passed their smoke tests.
         assert [v.quant for v in mlx] == ["8bit"]
@@ -183,4 +265,5 @@ def test_detect_hardware_none():
         patch("platform.system", return_value="Linux"),
         patch.object(llm_models, "_nvidia_vram_gb", return_value=None),
     ):
+        # Not ("cpu", ram): callers rely on (None, None) for "no GPU".
         assert detect_hardware() == (None, None)
