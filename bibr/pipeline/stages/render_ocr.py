@@ -31,6 +31,7 @@ import sys
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+from bibr.pipeline.memory_profile import measure_stage
 from bibr.pipeline.pipeline import run_stage
 from bibr.pipeline.progress import NullProgress
 from bibr.pipeline.stages.ocr import (
@@ -45,6 +46,19 @@ if TYPE_CHECKING:
     from bibr.pipeline.context import PipelineContext
 
 logger = logging.getLogger(__name__)
+
+
+async def _run_front_half(sub: PipelineContext, *stages) -> None:
+    """Run one window through layout, native text and OCR.
+
+    Each pass is measured as its own stage under ``PIPELINE_MEMORY_PROFILE``
+    (inside the fused stage's own record): page rendering and the layout
+    model are the front half's memory, and the fused record alone could not
+    tell them from OCR.
+    """
+    for stage in stages:
+        with measure_stage(sub, getattr(stage, "name", type(stage).__name__)):
+            await stage.run(sub)
 
 
 class InterleavedRenderOcrStage:
@@ -156,9 +170,7 @@ class InterleavedRenderOcrStage:
         for start in range(0, len(pending), window):
             group = pending[start : start + window]
             sub = replace(ctx, file_states=group)
-            await self._layout.run(sub)
-            await self._native.run(sub)
-            await self._ocr.run(sub)
+            await _run_front_half(sub, self._layout, self._native, self._ocr)
             # Reclaim this window's page images (and pdf_bytes / layout_results)
             # before the next window renders — the memory cap.
             for fs in group:
@@ -270,9 +282,7 @@ class StreamingRenderOcrStage(InterleavedRenderOcrStage):
             for start in range(0, len(pending), window):
                 group = pending[start : start + window]
                 sub = replace(ctx, file_states=group)
-                await self._layout.run(sub)
-                await self._native.run(sub)
-                await self._ocr.run(sub)
+                await _run_front_half(sub, self._layout, self._native, self._ocr)
                 # Reclaim this window's page images before the next renders —
                 # same memory cap as the non-streaming path.
                 for fs in group:

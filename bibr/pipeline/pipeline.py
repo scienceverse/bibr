@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from bibr.pipeline.memory_profile import measure_stage
 from bibr.pipeline.progress import NullProgress
 
 if TYPE_CHECKING:
@@ -63,13 +64,19 @@ def validate_stage_contracts(stages: Sequence[Stage]) -> None:
 
 
 async def run_stage(ctx: PipelineContext, stage: Stage) -> None:
-    """Run one stage with the timing and cleanup guarantees shared by all pipelines."""
+    """Run one stage with the timing and cleanup guarantees shared by all pipelines.
+
+    With ``PIPELINE_MEMORY_PROFILE`` on, the stage's process memory (the
+    boundary's frees included) is recorded too; see
+    :mod:`bibr.pipeline.memory_profile`.
+    """
     started = time.monotonic()
-    try:
-        await stage.run(ctx)
-    finally:
-        ctx.scratch.setdefault("stage_timings", {})[stage.name] = time.monotonic() - started
-        ctx.free_after_stage(stage.name)
+    with measure_stage(ctx, stage.name):
+        try:
+            await stage.run(ctx)
+        finally:
+            ctx.scratch.setdefault("stage_timings", {})[stage.name] = time.monotonic() - started
+            ctx.free_after_stage(stage.name)
 
 
 class Pipeline:

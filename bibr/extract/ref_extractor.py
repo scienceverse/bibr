@@ -588,14 +588,17 @@ def _get_ner_parser(settings: GlobalSettings | None = None, memory_mode: str | N
         with _NER_LOCK:
             if _NER_PARSER is None or key != _NER_PARSER_KEY:
                 from bibr.ner.runtime import load_ref_parser
+                from bibr.pipeline.memory_profile import profiling_enabled
+                from bibr.utils.process_memory import log_rss_delta
 
                 logger.info("loading NER parser: %s", settings.NER_PARSER_CKPT)
-                _NER_PARSER = load_ref_parser(
-                    settings.NER_PARSER_CKPT,
-                    device=device,
-                    revision=settings.NER_PARSER_REVISION,
-                    settings=settings,
-                )
+                with log_rss_delta("NER parser", verbose=profiling_enabled(settings)):
+                    _NER_PARSER = load_ref_parser(
+                        settings.NER_PARSER_CKPT,
+                        device=device,
+                        revision=settings.NER_PARSER_REVISION,
+                        settings=settings,
+                    )
                 _NER_PARSER_KEY = key
     return _NER_PARSER
 

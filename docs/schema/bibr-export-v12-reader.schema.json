@@ -2392,6 +2392,35 @@
       "title": "MatchOrganizationExportReader",
       "type": "object"
     },
+    "MemoryExportReader": {
+      "additionalProperties": true,
+      "description": "Per-stage process memory, recorded only with ``PIPELINE_MEMORY_PROFILE`` on.",
+      "properties": {
+        "peak_rss_mib": {
+          "default": null,
+          "description": "Highest stages[].peak_rss_mib.",
+          "minimum": 0,
+          "title": "Peak Rss Mib",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "stages": {
+          "additionalProperties": {
+            "$ref": "#/$defs/StageMemoryExportReader"
+          },
+          "description": "Memory per stage that finished before the export was built.",
+          "title": "Stages",
+          "type": "object"
+        }
+      },
+      "required": [
+        "stages"
+      ],
+      "title": "MemoryExportReader",
+      "type": "object"
+    },
     "MetadataExportReader": {
       "additionalProperties": true,
       "description": "Paper-level metadata, as printed in the paper.\n\nScalars only (``keywords`` is the one list), so R consumers can call\n``as.data.frame(metadata)`` (metacheck's ``.read_bibr``). How the values\nwere produced lives under ``extraction``; the input file under ``source``.",
@@ -3620,6 +3649,84 @@
       "title": "SourceExportReader",
       "type": "object"
     },
+    "StageMemoryExportReader": {
+      "additionalProperties": true,
+      "description": "The bibr process's memory over one stage (``PIPELINE_MEMORY_PROFILE``).\n\nMemory belongs to the process, not to this paper: ``files`` papers went\nthrough the stage together, and when ``overlapped`` is true another stage\nran at the same time, so the peak covers both.",
+      "properties": {
+        "files": {
+          "description": "Papers in the stage's batch when it started.",
+          "minimum": 0,
+          "title": "Files",
+          "type": "integer"
+        },
+        "overlapped": {
+          "description": "Whether another stage ran at the same time (back-half streaming, concurrent requests).",
+          "title": "Overlapped",
+          "type": "boolean"
+        },
+        "peak_reset": {
+          "description": "Whether the peak was reset when the stage started (Linux), making peak_rss_mib this stage's own.",
+          "title": "Peak Reset",
+          "type": "boolean"
+        },
+        "peak_rss_mib": {
+          "default": null,
+          "description": "Highest resident memory (MiB) while the stage ran. When peak_reset is false, the process's highest since it started.",
+          "minimum": 0,
+          "title": "Peak Rss Mib",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "python_peak_mib": {
+          "default": null,
+          "description": "Peak of Python's own allocations (MiB, tracemalloc), NumPy included; omitted unless PIPELINE_MEMORY_PROFILE_TRACEMALLOC is on.",
+          "minimum": 0,
+          "title": "Python Peak Mib",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "rss_delta_mib": {
+          "default": null,
+          "description": "Change in resident memory (MiB) from the stage's start to its end, after the stage boundary freed what it frees.",
+          "title": "Rss Delta Mib",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "rss_mib": {
+          "default": null,
+          "description": "Resident memory (MiB) when the stage ended.",
+          "minimum": 0,
+          "title": "Rss Mib",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "swap_mib": {
+          "default": null,
+          "description": "Process memory swapped out (MiB) when the stage ended.",
+          "minimum": 0,
+          "title": "Swap Mib",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "files",
+        "overlapped",
+        "peak_reset"
+      ],
+      "title": "StageMemoryExportReader",
+      "type": "object"
+    },
     "TableExportReader": {
       "additionalProperties": true,
       "description": "One table.",
@@ -3844,8 +3951,20 @@
     },
     "TimingsExportReader": {
       "additionalProperties": true,
-      "description": "Per-stage wall-clock seconds (the export stage's own time is excluded \u2014\nit is still running when this is built).\n\nBoth fields are always populated when this object exists: an untimed run\nomits the whole ``extraction.timings`` object rather than emitting one with\nnull fields. The ``| None`` types are structural only.",
+      "description": "Per-stage wall-clock seconds (the export stage's own time is excluded \u2014\nit is still running when this is built), and, opt-in, per-stage memory.\n\n``stages`` and ``total_seconds`` are always populated when this object\nexists: an untimed run omits the whole ``extraction.timings`` object rather\nthan emitting one with null fields. The ``| None`` types are structural\nonly.",
       "properties": {
+        "memory": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryExportReader"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The bibr process's memory per stage; present only when PIPELINE_MEMORY_PROFILE is on. Added in 12.3."
+        },
         "stages": {
           "additionalProperties": {
             "type": "number"

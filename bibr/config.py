@@ -2167,6 +2167,23 @@ class PipelineOptions(_BibrSettings):
         "mode not aggressive); managed local LLM backends keep the stage barrier. Escape hatch "
         "for debugging.",
     )
+    # Opt-in measurement only (bibr/pipeline/memory_profile.py): per stage, the
+    # process's peak RSS (Linux VmHWM, reset at each stage start), RSS, swap
+    # and file count, exported as extraction.timings.memory and copied into
+    # the bibr batch ledger. Changes nothing about how memory is used.
+    memory_profile: bool = Field(
+        False,
+        description="Record the process's peak RSS, RSS and swap over every pipeline stage, and "
+        "the RSS each model load adds (logged). Exported as extraction.timings.memory and "
+        "summarized by bibr batch report. Peaks are per stage on Linux; elsewhere they are the "
+        "process's peak so far. Set PIPELINE_STREAM_BACKHALF=false for per-stage attribution.",
+    )
+    memory_profile_tracemalloc: bool = Field(
+        False,
+        description="With PIPELINE_MEMORY_PROFILE, also record the peak of Python's own "
+        "allocations (tracemalloc, NumPy included; ONNX Runtime and image buffers are not). "
+        "Slows allocation-heavy stages.",
+    )
     # Max requests running the pipeline concurrently per worker (0 = unlimited).
     # The LitServe async loop dispatches unbounded concurrent predicts; this
     # bounds peak host RAM (page images) under an upload flood. GPU peak VRAM is
