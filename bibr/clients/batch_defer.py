@@ -276,9 +276,10 @@ def _spool(
     return True
 
 
-def read_spool(path: Path) -> list[dict]:
-    """The spool's rows, first occurrence per key; malformed lines are skipped."""
+def read_spool(path: Path, *, unique: bool = True) -> list[dict]:
+    """The spool's rows, by default only the first per key; malformed lines are skipped."""
     rows: dict[str, dict] = {}
+    every: list[dict] = []
     try:
         text = Path(path).read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -301,7 +302,8 @@ def read_spool(path: Path) -> list[dict]:
             logger.warning("Skipping malformed spool line %d of %s", number, path)
             continue
         rows.setdefault(row["key"], row)
-    return list(rows.values())
+        every.append(row)
+    return list(rows.values()) if unique else every
 
 
 def load_response_model(path: str) -> type:

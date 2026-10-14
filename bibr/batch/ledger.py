@@ -10,8 +10,9 @@ both. Resume semantics read the *latest* verdict per ``paper_id``:
 * ``ok`` → skipped (unless ``--force``, or the input is now other bytes);
 * ``failed`` → skipped unless ``--retry-failed`` (or ``--force``), except
   (:func:`reruns_by_default`) a paper that never got a verdict — the run was
-  interrupted, or the serve refused the token — which is always picked up
-  again, and a crash or a service outage (a killed run included), which is
+  interrupted, the serve refused the token, or ``--llm-batch`` deferred its
+  LLM calls to a Message Batch — which is always picked up again, and a
+  crash or a service outage (a killed run included), which is
   picked up again until the paper has failed that way
   :data:`MAX_UNSETTLED_FAILURES` times.
 
@@ -51,10 +52,13 @@ CHUNK_ERROR = "chunk_error"
 # The export could not be written: usually the machine's (a full disk, a
 # permission), so it counts as a crash below.
 OUTPUT_WRITE_FAILED = "output_write_failed"
+# ``bibr batch --llm-batch`` spooled the paper's LLM calls for a Message Batch
+# (bibr.batch.llm_batch); its replay runs the paper again.
+LLM_DEFERRED = "llm_deferred"
 # Failed lines that say nothing about the paper, which never got a verdict:
-# the run was stopped, or the serve refused the token. Resume always runs the
-# paper again.
-NEVER_RAN_CODES = frozenset({INTERRUPTED, "http_401", "http_403"})
+# the run was stopped, the serve refused the token, or the paper's LLM calls
+# were deferred to a batch. Resume always runs the paper again.
+NEVER_RAN_CODES = frozenset({INTERRUPTED, "http_401", "http_403", LLM_DEFERRED})
 # A crash or a service outage (``chunk_error``, a run killed mid-paper, an
 # export that could not be written, ``upstream_unavailable``, or a remote line
 # whose transient retries ran out) is usually the machine's or the service's,

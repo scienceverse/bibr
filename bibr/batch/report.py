@@ -12,6 +12,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
+from bibr.batch.ledger import LLM_DEFERRED
 from bibr.pipeline.stages.export import _OVERLAPPED_TIMINGS
 
 TOP_WARNINGS = 10
@@ -58,6 +59,8 @@ def compute_report(
         latest[str(row.get("paper_id"))] = row
     ok_latest = [r for r in latest.values() if r.get("status") == "ok"]
     failed_latest = [r for r in latest.values() if r.get("status") != "ok"]
+    # Waiting for the replay of ``--llm-batch``: failed, but not the paper's fault.
+    deferred_latest = [r for r in failed_latest if r.get("error_code") == LLM_DEFERRED]
     ok_attempts = [r for r in rows if r.get("status") == "ok"]
 
     # Run window: earliest start to latest finish across every attempt.
@@ -139,6 +142,7 @@ def compute_report(
             "total": len(latest),
             "ok": len(ok_latest),
             "failed": len(failed_latest),
+            "deferred": len(deferred_latest),
             "attempts": len(rows),
         },
         "window": {
@@ -206,8 +210,13 @@ def render_report(report: Mapping[str, Any], *, title: str = "bibr batch report"
     rows.append(
         (
             "papers",
-            f"{papers['ok']} ok · {papers['failed']} failed · {papers['total']} total "
-            f"({papers['attempts']} attempts)",
+            f"{papers['ok']} ok · {papers['failed']} failed"
+            + (
+                f" ({papers['deferred']} deferred to an LLM batch)"
+                if papers.get("deferred")
+                else ""
+            )
+            + f" · {papers['total']} total ({papers['attempts']} attempts)",
         )
     )
     if window["started_at"]:

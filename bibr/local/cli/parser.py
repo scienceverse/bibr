@@ -66,6 +66,7 @@ examples:
   bibr batch manifest.txt --out results/ --retry-failed --limit 50
   bibr batch manifest.txt --out results/ \\
       --serve-url https://bibr.example.org --concurrency 2 --max-concurrency 4
+  bibr batch papers/ --out results/ --llm-batch front-matter  # front matter via Message Batches
   bibr batch report results/                          # ledger summary (--json for JSON)
 
 ledger: <out>/outcomes.jsonl — one JSON verdict line per attempt (status,
@@ -481,6 +482,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Do not write <out>/tables/: the corpus as one Parquet file per table, "
             "rebuilt from every successful paper at the end of each run"
+        ),
+    )
+    batch.add_argument(
+        "--llm-batch",
+        choices=("front-matter",),
+        default=None,
+        help=(
+            "Send the per-paper front-matter LLM calls (title/abstract/keywords, authors, "
+            "classification) as Anthropic Message Batches at half the token price: run, "
+            "batch the deferred calls, fill the LLM response cache, replay. Local executor "
+            "with LLM_PROVIDER=anthropic, CACHE_LLM and CACHE_OCR on; may wait up to 24 h"
         ),
     )
     batch.add_argument(
