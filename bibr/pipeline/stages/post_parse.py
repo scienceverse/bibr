@@ -839,6 +839,8 @@ async def _extract_metadata_and_equations(
     validation_issue_sink: list[ValidationIssue] | None = None,
     on_references_ready: Callable[[list], None] | None = None,
     memory_mode: str | None = None,
+    registry_check=None,
+    review_client=None,
 ):
     """Phase 1: metadata + equation extraction in parallel.
 
@@ -891,6 +893,16 @@ async def _extract_metadata_and_equations(
             memory_mode=memory_mode,
         )
     else:
+        # The front-matter rules' inputs reach the extractor only when set, so
+        # extractor doubles that do not take them see the unchanged call.
+        front_matter_kwargs = {
+            name: value
+            for name, value in (
+                ("registry_check", registry_check),
+                ("review_client", review_client),
+            )
+            if value is not None
+        }
         extractor = MetadataExtractor(
             contents,
             file_hash=file_hash,
@@ -901,6 +913,7 @@ async def _extract_metadata_and_equations(
             classifier_resources=classifier_resources,
             front_matter_resolution=front_matter_resolution,
             memory_mode=memory_mode,
+            **front_matter_kwargs,
         )
         # Pass the listener only when one is set so extractor doubles that take no
         # kwargs (and every non-prefetching path) see the unchanged call.
@@ -1420,10 +1433,20 @@ async def post_parse(
     expected_identity: ExpectedIdentity | None = None,
     enrichment_prefetch: bool = False,
     memory_mode: str | None = None,
+    registry_lookup: bool = False,
 ):
     """Post-parse pipeline: classification, extraction, linking.
 
     Shared between LitServe and local pipelines.
+
+    When ``registry_lookup`` is set (the run looks the paper's DOI up:
+    ``CROSSREF_IDENTITY`` or ``CROSSREF_ENRICH``) and a front-matter rule
+    reads the registry record (``FRONT_MATTER_REGISTRY_TITLE``,
+    ``LLM_REVIEW_TRIGGER``), the lookup of the DOI the parsed text names
+    starts right after the sections are settled, under the core metadata
+    call (:mod:`bibr.pipeline.registry_check`). Its record lands in
+    ``metadata.match`` and its handle rides the ``Paper`` as
+    ``paper.registry_check``.
 
     When ``enrichment_prefetch`` is set (the run will enrich references), the
     enrich stage's up-front network work starts as a task the moment the
@@ -1450,6 +1473,7 @@ async def post_parse(
     )
     from bibr.extract.ref_extractor import _resolve_ref_strategies
     from bibr.paper import doc_info_candidates
+    from bibr.pipeline.registry_check import registry_check_wanted, start_registry_check
 
     # Single LLMClient for the entire post-parse pipeline — shared across
     # section classification, implicit section detection, and metadata extraction
@@ -1488,6 +1512,7 @@ async def post_parse(
             if prefetch_handle is None:
                 prefetch_handle = start_enrichment_prefetch(references, settings=effective_settings)
 
+    registry_check = None
     extraction_completed = False
     # The client is shared across concurrently-processed files; the contextvar
     # scopes usage attribution to this file's task tree (no snapshot diffing).
@@ -1520,6 +1545,17 @@ async def post_parse(
                 file_hash,
                 settings=effective_settings,
             )
+            # The paper's own registry record, looked up under the core
+            # metadata call for the front-matter rules that read it.
+            if (
+                registry_lookup
+                and not no_llm
+                and contents.preparsed_metadata is None
+                and registry_check_wanted(effective_settings)
+            ):
+                registry_check = start_registry_check(
+                    contents, settings=effective_settings, expected_identity=expected_identity
+                )
 
             # --- Metadata + Equations in parallel ---
             paper_metadata = await _extract_metadata_and_equations(
@@ -1536,7 +1572,12 @@ async def post_parse(
                 validation_issue_sink=metadata_issues,
                 on_references_ready=on_references_ready,
                 memory_mode=memory_mode,
+                registry_check=registry_check,
             )
+            if registry_check is not None:
+                # Usually done already: the lookup ran under the core call.
+                await registry_check.settle(paper_metadata.published)
+                paper_metadata.match.update(registry_check.matches)
             metadata_ownership_scoped = bool(
                 contents.preparsed_metadata is None
                 and contents.front_matter_resolution is not None
@@ -1693,6 +1734,8 @@ async def post_parse(
             # cancel rather than let it run to completion on its own.
             if not extraction_completed and prefetch_handle is not None:
                 prefetch_handle.cancel()
+            if not extraction_completed and registry_check is not None:
+                registry_check.cancel()
             # Capture-and-evict in the finally so the bucket is removed even
             # when a phase raises — shared (serve/local) clients are never
             # closed per file, so a leaked bucket would accumulate forever.
@@ -1788,6 +1831,7 @@ async def post_parse(
     )
     paper.field_decisions = field_decisions_of(paper_metadata)
     paper.enrichment_prefetch = prefetch_handle
+    paper.registry_check = registry_check
     paper.validation_issues.extend(front_matter_issues)
     paper.validation_issues.extend(metadata_issues)
     paper.llm_usage_labels = file_usage_labels
@@ -1852,6 +1896,9 @@ class PostParseStage:
         # run will actually enrich (post_parse itself skips it for refs=off /
         # no_llm / no references).
         enrichment_prefetch = bool(ctx.config.enrichment_enabled(ctx.settings))
+        # Whether the run looks the paper's own DOI up (identity or full
+        # enrichment): the front-matter rules may then read that record early.
+        registry_lookup = ctx.config.enrichment_mode(ctx.settings) in ("full", "identity")
 
         async def _gated(fs):
             async with sem:
@@ -1874,6 +1921,7 @@ class PostParseStage:
                     expected_identity=fs.expected_identity,
                     enrichment_prefetch=enrichment_prefetch,
                     memory_mode=ctx.config.memory_mode,
+                    registry_lookup=registry_lookup,
                 )
                 fs.stage_times[self.name] = time.monotonic() - fs_t0
                 return result

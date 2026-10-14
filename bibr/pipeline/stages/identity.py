@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from bibr.extract.doi_identity import collect_doi_candidates, doi_sha256, select_doi_candidates
 from bibr.extract.pdf_doi_evidence import is_pdf, read_pdf_doi_evidence
+from bibr.pipeline.registry_check import reconcile_with_final_doi
 from bibr.utils.text import normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
@@ -162,15 +163,21 @@ class IdentityValidationStage:
         paper.expected_identity = expected
         paper.doi_selection = selection
 
+        doi_changed = None
         if paper.metadata is not None:
             if selection.selected is not None:
                 paper.metadata.doi = selection.selected.normalized
             else:
                 # A scalar DOI without selected source evidence contradicts the receipt.
                 paper.metadata.doi = ""
+            # The front-matter rules may have read the record of a DOI taken
+            # from the parsed text alone; undo that when this one differs.
+            doi_changed = reconcile_with_final_doi(paper)
             _clear_own_doi_from_references(paper)
 
         issues = list(selection.issues)
+        if doi_changed is not None:
+            issues.append(doi_changed)
         if expected is not None:
             source_matches = expected.source_sha256 is None or (
                 fs.content_sha256 is not None

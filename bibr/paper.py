@@ -350,6 +350,11 @@ class Paper:
     # ``CrossrefEnricher``, cancelled by every path that skips enrichment.
     # Never serialized — the export layer does not read it.
     enrichment_prefetch: Any = field(default=None, repr=False, compare=False)
+    # Runtime-only: the early lookup of the paper's own DOI that the front-matter
+    # rules read (``bibr.pipeline.registry_check.RegistryCheck``). The identity
+    # stage detaches it when the final DOI differs; the enrichment skips its
+    # own lookup of a DOI it already answered. Never serialized.
+    registry_check: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         internal_issues = (

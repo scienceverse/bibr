@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from bibr.config import GlobalSettings
     from bibr.extract.front_matter import FrontMatterCandidate, FrontMatterResolution
     from bibr.pipeline.classifier_resources import ClassifierResources
+    from bibr.pipeline.registry_check import RegistryCheck
 
 logger = logging.getLogger(__name__)
 
@@ -2101,11 +2102,19 @@ class CoreMetadataExtractor:
         settings: GlobalSettings | None = None,
         classifier_resources: ClassifierResources | None = None,
         front_matter_resolution: FrontMatterResolution | None = None,
+        *,
+        registry_check: RegistryCheck | None = None,
+        review_client=None,
     ):
         self.contents = contents
         self.sentences_df = contents.sentences_df
         self.file_hash = file_hash
         self.llm_client = llm_client
+        # The early lookup of the paper's own DOI, awaited after the core call
+        # (``bibr.pipeline.registry_check``), and the second model that
+        # re-asks a call disagreeing with its record (``LLM_REVIEW_*``).
+        self._registry_check = registry_check
+        self._review_client = review_client
         self._settings = settings if settings is not None else snapshot_settings()
         self._classifier_resources = classifier_resources
         self._explicit_classifier_runtime = settings is not None or classifier_resources is not None
@@ -2233,6 +2242,11 @@ class CoreMetadataExtractor:
                 authors_text=authors_text,
                 classification_text=classification_text,
             )
+            if self._registry_check is not None:
+                # The lookup ran under the core call; this rarely waits.
+                await self._registry_check.settle(
+                    llm_metadata.published if llm_metadata is not None else None
+                )
             if llm_metadata is None:
                 # ``_call_core_llm`` degraded (see its broad-except branch). The
                 # empty record below is the correct fail-closed value, but on its

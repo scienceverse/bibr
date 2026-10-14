@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     from bibr.config import GlobalSettings
     from bibr.extract.front_matter import FrontMatterResolution
     from bibr.pipeline.classifier_resources import ClassifierResources
+    from bibr.pipeline.registry_check import RegistryCheck
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +194,9 @@ class MetadataExtractor:
         classifier_resources: ClassifierResources | None = None,
         front_matter_resolution: FrontMatterResolution | None = None,
         memory_mode: str | None = None,
+        *,
+        registry_check: RegistryCheck | None = None,
+        review_client: LlmClient | None = None,
     ):
         """
         Initialize the metadata extractor.
@@ -209,6 +213,11 @@ class MetadataExtractor:
             memory_mode: Per-run memory mode (``None`` = resolve from
                 Settings). Reaches the NER reference parser so aggressive
                 mode loads it on CPU.
+            registry_check: The early lookup of the paper's own DOI
+                (:mod:`bibr.pipeline.registry_check`), for the front-matter
+                review.
+            review_client: The second model's client (``LLM_REVIEW_*``) that
+                re-asks a title or author call disagreeing with the record.
         """
         from bibr.config import snapshot_settings
 
@@ -236,6 +245,10 @@ class MetadataExtractor:
             core_kwargs["settings"] = self._settings
         if classifier_resources is not None:
             core_kwargs["classifier_resources"] = classifier_resources
+        if registry_check is not None:
+            core_kwargs["registry_check"] = registry_check
+        if review_client is not None:
+            core_kwargs["review_client"] = review_client
         self.core = CoreMetadataExtractor(
             contents,
             file_hash=file_hash,
