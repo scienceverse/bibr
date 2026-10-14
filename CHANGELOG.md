@@ -25,11 +25,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   abstract and keywords; authors; classification) through Anthropic's Message Batches API at
   half the token price. A first round defers those calls and spools them, the batch answers
   go into the LLM response cache, and a second round replays the deferred papers from it. The
-  run reports how many deferred calls hit the cache and stops with an error below 95 %. It
-  needs the local executor, `LLM_PROVIDER=anthropic`, `CACHE_LLM` and `CACHE_OCR`, and it may
-  wait up to 24 hours. The saving is about half a cent per paper on Haiku 4.5, so it is meant
-  for hosted runs of 100,000 papers or more. A deferred paper is recorded as `llm_deferred`,
-  which resume runs again like an interruption, and `bibr batch report` counts it as deferred.
+  run reports how many deferred calls hit the cache and stops with an error below 95 %, or
+  before the replay when the batch left more than 5 % of the requests unanswered. The exit
+  code and the `--json` report cover both rounds, and `--deadline` also bounds the wait for
+  the batch, which the next run collects. It needs the local executor,
+  `LLM_PROVIDER=anthropic`, `CACHE_LLM` and `CACHE_OCR`, and it may wait up to 24 hours. The
+  saving is about half a cent per paper on Haiku 4.5, so it is meant for hosted runs of
+  100,000 papers or more. A deferred paper is recorded as `llm_deferred`, which resume runs
+  again like an interruption, and `bibr batch report` counts it as deferred.
 
 ### Changed
 

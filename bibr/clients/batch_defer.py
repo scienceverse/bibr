@@ -276,33 +276,64 @@ def _spool(
     return True
 
 
+def _parse_row(line: bytes) -> dict | None:
+    """One spool line as a row, or ``None`` when it is not a usable row."""
+    try:
+        row = json.loads(line)
+    except ValueError:
+        return None
+    if (
+        not isinstance(row, dict)
+        or row.get("v") != SPOOL_VERSION
+        or not isinstance(row.get("key"), str)
+        or not _KEY_RE.match(row["key"])
+        or not isinstance(row.get("messages"), list)
+    ):
+        return None
+    return row
+
+
+def iter_spool(path: Path) -> Iterator[tuple[int, dict]]:
+    """``(byte offset, row)`` of each usable spool line, read one line at a time.
+
+    A corpus-scale spool holds gigabytes of prompts; a reader keeps what it
+    needs (keys and offsets, say) and loads a row again by its offset with
+    :func:`read_row`. Malformed lines are skipped.
+    """
+    path = Path(path)
+    if not path.is_file():
+        return
+    with path.open("rb") as handle:
+        offset = 0
+        for number, line in enumerate(handle, start=1):
+            start, offset = offset, offset + len(line)
+            if not line.strip():
+                continue
+            row = _parse_row(line)
+            if row is None:
+                logger.warning("Skipping malformed spool line %d of %s", number, path)
+                continue
+            yield start, row
+
+
+def read_row(handle: Any, offset: int) -> dict:
+    """The row at *offset* of a spool opened in binary mode (see :func:`iter_spool`)."""
+    handle.seek(offset)
+    row = _parse_row(handle.readline())
+    if row is None:
+        raise ValueError(f"no spool row at byte {offset}")
+    return row
+
+
 def read_spool(path: Path, *, unique: bool = True) -> list[dict]:
     """The spool's rows, by default only the first per key; malformed lines are skipped."""
     rows: dict[str, dict] = {}
     every: list[dict] = []
-    try:
-        text = Path(path).read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return []
-    for number, line in enumerate(text.splitlines(), start=1):
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except ValueError:
-            logger.warning("Skipping unreadable spool line %d of %s", number, path)
-            continue
-        if (
-            not isinstance(row, dict)
-            or row.get("v") != SPOOL_VERSION
-            or not isinstance(row.get("key"), str)
-            or not _KEY_RE.match(row["key"])
-            or not isinstance(row.get("messages"), list)
-        ):
-            logger.warning("Skipping malformed spool line %d of %s", number, path)
-            continue
-        rows.setdefault(row["key"], row)
-        every.append(row)
+    for _, row in iter_spool(path):
+        if unique:
+            rows.setdefault(row["key"], row)
+        else:
+            every.append(row)
     return list(rows.values()) if unique else every
 
 

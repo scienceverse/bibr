@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import shutil
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -91,16 +93,22 @@ class Live:
 
 
 class FakeChew:
-    """``chew_many`` that runs only the front-matter fan-out, through the real client."""
+    """``chew_many`` that runs only the front-matter fan-out, through the real client.
 
-    def __init__(self, settings, live: Live):
+    A paper named in *fail* fails on its own (before any LLM call) with that code.
+    """
+
+    def __init__(self, settings, live: Live, fail: dict[str, str] | None = None):
         self.settings = settings
         self.live = live
+        self.fail = fail or {}
 
     def __call__(self, paths, batch_size):
         client = self.live.client(self.settings)
 
         async def one(path: Path):
+            if path.stem in self.fail:
+                return ChewFailure(path, "failed on its own", error_code=self.fail[path.stem])
             data = path.read_bytes()
             file_hash = hashlib.sha256(data).hexdigest()[:16]
             text = f"Front matter of {data.decode().split()[-1]}\nJane Doe\nAbstract."
@@ -123,15 +131,27 @@ class FakeChew:
 class FakeBatches:
     """``client.messages.batches`` with server state shared across invocations."""
 
-    def __init__(self, server: dict, *, fail_one: str | None = None, interrupt_polls: int = 0):
+    def __init__(
+        self,
+        server: dict,
+        *,
+        fail_one: str | None = None,
+        fail_all: str | None = None,
+        interrupt_polls: int = 0,
+    ):
         self.server = server
         self.fail_one = fail_one  # error the first request for this tool
+        self.fail_all = fail_all  # error every request with this error type
         self.errored: set[str] = set()
         self.interrupt_polls = interrupt_polls
         self.created: list[list[dict]] = []
+        self.log: list[str] = []
 
     def create(self, requests):
+        self.log.append("create")
         self.created.append(list(requests))
+        if self.fail_all:
+            self.errored.update(r["custom_id"] for r in requests)
         if self.fail_one:
             self.errored.add(
                 next(
@@ -145,6 +165,7 @@ class FakeBatches:
         return SimpleNamespace(id=batch_id)
 
     def retrieve(self, batch_id):
+        self.log.append("poll")
         if self.interrupt_polls:
             self.interrupt_polls -= 1
             raise KeyboardInterrupt
@@ -156,7 +177,8 @@ class FakeBatches:
         for request in self.server[batch_id]:
             custom_id = request["custom_id"]
             if custom_id in self.errored:
-                error = SimpleNamespace(error=SimpleNamespace(type="overloaded_error", message="x"))
+                kind = self.fail_all or "overloaded_error"
+                error = SimpleNamespace(error=SimpleNamespace(type=kind, message="x"))
                 result = SimpleNamespace(type="errored", error=error)
             else:
                 name = request["params"]["tools"][0]["name"]
@@ -180,8 +202,10 @@ def _options(corpus: Path, out: Path, **overrides) -> BatchOptions:
     return BatchOptions(**base)
 
 
-def _install(monkeypatch, settings, live: Live) -> None:
-    monkeypatch.setattr("bibr.batch.runner.open_chew_many", lambda local: FakeChew(settings, live))
+def _install(monkeypatch, settings, live: Live, fail: dict[str, str] | None = None) -> None:
+    monkeypatch.setattr(
+        "bibr.batch.runner.open_chew_many", lambda local: FakeChew(settings, live, fail)
+    )
 
 
 def _latest(out: Path) -> dict[str, dict]:
@@ -300,7 +324,7 @@ def test_an_interrupted_wait_resumes_the_same_batch(tmp_path, corpus, monkeypatc
         == 130
     )
     assert len(first.created) == 1
-    assert (out / "llm_batch" / "part-0001.state.json").is_file()
+    assert len(list((out / "llm_batch").glob("part-0001-*.state.json"))) == 1
 
     second = FakeBatches(server)
     code = run_llm_batch(
@@ -430,3 +454,269 @@ def test_cli_flag_refuses_before_any_work(tmp_path, monkeypatch, capsys):
 
     with pytest.raises(SystemExit):
         parser.parse_args(["batch", str(pdf), "--out", str(out), "--llm-batch", "references"])
+
+
+def test_a_round1_failure_fails_the_run_after_a_clean_replay(tmp_path, corpus, monkeypatch):
+    settings = _settings(tmp_path)
+    live = Live()
+    _install(monkeypatch, settings, live, fail={"gamma": "ocr_failed"})
+    out = tmp_path / "out"
+
+    code = run_llm_batch(
+        _options(corpus, out), settings=settings, batch_client=_batch_client(FakeBatches({}))
+    )
+
+    latest = _latest(out)
+    assert latest["alpha"]["status"] == latest["beta"]["status"] == "ok"
+    assert latest["gamma"]["error_code"] == "ocr_failed"  # not deferred, so not replayed
+    assert code == 1  # the replay's own exit code (0) must not hide gamma
+
+
+def test_json_report_when_nothing_is_deferred(tmp_path, corpus, monkeypatch, capsys):
+    settings = _settings(tmp_path)
+    _install(monkeypatch, settings, Live())
+    batches = _batch_client(FakeBatches({}))
+    warm = run_llm_batch(
+        _options(corpus, tmp_path / "warm"), settings=settings, batch_client=batches
+    )
+    assert warm == 0
+    capsys.readouterr()
+
+    code = run_llm_batch(
+        _options(corpus, tmp_path / "out", report_json=True),
+        settings=settings,
+        batch_client=batches,
+    )
+
+    assert code == 0
+    report = json.loads(capsys.readouterr().out)  # round 1 was the whole run
+    assert report["papers"]["ok"] == report["papers"]["total"] == 3
+    assert len(report["run_ids"]) == 1
+    assert report["llm_batch"]["deferred_papers"] == 0
+
+
+def test_json_report_covers_both_rounds(tmp_path, corpus, monkeypatch, capsys):
+    settings = _settings(tmp_path)
+    _install(monkeypatch, settings, Live())
+    alpha_only = tmp_path / "alpha-only"
+    alpha_only.mkdir()
+    shutil.copy(corpus / "alpha.pdf", alpha_only / "alpha.pdf")
+    batches = _batch_client(FakeBatches({}))
+    assert (
+        run_llm_batch(
+            _options(alpha_only, tmp_path / "warm"), settings=settings, batch_client=batches
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    code = run_llm_batch(
+        _options(corpus, tmp_path / "out", report_json=True),
+        settings=settings,
+        batch_client=batches,
+    )
+
+    assert code == 0
+    report = json.loads(capsys.readouterr().out)
+    # alpha finished in round 1 (its answers were cached), beta and gamma in round 2.
+    assert report["papers"] == {"total": 3, "ok": 3, "failed": 0, "deferred": 0, "attempts": 5}
+    assert len(report["run_ids"]) == 2
+    assert report["llm_batch"]["round2"]["hit_rate"] == 1.0
+
+
+def test_an_answer_gone_from_the_cache_is_batched_again(tmp_path, corpus, monkeypatch):
+    settings = _settings(tmp_path)
+    live = Live()
+    _install(monkeypatch, settings, live)
+    server: dict = {}
+    out = tmp_path / "out"
+    assert (
+        run_llm_batch(
+            _options(corpus, out),
+            settings=settings,
+            batch_client=_batch_client(FakeBatches(server)),
+        )
+        == 0
+    )
+    shutil.rmtree(tmp_path / "llm-cache")
+    (corpus / "alpha-copy.pdf").write_bytes((corpus / "alpha.pdf").read_bytes())
+
+    again = FakeBatches(server)
+    code = run_llm_batch(
+        _options(corpus, out), settings=settings, batch_client=_batch_client(again)
+    )
+
+    assert code == 0
+    (submitted,) = again.created  # alpha's three requests, answered once but no longer cached
+    assert len(submitted) == 3
+    assert live.calls == []
+    summary = json.loads((out / "llm_batch" / "summary.json").read_text())
+    assert summary["fill"]["batched_again"] == 3
+    assert summary["round2"]["hit_rate"] == 1.0
+
+
+def test_the_deadline_bounds_the_batch_wait(tmp_path, corpus, monkeypatch, capsys):
+    settings = _settings(tmp_path)
+    live = Live()
+    _install(monkeypatch, settings, live)
+    seen = {}
+
+    def fill(work, settings, **kwargs):
+        seen["timeout_s"] = kwargs["timeout_s"]
+        raise TimeoutError("batch msgbatch_1 did not end in time")
+
+    monkeypatch.setattr(llm_batch, "fill_cache", fill)
+    out = tmp_path / "out"
+
+    code = run_llm_batch(
+        _options(corpus, out, deadline=time.time() + 3600),
+        settings=settings,
+        batch_client=_batch_client(FakeBatches({})),
+    )
+
+    assert 3000 < seen["timeout_s"] <= 3600  # not the 25 h batch wait
+    assert code == 0  # a resumable stop, as a deadline is for `bibr batch`
+    assert "deadline reached" in capsys.readouterr().err
+    assert {e["error_code"] for e in _latest(out).values()} == {LLM_DEFERRED}
+    assert live.calls == []
+
+
+class EndlessBatches(FakeBatches):
+    """A batch that is still processing whenever it is polled."""
+
+    def retrieve(self, batch_id):
+        self.log.append("poll")
+        n = len(self.server[batch_id])
+        counts = SimpleNamespace(processing=n, succeeded=0, errored=0, canceled=0, expired=0)
+        return SimpleNamespace(processing_status="in_progress", request_counts=counts)
+
+
+def test_a_timed_out_fill_collects_the_same_batch_later(tmp_path, corpus, monkeypatch):
+    settings = _settings(tmp_path, batch_poll_interval_s=60)
+    _install(monkeypatch, settings, Live())
+    out = tmp_path / "out"
+    from bibr.clients.batch_defer import collecting
+
+    with collecting(out / "llm_batch" / "spool.jsonl") as collect:
+        from bibr.batch.runner import run_batch
+
+        run_batch(_options(corpus, out))
+    assert collect.spooled == 9
+    server: dict = {}
+
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        llm_batch.fill_cache(
+            out / "llm_batch",
+            settings,
+            batch_client=_batch_client(EndlessBatches(server)),
+            timeout_s=0.05,
+        )
+    assert time.monotonic() - started < 30  # the 60 s poll interval is cut to the time box
+
+    later = FakeBatches(server)
+    fill = llm_batch.fill_cache(out / "llm_batch", settings, batch_client=_batch_client(later))
+    assert later.created == []
+    assert fill.filled == 9
+
+
+def test_every_batch_is_submitted_before_the_wait(tmp_path, corpus, monkeypatch):
+    import bibr.clients.batch as batch
+
+    monkeypatch.setattr(batch, "MAX_BATCH_REQUESTS", 4)
+    settings = _settings(tmp_path)
+    live = Live()
+    _install(monkeypatch, settings, live)
+    batches = FakeBatches({})
+
+    code = run_llm_batch(
+        _options(corpus, tmp_path / "out"), settings=settings, batch_client=_batch_client(batches)
+    )
+
+    assert code == 0
+    assert [len(c) for c in batches.created] == [4, 4, 1]
+    assert batches.log[:3] == ["create"] * 3  # side by side at Anthropic, not one after another
+    assert live.calls == []
+
+
+def test_a_batch_that_answers_too_little_stops_before_the_replay(
+    tmp_path, corpus, monkeypatch, capsys
+):
+    monkeypatch.setattr(llm_batch, "MIN_UNANSWERED_TO_STOP", 2)
+    settings = _settings(tmp_path)
+    live = Live()
+    _install(monkeypatch, settings, live)
+    server: dict = {}
+    out = tmp_path / "out"
+
+    code = run_llm_batch(
+        _options(corpus, out),
+        settings=settings,
+        batch_client=_batch_client(FakeBatches(server, fail_all="invalid_request_error")),
+    )
+
+    assert code == 1
+    assert live.calls == []  # nothing paid at the full price
+    assert {e["error_code"] for e in _latest(out).values()} == {LLM_DEFERRED}
+    assert "unanswered" in capsys.readouterr().err
+    summary = json.loads((out / "llm_batch" / "summary.json").read_text())
+    assert summary["stopped"] == "unanswered"
+    assert summary["fill"]["errors"] == {"invalid_request_error": 9}
+
+    # The way out the error names: start the plan over and batch them again.
+    (out / "llm_batch" / "plan.json").unlink()
+    again = FakeBatches(server)
+    code = run_llm_batch(
+        _options(corpus, out), settings=settings, batch_client=_batch_client(again)
+    )
+    assert code == 0
+    assert [len(c) for c in again.created] == [9]
+    assert live.calls == []
+
+
+def test_refuses_an_instructor_without_the_v2_request_builder(tmp_path, corpus, monkeypatch):
+    import bibr.clients.batch as batch
+
+    def missing():
+        raise ModuleNotFoundError("No module named 'instructor.v2'")
+
+    monkeypatch.setattr(batch, "_instructor_tools", missing)
+
+    problem = llm_batch_blocker(_options(corpus, tmp_path / "out"), _settings(tmp_path))
+    assert "upgrade instructor" in problem
+
+
+def test_the_replay_runs_only_what_this_round_deferred(tmp_path, corpus, monkeypatch):
+    settings = _settings(tmp_path)
+    live = Live()
+    _install(monkeypatch, settings, live)
+    server: dict = {}
+    out = tmp_path / "out"
+    first = FakeBatches(server, interrupt_polls=1)
+    assert (
+        run_llm_batch(_options(corpus, out), settings=settings, batch_client=_batch_client(first))
+        == 130
+    )
+
+    # --limit 1: round 1 reaches one of the three waiting papers.
+    second = FakeBatches(server)
+    code = run_llm_batch(
+        _options(corpus, out, limit=1), settings=settings, batch_client=_batch_client(second)
+    )
+
+    assert code == 0  # the two papers not reached still wait; that is no failure
+    assert second.created == []  # the first run's batch is collected, all 9 answers
+    latest = _latest(out)
+    assert sorted(e["status"] for e in latest.values()) == ["failed", "failed", "ok"]
+    summary = json.loads((out / "llm_batch" / "summary.json").read_text())
+    assert summary["deferred_papers"] == 1
+    assert summary["fill"]["filled"] == 9
+
+    third = FakeBatches(server)
+    assert (
+        run_llm_batch(_options(corpus, out), settings=settings, batch_client=_batch_client(third))
+        == 0
+    )
+    assert third.created == []
+    assert {e["status"] for e in _latest(out).values()} == {"ok"}
+    assert live.calls == []

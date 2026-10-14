@@ -19,8 +19,10 @@ from bibr.clients.batch import AnthropicBatchAdapter
 from bibr.clients.batch_defer import (
     FRONT_MATTER_LABELS,
     collecting,
+    iter_spool,
     load_response_model,
     observing,
+    read_row,
     read_spool,
     request_for,
 )
@@ -282,6 +284,26 @@ def test_read_spool_keeps_the_first_row_per_key_and_skips_junk(tmp_path):
     )
     assert read_spool(spool) == [good]
     assert read_spool(tmp_path / "missing.jsonl") == []
+
+
+def test_spool_rows_stream_and_load_again_by_offset(tmp_path):
+    """The fill keeps offsets, not rows: a corpus-scale spool need not fit in memory."""
+    spool = tmp_path / "spool.jsonl"
+    rows = [
+        {"v": 1, "key": f"{i:032x}", "messages": [{"role": "user", "content": "Müller ✓"}]}
+        for i in range(3)
+    ]
+    lines = [json.dumps(rows[0], ensure_ascii=False), "{torn", json.dumps(rows[1]), ""]
+    spool.write_text("\n".join([*lines, json.dumps(rows[2], ensure_ascii=False)]) + "\n")
+
+    pairs = list(iter_spool(spool))
+
+    assert [row for _, row in pairs] == rows
+    with spool.open("rb") as handle:
+        assert [read_row(handle, offset) for offset, _ in pairs] == rows
+        with pytest.raises(ValueError):
+            read_row(handle, pairs[0][0] + 1)
+    assert list(iter_spool(tmp_path / "missing.jsonl")) == []
 
 
 @pytest.mark.parametrize(

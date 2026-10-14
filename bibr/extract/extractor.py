@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 
 from bibr.clients.llm import LLMClient
 from bibr.clients.llm_protocol import LlmClient
-from bibr.exceptions import BibrError, ProcessingError
+from bibr.exceptions import BibrError, LlmDeferred, ProcessingError
 from bibr.extract.core_metadata import (  # noqa: F401 — re-exported for back-compat
     _CORRECTION_NOTICE_TITLE_RE,
     CoreMetadataExtractor,
@@ -148,6 +148,13 @@ async def _await_core_and_reference_tasks(
 
         try:
             await core_task
+        except LlmDeferred:
+            # ``bibr batch --llm-batch`` deferred the front matter, so the paper
+            # runs again after the Message Batch. The reference calls already
+            # in flight are paid for: let them finish so their answers reach
+            # the LLM response cache, rather than paying for them again.
+            await asyncio.gather(ref_task, return_exceptions=True)
+            raise
         except BaseException:
             await _cancel_and_await(ref_task)
             raise

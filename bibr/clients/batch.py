@@ -16,10 +16,10 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from bibr.clients.prompts import PROMPTS, prompt_text
 
@@ -32,6 +32,26 @@ _BATCH_BYTE_BUDGET = MAX_BATCH_BYTES - 4 * 1024 * 1024
 # What Instructor adds to the system prompt itself whenever it leaves the tool
 # choice to the model (extended thinking), so the answer is the tool call alone.
 _TOOL_ONLY_INSTRUCTION = "Return only the tool call and no additional text."
+
+_T = TypeVar("_T")
+
+
+def partition(sized: Iterable[tuple[_T, int]]) -> Iterator[list[_T]]:
+    """Cut ``(item, request bytes)`` pairs, in order, into batches within Anthropic's limits.
+
+    Lazy, so a caller can measure one request at a time and keep only the
+    items (cache keys, say) rather than every built request.
+    """
+    current: list[_T] = []
+    size = 0
+    for item, n in sized:
+        if current and (len(current) >= MAX_BATCH_REQUESTS or size + n > _BATCH_BYTE_BUDGET):
+            yield current
+            current, size = [], 0
+        current.append(item)
+        size += n
+    if current:
+        yield current
 
 
 @dataclass(frozen=True)
@@ -121,6 +141,29 @@ def _instructor_tools():
     return Mode.TOOLS, Provider.ANTHROPIC, handle_response_model, process_response
 
 
+def transport_problem() -> str | None:
+    """Why this environment cannot build batch requests, or ``None``.
+
+    The requests come from Instructor's v2 request builder, which older
+    Instructor releases do not ship; checked up front so a corpus run can
+    refuse before any paper is processed.
+    """
+    try:
+        _instructor_tools()
+    except ImportError as exc:
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            installed = f"instructor {version('instructor')}"
+        except PackageNotFoundError:
+            installed = "no instructor"
+        return (
+            "Message Batches requests are built with Instructor's v2 request builder, "
+            f"which {installed} does not provide ({exc}): upgrade instructor."
+        )
+    return None
+
+
 class AnthropicBatchAdapter:
     """Anthropic Message Batches adapter (the live path's tool requests).
 
@@ -206,21 +249,13 @@ class AnthropicBatchAdapter:
     def _build_request(self, req: BatchRequest) -> dict:
         return {"custom_id": req.custom_id, "params": self.build_params(req)}
 
+    def request_bytes(self, req: BatchRequest) -> int:
+        """The size *req* adds to a batch's request body."""
+        return len(json.dumps(self._build_request(req)).encode("utf-8")) + 1
+
     def split(self, requests: Sequence[BatchRequest]) -> list[list[BatchRequest]]:
         """*requests* in order, cut into batches within Anthropic's per-batch limits."""
-        parts: list[list[BatchRequest]] = []
-        current: list[BatchRequest] = []
-        size = 0
-        for req in requests:
-            n = len(json.dumps(self._build_request(req)).encode("utf-8")) + 1
-            if current and (len(current) >= MAX_BATCH_REQUESTS or size + n > _BATCH_BYTE_BUDGET):
-                parts.append(current)
-                current, size = [], 0
-            current.append(req)
-            size += n
-        if current:
-            parts.append(current)
-        return parts
+        return list(partition((req, self.request_bytes(req)) for req in requests))
 
     @property
     def client(self):
@@ -322,28 +357,36 @@ class AnthropicBatchAdapter:
         }
         return BatchStatus(batch_id, status, counts, ended=status == "ended")
 
-    def run(self, requests, *, state_path=None, poll_interval=60, timeout_s=86400, progress=None):
+    def ensure_submitted(self, requests, *, state_path=None) -> str:
+        """The batch of *requests*: the one *state_path* records, else a new one.
+
+        A new batch's id and manifest go to *state_path*, so a later call (or
+        :meth:`run`) collects it instead of paying for it again.
+        """
         state_path = Path(state_path) if state_path else None
-        batch_id = None
         if state_path and state_path.exists():
             state = json.loads(state_path.read_text())
             batch_id = state.get("batch_id")
             if batch_id is not None:
                 self._verify_manifest(state, requests, state_path)
-        if batch_id is None:
-            batch_id = self.submit(requests)
-            if state_path:
-                manifest = {r.custom_id: _manifest_digest(r) for r in requests}
-                state_path.write_text(
-                    json.dumps(
-                        {
-                            "provider": "anthropic",
-                            "model": self.model,
-                            "batch_id": batch_id,
-                            "manifest": manifest,
-                        }
-                    )
+                return batch_id
+        batch_id = self.submit(requests)
+        if state_path:
+            manifest = {r.custom_id: _manifest_digest(r) for r in requests}
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "provider": "anthropic",
+                        "model": self.model,
+                        "batch_id": batch_id,
+                        "manifest": manifest,
+                    }
                 )
+            )
+        return batch_id
+
+    def run(self, requests, *, state_path=None, poll_interval=60, timeout_s=86400, progress=None):
+        batch_id = self.ensure_submitted(requests, state_path=state_path)
         deadline = time.monotonic() + timeout_s
         while True:
             status = self.poll(batch_id)
@@ -354,8 +397,10 @@ class AnthropicBatchAdapter:
                 )
             if status.ended:
                 break
-            if time.monotonic() > deadline:
+            remaining = deadline - time.monotonic()
+            if remaining < 0:
                 raise TimeoutError(f"batch {batch_id} did not end within {timeout_s}s")
             if poll_interval:
-                time.sleep(poll_interval)
+                # No longer than the time left, so a short time box ends on time.
+                time.sleep(min(poll_interval, remaining))
         return self.retrieve(batch_id, requests)

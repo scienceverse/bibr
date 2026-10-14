@@ -1040,6 +1040,31 @@ async def test_completed_typed_reference_failure_wins_over_core_failure():
     assert core_task.done()
 
 
+async def test_deferred_core_lets_the_reference_calls_finish():
+    """Under ``bibr batch --llm-batch`` the reference calls in flight are paid for:
+    they finish (and reach the LLM cache) instead of being cancelled."""
+    from bibr.exceptions import LlmDeferred
+
+    finished = []
+
+    async def references():
+        await asyncio.sleep(0.01)
+        finished.append(True)
+        return []
+
+    async def defer_core():
+        raise LlmDeferred("extract_title_keywords deferred to an Anthropic Message Batch")
+
+    core_task = asyncio.create_task(defer_core())
+    ref_task = asyncio.create_task(references())
+
+    with pytest.raises(LlmDeferred):
+        await _await_core_and_reference_tasks(core_task, ref_task)
+
+    assert finished == [True]
+    assert not ref_task.cancelled()
+
+
 class TestCollectReferenceRowsLayoutFallback:
     """Tests for layout-hint fallback in _collect_reference_rows."""
 

@@ -682,8 +682,13 @@ def run_batch(
     console: Any = None,
     transport: Any = None,
     stop: Any = None,
+    on_run_id: Callable[[str], None] | None = None,
 ) -> int:
-    """Execute one ``bibr batch`` run end to end; returns the process exit code."""
+    """Execute one ``bibr batch`` run end to end; returns the process exit code.
+
+    *on_run_id* sees the run's id once the run starts (after the plan, the
+    preflight and the lock); a run that never starts does not call it.
+    """
     from bibr.local.cli import ui
 
     if console is None:
@@ -741,7 +746,15 @@ def run_batch(
             plan = build_plan(options, ledger, discovery=discovery)
             if preflight_fails(plan):
                 return EXIT_FAILURES
-        return _execute(options, plan, ledger, console=console, transport=transport, stop=stop)
+        return _execute(
+            options,
+            plan,
+            ledger,
+            console=console,
+            transport=transport,
+            stop=stop,
+            on_run_id=on_run_id,
+        )
 
 
 def _file_state(path: Path) -> tuple[int, int] | None:
@@ -760,12 +773,15 @@ def _execute(
     console: Any,
     transport: Any,
     stop: Any,
+    on_run_id: Callable[[str], None] | None = None,
 ) -> int:
     """The run itself, under ``<out>/.lock``: execute, ledger, report."""
     from bibr.local.artifacts import atomic_write_json
     from bibr.local.cli import ui
 
     run_id = uuid.uuid4().hex[:12]
+    if on_run_id is not None:
+        on_run_id(run_id)
     started_at = utc_now_iso()
     context_holder: dict[str, LedgerContext] = {
         "context": LedgerContext(

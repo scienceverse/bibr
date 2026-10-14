@@ -206,21 +206,31 @@ One command runs three phases:
    [LLM response cache](configuration.md) cannot answer is not sent. Its
    request is written to `<out>/llm_batch/spool.jsonl` and the paper stops
    with `error_code` `llm_deferred` (printed as deferred, not as a failure).
-2. **The batch.** The spooled requests, each distinct request once and
-   without the ones the cache already answers, go to Anthropic in batches of
-   at most 100,000 requests or 256 MB. The run waits, checking every
-   `LLM_BATCH_POLL_INTERVAL_S` seconds (default 60). Every answer that
-   validates goes into the LLM response cache, stored exactly as the live
-   call would have stored it. A request the batch did not answer (errored,
-   expired, or an answer that fails validation) stores nothing, and round 2
-   makes that call live.
-3. **Round 2** runs the deferred papers again. Their front-matter calls now
-   find the batch's answers in the cache. The run prints the share of
-   deferred calls that did: below 95 % it stops with an error and exit code 1,
-   because the replay's requests no longer match the ones the batch answered
-   (settings, model or prompts changed in between) and every miss would be
-   paid for again at the full price. Papers it did not reach keep
-   `llm_deferred`.
+2. **The batch.** The requests round 1 spooled, each distinct request once
+   and without the ones the cache already answers, go to Anthropic in batches
+   of at most 100,000 requests or 256 MB, all submitted before the wait. The
+   run waits, checking every `LLM_BATCH_POLL_INTERVAL_S` seconds (default
+   60). Every answer that validates goes into the LLM response cache, stored
+   exactly as the live call would have stored it. A request the batch did not
+   answer (errored, expired, or an answer that fails validation) stores
+   nothing, and round 2 makes that call live. If more than 5 % of the
+   requests (and at least 20) have no answer, the run stops here with exit
+   code 1 instead, so a batch that fails across the board is not paid for
+   again at the full price: run without `--llm-batch` to make those calls
+   live, or fix the cause, delete `<out>/llm_batch/plan.json` and run the
+   same command to batch them again.
+3. **Round 2** runs the papers round 1 deferred again. Their front-matter
+   calls now find the batch's answers in the cache. The run prints the share
+   of deferred calls that did: below 95 % it stops with an error and exit
+   code 1, because the replay's requests no longer match the ones the batch
+   answered (settings, model or prompts changed in between, or another
+   `CACHE_LLM_DIR`) and every miss would be paid for again at the full price.
+   Papers it did not reach keep `llm_deferred`.
+
+The exit code covers both rounds, as for any `bibr batch` run: 1 when a paper
+failed in either round, whether or not it was deferred. With `--json`, one
+report over both rounds goes to stdout, with the run ids of both rounds under
+`run_ids` and the numbers of `summary.json` (below) under `llm_batch`.
 
 A batch request is the live call: the same model (`LLM_MODEL`), temperature
 or thinking budget, output cap, prompt-cache marks and tool schema, and its
@@ -238,10 +248,14 @@ the deferred calls are found by their usage labels). It also refuses
 
 To resume, re-run the same command. After a Ctrl-C during the wait the batch
 keeps running at Anthropic: `<out>/llm_batch/plan.json` and one
-`part-NNNN.state.json` per batch let the next run collect it rather than
-submit it again (Anthropic keeps the results for 29 days). A request that was
-in a batch once is not sent in another one. A run *without* `--llm-batch`
-processes papers still marked `llm_deferred` with live calls.
+`part-*.state.json` per batch let the next run collect it rather than submit
+it again (Anthropic keeps the results for 29 days). `--deadline` also bounds
+the wait: at the deadline the run stops as any `bibr batch` run does, and
+the batch keeps running for the next run to collect. A request that a batch
+answered is sent again only when its answer is no longer in the LLM cache (a
+cleared cache, another `CACHE_LLM_DIR`); one that a batch left unanswered
+goes live. A run *without* `--llm-batch` processes papers still marked
+`llm_deferred` with live calls.
 
 `<out>/llm_batch/summary.json` holds the latest run's numbers: deferred
 papers, spooled requests, requests sent, answers cached, unanswered requests
@@ -250,8 +264,14 @@ by error type, and the replay's hits, misses and hit rate.
 **The saving is small.** On Haiku 4.5 the front matter of a paper costs about
 a cent at the live price, and the batch halves that. The other LLM calls
 (references, sections, …) stay live, and the deferred papers go through the
-pipeline twice; the OCR cache keeps the second pass short. It pays off for
-hosted runs of 100,000 papers or more, not for a lab-sized corpus.
+pipeline twice; the OCR cache keeps the second pass short, and the LLM cache
+serves round 2 the calls round 1 already made. Round 1 lets a paper's
+reference calls finish when its front matter is deferred, so they are not paid
+for twice; the calls that come after the front matter (citation linking, the
+integrity statements) run only in round 2. It pays off for hosted runs of 100,000 papers or
+more, not for a lab-sized corpus. The spool holds every deferred prompt (a
+few kB each) on disk; the batch step reads it a line at a time and holds one
+batch's requests in memory (at most 256 MB of request bodies).
 
 ## Output layout
 
