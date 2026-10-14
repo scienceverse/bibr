@@ -1332,6 +1332,20 @@ def _usage_totals_by_label(
     return collapsed
 
 
+def _note_record_backed_title(check, decision, incumbent, inputs: dict) -> None:
+    """Keep the title decision made without the registry record on *check*.
+
+    When the record chose the title (the registry title row), the identity
+    stage restores this decision if the final DOI is not the one the record
+    was looked up for.
+    """
+    from bibr.extract.field_decisions import decide_title
+
+    if decision.source == "registry_printed":
+        check.record_backed.add("title")
+        check.title_fallback = decide_title(incumbent, **inputs)
+
+
 def _build_paper(contents, paper_metadata, file_name: str, file_hash: str, paper_id: str | None):
     """Assemble the final ``Paper`` object from extracted parts."""
     from bibr.input.file import InputFile, InputFormat
@@ -1606,28 +1620,44 @@ async def post_parse(
             # The title: the extracted one, the ownership-scoped null-title
             # safety net (one safe selected-record title row, then the layout
             # title under the same filters), byline adjacency for multilingual
-            # front matter (default off), the layout title and unknown-header
-            # scan outside ownership scope, then the doc-info.
-            title_decision = decide_title(
-                incumbent_candidate(
-                    paper_metadata, "title", source="native" if native_metadata else None
-                ),
-                resolution=contents.front_matter_resolution,
-                detected_title=contents.detected_title,
-                sections=contents.sections,
-                journal=paper_metadata.journal,
-                publisher=paper_metadata.publisher,
-                scoped=metadata_ownership_scoped,
-                abstained=metadata_abstained,
-                prefer_byline_adjacent=bool(
+            # front matter (default off), the printed row that is the paper's
+            # registry title (default off), the layout title and
+            # unknown-header scan outside ownership scope, then the doc-info.
+            title_incumbent = incumbent_candidate(
+                paper_metadata, "title", source="native" if native_metadata else None
+            )
+            title_inputs = {
+                "resolution": contents.front_matter_resolution,
+                "detected_title": contents.detected_title,
+                "sections": contents.sections,
+                "journal": paper_metadata.journal,
+                "publisher": paper_metadata.publisher,
+                "scoped": metadata_ownership_scoped,
+                "abstained": metadata_abstained,
+                "prefer_byline_adjacent": bool(
                     getattr(
                         getattr(effective_settings, "pipeline", None),
                         "title_prefer_byline_adjacent",
                         False,
                     )
                 ),
-                doc_info=doc_info.get("title"),
+                "doc_info": doc_info.get("title"),
+            }
+            registry_record = (
+                registry_check.record()
+                if registry_check is not None
+                and getattr(effective_settings, "FRONT_MATTER_REGISTRY_TITLE", False) is True
+                else None
             )
+            title_decision = decide_title(
+                title_incumbent,
+                **title_inputs,
+                **({"registry": registry_record} if registry_record is not None else {}),
+            )
+            if registry_check is not None:
+                _note_record_backed_title(
+                    registry_check, title_decision, title_incumbent, title_inputs
+                )
             apply_decision(paper_metadata, title_decision)
             metadata_issues.extend(title_decision.issues)
 

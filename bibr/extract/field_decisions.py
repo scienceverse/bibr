@@ -40,7 +40,7 @@ from __future__ import annotations
 import functools
 import logging
 import re
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -603,6 +603,7 @@ def decide_title(
     abstained: bool,
     prefer_byline_adjacent: bool,
     doc_info: FieldCandidate | None,
+    registry: Mapping[str, Any] | None = None,
 ) -> FieldDecision:
     """Title: the extracted title, the printed-row fallbacks, then the doc-info.
 
@@ -617,6 +618,10 @@ def decide_title(
        filters.
     2. Scoped and not abstained, a title in hand, byline adjacency enabled: the
        printed row directly above the byline when it disagrees.
+       Then, with *registry* (the paper's own confident registry record,
+       passed under FRONT_MATTER_REGISTRY_TITLE): the selected record's
+       printed row that is the record's title when the title disagrees with
+       the record (:func:`~bibr.extract.title_candidates.registry_title_candidate`).
     3. Unscoped, or the layout title is exactly a generic article label: the
        layout title replaces the title unless it is a generic label and the
        title is printed in the selected record, or it is a masthead the title
@@ -690,6 +695,21 @@ def decide_title(
             use(candidate, "byline_adjacent_title", reason)
         else:
             reject("byline_adjacent", reason)
+
+    title = selected.value if selected is not None else ""
+    if scoped and not abstained and title and registry is not None:
+        candidate, reason = titles.registry_title_candidate(
+            resolution, title, registry, journal=journal, publisher=publisher
+        )
+        if candidate is not None:
+            logger.info(
+                "Registry title rule replaced %r with candidate %s",
+                title,
+                candidate.evidence_ids[0],
+            )
+            use(candidate, "registry_printed_title", reason)
+        else:
+            reject("registry_printed", reason)
 
     if not scoped or is_exact_generic_article_label(detected_title):
         title = selected.value if selected is not None else ""

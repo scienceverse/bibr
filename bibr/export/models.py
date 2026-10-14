@@ -34,10 +34,11 @@ _SCHEMA_VERSION = "12.3"
 #   - New ``extraction.fields.title.registry`` and
 #     ``extraction.fields.author.registry``: ``{service, outcome}``, where
 #     ``outcome`` says whether the exported title or author list ``agree``s or
-#     ``disagree``s with the paper's own confident ``metadata_match`` record
-#     (``corrected`` is reserved for a later rule). The exported values are
-#     never changed. Omitted when there is no confident record, so every 12.2
-#     export is still a valid 12.3 reader input.
+#     ``disagree``s with the paper's own confident ``metadata_match`` record,
+#     or was ``corrected``: a printed value chosen over the first extracted
+#     one because it agrees with the record (FRONT_MATTER_REGISTRY_TITLE). The
+#     record's own text is never written. Omitted when there is no confident
+#     record, so every 12.2 export is still a valid 12.3 reader input.
 #   - New ``metadata_match[].subtitle``: the record's subtitle where the
 #     service keeps it apart from ``title`` (Crossref). Omitted when absent.
 #
@@ -1739,8 +1740,10 @@ class FieldRegistryExport(BaseModel):
         "of the other that keeps at least 70% of it; the record's title is also tried with "
         "its subtitle appended. Author lists agree when their full names pair up with an F1 "
         "of at least 0.9, whatever the given/family split. 'disagree': they differ, and the "
-        "export keeps its own value. 'corrected' is reserved for a printed value chosen "
-        "because the record agrees with it; bibr does not write it yet."
+        "export keeps its own value. 'corrected': the value agrees and is a printed one chosen "
+        "over the first extracted value because it agrees with the record (source "
+        "'registry_printed', under FRONT_MATTER_REGISTRY_TITLE); the record's own text is never "
+        "written."
     )
 
 
@@ -1757,7 +1760,8 @@ class FieldRecordExport(BaseModel):
     )
     source: str | None = Field(
         description="The step that produced the value, e.g. 'llm', 'layout_title', "
-        "'front_matter_candidate', 'doc_info', 'keywords_section', 'identity', 'classifier', "
+        "'front_matter_candidate', 'registry_printed', 'doc_info', 'keywords_section', "
+        "'identity', 'classifier', "
         "'native' (declared by the input); for doi, the selected identity candidate's "
         "source_kind; for a failed field the step that failed. Null when unknown or when "
         "nothing was produced."

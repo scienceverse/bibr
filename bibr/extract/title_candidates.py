@@ -4,9 +4,10 @@ The model reads the selected front-matter record and returns a title; the rows
 here are the alternatives the title decision
 (:func:`bibr.extract.field_decisions.decide_title`) weighs against it or falls
 back to: a selected-record title row, the layout-detected title, the row
-printed directly above the byline, the first unclassified heading, and the
-filters that keep journal furniture, generic article labels, bare section
-headings and mastheads out. Nothing here writes the title.
+printed directly above the byline, the row that prints the paper's registry
+title, the first unclassified heading, and the filters that keep journal
+furniture, generic article labels, bare section headings and mastheads out.
+Nothing here writes the title.
 """
 
 from __future__ import annotations
@@ -15,12 +16,14 @@ import difflib
 import logging
 import re
 import unicodedata
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from bibr.extract.field_decisions import FieldCandidate
 from bibr.validation import IssueSeverity, ValidationIssue
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from bibr.extract.front_matter import FrontMatterCandidate
 
 logger = logging.getLogger(__name__)
@@ -486,6 +489,105 @@ def byline_adjacent_candidate(
             issues=(issue,),
         ),
         "row above the byline disagrees with the title",
+    )
+
+
+def _contains_words(haystack: str, needle: str) -> bool:
+    return bool(needle) and f" {needle} " in f" {haystack} "
+
+
+def registry_title_candidate(
+    resolution,
+    title: str,
+    record: Mapping[str, Any],
+    *,
+    journal: str | None,
+    publisher: str | None,
+) -> tuple[FieldCandidate | None, str]:
+    """The printed title row that is the paper's registry title, when *title* disagrees.
+
+    *record* is the paper's own confident ``metadata_match`` row. When the
+    extracted title disagrees with it, the selected record's safe title row
+    whose text (case and punctuation aside) is the record's title, followed
+    by its subtitle when the record keeps one, stands in. The row's printed
+    text is used, never the record's. It is refused when:
+
+    - the extracted title extends the row (the record lacks a printed part);
+    - the extracted title is printed in the selected record before it, or the
+      two read as language versions of one title and the row is not the
+      version printed first (multilingual front matter prints the original
+      first, and registries often hold the English one);
+    - no row prints the record's title, as when the registry has a typo.
+
+    The decision gates it on FRONT_MATTER_REGISTRY_TITLE (off by default).
+    """
+    from bibr.enrich.verify_identity import _record_titles, _title_key, titles_agree
+    from bibr.extract.title_subtitle import _are_language_versions, drop_parallel_title
+
+    extracted = (title or "").strip()
+    if not extracted:
+        return None, "no title to compare"
+    record_titles = _record_titles(dict(record))
+    if not record_titles:
+        return None, "the record has no title"
+    if any(titles_agree(extracted, record_title) for record_title in record_titles):
+        return None, "agrees with the record"
+    selected_block = _selected_front_matter_block(resolution)
+    if selected_block is None:
+        return None, "no selected record"
+
+    owned = set(selected_block.candidate_ids) | set(selected_block.title_candidate_ids)
+    in_block = sorted(
+        (candidate for candidate in resolution.candidates if candidate.candidate_id in owned),
+        key=lambda candidate: candidate.reading_order,
+    )
+    safe = [
+        candidate
+        for candidate in in_block
+        if _safe_title_candidate(candidate, journal=journal, publisher=publisher)
+    ]
+    # With a subtitle the record's title alone would drop a printed part.
+    wanted = _title_key(record_titles[-1])
+    row = next((candidate for candidate in safe if _title_key(candidate.raw_text) == wanted), None)
+    if row is None:
+        return None, "no printed row is the record's title"
+
+    extracted_key = _title_key(extracted)
+    if extracted_key.startswith(wanted + " "):
+        return None, "the title extends the row"
+    if any(
+        candidate.reading_order < row.reading_order
+        and _contains_words(_title_key(candidate.raw_text), extracted_key)
+        for candidate in in_block
+    ):
+        return None, "the title is printed before the row"
+    if _are_language_versions(extracted, row.raw_text):
+        printed_text = "\n".join(candidate.raw_text for candidate in in_block)
+        kept, _ = drop_parallel_title(f"{extracted} / {row.raw_text}", printed_text)
+        if _title_key(kept) != wanted:
+            return None, "the row is a translation not printed first"
+
+    service = str(record.get("service") or "registry")
+    issue = ValidationIssue(
+        code="VAL_TITLE_REGISTRY_PRINTED",
+        severity=IssueSeverity.WARNING,
+        message=(
+            "Preferred the printed title row that matches the paper's registry record over the "
+            "extracted title"
+        ),
+        origin_stage="extract",
+        evidence_ids=(row.candidate_id, f"metadata_match:{service}"),
+        blocking=False,
+    )
+    return (
+        FieldCandidate(
+            "title",
+            "registry_printed",
+            row.raw_text,
+            evidence_ids=(row.candidate_id, f"metadata_match:{service}"),
+            issues=(issue,),
+        ),
+        "the printed row matches the record and the title does not",
     )
 
 
