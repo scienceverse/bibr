@@ -57,8 +57,6 @@ class RecordedCrossref:
     ``search`` from ``searches``: the first recorded answer whose key occurs
     in the query, else the recorded miss. DOIs in ``hang`` never answer."""
 
-    user_agent = "bibr-tests"
-
     def __init__(self, searches: dict[str, str] | None = None, hang: set[str] = frozenset()):
         self.searches = {"power posing": "search_carney", **(searches or {})}
         self.hang = {doi.casefold() for doi in hang}

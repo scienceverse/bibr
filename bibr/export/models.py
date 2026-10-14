@@ -39,8 +39,10 @@ _SCHEMA_VERSION = "12.3"
 #     Collaboration") is written as ``{literal}``; it was dropped before.
 #   - New ``extraction.enrichment.lookups[]``: per reference, how its registry
 #     lookup ended (``outcome``: doi_hit, doi_404, doi_rejected, search_hit,
-#     clean_miss, error, timed_out, not_attempted) and, for a doi_404, the
-#     ``registration_agency`` doi.org names. Omitted when not recorded.
+#     clean_miss, error, timed_out, not_attempted); for a doi_404, the
+#     ``registration_agency`` doi.org names; for a doi_rejected, the record
+#     the DOI resolved to (``record_year``, ``record_title``,
+#     ``record_bib_type``). Omitted when not recorded.
 #   - New root ``bib_check[]`` after ``bib_match``: per reference, whether it
 #     agrees with the record it was matched to (``status``: matched,
 #     fields_disagree, doi_unregistered, not_found, unchecked), the
@@ -1196,14 +1198,16 @@ class CheckNoteExport(BaseModel):
     )
     record: str | None = Field(
         description="The record's value (an author note gives the record's first author, or "
-        "its first authors when only co-authors are missing); null when there is no record, "
-        "as for a DOI that does not exist."
+        "its first authors when only co-authors are missing); null when the record has no "
+        "value to give: a DOI that does not exist, or a printed DOI that resolves to another "
+        "work (that work's DOI is the printed one)."
     )
     severity: Literal["major", "minor"] = Field(
         description="major: the difference names another work (title, first author, year more "
         "than a year off, DOI). minor: a difference a correct reference can have (a co-author "
         "left out, a name spelled differently, an organization the record lists as author, the "
-        "journal's name, volume, issue or pages, a book's edition year)."
+        "journal's name, volume, issue or pages, a book's edition year, a record dated two "
+        "years before the printed year)."
     )
 
 
@@ -1217,11 +1221,14 @@ class BibCheckExport(BaseModel):
         description="matched: the reference agrees with its record (no major note, and at most "
         "one minor note besides issue notes). "
         "fields_disagree: the reference has a major note or two minor ones (an issue note is "
-        "not counted); a printed DOI that names another work lands here. doi_unregistered: "
-        "doi.org says the printed DOI does not exist. not_found: every lookup answered and "
-        "Crossref has no record of the work, which is not evidence that the work does not "
-        "exist. unchecked: nothing was compared (a DOI registered with another agency, a "
-        "failed or timed-out lookup, nothing to look up)."
+        "not counted); a printed DOI that names another work lands here, and so does one whose "
+        "record is dated more than a year from the printed year (lookup outcome doi_rejected; "
+        "its notes say whether only the year differs). doi_unregistered: doi.org says the "
+        "printed DOI does not exist. not_found: every lookup answered and Crossref has no "
+        "record of the work, which is not evidence that the work does not exist. unchecked: "
+        "nothing was compared (a DOI registered with another agency, a printed DOI Crossref "
+        "has no record of that doi.org did not call unregistered, a failed or timed-out "
+        "lookup, nothing to look up)."
     )
     service: MatchServiceLiteral | None = Field(
         description="bib_match[].service of the record checked against; null when none."
@@ -1601,12 +1608,13 @@ class LookupExport(BaseModel):
     bib_id: Id = Field(description="bib[].bib_id of the reference.")
     outcome: LookupOutcomeLiteral = Field(
         description="doi_hit: the printed DOI resolved to the accepted record. doi_404: the "
-        "registry has no record of the printed DOI. doi_rejected: the printed DOI resolved to a "
-        "work dated more than a year from the printed year (other than two years before it, "
-        "an online-first date), and not a book. search_hit: a search found the "
-        "work. clean_miss: every search answered and none found it. error: a lookup failed "
-        "and nothing found the work. timed_out: the enrichment time budget ran out first. "
-        "not_attempted: the reference gave nothing to look up (no DOI, title or volume)."
+        "registry has no record of the printed DOI (no title search follows). doi_rejected: the "
+        "printed DOI resolved to a record dated more than a year from the printed year, which "
+        "was not accepted; record_year, record_title and record_bib_type describe it. "
+        "search_hit: a search found the work. clean_miss: every search answered and none "
+        "found it. error: a lookup failed and nothing found the work. timed_out: a time "
+        "budget ran out before every lookup had answered. not_attempted: the reference gave "
+        "nothing to look up (no DOI, title or volume)."
     )
     registration_agency: str | None = Field(
         default=None,
@@ -1614,14 +1622,35 @@ class LookupExport(BaseModel):
         "(crossref, datacite, medra, ...), or 'none' when doi.org says the DOI does not exist. "
         "Omitted when doi.org was not asked or did not answer.",
     )
+    record_year: int | None = Field(
+        default=None,
+        description="For doi_rejected: the year of the record the printed DOI resolved to. "
+        "Omitted otherwise.",
+    )
+    record_title: str | None = Field(
+        default=None,
+        description="For doi_rejected: that record's title, as deposited. Omitted otherwise "
+        "or when the record has none.",
+    )
+    record_bib_type: BibTypeLiteral | None = Field(
+        default=None,
+        description="For doi_rejected: that record's work type. Omitted otherwise or when the "
+        "record has none.",
+    )
 
-    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("registration_agency",)
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = (
+        "registration_agency",
+        "record_year",
+        "record_title",
+        "record_bib_type",
+    )
 
     @model_serializer(mode="wrap")
     def _omit_absent(self, handler):
         data = handler(self)
-        if data.get("registration_agency") is None:
-            data.pop("registration_agency", None)
+        for key in self.OMITTED_WHEN_ABSENT:
+            if data.get(key) is None:
+                data.pop(key, None)
         return data
 
 

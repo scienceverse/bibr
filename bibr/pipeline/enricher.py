@@ -119,6 +119,9 @@ class CrossrefEnricher:
             self._timeout if self._timeout is not None else self._settings.crossref.enrich_timeout
         )
         enrich_started_at = time.monotonic()
+        # When the wait below gives up: the doi.org agency lookup, which only
+        # refines the outcome of DOIs Crossref does not know, ends before it.
+        deadline = asyncio.get_running_loop().time() + timeout
 
         async def _identity() -> EnrichmentReport | None:
             if not meta.doi:
@@ -131,7 +134,7 @@ class CrossrefEnricher:
                 if prefetch_handle is not None:
                     await prefetch_handle.discard()
                 return None
-            kwargs: dict = {"settings": self._settings}
+            kwargs: dict = {"settings": self._settings, "deadline": deadline}
             if prefetch_handle is not None:
                 # Inside the timeout budget: a timed-out wait cancels the
                 # prefetch along with the rest of the enrichment.

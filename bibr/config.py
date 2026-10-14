@@ -1464,7 +1464,9 @@ class CrossrefOptions(_BibrSettings):
     doi_agency_lookup: bool = Field(
         True,
         description="Ask doi.org which agency registered each printed DOI that Crossref has no "
-        "record of (one request per paper), so a DataCite DOI is not reported as unregistered.",
+        "record of (one request per paper), so a DataCite DOI is not reported as unregistered. "
+        "The request carries no contact address and gives up after 3 seconds, or before the "
+        "paper's enrichment time runs out.",
     )
 
     @field_validator("consolidate", mode="before")

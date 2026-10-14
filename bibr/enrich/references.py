@@ -335,6 +335,7 @@ async def enrich_references(
     settings: GlobalSettings | None = None,
     prefetch: EnrichmentPrefetch | None = None,
     raw_strings: dict[int, str] | None = None,
+    deadline: float | None = None,
 ) -> EnrichmentReport:
     """Enrich references with Crossref metadata.
 
@@ -368,6 +369,10 @@ async def enrich_references(
         raw_strings: Each reference's printed string by ``bib_id``. With
             ``resolver.raw_search`` on, references still unmatched after the
             title passes are searched with it (see :func:`_enrich_raw_strings`).
+        deadline: The event-loop time (``loop.time()``) at which the caller
+            stops waiting. The doi.org registration-agency lookup gives up
+            before it (see :func:`_classify_unknown_dois`), so that optional
+            lookup never runs the enrichment out of time.
     """
     if not references:
         return EnrichmentReport()
@@ -397,6 +402,21 @@ async def enrich_references(
                 )
 
     semaphore = crossref_client.enrich_semaphore
+    fallback_sources = _effective_fallback_sources(effective) if resolver_client else []
+    raw_pass = bool(resolver_client is not None and raw_strings and effective.resolver.raw_search)
+
+    def _later_pass_applies(ref: PaperReference) -> bool:
+        """Will a resolver pass after this one search for *ref*? Until it has
+        answered, the reference's lookup is not finished."""
+        if ref.match:
+            return False
+        if fallback_sources and _resolver_fallback_eligible(ref):
+            return True
+        return raw_pass and _raw_search_eligible(ref, (raw_strings or {}).get(ref.bib_id))
+
+    def _close_first_pass(ref: PaperReference) -> None:
+        if not _later_pass_applies(ref):
+            lookup_of(ref).finished = True
 
     async def _enrich_one(ref: PaperReference) -> None:
         async with semaphore:
@@ -409,10 +429,10 @@ async def enrich_references(
                 resolver_authoritative=resolver_authoritative,
                 settings=effective,
             )
-            lookup_of(ref).finished = True
             if outcome is not None:
                 source, match = outcome
                 ref.match[source] = match
+            _close_first_pass(ref)
 
     # Crossref traffic of this batch; the prefetch counted its own.
     with count_requests() as tally:
@@ -428,7 +448,7 @@ async def enrich_references(
                         "Reference enrichment raised for bib_id=%s: %s", ref.bib_id, result
                     )
                     _record_terminal_failure(stats, ref, "reference enrichment", result)
-                    lookup_of(ref).finished = True
+                    _close_first_pass(ref)
 
             if resolver_client is not None:
                 try:
@@ -440,6 +460,8 @@ async def enrich_references(
                     )
                 except Exception as e:  # noqa: BLE001 — optional fallback cannot fail extraction
                     eligible = [ref for ref in references if _resolver_fallback_eligible(ref)]
+                    for ref in eligible:
+                        lookup_of(ref).errored = True
                     stats.fallback_errors += len(eligible)
                     logger.warning("Resolver fallback failed for %d refs: %s", len(eligible), e)
                     _record_fallback_warning(
@@ -448,24 +470,30 @@ async def enrich_references(
                         f"resolver fallback failed for {len(eligible)} refs: "
                         f"{_export_diagnostic(e)}",
                     )
-            if resolver_client is not None and raw_strings and effective.resolver.raw_search:
+            if raw_pass and raw_strings:
                 try:
                     await _enrich_raw_strings(
                         references, resolver_client, stats, raw_strings, settings=effective
                     )
                 except Exception as e:  # noqa: BLE001 — optional pass cannot fail extraction
+                    for ref in references:
+                        if _raw_search_eligible(ref, raw_strings.get(ref.bib_id)):
+                            lookup_of(ref).errored = True
                     logger.warning("Resolver raw-string search failed: %s", e)
                     _record_fallback_warning(
                         stats,
                         WarningCode.RESOLVER_FALLBACK_FAILED,
                         f"resolver raw-string search failed: {_export_diagnostic(e)}",
                     )
+            # Every pass that applies has answered.
+            for ref in references:
+                lookup_of(ref).finished = True
         finally:
             await prefetch.aclose()
     stats.add_requests(tally)
     stats.add_requests(prefetch.requests)
     if effective.crossref.doi_agency_lookup:
-        await _classify_unknown_dois(references, crossref_client)
+        await _classify_unknown_dois(references, deadline=deadline)
 
     matched = sum(1 for ref in references if ref.match)
     logger.info(
@@ -518,10 +546,25 @@ async def enrich_references(
     )
 
 
-async def _classify_unknown_dois(references: list[PaperReference], crossref_client) -> None:
+# The doi.org agency lookup only refines a doi_404 ("registered elsewhere" or
+# "does not exist"), so it gets a few seconds of its own and never the rest of
+# the paper's enrichment budget: a slow or unreachable doi.org leaves the agency
+# unknown (the check then reports the reference unchecked) instead of running
+# the enrichment out of time and holding the export as partial.
+_AGENCY_BUDGET_SECONDS = 3.0
+# It gives up this long before the caller's deadline, so that deadline never
+# passes while doi.org is still being waited for.
+_AGENCY_DEADLINE_MARGIN_SECONDS = 0.5
+
+
+async def _classify_unknown_dois(
+    references: list[PaperReference], *, deadline: float | None = None
+) -> None:
     """Ask doi.org which agency registered each printed DOI the registry had
     no record of, in one request: a DataCite DOI is unknown to Crossref but
-    exists, and a DOI no agency registered does not."""
+    exists, and a DOI no agency registered does not. Gives up after
+    :data:`_AGENCY_BUDGET_SECONDS`, or before *deadline* (event-loop time),
+    whichever comes first; never raises."""
     from bibr.enrich.lookup import recorded_lookup, registration_agencies
 
     unknown = [
@@ -533,12 +576,19 @@ async def _classify_unknown_dois(references: list[PaperReference], crossref_clie
     ]
     if not unknown:
         return
-    user_agent = getattr(crossref_client, "user_agent", None)
+    budget = _AGENCY_BUDGET_SECONDS
+    if deadline is not None:
+        remaining = deadline - asyncio.get_running_loop().time()
+        budget = min(budget, remaining - _AGENCY_DEADLINE_MARGIN_SECONDS)
+    if budget <= 0:
+        logger.debug("No time left to ask doi.org about %d DOIs", len(unknown))
+        return
     try:
-        agencies = await registration_agencies(
-            [ref.doi for ref, _ in unknown if ref.doi],
-            user_agent=user_agent if isinstance(user_agent, str) else None,
-        )
+        async with asyncio.timeout(budget):
+            agencies = await registration_agencies([ref.doi for ref, _ in unknown if ref.doi])
+    except TimeoutError:
+        logger.debug("doi.org did not answer within %.1fs; agencies left unknown", budget)
+        return
     except Exception as e:  # noqa: BLE001 — the agency only refines the outcome
         logger.debug("DOI registration-agency lookup failed: %s", e)
         return
@@ -658,14 +708,18 @@ async def _fetch_crossref_item(
             result = await client.works(ids=ref.doi)
             if result and "message" in result:
                 cr_item = CrossrefWorkItem.from_raw(result["message"])
-                if _doi_year_conflicts(ref.year, cr_item.year, cr_item.work_type):
+                if _doi_year_conflicts(ref.year, cr_item.year):
                     logger.warning(
                         "DOI %s year mismatch: ref=%d, crossref=%d — discarding match",
                         ref.doi,
                         ref.year,
                         cr_item.year,
                     )
-                    lookup.doi_status = "rejected"
+                    lookup.reject(
+                        cr_item.year,
+                        cr_item.title,
+                        migrate_bib_type(cr_item.work_type) if cr_item.work_type else None,
+                    )
                     return None
                 if stats is not None:
                     stats.doi_matches += 1
@@ -754,36 +808,12 @@ async def _fetch_crossref_item(
     return None
 
 
-# Crossref types whose DOI registers one edition of a book. Its record carries
-# that edition's year, often a reprint or e-book long after the printed one
-# (Cohen's 1988 "Statistical Power Analysis" is 10.4324/9780203771587, issued
-# 2013), so for them a year difference is no evidence against the DOI.
-_EDITION_DATED_TYPES = frozenset(
-    {
-        "book",
-        "edited-book",
-        "monograph",
-        "reference-book",
-        "book-set",
-        "book-chapter",
-        "book-section",
-        "book-part",
-        "book-track",
-    }
-)
-
-
-def _doi_year_conflicts(ref_year: int | None, record_year: int | None, work_type) -> bool:
-    """True when the record a printed DOI resolves to is dated too far from the
-    printed year (more than a year) to be the cited work. A reference dated
-    exactly two years after the record is not: Crossref dates many articles
-    by their online-first year, and references by the print issue's."""
-    if not ref_year or not record_year:
-        return False
-    delta = ref_year - record_year
-    if abs(delta) <= 1 or delta == 2:
-        return False
-    return work_type not in _EDITION_DATED_TYPES
+def _doi_year_conflicts(ref_year: int | None, record_year: int | None) -> bool:
+    """True when the record a printed DOI resolves to is dated more than a year
+    from the printed year, too far to be taken as the cited work. The check
+    (:mod:`bibr.enrich.check`) still describes that record, and tells an
+    online-first date or a book's later edition apart from another work."""
+    return bool(ref_year and record_year and abs(ref_year - record_year) > 1)
 
 
 def _fingerprint_query(ref) -> str:
@@ -1650,6 +1680,7 @@ async def _enrich_resolver_fallback(
     stats.fallback_attempts += len(eligible)
     semaphore = asyncio.Semaphore(settings.resolver.fallback_search_concurrency)
     answered = 0
+    unanswered = {id(ref): ref for ref in eligible}
 
     async def resolve(ref: PaperReference) -> None:
         nonlocal answered
@@ -1672,6 +1703,8 @@ async def _enrich_resolver_fallback(
             )
         except Exception as e:  # noqa: BLE001 — one bad answer costs only its own reference
             answered += 1
+            unanswered.pop(id(ref), None)
+            lookup_of(ref).errored = True
             stats.fallback_errors += 1
             logger.debug("Resolver fallback failed for bib_id=%s: %s", ref.bib_id, e)
             _record_fallback_warning(
@@ -1681,6 +1714,7 @@ async def _enrich_resolver_fallback(
             )
             return
         answered += 1
+        unanswered.pop(id(ref), None)
         if best is None:
             stats.fallback_misses += 1
             return
@@ -1696,6 +1730,9 @@ async def _enrich_resolver_fallback(
             await asyncio.gather(*(resolve(ref) for ref in eligible))
     except TimeoutError:
         stats.fallback_timeouts += 1
+        # Not every search of these references answered: not a clean miss.
+        for ref in unanswered.values():
+            lookup_of(ref).timed_out = True
         detail = (
             f"resolver fallback timed out after {settings.resolver.fallback_timeout:g}s "
             f"with {len(eligible) - answered} of {len(eligible)} refs unanswered"
@@ -1819,6 +1856,7 @@ async def _enrich_raw_strings(
     stats.raw_attempts += len(eligible)
     semaphore = asyncio.Semaphore(settings.resolver.fallback_search_concurrency)
     found: dict[int, tuple[dict, float]] = {}
+    unanswered = {id(ref): ref for ref in eligible}
 
     async def resolve(ref: PaperReference) -> None:
         raw = raw_strings[ref.bib_id]
@@ -1830,6 +1868,7 @@ async def _enrich_raw_strings(
                 settings.resolver.limit,
                 sources=settings.resolver.sources,
             )
+        unanswered.pop(id(ref), None)
         best = _best_raw_candidate(raw, candidates)
         if best == "ambiguous":
             stats.raw_ambiguous += 1
@@ -1841,6 +1880,8 @@ async def _enrich_raw_strings(
         async with asyncio.timeout(settings.resolver.fallback_timeout):
             await asyncio.gather(*(resolve(ref) for ref in eligible))
     except TimeoutError:
+        for ref in unanswered.values():
+            lookup_of(ref).timed_out = True
         detail = (
             f"resolver raw-string search timed out after {settings.resolver.fallback_timeout:g}s"
         )
@@ -1940,16 +1981,20 @@ async def _try_resolver(
             lookup.doi_status = "not_found"
             return None
         cand_year = cand.get("year")
-        if _doi_year_conflicts(
-            ref.year, cand_year if isinstance(cand_year, int) else None, cand.get("type")
-        ):
+        cand_year = cand_year if isinstance(cand_year, int) else None
+        if _doi_year_conflicts(ref.year, cand_year):
             logger.warning(
                 "Resolver DOI %s year mismatch: ref=%d, resolver=%d — discarding match",
                 ref.doi,
                 ref.year,
                 cand_year,
             )
-            lookup.doi_status = "rejected"
+            work_type = cand.get("type")
+            lookup.reject(
+                cand_year,
+                plain_text(cand.get("title")),
+                migrate_bib_type(work_type) if isinstance(work_type, str) and work_type else None,
+            )
             return None
         if stats is not None:
             stats.resolver_matches += 1

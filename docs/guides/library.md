@@ -197,10 +197,10 @@ saying whether it agrees with the record it was matched to:
 | `status` | Meaning |
 |---|---|
 | `matched` | The reference agrees with its record: no major difference and at most one minor one (a different issue number is not counted). |
-| `fields_disagree` | The title, first author, year or DOI differs (a major note), or two minor things do. A printed DOI that names another work lands here. |
+| `fields_disagree` | The title, first author, year or DOI differs (a major note), or two minor things do. A printed DOI that names another work lands here, and so does one whose record is dated more than a year from the printed year. |
 | `doi_unregistered` | doi.org says the printed DOI does not exist. |
 | `not_found` | Every lookup answered and Crossref has no record of the work. |
-| `unchecked` | Nothing was compared: the DOI is registered with another agency (DataCite, mEDRA), a lookup failed or ran out of time, or the reference gave nothing to look up. |
+| `unchecked` | Nothing was compared: the DOI is registered with another agency (DataCite, mEDRA), Crossref has no record of a printed DOI that doi.org did not call unregistered, a lookup failed or ran out of time, or the reference gave nothing to look up. |
 
 `not_found` means "not found in Crossref", not that the work does not exist:
 books, reports, theses, preprints, datasets, software and many non-English
@@ -227,6 +227,15 @@ when the record has more than two. Volume, issue and pages come from
 verification (`extraction.diagnostics.verification`); a page range is one
 difference, and a page printed without its "S" or "e" prefix agrees.
 `extraction.enrichment.lookups` says how each reference's lookup ended.
+
+Enrichment does not take a printed DOI's record as the cited work when the
+two are dated more than a year apart. The check still compares them: when the
+titles agree, the year is the only note (minor for a book, whose record
+carries the year of the edition registered, and for a record two years before
+the printed year, an online-first date); when they do not, a DOI note says the
+printed DOI names another work. A printed DOI Crossref has no record of is
+not searched for by title, so it is `unchecked` unless doi.org says the DOI
+does not exist.
 
 ## Warm sessions
 

@@ -208,6 +208,16 @@ def _lookup_rows(references) -> list[dict] | None:
         }
         if lookup is not None and row["outcome"] == "doi_404" and lookup.registration_agency:
             row["registration_agency"] = lookup.registration_agency
+        if lookup is not None and row["outcome"] == "doi_rejected":
+            # The record the printed DOI resolved to, so a reader (and the
+            # check) can tell a wrong DOI from a wrong printed year.
+            for key, value in (
+                ("record_year", lookup.rejected_year),
+                ("record_title", lookup.rejected_title or None),
+                ("record_bib_type", _export_bib_type(lookup.rejected_type)),
+            ):
+                if value is not None:
+                    row[key] = value
         rows.append(row)
     return rows
 

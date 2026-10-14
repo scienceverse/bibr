@@ -175,7 +175,10 @@ Crossref", never "fabricated" or "does not exist":
   journals are missing or registered elsewhere (DataCite, mEDRA, CNKI, JaLC).
   bibr asks doi.org which agency registered a printed DOI that Crossref does
   not know, and reports one registered elsewhere as `unchecked`; a reference
-  without a DOI it can only look for in Crossref.
+  without a DOI it can only look for in Crossref. A printed DOI Crossref does
+  not know is not followed by a title search, so it is `unchecked` (or
+  `doi_unregistered` when doi.org says the DOI does not exist), never
+  `not_found`.
 - A search can miss a work Crossref has, when the reference is cut short,
   garbled by OCR or the parser, or printed in another language than the record.
   Crossref keeps some subtitles apart from the title, and the search does not

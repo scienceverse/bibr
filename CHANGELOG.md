@@ -25,9 +25,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   matched to. The new top-level `bib_check` table (export schema 12.3) has one
   row per reference with a `status`: `matched`, `fields_disagree` (the title,
   first author, year or DOI differs, or two minor things do; a printed DOI that
-  names another work lands here), `doi_unregistered` (doi.org says the printed
-  DOI does not exist), `not_found` (Crossref has no record of the work) or
-  `unchecked` (a DOI registered with DataCite or another agency, a failed or
+  names another work lands here, and so does one whose record is dated more
+  than a year from the printed year, with notes saying whether only the year
+  differs), `doi_unregistered` (doi.org says the printed DOI does not exist),
+  `not_found` (every lookup answered and Crossref has no record of the work) or
+  `unchecked` (a DOI registered with DataCite or another agency, a printed DOI
+  Crossref has no record of that doi.org did not call unregistered, a failed or
   timed-out lookup, nothing to look up). Its `notes` list each difference with
   the printed and the record's value and a `major` or `minor` severity, and
   `retraction` gives the record's retraction or withdrawal notice. `not_found`
@@ -40,10 +43,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   "RETRACTED:" title prefix no longer costs it the match.
 - `extraction.enrichment.lookups` says how each reference's lookup ended:
   `doi_hit`, `doi_404`, `doi_rejected`, `search_hit`, `clean_miss`, `error`,
-  `timed_out` or `not_attempted`. For printed DOIs Crossref does not know, bibr
-  asks doi.org which agency registered them, in one request per paper, and
-  gives the answer as `registration_agency`. `CROSSREF_DOI_AGENCY_LOOKUP=false`
-  turns that request off.
+  `timed_out` or `not_attempted`. A `doi_rejected` row describes the record the
+  printed DOI resolved to (`record_year`, `record_title`, `record_bib_type`).
+  For printed DOIs Crossref does not know, bibr asks doi.org which agency
+  registered them, in one request per paper, and gives the answer as
+  `registration_agency`. That request carries no contact address and gives up
+  after a few seconds, or before the paper's enrichment time runs out, so a
+  slow doi.org never makes an enrichment partial.
+  `CROSSREF_DOI_AGENCY_LOOKUP=false` turns it off.
 - `bibr.write_tables()` also writes `extraction_enrichment_lookups.parquet`.
 
 ### Changed
@@ -56,10 +63,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - An organization author or editor of a matched record ("Open Science
   Collaboration") is exported as `{"literal": ...}`; it was dropped, which left
   such matches with no authors.
-- A printed DOI is no longer discarded when its record is dated two years
-  before the printed year, the online-first date of an article cited by its
-  print issue, or when it registers a book, whose record carries the year of
-  the edition registered.
 
 ### Fixed
 

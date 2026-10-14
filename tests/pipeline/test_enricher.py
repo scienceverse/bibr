@@ -2,7 +2,7 @@
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -48,7 +48,9 @@ async def test_crossref_enricher_calls_enrich_references():
     enricher = CrossrefEnricher()
     with patch("bibr.enrich.references.enrich_references", fake):
         await enricher.enrich(fs)
-    fake.assert_awaited_once_with(fs.paper.metadata.references, settings=enricher._settings)
+    fake.assert_awaited_once_with(
+        fs.paper.metadata.references, settings=enricher._settings, deadline=ANY
+    )
     assert fs.warnings == []
 
 
@@ -304,7 +306,10 @@ async def test_enricher_consumes_a_completed_prefetch():
         await enricher.enrich(fs)
 
     fake.assert_awaited_once_with(
-        fs.paper.metadata.references, settings=enricher._settings, prefetch="PREFETCH"
+        fs.paper.metadata.references,
+        settings=enricher._settings,
+        deadline=ANY,
+        prefetch="PREFETCH",
     )
     assert fs.paper.enrichment_prefetch is None
     assert fs.stage_times["enrich_prefetch"] >= 0.0
@@ -350,7 +355,9 @@ async def test_enricher_falls_back_inline_when_the_prefetch_failed(caplog):
             outcome = await enricher.enrich(fs)
 
     # No ``prefetch`` kwarg: enrich_references redoes the round-trips itself.
-    fake.assert_awaited_once_with(fs.paper.metadata.references, settings=enricher._settings)
+    fake.assert_awaited_once_with(
+        fs.paper.metadata.references, settings=enricher._settings, deadline=ANY
+    )
     assert outcome.warnings == ()
     assert fs.warnings == []
     assert any("prefetch unavailable" in r.message for r in caplog.records)

@@ -621,9 +621,13 @@ DOI exists (`doi_unregistered`), whether Crossref has no record of it
 (`not_found`), or that nothing was compared (`unchecked`); see
 [Checking references](library.md#checking-references). For a printed DOI
 Crossref does not know, bibr asks doi.org which agency registered it, in one
-request per paper for all such DOIs, so a DataCite or mEDRA DOI is
-`unchecked` rather than `not_found`. `CROSSREF_DOI_AGENCY_LOOKUP=false` skips
-that request, for deployments that may only call Crossref.
+request per paper for all such DOIs, so a DataCite or mEDRA DOI is not
+reported as one that does not exist. The request names bibr but carries no
+contact address (`CROSSREF_API_EMAIL` goes to Crossref only), and gives up
+after 3 seconds, or before the paper's `CROSSREF_ENRICH_TIMEOUT` runs out:
+a slow or unreachable doi.org leaves those references `unchecked` and never
+makes the enrichment partial. `CROSSREF_DOI_AGENCY_LOOKUP=false` skips that
+request, for deployments that may only call Crossref.
 
 ### Optional external resolver (`BIBR_RESOLVER_URL`)
 

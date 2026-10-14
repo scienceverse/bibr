@@ -6,15 +6,21 @@ For every ``bib`` row, :func:`check_bibs` writes one ``bib_check`` row:
   with it (no major difference, and at most one minor one besides the issue).
 - ``fields_disagree``: a record was found, but the reference prints a
   different title, first author, year or DOI (a major difference), or
-  several minor ones. A printed DOI that names another work lands here.
+  several minor ones. A printed DOI that names another work lands here, and
+  so does one whose record enrichment did not accept because it is dated
+  more than a year from the printed year (lookup outcome ``doi_rejected``):
+  its notes say whether the title differs too (the DOI names another work)
+  or only the year.
 - ``doi_unregistered``: doi.org says the printed DOI does not exist.
 - ``not_found``: every lookup answered, and Crossref has no record of the
   work. That is not evidence the work does not exist: books, reports,
   theses, preprints, software and non-English venues are often missing
   from Crossref.
 - ``unchecked``: nothing was compared. The DOI is registered with another
-  agency (DataCite, mEDRA), a lookup failed or ran out of time, or the
-  reference gave nothing to look up.
+  agency (DataCite, mEDRA), Crossref has no record of a printed DOI that
+  doi.org did not call unregistered (the work was not searched for by
+  title then), a lookup failed or ran out of time, or the reference gave
+  nothing to look up.
 
 A matched record that has been retracted or withdrawn gets ``retraction``,
 whatever its status. Each difference is a note ``{field, printed, record,
@@ -77,8 +83,9 @@ NAME_CLOSE_MIN = 80
 
 # Notice types that withdraw the work itself.
 _RETRACTION_TYPES = ("retraction", "partial_retraction", "withdrawal", "removal")
-# Record types whose year is that of the registered edition (see
-# bibr.enrich.references._EDITION_DATED_TYPES): a year difference is minor.
+# Record types whose year is that of the registered edition, often a reprint
+# or e-book long after the printed one (Cohen's 1988 "Statistical Power
+# Analysis" is registered as its 2013 edition): a year difference is minor.
 _EDITION_DATED_BIB_TYPES = frozenset({"book", "book_chapter"})
 # Locator fields: a disagreement is minor. A different issue alone is common
 # (combined issues, supplements), so issue notes do not count towards the
@@ -459,11 +466,8 @@ def _field_notes(
 
     year, record_year = bib.get("year"), match.get("year")
     if isinstance(year, int) and isinstance(record_year, int) and year_disagrees(year, record_year):
-        edition_dated = (
-            match.get("bib_type") in _EDITION_DATED_BIB_TYPES
-            or bib.get("bib_type") in _EDITION_DATED_BIB_TYPES
-        )
-        notes.append(_note("year", year, record_year, "minor" if edition_dated else "major"))
+        severity = "minor" if _edition_dated(bib, match.get("bib_type")) else "major"
+        notes.append(_note("year", year, record_year, severity))
 
     container, record_container = bib.get("container"), match.get("container")
     if container and record_container and not journal_coherent(container, record_container):
@@ -505,19 +509,61 @@ def _status_of_notes(notes: list[dict]) -> str:
     return "matched"
 
 
-def _unmatched(bib: dict, lookup: dict | None) -> tuple[str, list[dict]]:
-    outcome = (lookup or {}).get("outcome")
+def _edition_dated(bib: dict, record_type: object) -> bool:
+    """Is either side a book, whose record carries its registered edition's year?"""
+    return (
+        record_type in _EDITION_DATED_BIB_TYPES or bib.get("bib_type") in _EDITION_DATED_BIB_TYPES
+    )
+
+
+def _rejected_doi_notes(bib: dict, lookup: dict, reference: str) -> list[dict]:
+    """The differences between a reference and the record its printed DOI
+    resolved to, which enrichment did not accept because it is dated more than
+    a year from the printed year (lookup outcome ``doi_rejected``).
+
+    A year note always, with both years: minor when the record is a book (its
+    year is the registered edition's) or dated two years before the printed
+    year (an online-first date), major otherwise. When the record's title is
+    another work's, the DOI note comes first: the printed DOI names that work.
+    When the titles agree, the DOI is the cited work's and the year is what
+    differs, so there is no DOI note."""
+    title, record_title = bib.get("title"), lookup.get("record_title")
+    title_note = None
+    if title and record_title:
+        score = title_score(title, record_title, reference, identified=False)
+        if score is not None and score < TITLE_MINOR_BELOW:
+            severity = "major" if score < TITLE_MAJOR_BELOW else "minor"
+            title_note = _note("title", title, record_title, severity)
+    notes = []
+    if title_note is not None and title_note["severity"] == "major":
+        notes.append(_note("doi", bib.get("doi"), None, "major"))
+    if title_note is not None:
+        notes.append(title_note)
+    year, record_year = bib.get("year"), lookup.get("record_year")
+    online_first = (
+        isinstance(year, int)
+        and isinstance(record_year, int)
+        and not year_disagrees(year, record_year)
+    )
+    tolerated = online_first or _edition_dated(bib, lookup.get("record_bib_type"))
+    notes.append(_note("year", year, record_year, "minor" if tolerated else "major"))
+    return notes
+
+
+def _unmatched(bib: dict, lookup: dict | None, reference: str = "") -> tuple[str, list[dict]]:
+    lookup = lookup or {}
+    outcome = lookup.get("outcome")
     if outcome == "doi_404":
-        agency = (lookup or {}).get("registration_agency")
-        if agency == "none":
+        if lookup.get("registration_agency") == "none":
             return "doi_unregistered", [_note("doi", bib.get("doi"), None, "major")]
-        if agency is not None and agency != "crossref":
-            # Registered elsewhere (DataCite, mEDRA): bibr checks Crossref only.
-            return "unchecked", []
-        return "not_found", []
+        # Registered elsewhere (DataCite, mEDRA), registered with Crossref but
+        # not served by its API (indexing lag), or doi.org not asked or not
+        # answering. In every case Crossref was not searched for the work by
+        # its title, so nothing says Crossref lacks it.
+        return "unchecked", []
     if outcome == "doi_rejected":
-        # The printed DOI resolves, but to a work of another year.
-        return "fields_disagree", [_note("doi", bib.get("doi"), None, "major")]
+        # The printed DOI resolves, but to a record of another year.
+        return "fields_disagree", _rejected_doi_notes(bib, lookup, reference)
     if outcome == "clean_miss":
         return "not_found", []
     return "unchecked", []
@@ -535,7 +581,7 @@ def check_bib(
     of the reference before it, which a rule ("——") stands in for."""
     match = _record_for(matches)
     if match is None:
-        status, notes = _unmatched(bib, lookup)
+        status, notes = _unmatched(bib, lookup, reference)
         return {
             "bib_id": bib["bib_id"],
             "status": status,

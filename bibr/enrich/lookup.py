@@ -9,16 +9,16 @@ were answered. :meth:`ReferenceLookup.outcome` reduces that to one word:
   (:func:`registration_agencies`): a DataCite DOI is unknown to Crossref
   but exists.
 - ``doi_rejected``: the printed DOI resolved, but to a work published more
-  than a year from the printed year, so it names another work. A record two
-  years before the printed year (an online-first date) and a book's edition
-  are not rejected.
+  than a year from the printed year, so it was not taken as the cited work.
+  The record's year, title and type are kept (``rejected_*``) so the check can
+  say whether the DOI or the printed year is the one that differs.
 - ``search_hit``: a title, fingerprint or reference-string search found the
   work.
 - ``clean_miss``: every search answered, and none found the work.
 - ``error``: a lookup failed (a network error, a server error) and nothing
   else found the work.
-- ``timed_out``: the per-paper enrichment budget ran out before the
-  reference's lookup finished.
+- ``timed_out``: a time budget (the paper's, or a resolver pass's) ran out
+  before every lookup that applies to the reference had answered.
 - ``not_attempted``: the reference gave nothing to look up (no DOI, no
   usable title, no volume to fingerprint).
 """
@@ -58,7 +58,10 @@ UNREGISTERED = "none"
 _DOI_RA_URL = "https://doi.org/ra/"
 # DOIs per doi.org request; the list goes in the URL path.
 _RA_CHUNK = 40
-_RA_TIMEOUT_SECONDS = 10.0
+_RA_TIMEOUT_SECONDS = 3.0
+# doi.org is not Crossref: it gets no contact address, so the operator's
+# CROSSREF_API_EMAIL reaches only the service it was configured for.
+_RA_USER_AGENT = "bibr/{version} (+https://github.com/scienceverse/bibr)"
 
 
 @dataclass
@@ -78,6 +81,16 @@ class ReferenceLookup:
     # For a DOI the registry has no record of: the agency doi.org names for
     # it, lowercase ("datacite", "medra"), or UNREGISTERED.
     registration_agency: str | None = None
+    # For a rejected DOI: the record it resolved to (year, title as
+    # deposited, BibType value).
+    rejected_year: int | None = None
+    rejected_title: str | None = None
+    rejected_type: str | None = None
+
+    def reject(self, year: int | None, title: str | None, bib_type: str | None) -> None:
+        """The printed DOI resolved to a record of another year: keep what it was."""
+        self.doi_status = "rejected"
+        self.rejected_year, self.rejected_title, self.rejected_type = year, title, bib_type
 
     def outcome(self, matched: bool) -> LookupOutcome:
         """The lookup in one word; *matched* is whether the reference has a match."""
@@ -134,15 +147,19 @@ def _ra_name(entry: dict) -> str | None:
     return None
 
 
-async def registration_agencies(
-    dois: list[str], *, user_agent: str | None = None, http=None
-) -> dict[str, str]:
+def _user_agent() -> str:
+    from bibr import __version__
+
+    return _RA_USER_AGENT.format(version=__version__)
+
+
+async def registration_agencies(dois: list[str], *, http=None) -> dict[str, str]:
     """Which agency registered each DOI, by doi.org: ``{doi.casefold(): agency}``.
 
     Agencies are lowercase (``crossref``, ``datacite``, ``medra``);
     :data:`UNREGISTERED` means doi.org says the DOI does not exist. DOIs
     doi.org did not answer for are left out. Never raises: a failed request
-    leaves its DOIs out.
+    leaves its DOIs out. The request names bibr but no contact address.
     """
     from urllib.parse import quote
 
@@ -164,8 +181,7 @@ async def registration_agencies(
 
     owns_http = http is None
     if http is None:
-        headers = {"User-Agent": user_agent} if user_agent else {}
-        http = httpx.AsyncClient(timeout=_RA_TIMEOUT_SECONDS, headers=headers)
+        http = httpx.AsyncClient(timeout=_RA_TIMEOUT_SECONDS, headers={"User-Agent": _user_agent()})
     agencies: dict[str, str] = {}
     try:
         for start in range(0, len(wanted), _RA_CHUNK):

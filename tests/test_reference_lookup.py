@@ -3,6 +3,7 @@ from recorded Crossref and doi.org responses."""
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
@@ -47,8 +48,8 @@ def doi_org(monkeypatch):
     fake = RecordedDoiOrg()
     real = lookup_mod.registration_agencies
 
-    async def recorded(dois, *, user_agent=None, http=None):  # noqa: ARG001
-        return await real(dois, user_agent=user_agent, http=fake)
+    async def recorded(dois, *, http=None):  # noqa: ARG001
+        return await real(dois, http=fake)
 
     monkeypatch.setattr(lookup_mod, "registration_agencies", recorded)
     return fake
@@ -92,28 +93,38 @@ async def test_outcomes_from_recorded_responses(doi_org):
     # One batched doi.org request for both unknown DOIs.
     (url,) = doi_org.urls
     assert url.startswith("https://doi.org/ra/")
+    # The rejected DOI's record is kept, so the check can say what differs.
+    rejected = recorded_lookup(refs[5])
+    assert (rejected.rejected_year, rejected.rejected_type) == (2015, "journal_article")
+    assert rejected.rejected_title == "Estimating the reproducibility of psychological science"
 
 
-async def test_book_doi_is_not_rejected_for_its_edition_year(doi_org):
-    """Cohen's 1988 book is registered as its 2013 edition; a year apart is no
-    evidence against a book's printed DOI."""
+async def test_a_book_doi_of_another_years_edition_is_rejected_and_described(doi_org):
+    """Cohen's 1988 book is registered as its 2013 edition. Enrichment accepts
+    a DOI's record only within a year of the printed year, whatever its type;
+    the record stays on the lookup for the check, which calls the year
+    difference of a book minor."""
     ref = _ref(
         1, "Statistical power analysis for the behavioral sciences", doi=COHEN_DOI, year=1988
     )
-    assert await _enrich([ref]) == {1: "doi_hit"}
+    assert await _enrich([ref]) == {1: "doi_rejected"}
+    assert not ref.match
+    lookup = recorded_lookup(ref)
+    assert (lookup.rejected_year, lookup.rejected_type) == (2013, "book")
 
 
 def test_doi_year_guard():
-    """A record two years before the printed year is the online-first date of
-    the print issue cited; other gaps of two or more years name another work,
-    except for a book's edition."""
+    """A DOI's record more than a year from the printed year is not accepted,
+    whatever the gap's direction or the record's type."""
     from bibr.enrich.references import _doi_year_conflicts
 
-    assert not _doi_year_conflicts(2019, 2017, "journal-article")
-    assert not _doi_year_conflicts(2019, 2018, "journal-article")
-    assert _doi_year_conflicts(2017, 2019, "journal-article")
-    assert _doi_year_conflicts(2020, 2017, "journal-article")
-    assert not _doi_year_conflicts(1988, 2013, "book")
+    assert not _doi_year_conflicts(2019, 2018)
+    assert not _doi_year_conflicts(2018, 2019)
+    assert _doi_year_conflicts(2019, 2017)
+    assert _doi_year_conflicts(2017, 2019)
+    assert _doi_year_conflicts(1988, 2013)
+    assert not _doi_year_conflicts(None, 2013)
+    assert not _doi_year_conflicts(1988, None)
 
 
 async def test_retracted_work_is_found_by_its_doi(doi_org):
@@ -160,6 +171,201 @@ async def test_timed_out_references_are_marked_by_the_enricher(doi_org):
     assert recorded_lookup(ref).outcome(bool(ref.match)) == "timed_out"
 
 
+async def test_a_hanging_doi_org_leaves_the_enrichment_complete(doi_org, monkeypatch):
+    """doi.org only refines a doi_404: when it does not answer, the paper's
+    Crossref lookups that all finished still make a complete enrichment."""
+    from bibr.pipeline.enricher import CrossrefEnricher, EnrichmentStatus
+    from bibr.pipeline.state import FileState
+    from tests.export.conftest import _demo_paper
+
+    async def hang(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(lookup_mod, "registration_agencies", hang)
+    paper = _demo_paper(with_refs=True)
+    paper.metadata.doi = ""
+    first = paper.metadata.references[0]
+    first.doi, first.year, first.match = CARNEY_DOI, 2010, {}
+    second = _ref(2, "Some dataset", doi=DATACITE_DOI, year=2019)
+    paper.metadata.references = [first, second]
+    fs = FileState(path=Path("p.pdf"))
+    fs.paper = paper
+    with patch("bibr.clients.crossref.get_client", return_value=RecordedCrossref()):
+        outcome = await CrossrefEnricher(timeout=0.8, settings=_settings()).enrich(fs)
+
+    assert outcome.status is EnrichmentStatus.COMPLETE
+    assert paper.metadata.enrichment_complete is True
+    assert fs.warnings == []
+    assert recorded_lookup(first).outcome(bool(first.match)) == "doi_hit"
+    assert recorded_lookup(second).outcome(False) == "doi_404"
+    assert recorded_lookup(second).registration_agency is None
+
+
+async def test_the_agency_lookup_has_a_budget_of_its_own(doi_org, monkeypatch):
+    """Called without a deadline, a doi.org that never answers costs its own
+    few seconds, not more."""
+    from bibr.enrich import references as references_mod
+
+    async def hang(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(lookup_mod, "registration_agencies", hang)
+    monkeypatch.setattr(references_mod, "_AGENCY_BUDGET_SECONDS", 0.05)
+    ref = _ref(1, "Some dataset", doi=DATACITE_DOI, year=2019)
+    assert await asyncio.wait_for(_enrich([ref]), timeout=2) == {1: "doi_404"}
+    assert recorded_lookup(ref).registration_agency is None
+
+
+async def test_no_time_left_skips_the_agency_lookup(doi_org):
+    from bibr.enrich.references import enrich_references
+
+    ref = _ref(1, "Some dataset", doi=DATACITE_DOI, year=2019)
+    deadline = asyncio.get_running_loop().time() + 0.1
+    await enrich_references(
+        [ref], crossref_client=RecordedCrossref(), settings=_settings(), deadline=deadline
+    )
+    assert doi_org.urls == []
+    assert recorded_lookup(ref).registration_agency is None
+
+
+async def test_doi_org_is_not_sent_the_contact_address(monkeypatch):
+    """The Crossref contact email is for Crossref: doi.org gets a User-Agent
+    that names bibr and nothing else."""
+    import httpx
+
+    seen: list[httpx.Request] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=[{"DOI": CARNEY_DOI, "RA": "Crossref"}])
+
+    real_client = httpx.AsyncClient
+
+    def mocked(**kwargs):
+        return real_client(transport=httpx.MockTransport(answer), **kwargs)
+
+    monkeypatch.setenv("CROSSREF_API_EMAIL", "ops@example.org")
+    monkeypatch.setattr(httpx, "AsyncClient", mocked)
+    assert await registration_agencies([CARNEY_DOI]) == {CARNEY_DOI: "crossref"}
+    (request,) = seen
+    user_agent = request.headers["User-Agent"]
+    assert user_agent.startswith("bibr/")
+    assert "@" not in user_agent and "mailto" not in user_agent
+
+
+def _resolver_settings(**resolver) -> GlobalSettings:
+    from bibr.config import ResolverOptions
+
+    values = {
+        "sources": ["crossref"],
+        "fallback_sources": ["openalex"],
+        "raw_search": False,
+        "authoritative": False,
+        **resolver,
+    }
+    return GlobalSettings(
+        _env_file=None,
+        crossref={"doi_agency_lookup": False},
+        resolver=ResolverOptions(_env_file=None, **values),
+    )
+
+
+def _resolver(search):
+    from unittest import mock
+
+    resolver = mock.AsyncMock()
+    resolver.search_many = mock.AsyncMock(return_value=[[]])
+    resolver.lookup_doi = mock.AsyncMock(return_value=None)
+    resolver.search = search
+    return resolver
+
+
+async def _hang(*_args, **_kwargs):
+    await asyncio.Event().wait()
+
+
+async def test_a_budget_running_out_in_the_resolver_fallback_is_a_timeout(doi_org):
+    """Crossref answered (no match), but the resolver fallback still owed an
+    answer when the paper's budget ran out: not every lookup answered, so the
+    reference timed out rather than missed cleanly."""
+    from bibr.enrich.lookup import finish_unfinished
+    from bibr.enrich.references import enrich_references
+
+    ref = _ref(1, "A title nobody ever wrote about sourdough", year=2021, authors="Nobody, A.")
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(
+            enrich_references(
+                [ref],
+                crossref_client=RecordedCrossref(),
+                resolver_client=_resolver(_hang),
+                settings=_resolver_settings(),
+            ),
+            timeout=0.2,
+        )
+    finish_unfinished([ref], timed_out=True)
+    assert recorded_lookup(ref).outcome(False) == "timed_out"
+
+
+async def test_a_reference_no_later_pass_searches_is_finished_after_crossref(doi_org):
+    """A reference no resolver pass applies to (no usable title) is finished
+    once Crossref answered, so a budget running out later leaves it alone."""
+    from bibr.enrich.lookup import finish_unfinished
+    from bibr.enrich.references import enrich_references
+
+    searched = _ref(1, "A title nobody ever wrote about sourdough", year=2021)
+    untitled = _ref(2, "Short", doi=DATACITE_DOI, year=2019)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(
+            enrich_references(
+                [searched, untitled],
+                crossref_client=RecordedCrossref(),
+                resolver_client=_resolver(_hang),
+                settings=_resolver_settings(),
+            ),
+            timeout=0.2,
+        )
+    finish_unfinished([searched, untitled], timed_out=True)
+    assert recorded_lookup(searched).outcome(False) == "timed_out"
+    assert recorded_lookup(untitled).outcome(False) == "doi_404"
+
+
+async def test_the_resolver_fallbacks_own_timeout_and_errors_are_not_clean_misses(doi_org):
+    from bibr.enrich.references import enrich_references
+
+    async def search(title, *_args, **_kwargs):
+        if "error" in title:
+            raise RuntimeError("resolver down")
+        await asyncio.Event().wait()
+
+    hung = _ref(1, "A title nobody ever wrote about sourdough", year=2021)
+    failed = _ref(2, "A title that meets a resolver error", year=2021)
+    await enrich_references(
+        [hung, failed],
+        crossref_client=RecordedCrossref(),
+        resolver_client=_resolver(search),
+        settings=_resolver_settings(fallback_timeout=0.1),
+    )
+    assert recorded_lookup(hung).outcome(False) == "timed_out"
+    assert recorded_lookup(failed).outcome(False) == "error"
+
+
+async def test_a_clean_resolver_fallback_miss_is_a_clean_miss(doi_org):
+    from bibr.enrich.references import enrich_references
+
+    async def search(*_args, **_kwargs):
+        return []
+
+    ref = _ref(1, "A title nobody ever wrote about sourdough", year=2021)
+    await enrich_references(
+        [ref],
+        crossref_client=RecordedCrossref(),
+        resolver_client=_resolver(search),
+        settings=_resolver_settings(),
+    )
+    assert recorded_lookup(ref).outcome(False) == "clean_miss"
+    assert recorded_lookup(ref).finished
+
+
 def test_outcome_precedence():
     assert ReferenceLookup(hit="doi").outcome(True) == "doi_hit"
     assert ReferenceLookup(queried=True).outcome(True) == "search_hit"
@@ -185,6 +391,29 @@ async def test_registration_agencies_never_raises():
             raise OSError("unreachable")
 
     assert await registration_agencies([CARNEY_DOI], http=Down()) == {}
+
+
+def test_a_rejected_dois_record_is_exported():
+    from bibr.export.json_export import _export_paper_payload
+    from bibr.export.models import PaperExport
+    from tests.export.conftest import _demo_paper
+
+    paper = _demo_paper(with_refs=True)
+    ref = paper.metadata.references[0]
+    ref.match = {}
+    ref._lookup = ReferenceLookup(queried=True, finished=True)
+    ref._lookup.reject(2013, "Statistical Power Analysis for the Behavioral Sciences", "book")
+    payload = _export_paper_payload(paper)
+    PaperExport.model_validate(payload)
+    assert payload["extraction"]["enrichment"]["lookups"] == [
+        {
+            "bib_id": 1,
+            "outcome": "doi_rejected",
+            "record_year": 2013,
+            "record_title": "Statistical Power Analysis for the Behavioral Sciences",
+            "record_bib_type": "book",
+        }
+    ]
 
 
 def test_lookups_are_exported(demo_paper_for_lookups):

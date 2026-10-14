@@ -52,8 +52,8 @@ def doi_org(monkeypatch):
     fake = RecordedDoiOrg()
     real = lookup_mod.registration_agencies
 
-    async def recorded(dois, *, user_agent=None, http=None):  # noqa: ARG001
-        return await real(dois, user_agent=user_agent, http=fake)
+    async def recorded(dois, *, http=None):  # noqa: ARG001
+        return await real(dois, http=fake)
 
     monkeypatch.setattr(lookup_mod, "registration_agencies", recorded)
     return fake
@@ -122,7 +122,8 @@ async def test_recorded_cases(doi_org):
             first_page="aac4716",
             doi=OSC_DOI,
         ),
-        # 4. Cohen's book, printed 1988, registered as its 2013 edition.
+        # 4. Cohen's book, printed 1988, registered as its 2013 edition: the
+        #    DOI's record is not accepted, being 25 years off.
         _ref(
             4,
             "Statistical power analysis for the behavioral sciences",
@@ -148,7 +149,7 @@ async def test_recorded_cases(doi_org):
         1: "matched",
         2: "matched",
         3: "matched",
-        4: "matched",
+        4: "fields_disagree",
         5: "fields_disagree",
         6: "doi_unregistered",
         7: "unchecked",
@@ -169,12 +170,22 @@ async def test_recorded_cases(doi_org):
         "label": "Retraction",
     }
     assert rows[3]["notes"] == []
-    # A book's DOI carries its edition's year: a minor note, not a disagreement.
+    # A book's DOI carries its edition's year: the titles agree, so the year
+    # is the only note, and minor; the DOI is not blamed.
     assert rows[4]["notes"] == [
         {"field": "year", "printed": "1988", "record": "2013", "severity": "minor"}
     ]
+    assert rows[4]["service"] is None
+    # The DOI resolves to another work: its title and year say so.
     assert rows[5]["notes"] == [
-        {"field": "doi", "printed": OSC_DOI, "record": None, "severity": "major"}
+        {"field": "doi", "printed": OSC_DOI, "record": None, "severity": "major"},
+        {
+            "field": "title",
+            "printed": CARNEY_TITLE,
+            "record": "Estimating the reproducibility of psychological science",
+            "severity": "major",
+        },
+        {"field": "year", "printed": "2010", "record": "2015", "severity": "major"},
     ]
     assert rows[6]["notes"] == [
         {"field": "doi", "printed": UNREGISTERED_DOI, "record": None, "severity": "major"}
@@ -239,12 +250,49 @@ async def test_timed_out_and_failed_lookups_are_unchecked(doi_org):
     assert [r["status"] for r in payload["bib_check"]] == ["unchecked", "unchecked"]
 
 
-def test_unregistered_doi_without_an_agency_answer_is_not_found():
-    """doi.org did not answer (or was not asked): a Crossref 404 is all there is."""
-    row = check_bib({"bib_id": 1, "doi": "10.1000/x"}, [], {"bib_id": 1, "outcome": "doi_404"})
-    assert (row["status"], row["notes"]) == ("not_found", [])
-    crossref = {"bib_id": 1, "outcome": "doi_404", "registration_agency": "crossref"}
-    assert check_bib({"bib_id": 1}, [], crossref)["status"] == "not_found"
+async def test_a_wrong_printed_year_with_the_right_doi_blames_the_year(doi_org):
+    """Carney et al. with their own DOI but printed 2006: the record is the
+    cited work, so the note is on the year, with both years, and not on the
+    DOI."""
+    ref = _ref(1, CARNEY_TITLE, authors=CARNEY_AUTHORS, year=2006, doi=CARNEY_DOI)
+    (row,) = (await _checked([ref])).values()
+
+    assert row["status"] == "fields_disagree"
+    assert row["notes"] == [
+        {"field": "year", "printed": "2006", "record": "2010", "severity": "major"}
+    ]
+
+
+def test_a_rejected_dois_online_first_year_is_minor():
+    lookup = {
+        "bib_id": 1,
+        "outcome": "doi_rejected",
+        "record_year": 2010,
+        "record_title": "A study of things",
+        "record_bib_type": "journal_article",
+    }
+    bib = {"bib_id": 1, "doi": "10.1000/x", "title": "A study of things", "year": 2012}
+    row = check_bib(bib, [], lookup)
+    assert row["status"] == "fields_disagree"
+    assert row["notes"] == [
+        {"field": "year", "printed": "2012", "record": "2010", "severity": "minor"}
+    ]
+
+
+def test_a_doi_crossref_does_not_serve_is_unchecked_unless_doi_org_says_unregistered():
+    """A Crossref 404 is followed by no title search, so it never says
+    Crossref lacks the work: doi.org not asked or silent, or naming Crossref
+    itself (an indexing lag), leaves the reference unchecked."""
+    bib = {"bib_id": 1, "doi": "10.1000/x"}
+    for lookup in (
+        {"bib_id": 1, "outcome": "doi_404"},
+        {"bib_id": 1, "outcome": "doi_404", "registration_agency": "crossref"},
+        {"bib_id": 1, "outcome": "doi_404", "registration_agency": "datacite"},
+    ):
+        row = check_bib(bib, [], lookup)
+        assert (row["status"], row["notes"]) == ("unchecked", [])
+    unregistered = {"bib_id": 1, "outcome": "doi_404", "registration_agency": "none"}
+    assert check_bib(bib, [], unregistered)["status"] == "doi_unregistered"
 
 
 def test_a_reference_without_a_lookup_row_is_unchecked():
