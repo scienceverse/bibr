@@ -90,6 +90,7 @@ def test_batch_forwards_the_identity_switch():
 
 
 def test_run_mcp_maps_identity_flags(monkeypatch):
+    pytest.importorskip("mcp")
     from bibr.mcp_server import run_mcp
 
     captured = {}
