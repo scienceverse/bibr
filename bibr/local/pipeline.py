@@ -239,6 +239,11 @@ class LocalPipeline(Pipeline):
 
     For batch processing, use ``process_chunk()`` which loads each model once
     per chunk and loops over files within each stage.
+
+    ``crossref`` (reference enrichment) and ``crossref_identity`` (only the
+    paper's own DOI lookup, one request per paper, when reference enrichment
+    is off) are tri-state: ``None`` follows ``CROSSREF_ENRICH`` /
+    ``CROSSREF_IDENTITY``, both off by default.
     """
 
     def __init__(
@@ -262,6 +267,7 @@ class LocalPipeline(Pipeline):
         ref_seg_strategy: RefSegStrategy | None = None,
         ref_parse_strategy: RefParseStrategy | None = None,
         settings: GlobalSettings | None = None,
+        crossref_identity: bool | None = None,
     ):
         from bibr.config import snapshot_settings
 
@@ -275,7 +281,11 @@ class LocalPipeline(Pipeline):
             url_request,
         )
         from bibr.pipeline.context import RunConfig
-        from bibr.pipeline.enricher import CrossrefEnricher, RorEnricher
+        from bibr.pipeline.enricher import (
+            CrossrefEnricher,
+            CrossrefIdentityEnricher,
+            RorEnricher,
+        )
         from bibr.pipeline.plans import build_stage_plan
         from bibr.pipeline.resources import ResourceManager
 
@@ -330,6 +340,7 @@ class LocalPipeline(Pipeline):
         # default), True/False force it for this pipeline.
         if no_llm:
             crossref = False
+            crossref_identity = False
             equations = False
             llm_backend = "cloud"
 
@@ -341,6 +352,7 @@ class LocalPipeline(Pipeline):
             ocr_profile=ocr_profile,
             device=device,
             crossref=crossref,
+            crossref_identity=crossref_identity,
             equations=equations,
             start_page=start_page,
             end_page=end_page,
@@ -371,16 +383,17 @@ class LocalPipeline(Pipeline):
 
         # refs=off produces an empty bib table — Crossref enrichment (which
         # works on references) would be a per-paper no-op; skip the enricher
-        # so the enrich stage disappears rather than silently idling.
-        refs_off = (
-            ref_parse_strategy or settings_snapshot.REF_PARSE_STRATEGY or ""
-        ).lower() == "off"
-
+        # so the enrich stage disappears rather than silently idling. The
+        # identity-only lookup (the paper's own DOI) still runs under refs=off.
         enrichers = []
-        if config.enrichment_enabled(settings_snapshot) and not refs_off:
+        identity_enrichers = []
+        enrichment_mode = config.enrichment_mode(settings_snapshot)
+        if enrichment_mode == "full":
             enrichers.append(CrossrefEnricher(settings=settings_snapshot))
             if settings_snapshot.ror.enrich:
                 enrichers.append(RorEnricher(settings=settings_snapshot))
+        elif enrichment_mode == "identity":
+            identity_enrichers.append(CrossrefIdentityEnricher(settings=settings_snapshot))
 
         # Cloud LLM has no OCR→LLM VRAM handoff, so each OCR window's back
         # half (parse → extract → enrich → export) streams under subsequent
@@ -393,7 +406,10 @@ class LocalPipeline(Pipeline):
             and settings_snapshot.pipeline.stream_backhalf
         )
         stages = build_stage_plan(
-            mode="local", stream_backhalf=stream_backhalf, enrichers=enrichers
+            mode="local",
+            stream_backhalf=stream_backhalf,
+            enrichers=enrichers,
+            identity_enrichers=identity_enrichers,
         )
         super().__init__(
             stages=stages,
@@ -410,6 +426,7 @@ class LocalPipeline(Pipeline):
         self.ocr_profile = ocr_profile
         self.device = device
         self.crossref = crossref
+        self.crossref_identity = crossref_identity
         self.equations = equations
         self.start_page = start_page
         self.end_page = end_page

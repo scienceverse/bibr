@@ -237,3 +237,140 @@ def test_effective_crossref_resolution_order(tmp_path):
     assert api._effective_crossref(False) is False
     api._pipeline._config = dataclasses.replace(api._pipeline._config, crossref=False)
     assert api._effective_crossref(None) is False
+
+
+# --- crossref_identity: the paper's own DOI lookup ----------------------------
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("true", True), ("no", False), ("", None)])
+async def test_decode_request_parses_crossref_identity_tri_state(
+    tmp_path, monkeypatch, raw, expected
+):
+    import bibr.serve.deployments.pipeline as mod
+
+    monkeypatch.setattr(
+        mod, "consume_upload_descriptor", lambda *_a, **_k: (b"%PDF-1.4 stub", "ab" * 32)
+    )
+    api = BibrPipelineAPI(upload_root=tmp_path)
+    descriptor = {"upload_id": "u1", "filename": "paper.pdf", "size": 13, "sha256": "ab" * 32}
+    descriptor["crossref_identity"] = raw
+
+    decoded = await api.decode_request(descriptor)
+
+    assert decoded["crossref_identity"] is expected
+
+
+async def test_decode_request_rejects_non_boolean_crossref_identity(tmp_path, monkeypatch):
+    import bibr.serve.deployments.pipeline as mod
+
+    monkeypatch.setattr(
+        mod, "consume_upload_descriptor", lambda *_a, **_k: (b"%PDF-1.4 stub", "ab" * 32)
+    )
+    api = BibrPipelineAPI(upload_root=tmp_path)
+    descriptor = {
+        "upload_id": "u1",
+        "filename": "paper.pdf",
+        "size": 13,
+        "sha256": "ab" * 32,
+        "crossref_identity": "maybe",
+    }
+
+    with pytest.raises(HTTPException) as excinfo:
+        await api.decode_request(descriptor)
+    assert "crossref_identity must be a boolean" in excinfo.value.detail
+
+
+async def test_request_crossref_identity_overrides_run_config(tmp_path):
+    api, pipeline, _ = _api(tmp_path, setting=False)
+
+    await api.predict({**_inputs(), "crossref_identity": True})
+    await api.predict({**_inputs(content=b"other"), "crossref_identity": False})
+    await api.predict(_inputs(content=b"third"))
+
+    forced_on, forced_off, absent = pipeline.configs
+    assert forced_on.crossref_identity is True
+    assert forced_off.crossref_identity is False
+    # Absent keeps the deployment's tri-state (None → CROSSREF_IDENTITY).
+    assert absent.crossref_identity is None
+
+
+def _identity_key(api: BibrPipelineAPI, inputs: dict, *, crossref: bool, identity: bool) -> str:
+    import hashlib
+
+    digest = hashlib.sha256(inputs["content"]).hexdigest()
+    ref_seg, refs = _resolve_ref_strategies(None, None)
+    return api._cache_key(
+        digest,
+        None,
+        None,
+        False,
+        False,
+        None,
+        refs=refs,
+        ref_seg=ref_seg,
+        crossref=crossref,
+        input_format=".pdf",
+        identity=identity,
+    )
+
+
+async def test_identity_result_never_shares_a_cache_entry_with_a_plain_one(tmp_path):
+    api, pipeline, cache = _api(tmp_path, setting=False)
+
+    await api.predict(_inputs())
+    await api.predict({**_inputs(), "crossref_identity": True})  # must miss and run again
+
+    assert len(pipeline.configs) == 2
+    assert set(cache.values) == {
+        _identity_key(api, _inputs(), crossref=False, identity=False),
+        _identity_key(api, _inputs(), crossref=False, identity=True),
+    }
+    assert _identity_key(api, _inputs(), crossref=False, identity=True).endswith(":ident:fmt:pdf")
+
+
+async def test_identity_under_full_enrichment_shares_the_enriched_entry(tmp_path):
+    """Reference enrichment already makes the identity lookup: same result."""
+    api, pipeline, cache = _api(tmp_path, setting=True)
+
+    await api.predict(_inputs())
+    await api.predict({**_inputs(), "crossref_identity": True})
+
+    assert len(pipeline.configs) == 1
+    assert set(cache.values) == {_identity_key(api, _inputs(), crossref=True, identity=False)}
+
+
+def test_effective_crossref_identity_resolution_order(tmp_path):
+    api, _, _ = _api(tmp_path, setting=False)
+    assert api._effective_crossref_identity(None) is False
+    assert api._effective_crossref_identity(True) is True
+    api._settings.crossref.identity = True
+    assert api._effective_crossref_identity(None) is True
+    assert api._effective_crossref_identity(False) is False
+    api._pipeline._config = dataclasses.replace(api._pipeline._config, crossref_identity=False)
+    assert api._effective_crossref_identity(None) is False
+
+
+@pytest.mark.parametrize("value", ["true", "0", "YES"])
+def test_upload_options_accept_crossref_identity(value):
+    from bibr.serve.ingress import _validate_upload_options
+
+    assert _validate_upload_options({"crossref_identity": value}) == {"crossref_identity": value}
+
+
+def test_upload_options_reject_non_boolean_crossref_identity():
+    from bibr.serve.ingress import InvalidUploadOptionError, _validate_upload_options
+
+    with pytest.raises(InvalidUploadOptionError, match="crossref_identity must be a boolean"):
+        _validate_upload_options({"crossref_identity": "sometimes"})
+
+
+def test_job_dedupe_compares_crossref_identity_by_meaning():
+    from bibr.serve.jobs import upload_fingerprint
+
+    sha = "ab" * 32
+    assert upload_fingerprint(sha, "p.pdf", {"crossref_identity": "1"}) == upload_fingerprint(
+        sha, "p.pdf", {"crossref_identity": "yes"}
+    )
+    assert upload_fingerprint(sha, "p.pdf", {"crossref_identity": "1"}) != upload_fingerprint(
+        sha, "p.pdf", {"crossref_identity": "no"}
+    )

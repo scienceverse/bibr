@@ -50,6 +50,7 @@ def chew_options_from_config(config: Any) -> dict[str, Any]:
         "ocr_profile": config.ocr_profile,
         "device": config.device,
         "crossref": config.crossref,
+        "crossref_identity": config.crossref_identity,
         "equations": config.equations,
         "no_llm": config.no_llm,
         "figure_images": config.figure_images,
@@ -106,6 +107,10 @@ def _form_fields(args: Any, console: Any) -> dict[str, str] | None:
         form["crossref"] = "true"
     elif getattr(args, "no_crossref", False):
         form["crossref"] = "false"
+    if getattr(args, "crossref_identity", False):
+        form["crossref_identity"] = "true"
+    elif getattr(args, "no_crossref_identity", False):
+        form["crossref_identity"] = "false"
     if args.pages:
         from bibr.utils.pages import parse_pages
 

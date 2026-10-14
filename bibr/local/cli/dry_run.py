@@ -202,7 +202,17 @@ def _dry_run_enrichment_lines(config: ResolvedRunConfig, parse_strategy: str) ->
             reason = "CROSSREF_ENRICH=false"
         else:
             reason = "off by default; enable with --crossref or CROSSREF_ENRICH=true"
-        lines.append(f"Crossref: disabled ({reason})")
+        # The identity-only lookup (the paper's own DOI) runs when reference
+        # enrichment does not, unless --no-llm rules out every external call.
+        identity = getattr(config, "crossref_identity", None)
+        identity_on = not config.no_llm and (
+            identity if identity is not None else bool(Settings.crossref.identity)
+        )
+        if identity_on:
+            source = "--crossref-identity" if identity is True else "CROSSREF_IDENTITY=true"
+            lines.append(f"Crossref: paper DOI lookup only ({source}); references off ({reason})")
+        else:
+            lines.append(f"Crossref: disabled ({reason})")
         return lines
     lines.append(
         "Crossref: enabled (--crossref)"

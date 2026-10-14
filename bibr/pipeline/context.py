@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 ConsolidationMode = Literal["off", "fill", "replace"]
+EnrichmentMode = Literal["full", "identity", "off"]
 FigureExtractTier = Literal["off", "meta"]
 MemoryMode = Literal["aggressive", "balanced", "keep_all"]
 RefParseStrategy = Literal["ner", "llm", "llm-chunked", "ref-llm", "off"]
@@ -70,6 +71,10 @@ class RunConfig:
     ``Settings.crossref.enrich`` (off by default); ``True`` forces it on and
     ``False`` forces it off regardless of the setting. Resolve through
     :meth:`enrichment_enabled` rather than reading the field directly."""
+    crossref_identity: bool | None = None
+    """Look up only the paper's own DOI (one request) when reference
+    enrichment does not run. ``None`` follows ``Settings.crossref.identity``
+    (off by default). Resolve through :meth:`enrichment_mode`."""
     equations: bool = True
     start_page: int | None = None
     end_page: int | None = None
@@ -117,6 +122,33 @@ class RunConfig:
         if self.crossref is not None:
             return bool(self.crossref)
         return bool(settings.crossref.enrich)
+
+    def references_off(self, settings: GlobalSettings) -> bool:
+        """Whether reference extraction is off (``refs=off``) for this chunk."""
+        strategy = self.ref_parse_strategy or settings.REF_PARSE_STRATEGY or ""
+        return strategy.lower() == "off"
+
+    def enrichment_mode(self, settings: GlobalSettings) -> EnrichmentMode:
+        """Which external lookups the enrichment stage makes for this chunk.
+
+        ``"full"``: reference enrichment (:meth:`enrichment_enabled`, with
+        references extracted), which includes the paper's own DOI lookup.
+        ``"identity"``: only the paper's own DOI, one request per paper, when
+        :attr:`crossref_identity` (else ``settings.crossref.identity``) asks
+        for it and full enrichment does not run, including under
+        ``refs=off``. ``"off"``: no lookups. ``no_llm`` runs promise no
+        external calls, so they are always ``"off"``.
+        """
+        if self.no_llm:
+            return "off"
+        if self.enrichment_enabled(settings) and not self.references_off(settings):
+            return "full"
+        identity = (
+            self.crossref_identity
+            if self.crossref_identity is not None
+            else settings.crossref.identity
+        )
+        return "identity" if identity else "off"
 
     def figure_extract_tier(self, settings: GlobalSettings) -> FigureExtractTier:
         """Resolve the per-run figure-analysis tier.

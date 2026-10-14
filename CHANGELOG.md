@@ -21,6 +21,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   parse, bibr asks for the verbatim answer instead. A stand-in the model writes for an
   affiliation the text does not print ("Affiliation 3") is left empty.
   The merged call, the JSON re-roll and the NuExtract native backend stay verbatim.
+- `CROSSREF_IDENTITY=true` looks up the paper's own DOI when reference enrichment is off: one
+  request per paper that has a DOI, about half a second, in place of a lookup per reference. The
+  record goes to `metadata_match` as it does with full enrichment, and `refs=off` does not stop
+  the lookup. Switch it per run with `bibr chew --crossref-identity` / `--no-crossref-identity`
+  (also on `bibr batch` and `bibr mcp`), `bibr.chew(..., crossref_identity=True)`, the
+  `crossref_identity` form field on `POST /papers/extract` and `POST /papers/jobs`, or the
+  `crossref_identity` knob of the serve MCP tools. It is off by default because the request sends
+  the paper's DOI to Crossref (or to your resolver). It never runs with `--no-llm`. A failed or
+  timed-out lookup leaves the paper without a record and adds a warning. It does not hold the
+  result back.
 
 ### Changed
 

@@ -135,6 +135,7 @@ chew` CLI flags:
 | `no_llm` | `--no-llm` | Skip metadata LLM calls, equation extraction, citation linking, and Crossref; native metadata survives. OCR still uses the selected backend |
 | `device` | `--device` | Force compute device: `"cuda"`, `"mps"`, `"cpu"` |
 | `crossref` | `--crossref` / `--no-crossref` | Tri-state: `True` runs Crossref/resolver reference enrichment for this call, `False` skips it, omitted/`None` follows `CROSSREF_ENRICH` (off by default) |
+| `crossref_identity` | `--crossref-identity` / `--no-crossref-identity` | Tri-state: `True` looks up only the paper's own DOI (one request, which sends the DOI to Crossref) when reference enrichment is off, so the export can say whether the title and authors agree with the paper's record; omitted/`None` follows `CROSSREF_IDENTITY` (off by default) |
 | `equations` | `--no-equations` (inverted) | Enable/disable equation extraction |
 | `pages` | `--pages` | Page range to process, 1-based (e.g. `"1-5"`) |
 | `figure_images` | `--figure-images` | Include figure images in the output, as `data:` URIs |

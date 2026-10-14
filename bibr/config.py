@@ -1357,6 +1357,21 @@ class CrossrefOptions(_BibrSettings):
         "Per-run overrides: `bibr chew --crossref`/`--no-crossref`, `chew(crossref=...)`, "
         "or the serve API's `crossref` form field.",
     )
+    # The paper's own registry record without the reference fan-out: one DOI
+    # lookup per paper (about half a second against Crossref) instead of one
+    # per reference. It sends the paper's DOI to Crossref (or the resolver),
+    # which is why it is opt-in like enrichment itself. Full enrichment already
+    # makes this lookup, so the switch only matters when that is off.
+    identity: bool = Field(
+        False,
+        description="Look up the paper's own DOI in Crossref (or the configured resolver) when "
+        "reference enrichment is off: one request per paper with a selected DOI, which sends "
+        "that DOI to Crossref. The record goes to `metadata_match`, and the export compares the "
+        "title and authors with it (`extraction.fields.title.registry`, "
+        "`extraction.fields.author.registry`). Off by default; never runs without the LLM. "
+        "Per-run overrides: `bibr chew --crossref-identity`/`--no-crossref-identity`, "
+        "`chew(crossref_identity=...)`, or the serve API's `crossref_identity` form field.",
+    )
     # Every DOI-bearing reference otherwise costs its own /works/{doi} request
     # against a rate limiter shared by the whole process (and, with Redis, the
     # whole fleet). One /works?filter=doi:... request answers up to

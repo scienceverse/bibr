@@ -15,12 +15,16 @@ def build_stage_plan(
     mode: Literal["local", "serve"],
     stream_backhalf: bool,
     enrichers: Sequence[Enricher],
+    identity_enrichers: Sequence[Enricher] = (),
 ) -> tuple[Stage, ...]:
     """Build a fresh, validated-by-owner ordered stage plan.
 
     The pipeline remains deliberately linear.  Local execution fuses the
     render/OCR stages to bound memory, while serve keeps them separate so its
     GPU batchers can coalesce work across requests.
+
+    ``enrichers`` run when reference enrichment is on; ``identity_enrichers``
+    when a run asks only for the paper's own DOI lookup.
     """
     from bibr.pipeline.stages.classifiers import ClassifierStage, RequiredClassifierGate
     from bibr.pipeline.stages.core_checkpoint import CoreCheckpointStage
@@ -55,8 +59,13 @@ def build_stage_plan(
                     parse=ParseSegmentStage(),
                     post_parse=PostParseStage(),
                     identity=IdentityValidationStage(),
-                    checkpoint=CoreCheckpointStage(enrichment_requested=bool(enrichers)),
-                    enrich=EnrichmentStage(enrichers=list(enrichers)),
+                    checkpoint=CoreCheckpointStage(
+                        enrichment_requested=bool(enrichers),
+                        identity_requested=bool(identity_enrichers),
+                    ),
+                    enrich=EnrichmentStage(
+                        enrichers=list(enrichers), identity_enrichers=list(identity_enrichers)
+                    ),
                     export=ExportStage(),
                 ),
             )
@@ -68,8 +77,11 @@ def build_stage_plan(
             ParseSegmentStage(),
             PostParseStage(),
             IdentityValidationStage(),
-            CoreCheckpointStage(enrichment_requested=bool(enrichers)),
-            EnrichmentStage(enrichers=list(enrichers)),
+            CoreCheckpointStage(
+                enrichment_requested=bool(enrichers),
+                identity_requested=bool(identity_enrichers),
+            ),
+            EnrichmentStage(enrichers=list(enrichers), identity_enrichers=list(identity_enrichers)),
             ExportStage(),
         )
 
@@ -86,8 +98,11 @@ def build_stage_plan(
             ParseSegmentStage(),
             PostParseStage(),
             IdentityValidationStage(),
-            CoreCheckpointStage(enrichment_requested=bool(enrichers)),
-            EnrichmentStage(enrichers=list(enrichers)),
+            CoreCheckpointStage(
+                enrichment_requested=bool(enrichers),
+                identity_requested=bool(identity_enrichers),
+            ),
+            EnrichmentStage(enrichers=list(enrichers), identity_enrichers=list(identity_enrichers)),
             ExportStage(),
         )
 

@@ -821,6 +821,10 @@ def run_mcp(args: argparse.Namespace) -> int:
         options["crossref"] = True
     elif getattr(args, "no_crossref", False):
         options["crossref"] = False
+    if getattr(args, "crossref_identity", False):
+        options["crossref_identity"] = True
+    elif getattr(args, "no_crossref_identity", False):
+        options["crossref_identity"] = False
     if getattr(args, "no_equations", False):
         options["equations"] = False
     if getattr(args, "no_llm", False):

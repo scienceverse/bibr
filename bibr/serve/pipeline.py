@@ -77,6 +77,7 @@ class ServePipeline(Pipeline):
         equations: bool = True,
         ocr_profile: str | None = None,
         settings: GlobalSettings | None = None,
+        crossref_identity: bool | None = None,
     ) -> None:
         # Ensure BibrServeOcrBackend is imported so its ``@register``
         # decorator runs before ResourceManager tries to instantiate it.
@@ -94,7 +95,8 @@ class ServePipeline(Pipeline):
         # ServePipeline instance can be shared across concurrent requests on
         # one worker. ``crossref`` here is the deployment-level tri-state
         # (None = follow CROSSREF_ENRICH); a request's ``crossref`` form field
-        # overrides it per run.
+        # overrides it per run. ``crossref_identity`` works the same way
+        # against CROSSREF_IDENTITY and the ``crossref_identity`` form field.
         config = RunConfig(
             memory_mode="keep_all",
             ocr_backend="serve-http",
@@ -103,6 +105,7 @@ class ServePipeline(Pipeline):
             ocr_profile=ocr_profile if ocr_profile is not None else default_ocr_profile,
             device=None,
             crossref=crossref,
+            crossref_identity=crossref_identity,
             equations=equations,
             llm_backend="cloud",
         )
@@ -127,18 +130,29 @@ class ServePipeline(Pipeline):
         # request could need it and ``EnrichmentStage`` gates each run on
         # ``RunConfig.enrichment_enabled``. A request can also override a
         # deployment whose reference parser defaults to off, so that default
-        # must not permanently remove the enricher.
-        from bibr.pipeline.enricher import CrossrefEnricher, RorEnricher
+        # must not permanently remove the enricher. The identity-only lookup
+        # is likewise a per-request choice (``crossref_identity``).
+        from bibr.pipeline.enricher import (
+            CrossrefEnricher,
+            CrossrefIdentityEnricher,
+            RorEnricher,
+        )
 
         enrichers = [CrossrefEnricher(settings=settings_snapshot)]
         if settings_snapshot.ror.enrich:
             enrichers.append(RorEnricher(settings=settings_snapshot))
+        identity_enrichers = [CrossrefIdentityEnricher(settings=settings_snapshot)]
 
         # NOTE: ServePipeline omits LlmServerStage (which LocalPipeline includes
         # at bibr/local/pipeline.py). The serve worker manages its own
         # vllm-mlx subprocess lifecycle out-of-band — adding LlmServerStage here
         # would double-start the LLM server on the first request.
-        stages = build_stage_plan(mode="serve", stream_backhalf=False, enrichers=enrichers)
+        stages = build_stage_plan(
+            mode="serve",
+            stream_backhalf=False,
+            enrichers=enrichers,
+            identity_enrichers=identity_enrichers,
+        )
         super().__init__(
             stages=stages,
             resources=resources,

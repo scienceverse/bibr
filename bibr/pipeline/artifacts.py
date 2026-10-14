@@ -131,6 +131,8 @@ def enrichment_settings_digest(ctx: PipelineContext) -> str:
     settings = {
         "schema_revision": CROSSREF_ENRICHMENT_SCHEMA_REVISION,
         "enabled": ctx.config.enrichment_enabled(ctx.settings),
+        # "full", "identity" (the paper's own DOI only) or "off".
+        "mode": ctx.config.enrichment_mode(ctx.settings),
         "consolidate": ctx.config.consolidate or crossref.consolidate,
         "verify": crossref.verify,
         "enrich_concurrency": crossref.enrich_concurrency,
@@ -282,8 +284,15 @@ def replay_enrichment_sidecar(
     sidecar: EnrichmentSidecar,
     *,
     expected_settings_digest: str,
+    references_enriched: bool = True,
 ) -> dict:
-    """Merge a sidecar only when core, settings, and schema identities match."""
+    """Merge a sidecar only when core, settings, and schema identities match.
+
+    ``references_enriched`` is False for an identity-only sidecar (only the
+    paper's own DOI was looked up): its ``extraction.enrichment`` block is
+    left as the core has it, since no reference was looked up and a
+    ``refs_enriched: 0`` row would read as an enrichment that found nothing.
+    """
 
     if sidecar.schema_version != ENRICHMENT_SIDECAR_SCHEMA_VERSION:
         raise ArtifactReplayError("unsupported enrichment sidecar schema")
@@ -390,7 +399,7 @@ def replay_enrichment_sidecar(
     # v11: enrichment completeness and warnings live under ``extraction``, whose
     # presence the contract checks above already guaranteed.
     extraction = replayed["extraction"]
-    if bibliography:
+    if references_enriched and bibliography:
         matched_ids = {
             row.get("bib_id")
             for row in sidecar.bib_match
@@ -401,7 +410,7 @@ def replay_enrichment_sidecar(
             "refs_enriched": len(matched_ids),
             "refs_total": len(bibliography),
         }
-    else:
+    elif references_enriched:
         # Nothing to enrich — absent, not a zeroed row.
         extraction.pop("enrichment", None)
     if sidecar.completeness == "complete":

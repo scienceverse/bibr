@@ -347,6 +347,9 @@ class ExportStage:
                             core_payload,
                             durable_sidecar,
                             expected_settings_digest=settings_digest,
+                            references_enriched=(
+                                ctx.config.enrichment_mode(ctx.settings) == "full"
+                            ),
                         )
                         # The replayed core's extraction block predates
                         # enrichment, so its timings omit the enrich stage even

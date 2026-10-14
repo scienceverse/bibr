@@ -760,3 +760,16 @@ async def test_keyless_mount_serves_a_local_mcp_client_end_to_end():
                     "chew_paper", {"filename": "p.pdf", "content_base64": PDF_B64}
                 )
                 assert res.structured_content["paper_id"] == FIXTURE_ID
+
+
+@pytest.mark.parametrize(("identity", "expected"), [(True, "true"), (False, "false")])
+async def test_chew_paper_passes_crossref_identity_switch_through(identity, expected):
+    """The ``crossref_identity`` knob rides the descriptor like the form field."""
+    tracker = _FakeTracker()
+    async with _tool_session(tracker) as client:
+        await client.call_tool(
+            "chew_paper",
+            {"filename": "paper.pdf", "content_base64": PDF_B64, "crossref_identity": identity},
+        )
+        (descriptor,) = tracker.descriptors
+        assert descriptor["crossref_identity"] == expected

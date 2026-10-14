@@ -30,8 +30,15 @@ class EnrichmentStage:
     requires = ("paper",)
     produces = ()
 
-    def __init__(self, enrichers: Sequence[Enricher]) -> None:
+    def __init__(
+        self,
+        enrichers: Sequence[Enricher],
+        identity_enrichers: Sequence[Enricher] = (),
+    ) -> None:
+        # ``enrichers`` run when reference enrichment is on; ``identity_enrichers``
+        # (the paper's own DOI lookup) when only that was asked for.
         self._enrichers = enrichers
+        self._identity_enrichers = identity_enrichers
 
     @staticmethod
     async def _record_cutoff(papers, detail: str) -> None:
@@ -61,13 +68,21 @@ class EnrichmentStage:
 
     async def run(self, ctx: PipelineContext) -> None:
         # The serve pipeline is shared across requests, so request-scoped
-        # switches (refs=off, the tri-state ``crossref`` form field) cannot be
-        # represented by removing the stage at construction: gate per run.
-        if (
-            not self._enrichers
-            or (ctx.config.ref_parse_strategy or ctx.settings.REF_PARSE_STRATEGY) == "off"
-            or not ctx.config.enrichment_enabled(ctx.settings)
-        ):
+        # switches (refs=off, the tri-state ``crossref`` and
+        # ``crossref_identity`` form fields) cannot be represented by removing
+        # the stage at construction: gate per run.
+        mode = ctx.config.enrichment_mode(ctx.settings)
+        if mode == "full" and self._enrichers:
+            enrichers = self._enrichers
+            papers = [fs for fs in ctx.alive() if fs.paper is not None]
+        elif mode == "identity" and self._identity_enrichers:
+            from bibr.pipeline.enricher import needs_identity_lookup
+
+            enrichers = self._identity_enrichers
+            # Only papers with a DOI: the checkpoint marked just these pending,
+            # and the rest keep their core as the final export.
+            papers = [fs for fs in ctx.alive() if needs_identity_lookup(fs.paper)]
+        else:
             # Nothing will consume an enrichment prefetch on this path (e.g. a
             # serve request that switched refs/enrichment off against a
             # pipeline that started one): settle it before leaving.
@@ -75,7 +90,6 @@ class EnrichmentStage:
             return
         ctx.progress.stage_start(self.name)
         t0 = time.monotonic()
-        papers = [fs for fs in ctx.alive() if fs.paper is not None]
         if papers:
             unexpected_failure_ids: set[int] = set()
             explicit_partial_ids: set[int] = set()
@@ -93,7 +107,7 @@ class EnrichmentStage:
                         time.monotonic() - fs_t0
                     )
 
-            for enricher in self._enrichers:
+            for enricher in enrichers:
                 # return_exceptions: one file's enricher blowing up must not
                 # cancel its siblings or abort the chunk — enrichment is
                 # best-effort, so unexpected failures demote to warnings.
@@ -164,5 +178,9 @@ class EnrichmentStage:
             # a custom one ignores it) leaves the handle on the paper: settle
             # it so the stage never leaks a task.
             await discard_prefetches(papers)
+        if mode == "identity":
+            # The identity lookup consumes no reference prefetch, and papers
+            # without a DOI were never in ``papers``.
+            await discard_prefetches(ctx.alive())
         logger.debug("Enrichment stage: %.1fs", time.monotonic() - t0)
         ctx.progress.stage_end(self.name)
