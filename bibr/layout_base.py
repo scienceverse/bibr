@@ -219,7 +219,9 @@ class BaseLayoutDetector:
         """Open the ONNX bundle; ``self._model`` is the ORT backend."""
         from bibr.layout_onnx import PP_DOCLAYOUT_V4, OnnxLayoutBackend
 
-        backend = OnnxLayoutBackend(bundle_dir, device=device, threshold=self.threshold)
+        backend = OnnxLayoutBackend(
+            bundle_dir, device=device, threshold=self.threshold, settings=self._settings
+        )
         id2label = backend.manifest.get("id2label")
         if id2label is None and backend.architecture == PP_DOCLAYOUT_V4:
             from bibr.exceptions import ConfigurationError

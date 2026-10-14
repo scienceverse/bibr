@@ -450,13 +450,13 @@ def ort_thread_caps(settings=None) -> tuple[int, int]:
     """``(intra_op, inter_op)`` thread caps from ``ML_ORT_INTRA_OP_THREADS`` /
     ``ML_ORT_INTER_OP_THREADS``; ``0`` keeps ONNX Runtime's own default.
 
-    ``settings`` defaults to the process settings (environment and ``.env``):
-    the cap is a property of the host, read when each session opens.
+    ``settings`` is the owner's settings (a pipeline's, a loader's); without
+    one, the process settings (environment and ``.env``) are read in place.
     """
     if settings is None:
-        from bibr.config import snapshot_settings
+        from bibr.config import Settings
 
-        settings = snapshot_settings()
+        settings = Settings
     ml = settings.ml
     return int(ml.ort_intra_op_threads), int(ml.ort_inter_op_threads)
 
@@ -504,6 +504,7 @@ def create_session(
     model_name: str = "",
     gpu_mem_limit: int | None = None,
     disable_cpu_arena: bool = False,
+    settings=None,
 ):
     """Open an ``InferenceSession`` on ``model_path`` and report its device.
 
@@ -520,7 +521,8 @@ def create_session(
     there is unverified. Only pass it for models where the arena cost was
     measured (layout, SaT), not blindly for every model.
 
-    The session's thread pools take the ``ML_ORT_*_THREADS`` caps (see
+    The session's thread pools take the ``ML_ORT_*_THREADS`` caps of
+    ``settings`` (the process settings when ``None``; see
     :func:`apply_ort_thread_caps`); unset, ONNX Runtime sizes them itself.
     """
     ort = import_onnxruntime(model_name or "ONNX Runtime inference")
@@ -538,7 +540,7 @@ def create_session(
     options.log_severity_level = 3  # errors only; ORT's warnings are noisy at load
     if disable_cpu_arena and selected_device(providers) != "cuda":
         options.enable_cpu_mem_arena = False
-    apply_ort_thread_caps(options)
+    apply_ort_thread_caps(options, settings)
     session = ort.InferenceSession(str(model_path), sess_options=options, providers=providers)
     device = session_device(session, providers, model_name=model_name)
     return shrink_arena_after_runs(session), device

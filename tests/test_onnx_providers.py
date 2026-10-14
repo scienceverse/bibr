@@ -436,6 +436,34 @@ def test_create_session_reads_the_process_settings(monkeypatch):
     assert recorded["intra_op_num_threads"] == 3
 
 
+def test_create_session_takes_the_caps_of_the_settings_it_is_given(monkeypatch):
+    """A loader's settings (a pipeline's, a Python caller's) decide the caps,
+    not the process settings."""
+    from bibr.config import Settings
+
+    monkeypatch.setattr(Settings.ml, "ort_intra_op_threads", 0)
+    mock_ort, recorded = _cpu_only_ort_with_recording_options()
+    with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
+        onnx_providers.create_session(
+            "model.onnx", device="cpu", model_name="ner", settings=_capped_settings(2, 1)
+        )
+
+    assert (recorded["intra_op_num_threads"], recorded["inter_op_num_threads"]) == (2, 1)
+
+
+def test_thread_caps_read_the_process_settings_without_copying_them(monkeypatch):
+    """Opening a session reads two integers; it does not deep-copy the settings."""
+    from bibr.config import Settings
+
+    def no_snapshot(*_args, **_kwargs):
+        raise AssertionError("ort_thread_caps copied the settings")
+
+    monkeypatch.setattr("bibr.config.snapshot_settings", no_snapshot)
+    monkeypatch.setattr(Settings.ml, "ort_intra_op_threads", 5)
+
+    assert onnx_providers.ort_thread_caps() == (5, 0)
+
+
 def test_with_thread_caps_returns_options_unchanged_without_caps():
     """No cap: the segmenter's options (or their absence) pass straight through."""
     sentinel = object()

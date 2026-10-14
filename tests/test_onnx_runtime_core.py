@@ -343,3 +343,64 @@ def test_layout_forward_shapes_match_the_v3_contract():
     assert bool(((boxes >= 0.0) & (boxes <= 1.0)).all())
     # A strict threshold keeps nothing, but the run stays well-formed.
     assert all(len(det["scores"]) == 0 for det in backend.run(pages))
+
+
+# --- ML_ORT_*_THREADS reach every session through the run's own settings -------
+
+
+def _thread_settings(intra: int, inter: int):
+    from bibr.config import GlobalSettings
+
+    return GlobalSettings(
+        ml={"runtime": "onnx", "ort_intra_op_threads": intra, "ort_inter_op_threads": inter},
+        layout={"onnx_model_id": str(BUNDLES / "layout")},
+    )
+
+
+def _thread_pools(session) -> tuple[int, int]:
+    options = session.get_session_options()
+    return options.intra_op_num_threads, options.inter_op_num_threads
+
+
+def _load_onnx_sessions(settings) -> list:
+    """The session of every model ``create_session`` opens, loaded the way a run loads them."""
+    from bibr.local.layout import LayoutDetector
+    from bibr.ner.runtime import load_ref_parser
+    from bibr.structure.paper_classifier_common import load_paper_classifier
+    from bibr.structure.section_classifier_common import load_section_classifier
+
+    layout = LayoutDetector(device="cpu", settings=settings)
+    section = load_section_classifier(
+        str(BUNDLES / "section"), revision="main", device="cpu", settings=settings
+    )
+    paper = load_paper_classifier(
+        str(BUNDLES / "paper"), revision="main", device="cpu", settings=settings
+    )
+    ner = load_ref_parser(str(BUNDLES / "ner"), device="cpu", revision=None, settings=settings)
+    assert {model.runtime for model in (section, paper, ner)} == {"onnx"}
+    return [layout._model.session, section.session, paper.session, ner.session]
+
+
+def test_a_python_caller_settings_cap_every_onnx_session(monkeypatch):
+    """Settings passed to the API cap layout, both classifiers and the NER parser,
+    as they cap the sentence segmenter, though the process settings set no cap."""
+    from bibr.config import Settings
+
+    monkeypatch.setattr(Settings.ml, "ort_intra_op_threads", 0)
+    monkeypatch.setattr(Settings.ml, "ort_inter_op_threads", 0)
+
+    sessions = _load_onnx_sessions(_thread_settings(2, 1))
+
+    assert [_thread_pools(session) for session in sessions] == [(2, 1)] * 4
+
+
+def test_uncapped_settings_leave_every_onnx_session_at_the_default(monkeypatch):
+    """The caller's settings win the other way too: uncapped settings open
+    uncapped sessions whatever the process settings say."""
+    from bibr.config import Settings
+
+    monkeypatch.setattr(Settings.ml, "ort_intra_op_threads", 3)
+
+    sessions = _load_onnx_sessions(_thread_settings(0, 0))
+
+    assert [_thread_pools(session) for session in sessions] == [(0, 0)] * 4
