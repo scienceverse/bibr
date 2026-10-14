@@ -14,6 +14,11 @@ machine can run:
 | Linux, NVIDIA GPU with 8–11 GB | **bibr extract 2B**, Qwen3.5-2B fine-tuned for bibr (`scienceverse/bibr-extract-qwen35-2b`) | vLLM, about 8 GB VRAM | 207/252, −6.3 points [−9.9, −3.2] |
 | No suitable GPU, or you prefer a hosted model | **Claude Haiku 5.5** (`claude-haiku-5-5`) | an Anthropic API key, about $0.004 a paper | 221/252, −0.8 points [−2.4, +0.8] |
 
+The hosted setup uses Claude for OCR as well (`OCR_BACKEND=anthropic`,
+`OCR_VISION_MODEL=claude-haiku-5-5`), so it needs one Anthropic key. The 221/252
+above was measured with bibr's local OCR; Claude's OCR has not been scored on
+these papers yet, and the per-paper cost excludes it.
+
 Windows, Apple Silicon and NVIDIA cards below 8 GB keep
 [NuExtract 3](https://huggingface.co/numind/NuExtract3) through llama.cpp or
 MLX, because the fine-tuned models have no GGUF or MLX build yet. On the same

@@ -293,7 +293,8 @@ The setup wizard defaults to bibr's fine-tuned Qwen3.5 models for local
 structured extraction on Linux with an NVIDIA GPU: the 4B from 12 GB and the 2B
 from 8 GB. Windows, Apple Silicon and GPUs below 8 GB use
 [NuExtract 3](https://huggingface.co/numind/NuExtract3) through llama.cpp or MLX.
-Without a suitable GPU it recommends Claude Haiku 5.5 as a hosted model. See
+Without a suitable GPU it recommends Claude Haiku 5.5 as a hosted model, for
+OCR and extraction alike. See
 [choosing an extraction model](guides/extraction-models.md). These thresholds are
 model-fit estimates, not guarantees that every document fits available memory.
 

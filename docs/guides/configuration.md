@@ -242,7 +242,9 @@ has the measurements):
 | Rapid-MLX / vllm-mlx | `numind/NuExtract3-mlx-8bits`, with smaller quantizations available | 6 GB for the 8-bit variant |
 
 When no local model fits, the recommended hosted model is Claude Haiku 5.5
-(`LLM_PROVIDER=anthropic`, `LLM_MODEL=claude-haiku-5-5`).
+(`LLM_PROVIDER=anthropic`, `LLM_MODEL=claude-haiku-5-5`), which `bibr setup`
+also uses for cloud OCR (`OCR_BACKEND=anthropic`,
+`OCR_VISION_MODEL=claude-haiku-5-5`), so one Anthropic key covers both.
 
 These are model-fit estimates, not total pipeline memory guarantees. The
 advanced wizard also offers NuExtract 3 bf16 (11 GB) and Gemma 4 E4B on CUDA,

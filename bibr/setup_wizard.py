@@ -73,6 +73,10 @@ LLM_DEFAULTS: dict[str, dict[str, str]] = {
     "ollama": {"model": "gpt-oss:20b", "key_env": ""},
 }
 
+# Vision model per cloud OCR backend, written as OCR_VISION_MODEL. Unset, the
+# vision model is the Gemini default, which the anthropic backend cannot call.
+CLOUD_OCR_MODELS: dict[str, str] = {"anthropic": LLM_DEFAULTS["anthropic"]["model"]}
+
 WTPSPLIT_MODELS: dict[str, str] = {
     "sat-6l-sm": "Best speed/quality trade-off, recommended (default)",
     "sat-12l-sm": "Higher quality, slower",
@@ -418,16 +422,16 @@ def _build_recommended_setup(
             tier="cloud_fallback",
             env={
                 **base_env,
-                # Gemini stays the cloud OCR (Claude vision OCR is not evaluated);
-                # extraction uses the recommended hosted model.
-                "OCR_BACKEND": "gemini",
+                # One provider and one key: Claude reads the pages and extracts
+                # the metadata with the recommended hosted model.
+                "OCR_BACKEND": "anthropic",
+                "OCR_VISION_MODEL": CLOUD_OCR_MODELS["anthropic"],
                 "LLM_PROVIDER": "anthropic",
                 "LLM_MODEL": LLM_DEFAULTS["anthropic"]["model"],
             },
             extras={"ml", "demo"},
             preset_name="recommended-cloud",
-            privacy_summary="document contents are sent to the approved cloud providers "
-            "(Google for OCR, Anthropic for extraction)",
+            privacy_summary="document contents are sent to the approved cloud provider (Anthropic)",
             download_summary=(
                 "downloads local layout/reference models; cloud OCR/LLM need no local model download"
             ),
@@ -709,6 +713,7 @@ def _write_env_fresh(path: Path, env_vars: dict[str, str]) -> None:
         "Models": [
             "WTPSPLIT_MODEL",
             "OCR_BACKEND",
+            "OCR_VISION_MODEL",
             "OCR_BASE_URL",
             "REF_SEG_STRATEGY",
             "REF_PARSE_STRATEGY",
@@ -918,14 +923,11 @@ class SetupWizard:
 
         # No local, no private server: the only remaining path is the cloud.
         self.console.print(
-            "\nWithout a local or private server, bibr can process papers in the cloud: "
-            "Google Gemini reads the pages and Claude Haiku 5.5 extracts the metadata. "
-            "This sends document-derived content (page images and extracted text) to "
-            "Google and Anthropic."
+            "\nWithout a local or private server, bibr can process papers with Claude "
+            "Haiku 5.5 in the cloud. This sends document-derived content (page images and "
+            "extracted text) to Anthropic."
         )
-        if not Confirm.ask(
-            "Send document-derived content to Google Gemini and Anthropic Claude?", default=True
-        ):
+        if not Confirm.ask("Send document-derived content to Anthropic Claude?", default=True):
             self._handle_decline()
             return
 
@@ -1003,10 +1005,7 @@ class SetupWizard:
             )
 
         if "cloud_api_key" in setup.required_prompts:
-            self.env_vars["GOOGLE_API_KEY"] = Prompt.ask("Google API key (OCR)", password=True)
-            self.env_vars["ANTHROPIC_API_KEY"] = Prompt.ask(
-                "Anthropic API key (extraction)", password=True
-            )
+            self.env_vars["ANTHROPIC_API_KEY"] = Prompt.ask("Anthropic API key", password=True)
 
     def _offer_extras_install(self) -> None:
         if not self.selected_extras:
@@ -1101,7 +1100,8 @@ class SetupWizard:
         if setup.tier == "private_server":
             return f"your configured OCR server ({backend})"
         if setup.tier == "cloud_fallback":
-            return f"{backend} (Google Gemini vision, cloud)"
+            model = setup.env.get("OCR_VISION_MODEL", "")
+            return f"{backend} / {model} (vision, cloud)"
         if backend == "paddle":
             return "paddle (automatic Paddle-first chain; GLM fallback)"
         if backend == "glm-llama":
@@ -1659,6 +1659,8 @@ class SetupWizard:
             default=default_ocr,
         )
         self.env_vars["OCR_BACKEND"] = ocr_backend
+        if ocr_backend in CLOUD_OCR_MODELS:
+            self.env_vars["OCR_VISION_MODEL"] = CLOUD_OCR_MODELS[ocr_backend]
 
         # Reference parsing strategy (mirrors the ``--refs`` chew flag)
         self.console.print("\n[dim]Reference parsing (bibliography → structured fields):[/dim]")

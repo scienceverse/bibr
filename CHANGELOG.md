@@ -12,8 +12,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   NVIDIA GPU it picks bibr's fine-tuned Qwen3.5-4B (12 GB or more) or Qwen3.5-2B
   (8–11 GB), served by vLLM. On bibr's 252 development papers they pass 216 and
   207 against Qwen3.8-27B's 223, compared with 200 for NuExtract 3. Without a
-  suitable GPU the hosted recommendation is Claude Haiku 5.5 (221/252), with
-  Gemini kept for cloud OCR. Windows, Apple Silicon and cards below 8 GB keep
+  suitable GPU the hosted recommendation is Claude Haiku 5.5 (221/252), which
+  also does the cloud OCR, so setup needs one Anthropic key. Claude's OCR has
+  not been scored on bibr's papers yet. Windows, Apple Silicon and cards below 8 GB keep
   NuExtract 3. An unset `LLM_LOCAL_MODEL` with `LLM_BACKEND=vllm` now loads the
   4B model. See [choosing an extraction model](docs/guides/extraction-models.md).
 

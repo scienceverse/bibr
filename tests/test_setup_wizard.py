@@ -1032,6 +1032,21 @@ def test_step_external_services_llm_choice():
     assert wizard.env_vars.get("REF_PARSE_STRATEGY") == "llm"
 
 
+def test_step_external_services_anthropic_ocr_writes_a_claude_vision_model():
+    """Without OCR_VISION_MODEL the anthropic backend would call the Gemini default."""
+    wizard = SetupWizard()
+    with (
+        patch(
+            "bibr.setup_wizard.Prompt.ask",
+            side_effect=["", "sat-6l-sm", "anthropic", "ner"],
+        ),
+        patch("bibr.setup_wizard.Confirm.ask", return_value=False),
+    ):
+        wizard._step_external_services()
+    assert wizard.env_vars["OCR_BACKEND"] == "anthropic"
+    assert wizard.env_vars["OCR_VISION_MODEL"] == "claude-haiku-5-5"
+
+
 def test_step_external_services_default_refs_writes_nothing():
     """The default ner strategy must not clutter .env."""
     wizard = SetupWizard()
@@ -1431,7 +1446,8 @@ def test_recommended_setup_cloud_requires_explicit_consent():
     assert setup.tier == "cloud_fallback"
     assert setup.env["LLM_PROVIDER"] == "anthropic"
     assert setup.env["LLM_MODEL"] == "claude-haiku-5-5"
-    assert setup.env["OCR_BACKEND"] == "gemini"
+    assert setup.env["OCR_BACKEND"] == "anthropic"
+    assert setup.env["OCR_VISION_MODEL"] == "claude-haiku-5-5"
     assert "demo" in setup.extras
     assert "cloud_api_key" in setup.required_prompts
 
@@ -1884,7 +1900,7 @@ def test_weak_hardware_private_server_path_writes_urls(tmp_path, monkeypatch):
     assert "GOOGLE_API_KEY" not in content
 
 
-def test_weak_hardware_cloud_consent_writes_gemini_ocr_and_haiku(tmp_path, monkeypatch):
+def test_weak_hardware_cloud_consent_writes_claude_for_ocr_and_extraction(tmp_path, monkeypatch):
     """Weak machine + no private server + cloud consent → cloud_fallback env."""
     wizard = _recording_wizard()
     wizard.env_path = tmp_path / ".env"
@@ -1893,24 +1909,22 @@ def test_weak_hardware_cloud_consent_writes_gemini_ocr_and_haiku(tmp_path, monke
     monkeypatch.setattr("bibr.setup_wizard.PresetManager", MagicMock())
 
     def confirm(prompt, **k):
-        # Consent only to the cloud (Google Gemini) prompt; decline the private
+        # Consent only to the cloud (Anthropic) prompt; decline the private
         # server, install, connection test, and smoke test.
-        return "Google Gemini" in prompt
+        return "Anthropic" in prompt
 
     monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", confirm)
-    keys = {"Google API key (OCR)": "test-google-key", "Anthropic API key (extraction)": "sk-ant"}
-    monkeypatch.setattr(
-        "bibr.setup_wizard.Prompt.ask", lambda prompt, *a, **k: keys.get(prompt, "test-google-key")
-    )
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *a, **k: "sk-ant")
 
     wizard.run()
 
     content = wizard.env_path.read_text()
-    assert "OCR_BACKEND=gemini" in content
+    assert "OCR_BACKEND=anthropic" in content
+    assert "OCR_VISION_MODEL=claude-haiku-5-5" in content
     assert "LLM_PROVIDER=anthropic" in content
     assert "LLM_MODEL=claude-haiku-5-5" in content
-    assert "GOOGLE_API_KEY=test-google-key" in content
     assert "ANTHROPIC_API_KEY=sk-ant" in content
+    assert "GOOGLE_API_KEY" not in content
 
 
 def test_cloud_consent_declined_offers_advanced_handoff(monkeypatch):
@@ -2099,7 +2113,7 @@ def _drive_cloud_setup(monkeypatch, tmp_path, wizard, *, first_key, retry_key):
     monkeypatch.setattr("bibr.setup_wizard.PresetManager", MagicMock())
 
     def fake_prompt(prompt, *args, **kwargs):
-        if prompt == "Anthropic API key (extraction)":
+        if prompt == "Anthropic API key":
             return first_key
         if prompt == "API key":
             return retry_key
@@ -2157,7 +2171,7 @@ def test_cloud_retry_skipped_write_leaves_env_alone(tmp_path, monkeypatch):
     wizard.env_path.write_text("ANTHROPIC_API_KEY=sk-old-key-placeholder\n", encoding="utf-8")
     monkeypatch.setattr("bibr.setup_wizard.PresetManager", MagicMock())
 
-    prompts = {"Anthropic API key (extraction)": "sk-ant-TYPO", "API key": "sk-ant-CORRECT"}
+    prompts = {"Anthropic API key": "sk-ant-TYPO", "API key": "sk-ant-CORRECT"}
 
     def fake_prompt(prompt, *args, **kwargs):
         if prompt.startswith(str(wizard.env_path)):
