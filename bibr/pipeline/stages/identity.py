@@ -58,9 +58,14 @@ def _processed_bytes(fs: FileState) -> bytes | None:
     return data
 
 
-def _pdf_doi_evidence(fs: FileState) -> PdfDoiEvidence | None:
-    """The input PDF's own DOI evidence; None for other inputs or an unreadable PDF."""
-    contents = getattr(fs.paper, "contents", None)
+def _pdf_doi_evidence(fs: FileState, contents=None) -> PdfDoiEvidence | None:
+    """The input PDF's own DOI evidence; None for other inputs or an unreadable PDF.
+
+    *contents* defaults to the paper's; the extract stage passes the parsed
+    contents when it reads the evidence before the paper exists.
+    """
+    if contents is None:
+        contents = getattr(fs.paper, "contents", None)
     if contents is None or getattr(contents, "preparsed_metadata", None) is not None:
         return None
     # The front pages this run processed: a page range may start later.
@@ -119,6 +124,19 @@ def _clear_own_doi_from_references(paper) -> int:
     return cleared
 
 
+def read_early_doi_evidence(fs: FileState) -> PdfDoiEvidence | None:
+    """Read the PDF's own DOI evidence before extraction, and keep it for this stage.
+
+    The early registry lookup (:mod:`bibr.pipeline.registry_check`) selects
+    its DOI from the same evidence this stage selects the final DOI from, so
+    the two agree unless the parsed text changes in between. Blocking: call
+    it off the event loop.
+    """
+    evidence = _pdf_doi_evidence(fs, fs.contents)
+    fs.pdf_doi_evidence = (evidence,)
+    return evidence
+
+
 def doi_field_source(source_kind: str) -> str:
     """``extraction.fields.doi.source`` for a selected candidate's source kind."""
     return "native" if source_kind == "structured_metadata" else source_kind
@@ -133,8 +151,13 @@ class IdentityValidationStage:
         ctx.progress.stage_start(self.name)
         for fs in ctx.alive():
             try:
-                # Reading the PDF blocks on pdfium; keep it off the shared loop.
-                evidence = await asyncio.to_thread(_pdf_doi_evidence, fs)
+                if fs.pdf_doi_evidence is not None:
+                    # Read before extraction for the early registry lookup.
+                    (evidence,) = fs.pdf_doi_evidence
+                    fs.pdf_doi_evidence = None
+                else:
+                    # Reading the PDF blocks on pdfium; keep it off the shared loop.
+                    evidence = await asyncio.to_thread(_pdf_doi_evidence, fs)
                 self._validate(fs, evidence)
             except Exception as exc:  # noqa: BLE001 - per-file failure, never the chunk
                 fs.set_error(

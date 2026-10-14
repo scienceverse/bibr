@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
 
     from bibr.document.model import DocumentLayer
+    from bibr.extract.pdf_doi_evidence import PdfDoiEvidence
     from bibr.input.docx_native import DocxParser
     from bibr.input.epub_native import EpubParser
     from bibr.input.html_native import HtmlParser
@@ -123,6 +124,12 @@ class FileState:
     # The layer was asked for once, inline or rebuilt; a failed build leaves
     # doc_layer None and is not tried again.
     doc_layer_attempted: bool = field(default=False, compare=False, repr=False, kw_only=True)
+    # The PDF's own DOI evidence, read by the extract stage for the early
+    # registry lookup and reused by the identity stage: a 1-tuple once read
+    # (the evidence may be None), None while unread.
+    pdf_doi_evidence: "tuple[PdfDoiEvidence | None] | None" = field(
+        default=None, compare=False, repr=False, kw_only=True
+    )
 
     def free_pre_ocr(self):
         """Free data consumed by OCR stage."""

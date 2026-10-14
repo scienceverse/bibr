@@ -1336,21 +1336,26 @@ def _note_record_backed_title(check, decision, incumbent, inputs: dict) -> None:
     """Keep the title decision made without the registry record on *check*.
 
     When the record chose the title (the registry title row, or the review's
-    answer kept because it agrees with the record), the identity stage
-    restores this decision if the final DOI is not the one the record was
-    looked up for.
+    answer kept over a printed first answer because it agrees with the
+    record), the identity stage restores this decision if the final DOI is
+    not the one the record was looked up for. The decision without the
+    record starts from the first answer when the review's record-backed
+    answer replaced it, and never runs the registry title rule.
     """
     from bibr.extract.field_decisions import decide_title
 
-    if decision.source == "registry_printed":
-        check.record_backed.add("title")
-        check.title_fallback = decide_title(incumbent, **inputs)
-    elif (
-        decision.source == "llm_review"
+    base = incumbent
+    if (
+        incumbent.source == "llm_review"
         and "title" in check.record_backed
         and check.primary_title is not None
     ):
-        check.title_fallback = decide_title(check.primary_title, **inputs)
+        base = check.primary_title
+    if decision.source == "registry_printed" or (
+        decision.source == "llm_review" and base is not incumbent
+    ):
+        check.record_backed.add("title")
+        check.title_fallback = decide_title(base, **inputs)
     else:
         # A later step chose the title; the record did not.
         check.record_backed.discard("title")
@@ -1459,6 +1464,7 @@ async def post_parse(
     memory_mode: str | None = None,
     registry_lookup: bool = False,
     review_client=None,
+    pdf_doi_evidence=None,
 ):
     """Post-parse pipeline: classification, extraction, linking.
 
@@ -1469,9 +1475,10 @@ async def post_parse(
     reads the registry record (``FRONT_MATTER_REGISTRY_TITLE``,
     ``LLM_REVIEW_TRIGGER``), the lookup of the DOI the parsed text names
     starts right after the sections are settled, under the core metadata
-    call (:mod:`bibr.pipeline.registry_check`). Its record lands in
-    ``metadata.match`` and its handle rides the ``Paper`` as
-    ``paper.registry_check``. With ``LLM_REVIEW_TRIGGER=registry_disagree``
+    call (:mod:`bibr.pipeline.registry_check`), selected with the PDF's own
+    DOI evidence when the caller read it (*pdf_doi_evidence*, as the identity
+    stage will). Its record lands in ``metadata.match`` and its handle rides
+    the ``Paper`` as ``paper.registry_check``. With ``LLM_REVIEW_TRIGGER=registry_disagree``
     the core extractor re-asks a title or author call that disagrees with that
     record on *review_client* (built from ``LLM_REVIEW_*`` when not given);
     its usage is recorded under ``review_``-prefixed labels.
@@ -1596,7 +1603,10 @@ async def post_parse(
                 and registry_check_wanted(effective_settings)
             ):
                 registry_check = start_registry_check(
-                    contents, settings=effective_settings, expected_identity=expected_identity
+                    contents,
+                    settings=effective_settings,
+                    expected_identity=expected_identity,
+                    pdf_evidence=pdf_doi_evidence,
                 )
 
             # --- Metadata + Equations in parallel ---
@@ -1982,11 +1992,28 @@ class PostParseStage:
         review_client = None
         if registry_lookup and not ctx.config.no_llm and review_wanted(ctx.settings):
             review_client = getattr(ctx.resources, "review_llm_client", None)
+        from bibr.pipeline.registry_check import registry_check_wanted
+
+        early_record = (
+            registry_lookup and not ctx.config.no_llm and registry_check_wanted(ctx.settings)
+        )
 
         async def _gated(fs):
             async with sem:
                 fs_t0 = time.monotonic()
                 file_hash = fs.file_hash or ""
+                pdf_doi_evidence = None
+                if early_record:
+                    # The early lookup selects its DOI from the evidence the
+                    # identity stage will use; that stage reuses this read.
+                    from bibr.pipeline.stages.identity import read_early_doi_evidence
+
+                    try:
+                        pdf_doi_evidence = await asyncio.to_thread(read_early_doi_evidence, fs)
+                    except Exception:  # noqa: BLE001 - the parsed text stands on its own
+                        logger.warning(
+                            "Could not read DOI evidence early from %s", fs.path.name, exc_info=True
+                        )
                 result = await post_parse(
                     contents=fs.contents,
                     file_name=fs.path.name,
@@ -2006,6 +2033,7 @@ class PostParseStage:
                     memory_mode=ctx.config.memory_mode,
                     registry_lookup=registry_lookup,
                     **({"review_client": review_client} if review_client is not None else {}),
+                    **({"pdf_doi_evidence": pdf_doi_evidence} if early_record else {}),
                 )
                 fs.stage_times[self.name] = time.monotonic() - fs_t0
                 return result

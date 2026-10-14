@@ -35,9 +35,9 @@ _SCHEMA_VERSION = "12.3"
 #     ``extraction.fields.author.registry``: ``{service, outcome}``, where
 #     ``outcome`` says whether the exported title or author list ``agree``s or
 #     ``disagree``s with the paper's own confident ``metadata_match`` record,
-#     or was ``corrected``: a printed value chosen over the first extracted
-#     one because it agrees with the record (FRONT_MATTER_REGISTRY_TITLE, or
-#     the front-matter review). The record's own text is never written.
+#     or was ``corrected``: a printed value that replaced the first extracted
+#     one after that one disagreed with the record (FRONT_MATTER_REGISTRY_TITLE,
+#     or the front-matter review). The record's own text is never written.
 #     Omitted when there is no confident record, so every 12.2 export is still
 #     a valid 12.3 reader input.
 #   - New ``extraction.diagnostics.front_matter_review``: the receipt of the
@@ -1790,10 +1790,11 @@ class FieldRegistryExport(BaseModel):
         "of the other that keeps at least 70% of it; the record's title is also tried with "
         "its subtitle appended. Author lists agree when their full names pair up with an F1 "
         "of at least 0.9, whatever the given/family split. 'disagree': they differ, and the "
-        "export keeps its own value. 'corrected': the value agrees and is a printed one chosen "
-        "over the first extracted value because it agrees with the record (source "
+        "export keeps its own value. 'corrected': the value agrees, and it is a printed value "
+        "that replaced the first extracted one after that one disagreed with the record (source "
         "'registry_printed' under FRONT_MATTER_REGISTRY_TITLE, or 'llm_review' under "
-        "LLM_REVIEW_TRIGGER); the record's own text is never written."
+        "LLM_REVIEW_TRIGGER), unless the field's issues include 'VAL_REGISTRY_DOI_CHANGED' (the "
+        "record that chose it was another DOI's); the record's own text is never written."
     )
 
 

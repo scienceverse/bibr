@@ -71,6 +71,9 @@ _QUALIFYING_CODES: Mapping[str, frozenset[str]] = {
     "VAL_DOI_AMBIGUOUS": frozenset({"doi"}),
     "VAL_EXPECTED_ID_MISSING": frozenset({"doi"}),
     "VAL_EXPECTED_ID_MISMATCH": frozenset({"doi"}),
+    # The registry record the front-matter rules compared the title and the
+    # author list with was another DOI's, and was dropped.
+    "VAL_REGISTRY_DOI_CHANGED": frozenset({"title", "author"}),
 }
 _FIELD_FAILED = "VAL_METADATA_FIELD_FAILED"
 _ABSTENTION = "VAL_METADATA_MULTI_ITEM"

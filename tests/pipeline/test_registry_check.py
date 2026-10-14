@@ -111,6 +111,29 @@ def test_preliminary_doi_abstains_without_a_single_doi(dois):
     assert preliminary_doi(_contents(*dois)) is None
 
 
+BANNER = (
+    "Example J: first published as 10.1234/self.1 on 1 May 1999. Downloaded from "
+    "https://example.org/"
+)
+
+
+def _banner_evidence(text: str = BANNER):
+    from bibr.extract.pdf_doi_evidence import PdfDoiEvidence, TextLayerLine
+
+    line = TextLayerLine(1, text, tuple((970.0, 500.0) for _ in text), "")
+    return PdfDoiEvidence((1, 2), (line,), (), ())
+
+
+def test_preliminary_doi_reads_the_pdf_evidence_the_identity_stage_reads():
+    # The parsed text names no DOI; the PDF's text layer prints one in a margin.
+    assert preliminary_doi(_contents()) is None
+    assert preliminary_doi(_contents(), None, _banner_evidence()) == OWN_DOI
+    # A second DOI only the text layer prints makes the selection ambiguous,
+    # as it will for the identity stage.
+    other = _banner_evidence(BANNER.replace("10.1234/self.1", "10.5555/other.2"))
+    assert preliminary_doi(_contents(f"https://doi.org/{OWN_DOI}"), None, other) is None
+
+
 def test_wanted_only_for_a_rule_that_reads_the_record():
     settings = GlobalSettings()
     assert not registry_check_wanted(settings)
@@ -326,7 +349,99 @@ async def test_changed_doi_keeps_a_reviewed_author_list_and_says_so():
     paper = _paper_with_check(check)
     check.record_backed = {"author"}
     issue = reconcile_with_final_doi(paper)
-    assert issue is not None and "author list chosen with it is kept" in issue.message
+    assert issue is not None
+    assert "author list the review chose with it is kept" in issue.message
+    assert "no longer counts as corrected" in issue.message
+
+
+@pytest.mark.parametrize(
+    "lookup",
+    [
+        AsyncMock(return_value=EnrichmentReport(attempted=1)),
+        AsyncMock(side_effect=RuntimeError("down")),
+        _found(year=2010),
+    ],
+    ids=["not_found", "failed", "year_mismatch"],
+)
+async def test_changed_doi_after_an_early_lookup_without_a_record_says_nothing(lookup):
+    with patch(LOOKUP, lookup):
+        check = start_registry_check(
+            _contents("https://doi.org/10.5555/early.1"), settings=_settings()
+        )
+        await check.settle("2021")
+    assert check.record() is None
+    paper = _paper_with_check(check)
+    assert reconcile_with_final_doi(paper) is None
+    assert paper.registry_check is None
+    assert needs_identity_lookup(paper)
+
+
+async def test_restored_title_takes_its_issues_and_leaves_the_dropped_ones(caplog):
+    from bibr.validation import IssueSeverity, ValidationIssue
+
+    check = await _settled_check("10.5555/early.1")
+    paper = _paper_with_check(check)
+    kept = ValidationIssue("VAL_TITLE_REGROUNDED", IssueSeverity.WARNING, "first answer grounded")
+    dropped = ValidationIssue(
+        "VAL_TITLE_REGISTRY_PRINTED",
+        IssueSeverity.WARNING,
+        "registry row",
+        evidence_ids=("t1", "metadata_match:crossref"),
+    )
+    other = ValidationIssue("VAL_SOMETHING_ELSE", IssueSeverity.WARNING, "unrelated")
+    fallback = FieldCandidate("title", "llm", "The model title", issues=(kept,))
+    check.title_fallback = FieldDecision("title", fallback.value, fallback, "extracted")
+    check.record_backed = {"title"}
+    chosen = FieldCandidate("title", "registry_printed", "The record title", issues=(dropped,))
+    apply_decision(
+        paper.metadata, FieldDecision("title", chosen.value, chosen, "registry_printed_title")
+    )
+    paper.validation_issues.extend([other, dropped])
+
+    with caplog.at_level("INFO", logger="bibr.extract.field_decisions"):
+        issue = reconcile_with_final_doi(paper)
+
+    assert issue is not None and "title was decided again" in issue.message
+    assert paper.metadata.title == "The model title"
+    assert dropped not in paper.validation_issues
+    assert other in paper.validation_issues and kept in paper.validation_issues
+    # A planned second decision, not the "decided twice" warning.
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("decided again" in r.getMessage() for r in caplog.records)
+    assert field_decisions_of(paper.metadata).superseded[-1].source == "registry_printed"
+
+
+async def test_replayed_sidecar_keeps_the_early_record():
+    """Full enrichment of a paper whose DOI the early lookup answered: the
+    sidecar built from the enriched export carries the early record, and its
+    replay onto the core keeps it."""
+    from bibr.export.json_export import export_paper_to_json
+    from bibr.pipeline.artifacts import (
+        canonical_json_sha256,
+        make_enrichment_sidecar,
+        replay_enrichment_sidecar,
+    )
+
+    check = await _settled_check()
+    paper = _paper_with_check(check)
+    core = export_paper_to_json(paper)
+    assert [row["doi"] for row in core["metadata_match"]] == [OWN_DOI]
+
+    fs = FileState(path=Path("a.pdf"))
+    fs.paper = paper
+    with patch(LOOKUP, AsyncMock()) as later:
+        await CrossrefEnricher(settings=_settings()).enrich(fs)
+    later.assert_not_awaited()
+    enriched = export_paper_to_json(paper)
+
+    sidecar = make_enrichment_sidecar(
+        enriched,
+        core_sha256=canonical_json_sha256(core),
+        settings_digest="settings",
+        completeness="complete",
+    )
+    replayed = replay_enrichment_sidecar(core, sidecar, expected_settings_digest="settings")
+    assert replayed["metadata_match"] == core["metadata_match"]
 
 
 # --- post_parse wiring -------------------------------------------------------------
@@ -478,3 +593,103 @@ async def test_stage_asks_for_the_lookup_only_when_the_run_makes_it():
         with patch("bibr.pipeline.stages.post_parse.post_parse", fake_post_parse):
             await PostParseStage().run(ctx)
         assert seen[-1] is expected, config
+
+
+async def test_post_parse_selects_the_early_doi_with_the_pdf_evidence():
+    from bibr.pipeline.stages.post_parse import post_parse
+
+    async def extract(contents, file_hash, no_llm, llm_client, **kwargs):  # noqa: ARG001
+        return PaperMetadata(doi="", title="T", published="2021")
+
+    a, b, c, d, e = _post_parse_patches(extract)
+    with a, b, c, d, e, patch(LOOKUP, _found()):
+        paper = await post_parse(
+            contents=_contents(),
+            file_name="x.pdf",
+            file_hash="deadbeef",
+            llm_client=MagicMock(),
+            settings=_settings(),
+            registry_lookup=True,
+            pdf_doi_evidence=_banner_evidence(),
+        )
+    assert paper.registry_check.early_doi == OWN_DOI
+    assert paper.registry_check.status == "found"
+
+
+async def test_stage_reads_the_pdf_evidence_once_for_both_selections():
+    from bibr.pipeline.context import PipelineContext, RunConfig
+    from bibr.pipeline.progress import NullProgress
+    from bibr.pipeline.stages.identity import IdentityValidationStage
+    from bibr.pipeline.stages.post_parse import PostParseStage
+
+    evidence = _banner_evidence()
+    reads: list[object] = []
+    seen: dict = {}
+
+    def read(fs, contents=None):
+        reads.append(contents)
+        return evidence
+
+    paper = _paper_with_check(None, doi="")
+
+    async def fake_post_parse(contents, file_name, file_hash, **kwargs):  # noqa: ARG001
+        seen.update(kwargs)
+        return paper
+
+    fs = FileState(path=Path("a.pdf"))
+    fs.contents = _contents()
+    ctx = PipelineContext(
+        file_states=[fs],
+        progress=NullProgress(),
+        resources=MagicMock(),
+        config=RunConfig(crossref_identity=True),
+        settings=_settings(),
+    )
+    with (
+        patch("bibr.pipeline.stages.post_parse.post_parse", fake_post_parse),
+        patch("bibr.pipeline.stages.identity._pdf_doi_evidence", read),
+    ):
+        await PostParseStage().run(ctx)
+        assert seen["pdf_doi_evidence"] is evidence
+        assert reads == [fs.contents] and fs.pdf_doi_evidence == (evidence,)
+
+        validated = []
+        with patch.object(
+            IdentityValidationStage,
+            "_validate",
+            staticmethod(lambda fs, evidence=None: validated.append(evidence)),
+        ):
+            await IdentityValidationStage().run(ctx)
+    # The identity stage reused the early read instead of reading again.
+    assert validated == [evidence] and len(reads) == 1
+    assert fs.pdf_doi_evidence is None
+
+
+async def test_stage_reads_no_pdf_evidence_early_unless_a_rule_wants_the_record():
+    from bibr.pipeline.context import PipelineContext, RunConfig
+    from bibr.pipeline.progress import NullProgress
+    from bibr.pipeline.stages.post_parse import PostParseStage
+
+    seen: dict = {}
+
+    async def fake_post_parse(contents, file_name, file_hash, **kwargs):  # noqa: ARG001
+        seen.update(kwargs)
+        return MagicMock(name="paper")
+
+    fs = FileState(path=Path("a.pdf"))
+    fs.contents = _contents()
+    ctx = PipelineContext(
+        file_states=[fs],
+        progress=NullProgress(),
+        resources=MagicMock(),
+        config=RunConfig(crossref_identity=True),
+        settings=_settings(title_rule=False),
+    )
+    reader = MagicMock()
+    with (
+        patch("bibr.pipeline.stages.post_parse.post_parse", fake_post_parse),
+        patch("bibr.pipeline.stages.identity._pdf_doi_evidence", reader),
+    ):
+        await PostParseStage().run(ctx)
+    reader.assert_not_called()
+    assert "pdf_doi_evidence" not in seen and fs.pdf_doi_evidence is None

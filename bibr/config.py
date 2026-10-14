@@ -797,8 +797,9 @@ class LlmOptions(_BibrSettings):
         description="When to ask the review model (LLM_REVIEW_MODEL) again for the title or "
         'authors: "off" (default) or "registry_disagree" (the field disagrees with the '
         "paper's own registry record, which needs CROSSREF_IDENTITY or CROSSREF_ENRICH). The "
-        "review's answer replaces the first one only when it is printed in the front matter and "
-        "agrees with the record, or the first answer was not printed; "
+        "review's answer replaces the first one only when it is printed in the front matter, "
+        "is not a translation printed after another version of the title, and agrees with the "
+        "record or the first answer was not printed; "
         "`extraction.diagnostics.front_matter_review` counts the outcomes.",
     )
     review_provider: Literal["google", "openai", "anthropic", "groq", "ollama"] | None = Field(
@@ -2545,12 +2546,13 @@ class GlobalSettings(_BibrSettings):
     FRONT_MATTER_REGISTRY_TITLE: bool = Field(
         False,
         description="When the extracted title disagrees with the paper's own registry record, "
-        "use the selected front-matter row that prints the record's title (alone or with its "
-        "subtitle) instead. Never takes a translation printed after the extracted title, and "
-        "never shortens a title that extends the row. Needs CROSSREF_IDENTITY or "
-        "CROSSREF_ENRICH; the record is then looked up during extraction. "
-        "`extraction.fields.title.registry.outcome` is `corrected` when it applies. "
-        "Experimental, off by default.",
+        "use the selected front-matter row that prints the record's title (with its subtitle "
+        "when the record keeps one, on the same row or the row below) instead. Refused when the "
+        "extracted title is printed before that row (in any language), when the row is a "
+        "translation printed after another version of the title, and when the extracted title "
+        "extends the row. Needs CROSSREF_IDENTITY or CROSSREF_ENRICH; the record is then looked "
+        "up during extraction. `extraction.fields.title.registry.outcome` is `corrected` when "
+        "it applies. Experimental, off by default.",
     )
     # Reference extraction strategy — DECOUPLED segmentation + parsing axes
     # (resolved in bibr.extract.ref_extractor._resolve_ref_strategies; per-run

@@ -11,10 +11,12 @@ preliminary DOI from the parsed text and starts the lookup as a task before
 the core metadata call, so the round-trip hides under that call.
 
 The preliminary DOI is used only when the selection is unambiguous. The
-identity stage selects the final DOI later from more evidence (the PDF's own
-text layer and links); when that differs, it drops everything the early
-record decided (:func:`reconcile_with_final_doi`) and reports
-``VAL_REGISTRY_DOI_CHANGED``. When it agrees, the record found here is the
+extract stage reads the PDF's own DOI evidence (text layer, links, document
+info) first and hands it to both selections, so the identity stage selects
+the final DOI from the same evidence; the two differ only when the parsed
+text changes in between. When they differ, the identity stage drops what
+the early record decided (:func:`reconcile_with_final_doi`) and reports
+``VAL_REGISTRY_DOI_CHANGED``. When they agree, the record found here is the
 paper's ``metadata_match`` and the enrichment stage does not look the DOI up
 again. A failed or timed-out lookup leaves no record and the later lookup
 runs as usual. The handle rides the ``Paper`` as ``paper.registry_check``
@@ -37,6 +39,7 @@ if TYPE_CHECKING:
 
     from bibr.config import GlobalSettings
     from bibr.extract.field_decisions import FieldCandidate, FieldDecision
+    from bibr.extract.pdf_doi_evidence import PdfDoiEvidence
     from bibr.models import ExternalMatch, MatchSource, PaperAuthor
     from bibr.pipeline.identity import ExpectedIdentity
     from bibr.validation import ValidationIssue
@@ -65,17 +68,23 @@ def registry_check_wanted(settings: GlobalSettings) -> bool:
     return title_rule or getattr(llm, "review_trigger", "off") == "registry_disagree"
 
 
-def preliminary_doi(contents: Any, expected_identity: ExpectedIdentity | None = None) -> str | None:
-    """The DOI the parsed text names unambiguously, or None.
+def preliminary_doi(
+    contents: Any,
+    expected_identity: ExpectedIdentity | None = None,
+    pdf_evidence: PdfDoiEvidence | None = None,
+) -> str | None:
+    """The DOI the paper names unambiguously, or None.
 
-    The same selection the identity stage makes, without the PDF's own DOI
-    evidence, and only when it raised no issue (no tie, no expected-identity
-    conflict).
+    The selection the identity stage makes, from the same evidence when the
+    caller read the PDF's own DOI evidence (*pdf_evidence*), and used only
+    when it raised no issue (no tie, no expected-identity conflict).
     """
     from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
 
     try:
-        selection = select_doi_candidates(collect_doi_candidates(contents), expected_identity)
+        selection = select_doi_candidates(
+            collect_doi_candidates(contents, pdf_evidence), expected_identity
+        )
     except Exception:  # noqa: BLE001 - the early record is optional
         logger.debug("Preliminary DOI selection failed", exc_info=True)
         return None
@@ -264,9 +273,10 @@ def start_registry_check(
     *,
     settings: GlobalSettings,
     expected_identity: ExpectedIdentity | None = None,
+    pdf_evidence: PdfDoiEvidence | None = None,
 ) -> RegistryCheck | None:
-    """Start the early lookup; None when the parsed text names no single DOI."""
-    doi = preliminary_doi(contents, expected_identity)
+    """Start the early lookup; None when the paper names no single DOI."""
+    doi = preliminary_doi(contents, expected_identity, pdf_evidence)
     if not doi:
         return None
     timeout = float(settings.crossref.request_timeout)
@@ -295,13 +305,21 @@ def reconcile_with_final_doi(paper: Any) -> ValidationIssue | None:
     """Drop the early record's effects when the final DOI is another one.
 
     Called by the identity stage right after it writes ``metadata.doi``. The
-    record leaves ``metadata.match``, a title chosen because it agreed with
-    the record goes back to the decision made without it, and the check is
-    detached so the enrichment stage looks the final DOI up. An author list
-    the review chose is kept: affiliations and roles are already built on it,
-    and every name in it is printed; the issue says so.
+    record leaves ``metadata.match``, and the check is detached so the
+    enrichment stage looks the final DOI up. A title chosen because it agreed
+    with the record goes back to the decision made without it, with that
+    decision's issues in place of the dropped one's. An author list the
+    review chose because it agreed with the record is kept: every name in it
+    is printed, and the affiliations, contacts and contribution roles are
+    already built on it. Its source stays ``llm_review``, but the issue
+    returned here (which ``extraction.fields`` lists for the title and the
+    author list) keeps the export from reporting it ``corrected``.
+
+    Returns ``VAL_REGISTRY_DOI_CHANGED`` when the front-matter rules could
+    read the early record; an early lookup that found no confident record is
+    dropped silently.
     """
-    from bibr.extract.field_decisions import apply_decision
+    from bibr.extract.field_decisions import apply_decision, field_decisions_of
     from bibr.validation import IssueSeverity, ValidationIssue
 
     check = registry_check_of(paper)
@@ -311,20 +329,34 @@ def reconcile_with_final_doi(paper: Any) -> ValidationIssue | None:
     final = str(getattr(metadata, "doi", "") or "")
     if final.casefold() == check.early_doi.casefold():
         return None
+    used = check.record() is not None
     paper.registry_check = None
     check.cancel()
     for source in check.matches:
         metadata.match.pop(source, None)
+    if not used:
+        return None
     restored = []
     if "title" in check.record_backed and check.title_fallback is not None:
-        apply_decision(metadata, check.title_fallback)
+        ledger = field_decisions_of(metadata)
+        dropped = ledger.get("title") if ledger is not None else None
+        apply_decision(metadata, check.title_fallback, supersede=True)
+        issues = getattr(paper, "validation_issues", None)
+        if isinstance(issues, list):
+            stale = set(dropped.issues) if dropped is not None else set()
+            issues[:] = [issue for issue in issues if issue not in stale]
+            for issue in check.title_fallback.issues:
+                if issue not in issues:
+                    issues.append(issue)
         restored.append("the title was decided again without it")
     if "author" in check.record_backed:
-        restored.append("the author list chosen with it is kept")
-    used = check.status == "found"
+        restored.append(
+            "the author list the review chose with it is kept (every name is printed) but no "
+            "longer counts as corrected"
+        )
     message = (
         f"The final DOI ({final or 'none'}) differs from the one read early ({check.early_doi}); "
-        + ("the early registry record was dropped" if used else "the early lookup was dropped")
+        "the early registry record was dropped"
         + (f" and {', and '.join(restored)}" if restored else "")
     )
     return ValidationIssue(

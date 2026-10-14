@@ -151,14 +151,23 @@ class FieldDecisions:
     def proposal(self, name: str) -> FieldCandidate | None:
         return self._proposals.get(name)
 
-    def record(self, decision: FieldDecision) -> None:
+    def record(self, decision: FieldDecision, *, supersede: bool = False) -> None:
+        """Keep *decision* as the field's receipt.
+
+        *supersede* marks a planned second decision (the identity stage
+        restoring a title the paper's registry record chose, once the record
+        turns out to be another paper's); any other is unexpected and logged
+        as a warning.
+        """
         previous = self._decisions.get(decision.field)
         if previous is not None:
             # The pipeline decides each field once; a second decision replaces
             # the written value, so the newer receipt is kept.
-            logger.warning(
-                "Field %r decided twice (rule %r, then %r)",
+            log = logger.info if supersede else logger.warning
+            log(
+                "Field %r decided %s (rule %r, then %r)",
                 decision.field,
+                "again" if supersede else "twice",
                 previous.rule,
                 decision.rule,
             )
@@ -214,11 +223,13 @@ def field_decisions_of(metadata: Any) -> FieldDecisions | None:
     return ledger if isinstance(ledger, FieldDecisions) else None
 
 
-def apply_decision(metadata: Any, decision: FieldDecision) -> None:
+def apply_decision(metadata: Any, decision: FieldDecision, *, supersede: bool = False) -> None:
     """Write *decision*'s value to *metadata* and keep the receipt.
 
     The only writer of the decided ``PaperMetadata`` fields after construction
     (``tests/extract/test_field_decisions.py`` scans the package for others).
+    *supersede* says the field was decided before and this decision replaces
+    that one on purpose (see :meth:`FieldDecisions.record`).
     """
     attributes = FIELD_ATTRIBUTES[decision.field]
     values = decision.value if len(attributes) > 1 else (decision.value,)
@@ -226,7 +237,7 @@ def apply_decision(metadata: Any, decision: FieldDecision) -> None:
         setattr(metadata, attribute, value)
     ledger = field_decisions_of(metadata)
     if ledger is not None:
-        ledger.record(decision)
+        ledger.record(decision, supersede=supersede)
 
 
 def with_transforms(decision: FieldDecision, *transforms: str) -> FieldDecision:

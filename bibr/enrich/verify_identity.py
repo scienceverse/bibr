@@ -16,8 +16,9 @@ becomes ``{service, outcome}``, with outcome ``agree`` or ``disagree``, or
 chose over its first reading because it agrees with the record
 (``extraction.fields.<field>.source`` ``registry_printed``: the
 FRONT_MATTER_REGISTRY_TITLE row, or ``llm_review``: the front-matter review's
-answer). It is absent when there is no confident record or the record lacks
-the field.
+answer), unless the field carries ``VAL_REGISTRY_DOI_CHANGED`` (the record
+that chose it was another DOI's). It is absent when there is no confident
+record or the record lacks the field.
 
 The comparison is the one the validation scorer uses for title and authors,
 ported here because the scorer is not part of the package:
@@ -58,6 +59,9 @@ REGISTRY_FIELDS = ("title", "author")
 # ``extraction.fields.<field>.source`` of a printed value chosen because the
 # record agrees with it: an agreeing one is reported ``corrected``.
 RECORD_CHOSEN_SOURCES = frozenset({"registry_printed", "llm_review"})
+# The field's issue when the record that chose its value was another DOI's
+# and was dropped: the value then counts as extracted, not corrected.
+_RECORD_DROPPED = "VAL_REGISTRY_DOI_CHANGED"
 
 # A containment match must keep at least this share of the longer title.
 _MIN_CONTAINMENT_LENGTH_RATIO = 0.7
@@ -226,7 +230,11 @@ def _chosen_by_record(data: dict, name: str) -> bool:
     extraction = data.get("extraction")
     fields = extraction.get("fields") if isinstance(extraction, dict) else None
     record = fields.get(name) if isinstance(fields, dict) else None
-    return isinstance(record, dict) and record.get("source") in RECORD_CHOSEN_SOURCES
+    return (
+        isinstance(record, dict)
+        and record.get("source") in RECORD_CHOSEN_SOURCES
+        and _RECORD_DROPPED not in (record.get("issues") or ())
+    )
 
 
 def _agreement(data: dict, name: str, agree: bool) -> str:
