@@ -699,6 +699,13 @@ class LlmOptions(_BibrSettings):
         description="Extra CLI args appended to the managed vLLM LLM server command "
         "(overrides registry defaults on repeated flags).",
     )
+    speed_profile: Literal["latency", "throughput"] = Field(
+        "latency",
+        description="What the managed vLLM LLM server is tuned for: 'latency' (one paper at a "
+        "time; turns on the speculative decoding the model registry lists for the model, "
+        "which backs off as more requests run at once) or 'throughput' (large batches; no "
+        "speculative decoding). Written by `bibr setup`.",
+    )
     # Managed Rapid-MLX LLM server (Apple Silicon experimental fast path).
     rapid_mlx_model: str = Field(
         "qwen3.5-4b-4bit",
@@ -782,7 +789,7 @@ class LlmOptions(_BibrSettings):
         description="Poll interval in seconds for the offline batch LLM layer's job status checks.",
     )
 
-    @field_validator("provider", "backend", "structured_backend", mode="before")
+    @field_validator("provider", "backend", "structured_backend", "speed_profile", mode="before")
     @classmethod
     def _lower_llm_choice(cls, v):
         """Normalize choice-like values so the Literal check is case-insensitive."""

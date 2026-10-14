@@ -8,6 +8,7 @@ escape hatch covers staleness in between.
 
 from __future__ import annotations
 
+import json
 import logging
 import platform
 import subprocess
@@ -28,6 +29,10 @@ class LocalLLMVariant:
     # for ``platform == "cuda"`` — the vllm-mlx server does not read these.
     server_args: tuple[str, ...] = ()
     runtime: str | None = None
+    # Extra vLLM flags used only under ``LLM_SPEED_PROFILE=latency``, normally a
+    # ``--speculative-config`` built by one of the ``*_spec_args`` helpers below.
+    # The ``throughput`` profile never sends them.
+    latency_server_args: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -37,6 +42,47 @@ class LocalLLMModel:
     variants: tuple[LocalLLMVariant, ...]  # best-quality-first per platform
     env: dict[str, str] = field(default_factory=dict)  # quirk env for .env
     experimental_platforms: frozenset[str] = frozenset()
+
+
+def _spec_config_args(config: dict[str, object], tokens: int) -> tuple[str, ...]:
+    """``--speculative-config`` that drafts ``tokens`` tokens and backs off under load.
+
+    Speculative decoding pays off while the GPU is memory-bound and costs
+    throughput once it is compute-bound (DFlash 2 on Qwen3.8-27B: ~3x at one
+    request, 1.0-1.45x at 32), so vLLM's per-batch-size schedule halves the
+    draft past 4 requests in flight and stops drafting past 16.
+    """
+    config = {
+        **config,
+        "num_speculative_tokens": tokens,
+        "num_speculative_tokens_per_batch_size": [
+            [1, 4, tokens],
+            [5, 16, max(1, tokens // 2)],
+            [17, 4096, 0],
+        ],
+    }
+    return ("--speculative-config", json.dumps(config, separators=(",", ":")))
+
+
+def dflash_spec_args(drafter: str, tokens: int = 8) -> tuple[str, ...]:
+    """``latency_server_args`` for a DFlash / DFlash 2 drafter (e.g. ``z-lab/Qwen3.5-4B-DFlash``)."""
+    return _spec_config_args({"method": "dflash", "model": drafter}, tokens)
+
+
+def mtp_spec_args(tokens: int = 1) -> tuple[str, ...]:
+    """``latency_server_args`` for a checkpoint that ships native MTP layers."""
+    return _spec_config_args({"method": "mtp"}, tokens)
+
+
+def ngram_spec_args(tokens: int = 4) -> tuple[str, ...]:
+    """``latency_server_args`` that draft from the prompt, with no extra model.
+
+    bibr's JSON answers mostly copy strings from the paper, which is the case
+    prompt lookup is good at; the choice for models with no drafter.
+    """
+    return _spec_config_args(
+        {"method": "ngram", "prompt_lookup_min": 2, "prompt_lookup_max": 5}, tokens
+    )
 
 
 # Numbers below are pinned from the HF API (Task 1 Step 1; re-verified 2026-09-02 —
@@ -185,17 +231,20 @@ def default_local_model(backend: str) -> str:
     return variants[0].hf_id
 
 
-def registry_server_args(model: str) -> tuple[str, ...]:
+def registry_server_args(model: str, speed_profile: str = "throughput") -> tuple[str, ...]:
     """Extra vLLM launch args for a CUDA registry variant, by exact ``hf_id``.
 
     Matches ``model`` against every ``platform == "cuda"`` variant's ``hf_id``;
-    returns that variant's ``server_args`` or ``()`` for an unknown id. mlx
+    returns that variant's ``server_args`` (plus its ``latency_server_args``
+    under the ``latency`` speed profile) or ``()`` for an unknown id. mlx
     variants are intentionally not consulted — the vllm-mlx server does not
     consume ``server_args``.
     """
     for m in REGISTRY:
         for v in m.variants:
             if v.platform == "cuda" and v.hf_id == model:
+                if speed_profile == "latency":
+                    return v.server_args + v.latency_server_args
                 return v.server_args
     return ()
 

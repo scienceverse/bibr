@@ -144,6 +144,29 @@ def test_launch_cmd_no_registry_args_for_unknown_model():
     assert "--speculative-config" not in cmd
 
 
+@pytest.mark.parametrize(("profile", "speculates"), [("latency", True), ("throughput", False)])
+def test_launch_cmd_speculates_only_under_the_latency_profile(monkeypatch, profile, speculates):
+    from bibr.local import llm_models
+
+    variant = llm_models.LocalLLMVariant(
+        hf_id="org/fast",
+        platform="cuda",
+        quant="bf16",
+        min_vram_gb=10,
+        approx_download_gb=8,
+        latency_server_args=llm_models.ngram_spec_args(),
+        runtime="vllm",
+    )
+    monkeypatch.setattr(
+        llm_models,
+        "REGISTRY",
+        (llm_models.LocalLLMModel(key="fast", label="Fast", variants=(variant,)),),
+    )
+    monkeypatch.setattr(Settings.llm, "speed_profile", profile)
+    _server, popen = _mk_server(model="org/fast", port=9999)
+    assert ("--speculative-config" in popen.call_args[0][0]) is speculates
+
+
 def test_launch_cmd_pins_xgrammar_for_structured_outputs():
     _server, popen = _mk_server(model="org/unknown", port=9999)
     cmd = popen.call_args[0][0]

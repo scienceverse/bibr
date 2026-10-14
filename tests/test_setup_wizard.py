@@ -912,6 +912,7 @@ def test_easy_setup_accepts_recommendation_writes_env_and_preset(tmp_path, monke
     monkeypatch.setattr(wizard, "_install_selected_extras", lambda *a, **k: None)
     monkeypatch.setattr(wizard, "_test_local_server", lambda: None)
     monkeypatch.setattr(wizard, "_step_smoke_test", lambda *a, **k: None)
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *a, **k: "2")
 
     with patch("bibr.setup_wizard.PresetManager") as MockManager:
         wizard.run()
@@ -919,9 +920,12 @@ def test_easy_setup_accepts_recommendation_writes_env_and_preset(tmp_path, monke
     content = wizard.env_path.read_text()
     assert "OCR_BACKEND=glm-llama" in content
     assert "LLM_BACKEND=vllm" in content
+    assert "LLM_SPEED_PROFILE=throughput" in content
     MockManager.return_value.save.assert_called_once()
     assert MockManager.return_value.save.call_args.args[0] == "recommended-local"
-    assert "experimental" in wizard.console.export_text().lower()
+    output = wizard.console.export_text()
+    assert "How will you mostly use bibr?" in output
+    assert "experimental" in output.lower()
 
 
 def test_easy_setup_decline_then_decline_advanced_exits_clean(monkeypatch):
@@ -1464,10 +1468,11 @@ def test_local_provider_writes_registry_selection(monkeypatch):
     monkeypatch.setattr("bibr.setup_wizard.sys.platform", "linux")
     wizard = _recording_wizard()
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 24.0))
-    _feed_prompts(monkeypatch, ["local", "nuextract3", "1"])
+    _feed_prompts(monkeypatch, ["local", "nuextract3", "1", "1"])
     wizard._step_llm_provider()
     assert wizard.env_vars["LLM_BACKEND"] == "vllm"
     assert wizard.env_vars["LLM_LOCAL_MODEL"].count("/") == 1
+    assert wizard.env_vars["LLM_SPEED_PROFILE"] == "latency"
     assert "LLM_PROVIDER" not in wizard.env_vars
 
 
@@ -1485,10 +1490,11 @@ def test_local_provider_custom_hf_id(monkeypatch):
     monkeypatch.setattr("bibr.setup_wizard.sys.platform", "linux")
     wizard = _recording_wizard()
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 24.0))
-    _feed_prompts(monkeypatch, ["local", "custom", "my-org/my-model"])
+    _feed_prompts(monkeypatch, ["local", "custom", "my-org/my-model", "2"])
     wizard._step_llm_provider()
     assert wizard.env_vars["LLM_BACKEND"] == "vllm"
     assert wizard.env_vars["LLM_LOCAL_MODEL"] == "my-org/my-model"
+    assert wizard.env_vars["LLM_SPEED_PROFILE"] == "throughput"
     assert "LLM_PROVIDER" not in wizard.env_vars
 
 
@@ -1497,7 +1503,7 @@ def test_local_provider_writes_quirk_env(monkeypatch):
     monkeypatch.setattr("bibr.setup_wizard.sys.platform", "linux")
     wizard = _recording_wizard()
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 24.0))
-    _feed_prompts(monkeypatch, ["local", "gemma-4-e4b", "1"])
+    _feed_prompts(monkeypatch, ["local", "gemma-4-e4b", "1", "1"])
     wizard._step_llm_provider()
     assert wizard.env_vars["LLM_BACKEND"] == "vllm"
     assert wizard.env_vars["LLM_INSTRUCTOR_MODE"] == "json"
@@ -1523,10 +1529,22 @@ def test_local_provider_no_hardware_shows_all_variants(monkeypatch):
     monkeypatch.setattr("bibr.setup_wizard.sys.platform", "linux")
     wizard = _recording_wizard()
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: (None, None))
-    _feed_prompts(monkeypatch, ["local", "nuextract3", "1"])
+    _feed_prompts(monkeypatch, ["local", "nuextract3", "1", "1"])
     wizard._step_llm_provider()
     # Unknown hardware: default to the cuda variant list, unfiltered.
     assert wizard.env_vars["LLM_BACKEND"] == "vllm"
+
+
+def test_speed_question_is_only_asked_for_managed_vllm(monkeypatch):
+    """Only the managed vLLM server reads LLM_SPEED_PROFILE, so nobody else is asked."""
+    wizard = _recording_wizard()
+    asked = MagicMock(return_value="1")
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", asked)
+    for backend in ("llama-cpp", "rapid-mlx", "vllm-mlx", "cloud"):
+        wizard.env_vars = {"LLM_BACKEND": backend}
+        wizard._step_speed_profile()
+        assert "LLM_SPEED_PROFILE" not in wizard.env_vars
+    asked.assert_not_called()
 
 
 def test_local_provider_small_vram_selects_gguf_quant(monkeypatch):
@@ -1936,6 +1954,7 @@ def test_install_failure_after_env_written_keeps_config(tmp_path, monkeypatch):
         MagicMock(return_value=MagicMock(returncode=1, stderr="No solution found", stdout="")),
     )
     monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: True)
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *a, **k: k["default"])
 
     with pytest.raises(SystemExit):
         wizard.run()
