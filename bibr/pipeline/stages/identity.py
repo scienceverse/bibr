@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from bibr.extract.doi_identity import collect_doi_candidates, doi_sha256, select_doi_candidates
 from bibr.extract.pdf_doi_evidence import is_pdf, read_pdf_doi_evidence
+from bibr.pipeline.registry_check import reconcile_with_final_doi
 from bibr.utils.text import normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
@@ -57,9 +58,14 @@ def _processed_bytes(fs: FileState) -> bytes | None:
     return data
 
 
-def _pdf_doi_evidence(fs: FileState) -> PdfDoiEvidence | None:
-    """The input PDF's own DOI evidence; None for other inputs or an unreadable PDF."""
-    contents = getattr(fs.paper, "contents", None)
+def _pdf_doi_evidence(fs: FileState, contents=None) -> PdfDoiEvidence | None:
+    """The input PDF's own DOI evidence; None for other inputs or an unreadable PDF.
+
+    *contents* defaults to the paper's; the extract stage passes the parsed
+    contents when it reads the evidence before the paper exists.
+    """
+    if contents is None:
+        contents = getattr(fs.paper, "contents", None)
     if contents is None or getattr(contents, "preparsed_metadata", None) is not None:
         return None
     # The front pages this run processed: a page range may start later.
@@ -118,6 +124,19 @@ def _clear_own_doi_from_references(paper) -> int:
     return cleared
 
 
+def read_early_doi_evidence(fs: FileState) -> PdfDoiEvidence | None:
+    """Read the PDF's own DOI evidence before extraction, and keep it for this stage.
+
+    The early registry lookup (:mod:`bibr.pipeline.registry_check`) selects
+    its DOI from the same evidence this stage selects the final DOI from, so
+    the two agree unless the parsed text changes in between. Blocking: call
+    it off the event loop.
+    """
+    evidence = _pdf_doi_evidence(fs, fs.contents)
+    fs.pdf_doi_evidence = (evidence,)
+    return evidence
+
+
 def doi_field_source(source_kind: str) -> str:
     """``extraction.fields.doi.source`` for a selected candidate's source kind."""
     return "native" if source_kind == "structured_metadata" else source_kind
@@ -132,8 +151,13 @@ class IdentityValidationStage:
         ctx.progress.stage_start(self.name)
         for fs in ctx.alive():
             try:
-                # Reading the PDF blocks on pdfium; keep it off the shared loop.
-                evidence = await asyncio.to_thread(_pdf_doi_evidence, fs)
+                if fs.pdf_doi_evidence is not None:
+                    # Read before extraction for the early registry lookup.
+                    (evidence,) = fs.pdf_doi_evidence
+                    fs.pdf_doi_evidence = None
+                else:
+                    # Reading the PDF blocks on pdfium; keep it off the shared loop.
+                    evidence = await asyncio.to_thread(_pdf_doi_evidence, fs)
                 self._validate(fs, evidence)
             except Exception as exc:  # noqa: BLE001 - per-file failure, never the chunk
                 fs.set_error(
@@ -162,15 +186,21 @@ class IdentityValidationStage:
         paper.expected_identity = expected
         paper.doi_selection = selection
 
+        doi_changed = None
         if paper.metadata is not None:
             if selection.selected is not None:
                 paper.metadata.doi = selection.selected.normalized
             else:
                 # A scalar DOI without selected source evidence contradicts the receipt.
                 paper.metadata.doi = ""
+            # The front-matter rules may have read the record of a DOI taken
+            # from the parsed text alone; undo that when this one differs.
+            doi_changed = reconcile_with_final_doi(paper)
             _clear_own_doi_from_references(paper)
 
         issues = list(selection.issues)
+        if doi_changed is not None:
+            issues.append(doi_changed)
         if expected is not None:
             source_matches = expected.source_sha256 is None or (
                 fs.content_sha256 is not None

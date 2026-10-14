@@ -891,6 +891,8 @@ class PaperContents:
     # Internal diagnostics appended at the tail to preserve positional callers.
     reference_yield_receipt: ReferenceYieldReceipt | None = None
     reference_review_receipt: dict | None = field(default=None, kw_only=True)
+    # The front-matter review's receipt (``bibr.extract.front_matter_review``).
+    front_matter_review_receipt: dict | None = field(default=None, kw_only=True)
     reference_boundary_reason_flags: list[str] = field(default_factory=list)
     structure_validation_issues: list["ValidationIssue"] = field(default_factory=list)
     # The internal document layer (``bibr.document``) when

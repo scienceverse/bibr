@@ -437,6 +437,46 @@ download, serving command, request limits and export diagnostics. The base
 Qwen3.5-0.8B checkpoint alone is not the fine-tuned parser. Routing checks are
 observable source signals, not calibrated confidence.
 
+## Front matter and the paper's registry record
+
+Two settings let the paper's own registry record choose between two readings
+of its printed front matter. Both are off by default. The record only decides
+which printed text to keep: its own text is never exported in place of the
+page's, and authors are never taken from it.
+
+Both need the record, so they act only when the paper names its DOI and the
+run looks that DOI up (`CROSSREF_IDENTITY=true` or `CROSSREF_ENRICH=true`),
+and never with `--no-llm`. bibr starts the lookup as soon as the sections are
+known, so it runs while the metadata LLM call does. It reads the same evidence
+as the paper's final DOI selection (the parsed text and the PDF's own text
+layer, links and document info), uses the DOI only when that evidence names a
+single one, and uses the record only when it scores 0.9 or more and its year
+is at most one year from the printed date. A failed or timed-out early lookup
+leaves the later lookup to run as before. If the paper's final DOI is another
+one and the record was used, bibr drops the record and restores the title
+chosen without it, looks the final DOI up as usual, and adds the issue
+`VAL_REGISTRY_DOI_CHANGED`, which `extraction.fields.title` and
+`extraction.fields.author` also list. An author list the review chose because
+it agreed with the dropped record stays, since every name in it is printed and
+the affiliations and contribution roles are built on it, but its
+`registry.outcome` is no longer `corrected`.
+
+- `FRONT_MATTER_REGISTRY_TITLE=true`: when the extracted title disagrees with
+  the record, a title row of the selected front matter whose text is the
+  record's title (followed by its subtitle, on the same row or the row below,
+  when the record keeps one) is used instead, as printed. The extracted title
+  stays when no row prints the record's title, when the extracted title
+  extends that row, when the extracted title is printed before that row (in
+  any language: the printed-first title wins), and when the row is a
+  translation printed after another version of the title. A title chosen this
+  way has the source `registry_printed` and the issue
+  `VAL_TITLE_REGISTRY_PRINTED`, and `extraction.fields.title.registry.outcome`
+  is `corrected`.
+- `LLM_REVIEW_TRIGGER=registry_disagree` with `LLM_REVIEW_MODEL`: asks the
+  title or author call again on a second model when its answer disagrees with
+  the record. See
+  [Second opinion for front matter](deployment.md#second-opinion-for-front-matter).
+
 ## Local model runtime
 
 Four of bibr's models run locally: the PP-DocLayoutV3 layout detector, the

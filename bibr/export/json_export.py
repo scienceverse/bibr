@@ -40,6 +40,7 @@ from bibr.export.models import (
     FieldStatesExport,
     FigureExport,
     FloatPartExport,
+    FrontMatterReviewExport,
     FundingExport,
     FundingMatchExport,
     InputFormatLiteral,
@@ -1183,6 +1184,11 @@ def _export_paper_payload(
         review = getattr(paper.contents, "reference_review_receipt", None)
         if isinstance(review, dict):
             diagnostics["reference_review"] = ReferenceReviewExport.model_validate(review)
+        front_matter_review = getattr(paper.contents, "front_matter_review_receipt", None)
+        if isinstance(front_matter_review, dict):
+            diagnostics["front_matter_review"] = FrontMatterReviewExport.model_validate(
+                front_matter_review
+            )
         extraction_data["diagnostics"] = diagnostics
         if identity := extraction_data.get("identity"):
             extraction_data["identity"] = _export_identity_sections(identity, ids)

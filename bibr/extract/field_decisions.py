@@ -40,7 +40,7 @@ from __future__ import annotations
 import functools
 import logging
 import re
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -151,14 +151,23 @@ class FieldDecisions:
     def proposal(self, name: str) -> FieldCandidate | None:
         return self._proposals.get(name)
 
-    def record(self, decision: FieldDecision) -> None:
+    def record(self, decision: FieldDecision, *, supersede: bool = False) -> None:
+        """Keep *decision* as the field's receipt.
+
+        *supersede* marks a planned second decision (the identity stage
+        restoring a title the paper's registry record chose, once the record
+        turns out to be another paper's); any other is unexpected and logged
+        as a warning.
+        """
         previous = self._decisions.get(decision.field)
         if previous is not None:
             # The pipeline decides each field once; a second decision replaces
             # the written value, so the newer receipt is kept.
-            logger.warning(
-                "Field %r decided twice (rule %r, then %r)",
+            log = logger.info if supersede else logger.warning
+            log(
+                "Field %r decided %s (rule %r, then %r)",
                 decision.field,
+                "again" if supersede else "twice",
                 previous.rule,
                 decision.rule,
             )
@@ -214,11 +223,13 @@ def field_decisions_of(metadata: Any) -> FieldDecisions | None:
     return ledger if isinstance(ledger, FieldDecisions) else None
 
 
-def apply_decision(metadata: Any, decision: FieldDecision) -> None:
+def apply_decision(metadata: Any, decision: FieldDecision, *, supersede: bool = False) -> None:
     """Write *decision*'s value to *metadata* and keep the receipt.
 
     The only writer of the decided ``PaperMetadata`` fields after construction
     (``tests/extract/test_field_decisions.py`` scans the package for others).
+    *supersede* says the field was decided before and this decision replaces
+    that one on purpose (see :meth:`FieldDecisions.record`).
     """
     attributes = FIELD_ATTRIBUTES[decision.field]
     values = decision.value if len(attributes) > 1 else (decision.value,)
@@ -226,7 +237,7 @@ def apply_decision(metadata: Any, decision: FieldDecision) -> None:
         setattr(metadata, attribute, value)
     ledger = field_decisions_of(metadata)
     if ledger is not None:
-        ledger.record(decision)
+        ledger.record(decision, supersede=supersede)
 
 
 def with_transforms(decision: FieldDecision, *transforms: str) -> FieldDecision:
@@ -318,6 +329,8 @@ def decide_value(name: str, candidate: FieldCandidate | None) -> FieldDecision:
 
 _AUTHOR_RULES = {
     "llm": "extracted",
+    # The review model's list, kept over the first one (LLM_REVIEW_TRIGGER).
+    "llm_review": "front_matter_review",
     "llm_recovery": "empty_author_recovery",
     "credit_statement": "credit_statement_fallback",
     "native": "native",
@@ -603,6 +616,7 @@ def decide_title(
     abstained: bool,
     prefer_byline_adjacent: bool,
     doc_info: FieldCandidate | None,
+    registry: Mapping[str, Any] | None = None,
 ) -> FieldDecision:
     """Title: the extracted title, the printed-row fallbacks, then the doc-info.
 
@@ -617,6 +631,10 @@ def decide_title(
        filters.
     2. Scoped and not abstained, a title in hand, byline adjacency enabled: the
        printed row directly above the byline when it disagrees.
+       Then, with *registry* (the paper's own confident registry record,
+       passed under FRONT_MATTER_REGISTRY_TITLE): the selected record's
+       printed row that is the record's title when the title disagrees with
+       the record (:func:`~bibr.extract.title_candidates.registry_title_candidate`).
     3. Unscoped, or the layout title is exactly a generic article label: the
        layout title replaces the title unless it is a generic label and the
        title is printed in the selected record, or it is a masthead the title
@@ -690,6 +708,21 @@ def decide_title(
             use(candidate, "byline_adjacent_title", reason)
         else:
             reject("byline_adjacent", reason)
+
+    title = selected.value if selected is not None else ""
+    if scoped and not abstained and title and registry is not None:
+        candidate, reason = titles.registry_title_candidate(
+            resolution, title, registry, journal=journal, publisher=publisher
+        )
+        if candidate is not None:
+            logger.info(
+                "Registry title rule replaced %r with candidate %s",
+                title,
+                candidate.evidence_ids[0],
+            )
+            use(candidate, "registry_printed_title", reason)
+        else:
+            reject("registry_printed", reason)
 
     if not scoped or is_exact_generic_article_label(detected_title):
         title = selected.value if selected is not None else ""

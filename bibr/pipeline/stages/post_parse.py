@@ -839,6 +839,8 @@ async def _extract_metadata_and_equations(
     validation_issue_sink: list[ValidationIssue] | None = None,
     on_references_ready: Callable[[list], None] | None = None,
     memory_mode: str | None = None,
+    registry_check=None,
+    review_client=None,
 ):
     """Phase 1: metadata + equation extraction in parallel.
 
@@ -891,6 +893,16 @@ async def _extract_metadata_and_equations(
             memory_mode=memory_mode,
         )
     else:
+        # The front-matter rules' inputs reach the extractor only when set, so
+        # extractor doubles that do not take them see the unchanged call.
+        front_matter_kwargs = {
+            name: value
+            for name, value in (
+                ("registry_check", registry_check),
+                ("review_client", review_client),
+            )
+            if value is not None
+        }
         extractor = MetadataExtractor(
             contents,
             file_hash=file_hash,
@@ -901,6 +913,7 @@ async def _extract_metadata_and_equations(
             classifier_resources=classifier_resources,
             front_matter_resolution=front_matter_resolution,
             memory_mode=memory_mode,
+            **front_matter_kwargs,
         )
         # Pass the listener only when one is set so extractor doubles that take no
         # kwargs (and every non-prefetching path) see the unchanged call.
@@ -1319,6 +1332,35 @@ def _usage_totals_by_label(
     return collapsed
 
 
+def _note_record_backed_title(check, decision, incumbent, inputs: dict) -> None:
+    """Keep the title decision made without the registry record on *check*.
+
+    When the record chose the title (the registry title row, or the review's
+    answer kept over a printed first answer because it agrees with the
+    record), the identity stage restores this decision if the final DOI is
+    not the one the record was looked up for. The decision without the
+    record starts from the first answer when the review's record-backed
+    answer replaced it, and never runs the registry title rule.
+    """
+    from bibr.extract.field_decisions import decide_title
+
+    base = incumbent
+    if (
+        incumbent.source == "llm_review"
+        and "title" in check.record_backed
+        and check.primary_title is not None
+    ):
+        base = check.primary_title
+    if decision.source == "registry_printed" or (
+        decision.source == "llm_review" and base is not incumbent
+    ):
+        check.record_backed.add("title")
+        check.title_fallback = decide_title(base, **inputs)
+    else:
+        # A later step chose the title; the record did not.
+        check.record_backed.discard("title")
+
+
 def _build_paper(contents, paper_metadata, file_name: str, file_hash: str, paper_id: str | None):
     """Assemble the final ``Paper`` object from extracted parts."""
     from bibr.input.file import InputFile, InputFormat
@@ -1420,10 +1462,26 @@ async def post_parse(
     expected_identity: ExpectedIdentity | None = None,
     enrichment_prefetch: bool = False,
     memory_mode: str | None = None,
+    registry_lookup: bool = False,
+    review_client=None,
+    pdf_doi_evidence=None,
 ):
     """Post-parse pipeline: classification, extraction, linking.
 
     Shared between LitServe and local pipelines.
+
+    When ``registry_lookup`` is set (the run looks the paper's DOI up:
+    ``CROSSREF_IDENTITY`` or ``CROSSREF_ENRICH``) and a front-matter rule
+    reads the registry record (``FRONT_MATTER_REGISTRY_TITLE``,
+    ``LLM_REVIEW_TRIGGER``), the lookup of the DOI the parsed text names
+    starts right after the sections are settled, under the core metadata
+    call (:mod:`bibr.pipeline.registry_check`), selected with the PDF's own
+    DOI evidence when the caller read it (*pdf_doi_evidence*, as the identity
+    stage will). Its record lands in ``metadata.match`` and its handle rides
+    the ``Paper`` as ``paper.registry_check``. With ``LLM_REVIEW_TRIGGER=registry_disagree``
+    the core extractor re-asks a title or author call that disagrees with that
+    record on *review_client* (built from ``LLM_REVIEW_*`` when not given);
+    its usage is recorded under ``review_``-prefixed labels.
 
     When ``enrichment_prefetch`` is set (the run will enrich references), the
     enrich stage's up-front network work starts as a task the moment the
@@ -1448,8 +1506,15 @@ async def post_parse(
         field_decisions_of,
         incumbent_candidate,
     )
+    from bibr.extract.front_matter_review import (
+        build_review_client,
+        merge_counts,
+        pop_review_usage,
+        review_wanted,
+    )
     from bibr.extract.ref_extractor import _resolve_ref_strategies
     from bibr.paper import doc_info_candidates
+    from bibr.pipeline.registry_check import registry_check_wanted, start_registry_check
 
     # Single LLMClient for the entire post-parse pipeline — shared across
     # section classification, implicit section detection, and metadata extraction
@@ -1488,6 +1553,15 @@ async def post_parse(
             if prefetch_handle is None:
                 prefetch_handle = start_enrichment_prefetch(references, settings=effective_settings)
 
+    registry_check = None
+    # The front-matter review's own model; post_parse closes one it built.
+    owns_review_client = False
+    if no_llm or not review_wanted(effective_settings):
+        review_client = None
+    elif review_client is None and registry_lookup:
+        review_client = build_review_client(effective_settings)
+        owns_review_client = review_client is not None
+    review_usage: dict = {}
     extraction_completed = False
     # The client is shared across concurrently-processed files; the contextvar
     # scopes usage attribution to this file's task tree (no snapshot diffing).
@@ -1520,6 +1594,20 @@ async def post_parse(
                 file_hash,
                 settings=effective_settings,
             )
+            # The paper's own registry record, looked up under the core
+            # metadata call for the front-matter rules that read it.
+            if (
+                registry_lookup
+                and not no_llm
+                and contents.preparsed_metadata is None
+                and registry_check_wanted(effective_settings)
+            ):
+                registry_check = start_registry_check(
+                    contents,
+                    settings=effective_settings,
+                    expected_identity=expected_identity,
+                    pdf_evidence=pdf_doi_evidence,
+                )
 
             # --- Metadata + Equations in parallel ---
             paper_metadata = await _extract_metadata_and_equations(
@@ -1536,7 +1624,13 @@ async def post_parse(
                 validation_issue_sink=metadata_issues,
                 on_references_ready=on_references_ready,
                 memory_mode=memory_mode,
+                registry_check=registry_check,
+                review_client=review_client if registry_check is not None else None,
             )
+            if registry_check is not None:
+                # Usually done already: the lookup ran under the core call.
+                await registry_check.settle(paper_metadata.published)
+                paper_metadata.match.update(registry_check.matches)
             metadata_ownership_scoped = bool(
                 contents.preparsed_metadata is None
                 and contents.front_matter_resolution is not None
@@ -1565,28 +1659,44 @@ async def post_parse(
             # The title: the extracted one, the ownership-scoped null-title
             # safety net (one safe selected-record title row, then the layout
             # title under the same filters), byline adjacency for multilingual
-            # front matter (default off), the layout title and unknown-header
-            # scan outside ownership scope, then the doc-info.
-            title_decision = decide_title(
-                incumbent_candidate(
-                    paper_metadata, "title", source="native" if native_metadata else None
-                ),
-                resolution=contents.front_matter_resolution,
-                detected_title=contents.detected_title,
-                sections=contents.sections,
-                journal=paper_metadata.journal,
-                publisher=paper_metadata.publisher,
-                scoped=metadata_ownership_scoped,
-                abstained=metadata_abstained,
-                prefer_byline_adjacent=bool(
+            # front matter (default off), the printed row that is the paper's
+            # registry title (default off), the layout title and
+            # unknown-header scan outside ownership scope, then the doc-info.
+            title_incumbent = incumbent_candidate(
+                paper_metadata, "title", source="native" if native_metadata else None
+            )
+            title_inputs = {
+                "resolution": contents.front_matter_resolution,
+                "detected_title": contents.detected_title,
+                "sections": contents.sections,
+                "journal": paper_metadata.journal,
+                "publisher": paper_metadata.publisher,
+                "scoped": metadata_ownership_scoped,
+                "abstained": metadata_abstained,
+                "prefer_byline_adjacent": bool(
                     getattr(
                         getattr(effective_settings, "pipeline", None),
                         "title_prefer_byline_adjacent",
                         False,
                     )
                 ),
-                doc_info=doc_info.get("title"),
+                "doc_info": doc_info.get("title"),
+            }
+            registry_record = (
+                registry_check.record()
+                if registry_check is not None
+                and getattr(effective_settings, "FRONT_MATTER_REGISTRY_TITLE", False) is True
+                else None
             )
+            title_decision = decide_title(
+                title_incumbent,
+                **title_inputs,
+                **({"registry": registry_record} if registry_record is not None else {}),
+            )
+            if registry_check is not None:
+                _note_record_backed_title(
+                    registry_check, title_decision, title_incumbent, title_inputs
+                )
             apply_decision(paper_metadata, title_decision)
             metadata_issues.extend(title_decision.issues)
 
@@ -1693,6 +1803,8 @@ async def post_parse(
             # cancel rather than let it run to completion on its own.
             if not extraction_completed and prefetch_handle is not None:
                 prefetch_handle.cancel()
+            if not extraction_completed and registry_check is not None:
+                registry_check.cancel()
             # Capture-and-evict in the finally so the bucket is removed even
             # when a phase raises — shared (serve/local) clients are never
             # closed per file, so a leaked bucket would accumulate forever.
@@ -1728,6 +1840,14 @@ async def post_parse(
                 popped_trace = llm_client.traces_pop_file(usage_key)
                 if getattr(llm_client, "_track_usage", False):
                     file_llm_trace = popped_trace
+            # The review model's calls ran under the same key: record them
+            # under ``review_`` labels next to the core model's.
+            if usage_key is not None and review_client is not None:
+                review_usage = pop_review_usage(review_client, usage_key)
+                merge_counts(file_usage, review_usage["usage"])
+                merge_counts(file_usage_labels, review_usage["labels"])
+                file_protocol_hashes = {**file_protocol_hashes, **review_usage["hashes"]}
+                file_llm_trace = [*file_llm_trace, *review_usage["trace"]]
             if (
                 terminal_processing_error is not None
                 and terminal_processing_error.safe_diagnostics is not None
@@ -1749,6 +1869,13 @@ async def post_parse(
                     if terminal_processing_error is None:
                         raise
                     logger.warning("LLM client cleanup failed after terminal processing error")
+            if owns_review_client:
+                try:
+                    await review_client.close()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning("Review LLM client cleanup failed", exc_info=True)
 
     # Section types that only fit an IMRaD paper, once the paper type is
     # known and the title and statements no longer read the section types.
@@ -1788,6 +1915,7 @@ async def post_parse(
     )
     paper.field_decisions = field_decisions_of(paper_metadata)
     paper.enrichment_prefetch = prefetch_handle
+    paper.registry_check = registry_check
     paper.validation_issues.extend(front_matter_issues)
     paper.validation_issues.extend(metadata_issues)
     paper.llm_usage_labels = file_usage_labels
@@ -1801,6 +1929,9 @@ async def post_parse(
             usage_by_label=_usage_totals_by_label(file_usage_labels),
             protocol_hashes=file_protocol_hashes,
         )
+        if paper.qualification_provenance is not None and review_usage.get("labels"):
+            # The review answered with another model than ``model_id``.
+            paper.qualification_provenance["review_model_id"] = effective_settings.llm.review_model
 
     # Content-level warnings (e.g. reference-segmentation CRF fallback) come
     # first; post-parse-level warnings are appended after them.
@@ -1852,11 +1983,37 @@ class PostParseStage:
         # run will actually enrich (post_parse itself skips it for refs=off /
         # no_llm / no references).
         enrichment_prefetch = bool(ctx.config.enrichment_enabled(ctx.settings))
+        # Whether the run looks the paper's own DOI up (identity or full
+        # enrichment): the front-matter rules may then read that record early.
+        registry_lookup = ctx.config.enrichment_mode(ctx.settings) in ("full", "identity")
+        # The review model is shared across the run like the core client.
+        from bibr.extract.front_matter_review import review_wanted
+
+        review_client = None
+        if registry_lookup and not ctx.config.no_llm and review_wanted(ctx.settings):
+            review_client = getattr(ctx.resources, "review_llm_client", None)
+        from bibr.pipeline.registry_check import registry_check_wanted
+
+        early_record = (
+            registry_lookup and not ctx.config.no_llm and registry_check_wanted(ctx.settings)
+        )
 
         async def _gated(fs):
             async with sem:
                 fs_t0 = time.monotonic()
                 file_hash = fs.file_hash or ""
+                pdf_doi_evidence = None
+                if early_record:
+                    # The early lookup selects its DOI from the evidence the
+                    # identity stage will use; that stage reuses this read.
+                    from bibr.pipeline.stages.identity import read_early_doi_evidence
+
+                    try:
+                        pdf_doi_evidence = await asyncio.to_thread(read_early_doi_evidence, fs)
+                    except Exception:  # noqa: BLE001 - the parsed text stands on its own
+                        logger.warning(
+                            "Could not read DOI evidence early from %s", fs.path.name, exc_info=True
+                        )
                 result = await post_parse(
                     contents=fs.contents,
                     file_name=fs.path.name,
@@ -1874,6 +2031,9 @@ class PostParseStage:
                     expected_identity=fs.expected_identity,
                     enrichment_prefetch=enrichment_prefetch,
                     memory_mode=ctx.config.memory_mode,
+                    registry_lookup=registry_lookup,
+                    **({"review_client": review_client} if review_client is not None else {}),
+                    **({"pdf_doi_evidence": pdf_doi_evidence} if early_record else {}),
                 )
                 fs.stage_times[self.name] = time.monotonic() - fs_t0
                 return result

@@ -786,6 +786,56 @@ class LlmOptions(_BibrSettings):
         "experimental and require explicit runtime-specific qualification.",
     )
 
+    # Second opinion for the front matter: when the paper's own registry record
+    # (looked up early under CROSSREF_IDENTITY/CROSSREF_ENRICH) disagrees with
+    # the extracted title or author list, only the disagreeing call is asked
+    # again on this model. Its answer is kept only when it is printed and
+    # agrees with the record, or the first answer was not printed. Mirrors the
+    # dedicated reference endpoint (REF_LLM_*).
+    review_trigger: Literal["off", "registry_disagree"] = Field(
+        "off",
+        description="When to ask the review model (LLM_REVIEW_MODEL) again for the title or "
+        'authors: "off" (default) or "registry_disagree" (the field disagrees with the '
+        "paper's own registry record, which needs CROSSREF_IDENTITY or CROSSREF_ENRICH). The "
+        "review's answer replaces the first one only when it is printed in the front matter, "
+        "is not a translation printed after another version of the title, and agrees with the "
+        "record or the first answer was not printed; "
+        "`extraction.diagnostics.front_matter_review` counts the outcomes.",
+    )
+    review_provider: Literal["google", "openai", "anthropic", "groq", "ollama"] | None = Field(
+        None,
+        description="Provider of the front-matter review model. Null uses LLM_PROVIDER and then "
+        "also LLM_BASE_URL and LLM_API_KEY, unless LLM_REVIEW_BASE_URL or LLM_REVIEW_API_KEY "
+        "is set.",
+    )
+    review_model: str | None = Field(
+        None,
+        description="Model that re-asks a title or author call the registry record disagrees "
+        "with (LLM_REVIEW_TRIGGER). Null: no review.",
+    )
+    review_base_url: str | None = Field(
+        None,
+        description="OpenAI-compatible base URL of the review model, e.g. a second local server.",
+    )
+    review_api_key: str | None = Field(
+        None,
+        repr=False,
+        description="API key for the review model. Null falls back to LLM_API_KEY only for the "
+        "same endpoint (LLM_REVIEW_PROVIDER and LLM_REVIEW_BASE_URL unset), else to the "
+        "provider's own key (ANTHROPIC_API_KEY, GOOGLE_API_KEY, ...).",
+    )
+    review_max_concurrency: int = Field(
+        4,
+        ge=0,
+        description="Max in-flight requests to the review model across papers (0 = unlimited).",
+    )
+    review_timeout_seconds: int = Field(
+        60,
+        ge=1,
+        description="Deadline in seconds for one review call; a late review keeps the first "
+        "answer.",
+    )
+
     batch_model: str = Field(
         "claude-haiku-4-5", description="Model name for the offline batch LLM layer."
     )
@@ -794,7 +844,14 @@ class LlmOptions(_BibrSettings):
         description="Poll interval in seconds for the offline batch LLM layer's job status checks.",
     )
 
-    @field_validator("provider", "backend", "structured_backend", mode="before")
+    @field_validator(
+        "provider",
+        "backend",
+        "structured_backend",
+        "review_trigger",
+        "review_provider",
+        mode="before",
+    )
     @classmethod
     def _lower_llm_choice(cls, v):
         """Normalize choice-like values so the Literal check is case-insensitive."""
@@ -2483,6 +2540,20 @@ class GlobalSettings(_BibrSettings):
         True, description="Infer implicit sections from body text when headers are absent."
     )
     FIGURE_IMAGES: bool = Field(False, description="Extract figure images from PDFs.")
+    # The paper's own registry record as a title candidate: off until measured
+    # on more inputs. The record only chooses between printed rows; its own
+    # text is never written into the title.
+    FRONT_MATTER_REGISTRY_TITLE: bool = Field(
+        False,
+        description="When the extracted title disagrees with the paper's own registry record, "
+        "use the selected front-matter row that prints the record's title (with its subtitle "
+        "when the record keeps one, on the same row or the row below) instead. Refused when the "
+        "extracted title is printed before that row (in any language), when the row is a "
+        "translation printed after another version of the title, and when the extracted title "
+        "extends the row. Needs CROSSREF_IDENTITY or CROSSREF_ENRICH; the record is then looked "
+        "up during extraction. `extraction.fields.title.registry.outcome` is `corrected` when "
+        "it applies. Experimental, off by default.",
+    )
     # Reference extraction strategy — DECOUPLED segmentation + parsing axes
     # (resolved in bibr.extract.ref_extractor._resolve_ref_strategies; per-run
     # overrides ride RunConfig via chew(refs=...) / CLI --refs/--ref-seg).

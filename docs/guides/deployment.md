@@ -631,6 +631,87 @@ A resolver error falls through to Crossref. Misses also fall through by
 default; `BIBR_RESOLVER_AUTHORITATIVE=true` makes a clean resolver miss
 authoritative and skips the Crossref fallback.
 
+## Second opinion for front matter
+
+A small extraction model gets most titles and author lists right, and the
+paper's own registry record shows which of its answers to doubt. With
+`LLM_REVIEW_TRIGGER=registry_disagree`, bibr asks a second, usually larger,
+model again, but only for the call whose answer disagrees with the record:
+
+```bash
+# .env
+CROSSREF_IDENTITY=true            # or CROSSREF_ENRICH=true; the record comes from that lookup
+CROSSREF_API_EMAIL=you@example.org
+LLM_REVIEW_TRIGGER=registry_disagree
+LLM_REVIEW_MODEL=your-larger-model
+# Optional: serve the review model from another endpoint
+# LLM_REVIEW_PROVIDER=openai
+# LLM_REVIEW_BASE_URL=http://review-host:8000/v1
+# LLM_REVIEW_API_KEY=your-review-endpoint-key
+# LLM_REVIEW_MAX_CONCURRENCY=4
+# LLM_REVIEW_TIMEOUT_SECONDS=60
+```
+
+- The record comes from the lookup of the paper's DOI, which starts under
+  the core metadata call (see
+  [Front matter and the paper's registry record](configuration.md#front-matter-and-the-papers-registry-record)).
+  A paper without a DOI, or without a confident record, is never reviewed.
+- When the title or the author list does not agree with the record, or came
+  back empty while the record has it, that call alone is asked again on the
+  review model, with the same front-matter text. Titles also count as agreeing
+  when only their spacing differs, or when the record's title followed by its
+  subtitle matches.
+- The review's answer is used only when it is printed in the front matter and
+  either agrees with the record or the first answer was not printed; both
+  answers are judged after the same grounding as any other title. A review
+  title printed after another version of the title in another language is
+  refused, even when the record holds that version and whatever the first
+  answer was. Otherwise the first answer stays. The record's own text is never
+  exported.
+- A review that fails or takes longer than `LLM_REVIEW_TIMEOUT_SECONDS` keeps
+  the first answer; the paper never fails because of the review.
+
+Without `LLM_REVIEW_PROVIDER` and `LLM_REVIEW_BASE_URL`, the review model is
+called on the core model's provider and endpoint, with `LLM_API_KEY`. Setting
+either one points the review at another endpoint, and `LLM_API_KEY` is not
+sent there: set `LLM_REVIEW_API_KEY`, or the provider's own key variable. The
+review uses Instructor for structured output; the other `LLM_*` settings apply
+to it as to the core model. **Privacy:** the review model receives the same
+front-matter text as the core model, so a review served elsewhere sends that
+text there too.
+
+The export shows what the review did:
+
+- `extraction.diagnostics.front_matter_review` is
+  `{model, status, routed, attempted, accepted, rejected, failed, skipped, reasons}`
+  for every paper the review could compare with a record. `routed` counts the
+  calls that disagreed and `reasons` says why (`title_disagrees`,
+  `title_missing`, `authors_disagree`, `authors_missing`); `attempted` is
+  `accepted + rejected + failed`, and `routed` is `attempted + skipped`. With
+  the trigger on and no `LLM_REVIEW_MODEL`, `status` is `not_configured` and
+  every routed call is skipped.
+- A title or author list taken from the review has the source `llm_review`.
+  When it agrees with the record, `extraction.fields.<field>.registry.outcome`
+  is `corrected`. If the paper's final DOI turns out to be another one, a
+  reviewed title goes back to the first answer, while a reviewed author list
+  stays (every name in it is printed) without the `corrected` outcome, and
+  both fields list `VAL_REGISTRY_DOI_CHANGED`.
+- The review calls' token usage is reported under their own labels, prefixed
+  `review_`, and `extraction.qualification.review_model_id` names the review
+  model.
+
+On two development sets (252 papers), a simulation of a simpler variant of
+this routing, which took a 27B model's whole answer for the re-asked call only
+when it agreed with the record, lost no paper. The papers that passed every
+field check went from 216 to 219 for a 4B extraction model and from 207 to 216
+for a 2B one. It re-asked one or two calls on 8-12% of the papers. Papers in a
+language other than English were over half of those, because the record often
+holds an English parallel title. About a fifth of the papers had no record for
+the DOI bibr found, mostly because they print none, so the review could not
+reach them. The simulation did not model the acceptance of a printed answer
+over an unprinted first one, the printed requirement or the translation
+refusal, and the review as shipped has not been measured end to end yet.
+
 ## Hardware sizing
 
 Size the API host separately from the OCR and LLM services. The serve image

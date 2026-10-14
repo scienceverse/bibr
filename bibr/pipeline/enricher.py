@@ -114,6 +114,7 @@ class CrossrefEnricher:
             enrich_paper_identity,
             enrich_references,
         )
+        from bibr.pipeline.registry_check import covered_by_registry_check
 
         timeout = (
             self._timeout if self._timeout is not None else self._settings.crossref.enrich_timeout
@@ -121,7 +122,9 @@ class CrossrefEnricher:
         enrich_started_at = time.monotonic()
 
         async def _identity() -> EnrichmentReport | None:
-            if not meta.doi:
+            if not meta.doi or covered_by_registry_check(paper):
+                # The early lookup under extraction already answered for
+                # this DOI; its record is in ``meta.match``.
                 return None
             report = await enrich_paper_identity(meta, settings=self._settings)
             return report if isinstance(report, EnrichmentReport) else EnrichmentReport(attempted=1)
@@ -223,10 +226,14 @@ def needs_identity_lookup(paper) -> bool:
 
     The core checkpoint marks exactly these papers enrichment-pending and the
     enrichment stage runs exactly these, so a paper without a DOI keeps its
-    core as the final export and costs no request.
+    core as the final export and costs no request. Neither does a paper whose
+    DOI the early lookup under extraction already answered
+    (:mod:`bibr.pipeline.registry_check`): its record is already in the core.
     """
+    from bibr.pipeline.registry_check import covered_by_registry_check
+
     metadata = getattr(paper, "metadata", None)
-    return bool(getattr(metadata, "doi", None))
+    return bool(getattr(metadata, "doi", None)) and not covered_by_registry_check(paper)
 
 
 class CrossrefIdentityEnricher:

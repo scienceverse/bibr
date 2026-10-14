@@ -34,10 +34,17 @@ _SCHEMA_VERSION = "12.3"
 #   - New ``extraction.fields.title.registry`` and
 #     ``extraction.fields.author.registry``: ``{service, outcome}``, where
 #     ``outcome`` says whether the exported title or author list ``agree``s or
-#     ``disagree``s with the paper's own confident ``metadata_match`` record
-#     (``corrected`` is reserved for a later rule). The exported values are
-#     never changed. Omitted when there is no confident record, so every 12.2
-#     export is still a valid 12.3 reader input.
+#     ``disagree``s with the paper's own confident ``metadata_match`` record,
+#     or was ``corrected``: a printed value that replaced the first extracted
+#     one after that one disagreed with the record (FRONT_MATTER_REGISTRY_TITLE,
+#     or the front-matter review). The record's own text is never written.
+#     Omitted when there is no confident record, so every 12.2 export is still
+#     a valid 12.3 reader input.
+#   - New ``extraction.diagnostics.front_matter_review``: the receipt of the
+#     second-opinion review (LLM_REVIEW_TRIGGER): fields routed because they
+#     disagree with the record, and how many reviews were attempted,
+#     accepted, rejected, failed or skipped. Omitted when the review did not
+#     run.
 #   - New ``metadata_match[].subtitle``: the record's subtitle where the
 #     service keeps it apart from ``title`` (Crossref). Omitted when absent.
 #
@@ -1606,6 +1613,50 @@ class ReferenceReviewExport(BaseModel):
         return self
 
 
+class FrontMatterReviewExport(BaseModel):
+    """Second opinion on the title and authors where the paper's registry record disagrees."""
+
+    model_config = _STRICT
+
+    model: str | None = Field(description="Review model (LLM_REVIEW_MODEL); null when unset.")
+    status: Literal["configured", "not_configured"] = Field(
+        description="Whether a review model was configured."
+    )
+    routed: int = Field(
+        ge=0,
+        description="Fields (the title, the author list) whose first value disagreed with the "
+        "paper's own registry record, or was empty while the record has one.",
+    )
+    attempted: int = Field(ge=0, description="Routed fields asked again on the review model.")
+    accepted: int = Field(
+        ge=0,
+        description="Reviews used: printed in the front matter and agreeing with the record, or "
+        "the first value was not printed.",
+    )
+    rejected: int = Field(ge=0, description="Valid reviews not used; the first value was kept.")
+    failed: int = Field(
+        ge=0, description="Reviews that failed or timed out; the first value was kept."
+    )
+    skipped: int = Field(
+        ge=0,
+        description="Routed fields not asked again: no review model, or the first call failed.",
+    )
+    reasons: dict[str, Annotated[int, Field(ge=0)]] = Field(
+        description="Routed fields by reason: title_disagrees, title_missing, authors_disagree, "
+        "authors_missing."
+    )
+
+    @model_validator(mode="after")
+    def counts_reconcile(self):
+        if self.attempted != self.accepted + self.failed + self.rejected:
+            raise ValueError("review attempts must equal accepted + failed + rejected")
+        if self.routed != self.attempted + self.skipped:
+            raise ValueError("routed fields must equal attempted + skipped")
+        if sum(self.reasons.values()) != self.routed:
+            raise ValueError("reasons must count each routed field once")
+        return self
+
+
 class ReferenceYieldExport(BaseModel):
     """How many references were found, and how the reference section was split."""
 
@@ -1739,8 +1790,11 @@ class FieldRegistryExport(BaseModel):
         "of the other that keeps at least 70% of it; the record's title is also tried with "
         "its subtitle appended. Author lists agree when their full names pair up with an F1 "
         "of at least 0.9, whatever the given/family split. 'disagree': they differ, and the "
-        "export keeps its own value. 'corrected' is reserved for a printed value chosen "
-        "because the record agrees with it; bibr does not write it yet."
+        "export keeps its own value. 'corrected': the value agrees, and it is a printed value "
+        "that replaced the first extracted one after that one disagreed with the record (source "
+        "'registry_printed' under FRONT_MATTER_REGISTRY_TITLE, or 'llm_review' under "
+        "LLM_REVIEW_TRIGGER), unless the field's issues include 'VAL_REGISTRY_DOI_CHANGED' (the "
+        "record that chose it was another DOI's); the record's own text is never written."
     )
 
 
@@ -1757,7 +1811,8 @@ class FieldRecordExport(BaseModel):
     )
     source: str | None = Field(
         description="The step that produced the value, e.g. 'llm', 'layout_title', "
-        "'front_matter_candidate', 'doc_info', 'keywords_section', 'identity', 'classifier', "
+        "'front_matter_candidate', 'registry_printed', 'llm_review', 'doc_info', "
+        "'keywords_section', 'identity', 'classifier', "
         "'native' (declared by the input); for doi, the selected identity candidate's "
         "source_kind; for a failed field the step that failed. Null when unknown or when "
         "nothing was produced."
@@ -1862,6 +1917,11 @@ class DiagnosticsExport(BaseModel):
         default=None,
         description="Receipt for automatic fine-tuned review of NER references.",
     )
+    front_matter_review: FrontMatterReviewExport | None = Field(
+        default=None,
+        description="Receipt for the second-opinion review of the title and authors where the "
+        "paper's registry record disagrees (LLM_REVIEW_TRIGGER); omitted when it did not run.",
+    )
     consolidation: list[ConsolidationExport] | None = Field(
         default=None,
         description="Per modified reference, the bib[] fields consolidation took from bib_match; "
@@ -1881,6 +1941,7 @@ class DiagnosticsExport(BaseModel):
         "caption_assignment",
         "reference_yield",
         "reference_review",
+        "front_matter_review",
         "consolidation",
         "verification",
     )

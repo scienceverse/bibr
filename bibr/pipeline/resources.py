@@ -147,6 +147,7 @@ class ResourceManager:
         self._llm_server_backend: str | None = None
         self._llm_init_lock = asyncio.Lock()
         self._llm_client: LLMClient | None = None
+        self._review_llm_client: LLMClient | None = None
         if classifier_resources is None:
             from bibr.pipeline.classifier_resources import ClassifierResources
 
@@ -878,12 +879,26 @@ class ResourceManager:
                 self._llm_client = _make_llm_client()
         return self._llm_client
 
+    @property
+    def review_llm_client(self):
+        """Lazy LLMClient for the front-matter review model (``LLM_REVIEW_*``).
+
+        None while the review is off or has no model.
+        """
+        if self._review_llm_client is None:
+            from bibr.extract.front_matter_review import build_review_client
+
+            self._review_llm_client = build_review_client(self._settings)
+        return self._review_llm_client
+
     async def close_llm_client(self) -> None:
-        """Close the shared LLMClient (idempotent)."""
-        if self._llm_client is None:
-            return
-        try:
-            await self._llm_client.close()
-        except Exception as exc:
-            logger.warning("LLMClient.close failed: %s", exc)
-        self._llm_client = None
+        """Close the shared LLMClients (idempotent)."""
+        for name in ("_llm_client", "_review_llm_client"):
+            client = getattr(self, name)
+            if client is None:
+                continue
+            try:
+                await client.close()
+            except Exception as exc:
+                logger.warning("LLMClient.close failed: %s", exc)
+            setattr(self, name, None)
