@@ -82,6 +82,10 @@ def main():
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
+    # Gradio sends usage analytics to its maintainers unless this is off. bibr
+    # keeps it off for the demo; a value already in the environment wins.
+    os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
+
     try:
         import gradio
 

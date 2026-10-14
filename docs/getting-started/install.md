@@ -98,7 +98,8 @@ GB on first use, so it logs a warning naming `uv sync --extra vllm`, and
 `bibr setup` adds `vllm` to its Linux/CUDA plan. It only runs on an NVIDIA GPU
 with at least 8 GB of VRAM; smaller GPUs and CPU-only Linux machines take the
 llama.cpp path (`glm-llama`) for OCR instead. The managed local LLM uses the
-same bootstrap. On Python 3.14, where `vllm==0.31.0` cannot install from wheels
+same bootstrap from 11 GB of VRAM (NuExtract 3's vLLM build); below that,
+`--llm local` uses llama.cpp. On Python 3.14, where `vllm==0.31.0` cannot install from wheels
 (its `llguidance` dependency publishes none for 3.14) and the `vllm` extra
 therefore installs nothing, both launchers run the bootstrap
 inside a managed Python 3.13, and `bibr doctor` says so; a 3.11-3.13
@@ -145,7 +146,7 @@ cd bibr
 uv sync --extra all --all-groups
 ```
 
-`--all-groups` adds the dev and docs dependency groups (tests, linting, mkdocs) on top of the `all` extras. See the [contributing guide](../contributing/evaluation.md) for running the test and evaluation suites.
+`--all-groups` adds the dev and docs dependency groups (tests, linting, mkdocs) on top of the `all` extras. See the [development setup](../contributing/setup.md) for running the tests and [evaluation](../contributing/evaluation.md) for the evaluation suites.
 
 ## Verify your setup
 

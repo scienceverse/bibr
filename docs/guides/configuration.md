@@ -27,8 +27,9 @@ than a convenience. `${NAME}` inside a `.env` value remains literal; bibr does
 not interpolate it from another environment variable.
 
 Explicit run flags such as `--ocr`, `--llm`, `--refs`, and `--memory` override
-their corresponding settings for that invocation. Source-checkout users should
-prefix the commands on this page with `uv run`.
+their corresponding settings for that invocation. In a uv project (the
+Quickstart install or a source checkout), prefix the commands on this page with
+`uv run`.
 
 Set `BIBR_DISABLE_DOTENV=1` to skip both `.env` files entirely. Benchmark
 harnesses and CI should do this so every setting a run records came from the
@@ -463,9 +464,11 @@ All four bundles are published, so a core install needs no configuration:
 | Paper classifier | `scienceverse/bibr-paper-classifier` | `6046171b` |
 | Reference parser | `scienceverse/bibr-parser-v4-5-gold` | `ff50a83e` |
 
-The three text-model pins moved forward from the previously audited commits to
-the commits that add `onnx/`. Those commits are purely additive — no existing
-file changed — so the PyTorch path still loads byte-identical weights.
+The paper-classifier and reference-parser pins are the commits that added
+`onnx/` to the previously audited weights, so their PyTorch weights are
+unchanged. The section-classifier pin is the model retrained in 0.7.1; set
+`ML_SECTION_CLASSIFIER_REVISION=ee1a83db01ce947e3a5eb87dfde7221328f4b207` to
+keep the previous one.
 
 Execution providers come from the same chain the sentence segmenter uses
 (CUDA → CoreML → CPU), so `bibr[gpu]` accelerates all four models, not just

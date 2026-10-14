@@ -18,4 +18,3 @@ Rscript examples/platform/test_platform_api.R paper.pdf
 ```
 
 Open the Quarto notebook from this directory so its relative helper path resolves.
-Bulk maintainer tools live under [evaluation/platform](../../evaluation/platform/README.md).
