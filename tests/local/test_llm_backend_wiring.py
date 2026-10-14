@@ -95,6 +95,31 @@ def test_local_resolves_to_llama_cpp_on_small_cuda_gpu():
         assert resolve_llm_backend("local") == "llama-cpp"
 
 
+@pytest.mark.parametrize(
+    ("llama_server", "expected"), [(["llama-server"], "llama-cpp"), (None, "vllm")]
+)
+def test_local_without_a_gpu_runs_llama_cpp_on_the_cpu_when_installed(llama_server, expected):
+    """No GPU: llama.cpp when installed; otherwise vllm, whose preflight names the options."""
+    with (
+        patch("platform.system", return_value="Linux"),
+        patch("sys.platform", "linux"),
+        patch("bibr.local.llm_models.detect_hardware", return_value=(None, None)),
+        patch("bibr.local.llama_cpp.find_llama_server", return_value=llama_server),
+    ):
+        assert resolve_llm_backend("local") == expected
+
+
+def test_local_on_a_gpu_does_not_look_for_llama_server():
+    with (
+        patch("platform.system", return_value="Linux"),
+        patch("sys.platform", "linux"),
+        patch("bibr.local.llm_models.detect_hardware", return_value=("cuda", 24.0)),
+        patch("bibr.local.llama_cpp.find_llama_server", return_value=["llama-server"]) as find,
+    ):
+        assert resolve_llm_backend("local") == "vllm"
+    find.assert_not_called()
+
+
 def test_concrete_names_pass_through():
     for name in ("cloud", "vllm", "vllm-mlx", "rapid-mlx", "llama-cpp", "llmster"):
         assert resolve_llm_backend(name) == name
@@ -179,11 +204,17 @@ def test_llmster_settings_defaults():
 def test_preflight_local_backend_no_hardware_names_alternatives():
     from bibr.local import cli
 
-    with patch("bibr.local.llm_models.detect_hardware", return_value=(None, None)):
+    with (
+        patch("bibr.local.llm_models.detect_hardware", return_value=(None, None)),
+        patch("bibr.local.llama_cpp.cpu_install_hint", return_value="CPU-HINT"),
+    ):
         err = cli._preflight_local_backend("vllm")
     assert err is not None
     assert "ollama" in err.lower()
     assert "cloud" in err.lower()
+    # The CPU route: install llama.cpp and --llm local picks it.
+    assert "CPU-HINT" in err
+    assert "--llm local" in err
 
 
 def test_preflight_local_backend_vllm_ok_with_uv(monkeypatch):
@@ -264,29 +295,67 @@ def test_preflight_llama_cpp_does_not_require_detected_accelerator():
         assert cli._preflight_local_backend("llama-cpp") is None
 
 
-def test_preflight_llama_cpp_missing_launcher_has_platform_hint():
+@pytest.mark.parametrize(
+    ("hardware", "hint"), [(("cuda", 6.0), "GPU-BUILD-HINT"), ((None, None), "CPU-BUILD-HINT")]
+)
+def test_preflight_llama_cpp_missing_launcher_has_platform_hint(hardware, hint):
+    """A machine with no GPU is pointed at the CPU builds, not at a CUDA build."""
     from bibr.local import cli
 
     with (
-        patch("bibr.local.llm_models.detect_hardware", return_value=(None, None)),
+        patch("bibr.local.llm_models.detect_hardware", return_value=hardware),
         patch("bibr.local.llama_cpp.find_llama_server", return_value=None),
-        patch(
-            "bibr.local.llama_cpp.install_hint",
-            return_value="Install with: winget install llama.cpp",
-        ),
+        patch("bibr.local.llama_cpp.install_hint", return_value="GPU-BUILD-HINT"),
+        patch("bibr.local.llama_cpp.cpu_install_hint", return_value="CPU-BUILD-HINT"),
     ):
         err = cli._preflight_local_backend("llama-cpp")
 
     assert err is not None
-    assert "winget install llama.cpp" in err
+    assert err.endswith(hint)
 
 
-def test_preflight_llama_cpp_cpu_only_still_passes():
+@pytest.mark.parametrize("hardware", [("cuda", 8.0), (None, None)])
+def test_preflight_llama_cpp_cpu_only_still_passes(hardware):
     """CPU builds are slow but valid; preflight must not hard-fail."""
     from bibr.local import cli
 
     with (
+        patch("bibr.local.llm_models.detect_hardware", return_value=hardware),
         patch("bibr.local.llama_cpp.find_llama_server", return_value=["llama-server"]),
         patch("bibr.local.llama_cpp.probe_gpu_backend", return_value=False),
     ):
         assert cli._preflight_local_backend("llama-cpp") is None
+
+
+def test_preflight_llama_cpp_on_a_machine_without_a_gpu_expects_the_cpu(caplog):
+    """No GPU to switch to: say what the CPU costs instead of advising a CUDA build."""
+    import logging
+
+    from bibr.local import cli
+
+    with (
+        patch("bibr.local.llm_models.detect_hardware", return_value=(None, None)),
+        patch("bibr.local.llama_cpp.find_llama_server", return_value=["llama-server"]),
+        patch("bibr.local.llama_cpp.probe_gpu_backend", return_value=False),
+        caplog.at_level(logging.INFO),
+    ):
+        assert cli._preflight_local_backend("llama-cpp") is None
+    assert "minutes per paper" in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_managed_llm_model_follows_the_llama_cpp_build():
+    """dry-run and doctor name the model the server will load on a CPU build."""
+    from bibr.config import GlobalSettings
+    from bibr.local.cli.run_config import _managed_llm_model
+
+    settings = GlobalSettings()
+    settings.llm.local_model = None
+    with patch("bibr.local.llama_cpp.runs_on_cpu", return_value=True):
+        assert _managed_llm_model("llama-cpp", settings) == (
+            "scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M"
+        )
+    with patch("bibr.local.llama_cpp.runs_on_cpu", return_value=False):
+        assert _managed_llm_model("llama-cpp", settings) == (
+            "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
+        )

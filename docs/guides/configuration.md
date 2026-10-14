@@ -188,6 +188,9 @@ individual flags with
 matching defaults). On older GPUs (Pascal / GTX 10-series) PyTorch may fall
 back to CPU for layout/NER while llama.cpp still uses the GPU — that is
 expected; install a CUDA build of `llama-server` and skip the `gpu` extra.
+A llama.cpp build that sees no GPU gets no layer offload and `--threads` set
+to the physical cores bibr may use instead (see
+[Without a GPU](extraction-models.md#without-a-gpu-experimental)).
 
 ## Choosing an LLM
 
@@ -252,7 +255,9 @@ advanced wizard also offers Gemma 4 E4B on CUDA, and custom model IDs.
 `LLM_LOCAL_MODEL` selects managed local weights; `LLM_MODEL` and `--llm-model`
 select the provider model. When `LLM_LOCAL_MODEL` is unset, every managed
 runtime uses the 4B model: bf16 on vLLM, the Q8_0 GGUF on llama.cpp and the
-8-bit build on vllm-mlx. The managed llama.cpp server starts with thinking off
+8-bit build on vllm-mlx. A llama.cpp build that sees no GPU uses the 2B
+model's Q4_K_M GGUF instead, the fastest build on a CPU. The managed llama.cpp
+server starts with thinking off
 (`--reasoning off`, or `--reasoning-budget 0` on older builds, plus
 `--chat-template-kwargs '{"enable_thinking": false}'`) when the installed
 build supports it, and `bibr setup` also writes

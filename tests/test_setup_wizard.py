@@ -1560,14 +1560,40 @@ def test_local_provider_mac_uses_vllm_mlx_and_warns_experimental(monkeypatch):
     assert "cloud api" in text
 
 
-def test_local_provider_no_hardware_shows_all_variants(monkeypatch):
+def test_local_provider_no_hardware_offers_the_cpu_builds(monkeypatch):
+    """No GPU: llama.cpp on the CPU, with the builds keyed on system RAM."""
     monkeypatch.setattr("bibr.setup_wizard.sys.platform", "linux")
     wizard = _recording_wizard()
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: (None, None))
+    monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 16.0)
     _feed_prompts(monkeypatch, ["local", "bibr-extract-4b", "1"])
     wizard._step_llm_provider()
-    # Unknown hardware: default to the cuda variant list, unfiltered.
-    assert wizard.env_vars["LLM_BACKEND"] == "vllm"
+    assert wizard.env_vars["LLM_BACKEND"] == "llama-cpp"
+    assert wizard.env_vars["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-GGUF:Q4_K_M"
+    text = wizard.console.export_text()
+    assert "16 GB RAM" in text
+    assert "fastest first" in text
+    assert "needs ~8 GB of RAM" in text
+    assert "experimental" in text.lower()
+
+
+def test_local_provider_no_hardware_defaults_to_the_fastest_cpu_build(monkeypatch):
+    monkeypatch.setattr("bibr.setup_wizard.sys.platform", "win32")
+    wizard = _recording_wizard()
+    monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: (None, None))
+    monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 8.0)
+    answers = iter(["local"])
+
+    def prompt(*_a, **k):
+        # The provider, then Enter at every other prompt.
+        return next(answers, None) or k["default"]
+
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", prompt)
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: False)
+    wizard._step_llm_provider()
+    assert wizard.env_vars["LLM_BACKEND"] == "llama-cpp"
+    assert wizard.env_vars["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M"
+    assert "no variant fits" not in wizard.console.export_text().lower()
 
 
 def test_local_provider_small_vram_selects_gguf_quant(monkeypatch):
@@ -2423,3 +2449,210 @@ def test_run_validation_tests_the_private_server_llm(monkeypatch):
     wizard._run_validation(setup)
 
     assert calls == ["llm"]
+
+
+# ---------------------------------------------------------------------------
+# Experimental CPU tier (no NVIDIA GPU or Apple Silicon)
+# ---------------------------------------------------------------------------
+
+
+def _cpu_setup(monkeypatch, *, ram=8.0, sys_platform="linux", llama_server=("llama-server",)):
+    monkeypatch.setattr(
+        "bibr.local.llama_cpp.find_llama_server",
+        lambda: list(llama_server) if llama_server else None,
+    )
+    return _build_recommended_setup(
+        platform_key=None,
+        accelerator_memory_gb=None,
+        system_memory_gb=ram,
+        sys_platform=sys_platform,
+        machine="x86_64",
+        cpu_local=True,
+    )
+
+
+def test_cpu_local_setup_reads_the_text_layer_and_runs_the_2b_on_llama_cpp(monkeypatch):
+    setup = _cpu_setup(monkeypatch, ram=8.0)
+
+    assert setup.tier == "cpu_local"
+    assert setup.env["OCR_BACKEND"] == "text-layer"
+    assert setup.env["LLM_BACKEND"] == "llama-cpp"
+    assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M"
+    assert setup.env["LLM_CHAT_TEMPLATE_KWARGS"] == '{"enable_thinking": false}'
+    # No global timeout or equation overrides: the CPU build of llama.cpp
+    # sets its own when unset, and these would outlive a later cloud setup.
+    assert not {"EQUATION_EXTRACTION", "EQUATION_LLM_FALLBACK", "LLM_TIMEOUT_SECONDS"} & set(
+        setup.env
+    )
+    assert setup.env["PIPELINE_MEMORY_MODE"] == "aggressive"
+    # The core install's ONNX runtime is enough; torch would only add GBs.
+    assert setup.extras == {"demo"}
+    assert setup.required_prompts == ("install_extras", "smoke_test")
+    assert "stay on this machine" in setup.privacy_summary
+    assert "no OCR model" in setup.download_summary
+    runtime = setup.runtime_summary
+    assert "Experimental" in runtime
+    assert "minutes per paper" in runtime
+    assert "82" in runtime and "9.6" in runtime
+    assert "born-digital PDFs" in runtime
+    assert "scanned papers need cloud OCR or a GPU" in runtime
+    assert "regex pass only" in runtime
+    assert "Install llama.cpp" not in runtime
+
+
+def test_cpu_local_setup_memory_mode_follows_ram(monkeypatch):
+    setup = _cpu_setup(monkeypatch, ram=32.0)
+    assert setup.env["PIPELINE_MEMORY_MODE"] == "balanced"
+    # More RAM does not trade speed for the larger builds.
+    assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M"
+
+
+@pytest.mark.parametrize(
+    ("sys_platform", "hint"),
+    [("win32", "win-cpu-x64"), ("darwin", "brew install llama.cpp"), ("linux", "ubuntu-x64")],
+)
+def test_cpu_local_setup_says_how_to_install_llama_cpp(monkeypatch, sys_platform, hint):
+    setup = _cpu_setup(monkeypatch, sys_platform=sys_platform, llama_server=None)
+    assert "Install llama.cpp first" in setup.runtime_summary
+    assert hint in setup.runtime_summary
+
+
+@pytest.mark.parametrize(("platform_key", "vram"), [("cuda", 24.0), ("mlx", 16.0), ("cuda", 4.0)])
+def test_cpu_local_is_only_for_machines_without_a_gpu(monkeypatch, platform_key, vram):
+    monkeypatch.setattr("bibr.local.llama_cpp.find_llama_server", lambda: None)
+    setup = _build_recommended_setup(
+        platform_key=platform_key,
+        accelerator_memory_gb=vram,
+        system_memory_gb=16.0,
+        sys_platform="darwin" if platform_key == "mlx" else "linux",
+        machine="arm64" if platform_key == "mlx" else "x86_64",
+        cpu_local=True,
+    )
+    assert setup.tier != "cpu_local"
+
+
+def test_cpu_local_needs_the_text_layer_backend_and_enough_ram(monkeypatch):
+    from bibr.setup_wizard import _cpu_local_available
+
+    monkeypatch.setattr("bibr.setup_wizard._text_layer_ocr_available", lambda: False)
+    assert _cpu_local_available(32.0) is False
+    monkeypatch.setattr("bibr.setup_wizard._text_layer_ocr_available", lambda: True)
+    assert _cpu_local_available(32.0) is True
+    assert _cpu_local_available(6.0) is True
+    assert _cpu_local_available(5.5) is False
+
+
+def test_text_layer_ocr_available_follows_the_ocr_registry(monkeypatch):
+    import bibr.ocr.registry as registry
+    from bibr.setup_wizard import _text_layer_ocr_available
+
+    monkeypatch.setattr(registry, "TEXT_LAYER_BACKEND", "text-layer", raising=False)
+    assert _text_layer_ocr_available() is True
+    monkeypatch.delattr(registry, "TEXT_LAYER_BACKEND")
+    assert _text_layer_ocr_available() is False
+
+
+def _weak_machine(monkeypatch, tmp_path, *, cpu_tier=True):
+    wizard = _recording_wizard()
+    wizard.env_path = tmp_path / ".env"
+    monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: (None, None))
+    monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 8.0)
+    monkeypatch.setattr("bibr.setup_wizard.PresetManager", MagicMock())
+    monkeypatch.setattr("bibr.setup_wizard._text_layer_ocr_available", lambda: cpu_tier)
+    monkeypatch.setattr("bibr.local.llama_cpp.find_llama_server", lambda: ["llama-server"])
+    return wizard
+
+
+def test_weak_hardware_cpu_tier_after_the_cloud_is_declined(tmp_path, monkeypatch):
+    """No private server, no cloud: the CPU tier is offered and written when accepted."""
+    wizard = _weak_machine(monkeypatch, tmp_path)
+    asked = []
+
+    def confirm(prompt, **k):
+        asked.append((prompt, k.get("default")))
+        return prompt == "Use this experimental CPU setup?"
+
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", confirm)
+    monkeypatch.setattr(
+        "bibr.setup_wizard.Prompt.ask", MagicMock(side_effect=AssertionError("no prompts"))
+    )
+
+    wizard.run()
+
+    # Asked only after the cloud was declined, and No by default.
+    prompts = [prompt for prompt, _ in asked]
+    assert prompts.index("Send document-derived content to Anthropic Claude?") < prompts.index(
+        "Use this experimental CPU setup?"
+    )
+    assert dict(asked)["Use this experimental CPU setup?"] is False
+    content = wizard.env_path.read_text()
+    assert "OCR_BACKEND=text-layer" in content
+    assert "LLM_BACKEND=llama-cpp" in content
+    assert "LLM_LOCAL_MODEL=scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M" in content
+    assert "PIPELINE_MEMORY_MODE=aggressive" in content
+    assert "EQUATION_EXTRACTION" not in content
+    assert "LLM_TIMEOUT_SECONDS" not in content
+    assert "ANTHROPIC_API_KEY" not in content
+    text = " ".join(wizard.console.export_text().split())
+    # Shown as an option, not advertised as the recommendation.
+    assert "Experimental option for this machine: local, on the CPU (experimental)" in text
+    assert "Recommended for this machine" not in text
+    assert "born-digital PDFs only" in text
+
+
+def test_weak_hardware_cpu_tier_declined_hands_off_to_advanced(tmp_path, monkeypatch):
+    wizard = _weak_machine(monkeypatch, tmp_path)
+    called = []
+    monkeypatch.setattr(wizard, "run_advanced", lambda: called.append(True))
+    monkeypatch.setattr(
+        "bibr.setup_wizard.Confirm.ask", lambda prompt, **k: "advanced wizard" in prompt
+    )
+
+    wizard.run()
+
+    assert called == [True]
+    assert wizard.env_vars == {}
+    assert not wizard.env_path.exists()
+
+
+def test_weak_hardware_without_the_text_layer_backend_offers_no_cpu_tier(tmp_path, monkeypatch):
+    wizard = _weak_machine(monkeypatch, tmp_path, cpu_tier=False)
+    monkeypatch.setattr(wizard, "run_advanced", lambda: None)
+    asked = []
+    monkeypatch.setattr(
+        "bibr.setup_wizard.Confirm.ask", lambda prompt, **k: asked.append(prompt) or False
+    )
+
+    wizard.run()
+
+    assert "Use this experimental CPU setup?" not in asked
+    assert "CPU" not in wizard.console.export_text()
+
+
+def test_cloud_consent_text_mentions_the_cpu_alternative(tmp_path, monkeypatch):
+    wizard = _weak_machine(monkeypatch, tmp_path)
+    monkeypatch.setattr(wizard, "run_advanced", lambda: None)
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: False)
+
+    wizard.run()
+
+    text = " ".join(wizard.console.export_text().split())
+    assert "run everything on this machine's CPU instead" in text
+    assert "born-digital PDFs only" in text
+
+
+def test_cpu_tier_plan_rows_state_the_limits(monkeypatch):
+    setup = _cpu_setup(monkeypatch)
+    wizard = _recording_wizard()
+    rows = dict(wizard._plan_rows(setup))
+    assert "born-digital PDFs only" in rows["OCR"]
+    assert "no OCR model" in rows["OCR"]
+    assert rows["LLM"].endswith("via llama-cpp, local, on the CPU")
+    assert rows["Extras"] == "demo"
+    assert rows["Memory"].startswith("aggressive")
+
+
+def test_smoke_test_note_for_the_text_layer():
+    from bibr.setup_wizard import _OCR_BACKEND_DOWNLOAD_NOTES
+
+    assert "no OCR model" in _OCR_BACKEND_DOWNLOAD_NOTES["text-layer"]

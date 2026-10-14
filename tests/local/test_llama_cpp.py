@@ -2,11 +2,16 @@
 
 import contextlib
 import logging
+import sys
 import types
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+
+# Imported before the conftest stubs replace them.
+from bibr.local.llama_cpp import download_pinned_gguf as _real_download_pinned_gguf
+from bibr.local.llama_cpp import runs_on_cpu as _real_runs_on_cpu
 
 
 @contextlib.contextmanager
@@ -1409,14 +1414,26 @@ def test_startup_no_retry_on_load_failure(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "flag", ["--port 9000", "--alias other", "-hf other/repo", "-hfr other/repo"]
+    "flag",
+    [
+        "--port 9000",
+        "--alias other",
+        "-hf other/repo",
+        "-hfr other/repo",
+        "-mu https://example.org/other.gguf",
+        "--model-url=https://example.org/other.gguf",
+        "-m /home/u/models/my-finetune.gguf",
+        "--model=/home/u/models/my-finetune.gguf",
+    ],
 )
 def test_build_server_argv_rejects_identity_override(flag):
     """Extra args must not move the server bibr polls — point at the port setting (14)."""
     from bibr.exceptions import UpstreamServiceError
     from bibr.local.llama_cpp import build_server_argv
 
-    with pytest.raises(UpstreamServiceError, match="LLM_LLAMA_CPP_PORT"):
+    # The model flags point at the model setting instead.
+    setting = "LLM_LLAMA_CPP_PORT" if flag.startswith(("--port", "--alias")) else "LLM_LOCAL_MODEL"
+    with pytest.raises(UpstreamServiceError, match=setting):
         build_server_argv(
             ["llama-server"],
             model="m",
@@ -1648,3 +1665,573 @@ def test_health_200_with_live_process_is_readiness(monkeypatch):
             proc.terminate()
             proc.wait()
             httpd.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# CPU builds: no layer offload, a thread count, the pinned GGUF and the
+# slower-call defaults.
+# ---------------------------------------------------------------------------
+
+
+def test_role_runtime_args_cpu_drops_offload_and_sets_threads():
+    from bibr.local.llama_cpp import _role_runtime_args
+
+    gpu = _role_runtime_args("llm", frozenset())
+    cpu = _role_runtime_args("llm", frozenset(), cpu_only=True, cpu_threads=6)
+    assert "--n-gpu-layers" not in cpu
+    assert cpu[cpu.index("--threads") + 1] == "6"
+    assert cpu[cpu.index("--flash-attn") + 1] == "on"
+    assert cpu[cpu.index("--cache-type-k") + 1] == "q8_0"
+    # Everything but the offload pair and the thread count is the GPU launch.
+    assert [a for a in gpu if a not in ("--n-gpu-layers", "999")] == [
+        a for a in cpu if a not in ("--threads", "6")
+    ]
+    # Unknown core count: llama.cpp picks its own.
+    unknown = _role_runtime_args("ocr", frozenset(), cpu_only=True, cpu_threads=None)
+    assert "--threads" not in unknown
+    assert "--n-gpu-layers" not in unknown
+
+
+@pytest.mark.parametrize("user", ["-t 2", "--threads 2", "--threads=2"])
+def test_build_server_argv_user_threads_replace_the_core_count(user):
+    from bibr.local.llama_cpp import build_server_argv
+
+    argv = build_server_argv(
+        ["llama-server"],
+        model="m",
+        port=8770,
+        context_size=8192,
+        extra_args=user,
+        role="llm",
+        available=frozenset(),
+        cpu_only=True,
+        cpu_threads=8,
+    )
+    assert "8" not in argv
+    assert argv[-len(user.split()) :] == user.split()
+
+
+def test_build_server_argv_user_gpu_layers_survive_a_cpu_build():
+    """A user ``-ngl`` is passed through: the CPU launch only drops bibr's default."""
+    from bibr.local.llama_cpp import build_server_argv
+
+    argv = build_server_argv(
+        ["llama-server"],
+        model="m",
+        port=8770,
+        context_size=8192,
+        extra_args="-ngl 10",
+        role="llm",
+        available=frozenset(),
+        cpu_only=True,
+        cpu_threads=4,
+    )
+    assert "999" not in argv
+    assert argv[argv.index("-ngl") + 1] == "10"
+
+
+def test_build_server_argv_loads_the_pinned_file_by_path():
+    from bibr.local.llama_cpp import build_server_argv
+
+    path = "/cache/models--org--m-GGUF/snapshots/abc123/m-Q4_K_M.gguf"
+    argv = build_server_argv(
+        ["llama-server"],
+        model="org/m-GGUF:Q4_K_M",
+        port=8770,
+        context_size=8192,
+        role="llm",
+        available=frozenset(),
+        model_path=path,
+    )
+    assert argv[1:3] == ["-m", path]
+    assert "-hf" not in argv
+    assert "--model-url" not in argv
+    # bibr still asks the server for the model by its registry name.
+    assert argv[argv.index("--alias") + 1] == "org/m-GGUF:Q4_K_M"
+
+
+@pytest.mark.parametrize("model_path", [None, "/cache/m-Q4_K_M.gguf"])
+@pytest.mark.parametrize("role", ["llm", "ocr"])
+@pytest.mark.parametrize("cpu_only", [False, True])
+def test_build_server_argv_always_names_a_model_to_load(model_path, role, cpu_only):
+    """Without -m or -hf, llama-server starts as a router that loads nothing."""
+    from bibr.local.llama_cpp import build_server_argv
+
+    full = frozenset({"--kv-unified", "--spec-type", "--no-mmproj", "--no-context-shift"})
+    for available in (full, frozenset()):
+        argv = build_server_argv(
+            ["llama-server"],
+            model="org/m-GGUF:Q4_K_M",
+            port=8770,
+            context_size=8192,
+            extra_args="-t 2 --temp 0",
+            role=role,
+            available=available,
+            model_path=model_path,
+            cpu_only=cpu_only,
+            cpu_threads=4,
+        )
+        sources = [flag for flag in argv if flag in ("-m", "-hf")]
+        assert sources == (["-m"] if model_path else ["-hf"])
+        assert argv[argv.index(sources[0]) + 1] == (model_path or "org/m-GGUF:Q4_K_M")
+        assert "--model-url" not in argv
+
+
+def test_empty_device_table_is_a_cpu_build(monkeypatch):
+    """Current CPU-only builds print "(none)" under the device header."""
+    from bibr.local import llama_cpp
+
+    for table in ("Available devices:\n  (none)\n", "Available devices:\n"):
+        llama_cpp._BACKEND_KIND_CACHE.clear()
+        _stub_probe_output(monkeypatch, stdout=table)
+        assert llama_cpp.probe_backend_kind(["llama-server"]) == "cpu"
+        assert llama_cpp.probe_gpu_backend(["llama-server"]) is False
+    llama_cpp._BACKEND_KIND_CACHE.clear()
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [("cpu", True), ("cuda", False), ("vulkan", False), (None, False)],
+)
+def test_runs_on_cpu_follows_the_backend_kind(monkeypatch, kind, expected):
+    from bibr.local import llama_cpp
+
+    monkeypatch.setattr(llama_cpp, "probe_backend_kind", lambda *a, **k: kind)
+    assert _real_runs_on_cpu(["llama-server"]) is expected
+
+
+def test_runs_on_cpu_never_raises(monkeypatch):
+    from bibr.local import llama_cpp
+
+    def boom(*_a, **_k):
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(llama_cpp, "probe_backend_kind", boom)
+    assert _real_runs_on_cpu(["llama-server"]) is False
+
+
+def _fake_cpu_sysfs(root: Path, cores: dict[int, tuple[int, int]]) -> Path:
+    """sysfs ``cpuN/topology`` files for {cpu: (package, core_id)}."""
+    for cpu, (package, core) in cores.items():
+        topology = root / f"cpu{cpu}" / "topology"
+        topology.mkdir(parents=True)
+        (topology / "physical_package_id").write_text(f"{package}\n")
+        (topology / "core_id").write_text(f"{core}\n")
+    return root
+
+
+def test_physical_core_count_counts_cores_not_smt_threads(monkeypatch, tmp_path):
+    from bibr.local import llama_cpp
+
+    # 4 cores x 2 SMT threads: cpu N and N+4 share a core.
+    sysfs = _fake_cpu_sysfs(tmp_path / "cpu", {n: (0, n % 4) for n in range(8)})
+    monkeypatch.setattr(llama_cpp.sys, "platform", "linux")
+    monkeypatch.setattr(llama_cpp.os, "sched_getaffinity", lambda _pid: set(range(8)))
+    absent = tmp_path / "no-hybrid"
+    assert llama_cpp.physical_core_count(sysfs=sysfs, performance_cores=absent) == 4
+    # Confined to cpus 0-1 and their SMT siblings 4-5: two cores.
+    monkeypatch.setattr(llama_cpp.os, "sched_getaffinity", lambda _pid: {0, 1, 4, 5})
+    assert llama_cpp.physical_core_count(sysfs=sysfs, performance_cores=absent) == 2
+
+
+def test_physical_core_count_uses_performance_cores_on_hybrid_cpus(monkeypatch, tmp_path):
+    from bibr.local import llama_cpp
+
+    # cpus 0-3: two P-cores with SMT; cpus 4-7: four E-cores.
+    layout = {0: (0, 0), 1: (0, 0), 2: (0, 4), 3: (0, 4)}
+    layout.update({cpu: (0, 8 + cpu) for cpu in range(4, 8)})
+    sysfs = _fake_cpu_sysfs(tmp_path / "cpu", layout)
+    p_cores = tmp_path / "cpu_core_cpus"
+    p_cores.write_text("0-3\n")
+    monkeypatch.setattr(llama_cpp.sys, "platform", "linux")
+    monkeypatch.setattr(llama_cpp.os, "sched_getaffinity", lambda _pid: set(range(8)))
+    assert llama_cpp.physical_core_count(sysfs=sysfs, performance_cores=p_cores) == 2
+    # Pinned to E-cores only: those are all it has.
+    monkeypatch.setattr(llama_cpp.os, "sched_getaffinity", lambda _pid: {6, 7})
+    assert llama_cpp.physical_core_count(sysfs=sysfs, performance_cores=p_cores) == 2
+
+
+def test_physical_core_count_unknown_topology_is_none(monkeypatch, tmp_path):
+    from bibr.local import llama_cpp
+
+    monkeypatch.setattr(llama_cpp.sys, "platform", "linux")
+    monkeypatch.setattr(llama_cpp.os, "sched_getaffinity", lambda _pid: {0, 1})
+    empty = tmp_path / "cpu"
+    empty.mkdir()
+    assert llama_cpp.physical_core_count(sysfs=empty, performance_cores=tmp_path / "x") is None
+    monkeypatch.setattr(llama_cpp.sys, "platform", "win32")
+    assert llama_cpp.physical_core_count() is None
+
+
+def test_cpu_list_parses_ranges():
+    from bibr.local.llama_cpp import _cpu_list
+
+    assert _cpu_list("0-3,8-9,12\n") == {0, 1, 2, 3, 8, 9, 12}
+    assert _cpu_list("") == set()
+
+
+def test_cpu_install_hint_points_at_the_cpu_builds():
+    from bibr.local.llama_cpp import cpu_install_hint, missing_binary_message
+
+    windows = cpu_install_hint(platform_name="win32")
+    assert "win-cpu-x64" in windows
+    # winget installs the Vulkan build, which offloads to an integrated GPU.
+    assert "winget" not in windows
+    assert "brew install llama.cpp" in cpu_install_hint(platform_name="darwin")
+    linux = cpu_install_hint(platform_name="linux")
+    assert "ubuntu-x64" in linux
+    assert "GGML_CUDA" not in linux
+    assert "ubuntu-x64" in missing_binary_message(platform_name="linux", cpu=True)
+    assert "GGML_CUDA" in missing_binary_message(platform_name="linux")
+
+
+def test_cpu_build_launches_without_offload_and_with_threads(monkeypatch, caplog):
+    from bibr.local import llama_cpp
+
+    launched = _healthy_stub_server(
+        monkeypatch, available=frozenset(), wait_side_effect=lambda self, t: None
+    )
+    monkeypatch.setattr(llama_cpp, "runs_on_cpu", _real_runs_on_cpu)
+    monkeypatch.setattr(llama_cpp, "physical_core_count", lambda: 6)
+    offload_logged = MagicMock()
+    monkeypatch.setattr(llama_cpp, "log_offload_status", offload_logged)
+
+    with caplog.at_level(logging.INFO, logger="bibr.local.llama_cpp"):
+        server = llama_cpp.LlamaCppServer(model="org/model:Q4", port=8770, role="llm")
+    argv = launched[0]
+    assert server.cpu_only is True
+    assert "--n-gpu-layers" not in argv
+    assert argv[argv.index("--threads") + 1] == "6"
+    assert "runs on the CPU (6 threads)" in caplog.text
+    server._process = None
+    server.shutdown()
+
+
+def test_gpu_build_keeps_the_offload(monkeypatch):
+    from bibr.local import llama_cpp
+
+    launched = _healthy_stub_server(
+        monkeypatch,
+        available=frozenset(),
+        wait_side_effect=lambda self, t: None,
+        backend_kind="cuda",
+    )
+    monkeypatch.setattr(llama_cpp, "runs_on_cpu", _real_runs_on_cpu)
+    server = llama_cpp.LlamaCppServer(model="org/model:Q4", port=8770, role="llm")
+    argv = launched[0]
+    assert server.cpu_only is False
+    assert argv[argv.index("--n-gpu-layers") + 1] == "999"
+    assert "--threads" not in argv
+    server._process = None
+    server.shutdown()
+
+
+def test_llm_server_on_a_cpu_build_uses_the_fastest_pinned_build(monkeypatch):
+    from bibr.config import Settings
+    from bibr.local import llama_cpp
+    from bibr.local.llm_models import pinned_gguf
+
+    fake = MagicMock(base_url="http://127.0.0.1:8770", model="x", n_slots=1)
+    ctor = MagicMock(return_value=fake)
+    monkeypatch.setattr(llama_cpp, "LlamaCppServer", ctor)
+    monkeypatch.setattr(llama_cpp, "runs_on_cpu", lambda prefix=None: True)
+    monkeypatch.setattr(Settings.llm, "local_model", None)
+    llama_cpp.LlamaCppLlmServer()
+    model = "scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M"
+    assert ctor.call_args.kwargs["model"] == model
+    assert ctor.call_args.kwargs["cpu_only"] is True
+    assert ctor.call_args.kwargs["gguf"] == pinned_gguf(model)
+    assert ctor.call_args.kwargs["gguf"].filename == "bibr-extract-qwen35-2b-Q4_K_M.gguf"
+
+
+def test_llm_server_pins_no_file_for_a_model_outside_the_registry(monkeypatch):
+    from bibr.config import Settings
+    from bibr.local import llama_cpp
+
+    fake = MagicMock(base_url="http://127.0.0.1:8770", model="x", n_slots=1)
+    ctor = MagicMock(return_value=fake)
+    monkeypatch.setattr(llama_cpp, "LlamaCppServer", ctor)
+    monkeypatch.setattr(Settings.llm, "local_model", "someone/else-GGUF:Q4_K_M")
+    llama_cpp.LlamaCppLlmServer()
+    assert ctor.call_args.kwargs["gguf"] is None
+    assert ctor.call_args.kwargs["cpu_only"] is False
+
+
+def test_llm_server_on_a_cpu_build_raises_timeout_and_skips_the_equation_llm(caplog):
+    server = _llm_server_with_isolated_settings()
+    server._cpu_only = True
+    with caplog.at_level(logging.INFO, logger="bibr.local.llama_cpp"):
+        server.configure_llm_client()
+    assert server._settings.llm.timeout_seconds == 900
+    # Only the LLM fallback: the regex equations need no LLM and stay.
+    assert server._settings.EQUATION_LLM_FALLBACK is False
+    assert server._settings.EQUATION_EXTRACTION is True
+    assert "EQUATION_LLM_FALLBACK=true" in caplog.text
+
+
+def test_llm_server_on_a_cpu_build_respects_explicit_settings():
+    server = _llm_server_with_isolated_settings(
+        EQUATION_LLM_FALLBACK="true", LLM_TIMEOUT_SECONDS=120
+    )
+    server._cpu_only = True
+    server.configure_llm_client()
+    assert server._settings.llm.timeout_seconds == 120
+    assert server._settings.EQUATION_LLM_FALLBACK is True
+
+
+def test_llm_server_on_a_gpu_build_keeps_equations():
+    server = _llm_server_with_isolated_settings()
+    server.configure_llm_client()
+    assert server._settings.llm.timeout_seconds == 300
+    assert server._settings.EQUATION_EXTRACTION is True
+    assert server._settings.EQUATION_LLM_FALLBACK is True
+
+
+# ---------------------------------------------------------------------------
+# Pinned GGUF builds: fetched into the Hugging Face cache and loaded with -m,
+# and a server that loads no model is never reported ready.
+# ---------------------------------------------------------------------------
+
+
+def _pinned():
+    from bibr.local.llm_models import PinnedGguf
+
+    return PinnedGguf("org/m-GGUF", "m-Q4_K_M.gguf", "a" * 40)
+
+
+def test_pinned_build_launches_with_the_downloaded_file(monkeypatch):
+    import threading
+
+    from bibr.local import llama_cpp
+
+    launched = _healthy_stub_server(
+        monkeypatch, available=frozenset(), wait_side_effect=lambda self, t: None
+    )
+    download = MagicMock(return_value="/hf/snapshots/aaa/m-Q4_K_M.gguf")
+    monkeypatch.setattr(llama_cpp, "download_pinned_gguf", download)
+    stop = threading.Event()
+
+    server = llama_cpp.LlamaCppServer(
+        model="org/m-GGUF:Q4_K_M",
+        port=8770,
+        role="llm",
+        gguf=_pinned(),
+        startup_timeout=123,
+        stop_event=stop,
+    )
+    argv = launched[0]
+    assert argv[argv.index("-m") + 1] == "/hf/snapshots/aaa/m-Q4_K_M.gguf"
+    assert "-hf" not in argv and "--model-url" not in argv
+    assert argv[argv.index("--alias") + 1] == "org/m-GGUF:Q4_K_M"
+    download.assert_called_once()
+    assert download.call_args.args == (_pinned(),)
+    assert download.call_args.kwargs["timeout"] == 123
+    assert download.call_args.kwargs["stop_event"] is stop
+    assert download.call_args.kwargs["timeout_setting"] == "LLM_LLAMA_CPP_STARTUP_TIMEOUT"
+    server._process = None
+    server.shutdown()
+
+
+def test_pinned_build_downloads_nothing_before_the_checks_pass(monkeypatch):
+    """No binary, a reused server or bad extra args: refused before any download."""
+    from bibr.exceptions import UpstreamServiceError
+    from bibr.local import llama_cpp
+
+    download = MagicMock(side_effect=AssertionError("must not download"))
+    monkeypatch.setattr(llama_cpp, "download_pinned_gguf", download)
+
+    monkeypatch.setattr(llama_cpp, "find_llama_server", lambda: None)
+    with pytest.raises(UpstreamServiceError, match="not installed"):
+        llama_cpp.LlamaCppServer(model="org/m-GGUF:Q4_K_M", port=8770, role="llm", gguf=_pinned())
+
+    _healthy_stub_server(monkeypatch, available=frozenset(), wait_side_effect=lambda s, t: None)
+    with pytest.raises(UpstreamServiceError, match="LLM_LOCAL_MODEL"):
+        llama_cpp.LlamaCppServer(
+            model="org/m-GGUF:Q4_K_M",
+            port=8770,
+            role="llm",
+            gguf=_pinned(),
+            extra_args="-m /home/u/custom.gguf",
+        )
+
+    monkeypatch.setattr(llama_cpp, "guard_managed_server_port", lambda *a, **k: True)
+    reused = llama_cpp.LlamaCppServer(
+        model="org/m-GGUF:Q4_K_M", port=8770, role="llm", gguf=_pinned()
+    )
+    assert reused.loaded
+    download.assert_not_called()
+
+
+def _fake_hub(monkeypatch, *, cached=None, fetch=None):
+    """Stub ``hf_hub_download_no_symlink``: *cached* for cache lookups, *fetch* otherwise."""
+    calls: list[dict] = []
+
+    def download(**kwargs):
+        calls.append(kwargs)
+        if kwargs.get("local_files_only"):
+            if cached is None:
+                raise FileNotFoundError("not cached")
+            return cached
+        return fetch(**kwargs)
+
+    monkeypatch.setattr("bibr.utils.hf_cache.hf_hub_download_no_symlink", download)
+    return calls
+
+
+def test_download_pinned_gguf_returns_a_cached_file_without_downloading(monkeypatch):
+    calls = _fake_hub(monkeypatch, cached="/hf/m.gguf", fetch=None)
+    assert _real_download_pinned_gguf(_pinned(), timeout=5) == "/hf/m.gguf"
+    assert calls == [
+        {
+            "repo_id": "org/m-GGUF",
+            "filename": "m-Q4_K_M.gguf",
+            "revision": "a" * 40,
+            "local_files_only": True,
+        }
+    ]
+
+
+def test_download_pinned_gguf_fetches_the_file_at_its_commit(monkeypatch, caplog):
+    calls = _fake_hub(monkeypatch, fetch=lambda **_k: "/hf/fresh.gguf")
+    with caplog.at_level(logging.INFO, logger="bibr.local.llama_cpp"):
+        assert _real_download_pinned_gguf(_pinned(), timeout=5) == "/hf/fresh.gguf"
+    assert calls[-1] == {"repo_id": "org/m-GGUF", "filename": "m-Q4_K_M.gguf", "revision": "a" * 40}
+    assert "Downloading m-Q4_K_M.gguf from org/m-GGUF" in caplog.text
+
+
+def test_download_pinned_gguf_failure_names_the_file(monkeypatch):
+    from bibr.exceptions import UpstreamServiceError
+
+    def offline(**_k):
+        raise OSError("offline mode is enabled")
+
+    _fake_hub(monkeypatch, fetch=offline)
+    with pytest.raises(UpstreamServiceError, match="m-Q4_K_M.gguf from org/m-GGUF") as exc:
+        _real_download_pinned_gguf(_pinned(), timeout=5)
+    assert "offline mode is enabled" in str(exc.value)
+
+
+def test_download_pinned_gguf_stops_waiting_on_timeout_and_on_stop(monkeypatch):
+    import threading
+
+    from bibr.local.http_runtime import StartupCancelled
+
+    release = threading.Event()
+
+    def slow(**_k):
+        release.wait(10)
+        return "/hf/late.gguf"
+
+    _fake_hub(monkeypatch, fetch=slow)
+    try:
+        with pytest.raises(TimeoutError, match="OCR_LLAMA_CPP_STARTUP_TIMEOUT") as exc:
+            _real_download_pinned_gguf(
+                _pinned(), timeout=0.2, timeout_setting="OCR_LLAMA_CPP_STARTUP_TIMEOUT"
+            )
+        assert f"hf download org/m-GGUF m-Q4_K_M.gguf --revision {'a' * 40}" in str(exc.value)
+
+        stop = threading.Event()
+        stop.set()
+        with pytest.raises(StartupCancelled):
+            _real_download_pinned_gguf(_pinned(), timeout=30, stop_event=stop)
+    finally:
+        release.set()
+
+
+class _ModelsHandler:
+    """``/health`` 200, ``/v1/models`` answering *models_body*."""
+
+    @staticmethod
+    def make(models_body: bytes):
+        import http.server
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(models_body if self.path == "/v1/models" else b'{"status":"ok"}')
+
+            def log_message(self, *args):
+                pass
+
+        return Handler
+
+
+def _wait_against(monkeypatch, models_body: bytes):
+    """Run the real health wait against a stub server; return (error, child process)."""
+    import socketserver
+    import subprocess as real_subprocess
+    import threading
+
+    from bibr.local import http_runtime, llama_cpp
+
+    monkeypatch.setattr(llama_cpp, "request_bytes", http_runtime.request_bytes)
+    with socketserver.TCPServer(("127.0.0.1", 0), _ModelsHandler.make(models_body)) as httpd:
+        thread = threading.Thread(
+            target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        )
+        thread.start()
+        proc = real_subprocess.Popen(
+            ["sleep", "30"],  # noqa: S603, S607 — `sleep` test double, not a model
+            stdout=real_subprocess.DEVNULL,
+            stderr=real_subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        server = object.__new__(llama_cpp.LlamaCppServer)
+        server._process = proc
+        server._port = httpd.server_address[1]
+        server._model = "org/m-GGUF:Q4_K_M"
+        server._stderr_fh = None
+        server._stderr_log = None
+        server._reused = False
+        server._cpu_only = True
+        error = None
+        try:
+            llama_cpp.LlamaCppServer._wait_until_healthy(server, timeout=30)
+        except RuntimeError as exc:
+            error = exc
+        finally:
+            httpd.shutdown()
+        try:
+            proc.wait(timeout=5)
+        except real_subprocess.TimeoutExpired:
+            pass
+        return error, proc
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+def test_a_server_that_loads_no_model_is_not_ready(monkeypatch):
+    """llama-server with no model is a router: /health 200, no models listed."""
+    error, proc = _wait_against(monkeypatch, b'{"object": "list", "data": []}')
+    try:
+        assert error is not None
+        assert "does not serve 'org/m-GGUF:Q4_K_M'" in str(error)
+        assert "lists: none" in str(error)
+        # No conservative retry: this is not an argument error.
+        from bibr.local.llama_cpp import _looks_like_arg_error
+
+        assert not _looks_like_arg_error(str(error))
+        assert proc.poll() is not None  # killed, not left running
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"object": "list", "data": [{"id": "org/m-GGUF:Q4_K_M"}]}',
+        b'{"data": [{"id": "m-Q4_K_M.gguf", "aliases": ["org/m-GGUF:Q4_K_M"]}]}',
+        # Not a model list: proves nothing, so /health decides as before.
+        b"ok",
+    ],
+)
+def test_a_server_serving_the_model_is_ready(monkeypatch, body):
+    error, proc = _wait_against(monkeypatch, body)
+    try:
+        assert error is None
+        assert proc.poll() is None
+    finally:
+        proc.kill()
+        proc.wait()

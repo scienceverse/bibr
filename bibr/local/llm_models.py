@@ -12,6 +12,7 @@ import logging
 import platform
 import subprocess
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +20,10 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class LocalLLMVariant:
     hf_id: str
-    platform: str  # "cuda" | "mlx"
+    platform: str  # "cuda" | "mlx" | "cpu"
     quant: str  # e.g. "bf16", "awq-4bit", "nvfp4"
+    # The memory the variant needs: VRAM on "cuda", unified memory on "mlx",
+    # and system RAM on "cpu", where bibr's own models share it.
     min_vram_gb: float
     approx_download_gb: float
     # Extra CLI flags appended to the managed vLLM launch command for this
@@ -28,13 +31,19 @@ class LocalLLMVariant:
     # for ``platform == "cuda"`` — the vllm-mlx server does not read these.
     server_args: tuple[str, ...] = ()
     runtime: str | None = None
+    # llama.cpp builds: the GGUF file in the ``hf_id`` repo and the Hub commit
+    # it is downloaded from (``pinned_gguf``), since llama.cpp's ``-hf``
+    # always follows the repo's main branch.
+    gguf_file: str | None = None
+    gguf_revision: str | None = None
 
 
 @dataclass(frozen=True)
 class LocalLLMModel:
     key: str
     label: str
-    variants: tuple[LocalLLMVariant, ...]  # best-quality-first per platform
+    # Best quality first per platform, except "cpu": fastest first.
+    variants: tuple[LocalLLMVariant, ...]
     env: dict[str, str] = field(default_factory=dict)  # quirk env for .env
     experimental_platforms: frozenset[str] = frozenset()
 
@@ -70,9 +79,37 @@ _QWEN35_STUDENT_SERVER_ARGS: tuple[str, ...] = (
 _QWEN35_4B_REVISION = "6ab47a4e4e8b1b76c1ab234aec66f360683ff9fc"
 _QWEN35_2B_REVISION = "81d0442d0ecadc20e1b9587d54bff42242123870"
 
+#: Hub commits of the GGUF repos (2026-10-14), one per repo: each holds a
+#: Q8_0 and a Q4_K_M file.
+_QWEN35_4B_GGUF_REVISION = "8f5cb6f80329f800f17f3b25dd40be131068f872"
+_QWEN35_2B_GGUF_REVISION = "8e1a5823c4290cd583feb470556967df7259050a"
+
 #: Thinking off per request too, for llama.cpp and MLX servers, which do not
 #: read ``server_args``.
 _QWEN35_STUDENT_ENV: dict[str, str] = {"LLM_CHAT_TEMPLATE_KWARGS": '{"enable_thinking": false}'}
+
+
+def _student_gguf(
+    size: str, quant: str, *, platform_key: str, min_memory_gb: float, download_gb: float
+) -> LocalLLMVariant:
+    """A llama.cpp build of a student, pinned to its GGUF repo's commit."""
+    revision = {"4b": _QWEN35_4B_GGUF_REVISION, "2b": _QWEN35_2B_GGUF_REVISION}[size]
+    return LocalLLMVariant(
+        hf_id=f"scienceverse/bibr-extract-qwen35-{size}-GGUF:{quant}",
+        platform=platform_key,
+        quant=f"gguf-{quant.lower()}",
+        min_vram_gb=min_memory_gb,
+        approx_download_gb=download_gb,
+        runtime="llama-cpp",
+        gguf_file=f"bibr-extract-qwen35-{size}-{quant}.gguf",
+        gguf_revision=revision,
+    )
+
+
+#: Extra system RAM a "cpu" build needs on top of its GPU floor: bibr's own
+#: models run on the CPU as well (about 2 GB at peak without an LLM, measured
+#: on a CPU-only install), plus some headroom for the operating system.
+_CPU_RAM_OVERHEAD_GB = 3
 
 REGISTRY: tuple[LocalLLMModel, ...] = (
     LocalLLMModel(
@@ -91,22 +128,8 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
             ),
             # llama.cpp (Windows, cards below 8 GB): Q8_0 first, as the
             # closest to the evaluated bf16 weights.
-            LocalLLMVariant(
-                hf_id="scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0",
-                platform="cuda",
-                quant="gguf-q8_0",
-                min_vram_gb=7,
-                approx_download_gb=4.3,
-                runtime="llama-cpp",
-            ),
-            LocalLLMVariant(
-                hf_id="scienceverse/bibr-extract-qwen35-4b-GGUF:Q4_K_M",
-                platform="cuda",
-                quant="gguf-q4_k_m",
-                min_vram_gb=5,
-                approx_download_gb=2.6,
-                runtime="llama-cpp",
-            ),
+            _student_gguf("4b", "Q8_0", platform_key="cuda", min_memory_gb=7, download_gb=4.3),
+            _student_gguf("4b", "Q4_K_M", platform_key="cuda", min_memory_gb=5, download_gb=2.6),
             LocalLLMVariant(
                 hf_id="scienceverse/bibr-extract-qwen35-4b-mlx-8bit",
                 platform="mlx",
@@ -115,9 +138,19 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 approx_download_gb=4.5,
             ),
             # No 4-bit MLX build: it duplicated a funding entry in its smoke test.
+            # CPU: the 4B Q4_K_M only, the slowest of the CPU builds; the 2B
+            # comes first there (RECOMMENDED_MODEL_KEYS_BY_PLATFORM).
+            _student_gguf(
+                "4b",
+                "Q4_K_M",
+                platform_key="cpu",
+                min_memory_gb=5 + _CPU_RAM_OVERHEAD_GB,
+                download_gb=2.6,
+            ),
         ),
         env=_QWEN35_STUDENT_ENV,
-        experimental_platforms=frozenset({"mlx"}),  # smoke-tested only
+        # MLX: smoke-tested only. CPU: neither timed nor scored end to end.
+        experimental_platforms=frozenset({"mlx", "cpu"}),
     ),
     LocalLLMModel(
         key="bibr-extract-2b",
@@ -133,22 +166,8 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 server_args=("--revision", _QWEN35_2B_REVISION, *_QWEN35_STUDENT_SERVER_ARGS),
                 runtime="vllm",
             ),
-            LocalLLMVariant(
-                hf_id="scienceverse/bibr-extract-qwen35-2b-GGUF:Q8_0",
-                platform="cuda",
-                quant="gguf-q8_0",
-                min_vram_gb=4,
-                approx_download_gb=1.9,
-                runtime="llama-cpp",
-            ),
-            LocalLLMVariant(
-                hf_id="scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M",
-                platform="cuda",
-                quant="gguf-q4_k_m",
-                min_vram_gb=3,
-                approx_download_gb=1.2,
-                runtime="llama-cpp",
-            ),
+            _student_gguf("2b", "Q8_0", platform_key="cuda", min_memory_gb=4, download_gb=1.9),
+            _student_gguf("2b", "Q4_K_M", platform_key="cuda", min_memory_gb=3, download_gb=1.2),
             LocalLLMVariant(
                 hf_id="scienceverse/bibr-extract-qwen35-2b-mlx-8bit",
                 platform="mlx",
@@ -156,9 +175,28 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 min_vram_gb=3,
                 approx_download_gb=2.0,
             ),
+            # CPU (no NVIDIA GPU or Apple silicon), fastest first: on a CPU
+            # the LLM takes minutes a paper and decoding speed follows the
+            # file size, so Q4_K_M leads (204/252 against Q8_0's 209 on GPU
+            # llama.cpp; see docs/guides/extraction-models.md).
+            _student_gguf(
+                "2b",
+                "Q4_K_M",
+                platform_key="cpu",
+                min_memory_gb=3 + _CPU_RAM_OVERHEAD_GB,
+                download_gb=1.2,
+            ),
+            _student_gguf(
+                "2b",
+                "Q8_0",
+                platform_key="cpu",
+                min_memory_gb=4 + _CPU_RAM_OVERHEAD_GB,
+                download_gb=1.9,
+            ),
         ),
         env=_QWEN35_STUDENT_ENV,
-        experimental_platforms=frozenset({"mlx"}),  # smoke-tested only
+        # MLX: smoke-tested only. CPU: neither timed nor scored end to end.
+        experimental_platforms=frozenset({"mlx", "cpu"}),
     ),
     LocalLLMModel(
         key="gemma-4-e4b",
@@ -185,6 +223,14 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
 #: builds fits, else the 2B.
 RECOMMENDED_MODEL_KEYS: tuple[str, ...] = ("bibr-extract-4b", "bibr-extract-2b")
 
+#: Platforms whose default is not the best model that fits. On a CPU the 2B
+#: comes first: the LLM already takes minutes a paper there, and decoding
+#: slows with the file size, which is about twice as large for the 4B (so:
+#: 2B Q4_K_M, then 2B Q8_0, then 4B Q4_K_M).
+RECOMMENDED_MODEL_KEYS_BY_PLATFORM: dict[str, tuple[str, ...]] = {
+    "cpu": ("bibr-extract-2b", "bibr-extract-4b"),
+}
+
 
 def recommended_variant(
     platform_key: str,
@@ -194,9 +240,10 @@ def recommended_variant(
     """The recommended model and its best variant for a machine (None = nothing fits).
 
     ``memory_gb`` None means unknown memory: the best model for the platform
-    and runtime wins.
+    and runtime wins. On ``"cpu"`` the memory is system RAM.
     """
-    for key in RECOMMENDED_MODEL_KEYS:
+    keys = RECOMMENDED_MODEL_KEYS_BY_PLATFORM.get(platform_key, RECOMMENDED_MODEL_KEYS)
+    for key in keys:
         model = get_model(key)
         fitting = variants_for(model, platform_key, memory_gb, runtime)
         if fitting:
@@ -230,19 +277,23 @@ _BACKEND_VARIANT_FILTER: dict[str, tuple[str, str | None]] = {
 }
 
 
-def default_local_model(backend: str) -> str:
+def default_local_model(backend: str, *, cpu: bool = False) -> str:
     """The recommended model's variant for ``backend`` when ``LLM_LOCAL_MODEL`` is unset.
 
     Every managed server used to read one config default — the 8-bit MLX
     build — so a hand-written ``LLM_BACKEND=vllm`` or ``llama-cpp`` downloaded
     weights the runtime could not load. The answer is the best recommended
     entry that the backend's runtime can serve: the 4B student, as bf16 for
-    vLLM, GGUF Q8_0 for llama.cpp and 8-bit for MLX.
+    vLLM, GGUF Q8_0 for llama.cpp and 8-bit for MLX. ``cpu`` (llama.cpp only)
+    is a llama.cpp build that sees no GPU, which gets the first CPU build
+    instead: the 2B student's Q4_K_M.
     """
     try:
         platform_key, runtime = _BACKEND_VARIANT_FILTER[backend]
     except KeyError:
         raise ValueError(f"no default local model for LLM backend {backend!r}") from None
+    if cpu and backend == "llama-cpp":
+        platform_key = "cpu"
     picked = recommended_variant(platform_key, None, runtime)
     if picked is None:  # pragma: no cover - registry invariant
         raise ValueError(f"the registry has no recommended {platform_key}/{runtime} variant")
@@ -262,6 +313,27 @@ def registry_server_args(model: str) -> tuple[str, ...]:
             if v.platform == "cuda" and v.hf_id == model:
                 return v.server_args
     return ()
+
+
+class PinnedGguf(NamedTuple):
+    """One GGUF file of a Hub repo at a fixed commit."""
+
+    repo_id: str
+    filename: str
+    revision: str
+
+
+def pinned_gguf(model: str) -> PinnedGguf | None:
+    """The file and Hub commit of a registry GGUF build, by exact ``hf_id``.
+
+    ``None`` for an id outside the registry or a build with no pinned file,
+    which llama.cpp then fetches with ``-hf`` from the repo's main branch.
+    """
+    for m in REGISTRY:
+        for v in m.variants:
+            if v.hf_id == model and v.gguf_file and v.gguf_revision:
+                return PinnedGguf(model.split(":", 1)[0], v.gguf_file, v.gguf_revision)
+    return None
 
 
 def get_model(key: str) -> LocalLLMModel:
@@ -318,7 +390,11 @@ def _system_memory_gb() -> float:
 
 
 def detect_hardware() -> tuple[str | None, float | None]:
-    """Detect the local-LLM platform: ("cuda", vram) | ("mlx", ram) | (None, None)."""
+    """Detect the local-LLM platform: ("cuda", vram) | ("mlx", ram) | (None, None).
+
+    (None, None) means no NVIDIA GPU or Apple silicon; callers that offer the
+    "cpu" builds look up the system RAM themselves (``_system_memory_gb``).
+    """
     if platform.system() == "Darwin" and platform.machine() == "arm64":
         return ("mlx", _system_memory_gb())
     vram = _nvidia_vram_gb()

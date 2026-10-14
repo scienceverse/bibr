@@ -925,7 +925,8 @@ async def _extract_metadata_and_equations(
             eq_extractor.extract_with_llm_fallback(
                 contents.sentences,
                 contents.sections,
-                llm_client,
+                # No client: the regex equations alone (see EQUATION_LLM_FALLBACK).
+                llm_client if effective_settings.EQUATION_LLM_FALLBACK else None,
                 min_regex_stats=effective_settings.EQUATION_LLM_FALLBACK_MIN_REGEX_STATS,
                 regex_equations=regex_equations,
             ),

@@ -230,6 +230,30 @@ def display_wtpsplit_repo_id(value: str) -> str:
     return f"{resolved.hub_prefix}/{resolved.model_name}"
 
 
+def _pinned_gguf_cache_status(repo_id: str) -> str | None:
+    """Cache status of one of bibr's pinned GGUF builds; None for any other id.
+
+    llama.cpp loads these from the Hugging Face cache at their pinned commit
+    (``download_pinned_gguf``). Each repo holds several quantizations, so a
+    cached repo says nothing about this file: look the file itself up.
+    """
+    from bibr.local.llm_models import REGISTRY, pinned_gguf
+
+    pinned = pinned_gguf(repo_id)
+    if pinned is None:
+        return None
+    try:
+        from huggingface_hub import try_to_load_from_cache
+
+        cached = try_to_load_from_cache(pinned.repo_id, pinned.filename, revision=pinned.revision)
+    except Exception:  # noqa: BLE001 — an unreadable cache shouldn't crash the preview
+        return "cache state unknown (could not read HF cache)"
+    if isinstance(cached, str):
+        return "cached"
+    size = next(v.approx_download_gb for m in REGISTRY for v in m.variants if v.hf_id == repo_id)
+    return f"will download (~{size:.1f} GB)"
+
+
 def _hf_cache_status(repo_id: str) -> str:
     """'cached' / 'will download (~size)' / 'will download (size unknown)' / cache-unknown.
 
@@ -239,6 +263,9 @@ def _hf_cache_status(repo_id: str) -> str:
     """
     if repo_id.startswith("local bundle: "):
         return "available locally"
+    pinned_status = _pinned_gguf_cache_status(repo_id)
+    if pinned_status is not None:
+        return pinned_status
     bare_repo_id = _HF_CACHE_REPO_ALIASES.get(repo_id, repo_id).split(":", 1)[0]
     try:
         from huggingface_hub import scan_cache_dir

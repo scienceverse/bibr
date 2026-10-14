@@ -38,7 +38,11 @@ llama.cpp there, but it may run out of memory while OCR and extraction share
 the card. The
 MLX builds have only been smoke-tested, so setup marks them experimental. There
 are no 4-bit MLX builds: in their smoke tests the 4B's duplicated a funding
-entry and the 2B's returned award IDs as numbers.
+entry and the 2B's returned award IDs as numbers. bibr downloads each GGUF build
+from the Hub commit it was published at, not from the repository's newest files,
+into the Hugging Face cache, and starts llama.cpp on that file. A first download
+counts against its own `LLM_LLAMA_CPP_STARTUP_TIMEOUT`; on a slow connection,
+fetch the file first with `hf download <repo> <file> --revision <commit>`.
 
 The hosted setup uses Claude for OCR as well (`OCR_BACKEND=anthropic`,
 `OCR_VISION_MODEL=claude-haiku-5-5`), so it needs one Anthropic key. The 221/252
@@ -52,6 +56,61 @@ for llama.cpp and MLX. On the same papers it passes 200/252, −9.1 points
 Run `bibr setup --advanced` to choose another model, or set `LLM_LOCAL_MODEL`
 (local) or `LLM_PROVIDER` and `LLM_MODEL` (hosted) yourself; see
 [configuration](configuration.md).
+
+## Without a GPU (experimental)
+
+On a machine with no NVIDIA GPU or Apple Silicon, the hosted setup above is the
+recommended route. bibr can also run the extraction model on the CPU through
+llama.cpp. This route has been neither timed nor scored end to end, so bibr
+does not recommend it yet, and setup marks it experimental.
+
+| CPU build, fastest first | System RAM | Download |
+|---|---|---|
+| 2B Q4_K_M (`scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M`) | 6 GB | 1.2 GB |
+| 2B Q8_0 | 7 GB | 1.9 GB |
+| 4B Q4_K_M | 8 GB | 2.6 GB |
+
+The RAM figures are the GPU figures plus 3 GB for bibr's own models, which run
+on the CPU as well (about 2 GB at peak in a run without the LLM), and for the
+operating system. They are estimates. On a CPU, speed matters more than the
+small differences between these builds, so the 2B Q4_K_M comes first: served by
+llama.cpp on a GPU it passes 204/252, against 209 for the 2B Q8_0 and 214 for
+the 4B Q4_K_M.
+
+Expect minutes per paper. The only CPU measurement so far is the 4B Q8_0 on 4
+threads, which read the prompt at 82 tokens a second and wrote at 9.6. A typical
+paper's LLM calls read about 9,100 tokens and write about 1,500, so that build
+needs roughly 4 to 5 minutes of LLM time per paper. The 2B Q4_K_M file is less
+than a third of that size and should be faster, but it has not been timed.
+
+When the installed llama.cpp build sees no GPU:
+
+- `--llm local` picks llama.cpp if `llama-server` is installed. Without it, the
+  run is refused with the alternatives, including this one.
+- The server starts without `--n-gpu-layers 999` and with `--threads` set to
+  the physical cores bibr may use (only the performance cores on hybrid Intel
+  CPUs). `-t` in `LLM_LLAMA_CPP_EXTRA_ARGS` overrides the count.
+- With `LLM_LOCAL_MODEL` unset, it loads the 2B Q4_K_M.
+- An unset `LLM_TIMEOUT_SECONDS` becomes 900 seconds rather than 300, and an
+  unset `EQUATION_LLM_FALLBACK` becomes `false`: equations come from the regex
+  pass alone, because most equation LLM calls find nothing and on a CPU each
+  one keeps the server busy.
+
+If you decline the hosted setup on such a machine, `bibr setup` can show this
+as an experimental option, never as its recommendation: no OCR model
+(`OCR_BACKEND=text-layer`, which reads born-digital PDFs from their text layer;
+scanned papers need cloud OCR or a GPU), the 2B Q4_K_M on llama.cpp and the
+memory mode from the system RAM. It writes no timeout or equation settings, so
+a later switch to another LLM does not inherit the CPU defaults. bibr does not
+install llama.cpp. Install a CPU build and put `llama-server` on your `PATH`:
+
+- Windows: extract `llama-<version>-bin-win-cpu-x64.zip` from the
+  [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases).
+  `winget install llama.cpp` installs the Vulkan build instead, which runs the
+  model on an integrated GPU and so gets none of the CPU defaults above.
+- macOS: `brew install llama.cpp`.
+- Linux: extract `llama-<version>-bin-ubuntu-x64.tar.gz` from the releases, or
+  `brew install llama.cpp`.
 
 ## How close small models get to a large one
 

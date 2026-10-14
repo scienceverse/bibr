@@ -97,6 +97,7 @@ _OCR_BACKEND_DOWNLOAD_NOTES: dict[str, str] = {
     "glm-llama": "downloads the quantized GLM-OCR weights (~1-2 GB GGUF) on first run",
     "glm-http": "uses your external GLM-OCR server — no local download, but it must "
     "already be running",
+    "text-layer": "reads the PDF's own text layer — no OCR model to download",
     "gemini": "cloud vision OCR — no local model download",
     "openai": "cloud vision OCR — no local model download",
     "anthropic": "cloud vision OCR — no local model download",
@@ -199,7 +200,7 @@ def _caused_by_configuration_error(exc: BaseException) -> bool:
 
 
 SetupPrompt = Literal["install_extras", "cloud_api_key", "private_server_url", "smoke_test"]
-SetupTier = Literal["fully_local", "mostly_local", "private_server", "cloud_fallback"]
+SetupTier = Literal["fully_local", "mostly_local", "cpu_local", "private_server", "cloud_fallback"]
 
 
 @dataclass(frozen=True)
@@ -247,7 +248,7 @@ def _default_local_llm_backend(
         if rapid_mlx_unavailable_reason() is None:
             return "rapid-mlx"
         return "vllm-mlx"
-    if sys_platform_name == "win32":
+    if sys_platform_name == "win32" or platform_key == "cpu":
         return "llama-cpp"
     return cuda_llm_backend_for(memory_gb)
 
@@ -308,6 +309,88 @@ def _registry_short_label(hf_id: str) -> str | None:
     return None
 
 
+def _text_layer_ocr_available() -> bool:
+    """Whether this bibr can read PDFs from their text layer with no OCR model."""
+    try:
+        from bibr.ocr.registry import TEXT_LAYER_BACKEND  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _cpu_memory_floor_gb() -> float:
+    """System RAM the smallest CPU build of a local model needs."""
+    return min(v.min_vram_gb for m in REGISTRY for v in m.variants if v.platform == "cpu")
+
+
+def _cpu_local_available(system_memory_gb: float | None) -> bool:
+    """Whether to offer the experimental ``cpu_local`` tier to a machine with no GPU.
+
+    It needs the text-layer OCR backend (no OCR model can run well on a CPU)
+    and enough RAM for the smallest CPU build of the extraction model.
+    """
+    if not _text_layer_ocr_available():
+        return False
+    return system_memory_gb is None or system_memory_gb >= _cpu_memory_floor_gb()
+
+
+def _cpu_local_setup(
+    base_env: dict[str, str], system_memory_gb: float | None, sys_platform_name: str
+) -> RecommendedSetup:
+    """The experimental tier for a machine with no GPU: everything on the CPU."""
+    from bibr.local.llama_cpp import cpu_install_hint, find_llama_server
+
+    picked = recommended_variant("cpu", system_memory_gb, "llama-cpp") or recommended_variant(
+        "cpu", None, "llama-cpp"
+    )
+    if picked is None:  # pragma: no cover - registry invariant
+        raise ValueError("the registry has no CPU build of a recommended model")
+    model, variant = picked
+    name = _registry_short_label(variant.hf_id) or "local model"
+    env = {
+        **base_env,
+        # No OCR model: the layout model finds the regions and each is read
+        # from the PDF's embedded text, so scans cannot be read at all.
+        "OCR_BACKEND": "text-layer",
+        "LLM_BACKEND": "llama-cpp",
+        "LLM_LOCAL_MODEL": variant.hf_id,
+        **model.env,
+        # No timeout or equation overrides: a CPU build of llama.cpp sets its
+        # own when unset, and global values here would outlive this tier.
+    }
+    # The one CPU measurement so far is bibr's 4B student at Q8_0: about
+    # 9.1k prompt and 1.5k output tokens a paper at 82 and 9.6 tokens/s.
+    runtime = (
+        "Experimental: not yet timed or scored end to end. The extraction model runs on "
+        "the CPU through llama.cpp, so expect minutes per paper: bibr's 4B model read 82 "
+        "and wrote 9.6 tokens/s on 4 CPU threads, roughly 4-5 minutes of LLM time for a "
+        f"typical paper; the {name} build is smaller and should be faster. Equations come "
+        "from the regex pass only, with no LLM fallback. Only born-digital PDFs can be "
+        "read; scanned papers need cloud OCR or a GPU."
+    )
+    if find_llama_server() is None:
+        runtime += (
+            " Install llama.cpp first (bibr does not install it): "
+            f"{cpu_install_hint(platform_name=sys_platform_name)}."
+        )
+    return RecommendedSetup(
+        tier="cpu_local",
+        env=env,
+        # The core install runs layout, the classifiers and the reference
+        # models through ONNX Runtime; the ml (torch) extra adds GPU paths and
+        # a multi-GB download a CPU-only machine has no use for.
+        extras={"demo"},
+        preset_name="cpu-local",
+        privacy_summary="document contents stay on this machine",
+        download_summary=(
+            f"downloads the {name} model (~{variant.approx_download_gb:.1f} GB) and local "
+            "layout/reference models (under 1 GB); no OCR model"
+        ),
+        runtime_summary=runtime,
+        required_prompts=("install_extras", "smoke_test"),
+    )
+
+
 def _build_recommended_setup(
     *,
     platform_key: str | None = None,
@@ -316,8 +399,13 @@ def _build_recommended_setup(
     sys_platform: str | None = None,
     machine: str | None = None,
     allow_cloud: bool = False,
+    cpu_local: bool = False,
 ) -> RecommendedSetup:
-    """Build the easy setup recommendation without touching terminal state."""
+    """Build the easy setup recommendation without touching terminal state.
+
+    ``cpu_local`` asks for the experimental CPU tier on a machine with no
+    NVIDIA GPU or Apple Silicon (see :func:`_cpu_local_available`).
+    """
     if (
         platform_key is None
         and accelerator_memory_gb is None
@@ -416,6 +504,9 @@ def _build_recommended_setup(
             runtime_summary=runtime,
             required_prompts=("install_extras", "smoke_test"),
         )
+
+    if cpu_local and platform_key is None:
+        return _cpu_local_setup(base_env, system_memory_gb, sys_platform_name)
 
     if allow_cloud:
         return RecommendedSetup(
@@ -921,13 +1012,22 @@ class SetupWizard:
             self._finish_recommended_setup(setup)
             return
 
-        # No local, no private server: the only remaining path is the cloud.
+        # No local, no private server: the cloud, or (experimental, born-digital
+        # PDFs only) everything on this machine's CPU.
+        cpu_local = platform_key is None and _cpu_local_available(system_gb)
         self.console.print(
             "\nWithout a local or private server, bibr can process papers with Claude "
             "Haiku 5.5 in the cloud. This sends document-derived content (page images and "
             "extracted text) to Anthropic."
         )
+        if cpu_local:
+            self.console.print(
+                "If you decline, bibr can run everything on this machine's CPU instead: "
+                "experimental, minutes per paper, and born-digital PDFs only."
+            )
         if not Confirm.ask("Send document-derived content to Anthropic Claude?", default=False):
+            if cpu_local and self._offer_cpu_local(system_gb):
+                return
             self._handle_decline()
             return
 
@@ -953,6 +1053,21 @@ class SetupWizard:
                 "not recommended on this machine."
             )
         self.console.print(f"[dim]{line}[/dim]")
+
+    def _offer_cpu_local(self, system_gb: float | None) -> bool:
+        """Show the experimental CPU tier and set it up if accepted (default No)."""
+        setup = _build_recommended_setup(
+            platform_key=None,
+            accelerator_memory_gb=None,
+            system_memory_gb=system_gb,
+            cpu_local=True,
+        )
+        # Not scored yet, so it is shown as an option, not a recommendation.
+        self._print_recommendation(setup, heading="Experimental option for this machine")
+        if not Confirm.ask("Use this experimental CPU setup?", default=False):
+            return False
+        self._finish_recommended_setup(setup)
+        return True
 
     def _handle_decline(self) -> None:
         """Declining a recommendation is a handoff to --advanced, not a dead end."""
@@ -1068,18 +1183,21 @@ class SetupWizard:
     _TIER_LABELS = {
         "fully_local": "fully local",
         "mostly_local": "mostly local",
+        "cpu_local": "local, on the CPU (experimental)",
         "private_server": "private server",
         "cloud_fallback": "cloud",
     }
 
-    def _print_recommendation(self, setup: RecommendedSetup) -> None:
+    def _print_recommendation(
+        self, setup: RecommendedSetup, *, heading: str = "Recommended for this machine"
+    ) -> None:
         """Print the tier header plus a concrete, itemised plan preview.
 
         Rows are derived from ``setup.env`` (+ the model registry) so the user
         confirms an explicit plan rather than an opaque label.
         """
         tier_label = self._TIER_LABELS.get(setup.tier, setup.tier.replace("_", " "))
-        self.console.print(f"\n[bold]Recommended for this machine:[/bold] {tier_label}")
+        self.console.print(f"\n[bold]{heading}:[/bold] {tier_label}")
         for label, value in self._plan_rows(setup):
             self.console.print(ui.kv(label, value))
 
@@ -1106,6 +1224,8 @@ class SetupWizard:
             return "paddle (automatic Paddle-first chain; GLM fallback)"
         if backend == "glm-llama":
             return "glm-llama (GLM-OCR via llama.cpp, local)"
+        if backend == "text-layer":
+            return "text-layer (no OCR model: reads the PDF's own text; born-digital PDFs only)"
         return f"{backend} (local OCR)"
 
     def _plan_llm_value(self, setup: RecommendedSetup) -> str:
@@ -1118,7 +1238,8 @@ class SetupWizard:
         backend = setup.env.get("LLM_BACKEND", "")
         hf_id = setup.env.get("LLM_LOCAL_MODEL", "")
         name = _registry_short_label(hf_id) or "local model"
-        return f"{name} — {hf_id} via {backend}, local"
+        where = "local, on the CPU" if setup.tier == "cpu_local" else "local"
+        return f"{name} — {hf_id} via {backend}, {where}"
 
     def _plan_memory_value(self, setup: RecommendedSetup) -> str:
         mode = setup.env.get("PIPELINE_MEMORY_MODE", "")
@@ -1369,11 +1490,15 @@ class SetupWizard:
         """Managed local LLM: pick a curated model/quant for this machine."""
         platform_key, memory_gb = detect_hardware()
         if platform_key is None:
+            from bibr.local.pipeline import _get_system_memory_gb
+
+            # The CPU builds, keyed on system RAM and listed fastest first.
+            platform_key, memory_gb = "cpu", _get_system_memory_gb()
             self.console.print(
-                "[yellow]No NVIDIA GPU or Apple Silicon detected — a local LLM "
-                "may be slow or unsupported. Showing all options.[/yellow]"
+                "[yellow]No NVIDIA GPU or Apple Silicon detected — a local LLM runs on "
+                f"the CPU through llama.cpp ({memory_gb:.0f} GB RAM): experimental, and "
+                "expect minutes per paper. Showing the CPU builds.[/yellow]"
             )
-            platform_key = "cuda"
         elif memory_gb:
             kind = "VRAM" if platform_key == "cuda" else "unified memory"
             self.console.print(f"[dim]Detected {platform_key}: {memory_gb:.0f} GB {kind}[/dim]")
@@ -1430,11 +1555,13 @@ class SetupWizard:
                 "[yellow]No variant fits the detected memory — showing all; "
                 "the server may fail to load.[/yellow]"
             )
-        self.console.print("\n[dim]Variants (best quality first):[/dim]")
+        order = "fastest first" if platform_key == "cpu" else "best quality first"
+        self.console.print(f"\n[dim]Variants ({order}):[/dim]")
+        ram = " of RAM" if platform_key == "cpu" else ""
         for i, v in enumerate(shown, 1):
             runtime = _runtime_for_variant(v, backend)
             self.console.print(
-                f"  {i}. {runtime} / {v.quant} — needs ~{v.min_vram_gb:.0f} GB, "
+                f"  {i}. {runtime} / {v.quant} — needs ~{v.min_vram_gb:.0f} GB{ram}, "
                 f"downloads ~{v.approx_download_gb:.1f} GB ({v.hf_id})"
             )
         idx = Prompt.ask(
@@ -2026,9 +2153,10 @@ By default this runs the short recommended flow:
   2. Show a concrete plan preview (OCR + LLM backends, extras, memory mode,
      privacy, first-run download, speed) and ask a single confirmation.
   3. If this machine can't run local models, fork: use a private OCR/LLM
-     server if you have one, otherwise give informed consent to cloud (Google
-     Gemini). Declining any recommendation offers a handoff to --advanced
-     rather than dead-ending.
+     server if you have one, otherwise give informed consent to cloud
+     (Anthropic Claude). With no GPU at all, declining the cloud can show an
+     experimental CPU-only setup for born-digital PDFs. Declining any
+     recommendation offers a handoff to --advanced rather than dead-ending.
   4. Write .env (and save a preset), then optionally install extras and run
      validation: a connection test for cloud, a local server health check for
      managed local LLMs, and a smoke-test extraction on a bundled sample PDF.

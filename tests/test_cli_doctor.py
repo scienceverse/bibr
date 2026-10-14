@@ -207,6 +207,7 @@ def test_check_llm_local_backend_refuses_vllm_without_a_gpu():
         mock.patch.object(importlib.util, "find_spec", return_value=None),
         mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
         mock.patch("bibr.local.llm_models.detect_hardware", return_value=(None, None)),
+        mock.patch("bibr.local.llama_cpp.cpu_install_hint", return_value="CPU-HINT"),
     ):
         _check_llm_local_backend("vllm", "org/model", rec.ok, rec.fail)
     assert rec.calls == [
@@ -215,7 +216,9 @@ def test_check_llm_local_backend_refuses_vllm_without_a_gpu():
             "LLM backend: vllm — cannot start here",
             "--llm local needs an NVIDIA GPU (vLLM) or Apple Silicon (vllm-mlx); neither was "
             "detected. Use --llm cloud (hosted API) or run a local Ollama server "
-            "(LLM_PROVIDER=ollama, LLM_BACKEND=cloud).",
+            "(LLM_PROVIDER=ollama, LLM_BACKEND=cloud). Or run bibr's small extraction model "
+            "on the CPU with llama.cpp (experimental; minutes per paper): CPU-HINT, then use "
+            "--llm local.",
         )
     ]
 
@@ -634,6 +637,8 @@ def test_preflight_llama_cpp_cpu_only_still_warns_without_steering(monkeypatch, 
         steering_calls["n"] += 1
         return None
 
+    # A machine with a GPU: the CPU build is the thing to replace.
+    monkeypatch.setattr("bibr.local.llm_models.detect_hardware", lambda: ("cuda", 8.0))
     monkeypatch.setattr("bibr.local.llama_cpp.find_llama_server", lambda: ["llama-server"])
     monkeypatch.setattr("bibr.local.llama_cpp.probe_gpu_backend", lambda prefix: False)
     monkeypatch.setattr("bibr.local.llama_cpp.cuda_steering_hint", _steering)
@@ -646,11 +651,33 @@ def test_preflight_llama_cpp_cpu_only_still_warns_without_steering(monkeypatch, 
     assert steering_calls["n"] == 0
 
 
+def test_check_llm_local_backend_llama_cpp_cpu_build_without_a_gpu():
+    """No GPU: the CPU build is the intended target, reported with its cost."""
+    from bibr.local.cli import _check_llm_local_backend
+
+    rec = _Recorder()
+    with (
+        mock.patch("bibr.local.llm_models.detect_hardware", return_value=(None, None)),
+        mock.patch("bibr.local.llama_cpp.find_llama_server", return_value=["llama-server"]),
+        mock.patch("bibr.local.llama_cpp.probe_gpu_backend", return_value=False),
+    ):
+        _check_llm_local_backend("llama-cpp", "org/model:Q4", rec.ok, rec.fail)
+    assert rec.calls == [
+        (
+            "ok",
+            "LLM backend: llama-cpp (llama.cpp on the CPU, model=org/model:Q4) — "
+            "experimental: expect minutes per paper",
+            "",
+        )
+    ]
+
+
 def test_check_llm_local_backend_llama_cpp_missing_uses_install_hint():
     from bibr.local.cli import _check_llm_local_backend
 
     rec = _Recorder()
     with (
+        mock.patch("bibr.local.llm_models.detect_hardware", return_value=("cuda", 6.0)),
         mock.patch("bibr.local.llama_cpp.find_llama_server", return_value=None),
         mock.patch(
             "bibr.local.llama_cpp.install_hint",

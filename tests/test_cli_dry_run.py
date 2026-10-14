@@ -588,3 +588,26 @@ async def test_dry_run_hf_cache_unknown_without_huggingface_hub(tmp_path, capsys
 
     out = capsys.readouterr().out
     assert "cache state unknown (ml extra not installed)" in out
+
+
+def test_dry_run_cache_status_of_a_pinned_gguf_build_looks_up_the_file(tmp_path, monkeypatch):
+    """bibr's GGUF builds live in the HF cache at their pinned commit, one file per quant."""
+    from huggingface_hub import constants
+
+    from bibr.local.cli.dry_run import _hf_cache_status
+    from bibr.local.llm_models import pinned_gguf
+
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path))
+    q4 = "scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M"
+    q8 = "scienceverse/bibr-extract-qwen35-2b-GGUF:Q8_0"
+    assert _hf_cache_status(q4) == "will download (~1.2 GB)"
+
+    pinned = pinned_gguf(q4)
+    snapshot = (
+        tmp_path / f"models--{pinned.repo_id.replace('/', '--')}" / "snapshots" / pinned.revision
+    )
+    snapshot.mkdir(parents=True)
+    (snapshot / pinned.filename).write_bytes(b"GGUF")
+    assert _hf_cache_status(q4) == "cached"
+    # Another quant of the same repo is still a download.
+    assert _hf_cache_status(q8) == "will download (~1.9 GB)"

@@ -43,6 +43,30 @@ def _fresh_own_server_keys(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _llama_cpp_build_sees_a_gpu(monkeypatch, request):
+    # The managed llama.cpp servers ask the installed build whether it sees a
+    # GPU (``runs_on_cpu``), which would run the host's llama-server and make
+    # the launch flags depend on the machine. Default to a GPU build; the CPU
+    # tests opt in by patching it back.
+    if request.node.get_closest_marker("slow") is not None:
+        return
+    monkeypatch.setattr("bibr.local.llama_cpp.runs_on_cpu", lambda prefix=None: False)
+
+
+@pytest.fixture(autouse=True)
+def _pinned_gguf_is_cached(monkeypatch, request):
+    # A launch of one of bibr's own GGUF builds fetches the file from the Hub
+    # first (``download_pinned_gguf``); unit tests stand in a cached path.
+    # The download tests use the real function, imported before this stub.
+    if request.node.get_closest_marker("slow") is not None:
+        return
+    monkeypatch.setattr(
+        "bibr.local.llama_cpp.download_pinned_gguf",
+        lambda gguf, **_kwargs: f"/hf-cache/{gguf.repo_id}/{gguf.revision}/{gguf.filename}",
+    )
+
+
+@pytest.fixture(autouse=True)
 def _force_managed_port_probe_off(monkeypatch, request):
     if request.node.module.__name__.split(".")[-1] in _UNSTUBBED:
         yield
