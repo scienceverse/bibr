@@ -98,8 +98,8 @@ def _headers(mapping):
 
 
 def test_throttle_on_429_without_headers_widens_window():
-    """Crossref stopped sending X-Rate-Limit headers — a header-less 429 must
-    still tighten the local limiter (multiplicative), or a storm of resolver
+    """A 429 without X-Rate-Limit headers (Crossref omitted them for a while)
+    must still tighten the local limiter (multiplicative), or a storm of resolver
     misses hammers the search endpoint at the configured RPM forever."""
     import bibr.clients.crossref as mod
 

@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 from rapidfuzz import fuzz
 
+from bibr.clients.crossref import CrossrefRequestTally, count_requests
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.enrich.schemas import CrossrefAuthor, CrossrefWorkItem, plain_text
 from bibr.models import BibAuthor, MatchFunder, MatchOrganization, canonicalize_orcid
@@ -91,8 +92,20 @@ class ResolutionStats:
     raw_matches: int = 0
     raw_ambiguous: int = 0
     raw_duplicates: int = 0
+    # Crossref traffic for this batch, the prefetch included: requests sent,
+    # 429 (too many requests) answers, and requests repeated after a 429 or a
+    # transient failure. Throttling here means the batch outran Crossref's
+    # advertised limits.
+    crossref_requests: int = 0
+    crossref_throttled: int = 0
+    crossref_retries: int = 0
     failed_bib_ids: set[int] = field(default_factory=set)
     failure_details: list[ProcessingWarning] = field(default_factory=list)
+
+    def add_requests(self, tally: CrossrefRequestTally) -> None:
+        self.crossref_requests += tally.requests
+        self.crossref_throttled += tally.throttled
+        self.crossref_retries += tally.retries
 
 
 @dataclass(frozen=True)
@@ -160,6 +173,8 @@ class EnrichmentPrefetch:
     resolver_prefetch: dict[int, list[dict] | Exception] = field(default_factory=dict)
     resolver_prefetch_error: Exception | None = None
     """A failed prefetch search, replayed as a terminal failure per eligible ref."""
+    requests: CrossrefRequestTally = field(default_factory=CrossrefRequestTally)
+    """The Crossref requests the prefetch made."""
     started_at: float = 0.0
     finished_at: float = 0.0
     _closed: bool = field(default=False, repr=False)
@@ -209,6 +224,20 @@ async def prefetch_enrichment(
         prefetch.finished_at = time.monotonic()
         return prefetch
 
+    with count_requests(prefetch.requests):
+        await _run_prefetch(prefetch, references, effective, resolver_client)
+    prefetch.finished_at = time.monotonic()
+    return prefetch
+
+
+async def _run_prefetch(
+    prefetch: EnrichmentPrefetch,
+    references: list[PaperReference],
+    effective: GlobalSettings,
+    resolver_client,
+) -> None:
+    """The network work of :func:`prefetch_enrichment`, filling *prefetch*."""
+    crossref_client = prefetch.crossref_client
     try:
         owns_resolver = False
         if resolver_client is None and effective.resolver.url and effective.resolver.enrich:
@@ -283,9 +312,6 @@ async def prefetch_enrichment(
     except BaseException:
         await prefetch.aclose()
         raise
-
-    prefetch.finished_at = time.monotonic()
-    return prefetch
 
 
 async def enrich_references(
@@ -374,54 +400,62 @@ async def enrich_references(
                 source, match = outcome
                 ref.match[source] = match
 
-    try:
-        results = await asyncio.gather(
-            *[_enrich_one(ref) for ref in references], return_exceptions=True
-        )
-        for ref, result in zip(references, results, strict=True):
-            if isinstance(result, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
-                raise result
-            if isinstance(result, BaseException):
-                logger.warning("Reference enrichment raised for bib_id=%s: %s", ref.bib_id, result)
-                _record_terminal_failure(stats, ref, "reference enrichment", result)
+    # Crossref traffic of this batch; the prefetch counted its own.
+    with count_requests() as tally:
+        try:
+            results = await asyncio.gather(
+                *[_enrich_one(ref) for ref in references], return_exceptions=True
+            )
+            for ref, result in zip(references, results, strict=True):
+                if isinstance(result, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+                    raise result
+                if isinstance(result, BaseException):
+                    logger.warning(
+                        "Reference enrichment raised for bib_id=%s: %s", ref.bib_id, result
+                    )
+                    _record_terminal_failure(stats, ref, "reference enrichment", result)
 
-        if resolver_client is not None:
-            try:
-                await _enrich_resolver_fallback(
-                    references,
-                    resolver_client,
-                    stats,
-                    settings=effective,
-                )
-            except Exception as e:  # noqa: BLE001 — optional fallback cannot fail extraction
-                eligible = [ref for ref in references if _resolver_fallback_eligible(ref)]
-                stats.fallback_errors += len(eligible)
-                logger.warning("Resolver fallback failed for %d refs: %s", len(eligible), e)
-                _record_fallback_warning(
-                    stats,
-                    WarningCode.RESOLVER_FALLBACK_FAILED,
-                    f"resolver fallback failed for {len(eligible)} refs: {_export_diagnostic(e)}",
-                )
-        if resolver_client is not None and raw_strings and effective.resolver.raw_search:
-            try:
-                await _enrich_raw_strings(
-                    references, resolver_client, stats, raw_strings, settings=effective
-                )
-            except Exception as e:  # noqa: BLE001 — optional pass cannot fail extraction
-                logger.warning("Resolver raw-string search failed: %s", e)
-                _record_fallback_warning(
-                    stats,
-                    WarningCode.RESOLVER_FALLBACK_FAILED,
-                    f"resolver raw-string search failed: {_export_diagnostic(e)}",
-                )
-    finally:
-        await prefetch.aclose()
+            if resolver_client is not None:
+                try:
+                    await _enrich_resolver_fallback(
+                        references,
+                        resolver_client,
+                        stats,
+                        settings=effective,
+                    )
+                except Exception as e:  # noqa: BLE001 — optional fallback cannot fail extraction
+                    eligible = [ref for ref in references if _resolver_fallback_eligible(ref)]
+                    stats.fallback_errors += len(eligible)
+                    logger.warning("Resolver fallback failed for %d refs: %s", len(eligible), e)
+                    _record_fallback_warning(
+                        stats,
+                        WarningCode.RESOLVER_FALLBACK_FAILED,
+                        f"resolver fallback failed for {len(eligible)} refs: "
+                        f"{_export_diagnostic(e)}",
+                    )
+            if resolver_client is not None and raw_strings and effective.resolver.raw_search:
+                try:
+                    await _enrich_raw_strings(
+                        references, resolver_client, stats, raw_strings, settings=effective
+                    )
+                except Exception as e:  # noqa: BLE001 — optional pass cannot fail extraction
+                    logger.warning("Resolver raw-string search failed: %s", e)
+                    _record_fallback_warning(
+                        stats,
+                        WarningCode.RESOLVER_FALLBACK_FAILED,
+                        f"resolver raw-string search failed: {_export_diagnostic(e)}",
+                    )
+        finally:
+            await prefetch.aclose()
+    stats.add_requests(tally)
+    stats.add_requests(prefetch.requests)
 
     matched = sum(1 for ref in references if ref.match)
     logger.info(
         "Reference enrichment: %d/%d matched "
         "(resolver %d/%d, fallback matches=%d misses=%d errors=%d timeouts=%d attempts=%d, "
-        "crossref doi %d/%d, search %d/%d, fingerprint %d/%d, raw %d/%d ambiguous=%d duplicates=%d)",
+        "crossref doi %d/%d, search %d/%d, fingerprint %d/%d, raw %d/%d ambiguous=%d "
+        "duplicates=%d; crossref requests=%d throttled=%d retries=%d)",
         matched,
         len(references),
         stats.resolver_matches,
@@ -441,7 +475,17 @@ async def enrich_references(
         stats.raw_attempts,
         stats.raw_ambiguous,
         stats.raw_duplicates,
+        stats.crossref_requests,
+        stats.crossref_throttled,
+        stats.crossref_retries,
     )
+    if stats.crossref_throttled:
+        logger.warning(
+            "Crossref answered %d of %d requests with 429 (too many requests); %d were retried",
+            stats.crossref_throttled,
+            stats.crossref_requests,
+            stats.crossref_retries,
+        )
     # A reference is only "failed" if it ended UNMATCHED. A transient error in
     # an early strategy still lands in ``failed_bib_ids``, so counting that set
     # directly reported failures for references a later strategy went on to

@@ -569,9 +569,27 @@ value, so an enriched and an unenriched result for the same file never
 collide. Deployments that upgraded from a version where enrichment was on
 by default must now set `CROSSREF_ENRICH=true` to keep that behaviour.
 
-At volume, Crossref enrichment is rate-limited (`CROSSREF_RATE_LIMIT_RPM`,
-default `200`; raise it once you've set `CROSSREF_API_EMAIL` or have an
-API key) and can optionally be cached in Redis across requests
+Set `CROSSREF_API_EMAIL` on every process that enriches. Crossref serves
+requests that name a contact email from its polite pool, and the others
+from a slower anonymous pool. In October 2026 Crossref's response headers
+advertised these limits:
+
+| Pool | Searches | DOI lookups | Requests at once |
+|---|---|---|---|
+| Polite (with an email) | 3 a second | 10 a second | 3 |
+| Anonymous (no email) | 1 a second | 5 a second | 1 |
+
+bibr follows the limits each response advertises (`X-Rate-Limit-*` and
+`x-concurrency-limit`). It keeps at most that many requests in flight per
+pool, whatever `CROSSREF_ENRICH_CONCURRENCY` says. That setting only bounds
+how many references are resolved at once. Without an email the client is
+also capped at 60 requests a minute. Every reference printed without a DOI
+costs one search, so in the anonymous pool a long reference list can use
+most of the 120-second per-paper budget (`CROSSREF_ENRICH_TIMEOUT`).
+
+`CROSSREF_RATE_LIMIT_RPM` (default `200`) is a ceiling on top of
+Crossref's limits. Raising it above them gains nothing. Crossref responses
+can optionally be cached in Redis across requests
 (`CROSSREF_REDIS_CACHE`, off by default — falls back to `REDIS_URL`).
 With `REDIS_URL` set, every process that uses it shares one Crossref rate
 limit through Redis. The LLM rate limit is shared per provider and model:

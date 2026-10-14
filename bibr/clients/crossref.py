@@ -1,11 +1,14 @@
 import asyncio
 import contextlib
+import hashlib
 import logging
 import re
 import threading
 import time
-from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections import OrderedDict, deque
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -35,6 +38,32 @@ _BULK_DOI_CHUNK = 50
 # contact address in the User-Agent; without one the configured RPM cannot be
 # honored no matter how high it is set.
 _ANONYMOUS_RATE_LIMIT_RPM = 60
+
+# Requests Crossref allows in flight at once, per pool, until a response's
+# ``x-concurrency-limit`` header says otherwise. Its headers (checked October
+# 2026) advertise 3 for the polite pools (``polite-single`` for /works/{doi},
+# ``polite-array`` for searches and filters) and 1 for the anonymous ones.
+# This cap is separate from ``enrich_concurrency``, which only bounds how many
+# references are being resolved at once: before it, those 12 (16 with a
+# resolver) references each had a request in flight against a limit of 3, and
+# the excess came back as 429s and backoff.
+_POLITE_CONCURRENCY = 3
+_ANONYMOUS_CONCURRENCY = 1
+# Upper bound on an advertised concurrency limit, so a garbled header cannot
+# open the gate wide.
+_MAX_CONCURRENCY = 16
+
+# Fields requested from the search route (select= is supported there, not on
+# /works/{doi}, which always returns the whole record). ``updated-by`` carries
+# retraction, withdrawal and correction notices.
+_SEARCH_SELECT = (
+    "DOI,title,author,editor,issued,container-title,volume,issue,page,publisher,type,URL,"
+    "score,funder,license,updated-by"
+)
+# Search responses are cached under a key that names the field set, so an
+# entry cached for an older ``_SEARCH_SELECT`` (30 days in the shared Redis
+# cache) is not served for the new one.
+_SEARCH_CACHE_PREFIX = "search:" + hashlib.sha256(_SEARCH_SELECT.encode()).hexdigest()[:8]
 
 # Ceiling for the blind multiplicative 429 throttle (seconds between requests):
 # 2.0s ≈ 30 RPM, slow enough that Crossref stops throttling yet fast enough
@@ -75,6 +104,87 @@ def _cached_not_found_error(path: str) -> httpx.HTTPStatusError:
         request=request,
         response=httpx.Response(404, request=request),
     )
+
+
+@dataclass
+class CrossrefRequestTally:
+    """Crossref requests made inside one :func:`count_requests` block."""
+
+    requests: int = 0
+    throttled: int = 0
+    """Responses with status 429 (too many requests)."""
+    retries: int = 0
+    """Requests repeated after a transient failure or a 429."""
+
+
+_REQUEST_TALLY: ContextVar[CrossrefRequestTally | None] = ContextVar(
+    "bibr_crossref_request_tally", default=None
+)
+
+
+@contextlib.contextmanager
+def count_requests(tally: CrossrefRequestTally | None = None) -> Iterator[CrossrefRequestTally]:
+    """Count the Crossref requests made in this block and the tasks it starts.
+
+    The client is shared by every paper in the process, so its own counters
+    would mix papers; a context variable follows one paper's tasks instead.
+    """
+    tally = tally if tally is not None else CrossrefRequestTally()
+    token = _REQUEST_TALLY.set(tally)
+    try:
+        yield tally
+    finally:
+        _REQUEST_TALLY.reset(token)
+
+
+class _InFlightGate:
+    """At most ``limit()`` requests in flight on one event loop.
+
+    The limit is read on every acquire, so a new advertised limit applies to
+    the next request without rebuilding the gate. Release never awaits, so a
+    cancelled request always gives its slot back.
+    """
+
+    def __init__(self, limit: Callable[[], int]) -> None:
+        self._limit = limit
+        self.active = 0
+        self._waiters: deque[asyncio.Future[None]] = deque()
+
+    async def acquire(self) -> None:
+        while self.active >= max(1, self._limit()):
+            waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            self._waiters.append(waiter)
+            try:
+                await waiter
+            finally:
+                with contextlib.suppress(ValueError):
+                    self._waiters.remove(waiter)
+        self.active += 1
+
+    def release(self) -> None:
+        self.active -= 1
+        self.wake()
+
+    def wake(self) -> None:
+        """Let every waiter re-check the limit (a release, or a raised limit)."""
+        while self._waiters:
+            waiter = self._waiters.popleft()
+            if not waiter.done():
+                waiter.set_result(None)
+
+    @contextlib.asynccontextmanager
+    async def slot(self) -> AsyncIterator[None]:
+        await self.acquire()
+        try:
+            yield
+        finally:
+            self.release()
+
+
+def _pool_of(path: str) -> str:
+    """Crossref's pool for a request: ``single`` (one work by DOI) or ``list``
+    (search and filter queries), which have separate limits."""
+    return "list" if path.rstrip("/") == "/works" else "single"
 
 
 def _settings_key(settings: GlobalSettings) -> tuple[object, ...]:
@@ -125,6 +235,8 @@ class CrossrefClient:
     3. Reads ``X-Rate-Limit-Limit`` and ``X-Rate-Limit-Interval`` response
        headers to dynamically tighten the rate if CrossRef signals a lower
        allowance than configured.
+    4. Keeps at most ``x-concurrency-limit`` requests in flight per pool
+       (3 with a contact email, 1 without, until a response says otherwise).
     """
 
     def __init__(
@@ -140,10 +252,11 @@ class CrossrefClient:
         # Derive interval from configured RPM.
         # Without mailto, cap at 60 RPM (anonymous limit).
         rpm = self._settings.crossref.rate_limit_rpm
-        # Silently running at a third of the configured rate is the difference
-        # between an 80-reference paper enriching in ~25s and in ~81s, against
-        # a 120s per-paper budget — worth naming the numbers in the warning
-        # below rather than leaving the operator to infer it from timings.
+        # The anonymous pool allows one search a second and one request at a
+        # time, so every reference without a DOI costs a second or more of the
+        # 120s per-paper budget: an 80-reference paper can spend most of it
+        # here. Worth naming in the warning below rather than leaving the
+        # operator to infer it from timings.
         self._anonymous_clamped_from = (
             rpm if not self.mailto and rpm > _ANONYMOUS_RATE_LIMIT_RPM else None
         )
@@ -189,6 +302,16 @@ class CrossrefClient:
         # Lazily created per running event loop (see enrich_semaphore).
         self._enrich_semaphores: dict[asyncio.AbstractEventLoop, asyncio.Semaphore] = {}
         self._enrich_concurrency = self._settings.crossref.enrich_concurrency
+        # Requests in flight per Crossref pool (see _POLITE_CONCURRENCY). The
+        # limit is shared; the gates are per event loop, like the semaphore.
+        default_concurrency = (
+            _POLITE_CONCURRENCY if self.mailto or self.api_key else _ANONYMOUS_CONCURRENCY
+        )
+        self._pool_concurrency: dict[str, int] = {
+            "single": default_concurrency,
+            "list": default_concurrency,
+        }
+        self._inflight_gates: dict[tuple[asyncio.AbstractEventLoop, str], _InFlightGate] = {}
         self._breaker: object | None = None
         self._cb_failure_threshold = self._settings.cb.failure_threshold
         self._cb_reset_timeout = self._settings.cb.reset_timeout_seconds
@@ -198,20 +321,20 @@ class CrossrefClient:
         self._response_cache_init = False
 
         if self.mailto:
-            logger.info(f"CrossrefClient initialized with mailto: {self.mailto}")
+            # The address itself is a setting kept out of logs, like a key.
+            logger.info("CrossrefClient initialized with a contact email (polite pool)")
         elif self._anonymous_clamped_from is not None:
             logger.warning(
                 "CrossrefClient initialized WITHOUT mailto: Crossref's anonymous pool caps "
-                "this client at %d RPM, not the configured %d. Set CROSSREF_API_EMAIL to "
-                "enrich at the configured rate.",
+                "this client at %d RPM, not the configured %d RPM, with one request in "
+                "flight. Set CROSSREF_API_EMAIL to use the polite pool.",
                 _ANONYMOUS_RATE_LIMIT_RPM,
                 self._anonymous_clamped_from,
             )
         else:
             logger.warning(
-                "CrossrefClient initialized WITHOUT mailto. "
-                "You may be subject to stricter rate limits. "
-                "Set CROSSREF_API_EMAIL environment variable."
+                "CrossrefClient initialized WITHOUT mailto: Crossref's anonymous pool "
+                "allows one request in flight. Set CROSSREF_API_EMAIL to use the polite pool."
             )
 
     async def _ensure_limiter(self) -> None:
@@ -323,6 +446,19 @@ class CrossrefClient:
                     self._enrich_semaphores.pop(other, None)
             sem = self._enrich_semaphores[loop] = asyncio.Semaphore(self._enrich_concurrency)
         return sem
+
+    def _inflight_gate(self, pool: str) -> _InFlightGate:
+        """This loop's gate for *pool*, created on first use."""
+        loop = asyncio.get_running_loop()
+        gate = self._inflight_gates.get((loop, pool))
+        if gate is None:
+            for other_loop, other_pool in list(self._inflight_gates):
+                if other_loop.is_closed():
+                    self._inflight_gates.pop((other_loop, other_pool), None)
+            gate = self._inflight_gates[(loop, pool)] = _InFlightGate(
+                lambda: self._pool_concurrency[pool]
+            )
+        return gate
 
     def _get_breaker(self):
         """Lazily create the circuit breaker in the current event loop."""
@@ -461,16 +597,11 @@ class CrossrefClient:
         Returns:
             The JSON response from CrossRef.
         """
-        # select= is only supported on the list/search route, not on /works/{doi}
-        _SELECT = (
-            "DOI,title,author,editor,issued,container-title,volume,issue,page,publisher,type,URL,"
-            "score,funder,license"
-        )
         return await self._cached(
-            f"search:{limit}:{query}",
+            f"{_SEARCH_CACHE_PREFIX}:{limit}:{query}",
             lambda: self._request(
                 "/works",
-                params={"query.bibliographic": query, "rows": limit, "select": _SELECT},
+                params={"query.bibliographic": query, "rows": limit, "select": _SEARCH_SELECT},
             ),
         )
 
@@ -601,58 +732,73 @@ class CrossrefClient:
             return await self._request_inner(path, params)
 
     async def _request_inner(self, path: str, params: dict | None = None) -> dict[str, Any]:
-        """Inner retry loop for Crossref requests (wrapped by circuit breaker)."""
+        """Inner retry loop for Crossref requests (wrapped by circuit breaker).
+
+        Each attempt holds one of the pool's in-flight slots from before its
+        rate-limiter token to the end of the response; the backoff before a
+        retry is spent outside it, so a waiting retry does not block others.
+        """
         http = await self._get_http_client()
         await self._ensure_limiter()
         assert self.limiter is not None  # noqa: S101 — _ensure_limiter sets it
+        pool = _pool_of(path)
+        gate = self._inflight_gate(pool)
+        tally = _REQUEST_TALLY.get()
         last_exc: Exception | None = None
         retry_after: float | None = None
         for attempt in range(_MAX_RETRIES):
-            await self.limiter.acquire()
-            try:
-                logger.debug("CrossRef GET %s (attempt %d)", path, attempt + 1)
-                resp = await http.get(path, params=params)
-                self._adapt_rate_limit(resp.headers)
-                resp.raise_for_status()
-                self._recover_rate_limit()
+            async with gate.slot():
+                await self.limiter.acquire()
                 try:
-                    data: dict[str, Any] = resp.json()
-                    return data
-                except ValueError as e:
-                    raise httpx.DecodingError(str(e), request=resp.request) from e
-            except httpx.HTTPStatusError as e:
-                last_exc = e
-                # Crossref also tells us the limit on 429 — adapt before
-                # giving up or retrying so the next request has the new
-                # window width.
-                if e.response is not None:
-                    self._adapt_rate_limit(e.response.headers)
-                    if e.response.status_code == 429:
-                        self._throttle_on_429(e.response.headers)
-                    retry_after = self._parse_retry_after(e.response.headers)
-                if not self._is_retryable(e) or attempt == _MAX_RETRIES - 1:
-                    # 404 just means "no Crossref record for that DOI" —
-                    # extremely common when extracted DOIs are slightly
-                    # malformed or point to non-Crossref registries (OSF,
-                    # bioRxiv data deposits). Log quietly so a normal run
-                    # doesn't look full of red ERRORs.
-                    if e.response is not None and e.response.status_code == 404:
-                        logger.debug("CrossRef 404 (no record): %s", path)
-                    else:
+                    logger.debug("CrossRef GET %s (attempt %d)", path, attempt + 1)
+                    if tally is not None:
+                        tally.requests += 1
+                    resp = await http.get(path, params=params)
+                    self._adapt_rate_limit(resp.headers)
+                    self._adapt_concurrency(resp.headers, pool)
+                    resp.raise_for_status()
+                    self._recover_rate_limit()
+                    try:
+                        data: dict[str, Any] = resp.json()
+                        return data
+                    except ValueError as e:
+                        raise httpx.DecodingError(str(e), request=resp.request) from e
+                except httpx.HTTPStatusError as e:
+                    last_exc = e
+                    # Crossref also tells us the limit on 429 — adapt before
+                    # giving up or retrying so the next request has the new
+                    # window width.
+                    if e.response is not None:
+                        self._adapt_rate_limit(e.response.headers)
+                        self._adapt_concurrency(e.response.headers, pool)
+                        if e.response.status_code == 429:
+                            if tally is not None:
+                                tally.throttled += 1
+                            self._throttle_on_429(e.response.headers)
+                        retry_after = self._parse_retry_after(e.response.headers)
+                    if not self._is_retryable(e) or attempt == _MAX_RETRIES - 1:
+                        # 404 just means "no Crossref record for that DOI" —
+                        # extremely common when extracted DOIs are slightly
+                        # malformed or point to non-Crossref registries (OSF,
+                        # bioRxiv data deposits). Log quietly so a normal run
+                        # doesn't look full of red ERRORs.
+                        if e.response is not None and e.response.status_code == 404:
+                            logger.debug("CrossRef 404 (no record): %s", path)
+                        else:
+                            logger.error("CrossRef request failed: %s", e)
+                        raise
+                except Exception as e:  # noqa: BLE001 — re-raised unless transient
+                    # Naming only ReadTimeout/ConnectTimeout/ConnectError left whole
+                    # classes of retryable failure — RemoteProtocolError, ReadError,
+                    # PoolTimeout, and the DecodingError raised just above for an
+                    # unparseable body — escaping with zero retries, which
+                    # permanently loses enrichment for that reference.
+                    if not is_transient_network_error(e):
+                        raise
+                    last_exc = e
+                    if attempt == _MAX_RETRIES - 1:
                         logger.error("CrossRef request failed: %s", e)
-                    raise
-            except Exception as e:  # noqa: BLE001 — re-raised unless transient
-                # Naming only ReadTimeout/ConnectTimeout/ConnectError left whole
-                # classes of retryable failure — RemoteProtocolError, ReadError,
-                # PoolTimeout, and the DecodingError raised just above for an
-                # unparseable body — escaping with zero retries, which
-                # permanently loses enrichment for that reference.
-                if not is_transient_network_error(e):
-                    raise
-                last_exc = e
-                if attempt == _MAX_RETRIES - 1:
-                    logger.error("CrossRef request failed: %s", e)
-                    raise
+                        raise
 
             delay = min(_RETRY_BASE_DELAY * (2**attempt), 30.0)
             if retry_after is not None:
@@ -667,10 +813,43 @@ class CrossrefClient:
                 delay,
                 last_exc,
             )
+            if tally is not None:
+                tally.retries += 1
             await asyncio.sleep(delay)
 
         assert last_exc is not None  # noqa: S101 — loop sets it on every retry path
         raise last_exc
+
+    def _adapt_concurrency(self, headers: httpx.Headers, pool: str) -> None:
+        """Adopt the pool's advertised ``x-concurrency-limit``.
+
+        Crossref states how many requests it accepts at once from this client
+        in each pool, and it can differ by pool and by plan (Plus tokens get
+        more). Both directions are followed, bounded to 1..``_MAX_CONCURRENCY``.
+        """
+        value = headers.get("x-concurrency-limit")
+        if not value:
+            return
+        try:
+            limit = int(value)
+        except ValueError:
+            return
+        limit = max(1, min(limit, _MAX_CONCURRENCY))
+        current = self._pool_concurrency.get(pool)
+        if current == limit:
+            return
+        logger.debug(
+            "Crossref %s pool (%s) allows %d requests in flight (was %s)",
+            pool,
+            headers.get("x-api-pool") or "unnamed",
+            limit,
+            current,
+        )
+        self._pool_concurrency[pool] = limit
+        if current is not None and limit > current:
+            gate = self._inflight_gates.get((asyncio.get_running_loop(), pool))
+            if gate is not None:
+                gate.wake()
 
     def _adapt_rate_limit(self, headers: httpx.Headers) -> None:
         """Tighten the local rate limiter if CrossRef headers advertise a
@@ -717,12 +896,13 @@ class CrossrefClient:
     def _throttle_on_429(self, headers: httpx.Headers) -> None:
         """Tighten the local limiter on a 429 that carries NO rate-limit headers.
 
-        Crossref removed the ``X-Rate-Limit-*`` response headers years ago, so
-        in practice every 429 arrives blind and ``_adapt_rate_limit`` never
-        fires — without this, a storm of resolver-miss bibliographic searches
-        keeps hammering at the configured RPM and earns hundreds of 429s per
-        run. Multiplicative widening (capped) self-heals the rate instead;
-        header-carrying responses stay owned by ``_adapt_rate_limit``.
+        Crossref's responses carry ``X-Rate-Limit-*`` again (checked October
+        2026), and a 429 that has them is handled by ``_adapt_rate_limit``. A
+        429 without them (from a proxy in between, or a Crossref deployment
+        that drops them, as it did for some years) would otherwise leave the
+        rate unchanged, and a storm of bibliographic searches would keep
+        hammering at the configured RPM and earn hundreds of 429s per run.
+        Multiplicative widening (capped) self-heals the rate instead.
         """
         if headers.get("x-rate-limit-limit") and headers.get("x-rate-limit-interval"):
             return

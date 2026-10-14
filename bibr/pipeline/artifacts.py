@@ -26,7 +26,9 @@ CORE_SCHEMA_VERSION = "12.2"
 # Each major is a clean break: a v11 core cannot be replayed into a v12
 # payload, so the gate accepts exactly one version.
 SUPPORTED_CORE_SCHEMA_VERSIONS = frozenset({CORE_SCHEMA_VERSION})
-CROSSREF_ENRICHMENT_SCHEMA_REVISION = "crossref-v1"
+# "crossref-v2": searches select ``updated-by`` (retraction and correction
+# notices), so a sidecar enriched without them is not replayed as current.
+CROSSREF_ENRICHMENT_SCHEMA_REVISION = "crossref-v2"
 
 
 class RunState(StrEnum):
