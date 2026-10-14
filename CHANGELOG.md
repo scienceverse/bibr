@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `LLM_POINTER_OUTPUTS=true` (experimental, off by default) stops the two front-matter calls
+  from retyping text that is already in their prompt. The title/keywords call names the
+  abstract's first and last eight words, and bibr copies the abstract out of the front matter.
+  The authors call writes each affiliation once and gives each author its numbers. The wait
+  for core metadata follows the output of the slower call, and on the 27B's answers for 252
+  dev papers that output would shrink by about a third. When the abstract's words can't be
+  found in the text, or the answer is cut off or doesn't parse, bibr asks for the verbatim
+  answer instead. The merged call, the JSON re-roll and the NuExtract native backend stay
+  verbatim.
+
 ### Changed
 
 - The vLLM servers bibr starts get `VLLM_NO_USAGE_STATS=1`, and `bibr demo` sets

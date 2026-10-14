@@ -1,7 +1,8 @@
 """Contains Pydantic models that help us enforce type safety for requests and responses."""
 
+import copy
 import logging
-from typing import ClassVar, get_args
+from typing import Any, ClassVar, get_args
 
 from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 from pydantic.json_schema import SkipJsonSchema
@@ -234,6 +235,9 @@ class LLMResponse(BaseModel):
 class AbstractResponse(LLMResponse):
     """Retain an explicit JSON null separately from sanitized blank output."""
 
+    # The response fields that carry the abstract. An explicit null in them,
+    # with none of them filled, means the model found no abstract.
+    _abstract_fields: ClassVar[tuple[str, ...]] = ("abstract",)
     _abstract_explicitly_absent: bool = PrivateAttr(default=False)
     # Set when the response failed validation and was repaired locally
     # (``bibr.clients.llm._recover_finished_response``): what the repair did,
@@ -245,7 +249,8 @@ class AbstractResponse(LLMResponse):
     def _record_abstract_absence(cls, data, handler):
         raw = _strip_schema_name_envelope(data, cls.__name__)
         explicit_null = (
-            "abstract" in raw and raw["abstract"] is None
+            any(name in raw and raw[name] is None for name in cls._abstract_fields)
+            and all(raw.get(name) is None for name in cls._abstract_fields)
             if isinstance(raw, dict)
             else getattr(raw, "_abstract_explicitly_absent", False)
         )
@@ -499,6 +504,154 @@ class AuthorsLLM(LLMResponse):
     # Error code of the failed call these authors were salvaged from (the
     # leading complete objects of an unfinished response); ``None`` normally.
     _salvaged_after: str | None = PrivateAttr(default=None)
+
+
+# ---------------------------------------------------------------------------
+# Pointer variants (LLM_POINTER_OUTPUTS): the model points at text bibr
+# already holds instead of retyping it. bibr.clients.pointer_outputs turns
+# each answer back into the verbatim model above it, so they never leave the
+# LLM client. Shared fields are copies of the verbatim fields, so the two
+# schemas cannot drift apart in wording.
+# ---------------------------------------------------------------------------
+
+
+def _same_field(model: type[BaseModel], name: str) -> Any:
+    """A copy of *model*'s field *name*: same type, default and description."""
+    return copy.deepcopy(model.model_fields[name])
+
+
+class TitleKeywordsPointerLLM(AbstractResponse):
+    """:class:`TitleKeywordsLLM` with the abstract given by its first and last words."""
+
+    _abstract_fields: ClassVar[tuple[str, ...]] = ("abstract_first_words", "abstract_last_words")
+
+    nuextract_policy: ClassVar[NuExtractSchemaPolicy] = NuExtractSchemaPolicy(
+        semantics={
+            "title": "verbatim-string",
+            "abstract_first_words": "verbatim-string",
+            "abstract_last_words": "verbatim-string",
+            "keywords[]": "verbatim-string",
+            "journal": "verbatim-string",
+            "volume": "string",
+            "issue": "string",
+            "first_page": "string",
+            "last_page": "string",
+            "issn": "verbatim-string",
+            "publisher": "verbatim-string",
+            "published": "date",
+            "license": "string",
+        },
+    )
+
+    title: str | None = _same_field(TitleKeywordsLLM, "title")
+    abstract_first_words: str | None = Field(
+        default=None,
+        description=(
+            "The first eight words of the abstract, copied exactly as printed "
+            "(after any 'Abstract' heading). Null if no abstract is present."
+        ),
+    )
+    abstract_last_words: str | None = Field(
+        default=None,
+        description=(
+            "The last eight words of the abstract, copied exactly as printed, "
+            "through its final punctuation mark. Null if no abstract is present."
+        ),
+    )
+    keywords: list[str] = _same_field(TitleKeywordsLLM, "keywords")
+    journal: str | None = _same_field(TitleKeywordsLLM, "journal")
+    volume: str | None = _same_field(TitleKeywordsLLM, "volume")
+    issue: str | None = _same_field(TitleKeywordsLLM, "issue")
+    first_page: str | None = _same_field(TitleKeywordsLLM, "first_page")
+    last_page: str | None = _same_field(TitleKeywordsLLM, "last_page")
+    issn: str | None = _same_field(TitleKeywordsLLM, "issn")
+    publisher: str | None = _same_field(TitleKeywordsLLM, "publisher")
+    published: str | None = _same_field(TitleKeywordsLLM, "published")
+    license: str | None = _same_field(TitleKeywordsLLM, "license")
+
+    _coerce_title = field_validator("title", mode="before")(_scrub_str_placeholder)
+
+    @field_validator("abstract_first_words", "abstract_last_words", mode="before")
+    @classmethod
+    def anchor_blank_to_none(cls, v: object) -> object:
+        return TitleKeywordsLLM.abstract_blank_to_none(v)
+
+    @field_validator("keywords", mode="before")
+    @classmethod
+    def keywords_none_to_empty(cls, v: list[str] | None) -> list[str]:
+        return TitleKeywordsLLM.keywords_none_to_empty(v)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_biblio(cls, data):
+        data = _strip_schema_name_envelope(data, cls.__name__)
+        return _coerce_biblio_none_strings(data)
+
+
+class AuthorPointerLLM(BaseModel):
+    """:class:`AuthorLLM` with affiliations given by their numbers in the list."""
+
+    nuextract_policy: ClassVar[NuExtractSchemaPolicy] = NuExtractSchemaPolicy(
+        semantics={
+            "given": "string",
+            "family": "string",
+            "email": "email-address",
+            "orcid": "verbatim-string",
+        },
+    )
+
+    given: str | None = _same_field(AuthorLLM, "given")
+    family: str | None = _same_field(AuthorLLM, "family")
+    affiliation_ids: list[int] = Field(
+        default_factory=list,
+        description=(
+            "The numbers of this author's affiliations in the affiliations list "
+            "(1 is the first entry), in printed order"
+        ),
+    )
+    email: str | None = _same_field(AuthorLLM, "email")
+    corresponding: bool = _same_field(AuthorLLM, "corresponding")
+    orcid: str | None = _same_field(AuthorLLM, "orcid")
+
+    _coerce_strs = field_validator("given", "family", mode="before")(_scrub_str_placeholder)
+
+    @field_validator("affiliation_ids", mode="before")
+    @classmethod
+    def ids_none_to_empty(cls, v: object) -> object:
+        return [] if v is None else v
+
+    @model_validator(mode="before")
+    @classmethod
+    def _null_strings_to_none(cls, data):
+        return AuthorLLM._null_strings_to_none(data)
+
+
+class AuthorsPointerLLM(LLMResponse):
+    """:class:`AuthorsLLM` with each affiliation written once."""
+
+    nuextract_policy: ClassVar[NuExtractSchemaPolicy] = NuExtractSchemaPolicy(
+        semantics={"affiliations[]": "string"},
+    )
+
+    affiliations: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Every distinct affiliation of the authors, each written once as the "
+            "full institution name(s), in printed order. Authors refer to them by "
+            "number: 1 is the first entry"
+        ),
+    )
+    authors: list[AuthorPointerLLM] = Field(description="The authors of the paper")
+
+    @field_validator("affiliations", mode="before")
+    @classmethod
+    def affiliations_none_to_empty(cls, v: object) -> object:
+        if v is None:
+            return []
+        if isinstance(v, list):
+            # Blank, not dropped: authors refer to the entries by position.
+            return [a if isinstance(a, str) and not _is_placeholder_token(a) else "" for a in v]
+        return v
 
 
 class PaperClassificationLLM(LLMResponse):

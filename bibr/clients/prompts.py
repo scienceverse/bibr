@@ -30,6 +30,7 @@ from typing import Literal
 
 from bibr.schemas import (
     AuthorsLLM,
+    AuthorsPointerLLM,
     CitationResolutionResult,
     CoreMetadataLLM,
     EquationExtractionResult,
@@ -39,6 +40,7 @@ from bibr.schemas import (
     RefAnchors,
     ResearchIntegrityLLM,
     TitleKeywordsLLM,
+    TitleKeywordsPointerLLM,
 )
 from bibr.structure.paper_classifier import OECD_L2_MAP
 from bibr.utils.constants import ANCHOR_PROMPT_CHARS
@@ -124,21 +126,42 @@ first."""
 _PARALLEL_BYLINE_RULE = """- If the byline is printed in two scripts or languages, copy the names from the
   byline printed first. Never transliterate, romanise or translate a name."""
 
-_TITLE_KEYWORDS_PROMPT = (
-    f"""The supplied fenced text is front matter from a scientific paper.
-Extract the title, abstract, and keywords.
-
-{_TITLE_RULES}
-
-Abstract: copy the abstract prose verbatim — preserve wording, punctuation,
-and sentence boundaries. Exclude everything that is not abstract content:
-- running headers / journal-issue lines (e.g. "Psychological Science 2017, Vol. 28(5) 609-619")
+# What an abstract never contains, shared by the verbatim and pointer prompts.
+_ABSTRACT_EXCLUSIONS = """- running headers / journal-issue lines (e.g. "Psychological Science 2017, Vol. 28(5) 609-619")
 - copyright notices ("© The Author(s) 2017")
 - DOI URLs and "Reprints and permissions" / "Article reuse guidelines" banners
 - "www.<journal>.org" or publisher-logo fragments ("SAGE", "S Sage")
 - affiliation blocks (e.g. "1 Department of …")
-- "Statement of Relevance" boxes that some journals print alongside the abstract
-If the paper has no abstract (e.g. a commentary), return null.
+- "Statement of Relevance" boxes that some journals print alongside the abstract"""
+
+_ABSTRACT_COPY_RULES = f"""Abstract: copy the abstract prose verbatim — preserve wording, punctuation,
+and sentence boundaries. Exclude everything that is not abstract content:
+{_ABSTRACT_EXCLUSIONS}
+If the paper has no abstract (e.g. a commentary), return null."""
+
+# LLM_POINTER_OUTPUTS: the model names where the abstract starts and ends and
+# bibr copies it from the fenced text (bibr.clients.pointer_outputs), so the
+# call no longer writes the abstract out — most of its output tokens.
+_ABSTRACT_POINTER_RULES = f"""Abstract: do not copy the abstract out. Point to it, and the text between is
+copied from the document:
+- abstract_first_words: the first eight words of the abstract, exactly as
+  printed (after any "Abstract" heading)
+- abstract_last_words: the last eight words of the abstract, exactly as
+  printed, through its final punctuation mark
+The abstract is the abstract prose only. It never starts or ends on anything
+that is not abstract content:
+{_ABSTRACT_EXCLUSIONS}
+If the paper has no abstract (e.g. a commentary), return null for both."""
+
+
+def _title_keywords_prompt(abstract_rules: str, boundary_rules: str) -> str:
+    return (
+        f"""The supplied fenced text is front matter from a scientific paper.
+Extract the title, abstract, and keywords.
+
+{_TITLE_RULES}
+
+{abstract_rules}
 
 Keywords: return an empty list [] if absent.
 
@@ -160,10 +183,47 @@ and never take values from a reference in the bibliography.
 - license: only when an explicit license / Creative Commons line is printed,
   normalized to short form (e.g. "…Creative Commons Attribution 4.0 License"
   → "CC BY 4.0")."""
-    + _ABSTRACT_BOUNDARY_RULES
+        + boundary_rules
+    )
+
+
+_TITLE_KEYWORDS_PROMPT = _title_keywords_prompt(_ABSTRACT_COPY_RULES, _ABSTRACT_BOUNDARY_RULES)
+_TITLE_KEYWORDS_POINTERS_PROMPT = _title_keywords_prompt(
+    _ABSTRACT_POINTER_RULES,
+    _ABSTRACT_BOUNDARY_RULES.replace(
+        "Copy it\nverbatim; do not concatenate or translate the versions.",
+        "Point into\nthat one version only; never start in one version and end in another.",
+    ),
 )
 
-_AUTHORS_PROMPT = f"""The supplied fenced text is the first page of a scientific paper.
+_AUTHOR_AFFILIATION_RULES = """Affiliation rules:
+- Authors often have superscript numbers/symbols (e.g. "1,2" or "†") that map to a
+  numbered affiliation list elsewhere on the page. Resolve these to the actual institution
+  names. Never return raw numbers or symbols as the affiliation.
+- If an author has multiple affiliations, join them with "; " (semicolon + space).
+- Example: author has superscripts "1,2", and the list says
+  "1 University of Twente" / "2 North-West University"
+  → affiliation: "University of Twente; North-West University\""""
+
+# LLM_POINTER_OUTPUTS: each affiliation is written once and authors refer to it
+# by number (bibr.clients.pointer_outputs.expand_authors), instead of the full
+# institution name being written out again for every author who shares it.
+_AUTHOR_AFFILIATION_POINTER_RULES = """Affiliation rules:
+- affiliations: every distinct affiliation of the authors, each written once as
+  the actual institution name(s), in the order the page prints them.
+- Authors often have superscript numbers/symbols (e.g. "1,2" or "†") that map to a
+  numbered affiliation list elsewhere on the page. Resolve these to entries of your
+  affiliations list. Never put raw numbers or symbols in an affiliation.
+- affiliation_ids: the numbers of the author's entries in your affiliations list,
+  counting from 1, in printed order. [] when no affiliation is printed for the author.
+- Example: author has superscripts "1,2", and the list says
+  "1 University of Twente" / "2 North-West University"
+  → affiliations: ["University of Twente", "North-West University"],
+    affiliation_ids: [1, 2]"""
+
+
+def _authors_prompt(affiliation_rules: str) -> str:
+    return f"""The supplied fenced text is the first page of a scientific paper.
 Extract the authors. Preserve the original order of the authors.
 
 Author name rules:
@@ -181,14 +241,7 @@ Author name rules:
 - Organisation or consortium authors (e.g. "DeepSeek-AI", "The ATLAS Collaboration"):
   set given: "" and put the full name in family.
 
-Affiliation rules:
-- Authors often have superscript numbers/symbols (e.g. "1,2" or "†") that map to a
-  numbered affiliation list elsewhere on the page. Resolve these to the actual institution
-  names. Never return raw numbers or symbols as the affiliation.
-- If an author has multiple affiliations, join them with "; " (semicolon + space).
-- Example: author has superscripts "1,2", and the list says
-  "1 University of Twente" / "2 North-West University"
-  → affiliation: "University of Twente; North-West University"
+{affiliation_rules}
 
 Corresponding author & email rules:
 - Email: extract every author's email address if it is printed near their name.
@@ -204,6 +257,10 @@ Corresponding author & email rules:
 ORCID rules:
 - Look for ORCID identifiers near author names (URL or bare ID format).
 - Assign the ORCID to the correct author."""
+
+
+_AUTHORS_PROMPT = _authors_prompt(_AUTHOR_AFFILIATION_RULES)
+_AUTHORS_POINTERS_PROMPT = _authors_prompt(_AUTHOR_AFFILIATION_POINTER_RULES)
 
 _OECD_L2_VOCAB = "\n".join(
     f"  {l1}: " + ", ".join(f'"{label}"' for label in labels) for l1, labels in OECD_L2_MAP.items()
@@ -607,6 +664,18 @@ PROMPTS: dict[str, PromptSpec] = {
             system=_FRONT_MATTER_SYS,
             response_model=AuthorsLLM,
             build_user=_build_doc_first(_AUTHORS_PROMPT),
+        ),
+        PromptSpec(
+            name="title_keywords_pointers",
+            system=_FRONT_MATTER_SYS,
+            response_model=TitleKeywordsPointerLLM,
+            build_user=_build_doc_first(_TITLE_KEYWORDS_POINTERS_PROMPT),
+        ),
+        PromptSpec(
+            name="authors_pointers",
+            system=_FRONT_MATTER_SYS,
+            response_model=AuthorsPointerLLM,
+            build_user=_build_doc_first(_AUTHORS_POINTERS_PROMPT),
         ),
         PromptSpec(
             name="classification",

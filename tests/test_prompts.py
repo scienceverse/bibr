@@ -16,6 +16,8 @@ from bibr.clients.prompts import PROMPTS, fence, part, prompt_text
 EXPECTED_TASKS = {
     "title_keywords",
     "authors",
+    "title_keywords_pointers",
+    "authors_pointers",
     "classification",
     "core_metadata",
     "references_parse",
@@ -29,7 +31,14 @@ EXPECTED_TASKS = {
 
 # Tasks whose user prompt puts the fenced DOCUMENT first (shared cacheable
 # prefix across the per-paper front-matter fan-out) with the instruction after.
-DOC_FIRST_TASKS = ("title_keywords", "authors", "classification", "core_metadata")
+DOC_FIRST_TASKS = (
+    "title_keywords",
+    "authors",
+    "title_keywords_pointers",
+    "authors_pointers",
+    "classification",
+    "core_metadata",
+)
 
 
 def _render_every_prompt() -> dict[str, list[dict]]:
@@ -91,15 +100,19 @@ class TestRegistry:
     def test_specs_pair_prompt_with_response_model(self):
         from bibr.schemas import (
             AuthorsLLM,
+            AuthorsPointerLLM,
             CoreMetadataLLM,
             PaperClassificationLLM,
             PaperReferenceList,
             RefAnchors,
             TitleKeywordsLLM,
+            TitleKeywordsPointerLLM,
         )
 
         assert PROMPTS["title_keywords"].response_model is TitleKeywordsLLM
         assert PROMPTS["authors"].response_model is AuthorsLLM
+        assert PROMPTS["title_keywords_pointers"].response_model is TitleKeywordsPointerLLM
+        assert PROMPTS["authors_pointers"].response_model is AuthorsPointerLLM
         assert PROMPTS["classification"].response_model is PaperClassificationLLM
         assert PROMPTS["core_metadata"].response_model is CoreMetadataLLM
         assert PROMPTS["references_parse"].response_model is PaperReferenceList
@@ -112,7 +125,14 @@ class TestRegistry:
     def test_front_matter_tasks_share_one_system_prompt(self):
         """Identical system strings keep the request prefix byte-identical
         across the three concurrent front-matter calls (prompt-cache reuse)."""
-        systems = {PROMPTS[t].system for t in ("title_keywords", "authors", "classification")}
+        tasks = (
+            "title_keywords",
+            "authors",
+            "title_keywords_pointers",
+            "authors_pointers",
+            "classification",
+        )
+        systems = {PROMPTS[t].system for t in tasks}
         assert len(systems) == 1
 
 
@@ -258,7 +278,7 @@ class TestParallelLanguageFrontMatter:
         text = " ".join(p["text"] for p in parts if p["nuextract_role"] == "instructions")
         return " ".join(text.split())
 
-    @pytest.mark.parametrize("task", ["title_keywords", "core_metadata"])
+    @pytest.mark.parametrize("task", ["title_keywords", "title_keywords_pointers", "core_metadata"])
     def test_title_prompts_keep_the_title_printed_first(self, task):
         instruction = self._instruction(task)
         assert "return only the version printed first" in instruction
@@ -267,12 +287,52 @@ class TestParallelLanguageFrontMatter:
         # The rule belongs to the title, not to the abstract rules that follow.
         assert instruction.index("printed first") < instruction.index("Abstract:")
 
-    @pytest.mark.parametrize("task", ["authors", "core_metadata"])
+    @pytest.mark.parametrize("task", ["authors", "authors_pointers", "core_metadata"])
     def test_author_prompts_copy_the_byline_printed_first(self, task):
         instruction = self._instruction(task)
         assert "copy the names from the byline printed first" in instruction
         assert "Never transliterate, romanise or translate a name" in instruction
 
-    @pytest.mark.parametrize("task", ["title_keywords", "core_metadata"])
+    @pytest.mark.parametrize("task", ["title_keywords", "title_keywords_pointers", "core_metadata"])
     def test_abstract_keeps_its_english_preference(self, task):
         assert "prefer the printed English version" in self._instruction(task)
+
+
+class TestPointerPrompts:
+    """LLM_POINTER_OUTPUTS: the pointer prompts change how the abstract and the
+    affiliations are written out, and nothing else."""
+
+    @staticmethod
+    def _instruction(task: str) -> str:
+        return PROMPTS[task].build_user(boundary="BNDRY", text="DOC-TEXT")[1]["text"]
+
+    def test_title_prompt_asks_for_the_abstract_boundaries(self):
+        instruction = self._instruction("title_keywords_pointers")
+        assert "abstract_first_words" in instruction
+        assert "abstract_last_words" in instruction
+        assert "copy the abstract prose verbatim" not in instruction
+        assert "never start in one version and end in another" in instruction
+
+    def test_title_prompts_share_what_the_abstract_excludes(self):
+        exclusions = self._instruction("title_keywords").split("not abstract content:\n")[1]
+        exclusions = exclusions.split("\nIf the paper has no abstract")[0]
+        assert exclusions in self._instruction("title_keywords_pointers")
+
+    def test_author_prompt_numbers_each_affiliation_once(self):
+        instruction = self._instruction("authors_pointers")
+        assert "each written once" in instruction
+        assert 'affiliations: ["University of Twente", "North-West University"]' in instruction
+        assert "affiliation_ids: [1, 2]" in instruction
+        assert 'join them with "; "' not in instruction
+
+    @pytest.mark.parametrize(
+        ("verbatim", "pointers", "rules"),
+        [
+            ("title_keywords", "title_keywords_pointers", "Abstract:"),
+            ("authors", "authors_pointers", "Affiliation rules:"),
+        ],
+    )
+    def test_everything_but_the_changed_rules_is_shared(self, verbatim, pointers, rules):
+        before = self._instruction(verbatim)
+        after = self._instruction(pointers)
+        assert before.split(rules)[0] == after.split(rules)[0]
