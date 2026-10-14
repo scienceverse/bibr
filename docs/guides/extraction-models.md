@@ -20,7 +20,7 @@ through llama.cpp (GGUF) or MLX, with the largest build that fits:
 | Runtime | Builds, largest first | Memory |
 |---|---|---|
 | llama.cpp | 4B Q8_0, 4B Q4_K_M, 2B Q8_0, 2B Q4_K_M (`scienceverse/bibr-extract-qwen35-4b-GGUF`, `-2b-GGUF`) | from 7 GB down to 3 GB of VRAM |
-| MLX (Apple Silicon) | 4B 8-bit, 4B 4-bit, 2B 8-bit, 2B 4-bit (`scienceverse/bibr-extract-qwen35-4b-mlx-8bit` and so on) | from 6 GB down to 2 GB of memory |
+| MLX (Apple Silicon) | 4B 8-bit, 4B 4-bit, 2B 8-bit (`scienceverse/bibr-extract-qwen35-4b-mlx-8bit` and so on) | from 6 GB down to 3 GB of memory |
 
 The quantized builds are made from the same merged weights, but the scores in
 the tables on this page were measured with the bf16 weights on vLLM; the

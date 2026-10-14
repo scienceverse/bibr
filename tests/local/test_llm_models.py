@@ -63,7 +63,8 @@ def test_recommended_variant_none_when_nothing_fits():
 def test_students_are_merged_vllm_checkpoints_with_thinking_off():
     for key in ("bibr-extract-4b", "bibr-extract-2b"):
         model = get_model(key)
-        assert [v.runtime for v in model.variants] == ["vllm", "llama-cpp", "llama-cpp", None, None]
+        assert [v.runtime for v in model.variants][:3] == ["vllm", "llama-cpp", "llama-cpp"]
+        assert {v.platform for v in model.variants[3:]} == {"mlx"}
         # llama.cpp and MLX servers do not read server_args: thinking goes off per request.
         assert model.env == {"LLM_CHAT_TEMPLATE_KWARGS": '{"enable_thinking": false}'}
         args = registry_server_args(model.variants[0].hf_id)
