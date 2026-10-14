@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from bibr.export.models import (
     _SCHEMA_VERSION,
     OMITTABLE_ROOT_KEYS,
+    ROOT_KEYS_SINCE_MINOR,
     PaperExport,
     PaperExportReader,
 )
@@ -75,11 +76,12 @@ def build_export_schema(*, reader: bool = False) -> dict:
     12.x minor must stay optional for it. Both documents spell a nullable
     scalar or array ``"type": [T, "null"]`` rather than pydantic's ``anyOf``,
     the form R and codegen consumers read (metacheck's ``.paper_coerce()``
-    takes a column's type from ``type[[1]]``).
+    takes a column's type from ``type[[1]]``). The reader's root does not
+    require the keys an earlier 12.x lacks (:data:`ROOT_KEYS_SINCE_MINOR`).
     """
     model = PaperExportReader if reader else PaperExport
     schema = model.model_json_schema(by_alias=True)
-    schema["required"] = _required_root_keys(schema)
+    schema["required"] = _required_root_keys(schema, reader=reader)
     if not reader:
         _require_emitted_keys(schema)
     schema = _collapse_nullable(schema)
@@ -161,7 +163,7 @@ def _collapse_nullable(node: Any) -> Any:
     return collapsed
 
 
-def _required_root_keys(schema: dict) -> list[str]:
+def _required_root_keys(schema: dict, *, reader: bool = False) -> list[str]:
     """Return every root key the exporter always emits, in declaration order.
 
     Pydantic derives ``required`` from *default-absence*, so fields with a
@@ -175,5 +177,10 @@ def _required_root_keys(schema: dict) -> list[str]:
     The authority is :data:`bibr.export.models.OMITTABLE_ROOT_KEYS`: everything
     not in it is required. Deriving rather than hardcoding means a root key
     added later is required by default, which is the safe direction.
+
+    The reader also leaves out :data:`bibr.export.models.ROOT_KEYS_SINCE_MINOR`,
+    the keys a later 12.x minor added: an earlier 12.x export does not carry
+    them.
     """
-    return [key for key in schema.get("properties", {}) if key not in OMITTABLE_ROOT_KEYS]
+    optional = set(OMITTABLE_ROOT_KEYS) | (set(ROOT_KEYS_SINCE_MINOR) if reader else set())
+    return [key for key in schema.get("properties", {}) if key not in optional]

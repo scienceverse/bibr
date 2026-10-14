@@ -291,12 +291,13 @@ def _check_dangling_ref(payload: dict) -> list[ValidationIssue]:
         fid = row.get("funding_id")
         if fid is not None and fid not in funding_ids:
             dangling += 1
-    for row in _as_list(payload, "bib_match"):
-        if not isinstance(row, dict):
-            continue
-        bid = row.get("bib_id")
-        if bid is not None and bid not in targets["bib"]:
-            dangling += 1
+    for key in ("bib_match", "bib_check"):
+        for row in _as_list(payload, key):
+            if not isinstance(row, dict):
+                continue
+            bid = row.get("bib_id")
+            if bid is not None and bid not in targets["bib"]:
+                dangling += 1
     extraction = _as_dict(payload, "extraction")
     for row in _as_list(extraction, "text_regions"):
         if not isinstance(row, dict):

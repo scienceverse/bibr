@@ -237,6 +237,76 @@
       "title": "AuthorExportReader",
       "type": "object"
     },
+    "BibCheckExportReader": {
+      "additionalProperties": true,
+      "description": "Whether one reference agrees with the registry record bibr matched to it.",
+      "properties": {
+        "bib_id": {
+          "description": "bib[].bib_id of the reference.",
+          "minimum": 1,
+          "title": "Bib Id",
+          "type": "integer"
+        },
+        "notes": {
+          "description": "The differences: a DOI note first, then title, author, year, container, volume, issue and pages. Empty when there are none.",
+          "items": {
+            "$ref": "#/$defs/CheckNoteExportReader"
+          },
+          "title": "Notes",
+          "type": "array"
+        },
+        "retraction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UpdateNoticeExportReader"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The record's retraction, partial retraction, withdrawal or removal notice (from bib_match[].updated_by), whatever the status; null when it lists none."
+        },
+        "service": {
+          "description": "bib_match[].service of the record checked against; null when none.",
+          "examples": [
+            "crossref",
+            "openalex",
+            "datacite",
+            "doi.org",
+            "openlibrary",
+            "ror",
+            "manual",
+            "other"
+          ],
+          "title": "Service",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "matched: the reference agrees with its record (at most one minor note). fields_disagree: the reference has a major note or two minor ones (an issue note is not counted); a printed DOI that names another work lands here. doi_unregistered: doi.org says the printed DOI does not exist. not_found: every lookup answered and Crossref has no record of the work, which is not evidence that the work does not exist. unchecked: nothing was compared (a DOI registered with another agency, a failed or timed-out lookup, nothing to look up).",
+          "examples": [
+            "matched",
+            "fields_disagree",
+            "doi_unregistered",
+            "not_found",
+            "unchecked"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bib_id",
+        "status",
+        "service",
+        "notes",
+        "retraction"
+      ],
+      "title": "BibCheckExportReader",
+      "type": "object"
+    },
     "BibExportReader": {
       "additionalProperties": true,
       "description": "One entry of the paper's reference list, parsed from the printed entry.\n\nValues are as printed unless consolidation filled or replaced them from\n``bib_match``; the field names it took are listed per ``bib_id`` in\n``extraction.diagnostics.consolidation``.",
@@ -879,6 +949,61 @@
         "source_index"
       ],
       "title": "CaptionCandidateExportReader",
+      "type": "object"
+    },
+    "CheckNoteExportReader": {
+      "additionalProperties": true,
+      "description": "One way a reference differs from the record it was matched to.",
+      "properties": {
+        "field": {
+          "description": "The bib[] field that differs.",
+          "examples": [
+            "title",
+            "author",
+            "year",
+            "container",
+            "volume",
+            "issue",
+            "first_page",
+            "last_page",
+            "doi"
+          ],
+          "title": "Field",
+          "type": "string"
+        },
+        "printed": {
+          "description": "The reference's value, as printed (an author note gives the printed author list); null when the reference prints none.",
+          "title": "Printed",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "record": {
+          "description": "The record's value (an author note gives the record's first author, or its first authors when only co-authors are missing); null when there is no record, as for a DOI that does not exist.",
+          "title": "Record",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "severity": {
+          "description": "major: the difference names another work (title, first author, year more than a year off, DOI). minor: a difference a correct reference can have (a co-author left out, the journal's name, volume, issue or pages, a book's edition year).",
+          "examples": [
+            "major",
+            "minor"
+          ],
+          "title": "Severity",
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "printed",
+        "record",
+        "severity"
+      ],
+      "title": "CheckNoteExportReader",
       "type": "object"
     },
     "CitationCandidateExportReader": {
@@ -4554,6 +4679,15 @@
         "$ref": "#/$defs/BibExportReader"
       },
       "title": "Bib",
+      "type": "array"
+    },
+    "bib_check": {
+      "default": [],
+      "description": "One row per reference-list entry when enrichment ran: whether the entry agrees with the record it was matched to, how it differs, and whether that record was retracted. Empty when enrichment did not run. Added in 12.3.",
+      "items": {
+        "$ref": "#/$defs/BibCheckExportReader"
+      },
+      "title": "Bib Check",
       "type": "array"
     },
     "bib_match": {

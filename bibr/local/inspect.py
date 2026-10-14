@@ -180,6 +180,27 @@ def _enrichment_state(data: dict) -> str:
     return "not present"
 
 
+_CHECK_ORDER = ("matched", "fields_disagree", "doi_unregistered", "not_found", "unchecked")
+
+
+def _check_state(data: dict) -> str | None:
+    """Status counts from ``bib_check`` (schema 12.3) and the retracted
+    records among them; ``None`` when the export has no check rows."""
+    rows = [row for row in data.get("bib_check") or [] if isinstance(row, dict)]
+    if not rows:
+        return None
+    counts: dict[str, int] = {}
+    for row in rows:
+        status = str(row.get("status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    order = [s for s in _CHECK_ORDER if s in counts] + sorted(set(counts) - set(_CHECK_ORDER))
+    line = ", ".join(f"{counts[s]} {s}" for s in order)
+    retracted = sum(1 for row in rows if isinstance(row.get("retraction"), dict))
+    if retracted:
+        line += f"; {retracted} retracted"
+    return line
+
+
 def _llm_usage_lines(data: dict) -> list[str]:
     """Per-engine token counts from ``extraction.usage.breakdown`` (one row per
     ``(label, provider, model)``; ``UsageExport``). Rows are folded to one line
@@ -249,6 +270,9 @@ def _print_report(console, data: dict, source: str) -> None:
     console.print(f"  Bibliography entries: {_count_or_dash(data, 'bib')}")
     console.print(f"  In-text citations: {_citation_coverage(data)}")
     console.print(f"  Enrichment: {_enrichment_state(data)}")
+    check = _check_state(data)
+    if check is not None:
+        console.print(f"  Check: {check}")
     console.print()
 
     console.print("[bold]Validation[/bold]")

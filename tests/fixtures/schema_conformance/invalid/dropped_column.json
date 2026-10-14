@@ -79,6 +79,7 @@
   "affiliation_match": [],
   "funding_match": [],
   "bib_match": [],
+  "bib_check": [],
   "extraction": {
     "producer": {
       "name": "bibr",

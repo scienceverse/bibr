@@ -41,6 +41,12 @@ _SCHEMA_VERSION = "12.3"
 #     lookup ended (``outcome``: doi_hit, doi_404, doi_rejected, search_hit,
 #     clean_miss, error, timed_out, not_attempted) and, for a doi_404, the
 #     ``registration_agency`` doi.org names. Omitted when not recorded.
+#   - New root ``bib_check[]`` after ``bib_match``: per reference, whether it
+#     agrees with the record it was matched to (``status``: matched,
+#     fields_disagree, doi_unregistered, not_found, unchecked), the
+#     differences as ``notes[]`` ``{field, printed, record, severity}``, and
+#     the record's ``retraction`` notice. Empty when enrichment did not run.
+#     The reader does not require it, so a 12.0-12.2 export still reads.
 #
 # v12.2 (vs 12.1) — additive:
 #   - New ``extraction.diagnostics.verification[]``: per reference with a
@@ -1168,6 +1174,64 @@ class BibMatchExport(BaseModel):
     @model_serializer(mode="wrap")
     def _omit_absent(self, handler):
         return _omit_absent_updates(handler(self))
+
+
+CheckStatusLiteral = Literal[
+    "matched", "fields_disagree", "doi_unregistered", "not_found", "unchecked"
+]
+CheckFieldLiteral = Literal[
+    "title", "author", "year", "container", "volume", "issue", "first_page", "last_page", "doi"
+]
+
+
+class CheckNoteExport(BaseModel):
+    """One way a reference differs from the record it was matched to."""
+
+    model_config = _STRICT
+
+    field: CheckFieldLiteral = Field(description="The bib[] field that differs.")
+    printed: str | None = Field(
+        description="The reference's value, as printed (an author note gives the printed author "
+        "list); null when the reference prints none."
+    )
+    record: str | None = Field(
+        description="The record's value (an author note gives the record's first author, or "
+        "its first authors when only co-authors are missing); null when there is no record, "
+        "as for a DOI that does not exist."
+    )
+    severity: Literal["major", "minor"] = Field(
+        description="major: the difference names another work (title, first author, year more "
+        "than a year off, DOI). minor: a difference a correct reference can have (a co-author "
+        "left out, the journal's name, volume, issue or pages, a book's edition year)."
+    )
+
+
+class BibCheckExport(BaseModel):
+    """Whether one reference agrees with the registry record bibr matched to it."""
+
+    model_config = _STRICT
+
+    bib_id: Id = Field(description="bib[].bib_id of the reference.")
+    status: CheckStatusLiteral = Field(
+        description="matched: the reference agrees with its record (at most one minor note). "
+        "fields_disagree: the reference has a major note or two minor ones (an issue note is "
+        "not counted); a printed DOI that names another work lands here. doi_unregistered: "
+        "doi.org says the printed DOI does not exist. not_found: every lookup answered and "
+        "Crossref has no record of the work, which is not evidence that the work does not "
+        "exist. unchecked: nothing was compared (a DOI registered with another agency, a "
+        "failed or timed-out lookup, nothing to look up)."
+    )
+    service: MatchServiceLiteral | None = Field(
+        description="bib_match[].service of the record checked against; null when none."
+    )
+    notes: list[CheckNoteExport] = Field(
+        description="The differences: a DOI note first, then title, author, year, container, "
+        "volume, issue and pages. Empty when there are none."
+    )
+    retraction: UpdateNoticeExport | None = Field(
+        description="The record's retraction, partial retraction, withdrawal or removal notice "
+        "(from bib_match[].updated_by), whatever the status; null when it lists none."
+    )
 
 
 class MetadataMatchExport(BaseModel):
@@ -2302,6 +2366,11 @@ class ExtractionExport(BaseModel):
 # exporter in fact always emits.
 OMITTABLE_ROOT_KEYS: tuple[str, ...] = ()
 
+# Root keys added by a later 12.x minor, with that minor. This bibr always
+# writes them (so the strict schema requires them), but an export of an
+# earlier 12.x lacks them, so the reader schema does not.
+ROOT_KEYS_SINCE_MINOR: dict[str, str] = {"bib_check": "12.3"}
+
 
 class PaperExport(BaseModel):
     """A research paper as extracted by bibr (export schema v12).
@@ -2312,7 +2381,8 @@ class PaperExport(BaseModel):
     record tables ``author``, ``affiliation``, ``funding``, ``text``,
     ``section``, ``url``, ``bib``, ``xref``, ``figure``, ``table``, ``footnote``
     and ``eq`` hold what the paper says; the ``*_match`` tables hold what external
-    registries returned for the paper, its affiliations, funders and references.
+    registries returned for the paper, its affiliations, funders and references,
+    and ``bib_check`` how each reference compares with its record.
 
     Every record table has an integer primary key named ``<table>_id``,
     1-based; the other ``*_id`` columns are foreign keys to the table they name.
@@ -2412,6 +2482,12 @@ class PaperExport(BaseModel):
     bib_match: list[BibMatchExport] = Field(
         [],
         description="External-service records matched to reference-list entries, one row per hit.",
+    )
+    bib_check: list[BibCheckExport] = Field(
+        [],
+        description="One row per reference-list entry when enrichment ran: whether the entry "
+        "agrees with the record it was matched to, how it differs, and whether that record "
+        "was retracted. Empty when enrichment did not run. Added in 12.3.",
     )
     extraction: ExtractionExport = Field(
         description="How this output was produced — everything that is not the paper itself: "

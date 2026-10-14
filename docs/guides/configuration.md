@@ -96,6 +96,13 @@ enrich by default, or switch it per run — `bibr chew --crossref` /
 `--no-crossref`, `bibr.chew(..., crossref=True)`, or the `crossref=true|false`
 form field on `/papers/extract` — which wins over the setting either way.
 
+Without `CROSSREF_API_EMAIL`, Crossref serves bibr from its anonymous pool:
+one request at a time and a lower rate, so a long reference list can run out
+of the per-paper enrichment budget. [Deployment](deployment.md) lists the
+limits. An enriched export says per reference whether it agrees with the
+Crossref record it was matched to (`bib_check`; see
+[Checking references](library.md#checking-references)).
+
 ## Choosing an OCR backend
 
 `bibr chew` defaults to the `paddle` startup selector. It selects a concrete

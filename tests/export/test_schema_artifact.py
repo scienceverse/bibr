@@ -5,7 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from bibr.export import PaperExport, PaperExportReader, export_paper_to_json
-from bibr.export.models import OMITTABLE_ROOT_KEYS
+from bibr.export.models import OMITTABLE_ROOT_KEYS, ROOT_KEYS_SINCE_MINOR
 from bibr.export.schema_artifact import SCHEMA_BASE_URL, build_export_schema, schema_file_name
 
 SCHEMA_DIR = Path(__file__).resolve().parents[2] / "docs" / "schema"
@@ -102,7 +102,8 @@ def test_reader_artifact_relaxes_only_unknown_keys_enum_values_and_the_minor_ver
         f"{name}Reader": True for name in strict["$defs"]
     }
     assert reader["properties"].keys() == strict["properties"].keys()
-    assert reader["required"] == strict["required"]
+    # An earlier 12.x export lacks the root keys a later minor added.
+    assert reader["required"] == [k for k in strict["required"] if k not in ROOT_KEYS_SINCE_MINOR]
     assert strict["properties"]["schema_version"]["const"] == "12.3"
     assert reader["properties"]["schema_version"]["pattern"] == r"^12\.[0-9]+$"
 

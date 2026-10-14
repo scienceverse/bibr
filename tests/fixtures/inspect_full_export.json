@@ -325,6 +325,22 @@
       "url": null
     }
   ],
+  "bib_check": [
+    {
+      "bib_id": 1,
+      "status": "matched",
+      "service": "crossref",
+      "notes": [],
+      "retraction": null
+    },
+    {
+      "bib_id": 2,
+      "status": "not_found",
+      "service": null,
+      "notes": [],
+      "retraction": null
+    }
+  ],
   "extraction": {
     "producer": {
       "name": "bibr",

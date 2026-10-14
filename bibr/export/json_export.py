@@ -1444,6 +1444,8 @@ def _export_paper_payload(
         affiliation_match=affiliation_match_data,
         funding_match=funding_match_data,
         bib_match=bib_match_data,
+        # Filled after verification, on the payload (bibr.enrich.check).
+        bib_check=[],
         extraction=extraction_data,
     )
 

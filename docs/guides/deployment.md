@@ -615,6 +615,15 @@ issue and pages against its confident match before that: a value the parser
 missed or misread is replaced by the match's value only when the reference
 string prints it, and every comparison is recorded in
 `extraction.diagnostics.verification`.
+Enriched exports then carry a `bib_check` row per reference: whether it
+agrees with its record (`matched`, `fields_disagree`), whether its printed
+DOI exists (`doi_unregistered`), whether Crossref has no record of it
+(`not_found`), or that nothing was compared (`unchecked`); see
+[Checking references](library.md#checking-references). For a printed DOI
+Crossref does not know, bibr asks doi.org which agency registered it, in one
+request per paper for all such DOIs, so a DataCite or mEDRA DOI is
+`unchecked` rather than `not_found`. `CROSSREF_DOI_AGENCY_LOOKUP=false` skips
+that request, for deployments that may only call Crossref.
 
 ### Optional external resolver (`BIBR_RESOLVER_URL`)
 

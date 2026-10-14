@@ -255,6 +255,8 @@ def test_readers_accept_old_and_new_minor_exports(version):
     payload["schema_version"] = version
     if version == "12.0":
         del payload["extraction"]["fields"]
+    if version < "12.3":
+        del payload["bib_check"]
 
     model = PaperExportReader.model_validate(payload)
     assert model.schema_version == version

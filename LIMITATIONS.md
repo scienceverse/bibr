@@ -1,6 +1,6 @@
 # Known limitations
 
-Last updated: 2026-09-10
+Last updated: 2026-10-14
 
 bibr is alpha software. It already exports rich paper structure, metadata,
 references, cross-references, tables, figures, equations, and provenance fields,
@@ -163,6 +163,34 @@ Pay extra attention to:
   classifies instead and the export records it in `extraction.warnings`
   (codes `SECTION_CLASSIFIER_DEGRADED` and `PAPER_CLASSIFIER_DEGRADED`). Treat
   those exports as less validated than a clean run.
+
+## A reference Crossref cannot find is not a fabricated reference
+
+With enrichment on, `bib_check` says per reference whether it agrees with the
+Crossref record it was matched to. Its `not_found` status means "not found in
+Crossref", never "fabricated" or "does not exist":
+
+- Crossref registers most journal articles, but many books, chapters, reports,
+  theses, preprints, datasets, software, conference papers and non-English
+  journals are missing or registered elsewhere (DataCite, mEDRA, CNKI, JaLC).
+  bibr asks doi.org which agency registered a printed DOI that Crossref does
+  not know, and reports one registered elsewhere as `unchecked`; a reference
+  without a DOI it can only look for in Crossref.
+- A search can miss a work Crossref has, when the reference is cut short,
+  garbled by OCR or the parser, or printed in another language than the record.
+  Crossref deposits some subtitles apart from the title, and the search does not
+  use them, so a reference printing "Title: Subtitle" without a DOI can be
+  missed.
+- A reference whose lookup failed, ran out of time or gave nothing to look up
+  is `unchecked`, not `not_found`.
+- `fields_disagree` can come from a parsing error as easily as from a citing
+  error, and a correct reference can disagree with a record whose metadata is
+  wrong. The thresholds (title similarity, year tolerance, the author rules) are
+  not yet calibrated against hand-checked references.
+- A retraction is reported only when the publisher or Retraction Watch has
+  deposited it with Crossref; `retraction` absent does not mean a work stands.
+
+Check the printed reference and the record before you act on a status.
 
 ## Benchmark results depend on the evaluation protocol
 

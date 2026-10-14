@@ -365,6 +365,7 @@
       "funder": null
     }
   ],
+  "bib_check": [],
   "extraction": {
     "producer": {
       "name": "bibr",

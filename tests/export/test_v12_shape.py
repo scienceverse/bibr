@@ -220,6 +220,7 @@ def test_root_keys_are_emitted_in_reading_order(export_payload):
         "affiliation_match",
         "funding_match",
         "bib_match",
+        "bib_check",
         "extraction",
     ]
 

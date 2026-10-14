@@ -208,22 +208,29 @@ async def build_result_payload(ctx: PipelineContext, fs) -> dict:
 
 
 async def _consolidate_payload(ctx: PipelineContext, payload: dict) -> bool:
-    """Verify, then consolidate, ``payload``'s bib rows against ``bib_match``.
+    """Verify, check, then consolidate ``payload``'s bib rows against ``bib_match``.
 
     Verification runs first so a printed value it finds is not pre-empted by
-    consolidation's unprinted one. Returns whether either step ran.
+    consolidation's unprinted one. The per-reference check (``bib_check``)
+    runs on the printed values, before consolidation fills any from the
+    record, and only when enrichment ran. Returns whether any step ran.
     """
     import asyncio
 
-    verified = False
+    changed = False
     if ctx.settings.crossref.verify and payload.get("bib_match"):
         from bibr.enrich.verify import verify_bibs
 
         await asyncio.to_thread(verify_bibs, payload)
-        verified = True
+        changed = True
+    if ctx.config.enrichment_enabled(ctx.settings) and payload.get("bib"):
+        from bibr.enrich.check import check_bibs
+
+        await asyncio.to_thread(check_bibs, payload)
+        changed = True
     mode = ctx.config.consolidate or ctx.settings.crossref.consolidate
     if mode == "off":
-        return verified
+        return changed
     from bibr.enrich.consolidate import consolidate_bibs
     from bibr.export.json_export import append_payload_warning
 
