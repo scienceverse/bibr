@@ -213,6 +213,102 @@ class TestResolveTitleKeywords:
         assert (resolved.response, resolved.status) == (None, "unplaced")
 
 
+class TestAnchorChecks:
+    """Last words that mark a wrong span: the copy is not made."""
+
+    _OPENING = "We studied how often models copy the abstract in full."
+
+    def _resolve(self, source: str, last: str, keywords: list[str] | None = None):
+        answer = TitleKeywordsPointerLLM(
+            title="T",
+            abstract_first_words="We studied how often models copy the",
+            abstract_last_words=last,
+            keywords=keywords or [],
+        )
+        return resolve_title_keywords(answer, source)
+
+    @pytest.mark.parametrize(
+        "rest",
+        [
+            " A few stop early.",
+            " Third, some stop early.",
+            "\r\nthe sentence goes on in the next line.",
+        ],
+    )
+    def test_last_words_followed_by_more_of_the_paragraph_are_cut_short(self, rest):
+        source = f"{self._OPENING} Most copies end well.{rest}\n1 Introduction\n"
+        resolved = self._resolve(source, "Most copies end well.")
+        assert (resolved.response, resolved.status) == (None, "cut_short")
+
+    def test_last_words_that_stop_inside_a_sentence_are_cut_short(self):
+        source = f"{self._OPENING} Most copies end well in all clinics.\n"
+        resolved = self._resolve(source, "Most copies end well")
+        assert (resolved.response, resolved.status) == (None, "cut_short")
+
+    @pytest.mark.parametrize(
+        "rest",
+        [
+            "\nThe next block starts here.",
+            " Keywords: abstracts; copying",
+            " © 2024 The Authors.",
+            " 2018 The Authors. Published by Elsevier Inc.",
+            " (J Korean Med Rehabil 2022;32(4):61-72)",
+        ],
+    )
+    def test_a_line_that_may_follow_the_abstract_is_not_a_sentence(self, rest):
+        source = f"{self._OPENING} Most copies end well.{rest}\n"
+        resolved = self._resolve(source, "Most copies end well.")
+        assert resolved.status == "copied"
+        assert resolved.response.abstract.endswith("Most copies end well.")
+
+    @pytest.mark.parametrize(
+        "heading",
+        [
+            "RESEARCH IN CONTEXT",
+            "Keywords: abstracts; copying",
+            "Statement of Relevance",
+            "RELEVANTIE VOOR DE PRAKTIJK Dit artikel",
+        ],
+    )
+    def test_last_words_past_a_box_printed_after_the_abstract_overrun(self, heading):
+        source = (
+            f"{self._OPENING} Most copies end well.\n{heading}\nThe box says copies end well.\n"
+        )
+        resolved = self._resolve(source, "The box says copies end well.")
+        assert (resolved.response, resolved.status) == (None, "overran")
+
+    def test_last_words_past_the_keyword_list_overrun(self):
+        source = (
+            f"{self._OPENING} Most copies end well.\n"
+            "Abstracts; Copying; Language models\n"
+            "Highlights: copies end well.\n"
+        )
+        keywords = ["Abstracts", "Copying", "Language models"]
+        resolved = self._resolve(source, "Highlights: copies end well.", keywords)
+        assert (resolved.response, resolved.status) == (None, "overran")
+
+    def test_a_block_that_mentions_the_keywords_is_not_the_keyword_list(self):
+        source = (
+            f"{self._OPENING}\n"
+            "Methods: We counted the abstracts that models copied; copying was common.\n"
+        )
+        resolved = self._resolve(source, "copying was common.", ["abstracts", "copying"])
+        assert resolved.status == "copied"
+
+    def test_a_fuzzy_last_anchor_stops_at_its_own_last_word(self):
+        """A last anchor a letter longer than printed ("and" for "or") matches
+        a window that runs into the section number printed after the abstract."""
+        source = (
+            f"{self._OPENING} This adds to the debate or the proposals of the Commission "
+            "suffice to restore public trust.\n"
+            "2 The social role of auditors\n"
+        )
+        last = "and the proposals of the Commission suffice to restore public trust."
+        resolved = self._resolve(source, last)
+        assert resolved.status == "copied_fuzzy"
+        assert resolved.response.abstract.endswith("suffice to restore public trust.")
+
+
 class TestExpandAuthors:
     @staticmethod
     def _answer(affiliations, *ids):

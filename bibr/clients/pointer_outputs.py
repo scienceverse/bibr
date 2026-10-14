@@ -7,7 +7,9 @@ the abstract and the per-author affiliations are most of those tokens:
 * title/keywords returns the abstract's first and last words
   (:class:`~bibr.schemas.TitleKeywordsPointerLLM`). :func:`locate_abstract`
   finds them in the exact text the model was shown and :func:`resolve_title_keywords`
-  copies what lies between them.
+  copies what lies between them, unless the last words close a sentence the
+  paragraph goes on after, or lie past the keywords or a box printed after the
+  abstract (the model misjudged where the abstract ends).
 * authors lists each affiliation once and gives every author the numbers of
   its affiliations (:class:`~bibr.schemas.AuthorsPointerLLM`).
   :func:`expand_authors` writes each author's affiliation string back out,
@@ -66,6 +68,21 @@ _FURNITURE_BLOCK_RE = re.compile(
     r"|published\s+(?:online|by)\b|reprints\s+and\s+permissions\b|article\s+reuse\s+guidelines\b)",
     re.IGNORECASE,
 )
+# What opens a block printed after the abstract and never inside it: the
+# keyword list, or a box such as "Research in context". An abstract span that
+# runs into one ended on the wrong last words.
+_AFTER_ABSTRACT_RE = re.compile(
+    r"^\W*(?:key\s*words?|index\s+terms|research\s+in\s+context|statement\s+of\s+relevance"
+    r"|relevance\s+for\s+practice|relevantie\s+voor\s+de\s+praktijk|significance\s+statement"
+    r"|plain[\s-]+language\s+summary)\b",
+    re.IGNORECASE,
+)
+# A keyword list printed without a label: the answer's keywords make up at
+# least this share of the block's letters and digits.
+_KEYWORD_LIST_SHARE = 0.6
+# A fuzzy match of the closing anchor ends at the last place this many of the
+# anchor's own final letters and digits occur in it.
+_TAIL_PROBE = 6
 # A block break. A PDF text layer wraps lines inside a block with "\r\n".
 _BLOCK_BREAK_RE = re.compile(r"(?<!\r)\n")
 # A doubled text layer prints the end of one block again at the start of the
@@ -186,9 +203,10 @@ def locate_abstract(source: str, first_words: str, last_words: str) -> AbstractS
         tails = [span for span in _exact_spans(squashed, tail, head_start) if span[1] >= head_end]
         tail_fuzzy = not tails
         if tail_fuzzy:
-            tails = [
-                span for span in _fuzzy_spans(squashed, tail, head_start) if span[1] >= head_end
-            ]
+            found = (
+                _tighten(squashed, tail, span) for span in _fuzzy_spans(squashed, tail, head_start)
+            )
+            tails = [span for span in found if span[1] >= head_end]
         ends = [offsets[tail_end - 1] + 1 for _, tail_end in tails]
         # sorted() is stable: the earliest closing wins among equal fits.
         for end in sorted(ends, key=lambda end: -_closing_fit(source, end, mark)):
@@ -196,6 +214,15 @@ def locate_abstract(source: str, first_words: str, last_words: str) -> AbstractS
             if span[1] - span[0] <= MAX_ABSTRACT_CHARS:
                 return AbstractSpan(*span, fuzzy=fuzzy or tail_fuzzy)
     return None
+
+
+def _tighten(squashed: str, tail: str, span: tuple[int, int]) -> tuple[int, int]:
+    """*span*, a fuzzy match of *tail*, ending where the anchor's own last
+    letters and digits do. A match is as long as the anchor, so one quoted a
+    word longer than printed runs on past the abstract (into a section number)."""
+    probe = tail[-_TAIL_PROBE:]
+    stop = squashed.rfind(probe, span[0], span[1])
+    return span if stop == -1 else (span[0], stop + len(probe))
 
 
 def _closing_fit(source: str, end: int, mark: str | None) -> int:
@@ -286,18 +313,30 @@ def _without_repeat(previous: str, block: str) -> str:
 class ResolvedTitleKeywords:
     """A pointer answer turned back into a verbatim one.
 
-    ``response`` is ``None`` when the abstract anchors could not be placed;
-    ``status`` says what happened: ``copied``, ``copied_fuzzy``, ``absent``
-    (the model found no abstract) or ``unplaced``.
+    ``status`` says what happened: ``copied``, ``copied_fuzzy`` or ``absent``
+    (the model found no abstract). ``response`` is ``None`` when the anchors
+    cannot be trusted, and ``status`` is a key of :data:`UNUSED_ANCHORS`.
     """
 
     response: TitleKeywordsLLM | None
     status: str
 
 
+# Why a pointer answer's abstract was not used, by status.
+UNUSED_ANCHORS = {
+    "unplaced": "The abstract's first and last words were not found in the front matter",
+    "cut_short": "The abstract's last words close a sentence its paragraph goes on after",
+    "overran": "The abstract's last words lie past the keywords or a box printed after it",
+}
+
+
 def resolve_title_keywords(answer: TitleKeywordsPointerLLM, source: str) -> ResolvedTitleKeywords:
     """Copy the abstract *answer* points at out of *source*, the exact text
-    the model was shown, and return the verbatim response."""
+    the model was shown, and return the verbatim response.
+
+    Last words that close a sentence inside the abstract, or that lie past
+    the keyword list or a box printed after it, mark a wrong span; the copy is
+    not made and the status says why."""
     fields = answer.model_dump(exclude={"abstract_first_words", "abstract_last_words"})
     first, last = answer.abstract_first_words, answer.abstract_last_words
     if first is None and last is None:
@@ -307,6 +346,10 @@ def resolve_title_keywords(answer: TitleKeywordsPointerLLM, source: str) -> Reso
             fields["abstract"] = None
         return ResolvedTitleKeywords(TitleKeywordsLLM.model_validate(fields), "absent")
     span = locate_abstract(source, first or "", last or "")
+    if span is not None and _runs_on(source, span.end):
+        return ResolvedTitleKeywords(None, "cut_short")
+    if span is not None and _runs_past(source, span, answer.keywords):
+        return ResolvedTitleKeywords(None, "overran")
     abstract = abstract_text(source, span) if span is not None else ""
     if span is None or not abstract:
         return ResolvedTitleKeywords(None, "unplaced")
@@ -314,6 +357,39 @@ def resolve_title_keywords(answer: TitleKeywordsPointerLLM, source: str) -> Reso
         TitleKeywordsLLM.model_validate({**fields, "abstract": abstract}),
         "copied_fuzzy" if span.fuzzy else "copied",
     )
+
+
+def _runs_on(source: str, end: int) -> bool:
+    """Whether the paragraph that holds the abstract's end goes on after *end*
+    with more of a sentence: a lowercase word (the last words stopped inside a
+    sentence), or a capitalised word and a lowercase one (another sentence). A
+    copyright, citation or keyword line can follow on the same line."""
+    rest = _BLOCK_BREAK_RE.split(source[end:], maxsplit=1)[0].lstrip()
+    if _FURNITURE_BLOCK_RE.match(rest) or _AFTER_ABSTRACT_RE.match(rest):
+        return False
+    words = [word.strip(",;:.") for word in rest.split(maxsplit=2)[:2]]
+    if not words or not words[0].isalpha():
+        return False
+    if words[0].islower():
+        return True
+    return len(words) == 2 and words[0][0].isupper() and words[1].isalpha() and words[1].islower()
+
+
+def _runs_past(source: str, span: AbstractSpan, keywords: list[str]) -> bool:
+    """Whether a block of *span* after its first opens the keyword list or a
+    box printed after the abstract, or is the keyword list without a label."""
+    blocks = _BLOCK_BREAK_RE.split(source[span.start : span.end])[1:]
+    return any(
+        _AFTER_ABSTRACT_RE.match(block) or _is_keyword_list(block, keywords) for block in blocks
+    )
+
+
+def _is_keyword_list(block: str, keywords: list[str]) -> bool:
+    """Whether *block* is mostly the answer's *keywords*."""
+    squashed = _squash(block)[0]
+    found = {word for word in (_squash(keyword)[0] for keyword in keywords) if len(word) >= 3}
+    found = {word for word in found if word in squashed}
+    return len(found) >= 2 and sum(map(len, found)) >= _KEYWORD_LIST_SHARE * len(squashed)
 
 
 def _is_stand_in(entry: str) -> bool:

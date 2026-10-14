@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from bibr.clients.pointer_outputs import expand_authors, resolve_title_keywords
+from bibr.clients.pointer_outputs import UNUSED_ANCHORS, expand_authors, resolve_title_keywords
 from bibr.clients.prompts import PROMPTS
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.exceptions import (
@@ -2325,9 +2325,10 @@ class LLMClient:
         (``LLM_POINTER_OUTPUTS``).
 
         ``None`` hands the paper to the verbatim call: the abstract's first and
-        last words were not found in the text, or the answer was cut off or did
-        not parse. A failure a re-ask cannot fix (the service did not answer)
-        raises as the verbatim call would.
+        last words were not found in the text or mark a wrong span
+        (:data:`~bibr.clients.pointer_outputs.UNUSED_ANCHORS`), or the answer
+        was cut off or did not parse. A failure a re-ask cannot fix (the service
+        did not answer) raises as the verbatim call would.
         """
         spec = PROMPTS["title_keywords_pointers"]
         capped_text = self._cap_input(text, self._settings)
@@ -2368,8 +2369,8 @@ class LLMClient:
         resolved = resolve_title_keywords(answer, capped_text)
         if resolved.response is None:
             logger.warning(
-                "The abstract's first and last words were not found in the front matter; "
-                "asking for the verbatim answer (hash=%s)",
+                "%s; asking for the verbatim answer (hash=%s)",
+                UNUSED_ANCHORS[resolved.status],
                 file_hash,
             )
             return None

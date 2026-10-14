@@ -14,10 +14,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   The authors call writes each affiliation once and gives each author its numbers. The wait
   for core metadata follows the output of the slower call, and on the 27B's answers for 185
   gate192 papers that output would shrink by about a third. When the abstract's words can't be
-  found in the text, when authors are given affiliation numbers but no list, or when the
-  answer is cut off or doesn't parse, bibr asks for the verbatim answer instead. A stand-in
-  the model writes for an affiliation the text does not print ("Affiliation 3") is left
-  empty.
+  found in the text, when its last words close a sentence the paragraph goes on after or lie
+  past the keywords or a box printed after the abstract, when authors are given affiliation
+  numbers but no list, or when the answer is cut off or doesn't parse, bibr asks for the
+  verbatim answer instead. A stand-in the model writes for an affiliation the text does not
+  print ("Affiliation 3") is left empty.
   The merged call, the JSON re-roll and the NuExtract native backend stay verbatim.
 
 ### Changed

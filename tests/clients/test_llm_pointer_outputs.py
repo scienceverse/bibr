@@ -125,6 +125,20 @@ async def test_unplaced_abstract_falls_back_to_the_verbatim_call(monkeypatch):
     assert result.abstract == "verbatim"
 
 
+async def test_last_words_inside_the_abstract_fall_back_to_the_verbatim_call(monkeypatch, caplog):
+    cut_short = _POINTER_TITLE.model_copy(
+        update={"abstract_last_words": "how things are done in practice"}
+    )
+    client, calls = _client(
+        monkeypatch, {TitleKeywordsPointerLLM: cut_short, TitleKeywordsLLM: _VERBATIM_TITLE}
+    )
+    with caplog.at_level("WARNING", logger="bibr.clients.llm"):
+        result = await client.extract_title_keywords(_TEXT)
+    assert calls == [TitleKeywordsPointerLLM, TitleKeywordsLLM]
+    assert result.abstract == "verbatim"
+    assert "its paragraph goes on after" in caplog.text
+
+
 async def test_explicitly_absent_abstract_needs_no_verbatim_call(monkeypatch):
     absent = TitleKeywordsPointerLLM.model_validate(
         {"title": "T", "abstract_first_words": None, "abstract_last_words": None}
