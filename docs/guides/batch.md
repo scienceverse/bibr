@@ -403,6 +403,16 @@ it, with the host's `mem_available_mib` and `swap_used_mib`. With `--pid` the
 sampler stops when that process exits; otherwise stop it with Ctrl-C or
 `--duration`.
 
+PSS is read less often than the rest: on the first sample and every tenth
+after it (every 5 seconds), and `pss_read: false` marks the lines without it.
+The kernel builds PSS by walking a process's page tables while it holds that
+process's memory-map lock, so one read of a process with gigabytes resident
+takes tens of milliseconds, and the process waits meanwhile if it needs to map
+or unmap memory. Reading it twice a second for a bibr run and its model
+servers would slow down what you are measuring. `--pss-every N` changes the
+cadence (`1` reads it on every sample) and `--no-pss` turns it off. A chunk
+shorter than the cadence can have no PSS sample in its window.
+
 `join` lines the samples up with the ledger's `started_at` and `finished_at`.
 A local run stamps every paper of a chunk with the chunk's times, so the
 peaks are per chunk:

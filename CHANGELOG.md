@@ -52,7 +52,8 @@ export is still valid input for the 12.x reader.
   section covers all of it.
 - `scripts/mem_sampler.py`, in a source checkout, samples the memory of the
   bibr process tree and of named model servers from `/proc` twice a second
-  (resident memory, proportional set size, swap and peak), and joins the
+  (resident memory, swap and peak, with the proportional set size every 5
+  seconds because reading it holds up the sampled process), and joins the
   samples to a batch ledger to give each chunk's and paper's peak. It needs
   only Python, and runs on Linux.
 

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from scripts.mem_sampler import (
+    DEFAULT_PSS_EVERY,
     Group,
     ProcFS,
     build_parser,
@@ -205,6 +206,78 @@ def test_no_pss_skips_smaps(proc):
     row = sample_once(ProcFS(proc.root), [Group("run", pids=(100,))], pss=False, wall=_wall)
 
     assert row["groups"]["run"]["pss_mib"] is None
+    assert row["pss_read"] is False
+
+
+class _CountingProcFS(ProcFS):
+    """Counts smaps_rollup reads: each one walks a target's page tables under its mmap lock."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.smaps_reads = 0
+
+    def _read(self, *parts: str | int) -> str | None:
+        if parts and parts[-1] == "smaps_rollup":
+            self.smaps_reads += 1
+        return super()._read(*parts)
+
+
+def _run_ticks(proc_fs: ProcFS, ticks: int, **kwargs) -> list[dict]:
+    clock = _Clock()
+    out = io.StringIO()
+    run_sampler(
+        proc_fs,
+        [Group("run", pids=(100,))],
+        out,
+        interval=0.5,
+        duration=0.5 * (ticks - 1),
+        clock=clock,
+        sleep=clock.sleep,
+        wall=_wall,
+        **kwargs,
+    )
+    lines = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert len(lines) == ticks
+    return lines
+
+
+def test_pss_is_read_on_every_nth_tick_only(proc):
+    proc_fs = _CountingProcFS(proc.root)
+
+    lines = _run_ticks(proc_fs, 7, pss_every=3)
+
+    assert [line["pss_read"] for line in lines] == [True, False, False, True, False, False, True]
+    assert [line["groups"]["run"]["pss_mib"] for line in lines] == [
+        2190.0,
+        None,
+        None,
+        2190.0,
+        None,
+        None,
+        2190.0,
+    ]
+    # RSS is read on every tick all the same.
+    assert {line["groups"]["run"]["rss_mib"] for line in lines} == {2350.0}
+    assert proc_fs.smaps_reads == 3 * 3  # three ticks, three processes
+
+
+def test_the_default_reads_pss_far_less_often_than_rss(proc):
+    proc_fs = _CountingProcFS(proc.root)
+
+    lines = _run_ticks(proc_fs, 2 * DEFAULT_PSS_EVERY)
+
+    assert DEFAULT_PSS_EVERY > 1
+    assert sum(line["pss_read"] for line in lines) == 2
+    assert proc_fs.smaps_reads == 2 * 3
+
+
+def test_pss_every_zero_never_reads_smaps(proc):
+    proc_fs = _CountingProcFS(proc.root)
+
+    lines = _run_ticks(proc_fs, 4, pss_every=0)
+
+    assert not any(line["pss_read"] for line in lines)
+    assert proc_fs.smaps_reads == 0
 
 
 def test_a_group_with_no_process_has_no_reading(proc):
@@ -495,6 +568,31 @@ def test_cli_sample_writes_jsonl_until_the_run_exits(tmp_path, proc, monkeypatch
     (line,) = [json.loads(text) for text in out.read_text().splitlines()]
     assert set(line["groups"]) == {"run", "llm", "browser"}
     assert line["groups"]["browser"]["rss_mib"] == 900.0
+    # The first tick reads PSS; later ones only every --pss-every-th.
+    assert line["pss_read"] is True
+    assert line["groups"]["browser"]["pss_mib"] == 800.0
+
+
+@pytest.mark.parametrize(
+    ("flags", "pss_every"),
+    [([], DEFAULT_PSS_EVERY), (["--pss-every", "1"], 1), (["--no-pss"], 0)],
+)
+def test_cli_sample_passes_the_pss_cadence(tmp_path, proc, monkeypatch, flags, pss_every):
+    monkeypatch.setattr("scripts.mem_sampler.signal.signal", lambda *_a: None)
+    seen = {}
+    monkeypatch.setattr(
+        "scripts.mem_sampler.run_sampler", lambda *_args, **kwargs: seen.update(kwargs) or 0
+    )
+
+    code = main(["sample", "--pid", "100", "--proc-root", str(proc.root), *flags])
+
+    assert code == 0
+    assert seen["pss_every"] == pss_every
+
+
+def test_cli_sample_rejects_a_pss_cadence_below_one(proc, capsys):
+    assert main(["sample", "--pid", "100", "--pss-every", "0", "--proc-root", str(proc.root)]) == 2
+    assert "--no-pss" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

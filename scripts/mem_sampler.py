@@ -1,10 +1,11 @@
 """Sample a bibr run's memory from outside the process, and join it to the ledger.
 
 ``sample`` reads ``/proc`` twice a second and writes one JSON line per tick:
-for each group of processes, the summed resident memory (RSS), proportional
-set size (PSS, which splits shared pages between the processes that map
-them), swap, and the highest peak RSS (``VmHWM``) of any process in it, plus
-the host's available memory and swap use. A group is a process tree: a root
+for each group of processes, the summed resident memory (RSS), swap, and the
+highest peak RSS (``VmHWM``) of any process in it, plus the host's available
+memory and swap use. Every ``--pss-every``-th tick (every 5 s by default) it
+also reads the proportional set size (PSS, which splits shared pages between
+the processes that map them). A group is a process tree: a root
 pid (``--pid`` for the bibr run, ``--server NAME=PID`` for a model server)
 or the processes whose command line matches a pattern (``--match
 NAME=REGEX``, looked up again every tick, so it follows a process that
@@ -22,6 +23,11 @@ chunk's times, so a local run's peaks are per chunk.
     python scripts/mem_sampler.py join mem.jsonl results/outcomes.jsonl
 
 Linux only; standard library only. Ledger times have one-second resolution.
+PSS comes from ``/proc/<pid>/smaps_rollup``, which the kernel builds by
+walking the process's page tables while it holds that process's memory-map
+lock: on a large process one read takes tens of milliseconds (``status``
+takes microseconds), and the process waits if it needs the lock meanwhile.
+That is why PSS is read less often than RSS; ``--no-pss`` turns it off.
 With ``PIPELINE_MEMORY_PROFILE`` on, bibr resets its own ``VmHWM`` at every
 stage, so the sampled peak then covers the current stage only.
 """
@@ -44,6 +50,11 @@ from typing import Any, TextIO
 
 MIB = 1024 * 1024
 DEFAULT_INTERVAL = 0.5
+# Read PSS on every Nth tick only: smaps_rollup walks the target's page tables
+# under its mmap lock (measured 25.7 ms per read on a 1.7 GiB-RSS process,
+# against 0.013 ms for status), so reading it twice a second for a bibr run
+# and its model servers would perturb what is being measured.
+DEFAULT_PSS_EVERY = 10
 # Ledger times are truncated to the second, so a paper can finish up to a
 # second after its ``finished_at``.
 LEDGER_SLACK_S = 1.0
@@ -253,6 +264,8 @@ def sample_once(
     return {
         "t": round(now, 3),
         "time": datetime.fromtimestamp(now, tz=UTC).isoformat(timespec="milliseconds"),
+        # False: PSS was not read on this tick, so every pss_mib is null.
+        "pss_read": pss,
         "groups": rows,
         "mem_available_mib": _mib(meminfo.get("MemAvailable")),
         "swap_used_mib": _mib(swap_used),
@@ -267,7 +280,7 @@ def run_sampler(
     interval: float = DEFAULT_INTERVAL,
     duration: float | None = None,
     watch: Sequence[int] = (),
-    pss: bool = True,
+    pss_every: int = DEFAULT_PSS_EVERY,
     exclude: set[int] | None = None,
     should_stop: Callable[[], bool] = lambda: False,
     clock: Callable[[], float] = time.monotonic,
@@ -276,13 +289,16 @@ def run_sampler(
 ) -> int:
     """Write samples to *out* every *interval* seconds; return how many were written.
 
-    Stops after *duration* seconds, when *should_stop* says so, or once none
-    of the *watch* pids is running any more (after one last sample).
+    PSS is read on the first tick and every *pss_every*-th after it; ``0``
+    never reads it. Stops after *duration* seconds, when *should_stop* says
+    so, or once none of the *watch* pids is running any more (after one last
+    sample).
     """
     started = clock()
     next_tick = started
     written = 0
     while not should_stop():
+        pss = pss_every > 0 and written % pss_every == 0
         line = sample_once(proc, groups, pss=pss, exclude=exclude, wall=wall)
         out.write(json.dumps(line, separators=(",", ":")) + "\n")
         out.flush()
@@ -600,7 +616,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="keep sampling after the --pid process exits",
     )
-    sample.add_argument("--no-pss", action="store_true", help="skip PSS (smaps_rollup)")
+    sample.add_argument(
+        "--pss-every",
+        type=int,
+        default=DEFAULT_PSS_EVERY,
+        metavar="N",
+        help="read PSS (smaps_rollup, which briefly holds each process's memory-map lock) "
+        f"on every Nth tick only (default {DEFAULT_PSS_EVERY}; 1 = every tick)",
+    )
+    sample.add_argument("--no-pss", action="store_true", help="never read PSS")
     sample.add_argument("--out", type=Path, help="append samples here (default: stdout)")
     sample.add_argument("--proc-root", type=Path, default=Path("/proc"), help=argparse.SUPPRESS)
 
@@ -635,6 +659,11 @@ def _cmd_sample(args: argparse.Namespace) -> int:
     if args.interval <= 0:
         print("mem_sampler: --interval must be positive", file=sys.stderr)
         return 2
+    if args.pss_every < 1:
+        print(
+            "mem_sampler: --pss-every must be 1 or more (--no-pss turns PSS off)", file=sys.stderr
+        )
+        return 2
 
     stopping = False
 
@@ -659,7 +688,7 @@ def _cmd_sample(args: argparse.Namespace) -> int:
             interval=args.interval,
             duration=args.duration,
             watch=watch,
-            pss=not args.no_pss,
+            pss_every=0 if args.no_pss else args.pss_every,
             exclude=exclude,
             should_stop=lambda: stopping,
         )
