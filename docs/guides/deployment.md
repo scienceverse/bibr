@@ -652,22 +652,22 @@ LLM_REVIEW_MODEL=your-larger-model
 # LLM_REVIEW_TIMEOUT_SECONDS=60
 ```
 
-- The record comes from the lookup of the paper's printed DOI, which starts
-  under the core metadata call (see
+- The record comes from the lookup of the paper's DOI, which starts under
+  the core metadata call (see
   [Front matter and the paper's registry record](configuration.md#front-matter-and-the-papers-registry-record)).
-  A paper without a printed DOI, or without a confident record, is never
-  reviewed.
+  A paper without a DOI, or without a confident record, is never reviewed.
 - When the title or the author list does not agree with the record, or came
   back empty while the record has it, that call alone is asked again on the
   review model, with the same front-matter text. Titles also count as agreeing
   when only their spacing differs, or when the record's title followed by its
   subtitle matches.
 - The review's answer is used only when it is printed in the front matter and
-  either agrees with the record or the first answer was not printed. A review
-  title that translates a first title printed before it is refused, even when
-  the record holds that translation. Otherwise the first answer stays. The
-  answer used goes through the same grounding as any other, and the record's
-  own text is never exported.
+  either agrees with the record or the first answer was not printed; both
+  answers are judged after the same grounding as any other title. A review
+  title printed after another version of the title in another language is
+  refused, even when the record holds that version and whatever the first
+  answer was. Otherwise the first answer stays. The record's own text is never
+  exported.
 - A review that fails or takes longer than `LLM_REVIEW_TIMEOUT_SECONDS` keeps
   the first answer; the paper never fails because of the review.
 
@@ -692,19 +692,25 @@ The export shows what the review did:
   every routed call is skipped.
 - A title or author list taken from the review has the source `llm_review`.
   When it agrees with the record, `extraction.fields.<field>.registry.outcome`
-  is `corrected`.
+  is `corrected`. If the paper's final DOI turns out to be another one, a
+  reviewed title goes back to the first answer, while a reviewed author list
+  stays (every name in it is printed) without the `corrected` outcome, and
+  both fields list `VAL_REGISTRY_DOI_CHANGED`.
 - The review calls' token usage is reported under their own labels, prefixed
   `review_`, and `extraction.qualification.review_model_id` names the review
   model.
 
-On two development sets (252 papers), a simulation of this routing, with a
-27B model's answer standing in for the re-asked call, lost no paper. The
-papers that passed every field check went from 216 to 219 for a 4B extraction
-model and from 207 to 216 for a 2B one. It re-asked one or two calls on 8-12%
-of the papers. Papers in a language other than English were over half of
-those, because the record often holds an English parallel title. About a fifth
-of the papers had no record for the DOI bibr found, mostly because they print
-none, so the review could not reach them.
+On two development sets (252 papers), a simulation of a simpler variant of
+this routing, which took a 27B model's whole answer for the re-asked call only
+when it agreed with the record, lost no paper. The papers that passed every
+field check went from 216 to 219 for a 4B extraction model and from 207 to 216
+for a 2B one. It re-asked one or two calls on 8-12% of the papers. Papers in a
+language other than English were over half of those, because the record often
+holds an English parallel title. About a fifth of the papers had no record for
+the DOI bibr found, mostly because they print none, so the review could not
+reach them. The simulation did not model the acceptance of a printed answer
+over an unprinted first one, the printed requirement or the translation
+refusal, and the review as shipped has not been measured end to end yet.
 
 ## Hardware sizing
 
