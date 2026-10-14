@@ -368,6 +368,24 @@ def test_untyped_reference_with_journal_locators_is_an_article():
     assert [item["type"] for item in to_csl_json(data)] == ["article-journal", "document"]
 
 
+def test_records_catch_all_type_does_not_hide_a_printed_journal():
+    data = _export(
+        [
+            _bib(1, bib_type=None, container="Journal X", volume="3"),
+            _bib(2, bib_type=None, container=None),
+        ],
+        [_match(1, bib_type="other"), _match(2, bib_type="other")],
+        [_check(1), _check(2)],
+    )
+    assert [item["type"] for item in to_csl_json(data)] == ["article-journal", "document"]
+    kinds = [kind for kind, _, _ in parse_bibtex(to_bibtex(data))]
+    assert kinds == ["article", "misc"]
+    assert [record[0] for record in assert_ris_grammar(to_ris(data))] == [
+        ("TY", "JOUR"),
+        ("TY", "GEN"),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Pages, dates, identifiers
 # ---------------------------------------------------------------------------
@@ -526,6 +544,19 @@ def test_unsplittable_list_stays_one_literal():
     ((_, key, fields),) = parse_bibtex(to_bibtex(data))
     assert fields["author"] == "{张三, 李四}"
     assert key == "ref2020"
+
+
+def test_given_name_first_list_is_one_name_per_person():
+    data = _export([_bib(authors="Sepp Hochreiter and Jürgen Schmidhuber", year=1997)])
+    assert _one_csl(data)["author"] == [
+        {"family": "Hochreiter", "given": "Sepp"},
+        {"family": "Schmidhuber", "given": "Jürgen"},
+    ]
+    ((_, key, fields),) = parse_bibtex(to_bibtex(data))
+    assert key == "Hochreiter1997"
+    assert bibtex_names(fields["author"]) == ["Hochreiter, Sepp", "Schmidhuber, Jürgen"]
+    ((record),) = assert_ris_grammar(to_ris(data))
+    assert [v for t, v in record if t == "AU"] == ["Hochreiter, Sepp", "Schmidhuber, Jürgen"]
 
 
 def test_particles_and_suffixes_in_bibtex_and_ris():
@@ -750,6 +781,25 @@ def test_cite_keys_are_deterministic_and_unique():
     keys = [item["id"] for item in to_csl_json(_export(rows))]
     assert keys == ["Smith2020", "Smith2020a", "Smith2020b", "Muller2019", "Osternd", "ref2020"]
     assert keys == [item["id"] for item in to_csl_json(_export(rows))]
+
+
+def test_cite_keys_differing_only_in_case_do_not_collide():
+    # BibTeX compares keys ignoring case: "BRASILnd" and "Brasilnd" are one key.
+    rows = [
+        _bib(1, authors="BRASIL", year=None, title="a"),
+        _bib(2, authors="Brasil", year=None, title="b"),
+        _bib(3, authors="team TACS", year=2018, title="c"),
+        _bib(4, authors="Team TACS", year=2018, title="d"),
+    ]
+    text = to_bibtex(_export(rows))
+    keys = [key for _, key, _ in parse_bibtex(text)]
+    assert keys == ["BRASILnd", "Brasilnda", "teamTACS2018", "TeamTACS2018a"]
+    assert len({key.casefold() for key in keys}) == len(keys)
+    # The same across papers written to one file.
+    one = _export([_bib(1, authors="BRASIL", year=None)], paper_id="a")
+    two = _export([_bib(1, authors="Brasil", year=None)], paper_id="b")
+    combined, _ = render_references([one, two], "bibtex")
+    assert [key for _, key, _ in parse_bibtex(combined)] == ["BRASILnd", "Brasilnda"]
 
 
 def test_cite_keys_are_unique_across_papers():
