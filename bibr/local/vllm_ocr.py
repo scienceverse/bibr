@@ -21,7 +21,6 @@ from bibr.local.http_runtime import (
     LocalHttpError,
     bearer_headers,
     check_startup_stop,
-    env_with_api_key,
     guard_managed_server_port,
     kill_process_group,
     new_server_api_key,
@@ -30,6 +29,7 @@ from bibr.local.http_runtime import (
     register_server_key,
     request_bytes,
     unregister_server_key,
+    vllm_server_env,
 )
 from bibr.local.ocr import PaddleHttpOcrClient
 from bibr.ocr.registry import PADDLE_VLLM_GPU_MEMORY_UTILIZATION, register
@@ -127,7 +127,7 @@ class VllmOcrServer:
                 stdout=subprocess.DEVNULL,
                 stderr=self._stderr_fh,
                 start_new_session=True,
-                env=env_with_api_key("VLLM_API_KEY", self.api_key),
+                env=vllm_server_env(self.api_key),
             )
             self._wait_until_ready()
         except BaseException:

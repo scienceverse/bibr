@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- The vLLM servers bibr starts get `VLLM_NO_USAGE_STATS=1`, and `bibr demo` sets
+  `GRADIO_ANALYTICS_ENABLED=False`, so neither sends usage statistics to its
+  maintainers. A value already in your environment wins.
+
 ## [0.7.2] - 2026-10-14
 
 ### Fixed
