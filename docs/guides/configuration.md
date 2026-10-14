@@ -290,7 +290,8 @@ output cap, reasoning effort, thinking budget) and prompt, so changing any of
 them calls the model again; for `--llm llmster`, so does changing
 `LLM_LLMSTER_MODEL`. Another endpoint that serves different weights under the
 same model name and URL cannot be told apart: clear the directory after
-swapping the model behind it.
+swapping the model behind it. `bibr batch --llm-batch` fills this cache from
+Anthropic Message Batches (see the [batch guide](batch.md#front-matter-through-message-batches)).
 
 ### Managed local servers
 

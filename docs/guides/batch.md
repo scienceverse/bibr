@@ -11,6 +11,7 @@ bibr batch manifest.txt --out results/ --refs llm     # a manifest, LLM referenc
 bibr batch manifest.txt --out results/ \
     --serve-url https://bibr.example.org              # remote: a bibr serve job API
 bibr batch manifest.txt --out results/ --dry-run      # the plan, nothing processed
+bibr batch papers/ --out results/ --llm-batch front-matter  # front matter via Message Batches
 bibr batch report results/                            # summarise the ledger
 ```
 
@@ -65,12 +66,14 @@ The ledger's latest line per `paper_id` decides what a new run does with it:
 | none | run | run | run |
 | `ok` | skip | skip | run |
 | `failed` | skip | run | run |
-| `failed` before the paper got a verdict: `error_code` `interrupted`, `http_401` or `http_403` | run | run | run |
+| `failed` before the paper got a verdict: `error_code` `interrupted`, `http_401`, `http_403` or `llm_deferred` | run | run | run |
 | `failed` on a crash or a service outage: `error_code` `chunk_error`, `upstream_unavailable` or `output_write_failed`, or `transient_exhausted: true` | run until the paper has failed this way 3 times, then skip | run | run |
 | `started` with no verdict after it: the run was killed outright (after an `ok`, the `ok` row applies: its export is intact) | as a crash: run (alone) until it happened 3 times, then skip | run | run |
 
-A paper the run was interrupted on (Ctrl-C), or whose upload the serve refused
-because of the token, never got a verdict, so it always runs again. A crash or
+A paper the run was interrupted on (Ctrl-C), whose upload the serve refused
+because of the token, or whose front-matter LLM calls
+[`--llm-batch`](#front-matter-through-message-batches) deferred, never got a
+verdict, so it always runs again. A crash or
 a service outage — the OCR or LLM server unreachable or unable to start, a
 serve that kept answering 502/503 until the retries ran out, an export that
 could not be written (a full disk, a permission) — is usually the machine's
@@ -185,6 +188,71 @@ Concurrency adapts to the serve:
 The serve dispatches at most `JOBS_MAX_RUNNING` jobs at once, so a client
 in-flight much above that only lengthens the queue.
 
+## Front matter through Message Batches
+
+`--llm-batch front-matter` sends each paper's front-matter LLM calls (title,
+abstract and keywords; authors; the broad classification, when the trained
+classifier does not cover it) through Anthropic's Message Batches API, at half
+the token price, for a wait of up to 24 hours:
+
+```bash
+export LLM_PROVIDER=anthropic CACHE_LLM=true CACHE_OCR=true
+bibr batch papers/ --out results/ --llm-batch front-matter
+```
+
+One command runs three phases:
+
+1. **Round 1** runs the corpus as usual, except that a front-matter call the
+   [LLM response cache](configuration.md) cannot answer is not sent. Its
+   request is written to `<out>/llm_batch/spool.jsonl` and the paper stops
+   with `error_code` `llm_deferred` (printed as deferred, not as a failure).
+2. **The batch.** The spooled requests, each distinct request once and
+   without the ones the cache already answers, go to Anthropic in batches of
+   at most 100,000 requests or 256 MB. The run waits, checking every
+   `LLM_BATCH_POLL_INTERVAL_S` seconds (default 60). Every answer that
+   validates goes into the LLM response cache, stored exactly as the live
+   call would have stored it. A request the batch did not answer (errored,
+   expired, or an answer that fails validation) stores nothing, and round 2
+   makes that call live.
+3. **Round 2** runs the deferred papers again. Their front-matter calls now
+   find the batch's answers in the cache. The run prints the share of
+   deferred calls that did: below 95 % it stops with an error and exit code 1,
+   because the replay's requests no longer match the ones the batch answered
+   (settings, model or prompts changed in between) and every miss would be
+   paid for again at the full price. Papers it did not reach keep
+   `llm_deferred`.
+
+A batch request is the live call: the same model (`LLM_MODEL`), temperature
+or thinking budget, output cap, prompt-cache marks and tool schema, and its
+answer goes through the same validation. One difference: Sonnet 5.5, Opus 5.5
+and Fable 5.1 reject a forced tool choice, so their batch requests leave the
+choice to the model and ask for the tool call in the system prompt.
+
+The run refuses to start without the local executor (no `--serve-url`),
+`LLM_PROVIDER=anthropic` on the cloud LLM backend with an API key
+(`LLM_API_KEY` or `ANTHROPIC_API_KEY`), the `batch` extra, `CACHE_LLM=true`
+(the answers reach round 2 through the cache), `CACHE_OCR=true` (round 2 does
+not OCR the deferred papers again) and `LLM_TRACK_USAGE=true` (the default:
+the deferred calls are found by their usage labels). It also refuses
+`LLM_MERGED_CORE_METADATA` and the native NuExtract backend.
+
+To resume, re-run the same command. After a Ctrl-C during the wait the batch
+keeps running at Anthropic: `<out>/llm_batch/plan.json` and one
+`part-NNNN.state.json` per batch let the next run collect it rather than
+submit it again (Anthropic keeps the results for 29 days). A request that was
+in a batch once is not sent in another one. A run *without* `--llm-batch`
+processes papers still marked `llm_deferred` with live calls.
+
+`<out>/llm_batch/summary.json` holds the latest run's numbers: deferred
+papers, spooled requests, requests sent, answers cached, unanswered requests
+by error type, and the replay's hits, misses and hit rate.
+
+**The saving is small.** On Haiku 4.5 the front matter of a paper costs about
+a cent at the live price, and the batch halves that. The other LLM calls
+(references, sections, …) stay live, and the deferred papers go through the
+pipeline twice; the OCR cache keeps the second pass short. It pays off for
+hosted runs of 100,000 papers or more, not for a lab-sized corpus.
+
 ## Output layout
 
 ```
@@ -194,6 +262,7 @@ in-flight much above that only lengthens the queue.
   outcomes.jsonl      the ledger — a verdict line per attempt (local: a started line first)
   run_info.json       the latest run: options, executor, redacted settings, counts
   runs.jsonl          run_info of every run, appended
+  llm_batch/          --llm-batch only: spool.jsonl, plan.json, batch state files, summary.json
   .lock               held by the running run
 ```
 
@@ -260,7 +329,8 @@ an OCR or reference-parse code) or `processing_error`, `upstream_unavailable`
 failed to load: `ChewFailure.outage`),
 `chunk_error` (the pipeline crashed on the paper: a chunk that crashes runs its
 papers again one by one, so only a paper that crashes on its own gets it, or
-the whole chunk when the pipeline could not run at all), `interrupted`;
+the whole chunk when the pipeline could not run at all), `interrupted`,
+`llm_deferred` (`--llm-batch` sent its front-matter calls to a batch);
 in both executors, `output_write_failed` (the export could not be written to
 `<out>`: a full disk, a permission, a value JSON cannot hold);
 remotely, the serve's `error_code` when it gave one, else `http_<status>`,
@@ -290,7 +360,8 @@ bibr batch report · results/
 
 - **papers** counts the *latest* attempt per paper; **attempts** is the
   number of verdict lines (a resumed run's earlier failures are history, not
-  state; `started` lines are not counted).
+  state; `started` lines are not counted). Papers still waiting for an
+  `--llm-batch` replay count as failed and are named as deferred.
 - **throughput** is successful papers over the window from the earliest
   `started_at` to the latest `finished_at` — for a directory that holds
   several runs, that window spans all of them.
