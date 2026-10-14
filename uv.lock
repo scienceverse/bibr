@@ -294,7 +294,7 @@ wheels = [
 
 [[package]]
 name = "bibr"
-version = "0.7.1"
+version = "0.7.2"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
@@ -412,7 +412,7 @@ docs = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anthropic", marker = "extra == 'batch'", specifier = ">=0.40.0" },
+    { name = "anthropic", marker = "extra == 'batch'", specifier = ">=0.40.0,<1" },
     { name = "beautifulsoup4", specifier = ">=4.14.3" },
     { name = "bibr", extras = ["batch", "cache", "demo", "mcp", "torch"], marker = "extra == 'all'" },
     { name = "bibr", extras = ["torch"], marker = "extra == 'ml'" },

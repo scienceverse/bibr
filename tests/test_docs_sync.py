@@ -198,7 +198,7 @@ def test_install_doc_version_pins_match_pyproject():
         "vllm": "vllm==0.31.0",
         "cache": "redis>=5.0.0",
         "demo": "gradio>=6.15.0",
-        "batch": "anthropic>=0.40.0",
+        "batch": "anthropic>=0.40.0,<1",
     }
     for extra, token in cited.items():
         bases = {_base_req(r) for r in opt[extra]}
