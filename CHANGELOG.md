@@ -32,6 +32,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   shows the default host and port, and `bibr doctor` no longer suggests copying an
   `.env.example` that pip and uv installs don't have.
 
+### Changed
+
+- `bibr setup`'s question "Send document-derived content to Google Gemini?" now defaults to
+  No, so pressing Enter no longer sends page images and text to Google. Answer `y` to use
+  Gemini.
+
 ## [0.7.1] - 2026-10-14
 
 ### Changed

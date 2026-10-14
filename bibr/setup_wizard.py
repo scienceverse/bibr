@@ -908,7 +908,7 @@ class SetupWizard:
             "Gemini in the cloud. This sends document-derived content (page images and "
             "extracted text) to Google."
         )
-        if not Confirm.ask("Send document-derived content to Google Gemini?", default=True):
+        if not Confirm.ask("Send document-derived content to Google Gemini?", default=False):
             self._handle_decline()
             return
 
