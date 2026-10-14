@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from bibr.clients.pointer_outputs import UNUSED_ANCHORS, expand_authors, resolve_title_keywords
 from bibr.clients.prompts import PROMPTS
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.exceptions import (
@@ -33,12 +34,14 @@ from bibr.exceptions import (
 from bibr.schemas import (
     AuthorLLM,
     AuthorsLLM,
+    AuthorsPointerLLM,
     CoreMetadataLLM,
     PaperClassificationLLM,
     PaperReferenceLLM,
     PaperTypeLabel,
     ResearchIntegrityLLM,
     TitleKeywordsLLM,
+    TitleKeywordsPointerLLM,
 )
 from bibr.utils.transient import is_transient_network_error
 
@@ -1281,6 +1284,16 @@ class LLMClient:
         provider, _ = _get_provider(self._settings)
         return getattr(provider, "name", None) == "openai"
 
+    def _pointer_outputs_enabled(self) -> bool:
+        """``LLM_POINTER_OUTPUTS`` is on and the backend answers in free JSON.
+
+        NuExtract's native templates copy each field out and cannot point.
+        """
+        if not getattr(self._settings.llm, "pointer_outputs", False):
+            return False
+        self._ensure_backend_current()
+        return self._backend_protocol(self._backend) != "nuextract-native"
+
     def _get_json_mode_client(self):
         """Return a (cached) instructor client forced to free-JSON mode.
 
@@ -2150,11 +2163,10 @@ class LLMClient:
             body = result.model_dump(mode="json")
             # Blank/omitted model output is sanitized to None, but is not an
             # explicit refusal. Preserve that distinction when validating a hit.
-            if (
-                getattr(result, "_abstract_explicitly_absent", None) is False
-                and body.get("abstract") is None
-            ):
-                body.pop("abstract", None)
+            if getattr(result, "_abstract_explicitly_absent", None) is False:
+                for name in getattr(result, "_abstract_fields", ()):
+                    if body.get(name) is None:
+                        body.pop(name, None)
             cache.put(
                 key,
                 body,
@@ -2274,6 +2286,10 @@ class LLMClient:
         logger.debug(
             f"Starting LLM title/keywords extraction (hash={file_hash}, input length: {len(text)})"
         )
+        if self._pointer_outputs_enabled():
+            copied = await self._title_keywords_from_pointers(text, file_hash, boundary)
+            if copied is not None:
+                return copied
         try:
             spec = PROMPTS["title_keywords"]
             boundary = boundary or uuid.uuid4().hex
@@ -2302,6 +2318,70 @@ class LLMClient:
             )
             raise llm_call_error("Failed to extract title/keywords", e) from e
 
+    async def _title_keywords_from_pointers(
+        self, text: str, file_hash: str, boundary: str | None
+    ) -> TitleKeywordsLLM | None:
+        """The title/keywords answer with its abstract copied out of *text*
+        (``LLM_POINTER_OUTPUTS``).
+
+        ``None`` hands the paper to the verbatim call: the abstract's first and
+        last words were not found in the text or mark a wrong span
+        (:data:`~bibr.clients.pointer_outputs.UNUSED_ANCHORS`), or the answer
+        was cut off or did not parse. A failure a re-ask cannot fix (the service
+        did not answer) raises as the verbatim call would.
+        """
+        spec = PROMPTS["title_keywords_pointers"]
+        capped_text = self._cap_input(text, self._settings)
+        try:
+            answer = await self._invoke_structured(
+                spec.response_model,
+                [
+                    {
+                        "role": "user",
+                        "content": spec.build_user(
+                            boundary=boundary or uuid.uuid4().hex, text=capped_text
+                        ),
+                    }
+                ],
+                spec.system,
+                max_tokens=_task_max_tokens(self._settings, self._settings.llm.title_max_tokens),
+            )
+        except ProcessingError:
+            raise
+        except Exception as e:
+            answer = _recover_finished_response(e, TitleKeywordsPointerLLM, task="title/keywords")
+            if answer is None:
+                error = llm_call_error("Failed to extract title/keywords", e)
+                if not isinstance(error, (LlmTruncatedError, LlmInvalidOutputError)):
+                    logger.error(
+                        f"LLM title/keywords extraction failed (hash={file_hash}): {e}",
+                        exc_info=True,
+                    )
+                    raise error from e
+                logger.warning(
+                    "The pointer title/keywords answer failed (%s); asking for the "
+                    "verbatim answer (hash=%s)",
+                    error.error_code,
+                    file_hash,
+                )
+                return None
+        answer = cast("TitleKeywordsPointerLLM", answer)
+        resolved = resolve_title_keywords(answer, capped_text)
+        if resolved.response is None:
+            logger.warning(
+                "%s; asking for the verbatim answer (hash=%s)",
+                UNUSED_ANCHORS[resolved.status],
+                file_hash,
+            )
+            return None
+        resolved.response._repair_note = answer._repair_note
+        logger.info(
+            "Successfully extracted title/keywords, abstract %s (hash=%s)",
+            resolved.status,
+            file_hash,
+        )
+        return resolved.response
+
     @track_llm_usage
     async def extract_authors(
         self,
@@ -2315,6 +2395,11 @@ class LLMClient:
             f"Starting LLM author extraction (hash={file_hash}, input length: {len(text)}, "
             f"json_mode={json_mode})"
         )
+        # The json_mode re-roll is a recovery path and stays verbatim.
+        if not json_mode and self._pointer_outputs_enabled():
+            expanded = await self._authors_from_pointers(text, file_hash, boundary)
+            if expanded is not None:
+                return expanded
         try:
             spec = PROMPTS["authors"]
             boundary = boundary or uuid.uuid4().hex
@@ -2354,6 +2439,59 @@ class LLMClient:
                 exc_info=True,
             )
             raise llm_call_error("Failed to extract authors", e) from e
+
+    async def _authors_from_pointers(
+        self, text: str, file_hash: str, boundary: str | None
+    ) -> AuthorsLLM | None:
+        """The authors answer with each affiliation written once and numbered
+        (``LLM_POINTER_OUTPUTS``), expanded back to one affiliation string per
+        author.
+
+        ``None`` hands the paper to the verbatim call, which can also salvage a
+        cut-off byline: the answer was cut off, did not parse, or numbered
+        affiliations without listing any. A failure a re-ask cannot fix (the
+        service did not answer) raises as the verbatim call would.
+        """
+        spec = PROMPTS["authors_pointers"]
+        capped_text = self._cap_input(text, self._settings)
+        try:
+            answer = await self._invoke_structured(
+                spec.response_model,
+                [
+                    {
+                        "role": "user",
+                        "content": spec.build_user(
+                            boundary=boundary or uuid.uuid4().hex, text=capped_text
+                        ),
+                    }
+                ],
+                spec.system,
+                reasoning_effort=self._settings.llm.reasoning_effort_authors,
+                max_tokens=_task_max_tokens(self._settings, self._settings.llm.authors_max_tokens),
+            )
+        except ProcessingError:
+            raise
+        except Exception as e:
+            error = llm_call_error("Failed to extract authors", e)
+            if not isinstance(error, (LlmTruncatedError, LlmInvalidOutputError)):
+                logger.error(f"LLM author extraction failed (hash={file_hash}): {e}", exc_info=True)
+                raise error from e
+            logger.warning(
+                "The pointer author answer failed (%s); asking for the verbatim answer (hash=%s)",
+                error.error_code,
+                file_hash,
+            )
+            return None
+        expanded = expand_authors(cast("AuthorsPointerLLM", answer))
+        if expanded is None:
+            logger.warning(
+                "The pointer author answer numbered affiliations it did not list; "
+                "asking for the verbatim answer (hash=%s)",
+                file_hash,
+            )
+            return None
+        logger.info(f"Successfully extracted authors (hash={file_hash})")
+        return expanded
 
     @track_llm_usage
     async def extract_paper_classification(
