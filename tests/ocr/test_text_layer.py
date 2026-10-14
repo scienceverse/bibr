@@ -299,11 +299,79 @@ def test_table_builder_lets_a_spanning_header_cross_a_column_gap():
     html = build_table_html(chars)
 
     assert html is not None
-    # The header crosses the first gap; each of its words goes to the column
-    # holding its centre, and the columns stay those of the data rows.
-    assert html.startswith("<table><tr><td>Reaction</td><td>time condition</td><td></td></tr>")
+    # The header crosses the first gap: it spans columns, so it goes whole
+    # into the column it starts in, and the columns stay those of the data.
+    assert html.startswith("<table><tr><td>Reaction time condition</td><td></td><td></td></tr>")
     assert "<tr><td>r1</td><td>10</td><td>1.5</td></tr>" in html
     assert html.count("<tr>") == 8
+
+
+_SMALL_TABLE = [
+    [("Group", 100), ("N", 200), ("Mean", 300), ("SD", 400)],
+    *[[(f"G{k}", 100), ("12", 200), (f"0.9{k}", 300), ("0.14", 400)] for k in range(4)],
+]
+
+
+def _table_glyphs(rows: list[list[tuple[str, float]]], *, top: float = 10.0) -> list:
+    chars: list = []
+    for k, cells in enumerate(rows):
+        for cell, x in cells:
+            chars += _glyphs(cell, x, top + 16 * k) + [(" ", 0, 0, 0, 0)]
+    return chars
+
+
+def _cells(html: str) -> list[list[str]]:
+    import re
+
+    return [re.findall(r"<td>(.*?)</td>", row) for row in re.findall(r"<tr>(.*?)</tr>", html)]
+
+
+@pytest.mark.parametrize(
+    ("where", "row", "one_cell"),
+    [
+        # A note under a five-row table, one phrase across every column.
+        ("below", [("Note. Values are means across the four groups of the study.", 100)], True),
+        # A title line over it.
+        ("above", [("Table 2 Descriptive statistics of the four groups", 100)], True),
+        # A group header, one phrase over the Mean and SD columns.
+        ("above", [("Reaction time in ms", 290)], True),
+        # A group header row of two phrases, the second crossing Mean | SD.
+        ("above", [("Sample", 100), ("Reaction time in ms", 290)], False),
+    ],
+    ids=["note", "title", "group-header", "two-phrase-header"],
+)
+def test_a_small_table_keeps_its_columns_under_a_row_that_spans_them(where, row, one_cell):
+    from bibr.structure.parse_media import MediaHandlersMixin
+
+    rows = [*_SMALL_TABLE, row] if where == "below" else [row, *_SMALL_TABLE]
+
+    html = build_table_html(_table_glyphs(rows))
+
+    assert html is not None
+    cells = _cells(html)
+    assert all(len(cells_of_row) == 4 for cells_of_row in cells)
+    data = cells[:-1] if where == "below" else cells[1:]
+    assert data[0] == ["Group", "N", "Mean", "SD"]
+    assert data[1:] == [[f"G{k}", "12", f"0.9{k}", "0.14"] for k in range(4)]
+    if one_cell:
+        # The spanning row is one cell, in the column it starts in.
+        spanning = cells[-1] if where == "below" else cells[0]
+        assert [cell for cell in spanning if cell] == [row[0][0]]
+        assert spanning.index(row[0][0]) == (2 if row[0][1] > 250 else 0)
+    frame = MediaHandlersMixin._parse_html_table(html)
+    assert frame.shape[1] == 4
+
+
+def test_a_tight_data_row_is_split_word_by_word():
+    # The label runs close to the next cell, so the separator the other rows
+    # show falls inside its phrase; a row of several phrases is still split
+    # word by word.
+    rows = [*_SMALL_TABLE, [("Total sample", 100), ("1234567", 176), ("0.9", 300), ("0.1", 400)]]
+
+    html = build_table_html(_table_glyphs(rows))
+
+    assert html is not None
+    assert _cells(html)[-1] == ["Total sample", "1234567", "0.9", "0.1"]
 
 
 def test_table_builder_joins_tight_digit_boxes_and_escapes_cells():

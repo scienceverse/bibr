@@ -7,10 +7,19 @@ geometry alone:
   whitespace and wherever a glyph leaves the line or the gap to it is wider
   than a word space;
 - words are grouped into rows by clustering their vertical centres;
+- a row's words form phrases: runs of words with no gap of separator width
+  between them;
 - columns are the x-ranges between separators, where a separator is a run of
-  empty horizontal space that almost every row leaves empty (a header that
-  spans two columns may cross it);
-- each word goes to the column holding its centre.
+  empty horizontal space that almost every row leaves empty. Only rows of two
+  or more phrases vote: a title, a note or a group header printed as one
+  phrase ("Note. Values are means ...") spans columns and says nothing about
+  where they are. A voting row may still cross a separator (a long label, a
+  group header over two columns);
+- each word goes to the column holding its centre, except in a row of one
+  phrase that a separator cuts through a word of: that row spans columns,
+  and its text goes whole into the column it starts in, as a merged cell
+  would. In a row of several phrases a crossing phrase is split word by
+  word, since it is more often two cells set close than one wide cell.
 
 The result is plain ``<table><tr><td>`` HTML, which the table parser
 (:mod:`bibr.structure.parse_media`) reads like an OCR model's table. There
@@ -40,9 +49,12 @@ _ROW_CENTRE_TOLERANCE = 0.5
 _WORD_GAP = 0.8
 # A column separator is at least this share of the median glyph height wide.
 _MIN_COLUMN_GAP = 0.8
-# A separator may be crossed by words in at most this share of the rows (a
-# spanning header row or a long label).
+# A separator may be crossed by words in at most this share of the voting
+# rows (a long label, a group header over two columns) ...
 _MAX_CROSSING_ROW_SHARE = 0.15
+# ... and by one of them in any table of at least this many voting rows, so
+# a small table keeps its columns under one such row.
+_MIN_ROWS_FOR_ONE_CROSSING = 3
 
 
 @dataclass
@@ -107,6 +119,24 @@ def _rows(words: list[_Word], height: float) -> list[list[_Word]]:
     return [sorted(row, key=lambda w: w.x0) for row in rows]
 
 
+def _phrases(row: list[_Word], height: float) -> list[list[_Word]]:
+    """The row's words in runs split at gaps as wide as a column separator.
+
+    Measured on the same integer grid as :func:`_column_bounds`, so a row of
+    two or more phrases could show a separator on its own.
+    """
+    phrases: list[list[_Word]] = []
+    reach = 0.0
+    for word in row:
+        if phrases and int(word.x0) - int(reach) - 1 < _MIN_COLUMN_GAP * height:
+            phrases[-1].append(word)
+            reach = max(reach, word.x1)
+        else:
+            phrases.append([word])
+            reach = word.x1
+    return phrases
+
+
 def _column_bounds(rows: list[list[_Word]], height: float) -> list[float]:
     """The x positions that separate columns, left to right."""
     words = [word for row in rows for word in row]
@@ -115,9 +145,13 @@ def _column_bounds(rows: list[list[_Word]], height: float) -> list[float]:
     width = right - left
     if width <= 0:
         return []
-    # Per x unit, how many rows have a word over it.
+    voters = [row for row in rows if len(_phrases(row, height)) > 1]
+    if len(voters) < 2:
+        # Too few rows show a column gap to place columns by vote alone.
+        voters = rows
+    # Per x unit, how many voting rows have a word over it.
     crossing = [0] * width
-    for row in rows:
+    for row in voters:
         covered = [False] * width
         for word in row:
             start = max(0, int(word.x0) - left)
@@ -127,7 +161,9 @@ def _column_bounds(rows: list[list[_Word]], height: float) -> list[float]:
         for x, hit in enumerate(covered):
             if hit:
                 crossing[x] += 1
-    allowed = int(_MAX_CROSSING_ROW_SHARE * len(rows))
+    allowed = int(_MAX_CROSSING_ROW_SHARE * len(voters))
+    if len(voters) >= _MIN_ROWS_FOR_ONE_CROSSING:
+        allowed = max(1, allowed)
     bounds: list[float] = []
     run_start: int | None = None
     for x, count in enumerate(crossing):
@@ -140,6 +176,17 @@ def _column_bounds(rows: list[list[_Word]], height: float) -> list[float]:
                 bounds.append(left + (run_start + x) / 2.0)
             run_start = None
     return bounds
+
+
+def _column(x: float, bounds: list[float]) -> int:
+    return sum(1 for bound in bounds if x > bound)
+
+
+def _spans_columns(phrases: list[list[_Word]], bounds: list[float]) -> bool:
+    """Whether the row is one phrase that a separator cuts through a word of."""
+    if len(phrases) != 1:
+        return False
+    return any(word.x0 < bound < word.x1 for word in phrases[0] for bound in bounds)
 
 
 def build_table_html(chars: Sequence[Glyph]) -> str | None:
@@ -159,9 +206,12 @@ def build_table_html(chars: Sequence[Glyph]) -> str | None:
     out = ["<table>"]
     for row in rows:
         cells: list[list[str]] = [[] for _ in range(len(bounds) + 1)]
-        for word in row:
-            column = sum(1 for bound in bounds if word.x_centre > bound)
-            cells[column].append(word.text)
+        if _spans_columns(_phrases(row, height), bounds):
+            # One cell, in the column the row starts in.
+            cells[_column(row[0].x_centre, bounds)].append(" ".join(w.text for w in row))
+        else:
+            for word in row:
+                cells[_column(word.x_centre, bounds)].append(word.text)
         out.append("<tr>")
         out.extend(f"<td>{html.escape(' '.join(cell))}</td>" for cell in cells)
         out.append("</tr>")
