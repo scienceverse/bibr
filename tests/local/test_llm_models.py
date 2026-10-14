@@ -69,6 +69,8 @@ def test_students_are_merged_vllm_checkpoints_with_thinking_off():
         args = registry_server_args(model.variants[0].hf_id)
         assert "--enable-lora" not in args  # merged, so spec decoding stays usable
         assert "--language-model-only" in args
+        revision = args[args.index("--revision") + 1]
+        assert len(revision) == 40  # a pinned Hub commit, not a branch
         kwargs_idx = args.index("--default-chat-template-kwargs")
         assert args[kwargs_idx + 1] == '{"enable_thinking": false}'
 

@@ -47,14 +47,13 @@ class LocalLLMModel:
 # v5 scorer, gate192 + ci60 = 252 dev papers), paired against Qwen3.8-27B's
 # 223/252; see docs/guides/extraction-models.md.
 #
-# GGUF sizes are the built files (llama.cpp 6868a52, 2026-10-14); bf16 and MLX
-# sizes are estimates until the checkpoints are on the Hub. bf16: weights of the
-# Qwen3.5 base, with min_vram_gb rounded up from the measured 11.7 GB peak of a
+# bf16 and GGUF sizes are the built files (2026-10-14; GGUF from llama.cpp 6868a52);
+# MLX sizes are estimates until those builds exist. bf16: the merged
+# checkpoint (text, vision and MTP weights), with min_vram_gb rounded up from the measured 11.7 GB peak of a
 # low-memory 4B vLLM serve on a 24 GB card. GGUF and MLX: the quantized text
 # model, with min_vram_gb = ceil(size * 1.25) plus about 2 GB of context and
 # compute buffers, the margin the NuExtract 3 Q4_K_M build needed on 6 GB
-# cards. Pin --revision and re-check the sizes against the HF API when the
-# repos are published.
+# cards. The vLLM variants pin the Hub revision they were published at.
 _QWEN35_STUDENT_SERVER_ARGS: tuple[str, ...] = (
     # Text only: the vision tower is never used for extraction.
     "--language-model-only",
@@ -66,6 +65,10 @@ _QWEN35_STUDENT_SERVER_ARGS: tuple[str, ...] = (
     "--max-model-len",
     "32768",
 )
+
+#: Hub revisions published 2026-10-14 (the merged safetensors repos).
+_QWEN35_4B_REVISION = "6ab47a4e4e8b1b76c1ab234aec66f360683ff9fc"
+_QWEN35_2B_REVISION = "81d0442d0ecadc20e1b9587d54bff42242123870"
 
 #: Thinking off per request too, for llama.cpp and MLX servers, which do not
 #: read ``server_args``.
@@ -82,8 +85,8 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 platform="cuda",
                 quant="bf16",
                 min_vram_gb=12,
-                approx_download_gb=8.5,
-                server_args=_QWEN35_STUDENT_SERVER_ARGS,
+                approx_download_gb=8.7,
+                server_args=("--revision", _QWEN35_4B_REVISION, *_QWEN35_STUDENT_SERVER_ARGS),
                 runtime="vllm",
             ),
             # llama.cpp (Windows, cards below 8 GB): Q8_0 first, as the
@@ -132,8 +135,8 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 platform="cuda",
                 quant="bf16",
                 min_vram_gb=8,
-                approx_download_gb=4.3,
-                server_args=_QWEN35_STUDENT_SERVER_ARGS,
+                approx_download_gb=4.2,
+                server_args=("--revision", _QWEN35_2B_REVISION, *_QWEN35_STUDENT_SERVER_ARGS),
                 runtime="vllm",
             ),
             LocalLLMVariant(
