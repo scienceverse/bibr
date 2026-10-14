@@ -216,8 +216,7 @@ _AUTHOR_AFFILIATION_POINTER_RULES = """Affiliation rules:
   numbered affiliation list elsewhere on the page. Resolve these to entries of your
   affiliations list. Never put raw numbers or symbols in an affiliation.
 - A marker whose affiliation the fenced text does not print gets no entry and no
-  number. Never write a stand-in such as "<UNKNOWN>" or "Affiliation 1", and never
-  fill an affiliation in from memory or from where the study took place.
+  number. Never write a stand-in such as "Affiliation 1" in its place.
 - affiliation_ids: the numbers of the author's entries in your affiliations list,
   counting from 1, in printed order. [] when no affiliation is printed for the author.
 - Example: author has superscripts "1,2", and the list says

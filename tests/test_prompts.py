@@ -328,7 +328,7 @@ class TestPointerPrompts:
     def test_author_prompt_lists_only_printed_affiliations(self):
         instruction = self._instruction("authors_pointers")
         assert "affiliation the fenced text does not print gets no entry" in instruction
-        assert 'Never write a stand-in such as "<UNKNOWN>"' in instruction
+        assert 'Never write a stand-in such as "Affiliation 1"' in instruction
 
     @pytest.mark.parametrize(
         ("verbatim", "pointers", "rules"),

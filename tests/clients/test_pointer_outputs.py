@@ -253,11 +253,9 @@ class TestExpandAuthors:
     @pytest.mark.parametrize(
         "stand_in",
         [
-            "<UNKNOWN>",
             "Affiliation 2",
             "Affiliation 1 (A0, A1)",
             "Affiliation 3 not printed on this page",
-            "Unknown affiliation 4 (not printed in the supplied text)",
             "N/A",
         ],
     )

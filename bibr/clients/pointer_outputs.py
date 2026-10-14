@@ -12,7 +12,7 @@ the abstract and the per-author affiliations are most of those tokens:
   its affiliations (:class:`~bibr.schemas.AuthorsPointerLLM`).
   :func:`expand_authors` writes each author's affiliation string back out,
   joined with "; " as the verbatim prompt asks for. A stand-in written for an
-  affiliation the text does not print ("<UNKNOWN>") is left empty.
+  affiliation the text does not print ("Affiliation 3") is left empty.
 
 Both return the verbatim response models (:class:`~bibr.schemas.TitleKeywordsLLM`,
 :class:`~bibr.schemas.AuthorsLLM`), so nothing downstream changes.
@@ -75,10 +75,10 @@ _REPEAT_PROBE = 60
 _REPEAT_LEAD = 40
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 # A stand-in the model wrote for an affiliation the text does not print. Matched
-# on the whole entry, so an institution's own name is never caught: "<UNKNOWN>",
-# "Affiliation 3", "Affiliation 1 (Jane Doe, John Smith)", "N/A".
+# on the whole entry, so an institution's own name is never caught: "Affiliation 3",
+# "Affiliation 1 (Jane Doe, John Smith)", "N/A".
 _STAND_IN_RE = re.compile(
-    r"<[^<>]*>|(?:unknown\s+)?affiliation\s*#?\s*\d+(?:\s*\(.*\))?|unknown|n/?a|none|null|\W*",
+    r"affiliation\s*#?\s*\d+(?:\s*\(.*\))?|unknown|n/?a|none|null|\W*",
     re.IGNORECASE | re.DOTALL,
 )
 # ... or a note saying so: "Affiliation 3 not printed on this page".
@@ -326,8 +326,8 @@ def expand_authors(answer: AuthorsPointerLLM) -> AuthorsLLM | None:
     Numbers count from 1. A list that uses 0 and never the last number was
     counted from 0, so it is shifted. A number outside the list is dropped, and
     so is one that points at a stand-in the model wrote for an affiliation the
-    text does not print ("<UNKNOWN>", "Affiliation 3"): the verbatim answer
-    leaves such an affiliation empty too.
+    text does not print ("Affiliation 3", "N/A"): the verbatim answer leaves
+    such an affiliation empty too.
 
     ``None`` when authors give numbers but the list is empty: the answer lost
     its affiliations, and the verbatim call is asked instead.

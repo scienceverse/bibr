@@ -16,7 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   gate192 papers that output would shrink by about a third. When the abstract's words can't be
   found in the text, when authors are given affiliation numbers but no list, or when the
   answer is cut off or doesn't parse, bibr asks for the verbatim answer instead. A stand-in
-  the model writes for an affiliation the text does not print ("<UNKNOWN>") is left empty.
+  the model writes for an affiliation the text does not print ("Affiliation 3") is left
+  empty.
   The merged call, the JSON re-roll and the NuExtract native backend stay verbatim.
 
 ### Changed
