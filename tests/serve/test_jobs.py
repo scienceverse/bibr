@@ -1,7 +1,9 @@
 """Tests for the async job API (D1) — job store lifecycle (both backends) + HTTP routes."""
 
 import asyncio
+import json
 import time
+from pathlib import Path
 
 import pytest
 
@@ -1018,6 +1020,109 @@ class TestJobRoutes:
 
             assert len(tracker.discarded) == 1
             assert store._jobs == {}
+        finally:
+            asyncio.run(client.app.state.upload_store.close())
+
+
+class TestJobReferences:
+    """GET /papers/jobs/{id}/references: the result's reference list as a file."""
+
+    ENRICHED = (
+        Path(__file__).resolve().parent.parent
+        / "fixtures"
+        / "references"
+        / "enriched_check_12_3.json"
+    )
+
+    @pytest.fixture
+    def finished(self):
+        """A client (kept open, so the worker outlives the POST) and its succeeded job."""
+        result = json.loads(self.ENRICHED.read_text())
+        client = _client(MemoryJobStore(), tracker=_FakeTracker(result=result))
+        try:
+            with client:
+                job_id = client.post(
+                    "/papers/jobs", files={"file": ("a.pdf", b"%PDF-1.4", "application/pdf")}
+                ).json()["job_id"]
+                # The result is encoded in a worker thread: wait for it, not a poll count.
+                deadline = time.monotonic() + 30
+                while (status := client.get(f"/papers/jobs/{job_id}").json())[
+                    "status"
+                ] != "succeeded":
+                    assert time.monotonic() < deadline, f"job never succeeded: {status}"
+                    time.sleep(0.01)
+                yield client, job_id
+        finally:
+            asyncio.run(client.app.state.upload_store.close())
+
+    @pytest.mark.parametrize(
+        ("fmt", "content_type", "extension", "start"),
+        [
+            ("csl-json", "application/vnd.citationstyles.csl+json", ".json", b"["),
+            ("bibtex", "application/x-bibtex", ".bib", b"@article{Smith2020,"),
+            ("ris", "application/x-research-info-systems", ".ris", b"TY  - JOUR\r\n"),
+        ],
+    )
+    def test_each_format(self, finished, fmt, content_type, extension, start):
+        client, job_id = finished
+        resp = client.get(f"/papers/jobs/{job_id}/references", params={"format": fmt})
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].split(";")[0] == content_type
+        disposition = resp.headers["content-disposition"]
+        assert disposition == f'attachment; filename="{job_id}{extension}"'
+        assert resp.content.startswith(start)
+
+    def test_defaults_to_csl_json_and_takes_options(self, finished):
+        client, job_id = finished
+        items = client.get(f"/papers/jobs/{job_id}/references").json()
+        assert [item["id"] for item in items] == ["Smith2020", "Roe2019", "Cohen1988", "Poe2001"]
+        assert items[0]["volume"] == "7"
+        assert "note" in items[0]
+        record = client.get(
+            f"/papers/jobs/{job_id}/references",
+            params={"prefer": "record", "check_note": "false"},
+        ).json()
+        assert record[0]["volume"] == "8"
+        assert all("note" not in item for item in record)
+
+    def test_bad_format_is_422(self, finished):
+        client, job_id = finished
+        resp = client.get(f"/papers/jobs/{job_id}/references", params={"format": "endnote"})
+        assert resp.status_code == 422
+
+    def test_answers_like_result_while_there_is_none(self, monkeypatch):
+        client = _client(MemoryJobStore())
+
+        async def fake_run_job(*, store, job_id, **kw):
+            await store.set_running(job_id)
+
+        monkeypatch.setattr(jobs_mod, "_run_job", fake_run_job)
+        try:
+            with client:
+                assert client.get("/papers/jobs/nope/references").status_code == 404
+                job_id = client.post(
+                    "/papers/jobs", files={"file": ("a.pdf", b"%PDF-1.4", "application/pdf")}
+                ).json()["job_id"]
+                _poll_until(client, job_id, "running")
+                resp = client.get(f"/papers/jobs/{job_id}/references")
+                assert resp.status_code == 409
+                assert resp.json()["status"] == "running"
+        finally:
+            asyncio.run(client.app.state.upload_store.close())
+
+    def test_failed_job_answers_its_error(self):
+        client = _client(
+            MemoryJobStore(), tracker=_FakeTracker(error=HTTPException(422, "bad parse"))
+        )
+        try:
+            with client:
+                job_id = client.post(
+                    "/papers/jobs", files={"file": ("a.pdf", b"%PDF-1.4", "application/pdf")}
+                ).json()["job_id"]
+                _poll_until(client, job_id, "failed")
+                resp = client.get(f"/papers/jobs/{job_id}/references")
+                assert resp.status_code == 422
+                assert resp.json()["detail"] == "bad parse"
         finally:
             asyncio.run(client.app.state.upload_store.close())
 

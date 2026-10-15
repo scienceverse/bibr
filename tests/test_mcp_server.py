@@ -77,6 +77,8 @@ async def test_tool_listing():
             "get_tables",
             "get_figures",
             "save_paper",
+            "export_references",
+            "save_references",
         }
 
 
@@ -247,6 +249,84 @@ async def test_save_paper_round_trips(tmp_path):
         assert saved["path"] == str(out)
         assert saved["bytes"] == out.stat().st_size
         assert json.loads(out.read_text()) == json.loads(FIXTURE.read_text())
+
+
+async def test_export_references_in_each_format():
+    async with open_session(load=True) as loaded:
+        csl = _payload(await loaded.call_tool("export_references", {"paper_id": FIXTURE_ID}))
+        assert (csl["format"], csl["references"]) == ("csl-json", 2)
+        assert csl["content_type"] == "application/vnd.citationstyles.csl+json"
+        assert [item["id"] for item in json.loads(csl["text"])] == ["Smith2020", "Lee2021"]
+        bib = _payload(
+            await loaded.call_tool(
+                "export_references", {"paper_id": FIXTURE_ID, "format": "bibtex"}
+            )
+        )
+        assert bib["text"].startswith("@article{Smith2020,")
+        ris = _payload(
+            await loaded.call_tool(
+                "export_references",
+                {"paper_id": FIXTURE_ID, "format": "ris", "prefer": "record"},
+            )
+        )
+        assert ris["text"].startswith("TY  - JOUR\r\n")
+        bad = await loaded.call_tool(
+            "export_references", {"paper_id": FIXTURE_ID, "format": "endnote"}
+        )
+        assert bad.is_error
+
+
+async def test_save_references_writes_by_extension(tmp_path):
+    async with open_session(load=True, allow=(tmp_path,)) as loaded:
+        out = tmp_path / "refs.ris"
+        saved = _payload(
+            await loaded.call_tool("save_references", {"paper_id": FIXTURE_ID, "path": str(out)})
+        )
+        assert (saved["format"], saved["references"]) == ("ris", 2)
+        raw = out.read_bytes()
+        assert saved["bytes"] == len(raw)
+        assert raw.startswith(b"TY  - JOUR\r\n") and b"\r\r\n" not in raw
+        assert "refusing to overwrite" in _error_text(
+            await loaded.call_tool("save_references", {"paper_id": FIXTURE_ID, "path": str(out)})
+        )
+        _payload(
+            await loaded.call_tool(
+                "save_references", {"paper_id": FIXTURE_ID, "path": str(out), "overwrite": True}
+            )
+        )
+        assert "writes only .bib, .ris or .json" in _error_text(
+            await loaded.call_tool(
+                "save_references", {"paper_id": FIXTURE_ID, "path": str(tmp_path / "refs.txt")}
+            )
+        )
+        assert "its extension means csl-json" in _error_text(
+            await loaded.call_tool(
+                "save_references",
+                {"paper_id": FIXTURE_ID, "path": str(tmp_path / "r.json"), "format": "bibtex"},
+            )
+        )
+
+
+async def test_save_references_stays_in_scope(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    async with open_session(load=True) as loaded:
+        assert "outside the directories" in _error_text(
+            await loaded.call_tool(
+                "save_references", {"paper_id": FIXTURE_ID, "path": str(outside / "refs.bib")}
+            )
+        )
+    assert not (outside / "refs.bib").exists()
+
+
+def test_mcp_reference_literals_match_the_writers():
+    from typing import get_args
+
+    import bibr.mcp_server as mcp_server
+    from bibr.export import citations
+
+    assert get_args(mcp_server.ReferenceFormat) == get_args(citations.ReferenceFormat)
+    assert get_args(mcp_server.Prefer) == get_args(citations.Prefer)
 
 
 async def test_same_id_different_source_gets_suffix(tmp_path):

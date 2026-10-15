@@ -40,6 +40,23 @@ _ATTACHES_BEFORE = frozenset(",.;:!?)]}’”»'" + _JOINING_MARKS)
 _ATTACHES_AFTER = frozenset("([{‘“«'" + _JOINING_MARKS)
 
 
+# Registries mark a retracted or withdrawn work by prefixing its title
+# ("RETRACTED: ...", "RETRACTED ARTICLE: ...", "WITHDRAWN: ...", "Expression
+# of concern: ..."). A reference prints the work's own title.
+_NOTICE_TITLE_PREFIX = re.compile(
+    r"^\s*(?:retracted(?:\s+article)?|withdrawn(?:\s+article)?|expression\s+of\s+concern)"
+    r"\s*[:.\-\u2013\u2014]\s*",
+    re.IGNORECASE,
+)
+
+
+def strip_notice_prefix(title: str) -> str:
+    """*title* without a leading "RETRACTED:"-style marker, for comparing it
+    with a printed title. The deposited title is what gets exported."""
+    stripped = _NOTICE_TITLE_PREFIX.sub("", title, count=1)
+    return stripped or title
+
+
 def plain_text(value: object) -> str | None:
     """A Crossref title as plain text: inline tags dropped (their text kept),
     character entities decoded, whitespace collapsed.
