@@ -307,7 +307,6 @@ dependencies = [
     { name = "joblib" },
     { name = "jsonref" },
     { name = "litserve" },
-    { name = "numind" },
     { name = "onnxruntime" },
     { name = "pandas" },
     { name = "pillow" },
@@ -374,6 +373,9 @@ ml = [
     { name = "torchvision" },
     { name = "transformers" },
 ]
+nuextract = [
+    { name = "numind" },
+]
 torch = [
     { name = "opencv-python-headless" },
     { name = "pytorch-crf" },
@@ -391,6 +393,7 @@ vllm = [
 dev = [
     { name = "fakeredis", extra = ["lua"] },
     { name = "mypy" },
+    { name = "numind" },
     { name = "onnx" },
     { name = "pandas-stubs" },
     { name = "pip-audit" },
@@ -426,7 +429,7 @@ requires-dist = [
     { name = "jsonref", specifier = ">=1.1.0" },
     { name = "litserve", specifier = ">=0.2.16,<0.3" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.2.0,<3" },
-    { name = "numind", specifier = ">=0.3,<0.3.1" },
+    { name = "numind", marker = "extra == 'nuextract'", specifier = ">=0.3,<0.3.1" },
     { name = "onnxruntime", specifier = ">=1.19.0" },
     { name = "onnxruntime-gpu", extras = ["cuda", "cudnn"], marker = "(sys_platform == 'linux' and extra == 'gpu') or (sys_platform == 'win32' and extra == 'gpu')" },
     { name = "openai", marker = "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", specifier = ">=2.54.0,<3" },
@@ -461,12 +464,13 @@ requires-dist = [
     { name = "wordfreq", specifier = ">=3.0.0" },
     { name = "wtpsplit-lite", specifier = ">=0.2.0" },
 ]
-provides-extras = ["cache", "vllm", "torch", "ml", "demo", "batch", "gpu", "local-mlx", "local", "mcp", "all"]
+provides-extras = ["cache", "nuextract", "vllm", "torch", "ml", "demo", "batch", "gpu", "local-mlx", "local", "mcp", "all"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "fakeredis", extras = ["lua"], specifier = ">=2.30.0" },
     { name = "mypy", specifier = ">=1.15.0" },
+    { name = "numind", specifier = ">=0.3,<0.3.1" },
     { name = "onnx", specifier = ">=1.17.0" },
     { name = "pandas-stubs", specifier = ">=2.0.0" },
     { name = "pip-audit", specifier = ">=2.7.0" },

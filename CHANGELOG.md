@@ -30,9 +30,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   calls go out together and outnumber the limiter's three slots, so at 60 they waited for each
   other; on the 9 Oct 27B harness that wait was about 30% of the time after parsing. Set
   `LLM_RATE_LIMIT_RPM` to keep a lower limit.
+- `bibr setup` recommends a new extraction model by hardware. On Linux with an
+  NVIDIA GPU it picks bibr's fine-tuned Qwen3.5-4B (12 GB or more) or Qwen3.5-2B
+  (8–11 GB), served by vLLM. On bibr's 252 development papers they pass 216 and
+  207 against Qwen3.8-27B's 223, compared with 200 for NuExtract 3. Without a
+  suitable GPU the hosted recommendation is Claude Haiku 5.5 (221/252), which
+  also does the cloud OCR, so setup needs one Anthropic key. Claude's OCR has
+  not been scored on bibr's papers yet. Windows and cards below 8 GB get GGUF
+  (llama.cpp) builds of the same two models, which pass 204–218 of the 252
+  papers, and Apple Silicon gets their 8-bit MLX builds. An unset
+  `LLM_LOCAL_MODEL` now loads the 4B model on every managed runtime. See
+  [choosing an extraction model](docs/guides/extraction-models.md).
+- The managed llama.cpp LLM server starts with thinking off (`--reasoning off`,
+  or `--reasoning-budget 0` on older builds). llama-server's default,
+  `--reasoning auto`, turns thinking on for any model whose template supports it.
 - The vLLM servers bibr starts get `VLLM_NO_USAGE_STATS=1`, and `bibr demo` sets
   `GRADIO_ANALYTICS_ENABLED=False`, so neither sends usage statistics to its
   maintainers. A value already in your environment wins.
+
+### Removed
+
+- NuExtract 3 is no longer offered by `bibr setup` or used as a default; it
+  scored below both fine-tuned models. A `.env` that names a NuExtract model in
+  `LLM_LOCAL_MODEL` still works.
+- bibr no longer installs numind. The experimental
+  `LLM_STRUCTURED_BACKEND=nuextract-native` backend needs
+  `pip install 'bibr[nuextract]'` and otherwise stops with an error that says so.
 
 ## [0.7.2] - 2026-10-14
 

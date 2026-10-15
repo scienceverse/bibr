@@ -35,6 +35,28 @@ from bibr.local.http_runtime import (
 
 logger = logging.getLogger(__name__)
 
+
+def max_model_len(model: str, extra_args: str | None) -> int | None:
+    """The ``--max-model-len`` a vLLM server for *model* is launched with, if any.
+
+    Registry args come first and user extra args after, as on the command
+    line, so the last value wins.
+    """
+    from bibr.local.llm_models import registry_server_args
+
+    args = [*registry_server_args(model), *shlex.split(extra_args or "")]
+    value = None
+    for i, arg in enumerate(args):
+        if arg == "--max-model-len" and i + 1 < len(args):
+            value = args[i + 1]
+        elif arg.startswith("--max-model-len="):
+            value = arg.split("=", 1)[1]
+    try:
+        return int(value) if value is not None else None
+    except ValueError:
+        return None
+
+
 # Grace period between SIGTERM and SIGKILL on shutdown.
 _TERM_GRACE_S = 10
 
@@ -270,6 +292,12 @@ class VllmLlmServer:
         settings.llm.base_url = self.base_url + "/v1"
         settings.llm.api_key = self.api_key or "not-needed"
         settings.llm.model = self._model
+        if "context_tokens" not in settings.llm.model_fields_set:
+            # Inputs are cut to fit the window the server was started with
+            # (the students' registry args pin --max-model-len 32768).
+            settings.llm.context_tokens = max_model_len(
+                self._model, self._settings.llm.vllm_extra_args
+            )
         if "rate_limit_rpm" not in settings.llm.model_fields_set:
             settings.llm.rate_limit_rpm = MANAGED_LOCAL_LLM_RATE_LIMIT_RPM
             logger.info(

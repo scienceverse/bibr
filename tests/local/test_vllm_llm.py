@@ -123,13 +123,10 @@ def test_explicit_mem_fraction_parameter_controls_vllm_allocation():
 
 def test_launch_cmd_includes_registry_args_and_user_extra_last(monkeypatch):
     monkeypatch.setattr(Settings.llm, "vllm_extra_args", "--max-model-len 16384")
-    server, popen = _mk_server(model="numind/NuExtract3", port=9999)
+    server, popen = _mk_server(model="scienceverse/bibr-extract-qwen35-4b", port=9999)
     cmd = popen.call_args[0][0]
-    # MTP stays opt-in because it disables prefix caching and has a reported
-    # accuracy interaction; the registry only supplies non-speculative args.
-    assert "--speculative-config" not in cmd
     assert "--trust-remote-code" not in cmd
-    assert "--revision" in cmd
+    assert "--language-model-only" in cmd
     # User extra args appear AFTER the registry args (user wins on repeats).
     reg_idx = cmd.index("--max-model-len")
     user_idx = len(cmd) - 1 - cmd[::-1].index("--max-model-len")
@@ -177,9 +174,9 @@ def test_unset_local_model_launches_the_cuda_bf16_variant(monkeypatch):
     monkeypatch.setattr(Settings.llm, "local_model", None)
     _server, popen = _mk_server()
     cmd = popen.call_args[0][0]
-    assert "numind/NuExtract3" in cmd
+    assert "scienceverse/bibr-extract-qwen35-4b" in cmd
     assert not any("mlx" in part for part in cmd)
-    assert "--revision" in cmd  # the registry's launch args ride along
+    assert "--language-model-only" in cmd  # the registry's launch args ride along
 
 
 def _bare_server(process=None):
