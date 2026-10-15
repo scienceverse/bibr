@@ -70,6 +70,36 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "extras install failed ($LASTEXITCODE)" }
           & $py -c "import torch, transformers, cv2, gradio, anthropic; print('torch', torch.__version__, 'anthropic', anthropic.__version__)"
 
+  py315-uncapped:
+    name: Python 3.15 with the <3.15 cap lifted
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: latest
+          enable-cache: false
+
+      - name: pip install with requires-python <3.16
+        run: |
+          (Get-Content pyproject.toml) -replace 'requires-python = ">=3.11,<3.15"', 'requires-python = ">=3.11,<3.16"' | Set-Content pyproject.toml
+          uv python install 3.15
+          uv venv --seed --python 3.15 "$env:RUNNER_TEMP"
+          $py = "$env:RUNNER_TEMP\v\Scripts\python.exe"
+          & $py -m pip install --disable-pip-version-check --only-binary ":all:" . 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP\binary.log"
+          "only-binary exit: $LASTEXITCODE"
+          & $py -m pip install --disable-pip-version-check . 
+          if ($LASTEXITCODE -ne 0) { throw "pip install failed on 3.15" }
+          & $py -m pip list
+          & "$env:RUNNER_TEMP\v\Scripts\bibr.exe" --version
+          & "$env:RUNNER_TEMP\v\Scripts\bibr.exe" doctor
+          & $py -m pip install --disable-pip-version-check ".[ml,demo,batch]"
+          "extras exit: $LASTEXITCODE"
+
   uv-docs-path:
     name: Docs quickstart with uv (uv init, uv add)
     runs-on: windows-latest
