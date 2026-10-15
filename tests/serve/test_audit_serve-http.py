@@ -449,6 +449,7 @@ _EVERY_OPTION = {
     "include_regions": "false",
     "include_region_meta": "true",
     "crossref": "false",
+    "crossref_identity": "true",
     "consolidate": "fill",
     "refs": "ner",
     "ref_seg": "geom",

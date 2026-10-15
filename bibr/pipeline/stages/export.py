@@ -211,7 +211,9 @@ async def _consolidate_payload(ctx: PipelineContext, payload: dict) -> bool:
     """Verify, then consolidate, ``payload``'s bib rows against ``bib_match``.
 
     Verification runs first so a printed value it finds is not pre-empted by
-    consolidation's unprinted one. Returns whether either step ran.
+    consolidation's unprinted one. It also compares the paper's own title and
+    authors with ``metadata_match`` (``extraction.fields.<field>.registry``),
+    which only reports. Returns whether any step ran.
     """
     import asyncio
 
@@ -220,6 +222,11 @@ async def _consolidate_payload(ctx: PipelineContext, payload: dict) -> bool:
         from bibr.enrich.verify import verify_bibs
 
         await asyncio.to_thread(verify_bibs, payload)
+        verified = True
+    if ctx.settings.crossref.verify and payload.get("metadata_match"):
+        from bibr.enrich.verify_identity import verify_identity
+
+        await asyncio.to_thread(verify_identity, payload)
         verified = True
     mode = ctx.config.consolidate or ctx.settings.crossref.consolidate
     if mode == "off":
@@ -347,6 +354,9 @@ class ExportStage:
                             core_payload,
                             durable_sidecar,
                             expected_settings_digest=settings_digest,
+                            references_enriched=(
+                                ctx.config.enrichment_mode(ctx.settings) == "full"
+                            ),
                         )
                         # The replayed core's extraction block predates
                         # enrichment, so its timings omit the enrich stage even

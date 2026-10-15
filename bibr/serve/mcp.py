@@ -291,6 +291,7 @@ def build_serve_mcp(
         refs: str | None,
         consolidate: str | None,
         crossref: bool | None = None,
+        crossref_identity: bool | None = None,
     ) -> dict[str, str]:
         raw_options = {
             "start_page": "" if start_page is None else str(start_page),
@@ -299,6 +300,9 @@ def build_serve_mcp(
             "consolidate": consolidate or "",
             # Tri-state like the form field: absent → "" → dropped → server default.
             "crossref": "" if crossref is None else ("true" if crossref else "false"),
+            "crossref_identity": (
+                "" if crossref_identity is None else ("true" if crossref_identity else "false")
+            ),
         }
         try:
             return _validate_upload_options(raw_options)
@@ -376,6 +380,7 @@ def build_serve_mcp(
         refs: str | None = None,
         consolidate: str | None = None,
         crossref: bool | None = None,
+        crossref_identity: bool | None = None,
         *,
         ctx: Context,
     ) -> dict[str, Any]:
@@ -388,10 +393,13 @@ def build_serve_mcp(
         start_page/end_page (0-indexed, inclusive — the first page is 0),
         refs (ner|llm|llm-chunked|ref-llm|off), consolidate (fill|replace), and
         crossref (true runs Crossref/resolver reference enrichment, false skips
-        it; omit for the server default, which is off). Large papers can take
-        minutes.
+        it; omit for the server default, which is off), and crossref_identity
+        (true looks up only the paper's own DOI when enrichment is off; omit
+        for the server default, which is off). Large papers can take minutes.
         """
-        options = _validated_options(start_page, end_page, refs, consolidate, crossref)
+        options = _validated_options(
+            start_page, end_page, refs, consolidate, crossref, crossref_identity
+        )
         async with _admission_slots() as admission:
             if len(content_base64) > base64_envelope(upload_store.max_size):
                 max_mib = upload_store.max_size / 1024 / 1024
@@ -420,6 +428,7 @@ def build_serve_mcp(
             refs: str | None = None,
             consolidate: str | None = None,
             crossref: bool | None = None,
+            crossref_identity: bool | None = None,
             *,
             ctx: Context,
         ) -> dict[str, Any]:
@@ -433,7 +442,9 @@ def build_serve_mcp(
             this over chew_paper for anything you would otherwise download
             just to re-upload.
             """
-            options = _validated_options(start_page, end_page, refs, consolidate, crossref)
+            options = _validated_options(
+                start_page, end_page, refs, consolidate, crossref, crossref_identity
+            )
             started = time.monotonic()
             async with _admission_slots() as admission:
                 try:

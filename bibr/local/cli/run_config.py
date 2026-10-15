@@ -27,6 +27,10 @@ class ResolvedRunConfig:
     crossref: bool | None = None
     """Tri-state enrichment switch: ``True`` (``--crossref``), ``False``
     (``--no-crossref``), ``None`` follows ``CROSSREF_ENRICH`` (off by default)."""
+    crossref_identity: bool | None = None
+    """Tri-state paper-DOI lookup switch: ``True`` (``--crossref-identity``),
+    ``False`` (``--no-crossref-identity``), ``None`` follows
+    ``CROSSREF_IDENTITY`` (off by default)."""
     equations: bool = True
     no_llm: bool = False
     figure_images: bool | None = None
@@ -56,12 +60,25 @@ class ResolvedRunConfig:
 
         return bool(Settings.crossref.enrich)
 
+    def identity_lookup_enabled(self) -> bool:
+        """Whether this run looks up only the paper's own DOI (mirrors
+        ``RunConfig.enrichment_mode == "identity"``): asked for by
+        ``--crossref-identity`` or ``CROSSREF_IDENTITY``, and reference
+        enrichment is off. ``--no-llm`` makes no external calls."""
+        if self.no_llm or self.enrichment_enabled():
+            return False
+        if self.crossref_identity is not None:
+            return self.crossref_identity
+        from bibr.config import Settings
+
+        return bool(Settings.crossref.identity)
+
     def active_stages(self, files: Iterable[Path] | None = None) -> list[str]:
         """Progress stages for known input formats, or every format before discovery."""
         from bibr.pipeline.progress import STAGES, stages_for_files
 
         stages = list(STAGES) if files is None else stages_for_files(STAGES, files)
-        if not self.enrichment_enabled():
+        if not self.enrichment_enabled() and not self.identity_lookup_enabled():
             stages.remove("enrich")
         return stages
 
@@ -136,6 +153,7 @@ def resolve_run_config(args) -> ResolvedRunConfig:
         ocr_profile=explicit_profile or configured_profile,
         device=args.device,
         crossref=_resolve_crossref_flag(args),
+        crossref_identity=_resolve_crossref_identity_flag(args),
         equations=not args.no_equations,
         no_llm=args.no_llm,
         figure_images=args.figure_images or None,
@@ -156,6 +174,15 @@ def _resolve_crossref_flag(args) -> bool | None:
     if getattr(args, "crossref", False):
         return True
     if getattr(args, "no_crossref", False):
+        return False
+    return None
+
+
+def _resolve_crossref_identity_flag(args) -> bool | None:
+    """``--crossref-identity`` → True, ``--no-crossref-identity`` → False, else None."""
+    if getattr(args, "crossref_identity", False):
+        return True
+    if getattr(args, "no_crossref_identity", False):
         return False
     return None
 

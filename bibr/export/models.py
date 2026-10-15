@@ -24,11 +24,22 @@ from typing import Annotated, Any, ClassVar, Literal, Union, cast, get_args, get
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 from pydantic.fields import FieldInfo
 
-_SCHEMA_VERSION = "12.2"
+_SCHEMA_VERSION = "12.3"
 
 
 # ---------------------------------------------------------------------------
-# Pydantic v12.2 export schema — single source of truth for validation
+# Pydantic v12.3 export schema — single source of truth for validation
+#
+# v12.3 (vs 12.2) — additive:
+#   - New ``extraction.fields.title.registry`` and
+#     ``extraction.fields.author.registry``: ``{service, outcome}``, where
+#     ``outcome`` says whether the exported title or author list ``agree``s or
+#     ``disagree``s with the paper's own confident ``metadata_match`` record
+#     (``corrected`` is reserved for a later rule). The exported values are
+#     never changed. Omitted when there is no confident record, so every 12.2
+#     export is still a valid 12.3 reader input.
+#   - New ``metadata_match[].subtitle``: the record's subtitle where the
+#     service keeps it apart from ``title`` (Crossref). Omitted when absent.
 #
 # v12.2 (vs 12.1) — additive:
 #   - New ``extraction.diagnostics.verification[]``: per reference with a
@@ -1132,6 +1143,11 @@ class MetadataMatchExport(BaseModel):
         default=None, pattern=DOI_PATTERN, description="DOI of the matched record, lowercase."
     )
     title: str | None = Field(default=None, description="Title of the matched record.")
+    subtitle: str | None = Field(
+        default=None,
+        description="Subtitle of the matched record, where the service keeps it apart from "
+        "title (Crossref does). Omitted when the record has none.",
+    )
     author: list[PersonNameExport] | None = Field(
         default=None, description="Structured authors of the matched record; null when none."
     )
@@ -1166,6 +1182,16 @@ class MetadataMatchExport(BaseModel):
     funder: list[MatchFunderExport] | None = Field(
         default=None, description="Funders and awards the record lists."
     )
+
+    # A reader of a 12.2 export finds no ``subtitle``.
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("subtitle",)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_subtitle(self, handler):
+        data = handler(self)
+        if data.get("subtitle") is None:
+            data.pop("subtitle", None)
+        return data
 
 
 class AffiliationMatchExport(BaseModel):
@@ -1692,6 +1718,32 @@ class VerificationExport(BaseModel):
         return data
 
 
+RegistryOutcomeLiteral = Literal["agree", "disagree", "corrected"]
+
+
+class FieldRegistryExport(BaseModel):
+    """How an exported field compares with the paper's own registry record.
+
+    The record is the confident ``metadata_match`` row (score at least 0.9) of
+    the paper's DOI. It never replaces the exported value.
+    """
+
+    model_config = _STRICT
+
+    service: MatchServiceLiteral = Field(
+        description="Service of the metadata_match record compared."
+    )
+    outcome: RegistryOutcomeLiteral = Field(
+        description="'agree': the exported value says the same as the record. Titles are "
+        "compared case- and punctuation-insensitively, and one may be a word-aligned prefix "
+        "of the other that keeps at least 70% of it; the record's title is also tried with "
+        "its subtitle appended. Author lists agree when their full names pair up with an F1 "
+        "of at least 0.9, whatever the given/family split. 'disagree': they differ, and the "
+        "export keeps its own value. 'corrected' is reserved for a printed value chosen "
+        "because the record agrees with it; bibr does not write it yet."
+    )
+
+
 class FieldRecordExport(BaseModel):
     """What happened to one field (``extraction.fields``)."""
 
@@ -1721,15 +1773,24 @@ class FieldRecordExport(BaseModel):
         "'abstract_section_fallback', 'correction_notice', 'abstained'. Omitted when the "
         "field has no such decision (doi, bib), and in exports that predate it.",
     )
+    registry: FieldRegistryExport | None = Field(
+        default=None,
+        description="How the value compares with the paper's own registry record, for title "
+        "and author. Omitted when there is no confident metadata_match record (no DOI, no "
+        "lookup, or none found), when the record lacks the field or has another DOI, when "
+        "CROSSREF_VERIFY is off, and in exports that predate it.",
+    )
 
-    # A reader of an earlier 12.1 export finds no ``rule``.
-    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("rule",)
+    # A reader of an earlier 12.1 export finds no ``rule``, of a 12.2 export no
+    # ``registry``.
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("rule", "registry")
 
     @model_serializer(mode="wrap")
-    def _omit_absent_rule(self, handler):
+    def _omit_absent_keys(self, handler):
         data = handler(self)
-        if data.get("rule") is None:
-            data.pop("rule", None)
+        for key in self.OMITTED_WHEN_ABSENT:
+            if data.get(key) is None:
+                data.pop(key, None)
         return data
 
 
@@ -2216,7 +2277,7 @@ class PaperExport(BaseModel):
         "(bibr batch writes its corpus-unique id, the name of the JSON file). A converter uses "
         "the name of source.file_name without its extension.",
     )
-    schema_version: Literal["12.2"] = Field(
+    schema_version: Literal["12.3"] = Field(
         description="Export schema version. Its presence at the root is how readers "
         "distinguish v11 and later from all earlier versions.",
     )

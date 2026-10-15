@@ -569,6 +569,20 @@ value, so an enriched and an unenriched result for the same file never
 collide. Deployments that upgraded from a version where enrichment was on
 by default must now set `CROSSREF_ENRICH=true` to keep that behaviour.
 
+`CROSSREF_IDENTITY=true` (or the `crossref_identity=true|false` form field
+and MCP knob) asks for the paper's own record alone when reference
+enrichment is off: one DOI lookup per paper, about half a second, in place
+of a lookup per reference. Papers without a DOI make no request. The
+export's `extraction.fields.title.registry` and
+`extraction.fields.author.registry` then say whether the printed title and
+authors `agree` or `disagree` with that record. The lookup is best-effort:
+a Crossref error or timeout leaves the paper without a record and adds a
+warning, and does not hold the result back. **Privacy:** the lookup sends
+the paper's DOI to Crossref (or to your resolver), which tells the registry
+which paper is being processed. Turn it on only where your privacy notice
+covers that, and set `CROSSREF_API_EMAIL` so the requests use the polite
+pool.
+
 At volume, Crossref enrichment is rate-limited (`CROSSREF_RATE_LIMIT_RPM`,
 default `200`; raise it once you've set `CROSSREF_API_EMAIL` or have an
 API key) and can optionally be cached in Redis across requests
@@ -591,7 +605,9 @@ merged back into `bib`, or left only in `bib_match`.
 issue and pages against its confident match before that: a value the parser
 missed or misread is replaced by the match's value only when the reference
 string prints it, and every comparison is recorded in
-`extraction.diagnostics.verification`.
+`extraction.diagnostics.verification`. The same setting compares the
+paper's title and authors with its own `metadata_match` record and records
+the outcome in `extraction.fields.<field>.registry`, without changing them.
 
 ### Optional external resolver (`BIBR_RESOLVER_URL`)
 

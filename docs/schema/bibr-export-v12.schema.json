@@ -1830,6 +1830,18 @@
           "title": "Issues",
           "type": "array"
         },
+        "registry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FieldRegistryExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How the value compares with the paper's own registry record, for title and author. Omitted when there is no confident metadata_match record (no DOI, no lookup, or none found), when the record lacks the field or has another DOI, when CROSSREF_VERIFY is off, and in exports that predate it."
+        },
         "rule": {
           "default": null,
           "description": "The rule of the field's decision that chose the value or its absence, e.g. 'extracted', 'selected_record_title', 'layout_title_fallback', 'abstract_section_fallback', 'correction_notice', 'abstained'. Omitted when the field has no such decision (doi, bib), and in exports that predate it.",
@@ -1866,6 +1878,43 @@
         "issues"
       ],
       "title": "FieldRecordExport",
+      "type": "object"
+    },
+    "FieldRegistryExport": {
+      "additionalProperties": false,
+      "description": "How an exported field compares with the paper's own registry record.\n\nThe record is the confident ``metadata_match`` row (score at least 0.9) of\nthe paper's DOI. It never replaces the exported value.",
+      "properties": {
+        "outcome": {
+          "description": "'agree': the exported value says the same as the record. Titles are compared case- and punctuation-insensitively, and one may be a word-aligned prefix of the other that keeps at least 70% of it; the record's title is also tried with its subtitle appended. Author lists agree when their full names pair up with an F1 of at least 0.9, whatever the given/family split. 'disagree': they differ, and the export keeps its own value. 'corrected' is reserved for a printed value chosen because the record agrees with it; bibr does not write it yet.",
+          "enum": [
+            "agree",
+            "disagree",
+            "corrected"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "service": {
+          "description": "Service of the metadata_match record compared.",
+          "enum": [
+            "crossref",
+            "openalex",
+            "datacite",
+            "doi.org",
+            "openlibrary",
+            "ror",
+            "manual",
+            "other"
+          ],
+          "title": "Service",
+          "type": "string"
+        }
+      },
+      "required": [
+        "service",
+        "outcome"
+      ],
+      "title": "FieldRegistryExport",
       "type": "object"
     },
     "FieldStatesExport": {
@@ -3035,6 +3084,15 @@
           "default": null,
           "description": "The record's identifier at that service.",
           "title": "Service Id",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subtitle": {
+          "default": null,
+          "description": "Subtitle of the matched record, where the service keeps it apart from title (Crossref does). Omitted when the record has none.",
+          "title": "Subtitle",
           "type": [
             "string",
             "null"
@@ -4721,7 +4779,7 @@
       "type": "string"
     },
     "schema_version": {
-      "const": "12.2",
+      "const": "12.3",
       "description": "Export schema version. Its presence at the root is how readers distinguish v11 and later from all earlier versions.",
       "title": "Schema Version",
       "type": "string"

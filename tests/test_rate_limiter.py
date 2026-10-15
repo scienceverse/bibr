@@ -1,9 +1,25 @@
 """Tests for AsyncLocalRateLimiter."""
 
 import asyncio
+import gc
 import time
 
+import pytest
+
 from bibr.utils.rate_limiter import AsyncLocalRateLimiter
+
+
+@pytest.fixture(autouse=True)
+def _no_collection_pauses():
+    """These tests time waits of a tenth of a second. Late in a full run, one
+    collection of the session's heap can stall the event loop for longer."""
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if was_enabled:
+            gc.enable()
 
 
 class TestLocalRateLimiter:

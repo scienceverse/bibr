@@ -35,6 +35,7 @@ examples:
   references & output:
     bibr chew paper.pdf --crossref               # enrich references via Crossref (off by default)
     bibr chew paper.pdf --no-crossref            # force enrichment off (overrides CROSSREF_ENRICH=true)
+    bibr chew paper.pdf --crossref-identity      # look up only the paper's own DOI record
     bibr chew paper.pdf --refs llm               # full-precision LLM ref parser (default is local NER)
     bibr chew paper.pdf --refs off               # skip reference extraction entirely
     bibr chew paper.pdf --figure-images          # include base64 figure images
@@ -213,6 +214,21 @@ def _add_pipeline_options(parser: argparse.ArgumentParser) -> None:
         "--no-crossref",
         action="store_true",
         help="Disable Crossref reference enrichment for this run (overrides CROSSREF_ENRICH=true)",
+    )
+    crossref_identity = parser.add_mutually_exclusive_group()
+    crossref_identity.add_argument(
+        "--crossref-identity",
+        action="store_true",
+        help=(
+            "Look up only the paper's own DOI in Crossref (one request, which sends the DOI) "
+            "when reference enrichment is off, and compare the title and authors with that "
+            "record (off by default; overrides CROSSREF_IDENTITY=false)"
+        ),
+    )
+    crossref_identity.add_argument(
+        "--no-crossref-identity",
+        action="store_true",
+        help="Skip the paper DOI lookup for this run (overrides CROSSREF_IDENTITY=true)",
     )
     parser.add_argument(
         "--no-equations",
@@ -671,6 +687,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-crossref",
         action="store_true",
         help="Disable Crossref reference enrichment (as for 'bibr chew')",
+    )
+    mcp_identity = mcp_parser.add_mutually_exclusive_group()
+    mcp_identity.add_argument(
+        "--crossref-identity",
+        action="store_true",
+        help="Look up only the paper's own DOI when enrichment is off (as for 'bibr chew')",
+    )
+    mcp_identity.add_argument(
+        "--no-crossref-identity",
+        action="store_true",
+        help="Skip the paper DOI lookup (as for 'bibr chew')",
     )
     mcp_parser.add_argument(
         "--no-equations",

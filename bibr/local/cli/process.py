@@ -567,6 +567,7 @@ async def _run_process(args) -> None:
         consolidate=config.consolidate,
         ref_seg_strategy=config.ref_seg,
         ref_parse_strategy=config.refs,
+        crossref_identity=config.crossref_identity,
     )
 
     chunk_size = min(config.chunk_size, len(files))

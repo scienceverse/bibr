@@ -218,6 +218,75 @@ class CrossrefEnricher:
             )
 
 
+def needs_identity_lookup(paper) -> bool:
+    """Whether an identity-only run looks this paper up: it has a selected DOI.
+
+    The core checkpoint marks exactly these papers enrichment-pending and the
+    enrichment stage runs exactly these, so a paper without a DOI keeps its
+    core as the final export and costs no request.
+    """
+    metadata = getattr(paper, "metadata", None)
+    return bool(getattr(metadata, "doi", None))
+
+
+class CrossrefIdentityEnricher:
+    """Looks up the paper's own DOI only (one request), not its references.
+
+    Runs when ``RunConfig.enrichment_mode`` is ``"identity"``: the identity
+    lookup is wanted but reference enrichment is not. The record lands in
+    ``metadata.match`` exactly as :class:`CrossrefEnricher` would store it,
+    and the printed fields are never touched.
+
+    Best-effort like :class:`RorEnricher`: a failed or timed-out lookup leaves
+    the paper without a record and adds a warning, but never marks enrichment
+    partial, so a Crossref outage does not hold every export behind the
+    enrichment-pending gate.
+    """
+
+    name = "crossref_identity"
+
+    def __init__(
+        self,
+        timeout: float | None = None,
+        *,
+        settings: GlobalSettings | None = None,
+    ) -> None:
+        from bibr.config import snapshot_settings
+
+        self._timeout = timeout
+        self._settings = settings if settings is not None else snapshot_settings()
+
+    async def enrich(self, fs: FileState) -> EnrichmentOutcome:
+        paper = fs.paper
+        if paper is None or not needs_identity_lookup(paper):
+            return EnrichmentOutcome(EnrichmentStatus.NO_WORK)
+        from bibr.enrich.references import EnrichmentReport, enrich_paper_identity
+
+        timeout = (
+            self._timeout if self._timeout is not None else self._settings.crossref.enrich_timeout
+        )
+        try:
+            report = await asyncio.wait_for(
+                enrich_paper_identity(paper.metadata, settings=self._settings), timeout=timeout
+            )
+        except TimeoutError:
+            warning = ProcessingWarning(
+                WarningCode.CROSSREF_ENRICHMENT_TIMEOUT,
+                f"Paper DOI lookup timed out after {timeout:g}s",
+            )
+            logger.warning("[%s] paper DOI lookup timed out", fs.path.name)
+            return EnrichmentOutcome(EnrichmentStatus.COMPLETE, warnings=(warning,))
+        except Exception as e:  # noqa: BLE001 - the lookup is best-effort
+            warning = ProcessingWarning(
+                WarningCode.CROSSREF_ENRICHMENT_FAILED,
+                f"Paper DOI lookup failed: {describe_error(e)}",
+            )
+            logger.warning("[%s] paper DOI lookup failed: %s", fs.path.name, e)
+            return EnrichmentOutcome(EnrichmentStatus.COMPLETE, warnings=(warning,))
+        details = report.details if isinstance(report, EnrichmentReport) else ()
+        return EnrichmentOutcome(EnrichmentStatus.COMPLETE, warnings=tuple(details))
+
+
 class RorEnricher:
     """Matches affiliation strings and funder names to ROR organizations.
 

@@ -500,7 +500,7 @@ def _sanitize_request_id(raw: str | None) -> str | None:
 
 
 _BOOLEAN_OPTIONS = frozenset(
-    {"include_figures", "include_regions", "include_region_meta", "crossref"}
+    {"include_figures", "include_regions", "include_region_meta", "crossref", "crossref_identity"}
 )
 _INTEGER_OPTIONS = frozenset({"start_page", "end_page"})
 

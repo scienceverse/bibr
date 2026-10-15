@@ -366,6 +366,11 @@ class BibrPipelineAPI(ls.LitAPI):
         absent → the server-side CROSSREF_ENRICH setting, which is off by
         default. The response cache keys on the effective value, so an
         enriched and an unenriched result never collide.
+      - ``crossref_identity`` (optional bool): look up only the paper's own
+        DOI (one request) when reference enrichment does not run (``true``),
+        or not (``false``); absent → the server-side CROSSREF_IDENTITY
+        setting, which is off by default. Keyed in the response cache like
+        ``crossref``.
       - ``consolidate`` (optional, ``fill``/``replace``): merge accepted
         bib_match data into bib rows (absent → server-side
         CROSSREF_CONSOLIDATE setting; no per-request 'off' override)
@@ -593,6 +598,11 @@ class BibrPipelineAPI(ls.LitAPI):
         # Tri-state: absent/empty → None (defer to CROSSREF_ENRICH at run time).
         crossref_raw = request.get("crossref")
         crossref = None if crossref_raw in (None, "") else _opt_bool("crossref", crossref_raw)
+        # Tri-state too: absent/empty → None (defer to CROSSREF_IDENTITY).
+        identity_raw = request.get("crossref_identity")
+        crossref_identity = (
+            None if identity_raw in (None, "") else _opt_bool("crossref_identity", identity_raw)
+        )
 
         consolidate = request.get("consolidate")
         if consolidate in (None, ""):
@@ -625,6 +635,7 @@ class BibrPipelineAPI(ls.LitAPI):
             "include_regions": include_regions,
             "include_region_meta": include_region_meta,
             "crossref": crossref,
+            "crossref_identity": crossref_identity,
             "consolidate": consolidate,
             "refs": refs,
             "ref_seg": ref_seg,
@@ -676,6 +687,11 @@ class BibrPipelineAPI(ls.LitAPI):
         from bibr.extract.ref_extractor import _resolve_ref_strategies
 
         eff_ref_seg, eff_refs = _resolve_ref_strategies(ref_seg, refs)
+        # The identity-only lookup adds ``metadata_match`` to a run without
+        # reference enrichment, so such a result gets its own key.
+        effective_identity = self._effective_crossref_identity(
+            inputs.get("crossref_identity")
+        ) and not (effective_crossref and eff_refs != "off")
 
         # decode_request computes this while streaming. Direct embedders that
         # bypass decode retain a compatibility fallback.
@@ -701,6 +717,7 @@ class BibrPipelineAPI(ls.LitAPI):
             crossref=effective_crossref,
             input_format=Path(filename).suffix,
             include_region_meta=include_region_meta,
+            identity=effective_identity,
         )
 
         if not self._cache:
@@ -1084,6 +1101,7 @@ class BibrPipelineAPI(ls.LitAPI):
         refs = inputs.get("refs")
         ref_seg = inputs.get("ref_seg")
         crossref = inputs.get("crossref")
+        crossref_identity = inputs.get("crossref_identity")
 
         # Per-request fields ride on a fresh RunConfig; the pipeline is shared.
         overrides: dict[str, object] = {
@@ -1101,6 +1119,8 @@ class BibrPipelineAPI(ls.LitAPI):
         # with (normally None → CROSSREF_ENRICH).
         if crossref is not None:
             overrides["crossref"] = crossref
+        if crossref_identity is not None:
+            overrides["crossref_identity"] = crossref_identity
         config = dataclasses.replace(self._pipeline._config, **overrides)
 
         # Gate entry into the expensive pipeline run. The async loop dispatches
@@ -1212,6 +1232,17 @@ class BibrPipelineAPI(ls.LitAPI):
             return bool(deployment_default)
         return bool(self._settings.crossref.enrich)
 
+    def _effective_crossref_identity(self, requested: bool | None) -> bool:
+        """Resolve a request's tri-state ``crossref_identity`` like ``crossref``."""
+        if requested is not None:
+            return bool(requested)
+        pipeline = getattr(self, "_pipeline", None)
+        config = getattr(pipeline, "_config", None)
+        deployment_default = getattr(config, "crossref_identity", None)
+        if deployment_default is not None:
+            return bool(deployment_default)
+        return bool(self._settings.crossref.identity)
+
     @staticmethod
     def _cache_key(
         content_hash: str,
@@ -1225,6 +1256,7 @@ class BibrPipelineAPI(ls.LitAPI):
         crossref: bool = False,
         input_format: str | None = None,
         include_region_meta: bool = False,
+        identity: bool = False,
     ) -> str:
         """Response-cache key: the full SHA-256 of the upload (never the 16-hex
         ``file_hash`` display id) plus every option that changes the export.
@@ -1249,6 +1281,8 @@ class BibrPipelineAPI(ls.LitAPI):
             key += f":rseg:{ref_seg}"
         if crossref:
             key += ":enrich"
+        if identity:
+            key += ":ident"
         if input_format:
             key += f":fmt:{input_format.lstrip('.').lower()}"
         return key

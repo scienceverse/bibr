@@ -96,6 +96,18 @@ enrich by default, or switch it per run — `bibr chew --crossref` /
 `--no-crossref`, `bibr.chew(..., crossref=True)`, or the `crossref=true|false`
 form field on `/papers/extract` — which wins over the setting either way.
 
+To check the title and authors against the paper's own registry record
+without enriching the references, set `CROSSREF_IDENTITY=true` (or per run
+`bibr chew --crossref-identity`, `bibr.chew(..., crossref_identity=True)`, the
+`crossref_identity=true` form field). It makes one request per paper, only
+when a DOI was found, and that request sends the paper's DOI to Crossref (or
+your resolver). The record goes to `metadata_match`, and the export says
+whether the title and authors agree with it in
+`extraction.fields.title.registry` and `extraction.fields.author.registry`;
+the printed values are never changed. It is off by default, does nothing
+when reference enrichment is on (that already makes the lookup), and never
+runs with `--no-llm`.
+
 ## Choosing an OCR backend
 
 `bibr chew` defaults to the `paddle` startup selector. It selects a concrete

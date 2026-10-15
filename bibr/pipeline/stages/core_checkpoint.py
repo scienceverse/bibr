@@ -16,8 +16,24 @@ class CoreCheckpointStage:
     requires = ("paper",)
     produces = ("artifact_disposition", "core_sha256", "result_json")
 
-    def __init__(self, *, enrichment_requested: bool = False) -> None:
+    def __init__(
+        self, *, enrichment_requested: bool = False, identity_requested: bool = False
+    ) -> None:
+        # Whether the plan has reference enrichers / an identity-only enricher;
+        # each run then checks whether its config asks for them.
         self._enrichment_requested = enrichment_requested
+        self._identity_requested = identity_requested
+
+    def _pending(self, ctx, paper) -> bool:
+        """Whether the enrichment stage will look this paper up after the core."""
+        mode = ctx.config.enrichment_mode(ctx.settings)
+        if mode == "full":
+            return self._enrichment_requested
+        if mode == "identity" and self._identity_requested:
+            from bibr.pipeline.enricher import needs_identity_lookup
+
+            return needs_identity_lookup(paper)
+        return False
 
     async def run(self, ctx) -> None:
         ctx.progress.stage_start(self.name)
@@ -39,11 +55,7 @@ class CoreCheckpointStage:
                 # issue list. Resolve routing before adding our temporary gate.
                 serialized_issues = (payload_validation(payload) or {}).get("issues") or []
                 fs.artifact_disposition = disposition_for_issues(serialized_issues)
-                enrichment_requested = (
-                    self._enrichment_requested
-                    and ctx.config.enrichment_enabled(ctx.settings)
-                    and (ctx.config.ref_parse_strategy or ctx.settings.REF_PARSE_STRATEGY) != "off"
-                )
+                enrichment_requested = self._pending(ctx, paper)
                 if enrichment_requested:
                     payload = mark_enrichment_pending(payload)
                 fs.result_json = payload

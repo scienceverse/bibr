@@ -53,7 +53,8 @@ example names the papers directory with `--allow-dir`; see
 Pipeline options are fixed at server start (they configure the shared warm
 pipeline, exactly like `bibr.Chewer`): pass a subset of the `bibr chew`
 flags after `bibr mcp`, e.g. `bibr mcp --refs ner --crossref` (enrichment is
-off unless `--crossref` or `CROSSREF_ENRICH=true` turns it on). Everything
+off unless `--crossref` or `CROSSREF_ENRICH=true` turns it on, and
+`--crossref-identity` asks for the paper's own DOI lookup alone). Everything
 else (provider keys, model choice) comes from your `.env` /
 [settings](../reference/settings.md) as usual.
 
@@ -220,8 +221,10 @@ Three differences from the stdio server:
   `content_base64`, because client paths don't exist on the server (and the
   server never reads its own filesystem for clients). Per-call options match
   `POST /papers/extract`: `start_page`/`end_page`, `refs`, `consolidate`,
-  and `crossref` (`true`/`false`; omit to follow the server's
-  `CROSSREF_ENRICH`, which is off by default).
+  `crossref` (`true`/`false`; omit to follow the server's
+  `CROSSREF_ENRICH`, which is off by default) and `crossref_identity`
+  (`true` looks up only the paper's own DOI when enrichment is off; omit to
+  follow `CROSSREF_IDENTITY`, also off by default).
   Both MCP and REST use zero-based, inclusive page indices (`0` is the first page).
   `chew_url` avoids the upload entirely: the server downloads a public
   `https://` URL itself under the SSRF policy above, capped at the serve

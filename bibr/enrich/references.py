@@ -1352,6 +1352,7 @@ def _build_match(cr_item: CrossrefWorkItem, score: float) -> ExternalMatch:
         id=cr_item.doi,
         score=score,
         title=cr_item.title,
+        subtitle=cr_item.subtitle,
         authors=authors,
         year=cr_item.year,
         container=cr_item.container_title,

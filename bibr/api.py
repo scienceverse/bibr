@@ -105,6 +105,7 @@ _OPTION_TO_PIPELINE_ARG = {
     "ocr_profile": "ocr_profile",
     "device": "device",
     "crossref": "crossref",
+    "crossref_identity": "crossref_identity",
     "equations": "equations",
     "no_llm": "no_llm",
     "figure_images": "figure_images",
@@ -129,6 +130,7 @@ class ChewOptions(TypedDict, total=False):
     ocr_profile: Literal["paddle", "glm"] | None
     device: str | None
     crossref: bool | None
+    crossref_identity: bool | None
     equations: bool
     no_llm: bool
     figure_images: bool | None
@@ -793,6 +795,9 @@ def chew(
     ``crossref`` (tri-state: ``True`` runs Crossref/resolver reference
     enrichment for this call, ``False`` skips it, ``None``/omitted follows
     the ``CROSSREF_ENRICH`` setting, which is off by default),
+    ``crossref_identity`` (tri-state: ``True`` looks up only the paper's own
+    DOI, one request that sends the DOI to Crossref, when reference
+    enrichment is off; ``None`` follows ``CROSSREF_IDENTITY``, off by default),
     ``equations``, ``pages`` (1-based, e.g. ``"1-5"``), ``figure_images``,
     ``include_regions``, ``ocr_url``, ``ocr_model``, ``paper_id``
     (single-file only), ``batch_size`` (files per chunk, batch only),

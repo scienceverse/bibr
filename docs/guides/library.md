@@ -135,6 +135,7 @@ chew` CLI flags:
 | `no_llm` | `--no-llm` | Skip metadata LLM calls, equation extraction, citation linking, and Crossref; native metadata survives. OCR still uses the selected backend |
 | `device` | `--device` | Force compute device: `"cuda"`, `"mps"`, `"cpu"` |
 | `crossref` | `--crossref` / `--no-crossref` | Tri-state: `True` runs Crossref/resolver reference enrichment for this call, `False` skips it, omitted/`None` follows `CROSSREF_ENRICH` (off by default) |
+| `crossref_identity` | `--crossref-identity` / `--no-crossref-identity` | Tri-state: `True` looks up only the paper's own DOI (one request, which sends the DOI to Crossref) when reference enrichment is off, so the export can say whether the title and authors agree with the paper's record; omitted/`None` follows `CROSSREF_IDENTITY` (off by default) |
 | `equations` | `--no-equations` (inverted) | Enable/disable equation extraction |
 | `pages` | `--pages` | Page range to process, 1-based (e.g. `"1-5"`) |
 | `figure_images` | `--figure-images` | Include figure images in the output, as `data:` URIs |
@@ -187,6 +188,26 @@ result = bibr.chew("paper.pdf")
 enriched = result.consolidate()          # mode="fill" by default
 enriched = result.consolidate("replace")
 ```
+
+With reference enrichment or `crossref_identity=True`, a paper with a DOI
+gets its own registry record in `metadata_match`, and the export says
+whether the title and the author list agree with it:
+
+```python
+result = bibr.chew("paper.pdf", crossref_identity=True)
+fields = result.extraction["fields"]
+fields["title"].get("registry")    # {"service": "crossref", "outcome": "agree"}
+fields["author"].get("registry")   # None: no confident record to compare
+```
+
+`agree` means bibr's value says the same as the record. Titles are compared
+ignoring case and punctuation, and the record's title is also tried with its
+subtitle appended. Author lists are compared as full names, so a different
+split into given and family names still agrees. `disagree` means they
+differ, and either one may be wrong; the export keeps bibr's value either
+way. The key is absent when there was no lookup, no record with a score of
+0.9 or more for the paper's DOI, or the record lacks the field.
+`CROSSREF_VERIFY=false` turns the comparison off.
 
 ## Warm sessions
 

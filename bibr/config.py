@@ -1367,6 +1367,21 @@ class CrossrefOptions(_BibrSettings):
         "Per-run overrides: `bibr chew --crossref`/`--no-crossref`, `chew(crossref=...)`, "
         "or the serve API's `crossref` form field.",
     )
+    # The paper's own registry record without the reference fan-out: one DOI
+    # lookup per paper (about half a second against Crossref) instead of one
+    # per reference. It sends the paper's DOI to Crossref (or the resolver),
+    # which is why it is opt-in like enrichment itself. Full enrichment already
+    # makes this lookup, so the switch only matters when that is off.
+    identity: bool = Field(
+        False,
+        description="Look up the paper's own DOI in Crossref (or the configured resolver) when "
+        "reference enrichment is off: one request per paper with a selected DOI, which sends "
+        "that DOI to Crossref. The record goes to `metadata_match`, and the export compares the "
+        "title and authors with it (`extraction.fields.title.registry`, "
+        "`extraction.fields.author.registry`). Off by default; never runs without the LLM. "
+        "Per-run overrides: `bibr chew --crossref-identity`/`--no-crossref-identity`, "
+        "`chew(crossref_identity=...)`, or the serve API's `crossref_identity` form field.",
+    )
     # Every DOI-bearing reference otherwise costs its own /works/{doi} request
     # against a rate limiter shared by the whole process (and, with Redis, the
     # whole fleet). One /works?filter=doi:... request answers up to
@@ -1452,11 +1467,16 @@ class CrossrefOptions(_BibrSettings):
     # confident bib_match record at export. A disagreement is reported in
     # extraction.diagnostics.verification; a missing or misparsed value is
     # replaced only by the record's value as printed in the reference string.
+    # The paper's own title and authors are compared with its metadata_match
+    # record too, but that comparison is only reported, never applied.
     verify: bool = Field(
         True,
         description="Check parsed reference volume, issue and pages against the matched record "
         "at export: report disagreements, and fill or correct a value only when the record's "
-        "value is printed in the reference string. Needs enrichment; off leaves bib[] as parsed.",
+        "value is printed in the reference string. Also compares the paper's title and authors "
+        "with its own record (`extraction.fields.title.registry`, "
+        "`extraction.fields.author.registry`) without changing them. Needs enrichment or the "
+        "identity lookup; off leaves bib[] as parsed.",
     )
 
     @field_validator("consolidate", mode="before")
