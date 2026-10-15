@@ -87,9 +87,20 @@ def push(api: HfApi, args) -> str:
             api.request_space_hardware(repo, "zero-a10g")
         except HfHubHTTPError as exc:
             sys.exit(f"{repo} is on {hardware} and could not be moved to ZeroGPU: {exc}")
-    api.upload_folder(
-        folder_path=str(HERE), repo_id=repo, repo_type="space",
-        allow_patterns=SPACE_FILES, commit_message="Update the bibr demo",
+    # The extractor is a Space variable; the card preloads that model's weights.
+    api.add_space_variable(repo, "DEMO_EXTRACTOR", args.extractor)
+    card = (HERE / "README.md").read_text()
+    card = card.replace("scienceverse/bibr-extract-qwen35-4b", f"scienceverse/bibr-extract-qwen35-{args.extractor}")
+    from huggingface_hub import CommitOperationAdd
+
+    ops = [CommitOperationAdd("README.md", card.encode())]
+    for pattern in SPACE_FILES:
+        for path in sorted(HERE.glob(pattern)):
+            if path.name != "README.md":
+                ops.append(CommitOperationAdd(path.relative_to(HERE).as_posix(), str(path)))
+    api.create_commit(
+        repo, operations=ops, repo_type="space",
+        commit_message=f"Update the bibr demo ({args.extractor} extractor)",
     )
     print(f"pushed to {repo} ({'private' if info.private else 'PUBLIC'}): https://huggingface.co/spaces/{repo}")
     time.sleep(20)  # let the Space pick up the new commit
@@ -153,6 +164,15 @@ def run_paper(api: HfApi, args, pdf: Path) -> bool:
     return ok
 
 
+def status(api: HfApi, args) -> None:
+    """Print the Space's stage, its error message, and the end of its logs."""
+    repo = space_id(api, args)
+    runtime = api.get_space_runtime(repo)
+    print(f"{repo}: stage {runtime.stage}, hardware {runtime.hardware}")
+    print("error:", (runtime.raw or {}).get("errorMessage"))
+    tail_logs(repo, "run", lines=40)
+
+
 def publish(api: HfApi, args) -> None:
     repo = space_id(api, args)
     try:
@@ -164,13 +184,14 @@ def publish(api: HfApi, args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["launch", "push", "measure", "publish"])
+    parser.add_argument("command", choices=["launch", "push", "measure", "publish", "status"])
     parser.add_argument("pdf", nargs="?", type=Path, default=EXAMPLE)
     parser.add_argument("--name", default="bibr-demo")
     parser.add_argument("--owner")
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--public", action="store_true", help="launch: publish if the test passes")
     parser.add_argument("--allow-public-update", action="store_true")
+    parser.add_argument("--extractor", choices=["4b", "2b"], default="4b")
     args = parser.parse_args()
     api = HfApi()
     if args.command == "push":
@@ -180,7 +201,13 @@ def main() -> None:
             run_paper(api, args, args.pdf)
     elif args.command == "publish":
         publish(api, args)
+    elif args.command == "status":
+        status(api, args)
     else:
+        try:  # what the last run of the Space ended with, before replacing it
+            status(api, args)
+        except Exception as exc:  # noqa: BLE001 - a new Space has no status yet
+            print(f"(no earlier status: {type(exc).__name__})")
         if push(api, args) != "RUNNING":
             sys.exit("Not published: the Space did not start.")
         if not run_paper(api, args, args.pdf):

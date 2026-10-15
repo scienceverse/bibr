@@ -118,31 +118,61 @@ def _ensure_ref_adapter() -> Path:
     return download(REF_ADAPTER_DIR)
 
 
+def _memory() -> str:
+    """This process's resident memory and the container's limit, for the logs."""
+    rss = limit = "?"
+    try:
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith("VmRSS:"):
+                rss = f"{int(line.split()[1]) / 2**20:.1f} GiB"
+    except OSError:
+        pass
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            raw = Path(path).read_text().strip()
+            limit = raw if raw == "max" else f"{int(raw) / 2**30:.1f} GiB"
+            break
+        except (OSError, ValueError):
+            continue
+    return f"RSS {rss}, limit {limit}"
+
+
+def _loaded(name: str, make):
+    import time
+
+    logger.info("loading %s (%s)", name, _memory())
+    started = time.monotonic()
+    backend = make()
+    logger.info("loaded %s in %.0fs (%s)", name, time.monotonic() - started, _memory())
+    return backend
+
+
 def load_backends() -> dict[str, zm.Backend]:
     backends: dict[str, zm.Backend] = {}
-    ocr = zm.PaddleOcrBackend(*OCR_MODEL)
+    ocr = _loaded(OCR_MODEL[0], lambda: zm.PaddleOcrBackend(*OCR_MODEL))
     backends[ocr.alias] = ocr
     if DEMO_LLM == "local":
-        backends[EXTRACTOR[0]] = zm.ChatLlmBackend(
+        backends[EXTRACTOR[0]] = _loaded(EXTRACTOR[0], lambda: zm.ChatLlmBackend(
             EXTRACTOR[0],
             EXTRACTOR[0],
             revision=EXTRACTOR[1],
             max_batch=4,
             default_max_tokens=4096,
             template_defaults=NO_THINKING,
-        )
+        ))
     if REF_REVIEW:
-        backends[REF_ALIAS] = zm.ChatLlmBackend(
+        adapter_dir = str(_ensure_ref_adapter())
+        backends[REF_ALIAS] = _loaded(REF_ALIAS, lambda: zm.ChatLlmBackend(
             REF_ALIAS,
             REF_BASE[0],
             revision=REF_BASE[1],
-            adapter_dir=str(_ensure_ref_adapter()),
+            adapter_dir=adapter_dir,
             max_batch=16,
             default_max_tokens=512,
             duration_per_item=1,
             duration_cap=45,
             template_defaults=NO_THINKING,
-        )
+        ))
     return backends
 
 
