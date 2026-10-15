@@ -12,12 +12,16 @@ import asyncio
 import logging
 import os
 import random
-from typing import Any, ClassVar
+import time
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import BaseModel
 
 from bibr.config import snapshot_settings
 from bibr.ocr.registry import register
+
+if TYPE_CHECKING:
+    from bibr.exceptions import UpstreamServiceError
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +127,14 @@ class CloudOcrClient:
     # Systemic config/auth failures — every region will fail the same way.
     # Raise instead of degrading silently to blank content.
     _FATAL_STATUS: ClassVar[set[int]] = {401, 403, 404}
+    # A provider that keeps answering 429 after every retry has usually run out
+    # of quota (a free-tier key's daily limit), not hit a burst. Each region
+    # would still spend its retries and limiter slots before shipping blank, so
+    # a long paper ground on for an hour. After this many regions in a row end
+    # rate-limited, fail the file with a clear error instead, and fail further
+    # regions at once for _RATE_LIMIT_COOLDOWN_S so the other pages stop too.
+    _RATE_LIMIT_TRIP_REGIONS: ClassVar[int] = 5
+    _RATE_LIMIT_COOLDOWN_S: ClassVar[float] = 120.0
 
     def __init__(self, provider: str = "google", settings=None, **_kw: object):
         self._settings = settings if settings is not None else snapshot_settings()
@@ -130,6 +142,8 @@ class CloudOcrClient:
         self._client = None  # lazy-init
         self._init_lock = asyncio.Lock()
         self._loaded = True
+        self._rate_limited_regions = 0
+        self._rate_limited_until = 0.0
 
         from bibr.utils.circuit_breaker import AsyncCircuitBreaker
         from bibr.utils.rate_limiter import AsyncLocalRateLimiter
@@ -213,6 +227,9 @@ class CloudOcrClient:
 
         from bibr.ocr.image_utils import pil_to_base64_glmocr
 
+        if time.monotonic() < getattr(self, "_rate_limited_until", 0.0):
+            raise self._quota_error()
+
         image_b64 = pil_to_base64_glmocr(image)
         vision_prompt = self._resolve_prompt(prompt)
         img = InstructorImage.from_raw_base64(image_b64)
@@ -256,9 +273,10 @@ class CloudOcrClient:
                         timeout=hard_timeout,
                     )
                     text: str = result.text
+                    self._rate_limited_regions = 0
                     return text
             except Exception as exc:
-                from bibr.clients.llm import http_status_in_chain
+                from bibr.clients.llm import _is_provider_429, http_status_in_chain
 
                 last_exc = exc
                 # Check if transient (retryable). Instructor wraps the SDK's
@@ -282,6 +300,8 @@ class CloudOcrClient:
                         f"fatal status {status} — backend misconfigured or unauthorized",
                         original_error=exc,
                     ) from exc
+                if is_last and (status == 429 or _is_provider_429(exc)):
+                    self._note_rate_limited_region(exc)
                 if not transient or is_last:
                     logger.warning(
                         "CloudOcrClient(%s) failed after %d attempt(s): %s",
@@ -308,6 +328,29 @@ class CloudOcrClient:
         # Unreachable, but satisfies type checker
         logger.warning("CloudOcrClient(%s) exhausted retries: %s", self._provider, last_exc)
         return ""
+
+    def _quota_error(self, original_error: BaseException | None = None) -> UpstreamServiceError:
+        from bibr.exceptions import UpstreamServiceError
+
+        model = self._effective_settings.ocr_vision.model
+        return UpstreamServiceError(
+            f"ocr_vision/{self._provider}",
+            f"rate limited (429) on {self._RATE_LIMIT_TRIP_REGIONS} regions in a row with "
+            f"{model}; the API key's quota is probably used up. Check the provider's quota "
+            "page, use a key with a paid tier, or lower OCR_VISION_RATE_LIMIT_RPM",
+            original_error=original_error,
+        )
+
+    def _note_rate_limited_region(self, exc: BaseException) -> None:
+        """Count a region whose retries all ended in 429; trip after a run of them."""
+        self._rate_limited_regions = getattr(self, "_rate_limited_regions", 0) + 1
+        if self._rate_limited_regions < self._RATE_LIMIT_TRIP_REGIONS:
+            return
+        self._rate_limited_until = time.monotonic() + self._RATE_LIMIT_COOLDOWN_S
+        self._rate_limited_regions = 0
+        error = self._quota_error(exc)
+        logger.error("CloudOcrClient(%s) %s", self._provider, error)
+        raise error from exc
 
     async def wait_for_server(self) -> None:
         """No-op — cloud providers are always available."""

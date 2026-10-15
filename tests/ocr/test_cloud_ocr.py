@@ -412,6 +412,58 @@ async def test_recognize_returns_empty_after_max_retries(mock_cloud_client, _moc
     assert mock_instructor.create.await_count == 3  # _MAX_RETRIES
 
 
+def _rate_limited() -> Exception:
+    exc = Exception("429 RESOURCE_EXHAUSTED")
+    exc.status_code = 429
+    return exc
+
+
+async def test_recognize_fails_fast_once_quota_is_used_up(mock_cloud_client, _mock_image_utils):
+    """A key out of quota answers 429 to every retry; after a run of such regions
+    the file fails with a clear error instead of grinding through every region."""
+    from bibr.exceptions import UpstreamServiceError
+
+    mock_instructor = AsyncMock()
+    mock_instructor.create = AsyncMock(side_effect=_rate_limited())
+    mock_cloud_client._client = mock_instructor
+    mock_cloud_client._rate_limiter = AsyncMock()
+    trip = CloudOcrClient._RATE_LIMIT_TRIP_REGIONS
+
+    with patch("bibr.local.ocr_cloud.asyncio.sleep", new_callable=AsyncMock):
+        for _ in range(trip - 1):
+            assert await mock_cloud_client.recognize(MagicMock(), "Text Recognition:") == ""
+        with pytest.raises(UpstreamServiceError, match="quota"):
+            await mock_cloud_client.recognize(MagicMock(), "Text Recognition:")
+        calls = mock_instructor.create.await_count
+        assert calls == trip * CloudOcrClient._MAX_RETRIES
+
+        # Later regions fail at once, without another API call.
+        with pytest.raises(UpstreamServiceError, match="quota"):
+            await mock_cloud_client.recognize(MagicMock(), "Text Recognition:")
+        assert mock_instructor.create.await_count == calls
+
+
+async def test_recognize_rate_limit_run_resets_on_success(mock_cloud_client, _mock_image_utils):
+    """Occasional rate-limited regions between successes are a busy API, not a used-up quota."""
+    mock_instructor = AsyncMock()
+    mock_cloud_client._client = mock_instructor
+    mock_cloud_client._rate_limiter = AsyncMock()
+    exhausted = [_rate_limited()] * CloudOcrClient._MAX_RETRIES
+    trip = CloudOcrClient._RATE_LIMIT_TRIP_REGIONS
+    side_effect = []
+    for _ in range(3):
+        side_effect += exhausted * (trip - 1) + [OcrResult(text="ok")]
+    mock_instructor.create = AsyncMock(side_effect=side_effect)
+
+    with patch("bibr.local.ocr_cloud.asyncio.sleep", new_callable=AsyncMock):
+        results = [
+            await mock_cloud_client.recognize(MagicMock(), "Text Recognition:")
+            for _ in range(3 * trip)
+        ]
+    assert results.count("ok") == 3
+    assert results.count("") == 3 * (trip - 1)
+
+
 @pytest.mark.parametrize("status", [401, 403, 404])
 async def test_recognize_raises_on_fatal_auth_error(mock_cloud_client, _mock_image_utils, status):
     """recognize() raises UpstreamServiceError on auth/config status codes
