@@ -908,6 +908,7 @@ def test_write_references_needs_a_format(tmp_path):
         write_references(_export([_bib()]), tmp_path / "refs.txt")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows has no POSIX file modes or umask")
 def test_write_references_file_mode_follows_the_umask(tmp_path):
     mask = os.umask(0o022)
     try:
