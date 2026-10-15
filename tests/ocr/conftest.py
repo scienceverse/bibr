@@ -15,6 +15,7 @@ import pytest
 from bibr.local import ocr as _ocr  # noqa: F401 — triggers @register
 from bibr.local import ocr_cloud as _ocr_cloud  # noqa: F401 — triggers cloud @register
 from bibr.ocr import registry
+from bibr.ocr import text_layer as _text_layer  # noqa: F401 — triggers text-layer @register
 from bibr.serve import (
     ocr_backend as _serve_ocr_backend,  # noqa: F401 (side-effect: register serve-http)
 )

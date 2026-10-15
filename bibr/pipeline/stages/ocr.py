@@ -24,7 +24,7 @@ from bibr.ocr.profiles import (
     resolve_ocr_runtime_identity,
 )
 from bibr.ocr.ref_patterns import alnum_key, alnum_text_covered
-from bibr.ocr.registry import CLOUD_VISION_OCR_BACKENDS
+from bibr.ocr.registry import CLOUD_VISION_OCR_BACKENDS, TEXT_LAYER_BACKEND
 from bibr.ocr.types import OcrRegionResult
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.redact import describe_error, redact_urls
@@ -88,7 +88,8 @@ def _local_region_limit(settings: GlobalSettings, backend: str) -> int:
 def _backend_region_count(file_states) -> int:
     """Regions that will actually invoke the OCR backend.
 
-    Regions pre-filled by NativeTextStage (``_native_text_used``) and the
+    Regions pre-filled by NativeTextStage (``_native_text_used``), regions
+    the text-layer backend left unread (``_text_layer_unread``) and the
     ``abandon``/``skip`` task types bypass OCR, and a file that already carries
     ``ocr_regions`` (a cache hit) contributes nothing. Zero means no engine is
     needed for these files at all.
@@ -101,7 +102,7 @@ def _backend_region_count(file_states) -> int:
             for region in page_regions:
                 if region.get("task_type", "text") in ("abandon", "skip"):
                     continue
-                if region.get("_native_text_used"):
+                if region.get("_native_text_used") or region.get("_text_layer_unread"):
                     continue
                 total += 1
     return total
@@ -123,6 +124,12 @@ class OcrIdentityResolution:
 
     identity: OcrRuntimeIdentity | None
     engine_ready: bool
+
+
+def _text_layer_fallback_identity() -> OcrRuntimeIdentity:
+    from bibr.ocr.profiles import text_layer_identity
+
+    return text_layer_identity()
 
 
 def fail_ocr_targets(targets: list, exc: BaseException, *, stage: str, log: bool = True) -> None:
@@ -176,6 +183,17 @@ async def resolve_ocr_identity(
     requested_backend = cfg.ocr_backend or settings.ocr.backend
     automatic_backend = requested_backend == "paddle"
     identity = ctx.scratch.get("ocr_runtime_identity")
+
+    if automatic_backend:
+        from bibr.ocr.text_layer import text_layer_fallback_reason
+
+        if text_layer_fallback_reason(rm) is not None:
+            # No runtime of the automatic chain can start on this machine and
+            # OCR_FALLBACK_TO_TEXT_LAYER=auto: every file is read from its text
+            # layer, and no engine start is attempted.
+            identity = _text_layer_fallback_identity()
+            ctx.scratch["ocr_runtime_identity"] = identity
+            return OcrIdentityResolution(identity, False)
 
     runtime_identity = getattr(rm, "ocr_runtime_identity", None)
     runtime_client = getattr(rm, "ocr", None)
@@ -483,7 +501,8 @@ def _postprocess_ocr_regions(
         #    formulas), and a single "$...$" pair too, which would otherwise
         #    end up nested inside the "$$".
         for region in page_regions:
-            if region.get("label") == "formula":
+            # A formula read from the text layer is plain text, not LaTeX.
+            if region.get("label") == "formula" and region.get("_formula_source") != "text_layer":
                 content = region.get("content", "")
                 if content:
                     inner = strip_one_balanced_formula_wrapper(content, single_dollar=True)
@@ -639,6 +658,14 @@ async def _ocr_page_regions_impl(
                     content="",
                     image_b64=image_b64,
                 ).to_dict()
+            )
+            continue
+
+        # --- Text-layer backend: a region with no usable text-layer text
+        # ships empty; there is no OCR model to read it.
+        if region.get("_text_layer_unread") and not region.get("_native_text_used"):
+            region_list.append(
+                OcrRegionResult.from_layout_region(region, slot_idx=slot_idx, content="").to_dict()
             )
             continue
 
@@ -954,6 +981,13 @@ class OcrStage:
                 cached = ocr_cache.load(fs, cfg, identity, settings)
                 if cached is not None:
                     fs.ocr_regions = cached
+                    if identity.backend == TEXT_LAYER_BACKEND:
+                        from bibr.ocr.text_layer import (
+                            note_text_layer_fallback,
+                            text_layer_fallback_reason,
+                        )
+
+                        note_text_layer_fallback(fs, text_layer_fallback_reason(rm))
             self._check_ocr_success(ctx)
             alive = ctx.alive()
             if not alive:
@@ -962,6 +996,9 @@ class OcrStage:
         if alive and not pending:
             logger.debug("OCR stage: all files served from disk cache")
             return
+        text_layer = identity.backend == TEXT_LAYER_BACKEND
+        if text_layer:
+            await self._read_pending_text_layer(ctx, pending)
 
         # Shared-resource init failures (missing model, unreachable server)
         # must fail per-file rather than crash the whole chunk — subsequent
@@ -982,7 +1019,7 @@ class OcrStage:
         # It also decides whether an engine is started at all: a window whose
         # regions were all filled natively never pays for OCR startup.
         total_regions = _backend_region_count(pending)
-        engine_needed = total_regions > 0
+        engine_needed = total_regions > 0 and not text_layer
         if engine_needed and not resolution.engine_ready and ctx.signals.ocr_init_error is not None:
             # Chunk-scoped fast-fail for every backend. resolve_ocr_identity
             # covers the automatic chain before its startup; explicit backends
@@ -1014,20 +1051,30 @@ class OcrStage:
                 if isinstance(started, OcrRuntimeIdentity) and started != identity:
                     identity = started
                     ctx.scratch["ocr_runtime_identity"] = identity
+        elif text_layer:
+            logger.debug("OCR engine not started: the text-layer backend runs no OCR model")
         else:
             logger.info(
                 "OCR engine not started: native text covers every region of %d file(s)",
                 len(pending),
             )
+        if text_layer:
+            total_regions = 0
         ctx.progress.ocr_start(total_regions)
 
         raw_ocr_fn = rm.ocr.recognize if engine_needed else _no_engine_recognize
-        profile = resolve_ocr_profile(
-            explicit=identity.profile,
-            backend=identity.backend,
-            model=identity.model,
-            max_tokens=settings.ocr.generation_max_tokens,
-            temperature=settings.ocr.generation_temperature,
+        # The text-layer backend has no model profile; no prompt is ever sent,
+        # so the GLM profile only fills the slot the region code expects.
+        profile = (
+            GLM_PROFILE
+            if text_layer
+            else resolve_ocr_profile(
+                explicit=identity.profile,
+                backend=identity.backend,
+                model=identity.model,
+                max_tokens=settings.ocr.generation_max_tokens,
+                temperature=settings.ocr.generation_temperature,
+            )
         )
         ctx.scratch["ocr_profile"] = profile
 
@@ -1098,6 +1145,68 @@ class OcrStage:
                 await rm.shutdown_ocr()
 
     @staticmethod
+    async def _read_pending_text_layer(ctx, pending: list) -> None:
+        """Read the pending files' regions from their text layer; nothing goes to OCR.
+
+        The native-text stage reads them when the run starts in text-layer
+        mode. A file it passed before the automatic backend fell back is read
+        here. Any region still waiting for OCR after that is marked unread.
+        """
+        from bibr.ocr.text_layer import read_file_text_layer, text_layer_fallback_reason
+
+        fallback_reason = text_layer_fallback_reason(ctx.resources)
+        for fs in pending:
+            if not fs.text_layer_read:
+                await read_file_text_layer(fs, ctx.settings, fallback_reason=fallback_reason)
+            for page in fs.layout_results or []:
+                for region in page:
+                    if region.get("task_type", "text") in ("abandon", "skip"):
+                        continue
+                    if not region.get("_native_text_used"):
+                        region["_text_layer_unread"] = True
+
+    @staticmethod
+    def _check_text_layer_success(fs, threshold: float, fallback_reason: str | None) -> None:
+        """Fail a file read from its text layer whose text regions are mostly empty.
+
+        The share counts the running-text regions (``bibr.scan.page_kind``'s
+        text labels); formulas and tables drawn as paths do not make a file a
+        scan. Below ``OCR_MIN_SUCCESS_RATE`` the file is a scanned PDF (or one
+        with a broken text layer), which needs OCR. With *fallback_reason* (the
+        automatic backend fell back because no OCR runtime starts here) that is
+        an outage, which a resumed batch retries.
+        """
+        from bibr.scan.page_kind import _TEXT_LABELS
+
+        needed = 0
+        filled = 0
+        for page in fs.ocr_regions:
+            for region in page:
+                label = region.native_label or region.label or "text"
+                if label not in _TEXT_LABELS:
+                    continue
+                needed += 1
+                if region.content.strip():
+                    filled += 1
+        if needed == 0:
+            return
+        rate = filled / needed
+        if rate >= threshold:
+            return
+        msg = (
+            f"no usable text layer: only {filled}/{needed} text regions could be read from "
+            f"the PDF text layer ({rate:.0%} < {threshold:.0%} threshold). This looks like a "
+            "scanned PDF, which needs OCR: install llama.cpp for local OCR, pass --ocr-url "
+            "for an OCR server, or use a cloud OCR backend (--ocr gemini, openai or anthropic)"
+        )
+        # Read this way only because no OCR runtime could start here
+        # (OCR_FALLBACK_TO_TEXT_LAYER=auto): an outage, not the file's own
+        # failure, so a resumed batch reads it again once OCR is installed.
+        outage = fallback_reason is not None
+        fs.set_error(msg, code="scan_needs_ocr", stage="ocr", outage=outage)
+        logger.warning("%s: %s", fs.path.name, msg)
+
+    @staticmethod
     def _check_ocr_success(ctx) -> None:
         """Fail files where OCR delivered too little usable content.
 
@@ -1112,8 +1221,15 @@ class OcrStage:
         threshold = ctx.settings.ocr.min_success_rate
         if threshold <= 0:
             return
+        from bibr.ocr.text_layer import is_text_layer_mode, text_layer_fallback_reason
+
+        text_layer = is_text_layer_mode(ctx)
+        fallback_reason = text_layer_fallback_reason(ctx.resources) if text_layer else None
         for fs in ctx.alive():
             if fs.ocr_regions is None:
+                continue
+            if text_layer:
+                OcrStage._check_text_layer_success(fs, threshold, fallback_reason)
                 continue
             # A page that failed wholesale yields no regions at all, so it
             # lands in neither the numerator nor the denominator below: a file

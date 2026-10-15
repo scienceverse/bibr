@@ -118,6 +118,11 @@ def _dry_run_ocr_model(config: ResolvedRunConfig) -> tuple[str, str | None]:
         return served, None
     if backend in ("gemini", "openai", "anthropic"):
         return config.ocr_model or Settings.ocr_vision.model, None
+    if backend == "text-layer":
+        from bibr.ocr.registry import TEXT_LAYER_MODEL
+
+        # No weights: the PDF's own text layer is read.
+        return TEXT_LAYER_MODEL, None
     field = _OCR_LOCAL_WEIGHT_FIELD.get(backend)
     if field is None:
         return config.ocr_model or "(unknown)", None
@@ -417,7 +422,8 @@ def _print_dry_run_plan(
         candidate = candidates[0]
         out.print(f"  OCR backend: {escape(candidate.backend)}")
     out.print(f"  OCR model: {model_label}")
-    out.print(f"  OCR profile: {escape(config.ocr_profile or candidates[0].profile)}")
+    profile_label = config.ocr_profile or candidates[0].profile or "none (no OCR model)"
+    out.print(f"  OCR profile: {escape(profile_label)}")
     out.print(ui.kv("llm", _dry_run_llm_label(config)))
     refs_value = "disabled (--no-llm)"
     if not config.no_llm:

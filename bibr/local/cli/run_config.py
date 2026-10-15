@@ -2,8 +2,8 @@
 
 import os
 import sys
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from bibr.local.cli.parser import normalize_ocr_backend
@@ -39,6 +39,22 @@ class ResolvedRunConfig:
     ref_seg: str | None = None
     refs: str | None = None
     ocr_summary_model: str | None = None
+    ocr_text_layer_fallback: str | None = None
+    """Why no automatic OCR runtime can start here, when
+    ``OCR_FALLBACK_TO_TEXT_LAYER=auto`` swapped ``ocr_backend`` to
+    ``text-layer`` (:func:`apply_text_layer_fallback`)."""
+
+    @property
+    def pipeline_ocr_backend(self) -> str:
+        """The OCR backend the pipeline is built with.
+
+        After the text-layer fallback the pipeline gets the automatic backend
+        back: it finds the same blocker, switches to the text layer itself and
+        marks each file it reads that way (``OCR_BACKEND_UNAVAILABLE``), as a
+        library run on this machine does. An explicit ``--ocr text-layer``
+        run carries no such warning.
+        """
+        return "paddle" if self.ocr_text_layer_fallback else self.ocr_backend
 
     def enrichment_enabled(self) -> bool:
         """Whether this run enriches references (mirrors ``RunConfig.enrichment_enabled``).
@@ -332,39 +348,13 @@ def _ocr_candidate_unavailable_reason(backend: str) -> str | None:
 
     Returns ``None`` for backends this function does not vet (HTTP and cloud
     backends validate themselves at startup) and for runtimes whose launcher
-    and hardware are present.
+    and hardware are present. The check itself is the library's
+    (:func:`bibr.ocr.registry.local_runtime_unavailable_reason`), which the
+    text-layer fallback also asks.
     """
-    if backend == "paddle-vllm":
-        import importlib.util
-        import shutil
+    from bibr.ocr.registry import local_runtime_unavailable_reason
 
-        from bibr.ocr.registry import paddle_vllm_unavailable_reason
-
-        reason = paddle_vllm_unavailable_reason()
-        if reason is not None:
-            return reason
-        if importlib.util.find_spec("vllm") is None and shutil.which("uv") is None:
-            return (
-                "vllm is not installed and uv is unavailable to bootstrap it "
-                "(install with: uv sync --extra vllm)"
-            )
-        return None
-    if backend == "glm-llama":
-        from bibr.local.llama_cpp import find_llama_server, missing_binary_message
-
-        if find_llama_server() is None:
-            return missing_binary_message()
-        return None
-    if backend in {"paddle-rapid-mlx", "glm-rapid-mlx"}:
-        from bibr.local.rapid_mlx import rapid_mlx_unavailable_reason
-
-        reason = rapid_mlx_unavailable_reason()
-        if reason is not None:
-            return f"rapid-mlx launcher not available ({reason}); pip install 'rapid-mlx[guided]'"
-        return None
-    if backend == "glm-mlx":
-        return "this backend is disabled (vllm-mlx produced corrupted text); use glm-rapid-mlx"
-    return None
+    return local_runtime_unavailable_reason(backend)
 
 
 def _preflight_ocr_runtime(config: ResolvedRunConfig) -> str | None:
@@ -377,7 +367,59 @@ def _preflight_ocr_runtime(config: ResolvedRunConfig) -> str | None:
     """
     if config.ocr_url:
         return None
+    from bibr.ocr.registry import TEXT_LAYER_BACKEND
+
+    if config.ocr_backend == TEXT_LAYER_BACKEND:
+        # Reads the PDF's own text layer: there is no runtime to start.
+        return None
     return _ocr_runtime_blocker(config.ocr_backend)
+
+
+def apply_text_layer_fallback(
+    config: ResolvedRunConfig, preflight: Callable[[ResolvedRunConfig], str | None]
+) -> tuple[ResolvedRunConfig, str | None]:
+    """Swap an automatic OCR backend that cannot start for the text layer.
+
+    Only with ``OCR_FALLBACK_TO_TEXT_LAYER=auto``, the automatic ``paddle``
+    selector and no ``--ocr-url``. *preflight* is the caller's
+    :func:`_preflight_ocr_runtime` (each command module holds its own
+    reference). Returns the config to show and preflight, and, when it was
+    swapped, the warning to print once; otherwise the config unchanged and
+    None, and the caller's own preflight refuses the run as before. Build the
+    pipeline with :attr:`ResolvedRunConfig.pipeline_ocr_backend`.
+    """
+    from bibr.config import Settings
+    from bibr.ocr.registry import TEXT_LAYER_BACKEND, TEXT_LAYER_MODEL
+
+    if (
+        Settings.ocr.fallback_to_text_layer != "auto"
+        or config.ocr_url
+        or config.ocr_backend != "paddle"
+    ):
+        return config, None
+    refusal = preflight(config)
+    if refusal is None:
+        return config, None
+    # The refusal lists one "  - <backend>: <reason>" line per candidate and
+    # then the alternatives, one of which is this setting: keep the reasons.
+    blockers = [
+        line.strip()[2:] for line in refusal.splitlines() if line.strip().startswith("- ")
+    ] or [refusal.split("Alternatives:", 1)[0].strip()]
+    swapped = replace(
+        config,
+        ocr_backend=TEXT_LAYER_BACKEND,
+        ocr_model=None,
+        ocr_profile=None,
+        ocr_summary_model=TEXT_LAYER_MODEL,
+        ocr_text_layer_fallback="; ".join(blockers),
+    )
+    listed = "\n".join(f"  - {blocker}" for blocker in blockers)
+    warning = (
+        "No OCR backend can start on this machine, so PDFs are read from their embedded "
+        "text layer (OCR_FALLBACK_TO_TEXT_LAYER=auto). Born-digital PDFs work; scanned PDFs "
+        f"fail, since they need OCR:\n{listed}"
+    )
+    return swapped, warning
 
 
 def _ocr_runtime_blocker(ocr_backend: str) -> str | None:
@@ -398,8 +440,9 @@ def _ocr_runtime_blocker(ocr_backend: str) -> str | None:
     if not blockers:
         return None
     alternatives = (
-        "Alternatives: point --ocr-url at an external OCR server, or use a cloud vision "
-        "backend (--ocr gemini|openai|anthropic)."
+        "Alternatives: point --ocr-url at an external OCR server, use a cloud vision "
+        "backend (--ocr gemini|openai|anthropic), or read born-digital PDFs from their "
+        "text layer without OCR (--ocr text-layer, or OCR_FALLBACK_TO_TEXT_LAYER=auto)."
     )
     if len(blockers) == 1 and ocr_backend != "paddle":
         return f"OCR backend cannot start here — {blockers[0]}. {alternatives}"

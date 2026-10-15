@@ -116,6 +116,22 @@ region whose OCR request failed; the page then carries an
 Remaining regions use the selected OCR runtime.
 Disabling the bypass leaves metadata, outline, and geometry inspection available.
 
+**Text-layer backend (`bibr/ocr/text_layer.py`).** With `--ocr text-layer`
+(or with `OCR_FALLBACK_TO_TEXT_LAYER=auto` on a machine where no runtime of
+the automatic backend can start, `ResourceManager.check_text_layer_fallback`)
+no OCR model runs. The native-text stage then reads every region OCR
+would read from the text layer: page furniture, captions (cut to the caption's
+own lines, so axis labels above "Figure 2" stay out), formulas as plain text,
+and tables rebuilt from word positions (`bibr/ocr/text_layer_tables.py`).
+Each page must pass the gates in `bibr/ocr/text_layer_quality.py`: the share
+of its text area holding glyphs, glyph boxes on the rendered page's ink and
+ink under glyph boxes, and word statistics that catch a font encoding mapped
+to the wrong letters. A failing page keeps its regions but not their text,
+and page triage counts it as a scan or a broken text layer. The OCR stage
+emits the unread regions empty and fails a file whose text regions are mostly
+unread (`scan_needs_ocr`, at `OCR_MIN_SUCCESS_RATE`). `bibr serve` always
+reads pages through its own OCR deployment and does not offer this backend.
+
 **Scan path (`bibr/scan/`).** Each inspected page is classed as born-digital,
 born-digital with a broken text layer (most of its text regions failed the
 corruption gates), or a scan (no text layer, or an invisible OCR layer). Two

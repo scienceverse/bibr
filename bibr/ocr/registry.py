@@ -34,7 +34,16 @@ class OcrBackendCandidate:
 
     backend: str
     model: str
-    profile: OcrProfileName
+    # None only for the text-layer backend, which runs no OCR model.
+    profile: OcrProfileName | None
+
+
+#: The OCR backend that reads born-digital PDFs from their embedded text
+#: layer and runs no OCR model (:mod:`bibr.ocr.text_layer`). Scanned pages
+#: stay unread. Its runtime identity names this model so its OCR-cache
+#: entries never mix with a model's.
+TEXT_LAYER_BACKEND = "text-layer"
+TEXT_LAYER_MODEL = "pdf-text-layer"
 
 
 # The managed PaddleOCR-VL vLLM server's ``--gpu-memory-utilization``. vLLM
@@ -127,6 +136,8 @@ def _candidate_model(backend: str, settings: GlobalSettings) -> str:
 
 
 def _candidate(backend: str, settings: GlobalSettings) -> OcrBackendCandidate:
+    if backend == TEXT_LAYER_BACKEND:
+        return OcrBackendCandidate(backend=backend, model=TEXT_LAYER_MODEL, profile=None)
     return OcrBackendCandidate(
         backend=backend,
         model=_candidate_model(backend, settings),
@@ -173,14 +184,71 @@ def automatic_backend_names() -> tuple[str, ...]:
     return ("glm-llama",)
 
 
+def local_runtime_unavailable_reason(backend: str) -> str | None:
+    """Cheap, start-nothing check that a managed local OCR runtime can launch.
+
+    Returns ``None`` for backends this function does not vet (HTTP and cloud
+    backends validate themselves at startup) and for runtimes whose launcher
+    and hardware are present. The ``bibr chew`` preflight, ``bibr doctor``
+    and the text-layer fallback (:func:`automatic_chain_blockers`) all ask
+    here.
+    """
+    if backend == "paddle-vllm":
+        import importlib.util
+        import shutil
+
+        reason = paddle_vllm_unavailable_reason()
+        if reason is not None:
+            return reason
+        if importlib.util.find_spec("vllm") is None and shutil.which("uv") is None:
+            return (
+                "vllm is not installed and uv is unavailable to bootstrap it "
+                "(install with: uv sync --extra vllm)"
+            )
+        return None
+    if backend == "glm-llama":
+        from bibr.local.llama_cpp import find_llama_server, missing_binary_message
+
+        if find_llama_server() is None:
+            return missing_binary_message()
+        return None
+    if backend in {"paddle-rapid-mlx", "glm-rapid-mlx"}:
+        from bibr.local.rapid_mlx import rapid_mlx_unavailable_reason
+
+        reason = rapid_mlx_unavailable_reason()
+        if reason is not None:
+            return f"rapid-mlx launcher not available ({reason}); pip install 'rapid-mlx[guided]'"
+        return None
+    if backend == "glm-mlx":
+        return "this backend is disabled (vllm-mlx produced corrupted text); use glm-rapid-mlx"
+    return None
+
+
+def automatic_chain_blockers(settings: GlobalSettings) -> list[str]:
+    """Why no candidate of the automatic ``paddle`` chain can start here.
+
+    One ``"<backend>: <reason>"`` per candidate, checked without starting
+    anything; empty when any candidate can start (or is not vetted here).
+    With ``OCR_FALLBACK_TO_TEXT_LAYER=auto`` a non-empty answer switches the
+    run to the text layer (:mod:`bibr.ocr.text_layer`).
+    """
+    blockers: list[str] = []
+    for candidate in resolve_backend_candidates("paddle", settings):
+        reason = local_runtime_unavailable_reason(candidate.backend)
+        if reason is None:
+            return []
+        blockers.append(f"{candidate.backend}: {reason}")
+    return blockers
+
+
 #: The cloud vision-LLM OCR backends. They call their provider's API (set
 #: ``OCR_VISION_BASE_URL`` to move it), never an OCR server, and hold no local
 #: weights. The one definition every OCR module imports.
 CLOUD_VISION_OCR_BACKENDS = frozenset({"gemini", "openai", "anthropic"})
 
 #: Requests an ``ocr_url`` leaves alone: the two HTTP clients already address
-#: the URL, and the cloud vision backends ignore it.
-_URL_KEEPS_BACKEND = CLOUD_VISION_OCR_BACKENDS | {"paddle-http", "serve-http"}
+#: the URL, and the cloud vision backends and the text layer ignore it.
+_URL_KEEPS_BACKEND = CLOUD_VISION_OCR_BACKENDS | {"paddle-http", "serve-http", TEXT_LAYER_BACKEND}
 
 
 def url_request(explicit: str | None, configured: str | None) -> str | None:
@@ -189,15 +257,16 @@ def url_request(explicit: str | None, configured: str | None) -> str | None:
     ``explicit`` is the caller's backend (``--ocr``, ``ocr_backend=``,
     ``RunConfig.ocr_backend``) and is the request whenever it is set.
     Without it the configured ``OCR_BACKEND`` is the request, unless it names
-    a cloud vision provider: a server URL the caller named outranks a
-    configured cloud default, so page images never go to a cloud provider
-    because of a ``.env`` setting. ``None`` means no request (the default
-    ``paddle`` selector). Every entry point calls this before
+    a cloud vision provider or the text layer: a server URL the caller named
+    outranks a configured cloud default, so page images never go to a cloud
+    provider because of a ``.env`` setting, and a configured text-layer
+    default never leaves the named server unused. ``None`` means no request
+    (the default ``paddle`` selector). Every entry point calls this before
     :func:`resolve_url_backend`.
     """
     if explicit:
         return explicit
-    if configured in CLOUD_VISION_OCR_BACKENDS:
+    if configured in CLOUD_VISION_OCR_BACKENDS or configured == TEXT_LAYER_BACKEND:
         return None
     return configured
 
@@ -223,8 +292,8 @@ def resolve_url_backend(requested: str | None, ocr_url: str | None) -> str | Non
     from :func:`url_request`. An OCR URL means Paddle, bibr's default OCR:
 
     - without a URL the request is returned unchanged;
-    - ``paddle-http``, ``serve-http`` and the cloud vision backends
-      (:data:`CLOUD_VISION_OCR_BACKENDS`) are kept;
+    - ``paddle-http``, ``serve-http``, ``text-layer`` and the cloud vision
+      backends (:data:`CLOUD_VISION_OCR_BACKENDS`) are kept;
     - a GLM request (``glm``, any ``glm-*`` name, or the legacy ``http``
       alias of ``glm-http``) becomes ``glm-http``;
     - anything else, including the ``paddle`` selector and no request at

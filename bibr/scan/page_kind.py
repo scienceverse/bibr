@@ -10,6 +10,11 @@ nothing extra:
   private-use glyphs), so OCR read them instead.
 - ``born_digital``: everything else.
 
+With no OCR (the text-layer backend, ``bibr.ocr.text_layer``) the page's own
+verdict decides: a page whose text layer failed its gates is a scan when the
+layer is missing, hidden or covers too little of the page, and a broken text
+layer otherwise.
+
 A page with no inspection (the native-text pass did not run or failed) has no
 class: callers treat it as not a scan.
 """
@@ -73,6 +78,12 @@ def classify_page(
         return None
     if inspection.invisible_text_layer:
         return PageKind.SCAN
+    if getattr(inspection, "text_layer_ok", None) is False:
+        from bibr.ocr.text_layer import SCAN_REASONS
+
+        if inspection.text_layer_reason in SCAN_REASONS:
+            return PageKind.SCAN
+        return PageKind.BROKEN_TEXT_LAYER
     if layout_regions is None:
         return PageKind.SCAN if inspection.char_count == 0 else PageKind.BORN_DIGITAL
     regions = [r for r in layout_regions if r.get("label") in _TEXT_LABELS]

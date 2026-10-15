@@ -149,6 +149,22 @@ def _check_ocr_backend(ok, warn, fail) -> None:
         fail(f"OCR config: {e}")
         return
 
+    if backend == "text-layer":
+        ok(
+            "OCR backend: text-layer — no OCR model; born-digital PDFs are read from their "
+            "embedded text layer, scanned PDFs fail"
+        )
+        return
+    # OCR_FALLBACK_TO_TEXT_LAYER=auto: an automatic chain that cannot start here
+    # is not fatal, since chew and batch then read the text layer instead.
+    fallback_auto = (
+        backend == "paddle" and getattr(Settings.ocr, "fallback_to_text_layer", "off") == "auto"
+    )
+    fallback_note = (
+        "OCR_FALLBACK_TO_TEXT_LAYER=auto: born-digital PDFs will be read from their text layer; "
+        "scanned PDFs need OCR."
+    )
+
     if backend == "paddle-http":
         _check_paddle_http(backend, getattr(Settings, "OCR_BASE_URL", None), ok, warn)
         return
@@ -204,6 +220,13 @@ def _check_ocr_backend(ok, warn, fail) -> None:
         # chew refuses the run when no candidate can start; so does doctor.
         blocker = _ocr_runtime_blocker(backend)
         if blocker is not None:
+            if fallback_auto:
+                warn(
+                    "OCR backend: paddle (automatic) — no OCR runtime can start here; "
+                    "falling back to the PDF text layer",
+                    hint=f"{fallback_note}\n{blocker}",
+                )
+                return
             fail("OCR backend: paddle (automatic) — no OCR runtime can start here", hint=blocker)
             return
 
@@ -311,6 +334,12 @@ def _check_ocr_backend(ok, warn, fail) -> None:
 
         prefix = find_llama_server()
         if prefix is None:
+            if fallback_auto:
+                warn(
+                    f"{label}: llama.cpp not installed; falling back to the PDF text layer",
+                    hint=f"{fallback_note}\n{install_hint()}",
+                )
+                return
             fail(
                 f"{label}: llama.cpp not installed",
                 hint=install_hint(),

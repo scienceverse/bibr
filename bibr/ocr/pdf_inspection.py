@@ -53,6 +53,11 @@ class PdfPageInspection:
     # Diagonal watermark strings removed before the text layer was read
     # ("For Review Only", "RETRACTED"; see ``strip_furniture_objects``).
     watermarks: tuple[str, ...] = ()
+    # The text-layer backend's page verdict (``bibr.ocr.text_layer``): None
+    # when that backend did not read the page, else whether the page's text
+    # layer passed its gates, and if not, why (``reason`` names the gate).
+    text_layer_ok: bool | None = None
+    text_layer_reason: str | None = None
 
 
 @dataclass(frozen=True)

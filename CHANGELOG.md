@@ -21,6 +21,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   parse, bibr asks for the verbatim answer instead. A stand-in the model writes for an
   affiliation the text does not print ("Affiliation 3") is left empty.
   The merged call, the JSON re-roll and the NuExtract native backend stay verbatim.
+- A machine with no OCR runtime can process born-digital PDFs. The new `text-layer` OCR
+  backend (`--ocr text-layer` in `bibr chew`, `bibr batch` and `bibr mcp`, or
+  `OCR_BACKEND=text-layer`) runs no OCR model: the layout model still finds the page's
+  regions, and each one is read from the PDF's embedded text layer, including headers,
+  footers, captions, display formulas (as plain text) and tables, which are rebuilt from word
+  positions. A page whose text layer cannot be trusted (none at all, a hidden OCR layer over
+  a scan, text off the printed ink, or text that does not read as words) loses its text,
+  and the export's warnings name it. A scanned PDF fails with code `scan_needs_ocr`. The
+  export records `extraction.ocr.backend` as `text-layer`.
+- `OCR_FALLBACK_TO_TEXT_LAYER=auto` switches to the text layer, with one warning, when no
+  runtime of the automatic OCR backend can start on the machine (checked without starting
+  one), instead of refusing the run. Exports read this way carry `OCR_BACKEND_UNAVAILABLE`,
+  from `bibr chew`, `bibr batch` and the library alike, and a scanned PDF among them fails
+  as an outage, which re-running the same `bibr batch` command retries. The default is
+  `off`, and the refusal now names `--ocr text-layer`.
 
 ### Changed
 

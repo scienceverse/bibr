@@ -259,35 +259,45 @@ class TextHandlersMixin:
         page_number: int,
         bbox: list | None = None,
         region_meta: dict | None = None,
+        *,
+        plain_text: bool = False,
     ) -> None:
-        """Process formula content and emit as a display-formula sentence."""
+        """Process formula content and emit as a display-formula sentence.
+
+        ``plain_text`` marks a formula read from the PDF text layer by the
+        text-layer backend: it is kept as printed, since the LaTeX cleanup
+        below would read its spacing and symbols as OCR damage.
+        """
         self._expire_pending_table_label_fragment()
         text = content.strip()
         if not text:
             return
 
-        # Wrap in display math temporarily for clean_formula_text, which
-        # expects $$ delimiters to detect \text{} wrappers and broken blocks.
-        if not text.startswith("$"):
-            text = f"$${text}$$"
+        if plain_text:
+            inner = " ".join(text.split())
+        else:
+            # Wrap in display math temporarily for clean_formula_text, which
+            # expects $$ delimiters to detect \text{} wrappers and broken blocks.
+            if not text.startswith("$"):
+                text = f"$${text}$$"
 
-        # Clean formulas that are actually garbled OCR or \text{} wrappers.
-        # clean_formula_text returns None for broken blocks that should be
-        # discarded, or unwrapped plain text for \text{} wrappers.
-        cleaned = clean_formula_text(text)
-        if cleaned is None:
-            return
+            # Clean formulas that are actually garbled OCR or \text{} wrappers.
+            # clean_formula_text returns None for broken blocks that should be
+            # discarded, or unwrapped plain text for \text{} wrappers.
+            cleaned = clean_formula_text(text)
+            if cleaned is None:
+                return
 
-        # If the formula was unwrapped to plain text (no longer a formula),
-        # route it through the normal content handler instead.
-        if not cleaned.startswith("$"):
-            self._handle_content(cleaned, page_number, bbox, region_meta=region_meta)
-            return
+            # If the formula was unwrapped to plain text (no longer a formula),
+            # route it through the normal content handler instead.
+            if not cleaned.startswith("$"):
+                self._handle_content(cleaned, page_number, bbox, region_meta=region_meta)
+                return
 
-        # Strip the $$ delimiters — the is_display_formula flag replaces them.
-        inner = cleaned
-        if inner.startswith("$$") and inner.endswith("$$"):
-            inner = inner[2:-2].strip()
+            # Strip the $$ delimiters — the is_display_formula flag replaces them.
+            inner = cleaned
+            if inner.startswith("$$") and inner.endswith("$$"):
+                inner = inner[2:-2].strip()
 
         # Flush carry-over before formula
         self._flush_carry_over()

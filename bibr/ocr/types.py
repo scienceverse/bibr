@@ -66,6 +66,9 @@ class OcrRegionResult:
     # Two-recognizer consensus on a scanned region (bibr.scan.consensus): the
     # disagreement score, and whether and how the region was escalated.
     ocr_consensus: dict[str, Any] | None = None
+    # "text_layer" for a formula read from the PDF text layer by the
+    # text-layer backend (bibr.ocr.text_layer): plain text, not LaTeX.
+    formula_source: str | None = None
 
     @classmethod
     def from_layout_region(
@@ -104,6 +107,7 @@ class OcrRegionResult:
             finish_reason=finish_reason,
             native_text_candidate=layout.get("_native_text_candidate"),
             native_text_rejection_reason=layout.get("_native_text_rejection_reason"),
+            formula_source=layout.get("_formula_source"),
         )
 
     @classmethod
@@ -135,6 +139,7 @@ class OcrRegionResult:
             native_text_candidate=d.get("_native_text_candidate"),
             native_text_rejection_reason=d.get("_native_text_rejection_reason"),
             ocr_consensus=d.get("_ocr_consensus"),
+            formula_source=d.get("_formula_source"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -174,4 +179,6 @@ class OcrRegionResult:
             out["_native_text_rejection_reason"] = self.native_text_rejection_reason
         if self.ocr_consensus is not None:
             out["_ocr_consensus"] = self.ocr_consensus
+        if self.formula_source is not None:
+            out["_formula_source"] = self.formula_source
         return out
