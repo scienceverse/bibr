@@ -24,11 +24,31 @@ from typing import Annotated, Any, ClassVar, Literal, Union, cast, get_args, get
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 from pydantic.fields import FieldInfo
 
-_SCHEMA_VERSION = "12.2"
+_SCHEMA_VERSION = "12.3"
 
 
 # ---------------------------------------------------------------------------
-# Pydantic v12.2 export schema — single source of truth for validation
+# Pydantic v12.3 export schema — single source of truth for validation
+#
+# v12.3 (vs 12.2) — additive:
+#   - ``bib_match[]`` and ``metadata_match[]`` gain ``updated_by``: the notices
+#     that update the matched work (retraction, correction, expression of
+#     concern, withdrawal), each ``{type, doi, date, source, label}``. Omitted
+#     when the record lists none.
+#   - An organization author or editor of a matched record ("Open Science
+#     Collaboration") is written as ``{literal}``; it was dropped before.
+#   - New ``extraction.enrichment.lookups[]``: per reference, how its registry
+#     lookup ended (``outcome``: doi_hit, doi_404, doi_rejected, search_hit,
+#     clean_miss, error, timed_out, not_attempted); for a doi_404, the
+#     ``registration_agency`` doi.org names; for a doi_rejected, the record
+#     the DOI resolved to (``record_year``, ``record_title``,
+#     ``record_bib_type``). Omitted when not recorded.
+#   - New root ``bib_check[]`` after ``bib_match``: per reference, whether it
+#     agrees with the record it was matched to (``status``: matched,
+#     fields_disagree, doi_unregistered, not_found, unchecked), the
+#     differences as ``notes[]`` ``{field, printed, record, severity}``, and
+#     the record's ``retraction`` notice. Empty when enrichment did not run.
+#     The reader does not require it, so a 12.0-12.2 export still reads.
 #
 # v12.2 (vs 12.1) — additive:
 #   - New ``extraction.diagnostics.verification[]``: per reference with a
@@ -1053,6 +1073,44 @@ class PersonNameExport(BaseModel):
         return {k: v for k, v in data.items() if v is not None}
 
 
+class UpdateNoticeExport(BaseModel):
+    """A notice that updates a matched work, as the registry records it."""
+
+    model_config = _STRICT
+
+    type: str = Field(
+        description="Kind of notice, lowercase snake_case as the registry names it: "
+        "retraction, correction, expression_of_concern, withdrawal, erratum, addendum, ..."
+    )
+    doi: str | None = Field(
+        default=None, pattern=DOI_PATTERN, description="DOI of the notice, lowercase."
+    )
+    date: str | None = Field(
+        default=None,
+        pattern=ISO_DATE_PATTERN,
+        description="Date of the notice as ISO 8601 (YYYY, YYYY-MM or YYYY-MM-DD).",
+    )
+    source: str | None = Field(
+        default=None,
+        description="Who reported the notice to the registry: publisher, retraction-watch.",
+    )
+    label: str | None = Field(
+        default=None, description="The kind of notice as the record words it ('Retraction')."
+    )
+
+
+_UPDATED_BY_DESCRIPTION = (
+    "Notices that update the matched work (Crossref updated-by): retractions, corrections, "
+    "expressions of concern, withdrawals. Omitted when the record lists none."
+)
+
+
+def _omit_absent_updates(data: dict) -> dict:
+    if data.get("updated_by") is None:
+        data.pop("updated_by", None)
+    return data
+
+
 class BibMatchExport(BaseModel):
     """One external-service record matched to a reference-list entry."""
 
@@ -1108,6 +1166,80 @@ class BibMatchExport(BaseModel):
     )
     funder: list[MatchFunderExport] | None = Field(
         default=None, description="Funders and awards the record lists."
+    )
+    updated_by: list[UpdateNoticeExport] | None = Field(
+        default=None, description=_UPDATED_BY_DESCRIPTION
+    )
+
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("updated_by",)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent(self, handler):
+        return _omit_absent_updates(handler(self))
+
+
+CheckStatusLiteral = Literal[
+    "matched", "fields_disagree", "doi_unregistered", "not_found", "unchecked"
+]
+CheckFieldLiteral = Literal[
+    "title", "author", "year", "container", "volume", "issue", "first_page", "last_page", "doi"
+]
+
+
+class CheckNoteExport(BaseModel):
+    """One way a reference differs from the record it was matched to."""
+
+    model_config = _STRICT
+
+    field: CheckFieldLiteral = Field(description="The bib[] field that differs.")
+    printed: str | None = Field(
+        description="The reference's value, as printed (an author note gives the printed author "
+        "list); null when the reference prints none."
+    )
+    record: str | None = Field(
+        description="The record's value (an author note gives the record's first author, or "
+        "its first authors when only co-authors are missing); null when the record has no "
+        "value to give: a DOI that does not exist, or a printed DOI that resolves to another "
+        "work (that work's DOI is the printed one)."
+    )
+    severity: Literal["major", "minor"] = Field(
+        description="major: the difference names another work (title, first author, year more "
+        "than a year off, DOI). minor: a difference a correct reference can have (a co-author "
+        "left out, a name spelled differently, an organization the record lists as author, the "
+        "journal's name, volume, issue or pages, a book's edition year, a record dated two "
+        "years before the printed year)."
+    )
+
+
+class BibCheckExport(BaseModel):
+    """Whether one reference agrees with the registry record bibr matched to it."""
+
+    model_config = _STRICT
+
+    bib_id: Id = Field(description="bib[].bib_id of the reference.")
+    status: CheckStatusLiteral = Field(
+        description="matched: the reference agrees with its record (no major note, and at most "
+        "one minor note besides issue notes). "
+        "fields_disagree: the reference has a major note or two minor ones (an issue note is "
+        "not counted); a printed DOI that names another work lands here, and so does one whose "
+        "record is dated more than a year from the printed year (lookup outcome doi_rejected; "
+        "its notes say whether only the year differs). doi_unregistered: doi.org says the "
+        "printed DOI does not exist. not_found: every lookup answered and Crossref has no "
+        "record of the work, which is not evidence that the work does not exist. unchecked: "
+        "nothing was compared (a DOI registered with another agency, a printed DOI Crossref "
+        "has no record of that doi.org did not call unregistered, a failed or timed-out "
+        "lookup, nothing to look up)."
+    )
+    service: MatchServiceLiteral | None = Field(
+        description="bib_match[].service of the record checked against; null when none."
+    )
+    notes: list[CheckNoteExport] = Field(
+        description="The differences: a DOI note first, then title, author, year, container, "
+        "volume, issue and pages. Empty when there are none."
+    )
+    retraction: UpdateNoticeExport | None = Field(
+        description="The record's retraction, partial retraction, withdrawal or removal notice "
+        "(from bib_match[].updated_by), whatever the status; null when it lists none."
     )
 
 
@@ -1166,6 +1298,15 @@ class MetadataMatchExport(BaseModel):
     funder: list[MatchFunderExport] | None = Field(
         default=None, description="Funders and awards the record lists."
     )
+    updated_by: list[UpdateNoticeExport] | None = Field(
+        default=None, description=_UPDATED_BY_DESCRIPTION
+    )
+
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("updated_by",)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent(self, handler):
+        return _omit_absent_updates(handler(self))
 
 
 class AffiliationMatchExport(BaseModel):
@@ -1447,6 +1588,72 @@ class IdentityExport(BaseModel):
         return data
 
 
+LookupOutcomeLiteral = Literal[
+    "doi_hit",
+    "doi_404",
+    "doi_rejected",
+    "search_hit",
+    "clean_miss",
+    "error",
+    "timed_out",
+    "not_attempted",
+]
+
+
+class LookupExport(BaseModel):
+    """How the registry lookup of one reference ended."""
+
+    model_config = _STRICT
+
+    bib_id: Id = Field(description="bib[].bib_id of the reference.")
+    outcome: LookupOutcomeLiteral = Field(
+        description="doi_hit: the printed DOI resolved to the accepted record. doi_404: the "
+        "registry has no record of the printed DOI (no title search follows). doi_rejected: the "
+        "printed DOI resolved to a record dated more than a year from the printed year, which "
+        "was not accepted; record_year, record_title and record_bib_type describe it. "
+        "search_hit: a search found the work. clean_miss: every search answered and none "
+        "found it. error: a lookup failed and nothing found the work. timed_out: a time "
+        "budget ran out before every lookup had answered. not_attempted: the reference gave "
+        "nothing to look up (no DOI, title or volume)."
+    )
+    registration_agency: str | None = Field(
+        default=None,
+        description="For doi_404: the agency doi.org names for the printed DOI, lowercase "
+        "(crossref, datacite, medra, ...), or 'none' when doi.org says the DOI does not exist. "
+        "Omitted when doi.org was not asked or did not answer.",
+    )
+    record_year: int | None = Field(
+        default=None,
+        description="For doi_rejected: the year of the record the printed DOI resolved to. "
+        "Omitted otherwise.",
+    )
+    record_title: str | None = Field(
+        default=None,
+        description="For doi_rejected: that record's title, as deposited. Omitted otherwise "
+        "or when the record has none.",
+    )
+    record_bib_type: BibTypeLiteral | None = Field(
+        default=None,
+        description="For doi_rejected: that record's work type. Omitted otherwise or when the "
+        "record has none.",
+    )
+
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = (
+        "registration_agency",
+        "record_year",
+        "record_title",
+        "record_bib_type",
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_absent(self, handler):
+        data = handler(self)
+        for key in self.OMITTED_WHEN_ABSENT:
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
+
+
 class EnrichmentExport(BaseModel):
     """Reference-enrichment completeness — lets a consumer distinguish a
     partial (timed-out) enrichment from a complete one without scanning
@@ -1460,6 +1667,20 @@ class EnrichmentExport(BaseModel):
     )
     refs_enriched: int = Field(description="References with at least one bib_match row.")
     refs_total: int = Field(description="References in bib[].")
+    lookups: list[LookupExport] | None = Field(
+        default=None,
+        description="One row per reference: how its registry lookup ended. Omitted when the "
+        "export was made without recording lookups.",
+    )
+
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("lookups",)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent(self, handler):
+        data = handler(self)
+        if data.get("lookups") is None:
+            data.pop("lookups", None)
+        return data
 
 
 class CitationCandidateExport(BaseModel):
@@ -2177,6 +2398,11 @@ class ExtractionExport(BaseModel):
 # exporter in fact always emits.
 OMITTABLE_ROOT_KEYS: tuple[str, ...] = ()
 
+# Root keys added by a later 12.x minor, with that minor. This bibr always
+# writes them (so the strict schema requires them), but an export of an
+# earlier 12.x lacks them, so the reader schema does not.
+ROOT_KEYS_SINCE_MINOR: dict[str, str] = {"bib_check": "12.3"}
+
 
 class PaperExport(BaseModel):
     """A research paper as extracted by bibr (export schema v12).
@@ -2187,7 +2413,8 @@ class PaperExport(BaseModel):
     record tables ``author``, ``affiliation``, ``funding``, ``text``,
     ``section``, ``url``, ``bib``, ``xref``, ``figure``, ``table``, ``footnote``
     and ``eq`` hold what the paper says; the ``*_match`` tables hold what external
-    registries returned for the paper, its affiliations, funders and references.
+    registries returned for the paper, its affiliations, funders and references,
+    and ``bib_check`` how each reference compares with its record.
 
     Every record table has an integer primary key named ``<table>_id``,
     1-based; the other ``*_id`` columns are foreign keys to the table they name.
@@ -2216,7 +2443,7 @@ class PaperExport(BaseModel):
         "(bibr batch writes its corpus-unique id, the name of the JSON file). A converter uses "
         "the name of source.file_name without its extension.",
     )
-    schema_version: Literal["12.2"] = Field(
+    schema_version: Literal["12.3"] = Field(
         description="Export schema version. Its presence at the root is how readers "
         "distinguish v11 and later from all earlier versions.",
     )
@@ -2287,6 +2514,12 @@ class PaperExport(BaseModel):
     bib_match: list[BibMatchExport] = Field(
         [],
         description="External-service records matched to reference-list entries, one row per hit.",
+    )
+    bib_check: list[BibCheckExport] = Field(
+        [],
+        description="One row per reference-list entry when enrichment ran: whether the entry "
+        "agrees with the record it was matched to, how it differs, and whether that record "
+        "was retracted. Empty when enrichment did not run. Added in 12.3.",
     )
     extraction: ExtractionExport = Field(
         description="How this output was produced — everything that is not the paper itself: "

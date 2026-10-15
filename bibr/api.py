@@ -58,7 +58,7 @@ __all__ = [
     "chew_many",
 ]
 
-# Table-shaped top-level keys of the v12.0 export schema.
+# Table-shaped top-level keys of the v12 export schema.
 _TABLE_KEYS = (
     "author",
     "affiliation",
@@ -76,6 +76,7 @@ _TABLE_KEYS = (
     "affiliation_match",
     "funding_match",
     "bib_match",
+    "bib_check",
 )
 
 # Friendly attribute → schema key.

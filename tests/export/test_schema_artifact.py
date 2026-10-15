@@ -5,7 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from bibr.export import PaperExport, PaperExportReader, export_paper_to_json
-from bibr.export.models import OMITTABLE_ROOT_KEYS
+from bibr.export.models import OMITTABLE_ROOT_KEYS, ROOT_KEYS_SINCE_MINOR
 from bibr.export.schema_artifact import SCHEMA_BASE_URL, build_export_schema, schema_file_name
 
 SCHEMA_DIR = Path(__file__).resolve().parents[2] / "docs" / "schema"
@@ -102,14 +102,15 @@ def test_reader_artifact_relaxes_only_unknown_keys_enum_values_and_the_minor_ver
         f"{name}Reader": True for name in strict["$defs"]
     }
     assert reader["properties"].keys() == strict["properties"].keys()
-    assert reader["required"] == strict["required"]
-    assert strict["properties"]["schema_version"]["const"] == "12.2"
+    # An earlier 12.x export lacks the root keys a later minor added.
+    assert reader["required"] == [k for k in strict["required"] if k not in ROOT_KEYS_SINCE_MINOR]
+    assert strict["properties"]["schema_version"]["const"] == "12.3"
     assert reader["properties"]["schema_version"]["pattern"] == r"^12\.[0-9]+$"
 
 
 def _with_next_minor_fields(payload: dict) -> dict:
     """Mimic a later 12.x writer: next minor version, unknown keys at several depths."""
-    payload["schema_version"] = "12.2"
+    payload["schema_version"] = "12.4"
     payload["future_block"] = {"enabled": True}
     payload["metadata"]["subtitle"] = "A sequel"
     payload["section"][0]["numbering"] = "1."
@@ -129,7 +130,7 @@ def test_reader_artifact_and_model_accept_a_newer_minor_export(demo_paper):
     payload = _with_next_minor_fields(json.loads(json.dumps(export_paper_to_json(demo_paper))))
 
     assert not list(_validator(READER_ARTIFACT).iter_errors(payload))
-    assert PaperExportReader.model_validate(payload).schema_version == "12.2"
+    assert PaperExportReader.model_validate(payload).schema_version == "12.4"
 
     # The strict artifact and the producer model keep rejecting it.
     assert list(_validator(ARTIFACT).iter_errors(payload))
@@ -138,10 +139,10 @@ def test_reader_artifact_and_model_accept_a_newer_minor_export(demo_paper):
 
 
 def test_reader_accepts_enum_values_a_later_minor_adds(demo_paper):
-    """A 12.2 writer may add a value to a closed vocabulary; the strict model
+    """A 12.4 writer may add a value to a closed vocabulary; the strict model
     and artifact reject it, the reader model and artifact keep it."""
     payload = json.loads(json.dumps(export_paper_to_json(demo_paper)))
-    payload["schema_version"] = "12.2"
+    payload["schema_version"] = "12.4"
     payload["section"][0]["section_type"] = "preregistration"
     payload["bib"][0]["bib_type"] = "patent"
     payload["bib_match"][0]["service"] = "semantic-scholar"

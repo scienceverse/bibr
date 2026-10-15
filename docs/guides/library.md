@@ -19,7 +19,8 @@ result.save("paper.json")
 `chew()` returns a `Result`, an attribute-based view over the export dict
 with a validated v12 `PaperExport` model available as `result.model`.
 Table-shaped keys (`author`, `affiliation`, `funding`, `text`, `section`,
-`url`, `bib`, `xref`, `figure`, `table`, `eq`, `metadata_match`, `bib_match`)
+`url`, `bib`, `xref`, `figure`, `table`, `eq`, `metadata_match`, `bib_match`,
+`bib_check`)
 come back as `Records`, a `list` subclass
 with a `.df` convenience property for pandas:
 
@@ -187,6 +188,54 @@ result = bibr.chew("paper.pdf")
 enriched = result.consolidate()          # mode="fill" by default
 enriched = result.consolidate("replace")
 ```
+
+## Checking references
+
+With Crossref enrichment on, every reference gets one `result.bib_check` row
+saying whether it agrees with the record it was matched to:
+
+| `status` | Meaning |
+|---|---|
+| `matched` | The reference agrees with its record: no major difference and at most one minor one (a different issue number is not counted). |
+| `fields_disagree` | The title, first author, year or DOI differs (a major note), or two minor things do. A printed DOI that names another work lands here, and so does one whose record is dated more than a year from the printed year. |
+| `doi_unregistered` | doi.org says the printed DOI does not exist. |
+| `not_found` | Every lookup answered and Crossref has no record of the work. |
+| `unchecked` | Nothing was compared: the DOI is registered with another agency (DataCite, mEDRA), Crossref has no record of a printed DOI that doi.org did not call unregistered, a lookup failed or ran out of time, or the reference gave nothing to look up. |
+
+`not_found` means "not found in Crossref", not that the work does not exist:
+books, reports, theses, preprints, datasets, software and many non-English
+journals are missing from Crossref or hard to find there. Each row's `notes`
+lists the differences as `{field, printed, record, severity}`, with the printed
+and the record's values as they are; `retraction` holds the record's
+retraction or withdrawal notice whatever the status:
+
+```python
+checks = result.bib_check.df
+checks[checks.status == "fields_disagree"]
+retracted = [row["bib_id"] for row in result.bib_check if row["retraction"]]
+```
+
+A title is compared after folding case, accents and punctuation. A subtitle
+the reference or the record leaves out, a record title printed whole inside
+the reference (when it has at least 20 letters and digits, or the DOI or the
+volume and first page identify the work), an abbreviated journal name
+("Psychol. Sci.", "BMJ") and a year one off (two when the reference is the
+later, print-issue year) all agree. The record's first author must be named in
+the reference (a rule such as "——" names the previous reference's first
+author); a name spelled slightly differently is a minor note. The other authors may be cut short by "et al."
+when the record has more than two. Volume, issue and pages come from
+verification (`extraction.diagnostics.verification`); a page range is one
+difference, and a page printed without its "S" or "e" prefix agrees.
+`extraction.enrichment.lookups` says how each reference's lookup ended.
+
+Enrichment does not take a printed DOI's record as the cited work when the
+two are dated more than a year apart. The check still compares them: when the
+titles agree, the year is the only note (minor for a book, whose record
+carries the year of the edition registered, and for a record two years before
+the printed year, an online-first date); when they do not, a DOI note says the
+printed DOI names another work. A printed DOI Crossref has no record of is
+not searched for by title, so it is `unchecked` unless doi.org says the DOI
+does not exist.
 
 ## Warm sessions
 

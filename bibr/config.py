@@ -1350,11 +1350,17 @@ class CrossrefOptions(_BibrSettings):
     api_key: str | None = Field(
         None, description="Crossref API key, for Plus/Metadata Plus access."
     )
+    # Crossref advertises its own limits in every response (X-Rate-Limit-*,
+    # x-concurrency-limit) and the client slows to them, so this is a ceiling,
+    # not a target: raising it above Crossref's limit gains nothing.
     rate_limit_rpm: int = Field(
         200,
         ge=1,
-        description="Crossref rate limit in requests per minute "
-        "(raise to 600 if you set an email or have an API key).",
+        description="Crossref rate limit in requests per minute. bibr also slows to the limits "
+        "Crossref advertises in its responses, and keeps at most as many requests in flight as "
+        "Crossref allows (in October 2026: with an email, 3 searches or 10 DOI lookups a second "
+        "and 3 at once; without one, 1 search a second and 1 at once, capped at 60 RPM), so "
+        "raising this above them gains nothing.",
     )
     # Off by default: enrichment is a network fan-out against Crossref (and the
     # optional resolver) that adds seconds per paper and needs a polite-pool
@@ -1380,11 +1386,15 @@ class CrossrefOptions(_BibrSettings):
         "before the per-reference fan-out. Set false to restore one request per DOI.",
     )
     # Pipeline-fill parallelism for reference lookups. The SHARED rate limiter
-    # (rate_limit_rpm), not this, enforces polite-pool compliance, so raising
-    # concurrency only fills the pipeline — it never raises the request rate.
-    # Sized so the 200 RPM polite pool stays saturated at ~4s/search latency.
+    # (rate_limit_rpm) and the client's per-pool in-flight cap (Crossref's
+    # advertised x-concurrency-limit), not this, enforce polite-pool
+    # compliance, so raising it only fills the pipeline — it never raises the
+    # request rate or the number of Crossref requests in flight.
     enrich_concurrency: int = Field(
-        12, ge=1, description="Pipeline-fill parallelism for Crossref reference lookups."
+        12,
+        ge=1,
+        description="References resolved at once. Crossref requests in flight are capped "
+        "separately, at the limit Crossref advertises (3 with an email, 1 without).",
     )
     # Per-paper wall-clock budget (seconds) for the whole enrichment stage.
     enrich_timeout: float = Field(
@@ -1457,6 +1467,16 @@ class CrossrefOptions(_BibrSettings):
         description="Check parsed reference volume, issue and pages against the matched record "
         "at export: report disagreements, and fill or correct a value only when the record's "
         "value is printed in the reference string. Needs enrichment; off leaves bib[] as parsed.",
+    )
+    # A printed DOI Crossref has no record of may be registered elsewhere
+    # (DataCite, mEDRA) or nowhere. One batched doi.org request per paper tells
+    # which; extraction.enrichment.lookups and bib_check report it.
+    doi_agency_lookup: bool = Field(
+        True,
+        description="Ask doi.org which agency registered each printed DOI that Crossref has no "
+        "record of (one request per paper), so a DataCite DOI is not reported as unregistered. "
+        "The request carries no contact address and gives up after 3 seconds, or before the "
+        "paper's enrichment time runs out.",
     )
 
     @field_validator("consolidate", mode="before")
@@ -2875,19 +2895,19 @@ class GlobalSettings(_BibrSettings):
     def raise_enrich_concurrency_for_resolver(self) -> "GlobalSettings":
         """With the bibr-resolver enabled, most reference lookups resolve against the
         fast local resolver instead of CrossRef. But ``enrich_references`` gates every
-        lookup — resolver included — on ``crossref.enrich_concurrency`` (default 3, sized
-        for CrossRef politeness), needlessly serializing the resolver path. Raise it when
-        the resolver is configured and the user hasn't set it explicitly; the CrossRef
-        rate limiter independently paces the now-rare CrossRef fall-through, so politeness
-        is unaffected."""
+        lookup — resolver included — on ``crossref.enrich_concurrency`` (default 12),
+        needlessly serializing the resolver path. Raise it when the resolver is configured
+        and the user hasn't set it explicitly; the CrossRef rate limiter and in-flight cap
+        independently pace the now-rare CrossRef fall-through, so politeness is
+        unaffected."""
         import logging
 
         logger = logging.getLogger("bibr.config")
         if self.resolver.url and "enrich_concurrency" not in self.crossref.model_fields_set:
             self.crossref.enrich_concurrency = 16
             logger.info(
-                "bibr-resolver enabled — raising crossref.enrich_concurrency 3->16 "
-                "(CrossRef rate limiter still paces fall-through calls)"
+                "bibr-resolver enabled — raising crossref.enrich_concurrency to 16 "
+                "(the CrossRef rate limiter still paces fall-through calls)"
             )
         return self
 

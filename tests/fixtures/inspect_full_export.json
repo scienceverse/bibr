@@ -1,6 +1,6 @@
 {
   "paper_id": "10.1234/example.5678",
-  "schema_version": "12.2",
+  "schema_version": "12.3",
   "source": {
     "file_name": "example.pdf",
     "sha256": "6ca13d52ca70c883e0f0bb101e425a89e8624de51db2d2392593af6a84118090",
@@ -323,6 +323,22 @@
       "edition": null,
       "version": null,
       "url": null
+    }
+  ],
+  "bib_check": [
+    {
+      "bib_id": 1,
+      "status": "matched",
+      "service": "crossref",
+      "notes": [],
+      "retraction": null
+    },
+    {
+      "bib_id": 2,
+      "status": "not_found",
+      "service": null,
+      "notes": [],
+      "retraction": null
     }
   ],
   "extraction": {

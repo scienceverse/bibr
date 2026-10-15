@@ -20,9 +20,22 @@ from typing import Any
 import httpx
 from rapidfuzz import fuzz
 
+from bibr.clients.crossref import CrossrefRequestTally, count_requests
 from bibr.config import GlobalSettings, snapshot_settings
-from bibr.enrich.schemas import CrossrefAuthor, CrossrefWorkItem, plain_text
-from bibr.models import BibAuthor, MatchFunder, MatchOrganization, canonicalize_orcid
+from bibr.enrich.lookup import lookup_of
+from bibr.enrich.schemas import (
+    CrossrefAuthor,
+    CrossrefWorkItem,
+    plain_text,
+    strip_notice_prefix,
+)
+from bibr.models import (
+    BibAuthor,
+    MatchFunder,
+    MatchOrganization,
+    MatchUpdate,
+    canonicalize_orcid,
+)
 from bibr.paper import ExternalMatch, MatchSource, PaperReference, migrate_bib_type
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.redact import describe_error
@@ -91,8 +104,20 @@ class ResolutionStats:
     raw_matches: int = 0
     raw_ambiguous: int = 0
     raw_duplicates: int = 0
+    # Crossref traffic for this batch, the prefetch included: requests sent,
+    # 429 (too many requests) answers, and requests repeated after a 429 or a
+    # transient failure. Throttling here means the batch outran Crossref's
+    # advertised limits.
+    crossref_requests: int = 0
+    crossref_throttled: int = 0
+    crossref_retries: int = 0
     failed_bib_ids: set[int] = field(default_factory=set)
     failure_details: list[ProcessingWarning] = field(default_factory=list)
+
+    def add_requests(self, tally: CrossrefRequestTally) -> None:
+        self.crossref_requests += tally.requests
+        self.crossref_throttled += tally.throttled
+        self.crossref_retries += tally.retries
 
 
 @dataclass(frozen=True)
@@ -111,6 +136,7 @@ def _record_terminal_failure(
     operation: str,
     exc: BaseException,
 ) -> None:
+    lookup_of(ref).errored = True
     if stats is None:
         return
     stats.failed_bib_ids.add(ref.bib_id)
@@ -160,6 +186,8 @@ class EnrichmentPrefetch:
     resolver_prefetch: dict[int, list[dict] | Exception] = field(default_factory=dict)
     resolver_prefetch_error: Exception | None = None
     """A failed prefetch search, replayed as a terminal failure per eligible ref."""
+    requests: CrossrefRequestTally = field(default_factory=CrossrefRequestTally)
+    """The Crossref requests the prefetch made."""
     started_at: float = 0.0
     finished_at: float = 0.0
     _closed: bool = field(default=False, repr=False)
@@ -209,6 +237,20 @@ async def prefetch_enrichment(
         prefetch.finished_at = time.monotonic()
         return prefetch
 
+    with count_requests(prefetch.requests):
+        await _run_prefetch(prefetch, references, effective, resolver_client)
+    prefetch.finished_at = time.monotonic()
+    return prefetch
+
+
+async def _run_prefetch(
+    prefetch: EnrichmentPrefetch,
+    references: list[PaperReference],
+    effective: GlobalSettings,
+    resolver_client,
+) -> None:
+    """The network work of :func:`prefetch_enrichment`, filling *prefetch*."""
+    crossref_client = prefetch.crossref_client
     try:
         owns_resolver = False
         if resolver_client is None and effective.resolver.url and effective.resolver.enrich:
@@ -284,9 +326,6 @@ async def prefetch_enrichment(
         await prefetch.aclose()
         raise
 
-    prefetch.finished_at = time.monotonic()
-    return prefetch
-
 
 async def enrich_references(
     references: list[PaperReference],
@@ -296,6 +335,7 @@ async def enrich_references(
     settings: GlobalSettings | None = None,
     prefetch: EnrichmentPrefetch | None = None,
     raw_strings: dict[int, str] | None = None,
+    deadline: float | None = None,
 ) -> EnrichmentReport:
     """Enrich references with Crossref metadata.
 
@@ -329,6 +369,10 @@ async def enrich_references(
         raw_strings: Each reference's printed string by ``bib_id``. With
             ``resolver.raw_search`` on, references still unmatched after the
             title passes are searched with it (see :func:`_enrich_raw_strings`).
+        deadline: The event-loop time (``loop.time()``) at which the caller
+            stops waiting. The doi.org registration-agency lookup gives up
+            before it (see :func:`_classify_unknown_dois`), so that optional
+            lookup never runs the enrichment out of time.
     """
     if not references:
         return EnrichmentReport()
@@ -358,6 +402,21 @@ async def enrich_references(
                 )
 
     semaphore = crossref_client.enrich_semaphore
+    fallback_sources = _effective_fallback_sources(effective) if resolver_client else []
+    raw_pass = bool(resolver_client is not None and raw_strings and effective.resolver.raw_search)
+
+    def _later_pass_applies(ref: PaperReference) -> bool:
+        """Will a resolver pass after this one search for *ref*? Until it has
+        answered, the reference's lookup is not finished."""
+        if ref.match:
+            return False
+        if fallback_sources and _resolver_fallback_eligible(ref):
+            return True
+        return raw_pass and _raw_search_eligible(ref, (raw_strings or {}).get(ref.bib_id))
+
+    def _close_first_pass(ref: PaperReference) -> None:
+        if not _later_pass_applies(ref):
+            lookup_of(ref).finished = True
 
     async def _enrich_one(ref: PaperReference) -> None:
         async with semaphore:
@@ -373,55 +432,75 @@ async def enrich_references(
             if outcome is not None:
                 source, match = outcome
                 ref.match[source] = match
+            _close_first_pass(ref)
 
-    try:
-        results = await asyncio.gather(
-            *[_enrich_one(ref) for ref in references], return_exceptions=True
-        )
-        for ref, result in zip(references, results, strict=True):
-            if isinstance(result, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
-                raise result
-            if isinstance(result, BaseException):
-                logger.warning("Reference enrichment raised for bib_id=%s: %s", ref.bib_id, result)
-                _record_terminal_failure(stats, ref, "reference enrichment", result)
+    # Crossref traffic of this batch; the prefetch counted its own.
+    with count_requests() as tally:
+        try:
+            results = await asyncio.gather(
+                *[_enrich_one(ref) for ref in references], return_exceptions=True
+            )
+            for ref, result in zip(references, results, strict=True):
+                if isinstance(result, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+                    raise result
+                if isinstance(result, BaseException):
+                    logger.warning(
+                        "Reference enrichment raised for bib_id=%s: %s", ref.bib_id, result
+                    )
+                    _record_terminal_failure(stats, ref, "reference enrichment", result)
+                    _close_first_pass(ref)
 
-        if resolver_client is not None:
-            try:
-                await _enrich_resolver_fallback(
-                    references,
-                    resolver_client,
-                    stats,
-                    settings=effective,
-                )
-            except Exception as e:  # noqa: BLE001 — optional fallback cannot fail extraction
-                eligible = [ref for ref in references if _resolver_fallback_eligible(ref)]
-                stats.fallback_errors += len(eligible)
-                logger.warning("Resolver fallback failed for %d refs: %s", len(eligible), e)
-                _record_fallback_warning(
-                    stats,
-                    WarningCode.RESOLVER_FALLBACK_FAILED,
-                    f"resolver fallback failed for {len(eligible)} refs: {_export_diagnostic(e)}",
-                )
-        if resolver_client is not None and raw_strings and effective.resolver.raw_search:
-            try:
-                await _enrich_raw_strings(
-                    references, resolver_client, stats, raw_strings, settings=effective
-                )
-            except Exception as e:  # noqa: BLE001 — optional pass cannot fail extraction
-                logger.warning("Resolver raw-string search failed: %s", e)
-                _record_fallback_warning(
-                    stats,
-                    WarningCode.RESOLVER_FALLBACK_FAILED,
-                    f"resolver raw-string search failed: {_export_diagnostic(e)}",
-                )
-    finally:
-        await prefetch.aclose()
+            if resolver_client is not None:
+                try:
+                    await _enrich_resolver_fallback(
+                        references,
+                        resolver_client,
+                        stats,
+                        settings=effective,
+                    )
+                except Exception as e:  # noqa: BLE001 — optional fallback cannot fail extraction
+                    eligible = [ref for ref in references if _resolver_fallback_eligible(ref)]
+                    for ref in eligible:
+                        lookup_of(ref).errored = True
+                    stats.fallback_errors += len(eligible)
+                    logger.warning("Resolver fallback failed for %d refs: %s", len(eligible), e)
+                    _record_fallback_warning(
+                        stats,
+                        WarningCode.RESOLVER_FALLBACK_FAILED,
+                        f"resolver fallback failed for {len(eligible)} refs: "
+                        f"{_export_diagnostic(e)}",
+                    )
+            if raw_pass and raw_strings:
+                try:
+                    await _enrich_raw_strings(
+                        references, resolver_client, stats, raw_strings, settings=effective
+                    )
+                except Exception as e:  # noqa: BLE001 — optional pass cannot fail extraction
+                    for ref in references:
+                        if _raw_search_eligible(ref, raw_strings.get(ref.bib_id)):
+                            lookup_of(ref).errored = True
+                    logger.warning("Resolver raw-string search failed: %s", e)
+                    _record_fallback_warning(
+                        stats,
+                        WarningCode.RESOLVER_FALLBACK_FAILED,
+                        f"resolver raw-string search failed: {_export_diagnostic(e)}",
+                    )
+            # Every pass that applies has answered.
+            for ref in references:
+                lookup_of(ref).finished = True
+        finally:
+            await prefetch.aclose()
+    stats.add_requests(tally)
+    stats.add_requests(prefetch.requests)
+    if effective.crossref.doi_agency_lookup:
+        await _classify_unknown_dois(references, deadline=deadline)
 
     matched = sum(1 for ref in references if ref.match)
     logger.info(
         "Reference enrichment: %d/%d matched "
         "(resolver %d/%d, fallback matches=%d misses=%d errors=%d timeouts=%d attempts=%d, "
-        "crossref doi %d/%d, search %d/%d, fingerprint %d/%d, raw %d/%d ambiguous=%d duplicates=%d)",
+        "crossref doi %d/%d, search %d/%d, fingerprint %d/%d, raw %d/%d ambiguous=%d "
+        "duplicates=%d; crossref requests=%d throttled=%d retries=%d)",
         matched,
         len(references),
         stats.resolver_matches,
@@ -441,7 +520,17 @@ async def enrich_references(
         stats.raw_attempts,
         stats.raw_ambiguous,
         stats.raw_duplicates,
+        stats.crossref_requests,
+        stats.crossref_throttled,
+        stats.crossref_retries,
     )
+    if stats.crossref_throttled:
+        logger.warning(
+            "Crossref answered %d of %d requests with 429 (too many requests); %d were retried",
+            stats.crossref_throttled,
+            stats.crossref_requests,
+            stats.crossref_retries,
+        )
     # A reference is only "failed" if it ended UNMATCHED. A transient error in
     # an early strategy still lands in ``failed_bib_ids``, so counting that set
     # directly reported failures for references a later strategy went on to
@@ -455,6 +544,56 @@ async def enrich_references(
         failed=len(stats.failed_bib_ids & unresolved),
         details=tuple(dict.fromkeys(stats.failure_details)),
     )
+
+
+# The doi.org agency lookup only refines a doi_404 ("registered elsewhere" or
+# "does not exist"), so it gets a few seconds of its own and never the rest of
+# the paper's enrichment budget: a slow or unreachable doi.org leaves the agency
+# unknown (the check then reports the reference unchecked) instead of running
+# the enrichment out of time and holding the export as partial.
+_AGENCY_BUDGET_SECONDS = 3.0
+# It gives up this long before the caller's deadline, so that deadline never
+# passes while doi.org is still being waited for.
+_AGENCY_DEADLINE_MARGIN_SECONDS = 0.5
+
+
+async def _classify_unknown_dois(
+    references: list[PaperReference], *, deadline: float | None = None
+) -> None:
+    """Ask doi.org which agency registered each printed DOI the registry had
+    no record of, in one request: a DataCite DOI is unknown to Crossref but
+    exists, and a DOI no agency registered does not. Gives up after
+    :data:`_AGENCY_BUDGET_SECONDS`, or before *deadline* (event-loop time),
+    whichever comes first; never raises."""
+    from bibr.enrich.lookup import recorded_lookup, registration_agencies
+
+    unknown = [
+        (ref, lookup)
+        for ref in references
+        if ref.doi
+        and (lookup := recorded_lookup(ref)) is not None
+        and lookup.outcome(bool(ref.match)) == "doi_404"
+    ]
+    if not unknown:
+        return
+    budget = _AGENCY_BUDGET_SECONDS
+    if deadline is not None:
+        remaining = deadline - asyncio.get_running_loop().time()
+        budget = min(budget, remaining - _AGENCY_DEADLINE_MARGIN_SECONDS)
+    if budget <= 0:
+        logger.debug("No time left to ask doi.org about %d DOIs", len(unknown))
+        return
+    try:
+        async with asyncio.timeout(budget):
+            agencies = await registration_agencies([ref.doi for ref, _ in unknown if ref.doi])
+    except TimeoutError:
+        logger.debug("doi.org did not answer within %.1fs; agencies left unknown", budget)
+        return
+    except Exception as e:  # noqa: BLE001 — the agency only refines the outcome
+        logger.debug("DOI registration-agency lookup failed: %s", e)
+        return
+    for ref, lookup in unknown:
+        lookup.registration_agency = agencies.get((ref.doi or "").casefold())
 
 
 def _year_from_published(published: str | None) -> int | None:
@@ -559,28 +698,37 @@ async def _fetch_crossref_item(
     Returns:
         (CrossrefWorkItem, score) tuple or None if no match found.
     """
+    lookup = lookup_of(ref)
     # Strategy 1: DOI lookup
     if ref.doi:
         if stats is not None:
             stats.doi_attempts += 1
+        lookup.queried = True
         try:
             result = await client.works(ids=ref.doi)
             if result and "message" in result:
                 cr_item = CrossrefWorkItem.from_raw(result["message"])
-                if ref.year and cr_item.year and abs(ref.year - cr_item.year) > 1:
+                if _doi_year_conflicts(ref.year, cr_item.year):
                     logger.warning(
                         "DOI %s year mismatch: ref=%d, crossref=%d — discarding match",
                         ref.doi,
                         ref.year,
                         cr_item.year,
                     )
+                    lookup.reject(
+                        cr_item.year,
+                        cr_item.title,
+                        migrate_bib_type(cr_item.work_type) if cr_item.work_type else None,
+                    )
                     return None
                 if stats is not None:
                     stats.doi_matches += 1
+                lookup.doi_status, lookup.hit = "found", "doi"
                 return cr_item, 100.0
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 logger.debug("DOI not found in Crossref (404): %s", ref.doi)
+                lookup.doi_status = "not_found"
                 return None
             logger.debug("Crossref DOI lookup HTTP error for %s: %s", ref.doi, e)
             _record_terminal_failure(stats, ref, "DOI lookup", e)
@@ -600,6 +748,7 @@ async def _fetch_crossref_item(
             query_parts.append(str(ref.year))
 
         query_str = " ".join(query_parts)
+        lookup.queried = True
         try:
             result = await client.search(query=query_str, limit=3)
             if result and "message" in result and "items" in result["message"]:
@@ -611,8 +760,10 @@ async def _fetch_crossref_item(
                     ref_authors=ref.authors,
                     **_printed_fields(ref),
                 )
-                if match is not None and stats is not None:
-                    stats.search_matches += 1
+                if match is not None:
+                    lookup.hit = "search"
+                    if stats is not None:
+                        stats.search_matches += 1
                 return match
         except Exception as e:
             logger.debug(f"Crossref search failed for '{ref.title[:50]}...': {e}")
@@ -635,6 +786,7 @@ async def _fetch_crossref_item(
     if not title_usable and fingerprint_usable:
         if stats is not None:
             stats.fingerprint_attempts += 1
+        lookup.queried = True
         try:
             # Deeper than the title path's 3: a title-less fingerprint query is
             # bag-of-words over author+journal+volume+page, so the correct record
@@ -644,14 +796,24 @@ async def _fetch_crossref_item(
             result = await client.search(query=_fingerprint_query(ref), limit=_FINGERPRINT_ROWS)
             if result and "message" in result and "items" in result["message"]:
                 match = _find_best_fingerprint_match(ref, result["message"]["items"])
-                if match is not None and stats is not None:
-                    stats.fingerprint_matches += 1
+                if match is not None:
+                    lookup.hit = "search"
+                    if stats is not None:
+                        stats.fingerprint_matches += 1
                 return match
         except Exception as e:
             logger.debug(f"Crossref fingerprint search failed for bib_id={ref.bib_id}: {e}")
             _record_terminal_failure(stats, ref, "fingerprint search", e)
 
     return None
+
+
+def _doi_year_conflicts(ref_year: int | None, record_year: int | None) -> bool:
+    """True when the record a printed DOI resolves to is dated more than a year
+    from the printed year, too far to be taken as the cited work. The check
+    (:mod:`bibr.enrich.check`) still describes that record, and tells an
+    online-first date or a book's later edition apart from another work."""
+    return bool(ref_year and record_year and abs(ref_year - record_year) > 1)
 
 
 def _fingerprint_query(ref) -> str:
@@ -1142,6 +1304,11 @@ class _TitleCandidate:
     container: str | None
     volume: str | None
     first_page: str | None
+    # The record lists update notices (a retraction, a withdrawal), so a
+    # "RETRACTED:"-style prefix on its title is the registry's marker, not
+    # part of the title. A notice about the work carries the same prefix and
+    # lists none.
+    updated: bool = False
 
     @classmethod
     def from_crossref(cls, item: CrossrefWorkItem) -> _TitleCandidate:
@@ -1154,7 +1321,15 @@ class _TitleCandidate:
             container=item.container_title,
             volume=item.volume,
             first_page=_split_page_range(item.page)[0],
+            updated=bool(item.updates),
         )
+
+    @property
+    def scoring_title(self) -> str | None:
+        """The title compared with the printed one."""
+        if self.title and self.updated:
+            return strip_notice_prefix(self.title)
+        return self.title
 
     @classmethod
     def from_resolver(cls, cand: object) -> _TitleCandidate | None:
@@ -1275,7 +1450,12 @@ def _best_title_candidate(
         if _initials_conflict(ref_authors, list(cand.authors)):
             continue
         score = _score_candidate(
-            title, cand.title, ref_year, cand.year, ref_authors, [a.family for a in cand.authors]
+            title,
+            cand.scoring_title or cand.title,
+            ref_year,
+            cand.year,
+            ref_authors,
+            [a.family for a in cand.authors],
         )
         if score > best_score:
             best_score = score
@@ -1322,29 +1502,29 @@ def _build_match(cr_item: CrossrefWorkItem, score: float) -> ExternalMatch:
     """Build an ExternalMatch from a parsed CrossrefWorkItem."""
     bib_type = migrate_bib_type(cr_item.work_type) if cr_item.work_type else None
 
-    authors = None
-    if cr_item.authors:
-        author_list = [
-            BibAuthor(
-                given=a.given,
-                family=a.family,
-                orcid=canonicalize_orcid(a.orcid),
-                affiliation=[
-                    MatchOrganization(name=org.name, ror=org.ror) for org in a.affiliations
-                ]
-                or None,
-            )
-            for a in cr_item.authors
-            if a.family
-        ]
-        authors = author_list if author_list else None
-
-    editors = None
-    if cr_item.editors:
-        editor_list = [
-            BibAuthor(given=e.given, family=e.family) for e in cr_item.editors if e.family
-        ]
-        editors = editor_list if editor_list else None
+    # A person needs a family name; an organization (a ``name`` without one)
+    # is kept whole as ``literal``.
+    authors = [
+        BibAuthor(
+            given=a.given if a.family else "",
+            family=a.family,
+            literal=None if a.family else a.name,
+            orcid=canonicalize_orcid(a.orcid),
+            affiliation=[MatchOrganization(name=org.name, ror=org.ror) for org in a.affiliations]
+            or None,
+        )
+        for a in cr_item.authors
+        if a.family or a.name
+    ] or None
+    editors = [
+        BibAuthor(
+            given=e.given if e.family else "",
+            family=e.family,
+            literal=None if e.family else e.name,
+        )
+        for e in cr_item.editors
+        if e.family or e.name
+    ] or None
 
     first_page, last_page = _split_page_range(cr_item.page)
 
@@ -1369,6 +1549,11 @@ def _build_match(cr_item: CrossrefWorkItem, score: float) -> ExternalMatch:
         funders=[
             MatchFunder(name=f.name, funder_doi=f.funder_doi, ror=f.ror, award_ids=f.award_ids)
             for f in cr_item.funders
+        ]
+        or None,
+        updated_by=[
+            MatchUpdate(type=u.type, doi=u.doi, date=u.date, source=u.source, label=u.label)
+            for u in cr_item.updates
         ]
         or None,
     )
@@ -1495,9 +1680,11 @@ async def _enrich_resolver_fallback(
     stats.fallback_attempts += len(eligible)
     semaphore = asyncio.Semaphore(settings.resolver.fallback_search_concurrency)
     answered = 0
+    unanswered = {id(ref): ref for ref in eligible}
 
     async def resolve(ref: PaperReference) -> None:
         nonlocal answered
+        lookup_of(ref).queried = True
         try:
             async with semaphore:
                 candidates = await resolver_client.search(
@@ -1516,6 +1703,8 @@ async def _enrich_resolver_fallback(
             )
         except Exception as e:  # noqa: BLE001 — one bad answer costs only its own reference
             answered += 1
+            unanswered.pop(id(ref), None)
+            lookup_of(ref).errored = True
             stats.fallback_errors += 1
             logger.debug("Resolver fallback failed for bib_id=%s: %s", ref.bib_id, e)
             _record_fallback_warning(
@@ -1525,6 +1714,7 @@ async def _enrich_resolver_fallback(
             )
             return
         answered += 1
+        unanswered.pop(id(ref), None)
         if best is None:
             stats.fallback_misses += 1
             return
@@ -1532,6 +1722,7 @@ async def _enrich_resolver_fallback(
         if ref.match:
             return
         ref.match[_resolver_match_source(candidate)] = _build_match_from_candidate(candidate, score)
+        lookup_of(ref).hit = "search"
         stats.fallback_matches += 1
 
     try:
@@ -1539,6 +1730,9 @@ async def _enrich_resolver_fallback(
             await asyncio.gather(*(resolve(ref) for ref in eligible))
     except TimeoutError:
         stats.fallback_timeouts += 1
+        # Not every search of these references answered: not a clean miss.
+        for ref in unanswered.values():
+            lookup_of(ref).timed_out = True
         detail = (
             f"resolver fallback timed out after {settings.resolver.fallback_timeout:g}s "
             f"with {len(eligible) - answered} of {len(eligible)} refs unanswered"
@@ -1592,7 +1786,7 @@ def _raw_candidate_score(raw: str, cand: _TitleCandidate | None) -> float | None
     """
     if cand is None or not cand.title or cand.work_type in _VETOED_WORK_TYPES:
         return None
-    title = _fold(plain_text(cand.title) or "")
+    title = _fold(plain_text(cand.scoring_title) or "")
     if len(title.split()) <= _GENERIC_TITLE_WORDS:
         return None
     folded_raw = _fold(raw)
@@ -1662,9 +1856,11 @@ async def _enrich_raw_strings(
     stats.raw_attempts += len(eligible)
     semaphore = asyncio.Semaphore(settings.resolver.fallback_search_concurrency)
     found: dict[int, tuple[dict, float]] = {}
+    unanswered = {id(ref): ref for ref in eligible}
 
     async def resolve(ref: PaperReference) -> None:
         raw = raw_strings[ref.bib_id]
+        lookup_of(ref).queried = True
         async with semaphore:
             candidates = await resolver_client.search(
                 _raw_query(raw),
@@ -1672,6 +1868,7 @@ async def _enrich_raw_strings(
                 settings.resolver.limit,
                 sources=settings.resolver.sources,
             )
+        unanswered.pop(id(ref), None)
         best = _best_raw_candidate(raw, candidates)
         if best == "ambiguous":
             stats.raw_ambiguous += 1
@@ -1683,6 +1880,8 @@ async def _enrich_raw_strings(
         async with asyncio.timeout(settings.resolver.fallback_timeout):
             await asyncio.gather(*(resolve(ref) for ref in eligible))
     except TimeoutError:
+        for ref in unanswered.values():
+            lookup_of(ref).timed_out = True
         detail = (
             f"resolver raw-string search timed out after {settings.resolver.fallback_timeout:g}s"
         )
@@ -1705,6 +1904,7 @@ async def _enrich_raw_strings(
         if doi is not None:
             held.add(doi)
         ref.match[_resolver_match_source(candidate)] = _build_match_from_candidate(candidate, score)
+        lookup_of(ref).hit = "search"
         stats.raw_matches += 1
 
 
@@ -1770,25 +1970,39 @@ async def _try_resolver(
     if stats is not None:
         stats.resolver_attempts += 1
     effective = settings if settings is not None else snapshot_settings()
+    lookup = lookup_of(ref)
 
     if ref.doi:
+        lookup.queried = True
         cand = await resolver_client.lookup_doi(ref.doi, raise_on_error=raise_on_error)
         if cand is None:
+            # Provisional when the resolver is not authoritative: Crossref is
+            # asked next, and its answer replaces this one.
+            lookup.doi_status = "not_found"
             return None
         cand_year = cand.get("year")
-        if ref.year and cand_year and abs(ref.year - cand_year) > 1:
+        cand_year = cand_year if isinstance(cand_year, int) else None
+        if _doi_year_conflicts(ref.year, cand_year):
             logger.warning(
                 "Resolver DOI %s year mismatch: ref=%d, resolver=%d — discarding match",
                 ref.doi,
                 ref.year,
                 cand_year,
             )
+            work_type = cand.get("type")
+            lookup.reject(
+                cand_year,
+                plain_text(cand.get("title")),
+                migrate_bib_type(work_type) if isinstance(work_type, str) and work_type else None,
+            )
             return None
         if stats is not None:
             stats.resolver_matches += 1
+        lookup.doi_status, lookup.hit = "found", "doi"
         return _resolver_match_source(cand), _build_match_from_candidate(cand, 100.0)
 
     if ref.title and len(ref.title) >= 10:
+        lookup.queried = True
         if prefetch is not None:
             candidates = prefetch.get(id(ref), [])
             if isinstance(candidates, Exception):
@@ -1814,6 +2028,7 @@ async def _try_resolver(
             cand, score = best
             if stats is not None:
                 stats.resolver_matches += 1
+            lookup.hit = "search"
             return _resolver_match_source(cand), _build_match_from_candidate(cand, score)
 
     return None

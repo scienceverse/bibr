@@ -10,10 +10,11 @@ prefixed with ``paper_id``, so a table covers the whole corpus and joins on
   ``producer_version`` / ``completed_at`` from ``extraction``;
 - one file per record table (``author``, ``affiliation``, ``funding``,
   ``text``, ``section``, ``url``, ``bib``, ``xref``, ``figure``, ``table``,
-  ``eq`` and the ``*_match`` tables), with the export's columns;
+  ``eq``, the ``*_match`` tables and ``bib_check``), with the export's
+  columns;
 - ``extraction_*`` files for the tidy processing lists (page sizes, float
   parts, text regions, section classification, xref tiers, consolidation,
-  validation issues, warnings).
+  validation issues, warnings, reference lookups).
 
 Column types come from the export models, not from the data, so every file
 has the same schema however many papers it holds, and a table with no rows
@@ -65,6 +66,7 @@ TABLES: dict[str, tuple[tuple[str, ...], type[BaseModel]]] = {
     "affiliation_match": (("affiliation_match",), m.AffiliationMatchExport),
     "funding_match": (("funding_match",), m.FundingMatchExport),
     "bib_match": (("bib_match",), m.BibMatchExport),
+    "bib_check": (("bib_check",), m.BibCheckExport),
     "extraction_pages": (("extraction", "pages"), m.PageExport),
     "extraction_float_parts": (("extraction", "float_parts"), m.FloatPartExport),
     "extraction_text_regions": (("extraction", "text_regions"), m.TextRegionExport),
@@ -82,6 +84,7 @@ TABLES: dict[str, tuple[tuple[str, ...], type[BaseModel]]] = {
         m.ValidationIssueExport,
     ),
     "extraction_warnings": (("extraction", "warnings"), m.WarningExport),
+    "extraction_enrichment_lookups": (("extraction", "enrichment", "lookups"), m.LookupExport),
 }
 
 # The ``paper`` table: (column, path inside the export, annotation).

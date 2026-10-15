@@ -237,6 +237,76 @@
       "title": "AuthorExportReader",
       "type": "object"
     },
+    "BibCheckExportReader": {
+      "additionalProperties": true,
+      "description": "Whether one reference agrees with the registry record bibr matched to it.",
+      "properties": {
+        "bib_id": {
+          "description": "bib[].bib_id of the reference.",
+          "minimum": 1,
+          "title": "Bib Id",
+          "type": "integer"
+        },
+        "notes": {
+          "description": "The differences: a DOI note first, then title, author, year, container, volume, issue and pages. Empty when there are none.",
+          "items": {
+            "$ref": "#/$defs/CheckNoteExportReader"
+          },
+          "title": "Notes",
+          "type": "array"
+        },
+        "retraction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UpdateNoticeExportReader"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The record's retraction, partial retraction, withdrawal or removal notice (from bib_match[].updated_by), whatever the status; null when it lists none."
+        },
+        "service": {
+          "description": "bib_match[].service of the record checked against; null when none.",
+          "examples": [
+            "crossref",
+            "openalex",
+            "datacite",
+            "doi.org",
+            "openlibrary",
+            "ror",
+            "manual",
+            "other"
+          ],
+          "title": "Service",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "matched: the reference agrees with its record (no major note, and at most one minor note besides issue notes). fields_disagree: the reference has a major note or two minor ones (an issue note is not counted); a printed DOI that names another work lands here, and so does one whose record is dated more than a year from the printed year (lookup outcome doi_rejected; its notes say whether only the year differs). doi_unregistered: doi.org says the printed DOI does not exist. not_found: every lookup answered and Crossref has no record of the work, which is not evidence that the work does not exist. unchecked: nothing was compared (a DOI registered with another agency, a printed DOI Crossref has no record of that doi.org did not call unregistered, a failed or timed-out lookup, nothing to look up).",
+          "examples": [
+            "matched",
+            "fields_disagree",
+            "doi_unregistered",
+            "not_found",
+            "unchecked"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bib_id",
+        "status",
+        "service",
+        "notes",
+        "retraction"
+      ],
+      "title": "BibCheckExportReader",
+      "type": "object"
+    },
     "BibExportReader": {
       "additionalProperties": true,
       "description": "One entry of the paper's reference list, parsed from the printed entry.\n\nValues are as printed unless consolidation filled or replaced them from\n``bib_match``; the field names it took are listed per ``bib_id`` in\n``extraction.diagnostics.consolidation``.",
@@ -694,6 +764,18 @@
             "null"
           ]
         },
+        "updated_by": {
+          "default": null,
+          "description": "Notices that update the matched work (Crossref updated-by): retractions, corrections, expressions of concern, withdrawals. Omitted when the record lists none.",
+          "items": {
+            "$ref": "#/$defs/UpdateNoticeExportReader"
+          },
+          "title": "Updated By",
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "url": {
           "default": null,
           "description": "URL of the record.",
@@ -867,6 +949,61 @@
         "source_index"
       ],
       "title": "CaptionCandidateExportReader",
+      "type": "object"
+    },
+    "CheckNoteExportReader": {
+      "additionalProperties": true,
+      "description": "One way a reference differs from the record it was matched to.",
+      "properties": {
+        "field": {
+          "description": "The bib[] field that differs.",
+          "examples": [
+            "title",
+            "author",
+            "year",
+            "container",
+            "volume",
+            "issue",
+            "first_page",
+            "last_page",
+            "doi"
+          ],
+          "title": "Field",
+          "type": "string"
+        },
+        "printed": {
+          "description": "The reference's value, as printed (an author note gives the printed author list); null when the reference prints none.",
+          "title": "Printed",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "record": {
+          "description": "The record's value (an author note gives the record's first author, or its first authors when only co-authors are missing); null when the record has no value to give: a DOI that does not exist, or a printed DOI that resolves to another work (that work's DOI is the printed one).",
+          "title": "Record",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "severity": {
+          "description": "major: the difference names another work (title, first author, year more than a year off, DOI). minor: a difference a correct reference can have (a co-author left out, a name spelled differently, an organization the record lists as author, the journal's name, volume, issue or pages, a book's edition year, a record dated two years before the printed year).",
+          "examples": [
+            "major",
+            "minor"
+          ],
+          "title": "Severity",
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "printed",
+        "record",
+        "severity"
+      ],
+      "title": "CheckNoteExportReader",
       "type": "object"
     },
     "CitationCandidateExportReader": {
@@ -1282,6 +1419,18 @@
           "description": "False when enrichment stopped before every reference was looked up, e.g. on a timeout.",
           "title": "Complete",
           "type": "boolean"
+        },
+        "lookups": {
+          "default": null,
+          "description": "One row per reference: how its registry lookup ended. Omitted when the export was made without recording lookups.",
+          "items": {
+            "$ref": "#/$defs/LookupExportReader"
+          },
+          "title": "Lookups",
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "refs_enriched": {
           "description": "References with at least one bib_match row.",
@@ -2320,6 +2469,87 @@
       "title": "LlmTraceExportReader",
       "type": "object"
     },
+    "LookupExportReader": {
+      "additionalProperties": true,
+      "description": "How the registry lookup of one reference ended.",
+      "properties": {
+        "bib_id": {
+          "description": "bib[].bib_id of the reference.",
+          "minimum": 1,
+          "title": "Bib Id",
+          "type": "integer"
+        },
+        "outcome": {
+          "description": "doi_hit: the printed DOI resolved to the accepted record. doi_404: the registry has no record of the printed DOI (no title search follows). doi_rejected: the printed DOI resolved to a record dated more than a year from the printed year, which was not accepted; record_year, record_title and record_bib_type describe it. search_hit: a search found the work. clean_miss: every search answered and none found it. error: a lookup failed and nothing found the work. timed_out: a time budget ran out before every lookup had answered. not_attempted: the reference gave nothing to look up (no DOI, title or volume).",
+          "examples": [
+            "doi_hit",
+            "doi_404",
+            "doi_rejected",
+            "search_hit",
+            "clean_miss",
+            "error",
+            "timed_out",
+            "not_attempted"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "record_bib_type": {
+          "default": null,
+          "description": "For doi_rejected: that record's work type. Omitted otherwise or when the record has none.",
+          "examples": [
+            "journal_article",
+            "book",
+            "book_chapter",
+            "dataset",
+            "software",
+            "preprint",
+            "conference_paper",
+            "report",
+            "thesis",
+            "other"
+          ],
+          "title": "Record Bib Type",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "record_title": {
+          "default": null,
+          "description": "For doi_rejected: that record's title, as deposited. Omitted otherwise or when the record has none.",
+          "title": "Record Title",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "record_year": {
+          "default": null,
+          "description": "For doi_rejected: the year of the record the printed DOI resolved to. Omitted otherwise.",
+          "title": "Record Year",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "registration_agency": {
+          "default": null,
+          "description": "For doi_404: the agency doi.org names for the printed DOI, lowercase (crossref, datacite, medra, ...), or 'none' when doi.org says the DOI does not exist. Omitted when doi.org was not asked or did not answer.",
+          "title": "Registration Agency",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "bib_id",
+        "outcome"
+      ],
+      "title": "LookupExportReader",
+      "type": "object"
+    },
     "MatchFunderExportReader": {
       "additionalProperties": true,
       "description": "A funder named on an external-service record.",
@@ -2898,6 +3128,18 @@
           "title": "Title",
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "updated_by": {
+          "default": null,
+          "description": "Notices that update the matched work (Crossref updated-by): retractions, corrections, expressions of concern, withdrawals. Omitted when the record lists none.",
+          "items": {
+            "$ref": "#/$defs/UpdateNoticeExportReader"
+          },
+          "title": "Updated By",
+          "type": [
+            "array",
             "null"
           ]
         },
@@ -3871,6 +4113,60 @@
       "title": "TimingsExportReader",
       "type": "object"
     },
+    "UpdateNoticeExportReader": {
+      "additionalProperties": true,
+      "description": "A notice that updates a matched work, as the registry records it.",
+      "properties": {
+        "date": {
+          "default": null,
+          "description": "Date of the notice as ISO 8601 (YYYY, YYYY-MM or YYYY-MM-DD).",
+          "pattern": "^[0-9]{4}(-[0-9]{2}(-[0-9]{2})?)?$",
+          "title": "Date",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "doi": {
+          "default": null,
+          "description": "DOI of the notice, lowercase.",
+          "pattern": "^10\\.[0-9]{4,9}/[^\\sA-Z]+$",
+          "title": "Doi",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "default": null,
+          "description": "The kind of notice as the record words it ('Retraction').",
+          "title": "Label",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "default": null,
+          "description": "Who reported the notice to the registry: publisher, retraction-watch.",
+          "title": "Source",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "description": "Kind of notice, lowercase snake_case as the registry names it: retraction, correction, expression_of_concern, withdrawal, erratum, addendum, ...",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "UpdateNoticeExportReader",
+      "type": "object"
+    },
     "UrlExportReader": {
       "additionalProperties": true,
       "description": "One hyperlink found in the text.",
@@ -4422,6 +4718,15 @@
         "$ref": "#/$defs/BibExportReader"
       },
       "title": "Bib",
+      "type": "array"
+    },
+    "bib_check": {
+      "default": [],
+      "description": "One row per reference-list entry when enrichment ran: whether the entry agrees with the record it was matched to, how it differs, and whether that record was retracted. Empty when enrichment did not run. Added in 12.3.",
+      "items": {
+        "$ref": "#/$defs/BibCheckExportReader"
+      },
+      "title": "Bib Check",
       "type": "array"
     },
     "bib_match": {

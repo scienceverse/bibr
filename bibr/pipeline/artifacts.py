@@ -21,12 +21,15 @@ if TYPE_CHECKING:
 # check with an accurate message instead of the misleading core-version one.
 # "3" (v12) adds the ROR ``affiliation_match`` and ``funding_match`` rows.
 # "4" stores warnings as ``{code, message}`` objects instead of prose.
-ENRICHMENT_SIDECAR_SCHEMA_VERSION = "4"
-CORE_SCHEMA_VERSION = "12.2"
+# "5" (v12.3) adds ``lookups``: how each reference's registry lookup ended.
+ENRICHMENT_SIDECAR_SCHEMA_VERSION = "5"
+CORE_SCHEMA_VERSION = "12.3"
 # Each major is a clean break: a v11 core cannot be replayed into a v12
 # payload, so the gate accepts exactly one version.
 SUPPORTED_CORE_SCHEMA_VERSIONS = frozenset({CORE_SCHEMA_VERSION})
-CROSSREF_ENRICHMENT_SCHEMA_REVISION = "crossref-v1"
+# "crossref-v2": searches select ``updated-by`` (retraction and correction
+# notices), so a sidecar enriched without them is not replayed as current.
+CROSSREF_ENRICHMENT_SCHEMA_REVISION = "crossref-v2"
 
 
 class RunState(StrEnum):
@@ -60,11 +63,12 @@ class EnrichmentSidecar:
     funding_match: tuple[dict, ...] = ()
     warnings: tuple[ProcessingWarning, ...] = ()
     detail: str | None = None
+    lookups: tuple[dict, ...] = ()
 
     def to_dict(self) -> dict:
         value = asdict(self)
         # Keep the common complete sidecar compact.
-        for key in ("affiliation_match", "funding_match", "warnings"):
+        for key in ("affiliation_match", "funding_match", "warnings", "lookups"):
             if not value[key]:
                 value.pop(key)
         if self.detail is None:
@@ -87,6 +91,7 @@ class EnrichmentSidecar:
                 for warning in map(ProcessingWarning.from_dict, value.get("warnings") or ())
             ),
             detail=(str(value["detail"])[:512] if value.get("detail") is not None else None),
+            lookups=tuple(value.get("lookups") or ()),
         )
 
 
@@ -133,6 +138,7 @@ def enrichment_settings_digest(ctx: PipelineContext) -> str:
         "enabled": ctx.config.enrichment_enabled(ctx.settings),
         "consolidate": ctx.config.consolidate or crossref.consolidate,
         "verify": crossref.verify,
+        "doi_agency_lookup": crossref.doi_agency_lookup,
         "enrich_concurrency": crossref.enrich_concurrency,
         "enrich_timeout": crossref.enrich_timeout,
         "request_timeout": crossref.request_timeout,
@@ -259,6 +265,8 @@ def make_enrichment_sidecar(
         copy.deepcopy(enriched_payload.get("funding_match") or ()),
         key=lambda row: str(row.get("funding_id", "")) if isinstance(row, dict) else "",
     )
+    enrichment = (enriched_payload.get("extraction") or {}).get("enrichment") or {}
+    lookups = copy.deepcopy(enrichment.get("lookups") or ())
 
     return EnrichmentSidecar(
         schema_version=ENRICHMENT_SIDECAR_SCHEMA_VERSION,
@@ -274,6 +282,7 @@ def make_enrichment_sidecar(
             for warning in warnings
         ),
         detail=" ".join(str(detail).split())[:512] if detail else None,
+        lookups=tuple(lookups),
     )
 
 
@@ -332,6 +341,13 @@ def replay_enrichment_sidecar(
         if row["service"] in seen_metadata_services:
             raise ArtifactReplayError("duplicate paper enrichment service row")
         seen_metadata_services.add(row["service"])
+    seen_lookup_ids: set[object] = set()
+    for row in sidecar.lookups:
+        if not isinstance(row, dict) or row.get("bib_id") not in core_bib_ids:
+            raise ArtifactReplayError("reference lookup references unknown bib_id")
+        if row["bib_id"] in seen_lookup_ids:
+            raise ArtifactReplayError("duplicate reference lookup row")
+        seen_lookup_ids.add(row["bib_id"])
     for table, id_key, rows in (
         ("affiliation", "affiliation_id", sidecar.affiliation_match),
         ("funding", "funding_id", sidecar.funding_match),
@@ -360,7 +376,7 @@ def replay_enrichment_sidecar(
         MetadataMatchExport,
         append_payload_warning,
     )
-    from bibr.export.models import WarningExport
+    from bibr.export.models import LookupExport, WarningExport
 
     try:
         for row in sidecar.bib_match:
@@ -373,6 +389,8 @@ def replay_enrichment_sidecar(
             FundingMatchExport.model_validate(row, strict=True)
         for warning in sidecar.warnings:
             WarningExport.model_validate(warning.to_dict(), strict=True)
+        for row in sidecar.lookups:
+            LookupExport.model_validate(row, strict=True)
     except ValidationError as exc:
         raise ArtifactReplayError("invalid typed enrichment row") from exc
     try:
@@ -401,6 +419,8 @@ def replay_enrichment_sidecar(
             "refs_enriched": len(matched_ids),
             "refs_total": len(bibliography),
         }
+        if sidecar.lookups:
+            extraction["enrichment"]["lookups"] = copy.deepcopy(list(sidecar.lookups))
     else:
         # Nothing to enrich — absent, not a zeroed row.
         extraction.pop("enrichment", None)

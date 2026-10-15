@@ -192,6 +192,36 @@ def _export_doi(value: str | None, field: str) -> str | None:
     return _conformed(bare.lower(), _DOI_RE, field)
 
 
+def _lookup_rows(references) -> list[dict] | None:
+    """``extraction.enrichment.lookups``: how each reference's lookup ended.
+    ``None`` when enrichment recorded none (a Paper enriched elsewhere)."""
+    from bibr.enrich.lookup import recorded_lookup
+
+    lookups = [recorded_lookup(ref) for ref in references]
+    if not any(lookups):
+        return None
+    rows = []
+    for ref, lookup in zip(references, lookups, strict=True):
+        row: dict[str, Any] = {
+            "bib_id": ref.bib_id,
+            "outcome": lookup.outcome(bool(ref.match)) if lookup else "not_attempted",
+        }
+        if lookup is not None and row["outcome"] == "doi_404" and lookup.registration_agency:
+            row["registration_agency"] = lookup.registration_agency
+        if lookup is not None and row["outcome"] == "doi_rejected":
+            # The record the printed DOI resolved to, so a reader (and the
+            # check) can tell a wrong DOI from a wrong printed year.
+            for key, value in (
+                ("record_year", lookup.rejected_year),
+                ("record_title", lookup.rejected_title or None),
+                ("record_bib_type", _export_bib_type(lookup.rejected_type)),
+            ):
+                if value is not None:
+                    row[key] = value
+        rows.append(row)
+    return rows
+
+
 def _export_service_id(value: str | None) -> str | None:
     """A match row's ``service_id``, with a DOI identifier lowercased like every DOI."""
     if value and normalize_doi(value) == value.strip():
@@ -775,7 +805,13 @@ def _export_paper_payload(
             return None
         rows = []
         for a in authors:
-            row: dict[str, Any] = {"given": a.given, "family": a.family}
+            literal = getattr(a, "literal", None)
+            # An organization author is one whole name, with no given/family.
+            row: dict[str, Any] = (
+                {"literal": literal}
+                if literal and not a.family
+                else {"given": a.given, "family": a.family}
+            )
             if orcid := _conformed(getattr(a, "orcid", None), _ORCID_RE, "orcid"):
                 row["orcid"] = orcid
             if getattr(a, "affiliation", None):
@@ -787,7 +823,7 @@ def _export_paper_payload(
         return rows
 
     def _record_ids(m) -> dict[str, Any]:
-        """License and funder identifiers of one external record."""
+        """License, funder and update-notice identifiers of one external record."""
         # Taken from the external record as deposited, like its ``url``.
         license_url = _without_active_scheme(getattr(m, "license_url", None))
         funders = getattr(m, "funders", None)
@@ -805,6 +841,17 @@ def _export_paper_payload(
             ]
             if funders
             else None,
+            "updated_by": [
+                {
+                    "type": u.type,
+                    "doi": _export_doi(u.doi, "updated_by.doi"),
+                    "date": _conformed(u.date, _ISO_DATE_RE, "updated_by.date"),
+                    "source": u.source,
+                    "label": u.label,
+                }
+                for u in getattr(m, "updated_by", None) or []
+            ]
+            or None,
         }
 
     # bib (flat, no nested match) and bib_match (top-level)
@@ -939,6 +986,7 @@ def _export_paper_payload(
             complete=paper.metadata.enrichment_complete,
             refs_enriched=sum(1 for r in _refs if r.match),
             refs_total=len(_refs),
+            lookups=_lookup_rows(_refs),
         )
 
     regions_data: list[RegionExport] | None = None
@@ -1406,6 +1454,8 @@ def _export_paper_payload(
         affiliation_match=affiliation_match_data,
         funding_match=funding_match_data,
         bib_match=bib_match_data,
+        # Filled after verification, on the payload (bibr.enrich.check).
+        bib_check=[],
         extraction=extraction_data,
     )
 

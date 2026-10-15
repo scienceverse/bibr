@@ -33,6 +33,8 @@ os.environ["LLM_TRACK_USAGE"] = "false"
 os.environ["BIBR_RESOLVER_URL"] = ""
 os.environ["BIBR_RESOLVER_ENRICH"] = "false"
 os.environ["BIBR_RESOLVER_AUTHORITATIVE"] = "false"
+# No doi.org registration-agency lookups from tests that fake a Crossref 404.
+os.environ["CROSSREF_DOI_AGENCY_LOOKUP"] = "false"
 # Production default is "ner" (local parser); pinned to "llm" here so the test
 # suite doesn't pull the ModernBERT-CRF checkpoint. See
 # test_config.test_ref_strategy_defaults_are_local for the real default.

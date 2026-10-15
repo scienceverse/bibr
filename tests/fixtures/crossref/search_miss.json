@@ -1,0 +1,81 @@
+{
+ "status": "ok",
+ "message-type": "work-list",
+ "message": {
+  "items": [
+   {
+    "DOI": "10.7717/peerj.16163/fig-4",
+    "type": "component",
+    "title": [
+     "Figure 4: Patterns of bacterial and functional succession in sourdough starters."
+    ],
+    "issued": {
+     "date-parts": [
+      [
+       null
+      ]
+     ]
+    },
+    "publisher": "PeerJ",
+    "URL": "https://doi.org/10.7717/peerj.16163/fig-4",
+    "score": 30.780294
+   },
+   {
+    "DOI": "10.7717/peerj.16163/supp-6",
+    "type": "component",
+    "title": [
+     "Supplemental Information 6: 16S bacterial richness measured in sourdough starters from days 1–14."
+    ],
+    "issued": {
+     "date-parts": [
+      [
+       null
+      ]
+     ]
+    },
+    "publisher": "PeerJ",
+    "URL": "https://doi.org/10.7717/peerj.16163/supp-6",
+    "score": 29.133087
+   },
+   {
+    "DOI": "10.64628/aam.smvxyrqx9",
+    "type": "posted-content",
+    "title": [
+     "Before DIY sourdough starters became popular, there was home economics"
+    ],
+    "author": [
+     {
+      "given": "Mary-Leah",
+      "family": "Zwart",
+      "sequence": "first",
+      "affiliation": [
+       {
+        "name": "University of British Columbia"
+       }
+      ]
+     }
+    ],
+    "editor": [
+     {
+      "given": "Susannah",
+      "family": "Schmidt",
+      "sequence": "additional",
+      "affiliation": []
+     }
+    ],
+    "issued": {
+     "date-parts": [
+      [
+       2020,
+       5,
+       5
+      ]
+     ]
+    },
+    "publisher": "The Conversation Media Group Ltd",
+    "URL": "https://doi.org/10.64628/aam.smvxyrqx9",
+    "score": 28.505972
+   }
+  ]
+ }
+}

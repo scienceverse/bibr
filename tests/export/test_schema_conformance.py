@@ -97,6 +97,125 @@ def test_the_full_example_has_every_root_key_in_order():
     assert example["footnote"] and example["figure"][0]["text_id"] is not None
 
 
+def test_the_enriched_example_carries_every_check_shape():
+    """``valid/enriched_check.json`` is the demo paper enriched and checked:
+    the 12.3 shapes (update notices, an organization author, lookups, a
+    ``bib_check`` row with a note and a retraction) stated in the published
+    schemas, as bibr writes them today."""
+    path = ROOT / "valid" / "enriched_check.json"
+    example = json.loads(path.read_text())
+    assert example == _enriched_check_payload()
+
+    (prior,) = (row for row in example["bib_match"] if row["bib_id"] == 1)
+    assert prior["updated_by"][0]["type"] == "retraction"
+    assert {"literal": "Open Science Collaboration"} in prior["author"]
+    assert example["metadata_match"][0]["updated_by"][0]["type"] == "correction"
+    lookups = {row["bib_id"]: row for row in example["extraction"]["enrichment"]["lookups"]}
+    assert lookups[1]["outcome"] == "doi_hit"
+    assert lookups[2] == {"bib_id": 2, "outcome": "doi_404", "registration_agency": "none"}
+    assert lookups[3]["outcome"] == "doi_rejected" and lookups[3]["record_year"] == 2013
+    assert lookups[4] == {"bib_id": 4, "outcome": "clean_miss"}
+    checks = {row["bib_id"]: row for row in example["bib_check"]}
+    assert checks[1]["status"] == "matched" and checks[1]["retraction"]["type"] == "retraction"
+    assert checks[1]["notes"] == [
+        {"field": "volume", "printed": "7", "record": "8", "severity": "minor"}
+    ]
+    assert checks[2]["status"] == "doi_unregistered"
+    assert checks[3]["status"] == "fields_disagree"
+    assert checks[3]["notes"][0]["record"] == "2013"
+    assert checks[4]["status"] == "not_found"
+
+
+def _enriched_check_payload() -> dict:
+    """The demo paper as an enriched run exports it: its reference matched by
+    DOI to a record that was retracted and lists an organization author, the
+    paper's own record corrected, a DOI that does not exist, a book DOI of a
+    later edition, and a reference Crossref has no record of."""
+    from bibr.enrich.check import check_bibs
+    from bibr.enrich.lookup import ReferenceLookup
+    from bibr.enrich.verify import verify_bibs
+    from bibr.export.json_export import _export_paper_payload
+    from bibr.models import BibAuthor, MatchUpdate
+    from bibr.paper import MatchSource, PaperReference
+    from tests.export.conftest import _demo_paper
+
+    paper = _demo_paper(with_refs=True)
+    meta = paper.metadata
+    prior = meta.references[0]
+    record = prior.match[MatchSource.CROSSREF]
+    record.score = 100.0
+    record.volume = "8"
+    record.authors = [
+        *record.authors,
+        BibAuthor(given="", family="", literal="Open Science Collaboration"),
+    ]
+    record.updated_by = [
+        MatchUpdate(
+            type="retraction",
+            doi="10.1234/prior.retraction",
+            date="2021-03-01",
+            source="retraction-watch",
+            label="Retraction",
+        )
+    ]
+    prior._lookup = ReferenceLookup(queried=True, doi_status="found", hit="doi", finished=True)
+    meta.match[MatchSource.CROSSREF].updated_by = [
+        MatchUpdate(type="correction", doi="10.1234/demo.correction", date="2026-02-01")
+    ]
+    unregistered = PaperReference(
+        bib_id=2,
+        first_page=None,
+        volume=None,
+        title="A Study Nobody Registered",
+        authors="Roe, R.",
+        year=2019,
+        container="Journal of Things",
+        doi="10.1234/missing",
+        bib_type="journal_article",
+    )
+    unregistered._lookup = ReferenceLookup(
+        queried=True, doi_status="not_found", finished=True, registration_agency="none"
+    )
+    book = PaperReference(
+        bib_id=3,
+        container=None,
+        first_page=None,
+        volume=None,
+        title="Statistical power analysis for the behavioral sciences",
+        authors="Cohen, J.",
+        year=1988,
+        publisher="Lawrence Erlbaum Associates",
+        doi="10.4324/9780203771587",
+        bib_type="book",
+    )
+    book._lookup = ReferenceLookup(queried=True, finished=True)
+    book._lookup.reject(2013, "Statistical Power Analysis for the Behavioral Sciences", "book")
+    unknown = PaperReference(
+        bib_id=4,
+        container=None,
+        first_page=None,
+        volume=None,
+        title="A Report Crossref Does Not Hold",
+        authors="Poe, E.",
+        year=2001,
+        bib_type="report",
+    )
+    unknown._lookup = ReferenceLookup(queried=True, finished=True)
+    meta.references = [prior, unregistered, book, unknown]
+    payload = _export_paper_payload(paper)
+    payload["extraction"]["completed_at"] = "2026-09-22T12:00:00Z"
+    verify_bibs(payload)
+    check_bibs(payload)
+    return payload
+
+
+def _regenerate_enriched_check_example() -> None:
+    """Rewrite ``valid/enriched_check.json`` (run this module)."""
+    (ROOT / "valid" / "enriched_check.json").write_text(
+        json.dumps(_enriched_check_payload(), indent=2, ensure_ascii=False) + "\n"
+    )
+
+
 def _regenerate_full_example() -> None:
     """Rewrite ``valid/full.json`` from the shared demo paper (run this module)."""
     from bibr.export.json_export import _export_paper_payload
@@ -145,3 +264,4 @@ def _regenerate_full_example() -> None:
 
 if __name__ == "__main__":
     _regenerate_full_example()
+    _regenerate_enriched_check_example()

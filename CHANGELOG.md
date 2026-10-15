@@ -21,6 +21,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   parse, bibr asks for the verbatim answer instead. A stand-in the model writes for an
   affiliation the text does not print ("Affiliation 3") is left empty.
   The merged call, the JSON re-roll and the NuExtract native backend stay verbatim.
+- Enriched exports check every reference against the Crossref record it was
+  matched to. The new top-level `bib_check` table (export schema 12.3) has one
+  row per reference with a `status`: `matched`, `fields_disagree` (the title,
+  first author, year or DOI differs, or two minor things do; a printed DOI that
+  names another work lands here, and so does one whose record is dated more
+  than a year from the printed year, with notes saying whether only the year
+  differs), `doi_unregistered` (doi.org says the printed DOI does not exist),
+  `not_found` (every lookup answered and Crossref has no record of the work) or
+  `unchecked` (a DOI registered with DataCite or another agency, a printed DOI
+  Crossref has no record of that doi.org did not call unregistered, a failed or
+  timed-out lookup, nothing to look up). Its `notes` list each difference with
+  the printed and the record's value and a `major` or `minor` severity, and
+  `retraction` gives the record's retraction or withdrawal notice. `not_found`
+  means not found in Crossref, not that the reference is made up; see the known
+  limitations. `Result.bib_check`, `bibr.write_tables()` (`bib_check.parquet`)
+  and `bibr inspect` (a status count) show it.
+- `bib_match` and `metadata_match` rows list the notices that update the
+  matched work in `updated_by` (retraction, correction, expression of concern,
+  withdrawal), with each notice's DOI, date and source. A retracted record's
+  "RETRACTED:" title prefix no longer costs it the match.
+- `extraction.enrichment.lookups` says how each reference's lookup ended:
+  `doi_hit`, `doi_404`, `doi_rejected`, `search_hit`, `clean_miss`, `error`,
+  `timed_out` or `not_attempted`. A `doi_rejected` row describes the record the
+  printed DOI resolved to (`record_year`, `record_title`, `record_bib_type`).
+  For printed DOIs Crossref does not know, bibr asks doi.org which agency
+  registered them, in one request per paper, and gives the answer as
+  `registration_agency`. That request carries no contact address and gives up
+  after a few seconds, or before the paper's enrichment time runs out, so a
+  slow doi.org never makes an enrichment partial.
+  `CROSSREF_DOI_AGENCY_LOOKUP=false` turns it off.
+- `bibr.write_tables()` also writes `extraction_enrichment_lookups.parquet`.
 
 ### Changed
 
@@ -47,6 +78,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The vLLM servers bibr starts get `VLLM_NO_USAGE_STATS=1`, and `bibr demo` sets
   `GRADIO_ANALYTICS_ENABLED=False`, so neither sends usage statistics to its
   maintainers. A value already in your environment wins.
+- Export schema 12.3. Every addition is optional for readers, so an export
+  from an earlier 12.x still reads.
+- An organization author or editor of a matched record ("Open Science
+  Collaboration") is exported as `{"literal": ...}`; it was dropped, which left
+  such matches with no authors.
+
+### Fixed
+
+- Crossref enrichment kept up to 16 requests in flight, while Crossref allows 3
+  at once from its polite pool and 1 from the anonymous one. The extra requests
+  were answered with 429 and retried, and that waiting could take most of a
+  paper's enrichment time. bibr now keeps within the `x-concurrency-limit` and
+  `X-Rate-Limit-*` values Crossref advertises, per pool, whatever
+  `CROSSREF_ENRICH_CONCURRENCY` is set to, and logs how many requests a paper
+  made and how many were answered with 429. The Crossref settings no longer
+  suggest raising the rate limit above what Crossref allows, and the contact
+  email is no longer written to the log.
 
 ### Removed
 

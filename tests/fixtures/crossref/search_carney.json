@@ -1,0 +1,180 @@
+{
+ "status": "ok",
+ "message-type": "work-list",
+ "message": {
+  "items": [
+   {
+    "DOI": "10.1177/0956797610383437",
+    "type": "journal-article",
+    "title": [
+     "Power Posing"
+    ],
+    "author": [
+     {
+      "given": "Dana R.",
+      "family": "Carney",
+      "sequence": "first",
+      "affiliation": [
+       {
+        "name": "Columbia University"
+       }
+      ]
+     },
+     {
+      "given": "Amy J.C.",
+      "family": "Cuddy",
+      "sequence": "additional",
+      "affiliation": [
+       {
+        "name": "Harvard University"
+       }
+      ]
+     },
+     {
+      "given": "Andy J.",
+      "family": "Yap",
+      "sequence": "additional",
+      "affiliation": [
+       {
+        "name": "Columbia University"
+       }
+      ]
+     }
+    ],
+    "issued": {
+     "date-parts": [
+      [
+       2010,
+       9,
+       20
+      ]
+     ]
+    },
+    "container-title": [
+     "Psychological Science"
+    ],
+    "volume": "21",
+    "issue": "10",
+    "page": "1363-1368",
+    "publisher": "SAGE Publications",
+    "URL": "https://doi.org/10.1177/0956797610383437",
+    "score": 106.25146
+   },
+   {
+    "DOI": "10.1037/a0038543",
+    "type": "journal-article",
+    "title": [
+     "Preparatory power posing affects nonverbal presence and job interview performance."
+    ],
+    "author": [
+     {
+      "given": "Amy J. C.",
+      "family": "Cuddy",
+      "sequence": "first",
+      "affiliation": []
+     },
+     {
+      "given": "Caroline A.",
+      "family": "Wilmuth",
+      "sequence": "additional",
+      "affiliation": []
+     },
+     {
+      "given": "Andy J.",
+      "family": "Yap",
+      "sequence": "additional",
+      "affiliation": []
+     },
+     {
+      "given": "Dana R.",
+      "family": "Carney",
+      "sequence": "additional",
+      "affiliation": []
+     }
+    ],
+    "issued": {
+     "date-parts": [
+      [
+       2015,
+       7
+      ]
+     ]
+    },
+    "container-title": [
+     "Journal of Applied Psychology"
+    ],
+    "volume": "100",
+    "issue": "4",
+    "page": "1286-1295",
+    "publisher": "American Psychological Association (APA)",
+    "URL": "https://doi.org/10.1037/a0038543",
+    "score": 50.359882,
+    "updated-by": [
+     {
+      "DOI": "10.1037/apl0000317",
+      "type": "correction",
+      "label": "Correction",
+      "source": "publisher",
+      "updated": {
+       "date-parts": [
+        [
+         2018,
+         5,
+         14
+        ]
+       ],
+       "date-time": "2018-05-14T00:00:00Z",
+       "timestamp": 1526256000000
+      }
+     }
+    ]
+   },
+   {
+    "DOI": "10.1037/e521512014-345",
+    "type": "dataset",
+    "title": [
+     "Visual Attention to Power Posers: People Avert Their Gaze from Nonverbal Displays of Power"
+    ],
+    "author": [
+     {
+      "given": "Elizabeth",
+      "family": "Baily",
+      "sequence": "first",
+      "affiliation": []
+     },
+     {
+      "given": "Amy",
+      "family": "Cuddy",
+      "sequence": "additional",
+      "affiliation": []
+     },
+     {
+      "given": "Sarah",
+      "family": "Gaither",
+      "sequence": "additional",
+      "affiliation": []
+     },
+     {
+      "given": "Dana",
+      "family": "Carney",
+      "sequence": "additional",
+      "affiliation": []
+     }
+    ],
+    "issued": {
+     "date-parts": [
+      [
+       2012
+      ]
+     ]
+    },
+    "container-title": [
+     "PsycEXTRA Dataset"
+    ],
+    "publisher": "American Psychological Association (APA)",
+    "URL": "https://doi.org/10.1037/e521512014-345",
+    "score": 48.600285
+   }
+  ]
+ }
+}

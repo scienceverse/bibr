@@ -119,6 +119,9 @@ class CrossrefEnricher:
             self._timeout if self._timeout is not None else self._settings.crossref.enrich_timeout
         )
         enrich_started_at = time.monotonic()
+        # When the wait below gives up: the doi.org agency lookup, which only
+        # refines the outcome of DOIs Crossref does not know, ends before it.
+        deadline = asyncio.get_running_loop().time() + timeout
 
         async def _identity() -> EnrichmentReport | None:
             if not meta.doi:
@@ -131,7 +134,7 @@ class CrossrefEnricher:
                 if prefetch_handle is not None:
                     await prefetch_handle.discard()
                 return None
-            kwargs: dict = {"settings": self._settings}
+            kwargs: dict = {"settings": self._settings, "deadline": deadline}
             if prefetch_handle is not None:
                 # Inside the timeout budget: a timed-out wait cancels the
                 # prefetch along with the rest of the enrichment.
@@ -188,6 +191,9 @@ class CrossrefEnricher:
         except TimeoutError:
             if meta.references:
                 meta.enrichment_complete = False
+                from bibr.enrich.lookup import finish_unfinished
+
+                finish_unfinished(meta.references, timed_out=True)
             warning = ProcessingWarning(
                 WarningCode.CROSSREF_ENRICHMENT_TIMEOUT,
                 f"Crossref enrichment timed out after {timeout:g}s",
@@ -202,6 +208,9 @@ class CrossrefEnricher:
         except Exception as e:  # noqa: BLE001
             if meta.references:
                 meta.enrichment_complete = False
+                from bibr.enrich.lookup import finish_unfinished
+
+                finish_unfinished(meta.references, timed_out=False)
             # Both strings are exported: they name the error, not the request
             # URL an HTTP error quotes. The log line keeps the raw text.
             reason = describe_error(e)

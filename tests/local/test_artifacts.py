@@ -11,7 +11,7 @@ from bibr.processing_warnings import ProcessingWarning, WarningCode
 
 def _core_payload(*, title: str = "Café") -> dict:
     return {
-        "schema_version": "12.2",
+        "schema_version": "12.3",
         "metadata": {"title": title},
         "bib": [{"bib_id": 1}],
         "bib_match": [],
@@ -484,6 +484,7 @@ def test_enrichment_settings_digest_includes_resolver_result_settings():
         settings.crossref.enrich = True
         settings.crossref.consolidate = "off"
         settings.crossref.verify = True
+        settings.crossref.doi_agency_lookup = True
         settings.crossref.enrich_concurrency = 4
         settings.crossref.enrich_timeout = 30
         settings.crossref.request_timeout = 10
@@ -591,3 +592,51 @@ def test_a_sidecar_without_ror_rows_stays_compact():
     )
     assert "affiliation_match" not in sidecar.to_dict()
     assert "funding_match" not in sidecar.to_dict()
+
+
+def test_sidecar_carries_reference_lookups_through_replay():
+    from bibr.pipeline.artifacts import (
+        ArtifactReplayError,
+        EnrichmentSidecar,
+        canonical_json_sha256,
+        make_enrichment_sidecar,
+        replay_enrichment_sidecar,
+    )
+
+    core = _core_payload()
+    enriched = json.loads(json.dumps(core))
+    lookups = [{"bib_id": 1, "outcome": "doi_404", "registration_agency": "datacite"}]
+    enriched["extraction"]["enrichment"] = {
+        "complete": True,
+        "refs_enriched": 0,
+        "refs_total": 1,
+        "lookups": lookups,
+    }
+    sidecar = make_enrichment_sidecar(
+        enriched,
+        core_sha256=canonical_json_sha256(core),
+        settings_digest="settings-v1",
+        completeness="complete",
+    )
+    durable = EnrichmentSidecar.from_dict(json.loads(json.dumps(sidecar.to_dict())))
+
+    replayed = replay_enrichment_sidecar(core, durable, expected_settings_digest="settings-v1")
+    assert replayed["extraction"]["enrichment"]["lookups"] == lookups
+
+    for bad in (
+        [{"bib_id": 2, "outcome": "doi_hit"}],  # no such reference
+        [{"bib_id": 1, "outcome": "fabricated"}],  # not an outcome
+        [{"bib_id": 1, "outcome": "doi_hit"}, {"bib_id": 1, "outcome": "doi_hit"}],
+    ):
+        invalid = EnrichmentSidecar(**{**durable.__dict__, "lookups": tuple(bad)})
+        with pytest.raises(ArtifactReplayError):
+            replay_enrichment_sidecar(core, invalid, expected_settings_digest="settings-v1")
+
+
+def test_sidecar_without_lookups_stays_compact():
+    from bibr.pipeline.artifacts import EnrichmentSidecar
+
+    sidecar = EnrichmentSidecar(
+        schema_version="5", core_sha256="0" * 64, settings_digest="s", completeness="complete"
+    )
+    assert "lookups" not in sidecar.to_dict()
