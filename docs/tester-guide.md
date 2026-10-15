@@ -18,6 +18,7 @@ pipeline with a short PDF, then add fully local inference once that works.
 |---|---|---|
 | **Windows hybrid (recommended first)** | A Windows laptop with a 6 GB NVIDIA GPU | Local OCR and reference ML; a cloud LLM handles metadata |
 | **Windows fully local** | Local inference after the hybrid test passes | Quantized OCR and LLM models, loaded one at a time; keep Crossref off (the default) for offline runs after model downloads |
+| **[try.bibr.org](https://try.bibr.org)** | Trying one paper, with no installation | Only the browser; upload the paper to the hosted demo |
 | **Shared demo link** | The quickest evaluation, with no installation | Only the browser; whoever runs `bibr demo --share` (see [Gradio demo](#gradio-demo)) processes the paper |
 
 ### Status of the 6 GB Windows path
@@ -27,7 +28,7 @@ bibr now has a native Windows path; WSL2 is not required. On Windows it uses
 the local LLM. For a 6 GB GPU, setup selects:
 
 - GLM-OCR Q8 (about 950 MB downloaded) for `glm-llama`;
-- the bibr extract 4B Q4_K_M GGUF (about 2.7 GB downloaded) for a fully local LLM; and
+- the bibr extract 4B Q4_K_M GGUF (about 2.6 GB downloaded) for a fully local LLM; and
 - `aggressive` memory mode, which unloads one model before loading the next.
 
 The code and automated tests explicitly cover the 6 GB selection, but this is a
@@ -75,8 +76,9 @@ running on NVIDIA hardware.
 GTX 10-series (Pascal) cards must use the `cuda-12.4` zips above — the
 `cuda-13.x` builds dropped support for that generation.
 
-Alternatively, install the package distributed through winget and inspect the
-runtime it provides:
+Alternatively, install the package distributed through winget, which is the
+command `bibr setup`'s plan gives. It installs the Vulkan build, which works on
+NVIDIA but is slower than a CUDA build:
 
 ```powershell
 winget install llama.cpp
@@ -140,10 +142,11 @@ uv run bibr setup --advanced
 
 For the first test:
 
-1. Choose a cloud LLM provider, such as Google, and enter its API key. This
-   sends document text to that provider for metadata extraction.
-2. Choose `glm-llama` for OCR on this Windows machine and `aggressive` memory
-   mode. Keep the default NER reference parser. Enter a Crossref email if
+1. Choose a cloud LLM provider, such as Anthropic (the default, with Claude
+   Haiku 5.5), and enter its API key. This sends document text to that
+   provider for metadata extraction.
+2. Choose `glm-llama` for OCR on this Windows machine. Setup pins `aggressive`
+   memory mode on a 6 GB GPU. Keep the default NER reference parser. Enter a Crossref email if
    desired; Crossref enrichment is a separate network service.
 3. When the wizard offers to install extras, accept — `uv sync --extra all`
    already installed the relevant ones, and the install step uses
@@ -306,7 +309,7 @@ If fully local inference does not run, or is too slow, walk down this ladder:
 
 1. try the llama.cpp build (`--ocr glm-llama`, and `--llm local` on Windows or a
    small GPU already selects llama.cpp);
-2. set an API key for a cloud LLM (Google, OpenAI, Anthropic, …) and keep OCR
+2. set an API key for a cloud LLM (Anthropic, Google, OpenAI, …) and keep OCR
    local — inexpensive and reliable; or
 3. self-host an open-source LLM on a GPU box and point bibr at it — OSS models
    run much better on a real GPU than on a laptop.
@@ -351,6 +354,12 @@ result.save("result.json")
 ```
 
 In Jupyter, use `await bibr.achew(...)` instead.
+
+To load the references into a reference manager, `uv run bibr references
+results/ -o refs.bib` writes those of every export in `results/` to one BibTeX
+file; a `.ris` name writes RIS and a `.json` name CSL-JSON. In Python,
+`result.to_bibtex()`, `result.to_ris()` and `result.to_csl_json()` return the
+same lists.
 
 ## Gradio demo
 

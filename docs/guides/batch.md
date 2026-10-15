@@ -207,6 +207,12 @@ resumed run with nothing new does not re-read the corpus; see the
 another schema major, left in `<out>` by an older bibr, is left out of the
 tables with a warning; `--force` re-runs every paper under the current schema.
 
+For a reference manager, `bibr references <out>/ -o refs.bib` writes the
+reference lists of every export in `<out>` to one BibTeX file, with cite keys
+unique across it; a `.ris` name writes RIS and a `.json` name CSL-JSON.
+`run_info.json` is not an export, so it is skipped with a warning. The
+[Python guide](library.md#reference-lists) describes which values are written.
+
 `run_info.json` carries the `run_id` that stamps this run's ledger lines,
 `started_at`/`finished_at`, the invocation (`options`, without the token),
 `bibr_version`, `build_sha` (the serve's for remote runs, the checkout's git

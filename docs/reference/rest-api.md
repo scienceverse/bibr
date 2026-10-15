@@ -259,7 +259,8 @@ do not count the original extraction's LLM tokens as new usage.
 | `400` | Invalid input (missing filename, malformed/bounded option, duplicate multipart part, an unexpected file part, too many text parts) |
 | `401` | Missing or invalid bearer token (`AUTH_API_KEY` set) |
 | `404` | Unknown job id (expired past `JOBS_TTL_SECONDS`, evicted by the retention limits, or never existed) |
-| `409` | Job result requested before the job finished |
+| `409` | Job result or reference list requested before the job finished, or `DELETE` on a job that is running or finished |
+| `410` | Result or reference list of a cancelled job (`error_code: job_cancelled`) |
 | `413` | Upload limit exceeded (50 MiB file / 51 MiB multipart envelope) |
 | `422` | Extraction processing error, including an LLM response that was truncated at its token limit (`error_code: llm_truncated`) or failed validation (`llm_invalid_output`); retrying the same request fails the same way. A failure caused by an internal or library exception only names its stage and code (`Processing failed in layout (layout_failed)`); the exception text goes to the server log, not the response. When a service or model the pipeline needs was down (an OCR server that refused or dropped the connection, a layout model or LLM server that could not start), the detail also carries `"outage": true` and the message ends in `: service temporarily unavailable`: the same request may succeed later |
 | `429` | Upload admission or async-job active cap reached |

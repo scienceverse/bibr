@@ -7,7 +7,8 @@ hide:
 
 **bib**liography **r**odent chews through scientific papers and returns structured
 JSON. Read PDF, DOCX, JATS XML, HTML, and ePub; extract metadata, references,
-sections, sentences, tables, figures, and equations.
+sections, sentences, tables, figures, and equations; and export reference lists
+as BibTeX, RIS, or CSL-JSON.
 
 To try bibr on one paper without installing anything, upload it at
 [try.bibr.org](https://try.bibr.org).
@@ -68,9 +69,11 @@ The first run may download models and additional runtimes.
 
     ---
 
-    Use local or cloud models from the CLI and Python, or deploy an HTTP API
-    with `bibr serve`. Fully offline operation also requires local model assets
-    and external enrichment to be disabled. [Deploy bibr](guides/deployment.md).
+    Use bibr's fine-tuned Qwen3.5 models locally or Claude Haiku 5.5 in the
+    cloud, from the CLI and Python, or deploy an HTTP API with `bibr serve`.
+    [Choose a model](guides/extraction-models.md). Fully offline operation
+    also requires local model assets and external enrichment to be disabled.
+    [Deploy bibr](guides/deployment.md).
 
 </div>
 

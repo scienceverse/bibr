@@ -545,7 +545,7 @@ Reference segmentation and parsing have two independent controls:
 ```bash
 # .env
 REF_SEG_STRATEGY=geom   # "geom" (default) | "region" | "llm" | "crf"
-REF_PARSE_STRATEGY=ner  # "ner" (default) | "llm" | "llm-chunked" | "off"
+REF_PARSE_STRATEGY=ner  # "ner" (default) | "llm" | "llm-chunked" | "ref-llm" | "off"
 ```
 
 By default, segmentation runs on a local geometry model (`geom`), which

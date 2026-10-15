@@ -95,6 +95,12 @@ resolver and the `bib_match` table stays empty. Set `CROSSREF_ENRICH=true` to
 enrich by default, or switch it per run — `bibr chew --crossref` /
 `--no-crossref`, `bibr.chew(..., crossref=True)`, or the `crossref=true|false`
 form field on `/papers/extract` — which wins over the setting either way.
+With enrichment on, `CROSSREF_VERIFY` (default `true`) checks each
+reference's volume, issue and pages against its matched record, and the
+optional resolver's `BIBR_RESOLVER_RAW_SEARCH` (default `true`) searches again
+with the whole reference string for references the title searches left
+unmatched; see
+[Reference extraction at scale](deployment.md#reference-extraction-at-scale).
 
 ## Choosing an OCR backend
 
@@ -120,6 +126,10 @@ backend, or set `OCR_BACKEND` to one) for a GLM endpoint. An explicit
 `--ocr gemini`, `openai` or `anthropic` ignores the URL with a warning. A
 cloud vision `OCR_BACKEND` does not override a URL you pass: the run uses
 that server as `paddle-http` and sends no page image to the cloud provider.
+The cloud vision backends all use `OCR_VISION_MODEL`, whose default
+(`gemini-3-flash-preview`) is a Gemini model, so with `--ocr openai` or
+`--ocr anthropic` set it to one of that provider's vision models, such as
+`OCR_VISION_MODEL=claude-haiku-5-5`.
 For example:
 
 ```bash
@@ -194,7 +204,11 @@ expected; install a CUDA build of `llama-server` and skip the `gpu` extra.
 `LLM_PROVIDER` selects the provider used for metadata extraction and LLM
 fallbacks such as section classification and citation linking: `{{ default_llm_provider }}`
 (the default), `openai`, `anthropic`, `groq`, or `ollama` (a local Ollama
-server). `LLM_MODEL` picks the model for that provider.
+server). `LLM_MODEL` picks the model for that provider. Its default,
+`{{ default_llm_model }}`, does not change with the provider, so set
+`LLM_MODEL` whenever you set `LLM_PROVIDER` yourself, for example
+`LLM_MODEL=claude-haiku-5-5` with `anthropic`; otherwise the provider is sent
+a model name it does not serve.
 
 For Ollama, `LLM_OLLAMA_BASE_URL` names the server (default
 `http://localhost:11434`). bibr talks to Ollama's OpenAI-compatible API under
@@ -256,7 +270,7 @@ runtime uses the 4B model: bf16 on vLLM, the Q8_0 GGUF on llama.cpp and the
 (`--reasoning off`, or `--reasoning-budget 0` on older builds, plus
 `--chat-template-kwargs '{"enable_thinking": false}'`) when the installed
 build supports it, and `bibr setup` also writes
-`LLM_CHAT_TEMPLATE_KWARGS='{"enable_thinking": false}'` for the students. Rapid-MLX
+`LLM_CHAT_TEMPLATE_KWARGS='{"enable_thinking": false}'` for the fine-tuned models. Rapid-MLX
 has a separate `LLM_RAPID_MLX_MODEL` default (`qwen3.5-4b-4bit`) when no local
 model was explicitly configured.
 
@@ -264,6 +278,15 @@ model was explicitly configured.
 `nuextract-native` backend, for a NuExtract server you run yourself, is
 explicit-only and needs `pip install 'bibr[nuextract]'`, because bibr no longer
 installs numind by default.
+
+`LLM_POINTER_OUTPUTS=true` is experimental and off by default. It shortens
+the answers of the two front-matter calls: the title and keywords call names
+the abstract's first and last words and bibr copies the abstract from the
+front matter, and the authors call lists each affiliation once and gives each
+author its numbers. When the abstract cannot be placed in the text, or the
+answer is cut off or does not parse, bibr asks for the verbatim answer
+instead. The merged call (`LLM_MERGED_CORE_METADATA`) and the
+`nuextract-native` backend do not use it.
 
 For `--llm llmster`, install LM Studio's `lms` CLI and download the desired model
 first, then set `LLM_LLMSTER_MODEL` to its model key. Bibr can start its daemon
