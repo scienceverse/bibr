@@ -592,6 +592,13 @@ class LlmOptions(_BibrSettings):
         description="Max completion tokens for citation resolution; 0 disables the task cap.",
     )
     max_input_chars: int = Field(300_000, description="Max input characters sent to the LLM.")
+    context_tokens: int | None = Field(
+        None,
+        ge=1,
+        description="The LLM server's context window in tokens. When set, long inputs are cut "
+        "so prompt plus completion fits it. bibr fills it in for the servers it starts and "
+        "learns it from a context-length rejection otherwise.",
+    )
     # Reference-segmentation OUTPUT bound: the anchor-emit call produces ~1 short
     # anchor per reference, so a long bibliography in one window emits too many
     # anchors to finish within the LLM hard-timeout (the LIGO 118->0 collapse).
