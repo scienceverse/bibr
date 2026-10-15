@@ -1066,6 +1066,8 @@ class LlamaCppLlmServer:
                     cap,
                     ctx,
                 )
+        if "context_tokens" not in self._settings.llm.model_fields_set:
+            self._settings.llm.context_tokens = ctx
         if "rate_limit_rpm" not in self._settings.llm.model_fields_set:
             # Our own server has no external quota to protect; the cloud 60
             # rpm default would only add dead time between serialized calls.
