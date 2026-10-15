@@ -24,6 +24,10 @@ dependencies = [
     "html5lib>=1.1",
     "httpx[http2]>=0.28.1",
     "google-genai>=1.0.0",
+    # The SDK behind the hosted default (LLM_PROVIDER=anthropic and the anthropic
+    # OCR backend `bibr setup` recommends). Below 1.0, as the `batch` extra pins it:
+    # 1.x broke every call through the adapter (bibr/clients/providers/anthropic.py).
+    "anthropic>=0.40.0,<1",
     "instructor>=1.7.0",
     "jsonref>=1.1.0", # instructor's Gemini provider imports it to map response models to GenAI tool schemas (default LLM path)
     "tenacity>=8.0.0", # validation-retry policy for the LLM client (imported directly)

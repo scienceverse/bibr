@@ -51,6 +51,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `LLM_STRUCTURED_BACKEND=nuextract-native` backend needs
   `pip install 'bibr[nuextract]'` and otherwise stops with an error that says so.
 
+### Fixed
+
+- The hosted plan `bibr setup` recommends (Claude Haiku 5.5 for OCR and
+  extraction) works on a plain `pip install bibr`. The anthropic SDK it needs
+  only came with the `batch` extra, which setup did not install, so the first
+  paper failed. It is now a core dependency, still below 1.0.
+- On Windows with an NVIDIA GPU, the setup plan says that OCR and the LLM run
+  through llama.cpp and gives the `winget install llama.cpp` command. It used
+  to say only that local runs can be slow.
+
 ## [0.7.2] - 2026-10-14
 
 ### Fixed
