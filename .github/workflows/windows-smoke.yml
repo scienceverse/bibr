@@ -1,0 +1,244 @@
+name: Windows researcher smoke
+
+# Temporary: exercises the path a Windows researcher follows (pip install,
+# bibr setup, hosted key, llama.cpp local model, a real PDF) on windows-latest.
+
+on:
+  push:
+    branches: [claude/project-thread-weqn3t]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    name: pip install (Python ${{ matrix.python }})
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14", "3.15"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: latest
+          enable-cache: false
+
+      - name: Python interpreter
+        run: |
+          uv python install ${{ matrix.python }}
+          uv venv --seed --python ${{ matrix.python }} "$env:RUNNER_TEMP\main"
+          uv venv --seed --python ${{ matrix.python }} "$env:RUNNER_TEMP\pypi"
+          & "$env:RUNNER_TEMP\main\Scripts\python.exe" --version
+
+      - name: pip install bibr from PyPI (what researchers get today)
+        continue-on-error: true
+        run: |
+          $py = "$env:RUNNER_TEMP\pypi\Scripts\python.exe"
+          & $py -m pip install --disable-pip-version-check bibr
+          if ($LASTEXITCODE -ne 0) { throw "pip install bibr failed ($LASTEXITCODE)" }
+          & $py -m pip show bibr
+          & "$env:RUNNER_TEMP\pypi\Scripts\bibr.exe" --version
+
+      - name: pip install main checkout (unlocked resolution)
+        run: |
+          $py = "$env:RUNNER_TEMP\main\Scripts\python.exe"
+          & $py -m pip install --disable-pip-version-check .
+          if ($LASTEXITCODE -ne 0) { throw "pip install . failed ($LASTEXITCODE)" }
+          & $py -m pip list
+
+      - name: bibr --help, import, doctor
+        run: |
+          $bibr = "$env:RUNNER_TEMP\main\Scripts\bibr.exe"
+          & $bibr --version
+          & $bibr --help
+          & "$env:RUNNER_TEMP\main\Scripts\python.exe" -c "import bibr; from bibr import LocalPipeline, Pipeline, Settings; print('import ok')"
+          & $bibr doctor
+          "doctor exit code: $LASTEXITCODE"
+
+      - name: pip install the extras setup recommends (ml, demo) plus batch
+        continue-on-error: true
+        run: |
+          $py = "$env:RUNNER_TEMP\main\Scripts\python.exe"
+          & $py -m pip install --disable-pip-version-check ".[ml,demo,batch]"
+          if ($LASTEXITCODE -ne 0) { throw "extras install failed ($LASTEXITCODE)" }
+          & $py -c "import torch, transformers, cv2, gradio, anthropic; print('torch', torch.__version__, 'anthropic', anthropic.__version__)"
+
+  uv-docs-path:
+    name: Docs quickstart with uv (uv init, uv add)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
+        with:
+          persist-credentials: false
+          path: bibr-src
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: latest
+          enable-cache: false
+
+      - name: uv init + uv add bibr (PyPI)
+        continue-on-error: true
+        run: |
+          uv init --python 3.12 paper-extraction
+          cd paper-extraction
+          uv add bibr
+          if ($LASTEXITCODE -ne 0) { throw "uv add bibr failed" }
+          uv run bibr --version
+          uv run bibr doctor
+          "doctor exit code: $LASTEXITCODE"
+
+      - name: uv init + uv add main checkout
+        run: |
+          uv init --python 3.12 paper-main
+          cd paper-main
+          uv add ..\bibr-src
+          if ($LASTEXITCODE -ne 0) { throw "uv add main failed" }
+          uv run bibr --version
+          uv run bibr doctor
+          "doctor exit code: $LASTEXITCODE"
+
+  smoke:
+    name: setup + hosted key + llama.cpp + real PDF
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      PYTHONIOENCODING: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: latest
+          enable-cache: false
+
+      - name: Install bibr from the checkout with pip
+        run: |
+          uv python install 3.12
+          uv venv --seed --python 3.12 "$env:RUNNER_TEMP\venv"
+          & "$env:RUNNER_TEMP\venv\Scripts\python.exe" -m pip install --disable-pip-version-check .
+          if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
+          "$env:RUNNER_TEMP\venv\Scripts" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Fetch a real paper
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\papers" | Out-Null
+          $out = "$env:RUNNER_TEMP\papers\ioannidis2005.pdf"
+          try {
+            Invoke-WebRequest -UseBasicParsing -UserAgent "Mozilla/5.0" -OutFile $out `
+              "https://journals.plos.org/plosmedicine/article/file?id=10.1371/journal.pmed.0020124&type=printable"
+          } catch { "PLOS download failed: $_" }
+          if (-not (Test-Path $out) -or (Get-Item $out).Length -lt 20000) {
+            Invoke-WebRequest -UseBasicParsing -OutFile $out "https://arxiv.org/pdf/1706.03762"
+          }
+          Get-Item $out | Format-List Name, Length
+          Copy-Item bibr\data\sample_paper.pdf "$env:RUNNER_TEMP\papers\sample_paper.pdf"
+
+      - name: Console encoding facts
+        run: |
+          python -c "import sys, locale; print(sys.stdout.encoding, locale.getpreferredencoding(), sys.flags.utf8_mode)"
+          [Console]::OutputEncoding
+
+      - name: bibr doctor (fresh install)
+        continue-on-error: true
+        run: |
+          bibr doctor
+          "doctor exit code: $LASTEXITCODE"
+
+      - name: setup wizard, real hardware (no GPU) -> hosted Anthropic with a fake key
+        continue-on-error: true
+        env:
+          SCENARIO: cloud
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\cloud" | Out-Null
+          Set-Location "$env:RUNNER_TEMP\cloud"
+          python "$env:GITHUB_WORKSPACE\ci\windows-smoke\drive_setup.py"
+          "wizard exit code: $LASTEXITCODE"
+          Get-Content .env
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: hosted chew with the fake key (expect an auth error, not a crash)
+        continue-on-error: true
+        run: |
+          Set-Location "$env:RUNNER_TEMP\cloud"
+          bibr chew "$env:RUNNER_TEMP\papers\ioannidis2005.pdf" -o paper.json
+          "chew exit code: $LASTEXITCODE"
+          Get-ChildItem -Recurse | Select-Object FullName, Length
+
+      - name: --no-llm chew with no OCR server (what a CPU laptop without a key sees)
+        continue-on-error: true
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\nollm" | Out-Null
+          Set-Location "$env:RUNNER_TEMP\nollm"
+          bibr chew "$env:RUNNER_TEMP\papers\sample_paper.pdf" --no-llm -o paper.json
+          "chew exit code: $LASTEXITCODE"
+
+      - name: Install llama.cpp (Windows CPU release build)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $rel = gh api repos/ggml-org/llama.cpp/releases/latest | ConvertFrom-Json
+          $asset = $rel.assets | Where-Object { $_.name -like "llama-*-bin-win-cpu-x64.zip" } | Select-Object -First 1
+          "llama.cpp release $($rel.tag_name): $($asset.name)"
+          Invoke-WebRequest -UseBasicParsing -OutFile "$env:RUNNER_TEMP\llama.zip" $asset.browser_download_url
+          Expand-Archive "$env:RUNNER_TEMP\llama.zip" -DestinationPath "$env:RUNNER_TEMP\llama"
+          $server = Get-ChildItem -Recurse "$env:RUNNER_TEMP\llama" -Filter llama-server.exe | Select-Object -First 1
+          $server.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          & $server.FullName --version
+
+      - name: setup wizard, pretend 8 GB NVIDIA GPU -> Windows fully-local plan
+        continue-on-error: true
+        timeout-minutes: 40
+        env:
+          SCENARIO: local-cuda
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\local" | Out-Null
+          Set-Location "$env:RUNNER_TEMP\local"
+          python "$env:GITHUB_WORKSPACE\ci\windows-smoke\drive_setup.py"
+          "wizard exit code: $LASTEXITCODE"
+          Get-Content .env
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: local chew of a real paper, page 1, llama.cpp OCR + 2B student on CPU
+        continue-on-error: true
+        timeout-minutes: 60
+        env:
+          LLM_BACKEND: llama-cpp
+          LLM_LOCAL_MODEL: scienceverse/bibr-extract-qwen35-2b-GGUF:Q4_K_M
+          OCR_BACKEND: glm-llama
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\real" | Out-Null
+          Set-Location "$env:RUNNER_TEMP\real"
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          bibr chew "$env:RUNNER_TEMP\papers\ioannidis2005.pdf" --pages 1 --llm local --ocr glm-llama -o "$env:RUNNER_TEMP\real\paper.json" -v
+          "chew exit code: $LASTEXITCODE after $($sw.Elapsed)"
+          Get-ChildItem -Recurse | Select-Object FullName, Length
+          if (Test-Path paper.json) { python -c "import json; d=json.load(open('paper.json', encoding='utf-8')); m=d.get('metadata') or {}; print('title:', m.get('title')); print('authors:', [a.get('name') if isinstance(a, dict) else a for a in (m.get('authors') or [])][:5]); print('doi:', m.get('doi'))" }
+
+      - name: Collect llama.cpp logs and outputs
+        if: always()
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\collect" | Out-Null
+          Get-ChildItem -Recurse $env:TEMP -Filter "*llama*" -ErrorAction SilentlyContinue | Select-Object FullName, Length
+          foreach ($d in "cloud", "local", "real", "nollm") {
+            if (Test-Path "$env:RUNNER_TEMP\$d") { Copy-Item -Recurse "$env:RUNNER_TEMP\$d" "$env:RUNNER_TEMP\collect\$d" -ErrorAction SilentlyContinue }
+          }
+          Get-ChildItem -Recurse "$env:RUNNER_TEMP\collect" -Filter .env | Remove-Item -Force
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: windows-smoke-outputs
+          path: ${{ runner.temp }}/collect
+          if-no-files-found: warn
+          retention-days: 7
