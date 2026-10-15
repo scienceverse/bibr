@@ -45,10 +45,6 @@ dependencies = [
     "litserve>=0.2.16,<0.3",
     "uvicorn[standard]>=0.30.0",
     "python-docx>=1.1.0",
-    # numind 0.3.1 changed convert_json_schema_to_nuextract_template to return a
-    # dict instead of (template, dropped_branches), and every native NuExtract
-    # contract (LLM_STRUCTURED_BACKEND=nuextract-native) failed to build.
-    "numind>=0.3,<0.3.1",
     # The torch-free ML runtime. Every bibr-owned model is served through ONNX
     # Runtime with its own `tokenizers` tokenizer, resolved from the Hub cache;
     # scikit-learn/joblib carry the geom sentence segmenter's model bundle.
@@ -111,6 +107,7 @@ dev = [
     # scripts/generate_onnx_test_bundles.py, tests/onnx_fixtures.py). Not a
     # runtime dependency: inference only needs onnxruntime, which is core.
     "onnx>=1.17.0",
+    "numind>=0.3,<0.3.1",  # tests for the nuextract-native backend (the nuextract extra)
 ]
 docs = [
     "mkdocs>=1.6",
@@ -126,6 +123,11 @@ docs = [
 
 [project.optional-dependencies]
 cache = ["redis>=5.0.0"]
+# The experimental LLM_STRUCTURED_BACKEND=nuextract-native backend, for NuExtract
+# servers. numind 0.3.1 changed convert_json_schema_to_nuextract_template to
+# return a dict instead of (template, dropped_branches), and 0.3.2 needs a C
+# compiler on Windows and Linux (cdifflib).
+nuextract = ["numind>=0.3,<0.3.1"]
 # Managed local vLLM server for `--llm local` on Linux/CUDA (`bibr setup` local path).
 # 0.30.0 is the first release clear of 0.27.0's 20 pip-audit advisories (e.g.
 # PYSEC-2026-3985, a trust_remote_code bypass); the `uv tool run` bootstrap in

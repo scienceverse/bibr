@@ -381,13 +381,25 @@ def _role_runtime_args(role: str, available: frozenset[str]) -> list[str]:
     if "--spec-type" in available:
         args += ["--spec-type", "ngram-mod"]
     if "--no-mmproj" in available:
-        # The NuExtract3-GGUF HF repo ships a 676 MB BF16 mmproj that ``-hf``
-        # auto-loads; the LLM path is text-only, so skip it.
+        # GGUF repos of vision-language models (Qwen3.5, NuExtract 3) can ship
+        # an mmproj that ``-hf`` auto-loads; the LLM path is text-only, so
+        # skip it.
         args += ["--no-mmproj"]
     if "--jinja" in available:
-        # NuExtract passes its extraction template through chat-template
-        # kwargs; llama.cpp only applies those kwargs when Jinja is enabled.
+        # Chat-template kwargs (thinking off, NuExtract's extraction template)
+        # only apply when Jinja is enabled.
         args += ["--jinja"]
+        if "--chat-template-kwargs" in available:
+            # bibr's Qwen3.5 students were trained and scored with thinking
+            # off; templates without the switch ignore it.
+            args += ["--chat-template-kwargs", '{"enable_thinking": false}']
+    # With the default ``--reasoning auto``, llama-server passes
+    # enable_thinking=true itself to any template that supports thinking,
+    # whatever the template's own default; turn reasoning off outright.
+    if "--reasoning" in available:
+        args += ["--reasoning", "off"]
+    elif "--reasoning-budget" in available:
+        args += ["--reasoning-budget", "0"]
     return args
 
 
@@ -990,7 +1002,7 @@ class LlamaCppServer:
 
 
 class LlamaCppLlmServer:
-    """Managed NuExtract GGUF server for Windows and small CUDA GPUs."""
+    """Managed GGUF extraction-model server for Windows and small CUDA GPUs."""
 
     def __init__(self, settings=None, *, stop_event: threading.Event | None = None) -> None:
         from bibr.config import snapshot_settings
@@ -1054,6 +1066,8 @@ class LlamaCppLlmServer:
                     cap,
                     ctx,
                 )
+        if "context_tokens" not in self._settings.llm.model_fields_set:
+            self._settings.llm.context_tokens = ctx
         if "rate_limit_rpm" not in self._settings.llm.model_fields_set:
             # Our own server has no external quota to protect; the cloud 60
             # rpm default would only add dead time between serialized calls.

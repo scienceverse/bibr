@@ -158,6 +158,27 @@ class TestDefaultBackend:
 
         assert isinstance(LLMClient(settings=settings)._backend, NuExtractNativeBackend)
 
+    def test_nuextract_native_backend_without_numind_names_the_extra(self, monkeypatch):
+        import importlib.util
+
+        from bibr.exceptions import ConfigurationError
+
+        real_find_spec = importlib.util.find_spec
+        monkeypatch.setattr(
+            importlib.util,
+            "find_spec",
+            lambda name, *a, **k: None if name == "numind" else real_find_spec(name, *a, **k),
+        )
+        settings = _settings(
+            provider="openai",
+            base_url="http://127.0.0.1:8767/v1",
+            model="numind/NuExtract3",
+            structured_backend="nuextract-native",
+        )
+
+        with pytest.raises(ConfigurationError, match=r"bibr\[nuextract\]"):
+            LLMClient(settings=settings)
+
     def test_gguf_nuextract_without_base_url_keeps_instructor(self):
         settings = _settings(
             provider="openai",

@@ -3,6 +3,7 @@ import contextlib
 import copy
 import functools
 import hashlib
+import importlib.util
 import inspect
 import itertools
 import json
@@ -20,6 +21,7 @@ from bibr.clients.pointer_outputs import UNUSED_ANCHORS, expand_authors, resolve
 from bibr.clients.prompts import PROMPTS
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.exceptions import (
+    ConfigurationError,
     LlmCallError,
     LlmInvalidOutputError,
     LlmRejectedError,
@@ -141,6 +143,66 @@ def _validation_attempts(settings: "GlobalSettings") -> int:
         return configured
     is_custom_openai = settings.llm.provider.lower() == "openai" and bool(settings.llm.base_url)
     return 1 if is_custom_openai else _LLM_VALIDATION_ATTEMPTS
+
+
+# Room the prompt around the paper text takes: instructions, chat template and
+# boundary markers. The longest prompt (core_metadata) is about 5.4k characters.
+_PROMPT_OVERHEAD_TOKENS = 2_048
+_CONTEXT_WINDOW_RE = re.compile(r"maximum context length is (\d+) tokens", re.IGNORECASE)
+
+
+def _char_tokens(ch: str) -> float:
+    """Tokens one character costs, over-counted for Qwen-style vocabularies.
+
+    English runs about 4 characters a token, other alphabets 2 to 3, digits
+    one each, and CJK, kana and hangul about one a character.
+    """
+    o = ord(ch)
+    if o < 0x80:
+        if ch.isdigit():
+            return 1.0
+        return 0.25 if ch.isalpha() else 0.5
+    if (
+        0x1100 <= o <= 0x11FF
+        or 0x2E80 <= o <= 0x9FFF
+        or 0xAC00 <= o <= 0xD7FF
+        or 0xF900 <= o <= 0xFAFF
+        or 0xFF00 <= o <= 0xFFEF
+        or o >= 0x20000
+    ):
+        return 1.0
+    return 0.5
+
+
+def _token_fit(text: str, budget: int) -> int:
+    """Length of the longest prefix of *text* estimated to fit *budget* tokens."""
+    if len(text) <= budget:
+        return len(text)
+    cost = 0.0
+    for i, ch in enumerate(text):
+        cost += _char_tokens(ch)
+        if cost > budget:
+            return i
+    return len(text)
+
+
+def _context_window_from_error(exc: BaseException) -> int | None:
+    """The context window a server named when it rejected a prompt as too long.
+
+    vLLM, SGLang and OpenAI answer HTTP 400 with "This model's maximum context
+    length is N tokens"; Instructor and bibr wrap that error, so the whole
+    cause chain is searched.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        match = _CONTEXT_WINDOW_RE.search(str(cur))
+        if match:
+            return int(match.group(1))
+        nxt = getattr(cur, "original_error", None)
+        cur = nxt if isinstance(nxt, BaseException) else (cur.__cause__ or cur.__context__)
+    return None
 
 
 def _task_max_tokens(settings: GlobalSettings, task_limit: int | None) -> int | None:
@@ -976,10 +1038,17 @@ def track_llm_usage(func):
 
     @functools.wraps(func)
     async def wrapper(self, *args, **kwargs):
-        return await self._run_labeled_call(
-            func.__name__,
-            lambda: func(self, *args, **kwargs),
-        )
+        async def call():
+            try:
+                return await func(self, *args, **kwargs)
+            except Exception as exc:
+                if not self._learn_context_window(exc):
+                    raise
+            # The server rejected the prompt as longer than its context window
+            # and named the window: ask again with the input cut to fit it.
+            return await func(self, *args, **kwargs)
+
+        return await self._run_labeled_call(func.__name__, call)
 
     return wrapper
 
@@ -1179,6 +1248,13 @@ class LLMClient:
         kind = _structured_backend_kind(self._settings)
         self._backend_kind = kind
         if kind == "nuextract-native":
+            if importlib.util.find_spec("numind") is None:
+                raise ConfigurationError(
+                    "LLM_STRUCTURED_BACKEND=nuextract-native needs the numind package, "
+                    "which bibr no longer installs by default. Install it with "
+                    "`pip install 'bibr[nuextract]'`, or unset LLM_STRUCTURED_BACKEND.",
+                    problems=["LLM_STRUCTURED_BACKEND=nuextract-native needs bibr[nuextract]"],
+                )
             from bibr.clients.nuextract import NuExtractNativeBackend
 
             logger.info(
@@ -1237,14 +1313,56 @@ class LLMClient:
             self._backend = self._make_backend()
 
     @staticmethod
-    def _cap_input(text: str, settings: "GlobalSettings | None" = None) -> str:
-        """Truncate input text to LLM_MAX_INPUT_CHARS to prevent token-cost abuse."""
+    def _cap_input(
+        text: str, settings: "GlobalSettings | None" = None, *, max_tokens: int | None = None
+    ) -> str:
+        """Truncate input text to LLM_MAX_INPUT_CHARS to prevent token-cost abuse.
+
+        When the server's context window is known (``llm.context_tokens``), also
+        cut the text so it fits beside the prompt and *max_tokens* of completion
+        (a quarter of the window when the call sends no cap), counting tokens
+        conservatively. Without that, a long front matter in a CJK paper
+        overruns a 32k-token local server and the whole call is rejected.
+        """
         effective = settings if settings is not None else snapshot_settings()
         limit = effective.llm.max_input_chars
         if len(text) > limit:
             logger.warning("LLM input truncated from %d to %d chars", len(text), limit)
-            return text[:limit]
+            text = text[:limit]
+        context = effective.llm.context_tokens
+        if context:
+            # A completion cap at or past the window would leave no room for
+            # text; such a call cannot fit anyway, so keep half the window.
+            reserve = min(max_tokens or context // 4, context // 2)
+            fit = _token_fit(text, max(context - reserve - _PROMPT_OVERHEAD_TOKENS, 0))
+            if fit < len(text):
+                logger.warning(
+                    "LLM input truncated from %d to %d chars to fit the %d-token context",
+                    len(text),
+                    fit,
+                    context,
+                )
+                text = text[:fit]
         return text
+
+    def _learn_context_window(self, exc: BaseException) -> bool:
+        """Remember the context window a server named when it rejected a prompt.
+
+        True when it is smaller than the window inputs were cut to, so asking
+        again with :meth:`_cap_input` cutting to it can succeed.
+        """
+        window = _context_window_from_error(exc)
+        if window is None:
+            return False
+        current = self._settings.llm.context_tokens
+        if current is not None and current <= window:
+            return False
+        logger.warning(
+            "The LLM server's context window is %d tokens; cutting long inputs to fit it",
+            window,
+        )
+        self._settings.llm.context_tokens = window
+        return True
 
     def _settings_signature(self) -> tuple:
         return (
@@ -2293,12 +2411,13 @@ class LLMClient:
         try:
             spec = PROMPTS["title_keywords"]
             boundary = boundary or uuid.uuid4().hex
-            capped_text = self._cap_input(text, self._settings)
+            max_tokens = _task_max_tokens(self._settings, self._settings.llm.title_max_tokens)
+            capped_text = self._cap_input(text, self._settings, max_tokens=max_tokens)
             result = await self._invoke_structured(
                 spec.response_model,
                 [{"role": "user", "content": spec.build_user(boundary=boundary, text=capped_text)}],
                 spec.system,
-                max_tokens=_task_max_tokens(self._settings, self._settings.llm.title_max_tokens),
+                max_tokens=max_tokens,
             )
 
             logger.info(f"Successfully extracted title/keywords (hash={file_hash})")
@@ -2331,7 +2450,8 @@ class LLMClient:
         did not answer) raises as the verbatim call would.
         """
         spec = PROMPTS["title_keywords_pointers"]
-        capped_text = self._cap_input(text, self._settings)
+        max_tokens = _task_max_tokens(self._settings, self._settings.llm.title_max_tokens)
+        capped_text = self._cap_input(text, self._settings, max_tokens=max_tokens)
         try:
             answer = await self._invoke_structured(
                 spec.response_model,
@@ -2344,7 +2464,7 @@ class LLMClient:
                     }
                 ],
                 spec.system,
-                max_tokens=_task_max_tokens(self._settings, self._settings.llm.title_max_tokens),
+                max_tokens=max_tokens,
             )
         except ProcessingError:
             raise
@@ -2403,14 +2523,15 @@ class LLMClient:
         try:
             spec = PROMPTS["authors"]
             boundary = boundary or uuid.uuid4().hex
-            capped_text = self._cap_input(text, self._settings)
+            max_tokens = _task_max_tokens(self._settings, self._settings.llm.authors_max_tokens)
+            capped_text = self._cap_input(text, self._settings, max_tokens=max_tokens)
             result = await self._invoke_structured(
                 spec.response_model,
                 [{"role": "user", "content": spec.build_user(boundary=boundary, text=capped_text)}],
                 spec.system,
                 reasoning_effort=self._settings.llm.reasoning_effort_authors,
                 client_override=self._get_json_mode_client() if json_mode else None,
-                max_tokens=_task_max_tokens(self._settings, self._settings.llm.authors_max_tokens),
+                max_tokens=max_tokens,
             )
 
             logger.info(f"Successfully extracted authors (hash={file_hash})")
@@ -2453,7 +2574,8 @@ class LLMClient:
         service did not answer) raises as the verbatim call would.
         """
         spec = PROMPTS["authors_pointers"]
-        capped_text = self._cap_input(text, self._settings)
+        max_tokens = _task_max_tokens(self._settings, self._settings.llm.authors_max_tokens)
+        capped_text = self._cap_input(text, self._settings, max_tokens=max_tokens)
         try:
             answer = await self._invoke_structured(
                 spec.response_model,
@@ -2467,7 +2589,7 @@ class LLMClient:
                 ],
                 spec.system,
                 reasoning_effort=self._settings.llm.reasoning_effort_authors,
-                max_tokens=_task_max_tokens(self._settings, self._settings.llm.authors_max_tokens),
+                max_tokens=max_tokens,
             )
         except ProcessingError:
             raise
@@ -2827,14 +2949,15 @@ class LLMClient:
         try:
             spec = PROMPTS["references_parse"]
             boundary = uuid.uuid4().hex
-            capped_text = self._cap_input(text, self._settings)
+            max_tokens = self._settings.REF_PARSE_MAX_TOKENS
+            capped_text = self._cap_input(text, self._settings, max_tokens=max_tokens)
             content = spec.build_user(boundary=boundary, text=capped_text, start_index=start_index)
 
             result = await self._invoke_structured(
                 spec.response_model,
                 [{"role": "user", "content": content}],
                 spec.system,
-                max_tokens=self._settings.REF_PARSE_MAX_TOKENS,
+                max_tokens=max_tokens,
             )
 
             extracted_refs = result.references
@@ -2916,14 +3039,15 @@ class LLMClient:
         try:
             spec = PROMPTS["references_parse_chunk"]
             boundary = uuid.uuid4().hex
-            capped_text = self._cap_input(text, self._settings)
+            max_tokens = self._settings.REF_PARSE_MAX_TOKENS
+            capped_text = self._cap_input(text, self._settings, max_tokens=max_tokens)
             content = spec.build_user(boundary=boundary, text=capped_text)
 
             result = await self._invoke_structured(
                 spec.response_model,
                 [{"role": "user", "content": content}],
                 spec.system,
-                max_tokens=self._settings.REF_PARSE_MAX_TOKENS,
+                max_tokens=max_tokens,
             )
 
             extracted_refs = result.references

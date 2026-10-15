@@ -68,20 +68,20 @@ def test_local_resolves_to_llama_cpp_on_windows():
 
 
 def test_local_resolves_to_llama_cpp_when_no_vllm_variant_fits():
-    """A 10 GB card passed the old "> 8 GB" rule but cannot hold NuExtract 3 bf16 (11 GB)."""
+    """A 7 GB card cannot hold the smallest recommended vLLM model (the 2B student, 8 GB)."""
     with (
         patch("platform.system", return_value="Linux"),
         patch("sys.platform", "linux"),
-        patch("bibr.local.llm_models.detect_hardware", return_value=("cuda", 10.0)),
+        patch("bibr.local.llm_models.detect_hardware", return_value=("cuda", 7.0)),
     ):
         assert resolve_llm_backend("local") == "llama-cpp"
 
 
-def test_local_resolves_to_vllm_once_the_bf16_variant_fits():
+def test_local_resolves_to_vllm_once_a_student_fits():
     with (
         patch("platform.system", return_value="Linux"),
         patch("sys.platform", "linux"),
-        patch("bibr.local.llm_models.detect_hardware", return_value=("cuda", 11.0)),
+        patch("bibr.local.llm_models.detect_hardware", return_value=("cuda", 8.0)),
     ):
         assert resolve_llm_backend("local") == "vllm"
 

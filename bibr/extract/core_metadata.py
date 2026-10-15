@@ -746,6 +746,107 @@ def _rewrite_consortium_authors(authors: list[PaperAuthor], context: str) -> lis
     return kept
 
 
+def _split_line_merged_authors(authors: list[PaperAuthor], context: str) -> list[PaperAuthor]:
+    """Split a person the model built from two names printed on separate lines.
+
+    Developmental Science prints one author per line; the 4B student read
+    "Cyann Bernard" and "Adeline Depierreux" as one person "Cyann Bernard
+    Adeline Depierreux". A person is split only when no line prints their
+    whole name and two lines print exactly its two halves, two or more tokens
+    each. Each half takes its last word as the family name. Email, ORCID and
+    the corresponding flag were attached to someone who does not exist, so
+    they are cleared for the printed contact lines to fill in again.
+    """
+    lines = [tokens for tokens in map(_name_tokens, context.splitlines()) if tokens]
+    printed = set(lines)
+    kept: list[PaperAuthor] = []
+    changed = False
+    for author in authors:
+        words = " ".join(part for part in (author.given, author.family) if part).split()
+        tokens = _name_tokens(" ".join(words))
+        split = None
+        if (
+            ORGANIZATION_ROLE not in (author.role or [])
+            and len(words) >= 4
+            and len(tokens) == len(words)
+            and not any(
+                line[i : i + len(tokens)] == tokens
+                for line in lines
+                for i in range(len(line) - len(tokens) + 1)
+            )
+        ):
+            split = next(
+                (
+                    k
+                    for k in range(2, len(tokens) - 1)
+                    if tokens[:k] in printed and tokens[k:] in printed
+                ),
+                None,
+            )
+        if split is None:
+            kept.append(author)
+            continue
+        changed = True
+        for half in (words[:split], words[split:]):
+            kept.append(
+                author.model_copy(
+                    update={
+                        "given": " ".join(half[:-1]),
+                        "family": half[-1],
+                        "email": None,
+                        "orcid": None,
+                        "corresponding": False,
+                    }
+                )
+            )
+    if not changed:
+        return authors
+    for author_id, author in enumerate(kept, start=1):
+        author.author_id = author_id
+    return kept
+
+
+# The last word of a group author's name ("MChart Expert Panel").
+_GROUP_HEAD_RE = re.compile(
+    r"\b(?:collaborat(?:ion|ive|ors?)|collective|committee|consortium|contributors|group|"
+    r"investigators?|network|panel|society|team|trialists?)$",
+    re.IGNORECASE,
+)
+
+
+def _rejoin_wrapped_group_names(authors: list[PaperAuthor], context: str) -> list[PaperAuthor]:
+    """Restore the head of a group name the byline wrapped onto the line above.
+
+    JMIR's byline ends "...; Amir Aryani1,5, PhD; MChart" with "Expert Panel6"
+    on the next line, and the model kept only "Expert Panel". A group author
+    (no given name, a group word last) takes the one word that follows the
+    last ";" and ends the line printed right before its name. A comma is not
+    enough: "..., PhD" before a line break is a degree, not a name.
+    """
+    for author in authors:
+        if author.given or not author.family or not _GROUP_HEAD_RE.search(author.family):
+            continue
+        match = re.search(
+            r";[ \t]*(?P<head>[^\W\d_][^\s,;]*)[ \t]*\n\s*"
+            + re.escape(author.family)
+            + r"(?![^\W\d_])",
+            context,
+        )
+        if match is None:
+            continue
+        head = match.group("head")
+        others = {
+            token
+            for other in authors
+            if other is not author
+            for token in _name_tokens(f"{other.given} {other.family}")
+        }
+        if not set(_name_tokens(head)).isdisjoint(others):
+            continue
+        author.family = f"{head} {author.family}"
+    return authors
+
+
 def _name_tokens(value: str) -> tuple[str, ...]:
     # Marker stripping happens here, before casefolding, so that every name
     # comparison in this module is symmetric: printed byline text and extracted
@@ -2783,11 +2884,15 @@ class CoreMetadataExtractor:
         dropped_translators = len(kept) != len(authors)
         before_groups = [(author.given, author.family) for author in kept]
         kept = _rewrite_consortium_authors(kept, context)
+        before_split = len(kept)
+        kept = _rejoin_wrapped_group_names(_split_line_merged_authors(kept, context), context)
         repairs = len(self.validation_issues)
         self._repair_glued_names(kept)
         transforms = []
         if dropped_translators:
             transforms.append("translator_credits_dropped")
+        if len(kept) != before_split:
+            transforms.append("line_merged_authors_split")
         if [(author.given, author.family) for author in kept] != before_groups:
             transforms.append("group_authors_rewritten")
         if len(self.validation_issues) != repairs:
