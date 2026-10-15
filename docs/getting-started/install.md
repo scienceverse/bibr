@@ -1,6 +1,11 @@
 # Installation
 
 bibr requires **Python >=3.11,<3.15** (3.11, 3.12, 3.13, or 3.14).
+Python 3.15 is not supported yet: onnxruntime, which bibr's models run on,
+publishes no 3.15 wheels. On 3.15 (or 3.10), `pip install bibr` cannot install
+a current release: it fails, or picks the empty early placeholder 0.0.2, after
+which `bibr` is not a command. The uv commands below avoid this, because
+`uv init --python 3.12` fetches its own Python 3.12.
 
 ## System prerequisites
 
