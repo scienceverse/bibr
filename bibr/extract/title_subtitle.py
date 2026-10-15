@@ -84,7 +84,12 @@ _LABEL_PREFIX_RE = re.compile(
     r"e-?mail\b|running\s+(?:title|head)\b|short\s+title\b|key\s*words?\b|abstract\b|"
     r"summary\b|in\s+memoriam\b|in\s+memory\s+of\b|dedicated\s+to\b|edited\s+by\b|"
     r"(?:handling\s+)?editor\b|reviewed\s+by\b|issn\b|isbn\b|vol(?:ume)?\.?\s*\d|"
-    r"(?:table|fig(?:ure)?\.?)\s*\d|(?:udc|udk|удк|jel|pacs|msc)\b)",
+    r"(?:table|fig(?:ure)?\.?)\s*\d|(?:udc|udk|удк|jel|pacs|msc)\b|"
+    # Declaration boxes a sidebar prints beside the title block (Open Mind's
+    # "Competing Interests: The authors declare ...").
+    r"(?:competing|conflicts?\s+of)\s+interests?\b|"
+    r"(?:funding|financial\s+disclosures?|data\s+availability|declarations?|"
+    r"supplementa(?:l|ry)\s+materials?|acknowledge?ments?)\s*:)",
     re.IGNORECASE,
 )
 # A journal or proceedings name, not a subtitle.

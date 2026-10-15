@@ -61,6 +61,7 @@ nav:
       - MCP server: guides/mcp.md
       - Batch runs: guides/batch.md
       - Configuration: guides/configuration.md
+      - Extraction models: guides/extraction-models.md
       - Fine-tuned reference model: guides/reference-model.md
       - Production deployment: guides/deployment.md
       - Architecture: guides/architecture.md

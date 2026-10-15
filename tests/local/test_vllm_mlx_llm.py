@@ -77,7 +77,7 @@ def test_llm_server_continuous_batching_opt_in(monkeypatch):
     assert constructor.call_args.kwargs["continuous_batching"] is True
 
 
-def test_nuextract_llm_server_uses_llm_role_settings(monkeypatch):
+def test_mlx_llm_server_uses_llm_role_settings(monkeypatch):
     """The text LLM server must read its own ``vllm_mlx_*`` settings, not the
     (permanently disabled — see ``raise_vllm_mlx_ocr_disabled``) OCR role's.
     """
@@ -107,7 +107,7 @@ def test_nuextract_llm_server_uses_llm_role_settings(monkeypatch):
 
     llm_mod.VllmMlxLlmServer()
 
-    assert calls[0]["model"] == "numind/NuExtract3-mlx-8bits"
+    assert calls[0]["model"] == "scienceverse/bibr-extract-qwen35-4b-mlx-8bit"
     assert calls[0]["port"] == 8767
     assert calls[0]["multimodal"] is False
 
@@ -334,3 +334,38 @@ def test_configure_llm_client_respects_explicit_rate_limit(monkeypatch):
         server = mod.VllmMlxLlmServer()
         server.configure_llm_client()
         assert server._settings.llm.rate_limit_rpm == 25
+
+
+def test_configure_llm_client_turns_thinking_off_by_default(monkeypatch):
+    """mlx-lm turns thinking on for any vocab with <think>, whatever the template says."""
+    from bibr.config import Settings
+    from bibr.local import llm as mod
+    from bibr.local import ocr
+
+    monkeypatch.setattr(
+        ocr, "VllmMlxServer", MagicMock(return_value=MagicMock(base_url="http://x"))
+    )
+    monkeypatch.setattr(Settings.llm, "local_model", "org/text-model")
+    monkeypatch.setattr(Settings.llm, "chat_template_kwargs", {})
+
+    with _unset_field(Settings.llm, "chat_template_kwargs"):
+        server = mod.VllmMlxLlmServer()
+        server.configure_llm_client()
+        assert server._settings.llm.chat_template_kwargs == {"enable_thinking": False}
+
+
+def test_configure_llm_client_respects_explicit_chat_template_kwargs(monkeypatch):
+    from bibr.config import Settings
+    from bibr.local import llm as mod
+    from bibr.local import ocr
+
+    monkeypatch.setattr(
+        ocr, "VllmMlxServer", MagicMock(return_value=MagicMock(base_url="http://x"))
+    )
+    monkeypatch.setattr(Settings.llm, "local_model", "org/text-model")
+    monkeypatch.setattr(Settings.llm, "chat_template_kwargs", {"enable_thinking": True})
+
+    with _set_field_explicit(Settings.llm, "chat_template_kwargs"):
+        server = mod.VllmMlxLlmServer()
+        server.configure_llm_client()
+        assert server._settings.llm.chat_template_kwargs == {"enable_thinking": True}
