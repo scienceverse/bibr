@@ -88,7 +88,7 @@ jobs:
         run: |
           (Get-Content pyproject.toml) -replace 'requires-python = ">=3.11,<3.15"', 'requires-python = ">=3.11,<3.16"' | Set-Content pyproject.toml
           uv python install 3.15
-          uv venv --seed --python 3.15 "$env:RUNNER_TEMP"
+          uv venv --seed --python 3.15 "$env:RUNNER_TEMP\v"
           $py = "$env:RUNNER_TEMP\v\Scripts\python.exe"
           & $py -m pip install --disable-pip-version-check --only-binary ":all:" . 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP\binary.log"
           "only-binary exit: $LASTEXITCODE"

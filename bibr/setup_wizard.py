@@ -359,7 +359,9 @@ def _build_recommended_setup(
         # the user can install — while the other half may still need the
         # vllm extra.
         llm_on_llama_cpp = sys_platform_name == "linux" and env.get("LLM_BACKEND") == "llama-cpp"
-        ocr_on_llama_cpp = ocr_backend == "glm-llama"
+        # Native Windows has no vLLM: the automatic chain is glm-llama alone
+        # (bibr.ocr.registry), so OCR always runs through llama.cpp there.
+        ocr_on_llama_cpp = ocr_backend == "glm-llama" or sys_platform_name == "win32"
         if sys_platform_name == "linux" and accelerator_memory_gb is not None:
             from bibr.ocr.registry import paddle_vllm_unavailable_reason
 
@@ -367,7 +369,15 @@ def _build_recommended_setup(
                 paddle_vllm_unavailable_reason(vram_gb=accelerator_memory_gb) is not None
             )
         runtime = "Fully local runs can be slow and may download several GB."
-        if ocr_on_llama_cpp:
+        if sys_platform_name == "win32":
+            from bibr.local.llama_cpp import install_hint
+
+            runtime = (
+                "Uses llama.cpp (llama-server) for OCR and the LLM, which bibr does not "
+                f"install. {install_hint(platform_name='win32')}. Fully local runs can be "
+                "slow and may download several GB."
+            )
+        elif ocr_on_llama_cpp:
             runtime = (
                 "Uses llama.cpp for OCR/LLM: install a CUDA (or Vulkan) build separately "
                 "and put llama-server on PATH. Layout and NER use PyTorch; on older GPUs "
