@@ -203,6 +203,31 @@ def _reads_as_misread_reference_heading(text: str) -> bool:
     )
 
 
+# Back-matter statement sections that never hold a reference list of their own.
+_STATEMENT_SECTION_TYPES = frozenset(
+    {
+        CanonicalSection.ENDNOTE,
+        CanonicalSection.COI,
+        CanonicalSection.FUNDING,
+        CanonicalSection.ACKNOWLEDGMENT,
+        CanonicalSection.OPEN_DATA,
+        CanonicalSection.ETHICS,
+        CanonicalSection.AUTHOR_CONTRIBUTIONS,
+        CanonicalSection.UNKNOWN,
+    }
+)
+
+# A references heading holding fewer dated entries than this counts as empty.
+_DISPLACED_HEADING_MAX_ENTRIES = 3
+# A statement section must hold at least this many dated entries to be the list.
+_DISPLACED_MIN_ENTRIES = 5
+
+
+def _is_dated_entry_start(text: str) -> bool:
+    """Whether a row opens a reference entry and carries a year."""
+    return _looks_like_terminal_reference_start(text) and bool(YEARISH_RE.search(text))
+
+
 def _reads_as_list_row(text: str) -> bool:
     """Whether a row continues a reference list: a list number, an entry onset or a year."""
     return bool(
@@ -399,6 +424,13 @@ class RefLocator:
         self.contents.reference_boundary_reason_flags = []
         self.map_canonical_sections()
 
+        displaced = self._collect_displaced_entry_rows()
+        if displaced is not None:
+            heading, displaced_df = displaced
+            self._demote_overridden_references(heading)
+            self._reclassify_as_references(displaced_df)
+            return self._trim_terminal_boundary(displaced_df)
+
         has_section_col = "section_name" in self.sentences_df.columns
 
         # Step 0: trust what is printed — a literal references heading wins.
@@ -509,6 +541,74 @@ class RefLocator:
             return self._trim_terminal_boundary(misread_df)
 
         raise ValueError("No reference section found.")
+
+    def _collect_displaced_entry_rows(self) -> tuple[str, pd.DataFrame] | None:
+        """The list the reading order filed under a statement section after its heading.
+
+        Frontiers prints its statements (Funding, Conflict of interest,
+        Generative AI statement, Publisher's note) in a column above a
+        full-width References heading. The layout reading order can put that
+        heading before the statements, so it heads one statement or nothing,
+        and every entry lands under "Publisher's note" after it. Only then,
+        when the last printed references heading holds fewer than three dated
+        entries and a statement section after it holds at least five (and at
+        least twice as many as the heading has rows) that make up at least half
+        of its rows from the first one on, are those rows the list. Rows under the heading stay only when they open a dated entry.
+        Returns the heading and the rows, or None.
+        """
+        df = self.sentences_df
+        if df.empty or not {"section_id", "text", "text_id"}.issubset(df.columns):
+            return None
+        sections = self.contents.sections
+        heading_at = next(
+            (
+                index
+                for index in range(len(sections) - 1, -1, -1)
+                if sections[index].level > 0
+                and _REF_HEADER_RE.match(str(sections[index].header or "").strip())
+            ),
+            None,
+        )
+        if heading_at is None:
+            return None
+        heading = sections[heading_at]
+        texts_by_section = df.groupby("section_id", sort=False)
+        held = (
+            texts_by_section.get_group(heading.section_id)
+            if heading.section_id in texts_by_section.groups
+            else df.iloc[0:0]
+        )
+        held_texts = held["text"].astype(str)
+        if sum(map(_is_dated_entry_start, held_texts)) >= _DISPLACED_HEADING_MAX_ENTRIES:
+            return None
+        for section in sections[heading_at + 1 :]:
+            if section.section_type not in _STATEMENT_SECTION_TYPES or _is_reference_heading(
+                str(section.header or "")
+            ):
+                return None
+            if section.section_id not in texts_by_section.groups:
+                continue
+            rows = texts_by_section.get_group(section.section_id).sort_values("text_id")
+            texts = rows["text"].astype(str).tolist()
+            first = next((i for i, text in enumerate(texts) if _is_dated_entry_start(text)), None)
+            if first is None:
+                continue
+            entries = sum(map(_is_dated_entry_start, texts[first:]))
+            if (
+                entries < max(_DISPLACED_MIN_ENTRIES, 2 * len(held))
+                or 2 * entries < len(texts) - first
+            ):
+                continue
+            kept = held[held_texts.map(_is_dated_entry_start)]
+            logger.info(
+                "Reference entries filed under %r after the %r heading: taking %d rows",
+                section.header,
+                heading.header,
+                len(texts) - first,
+            )
+            self._add_boundary_flag("displaced_reference_entries")
+            return heading.header, pd.concat([kept, rows.iloc[first:]]).sort_values("text_id")
+        return None
 
     def _record_inferred_section(self, rows: int) -> None:
         """Say that the reference list was inferred rather than found by its heading."""
