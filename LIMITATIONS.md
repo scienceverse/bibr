@@ -28,14 +28,21 @@ changes every week.
 - 🔴 **Weak**: often wrong or missing, so treat it as a first draft
 - ⚪ **Not measured**: bibr exports it, but we have no answer key for it yet
 
-**How we know**
+**How we know**, as a medal. These are the same medals our internal
+validation hub gives each part, and each one needs the one before it:
 
-- **Sealed test**: scored on papers that were kept out of development.
-- **Answer key**: scored against a labelled answer key. Our answer keys were
+- **Platinum**: also checked on a sealed test, papers kept out of development.
+- **Gold**: also meets a goal we agreed before looking at the results.
+- **Silver**: scored against a labelled answer key. Our answer keys were
   transcribed from the PDFs by language models (Claude and Gemini) and
   spot-checked by people, not checked line by line.
-- **Spot checks**: a small sample checked by hand.
-- **None yet**: no systematic measurement.
+- **Bronze**: what it must get right is written down, with a way to measure it,
+  but no answer key checked by people yet: rough labels or spot checks only.
+- **No medal**: no systematic measurement yet.
+
+No part of bibr has Gold yet, because we haven't agreed goals for them in
+advance. That is the next step, so sealed-test results below still count as
+Silver; the cell says when a part also has one.
 
 ### Reading the paper
 
@@ -47,27 +54,27 @@ development papers the smaller models score lower than the 27B; see
 
 | Part | What it does | Rating | How we know | Latest result |
 |---|---|---|---|---|
-| Whole paper | Gets the title, DOI, author names and the reference list right, all at once | 🟢 Strong | Sealed test | 91.0% of 200 recent behavioural-science papers and 91.0% of 100 from 8 other fields, published July to October 2026 and kept out of development (GROBID 0.9.0: 61.5% and 63.0%). With bibr extract 4B, against the publishers' JATS XML checked against the PDF. bibr's lead is in the front matter; on reference details GROBID was slightly ahead. On our development sets, with the 27B: 96.0% of 200 social-science papers (GROBID 0.9.1: 52.5%) and 89.1% of 192 across fields (46.4%). Oct 2026 |
-| Title and DOI | The paper's own title and DOI | 🟢 Strong | Answer key | Title exactly right 98.4%, DOI 100%, on 192 papers. Oct 2026 |
-| Author names | Every author's full name, in order | 🟢 Strong | Answer key | 0.99 F1 on 192 papers. Oct 2026 |
-| Abstract | The abstract text | 🟢 Strong | Answer key | 0.94 text overlap (ROUGE-L) on 178 papers. Oct 2026 |
-| Affiliations | Which institution each author belongs to | 🟡 Good | Answer key | Author–affiliation pairs: 0.90 F1 on 120 papers that weren't used to build this part, 0.96 on 99 that were. Oct 2026 |
-| Corresponding author | Who to write to | 🟠 Fair | Answer key | 0.74 F1 on 300 biomedical papers; finds about half on social-science papers. Oct 2026 |
-| Reference list | Finds and splits every printed reference | 🟢 Strong | Answer key | 0.96 F1 on 188 papers, 0.98 on 200. Oct 2026 |
-| Reference details | Authors, title, year, DOI, journal and pages of each reference | 🟢 Strong for authors, titles and years · 🟡 Good for DOIs · 🟠 Fair for journal names and pages | Answer key; sealed test for footnote styles | Authors 0.98, titles 0.96, years 0.98, DOIs 0.93, journals 0.73 on 192 papers (Oct 2026); pages 0.65 (Sep 2026). Footnote styles and other languages are harder: every field right on 42% of 9,728 German, Italian and English footnote references (sealed test) and 56% of 10,000 RenoBench references |
-| Reference reviewer (opt-in, experimental) | A small fine-tuned model (0.8B) double-checks the parsed references. Needs a GPU server | 🟡 Good, for the model on its own | Sealed test | Every field right on 82.6% of the sealed footnote references above (built-in parser: 42.4%), and on 68.0% of RenoBench references it never saw (55.7%). Not yet measured inside bibr. Oct 2026 |
-| Scanned papers | Scans and image-only PDFs, read with bibr's own OCR | 🟡 Good | Answer key; sealed test for simulated scans | 82.5% of 80 real scans from before 2000 pass (GROBID: 23.8%). On the 8 with no text layer at all, bibr passes all 8 and GROBID none. When 90 of the sealed-test papers were turned into image-only scans, bibr passed 94.4%, about the same as on the originals; GROBID can't read image-only PDFs. Slower than born-digital PDFs. Oct 2026 |
-| Body text and headings | The running text, its headings and how they nest | 🟡 Good | Answer key | Sections recovered 0.81, headings found 0.85, nesting right 0.89. Oct 2026 |
-| Section types | Labels sections as introduction, methods, results and so on | 🟡 Good in English · 🔴 Weak in other languages | Answer key | 88% of sections typed right on 119 papers (Oct 2026). The classifier retrained for 0.7.1 mostly helps unusual English headings; other languages still lag |
-| Tables | Finds each table and its caption | 🟡 Good · 🟠 Fair for captions | Answer key, not yet checked by people | Tables found: 0.92 F1. Captions 0.56 similarity. Cell structure not measured. Oct 2026 |
-| Figures | Finds each figure and its caption | 🟡 Good | Answer key, not yet checked by people | Figures found: 0.88 F1. Captions 0.73 similarity. Oct 2026 |
-| Equations | Equation regions and their text | ⚪ Not measured | None yet | Exported, no answer key |
-| In-text citations | Links "(Smith, 2020)" to the right reference | 🟡 Good | Answer key | 0.80 F1 on 89 papers. Links to tables 0.85, links to figures 0.51. Oct 2026 |
-| URLs | Every URL printed in the paper | 🟡 Good | Answer key | 0.81 F1 on 92 papers. Oct 2026 |
-| Statements | Funding, conflicts of interest, ethics approval, data availability | ⚪ Not measured | None yet | Exported, no answer key |
-| Paper type | Research article, review and so on | 🟡 Good | Answer key (MEDLINE labels) | 0.94 macro F1. Jul 2026 |
-| Research field | OECD field of science | 🟠 Fair | Rough labels only | About 0.68 macro F1 at the top level, against OpenAlex labels. Jul 2026 |
-| Word, JATS, HTML and ePub files | Read natively, without OCR | ⚪ Not measured | None yet | All our benchmarks are PDFs |
+| Whole paper | Gets the title, DOI, author names and the reference list right, all at once | 🟢 Strong | Silver, plus a sealed test | 91.0% of 200 recent behavioural-science papers and 91.0% of 100 from 8 other fields, published July to October 2026 and kept out of development (GROBID 0.9.0: 61.5% and 63.0%). With bibr extract 4B, against the publishers' JATS XML checked against the PDF. bibr's lead is in the front matter; on reference details GROBID was slightly ahead. On our development sets, with the 27B: 96.0% of 200 social-science papers (GROBID 0.9.1: 52.5%) and 89.1% of 192 across fields (46.4%). Oct 2026 |
+| Title and DOI | The paper's own title and DOI | 🟢 Strong | Silver | Title exactly right 98.4%, DOI 100%, on 192 papers. Oct 2026 |
+| Author names | Every author's full name, in order | 🟢 Strong | Silver | 0.99 F1 on 192 papers. Oct 2026 |
+| Abstract | The abstract text | 🟢 Strong | Silver | 0.94 text overlap (ROUGE-L) on 178 papers. Oct 2026 |
+| Affiliations | Which institution each author belongs to | 🟡 Good | Silver | Author–affiliation pairs: 0.90 F1 on 120 papers that weren't used to build this part, 0.96 on 99 that were. Oct 2026 |
+| Corresponding author | Who to write to | 🟠 Fair | Silver | 0.74 F1 on 300 biomedical papers; finds about half on social-science papers. Oct 2026 |
+| Reference list | Finds and splits every printed reference | 🟢 Strong | Silver | 0.96 F1 on 188 papers, 0.98 on 200. Oct 2026 |
+| Reference details | Authors, title, year, DOI, journal and pages of each reference | 🟢 Strong for authors, titles and years · 🟡 Good for DOIs · 🟠 Fair for journal names and pages | Silver, plus a sealed test for footnote styles | Authors 0.98, titles 0.96, years 0.98, DOIs 0.93, journals 0.73 on 192 papers (Oct 2026); pages 0.65 (Sep 2026). Footnote styles and other languages are harder: every field right on 42% of 9,728 German, Italian and English footnote references (sealed test) and 56% of 10,000 RenoBench references |
+| Reference reviewer (opt-in, experimental) | A small fine-tuned model (0.8B) double-checks the parsed references. Needs a GPU server | 🟡 Good, for the model on its own | Silver, plus a sealed test | Every field right on 82.6% of the sealed footnote references above (built-in parser: 42.4%), and on 68.0% of RenoBench references it never saw (55.7%). Not yet measured inside bibr. Oct 2026 |
+| Scanned papers | Scans and image-only PDFs, read with bibr's own OCR | 🟡 Good | Silver, plus a sealed test for simulated scans | 82.5% of 80 real scans from before 2000 pass (GROBID: 23.8%). On the 8 with no text layer at all, bibr passes all 8 and GROBID none. When 90 of the sealed-test papers were turned into image-only scans, bibr passed 94.4%, about the same as on the originals; GROBID can't read image-only PDFs. Slower than born-digital PDFs. Oct 2026 |
+| Body text and headings | The running text, its headings and how they nest | 🟡 Good | Silver | Sections recovered 0.81, headings found 0.85, nesting right 0.89. Oct 2026 |
+| Section types | Labels sections as introduction, methods, results and so on | 🟡 Good in English · 🔴 Weak in other languages | Silver | 88% of sections typed right on 119 papers (Oct 2026). The classifier retrained for 0.7.1 mostly helps unusual English headings; other languages still lag |
+| Tables | Finds each table and its caption | 🟡 Good · 🟠 Fair for captions | Bronze: the answer key isn't checked by people yet | Tables found: 0.92 F1. Captions 0.56 similarity. Cell structure not measured. Oct 2026 |
+| Figures | Finds each figure and its caption | 🟡 Good | Bronze: the answer key isn't checked by people yet | Figures found: 0.88 F1. Captions 0.73 similarity. Oct 2026 |
+| Equations | Equation regions and their text | ⚪ Not measured | No medal | Exported, no answer key |
+| In-text citations | Links "(Smith, 2020)" to the right reference | 🟡 Good | Silver | 0.80 F1 on 89 papers. Links to tables 0.85, links to figures 0.51. Oct 2026 |
+| URLs | Every URL printed in the paper | 🟡 Good | Silver | 0.81 F1 on 92 papers. Oct 2026 |
+| Statements | Funding, conflicts of interest, ethics approval, data availability | ⚪ Not measured | No medal | Exported, no answer key |
+| Paper type | Research article, review and so on | 🟡 Good | Silver (MEDLINE labels) | 0.94 macro F1. Jul 2026 |
+| Research field | OECD field of science | 🟠 Fair | Bronze: rough labels only | About 0.68 macro F1 at the top level, against OpenAlex labels. Jul 2026 |
+| Word, JATS, HTML and ePub files | Read natively, without OCR | ⚪ Not measured | No medal | All our benchmarks are PDFs |
 
 Most of these papers are in English, and most are from the social sciences.
 Other languages and fields are less tested. Of the 29 non-English papers in our
@@ -78,8 +85,8 @@ than the 27B, and the 2B passed 4 fewer.
 
 | Part | What it does | Rating | How we know | Latest result |
 |---|---|---|---|---|
-| Crossref enrichment (opt-in) | Looks each reference up and fills in missing DOIs, volumes and pages | 🟡 Good | Answer key, partial | On 630 papers it left the parsed reference list unchanged and raised correct volumes from 86% to 93% and pages from 81% to 84%. DOI precision stayed at about 96%. Most filled-in values can't be checked against our key, which only has the DOIs papers print. Sep 2026 |
-| Whole-reference search (needs a bibr resolver) | Searches with the full reference text when a title search finds nothing | 🟡 Good | Spot checks | Found a record for 106 of 923 previously unmatched references on 119 papers; a hand check of the riskiest found one wrong version. Where a match already existed, it agreed on the DOI 98.6% of the time. Oct 2026 |
+| Crossref enrichment (opt-in) | Looks each reference up and fills in missing DOIs, volumes and pages | 🟡 Good | Silver, for the fields our key covers | On 630 papers it left the parsed reference list unchanged and raised correct volumes from 86% to 93% and pages from 81% to 84%. DOI precision stayed at about 96%. Most filled-in values can't be checked against our key, which only has the DOIs papers print. Sep 2026 |
+| Whole-reference search (needs a bibr resolver) | Searches with the full reference text when a title search finds nothing | 🟡 Good | Bronze: spot checks | Found a record for 106 of 923 previously unmatched references on 119 papers; a hand check of the riskiest found one wrong version. Where a match already existed, it agreed on the DOI 98.6% of the time. Oct 2026 |
 
 ### Choosing an extraction model
 
