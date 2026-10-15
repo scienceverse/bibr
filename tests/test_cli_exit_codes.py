@@ -113,3 +113,33 @@ async def test_run_process_missing_input_among_valid_still_exits_1(tmp_path, mon
     with pytest.raises(SystemExit) as exc_info:
         await _run_process(args)
     assert exc_info.value.code == 1
+
+
+async def test_run_process_missing_input_reported_before_missing_llm_key(
+    tmp_path, monkeypatch, capsys
+):
+    """A mistyped path says so, even when no LLM key is configured yet."""
+    from bibr.local.cli import _build_parser, _run_process
+
+    def _no_key():
+        raise ValueError("Google API key required.")
+
+    monkeypatch.setattr("bibr.clients.llm.preflight_credentials", _no_key)
+    missing = tmp_path / "missing.pdf"
+    args = _build_parser().parse_args(["chew", str(missing), "--llm", "cloud"])
+    with pytest.raises(SystemExit) as exc:
+        await _run_process(args)
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "Path not found" in err
+    assert "API key required" not in err
+
+
+async def test_run_process_url_input_gets_download_hint(monkeypatch, capsys):
+    from bibr.local.cli import _build_parser, _run_process
+
+    monkeypatch.setattr("bibr.clients.llm.preflight_credentials", lambda: None)
+    args = _build_parser().parse_args(["chew", "https://example.org/paper.pdf", "--no-llm"])
+    with pytest.raises(SystemExit):
+        await _run_process(args)
+    assert "download the paper first" in capsys.readouterr().err

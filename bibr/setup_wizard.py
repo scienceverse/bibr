@@ -370,9 +370,7 @@ def _build_recommended_setup(
         if ocr_on_llama_cpp:
             runtime = (
                 "Uses llama.cpp for OCR/LLM: install a CUDA (or Vulkan) build separately "
-                "and put llama-server on PATH. Layout and NER use PyTorch; on older GPUs "
-                "(Pascal / GTX 10-series) PyTorch falls back to CPU automatically — that "
-                "is expected."
+                "and put llama-server on PATH."
             )
         elif llm_on_llama_cpp:
             runtime = (
@@ -1014,9 +1012,7 @@ class SetupWizard:
             f"Install recommended extras now ({', '.join(sorted(self.selected_extras))})?",
             default=True,
         ):
-            self.console.print(
-                "[dim]Skipped — install later with the command shown in `bibr doctor`.[/dim]"
-            )
+            self.console.print("[dim]Skipped — re-run `bibr setup` to install them later.[/dim]")
             return
         self._install_selected_extras("Recommended setup", config_saved=True)
 
@@ -1502,8 +1498,7 @@ class SetupWizard:
     def _offer_local_server_test(self) -> None:
         """Optionally launch the managed local LLM server once to health-check it."""
         self.console.print(
-            "[dim]First launch downloads the model (see size above) and can "
-            "take several minutes.[/dim]"
+            "[dim]First launch downloads the model (several GB) and can take several minutes.[/dim]"
         )
         if not Confirm.ask("Launch the local server once to test it now?", default=False):
             self.console.print(
@@ -2026,9 +2021,9 @@ By default this runs the short recommended flow:
   2. Show a concrete plan preview (OCR + LLM backends, extras, memory mode,
      privacy, first-run download, speed) and ask a single confirmation.
   3. If this machine can't run local models, fork: use a private OCR/LLM
-     server if you have one, otherwise give informed consent to cloud (Google
-     Gemini). Declining any recommendation offers a handoff to --advanced
-     rather than dead-ending.
+     server if you have one, otherwise give informed consent to cloud
+     (Anthropic Claude Haiku 5.5). Declining any recommendation offers a
+     handoff to --advanced rather than dead-ending.
   4. Write .env (and save a preset), then optionally install extras and run
      validation: a connection test for cloud, a local server health check for
      managed local LLMs, and a smoke-test extraction on a bundled sample PDF.

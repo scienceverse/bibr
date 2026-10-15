@@ -63,6 +63,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `GRADIO_ANALYTICS_ENABLED=False`, so neither sends usage statistics to its
   maintainers. A value already in your environment wins.
 
+### Fixed
+
+- `bibr setup`'s cloud plan works on a plain install. It configures Claude for OCR and
+  metadata, but the anthropic SDK came only with the `batch` extra, so the connection test
+  failed and its `pip install anthropic` hint installed a 1.x SDK that bibr refuses. The SDK
+  (below 1.0) is now a core dependency.
+- `bibr chew` reports a mistyped path, an empty folder or a URL before a missing LLM key,
+  instead of asking for a key first. A URL gets a hint to download the paper.
+- `bibr doctor` no longer suggests setting a key when the LLM provider's SDK is missing or
+  unsupported. The quickstart, README and `bibr setup --help` name Claude Haiku 5.5 as
+  setup's cloud option instead of Google Gemini, and README and the docs home link
+  [try.bibr.org](https://try.bibr.org).
+
 ### Removed
 
 - NuExtract 3 is no longer offered by `bibr setup` or used as a default; it

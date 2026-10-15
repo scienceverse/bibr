@@ -124,11 +124,16 @@ def _collect_files(inputs: list[str]) -> tuple[list[Path], int]:
 
         console = Console(stderr=True)
         if missing_paths:
+            urls = [m for m in missing_paths if m.lower().startswith(("http://", "https://"))]
             ui.error(
                 console,
                 f"Path not found: {escape(', '.join(missing_paths))}",
-                hint="Check for typos, or pass an existing PDF/DOCX/XML/HTML/ePub "
-                "file or directory.",
+                hint=(
+                    "bibr chew reads local files: download the paper first, then pass its path."
+                    if urls
+                    else "Check for typos, or pass an existing PDF/DOCX/XML/HTML/ePub "
+                    "file or directory."
+                ),
             )
         elif empty_dirs:
             ui.error(
