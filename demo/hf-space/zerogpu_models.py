@@ -342,7 +342,9 @@ class ChatLlmBackend(_HFGenerator):
         if adapter_dir:
             from peft import PeftModel
 
-            model = PeftModel.from_pretrained(model, adapter_dir).merge_and_unload()
+            # PEFT loads onto CUDA when torch says it is available, which ZeroGPU
+            # fakes outside @spaces.GPU, so load and merge the adapter on the CPU.
+            model = PeftModel.from_pretrained(model, adapter_dir, torch_device="cpu").merge_and_unload()
         self.model = model.to(_device())
         self.model.eval()
         self.eos_ids = self._collect_eos()
