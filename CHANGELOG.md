@@ -24,6 +24,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- An `LLM_BASE_URL` on this machine, a private network or a tailnet (a vLLM, SGLang or
+  llama.cpp server bibr did not start) now gets the 600 requests per minute that bibr's own
+  local servers get, instead of the 60 that guard a cloud provider's quota. The front-matter
+  calls go out together and outnumber the limiter's three slots, so at 60 they waited for each
+  other; on the 9 Oct 27B harness that wait was about 30% of the time after parsing. Set
+  `LLM_RATE_LIMIT_RPM` to keep a lower limit.
 - `bibr setup` recommends a new extraction model by hardware. On Linux with an
   NVIDIA GPU it picks bibr's fine-tuned Qwen3.5-4B (12 GB or more) or Qwen3.5-2B
   (8–11 GB), served by vLLM. On bibr's 252 development papers they pass 216 and

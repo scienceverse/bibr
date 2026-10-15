@@ -275,6 +275,12 @@ Validate the fields you need on representative papers before choosing a model
 for a large run. Cloud LLMs or an external OpenAI-compatible server can be used
 with local OCR when local LLM throughput is insufficient.
 
+`LLM_RATE_LIMIT_RPM` defaults to 60 requests per minute to stay inside a cloud
+provider's quota. For a server bibr starts itself, and for an `LLM_BASE_URL` on
+loopback, a private network or a tailnet, bibr uses 600 instead, so the server's
+own queue and `LLM_MAX_CONCURRENCY` set the pace. The `ollama` provider gets 10.
+Setting `LLM_RATE_LIMIT_RPM` yourself overrides all of these.
+
 The provider SDK sends each LLM request once and gives it up after twice
 `LLM_TIMEOUT_SECONDS`. bibr retries rate limits (429), server errors (5xx),
 request timeouts and conflicts (408, 409) and dropped connections itself, up
