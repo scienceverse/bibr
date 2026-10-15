@@ -1,6 +1,6 @@
 # Known limitations
 
-Last updated: 2026-10-14
+Last updated: 2026-10-15
 
 bibr is alpha software. It already exports rich paper structure, metadata,
 references, cross-references, tables, figures, equations, and provenance fields,
@@ -16,8 +16,9 @@ We rate each part of bibr on two things: **how well it works** on the papers we
 tested, and **how we know**, meaning how strong that evidence is.
 
 Most results come from development sets: papers we looked at while building
-bibr. That flatters bibr. A sealed test on papers nobody has looked at comes
-next. Every result has a date, because bibr changes every week.
+bibr. That flatters bibr. The whole-paper result also has a sealed test, on 300
+recent papers we kept out of development. Every result has a date, because bibr
+changes every week.
 
 **How well it works**
 
@@ -38,13 +39,15 @@ next. Every result has a date, because bibr changes every week.
 
 ### Reading the paper
 
-These results use Qwen3.8-27B, a large open model, to read the front matter
-(title, authors, abstract and so on). The smaller local models that `bibr setup`
-picks score lower there; see [Choosing an extraction model](#choosing-an-extraction-model).
+Most of these results use Qwen3.8-27B, a large open model, to read the front
+matter (title, authors, abstract and so on). The sealed whole-paper test used
+bibr extract 4B, the fine-tuned model `bibr setup` picks for most GPUs. On our
+development papers the smaller models score lower than the 27B; see
+[Choosing an extraction model](#choosing-an-extraction-model).
 
 | Part | What it does | Rating | How we know | Latest result |
 |---|---|---|---|---|
-| Whole paper | Gets the title, DOI, author names and the reference list right, all at once | 🟢 Strong | Answer key | 96.0% of 200 social-science papers (GROBID 0.9.1: 52.5%). 89.1% of 192 papers sampled across fields (GROBID: 46.4%). With a 27B open model; see [Choosing an extraction model](#choosing-an-extraction-model). Oct 2026 |
+| Whole paper | Gets the title, DOI, author names and the reference list right, all at once | 🟢 Strong | Sealed test | 91.0% of 200 recent behavioural-science papers and 91.0% of 100 from 8 other fields, published July to October 2026 and kept out of development (GROBID 0.9.0: 61.5% and 63.0%). With bibr extract 4B, against the publishers' JATS XML checked against the PDF. bibr's lead is in the front matter; on reference details GROBID was slightly ahead. On our development sets, with the 27B: 96.0% of 200 social-science papers (GROBID 0.9.1: 52.5%) and 89.1% of 192 across fields (46.4%). Oct 2026 |
 | Title and DOI | The paper's own title and DOI | 🟢 Strong | Answer key | Title exactly right 98.4%, DOI 100%, on 192 papers. Oct 2026 |
 | Author names | Every author's full name, in order | 🟢 Strong | Answer key | 0.99 F1 on 192 papers. Oct 2026 |
 | Abstract | The abstract text | 🟢 Strong | Answer key | 0.94 text overlap (ROUGE-L) on 178 papers. Oct 2026 |
@@ -53,7 +56,7 @@ picks score lower there; see [Choosing an extraction model](#choosing-an-extract
 | Reference list | Finds and splits every printed reference | 🟢 Strong | Answer key | 0.96 F1 on 188 papers, 0.98 on 200. Oct 2026 |
 | Reference details | Authors, title, year, DOI, journal and pages of each reference | 🟢 Strong for authors, titles and years · 🟡 Good for DOIs · 🟠 Fair for journal names and pages | Answer key; sealed test for footnote styles | Authors 0.98, titles 0.96, years 0.98, DOIs 0.93, journals 0.73 on 192 papers (Oct 2026); pages 0.65 (Sep 2026). Footnote styles and other languages are harder: every field right on 42% of 9,728 German, Italian and English footnote references (sealed test) and 56% of 10,000 RenoBench references |
 | Reference reviewer (opt-in, experimental) | A small fine-tuned model (0.8B) double-checks the parsed references. Needs a GPU server | 🟡 Good, for the model on its own | Sealed test | Every field right on 82.6% of the sealed footnote references above (built-in parser: 42.4%), and on 68.0% of RenoBench references it never saw (55.7%). Not yet measured inside bibr. Oct 2026 |
-| Scanned papers | Papers from before 2000, read with bibr's own OCR | 🟡 Good | Answer key | 82.5% of 80 scans pass (GROBID: 23.8%). On the 8 scans with no text layer at all, bibr passes all 8 and GROBID none. Slower than born-digital PDFs. Oct 2026 |
+| Scanned papers | Scans and image-only PDFs, read with bibr's own OCR | 🟡 Good | Answer key; sealed test for simulated scans | 82.5% of 80 real scans from before 2000 pass (GROBID: 23.8%). On the 8 with no text layer at all, bibr passes all 8 and GROBID none. When 90 of the sealed-test papers were turned into image-only scans, bibr passed 94.4%, about the same as on the originals; GROBID can't read image-only PDFs. Slower than born-digital PDFs. Oct 2026 |
 | Body text and headings | The running text, its headings and how they nest | 🟡 Good | Answer key | Sections recovered 0.81, headings found 0.85, nesting right 0.89. Oct 2026 |
 | Section types | Labels sections as introduction, methods, results and so on | 🟡 Good in English · 🔴 Weak in other languages | Answer key | 88% of sections typed right on 119 papers (Oct 2026). The classifier retrained for 0.7.1 mostly helps unusual English headings; other languages still lag |
 | Tables | Finds each table and its caption | 🟡 Good · 🟠 Fair for captions | Answer key, not yet checked by people | Tables found: 0.92 F1. Captions 0.56 similarity. Cell structure not measured. Oct 2026 |
@@ -68,8 +71,8 @@ picks score lower there; see [Choosing an extraction model](#choosing-an-extract
 
 Most of these papers are in English, and most are from the social sciences.
 Other languages and fields are less tested. Of the 29 non-English papers in our
-model comparison, Claude Haiku 5.5 passed 2 fewer than the 27B and NuExtract 3
-passed 6 fewer.
+model comparison, Claude Haiku 5.5 and the fine-tuned 4B each passed 2 fewer
+than the 27B, and the 2B passed 4 fewer.
 
 ### Checking references against the record
 
@@ -80,19 +83,27 @@ passed 6 fewer.
 
 ### Choosing an extraction model
 
-A language model reads the title, authors and other front matter. We scored
-three of them the same way on 252 development papers in October 2026. A paper
-passes when its title, DOI, author names and reference list are all right.
+A language model reads the title, authors and other front matter, and
+`bibr setup` picks one that fits your machine. We scored them the same way on
+252 development papers in October 2026. A paper passes when its title, DOI,
+author names and reference list are all right.
 
 | Model | Runs on | Papers passed | Compared with the 27B |
 |---|---|---|---|
 | Qwen3.8-27B | Your own model server on a 24 GB GPU | 223 of 252 (88.5%) | Reference |
-| Claude Haiku 5.5 | Anthropic's API, with your key (bibr 0.7.2 or later). Text from your papers goes to Anthropic | 221 of 252 | −0.8 points |
-| NuExtract 3 | bibr's default local model, on NVIDIA GPUs, Apple Silicon Macs or llama.cpp | 200 of 252 | −9.1 points |
+| Claude Haiku 5.5 | Anthropic's API, with your key. Page images and text from your papers go to Anthropic. Setup offers it when there's no suitable GPU | 221 of 252 | −0.8 points |
+| bibr extract 4B (Qwen3.5-4B, fine-tuned for bibr) | bibr's default on Linux with an NVIDIA GPU of 12 GB or more | 216 of 252 | −2.8 points |
+| bibr extract 2B (Qwen3.5-2B, fine-tuned for bibr) | bibr's default on Linux with an NVIDIA GPU of 8 to 11 GB | 207 of 252 | −6.3 points |
 
-`bibr setup` picks NuExtract 3 when you run locally. To use another model, point
-bibr at your own OpenAI-compatible server
-([configuration guide](docs/guides/configuration.md)).
+On Windows, and on NVIDIA GPUs with 5 to 7 GB, setup runs a compressed build of
+the 4B through llama.cpp, which you install yourself. On the same papers, its
+8-bit build passed 218 and its 4-bit build 214, in single runs. On Apple Silicon
+Macs, setup runs a Mac build of the 4B, or of the 2B on a Mac with less memory.
+We have only smoke-tested these, so setup marks them as experimental. Haiku's result used bibr's own OCR. When setup offers
+Haiku, it uses Claude for the OCR too, which we haven't scored yet. The
+[extraction model guide](docs/guides/extraction-models.md) has the full
+comparison, and the [configuration guide](docs/guides/configuration.md) shows
+how to use another model.
 
 On a computer with only a CPU, PDFs need llama.cpp (which is slow there), your
 own OCR and model server, or cloud processing. Word, JATS, HTML and ePub files
