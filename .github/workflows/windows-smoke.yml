@@ -258,7 +258,7 @@ jobs:
           New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\real" | Out-Null
           Set-Location "$env:RUNNER_TEMP\real"
           $sw = [Diagnostics.Stopwatch]::StartNew()
-          bibr chew "$env:RUNNER_TEMP\papers\ioannidis2005.pdf" --pages 1 --llm local --ocr glm-llama -o "$env:RUNNER_TEMP\real\paper.json" -v
+          bibr chew "$env:RUNNER_TEMP\papers\ioannidis2005.pdf" --pages 1 --llm local --ocr glm-llama -o "$env:RUNNER_TEMP\real\paper.json"
           "chew exit code: $LASTEXITCODE after $($sw.Elapsed)"
           Get-ChildItem -Recurse | Select-Object FullName, Length
           if (Test-Path paper.json) { python -c "import json; d=json.load(open('paper.json', encoding='utf-8')); m=d.get('metadata') or {}; print('title:', m.get('title')); print('authors:', [a.get('name') if isinstance(a, dict) else a for a in (m.get('authors') or [])][:5]); print('doi:', m.get('doi'))" }
