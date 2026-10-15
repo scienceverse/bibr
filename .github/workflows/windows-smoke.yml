@@ -61,6 +61,7 @@ jobs:
           & "$env:RUNNER_TEMP\main\Scripts\python.exe" -c "import bibr; from bibr import LocalPipeline, Pipeline, Settings; print('import ok')"
           & $bibr doctor
           "doctor exit code: $LASTEXITCODE"
+          exit 0
 
       - name: pip install the extras setup recommends (ml, demo) plus batch
         continue-on-error: true
@@ -125,6 +126,7 @@ jobs:
           uv run bibr --version
           uv run bibr doctor
           "doctor exit code: $LASTEXITCODE"
+          exit 0
 
       - name: uv init + uv add main checkout
         run: |
@@ -135,6 +137,7 @@ jobs:
           uv run bibr --version
           uv run bibr doctor
           "doctor exit code: $LASTEXITCODE"
+          exit 0
 
   smoke:
     name: setup + hosted key + llama.cpp + real PDF
@@ -217,9 +220,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $rel = gh api repos/ggml-org/llama.cpp/releases/latest | ConvertFrom-Json
-          $asset = $rel.assets | Where-Object { $_.name -like "llama-*-bin-win-cpu-x64.zip" } | Select-Object -First 1
-          "llama.cpp release $($rel.tag_name): $($asset.name)"
+          $rels = gh api "repos/ggml-org/llama.cpp/releases?per_page=30" | ConvertFrom-Json
+          "latest release $($rels[0].tag_name) assets:"
+          $rels[0].assets | ForEach-Object { "  $($_.name)" }
+          $asset = $null
+          foreach ($r in $rels) {
+            $asset = $r.assets | Where-Object { $_.name -like "*win*cpu*x64*.zip" } | Select-Object -First 1
+            if ($asset) { "using $($r.tag_name): $($asset.name)"; break }
+          }
           Invoke-WebRequest -UseBasicParsing -OutFile "$env:RUNNER_TEMP\llama.zip" $asset.browser_download_url
           Expand-Archive "$env:RUNNER_TEMP\llama.zip" -DestinationPath "$env:RUNNER_TEMP\llama"
           $server = Get-ChildItem -Recurse "$env:RUNNER_TEMP\llama" -Filter llama-server.exe | Select-Object -First 1

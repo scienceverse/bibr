@@ -62,8 +62,11 @@ wizard.Prompt.ask = rich.prompt.Prompt.ask
 if SCENARIO == "local-cuda":
     wizard.detect_hardware = lambda: ("cuda", 8.0)
 
+from bibr.local.cli import main as bibr_main  # noqa: E402
+
+sys.argv = ["bibr", "setup"]
 try:
-    wizard.SetupWizard().run()
+    bibr_main()
 except SystemExit as exc:
     print(f"[drive] wizard exited with {exc.code!r}", flush=True)
     raise
