@@ -1,0 +1,11 @@
+# Gradio itself comes from sdk_version in README.md.
+bibr==0.7.1
+# bibr 0.7.1 allows numind 0.3.2, which needs a C compiler on Linux (fixed in 0.7.2).
+numind==0.3.0
+metacheck>=0.4.0a1
+spaces>=0.51
+# ZeroGPU supports torch 2.8 to 2.13; bibr's torch extra floors at 2.13.
+torch==2.13.0
+transformers>=5.0.0,<6
+peft>=0.21
+xgrammar>=0.2
