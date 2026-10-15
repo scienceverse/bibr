@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-10-15
+
+0.7.2 was never tagged or published to PyPI, so this is the first release with its fixes
+too (listed under 0.7.2 below). Two of them changed again here: numind is no longer installed
+at all, and setup's cloud consent question, which still defaults to No, now asks about
+Anthropic Claude instead of Google Gemini.
+
 ### Added
 
 - `LLM_POINTER_OUTPUTS=true` (experimental, off by default) stops the two front-matter calls
@@ -88,7 +95,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `LLM_STRUCTURED_BACKEND=nuextract-native` backend needs
   `pip install 'bibr[nuextract]'` and otherwise stops with an error that says so.
 
-## [0.7.2] - 2026-10-14
+## [0.7.2] - 2026-10-14 (not published; included in 0.7.3)
 
 ### Fixed
 
