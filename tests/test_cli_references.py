@@ -11,9 +11,7 @@ import pytest
 from bibr.local.cli.parser import _build_parser
 from bibr.local.cli.references import run_references
 
-ENRICHED = (
-    Path(__file__).parent / "fixtures" / "schema_conformance" / "valid" / "enriched_check.json"
-)
+ENRICHED = Path(__file__).parent / "fixtures" / "references" / "enriched_check_12_3.json"
 INSPECT = Path(__file__).parent / "fixtures" / "inspect_full_export.json"
 
 

@@ -28,7 +28,9 @@ from bibr.export.citations import (
 from bibr.export.models import BibTypeLiteral
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
-ENRICHED = FIXTURES / "schema_conformance" / "valid" / "enriched_check.json"
+# An enriched export as a bibr with the reference check (export schema 12.3)
+# writes it, with bib_check rows the writers read when present.
+ENRICHED = FIXTURES / "references" / "enriched_check_12_3.json"
 INSPECT = FIXTURES / "inspect_full_export.json"
 
 

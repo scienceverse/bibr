@@ -1030,9 +1030,8 @@ class TestJobReferences:
     ENRICHED = (
         Path(__file__).resolve().parent.parent
         / "fixtures"
-        / "schema_conformance"
-        / "valid"
-        / "enriched_check.json"
+        / "references"
+        / "enriched_check_12_3.json"
     )
 
     @pytest.fixture
