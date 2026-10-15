@@ -639,6 +639,22 @@ def test_default_writes_only_printed_values_even_for_a_matched_record():
     assert not [tag for tag, _ in record if tag in ("DO", "JO", "T2", "SP")]
 
 
+def test_prefer_record_names_the_values_it_took_from_the_record():
+    data = _export(
+        [_bib(volume="8", container="Journal of Things", first_page=None, doi=None)],
+        [_match()],
+        [_check(status="matched")],
+    )
+    note = "bibr: from the Crossref record, not the paper: authors, publisher, issue, pages, DOI"
+    assert _one_csl(data, prefer="record")["note"] == note
+    ((_, _, fields),) = parse_bibtex(to_bibtex(data, prefer="record"))
+    assert fields["note"] == note
+    ((record),) = assert_ris_grammar(to_ris(data, prefer="record"))
+    assert ("N1", note) in record
+    assert "note" not in _one_csl(data, prefer="record", check_note=False)
+    assert "note" not in _one_csl(data)
+
+
 def test_prefer_record_fills_gaps_from_a_matched_record():
     data = _export(
         [_bib(volume="7", container=None, first_page=None, doi=None)],

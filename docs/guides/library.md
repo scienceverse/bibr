@@ -214,7 +214,11 @@ The export itself is never changed. Which values are written:
   value the paper did not print. The registry record only feeds the check
   note.
 - **`prefer="record"` (opt-in).** A matched record's values are taken over
-  the printed ones, and the record fills what the reference does not print.
+  the printed ones, and the record fills what the reference does not print
+  (a missing DOI, journal or page range). Each such entry gets a note naming
+  the values that came from the record ("bibr: from the Crossref record, not
+  the paper: pages, DOI"). This needs enrichment (`--crossref`); without it
+  there is no record and the output is as printed.
 - **Only a matching record.** With `prefer="record"`, a record is used only
   when it agrees with the reference: bibr compares the two when writing
   (title, first author, year and DOI after folding case, accents and

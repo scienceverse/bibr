@@ -131,7 +131,7 @@ error). The query parameters are:
 The file name comes in a `Content-Disposition: attachment` header. Any other
 `format` or `prefer` answers `422`. With the default `prefer=printed` every
 value is printed in the reference; `prefer=record` lets a matched Crossref
-record fill or replace them. The values written are those of
+record fill or replace them, with a note naming the values it supplied. The values written are those of
 [`Result.to_bibtex()`](../guides/library.md#reference-manager-files):
 
 ```bash

@@ -546,7 +546,8 @@ def _register_query_tools(server: MCPServer, get_store: Callable[[Context], _Pap
         """The paper's reference list as one file's text for a reference manager:
         CSL-JSON (Zotero, Mendeley, Pandoc), BibTeX or RIS. Values are as printed,
         and a field a reference does not print stays empty (prefer="record" takes a
-        matched registry record's values first and fills the gaps from it). A note on each reference says what the check found when it is
+        matched registry record's values first and fills the gaps from it, noting
+        which values came from the record). A note on each reference says what the check found when it is
         not matched, and names a retraction or withdrawal of its record."""
         entry = get_store(ctx).get(paper_id)
         return await asyncio.to_thread(_render_reference_list, paper_id, entry.data, format, prefer)

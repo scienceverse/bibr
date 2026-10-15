@@ -308,7 +308,8 @@ class Result:
 
         Values are as printed; a field a reference does not print stays
         empty. ``prefer="record"`` (opt-in) takes a matched record's values
-        over the printed ones and fills the gaps from it. ``check_note`` adds a note saying when the check found a
+        over the printed ones and fills the gaps from it, noting which values
+        came from the record. ``check_note`` adds a note saying when the check found a
         difference, an unregistered DOI, no record, or a retraction. See
         :mod:`bibr.export.citations`; ``bibr.write_references()`` writes a file.
         """

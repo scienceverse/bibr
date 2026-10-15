@@ -11,7 +11,8 @@ Which values are written:
   range or journal the paper did not print is never added from a registry
   record. The record only feeds the check note.
 - ``prefer="record"`` (opt-in) takes a matched record's values over the
-  printed ones and fills the gaps from it. A record is used only when the
+  printed ones and fills the gaps from it, and the entry's note names the
+  values that came from the record (unless ``check_note=False``). A record is used only when the
   reference's check status is ``matched``. A reference whose record
   disagrees with it (``fields_disagree``), whose printed DOI does not exist
   (``doi_unregistered``), or that was not found or not checked is written as
@@ -524,6 +525,39 @@ def _build_entry(
     return entry
 
 
+# Entry values a record can supply, by the word the note uses for them.
+_RECORD_NOTE_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("type", ("bib_type",)),
+    ("title", ("title",)),
+    ("authors", ("authors", "authors_et_al")),
+    ("editors", ("editors", "editors_et_al")),
+    ("journal", ("container",)),
+    ("publisher", ("publisher",)),
+    ("edition", ("edition",)),
+    ("version", ("version",)),
+    ("volume", ("volume",)),
+    ("issue", ("issue",)),
+    ("pages", ("first_page", "last_page")),
+    ("date", ("year", "month", "day", "in_press")),
+    ("DOI", ("doi",)),
+    ("URL", ("url",)),
+)
+
+
+def _record_note(entry: _Entry, printed: _Entry, check: Mapping[str, Any] | None) -> str | None:
+    """Name the values ``prefer="record"`` took from the record instead of the
+    paper, so a reader can tell them from what the reference printed."""
+    taken = [
+        word
+        for word, attrs in _RECORD_NOTE_FIELDS
+        if any(getattr(entry, a) != getattr(printed, a) for a in attrs)
+    ]
+    if not taken:
+        return None
+    service = _SERVICE_NAMES.get(str((check or {}).get("service")), "registry")
+    return f"bibr: from the {service} record, not the paper: {', '.join(taken)}"
+
+
 def _entries(data: Mapping[str, Any], *, prefer: str, check_note: bool) -> list[_Entry]:
     checks = _check_rows(data)
     matches_by_bib: dict[Any, list[Mapping[str, Any]]] = {}
@@ -543,6 +577,13 @@ def _entries(data: Mapping[str, Any], *, prefer: str, check_note: bool) -> list[
         entry = _build_entry(
             bib, check, record, prefer=prefer, check_note=check_note, previous=previous
         )
+        if record is not None and check_note:
+            printed = _build_entry(
+                bib, None, None, prefer="printed", check_note=False, previous=previous
+            )
+            note = _record_note(entry, printed, check)
+            if note:
+                entry.notes.append(note)
         previous = (entry.authors, entry.authors_et_al)
         entries.append(entry)
     return entries

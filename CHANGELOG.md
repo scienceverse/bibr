@@ -14,8 +14,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   each reference printed by default. Since 0.7.3 a field a reference did not
   print (DOI, pages, journal, date, URL) was filled from its matched Crossref or
   resolver record, and a matched record's author names replaced the printed
-  ones; that now needs `prefer="record"` (`--prefer record`). The JSON export
-  was never affected: matches stay in `bib_match` and `bib_check`.
+  ones; that now needs `prefer="record"` (`--prefer record`,
+  `?prefer=record`), and each entry it changes gets a note naming the values
+  that came from the record. The JSON export was never affected: matches stay
+  in `bib_match` and `bib_check`.
 
 ## [0.7.3] - 2026-10-15
 
