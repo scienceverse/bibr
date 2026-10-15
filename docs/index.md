@@ -31,8 +31,9 @@ The first run may download models and additional runtimes.
 !!! warning "Alpha: check important extractions against the source"
     Extraction quality varies by paper, language, layout, and model. Current
     evaluation is strongest for English social science papers. A valid JSON
-    document can still contain mistakes. Read the [known limitations](limitations.md)
-    and [evaluation guide](contributing/evaluation.md) before relying on a field.
+    document can still contain mistakes. See
+    [where bibr is strong and where it isn't](limitations.md) and the
+    [evaluation guide](contributing/evaluation.md) before relying on a field.
 
 <div class="grid cards" markdown>
 
