@@ -44,6 +44,9 @@ import zerogpu_models as zm
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("bibr-space")
+# At INFO, httpx logs ZeroGPU scheduler URLs, which carry the visitor's token.
+for _name in ("httpx", "httpx2"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
 
 HERE = Path(__file__).parent
 DEMO_LLM = os.environ.get("DEMO_LLM", "local").lower()
