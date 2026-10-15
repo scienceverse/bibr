@@ -190,6 +190,8 @@ enriched = result.consolidate("replace")
 
 ## Reference lists
 
+### Reference-manager files
+
 `result.to_csl_json()`, `result.to_bibtex()` and `result.to_ris()` give the
 reference list in the formats reference managers import: CSL-JSON (Zotero,
 Mendeley, Pandoc and other citeproc tools), BibTeX and RIS (EndNote, Zotero,
