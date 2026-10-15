@@ -129,8 +129,9 @@ error). The query parameters are:
 | `ris` | `application/x-research-info-systems; charset=utf-8` | `{id}.ris` |
 
 The file name comes in a `Content-Disposition: attachment` header. Any other
-`format` or `prefer` answers `422`. The values written, and when the matched
-Crossref record fills or replaces them, are those of
+`format` or `prefer` answers `422`. With the default `prefer=printed` every
+value is printed in the reference; `prefer=record` lets a matched Crossref
+record fill or replace them. The values written are those of
 [`Result.to_bibtex()`](../guides/library.md#reference-manager-files):
 
 ```bash

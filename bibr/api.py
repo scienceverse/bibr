@@ -306,10 +306,9 @@ class Result:
     ) -> list[dict[str, Any]]:
         """The references as CSL-JSON items, for Zotero, Mendeley or Pandoc.
 
-        Values are as printed, with what a reference does not print filled
-        from its record when the reference check matched it;
-        ``prefer="record"`` takes a matched record's values over the printed
-        ones. ``check_note`` adds a note saying when the check found a
+        Values are as printed; a field a reference does not print stays
+        empty. ``prefer="record"`` (opt-in) takes a matched record's values
+        over the printed ones and fills the gaps from it. ``check_note`` adds a note saying when the check found a
         difference, an unregistered DOI, no record, or a retraction. See
         :mod:`bibr.export.citations`; ``bibr.write_references()`` writes a file.
         """

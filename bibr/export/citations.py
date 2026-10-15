@@ -6,23 +6,26 @@ Built from an export's ``bib`` rows (the references as printed), its
 
 Which values are written:
 
-- By default (``prefer="printed"``) every field is the reference's printed
-  value; a field the reference does not print is filled from the matched
-  record. ``prefer="record"`` takes the record's values over the printed ones.
-- A record is used only when the reference's check status is ``matched``.
-  A reference whose record disagrees with it (``fields_disagree``), whose
-  printed DOI does not exist (``doi_unregistered``), or that was not found or
-  not checked is written as printed. An export without ``bib_check`` rows
-  (enrichment off, or written before export schema 12.3) is checked here
-  first when it has ``bib_match`` rows.
-- Names come from the matched record, which lists them as family and given
-  names; otherwise the printed list is split (:mod:`bibr.export.names`). An
-  organization becomes one name, and a list that cannot be split is written
-  as one name rather than split wrongly. "et al." becomes "and others" in
-  BibTeX and is left out of CSL-JSON and RIS.
-- The type is the record's when matched, else the printed one; an untyped
-  reference with a container and a volume, issue or page is a journal
-  article.
+- By default (``prefer="printed"``) every value is the reference's printed
+  value, and a field the reference does not print stays empty: a DOI, page
+  range or journal the paper did not print is never added from a registry
+  record. The record only feeds the check note.
+- ``prefer="record"`` (opt-in) takes a matched record's values over the
+  printed ones and fills the gaps from it. A record is used only when the
+  reference's check status is ``matched``. A reference whose record
+  disagrees with it (``fields_disagree``), whose printed DOI does not exist
+  (``doi_unregistered``), or that was not found or not checked is written as
+  printed. An export without ``bib_check`` rows (enrichment off, or written
+  before export schema 12.3) is checked here first when it has ``bib_match``
+  rows.
+- Names are the printed list, split into family and given names
+  (:mod:`bibr.export.names`); with ``prefer="record"`` a matched record's
+  names are used. An organization becomes one name, and a list that cannot
+  be split is written as one name rather than split wrongly. "et al."
+  becomes "and others" in BibTeX and is left out of CSL-JSON and RIS.
+- The type is the printed one (with ``prefer="record"``, the matched
+  record's unless that is the catch-all); an untyped reference with a
+  container and a volume, issue or page is a journal article.
 - Pages: an abbreviated last page is written in full ("1267-89" as
   1267-1289), and an article number ("e0123456") as the first page only.
 - A note says what the check found when it is not ``matched`` (and not
@@ -530,7 +533,13 @@ def _entries(data: Mapping[str, Any], *, prefer: str, check_note: bool) -> list[
     previous: tuple[list[PrintedName], bool] = ([], False)
     for bib in _rows(data, "bib"):
         check = checks.get(bib.get("bib_id"))
-        record = _matched_record(check, matches_by_bib.get(bib.get("bib_id"), []))
+        # Printed values only, unless the caller asked for the record's: bibr
+        # reports what the paper printed and never completes a reference.
+        record = (
+            _matched_record(check, matches_by_bib.get(bib.get("bib_id"), []))
+            if prefer == "record"
+            else None
+        )
         entry = _build_entry(
             bib, check, record, prefer=prefer, check_note=check_note, previous=previous
         )
