@@ -534,8 +534,9 @@ class LlmOptions(_BibrSettings):
         60,
         ge=1,
         description="LLM rate limit in requests per minute. Guards a cloud provider's quota, "
-        "so it is auto-lowered to 10 for the ollama provider and auto-raised for a managed "
-        "local server (which has no external quota) — both unless set explicitly.",
+        "so it is auto-lowered to 10 for the ollama provider and auto-raised to 600 for a "
+        "managed local server or an LLM_BASE_URL on loopback, a private network or a tailnet "
+        "(which have no external quota) — all unless set explicitly.",
     )
     # Max in-flight LLM requests (0 = unlimited). Local single-device servers
     # share one model/Metal or CUDA context and are often safest serialized;
@@ -2831,6 +2832,43 @@ class GlobalSettings(_BibrSettings):
         if self.llm.provider == "ollama" and "rate_limit_rpm" not in self.llm.model_fields_set:
             self.llm.rate_limit_rpm = 10
             logger.info("Ollama LLM provider detected — auto-lowering llm.rate_limit_rpm to 10")
+        return self
+
+    @model_validator(mode="after")
+    def raise_self_hosted_llm_rate_limit(self) -> "GlobalSettings":
+        """Raise the LLM rate limit for a self-hosted ``LLM_BASE_URL`` if not set explicitly.
+
+        The 60 rpm default guards a cloud provider's quota. A server on this machine,
+        the LAN or a tailnet (vLLM, SGLang, llama.cpp started by someone else) has no
+        quota, and at 5-8 calls per paper the default only adds waits: the
+        front-matter fan-out sends more calls than the limiter's three slots. Use
+        the rate bibr already gives the local servers it starts itself, so the
+        server's queue and ``LLM_MAX_CONCURRENCY`` are the real bound. Decided from
+        the host name alone (:func:`bibr.utils.hosts.is_private_network_host`).
+        """
+        import logging
+        from urllib.parse import urlsplit
+
+        from bibr.local.http_runtime import MANAGED_LOCAL_LLM_RATE_LIMIT_RPM
+        from bibr.utils.hosts import is_private_network_host
+
+        if (
+            self.llm.provider == "ollama"
+            or not self.llm.base_url
+            or "rate_limit_rpm" in self.llm.model_fields_set
+        ):
+            return self
+        try:
+            host = urlsplit(self.llm.base_url.strip()).hostname
+        except ValueError:
+            return self
+        if host and is_private_network_host(host):
+            self.llm.rate_limit_rpm = MANAGED_LOCAL_LLM_RATE_LIMIT_RPM
+            logging.getLogger("bibr.config").info(
+                "Self-hosted LLM_BASE_URL (%s) — raising llm.rate_limit_rpm to %d",
+                host,
+                MANAGED_LOCAL_LLM_RATE_LIMIT_RPM,
+            )
         return self
 
     @model_validator(mode="after")
