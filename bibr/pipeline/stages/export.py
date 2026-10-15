@@ -99,7 +99,8 @@ def _build_extraction(ctx: PipelineContext, paper, fs=None) -> dict:
     Timings come from the file's own ``fs.stage_times`` — in a multi-file
     chunk the chunk wall clock must not be attributed to every paper. The
     chunk-level ``ctx.scratch["stage_timings"]`` is only a fallback for
-    callers without per-file times.
+    callers without per-file times. Per-stage memory
+    (``PIPELINE_MEMORY_PROFILE``) rides along as ``timings.memory``.
     """
     import datetime as _dt
 
@@ -129,6 +130,16 @@ def _build_extraction(ctx: PipelineContext, paper, fs=None) -> dict:
         if raw_timings
         else None
     )
+    if timings is not None:
+        # Opt-in (PIPELINE_MEMORY_PROFILE): absent, not null, when it was off.
+        from bibr.pipeline.memory_profile import SCRATCH_KEY, memory_export
+
+        memory = memory_export(
+            getattr(fs, "stage_memory", None)
+            or (getattr(ctx, "scratch", None) or {}).get(SCRATCH_KEY)
+        )
+        if memory is not None:
+            timings["memory"] = memory
     ocr, llm = _build_engines(ctx, paper)
 
     extraction = {
@@ -351,8 +362,9 @@ class ExportStage:
                         # The replayed core's extraction block predates
                         # enrichment, so its timings omit the enrich stage even
                         # though enrichment ran. Carry the enriched run's
-                        # timings over so sinked and unsinked exports report the
-                        # same provenance (audit pipeline-stages-12).
+                        # timings (and memory record) over so sinked and
+                        # unsinked exports report the same provenance (audit
+                        # pipeline-stages-12).
                         enriched_timings = (enriched_payload.get("extraction") or {}).get("timings")
                         if isinstance(enriched_timings, dict):
                             replayed_payload.setdefault("extraction", {})["timings"] = (

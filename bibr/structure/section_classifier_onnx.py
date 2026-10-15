@@ -39,7 +39,7 @@ class OnnxSectionClassifierModel:
 
     runtime = "onnx"
 
-    def __init__(self, bundle_dir: str | Path, device: str | None = None) -> None:
+    def __init__(self, bundle_dir: str | Path, device: str | None = None, settings=None) -> None:
         from bibr.utils.onnx_providers import create_session
 
         self.bundle_dir = Path(bundle_dir)
@@ -53,6 +53,7 @@ class OnnxSectionClassifierModel:
             self.bundle_dir / self.manifest.get("model_file", ONNX_MODEL),
             device=device,
             model_name="section classifier (ONNX)",
+            settings=settings,
         )
         self._input_names = [i.name for i in self.session.get_inputs()]
 

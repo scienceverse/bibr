@@ -60,6 +60,49 @@ def test_required_excludes_only_the_omittable_root_keys():
     assert set(on_disk["properties"]) - set(on_disk["required"]) == set(OMITTABLE_ROOT_KEYS)
 
 
+def _serializing_models() -> list[type]:
+    from bibr.export.schema_artifact import _export_models
+
+    models: dict[str, type] = {}
+    _export_models(PaperExport, models)
+    return [
+        model
+        for _name, model in sorted(models.items())
+        if model.__pydantic_decorators__.model_serializers
+    ]
+
+
+@pytest.mark.parametrize("model", _serializing_models(), ids=lambda model: model.__name__)
+def test_a_serializer_drops_only_the_keys_its_model_declares_omittable(model):
+    """``OMITTED_WHEN_ABSENT`` is what keeps a key optional in the strict artifact.
+
+    A serializer that drops a key the ClassVar does not list makes the
+    artifact require a key real exports leave out, so it rejects them; the
+    models fill the missing default and never notice. Each serializer is run
+    on a row whose every key is absent, and may drop only the declared keys.
+    """
+    keys = [field.alias or name for name, field in model.model_fields.items()]
+    instance = model.model_construct(**dict.fromkeys(model.model_fields))
+    omittable = set(getattr(model, "OMITTED_WHEN_ABSENT", ()))
+    for decorator in model.__pydantic_decorators__.model_serializers.values():
+        assert decorator.info.mode == "wrap"
+        dumped = decorator.func(instance, lambda _model: dict.fromkeys(keys))
+        dropped = set(keys) - set(dumped)
+        assert dropped <= omittable, (
+            f"{model.__name__}.{decorator.cls_var_name} drops {sorted(dropped - omittable)}, "
+            "which OMITTED_WHEN_ABSENT does not list"
+        )
+
+
+def test_omittable_nested_keys_are_optional_in_the_strict_artifact():
+    """The reverse: every declared omittable key is left out of ``required``."""
+    on_disk = json.loads(ARTIFACT.read_text())
+    for model in _serializing_models():
+        definition = on_disk if model is PaperExport else on_disk["$defs"][model.__name__]
+        required = set(definition.get("required", ()))
+        assert not required & set(getattr(model, "OMITTED_WHEN_ABSENT", ())), model.__name__
+
+
 def test_artifact_uses_defs_refs_metacheck_can_resolve():
     """metacheck's paper() constructor resolves "#/$defs/Name" refs."""
     on_disk = json.loads(ARTIFACT.read_text())
@@ -103,7 +146,7 @@ def test_reader_artifact_relaxes_only_unknown_keys_enum_values_and_the_minor_ver
     }
     assert reader["properties"].keys() == strict["properties"].keys()
     assert reader["required"] == strict["required"]
-    assert strict["properties"]["schema_version"]["const"] == "12.2"
+    assert strict["properties"]["schema_version"]["const"] == "12.3"
     assert reader["properties"]["schema_version"]["pattern"] == r"^12\.[0-9]+$"
 
 

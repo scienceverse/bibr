@@ -403,3 +403,49 @@ def test_record_failed_line_leaves_validation_counts_empty(tmp_path):
 
     assert entry["n_validation_errors"] is None
     assert entry["n_validation_warnings"] is None
+
+
+# --- memory (PIPELINE_MEMORY_PROFILE) -----------------------------------------
+
+
+def _memory_export() -> dict:
+    return {
+        "schema_version": "12.3",
+        "extraction": {
+            "timings": {
+                "stages": {"layout": 3.0, "extract": 5.0},
+                "total_seconds": 8.0,
+                "memory": {
+                    "peak_rss_mib": 2210.5,
+                    "stages": {
+                        "layout": {"peak_rss_mib": 2210.5, "overlapped": False},
+                        "extract": {"peak_rss_mib": 1702.0, "overlapped": True},
+                        "broken": {"peak_rss_mib": None},
+                    },
+                },
+            }
+        },
+    }
+
+
+def test_summary_copies_the_memory_peaks():
+    summary = summarize_export(_memory_export())
+
+    assert summary["peak_rss_mib"] == 2210.5
+    assert summary["stage_peak_rss_mib"] == {"layout": 2210.5, "extract": 1702.0}
+    assert summary["memory_overlapped"] is True
+    assert summary["stage_times"] == {"layout": 3.0, "extract": 5.0}
+
+
+def test_ledger_line_has_memory_fields_only_when_the_export_has_memory(tmp_path):
+    ledger = Ledger(tmp_path / "outcomes.jsonl")
+
+    with_memory = ledger.record(
+        _item(tmp_path, "a"), Outcome("ok", export=_memory_export()), context=CTX
+    )
+    without = ledger.record(_item(tmp_path, "b"), Outcome("ok", export=_export()), context=CTX)
+
+    assert with_memory["peak_rss_mib"] == 2210.5
+    assert with_memory["stage_peak_rss_mib"] == {"layout": 2210.5, "extract": 1702.0}
+    assert with_memory["memory_overlapped"] is True
+    assert not {"peak_rss_mib", "stage_peak_rss_mib", "memory_overlapped"} & set(without)

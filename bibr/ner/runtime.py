@@ -37,7 +37,7 @@ def load_ref_parser(
         from bibr.ner.parser_onnx import OnnxRefParser
 
         logger.info("NER parser runtime: onnx (%s)", bundle)
-        return OnnxRefParser(bundle, device=device)
+        return OnnxRefParser(bundle, device=device, settings=settings)
 
     import bibr.ner.parser as parser_mod
 

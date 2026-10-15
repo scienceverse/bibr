@@ -446,6 +446,58 @@ def cpu_ort_session_options():
     return options
 
 
+def ort_thread_caps(settings=None) -> tuple[int, int]:
+    """``(intra_op, inter_op)`` thread caps from ``ML_ORT_INTRA_OP_THREADS`` /
+    ``ML_ORT_INTER_OP_THREADS``; ``0`` keeps ONNX Runtime's own default.
+
+    ``settings`` is the owner's settings (a pipeline's, a loader's; every
+    bibr loader passes its own). Without one, a snapshot of the process
+    settings (environment and ``.env``) is read.
+    """
+    if settings is None:
+        from bibr.config import snapshot_settings
+
+        settings = snapshot_settings()
+    ml = settings.ml
+    return int(ml.ort_intra_op_threads), int(ml.ort_inter_op_threads)
+
+
+def apply_ort_thread_caps(options, settings=None) -> bool:
+    """Write the configured thread caps onto ``options``; True when one was set.
+
+    An unset cap (``0``) leaves the attribute untouched, so a run without
+    caps opens its sessions exactly as before.
+    """
+    intra_op, inter_op = ort_thread_caps(settings)
+    if intra_op > 0:
+        options.intra_op_num_threads = intra_op
+    if inter_op > 0:
+        options.inter_op_num_threads = inter_op
+    return intra_op > 0 or inter_op > 0
+
+
+def with_ort_thread_caps(options, settings=None):
+    """``options`` with the configured thread caps applied.
+
+    For callers that hand ``SessionOptions`` to a library which opens the
+    session itself (wtpsplit's ``SaT``). With no cap configured ``options``
+    comes back unchanged, ``None`` included; with a cap and no ``options``
+    a fresh ``SessionOptions`` carries it (``None`` when onnxruntime cannot
+    be imported).
+    """
+    intra_op, inter_op = ort_thread_caps(settings)
+    if intra_op <= 0 and inter_op <= 0:
+        return options
+    if options is None:
+        try:
+            import onnxruntime as ort
+        except ImportError:
+            return None
+        options = ort.SessionOptions()
+    apply_ort_thread_caps(options, settings)
+    return options
+
+
 def create_session(
     model_path: str | Path,
     *,
@@ -453,6 +505,7 @@ def create_session(
     model_name: str = "",
     gpu_mem_limit: int | None = None,
     disable_cpu_arena: bool = False,
+    settings=None,
 ):
     """Open an ``InferenceSession`` on ``model_path`` and report its device.
 
@@ -468,6 +521,10 @@ def create_session(
     (``kSameAsRequested`` plus per-run shrinkage) and disabling the CPU arena
     there is unverified. Only pass it for models where the arena cost was
     measured (layout, SaT), not blindly for every model.
+
+    The session's thread pools take the ``ML_ORT_*_THREADS`` caps of
+    ``settings`` (the process settings when ``None``; see
+    :func:`apply_ort_thread_caps`); unset, ONNX Runtime sizes them itself.
     """
     ort = import_onnxruntime(model_name or "ONNX Runtime inference")
     allow_accelerators = enable_cuda_for(device)
@@ -484,6 +541,7 @@ def create_session(
     options.log_severity_level = 3  # errors only; ORT's warnings are noisy at load
     if disable_cpu_arena and selected_device(providers) != "cuda":
         options.enable_cpu_mem_arena = False
+    apply_ort_thread_caps(options, settings)
     session = ort.InferenceSession(str(model_path), sess_options=options, providers=providers)
     device = session_device(session, providers, model_name=model_name)
     return shrink_arena_after_runs(session), device

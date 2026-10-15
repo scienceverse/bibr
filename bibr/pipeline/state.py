@@ -123,6 +123,9 @@ class FileState:
     # The layer was asked for once, inline or rebuilt; a failed build leaves
     # doc_layer None and is not tried again.
     doc_layer_attempted: bool = field(default=False, compare=False, repr=False, kw_only=True)
+    # Per-stage process memory, ``{stage: StageMemory}``, recorded only with
+    # ``PIPELINE_MEMORY_PROFILE`` on (``bibr.pipeline.memory_profile``).
+    stage_memory: dict = field(default_factory=dict, compare=False, repr=False, kw_only=True)
 
     def free_pre_ocr(self):
         """Free data consumed by OCR stage."""

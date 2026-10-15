@@ -1800,6 +1800,25 @@ class MlOptions(_BibrSettings):
         "or configured, else torch when installed), 'onnx' (require the ONNX bundle), or 'torch' "
         "(require the torch extra).",
     )
+    # ONNX Runtime sizes each session's intra-op thread pool to the physical
+    # cores, so every CPU session a run opens (layout, both classifiers, the
+    # NER parser, the sentence segmenter) may claim every core. On a host
+    # shared with model servers or other runs that oversubscribes the CPU; a
+    # cap trades per-call speed for co-tenancy. Read when a session opens.
+    ort_intra_op_threads: int = Field(
+        0,
+        ge=0,
+        description="Threads each ONNX Runtime session may use inside one operator (layout, "
+        "classifiers, NER parser, sentence segmenter). 0 keeps ONNX Runtime's default (one per "
+        "physical core). Set it on a CPU host shared with model servers or other runs.",
+    )
+    ort_inter_op_threads: int = Field(
+        0,
+        ge=0,
+        description="Threads each ONNX Runtime session may use to run independent operators in "
+        "parallel. 0 keeps ONNX Runtime's default. bibr's sessions run their graphs "
+        "sequentially, so ML_ORT_INTRA_OP_THREADS is the cap that limits CPU use.",
+    )
 
     # Trained section classifier (MiniLM two-head, document-context input
     # template). When ``section_classifier_model_id`` is None, classification
@@ -2157,6 +2176,23 @@ class PipelineOptions(_BibrSettings):
         "subsequent windows' OCR. Only applies to the cloud-LLM path (LLM_BACKEND=cloud, memory "
         "mode not aggressive); managed local LLM backends keep the stage barrier. Escape hatch "
         "for debugging.",
+    )
+    # Opt-in measurement only (bibr/pipeline/memory_profile.py): per stage, the
+    # process's peak RSS (Linux VmHWM, reset at each stage start), RSS, swap
+    # and file count, exported as extraction.timings.memory and copied into
+    # the bibr batch ledger. Changes nothing about how memory is used.
+    memory_profile: bool = Field(
+        False,
+        description="Record the process's peak RSS, RSS and swap over every pipeline stage, and "
+        "the RSS each model load adds (logged). Exported as extraction.timings.memory and "
+        "summarized by bibr batch report. Peaks are per stage on Linux; elsewhere they are the "
+        "process's peak so far. Set PIPELINE_STREAM_BACKHALF=false for per-stage attribution.",
+    )
+    memory_profile_tracemalloc: bool = Field(
+        False,
+        description="With PIPELINE_MEMORY_PROFILE, also record the peak of Python's own "
+        "allocations (tracemalloc, NumPy included; ONNX Runtime and image buffers are not). "
+        "Slows allocation-heavy stages.",
     )
     # Max requests running the pipeline concurrently per worker (0 = unlimited).
     # The LitServe async loop dispatches unbounded concurrent predicts; this

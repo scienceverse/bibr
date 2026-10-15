@@ -10,7 +10,9 @@ from enum import StrEnum
 from typing import Any
 
 from bibr.pipeline.inference_batcher import InferenceBatcher
+from bibr.pipeline.memory_profile import profiling_enabled
 from bibr.utils.locks import LOCAL_INFERENCE_LOCK
+from bibr.utils.process_memory import log_rss_delta
 
 logger = logging.getLogger(__name__)
 _MIB = 1024 * 1024
@@ -207,7 +209,13 @@ class ClassifierResources:
         resource.status = ClassifierStatus(ClassifierState.LOADING, device)
         try:
             resource.model = await asyncio.to_thread(
-                _locked_load, resource.loader, resource.model_id, resource.revision, device
+                _locked_load,
+                resource.loader,
+                resource.model_id,
+                resource.revision,
+                device,
+                label=f"{resource.name} classifier",
+                verbose=profiling_enabled(self._settings),
             )
         except Exception as exc:  # noqa: BLE001 - sticky degraded startup state
             state = ClassifierState.FAILED_REQUIRED if self._required else ClassifierState.DEGRADED
@@ -225,8 +233,12 @@ class ClassifierResources:
         )
 
 
-def _locked_load(loader, model_id: str, revision: str, device: str):
-    with LOCAL_INFERENCE_LOCK:
+def _locked_load(
+    loader, model_id: str, revision: str, device: str, *, label: str = "classifier", verbose=False
+):
+    # Measured under the lock, so no other local model load or forward pass
+    # runs inside the logged RSS change.
+    with LOCAL_INFERENCE_LOCK, log_rss_delta(label, verbose=verbose):
         return loader(model_id, revision, device)
 
 

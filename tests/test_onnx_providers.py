@@ -360,3 +360,141 @@ def test_cpu_ort_session_options_is_none_without_onnxruntime():
     ort_kwargs then)."""
     with patch.dict("sys.modules", {"onnxruntime": None}):
         assert onnx_providers.cpu_ort_session_options() is None
+
+
+# --- ML_ORT_*_THREADS caps -----------------------------------------------------
+
+
+def _capped_settings(intra: int = 0, inter: int = 0):
+    from bibr.config import GlobalSettings
+
+    return GlobalSettings(ml={"ort_intra_op_threads": intra, "ort_inter_op_threads": inter})
+
+
+def test_thread_caps_default_to_onnxruntime_own_sizing():
+    """Unset, both caps are 0: ORT keeps sizing its pools to the cores."""
+    from bibr.config import GlobalSettings
+
+    assert onnx_providers.ort_thread_caps(GlobalSettings()) == (0, 0)
+
+
+def test_thread_caps_read_the_ml_settings():
+    assert onnx_providers.ort_thread_caps(_capped_settings(4, 1)) == (4, 1)
+
+
+def test_thread_caps_reject_negative_values():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        _capped_settings(-1)
+
+
+def test_create_session_leaves_thread_pools_alone_without_caps():
+    """No cap configured: the session options carry no thread attribute, so a
+    run opens its sessions exactly as before the setting existed."""
+    mock_ort, recorded = _cpu_only_ort_with_recording_options()
+    with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
+        onnx_providers.create_session("model.onnx", device="cpu", model_name="layout")
+
+    assert "intra_op_num_threads" not in recorded
+    assert "inter_op_num_threads" not in recorded
+
+
+def test_create_session_applies_the_configured_thread_caps(monkeypatch):
+    """The caps the bench used to patch into every SessionOptions now come from
+    ML_ORT_INTRA_OP_THREADS / ML_ORT_INTER_OP_THREADS."""
+    monkeypatch.setattr(onnx_providers, "ort_thread_caps", lambda settings=None: (4, 1))
+    mock_ort, recorded = _cpu_only_ort_with_recording_options()
+    with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
+        onnx_providers.create_session(
+            "model.onnx", device="cpu", model_name="layout", disable_cpu_arena=True
+        )
+
+    assert recorded["intra_op_num_threads"] == 4
+    assert recorded["inter_op_num_threads"] == 1
+    assert recorded["enable_cpu_mem_arena"] is False
+
+
+def test_create_session_sets_only_the_cap_that_is_configured(monkeypatch):
+    monkeypatch.setattr(onnx_providers, "ort_thread_caps", lambda settings=None: (2, 0))
+    mock_ort, recorded = _cpu_only_ort_with_recording_options()
+    with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
+        onnx_providers.create_session("model.onnx", device="cpu", model_name="ner")
+
+    assert recorded["intra_op_num_threads"] == 2
+    assert "inter_op_num_threads" not in recorded
+
+
+def test_create_session_reads_the_process_settings(monkeypatch):
+    from bibr.config import Settings
+
+    monkeypatch.setattr(Settings.ml, "ort_intra_op_threads", 3)
+    mock_ort, recorded = _cpu_only_ort_with_recording_options()
+    with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
+        onnx_providers.create_session("model.onnx", device="cpu", model_name="ner")
+
+    assert recorded["intra_op_num_threads"] == 3
+
+
+def test_create_session_takes_the_caps_of_the_settings_it_is_given(monkeypatch):
+    """A loader's settings (a pipeline's, a Python caller's) decide the caps,
+    not the process settings."""
+    from bibr.config import Settings
+
+    monkeypatch.setattr(Settings.ml, "ort_intra_op_threads", 0)
+    mock_ort, recorded = _cpu_only_ort_with_recording_options()
+    with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
+        onnx_providers.create_session(
+            "model.onnx", device="cpu", model_name="ner", settings=_capped_settings(2, 1)
+        )
+
+    assert (recorded["intra_op_num_threads"], recorded["inter_op_num_threads"]) == (2, 1)
+
+
+def test_a_session_opened_with_settings_does_not_copy_the_process_settings(monkeypatch):
+    """The loaders pass their settings, so opening a session reads two integers
+    from them instead of deep-copying the process settings."""
+
+    def no_snapshot(*_args, **_kwargs):
+        raise AssertionError("create_session copied the process settings")
+
+    monkeypatch.setattr("bibr.config.snapshot_settings", no_snapshot)
+    mock_ort, recorded = _cpu_only_ort_with_recording_options()
+    with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
+        onnx_providers.create_session(
+            "model.onnx", device="cpu", model_name="ner", settings=_capped_settings(5)
+        )
+
+    assert recorded["intra_op_num_threads"] == 5
+
+
+def test_with_thread_caps_returns_options_unchanged_without_caps():
+    """No cap: the segmenter's options (or their absence) pass straight through."""
+    sentinel = object()
+    settings = _capped_settings()
+
+    assert onnx_providers.with_ort_thread_caps(sentinel, settings) is sentinel
+    assert onnx_providers.with_ort_thread_caps(None, settings) is None
+
+
+def test_with_thread_caps_capped_real_session_options():
+    """A real SessionOptions takes the caps: the arena-free CPU options keep
+    their arena setting, and a CUDA SaT session (no options of its own) gets
+    fresh ones carrying only the caps."""
+    ort = pytest.importorskip("onnxruntime")
+    settings = _capped_settings(2, 1)
+
+    cpu_options = onnx_providers.with_ort_thread_caps(
+        onnx_providers.cpu_ort_session_options(), settings
+    )
+    fresh = onnx_providers.with_ort_thread_caps(None, settings)
+
+    assert cpu_options.enable_cpu_mem_arena is False
+    assert (cpu_options.intra_op_num_threads, cpu_options.inter_op_num_threads) == (2, 1)
+    assert isinstance(fresh, ort.SessionOptions)
+    assert (fresh.intra_op_num_threads, fresh.inter_op_num_threads) == (2, 1)
+
+
+def test_with_thread_caps_is_none_without_onnxruntime():
+    with patch.dict("sys.modules", {"onnxruntime": None}):
+        assert onnx_providers.with_ort_thread_caps(None, _capped_settings(2)) is None

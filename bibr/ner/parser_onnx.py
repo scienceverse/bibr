@@ -56,6 +56,7 @@ class OnnxRefParser:
         bundle_dir: str | Path,
         device: str | None = None,
         max_seq_len: int | None = None,
+        settings=None,
     ) -> None:
         from bibr.utils.onnx_providers import create_session
 
@@ -77,6 +78,7 @@ class OnnxRefParser:
             self.bundle_dir / self.manifest.get("model_file", ONNX_MODEL),
             device=device,
             model_name="NER reference parser (ONNX)",
+            settings=settings,
         )
         self._input_names = [i.name for i in self.session.get_inputs()]
 

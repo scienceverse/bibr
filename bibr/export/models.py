@@ -24,11 +24,18 @@ from typing import Annotated, Any, ClassVar, Literal, Union, cast, get_args, get
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 from pydantic.fields import FieldInfo
 
-_SCHEMA_VERSION = "12.2"
+_SCHEMA_VERSION = "12.3"
 
 
 # ---------------------------------------------------------------------------
-# Pydantic v12.2 export schema — single source of truth for validation
+# Pydantic v12.3 export schema — single source of truth for validation
+#
+# v12.3 (vs 12.2) — additive:
+#   - New ``extraction.timings.memory``: with ``PIPELINE_MEMORY_PROFILE`` on,
+#     the bibr process's peak RSS, RSS, RSS change and swap over each stage,
+#     with the stage's file count and whether it overlapped another stage.
+#     Omitted when the setting is off (the default), so every 12.2 export is
+#     still a valid 12.3 reader input.
 #
 # v12.2 (vs 12.1) — additive:
 #   - New ``extraction.diagnostics.verification[]``: per reference with a
@@ -1868,19 +1875,105 @@ class ExtractionSettingsExport(BaseModel):
     consolidate: str = Field(description="Consolidation mode: 'off', 'fill' or 'replace'.")
 
 
+class StageMemoryExport(BaseModel):
+    """The bibr process's memory over one stage (``PIPELINE_MEMORY_PROFILE``).
+
+    Memory belongs to the process, not to this paper: ``files`` papers went
+    through the stage together, and when ``overlapped`` is true another stage
+    ran at the same time, so the peak covers both.
+    """
+
+    model_config = _STRICT
+
+    peak_rss_mib: float | None = Field(
+        default=None,
+        ge=0,
+        description="Highest resident memory (MiB) while the stage ran. When peak_reset is "
+        "false, the process's highest since it started.",
+    )
+    rss_mib: float | None = Field(
+        default=None, ge=0, description="Resident memory (MiB) when the stage ended."
+    )
+    rss_delta_mib: float | None = Field(
+        default=None,
+        description="Change in resident memory (MiB) from the stage's start to its end, after "
+        "the stage boundary freed what it frees.",
+    )
+    swap_mib: float | None = Field(
+        default=None, ge=0, description="Process memory swapped out (MiB) when the stage ended."
+    )
+    python_peak_mib: float | None = Field(
+        default=None,
+        ge=0,
+        description="Peak of Python's own allocations (MiB, tracemalloc), NumPy included; "
+        "omitted unless PIPELINE_MEMORY_PROFILE_TRACEMALLOC is on.",
+    )
+    files: int = Field(ge=0, description="Papers in the stage's batch when it started.")
+    overlapped: bool = Field(
+        description="Whether another stage ran at the same time (back-half streaming, "
+        "concurrent requests)."
+    )
+    peak_reset: bool = Field(
+        description="Whether the peak was reset when the stage started (Linux), making "
+        "peak_rss_mib this stage's own."
+    )
+
+    # Written only when tracemalloc ran (PIPELINE_MEMORY_PROFILE_TRACEMALLOC).
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("python_peak_mib",)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_python_peak(self, handler):
+        data = handler(self)
+        for key in self.OMITTED_WHEN_ABSENT:
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
+
+
+class MemoryExport(BaseModel):
+    """Per-stage process memory, recorded only with ``PIPELINE_MEMORY_PROFILE`` on."""
+
+    model_config = _STRICT
+
+    peak_rss_mib: float | None = Field(
+        default=None, ge=0, description="Highest stages[].peak_rss_mib."
+    )
+    stages: dict[str, StageMemoryExport] = Field(
+        description="Memory per stage that finished before the export was built."
+    )
+
+
 class TimingsExport(BaseModel):
     """Per-stage wall-clock seconds (the export stage's own time is excluded —
-    it is still running when this is built).
+    it is still running when this is built), and, opt-in, per-stage memory.
 
-    Both fields are always populated when this object exists: an untimed run
-    omits the whole ``extraction.timings`` object rather than emitting one with
-    null fields. The ``| None`` types are structural only.
+    ``stages`` and ``total_seconds`` are always populated when this object
+    exists: an untimed run omits the whole ``extraction.timings`` object rather
+    than emitting one with null fields. The ``| None`` types are structural
+    only.
     """
 
     model_config = _STRICT
 
     stages: dict[str, float] | None = Field(default=None, description="Seconds per stage.")
     total_seconds: float | None = Field(default=None, description="Seconds for the whole run.")
+    memory: MemoryExport | None = Field(
+        default=None,
+        description="The bibr process's memory per stage; present only when "
+        "PIPELINE_MEMORY_PROFILE is on. Added in 12.3.",
+    )
+
+    # Written only with PIPELINE_MEMORY_PROFILE on, so a default run's timings
+    # stay exactly what 12.2 wrote.
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("memory",)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_memory(self, handler):
+        data = handler(self)
+        for key in self.OMITTED_WHEN_ABSENT:
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
 
 
 class UsageRowExport(BaseModel):
@@ -2216,7 +2309,7 @@ class PaperExport(BaseModel):
         "(bibr batch writes its corpus-unique id, the name of the JSON file). A converter uses "
         "the name of source.file_name without its extension.",
     )
-    schema_version: Literal["12.2"] = Field(
+    schema_version: Literal["12.3"] = Field(
         description="Export schema version. Its presence at the root is how readers "
         "distinguish v11 and later from all earlier versions.",
     )

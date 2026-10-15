@@ -180,17 +180,25 @@ class ResourceManager:
         """Load layout detector if not already loaded."""
         if self._layout is not None and getattr(self._layout, "loaded", False):
             return
-        if self._layout_factory is not None:
-            self._layout = _make_settings_aware(
-                self._layout_factory,
-                self._settings,
-                device=self.device,
-            )
-            return
-        from bibr.layout.registry import create
-        from bibr.local import layout as _local_layout  # noqa: F401 — triggers @register
+        with self._log_model_load("layout model"):
+            if self._layout_factory is not None:
+                self._layout = _make_settings_aware(
+                    self._layout_factory,
+                    self._settings,
+                    device=self.device,
+                )
+                return
+            from bibr.layout.registry import create
+            from bibr.local import layout as _local_layout  # noqa: F401 — triggers @register
 
-        self._layout = create("local", device=self.device, settings=self._settings)
+            self._layout = create("local", device=self.device, settings=self._settings)
+
+    def _log_model_load(self, label: str):
+        """Log the RSS a model load adds (INFO with PIPELINE_MEMORY_PROFILE, else DEBUG)."""
+        from bibr.pipeline.memory_profile import profiling_enabled
+        from bibr.utils.process_memory import log_rss_delta
+
+        return log_rss_delta(label, verbose=profiling_enabled(self._settings))
 
     def unload_layout(self) -> None:
         """Unload layout detector to free GPU memory."""
@@ -207,16 +215,17 @@ class ResourceManager:
         """Load sentence segmenter if not already loaded."""
         if self._segmenter is not None and getattr(self._segmenter, "loaded", False):
             return
-        if self._segmenter_factory is not None:
-            self._segmenter = _make_settings_aware(
-                self._segmenter_factory,
-                self._settings,
-            )
-            return
-        from bibr.local import segmenter as _local_segmenter  # noqa: F401 — triggers @register
-        from bibr.segmenter.registry import create
+        with self._log_model_load("sentence segmenter"):
+            if self._segmenter_factory is not None:
+                self._segmenter = _make_settings_aware(
+                    self._segmenter_factory,
+                    self._settings,
+                )
+                return
+            from bibr.local import segmenter as _local_segmenter  # noqa: F401 — triggers @register
+            from bibr.segmenter.registry import create
 
-        self._segmenter = create("local", settings=self._settings)
+            self._segmenter = create("local", settings=self._settings)
 
     def unload_segmenter(self) -> None:
         """Unload sentence segmenter."""

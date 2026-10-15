@@ -638,6 +638,7 @@ class OnnxLayoutBackend:
         *,
         device: str | None = None,
         threshold: float,
+        settings=None,
     ) -> None:
         from bibr.utils.onnx_providers import create_session
 
@@ -668,6 +669,7 @@ class OnnxLayoutBackend:
             # CPU-only layout sessions skip ORT's CPU arena (audit-measured
             # ~5 GB at batch 8); a no-op when the chain includes CUDA.
             disable_cpu_arena=True,
+            settings=settings,
         )
         self._input_name = self.session.get_inputs()[0].name
         outputs = {o.name for o in self.session.get_outputs()}

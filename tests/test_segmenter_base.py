@@ -641,3 +641,34 @@ def test_segmenter_cuda_session_keeps_default_session_options(monkeypatch):
     )
 
     assert "ort_kwargs" not in init["kwargs"]
+
+
+def test_segmenter_cpu_session_takes_the_ort_thread_caps(monkeypatch):
+    """SaT opens its own session, so ML_ORT_*_THREADS reach it through the
+    options it is handed, next to the CPU-arena opt-out."""
+    pytest.importorskip("onnxruntime")
+    monkeypatch.setattr("bibr.utils.onnx_providers.ort_thread_caps", lambda settings=None: (2, 1))
+
+    _, _, init = _build_segmenter(monkeypatch, model_name="sat-6l-sm")
+
+    sess_options = init["kwargs"]["ort_kwargs"]["sess_options"]
+    assert sess_options.enable_cpu_mem_arena is False
+    assert (sess_options.intra_op_num_threads, sess_options.inter_op_num_threads) == (2, 1)
+
+
+def test_segmenter_cuda_session_gets_only_the_thread_caps(monkeypatch):
+    """A capped CUDA SaT session gets fresh options carrying the caps alone; the
+    CPU arena keeps its default there."""
+    pytest.importorskip("onnxruntime")
+    monkeypatch.setattr("bibr.utils.onnx_providers.ort_thread_caps", lambda settings=None: (2, 0))
+
+    _, _, init = _build_segmenter(
+        monkeypatch,
+        model_name="sat-6l-sm",
+        requested_providers=_CUDA_CHAIN,
+        session_providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+    )
+
+    sess_options = init["kwargs"]["ort_kwargs"]["sess_options"]
+    assert sess_options.intra_op_num_threads == 2
+    assert sess_options.enable_cpu_mem_arena is True
