@@ -75,6 +75,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   unsupported. The quickstart, README and `bibr setup --help` name Claude Haiku 5.5 as
   setup's cloud option instead of Google Gemini, and README and the docs home link
   [try.bibr.org](https://try.bibr.org).
+- On Windows with an NVIDIA GPU, the setup plan says that OCR and the LLM run
+  through llama.cpp and gives the `winget install llama.cpp` command. It used
+  to say only that local runs can be slow.
 
 ### Removed
 
