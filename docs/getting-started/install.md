@@ -1,6 +1,11 @@
 # Installation
 
 bibr requires **Python >=3.11,<3.15** (3.11, 3.12, 3.13, or 3.14).
+Python 3.15 is not supported yet: onnxruntime, which bibr's models run on,
+publishes no 3.15 wheels. On 3.15 (or 3.10), `pip install bibr` cannot install
+a current release: it fails, or picks the empty early placeholder 0.0.2, after
+which `bibr` is not a command. The uv commands below avoid this, because
+`uv init --python 3.12` fetches its own Python 3.12.
 
 ## System prerequisites
 
@@ -73,7 +78,7 @@ extra syntax is `uv add 'bibr[<extra>]'`.
 | `gpu` | `onnxruntime-gpu[cuda,cudnn]` (Linux/Windows) | GPU execution providers for ONNX Runtime — sentence segmentation, and on a core install layout, the classifiers and the NER parser too. It needs one more command after syncing; see [GPU ONNX Runtime](#gpu-onnx-runtime). |
 | `cache` | `redis>=5.0.0` | Redis-backed response caching — set `REDIS_URL` to enable it (the result cache is on by default, but only uses Redis once a URL is configured). |
 | `demo` | `gradio>=6.15.0` | The interactive Gradio demo app. |
-| `batch` | `anthropic>=0.40.0,<1` | Offline processing via the Anthropic Message Batches API — bulk paper-type/OECD labeling and similar bulk LLM workflows. It is also the SDK `LLM_PROVIDER=anthropic` needs. |
+| `batch` | `anthropic>=0.40.0,<1` | Offline processing via the Anthropic Message Batches API — bulk paper-type/OECD labeling and similar bulk LLM workflows. The SDK itself is a core dependency, since `LLM_PROVIDER=anthropic` (the hosted default `bibr setup` recommends) needs it; this extra keeps existing installs working. |
 | `mcp` | `mcp>=2.2.0,<3` | The `bibr mcp` server — extraction as [Model Context Protocol tools](../guides/mcp.md) for agents (Claude Code, Claude Desktop, any MCP client). |
 | `all` | `batch` + `cache` + `demo` + `mcp` + `torch` | The cloud + ML set for a full local-dev setup. Does **not** include `vllm`, `local`, `local-mlx`, or `gpu` — add whichever match your hardware. |
 

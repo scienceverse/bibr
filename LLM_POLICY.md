@@ -26,8 +26,8 @@ On bibr's development papers, large models barely differ, while smaller ones
 lose accuracy: off the shelf, 4–8B models pass 6 to 11 points fewer papers than
 Qwen3.8-27B. Fine-tuning on bibr's own tasks closes about half of that gap, so
 bibr's local defaults are fine-tuned Qwen3.5 models: a 4B model 2.8 points
-behind the 27B and a 2B model 6.3 points behind. The hosted default, Claude
-Haiku 5.5, is within a point of the 27B. These are development-set results;
+behind the 27B and a 2B model 6.3 points behind. The hosted recommendation,
+Claude Haiku 5.5, is within a point of the 27B. These are development-set results;
 [choosing an extraction model](docs/guides/extraction-models.md) has the
 numbers and their limits.
 

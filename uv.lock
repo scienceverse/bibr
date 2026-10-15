@@ -294,9 +294,10 @@ wheels = [
 
 [[package]]
 name = "bibr"
-version = "0.7.2"
+version = "0.7.3"
 source = { editable = "." }
 dependencies = [
+    { name = "anthropic" },
     { name = "beautifulsoup4" },
     { name = "google-genai" },
     { name = "html5lib" },
@@ -415,6 +416,7 @@ docs = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anthropic", specifier = ">=0.40.0,<1" },
     { name = "anthropic", marker = "extra == 'batch'", specifier = ">=0.40.0,<1" },
     { name = "beautifulsoup4", specifier = ">=4.14.3" },
     { name = "bibr", extras = ["batch", "cache", "demo", "mcp", "torch"], marker = "extra == 'all'" },

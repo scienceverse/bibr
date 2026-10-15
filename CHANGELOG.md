@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-10-15
+
+0.7.2 was never tagged or published to PyPI, so this is the first release with its fixes
+too (listed under 0.7.2 below). Two of them changed again here: numind is no longer installed
+at all, and setup's cloud consent question, which still defaults to No, now asks about
+Anthropic Claude instead of Google Gemini.
+
 ### Added
 
 - `LLM_POINTER_OUTPUTS=true` (experimental, off by default) stops the two front-matter calls
@@ -63,6 +70,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `GRADIO_ANALYTICS_ENABLED=False`, so neither sends usage statistics to its
   maintainers. A value already in your environment wins.
 
+### Fixed
+
+- `bibr setup`'s cloud plan works on a plain install. It configures Claude for OCR and
+  metadata, but the anthropic SDK came only with the `batch` extra, so the connection test
+  failed and its `pip install anthropic` hint installed a 1.x SDK that bibr refuses. The SDK
+  (below 1.0) is now a core dependency.
+- `bibr chew` reports a mistyped path, an empty folder or a URL before a missing LLM key,
+  instead of asking for a key first. A URL gets a hint to download the paper.
+- `bibr doctor` no longer suggests setting a key when the LLM provider's SDK is missing or
+  unsupported. The quickstart, README and `bibr setup --help` name Claude Haiku 5.5 as
+  setup's cloud option instead of Google Gemini, and README and the docs home link
+  [try.bibr.org](https://try.bibr.org).
+- On Windows with an NVIDIA GPU, the setup plan says that OCR and the LLM run
+  through llama.cpp and gives the `winget install llama.cpp` command. It used
+  to say only that local runs can be slow.
+
 ### Removed
 
 - NuExtract 3 is no longer offered by `bibr setup` or used as a default; it
@@ -72,7 +95,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `LLM_STRUCTURED_BACKEND=nuextract-native` backend needs
   `pip install 'bibr[nuextract]'` and otherwise stops with an error that says so.
 
-## [0.7.2] - 2026-10-14
+## [0.7.2] - 2026-10-14 (not published; included in 0.7.3)
 
 ### Fixed
 

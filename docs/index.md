@@ -9,6 +9,9 @@ hide:
 JSON. Read PDF, DOCX, JATS XML, HTML, and ePub; extract metadata, references,
 sections, sentences, tables, figures, and equations.
 
+To try bibr on one paper without installing anything, upload it at
+[try.bibr.org](https://try.bibr.org).
+
 Install bibr from PyPI to use the features documented here. See
 [installation](getting-started/install.md) for Python and system requirements,
 optional extras, and contributor source installs.

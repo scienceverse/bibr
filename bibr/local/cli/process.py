@@ -415,37 +415,6 @@ async def _run_process(args) -> None:
 
     console.print(_format_run_summary(config))
 
-    # Fail fast on missing LLM credentials — the provider would otherwise
-    # raise only on the first LLM call, after the user already sat through OCR.
-    # Skipped under --dry-run: it constructs a real provider client (no
-    # network call, but --dry-run previews the plan without touching any
-    # client/model machinery at all — see ``_print_dry_run_plan``).
-    if not args.dry_run and not config.no_llm and config.llm_backend == "cloud":
-        try:
-            from bibr.clients.llm import preflight_credentials
-
-            preflight_credentials()
-        except ValueError as e:
-            ui.error(
-                console,
-                escape(str(e)),
-                hint="Run [cyan]bibr setup[/cyan] to configure an LLM provider, "
-                "or pass [cyan]--no-llm[/cyan] for structural output only.",
-            )
-            sys.exit(1)
-
-    # Fail fast on a managed local backend that can't run here (unsupported
-    # hardware or a missing launcher) — otherwise the run crashes deep in vLLM
-    # after OCR. Skipped under --no-llm (no server is started) and --dry-run
-    # (nothing is started).
-    from bibr.local.pipeline import LOCAL_LLM_BACKENDS
-
-    if not args.dry_run and not config.no_llm and config.llm_backend in LOCAL_LLM_BACKENDS:
-        err = _preflight_local_backend(config.llm_backend)
-        if err:
-            ui.error(console, escape(err))
-            sys.exit(1)
-
     # Collect files
     if source_mode == "manifest":
         files = [record.input_path for record in manifest_records]
@@ -491,6 +460,38 @@ async def _run_process(args) -> None:
                 "runs with different -o targets.[/dim]"
             )
             sys.exit(2)
+
+    # Fail fast on missing LLM credentials, after the inputs resolved so a
+    # mistyped path is reported as such — the provider would otherwise
+    # raise only on the first LLM call, after the user already sat through OCR.
+    # Skipped under --dry-run: it constructs a real provider client (no
+    # network call, but --dry-run previews the plan without touching any
+    # client/model machinery at all — see ``_print_dry_run_plan``).
+    if not args.dry_run and not config.no_llm and config.llm_backend == "cloud":
+        try:
+            from bibr.clients.llm import preflight_credentials
+
+            preflight_credentials()
+        except ValueError as e:
+            ui.error(
+                console,
+                escape(str(e)),
+                hint="Run [cyan]bibr setup[/cyan] to configure an LLM provider, "
+                "or pass [cyan]--no-llm[/cyan] for structural output only.",
+            )
+            sys.exit(1)
+
+    # Fail fast on a managed local backend that can't run here (unsupported
+    # hardware or a missing launcher) — otherwise the run crashes deep in vLLM
+    # after OCR. Skipped under --no-llm (no server is started) and --dry-run
+    # (nothing is started).
+    from bibr.local.pipeline import LOCAL_LLM_BACKENDS
+
+    if not args.dry_run and not config.no_llm and config.llm_backend in LOCAL_LLM_BACKENDS:
+        err = _preflight_local_backend(config.llm_backend)
+        if err:
+            ui.error(console, escape(err))
+            sys.exit(1)
 
     if not args.dry_run and any(p.suffix.lower() == ".pdf" for p in files):
         opencv_problem = _preflight_opencv()

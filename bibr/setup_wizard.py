@@ -359,7 +359,9 @@ def _build_recommended_setup(
         # the user can install — while the other half may still need the
         # vllm extra.
         llm_on_llama_cpp = sys_platform_name == "linux" and env.get("LLM_BACKEND") == "llama-cpp"
-        ocr_on_llama_cpp = ocr_backend == "glm-llama"
+        # Native Windows has no vLLM: the automatic chain is glm-llama alone
+        # (bibr.ocr.registry), so OCR always runs through llama.cpp there.
+        ocr_on_llama_cpp = ocr_backend == "glm-llama" or sys_platform_name == "win32"
         if sys_platform_name == "linux" and accelerator_memory_gb is not None:
             from bibr.ocr.registry import paddle_vllm_unavailable_reason
 
@@ -367,12 +369,18 @@ def _build_recommended_setup(
                 paddle_vllm_unavailable_reason(vram_gb=accelerator_memory_gb) is not None
             )
         runtime = "Fully local runs can be slow and may download several GB."
-        if ocr_on_llama_cpp:
+        if sys_platform_name == "win32":
+            from bibr.local.llama_cpp import install_hint
+
+            runtime = (
+                "Uses llama.cpp (llama-server) for OCR and the LLM, which bibr does not "
+                f"install. {install_hint(platform_name='win32')}. Fully local runs can be "
+                "slow and may download several GB."
+            )
+        elif ocr_on_llama_cpp:
             runtime = (
                 "Uses llama.cpp for OCR/LLM: install a CUDA (or Vulkan) build separately "
-                "and put llama-server on PATH. Layout and NER use PyTorch; on older GPUs "
-                "(Pascal / GTX 10-series) PyTorch falls back to CPU automatically — that "
-                "is expected."
+                "and put llama-server on PATH."
             )
         elif llm_on_llama_cpp:
             runtime = (
@@ -1014,9 +1022,7 @@ class SetupWizard:
             f"Install recommended extras now ({', '.join(sorted(self.selected_extras))})?",
             default=True,
         ):
-            self.console.print(
-                "[dim]Skipped — install later with the command shown in `bibr doctor`.[/dim]"
-            )
+            self.console.print("[dim]Skipped — re-run `bibr setup` to install them later.[/dim]")
             return
         self._install_selected_extras("Recommended setup", config_saved=True)
 
@@ -1502,8 +1508,7 @@ class SetupWizard:
     def _offer_local_server_test(self) -> None:
         """Optionally launch the managed local LLM server once to health-check it."""
         self.console.print(
-            "[dim]First launch downloads the model (see size above) and can "
-            "take several minutes.[/dim]"
+            "[dim]First launch downloads the model (several GB) and can take several minutes.[/dim]"
         )
         if not Confirm.ask("Launch the local server once to test it now?", default=False):
             self.console.print(
@@ -2026,9 +2031,9 @@ By default this runs the short recommended flow:
   2. Show a concrete plan preview (OCR + LLM backends, extras, memory mode,
      privacy, first-run download, speed) and ask a single confirmation.
   3. If this machine can't run local models, fork: use a private OCR/LLM
-     server if you have one, otherwise give informed consent to cloud (Google
-     Gemini). Declining any recommendation offers a handoff to --advanced
-     rather than dead-ending.
+     server if you have one, otherwise give informed consent to cloud
+     (Anthropic Claude Haiku 5.5). Declining any recommendation offers a
+     handoff to --advanced rather than dead-ending.
   4. Write .env (and save a preset), then optionally install extras and run
      validation: a connection test for cloud, a local server health check for
      managed local LLMs, and a smoke-test extraction on a bundled sample PDF.

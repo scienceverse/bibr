@@ -24,6 +24,9 @@
 
 ## Get started
 
+To try bibr on one paper without installing anything, upload it at
+[try.bibr.org](https://try.bibr.org).
+
 Requires Python 3.11–3.14 and the
 [system prerequisites](https://bibr.org/getting-started/install/#system-prerequisites).
 Install from PyPI in a project managed by [uv](https://docs.astral.sh/uv/):
@@ -64,8 +67,10 @@ uv run bibr demo                       # Open it locally
 References are parsed locally by default. Use `--refs llm` to parse them with the
 LLM, or `--refs off` to skip them. More options: [CLI reference](https://bibr.org/reference/cli/).
 
-Unless `bibr setup` configures a local or private LLM, metadata extraction uses Google
-Gemini, which receives text extracted from the paper and needs `GOOGLE_API_KEY`.
+`bibr setup` picks a local model when your hardware can run one. Otherwise it offers
+Claude Haiku 5.5, which receives the page images and extracted text and needs an Anthropic
+API key. Without a `.env` from `bibr setup` (in the current folder or `~/.bibr/`), metadata
+extraction uses Google Gemini and needs `GOOGLE_API_KEY`.
 `bibr chew paper.pdf --dry-run` shows where each stage runs before anything is sent.
 
 ### Python

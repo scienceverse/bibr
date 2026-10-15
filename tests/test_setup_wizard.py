@@ -1352,6 +1352,9 @@ def test_recommended_setup_windows_uses_the_4b_gguf():
     )
     assert setup.env["LLM_BACKEND"] == "llama-cpp"
     assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
+    # bibr cannot install llama.cpp itself, so the plan says how to get it.
+    assert "winget install llama.cpp" in setup.runtime_summary
+    assert "llama-server" in setup.runtime_summary
 
 
 def test_recommended_setup_apple_silicon_warns_about_runtime():

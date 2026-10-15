@@ -5,7 +5,8 @@ Turns a list of independent structured-extraction requests into one provider
 batch job, polls to completion, and returns validated pydantic results keyed
 by a caller custom_id. Structured output is a forced tool whose input_schema
 is the request schema's model_json_schema() sanitized to strict-tool-legal
-form. The `anthropic` SDK is imported lazily (optional `batch` extra).
+form. The `anthropic` SDK is imported lazily (a core dependency; the `batch` extra
+names it too).
 """
 
 from __future__ import annotations

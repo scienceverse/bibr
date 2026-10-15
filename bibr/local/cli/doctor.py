@@ -831,9 +831,15 @@ def _run_doctor() -> None:
         try:
             preflight_credentials()
         except Exception as e:  # noqa: BLE001 — missing key, unknown provider or SDK
+            message = _redact_llm_keys(str(e), settings)
             fail(
-                f"LLM provider: {provider} — {_redact_llm_keys(str(e), settings)}",
-                hint="Run bibr setup or set the key in .env",
+                f"LLM provider: {provider} — {message}",
+                # A missing or unsupported SDK names its own install command.
+                hint=(
+                    "Install the package the message names"
+                    if "install" in message.lower() and "key" not in message.lower()
+                    else "Run bibr setup or set the key in .env"
+                ),
             )
             fail("LLM connection: skipped", hint="Fix the LLM provider first")
         else:

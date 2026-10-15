@@ -1,6 +1,6 @@
 [project]
 name = "bibr"
-version = "0.7.2"
+version = "0.7.3"
 description = "Scientific paper extraction to structured JSON: metadata, text, references, tables, figures, and equations from PDF, DOCX, JATS XML, HTML, and ePub."
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
@@ -24,6 +24,9 @@ dependencies = [
     "html5lib>=1.1",
     "httpx[http2]>=0.28.1",
     "google-genai>=1.0.0",
+    # Claude is the hosted recommendation of `bibr setup` (LLM_PROVIDER and
+    # OCR_BACKEND=anthropic). Below 1.0: see the batch extra.
+    "anthropic>=0.40.0,<1",
     "instructor>=1.7.0",
     "jsonref>=1.1.0", # instructor's Gemini provider imports it to map response models to GenAI tool schemas (default LLM path)
     "tenacity>=8.0.0", # validation-retry policy for the LLM client (imported directly)
