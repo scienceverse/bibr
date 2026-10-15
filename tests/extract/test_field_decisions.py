@@ -62,6 +62,10 @@ _OTHER_OBJECTS = {
     ("enrich/references.py", "ref.authors"),
     ("export/json_export.py", "m.authors"),
     ("export/json_export.py", "r.authors"),
+    # Reference-manager entries, built from one reference and its matched record.
+    ("export/citations.py", "entry.authors"),
+    ("export/citations.py", "entry.publisher"),
+    ("export/citations.py", "entry.title"),
     ("extract/core_metadata.py", "llm_metadata.authors"),
     ("extract/core_metadata.py", "recovered.authors"),
     ("extract/research_integrity.py", "result.affiliations"),

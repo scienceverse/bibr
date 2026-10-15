@@ -188,6 +188,84 @@ enriched = result.consolidate()          # mode="fill" by default
 enriched = result.consolidate("replace")
 ```
 
+## Reference lists
+
+### Reference-manager files
+
+`result.to_csl_json()`, `result.to_bibtex()` and `result.to_ris()` give the
+reference list in the formats reference managers import: CSL-JSON (Zotero,
+Mendeley, Pandoc and other citeproc tools), BibTeX and RIS (EndNote, Zotero,
+Mendeley). `bibr.write_references()` writes one file from one result or many,
+with results, export dicts or export JSON paths as for `write_tables()`; it
+takes the format from the file's extension (`.json`, `.bib`, `.ris`) unless
+`format=` says otherwise, and cite keys are unique across the file:
+
+```python
+items = result.to_csl_json()                       # a list of dicts
+bibr.write_references(result, "refs.bib")
+bibr.write_references(bibr.chew("papers/"), "refs.ris")
+bibr.write_references(results, "refs.txt", format="csl-json", prefer="record")
+```
+
+The export itself is never changed. Which values are written:
+
+- **Printed first.** Each field is what the reference printed; a field it does
+  not print (the DOI, the pages, the journal) is filled from its record.
+  `prefer="record"` takes the record's values over the printed ones.
+- **Only a matching record.** A record is used only when it agrees with the
+  reference: bibr compares the two when writing (title, first author, year and
+  DOI after folding case, accents and punctuation, plus the volume, issue and
+  pages from verification). A reference whose record disagrees with it, or that
+  has no record, is written as printed; without enrichment, every value is the
+  printed one.
+- **Names.** A matched record lists its authors and editors as family and
+  given names, and those are used. Otherwise the printed list is split: "Smith,
+  J. A., & Doe, B.", "Smith JA, Doe B", "J. A. Smith and B. Doe", "John Smith,
+  Jane Doe", Chicago's "Smith, John, and Jane Doe" and "Smith, J.; Doe, A." are
+  read, with particles ("van der Berg") and suffixes ("Jr.") kept with their
+  name. Two full names in a row are always two people. An organization ("World
+  Health Organization") is one name: a CSL `literal`, a braced BibTeX name, one
+  RIS `AU` line. A list that fits none of these styles is written as one such
+  name rather than split wrongly. "et al." becomes "and others" in BibTeX and
+  is left out of CSL-JSON and RIS. A rule ("——") repeats the previous
+  reference's authors.
+- **Pages.** An abbreviated last page is written in full ("1267–89" as
+  1267–1289); an article number ("e0123456") is the first page only.
+- **Notes.** When a reference and its record disagree, a note names the
+  fields that differ, after any note the reference printed. `check_note=False`
+  leaves it out. In CSL-JSON the note is `note`, which Zotero keeps in the
+  Extra field.
+
+| `bib_type` | CSL-JSON | BibTeX | RIS |
+|---|---|---|---|
+| `journal_article` | `article-journal` | `@article` | `JOUR` |
+| `book` | `book` | `@book` | `BOOK` |
+| `book_chapter` | `chapter` | `@incollection` | `CHAP` |
+| `conference_paper` | `paper-conference` | `@inproceedings` | `CPAPER` |
+| `report` | `report` | `@techreport` | `RPRT` |
+| `thesis` | `thesis` | `@phdthesis` | `THES` |
+| `dataset` | `dataset` | `@misc` | `DATA` |
+| `software` | `software` | `@misc` | `COMP` |
+| `preprint` | `article` | `@misc` | `UNPB` |
+| `other` | `document` | `@misc` | `GEN` |
+
+A matched reference takes its record's type unless that type is the catch-all
+`other`; then, as for any other reference, the printed type is used, and a
+reference without a type that names a journal with a volume, issue or page is a
+journal article. Dates, bare
+lowercase DOIs, URLs, editors, edition, series, PMID, arXiv identifiers and
+"in press" (CSL `status`, BibTeX `pubstate`) are written too. Cite keys are
+the first author's family name and the year (`Smith2020`, then `Smith2020a`,
+`Smith2020b`), folded to ASCII; keys that differ only in case count as the same
+key, as they do in BibTeX.
+
+The CLI equivalent is `bibr references results/ -o refs.bib` (`--format`,
+`--prefer record`, `--no-check-note`; without `-o` it writes to standard
+output). bibr serve answers `GET /papers/jobs/{id}/references?format=` (see the
+[REST API](../reference/rest-api.md#get-papersjobsidreferences)), and the MCP
+servers have `export_references` and, over stdio, `save_references` (see
+[MCP](mcp.md)).
+
 ## Warm sessions
 
 Calling `chew()` repeatedly builds and tears down a pipeline (and its
