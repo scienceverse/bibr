@@ -95,11 +95,16 @@ resolver and the `bib_match` table stays empty. Set `CROSSREF_ENRICH=true` to
 enrich by default, or switch it per run — `bibr chew --crossref` /
 `--no-crossref`, `bibr.chew(..., crossref=True)`, or the `crossref=true|false`
 form field on `/papers/extract` — which wins over the setting either way.
-With enrichment on, `CROSSREF_VERIFY` (default `true`) checks each
-reference's volume, issue and pages against its matched record, and the
-optional resolver's `BIBR_RESOLVER_RAW_SEARCH` (default `true`) searches again
-with the whole reference string for references the title searches left
-unmatched; see
+Matches stay in `bib_match` and do not become values of the references in
+`bib`, unless you opt in with `CROSSREF_CONSOLIDATE=fill` or `replace` (off by
+default). With enrichment on, `CROSSREF_VERIFY` (default `true`) checks each
+reference's parsed volume, issue and pages against its matched record and
+reports disagreements; it fills or corrects one of those values only when
+the record's value is printed in the reference string, so a value the paper
+did not print is never added. The optional resolver's
+`BIBR_RESOLVER_RAW_SEARCH` (default `true`) only finds matches: it searches
+again with the whole reference string for references the title searches
+left unmatched; see
 [Reference extraction at scale](deployment.md#reference-extraction-at-scale).
 
 ## Choosing an OCR backend
