@@ -19,6 +19,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that came from the record. The JSON export was never affected: matches stay
   in `bib_match` and `bib_check`.
 
+### Fixed
+
+- Cloud OCR (`gemini`, `openai`, `anthropic`) stops a paper with an error naming the
+  likely cause ("quota probably used up") once 5 regions in a row are still rate-limited
+  (429) after their retries. Before, each region spent its retries and then shipped blank,
+  so a key out of quota ground through a long paper for up to an hour. Further regions
+  fail at once for the next 2 minutes, so the other pages stop too.
+
 ## [0.7.3] - 2026-10-15
 
 0.7.2 was never tagged or published to PyPI, so this is the first release with its fixes
