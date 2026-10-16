@@ -356,8 +356,9 @@ def test_matched_record_type_wins_but_not_its_catch_all():
         [_match(1, bib_type="book_chapter"), _match(2, bib_type="other")],
         [_check(1), _check(2)],
     )
-    types = [item["type"] for item in to_csl_json(data)]
+    types = [item["type"] for item in to_csl_json(data, prefer="record")]
     assert types == ["chapter", "book"]
+    assert [item["type"] for item in to_csl_json(data)] == ["article-journal", "book"]
 
 
 def test_untyped_reference_with_journal_locators_is_an_article():
@@ -454,9 +455,12 @@ def test_in_press_reference_dated_by_its_matched_record_is_published():
     data = _export(
         [_bib(year=None, is_in_press=True)], [_match(year=2021)], [_check(status="matched")]
     )
-    item = _one_csl(data)
+    item = _one_csl(data, prefer="record")
     assert item["issued"] == {"date-parts": [[2021]]}
     assert "status" not in item
+    printed = _one_csl(data)
+    assert printed["status"] == "in press"
+    assert "issued" not in printed
 
 
 def test_identifiers():
@@ -585,13 +589,16 @@ def test_rule_repeats_the_previous_references_authors():
 
 def test_matched_reference_takes_the_records_names():
     data = _export([_bib(authors="Smith, J., et al.")], [_match()], [_check()])
-    item = _one_csl(data)
+    item = _one_csl(data, prefer="record")
     assert item["author"] == [
         {"family": "Smith", "given": "Jane"},
         {"family": "Doe", "given": "Anna"},
     ]
-    ((_, _, fields),) = parse_bibtex(to_bibtex(data))
+    ((_, _, fields),) = parse_bibtex(to_bibtex(data, prefer="record"))
     assert "others" not in fields["author"]
+    assert _one_csl(data)["author"] == [{"family": "Smith", "given": "J."}]
+    ((_, _, fields),) = parse_bibtex(to_bibtex(data))
+    assert "others" in fields["author"]
 
 
 def test_record_organization_author_and_stray_and_are_handled():
@@ -603,23 +610,58 @@ def test_record_organization_author_and_stray_and_are_handled():
         ]
     )
     data = _export([_bib()], [match], [_check()])
-    assert _one_csl(data)["author"] == [
+    assert _one_csl(data, prefer="record")["author"] == [
         {"family": "Smith", "given": "Jane"},
         {"literal": "Open Science Collaboration"},
     ]
 
 
 # ---------------------------------------------------------------------------
-# Which values: printed first, a record only when the check matched
+# Which values: printed only by default, a record only when asked for and the
+# check matched
 # ---------------------------------------------------------------------------
 
 
-def test_printed_values_win_and_gaps_come_from_a_matched_record():
+def test_default_writes_only_printed_values_even_for_a_matched_record():
     data = _export(
-        [_bib(volume="7", container=None, first_page=None)], [_match()], [_check(status="matched")]
+        [_bib(volume="7", container=None, first_page=None, doi=None)],
+        [_match()],
+        [_check(status="matched")],
     )
     item = _one_csl(data)
-    assert item["volume"] == "7"  # printed
+    assert item["volume"] == "7"
+    for gap in ("container-title", "page", "DOI", "publisher", "URL"):
+        assert gap not in item
+    ((_, _, fields),) = parse_bibtex(to_bibtex(data))
+    assert "doi" not in fields
+    assert "journal" not in fields
+    ((record),) = assert_ris_grammar(to_ris(data))
+    assert not [tag for tag, _ in record if tag in ("DO", "JO", "T2", "SP")]
+
+
+def test_prefer_record_names_the_values_it_took_from_the_record():
+    data = _export(
+        [_bib(volume="8", container="Journal of Things", first_page=None, doi=None)],
+        [_match()],
+        [_check(status="matched")],
+    )
+    note = "bibr: from the Crossref record, not the paper: authors, publisher, issue, pages, DOI"
+    assert _one_csl(data, prefer="record")["note"] == note
+    ((_, _, fields),) = parse_bibtex(to_bibtex(data, prefer="record"))
+    assert fields["note"] == note
+    ((record),) = assert_ris_grammar(to_ris(data, prefer="record"))
+    assert ("N1", note) in record
+    assert "note" not in _one_csl(data, prefer="record", check_note=False)
+    assert "note" not in _one_csl(data)
+
+
+def test_prefer_record_fills_gaps_from_a_matched_record():
+    data = _export(
+        [_bib(volume="7", container=None, first_page=None, doi=None)],
+        [_match()],
+        [_check(status="matched")],
+    )
+    item = _one_csl(data, prefer="record")
     assert item["container-title"] == "Journal of Things"  # gap filled
     assert item["page"] == "101-120"  # gap filled, both ends from the record
     assert item["DOI"] == "10.1234/prior"
@@ -675,14 +717,14 @@ def test_record_placeholders_markup_and_doi_urls_are_not_taken():
 
 def test_export_without_bib_check_is_checked_first():
     agreeing = _export([_bib(container=None, volume=None)], [_match()])
-    item = _one_csl(agreeing)
+    item = _one_csl(agreeing, prefer="record")
     assert item["container-title"] == "Journal of Things"
     assert "bib_check" not in agreeing
     other_work = _export(
         [_bib(container=None, title="Completely Different Title About Fish")],
         [_match(title="Neural Correlates of Something Else Entirely")],
     )
-    assert "container-title" not in _one_csl(other_work)
+    assert "container-title" not in _one_csl(other_work, prefer="record")
 
 
 def test_writers_never_change_the_export():
@@ -761,7 +803,7 @@ def test_bibtex_escapes_round_trip():
 def test_bibtex_name_with_and_or_comma_is_braced():
     match = _match(author=[{"family": "Smith, Jr", "given": "J."}, {"family": "Anderson"}])
     data = _export([_bib()], [match], [_check()])
-    ((_, _, fields),) = parse_bibtex(to_bibtex(data))
+    ((_, _, fields),) = parse_bibtex(to_bibtex(data, prefer="record"))
     assert bibtex_names(fields["author"]) == ["{Smith, Jr}, J.", "Anderson"]
 
 

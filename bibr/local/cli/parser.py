@@ -787,9 +787,10 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["printed", "record"],
         default="printed",
         help=(
-            "printed: the reference's values, gaps filled from its matched record; "
-            "record: a matched record's values first (a record whose check did not "
-            "match is never used)"
+            "printed (default): only what the reference printed; "
+            "record: a matched record's values first, gaps such as a missing DOI "
+            "filled from it, with a note naming those values (needs --crossref "
+            "results; a record whose check did not match is never used)"
         ),
     )
     references_parser.add_argument(
