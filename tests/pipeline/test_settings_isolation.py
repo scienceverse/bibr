@@ -167,17 +167,21 @@ async def test_resolver_construction_uses_supplied_settings_snapshot():
     first.resolver.url = "http://first"
     first.resolver.enrich = True
     first.resolver.timeout = 1.5
+    first.resolver.retries = 1
+    first.resolver.max_concurrency = 2
     second.resolver.url = "http://second"
     second.resolver.enrich = True
     second.resolver.timeout = 9.0
+    second.resolver.retries = 4
+    second.resolver.retry_backoff = 0.25
 
     with patch("bibr.clients.resolver.ResolverClient", side_effect=[Resolver(), Resolver()]) as cls:
         await enrich_references([reference], crossref_client=crossref, settings=first)
         await enrich_references([reference], crossref_client=crossref, settings=second)
 
     assert cls.call_args_list == [
-        call("http://first", timeout=1.5),
-        call("http://second", timeout=9.0),
+        call("http://first", timeout=1.5, retries=1, retry_backoff=1.0, max_concurrency=2),
+        call("http://second", timeout=9.0, retries=4, retry_backoff=0.25, max_concurrency=8),
     ]
 
 
