@@ -38,6 +38,8 @@ The first run may download models and additional runtimes.
     document can still contain mistakes. See
     [where bibr is strong and where it isn't](limitations.md) and the
     [evaluation guide](contributing/evaluation.md) before relying on a field.
+    The [JATS benchmark](https://github.com/scienceverse/bibr-jats-eval) behind the whole-paper result is
+    public, with its papers, answer key and scores.
 
 <div class="grid cards" markdown>
 
