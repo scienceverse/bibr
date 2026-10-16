@@ -217,6 +217,9 @@ async def prefetch_enrichment(
             resolver_client = ResolverClient(
                 effective.resolver.url,
                 timeout=effective.resolver.timeout,
+                retries=effective.resolver.retries,
+                retry_backoff=effective.resolver.retry_backoff,
+                max_concurrency=effective.resolver.max_concurrency,
             )
             owns_resolver = True
         prefetch.resolver_client = resolver_client
@@ -496,6 +499,9 @@ async def enrich_paper_identity(
         resolver_client = ResolverClient(
             effective.resolver.url,
             timeout=effective.resolver.timeout,
+            retries=effective.resolver.retries,
+            retry_backoff=effective.resolver.retry_backoff,
+            max_concurrency=effective.resolver.max_concurrency,
         )
         owns_resolver = True
     if resolver_client is not None and not await resolver_client.healthy():

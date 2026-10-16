@@ -10,6 +10,10 @@ def _isolate_resolver_env(monkeypatch, tmp_path):
         "BIBR_RESOLVER_URL",
         "BIBR_RESOLVER_ENRICH",
         "BIBR_RESOLVER_TIMEOUT",
+        "BIBR_RESOLVER_RETRIES",
+        "BIBR_RESOLVER_RETRY_BACKOFF",
+        "BIBR_RESOLVER_MAX_CONCURRENCY",
+        "BIBR_RESOLVER_SEARCH_CONCURRENCY",
         "BIBR_RESOLVER_LIMIT",
         "BIBR_RESOLVER_AUTHORITATIVE",
         "BIBR_RESOLVER_SOURCES",
@@ -27,8 +31,15 @@ def test_resolver_options_defaults():
     o = ResolverOptions()
     assert o.url is None
     assert o.enrich is True
-    assert o.timeout == 10.0
+    assert o.timeout == 30.0
     assert o.limit == 20
+    # Sized for a GPU-speed batch run against one resolver that runs 16 searches
+    # at once: a busy answer is retried, and the whole process keeps at most 8
+    # requests in flight however many papers it has open.
+    assert o.retries == 3
+    assert o.retry_backoff == 1.0
+    assert o.max_concurrency == 8
+    assert o.search_concurrency == 4
     # Default off: the resolver is a fast accelerator over CrossRef, so a resolver
     # miss still falls through to CrossRef unless the operator asserts the resolver
     # is backed by the same corpus.
@@ -38,11 +49,15 @@ def test_resolver_options_defaults():
 def test_resolver_options_env(monkeypatch):
     monkeypatch.setenv("BIBR_RESOLVER_URL", "http://gpu-box:2010")
     monkeypatch.setenv("BIBR_RESOLVER_LIMIT", "5")
+    monkeypatch.setenv("BIBR_RESOLVER_RETRIES", "0")
+    monkeypatch.setenv("BIBR_RESOLVER_MAX_CONCURRENCY", "2")
     from bibr.config import ResolverOptions
 
     o = ResolverOptions()
     assert o.url == "http://gpu-box:2010"
     assert o.limit == 5
+    assert o.retries == 0
+    assert o.max_concurrency == 2
 
 
 def test_resolver_sources_default_is_crossref_only():

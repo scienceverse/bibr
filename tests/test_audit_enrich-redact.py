@@ -82,7 +82,7 @@ async def test_resolver_http_error_warning_names_the_status_not_the_url():
 
     settings = _settings(url=_SECRET_URL, enrich=True, authoritative=True)
     http = httpx.AsyncClient(base_url=_SECRET_URL, transport=httpx.MockTransport(handler))
-    resolver = ResolverClient(_SECRET_URL, client=http)
+    resolver = ResolverClient(_SECRET_URL, client=http, retry_backoff=0)
     report = await enrich_references(
         [_ref()], crossref_client=_crossref(), resolver_client=resolver, settings=settings
     )

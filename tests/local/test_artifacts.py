@@ -494,6 +494,7 @@ def test_enrichment_settings_digest_includes_resolver_result_settings():
         settings.resolver.url = url
         settings.resolver.enrich = True
         settings.resolver.timeout = 10
+        settings.resolver.retries = 3
         settings.resolver.limit = limit
         settings.resolver.search_concurrency = 8
         settings.resolver.authoritative = authoritative

@@ -707,3 +707,43 @@ async def test_non_authoritative_resolver_keeps_the_crossref_doi_prefetch(monkey
     await enrich_references([ref], crossref_client=crossref, resolver_client=resolver)
 
     crossref.prefetch_works_by_doi.assert_awaited_once_with(["10.1/abc"])
+
+
+async def test_owned_resolver_client_takes_the_retry_and_cap_settings(monkeypatch):
+    """The client enrich_references builds for itself must carry the configured
+    retries and in-flight cap, or a batch run is back to giving up on a 503."""
+    import bibr.clients.resolver as resolver_mod
+    from bibr.enrich.references import prefetch_enrichment
+
+    built = {}
+
+    class FakeClient:
+        def __init__(self, base_url, **kwargs):
+            built.update(kwargs, base_url=base_url)
+
+        async def healthy(self):
+            return False
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(resolver_mod, "ResolverClient", FakeClient)
+    settings = _fallback_settings(
+        url="http://resolver:2010",
+        enrich=True,
+        timeout=12.0,
+        retries=5,
+        retry_backoff=0.5,
+        max_concurrency=3,
+    )
+    prefetch = await prefetch_enrichment(
+        [_make_ref()], settings=settings, crossref_client=_mock_crossref()
+    )
+    await prefetch.aclose()
+    assert built == {
+        "base_url": "http://resolver:2010",
+        "timeout": 12.0,
+        "retries": 5,
+        "retry_backoff": 0.5,
+        "max_concurrency": 3,
+    }

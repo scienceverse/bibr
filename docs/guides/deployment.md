@@ -613,14 +613,23 @@ enrichment is on (`--crossref` or `CROSSREF_ENRICH=true`).
 |---|---|---|
 | `BIBR_RESOLVER_URL` | _(unset)_ | Resolver base URL, e.g. `http://resolver-host:2010`. Unset = disabled. |
 | `BIBR_RESOLVER_ENRICH` | `true` | Master gate; `false` disables even when a URL is set. |
-| `BIBR_RESOLVER_TIMEOUT` | `10.0` | Per-request timeout (seconds). |
+| `BIBR_RESOLVER_TIMEOUT` | `30.0` | Per-request timeout (seconds). |
+| `BIBR_RESOLVER_RETRIES` | `3` | Times a call is tried again after a busy answer (429/502/503/504), a timeout (once at most) or a dropped connection. `0` disables retries. |
+| `BIBR_RESOLVER_RETRY_BACKOFF` | `1.0` | First wait (seconds) before a retry; it doubles each time, with jitter, up to 30 s, and is never shorter than the resolver's `Retry-After`. |
+| `BIBR_RESOLVER_MAX_CONCURRENCY` | `8` | Max resolver requests in flight across all papers in one bibr process. `0` = no cap. |
 | `BIBR_RESOLVER_LIMIT` | `20` | Max candidates requested from `/search`. |
-| `BIBR_RESOLVER_SEARCH_CONCURRENCY` | `8` | Max concurrent `/search` calls when prefetching a reference list's title searches. |
+| `BIBR_RESOLVER_SEARCH_CONCURRENCY` | `4` | Max concurrent `/search` calls when prefetching one paper's title searches. |
 | `BIBR_RESOLVER_RAW_SEARCH` | `true` | Search again with the whole reference string for references the title searches left unmatched, accepting a candidate only when its title, year and first author (or volume and first page) are printed in it, and never a work another reference of the paper already holds. |
 
 A resolver error falls through to Crossref. Misses also fall through by
 default; `BIBR_RESOLVER_AUTHORITATIVE=true` makes a clean resolver miss
 authoritative and skips the Crossref fallback.
+
+`BIBR_RESOLVER_SEARCH_CONCURRENCY` applies per paper, so a batch with many
+papers open at once multiplies it; `BIBR_RESOLVER_MAX_CONCURRENCY` is the cap
+for the whole process. When several bibr processes or machines share one
+resolver, keep their caps together at or below the resolver's own
+`search_concurrency` (16 by default), or it queues and answers "busy".
 
 ## Hardware sizing
 
