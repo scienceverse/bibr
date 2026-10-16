@@ -304,6 +304,10 @@ need recognition use the external OCR service at `OCR_BASE_URL` (default
 `http://localhost:8080`; Compose overrides it with its private `bibr-ocr`
 service name). Native document formats skip OCR, and eligible PDF regions use
 embedded text; the server still checks the configured OCR service in `/ready`.
+A PDF job still needs that service to be reachable, even for a born-digital
+paper: tables, formulas and regions without usable embedded text go to OCR,
+and when the service cannot be reached the whole job fails after about two
+minutes with `OCR server is unreachable`.
 
 `OCR_BASE_URL` is the server **root**: bibr appends `/v1/models` and
 `/v1/chat/completions` itself and probes `/health` at the root, so do not
@@ -442,9 +446,11 @@ segmenter) are lighter; building with `--build-arg WITH_GPU=true` swaps in
 the `onnxruntime-gpu` build `uv.lock` pins, but the compose file only
 declares a GPU device reservation for `bibr-ocr` — add one to `bibr-serve` too (or rely on
 `nvidia` as the Docker default runtime) if you want its models on GPU as
-well. Without a GPU, `bibr-serve` still runs — the layout detector and
+well. Without a GPU, `bibr-serve` starts and its layout detector and
 segmenter fall back to CPU (see `LAYOUT_USE_GPU` / `SEGMENTER_USE_GPU`
-below).
+below), but it can only process PDFs when an OCR server is reachable: the
+bundled `bibr-ocr` needs a GPU, so a CPU-only host needs an external
+`OCR_BASE_URL` (see the split deployment above).
 
 ### Environment variables
 
@@ -454,6 +460,7 @@ Set these in `.env` (run `bibr config example --full` or see the
 | Variable | Description | Default |
 |---|---|---|
 | `LLM_PROVIDER` | LLM backend: `google`, `openai`, `anthropic`, `groq`, or `ollama` | `google` |
+| `LLM_MODEL` | Model for the selected provider. The default is a Gemini model, so set it whenever `LLM_PROVIDER` is not `google` (an Anthropic provider sent the Gemini name gets a 404) | `gemini-3.5-flash-lite` |
 | `GOOGLE_API_KEY` | Google AI API key (`google` provider) | — |
 | `LLM_API_KEY` | OpenAI-compatible API key (`openai` provider) | — |
 | `ANTHROPIC_API_KEY` | Anthropic API key (`anthropic` provider) | — |
@@ -545,7 +552,7 @@ Reference segmentation and parsing have two independent controls:
 ```bash
 # .env
 REF_SEG_STRATEGY=geom   # "geom" (default) | "region" | "llm" | "crf"
-REF_PARSE_STRATEGY=ner  # "ner" (default) | "llm" | "llm-chunked" | "off"
+REF_PARSE_STRATEGY=ner  # "ner" (default) | "llm" | "llm-chunked" | "ref-llm" | "off"
 ```
 
 By default, segmentation runs on a local geometry model (`geom`), which

@@ -15,6 +15,7 @@
 - Extracts metadata, references, full text, tables, figures, and equations into a
   [versioned JSON format](https://bibr.org/reference/schema/), and writes whole corpora
   as Parquet tables for pandas, polars, DuckDB, or R.
+- Exports reference lists as BibTeX, RIS, or CSL-JSON for Zotero and other reference managers.
 - Includes sentence and page references to help check extractions against the source.
 - Works through the CLI, Python, an HTTP API, a web demo, or MCP.
 - Lets you choose local or cloud models, limit page ranges, and skip extraction stages.
@@ -59,6 +60,7 @@ for development setup.
 uv run bibr chew papers/ -o results/   # Process a directory
 uv run bibr batch papers/ --out corpus/  # Resumable corpus run, plus Parquet tables
 uv run bibr tables results/ --out tables/  # JSON exports → one Parquet file per table
+uv run bibr references results/ -o refs.bib  # Reference lists → BibTeX (.ris, CSL-JSON .json)
 uv run bibr chew paper.pdf --dry-run   # Preview the processing plan
 uv add 'bibr[demo]'                    # Add the optional web demo
 uv run bibr demo                       # Open it locally
@@ -84,6 +86,7 @@ references = result.references.df  # pandas DataFrame
 result.save("result.json")
 
 bibr.write_tables(bibr.chew("papers/"), "tables/")  # corpus → Parquet, keyed by paper_id
+bibr.write_references(result, "refs.bib")  # reference list → BibTeX, RIS, or CSL-JSON
 ```
 
 See the [Python guide](https://bibr.org/guides/library/) for batch processing and
@@ -93,7 +96,8 @@ reusing loaded models with `bibr.Chewer`.
 
 bibr uses LLMs selectively for tasks such as front-page metadata. `bibr setup`
 recommends a model for your hardware: bibr's fine-tuned Qwen3.5 4B or 2B model
-on an NVIDIA GPU, or Claude Haiku 5.5 as a hosted model
+on an NVIDIA GPU (vLLM on Linux, llama.cpp on Windows), the same models as MLX
+builds on Apple Silicon, or Claude Haiku 5.5 as a hosted model
 ([how they compare](https://bibr.org/guides/extraction-models/)). You can disable downstream LLM extraction
 with `--no-llm`, which returns structural output; PDF OCR may still use a
 vision-language model. The [LLM use note](https://bibr.org/llm-use/) covers these choices
@@ -140,6 +144,7 @@ We are grateful to the open-source projects that bibr builds on:
 
 - [PaddleOCR-VL-1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) (PaddlePaddle) — default OCR recognizer
 - [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) (Z.ai / Tsinghua University) — explicit compatibility backend and fallback
+- [Qwen3.5](https://huggingface.co/Qwen) (Alibaba Qwen) — base of bibr's fine-tuned extraction models
 - [GROBID](https://github.com/kermitt2/grobid) — a major source of inspiration for structured scientific document parsing
 - [LitServe](https://lightning.ai/docs/litserve/home) (Lightning AI) — serving infrastructure
 - [PP-DocLayoutV3](https://github.com/PaddlePaddle/PaddleOCR) (PaddlePaddle) — document layout analysis

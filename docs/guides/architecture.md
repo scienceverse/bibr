@@ -214,6 +214,13 @@ record and match table, and the `extraction_*` processing lists. Every row start
 with `paper_id`; column types come from the export models, so all files share one
 schema whatever papers they hold.
 
+**Reference lists** (`bibr/export/citations.py`): `Result.to_csl_json()`,
+`to_bibtex()` and `to_ris()`, `bibr.write_references()`, `bibr references`, the
+serve route `GET /papers/jobs/{id}/references` and the MCP tools
+`export_references` and `save_references` write an export's references as
+CSL-JSON, BibTeX or RIS for reference managers. They read the export and never
+change it; see the [Python guide](library.md#reference-lists).
+
 Within major version 12, the schema is additive-only: new optional fields and
 new enum values may appear in any `12.x` release, and readers must ignore keys
 they don't recognize and accept enum values they don't know.

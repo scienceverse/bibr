@@ -209,18 +209,25 @@ bibr.write_references(results, "refs.txt", format="csl-json", prefer="record")
 
 The export itself is never changed. Which values are written:
 
-- **Printed first.** Each field is what the reference printed; a field it does
-  not print (the DOI, the pages, the journal) is filled from its record.
-  `prefer="record"` takes the record's values over the printed ones.
-- **Only a matching record.** A record is used only when it agrees with the
-  reference: bibr compares the two when writing (title, first author, year and
-  DOI after folding case, accents and punctuation, plus the volume, issue and
-  pages from verification). A reference whose record disagrees with it, or that
-  has no record, is written as printed; without enrichment, every value is the
-  printed one.
-- **Names.** A matched record lists its authors and editors as family and
-  given names, and those are used. Otherwise the printed list is split: "Smith,
-  J. A., & Doe, B.", "Smith JA, Doe B", "J. A. Smith and B. Doe", "John Smith,
+- **Printed only.** Each field is what the reference printed. A field it does
+  not print (the DOI, the pages, the journal) stays empty: bibr never adds a
+  value the paper did not print. The registry record only feeds the check
+  note.
+- **`prefer="record"` (opt-in).** A matched record's values are taken over
+  the printed ones, and the record fills what the reference does not print
+  (a missing DOI, journal or page range). Each such entry gets a note naming
+  the values that came from the record ("bibr: from the Crossref record, not
+  the paper: pages, DOI"). This needs enrichment (`--crossref`); without it
+  there is no record and the output is as printed.
+- **Only a matching record.** With `prefer="record"`, a record is used only
+  when it agrees with the reference: bibr compares the two when writing
+  (title, first author, year and DOI after folding case, accents and
+  punctuation, plus the volume, issue and pages from verification). A
+  reference whose record disagrees with it, or that has no record, is written
+  as printed; without enrichment, every value is the printed one.
+- **Names.** The printed list is split into names (with `prefer="record"`, a
+  matched record's family and given names are used instead). "Smith, J. A., &
+  Doe, B.", "Smith JA, Doe B", "J. A. Smith and B. Doe", "John Smith,
   Jane Doe", Chicago's "Smith, John, and Jane Doe" and "Smith, J.; Doe, A." are
   read, with particles ("van der Berg") and suffixes ("Jr.") kept with their
   name. Two full names in a row are always two people. An organization ("World
@@ -249,9 +256,8 @@ The export itself is never changed. Which values are written:
 | `preprint` | `article` | `@misc` | `UNPB` |
 | `other` | `document` | `@misc` | `GEN` |
 
-A matched reference takes its record's type unless that type is the catch-all
-`other`; then, as for any other reference, the printed type is used, and a
-reference without a type that names a journal with a volume, issue or page is a
+The printed type is used (with `prefer="record"`, a matched record's type
+unless that type is the catch-all `other`), and a reference without a type that names a journal with a volume, issue or page is a
 journal article. Dates, bare
 lowercase DOIs, URLs, editors, edition, series, PMID, arXiv identifiers and
 "in press" (CSL `status`, BibTeX `pubstate`) are written too. Cite keys are

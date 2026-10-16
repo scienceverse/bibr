@@ -18,7 +18,9 @@ uv sync --locked --extra all --all-groups
 `mcp`, `torch`). The hardware-specific serving extras (`local`, `vllm`,
 `local-mlx`, `gpu`) are opt-in; `--all-extras` also resolves if you want
 every one, subject to their platform markers. `local` is an Apple Silicon
-serving extra; it does not install a universal in-process OCR engine.
+serving extra; it does not install a universal in-process OCR engine. The
+`nuextract` extra, needed only by the experimental
+`LLM_STRUCTURED_BACKEND=nuextract-native` backend, is opt-in too.
 
 For core code or documentation work without local ML models:
 
