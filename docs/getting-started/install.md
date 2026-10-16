@@ -79,6 +79,7 @@ extra syntax is `uv add 'bibr[<extra>]'`.
 | `cache` | `redis>=5.0.0` | Redis-backed response caching — set `REDIS_URL` to enable it (the result cache is on by default, but only uses Redis once a URL is configured). |
 | `demo` | `gradio>=6.15.0` | The interactive Gradio demo app. |
 | `batch` | `anthropic>=0.40.0,<1` | Offline processing via the Anthropic Message Batches API — bulk paper-type/OECD labeling and similar bulk LLM workflows. The SDK itself is a core dependency, since `LLM_PROVIDER=anthropic` (the hosted default `bibr setup` recommends) needs it; this extra keeps existing installs working. |
+| `nuextract` | `numind>=0.3,<0.3.1` | The experimental `LLM_STRUCTURED_BACKEND=nuextract-native` backend for NuExtract servers. bibr no longer installs numind otherwise, and that backend stops with an error naming this extra. |
 | `mcp` | `mcp>=2.2.0,<3` | The `bibr mcp` server — extraction as [Model Context Protocol tools](../guides/mcp.md) for agents (Claude Code, Claude Desktop, any MCP client). |
 | `all` | `batch` + `cache` + `demo` + `mcp` + `torch` | The cloud + ML set for a full local-dev setup. Does **not** include `vllm`, `local`, `local-mlx`, or `gpu` — add whichever match your hardware. |
 
