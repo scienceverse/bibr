@@ -3,10 +3,18 @@
 Thin wrapper over the resolver's ``/search`` and ``/works/{doi}`` endpoints. Every
 call degrades gracefully — any HTTP/parse error returns an empty result so the
 caller falls through to CrossRef; the resolver never fails enrichment.
+
+A busy resolver is retried, not given up on: a 429/502/503/504 answer, a timeout
+or a dropped connection is tried again after an exponential backoff. Every client
+in the process that talks to the same resolver also shares one cap on requests in
+flight, so a batch with many papers open at once can't flood it.
 """
 
 import asyncio
+import contextlib
 import logging
+import random
+import threading
 from urllib.parse import quote
 
 import httpx
@@ -15,16 +23,87 @@ from bibr.utils.text import is_url_safe_doi
 
 logger = logging.getLogger(__name__)
 
+# What a busy or briefly unreachable resolver answers. bibr-resolver says 503
+# ("resolver backend unavailable") when its search backend runs out of capacity;
+# a proxy in front of it may say 502/504 or 429.
+_RETRY_STATUSES = frozenset({429, 502, 503, 504})
+
+# A request the resolver did not finish: a timeout (including waiting for a
+# pooled connection) or a connection it dropped. A refused connection is left
+# out on purpose: that resolver is down, not busy, and the health probe should
+# say so at once rather than after the whole backoff.
+_RETRY_ERRORS: tuple[type[Exception], ...] = (
+    httpx.TimeoutException,
+    httpx.RemoteProtocolError,
+    httpx.ReadError,
+    httpx.WriteError,
+)
+
+# No single backoff wait is longer than this, whatever Retry-After says.
+_MAX_RETRY_DELAY = 30.0
+
+# A timed-out request is retried once at most, within the retry budget. The
+# resolver may still be running the search it gave up waiting for, so every
+# retry of a timeout adds load to a resolver that is already behind, and four
+# 30 s attempts would outlast the paper's whole enrichment budget.
+_TIMEOUT_RETRIES = 1
+
+# The health probe decides whether a paper uses the resolver at all, and it runs
+# inside the paper's enrichment budget: a resolver that accepts the connection
+# but never answers must cost seconds here, not the full search timeout.
+_HEALTH_TIMEOUT = 10.0
+
+# One in-flight cap per (event loop, resolver URL, limit). Papers each build
+# their own ResolverClient, so a per-client cap would multiply by the papers in
+# flight; this one is shared. An asyncio.Semaphore belongs to one loop, hence
+# the loop in the key; gates of closed loops are dropped as new ones are made.
+_GATES: dict[tuple[asyncio.AbstractEventLoop, str, int], asyncio.Semaphore] = {}
+_GATES_LOCK = threading.Lock()
+
+
+def _shared_gate(base_url: str, limit: int) -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    key = (loop, base_url, limit)
+    with _GATES_LOCK:
+        gate = _GATES.get(key)
+        if gate is None:
+            for stale in [k for k in _GATES if k[0].is_closed()]:
+                del _GATES[stale]
+            gate = _GATES[key] = asyncio.Semaphore(limit)
+    return gate
+
+
+def _retry_after(headers: httpx.Headers) -> float | None:
+    """A numeric ``Retry-After`` in seconds; the HTTP-date form and garbage are None."""
+    try:
+        secs = float(headers.get("retry-after", ""))
+    except ValueError:
+        return None
+    return secs if secs >= 0 else None
+
 
 class ResolverClient:
     def __init__(
         self,
         base_url: str,
         *,
-        timeout: float = 10.0,
+        timeout: float = 30.0,
         client: httpx.AsyncClient | None = None,
+        retries: int = 3,
+        retry_backoff: float = 1.0,
+        max_concurrency: int = 8,
     ) -> None:
+        """``retries`` is how many times a busy answer, a timeout (once at most) or
+        a dropped connection is tried again, after ``retry_backoff`` seconds
+        doubled per attempt (with jitter, and never less than the resolver's
+        Retry-After). ``max_concurrency`` caps requests in
+        flight across every client in this process that uses the same resolver
+        URL; 0 means no cap."""
         self.base_url = base_url.rstrip("/")
+        self._timeout = timeout
+        self._retries = max(0, retries)
+        self._retry_backoff = max(0.0, retry_backoff)
+        self._max_concurrency = max(0, max_concurrency)
         self._client = client or httpx.AsyncClient(
             base_url=self.base_url,
             timeout=httpx.Timeout(timeout),
@@ -35,6 +114,61 @@ class ResolverClient:
     async def close(self) -> None:
         if not self._client.is_closed:
             await self._client.aclose()
+
+    def _slot(self) -> "asyncio.Semaphore | contextlib.nullcontext[None]":
+        if not self._max_concurrency:
+            return contextlib.nullcontext()
+        return _shared_gate(self.base_url, self._max_concurrency)
+
+    def _backoff(self, attempt: int, retry_after: float | None) -> float:
+        # Jittered so the requests a busy spell turned away don't all come back
+        # in the same instant and make it busy again.
+        delay = self._retry_backoff * (2**attempt) * random.uniform(0.5, 1.0)  # noqa: S311
+        if retry_after is not None:
+            delay = max(delay, retry_after)
+        return min(delay, _MAX_RETRY_DELAY)
+
+    async def _request(
+        self, method: str, path: str, *, timeout_retries: int = _TIMEOUT_RETRIES, **kwargs
+    ) -> httpx.Response:
+        """Send one request, retrying a busy answer or an unfinished request.
+
+        Returns the last response, whatever its status, for the caller to judge;
+        raises the last transport error once the retries are spent. At most
+        ``timeout_retries`` of the retries may follow a timeout. The backoff
+        wait happens outside the in-flight cap, so a request that is waiting
+        frees its slot for one that can run."""
+        attempt = 0
+        timeouts = 0
+        while True:
+            try:
+                async with self._slot():
+                    resp = await self._client.request(method, path, **kwargs)
+            except _RETRY_ERRORS as e:
+                if isinstance(e, httpx.TimeoutException):
+                    timeouts += 1
+                    if timeouts > timeout_retries:
+                        raise
+                if attempt >= self._retries:
+                    raise
+                reason: object = e
+                delay = self._backoff(attempt, None)
+            else:
+                if resp.status_code not in _RETRY_STATUSES or attempt >= self._retries:
+                    return resp
+                reason = f"HTTP {resp.status_code}"
+                delay = self._backoff(attempt, _retry_after(resp.headers))
+            attempt += 1
+            logger.debug(
+                "resolver %s %s: %s; retry %d/%d in %.1fs",
+                method,
+                path[:80],
+                reason,
+                attempt,
+                self._retries,
+                delay,
+            )
+            await asyncio.sleep(delay)
 
     async def healthy(self) -> bool:
         """Probe GET /health once and cache the verdict for this client's lifetime.
@@ -50,7 +184,9 @@ class ResolverClient:
 
     async def _probe_health(self) -> bool:
         try:
-            resp = await self._client.get("/health")
+            resp = await self._request(
+                "GET", "/health", timeout_retries=0, timeout=min(self._timeout, _HEALTH_TIMEOUT)
+            )
             resp.raise_for_status()
             payload = resp.json()
             # A proxy or another service answering /health may return any JSON
@@ -82,7 +218,7 @@ class ResolverClient:
         if sources:
             body["sources"] = list(sources)
         try:
-            resp = await self._client.post("/search", json=body)
+            resp = await self._request("POST", "/search", json=body)
             resp.raise_for_status()
             payload = resp.json()
             # A body of ``{"candidates": null}`` makes ``.get(..., [])`` return
@@ -104,7 +240,7 @@ class ResolverClient:
         self,
         queries: list[dict],
         *,
-        concurrency: int = 8,
+        concurrency: int = 4,
         sources: list[str] | None = None,
         raise_on_error: bool = False,
     ) -> list[list[dict] | Exception]:
@@ -150,7 +286,7 @@ class ResolverClient:
             return None
         path = quote(doi, safe="/")
         try:
-            resp = await self._client.get(f"/works/{path}")
+            resp = await self._request("GET", f"/works/{path}")
             if resp.status_code == 404:
                 return None
             resp.raise_for_status()

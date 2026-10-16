@@ -66,7 +66,7 @@ class TestResolverNullCandidates:
         response.raise_for_status = MagicMock()
         response.json = MagicMock(return_value=payload)
         client._client = MagicMock()
-        client._client.post = AsyncMock(return_value=response)
+        client._client.request = AsyncMock(return_value=response)
         return await client.search("Some title", 2020, 5)
 
     async def test_null_candidates_becomes_an_empty_list(self):

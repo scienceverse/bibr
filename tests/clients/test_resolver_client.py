@@ -4,10 +4,12 @@ import pytest
 from bibr.clients.resolver import ResolverClient
 
 
-def _client(handler):
+def _client(handler, **kwargs):
     transport = httpx.MockTransport(handler)
     http = httpx.AsyncClient(base_url="http://resolver", transport=transport)
-    return ResolverClient("http://resolver", client=http)
+    # No backoff wait: retries still run, the tests just don't sleep through them.
+    kwargs.setdefault("retry_backoff", 0)
+    return ResolverClient("http://resolver", client=http, **kwargs)
 
 
 async def test_search_returns_candidates():
@@ -401,4 +403,264 @@ async def test_search_drops_candidates_that_are_not_objects():
     body = {"candidates": [{"title": "Kept"}, "stray", None, 3]}
     rc = _client(lambda request: httpx.Response(200, json=body))
     assert await rc.search("A title", 2020, 5) == [{"title": "Kept"}]
+    await rc.close()
+
+
+# --- Busy resolver: retries and the shared in-flight cap ----------------------
+# Under batch load bibr-resolver answers 503 ("resolver backend unavailable") or
+# runs past the timeout; both used to leave the reference unmatched at once.
+
+
+async def test_search_retries_a_busy_answer_until_it_succeeds():
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return httpx.Response(503, json={"detail": "resolver backend unavailable"})
+        return httpx.Response(200, json={"candidates": [{"title": "X"}]})
+
+    rc = _client(handler)
+    assert await rc.search("X", 2020, 5) == [{"title": "X"}]
+    assert calls["n"] == 3
+    await rc.close()
+
+
+@pytest.mark.parametrize("status", [429, 502, 503, 504])
+async def test_search_gives_up_after_the_configured_retries(status):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(status)
+
+    rc = _client(handler, retries=2)
+    assert await rc.search("X", None, 5) == []
+    assert calls["n"] == 3
+    with pytest.raises(httpx.HTTPStatusError):
+        await rc.search("X", None, 5, raise_on_error=True)
+    await rc.close()
+
+
+async def test_search_retries_a_timeout():
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ReadTimeout("slow", request=request)
+        return httpx.Response(200, json={"candidates": [{"title": "X"}]})
+
+    rc = _client(handler)
+    assert await rc.search("X", None, 5) == [{"title": "X"}]
+    assert calls["n"] == 2
+    await rc.close()
+
+
+async def test_a_timeout_is_retried_once_at_most():
+    """The resolver may still be running a search it timed out on, so retrying
+    a timeout again and again only piles more work on a resolver that is behind."""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        raise httpx.ReadTimeout("slow", request=request)
+
+    rc = _client(handler, retries=3)
+    with pytest.raises(httpx.ReadTimeout):
+        await rc.search("X", None, 5, raise_on_error=True)
+    assert calls["n"] == 2
+    assert await rc.search("X", None, 5) == []
+    await rc.close()
+
+
+async def test_busy_answers_and_one_timeout_share_the_retry_budget():
+    answers = iter(["timeout", 503, 503, 200])
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        answer = next(answers)
+        if answer == "timeout":
+            raise httpx.ReadTimeout("slow", request=request)
+        if answer == 200:
+            return httpx.Response(200, json={"candidates": [{"title": "X"}]})
+        return httpx.Response(answer)
+
+    rc = _client(handler, retries=3)
+    assert await rc.search("X", None, 5) == [{"title": "X"}]
+    assert calls["n"] == 4
+    await rc.close()
+
+
+async def test_health_probe_does_not_retry_a_timeout_and_caps_its_wait():
+    """The probe runs inside the paper's enrichment budget: a resolver that never
+    answers must not hold it for the full search timeout, twice."""
+    seen = []
+
+    def handler(request):
+        seen.append(request.extensions["timeout"])
+        raise httpx.ReadTimeout("slow", request=request)
+
+    rc = _client(handler, timeout=30.0)
+    assert await rc.healthy() is False
+    assert len(seen) == 1
+    assert seen[0]["read"] == 10.0
+    await rc.close()
+
+
+async def test_a_refused_connection_is_not_retried():
+    """A resolver that refuses the connection is down, not busy: the health probe
+    should say so at once instead of after the whole backoff."""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        raise httpx.ConnectError("refused", request=request)
+
+    rc = _client(handler)
+    assert await rc.healthy() is False
+    assert calls["n"] == 1
+    await rc.close()
+
+
+@pytest.mark.parametrize("status", [400, 404, 422, 500])
+async def test_other_statuses_are_not_retried(status):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(status)
+
+    rc = _client(handler)
+    assert await rc.lookup_doi("10.1/x") is None
+    assert calls["n"] == 1
+    await rc.close()
+
+
+async def test_zero_retries_sends_one_request():
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(503)
+
+    rc = _client(handler, retries=0)
+    assert await rc.search("X", None, 5) == []
+    assert calls["n"] == 1
+    await rc.close()
+
+
+async def test_lookup_doi_and_health_retry_a_busy_answer():
+    seen: dict[str, int] = {}
+
+    def handler(request):
+        seen[request.url.path] = seen.get(request.url.path, 0) + 1
+        if seen[request.url.path] == 1:
+            return httpx.Response(503)
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        return httpx.Response(200, json={"doi": "10.1/x"})
+
+    rc = _client(handler)
+    assert await rc.healthy() is True
+    assert await rc.lookup_doi("10.1/x") == {"doi": "10.1/x"}
+    assert seen == {"/health": 2, "/works/10.1/x": 2}
+    await rc.close()
+
+
+async def test_backoff_doubles_and_honours_retry_after(monkeypatch):
+    import bibr.clients.resolver as resolver_mod
+
+    waits: list[float] = []
+
+    async def fake_sleep(delay):
+        waits.append(delay)
+
+    monkeypatch.setattr(resolver_mod.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(resolver_mod.random, "uniform", lambda a, b: b)
+    answers = iter(
+        [
+            httpx.Response(503),
+            httpx.Response(503),
+            httpx.Response(503, headers={"Retry-After": "7"}),
+            httpx.Response(503, headers={"Retry-After": "600"}),
+            httpx.Response(200, json={"candidates": []}),
+        ]
+    )
+    rc = _client(lambda request: next(answers), retries=4, retry_backoff=1.0)
+    assert await rc.search("X", None, 5) == []
+    # 1, 2, then Retry-After's 7 over the backoff's 4, then 600 capped at 30.
+    assert waits == [1.0, 2.0, 7.0, 30.0]
+    await rc.close()
+
+
+async def test_a_request_waiting_to_retry_does_not_hold_an_in_flight_slot(monkeypatch):
+    import bibr.clients.resolver as resolver_mod
+
+    held: list[bool] = []
+    real_sleep = resolver_mod.asyncio.sleep
+
+    async def fake_sleep(delay):
+        held.append(resolver_mod._shared_gate("http://resolver-slot", 1).locked())
+        await real_sleep(0)
+
+    monkeypatch.setattr(resolver_mod.asyncio, "sleep", fake_sleep)
+    answers = iter([httpx.Response(503), httpx.Response(200, json={"candidates": []})])
+    http = httpx.AsyncClient(
+        base_url="http://resolver-slot", transport=httpx.MockTransport(lambda r: next(answers))
+    )
+    rc = ResolverClient("http://resolver-slot", client=http, max_concurrency=1)
+    assert await rc.search("X", None, 5) == []
+    assert held == [False]
+    await rc.close()
+
+
+async def test_in_flight_cap_is_shared_by_every_client_of_one_resolver():
+    """Each paper builds its own client, so a per-client cap multiplied by the
+    papers in flight: 12 papers x 8 searches flooded the resolver."""
+    import asyncio
+
+    in_flight = {"current": 0, "max": 0}
+
+    async def handler(request):
+        in_flight["current"] += 1
+        in_flight["max"] = max(in_flight["max"], in_flight["current"])
+        await asyncio.sleep(0.01)
+        in_flight["current"] -= 1
+        return httpx.Response(200, json={"candidates": []})
+
+    def paper_client():
+        http = httpx.AsyncClient(
+            base_url="http://resolver-shared", transport=httpx.MockTransport(handler)
+        )
+        return ResolverClient("http://resolver-shared", client=http, max_concurrency=3)
+
+    papers = [paper_client() for _ in range(4)]
+    queries = [{"title": f"t{i}", "year": None, "limit": 5} for i in range(6)]
+    await asyncio.gather(*(rc.search_many(queries, concurrency=4) for rc in papers))
+    assert in_flight["max"] == 3
+    for rc in papers:
+        await rc.close()
+
+
+async def test_zero_max_concurrency_means_no_shared_cap():
+    import asyncio
+
+    in_flight = {"current": 0, "max": 0}
+
+    async def handler(request):
+        in_flight["current"] += 1
+        in_flight["max"] = max(in_flight["max"], in_flight["current"])
+        await asyncio.sleep(0.01)
+        in_flight["current"] -= 1
+        return httpx.Response(200, json={"candidates": []})
+
+    http = httpx.AsyncClient(
+        base_url="http://resolver-uncapped", transport=httpx.MockTransport(handler)
+    )
+    rc = ResolverClient("http://resolver-uncapped", client=http, max_concurrency=0)
+    queries = [{"title": f"t{i}", "year": None, "limit": 5} for i in range(6)]
+    await rc.search_many(queries, concurrency=6)
+    assert in_flight["max"] == 6
     await rc.close()

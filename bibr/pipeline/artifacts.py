@@ -144,6 +144,7 @@ def enrichment_settings_digest(ctx: PipelineContext) -> str:
             "url": resolver.url,
             "enabled": bool(resolver.enrich),
             "timeout": resolver.timeout,
+            "retries": resolver.retries,
             "limit": resolver.limit,
             "search_concurrency": resolver.search_concurrency,
             "authoritative": resolver.authoritative,

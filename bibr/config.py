@@ -1510,8 +1510,8 @@ class ResolverOptions(_BibrSettings):
     """Optional external bibr-resolver candidate-search service (tier 3 in the
     enrichment chain). Default-off: when ``url`` is unset, bibr behaves exactly
     as today. Env: ``BIBR_RESOLVER_URL``, ``BIBR_RESOLVER_ENRICH``,
-    ``BIBR_RESOLVER_TIMEOUT``, ``BIBR_RESOLVER_LIMIT``,
-    ``BIBR_RESOLVER_FALLBACK_SOURCES``."""
+    ``BIBR_RESOLVER_TIMEOUT``, ``BIBR_RESOLVER_RETRIES``, ``BIBR_RESOLVER_MAX_CONCURRENCY``,
+    ``BIBR_RESOLVER_LIMIT``, ``BIBR_RESOLVER_FALLBACK_SOURCES``."""
 
     model_config = _section("BIBR_RESOLVER_")
 
@@ -1526,10 +1526,37 @@ class ResolverOptions(_BibrSettings):
         description="Master gate for the resolver; when false the resolver is skipped even if url is set.",
     )
     # Per-request timeout (seconds) for single resolver calls (/search, /works, /health).
+    # 30, not 10: a resolver under batch load queues searches behind its own
+    # concurrency limit, and at 10 s many of them timed out and left the
+    # reference unmatched. A healthy resolver answers in well under a second, so
+    # this only matters when it is busy, where waiting beats giving up.
     timeout: float = Field(
-        10.0,
+        30.0,
         gt=0,
         description="Per-request timeout in seconds for resolver calls (/search, /works, /health).",
+    )
+    # A busy resolver answers 503; bibr used to take that as a failed search.
+    retries: int = Field(
+        3,
+        ge=0,
+        description="Times a resolver call is tried again after a busy answer (429/502/503/504), "
+        "a timeout (once at most) or a dropped connection. 0 disables retries.",
+    )
+    retry_backoff: float = Field(
+        1.0,
+        ge=0,
+        description="First wait in seconds before retrying a resolver call; it doubles on each "
+        "retry (with jitter, capped at 30 s) and is never shorter than the resolver's Retry-After.",
+    )
+    # Each paper builds its own resolver client, so the per-paper limits below
+    # multiply by the papers in flight: 12 papers x 8 searches flooded a
+    # resolver that runs 16 searches at once. This cap is shared by every paper
+    # in the process.
+    max_concurrency: int = Field(
+        8,
+        ge=0,
+        description="Max resolver requests in flight across all papers in this process (per "
+        "resolver URL). 0 = no cap.",
     )
     # Max candidates to request from the resolver /search endpoint.
     limit: int = Field(
@@ -1537,7 +1564,7 @@ class ResolverOptions(_BibrSettings):
     )
     # Max concurrent /search calls when prefetching a reference list's title searches.
     search_concurrency: int = Field(
-        8,
+        4,
         ge=1,
         description="Max concurrent /search calls when prefetching a reference list's title searches.",
     )

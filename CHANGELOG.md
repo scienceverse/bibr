@@ -6,7 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A busy bibr-resolver no longer leaves references unmatched. A resolver call
+  that gets a busy answer (429/502/503/504), times out or loses its connection
+  is now retried up to 3 times with exponential backoff, a timeout only once
+  (`BIBR_RESOLVER_RETRIES`, `BIBR_RESOLVER_RETRY_BACKOFF`); before, one 503 was
+  a failed search. The health probe still gives up on a resolver that does not
+  answer within 10 s. A batch run at GPU speed, with 12 papers in flight each
+  sending 8 searches at once, overloaded the resolver this way.
+
 ### Changed
+
+- The resolver's defaults are sized for batch runs: every paper in a bibr
+  process now shares one cap of 8 resolver requests in flight
+  (`BIBR_RESOLVER_MAX_CONCURRENCY`, new; `0` = no cap), one paper's title
+  searches run 4 at a time instead of 8 (`BIBR_RESOLVER_SEARCH_CONCURRENCY`),
+  and a resolver call waits up to 30 s instead of 10 s
+  (`BIBR_RESOLVER_TIMEOUT`).
 
 - Reference-manager files (`to_csl_json()`, `to_bibtex()`, `to_ris()`,
   `write_references()`, `bibr references`, `GET /papers/jobs/{id}/references`
