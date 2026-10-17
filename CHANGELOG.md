@@ -18,6 +18,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Refreshed `uv.lock` to releases at least a week old (as of 2026-10-10):
+  transformers 5.17.0, tokenizers 0.23.3, onnxruntime 1.31.0, anthropic
+  0.125.0, google-genai 2.29.0, instructor 1.17.0, pydantic 2.14.0, pyarrow
+  26.0.0, mlx-lm 0.32.0, vllm-mlx 0.4.1 and the rest of the lock. Held where
+  something else pins them: transformers below 5.18 and torch at 2.13.0
+  (vLLM 0.31.0 requires both), onnxruntime-gpu at 1.26.0 (the last CUDA 12
+  build), the CUDA libraries, openai below 3, and ruff at 0.15.22 (0.17
+  reformats Markdown code blocks and adds a lint rule).
+
 - The resolver's defaults are sized for batch runs: every paper in a bibr
   process now shares one cap of 8 resolver requests in flight
   (`BIBR_RESOLVER_MAX_CONCURRENCY`, new; `0` = no cap), one paper's title
