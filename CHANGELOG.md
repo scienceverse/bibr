@@ -15,6 +15,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a failed search. The health probe still gives up on a resolver that does not
   answer within 10 s. A batch run at GPU speed, with 12 papers in flight each
   sending 8 searches at once, overloaded the resolver this way.
+- A meta-science paper's results section on how other studies share data
+  ("Data sharing", "Open science practices", "Reproducibility") was copied as
+  the paper's own `data_availability` in the default shadow mode, while its
+  real statement, "The codebook, data, and analysis code are available in this
+  OSF repository: …", was not recognised in any mode (#204). A section typed as
+  open data under a heading other than "Data/Code/Materials availability" that
+  is longer than a compact statement and never declares where the data are no
+  longer beats a declaration elsewhere in the paper, and a declaration whose
+  subject lists several items ("The codebook, data, and analysis code are …",
+  "The data, code, and materials are …") is now recognised.
 
 ### Changed
 
