@@ -22,6 +22,8 @@
 
 > **Alpha:** Expect bugs and uneven extraction quality. Current evaluation is strongest
 > for English-language social science papers. See [where bibr is strong and where it isn't](https://bibr.org/limitations/).
+> The [JATS benchmark](https://github.com/scienceverse/bibr-jats-eval) behind the whole-paper result, bibr against GROBID on
+> 300 open-access papers, is public with its papers, answer key and scores.
 
 ## Get started
 

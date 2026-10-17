@@ -267,6 +267,16 @@ and given names. GROBID does not classify body sections, so its body text is
 typed `unknown`. In the section-text benchmark only the label-independent
 `layout_recall` is comparable between the two tools.
 
+## The public JATS benchmark
+
+The [bibr JATS benchmark](https://github.com/scienceverse/bibr-jats-eval) is the
+whole-paper test on the [limitations page](../limitations.md), made public: 300
+CC BY papers from PMC Open Access, gold built by a script from the publishers'
+JATS and checked against the PDF text, per-paper scores for bibr and GROBID
+0.9.0, and the scripts behind them. Its README shows how to download the exact
+PDFs and score your own outputs with `evaluation.evaluate`. Scores taken after
+the benchmark was published are not held-out results.
+
 ## Interpreting results
 
 Compare runs on the same papers, gold revision, metric version, and extraction
