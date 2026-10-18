@@ -7,8 +7,8 @@ title: "bibr: Scientific paper extraction to structured JSON"
 authors:
   - family-names: Werner
     given-names: Jakub
-version: 0.7.3
-date-released: 2026-10-15
+version: 0.7.4
+date-released: 2026-10-18
 license: AGPL-3.0-or-later
 repository-code: "https://github.com/scienceverse/bibr"
 url: "https://bibr.org"
