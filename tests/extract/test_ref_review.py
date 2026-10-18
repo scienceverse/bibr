@@ -165,3 +165,68 @@ def test_review_counts_are_verified_by_export_model():
             skipped=0,
             reasons={},
         )
+
+
+ZH = "张三, 李四. 深度学习研究[J]. 计算机学报, 2020, 43(1): 1-10."
+
+
+def test_cjk_reference_is_routed_even_when_one_span_covers_it():
+    lumped = PaperReference(
+        bib_id=1,
+        title="张三, 李四. 深度学习研究",
+        authors=None,
+        year=2020,
+        container="计算机学报",
+        first_page=None,
+        volume=None,
+    )
+    assert coverage(ZH, lumped) == 1.0
+    assert reasons(ZH, lumped, min_coverage=0.8, long_chars=1200) == ("cjk_script",)
+
+
+def test_cjk_review_is_kept_when_no_check_gets_worse():
+    current = PaperReference(
+        bib_id=1,
+        title="张三, 李四. 深度学习研究",
+        authors=None,
+        year=2020,
+        container="计算机学报",
+        first_page=None,
+        volume=None,
+    )
+    candidate = PaperReference(
+        bib_id=1,
+        title="深度学习研究",
+        authors="张三, 李四",
+        year=2020,
+        container="计算机学报",
+        first_page=None,
+        volume=None,
+    )
+    assert improves(ZH, current, candidate, min_coverage=0.8, long_chars=1200)
+    weaker = PaperReference(
+        bib_id=1,
+        title="深度学习研究",
+        authors="张三, 李四",
+        year=2020,
+        container="计算机学报 增刊",
+        first_page=None,
+        volume=None,
+    )
+    assert not improves(ZH, current, weaker, min_coverage=0.8, long_chars=1200)
+
+
+def test_equal_latin_review_still_needs_a_gain():
+    current = PaperReference(
+        bib_id=1,
+        title="A test",
+        authors="Smith J",
+        year=2020,
+        container="Journal",
+        first_page=None,
+        volume=None,
+    )
+    candidate = current.model_copy(update={"title": "A test", "container": "Journal"})
+    assert not improves(
+        "Smith J. 2020. A test. Journal.", current, candidate, min_coverage=0.8, long_chars=1200
+    )

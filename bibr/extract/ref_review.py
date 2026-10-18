@@ -13,6 +13,11 @@ from bibr.models import PaperReference
 
 _WORDS = re.compile(r"[^\W\d_]+", re.UNICODE)
 _YEAR = re.compile(r"(?<!\d)(?:1[5-9]|20)\d\d(?!\d)")
+# Han, kana and Hangul. _WORDS reads an unspaced CJK run as one word, so a parse
+# that lumps authors, title and journal into one span still passes coverage.
+_CJK = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]")
+# Signals of the input rather than the parse: no parser can clear them.
+_INPUT_FLAGS = frozenset({"long_reference", "cjk_script"})
 _FIELDS = ("authors", "title", "container", "editors", "publisher", "edition")
 
 
@@ -51,6 +56,8 @@ def reasons(
         flags.append("unassigned_words")
     if len(reference) > long_chars:
         flags.append("long_reference")
+    if _CJK.search(reference):
+        flags.append("cjk_script")
     return tuple(flags)
 
 
@@ -73,10 +80,14 @@ def improves(
         return False
     before = set(reasons(reference, current, min_coverage=min_coverage, long_chars=long_chars))
     after = set(reasons(reference, candidate, min_coverage=min_coverage, long_chars=long_chars))
-    # Length belongs to the input, so no parser can clear that signal.
-    before.discard("long_reference")
-    after.discard("long_reference")
+    cjk = "cjk_script" in before
+    before -= _INPUT_FLAGS
+    after -= _INPUT_FLAGS
     old_coverage, new_coverage = coverage(reference, current), coverage(reference, candidate)
-    return new_coverage >= old_coverage and (
-        len(after) < len(before) or new_coverage > old_coverage
-    )
+    if new_coverage < old_coverage:
+        return False
+    if cjk:
+        # Coverage cannot tell CJK fields apart, so keep the review when no
+        # source check gets worse.
+        return after <= before
+    return len(after) < len(before) or new_coverage > old_coverage

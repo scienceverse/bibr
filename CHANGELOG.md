@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- References printed in Chinese, Japanese or Korean script always go to the
+  fine-tuned reference review (when `REF_LLM_BASE_URL` is set), and the review's
+  parse is kept when no source check gets worse. The coverage check reads an
+  unspaced CJK run as one word, so a v5.1 parse that lumped authors, title and
+  journal into one span passed it and skipped the review that v4.5's parses
+  went through.
+
 ## [0.7.4] - 2026-10-18
 
 The reference parser is now v5.1 (UltraBERT-150M), which matches references far better
