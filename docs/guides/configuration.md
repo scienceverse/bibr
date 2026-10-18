@@ -209,11 +209,13 @@ expected; install a CUDA build of `llama-server` and skip the `gpu` extra.
 `LLM_PROVIDER` selects the provider used for metadata extraction and LLM
 fallbacks such as section classification and citation linking: `{{ default_llm_provider }}`
 (the default), `openai`, `anthropic`, `groq`, or `ollama` (a local Ollama
-server). `LLM_MODEL` picks the model for that provider. Its default,
-`{{ default_llm_model }}`, does not change with the provider, so set
-`LLM_MODEL` whenever you set `LLM_PROVIDER` yourself, for example
-`LLM_MODEL=claude-haiku-5-5` with `anthropic`; otherwise the provider is sent
-a model name it does not serve.
+server). `LLM_MODEL` picks the model for that provider. Left unset, it
+follows the provider: `{{ default_llm_model }}` for `google`,
+`claude-haiku-5-5` for `anthropic`, `gpt-5-nano` for `openai`,
+`llama-3.3-70b-versatile` for `groq` and `gpt-oss:20b` for `ollama`, the same
+models `bibr setup` writes. An `openai` provider pointed at your own server
+with `LLM_BASE_URL` keeps `{{ default_llm_model }}`, so name the served model
+there.
 
 For Ollama, `LLM_OLLAMA_BASE_URL` names the server (default
 `http://localhost:11434`). bibr talks to Ollama's OpenAI-compatible API under

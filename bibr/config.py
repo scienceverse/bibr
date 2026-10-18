@@ -468,6 +468,21 @@ class _BibrSettings(BaseSettings):
         return (init_settings, env_settings, no_interp, file_secret_settings)
 
 
+# Model each provider gets when ``LLM_PROVIDER`` is set without ``LLM_MODEL``.
+# ``bibr setup`` writes the same model (``setup_wizard.LLM_DEFAULTS``). Without
+# this, a hand-set provider kept the Gemini default and the provider answered
+# 404 for a model it does not serve.
+DEFAULT_LLM_MODELS: dict[str, str] = {
+    "google": "gemini-3.5-flash-lite",
+    "openai": "gpt-5-nano",
+    # Haiku 5.5 is the recommended hosted extraction model
+    # (docs/guides/extraction-models.md).
+    "anthropic": "claude-haiku-5-5",
+    "groq": "llama-3.3-70b-versatile",
+    "ollama": "gpt-oss:20b",
+}
+
+
 class LlmOptions(_BibrSettings):
     """LLM client settings. Env: ``LLM_PROVIDER``, ``LLM_MODEL``, ``LLM_API_KEY``, ..."""
 
@@ -479,7 +494,13 @@ class LlmOptions(_BibrSettings):
         "Custom adapters added through bibr.clients.providers.register cannot be named here; "
         "set them on the settings object in code instead.",
     )
-    model: str = Field("gemini-3.5-flash-lite", description="Model name for the selected provider.")
+    model: str = Field(
+        DEFAULT_LLM_MODELS["google"],
+        description="Model name for the selected provider. Unset, it follows LLM_PROVIDER: "
+        + ", ".join(f"{name} uses {model}" for name, model in DEFAULT_LLM_MODELS.items())
+        + ". An openai provider with LLM_BASE_URL keeps this default, so name the served "
+        "model there.",
+    )
     model_revision: str | None = Field(
         None,
         description="Exact model revision/commit deployed (surfaced in qualification_provenance; "
@@ -839,6 +860,29 @@ class LlmOptions(_BibrSettings):
             except ValueError:
                 return v
         return v
+
+    @model_validator(mode="after")
+    def _default_model_for_provider(self) -> "LlmOptions":
+        self.apply_provider_default_model()
+        return self
+
+    def apply_provider_default_model(self) -> None:
+        """Give an unset ``model`` the default of the current ``provider``.
+
+        Runs when the settings are built and again after ``--llm-provider``
+        swaps the provider in place. The default stays out of
+        ``model_fields_set``, so a later provider change still counts it as
+        unset. An openai provider with ``base_url`` points at a self-hosted
+        server whose model name bibr cannot guess, so it is left alone.
+        """
+        if "model" in self.model_fields_set:
+            return
+        if self.provider == "openai" and self.base_url:
+            return
+        default = DEFAULT_LLM_MODELS.get(self.provider)
+        if default is not None and default != self.model:
+            self.model = default
+            self.model_fields_set.discard("model")
 
 
 class OcrOptions(_BibrSettings):

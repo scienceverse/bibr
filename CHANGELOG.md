@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Setting `LLM_PROVIDER` (or `--llm-provider`) without `LLM_MODEL` now picks
+  that provider's default model: `claude-haiku-5-5` for `anthropic`,
+  `gpt-5-nano` for `openai`, `llama-3.3-70b-versatile` for `groq` and
+  `gpt-oss:20b` for `ollama`, the same models `bibr setup` writes. Before, every
+  provider was sent the Gemini default, so a hand-set Anthropic provider (for
+  example in a Docker deploy) failed with a 404. An `openai` provider with
+  `LLM_BASE_URL` still needs `LLM_MODEL`, since only the server knows its
+  model's name.
+
 - A busy bibr-resolver no longer leaves references unmatched. A resolver call
   that gets a busy answer (429/502/503/504), times out or loses its connection
   is now retried up to 3 times with exponential backoff, a timeout only once

@@ -21,7 +21,9 @@ CAPS = {
 
 
 def _provider(**llm):
-    settings = GlobalSettings(llm={"provider": "anthropic", **llm})
+    # Pin a model that takes budget thinking: the provider default, Haiku 5.5,
+    # rejects it (and every sampling parameter).
+    settings = GlobalSettings(llm={"provider": "anthropic", "model": "claude-haiku-4-5", **llm})
     return AnthropicProvider(settings=settings), settings
 
 
