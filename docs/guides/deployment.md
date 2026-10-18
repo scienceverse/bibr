@@ -460,7 +460,7 @@ Set these in `.env` (run `bibr config example --full` or see the
 | Variable | Description | Default |
 |---|---|---|
 | `LLM_PROVIDER` | LLM backend: `google`, `openai`, `anthropic`, `groq`, or `ollama` | `google` |
-| `LLM_MODEL` | Model for the selected provider. The default is a Gemini model, so set it whenever `LLM_PROVIDER` is not `google` (an Anthropic provider sent the Gemini name gets a 404) | `gemini-3.5-flash-lite` |
+| `LLM_MODEL` | Model for the selected provider. Unset, it follows `LLM_PROVIDER`: `claude-haiku-5-5` for `anthropic`, `gpt-5-nano` for `openai`, `llama-3.3-70b-versatile` for `groq`, `gpt-oss:20b` for `ollama`. Set it for an `openai` provider with `LLM_BASE_URL` | `gemini-3.5-flash-lite` |
 | `GOOGLE_API_KEY` | Google AI API key (`google` provider) | — |
 | `LLM_API_KEY` | OpenAI-compatible API key (`openai` provider) | — |
 | `ANTHROPIC_API_KEY` | Anthropic API key (`anthropic` provider) | — |

@@ -30,6 +30,30 @@ def test_apply_runtime_settings_applies_llm_provider():
         assert mock_settings.llm.provider == "anthropic"
 
 
+@pytest.mark.parametrize(
+    ("llm_model", "expected"),
+    [(None, "claude-haiku-5-5"), ("claude-sonnet-5-5", "claude-sonnet-5-5")],
+)
+def test_apply_runtime_settings_llm_provider_brings_its_default_model(llm_model, expected):
+    """``--llm-provider anthropic`` alone no longer sends the Gemini default model."""
+    from bibr.config import LlmOptions
+    from bibr.local.cli import _apply_runtime_settings
+
+    args = Namespace(
+        preset=None,
+        llm_provider="anthropic",
+        llm_model=llm_model,
+        no_equations=False,
+        refs=None,
+        ref_seg=None,
+    )
+    llm = LlmOptions(_env_file=None, provider="google")
+    with patch("bibr.config.Settings") as mock_settings:
+        mock_settings.llm = llm
+        _apply_runtime_settings(args)
+    assert (llm.provider, llm.model) == ("anthropic", expected)
+
+
 def test_apply_runtime_settings_disables_equations():
     from bibr.local.cli import _apply_runtime_settings
 

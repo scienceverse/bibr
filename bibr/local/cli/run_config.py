@@ -198,6 +198,7 @@ def _apply_runtime_settings(args) -> None:
 
     if args.llm_provider:
         bibr.config.Settings.llm.provider = args.llm_provider
+        bibr.config.Settings.llm.apply_provider_default_model()
     if args.llm_model:
         bibr.config.Settings.llm.model = args.llm_model
     if args.no_equations:

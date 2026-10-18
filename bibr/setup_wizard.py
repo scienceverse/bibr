@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Literal
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
+from bibr.config import DEFAULT_LLM_MODELS
 from bibr.env_utils import _format_env_value, write_env_text
 from bibr.env_utils import merge_env as _merge_env  # re-exported for tests
 from bibr.local.cli import ui
@@ -62,15 +63,16 @@ _GPU_BUILD_PROBE = (
     "import onnxruntime; print('CUDAExecutionProvider' in onnxruntime.get_available_providers())"
 )
 
+# Models come from bibr.config.DEFAULT_LLM_MODELS, which also fills LLM_MODEL
+# when LLM_PROVIDER is set by hand. Haiku 5.5 is the recommended hosted
+# extraction model: on the 9 Oct harness (252 dev papers) it passes 221 against
+# Qwen3.8-27B's 223, at about $0.004 a paper (docs/guides/extraction-models.md).
 LLM_DEFAULTS: dict[str, dict[str, str]] = {
-    "google": {"model": "gemini-3.5-flash-lite", "key_env": "GOOGLE_API_KEY"},
-    "openai": {"model": "gpt-5-nano", "key_env": "LLM_API_KEY"},
-    # Haiku 5.5 is the recommended hosted extraction model: on the 9 Oct harness
-    # (252 dev papers) it passes 221 against Qwen3.8-27B's 223, at about $0.004
-    # a paper (docs/guides/extraction-models.md).
-    "anthropic": {"model": "claude-haiku-5-5", "key_env": "ANTHROPIC_API_KEY"},
-    "groq": {"model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
-    "ollama": {"model": "gpt-oss:20b", "key_env": ""},
+    "google": {"model": DEFAULT_LLM_MODELS["google"], "key_env": "GOOGLE_API_KEY"},
+    "openai": {"model": DEFAULT_LLM_MODELS["openai"], "key_env": "LLM_API_KEY"},
+    "anthropic": {"model": DEFAULT_LLM_MODELS["anthropic"], "key_env": "ANTHROPIC_API_KEY"},
+    "groq": {"model": DEFAULT_LLM_MODELS["groq"], "key_env": "GROQ_API_KEY"},
+    "ollama": {"model": DEFAULT_LLM_MODELS["ollama"], "key_env": ""},
 }
 
 # Vision model per cloud OCR backend, written as OCR_VISION_MODEL. Unset, the

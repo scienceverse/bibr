@@ -1343,3 +1343,56 @@ class TestSecretRedaction:
         assert "gsk-secret-top-level" not in blob
         # Non-secret nested values survive round-trip.
         assert dumped["llm"]["provider"] == s.llm.provider
+
+
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [
+        ("google", "gemini-3.5-flash-lite"),
+        ("anthropic", "claude-haiku-5-5"),
+        ("openai", "gpt-5-nano"),
+        ("groq", "llama-3.3-70b-versatile"),
+        ("ollama", "gpt-oss:20b"),
+    ],
+)
+def test_llm_provider_without_model_gets_its_own_default(monkeypatch, provider, model):
+    """``LLM_PROVIDER=anthropic`` alone used to send the Gemini default (a 404)."""
+    from bibr.config import DEFAULT_LLM_MODELS, LlmOptions
+    from bibr.setup_wizard import LLM_DEFAULTS
+
+    monkeypatch.setenv("LLM_PROVIDER", provider)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    opts = LlmOptions(_env_file=None)
+    assert opts.model == model
+    assert "model" not in opts.model_fields_set
+    assert LLM_DEFAULTS[provider]["model"] == DEFAULT_LLM_MODELS[provider]
+
+
+def test_llm_model_set_explicitly_is_kept(monkeypatch):
+    from bibr.config import LlmOptions
+
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("LLM_MODEL", "claude-sonnet-5-5")
+    assert LlmOptions(_env_file=None).model == "claude-sonnet-5-5"
+    monkeypatch.setenv("LLM_MODEL", "gemini-3.5-flash-lite")
+    assert LlmOptions(_env_file=None).model == "gemini-3.5-flash-lite"
+
+
+def test_llm_openai_base_url_keeps_the_default_model(monkeypatch):
+    """A self-hosted OpenAI-compatible server names its own model; bibr does not guess it."""
+    from bibr.config import LlmOptions
+
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("LLM_BASE_URL", "http://gpu-host:8000/v1")
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    assert LlmOptions(_env_file=None).model == "gemini-3.5-flash-lite"
+
+
+def test_llm_provider_swap_follows_an_unset_model():
+    from bibr.config import LlmOptions
+
+    opts = LlmOptions(_env_file=None, provider="anthropic")
+    opts.provider = "groq"
+    opts.apply_provider_default_model()
+    assert opts.model == "llama-3.3-70b-versatile"

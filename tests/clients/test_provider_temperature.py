@@ -18,6 +18,10 @@ _PLAIN = ["openai", "anthropic", "groq", "ollama"]
 
 
 def _settings(**llm):
+    if llm.get("provider") == "anthropic":
+        # The provider default, Haiku 5.5, rejects every sampling parameter;
+        # these tests need a Claude model that takes them.
+        llm.setdefault("model", "claude-haiku-4-5")
     return GlobalSettings(llm=llm)
 
 
