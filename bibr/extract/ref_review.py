@@ -13,8 +13,9 @@ from bibr.models import PaperReference
 
 _WORDS = re.compile(r"[^\W\d_]+", re.UNICODE)
 _YEAR = re.compile(r"(?<!\d)(?:1[5-9]|20)\d\d(?!\d)")
-# Han, kana and Hangul. _WORDS reads an unspaced CJK run as one word, so a parse
-# that lumps authors, title and journal into one span still passes coverage.
+# Han, kana and Hangul. The checks below test that fields occur in the source,
+# not that they are assigned right, so a parse that lumps an unspaced CJK
+# reference's authors, title and journal into the title still passes them.
 _CJK = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]")
 # Signals of the input rather than the parse: no parser can clear them.
 _INPUT_FLAGS = frozenset({"long_reference", "cjk_script"})
