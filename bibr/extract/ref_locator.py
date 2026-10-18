@@ -443,11 +443,23 @@ class RefLocator:
         # Step 0: trust what is printed — a literal references heading wins,
         # in any language the heading grammar lists. English-only, a German
         # "Literatur" list lost to a two-row body section the front-role model
-        # or the layout fallback offered first (EXCITE dev 40753, 32265).
+        # or the layout fallback offered first (EXCITE dev 40753, 32265). An
+        # English heading still goes first: with "References" and "13 Literatur"
+        # both printed over halves of one list, the later German one took the
+        # shorter half (EXCITE dev 32707).
+        section_names = (
+            list(reversed(self.sentences_df["section_name"].dropna().unique()))
+            if has_section_col
+            else []
+        )
+        printed = [str(name) for name in section_names if _REF_HEADER_RE.match(str(name).strip())]
+        printed += [
+            str(name)
+            for name in section_names
+            if str(name) not in printed and _is_printed_reference_heading(str(name))
+        ]
         if has_section_col:
-            for section_name in reversed(self.sentences_df["section_name"].dropna().unique()):
-                if not _is_printed_reference_heading(str(section_name)):
-                    continue
+            for section_name in printed:
                 mask = self.sentences_df["section_name"] == section_name
                 if not mask.any():
                     continue

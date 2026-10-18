@@ -165,3 +165,24 @@ def test_german_source_headings_are_reference_headings(heading):
 def test_bare_or_qualified_quellen_is_not_a_reference_heading(heading):
     # "Quellen:" alone also opens German table notes.
     assert not _is_reference_heading(heading)
+
+
+def test_english_heading_goes_before_a_later_non_english_one():
+    # EXCITE dev 32707: one list printed under "References" and "13 Literatur";
+    # the English section holds the longer half.
+    contents = _contents(
+        [
+            ("Einleitung", CanonicalSection.INTRODUCTION),
+            ("References", CanonicalSection.UNKNOWN),
+            ("13 Literatur", CanonicalSection.UNKNOWN),
+        ],
+        [
+            (1, "Die Eingliederung wurde 2008 untersucht."),
+            *((2, ref) for ref in LIST),
+            (3, "Alles, T., Zelfel, R. (2008)."),
+        ],
+    )
+
+    rows = RefLocator(contents).collect_reference_rows()
+
+    assert list(rows["text"]) == LIST
