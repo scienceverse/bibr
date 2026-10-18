@@ -243,7 +243,7 @@ def test_front_role_override_retypes_the_misclassified_body_section():
         [
             ("Введение", CanonicalSection.INTRODUCTION, 1.0, "exact_alias"),
             ("Flipped preferences", CanonicalSection.REFERENCES, 0.6, "model"),
-            ("Список литературы", CanonicalSection.UNKNOWN),
+            ("Цитируемая литература", CanonicalSection.UNKNOWN),
         ],
         [
             (1, "Текст введения."),
@@ -262,7 +262,7 @@ def test_front_role_override_retypes_the_misclassified_body_section():
     assert _types(contents) == [
         ("Введение", CanonicalSection.INTRODUCTION, 1.0, "exact_alias"),
         ("Flipped preferences", CanonicalSection.UNKNOWN, 0.0, None),
-        ("Список литературы", CanonicalSection.REFERENCES, 1.0, "exact_alias"),
+        ("Цитируемая литература", CanonicalSection.REFERENCES, 0.95, "substring_alias"),
     ]
     assert contents.reference_boundary_reason_flags == [
         "front_role_ref_header",
