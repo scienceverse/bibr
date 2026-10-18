@@ -1670,7 +1670,7 @@ class SetupWizard:
         # Reference parsing strategy (mirrors the ``--refs`` chew flag)
         self.console.print("\n[dim]Reference parsing (bibliography → structured fields):[/dim]")
         self.console.print(
-            "  [cyan]ner[/cyan] — local ModernBERT-CRF parser (default): cuts most of\n"
+            "  [cyan]ner[/cyan] — local encoder-CRF parser (default): cuts most of\n"
             "        bibr's LLM token use (references are the bulk of it); reference\n"
             "        field precision is lower (requires the ml extra)\n"
             "  [cyan]llm[/cyan] — batched LLM parsing: full reference precision, at the\n"

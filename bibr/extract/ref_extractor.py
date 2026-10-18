@@ -3,7 +3,7 @@
 ``ReferenceExtractor`` turns a located references DataFrame into
 ``PaperReference`` objects: segmentation (geom GBM → region anchors → LLM
 anchor-emit → CRF cascade, plus marker-split last resort) followed by parsing
-(batched LLM or local ModernBERT-CRF NER, dispatched through
+(batched LLM or local encoder-CRF NER, dispatched through
 ``REF_PARSE_STRATEGIES``).
 Module-level helpers cover the strategy-independent finalize steps (DOI/author
 rescue, vol/issue normalization, bib_type inference, bib_id sequencing).
@@ -583,7 +583,13 @@ def _get_ner_parser(settings: GlobalSettings | None = None, memory_mode: str | N
     global _NER_PARSER, _NER_PARSER_KEY
     settings = settings if settings is not None else snapshot_settings()
     device = resolve_ner_device(settings, memory_mode)
-    key = (settings.NER_PARSER_CKPT, device, settings.NER_PARSER_REVISION)
+    key = (
+        settings.NER_PARSER_CKPT,
+        device,
+        settings.NER_PARSER_REVISION,
+        settings.NER_PARSER_ENCODER,
+        settings.NER_PARSER_ENCODER_REVISION,
+    )
     if _NER_PARSER is None or key != _NER_PARSER_KEY:
         with _NER_LOCK:
             if _NER_PARSER is None or key != _NER_PARSER_KEY:
@@ -970,8 +976,8 @@ def _backfill_vancouver_numbers(fields: dict[str, Any], segment: str) -> None:
 
     Fill-only: a field the parser already populated survives untouched, except
     when it holds the undecomposed span (see ``_is_lumped_span``). Interim
-    measure for a ref-parse training-distribution gap — the v4.5-gold parser is
-    APA-heavy and tags this tail ``O``.
+    measure for a ref-parse training-distribution gap — the v4.5-gold parser was
+    APA-heavy and tagged this tail ``O``.
     """
     match = _match_vancouver_tail(fields, segment)
     if match is None:
@@ -1664,7 +1670,7 @@ async def _parse_refs_via_ner(
     ref_text: str,  # noqa: ARG001 — uniform strategy signature
     ref_strings: list[str],
 ) -> list[PaperReference]:
-    # Offload the synchronous ModernBERT-CRF forward pass to a worker thread so
+    # Offload the synchronous encoder-CRF forward pass to a worker thread so
     # it does not block the shared serve event loop (BibrPipelineAPI runs
     # enable_async=True, one loop for many concurrent requests).
     if (
@@ -2554,7 +2560,7 @@ class ReferenceExtractor:
         """CRF last-resort segmentation, guarded so a populated references region
         never silently yields 0.
 
-        Synchronous: a ModernBERT-CRF load plus N sliding-window forward passes
+        Synchronous: an encoder-CRF load plus N sliding-window forward passes
         holding the process-wide inference lock. Every caller offloads it with
         ``asyncio.to_thread``, matching ``_segment_geom`` and
         ``_parse_refs_via_ner`` — ``bibr serve`` runs one async worker, so this

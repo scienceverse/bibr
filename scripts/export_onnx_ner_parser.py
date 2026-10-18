@@ -1,4 +1,4 @@
-"""Export the ModernBERT+CRF reference parser to ONNX and check parity.
+"""Export the encoder+CRF reference parser to ONNX and check parity.
 
 Usage::
 
@@ -85,7 +85,7 @@ def main() -> int:
     import torch
 
     from bibr.config import GlobalSettings
-    from bibr.ner.parser import DEFAULT_ENCODER, RefParser
+    from bibr.ner.parser import RefParser
     from bibr.ner.parser_onnx import OnnxRefParser
     from bibr.ner.tags import BIO_TAGS
 
@@ -118,7 +118,7 @@ def main() -> int:
         if getattr(torch_parser.tokenizer, "vocab_file", None)
         else None
     )
-    # Save the exact tokenizer the torch parser uses (ModernBERT-base's tokenizer.json).
+    # Save the exact tokenizer the torch parser uses (its encoder's tokenizer.json).
     torch_parser.tokenizer.save_pretrained(str(bundle / "_tok"))
     (bundle / "_tok" / "tokenizer.json").replace(bundle / "tokenizer.json")
     for leftover in (bundle / "_tok").iterdir():
@@ -157,7 +157,7 @@ def main() -> int:
         {
             "model": "ner_parser",
             "architecture": "FeatureGatedEncoderCRF",
-            "encoder": DEFAULT_ENCODER,
+            "encoder": torch_parser.encoder_name,
             "opset": args.opset,
             "exporter": "dynamo" if args.dynamo else "torchscript",
             "attn_implementation": "eager" if args.eager else "default",

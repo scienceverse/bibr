@@ -1,4 +1,4 @@
-"""ONNX Runtime reference parser (ModernBERT emissions + numpy CRF decode).
+"""ONNX Runtime reference parser (encoder emissions + numpy CRF decode).
 
 Behaviourally identical to :class:`bibr.ner.parser.RefParser`: the same
 tokenizer settings (``add_special_tokens=False``, truncation to

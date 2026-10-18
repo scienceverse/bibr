@@ -18,6 +18,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- The default reference parser is v5, `scienceverse/bibr-parser-v5-ultrabert`
+  (UltraBERT-150M encoder + CRF), trained on JATS reference markup plus the v4.5
+  gold rows. Against v4.5 it raises reference exact match from 0.42 to 0.80 on
+  the refsets sealed test and from 0.56 to 0.73 on RenoBench, and edges it on the
+  v4.5 gold validation split (entity F1 0.971 vs 0.966). The parser repo carries
+  UltraBERT's config, modeling code and tokenizer, so the PyTorch runtime loads
+  them from the same pinned commit (`trust_remote_code` only at a commit SHA or
+  from a local directory); the ONNX bundle runs no custom code. The encoder now
+  comes from the checkpoint (ModernBERT-base for a repo without a `config.json`),
+  and `NER_PARSER_ENCODER` / `NER_PARSER_ENCODER_REVISION` (new) override it.
+  `NER_PARSER_CKPT=scienceverse/bibr-parser-v4-5-gold` with
+  `NER_PARSER_REVISION=ff50a83e7f5b73dcf6f8f973a1a6e3847ec429e6` keeps v4.5.
+
 - The resolver's defaults are sized for batch runs: every paper in a bibr
   process now shares one cap of 8 resolver requests in flight
   (`BIBR_RESOLVER_MAX_CONCURRENCY`, new; `0` = no cap), one paper's title

@@ -59,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Reference extraction strategy: 'ner' (default) parses each reference "
-            "with the local ModernBERT-CRF model (no per-reference LLM cost); 'llm' "
+            "with the local encoder-CRF model (no per-reference LLM cost); 'llm' "
             "parses the bibliography with the configured LLM. "
             "Overrides REF_PARSE_STRATEGY for the demo."
         ),

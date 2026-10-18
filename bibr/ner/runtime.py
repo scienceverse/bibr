@@ -42,4 +42,10 @@ def load_ref_parser(
     import bibr.ner.parser as parser_mod
 
     logger.info("NER parser runtime: torch (%s@%s)", ckpt_str, revision or "main")
-    return parser_mod.RefParser(ckpt, device=device, revision=revision)
+    return parser_mod.RefParser(
+        ckpt,
+        encoder_name=getattr(settings, "NER_PARSER_ENCODER", None),
+        device=device,
+        revision=revision,
+        encoder_revision=getattr(settings, "NER_PARSER_ENCODER_REVISION", None),
+    )

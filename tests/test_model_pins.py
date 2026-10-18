@@ -63,3 +63,15 @@ def test_serve_image_pins_the_torch_runtime():
     dockerfile = Path("Dockerfile.serve").read_text()
     assert "ENV ML_RUNTIME=torch" in dockerfile
     assert dockerfile.count("ignore_patterns=['onnx/*']") == 2
+
+
+def test_docs_and_dry_run_mirror_the_parser_pin():
+    """The runtime table in the configuration guide and the dry-run download sizes
+    name the default reference parser; a re-pin must update them too."""
+    from bibr.config import Settings
+    from bibr.local.cli.dry_run import _APPROX_MODEL_SIZES
+
+    docs = Path("docs/guides/configuration.md").read_text()
+    row = f"| Reference parser | `{Settings.NER_PARSER_CKPT}` | `{Settings.NER_PARSER_REVISION[:8]}` |"
+    assert row in docs
+    assert Settings.NER_PARSER_CKPT in _APPROX_MODEL_SIZES

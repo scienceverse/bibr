@@ -43,17 +43,26 @@ class EncoderCRFModel(nn.Module):
         num_tags: int,
         dropout: float = 0.0,
         bio_tags: list[str] | None = None,
+        revision: str | None = None,
+        trust_remote_code: bool = False,
     ) -> None:
         super().__init__()
         # Build the encoder from config only (no weight download). The base
         # pretrained weights would be immediately overwritten by the trained
         # checkpoint in load_state_dict, so loading them is wasted I/O and emits
         # a spurious transformers "UNEXPECTED keys" load report for the base
-        # MLM head we never use.
+        # MLM head we never use. An encoder with its own modeling code (UltraBERT)
+        # needs ``trust_remote_code``; ``code_revision`` keeps that code at the
+        # same pinned ``revision`` as its config (``from_config`` would otherwise
+        # fetch it from the repo's default branch).
         from bibr.utils.hf_cache import disable_hf_cache_symlinks_on_windows
 
         disable_hf_cache_symlinks_on_windows()
-        self.encoder = AutoModel.from_config(AutoConfig.from_pretrained(encoder_name))
+        config = AutoConfig.from_pretrained(
+            encoder_name, revision=revision, trust_remote_code=trust_remote_code
+        )
+        remote = {"trust_remote_code": True, "code_revision": revision} if trust_remote_code else {}
+        self.encoder = AutoModel.from_config(config, **remote)
         hidden_size: int = self.encoder.config.hidden_size
         self.dropout = nn.Dropout(dropout)
         self.linear = nn.Linear(hidden_size, num_tags)
@@ -102,12 +111,16 @@ class FeatureGatedEncoderCRF(EncoderCRFModel):
         dropout: float = 0.0,
         bio_tags: list[str] | None = None,
         feature_dim: int = _FEATURE_DIM,
+        revision: str | None = None,
+        trust_remote_code: bool = False,
     ) -> None:
         super().__init__(
             encoder_name=encoder_name,
             num_tags=num_tags,
             dropout=dropout,
             bio_tags=bio_tags,
+            revision=revision,
+            trust_remote_code=trust_remote_code,
         )
         self.feature_dim = feature_dim
         self.feature_proj = nn.Linear(feature_dim, self.encoder.config.hidden_size)

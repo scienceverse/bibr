@@ -42,6 +42,11 @@ def test_refparser_forwards_revision_to_resolver(monkeypatch):
         return "/cache/best.pt"
 
     monkeypatch.setattr(parser_mod, "resolve_checkpoint", fake_resolve)
+    monkeypatch.setattr(
+        parser_mod,
+        "resolve_encoder",
+        lambda ckpt, revision=None: (parser_mod.DEFAULT_ENCODER, None),
+    )
     monkeypatch.setattr(parser_mod.AutoTokenizer, "from_pretrained", lambda *a, **k: object())
     monkeypatch.setattr(parser_mod, "FeatureGatedEncoderCRF", lambda **k: _StubModel())
     monkeypatch.setattr(parser_mod.torch, "load", lambda *a, **k: {})
@@ -79,8 +84,9 @@ def test_extractor_passes_configured_revisions(monkeypatch):
 
     calls = {}
 
-    def rec_parser(ckpt, device=None, revision=None):
+    def rec_parser(ckpt, device=None, revision=None, **encoder):
         calls["parser"] = revision
+        calls["encoder"] = encoder
         return object()
 
     def rec_seg(ckpt, device=None, revision=None):
@@ -96,4 +102,8 @@ def test_extractor_passes_configured_revisions(monkeypatch):
     ex._get_ner_segmenter()
 
     assert calls["parser"] == Settings.NER_PARSER_REVISION
+    assert calls["encoder"] == {
+        "encoder_name": Settings.NER_PARSER_ENCODER,
+        "encoder_revision": Settings.NER_PARSER_ENCODER_REVISION,
+    }
     assert calls["seg"] == Settings.NER_SEG_REVISION

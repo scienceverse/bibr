@@ -235,7 +235,7 @@ def _add_pipeline_options(parser: argparse.ArgumentParser) -> None:
         "--refs",
         choices=["llm", "ner", "llm-chunked", "ref-llm", "off"],
         help=(
-            "Reference parser: 'ner' (default) uses the local ModernBERT-CRF model "
+            "Reference parser: 'ner' (default) uses the local encoder-CRF model "
             "through ONNX Runtime or the optional PyTorch runtime. "
             "'llm' parses references with the configured LLM in batches. "
             "'llm-chunked' parses region-aligned chunks of the reference list. "
