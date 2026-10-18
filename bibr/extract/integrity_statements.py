@@ -217,6 +217,7 @@ _LEGACY_ANCHORS: dict[str, tuple[re.Pattern[str], ...]] = {
         r"data are openly available",
         r"code availability",
         r"materials are available",
+        r"code (?:is|are) available",
     ),
 }
 _LEGACY_FUNDING_STRONG_ANCHORS = _legacy_compile(
@@ -1084,6 +1085,29 @@ def _legacy_section_is_long(field: str, section: PaperSection, rows: list[PaperS
     )
 
 
+def _legacy_section_is_topical(
+    field: str, section: PaperSection, rows: list[PaperSentence]
+) -> bool:
+    """A long data-typed section about data sharing rather than a statement.
+
+    "Data sharing", "Open science practices" or "Reproducibility" can head a
+    results section of a meta-science paper, which reports how other studies
+    share data. Unless it is headed as an availability statement, a section
+    longer than a compact statement that never declares where this paper's own
+    data are does not beat a declaration elsewhere in the paper.
+    """
+    if field != "data_availability" or _heading_field(section)[0] == field:
+        return False
+    if (
+        len(" ".join(row.text for row in rows)) <= _MAX_COMPACT_CHARS
+        and len({row.paragraph_id for row in rows}) <= _MAX_COMPACT_PARAGRAPHS
+    ):
+        return False
+    return not any(
+        _declaration_predicate(field, row.text, author_aliases=frozenset()) for row in rows
+    )
+
+
 def _leading_paragraph_rows(rows: list[PaperSentence]) -> list[PaperSentence]:
     """The rows of the first ``_MAX_COMPACT_PARAGRAPHS`` paragraphs."""
     paragraph_ids: list[int] = []
@@ -1130,7 +1154,9 @@ def _build_legacy_snapshot_candidates(
                 )
             ):
                 continue
-            if _legacy_section_is_long(field, section, rows):
+            if _legacy_section_is_long(field, section, rows) or _legacy_section_is_topical(
+                field, section, rows
+            ):
                 long_copies.append((section, rows, heading_tail))
                 continue
             candidates.append(_legacy_section_candidate(field, section, rows, heading_tail))

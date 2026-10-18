@@ -3775,3 +3775,105 @@ def test_topic_like_strong_heading_over_body_text_is_not_copied(
     metadata = _shadow_values(contents)
 
     assert getattr(metadata, field) is None
+
+
+_DATA_SHARING_RESULTS = [
+    ("Most of the coded studies (88%) did not share any data.", 1),
+    ("Data were shared in full for 31 studies and in part for 7.", 1),
+    ("In 2% of the studies the authors said data were available upon request.", 1),
+    ("Most shared data sat in public repositories, mainly OSF and GitHub.", 1),
+    ("Code sharing was just as rare as data sharing in the sample.", 2),
+    ("For 91% of the studies no code was shared at all.", 2),
+    ("Full code was shared for 8% of the studies and partial code for under 1%.", 2),
+    ("Data sharing grew slowly over time and reached 27% in the last year coded.", 3),
+    ("Code sharing appeared later and reached 20% in the same year.", 3),
+    ("Studies that shared data were far more likely to share code as well.", 3),
+    ("Of the 42 studies that shared data, 27 also shared their code.", 4),
+    ("Only 15 of the 434 studies that did not share data shared any code.", 4),
+    ("In this field, one form of transparency tends to come with the others.", 4),
+]
+_OWN_DATA_STATEMENT = (
+    "The codebook, data, and analysis code are available in this OSF repository: "
+    "https://osf.io/abcde/."
+)
+
+
+@pytest.mark.parametrize("mode", ["shadow", "active"])
+@pytest.mark.parametrize(
+    ("heading", "source", "score"),
+    [
+        ("Data sharing", "exact_alias", 1.0),
+        ("Open science practices", "substring_alias", 0.95),
+        ("Data and code sharing", "model", 0.9),
+    ],
+)
+def test_meta_science_data_sharing_results_do_not_beat_the_papers_own_statement(
+    mode: str, heading: str, source: str, score: float
+):
+    # bibr#204: a results section on how other studies share data was copied
+    # as the paper's data availability statement.
+    contents = _contents(
+        [
+            (
+                1,
+                "Method",
+                CanonicalSection.METHODS,
+                "exact_alias",
+                1.0,
+                [
+                    "We coded 476 empirical studies published between 2010 and 2022.",
+                    _OWN_DATA_STATEMENT,
+                ],
+            ),
+            (2, heading, CanonicalSection.OPEN_DATA, source, score, _DATA_SHARING_RESULTS),
+        ]
+    )
+
+    _resolution, metadata = _resolve_apply(contents, mode)
+
+    assert metadata.data_availability == _OWN_DATA_STATEMENT
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        _OWN_DATA_STATEMENT,
+        "Materials, data and code are available at https://osf.io/abcde/.",
+        "The data, code, and materials are available at https://osf.io/abcde/.",
+    ],
+)
+@pytest.mark.parametrize("mode", ["shadow", "active"])
+def test_coordinated_data_subject_declaration_is_recovered(text: str, mode: str):
+    contents = _contents([(1, "Method", CanonicalSection.METHODS, "exact_alias", 1.0, [text])])
+
+    _resolution, metadata = _resolve_apply(contents, mode)
+
+    assert metadata.data_availability == text
+
+
+def test_long_data_availability_section_is_still_copied_in_shadow_mode():
+    contents = _contents(
+        [
+            (
+                1,
+                "Method",
+                CanonicalSection.METHODS,
+                "exact_alias",
+                1.0,
+                [_OWN_DATA_STATEMENT],
+            ),
+            (
+                2,
+                "Data availability",
+                CanonicalSection.OPEN_DATA,
+                "exact_alias",
+                1.0,
+                _DATA_SHARING_RESULTS,
+            ),
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.data_availability is not None
+    assert metadata.data_availability.startswith(_DATA_SHARING_RESULTS[0][0])
