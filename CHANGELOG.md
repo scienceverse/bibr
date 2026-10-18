@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-10-18
+
+The reference parser is now v5.1 (UltraBERT-150M), which matches references far better
+outside the training domain. Two defaults also change: reference-manager files (BibTeX,
+RIS, CSL-JSON) now hold only what each reference printed unless you ask for registry
+values with `--prefer record`, and a resolver call now waits up to 30 s instead of 10 s.
+See Changed.
+
 ### Fixed
 
 - Setting `LLM_PROVIDER` (or `--llm-provider`) without `LLM_MODEL` now picks
@@ -34,6 +42,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   longer beats a declaration elsewhere in the paper, and a declaration whose
   subject lists several items ("The codebook, data, and analysis code are …",
   "The data, code, and materials are …") is now recognised.
+- Cloud OCR (`gemini`, `openai`, `anthropic`) stops a paper with an error naming the
+  likely cause ("quota probably used up") once 5 regions in a row are still rate-limited
+  (429) after their retries. Before, each region spent its retries and then shipped blank,
+  so a key out of quota ground through a long paper for up to an hour. Further regions
+  fail at once for the next 2 minutes, so the other pages stop too.
 
 ### Changed
 
@@ -78,14 +91,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `?prefer=record`), and each entry it changes gets a note naming the values
   that came from the record. The JSON export was never affected: matches stay
   in `bib_match` and `bib_check`.
-
-### Fixed
-
-- Cloud OCR (`gemini`, `openai`, `anthropic`) stops a paper with an error naming the
-  likely cause ("quota probably used up") once 5 regions in a row are still rate-limited
-  (429) after their retries. Before, each region spent its retries and then shipped blank,
-  so a key out of quota ground through a long paper for up to an hour. Further regions
-  fail at once for the next 2 minutes, so the other pages stop too.
 
 ## [0.7.3] - 2026-10-15
 
