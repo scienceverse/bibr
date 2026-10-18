@@ -2547,7 +2547,7 @@ class GlobalSettings(_BibrSettings):
     # Reference extraction strategy — DECOUPLED segmentation + parsing axes
     # (resolved in bibr.extract.ref_extractor._resolve_ref_strategies; per-run
     # overrides ride RunConfig via chew(refs=...) / CLI --refs/--ref-seg).
-    # The local ModernBERT-CRF parser ("ner") is the default: reference parsing
+    # The local encoder-CRF parser ("ner") is the default: reference parsing
     # is the bulk of bibr's LLM tokens, so doing it locally cuts most of the
     # per-paper cost. To use LLM field parsing instead, set parse=llm (CLI
     # `--refs llm`). Segmentation defaults to the local geometry GBM ("geom"),
@@ -2565,7 +2565,7 @@ class GlobalSettings(_BibrSettings):
     )
     REF_PARSE_STRATEGY: Literal["llm", "ner", "llm-chunked", "ref-llm", "off"] | None = Field(
         "ner",
-        description='Reference-parsing strategy: "ner" (default; local ModernBERT-CRF parser, no '
+        description='Reference-parsing strategy: "ner" (default; local encoder-CRF parser, no '
         'per-reference LLM cost), "ref-llm" (dedicated fine-tuned reference model), "llm" (batched LLM), "llm-chunked" (chunk-tolerant '
         'LLM parse over region-aligned chunks), or "off" (disable reference extraction entirely).',
     )
@@ -2745,13 +2745,15 @@ class GlobalSettings(_BibrSettings):
         description="Local path or HF Hub repo id for the NER reference-segmenter checkpoint "
         "(optionally suffixed :filename.pt).",
     )
-    # Parser default is the v4.5 gold-trained feature-gated checkpoint (0.9656
-    # strict micro entity F1 on the gold val split vs 0.0544 for giant-v4, whose
-    # span conventions are OOD). The parser path (RefParser →
-    # FeatureGatedEncoderCRF, add_special_tokens=False) requires a v4-format
-    # checkpoint; the legacy v1 parser is no longer loadable here.
+    # Parser default is v5.1: UltraBERT-150M + feature-gated CRF trained on the
+    # reference markup of CC BY / CC0 JATS papers, LinkedBooks and the v4.5 gold
+    # rows (refsets sealed test ref_exact 0.75 vs 0.42 for v4.5, RenoBench 0.73
+    # vs 0.56, v4.5 gold val entity F1 0.975 vs 0.966). The repo carries the encoder's config, modeling code and
+    # tokenizer, so they load from it at NER_PARSER_REVISION. The parser path
+    # (RefParser → FeatureGatedEncoderCRF, add_special_tokens=False) requires a
+    # v4-format checkpoint; the legacy v1 parser is no longer loadable here.
     NER_PARSER_CKPT: str = Field(
-        "scienceverse/bibr-parser-v4-5-gold",
+        "scienceverse/bibr-parser-v5-1-ultrabert",
         description="Local path or HF Hub repo id for the NER reference-parser checkpoint "
         "(optionally suffixed :filename.pt). Requires a v4-format checkpoint.",
     )
@@ -2765,9 +2767,23 @@ class GlobalSettings(_BibrSettings):
         "track the latest revision instead.",
     )
     NER_PARSER_REVISION: str = Field(
-        "ff50a83e7f5b73dcf6f8f973a1a6e3847ec429e6",
+        "97b06cc7dd6511bdd53f8855c93a29020231d215",
         description='Pinned commit revision for the NER parser checkpoint. Set to "main" to track '
-        "the latest revision instead.",
+        "the latest revision instead; a parser repo that ships its own encoder code (v5) loads "
+        "only from a commit SHA or a local directory.",
+    )
+    # Unset, the encoder comes from the checkpoint (bibr.ner.parser.resolve_encoder):
+    # the parser repo itself when it ships a config.json, else ModernBERT-base.
+    NER_PARSER_ENCODER: str | None = Field(
+        None,
+        description="Encoder (HF Hub repo id or local directory) whose config, modeling code and "
+        "tokenizer the torch NER parser loads. Unset: the checkpoint's own (a parser repo with a "
+        "config.json, at NER_PARSER_REVISION), else answerdotai/ModernBERT-base.",
+    )
+    NER_PARSER_ENCODER_REVISION: str | None = Field(
+        None,
+        description="Revision of NER_PARSER_ENCODER. An encoder with its own modeling code runs it "
+        "only from a local directory or a commit SHA revision.",
     )
     NER_DEVICE: str | None = Field(
         None, description="Device for NER checkpoints: cpu, cuda, or mps (auto-detected if unset)."

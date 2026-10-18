@@ -37,6 +37,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- The default reference parser is v5.1,
+  `scienceverse/bibr-parser-v5-1-ultrabert` (UltraBERT-150M encoder + CRF),
+  trained on the reference markup of CC BY / CC0 JATS papers, LinkedBooks and
+  the v4.5 gold rows. Against v4.5 it raises reference exact match from 0.42 to
+  0.75 on the refsets sealed test and from 0.56 to 0.73 on RenoBench, and edges
+  it on the v4.5 gold validation split (entity F1 0.975 vs 0.966). The parser
+  repo carries UltraBERT's config, modeling code and tokenizer, so the PyTorch
+  runtime loads them from the same pinned commit (`trust_remote_code` only at a
+  commit SHA or from a local directory, so `NER_PARSER_REVISION=main` does not
+  load it under PyTorch); the ONNX bundle runs no custom code. The encoder now
+  comes from the checkpoint (ModernBERT-base for a repo without a
+  `config.json`), and `NER_PARSER_ENCODER` / `NER_PARSER_ENCODER_REVISION` (new)
+  override it. `NER_PARSER_CKPT=scienceverse/bibr-parser-v4-5-gold` with
+  `NER_PARSER_REVISION=ff50a83e7f5b73dcf6f8f973a1a6e3847ec429e6` keeps v4.5.
+
 - Refreshed `uv.lock` to releases at least a week old (as of 2026-10-10):
   transformers 5.17.0, tokenizers 0.23.3, onnxruntime 1.31.0, anthropic
   0.125.0, google-genai 2.29.0, instructor 1.17.0, pydantic 2.14.0, pyarrow

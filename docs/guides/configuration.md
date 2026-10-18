@@ -427,7 +427,7 @@ Reference parsing has its own strategy knob, `--refs` (or `REF_PARSE_STRATEGY`):
   reference with a local geometry model, cascading through layout-region
   anchors, LLM segmentation, and CRF when earlier tiers cannot resolve it; a
   segmentation of the section's printed lines replaces a fallback,
-  under-yielding or clearly weaker result. A local ModernBERT-CRF model parses
+  under-yielding or clearly weaker result. A local encoder-CRF model parses
   the resulting entries. The core install
   supports geometry and ONNX parsing. When a dedicated fine-tuned endpoint is
   configured, flagged entries receive bounded model review with NER retention
@@ -477,7 +477,7 @@ observable source signals, not calibrated confidence.
 ## Local model runtime
 
 Four of bibr's models run locally: the PP-DocLayoutV3 layout detector, the
-section classifier, the paper classifier and the ModernBERT+CRF reference
+section classifier, the paper classifier and the encoder+CRF reference
 parser. Each ships twice — as PyTorch weights, and as an ONNX bundle
 (`onnx/model.onnx` + `onnx/bibr_onnx.json`, plus `onnx/tokenizer.json` for the
 text models) in the same Hub repo at the same pinned revision. `ML_RUNTIME`
@@ -511,11 +511,21 @@ All four bundles are published, so a core install needs no configuration:
 | Layout | `scienceverse/bibr-layout-onnx` | `2bcb16a6` |
 | Section classifier | `scienceverse/bibr-section-classifier` | `cf7c2d85` |
 | Paper classifier | `scienceverse/bibr-paper-classifier` | `6046171b` |
-| Reference parser | `scienceverse/bibr-parser-v4-5-gold` | `ff50a83e` |
+| Reference parser | `scienceverse/bibr-parser-v5-1-ultrabert` | `97b06cc7` |
 
-The paper-classifier and reference-parser pins are the commits that added
-`onnx/` to the previously audited weights, so their PyTorch weights are
-unchanged. The section-classifier pin is the model retrained in 0.7.1; set
+The paper-classifier pin is the commit that added `onnx/` to the previously
+audited weights, so its PyTorch weights are unchanged. The reference-parser pin
+is the v5.1 parser (UltraBERT-150M encoder); its repo also carries the encoder's
+`config.json`, modeling code and tokenizer, so the PyTorch runtime loads them
+from the same pinned commit with `trust_remote_code` and never runs unpinned
+code, while the ONNX bundle needs no custom code at all. For that reason the
+PyTorch runtime cannot load it at `NER_PARSER_REVISION=main`; pin a commit SHA. Set
+`NER_PARSER_CKPT=scienceverse/bibr-parser-v4-5-gold` and
+`NER_PARSER_REVISION=ff50a83e7f5b73dcf6f8f973a1a6e3847ec429e6` to keep the
+previous ModernBERT-base parser. `NER_PARSER_ENCODER` (and
+`NER_PARSER_ENCODER_REVISION`) override the encoder for a checkpoint that does
+not ship one; an encoder with its own modeling code runs it only from a local
+directory or a commit SHA. The section-classifier pin is the model retrained in 0.7.1; set
 `ML_SECTION_CLASSIFIER_REVISION=ee1a83db01ce947e3a5eb87dfde7221328f4b207` to
 keep the previous one.
 

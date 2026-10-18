@@ -557,7 +557,7 @@ REF_PARSE_STRATEGY=ner  # "ner" (default) | "llm" | "llm-chunked" | "ref-llm" | 
 
 By default, segmentation runs on a local geometry model (`geom`), which
 cascades to LLM assistance only when its own confidence is low, and
-parsing runs on a local ModernBERT-CRF model (`ner`) — zero per-reference
+parsing runs on a local encoder-CRF model (`ner`) — zero per-reference
 LLM cost in the common case. `REF_PARSE_STRATEGY=llm` trades that cost for
 LLM-based field extraction by parsing the bibliography with the
 configured LLM in batches (size controlled by

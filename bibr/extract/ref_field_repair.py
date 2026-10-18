@@ -1,6 +1,6 @@
 """Deterministic repairs of NER reference fields (post-parse, before finalize).
 
-The NER reference parser (ModernBERT emissions + CRF) segments a reference
+The NER reference parser (encoder emissions + CRF) segments a reference
 correctly far more often than it places the field boundaries correctly. Its
 recurring boundary errors are systematic enough to repair from the reference
 text itself, without retraining:
