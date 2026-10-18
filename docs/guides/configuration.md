@@ -509,14 +509,15 @@ All four bundles are published, so a core install needs no configuration:
 | Layout | `scienceverse/bibr-layout-onnx` | `2bcb16a6` |
 | Section classifier | `scienceverse/bibr-section-classifier` | `cf7c2d85` |
 | Paper classifier | `scienceverse/bibr-paper-classifier` | `6046171b` |
-| Reference parser | `scienceverse/bibr-parser-v5-ultrabert` | `f508ada9` |
+| Reference parser | `scienceverse/bibr-parser-v5-1-ultrabert` | `97b06cc7` |
 
 The paper-classifier pin is the commit that added `onnx/` to the previously
 audited weights, so its PyTorch weights are unchanged. The reference-parser pin
-is the v5 parser (UltraBERT-150M encoder); its repo also carries the encoder's
+is the v5.1 parser (UltraBERT-150M encoder); its repo also carries the encoder's
 `config.json`, modeling code and tokenizer, so the PyTorch runtime loads them
 from the same pinned commit with `trust_remote_code` and never runs unpinned
-code, while the ONNX bundle needs no custom code at all. Set
+code, while the ONNX bundle needs no custom code at all. For that reason the
+PyTorch runtime cannot load it at `NER_PARSER_REVISION=main`; pin a commit SHA. Set
 `NER_PARSER_CKPT=scienceverse/bibr-parser-v4-5-gold` and
 `NER_PARSER_REVISION=ff50a83e7f5b73dcf6f8f973a1a6e3847ec429e6` to keep the
 previous ModernBERT-base parser. `NER_PARSER_ENCODER` (and

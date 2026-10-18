@@ -2701,15 +2701,15 @@ class GlobalSettings(_BibrSettings):
         description="Local path or HF Hub repo id for the NER reference-segmenter checkpoint "
         "(optionally suffixed :filename.pt).",
     )
-    # Parser default is v5: UltraBERT-150M + feature-gated CRF trained on JATS
-    # reference markup plus the v4.5 gold rows (refsets sealed test ref_exact
-    # 0.80 vs 0.42 for v4.5, RenoBench 0.73 vs 0.56, v4.5 gold val entity F1
-    # 0.971 vs 0.966). The repo carries the encoder's config, modeling code and
+    # Parser default is v5.1: UltraBERT-150M + feature-gated CRF trained on the
+    # reference markup of CC BY / CC0 JATS papers, LinkedBooks and the v4.5 gold
+    # rows (refsets sealed test ref_exact 0.75 vs 0.42 for v4.5, RenoBench 0.73
+    # vs 0.56, v4.5 gold val entity F1 0.975 vs 0.966). The repo carries the encoder's config, modeling code and
     # tokenizer, so they load from it at NER_PARSER_REVISION. The parser path
     # (RefParser → FeatureGatedEncoderCRF, add_special_tokens=False) requires a
     # v4-format checkpoint; the legacy v1 parser is no longer loadable here.
     NER_PARSER_CKPT: str = Field(
-        "scienceverse/bibr-parser-v5-ultrabert",
+        "scienceverse/bibr-parser-v5-1-ultrabert",
         description="Local path or HF Hub repo id for the NER reference-parser checkpoint "
         "(optionally suffixed :filename.pt). Requires a v4-format checkpoint.",
     )
@@ -2723,9 +2723,10 @@ class GlobalSettings(_BibrSettings):
         "track the latest revision instead.",
     )
     NER_PARSER_REVISION: str = Field(
-        "f508ada9013b74443d7d872ab2de181f5b497ad2",
+        "97b06cc7dd6511bdd53f8855c93a29020231d215",
         description='Pinned commit revision for the NER parser checkpoint. Set to "main" to track '
-        "the latest revision instead.",
+        "the latest revision instead; a parser repo that ships its own encoder code (v5) loads "
+        "only from a commit SHA or a local directory.",
     )
     # Unset, the encoder comes from the checkpoint (bibr.ner.parser.resolve_encoder):
     # the parser repo itself when it ships a config.json, else ModernBERT-base.

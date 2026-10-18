@@ -18,7 +18,7 @@ from torch import nn
 from bibr.ner import parser as parser_mod
 from bibr.ner.parser import DEFAULT_ENCODER, resolve_encoder, trusts_remote_code
 
-SHA = "f508ada9013b74443d7d872ab2de181f5b497ad2"
+SHA = "97b06cc7dd6511bdd53f8855c93a29020231d215"
 
 
 def _hub_files(monkeypatch, present: set[str]) -> list:

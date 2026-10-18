@@ -59,7 +59,7 @@ _APPROX_MODEL_SIZES: dict[str, str] = {
     "scienceverse/bibr-segmenter-v1": "300 MB",
     # dmis-lab/UltraBERT-150M encoder + CRF head: best.pt (torch) or onnx/model.onnx
     # (ONNX Runtime), 605 MB either way.
-    "scienceverse/bibr-parser-v5-ultrabert": "605 MB",
+    "scienceverse/bibr-parser-v5-1-ultrabert": "605 MB",
     # GLM-OCR weight repos — same figures as _OCR_BACKEND_DOWNLOAD_NOTES in
     # bibr/setup_wizard.py (bf16 ~2.7 GB, llama.cpp Q8_0 GGUF quant smaller).
     # Bare repo id — the ":Q8_0" quant suffix is stripped before lookup (see
