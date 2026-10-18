@@ -52,14 +52,19 @@ _DATA_DECLARATION_PATTERNS = (
     r"\b(?:osf|zenodo|figshare|dryad|github|repository|corresponding author|"
     r"request|https?://)",
 )
+_DATA_LIST_ITEM = (
+    r"(?:(?:analysis|analytic|study|experimental|source)\s+)?"
+    r"(?:data|datasets?|code|codebooks?|materials?|scripts?|software|syntax)"
+)
 _DATA_SUBJECT = (
     r"(?:(?:the|these|our|all)\s+)?"
+    # "The codebook, data, and analysis code are available in this OSF repository".
+    rf"(?:{_DATA_LIST_ITEM}\s*,\s*){{0,3}}"
     r"(?:(?:raw|anonymi[sz]ed|de-identified|underlying|source|study|research|"
     r"survey|experimental|processed|supporting)\s+){0,2}"
     r"(?:data|datasets?|code|materials?)"
     # "Data and analysis scripts are available at ...", "data and materials".
-    r"(?:\s+(?:and|&)\s+(?:(?:analysis|analytic|study|experimental|source)\s+)?"
-    r"(?:data|datasets?|code|materials?|scripts?|software))?"
+    rf"(?:\s*,\s*{_DATA_LIST_ITEM}){{0,3}}(?:,?\s+(?:and|&)\s+{_DATA_LIST_ITEM})?"
 )
 _DATA_TARGET = (
     r"(?:osf|zenodo|figshare|dryad|github|repository|corresponding author|authors?|request|"

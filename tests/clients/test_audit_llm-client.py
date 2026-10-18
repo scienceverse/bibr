@@ -460,7 +460,7 @@ def test_openai_shaped_usage_with_cache_fields_is_not_counted_twice():
         ("claude-haiku-4-5", 65536, 16384),
         ("claude-haiku-4-5", 4096, 4096),
         # The SDK's own non-streaming limit for this model is lower.
-        pytest.param("claude-opus-4-1-20250805", None, 8192, marks=needs_anthropic),
+        pytest.param("claude-opus-4-0", None, 8192, marks=needs_anthropic),
     ],
 )
 def test_anthropic_caps_non_streaming_output(model, requested, sent):

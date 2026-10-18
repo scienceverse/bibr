@@ -15,6 +15,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a failed search. The health probe still gives up on a resolver that does not
   answer within 10 s. A batch run at GPU speed, with 12 papers in flight each
   sending 8 searches at once, overloaded the resolver this way.
+- A meta-science paper's results section on how other studies share data
+  ("Data sharing", "Open science practices", "Reproducibility") was copied as
+  the paper's own `data_availability` in the default shadow mode, while its
+  real statement, "The codebook, data, and analysis code are available in this
+  OSF repository: …", was not recognised in any mode (#204). A section typed as
+  open data under a heading other than "Data/Code/Materials availability" that
+  is longer than a compact statement and never declares where the data are no
+  longer beats a declaration elsewhere in the paper, and a declaration whose
+  subject lists several items ("The codebook, data, and analysis code are …",
+  "The data, code, and materials are …") is now recognised.
 
 ### Changed
 
@@ -32,6 +42,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `config.json`), and `NER_PARSER_ENCODER` / `NER_PARSER_ENCODER_REVISION` (new)
   override it. `NER_PARSER_CKPT=scienceverse/bibr-parser-v4-5-gold` with
   `NER_PARSER_REVISION=ff50a83e7f5b73dcf6f8f973a1a6e3847ec429e6` keeps v4.5.
+
+- Refreshed `uv.lock` to releases at least a week old (as of 2026-10-10):
+  transformers 5.17.0, tokenizers 0.23.3, onnxruntime 1.31.0, anthropic
+  0.125.0, google-genai 2.29.0, instructor 1.17.0, pydantic 2.14.0, pyarrow
+  26.0.0, mlx-lm 0.32.0, vllm-mlx 0.4.1 and the rest of the lock. Held where
+  something else pins them: transformers below 5.18 and torch at 2.13.0
+  (vLLM 0.31.0 requires both), onnxruntime-gpu at 1.26.0 (the last CUDA 12
+  build), the CUDA libraries, openai below 3, and ruff at 0.15.22 (0.17
+  reformats Markdown code blocks and adds a lint rule).
 
 - The resolver's defaults are sized for batch runs: every paper in a bibr
   process now shares one cap of 8 resolver requests in flight
