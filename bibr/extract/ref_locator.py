@@ -3,7 +3,7 @@
 ``RefLocator`` owns everything about WHERE the paper's front matter and
 reference list live in ``sentences_df`` — canonical-section mapping, the
 metadata cutoff, reference-section discovery (header-alias override →
-canonical map → layout-hint → header-text fallbacks), and boundary-orphan
+canonical map → header-text → layout-hint fallbacks), and boundary-orphan
 reclaim. It never calls an LLM and never parses reference contents; those
 belong to ``bibr.extract.core_metadata`` and ``bibr.extract.ref_extractor``.
 """
@@ -41,6 +41,13 @@ _REF_HEADER_WORD_RE = re.compile(
     r"\b(?:references|bibliography|works cited|literature cited|reference list)\b",
     re.IGNORECASE,
 )
+
+
+def _is_printed_reference_heading(header: str) -> bool:
+    """True when *header* opens on an English references word or is, as a
+    whole, a references heading in any language the grammar lists."""
+    text = header.strip()
+    return bool(_REF_HEADER_RE.match(text) or _WHOLE_REF_HEADER_RE.match(text))
 
 
 def _is_reference_heading(header: str) -> bool:
@@ -418,7 +425,7 @@ class RefLocator:
         occasionally types a body section as REFERENCES while the literal
         "References" header gets UNKNOWN (exp #2: 09567976241258149), and the
         canonical-map path would then short-circuit on the wrong section.
-        Falls back to the canonical map, then to layout-hint and header-text
+        Falls back to the canonical map, then to header-text and layout-hint
         heuristics.
         """
         self.contents.reference_boundary_reason_flags = []
@@ -433,11 +440,26 @@ class RefLocator:
 
         has_section_col = "section_name" in self.sentences_df.columns
 
-        # Step 0: trust what is printed — a literal references heading wins.
+        # Step 0: trust what is printed — a literal references heading wins,
+        # in any language the heading grammar lists. English-only, a German
+        # "Literatur" list lost to a two-row body section the front-role model
+        # or the layout fallback offered first (EXCITE dev 40753, 32265). An
+        # English heading still goes first: with "References" and "13 Literatur"
+        # both printed over halves of one list, the later German one took the
+        # shorter half (EXCITE dev 32707).
+        section_names = (
+            list(reversed(self.sentences_df["section_name"].dropna().unique()))
+            if has_section_col
+            else []
+        )
+        printed = [str(name) for name in section_names if _REF_HEADER_RE.match(str(name).strip())]
+        printed += [
+            str(name)
+            for name in section_names
+            if str(name) not in printed and _is_printed_reference_heading(str(name))
+        ]
         if has_section_col:
-            for section_name in reversed(self.sentences_df["section_name"].dropna().unique()):
-                if not _REF_HEADER_RE.match(str(section_name).strip()):
-                    continue
+            for section_name in printed:
                 mask = self.sentences_df["section_name"] == section_name
                 if not mask.any():
                     continue
@@ -469,7 +491,17 @@ class RefLocator:
                 header_df: pd.DataFrame = self._drop_preceding_article_rows(
                     self.sentences_df[mask].copy()
                 )
-                if not header_df.empty:
+                if (
+                    not header_df.empty
+                    and not header_df["text"].astype(str).str.contains(YEARISH_RE).any()
+                ):
+                    # A list without a single year is a body heading the model
+                    # misread ("Auswertung" above two sentences of results).
+                    logger.info(
+                        f"Front-role model header: section '{model_header}' holds no "
+                        "dated row; not taking it as the reference section"
+                    )
+                elif not header_df.empty:
                     logger.info(
                         f"Front-role model header: using section '{model_header}' "
                         "as the reference section"
@@ -491,24 +523,12 @@ class RefLocator:
                 ref_df = self._reclaim_boundary_orphans(ref_df, ref_section_name)
                 return self._trim_terminal_boundary(ref_df)
 
-        # Fallback 1: layout detection found reference regions but section
-        # classification didn't identify a REFERENCES section (e.g., unusual
-        # or non-English header that didn't match aliases or zero-shot NLI).
-        if self.contents.layout_hints:
-            hint_labels = {label for label, _ in self.contents.layout_hints}
-            if "reference" in hint_labels or "reference_content" in hint_labels:
-                ref_df = self._drop_preceding_article_rows(
-                    self._collect_last_unknown_section_rows()
-                )
-                if not ref_df.empty:
-                    self._reclassify_as_references(ref_df)
-                    self._record_inferred_section(len(ref_df))
-                    return self._trim_terminal_boundary(ref_df)
-
-        # Fallback 2: a section whose whole heading reads as a references
+        # Fallback 1: a section whose whole heading reads as a references
         # heading (any listed language) that the classifier did not type
         # REFERENCES. The heading must match as a whole: a substring test took
         # "Revealed Preferences" or "Reference standard" for the bibliography.
+        # A printed heading beats the layout guess below, which takes the last
+        # unclassified section whatever it holds.
         if not has_section_col:
             raise ValueError("No section_name column in sentences_df (OCR may have failed)")
         for section_name in reversed(self.sentences_df["section_name"].dropna().unique()):
@@ -524,6 +544,20 @@ class RefLocator:
                     )
                     self._reclassify_as_references(fallback_df)
                     return self._trim_terminal_boundary(fallback_df)
+
+        # Fallback 2: layout detection found reference regions but section
+        # classification didn't identify a REFERENCES section (e.g., unusual
+        # or non-English header that didn't match aliases or zero-shot NLI).
+        if self.contents.layout_hints:
+            hint_labels = {label for label, _ in self.contents.layout_hints}
+            if "reference" in hint_labels or "reference_content" in hint_labels:
+                ref_df = self._drop_preceding_article_rows(
+                    self._collect_last_unknown_section_rows()
+                )
+                if not ref_df.empty:
+                    self._reclassify_as_references(ref_df)
+                    self._record_inferred_section(len(ref_df))
+                    return self._trim_terminal_boundary(ref_df)
 
         # Last resorts, reached only when no section holds the list: a heading
         # printed run-in at the start of a body row (its section stays a body

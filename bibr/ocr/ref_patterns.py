@@ -35,8 +35,9 @@ _REF_HEADER_WORDS = (
     # bibliografi / bibliografia / bibliografía / bibliografie / bibliography / bibliographie
     r"bibliogra(?:f|ph)(?:ia|ía|ie|y|i)?",
     # Germanic / Nordic
-    r"literatur(?:verzeichnis)?",
-    r"quellenverzeichnis",
+    r"literatur(?:verzeichnis)?(?:\s+und\s+quellen)?",
+    r"quellen(?:verzeichnis|\s+und\s+literatur)",
+    r"(?:zitierte|verwendete)(?:\s+und\s+(?:zitierte|verwendete))?\s+(?:quellen|literatur)",
     r"literatuur(?:lijst)?",
     r"referenties",
     r"litteratur",
