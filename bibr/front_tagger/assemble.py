@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from bibr.export.normalize import license_ids
 from bibr.front_tagger.contract import TaggerInput
@@ -284,6 +284,26 @@ class _Author:
     corresponding: bool = False
 
 
+def _unglue_letter_keys(authors: list[_Author], by_mark: dict[str, str]) -> None:
+    """Split a superscript letter key OCR glued to a family name ("Vegaa").
+
+    On a paper whose affiliations are keyed "a", "b", ..., an author with no
+    mark of their own whose family name ends in one of those keys printed it
+    as a superscript: "Vegaa" is "Vega" keyed "a".
+    """
+    letters = {key for key in by_mark if len(key) == 1 and key.islower()}
+    if not letters:
+        return
+    for author in authors:
+        if author.marks or not author.family:
+            continue
+        last = author.family[-1]
+        stem, key = last.text[:-1], last.text[-1:]
+        if key in letters and len(stem) >= 2 and stem[-1].isalpha():
+            author.family[-1] = replace(last, text=stem)
+            author.marks = [key]
+
+
 def _group_authors(spans: list[Span]) -> list[_Author]:
     """One author per given/family pair, in either printed order.
 
@@ -391,6 +411,7 @@ def assemble(
                 author.orcid = "-".join(m.groups()).upper()
 
     affiliation_by_mark, unmarked_affiliations = _affiliations(spans, inp, tags)
+    _unglue_letter_keys(authors, affiliation_by_mark)
     _link_affiliations(authors, affiliation_by_mark, unmarked_affiliations, problems)
     _assign_loose_emails(authors, spans)
     _flag_corresponding(authors, inp, tags)
