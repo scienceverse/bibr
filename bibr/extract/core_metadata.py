@@ -3072,6 +3072,33 @@ class CoreMetadataExtractor:
             )
         )
 
+    def _accepted_front_tagger(self, block_text: str):
+        """The front-matter tagger's answer when it may replace the LLM calls.
+
+        It must be on (``ML_FRONT_TAGGER_MODE=primary``), confident and
+        complete, and its title must be printed in the front-matter record the
+        resolver selected, so the tagger and the LLM context read the same
+        article on a multi-article page.
+        """
+        ml = self._settings.ml
+        result = getattr(self.contents, "front_tagger_result", None)
+        if result is None or getattr(ml, "front_tagger_mode", "off") != "primary":
+            return None
+        threshold = float(getattr(ml, "front_tagger_min_confidence", 0.9))
+        reasons = result.rejection_reasons(threshold)
+        title = result.title_keywords.title or ""
+        if not reasons and _normalize_for_grounding(title) not in _normalize_for_grounding(
+            block_text
+        ):
+            reasons.append("title_outside_selected_record")
+        if reasons:
+            logger.info(
+                "Front-matter tagger not used (hash=%s): %s", self.file_hash, ", ".join(reasons)
+            )
+            return None
+        logger.info("Front-matter tagger answer used (hash=%s)", self.file_hash)
+        return result
+
     async def _call_core_llm(
         self,
         full_text: str,
@@ -3090,6 +3117,7 @@ class CoreMetadataExtractor:
                 authors_text=authors_text,
                 classification_text=classification_text,
                 include_classification=not bool(self._settings.ml.paper_classifier_model_id),
+                tagged=self._accepted_front_tagger(full_text),
             )
         except (ProcessingError, UpstreamServiceError):
             raise

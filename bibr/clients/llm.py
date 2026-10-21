@@ -50,6 +50,7 @@ from bibr.utils.transient import is_transient_network_error
 if TYPE_CHECKING:
     from bibr.clients.providers.base import LlmProvider
     from bibr.clients.structured import StructuredBackend
+    from bibr.front_tagger.assemble import TaggedFrontMatter
     from bibr.utils.rate_limiter import AsyncLocalRateLimiter, AsyncRedisRateLimiter
 
 logger = logging.getLogger(__name__)
@@ -659,6 +660,11 @@ def llm_call_error(message: str, exc: BaseException) -> LlmCallError:
     """
     error_class = _classify_llm_failure(exc)
     return error_class(message, exc, cause=_failure_cause(error_class, exc))
+
+
+async def _ready(value):
+    """An awaitable that yields ``value``, to stand in a gather for a skipped call."""
+    return value
 
 
 def _recover_finished_response(
@@ -2736,6 +2742,7 @@ class LLMClient:
         authors_text: str | None = None,
         classification_text: str | None = None,
         include_classification: bool = True,
+        tagged: "TaggedFrontMatter | None" = None,
     ) -> CoreMetadataLLM:
         """Run title/keywords, authors, and optional classification concurrently.
 
@@ -2748,6 +2755,10 @@ class LLMClient:
         context slices for the authors and classification calls (see
         ``LLM_PER_TASK_CONTEXT``); ``None`` falls back to the full ``text``.
         Title/keywords always receives the full ``text``.
+
+        ``tagged`` is an accepted front-matter tagger answer
+        (``ML_FRONT_TAGGER_MODE=primary``): it stands in for the title/keywords
+        and authors calls, and only the classification call is made.
         """
         if getattr(self._settings.llm, "merged_core_metadata", False):
             try:
@@ -2780,10 +2791,13 @@ class LLMClient:
 
         # Start all three independent extraction calls together. They share the same fenced
         # front-matter prefix for provider cache reuse.
-        tasks = [
-            self.extract_title_keywords(text, file_hash=file_hash, boundary=boundary),
-            self.extract_authors(authors_text, file_hash=file_hash, boundary=boundary),
-        ]
+        if tagged is not None:
+            tasks = [_ready(tagged.title_keywords), _ready(tagged.byline)]
+        else:
+            tasks = [
+                self.extract_title_keywords(text, file_hash=file_hash, boundary=boundary),
+                self.extract_authors(authors_text, file_hash=file_hash, boundary=boundary),
+            ]
         if include_classification:
             tasks.append(
                 self.extract_paper_classification(

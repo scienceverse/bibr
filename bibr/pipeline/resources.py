@@ -136,6 +136,8 @@ class ResourceManager:
         self._segmenter: SentenceSegmenter | None = segmenter
         self._front_role = None
         self._front_role_resolved = False
+        self._front_tagger = None
+        self._front_tagger_resolved = False
         self._ocr: OcrBackend | None = None
         self._ocr_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._ocr_future: concurrent.futures.Future[OcrBackend] | None = None
@@ -255,6 +257,8 @@ class ResourceManager:
             release_front_role_classifier(self._front_role)
         self._front_role = None
         self._front_role_resolved = False
+        self._front_tagger = None
+        self._front_tagger_resolved = False
         if not self._owns_models:
             return
         # The NER parser singleton is process-global rather than an owned
@@ -297,6 +301,20 @@ class ResourceManager:
     @property
     def front_role(self):
         return self._front_role
+
+    def ensure_front_tagger(self):
+        """Return the front-matter tagger, loading it on first use.
+
+        ``None`` when ``ML_FRONT_TAGGER_MODE`` is off or the bundle cannot be
+        loaded; front matter then goes to the LLM as before.
+        """
+        if self._front_tagger_resolved:
+            return self._front_tagger
+        from bibr.front_tagger.runtime import load_front_tagger
+
+        self._front_tagger = load_front_tagger(self._settings)
+        self._front_tagger_resolved = self._front_tagger is not None
+        return self._front_tagger
 
     # -- OCR --
 

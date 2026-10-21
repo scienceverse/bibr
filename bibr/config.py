@@ -2027,6 +2027,31 @@ class MlOptions(_BibrSettings):
         description="Front-role probability of a non-title role above which a title seed cannot "
         "root a second front-matter record. 1.0 disables the veto.",
     )
+    # Front-matter tagger (bibr/front_tagger/): an encoder + CRF that labels the
+    # printed title, names, affiliations and abstract on the first two pages, so
+    # the title/keywords and authors LLM calls run only when it is unsure.
+    # Off by default until it is measured against the LLM on the dev sets.
+    front_tagger_mode: Literal["off", "primary"] = Field(
+        "off",
+        description="'primary' takes title, abstract, keywords and authors from the front-matter "
+        "tagger when it is confident and asks the LLM otherwise; 'off' always asks the LLM.",
+    )
+    front_tagger_model_id: str | None = Field(
+        None,
+        description="HF Hub repo id or local directory of the front-matter tagger's ONNX bundle "
+        "(an onnx/ directory with bibr_onnx.json). Null leaves the tagger off.",
+    )
+    front_tagger_revision: str | None = Field(
+        None,
+        description="Pinned revision of the front-matter tagger bundle on the Hub.",
+    )
+    front_tagger_min_confidence: float = Field(
+        0.9,
+        ge=0.0,
+        le=1.0,
+        description="Lowest tag posterior on the title and author names (and mean on the "
+        "abstract) at which the tagger's answer replaces the LLM calls.",
+    )
     classifiers_required: bool = Field(
         False,
         description="Fail readiness when a configured local classifier cannot be loaded. "

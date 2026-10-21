@@ -66,18 +66,18 @@ def test_full_page_reads_back_as_printed():
     assert tk.keywords == ["handedness", "heritability"]
     assert (tk.journal, tk.volume, tk.issue) == ("Laterality", "26", "3")
     assert (tk.first_page, tk.last_page) == ("65", "74")
-    names = [(a.given, a.family) for a in got.authors.authors]
+    names = [(a.given, a.family) for a in got.byline.authors]
     assert names == [("Thais", "de Oliveira"), ("Mary", "Jones"), ("Li", "Wei")]
-    affs = [a.affiliation for a in got.authors.authors]
+    affs = [a.affiliation for a in got.byline.authors]
     assert affs == [
         "Universidade de São Paulo, Brazil; University of Twente",
         "University of Twente",
         "Peking University",
     ]
-    jones = got.authors.authors[1]
+    jones = got.byline.authors[1]
     assert jones.email == "mary.jones@utwente.nl"
     assert jones.corresponding is True
-    assert not got.authors.authors[0].corresponding
+    assert not got.byline.authors[0].corresponding
     assert got.problems == []
     assert got.accepted(0.9)
 
@@ -93,7 +93,7 @@ def test_family_first_bylines_pair_up():
         ("GIVEN", "KL"),
     )
     got = assemble(inp, tags, [1.0] * len(tags))
-    assert [(a.given, a.family) for a in got.authors.authors] == [("J", "Smith"), ("KL", "Jones")]
+    assert [(a.given, a.family) for a in got.byline.authors] == [("J", "Smith"), ("KL", "Jones")]
     # One unmarked affiliation-free byline: nothing to link, nothing wrong.
     assert got.problems == []
 
@@ -168,7 +168,7 @@ def test_mark_ranges_expand():
         ("AFFILIATION", "Univ C"),
     )
     got = assemble(inp, tags, [1.0] * len(tags))
-    assert got.authors.authors[0].affiliation == "Univ A; Univ B; Univ C"
+    assert got.byline.authors[0].affiliation == "Univ A; Univ B; Univ C"
 
 
 def test_unmarked_affiliations_link_by_position():
@@ -190,7 +190,7 @@ def test_unmarked_affiliations_link_by_position():
         ("AFFILIATION", "Univ B"),
     )
     got = assemble(inp, tags, [1.0] * len(tags))
-    assert [a.affiliation for a in got.authors.authors] == ["Univ A", "Univ B"]
+    assert [a.affiliation for a in got.byline.authors] == ["Univ A", "Univ B"]
     assert got.problems == []
 
 
@@ -265,7 +265,7 @@ def test_no_title_or_authors_is_a_problem():
     got = assemble(inp, ["O"] * len(inp.words), [1.0] * len(inp.words))
     assert got.problems == ["no_title", "no_authors"]
     assert not got.title_keywords.title
-    assert got.authors.authors == []
+    assert got.byline.authors == []
 
 
 def test_orcid_and_license_normalised():
@@ -283,5 +283,5 @@ def test_orcid_and_license_normalised():
         ("LICENSE", "CC BY 4.0 license"),
     )
     got = assemble(inp, tags, [1.0] * len(tags))
-    assert got.authors.authors[0].orcid == "0000-0002-1825-009X"
+    assert got.byline.authors[0].orcid == "0000-0002-1825-009X"
     assert got.title_keywords.license == "CC BY 4.0"

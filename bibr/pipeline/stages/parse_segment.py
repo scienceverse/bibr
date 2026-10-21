@@ -68,6 +68,31 @@ async def _predict_front_roles(rm, ocr_regions, *, first_page_index: int):
     return predictions if isinstance(predictions, FrontRolePredictions) else None
 
 
+async def _tag_front_matter(rm, ocr_regions, *, first_page_index: int):
+    """Run the optional front-matter tagger off the event loop; never raise."""
+    ensure = getattr(rm, "ensure_front_tagger", None)
+    if ensure is None:
+        return None
+    try:
+        tagger = ensure()
+        if tagger is None:
+            return None
+        from bibr.extract.front_role import build_front_regions
+        from bibr.front_tagger.assemble import assemble
+        from bibr.front_tagger.contract import build_tagger_input
+
+        def run():
+            regions = build_front_regions(ocr_regions, first_page_index=first_page_index)
+            inp = build_tagger_input(regions, first_page_index=first_page_index)
+            tags, confidences = tagger.tag(inp)
+            return assemble(inp, tags, confidences)
+
+        return await asyncio.to_thread(run)
+    except Exception:  # noqa: BLE001 - the LLM still covers front matter
+        logger.warning("Front-matter tagging failed; the LLM reads the front matter", exc_info=True)
+        return None
+
+
 def _split_scanned_articles(fs) -> None:
     """Drop neighbouring articles' regions from the file's scanned pages; never raise."""
     try:
@@ -170,6 +195,9 @@ class ParseSegmentStage:
                     )
                     if predictions is not None:
                         contents.front_role_predictions = predictions
+                    contents.front_tagger_result = await _tag_front_matter(
+                        rm, fs.ocr_regions, first_page_index=ctx.config.start_page or 0
+                    )
 
                 assembler = parser.assembler
                 if len(assembler):

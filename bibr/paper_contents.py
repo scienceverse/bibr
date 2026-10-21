@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from bibr.document.model import DocumentLayer
     from bibr.extract.front_matter import FrontMatterResolution
     from bibr.extract.front_role import FrontRolePredictions
+    from bibr.front_tagger.assemble import TaggedFrontMatter
     from bibr.models import PaperMetadata, PaperReference
     from bibr.validation import ValidationIssue
 
@@ -854,6 +855,10 @@ class PaperContents:
     # the same key RegionSummary carries. None when the model is disabled or
     # the input had no OCR regions (native DOCX/JATS/HTML). Internal-only.
     front_role_predictions: "FrontRolePredictions | None" = None
+    # The front-matter tagger's answer (bibr/front_tagger/), assembled into the
+    # title/keywords and authors LLM responses. None unless
+    # ML_FRONT_TAGGER_MODE is on and the input had OCR regions. Internal-only.
+    front_tagger_result: "TaggedFrontMatter | None" = None
     # Warnings recorded during content-level extraction (e.g. reference
     # segmentation falling back to CRF); surfaced onto
     # ``Paper.processing_warnings`` in post_parse.

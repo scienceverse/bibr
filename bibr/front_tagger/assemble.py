@@ -62,8 +62,8 @@ class Span:
 
 @dataclass
 class TaggedFrontMatter:
-    title_keywords: TitleKeywordsLLM
-    authors: AuthorsLLM
+    title_keywords: TitleKeywordsLLM  # the title/keywords call's answer
+    byline: AuthorsLLM  # the authors call's answer
     #: Field -> confidence in [0, 1] (lowest word posterior; the abstract's is the mean).
     confidence: dict[str, float] = field(default_factory=dict)
     #: Why the tags alone cannot stand in for the LLM (empty when they can).
@@ -373,7 +373,7 @@ def assemble(
     ]
     return TaggedFrontMatter(
         title_keywords=title_keywords,
-        authors=AuthorsLLM(authors=author_rows),
+        byline=AuthorsLLM(authors=author_rows),
         confidence=confidence,
         problems=problems,
     )
