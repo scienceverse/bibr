@@ -68,3 +68,44 @@ def viterbi_decode(
         best_tags.reverse()
         best_tags_list.append(best_tags)
     return best_tags_list
+
+
+def _logsumexp(values: np.ndarray, axis: int) -> np.ndarray:
+    peak = values.max(axis=axis, keepdims=True)
+    peak = np.where(np.isfinite(peak), peak, 0.0)
+    return np.log(np.exp(values - peak).sum(axis=axis)) + np.squeeze(peak, axis=axis)
+
+
+def marginals(
+    emissions: np.ndarray,
+    *,
+    start_transitions: np.ndarray,
+    end_transitions: np.ndarray,
+    transitions: np.ndarray,
+) -> np.ndarray:
+    """Per-step tag posteriors ``(L, T)`` of one unpadded sequence (forward-backward).
+
+    ``marginals(...)[i, t]`` is the probability that step ``i`` carries tag
+    ``t`` under the CRF, summed over every path; the tagger reads it as the
+    confidence of the Viterbi tag.
+    """
+    emissions = np.asarray(emissions, dtype=np.float64)
+    if emissions.ndim != 2:
+        raise ValueError("emissions must be (L, T)")
+    length = emissions.shape[0]
+    if length == 0:
+        return np.zeros_like(emissions)
+    start = np.asarray(start_transitions, dtype=np.float64)
+    end = np.asarray(end_transitions, dtype=np.float64)
+    trans = np.asarray(transitions, dtype=np.float64)
+
+    alpha = np.empty_like(emissions)
+    alpha[0] = start + emissions[0]
+    for i in range(1, length):
+        alpha[i] = _logsumexp(alpha[i - 1][:, None] + trans, axis=0) + emissions[i]
+    beta = np.empty_like(emissions)
+    beta[-1] = end
+    for i in range(length - 2, -1, -1):
+        beta[i] = _logsumexp(trans + (emissions[i + 1] + beta[i + 1])[None, :], axis=1)
+    log_z = _logsumexp(alpha[-1] + end, axis=0)
+    return np.exp(alpha + beta - log_z)
