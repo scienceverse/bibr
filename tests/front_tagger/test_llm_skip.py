@@ -51,13 +51,39 @@ def _accepted(extractor, block_text):
 def test_confident_answer_in_the_selected_record_is_used():
     tagged = _tagged()
     block = "Running head: X\nPrevalence of  Handedness\nThais de Oliveira"
-    assert _accepted(_extractor(tagged), block) is tagged
+    used = _accepted(_extractor(tagged), block)
+    assert used.title_keywords is tagged.title_keywords
+    assert used.byline is tagged.byline
+
+
+def test_an_unlinked_byline_still_saves_the_title_call():
+    block = "Prevalence of Handedness\nThais de Oliveira"
+    used = _accepted(_extractor(_tagged(problems=["affiliations_unlinked"])), block)
+    assert used.title_keywords is not None and used.byline is None
+
+
+async def test_a_partial_answer_asks_only_for_the_missing_call():
+    client = LLMClient()
+    client.extract_title_keywords = mock.AsyncMock()
+    client.extract_authors = mock.AsyncMock(
+        return_value=AuthorsLLM(authors=[AuthorLLM(given="Ann", family="Lee")])
+    )
+    client.extract_paper_classification = mock.AsyncMock(
+        return_value=PaperClassificationLLM(paper_type="empirical")
+    )
+    tagged = _tagged()
+    tagged.byline = None
+    result = await client.extract_core_metadata("FULL", file_hash="h", tagged=tagged)
+    client.extract_title_keywords.assert_not_awaited()
+    client.extract_authors.assert_awaited_once()
+    assert result.title == "Prevalence of Handedness"
+    assert [a.family for a in result.authors] == ["Lee"]
 
 
 def test_off_unsure_incomplete_or_elsewhere_goes_to_the_llm():
     block = "Prevalence of Handedness\nThais de Oliveira"
     assert _accepted(_extractor(_tagged(), mode="off"), block) is None
     assert _accepted(_extractor(_tagged(conf=0.5)), block) is None
-    assert _accepted(_extractor(_tagged(problems=["affiliations_unlinked"])), block) is None
+    assert _accepted(_extractor(_tagged(problems=["no_title", "no_authors"])), block) is None
     assert _accepted(_extractor(_tagged(title="Another Article Entirely")), block) is None
     assert _accepted(_extractor(None), block) is None

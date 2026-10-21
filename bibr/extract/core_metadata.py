@@ -13,7 +13,7 @@ import difflib
 import logging
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -3073,31 +3073,57 @@ class CoreMetadataExtractor:
         )
 
     def _accepted_front_tagger(self, block_text: str):
-        """The front-matter tagger's answer when it may replace the LLM calls.
+        """The parts of the front-matter tagger's answer that may replace LLM calls.
 
-        It must be on (``ML_FRONT_TAGGER_MODE=primary``), confident and
-        complete, and its title must be printed in the front-matter record the
-        resolver selected, so the tagger and the LLM context read the same
-        article on a multi-article page.
+        The tagger must be on (``ML_FRONT_TAGGER_MODE=primary``) and its title
+        printed in the front-matter record the resolver selected, so the tagger
+        and the LLM context read the same article on a multi-article page.
+        Each part (title/keywords, authors) must then be complete and
+        confident on its own; a part that is not goes to its LLM call, so a
+        paper whose affiliations are printed past page 2 still saves the
+        title/keywords call.
         """
         ml = self._settings.ml
         result = getattr(self.contents, "front_tagger_result", None)
         if result is None or getattr(ml, "front_tagger_mode", "off") != "primary":
             return None
         threshold = float(getattr(ml, "front_tagger_min_confidence", 0.9))
-        reasons = result.rejection_reasons(threshold)
-        title = result.title_keywords.title or ""
-        if not reasons and _normalize_for_grounding(title) not in _normalize_for_grounding(
-            block_text
-        ):
-            reasons.append("title_outside_selected_record")
-        if reasons:
+        title = (result.title_keywords.title if result.title_keywords else None) or ""
+        if not title or _normalize_for_grounding(title) not in _normalize_for_grounding(block_text):
+            reasons = result.title_reasons(threshold) or ["title_outside_selected_record"]
             logger.info(
                 "Front-matter tagger not used (hash=%s): %s", self.file_hash, ", ".join(reasons)
             )
             return None
-        logger.info("Front-matter tagger answer used (hash=%s)", self.file_hash)
-        return result
+        title_reasons = result.title_reasons(threshold)
+        byline_reasons = result.byline_reasons(threshold)
+        if title_reasons and byline_reasons:
+            logger.info(
+                "Front-matter tagger not used (hash=%s): %s",
+                self.file_hash,
+                ", ".join(title_reasons + byline_reasons),
+            )
+            return None
+        logger.info(
+            "Front-matter tagger answer used for %s (hash=%s)%s",
+            " and ".join(
+                part
+                for part, reasons in (
+                    ("title/keywords", title_reasons),
+                    ("authors", byline_reasons),
+                )
+                if not reasons
+            ),
+            self.file_hash,
+            f"; LLM asked for the rest: {', '.join(title_reasons + byline_reasons)}"
+            if title_reasons or byline_reasons
+            else "",
+        )
+        return replace(
+            result,
+            title_keywords=None if title_reasons else result.title_keywords,
+            byline=None if byline_reasons else result.byline,
+        )
 
     async def _call_core_llm(
         self,

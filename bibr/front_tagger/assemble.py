@@ -61,31 +61,44 @@ class Span:
     confidence: float  # lowest word confidence in the span
 
 
+_TITLE_PROBLEMS = frozenset({"no_title"})
+
+
 @dataclass
 class TaggedFrontMatter:
-    title_keywords: TitleKeywordsLLM  # the title/keywords call's answer
-    byline: AuthorsLLM  # the authors call's answer
+    """The tagger's two answers. A part set to ``None`` goes to its LLM call."""
+
+    title_keywords: TitleKeywordsLLM | None  # the title/keywords call's answer
+    byline: AuthorsLLM | None  # the authors call's answer
     #: Field -> confidence in [0, 1] (lowest word posterior; the abstract's is the mean).
     confidence: dict[str, float] = field(default_factory=dict)
-    #: Why the tags alone cannot stand in for the LLM (empty when they can).
+    #: What the tags leave undecided; "no_title" holds back the title/keywords
+    #: answer, every other problem the authors answer.
     problems: list[str] = field(default_factory=list)
 
-    def accepted(self, min_confidence: float) -> bool:
-        """Whether the tags can replace the title/keywords and authors calls."""
-        if self.problems:
-            return False
-        needed = ("title", "authors")
-        if any(self.confidence.get(name, 0.0) < min_confidence for name in needed):
-            return False
-        return self.confidence.get("abstract", 1.0) >= min_confidence
+    def _low(self, names: tuple[str, ...], min_confidence: float) -> list[str]:
+        return [
+            f"low_confidence_{name}"
+            for name in names
+            if (value := self.confidence.get(name)) is not None and value < min_confidence
+        ]
+
+    def title_reasons(self, min_confidence: float) -> list[str]:
+        """Why the title/keywords answer cannot replace its call (empty when it can)."""
+        problems = [p for p in self.problems if p in _TITLE_PROBLEMS]
+        return problems + self._low(("title", "abstract"), min_confidence)
+
+    def byline_reasons(self, min_confidence: float) -> list[str]:
+        """Why the authors answer cannot replace its call (empty when it can)."""
+        problems = [p for p in self.problems if p not in _TITLE_PROBLEMS]
+        return problems + self._low(("authors",), min_confidence)
 
     def rejection_reasons(self, min_confidence: float) -> list[str]:
-        reasons = list(self.problems)
-        for name in ("title", "authors", "abstract"):
-            value = self.confidence.get(name)
-            if value is not None and value < min_confidence:
-                reasons.append(f"low_confidence_{name}")
-        return reasons
+        return self.title_reasons(min_confidence) + self.byline_reasons(min_confidence)
+
+    def accepted(self, min_confidence: float) -> bool:
+        """Whether the tags can replace both the title/keywords and authors calls."""
+        return not self.rejection_reasons(min_confidence)
 
 
 def _field(tag: str) -> str | None:

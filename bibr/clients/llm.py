@@ -2757,8 +2757,9 @@ class LLMClient:
         Title/keywords always receives the full ``text``.
 
         ``tagged`` is an accepted front-matter tagger answer
-        (``ML_FRONT_TAGGER_MODE=primary``): it stands in for the title/keywords
-        and authors calls, and only the classification call is made.
+        (``ML_FRONT_TAGGER_MODE=primary``): each part it carries stands in for
+        its call (title/keywords, authors); a part left ``None`` is asked of
+        the LLM as usual.
         """
         if getattr(self._settings.llm, "merged_core_metadata", False):
             try:
@@ -2791,13 +2792,16 @@ class LLMClient:
 
         # Start all three independent extraction calls together. They share the same fenced
         # front-matter prefix for provider cache reuse.
-        if tagged is not None:
-            tasks = [_ready(tagged.title_keywords), _ready(tagged.byline)]
-        else:
-            tasks = [
-                self.extract_title_keywords(text, file_hash=file_hash, boundary=boundary),
-                self.extract_authors(authors_text, file_hash=file_hash, boundary=boundary),
-            ]
+        tagged_title = tagged.title_keywords if tagged is not None else None
+        tagged_byline = tagged.byline if tagged is not None else None
+        tasks = [
+            _ready(tagged_title)
+            if tagged_title is not None
+            else self.extract_title_keywords(text, file_hash=file_hash, boundary=boundary),
+            _ready(tagged_byline)
+            if tagged_byline is not None
+            else self.extract_authors(authors_text, file_hash=file_hash, boundary=boundary),
+        ]
         if include_classification:
             tasks.append(
                 self.extract_paper_classification(
