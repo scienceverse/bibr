@@ -312,3 +312,54 @@ def test_superscript_keys_symbol_runs_and_orcid_icons():
     # "**" is one key with no affiliation behind it: a symbol, not a lost list.
     assert (second.family, second.corresponding) == ("He", False)
     assert got.problems == []
+
+
+def test_letter_keys_glued_to_family_names():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Juan Vegaa, Ana Mallenb,c"),
+        ("text", "a Univ A"),
+        ("text", "b Univ B"),
+        ("text", "c Univ C"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Juan"),
+        ("FAMILY", "Vegaa"),
+        ("GIVEN", "Ana"),
+        ("FAMILY", "Mallenb"),
+        ("AUTHOR_MARK", "c"),
+        ("AFF_MARK", "a"),
+        ("AFFILIATION", "Univ A"),
+        ("AFF_MARK", "b"),
+        ("AFFILIATION", "Univ B"),
+        ("AFF_MARK", "c"),
+        ("AFFILIATION", "Univ C"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags))
+    rows = [(a.family, a.affiliation) for a in got.byline.authors]
+    # "Mallenb" carries a mark of its own, so its last letter stays: the rule
+    # only splits an unmarked name.
+    assert rows == [("Vega", "Univ A"), ("Mallenb", "Univ C")]
+
+
+def test_digit_keyed_names_keep_their_last_letter():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Li Costa, Juan Vega1"),
+        ("text", "1 Univ A"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Li"),
+        ("FAMILY", "Costa"),
+        ("GIVEN", "Juan"),
+        ("FAMILY", "Vega"),
+        ("AUTHOR_MARK", "1"),
+        ("AFF_MARK", "1"),
+        ("AFFILIATION", "Univ A"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags))
+    assert [a.family for a in got.byline.authors] == ["Costa", "Vega"]
