@@ -6,8 +6,11 @@ trained on and the CRF parameters; ``model.onnx`` maps ``input_ids``,
 ``attention_mask`` and ``token_features`` to ``emissions``.
 
 The input string is tokenized without special tokens. Each subtoken takes the
-feature row of the word its offsets overlap (a zero row between regions), and
-a word's tag and confidence are those of its first subtoken. Inputs longer
+feature row of the first word its offsets overlap (a zero row between
+regions), and a word's tag and confidence are those of the first subtoken that
+starts in it. A word no subtoken starts in (``","`` folded into ``"Smith,"``,
+most kanji under a SentencePiece vocabulary) takes the ``I-`` form of the tag
+of the subtoken that covers it, the label training gives it. Inputs longer
 than the bundle's ``max_length`` run in overlapping windows; every token keeps
 the emissions of the window it sits deepest in, and one CRF pass decodes the
 stitched sequence.
@@ -32,19 +35,50 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _word_of_tokens(offsets: list[tuple[int, int]], inp: TaggerInput) -> list[int]:
-    """Index of the word each token overlaps, or -1 (whitespace, region breaks)."""
-    out: list[int] = []
+def _words_of_tokens(offsets: list[tuple[int, int]], inp: TaggerInput) -> list[list[int]]:
+    """Indexes of the words each token overlaps, in order; empty for whitespace
+    and region breaks."""
+    out: list[list[int]] = []
     w = 0
     words = inp.words
     for start, end in offsets:
         while w < len(words) and words[w].end <= start:
             w += 1
-        if w < len(words) and start < words[w].end and end > words[w].start:
-            out.append(w)
-        else:
-            out.append(-1)
+        hit: list[int] = []
+        k = w
+        while k < len(words) and words[k].start < end:
+            if words[k].end > start:
+                hit.append(k)
+            k += 1
+        out.append(hit)
     return out
+
+
+def _inside(tag: str) -> str:
+    return tag if tag == "O" else f"I-{tag[2:]}"
+
+
+def _word_tags(
+    words_of: list[list[int]], token_tags: list[str], token_conf: list[float], n_words: int
+) -> tuple[list[str], list[float]]:
+    """Word tags from token tags: a word's own first subtoken decides; a word
+    only covered by a token that starts in an earlier word continues it."""
+    tags = ["O"] * n_words
+    conf = [1.0] * n_words
+    own: set[int] = set()
+    covered: set[int] = set()
+    for hit, tag, p in zip(words_of, token_tags, token_conf, strict=True):
+        if not hit:
+            continue
+        first = hit[0]
+        if first not in own:
+            own.add(first)
+            tags[first], conf[first] = tag, p
+        for w in hit[1:]:
+            if w not in own and w not in covered:
+                covered.add(w)
+                tags[w], conf[w] = _inside(tag), p
+    return tags, conf
 
 
 def _windows(length: int, size: int) -> list[tuple[int, int]]:
@@ -115,12 +149,12 @@ class OnnxFrontTagger:
             return [], []
         encoding = self.tokenizer.encode(inp.text, add_special_tokens=False)
         ids = np.asarray(encoding.ids, dtype=np.int64)
-        word_of = _word_of_tokens(list(encoding.offsets), inp)
+        words_of = _words_of_tokens(list(encoding.offsets), inp)
         feats = np.zeros((len(ids), len(FEATURE_KEYS)), dtype=np.float32)
         rows = np.asarray(inp.features, dtype=np.float32)
-        for t, w in enumerate(word_of):
-            if w >= 0:
-                feats[t] = rows[w]
+        for t, hit in enumerate(words_of):
+            if hit:
+                feats[t] = rows[hit[0]]
 
         emissions = np.zeros((len(ids), len(self.tags)), dtype=np.float32)
         depth = np.full(len(ids), -1, dtype=np.int64)
@@ -141,16 +175,12 @@ class OnnxFrontTagger:
         path = viterbi_decode(emissions[None], np.ones((1, len(ids)), dtype=bool), **crf)[0]
         posterior = marginals(emissions, **crf)
 
-        tags = ["O"] * len(inp.words)
-        conf = [1.0] * len(inp.words)
-        seen: set[int] = set()
-        for t, w in enumerate(word_of):
-            if w < 0 or w in seen:
-                continue
-            seen.add(w)
-            tags[w] = self.tags[path[t]]
-            conf[w] = float(posterior[t, path[t]])
-        return tags, conf
+        return _word_tags(
+            words_of,
+            [self.tags[k] for k in path],
+            [float(posterior[t, k]) for t, k in enumerate(path)],
+            len(inp.words),
+        )
 
 
 _CACHE: dict[tuple[str, str | None], OnnxFrontTagger | None] = {}

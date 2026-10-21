@@ -147,3 +147,33 @@ def test_loader_reads_a_local_bundle(tmp_path):
     )
     assert isinstance(load_front_tagger(settings), OnnxFrontTagger)
     reset_front_tagger_cache()
+
+
+def test_words_inside_a_merged_token_continue_its_tag():
+    from bibr.front_tagger.runtime import _word_tags, _words_of_tokens
+
+    # "Smith," as one token, then CJK "山田太郎" as two tokens ("山田", "太郎").
+    inp = tagger_input(("text", "Smith, 山田太郎"))
+    assert [w.text for w in inp.words] == ["Smith", ",", "山", "田", "太", "郎"]
+    words_of = _words_of_tokens([(0, 6), (7, 9), (9, 11)], inp)
+    assert words_of == [[0, 1], [2, 3], [4, 5]]
+    tags, conf = _word_tags(
+        words_of, ["B-FAMILY", "B-FAMILY", "B-GIVEN"], [0.9, 0.8, 0.7], len(inp.words)
+    )
+    assert tags == ["B-FAMILY", "I-FAMILY", "B-FAMILY", "I-FAMILY", "B-GIVEN", "I-GIVEN"]
+    assert conf == [0.9, 0.9, 0.8, 0.8, 0.7, 0.7]
+
+
+def test_a_word_a_token_starts_in_keeps_that_tokens_tag():
+    from bibr.front_tagger.runtime import _word_tags, _words_of_tokens
+
+    # Tokens "ab c", "d", "ef": "cd" is covered by "ab c" but its own token is
+    # "d", the first token whose first word it is (training labels "d" with it).
+    inp = tagger_input(("text", "ab cd ef"))
+    words_of = _words_of_tokens([(0, 4), (4, 5), (6, 8)], inp)
+    assert words_of == [[0, 1], [1], [2]]
+    tags, _ = _word_tags(words_of, ["O", "O", "B-TITLE"], [1.0, 1.0, 0.6], 3)
+    assert tags == ["O", "O", "B-TITLE"]
+    tags, conf = _word_tags(words_of, ["B-TITLE", "B-ABSTRACT", "I-ABSTRACT"], [0.9, 0.5, 0.6], 3)
+    assert tags == ["B-TITLE", "B-ABSTRACT", "I-ABSTRACT"]
+    assert conf == [0.9, 0.5, 0.6]
