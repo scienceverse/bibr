@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 from bibr.extract.front_role_features import NON_TEXT_LABELS, FrontRegion, region_features
 
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 
 #: Pages of front matter the tagger reads (counted from the paper's first page).
 MAX_PAGES = 2
@@ -107,13 +107,16 @@ FEATURE_DIM = len(FEATURE_KEYS)
 # Han, kana and Hangul characters are words of their own: unspaced CJK text
 # would otherwise come out as one word carrying one tag.
 _CJK = "[぀-ヿ㐀-䶿一-鿿豈-﫿가-힯]"
-_LETTERS = rf"(?:(?!{_CJK})[^\W\d_])+"
+# Superscript and subscript digits ("Neri-Suárez²") are no letters: they are
+# affiliation keys, and split off like ASCII digits.
+_SCRIPT_DIGITS = "[\u00b2\u00b3\u00b9\u2070\u2074-\u2079\u2080-\u2089]"
+_LETTERS = rf"(?:(?!{_CJK}|{_SCRIPT_DIGITS})[^\W\d_])+"
 # A letter run may carry inner apostrophes and hyphens (O'Neil, Jean-Pierre);
 # digits and every other character stand alone, so a superscript key glued to
 # a name ("Smith1,2") splits into "Smith", "1", ",", "2".
-WORD_RE = re.compile(rf"{_CJK}|{_LETTERS}(?:['’\-]{_LETTERS})*|\d+|\S")
+WORD_RE = re.compile(rf"{_CJK}|{_LETTERS}(?:['’\-]{_LETTERS})*|\d+|{_SCRIPT_DIGITS}+|\S")
 _CJK_RE = re.compile(_CJK)
-_MARKS = frozenset("*†‡§¶#‖⁎∗")
+_MARKS = frozenset("*†‡§¶#‖⁎∗☯✝")
 
 
 @dataclass(frozen=True)

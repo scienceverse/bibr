@@ -285,3 +285,30 @@ def test_orcid_and_license_normalised():
     got = assemble(inp, tags, [1.0] * len(tags))
     assert got.byline.authors[0].orcid == "0000-0002-1825-009X"
     assert got.title_keywords.license == "CC BY 4.0"
+
+
+def test_superscript_keys_symbol_runs_and_orcid_icons():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Ana Neri-Suárez²,* Bo HeID**"),
+        ("text", "2 Univ B"),
+        ("text", "* Corresponding author"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Ana"),
+        ("FAMILY", "Neri-Suárez"),
+        ("AUTHOR_MARK", "²,*"),
+        ("GIVEN", "Bo"),
+        ("FAMILY", "HeID"),
+        ("AUTHOR_MARK", "**"),
+        ("AFF_MARK", "2"),
+        ("AFFILIATION", "Univ B"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags))
+    first, second = got.byline.authors
+    assert (first.family, first.affiliation, first.corresponding) == ("Neri-Suárez", "Univ B", True)
+    # "**" is one key with no affiliation behind it: a symbol, not a lost list.
+    assert (second.family, second.corresponding) == ("He", False)
+    assert got.problems == []
