@@ -23,6 +23,7 @@ class LlmClient(Protocol):
         authors_text: str | None = None,
         classification_text: str | None = None,
         include_classification: bool = True,
+        tagged: Any = None,
     ) -> Any: ...
     async def extract_references(
         self, text: str, file_hash: str = "unknown", start_index: int = 1
