@@ -16,6 +16,7 @@ confidence bar, the caller asks the LLM as before.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
@@ -25,7 +26,7 @@ from bibr.schemas import AuthorLLM, AuthorsLLM, TitleKeywordsLLM
 
 _NAME_FIELDS = frozenset({"GIVEN", "FAMILY"})
 _LIST_SEPARATORS = frozenset({",", ";", "，", "；", "、"})
-_SYMBOL_MARKS = frozenset("*†‡§¶#‖⁎∗✉")
+_SYMBOL_MARKS = frozenset("*†‡§¶#‖⁎∗✉☯✝")
 _RANGE_DASHES = frozenset("-–—")
 _TRIM = " \t\n,;:.·|"
 _ORCID_RE = re.compile(r"(\d{4})[\s-]?(\d{4})[\s-]?(\d{4})[\s-]?(\d{3}[\dXx])")
@@ -160,23 +161,44 @@ def _clean(text: str | None) -> str | None:
     return text or None
 
 
+def _is_symbol(key: str) -> bool:
+    return not any(c.isalnum() for c in key)
+
+
 def _mark_keys(words: list[str]) -> list[str]:
-    """Affiliation keys from mark words: "1", ",", "2", "–", "4" -> 1, 2, 3, 4."""
+    """Affiliation keys from mark words: "1", ",", "2", "–", "4" -> 1, 2, 3, 4.
+
+    Superscript digits read as plain ones ("²" keys the "2" affiliation), and
+    a run of one repeated symbol is one key ("*", "*" -> "**").
+    """
     keys: list[str] = []
     pending_range = False
-    for word in words:
+    previous_symbol = False
+    for raw in words:
+        word = unicodedata.normalize("NFKC", raw)
         if word in _LIST_SEPARATORS:
-            pending_range = False
+            pending_range = previous_symbol = False
             continue
         if word in _RANGE_DASHES:
             pending_range = bool(keys) and keys[-1].isdigit()
+            previous_symbol = False
             continue
-        if pending_range and word.isdigit() and int(word) > int(keys[-1]):
+        if previous_symbol and _is_symbol(word) and set(word) == set(keys[-1]):
+            keys[-1] += word
+        elif pending_range and word.isdigit() and int(word) > int(keys[-1]):
             keys.extend(str(n) for n in range(int(keys[-1]) + 1, int(word) + 1))
         else:
             keys.append(word)
         pending_range = False
+        previous_symbol = _is_symbol(word)
     return keys
+
+
+def _strip_orcid_icon(name: str) -> str:
+    """Drop an ORCID icon OCR glued to a name as "ID" ("HeID" -> "He")."""
+    if len(name) > 3 and name.endswith("ID") and name[-3].islower():
+        return name[:-2]
+    return name
 
 
 def _license_short(printed: str | None) -> str | None:
@@ -363,7 +385,7 @@ def assemble(
     author_rows = [
         AuthorLLM(
             given=" ".join(s.text for s in a.given),
-            family=" ".join(s.text for s in a.family),
+            family=_strip_orcid_icon(" ".join(s.text for s in a.family)),
             affiliation=a.affiliation,
             email=a.email,
             orcid=a.orcid,
@@ -420,7 +442,7 @@ def _link_affiliations(
             for key in author.marks:
                 text = by_mark.get(key)
                 if text is None:
-                    if key not in _SYMBOL_MARKS and "affiliation_mark_unresolved" not in problems:
+                    if not _is_symbol(key) and "affiliation_mark_unresolved" not in problems:
                         # A digit or letter key with no affiliation behind it:
                         # the list was not read, so the LLM resolves it.
                         problems.append("affiliation_mark_unresolved")
@@ -449,8 +471,6 @@ def _link_affiliations(
 
 
 def _fold(text: str) -> str:
-    import unicodedata
-
     decomposed = unicodedata.normalize("NFKD", text)
     return "".join(c for c in decomposed if c.isalnum() and not unicodedata.combining(c)).lower()
 
@@ -491,10 +511,16 @@ def _flag_corresponding(authors: list[_Author], inp: TaggerInput, tags) -> None:
     if not cue_regions:
         return
     symbols = {
-        inp.words[i].text
+        key
         for indices in cue_regions
-        for i in indices
-        if inp.words[i].text in _SYMBOL_MARKS and _field(tags[i]) != "AUTHOR_MARK"
+        for key in _mark_keys(
+            [
+                inp.words[i].text
+                for i in indices
+                if _is_symbol(inp.words[i].text) and _field(tags[i]) != "AUTHOR_MARK"
+            ]
+        )
+        if key in _SYMBOL_MARKS or len(set(key)) == 1 and key[0] in _SYMBOL_MARKS
     }
     cue_text = _fold("".join(inp.words[i].text for indices in cue_regions for i in indices))
     for author in authors:
