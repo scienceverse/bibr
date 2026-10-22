@@ -70,8 +70,30 @@ picture inside nested drawings is one figure.
 **HTML and ePub limits.** An HTML file over 48 MiB is rejected at validation
 as invalid input, before the pure-Python html5lib parser reads it. HTML is
 read in the encoding its byte-order mark names (UTF-8, or UTF-16 as Word's
-"Save as Unicode" writes it), else its `<meta charset>`; an ePub chapter in
-the encoding its byte-order mark or XML declaration names.
+"Save as Unicode" writes it), else its `<meta charset>`, else as UTF-8 when
+the bytes decode as UTF-8 and as windows-1252 when they do not; an ePub
+chapter in the encoding its byte-order mark or XML declaration names.
+
+**Headings and reference lists in DOCX and HTML.** DOCX headings come from
+Word's heading styles (`Title`, `Heading 1`-`6`) and outline levels; HTML
+headings from `<h1>`-`<h6>`. A manuscript whose author bolded the headings by
+hand has neither, so in a document with no heading style, outline level or
+heading element a short paragraph that is bold throughout is a level-1
+heading (not one opening "Figure" or "Table", ending in `,` `;` `:`, or a
+sentence of more than six words ending in a full stop). In any document, a
+paragraph whose whole text is a references heading ("References", "6.
+Literatur", the languages of the reference-heading grammar) heads the
+reference list. A list a reference manager generated is found even under no
+heading: in DOCX, paragraphs in the `Bibliography`, `EndNote Bibliography` or
+`Citavi Bibliography Entry` style or inside an EndNote, Zotero, Mendeley,
+Citavi, Papers or Word bibliography field; in HTML, Word's `MsoBibliography`
+and `EndNoteBibliography` paragraphs and a container named `refs`,
+`references`, `bibliography`, `csl-bib-body`, `ref-list` or `reflist`
+(pandoc and Quarto's citeproc output). Such a list under no references
+heading gets a "References" section. A paragraph without a year after the
+list ends it, and goes back to the section open before the references
+heading. HTML text outside any paragraph element (`<div>text</div>`, a
+`<dd>`) is read as a paragraph of its own, as a browser lays it out.
 
 **HTML table limits** (HTML and ePub tables, and the table HTML OCR returns).
 A `rowspan` ends at the table's last row, as a browser draws it, and more

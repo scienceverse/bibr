@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A Word manuscript whose headings are Normal paragraphs bolded by hand now
+  gets its sections and its reference list (#215). Before, such a .docx (about
+  one in four new PsyArXiv preprints is a .docx) was read without a single
+  section, so `bib` came out empty with `REF_SECTION_NOT_FOUND` although the
+  references were in the file. In a document without heading styles, a short
+  paragraph that is bold throughout is now a heading; in any document, a
+  paragraph reading "References" (or "Reference list", "Literatur", ...) heads
+  the list; outline levels count as heading levels; and a list that EndNote,
+  Zotero, Mendeley, Citavi or Word generated (its `EndNote Bibliography` or
+  `Bibliography` style, or its `ADDIN EN.REFLIST`, `ZOTERO_BIBL`, `Mendeley
+  Bibliography` or `BIBLIOGRAPHY` field) is found even under no heading. The
+  tables and notes after a generated list are no longer read as references.
+- HTML and ePub text outside a paragraph element is no longer dropped. A page
+  whose paragraphs are `<div>`s (as ScienceDirect writes them) failed with
+  "HTML input did not contain parseable article content", and a pandoc or
+  Quarto page or ePub lost its whole reference list (`<div class="csl-entry">`
+  entries); a reference list written as a definition list is read with each
+  entry's label. HTML that Word or Google Docs exports from a manuscript with
+  hand-bolded headings gets its sections and references as the .docx now
+  does, and a chapter's `<title>` in an ePub stays out of the text.
+- HTML references headings beyond "References", "Bibliography" and "Works
+  cited" ("Literature Cited", "Reference list", "Literaturverzeichnis", ...)
+  now type the section as references, so its list is read natively; and a
+  page's first heading taken as its missing title no longer turns a
+  "References" heading into the title.
+- A UTF-8 HTML file without an encoding declaration (no byte-order mark, no
+  `<meta charset>`) is now read as UTF-8 instead of windows-1252, which turned
+  "Café" into "CafÃ©".
+
 ## [0.7.4] - 2026-10-18
 
 The reference parser is now v5.1 (UltraBERT-150M), which matches references far better
