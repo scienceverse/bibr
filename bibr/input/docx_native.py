@@ -1,9 +1,13 @@
 """Native DOCX parser: python-docx Document → PaperContents.
 
 Heading levels come directly from Word styles (``Title``,
-``Heading 1``-``Heading 6``), giving a faithful multi-level hierarchy at
-parse time. This depth is intentionally **not** preserved in the final
-output: the shared post-parse stage runs ``assign_hierarchy_from_top_level``
+``Heading 1``-``Heading 6``) and outline levels, giving a faithful multi-level
+hierarchy at parse time. A manuscript whose headings were bolded by hand has
+neither: there a short paragraph bold throughout is a level-1 heading, and in
+any document a paragraph reading "References" heads the reference list, as
+does a reference manager's generated list under no heading (#215,
+:mod:`bibr.input.heading_cues`). This depth is intentionally **not** preserved
+in the final output: the shared post-parse stage runs ``assign_hierarchy_from_top_level``
 (``pipeline/stages/post_parse.py``), which canonicalizes every *unnumbered*
 heading to the IMRaD 1-2 level shape — the same structure the PDF path
 produces — so DOCX and PDF outputs stay uniform. Only numbered headings
@@ -30,6 +34,12 @@ import pandas as pd
 from bibr.input.docx_footnotes import load_endnotes as _load_endnotes
 from bibr.input.docx_footnotes import load_footnotes as _load_footnotes
 from bibr.input.docx_omml import omml_to_text as _omml_to_text
+from bibr.input.heading_cues import (
+    REFERENCES_HEADER,
+    names_reference_list,
+    reads_as_bold_heading,
+    reads_as_reference_heading,
+)
 from bibr.paper_contents import (
     CanonicalSection,
     PaperContents,
@@ -48,7 +58,7 @@ from bibr.structure.float_labels import FIGURE_WORD, SUPPLEMENT_WORD, TABLE_WORD
 from bibr.structure.html_table import rendered_size as _rendered_size
 from bibr.structure.section_tree import infer_level_from_numbering
 from bibr.structure.xref_utils import URL_RE, detect_xrefs
-from bibr.utils.text import clean_extracted_url
+from bibr.utils.text import YEARISH_RE, clean_extracted_url
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +175,45 @@ _HEADING_STYLE_LEVELS: dict[str, int] = {
     "heading 4": 4,
     "heading 5": 5,
     "heading 6": 6,
+    # The heading reference managers insert above the list they generate.
+    "EndNote Bibliography Title": 1,
+    "Citavi Bibliography Heading": 1,
 }
+
+# Paragraph styles reference managers give each entry of the list they
+# generate: Word's own and the one Zotero and Mendeley use, EndNote's and
+# Citavi's. A style based on one of them counts too.
+_BIBLIOGRAPHY_STYLES: frozenset[str] = frozenset(
+    {"Bibliography", "EndNote Bibliography", "Citavi Bibliography Entry"}
+)
+
+# The field instruction of a generated reference list: EndNote's
+# "ADDIN EN.REFLIST", Zotero's "ADDIN ZOTERO_BIBL", Mendeley's "ADDIN Mendeley
+# Bibliography CSL_BIBLIOGRAPHY", Citavi's, Papers' and Word's own BIBLIOGRAPHY
+# field. Only the first words are read: a citation field's instruction carries
+# the cited works' titles, which can hold any word.
+_BIBLIOGRAPHY_FIELD_RE = re.compile(
+    r"\s*(?:ADDIN\s+(?:EN\.REFLIST|ZOTERO_BIBL|Mendeley\s+Bibliography|CSL_BIBLIOGRAPHY"
+    r"|CITAVI\.BIBLIOGRAPHY|PAPERS2_BIBLIOGRAPHY)|BIBLIOGRAPHY)\b",
+    re.IGNORECASE,
+)
+
+# Heading styles that do not show the author used heading styles for the
+# sections: the paper's title, and the heading a reference manager inserts.
+_NON_SECTION_HEADING_STYLES = frozenset(
+    {"Title", "Subtitle", "EndNote Bibliography Title", "Citavi Bibliography Heading"}
+)
+
+_W_OUTLINE_LVL = f"{{{_NS['w']}}}pPr/{{{_NS['w']}}}outlineLvl"
+_W_RPR_B = f"{{{_NS['w']}}}rPr/{{{_NS['w']}}}b"
+_W_R_STYLE = f"{{{_NS['w']}}}rPr/{{{_NS['w']}}}rStyle"
+_W_T = f"{{{_NS['w']}}}t"
+_W_P = f"{{{_NS['w']}}}p"
+_W_FLD_CHAR = f"{{{_NS['w']}}}fldChar"
+_W_FLD_CHAR_TYPE = f"{{{_NS['w']}}}fldCharType"
+_W_INSTR_TEXT = f"{{{_NS['w']}}}instrText"
+_W_FLD_SIMPLE = f"{{{_NS['w']}}}fldSimple"
+_W_INSTR = f"{{{_NS['w']}}}instr"
 
 
 @dataclass
@@ -294,29 +342,175 @@ class _Styles:
                 self._by_id.setdefault(style_id, style)
             if style.get(_W_TYPE) == "paragraph" and style.get(_W_DEFAULT) in _ON:
                 self._default = style
-        self._resolved: dict[str | None, tuple[str | None, bool]] = {}
+        self._resolved: dict[str | None, _StyleTraits] = {}
+        self._bold: dict[str | None, bool | None] = {}
 
     def of(self, paragraph) -> tuple[str | None, bool]:
         """A paragraph's style name, and whether that is Word's Caption style
         or one based on it (pandoc's "Table Caption" and "Image Caption")."""
+        traits = self.traits(paragraph)
+        return traits.name, traits.caption
+
+    def traits(self, paragraph) -> _StyleTraits:
+        """What a paragraph's style says about it (see :class:`_StyleTraits`)."""
         style_id = paragraph._p.style
         resolved = self._resolved.get(style_id)
         if resolved is None:
             style = self._by_id.get(style_id) if style_id else None
             if style is None or style.get(_W_TYPE) != "paragraph":
                 style = self._default
-            resolved = self._resolved[style_id] = (_style_name(style), self._is_caption(style))
+            resolved = self._resolved[style_id] = _StyleTraits(
+                name=_style_name(style),
+                caption=self._based_on_any(style, frozenset({"Caption"})),
+                bibliography=self._based_on_any(style, _BIBLIOGRAPHY_STYLES),
+                outline_level=self._inherited(style, _outline_level) or None,
+                bold=bool(self._inherited(style, _bold_value)),
+            )
         return resolved
 
-    def _is_caption(self, style) -> bool:
+    def bold(self, style_id: str | None) -> bool | None:
+        """Whether the style with *style_id* (and the styles it is based on)
+        sets bold: ``None`` when none of them says."""
+        if style_id not in self._bold:
+            style = self._by_id.get(style_id) if style_id else None
+            self._bold[style_id] = self._inherited(style, _bold_value)
+        return self._bold[style_id]
+
+    def _chain(self, style):
+        """*style* and the styles it is based on, nearest first."""
         for _ in range(8):  # base-style chains are short; a malformed cycle must end
             if style is None:
-                return False
-            if _style_name(style) == "Caption":
-                return True
+                return
+            yield style
             based_on = style.find(_W_BASED_ON)
             style = None if based_on is None else self._by_id.get(based_on.get(_W_VAL))
-        return False
+
+    def _based_on_any(self, style, names: frozenset[str]) -> bool:
+        return any(_style_name(link) in names for link in self._chain(style))
+
+    def _inherited(self, style, read):
+        """The first value *read* finds along *style*'s base-style chain."""
+        for link in self._chain(style):
+            value = read(link)
+            if value is not None:
+                return value
+        return None
+
+
+@dataclass(frozen=True)
+class _StyleTraits:
+    """What a paragraph style says about the paragraphs that use it."""
+
+    name: str | None
+    # Word's Caption style or one based on it.
+    caption: bool
+    # A reference manager's bibliography entry style or one based on it.
+    bibliography: bool
+    # The heading level its outline level gives (1-based), or None for body text.
+    outline_level: int | None
+    # Whether its text is bold.
+    bold: bool
+
+
+def _on(el) -> bool:
+    """An ST_OnOff toggle element's value: present without ``w:val`` is on."""
+    value = el.get(_W_VAL)
+    return value is None or value.lower() in _ON
+
+
+def _bold_value(el) -> bool | None:
+    """Whether a style or run's own properties set bold (``None`` when silent)."""
+    b = el.find(_W_RPR_B)
+    return None if b is None else _on(b)
+
+
+def _outline_level(el) -> int | None:
+    """The heading level a paragraph or style's ``w:outlineLvl`` gives, 1-based:
+    outline levels 0-8 are headings (deeper than 6, the deepest heading style,
+    read as 6), and 9 is body text, read as 0. ``None`` when it sets none."""
+    lvl = el.find(_W_OUTLINE_LVL)
+    if lvl is None:
+        return None
+    try:
+        value = int(lvl.get(_W_VAL))
+    except (TypeError, ValueError):
+        return None
+    if 0 <= value <= 8:
+        return min(value + 1, 6)
+    return 0 if value == 9 else None
+
+
+def _heading_level(paragraph, traits: _StyleTraits) -> int | None:
+    """A paragraph's heading level from its style name or its outline level
+    (its own, else its style's), or ``None`` for body text."""
+    level = _heading_level_from_style(traits.name)
+    if level is None:
+        own = _outline_level(paragraph._p)
+        level = (own if own is not None else traits.outline_level) or None
+    return level
+
+
+def _is_bold_throughout(p, styles: _Styles, traits: _StyleTraits) -> bool:
+    """Whether every run of a paragraph's text is bold: set on the run, else by
+    its character style, else by the paragraph style."""
+    seen = False
+    for run in _wrapped_runs(p):
+        if not any(t.text and t.text.strip() for t in run.iterchildren(_W_T)):
+            continue
+        seen = True
+        bold = _bold_value(run)
+        if bold is None:
+            r_style = run.find(_W_R_STYLE)
+            if r_style is not None:
+                bold = styles.bold(r_style.get(_W_VAL))
+        if not (traits.bold if bold is None else bold):
+            return False
+    return seen
+
+
+def _field_bibliography_paragraphs(body) -> set:
+    """The ``w:p`` elements holding the text of a reference manager's generated
+    reference list field (``_BIBLIOGRAPHY_FIELD_RE``).
+
+    A complex field runs from a ``begin`` to an ``end`` field character, often
+    across paragraphs: EndNote opens "ADDIN EN.REFLIST" in the first entry's
+    paragraph and closes it in the last. Its instruction comes before the
+    ``separate`` character and its displayed result after it. Fields nest
+    (citations inside a list), so the open fields are kept as a stack.
+    """
+    out: set = set()
+    # Per open field: its instruction so far, and once separated whether it
+    # is a reference list.
+    stack: list[tuple[list[str], list[bool]]] = []
+    open_lists = 0  # separated reference-list fields on the stack
+    for el in body.iter(_W_FLD_CHAR, _W_INSTR_TEXT, _W_FLD_SIMPLE, _W_T):
+        tag = el.tag
+        if tag == _W_FLD_CHAR:
+            kind = el.get(_W_FLD_CHAR_TYPE)
+            if kind == "begin":
+                stack.append(([], []))
+            elif kind == "separate" and stack and not stack[-1][1]:
+                is_list = bool(_BIBLIOGRAPHY_FIELD_RE.match("".join(stack[-1][0])))
+                stack[-1][1].append(is_list)
+                open_lists += is_list
+            elif kind == "end" and stack:
+                _, separated = stack.pop()
+                open_lists -= bool(separated and separated[0])
+        elif tag == _W_INSTR_TEXT:
+            # Only the first words name the field; a citation's instruction
+            # holds whole records, so stop collecting once there are enough.
+            if stack and not stack[-1][1] and sum(map(len, stack[-1][0])) < 200:
+                stack[-1][0].append(el.text or "")
+        elif tag == _W_FLD_SIMPLE:
+            if _BIBLIOGRAPHY_FIELD_RE.match(el.get(_W_INSTR) or ""):
+                paragraph = next(el.iterancestors(_W_P), None)
+                if paragraph is not None:
+                    out.add(paragraph)
+        elif open_lists and el.text and el.text.strip():
+            paragraph = next(el.iterancestors(_W_P), None)
+            if paragraph is not None:
+                out.add(paragraph)
+    return out
 
 
 def _style_name(style) -> str | None:
@@ -468,6 +662,15 @@ class DocxParser:
         self._figure_counter = 1
         self._current_section_id = 0
         self._detected_title: str | None = None
+        # Whether the latest heading is a references heading, the section
+        # open before it, and whether a reference manager's list is running.
+        self._in_references = False
+        self._section_before_references = 0
+        self._in_generated_list = False
+        # Paragraphs of reference-manager list fields, and whether bold
+        # paragraphs are headings; both set when parse() reads the document.
+        self._field_bibliography: set = set()
+        self._bold_headings = False
         # Headings that can still parent the next one, levels increasing.
         self._open_headings: list[PaperSection] = []
 
@@ -548,6 +751,15 @@ class DocxParser:
         self._endnotes_map = _load_endnotes(doc)
 
         blocks = _iter_blocks(doc)
+        self._field_bibliography = _field_bibliography_paragraphs(doc.element.body)
+        # A document whose author made headings by hand, bold and without a
+        # heading style or outline level, has no other sign of its sections.
+        self._bold_headings = not any(
+            block.kind == "paragraph"
+            and (traits := self._styles.traits(block.obj)).name not in _NON_SECTION_HEADING_STYLES
+            and _heading_level(block.obj, traits) is not None
+            for block in blocks
+        )
         # Read every table's cells first: which tables are kept decides which
         # paragraphs are table captions.
         table_cells = {
@@ -570,6 +782,7 @@ class DocxParser:
                 cells = table_cells[index]
                 if cells is None:
                     continue
+                self._end_generated_list()
                 caption_index = table_captions.get(index)
                 caption = (
                     _paragraph_text(blocks[caption_index].obj._p).strip()
@@ -845,15 +1058,31 @@ class DocxParser:
     # ------------------------------------------------------------------
 
     def _handle_paragraph(self, paragraph) -> None:
-        style_name, caption_style = self._styles.of(paragraph)
+        traits = self._styles.traits(paragraph)
+        style_name, caption_style = traits.name, traits.caption
 
         # Quick path: heading paragraphs cannot host inline math/images/refs we care about.
         plain = _paragraph_text(paragraph._p).strip()
-        level = _heading_level_from_style(style_name)
+        bibliography = traits.bibliography or paragraph._p in self._field_bibliography
+        level = _heading_level(paragraph, traits)
+        if level is None and plain and not (caption_style or bibliography):
+            level = self._unstyled_heading_level(paragraph, traits, plain)
         if level is not None:
             if plain:
                 self._handle_heading(plain, level, style_name)
             return
+
+        if bibliography and plain:
+            # A reference manager's list under no references heading (its
+            # entries follow the last body paragraph) gets one, so the list
+            # is found.
+            if not self._in_references:
+                self._handle_heading(REFERENCES_HEADER, 1, None)
+            self._in_generated_list = True
+        elif plain and not (self._in_generated_list and YEARISH_RE.search(plain)):
+            # A dated paragraph can be an entry typed in by hand after the
+            # generated ones; anything else ends the list.
+            self._end_generated_list()
 
         # Caption-styled paragraph: drain pending images, attach text as caption.
         if self._unfilled_caption_figures and plain and caption_style:
@@ -1069,7 +1298,51 @@ class DocxParser:
 
         flush_body()
 
+    def _unstyled_heading_level(self, paragraph, traits: _StyleTraits, plain: str) -> int | None:
+        """The level of a heading that no style or outline level marks.
+
+        A paragraph reading "References" (or the same heading in another
+        language) heads the reference list whatever its formatting. In a
+        document without heading styles or outline levels, a short paragraph
+        bold throughout is a level-1 heading: authors bold the headings of a
+        manuscript by hand. Neither holds a picture, an equation, or a line of
+        a table of contents.
+        """
+        p = paragraph._p
+        if (
+            (traits.name or "").lower().startswith("toc")
+            or _has_picture(paragraph)
+            or next(p.iter(_M_OMATH), None) is not None
+        ):
+            return None
+        if reads_as_reference_heading(plain):
+            return 1
+        if (
+            self._bold_headings
+            and reads_as_bold_heading(plain)
+            and _is_bold_throughout(p, self._styles, traits)
+        ):
+            return 1
+        return None
+
+    def _end_generated_list(self) -> None:
+        """Close a reference manager's list at the first block after it.
+
+        What follows the list under the same heading (the tables and figures
+        of a manuscript, a note) is not part of it: it goes back to the section
+        open before the references heading, so it is not read as references.
+        """
+        if self._in_generated_list:
+            self._in_generated_list = False
+            self._in_references = False
+            self._current_section_id = self._section_before_references
+
     def _handle_heading(self, text: str, level: int, style_name: str | None) -> None:
+        in_references = names_reference_list(text)
+        if in_references and not self._in_references:
+            self._section_before_references = self._current_section_id
+        self._in_references = in_references
+        self._in_generated_list = False
         # Capture the document Title style (or first Heading 1) as the paper title
         if self._detected_title is None and style_name in (
             "Title",
