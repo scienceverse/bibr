@@ -484,3 +484,33 @@ def test_a_drop_cap_in_a_region_of_its_own_is_part_of_the_title():
         inp = tagger_input(("doc_title", lead), ("doc_title", title), ("text", "Ana Lima"))
         tags = label(inp, ("TITLE", title), ("GIVEN", "Ana"), ("FAMILY", "Lima"))
         assert "untagged_title_edge" in assemble(inp, tags, [1.0] * len(tags)).problems
+
+
+def test_a_lone_furniture_word_before_the_title_is_a_cut_first_word():
+    inp = tagger_input(("doc_title", "Wine Quality and Type Prediction"), ("text", "Ana Lima"))
+    tags = label(
+        inp,
+        ("FURNITURE", "Wine"),
+        ("TITLE", "Quality and Type Prediction"),
+        ("GIVEN", "Ana"),
+        ("FAMILY", "Lima"),
+    )
+    assert "untagged_title_edge" in assemble(inp, tags, [1.0] * len(tags)).problems
+    inp = tagger_input(("doc_title", "Original Article Quality and Type"), ("text", "Ana Lima"))
+    tags = label(
+        inp,
+        ("FURNITURE", "Original Article"),
+        ("TITLE", "Quality and Type"),
+        ("GIVEN", "Ana"),
+        ("FAMILY", "Lima"),
+    )
+    assert "untagged_title_edge" not in assemble(inp, tags, [1.0] * len(tags)).problems
+    inp = tagger_input(("header", "Cell"), ("doc_title", "Quality and Type"), ("text", "Ana Lima"))
+    tags = label(
+        inp,
+        ("FURNITURE", "Cell"),
+        ("TITLE", "Quality and Type"),
+        ("GIVEN", "Ana"),
+        ("FAMILY", "Lima"),
+    )
+    assert "untagged_title_edge" not in assemble(inp, tags, [1.0] * len(tags)).problems
