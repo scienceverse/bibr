@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import io
 import zipfile
-from xml.sax.saxutils import escape
+from html import escape
 
 import pytest
 
