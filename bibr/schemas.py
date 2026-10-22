@@ -787,6 +787,9 @@ class CoreMetadataLLM(AbstractResponse):
     _field_failures: dict[str, str] = PrivateAttr(default_factory=dict)
     # ``AuthorsLLM._salvaged_after`` of the author call, carried through.
     _authors_salvaged_after: str | None = PrivateAttr(default=None)
+    # The calls the front-matter tagger answered instead of the model
+    # ("title_keywords", "authors"); their fields' source is "front_tagger".
+    _front_tagger_parts: frozenset[str] = PrivateAttr(default_factory=frozenset)
 
     _coerce_title = field_validator("title", mode="before")(_scrub_str_placeholder)
     _canon_oecd_domain = field_validator("oecd_domain", mode="before")(_canonicalize_oecd_domain)

@@ -2945,6 +2945,11 @@ class LLMClient:
         combined._abstract_explicitly_absent = title_kw._abstract_explicitly_absent
         combined._repair_note = title_kw._repair_note
         combined._field_failures = field_failures
+        combined._front_tagger_parts = frozenset(
+            part
+            for part, answer in (("title_keywords", tagged_title), ("authors", tagged_byline))
+            if answer is not None
+        )
         salvaged_after = getattr(authors, "_salvaged_after", None)
         combined._authors_salvaged_after = (
             salvaged_after if isinstance(salvaged_after, str) else None

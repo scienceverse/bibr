@@ -19,7 +19,10 @@ def _page():
         ("text", "3 Peking University"),
         ("text", "* Corresponding author: mary.jones@utwente.nl"),
         ("abstract", "Abstract"),
-        ("abstract", "We studied handedness in 400 families. It is heritable."),
+        (
+            "abstract",
+            "We studied handedness in 400 families from three countries over two decades. Left handedness was more common in sons than in daughters, ran in families, and was rarer among older participants. Twin pairs agreed more often than siblings. It is heritable.",
+        ),
         ("text", "Keywords: handedness; heritability"),
         ("footer", "Laterality 2021, Vol. 26(3) 65-74 © The Author(s) 2021"),
     )
@@ -47,7 +50,10 @@ def _tags(inp):
         ("AFF_MARK", "3"),
         ("AFFILIATION", "Peking University"),
         ("EMAIL", "mary.jones@utwente.nl"),
-        ("ABSTRACT", "We studied handedness in 400 families. It is heritable."),
+        (
+            "ABSTRACT",
+            "We studied handedness in 400 families from three countries over two decades. Left handedness was more common in sons than in daughters, ran in families, and was rarer among older participants. Twin pairs agreed more often than siblings. It is heritable.",
+        ),
         ("KEYWORD", "handedness"),
         ("KEYWORD", "heritability"),
         ("JOURNAL", "Laterality"),
@@ -62,7 +68,10 @@ def test_full_page_reads_back_as_printed():
     got = assemble(inp, _tags(inp), _ones(inp))
     tk = got.title_keywords
     assert tk.title == "Prevalence and Heritability of Handedness"
-    assert tk.abstract == "We studied handedness in 400 families. It is heritable."
+    assert (
+        tk.abstract
+        == "We studied handedness in 400 families from three countries over two decades. Left handedness was more common in sons than in daughters, ran in families, and was rarer among older participants. Twin pairs agreed more often than siblings. It is heritable."
+    )
     assert tk.keywords == ["handedness", "heritability"]
     assert (tk.journal, tk.volume, tk.issue) == ("Laterality", "26", "3")
     assert (tk.first_page, tk.last_page) == ("65", "74")
@@ -95,7 +104,7 @@ def test_family_first_bylines_pair_up():
     got = assemble(inp, tags, [1.0] * len(tags))
     assert [(a.given, a.family) for a in got.byline.authors] == [("J", "Smith"), ("KL", "Jones")]
     # One unmarked affiliation-free byline: nothing to link, nothing wrong.
-    assert got.problems == []
+    assert got.byline_reasons(0.9) == []
 
 
 def test_low_confidence_edge_word_holds_the_title_back():
@@ -125,7 +134,7 @@ def test_unresolved_affiliation_mark_falls_back():
     )
     got = assemble(inp, tags, [1.0] * len(tags))
     # No affiliation list was read at all: nothing to resolve the keys against.
-    assert got.problems == []
+    assert got.byline_reasons(0.9) == []
     inp2 = tagger_input(
         ("doc_title", "Title words"), ("text", "Ann Lee1 and Bo Kim2"), ("text", "1 Univ A")
     )
@@ -191,7 +200,7 @@ def test_unmarked_affiliations_link_by_position():
     )
     got = assemble(inp, tags, [1.0] * len(tags))
     assert [a.affiliation for a in got.byline.authors] == ["Univ A", "Univ B"]
-    assert got.problems == []
+    assert got.byline_reasons(0.9) == []
 
 
 def test_unmarked_affiliations_after_the_byline_are_ambiguous():
@@ -263,7 +272,7 @@ def test_title_split_across_regions_and_subtitle():
 def test_no_title_or_authors_is_a_problem():
     inp = tagger_input(("text", "Some body text only"))
     got = assemble(inp, ["O"] * len(inp.words), [1.0] * len(inp.words))
-    assert got.problems == ["no_title", "no_authors"]
+    assert got.problems == ["no_title", "no_abstract", "no_authors"]
     assert not got.title_keywords.title
     assert got.byline.authors == []
 
@@ -311,7 +320,7 @@ def test_superscript_keys_symbol_runs_and_orcid_icons():
     assert (first.family, first.affiliation, first.corresponding) == ("Neri-Suárez", "Univ B", True)
     # "**" is one key with no affiliation behind it: a symbol, not a lost list.
     assert (second.family, second.corresponding) == ("He", False)
-    assert got.problems == []
+    assert got.byline_reasons(0.9) == []
 
 
 def test_letter_keys_glued_to_family_names():
@@ -363,3 +372,84 @@ def test_digit_keyed_names_keep_their_last_letter():
     )
     got = assemble(inp, tags, [1.0] * len(tags))
     assert [a.family for a in got.byline.authors] == ["Costa", "Vega"]
+
+
+def test_a_missing_or_clipped_abstract_holds_back_only_the_title_call():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Ana Lima"),
+        ("abstract", "We studied handedness."),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Ana"),
+        ("FAMILY", "Lima"),
+        ("ABSTRACT", "We studied handedness."),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags))
+    assert got.title_reasons(0.9) == ["short_abstract"]
+    assert got.byline_reasons(0.9) == []
+    untagged = [t if t != "B-ABSTRACT" and t != "I-ABSTRACT" else "O" for t in tags]
+    assert assemble(inp, untagged, [1.0] * len(tags)).title_reasons(0.9) == ["no_abstract"]
+
+
+def test_bylines_with_a_half_name_or_a_dropped_name_go_to_the_llm():
+    inp = tagger_input(("doc_title", "Title words"), ("text", "Nour S., Ana Lima and Bo Chen"))
+    half = label(
+        inp, ("TITLE", "Title words"), ("GIVEN", "Nour S."), ("GIVEN", "Ana"), ("FAMILY", "Lima")
+    )
+    reasons = assemble(inp, half, [1.0] * len(half)).byline_reasons(0.9)
+    assert "incomplete_author_name" in reasons
+    # "Ana" is printed between named authors but tagged as nothing.
+    dropped = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Nour S."),
+        ("FAMILY", "Lima"),
+        ("GIVEN", "Bo"),
+        ("FAMILY", "Chen"),
+    )
+    assert "untagged_byline_word" in assemble(inp, dropped, [1.0] * len(dropped)).byline_reasons(
+        0.9
+    )
+
+
+def test_a_group_author_needs_no_given_name():
+    inp = tagger_input(
+        ("doc_title", "Title words"), ("text", "Ana Lima and the ATLAS Collaboration")
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Ana"),
+        ("FAMILY", "Lima"),
+        ("FAMILY", "ATLAS Collaboration"),
+    )
+    assert assemble(inp, tags, [1.0] * len(tags)).byline_reasons(0.9) == []
+
+
+def test_roman_numeral_keys_glued_to_family_names():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "RITA LIMAII, JOSE GANDHI"),
+        ("text", "I Univ A"),
+        ("text", "II Univ B"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "RITA"),
+        ("FAMILY", "LIMAII"),
+        ("GIVEN", "JOSE"),
+        ("FAMILY", "GANDHI"),
+        ("AFF_MARK", "I"),
+        ("AFFILIATION", "Univ A"),
+        ("AFF_MARK", "II"),
+        ("AFFILIATION", "Univ B"),
+    )
+    rows = [
+        (a.family, a.affiliation) for a in assemble(inp, tags, [1.0] * len(tags)).byline.authors
+    ]
+    # A single capital "I" is no glued key on an all-capitals name.
+    assert rows == [("LIMA", "Univ B"), ("GANDHI", "")]

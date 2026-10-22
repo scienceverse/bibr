@@ -33,6 +33,7 @@ async def test_tagged_answer_skips_the_two_calls():
     client.extract_paper_classification.assert_awaited_once()
     assert result.title == "Prevalence of Handedness"
     assert [a.family for a in result.authors] == ["de Oliveira"]
+    assert result._front_tagger_parts == {"title_keywords", "authors"}
 
 
 def _extractor(result, mode="primary"):
@@ -78,6 +79,7 @@ async def test_a_partial_answer_asks_only_for_the_missing_call():
     client.extract_authors.assert_awaited_once()
     assert result.title == "Prevalence of Handedness"
     assert [a.family for a in result.authors] == ["Lee"]
+    assert result._front_tagger_parts == {"title_keywords"}
 
 
 def test_off_unsure_incomplete_or_elsewhere_goes_to_the_llm():

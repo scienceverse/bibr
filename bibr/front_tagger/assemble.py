@@ -21,7 +21,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 
 from bibr.export.normalize import license_ids
-from bibr.front_tagger.contract import TaggerInput
+from bibr.front_tagger.contract import WORD_RE, TaggerInput
 from bibr.schemas import AuthorLLM, AuthorsLLM, TitleKeywordsLLM
 
 _NAME_FIELDS = frozenset({"GIVEN", "FAMILY"})
@@ -45,6 +45,19 @@ _ABSTRACT_HEADING_RE = re.compile(
     r"аннотация|резюме|abstrakt|samenvatting|要旨|摘要|초록)$",
     re.IGNORECASE,
 )
+# A family name alone is complete for a group author ("ATLAS Collaboration").
+_COLLECTIVE_RE = re.compile(
+    r"group|consorti|collaborat|network|team|committee|investigators|study|project|"
+    r"initiative|alliance|society|association|council|working|members",
+    re.IGNORECASE,
+)
+# Words a byline prints between names without naming anyone.
+_BYLINE_FILLERS = frozenset(
+    {"and", "und", "et", "y", "e", "i", "og", "en", "och", "a", "&", "with", "on", "behalf", "of"}
+    | {"the", "for", "md", "phd", "msc", "bsc", "mph", "rn", "dphil", "dr", "prof", "jr", "sr"}
+)
+_MIN_ABSTRACT_WORDS = 40
+_ROMAN_KEY_RE = re.compile(r"[IVX]{1,4}")
 _ENGLISH_WORDS = frozenset(
     {"the", "of", "and", "in", "to", "a", "is", "was", "we", "for", "with", "that", "this"}
     | {"are", "were", "on", "by", "as", "from"}
@@ -61,7 +74,10 @@ class Span:
     confidence: float  # lowest word confidence in the span
 
 
-_TITLE_PROBLEMS = frozenset({"no_title"})
+# Problems that hold back the title/keywords answer; every other one holds
+# back the authors answer. That call also returns the abstract, so a missing
+# or clipped one sends it to the LLM.
+_TITLE_PROBLEMS = frozenset({"no_title", "no_abstract", "short_abstract"})
 
 
 @dataclass
@@ -72,8 +88,9 @@ class TaggedFrontMatter:
     byline: AuthorsLLM | None  # the authors call's answer
     #: Field -> confidence in [0, 1] (lowest word posterior; the abstract's is the mean).
     confidence: dict[str, float] = field(default_factory=dict)
-    #: What the tags leave undecided; "no_title" holds back the title/keywords
-    #: answer, every other problem the authors answer.
+    #: What the tags leave undecided; title problems ("no_title", "no_abstract",
+    #: "short_abstract") hold back the title/keywords answer, every other
+    #: problem the authors answer.
     problems: list[str] = field(default_factory=list)
 
     def _low(self, names: tuple[str, ...], min_confidence: float) -> list[str]:
@@ -284,23 +301,64 @@ class _Author:
     corresponding: bool = False
 
 
-def _unglue_letter_keys(authors: list[_Author], by_mark: dict[str, str]) -> None:
-    """Split a superscript letter key OCR glued to a family name ("Vegaa").
+def _incomplete_name(author: _Author) -> bool:
+    """A person with a given or a family name missing; group authors excepted."""
+    if author.given and author.family:
+        return False
+    parts = author.family or author.given
+    return not any(_COLLECTIVE_RE.search(s.text) for s in parts)
 
-    On a paper whose affiliations are keyed "a", "b", ..., an author with no
-    mark of their own whose family name ends in one of those keys printed it
-    as a superscript: "Vegaa" is "Vega" keyed "a".
+
+def _untagged_byline_words(inp: TaggerInput, tags, lo: int, hi: int) -> bool:
+    """Whether a capitalised word between the first and last author is in no
+    field: a name the tagger dropped from the list."""
+    for i in range(lo, hi + 1):
+        if _field(tags[i]) is not None:
+            continue
+        text = inp.words[i].text
+        if text[:1].isupper() and text.casefold().strip(".") not in _BYLINE_FILLERS:
+            return True
+    return False
+
+
+def _glued_key(name: str, letters: set[str], romans: set[str]) -> str | None:
+    """The affiliation key OCR glued to the end of ``name``, if one is."""
+    for key in sorted(romans, key=len, reverse=True):
+        stem = name[: -len(key)]
+        # "LimaII" splits at the case change; all capitals ("LIMAII") only on
+        # a key of two or more numerals, so "GANDHI" keeps its "I".
+        if (
+            name.endswith(key)
+            and len(stem) >= 2
+            and stem[-1].isalpha()
+            and (stem[-1].islower() or len(key) >= 2)
+        ):
+            return key
+    key = name[-1:]
+    if key in letters and len(name) >= 3 and name[-2].isalpha():
+        return key
+    return None
+
+
+def _unglue_letter_keys(authors: list[_Author], by_mark: dict[str, str]) -> None:
+    """Split a superscript letter or numeral key OCR glued to a family name.
+
+    On a paper whose affiliations are keyed "a", "b", ... (or "I", "II", ...),
+    an author with no mark of their own whose family name ends in one of
+    those keys printed it as a superscript: "Vegaa" is "Vega" keyed "a",
+    "LIMAII" is "LIMA" keyed "II".
     """
     letters = {key for key in by_mark if len(key) == 1 and key.islower()}
-    if not letters:
+    romans = {key for key in by_mark if _ROMAN_KEY_RE.fullmatch(key)}
+    if not letters and not romans:
         return
     for author in authors:
         if author.marks or not author.family:
             continue
         last = author.family[-1]
-        stem, key = last.text[:-1], last.text[-1:]
-        if key in letters and len(stem) >= 2 and stem[-1].isalpha():
-            author.family[-1] = replace(last, text=stem)
+        key = _glued_key(last.text, letters, romans)
+        if key is not None:
+            author.family[-1] = replace(last, text=last.text[: -len(key)])
             author.marks = [key]
 
 
@@ -351,6 +409,10 @@ def assemble(
     abstract, abstract_conf = _abstract(spans, tags, inp, confidences)
     if abstract_conf is not None:
         confidence["abstract"] = abstract_conf
+    if abstract is None:
+        problems.append("no_abstract")
+    elif len(WORD_RE.findall(abstract)) < _MIN_ABSTRACT_WORDS:
+        problems.append("short_abstract")
 
     pages = _clean(getattr(_first(spans, "PAGES"), "text", None))
     first_page = last_page = None
@@ -379,6 +441,10 @@ def assemble(
     confidence["authors"] = min((confidences[i] for i in name_words), default=0.0)
     if any(not a.family and not a.given for a in authors):
         problems.append("empty_author_name")
+    elif any(_incomplete_name(a) for a in authors):
+        problems.append("incomplete_author_name")
+    if authors and _untagged_byline_words(inp, tags, authors[0].first_word, authors[-1].last_word):
+        problems.append("untagged_byline_word")
 
     # Marks, emails and ORCIDs printed after an author and before the next
     # belong to that author.
