@@ -291,17 +291,22 @@ def _title_text_problems(inp: TaggerInput, tags, first_word: int, last_word: int
     # is a drop-capped first word; a run of them is a rubric ("Original
     # Article") the tagger rightly left out. A lone capital before a title
     # that starts in lower case is a drop cap split off its word ("W" "ine").
+    # A lone word tagged page furniture counts too: the model learned to cut
+    # a title's first word from projections that did ("Wine | Quality ...").
     before = first_word - 1
     words = inp.words
 
     def untagged(i: int, region: int) -> bool:
-        return i >= 0 and words[i].region == region and _field(tags[i]) is None
+        return i >= 0 and words[i].region == region and _field(tags[i]) in (None, "FURNITURE")
 
-    if before >= 0 and _field(tags[before]) is None:
+    if untagged(before, words[before].region if before >= 0 else -1):
         text = words[before].text
         region = words[before].region
+        # A furniture word only inside the title's region: one in a region of
+        # its own is a journal banner ("Cell").
         alone = not untagged(before - 1, region) and (
-            region == words[first_word].region or not untagged(before + 1, region)
+            region == words[first_word].region
+            or (_field(tags[before]) is None and not untagged(before + 1, region))
         )
         drop_cap = len(text) == 1 and text.isupper() and words[first_word].text[:1].islower()
         if alone and text[:1].isupper() and (not text.isupper() or drop_cap):
