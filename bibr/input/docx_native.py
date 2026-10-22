@@ -204,6 +204,11 @@ _NON_SECTION_HEADING_STYLES = frozenset(
     {"Title", "Subtitle", "EndNote Bibliography Title", "Citavi Bibliography Heading"}
 )
 
+# Fewer styled headings than this leave the hand-bolded ones to find the
+# sections: in a PsyArXiv sample, a lone "Heading 1" Abstract or appendix
+# heading otherwise left a whole manuscript with one or two sections.
+_MIN_STYLED_HEADINGS = 3
+
 _W_OUTLINE_LVL = f"{{{_NS['w']}}}pPr/{{{_NS['w']}}}outlineLvl"
 _W_RPR_B = f"{{{_NS['w']}}}rPr/{{{_NS['w']}}}b"
 _W_R_STYLE = f"{{{_NS['w']}}}rPr/{{{_NS['w']}}}rStyle"
@@ -754,12 +759,16 @@ class DocxParser:
         self._field_bibliography = _field_bibliography_paragraphs(doc.element.body)
         # A document whose author made headings by hand, bold and without a
         # heading style or outline level, has no other sign of its sections.
-        self._bold_headings = not any(
-            block.kind == "paragraph"
+        # One or two styled headings (an "Abstract" in Heading 1, an appendix
+        # heading style) do not mean the sections are styled.
+        styled_headings = sum(
+            1
+            for block in blocks
+            if block.kind == "paragraph"
             and (traits := self._styles.traits(block.obj)).name not in _NON_SECTION_HEADING_STYLES
             and _heading_level(block.obj, traits) is not None
-            for block in blocks
         )
+        self._bold_headings = styled_headings < _MIN_STYLED_HEADINGS
         # Read every table's cells first: which tables are kept decides which
         # paragraphs are table captions.
         table_cells = {
@@ -1305,7 +1314,8 @@ class DocxParser:
         language) heads the reference list whatever its formatting. In a
         document without heading styles or outline levels, a short paragraph
         bold throughout is a level-1 heading: authors bold the headings of a
-        manuscript by hand. Neither holds a picture, an equation, or a line of
+        manuscript by hand. A document with only one or two styled headings
+        counts as one without. Neither holds a picture, an equation, or a line of
         a table of contents.
         """
         p = paragraph._p

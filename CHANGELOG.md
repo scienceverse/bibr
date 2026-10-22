@@ -19,8 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   gets its sections and its reference list (#215). Before, such a .docx (about
   one in four new PsyArXiv preprints is a .docx) was read without a single
   section, so `bib` came out empty with `REF_SECTION_NOT_FOUND` although the
-  references were in the file. In a document without heading styles, a short
-  paragraph that is bold throughout is now a heading; in any document, a
+  references were in the file. In a document with fewer than three styled
+  headings, a short paragraph that is bold throughout is now a heading; in any document, a
   paragraph reading "References" (or "Reference list", "Literatur", ...) heads
   the list; outline levels count as heading levels; and a list that EndNote,
   Zotero, Mendeley, Citavi or Word generated (its `EndNote Bibliography` or

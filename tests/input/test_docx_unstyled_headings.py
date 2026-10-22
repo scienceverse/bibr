@@ -297,9 +297,26 @@ def test_bold_paragraphs_are_body_text_when_the_document_has_heading_styles():
         _plain("Introduction", style="Heading1")
         + _bold("An emphasised remark")
         + _plain("Body text.")
+        + _plain("Method", style="Heading1")
+        + _plain("Discussion", style="Heading1")
     )
 
-    assert _headers(_parse(body)) == ["Introduction"]
+    assert _headers(_parse(body)) == ["Introduction", "Method", "Discussion"]
+
+
+def test_one_styled_heading_leaves_the_bold_ones_to_find_the_sections():
+    """A PsyArXiv manuscript styled only its "Abstract" as Heading 1 and
+    bolded the rest by hand; it came out with two sections."""
+    body = (
+        _plain("Abstract", style="Heading1")
+        + _plain("We asked a question (Smith, 2020).")
+        + _bold("Method")
+        + _plain("We recruited students.")
+        + _bold("Discussion")
+        + _plain("It worked.")
+    )
+
+    assert _headers(_parse(body)) == ["Abstract", "Method", "Discussion"]
 
 
 def test_outline_levels_make_headings():
