@@ -471,6 +471,9 @@ def test_titles_a_text_layer_garbled_go_to_the_llm():
     assert _title_reasons("Wine Tasting in the Lab", "Tasting in the Lab") == [
         "untagged_title_edge"
     ]
-    # One case change is a name, not glued words.
-    plain = "McDonald Farms and the Long Run"
-    assert _title_reasons(plain, plain) == []
+    # Case changes in names and acronyms are no glued words, and a rubric
+    # left out of the title is no dropped word.
+    for plain in ("McDonald Farms and CoViD-19", "A ConvNeXt-ViT for the Long Run"):
+        assert _title_reasons(plain, plain) == []
+    assert _title_reasons("Original Article Tasting in the Lab", "Tasting in the Lab") == []
+    assert _title_reasons("ARTICLE Tasting in the Lab", "Tasting in the Lab") == []

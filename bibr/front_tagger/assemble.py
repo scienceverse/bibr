@@ -58,9 +58,10 @@ _BYLINE_FILLERS = frozenset(
 )
 _MIN_ABSTRACT_WORDS = 40
 _ROMAN_KEY_RE = re.compile(r"[IVX]{1,4}")
-# A lower-case letter followed by a capital: two of them in one word
+# A lower-case run followed by a capitalised one: two of them in one word
 # ("AnxietyinCollegeStudents") are words a text layer printed without spaces.
-_CASE_JOIN_RE = re.compile(r"[a-z][A-Z]")
+# Short pieces are acronyms and brand names ("CoViD", "ConvNeXt").
+_CASE_JOIN_RE = re.compile(r"[a-z]{3}(?=[A-Z][a-z]{2})")
 _ENGLISH_WORDS = frozenset(
     {"the", "of", "and", "in", "to", "a", "is", "was", "we", "for", "with", "that", "this"}
     | {"are", "were", "on", "by", "as", "from"}
@@ -285,12 +286,20 @@ def _title_text_problems(inp: TaggerInput, tags, first_word: int, last_word: int
     trigrams = [tuple(letters[i : i + 3]) for i in range(len(letters) - 2)]
     if any(trigrams[j] in trigrams[: max(0, j - 2)] for j in range(len(trigrams))):
         problems.append("repeated_title_words")
+    # One capitalised word left alone between the title and the region's
+    # start (or a tagged field) is a drop-capped first word; a run of them is
+    # a rubric ("Original Article") the tagger rightly left out.
     before = first_word - 1
+    region = inp.words[first_word].region
+
+    def untagged(i: int) -> bool:
+        return i >= 0 and inp.words[i].region == region and _field(tags[i]) is None
+
     if (
-        before >= 0
-        and _field(tags[before]) is None
-        and inp.words[before].region == inp.words[first_word].region
+        untagged(before)
+        and not untagged(before - 1)
         and inp.words[before].text[:1].isupper()
+        and not inp.words[before].text.isupper()
     ):
         problems.append("untagged_title_edge")
     return problems
