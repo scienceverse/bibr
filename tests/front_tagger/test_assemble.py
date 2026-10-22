@@ -453,3 +453,24 @@ def test_roman_numeral_keys_glued_to_family_names():
     ]
     # A single capital "I" is no glued key on an all-capitals name.
     assert rows == [("LIMA", "Univ B"), ("GANDHI", "")]
+
+
+def _title_reasons(title_region: str, title: str) -> list[str]:
+    inp = tagger_input(("doc_title", title_region), ("text", "Ana Lima"))
+    tags = label(inp, ("TITLE", title), ("GIVEN", "Ana"), ("FAMILY", "Lima"))
+    got = assemble(inp, tags, [1.0] * len(tags))
+    return [p for p in got.problems if p not in ("no_abstract", "short_abstract")]
+
+
+def test_titles_a_text_layer_garbled_go_to_the_llm():
+    glued = "Predictors of Social AnxietyinCollegeStudents"
+    assert _title_reasons(glued, glued) == ["glued_title_words"]
+    doubled = "Tools for Role-modeling and Teaching Critical Thinking modeling and Teaching Critical Thinking"
+    assert _title_reasons(doubled, doubled) == ["repeated_title_words"]
+    # A drop-capped first word left out of the title span.
+    assert _title_reasons("Wine Tasting in the Lab", "Tasting in the Lab") == [
+        "untagged_title_edge"
+    ]
+    # One case change is a name, not glued words.
+    plain = "McDonald Farms and the Long Run"
+    assert _title_reasons(plain, plain) == []
