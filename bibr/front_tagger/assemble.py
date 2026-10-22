@@ -58,6 +58,9 @@ _BYLINE_FILLERS = frozenset(
 )
 _MIN_ABSTRACT_WORDS = 40
 _ROMAN_KEY_RE = re.compile(r"[IVX]{1,4}")
+# A lower-case letter followed by a capital: two of them in one word
+# ("AnxietyinCollegeStudents") are words a text layer printed without spaces.
+_CASE_JOIN_RE = re.compile(r"[a-z][A-Z]")
 _ENGLISH_WORDS = frozenset(
     {"the", "of", "and", "in", "to", "a", "is", "was", "we", "for", "with", "that", "this"}
     | {"are", "were", "on", "by", "as", "from"}
@@ -77,7 +80,16 @@ class Span:
 # Problems that hold back the title/keywords answer; every other one holds
 # back the authors answer. That call also returns the abstract, so a missing
 # or clipped one sends it to the LLM.
-_TITLE_PROBLEMS = frozenset({"no_title", "no_abstract", "short_abstract"})
+_TITLE_PROBLEMS = frozenset(
+    {
+        "no_title",
+        "glued_title_words",
+        "repeated_title_words",
+        "untagged_title_edge",
+        "no_abstract",
+        "short_abstract",
+    }
+)
 
 
 @dataclass
@@ -258,13 +270,40 @@ def _englishness(text: str) -> float:
     return sum(w in _ENGLISH_WORDS for w in words) / len(words) if words else 0.0
 
 
-def _title(spans: list[Span], tags, inp: TaggerInput, conf) -> tuple[str | None, float]:
+def _title_text_problems(inp: TaggerInput, tags, first_word: int, last_word: int) -> list[str]:
+    """What makes the printed title unsafe to copy as is.
+
+    The LLM respaces a title a text layer glued together, drops a doubled
+    text layer's repeat and keeps a drop-capped first word; copied print
+    keeps the fault.
+    """
+    problems: list[str] = []
+    words = [inp.words[i].text for i in range(first_word, last_word + 1)]
+    if any(len(_CASE_JOIN_RE.findall(word)) >= 2 for word in words):
+        problems.append("glued_title_words")
+    letters = [w.casefold() for w in words if any(c.isalnum() for c in w)]
+    trigrams = [tuple(letters[i : i + 3]) for i in range(len(letters) - 2)]
+    if any(trigrams[j] in trigrams[: max(0, j - 2)] for j in range(len(trigrams))):
+        problems.append("repeated_title_words")
+    before = first_word - 1
+    if (
+        before >= 0
+        and _field(tags[before]) is None
+        and inp.words[before].region == inp.words[first_word].region
+        and inp.words[before].text[:1].isupper()
+    ):
+        problems.append("untagged_title_edge")
+    return problems
+
+
+def _title(spans: list[Span], tags, inp: TaggerInput, conf) -> tuple[str | None, float, list[str]]:
     groups = _clusters(spans, tags, inp, "TITLE")
     if not groups:
-        return None, 0.0
+        return None, 0.0, ["no_title"]
     group = groups[0]  # the version printed first
     title = _joined(group)
     first_word, last_word = group[0].words[0], group[-1].words[-1]
+    problems = _title_text_problems(inp, tags, first_word, last_word)
     # The words around the title decide where it starts and stops: a running
     # head the model was unsure about counts against the title.
     edge = [i for i in (first_word - 1, last_word + 1) if 0 <= i < len(inp.words)]
@@ -275,7 +314,7 @@ def _title(spans: list[Span], tags, inp: TaggerInput, conf) -> tuple[str | None,
 
         title = f"{title}{_separator(title, subtitle.text)}{subtitle.text}"
         confidence = min(confidence, subtitle.confidence)
-    return title, confidence
+    return title, confidence, problems
 
 
 def _abstract(spans: list[Span], tags, inp: TaggerInput, conf) -> tuple[str | None, float | None]:
@@ -402,9 +441,8 @@ def assemble(
     problems: list[str] = []
     confidence: dict[str, float] = {}
 
-    title, title_conf = _title(spans, tags, inp, confidences)
-    if title is None:
-        problems.append("no_title")
+    title, title_conf, title_problems = _title(spans, tags, inp, confidences)
+    problems.extend(title_problems)
     confidence["title"] = title_conf
     abstract, abstract_conf = _abstract(spans, tags, inp, confidences)
     if abstract_conf is not None:
