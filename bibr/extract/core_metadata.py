@@ -2394,7 +2394,9 @@ class CoreMetadataExtractor:
                     veto = "fabricated: absent from the extraction context"
                 elif authors and not self._drop_transliterated_authors(kept, full_text, resolution):
                     veto = "romanised: written in a script the byline does not print"
-            author_trail = [_AuthorProposal("llm", authors, transforms, veto)]
+            tagger_parts = getattr(llm_metadata, "_front_tagger_parts", frozenset())
+            author_source = "front_tagger" if "authors" in tagger_parts else "llm"
+            author_trail = [_AuthorProposal(author_source, authors, transforms, veto)]
             usable = authors if veto is None else []
             # Gate recovery on the sanitized author list: a nonempty raw response may contain no
             # usable names. Prefer the selected byline over repeating the same wide context.
@@ -2591,33 +2593,35 @@ class CoreMetadataExtractor:
             )
             metadata._abstract_explicitly_absent = llm_metadata._abstract_explicitly_absent
             ledger = metadata._field_decisions
+            # The title/keywords call's fields, or the tagger's answer in its place.
+            source = "front_tagger" if "title_keywords" in tagger_parts else "llm"
             ledger.propose(
                 FieldCandidate(
                     "title",
-                    "llm" if title == model_title else "title_grounding",
+                    source if title == model_title else "title_grounding",
                     title,
                     evidence_ids=tuple(title_evidence),
                     transforms=tuple(title_transforms),
                 )
             )
-            ledger.propose(FieldCandidate("abstract", "llm", abstract, veto=notice_veto))
-            ledger.propose(FieldCandidate("keywords", "llm", keywords, veto=notice_veto))
+            ledger.propose(FieldCandidate("abstract", source, abstract, veto=notice_veto))
+            ledger.propose(FieldCandidate("keywords", source, keywords, veto=notice_veto))
             for decision in (
                 author_decision,
                 decide_value(
                     "published",
                     FieldCandidate(
                         "published",
-                        "llm",
+                        source,
                         published,
                         transforms=(
                             ("precision_refined",) if published != llm_metadata.published else ()
                         ),
                     ),
                 ),
-                decide_value("journal", FieldCandidate("journal", "llm", llm_metadata.journal)),
+                decide_value("journal", FieldCandidate("journal", source, llm_metadata.journal)),
                 decide_value(
-                    "publisher", FieldCandidate("publisher", "llm", llm_metadata.publisher)
+                    "publisher", FieldCandidate("publisher", source, llm_metadata.publisher)
                 ),
                 decide_classification(classifications, notice=notice),
             ):
