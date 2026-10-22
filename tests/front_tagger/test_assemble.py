@@ -477,3 +477,10 @@ def test_titles_a_text_layer_garbled_go_to_the_llm():
         assert _title_reasons(plain, plain) == []
     assert _title_reasons("Original Article Tasting in the Lab", "Tasting in the Lab") == []
     assert _title_reasons("ARTICLE Tasting in the Lab", "Tasting in the Lab") == []
+
+
+def test_a_drop_cap_in_a_region_of_its_own_is_part_of_the_title():
+    for lead, title in (("Wine", "Tasting in the Lab"), ("W", "ine Tasting in the Lab")):
+        inp = tagger_input(("doc_title", lead), ("doc_title", title), ("text", "Ana Lima"))
+        tags = label(inp, ("TITLE", title), ("GIVEN", "Ana"), ("FAMILY", "Lima"))
+        assert "untagged_title_edge" in assemble(inp, tags, [1.0] * len(tags)).problems

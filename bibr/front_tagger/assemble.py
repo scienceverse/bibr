@@ -286,22 +286,26 @@ def _title_text_problems(inp: TaggerInput, tags, first_word: int, last_word: int
     trigrams = [tuple(letters[i : i + 3]) for i in range(len(letters) - 2)]
     if any(trigrams[j] in trigrams[: max(0, j - 2)] for j in range(len(trigrams))):
         problems.append("repeated_title_words")
-    # One capitalised word left alone between the title and the region's
-    # start (or a tagged field) is a drop-capped first word; a run of them is
-    # a rubric ("Original Article") the tagger rightly left out.
+    # One capitalised word left alone just before the title, in its region
+    # (after the region's start or a tagged field) or as a region of its own,
+    # is a drop-capped first word; a run of them is a rubric ("Original
+    # Article") the tagger rightly left out. A lone capital before a title
+    # that starts in lower case is a drop cap split off its word ("W" "ine").
     before = first_word - 1
-    region = inp.words[first_word].region
+    words = inp.words
 
-    def untagged(i: int) -> bool:
-        return i >= 0 and inp.words[i].region == region and _field(tags[i]) is None
+    def untagged(i: int, region: int) -> bool:
+        return i >= 0 and words[i].region == region and _field(tags[i]) is None
 
-    if (
-        untagged(before)
-        and not untagged(before - 1)
-        and inp.words[before].text[:1].isupper()
-        and not inp.words[before].text.isupper()
-    ):
-        problems.append("untagged_title_edge")
+    if before >= 0 and _field(tags[before]) is None:
+        text = words[before].text
+        region = words[before].region
+        alone = not untagged(before - 1, region) and (
+            region == words[first_word].region or not untagged(before + 1, region)
+        )
+        drop_cap = len(text) == 1 and text.isupper() and words[first_word].text[:1].islower()
+        if alone and text[:1].isupper() and (not text.isupper() or drop_cap):
+            problems.append("untagged_title_edge")
     return problems
 
 

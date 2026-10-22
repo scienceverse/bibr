@@ -93,6 +93,22 @@ async def _tag_front_matter(rm, ocr_regions, *, first_page_index: int):
         return None
 
 
+def _front_page_was_read(fs, first_page_index: int) -> bool:
+    """Whether OCR read the paper's first page (a scan or a broken text layer).
+
+    The front-matter tagger learned from born-digital pages and misses most
+    abstracts on scans, so those keep the LLM. A page with no class (no
+    inspection) counts as born-digital, as everywhere else.
+    """
+    try:
+        from bibr.scan.page_kind import PageKind, ensure_page_kinds
+
+        kind = ensure_page_kinds(fs).get(first_page_index)
+    except Exception:  # noqa: BLE001 - a missing class is not a scan
+        return False
+    return kind in (PageKind.SCAN, PageKind.BROKEN_TEXT_LAYER)
+
+
 def _split_scanned_articles(fs) -> None:
     """Drop neighbouring articles' regions from the file's scanned pages; never raise."""
     try:
@@ -195,9 +211,16 @@ class ParseSegmentStage:
                     )
                     if predictions is not None:
                         contents.front_role_predictions = predictions
-                    contents.front_tagger_result = await _tag_front_matter(
-                        rm, fs.ocr_regions, first_page_index=ctx.config.start_page or 0
-                    )
+                    first_page = ctx.config.start_page or 0
+                    if _front_page_was_read(fs, first_page):
+                        logger.debug(
+                            "%s: front page went through OCR; the LLM reads the front matter",
+                            fs.path.name,
+                        )
+                    else:
+                        contents.front_tagger_result = await _tag_front_matter(
+                            rm, fs.ocr_regions, first_page_index=first_page
+                        )
 
                 assembler = parser.assembler
                 if len(assembler):
