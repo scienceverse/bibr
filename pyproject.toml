@@ -229,6 +229,14 @@ environments = [
 # (setuptools' own PYSEC-2026-3447 can't be floored — the fix is 83.0.0, above
 # that same vllm pin. Every other branch of the lock has 83.0.0; the pinned one
 # is tracked in ci/vulnerability-exceptions.toml instead.)
+# pillow>=13.0.0 overrides gradio's pillow<13.0 cap (still in gradio 6.30.0,
+# the demo extra) so the lock gets the fixes for the twenty-odd pillow 12.3.0
+# advisories pip-audit reports. bibr decodes untrusted PDF images with pillow,
+# so this is runtime exposure. The demo tests pass on pillow 13; drop the
+# override once gradio lifts its cap.
+override-dependencies = [
+    "pillow>=13.0.0",
+]
 constraint-dependencies = [
     "aiohttp>=3.14.3",
     "click>=8.3.3",

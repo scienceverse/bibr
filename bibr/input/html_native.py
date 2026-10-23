@@ -9,6 +9,7 @@ contract used by the other native inputs.
 
 from __future__ import annotations
 
+import codecs
 import itertools
 import logging
 import re
@@ -20,6 +21,12 @@ import pandas as pd
 import webencodings  # html5lib's encoding table (a dependency of html5lib)
 from bs4 import BeautifulSoup, CData, NavigableString, Tag
 
+from bibr.input.heading_cues import (
+    REFERENCES_HEADER,
+    names_reference_list,
+    reads_as_bold_heading,
+    reads_as_reference_heading,
+)
 from bibr.input.mathml_whitespace import FlatText, mspace_separates
 from bibr.models import PaperAuthor, PaperMetadata
 from bibr.paper_contents import (
@@ -37,7 +44,7 @@ from bibr.structure.assembler import DeferredText, DocumentAssembler
 from bibr.structure.float_labels import caption_label
 from bibr.structure.html_table import TableBudget, html_table_frame, is_hidden_table
 from bibr.structure.xref_utils import URL_RE, detect_xrefs
-from bibr.utils.text import clean_extracted_url, collapse_ws
+from bibr.utils.text import YEARISH_RE, clean_extracted_url, collapse_ws
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +126,26 @@ _INLINE_TAGS = frozenset(
         "semantics",
     }
 )
+# What a run of inline content between blocks can hold: the inline elements, a
+# line break and an image. A browser lays such a run out as a paragraph of its
+# own, whatever element it sits in.
+_RUN_TAGS = _INLINE_TAGS | {"br", "img"}
+# Document metadata, never page text: an ePub's chapters each bring a <head>,
+# and html5lib keeps a <title> met inside <body> where it stands.
+_NON_CONTENT_TAGS = frozenset({"head", "title", "meta", "link", "base"})
+# Elements that set their text bold, and a style declaration that does.
+_BOLD_TAGS = frozenset({"b", "strong"})
+_BOLD_STYLE_RE = re.compile(r"font-weight\s*:\s*(?:bold(?:er)?|[6-9]00)\b", re.IGNORECASE)
+# Class names of a reference list's entries in HTML that Word ("Save as Web
+# Page") writes for its Bibliography and EndNote's EndNote Bibliography style.
+_BIBLIOGRAPHY_CLASSES = frozenset({"msobibliography", "endnotebibliography"})
+# Class and id names of a container holding a reference list and nothing
+# else: pandoc and Quarto's citeproc output (<div id="refs" class="references
+# csl-bib-body">), MediaWiki's and others. Whole names only: a substring such
+# as "citation" also names a page's "Cite this article" tools.
+_REFERENCE_CONTAINER_NAMES = frozenset(
+    {"refs", "references", "bibliography", "csl-bib-body", "ref-list", "reflist"}
+)
 # Upper bound on HTML fed to the pure-Python html5lib parser (audit L9). Well
 # above any real article/JATS/EPUB spine document, below what makes parsing a
 # DoS. Kept below the serve upload cap so it fails fast on the parse path.
@@ -131,6 +158,10 @@ _ELEMENT_RE = re.compile(
     r"<\s*(?:html|body|article|main|section|p|h[1-6]|table|figure|div|li|blockquote|ol|ul)\b",
     re.ASCII | re.IGNORECASE,
 )
+# Where html5lib looks for an encoding declaration, and what it finds there.
+_PRESCAN_BYTES = 1024
+_META_CHARSET_RE = re.compile(rb"<meta[^>]*charset", re.IGNORECASE)
+_BOMS = (codecs.BOM_UTF8, codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)
 # collapse_ws's whitespace rule: every run of whitespace becomes one space.
 _WS_RUN_RE = re.compile(r"\s+")
 _DOI_RE = re.compile(r"\b10\.\d{4,9}/\S+\b", re.IGNORECASE)
@@ -252,6 +283,9 @@ def _split_person_name(value: str) -> tuple[str, str]:
 
 
 def _map_heading(header: str) -> CanonicalSection:
+    if reads_as_reference_heading(header):
+        # "Literature Cited", "Reference list", "Literaturverzeichnis", ...
+        return CanonicalSection.REFERENCES
     norm = re.sub(r"^\s*\d+(?:\.\d+)*\.?\s*", "", header.lower()).strip()
     for canon, aliases in {
         CanonicalSection.ABSTRACT: {"abstract", "summary"},
@@ -459,6 +493,43 @@ def _anchor_offsets(block: Tag, anchors: list[tuple[Tag, str]]) -> list[int]:
     return offsets
 
 
+def _block_holders(root: Tag) -> set[int]:
+    """The ids of the inline elements under *root* that hold a block element,
+    at any depth, found in one pass from the leaves up."""
+    holders: set[int] = set()
+    for tag in reversed(root.find_all(True)):
+        for child in tag.children:
+            if isinstance(child, Tag) and (
+                _tag_name(child) not in _RUN_TAGS or id(child) in holders
+            ):
+                holders.add(id(tag))
+                break
+    return holders
+
+
+def _bold_throughout(block: Tag) -> bool:
+    """Whether every piece of text in *block* is bold: inside ``<b>`` or
+    ``<strong>``, or under an element whose style sets a bold font weight
+    (the block's own included)."""
+    seen = False
+    for string in block.find_all(string=True):
+        if type(string) not in (NavigableString, CData) or not string.strip():
+            continue
+        seen = True
+        element = string.parent
+        while element is not None:
+            if _tag_name(element) in _BOLD_TAGS or _BOLD_STYLE_RE.search(
+                str(element.get("style") or "")
+            ):
+                break
+            if element is block:
+                return False
+            element = element.parent
+        else:
+            return False
+    return seen
+
+
 class HtmlParser:
     """Parses article HTML/XHTML bytes into :class:`PaperContents`."""
 
@@ -496,6 +567,17 @@ class HtmlParser:
         # Spans repeat a cell's text in every slot they cover: the tables of
         # one document (an ePub's chapters together) share one limit.
         self._table_budget = TableBudget()
+        # The parsed document, the inline elements holding a block (read as
+        # containers), and whether bold paragraphs are headings: all set when
+        # parse() reads the document.
+        self._soup: BeautifulSoup | None = None
+        self._block_holders: set[int] = set()
+        self._bold_headings = False
+        # The section open before the references heading, and whether a
+        # reference list (a list element, or paragraphs Word or EndNote marked
+        # as entries) has been read under it.
+        self._section_before_references = 0
+        self._reference_list = False
 
     @property
     def _deferred_texts(self) -> list[tuple[str, int | None, int, bool, bool]]:
@@ -522,9 +604,7 @@ class HtmlParser:
 
         try:
             soup = (
-                self._parsed_soup
-                if self._parsed_soup is not None
-                else BeautifulSoup(self.html_bytes, "html5lib")
+                self._parsed_soup if self._parsed_soup is not None else _parse_soup(self.html_bytes)
             )
         except Exception as exc:
             raise ProcessingError(f"Failed to parse HTML: {exc}") from exc
@@ -540,6 +620,12 @@ class HtmlParser:
         )
 
         root = soup.find("article") or soup.find("main") or soup.body or soup
+        self._soup = soup
+        self._block_holders = _block_holders(root)
+        # A page without heading elements (HTML a word processor wrote from a
+        # manuscript whose headings were bolded by hand) has no other sign of
+        # its sections.
+        self._bold_headings = root.find(_HEADING_TAGS) is None
         self._process_children(root)
 
         if not self.assembler.entries and not self.tables and not self.figures:
@@ -775,7 +861,7 @@ class HtmlParser:
         # The walk keeps its own stack, as _flatten does: html5lib does not
         # bound nesting depth, and recursing per container hit Python's
         # recursion limit on deeply nested <div>s or unclosed <span>s.
-        stack: list[Iterator[Any]] = [iter(parent.children)]
+        stack: list[Iterator[Any]] = [iter(self._blocks(parent))]
         while stack:
             child = next(stack[-1], None)
             if child is None:
@@ -784,6 +870,8 @@ class HtmlParser:
             if not isinstance(child, Tag):
                 continue
             name = _tag_name(child)
+            if name in _NON_CONTENT_TAGS:
+                continue
             if name in _HEADING_TAGS:
                 self._handle_heading(child)
             elif name in _BLOCK_TEXT_TAGS:
@@ -798,27 +886,80 @@ class HtmlParser:
                     self._append_reference(_text(child))
                 else:
                     self._handle_text_block(child)
+            elif name == "dl" and (self._in_references() or self._looks_like_reference_list(child)):
+                self._handle_reference_definitions(child)
             elif name == "table":
                 self._handle_table(child)
             elif name == "figure":
                 self._handle_figure(child)
+            elif self._is_reference_container(child):
+                self._handle_reference_container(child)
             else:
                 # Every other element (known containers and unknown tags alike)
                 # may hold text deeper down — descend rather than drop it.
-                stack.append(iter(child.children))
+                stack.append(iter(self._blocks(child)))
+
+    def _blocks(self, container: Tag) -> list[Any]:
+        """*container*'s children, each run of inline content between them
+        (text, inline elements, line breaks) wrapped in a ``<p>`` of its own.
+
+        A browser lays out such a run as a paragraph whatever element holds
+        it, but the walk only read text from blocks: the paragraphs of a page
+        written as ``<div>text</div>`` (ScienceDirect's are), a definition
+        list's entries and citeproc's ``<div class="csl-entry">`` references
+        were all dropped. An inline element holding a block (``<a>`` around a
+        ``<div>``) stays a container.
+        """
+        out: list[Any] = []
+        run: list[Any] = []
+
+        def flush() -> None:
+            if any(
+                (node.get_text() if isinstance(node, Tag) else str(node)).strip() for node in run
+            ):
+                assert self._soup is not None
+                wrapper = self._soup.new_tag("p")
+                run[0].insert_before(wrapper)
+                for node in run:
+                    wrapper.append(node.extract())
+                out.append(wrapper)
+            run.clear()
+
+        for child in list(container.children):
+            if isinstance(child, Tag):
+                if _tag_name(child) in _RUN_TAGS and id(child) not in self._block_holders:
+                    run.append(child)
+                    continue
+                flush()
+                out.append(child)
+            elif type(child) in (NavigableString, CData):
+                run.append(child)
+        flush()
+        return out
 
     def _handle_heading(self, tag: Tag) -> None:
         header = _text(tag)
         if not header:
             return
-        level = int(_tag_name(tag)[1])
+        self._open_section(header, int(_tag_name(tag)[1]))
+
+    def _open_section(self, header: str, level: int) -> None:
+        if names_reference_list(header) and not self._in_references():
+            self._section_before_references = self._current_section_id
+        self._reference_list = False
         while self._heading_stack and self._heading_stack[-1][0] >= level:
             self._heading_stack.pop()
         parent_id = self._heading_stack[-1][1] if self._heading_stack else 0
         self._section_counter += 1
         section_id = self._section_counter
         section_type = _map_heading(header)
-        if self._detected_title and header == self._detected_title:
+        if (
+            self._detected_title
+            and header == self._detected_title
+            and section_type == CanonicalSection.UNKNOWN
+        ):
+            # A page without a title of its own takes its first heading as
+            # one; a "References" or "Abstract" heading still heads its section.
             section_type = CanonicalSection.TITLE
         self.sections.append(
             PaperSection(
@@ -843,6 +984,27 @@ class HtmlParser:
         text = _text(tag)
         if not text:
             return
+        if _tag_name(tag) == "p":
+            if reads_as_reference_heading(text):
+                # A paragraph reading "References" heads the list whatever its
+                # markup; under a references heading already, it repeats it.
+                if not self._in_references():
+                    self._open_section(text, self._top_heading_level())
+                return
+            if self._bold_headings and reads_as_bold_heading(text) and _bold_throughout(tag):
+                self._open_section(text, self._top_heading_level())
+                return
+            if _BIBLIOGRAPHY_CLASSES & set(_attr_tokens(tag, "class").split()):
+                if not self._in_references():
+                    self._ensure_references_section()
+                self._reference_list = True
+                self._append_reference(text)
+                return
+        # A dated paragraph after a reference list can be one more entry
+        # (typed in by hand after the ones Word marked); anything else follows
+        # the list rather than belonging to it.
+        if self._in_references() and self._reference_list and not YEARISH_RE.search(text):
+            self._end_reference_list()
         if self._in_references():
             self._append_reference(text)
             return
@@ -867,14 +1029,94 @@ class HtmlParser:
             self._ensure_references_section()
         for li in tag.find_all("li", recursive=False):
             self._append_reference(_text(li))
+        self._reference_list = True
+
+    def _handle_reference_definitions(self, tag: Tag) -> None:
+        """A reference list written as a definition list: each ``<dd>``
+        entry, after the label its ``<dt>`` prints ("[1]")"""
+        if not self._in_references():
+            self._ensure_references_section()
+        label = ""
+        for child in tag.find_all(["dt", "dd"], recursive=False):
+            if _tag_name(child) == "dt":
+                label = _text(child)
+                continue
+            self._append_reference(f"{label} {_text(child)}")
+            label = ""
+        if label:
+            self._append_reference(label)
+        self._reference_list = True
+
+    def _is_reference_container(self, tag: Tag) -> bool:
+        """Whether *tag* holds a reference list and nothing else, by its
+        class or id (``_REFERENCE_CONTAINER_NAMES``)."""
+        if _tag_name(tag) in _RUN_TAGS:
+            return False
+        names = set(_attr_tokens(tag, "id", "class").split())
+        return bool(names & _REFERENCE_CONTAINER_NAMES)
+
+    def _handle_reference_container(self, tag: Tag) -> None:
+        """Each entry of a reference-list container: its lists' items, and
+        its other blocks (citeproc's ``<div class="csl-entry">``) one each,
+        without the headings inside it."""
+        if not self._in_references():
+            self._ensure_references_section()
+        stack: list[Iterator[Any]] = [iter(self._blocks(tag))]
+        while stack:
+            child = next(stack[-1], None)
+            if child is None:
+                stack.pop()
+                continue
+            name = _tag_name(child)
+            if name in _HEADING_TAGS or name in _NON_CONTENT_TAGS:
+                continue
+            if name in {"ol", "ul"}:
+                for li in child.find_all("li", recursive=False):
+                    self._append_reference(_text(li))
+            elif name in {"p", "li", "dd", "dt"} or self._holds_only_runs(child):
+                self._append_reference(_text(child))
+            else:
+                stack.append(iter(self._blocks(child)))
+        self._reference_list = True
+
+    def _holds_only_runs(self, tag: Tag) -> bool:
+        """Whether *tag* holds text and inline elements only, no block."""
+        return all(
+            not isinstance(child, Tag)
+            or (_tag_name(child) in _RUN_TAGS and id(child) not in self._block_holders)
+            for child in tag.children
+        )
+
+    def _end_reference_list(self) -> None:
+        """Close the reference list: what follows it under the same heading
+        (a note, a licence, the page's tables) goes back to the section open
+        before the references heading, so it is not read as references."""
+        self._reference_list = False
+        self._current_section_id = self._section_before_references
+        while len(self._heading_stack) > 1 and self._heading_stack[-1][1] != (
+            self._current_section_id
+        ):
+            self._heading_stack.pop()
+
+    def _top_heading_level(self) -> int:
+        """The level of a heading no element marks: that of the shallowest
+        section heading so far other than the title, else 1."""
+        levels = [
+            section.level
+            for section in self.sections[1:]
+            if section.section_type != CanonicalSection.TITLE
+        ]
+        return min(levels, default=1)
 
     def _ensure_references_section(self) -> None:
+        self._section_before_references = self._current_section_id
+        self._reference_list = False
         self._section_counter += 1
         section_id = self._section_counter
         self.sections.append(
             PaperSection(
                 section_id=section_id,
-                header="References",
+                header=REFERENCES_HEADER,
                 level=1,
                 parent_section_id=0,
                 section_type=CanonicalSection.REFERENCES,
@@ -988,6 +1230,30 @@ class HtmlParser:
             )
 
 
+def _parse_soup(html_bytes: bytes) -> BeautifulSoup:
+    """Parse *html_bytes* with html5lib, reading undeclared UTF-8 as UTF-8.
+
+    Without a byte-order mark or a ``<meta charset>`` in the first 1024 bytes
+    (where html5lib looks for one) html5lib decodes as windows-1252, so a
+    UTF-8 page saved without a declaration (pandoc's fragments, an XHTML file
+    declaring its encoding only in the XML declaration, which HTML parsing
+    ignores) read "Café" as "CafÃ©". Bytes that decode as UTF-8 are
+    UTF-8 text in practice; anything else keeps html5lib's detection.
+    """
+    from_encoding = None
+    if (
+        not html_bytes.startswith(_BOMS)
+        and _META_CHARSET_RE.search(html_bytes[:_PRESCAN_BYTES]) is None
+    ):
+        try:
+            html_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+        else:
+            from_encoding = "utf-8"
+    return BeautifulSoup(html_bytes, "html5lib", from_encoding=from_encoding)
+
+
 def _reads_as_markup(html_bytes: bytes) -> bool:
     """Whether the start of *html_bytes* holds an HTML element tag.
 
@@ -1020,7 +1286,7 @@ def inspect_html(html_bytes: bytes) -> tuple[bool, BeautifulSoup | None]:
     if not _reads_as_markup(html_bytes):
         return False, None
     try:
-        soup = BeautifulSoup(html_bytes, "html5lib")
+        soup = _parse_soup(html_bytes)
     except Exception:
         return False, None
     HtmlParser._remove_noise(soup)
