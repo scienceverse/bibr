@@ -386,6 +386,24 @@ def test_the_bold_title_page_above_the_abstract_is_no_section():
     assert _headers(_parse(body)) == ["Abstract", "Method"]
 
 
+def test_an_outlined_byline_above_the_abstract_is_no_heading():
+    """A harvested manuscript set its byline, affiliation and email line at
+    outline level 0. They became headings, and as three styled headings they
+    turned the bold body headings off."""
+    body = (
+        _bold("Aging and the hippocampus")
+        + _plain("Jenna L. Merenstein", outline=0)
+        + _plain("Department of Psychology, Somewhere University", outline=0)
+        + _plain("Email: jenna@example.org", outline=0)
+        + _bold("Abstract")
+        + _plain("We studied it.")
+        + _bold("Method")
+        + _plain("We did it.")
+    )
+
+    assert _headers(_parse(body)) == ["Abstract", "Method"]
+
+
 def test_reference_entries_with_an_outline_level_are_not_headings():
     """A harvested PsyArXiv manuscript had a stray outline level 0 on three
     reference entries. They became headings, each starting a front-matter
