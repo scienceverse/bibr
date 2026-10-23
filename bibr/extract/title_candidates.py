@@ -15,6 +15,8 @@ import difflib
 import logging
 import re
 import unicodedata
+from collections import Counter
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from bibr.extract.field_decisions import FieldCandidate
@@ -38,6 +40,12 @@ _TITLE_AGREE_RATIO = 0.85
 # Use a narrow masthead grammar: a URL or ISSN is stronger page-furniture evidence than a volume
 # label or bare DOI.
 _MASTHEAD_MARKER_RE = re.compile(r"https?://|www\.|ISSN\s*\d{4}", re.IGNORECASE)
+# A page header's folio, printed before or after the running head.
+_HEADER_FOLIO_RE = re.compile(r"^\d{1,4}\s+|\s+\d{1,4}$")
+# What separates a running head from the title the model read after it.
+_RUNNING_HEAD_SEPARATORS = " :.|-\u2013\u2014"
+# Words the title must keep once the running head is cut off it.
+_MIN_TITLE_WORDS_AFTER_HEAD = 4
 
 
 def _normalize_for_match(s: str) -> str:
@@ -486,6 +494,90 @@ def byline_adjacent_candidate(
             issues=(issue,),
         ),
         "row above the byline disagrees with the title",
+    )
+
+
+def _running_heads(headers: Iterable[str]) -> list[str]:
+    """Page headers printed in capitals on more than one page, longest first.
+
+    An APA manuscript prints a short running head in capitals at the top of
+    every page; a header seen once may be the title page's own title.
+    """
+
+    counts = Counter(
+        _HEADER_FOLIO_RE.sub("", " ".join(header.split())) for header in headers if header
+    )
+    heads = [
+        header
+        for header, count in counts.items()
+        if count >= 2 and header.isupper() and len(header.split()) >= 2
+    ]
+    return sorted(heads, key=len, reverse=True)
+
+
+def _after_running_head(text: str, head: str) -> str | None:
+    """*text* without the running head it opens with, when a title is left."""
+
+    if not text.startswith(head) or text[len(head) : len(head) + 1] not in _RUNNING_HEAD_SEPARATORS:
+        return None
+    rest = text[len(head) :].lstrip(_RUNNING_HEAD_SEPARATORS)
+    if len(rest.split()) < _MIN_TITLE_WORDS_AFTER_HEAD or rest.isupper():
+        return None
+    return rest
+
+
+def running_head_candidate(
+    title: str,
+    running_headers: Iterable[str],
+    detected_title: str | None,
+    *,
+    journal: str | None,
+    publisher: str | None,
+) -> tuple[FieldCandidate | None, str]:
+    """The title without the running head the model read into it.
+
+    A manuscript's first page prints the running head above the title, and the
+    model can take it as the title's first line, or as the whole title. When
+    *title* opens with a header repeated in capitals on later pages, the rest
+    of it is the title; when it is only that header, the layout-detected title
+    stands in, without the head if it opens with it too.
+    """
+
+    from bibr.extract.front_matter import _normalize_text
+
+    text = " ".join((title or "").split())
+    head = next(
+        (
+            head
+            for head in _running_heads(running_headers)
+            if text == head or _after_running_head(text, head) is not None
+        ),
+        None,
+    )
+    if head is None:
+        return None, "no running head in the title"
+    if text != head:
+        replacement, source = _after_running_head(text, head), "running_head_stripped"
+    else:
+        detected = " ".join((detected_title or "").split())
+        replacement = _after_running_head(detected, head)
+        if replacement is None and detected and not detected.casefold().startswith(head.casefold()):
+            replacement = detected if len(detected.split()) >= _MIN_TITLE_WORDS_AFTER_HEAD else None
+        source = "layout_title"
+    if not replacement or _title_text_is_unsafe(
+        replacement, _normalize_text(replacement), "doc_title", journal=journal, publisher=publisher
+    ):
+        return None, "running head with no safe title after it"
+    issue = ValidationIssue(
+        code="VAL_TITLE_RUNNING_HEAD",
+        severity=IssueSeverity.WARNING,
+        message="Dropped the running head the model read as part of the title",
+        origin_stage="extract",
+        blocking=False,
+    )
+    return (
+        FieldCandidate("title", source, replacement, issues=(issue,)),
+        "title opened with the running head",
     )
 
 

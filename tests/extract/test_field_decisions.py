@@ -999,6 +999,66 @@ def test_title_byline_adjacency_is_off_by_default():
     )
 
 
+_HEAD = "TOP-DOWN VS. BOTTOM-UP LIFE SATISFACTION"
+_UNDER_HEAD = "Building Overall Life Satisfaction From the Bottom Up or the Top Down?"
+# An APA manuscript's page headers: the running head on every page, and the
+# title page's own title once.
+_HEADERS = [_HEAD, _UNDER_HEAD, _HEAD, f"{_HEAD} 3", f"4 {_HEAD}"]
+
+
+@pytest.mark.parametrize("joint", [" ", ": ", "\n"])
+def test_title_drops_the_running_head_the_model_read_into_it(joint):
+    decision = _title(f"{_HEAD}{joint}{_UNDER_HEAD}", running_headers=_HEADERS)
+
+    assert (decision.value, decision.source, decision.rule) == (
+        _UNDER_HEAD,
+        "running_head_stripped",
+        "running_head",
+    )
+    assert [issue.code for issue in decision.issues] == ["VAL_TITLE_RUNNING_HEAD"]
+
+
+@pytest.mark.parametrize(
+    ("detected", "value", "rule"),
+    [
+        (_UNDER_HEAD, _UNDER_HEAD, "running_head"),
+        (f"{_HEAD} {_UNDER_HEAD}", _UNDER_HEAD, "running_head"),
+        # Nothing printed to stand in: the head is kept.
+        (None, _HEAD, "extracted"),
+        (_HEAD, _HEAD, "extracted"),
+        # The same words in title case: a title printed as its own running head.
+        (_HEAD.title(), _HEAD, "extracted"),
+    ],
+)
+def test_a_title_that_is_only_the_running_head_takes_the_layout_title(detected, value, rule):
+    decision = _title(_HEAD, running_headers=_HEADERS, detected_title=detected)
+
+    assert (decision.value, decision.rule) == (value, rule)
+
+
+@pytest.mark.parametrize(
+    ("title", "headers"),
+    [
+        # Printed on one page only: the title page's own title row.
+        (f"{_HEAD} {_UNDER_HEAD}", [_HEAD, _UNDER_HEAD]),
+        # A running head in title case can be the short title itself.
+        (
+            "Life Satisfaction From the Bottom Up: A Genetically Informative Test",
+            ["Life Satisfaction From the Bottom Up"] * 3,
+        ),
+        # Cut mid-word, or too little left to be a title.
+        (f"{_HEAD}S AND MORE: Building Overall Life Satisfaction", _HEADERS),
+        (f"{_HEAD}: A Twin Study", _HEADERS),
+        # The whole title is printed in capitals.
+        (f"{_HEAD}: BUILDING OVERALL LIFE SATISFACTION FROM THE BOTTOM UP", _HEADERS),
+    ],
+)
+def test_title_keeps_what_is_not_a_running_head(title, headers):
+    decision = _title(title, running_headers=headers)
+
+    assert (decision.value, decision.rule) == (title, "extracted")
+
+
 def test_unscoped_title_prefers_the_layout_title():
     decision = _title("A Model Title", scoped=False, detected_title="The Layout Title")
     assert (decision.value, decision.source, decision.rule) == (
