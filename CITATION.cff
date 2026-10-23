@@ -8,7 +8,7 @@ authors:
   - family-names: Werner
     given-names: Jakub
 version: 0.7.4
-date-released: 2026-10-18
+date-released: 2026-10-23
 license: AGPL-3.0-or-later
 repository-code: "https://github.com/scienceverse/bibr"
 url: "https://bibr.org"
