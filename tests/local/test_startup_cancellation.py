@@ -203,6 +203,10 @@ async def test_await_owned_sets_stop_event_on_cancel_and_still_settles():
 
     task = asyncio.create_task(await_owned(loop.run_in_executor(None, work), stop_event=stop))
     await asyncio.to_thread(entered.wait, 5)
+    # A task cancelled before its first step never runs its body, so let
+    # await_owned reach its await before cancelling.
+    while not task.done() and task.get_coro().cr_await is None:
+        await asyncio.sleep(0)
     task.cancel()
     (result,) = await asyncio.gather(task, return_exceptions=True)
 
