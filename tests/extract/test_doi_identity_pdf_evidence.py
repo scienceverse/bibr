@@ -236,6 +236,26 @@ def test_a_parsed_doi_that_ran_into_the_next_line_is_rejected(footer, metadata, 
         assert selection.selected.normalized == parsed.normalized
 
 
+def test_a_doi_printed_whole_is_not_rejected_where_another_line_wraps_it():
+    # The footer prints the paper's DOI whole; a supplement link breaks the
+    # same DOI at a line end and runs on into its path.
+    footer = "PNAS 2026 Vol. 1 No. 2 e1234567 https://doi.org/10.1234/pnas.1234567 1 of 12"
+    contents = _contents(_TITLE_ONLY, footers=[footer])
+    wrapped = _line(
+        1,
+        "https://www.example.org/lookup/suppl/doi:10.1234/pnas.",
+        next_text="1234567/-/DCSupplemental.",
+    )
+    whole = _line(1, footer)
+
+    candidates, selection = _select(contents, _evidence([wrapped, whole]))
+
+    [parsed] = [c for c in candidates if c.source_kind == "footer"]
+    assert parsed.rejection_reason is None
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1234/pnas.1234567"
+
+
 @pytest.mark.parametrize(
     "evidence",
     [
