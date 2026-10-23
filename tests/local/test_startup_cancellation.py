@@ -201,8 +201,13 @@ async def test_await_owned_sets_stop_event_on_cancel_and_still_settles():
         assert stop.wait(5), "cancellation never set the stop event"
         return "settled"
 
-    task = asyncio.create_task(await_owned(loop.run_in_executor(None, work), stop_event=stop))
-    await asyncio.to_thread(entered.wait, 5)
+    async def owner() -> str:
+        # Submit inside the task, as callers do: the work then cannot start
+        # before await_owned owns it, so a cancel cannot land in between.
+        return await await_owned(loop.run_in_executor(None, work), stop_event=stop)
+
+    task = asyncio.create_task(owner())
+    assert await asyncio.to_thread(entered.wait, 5)
     task.cancel()
     (result,) = await asyncio.gather(task, return_exceptions=True)
 
