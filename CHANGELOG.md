@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - setuptools is locked at 84.2.1 for GHSA-xmj3-9gf7-h52w (Windows only).
   The Linux Python 3.12-3.13 lock keeps 80.10.2 under vllm's setuptools<81 pin,
   with a dated exception in `ci/vulnerability-exceptions.toml`.
+- filelock is locked at 4.2.4 for CVE-2026-112914 (fixed in 4.2.1).
 
 ### Fixed
 
