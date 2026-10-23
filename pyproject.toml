@@ -226,9 +226,10 @@ environments = [
 # (still in vllm 0.31.0, on Python >3.11), so the linux/x86_64 Python 3.12-3.13
 # branch of the lock still resolves. Do not raise this floor past 81 without
 # checking that pin.
-# (setuptools' own PYSEC-2026-3447 can't be floored — the fix is 83.0.0, above
-# that same vllm pin. Every other branch of the lock has 83.0.0; the pinned one
-# is tracked in ci/vulnerability-exceptions.toml instead.)
+# (setuptools' own PYSEC-2026-3447 and GHSA-xmj3-9gf7-h52w can't be floored —
+# the fixes are 83.0.0 and 84.1.0, above that same vllm pin. Every other branch
+# of the lock has 84.2.1; the pinned one is tracked in
+# ci/vulnerability-exceptions.toml instead.)
 # pillow>=13.0.0 overrides gradio's pillow<13.0 cap (still in gradio 6.30.0,
 # the demo extra) so the lock gets the fixes for the twenty-odd pillow 12.3.0
 # advisories pip-audit reports. bibr decodes untrusted PDF images with pillow,
