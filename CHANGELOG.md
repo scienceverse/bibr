@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-10-23
+
+The reference parser is now v5.1 (UltraBERT-150M), which matches references far better
+outside the training domain. Word manuscripts without heading styles, HTML and ePub
+files now keep their sections and reference lists. Two defaults also change:
+reference-manager files (BibTeX, RIS, CSL-JSON) now hold only what each reference
+printed unless you ask for registry values with `--prefer record`, and a resolver call
+now waits up to 30 s instead of 10 s. See Changed, and Known issues for Chinese
+references.
+
 ### Security
 
 - The lock moves to pillow 13.0.0, certifi 2026.10.19, virtualenv 21.14.12 and
@@ -49,17 +59,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - A UTF-8 HTML file without an encoding declaration (no byte-order mark, no
   `<meta charset>`) is now read as UTF-8 instead of windows-1252, which turned
   "Café" into "CafÃ©".
-
-## [0.7.4] - 2026-10-18
-
-The reference parser is now v5.1 (UltraBERT-150M), which matches references far better
-outside the training domain. Two defaults also change: reference-manager files (BibTeX,
-RIS, CSL-JSON) now hold only what each reference printed unless you ask for registry
-values with `--prefer record`, and a resolver call now waits up to 30 s instead of 10 s.
-See Changed.
-
-### Fixed
-
+- A paper whose reference list sits under a printed non-English heading
+  ("Literatur", "Literaturverzeichnis", "Bibliografia", ...) no longer loses
+  the list to a weaker guess. The locator's printed-heading check only knew
+  English headings, so a one-row body section the front-role model took for
+  the header, or the layout fallback's last unclassified section, could win,
+  and the reference segmenters then ran on body text. A printed references
+  heading in any language the heading grammar lists now wins; an English
+  heading still goes first when both are printed. The German "Quellen"
+  compound headings ("Verwendete Literatur", "Literatur und Quellen", ...)
+  are recognised too. On EXCITE dev, reference matching F1 rose from 0.773
+  to 0.784 (German papers 0.729 to 0.744).
 - Setting `LLM_PROVIDER` (or `--llm-provider`) without `LLM_MODEL` now picks
   that provider's default model: `claude-haiku-5-5` for `anthropic`,
   `gpt-5-nano` for `openai`, `llama-3.3-70b-versatile` for `groq` and
@@ -135,6 +145,19 @@ See Changed.
   `?prefer=record`), and each entry it changes gets a note naming the values
   that came from the record. The JSON export was never affected: matches stay
   in `bib_match` and `bib_check`.
+
+### Known issues
+
+- Chinese references printed without spaces in full-width punctuation
+  (GB/T 7714 style) often come out of the v5.1 parser with the authors, title
+  and journal all in `title` and no authors, so they match a registry record
+  less often than under v4.5. On a held-out set of 11 Chinese papers,
+  reference matching F1 fell from 0.94 to 0.71; other languages held or
+  improved. These parses pass the source checks, so the optional reference
+  review (`REF_LLM_BASE_URL`) does not pick them up either. A fix is planned.
+  Until then, `NER_PARSER_CKPT=scienceverse/bibr-parser-v4-5-gold` with
+  `NER_PARSER_REVISION=ff50a83e7f5b73dcf6f8f973a1a6e3847ec429e6` keeps v4.5
+  for corpora that are mostly Chinese.
 
 ## [0.7.3] - 2026-10-15
 
