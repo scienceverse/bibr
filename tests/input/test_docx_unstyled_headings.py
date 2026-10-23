@@ -30,6 +30,7 @@ _WML = "application/vnd.openxmlformats-officedocument.wordprocessingml"
 _STYLES = (
     f'<w:styles xmlns:w="{W}">'
     '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>'
+    '<w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/></w:style>'
     '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/>'
     '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr></w:style>'
     '<w:style w:type="paragraph" w:styleId="TOCHeading"><w:name w:val="TOC Heading"/>'
@@ -179,7 +180,7 @@ def test_bold_headings_and_an_endnote_list_give_sections_and_references():
     )
     contents = _parse(body)
 
-    assert _headers(contents)[1:] == ["Abstract", "Method", "Discussion", "References"]
+    assert _headers(contents) == ["Abstract", "Method", "Discussion", "References"]
     assert _section_texts(contents, "Method") == [
         "We recruited 500 participants online (Anderson et al., 2021)."
     ]
@@ -366,6 +367,57 @@ def test_bold_paragraphs_that_are_not_headings(paragraph):
     body = _bold("Method") + _plain("Text.") + paragraph
 
     assert _headers(_parse(body)) == ["Method"]
+
+
+def test_the_bold_title_page_above_the_abstract_is_no_section():
+    """The title over two bold lines and the bold author line came out as
+    sections; with the LLM on, a title section competes with the real one."""
+    body = (
+        _bold("Short-term Cultural Evolution in Response to COVID-19")
+        + _bold("Integrating Quantitative and Thematic Analysis")
+        + _bold("Jane Doe, John Roe")
+        + _plain("University of Somewhere")
+        + _bold("Abstract")
+        + _plain("We studied it.")
+        + _bold("Method")
+        + _plain("We did it.")
+    )
+
+    assert _headers(_parse(body)) == ["Abstract", "Method"]
+
+
+def test_reference_entries_with_an_outline_level_are_not_headings():
+    """A harvested PsyArXiv manuscript had a stray outline level 0 on three
+    reference entries. They became headings, each starting a front-matter
+    record, and counted as styled headings, so the bold ones went unread."""
+    body = (
+        _bold("Introduction")
+        + _plain("Text (Kesebir & Kesebir, 2012).")
+        + _bold("Discussion")
+        + _plain("More text.")
+        + _bold("References")
+        + "".join(_plain(ref, outline=0) for ref in REFS)
+        + _plain(
+            "Micheletti, E. B. (2022). What is cultural evolution? doi.org/10.1093/x", outline=0
+        )
+    )
+    contents = _parse(body)
+
+    assert _headers(contents) == ["Introduction", "Discussion", "References"]
+    assert len(_reference_rows(contents)) == len(REFS) + 1
+
+
+def test_a_caption_in_the_title_style_is_no_heading():
+    body = (
+        _plain("A study of games", style="Title")
+        + _plain("Introduction", style="Heading1")
+        + _plain("Text.")
+        + _plain("Table S1: Top video games by year (2020-2024).", style="Title")
+    )
+    contents = _parse(body)
+
+    assert _headers(contents) == ["A study of games", "Introduction"]
+    assert _section_texts(contents, "Introduction")[-1].startswith("Table S1")
 
 
 def test_bold_entries_in_the_references_are_not_headings():

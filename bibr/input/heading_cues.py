@@ -91,6 +91,50 @@ def reads_as_bold_heading(text: str) -> bool:
     return _CAPTION_START_RE.match(text) is None and _REFERENCE_ENTRY_RE.search(text) is None
 
 
+# Headings that open a manuscript's body. Bold paragraphs above the first of
+# them are its title page: the title (often over several lines), the authors
+# and their affiliations.
+_BODY_OPENERS = frozenset(
+    {
+        "abstract",
+        "summary",
+        "introduction",
+        "background",
+        "keywords",
+        "key words",
+        "method",
+        "methods",
+        "significance statement",
+        "public significance statement",
+    }
+)
+
+
+def opens_the_body(text: str) -> bool:
+    """Whether a heading is one a manuscript's body starts with ("Abstract",
+    "1. Introduction")."""
+    norm = re.sub(r"^\s*\d+(?:\.\d+)*\.?\s*", "", text.lower()).strip().rstrip(".:")
+    return norm in _BODY_OPENERS
+
+
+def reads_as_outline_heading(text: str) -> bool:
+    """Whether a paragraph that an outline level alone marks as a heading
+    reads as one: not a reference entry or caption a template happened to give
+    an outline level, nor a whole paragraph of text."""
+    text = text.strip()
+    return (
+        len(text) <= _MAX_BOLD_HEADING_CHARS
+        and len(text.split()) <= _MAX_BOLD_HEADING_WORDS
+        and _CAPTION_START_RE.match(text) is None
+        and _REFERENCE_ENTRY_RE.search(text) is None
+    )
+
+
+def starts_as_caption(text: str) -> bool:
+    """Whether a paragraph opens with a figure or table word ("Table S1: ...")."""
+    return _CAPTION_START_RE.match(text.strip()) is not None
+
+
 def reads_as_float_label(text: str) -> bool:
     """Whether a paragraph is only a figure or table label ("Table S1",
     "Figure 2"), as APA sets one above the float's title."""
