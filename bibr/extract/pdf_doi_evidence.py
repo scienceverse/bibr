@@ -86,6 +86,9 @@ class PdfDoiEvidence:
     lines: tuple[TextLayerLine, ...]
     links: tuple[LinkDoi, ...]
     metadata: tuple[MetadataDoi, ...]
+    # The read pages whose text layer prints any character: a page without one
+    # (a scan) says nothing about which DOIs it prints.
+    text_pages: tuple[int, ...] = ()
 
 
 def is_pdf(data: bytes | None) -> bool:
@@ -273,4 +276,11 @@ def read_pdf_doi_evidence(pdf_bytes: bytes, pages: Iterable[int]) -> PdfDoiEvide
             )
             links.append(LinkDoi(page_number, doi, link.uri, rect, _text_near(records, link.rect)))
     pages_read = tuple(page_number for page_number, *_rest in read)
-    return PdfDoiEvidence(pages_read, tuple(lines), tuple(links), tuple(metadata))
+    text_pages = tuple(
+        page_number
+        for page_number, _box, _rotation, records, _links in read
+        if any(not is_newline for *_char, is_newline in records)
+    )
+    return PdfDoiEvidence(
+        pages_read, tuple(lines), tuple(links), tuple(metadata), text_pages=text_pages
+    )
