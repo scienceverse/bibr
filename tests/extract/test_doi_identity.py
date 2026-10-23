@@ -1904,3 +1904,41 @@ def test_a_tie_both_dois_of_which_are_corroborated_still_abstains():
 
     assert selection.selected is None
     assert [issue.code for issue in selection.issues] == ["VAL_DOI_AMBIGUOUS"]
+
+
+@pytest.mark.parametrize(
+    ("text", "placeholder"),
+    [
+        ("Digital Object Identifier 10.1109/XXXX.2022.1234567", "10.1109/xxxx.2022.1234567"),
+        ("http://dx.doi.org/10.1364/ao.XX.XXXXXX", "10.1364/ao.xx.xxxxxx"),
+        ("https://doi.org/10.3390/xxxxx", "10.3390/xxxxx"),
+        ("Article ID XXXXXX, https://doi.org/10.1155/2020/XXXXXX", "10.1155/2020/xxxxxx"),
+    ],
+)
+def test_a_templates_sample_doi_never_names_the_paper(text, placeholder):
+    from bibr.extract.doi_identity import (
+        TEMPLATE_PLACEHOLDER,
+        collect_doi_candidates,
+        select_doi_candidates,
+    )
+
+    contents = _contents([("Title", CanonicalSection.TITLE, text, 1)])
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is None
+    [candidate] = selection.candidates
+    assert candidate.normalized == placeholder
+    assert candidate.rejection_reason == TEMPLATE_PLACEHOLDER
+
+
+@pytest.mark.parametrize("doi", ["10.1016/j.xcrm.2023.101234", "10.1111/j.1467-9280.2005.01528.x"])
+def test_a_doi_with_an_x_in_it_is_not_a_template_sample(doi):
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents([("Title", CanonicalSection.TITLE, f"https://doi.org/{doi}", 1)])
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == doi
