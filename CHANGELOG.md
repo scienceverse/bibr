@@ -8,8 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
-- The lock moves to pillow 13.0.0, certifi 2026.10.19 and virtualenv 21.14.12,
-  clearing the advisories that turned the dependency audit red on every branch.
+- The lock moves to pillow 13.0.0, certifi 2026.10.19, virtualenv 21.14.12 and
+  brotli 1.2.1, clearing the advisories that turned the dependency audit red on
+  every branch.
   gradio (the `demo` extra) still caps pillow below 13, so a uv override lifts
   the cap in the lock; the demo works on pillow 13.
 
