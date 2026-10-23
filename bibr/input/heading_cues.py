@@ -12,7 +12,12 @@ from __future__ import annotations
 import re
 
 from bibr.ocr.ref_patterns import _REF_HEADER_RE
-from bibr.structure.float_labels import FIGURE_WORD, SUPPLEMENT_WORD, TABLE_WORD
+from bibr.structure.float_labels import (
+    FIGURE_WORD,
+    SUPPLEMENT_WORD,
+    TABLE_WORD,
+    label_element_label,
+)
 
 # The header of the section a parser opens for a reference list that no
 # references heading precedes.
@@ -28,6 +33,17 @@ _REF_HEADING_WORD_RE = re.compile(
 # A paragraph opening with a figure or table word, labelled or not.
 _CAPTION_START_RE = re.compile(
     rf"{SUPPLEMENT_WORD}?(?:{FIGURE_WORD}|{TABLE_WORD})(?![A-Za-z])", re.IGNORECASE
+)
+
+# A reference entry, which an author may bold whole: a year in parentheses
+# followed by the entry's next field ("Smith, J. (2020). Title"), a Vancouver
+# year and volume ("2020;12:"), or a DOI or URL. A heading can hold a year
+# ("Lockdown Effects (2020)"), but not one followed by more fields.
+_REFERENCE_ENTRY_RE = re.compile(
+    r"\((?:1[6-9]|20)\d{2}[a-z]?(?:,[^)]{0,30})?\)\s*[.,]"
+    r"|\b(?:1[6-9]|20)\d{2}\s*;\s*\d"
+    r"|\b10\.\d{4,9}/|https?://|\bwww\.",
+    re.IGNORECASE,
 )
 
 # A paragraph bold throughout is a heading when it is at most this long.
@@ -63,7 +79,7 @@ def names_reference_list(header: str) -> bool:
 def reads_as_bold_heading(text: str) -> bool:
     """Whether a paragraph bold throughout is short enough, and shaped enough
     like a heading, to be one: not a caption, not a sentence, not a lead-in
-    ("Keywords:")."""
+    ("Keywords:"), not a reference entry."""
     text = text.strip()
     words = text.split()
     if not words or len(text) > _MAX_BOLD_HEADING_CHARS or len(words) > _MAX_BOLD_HEADING_WORDS:
@@ -72,4 +88,10 @@ def reads_as_bold_heading(text: str) -> bool:
         return False
     if text[-1] == "." and len(words) > _MAX_DOTTED_HEADING_WORDS:
         return False
-    return _CAPTION_START_RE.match(text) is None
+    return _CAPTION_START_RE.match(text) is None and _REFERENCE_ENTRY_RE.search(text) is None
+
+
+def reads_as_float_label(text: str) -> bool:
+    """Whether a paragraph is only a figure or table label ("Table S1",
+    "Figure 2"), as APA sets one above the float's title."""
+    return any(label_element_label(text, kind) is not None for kind in ("figure", "table"))

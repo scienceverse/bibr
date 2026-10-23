@@ -355,9 +355,32 @@ def test_bold_from_a_paragraph_or_character_style_counts():
         pytest.param(_bold("Table 2. Means and standard deviations"), id="table-label"),
         pytest.param(_bold("This sentence is bold for emphasis and ends like one."), id="sentence"),
         pytest.param(_bold(" ".join(["word"] * 25)), id="long"),
+        pytest.param(_bold("R Core Team (2023). R: A language and environment"), id="reference"),
+        pytest.param(_bold("Smith J, Doe K. A paper. J Things. 2020;12:45-67"), id="vancouver"),
+        pytest.param(_bold("Materials at https://osf.io/abcde"), id="url"),
+        pytest.param(_bold("Table S1") + _bold("Descriptive statistics"), id="apa-table-title"),
+        pytest.param(_plain("Figure 2") + _bold("Study design"), id="apa-figure-title"),
     ],
 )
 def test_bold_paragraphs_that_are_not_headings(paragraph):
     body = _bold("Method") + _plain("Text.") + paragraph
 
     assert _headers(_parse(body)) == ["Method"]
+
+
+def test_bold_entries_in_the_references_are_not_headings():
+    """A harvested PsyArXiv manuscript bolded some entries of its list; each
+    became a section, which split the paper into several front-matter records
+    under the LLM."""
+    body = (
+        _bold("Method")
+        + _plain("Text (Smith, 2020).")
+        + _bold("References")
+        + _plain(REFS[0])
+        + _bold("Doe, K. 2021 Meta-analysis")
+        + _plain(REFS[1])
+        + _bold("Appendix A")
+        + _plain("Items.")
+    )
+
+    assert _headers(_parse(body)) == ["Method", "References", "Appendix A"]

@@ -27,6 +27,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `Bibliography` style, or its `ADDIN EN.REFLIST`, `ZOTERO_BIBL`, `Mendeley
   Bibliography` or `BIBLIOGRAPHY` field) is found even under no heading. The
   tables and notes after a generated list are no longer read as references.
+  A bold reference entry, or a bold table or figure title under its "Table S1"
+  label, is not taken for a heading.
 - HTML and ePub text outside a paragraph element is no longer dropped. A page
   whose paragraphs are `<div>`s (as ScienceDirect writes them) failed with
   "HTML input did not contain parseable article content", and a pandoc or

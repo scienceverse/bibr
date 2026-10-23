@@ -38,6 +38,7 @@ from bibr.input.heading_cues import (
     REFERENCES_HEADER,
     names_reference_list,
     reads_as_bold_heading,
+    reads_as_float_label,
     reads_as_reference_heading,
 )
 from bibr.paper_contents import (
@@ -676,6 +677,9 @@ class DocxParser:
         # paragraphs are headings; both set when parse() reads the document.
         self._field_bibliography: set = set()
         self._bold_headings = False
+        # The text of the last paragraph that had any, for the bold title an
+        # APA table or figure label ("Table S1") sets above its float.
+        self._previous_text = ""
         # Headings that can still parent the next one, levels increasing.
         self._open_headings: list[PaperSection] = []
 
@@ -1072,10 +1076,13 @@ class DocxParser:
 
         # Quick path: heading paragraphs cannot host inline math/images/refs we care about.
         plain = _paragraph_text(paragraph._p).strip()
+        previous_text = self._previous_text
+        if plain:
+            self._previous_text = plain
         bibliography = traits.bibliography or paragraph._p in self._field_bibliography
         level = _heading_level(paragraph, traits)
         if level is None and plain and not (caption_style or bibliography):
-            level = self._unstyled_heading_level(paragraph, traits, plain)
+            level = self._unstyled_heading_level(paragraph, traits, plain, previous_text)
         if level is not None:
             if plain:
                 self._handle_heading(plain, level, style_name)
@@ -1307,7 +1314,9 @@ class DocxParser:
 
         flush_body()
 
-    def _unstyled_heading_level(self, paragraph, traits: _StyleTraits, plain: str) -> int | None:
+    def _unstyled_heading_level(
+        self, paragraph, traits: _StyleTraits, plain: str, previous_text: str
+    ) -> int | None:
         """The level of a heading that no style or outline level marks.
 
         A paragraph reading "References" (or the same heading in another
@@ -1315,8 +1324,10 @@ class DocxParser:
         document without heading styles or outline levels, a short paragraph
         bold throughout is a level-1 heading: authors bold the headings of a
         manuscript by hand. A document with only one or two styled headings
-        counts as one without. Neither holds a picture, an equation, or a line of
-        a table of contents.
+        counts as one without. A bold title under a table or figure label
+        ("Table S1") is the float's, and a dated bold paragraph in the
+        references is an entry. Neither kind of heading holds a picture, an
+        equation, or a line of a table of contents.
         """
         p = paragraph._p
         if (
@@ -1330,6 +1341,8 @@ class DocxParser:
         if (
             self._bold_headings
             and reads_as_bold_heading(plain)
+            and not reads_as_float_label(previous_text)
+            and not (self._in_references and YEARISH_RE.search(plain))
             and _is_bold_throughout(p, self._styles, traits)
         ):
             return 1
