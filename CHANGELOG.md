@@ -47,9 +47,9 @@ references.
   tables and notes after a generated list are no longer read as references.
   A bold reference entry, a bold table or figure title under its "Table S1"
   label, and the title page above the first "Abstract" or "Introduction"
-  (bold or outlined, but for its labels such as "Corresponding Author") are not
-  taken for headings; an outline level makes a heading only of text that reads
-  as one, and a caption in the Title style is body text.
+  (bold or outlined) are not taken for headings; an outline level makes a
+  heading only of text that reads as one, and a caption in the Title style is
+  body text.
 - HTML and ePub text outside a paragraph element is no longer dropped. A page
   whose paragraphs are `<div>`s (as ScienceDirect writes them) failed with
   "HTML input did not contain parseable article content", and a pandoc or
