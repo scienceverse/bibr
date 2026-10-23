@@ -6,20 +6,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Security
-
-- setuptools is locked at 84.2.1 for GHSA-xmj3-9gf7-h52w (Windows only).
-  The Linux Python 3.12-3.13 lock keeps 80.10.2 under vllm's setuptools<81 pin,
-  with a dated exception in `ci/vulnerability-exceptions.toml`.
-- filelock is locked at 4.2.4 for CVE-2026-112914 (fixed in 4.2.1).
-
-### Fixed
-
-- A title-page label in a Word manuscript ("Authors and Affiliations",
-  "Corresponding Author", "Highlights", "Author note", ...) heads its part
-  again. Since 0.7.4 the whole title page above "Abstract" or "Introduction"
-  made no headings, so such a label was read as part of the title (#236).
-
 ## [0.7.4] - 2026-10-23
 
 The reference parser is now v5.1 (UltraBERT-150M), which matches references far better
@@ -37,6 +23,10 @@ references.
   every branch.
   gradio (the `demo` extra) still caps pillow below 13, so a uv override lifts
   the cap in the lock; the demo works on pillow 13.
+- The lock moves to filelock 4.2.4 (CVE-2026-112914) and setuptools 84.2.1
+  (GHSA-xmj3-9gf7-h52w, Windows only). vllm's setuptools<81 pin keeps 80.10.2
+  in the Linux Python 3.12-3.13 lock, under a dated exception in
+  `ci/vulnerability-exceptions.toml`.
 
 ### Fixed
 
@@ -54,9 +44,10 @@ references.
   tables and notes after a generated list are no longer read as references.
   A bold reference entry, a bold table or figure title under its "Table S1"
   label, and the title page above the first "Abstract" or "Introduction"
-  (bold or outlined) are not taken for headings; an outline level makes a
-  heading only of text that reads as one, and a caption in the Title style is
-  body text.
+  (bold or outlined) are not taken for headings, but its labels ("Authors and
+  Affiliations", "Corresponding Author", "Highlights", ...) still head their
+  parts (#236); an outline level makes a heading only of text that reads as
+  one, and a caption in the Title style is body text.
 - HTML and ePub text outside a paragraph element is no longer dropped. A page
   whose paragraphs are `<div>`s (as ScienceDirect writes them) failed with
   "HTML input did not contain parseable article content", and a pandoc or
