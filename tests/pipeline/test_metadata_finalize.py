@@ -836,6 +836,57 @@ class TestSelectedAbstractFinalize:
 
         assert select_abstract_span(contents, resolution).text_ids == ()
 
+    @staticmethod
+    def _title_page_span(heading_page):
+        from bibr.structure.implicit_sections import select_abstract_span
+
+        # A manuscript's title page: title and byline on page one, the printed
+        # Abstract heading and its paragraph at the top of the next page.
+        sections = [
+            PaperSection(0, "Root", 0, None),
+            PaperSection(1, "Paper Title", 1, 0, CanonicalSection.TITLE),
+            PaperSection(2, "Abstract", 1, 0, CanonicalSection.ABSTRACT),
+            PaperSection(3, "Introduction", 1, 0, CanonicalSection.INTRODUCTION),
+        ]
+        sentences = [
+            PaperSentence(1, "Paper Title", 1, 1, page_number=1),
+            PaperSentence(2, "Ana Silva and Jonas Byrne", 1, 2, page_number=1),
+            PaperSentence(3, "Working memory predicts recall.", 2, 3, page_number=heading_page),
+            PaperSentence(4, "Body sentence.", 3, 4, page_number=heading_page + 1),
+        ]
+        resolution = _selected_resolution(
+            _candidate("title", 0, (1,), "Paper Title", roles={"title"}),
+            _candidate("byline", 1, (2,), "Ana Silva and Jonas Byrne", roles={"byline"}),
+            _candidate(
+                "abstract-heading",
+                2,
+                (),
+                "Abstract",
+                roles={"abstract", "heading"},
+                page=heading_page,
+                section_id=2,
+                region_label="paragraph_title",
+                source_kind="heading",
+            ),
+            _candidate(
+                "abstract",
+                3,
+                (3,),
+                "Working memory predicts recall.",
+                roles={"abstract"},
+                page=heading_page,
+                section_id=2,
+            ),
+            allowed_text_ids={1, 2, 3},
+        )
+        return select_abstract_span(_contents(sentences, sections), resolution)
+
+    def test_abstract_heading_behind_a_title_page_opens_on_page_two(self):
+        assert self._title_page_span(2).text_ids == (3,)
+
+    def test_abstract_heading_on_page_three_does_not_open(self):
+        assert self._title_page_span(3).text_ids == ()
+
     def test_page_one_span_allows_page_two_but_stops_before_page_three(self):
         from bibr.structure.implicit_sections import select_abstract_span
 
