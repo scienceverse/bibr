@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Fully local runs on one NVIDIA card keep the managed vLLM LLM and the
+  managed PaddleOCR-VL server up side by side when the card has room for both
+  (the 4B student on a 24 GB card). Their default shares (0.85 and 0.92)
+  could not coexist, so every chunk of a batch, 8 papers by default, stopped
+  the LLM to start OCR and then stopped OCR to start the LLM again, and each
+  start takes about a minute or more. PaddleOCR-VL now gets 7 GB, the ONNX
+  models keep 4 GB and the LLM gets the rest, unless `LLM_LOCAL_MEM_FRACTION`,
+  the new `OCR_PADDLE_VLLM_MEM_FRACTION` or a `--gpu-memory-utilization` extra
+  arg is set.
+- `bibr setup`'s recommended local plan for NVIDIA cards (Linux and Windows)
+  installs the `gpu` extra. Without `onnxruntime-gpu`, the layout, sentence,
+  reference and classifier models ran on the CPU beside the GPU, which made a
+  launch-day run on an RTX 5090 3.5 times slower (169 vs 591 papers an hour).
+
 ### Security
 
 - The lock moves to pillow 13.0.0, certifi 2026.10.19, virtualenv 21.14.12 and

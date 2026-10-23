@@ -740,12 +740,13 @@ class ResourceManager:
 
         Each vLLM server claims a fixed share of total VRAM when it starts and
         refuses to start while less is free, so with shares summing above 1
-        (the defaults, 0.85 + 0.92) the one starting must stop the other.
+        (0.85 + 0.92 on a card too small to share) the one starting must stop
+        the other.
         """
-        from bibr.ocr.registry import PADDLE_VLLM_GPU_MEMORY_UTILIZATION
+        from bibr.ocr.registry import paddle_vllm_mem_fraction
 
         llm_share = self._managed_vllm_fraction or self._settings.llm.local_mem_fraction
-        return llm_share + PADDLE_VLLM_GPU_MEMORY_UTILIZATION > 1.0
+        return llm_share + paddle_vllm_mem_fraction(self._settings) > 1.0
 
     def _llm_server_blocks_ocr(self, ocr_backend: str) -> bool:
         """Whether starting ``ocr_backend`` must first stop the managed LLM server.

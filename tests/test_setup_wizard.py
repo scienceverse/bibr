@@ -1275,6 +1275,8 @@ def test_recommended_setup_cuda_uses_fully_local_defaults():
     assert {"ml", "vllm"} <= setup.extras
     assert "local" not in setup.extras
     assert "demo" in setup.extras
+    # onnxruntime-gpu, or layout, SaT, NER and the classifiers run on the CPU.
+    assert "gpu" in setup.extras
     assert setup.required_prompts == ("install_extras", "smoke_test")
 
 
@@ -1355,6 +1357,8 @@ def test_recommended_setup_windows_uses_the_4b_gguf():
     # bibr cannot install llama.cpp itself, so the plan says how to get it.
     assert "winget install llama.cpp" in setup.runtime_summary
     assert "llama-server" in setup.runtime_summary
+    # llama.cpp runs OCR and the LLM, but the ONNX models still want the GPU.
+    assert "gpu" in setup.extras
 
 
 def test_recommended_setup_apple_silicon_warns_about_runtime():
@@ -1379,6 +1383,7 @@ def test_recommended_setup_apple_silicon_warns_about_runtime():
     assert "demo" in setup.extras
     assert "Apple Silicon" in setup.runtime_summary
     assert "slow" in setup.runtime_summary
+    assert "gpu" not in setup.extras
     # Honest about the real cost: a full extraction is tens of minutes.
     assert "15-30" in setup.runtime_summary
 

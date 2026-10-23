@@ -42,6 +42,18 @@ class OcrBackendCandidate:
 # the classifier device picker leaves it free (``bibr.local.pipeline``).
 PADDLE_VLLM_GPU_MEMORY_UTILIZATION = 0.92
 
+
+def paddle_vllm_mem_fraction(settings: GlobalSettings) -> float:
+    """The share of total VRAM the managed PaddleOCR-VL vLLM server is launched with.
+
+    ``OCR_PADDLE_VLLM_MEM_FRACTION`` when set (by the user, or by
+    ``LocalPipeline`` when the server can run beside the managed vLLM LLM),
+    else ``PADDLE_VLLM_GPU_MEMORY_UTILIZATION``.
+    """
+    configured = settings.ocr.paddle_vllm_mem_fraction
+    return PADDLE_VLLM_GPU_MEMORY_UTILIZATION if configured is None else configured
+
+
 # PaddleOCR-VL through the managed vLLM server needs an NVIDIA GPU with room
 # for the ~1.8 GB bf16 weights plus vLLM's KV/activation budget at
 # ``PADDLE_VLLM_GPU_MEMORY_UTILIZATION``. Below this floor bibr's documented

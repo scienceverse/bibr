@@ -33,6 +33,21 @@ def test_balanced_resolved_local_backends_unload_ocr():
     assert _should_unload_ocr_after_chunk("balanced", "vllm-mlx") is True
 
 
+def test_colocated_paddle_vllm_stays_loaded_beside_the_vllm_llm():
+    """Sized to fit together, the LLM needs none of OCR's VRAM: no per-chunk restart."""
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.llm.local_mem_fraction = 0.54
+    settings.ocr.paddle_vllm_mem_fraction = 0.30
+    assert _should_unload_ocr_after_chunk("balanced", "vllm", settings, "paddle-vllm") is False
+    assert _should_unload_ocr_after_chunk("balanced", "vllm", settings, "paddle") is False
+    # Other OCR runtimes and the unsized default keep the old teardown.
+    assert _should_unload_ocr_after_chunk("balanced", "vllm", settings, "glm-llama") is True
+    settings.ocr.paddle_vllm_mem_fraction = None
+    assert _should_unload_ocr_after_chunk("balanced", "vllm", settings, "paddle-vllm") is True
+
+
 def test_aggressive_always_unloads():
     assert _should_unload_ocr_after_chunk("aggressive", "cloud") is True
     assert _should_unload_ocr_after_chunk("aggressive", "local") is True
