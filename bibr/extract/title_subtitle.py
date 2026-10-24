@@ -114,8 +114,9 @@ _BRACKETED_VERSION_RE = re.compile(r"(?P<first>.*\S)\s*\[(?P<other>[^\[\]]+)\]\s
 _MIN_VERSION_WORDS = 3
 _MIN_LANGUAGE_WORDS = 2
 # Rows printed on their own that label something rather than continue a title:
-# article-type kickers, author-box and citation-box headings, and the one-word
-# section headings of languages the shared alias table does not cover.
+# article-type kickers, author-box, summary-box and citation-box headings, and
+# the one-word section headings of languages the shared alias table does not
+# cover.
 _LABEL_ROWS = frozenset(
     {
         "article",
@@ -149,6 +150,12 @@ _LABEL_ROWS = frozenset(
         "systematic review",
         "to cite this article",
         "viewpoint",
+        # Summary-box headings a Cell Press-style first page prints under the
+        # title, beside the author box
+        "graphical abstract",
+        "highlights",
+        "in brief",
+        "visual abstract",
         # French citation boxes
         "pour citer cet article",
         "référence électronique",
