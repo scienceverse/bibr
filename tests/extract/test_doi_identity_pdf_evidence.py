@@ -6,6 +6,7 @@ import pytest
 
 from bibr.extract.doi_identity import (
     AGREEMENT_ONLY,
+    LATER_PAGE_FURNITURE,
     LINE_JOIN_OVERRUN,
     collect_doi_candidates,
     select_doi_candidates,
@@ -234,6 +235,44 @@ def test_a_parsed_doi_that_ran_into_the_next_line_is_rejected(footer, metadata, 
         assert not [c for c in candidates if c.source_kind == "text_layer"]
         assert selection.selected is not None
         assert selection.selected.normalized == parsed.normalized
+
+
+_CUT_OFF = "https://doi.org/10.1037/h0043158"
+
+
+def _furniture_select(headers, lines=(), *, text_pages=(1, 2)):
+    evidence = PdfDoiEvidence((1, 2), tuple(lines), (), (), text_pages=text_pages)
+    return _select(_contents(_TITLE_ONLY, headers=headers), evidence)
+
+
+def test_a_header_doi_printed_once_past_the_front_pages_is_a_cut_off_reference():
+    # A page break cut the DOI line off a reference entry; the parse took it for
+    # a page header. The front pages print no DOI.
+    candidates, selection = _furniture_select([_CUT_OFF])
+
+    [header] = [c for c in candidates if c.source_kind == "header"]
+    assert header.rejection_reason == LATER_PAGE_FURNITURE
+    assert selection.selected is None
+
+
+@pytest.mark.parametrize(
+    ("headers", "lines", "text_pages"),
+    [
+        # The front page prints it.
+        ([_CUT_OFF], [_line(1, _CUT_OFF)], (1, 2)),
+        # Repeated running furniture.
+        ([_CUT_OFF, _CUT_OFF], [], (1, 2)),
+        # A front page without a text layer says nothing.
+        ([_CUT_OFF], [], (2,)),
+    ],
+    ids=["printed_on_page_one", "repeated", "scanned_front_page"],
+)
+def test_a_header_doi_the_front_pages_may_print_is_kept(headers, lines, text_pages):
+    candidates, selection = _furniture_select(headers, lines, text_pages=text_pages)
+
+    assert all(c.rejection_reason is None for c in candidates if c.source_kind == "header")
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1037/h0043158"
 
 
 @pytest.mark.parametrize(

@@ -32,6 +32,7 @@ TEXT_LAYER = "text_layer"
 LINK_ANNOTATION = "link_annotation"
 AGREEMENT_ONLY = "agreement_only"
 LINE_JOIN_OVERRUN = "line_join_overrun"
+LATER_PAGE_FURNITURE = "later_page_furniture"
 
 _DOI_RE = DOI_CANDIDATE_RE
 _REFERENCE_PREFIX_RE = re.compile(r"^\s*(?:\[\d+[A-Za-z]?\]|\d+[.)]\s)")
@@ -1175,8 +1176,39 @@ def _with_pdf_evidence(
             line, regions_by_page.get(line.page, []), section_map
         )
     ]
+    # Header and footer rows carry no page. One printed once that the front
+    # pages do not print (their text layer and links read in full) stood on a
+    # later page: in a manuscript, the end of a reference entry a page break
+    # cut off ("https://doi.org/10.1037/h0043158" atop a references page),
+    # never the paper's own DOI.
+    front_dois = [reading.normalized for reading, _tail, _line in readings]
+    front_dois.extend(_canonical_doi(link.doi) or "" for link in evidence.links)
+    front_read = bool(evidence.pages) and set(evidence.pages) <= set(evidence.text_pages)
+
+    def later_page_furniture(candidate: DoiCandidate) -> bool:
+        return (
+            front_read
+            and candidate.source_kind in _FURNITURE_SOURCES
+            and candidate.repeated_header_footer_count <= 1
+            and not any(
+                doi
+                and (candidate.normalized.startswith(doi) or doi.startswith(candidate.normalized))
+                for doi in front_dois
+            )
+        )
+
     checked: list[DoiCandidate] = []
     for candidate in parsed:
+        if candidate.rejection_reason is None and later_page_furniture(candidate):
+            checked.append(
+                replace(
+                    candidate,
+                    semantic_context=LATER_PAGE_FURNITURE,
+                    selection_tier=0,
+                    rejection_reason=LATER_PAGE_FURNITURE,
+                )
+            )
+            continue
         for reading, tail, line in readings:
             if (
                 candidate.rejection_reason is None
