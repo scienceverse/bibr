@@ -110,11 +110,38 @@ _BODY_OPENERS = frozenset(
 )
 
 
+# Labels a title page heads its parts with. Read as headings, they keep the
+# byline and highlights apart from the title above them.
+_TITLE_PAGE_LABELS = frozenset(
+    {
+        "affiliations",
+        "author affiliations",
+        "authors and affiliations",
+        "author information",
+        "author note",
+        "authors",
+        "corresponding author",
+        "correspondence",
+        "highlights",
+        "running head",
+    }
+)
+
+
+def _normalized_heading(text: str) -> str:
+    return re.sub(r"^\s*\d+(?:\.\d+)*\.?\s*", "", text.lower()).strip().rstrip(".:")
+
+
 def opens_the_body(text: str) -> bool:
     """Whether a heading is one a manuscript's body starts with ("Abstract",
     "1. Introduction")."""
-    norm = re.sub(r"^\s*\d+(?:\.\d+)*\.?\s*", "", text.lower()).strip().rstrip(".:")
-    return norm in _BODY_OPENERS
+    return _normalized_heading(text) in _BODY_OPENERS
+
+
+def labels_a_title_page_part(text: str) -> bool:
+    """Whether a paragraph is a title-page label ("Authors and Affiliations",
+    "Corresponding Author", "Highlights")."""
+    return _normalized_heading(text) in _TITLE_PAGE_LABELS
 
 
 def reads_as_outline_heading(text: str) -> bool:

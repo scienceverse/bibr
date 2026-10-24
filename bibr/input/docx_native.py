@@ -36,6 +36,7 @@ from bibr.input.docx_footnotes import load_footnotes as _load_footnotes
 from bibr.input.docx_omml import omml_to_text as _omml_to_text
 from bibr.input.heading_cues import (
     REFERENCES_HEADER,
+    labels_a_title_page_part,
     names_reference_list,
     opens_the_body,
     reads_as_bold_heading,
@@ -1364,7 +1365,8 @@ class DocxParser:
         bold throughout is a level-1 heading: authors bold the headings of a
         manuscript by hand. A document with only one or two styled headings
         counts as one without. Bold paragraphs above the first "Abstract" or
-        "Introduction" are its title page. A bold title under a table or
+        "Introduction" are its title page, but for its labels ("Corresponding
+        Author"), which keep its parts apart. A bold title under a table or
         figure label ("Table S1") is the float's, and a dated bold paragraph in
         the references is an entry. Neither kind of heading holds a picture, an
         equation, or a line of a table of contents.
@@ -1381,7 +1383,7 @@ class DocxParser:
         if (
             self._bold_headings
             and reads_as_bold_heading(plain)
-            and p not in self._title_page
+            and (p not in self._title_page or labels_a_title_page_part(plain))
             and not reads_as_float_label(previous_text)
             and not (self._in_references and YEARISH_RE.search(plain))
             and _is_bold_throughout(p, self._styles, traits)

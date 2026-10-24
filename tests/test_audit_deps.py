@@ -22,6 +22,7 @@ VLLM_FIXED = Version("0.30.0")
 ADVISORY_FIXES = {
     "CVE-2025-3000": ("torch", Version("2.13.0")),
     "PYSEC-2026-3447": ("setuptools", Version("83.0.0")),
+    "GHSA-xmj3-9gf7-h52w": ("setuptools", Version("84.1.0")),
 }
 
 
@@ -133,8 +134,8 @@ def test_lock_holds_no_torch_without_the_cve_2025_3000_fix():
 
 def test_unfixed_setuptools_is_locked_only_where_vllm_caps_it():
     # vLLM caps setuptools<81 on Python >3.11, so the Linux 3.12/3.13 forks
-    # cannot reach the 83.0.0 fix; every other fork must lock it.
-    fixed = ADVISORY_FIXES["PYSEC-2026-3447"][1]
+    # cannot reach the 83.0.0 or 84.1.0 fixes; every other fork must lock them.
+    fixed = max(ADVISORY_FIXES[a][1] for a in ("PYSEC-2026-3447", "GHSA-xmj3-9gf7-h52w"))
     capped = {("linux", "3.12"), ("linux", "3.13")}
     for package in _locked()["setuptools"]:
         if Version(package["version"]) >= fixed:
