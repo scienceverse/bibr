@@ -1921,6 +1921,19 @@ def _record_title_indices(
     title_indices = [
         index for index, candidate in enumerate(candidates) if "title" in candidate.roles
     ]
+    # A title row that ends on a colon goes on in the title row right after it
+    # ("Becoming a climate activist:" over "A qualitative investigation of
+    # ..."): a manuscript sets the title and its subtitle as two paragraphs.
+    # The second row is no title of its own, so the abstract below it is the
+    # first row's, and the record starts there.
+    continuations = {
+        index
+        for index in title_indices
+        if index > 0
+        and index - 1 in title_indices
+        and candidates[index - 1].raw_text.rstrip().endswith(":")
+    }
+    title_indices = [index for index in title_indices if index not in continuations]
     developed: set[int] = set()
     for position, index in enumerate(title_indices):
         next_index = (
