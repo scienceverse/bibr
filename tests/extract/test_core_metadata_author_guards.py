@@ -240,6 +240,47 @@ async def test_printed_byline_blocks_the_drop_even_when_nothing_grounds():
     assert "VAL_AUTHOR_FABRICATED" not in [issue.code for issue in ext.validation_issues]
 
 
+async def test_byline_on_probation_blocks_the_drop_even_when_it_took_the_title_role():
+    # The rf3e5 shape: the byline row passed the probation test on page 1 but
+    # was read as a second title line, so no row carries the byline role, and
+    # every glued affiliation letter defeats grounding.
+    title = _candidate(
+        "c1",
+        "Associations Among Affective Valence, Intrusive Thoughts, and Prospective Memory",
+        roles=frozenset({"title"}),
+        text_ids=(1,),
+    )
+    byline = _candidate(
+        "c2",
+        "Francesco Pupilloa , Maria A. Nygaardb , Katharina Schnitzspahnb & Louise H. Phillipsb",
+        roles=frozenset({"title", "heading", "byline_probation"}),
+        text_ids=(2,),
+    )
+    ext = _extractor(
+        _resolution(title, byline),
+        CoreMetadataLLM(
+            title="Associations Among Affective Valence, Intrusive Thoughts, and Prospective Memory",
+            authors=[
+                AuthorLLM(given="Francesco", family="Pupillo"),
+                AuthorLLM(given="Maria A.", family="Nygaard"),
+                AuthorLLM(given="Katharina", family="Schnitzspahn"),
+                AuthorLLM(given="Louise H.", family="Phillips"),
+            ],
+            keywords=[],
+        ),
+    )
+
+    metadata = await ext.extract()
+
+    assert [author.family for author in metadata.authors] == [
+        "Pupillo",
+        "Nygaard",
+        "Schnitzspahn",
+        "Phillips",
+    ]
+    assert "VAL_AUTHOR_FABRICATED" not in [issue.code for issue in ext.validation_issues]
+
+
 async def test_surname_only_author_never_triggers_the_drop():
     # A family-only, non-organization author yields no comparable token variant,
     # so it can never be "grounded" — the guard must not read that as fabrication.
