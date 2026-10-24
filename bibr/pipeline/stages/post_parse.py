@@ -1566,7 +1566,8 @@ async def post_parse(
             # safety net (one safe selected-record title row, then the layout
             # title under the same filters), byline adjacency for multilingual
             # front matter (default off), the layout title and unknown-header
-            # scan outside ownership scope, then the doc-info.
+            # scan outside ownership scope, the title without a running head
+            # read into it, then the doc-info.
             title_decision = decide_title(
                 incumbent_candidate(
                     paper_metadata, "title", source="native" if native_metadata else None
@@ -1586,6 +1587,7 @@ async def post_parse(
                     )
                 ),
                 doc_info=doc_info.get("title"),
+                running_headers=contents.detected_headers or (),
             )
             apply_decision(paper_metadata, title_decision)
             metadata_issues.extend(title_decision.issues)
