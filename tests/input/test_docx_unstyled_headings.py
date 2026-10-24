@@ -386,6 +386,30 @@ def test_the_bold_title_page_above_the_abstract_is_no_section():
     assert _headers(_parse(body)) == ["Abstract", "Method"]
 
 
+def test_title_page_labels_keep_the_byline_apart_from_the_title():
+    """A harvested manuscript's bold "Authors and Affiliations" under its title
+    was read as title page and glued onto the title."""
+    body = (
+        _plain("Digital tools for older adults: A scoping review", style="Heading1")
+        + _bold("Authors and Affiliations")
+        + _plain("Jane Doe, University of Somewhere")
+        + _bold("Corresponding Author")
+        + _plain("Jane Doe, jane@example.org")
+        + _bold("Highlights")
+        + _plain("Tools help.")
+        + _bold("Abstract")
+        + _plain("We reviewed it.")
+    )
+
+    assert _headers(_parse(body)) == [
+        "Digital tools for older adults: A scoping review",
+        "Authors and Affiliations",
+        "Corresponding Author",
+        "Highlights",
+        "Abstract",
+    ]
+
+
 def test_an_outlined_byline_above_the_abstract_is_no_heading():
     """A harvested manuscript set its byline, affiliation and email line at
     outline level 0. They became headings, and as three styled headings they

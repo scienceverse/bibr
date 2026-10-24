@@ -39,6 +39,10 @@ references.
   every branch.
   gradio (the `demo` extra) still caps pillow below 13, so a uv override lifts
   the cap in the lock; the demo works on pillow 13.
+- The lock moves to filelock 4.2.4 (CVE-2026-112914) and setuptools 84.2.1
+  (GHSA-xmj3-9gf7-h52w, Windows only). vllm's setuptools<81 pin keeps 80.10.2
+  in the Linux Python 3.12-3.13 lock, under a dated exception in
+  `ci/vulnerability-exceptions.toml`.
 
 ### Fixed
 
@@ -56,9 +60,10 @@ references.
   tables and notes after a generated list are no longer read as references.
   A bold reference entry, a bold table or figure title under its "Table S1"
   label, and the title page above the first "Abstract" or "Introduction"
-  (bold or outlined) are not taken for headings; an outline level makes a
-  heading only of text that reads as one, and a caption in the Title style is
-  body text.
+  (bold or outlined) are not taken for headings, but its labels ("Authors and
+  Affiliations", "Corresponding Author", "Highlights", ...) still head their
+  parts (#236); an outline level makes a heading only of text that reads as
+  one, and a caption in the Title style is body text.
 - HTML and ePub text outside a paragraph element is no longer dropped. A page
   whose paragraphs are `<div>`s (as ScienceDirect writes them) failed with
   "HTML input did not contain parseable article content", and a pandoc or
