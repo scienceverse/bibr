@@ -1711,7 +1711,10 @@ def _with_byline_probation(
     candidates = _collect_candidates(
         contents, allow_byline_probation=False, policy=policy, use_model=use_model
     )
-    allow_byline_probation = not any("byline" in candidate.roles for candidate in candidates)
+    allow_byline_probation = not any(
+        "byline" in candidate.roles and not _translates_the_title_above(candidates, index)
+        for index, candidate in enumerate(candidates)
+    )
     if allow_byline_probation:
         candidates = _collect_candidates(
             contents, allow_byline_probation=True, policy=policy, use_model=use_model
@@ -1731,6 +1734,59 @@ def _with_byline_probation(
         page_heads=True,
         policy=policy,
         use_model=use_model,
+    )
+
+
+# A translated title shares this many cognates with the title it translates
+# ("Depression"/"Depressão", "Strategies"/"Estratégias"); a byline shares none.
+_MIN_TRANSLATED_TITLE_COGNATES = 2
+_MIN_COGNATE_CHARS = 5
+_MIN_COGNATE_RATIO = 0.8
+
+
+def _shared_cognates(title: str, other: str) -> int:
+    """How many of the title's longer words the other text prints a close form of."""
+
+    def long_words(text: str) -> set[str]:
+        return {
+            word
+            for word in _WORD_RE.findall(_fold_accents(text))
+            if len(word) >= _MIN_COGNATE_CHARS
+        }
+
+    others = long_words(other)
+    return sum(
+        any(
+            difflib.SequenceMatcher(None, word, form).ratio() >= _MIN_COGNATE_RATIO
+            for form in others
+        )
+        for word in long_words(title)
+    )
+
+
+def _translates_the_title_above(candidates: tuple[FrontMatterCandidate, ...], index: int) -> bool:
+    """A byline-role row that is the title printed right above it, translated.
+
+    "Sintomas de Depressão, Ansiedade, Estresse entre Estudantes de Enfermagem
+    e Estratégias de Coping Utilizadas" under an English title reads as a name
+    list (capitalized chunks, commas, "de" particles), and that false byline
+    kept byline probation from reading the real names, which the section
+    classifier had typed as acknowledgment headings. Such a row names nobody,
+    is in another language than the title, and prints the title's cognates;
+    a byline in the title's language or one naming a person is left alone.
+    """
+
+    if index == 0:
+        return False
+    title, row = candidates[index - 1], candidates[index]
+    return bool(
+        row.page is not None
+        and title.page == row.page
+        and "title" in title.roles
+        and not row.roles & {"title", "abstract", "affiliation", "doi"}
+        and not _has_person_name_evidence(row.raw_text)
+        and _languages_differ(_title_language(title.raw_text), _title_language(row.raw_text))
+        and _shared_cognates(title.raw_text, row.raw_text) >= _MIN_TRANSLATED_TITLE_COGNATES
     )
 
 
