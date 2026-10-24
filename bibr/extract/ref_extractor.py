@@ -454,6 +454,29 @@ def _rescue_doi_from_segment(segment: str | None) -> str | None:
     return None
 
 
+# A printed arXiv identifier: "arXiv:2408.04667", "arXiv preprint
+# arXiv:2301.07597", "arxiv.org/abs/2301.07597v2", the arXiv DOI
+# "10.48550/arXiv.2301.07597", or an old-style "hep-th/9901001".
+_ARXIV_REF_ID_RE = re.compile(
+    r"(?:\barxiv\.org/(?:abs|pdf)/|\b10\.48550/arxiv\.|\barxiv(?:\s+preprint)?\s*:\s*)"
+    r"(?P<id>\d{4}\.\d{4,5}(?:v\d+)?|[a-z-]+(?:\.[a-z]{2})?/\d{7}(?:v\d+)?)(?![\w/])",
+    re.IGNORECASE,
+)
+
+
+def _arxiv_id_from_segment(segment: str | None) -> str | None:
+    """The arXiv identifier the reference prints, as printed without its label.
+
+    The tagger's ARXIV tag rarely fires, so a reference reading "Preprint,
+    arXiv:2408.04667." exported no identifier. A segment printing two
+    different identifiers (two references run together) gives none.
+    """
+    if not segment:
+        return None
+    found = {m.group("id") for m in _ARXIV_REF_ID_RE.finditer(segment)}
+    return found.pop() if len(found) == 1 else None
+
+
 # An author-date publication year in parentheses ("(2014)", "(2012a)",
 # "(2014, March)"). It marks the end of the leading author block, so the text
 # before it is the printed byline. Vancouver / numbered styles (bare year at the
@@ -1108,7 +1131,8 @@ def _finalize_reference_fields(fields: dict[str, Any], segment: str | None) -> d
     """Strategy-independent reference finalize shared by every parse path.
 
     DOI rescue: a clean printed doi:/doi.org token in the ref's own segment
-    covers a DOI the parser under-emitted, but never overrides an emitted one.
+    covers a DOI the parser under-emitted, but never overrides an emitted one;
+    a printed arXiv identifier fills an empty ``arxiv`` the same way.
     Also completes a half-emitted page range from the segment, expands compact
     last pages ("782-92" → "792"), backfills a dropped Vancouver year/container
     from the segment, and migrates/infers ``bib_type``.
@@ -1121,6 +1145,7 @@ def _finalize_reference_fields(fields: dict[str, Any], segment: str | None) -> d
         if len(suffixes) == 1:
             fields["year_suffix"] = suffixes.pop()
     fields["doi"] = normalize_doi(fields.get("doi")) or _rescue_doi_from_segment(segment)
+    fields["arxiv"] = fields.get("arxiv") or _arxiv_id_from_segment(segment)
     fields["last_page"] = _expand_compact_last_page(
         fields.get("first_page"), fields.get("last_page")
     )
