@@ -349,9 +349,93 @@ def test_local_vllm_llm_keeps_its_own_fraction_beside_paddle_vllm(monkeypatch):
         monkeypatch, free_gib=78, total_gib=80, llm_backend="vllm", ocr_backend="paddle-vllm"
     )
     assert pipe._resources._managed_vllm_fraction == pipe._settings.llm.local_mem_fraction
-    assert pipe._resources.classifiers._managed_vllm_fraction == 0.92
-    # 8% of 80 GiB minus the 2 GiB reserve still holds both models.
+    # Both servers fit on 80 GB, so they are sized to run together: the LLM
+    # keeps its 0.85 and PaddleOCR-VL gets 0.09 (7 GB) instead of 0.92.
+    assert pipe._resources.classifiers._managed_vllm_fraction == pytest.approx(0.94)
+    # 6% of 80 GiB minus the 2 GiB reserve still holds both models.
     assert devices == {"paper": "cuda", "section": "cuda"}
+
+
+def test_both_managed_vllm_servers_share_a_24_gb_card(monkeypatch):
+    """The 0.85 + 0.92 defaults made each chunk stop one server to start the other."""
+    _pin_linux_x86(monkeypatch, vram_gb=24.0)
+    pipe, _ = _pipeline_devices(
+        monkeypatch, free_gib=22, total_gib=24, llm_backend="vllm", ocr_backend="paddle"
+    )
+    assert pipe._settings.llm.local_mem_fraction == pytest.approx(0.54)
+    assert pipe._settings.ocr.paddle_vllm_mem_fraction == pytest.approx(0.30)
+    assert pipe._resources._managed_vllm_fraction == pytest.approx(0.54)
+    assert pipe._resources.classifiers._managed_vllm_fraction == pytest.approx(0.84)
+    assert not pipe._resources._vllm_shares_overcommit()
+
+
+def _pipeline_settings(monkeypatch, *, vram_gb, configure=None, **pipeline_kwargs):
+    from bibr.config import GlobalSettings
+    from bibr.local.pipeline import LocalPipeline
+
+    _pin_linux_x86(monkeypatch, vram_gb=vram_gb)
+    settings = GlobalSettings()
+    if configure is not None:
+        configure(settings)
+    kwargs = {"memory_mode": "balanced", "llm_backend": "vllm", "ocr_backend": "paddle-vllm"}
+    pipe = LocalPipeline(settings=settings, **{**kwargs, **pipeline_kwargs})
+    return pipe._settings
+
+
+def _set_llm_fraction(settings):
+    settings.llm.local_mem_fraction = 0.7
+
+
+def _set_paddle_extra_args(settings):
+    settings.ocr.paddle_vllm_extra_args = "--gpu-memory-utilization 0.5"
+
+
+@pytest.mark.parametrize(
+    ("vram_gb", "configure", "pipeline_kwargs"),
+    [
+        # 16 GB leaves the 4B 5 GB beside PaddleOCR-VL: below its 12 GB minimum.
+        (16.0, None, {}),
+        # The user's own shares win.
+        (24.0, _set_llm_fraction, {}),
+        (24.0, _set_paddle_extra_args, {}),
+        # Only when bibr launches both servers and keeps them between chunks.
+        (24.0, None, {"llm_backend": "cloud"}),
+        (24.0, None, {"ocr_backend": "glm-llama"}),
+        (24.0, None, {"ocr_url": "http://127.0.0.1:8774"}),
+        (24.0, None, {"memory_mode": "aggressive"}),
+        (24.0, None, {"no_llm": True}),
+    ],
+)
+def test_managed_vllm_shares_left_alone(monkeypatch, vram_gb, configure, pipeline_kwargs):
+    settings = _pipeline_settings(
+        monkeypatch, vram_gb=vram_gb, configure=configure, **pipeline_kwargs
+    )
+    assert settings.ocr.paddle_vllm_mem_fraction is None
+    assert settings.llm.local_mem_fraction == (0.7 if configure is _set_llm_fraction else 0.85)
+
+
+@pytest.mark.parametrize(
+    ("vram_gb", "llm_min_gb", "expected"),
+    [
+        (24.0, 12, (0.54, 0.30)),
+        (32.0, 12, (0.65, 0.22)),
+        (80.0, 12, (0.85, 0.09)),
+        (24.0, 8, (0.54, 0.30)),
+        (16.0, 12, None),
+        (16.0, 8, None),
+        (None, 12, None),
+        (24.0, None, None),
+    ],
+)
+def test_colocated_vllm_shares(vram_gb, llm_min_gb, expected):
+    from bibr.local.pipeline import _colocated_vllm_shares
+
+    shares = _colocated_vllm_shares(vram_gb, llm_min_gb, 0.85)
+    if expected is None:
+        assert shares is None
+    else:
+        assert shares == pytest.approx(expected)
+        assert sum(shares) * vram_gb <= vram_gb - 4.0 + 0.01 * vram_gb
 
 
 @pytest.mark.parametrize(

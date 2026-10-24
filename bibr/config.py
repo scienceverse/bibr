@@ -940,6 +940,14 @@ class OcrOptions(_BibrSettings):
     paddle_vllm_extra_args: str = Field(
         "", description="Extra CLI args appended to the managed Paddle vLLM OCR server command."
     )
+    paddle_vllm_mem_fraction: float | None = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="GPU memory fraction for the managed Paddle vLLM OCR server. Unset: 0.92, "
+        "or, when bibr also manages a vLLM LLM on the same card and both fit, a smaller share "
+        "that keeps both servers running instead of restarting them every chunk.",
+    )
     paddle_mlx_model: str = Field(
         "olragon/PaddleOCR-VL-1.6-8bit",
         description="Model id for the managed Paddle MLX OCR server.",

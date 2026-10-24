@@ -870,7 +870,8 @@ def _should_unload_ocr_after_chunk(
     - ``aggressive`` always unloads (8 GB boxes reclaim every byte);
     - ``balanced`` keeps OCR resident across chunks unless a local LLM server
       backend follows (``vllm`` / ``vllm-mlx``, or the unresolved ``local``
-      alias).
+      alias), and keeps paddle-vllm resident beside a managed vLLM LLM when
+      ``LocalPipeline`` sized the two to fit on the card together.
 
     Cloud vision OCR (gemini/openai/anthropic) never unloads between chunks:
     the client holds no local weights, so teardown only forces a re-handshake
@@ -899,6 +900,18 @@ def _should_unload_ocr_after_chunk(
     # (vllm / vllm-mlx) before reaching RunConfig, so match both.
     from bibr.local.pipeline import LOCAL_LLM_BACKENDS
 
+    if (
+        llm_backend == "vllm"
+        and backend in ("paddle", "paddle-vllm")
+        and settings is not None
+        and settings.ocr.paddle_vllm_mem_fraction is not None
+    ):
+        # LocalPipeline sized both managed vLLM servers to fit on the card
+        # (``_apply_colocated_vllm_shares``): the LLM needs none of OCR's VRAM.
+        from bibr.ocr.registry import paddle_vllm_mem_fraction
+
+        if settings.llm.local_mem_fraction + paddle_vllm_mem_fraction(settings) <= 1.0:
+            return False
     return llm_backend == "local" or llm_backend in LOCAL_LLM_BACKENDS
 
 

@@ -53,7 +53,7 @@ EXTRAS = {
     "local": "In-process local OCR/LLM runtime (vllm-mlx) for Apple Silicon",
     "local-mlx": "Local OCR optimized for Apple Silicon Macs",
     "cache": "Response caching for the HTTP API (requires Redis)",
-    "gpu": "GPU acceleration for sentence splitting (NVIDIA CUDA)",
+    "gpu": "GPU ONNX Runtime for layout, sentence splitting, NER and classifiers (NVIDIA CUDA)",
     "demo": "Interactive web demo UI",
 }
 
@@ -410,6 +410,11 @@ def _build_recommended_setup(
                 ocr_backend="glm-llama" if ocr_on_llama_cpp else ocr_backend,
             ),
         }
+        if platform_key == "cuda" and sys_platform_name in ("linux", "win32"):
+            # Without onnxruntime-gpu, layout, SaT, NER and the classifiers
+            # run on the CPU beside an idle GPU: 169 vs 591 papers/h on an
+            # RTX 5090 in the 2026-10-15 launch runs.
+            extras.add("gpu")
         if "vllm" in extras and sys.version_info >= (3, 14):
             runtime += (
                 " Python 3.14 has no vLLM wheels yet, so the vllm extra installs nothing; "

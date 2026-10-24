@@ -108,6 +108,23 @@ async def test_shares_that_fit_keep_the_llm_server(monkeypatch, events):
     assert rm._llm_server is not None
 
 
+async def test_colocated_shares_keep_both_servers_across_chunks(monkeypatch, events):
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.llm.local_mem_fraction = 0.54
+    settings.ocr.paddle_vllm_mem_fraction = 0.30
+    _candidates(monkeypatch, "paddle-vllm")
+    rm = ResourceManager(ocr_backend="paddle-vllm", managed_vllm_fraction=0.54, settings=settings)
+    with patch.object(rm, "_create_ocr_client_for", side_effect=_ocr_factory(events)):
+        await rm.await_ocr()  # chunk 1 OCR
+        await rm.start_llm_server(backend="vllm")  # LlmServerStage
+        await rm.await_ocr()  # chunk 2 OCR reuses the resident engine
+
+    assert events == ["ocr-start:paddle-vllm", "llm-start"]
+    assert rm._llm_server is not None
+
+
 async def test_non_vllm_llm_server_is_left_running(monkeypatch, events):
     import bibr.local.llama_cpp as llama_cpp
 

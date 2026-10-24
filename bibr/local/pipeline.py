@@ -18,6 +18,7 @@ local OCR stays sequential.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from typing import TYPE_CHECKING, cast
 
@@ -207,18 +208,114 @@ def _managed_gpu_fraction(llm_backend: str, ocr_backend: str, settings: GlobalSe
     defaults, 0.85 + 0.92), only one is ever up and the larger share is what
     the classifiers must leave free.
     """
-    from bibr.ocr.registry import PADDLE_VLLM_GPU_MEMORY_UTILIZATION, automatic_backend_names
+    from bibr.ocr.registry import paddle_vllm_mem_fraction
 
     llm_share = settings.llm.local_mem_fraction if llm_backend in ("local", "vllm") else 0.0
-    # The automatic ``paddle`` chain lists paddle-vllm only on hardware that
-    # can run it, so a small GPU keeps its room for the classifiers.
-    starts_paddle_vllm = ocr_backend == "paddle-vllm" or (
-        ocr_backend == "paddle" and "paddle-vllm" in automatic_backend_names()
-    )
-    ocr_share = PADDLE_VLLM_GPU_MEMORY_UTILIZATION if starts_paddle_vllm else 0.0
+    ocr_share = paddle_vllm_mem_fraction(settings) if _starts_paddle_vllm(ocr_backend) else 0.0
     if llm_share + ocr_share <= 1.0:
         return llm_share + ocr_share
     return max(llm_share, ocr_share)
+
+
+def _starts_paddle_vllm(ocr_backend: str) -> bool:
+    """Whether this run's OCR is (or automatically resolves to) managed paddle-vllm."""
+    from bibr.ocr.registry import automatic_backend_names
+
+    # The automatic ``paddle`` chain lists paddle-vllm only on hardware that
+    # can run it, so a small GPU keeps its room for the classifiers.
+    return ocr_backend == "paddle-vllm" or (
+        ocr_backend == "paddle" and "paddle-vllm" in automatic_backend_names()
+    )
+
+
+#: VRAM the managed PaddleOCR-VL server gets beside the managed vLLM LLM: its
+#: ~1.8 GB of weights plus KV for 12 sequences. The 2026-10-15 launch runs
+#: served it at 0.22 of a 32 GB card (7.2 GB) at 1,155 papers/h.
+_COLOCATED_PADDLE_VLLM_GB = 7.0
+#: VRAM left outside both servers for the ONNX models (layout, SaT, NER,
+#: classifiers) and each server's CUDA context.
+_COLOCATED_ONNX_RESERVE_GB = 4.0
+
+
+def _colocated_vllm_shares(
+    vram_gb: float | None, llm_min_vram_gb: float | None, llm_cap: float
+) -> tuple[float, float] | None:
+    """(LLM share, OCR share) that let both managed vLLM servers run at once, or None.
+
+    The defaults (0.85 for the LLM, 0.92 for PaddleOCR-VL) cannot coexist, so
+    a balanced run stopped one server to start the other twice per chunk,
+    paying both start-ups (about 4 minutes on an RTX 5090) every 8 papers.
+    On a card with room for both, PaddleOCR-VL gets a fixed few GB, the ONNX
+    models a reserve, and the LLM the rest up to ``llm_cap``; None when the
+    LLM's rest would be below its registry minimum (or either size is unknown).
+    """
+    if vram_gb is None or llm_min_vram_gb is None or vram_gb <= 0:
+        return None
+    llm_gb = vram_gb - _COLOCATED_PADDLE_VLLM_GB - _COLOCATED_ONNX_RESERVE_GB
+    if llm_gb < llm_min_vram_gb:
+        return None
+    # The OCR share rounds up, so PaddleOCR-VL gets at least its GB; the
+    # LLM's rounds down, so the ONNX reserve stays free.
+    ocr_share = math.ceil(_COLOCATED_PADDLE_VLLM_GB / vram_gb * 100) / 100
+    llm_share = min(llm_cap, math.floor(llm_gb / vram_gb * 100) / 100)
+    if llm_share * vram_gb < llm_min_vram_gb:
+        return None
+    return llm_share, ocr_share
+
+
+def _managed_llm_min_vram_gb(settings: GlobalSettings) -> float | None:
+    """Registry minimum VRAM of the managed vLLM model, None for a model not in it."""
+    from bibr.local.llm_models import REGISTRY, default_local_model
+
+    model = settings.llm.local_model or default_local_model("vllm")
+    for entry in REGISTRY:
+        for variant in entry.variants:
+            if variant.platform == "cuda" and variant.runtime == "vllm" and variant.hf_id == model:
+                return variant.min_vram_gb
+    return None
+
+
+def _apply_colocated_vllm_shares(
+    llm_backend: str,
+    ocr_backend: str,
+    ocr_url: str | None,
+    memory_mode: str,
+    settings: GlobalSettings,
+) -> None:
+    """Size both managed vLLM servers to run side by side when the card has room.
+
+    Applies only when bibr launches both (vLLM LLM, paddle-vllm OCR), the
+    memory mode keeps servers between chunks, and the user set neither share
+    (``LLM_LOCAL_MEM_FRACTION``, ``OCR_PADDLE_VLLM_MEM_FRACTION`` or a
+    ``--gpu-memory-utilization`` in either server's extra args). Writes the
+    shares onto this pipeline's settings snapshot, which every launcher and
+    VRAM check reads.
+    """
+    if llm_backend != "vllm" or ocr_url or memory_mode == "aggressive":
+        return
+    if not _starts_paddle_vllm(ocr_backend):
+        return
+    llm, ocr = settings.llm, settings.ocr
+    if "local_mem_fraction" in llm.model_fields_set or ocr.paddle_vllm_mem_fraction is not None:
+        return
+    if any(
+        "--gpu-memory-utilization" in (args or "")
+        for args in (llm.vllm_extra_args, ocr.paddle_vllm_extra_args)
+    ):
+        return
+    from bibr.ocr.registry import _cuda_vram_gb
+
+    shares = _colocated_vllm_shares(
+        _cuda_vram_gb(), _managed_llm_min_vram_gb(settings), llm.local_mem_fraction
+    )
+    if shares is None:
+        return
+    llm.local_mem_fraction, ocr.paddle_vllm_mem_fraction = shares
+    logger.info(
+        "Managed vLLM LLM (%.2f of VRAM) and PaddleOCR-VL (%.2f) fit together; "
+        "both stay up between chunks",
+        *shares,
+    )
 
 
 class LocalPipeline(Pipeline):
@@ -332,6 +429,9 @@ class LocalPipeline(Pipeline):
             crossref = False
             equations = False
             llm_backend = "cloud"
+        _apply_colocated_vllm_shares(
+            llm_backend, ocr_backend, ocr_url, memory_mode, settings_snapshot
+        )
 
         config = RunConfig(
             memory_mode=memory_mode,

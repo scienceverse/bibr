@@ -239,10 +239,17 @@ least 8 GB (or when VRAM detection is unavailable).
 Explicit choices are `vllm`, `vllm-mlx`, `rapid-mlx`, `llama-cpp`, and `llmster`.
 The OCR and LLM choices are independent, so local OCR with a cloud LLM is a
 supported hybrid configuration. A managed vLLM LLM server and the managed
-`paddle-vllm` OCR server each reserve a share of GPU memory (0.85 and 0.92 by
-default) and cannot run together, so bibr stops the one that is running before
-starting the other: in a batch, each chunk's OCR stops the LLM server and that
-chunk's LLM stage starts it again.
+`paddle-vllm` OCR server each reserve a share of GPU memory. When the card has
+room for both (the 4B student on a 24 GB card, the 2B from about 19 GB), bibr
+gives PaddleOCR-VL 7 GB, leaves 4 GB for the ONNX models and gives the LLM the
+rest (at most `LLM_LOCAL_MEM_FRACTION`'s default of 0.85), and both stay up for
+the whole run. On a smaller card, or when you set `LLM_LOCAL_MEM_FRACTION`,
+`OCR_PADDLE_VLLM_MEM_FRACTION` or `--gpu-memory-utilization` in either server's
+extra args, the shares stay as set (0.85 and 0.92 by default). Shares that do
+not fit together cannot run together, so bibr stops the one that is running
+before starting the other: in a batch, each chunk's OCR stops the LLM server and
+that chunk's LLM stage starts it again, which costs both servers' start-up
+(minutes) every chunk.
 
 `bibr chew`, `bibr batch` and `bibr mcp` stop the managed servers they started
 when the command ends, including on Ctrl-C, SIGTERM (`kill`, `docker stop`,

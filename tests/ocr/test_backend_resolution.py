@@ -210,7 +210,9 @@ class TestLocalPipelineResolvesAliases:
         monkeypatch.setattr(
             Settings,
             "ocr",
-            types.SimpleNamespace(model_fields_set=frozenset(), backend="glm-llama"),
+            types.SimpleNamespace(
+                model_fields_set=frozenset(), backend="glm-llama", paddle_vllm_mem_fraction=None
+            ),
         )
         from bibr.local.pipeline import LocalPipeline
 
