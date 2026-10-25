@@ -11,14 +11,13 @@ import logging
 import math
 import re
 import time
-import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from bibr.clients.pointer_outputs import UNUSED_ANCHORS, expand_authors, resolve_title_keywords
-from bibr.clients.prompts import PROMPTS
+from bibr.clients.prompts import PROMPTS, fence_boundary
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.exceptions import (
     ConfigurationError,
@@ -2410,9 +2409,9 @@ class LLMClient:
                 return copied
         try:
             spec = PROMPTS["title_keywords"]
-            boundary = boundary or uuid.uuid4().hex
             max_tokens = _task_max_tokens(self._settings, self._settings.llm.title_max_tokens)
             capped_text = self._cap_input(text, self._settings, max_tokens=max_tokens)
+            boundary = boundary or fence_boundary("title_keywords", capped_text)
             result = await self._invoke_structured(
                 spec.response_model,
                 [{"role": "user", "content": spec.build_user(boundary=boundary, text=capped_text)}],
@@ -2459,7 +2458,9 @@ class LLMClient:
                     {
                         "role": "user",
                         "content": spec.build_user(
-                            boundary=boundary or uuid.uuid4().hex, text=capped_text
+                            boundary=boundary
+                            or fence_boundary("title_keywords_pointers", capped_text),
+                            text=capped_text,
                         ),
                     }
                 ],
@@ -2522,9 +2523,9 @@ class LLMClient:
                 return expanded
         try:
             spec = PROMPTS["authors"]
-            boundary = boundary or uuid.uuid4().hex
             max_tokens = _task_max_tokens(self._settings, self._settings.llm.authors_max_tokens)
             capped_text = self._cap_input(text, self._settings, max_tokens=max_tokens)
+            boundary = boundary or fence_boundary("authors", capped_text)
             result = await self._invoke_structured(
                 spec.response_model,
                 [{"role": "user", "content": spec.build_user(boundary=boundary, text=capped_text)}],
@@ -2583,7 +2584,8 @@ class LLMClient:
                     {
                         "role": "user",
                         "content": spec.build_user(
-                            boundary=boundary or uuid.uuid4().hex, text=capped_text
+                            boundary=boundary or fence_boundary("authors_pointers", capped_text),
+                            text=capped_text,
                         ),
                     }
                 ],
@@ -2629,8 +2631,8 @@ class LLMClient:
         )
         try:
             spec = PROMPTS["classification"]
-            boundary = boundary or uuid.uuid4().hex
             compact = text[: self._settings.llm.classification_max_chars]
+            boundary = boundary or fence_boundary("classification", compact)
             result = await self._invoke_structured(
                 spec.response_model,
                 [{"role": "user", "content": spec.build_user(boundary=boundary, text=compact)}],
@@ -2705,8 +2707,8 @@ class LLMClient:
         )
         try:
             spec = PROMPTS["core_metadata"]
-            boundary = uuid.uuid4().hex
             capped_text = self._cap_input(text, self._settings)
+            boundary = fence_boundary("core_metadata", capped_text)
             result = await self._invoke_structured(
                 spec.response_model,
                 [{"role": "user", "content": spec.build_user(boundary=boundary, text=capped_text)}],
@@ -2775,8 +2777,10 @@ class LLMClient:
 
         # One boundary for the whole fan-out: the three calls fence the SAME
         # front-matter text, and a shared boundary keeps the fenced-document
-        # prefix byte-identical so provider prompt caches can reuse it.
-        boundary = uuid.uuid4().hex
+        # prefix byte-identical so provider prompt caches can reuse it. It is
+        # derived from every text the calls fence (each call embeds a prefix of
+        # its text), so it occurs in none of them.
+        boundary = fence_boundary("core_metadata_fanout", text, authors_text, classification_text)
 
         # Start all three independent extraction calls together. They share the same fenced
         # front-matter prefix for provider cache reuse.
@@ -2948,9 +2952,9 @@ class LLMClient:
         )
         try:
             spec = PROMPTS["references_parse"]
-            boundary = uuid.uuid4().hex
             max_tokens = self._settings.REF_PARSE_MAX_TOKENS
             capped_text = self._cap_input(text, self._settings, max_tokens=max_tokens)
+            boundary = fence_boundary("references_parse", capped_text)
             content = spec.build_user(boundary=boundary, text=capped_text, start_index=start_index)
 
             result = await self._invoke_structured(
@@ -3038,9 +3042,9 @@ class LLMClient:
         )
         try:
             spec = PROMPTS["references_parse_chunk"]
-            boundary = uuid.uuid4().hex
             max_tokens = self._settings.REF_PARSE_MAX_TOKENS
             capped_text = self._cap_input(text, self._settings, max_tokens=max_tokens)
+            boundary = fence_boundary("references_parse_chunk", capped_text)
             content = spec.build_user(boundary=boundary, text=capped_text)
 
             result = await self._invoke_structured(
@@ -3135,7 +3139,7 @@ class LLMClient:
     async def _segment_window(self, window_text: str) -> list[str]:
         """LLM-segment one references window into verbatim opening anchors."""
         spec = PROMPTS["references_segment"]
-        boundary = uuid.uuid4().hex
+        boundary = fence_boundary("references_segment", window_text)
         result = await self._invoke_structured(
             spec.response_model,
             [{"role": "user", "content": spec.build_user(boundary=boundary, text=window_text)}],
@@ -3170,7 +3174,6 @@ class LLMClient:
         )
         try:
             spec = PROMPTS["research_integrity"]
-            boundary = uuid.uuid4().hex
             authors_block = (
                 "\n".join(f"- {g} {f}".strip() for g, f in author_names) or "(none provided)"
             )
@@ -3178,13 +3181,15 @@ class LLMClient:
                 "\n".join(f"[{i}] {t}" for i, t in enumerate(affiliation_list, start=1))
                 or "(none provided)"
             )
-            content = spec.build_user(
-                boundary=boundary,
-                funding_text=self._cap_input(funding_text, self._settings),
-                contributions_text=self._cap_input(contributions_text, self._settings),
-                affiliations_block=self._cap_input(affiliations_block, self._settings),
-                authors_block=authors_block,
-            )
+            blocks = {
+                "funding_text": self._cap_input(funding_text, self._settings),
+                "contributions_text": self._cap_input(contributions_text, self._settings),
+                "affiliations_block": self._cap_input(affiliations_block, self._settings),
+                "authors_block": authors_block,
+            }
+            # One boundary fences all four blocks, so none of them may contain it.
+            boundary = fence_boundary("research_integrity", *blocks.values())
+            content = spec.build_user(boundary=boundary, **blocks)
             result = await self._invoke_structured(
                 spec.response_model,
                 [{"role": "user", "content": content}],
@@ -3246,12 +3251,11 @@ class LLMClient:
             cite_block = "\n".join(cite_lines)
 
             spec = PROMPTS["citation_resolution"]
-            boundary = uuid.uuid4().hex
-            prompt = spec.build_user(
-                boundary=boundary,
-                ref_block=self._cap_input(ref_block, self._settings),
-                cite_block=self._cap_input(cite_block, self._settings),
-            )
+            ref_block = self._cap_input(ref_block, self._settings)
+            cite_block = self._cap_input(cite_block, self._settings)
+            # One boundary fences both blocks, so neither may contain it.
+            boundary = fence_boundary("citation_resolution", ref_block, cite_block)
+            prompt = spec.build_user(boundary=boundary, ref_block=ref_block, cite_block=cite_block)
 
             result = await self._invoke_structured(
                 spec.response_model,
@@ -3303,11 +3307,9 @@ class LLMClient:
             sent_block = "\n".join(sent_lines)
 
             spec = PROMPTS["equations"]
-            boundary = uuid.uuid4().hex
-            prompt = spec.build_user(
-                boundary=boundary,
-                sent_block=self._cap_input(sent_block, self._settings),
-            )
+            sent_block = self._cap_input(sent_block, self._settings)
+            boundary = fence_boundary("equations", sent_block)
+            prompt = spec.build_user(boundary=boundary, sent_block=sent_block)
 
             result = await self._invoke_structured(
                 spec.response_model,

@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The same paper now sends the same prompts to the LLM on every run. Each
+  prompt fences the paper's text between marker lines whose 32-character hex
+  boundary keeps a document from posing as instructions; that boundary was
+  random per call, and at temperature 0 a local model's answer can depend on
+  it, so two identical runs agreed on only about 96% of LLM answers. The
+  boundary is now derived from the fenced text (SHA-256), never occurs in it,
+  and keeps its shape, so LLM cache entries from earlier releases still hit.
+  A paper whose text changes still draws a new boundary.
+
 ## [0.7.4] - 2026-10-23
 
 The reference parser is now v5.1 (UltraBERT-150M), which matches references far better
