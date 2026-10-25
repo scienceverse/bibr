@@ -34,6 +34,10 @@ import pandas as pd
 from bibr.input.docx_footnotes import load_endnotes as _load_endnotes
 from bibr.input.docx_footnotes import load_footnotes as _load_footnotes
 from bibr.input.docx_omml import omml_to_text as _omml_to_text
+from bibr.input.docx_references import (
+    MAX_HEADING_CHARS as _MAX_REFERENCE_HEADING_CHARS,
+)
+from bibr.input.docx_references import ReferenceParagraph, reference_entries
 from bibr.input.heading_cues import (
     REFERENCES_HEADER,
     labels_a_title_page_part,
@@ -119,6 +123,10 @@ _W_DRAWING = f"{{{_NS['w']}}}drawing"
 _A_BLIP = f"{{{_NS['a']}}}blip"
 _M_OMATH = f"{{{_NS['m']}}}oMath"
 _W_TXBX_CONTENT = f"{{{_NS['w']}}}txbxContent"
+_W_T = f"{{{_NS['w']}}}t"
+_W_BR = f"{{{_NS['w']}}}br"
+_W_CR = f"{{{_NS['w']}}}cr"
+_W_TAB = f"{{{_NS['w']}}}tab"
 _W_STYLE = f"{{{_NS['w']}}}style"
 _W_STYLE_ID = f"{{{_NS['w']}}}styleId"
 _W_TYPE = f"{{{_NS['w']}}}type"
@@ -580,6 +588,20 @@ def _paragraph_text(p) -> str:
     return "".join(run.text for run in _wrapped_runs(p))
 
 
+def _line_texts(p) -> tuple[str, ...]:
+    """A paragraph's text split at its explicit line breaks (Shift+Enter, a
+    legacy carriage return); tabs read as spaces, page breaks are ignored."""
+    lines: list[list[str]] = [[]]
+    for node in p.iter(_W_T, _W_BR, _W_CR, _W_TAB):
+        if node.tag == _W_T:
+            lines[-1].append(node.text or "")
+        elif node.tag == _W_TAB:
+            lines[-1].append(" ")
+        elif node.tag == _W_CR or node.get(_W_TYPE) in (None, "textWrapping"):
+            lines.append([])
+    return tuple(line for line in (" ".join("".join(parts).split()) for parts in lines) if line)
+
+
 def _wrapped_runs(el):
     """The ``w:r`` children of *el* and of the inline wrappers in it, in order."""
     for child in el.iterchildren():
@@ -702,6 +724,10 @@ class DocxParser:
         self._previous_text = ""
         # Headings that can still parent the next one, levels increasing.
         self._open_headings: list[PaperSection] = []
+        # The paragraphs read under a references heading short enough to be
+        # one, for ``native_ref_strings`` (:mod:`bibr.input.docx_references`).
+        self._reference_paragraphs: list[ReferenceParagraph] = []
+        self._reference_heading = ""
 
         # Notes: text maps from footnotes.xml / endnotes.xml + deferred
         # references for xref linking. The two id spaces are independent (both
@@ -844,6 +870,15 @@ class DocxParser:
             elif block.kind == "math_para":
                 self._handle_math_para(block.obj)
         self._record_limit_warnings()
+        native_refs, reason = reference_entries(self._reference_paragraphs)
+        if self._reference_paragraphs:
+            logger.debug(
+                "DOCX reference paragraphs: %d, %s",
+                len(self._reference_paragraphs),
+                f"{len(native_refs)} entries used as segmentation"
+                if native_refs
+                else f"left to the reference segmenter ({reason})",
+            )
 
         return PaperContents(
             sentences=[],
@@ -858,6 +893,7 @@ class DocxParser:
             detected_footers=self.detected_footers,
             layout_hints=self.layout_hints,
             processing_warnings=self.processing_warnings,
+            native_ref_strings=native_refs,
         )
 
     def _record_limit_warnings(self) -> None:
@@ -1153,6 +1189,7 @@ class DocxParser:
         #   - m:oMath (inline math → wrap in $...$)
         #   - m:oMathPara (display math → emit as separate deferred entry)
         #   - w:drawing (inline image → register as PaperFigure)
+        first_entry = len(self.assembler)
         text_buf: list[str] = []
         # The ``$…$`` each inline equation became, for the late clean-up.
         math_buf: list[str] = []
@@ -1353,6 +1390,14 @@ class DocxParser:
                 self._figure_counter += 1
 
         flush_body()
+        if self._in_references and len(self._reference_heading) <= _MAX_REFERENCE_HEADING_CHARS:
+            texts = [e.text for e in self.assembler.entries[first_entry:] if not e.is_formula]
+            if texts:
+                self._reference_paragraphs.append(
+                    ReferenceParagraph(
+                        " ".join(texts), _line_texts(paragraph._p), self._current_section_id
+                    )
+                )
 
     def _unstyled_heading_level(
         self, paragraph, traits: _StyleTraits, plain: str, previous_text: str
@@ -1408,6 +1453,7 @@ class DocxParser:
         if in_references and not self._in_references:
             self._section_before_references = self._current_section_id
         self._in_references = in_references
+        self._reference_heading = text if in_references else ""
         self._in_generated_list = False
         # Capture the document Title style (or first Heading 1) as the paper title
         if self._detected_title is None and style_name in (

@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- A Word manuscript's reference list is now segmented by its own paragraphs,
+  one entry each, instead of by an LLM call, when the paragraphs pass a
+  structure check: at least three entries, nine in ten with a year, the list
+  ending at the first table, figure, appendix or supplement heading under the
+  references heading. That call cost about 1.6k output tokens per .docx on the
+  4B model, and minutes on a CPU. Entries joined by line breaks within one
+  paragraph are split at them. A list that fails the check (entries
+  hard-wrapped into several paragraphs, floats the end rule missed) is
+  segmented by the LLM as before.
+
 ## [0.7.4] - 2026-10-23
 
 The reference parser is now v5.1 (UltraBERT-150M), which matches references far better
