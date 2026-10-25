@@ -210,11 +210,6 @@ class Pipeline:
             from bibr.pipeline.enrich_prefetch import cancel_leftover_prefetches
 
             cancel_leftover_prefetches(file_states)
-        # The chunk's intermediates are gone; return the heap pages they held
-        # (see bibr.utils.heap), or a long batch grows from chunk to chunk.
-        from bibr.utils.heap import arelease_free_heap
-
-        await arelease_free_heap()
 
     async def aclose(self) -> None:
         """Release pipeline-lifetime models, servers and clients.

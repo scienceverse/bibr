@@ -373,6 +373,12 @@ class ChunkProcessor:
 
         if self.is_batch and total_chunks > 1:
             console.print(f"  [dim]Chunk done in {chunk_elapsed:.1f}s[/dim]")
+        if self.is_batch:
+            # Hand the chunk's freed heap back before the next one renders
+            # (PIPELINE_HEAP_TRIM, see bibr.utils.heap).
+            from bibr.utils.heap import trim_after_chunk
+
+            await trim_after_chunk(getattr(self.pipeline, "settings", None))
 
         return file_states
 

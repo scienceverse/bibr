@@ -96,15 +96,92 @@ def test_real_malloc_trim_runs_on_glibc(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_async_form_trims_off_the_event_loop(monkeypatch):
-    threads: list[int] = []
+async def test_async_form_trims_on_its_own_thread_not_the_shared_executor(monkeypatch):
+    threads: list[str] = []
 
     def trim(pad: int) -> int:
-        threads.append(threading.get_ident())
+        threads.append(threading.current_thread().name)
         return 1
 
     monkeypatch.setattr(heap, "_malloc_trim", trim)
     monkeypatch.setattr(heap, "_last_trim", float("-inf"))
-    assert await heap.arelease_free_heap() is True
-    assert threads and threads[0] != threading.get_ident()
-    assert asyncio.get_running_loop().is_running()
+    # Saturate the loop's default executor: a trim queued behind its jobs
+    # (page rendering, back-half work) would wait for them.
+    gate = threading.Event()
+    loop = asyncio.get_running_loop()
+    busy = [loop.run_in_executor(None, gate.wait) for _ in range(64)]
+    try:
+        assert await asyncio.wait_for(heap.arelease_free_heap(), timeout=5) is True
+    finally:
+        gate.set()
+        await asyncio.gather(*busy)
+    assert threads == [threads[0]]
+    assert threads[0].startswith("bibr-heap-trim")
+    assert threads[0] != threading.current_thread().name
+
+
+def test_a_forked_child_gets_a_fresh_executor(monkeypatch):
+    monkeypatch.setattr(heap, "_executor", object())
+    heap._reset_after_fork()
+    assert heap._executor is None
+    assert heap._trim_executor() is heap._trim_executor()
+
+
+def _settings(mode):
+    class _Pipeline:
+        heap_trim = mode
+
+    class _Settings:
+        pipeline = _Pipeline()
+
+    return _Settings()
+
+
+@pytest.fixture
+def async_trims(monkeypatch):
+    calls: list[str] = []
+
+    async def trim():
+        calls.append("trim")
+        return True
+
+    monkeypatch.setattr(heap, "arelease_free_heap", trim)
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("mode", "after_chunk", "between_windows"),
+    [("off", 0, 0), ("chunk", 1, 0), ("window", 1, 1)],
+)
+@pytest.mark.asyncio
+async def test_modes_say_where_the_batch_trims(async_trims, mode, after_chunk, between_windows):
+    settings = _settings(mode)
+
+    await heap.trim_after_chunk(settings)
+    assert len(async_trims) == after_chunk
+    await heap.trim_between_windows(settings)
+    assert len(async_trims) == after_chunk + between_windows
+
+
+@pytest.mark.asyncio
+async def test_settings_without_the_field_trim_after_chunks_only(async_trims):
+    assert heap.heap_trim_mode(None) == "chunk"
+    assert heap.heap_trim_mode(_settings("bogus")) == "chunk"
+    await heap.trim_between_windows(None)
+    assert async_trims == []
+    await heap.trim_after_chunk(None)
+    assert async_trims == ["trim"]
+
+
+def test_the_setting_defaults_to_chunk_and_reads_the_env(monkeypatch):
+    from pydantic import ValidationError
+
+    from bibr.config import PipelineOptions
+
+    monkeypatch.delenv("PIPELINE_HEAP_TRIM", raising=False)
+    assert PipelineOptions().heap_trim == "chunk"
+    monkeypatch.setenv("PIPELINE_HEAP_TRIM", " Window ")
+    assert PipelineOptions().heap_trim == "window"
+    monkeypatch.setenv("PIPELINE_HEAP_TRIM", "always")
+    with pytest.raises(ValidationError):
+        PipelineOptions()

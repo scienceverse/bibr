@@ -40,7 +40,7 @@ from bibr.pipeline.stages.ocr import (
     fail_ocr_targets,
     resolve_ocr_identity,
 )
-from bibr.utils.heap import arelease_free_heap
+from bibr.utils.heap import trim_between_windows
 
 if TYPE_CHECKING:
     from bibr.pipeline.context import PipelineContext
@@ -164,9 +164,11 @@ class InterleavedRenderOcrStage:
             # before the next window renders — the memory cap.
             for fs in group:
                 fs.free_pre_ocr()
-            # ...and hand the freed pages back to the OS: left in the
-            # worker threads' malloc arenas they add up across windows.
-            await arelease_free_heap()
+            # ...and, with PIPELINE_HEAP_TRIM=window, hand the freed pages back
+            # to the OS before the next window (the last window's go at the
+            # chunk-end trim).
+            if start + window < len(pending):
+                await trim_between_windows(ctx.settings)
 
         # Single per-chunk teardown, matching what OcrStage would have done once
         # had it processed the whole chunk in one pass.
@@ -282,7 +284,8 @@ class StreamingRenderOcrStage(InterleavedRenderOcrStage):
                 for fs in group:
                     fs.free_pre_ocr()
                 _spawn(group)
-                await arelease_free_heap()
+                if start + window < len(pending):
+                    await trim_between_windows(ctx.settings)
         finally:
             # Settle every spawned back half before the stage returns — no
             # window task may outlive run(), even when a front-half stage
