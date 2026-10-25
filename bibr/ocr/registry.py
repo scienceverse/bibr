@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import math
 import platform
 import sys
 from dataclasses import dataclass
@@ -37,16 +38,23 @@ class OcrBackendCandidate:
     profile: OcrProfileName
 
 
-# The managed PaddleOCR-VL vLLM server's ``--gpu-memory-utilization``. vLLM
-# claims this fraction of total VRAM and will not start when less is free, so
-# the classifier device picker leaves it free (``bibr.local.pipeline``).
+# VRAM the managed PaddleOCR-VL vLLM server is given: the ~1.8 GB bf16
+# weights, the vision encoder's profiling peak at 16,384 batched tokens and KV
+# for 12 sequences (18 KB per token). vLLM's ``--gpu-memory-utilization`` is a
+# share of the whole card that must be free when the server starts, so the
+# launcher turns this into a share of the card
+# (``paddle_vllm_gpu_memory_utilization``) instead of claiming most of it.
+PADDLE_VLLM_GPU_MEMORY_GB = 7.0
+
+# The largest share the managed PaddleOCR-VL server is launched with, and its
+# share when the card's size is unknown. The rest of the card has to hold
+# bibr's own ONNX sessions (layout, SaT, the NER parser), which stay on the GPU
+# between chunks, and vLLM's CUDA context.
 PADDLE_VLLM_GPU_MEMORY_UTILIZATION = 0.92
 
 # PaddleOCR-VL through the managed vLLM server needs an NVIDIA GPU with room
-# for the ~1.8 GB bf16 weights plus vLLM's KV/activation budget at
-# ``PADDLE_VLLM_GPU_MEMORY_UTILIZATION``. Below this floor bibr's documented
-# Linux contract ("NVIDIA GPU <= 8 GB uses llama.cpp") routes OCR to
-# ``glm-llama``.
+# for ``PADDLE_VLLM_GPU_MEMORY_GB``. Below this floor bibr's documented Linux
+# contract ("NVIDIA GPU <= 8 GB uses llama.cpp") routes OCR to ``glm-llama``.
 PADDLE_VLLM_MIN_VRAM_GB = 8.0
 
 
@@ -85,6 +93,29 @@ def paddle_vllm_unavailable_reason(*, vram_gb: float | None | object = _PROBE) -
             f"{PADDLE_VLLM_MIN_VRAM_GB:.0f} GB (llama.cpp is the low-VRAM OCR path)"
         )
     return None
+
+
+def paddle_vllm_gpu_memory_utilization(*, vram_gb: float | None | object = _PROBE) -> float:
+    """``--gpu-memory-utilization`` for the managed PaddleOCR-VL vLLM server.
+
+    ``PADDLE_VLLM_GPU_MEMORY_GB`` as a share of this card's VRAM, rounded up
+    to the next hundredth and capped at ``PADDLE_VLLM_GPU_MEMORY_UTILIZATION``
+    (also the answer when the card's size is unknown): 0.22 on a 32 GB card,
+    0.30 on 24 GB, 0.44 on 16 GB.
+
+    vLLM refuses to start unless that share of the whole card is free. bibr
+    keeps its layout, SaT and NER ONNX sessions on the GPU between chunks, so
+    a fixed 0.92 left 8% of the card for them and for vLLM's own CUDA context:
+    on an RTX 5090 the second chunk's restart found 28.52 of the 28.93 GiB it
+    asked for, and every later paper failed.
+    """
+    vram = _cuda_vram_gb() if vram_gb is _PROBE else vram_gb
+    if not isinstance(vram, int | float) or vram <= 0:
+        return PADDLE_VLLM_GPU_MEMORY_UTILIZATION
+    # round() first, so float noise (7 / 35 * 100 = 20.000000000000004) cannot
+    # push the share up a hundredth.
+    share = math.ceil(round(PADDLE_VLLM_GPU_MEMORY_GB / vram * 100, 6)) / 100
+    return min(PADDLE_VLLM_GPU_MEMORY_UTILIZATION, share)
 
 
 def default_backend() -> str:

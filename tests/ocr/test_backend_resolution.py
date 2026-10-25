@@ -331,3 +331,59 @@ class TestLinuxChainIsHardwareAware:
         assert "no NVIDIA GPU" in registry.paddle_vllm_unavailable_reason(vram_gb=None)
         low = registry.paddle_vllm_unavailable_reason(vram_gb=6.0)
         assert "6 GB" in low and "llama.cpp" in low
+
+
+class TestPaddleVllmShareIsSizedFromItsNeed:
+    """The managed PaddleOCR-VL server asks vLLM for about 7 GB, not 92% of the card.
+
+    vLLM will not start unless its whole share is free, and bibr's layout, SaT
+    and NER ONNX sessions stay on the GPU between chunks. On an RTX 5090 they
+    held 2.43 GiB when the second chunk restarted OCR, so 0.92 (28.93 of 31.45
+    GiB) never fitted again and every paper after the first chunk failed.
+    """
+
+    @pytest.mark.parametrize(
+        ("vram_gb", "share"),
+        [
+            # nvidia-smi totals in GiB, as ``_cuda_vram_gb`` reports them.
+            (31.84, 0.22),  # RTX 5090
+            (24.0, 0.30),  # RTX 3090 / 4090
+            (15.99, 0.44),  # 16 GB cards
+            (11.99, 0.59),  # 12 GB cards
+            (10.0, 0.70),
+            (8.0, 0.88),  # paddle-vllm's floor
+            (80.0, 0.09),
+            # 7 / 35 * 100 is 20.000000000000004 in floats: still 0.20.
+            (35.0, 0.20),
+        ],
+    )
+    def test_share_by_card(self, vram_gb, share):
+        from bibr.ocr import registry
+
+        assert registry.paddle_vllm_gpu_memory_utilization(vram_gb=vram_gb) == share
+
+    @pytest.mark.parametrize("vram_gb", [None, 0.0, 4.0])
+    def test_unknown_or_tiny_card_keeps_the_cap(self, vram_gb):
+        from bibr.ocr import registry
+
+        assert (
+            registry.paddle_vllm_gpu_memory_utilization(vram_gb=vram_gb)
+            == registry.PADDLE_VLLM_GPU_MEMORY_UTILIZATION
+        )
+
+    def test_probes_the_card_by_default(self, monkeypatch):
+        from bibr.ocr import registry
+
+        monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: 31.84)
+        assert registry.paddle_vllm_gpu_memory_utilization() == 0.22
+
+    @pytest.mark.parametrize("vram_gb", [10.0, 11.99, 15.99, 24.0, 31.84, 48.0, 80.0])
+    def test_share_leaves_room_for_the_resident_onnx_sessions(self, vram_gb):
+        """What a restart needs outside the share: bibr's resident ONNX sessions
+        (2.43 GiB on the 5090 at the second chunk) plus vLLM's own CUDA context
+        (0.49 GiB there). 0.92 left 2.5 GiB of a 32 GB card and 1.9 of 24 GB."""
+        from bibr.ocr import registry
+
+        share = registry.paddle_vllm_gpu_memory_utilization(vram_gb=vram_gb)
+        assert (1 - share) * vram_gb >= 2.43 + 0.49
+        assert share * vram_gb >= registry.PADDLE_VLLM_GPU_MEMORY_GB

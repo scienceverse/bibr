@@ -1,7 +1,7 @@
 """Managed vLLM LLM and PaddleOCR-VL vLLM servers never start beside each other.
 
-Each claims a fixed share of total VRAM (defaults 0.85 and 0.92) and will not
-start while less is free. The LLM server outlives a chunk, so a later chunk's
+Each claims a fixed share of total VRAM (0.85 and, on the suite's 24 GB card,
+PaddleOCR-VL's 0.30) and will not start while less is free. The LLM server outlives a chunk, so a later chunk's
 ``paddle-vllm`` restart found it still up: explicit ``paddle-vllm`` failed
 every file after chunk 1 and the automatic chain silently fell back to GLM.
 """
@@ -156,3 +156,19 @@ async def test_resident_paddle_vllm_is_stopped_before_the_vllm_llm_starts(monkey
 
     assert events == ["ocr-start:paddle-vllm", "ocr-stop", "llm-start"]
     assert rm.ocr is None
+
+
+@pytest.mark.parametrize(("vram_gb", "stops_llm"), [(31.84, True), (80.0, False)])
+async def test_llm_stop_follows_the_cards_paddle_share(monkeypatch, events, vram_gb, stops_llm):
+    """0.85 + 0.22 overcommits a 32 GB card; 0.85 + 0.09 fits on 80 GB."""
+    monkeypatch.setattr("bibr.ocr.registry._cuda_vram_gb", lambda: vram_gb)
+    _candidates(monkeypatch, "paddle-vllm")
+    rm = ResourceManager(ocr_backend="paddle-vllm", managed_vllm_fraction=0.85)
+    await rm.start_llm_server(backend="vllm")
+    with patch.object(rm, "_create_ocr_client_for", side_effect=_ocr_factory(events)):
+        await rm.await_ocr()
+
+    expected = ["llm-start", "llm-stop", "ocr-start:paddle-vllm"]
+    if not stops_llm:
+        expected = ["llm-start", "ocr-start:paddle-vllm"]
+    assert events == expected

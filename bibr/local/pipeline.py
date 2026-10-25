@@ -204,10 +204,10 @@ def _managed_gpu_fraction(llm_backend: str, ocr_backend: str, settings: GlobalSe
     Paddle OCR vLLM both managed, the barrier plan can run them at once (OCR
     kept resident under ``keep_all``, or a later chunk's OCR beside the LLM),
     so both shares are claimed when they fit together. When they do not (the
-    defaults, 0.85 + 0.92), only one is ever up and the larger share is what
-    the classifiers must leave free.
+    defaults on a 32 GB card, 0.85 + 0.22), only one is ever up and the larger
+    share is what the classifiers must leave free.
     """
-    from bibr.ocr.registry import PADDLE_VLLM_GPU_MEMORY_UTILIZATION, automatic_backend_names
+    from bibr.ocr.registry import automatic_backend_names, paddle_vllm_gpu_memory_utilization
 
     llm_share = settings.llm.local_mem_fraction if llm_backend in ("local", "vllm") else 0.0
     # The automatic ``paddle`` chain lists paddle-vllm only on hardware that
@@ -215,7 +215,7 @@ def _managed_gpu_fraction(llm_backend: str, ocr_backend: str, settings: GlobalSe
     starts_paddle_vllm = ocr_backend == "paddle-vllm" or (
         ocr_backend == "paddle" and "paddle-vllm" in automatic_backend_names()
     )
-    ocr_share = PADDLE_VLLM_GPU_MEMORY_UTILIZATION if starts_paddle_vllm else 0.0
+    ocr_share = paddle_vllm_gpu_memory_utilization() if starts_paddle_vllm else 0.0
     if llm_share + ocr_share <= 1.0:
         return llm_share + ocr_share
     return max(llm_share, ocr_share)

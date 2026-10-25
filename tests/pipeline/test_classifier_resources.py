@@ -329,17 +329,31 @@ def _pin_linux_x86(monkeypatch, *, vram_gb):
 
 @pytest.mark.parametrize("ocr_backend", ["paddle-vllm", "paddle"])
 def test_classifiers_leave_room_for_managed_paddle_vllm_ocr(monkeypatch, ocr_backend):
-    """Cloud LLM + managed Paddle OCR vLLM on a 24 GB GPU.
+    """Cloud LLM + managed Paddle OCR vLLM on a 10 GB GPU.
 
     The streaming plan loads the classifiers before OCR starts; with a cloud
-    LLM nothing was reserved, so both went to CUDA and vLLM's 92% claim then
-    found the memory gone. Both now go to CPU (same results, slower).
+    LLM nothing was reserved, so both went to CUDA and vLLM's claim then
+    found the memory gone. PaddleOCR-VL's 0.70 of this card leaves 3 GiB, the
+    2 GiB safety reserve 1 GiB of it: the section model fits, the paper model
+    goes to CPU (same results, slower).
     """
+    _pin_linux_x86(monkeypatch, vram_gb=10.0)
+    pipe, devices = _pipeline_devices(
+        monkeypatch, free_gib=9.5, total_gib=10, llm_backend="cloud", ocr_backend=ocr_backend
+    )
+    assert pipe._resources.classifiers._managed_vllm_fraction == pytest.approx(0.70)
+    assert devices == {"paper": "cpu", "section": "cuda"}
+
+
+@pytest.mark.parametrize("ocr_backend", ["paddle-vllm", "paddle"])
+def test_classifiers_fit_beside_paddle_vllm_ocr_on_24_gb(monkeypatch, ocr_backend):
+    """PaddleOCR-VL claims its ~7 GB (0.30 of 24 GB), not 92%: both models fit."""
     _pin_linux_x86(monkeypatch, vram_gb=24.0)
-    _, devices = _pipeline_devices(
+    pipe, devices = _pipeline_devices(
         monkeypatch, free_gib=22, total_gib=24, llm_backend="cloud", ocr_backend=ocr_backend
     )
-    assert devices == {"paper": "cpu", "section": "cpu"}
+    assert pipe._resources.classifiers._managed_vllm_fraction == pytest.approx(0.30)
+    assert devices == {"paper": "cuda", "section": "cuda"}
 
 
 def test_local_vllm_llm_keeps_its_own_fraction_beside_paddle_vllm(monkeypatch):
@@ -349,8 +363,9 @@ def test_local_vllm_llm_keeps_its_own_fraction_beside_paddle_vllm(monkeypatch):
         monkeypatch, free_gib=78, total_gib=80, llm_backend="vllm", ocr_backend="paddle-vllm"
     )
     assert pipe._resources._managed_vllm_fraction == pipe._settings.llm.local_mem_fraction
-    assert pipe._resources.classifiers._managed_vllm_fraction == 0.92
-    # 8% of 80 GiB minus the 2 GiB reserve still holds both models.
+    # 0.85 + PaddleOCR-VL's 0.09 of an 80 GB card fit together, so both count.
+    assert pipe._resources.classifiers._managed_vllm_fraction == pytest.approx(0.94)
+    # 6% of 80 GiB minus the 2 GiB reserve still holds both models.
     assert devices == {"paper": "cuda", "section": "cuda"}
 
 
@@ -378,14 +393,15 @@ def test_free_gpu_without_managed_vllm_keeps_both_on_cuda(monkeypatch, pipeline_
 @pytest.mark.parametrize(
     ("llm_backend", "llm_fraction", "ocr_backend", "expected"),
     [
-        ("cloud", 0.85, "paddle-vllm", 0.92),
+        # The suite's 24 GB card: PaddleOCR-VL claims 0.30 of it.
+        ("cloud", 0.85, "paddle-vllm", 0.30),
         ("cloud", 0.85, "glm-http", 0.0),
         ("cloud", 0.85, "glm-llama", 0.0),
         ("vllm", 0.85, "glm-llama", 0.85),
-        # 0.85 + 0.92 cannot both be up on one GPU: whichever is up is the bound.
-        ("vllm", 0.85, "paddle-vllm", 0.92),
+        # 0.85 + 0.30 cannot both be up on one GPU: whichever is up is the bound.
+        ("vllm", 0.85, "paddle-vllm", 0.85),
         # Shares that fit together can be up at once (keep_all, later chunks).
-        ("vllm", 0.05, "paddle-vllm", 0.97),
+        ("vllm", 0.05, "paddle-vllm", 0.35),
     ],
 )
 def test_managed_gpu_fraction(llm_backend, llm_fraction, ocr_backend, expected):

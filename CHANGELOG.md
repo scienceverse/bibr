@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A fully local batch on one NVIDIA card with `onnxruntime-gpu` installed no
+  longer fails every paper after the first chunk. The managed PaddleOCR-VL
+  server asked vLLM for 92% of the card, which vLLM needs free before it
+  starts, and from the second chunk bibr's own layout, sentence and reference
+  models held more than the 8% left (on an RTX 5090, 28.52 GiB free of the
+  28.93 GiB asked for), so OCR could not restart. PaddleOCR-VL now asks for
+  about 7 GB (0.22 of a 32 GB card, 0.30 of 24 GB, 0.44 of 16 GB), which also
+  leaves room for the layout model beside it.
+
 ## [0.7.4] - 2026-10-23
 
 The reference parser is now v5.1 (UltraBERT-150M), which matches references far better
