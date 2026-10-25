@@ -285,3 +285,27 @@ def test_stage_declares_contracts_for_static_validation():
             ExportStage(),
         ]
     )
+
+
+@pytest.mark.asyncio
+async def test_freed_page_images_go_back_to_the_os_after_every_window(monkeypatch):
+    from bibr.config import Settings
+    from bibr.pipeline.stages import render_ocr
+
+    files = _mk_files(6)
+    peak = [0]
+    resident_at_trim: list[int] = []
+
+    async def trim():
+        resident_at_trim.append(sum(1 for fs in files if fs.page_images is not None))
+        return True
+
+    monkeypatch.setattr(render_ocr, "arelease_free_heap", trim)
+    ctx = _ctx(files, RunConfig(ocr_backend="gemini", memory_mode="balanced"))
+
+    await _stage(files, peak).run(ctx)
+
+    window = Settings.ocr.max_concurrent_files
+    assert len(resident_at_trim) == -(-len(files) // window)
+    # Each trim runs after its window dropped its page images.
+    assert resident_at_trim == [0] * len(resident_at_trim)

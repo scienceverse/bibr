@@ -539,3 +539,26 @@ class TestBackhalfProgress:
         assert prog.ends == []
         assert a.result_json == {"paper_id": "a.pdf"}
         assert b.result_json == {"paper_id": "b.pdf"}
+
+
+@pytest.mark.asyncio
+async def test_each_window_returns_its_freed_pages_after_spawning_its_back_half(monkeypatch):
+    from bibr.pipeline.stages import render_ocr
+
+    events: list[str] = []
+
+    async def trim():
+        events.append("trim")
+        return True
+
+    monkeypatch.setattr(render_ocr, "arelease_free_heap", trim)
+    monkeypatch.setattr(Settings.ocr, "max_concurrent_files", 1)
+    files = [_mk("a.pdf"), _mk("b.pdf")]
+    ctx = _ctx(files, _cfg(ocr_backend="gemini"))
+
+    await _stage(events).run(ctx)
+
+    assert events.count("trim") == 2
+    first_trim = events.index("trim")
+    assert events.index("ocr_end:a.pdf") < first_trim < events.index("ocr_start:b.pdf")
+    assert all(fs.page_images is None for fs in files)

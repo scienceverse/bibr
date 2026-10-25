@@ -223,3 +223,46 @@ async def test_aclose_continues_after_a_teardown_failure():
     pl._resources.close_llm_server.assert_awaited_once()
     pl._resources.shutdown_ocr.assert_awaited_once()
     pl._resources.close_llm_client.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_chunk_returns_freed_heap_once_per_chunk(monkeypatch):
+    from bibr.utils import heap
+
+    trims: list[str] = []
+
+    async def trim():
+        trims.append("trim")
+        return True
+
+    monkeypatch.setattr(heap, "arelease_free_heap", trim)
+    pipeline = _make_pipeline([_NoopStage(), _ExportStage()])
+
+    await pipeline.process_chunk([FileState(path=Path("a.pdf")), FileState(path=Path("b.pdf"))])
+    await pipeline.process_chunk([FileState(path=Path("c.pdf"))])
+
+    assert trims == ["trim", "trim"]
+
+
+@pytest.mark.asyncio
+async def test_process_chunk_does_not_trim_when_a_stage_raises(monkeypatch):
+    from bibr.utils import heap
+
+    trims: list[str] = []
+
+    async def trim():
+        trims.append("trim")
+        return True
+
+    class _Raises:
+        name = "raises"
+
+        async def run(self, ctx):  # noqa: ARG002
+            raise RuntimeError("stage crashed")
+
+    monkeypatch.setattr(heap, "arelease_free_heap", trim)
+    pipeline = _make_pipeline([_Raises()])
+
+    with pytest.raises(RuntimeError, match="stage crashed"):
+        await pipeline.process_chunk([FileState(path=Path("a.pdf"))])
+    assert trims == []
