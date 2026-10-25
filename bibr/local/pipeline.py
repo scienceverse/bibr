@@ -196,18 +196,25 @@ def _auto_batch_size(memory_mode: str) -> int:
 
 
 def _managed_gpu_fraction(llm_backend: str, ocr_backend: str, settings: GlobalSettings) -> float:
-    """Share of total VRAM the managed vLLM servers of this run claim.
+    """Share of total VRAM the classifiers must leave to the managed vLLM servers.
 
     The classifiers load before these servers start (before Paddle OCR in the
     streaming plan, before the LLM in the barrier plan), and a vLLM server will
     not start unless its whole share is still free. With a local vLLM LLM and
     Paddle OCR vLLM both managed, the barrier plan can run them at once (OCR
     kept resident under ``keep_all``, or a later chunk's OCR beside the LLM),
-    so both shares are claimed when they fit together. When they do not (the
-    defaults on a 32 GB card, 0.85 + 0.22), only one is ever up and the larger
-    share is what the classifiers must leave free.
+    so both shares are claimed when they fit together with bibr's ONNX reserve
+    (``managed_vllm_shares_fit``). When they do not (the defaults, 0.85 and
+    PaddleOCR-VL's ~5 GB, on cards up to 64 GB), one server stops for the
+    other and restarts every chunk beside bibr's resident ONNX sessions: the
+    larger share and that reserve are what the classifiers must leave free.
     """
-    from bibr.ocr.registry import automatic_backend_names, paddle_vllm_gpu_memory_utilization
+    from bibr.ocr.registry import (
+        automatic_backend_names,
+        managed_vllm_onnx_reserve_share,
+        managed_vllm_shares_fit,
+        paddle_vllm_gpu_memory_utilization,
+    )
 
     llm_share = settings.llm.local_mem_fraction if llm_backend in ("local", "vllm") else 0.0
     # The automatic ``paddle`` chain lists paddle-vllm only on hardware that
@@ -216,9 +223,11 @@ def _managed_gpu_fraction(llm_backend: str, ocr_backend: str, settings: GlobalSe
         ocr_backend == "paddle" and "paddle-vllm" in automatic_backend_names()
     )
     ocr_share = paddle_vllm_gpu_memory_utilization() if starts_paddle_vllm else 0.0
-    if llm_share + ocr_share <= 1.0:
+    if not (llm_share and ocr_share):
         return llm_share + ocr_share
-    return max(llm_share, ocr_share)
+    if managed_vllm_shares_fit(llm_share, ocr_share):
+        return llm_share + ocr_share
+    return min(1.0, max(llm_share, ocr_share) + managed_vllm_onnx_reserve_share())
 
 
 class LocalPipeline(Pipeline):

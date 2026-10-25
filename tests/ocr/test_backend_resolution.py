@@ -6,6 +6,8 @@ Previously this logic lived only in the CLI, so library calls ignored
 
 import pytest
 
+from bibr.ocr import registry as _registry_for_probe
+
 
 class _OcrSettings:
     paddle_model = "paddle/source"
@@ -333,8 +335,30 @@ class TestLinuxChainIsHardwareAware:
         assert "6 GB" in low and "llama.cpp" in low
 
 
+# Captured at collection, before the suite's conftest pins it for each test.
+_MANAGED_GPU_PROBE = _registry_for_probe._managed_gpu_vram_gb
+
+# nvidia-smi totals (GiB) of common cards, as the VRAM probes report them.
+_CARDS = {
+    "12 GB": 12.0,
+    "16 GB": 15.99,
+    "24 GB": 24.0,
+    "32 GB (RTX 5090)": 31.84,
+    "48 GB": 47.99,
+    "64 GB": 64.0,
+    "80 GB": 79.65,
+}
+# vLLM multiplies its share by CUDA's total, which is smaller than
+# nvidia-smi's: 31.45 vs 31.84 GiB on an RTX 5090, 23.56 vs 24.0 on an RTX 3090.
+_CUDA_OF_SMI = 0.98
+# What a server restarting beside bibr's resident ONNX sessions needs outside
+# its share on an RTX 5090: bibr held 2.43-2.77 GiB at the later chunks' OCR
+# restarts, and the new server's CUDA context takes about 0.49 GiB.
+_RESTART_NEED_GIB = 2.77 + 0.49
+
+
 class TestPaddleVllmShareIsSizedFromItsNeed:
-    """The managed PaddleOCR-VL server asks vLLM for about 7 GB, not 92% of the card.
+    """The managed PaddleOCR-VL server asks vLLM for about 5 GB, not 92% of the card.
 
     vLLM will not start unless its whole share is free, and bibr's layout, SaT
     and NER ONNX sessions stay on the GPU between chunks. On an RTX 5090 they
@@ -345,16 +369,16 @@ class TestPaddleVllmShareIsSizedFromItsNeed:
     @pytest.mark.parametrize(
         ("vram_gb", "share"),
         [
-            # nvidia-smi totals in GiB, as ``_cuda_vram_gb`` reports them.
-            (31.84, 0.22),  # RTX 5090
-            (24.0, 0.30),  # RTX 3090 / 4090
-            (15.99, 0.44),  # 16 GB cards
-            (11.99, 0.59),  # 12 GB cards
-            (10.0, 0.70),
-            (8.0, 0.88),  # paddle-vllm's floor
-            (80.0, 0.09),
-            # 7 / 35 * 100 is 20.000000000000004 in floats: still 0.20.
-            (35.0, 0.20),
+            (12.0, 0.42),
+            (15.99, 0.32),
+            (24.0, 0.21),
+            (23.99, 0.21),  # RTX 4090
+            (31.84, 0.16),  # RTX 5090
+            (47.99, 0.11),
+            (64.0, 0.08),
+            (79.65, 0.07),
+            (10.0, 0.50),
+            (8.0, 0.63),  # paddle-vllm's floor
         ],
     )
     def test_share_by_card(self, vram_gb, share):
@@ -371,19 +395,233 @@ class TestPaddleVllmShareIsSizedFromItsNeed:
             == registry.PADDLE_VLLM_GPU_MEMORY_UTILIZATION
         )
 
-    def test_probes_the_card_by_default(self, monkeypatch):
+    def test_probes_the_managed_servers_card_by_default(self, monkeypatch):
         from bibr.ocr import registry
 
-        monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: 31.84)
-        assert registry.paddle_vllm_gpu_memory_utilization() == 0.22
+        monkeypatch.setattr(registry, "_managed_gpu_vram_gb", lambda: 31.84)
+        assert registry.paddle_vllm_gpu_memory_utilization() == 0.16
 
-    @pytest.mark.parametrize("vram_gb", [10.0, 11.99, 15.99, 24.0, 31.84, 48.0, 80.0])
-    def test_share_leaves_room_for_the_resident_onnx_sessions(self, vram_gb):
-        """What a restart needs outside the share: bibr's resident ONNX sessions
-        (2.43 GiB on the 5090 at the second chunk) plus vLLM's own CUDA context
-        (0.49 GiB there). 0.92 left 2.5 GiB of a 32 GB card and 1.9 of 24 GB."""
+    @pytest.mark.parametrize("vram_gb", [8.0, 10.0, *_CARDS.values()])
+    def test_share_holds_paddleocr_vl(self, vram_gb):
+        """At 0.20 of a 24 GB card (4.71 GiB of CUDA memory) PaddleOCR-VL ran 20/20
+        papers with a 2.26 GiB KV cache, at least 10x its peak use."""
         from bibr.ocr import registry
 
         share = registry.paddle_vllm_gpu_memory_utilization(vram_gb=vram_gb)
-        assert (1 - share) * vram_gb >= 2.43 + 0.49
-        assert share * vram_gb >= registry.PADDLE_VLLM_GPU_MEMORY_GB
+        assert share * vram_gb * _CUDA_OF_SMI >= 4.7
+
+    @pytest.mark.parametrize("vram_gb", [10.0, *_CARDS.values()])
+    def test_share_leaves_room_to_restart_beside_the_onnx_sessions(self, vram_gb):
+        """0.92 left 2.5 GiB of a 32 GB card and 1.9 of 24 GB."""
+        from bibr.ocr import registry
+
+        share = registry.paddle_vllm_gpu_memory_utilization(vram_gb=vram_gb)
+        assert (1 - share) * vram_gb * _CUDA_OF_SMI >= _RESTART_NEED_GIB
+
+
+class TestManagedVllmSharesFit:
+    """Both managed vLLM servers count as fitting only with bibr's ONNX reserve left over.
+
+    Shares summing to 1 are not enough: at 0.85 + 0.15 on a 48 GB card, a
+    later chunk's PaddleOCR-VL restart would find bibr's own sessions inside its
+    share and never start, so every later paper would fail.
+    """
+
+    @pytest.mark.parametrize(
+        ("card", "fits"),
+        [
+            ("12 GB", False),
+            ("16 GB", False),
+            ("24 GB", False),
+            ("32 GB (RTX 5090)", False),
+            ("48 GB", False),  # 0.85 + 0.11 = 0.96 leaves 1.9 GiB
+            ("64 GB", False),  # 0.85 + 0.08 = 0.93 leaves 4.4 GiB
+            ("80 GB", True),  # 0.85 + 0.07 = 0.92 leaves 6.2 GiB
+        ],
+    )
+    def test_default_llm_share(self, card, fits):
+        from bibr.ocr import registry
+
+        vram = _CARDS[card]
+        ocr = registry.paddle_vllm_gpu_memory_utilization(vram_gb=vram)
+        assert registry.managed_vllm_shares_fit(0.85, ocr, vram_gb=vram) is fits
+
+    @pytest.mark.parametrize(
+        ("llm_share", "card", "fits"),
+        [
+            # LLM_LOCAL_MEM_FRACTION set by the user.
+            (0.6, "24 GB", False),  # 0.81 of the card leaves 4.5 GiB
+            (0.5, "24 GB", True),
+            (0.85, "48 GB", False),
+            (0.7, "48 GB", True),
+            (0.5, "32 GB (RTX 5090)", True),
+            (0.7, "32 GB (RTX 5090)", False),
+            (0.05, "12 GB", True),  # 0.05 + 0.42 leaves 6.2 GiB
+        ],
+    )
+    def test_user_set_llm_share(self, llm_share, card, fits):
+        from bibr.ocr import registry
+
+        vram = _CARDS[card]
+        ocr = registry.paddle_vllm_gpu_memory_utilization(vram_gb=vram)
+        assert registry.managed_vllm_shares_fit(llm_share, ocr, vram_gb=vram) is fits
+
+    @pytest.mark.parametrize("card", list(_CARDS))
+    @pytest.mark.parametrize("llm_share", [0.3, 0.5, 0.6, 0.7, 0.76, 0.85])
+    def test_shares_that_fit_leave_the_reserve(self, card, llm_share):
+        """Whenever the servers may be up together, at least ~5.9 GiB of CUDA memory
+        stays outside both: what a restart needs, and the room at which layout
+        stopped retrying after OOM on a 24 GB card (6.1 GiB)."""
+        from bibr.ocr import registry
+
+        vram = _CARDS[card]
+        ocr = registry.paddle_vllm_gpu_memory_utilization(vram_gb=vram)
+        if registry.managed_vllm_shares_fit(llm_share, ocr, vram_gb=vram):
+            room = (1 - llm_share - ocr) * vram * _CUDA_OF_SMI
+            assert room >= registry.MANAGED_VLLM_ONNX_RESERVE_GB * _CUDA_OF_SMI - 1e-6
+            assert room >= _RESTART_NEED_GIB
+
+    @pytest.mark.parametrize("vram_gb", [None, 0.0])
+    def test_unknown_card_never_fits(self, vram_gb):
+        from bibr.ocr import registry
+
+        assert registry.managed_vllm_shares_fit(0.05, 0.05, vram_gb=vram_gb) is False
+
+    def test_exact_fit_survives_float_noise(self):
+        from bibr.ocr import registry
+
+        # 0.54 + 0.21 + 6/24 is 1.0000000000000002 in floats.
+        assert registry.managed_vllm_shares_fit(0.54, 0.21, vram_gb=24.0) is True
+
+
+class TestManagedServersCard:
+    """The PaddleOCR-VL share is sized from the card CUDA_VISIBLE_DEVICES exposes.
+
+    vLLM runs on CUDA's device 0, which need not be nvidia-smi's GPU 0. An
+    80 GB GPU 0 beside a visible 16 GB card used to give 0.09 of the 16 GB
+    card, 1.4 GiB, less than PaddleOCR-VL's weights.
+    """
+
+    A100 = ("GPU-aaaaaaaa-1111-2222-3333-444444444444", 79.65)
+    RTX4080 = ("GPU-bbbbbbbb-1111-2222-3333-444444444444", 15.99)
+    RTX3090 = ("GPU-cccccccc-1111-2222-3333-444444444444", 24.0)
+    RTX3090_2 = ("GPU-dddddddd-1111-2222-3333-444444444444", 24.0)
+
+    @pytest.mark.parametrize(
+        ("visible", "order", "expected"),
+        [
+            # PCI bus order: CUDA numbers the cards as nvidia-smi does.
+            (None, "PCI_BUS_ID", 79.65),
+            ("1", "PCI_BUS_ID", 15.99),
+            ("1,0", "PCI_BUS_ID", 15.99),
+            (" 0 ", "pci_bus_id", 79.65),
+            # By UUID, full or a unique prefix: no ordering question.
+            ("GPU-bbbbbbbb-1111-2222-3333-444444444444", None, 15.99),
+            ("GPU-bbbb", None, 15.99),
+            ("GPU-bbbb,GPU-aaaa", None, 15.99),
+            # CUDA's default order is fastest first: cards of different sizes
+            # cannot be told apart by number.
+            (None, None, None),
+            ("1", None, None),
+            ("0", "FASTEST_FIRST", None),
+            # No card, a MIG slice, an unknown UUID or an index out of range.
+            ("", "PCI_BUS_ID", None),
+            ("-1", "PCI_BUS_ID", None),
+            ("NoDevFiles", None, None),
+            ("MIG-12345678-1111-2222-3333-444444444444", None, None),
+            ("GPU-ffff", None, None),
+            ("GPU-", None, None),
+            ("2", "PCI_BUS_ID", None),
+        ],
+    )
+    def test_mixed_cards(self, visible, order, expected):
+        from bibr.ocr import registry
+
+        gpus = (self.A100, self.RTX4080)
+        assert registry._visible_gpu_vram_gb(gpus, visible, order) == expected
+
+    @pytest.mark.parametrize("visible", [None, "0", "1", "1,0"])
+    @pytest.mark.parametrize("order", [None, "PCI_BUS_ID"])
+    def test_cards_of_one_size_need_no_ordering(self, visible, order):
+        from bibr.ocr import registry
+
+        gpus = (self.RTX3090, self.RTX3090_2)
+        assert registry._visible_gpu_vram_gb(gpus, visible, order) == 24.0
+
+    @pytest.mark.parametrize("visible", [None, "0", "GPU-cccc"])
+    def test_single_card(self, visible):
+        from bibr.ocr import registry
+
+        assert registry._visible_gpu_vram_gb((self.RTX3090,), visible, None) == 24.0
+
+    @pytest.mark.parametrize("gpus", [None, ()])
+    def test_no_inventory(self, gpus):
+        from bibr.ocr import registry
+
+        assert registry._visible_gpu_vram_gb(gpus, None, None) is None
+
+    def _use_real_probe(self, monkeypatch, gpus, env):
+        from bibr.ocr import registry
+
+        monkeypatch.setattr(registry, "_nvidia_gpu_inventory", lambda: gpus)
+        for name in ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER"):
+            if name in env:
+                monkeypatch.setenv(name, env[name])
+            else:
+                monkeypatch.delenv(name, raising=False)
+        # The suite's conftest pins this probe; put the real one back, uncached.
+        monkeypatch.setattr(registry, "_managed_gpu_vram_gb", _MANAGED_GPU_PROBE.__wrapped__)
+        return registry
+
+    def test_share_follows_the_visible_card(self, monkeypatch):
+        registry = self._use_real_probe(
+            monkeypatch,
+            (self.A100, self.RTX4080),
+            {"CUDA_VISIBLE_DEVICES": "1", "CUDA_DEVICE_ORDER": "PCI_BUS_ID"},
+        )
+        assert registry.paddle_vllm_gpu_memory_utilization() == 0.32
+        # GPU 0's 80 GB would have let 0.85 + 0.07 run together on the 16 GB card.
+        assert registry.managed_vllm_shares_fit(0.85, 0.32) is False
+
+    def test_card_that_cannot_be_told_keeps_the_cap_and_swaps(self, monkeypatch):
+        registry = self._use_real_probe(
+            monkeypatch, (self.A100, self.RTX4080), {"CUDA_VISIBLE_DEVICES": "1"}
+        )
+        assert registry.paddle_vllm_gpu_memory_utilization() == 0.92
+        assert registry.managed_vllm_shares_fit(0.05, 0.05) is False
+
+    def test_nothing_visible(self, monkeypatch):
+        registry = self._use_real_probe(monkeypatch, (self.RTX3090,), {"CUDA_VISIBLE_DEVICES": ""})
+        assert registry.paddle_vllm_gpu_memory_utilization() == 0.92
+
+    def test_inventory_parses_nvidia_smi(self, monkeypatch):
+        import subprocess
+
+        from bibr.ocr import registry
+
+        def fake_run(cmd, **kwargs):
+            assert cmd[:2] == ["nvidia-smi", "--query-gpu=uuid,memory.total"]
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=f"{self.A100[0]}, 81559\n{self.RTX4080[0]}, 16376\n", stderr=""
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        gpus = registry._nvidia_gpu_inventory.__wrapped__()
+        assert [uuid for uuid, _ in gpus] == [self.A100[0], self.RTX4080[0]]
+        assert [round(total, 2) for _, total in gpus] == [79.65, 15.99]
+
+    @pytest.mark.parametrize("outcome", ["error", "garbage", "missing"])
+    def test_inventory_failures(self, monkeypatch, outcome):
+        import subprocess
+
+        from bibr.ocr import registry
+
+        def fake_run(cmd, **kwargs):
+            if outcome == "missing":
+                raise FileNotFoundError("nvidia-smi")
+            if outcome == "error":
+                return subprocess.CompletedProcess(cmd, 9, stdout="", stderr="NVML init failed")
+            return subprocess.CompletedProcess(cmd, 0, stdout="GPU-x, [N/A]\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert registry._nvidia_gpu_inventory.__wrapped__() is None

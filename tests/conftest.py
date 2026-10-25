@@ -176,8 +176,15 @@ def _pin_cuda_probe_for_platform_tests(monkeypatch):
     """The automatic Linux OCR chain now asks the hardware before listing
     ``paddle-vllm``. Tests that pin ``sys.platform`` to linux were written
     against the old unconditional chain, so pin a roomy GPU here; tests that
-    exercise the CPU-only / small-GPU paths patch the probe themselves."""
-    monkeypatch.setattr("bibr.ocr.registry._cuda_vram_gb", lambda: 24.0)
+    exercise the CPU-only / small-GPU paths patch the probe themselves.
+
+    The managed vLLM servers' card (``_managed_gpu_vram_gb``, which reads
+    ``CUDA_VISIBLE_DEVICES``) follows whatever a test pins ``_cuda_vram_gb``
+    to, so the suite never sizes shares from the host's own GPU."""
+    from bibr.ocr import registry
+
+    monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: 24.0)
+    monkeypatch.setattr(registry, "_managed_gpu_vram_gb", lambda: registry._cuda_vram_gb())
 
 
 @pytest.fixture(autouse=True)

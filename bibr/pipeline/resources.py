@@ -739,14 +739,16 @@ class ResourceManager:
         """Whether the managed vLLM LLM and PaddleOCR-VL servers cannot run together.
 
         Each vLLM server claims a fixed share of total VRAM when it starts and
-        refuses to start while less is free, so with shares summing above 1
-        (the defaults on a 32 GB card: 0.85 + 0.22) the one starting must stop
-        the other.
+        refuses to start while less is free, and bibr's own GPU sessions stay
+        on the card between chunks. So unless both shares plus
+        ``MANAGED_VLLM_ONNX_RESERVE_GB`` fit (the defaults, 0.85 and
+        PaddleOCR-VL's ~5 GB, do not on cards up to 64 GB), the one starting
+        must stop the other.
         """
-        from bibr.ocr.registry import paddle_vllm_gpu_memory_utilization
+        from bibr.ocr.registry import managed_vllm_shares_fit, paddle_vllm_gpu_memory_utilization
 
         llm_share = self._managed_vllm_fraction or self._settings.llm.local_mem_fraction
-        return llm_share + paddle_vllm_gpu_memory_utilization() > 1.0
+        return not managed_vllm_shares_fit(llm_share, paddle_vllm_gpu_memory_utilization())
 
     def _llm_server_blocks_ocr(self, ocr_backend: str) -> bool:
         """Whether starting ``ocr_backend`` must first stop the managed LLM server.

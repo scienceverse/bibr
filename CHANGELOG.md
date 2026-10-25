@@ -14,8 +14,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   starts, and from the second chunk bibr's own layout, sentence and reference
   models held more than the 8% left (on an RTX 5090, 28.52 GiB free of the
   28.93 GiB asked for), so OCR could not restart. PaddleOCR-VL now asks for
-  about 7 GB (0.22 of a 32 GB card, 0.30 of 24 GB, 0.44 of 16 GB), which also
-  leaves room for the layout model beside it.
+  about 5 GB of the card the servers run on (0.16 of a 32 GB card, 0.21 of
+  24 GB, 0.32 of 16 GB, read from the card `CUDA_VISIBLE_DEVICES` exposes),
+  which also leaves room for the layout model beside it. The managed LLM and
+  OCR servers run side by side only when their shares leave 6 GB of the card
+  for bibr's own models; otherwise they still take turns, and the paper and
+  section classifiers use the GPU only beyond the larger share and those 6 GB,
+  so each restart finds its share free.
 
 ## [0.7.4] - 2026-10-23
 
