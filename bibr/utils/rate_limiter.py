@@ -76,6 +76,18 @@ class AsyncLocalRateLimiter:
                 return None
             return self._timestamps[0] + self.window_seconds - now
 
+    def seconds_until_slot(self) -> float:
+        """Seconds until a slot is free (0.0 when one is free now), without
+        taking it. Waiters already queued for a slot are not counted."""
+        with self._window_lock:
+            now = time.monotonic()
+            cutoff = now - self.window_seconds
+            while self._timestamps and self._timestamps[0] <= cutoff:
+                self._timestamps.popleft()
+            if len(self._timestamps) < self.max_requests:
+                return 0.0
+            return self._timestamps[0] + self.window_seconds - now
+
     async def acquire(self) -> None:
         """Acquire a slot. Blocks if the window is full; resumes when a slot ages out."""
         room = self._waitroom()

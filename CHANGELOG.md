@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- ROR matching no longer throttles itself to 50 requests per 5 minutes when no
+  client ID is set. ROR limits each IP address to 2000 requests per 5 minutes
+  and does not enforce its lower anonymous limit, so the default budget is now
+  1000 requests per 5 minutes per process, half the per-address limit (2000
+  with `ROR_CLIENT_ID`; `ROR_REQUESTS_PER_5MIN` still sets it). With
+  enrichment on, a batch spent the 50 requests in its first minute and every
+  later paper in that 5 minutes waited out the 60 s `ROR_ENRICH_TIMEOUT` and
+  kept few affiliation matches. A string whose lookup cannot start before the
+  paper's ROR time budget ends is now left unmatched at once ("rate limited")
+  instead of holding the paper until the timeout.
+
 ## [0.7.4] - 2026-10-23
 
 The reference parser is now v5.1 (UltraBERT-150M), which matches references far better

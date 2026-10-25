@@ -5,11 +5,17 @@ ROR marks at most one result ``chosen`` when it is confident in the match and
 advises against selecting by score, so only the chosen result is taken; a
 string without one stays unmatched.
 
-ROR publishes a rate limit of 50 requests per 5 minutes without a client ID
-and 2000 with one (sent as the ``Client-Id`` header). The client keeps to it
-with a sliding window, remembers answers (misses too) in a process-wide
-cache, and backs off entirely after a 429 for the ``Retry-After`` interval
-(at most one window).
+ROR limits each IP address to 2000 requests per 5 minutes. Its lower limit
+for requests without a client ID (50 per 5 minutes) is not enforced, and
+client ID registration is paused, so the client's own budget is 1000 requests
+per 5 minutes per process without a client ID: half the per-address limit,
+so two processes on one address stay under it. With a client ID (sent as the
+``Client-Id`` header) the budget is 2000. ``ROR_REQUESTS_PER_5MIN`` sets it.
+The client keeps to the budget with a sliding window, remembers answers
+(misses too) in a process-wide cache, and backs off entirely after a 429 for
+the ``Retry-After`` interval (at most one window). A lookup given a deadline
+does not wait for a slot that would free after it: it reports "rate limited"
+at once, so a paper does not sit out its whole ROR time budget in the queue.
 Every failure degrades to "no match": ROR never fails enrichment.
 """
 
@@ -33,7 +39,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _WINDOW_SECONDS = 300.0
-_ANONYMOUS_REQUESTS_PER_WINDOW = 50
+# Per process. Two processes on one address at 1000 each stay under ROR's
+# 2000 per address; one 429 would stop ROR lookups for up to a window.
+_ANONYMOUS_REQUESTS_PER_WINDOW = 1000
 _CLIENT_ID_REQUESTS_PER_WINDOW = 2000
 # Strings outside these bounds are not affiliations worth a request.
 _MIN_CHARS = 3
@@ -108,21 +116,29 @@ class RorClient:
         result, _failure = await self.lookup(text)
         return result
 
-    async def lookup(self, text: str) -> tuple[OrganizationMatch | None, str | None]:
+    async def lookup(
+        self, text: str, *, deadline: float | None = None
+    ) -> tuple[OrganizationMatch | None, str | None]:
         """ROR's chosen organization for *text*, and why the lookup failed if it did.
 
         The failure is ``None`` for an answered lookup, matched or not, and a
         short reason when ROR could not be asked or did not answer usefully:
         "HTTP 503", "rate limited", "invalid JSON", or the type name of the
         error raised ("ConnectError"). It never raises an ``Exception``.
+
+        *deadline* is a ``time.monotonic()`` value: when the request budget
+        has no slot free before it, the lookup is "rate limited" without
+        waiting.
         """
         try:
-            return await self._lookup(text)
+            return await self._lookup(text, deadline)
         except Exception as exc:  # noqa: BLE001 - one bad answer must not fail the paper's lookups
             logger.debug("ROR lookup failed for %r", text[:80], exc_info=True)
             return None, type(exc).__name__
 
-    async def _lookup(self, text: str) -> tuple[OrganizationMatch | None, str | None]:
+    async def _lookup(
+        self, text: str, deadline: float | None = None
+    ) -> tuple[OrganizationMatch | None, str | None]:
         text = " ".join(text.split())
         if not _MIN_CHARS <= len(text) <= _MAX_CHARS:
             return None, None
@@ -131,6 +147,10 @@ class RorClient:
             self._cache.move_to_end(key)
             return self._cache[key], None
         if self.blocked:
+            return None, "rate limited"
+        if deadline is not None and (
+            time.monotonic() + self._limiter.seconds_until_slot() >= deadline
+        ):
             return None, "rate limited"
         await self._limiter.acquire()
         try:

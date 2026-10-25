@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import httpx
 import pytest
@@ -125,10 +126,69 @@ def test_errors_degrade_to_no_match():
     assert asyncio.run(_client(handler).match("Some University")) is None
 
 
-def test_default_budget_follows_rors_published_limits():
-    assert RorClient(settings=_settings())._limiter.max_requests == 50
+def test_default_budget_is_half_rors_per_address_limit():
+    # ROR allows 2000 requests per 5 minutes per IP address and does not
+    # enforce its anonymous limit of 50; two processes at 1000 stay under 2000.
+    assert RorClient(settings=_settings())._limiter.max_requests == 1000
     assert RorClient(settings=_settings(client_id="x"))._limiter.max_requests == 2000
     assert RorClient(settings=_settings(requests_per_5min=7))._limiter.max_requests == 7
+
+
+def _answering(calls: list[str]):
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.params["affiliation"])
+        return httpx.Response(200, json={"items": [_item("0uni00011", chosen=True)]})
+
+    return handler
+
+
+def test_a_lookup_does_not_wait_for_a_slot_past_its_deadline():
+    calls: list[str] = []
+    client = _client(_answering(calls), requests_per_5min=1)
+
+    async def run():
+        first = await client.lookup("First University", deadline=time.monotonic() + 30)
+        started = time.monotonic()
+        # The next slot frees in 300 s, after this deadline: no wait, no request.
+        second = await client.lookup("Second University", deadline=started + 30)
+        return first, second, time.monotonic() - started
+
+    first, second, waited = asyncio.run(run())
+    assert first[0] is not None and first[1] is None
+    assert second == (None, "rate limited")
+    assert waited < 1.0
+    assert calls == ["First University"]
+
+
+def test_a_lookup_with_a_free_slot_ignores_its_deadline():
+    calls: list[str] = []
+    client = _client(_answering(calls), requests_per_5min=5)
+
+    async def run():
+        deadline = time.monotonic() + 30
+        return [await client.lookup(name, deadline=deadline) for name in ("Uni A", "Uni B")]
+
+    assert [failure for _, failure in asyncio.run(run())] == [None, None]
+    assert calls == ["Uni A", "Uni B"]
+
+
+def test_an_exhausted_budget_ends_a_papers_matching_at_once():
+    """With the budget spent, the paper's other strings are "rate limited"
+    straight away instead of holding the paper for its whole ROR budget."""
+    calls: list[str] = []
+    client = _client(_answering(calls), requests_per_5min=1)
+
+    async def run():
+        started = time.monotonic()
+        report = await enrich_organizations(_metadata(), client, timeout=60)
+        return report, time.monotonic() - started
+
+    report, elapsed = asyncio.run(run())
+    assert len(calls) == 1
+    assert report.attempted == 4 and report.matched == 1
+    assert not report.timed_out
+    assert report.failed == 3 and report.failure_reasons == ("rate limited",)
+    assert elapsed < 5
 
 
 def _metadata() -> PaperMetadata:
