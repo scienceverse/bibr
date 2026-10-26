@@ -95,6 +95,7 @@ class ResourceManager:
         ocr_breaker=None,
         managed_vllm_fraction: float = 0.0,
         managed_gpu_fraction: float | None = None,
+        managed_llm_share_fixed: bool | None = None,
         settings: GlobalSettings | None = None,
         layout=None,
         segmenter=None,
@@ -126,6 +127,16 @@ class ResourceManager:
         self.ocr_sem_global = ocr_sem_global
         self.ocr_breaker = ocr_breaker
         self._managed_vllm_fraction = managed_vllm_fraction
+        # Whether the managed vLLM LLM server starts at exactly that share
+        # (the user chose it) or sizes it from the VRAM free at each start,
+        # with it as the cap (see ``bibr.local.vllm_share``). None reads the
+        # user's choice from the settings; a caller that writes a planned
+        # share onto them first passes what the user set.
+        if managed_llm_share_fixed is None:
+            from bibr.local.vllm_share import llm_share_user_set
+
+            managed_llm_share_fixed = llm_share_user_set(self._settings)
+        self._llm_share_fixed = managed_llm_share_fixed
         self._layout_factory = layout_factory
         self._segmenter_factory = segmenter_factory
         # Injected models transfer ownership by default. Embedders sharing
@@ -820,12 +831,20 @@ class ResourceManager:
                 # Module (not class) import so tests can monkeypatch the symbol.
                 import bibr.local.vllm_llm as vllm_llm
 
+                # Unless the user set the share, it is sized at every start
+                # from the VRAM free then: bibr's own GPU sessions grow over a
+                # batch, and a restart at the fixed 0.85 beside them ran out
+                # of memory in CUDA graph capture after its startup check.
+                share_from_free = not self._llm_share_fixed
+                colocated = not self._vllm_shares_overcommit()
                 server = await self._construct_llm_server(
                     lambda stop: _make_settings_aware(
                         vllm_llm.VllmLlmServer,
                         self._settings,
                         mem_fraction=self._managed_vllm_fraction or None,
                         stop_event=stop,
+                        share_from_free_memory=share_from_free,
+                        colocated=colocated,
                     ),
                 )
             elif backend == "llama-cpp":

@@ -273,6 +273,7 @@ class LocalPipeline(Pipeline):
         settings: GlobalSettings | None = None,
     ):
         from bibr.config import snapshot_settings
+        from bibr.local.vllm_share import llm_share_user_set
 
         # Alias/platform resolution ("glm", None → OCR_BACKEND or
         # platform default) — same table as the CLI, so the library API
@@ -375,6 +376,7 @@ class LocalPipeline(Pipeline):
                 else 0.0
             ),
             managed_gpu_fraction=_managed_gpu_fraction(llm_backend, ocr_backend, settings_snapshot),
+            managed_llm_share_fixed=llm_share_user_set(settings_snapshot),
             settings=settings_snapshot,
         )
 

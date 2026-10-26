@@ -21,6 +21,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   for bibr's own models; otherwise they still take turns, and the paper and
   section classifiers use the GPU only beyond the larger share and those 6 GB,
   so each restart finds its share free.
+- The managed vLLM LLM server no longer fails to restart part-way through a
+  fully local batch when it takes turns with PaddleOCR-VL on one card. It
+  restarted at a fixed 0.85 of the card beside bibr's own GPU models, which
+  grow over a batch (from about 0.5 to 3 GiB on an RTX 3090); vLLM's startup
+  check still passed, but CUDA graph capture, which takes about 1.3 GiB beyond
+  the share after the KV cache is allocated, then ran out of memory once bibr
+  held more than about 2.2 GiB, and every paper of that chunk failed. Unless
+  you set `LLM_LOCAL_MEM_FRACTION` (or `--gpu-memory-utilization` in
+  `LLM_VLLM_EXTRA_ARGS`), which still wins, the share is now worked out at
+  every start from the memory free then, less what vLLM takes beyond its share
+  while starting and room for bibr's models to grow (0.70 of a 24 GB card),
+  with the configured share as the cap. When even the model's minimum (12 GB
+  for the 4B student) does not fit, that start fails at once with a clear
+  error instead of launching vLLM to crash. The Qwen3.5 students now run at
+  most 128 sequences at once, which halves vLLM's capture sizes and lets them
+  start on a smaller share.
 
 ## [0.7.4] - 2026-10-23
 

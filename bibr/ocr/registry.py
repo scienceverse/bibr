@@ -114,6 +114,35 @@ def _nvidia_gpu_inventory() -> tuple[tuple[str, float], ...] | None:
     return tuple(gpus) or None
 
 
+def _visible_gpu_indices(
+    uuids: tuple[str, ...], visible_devices: str | None, device_order: str | None
+) -> tuple[int, ...] | None:
+    """Indices into ``uuids`` of the cards that may be CUDA's device 0, or None.
+
+    ``uuids`` is nvidia-smi's list, which is in PCI bus order. CUDA numbers the
+    cards fastest first unless ``CUDA_DEVICE_ORDER=PCI_BUS_ID``, and
+    ``CUDA_VISIBLE_DEVICES`` picks by that number or by UUID (a unique prefix
+    is enough), so without PCI order a number leaves every card a candidate.
+    None when the choice names no card, a MIG slice or something unparsable.
+    """
+    if not uuids:
+        return None
+    pci_order = (device_order or "").strip().upper() == "PCI_BUS_ID"
+    every = tuple(range(len(uuids)))
+    if visible_devices is None:
+        return every[:1] if pci_order else every
+    first = visible_devices.split(",")[0].strip()
+    if first.startswith("GPU-"):
+        matches = tuple(i for i, uuid in enumerate(uuids) if uuid.startswith(first))
+        return matches if len(matches) == 1 else None
+    if first.isdigit():
+        index = int(first)
+        if index >= len(uuids):
+            return None
+        return (index,) if pci_order else every
+    return None
+
+
 def _visible_gpu_vram_gb(
     gpus: tuple[tuple[str, float], ...] | None,
     visible_devices: str | None,
@@ -121,31 +150,16 @@ def _visible_gpu_vram_gb(
 ) -> float | None:
     """Total VRAM (GiB) of the card CUDA numbers 0, where a vLLM server starts.
 
-    ``gpus`` is nvidia-smi's list, which is in PCI bus order. CUDA numbers the
-    cards fastest first unless ``CUDA_DEVICE_ORDER=PCI_BUS_ID``, and
-    ``CUDA_VISIBLE_DEVICES`` picks by that number or by UUID (a unique prefix
-    is enough). None when the choice still spans cards of different sizes, or
-    when it names no card, a MIG slice or something unparsable.
+    ``gpus`` is nvidia-smi's list (see ``_visible_gpu_indices`` for how the
+    card is picked). None when the choice still spans cards of different
+    sizes, or when it names no card, a MIG slice or something unparsable.
     """
     if not gpus:
         return None
-    pci_order = (device_order or "").strip().upper() == "PCI_BUS_ID"
-    if visible_devices is None:
-        candidates = gpus[:1] if pci_order else gpus
-    else:
-        first = visible_devices.split(",")[0].strip()
-        if first.startswith("GPU-"):
-            candidates = tuple(gpu for gpu in gpus if gpu[0].startswith(first))
-            if len(candidates) != 1:
-                return None
-        elif first.isdigit():
-            index = int(first)
-            if index >= len(gpus):
-                return None
-            candidates = gpus[index : index + 1] if pci_order else gpus
-        else:
-            return None
-    sizes = {total for _, total in candidates}
+    indices = _visible_gpu_indices(tuple(uuid for uuid, _ in gpus), visible_devices, device_order)
+    if not indices:
+        return None
+    sizes = {gpus[i][1] for i in indices}
     return sizes.pop() if len(sizes) == 1 else None
 
 
@@ -164,6 +178,98 @@ def _managed_gpu_vram_gb() -> float | None:
         _nvidia_gpu_inventory(),
         os.environ.get("CUDA_VISIBLE_DEVICES"),
         os.environ.get("CUDA_DEVICE_ORDER"),
+    )
+
+
+@dataclass(frozen=True)
+class GpuMemory:
+    """Memory of the card the managed vLLM servers start on, in GiB, read just now."""
+
+    #: What CUDA reports as the card's total (nvidia-smi's ``memory.total``
+    #: less ``memory.reserved``): the amount vLLM's ``--gpu-memory-utilization``
+    #: is a share of. 23.56 GiB on an RTX 3090.
+    total_gb: float
+    free_gb: float
+    #: This process's own use of the card (bibr's ONNX sessions and CUDA
+    #: context); 0 when nvidia-smi does not list it.
+    own_gb: float
+
+
+def _nvidia_smi_rows(query: str, fields: str) -> list[list[str]] | None:
+    """nvidia-smi ``--query-<query>=<fields>`` rows, split on commas, or None."""
+    import subprocess
+
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["nvidia-smi", f"--query-{query}={fields}", "--format=csv,noheader,nounits"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return [
+        [cell.strip() for cell in line.split(",")] for line in result.stdout.strip().splitlines()
+    ]
+
+
+def _mib_to_gib(value: str) -> float | None:
+    try:
+        return float(value) / 1024.0
+    except ValueError:
+        return None
+
+
+def _own_gpu_memory_gb(uuid: str) -> float:
+    """GiB this process holds on the card ``uuid`` (0 when nvidia-smi cannot say)."""
+    rows = _nvidia_smi_rows("compute-apps", "pid,gpu_uuid,used_memory") or []
+    pid = str(os.getpid())
+    used = 0.0
+    for row in rows:
+        if len(row) == 3 and row[0] == pid and row[1] == uuid:
+            used += _mib_to_gib(row[2]) or 0.0
+    return used
+
+
+def managed_gpu_memory() -> GpuMemory | None:
+    """Total, free and own memory of the managed vLLM servers' card, or None.
+
+    Read now, not cached: the managed LLM server sizes its share from it at
+    every start, and bibr's own GPU sessions grow during a batch. The card is
+    CUDA's device 0 under ``CUDA_VISIBLE_DEVICES``, picked as for
+    ``_managed_gpu_vram_gb``; when several cards of one size may be device 0,
+    the one with the least free memory. None when no NVIDIA GPU is visible,
+    the candidates differ in size, or nvidia-smi fails. Drivers without
+    ``memory.reserved`` count the whole card as CUDA's total, which only makes
+    the shares computed from it smaller. Tests patch this name.
+    """
+    rows = _nvidia_smi_rows("gpu", "uuid,memory.total,memory.reserved,memory.free")
+    if rows is not None and all(len(row) == 4 for row in rows):
+        cards = [(row[0], row[1], row[2], row[3]) for row in rows]
+    else:
+        rows = _nvidia_smi_rows("gpu", "uuid,memory.total,memory.free")
+        if rows is None or not all(len(row) == 3 for row in rows):
+            return None
+        cards = [(row[0], row[1], "0", row[2]) for row in rows]
+    parsed = []
+    for uuid, total, reserved, free in cards:
+        total_gb, free_gb = _mib_to_gib(total), _mib_to_gib(free)
+        if total_gb is None or free_gb is None:
+            return None
+        parsed.append((uuid, total_gb, _mib_to_gib(reserved) or 0.0, free_gb))
+    indices = _visible_gpu_indices(
+        tuple(card[0] for card in parsed),
+        os.environ.get("CUDA_VISIBLE_DEVICES"),
+        os.environ.get("CUDA_DEVICE_ORDER"),
+    )
+    if not indices or len({parsed[i][1] for i in indices}) != 1:
+        return None
+    uuid, total_gb, reserved_gb, free_gb = min((parsed[i] for i in indices), key=lambda c: c[3])
+    return GpuMemory(
+        total_gb=total_gb - reserved_gb, free_gb=free_gb, own_gb=_own_gpu_memory_gb(uuid)
     )
 
 

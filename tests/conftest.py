@@ -188,6 +188,19 @@ def _pin_cuda_probe_for_platform_tests(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_live_gpu_memory_reading(monkeypatch):
+    """Keep the suite off the host GPU's free memory.
+
+    The managed vLLM LLM server sizes its share from ``managed_gpu_memory``
+    (None keeps the configured share). Tests that exercise it patch it back
+    themselves.
+    """
+    from bibr.ocr import registry
+
+    monkeypatch.setattr(registry, "managed_gpu_memory", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _skip_installed_onnxruntime_builds_check(monkeypatch):
     """Keep ``get_ort_providers()``'s installed-builds check off the test venv.
 

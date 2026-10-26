@@ -88,7 +88,19 @@ class VllmLlmServer:
         settings=None,
         *,
         stop_event: threading.Event | None = None,
+        share_from_free_memory: bool = False,
+        colocated: bool = False,
     ):
+        """Start (or reuse) the server; blocking.
+
+        ``mem_fraction`` (default ``llm.local_mem_fraction``) is the share
+        vLLM is launched with. With ``share_from_free_memory`` it is only the
+        cap: the share is worked out from the VRAM free right now (see
+        ``bibr.local.vllm_share``), and ``ManagedLlmVramError`` is raised
+        before launching when the model's floor does not fit. ``colocated``
+        says the PaddleOCR-VL server may run beside this one, whose shares
+        already leave bibr's ONNX reserve out.
+        """
         self._stop_event = stop_event
         self._settings = settings if settings is not None else snapshot_settings()
         from bibr.local.llm_models import default_local_model
@@ -111,6 +123,8 @@ class VllmLlmServer:
             # Another pipeline in this process may have started it.
             self.api_key = own_server_key(self.base_url)
             return
+        if share_from_free_memory:
+            mem_fraction = self._share_from_free_memory(mem_fraction, colocated=colocated)
 
         cmd = self._resolve_launch_cmd(self._model)
         cmd.extend(
@@ -167,6 +181,33 @@ class VllmLlmServer:
             self.shutdown()
             raise
         register_server_key(self.base_url, self.api_key)
+
+    def _share_from_free_memory(self, cap: float, *, colocated: bool) -> float:
+        """The share for this start, sized from the VRAM free now (at most *cap*)."""
+        from bibr.local import vllm_share
+        from bibr.ocr import registry
+
+        reading = vllm_share.settled_gpu_memory(
+            registry.managed_gpu_memory,
+            wait=lambda seconds: pause_startup_poll(seconds, self._stop_event, "vLLM"),
+        )
+        extra_args = self._settings.llm.vllm_extra_args
+        share = vllm_share.size_managed_llm_share(
+            reading,
+            cap=cap,
+            floor_gb=vllm_share.managed_llm_floor_gb(self._model),
+            reserve_gb=vllm_share.overshoot_reserve_gb(self._model, extra_args),
+            colocated=colocated,
+        )
+        if share.reason == "floor":
+            logger.warning(
+                "Managed vLLM LLM share %s; bibr's GPU sessions have little room left, "
+                "so expect ONNX batches to split after CUDA out-of-memory",
+                share.describe(),
+            )
+        else:
+            logger.info("Managed vLLM LLM share %s", share.describe())
+        return share.share
 
     @staticmethod
     def _resolve_launch_cmd(model: str) -> list[str]:

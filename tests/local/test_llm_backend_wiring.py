@@ -128,7 +128,11 @@ async def test_start_llm_server_vllm_branch(monkeypatch):
     resources = ResourceManager(settings=custom)
     await resources.start_llm_server(backend="vllm")
     assert resources._llm_server is instance
-    factory.assert_called_once_with(settings=custom, stop_event=ANY)
+    # The share is sized from the VRAM free at start (the user set none), and
+    # the default 0.85 cannot share the card with PaddleOCR-VL.
+    factory.assert_called_once_with(
+        settings=custom, stop_event=ANY, share_from_free_memory=True, colocated=False
+    )
     assert isinstance(factory.call_args.kwargs["stop_event"], threading.Event)
     instance.configure_llm_client.assert_called_once()
 
