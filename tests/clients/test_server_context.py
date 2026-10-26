@@ -697,6 +697,46 @@ async def test_an_endpoint_that_never_says_is_asked_less_and_less_often(monkeypa
     assert len(asked) == 11, "a complete answer is not asked again"
 
 
+async def test_a_long_outage_keeps_the_longest_wait_without_overflowing(monkeypatch, clock):
+    # 1,025 misses in a row (about a week of calls) overflowed 2 ** misses as a
+    # float, and from then on every LLM call raised before it was sent.
+    probe = AsyncMock(return_value=None)
+    monkeypatch.setattr(server_context, "probe_server_context", probe)
+    client = LLMClient(
+        settings=GlobalSettings(
+            llm={"provider": "openai", "base_url": "http://10.0.0.7:8080/v1", "model": "m"}
+        )
+    )
+    await client.ensure_server_context()
+    client._server_context_misses = 5_000
+
+    clock[0] += 600
+    await client.ensure_server_context()
+
+    assert probe.await_count == 2
+    assert client._server_context_retry_at == clock[0] + 600
+
+
+async def test_a_new_endpoint_starts_with_the_shortest_wait_and_no_server_kind(monkeypatch, clock):
+    answers = [ServerContext("ollama", None)] * 3 + [None] * 3
+    probe = AsyncMock(side_effect=answers)
+    monkeypatch.setattr(server_context, "probe_server_context", probe)
+    client = LLMClient(settings=_surf_settings())
+    for _ in range(3):  # an Ollama model that is not loaded: asked again
+        await client.ensure_server_context()
+        clock[0] += 600
+    assert client._server_kind == "ollama"
+    assert client._server_context_misses == 3
+
+    client._settings.llm.base_url = "http://10.0.0.8:8080/v1"
+    await client.ensure_server_context()
+
+    assert probe.await_count == 4
+    assert client._server_kind is None
+    assert client._server_context_misses == 1
+    assert client._server_context_retry_at == clock[0] + 30
+
+
 async def test_the_ollama_provider_down_at_the_first_calls_is_sized_once_it_is_up(
     ollama_client, clock
 ):

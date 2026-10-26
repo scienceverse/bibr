@@ -1529,8 +1529,11 @@ class LLMClient:
             # An endpoint that never says (a proxy answering 5xx on the routes
             # it does not serve) is asked less and less often, not every 30 s.
             self._server_context_misses = 0 if settled else self._server_context_misses + 1
+            # The doubling stops long after the maximum is reached, so a
+            # week-long outage cannot overflow the float.
+            doublings = min(max(self._server_context_misses - 1, 0), 16)
             wait = min(
-                _SERVER_CONTEXT_RETRY_SECONDS * 2 ** max(self._server_context_misses - 1, 0),
+                _SERVER_CONTEXT_RETRY_SECONDS * 2**doublings,
                 _SERVER_CONTEXT_RETRY_MAX_SECONDS,
             )
             self._server_context_retry_at = _server_context_clock() + wait

@@ -245,8 +245,10 @@ minutes) until Ollama gives its window. When an Ollama or llama.cpp server
 rejects a request as too long and names its window, the caps move to that
 window too. A vLLM server is not sized in advance: bibr learns its window
 when the server rejects a request as too long. A call whose window leaves
-fewer than 256 tokens for the paper text is not sent, and its fields are
-marked failed.
+fewer than 256 tokens for the paper text, when that text would have to be
+cut, is not sent: its fields are marked failed, or the step falls back where
+it has one (the NER parser for references, the positional heuristic for the
+abstract; headers keep their alias prior).
 
 With `LLM_CONTEXT_TOKENS` you set the window yourself, and long inputs are
 cut to fit it on any server. For an Ollama or llama.cpp server it also wins
