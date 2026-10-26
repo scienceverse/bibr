@@ -2080,7 +2080,12 @@ def _line_number_column(
 #   rendered with the page's light text hidden, has a median colour within
 #   _HIDDEN_TEXT_BACKGROUND_TOLERANCE of the fill on every channel. White text
 #   on a coloured masthead band keeps its band and stays, and so does text
-#   filled white but outlined in a dark stroke (render modes 2 and 6).
+#   filled white but outlined in a dark stroke (render modes 2 and 6). Not on
+#   a page images cover as a scan does (_coverage_qualifies): there the light
+#   text is the scan's OCR layer filled white, and the "background" the
+#   render shows is the scan's paper around its ink, so the median kept some
+#   words and dropped others (W2037590930: 318 of 1078 objects on page 1).
+#   The page keeps its layer whole, as before the rule.
 # - overprint: a later copy of an earlier object, the same text at the same
 #   size, whose box covers at least _OVERPRINT_MIN_OVERLAP of the smaller box.
 #   "Fake bold" draws a running head two or three times a fraction of a point
@@ -2172,7 +2177,7 @@ def _find_hidden_text(pdfium_c, page, objects: list) -> list[tuple[tuple, str, _
             light.append((entry, rgba, box))
     if invisible and len(invisible) < _HIDDEN_TEXT_MAX_INVISIBLE_SHARE * len(objects):
         hidden.extend(invisible)
-    if light:
+    if light and not _coverage_qualifies(_page_image_coverage(page, crop_box)):
         hidden.extend(_on_own_colour(pdfium_c, page, light, crop_box))
     taken = {id(entry) for entry, _reason, _box in hidden}
     hidden.extend(_overprints(pdfium_c, page, [e for e in objects if id(e) not in taken]))

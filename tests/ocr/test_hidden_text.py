@@ -19,6 +19,9 @@ from bibr.extract.pdf_doi_evidence import read_pdf_doi_evidence
 from bibr.ocr import native_text
 from bibr.ocr.native_text import fill_native_text_and_fonts, open_text_page
 from bibr.ocr.utils import pdfium_lock
+from tests.ocr.test_invisible_text_layer import _image
+from tests.ocr.test_invisible_text_layer import _pdf as _layer_pdf
+from tests.ocr.test_invisible_text_layer import _text as _layer_text
 from tests.ocr.test_watermark_text import _PAGE_H, _PAGE_W, _bt, _pdf, _width
 
 _HEAD_Y = 760.0
@@ -187,6 +190,20 @@ def test_hidden_ocr_layer_of_a_scan_is_kept():
     text = _page_text(pdf_bytes)
     assert "OCR line 0" in text
     assert "OCR line 9" in text
+
+
+def test_white_ocr_layer_over_a_scan_is_kept():
+    """A scan's OCR layer filled white over the page image (W2037590930) is its text.
+
+    The render behind it is the scan's paper, so the background test would
+    keep only the words over ink; a page images cover keeps the layer whole.
+    """
+    lines = ["Proceedings of the Society 41 (1962)", "An old scan with a white text layer"]
+    layer = b"q 1 1 1 rg\n" + _layer_text(lines, x=40, y=740, size=10) + b"Q\n"
+    pdf_bytes = _layer_pdf([{"content": _image(612, 792) + layer}])
+
+    text = _page_text(pdf_bytes)
+    assert all(line in text for line in lines)
 
 
 def test_text_off_the_page_is_dropped():
