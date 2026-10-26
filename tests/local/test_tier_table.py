@@ -23,19 +23,22 @@ _Q8 = "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
 _Q4 = "scienceverse/bibr-extract-qwen35-4b-GGUF:Q4_K_M"
 
 #: (card, nvidia-smi memory.total MiB, compute capability) -> (LLM backend,
-#: model, memory mode, OCR runtime). Turing and Pascal rows are the
+#: model, memory mode, OCR runtime). Rows marked "ran" finished a batch with
+#: this default on an RTX 3090 cut to that card's memory beside a 0.5 GiB
+#: desktop, with no refused start and no failed paper (2026-10-24..26); the
+#: others follow the same size rule. Turing and Pascal rows are the
 #: compute-capability routing rule, not measured cards.
 TIER_TABLE = [
     (("RTX 5090", 32607, 12.0), ("vllm", _4B, "balanced", "paddle-vllm")),
-    (("RTX 3090", 24576, 8.6), ("vllm", _4B, "balanced", "paddle-vllm")),
-    (("RTX 4000 Ada", 20475, 8.9), ("vllm", _4B, "balanced", "paddle-vllm")),
+    (("RTX 3090", 24576, 8.6), ("vllm", _4B, "balanced", "paddle-vllm")),  # ran: 100 papers
+    (("RTX 4000 Ada", 20475, 8.9), ("vllm", _4B, "balanced", "paddle-vllm")),  # ran: 48
     (("RTX 4080", 16376, 8.9), ("vllm", _W4A16, "balanced", "paddle-vllm")),
     (("RTX 3060 12 GB", 12288, 8.6), ("vllm", _W4A16, "balanced", "paddle-vllm")),
-    (("RTX 5070", 12227, 12.0), ("vllm", _W4A16, "balanced", "paddle-vllm")),
-    (("RTX 3080 10 GB", 10240, 8.6), ("vllm", _W4A16, "aggressive", "paddle-vllm")),
+    (("RTX 5070", 12227, 12.0), ("vllm", _W4A16, "balanced", "paddle-vllm")),  # ran: 100
+    (("RTX 3080 10 GB", 10240, 8.6), ("vllm", _W4A16, "aggressive", "paddle-vllm")),  # ran: 48
     (("RTX 3070", 8192, 8.6), ("llama-cpp", _Q8, "aggressive", "glm-llama")),
-    (("RTX 4060", 8188, 8.9), ("llama-cpp", _Q8, "aggressive", "glm-llama")),
-    (("RTX 3050 6 GB", 6144, 8.6), ("llama-cpp", _Q4, "aggressive", "glm-llama")),
+    (("RTX 4060", 8188, 8.9), ("llama-cpp", _Q8, "aggressive", "glm-llama")),  # ran: 100
+    (("RTX 3050 6 GB", 6144, 8.6), ("llama-cpp", _Q4, "aggressive", "glm-llama")),  # ran: 48
     (("TITAN RTX", 24576, 7.5), ("llama-cpp", _Q8, "balanced", "glm-llama")),
     (("RTX 2080 Ti", 11264, 7.5), ("llama-cpp", _Q8, "aggressive", "glm-llama")),
     (("GTX 1080 Ti", 11264, 6.1), ("llama-cpp", _Q8, "aggressive", "glm-llama")),
