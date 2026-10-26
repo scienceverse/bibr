@@ -394,6 +394,16 @@ def test_key_changes_with_native_header_footer_setting(monkeypatch):
     assert ocr_cache._key(fs, cfg, _identity()) != base
 
 
+def test_key_changes_with_native_formula_number_setting(monkeypatch):
+    fs = _fs()
+    cfg = RunConfig(ocr_backend="glm-llama")
+    base = ocr_cache._key(fs, cfg, _identity())
+
+    monkeypatch.setattr(Settings.ocr, "native_text_formula_number", True)
+
+    assert ocr_cache._key(fs, cfg, _identity()) != base
+
+
 def test_key_changes_with_invisible_layer_setting(monkeypatch):
     fs = _fs()
     cfg = RunConfig(ocr_backend="glm-llama")

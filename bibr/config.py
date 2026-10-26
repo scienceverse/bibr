@@ -1011,6 +1011,13 @@ class OcrOptions(_BibrSettings):
         "Off by default pending an eval of DOI furniture and front-matter effects; "
         "enable to A/B. Short running heads use the short-text allowance.",
     )
+    native_text_formula_number: bool = Field(
+        False,
+        description='Read equation-number regions (formula_number, e.g. "(3)") from the PDF '
+        "text layer instead of OCR on born-digital PDFs, under the same printable-ratio gate. "
+        "They are 1-16 characters, so they get their own short-text allowance; longer text "
+        "(the box caught part of the formula) falls back to OCR. Off by default; enable to A/B.",
+    )
     native_text_reject_invisible_layer: bool = Field(
         True,
         description="Read a scanned page with OCR even when it carries a text layer, if "
