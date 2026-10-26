@@ -267,6 +267,12 @@ memory was free, that chunk's papers fail, and the next chunk tries again. Set
 `LLM_LOCAL_MEM_FRACTION`, or `--gpu-memory-utilization` in
 `LLM_VLLM_EXTRA_ARGS`, to start the LLM server at exactly that share instead.
 
+The LLM server starts after a chunk's OCR, and OCR only adds to what bibr
+holds. So while the LLM server is down, bibr checks before each chunk's OCR
+whether the memory free then could start it. When it could not, the chunk's
+papers fail with the same error before any OCR runs, and the check is made
+again before the next chunk, which goes ahead once enough memory is free.
+
 The minimum comes from bibr's model registry, which lists the published
 builds. A model it does not list, such as a local path, has none, so a start
 that cannot fit is launched and fails inside vLLM. Set `LLM_LOCAL_MIN_VRAM_GB`

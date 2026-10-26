@@ -14,6 +14,7 @@ import importlib
 import inspect
 import logging
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
     from bibr.local.layout import LayoutDetector
     from bibr.local.llm import VllmMlxLlmServer
     from bibr.local.segmenter import SentenceSegmenter
+    from bibr.local.vllm_share import ManagedLlmVramError
     from bibr.ocr.backend import OcrBackend
 
 logger = logging.getLogger(__name__)
@@ -802,6 +804,54 @@ class ResourceManager:
             and self._llm_server_backend == "vllm"
             and self._vllm_shares_overcommit()
         )
+
+    async def llm_start_refusal(self, backend: str) -> ManagedLlmVramError | None:
+        """The refusal the managed vLLM LLM server's next start is sure to meet, if any.
+
+        Checked before a chunk's OCR. The start comes after OCR, and on the
+        swap path PaddleOCR-VL has stopped by then, so the memory free at the
+        start is about what is free now, or less: bibr's own GPU sessions only
+        grow within a chunk. So when even what is free now cannot meet the
+        model's floor, the start would raise ``ManagedLlmVramError``, and the
+        chunk's OCR is skipped. That error is returned (raised, so it carries
+        a traceback) to fail the chunk exactly as the start would; ``None``
+        means the chunk goes ahead. Read again before every chunk, since
+        memory that other processes held can come back.
+
+        No prediction (``None``) when the share is the user's (it is launched
+        as given), when the LLM server is up (it is reused, or restarted after
+        OCR from memory not free now), while an OCR preload is in flight, or
+        when an OCR engine that holds GPU memory is resident (it may be
+        stopped before the start).
+        """
+        if backend != "vllm" or self._llm_share_fixed or self._llm_server is not None:
+            return None
+        if self._ocr_future is not None:
+            return None
+        if self._ocr is not None:
+            from bibr.pipeline.stages.ocr import REMOTE_OCR_BACKENDS
+
+            if not (self.ocr_url or self.ocr_backend in REMOTE_OCR_BACKENDS):
+                return None
+        from bibr.local import vllm_share
+        from bibr.ocr import registry
+
+        reading = await asyncio.to_thread(
+            vllm_share.settled_gpu_memory, registry.managed_gpu_memory, wait=time.sleep
+        )
+        if reading is None:
+            return None
+        try:
+            vllm_share.managed_llm_share(
+                reading,
+                self._settings,
+                vllm_share.managed_llm_model(self._settings),
+                cap=self._managed_vllm_fraction or self._settings.llm.local_mem_fraction,
+                swaps_with_ocr=self._llm_swaps_with_ocr(),
+            )
+        except vllm_share.ManagedLlmVramError as exc:
+            return exc
+        return None
 
     async def _construct_llm_server(self, factory):
         """Run *factory(stop_event)* off the loop; cancellation sets the event."""
