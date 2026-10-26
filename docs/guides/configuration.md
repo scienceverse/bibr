@@ -240,19 +240,32 @@ Explicit choices are `vllm`, `vllm-mlx`, `rapid-mlx`, `llama-cpp`, and `llmster`
 The OCR and LLM choices are independent, so local OCR with a cloud LLM is a
 supported hybrid configuration. A managed vLLM LLM server and the managed
 `paddle-vllm` OCR server each reserve a share of GPU memory. The LLM server
-takes 0.85 of the card by default (`LLM_LOCAL_MEM_FRACTION`); PaddleOCR-VL
-takes about 5 GB, so 0.16 of a 32 GB card, 0.21 of 24 GB and 0.32 of 16 GB. A
-vLLM server starts only when its whole share is free, and the rest of the card
-holds bibr's layout, sentence and reference models, which stay on the GPU
-between chunks when `onnxruntime-gpu` is installed. Unless the two shares
-leave at least 6 GB of the card for those models (at the defaults, only on
-cards of about 80 GB), bibr stops the server that is running before starting
-the other: in a batch, each chunk's OCR stops the LLM server and that chunk's
-LLM stage starts it again. The shares are sized from the card that
-`CUDA_VISIBLE_DEVICES` exposes; when bibr cannot tell which card that is
-(cards of different sizes numbered in CUDA's default fastest-first order),
-PaddleOCR-VL keeps 0.92 and the servers take turns. Set
-`CUDA_DEVICE_ORDER=PCI_BUS_ID` or select the card by UUID to avoid that.
+takes at most 0.85 of the card (see below); PaddleOCR-VL takes about 5 GB, so
+0.16 of a 32 GB card, 0.21 of 24 GB and 0.32 of 16 GB. A vLLM server starts
+only when its whole share is free, and the rest of the card holds bibr's
+layout, sentence and reference models, which stay on the GPU between chunks
+when `onnxruntime-gpu` is installed. Unless the two shares leave at least 6 GB
+of the card for those models (with the LLM at 0.85, only on cards of about
+80 GB), bibr stops the server that is running before starting the other: in a
+batch, each chunk's OCR stops the LLM server and that chunk's LLM stage starts
+it again. The shares are sized from the card that `CUDA_VISIBLE_DEVICES`
+exposes; when bibr cannot tell which card that is (cards of different sizes
+numbered in CUDA's default fastest-first order), PaddleOCR-VL keeps 0.92 and
+the servers take turns. Set `CUDA_DEVICE_ORDER=PCI_BUS_ID` or select the card
+by UUID to avoid that.
+
+The LLM server works out its share each time it starts, from the GPU memory
+free at that moment. It takes at most 0.85 of the card, and less when the card
+is busier: the share leaves room for vLLM's brief extra use while it starts
+(about 1 GB) and for bibr's models. That room is 1 GB when no PaddleOCR-VL
+server takes turns with the LLM, so a free 24 GB card still gets 0.85, and
+6 GB in all when one does (about 0.70 of a 24 GB card). When that does not
+leave the model its minimum (12 GB for the 4B student, 8 GB for the 2B), the
+share drops to the minimum while bibr's models keep at least 1 GB. When even
+that does not fit, the start fails at once with an error that says how much
+memory was free, that chunk's papers fail, and the next chunk tries again. Set
+`LLM_LOCAL_MEM_FRACTION`, or `--gpu-memory-utilization` in
+`LLM_VLLM_EXTRA_ARGS`, to start the LLM server at exactly that share instead.
 
 `bibr chew`, `bibr batch` and `bibr mcp` stop the managed servers they started
 when the command ends, including on Ctrl-C, SIGTERM (`kill`, `docker stop`,

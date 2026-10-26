@@ -710,7 +710,11 @@ class LlmOptions(_BibrSettings):
         0.85,
         ge=0.0,
         le=1.0,
-        description="GPU memory fraction reserved for the managed local LLM server (0.0-1.0).",
+        description=(
+            "Share of GPU memory (0.0-1.0) for the managed vLLM LLM server. Left unset, it is "
+            "the most the server takes: bibr sizes the share from the GPU memory free when the "
+            "server starts. Set it to start the server at exactly this share."
+        ),
     )
     vllm_mlx_port: int = Field(8767, description="Port for the managed vllm-mlx LLM server.")
     # Extra CLI args appended to the managed ``vllm_mlx.server`` command

@@ -41,13 +41,13 @@ def _bibr_alone(own_gb: float, total: float = CUDA_3090) -> GpuMemory:
     return GpuMemory(total_gb=total, free_gb=total - own_gb, own_gb=own_gb)
 
 
-def _size(reading, *, cap=0.85, model=STUDENT_4B, colocated=False, extra=None) -> LlmShare:
+def _size(reading, *, cap=0.85, model=STUDENT_4B, swaps_with_ocr=True, extra=None) -> LlmShare:
     return size_managed_llm_share(
         reading,
         cap=cap,
         floor_gb=managed_llm_floor_gb(model),
         reserve_gb=overshoot_reserve_gb(model, extra),
-        colocated=colocated,
+        swaps_with_ocr=swaps_with_ocr,
     )
 
 
@@ -113,17 +113,88 @@ class TestCapAndColocation:
     def test_colocated_plan_keeps_its_share_beside_paddleocr(self):
         # The planned 0.54 with PaddleOCR-VL's 5 GB and its context up.
         reading = GpuMemory(total_gb=CUDA_3090, free_gb=CUDA_3090 - 5.4 - 0.5, own_gb=0.5)
-        share = _size(reading, cap=0.54, colocated=True)
+        share = _size(reading, cap=0.54, swaps_with_ocr=False)
         assert (share.share, share.reason) == (0.54, "cap")
 
     def test_colocated_start_on_a_crowded_card_shrinks(self):
         # Free less the 1.0 GiB capture reserve and 1.0 GiB of room: 12.3 GiB.
         reading = GpuMemory(total_gb=CUDA_3090, free_gb=14.3, own_gb=3.0)
-        share = _size(reading, cap=0.54, colocated=True)
+        share = _size(reading, cap=0.54, swaps_with_ocr=False)
         assert (share.share, share.reason) == (0.52, "free")
 
     def test_no_reading_keeps_the_configured_share(self):
         assert _size(None) == LlmShare(share=0.85, reason="unknown")
+
+
+class TestLlmOnly:
+    """No managed PaddleOCR-VL takes turns with the LLM: only bibr's sessions share the card.
+
+    The swap headroom (bibr's 6 GB) dropped every such start on a 24 GB card
+    from 0.85 to 0.70; the configured share is kept while it fits.
+    """
+
+    def test_free_card_keeps_the_configured_share(self):
+        # E23 A's first LLM start: bibr held 504 MiB.
+        reading = _bibr_alone(504 * MIB)
+        share = _size(reading, swaps_with_ocr=False)
+        assert (share.share, share.reason) == (0.85, "cap")
+        assert share.headroom_gb == 1.0
+        # The share, vLLM's overshoot reserve, bibr and 1 GiB of room fit.
+        reserve = overshoot_reserve_gb(STUDENT_4B, None)
+        assert 0.85 * CUDA_3090 + reserve + 504 * MIB + 1.0 <= CUDA_3090
+        # The same reading with PaddleOCR-VL swapping in leaves bibr its 6 GB.
+        assert _size(reading).share == 0.70
+
+    def test_a_busier_card_shrinks_only_as_needed(self):
+        # bibr at E23 A's 2,262 MiB: 21.35 GiB free, less 1.0 + 1.0 = 19.35.
+        share = _size(_bibr_alone(2262 * MIB), swaps_with_ocr=False)
+        assert (share.share, share.reason) == (0.82, "free")
+
+    def test_16gb_card(self):
+        share = _size(_bibr_alone(0.5, total=CUDA_16GB), swaps_with_ocr=False)
+        assert (share.share, share.reason) == (0.83, "free")
+
+
+class TestFloorRounding:
+    """A target just above the floor must not round down to a share under it.
+
+    On an RTX 3090 a 12.008 GiB target rounded down to 0.50 (11.78 GiB, under
+    the 4B's 12 GiB floor), while a slightly smaller one took the floor path
+    and got 0.51 (12.02 GiB). The window is [12.0, 0.51 x 23.56) GiB.
+    """
+
+    @staticmethod
+    def _reading_for_target(target: float, *, swaps_with_ocr: bool) -> GpuMemory:
+        own = 0.5
+        headroom = max(1.0, 6.0 - own) if swaps_with_ocr else 1.0
+        free = target + overshoot_reserve_gb(STUDENT_4B, None) + headroom
+        return GpuMemory(total_gb=CUDA_3090, free_gb=free, own_gb=own)
+
+    @pytest.mark.parametrize("swaps_with_ocr", [True, False])
+    @pytest.mark.parametrize("target", [12.0, 12.008, 12.015])
+    def test_window_just_above_the_floor_takes_the_floor_path(self, target, swaps_with_ocr):
+        assert target < 0.51 * CUDA_3090
+        reading = self._reading_for_target(target, swaps_with_ocr=swaps_with_ocr)
+        share = _size(reading, swaps_with_ocr=swaps_with_ocr)
+        assert (share.share, share.reason) == (0.51, "floor")
+        assert share.budget_gb >= 12.0
+
+    def test_just_past_the_window_is_sized_from_free_memory(self):
+        reading = self._reading_for_target(0.51 * CUDA_3090 + 0.001, swaps_with_ocr=False)
+        share = _size(reading, swaps_with_ocr=False)
+        assert (share.share, share.reason) == (0.51, "free")
+
+    @pytest.mark.parametrize("swaps_with_ocr", [True, False])
+    def test_no_target_launches_under_the_floor(self, swaps_with_ocr):
+        # Every target from 11 to 13 GiB in 1 MiB steps: at the floor or refused.
+        for step in range(2 * 1024 + 1):
+            target = 11.0 + step * MIB
+            reading = self._reading_for_target(target, swaps_with_ocr=swaps_with_ocr)
+            try:
+                share = _size(reading, swaps_with_ocr=swaps_with_ocr)
+            except ManagedLlmVramError:
+                continue
+            assert share.share * CUDA_3090 >= 12.0, (target, share)
 
 
 class TestFloor:
@@ -354,10 +425,26 @@ class TestServerStart:
         self._probe(monkeypatch, _bibr_alone(2262 * MIB))
         with caplog.at_level("INFO", logger="bibr.local.vllm_llm"):
             _server, popen = _mk_server(
-                model=STUDENT_4B, port=9999, mem_fraction=0.85, share_from_free_memory=True
+                model=STUDENT_4B,
+                port=9999,
+                mem_fraction=0.85,
+                share_from_free_memory=True,
+                swaps_with_ocr=True,
             )
         assert _launched_share(popen) == "0.7"
         assert any("Managed vLLM LLM share 0.70" in r.getMessage() for r in caplog.records)
+
+    def test_llm_only_start_keeps_the_configured_share(self, monkeypatch, caplog):
+        self._probe(monkeypatch, _bibr_alone(504 * MIB))
+        with caplog.at_level("INFO", logger="bibr.local.vllm_llm"):
+            _server, popen = _mk_server(
+                model=STUDENT_4B, port=9999, mem_fraction=0.85, share_from_free_memory=True
+            )
+        assert _launched_share(popen) == "0.85"
+        assert any(
+            "Managed vLLM LLM share 0.85 of 23.56 GiB (cap)" in r.getMessage()
+            for r in caplog.records
+        )
 
     def test_floor_that_does_not_fit_never_launches_vllm(self, monkeypatch):
         self._probe(monkeypatch, _bibr_alone(2.3, total=CUDA_16GB))
@@ -377,7 +464,11 @@ class TestServerStart:
         self._probe(monkeypatch, _bibr_alone(0.5, total=CUDA_16GB))
         with caplog.at_level("WARNING", logger="bibr.local.vllm_llm"):
             _server, popen = _mk_server(
-                model=STUDENT_4B, port=9999, mem_fraction=0.85, share_from_free_memory=True
+                model=STUDENT_4B,
+                port=9999,
+                mem_fraction=0.85,
+                share_from_free_memory=True,
+                swaps_with_ocr=True,
             )
         assert _launched_share(popen) == "0.77"
         assert any("little room left" in r.getMessage() for r in caplog.records)

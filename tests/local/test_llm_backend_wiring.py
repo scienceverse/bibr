@@ -125,13 +125,13 @@ async def test_start_llm_server_vllm_branch(monkeypatch):
     factory = MagicMock(return_value=instance)
     monkeypatch.setattr(vllm_llm, "VllmLlmServer", factory)
     custom = GlobalSettings()
-    resources = ResourceManager(settings=custom)
+    resources = ResourceManager(settings=custom, ocr_backend="paddle-vllm")
     await resources.start_llm_server(backend="vllm")
     assert resources._llm_server is instance
     # The share is sized from the VRAM free at start (the user set none), and
-    # the default 0.85 cannot share the card with PaddleOCR-VL.
+    # the default 0.85 cannot share the card with PaddleOCR-VL: they swap.
     factory.assert_called_once_with(
-        settings=custom, stop_event=ANY, share_from_free_memory=True, colocated=False
+        settings=custom, stop_event=ANY, share_from_free_memory=True, swaps_with_ocr=True
     )
     assert isinstance(factory.call_args.kwargs["stop_event"], threading.Event)
     instance.configure_llm_client.assert_called_once()

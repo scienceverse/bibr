@@ -50,7 +50,9 @@ LLM_CONTEXT_RESERVE_GB = 0.5
 LLM_CAPTURE_RESERVE_GB_AT_512 = 1.0
 
 #: Room always left beside the LLM's share for bibr's own GPU sessions to
-#: grow within a chunk.
+#: grow within a chunk. It is all the room an LLM-only run leaves (no managed
+#: PaddleOCR-VL server takes turns with the LLM), so the configured share
+#: (0.85) still fits a free 24 GB card.
 LLM_ONNX_MIN_HEADROOM_GB = 1.0
 
 #: vLLM's ``--max-num-seqs`` when neither bibr nor the user sets it.
@@ -78,8 +80,9 @@ class LlmShare:
     share: float
     #: ``cap``: the configured share fitted. ``free``: sized down to what is
     #: free. ``floor``: squeezed to the model's floor, leaving bibr only
-    #: ``LLM_ONNX_MIN_HEADROOM_GB`` to grow into. ``unknown``: no reading, so
-    #: the configured share as before.
+    #: ``LLM_ONNX_MIN_HEADROOM_GB`` to grow into (also when the share sized
+    #: from free memory rounds down to just under the floor). ``unknown``: no
+    #: reading, so the configured share as before.
     reason: str
     budget_gb: float | None = None
     total_gb: float | None = None
@@ -168,18 +171,22 @@ def size_managed_llm_share(
     cap: float,
     floor_gb: float | None,
     reserve_gb: float,
-    colocated: bool,
+    swaps_with_ocr: bool,
 ) -> LlmShare:
     """The share for a managed vLLM LLM server starting now.
 
     The budget is the configured share (*cap*) of the card or, when less is
     free, what is free less the server's overshoot reserve and room for bibr's
-    sessions to grow. That room is ``MANAGED_VLLM_ONNX_RESERVE_GB`` less what
-    bibr already holds (at least ``LLM_ONNX_MIN_HEADROOM_GB``) when the LLM and
-    PaddleOCR-VL swap the card, and ``LLM_ONNX_MIN_HEADROOM_GB`` when they run
-    side by side (*colocated*), whose shares already leave that reserve out.
-    Below the model's floor the budget is squeezed to the floor while the
-    minimum room still fits; otherwise ``ManagedLlmVramError``.
+    sessions to grow. That room depends on what else uses the card. When a
+    managed PaddleOCR-VL server takes turns with the LLM (*swaps_with_ocr*),
+    the LLM restarts every chunk beside bibr's grown sessions, and the room is
+    ``MANAGED_VLLM_ONNX_RESERVE_GB`` less what bibr already holds (at least
+    ``LLM_ONNX_MIN_HEADROOM_GB``). Otherwise it is ``LLM_ONNX_MIN_HEADROOM_GB``:
+    an LLM-only run shares the card with bibr's own sessions alone (what they
+    hold is already not free), and shares planned to run side by side already
+    leave that reserve out. Below the model's floor, the budget is squeezed to
+    the floor while the minimum room still fits; otherwise
+    ``ManagedLlmVramError``.
     """
     from bibr.ocr.registry import MANAGED_VLLM_ONNX_RESERVE_GB
 
@@ -187,9 +194,9 @@ def size_managed_llm_share(
         return LlmShare(share=cap, reason="unknown")
     total, free, own = reading.total_gb, reading.free_gb, reading.own_gb
     headroom = (
-        LLM_ONNX_MIN_HEADROOM_GB
-        if colocated
-        else max(LLM_ONNX_MIN_HEADROOM_GB, MANAGED_VLLM_ONNX_RESERVE_GB - own)
+        max(LLM_ONNX_MIN_HEADROOM_GB, MANAGED_VLLM_ONNX_RESERVE_GB - own)
+        if swaps_with_ocr
+        else LLM_ONNX_MIN_HEADROOM_GB
     )
     cap_gb = cap * total
     floor = None if floor_gb is None else min(floor_gb, cap_gb)
@@ -205,9 +212,11 @@ def size_managed_llm_share(
     if target >= cap_gb:
         return LlmShare(share=cap, reason="cap", budget_gb=cap_gb, **details)
     if target > 0 and (floor is None or target >= floor):
-        # Round down so the reserve and headroom stay free.
+        # Round down so the reserve and headroom stay free. Rounding down can
+        # land just under the floor (on an RTX 3090, 12.008 GiB gives 0.50, or
+        # 11.78 GiB, below the 4B's 12): such a start takes the floor path.
         share = math.floor(round(target / total * 100, 6)) / 100
-        if share > 0:
+        if share > 0 and (floor is None or share * total >= floor):
             return LlmShare(share=share, reason="free", budget_gb=share * total, **details)
     squeezed = free - reserve_gb - LLM_ONNX_MIN_HEADROOM_GB
     if floor is not None and squeezed >= floor:

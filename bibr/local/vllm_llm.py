@@ -89,7 +89,7 @@ class VllmLlmServer:
         *,
         stop_event: threading.Event | None = None,
         share_from_free_memory: bool = False,
-        colocated: bool = False,
+        swaps_with_ocr: bool = False,
     ):
         """Start (or reuse) the server; blocking.
 
@@ -97,9 +97,11 @@ class VllmLlmServer:
         vLLM is launched with. With ``share_from_free_memory`` it is only the
         cap: the share is worked out from the VRAM free right now (see
         ``bibr.local.vllm_share``), and ``ManagedLlmVramError`` is raised
-        before launching when the model's floor does not fit. ``colocated``
-        says the PaddleOCR-VL server may run beside this one, whose shares
-        already leave bibr's ONNX reserve out.
+        before launching when the model's floor does not fit.
+        ``swaps_with_ocr`` says a managed PaddleOCR-VL server takes turns with
+        this one on the card, so each restart leaves bibr's sessions their
+        whole ONNX reserve; otherwise (LLM-only, or both servers planned side
+        by side) the configured share is kept while it fits.
         """
         self._stop_event = stop_event
         self._settings = settings if settings is not None else snapshot_settings()
@@ -124,7 +126,7 @@ class VllmLlmServer:
             self.api_key = own_server_key(self.base_url)
             return
         if share_from_free_memory:
-            mem_fraction = self._share_from_free_memory(mem_fraction, colocated=colocated)
+            mem_fraction = self._share_from_free_memory(mem_fraction, swaps_with_ocr=swaps_with_ocr)
 
         cmd = self._resolve_launch_cmd(self._model)
         cmd.extend(
@@ -182,7 +184,7 @@ class VllmLlmServer:
             raise
         register_server_key(self.base_url, self.api_key)
 
-    def _share_from_free_memory(self, cap: float, *, colocated: bool) -> float:
+    def _share_from_free_memory(self, cap: float, *, swaps_with_ocr: bool) -> float:
         """The share for this start, sized from the VRAM free now (at most *cap*)."""
         from bibr.local import vllm_share
         from bibr.ocr import registry
@@ -197,7 +199,7 @@ class VllmLlmServer:
             cap=cap,
             floor_gb=vllm_share.managed_llm_floor_gb(self._model),
             reserve_gb=vllm_share.overshoot_reserve_gb(self._model, extra_args),
-            colocated=colocated,
+            swaps_with_ocr=swaps_with_ocr,
         )
         if share.reason == "floor":
             logger.warning(

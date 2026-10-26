@@ -761,6 +761,34 @@ class ResourceManager:
         llm_share = self._managed_vllm_fraction or self._settings.llm.local_mem_fraction
         return not managed_vllm_shares_fit(llm_share, paddle_vllm_gpu_memory_utilization())
 
+    def _starts_managed_paddle_vllm(self) -> bool:
+        """Whether this run's OCR is, or may resolve to, a managed paddle-vllm server.
+
+        The OCR backend once one was constructed, else the requested one; the
+        automatic ``paddle`` chain lists paddle-vllm only on hardware that can
+        run it. An OCR URL names someone else's server.
+        """
+        if self.ocr_url:
+            return False
+        if self.ocr_backend == "paddle-vllm":
+            return True
+        if self.ocr_backend != "paddle":
+            return False
+        from bibr.ocr.registry import automatic_backend_names
+
+        return "paddle-vllm" in automatic_backend_names()
+
+    def _llm_swaps_with_ocr(self) -> bool:
+        """Whether a managed PaddleOCR-VL server takes turns with the vLLM LLM server.
+
+        Only then does the LLM restart every chunk beside bibr's grown GPU
+        sessions, so its share leaves them ``MANAGED_VLLM_ONNX_RESERVE_GB``.
+        With any other OCR the LLM shares the card with bibr's own sessions
+        alone, and shares that fit together were planned with that reserve
+        left out: either way the configured share is kept while it fits.
+        """
+        return self._starts_managed_paddle_vllm() and self._vllm_shares_overcommit()
+
     def _llm_server_blocks_ocr(self, ocr_backend: str) -> bool:
         """Whether starting ``ocr_backend`` must first stop the managed LLM server.
 
@@ -836,7 +864,7 @@ class ResourceManager:
                 # batch, and a restart at the fixed 0.85 beside them ran out
                 # of memory in CUDA graph capture after its startup check.
                 share_from_free = not self._llm_share_fixed
-                colocated = not self._vllm_shares_overcommit()
+                swaps_with_ocr = share_from_free and self._llm_swaps_with_ocr()
                 server = await self._construct_llm_server(
                     lambda stop: _make_settings_aware(
                         vllm_llm.VllmLlmServer,
@@ -844,7 +872,7 @@ class ResourceManager:
                         mem_fraction=self._managed_vllm_fraction or None,
                         stop_event=stop,
                         share_from_free_memory=share_from_free,
-                        colocated=colocated,
+                        swaps_with_ocr=swaps_with_ocr,
                     ),
                 )
             elif backend == "llama-cpp":

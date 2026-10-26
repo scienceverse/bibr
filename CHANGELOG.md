@@ -31,10 +31,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   you set `LLM_LOCAL_MEM_FRACTION` (or `--gpu-memory-utilization` in
   `LLM_VLLM_EXTRA_ARGS`), which still wins, the share is now worked out at
   every start from the memory free then, less what vLLM takes beyond its share
-  while starting and room for bibr's models to grow (0.70 of a 24 GB card),
-  with the configured share as the cap. When even the model's minimum (12 GB
-  for the 4B student) does not fit, that start fails at once with a clear
-  error instead of launching vLLM to crash. The Qwen3.5 students now run at
+  while starting and room for bibr's models to grow, with the configured share
+  as the cap. That room is bibr's 6 GB when PaddleOCR-VL takes turns with the
+  LLM (0.70 of a 24 GB card) and 1 GB with any other OCR, so a free 24 GB card
+  keeps 0.85. When even the model's minimum (12 GB for the 4B student) does
+  not fit, that start fails at once with a clear error instead of launching
+  vLLM to crash. The Qwen3.5 students now run at
   most 128 sequences at once, which halves vLLM's capture sizes and lets them
   start on a smaller share.
 - A nearly full GPU no longer fails papers, drops their references or sends
