@@ -168,7 +168,7 @@ def managed_llm_floor_gb(model: str, settings: GlobalSettings | None = None) -> 
     (*settings*) sets the floor of a model the registry does not list, such
     as a local path, and can raise a listed model's floor but not lower it:
     a lower value is ignored with a warning, so a value left over from a
-    local build (6.75 for the W4A16 build) never sizes the bf16 4B's starts
+    local build (6.25 for the W4A16 build) never sizes the bf16 4B's starts
     below what it needs. This matches ``LLM_LOCAL_MEM_FRACTION``, the way to
     choose a share yourself.
     """
@@ -265,14 +265,17 @@ def size_managed_llm_share(
         details["headroom_gb"] = LLM_ONNX_MIN_HEADROOM_GB
         return LlmShare(share=share, reason="floor", budget_gb=share * total, **details)
     if floor is None:
-        # Without a floor any share above zero would do, but only beside the
-        # full room for bibr: the squeeze to LLM_ONNX_MIN_HEADROOM_GB is for a
-        # model's floor alone.
-        need = reserve_gb + headroom
+        # Without a floor the smallest share, one hundredth of the card, would
+        # do, but only beside the full room for bibr: the squeeze to
+        # LLM_ONNX_MIN_HEADROOM_GB is for a model's floor alone. Free memory
+        # just above the reserve and room rounds down to a share of 0, so the
+        # need counts that hundredth too.
+        smallest = 0.01 * total
+        need = smallest + reserve_gb + headroom
         needs = (
-            f"more than {need:.2f} GiB (the model has no floor; {reserve_gb:.2f} GiB vLLM "
-            f"takes beyond its share while starting, and {headroom:.2f} GiB for bibr's GPU "
-            "sessions)"
+            f"{need:.2f} GiB (the model has no floor, so the smallest share, one hundredth of "
+            f"the card or {smallest:.2f} GiB; {reserve_gb:.2f} GiB vLLM takes beyond its share "
+            f"while starting; and {headroom:.2f} GiB for bibr's GPU sessions)"
         )
     else:
         need = floor + reserve_gb + LLM_ONNX_MIN_HEADROOM_GB

@@ -75,7 +75,7 @@ class LocalLLMModel:
 # v5 scorer, gate192 + ci60 = 252 dev papers), paired against Qwen3.8-27B's
 # 223/252; see docs/guides/extraction-models.md.
 #
-# bf16, W4A16 and GGUF sizes are the built files (2026-10-14 and 2026-10-25;
+# bf16, W4A16 and GGUF sizes are the built files (2026-10-14 and 2026-10-26;
 # GGUF from llama.cpp 6868a52); MLX sizes are estimates until those builds
 # exist. bf16: the merged checkpoint (text, vision and MTP weights). The vLLM
 # variants pin the Hub revision they were published at, and their min_vram_gb
@@ -123,7 +123,7 @@ QWEN35_4B_W4A16_SERVER_ARGS: tuple[str, ...] = (
 )
 
 #: Hub revisions published 2026-10-14 (the merged safetensors repos) and
-#: 2026-10-25 (the W4A16 build).
+#: 2026-10-26 (the W4A16 build).
 _QWEN35_4B_REVISION = "6ab47a4e4e8b1b76c1ab234aec66f360683ff9fc"
 _QWEN35_2B_REVISION = "81d0442d0ecadc20e1b9587d54bff42242123870"
 _QWEN35_4B_W4A16_REVISION = "a2af8f6e90e6481251af9eb07d02c034c30e3446"
@@ -158,14 +158,15 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 server_args=("--revision", _QWEN35_4B_REVISION, *_QWEN35_STUDENT_SERVER_ARGS),
                 runtime="vllm",
             ),
-            # int4 weights: 218/252 against the bf16 build's 216, at half its budget.
+            # int4 weights: 218/252 against the bf16 build's 217 on the same box, at
+            # half its budget.
             LocalLLMVariant(
                 hf_id="scienceverse/bibr-extract-qwen35-4b-W4A16",
                 platform="cuda",
                 quant="w4a16",
                 min_vram_gb=8,
                 min_budget_gb=QWEN35_4B_W4A16_BUDGET_GB,
-                approx_download_gb=3.8,  # 4,050,888,413 bytes
+                approx_download_gb=3.8,  # 4,050,890,519 bytes at that revision
                 server_args=(
                     "--revision",
                     _QWEN35_4B_W4A16_REVISION,

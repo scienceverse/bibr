@@ -742,10 +742,23 @@ class TestW4a16Floor:
                 reading, _w4a16_settings(floor=None), W4A16_LOCAL, cap=0.85, swaps_with_ocr=True
             )
         assert (
-            "it needs more than 4.77 GiB (the model has no floor; 0.75 GiB vLLM takes beyond its "
-            "share while starting, and 4.02 GiB for bibr's GPU sessions)"
+            "it needs 5.01 GiB (the model has no floor, so the smallest share, one hundredth of "
+            "the card or 0.24 GiB; 0.75 GiB vLLM takes beyond its share while starting; and "
+            "4.02 GiB for bibr's GPU sessions)"
         ) in str(exc.value)
-        assert "floor," not in str(exc.value)
+        assert "GiB floor," not in str(exc.value)
+
+    def test_a_floorless_share_that_rounds_to_zero_names_more_than_is_free(self):
+        # 4.80 GiB free is 0.03 above the reserve and the room, which rounds
+        # down to a share of 0: the refusal must not say it needs less than
+        # is free.
+        reading = GpuMemory(total_gb=CUDA_3090, free_gb=4.80, own_gb=1.98)
+        with pytest.raises(ManagedLlmVramError) as exc:
+            vllm_share.managed_llm_share(
+                reading, _w4a16_settings(floor=None), W4A16_LOCAL, cap=0.85, swaps_with_ocr=True
+            )
+        assert "4.80 of 23.56 GiB free" in str(exc.value)
+        assert "it needs 5.01 GiB" in str(exc.value)
 
     def test_the_bf16_4b_is_refused_where_w4a16_starts(self):
         reading = GpuMemory(total_gb=CUDA_3090, free_gb=13.57, own_gb=1.98)
