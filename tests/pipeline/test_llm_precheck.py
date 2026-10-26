@@ -673,6 +673,38 @@ class TestReleaseBeforeRefusing:
         assert await rm.llm_start_refusal("vllm") is None
         assert rm._layout.unloads == 0
 
+    async def test_a_start_that_reuses_a_server_releases_nothing(self, card, ner, port):
+        """The start asks the port before it reads the card: a server for the
+        model already listening is reused, so nothing of bibr's is unloaded."""
+        card["reading"] = REFUSED
+        port["models"] = [STUDENT_4B]
+        rm = _rm(memory_mode="balanced")
+        rm._layout = _GpuModel(card, 1.5)
+        with _no_launch() as popen:
+            await rm.start_llm_server("vllm")
+        popen.assert_not_called()
+        assert rm._llm_server._reused is True
+        assert rm._layout.unloads == 0
+        assert rm.llm_start_releases == 0
+        assert card["reads"] == 0
+
+    @pytest.mark.parametrize(
+        ("ocr_backend", "ocr_url"),
+        [("paddle-http", "http://ocr.test:8080"), ("glm-http", None), ("gemini", None)],
+    )
+    async def test_a_remote_ocr_client_is_never_released(self, card, ner, ocr_backend, ocr_url):
+        """Someone else's OCR server holds none of this card: stopping its client frees nothing."""
+        card["reading"] = GpuMemory(total_gb=CUDA_3090, free_gb=10.0, own_gb=1.98)
+        rm = _rm(memory_mode="balanced", ocr_backend=ocr_backend, ocr_url=ocr_url)
+        rm._layout = _GpuModel(card, 0.1)
+        ocr = MagicMock()
+        rm._ocr = ocr
+        assert isinstance(await rm.llm_start_refusal("vllm"), ManagedLlmVramError)
+        assert rm._layout.unloads == 1
+        assert rm.llm_start_releases == 1
+        ocr.shutdown.assert_not_called()
+        assert rm.ocr is ocr
+
     async def test_a_release_is_logged_once_per_chunk(self, card, ner, caplog):
         card["reading"] = REFUSED
         rm = _rm(memory_mode="balanced")
