@@ -14,7 +14,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Both are off by default. A header or footer stays with OCR when its text is
   in a right-to-left script (the text layer reverses brackets and digits), when
   it is a first-page masthead drawn partly as an image or barely covered by the
-  text layer's glyphs, and on a page whose text is mostly an invisible OCR layer.
+  text layer's glyphs, and on a scanned page: one whose text is mostly an
+  invisible OCR layer, or one a page-sized image covers under a visible OCR
+  layer.
 - The opt-in `extraction.regions[]` rows name where each region's text came
   from: `source` is `text_layer` or `ocr`, and `ocr_backend` names the OCR
   backend that read an `ocr` region, including a consensus or escalation

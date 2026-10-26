@@ -1262,7 +1262,14 @@ def _sample_page_font_metadata(
 #   fillable first-page header/footer boxes to OCR, gesec's raster
 #   "DOI: 10.7769/gesec.7i3.557" line among them;
 # - a page whose text is mostly invisible (render mode 3/7), an OCR layer the
-#   scan check did not accept: its furniture stays with OCR like a scan's.
+#   scan check did not accept: its furniture stays with OCR like a scan's;
+# - a page images cover as a scan does (_coverage_qualifies) whose text is
+#   visible: a scanning service's OCR layer drawn in a filling mode, so the
+#   scan check keeps it as text. Its running heads read worse than our OCR
+#   (scans_eval80 W2052296118: "althof ef af.i" for "Althof et al.:",
+#   W2037590930: "1025" for the whole Lancet running head), so they go to
+#   OCR; body text keeps its route. On the 392 dev PDFs (2026-10-26) only
+#   gesec's first page and W4308442706 qualify; on scans_eval80, 7 PDFs.
 _MASTHEAD_MAX_IMAGE_COVERAGE = 0.5
 _MASTHEAD_MIN_GLYPH_COVERAGE = 0.2
 _RTL_BIDI_CLASSES = frozenset({"R", "AL"})
@@ -1430,7 +1437,17 @@ def _fill_page_regions_from_textpage(
             )
         if furniture_state["invisible"]:
             return True
-        if page_idx != 0 or page is None:
+        if page is None:
+            return False
+        if "scan_like" not in furniture_state:
+            try:
+                coverage = _page_image_coverage(page, crop_box)
+            except Exception:  # noqa: BLE001 - without the rule the page reads as born-digital
+                coverage = 0.0
+            furniture_state["scan_like"] = _coverage_qualifies(coverage)
+        if furniture_state["scan_like"]:
+            return True
+        if page_idx != 0:
             return False
         if "images" not in furniture_state:
             furniture_state["images"] = _page_image_boxes(page)

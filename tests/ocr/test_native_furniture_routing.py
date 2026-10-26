@@ -4,8 +4,9 @@ With OCR_NATIVE_TEXT_HEADER_FOOTER on, a header or footer stays with OCR when
 its text is in a right-to-left script (pdfium's visual order turned "(14)"
 into ")41(" in an Arabic running head), when it is a first-page masthead
 drawn partly as an image (gesec's raster "DOI: 10.7769/..." line, of which the
-text layer has only the editor line), and on a page whose text is mostly an
-invisible OCR layer. Body text keeps its route in every case.
+text layer has only the editor line), on a page whose text is mostly an
+invisible OCR layer, and on a page a scan image covers whatever the render mode
+of its OCR layer. Body text keeps its route in every case.
 """
 
 from __future__ import annotations
@@ -101,6 +102,20 @@ def test_mostly_invisible_page_keeps_its_furniture_on_ocr():
     """An OCR layer over a page the scan check did not accept: body as before, header to OCR."""
     layer = _text(["Journal of Things 12 (1985) 3-9"], mode=3, y=760, size=9)
     layer += _text(_BODY * 4, mode=3, y=600)
+    pdf_bytes = _pdf([{"content": layer}, {"content": layer}])
+    pages = [[], [_region("header", 60, 750, 560, 772), _region("text", 60, 440, 560, 615)]]
+
+    filled = _fill(pdf_bytes, pages)
+
+    assert "_native_text_used" not in filled[1][0]
+    assert filled[1][1]["_native_text_used"] is True
+
+
+def test_visible_ocr_layer_over_a_scan_keeps_its_furniture_on_ocr():
+    """A scanning service's OCR layer drawn visibly over the page image (W2052296118)."""
+    layer = _image(612, 792)
+    layer += _text(["Althof ef af.i Electronic portal imaging device"], x=60, y=760, size=9)
+    layer += _text(_BODY * 4, y=600)
     pdf_bytes = _pdf([{"content": layer}, {"content": layer}])
     pages = [[], [_region("header", 60, 750, 560, 772), _region("text", 60, 440, 560, 615)]]
 
