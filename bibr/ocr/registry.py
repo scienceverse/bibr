@@ -282,6 +282,63 @@ def managed_gpu_memory() -> GpuMemory | None:
     )
 
 
+#: The lowest CUDA compute capability bibr's automatic routing sends to vLLM.
+#: The published vLLM models (the extraction students and PaddleOCR-VL) are
+#: bf16 checkpoints, and vLLM 0.31 serves bf16 only from compute capability
+#: 8.0 (Ampere; ``vllm.platforms.cuda``). bibr passes no ``--dtype``, and with
+#: vLLM's default ``auto`` dtype an older card (Turing 7.5, Volta 7.0, Pascal
+#: 6.x) is not refused: vLLM casts the model to float16 with a warning, a
+#: numeric path bibr has never been measured on. So such cards run both the
+#: LLM and the OCR on llama.cpp. A routing rule, not a refusal: an explicit
+#: ``paddle-vllm`` or ``--llm vllm`` still starts there.
+VLLM_MIN_COMPUTE_CAPABILITY = 8.0
+
+
+@functools.cache
+def _nvidia_compute_capability() -> float | None:
+    """Compute capability of the card the managed servers start on, or None.
+
+    That is CUDA's device 0 under this process's ``CUDA_VISIBLE_DEVICES``
+    (see ``_visible_gpu_indices``); when several cards may be device 0, the
+    lowest of theirs. None when nvidia-smi is missing, too old to report
+    ``compute_cap``, or the choice names no card. Probed once per process;
+    tests patch this name.
+    """
+    rows = _nvidia_smi_rows("gpu", "uuid,compute_cap")
+    if not rows or not all(len(row) == 2 for row in rows):
+        return None
+    indices = _visible_gpu_indices(
+        tuple(row[0] for row in rows),
+        os.environ.get("CUDA_VISIBLE_DEVICES"),
+        os.environ.get("CUDA_DEVICE_ORDER"),
+    )
+    if not indices:
+        return None
+    try:
+        return min(float(rows[i][1]) for i in indices)
+    except ValueError:
+        return None
+
+
+def vllm_compute_capability_blocker(*, capability: float | None | object = _PROBE) -> str | None:
+    """Why bibr's automatic routing keeps vLLM off this card, or ``None``.
+
+    ``None`` when the compute capability is ``VLLM_MIN_COMPUTE_CAPABILITY`` or
+    more, or cannot be read (routing then stays as it was). Consulted by the
+    automatic ``paddle`` OCR chain, by the ``local`` LLM backend's choice
+    (``bibr.local.llm_models.cuda_llm_backend_for``) and by setup; never by an
+    explicit ``paddle-vllm`` or ``vllm`` start.
+    """
+    cap = _nvidia_compute_capability() if capability is _PROBE else capability
+    if not isinstance(cap, int | float) or cap >= VLLM_MIN_COMPUTE_CAPABILITY:
+        return None
+    return (
+        f"the GPU's compute capability is {cap:.1f}; bibr's vLLM models are bf16, "
+        f"which vLLM serves from {VLLM_MIN_COMPUTE_CAPABILITY:.1f} (Ampere) on, and "
+        "would run cast to float16, which bibr has not tested"
+    )
+
+
 def paddle_vllm_unavailable_reason(*, vram_gb: float | None | object = _PROBE) -> str | None:
     """Why the managed ``paddle-vllm`` runtime cannot start here, or ``None``.
 
@@ -401,13 +458,15 @@ def _candidate(backend: str, settings: GlobalSettings) -> OcrBackendCandidate:
 
 
 def resolve_backend_candidates(
-    name: str | None, settings: GlobalSettings
+    name: str | None, settings: GlobalSettings, *, llm_backend: str | None = None
 ) -> tuple[OcrBackendCandidate, ...]:
     """Resolve an OCR request to concrete, deterministic startup candidates.
 
     Only the ``paddle`` automatic selector has more than one candidate.
     Explicit concrete backends are deliberately single-candidate requests so a
     user-selected runtime is never silently replaced by another implementation.
+    ``llm_backend`` is the run's resolved LLM backend, when the caller knows
+    it (see ``automatic_backend_names``).
     """
     if name is None:
         ocr_opts = settings.ocr
@@ -419,11 +478,29 @@ def resolve_backend_candidates(
 
     if name != "paddle":
         return (_candidate(name, settings),)
-    return tuple(_candidate(backend, settings) for backend in automatic_backend_names())
+    return tuple(
+        _candidate(backend, settings)
+        for backend in automatic_backend_names(llm_backend=llm_backend)
+    )
 
 
-def automatic_backend_names() -> tuple[str, ...]:
-    """The concrete runtimes the automatic ``paddle`` selector tries here, in order."""
+#: Why the automatic chain leaves out paddle-vllm beside a llama.cpp LLM.
+_LLAMA_CPP_LLM_KEEPS_OCR_ON_LLAMA_CPP = (
+    "the LLM runs on llama.cpp, and bibr hands GPU memory between two vLLM servers "
+    "or two llama.cpp servers but not between PaddleOCR-VL on vLLM and a llama.cpp "
+    "LLM (bibr setup pairs a llama.cpp LLM with GLM-OCR on llama.cpp too)"
+)
+
+
+def automatic_backend_names(*, llm_backend: str | None = None) -> tuple[str, ...]:
+    """The concrete runtimes the automatic ``paddle`` selector tries here, in order.
+
+    ``llm_backend`` is the run's resolved LLM backend (``"cloud"`` for
+    ``--no-llm``; None when the caller does not know it). On Linux a
+    ``llama-cpp`` LLM leaves paddle-vllm out, so the OCR runs GLM-OCR on
+    llama.cpp, the pair setup recommends, and so does a card whose compute
+    capability is below ``VLLM_MIN_COMPUTE_CAPABILITY``.
+    """
     if sys.platform == "darwin" and platform.machine() == "arm64":
         return ("paddle-rapid-mlx", "paddle-mlx-vlm", "glm-rapid-mlx", "glm-llama")
     if sys.platform == "win32":
@@ -432,7 +509,11 @@ def automatic_backend_names() -> tuple[str, ...]:
         # The managed vLLM runtime is only a candidate on hardware that can
         # run it. Otherwise a CPU-only or small-GPU box spent the whole 900 s
         # startup budget bootstrapping vLLM before falling through to llama.cpp.
-        vllm_blocker = paddle_vllm_unavailable_reason()
+        vllm_blocker = (
+            _LLAMA_CPP_LLM_KEEPS_OCR_ON_LLAMA_CPP
+            if llm_backend == "llama-cpp"
+            else paddle_vllm_unavailable_reason() or vllm_compute_capability_blocker()
+        )
         if vllm_blocker is None:
             return ("paddle-vllm", "glm-llama")
         logger.debug("paddle-vllm skipped in the automatic OCR chain: %s", vllm_blocker)

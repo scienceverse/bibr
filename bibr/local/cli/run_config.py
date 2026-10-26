@@ -102,16 +102,16 @@ def resolve_run_config(args) -> ResolvedRunConfig:
     from bibr.config import Settings
 
     llm_backend = _resolve_llm_backend(args.llm or Settings.llm.backend)
+    # The LLM server the run starts: none under --no-llm.
+    server_llm_backend = "cloud" if getattr(args, "no_llm", False) else llm_backend
 
     # Determine memory mode: on a CUDA card it depends on whether a managed
-    # local LLM server shares the card (--no-llm never starts one).
+    # local LLM server shares the card.
     memory_mode = args.memory
     if memory_mode is None:
         from bibr.local.pipeline import _default_memory_mode
 
-        memory_mode = _default_memory_mode(
-            llm_backend="cloud" if getattr(args, "no_llm", False) else llm_backend
-        )
+        memory_mode = _default_memory_mode(llm_backend=server_llm_backend)
 
     # Parse page range
     start_page, end_page = None, None
@@ -132,7 +132,9 @@ def resolve_run_config(args) -> ResolvedRunConfig:
         if "paddle" not in model_name and "glm" not in model_name:
             raise ValueError("Custom --ocr-model aliases require --ocr-profile {paddle,glm}.")
 
-    summary_candidate = resolve_backend_candidates(ocr_backend, Settings)[0]
+    summary_candidate = resolve_backend_candidates(
+        ocr_backend, Settings, llm_backend=server_llm_backend
+    )[0]
     return ResolvedRunConfig(
         ocr_backend=ocr_backend,
         memory_mode=memory_mode,
@@ -384,18 +386,25 @@ def _preflight_ocr_runtime(config: ResolvedRunConfig) -> str | None:
     """
     if config.ocr_url:
         return None
-    return _ocr_runtime_blocker(config.ocr_backend)
+    return _ocr_runtime_blocker(config.ocr_backend, llm_backend=_run_llm_backend(config))
 
 
-def _ocr_runtime_blocker(ocr_backend: str) -> str | None:
+def _run_llm_backend(config: ResolvedRunConfig) -> str:
+    """The LLM backend whose server the run starts: ``cloud`` under ``--no-llm``."""
+    return "cloud" if config.no_llm else config.llm_backend
+
+
+def _ocr_runtime_blocker(ocr_backend: str, *, llm_backend: str | None = None) -> str | None:
     """Why no candidate of ``ocr_backend``'s startup chain can start here, or ``None``.
 
     Shared by the ``bibr chew``/``bibr batch`` preflight and ``bibr doctor``.
+    ``llm_backend`` is the run's resolved LLM backend (see
+    ``bibr.ocr.registry.automatic_backend_names``).
     """
     from bibr.config import Settings
     from bibr.ocr.registry import resolve_backend_candidates
 
-    candidates = resolve_backend_candidates(ocr_backend, Settings)
+    candidates = resolve_backend_candidates(ocr_backend, Settings, llm_backend=llm_backend)
     blockers: list[str] = []
     for candidate in candidates:
         reason = _ocr_candidate_unavailable_reason(candidate.backend)

@@ -55,6 +55,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the LLM's later starts on an emulated 12 GB card, which on a 10 GB card would
   leave less than 8 GiB from the second chunk. The 12 GB card stays balanced:
   it finished 100 papers with a desktop, its last starts finding 8.6 GiB free.
+- On Linux the automatic OCR chain (`OCR_BACKEND` unset or `paddle`) now runs
+  GLM-OCR on llama.cpp whenever the run's LLM runs on llama.cpp, the pair
+  `bibr setup` writes: bibr hands GPU memory between two vLLM servers or two
+  llama.cpp servers, but not between PaddleOCR-VL on vLLM and a llama.cpp LLM.
+  `--llm local` on a card of 8.0–9.75 GiB used to start PaddleOCR-VL on vLLM
+  beside the llama.cpp LLM, a pair no run measured. An explicit
+  `OCR_BACKEND=paddle-vllm` still starts PaddleOCR-VL.
+- NVIDIA cards older than Ampere (compute capability below 8.0: Turing,
+  Volta, Pascal) now run the extraction LLM and the automatic OCR on
+  llama.cpp, in `bibr setup` and for `--llm local`. bibr's vLLM models are
+  bf16, which vLLM 0.31 serves only from compute capability 8.0; on an older
+  card it does not refuse them but casts them to float16 with a warning, a
+  path bibr has not been tested on. No Turing or Pascal card has been tested
+  with either runtime: this is a conservative routing rule. When nvidia-smi
+  cannot report the compute capability, routing is as before; an explicit
+  `--llm vllm` or `OCR_BACKEND=paddle-vllm` still starts vLLM.
 - Setup counts a card that reports up to 0.25 GiB under a size (an RTX 5070
   reports 12,227 MiB) as that size, for the model it recommends and for its
   memory mode. Such cards used to get the next smaller tier. PaddleOCR-VL's
@@ -62,6 +78,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `--llm local` (or `LLM_BACKEND=local`) without `bibr setup` now serves the
+  build setup recommends for the card when `LLM_LOCAL_MODEL` is unset. It
+  served the bf16 4B on every NVIDIA card that runs vLLM, whose start bibr
+  refuses below 20 GB; on a 10–19 GB card it is now the W4A16 build, and on
+  llama.cpp a card below 7 GB gets the Q4_K_M build instead of Q8_0. The
+  runtime and setup now pick the model, the backend, the memory mode and the
+  OCR through the same rules on every card.
 - On a small card, a fully local batch with both servers on llama.cpp no longer
   fails every paper after the first chunk. The LLM server outlived the chunk,
   and the next chunk's GLM-OCR server started beside it, could not allocate

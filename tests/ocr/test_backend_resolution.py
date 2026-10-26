@@ -343,6 +343,115 @@ class TestLinuxChainIsHardwareAware:
         assert registry.paddle_vllm_unavailable_reason(vram_gb=8.0) is None
 
 
+class TestLinuxChainFollowsTheLlmBackend:
+    """The automatic chain runs GLM-OCR on llama.cpp beside a llama.cpp LLM, as
+    setup pairs them: bibr hands GPU memory between two vLLM servers or two
+    llama.cpp servers, not between PaddleOCR-VL on vLLM and a llama.cpp LLM."""
+
+    @staticmethod
+    def _linux(monkeypatch, vram, capability=None):
+        from bibr.ocr import registry
+
+        monkeypatch.setattr(registry.sys, "platform", "linux")
+        monkeypatch.setattr(registry.platform, "machine", lambda: "x86_64")
+        monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: vram)
+        monkeypatch.setattr(registry, "_nvidia_compute_capability", lambda: capability)
+        return registry
+
+    @pytest.mark.parametrize("vram", [8.0, 10.0, 12.0, 24.0])
+    def test_a_llama_cpp_llm_keeps_ocr_on_llama_cpp(self, monkeypatch, vram):
+        registry = self._linux(monkeypatch, vram)
+        chain = registry.resolve_backend_candidates(
+            "paddle", _CandidateSettings(), llm_backend="llama-cpp"
+        )
+        assert [c.backend for c in chain] == ["glm-llama"]
+        assert registry.automatic_backend_names(llm_backend="llama-cpp") == ("glm-llama",)
+
+    @pytest.mark.parametrize("llm", [None, "cloud", "vllm", "llmster"])
+    def test_other_llm_backends_keep_paddle_vllm_first(self, monkeypatch, llm):
+        registry = self._linux(monkeypatch, 24.0)
+        assert registry.automatic_backend_names(llm_backend=llm) == ("paddle-vllm", "glm-llama")
+
+    def test_an_explicit_paddle_vllm_is_kept_beside_a_llama_cpp_llm(self, monkeypatch):
+        registry = self._linux(monkeypatch, 24.0)
+        chain = registry.resolve_backend_candidates(
+            "paddle-vllm", _CandidateSettings(), llm_backend="llama-cpp"
+        )
+        assert [c.backend for c in chain] == ["paddle-vllm"]
+
+    def test_the_resource_manager_resolves_with_its_llm_backend(self, monkeypatch):
+        self._linux(monkeypatch, 24.0)
+        from bibr.pipeline.resources import ResourceManager
+
+        beside_llama = ResourceManager(ocr_backend="paddle", llm_backend="llama-cpp")
+        assert [c.backend for c in beside_llama._resolve_ocr_candidates()] == ["glm-llama"]
+        assert not beside_llama._starts_managed_paddle_vllm()
+        beside_vllm = ResourceManager(ocr_backend="paddle", llm_backend="vllm")
+        assert [c.backend for c in beside_vllm._resolve_ocr_candidates()] == [
+            "paddle-vllm",
+            "glm-llama",
+        ]
+        assert beside_vllm._starts_managed_paddle_vllm()
+
+
+class TestComputeCapabilityGuard:
+    """vLLM 0.31 serves bf16 from compute capability 8.0; on older cards the
+    automatic chain runs GLM-OCR on llama.cpp. Unreadable keeps the chain."""
+
+    @staticmethod
+    def _linux(monkeypatch, capability):
+        return TestLinuxChainFollowsTheLlmBackend._linux(monkeypatch, 24.0, capability)
+
+    @pytest.mark.parametrize("capability", [6.1, 7.0, 7.5])
+    def test_pre_ampere_cards_skip_paddle_vllm(self, monkeypatch, capability):
+        registry = self._linux(monkeypatch, capability)
+        assert registry.automatic_backend_names() == ("glm-llama",)
+        assert registry.automatic_backend_names(llm_backend="cloud") == ("glm-llama",)
+        blocker = registry.vllm_compute_capability_blocker()
+        assert blocker is not None and f"{capability:.1f}" in blocker
+
+    @pytest.mark.parametrize("capability", [8.0, 8.6, 8.9, 12.0, None])
+    def test_ampere_and_newer_or_unknown_keep_paddle_vllm(self, monkeypatch, capability):
+        registry = self._linux(monkeypatch, capability)
+        assert registry.automatic_backend_names() == ("paddle-vllm", "glm-llama")
+        assert registry.vllm_compute_capability_blocker() is None
+
+    def test_explicit_paddle_vllm_is_not_refused_on_an_old_card(self, monkeypatch):
+        """A routing rule, not a refusal: the launcher's own check ignores it."""
+        registry = self._linux(monkeypatch, 7.5)
+        chain = registry.resolve_backend_candidates("paddle-vllm", _CandidateSettings())
+        assert [c.backend for c in chain] == ["paddle-vllm"]
+        assert registry.paddle_vllm_unavailable_reason(vram_gb=24.0) is None
+
+    def test_the_probe_reads_the_card_cuda_numbers_0(self, monkeypatch):
+        from bibr.ocr import registry
+
+        probe = _CAPABILITY_PROBE.__wrapped__
+        rows = [["GPU-aaa", "8.6"], ["GPU-bbb", "7.5"]]
+        monkeypatch.setattr(registry, "_nvidia_smi_rows", lambda query, fields: rows)
+        monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+        assert probe() == 7.5
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-aaa")
+        assert probe() == 8.6
+        # Without PCI order either card may be device 0: the lower one counts.
+        monkeypatch.delenv("CUDA_DEVICE_ORDER")
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+        assert probe() == 7.5
+
+    @pytest.mark.parametrize(
+        "rows", [None, [], [["GPU-aaa"]], [["GPU-aaa", "[N/A]"]], [["GPU-aaa", "8.6", "x"]]]
+    )
+    def test_an_unreadable_capability_is_none(self, monkeypatch, rows):
+        from bibr.ocr import registry
+
+        monkeypatch.setattr(registry, "_nvidia_smi_rows", lambda query, fields: rows)
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        assert _CAPABILITY_PROBE.__wrapped__() is None
+
+
+# Captured at collection, before the suite's conftest pins it for each test.
+_CAPABILITY_PROBE = _registry_for_probe._nvidia_compute_capability
 # Captured at collection, before the suite's conftest pins it for each test.
 _MANAGED_GPU_PROBE = _registry_for_probe._managed_gpu_vram_gb
 

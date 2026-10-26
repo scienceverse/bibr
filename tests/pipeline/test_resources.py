@@ -345,7 +345,7 @@ async def test_automatic_paddle_falls_back_only_during_startup_and_records_ident
     accepted.wait_for_server = AsyncMock()
 
     monkeypatch.setattr(
-        "bibr.ocr.registry.resolve_backend_candidates", lambda name, settings: candidates
+        "bibr.ocr.registry.resolve_backend_candidates", lambda name, settings, **_: candidates
     )
     with patch.object(
         rm,
@@ -378,7 +378,7 @@ async def test_automatic_paddle_aggregates_all_startup_failures(monkeypatch):
         _candidate("glm-llama", "glm/llama", "glm"),
     )
     monkeypatch.setattr(
-        "bibr.ocr.registry.resolve_backend_candidates", lambda name, settings: candidates
+        "bibr.ocr.registry.resolve_backend_candidates", lambda name, settings, **_: candidates
     )
     with (
         patch.object(
@@ -404,7 +404,7 @@ async def test_selected_automatic_candidate_does_not_fallback_after_recognize_fa
         _candidate("glm-llama", "glm/llama", "glm"),
     )
     monkeypatch.setattr(
-        "bibr.ocr.registry.resolve_backend_candidates", lambda name, settings: candidates
+        "bibr.ocr.registry.resolve_backend_candidates", lambda name, settings, **_: candidates
     )
     with patch.object(rm, "_create_ocr_client_for", return_value=selected) as create:
         await rm.await_ocr()
@@ -423,7 +423,7 @@ async def test_explicit_paddle_rapid_preserves_request_model_and_profile(monkeyp
     client.wait_for_server = AsyncMock()
     monkeypatch.setattr(
         "bibr.ocr.registry.resolve_backend_candidates",
-        lambda name, settings: (_candidate("paddle-rapid-mlx", "paddle/default", "paddle"),),
+        lambda name, settings, **_: (_candidate("paddle-rapid-mlx", "paddle/default", "paddle"),),
     )
     with patch.object(rm, "_create_ocr_client_for", return_value=client) as create:
         await rm.await_ocr()
@@ -444,7 +444,7 @@ async def test_explicit_paddle_vllm_keeps_source_model_but_records_served_alias(
     client.wait_for_server = AsyncMock()
     monkeypatch.setattr(
         "bibr.ocr.registry.resolve_backend_candidates",
-        lambda name, settings: (_candidate("paddle-vllm", "paddle-ocr-vl-1.6", "paddle"),),
+        lambda name, settings, **_: (_candidate("paddle-vllm", "paddle-ocr-vl-1.6", "paddle"),),
     )
     with patch.object(rm, "_create_ocr_client_for", return_value=client) as create:
         await rm.await_ocr()
@@ -466,7 +466,7 @@ async def test_explicit_backend_uses_settings_profile_for_runtime_and_cache_iden
     client.wait_for_server = AsyncMock()
     monkeypatch.setattr(
         "bibr.ocr.registry.resolve_backend_candidates",
-        lambda name, settings: (_candidate("paddle-rapid-mlx", "paddle/default", "paddle"),),
+        lambda name, settings, **_: (_candidate("paddle-rapid-mlx", "paddle/default", "paddle"),),
     )
     with patch.object(rm, "_create_ocr_client_for", return_value=client) as create:
         await rm.await_ocr()
@@ -489,7 +489,7 @@ async def test_automatic_fallback_reason_is_bounded_actionable_and_redacted(monk
         _candidate("glm-llama", "glm/llama", "glm"),
     )
     monkeypatch.setattr(
-        "bibr.ocr.registry.resolve_backend_candidates", lambda name, settings: candidates
+        "bibr.ocr.registry.resolve_backend_candidates", lambda name, settings, **_: candidates
     )
     with (
         patch.object(

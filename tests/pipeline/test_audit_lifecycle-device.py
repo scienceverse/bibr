@@ -58,7 +58,7 @@ def _ocr_factory(log: list[str]):
 def _candidates(monkeypatch, *backends):
     monkeypatch.setattr(
         "bibr.ocr.registry.resolve_backend_candidates",
-        lambda name, settings: tuple(_candidate(b) for b in backends),
+        lambda name, settings, **_: tuple(_candidate(b) for b in backends),
     )
 
 

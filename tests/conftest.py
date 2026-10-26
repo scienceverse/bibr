@@ -180,11 +180,14 @@ def _pin_cuda_probe_for_platform_tests(monkeypatch):
 
     The managed vLLM servers' card (``_managed_gpu_vram_gb``, which reads
     ``CUDA_VISIBLE_DEVICES``) follows whatever a test pins ``_cuda_vram_gb``
-    to, so the suite never sizes shares from the host's own GPU."""
+    to, so the suite never sizes shares from the host's own GPU. The compute
+    capability reads as unknown (routing as before the guard), so the host's
+    card never decides between vLLM and llama.cpp; tests of the guard pin it."""
     from bibr.ocr import registry
 
     monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: 24.0)
     monkeypatch.setattr(registry, "_managed_gpu_vram_gb", lambda: registry._cuda_vram_gb())
+    monkeypatch.setattr(registry, "_nvidia_compute_capability", lambda: None)
 
 
 @pytest.fixture(autouse=True)

@@ -271,7 +271,8 @@ def _managed_gpu_fraction(llm_backend: str, ocr_backend: str, settings: GlobalSe
     # The automatic ``paddle`` chain lists paddle-vllm only on hardware that
     # can run it, so a small GPU keeps its room for the classifiers.
     starts_paddle_vllm = ocr_backend == "paddle-vllm" or (
-        ocr_backend == "paddle" and "paddle-vllm" in automatic_backend_names()
+        ocr_backend == "paddle"
+        and "paddle-vllm" in automatic_backend_names(llm_backend=llm_backend)
     )
     ocr_share = paddle_vllm_gpu_memory_utilization() if starts_paddle_vllm else 0.0
     if not (llm_share and ocr_share):
@@ -433,6 +434,7 @@ class LocalPipeline(Pipeline):
             ),
             managed_gpu_fraction=_managed_gpu_fraction(llm_backend, ocr_backend, settings_snapshot),
             managed_llm_share_fixed=llm_share_user_set(settings_snapshot),
+            llm_backend=llm_backend,
             settings=settings_snapshot,
         )
 

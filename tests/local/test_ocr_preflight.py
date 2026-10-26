@@ -14,8 +14,8 @@ from types import SimpleNamespace
 import pytest
 
 
-def _cfg(backend, url=None):
-    return SimpleNamespace(ocr_backend=backend, ocr_url=url)
+def _cfg(backend, url=None, llm_backend="cloud", no_llm=False):
+    return SimpleNamespace(ocr_backend=backend, ocr_url=url, llm_backend=llm_backend, no_llm=no_llm)
 
 
 def _pin_install(monkeypatch, *, torch, cv2):
@@ -160,3 +160,29 @@ async def test_chew_refuses_pdfs_without_a_working_opencv_when_torch_is_installe
     err = capsys.readouterr().err
     assert f"Layout/OCR image runtime unavailable: {reason}" in err
     assert f"Repair with: {repair}" in err
+
+
+@pytest.mark.parametrize(
+    ("llm_backend", "no_llm", "passed"),
+    [
+        ("llama-cpp", False, "llama-cpp"),
+        ("vllm", False, "vllm"),
+        ("llama-cpp", True, "cloud"),
+    ],
+)
+def test_the_preflight_resolves_the_chain_with_the_runs_llm_backend(
+    monkeypatch, llm_backend, no_llm, passed
+):
+    """Beside a llama.cpp LLM the chain is GLM-OCR alone, so the preflight
+    checks llama.cpp, not paddle-vllm."""
+    from bibr.local.cli import run_config
+
+    seen = []
+    monkeypatch.setattr(
+        run_config, "_ocr_runtime_blocker", lambda backend, **kw: seen.append(kw) or None
+    )
+    assert (
+        run_config._preflight_ocr_runtime(_cfg("paddle", llm_backend=llm_backend, no_llm=no_llm))
+        is None
+    )
+    assert seen == [{"llm_backend": passed}]

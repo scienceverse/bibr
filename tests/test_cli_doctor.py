@@ -310,7 +310,7 @@ def _pin_apple_silicon_paddle_chain(monkeypatch) -> None:
 
     monkeypatch.setattr(
         "bibr.ocr.registry.resolve_backend_candidates",
-        lambda backend, settings: (
+        lambda backend, settings, **_: (
             OcrBackendCandidate("paddle-rapid-mlx", "PaddlePaddle/PaddleOCR-VL-1.6", "paddle"),
             OcrBackendCandidate("paddle-mlx-vlm", "PaddlePaddle/PaddleOCR-VL-1.6", "paddle"),
             OcrBackendCandidate("glm-rapid-mlx", "THUDM/GLM-OCR", "glm"),
@@ -477,7 +477,7 @@ def test_check_automatic_linux_paddle_uses_vllm_package_runner_cache_status(monk
     monkeypatch.setattr(Settings.ocr, "backend", "paddle")
     monkeypatch.setattr(
         "bibr.ocr.registry.resolve_backend_candidates",
-        lambda backend, settings: (
+        lambda backend, settings, **_: (
             OcrBackendCandidate("paddle-vllm", "PaddlePaddle/PaddleOCR-VL-1.6", "paddle"),
             OcrBackendCandidate("glm-llama", "THUDM/GLM-OCR", "glm"),
         ),
@@ -913,7 +913,7 @@ def _run_doctor_lines(monkeypatch) -> tuple[list[str], int, _FakeInstructor]:
     )
     monkeypatch.setattr(doctor, "_check_device", lambda ok, warn, fail: ok("Device: stub"))
     monkeypatch.setattr(
-        doctor, "_check_ocr_backend", lambda ok, warn, fail: ok("OCR backend: stub")
+        doctor, "_check_ocr_backend", lambda ok, warn, fail, **_: ok("OCR backend: stub")
     )
     fake = _FakeInstructor()
     monkeypatch.setattr("instructor.from_provider", fake)
@@ -1175,7 +1175,7 @@ def _linux_chain(monkeypatch, *backends):
 
     monkeypatch.setattr(
         "bibr.ocr.registry.resolve_backend_candidates",
-        lambda backend, settings: tuple(
+        lambda backend, settings, **_: tuple(
             OcrBackendCandidate(name, f"model-for-{name}", "paddle" if "paddle" in name else "glm")
             for name in backends
         ),
@@ -1212,7 +1212,7 @@ def test_check_ocr_backend_fails_when_no_chain_candidate_can_start(monkeypatch):
         run_config, "_ocr_candidate_unavailable_reason", lambda backend: f"{backend} is missing"
     )
     chew_refusal = run_config._preflight_ocr_runtime(
-        SimpleNamespace(ocr_backend="paddle", ocr_url=None)
+        SimpleNamespace(ocr_backend="paddle", ocr_url=None, llm_backend="cloud", no_llm=False)
     )
 
     rec = _Recorder()

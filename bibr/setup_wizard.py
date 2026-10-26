@@ -31,9 +31,9 @@ from bibr.local.cli import ui
 from bibr.local.llm_models import (
     REGISTRY,
     cuda_llm_backend_for,
+    default_variant,
     detect_hardware,
     get_model,
-    recommended_variant,
     variants_for,
 )
 from bibr.presets import PresetManager
@@ -224,9 +224,9 @@ def _local_llm_env(
     """Choose the default managed local LLM env for easy setup."""
     backend = _default_local_llm_backend(platform_key, memory_gb, sys_platform_name)
     runtime = _BACKEND_RUNTIME.get(backend)
-    picked = recommended_variant(platform_key, memory_gb, runtime) or recommended_variant(
-        platform_key, None, runtime
-    )
+    # The runtime serves the same variant when LLM_LOCAL_MODEL is unset
+    # (bibr.local.llm_models.default_local_model).
+    picked = default_variant(platform_key, memory_gb, runtime)
     if picked is None:  # pragma: no cover - registry invariant
         raise ValueError(f"no recommended local model for {platform_key}/{backend}")
     model, variant = picked
@@ -1418,9 +1418,7 @@ class SetupWizard:
             self.console.print(f"  [bold]{m.key}[/bold] — {m.label}{tag}")
         self.console.print("  [bold]custom[/bold] — any HF model id (you own quant/flags)")
 
-        recommended = recommended_variant(
-            platform_key, memory_gb, _BACKEND_RUNTIME.get(backend)
-        ) or recommended_variant(platform_key, None, _BACKEND_RUNTIME.get(backend))
+        recommended = default_variant(platform_key, memory_gb, _BACKEND_RUNTIME.get(backend))
         default_key = (
             recommended[0].key
             if recommended and recommended[0].key in keys

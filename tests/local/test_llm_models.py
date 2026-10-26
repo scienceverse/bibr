@@ -186,6 +186,88 @@ def test_default_local_model_follows_the_backend_runtime():
         default_local_model("cloud")
 
 
+_4B = "scienceverse/bibr-extract-qwen35-4b"
+_4B_W4A16 = "scienceverse/bibr-extract-qwen35-4b-W4A16"
+_4B_Q8 = "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
+_4B_Q4 = "scienceverse/bibr-extract-qwen35-4b-GGUF:Q4_K_M"
+
+
+@pytest.mark.parametrize(
+    ("memory_gb", "vllm_model", "llama_model"),
+    [
+        (32607 / 1024, _4B, _4B_Q8),  # RTX 5090
+        (24.0, _4B, _4B_Q8),  # RTX 3090 / 4090
+        (20475 / 1024, _4B, _4B_Q8),  # RTX 4000 Ada (20 GB)
+        (19.75, _4B, _4B_Q8),  # within the 0.25 GiB tolerance of 20
+        (19.7, _4B_W4A16, _4B_Q8),
+        (16.0, _4B_W4A16, _4B_Q8),
+        (12227 / 1024, _4B_W4A16, _4B_Q8),  # RTX 5070
+        (11.0, _4B_W4A16, _4B_Q8),  # RTX 2080 Ti / 1080 Ti size
+        (10.0, _4B_W4A16, _4B_Q8),  # RTX 3080 10 GB
+        (9.75, _4B_W4A16, _4B_Q8),
+        # Below every vLLM tier the vLLM answer is the variant that comes
+        # closest (its start is refused by the server's own check); the
+        # card's own default is llama.cpp (cuda_llm_backend_for).
+        (8188 / 1024, _4B_W4A16, _4B_Q8),  # RTX 4060
+        (6.0, _4B_W4A16, _4B_Q4),  # RTX 2060 / 3050 6 GB
+        (4.0, _4B_W4A16, "scienceverse/bibr-extract-qwen35-2b-GGUF:Q8_0"),
+        (None, _4B, _4B_Q8),  # unknown memory: the best build
+    ],
+)
+def test_default_local_model_follows_the_card(memory_gb, vllm_model, llama_model):
+    """``--llm local`` without setup serves the build setup writes for the card;
+    it used to serve the bf16 build everywhere, refused below 20 GB."""
+    assert default_local_model("vllm", memory_gb=memory_gb) == vllm_model
+    assert default_local_model("llama-cpp", memory_gb=memory_gb) == llama_model
+
+
+def test_default_local_model_probes_the_card(monkeypatch):
+    from bibr.ocr import registry
+
+    monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: 12227 / 1024)
+    assert default_local_model("vllm") == _4B_W4A16
+    monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: 6.0)
+    assert default_local_model("llama-cpp") == _4B_Q4
+    monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: None)
+    assert default_local_model("vllm") == _4B
+
+
+def test_default_local_model_mlx_follows_the_ram(monkeypatch):
+    monkeypatch.setattr(llm_models.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(llm_models.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(llm_models, "_system_memory_gb", lambda: 16.0)
+    assert default_local_model("vllm-mlx") == "scienceverse/bibr-extract-qwen35-4b-mlx-8bit"
+    monkeypatch.setattr(llm_models, "_system_memory_gb", lambda: 4.0)
+    assert default_local_model("rapid-mlx") == "scienceverse/bibr-extract-qwen35-2b-mlx-8bit"
+
+
+@pytest.mark.parametrize("capability", [6.1, 7.0, 7.5])
+def test_pre_ampere_cards_run_the_llm_on_llama_cpp(capability):
+    from bibr.local.llm_models import cuda_llm_backend_for
+
+    for memory_gb in (None, 11.0, 16.0, 24.0, 48.0):
+        assert cuda_llm_backend_for(memory_gb, compute_capability=capability) == "llama-cpp"
+
+
+@pytest.mark.parametrize("capability", [8.0, 8.6, 12.0, None])
+def test_ampere_and_newer_or_unknown_keep_the_size_rule(capability):
+    from bibr.local.llm_models import cuda_llm_backend_for
+
+    assert cuda_llm_backend_for(24.0, compute_capability=capability) == "vllm"
+    assert cuda_llm_backend_for(10.0, compute_capability=capability) == "vllm"
+    assert cuda_llm_backend_for(8.0, compute_capability=capability) == "llama-cpp"
+
+
+def test_cuda_llm_backend_probes_the_compute_capability(monkeypatch):
+    from bibr.local.llm_models import cuda_llm_backend_for
+    from bibr.ocr import registry
+
+    monkeypatch.setattr(registry, "_nvidia_compute_capability", lambda: 7.5)
+    assert cuda_llm_backend_for(24.0) == "llama-cpp"
+    monkeypatch.setattr(registry, "_nvidia_compute_capability", lambda: 8.6)
+    assert cuda_llm_backend_for(24.0) == "vllm"
+
+
 def test_registry_server_args_unknown_model_empty():
     assert registry_server_args("someone/custom-model") == ()
 

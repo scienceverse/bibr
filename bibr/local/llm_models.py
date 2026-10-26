@@ -48,6 +48,9 @@ class LocalLLMVariant:
 #: far from the next smaller sizes (an 11 GB card reports 11,264 MiB).
 CARD_SIZE_TOLERANCE_GB = 0.25
 
+#: Default for the arguments probed from this machine when not given.
+_PROBE = object()
+
 #: The smallest card (GiB of ``memory.total``, within ``CARD_SIZE_TOLERANCE_GB``)
 #: whose default LLM runs on vLLM: the 4B student's W4A16 build, taking turns
 #: with PaddleOCR-VL on vLLM. Below it the default is the 4B's GGUF build on
@@ -302,7 +305,35 @@ def recommended_variant(
     return None
 
 
-def cuda_llm_backend_for(memory_gb: float | None) -> str:
+def default_variant(
+    platform_key: str,
+    memory_gb: float | None,
+    runtime: str | None = None,
+) -> tuple[LocalLLMModel, LocalLLMVariant] | None:
+    """The default model and variant for a machine and runtime: setup's and the runtime's.
+
+    The recommended variant that fits ``memory_gb`` (``recommended_variant``).
+    When none fits, the runtime's recommended variant with the smallest
+    minimum, which comes closest to starting (a start that cannot fit is
+    refused by the managed server's own check). ``memory_gb`` None (unknown)
+    picks the best variant for the platform and runtime. ``bibr setup``
+    writes this as ``LLM_LOCAL_MODEL``, and ``default_local_model`` serves it
+    when ``LLM_LOCAL_MODEL`` is unset, so the two agree on every card.
+    """
+    picked = recommended_variant(platform_key, memory_gb, runtime)
+    if picked is not None or memory_gb is None:
+        return picked
+    candidates = [
+        (model, variant)
+        for model in (get_model(key) for key in RECOMMENDED_MODEL_KEYS)
+        for variant in variants_for(model, platform_key, None, runtime)
+    ]
+    return min(candidates, key=lambda pair: pair[1].min_vram_gb, default=None)
+
+
+def cuda_llm_backend_for(
+    memory_gb: float | None, *, compute_capability: float | None | object = _PROBE
+) -> str:
     """Managed LLM backend for a CUDA card with ``memory_gb`` of VRAM (None = unknown).
 
     vLLM only when a vLLM variant of a recommended model actually fits (the
@@ -310,8 +341,20 @@ def cuda_llm_backend_for(memory_gb: float | None) -> str:
     whose GGUF builds of the students go down to 3 GB. The old rule ("vLLM
     above 8 GB") handed 9-10 GB cards a plan whose only vLLM variant
     (NuExtract 3 bf16, 11 GB) OOMed after OCR, because the fit filter was
-    dropped silently when nothing fit.
+    dropped silently when nothing fit. A card whose compute capability is
+    below ``bibr.ocr.registry.VLLM_MIN_COMPUTE_CAPABILITY`` (read when
+    ``compute_capability`` is not given; unreadable counts as fine) gets
+    llama.cpp at any size.
     """
+    from bibr.ocr.registry import vllm_compute_capability_blocker
+
+    blocker = (
+        vllm_compute_capability_blocker()
+        if compute_capability is _PROBE
+        else vllm_compute_capability_blocker(capability=compute_capability)
+    )
+    if blocker is not None:
+        return "llama-cpp"
     if memory_gb is None:
         return "vllm"
     if recommended_variant("cuda", memory_gb, "vllm") is not None:
@@ -329,20 +372,42 @@ _BACKEND_VARIANT_FILTER: dict[str, tuple[str, str | None]] = {
 }
 
 
-def default_local_model(backend: str) -> str:
+def _detected_memory_gb(platform_key: str) -> float | None:
+    """This machine's memory for ``platform_key``'s tiers, as setup reads it, or None.
+
+    The first NVIDIA card's total for ``cuda`` (probed once per process), the
+    system RAM on Apple Silicon for ``mlx``; None on other hardware.
+    """
+    if platform_key == "cuda":
+        from bibr.ocr.registry import _cuda_vram_gb
+
+        return _cuda_vram_gb()
+    if platform_key == "mlx" and platform.system() == "Darwin" and platform.machine() == "arm64":
+        return _system_memory_gb()
+    return None
+
+
+def default_local_model(backend: str, *, memory_gb: float | None | object = _PROBE) -> str:
     """The recommended model's variant for ``backend`` when ``LLM_LOCAL_MODEL`` is unset.
 
     Every managed server used to read one config default — the 8-bit MLX
     build — so a hand-written ``LLM_BACKEND=vllm`` or ``llama-cpp`` downloaded
-    weights the runtime could not load. The answer is the best recommended
-    entry that the backend's runtime can serve: the 4B student, as bf16 for
-    vLLM, GGUF Q8_0 for llama.cpp and 8-bit for MLX.
+    weights the runtime could not load. The answer is ``default_variant`` for
+    the backend's runtime and this machine's memory (``memory_gb`` when
+    given), the variant ``bibr setup`` writes on the same machine: on CUDA the
+    4B student as bf16 for vLLM from 20 GB, its W4A16 build below, GGUF Q8_0
+    for llama.cpp from 7 GB and Q4_K_M below; 8-bit for MLX. It used to ignore
+    the card, so ``--llm local`` without setup on a 10-19 GB card served the
+    bf16 build, whose start is refused there.
     """
     try:
         platform_key, runtime = _BACKEND_VARIANT_FILTER[backend]
     except KeyError:
         raise ValueError(f"no default local model for LLM backend {backend!r}") from None
-    picked = recommended_variant(platform_key, None, runtime)
+    memory = _detected_memory_gb(platform_key) if memory_gb is _PROBE else memory_gb
+    picked = default_variant(
+        platform_key, memory if isinstance(memory, int | float) else None, runtime
+    )
     if picked is None:  # pragma: no cover - registry invariant
         raise ValueError(f"the registry has no recommended {platform_key}/{runtime} variant")
     return picked[1].hf_id
