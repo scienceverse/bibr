@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `LLM_LOCAL_MIN_VRAM_GB` sets the minimum GPU memory of the managed vLLM LLM
+  server's model, for a model bibr's registry does not list (a local path has
+  no minimum, so a start that cannot fit used to be launched and fail inside
+  vLLM). For a local copy of the 4B student's W4A16 build it is 7 GB, served
+  with `--max-num-seqs 64`; the configuration guide has the settings.
+
 ### Fixed
 
 - A fully local batch on one NVIDIA card with `onnxruntime-gpu` installed no

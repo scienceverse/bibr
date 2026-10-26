@@ -75,6 +75,24 @@ _QWEN35_STUDENT_SERVER_ARGS: tuple[str, ...] = (
     "128",
 )
 
+#: The 4B student's W4A16 GPTQ build (int4 weights, the Gated DeltaNet A_log
+#: and norm tensors kept in F32), which is not in ``REGISTRY`` until it is
+#: published. Its floor follows the bf16 one: the smallest budget measured to
+#: start, rounded up to a whole GB. A first start (empty vLLM compile cache,
+#: 1 GiB of the card held by another process) worked at 6.71 GiB and failed
+#: at 5.98 GiB with ``--max-num-seqs 64``: compiling during vLLM's memory
+#: profile takes about 1.1 GiB more than a warm start, so a warm 5.98 GiB
+#: start worked. Hence 7, with 64 sequences: at 128, vLLM needs a Mamba cache
+#: block for each of them, about 2.1 GiB of KV cache instead of 1.1, and the
+#: floor would be about 8 (estimated, not measured). Select it for a local copy of the build with
+#: ``LLM_LOCAL_MIN_VRAM_GB=7`` and these args in ``LLM_VLLM_EXTRA_ARGS``.
+QWEN35_4B_W4A16_MIN_VRAM_GB = 7
+QWEN35_4B_W4A16_SERVER_ARGS: tuple[str, ...] = (
+    *_QWEN35_STUDENT_SERVER_ARGS,
+    "--max-num-seqs",
+    "64",
+)
+
 #: Hub revisions published 2026-10-14 (the merged safetensors repos).
 _QWEN35_4B_REVISION = "6ab47a4e4e8b1b76c1ab234aec66f360683ff9fc"
 _QWEN35_2B_REVISION = "81d0442d0ecadc20e1b9587d54bff42242123870"

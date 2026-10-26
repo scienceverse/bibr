@@ -105,9 +105,9 @@ class VllmLlmServer:
         """
         self._stop_event = stop_event
         self._settings = settings if settings is not None else snapshot_settings()
-        from bibr.local.llm_models import default_local_model
+        from bibr.local.vllm_share import managed_llm_model
 
-        self._model = model or self._settings.llm.local_model or default_local_model("vllm")
+        self._model = managed_llm_model(self._settings, model)
         self._port = port if port is not None else self._settings.llm.vllm_port
         if mem_fraction is None:
             mem_fraction = self._settings.llm.local_mem_fraction
@@ -193,13 +193,8 @@ class VllmLlmServer:
             registry.managed_gpu_memory,
             wait=lambda seconds: pause_startup_poll(seconds, self._stop_event, "vLLM"),
         )
-        extra_args = self._settings.llm.vllm_extra_args
-        share = vllm_share.size_managed_llm_share(
-            reading,
-            cap=cap,
-            floor_gb=vllm_share.managed_llm_floor_gb(self._model),
-            reserve_gb=vllm_share.overshoot_reserve_gb(self._model, extra_args),
-            swaps_with_ocr=swaps_with_ocr,
+        share = vllm_share.managed_llm_share(
+            reading, self._settings, self._model, cap=cap, swaps_with_ocr=swaps_with_ocr
         )
         if share.reason == "floor":
             logger.warning(

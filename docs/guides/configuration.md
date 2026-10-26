@@ -267,6 +267,20 @@ memory was free, that chunk's papers fail, and the next chunk tries again. Set
 `LLM_LOCAL_MEM_FRACTION`, or `--gpu-memory-utilization` in
 `LLM_VLLM_EXTRA_ARGS`, to start the LLM server at exactly that share instead.
 
+The minimum comes from bibr's model registry, which lists the published
+builds. A model it does not list, such as a local path, has none, so a start
+that cannot fit is launched and fails inside vLLM. Set `LLM_LOCAL_MIN_VRAM_GB`
+to give it one. For a local copy of the 4B student's W4A16 build, the
+minimum is 7 GB with at most 64 sequences (more with 128, since vLLM keeps a
+cache block for each sequence):
+
+```bash
+LLM_LOCAL_MODEL=/path/to/bibr-extract-qwen35-4b-W4A16
+LLM_LOCAL_MIN_VRAM_GB=7
+LLM_VLLM_EXTRA_ARGS='--language-model-only --generation-config vllm --max-model-len 32768 --max-num-seqs 64'
+LLM_CHAT_TEMPLATE_KWARGS='{"enable_thinking": false}'
+```
+
 `bibr chew`, `bibr batch` and `bibr mcp` stop the managed servers they started
 when the command ends, including on Ctrl-C, SIGTERM (`kill`, `docker stop`,
 `timeout`, an MCP host stopping `bibr mcp`) and SIGHUP (a closed terminal or SSH

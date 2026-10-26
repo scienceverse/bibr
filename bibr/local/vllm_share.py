@@ -135,14 +135,19 @@ def overshoot_reserve_gb(model: str, extra_args: str | None) -> float:
     return LLM_CONTEXT_RESERVE_GB + LLM_CAPTURE_RESERVE_GB_AT_512 * capture / _VLLM_MAX_CAPTURE_SIZE
 
 
-def managed_llm_floor_gb(model: str) -> float | None:
-    """The registry's minimum VRAM for *model* served by vLLM, None if it is not listed.
+def managed_llm_floor_gb(model: str, settings: GlobalSettings | None = None) -> float | None:
+    """The minimum VRAM for *model* served by vLLM, None if it is not known.
 
-    It covers the weights, vLLM's profiling activations and the KV cache the
-    server needs to start (one Mamba block per sequence for the hybrid
-    Qwen3.5 students, and ``--max-model-len`` tokens): 12 GB for the 4B
-    student, rounded up from its measured 11.7 GB low-memory peak.
+    ``LLM_LOCAL_MIN_VRAM_GB`` when set (*settings*), so a model the registry
+    does not list, such as a local path to the 4B student's W4A16 build, gets
+    a floor too; else the registry's ``min_vram_gb`` for the model's vLLM
+    variant. It covers the weights, vLLM's profiling activations and the KV
+    cache the server needs to start (one Mamba block per sequence for the
+    hybrid Qwen3.5 students, and ``--max-model-len`` tokens): 12 GB for the
+    4B student, rounded up from its measured 11.7 GB low-memory peak.
     """
+    if settings is not None and settings.llm.local_min_vram_gb is not None:
+        return float(settings.llm.local_min_vram_gb)
     from bibr.local.llm_models import REGISTRY
 
     for entry in REGISTRY:
@@ -232,6 +237,39 @@ def size_managed_llm_share(
         f"takes beyond its share while starting, and {LLM_ONNX_MIN_HEADROOM_GB:.1f} GiB for "
         "bibr's GPU sessions). Free GPU memory (other processes), pick a smaller model "
         "(LLM_LOCAL_MODEL), or set LLM_LOCAL_MEM_FRACTION to choose the share yourself"
+    )
+
+
+def managed_llm_model(settings: GlobalSettings, model: str | None = None) -> str:
+    """The model a managed vLLM LLM server for *settings* serves.
+
+    *model*, else ``LLM_LOCAL_MODEL``, else the registry's default vLLM model.
+    """
+    from bibr.local.llm_models import default_local_model
+
+    return model or settings.llm.local_model or default_local_model("vllm")
+
+
+def managed_llm_share(
+    reading: GpuMemory | None,
+    settings: GlobalSettings,
+    model: str,
+    *,
+    cap: float,
+    swaps_with_ocr: bool,
+) -> LlmShare:
+    """``size_managed_llm_share`` with *model*'s floor and overshoot reserve.
+
+    The one place a start (``VllmLlmServer``) and the check before a chunk's
+    OCR (``ResourceManager.llm_start_refusal``) get the floor and the reserve,
+    so the two always agree. Raises ``ManagedLlmVramError`` as that does.
+    """
+    return size_managed_llm_share(
+        reading,
+        cap=cap,
+        floor_gb=managed_llm_floor_gb(model, settings),
+        reserve_gb=overshoot_reserve_gb(model, settings.llm.vllm_extra_args),
+        swaps_with_ocr=swaps_with_ocr,
     )
 
 

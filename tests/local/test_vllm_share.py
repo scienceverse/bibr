@@ -496,3 +496,165 @@ class TestServerStart:
         cmd = popen.call_args[0][0]
         last = len(cmd) - 1 - cmd[::-1].index("--gpu-memory-utilization")
         assert cmd[last + 1] == "0.5"
+
+
+W4A16_LOCAL = "/models/bibr-extract-qwen35-4b-W4A16"
+
+
+def _w4a16_settings(floor: float | None = 7.0):
+    """Settings for a local copy of the 4B W4A16 build, selected as documented."""
+    import shlex
+
+    from bibr.config import GlobalSettings
+    from bibr.local.llm_models import QWEN35_4B_W4A16_SERVER_ARGS
+
+    settings = GlobalSettings()
+    settings.llm.local_model = W4A16_LOCAL
+    settings.llm.vllm_extra_args = shlex.join(QWEN35_4B_W4A16_SERVER_ARGS)
+    if floor is not None:
+        settings.llm.local_min_vram_gb = floor
+    return settings
+
+
+def _hog(hog_gb: float, own_gb: float) -> GpuMemory:
+    """A 3090 with another process holding *hog_gb*: a smaller card, emulated."""
+    return GpuMemory(total_gb=CUDA_3090, free_gb=CUDA_3090 - hog_gb - own_gb, own_gb=own_gb)
+
+
+class TestFloorSetting:
+    """``LLM_LOCAL_MIN_VRAM_GB`` gives a floor to a model the registry does not list."""
+
+    def test_unset_by_default(self):
+        from bibr.config import GlobalSettings
+
+        assert GlobalSettings().llm.local_min_vram_gb is None
+
+    def test_read_from_the_environment(self, monkeypatch):
+        from bibr.config import GlobalSettings
+
+        monkeypatch.setenv("LLM_LOCAL_MIN_VRAM_GB", "7")
+        assert GlobalSettings().llm.local_min_vram_gb == 7.0
+
+    @pytest.mark.parametrize("bad", ["0", "-1"])
+    def test_must_be_positive(self, monkeypatch, bad):
+        from pydantic import ValidationError
+
+        from bibr.config import GlobalSettings
+
+        monkeypatch.setenv("LLM_LOCAL_MIN_VRAM_GB", bad)
+        with pytest.raises(ValidationError):
+            GlobalSettings()
+
+    def test_overrides_the_registry_and_covers_a_local_path(self):
+        settings = _w4a16_settings()
+        assert managed_llm_floor_gb(W4A16_LOCAL) is None
+        assert managed_llm_floor_gb(W4A16_LOCAL, settings) == 7.0
+        assert managed_llm_floor_gb(STUDENT_4B, settings) == 7.0
+        assert managed_llm_floor_gb(STUDENT_4B, _w4a16_settings(floor=None)) == 12.0
+
+    def test_model_resolution(self):
+        from bibr.config import GlobalSettings
+
+        assert vllm_share.managed_llm_model(_w4a16_settings()) == W4A16_LOCAL
+        assert vllm_share.managed_llm_model(_w4a16_settings(), "org/other") == "org/other"
+        assert vllm_share.managed_llm_model(GlobalSettings()) == STUDENT_4B
+
+
+class TestW4a16Floor:
+    """The 4B W4A16 build's floor (7 GB at 64 sequences) on emulated 16 and 12 GB cards.
+
+    Readings are E25 V2's (an 8 GiB hog on the 3090): bibr 0.50 GiB before
+    the first LLM start, 1.98-2.06 GiB before the later ones, which refused
+    the bf16 4B (12 GB floor) at 13.48-13.57 GiB free.
+    """
+
+    def _share(self, reading, floor=7.0):
+        settings = _w4a16_settings(floor)
+        return vllm_share.managed_llm_share(
+            reading, settings, W4A16_LOCAL, cap=0.85, swaps_with_ocr=True
+        )
+
+    def test_constants(self):
+        from bibr.local.llm_models import (
+            QWEN35_4B_W4A16_MIN_VRAM_GB,
+            QWEN35_4B_W4A16_SERVER_ARGS,
+            registry_server_args,
+        )
+
+        assert QWEN35_4B_W4A16_MIN_VRAM_GB == 7
+        # Same student args, with the last --max-num-seqs (which vLLM keeps) at 64.
+        assert QWEN35_4B_W4A16_SERVER_ARGS[:-2] == registry_server_args(STUDENT_4B)[2:]
+        assert QWEN35_4B_W4A16_SERVER_ARGS[-2:] == ("--max-num-seqs", "64")
+        # 64 sequences capture up to 128: 0.5 + 1.0 x 128 / 512.
+        assert overshoot_reserve_gb(W4A16_LOCAL, _w4a16_settings().llm.vllm_extra_args) == 0.75
+
+    @pytest.mark.parametrize(("free", "own"), [(15.04, 0.50), (13.57, 1.98), (13.48, 2.06)])
+    def test_16gb_swap_path_starts_sized_from_free_memory(self, free, own):
+        share = self._share(GpuMemory(total_gb=CUDA_3090, free_gb=free, own_gb=own))
+        assert share.reason == "free"
+        assert share.share == 0.37
+        assert share.budget_gb >= 7.0
+
+    def test_12gb_first_start_takes_the_floor(self):
+        share = self._share(_hog(12.0, 0.50))
+        assert share.reason == "floor"
+        assert share.share == 0.30
+        assert share.budget_gb >= 7.0
+        assert share.headroom_gb == 1.0
+
+    def test_12gb_grown_bibr_still_fits_until_2_8_gib(self):
+        assert self._share(_hog(12.0, 2.42)).reason == "floor"
+        with pytest.raises(ManagedLlmVramError) as exc:
+            self._share(_hog(12.0, 2.90))
+        message = str(exc.value)
+        assert "the model's 7.0 GiB floor, 0.75 GiB vLLM takes beyond its share" in message
+        assert "needs 8.75 GiB" in message
+
+    def test_without_the_setting_a_local_path_has_no_floor(self):
+        # Sized from free memory however little is left: vLLM would be launched
+        # to fail instead of a typed refusal.
+        share = self._share(_hog(12.0, 2.90), floor=None)
+        assert share.reason == "free"
+        assert share.floor_gb is None
+        assert share.budget_gb < 7.0
+
+    def test_the_bf16_4b_is_refused_where_w4a16_starts(self):
+        reading = GpuMemory(total_gb=CUDA_3090, free_gb=13.57, own_gb=1.98)
+        with pytest.raises(ManagedLlmVramError):
+            _size(reading)
+        assert self._share(reading).share == 0.37
+
+    def test_server_launches_the_local_build_with_its_args(self, monkeypatch):
+        monkeypatch.setattr(vllm_share, "_SETTLE_INTERVAL_S", 0.0)
+        monkeypatch.setattr("bibr.ocr.registry.managed_gpu_memory", lambda: _hog(12.0, 0.5))
+        server, popen = _mk_server(
+            settings=_w4a16_settings(),
+            port=9999,
+            mem_fraction=0.85,
+            share_from_free_memory=True,
+            swaps_with_ocr=True,
+        )
+        cmd = popen.call_args[0][0]
+        assert cmd[cmd.index("--model") + 1] == W4A16_LOCAL
+        assert _launched_share(popen) == "0.3"
+        assert cmd[-2:] == ["--max-num-seqs", "64"]
+        server._process = None
+
+    def test_server_refuses_below_the_floor_without_launching(self, monkeypatch):
+        from bibr.local import vllm_llm
+
+        monkeypatch.setattr(vllm_share, "_SETTLE_INTERVAL_S", 0.0)
+        monkeypatch.setattr("bibr.ocr.registry.managed_gpu_memory", lambda: _hog(12.0, 2.9))
+        with (
+            patch("importlib.util.find_spec", return_value=object()),
+            patch.object(vllm_llm.subprocess, "Popen") as popen,
+            pytest.raises(ManagedLlmVramError),
+        ):
+            vllm_llm.VllmLlmServer(
+                settings=_w4a16_settings(),
+                port=9999,
+                mem_fraction=0.85,
+                share_from_free_memory=True,
+                swaps_with_ocr=True,
+            )
+        popen.assert_not_called()

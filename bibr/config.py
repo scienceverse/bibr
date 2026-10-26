@@ -716,6 +716,18 @@ class LlmOptions(_BibrSettings):
             "server starts. Set it to start the server at exactly this share."
         ),
     )
+    local_min_vram_gb: float | None = Field(
+        None,
+        gt=0.0,
+        description=(
+            "Minimum GPU memory (GB) the managed vLLM LLM server's model needs. When bibr sizes "
+            "the server's share at a start, a share below it is refused before vLLM is "
+            "launched. Left unset, it is the registry's floor for the model (12 for the 4B "
+            "student, 8 for the 2B; none for a model the registry does not list). Set it for "
+            "a local build, such as 7 for the 4B student's W4A16 build served with "
+            "--max-num-seqs 64."
+        ),
+    )
     vllm_mlx_port: int = Field(8767, description="Port for the managed vllm-mlx LLM server.")
     # Extra CLI args appended to the managed ``vllm_mlx.server`` command
     # (shlex-split). E.g. disable Qwen thinking and strip reasoning content:
