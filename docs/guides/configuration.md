@@ -345,8 +345,8 @@ Cards older than Ampere (compute capability below 8.0: Turing, Volta,
 Pascal) run the LLM and the automatic OCR on llama.cpp at any size: bibr's
 vLLM models are bf16, which vLLM 0.31 serves from compute capability 8.0, and
 on an older card it casts them to float16, which bibr has not tested. No
-Turing or Pascal card has been tested with either runtime; this is a
-conservative routing rule. The advanced wizard
+batch on a Turing or Pascal card has been recorded with either runtime; this
+is a conservative routing rule. The advanced wizard
 also offers the 2B student on vLLM from 12 GB
 (`scienceverse/bibr-extract-qwen35-2b`, a 6.25 GiB budget at 128 sequences and
 8.25 GiB free to start), Gemma 4 E4B on CUDA, and custom model IDs.

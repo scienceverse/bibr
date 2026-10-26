@@ -49,8 +49,8 @@ passed 38 to the bf16 4B's 41, a difference within chance at that size.
 
 Cards older than Ampere (compute capability below 8.0: Turing, Volta, Pascal)
 get the llama.cpp row for their size at any size, because bibr's vLLM models
-are bf16, which vLLM serves from compute capability 8.0. No such card has been
-tested; this is a conservative routing rule. A cloud or remote LLM with bibr's
+are bf16, which vLLM serves from compute capability 8.0. No batch on such a
+card has been recorded; this is a conservative routing rule. A cloud or remote LLM with bibr's
 local OCR keeps the balanced mode on cards above 8 GB, since no LLM server
 shares the card.
 

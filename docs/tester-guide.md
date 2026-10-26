@@ -273,9 +273,11 @@ installing a different PyTorch inside the venv or enabling the `gpu` extra.
 **Cards older than Ampere (Turing, e.g. RTX 20-series, GTX 16-series; Volta;
 Pascal), at any memory size:** bibr's vLLM models are bf16, which vLLM serves
 only from compute capability 8.0, so `bibr setup` and `--llm local` run the
-LLM and the OCR on llama.cpp there, as on a small card. No Turing or Pascal
-card has been tested with bibr: this is a conservative routing rule, not a
-measured result. An explicit `--llm vllm` or `--ocr paddle-vllm` still starts
+LLM and the OCR on llama.cpp there, as on a small card. This is a
+conservative routing rule, not a measured result: no batch on a Turing or
+Pascal card has been recorded, with this rule or with the vLLM routing before
+it. (The Pascal notes above came with earlier fixes for GTX 10-series cards,
+not from a measured run.) An explicit `--llm vllm` or `--ocr paddle-vllm` still starts
 vLLM. Going by vLLM 0.31's source, it then casts the bf16 models to float16,
 and its 4-bit kernels (the W4A16 build) need compute capability 7.5, which
 rules out Pascal; none of this has been run.
