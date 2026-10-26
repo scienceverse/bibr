@@ -1028,6 +1028,20 @@ _SHORT_NATIVE_TEXT_MIN_CHARS = 3
 # the box caught part of the formula, so that region goes to OCR instead.
 _FORMULA_NUMBER_MIN_CHARS = 1
 _FORMULA_NUMBER_MAX_CHARS = 16
+# Text-layer equation numbers must also look like one once whitespace is
+# removed: an optional bracket, up to four letters (a section or appendix
+# prefix, a roman numeral), digits with up to two dotted or dashed parts, an
+# optional letter suffix and an optional closing bracket. Anything else, such
+# as brackets from a symbol font ("ð1Þ" for "(1)") or a formula
+# glyph the box caught ("g (3)"), goes to OCR.
+_FORMULA_NUMBER_RE = re.compile(
+    r"[(\[]?[A-Za-z]{0,4}[.\-]?\d{0,3}(?:[.\-\u2013]\d{1,3}){0,2}[a-z]?[)\]]?"
+)
+# Springer PDFs carry an invisible run of the font subset's digits and
+# punctuation, "(0123456789().,-volV)", in the running head beside the DOI
+# (white fill, 1 pt). OCR never reads it, but the text layer does, and in a
+# header it glues onto the DOI ("...0654-7(0123456789(").
+_GLYPH_SET_MARKER_RE = re.compile(r"\(?0123456789[().,\-volV]{0,12}")
 
 _FONT_SAMPLE_SIZE = 15
 _FONT_BBOX_TOLERANCE = 5.0  # PDF points
@@ -1239,6 +1253,12 @@ def _sample_page_font_metadata(
             region["_is_italic"] = is_italic
 
 
+def _strip_glyph_set_markers(text: str) -> str:
+    """Drop Springer's invisible glyph-set runs, keeping the line breaks."""
+    lines = (" ".join(line.split()) for line in _GLYPH_SET_MARKER_RE.sub(" ", text).split("\n"))
+    return "\n".join(line for line in lines if line)
+
+
 def _fill_page_regions_from_textpage(
     textpage,
     crop_box: tuple[float, float, float, float],
@@ -1304,6 +1324,12 @@ def _fill_page_regions_from_textpage(
             effective_min_chars = min(min_chars, _FORMULA_NUMBER_MIN_CHARS)
             if len(native_text.strip()) > _FORMULA_NUMBER_MAX_CHARS:
                 continue
+            compact = "".join(native_text.split())
+            if not (_FORMULA_NUMBER_RE.fullmatch(compact) and any(ch.isalnum() for ch in compact)):
+                continue
+            native_text = compact
+        if label in HEADER_FOOTER_LABELS and "0123456789" in native_text:
+            native_text = _strip_glyph_set_markers(native_text)
         if len(native_text.strip()) < effective_min_chars:
             continue
         if not _is_native_text_usable(native_text, min_printable_ratio):
