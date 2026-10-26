@@ -234,8 +234,10 @@ LLM_API_KEY=your-endpoint-key
 
 `--llm local` starts a managed server. It resolves to Rapid-MLX on Apple
 Silicon when that executable is available, otherwise vllm-mlx; llama.cpp on
-Windows or CUDA cards below 10 GB; and vLLM on Linux/CUDA systems with at
-least 10 GB (or when VRAM detection is unavailable).
+Windows, CUDA cards below 10 GB and CUDA cards older than Ampere (compute
+capability below 8.0); and vLLM on other Linux/CUDA systems with at least
+10 GB (or when VRAM detection is unavailable). With the same card it picks the
+model, the memory mode and the OCR that `bibr setup` writes.
 Explicit choices are `vllm`, `vllm-mlx`, `rapid-mlx`, `llama-cpp`, and `llmster`.
 The OCR and LLM choices are independent, so local OCR with a cloud LLM is a
 supported hybrid configuration. A managed vLLM LLM server and the managed
@@ -330,16 +332,29 @@ matches a card that reports up to 0.25 GiB under a size (an RTX 5070 reports
 12,227 MiB) to that size, for the model and for the memory mode; PaddleOCR-VL's
 8 GB minimum has no such slack. On a Linux card below 10 GB that could run
 PaddleOCR-VL, setup sets `OCR_BACKEND=glm-llama`, so OCR and the LLM both run
-on llama.cpp and take turns on the card. Cards below 12 GB get the aggressive
-memory mode (`PIPELINE_MEMORY_MODE=aggressive`, 3 papers a chunk), which
-unloads bibr's own models before each start of the LLM. The advanced wizard
+on llama.cpp and take turns on the card; without setup, the automatic OCR
+chain does the same whenever the LLM runs on llama.cpp. Cards below 12 GB
+whose LLM server bibr manages get the aggressive memory mode
+(`PIPELINE_MEMORY_MODE=aggressive`, 3 papers a chunk), which unloads bibr's
+own models before each start of the LLM; with a cloud or remote LLM, only
+cards of 8 GB or less do. In the balanced mode, when the memory free cannot
+start the managed vLLM LLM server, bibr first releases the same models (and a
+resident OCR server) and refuses the start only if it is still short.
+
+Cards older than Ampere (compute capability below 8.0: Turing, Volta,
+Pascal) run the LLM and the automatic OCR on llama.cpp at any size: bibr's
+vLLM models are bf16, which vLLM 0.31 serves from compute capability 8.0, and
+on an older card it casts them to float16, which bibr has not tested. No
+Turing or Pascal card has been tested with either runtime; this is a
+conservative routing rule. The advanced wizard
 also offers the 2B student on vLLM from 12 GB
 (`scienceverse/bibr-extract-qwen35-2b`, a 6.25 GiB budget at 128 sequences and
 8.25 GiB free to start), Gemma 4 E4B on CUDA, and custom model IDs.
 `LLM_LOCAL_MODEL` selects managed local weights; `LLM_MODEL` and `--llm-model`
 select the provider model. When `LLM_LOCAL_MODEL` is unset, every managed
-runtime uses the 4B model: bf16 on vLLM, the Q8_0 GGUF on llama.cpp and the
-8-bit build on vllm-mlx. The managed llama.cpp server starts with thinking off
+runtime uses the build `bibr setup` recommends for the card: on vLLM the 4B
+bf16 from 20 GB and its W4A16 build below, on llama.cpp the 4B Q8_0 from 7 GB
+and Q4_K_M below, and the 8-bit build on vllm-mlx. The managed llama.cpp server starts with thinking off
 (`--reasoning off`, or `--reasoning-budget 0` on older builds, plus
 `--chat-template-kwargs '{"enable_thinking": false}'`) when the installed
 build supports it, and `bibr setup` also writes

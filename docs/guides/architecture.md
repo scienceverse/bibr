@@ -374,7 +374,8 @@ Pipeline orchestrator (`bibr/local/pipeline.py`). Loads models sequentially to f
 
 Memory management modes control GPU VRAM usage: `aggressive` (load/unload per phase), `balanced` (keep layout + segmenter resident; OCR also stays resident across chunks unless a local LLM server needs the VRAM), `keep_all` (everything loaded).
 
-Auto-selection uses `aggressive` with ≤8 GB system RAM or a CUDA card below 12 GB;
+Auto-selection uses `aggressive` with ≤8 GB system RAM, a CUDA card below 12 GB
+that a managed local LLM server shares, or a CUDA card of 8 GB or less;
 otherwise it uses `balanced`. With a cloud LLM and non-aggressive memory
 mode, `PIPELINE_STREAM_BACKHALF=true` allows completed files' parsing,
 extraction, enrichment, and export to overlap subsequent OCR work. Managed

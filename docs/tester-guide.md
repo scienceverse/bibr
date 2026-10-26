@@ -236,7 +236,7 @@ uv run bibr demo
 ### Linux, NVIDIA GPU below 10 GB (e.g. GTX 1060, RTX 4060)
 
 Below 10 GB, `bibr setup` uses **llama.cpp** for OCR and the local LLM. From
-10 GB, both run through vLLM, with the 4-bit W4A16 build of bibr's fine-tuned
+10 GB, on Ampere or newer cards, both run through vLLM, with the 4-bit W4A16 build of bibr's fine-tuned
 4B model below 20 GB and its bf16 build from 20 GB. Install a
 **CUDA** (or Vulkan) build of llama.cpp separately:
 
@@ -251,14 +251,17 @@ uv sync --extra all
 # No additional Python serving extra is needed for llama.cpp.
 ```
 
-3. Run advanced setup for a cloud LLM plus `glm-llama`, then check the resolved
-   configuration. Accept the extras-install offer if dependencies are missing;
-   setup installs with `--inexact` to retain other installed extras.
+3. Run setup and accept its recommended local plan (GLM-OCR and the 4B
+   GGUF build, both on llama.cpp, in the aggressive memory mode), then check
+   the resolved configuration. Accept the extras-install offer if dependencies
+   are missing; setup installs with `--inexact` to retain other installed
+   extras. To use a cloud LLM instead, choose it in `bibr setup --advanced`
+   and keep `glm-llama` for OCR.
 
 ```bash
-uv run bibr setup --advanced
+uv run bibr setup
 uv run bibr doctor
-uv run bibr chew paper.pdf --pages 1-3 --ocr glm-llama --memory aggressive -v
+uv run bibr chew paper.pdf --pages 1-3 -v
 ```
 
 **About “CUDA problems” on older cards (Pascal / GTX 10-series):** current
@@ -266,6 +269,16 @@ PyTorch wheels no longer ship kernels for compute capability 6.x. Layout and
 NER then run on **CPU** automatically — that is expected and not fatal. GPU
 work for OCR/LLM goes through llama.cpp. Do not try to “fix” this by
 installing a different PyTorch inside the venv or enabling the `gpu` extra.
+
+**Cards older than Ampere (Turing, e.g. RTX 20-series, GTX 16-series; Volta;
+Pascal), at any memory size:** bibr's vLLM models are bf16, which vLLM serves
+only from compute capability 8.0, so `bibr setup` and `--llm local` run the
+LLM and the OCR on llama.cpp there, as on a small card. No Turing or Pascal
+card has been tested with bibr: this is a conservative routing rule, not a
+measured result. An explicit `--llm vllm` or `--ocr paddle-vllm` still starts
+vLLM. Going by vLLM 0.31's source, it then casts the bf16 models to float16,
+and its 4-bit kernels (the W4A16 build) need compute capability 7.5, which
+rules out Pascal; none of this has been run.
 
 While a job runs, `nvidia-smi` should show `llama-server` using the GPU. If
 doctor warns that llama.cpp is CPU-only, replace the binary with a CUDA build.
@@ -280,15 +293,18 @@ Optional overrides (already the managed defaults for low-VRAM) live in `.env`:
 
 ### Which backend, and how fast
 
-`bibr setup` chooses a model and runtime; `--llm local` only resolves the runtime
-from the platform and detected memory. The current defaults are:
+`bibr setup` writes a model and runtime to `.env`; `--llm local` without setup
+resolves the same model, runtime, memory mode and OCR from the platform and
+the detected card (a test checks that the two agree on every row). The
+current defaults are:
 
 | Platform | OCR backend | Local LLM backend |
 |---|---|---|
 | Windows | `glm-llama` (llama.cpp) | llama.cpp |
 | Linux, NVIDIA GPU **≥ 20 GB** (e.g. RTX 3090) | `paddle-vllm` | vLLM, bibr extract 4B |
 | Linux, NVIDIA GPU **10–<20 GB** | `paddle-vllm` | vLLM, bibr extract 4B W4A16 (aggressive memory mode below 12 GB) |
-| Linux, NVIDIA GPU **< 10 GB** | `glm-llama` (llama.cpp; from 8 GB `bibr setup` sets it, and without setup the automatic selector tries `paddle-vllm` first) | llama.cpp, bibr extract 4B GGUF |
+| Linux, NVIDIA GPU **< 10 GB** | `glm-llama` (llama.cpp) | llama.cpp, bibr extract 4B GGUF (Q8_0 from 7 GB, Q4_K_M below) |
+| Linux, NVIDIA GPU older than Ampere (compute capability below 8.0), any size | `glm-llama` (llama.cpp) | llama.cpp, bibr extract 4B GGUF (untested on such cards) |
 | Apple Silicon (M-series) | `paddle-rapid-mlx` (rapid-mlx) | rapid-mlx, else vllm-mlx |
 | No suitable GPU | cloud vision OCR or an external OCR server | a cloud LLM |
 
