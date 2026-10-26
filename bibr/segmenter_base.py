@@ -406,9 +406,11 @@ class BaseSentenceSegmenter:
             cpu_ort_session_options,
             cuda_provider_available,
             get_ort_providers,
+            is_session_gpu_oom,
             selected_device,
             session_device,
             shrink_arena_after_runs,
+            warn_session_on_cpu,
         )
 
         self._settings = settings if settings is not None else snapshot_settings()
@@ -481,7 +483,27 @@ class BaseSentenceSegmenter:
                 self._resolved_model.repo_id, self._resolved_model.revision
             )
         model_kwargs["tokenizer_name_or_path"] = tokenizer or base_tokenizer_dir()
-        self.model = SaT(sat_target, **model_kwargs)
+        self.model = None
+        try:
+            self.model = SaT(sat_target, **model_kwargs)
+        except Exception as exc:
+            # On a nearly full card the CUDA session cannot even be opened
+            # (its arena cannot place the weights): use the CPU, as a single
+            # text that does not fit at run time does, rather than failing
+            # every paper of the chunk with parse_failed.
+            if not is_session_gpu_oom(exc, providers):
+                raise
+            warn_session_on_cpu("SentenceSegmenter (wtpsplit-sat)", exc)
+        if self.model is None:
+            providers = get_ort_providers(
+                enable_cuda=False, enable_coreml=False, model_name="wtpsplit-sat (CPU)"
+            )
+            model_kwargs["ort_providers"] = providers
+            model_kwargs.pop("ort_kwargs", None)
+            cpu_options = cpu_ort_session_options()
+            if cpu_options is not None:
+                model_kwargs["ort_kwargs"] = {"sess_options": cpu_options}
+            self.model = SaT(sat_target, **model_kwargs)
         # SaT opens the ORT session itself. Report the providers that session
         # got, not the ones requested: ORT drops a CUDA provider that fails to
         # start and runs on CPU.

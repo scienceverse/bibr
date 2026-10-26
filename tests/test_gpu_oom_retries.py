@@ -491,3 +491,114 @@ class TestSentenceSegmenter:
         with pytest.raises(RuntimeError, match="illegal memory access"):
             seg._split_batch_with_retry(["a", "b"])
         assert gpu.batches == [2]
+
+
+# The sentence segmenter's CUDA session could not even be created on an 8 GB
+# card with a desktop beside the managed vLLM server (E26 E8-w4xd, 15:32:12):
+# ORT's constructor raised its arena failure, and the chunk failed parse_failed.
+SESSION_ARENA_OOM = (
+    "[ONNXRuntimeError] : 1 : FAIL : Exception during initialization: "
+    "/onnxruntime_src/onnxruntime/core/framework/bfc_arena.cc:358 void* "
+    "onnxruntime::BFCArena::AllocateRawInternal(size_t, bool, onnxruntime::Stream*) "
+    "Failed to allocate memory for requested buffer of size 384003072"
+)
+
+
+def _cuda_sessions_fail(monkeypatch, message: str) -> list[dict]:
+    """From now on every session asks for CUDA first, and opening a CUDA one raises *message*.
+
+    A chain without CUDA opens the real graph on the CPU. Returns one record
+    (provider names, whether the CPU arena was left on) per session opened.
+    """
+    import onnxruntime as ort
+
+    from bibr.utils import onnx_providers
+
+    real_providers = onnx_providers.get_ort_providers
+    real_session = ort.InferenceSession
+    opened: list[dict] = []
+
+    def providers(*, enable_cuda: bool = True, **kwargs):
+        chain = real_providers(enable_cuda=False, **kwargs)
+        return [("CUDAExecutionProvider", {}), *chain] if enable_cuda else chain
+
+    def session(path, sess_options=None, providers=None, **kwargs):
+        names = [p[0] if isinstance(p, tuple) else p for p in providers]
+        arena = None if sess_options is None else sess_options.enable_cpu_mem_arena
+        opened.append({"providers": names, "cpu_arena": arena})
+        if "CUDAExecutionProvider" in names:
+            raise RuntimeError(message)
+        return real_session(path, sess_options=sess_options, providers=providers, **kwargs)
+
+    monkeypatch.setattr(onnx_providers, "get_ort_providers", providers)
+    monkeypatch.setattr(ort, "InferenceSession", session)
+    return opened
+
+
+_CPU_FALLBACK_LINE = (
+    "could not open its CUDA session: GPU out of memory (RuntimeError); opening it on the CPU"
+)
+
+
+class TestSessionCreation:
+    """A CUDA session that cannot be opened for lack of memory opens on the CPU instead."""
+
+    def test_section_classifier_opens_on_the_cpu_and_matches_golden(self, monkeypatch, caplog):
+        from bibr.structure.section_classifier_onnx import OnnxSectionClassifierModel
+
+        opened = _cuda_sessions_fail(monkeypatch, SESSION_ARENA_OOM)
+        with caplog.at_level(logging.WARNING, logger="bibr.utils.onnx_providers"):
+            model = OnnxSectionClassifierModel(core._bundle("section"), "cuda")
+        assert model.device == "cpu"
+        assert [o["providers"][0] for o in opened] == [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider",
+        ]
+        assert f"section classifier (ONNX) {_CPU_FALLBACK_LINE}" in caplog.text
+        assert "requested CUDA" not in caplog.text
+        preds = model.classify_batch(core.CONTEXTS, max_length=32)
+        assert [
+            (p.canonical_type.value, p.is_top_level, round(p.score, 4)) for p in preds
+        ] == core.SECTION_GOLDEN
+
+    def test_ner_parser_opens_on_the_cpu_and_matches_golden(self, monkeypatch, caplog):
+        from bibr.ner.parser_onnx import OnnxRefParser
+
+        opened = _cuda_sessions_fail(monkeypatch, SESSION_ARENA_OOM)
+        with caplog.at_level(logging.WARNING, logger="bibr.utils.onnx_providers"):
+            parser = OnnxRefParser(core._bundle("ner"), device="cuda")
+        assert parser.device == "cpu"
+        assert len(opened) == 2
+        assert f"NER reference parser (ONNX) {_CPU_FALLBACK_LINE}" in caplog.text
+        assert parser.parse_batch(core.REFS) == core.NER_GOLDEN
+
+    def test_paper_classifier_opens_on_the_cpu(self, monkeypatch):
+        from bibr.structure.paper_classifier_onnx import OnnxPaperClassifierModel
+
+        _cuda_sessions_fail(monkeypatch, SESSION_ARENA_OOM)
+        model = OnnxPaperClassifierModel(core._bundle("paper"), "cuda")
+        assert model.device == "cpu"
+        assert [p.paper_type for p in model.classify_batch(core.ITEMS)] == [
+            row[4] for row in core.PAPER_GOLDEN
+        ]
+
+    def test_layout_opens_on_the_cpu_without_the_cpu_arena(self, monkeypatch, caplog):
+        from bibr.layout_onnx import OnnxLayoutBackend
+
+        opened = _cuda_sessions_fail(monkeypatch, SESSION_ARENA_OOM)
+        with caplog.at_level(logging.WARNING, logger="bibr.utils.onnx_providers"):
+            backend = OnnxLayoutBackend(core._bundle("layout"), device="cuda", threshold=0.05)
+        assert backend.device == "cpu"
+        assert opened[1] == {"providers": ["CPUExecutionProvider"], "cpu_arena": False}
+        assert _CPU_FALLBACK_LINE in caplog.text
+        assert [
+            core._rounded(det) for det in backend.run(core._sample_pages())
+        ] == core.LAYOUT_GOLDEN
+
+    def test_a_real_fault_while_opening_still_raises(self, monkeypatch):
+        from bibr.ner.parser_onnx import OnnxRefParser
+
+        opened = _cuda_sessions_fail(monkeypatch, ILLEGAL_ADDRESS)
+        with pytest.raises(RuntimeError, match="illegal memory access"):
+            OnnxRefParser(core._bundle("ner"), device="cuda")
+        assert len(opened) == 1

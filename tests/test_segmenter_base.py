@@ -641,3 +641,85 @@ def test_segmenter_cuda_session_keeps_default_session_options(monkeypatch):
     )
 
     assert "ort_kwargs" not in init["kwargs"]
+
+
+# ORT's constructor failure when the segmenter's CUDA session could not be
+# created on a nearly full 8 GB card (E26 E8-w4xd, 15:32:12).
+_SESSION_ARENA_OOM = (
+    "[ONNXRuntimeError] : 1 : FAIL : Exception during initialization: "
+    "/onnxruntime_src/onnxruntime/core/framework/bfc_arena.cc:358 void* "
+    "onnxruntime::BFCArena::AllocateRawInternal(size_t, bool, onnxruntime::Stream*) "
+    "Failed to allocate memory for requested buffer of size 384003072"
+)
+
+
+def _build_segmenter_whose_cuda_session_fails(monkeypatch, message: str):
+    pytest.importorskip(
+        "bibr.utils.device",
+        reason="segmenter startup needs the 'ml' extra",
+        exc_type=ImportError,
+    )
+    opened: list[dict[str, object]] = []
+    init: dict[str, object] = {}
+
+    def fake_sat(name, **kwargs):
+        names = [p[0] if isinstance(p, tuple) else p for p in kwargs["ort_providers"]]
+        opened.append({"providers": names, "ort_kwargs": kwargs.get("ort_kwargs")})
+        if "CUDAExecutionProvider" in names:
+            raise RuntimeError(message)
+        return _RecordingSplitModel(["CPUExecutionProvider"])
+
+    monkeypatch.setattr("wtpsplit_lite.SaT", fake_sat)
+    monkeypatch.setattr(
+        "bibr.segmenter_base.materialize_hub_snapshot",
+        lambda repo_id, revision: (f"/pinned/{repo_id}@{revision}", None),
+    )
+    monkeypatch.setattr("bibr.segmenter_base.base_tokenizer_dir", lambda: "/base-tokenizer")
+    monkeypatch.setattr(
+        "bibr.utils.onnx_providers.get_ort_providers",
+        lambda *, enable_cuda=True, **kwargs: (
+            list(_CUDA_CHAIN) if enable_cuda else ["CPUExecutionProvider"]
+        ),
+    )
+    monkeypatch.setattr(
+        "bibr.utils.device.report_device",
+        lambda component, device, **kwargs: init.__setitem__("reported_device", device),
+    )
+    return opened, init
+
+
+def test_segmenter_opens_on_the_cpu_when_its_cuda_session_cannot_be_created(monkeypatch, caplog):
+    """The whole chunk failed parse_failed ("Sentence segmenter failed to load");
+    the segmenter now opens on the CPU, as a single text that does not fit does."""
+    ort = pytest.importorskip("onnxruntime")
+    opened, init = _build_segmenter_whose_cuda_session_fails(monkeypatch, _SESSION_ARENA_OOM)
+
+    with caplog.at_level(logging.WARNING):
+        segmenter = BaseSentenceSegmenter(model_name="sat-6l-sm", use_gpu=True)
+
+    assert [o["providers"] for o in opened] == [
+        ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        ["CPUExecutionProvider"],
+    ]
+    assert segmenter._device == "cpu"
+    assert init["reported_device"] == "cpu"
+    assert (
+        "SentenceSegmenter (wtpsplit-sat) could not open its CUDA session: GPU out of memory "
+        "(RuntimeError); opening it on the CPU"
+    ) in caplog.text
+    assert "requested CUDA" not in caplog.text
+    # The CPU session skips ORT's CPU arena, as every CPU-only SaT session does.
+    sess_options = opened[1]["ort_kwargs"]["sess_options"]
+    assert isinstance(sess_options, ort.SessionOptions)
+    assert sess_options.enable_cpu_mem_arena is False
+    assert segmenter._split_batch_with_retry(["One. Two."]) == [["One. Two."]]
+
+
+def test_segmenter_still_raises_other_session_creation_failures(monkeypatch):
+    opened, _ = _build_segmenter_whose_cuda_session_fails(
+        monkeypatch, "[ONNXRuntimeError] : 7 : INVALID_PROTOBUF : Load model failed"
+    )
+
+    with pytest.raises(RuntimeError, match="INVALID_PROTOBUF"):
+        BaseSentenceSegmenter(model_name="sat-6l-sm", use_gpu=True)
+    assert len(opened) == 1
