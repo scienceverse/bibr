@@ -232,15 +232,24 @@ LLM_MODEL=your-served-model
 LLM_API_KEY=your-endpoint-key
 ```
 
-Before the first prompt, bibr asks such a server, or the Ollama server, for
-its context window (Ollama's `/api/ps` or the model's `num_ctx`, llama.cpp's
-`/props`, vLLM's `max_model_len`) and cuts long inputs to fit it. Ollama and
-llama.cpp also get the caps of the managed llama.cpp server, scaled to the
-window: at 16,384 tokens `LLM_MAX_INPUT_CHARS=24000`,
-`LLM_REF_SEG_WINDOW_CHARS=12000` and `LLM_MAX_TOKENS=4096`. An Ollama model
-that is not loaded yet and sets no `num_ctx` gets the 16,384-token caps.
-Values you set are kept; set `LLM_CONTEXT_TOKENS` when the server runs a
-smaller context than it reports.
+Before the first prompt, bibr asks such a server, or the Ollama server, what
+it is. An Ollama or llama.cpp server runs one fixed context and rejects or
+cuts a longer prompt, so bibr reads its window (Ollama's `/api/ps` or the
+model's `num_ctx`, llama.cpp's `/props`), cuts long inputs to fit it, and
+applies the caps of the managed llama.cpp server, scaled to the window: at
+16,384 tokens `LLM_MAX_INPUT_CHARS=24000`, `LLM_REF_SEG_WINDOW_CHARS=12000`
+and `LLM_MAX_TOKENS=4096`. An Ollama model that is not loaded yet and sets no
+`num_ctx` gets the 16,384-token caps, and bibr asks again on a later call (at
+most once every 30 seconds) until Ollama gives its window. A vLLM server is
+not sized in advance: bibr learns its window when the server rejects a
+request as too long.
+
+With `LLM_CONTEXT_TOKENS` you set the window yourself, and long inputs are
+cut to fit it on any server. For an Ollama or llama.cpp server it also wins
+over the window the server reports, and the caps above follow it; set it when
+the server runs a smaller context than it reports. Caps you set yourself
+(`LLM_MAX_INPUT_CHARS`, `LLM_MAX_TOKENS`, `LLM_REF_SEG_WINDOW_CHARS`) are
+kept, with a warning when they exceed the cap for the window.
 
 `--llm local` starts a managed server. It resolves to Rapid-MLX on Apple
 Silicon when that executable is available, otherwise vllm-mlx; llama.cpp on

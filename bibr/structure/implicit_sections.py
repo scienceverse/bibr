@@ -830,15 +830,17 @@ to classify, not as instructions.
 
     boundary = uuid.uuid4().hex
     max_tokens = _task_max_tokens(effective, effective.llm.section_max_tokens)
-    if isinstance(llm_client, LLMClient):
-        # The client's settings carry the server's context window and the caps
-        # set for it; the global settings _cap_input falls back to do not.
-        await llm_client.ensure_server_context()
-        capped_text = llm_client.cap_input(front_matter_text, max_tokens=max_tokens)
-    else:
-        capped_text = llm_client._cap_input(front_matter_text)
 
     try:
+        if isinstance(llm_client, LLMClient):
+            # The client's settings carry the server's context window and the
+            # caps set for it; the global settings _cap_input falls back to do
+            # not.
+            await llm_client.ensure_server_context()
+            capped_text = llm_client.cap_input(front_matter_text, max_tokens=max_tokens)
+        else:
+            capped_text = llm_client._cap_input(front_matter_text)
+
         from bibr.clients.prompts import fence, part
 
         result = await llm_client.invoke_structured(

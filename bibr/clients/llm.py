@@ -153,6 +153,14 @@ _CONTEXT_WINDOW_RE = re.compile(
     r"|exceeds the available context size \((\d+) tokens\)",
     re.IGNORECASE,
 )
+# A self-hosted server whose context window could not be read (down, model not
+# loaded yet) is asked again at most this often; see
+# LLMClient.ensure_server_context.
+_SERVER_CONTEXT_RETRY_SECONDS = 30.0
+
+
+def _server_context_clock() -> float:
+    return time.monotonic()
 
 
 def _char_tokens(ch: str) -> float:
@@ -188,6 +196,26 @@ def _token_fit(text: str, budget: int) -> int:
         if cost > budget:
             return i
     return len(text)
+
+
+def _token_cost(text: str) -> int:
+    """Tokens *text* is estimated to cost, counted as :func:`_token_fit` counts."""
+    return math.ceil(sum(_char_tokens(ch) for ch in text))
+
+
+def _share_by_need(needs: list[int], budget: int) -> list[int]:
+    """Split *budget* between inputs that need *needs*, by need.
+
+    No input gets more than it needs; what the small ones leave is shared
+    equally by the ones that need more.
+    """
+    shares = [0] * len(needs)
+    remaining = max(budget, 0)
+    order = sorted(range(len(needs)), key=needs.__getitem__)
+    for done, i in enumerate(order):
+        shares[i] = min(needs[i], remaining // (len(needs) - done))
+        remaining -= shares[i]
+    return shares
 
 
 def _context_budget(context: int, max_tokens: int | None) -> int:
@@ -1219,10 +1247,13 @@ def _structured_backend_kind(settings) -> str:
 
 
 class LLMClient:
-    # Endpoint (settings signature) whose context window was last asked for;
-    # see ensure_server_context. The lock is loop-bound like the limiter's.
-    # Class defaults, so a client built without __init__ has them too.
+    # Endpoint whose context window was last asked for, whether its answer was
+    # complete, and when an incomplete one may be asked again; see
+    # ensure_server_context. The lock is loop-bound like the limiter's. Class
+    # defaults, so a client built without __init__ has them too.
     _server_context_sig: tuple | None = None
+    _server_context_settled: bool = False
+    _server_context_retry_at: float = 0.0
     _server_context_lock: asyncio.Lock | None = None
     _server_context_loop: asyncio.AbstractEventLoop | None = None
 
@@ -1346,7 +1377,6 @@ class LLMClient:
         settings: "GlobalSettings | None" = None,
         *,
         max_tokens: int | None = None,
-        parts: int = 1,
     ) -> str:
         """Truncate input text to LLM_MAX_INPUT_CHARS to prevent token-cost abuse.
 
@@ -1354,27 +1384,46 @@ class LLMClient:
         cut the text so it fits beside the prompt and *max_tokens* of completion
         (a quarter of the window when the call sends no cap), counting tokens
         conservatively. Without that, a long front matter in a CJK paper
-        overruns a 32k-token local server and the whole call is rejected. A
-        prompt that carries *parts* inputs cut this way gives each that share
-        of the window.
+        overruns a 32k-token local server and the whole call is rejected.
+        """
+        return LLMClient._cap_inputs([text], settings, max_tokens=max_tokens)[0]
+
+    @staticmethod
+    def _cap_inputs(
+        texts: list[str],
+        settings: "GlobalSettings | None" = None,
+        *,
+        max_tokens: int | None = None,
+    ) -> list[str]:
+        """:meth:`_cap_input` for the several inputs of one prompt, by need.
+
+        Together they get LLM_MAX_INPUT_CHARS and the context budget, shared
+        by need (:func:`_share_by_need`): an input shorter than an equal share
+        is kept whole, and what it leaves goes to the longer ones.
         """
         effective = settings if settings is not None else snapshot_settings()
-        limit = effective.llm.max_input_chars
-        if len(text) > limit:
-            logger.warning("LLM input truncated from %d to %d chars", len(text), limit)
-            text = text[:limit]
+        limits = _share_by_need([len(t) for t in texts], effective.llm.max_input_chars)
+        cut = [t[:limit] for t, limit in zip(texts, limits, strict=True)]
+        if sum(map(len, cut)) < sum(map(len, texts)):
+            logger.warning(
+                "LLM input truncated from %d to %d chars",
+                sum(map(len, texts)),
+                sum(map(len, cut)),
+            )
         context = effective.llm.context_tokens
-        if context:
-            fit = _token_fit(text, _context_budget(context, max_tokens) // parts)
-            if fit < len(text):
+        budget = _context_budget(context, max_tokens) if context else None
+        if budget is not None and sum(map(len, cut)) > budget:
+            shares = _share_by_need([_token_cost(t) for t in cut], budget)
+            fitted = [t[: _token_fit(t, share)] for t, share in zip(cut, shares, strict=True)]
+            if sum(map(len, fitted)) < sum(map(len, cut)):
                 logger.warning(
                     "LLM input truncated from %d to %d chars to fit the %d-token context",
-                    len(text),
-                    fit,
+                    sum(map(len, cut)),
+                    sum(map(len, fitted)),
                     context,
                 )
-                text = text[:fit]
-        return text
+            cut = fitted
+        return cut
 
     def cap_input(self, text: str, *, max_tokens: int | None = None) -> str:
         """:meth:`_cap_input` under this client's settings, which carry what
@@ -1393,31 +1442,75 @@ class LLMClient:
             limit = _token_fit(text[:limit], _context_budget(context, max_tokens))
         return limit
 
-    async def ensure_server_context(self) -> None:
-        """Size inputs to a self-hosted server's context window, once per endpoint.
+    def _server_context_signature(self) -> tuple:
+        llm = self._settings.llm
+        return (llm.provider, llm.base_url, llm.ollama_base_url, llm.api_key, llm.model)
 
-        Runs before a prompt is built, for an ``LLM_BASE_URL`` server or the
-        ollama provider whose window is not known yet: neither
-        ``LLM_CONTEXT_TOKENS`` nor a server bibr started set it. See
-        :mod:`bibr.clients.server_context`.
+    def _server_context_pending(self, sig: tuple) -> bool:
+        """Whether :meth:`ensure_server_context` should ask the server now."""
+        if self._server_context_sig != sig:
+            return True
+        if self._server_context_settled:
+            return False
+        return _server_context_clock() >= self._server_context_retry_at
+
+    async def ensure_server_context(self) -> None:
+        """Size inputs to a self-hosted server's context window before a prompt.
+
+        For an ``LLM_BASE_URL`` server or the ollama provider (see
+        :mod:`bibr.clients.server_context`). An endpoint is asked once, and
+        concurrent first calls wait for that one answer. When the answer is
+        not complete (the server is down, or Ollama's model is not loaded and
+        the 16,384-token caps stand in), a later call asks again, at most once
+        every ``_SERVER_CONTEXT_RETRY_SECONDS``; calls that arrive while it
+        asks keep the caps in place instead of waiting. Never raises.
         """
-        sig = self._settings_signature()
-        if self._server_context_sig == sig:
+        sig = self._server_context_signature()
+        if not self._server_context_pending(sig):
             return
         loop = asyncio.get_running_loop()
         if self._server_context_lock is None or self._server_context_loop is not loop:
             self._server_context_lock = asyncio.Lock()
             self._server_context_loop = loop
-        async with self._server_context_lock:
-            if self._server_context_sig == sig:
+        lock = self._server_context_lock
+        if self._server_context_sig == sig and lock.locked():
+            return
+        async with lock:
+            if not self._server_context_pending(sig):
                 return
-            if "context_tokens" not in self._settings.llm.model_fields_set:
-                from bibr.clients import server_context
-
-                found = await server_context.probe_server_context(self._settings)
-                if found is not None:
-                    server_context.apply_server_context(self._settings.llm, found)
+            first = self._server_context_sig != sig
+            try:
+                settled = await self._fit_server_context(first=first)
+            except Exception as exc:  # noqa: BLE001 - sizing must never fail a call
+                logger.debug("Sizing inputs to the LLM server's context failed: %s", exc)
+                settled = False
             self._server_context_sig = sig
+            self._server_context_settled = settled
+            self._server_context_retry_at = _server_context_clock() + _SERVER_CONTEXT_RETRY_SECONDS
+
+    async def _fit_server_context(self, *, first: bool) -> bool:
+        """Ask the server and apply its answer; True when nothing is left to learn."""
+        from bibr.clients import server_context as sc
+
+        llm = self._settings.llm
+        if sc.self_hosted_endpoint(self._settings) is None:
+            return True
+        user_window = "context_tokens" in llm.user_set_fields
+        if first and llm.context_tokens is not None and not user_window:
+            # A server bibr started set its window and caps itself.
+            return True
+        ollama = llm.provider.strip().lower() == "ollama"
+        if ollama and user_window:
+            # The user's window wins over the server's: nothing to ask.
+            found: sc.ServerContext | None = sc.ServerContext("ollama", None)
+        else:
+            found = await sc.probe_server_context(self._settings)
+            if found is None and ollama:
+                found = sc.ServerContext("ollama", None)
+        if found is None:
+            return False
+        sc.apply_server_context(llm, found)
+        return found.server not in sc.FIXED_CONTEXT_SERVERS or llm.context_tokens is not None
 
     def _learn_context_window(self, exc: BaseException, window_before: int | None) -> bool:
         """Remember the context window a server named when it rejected a prompt.
@@ -2760,13 +2853,16 @@ class LLMClient:
         logger.debug(f"Starting LLM paper_type labeling (hash={file_hash})")
         try:
             spec = PROMPTS["paper_type_label"]
+            max_tokens = _task_max_tokens(self._settings, self._settings.llm.paper_type_max_tokens)
+            # str(): the prompt has always formatted whatever it was given.
+            title, abstract = self._cap_inputs(
+                [str(title), str(abstract)], self._settings, max_tokens=max_tokens
+            )
             result = await self._invoke_structured(
                 spec.response_model,
                 [{"role": "user", "content": spec.build_user(title=title, abstract=abstract)}],
                 spec.system,
-                max_tokens=_task_max_tokens(
-                    self._settings, self._settings.llm.paper_type_max_tokens
-                ),
+                max_tokens=max_tokens,
             )
 
             logger.info(f"Successfully labeled paper_type (hash={file_hash})")
@@ -3186,6 +3282,16 @@ class LLMClient:
                 self._settings.llm.ref_seg_window_chars,
             )
             windows = _window_ref_text(text, budget)
+            context = self._settings.llm.context_tokens
+            if context and (fit_tokens := _context_budget(context, None)):
+                # Each window is a prompt of its own: split again one that the
+                # server's window cannot hold, so that asking again after the
+                # server named a smaller window sends smaller windows.
+                windows = [
+                    piece
+                    for window in windows
+                    for piece in _window_ref_text(window, max(_token_fit(window, fit_tokens), 1))
+                ]
             if len(windows) > _SEG_MAX_WINDOWS:
                 logger.warning(
                     "Reference section spans %d windows (%d chars each); segmenting "
@@ -3276,15 +3382,17 @@ class LLMClient:
                 or "(none provided)"
             )
             max_tokens = _task_max_tokens(self._settings, self._settings.llm.integrity_max_tokens)
-
-            def cap(text: str) -> str:
-                return self._cap_input(text, self._settings, max_tokens=max_tokens, parts=3)
-
+            # The four texts share one prompt, so they share its input budget.
+            funding_text, contributions_text, affiliations_block, authors_block = self._cap_inputs(
+                [funding_text, contributions_text, affiliations_block, authors_block],
+                self._settings,
+                max_tokens=max_tokens,
+            )
             content = spec.build_user(
                 boundary=boundary,
-                funding_text=cap(funding_text),
-                contributions_text=cap(contributions_text),
-                affiliations_block=cap(affiliations_block),
+                funding_text=funding_text,
+                contributions_text=contributions_text,
+                affiliations_block=affiliations_block,
                 authors_block=authors_block,
             )
             result = await self._invoke_structured(
@@ -3348,15 +3456,11 @@ class LLMClient:
             spec = PROMPTS["citation_resolution"]
             boundary = uuid.uuid4().hex
             max_tokens = _task_max_tokens(self._settings, self._settings.llm.citation_max_tokens)
-            prompt = spec.build_user(
-                boundary=boundary,
-                ref_block=self._cap_input(
-                    ref_block, self._settings, max_tokens=max_tokens, parts=2
-                ),
-                cite_block=self._cap_input(
-                    cite_block, self._settings, max_tokens=max_tokens, parts=2
-                ),
+            # One prompt carries both lists, so they share its input budget.
+            ref_block, cite_block = self._cap_inputs(
+                [ref_block, cite_block], self._settings, max_tokens=max_tokens
             )
+            prompt = spec.build_user(boundary=boundary, ref_block=ref_block, cite_block=cite_block)
 
             result = await self._invoke_structured(
                 spec.response_model,
