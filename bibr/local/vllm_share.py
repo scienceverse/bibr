@@ -135,19 +135,8 @@ def overshoot_reserve_gb(model: str, extra_args: str | None) -> float:
     return LLM_CONTEXT_RESERVE_GB + LLM_CAPTURE_RESERVE_GB_AT_512 * capture / _VLLM_MAX_CAPTURE_SIZE
 
 
-def managed_llm_floor_gb(model: str, settings: GlobalSettings | None = None) -> float | None:
-    """The minimum VRAM for *model* served by vLLM, None if it is not known.
-
-    ``LLM_LOCAL_MIN_VRAM_GB`` when set (*settings*), so a model the registry
-    does not list, such as a local path to the 4B student's W4A16 build, gets
-    a floor too; else the registry's ``min_vram_gb`` for the model's vLLM
-    variant. It covers the weights, vLLM's profiling activations and the KV
-    cache the server needs to start (one Mamba block per sequence for the
-    hybrid Qwen3.5 students, and ``--max-model-len`` tokens): 12 GB for the
-    4B student, rounded up from its measured 11.7 GB low-memory peak.
-    """
-    if settings is not None and settings.llm.local_min_vram_gb is not None:
-        return float(settings.llm.local_min_vram_gb)
+def _registry_floor_gb(model: str) -> float | None:
+    """The registry's ``min_vram_gb`` for *model*'s vLLM variant, None if it is not listed."""
     from bibr.local.llm_models import REGISTRY
 
     for entry in REGISTRY:
@@ -155,6 +144,45 @@ def managed_llm_floor_gb(model: str, settings: GlobalSettings | None = None) -> 
             if variant.platform == "cuda" and variant.runtime == "vllm" and variant.hf_id == model:
                 return float(variant.min_vram_gb)
     return None
+
+
+# Models whose LLM_LOCAL_MIN_VRAM_GB was already reported as ignored: once per
+# process each, since every start and every chunk's check reads the floor.
+_floor_setting_ignored_for: set[str] = set()
+
+
+def managed_llm_floor_gb(model: str, settings: GlobalSettings | None = None) -> float | None:
+    """The minimum VRAM for *model* served by vLLM, None if it is not known.
+
+    The registry's ``min_vram_gb`` for the model's vLLM variant. It covers the
+    weights, vLLM's profiling activations and the KV cache the server needs to
+    start (one Mamba block per sequence for the hybrid Qwen3.5 students, and
+    ``--max-model-len`` tokens): 12 GB for the 4B student, rounded up from its
+    measured 11.7 GB low-memory peak. A model the registry does not list, such
+    as a local path to the 4B student's W4A16 build, takes
+    ``LLM_LOCAL_MIN_VRAM_GB`` (*settings*) instead. A listed model keeps the
+    registry's floor and the setting is ignored with a warning, so a value
+    left over from a local build (7 for the W4A16 build) never sizes the bf16
+    4B's starts below the 12 GB it needs.
+    """
+    floor = _registry_floor_gb(model)
+    setting = settings.llm.local_min_vram_gb if settings is not None else None
+    if setting is None:
+        return floor
+    if floor is None:
+        return float(setting)
+    if model not in _floor_setting_ignored_for:
+        _floor_setting_ignored_for.add(model)
+        logger.warning(
+            "LLM_LOCAL_MIN_VRAM_GB=%g is ignored for %s: bibr's model registry lists that "
+            "model with a minimum of %g GB, which is used instead. The setting is for a model "
+            "the registry does not list, such as a local path; unset it, or set "
+            "LLM_LOCAL_MEM_FRACTION to choose the share yourself.",
+            setting,
+            model,
+            floor,
+        )
+    return floor
 
 
 def llm_share_user_set(settings: GlobalSettings) -> bool:

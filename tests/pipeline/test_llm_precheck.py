@@ -148,6 +148,16 @@ class TestLlmStartRefusal:
         card["reading"] = REFUSED
         assert await _rm(settings=_local_w4a16_settings(7.0)).llm_start_refusal("vllm") is None
 
+    async def test_a_left_over_floor_setting_keeps_the_registry_floor(self, card, monkeypatch):
+        # LLM_LOCAL_MIN_VRAM_GB=7 left set after switching back to the bf16 4B.
+        monkeypatch.setattr(vllm_share, "_floor_setting_ignored_for", set())
+        card["reading"] = REFUSED
+        settings = _settings()
+        settings.llm.local_min_vram_gb = 7.0
+        refusal = await _rm(settings=settings).llm_start_refusal("vllm")
+        assert isinstance(refusal, ManagedLlmVramError)
+        assert "the model's 12.0 GiB floor" in str(refusal)
+
     @pytest.mark.parametrize("backend", ["cloud", "llama-cpp", "vllm-mlx", "llmster"])
     async def test_only_the_managed_vllm_server_is_checked(self, card, backend):
         card["reading"] = REFUSED

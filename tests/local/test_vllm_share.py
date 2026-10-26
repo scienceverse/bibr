@@ -6,6 +6,7 @@ own GPU sessions held more than about 2.2 GiB: the share passed vLLM's
 startup check, and capture then took about 1.3 GiB beyond it.
 """
 
+import logging
 import subprocess
 from unittest.mock import MagicMock, patch
 
@@ -524,6 +525,10 @@ def _hog(hog_gb: float, own_gb: float) -> GpuMemory:
 class TestFloorSetting:
     """``LLM_LOCAL_MIN_VRAM_GB`` gives a floor to a model the registry does not list."""
 
+    @pytest.fixture(autouse=True)
+    def _fresh_warnings(self, monkeypatch):
+        monkeypatch.setattr(vllm_share, "_floor_setting_ignored_for", set())
+
     def test_unset_by_default(self):
         from bibr.config import GlobalSettings
 
@@ -545,12 +550,44 @@ class TestFloorSetting:
         with pytest.raises(ValidationError):
             GlobalSettings()
 
-    def test_overrides_the_registry_and_covers_a_local_path(self):
-        settings = _w4a16_settings()
+    def test_covers_a_local_path(self):
         assert managed_llm_floor_gb(W4A16_LOCAL) is None
-        assert managed_llm_floor_gb(W4A16_LOCAL, settings) == 7.0
-        assert managed_llm_floor_gb(STUDENT_4B, settings) == 7.0
+        assert managed_llm_floor_gb(W4A16_LOCAL, _w4a16_settings(floor=None)) is None
+        assert managed_llm_floor_gb(W4A16_LOCAL, _w4a16_settings()) == 7.0
+
+    def test_a_registry_model_keeps_its_floor_with_one_warning(self, caplog):
+        # The setting left at 7 after switching back to a published build.
+        settings = _w4a16_settings()
+        with caplog.at_level(logging.WARNING, logger="bibr.local.vllm_share"):
+            assert managed_llm_floor_gb(STUDENT_4B, settings) == 12.0
+            assert managed_llm_floor_gb(STUDENT_4B, settings) == 12.0
+            assert managed_llm_floor_gb(STUDENT_2B, settings) == 8.0
+            assert managed_llm_floor_gb(W4A16_LOCAL, settings) == 7.0
+        warnings = [r.getMessage() for r in caplog.records]
+        assert len(warnings) == 2  # once per listed model, not at every start
+        assert warnings[0].startswith(
+            f"LLM_LOCAL_MIN_VRAM_GB=7 is ignored for {STUDENT_4B}: bibr's model registry lists "
+            "that model with a minimum of 12 GB"
+        )
+        assert STUDENT_2B in warnings[1]
         assert managed_llm_floor_gb(STUDENT_4B, _w4a16_settings(floor=None)) == 12.0
+
+    def test_a_left_over_setting_never_starts_the_bf16_4b_below_its_floor(self):
+        # The emulated 12 GB card where the W4A16 build starts at its 7 GiB
+        # floor: the bf16 4B is refused at its own 12 GB, not squeezed to 7.
+        settings = _w4a16_settings()
+        settings.llm.local_model = STUDENT_4B
+        settings.llm.vllm_extra_args = ""
+        with pytest.raises(ManagedLlmVramError, match=r"the model's 12\.0 GiB floor"):
+            vllm_share.managed_llm_share(
+                _hog(12.0, 0.50), settings, STUDENT_4B, cap=0.85, swaps_with_ocr=True
+            )
+        assert (
+            vllm_share.managed_llm_share(
+                _hog(12.0, 0.50), _w4a16_settings(), W4A16_LOCAL, cap=0.85, swaps_with_ocr=True
+            ).reason
+            == "floor"
+        )
 
     def test_model_resolution(self):
         from bibr.config import GlobalSettings

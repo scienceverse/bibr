@@ -279,9 +279,12 @@ pipeline in the same process started, without asking for memory.
 The minimum comes from bibr's model registry, which lists the published
 builds. A model it does not list, such as a local path, has none, so a start
 that cannot fit is launched and fails inside vLLM. Set `LLM_LOCAL_MIN_VRAM_GB`
-to give it one. For a local copy of the 4B student's W4A16 build, the
-minimum is 7 GB with at most 64 sequences (more with 128, since vLLM keeps a
-cache block for each sequence):
+to give it one. The setting applies only to such a model: a model the
+registry lists keeps the registry's minimum, and bibr logs a warning that the
+setting is ignored, so a value left over from a local build cannot start the
+4B student below its 12 GB. For a local copy of the 4B student's W4A16 build,
+the minimum is 7 GB with at most 64 sequences (more with 128, since vLLM keeps
+a cache block for each sequence):
 
 ```bash
 LLM_LOCAL_MODEL=/path/to/bibr-extract-qwen35-4b-W4A16

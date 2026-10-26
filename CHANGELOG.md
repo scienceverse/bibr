@@ -12,7 +12,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   server's model, for a model bibr's registry does not list (a local path has
   no minimum, so a start that cannot fit used to be launched and fail inside
   vLLM). For a local copy of the 4B student's W4A16 build it is 7 GB, served
-  with `--max-num-seqs 64`; the configuration guide has the settings.
+  with `--max-num-seqs 64`; the configuration guide has the settings. A model
+  the registry lists keeps the registry's minimum and the setting is ignored
+  with a warning, so a value left from a local build never starts the bf16 4B
+  student below its 12 GB.
 
 ### Fixed
 
