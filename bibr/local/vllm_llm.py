@@ -57,6 +57,31 @@ def max_model_len(model: str, extra_args: str | None) -> int | None:
         return None
 
 
+def _server_url(port: int) -> str:
+    return f"http://localhost:{port}"
+
+
+def reuses_running_server(model: str, port: int) -> bool:
+    """Whether a managed vLLM LLM server start for *model* reuses the server on *port*.
+
+    The check ``VllmLlmServer`` makes before anything else
+    (``guard_managed_server_port``): True when a server for *model* already
+    listens on the port, one that another pipeline in this process started
+    (its key is shared) or another process's, and the start reuses it without
+    sizing a share or launching vLLM; False when the port is free and vLLM is
+    launched. Raises ``UpstreamServiceError`` for a listener the start cannot
+    use. ``ResourceManager.llm_start_refusal`` asks the same before a chunk's
+    OCR, so it never predicts a refusal for a start that would reuse a server.
+    """
+    return guard_managed_server_port(
+        "llm",
+        base_url=_server_url(port),
+        model=model,
+        server_label="vLLM",
+        request_fn=request_bytes,
+    )
+
+
 # Grace period between SIGTERM and SIGKILL on shutdown.
 _TERM_GRACE_S = 10
 
@@ -114,13 +139,7 @@ class VllmLlmServer:
         self._process: subprocess.Popen | None = None
         self._stderr_fh = None
         self._stderr_log: Path | None = None
-        self._reused = guard_managed_server_port(
-            "llm",
-            base_url=self.base_url,
-            model=self._model,
-            server_label="vLLM",
-            request_fn=request_bytes,
-        )
+        self._reused = reuses_running_server(self._model, self._port)
         if self._reused:
             # Another pipeline in this process may have started it.
             self.api_key = own_server_key(self.base_url)
@@ -268,7 +287,7 @@ class VllmLlmServer:
 
     @property
     def base_url(self) -> str:
-        return f"http://localhost:{self._port}"
+        return _server_url(self._port)
 
     @property
     def _effective_settings(self):

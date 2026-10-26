@@ -11,18 +11,23 @@ would give.
 
 from __future__ import annotations
 
+import contextlib
+import json
 import logging
+import shlex
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from bibr.exceptions import UpstreamServiceError
 from bibr.local import vllm_share
 from bibr.local.vllm_share import ManagedLlmVramError
 from bibr.ocr.registry import GpuMemory
 from bibr.pipeline.resources import ResourceManager
 
 STUDENT_4B = "scienceverse/bibr-extract-qwen35-4b"
+W4A16_LOCAL = "/models/bibr-extract-qwen35-4b-W4A16"
 CUDA_3090 = 23.56
 # E25 V2 readings beside the 8 GiB hog: before chunk 1's LLM start (fits at
 # the 12 GB floor), before chunk 2's (refused: 14.00 GiB needed), and a card
@@ -46,12 +51,64 @@ def card(monkeypatch):
     return state
 
 
+@pytest.fixture(autouse=True)
+def port(monkeypatch):
+    """What answers ``/v1/models`` on the LLM server's port (9996): nothing, unless a test says so.
+
+    The start's port check and the precheck both probe through
+    ``vllm_llm.request_bytes``. ``models`` lists what a listener serves and
+    ``key`` the key it requires (None: no key). Nothing listens on any other
+    port. The keys of servers this process started are kept per test.
+    """
+    from bibr.local import http_runtime, vllm_llm
+
+    state = {"models": None, "key": None, "probes": 0}
+
+    def request_bytes(url, *, headers=None, **_kwargs):
+        state["probes"] += 1
+        if state["models"] is None or url != "http://localhost:9996/v1/models":
+            raise http_runtime.LocalHttpError("connection refused")
+        if state["key"] and dict(headers or {}).get("Authorization") != f"Bearer {state['key']}":
+            return 401, "Unauthorized", b""
+        return 200, "OK", json.dumps({"data": [{"id": m} for m in state["models"]]}).encode()
+
+    monkeypatch.setattr(vllm_llm, "request_bytes", request_bytes)
+    monkeypatch.setattr(http_runtime, "_OWN_SERVER_KEYS", {})
+    return state
+
+
+@contextlib.contextmanager
+def _no_launch():
+    """vLLM's launch and readiness wait mocked out; yields the ``Popen`` mock."""
+    import bibr.local.vllm_llm as vllm_llm
+
+    with (
+        patch("importlib.util.find_spec", return_value=object()),
+        patch.object(vllm_llm.subprocess, "Popen") as popen,
+        patch.object(vllm_llm.VllmLlmServer, "_wait_until_healthy"),
+        patch.object(vllm_llm.VllmLlmServer, "configure_llm_client", lambda self: None),
+    ):
+        popen.return_value = MagicMock()
+        yield popen
+
+
 def _settings():
     from bibr.config import GlobalSettings
 
     settings = GlobalSettings()
     settings.llm.local_model = STUDENT_4B
     settings.llm.vllm_port = 9996
+    return settings
+
+
+def _local_w4a16_settings(floor: float | None = None):
+    """A local copy of the 4B W4A16 build: not in the registry, so no floor unless set."""
+    from bibr.local.llm_models import QWEN35_4B_W4A16_SERVER_ARGS
+
+    settings = _settings()
+    settings.llm.local_model = W4A16_LOCAL
+    settings.llm.vllm_extra_args = shlex.join(QWEN35_4B_W4A16_SERVER_ARGS)
+    settings.llm.local_min_vram_gb = floor
     return settings
 
 
@@ -89,9 +146,7 @@ class TestLlmStartRefusal:
     async def test_floor_setting_is_used(self, card):
         # The W4A16 build's 7 GB floor fits where the bf16 4B's 12 GB does not.
         card["reading"] = REFUSED
-        settings = _settings()
-        settings.llm.local_min_vram_gb = 7.0
-        assert await _rm(settings=settings).llm_start_refusal("vllm") is None
+        assert await _rm(settings=_local_w4a16_settings(7.0)).llm_start_refusal("vllm") is None
 
     @pytest.mark.parametrize("backend", ["cloud", "llama-cpp", "vllm-mlx", "llmster"])
     async def test_only_the_managed_vllm_server_is_checked(self, card, backend):
@@ -132,6 +187,171 @@ class TestLlmStartRefusal:
         rm._ocr = object()
         refusal = await rm.llm_start_refusal("vllm")
         assert isinstance(refusal, ManagedLlmVramError) is predicted
+
+
+class TestReusedServer:
+    """A start that would reuse a server already on the port is never predicted.
+
+    ``VllmLlmServer`` asks the port first and reuses a listener that serves
+    the model before any share is sized, however little memory is free; that
+    server is what holds the card. The precheck asks the same check
+    (``vllm_llm.reuses_running_server``) through the same probe.
+    """
+
+    async def test_another_processs_server_for_the_model_is_reused(self, card, port):
+        card["reading"] = REFUSED
+        port["models"] = [STUDENT_4B]
+        rm = _rm()
+        assert await rm.llm_start_refusal("vllm") is None
+        assert card["reads"] == 0  # no share is sized for a reused server
+        with _no_launch() as popen:
+            await rm.start_llm_server("vllm")
+        popen.assert_not_called()
+        assert rm._llm_server is not None
+        assert rm._llm_server._reused is True
+
+    async def test_a_sibling_pipelines_server_is_reused(self, card, port):
+        """Two pipelines in one process: the second finds the first's keyed server on the card."""
+        first, second = _rm(), _rm()
+        with _no_launch() as popen:
+            assert await first.llm_start_refusal("vllm") is None
+            await first.start_llm_server("vllm")
+            assert popen.call_count == 1
+            # The first's server holds the card and answers only to its key.
+            port["models"], port["key"] = [STUDENT_4B], first._llm_server.api_key
+            card["reading"] = REFUSED
+            reads = card["reads"]
+            assert await second.llm_start_refusal("vllm") is None
+            assert card["reads"] == reads
+            await second.start_llm_server("vllm")
+            assert popen.call_count == 1
+        assert second._llm_server._reused is True
+        assert second._llm_server.api_key == first._llm_server.api_key
+        first._llm_server._process = None  # never signal the mocked process
+
+    @pytest.mark.parametrize(
+        ("models", "key"),
+        [
+            (["org/another-model"], None),  # a leftover server for another model
+            ([STUDENT_4B], "another-process-key"),  # another bibr process's keyed server
+        ],
+    )
+    async def test_a_listener_the_start_cannot_use_is_left_to_the_start(
+        self, card, port, models, key
+    ):
+        card["reading"] = REFUSED
+        port["models"], port["key"] = models, key
+        rm = _rm()
+        assert await rm.llm_start_refusal("vllm") is None
+        assert card["reads"] == 0
+        with _no_launch() as popen, pytest.raises(UpstreamServiceError) as start:
+            await rm.start_llm_server("vllm")
+        # The start's own error about the port, not a memory refusal.
+        assert not isinstance(start.value, ManagedLlmVramError)
+        assert "port 9996" in str(start.value)
+        popen.assert_not_called()
+
+    async def test_a_free_port_is_probed_then_predicted(self, card, port):
+        card["reading"] = REFUSED
+        assert isinstance(await _rm().llm_start_refusal("vllm"), ManagedLlmVramError)
+        assert port["probes"] == 1
+        assert card["reads"] >= 1
+
+
+async def _start_refusal(rm: ResourceManager) -> str | None:
+    """What the real start does on the card as it reads now: its refusal, or None once launched."""
+    with _no_launch() as popen:
+        try:
+            await rm.start_llm_server("vllm")
+        except ManagedLlmVramError as exc:
+            popen.assert_not_called()
+            return str(exc)
+    popen.assert_called_once()
+    rm._llm_server._process = None  # never signal the mocked process
+    return None
+
+
+class TestAgreesWithTheStart:
+    """The precheck refuses exactly when the start would, with the start's own message.
+
+    Covers what the 0.85 fixtures above cannot tell apart: a model without a
+    floor, where the swap path's room for bibr decides, and a planned share
+    below the model's floor, which caps it.
+    """
+
+    @pytest.mark.parametrize(
+        ("settings", "fraction", "reading", "refused"),
+        [
+            pytest.param(_settings, 0.85, FITS, False, id="bf16-fits"),
+            pytest.param(_settings, 0.85, REFUSED, True, id="bf16-refused"),
+            # A local path with LLM_LOCAL_MIN_VRAM_GB=7 starts at its floor,
+            # and is refused once bibr holds 2.9 GiB beside a 12 GiB hog
+            # (8.75 GiB needed), where without the floor it would start at 0.20.
+            pytest.param(
+                lambda: _local_w4a16_settings(7.0), 0.85, REFUSED, False, id="w4a16-floor"
+            ),
+            pytest.param(
+                lambda: _local_w4a16_settings(7.0),
+                0.85,
+                GpuMemory(total_gb=CUDA_3090, free_gb=8.66, own_gb=2.90),
+                True,
+                id="w4a16-floor-refused",
+            ),
+            # A local path without it has no floor. On the swap path a start
+            # still leaves bibr 6 GiB less what it holds (4.02 GiB here), so
+            # it is refused once that and the 0.75 GiB reserve use up what is
+            # free; with only the 1 GiB minimum it would start at 0.11.
+            pytest.param(
+                _local_w4a16_settings,
+                0.85,
+                GpuMemory(total_gb=CUDA_3090, free_gb=4.50, own_gb=1.98),
+                True,
+                id="floorless-swap-refused",
+            ),
+            pytest.param(
+                _local_w4a16_settings,
+                0.85,
+                GpuMemory(total_gb=CUDA_3090, free_gb=6.00, own_gb=1.98),
+                False,
+                id="floorless-swap-fits",
+            ),
+            # A planned share of 0.40 (9.42 GiB) caps the 4B's 12 GB floor:
+            # with 10 GiB left after the reserve and bibr's room, the start
+            # takes 0.40, where the 12 GB floor would refuse it.
+            pytest.param(
+                _settings,
+                0.40,
+                GpuMemory(total_gb=CUDA_3090, free_gb=12.00, own_gb=1.00),
+                False,
+                id="cap-below-floor-fits",
+            ),
+            pytest.param(
+                _settings,
+                0.40,
+                GpuMemory(total_gb=CUDA_3090, free_gb=11.00, own_gb=1.00),
+                True,
+                id="cap-below-floor-refused",
+            ),
+        ],
+    )
+    async def test_refusal_matches_the_real_start(self, card, settings, fraction, reading, refused):
+        card["reading"] = reading
+        rm = _rm(settings=settings(), managed_vllm_fraction=fraction)
+        predicted = await rm.llm_start_refusal("vllm")
+        started = await _start_refusal(rm)
+        assert (predicted is not None) is refused
+        assert (None if predicted is None else str(predicted)) == started
+
+    def test_the_cases_cover_the_swap_path_and_a_capped_floor(self):
+        assert _rm(settings=_local_w4a16_settings())._llm_swaps_with_ocr() is True
+        assert vllm_share.managed_llm_floor_gb(W4A16_LOCAL, _local_w4a16_settings()) is None
+        # 0.40 + PaddleOCR-VL's 0.21 + the 0.25 ONNX reserve fit a 24 GB card:
+        # no swap, and the cap is below the 4B's 12 GB floor.
+        capped = _rm(managed_vllm_fraction=0.40)
+        assert capped._llm_swaps_with_ocr() is False
+        floor = vllm_share.managed_llm_floor_gb(STUDENT_4B)
+        assert floor is not None
+        assert floor > 0.40 * CUDA_3090
 
 
 def _ctx(resources, *papers, **config):
@@ -213,14 +433,16 @@ def test_the_local_barrier_plan_checks_before_ocr_only():
         assert "llm_server_precheck" not in names
 
 
-async def test_e25_v2_chunks_after_a_refusal_skip_ocr_until_memory_comes_back(card, monkeypatch):
-    """Real ResourceManager and VllmLlmServer (Popen mocked) over three chunks.
+async def test_e25_v2_chunks_after_a_refusal_skip_ocr_until_memory_comes_back(card, port):
+    """Real ResourceManager, VllmLlmServer and port check (Popen mocked) over four chunks.
 
     Chunk 1 passes the check, its OCR grows bibr to 1.98 GiB, and the start is
     refused. Chunk 2 is refused before OCR, with the same error text and
     outcome. Chunk 3 finds the memory back: OCR runs and the server starts.
+    Chunk 4 goes to a second pipeline in this process while the first's
+    server holds the card: its check finds that server on the port, so its
+    OCR runs and its start reuses the server instead of being refused.
     """
-    import bibr.local.vllm_llm as vllm_llm
     from bibr.api import ChewFailure
     from bibr.batch.runner import _local_outcome
     from bibr.config import snapshot_settings
@@ -229,8 +451,6 @@ async def test_e25_v2_chunks_after_a_refusal_skip_ocr_until_memory_comes_back(ca
     from bibr.pipeline.stages.llm_server import LlmServerPrecheckStage, LlmServerStage
     from bibr.pipeline.state import FileState
 
-    monkeypatch.setattr(vllm_llm, "guard_managed_server_port", lambda *a, **k: False)
-    monkeypatch.setattr(vllm_llm.VllmLlmServer, "configure_llm_client", lambda self: None)
     ocred: list[str] = []
 
     class _RenderOcr:
@@ -243,30 +463,34 @@ async def test_e25_v2_chunks_after_a_refusal_skip_ocr_until_memory_comes_back(ca
             if card["reading"] is FITS:
                 card["reading"] = REFUSED  # bibr's sessions grew during the chunk
 
-    rm = _rm()
-    pipeline = Pipeline(
-        stages=[LlmServerPrecheckStage(), _RenderOcr(), LlmServerStage()],
-        resources=rm,
-        config=RunConfig(llm_backend="vllm"),
-        settings=snapshot_settings(),
-    )
+    def pipeline(rm):
+        return Pipeline(
+            stages=[LlmServerPrecheckStage(), _RenderOcr(), LlmServerStage()],
+            resources=rm,
+            config=RunConfig(llm_backend="vllm"),
+            settings=snapshot_settings(),
+        )
+
+    rm, sibling = _rm(), _rm()
+    first, second = pipeline(rm), pipeline(sibling)
     chunk1 = [FileState(path=Path(f"c1-{i}.pdf")) for i in range(2)]
     chunk2 = [FileState(path=Path(f"c2-{i}.pdf")) for i in range(2)]
     chunk3 = [FileState(path=Path(f"c3-{i}.pdf")) for i in range(2)]
-    with (
-        patch("importlib.util.find_spec", return_value=object()),
-        patch.object(vllm_llm.subprocess, "Popen") as popen,
-        patch.object(vllm_llm.VllmLlmServer, "_wait_until_healthy"),
-    ):
-        popen.return_value = MagicMock()
-        await pipeline.process_chunk(chunk1)
-        await pipeline.process_chunk(chunk2)
+    chunk4 = [FileState(path=Path(f"c4-{i}.pdf")) for i in range(2)]
+    with _no_launch() as popen:
+        await first.process_chunk(chunk1)
+        await first.process_chunk(chunk2)
         assert popen.call_count == 0  # vLLM was never launched to crash
         card["reading"] = CAME_BACK
-        await pipeline.process_chunk(chunk3)
+        await first.process_chunk(chunk3)
+        assert popen.call_count == 1
+        # The server now listens on the port, keyed, and holds the card.
+        port["models"], port["key"] = [STUDENT_4B], rm._llm_server.api_key
+        card["reading"] = REFUSED
+        await second.process_chunk(chunk4)
         assert popen.call_count == 1
 
-    assert ocred == ["c1-0.pdf", "c1-1.pdf", "c3-0.pdf", "c3-1.pdf"]
+    assert ocred == ["c1-0.pdf", "c1-1.pdf", "c3-0.pdf", "c3-1.pdf", "c4-0.pdf", "c4-1.pdf"]
 
     def outcome(fs):
         failure = ChewFailure(
@@ -279,5 +503,6 @@ async def test_e25_v2_chunks_after_a_refusal_skip_ocr_until_memory_comes_back(ca
     status, code, stage, error = outcome(chunk2[0])
     assert (status, code, stage) == ("failed", "upstream_unavailable", "llm_server")
     assert error.startswith("LLM server start failed: Error in llm: not enough free GPU memory")
-    assert all(fs.error is None for fs in chunk3)
+    assert all(fs.error is None for fs in chunk3 + chunk4)
+    assert sibling._llm_server._reused is True
     rm._llm_server._process = None  # never signal the mocked process

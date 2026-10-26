@@ -271,7 +271,10 @@ The LLM server starts after a chunk's OCR, and OCR only adds to what bibr
 holds. So while the LLM server is down, bibr checks before each chunk's OCR
 whether the memory free then could start it. When it could not, the chunk's
 papers fail with the same error before any OCR runs, and the check is made
-again before the next chunk, which goes ahead once enough memory is free.
+again before the next chunk, which goes ahead once enough memory is free. A
+server already listening on the LLM server's port (`LLM_VLLM_PORT`) is never
+checked: the start reuses one that serves the model, such as one another
+pipeline in the same process started, without asking for memory.
 
 The minimum comes from bibr's model registry, which lists the published
 builds. A model it does not list, such as a local path, has none, so a start

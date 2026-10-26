@@ -22,7 +22,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   OCRed for nothing). While the LLM server is down, bibr now checks before each
   chunk's OCR whether the memory free then could start it; when it could not,
   the chunk's papers fail at once with the same error and outcome, and the
-  next chunk checks again.
+  next chunk checks again. A server already serving the model on the LLM
+  server's port, which the start reuses, is never checked.
 - A fully local batch on one NVIDIA card with `onnxruntime-gpu` installed no
   longer fails every paper after the first chunk. The managed PaddleOCR-VL
   server asked vLLM for 92% of the card, which vLLM needs free before it

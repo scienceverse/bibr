@@ -820,9 +820,14 @@ class ResourceManager:
 
         No prediction (``None``) when the share is the user's (it is launched
         as given), when the LLM server is up (it is reused, or restarted after
-        OCR from memory not free now), while an OCR preload is in flight, or
-        when an OCR engine that holds GPU memory is resident (it may be
-        stopped before the start).
+        OCR from memory not free now), while an OCR preload is in flight, when
+        an OCR engine that holds GPU memory is resident (it may be stopped
+        before the start), or when a server already listens on the LLM
+        server's port. The start's own check decides that
+        (``vllm_llm.reuses_running_server``): a server for the model, one a
+        sibling pipeline in this process started included, is reused before
+        any share is sized, however little memory is free, and any other
+        listener fails the start with its own error.
         """
         if backend != "vllm" or self._llm_share_fixed or self._llm_server is not None:
             return None
@@ -833,9 +838,19 @@ class ResourceManager:
 
             if not (self.ocr_url or self.ocr_backend in REMOTE_OCR_BACKENDS):
                 return None
-        from bibr.local import vllm_share
+        from bibr.exceptions import UpstreamServiceError
+        from bibr.local import vllm_llm, vllm_share
         from bibr.ocr import registry
 
+        model = vllm_share.managed_llm_model(self._settings)
+        try:
+            reused = await asyncio.to_thread(
+                vllm_llm.reuses_running_server, model, self._settings.llm.vllm_port
+            )
+        except UpstreamServiceError:
+            return None
+        if reused:
+            return None
         reading = await asyncio.to_thread(
             vllm_share.settled_gpu_memory, registry.managed_gpu_memory, wait=time.sleep
         )
@@ -845,7 +860,7 @@ class ResourceManager:
             vllm_share.managed_llm_share(
                 reading,
                 self._settings,
-                vllm_share.managed_llm_model(self._settings),
+                model,
                 cap=self._managed_vllm_fraction or self._settings.llm.local_mem_fraction,
                 swaps_with_ocr=self._llm_swaps_with_ocr(),
             )
