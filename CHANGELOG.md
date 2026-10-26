@@ -8,15 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- A long `bibr batch` run no longer grows its memory by a gigabyte or more every
-  few chunks. Freed page images and model buffers stayed in glibc's malloc arenas
-  instead of going back to the system, so the process kept the high-water mark of
-  every chunk: on 80 CPU papers it ended at 8.1 GiB, holding 3.8 GiB of free
-  heap next to 1.6 GiB in use. bibr now hands free heap back with `malloc_trim`
-  after each render window and at the end of each chunk (Linux with glibc only;
-  elsewhere it does nothing), and the same run stays at about 4.5 GiB. With
-  layout on a GPU and local vLLM servers, 48 papers now end at 4.4 GiB instead
-  of 11.1 GiB.
+- A long `bibr batch` run no longer grows its memory from chunk to chunk.
+  Freed page images and model buffers stayed in glibc's malloc arenas instead of
+  going back to the system, so the process kept the high-water mark of every
+  chunk: with layout on a GPU it held about 11 GiB after 48 papers and peaked at
+  16-19 GiB over 200, while its heap in use stayed near 2 GiB. bibr now hands
+  free heap back with `malloc_trim` after each chunk of a batch (`bibr batch`,
+  `bibr chew` on several files, `chew()` or `Chewer` on a list; Linux with glibc
+  only). In a 32-paper GPU batch at the default batch size of 8, the process now
+  averages 6.6 GiB over the last third of the run instead of 8.4 GiB, peaks at
+  7.4 GiB instead of 8.9 GiB, and no longer climbs from chunk to chunk; the
+  throughput difference stayed within run-to-run noise.
+  `PIPELINE_HEAP_TRIM=window` also trims between the render windows inside a
+  chunk, which keeps large chunks (`--batch-size` 24 and up) lower but ran a
+  24-paper chunk 20-30% slower; `PIPELINE_HEAP_TRIM=off` turns trimming off.
+  Single-paper calls and `bibr serve` requests never trim.
 
 ## [0.7.4] - 2026-10-23
 

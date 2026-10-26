@@ -8,7 +8,7 @@ on its own. The page buffers of the next window rarely fit the holes the last
 window left, so a long ``bibr batch`` grows from chunk to chunk while its live
 objects do not (an 80-paper CPU batch ended holding 3.8 GiB of free heap next
 to 1.6 GiB in use). ``malloc_trim(0)`` walks every arena and returns whole
-free pages from anywhere in them, in about 0.1-0.3 s for a few GiB.
+free pages from anywhere in them, in 0.1-0.6 s for a few GiB.
 
 ``Settings.pipeline.heap_trim`` (``PIPELINE_HEAP_TRIM``) says when the batch
 drivers trim:
@@ -17,13 +17,15 @@ drivers trim:
   ``bibr chew`` on several files, ``chew()``/``Chewer`` on a list);
 * ``"window"``: also between the render/OCR windows inside a chunk, which
   keeps the footprint down inside large chunks (``--batch-size`` well above
-  ``OCR_MAX_CONCURRENT_FILES``) at the price of re-faulting the released pages
-  in the next window;
+  ``OCR_MAX_CONCURRENT_FILES``). The next window then faults the released
+  pages back in while it renders, the step the OCR server waits on, and a
+  24-paper chunk ran 20-30% slower;
 * ``"off"``: never.
 
-Single-paper calls and ``bibr serve`` requests never trim: a trim there would
-cost each request time and free nothing a long run would miss. It is a no-op
-off glibc (macOS, Windows, musl), where the function does not exist.
+Single-paper calls (a warm ``Chewer`` given one path at a time included) and
+``bibr serve`` requests never trim: neither their growth over many calls nor
+the per-call cost of a trim has been measured. It is a no-op off glibc
+(macOS, Windows, musl), where the function does not exist.
 """
 
 from __future__ import annotations
