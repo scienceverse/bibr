@@ -13,6 +13,7 @@ import json
 import logging
 import math
 import re
+import threading
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -486,6 +487,13 @@ class BaseSentenceSegmenter:
         # start and runs on CPU.
         session = self.model.model.ort_session
         device = session_device(session, providers, model_name="wtpsplit-sat")
+        # What a CPU copy needs, opened only when one text does not fit on a
+        # nearly full GPU (see ``_split_batch_with_retry``).
+        self._device = device
+        self._sat_target = sat_target
+        self._sat_tokenizer = model_kwargs["tokenizer_name_or_path"]
+        self._cpu_model = None
+        self._cpu_model_lock = threading.Lock()
         # SaT also runs the session itself, so wrap it in place: on CUDA, each
         # run then frees the arena memory it no longer uses.
         self.model.model.ort_session = shrink_arena_after_runs(session)
@@ -538,45 +546,82 @@ class BaseSentenceSegmenter:
         return results
 
     def _split_batch_with_retry(self, texts: list[str]) -> list[list[str]]:
-        """Run model.split() with automatic batch halving on OOM."""
+        """Run model.split() with automatic batch halving on GPU OOM.
+
+        A single text that still does not fit is split by a CPU copy of the
+        model when the session is on the GPU: on a nearly full card the
+        halving reached one 3,361-character text within 40 ms and the paper
+        failed with ``parse_failed``.
+        """
+        from bibr.utils.gpu_oom import is_gpu_oom_error
+
         try:
             return self._collect_split_result(texts)
         except Exception as exc:
-            if "BFCArena" not in str(exc) and "out of memory" not in str(exc).lower():
+            if not is_gpu_oom_error(exc):
                 raise
-
-            if len(texts) == 1:
+            if len(texts) == 1 and getattr(self, "_device", "cpu") != "cuda":
                 logger.error(
                     "OOM on single text (%d chars), cannot reduce batch further", len(texts[0])
                 )
                 raise
 
-            half = max(1, len(texts) // 2)
-            logger.warning(
-                "OOM with batch size %d, retrying as %d + %d",
-                len(texts),
-                half,
-                len(texts) - half,
-            )
-            left = self._split_batch_with_retry(texts[:half])
-            right = self._split_batch_with_retry(texts[half:])
-            return left + right
+        # Retried outside the handler, so the failed run's traceback is freed.
+        if len(texts) == 1:
+            logger.warning("OOM on single text (%d chars); splitting it on the CPU", len(texts[0]))
+            return self._collect_split_result(texts, model=self._cpu_sat())
 
-    def _collect_split_result(self, batch: list[str]) -> list[list[str]]:
-        """Call model.split() and normalize the result to list[list[str]]."""
+        half = max(1, len(texts) // 2)
+        logger.warning(
+            "OOM with batch size %d, retrying as %d + %d",
+            len(texts),
+            half,
+            len(texts) - half,
+        )
+        left = self._split_batch_with_retry(texts[:half])
+        right = self._split_batch_with_retry(texts[half:])
+        return left + right
+
+    def _cpu_sat(self):
+        """A CPU copy of the SaT model, built on first use (GPU OOM last resort)."""
+        with self._cpu_model_lock:
+            if self._cpu_model is None:
+                from wtpsplit_lite import SaT
+
+                from bibr.utils.onnx_providers import cpu_ort_session_options, get_ort_providers
+
+                model_kwargs: dict[str, Any] = {
+                    "ort_providers": get_ort_providers(
+                        enable_cuda=False, enable_coreml=False, model_name="wtpsplit-sat (CPU)"
+                    ),
+                    "hub_prefix": None,
+                    "tokenizer_name_or_path": self._sat_tokenizer,
+                }
+                cpu_options = cpu_ort_session_options()
+                if cpu_options is not None:
+                    model_kwargs["ort_kwargs"] = {"sess_options": cpu_options}
+                self._cpu_model = SaT(self._sat_target, **model_kwargs)
+                logger.info("SentenceSegmenter CPU copy ready for GPU out-of-memory retries")
+            return self._cpu_model
+
+    def _collect_split_result(self, batch: list[str], *, model=None) -> list[list[str]]:
+        """Call model.split() and normalize the result to list[list[str]].
+
+        ``model`` defaults to the loaded SaT (the CPU copy after a GPU OOM).
+        """
         assert self.model is not None  # noqa: S101 — segment_batch ensures load
         batch = [_coerce_split_text(text) for text in batch]
         try:
-            return self._collect_model_split_result(batch)
+            return self._collect_model_split_result(batch, model=model)
         except TypeError as exc:
             if not _is_tokenizer_textencode_error(exc):
                 raise
-            return self._collect_split_result_with_tokenizer_fallback(batch, exc)
+            return self._collect_split_result_with_tokenizer_fallback(batch, exc, model=model)
 
-    def _collect_model_split_result(self, batch: list[str]) -> list[list[str]]:
+    def _collect_model_split_result(self, batch: list[str], *, model=None) -> list[list[str]]:
         """Call wtpsplit and normalize its generator/list return shape."""
         assert self.model is not None  # noqa: S101 — segment_batch ensures load
-        split_result = self.model.split(batch, **self._split_kwargs())
+        split_result = (model or self.model).split(batch, **self._split_kwargs())
         if hasattr(split_result, "__next__"):
             return list(split_result)
         if len(batch) == 1 and split_result and not isinstance(split_result[0], list):
@@ -595,7 +640,7 @@ class BaseSentenceSegmenter:
         return kwargs
 
     def _collect_split_result_with_tokenizer_fallback(
-        self, batch: list[str], exc: TypeError
+        self, batch: list[str], exc: TypeError, *, model=None
     ) -> list[list[str]]:
         """Isolate wtpsplit tokenizer failures to one paragraph when possible."""
         if len(batch) == 1:
@@ -609,6 +654,6 @@ class BaseSentenceSegmenter:
             return [_fallback_split_text(text)]
 
         half = max(1, len(batch) // 2)
-        left = self._collect_split_result(batch[:half])
-        right = self._collect_split_result(batch[half:])
+        left = self._collect_split_result(batch[:half], model=model)
+        right = self._collect_split_result(batch[half:], model=model)
         return left + right

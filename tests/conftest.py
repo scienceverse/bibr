@@ -192,12 +192,16 @@ def _no_live_gpu_memory_reading(monkeypatch):
     """Keep the suite off the host GPU's free memory.
 
     The managed vLLM LLM server sizes its share from ``managed_gpu_memory``
-    (None keeps the configured share). Tests that exercise it patch it back
-    themselves.
+    (None keeps the configured share), and a bare ORT ``cudaError`` counts as
+    out-of-memory only on a nearly full card or after a recent recognised
+    out-of-memory failure, which ``bibr.utils.gpu_oom`` remembers per process.
+    Tests that exercise either patch them back themselves.
     """
     from bibr.ocr import registry
+    from bibr.utils import gpu_oom
 
     monkeypatch.setattr(registry, "managed_gpu_memory", lambda: None)
+    monkeypatch.setattr(gpu_oom, "_last_oom_at", None)
 
 
 @pytest.fixture(autouse=True)

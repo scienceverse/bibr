@@ -11,10 +11,13 @@ parameters taken from the bundle manifest.
 from __future__ import annotations
 
 import logging
+import threading
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
 
+from bibr.utils.gpu_oom import split_on_gpu_oom
 from bibr.utils.ml_runtime import ONNX_MODEL, read_onnx_manifest
 from bibr.utils.onnx_tokenizer import encode_batch, load_tokenizer
 from bibr.utils.text import strip_lone_surrogates
@@ -73,12 +76,15 @@ class OnnxRefParser:
                 f"{self.transitions.shape} does not match {len(self.tags)} tags"
             )
         self.tokenizer = load_tokenizer(self.bundle_dir, self.manifest)
+        self._model_path = self.bundle_dir / self.manifest.get("model_file", ONNX_MODEL)
         self.session, self.device = create_session(
-            self.bundle_dir / self.manifest.get("model_file", ONNX_MODEL),
+            self._model_path,
             device=device,
             model_name="NER reference parser (ONNX)",
         )
         self._input_names = [i.name for i in self.session.get_inputs()]
+        self._cpu_session = None
+        self._cpu_session_lock = threading.Lock()
 
     def parse(self, ref_text: str) -> dict[str, str | int]:
         """Parse one reference. Returns a dict with PaperReference field names."""
@@ -101,33 +107,70 @@ class OnnxRefParser:
         for start in range(0, len(slots), step):
             chunk_slots = slots[start : start + step]
             texts = [strip_lone_surrogates(ref_texts[i]) for i in chunk_slots]
-            batch = encode_batch(
-                self.tokenizer, texts, max_length=self.max_seq_len, add_special_tokens=False
+            # A GPU out-of-memory failure halves the chunk and finally parses
+            # a single reference on the CPU: it used to fail the whole
+            # paper's reference extraction, which then shipped without its
+            # references (or, when it raised further up, failed the paper).
+            parsed = split_on_gpu_oom(
+                texts,
+                self._parse_chunk,
+                label="NER reference parser",
+                run_on_cpu=(
+                    (lambda one: self._parse_chunk(one, session=self._session_on_cpu()))
+                    if getattr(self, "device", None) == "cuda"
+                    else None
+                ),
             )
-            if batch.input_ids.shape[1] == 0:
-                continue
-            truncated += count_truncated(texts, batch.offsets, self.max_seq_len)
-            emissions = self._emissions(batch.input_ids, batch.attention_mask)
-            paths = viterbi_decode(
-                emissions,
-                batch.attention_mask,
-                start_transitions=self.start_transitions,
-                end_transitions=self.end_transitions,
-                transitions=self.transitions,
-            )
-            for slot, path, offsets, text in zip(
-                chunk_slots, paths, batch.offsets, texts, strict=True
-            ):
-                results[slot] = self._decode(path, offsets[: len(path)], text)
+            for slot, (result, cut) in zip(chunk_slots, parsed, strict=True):
+                results[slot] = result
+                truncated += cut
         self.last_truncated_count = truncated
         if truncated:
             logger.debug("NER parser truncated %d of %d references", truncated, len(slots))
         return results
 
-    def _emissions(self, input_ids: np.ndarray, attention_mask: np.ndarray) -> np.ndarray:
+    def _parse_chunk(
+        self, texts: Sequence[str], *, session=None
+    ) -> list[tuple[dict[str, str | int], int]]:
+        """Each text's parsed fields and whether it was truncated (1/0), in order."""
+        batch = encode_batch(
+            self.tokenizer, list(texts), max_length=self.max_seq_len, add_special_tokens=False
+        )
+        if batch.input_ids.shape[1] == 0:
+            return [({}, 0) for _ in texts]
+        emissions = self._emissions(batch.input_ids, batch.attention_mask, session=session)
+        paths = viterbi_decode(
+            emissions,
+            batch.attention_mask,
+            start_transitions=self.start_transitions,
+            end_transitions=self.end_transitions,
+            transitions=self.transitions,
+        )
+        return [
+            (
+                self._decode(path, offsets[: len(path)], text),
+                count_truncated([text], [offsets], self.max_seq_len),
+            )
+            for path, offsets, text in zip(paths, batch.offsets, texts, strict=True)
+        ]
+
+    def _session_on_cpu(self):
+        """A CPU session on the same graph, opened on first use (GPU OOM last resort)."""
+        with self._cpu_session_lock:
+            if self._cpu_session is None:
+                from bibr.utils.onnx_providers import create_session
+
+                self._cpu_session, _device = create_session(
+                    self._model_path, device="cpu", model_name="NER reference parser (ONNX, CPU)"
+                )
+            return self._cpu_session
+
+    def _emissions(
+        self, input_ids: np.ndarray, attention_mask: np.ndarray, *, session=None
+    ) -> np.ndarray:
         feeds = {"input_ids": input_ids, "attention_mask": attention_mask}
         feeds = {k: v for k, v in feeds.items() if k in self._input_names}
-        (emissions,) = self.session.run(["emissions"], feeds)
+        (emissions,) = (session or self.session).run(["emissions"], feeds)
         return np.asarray(emissions, dtype=np.float32)
 
     def _decode(self, preds: list[int], offsets: list, text: str) -> dict[str, str | int]:

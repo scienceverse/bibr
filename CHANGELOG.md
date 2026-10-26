@@ -37,6 +37,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   error instead of launching vLLM to crash. The Qwen3.5 students now run at
   most 128 sequences at once, which halves vLLM's capture sizes and lets them
   start on a smaller share.
+- A nearly full GPU no longer fails papers, drops their references or sends
+  their headings to the LLM. bibr's layout, sentence, reference-parser and
+  section-classifier models now treat each GPU out-of-memory failure alike:
+  they retry with smaller batches and, for a single page, text, reference or
+  heading that still does not fit, run it on the CPU. This includes the bare
+  `cudaError` that ONNX Runtime raised for a layout convolution on a nearly
+  full card (the paper failed with `layout_failed`), reference-parser memory
+  errors (the paper shipped without references) and section-classifier ones
+  (its headings fell back to the LLM tier). Other CUDA errors still fail as
+  before.
 
 ## [0.7.4] - 2026-10-23
 
