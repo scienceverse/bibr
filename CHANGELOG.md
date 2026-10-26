@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- bibr now sizes its prompts to the context window of an Ollama, llama.cpp or
+  vLLM server it did not start itself. The input cap is sized for cloud models
+  (`LLM_MAX_INPUT_CHARS` 300,000 characters), so on an Ollama server with a
+  16,384-token context a long front matter either failed the paper with HTTP
+  400 "exceeds the available context size" (models run with their GGUF chat
+  template) or came back without its title or authors (Ollama library models,
+  which shorten an over-long prompt and answer anyway). Before the first call,
+  bibr asks an `LLM_BASE_URL` server, or the `ollama` provider's server, for
+  its window: Ollama's `/api/ps` (or the model's `num_ctx`), llama.cpp's
+  `/props`, vLLM's `max_model_len` in `/v1/models`. Inputs are then cut to fit
+  it, and Ollama and llama.cpp get the caps the managed llama.cpp server uses
+  (`LLM_MAX_INPUT_CHARS` 24,000, `LLM_REF_SEG_WINDOW_CHARS` 12,000,
+  `LLM_MAX_TOKENS` 4,096 at 16,384 tokens, scaled up for a larger context).
+  When Ollama does not say (the model is not loaded and sets no `num_ctx`),
+  the caps for 16,384 tokens apply. Values you set yourself, including
+  `LLM_CONTEXT_TOKENS`, are kept.
+- llama.cpp's and Ollama's "request (N tokens) exceeds the available context
+  size (M tokens)" is now read like vLLM's "maximum context length": the call
+  asks once more with its input cut to M tokens. When several concurrent calls
+  overflow, each asks again, not only the first to fail. A title/keywords call
+  that still runs past the window leaves its fields empty and marked failed,
+  as a truncated response does, instead of failing the paper.
+- The LLM section-classification call is split into parts that fit
+  `LLM_MAX_INPUT_CHARS` and the server's context window. A paper with 80
+  unrecognised headings sent them in one 17,332-token prompt, which a
+  16,384-token server rejected. The paper-classification and implicit-section
+  calls are cut to the same limits; the implicit-section call read the process
+  settings and missed the caps set for the pipeline's server. The
+  citation-resolution and research-integrity calls, which carry two and three
+  texts, now split the context window between them; each text was cut to the
+  whole window, so a long reference list with many citations could still run
+  past it.
+
 ## [0.7.4] - 2026-10-23
 
 The reference parser is now v5.1 (UltraBERT-150M), which matches references far better

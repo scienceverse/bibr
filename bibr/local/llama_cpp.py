@@ -1033,18 +1033,16 @@ class LlamaCppLlmServer:
         if "max_concurrency" not in self._settings.llm.model_fields_set:
             self._settings.llm.max_concurrency = self._server.n_slots
         # Keep prompt + completion inside the launched context size. The caps
-        # below equal the historical constants at the default 16384-token
-        # context (completion ≤ ctx/4); a larger LLM_LLAMA_CPP_CONTEXT_SIZE
-        # scales them instead of silently keeping the small-context budget.
-        # Explicit user values are never replaced — only warned about when
-        # they cannot fit the context.
+        # equal the historical constants at the default 16384-token context
+        # (completion ≤ ctx/4); a larger LLM_LLAMA_CPP_CONTEXT_SIZE scales
+        # them instead of silently keeping the small-context budget. An
+        # external Ollama or llama.cpp gets the same caps
+        # (bibr.clients.server_context). Explicit user values are never
+        # replaced — only warned about when they cannot fit the context.
+        from bibr.clients.server_context import fixed_context_caps
+
         ctx = self._settings.llm.llama_cpp_context_size
-        caps = (
-            ("max_tokens", ctx // 4),
-            ("max_input_chars", 24_000 * ctx // 16_384),
-            ("ref_seg_window_chars", 12_000 * ctx // 16_384),
-        )
-        for field, cap in caps:
+        for field, cap in fixed_context_caps(ctx):
             current = getattr(self._settings.llm, field)
             if field in self._settings.llm.model_fields_set:
                 if current > cap:

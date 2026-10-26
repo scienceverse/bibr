@@ -36,6 +36,8 @@ from bibr.utils.locks import LOCAL_INFERENCE_LOCK
 from bibr.utils.text import normalize_text
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from bibr.clients.llm_protocol import LlmClient
     from bibr.pipeline.classifier_resources import ClassifierResources
     from bibr.structure.section_classifier_model import SectionClassifierModel
@@ -403,6 +405,20 @@ def _classify_lookup(header_text: str) -> tuple[CanonicalSection, float]:
     return section, score
 
 
+def _fitting_spans(lines: list[str], limit_of: Callable[[str], int]) -> list[tuple[int, int]]:
+    """Split *lines* into consecutive ``(start, stop)`` runs whose joined text
+    *limit_of* keeps whole. A line too long even alone gets a run of its own."""
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for end in range(1, len(lines)):
+        run = "\n".join(lines[start : end + 1])
+        if limit_of(run) < len(run):
+            spans.append((start, end))
+            start = end
+    spans.append((start, len(lines)))
+    return spans
+
+
 async def _classify_llm_batch(
     header_texts: list[str],
     body_snippets: list[str] | None = None,
@@ -413,6 +429,9 @@ async def _classify_llm_batch(
     degradation_warnings: list[ProcessingWarning] | None = None,
 ) -> list[tuple[CanonicalSection, float]]:
     """Use LLM to classify unknown section headers in a single batch call.
+
+    A list too long for one prompt (``LLM_MAX_INPUT_CHARS``, the server's
+    context window) is classified in several calls, one per part that fits.
 
     Args:
         header_texts: Section headers to classify.
@@ -450,6 +469,35 @@ async def _classify_llm_batch(
                     line += f" — opening text: {snippet}..."
             lines.append(line)
         sections_block = "\n".join(lines)
+
+        # A list longer than LLM_MAX_INPUT_CHARS or the server's context window
+        # goes out in several calls. Sent whole, the 80 headings of one paper
+        # made a 17,332-token prompt that a 16,384-token Ollama rejected.
+        max_tokens = _task_max_tokens(effective, effective.llm.section_max_tokens)
+        if isinstance(llm_client, LLMClient):
+            await llm_client.ensure_server_context()
+            client = llm_client
+
+            def limit_of(text: str) -> int:
+                return client.input_limit(text, max_tokens=max_tokens)
+
+        else:
+
+            def limit_of(text: str) -> int:
+                return min(len(text), effective.llm.max_input_chars)
+
+        if len(lines) > 1 and limit_of(sections_block) < len(sections_block):
+            results: list[tuple[CanonicalSection, float]] = []
+            for start, stop in _fitting_spans(lines, limit_of):
+                results += await _classify_llm_batch(
+                    header_texts[start:stop],
+                    body_snippets[start:stop] if body_snippets else None,
+                    llm_client,
+                    scope_context[start:stop] if scope_context else None,
+                    settings=effective,
+                    degradation_warnings=degradation_warnings,
+                )
+            return results
 
         body_instruction = ""
         if body_snippets:
@@ -502,7 +550,7 @@ Valid section types:
             ],
             "You are a scientific paper section classifier.",
             label="section_classifier",
-            max_tokens=_task_max_tokens(effective, effective.llm.section_max_tokens),
+            max_tokens=max_tokens,
         )
 
         classifications = result.classifications

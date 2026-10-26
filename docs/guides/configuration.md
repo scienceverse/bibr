@@ -232,6 +232,16 @@ LLM_MODEL=your-served-model
 LLM_API_KEY=your-endpoint-key
 ```
 
+Before the first prompt, bibr asks such a server, or the Ollama server, for
+its context window (Ollama's `/api/ps` or the model's `num_ctx`, llama.cpp's
+`/props`, vLLM's `max_model_len`) and cuts long inputs to fit it. Ollama and
+llama.cpp also get the caps of the managed llama.cpp server, scaled to the
+window: at 16,384 tokens `LLM_MAX_INPUT_CHARS=24000`,
+`LLM_REF_SEG_WINDOW_CHARS=12000` and `LLM_MAX_TOKENS=4096`. An Ollama model
+that is not loaded yet and sets no `num_ctx` gets the 16,384-token caps.
+Values you set are kept; set `LLM_CONTEXT_TOKENS` when the server runs a
+smaller context than it reports.
+
 `--llm local` starts a managed server. It resolves to Rapid-MLX on Apple
 Silicon when that executable is available, otherwise vllm-mlx; llama.cpp on
 Windows or CUDA cards below 8 GB; and vLLM on Linux/CUDA systems with at

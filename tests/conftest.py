@@ -193,6 +193,19 @@ def _skip_installed_onnxruntime_builds_check(monkeypatch):
     monkeypatch.setattr("bibr.utils.onnx_providers._gpu_build_shadowed", False)
 
 
+@pytest.fixture(autouse=True)
+def _no_llm_server_context_probe(monkeypatch):
+    """Keep ``LLMClient`` from asking an ``LLM_BASE_URL`` server for its
+    context window before the first call. Tests that point a client at a
+    made-up or loopback URL and stub the call would otherwise send real GETs
+    there; tests/clients/test_server_context.py drives the probe itself."""
+
+    async def no_probe(settings, *, transport=None):
+        return None
+
+    monkeypatch.setattr("bibr.clients.server_context.probe_server_context", no_probe)
+
+
 # ---------------------------------------------------------------------------
 # Isolation: the process-global Settings must not leak between tests.
 #

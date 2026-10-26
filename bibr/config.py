@@ -618,8 +618,9 @@ class LlmOptions(_BibrSettings):
         None,
         ge=1,
         description="The LLM server's context window in tokens. When set, long inputs are cut "
-        "so prompt plus completion fits it. bibr fills it in for the servers it starts and "
-        "learns it from a context-length rejection otherwise.",
+        "so prompt plus completion fits it. bibr fills it in for the servers it starts, asks "
+        "an Ollama, llama.cpp or vLLM server for it, and learns it from a context-length "
+        "rejection otherwise.",
     )
     # Reference-segmentation OUTPUT bound: the anchor-emit call produces ~1 short
     # anchor per reference, so a long bibliography in one window emits too many
