@@ -370,6 +370,36 @@ class TestLlmBackendResolution:
         assert pipe.llm_backend == "cloud"
         assert pipe._config.llm_backend == "cloud"
 
+    @pytest.mark.parametrize(
+        ("llm_backend", "no_llm", "chain"),
+        [
+            ("llama-cpp", False, ["glm-llama"]),
+            ("vllm", False, ["paddle-vllm", "glm-llama"]),
+            # --no-llm starts no LLM server, so nothing displaces paddle-vllm.
+            ("llama-cpp", True, ["paddle-vllm", "glm-llama"]),
+        ],
+    )
+    def test_the_resources_resolve_ocr_beside_the_pipelines_llm_backend(
+        self, monkeypatch, llm_backend, no_llm, chain
+    ):
+        """LocalPipeline hands its LLM backend to ResourceManager.
+
+        Without it the automatic OCR chain on a 24 GB Linux card starts
+        PaddleOCR-VL on vLLM beside a llama.cpp LLM, a pair bibr does not hand
+        GPU memory between (setup pairs GLM-OCR with it).
+        """
+        from bibr.ocr import registry
+
+        monkeypatch.setattr(registry.sys, "platform", "linux")
+        monkeypatch.setattr(registry.platform, "machine", lambda: "x86_64")
+        monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: 24.0)
+        pipe = LocalPipeline(
+            llm_backend=llm_backend, no_llm=no_llm, ocr_backend="paddle", memory_mode="balanced"
+        )
+        resources = pipe._resources
+        assert [c.backend for c in resources._resolve_ocr_candidates()] == chain
+        assert resources._starts_managed_paddle_vllm() is (chain[0] == "paddle-vllm")
+
 
 # --- PIPELINE_MEMORY_MODE wiring ---
 

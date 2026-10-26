@@ -222,6 +222,33 @@ def test_resolve_memory_mode_sees_the_llm_backend(monkeypatch, argv, passed):
 
 
 @pytest.mark.parametrize(
+    ("argv", "first"),
+    [
+        (("--llm", "llama-cpp"), "glm-llama"),
+        (("--llm", "vllm"), "paddle-vllm"),
+        (("--llm", "llama-cpp", "--no-llm"), "paddle-vllm"),
+    ],
+)
+def test_the_ocr_summary_names_the_model_the_run_starts(monkeypatch, argv, first):
+    """The plan summary's OCR model comes from the chain beside the run's LLM server."""
+    from bibr.config import Settings
+    from bibr.ocr import registry
+
+    monkeypatch.setattr(registry.sys, "platform", "linux")
+    monkeypatch.setattr(registry.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: 24.0)
+    models = {
+        c.backend: c.model
+        for c in registry.resolve_backend_candidates("paddle", Settings, llm_backend="vllm")
+    }
+    assert models["paddle-vllm"] != models["glm-llama"]
+
+    config = _resolve("paper.pdf", "--ocr", "paddle", "--memory", "balanced", *argv)
+
+    assert config.ocr_summary_model == models[first]
+
+
+@pytest.mark.parametrize(
     ("memory", "expected"),
     [("aggressive", 3), ("balanced", 8), ("keep_all", 20)],
 )

@@ -1,5 +1,6 @@
 """Tests for ``bibr doctor`` check helpers."""
 
+import contextlib
 import sys
 from types import SimpleNamespace
 from unittest import mock
@@ -1319,3 +1320,41 @@ def test_doctor_reports_an_unknown_llm_backend(monkeypatch):
     ]
     assert fake.requests == []
     assert code == 1
+
+
+@pytest.mark.parametrize("backend", ["llama-cpp", "vllm"])
+def test_doctor_checks_the_ocr_chain_beside_the_configured_llm_backend(monkeypatch, backend):
+    """doctor hands the resolved LLM backend to its OCR check, as chew's preflight does.
+
+    Beside a llama.cpp LLM the automatic chain is GLM-OCR alone; without the
+    backend doctor would vet paddle-vllm on a card where chew never starts it.
+    """
+    import io
+
+    import rich.console
+
+    import bibr.config
+    import bibr.local.cli.doctor as doctor
+
+    monkeypatch.setattr(bibr.config.Settings.llm, "backend", backend)
+    real_console = rich.console.Console
+    monkeypatch.setattr(
+        rich.console,
+        "Console",
+        lambda *a, **k: real_console(file=io.StringIO(), width=400, color_system=None),
+    )
+    monkeypatch.setattr(doctor, "_check_device", lambda ok, warn, fail: ok("Device: stub"))
+    monkeypatch.setattr(
+        doctor, "_check_llm_local_backend", lambda backend, model, ok, fail: ok("LLM: stub")
+    )
+    seen = []
+
+    def check_ocr(ok, warn, fail, **kwargs):
+        seen.append(kwargs)
+        ok("OCR backend: stub")
+
+    monkeypatch.setattr(doctor, "_check_ocr_backend", check_ocr)
+    with contextlib.suppress(SystemExit):
+        doctor._run_doctor()
+
+    assert seen == [{"llm_backend": backend}]
