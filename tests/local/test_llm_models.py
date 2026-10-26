@@ -77,6 +77,15 @@ def test_students_are_merged_vllm_checkpoints_with_thinking_off():
         assert args[kwargs_idx + 1] == '{"enable_thinking": false}'
 
 
+@pytest.mark.parametrize("key", ["bibr-extract-4b", "bibr-extract-2b"])
+def test_students_cap_running_sequences_below_their_mamba_blocks(key):
+    """vLLM 0.31 refused the 4B at 0.54 of a 24 GB card: "max_num_seqs (256)
+    exceeds available Mamba cache blocks (165)". bibr ran at most 19 at once."""
+    args = registry_server_args(get_model(key).variants[0].hf_id)
+    max_num_seqs = int(args[args.index("--max-num-seqs") + 1])
+    assert 19 < max_num_seqs <= 165
+
+
 def test_default_local_model_follows_the_backend_runtime():
     """An unset LLM_LOCAL_MODEL must never hand vLLM or llama.cpp the MLX build."""
     assert default_local_model("vllm") == "scienceverse/bibr-extract-qwen35-4b"

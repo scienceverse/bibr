@@ -64,6 +64,15 @@ _QWEN35_STUDENT_SERVER_ARGS: tuple[str, ...] = (
     "vllm",
     "--max-model-len",
     "32768",
+    # Qwen3.5 is a hybrid model: vLLM gives each running sequence one Mamba
+    # cache block, and its default of 256 sequences needs more blocks than the
+    # 4B's 0.54 share of a 24 GB card holds (165), so the server failed CUDA
+    # graph capture and never started. bibr ran at most 19 sequences at once
+    # in 20- and 60-paper batches; vLLM queues any beyond the cap. It also
+    # halves the CUDA graph capture sizes (256 instead of 512), which cut the
+    # memory capture takes beyond the share from about 1.3 to 0.75 GiB.
+    "--max-num-seqs",
+    "128",
 )
 
 #: Hub revisions published 2026-10-14 (the merged safetensors repos).
