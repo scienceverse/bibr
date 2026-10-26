@@ -46,7 +46,7 @@ _LLAMA_CPP_DEFAULT_TIMEOUT_SECONDS = 300
 _LLAMA_CPP_RELEASES_URL = "https://github.com/ggml-org/llama.cpp/releases"
 
 # Flags applied for every managed server regardless of role. llama.cpp is
-# bibr's low-memory path (Windows + ≤8 GB CUDA), so flash-attn + quantized KV
+# bibr's low-memory path (Windows, and CUDA cards below 10 GB), so flash-attn + quantized KV
 # are on by default. User ``extra_args`` can override any of these
 # (see ``_merge_cli_args``). Role- and probe-specific flags are added by
 # ``_role_runtime_args``.

@@ -408,7 +408,7 @@ models are loaded and unloaded to fit available GPU/RAM:
 | Mode | Description | Use when |
 |---|---|---|
 | `balanced` | Keeps layout + segmenter loaded; OCR stays resident unless a local LLM needs the memory | Default when neither low-memory condition below applies |
-| `aggressive` | Loads/unloads models between phases | Auto-selected for ≤8 GB system RAM or a CUDA GPU with ≤8 GB VRAM |
+| `aggressive` | Loads/unloads models between phases | Auto-selected for ≤8 GB system RAM or a CUDA GPU below 12 GB of VRAM |
 | `keep_all` | Keeps models loaded for the duration of the run | Explicit opt-in when all selected models fit in memory |
 
 Leave `memory` unset to get the auto-detected default; pass it explicitly

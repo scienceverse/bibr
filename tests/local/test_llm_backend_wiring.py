@@ -81,9 +81,19 @@ def test_local_resolves_to_vllm_once_a_student_fits():
     with (
         patch("platform.system", return_value="Linux"),
         patch("sys.platform", "linux"),
-        patch("bibr.local.llm_models.detect_hardware", return_value=("cuda", 8.0)),
+        patch("bibr.local.llm_models.detect_hardware", return_value=("cuda", 10.0)),
     ):
         assert resolve_llm_backend("local") == "vllm"
+
+
+def test_local_resolves_to_llama_cpp_on_an_8_gb_card():
+    # Every managed vLLM start was refused on an emulated 8 GB card with a desktop.
+    with (
+        patch("platform.system", return_value="Linux"),
+        patch("sys.platform", "linux"),
+        patch("bibr.local.llm_models.detect_hardware", return_value=("cuda", 8.0)),
+    ):
+        assert resolve_llm_backend("local") == "llama-cpp"
 
 
 def test_local_resolves_to_llama_cpp_on_small_cuda_gpu():

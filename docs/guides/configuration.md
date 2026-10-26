@@ -234,8 +234,8 @@ LLM_API_KEY=your-endpoint-key
 
 `--llm local` starts a managed server. It resolves to Rapid-MLX on Apple
 Silicon when that executable is available, otherwise vllm-mlx; llama.cpp on
-Windows or CUDA cards below 8 GB; and vLLM on Linux/CUDA systems with at
-least 8 GB (or when VRAM detection is unavailable).
+Windows or CUDA cards below 10 GB; and vLLM on Linux/CUDA systems with at
+least 10 GB (or when VRAM detection is unavailable).
 Explicit choices are `vllm`, `vllm-mlx`, `rapid-mlx`, `llama-cpp`, and `llmster`.
 The OCR and LLM choices are independent, so local OCR with a cloud LLM is a
 supported hybrid configuration. A managed vLLM LLM server and the managed
@@ -316,8 +316,8 @@ has the measurements):
 | Runtime | Setup model | Registry memory floor |
 |---|---|---|
 | vLLM, 20 GB or more | `scienceverse/bibr-extract-qwen35-4b` (Qwen3.5-4B fine-tuned for bibr, bf16) | a 12.25 GiB budget; 14.25 GiB free to start |
-| vLLM, 8–19 GB | `scienceverse/bibr-extract-qwen35-4b-W4A16` (the same model with 4-bit weights) | a 6.25 GiB budget; 8 GiB free to start, so an 8 GB card needs `LLM_LOCAL_MEM_FRACTION` and nothing else on the card |
-| llama.cpp (Windows, cards below 8 GB) | `scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0`, else `:Q4_K_M`, else the 2B's `scienceverse/bibr-extract-qwen35-2b-GGUF` builds | 7 GB for the 4B Q8_0, down to 3 GB for the 2B Q4_K_M |
+| vLLM, 10–19 GB | `scienceverse/bibr-extract-qwen35-4b-W4A16` (the same model with 4-bit weights) | a 6.25 GiB budget; 8 GiB free to start |
+| llama.cpp (Windows, cards below 10 GB) | `scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0`, else `:Q4_K_M`, else the 2B's `scienceverse/bibr-extract-qwen35-2b-GGUF` builds | 7 GB for the 4B Q8_0, down to 3 GB for the 2B Q4_K_M |
 | Rapid-MLX / vllm-mlx | `scienceverse/bibr-extract-qwen35-4b-mlx-8bit`, else the 2B's `-2b-mlx-8bit` | 6 GB for the 4B, 3 GB for the 2B |
 
 When no local model fits, the recommended hosted model is Claude Haiku 5.5
@@ -326,8 +326,14 @@ also uses for cloud OCR (`OCR_BACKEND=anthropic`,
 `OCR_VISION_MODEL=claude-haiku-5-5`), so one Anthropic key covers both.
 
 These are model-fit estimates, not total pipeline memory guarantees. Setup
-matches a card that reports up to 0.25 GiB under a size (an RTX 4060 reports
-8,188 MiB) to that size. The advanced wizard also offers the 2B student on vLLM
+matches a card that reports up to 0.25 GiB under a size (an RTX 5070 reports
+12,227 MiB) to that size, for the model and for the memory mode; PaddleOCR-VL's
+8 GB minimum has no such slack. On a Linux card below 10 GB that could run
+PaddleOCR-VL, setup sets `OCR_BACKEND=glm-llama`, so OCR and the LLM both run
+on llama.cpp and take turns on the card. Cards below 12 GB get the aggressive
+memory mode (`PIPELINE_MEMORY_MODE=aggressive`, 3 papers a chunk), which
+unloads bibr's own models before each start of the LLM. The advanced wizard
+also offers the 2B student on vLLM from 12 GB
 (`scienceverse/bibr-extract-qwen35-2b`, a 6.25 GiB budget at 128 sequences and
 8.25 GiB free to start), Gemma 4 E4B on CUDA, and custom model IDs.
 `LLM_LOCAL_MODEL` selects managed local weights; `LLM_MODEL` and `--llm-model`

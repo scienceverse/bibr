@@ -48,12 +48,21 @@ class LocalLLMVariant:
 #: far from the next smaller sizes (an 11 GB card reports 11,264 MiB).
 CARD_SIZE_TOLERANCE_GB = 0.25
 
+#: The smallest card (GiB of ``memory.total``, within ``CARD_SIZE_TOLERANCE_GB``)
+#: whose default LLM runs on vLLM: the 4B student's W4A16 build, taking turns
+#: with PaddleOCR-VL on vLLM. Below it the default is the 4B's GGUF build on
+#: llama.cpp, with GLM-OCR on llama.cpp too. bibr's memory mode is aggressive
+#: on such cards (``bibr.local.pipeline.CUDA_BALANCED_MIN_GB``).
+VLLM_LLM_MIN_CARD_GB = 10
+
 
 def fits_card(min_vram_gb: float, memory_gb: float) -> bool:
     """Whether a card of ``memory_gb`` (nvidia-smi total, GiB) is at least ``min_vram_gb``.
 
-    The one card-size comparison for the registry tiers and PaddleOCR-VL's
-    8 GB gate, with ``CARD_SIZE_TOLERANCE_GB`` of slack.
+    The one card-size comparison for the registry tiers and the CUDA memory
+    mode (``bibr.local.pipeline.CUDA_BALANCED_MIN_GB``), with
+    ``CARD_SIZE_TOLERANCE_GB`` of slack. PaddleOCR-VL's 8 GB gate has none, so
+    an RTX 4060 keeps GLM-OCR on llama.cpp beside its llama.cpp LLM.
     """
     return memory_gb + CARD_SIZE_TOLERANCE_GB >= min_vram_gb
 
@@ -79,17 +88,20 @@ class LocalLLMModel:
 # GGUF from llama.cpp 6868a52); MLX sizes are estimates until those builds
 # exist. bf16: the merged checkpoint (text, vision and MTP weights). The vLLM
 # variants pin the Hub revision they were published at, and their min_vram_gb
-# is the smallest card the managed server keeps starting on beside bibr's own
-# GPU models: on the swap path a start needs the budget floor, vLLM's overshoot
+# is the smallest card whose default finished a batch on an emulated card with
+# 0.5 GiB taken by a desktop, at bibr's default memory mode and batch size for
+# that card: on the swap path a start needs the budget floor, vLLM's overshoot
 # reserve and 1 GiB for bibr free (bibr.local.vllm_share). The 4B bf16 needs
 # 14.25 GiB: a card emulated at 16 GB refused its starts once bibr held 2 GiB,
-# so 20 (24 GB ran it). The W4A16 build needs 8 GiB: it ran 48 papers on cards
-# emulated at 12 and 16 GB; an 8 GB card (about 7.6 GiB to CUDA) is refused
-# unless the user sets the share, but it is still the best vLLM variant there:
-# the 2B needs more (6.25 GiB at 128 sequences plus a 1 GiB reserve) and scores
-# less. GGUF and MLX: the quantized text model, with min_vram_gb =
-# ceil(size * 1.25) plus about 2 GB of context and compute buffers, the margin
-# the NuExtract 3 Q4_K_M build needed on 6 GB cards.
+# so 20 (24 GB ran it). The W4A16 build needs 8 GiB: it ran 48 papers on a
+# 10 GB card in aggressive mode (bibr's GPU sessions unloaded before each LLM
+# start, 0.27 GiB left) and 100 on a 12 GB card in balanced mode. An 8 GB card
+# (about 7.0 GiB to CUDA beside a desktop) refuses every start, so it runs the
+# GGUF build on llama.cpp. The 2B on vLLM needs more (6.25 GiB at 128
+# sequences plus a 1 GiB reserve) and scores less; it is listed from 12 GB for
+# advanced setup only. GGUF and MLX: the quantized text model, with
+# min_vram_gb = ceil(size * 1.25) plus about 2 GB of context and compute
+# buffers, the margin the NuExtract 3 Q4_K_M build needed on 6 GB cards.
 _QWEN35_STUDENT_SERVER_ARGS: tuple[str, ...] = (
     # Text only: the vision tower is never used for extraction.
     "--language-model-only",
@@ -164,7 +176,7 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 hf_id="scienceverse/bibr-extract-qwen35-4b-W4A16",
                 platform="cuda",
                 quant="w4a16",
-                min_vram_gb=8,
+                min_vram_gb=VLLM_LLM_MIN_CARD_GB,
                 min_budget_gb=QWEN35_4B_W4A16_BUDGET_GB,
                 approx_download_gb=3.8,  # 4,050,890,519 bytes at that revision
                 server_args=(
@@ -174,7 +186,7 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 ),
                 runtime="vllm",
             ),
-            # llama.cpp (Windows, cards below 8 GB): Q8_0 first, as the
+            # llama.cpp (Windows, cards below 10 GB): Q8_0 first, as the
             # closest to the evaluated bf16 weights.
             LocalLLMVariant(
                 hf_id="scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0",
@@ -213,7 +225,7 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 hf_id="scienceverse/bibr-extract-qwen35-2b",
                 platform="cuda",
                 quant="bf16",
-                min_vram_gb=8,
+                min_vram_gb=12,  # needs 0.25 GiB more than the W4A16 build; not measured at 10
                 min_budget_gb=QWEN35_2B_BUDGET_GB,
                 approx_download_gb=4.2,
                 server_args=("--revision", _QWEN35_2B_REVISION, *_QWEN35_STUDENT_SERVER_ARGS),
@@ -294,10 +306,11 @@ def cuda_llm_backend_for(memory_gb: float | None) -> str:
     """Managed LLM backend for a CUDA card with ``memory_gb`` of VRAM (None = unknown).
 
     vLLM only when a vLLM variant of a recommended model actually fits (the
-    2B student needs 8 GB); otherwise llama.cpp, whose GGUF builds of the
-    students go down to 3 GB. The old rule ("vLLM above 8 GB") handed 9-10 GB
-    cards a plan whose only vLLM variant (NuExtract 3 bf16, 11 GB) OOMed after
-    OCR, because the fit filter was dropped silently when nothing fit.
+    4B's W4A16 build from ``VLLM_LLM_MIN_CARD_GB``); otherwise llama.cpp,
+    whose GGUF builds of the students go down to 3 GB. The old rule ("vLLM
+    above 8 GB") handed 9-10 GB cards a plan whose only vLLM variant
+    (NuExtract 3 bf16, 11 GB) OOMed after OCR, because the fit filter was
+    dropped silently when nothing fit.
     """
     if memory_gb is None:
         return "vllm"

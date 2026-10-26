@@ -822,8 +822,8 @@ class ResourceManager:
         (``GLM_LLAMA_OCR_VRAM_GB``) plus the minimum room bibr keeps for its
         own GPU sessions (``LLM_ONNX_MIN_HEADROOM_GB``). With no reading of
         the card (no NVIDIA GPU visible to nvidia-smi), the aggressive memory
-        mode, which bibr picks for cards up to 8 GB, stops it and any other
-        mode keeps it. An OCR URL names someone else's server, which bibr
+        mode, which bibr picks for CUDA cards below 12 GB, stops it and any
+        other mode keeps it. An OCR URL names someone else's server, which bibr
         does not start.
         """
         if self.ocr_url:

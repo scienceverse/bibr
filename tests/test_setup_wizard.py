@@ -1303,8 +1303,8 @@ def test_recommended_setup_low_vram_cuda_keeps_paddle_automatic_ocr():
 
 
 def test_recommended_setup_mid_vram_cuda_runs_the_4b_w4a16_build_on_vllm():
-    """8-19 GB: paddle-vllm OCR (8 GB gate) and the 4B student's W4A16 vLLM build
-    (8 GB tier) both run on vLLM, so no llama.cpp split is needed. Under
+    """10-19 GB: paddle-vllm OCR (8 GB gate) and the 4B student's W4A16 vLLM build
+    (10 GB tier) both run on vLLM, so no llama.cpp split is needed. Under
     NuExtract 3 (11 GB) these cards had to run the LLM through llama.cpp, and
     until the W4A16 build was listed they got the 2B student."""
     setup = _build_recommended_setup(
@@ -1324,7 +1324,7 @@ def test_recommended_setup_mid_vram_cuda_runs_the_4b_w4a16_build_on_vllm():
 @pytest.mark.parametrize(
     ("vram_gb", "expected"),
     [
-        (8.0, "scienceverse/bibr-extract-qwen35-4b-W4A16"),
+        (10.0, "scienceverse/bibr-extract-qwen35-4b-W4A16"),
         (11.0, "scienceverse/bibr-extract-qwen35-4b-W4A16"),
         (12.0, "scienceverse/bibr-extract-qwen35-4b-W4A16"),
         (16.0, "scienceverse/bibr-extract-qwen35-4b-W4A16"),
@@ -1343,6 +1343,54 @@ def test_recommended_setup_cuda_picks_the_student_that_fits(vram_gb, expected):
     assert setup.env["LLM_BACKEND"] == "vllm"
     assert setup.env["LLM_LOCAL_MODEL"] == expected
     assert "llama-server" not in setup.runtime_summary
+
+
+@pytest.mark.parametrize(
+    ("vram_gb", "ocr_backend"),
+    [
+        # An RTX 3070 (8,192 MiB) could run PaddleOCR-VL on vLLM, but bibr does
+        # not hand GPU memory between it and a llama.cpp LLM: GLM-OCR instead.
+        (8.0, "glm-llama"),
+        (9.5, "glm-llama"),
+        # An RTX 4060 (8,188 MiB): the automatic chain is GLM-OCR alone.
+        (8188 / 1024, "paddle"),
+    ],
+)
+def test_recommended_setup_8_gb_cuda_runs_both_halves_on_llama_cpp(vram_gb, ocr_backend):
+    """Every managed vLLM start was refused on an emulated 8 GB card with a
+    desktop; the GGUF 4B and GLM-OCR on llama.cpp finished the batch."""
+    setup = _build_recommended_setup(
+        platform_key="cuda",
+        accelerator_memory_gb=vram_gb,
+        system_memory_gb=32.0,
+        sys_platform="linux",
+        machine="x86_64",
+    )
+    assert setup.env["LLM_BACKEND"] == "llama-cpp"
+    assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
+    assert setup.env["OCR_BACKEND"] == ocr_backend
+    assert setup.env["PIPELINE_MEMORY_MODE"] == "aggressive"
+    assert "vllm" not in setup.extras
+    assert "llama-server" in setup.runtime_summary
+
+
+@pytest.mark.parametrize(
+    ("vram_gb", "mode"),
+    [(10.0, "aggressive"), (11.0, "aggressive"), (12227 / 1024, "balanced"), (12.0, "balanced")],
+)
+def test_recommended_setup_runs_cards_below_12_gb_aggressive(vram_gb, mode):
+    """The W4A16 build's starts need 8 GiB free; below 12 GB only aggressive
+    mode, which unloads bibr's GPU sessions before each start, was measured."""
+    setup = _build_recommended_setup(
+        platform_key="cuda",
+        accelerator_memory_gb=vram_gb,
+        system_memory_gb=32.0,
+        sys_platform="linux",
+        machine="x86_64",
+    )
+    assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-W4A16"
+    assert setup.env["OCR_BACKEND"] == "paddle"
+    assert setup.env["PIPELINE_MEMORY_MODE"] == mode
 
 
 def test_recommended_setup_windows_uses_the_4b_gguf():

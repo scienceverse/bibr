@@ -2185,7 +2185,7 @@ class PipelineOptions(_BibrSettings):
         None,
         description="Default memory mode when no --memory flag / LocalPipeline arg is given: "
         '"aggressive", "balanced", or "keep_all". Null selects aggressive on systems '
-        "with <=8 GB RAM or CUDA GPUs with <=8 GB VRAM; otherwise balanced.",
+        "with <=8 GB RAM or CUDA GPUs below 12 GB of VRAM; otherwise balanced.",
     )
     integrity_statement_mode: Literal["legacy", "shadow", "active"] = Field(
         "shadow",

@@ -233,11 +233,11 @@ uv run bibr doctor
 uv run bibr demo
 ```
 
-### Linux, NVIDIA GPU below 8 GB (e.g. GTX 1060)
+### Linux, NVIDIA GPU below 10 GB (e.g. GTX 1060, RTX 4060)
 
-Below 8 GB, the automatic selectors use **llama.cpp** for OCR and the local
-LLM. From 8 GB, both run through vLLM, with bibr's fine-tuned 2B model below
-12 GB and its 4B model from 12 GB. Install a
+Below 10 GB, `bibr setup` uses **llama.cpp** for OCR and the local LLM. From
+10 GB, both run through vLLM, with the 4-bit W4A16 build of bibr's fine-tuned
+4B model below 20 GB and its bf16 build from 20 GB. Install a
 **CUDA** (or Vulkan) build of llama.cpp separately:
 
 1. Install or build llama.cpp with CUDA support (`GGML_CUDA=ON` for a source
@@ -287,14 +287,14 @@ from the platform and detected memory. The current defaults are:
 |---|---|---|
 | Windows | `glm-llama` (llama.cpp) | llama.cpp |
 | Linux, NVIDIA GPU **≥ 20 GB** (e.g. RTX 3090) | `paddle-vllm` | vLLM, bibr extract 4B |
-| Linux, NVIDIA GPU **8–<20 GB** | `paddle-vllm` | vLLM, bibr extract 4B W4A16 (an 8 GB card needs `LLM_LOCAL_MEM_FRACTION` and no desktop on the card) |
-| Linux, NVIDIA GPU **< 8 GB** | `glm-llama` (llama.cpp) | llama.cpp |
+| Linux, NVIDIA GPU **10–<20 GB** | `paddle-vllm` | vLLM, bibr extract 4B W4A16 (aggressive memory mode below 12 GB) |
+| Linux, NVIDIA GPU **< 10 GB** | `glm-llama` (llama.cpp; from 8 GB `bibr setup` sets it, and without setup the automatic selector tries `paddle-vllm` first) | llama.cpp, bibr extract 4B GGUF |
 | Apple Silicon (M-series) | `paddle-rapid-mlx` (rapid-mlx) | rapid-mlx, else vllm-mlx |
 | No suitable GPU | cloud vision OCR or an external OCR server | a cloud LLM |
 
 The setup wizard defaults to bibr's fine-tuned Qwen3.5 models for local
 structured extraction on Linux with an NVIDIA GPU: the 4B from 20 GB and its
-4-bit W4A16 build from 8 GB. Windows and GPUs below 8 GB use GGUF (llama.cpp) builds of the same
+4-bit W4A16 build from 10 GB. Windows and GPUs below 10 GB use GGUF (llama.cpp) builds of the same
 models, and Apple Silicon their 8-bit MLX builds.
 Without a suitable GPU it recommends Claude Haiku 5.5 as a hosted model, for
 OCR and extraction alike. See

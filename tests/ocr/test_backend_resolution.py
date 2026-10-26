@@ -334,13 +334,13 @@ class TestLinuxChainIsHardwareAware:
         low = registry.paddle_vllm_unavailable_reason(vram_gb=6.0)
         assert "6 GB" in low and "llama.cpp" in low
 
-    def test_a_nominal_8gb_card_runs_paddle_vllm(self):
-        # An RTX 4060 reports 8,188 MiB: the registry's card-size rule counts
-        # it as 8 GB, for OCR as for the LLM tiers.
+    def test_an_rtx_4060_keeps_glm_ocr_on_llama_cpp(self):
+        # An RTX 4060 reports 8,188 MiB: no card-size tolerance for OCR, so
+        # its automatic chain stays on llama.cpp, the OCR of its default pair.
         from bibr.ocr import registry
 
-        assert registry.paddle_vllm_unavailable_reason(vram_gb=8188 / 1024) is None
-        assert registry.paddle_vllm_unavailable_reason(vram_gb=7.5) is not None
+        assert registry.paddle_vllm_unavailable_reason(vram_gb=8188 / 1024) is not None
+        assert registry.paddle_vllm_unavailable_reason(vram_gb=8.0) is None
 
 
 # Captured at collection, before the suite's conftest pins it for each test.

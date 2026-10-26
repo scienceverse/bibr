@@ -273,7 +273,7 @@ class TestFloor:
         patched = dataclasses.replace(model, variants=(bare, *model.variants[1:]))
         registry = tuple(patched if m.key == model.key else m for m in llm_models.REGISTRY)
         monkeypatch.setattr(llm_models, "REGISTRY", registry)
-        assert managed_llm_floor_gb(STUDENT_2B) == 8.0
+        assert managed_llm_floor_gb(STUDENT_2B) == 12.0
 
 
 class TestUserSetShareWins:

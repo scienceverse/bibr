@@ -11,9 +11,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The 4B student's W4A16 build (`scienceverse/bibr-extract-qwen35-4b-W4A16`,
   4-bit weights, a 3.8 GB download) is in bibr's model registry, served by
   vLLM with at most 64 sequences. It passed 218 of 252 development papers,
-  against 216 for the bf16 build, and needs half its memory. `bibr setup` now
-  recommends it for Linux NVIDIA cards with 8–19 GB, where it replaces the 2B
-  student, and recommends the bf16 4B from 20 GB (was 12).
+  against 217 for the bf16 build on the same machine, and needs half its
+  memory. `bibr setup` now recommends it for Linux NVIDIA cards with 10–19 GB,
+  where it replaces the 2B student, and recommends the bf16 4B from 20 GB
+  (was 12).
 - `LLM_LOCAL_MIN_VRAM_GB` sets the minimum budget of the managed vLLM LLM
   server's model, for a model bibr's registry does not list (a local path has
   no minimum, so a start that cannot fit used to be launched and fail inside
@@ -33,16 +34,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   On the swap path a start needs that budget free, plus what vLLM takes beyond
   it while starting and 1 GB for bibr's models: 14.25 GiB for the 4B, which a
   16 GB card no longer has once bibr's models have grown, and 8 GiB for the
-  W4A16 build. An 8 GB card, with about 7.6 GiB free to CUDA, cannot start any
-  of them unless you set the share yourself (`LLM_LOCAL_MEM_FRACTION`), and
-  that works only when nothing else, such as a desktop, uses the card.
-- Setup counts a card that reports up to 0.25 GiB under a size (an RTX 4060
-  reports 8,188 MiB, an RTX 5070 12,227 MiB) as that size, for the model it
-  recommends and for PaddleOCR-VL's 8 GB minimum. Such cards used to get the
-  next smaller tier.
+  W4A16 build. An 8 GB card, with about 7.6 GiB free to CUDA (about 7 GiB
+  beside a desktop), cannot start any of them unless you set the share
+  yourself (`LLM_LOCAL_MEM_FRACTION`), and that works only when nothing else,
+  such as a desktop, uses the card.
+- On Linux NVIDIA cards below 10 GB, `bibr setup` now runs both OCR (GLM-OCR)
+  and the 4B student's Q8_0 GGUF build on llama.cpp, which you install. Such
+  cards used to get the 2B student on vLLM from 8 GB, whose starts need more
+  memory than an 8 GB card has free. On an emulated 8 GB card with 0.5 GiB
+  taken by a desktop, the llama.cpp pair finished a 48-paper batch (with the
+  fix below).
+- CUDA cards below 12 GB now run bibr's aggressive memory mode (was 8 GB and
+  below), which unloads bibr's own models before each start of the LLM and
+  processes 3 papers a chunk. On an emulated 10 GB card with a desktop, the
+  W4A16 build's 16 starts found 8.76 GiB free each time (8 GiB needed) and the
+  48-paper batch finished. In balanced mode bibr's models held 2.0–2.4 GiB at
+  the LLM's later starts on an emulated 12 GB card, which on a 10 GB card would
+  leave less than 8 GiB from the second chunk. The 12 GB card stays balanced:
+  it finished 100 papers with a desktop, its last starts finding 8.6 GiB free.
+- Setup counts a card that reports up to 0.25 GiB under a size (an RTX 5070
+  reports 12,227 MiB) as that size, for the model it recommends and for its
+  memory mode. Such cards used to get the next smaller tier. PaddleOCR-VL's
+  8 GB minimum has no such slack, so an RTX 4060 (8,188 MiB) keeps GLM-OCR.
 
 ### Fixed
 
+- On a small card, a fully local batch with both servers on llama.cpp no longer
+  fails every paper after the first chunk. The LLM server outlived the chunk,
+  and the next chunk's GLM-OCR server started beside it, could not allocate
+  its compute buffer and refused every page (on an emulated 8 GB card with a
+  desktop, 3 of 3 papers failed in each later chunk). bibr now stops the LLM
+  server before that start when the memory free then cannot also hold GLM-OCR
+  (2.25 GiB) and 1 GiB for its own models; the LLM stage restarts it.
+- When the layout, sentence, reference-parser or a classifier model could not
+  even open its CUDA session for lack of GPU memory, the whole chunk failed
+  (`parse_failed` for the sentence segmenter). Such a model now opens on the
+  CPU, with a warning, like a batch that runs out of memory later.
+- The error for a model without a minimum whose free memory sat just above
+  what bibr needs beside it, so that its share rounded down to 0, said it
+  needed less than was free. It now counts the smallest share too.
 - When a model without a minimum could not start because PaddleOCR-VL takes
   turns with it, the error said it needed the startup reserve plus 1 GB, less
   than the room bibr keeps for its own models there (6 GB less what they

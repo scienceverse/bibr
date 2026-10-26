@@ -23,8 +23,12 @@ def test_cuda_llm_backend_follows_the_registry_fit():
     assert cuda_llm_backend_for(None) == "vllm"  # unknown VRAM keeps the fast path
     assert cuda_llm_backend_for(6.0) == "llama-cpp"
     assert cuda_llm_backend_for(7.7) == "llama-cpp"
-    assert cuda_llm_backend_for(8188 / 1024) == "vllm"  # an RTX 4060: the W4A16 build
-    assert cuda_llm_backend_for(8.0) == "vllm"
+    # 8 GB cards (an RTX 4060 reports 8,188 MiB) refuse every managed vLLM
+    # start beside a desktop, so their default is the GGUF build on llama.cpp.
+    assert cuda_llm_backend_for(8188 / 1024) == "llama-cpp"
+    assert cuda_llm_backend_for(8.0) == "llama-cpp"
+    assert cuda_llm_backend_for(9.5) == "llama-cpp"
+    assert cuda_llm_backend_for(10.0) == "vllm"  # an RTX 3080: the W4A16 build
     assert cuda_llm_backend_for(11.0) == "vllm"
 
 
@@ -38,8 +42,9 @@ def test_cuda_llm_backend_follows_the_registry_fit():
         ("cuda", 12.0, "vllm", "scienceverse/bibr-extract-qwen35-4b-W4A16"),
         ("cuda", 12227 / 1024, "vllm", "scienceverse/bibr-extract-qwen35-4b-W4A16"),  # RTX 5070
         ("cuda", 11.0, "vllm", "scienceverse/bibr-extract-qwen35-4b-W4A16"),
-        ("cuda", 8.0, "vllm", "scienceverse/bibr-extract-qwen35-4b-W4A16"),
-        ("cuda", 8188 / 1024, "vllm", "scienceverse/bibr-extract-qwen35-4b-W4A16"),  # RTX 4060
+        ("cuda", 10.0, "vllm", "scienceverse/bibr-extract-qwen35-4b-W4A16"),  # RTX 3080
+        ("cuda", 8.0, "llama-cpp", "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"),
+        ("cuda", 8188 / 1024, "llama-cpp", "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"),
         ("cuda", 24.0, "llama-cpp", "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"),
         ("cuda", 7.0, "llama-cpp", "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"),
         ("cuda", 6.0, "llama-cpp", "scienceverse/bibr-extract-qwen35-4b-GGUF:Q4_K_M"),
@@ -114,8 +119,8 @@ def test_budget_floors_and_tiers():
     floors = {h: (v.min_budget_gb, v.min_vram_gb) for h, v in by_id.items()}
     assert floors == {
         "scienceverse/bibr-extract-qwen35-4b": (12.25, 20),
-        "scienceverse/bibr-extract-qwen35-4b-W4A16": (6.25, 8),
-        "scienceverse/bibr-extract-qwen35-2b": (6.25, 8),
+        "scienceverse/bibr-extract-qwen35-4b-W4A16": (6.25, 10),
+        "scienceverse/bibr-extract-qwen35-2b": (6.25, 12),
     }
 
 
@@ -156,10 +161,19 @@ class TestCardSizeTolerance:
 
     def test_variants_for_uses_it(self):
         model = get_model("bibr-extract-4b")
-        hf_ids = [v.hf_id for v in variants_for(model, "cuda", 8188 / 1024, "vllm")]
+        hf_ids = [v.hf_id for v in variants_for(model, "cuda", 9.8, "vllm")]
         assert hf_ids == ["scienceverse/bibr-extract-qwen35-4b-W4A16"]
-        assert variants_for(model, "cuda", 7.5, "vllm") == []
-        assert variants_for(get_model("bibr-extract-2b"), "cuda", 8151 / 1024, "vllm")
+        assert variants_for(model, "cuda", 9.7, "vllm") == []
+        # An RTX 5070 (12,227 MiB) is a 12 GB card for the 2B's vLLM build.
+        assert variants_for(get_model("bibr-extract-2b"), "cuda", 12227 / 1024, "vllm")
+        assert not variants_for(get_model("bibr-extract-2b"), "cuda", 11.0, "vllm")
+
+    def test_no_vllm_variant_reaches_an_8_gb_card(self):
+        # Every managed vLLM start was refused on an emulated 8 GB card with a
+        # desktop (E26, E27), so the tolerance must not lift one onto it.
+        for key in ("bibr-extract-4b", "bibr-extract-2b"):
+            assert variants_for(get_model(key), "cuda", 8188 / 1024, "vllm") == []
+            assert variants_for(get_model(key), "cuda", 8.0, "vllm") == []
 
 
 def test_default_local_model_follows_the_backend_runtime():

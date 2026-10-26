@@ -63,8 +63,10 @@ PADDLE_VLLM_GPU_MEMORY_UTILIZATION = 0.92
 MANAGED_VLLM_ONNX_RESERVE_GB = 6.0
 
 # PaddleOCR-VL through the managed vLLM server needs an NVIDIA GPU with room
-# for ``PADDLE_VLLM_GPU_MEMORY_GB``. Below this floor bibr's documented Linux
-# contract ("NVIDIA GPU <= 8 GB uses llama.cpp") routes OCR to ``glm-llama``.
+# for ``PADDLE_VLLM_GPU_MEMORY_GB``. Below this floor the automatic chain runs
+# OCR on ``glm-llama``. Setup also picks ``glm-llama`` on larger cards whose LLM
+# runs on llama.cpp (below ``bibr.local.llm_models.VLLM_LLM_MIN_CARD_GB``), the
+# pair bibr hands GPU memory between.
 PADDLE_VLLM_MIN_VRAM_GB = 8.0
 #: GPU memory a managed GLM-OCR llama.cpp server (``glm-llama``, the Q8_0 GGUF
 #: with its vision projector, an 8,192-token context and one slot) holds while
@@ -287,14 +289,12 @@ def paddle_vllm_unavailable_reason(*, vram_gb: float | None | object = _PROBE) -
     spends its startup budget bootstrapping vLLM), by the managed launcher
     itself, and by the ``bibr chew`` preflight.
     """
-    from bibr.local.llm_models import fits_card
-
     vram = _cuda_vram_gb() if vram_gb is _PROBE else vram_gb
     if not isinstance(vram, int | float):
         return "no NVIDIA GPU detected (paddle-vllm needs CUDA)"
-    # The registry's card-size rule, so a card that counts as 8 GB for the
-    # LLM (an RTX 4060 reports 8,188 MiB) also runs PaddleOCR-VL on vLLM.
-    if not fits_card(PADDLE_VLLM_MIN_VRAM_GB, vram):
+    # No card-size tolerance here (bibr.local.llm_models.fits_card): an RTX
+    # 4060 (8,188 MiB) keeps GLM-OCR on llama.cpp, the OCR of its default pair.
+    if vram < PADDLE_VLLM_MIN_VRAM_GB:
         return (
             f"the GPU has {vram:.0f} GB of VRAM and paddle-vllm needs at least "
             f"{PADDLE_VLLM_MIN_VRAM_GB:.0f} GB (llama.cpp is the low-VRAM OCR path)"

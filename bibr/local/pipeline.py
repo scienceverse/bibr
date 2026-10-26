@@ -147,6 +147,17 @@ def resolve_llm_backend(raw: str, settings: GlobalSettings | None = None) -> str
     return raw
 
 
+#: CUDA cards below this size (GiB of nvidia-smi's ``memory.total``, within the
+#: registry's ``CARD_SIZE_TOLERANCE_GB``) run the aggressive memory mode. There
+#: the managed vLLM LLM server starts every chunk with only about 1 GiB to spare
+#: (the 4B's W4A16 build needs 8 GiB free; a 10 GB card beside a desktop has
+#: about 9 GiB), and aggressive mode unloads bibr's GPU sessions before it
+#: starts (0.27 GiB left, against about 2.4 GiB once balanced mode's have
+#: grown). A 12 GB card finished 100 papers in balanced mode beside a desktop,
+#: its last starts finding 8.6 GiB free.
+CUDA_BALANCED_MIN_GB = 12
+
+
 def _auto_memory_mode(
     platform_key: str | None, accel_gb: float | None, system_ram_gb: float
 ) -> MemoryMode:
@@ -160,10 +171,14 @@ def _auto_memory_mode(
     to ``aggressive`` that saves a 30-60 s OCR server reload per chunk and
     keeps layout+segmenter resident; only ≤8 GB machines still need
     ``aggressive`` (caught by the ``system_ram_gb`` rule below, since
-    ``accel_gb`` is unified memory on mlx).
+    ``accel_gb`` is unified memory on mlx). CUDA cards below
+    ``CUDA_BALANCED_MIN_GB`` run ``aggressive`` too.
     """
-    if platform_key == "cuda" and accel_gb is not None and accel_gb <= 8:
-        return "aggressive"
+    if platform_key == "cuda" and accel_gb is not None:
+        from bibr.local.llm_models import fits_card
+
+        if not fits_card(CUDA_BALANCED_MIN_GB, accel_gb):
+            return "aggressive"
     if system_ram_gb <= 8:
         return "aggressive"
     return "balanced"
@@ -244,7 +259,8 @@ class LocalPipeline(Pipeline):
       but the weights stay resident across files by design.
     - ``"keep_all"``: Keep everything loaded (24+ GB GPU or cloud LLM only)
     - ``None`` (default): ``PIPELINE_MEMORY_MODE`` if set, else auto-detect
-      from system RAM (≤8 GB → aggressive, else balanced)
+      (≤8 GB of system RAM or a CUDA card below ``CUDA_BALANCED_MIN_GB`` →
+      aggressive, else balanced)
 
     For batch processing, use ``process_chunk()`` which loads each model once
     per chunk and loops over files within each stage.

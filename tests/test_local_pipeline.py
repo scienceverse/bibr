@@ -407,6 +407,12 @@ class TestMemoryModeSetting:
         # Discrete NVIDIA GPUs: the VRAM ceiling is 8 GB.
         assert _auto_memory_mode("cuda", 6.0, 64.0) == "aggressive"
         assert _auto_memory_mode("cuda", 24.0, 64.0) == "balanced"
+        # Below 12 GB (an RTX 5070's 12,227 MiB counts as 12) cards run aggressive.
+        assert _auto_memory_mode("cuda", 8.0, 64.0) == "aggressive"
+        assert _auto_memory_mode("cuda", 10.0, 64.0) == "aggressive"
+        assert _auto_memory_mode("cuda", 11.0, 64.0) == "aggressive"
+        assert _auto_memory_mode("cuda", 12227 / 1024, 64.0) == "balanced"
+        assert _auto_memory_mode("cuda", 12.0, 64.0) == "balanced"
         # Apple Silicon hands unified memory from OCR to LLM sequentially and
         # the MLX models are small, so 16 GB runs balanced; only ≤8 GB needs
         # aggressive (via the system-RAM rule — accel_gb is unified memory).

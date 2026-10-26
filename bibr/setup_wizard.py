@@ -354,22 +354,29 @@ def _build_recommended_setup(
         env = {**base_env, "OCR_BACKEND": ocr_backend}
         env.update(_local_llm_env(platform_key, accelerator_memory_gb, sys_platform_name))
         # On Linux each half has its own VRAM gate: the automatic OCR chain
-        # runs paddle-vllm from 8 GB (bibr.ocr.registry) and the LLM picks
-        # vLLM only when a vLLM variant of a recommended model fits (8 GB for
-        # the 2B student, bibr.local.llm_models). Below its gate a half runs
-        # through llama.cpp, which needs llama-server on PATH — something only
-        # the user can install — while the other half may still need the
-        # vllm extra.
+        # runs paddle-vllm from 8 GB (bibr.ocr.registry), and the LLM runs on
+        # vLLM only from the card size where a vLLM variant of a recommended
+        # model is the default (bibr.local.llm_models). Below its gate a half
+        # runs through llama.cpp, which needs llama-server on PATH — something
+        # only the user can install. bibr hands GPU memory between two vLLM
+        # servers and between two llama.cpp servers, but not between
+        # PaddleOCR-VL on vLLM and a llama.cpp LLM, so a card that could run
+        # paddle-vllm but gets its LLM on llama.cpp runs GLM-OCR on llama.cpp
+        # too: the pair that finished a batch on an emulated 8 GB card.
         llm_on_llama_cpp = sys_platform_name == "linux" and env.get("LLM_BACKEND") == "llama-cpp"
         # Native Windows has no vLLM: the automatic chain is glm-llama alone
         # (bibr.ocr.registry), so OCR always runs through llama.cpp there.
-        ocr_on_llama_cpp = ocr_backend == "glm-llama" or sys_platform_name == "win32"
+        ocr_on_llama_cpp = sys_platform_name == "win32"
         if sys_platform_name == "linux" and accelerator_memory_gb is not None:
             from bibr.ocr.registry import paddle_vllm_unavailable_reason
 
-            ocr_on_llama_cpp = ocr_on_llama_cpp or (
+            ocr_on_llama_cpp = (
                 paddle_vllm_unavailable_reason(vram_gb=accelerator_memory_gb) is not None
             )
+            if llm_on_llama_cpp and not ocr_on_llama_cpp:
+                ocr_backend = "glm-llama"
+                env["OCR_BACKEND"] = ocr_backend
+                ocr_on_llama_cpp = True
         runtime = "Fully local runs can be slow and may download several GB."
         if sys_platform_name == "win32":
             from bibr.local.llama_cpp import install_hint
@@ -383,12 +390,6 @@ def _build_recommended_setup(
             runtime = (
                 "Uses llama.cpp for OCR/LLM: install a CUDA (or Vulkan) build separately "
                 "and put llama-server on PATH."
-            )
-        elif llm_on_llama_cpp:
-            runtime = (
-                "Uses vLLM for OCR and llama.cpp for the LLM (the smallest recommended vLLM "
-                "model needs 8 GB of VRAM): install a CUDA (or Vulkan) build of llama.cpp "
-                "separately and put llama-server on PATH."
             )
         elif platform_key == "mlx" and env.get("LLM_BACKEND") == "rapid-mlx":
             runtime = (
@@ -1722,8 +1723,8 @@ class SetupWizard:
 
         The runtime already auto-detects this each chew, but persisting it here
         makes the choice explicit for a first-time tester — and lets low-memory
-        machines (a 6 GB GPU, or an 8 GB Apple Silicon Mac running fully local)
-        see why they are in ``aggressive`` mode.
+        machines (a CUDA card below 12 GB, or an 8 GB Apple Silicon Mac running
+        fully local) see why they are in ``aggressive`` mode.
         """
         from bibr.local.pipeline import _auto_memory_mode, _get_system_memory_gb
 
