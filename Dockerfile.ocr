@@ -11,7 +11,7 @@
 # path); plain decoding is stable. Re-enable once upstream fixes GLM-OCR + NEXTN.
 # ---------------------------------------------------------------------------
 
-FROM lmsysorg/sglang:v0.5.21@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
+FROM lmsysorg/sglang:v0.5.22@sha256:e3a4f06001a29542fc4a8638536d9ffc5eb9c9942b08603c09b19a56eae4a1ae
 
 # transformers >= 5.1 provides glm_ocr natively. Only transformers itself is
 # pinned: pip resolves its dependencies (huggingface-hub, tokenizers,
