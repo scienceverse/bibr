@@ -595,6 +595,33 @@ class TestSessionCreation:
             core._rounded(det) for det in backend.run(core._sample_pages())
         ] == core.LAYOUT_GOLDEN
 
+    def test_it_is_recorded_as_the_run_time_fallback_is(self, monkeypatch, caplog):
+        """Neither CPU fallback has a counter: each logs a warning and opens the
+        process-wide recent-out-of-memory window (``gpu_oom._note_oom``)."""
+        from bibr.ner.parser_onnx import OnnxRefParser
+        from bibr.utils import gpu_oom
+
+        _cuda_sessions_fail(monkeypatch, SESSION_ARENA_OOM)
+        assert not gpu_oom._recent_oom()
+        with caplog.at_level(logging.WARNING):
+            OnnxRefParser(core._bundle("ner"), device="cuda")
+        assert gpu_oom._recent_oom()
+        session_warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+
+        monkeypatch.setattr(gpu_oom, "_last_oom_at", None)
+        caplog.clear()
+
+        def run(_items):
+            raise RuntimeError(SESSION_ARENA_OOM)
+
+        with caplog.at_level(logging.WARNING):
+            assert gpu_oom.split_on_gpu_oom(
+                ["x"], run, label="t", run_on_cpu=lambda _items: ["cpu"]
+            ) == ["cpu"]
+        assert gpu_oom._recent_oom()
+        run_warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(session_warnings) == len(run_warnings) == 1
+
     def test_a_real_fault_while_opening_still_raises(self, monkeypatch):
         from bibr.ner.parser_onnx import OnnxRefParser
 
