@@ -13,7 +13,9 @@ on the CPU, instead of failing the paper or dropping to a weaker tier.
 Real CUDA faults are not retried: ORT describes them (``CUDA failure 700: an
 illegal memory access was encountered``), and a bare ``cudaError`` counts as
 out-of-memory only while the card is nearly full or another out-of-memory
-failure was just seen in this process.
+failure was just seen in this process. A failure on a CPU session is never a
+GPU out-of-memory failure, although ORT's CPU arena reports one in the same
+words (``BFCArena ... Failed to allocate memory``).
 """
 
 from __future__ import annotations
@@ -42,10 +44,23 @@ _OOM_MARKERS = (
     "cublas_status_alloc_failed",
 )
 
+#: Fragments (lower case) of the failures layout and SaT have always split a
+#: batch on, on any device: ORT's arena (its CPU arena uses the same words as
+#: its CUDA arena) and torch's "out of memory".
+_ALLOCATION_MARKERS = ("out of memory", "bfcarena", "failed to allocate memory")
+
 #: A bare ORT ``CudaCall`` failure counts as out-of-memory while the card has
 #: less than this free, or within ``_RECENT_OOM_S`` of a recognised one.
 NEARLY_FULL_GB = 2.0
 _RECENT_OOM_S = 10.0
+
+# The window is process-wide, not per model or per session, on purpose: the
+# one bare ``cudaError`` seen (E23, layout) came 12 ms after an arena failure
+# in another model (the section classifier), so a per-model window would have
+# missed it. The cost is that an undescribed real CUDA fault within 10 s of
+# any recognised out-of-memory failure in this process is retried (split, then
+# a single input on the CPU) instead of raised at once. The CPU result is
+# still correct; a fault that persists raises again once the window closes.
 
 _last_oom_at: float | None = None
 _last_oom_lock = threading.Lock()
@@ -78,14 +93,17 @@ def _card_nearly_full() -> bool:
     return reading is not None and reading.free_gb < NEARLY_FULL_GB
 
 
-def is_gpu_oom_error(exc: BaseException) -> bool:
+def is_gpu_oom_error(exc: BaseException, *, on_gpu: bool = True) -> bool:
     """True for a GPU allocation failure that a smaller batch may avoid.
 
     Recognised from the message (see ``_OOM_MARKERS``); a bare ORT
     ``cudaError`` without a description only while the card is nearly full or
     shortly after another recognised failure. A recognised failure is
-    remembered for that second check.
+    remembered for that second check. Always False when the run that failed
+    was on a CPU session (``on_gpu=False``).
     """
+    if not on_gpu:
+        return False
     message = str(exc).lower()
     if any(marker in message for marker in _OOM_MARKERS):
         _note_oom()
@@ -95,23 +113,40 @@ def is_gpu_oom_error(exc: BaseException) -> bool:
     return False
 
 
+def is_memory_error(exc: BaseException, *, on_gpu: bool) -> bool:
+    """Whether a smaller batch may avoid *exc*, on a GPU or a CPU session.
+
+    On a GPU session, a GPU out-of-memory failure (``is_gpu_oom_error``). On a
+    CPU session, the arena and "out of memory" failures that layout and SaT
+    have always split a batch on; these are not GPU failures, so they are
+    neither remembered for the bare ``cudaError`` check nor sent to a CPU
+    fallback.
+    """
+    if on_gpu:
+        return is_gpu_oom_error(exc)
+    message = str(exc).lower()
+    return any(marker in message for marker in _ALLOCATION_MARKERS)
+
+
 def split_on_gpu_oom(
     items: Sequence[T],
     run: Callable[[Sequence[T]], list[R]],
     *,
     label: str,
     run_on_cpu: Callable[[Sequence[T]], list[R]] | None = None,
+    on_gpu: bool = True,
 ) -> list[R]:
     """``run(items)``, halving the batch after a GPU out-of-memory failure.
 
     A single input that still fails goes to *run_on_cpu* when given, and
-    otherwise re-raises. Any other error propagates unchanged. Each split and
+    otherwise re-raises. Any other error propagates unchanged, as does every
+    error when *run* is on a CPU session (``on_gpu=False``). Each split and
     CPU fallback is logged as a warning naming *label*.
     """
     try:
         return run(items)
     except Exception as exc:
-        if not is_gpu_oom_error(exc) or (len(items) <= 1 and run_on_cpu is None):
+        if not is_gpu_oom_error(exc, on_gpu=on_gpu) or (len(items) <= 1 and run_on_cpu is None):
             raise
         reason = type(exc).__name__
     # Retried outside the handler, so the failed run's traceback (and any
@@ -132,5 +167,5 @@ def split_on_gpu_oom(
         len(items) - half,
     )
     return split_on_gpu_oom(
-        items[:half], run, label=label, run_on_cpu=run_on_cpu
-    ) + split_on_gpu_oom(items[half:], run, label=label, run_on_cpu=run_on_cpu)
+        items[:half], run, label=label, run_on_cpu=run_on_cpu, on_gpu=on_gpu
+    ) + split_on_gpu_oom(items[half:], run, label=label, run_on_cpu=run_on_cpu, on_gpu=on_gpu)

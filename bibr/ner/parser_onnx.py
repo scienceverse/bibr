@@ -111,15 +111,18 @@ class OnnxRefParser:
             # a single reference on the CPU: it used to fail the whole
             # paper's reference extraction, which then shipped without its
             # references (or, when it raised further up, failed the paper).
+            # A CPU session's failure is raised as before.
+            on_gpu = getattr(self, "device", None) == "cuda"
             parsed = split_on_gpu_oom(
                 texts,
                 self._parse_chunk,
                 label="NER reference parser",
                 run_on_cpu=(
                     (lambda one: self._parse_chunk(one, session=self._session_on_cpu()))
-                    if getattr(self, "device", None) == "cuda"
+                    if on_gpu
                     else None
                 ),
+                on_gpu=on_gpu,
             )
             for slot, (result, cut) in zip(chunk_slots, parsed, strict=True):
                 results[slot] = result
@@ -155,13 +158,20 @@ class OnnxRefParser:
         ]
 
     def _session_on_cpu(self):
-        """A CPU session on the same graph, opened on first use (GPU OOM last resort)."""
+        """A CPU session on the same graph, opened on first use (GPU OOM last resort).
+
+        Without ORT's CPU arena, as layout's: it runs one reference at a time,
+        and an arena would keep its peak allocation for the rest of the run.
+        """
         with self._cpu_session_lock:
             if self._cpu_session is None:
                 from bibr.utils.onnx_providers import create_session
 
                 self._cpu_session, _device = create_session(
-                    self._model_path, device="cpu", model_name="NER reference parser (ONNX, CPU)"
+                    self._model_path,
+                    device="cpu",
+                    model_name="NER reference parser (ONNX, CPU)",
+                    disable_cpu_arena=True,
                 )
             return self._cpu_session
 

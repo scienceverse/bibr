@@ -83,7 +83,9 @@ class OnnxSectionClassifierModel:
             chunk = contexts[start : start + _MAX_INFERENCE_BATCH]
             # A GPU out-of-memory failure halves the chunk and finally runs a
             # single header on the CPU, instead of failing the whole paper's
-            # headers over to the alias/LLM tier.
+            # headers over to the alias/LLM tier. A CPU session's failure is
+            # raised as before.
+            on_gpu = getattr(self, "device", None) == "cuda"
             results.extend(
                 split_on_gpu_oom(
                     chunk,
@@ -95,21 +97,29 @@ class OnnxSectionClassifierModel:
                                 one, max_length, session=self._session_on_cpu()
                             )
                         )
-                        if getattr(self, "device", None) == "cuda"
+                        if on_gpu
                         else None
                     ),
+                    on_gpu=on_gpu,
                 )
             )
         return results
 
     def _session_on_cpu(self):
-        """A CPU session on the same graph, opened on first use (GPU OOM last resort)."""
+        """A CPU session on the same graph, opened on first use (GPU OOM last resort).
+
+        Without ORT's CPU arena, as layout's: it runs one heading at a time,
+        and an arena would keep its peak allocation for the rest of the run.
+        """
         with self._cpu_session_lock:
             if self._cpu_session is None:
                 from bibr.utils.onnx_providers import create_session
 
                 self._cpu_session, _device = create_session(
-                    self._model_path, device="cpu", model_name="section classifier (ONNX, CPU)"
+                    self._model_path,
+                    device="cpu",
+                    model_name="section classifier (ONNX, CPU)",
+                    disable_cpu_arena=True,
                 )
             return self._cpu_session
 

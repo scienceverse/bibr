@@ -16,7 +16,7 @@ from PIL import Image
 
 from bibr.ocr.registry import GpuMemory
 from bibr.utils import gpu_oom
-from bibr.utils.gpu_oom import is_gpu_oom_error, split_on_gpu_oom
+from bibr.utils.gpu_oom import is_gpu_oom_error, is_memory_error, split_on_gpu_oom
 from tests import test_onnx_runtime_core as core
 
 # A section-classifier arena failure (E23 C/chk1 04:28:39.203).
@@ -106,6 +106,38 @@ class TestRecognition:
 
         monkeypatch.setattr("bibr.ocr.registry.managed_gpu_memory", broken)
         assert not is_gpu_oom_error(RuntimeError(BARE_CUDA_ERROR))
+
+
+class TestCpuSessions:
+    """ORT's CPU arena fails in the same words as its CUDA arena; that is no GPU OOM."""
+
+    def test_a_cpu_arena_failure_is_not_a_gpu_oom(self, monkeypatch):
+        _nearly_full(monkeypatch, None)
+        assert not is_gpu_oom_error(RuntimeError(ARENA_OOM), on_gpu=False)
+        # Nor does it open the window for a bare cudaError on the GPU.
+        assert gpu_oom._last_oom_at is None
+        assert not is_gpu_oom_error(RuntimeError(BARE_CUDA_ERROR))
+
+    def test_a_cpu_session_still_splits_on_its_arena_failures(self):
+        assert is_memory_error(RuntimeError(ARENA_OOM), on_gpu=False)
+        assert is_memory_error(RuntimeError("out of memory"), on_gpu=False)
+        assert not is_memory_error(RuntimeError(BARE_CUDA_ERROR), on_gpu=False)
+        assert gpu_oom._last_oom_at is None
+
+    def test_split_raises_a_cpu_sessions_failure_at_once(self, caplog):
+        calls = []
+
+        def run(items):
+            calls.append(len(items))
+            raise RuntimeError(ARENA_OOM)
+
+        with (
+            caplog.at_level(logging.WARNING, logger="bibr.utils.gpu_oom"),
+            pytest.raises(RuntimeError, match="BFCArena"),
+        ):
+            split_on_gpu_oom([1, 2, 3], run, label="Model", on_gpu=False)
+        assert calls == [3]
+        assert not [r for r in caplog.records if "GPU out of memory" in r.getMessage()]
 
 
 class TestSplit:
@@ -214,13 +246,29 @@ class TestSectionClassifier:
         with pytest.raises(RuntimeError, match="illegal memory access"):
             model.classify_batch(core.CONTEXTS, max_length=32)
 
-    def test_a_cpu_session_that_fails_is_not_retried(self):
+    def test_a_cpu_session_that_fails_is_not_retried(self, caplog):
         from bibr.structure.section_classifier_onnx import OnnxSectionClassifierModel
 
         model = OnnxSectionClassifierModel(core._bundle("section"), "cpu")
-        model.session = _FailingGpuSession(model.session, ARENA_OOM)  # device stays "cpu"
-        with pytest.raises(RuntimeError, match="BFCArena"):
+        session = _FailingGpuSession(model.session, ARENA_OOM)  # device stays "cpu"
+        model.session = session
+        with (
+            caplog.at_level(logging.WARNING, logger="bibr.utils.gpu_oom"),
+            pytest.raises(RuntimeError, match="BFCArena"),
+        ):
             model.classify_batch(core.CONTEXTS, max_length=32)
+        # Raised as before: no split, and not logged as a GPU out-of-memory.
+        assert session.batches == [len(core.CONTEXTS)]
+        assert not [r for r in caplog.records if "GPU out of memory" in r.getMessage()]
+        assert model._cpu_session is None
+
+    def test_cpu_fallback_session_skips_the_cpu_arena(self, monkeypatch):
+        from bibr.structure.section_classifier_onnx import OnnxSectionClassifierModel
+
+        model = OnnxSectionClassifierModel(core._bundle("section"), "cpu")
+        calls = _spy_create_session(monkeypatch)
+        model._session_on_cpu()
+        assert calls == [{"device": "cpu", "disable_cpu_arena": True}]
 
 
 class TestNerParser:
@@ -259,13 +307,53 @@ class TestNerParser:
         with pytest.raises(RuntimeError, match="illegal memory access"):
             parser.parse_batch(core.REFS)
 
+    def test_a_cpu_session_that_fails_is_not_retried(self, caplog):
+        from bibr.ner.parser_onnx import OnnxRefParser
 
-def _layout_detector(message: str, *, fits: int = 0):
+        parser = OnnxRefParser(core._bundle("ner"), device="cpu")
+        session = _FailingGpuSession(parser.session, ARENA_OOM)  # device stays "cpu"
+        parser.session = session
+        with (
+            caplog.at_level(logging.WARNING, logger="bibr.utils.gpu_oom"),
+            pytest.raises(RuntimeError, match="BFCArena"),
+        ):
+            parser.parse_batch(core.REFS)
+        assert session.batches == [len(core.REFS)]
+        assert not [r for r in caplog.records if "GPU out of memory" in r.getMessage()]
+        assert parser._cpu_session is None
+
+    def test_cpu_fallback_session_skips_the_cpu_arena(self, monkeypatch):
+        from bibr.ner.parser_onnx import OnnxRefParser
+
+        parser = OnnxRefParser(core._bundle("ner"), device="cpu")
+        calls = _spy_create_session(monkeypatch)
+        parser._session_on_cpu()
+        assert calls == [{"device": "cpu", "disable_cpu_arena": True}]
+
+
+def _spy_create_session(monkeypatch) -> list[dict]:
+    """Record the device and CPU-arena choice of each session opened from now on."""
+    from bibr.utils import onnx_providers
+
+    real = onnx_providers.create_session
+    calls: list[dict] = []
+
+    def spy(model_path, **kwargs):
+        calls.append(
+            {"device": kwargs.get("device"), "disable_cpu_arena": kwargs.get("disable_cpu_arena")}
+        )
+        return real(model_path, **kwargs)
+
+    monkeypatch.setattr(onnx_providers, "create_session", spy)
+    return calls
+
+
+def _layout_detector(message: str, *, fits: int = 0, device: str = "cuda"):
     from bibr.layout_base import BaseLayoutDetector
     from bibr.layout_onnx import OnnxLayoutBackend
 
     backend = OnnxLayoutBackend(core._bundle("layout"), threshold=0.05)
-    backend.device = "cuda"
+    backend.device = device
     backend.session = _FailingGpuSession(
         backend.session, message, fits=fits, batch_input=backend._input_name
     )
@@ -310,6 +398,21 @@ class TestLayout:
         det, _backend = _layout_detector(ILLEGAL_ADDRESS)
         with pytest.raises(RuntimeError, match="illegal memory access"):
             det._detect_images(core._sample_pages())
+
+    def test_a_cpu_session_splits_as_before_but_never_reruns_a_page_on_itself(self, caplog):
+        det, backend = _layout_detector(ARENA_OOM, device="cpu")
+        with (
+            caplog.at_level(logging.WARNING, logger="bibr.layout_base"),
+            pytest.raises(RuntimeError, match="BFCArena"),
+        ):
+            det._detect_images(core._sample_pages())
+        # The batch halves as it always did; the single page then raises
+        # instead of running again on the same CPU session.
+        assert backend.session.batches == [2, 1]
+        messages = [r.getMessage() for r in caplog.records]
+        assert "Layout OOM with batch size 2, retrying as 1 + 1" in messages
+        assert "Layout OOM on a single page; running it on the CPU" not in messages
+        assert gpu_oom._last_oom_at is None
 
     def test_torch_runtime_has_no_cpu_fallback(self):
         from bibr.layout_base import BaseLayoutDetector
@@ -374,6 +477,13 @@ class TestSentenceSegmenter:
         seg = _segmenter(_FakeSat(fail_with=ARENA_OOM), device="cpu")
         with pytest.raises(RuntimeError, match="BFCArena"):
             seg._split_batch_with_retry(["a"])
+
+    def test_cpu_session_halves_without_counting_a_gpu_oom(self):
+        gpu = _FakeSat(fail_with=ARENA_OOM, fits=1)
+        seg = _segmenter(gpu, device="cpu")
+        assert seg._split_batch_with_retry(["a", "b"]) == [["a"], ["b"]]
+        assert gpu.batches == [2, 1, 1]
+        assert gpu_oom._last_oom_at is None
 
     def test_real_fault_is_not_retried(self):
         gpu = _FakeSat(fail_with=ILLEGAL_ADDRESS)

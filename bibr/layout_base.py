@@ -22,6 +22,7 @@ rectangle becomes ``bbox_2d``) and decodes reading order from two order heads
 import logging
 import time
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 
@@ -96,16 +97,19 @@ def _maybe_empty_cache() -> None:
     torch.cuda.empty_cache()
 
 
-def _is_oom_error(exc: BaseException) -> bool:
-    """True for a torch CUDA OOM or an ORT GPU allocation failure.
+def _is_oom_error(exc: BaseException, *, on_gpu: bool = True) -> bool:
+    """True for an allocation failure that a smaller batch may avoid.
 
-    Includes the bare ORT ``cudaError`` a cuDNN convolution raised on a
-    nearly full card (see ``bibr.utils.gpu_oom``), which used to fail the
-    paper with ``layout_failed`` instead of splitting the batch.
+    On the GPU, a torch CUDA OOM or an ORT GPU allocation failure, including
+    the bare ORT ``cudaError`` a cuDNN convolution raised on a nearly full
+    card (see ``bibr.utils.gpu_oom``), which used to fail the paper with
+    ``layout_failed`` instead of splitting the batch. On a CPU session, the
+    arena and out-of-memory failures layout always split on, which are not
+    GPU failures.
     """
-    from bibr.utils.gpu_oom import is_gpu_oom_error
+    from bibr.utils.gpu_oom import is_memory_error
 
-    return is_gpu_oom_error(exc)
+    return is_memory_error(exc, on_gpu=on_gpu)
 
 
 def _check_label_map(id2label, source: str) -> None:
@@ -192,7 +196,9 @@ class BaseLayoutDetector:
         # Set True by variants that wrap the model in torch.compile — gates the
         # fixed-size batch padding (only compiled graphs recompile on new shapes).
         self._compiled: bool = False
-        self._model = None
+        # The ORT backend (``OnnxLayoutBackend``) or the torch module, set by
+        # ``_install_model``.
+        self._model: Any = None
         self._image_processor = None
 
         # Pre-allocate a dummy image for batch padding (avoids per-call PIL
@@ -299,12 +305,14 @@ class BaseLayoutDetector:
                 return self._detect_onnx(images, orig_sizes)
             return self._detect_pytorch(images, orig_sizes)
         except Exception as exc:
-            if not _is_oom_error(exc):
+            on_gpu = self._runs_on_gpu()
+            if not _is_oom_error(exc, on_gpu=on_gpu):
                 raise
             if len(images) <= 1:
-                # One page that still does not fit runs on the CPU when the
-                # ONNX backend can (a slow page instead of a failed paper).
-                if not self._can_detect_on_cpu():
+                # One page that still does not fit on the GPU runs on the CPU
+                # when the ONNX backend can (a slow page instead of a failed
+                # paper). A CPU session's own failure is raised as before.
+                if not (on_gpu and self._can_detect_on_cpu()):
                     raise
                 single_on_cpu = True
             else:
@@ -314,6 +322,12 @@ class BaseLayoutDetector:
             logger.warning("Layout OOM on a single page; running it on the CPU")
             return self._detect_onnx(images, orig_sizes, on_cpu=True)
         return self._detect_split(images)
+
+    def _runs_on_gpu(self) -> bool:
+        """Whether the layout model runs on a GPU (False for a CPU session)."""
+        if getattr(self, "_runtime", "torch") == "onnx":
+            return getattr(self._model, "device", None) == "cuda"
+        return getattr(getattr(self, "_device", None), "type", None) != "cpu"
 
     def _can_detect_on_cpu(self) -> bool:
         return getattr(self, "_runtime", "torch") == "onnx" and hasattr(self._model, "run_on_cpu")

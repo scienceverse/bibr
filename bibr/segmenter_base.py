@@ -492,7 +492,7 @@ class BaseSentenceSegmenter:
         self._device = device
         self._sat_target = sat_target
         self._sat_tokenizer = model_kwargs["tokenizer_name_or_path"]
-        self._cpu_model = None
+        self._cpu_model: SaT | None = None
         self._cpu_model_lock = threading.Lock()
         # SaT also runs the session itself, so wrap it in place: on CUDA, each
         # run then frees the arena memory it no longer uses.
@@ -551,16 +551,18 @@ class BaseSentenceSegmenter:
         A single text that still does not fit is split by a CPU copy of the
         model when the session is on the GPU: on a nearly full card the
         halving reached one 3,361-character text within 40 ms and the paper
-        failed with ``parse_failed``.
+        failed with ``parse_failed``. A CPU session halves on its own arena
+        failures as before, and its single text raises.
         """
-        from bibr.utils.gpu_oom import is_gpu_oom_error
+        from bibr.utils.gpu_oom import is_memory_error
 
+        on_gpu = getattr(self, "_device", "cpu") == "cuda"
         try:
             return self._collect_split_result(texts)
         except Exception as exc:
-            if not is_gpu_oom_error(exc):
+            if not is_memory_error(exc, on_gpu=on_gpu):
                 raise
-            if len(texts) == 1 and getattr(self, "_device", "cpu") != "cuda":
+            if len(texts) == 1 and not on_gpu:
                 logger.error(
                     "OOM on single text (%d chars), cannot reduce batch further", len(texts[0])
                 )

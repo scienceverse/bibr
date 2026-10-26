@@ -467,7 +467,9 @@ def create_session(
     whose provider chain includes CUDA: the CUDA EP has its own arena
     (``kSameAsRequested`` plus per-run shrinkage) and disabling the CPU arena
     there is unverified. Only pass it for models where the arena cost was
-    measured (layout, SaT), not blindly for every model.
+    measured (layout, SaT) and for the CPU sessions that run single inputs
+    after a GPU out-of-memory failure (layout, NER parser, section
+    classifier), not blindly for every model.
     """
     ort = import_onnxruntime(model_name or "ONNX Runtime inference")
     allow_accelerators = enable_cuda_for(device)
