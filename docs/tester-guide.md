@@ -310,12 +310,15 @@ current defaults are:
 
 The setup wizard defaults to bibr's fine-tuned Qwen3.5 models for local
 structured extraction on Linux with an NVIDIA GPU: the 4B from 20 GB and its
-4-bit W4A16 build from 10 GB. Windows and GPUs below 10 GB use GGUF (llama.cpp) builds of the same
-models, and Apple Silicon their 8-bit MLX builds.
+4-bit W4A16 build from 10 GB. Windows, GPUs below 10 GB and GPUs older than
+Ampere use GGUF (llama.cpp) builds of the same models, and Apple Silicon their
+8-bit MLX builds.
 Without a suitable GPU it recommends Claude Haiku 5.5 as a hosted model, for
 OCR and extraction alike. See
-[choosing an extraction model](guides/extraction-models.md). These thresholds are
-model-fit estimates, not guarantees that every document fits available memory.
+[choosing an extraction model](guides/extraction-models.md). The card sizes come
+from batches on one RTX 3090 with its memory cut to each size beside a desktop;
+they are not guarantees that every document fits available memory, and that
+page's speeds are the RTX 3090's, not those of the cards it emulated.
 
 Throughput depends on the model, backend, hardware, and document. Scanned PDFs
 require more OCR than PDFs with usable embedded text. Test a representative

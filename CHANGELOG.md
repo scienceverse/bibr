@@ -42,18 +42,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and the 4B student's Q8_0 GGUF build on llama.cpp, which you install. Such
   cards used to get the 2B student on vLLM from 8 GB, whose starts need more
   memory than an 8 GB card has free. On an emulated 8 GB card with 0.5 GiB
-  taken by a desktop, the llama.cpp pair finished a 48-paper batch (with the
-  fix below).
+  taken by a desktop, the llama.cpp pair finished 48- and 100-paper batches
+  (with the fix below), and the Q4_K_M build that cards below 7 GB get
+  finished 48 papers on an emulated 6 GB card. Emulated means an RTX 3090
+  with its free memory cut to the card's: the sizes were tested, not the
+  speeds of those cards.
 - CUDA cards below 12 GB now run bibr's aggressive memory mode (was 8 GB and
   below) when bibr manages the LLM server on the same card (`--llm local`,
   `vllm` or `llama-cpp`). Aggressive mode unloads bibr's own models before each
   start of the LLM and processes 3 papers a chunk. A cloud or remote LLM with
   local OCR, or `--no-llm`, keeps the rule from before: balanced from above
-  8 GB, with batches of 8 and the streaming back half. On an emulated 10 GB card with a desktop, the
-  W4A16 build's 16 starts found 8.76 GiB free each time (8 GiB needed) and the
-  48-paper batch finished. In balanced mode bibr's models held 2.0–2.4 GiB at
-  the LLM's later starts on an emulated 12 GB card, which on a 10 GB card would
-  leave less than 8 GiB from the second chunk. The 12 GB card stays balanced:
+  8 GB, with batches of 8 and the streaming back half. On an emulated 10 GB
+  card with a desktop, the W4A16 build's 16 starts found 8.76 GiB free each
+  time (8 GiB needed) and the 48-paper batch finished. In balanced mode
+  bibr's models held 2.0–2.4 GiB at the LLM's later starts on an emulated
+  12 GB card, which on a 10 GB card would leave less than 8 GiB from the
+  second chunk. The 12 GB card stays balanced:
   it finished 100 papers with a desktop, its last starts finding 8.6 GiB free.
 - On Linux the automatic OCR chain (`OCR_BACKEND` unset or `paddle`) now runs
   GLM-OCR on llama.cpp whenever the run's LLM runs on llama.cpp, the pair
@@ -84,7 +88,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   aggressive mode releases (the layout, sentence-segmenter and NER
   reference-parser sessions, reloaded when next needed, and a resident local
   OCR server), reads the card again, and refuses only if it is still short.
-  The release is logged once per chunk as a warning.
+  The release is logged once per chunk as a warning. On an emulated 12 GB
+  card beside a 1.5 GiB desktop, 3 of a 48-paper batch's 6 starts needed it
+  (7.98 GiB free of 8.00 before, 9.6 after) and the batch finished.
 - `--llm local` (or `LLM_BACKEND=local`) without `bibr setup` now serves the
   build setup recommends for the card when `LLM_LOCAL_MODEL` is unset. It
   served the bf16 4B on every NVIDIA card that runs vLLM, whose start bibr
