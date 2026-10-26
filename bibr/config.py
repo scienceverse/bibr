@@ -720,12 +720,12 @@ class LlmOptions(_BibrSettings):
         None,
         gt=0.0,
         description=(
-            "Minimum GPU memory (GB) of a managed vLLM LLM server model that bibr's registry "
-            "does not list, such as a local path: when bibr sizes the server's share at a "
-            "start, a share below it is refused before vLLM is launched. Set it for a local "
-            "build, such as 7 for the 4B student's W4A16 build served with --max-num-seqs 64. "
-            "A model the registry lists keeps the registry's minimum (12 for the 4B student, "
-            "8 for the 2B), and this setting is then ignored with a warning."
+            "Minimum budget (GiB) of a managed vLLM LLM server's model: when bibr sizes the "
+            "server's share at a start, a share below it is refused before vLLM is launched. "
+            "It sets the minimum of a model that bibr's registry does not list, such as a local "
+            "path (6.25 for a local copy of the 4B student's W4A16 build served with "
+            "--max-num-seqs 64). For a model the registry lists it can raise the registry's "
+            "minimum but not lower it: a lower value is ignored with a warning."
         ),
     )
     vllm_mlx_port: int = Field(8767, description="Port for the managed vllm-mlx LLM server.")

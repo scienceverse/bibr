@@ -21,6 +21,9 @@ class LocalLLMVariant:
     hf_id: str
     platform: str  # "cuda" | "mlx"
     quant: str  # e.g. "bf16", "awq-4bit", "nvfp4"
+    #: The card-size tier: the smallest card, in GiB of nvidia-smi's
+    #: ``memory.total`` (within ``CARD_SIZE_TOLERANCE_GB``), that setup and
+    #: ``recommended_variant`` offer this variant on. A size, not a budget.
     min_vram_gb: float
     approx_download_gb: float
     # Extra CLI flags appended to the managed vLLM launch command for this
@@ -28,6 +31,31 @@ class LocalLLMVariant:
     # for ``platform == "cuda"`` — the vllm-mlx server does not read these.
     server_args: tuple[str, ...] = ()
     runtime: str | None = None
+    #: The managed vLLM server's budget floor, in GiB of
+    #: ``--gpu-memory-utilization`` x CUDA's total: the smallest budget measured
+    #: to start with an empty compile cache and serve one ``--max-model-len``
+    #: request at this variant's own ``--max-num-seqs``, rounded up to a
+    #: quarter GiB. bibr sizes the managed LLM share against it
+    #: (``bibr.local.vllm_share``). None: ``min_vram_gb`` stands in for it.
+    min_budget_gb: float | None = None
+
+
+#: How far under a tier's whole GiB a card's nvidia-smi ``memory.total`` may be
+#: and still count as that size. Some cards report a little less than their
+#: nominal size: an RTX 4060 8,188 MiB, an RTX 5060 (laptop) 8,151 MiB, an RTX
+#: 5070 12,227 MiB and an RTX 5090 32,607 MiB, against 8,192, 12,288 and 32,768;
+#: an RTX 3090 reports exactly 24,576. A quarter GiB covers all of them and is
+#: far from the next smaller sizes (an 11 GB card reports 11,264 MiB).
+CARD_SIZE_TOLERANCE_GB = 0.25
+
+
+def fits_card(min_vram_gb: float, memory_gb: float) -> bool:
+    """Whether a card of ``memory_gb`` (nvidia-smi total, GiB) is at least ``min_vram_gb``.
+
+    The one card-size comparison for the registry tiers and PaddleOCR-VL's
+    8 GB gate, with ``CARD_SIZE_TOLERANCE_GB`` of slack.
+    """
+    return memory_gb + CARD_SIZE_TOLERANCE_GB >= min_vram_gb
 
 
 @dataclass(frozen=True)
@@ -76,27 +104,32 @@ _QWEN35_STUDENT_SERVER_ARGS: tuple[str, ...] = (
 )
 
 #: The 4B student's W4A16 GPTQ build (int4 weights, the Gated DeltaNet A_log
-#: and norm tensors kept in F32), which is not in ``REGISTRY`` until it is
-#: published. Its floor follows the bf16 one: the smallest budget measured to
-#: start, rounded up to a whole GB. A first start (empty vLLM compile cache,
-#: 1 GiB of the card held by another process) worked at 6.71 GiB and failed
-#: at 5.98 GiB with ``--max-num-seqs 64``: compiling during vLLM's memory
-#: profile takes about 1.1 GiB more than a warm start, so a warm 5.98 GiB
-#: start worked. Hence 7, with 64 sequences: at 128, vLLM needs a Mamba cache
-#: block for each of them, about 2.1 GiB of KV cache instead of 1.1, and the
-#: floor would be about 8 (estimated, not measured). Select it for a local copy of the build with
-#: ``LLM_LOCAL_MIN_VRAM_GB=7`` and these args in ``LLM_VLLM_EXTRA_ARGS``.
-QWEN35_4B_W4A16_MIN_VRAM_GB = 7
+#: and norm tensors kept in F32), served with at most 64 sequences: at 128,
+#: vLLM needs a Mamba cache block for each of them, about 2.1 GiB of KV cache
+#: instead of the 1.1 GiB one 32,768-token request needs. The same weights
+#: scored 218/252 against the bf16 build's 217 on the same box.
 QWEN35_4B_W4A16_SERVER_ARGS: tuple[str, ...] = (
     *_QWEN35_STUDENT_SERVER_ARGS,
     "--max-num-seqs",
     "64",
 )
 
-#: Hub revisions published 2026-10-14 (the merged safetensors repos).
+#: Hub revisions published 2026-10-14 (the merged safetensors repos) and
+#: 2026-10-25 (the W4A16 build).
 _QWEN35_4B_REVISION = "6ab47a4e4e8b1b76c1ab234aec66f360683ff9fc"
 _QWEN35_2B_REVISION = "81d0442d0ecadc20e1b9587d54bff42242123870"
+_QWEN35_4B_W4A16_REVISION = "a2af8f6e90e6481251af9eb07d02c034c30e3446"
 
+#: Budget floors (``LocalLLMVariant.min_budget_gb``) of the vLLM variants:
+#: cold starts (empty vLLM, Inductor and Triton caches) on an RTX 3090 with
+#: vLLM 0.31.0, stepping ``--gpu-memory-utilization`` by 0.01 (0.24 GiB) until
+#: one budget served a 32,768-token request and the next lower one failed
+#: vLLM's KV cache check. The smallest budget that served, rounded up to a
+#: quarter GiB. A warm start (the compile cache filled by an earlier start)
+#: needs about 1.1 GiB less.
+QWEN35_4B_BUDGET_GB = 12.25  # 128 seqs: served at 12.02 GiB; 11.78 had 127 Mamba blocks
+QWEN35_4B_W4A16_BUDGET_GB = 6.25  # 64 seqs: served at 6.13 GiB; 5.89 had too little KV cache
+QWEN35_2B_BUDGET_GB = 6.25  # 128 seqs: served at 6.13 GiB; 5.89 had 127 Mamba blocks
 #: Thinking off per request too, for llama.cpp and MLX servers, which do not
 #: read ``server_args``.
 _QWEN35_STUDENT_ENV: dict[str, str] = {"LLM_CHAT_TEMPLATE_KWARGS": '{"enable_thinking": false}'}
@@ -111,9 +144,25 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 hf_id="scienceverse/bibr-extract-qwen35-4b",
                 platform="cuda",
                 quant="bf16",
-                min_vram_gb=12,
+                min_vram_gb=20,
+                min_budget_gb=QWEN35_4B_BUDGET_GB,
                 approx_download_gb=8.7,
                 server_args=("--revision", _QWEN35_4B_REVISION, *_QWEN35_STUDENT_SERVER_ARGS),
+                runtime="vllm",
+            ),
+            # int4 weights, for cards the bf16 build does not fit.
+            LocalLLMVariant(
+                hf_id="scienceverse/bibr-extract-qwen35-4b-W4A16",
+                platform="cuda",
+                quant="w4a16",
+                min_vram_gb=12,
+                min_budget_gb=QWEN35_4B_W4A16_BUDGET_GB,
+                approx_download_gb=3.8,  # 4,050,888,413 bytes
+                server_args=(
+                    "--revision",
+                    _QWEN35_4B_W4A16_REVISION,
+                    *QWEN35_4B_W4A16_SERVER_ARGS,
+                ),
                 runtime="vllm",
             ),
             # llama.cpp (Windows, cards below 8 GB): Q8_0 first, as the
@@ -156,6 +205,7 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 platform="cuda",
                 quant="bf16",
                 min_vram_gb=8,
+                min_budget_gb=QWEN35_2B_BUDGET_GB,
                 approx_download_gb=4.2,
                 server_args=("--revision", _QWEN35_2B_REVISION, *_QWEN35_STUDENT_SERVER_ARGS),
                 runtime="vllm",
@@ -309,7 +359,7 @@ def variants_for(
     if runtime is not None:
         out = [v for v in out if v.runtime in (None, runtime)]
     if memory_gb is not None:
-        out = [v for v in out if v.min_vram_gb <= memory_gb]
+        out = [v for v in out if fits_card(v.min_vram_gb, memory_gb)]
     return out
 
 

@@ -280,10 +280,14 @@ def paddle_vllm_unavailable_reason(*, vram_gb: float | None | object = _PROBE) -
     spends its startup budget bootstrapping vLLM), by the managed launcher
     itself, and by the ``bibr chew`` preflight.
     """
+    from bibr.local.llm_models import fits_card
+
     vram = _cuda_vram_gb() if vram_gb is _PROBE else vram_gb
     if vram is None:
         return "no NVIDIA GPU detected (paddle-vllm needs CUDA)"
-    if vram < PADDLE_VLLM_MIN_VRAM_GB:
+    # The registry's card-size rule, so a card that counts as 8 GB for the
+    # LLM (an RTX 4060 reports 8,188 MiB) also runs PaddleOCR-VL on vLLM.
+    if not fits_card(PADDLE_VLLM_MIN_VRAM_GB, vram):
         return (
             f"the GPU has {vram:.0f} GB of VRAM and paddle-vllm needs at least "
             f"{PADDLE_VLLM_MIN_VRAM_GB:.0f} GB (llama.cpp is the low-VRAM OCR path)"

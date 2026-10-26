@@ -95,7 +95,7 @@ class LlmShare:
     def describe(self) -> str:
         if self.total_gb is None:
             return f"{self.share:.2f} (no GPU memory reading; the configured share)"
-        floor = "none" if self.floor_gb is None else f"{self.floor_gb:.1f} GiB"
+        floor = "none" if self.floor_gb is None else f"{self.floor_gb:.2f} GiB"
         return (
             f"{self.share:.2f} of {self.total_gb:.2f} GiB ({self.reason}): "
             f"{self.free_gb:.2f} GiB free, bibr {self.own_gb:.2f} GiB, "
@@ -136,48 +136,55 @@ def overshoot_reserve_gb(model: str, extra_args: str | None) -> float:
 
 
 def _registry_floor_gb(model: str) -> float | None:
-    """The registry's ``min_vram_gb`` for *model*'s vLLM variant, None if it is not listed."""
+    """The registry's vLLM budget floor for *model*, None if it is not listed.
+
+    The variant's ``min_budget_gb``, or its ``min_vram_gb`` card size when it
+    has none (the floor before budget floors were measured).
+    """
     from bibr.local.llm_models import REGISTRY
 
     for entry in REGISTRY:
         for variant in entry.variants:
             if variant.platform == "cuda" and variant.runtime == "vllm" and variant.hf_id == model:
+                if variant.min_budget_gb is not None:
+                    return float(variant.min_budget_gb)
                 return float(variant.min_vram_gb)
     return None
 
 
-# Models whose LLM_LOCAL_MIN_VRAM_GB was already reported as ignored: once per
-# process each, since every start and every chunk's check reads the floor.
+# Models whose lower LLM_LOCAL_MIN_VRAM_GB was already reported as ignored: once
+# per process each, since every start and every chunk's check reads the floor.
 _floor_setting_ignored_for: set[str] = set()
 
 
 def managed_llm_floor_gb(model: str, settings: GlobalSettings | None = None) -> float | None:
-    """The minimum VRAM for *model* served by vLLM, None if it is not known.
+    """The vLLM budget floor for *model*, None if it is not known.
 
-    The registry's ``min_vram_gb`` for the model's vLLM variant. It covers the
-    weights, vLLM's profiling activations and the KV cache the server needs to
-    start (one Mamba block per sequence for the hybrid Qwen3.5 students, and
-    ``--max-model-len`` tokens): 12 GB for the 4B student, rounded up from its
-    measured 11.7 GB low-memory peak. A model the registry does not list, such
-    as a local path to the 4B student's W4A16 build, takes
-    ``LLM_LOCAL_MIN_VRAM_GB`` (*settings*) instead. A listed model keeps the
-    registry's floor and the setting is ignored with a warning, so a value
-    left over from a local build (7 for the W4A16 build) never sizes the bf16
-    4B's starts below the 12 GB it needs.
+    The registry's budget floor for the model's vLLM variant
+    (``LocalLLMVariant.min_budget_gb``): the weights, vLLM's profiling
+    activations with an empty compile cache, and the KV cache the server
+    needs to start (one Mamba block per sequence for the hybrid Qwen3.5
+    students, and ``--max-model-len`` tokens). ``LLM_LOCAL_MIN_VRAM_GB``
+    (*settings*) sets the floor of a model the registry does not list, such
+    as a local path, and can raise a listed model's floor but not lower it:
+    a lower value is ignored with a warning, so a value left over from a
+    local build (6.75 for the W4A16 build) never sizes the bf16 4B's starts
+    below what it needs. This matches ``LLM_LOCAL_MEM_FRACTION``, the way to
+    choose a share yourself.
     """
     floor = _registry_floor_gb(model)
     setting = settings.llm.local_min_vram_gb if settings is not None else None
     if setting is None:
         return floor
-    if floor is None:
+    if floor is None or setting >= floor:
         return float(setting)
     if model not in _floor_setting_ignored_for:
         _floor_setting_ignored_for.add(model)
         logger.warning(
             "LLM_LOCAL_MIN_VRAM_GB=%g is ignored for %s: bibr's model registry lists that "
-            "model with a minimum of %g GB, which is used instead. The setting is for a model "
-            "the registry does not list, such as a local path; unset it, or set "
-            "LLM_LOCAL_MEM_FRACTION to choose the share yourself.",
+            "model with a minimum of %g GiB, and the setting can raise a listed model's "
+            "minimum but not lower it. Unset it, or set LLM_LOCAL_MEM_FRACTION to choose "
+            "the share yourself.",
             setting,
             model,
             floor,
@@ -257,13 +264,27 @@ def size_managed_llm_share(
         share = min(cap, math.ceil(round(floor / total * 100, 6)) / 100)
         details["headroom_gb"] = LLM_ONNX_MIN_HEADROOM_GB
         return LlmShare(share=share, reason="floor", budget_gb=share * total, **details)
-    need = (floor if floor is not None else 0.0) + reserve_gb + LLM_ONNX_MIN_HEADROOM_GB
+    if floor is None:
+        # Without a floor any share above zero would do, but only beside the
+        # full room for bibr: the squeeze to LLM_ONNX_MIN_HEADROOM_GB is for a
+        # model's floor alone.
+        need = reserve_gb + headroom
+        needs = (
+            f"more than {need:.2f} GiB (the model has no floor; {reserve_gb:.2f} GiB vLLM "
+            f"takes beyond its share while starting, and {headroom:.2f} GiB for bibr's GPU "
+            "sessions)"
+        )
+    else:
+        need = floor + reserve_gb + LLM_ONNX_MIN_HEADROOM_GB
+        needs = (
+            f"{need:.2f} GiB (the model's {floor:.2f} GiB floor, {reserve_gb:.2f} GiB vLLM "
+            f"takes beyond its share while starting, and {LLM_ONNX_MIN_HEADROOM_GB:.1f} GiB for "
+            "bibr's GPU sessions)"
+        )
     raise ManagedLlmVramError(
         f"not enough free GPU memory to start the managed vLLM LLM server: "
         f"{free:.2f} of {total:.2f} GiB free (bibr itself holds {own:.2f} GiB), and it needs "
-        f"{need:.2f} GiB (the model's {floor or 0.0:.1f} GiB floor, {reserve_gb:.2f} GiB vLLM "
-        f"takes beyond its share while starting, and {LLM_ONNX_MIN_HEADROOM_GB:.1f} GiB for "
-        "bibr's GPU sessions). Free GPU memory (other processes), pick a smaller model "
+        f"{needs}. Free GPU memory (other processes), pick a smaller model "
         "(LLM_LOCAL_MODEL), or set LLM_LOCAL_MEM_FRACTION to choose the share yourself"
     )
 
