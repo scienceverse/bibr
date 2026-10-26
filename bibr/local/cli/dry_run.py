@@ -171,7 +171,7 @@ def _dry_run_memory_mode_label(args, config: ResolvedRunConfig) -> str:
 
     if Settings.pipeline.memory_mode:
         return f"{config.memory_mode} (PIPELINE_MEMORY_MODE setting)"
-    return f"{config.memory_mode} (auto-detected from system RAM)"
+    return f"{config.memory_mode} (auto-detected from system RAM, CUDA VRAM and the LLM backend)"
 
 
 def _dry_run_enrichment_lines(config: ResolvedRunConfig, parse_strategy: str) -> list[str]:

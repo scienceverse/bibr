@@ -192,10 +192,33 @@ def test_resolve_unset_default_paddle_preserves_automatic_selector(monkeypatch):
 
 
 def test_resolve_default_memory_mode_autodetected(monkeypatch):
-    monkeypatch.setattr("bibr.local.pipeline._default_memory_mode", lambda: "aggressive")
+    monkeypatch.setattr("bibr.local.pipeline._default_memory_mode", lambda **_: "aggressive")
     config = _resolve("paper.pdf", "--ocr", "glm-llama")
     assert config.memory_mode == "aggressive"
     assert config.chunk_size == 3
+
+
+@pytest.mark.parametrize(
+    ("argv", "passed"),
+    [
+        (("--llm", "cloud"), "cloud"),
+        (("--llm", "vllm"), "vllm"),
+        (("--llm", "llama-cpp"), "llama-cpp"),
+        (("--llm", "vllm", "--no-llm"), "cloud"),
+    ],
+)
+def test_resolve_memory_mode_sees_the_llm_backend(monkeypatch, argv, passed):
+    """The auto memory mode depends on whether bibr's own LLM server shares the card."""
+    seen = []
+
+    def fake_default(settings=None, *, llm_backend=None):
+        seen.append(llm_backend)
+        return "balanced"
+
+    monkeypatch.setattr("bibr.local.pipeline._default_memory_mode", fake_default)
+    config = _resolve("paper.pdf", "--ocr", "glm-llama", *argv)
+    assert seen == [passed]
+    assert config.memory_mode == "balanced"
 
 
 @pytest.mark.parametrize(

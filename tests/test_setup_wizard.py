@@ -1935,6 +1935,30 @@ def test_step_memory_mode_persists_resolved_mode(monkeypatch, hardware, ram, exp
     assert wizard.env_vars["PIPELINE_MEMORY_MODE"] == expected
 
 
+@pytest.mark.parametrize(
+    ("llm_backend", "expected"),
+    [
+        ("cloud", "balanced"),
+        (None, "balanced"),
+        ("local", "aggressive"),
+        ("vllm", "aggressive"),
+        ("llama-cpp", "aggressive"),
+    ],
+)
+def test_step_memory_mode_follows_the_llm_step(monkeypatch, llm_backend, expected):
+    """A 10 GB card runs aggressive only when bibr's own LLM server shares it;
+    a cloud LLM with local OCR keeps balanced (batches of 8)."""
+    monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 10.0))
+    monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 32.0)
+
+    wizard = SetupWizard()
+    if llm_backend is not None:
+        wizard.env_vars["LLM_BACKEND"] = llm_backend
+    wizard._step_memory_mode()
+
+    assert wizard.env_vars["PIPELINE_MEMORY_MODE"] == expected
+
+
 # ---------------------------------------------------------------------------
 # New simple-flow behaviour: weak-hardware fork, plan preview, ordering
 # ---------------------------------------------------------------------------

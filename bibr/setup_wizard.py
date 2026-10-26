@@ -337,12 +337,18 @@ def _build_recommended_setup(
         system_memory_gb = _get_system_memory_gb()
     from bibr.local.pipeline import _auto_memory_mode
 
-    memory_mode = _auto_memory_mode(platform_key, accelerator_memory_gb, system_memory_gb)
+    def memory_mode_for(llm_backend: str | None) -> str:
+        # The runtime's rule: on a CUDA card it depends on whether the LLM
+        # server bibr manages shares the card.
+        return _auto_memory_mode(
+            platform_key, accelerator_memory_gb, system_memory_gb, llm_backend=llm_backend
+        )
+
     base_env = {
         "WTPSPLIT_MODEL": "sat-6l-sm",
         "REF_SEG_STRATEGY": "geom",
         "REF_PARSE_STRATEGY": "ner",
-        "PIPELINE_MEMORY_MODE": memory_mode,
+        "PIPELINE_MEMORY_MODE": memory_mode_for(None),
         "CROSSREF_CONSOLIDATE": "off",
     }
 
@@ -353,6 +359,7 @@ def _build_recommended_setup(
         ocr_backend = "paddle"
         env = {**base_env, "OCR_BACKEND": ocr_backend}
         env.update(_local_llm_env(platform_key, accelerator_memory_gb, sys_platform_name))
+        env["PIPELINE_MEMORY_MODE"] = memory_mode_for(env.get("LLM_BACKEND"))
         # On Linux each half has its own VRAM gate: the automatic OCR chain
         # runs paddle-vllm from 8 GB (bibr.ocr.registry), and the LLM runs on
         # vLLM only from the card size where a vLLM variant of a recommended
@@ -1723,13 +1730,20 @@ class SetupWizard:
 
         The runtime already auto-detects this each chew, but persisting it here
         makes the choice explicit for a first-time tester — and lets low-memory
-        machines (a CUDA card below 12 GB, or an 8 GB Apple Silicon Mac running
-        fully local) see why they are in ``aggressive`` mode.
+        machines (a CUDA card below 12 GB that runs bibr's own LLM server, one of
+        8 GB or less, or an 8 GB Apple Silicon Mac running fully local) see why
+        they are in ``aggressive`` mode. It runs after the LLM step, whose
+        ``LLM_BACKEND`` the rule depends on.
         """
         from bibr.local.pipeline import _auto_memory_mode, _get_system_memory_gb
 
         platform_key, accel_gb = detect_hardware()
-        mode = _auto_memory_mode(platform_key, accel_gb, _get_system_memory_gb())
+        mode = _auto_memory_mode(
+            platform_key,
+            accel_gb,
+            _get_system_memory_gb(),
+            llm_backend=self.env_vars.get("LLM_BACKEND"),
+        )
         self.env_vars["PIPELINE_MEMORY_MODE"] = mode
         if mode == "aggressive":
             self.console.print(

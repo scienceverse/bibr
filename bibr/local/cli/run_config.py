@@ -98,12 +98,20 @@ def resolve_run_config(args) -> ResolvedRunConfig:
     else:
         ocr_backend = normalize_ocr_backend(ocr_backend)
 
-    # Determine memory mode
+    # --llm unset (None) falls back to the LLM_BACKEND setting (default "cloud").
+    from bibr.config import Settings
+
+    llm_backend = _resolve_llm_backend(args.llm or Settings.llm.backend)
+
+    # Determine memory mode: on a CUDA card it depends on whether a managed
+    # local LLM server shares the card (--no-llm never starts one).
     memory_mode = args.memory
     if memory_mode is None:
         from bibr.local.pipeline import _default_memory_mode
 
-        memory_mode = _default_memory_mode()
+        memory_mode = _default_memory_mode(
+            llm_backend="cloud" if getattr(args, "no_llm", False) else llm_backend
+        )
 
     # Parse page range
     start_page, end_page = None, None
@@ -115,8 +123,6 @@ def resolve_run_config(args) -> ResolvedRunConfig:
 
     chunk_size = args.batch_size if args.batch_size > 0 else _auto_batch_size(memory_mode)
 
-    # --llm unset (None) falls back to the LLM_BACKEND setting (default "cloud").
-    from bibr.config import Settings
     from bibr.ocr.registry import resolve_backend_candidates
 
     explicit_profile = getattr(args, "ocr_profile", None)
@@ -130,7 +136,7 @@ def resolve_run_config(args) -> ResolvedRunConfig:
     return ResolvedRunConfig(
         ocr_backend=ocr_backend,
         memory_mode=memory_mode,
-        llm_backend=_resolve_llm_backend(args.llm or Settings.llm.backend),
+        llm_backend=llm_backend,
         ocr_url=args.ocr_url,
         ocr_model=args.ocr_model,
         ocr_profile=explicit_profile or configured_profile,

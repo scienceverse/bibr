@@ -148,18 +148,36 @@ def resolve_llm_backend(raw: str, settings: GlobalSettings | None = None) -> str
 
 
 #: CUDA cards below this size (GiB of nvidia-smi's ``memory.total``, within the
-#: registry's ``CARD_SIZE_TOLERANCE_GB``) run the aggressive memory mode. There
-#: the managed vLLM LLM server starts every chunk with only about 1 GiB to spare
-#: (the 4B's W4A16 build needs 8 GiB free; a 10 GB card beside a desktop has
-#: about 9 GiB), and aggressive mode unloads bibr's GPU sessions before it
-#: starts (0.27 GiB left, against about 2.4 GiB once balanced mode's have
-#: grown). A 12 GB card finished 100 papers in balanced mode beside a desktop,
-#: its last starts finding 8.6 GiB free.
+#: registry's ``CARD_SIZE_TOLERANCE_GB``) run the aggressive memory mode when
+#: bibr manages the LLM server on the same card (``GPU_LLM_SERVER_BACKENDS``).
+#: There the managed vLLM LLM server starts every chunk with only about 1 GiB
+#: to spare (the 4B's W4A16 build needs 8 GiB free; a 10 GB card beside a
+#: desktop has about 9 GiB), and aggressive mode unloads bibr's GPU sessions
+#: before it starts (0.27 GiB left, against about 2.4 GiB once balanced
+#: mode's have grown). A 12 GB card finished 100 papers in balanced mode
+#: beside a desktop, its last starts finding 8.6 GiB free. Without a local LLM
+#: server on the card (a cloud or remote LLM, or ``--no-llm``) nothing needs
+#: that room, and the rule is the one before: aggressive up to 8 GB.
 CUDA_BALANCED_MIN_GB = 12
+
+#: The ``--llm`` / ``LLM_BACKEND`` values for which bibr starts and manages the
+#: LLM server on the CUDA card itself (``local`` resolves to one of them
+#: there). Other managed backends (``llmster``) and every remote one keep the
+#: card-size rule from before ``CUDA_BALANCED_MIN_GB``.
+GPU_LLM_SERVER_BACKENDS = frozenset({"local", "vllm", "llama-cpp"})
+
+#: The largest CUDA card (GiB) that runs aggressive mode when no LLM server of
+#: bibr's shares the card: OCR alone (PaddleOCR-VL needs 8 GB) and bibr's own
+#: GPU sessions.
+CUDA_AGGRESSIVE_MAX_GB_WITHOUT_LOCAL_LLM = 8
 
 
 def _auto_memory_mode(
-    platform_key: str | None, accel_gb: float | None, system_ram_gb: float
+    platform_key: str | None,
+    accel_gb: float | None,
+    system_ram_gb: float,
+    *,
+    llm_backend: str | None = None,
 ) -> MemoryMode:
     """Pure hardware → memory-mode rule (shared by runtime default and setup).
 
@@ -171,21 +189,37 @@ def _auto_memory_mode(
     to ``aggressive`` that saves a 30-60 s OCR server reload per chunk and
     keeps layout+segmenter resident; only ≤8 GB machines still need
     ``aggressive`` (caught by the ``system_ram_gb`` rule below, since
-    ``accel_gb`` is unified memory on mlx). CUDA cards below
-    ``CUDA_BALANCED_MIN_GB`` run ``aggressive`` too.
+    ``accel_gb`` is unified memory on mlx).
+
+    On CUDA the rule depends on ``llm_backend``, the run's ``--llm`` /
+    ``LLM_BACKEND``: when bibr manages the LLM server on the card
+    (``GPU_LLM_SERVER_BACKENDS``), cards below ``CUDA_BALANCED_MIN_GB`` run
+    ``aggressive``; otherwise (a cloud or remote LLM, ``--no-llm``, or None)
+    only cards of ``CUDA_AGGRESSIVE_MAX_GB_WITHOUT_LOCAL_LLM`` or less do, so
+    such runs keep batches of 8, a resident OCR server and the streaming back
+    half.
     """
     if platform_key == "cuda" and accel_gb is not None:
-        from bibr.local.llm_models import fits_card
+        if llm_backend in GPU_LLM_SERVER_BACKENDS:
+            from bibr.local.llm_models import fits_card
 
-        if not fits_card(CUDA_BALANCED_MIN_GB, accel_gb):
+            if not fits_card(CUDA_BALANCED_MIN_GB, accel_gb):
+                return "aggressive"
+        elif accel_gb <= CUDA_AGGRESSIVE_MAX_GB_WITHOUT_LOCAL_LLM:
             return "aggressive"
     if system_ram_gb <= 8:
         return "aggressive"
     return "balanced"
 
 
-def _default_memory_mode(settings: GlobalSettings | None = None) -> MemoryMode:
-    """Default memory mode: ``PIPELINE_MEMORY_MODE`` if set, else RAM auto-detect."""
+def _default_memory_mode(
+    settings: GlobalSettings | None = None, *, llm_backend: str | None = None
+) -> MemoryMode:
+    """Default memory mode: ``PIPELINE_MEMORY_MODE`` if set, else hardware auto-detect.
+
+    ``llm_backend`` is the run's resolved ``--llm`` / ``LLM_BACKEND`` (``"cloud"``
+    for ``--no-llm``); see ``_auto_memory_mode``.
+    """
     from bibr.config import snapshot_settings
 
     effective = settings if settings is not None else snapshot_settings()
@@ -195,7 +229,9 @@ def _default_memory_mode(settings: GlobalSettings | None = None) -> MemoryMode:
     from bibr.local.llm_models import detect_hardware
 
     platform_key, memory_gb = detect_hardware()
-    return _auto_memory_mode(platform_key, memory_gb, _get_system_memory_gb())
+    return _auto_memory_mode(
+        platform_key, memory_gb, _get_system_memory_gb(), llm_backend=llm_backend
+    )
 
 
 def _auto_batch_size(memory_mode: str) -> int:
@@ -259,8 +295,9 @@ class LocalPipeline(Pipeline):
       but the weights stay resident across files by design.
     - ``"keep_all"``: Keep everything loaded (24+ GB GPU or cloud LLM only)
     - ``None`` (default): ``PIPELINE_MEMORY_MODE`` if set, else auto-detect
-      (≤8 GB of system RAM or a CUDA card below ``CUDA_BALANCED_MIN_GB`` →
-      aggressive, else balanced)
+      (≤8 GB of system RAM, a CUDA card below ``CUDA_BALANCED_MIN_GB`` that a
+      managed local LLM server shares, or one of 8 GB or less → aggressive,
+      else balanced)
 
     For batch processing, use ``process_chunk()`` which loads each model once
     per chunk and loops over files within each stage.
@@ -344,10 +381,13 @@ class LocalPipeline(Pipeline):
         llm_backend = resolve_llm_backend(
             llm_backend or settings_snapshot.llm.backend, settings=settings_snapshot
         )
-        # None → PIPELINE_MEMORY_MODE, else RAM auto-detect — same resolution
+        # None → PIPELINE_MEMORY_MODE, else hardware auto-detect (which looks
+        # at whether a managed LLM server shares the card) — same resolution
         # ladder as the CLI, so the library API behaves identically.
         if memory_mode is None:
-            memory_mode = _default_memory_mode(settings_snapshot)
+            memory_mode = _default_memory_mode(
+                settings_snapshot, llm_backend="cloud" if no_llm else llm_backend
+            )
 
         # --no-llm implies no Crossref and no equation extraction, and no
         # managed local LLM server (which would never be called — forcing

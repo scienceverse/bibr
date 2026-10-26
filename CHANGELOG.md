@@ -45,8 +45,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   taken by a desktop, the llama.cpp pair finished a 48-paper batch (with the
   fix below).
 - CUDA cards below 12 GB now run bibr's aggressive memory mode (was 8 GB and
-  below), which unloads bibr's own models before each start of the LLM and
-  processes 3 papers a chunk. On an emulated 10 GB card with a desktop, the
+  below) when bibr manages the LLM server on the same card (`--llm local`,
+  `vllm` or `llama-cpp`). Aggressive mode unloads bibr's own models before each
+  start of the LLM and processes 3 papers a chunk. A cloud or remote LLM with
+  local OCR, or `--no-llm`, keeps the rule from before: balanced from above
+  8 GB, with batches of 8 and the streaming back half. On an emulated 10 GB card with a desktop, the
   W4A16 build's 16 starts found 8.76 GiB free each time (8 GiB needed) and the
   48-paper batch finished. In balanced mode bibr's models held 2.0–2.4 GiB at
   the LLM's later starts on an emulated 12 GB card, which on a 10 GB card would
