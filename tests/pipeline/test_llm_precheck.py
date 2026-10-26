@@ -531,3 +531,158 @@ async def test_e25_v2_chunks_after_a_refusal_skip_ocr_until_memory_comes_back(ca
     assert all(fs.error is None for fs in chunk3 + chunk4)
     assert sibling._llm_server._reused is True
     rm._llm_server._process = None  # never signal the mocked process
+
+
+class _GpuModel:
+    """One of bibr's own GPU models: unloading it frees ``frees_gb`` on the card."""
+
+    def __init__(self, card, frees_gb: float) -> None:
+        self.loaded = True
+        self.unloads = 0
+        self._card = card
+        self._frees_gb = frees_gb
+
+    def unload(self) -> None:
+        self.loaded = False
+        self.unloads += 1
+        _free(self._card, self._frees_gb)
+
+
+def _free(card, gb: float) -> None:
+    r = card["reading"]
+    card["reading"] = GpuMemory(
+        total_gb=r.total_gb, free_gb=r.free_gb + gb, own_gb=max(0.0, r.own_gb - gb)
+    )
+
+
+@pytest.fixture
+def ner(monkeypatch):
+    """The NER parser singleton: not loaded unless a test says so; unloads are counted."""
+    from bibr.extract import ref_extractor
+
+    state = {"loaded": False, "unloads": 0}
+
+    def unload():
+        state["loaded"] = False
+        state["unloads"] += 1
+
+    monkeypatch.setattr(ref_extractor, "ner_parser_loaded", lambda: state["loaded"])
+    monkeypatch.setattr(ref_extractor, "unload_ner_parser", unload)
+    return state
+
+
+def _released(caplog) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if "before the managed vLLM LLM server start" in r.message]
+
+
+class TestReleaseBeforeRefusing:
+    """Balanced mode releases bibr's own GPU models (and a resident OCR server)
+    before it refuses a managed vLLM LLM start, then reads the card again.
+
+    REFUSED (13.57 GiB free, bibr holding 1.98) is short of the 4B's 14.25;
+    releasing 1.5 GiB of bibr's models brings it to 15.07 with 0.48 held,
+    which fits as FITS does.
+    """
+
+    async def test_the_precheck_releases_and_goes_ahead(self, card, ner, caplog, monkeypatch):
+        from bibr.extract import ref_extractor
+
+        card["reading"] = REFUSED
+        rm = _rm(memory_mode="balanced")
+        rm._layout, rm._segmenter = _GpuModel(card, 1.0), _GpuModel(card, 0.25)
+        ner["loaded"] = True
+
+        def unload_ner():
+            ner["loaded"] = False
+            ner["unloads"] += 1
+            _free(card, 0.25)
+
+        monkeypatch.setattr(ref_extractor, "unload_ner_parser", unload_ner)
+        with caplog.at_level(logging.DEBUG, logger="bibr.pipeline.resources"):
+            assert await rm.llm_start_refusal("vllm") is None
+        assert (rm._layout.unloads, rm._segmenter.unloads, ner["unloads"]) == (1, 1, 1)
+        assert rm.llm_start_releases == 1
+        [record] = _released(caplog)
+        assert record.levelno == logging.WARNING
+        assert "layout, sentence segmenter, NER reference parser" in record.message
+        assert "needs 14.25 GiB" in record.message  # the refusal it avoided
+
+    async def test_still_short_after_the_release_is_refused(self, card, ner):
+        card["reading"] = REFUSED
+        rm = _rm(memory_mode="balanced")
+        rm._layout = _GpuModel(card, 0.1)
+        refusal = await rm.llm_start_refusal("vllm")
+        assert isinstance(refusal, ManagedLlmVramError)
+        assert "13.67 of 23.56 GiB free" in str(refusal)  # read again after the release
+        assert rm._layout.unloads == 1
+        assert rm.llm_start_releases == 1
+
+    async def test_nothing_to_release_refuses_at_once(self, card, ner, caplog):
+        card["reading"] = REFUSED
+        rm = _rm(memory_mode="balanced")
+        with caplog.at_level(logging.DEBUG, logger="bibr.pipeline.resources"):
+            assert isinstance(await rm.llm_start_refusal("vllm"), ManagedLlmVramError)
+        assert rm.llm_start_releases == 0
+        assert not _released(caplog)
+
+    @pytest.mark.parametrize("mode", ["aggressive", "keep_all"])
+    async def test_only_balanced_mode_releases(self, card, ner, mode):
+        card["reading"] = REFUSED
+        rm = _rm(memory_mode=mode)
+        rm._layout = _GpuModel(card, 1.5)
+        assert isinstance(await rm.llm_start_refusal("vllm"), ManagedLlmVramError)
+        assert rm._layout.unloads == 0
+        assert rm.llm_start_releases == 0
+
+    async def test_a_start_that_fits_releases_nothing(self, card, ner):
+        card["reading"] = FITS
+        rm = _rm(memory_mode="balanced")
+        rm._layout = _GpuModel(card, 1.0)
+        assert await rm.llm_start_refusal("vllm") is None
+        assert await _start_refusal(rm) is None
+        assert rm._layout.unloads == 0
+
+    async def test_the_start_releases_a_resident_ocr_server_and_starts(self, card, ner):
+        """From the second chunk the start, not the precheck, meets the refusal:
+        the precheck saw the LLM server up. A resident OCR server is stopped too."""
+        card["reading"] = GpuMemory(total_gb=CUDA_3090, free_gb=10.0, own_gb=1.98)
+        rm = _rm(memory_mode="balanced", ocr_backend="glm-llama")
+        rm._layout = _GpuModel(card, 0.0)
+        ocr = MagicMock()
+        ocr.shutdown.side_effect = lambda: _free(card, 5.5)
+        rm._ocr, rm.ocr_backend = ocr, "glm-llama"
+        assert await _start_refusal(rm) is None
+        ocr.shutdown.assert_called_once()
+        assert rm.ocr is None
+        assert rm._layout.unloads == 1
+        assert rm.llm_start_releases == 1
+
+    async def test_the_start_is_refused_when_still_short(self, card, ner):
+        card["reading"] = REFUSED
+        rm = _rm(memory_mode="balanced")
+        rm._layout = _GpuModel(card, 0.1)
+        started = await _start_refusal(rm)
+        assert started is not None and "13.67 of 23.56 GiB free" in started
+        assert rm.llm_start_releases == 1
+
+    async def test_a_reused_server_releases_nothing(self, card, ner, port):
+        card["reading"] = REFUSED
+        port["models"] = [STUDENT_4B]
+        rm = _rm(memory_mode="balanced")
+        rm._layout = _GpuModel(card, 1.5)
+        assert await rm.llm_start_refusal("vllm") is None
+        assert rm._layout.unloads == 0
+
+    async def test_a_release_is_logged_once_per_chunk(self, card, ner, caplog):
+        card["reading"] = REFUSED
+        rm = _rm(memory_mode="balanced")
+        rm._layout = _GpuModel(card, 1.5)
+        with caplog.at_level(logging.DEBUG, logger="bibr.pipeline.resources"):
+            assert await rm.llm_start_refusal("vllm") is None  # chunk 1's precheck
+            # The layout reloads for the chunk's OCR and bibr grows again.
+            rm._layout.loaded = True
+            card["reading"] = REFUSED
+            assert await _start_refusal(rm) is None  # chunk 1's start
+        assert rm.llm_start_releases == 2
+        levels = [r.levelno for r in _released(caplog)]
+        assert levels == [logging.WARNING, logging.DEBUG]

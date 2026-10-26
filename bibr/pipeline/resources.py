@@ -164,6 +164,14 @@ class ResourceManager:
         self._llm_server: VllmMlxLlmServer | None = None
         self._llm_server_backend: str | None = None
         self._llm_init_lock = asyncio.Lock()
+        #: Times bibr released its own GPU models (and a resident OCR server)
+        #: in balanced mode because the managed vLLM LLM server's start would
+        #: otherwise have been refused (``_release_for_llm_start``).
+        self.llm_start_releases = 0
+        # Chunks seen by ``llm_start_refusal`` (called once before each
+        # chunk's OCR), so a release is logged once per chunk.
+        self._chunk_serial = 0
+        self._release_logged_chunk = -1
         self._llm_client: LLMClient | None = None
         if classifier_resources is None:
             from bibr.pipeline.classifier_resources import ClassifierResources
@@ -866,7 +874,13 @@ class ResourceManager:
         sibling pipeline in this process started included, is reused before
         any share is sized, however little memory is free, and any other
         listener fails the start with its own error.
+
+        In balanced mode a predicted refusal first releases what aggressive
+        mode would (``_release_for_llm_start``) and reads the card again; only
+        a start still short is refused. The start does the same, since from
+        the second chunk the LLM server is up at this check.
         """
+        self._chunk_serial += 1
         if backend != "vllm" or self._llm_share_fixed or self._llm_server is not None:
             return None
         if self._ocr_future is not None:
@@ -876,19 +890,34 @@ class ResourceManager:
 
             if not (self.ocr_url or self.ocr_backend in REMOTE_OCR_BACKENDS):
                 return None
+        if await self._reuses_llm_server():
+            return None
+        refusal = await self._llm_start_refusal_now()
+        if refusal is not None and await self._release_for_llm_start(refusal):
+            refusal = await self._llm_start_refusal_now()
+        return refusal
+
+    async def _reuses_llm_server(self) -> bool:
+        """Whether the managed vLLM LLM start would reuse a server already listening.
+
+        True when the check itself fails too: the start then reports it.
+        """
         from bibr.exceptions import UpstreamServiceError
         from bibr.local import vllm_llm, vllm_share
-        from bibr.ocr import registry
 
         model = vllm_share.managed_llm_model(self._settings)
         try:
-            reused = await asyncio.to_thread(
+            return await asyncio.to_thread(
                 vllm_llm.reuses_running_server, model, self._settings.llm.vllm_port
             )
         except UpstreamServiceError:
-            return None
-        if reused:
-            return None
+            return True
+
+    async def _llm_start_refusal_now(self) -> ManagedLlmVramError | None:
+        """The refusal a managed vLLM LLM start would meet with the memory free now."""
+        from bibr.local import vllm_share
+        from bibr.ocr import registry
+
         reading = await asyncio.to_thread(
             vllm_share.settled_gpu_memory, registry.managed_gpu_memory, wait=time.sleep
         )
@@ -898,13 +927,67 @@ class ResourceManager:
             vllm_share.managed_llm_share(
                 reading,
                 self._settings,
-                model,
+                vllm_share.managed_llm_model(self._settings),
                 cap=self._managed_vllm_fraction or self._settings.llm.local_mem_fraction,
                 swaps_with_ocr=self._llm_swaps_with_ocr(),
             )
         except vllm_share.ManagedLlmVramError as exc:
             return exc
         return None
+
+    async def _release_for_llm_start(self, refusal: ManagedLlmVramError) -> bool:
+        """In balanced mode, release what aggressive mode would before a refused start.
+
+        That is bibr's own GPU models (the layout detector, the sentence
+        segmenter and the NER reference parser, each reloaded when next
+        needed) and a resident local OCR server. The paper and section
+        classifiers are left alone: with a managed vLLM LLM server they stay
+        off the GPU's managed share anyway. Returns whether anything was
+        released, so the caller reads the free memory again. Only the
+        balanced mode does this: aggressive mode has released them already,
+        and ``keep_all`` keeps them by definition.
+        """
+        if self.memory_mode != "balanced":
+            return False
+        released: list[str] = []
+        layout = self._layout
+        if layout is not None and getattr(layout, "loaded", False) and hasattr(layout, "unload"):
+            await asyncio.to_thread(layout.unload)
+            released.append("layout")
+        segmenter = self._segmenter
+        if (
+            segmenter is not None
+            and getattr(segmenter, "loaded", False)
+            and hasattr(segmenter, "unload")
+        ):
+            await asyncio.to_thread(segmenter.unload)
+            released.append("sentence segmenter")
+        from bibr.extract.ref_extractor import ner_parser_loaded
+
+        if ner_parser_loaded():
+            self.unload_ner_parser()
+            released.append("NER reference parser")
+        if self._ocr is not None or self._ocr_future is not None:
+            from bibr.pipeline.stages.ocr import REMOTE_OCR_BACKENDS
+
+            if not (self.ocr_url or self.ocr_backend in REMOTE_OCR_BACKENDS):
+                await self.shutdown_ocr()
+                released.append(f"OCR server ({self.ocr_backend})")
+        if not released:
+            return False
+        self.llm_start_releases += 1
+        level = logging.DEBUG
+        if self._release_logged_chunk != self._chunk_serial:
+            self._release_logged_chunk = self._chunk_serial
+            level = logging.WARNING
+        logger.log(
+            level,
+            "Released %s before the managed vLLM LLM server start (release %d): %s",
+            ", ".join(released),
+            self.llm_start_releases,
+            refusal,
+        )
+        return True
 
     async def _construct_llm_server(self, factory):
         """Run *factory(stop_event)* off the loop; cancellation sets the event."""
@@ -938,6 +1021,20 @@ class ResourceManager:
             # outside the LLM lock: await_ocr takes the locks the other way.
             logger.info("Stopping PaddleOCR-VL vLLM to free VRAM for the vLLM LLM server")
             await self.shutdown_ocr()
+        if (
+            backend == "vllm"
+            and self._llm_server is None
+            and self.memory_mode == "balanced"
+            and not self._llm_share_fixed
+            and not await self._reuses_llm_server()
+        ):
+            # bibr's own GPU models grow over a batch; when what they hold
+            # would leave the start short, release them as aggressive mode
+            # does, then start (the start's own check decides). Outside the
+            # LLM lock, like the OCR stop above.
+            refusal = await self._llm_start_refusal_now()
+            if refusal is not None:
+                await self._release_for_llm_start(refusal)
         async with self._llm_init_lock:
             if self._llm_server is not None:
                 return

@@ -78,6 +78,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- In the balanced memory mode, bibr no longer refuses a managed vLLM LLM
+  server start that would fit once its own GPU models were released. When
+  the memory free cannot start the model, bibr first releases what the
+  aggressive mode releases (the layout, sentence-segmenter and NER
+  reference-parser sessions, reloaded when next needed, and a resident local
+  OCR server), reads the card again, and refuses only if it is still short.
+  The release is logged once per chunk as a warning.
 - `--llm local` (or `LLM_BACKEND=local`) without `bibr setup` now serves the
   build setup recommends for the card when `LLM_LOCAL_MODEL` is unset. It
   served the bf16 4B on every NVIDIA card that runs vLLM, whose start bibr
