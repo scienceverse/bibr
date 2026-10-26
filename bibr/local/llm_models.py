@@ -112,9 +112,12 @@ class LocalLLMModel:
 #   GLM-OCR taking turns on llama.cpp. No card between 7 and 8 GB was run.
 # - 4B GGUF Q4_K_M, 5: 48 papers on a 6 GB card, with GLM-OCR taking turns on
 #   llama.cpp and 40 MiB free at the tightest point. No 5 GB card was run.
-# - 2B bf16, 12: not run on a card below 24 GB. Its budget (6.25 GiB at 128
-#   sequences) needs 0.25 GiB more free than the W4A16 build's; it scores less
-#   and is offered from 12 GB in advanced setup only.
+# - 2B bf16, 12: no run at the default settings beside a desktop backs it. On
+#   an emulated 8 GB card with no desktop, bibr refused all 6 of its starts at
+#   the default settings (48 papers, none done); with the LLM's share set by
+#   hand (about 6.4 GiB) the same 48 papers finished. Its budget (6.25 GiB at
+#   128 sequences) needs 0.25 GiB more free than the W4A16 build's; it scores
+#   less and is offered from 12 GB in advanced setup only.
 # - The 2B GGUF builds and every MLX build: a size rule, not a run. GGUF:
 #   ceil(1.25 x the file's GiB) + 1; MLX: ceil(1.25 x the estimated size).
 _QWEN35_STUDENT_SERVER_ARGS: tuple[str, ...] = (
@@ -240,7 +243,7 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 hf_id="scienceverse/bibr-extract-qwen35-2b",
                 platform="cuda",
                 quant="bf16",
-                min_vram_gb=12,  # 0.25 GiB more than the W4A16 build; not run below 24 GB
+                min_vram_gb=12,  # 0.25 GiB more than the W4A16 build; no default run backs it
                 min_budget_gb=QWEN35_2B_BUDGET_GB,
                 approx_download_gb=4.2,
                 server_args=("--revision", _QWEN35_2B_REVISION, *_QWEN35_STUDENT_SERVER_ARGS),

@@ -71,8 +71,10 @@ GGUF build on llama.cpp, which take turns on the card. If nothing else uses an
 yourself (`LLM_LOCAL_MEM_FRACTION=0.83`, about 6.3 GiB of 7.6, ran 48 papers
 with many ONNX out-of-memory retries); with a desktop on the card the same
 setting failed. The 2B student needs at least as much as the W4A16 build on
-vLLM (6.25 GiB at 128 sequences) and has not been run on a card below 24 GB, so
-it is no longer the default for any card.
+vLLM (6.25 GiB at 128 sequences). On an emulated 8 GB card with no desktop,
+bibr refused every start of it at the default settings; with the LLM's share
+set by hand it ran 48 papers. No run at the default settings beside a desktop
+backs it, so it is no longer the default for any card.
 
 Windows, NVIDIA cards below 10 GB and NVIDIA cards older than Ampere run the
 models through llama.cpp (GGUF), with the largest build that fits. `bibr setup`
