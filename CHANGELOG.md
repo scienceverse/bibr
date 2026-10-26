@@ -89,8 +89,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reference-parser sessions, reloaded when next needed, and a resident local
   OCR server), reads the card again, and refuses only if it is still short.
   The release is logged once per chunk as a warning. On an emulated 12 GB
-  card beside a 1.5 GiB desktop, 3 of a 48-paper batch's 6 starts needed it
-  (7.98 GiB free of 8.00 before, 9.6 after) and the batch finished.
+  card beside a 1.5 GiB desktop, 3 of a 48-paper batch's 6 starts needed it,
+  each at the LLM start after the chunk's OCR (7.98, 7.85 and 7.86 GiB free
+  of the 8.00 needed before the release, 9.6 after), and the batch finished.
 - `--llm local` (or `LLM_BACKEND=local`) without `bibr setup` now serves the
   build setup recommends for the card when `LLM_LOCAL_MODEL` is unset. It
   served the bf16 4B on every NVIDIA card that runs vLLM, whose start bibr
