@@ -283,7 +283,7 @@ def paddle_vllm_unavailable_reason(*, vram_gb: float | None | object = _PROBE) -
     from bibr.local.llm_models import fits_card
 
     vram = _cuda_vram_gb() if vram_gb is _PROBE else vram_gb
-    if vram is None:
+    if not isinstance(vram, int | float):
         return "no NVIDIA GPU detected (paddle-vllm needs CUDA)"
     # The registry's card-size rule, so a card that counts as 8 GB for the
     # LLM (an RTX 4060 reports 8,188 MiB) also runs PaddleOCR-VL on vLLM.

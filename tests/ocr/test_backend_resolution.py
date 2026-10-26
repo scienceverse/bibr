@@ -334,6 +334,14 @@ class TestLinuxChainIsHardwareAware:
         low = registry.paddle_vllm_unavailable_reason(vram_gb=6.0)
         assert "6 GB" in low and "llama.cpp" in low
 
+    def test_a_nominal_8gb_card_runs_paddle_vllm(self):
+        # An RTX 4060 reports 8,188 MiB: the registry's card-size rule counts
+        # it as 8 GB, for OCR as for the LLM tiers.
+        from bibr.ocr import registry
+
+        assert registry.paddle_vllm_unavailable_reason(vram_gb=8188 / 1024) is None
+        assert registry.paddle_vllm_unavailable_reason(vram_gb=7.5) is not None
+
 
 # Captured at collection, before the suite's conftest pins it for each test.
 _MANAGED_GPU_PROBE = _registry_for_probe._managed_gpu_vram_gb

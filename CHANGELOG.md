@@ -8,17 +8,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- `LLM_LOCAL_MIN_VRAM_GB` sets the minimum GPU memory of the managed vLLM LLM
+- The 4B student's W4A16 build (`scienceverse/bibr-extract-qwen35-4b-W4A16`,
+  4-bit weights, a 3.8 GB download) is in bibr's model registry, served by
+  vLLM with at most 64 sequences. It passed 218 of 252 development papers,
+  against 216 for the bf16 build, and needs half its memory. `bibr setup` now
+  recommends it for Linux NVIDIA cards with 8–19 GB, where it replaces the 2B
+  student, and recommends the bf16 4B from 20 GB (was 12).
+- `LLM_LOCAL_MIN_VRAM_GB` sets the minimum budget of the managed vLLM LLM
   server's model, for a model bibr's registry does not list (a local path has
   no minimum, so a start that cannot fit used to be launched and fail inside
-  vLLM). For a local copy of the 4B student's W4A16 build it is 7 GB, served
-  with `--max-num-seqs 64`; the configuration guide has the settings. A model
-  the registry lists keeps the registry's minimum and the setting is ignored
-  with a warning, so a value left from a local build never starts the bf16 4B
-  student below its 12 GB.
+  vLLM). For a local copy of the 4B student's W4A16 build it is 6.25 GiB,
+  served with `--max-num-seqs 64`; the configuration guide has the settings.
+  For a model the registry lists it can raise the minimum but not lower it: a
+  lower value is ignored with a warning, so a value left from a local build
+  never starts the bf16 4B student below its 12.25 GiB.
+
+### Changed
+
+- The managed vLLM LLM server's minimum is now the budget each published
+  model was measured to need on an RTX 3090 with vLLM 0.31.0: a first start,
+  before vLLM has filled its compile cache, that serves one 32,768-token
+  request. It is 12.25 GiB for the 4B student and 6.25 GiB for its W4A16 build
+  and for the 2B (it was the card sizes setup offers them on, 12 and 8 GB).
+  On the swap path a start needs that budget free, plus what vLLM takes beyond
+  it while starting and 1 GB for bibr's models: 14.25 GiB for the 4B, which a
+  16 GB card no longer has once bibr's models have grown, and 8 GiB for the
+  W4A16 build. An 8 GB card, with about 7.6 GiB free to CUDA, cannot start any
+  of them unless you set the share yourself (`LLM_LOCAL_MEM_FRACTION`).
+- Setup counts a card that reports up to 0.25 GiB under a size (an RTX 4060
+  reports 8,188 MiB, an RTX 5070 12,227 MiB) as that size, for the model it
+  recommends and for PaddleOCR-VL's 8 GB minimum. Such cards used to get the
+  next smaller tier.
 
 ### Fixed
 
+- When a model without a minimum could not start because PaddleOCR-VL takes
+  turns with it, the error said it needed the startup reserve plus 1 GB, less
+  than the room bibr keeps for its own models there (6 GB less what they
+  already hold). It now names that room.
 - After the managed vLLM LLM server could not start for lack of GPU memory,
   every later chunk of a batch still started PaddleOCR-VL and OCRed its papers
   before the LLM start was refused again (on an emulated 16 GB card, 40 papers
@@ -53,7 +80,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   while starting and room for bibr's models to grow, with the configured share
   as the cap. That room is bibr's 6 GB when PaddleOCR-VL takes turns with the
   LLM (0.70 of a 24 GB card) and 1 GB with any other OCR, so a free 24 GB card
-  keeps 0.85. When even the model's minimum (12 GB for the 4B student) does
+  keeps 0.85. When even the model's minimum (12.25 GiB for the 4B student) does
   not fit, that start fails at once with a clear error instead of launching
   vLLM to crash. The Qwen3.5 students now run at
   most 128 sequences at once, which halves vLLM's capture sizes and lets them

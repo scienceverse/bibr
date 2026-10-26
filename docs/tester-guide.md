@@ -286,15 +286,15 @@ from the platform and detected memory. The current defaults are:
 | Platform | OCR backend | Local LLM backend |
 |---|---|---|
 | Windows | `glm-llama` (llama.cpp) | llama.cpp |
-| Linux, NVIDIA GPU **≥ 12 GB** (e.g. RTX 3090) | `paddle-vllm` | vLLM, bibr extract 4B |
-| Linux, NVIDIA GPU **8–<12 GB** | `paddle-vllm` | vLLM, bibr extract 2B |
+| Linux, NVIDIA GPU **≥ 20 GB** (e.g. RTX 3090) | `paddle-vllm` | vLLM, bibr extract 4B |
+| Linux, NVIDIA GPU **8–<20 GB** | `paddle-vllm` | vLLM, bibr extract 4B W4A16 (on an 8 GB card, set `LLM_LOCAL_MEM_FRACTION`) |
 | Linux, NVIDIA GPU **< 8 GB** | `glm-llama` (llama.cpp) | llama.cpp |
 | Apple Silicon (M-series) | `paddle-rapid-mlx` (rapid-mlx) | rapid-mlx, else vllm-mlx |
 | No suitable GPU | cloud vision OCR or an external OCR server | a cloud LLM |
 
 The setup wizard defaults to bibr's fine-tuned Qwen3.5 models for local
-structured extraction on Linux with an NVIDIA GPU: the 4B from 12 GB and the 2B
-from 8 GB. Windows and GPUs below 8 GB use GGUF (llama.cpp) builds of the same
+structured extraction on Linux with an NVIDIA GPU: the 4B from 20 GB and its
+4-bit W4A16 build from 8 GB. Windows and GPUs below 8 GB use GGUF (llama.cpp) builds of the same
 models, and Apple Silicon their 8-bit MLX builds.
 Without a suitable GPU it recommends Claude Haiku 5.5 as a hosted model, for
 OCR and extraction alike. See

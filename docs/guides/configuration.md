@@ -260,10 +260,11 @@ is busier: the share leaves room for vLLM's brief extra use while it starts
 (about 1 GB) and for bibr's models. That room is 1 GB when no PaddleOCR-VL
 server takes turns with the LLM, so a free 24 GB card still gets 0.85, and
 6 GB in all when one does (about 0.70 of a 24 GB card). When that does not
-leave the model its minimum (12 GB for the 4B student, 8 GB for the 2B), the
-share drops to the minimum while bibr's models keep at least 1 GB. When even
-that does not fit, the start fails at once with an error that says how much
-memory was free, that chunk's papers fail, and the next chunk tries again. Set
+leave the model its minimum budget (12.25 GiB for the 4B student, 6.25 GiB for
+its W4A16 build and for the 2B), the share drops to the minimum while bibr's
+models keep at least 1 GB. When even that does not fit, the start fails at
+once with an error that says how much memory was free and how much it needs,
+that chunk's papers fail, and the next chunk tries again. Set
 `LLM_LOCAL_MEM_FRACTION`, or `--gpu-memory-utilization` in
 `LLM_VLLM_EXTRA_ARGS`, to start the LLM server at exactly that share instead.
 
@@ -277,18 +278,25 @@ checked: the start reuses one that serves the model, such as one another
 pipeline in the same process started, without asking for memory.
 
 The minimum comes from bibr's model registry, which lists the published
-builds. A model it does not list, such as a local path, has none, so a start
-that cannot fit is launched and fails inside vLLM. Set `LLM_LOCAL_MIN_VRAM_GB`
-to give it one. The setting applies only to such a model: a model the
-registry lists keeps the registry's minimum, and bibr logs a warning that the
-setting is ignored, so a value left over from a local build cannot start the
-4B student below its 12 GB. For a local copy of the 4B student's W4A16 build,
-the minimum is 7 GB with at most 64 sequences (more with 128, since vLLM keeps
-a cache block for each sequence):
+builds with the smallest budget each was measured to start with: a first
+start, before vLLM has filled its compile cache, that served one
+32,768-token request on an RTX 3090 with vLLM 0.31.0, rounded up to a quarter
+GiB. A later start reuses the cache and needs about 1 GiB less. The minimum is
+a budget, not a card size: on the swap path a start also needs vLLM's extra
+use while it starts (0.75 GiB at 64 sequences, 1 GiB at 128) and 1 GiB for
+bibr's models free beside it, so the W4A16 build needs 8 GiB free and the 4B
+student 14.25 GiB. A model the registry does not list, such as a local path,
+has no minimum, so a start that cannot fit is launched and fails inside vLLM.
+Set `LLM_LOCAL_MIN_VRAM_GB` to give it one. For a model the registry lists,
+the setting can raise the minimum but not lower it: a lower value is ignored
+and bibr logs a warning once, so a value left over from a local build cannot
+start the 4B student below its 12.25 GiB. For a local copy of the 4B student's
+W4A16 build, the minimum is 6.25 GiB with at most 64 sequences (more with 128,
+since vLLM keeps a cache block for each sequence):
 
 ```bash
 LLM_LOCAL_MODEL=/path/to/bibr-extract-qwen35-4b-W4A16
-LLM_LOCAL_MIN_VRAM_GB=7
+LLM_LOCAL_MIN_VRAM_GB=6.25
 LLM_VLLM_EXTRA_ARGS='--language-model-only --generation-config vllm --max-model-len 32768 --max-num-seqs 64'
 LLM_CHAT_TEMPLATE_KWARGS='{"enable_thinking": false}'
 ```
@@ -307,8 +315,8 @@ has the measurements):
 
 | Runtime | Setup model | Registry memory floor |
 |---|---|---|
-| vLLM, 12 GB or more | `scienceverse/bibr-extract-qwen35-4b` (Qwen3.5-4B fine-tuned for bibr, bf16) | 12 GB VRAM |
-| vLLM, 8–11 GB | `scienceverse/bibr-extract-qwen35-2b` (Qwen3.5-2B fine-tuned for bibr, bf16) | 8 GB VRAM |
+| vLLM, 20 GB or more | `scienceverse/bibr-extract-qwen35-4b` (Qwen3.5-4B fine-tuned for bibr, bf16) | a 12.25 GiB budget; 14.25 GiB free to start |
+| vLLM, 8–19 GB | `scienceverse/bibr-extract-qwen35-4b-W4A16` (the same model with 4-bit weights) | a 6.25 GiB budget; 8 GiB free to start, so an 8 GB card needs `LLM_LOCAL_MEM_FRACTION` |
 | llama.cpp (Windows, cards below 8 GB) | `scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0`, else `:Q4_K_M`, else the 2B's `scienceverse/bibr-extract-qwen35-2b-GGUF` builds | 7 GB for the 4B Q8_0, down to 3 GB for the 2B Q4_K_M |
 | Rapid-MLX / vllm-mlx | `scienceverse/bibr-extract-qwen35-4b-mlx-8bit`, else the 2B's `-2b-mlx-8bit` | 6 GB for the 4B, 3 GB for the 2B |
 
@@ -317,8 +325,11 @@ When no local model fits, the recommended hosted model is Claude Haiku 5.5
 also uses for cloud OCR (`OCR_BACKEND=anthropic`,
 `OCR_VISION_MODEL=claude-haiku-5-5`), so one Anthropic key covers both.
 
-These are model-fit estimates, not total pipeline memory guarantees. The
-advanced wizard also offers Gemma 4 E4B on CUDA, and custom model IDs.
+These are model-fit estimates, not total pipeline memory guarantees. Setup
+matches a card that reports up to 0.25 GiB under a size (an RTX 4060 reports
+8,188 MiB) to that size. The advanced wizard also offers the 2B student on vLLM
+(`scienceverse/bibr-extract-qwen35-2b`, a 6.25 GiB budget at 128 sequences and
+8.25 GiB free to start), Gemma 4 E4B on CUDA, and custom model IDs.
 `LLM_LOCAL_MODEL` selects managed local weights; `LLM_MODEL` and `--llm-model`
 select the provider model. When `LLM_LOCAL_MODEL` is unset, every managed
 runtime uses the 4B model: bf16 on vLLM, the Q8_0 GGUF on llama.cpp and the

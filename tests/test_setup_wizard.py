@@ -1302,10 +1302,11 @@ def test_recommended_setup_low_vram_cuda_keeps_paddle_automatic_ocr():
     assert "llama.cpp" in setup.runtime_summary
 
 
-def test_recommended_setup_mid_vram_cuda_runs_the_2b_student_on_vllm():
-    """8-11 GB: paddle-vllm OCR (8 GB gate) and the 2B student's vLLM build (8 GB)
-    both fit, so no llama.cpp split is needed. Under NuExtract 3 (11 GB) these
-    cards had to run the LLM through llama.cpp."""
+def test_recommended_setup_mid_vram_cuda_runs_the_4b_w4a16_build_on_vllm():
+    """8-19 GB: paddle-vllm OCR (8 GB gate) and the 4B student's W4A16 vLLM build
+    (8 GB tier) both run on vLLM, so no llama.cpp split is needed. Under
+    NuExtract 3 (11 GB) these cards had to run the LLM through llama.cpp, and
+    until the W4A16 build was listed they got the 2B student."""
     setup = _build_recommended_setup(
         platform_key="cuda",
         accelerator_memory_gb=10.0,
@@ -1315,7 +1316,7 @@ def test_recommended_setup_mid_vram_cuda_runs_the_2b_student_on_vllm():
     )
     assert setup.env["OCR_BACKEND"] == "paddle"
     assert setup.env["LLM_BACKEND"] == "vllm"
-    assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-2b"
+    assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-W4A16"
     assert "vllm" in setup.extras
     assert "llama-server" not in setup.runtime_summary
 
@@ -1323,8 +1324,11 @@ def test_recommended_setup_mid_vram_cuda_runs_the_2b_student_on_vllm():
 @pytest.mark.parametrize(
     ("vram_gb", "expected"),
     [
-        (11.0, "scienceverse/bibr-extract-qwen35-2b"),
-        (12.0, "scienceverse/bibr-extract-qwen35-4b"),
+        (8.0, "scienceverse/bibr-extract-qwen35-4b-W4A16"),
+        (11.0, "scienceverse/bibr-extract-qwen35-4b-W4A16"),
+        (12.0, "scienceverse/bibr-extract-qwen35-4b-W4A16"),
+        (16.0, "scienceverse/bibr-extract-qwen35-4b-W4A16"),
+        (20.0, "scienceverse/bibr-extract-qwen35-4b"),
         (24.0, "scienceverse/bibr-extract-qwen35-4b"),
     ],
 )
@@ -1518,10 +1522,20 @@ def test_local_provider_cuda_can_select_the_students_llama_variant(monkeypatch):
     monkeypatch.setattr("bibr.setup_wizard.sys.platform", "linux")
     wizard = _recording_wizard()
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 24.0))
-    _feed_prompts(monkeypatch, ["local", "bibr-extract-4b", "2"])
+    _feed_prompts(monkeypatch, ["local", "bibr-extract-4b", "3"])
     wizard._step_llm_provider()
     assert wizard.env_vars["LLM_BACKEND"] == "llama-cpp"
     assert wizard.env_vars["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
+
+
+def test_local_provider_cuda_can_select_the_4b_w4a16_build(monkeypatch):
+    monkeypatch.setattr("bibr.setup_wizard.sys.platform", "linux")
+    wizard = _recording_wizard()
+    monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 24.0))
+    _feed_prompts(monkeypatch, ["local", "bibr-extract-4b", "2"])
+    wizard._step_llm_provider()
+    assert wizard.env_vars["LLM_BACKEND"] == "vllm"
+    assert wizard.env_vars["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-W4A16"
 
 
 def test_local_provider_custom_hf_id(monkeypatch):

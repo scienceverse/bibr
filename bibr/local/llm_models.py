@@ -75,13 +75,21 @@ class LocalLLMModel:
 # v5 scorer, gate192 + ci60 = 252 dev papers), paired against Qwen3.8-27B's
 # 223/252; see docs/guides/extraction-models.md.
 #
-# bf16 and GGUF sizes are the built files (2026-10-14; GGUF from llama.cpp 6868a52);
-# MLX sizes are estimates until those builds exist. bf16: the merged
-# checkpoint (text, vision and MTP weights), with min_vram_gb rounded up from the measured 11.7 GB peak of a
-# low-memory 4B vLLM serve on a 24 GB card. GGUF and MLX: the quantized text
-# model, with min_vram_gb = ceil(size * 1.25) plus about 2 GB of context and
-# compute buffers, the margin the NuExtract 3 Q4_K_M build needed on 6 GB
-# cards. The vLLM variants pin the Hub revision they were published at.
+# bf16, W4A16 and GGUF sizes are the built files (2026-10-14 and 2026-10-25;
+# GGUF from llama.cpp 6868a52); MLX sizes are estimates until those builds
+# exist. bf16: the merged checkpoint (text, vision and MTP weights). The vLLM
+# variants pin the Hub revision they were published at, and their min_vram_gb
+# is the smallest card the managed server keeps starting on beside bibr's own
+# GPU models: on the swap path a start needs the budget floor, vLLM's overshoot
+# reserve and 1 GiB for bibr free (bibr.local.vllm_share). The 4B bf16 needs
+# 14.25 GiB: a card emulated at 16 GB refused its starts once bibr held 2 GiB,
+# so 20 (24 GB ran it). The W4A16 build needs 8 GiB: it ran 48 papers on cards
+# emulated at 12 and 16 GB; an 8 GB card (about 7.6 GiB to CUDA) is refused
+# unless the user sets the share, but it is still the best vLLM variant there:
+# the 2B needs more (6.25 GiB at 128 sequences plus a 1 GiB reserve) and scores
+# less. GGUF and MLX: the quantized text model, with min_vram_gb =
+# ceil(size * 1.25) plus about 2 GB of context and compute buffers, the margin
+# the NuExtract 3 Q4_K_M build needed on 6 GB cards.
 _QWEN35_STUDENT_SERVER_ARGS: tuple[str, ...] = (
     # Text only: the vision tower is never used for extraction.
     "--language-model-only",
@@ -150,12 +158,12 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 server_args=("--revision", _QWEN35_4B_REVISION, *_QWEN35_STUDENT_SERVER_ARGS),
                 runtime="vllm",
             ),
-            # int4 weights, for cards the bf16 build does not fit.
+            # int4 weights: 218/252 against the bf16 build's 216, at half its budget.
             LocalLLMVariant(
                 hf_id="scienceverse/bibr-extract-qwen35-4b-W4A16",
                 platform="cuda",
                 quant="w4a16",
-                min_vram_gb=12,
+                min_vram_gb=8,
                 min_budget_gb=QWEN35_4B_W4A16_BUDGET_GB,
                 approx_download_gb=3.8,  # 4,050,888,413 bytes
                 server_args=(

@@ -30,8 +30,8 @@ STUDENT_4B = "scienceverse/bibr-extract-qwen35-4b"
 W4A16_LOCAL = "/models/bibr-extract-qwen35-4b-W4A16"
 CUDA_3090 = 23.56
 # E25 V2 readings beside the 8 GiB hog: before chunk 1's LLM start (fits at
-# the 12 GB floor), before chunk 2's (refused: 14.00 GiB needed), and a card
-# whose other user has gone (memory came back).
+# the 4B's 12.25 GiB floor), before chunk 2's (refused: 14.25 GiB needed), and
+# a card whose other user has gone (memory came back).
 FITS = GpuMemory(total_gb=CUDA_3090, free_gb=15.04, own_gb=0.50)
 REFUSED = GpuMemory(total_gb=CUDA_3090, free_gb=13.57, own_gb=1.98)
 CAME_BACK = GpuMemory(total_gb=CUDA_3090, free_gb=21.58, own_gb=1.98)
@@ -127,7 +127,7 @@ class TestLlmStartRefusal:
         assert isinstance(refusal, ManagedLlmVramError)
         assert refusal.__traceback__ is not None  # raised, so the log shows where
         assert "13.57 of 23.56 GiB free (bibr itself holds 1.98 GiB)" in str(refusal)
-        assert "needs 14.00 GiB" in str(refusal)
+        assert "needs 14.25 GiB" in str(refusal)
 
     async def test_the_message_is_the_starts_own(self, card):
         card["reading"] = REFUSED
@@ -144,7 +144,7 @@ class TestLlmStartRefusal:
         assert await _rm().llm_start_refusal("vllm") is None
 
     async def test_floor_setting_is_used(self, card):
-        # The W4A16 build's 7 GB floor fits where the bf16 4B's 12 GB does not.
+        # A local W4A16 copy's 7 GiB floor fits where the bf16 4B's 12.25 does not.
         card["reading"] = REFUSED
         assert await _rm(settings=_local_w4a16_settings(7.0)).llm_start_refusal("vllm") is None
 
@@ -156,7 +156,7 @@ class TestLlmStartRefusal:
         settings.llm.local_min_vram_gb = 7.0
         refusal = await _rm(settings=settings).llm_start_refusal("vllm")
         assert isinstance(refusal, ManagedLlmVramError)
-        assert "the model's 12.0 GiB floor" in str(refusal)
+        assert "the model's 12.25 GiB floor" in str(refusal)
 
     @pytest.mark.parametrize("backend", ["cloud", "llama-cpp", "vllm-mlx", "llmster"])
     async def test_only_the_managed_vllm_server_is_checked(self, card, backend):
@@ -325,9 +325,20 @@ class TestAgreesWithTheStart:
                 False,
                 id="floorless-swap-fits",
             ),
-            # A planned share of 0.40 (9.42 GiB) caps the 4B's 12 GB floor:
+            # The same reading with a planned share of 0.40, which runs beside
+            # PaddleOCR-VL instead of taking turns with it: bibr keeps only the
+            # 1 GiB minimum, so the start fits at 0.11. A precheck that assumed
+            # the swap path (bibr's 6 GiB) would refuse it.
+            pytest.param(
+                _local_w4a16_settings,
+                0.40,
+                GpuMemory(total_gb=CUDA_3090, free_gb=4.50, own_gb=1.98),
+                False,
+                id="floorless-no-swap-fits",
+            ),
+            # A planned share of 0.40 (9.42 GiB) caps the 4B's 12.25 GiB floor:
             # with 10 GiB left after the reserve and bibr's room, the start
-            # takes 0.40, where the 12 GB floor would refuse it.
+            # takes 0.40, where the 12.25 GiB floor would refuse it.
             pytest.param(
                 _settings,
                 0.40,
@@ -352,11 +363,15 @@ class TestAgreesWithTheStart:
         assert (predicted is not None) is refused
         assert (None if predicted is None else str(predicted)) == started
 
-    def test_the_cases_cover_the_swap_path_and_a_capped_floor(self):
+    def test_the_cases_cover_both_paths_and_a_capped_floor(self):
         assert _rm(settings=_local_w4a16_settings())._llm_swaps_with_ocr() is True
+        assert (
+            _rm(settings=_local_w4a16_settings(), managed_vllm_fraction=0.40)._llm_swaps_with_ocr()
+            is False
+        )
         assert vllm_share.managed_llm_floor_gb(W4A16_LOCAL, _local_w4a16_settings()) is None
         # 0.40 + PaddleOCR-VL's 0.21 + the 0.25 ONNX reserve fit a 24 GB card:
-        # no swap, and the cap is below the 4B's 12 GB floor.
+        # no swap, and the cap is below the 4B's 12.25 GiB floor.
         capped = _rm(managed_vllm_fraction=0.40)
         assert capped._llm_swaps_with_ocr() is False
         floor = vllm_share.managed_llm_floor_gb(STUDENT_4B)
