@@ -988,8 +988,14 @@ def _reject_edge_cuts(candidates: list[DoiCandidate], cut: set[int]) -> list[Doi
     _LOST_END_RE) is that DOI cut short ("10.1177/117793222311603" beside
     "10.1177/11779322231160397") and must never outrank it. Extensions with
     letters past that (a figure's ".g001") are other DOIs and leave it alone.
+    Only a longer DOI that could be the article's counts: one already rejected
+    (a cited reference, a component) proves nothing about the cut one.
     """
-    values = {candidate.normalized.casefold() for candidate in candidates}
+    values = {
+        candidate.normalized.casefold()
+        for candidate in candidates
+        if candidate.rejection_reason in (None, AGREEMENT_ONLY)
+    }
     out = []
     for candidate in candidates:
         value = candidate.normalized.casefold()

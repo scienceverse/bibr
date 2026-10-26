@@ -10,8 +10,11 @@ as ``edge_truncated``.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from bibr.extract.doi_identity import (
     EDGE_TRUNCATED,
+    _reject_edge_cuts,
     collect_doi_candidates,
     select_doi_candidates,
 )
@@ -76,3 +79,17 @@ def test_a_component_extension_does_not_reject_the_article_doi():
     )
 
     assert _by_value(selection)["10.1371/journal.pone.0279511"] is None
+
+
+def test_a_rejected_longer_doi_does_not_reject_the_cut_one():
+    """A cited reference that happens to extend the DOI is no evidence of a cut."""
+    found = collect_doi_candidates(_contents([_CUT_HEADER], [_FULL_FOOTER], cut=False))
+    cut = next(c for c in found if c.normalized == "10.1177/117793222311603")
+    cited = replace(
+        next(c for c in found if c.normalized == "10.1177/11779322231160397"),
+        rejection_reason="reference_candidate",
+    )
+
+    kept = _reject_edge_cuts([cut, cited], {id(cut)})
+
+    assert kept[0].rejection_reason is None
