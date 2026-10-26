@@ -701,10 +701,15 @@ class LlmOptions(_BibrSettings):
     local_model: str | None = Field(
         None,
         description="Model id served by the managed local LLM backends. Unset picks the "
-        "recommended model the selected backend can load: bibr's fine-tuned Qwen3.5-4B "
-        "(scienceverse/bibr-extract-qwen35-4b): bf16 for vLLM, the GGUF Q8_0 build for "
-        "llama.cpp and the 8-bit MLX build for Apple Silicon. `bibr setup` writes it "
-        "explicitly and picks a smaller build, or the 2B student, when memory is short.",
+        "build `bibr setup` would write for the selected backend and the detected memory "
+        "(the NVIDIA card's, or system RAM on Apple Silicon; the tier table in "
+        "docs/guides/extraction-models.md): bibr's fine-tuned Qwen3.5-4B "
+        "(scienceverse/bibr-extract-qwen35-4b) as bf16 on vLLM from 20 GB and its W4A16 "
+        "build below; on llama.cpp its GGUF Q8_0 build from 7 GB and Q4_K_M below; on "
+        "Apple Silicon its 8-bit MLX build. The 2B student only when a 2B build fits and "
+        "no 4B build does; when nothing fits, the build with the smallest minimum. Unknown "
+        "memory gets the backend's first build (4B bf16 on vLLM, Q8_0 on llama.cpp). "
+        "`bibr setup` writes it explicitly.",
     )
     local_mem_fraction: float = Field(
         0.85,
