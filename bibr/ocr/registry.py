@@ -66,6 +66,13 @@ MANAGED_VLLM_ONNX_RESERVE_GB = 6.0
 # for ``PADDLE_VLLM_GPU_MEMORY_GB``. Below this floor bibr's documented Linux
 # contract ("NVIDIA GPU <= 8 GB uses llama.cpp") routes OCR to ``glm-llama``.
 PADDLE_VLLM_MIN_VRAM_GB = 8.0
+#: GPU memory a managed GLM-OCR llama.cpp server (``glm-llama``, the Q8_0 GGUF
+#: with its vision projector, an 8,192-token context and one slot) holds while
+#: it OCRs: at most 2,206 MiB on an RTX 3090 over a chunk of three papers
+#: (llama.cpp b11282), rounded up to a quarter GiB. A start beside a managed
+#: llama.cpp LLM server stops that server first when less than this plus
+#: bibr's minimum room is free (``ResourceManager._llm_server_blocks_ocr``).
+GLM_LLAMA_OCR_VRAM_GB = 2.25
 
 
 @functools.cache

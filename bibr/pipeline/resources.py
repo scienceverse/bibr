@@ -613,8 +613,10 @@ class ResourceManager:
                 try:
                     if self._llm_server_blocks_ocr(candidate.backend):
                         logger.info(
-                            "Stopping the managed vLLM LLM server to free VRAM for "
-                            "PaddleOCR-VL vLLM; the LLM stage restarts it"
+                            "Stopping the managed %s LLM server to free VRAM for %s OCR; "
+                            "the LLM stage restarts it",
+                            self._llm_server_backend,
+                            candidate.backend,
                         )
                         await self.close_llm_server()
                     client = await self._construct_ocr_candidate(candidate)
@@ -797,13 +799,42 @@ class ResourceManager:
         The LLM server outlives a chunk while a balanced run tears OCR down
         after each one, so a later chunk's ``paddle-vllm`` restart found the
         LLM still holding its share: explicit ``paddle-vllm`` failed every file
-        and the automatic chain fell back to GLM mid-batch.
+        and the automatic chain fell back to GLM mid-batch. A managed llama.cpp
+        LLM server outlives the chunk the same way, and on a small card the
+        next chunk's GLM-OCR llama.cpp server started beside it could not
+        allocate its compute buffer and failed every page (an emulated 8 GB
+        card with a desktop on it, from the second chunk on), so it stops
+        when the memory free then cannot also hold GLM-OCR
+        (``_llama_cpp_llm_blocks_glm_ocr``).
         """
+        if ocr_backend == "glm-llama" and self._llm_server_backend == "llama-cpp":
+            return self._llama_cpp_llm_blocks_glm_ocr()
         return (
             ocr_backend == "paddle-vllm"
             and self._llm_server_backend == "vllm"
             and self._vllm_shares_overcommit()
         )
+
+    def _llama_cpp_llm_blocks_glm_ocr(self) -> bool:
+        """Whether a managed GLM-OCR start needs the llama.cpp LLM server's memory.
+
+        It does when less is free than GLM-OCR holds
+        (``GLM_LLAMA_OCR_VRAM_GB``) plus the minimum room bibr keeps for its
+        own GPU sessions (``LLM_ONNX_MIN_HEADROOM_GB``). With no reading of
+        the card (no NVIDIA GPU visible to nvidia-smi), the aggressive memory
+        mode, which bibr picks for cards up to 8 GB, stops it and any other
+        mode keeps it. An OCR URL names someone else's server, which bibr
+        does not start.
+        """
+        if self.ocr_url:
+            return False
+        from bibr.local.vllm_share import LLM_ONNX_MIN_HEADROOM_GB
+        from bibr.ocr.registry import GLM_LLAMA_OCR_VRAM_GB, managed_gpu_memory
+
+        reading = managed_gpu_memory()
+        if reading is None:
+            return self.memory_mode == "aggressive"
+        return reading.free_gb < GLM_LLAMA_OCR_VRAM_GB + LLM_ONNX_MIN_HEADROOM_GB
 
     async def llm_start_refusal(self, backend: str) -> ManagedLlmVramError | None:
         """The refusal the managed vLLM LLM server's next start is sure to meet, if any.
