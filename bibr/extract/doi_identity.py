@@ -31,6 +31,13 @@ UNCONTESTED_UNTYPED = 1
 TEXT_LAYER = "text_layer"
 LINK_ANNOTATION = "link_annotation"
 AGREEMENT_ONLY = "agreement_only"
+# Text the PDF carries but never prints (white on white, off the page; the
+# hidden_text rule of bibr.ocr.native_text) is an agreement-only row too:
+# osf_mvfth's only DOI is a white-on-white APA postprint banner. It may agree
+# with the selected DOI (semantic context HIDDEN_TEXT_AGREEMENT) and never
+# names the paper, breaks a tie or rejects another candidate.
+HIDDEN_TEXT = "hidden_text"
+HIDDEN_TEXT_AGREEMENT = "hidden_text_agreement"
 LINE_JOIN_OVERRUN = "line_join_overrun"
 # A DOI read from a text-layer region whose box cut its line short, which a
 # longer candidate extends by an end the cut can lose (see _reject_edge_cuts).
@@ -964,7 +971,12 @@ def collect_doi_candidates(
 
 
 def _summary_key(text: str | None) -> str:
-    """A region's text as RegionSummary keeps it (its first 200 characters), whitespace-folded."""
+    """A region's text, whitespace-folded, cut to its first 150 characters.
+
+    RegionSummary keeps the first 200 raw characters of a region; folding
+    their line breaks and runs of spaces can shorten them, so both sides are
+    compared on a shorter prefix that survives the fold.
+    """
     return " ".join((text or "").split())[:150]
 
 
@@ -989,12 +1001,14 @@ def _reject_edge_cuts(candidates: list[DoiCandidate], cut: set[int]) -> list[Doi
     "10.1177/11779322231160397") and must never outrank it. Extensions with
     letters past that (a figure's ".g001") are other DOIs and leave it alone.
     Only a longer DOI that could be the article's counts: one already rejected
-    (a cited reference, a component) proves nothing about the cut one.
+    (a cited reference, a component) proves nothing about the cut one, and
+    hidden text never decides against a printed candidate.
     """
     values = {
         candidate.normalized.casefold()
         for candidate in candidates
         if candidate.rejection_reason in (None, AGREEMENT_ONLY)
+        and candidate.source_kind != HIDDEN_TEXT
     }
     out = []
     for candidate in candidates:
@@ -1147,13 +1161,14 @@ def _text_layer_candidates(
 
 
 def _agreement_rows(evidence: PdfDoiEvidence) -> list[DoiCandidate]:
-    """One receipt row per DOI a link target or the document information names.
+    """One receipt row per DOI a link target, the document information or hidden text names.
 
     They never take part in the selection; they record what the PDF says
     beside its print. A link target counts once per page. ``semantic_context``
     says whether the page prints that DOI under or next to the link
     (``printed_link``); the printed DOI itself is a candidate of the text it is
-    printed in.
+    printed in. A hidden-text row counts once per page; its context becomes
+    ``hidden_text_agreement`` when the selection picks the same DOI.
     """
 
     rows: list[DoiCandidate] = []
@@ -1194,6 +1209,11 @@ def _agreement_rows(evidence: PdfDoiEvidence) -> list[DoiCandidate]:
             normalized = _canonical_doi(match.group(0))
             if normalized is not None:
                 row(match.group(0), normalized, item.source, None, item.key, "pdf_metadata")
+    for hidden in getattr(evidence, "hidden", ()):
+        for match in _DOI_RE.finditer(hidden.text):
+            normalized = _canonical_doi(match.group(0))
+            if normalized is not None:
+                row(match.group(0), normalized, HIDDEN_TEXT, hidden.page, HIDDEN_TEXT, HIDDEN_TEXT)
     return rows
 
 
@@ -1521,10 +1541,32 @@ def _select_without_expected(
     return DoiSelection(highest[0], candidates, ())
 
 
+def _mark_hidden_agreement(selection: DoiSelection) -> DoiSelection:
+    """Mark the hidden-text rows that name the selected DOI (``hidden_text_agreement``)."""
+    selected = selection.selected
+    if selected is None or not any(c.source_kind == HIDDEN_TEXT for c in selection.candidates):
+        return selection
+    value = selected.normalized.casefold()
+    return replace(
+        selection,
+        candidates=tuple(
+            replace(candidate, semantic_context=HIDDEN_TEXT_AGREEMENT)
+            if candidate.source_kind == HIDDEN_TEXT and candidate.normalized.casefold() == value
+            else candidate
+            for candidate in selection.candidates
+        ),
+    )
+
+
 def select_doi_candidates(
     candidates, expected_identity: ExpectedIdentity | None = None
 ) -> DoiSelection:
     """Select by explicit evidence tiers, then by source provenance within a tier.
+
+    Agreement-only rows (link targets, document information, hidden text)
+    take no part. A hidden-text row that names the selected DOI is marked
+    ``hidden_text_agreement`` in the receipt: hidden text may agree with the
+    paper's DOI, never name it.
 
     An equal-tier conflict always raises ``VAL_DOI_AMBIGUOUS``; it resolves to a
     candidate only when the provenance ladder in ``_select_without_expected``
@@ -1543,7 +1585,12 @@ def select_doi_candidates(
     section.
     """
 
-    candidate_tuple = tuple(candidates)
+    return _mark_hidden_agreement(_select_doi_candidates(tuple(candidates), expected_identity))
+
+
+def _select_doi_candidates(
+    candidate_tuple: tuple[DoiCandidate, ...], expected_identity: ExpectedIdentity | None
+) -> DoiSelection:
     if expected_identity is None or not (
         expected_identity.expected_doi or expected_identity.expected_doi_sha256
     ):

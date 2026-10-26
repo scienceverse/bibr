@@ -6,11 +6,19 @@ import pytest
 
 from bibr.extract.doi_identity import (
     AGREEMENT_ONLY,
+    HIDDEN_TEXT,
+    HIDDEN_TEXT_AGREEMENT,
     LINE_JOIN_OVERRUN,
     collect_doi_candidates,
     select_doi_candidates,
 )
-from bibr.extract.pdf_doi_evidence import LinkDoi, MetadataDoi, PdfDoiEvidence, TextLayerLine
+from bibr.extract.pdf_doi_evidence import (
+    HiddenDoi,
+    LinkDoi,
+    MetadataDoi,
+    PdfDoiEvidence,
+    TextLayerLine,
+)
 from bibr.paper_contents import (
     CanonicalSection,
     PaperContents,
@@ -60,8 +68,8 @@ def _line(page: int, text: str, *, at=_MARGIN, next_text: str = "") -> TextLayer
     return TextLayerLine(page, text, tuple(at for _ in text), next_text)
 
 
-def _evidence(lines=(), links=(), metadata=()) -> PdfDoiEvidence:
-    return PdfDoiEvidence((1, 2), tuple(lines), tuple(links), tuple(metadata))
+def _evidence(lines=(), links=(), metadata=(), hidden=()) -> PdfDoiEvidence:
+    return PdfDoiEvidence((1, 2), tuple(lines), tuple(links), tuple(metadata), tuple(hidden))
 
 
 def _info(doi: str) -> MetadataDoi:
@@ -408,3 +416,126 @@ def test_without_pdf_evidence_the_pool_is_unchanged():
 
     assert collect_doi_candidates(contents) == collect_doi_candidates(contents, None)
     assert collect_doi_candidates(contents, _evidence()) == collect_doi_candidates(contents)
+
+
+# --- hidden text -----------------------------------------------------------------
+#
+# osf_mvfth prints no DOI; its only one is a white-on-white APA postprint banner
+# ("Not the version of record. Final article available at:
+# https://doi.org/10.1037/cou0000324"), which the hidden-text rule strips. Hidden
+# text may agree with the paper's DOI, never name it.
+
+_BANNER = "Final article available at: https://doi.org/10.1037/cou0000324"
+
+
+def _hidden_rows(candidates):
+    return [
+        (c.source_kind, c.page, c.normalized, c.semantic_context, c.marker_kind, c.rejection_reason)
+        for c in candidates
+        if c.source_kind == HIDDEN_TEXT
+    ]
+
+
+def test_a_hidden_text_doi_never_names_the_paper_alone():
+    candidates, selection = _select(
+        _contents(_TITLE_ONLY), _evidence(hidden=[HiddenDoi(1, _BANNER), HiddenDoi(1, _BANNER)])
+    )
+
+    assert selection.selected is None
+    assert selection.issues == ()
+    assert _hidden_rows(selection.candidates) == [
+        (HIDDEN_TEXT, 1, "10.1037/cou0000324", HIDDEN_TEXT, HIDDEN_TEXT, AGREEMENT_ONLY)
+    ]
+    assert _hidden_rows(candidates) == _hidden_rows(selection.candidates)
+
+
+def test_a_hidden_text_doi_agrees_with_the_printed_one():
+    contents = _contents(
+        [
+            (CanonicalSection.TITLE, "A study of examples", 1),
+            (CanonicalSection.ABSTRACT, "https://doi.org/10.1037/cou0000324", 1),
+        ]
+    )
+
+    _candidates, selection = _select(contents, _evidence(hidden=[HiddenDoi(1, _BANNER)]))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1037/cou0000324"
+    assert selection.selected.source_kind == "sentence"
+    assert _hidden_rows(selection.candidates) == [
+        (HIDDEN_TEXT, 1, "10.1037/cou0000324", HIDDEN_TEXT_AGREEMENT, HIDDEN_TEXT, AGREEMENT_ONLY)
+    ]
+
+
+def test_a_hidden_text_doi_that_names_another_doi_is_only_recorded():
+    contents = _contents(
+        [
+            (CanonicalSection.TITLE, "A study of examples", 1),
+            (CanonicalSection.ABSTRACT, "https://doi.org/10.1234/own.9", 1),
+        ]
+    )
+
+    _candidates, selection = _select(contents, _evidence(hidden=[HiddenDoi(1, _BANNER)]))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1234/own.9"
+    assert [row[3] for row in _hidden_rows(selection.candidates)] == [HIDDEN_TEXT]
+
+
+def test_hidden_text_never_breaks_a_tie():
+    contents = _contents(
+        [
+            (CanonicalSection.TITLE, "See https://doi.org/10.1234/first.1 for the data.", 1),
+            (CanonicalSection.TITLE, "https://doi.org/10.1234/second.2", 1),
+        ]
+    )
+
+    _candidates, selection = _select(
+        contents, _evidence(hidden=[HiddenDoi(1, "https://doi.org/10.1234/second.2")])
+    )
+
+    assert selection.selected is None
+    assert [issue.code for issue in selection.issues] == ["VAL_DOI_AMBIGUOUS"]
+    assert [row[3] for row in _hidden_rows(selection.candidates)] == [HIDDEN_TEXT]
+
+
+def test_hidden_text_never_confirms_an_unlabelled_body_doi():
+    contents = _contents(
+        [
+            (CanonicalSection.TITLE, "A study of examples", 1),
+            (CanonicalSection.INTRODUCTION, "As published at 10.1234/own.9 in full.", 5),
+        ]
+    )
+
+    _candidates, selection = _select(
+        contents, _evidence(hidden=[HiddenDoi(1, "https://doi.org/10.1234/own.9")])
+    )
+
+    assert selection.selected is None
+
+
+def test_hidden_text_never_rejects_a_cut_short_printed_doi():
+    """A hidden longer DOI is no evidence that a printed one was cut by its box."""
+    cut = "DOI: 10.1177/117793222311603\nBioinformatics and Biology Insights"
+    contents = _contents(
+        _TITLE_ONLY,
+        headers=[cut],
+        regions=[
+            RegionSummary(
+                page=1,
+                index=0,
+                label="header",
+                bbox=None,
+                content=cut,
+                source="text_layer",
+                native_text_edge_cut=True,
+            )
+        ],
+    )
+
+    candidates = collect_doi_candidates(
+        contents, _evidence(hidden=[HiddenDoi(1, "https://doi.org/10.1177/11779322231160397")])
+    )
+
+    [printed] = [c for c in candidates if c.source_kind == "header"]
+    assert printed.rejection_reason is None

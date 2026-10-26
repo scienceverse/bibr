@@ -24,11 +24,29 @@ from typing import Annotated, Any, ClassVar, Literal, Union, cast, get_args, get
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 from pydantic.fields import FieldInfo
 
-_SCHEMA_VERSION = "12.2"
+_SCHEMA_VERSION = "12.3"
 
 
 # ---------------------------------------------------------------------------
-# Pydantic v12.2 export schema — single source of truth for validation
+# Pydantic v12.3 export schema — single source of truth for validation
+#
+# v12.3 (vs 12.2) — additive:
+#   - New ``extraction.regions[].source`` (``text_layer`` or ``ocr``: where the
+#     region's text came from) and ``.ocr_backend`` (the backend that read an
+#     ``ocr`` region), in the opt-in regions block. Omitted for a region
+#     without text.
+#   - New ``extraction.settings.native_text_header_footer`` and
+#     ``.native_text_formula_number``: whether those regions could be read
+#     from the PDF text layer.
+#   - ``extraction.identity.receipt.candidates[]`` gains values in its open
+#     vocabularies: ``rejection_reason`` ``edge_truncated``, and the
+#     agreement-only ``source_kind`` ``hidden_text`` (a DOI in text the PDF
+#     never prints) with ``semantic_context`` ``hidden_text`` or
+#     ``hidden_text_agreement``.
+#   Every key is omitted when absent, so every 12.2 export is still a valid
+#   12.3 reader input. These keys first appeared inside 12.2 on an unreleased
+#   branch; exports that carry them declare 12.3, since 12.2 shipped without
+#   them (v0.7.0-v0.7.4) and its strict schema rejects them.
 #
 # v12.2 (vs 12.1) — additive:
 #   - New ``extraction.diagnostics.verification[]``: per reference with a
@@ -37,11 +55,6 @@ _SCHEMA_VERSION = "12.2"
 #     ``filled`` or ``corrected`` from it (only with a value printed in the
 #     reference string), or ``disagree``. Omitted when verification did not
 #     run, so every 12.1 export is still a valid 12.2 reader input.
-#   - Optional keys added within 12.2, omitted when absent (no version bump:
-#     an earlier 12.2 export lacks them and stays valid): the opt-in
-#     ``extraction.regions[].source`` (``text_layer`` or ``ocr``) and
-#     ``.ocr_backend``, and ``extraction.settings.native_text_header_footer``
-#     and ``.native_text_formula_number``.
 #
 # v12.1 (vs 12.0) — additive:
 #   - New ``extraction.fields``: for each tracked field (``title``, ``author``,
@@ -1276,17 +1289,17 @@ class RegionExport(BaseModel):
         default=None,
         description="Where the region's text came from: 'text_layer' (the PDF's own text layer, "
         "including a scanned page's hidden OCR layer used when OCR returned nothing) or 'ocr' "
-        "(a region merged from both is 'ocr'). Omitted for a region without text, and in exports "
-        "that predate it.",
+        "(a region merged from both is 'ocr'). Omitted for a region without text, and before "
+        "schema 12.3.",
     )
     ocr_backend: str | None = Field(
         default=None,
         description="The OCR backend that read an 'ocr' region: extraction.ocr.backend, or the "
         "consensus or escalation recognizer whose reading replaced it. Omitted for other regions, "
-        "and in exports that predate it.",
+        "and before schema 12.3.",
     )
 
-    # A reader of an earlier 12.2 export finds neither key.
+    # A reader of a 12.2 export finds neither key (both are 12.3).
     OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("source", "ocr_backend")
 
     @model_serializer(mode="wrap")
@@ -1390,9 +1403,12 @@ class DoiCandidateExport(BaseModel):
     page 1 or 2 where the parsed text does not hold it, such as a banner in the
     page margin; ``region_index`` names the layout region it is printed in, or
     is null outside every region. ``link_annotation`` and ``pdf_info`` rows are
-    a DOI a link target or the document-information dictionary names. They
-    take no part in the selection (``rejection_reason`` ``agreement_only``) and
-    record what the PDF says beside its print.
+    a DOI a link target or the document-information dictionary names, and
+    ``hidden_text`` rows (since 12.3) a DOI in text on page 1 or 2 that never
+    prints (white on white, off the page; ``semantic_context``
+    ``hidden_text_agreement`` when it names the selected DOI). They take no
+    part in the selection (``rejection_reason`` ``agreement_only``) and record
+    what the PDF says beside its print.
     """
 
     model_config = _STRICT
@@ -1401,8 +1417,8 @@ class DoiCandidateExport(BaseModel):
     normalized: str = Field(description="The DOI normalized for comparison.")
     source_kind: str = Field(
         description="Where it was read: 'sentence', 'header', 'footer', 'structured_metadata', "
-        "'publication_region' or 'text_layer'; 'link_annotation' or 'pdf_info' for an "
-        "agreement-only row."
+        "'publication_region' or 'text_layer'; 'link_annotation', 'pdf_info' or 'hidden_text' "
+        "(text the PDF never prints, since 12.3) for an agreement-only row."
     )
     page: int | None = Field(description="1-based page, when known.")
     section_id: int | None = Field(description="section[].section_id, when known.")
@@ -1418,12 +1434,16 @@ class DoiCandidateExport(BaseModel):
     marker_kind: str = Field(
         description="Label printed before the DOI, e.g. 'article_doi', 'data_doi', "
         "'structured_doi' or 'first_published_as' (a repository banner); for a link row "
-        "'link_uri', for a document-information row its key."
+        "'link_uri', for a document-information row its key, for a hidden-text row "
+        "'hidden_text'."
     )
     repeated_header_footer_count: int = Field(
         description="On how many pages the same DOI appears as header or footer furniture."
     )
-    semantic_context: str = Field(description="Surrounding-context class used in selection.")
+    semantic_context: str = Field(
+        description="Surrounding-context class used in selection; for a 'hidden_text' row "
+        "'hidden_text_agreement' when it names the selected DOI, else 'hidden_text'."
+    )
     selection_tier: int = Field(
         description="Selection strength: 4 matches the caller's expected DOI, 3 is an explicit "
         "self-identification, 2 is front matter or repeated furniture, 1 is uncontested and "
@@ -1433,8 +1453,8 @@ class DoiCandidateExport(BaseModel):
         default=None,
         description="Why the candidate was not selected, e.g. 'reference_candidate', "
         "'component_candidate', 'line_join_overrun' (the DOI ran on into the next printed "
-        "field), 'edge_truncated' (a text-layer region's box cut the DOI short and a longer "
-        "candidate completes it) or 'agreement_only'; null when eligible.",
+        "field), 'edge_truncated' (since 12.3: a text-layer region's box cut the DOI short and a "
+        "longer candidate completes it) or 'agreement_only'; null when eligible.",
     )
 
 
@@ -1899,15 +1919,15 @@ class ExtractionSettingsExport(BaseModel):
     native_text_header_footer: bool | None = Field(
         default=None,
         description="Whether header and footer regions could be read from the PDF text layer "
-        "(OCR_NATIVE_TEXT_HEADER_FOOTER). Omitted in exports that predate it.",
+        "(OCR_NATIVE_TEXT_HEADER_FOOTER). Omitted before schema 12.3.",
     )
     native_text_formula_number: bool | None = Field(
         default=None,
         description="Whether formula_number regions could be read from the PDF text layer "
-        "(OCR_NATIVE_TEXT_FORMULA_NUMBER). Omitted in exports that predate it.",
+        "(OCR_NATIVE_TEXT_FORMULA_NUMBER). Omitted before schema 12.3.",
     )
 
-    # A reader of an earlier 12.2 export finds neither key.
+    # A reader of a 12.2 export finds neither key (both are 12.3).
     OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = (
         "native_text_header_footer",
         "native_text_formula_number",
@@ -2270,7 +2290,7 @@ class PaperExport(BaseModel):
         "(bibr batch writes its corpus-unique id, the name of the JSON file). A converter uses "
         "the name of source.file_name without its extension.",
     )
-    schema_version: Literal["12.2"] = Field(
+    schema_version: Literal["12.3"] = Field(
         description="Export schema version. Its presence at the root is how readers "
         "distinguish v11 and later from all earlier versions.",
     )

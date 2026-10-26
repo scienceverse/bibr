@@ -6,7 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Added
+### Added — export schema 12.3 (additive)
+
+The export moves to schema `12.3`, which adds optional keys and receipt values;
+every 12.2 export is still valid input for the 12.x reader.
 
 - `OCR_NATIVE_TEXT_HEADER_FOOTER=true` reads running heads and page footers
   from the PDF's text layer instead of OCR, and `OCR_NATIVE_TEXT_FORMULA_NUMBER=true`
@@ -22,8 +25,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   backend that read an `ocr` region, including a consensus or escalation
   recognizer whose reading replaced the primary one.
   `extraction.settings` records `native_text_header_footer` and
-  `native_text_formula_number`. The keys are optional and omitted when absent,
-  so the schema stays 12.2 and earlier 12.2 exports remain valid.
+  `native_text_formula_number`. The keys are new in schema 12.3 and omitted
+  when absent.
+- A DOI that the PDF carries only in text it never prints (white on white,
+  under a logo) is kept in the identity receipt as an agreement-only
+  `hidden_text` candidate. It never names the paper on its own; when it matches
+  the DOI chosen from printed evidence, its `semantic_context` is
+  `hidden_text_agreement`.
 
 ### Fixed
 

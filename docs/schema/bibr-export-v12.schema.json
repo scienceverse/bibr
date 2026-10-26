@@ -1229,10 +1229,10 @@
     },
     "DoiCandidateExport": {
       "additionalProperties": false,
-      "description": "One source-visible DOI and where it was read.\n\n``page`` and ``region_index`` name the layout region the DOI was read\nfrom: the ``extraction.regions`` row with the same ``page`` and ``index``.\nThat index is the region's 0-based position among its page's regions after\nOCR post-processing. Post-processing renumbers a page when it drops\nduplicate regions or merges split ones (a formula and its equation number,\na word hyphenated across two blocks), so the index can differ from the\nlayout detector's original slot.\n\nA ``sentence`` candidate names the region that began the sentence's\nparagraph (``text[].paragraph_id``), which ``region_type`` labels. If the\nparser joined following regions into that paragraph, the DOI may be\nprinted in one of those instead.\n\n``region_index`` is null when no layout region on ``page`` is recorded:\nheader and footer furniture, structured metadata, captions, footnotes,\ninput parsed without layout analysis, and a sentence printed on a later\npage than the region that began its paragraph.\n\nA ``text_layer`` candidate is a DOI a PDF's visible text layer prints on\npage 1 or 2 where the parsed text does not hold it, such as a banner in the\npage margin; ``region_index`` names the layout region it is printed in, or\nis null outside every region. ``link_annotation`` and ``pdf_info`` rows are\na DOI a link target or the document-information dictionary names. They\ntake no part in the selection (``rejection_reason`` ``agreement_only``) and\nrecord what the PDF says beside its print.",
+      "description": "One source-visible DOI and where it was read.\n\n``page`` and ``region_index`` name the layout region the DOI was read\nfrom: the ``extraction.regions`` row with the same ``page`` and ``index``.\nThat index is the region's 0-based position among its page's regions after\nOCR post-processing. Post-processing renumbers a page when it drops\nduplicate regions or merges split ones (a formula and its equation number,\na word hyphenated across two blocks), so the index can differ from the\nlayout detector's original slot.\n\nA ``sentence`` candidate names the region that began the sentence's\nparagraph (``text[].paragraph_id``), which ``region_type`` labels. If the\nparser joined following regions into that paragraph, the DOI may be\nprinted in one of those instead.\n\n``region_index`` is null when no layout region on ``page`` is recorded:\nheader and footer furniture, structured metadata, captions, footnotes,\ninput parsed without layout analysis, and a sentence printed on a later\npage than the region that began its paragraph.\n\nA ``text_layer`` candidate is a DOI a PDF's visible text layer prints on\npage 1 or 2 where the parsed text does not hold it, such as a banner in the\npage margin; ``region_index`` names the layout region it is printed in, or\nis null outside every region. ``link_annotation`` and ``pdf_info`` rows are\na DOI a link target or the document-information dictionary names, and\n``hidden_text`` rows (since 12.3) a DOI in text on page 1 or 2 that never\nprints (white on white, off the page; ``semantic_context``\n``hidden_text_agreement`` when it names the selected DOI). They take no\npart in the selection (``rejection_reason`` ``agreement_only``) and record\nwhat the PDF says beside its print.",
       "properties": {
         "marker_kind": {
-          "description": "Label printed before the DOI, e.g. 'article_doi', 'data_doi', 'structured_doi' or 'first_published_as' (a repository banner); for a link row 'link_uri', for a document-information row its key.",
+          "description": "Label printed before the DOI, e.g. 'article_doi', 'data_doi', 'structured_doi' or 'first_published_as' (a repository banner); for a link row 'link_uri', for a document-information row its key, for a hidden-text row 'hidden_text'.",
           "title": "Marker Kind",
           "type": "string"
         },
@@ -1272,7 +1272,7 @@
         },
         "rejection_reason": {
           "default": null,
-          "description": "Why the candidate was not selected, e.g. 'reference_candidate', 'component_candidate', 'line_join_overrun' (the DOI ran on into the next printed field), 'edge_truncated' (a text-layer region's box cut the DOI short and a longer candidate completes it) or 'agreement_only'; null when eligible.",
+          "description": "Why the candidate was not selected, e.g. 'reference_candidate', 'component_candidate', 'line_join_overrun' (the DOI ran on into the next printed field), 'edge_truncated' (since 12.3: a text-layer region's box cut the DOI short and a longer candidate completes it) or 'agreement_only'; null when eligible.",
           "title": "Rejection Reason",
           "type": [
             "string",
@@ -1306,12 +1306,12 @@
           "type": "integer"
         },
         "semantic_context": {
-          "description": "Surrounding-context class used in selection.",
+          "description": "Surrounding-context class used in selection; for a 'hidden_text' row 'hidden_text_agreement' when it names the selected DOI, else 'hidden_text'.",
           "title": "Semantic Context",
           "type": "string"
         },
         "source_kind": {
-          "description": "Where it was read: 'sentence', 'header', 'footer', 'structured_metadata', 'publication_region' or 'text_layer'; 'link_annotation' or 'pdf_info' for an agreement-only row.",
+          "description": "Where it was read: 'sentence', 'header', 'footer', 'structured_metadata', 'publication_region' or 'text_layer'; 'link_annotation', 'pdf_info' or 'hidden_text' (text the PDF never prints, since 12.3) for an agreement-only row.",
           "title": "Source Kind",
           "type": "string"
         },
@@ -1800,7 +1800,7 @@
         },
         "native_text_formula_number": {
           "default": null,
-          "description": "Whether formula_number regions could be read from the PDF text layer (OCR_NATIVE_TEXT_FORMULA_NUMBER). Omitted in exports that predate it.",
+          "description": "Whether formula_number regions could be read from the PDF text layer (OCR_NATIVE_TEXT_FORMULA_NUMBER). Omitted before schema 12.3.",
           "title": "Native Text Formula Number",
           "type": [
             "boolean",
@@ -1809,7 +1809,7 @@
         },
         "native_text_header_footer": {
           "default": null,
-          "description": "Whether header and footer regions could be read from the PDF text layer (OCR_NATIVE_TEXT_HEADER_FOOTER). Omitted in exports that predate it.",
+          "description": "Whether header and footer regions could be read from the PDF text layer (OCR_NATIVE_TEXT_HEADER_FOOTER). Omitted before schema 12.3.",
           "title": "Native Text Header Footer",
           "type": [
             "boolean",
@@ -3634,7 +3634,7 @@
         },
         "ocr_backend": {
           "default": null,
-          "description": "The OCR backend that read an 'ocr' region: extraction.ocr.backend, or the consensus or escalation recognizer whose reading replaced it. Omitted for other regions, and in exports that predate it.",
+          "description": "The OCR backend that read an 'ocr' region: extraction.ocr.backend, or the consensus or escalation recognizer whose reading replaced it. Omitted for other regions, and before schema 12.3.",
           "title": "Ocr Backend",
           "type": [
             "string",
@@ -3667,7 +3667,7 @@
         },
         "source": {
           "default": null,
-          "description": "Where the region's text came from: 'text_layer' (the PDF's own text layer, including a scanned page's hidden OCR layer used when OCR returned nothing) or 'ocr' (a region merged from both is 'ocr'). Omitted for a region without text, and in exports that predate it.",
+          "description": "Where the region's text came from: 'text_layer' (the PDF's own text layer, including a scanned page's hidden OCR layer used when OCR returned nothing) or 'ocr' (a region merged from both is 'ocr'). Omitted for a region without text, and before schema 12.3.",
           "enum": [
             "text_layer",
             "ocr",
@@ -4762,7 +4762,7 @@
       "type": "string"
     },
     "schema_version": {
-      "const": "12.2",
+      "const": "12.3",
       "description": "Export schema version. Its presence at the root is how readers distinguish v11 and later from all earlier versions.",
       "title": "Schema Version",
       "type": "string"
