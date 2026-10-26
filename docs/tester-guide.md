@@ -287,7 +287,7 @@ from the platform and detected memory. The current defaults are:
 |---|---|---|
 | Windows | `glm-llama` (llama.cpp) | llama.cpp |
 | Linux, NVIDIA GPU **≥ 20 GB** (e.g. RTX 3090) | `paddle-vllm` | vLLM, bibr extract 4B |
-| Linux, NVIDIA GPU **8–<20 GB** | `paddle-vllm` | vLLM, bibr extract 4B W4A16 (on an 8 GB card, set `LLM_LOCAL_MEM_FRACTION`) |
+| Linux, NVIDIA GPU **8–<20 GB** | `paddle-vllm` | vLLM, bibr extract 4B W4A16 (an 8 GB card needs `LLM_LOCAL_MEM_FRACTION` and no desktop on the card) |
 | Linux, NVIDIA GPU **< 8 GB** | `glm-llama` (llama.cpp) | llama.cpp |
 | Apple Silicon (M-series) | `paddle-rapid-mlx` (rapid-mlx) | rapid-mlx, else vllm-mlx |
 | No suitable GPU | cloud vision OCR or an external OCR server | a cloud LLM |

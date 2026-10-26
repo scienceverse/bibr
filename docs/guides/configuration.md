@@ -316,7 +316,7 @@ has the measurements):
 | Runtime | Setup model | Registry memory floor |
 |---|---|---|
 | vLLM, 20 GB or more | `scienceverse/bibr-extract-qwen35-4b` (Qwen3.5-4B fine-tuned for bibr, bf16) | a 12.25 GiB budget; 14.25 GiB free to start |
-| vLLM, 8–19 GB | `scienceverse/bibr-extract-qwen35-4b-W4A16` (the same model with 4-bit weights) | a 6.25 GiB budget; 8 GiB free to start, so an 8 GB card needs `LLM_LOCAL_MEM_FRACTION` |
+| vLLM, 8–19 GB | `scienceverse/bibr-extract-qwen35-4b-W4A16` (the same model with 4-bit weights) | a 6.25 GiB budget; 8 GiB free to start, so an 8 GB card needs `LLM_LOCAL_MEM_FRACTION` and nothing else on the card |
 | llama.cpp (Windows, cards below 8 GB) | `scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0`, else `:Q4_K_M`, else the 2B's `scienceverse/bibr-extract-qwen35-2b-GGUF` builds | 7 GB for the 4B Q8_0, down to 3 GB for the 2B Q4_K_M |
 | Rapid-MLX / vllm-mlx | `scienceverse/bibr-extract-qwen35-4b-mlx-8bit`, else the 2B's `-2b-mlx-8bit` | 6 GB for the 4B, 3 GB for the 2B |
 

@@ -21,11 +21,17 @@ budget (12.25 GiB for the 4B, 6.25 GiB for the W4A16 build, measured on an RTX
 other models. The 4B needs a 20 GB card because on a 16 GB card bibr's other
 models soon hold more than the 1.4 GiB it leaves them, and its later starts are
 refused; the W4A16 build ran a 48-paper batch on cards emulated at 12 and
-16 GB. **An 8 GB card has too little memory for that**: about 7.6 GiB is free
-to CUDA, so bibr refuses every start of either model with an error that says
-so. On such a card, set the LLM's share yourself, which bibr then uses as
-given, for example `LLM_LOCAL_MEM_FRACTION=0.83` for the W4A16 build (about
-6.3 GiB of 7.6). The 2B student needs at least as much as the W4A16 build on
+16 GB, and on a 12 GB card with 0.5 GiB taken by a desktop. **An 8 GB card
+has too little memory for that**: about 7.6 GiB is free to CUDA, so bibr
+refuses every start of either model with an error that says so, before it
+OCRs the batch. If nothing else uses the card (no desktop on it), you can set
+the LLM's share yourself, which bibr then uses as given, for example
+`LLM_LOCAL_MEM_FRACTION=0.83` for the W4A16 build (about 6.3 GiB of 7.6): a
+48-paper batch then ran on a card emulated at 8 GB, with many ONNX
+out-of-memory retries. With 0.5 GiB taken by a desktop the same setting
+failed: the sentence segmenter could not load and the LLM's next start ran
+out of memory. On such a card use llama.cpp (`bibr setup --advanced`) or a
+hosted model. The 2B student needs at least as much as the W4A16 build on
 vLLM (6.25 GiB at 128 sequences), so it is no longer the default for any card.
 
 Windows and NVIDIA cards below 8 GB run the models through llama.cpp (GGUF),

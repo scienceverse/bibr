@@ -34,7 +34,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   it while starting and 1 GB for bibr's models: 14.25 GiB for the 4B, which a
   16 GB card no longer has once bibr's models have grown, and 8 GiB for the
   W4A16 build. An 8 GB card, with about 7.6 GiB free to CUDA, cannot start any
-  of them unless you set the share yourself (`LLM_LOCAL_MEM_FRACTION`).
+  of them unless you set the share yourself (`LLM_LOCAL_MEM_FRACTION`), and
+  that works only when nothing else, such as a desktop, uses the card.
 - Setup counts a card that reports up to 0.25 GiB under a size (an RTX 4060
   reports 8,188 MiB, an RTX 5070 12,227 MiB) as that size, for the model it
   recommends and for PaddleOCR-VL's 8 GB minimum. Such cards used to get the
