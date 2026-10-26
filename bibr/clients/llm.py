@@ -154,9 +154,15 @@ _CONTEXT_WINDOW_RE = re.compile(
     re.IGNORECASE,
 )
 # A self-hosted server whose context window could not be read (down, model not
-# loaded yet) is asked again at most this often; see
+# loaded yet) is asked again after this long, then after twice as long each
+# time it still does not say, up to the maximum; see
 # LLMClient.ensure_server_context.
 _SERVER_CONTEXT_RETRY_SECONDS = 30.0
+_SERVER_CONTEXT_RETRY_MAX_SECONDS = 600.0
+# A call whose input budget (see _context_budget) is below this many tokens
+# while its text would have to be cut is not sent: the prompt would carry
+# little or none of the paper. See LLMClient._cap_inputs.
+_MIN_INPUT_BUDGET_TOKENS = 256
 
 
 def _server_context_clock() -> float:
@@ -227,6 +233,19 @@ def _context_budget(context: int, max_tokens: int | None) -> int:
     """
     reserve = min(max_tokens or context // 4, context // 2)
     return max(context - reserve - _PROMPT_OVERHEAD_TOKENS, 0)
+
+
+class _NoRoomForInputError(LlmRejectedError):
+    """The context window leaves no room for the paper text, so the prompt was
+    not sent.
+
+    Raised before the call where a server would answer a context-length 400
+    after it, and recorded the same way: the call fails with ``llm_failed``
+    and core metadata keeps the record with that call's fields marked failed.
+    Without it, a 4,096-token completion cap in a 4,096-token window sent
+    title and author prompts that carried no paper text, and the server
+    accepted them.
+    """
 
 
 def _context_window_from_error(exc: BaseException) -> int | None:
@@ -1254,6 +1273,11 @@ class LLMClient:
     _server_context_sig: tuple | None = None
     _server_context_settled: bool = False
     _server_context_retry_at: float = 0.0
+    # Incomplete answers in a row, which lengthen the wait before asking again.
+    _server_context_misses: int = 0
+    # The kind of server the last answer named ("ollama", "llama.cpp", ...),
+    # so a window learned from a rejection can move the caps for it.
+    _server_kind: str | None = None
     _server_context_lock: asyncio.Lock | None = None
     _server_context_loop: asyncio.AbstractEventLoop | None = None
 
@@ -1400,6 +1424,9 @@ class LLMClient:
         Together they get LLM_MAX_INPUT_CHARS and the context budget, shared
         by need (:func:`_share_by_need`): an input shorter than an equal share
         is kept whole, and what it leaves goes to the longer ones.
+
+        Raises :class:`_NoRoomForInputError` instead of cutting the inputs to
+        fewer than ``_MIN_INPUT_BUDGET_TOKENS`` tokens, for any provider.
         """
         effective = settings if settings is not None else snapshot_settings()
         limits = _share_by_need([len(t) for t in texts], effective.llm.max_input_chars)
@@ -1416,6 +1443,14 @@ class LLMClient:
             shares = _share_by_need([_token_cost(t) for t in cut], budget)
             fitted = [t[: _token_fit(t, share)] for t, share in zip(cut, shares, strict=True)]
             if sum(map(len, fitted)) < sum(map(len, cut)):
+                if budget < _MIN_INPUT_BUDGET_TOKENS:
+                    raise _NoRoomForInputError(
+                        "Prompt not sent",
+                        cause=(
+                            f"the {context}-token context window leaves {budget} tokens for "
+                            f"the input beside a {max_tokens or 'default'}-token completion"
+                        ),
+                    )
                 logger.warning(
                     "LLM input truncated from %d to %d chars to fit the %d-token context",
                     sum(map(len, cut)),
@@ -1461,8 +1496,10 @@ class LLMClient:
         :mod:`bibr.clients.server_context`). An endpoint is asked once, and
         concurrent first calls wait for that one answer. When the answer is
         not complete (the server is down, or Ollama's model is not loaded and
-        the 16,384-token caps stand in), a later call asks again, at most once
-        every ``_SERVER_CONTEXT_RETRY_SECONDS``; calls that arrive while it
+        the 16,384-token caps stand in), a later call asks again after
+        ``_SERVER_CONTEXT_RETRY_SECONDS``, then after twice as long each time
+        the answer is still incomplete, up to
+        ``_SERVER_CONTEXT_RETRY_MAX_SECONDS``; calls that arrive while it
         asks keep the caps in place instead of waiting. Never raises.
         """
         sig = self._server_context_signature()
@@ -1479,6 +1516,9 @@ class LLMClient:
             if not self._server_context_pending(sig):
                 return
             first = self._server_context_sig != sig
+            if first:
+                self._server_context_misses = 0
+                self._server_kind = None
             try:
                 settled = await self._fit_server_context(first=first)
             except Exception as exc:  # noqa: BLE001 - sizing must never fail a call
@@ -1486,7 +1526,14 @@ class LLMClient:
                 settled = False
             self._server_context_sig = sig
             self._server_context_settled = settled
-            self._server_context_retry_at = _server_context_clock() + _SERVER_CONTEXT_RETRY_SECONDS
+            # An endpoint that never says (a proxy answering 5xx on the routes
+            # it does not serve) is asked less and less often, not every 30 s.
+            self._server_context_misses = 0 if settled else self._server_context_misses + 1
+            wait = min(
+                _SERVER_CONTEXT_RETRY_SECONDS * 2 ** max(self._server_context_misses - 1, 0),
+                _SERVER_CONTEXT_RETRY_MAX_SECONDS,
+            )
+            self._server_context_retry_at = _server_context_clock() + wait
 
     async def _fit_server_context(self, *, first: bool) -> bool:
         """Ask the server and apply its answer; True when nothing is left to learn."""
@@ -1509,6 +1556,7 @@ class LLMClient:
                 found = sc.ServerContext("ollama", None)
         if found is None:
             return False
+        self._server_kind = found.server
         sc.apply_server_context(llm, found)
         return found.server not in sc.FIXED_CONTEXT_SERVERS or llm.context_tokens is not None
 
@@ -1520,17 +1568,25 @@ class LLMClient:
         cutting to it can succeed. Comparing with the window the call started
         under, not the current one, lets each of several concurrent calls that
         overflowed ask again, not only the first to fail.
+
+        For an Ollama or llama.cpp server the caps move to the window too
+        (:func:`~bibr.clients.server_context.apply_learned_window`), so the
+        retry and later calls keep room for input beside the completion.
         """
+        from bibr.clients import server_context as sc
+
         window = _context_window_from_error(exc)
         if window is None:
             return False
-        current = self._settings.llm.context_tokens
+        llm = self._settings.llm
+        current = llm.context_tokens
         if current is None or window < current:
             logger.warning(
                 "The LLM server's context window is %d tokens; cutting long inputs to fit it",
                 window,
             )
-            self._settings.llm.context_tokens = window
+            llm.context_tokens = window
+            sc.apply_learned_window(llm, self._server_kind, window)
         return window_before is None or window < window_before
 
     def _settings_signature(self) -> tuple:
@@ -3018,10 +3074,13 @@ class LLMClient:
             # retry could fix; otherwise the paper fails as it always did. A
             # prompt past the server's context window is not one: the call
             # already asked again with its input cut to the window the server
-            # named, if it named a smaller one.
+            # named, if it named a smaller one. Nor is a window with no room
+            # for the input, where the prompt was not sent.
             for outcome in (title_kw, authors, classification):
                 error = typed.get(id(outcome))
-                if error is None or isinstance(error, (LlmTruncatedError, LlmInvalidOutputError)):
+                if error is None or isinstance(
+                    error, (LlmTruncatedError, LlmInvalidOutputError, _NoRoomForInputError)
+                ):
                     continue
                 if _context_window_from_error(error) is not None:
                     continue

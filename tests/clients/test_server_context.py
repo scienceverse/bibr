@@ -23,9 +23,16 @@ import pytest
 from openai import AsyncOpenAI
 
 from bibr.clients import llm, server_context
-from bibr.clients.llm import LLMClient, _context_budget, _share_by_need, _task_max_tokens
+from bibr.clients.llm import (
+    LLMClient,
+    _context_budget,
+    _NoRoomForInputError,
+    _share_by_need,
+    _task_max_tokens,
+)
 from bibr.clients.server_context import (
     ServerContext,
+    apply_learned_window,
     apply_server_context,
     fixed_context_caps,
 )
@@ -46,7 +53,8 @@ from bibr.structure.section_classifier import _classify_llm_batch, _fitting_span
 
 SURF_URL = "http://172.17.0.1:11434/v1"
 FT_MODEL = "hf.co/scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
-FRONT_MATTER = "A printed study of word growth. " * 9_000
+PAPER_TEXT = "A printed study of word growth."
+FRONT_MATTER = f"{PAPER_TEXT} " * 9_000
 
 
 def _surf_settings(**llm_fields) -> GlobalSettings:
@@ -469,6 +477,25 @@ def test_a_larger_window_found_later_raises_the_caps_bibr_set_up_to_the_defaults
     assert (llm_options.max_tokens, llm_options.max_input_chars) == (65_536, 300_000)
 
 
+def test_a_learned_window_moves_the_caps_bibr_owns_on_fixed_context_servers(caplog):
+    settings = _surf_settings(max_input_chars=50_000)
+    apply_server_context(settings.llm, ServerContext("ollama", None))
+    settings.llm.context_tokens = 4_096
+    with caplog.at_level(logging.WARNING, logger="bibr.clients.server_context"):
+        apply_learned_window(settings.llm, "ollama", 4_096)
+
+    assert settings.llm.max_tokens == 1_024
+    assert settings.llm.ref_seg_window_chars == 3_000
+    assert settings.llm.max_input_chars == 50_000, "the user's cap is kept"
+    assert "explicit llm.max_input_chars=50000 exceeds the 4096-token" in caplog.text
+
+    # vLLM, other servers and a server that never answered keep their caps.
+    for server in ("vllm", "other", None):
+        llm_options = GlobalSettings().llm
+        apply_learned_window(llm_options, server, 4_096)
+        assert (llm_options.max_tokens, llm_options.max_input_chars) == (65_536, 300_000)
+
+
 async def test_a_users_window_sizes_the_caps_and_wins_over_the_servers(ollama_client):
     # LLM_CONTEXT_TOKENS used to skip the probe, and with it every cap:
     # max_tokens went back to 65536 and the segmentation window to 16000.
@@ -622,6 +649,87 @@ async def test_a_probe_that_raises_does_not_fail_the_call(monkeypatch, clock):
     assert probe.await_count == 2
 
 
+async def test_an_endpoint_that_never_says_is_asked_less_and_less_often(monkeypatch, clock):
+    # A proxy that answers 5xx on the routes it does not serve gave no answer
+    # and was asked again every 30 s for as long as the process ran.
+    asked: list[float] = []
+    up = False
+
+    def proxy(request):
+        path = request.url.path
+        if path == "/v1/models":
+            asked.append(clock[0])
+        if up:
+            if path == "/props":
+                return httpx.Response(200, json={"default_generation_settings": {"n_ctx": 8_192}})
+            return httpx.Response(404, text="not found")
+        return httpx.Response(502, text="Bad Gateway")
+
+    async def probe(settings, *, transport=None):
+        return await real_probe(settings, transport=httpx.MockTransport(proxy))
+
+    monkeypatch.setattr(server_context, "probe_server_context", probe)
+    client = LLMClient(
+        settings=GlobalSettings(
+            llm={"provider": "openai", "base_url": "http://10.0.0.7:8080/v1", "model": "m"}
+        )
+    )
+    start = clock[0]
+    for _ in range(360):  # a call every 10 s for an hour
+        await client.ensure_server_context()
+        clock[0] += 10
+
+    gaps = [later - earlier for earlier, later in zip(asked, asked[1:], strict=False)]
+    assert asked[0] == start
+    assert gaps == [30, 60, 120, 240, 480, 600, 600, 600, 600]
+    assert client._settings.llm.context_tokens is None
+
+    # It still gets sized once it answers, within the longest wait.
+    up = True
+    clock[0] += 600
+    await client.ensure_server_context()
+    assert len(asked) == 11
+    llm_options = client._settings.llm
+    assert llm_options.context_tokens == 8_192
+    assert (llm_options.max_tokens, llm_options.max_input_chars) == (2_048, 12_000)
+    clock[0] += 3_600
+    await client.ensure_server_context()
+    assert len(asked) == 11, "a complete answer is not asked again"
+
+
+async def test_the_ollama_provider_down_at_the_first_calls_is_sized_once_it_is_up(
+    ollama_client, clock
+):
+    server = FakeOllama(num_ctx=8_192)
+    server.down = True
+    settings = GlobalSettings(
+        llm={
+            "provider": "ollama",
+            "ollama_base_url": "http://172.17.0.1:11434",
+            "model": FT_MODEL,
+        }
+    )
+    client = ollama_client(server, settings)
+    llm_options = client._settings.llm
+
+    await client.ensure_server_context()  # down: asked again after 30 s
+    clock[0] += 30
+    await client.ensure_server_context()  # still down: after 60 s
+    assert llm_options.context_tokens is None
+    assert (llm_options.max_tokens, llm_options.max_input_chars) == (4_096, 24_000)
+
+    server.down = False
+    clock[0] += 30
+    await client.ensure_server_context()
+    assert server.probes() == 0, "asked again before the wait was over"
+    clock[0] += 30
+    await client.ensure_server_context()
+
+    assert server.probes() == 1
+    assert llm_options.context_tokens == 8_192
+    assert (llm_options.max_tokens, llm_options.max_input_chars) == (2_048, 12_000)
+
+
 async def test_an_external_vllm_gets_no_caps_before_the_first_call(monkeypatch, clock):
     # No vLLM arm was measured, and bibr's eval harness points LLM_BASE_URL
     # at vLLM: it keeps learning its window from a context-length 400.
@@ -688,6 +796,77 @@ async def test_an_overflow_at_an_unknown_window_is_asked_again_cut_to_it(ollama_
     assert client._settings.llm.context_tokens == 6_000
     accepted = [t for t in server.prompt_tokens if t not in server.rejected]
     assert len(accepted) == 3 and max(accepted) <= 6_000
+
+
+def _accepted(server: FakeOllama) -> list[str]:
+    return [
+        p for p, t in zip(server.prompts, server.prompt_tokens, strict=True) if t <= server.num_ctx
+    ]
+
+
+async def test_a_window_learned_from_a_rejection_leaves_room_for_the_paper(ollama_client, clock):
+    # Ollama's model is not loaded at the probe, so the 16k caps stand in
+    # (max_tokens 4,096), and the server runs a 4,096-token context. The
+    # window came from the 400 alone: the caps stayed at 4,096 and each
+    # retry, and every call until the next probe, had an input budget of
+    # _context_budget(4096, 4096) == 0. The title and author prompts went
+    # out with no paper text, were accepted, and no field was marked failed.
+    server = FakeOllama(num_ctx=4_096, loaded=False)
+    client = ollama_client(server, _surf_settings())
+
+    combined = await client.extract_core_metadata(FRONT_MATTER)
+
+    llm_options = client._settings.llm
+    assert server.probes() == 1, "the clock did not move: no second probe"
+    assert llm_options.context_tokens == 4_096
+    assert (llm_options.max_tokens, llm_options.max_input_chars) == (1_024, 6_000)
+    for task_cap in (llm_options.title_max_tokens, llm_options.authors_max_tokens):
+        assert _context_budget(4_096, _task_max_tokens(client._settings, task_cap)) == 1_024
+    assert len(server.rejected) == 3
+    assert len(_accepted(server)) == 3
+    assert all(PAPER_TEXT in prompt for prompt in _accepted(server))
+    assert combined.title == "A printed title"
+    assert [(a.given, a.family) for a in combined.authors] == [("Mara", "Quill")]
+    assert combined._field_failures == {}
+
+    # The next paper, still before the server is asked again.
+    sent = len(server.prompts)
+    again = await client.extract_core_metadata(FRONT_MATTER)
+
+    assert server.probes() == 1
+    assert len(server.rejected) == 3
+    assert len(server.prompts) - sent == 3
+    assert all(PAPER_TEXT in prompt for prompt in server.prompts[sent:])
+    assert again.title == "A printed title" and again._field_failures == {}
+
+
+async def test_no_prompt_goes_out_without_paper_text(ollama_client):
+    # A server bibr cannot place (it answers none of the probe routes) gets
+    # no caps. It names a 4,096-token window in a 400, and the default title
+    # and author completion caps leave no room beside it: those prompts are
+    # not sent, and their fields are marked failed as an overflow is.
+
+    class UnplacedServer(FakeOllama):
+        def respond(self, request: httpx.Request) -> httpx.Response:
+            if request.url.path in {"/v1/models", "/props", "/api/version"}:
+                return httpx.Response(404, text="not found")
+            return super().respond(request)
+
+    server = UnplacedServer(num_ctx=4_096)
+    client = ollama_client(server, _surf_settings())
+
+    combined = await client.extract_core_metadata(FRONT_MATTER)
+
+    assert client._settings.llm.context_tokens == 4_096
+    assert client._settings.llm.max_tokens == 65_536
+    assert not combined.title and combined.authors == []
+    assert combined._field_failures["title"] == "llm_failed"
+    assert combined._field_failures["authors"] == "llm_failed"
+    # The classification cap (1,024) leaves room: it is sent and kept.
+    assert combined.paper_type == "empirical"
+    assert len(server.rejected) == 3
+    assert len(_accepted(server)) == 1
+    assert all(PAPER_TEXT in prompt for prompt in _accepted(server))
 
 
 async def test_an_overflow_past_the_known_window_keeps_the_record(ollama_client):
@@ -843,6 +1022,40 @@ async def test_the_paper_type_label_input_is_cut_to_the_window():
 
 
 # --- Learning a window from a rejection --------------------------------------
+
+
+async def test_the_no_room_guard_holds_for_every_provider():
+    # A cloud provider with a user-set window: the default 4,096-token title
+    # cap leaves 0 tokens for input in a 4,096-token window.
+    settings = GlobalSettings(llm={"context_tokens": 4_096})
+    client = LLMClient(settings=settings)
+    client._invoke_structured = AsyncMock(return_value=TitleKeywordsLLM(title="x"))
+
+    with pytest.raises(LlmRejectedError) as raised:
+        await client.extract_title_keywords(FRONT_MATTER)
+
+    assert isinstance(raised.value, _NoRoomForInputError)
+    assert raised.value.error_code == "llm_failed"
+    assert "leaves 0 tokens" in str(raised.value)
+    client._invoke_structured.assert_not_awaited()
+
+
+def test_the_no_room_guard_fires_only_below_the_floor_and_only_when_text_is_cut():
+    settings = GlobalSettings(llm={"context_tokens": 4_096})
+    # Budget 0, nothing to cut.
+    assert LLMClient._cap_input("", settings, max_tokens=4_096) == ""
+    # Budget 148 tokens: a short text fits whole and is sent.
+    assert _context_budget(4_096, 1_900) == 148
+    assert LLMClient._cap_input(PAPER_TEXT, settings, max_tokens=1_900) == PAPER_TEXT
+    with pytest.raises(_NoRoomForInputError):
+        LLMClient._cap_input(FRONT_MATTER, settings, max_tokens=1_900)
+    # Several texts share the budget, and the guard.
+    with pytest.raises(_NoRoomForInputError):
+        LLMClient._cap_inputs([FRONT_MATTER, PAPER_TEXT], settings, max_tokens=1_900)
+    # At the floor (256 tokens) the text is cut, not refused.
+    assert _context_budget(4_096, 1_792) == 256
+    capped = LLMClient._cap_input(FRONT_MATTER, settings, max_tokens=1_792)
+    assert PAPER_TEXT in capped and len(capped) < 1_000
 
 
 async def test_invoke_structured_learns_the_window_a_server_names():

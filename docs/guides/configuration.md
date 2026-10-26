@@ -239,17 +239,21 @@ model's `num_ctx`, llama.cpp's `/props`), cuts long inputs to fit it, and
 applies the caps of the managed llama.cpp server, scaled to the window: at
 16,384 tokens `LLM_MAX_INPUT_CHARS=24000`, `LLM_REF_SEG_WINDOW_CHARS=12000`
 and `LLM_MAX_TOKENS=4096`. An Ollama model that is not loaded yet and sets no
-`num_ctx` gets the 16,384-token caps, and bibr asks again on a later call (at
-most once every 30 seconds) until Ollama gives its window. A vLLM server is
-not sized in advance: bibr learns its window when the server rejects a
-request as too long.
+`num_ctx` gets the 16,384-token caps, and bibr asks again on a later call
+(after 30 seconds, then after twice as long each time, up to once every 10
+minutes) until Ollama gives its window. When an Ollama or llama.cpp server
+rejects a request as too long and names its window, the caps move to that
+window too. A vLLM server is not sized in advance: bibr learns its window
+when the server rejects a request as too long. A call whose window leaves
+fewer than 256 tokens for the paper text is not sent, and its fields are
+marked failed.
 
 With `LLM_CONTEXT_TOKENS` you set the window yourself, and long inputs are
 cut to fit it on any server. For an Ollama or llama.cpp server it also wins
 over the window the server reports, and the caps above follow it; set it when
 the server runs a smaller context than it reports. Caps you set yourself
 (`LLM_MAX_INPUT_CHARS`, `LLM_MAX_TOKENS`, `LLM_REF_SEG_WINDOW_CHARS`) are
-kept, with a warning when they exceed the cap for the window.
+kept, with a warning when they exceed the cap for a known window.
 
 `--llm local` starts a managed server. It resolves to Rapid-MLX on Apple
 Silicon when that executable is available, otherwise vllm-mlx; llama.cpp on

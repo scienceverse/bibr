@@ -19,8 +19,9 @@ and llama.cpp, how long its context is:
 
 :func:`apply_server_context` then gives Ollama and llama.cpp the caps the
 managed llama.cpp server uses and sets ``llm.context_tokens``. vLLM is left as
-it was: bibr learns its window from a context-length rejection. Values the
-user set are never replaced.
+it was: bibr learns its window from a context-length rejection. A window
+Ollama or llama.cpp names in such a rejection moves the caps too
+(:func:`apply_learned_window`). Values the user set are never replaced.
 """
 
 from __future__ import annotations
@@ -233,6 +234,38 @@ def apply_server_context(llm: LlmOptions, found: ServerContext) -> None:
             found.context_tokens,
         )
     window = user_window or found.context_tokens or llm.context_tokens
+    _move_caps(llm, found.server, window)
+    if found.context_tokens and user_window is None:
+        llm.context_tokens = found.context_tokens
+        logger.info(
+            "%s LLM server — context window %d tokens; long inputs are cut to fit it",
+            found.server,
+            found.context_tokens,
+        )
+
+
+def apply_learned_window(llm: LlmOptions, server: str | None, window: int) -> None:
+    """Size *llm*'s caps to a window a fixed-context server named in a rejection.
+
+    The caller has set ``llm.context_tokens`` to *window*. Without this the
+    caps stay where an earlier answer put them: the 16,384-token stand-ins
+    when Ollama's model was not loaded at the probe, whose 4,096-token
+    completion leaves no room for input in a 4,096-token window. Fields the
+    user set are kept and caps move as in :func:`apply_server_context`. Other
+    servers are left as they are.
+    """
+    if server in FIXED_CONTEXT_SERVERS:
+        _move_caps(llm, server, window)
+
+
+def _move_caps(llm: LlmOptions, server: str, window: int | None) -> None:
+    """Set the caps bibr owns to :func:`fixed_context_caps` of *window*.
+
+    The assumed 16,384-token window when *window* is ``None``. A cap the user
+    set is kept, with a warning when it exceeds the cap of a known window; a
+    cap bibr moved before never goes above the value it replaced.
+    """
+    user_set = llm.user_set_fields
     tier = window or ASSUMED_FIXED_CONTEXT_TOKENS
     replaced = llm.server_cap_replaced
     for field, cap in fixed_context_caps(tier):
@@ -242,7 +275,7 @@ def apply_server_context(llm: LlmOptions, found: ServerContext) -> None:
                 logger.warning(
                     "%s LLM server — explicit llm.%s=%s exceeds the %d-token context "
                     "budget (~%s); requests past the context will fail or be cut.",
-                    found.server,
+                    server,
                     field,
                     current,
                     window,
@@ -255,16 +288,9 @@ def apply_server_context(llm: LlmOptions, found: ServerContext) -> None:
             setattr(llm, field, target)
             logger.info(
                 "%s LLM server — llm.%s set to %d for a %d-token context%s",
-                found.server,
+                server,
                 field,
                 target,
                 tier,
                 "" if window else " (assumed; the server did not say)",
             )
-    if found.context_tokens and user_window is None:
-        llm.context_tokens = found.context_tokens
-        logger.info(
-            "%s LLM server — context window %d tokens; long inputs are cut to fit it",
-            found.server,
-            found.context_tokens,
-        )

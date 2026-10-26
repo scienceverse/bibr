@@ -24,8 +24,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   When Ollama does not give its window (the model is not loaded and sets no
   `num_ctx`), or the `ollama` provider's server cannot be reached, the caps
   for 16,384 tokens apply. While the server cannot be reached or has not
-  given its window, bibr asks again on a later call, at most once every 30
-  seconds. Values you set yourself are kept.
+  given its window, bibr asks again on a later call: after 30 seconds, then
+  after twice as long each time it still has no answer, up to once every 10
+  minutes. Values you set yourself are kept. A warning says when one of them
+  exceeds the cap for the window; it is logged only when the window is known
+  (reported by the server, set in `LLM_CONTEXT_TOKENS` or named in a
+  rejection), not while the caps for an assumed 16,384 tokens apply.
 - `LLM_CONTEXT_TOKENS` now also sizes those caps: for an Ollama or llama.cpp
   server, the caps follow the window you set, which wins over the window the
   server reports. `LLM_MAX_INPUT_CHARS`, `LLM_MAX_TOKENS` and
@@ -45,7 +49,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   fields empty and marked failed, as a truncated response does, instead of
   failing the paper. Reference-segmentation windows are also split to fit a
   known window, so the second attempt after such a rejection sends smaller
-  windows instead of the same ones.
+  windows instead of the same ones. For an Ollama or llama.cpp server, a
+  window learned from a rejection also moves the caps to it, as the server's
+  own answer would. Before, a 4,096-token window learned while the caps for
+  16,384 tokens applied (Ollama's model not loaded when bibr asked) kept
+  `LLM_MAX_TOKENS` at 4,096 and left the title and author calls no room for
+  input: their prompts went out without any paper text and were answered.
+- A call whose context window leaves fewer than 256 tokens for its input, when
+  its text would have to be cut, is no longer sent. It fails as a
+  context-length rejection does (`llm_failed`; core metadata keeps the record
+  and marks that call's fields failed). This holds for every provider.
 - The LLM section-classification call is split into parts that fit
   `LLM_MAX_INPUT_CHARS` and the server's context window. A paper with 80
   unrecognised headings sent them in one 17,332-token prompt, which a
@@ -60,7 +73,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   equal share is kept whole, and the rest goes to the longer ones. Before,
   each text was cut to the whole budget on its own (the integrity author list
   not at all), so a long reference list with many citations could still run
-  past the window.
+  past the window. This applies to every provider, cloud ones included: the
+  texts of one prompt are now cut to `LLM_MAX_INPUT_CHARS` (300,000 characters
+  by default) in total rather than each, and the paper-type label's title and
+  abstract, which were not cut at all, are now cut to it too. Only prompts
+  whose texts together run past that limit change.
 - Not changed: the experimental single-call core metadata
   (`LLM_MERGED_CORE_METADATA`, off by default) still fails the paper when its
   prompt runs past the window. With `OLLAMA_NUM_PARALLEL` above 1, whether
