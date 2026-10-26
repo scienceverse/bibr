@@ -130,6 +130,7 @@ def _key(
     )
     table_recovery_limit = PADDLE_TABLE_RECOVERY_MAX_TOKENS if runs_table_recovery else 0
     from bibr import __version__
+    from bibr.document.model import HIDDEN_TEXT_RULE
 
     parts = [
         str(_CACHE_FORMAT_VERSION),
@@ -173,6 +174,8 @@ def _key(
         f"native_text_min_chars={effective.ocr.native_text_min_chars}",
         f"native_text_min_printable_ratio={effective.ocr.native_text_min_printable_ratio}",
         f"native_text_header_footer={int(effective.ocr.native_text_header_footer)}",
+        # The hidden-text strip decides which text-layer glyphs exist at all.
+        f"native_text_hidden={HIDDEN_TEXT_RULE}",
         "native_text_reject_invisible_layer="
         f"{int(effective.ocr.native_text_reject_invisible_layer)}",
         f"outline_headings={int(effective.pipeline.outline_headings)}",

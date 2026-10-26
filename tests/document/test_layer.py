@@ -547,7 +547,9 @@ def test_layer_is_deterministic_and_round_trips(name):
     assert serialize.canonical_bytes(second) == text
     assert serialize.canonical_bytes(restored) == text
     assert first.version == LAYER_VERSION
-    assert first.index_frame == INDEX_FRAME == "post_strip:watermark/1+line_number/1"
+    assert (
+        first.index_frame == INDEX_FRAME == ("post_strip:watermark/1+line_number/1+hidden_text/1")
+    )
     for page in first.pages:
         if page.cols is None:
             continue

@@ -37,6 +37,11 @@ _SCHEMA_VERSION = "12.2"
 #     ``filled`` or ``corrected`` from it (only with a value printed in the
 #     reference string), or ``disagree``. Omitted when verification did not
 #     run, so every 12.1 export is still a valid 12.2 reader input.
+#   - Optional keys added within 12.2, omitted when absent (no version bump:
+#     an earlier 12.2 export lacks them and stays valid): the opt-in
+#     ``extraction.regions[].source`` (``text_layer`` or ``ocr``) and
+#     ``.ocr_backend``, and ``extraction.settings.native_text_header_footer``
+#     and ``.native_text_formula_number``.
 #
 # v12.1 (vs 12.0) — additive:
 #   - New ``extraction.fields``: for each tracked field (``title``, ``author``,
@@ -1267,6 +1272,30 @@ class RegionExport(BaseModel):
         default=None,
         description="Bounding-box height divided by the region's line count, in points.",
     )
+    source: Literal["text_layer", "ocr"] | None = Field(
+        default=None,
+        description="Where the region's text came from: 'text_layer' (the PDF's own text layer, "
+        "including a scanned page's hidden OCR layer used when OCR returned nothing) or 'ocr' "
+        "(a region merged from both is 'ocr'). Omitted for a region without text, and in exports "
+        "that predate it.",
+    )
+    ocr_backend: str | None = Field(
+        default=None,
+        description="The OCR backend that read an 'ocr' region: extraction.ocr.backend, or the "
+        "consensus or escalation recognizer whose reading replaced it. Omitted for other regions, "
+        "and in exports that predate it.",
+    )
+
+    # A reader of an earlier 12.2 export finds neither key.
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("source", "ocr_backend")
+
+    @model_serializer(mode="wrap")
+    def _omit_absent(self, handler):
+        data = handler(self)
+        for key in self.OMITTED_WHEN_ABSENT:
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
 
 
 class TextRegionExport(BaseModel):
@@ -1404,7 +1433,8 @@ class DoiCandidateExport(BaseModel):
         default=None,
         description="Why the candidate was not selected, e.g. 'reference_candidate', "
         "'component_candidate', 'line_join_overrun' (the DOI ran on into the next printed "
-        "field) or 'agreement_only'; null when eligible.",
+        "field), 'edge_truncated' (a text-layer region's box cut the DOI short and a longer "
+        "candidate completes it) or 'agreement_only'; null when eligible.",
     )
 
 
@@ -1866,6 +1896,30 @@ class ExtractionSettingsExport(BaseModel):
     ref_parse: str = Field(description="Reference parsing strategy used.")
     crossref_enrich: bool = Field(description="Whether Crossref enrichment was enabled.")
     consolidate: str = Field(description="Consolidation mode: 'off', 'fill' or 'replace'.")
+    native_text_header_footer: bool | None = Field(
+        default=None,
+        description="Whether header and footer regions could be read from the PDF text layer "
+        "(OCR_NATIVE_TEXT_HEADER_FOOTER). Omitted in exports that predate it.",
+    )
+    native_text_formula_number: bool | None = Field(
+        default=None,
+        description="Whether formula_number regions could be read from the PDF text layer "
+        "(OCR_NATIVE_TEXT_FORMULA_NUMBER). Omitted in exports that predate it.",
+    )
+
+    # A reader of an earlier 12.2 export finds neither key.
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = (
+        "native_text_header_footer",
+        "native_text_formula_number",
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_absent(self, handler):
+        data = handler(self)
+        for key in self.OMITTED_WHEN_ABSENT:
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
 
 
 class TimingsExport(BaseModel):

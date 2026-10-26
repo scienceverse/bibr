@@ -52,7 +52,8 @@ LAYER_VERSION = "doclayer/3"
 # rule's version with it, and INDEX_FRAME, the key of those indexes, changes.
 WATERMARK_RULE = "watermark/1"
 LINE_NUMBER_RULE = "line_number/1"
-INDEX_FRAME = f"post_strip:{WATERMARK_RULE}+{LINE_NUMBER_RULE}"
+HIDDEN_TEXT_RULE = "hidden_text/1"
+INDEX_FRAME = f"post_strip:{WATERMARK_RULE}+{LINE_NUMBER_RULE}+{HIDDEN_TEXT_RULE}"
 # The invisible-layer rule (bibr.ocr.native_text._is_invisible_text_layer_page)
 # behind Page.text_source.
 INVISIBLE_LAYER_RULE = "invisible_layer/1"
@@ -271,7 +272,7 @@ class Furniture:
     # p{page}.f{n}: the n-th object the furniture strip removed from the page.
     furniture_id: str
     page: int
-    # watermark | line_number
+    # watermark | line_number | hidden_text
     kind: str
     bbox_pdf: Box | None
     text: str

@@ -578,9 +578,12 @@ def test_eligible_labels_include_header_footer():
 
 def test_header_footer_setting_defaults_off_but_enables_fill(monkeypatch):
     """The setting gates the behavior: off skips header/footer, on fills."""
+    import bibr.ocr.native_text as native_mod
     from bibr.config import GlobalSettings
     from bibr.ocr.native_text import resolve_eligible_labels
 
+    # A whole-page box around two lines is no first-page masthead.
+    monkeypatch.setattr(native_mod, "_masthead_needs_ocr", lambda *a, **k: False)
     monkeypatch.setenv("OCR_NATIVE_TEXT_HEADER_FOOTER", "true")
     assert GlobalSettings().ocr.native_text_header_footer is True
 
@@ -606,11 +609,14 @@ def test_header_footer_setting_defaults_off_but_enables_fill(monkeypatch):
     assert filled_on[0][0]["_native_text_used"] is True
 
 
-def test_fill_populates_header_footer_from_native_pdf():
+def test_fill_populates_header_footer_from_native_pdf(monkeypatch):
     """Header/footer regions fill from the text layer like body text (same
     printable-ratio gate): every such region otherwise costs an OCR call."""
+    import bibr.ocr.native_text as native_mod
     from bibr.ocr.native_text import resolve_eligible_labels
 
+    # A whole-page box around two lines is no first-page masthead.
+    monkeypatch.setattr(native_mod, "_masthead_needs_ocr", lambda *a, **k: False)
     pdf_bytes = FIXTURE_PDF.read_bytes()
     regions = [
         [
@@ -637,6 +643,8 @@ def test_fill_accepts_short_header_footer_below_body_min_chars(monkeypatch):
 
     pdf_bytes = FIXTURE_PDF.read_bytes()
     monkeypatch.setattr(native_mod, "_text_from_bbox_on_textpage", lambda *a, **k: "Cell Biology")
+    # A whole-page box around two lines is no first-page masthead.
+    monkeypatch.setattr(native_mod, "_masthead_needs_ocr", lambda *a, **k: False)
 
     regions = [
         [
@@ -713,6 +721,10 @@ def test_formula_number_setting_defaults_off_and_resolves(monkeypatch):
         ("(S12)", "(S12)"),
         ("(A.1)", "(A.1)"),
         ("ii", "ii"),
+        ("(iv)", "(iv)"),
+        ("(IV)", "(IV)"),
+        ("(a)", None),  # a letter alone is no equation number
+        ("(S)", None),
         ("( 1 )", "(1)"),
         ("x = \\alpha + \\beta (3)", None),  # 22 chars: the box caught the formula
         ("g (3)", None),  # a formula glyph the box caught
@@ -774,38 +786,6 @@ def test_fill_formula_number_still_rejects_corrupt_text(monkeypatch):
         pdf_bytes, regions, min_chars=5, eligible_labels=resolve_eligible_labels(False, True)
     )
     assert "_native_text_used" not in filled[0][0]
-
-
-@pytest.mark.parametrize(
-    ("native", "expected"),
-    [
-        (
-            "J Relig Health https://doi.org/10.1007/s10943-018-0654-7(0123456789().,-volV)",
-            "J Relig Health https://doi.org/10.1007/s10943-018-0654-7",
-        ),
-        (
-            "(0123456789().,-volV)(0123456789().,-volV)\nJournal of Religion and Health",
-            "Journal of Religion and Health",
-        ),
-        ("Page 2 of 14", "Page 2 of 14"),
-    ],
-)
-def test_fill_header_drops_springer_glyph_set_marker(monkeypatch, native, expected):
-    """Springer's invisible glyph-set run is dropped from text-layer headers,
-    so it cannot glue onto the DOI."""
-    import bibr.ocr.native_text as native_mod
-    from bibr.ocr.native_text import resolve_eligible_labels
-
-    pdf_bytes = FIXTURE_PDF.read_bytes()
-    monkeypatch.setattr(native_mod, "_text_from_bbox_on_textpage", lambda *a, **k: native)
-    regions = [
-        [{"label": "header", "task_type": "text", "bbox_2d": [0, 0, 1000, 1000], "content": ""}]
-    ]
-    filled = fill_regions_from_native_text(
-        pdf_bytes, regions, min_chars=5, eligible_labels=resolve_eligible_labels(True, False)
-    )
-    assert filled[0][0]["_native_text_used"] is True
-    assert filled[0][0]["content"] == expected
 
 
 def test_fill_respects_min_chars_threshold():

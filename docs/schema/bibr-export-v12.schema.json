@@ -1272,7 +1272,7 @@
         },
         "rejection_reason": {
           "default": null,
-          "description": "Why the candidate was not selected, e.g. 'reference_candidate', 'component_candidate', 'line_join_overrun' (the DOI ran on into the next printed field) or 'agreement_only'; null when eligible.",
+          "description": "Why the candidate was not selected, e.g. 'reference_candidate', 'component_candidate', 'line_join_overrun' (the DOI ran on into the next printed field), 'edge_truncated' (a text-layer region's box cut the DOI short and a longer candidate completes it) or 'agreement_only'; null when eligible.",
           "title": "Rejection Reason",
           "type": [
             "string",
@@ -1797,6 +1797,24 @@
           "description": "Whether Crossref enrichment was enabled.",
           "title": "Crossref Enrich",
           "type": "boolean"
+        },
+        "native_text_formula_number": {
+          "default": null,
+          "description": "Whether formula_number regions could be read from the PDF text layer (OCR_NATIVE_TEXT_FORMULA_NUMBER). Omitted in exports that predate it.",
+          "title": "Native Text Formula Number",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "native_text_header_footer": {
+          "default": null,
+          "description": "Whether header and footer regions could be read from the PDF text layer (OCR_NATIVE_TEXT_HEADER_FOOTER). Omitted in exports that predate it.",
+          "title": "Native Text Header Footer",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "ref_parse": {
           "description": "Reference parsing strategy used.",
@@ -3614,6 +3632,15 @@
             "null"
           ]
         },
+        "ocr_backend": {
+          "default": null,
+          "description": "The OCR backend that read an 'ocr' region: extraction.ocr.backend, or the consensus or escalation recognizer whose reading replaced it. Omitted for other regions, and in exports that predate it.",
+          "title": "Ocr Backend",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "page": {
           "description": "1-based page number.",
           "minimum": 1,
@@ -3635,6 +3662,20 @@
           "title": "Section Id",
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "source": {
+          "default": null,
+          "description": "Where the region's text came from: 'text_layer' (the PDF's own text layer, including a scanned page's hidden OCR layer used when OCR returned nothing) or 'ocr' (a region merged from both is 'ocr'). Omitted for a region without text, and in exports that predate it.",
+          "enum": [
+            "text_layer",
+            "ocr",
+            null
+          ],
+          "title": "Source",
+          "type": [
+            "string",
             "null"
           ]
         }

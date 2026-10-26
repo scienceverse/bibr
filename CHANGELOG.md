@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `OCR_NATIVE_TEXT_HEADER_FOOTER=true` reads running heads and page footers
+  from the PDF's text layer instead of OCR, and `OCR_NATIVE_TEXT_FORMULA_NUMBER=true`
+  does the same for equation numbers that read like "(12)", "(3a)" or "(iv)".
+  Both are off by default. A header or footer stays with OCR when its text is
+  in a right-to-left script (the text layer reverses brackets and digits), when
+  it is a first-page masthead drawn partly as an image or barely covered by the
+  text layer's glyphs, and on a page whose text is mostly an invisible OCR layer.
+- The opt-in `extraction.regions[]` rows name where each region's text came
+  from: `source` is `text_layer` or `ocr`, and `ocr_backend` names the OCR
+  backend that read an `ocr` region, including a consensus or escalation
+  recognizer whose reading replaced the primary one.
+  `extraction.settings` records `native_text_header_footer` and
+  `native_text_formula_number`. The keys are optional and omitted when absent,
+  so the schema stays 12.2 and earlier 12.2 exports remain valid.
+
+### Fixed
+
+- Text that never prints no longer enters what bibr reads from the PDF text
+  layer, for any region and for the DOI evidence: white text on a white page,
+  text in invisible render mode on a born-digital page, glyphs under 1 pt, text
+  outside the page's crop box, and the extra copies of a line overprinted for a
+  bold look ("Sensors 2024, 24, 572" three times). Springer's hidden
+  "(0123456789().,-volV)" run no longer sticks to the DOI in the running head,
+  and SAGE's hidden white DOI link no longer gives a second, cut-off DOI. A
+  scan's hidden OCR layer is kept, and white text on a coloured band still
+  counts as printed. The removed objects are reported as `hidden_text`
+  furniture (rule `hidden_text/1`).
+- A DOI read from a text-layer header or footer whose box cuts the printed line
+  ("10.1177/117793222311603" for "10.1177/11779322231160397") no longer
+  outranks the full DOI it is a prefix of. It is kept in the identity receipt
+  with `rejection_reason` `edge_truncated`.
+
 ## [0.7.4] - 2026-10-23
 
 The reference parser is now v5.1 (UltraBERT-150M), which matches references far better

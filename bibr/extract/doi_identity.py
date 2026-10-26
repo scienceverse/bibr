@@ -32,6 +32,9 @@ TEXT_LAYER = "text_layer"
 LINK_ANNOTATION = "link_annotation"
 AGREEMENT_ONLY = "agreement_only"
 LINE_JOIN_OVERRUN = "line_join_overrun"
+# A DOI read from a text-layer region whose box cut its line short, which a
+# longer candidate extends by an end the cut can lose (see _reject_edge_cuts).
+EDGE_TRUNCATED = "edge_truncated"
 
 _DOI_RE = DOI_CANDIDATE_RE
 _REFERENCE_PREFIX_RE = re.compile(r"^\s*(?:\[\d+[A-Za-z]?\]|\d+[.)]\s)")
@@ -908,20 +911,29 @@ def collect_doi_candidates(
         ("footer", line) for line in contents.detected_footers
     ]
     counts = Counter(line.strip().casefold() for _, line in furniture)
+    cut_texts, cut_regions = _edge_cut_sources(contents)
+    cut: set[int] = set()
     for source_kind, line in furniture:
-        candidates.extend(
-            _candidates_from_text(
-                line,
-                source_kind=source_kind,
-                page=None,
-                section_id=None,
-                section_type=None,
-                region_index=None,
-                region_type=source_kind,
-                text_id=None,
-                repeated_count=counts[line.strip().casefold()],
-            )
+        found = _candidates_from_text(
+            line,
+            source_kind=source_kind,
+            page=None,
+            section_id=None,
+            section_type=None,
+            region_index=None,
+            region_type=source_kind,
+            text_id=None,
+            repeated_count=counts[line.strip().casefold()],
         )
+        if _summary_key(line) in cut_texts:
+            cut.update(id(candidate) for candidate in found)
+        candidates.extend(found)
+    cut.update(
+        id(candidate)
+        for candidate in candidates
+        if candidate.source_kind == "sentence"
+        and (candidate.page, candidate.region_index) in cut_regions
+    )
 
     preparsed = getattr(contents, "preparsed_metadata", None)
     structured_doi = _canonical_doi(getattr(preparsed, "doi", None))
@@ -946,7 +958,59 @@ def collect_doi_candidates(
     candidates.extend(_publication_table_doi_candidates(contents))
     if pdf_evidence is not None:
         candidates = _with_pdf_evidence(contents, candidates, pdf_evidence, section_map)
+    if cut:
+        candidates = _reject_edge_cuts(candidates, cut)
     return tuple(candidates)
+
+
+def _summary_key(text: str | None) -> str:
+    """A region's text as RegionSummary keeps it (its first 200 characters), whitespace-folded."""
+    return " ".join((text or "").split())[:150]
+
+
+def _edge_cut_sources(contents) -> tuple[set[str], set[tuple[int, int]]]:
+    """The text-layer regions whose box cut a printed line: their texts and ``(page, index)``."""
+    texts: set[str] = set()
+    regions: set[tuple[int, int]] = set()
+    for region in getattr(contents, "region_summaries", ()) or ():
+        if getattr(region, "native_text_edge_cut", False):
+            texts.add(_summary_key(region.content))
+            regions.add((region.page, region.index))
+    texts.discard("")
+    return texts, regions
+
+
+def _reject_edge_cuts(candidates: list[DoiCandidate], cut: set[int]) -> list[DoiCandidate]:
+    """Reject a DOI from a line-cutting text-layer region that another DOI extends.
+
+    The region's box ended the printed line mid-token, so a DOI there that a
+    longer candidate extends by an end a cut can lose (a few characters, see
+    _LOST_END_RE) is that DOI cut short ("10.1177/117793222311603" beside
+    "10.1177/11779322231160397") and must never outrank it. Extensions with
+    letters past that (a figure's ".g001") are other DOIs and leave it alone.
+    """
+    values = {candidate.normalized.casefold() for candidate in candidates}
+    out = []
+    for candidate in candidates:
+        value = candidate.normalized.casefold()
+        if (
+            id(candidate) in cut
+            and candidate.rejection_reason is None
+            and any(
+                other != value
+                and other.startswith(value)
+                and _LOST_END_RE.match(other[len(value) :])
+                for other in values
+            )
+        ):
+            candidate = replace(
+                candidate,
+                semantic_context="edge_truncated",
+                selection_tier=0,
+                rejection_reason=EDGE_TRUNCATED,
+            )
+        out.append(candidate)
+    return out
 
 
 # Layout labels whose text a DOI inside them belongs to: a reference entry, a
