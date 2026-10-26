@@ -14,7 +14,8 @@ every 12.2 export is still valid input for the 12.x reader.
 - `OCR_NATIVE_TEXT_HEADER_FOOTER=true` reads running heads and page footers
   from the PDF's text layer instead of OCR, and `OCR_NATIVE_TEXT_FORMULA_NUMBER=true`
   does the same for equation numbers that read like "(12)", "(3a)" or "(iv)".
-  Both are off by default. A header or footer stays with OCR when its text is
+  The header/footer setting is on by default (see Changed); the formula-number
+  one stays off. A header or footer stays with OCR when its text is
   in a right-to-left script (the text layer reverses brackets and digits), when
   it is a first-page masthead drawn partly as an image or barely covered by the
   text layer's glyphs, and on a scanned page: one whose text is mostly an
@@ -32,6 +33,14 @@ every 12.2 export is still valid input for the 12.x reader.
   `hidden_text` candidate. It never names the paper on its own; when it matches
   the DOI chosen from printed evidence, its `semantic_context` is
   `hidden_text_agreement`.
+
+### Changed
+
+- Running heads and page footers of born-digital PDFs are now read from the
+  text layer by default (`OCR_NATIVE_TEXT_HEADER_FOOTER=true`), which cuts OCR
+  requests per born-digital paper by about 42% with no change in the scored
+  fields on born-digital papers or scans. Set it to `false` to OCR them as
+  before.
 
 ### Fixed
 

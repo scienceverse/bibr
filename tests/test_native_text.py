@@ -551,10 +551,9 @@ def test_fill_skips_table_regions():
 
 
 def test_eligible_labels_include_header_footer():
-    """x-performance-3 behind OCR_NATIVE_TEXT_HEADER_FOOTER (default off).
+    """x-performance-3 behind OCR_NATIVE_TEXT_HEADER_FOOTER (default on).
 
-    Default output is unchanged (header/footer go to OCR); opting in adds
-    them to the eligible set. Short running heads keep the short-text
+    The setting adds header/footer to the eligible set; off, they go to OCR. Short running heads keep the short-text
     allowance in both cases (it only matters once they are eligible).
     """
     from bibr.config import GlobalSettings
@@ -565,7 +564,7 @@ def test_eligible_labels_include_header_footer():
         resolve_eligible_labels,
     )
 
-    assert GlobalSettings().ocr.native_text_header_footer is False
+    assert GlobalSettings().ocr.native_text_header_footer is True
     assert "header" not in DEFAULT_ELIGIBLE_LABELS
     assert "footer" not in DEFAULT_ELIGIBLE_LABELS
     assert resolve_eligible_labels(False) == DEFAULT_ELIGIBLE_LABELS
@@ -576,7 +575,7 @@ def test_eligible_labels_include_header_footer():
     assert "footer" in _SHORT_NATIVE_TEXT_LABELS
 
 
-def test_header_footer_setting_defaults_off_but_enables_fill(monkeypatch):
+def test_header_footer_setting_gates_the_fill(monkeypatch):
     """The setting gates the behavior: off skips header/footer, on fills."""
     import bibr.ocr.native_text as native_mod
     from bibr.config import GlobalSettings
@@ -584,8 +583,8 @@ def test_header_footer_setting_defaults_off_but_enables_fill(monkeypatch):
 
     # A whole-page box around two lines is no first-page masthead.
     monkeypatch.setattr(native_mod, "_masthead_needs_ocr", lambda *a, **k: False)
-    monkeypatch.setenv("OCR_NATIVE_TEXT_HEADER_FOOTER", "true")
-    assert GlobalSettings().ocr.native_text_header_footer is True
+    monkeypatch.setenv("OCR_NATIVE_TEXT_HEADER_FOOTER", "false")
+    assert GlobalSettings().ocr.native_text_header_footer is False
 
     pdf_bytes = FIXTURE_PDF.read_bytes()
     regions_off = [

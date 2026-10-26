@@ -964,8 +964,8 @@ def get_native_text_in_bbox(
 #     handled by OCR than by the min_chars threshold. Eligible only when
 #     OCR_NATIVE_TEXT_FORMULA_NUMBER is on (see FORMULA_NUMBER_LABELS), with
 #     its own short-text allowance (1..16 characters).
-#   - header / footer: only eligible when OCR_NATIVE_TEXT_HEADER_FOOTER is on
-#     (see HEADER_FOOTER_LABELS). Their only consumers (detected_headers /
+#   - header / footer: eligible when OCR_NATIVE_TEXT_HEADER_FOOTER is on, the
+#     default (see HEADER_FOOTER_LABELS). Their only consumers (detected_headers /
 #     detected_footers feeding DOI furniture candidates and front-matter
 #     masthead checks) need plain text, which the native layer returns exactly
 #     on born-digital PDFs — about half of all OCR calls there. The
@@ -987,8 +987,8 @@ DEFAULT_ELIGIBLE_LABELS: frozenset[str] = frozenset(
     }
 )
 
-# Header/footer labels, eligible only when the header/footer native-text
-# setting is on (off by default, so default output is unchanged).
+# Header/footer labels, eligible when the header/footer native-text setting
+# is on (the default; see furniture_to_ocr for the regions that stay on OCR).
 HEADER_FOOTER_LABELS: frozenset[str] = frozenset({"header", "footer"})
 
 

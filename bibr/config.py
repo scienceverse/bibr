@@ -1005,11 +1005,14 @@ class OcrOptions(_BibrSettings):
         "to be trusted; below this the page falls back to OCR.",
     )
     native_text_header_footer: bool = Field(
-        False,
+        True,
         description="Read header/footer regions from the PDF text layer instead of OCR "
         "on born-digital PDFs, under the same printable-ratio gate as body text. "
-        "Off by default pending an eval of DOI furniture and front-matter effects; "
-        "enable to A/B. Short running heads use the short-text allowance.",
+        "Short running heads use the short-text allowance. A header or footer stays "
+        "with OCR in a right-to-left script, as a first-page masthead the text layer "
+        "barely covers, and on scanned pages. On by default since the E12b eval "
+        "(2026-10-26: no scored change on born-digital PDFs or scans, about 42% fewer "
+        "OCR requests per born-digital paper); set false to OCR them.",
     )
     native_text_formula_number: bool = Field(
         False,
