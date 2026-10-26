@@ -52,7 +52,7 @@ LAYER_VERSION = "doclayer/3"
 # rule's version with it, and INDEX_FRAME, the key of those indexes, changes.
 WATERMARK_RULE = "watermark/1"
 LINE_NUMBER_RULE = "line_number/1"
-HIDDEN_TEXT_RULE = "hidden_text/1"
+HIDDEN_TEXT_RULE = "hidden_text/2"
 INDEX_FRAME = f"post_strip:{WATERMARK_RULE}+{LINE_NUMBER_RULE}+{HIDDEN_TEXT_RULE}"
 # The invisible-layer rule (bibr.ocr.native_text._is_invisible_text_layer_page)
 # behind Page.text_source.

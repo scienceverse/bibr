@@ -36,16 +36,19 @@ every 12.2 export is still valid input for the 12.x reader.
 ### Fixed
 
 - Text that never prints no longer enters what bibr reads from the PDF text
-  layer, for any region and for the DOI evidence: white text on a white page,
-  text in invisible render mode on a born-digital page, glyphs under 1 pt, text
-  outside the page's crop box, and the extra copies of a line overprinted for a
-  bold look ("Sensors 2024, 24, 572" three times). Springer's hidden
+  layer, for any region and for the DOI evidence: light text whose drawing
+  changes no pixel of the page (white on white, or under a logo painted over
+  it), text in invisible render mode on a born-digital page, glyphs under 1 pt,
+  text outside the page's crop box, and the extra copies of a line overprinted
+  for a bold look ("Sensors 2024, 24, 572" three times). Springer's hidden
   "(0123456789().,-volV)" run no longer sticks to the DOI in the running head,
   and SAGE's hidden white DOI link no longer gives a second, cut-off DOI. A
   scan's OCR layer is kept, whether hidden or filled white over the page
-  image, and white text on a coloured band or with a dark outline still
-  counts as printed. The removed objects are reported as `hidden_text`
-  furniture (rule `hidden_text/1`).
+  image: invisible text stays on a page images cover as a scan does, and on a
+  page whose characters the scan check counts as mostly invisible. White text
+  on a coloured band, also one that covers only part of the line, or with a
+  dark outline still counts as printed. The removed objects are reported as
+  `hidden_text` furniture (rule `hidden_text/2`).
 - A DOI read from a text-layer header or footer whose box cuts the printed line
   ("10.1177/117793222311603" for "10.1177/11779322231160397") no longer
   outranks the full DOI it is a prefix of. It is kept in the identity receipt

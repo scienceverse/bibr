@@ -1,4 +1,4 @@
-"""Text that never prints stays out of the native text layer (rule hidden_text/1).
+"""Text that never prints stays out of the native text layer (rule hidden_text/2).
 
 Springer PDFs carry an invisible run of the font subset's digits and
 punctuation in the running head, "(0123456789().,-volV)" at 0.1 pt in white,
@@ -101,11 +101,16 @@ def test_springer_head_run_does_not_glue_onto_the_doi():
 
 
 def test_white_vol_marker_leaves_the_footer():
-    """'Vol.:(0123456789)' in white at 8 pt beside the visible footer."""
+    """'Vol.:(0123456789)' in white at 8 pt beside the visible footer.
+
+    It ends before the page number: white glyphs painted over black ones would
+    erase ink, which the render counts as showing.
+    """
+    marker = "Vol.:(0123456789)"
     pdf_bytes = _pdf(
         _body()
         + _bt("1 3", 520.0, _FOOT_Y, size=8.0)
-        + _white(_bt("Vol.:(0123456789)", 470.0, _FOOT_Y, size=8.0))
+        + _white(_bt(marker, 510.0 - _width(marker, 8.0), _FOOT_Y, size=8.0))
     )
 
     assert _read(pdf_bytes, "footer", _FOOT_Y) == "1 3"
@@ -144,6 +149,32 @@ def test_white_text_on_a_coloured_band_is_kept():
     assert _read(pdf_bytes, "header", _HEAD_Y) == "Open Access Journal"
 
 
+def test_white_text_half_on_a_coloured_band_is_kept():
+    """A band behind the top of the box only: most of the box is white page.
+
+    A median of the box judged it background and dropped the whole line; only
+    text whose drawing changes almost none of its box is hidden.
+    """
+    band = b"q 0.1 0.2 0.5 rg 30 763.4 552 30 re f Q\n"
+    pdf_bytes = _pdf(band + _white(_bt("Open Access Journal", 46.0, _HEAD_Y, size=10.0)) + _body())
+
+    assert _read(pdf_bytes, "header", _HEAD_Y) == "Open Access Journal"
+
+
+def test_white_text_under_a_logo_painted_over_it_leaves_the_footer():
+    """Springer's marker sits under its logo: the box shows the logo, not white."""
+    marker = "Vol.:(0123456789)"
+    logo = b"q 0.3 0.3 0.3 rg 96 %.2f %.2f 14 re f Q\n" % (_FOOT_Y - 4.0, _width(marker, 8.0) + 8.0)
+    pdf_bytes = _pdf(
+        _body()
+        + _bt("1 3", 520.0, _FOOT_Y, size=8.0)
+        + _white(_bt(marker, 100.0, _FOOT_Y, size=8.0))
+        + logo
+    )
+
+    assert _read(pdf_bytes, "footer", _FOOT_Y) == "1 3"
+
+
 def test_white_text_on_white_is_dropped():
     pdf_bytes = _pdf(
         _white(_bt("Abstract citation ID: ckae144.904", 72.0, 700.0)) + _body(),
@@ -152,6 +183,17 @@ def test_white_text_on_white_is_dropped():
     text = _page_text(pdf_bytes)
     assert "ckae144" not in text
     assert "Body text line 0" in text
+
+
+def test_a_white_on_white_doi_is_hidden_doi_evidence_not_a_printed_line():
+    """osf_mvfth: the postprint banner's DOI is white on white."""
+    banner = "Final article available at: https://doi.org/10.1037/cou0000324"
+    pdf_bytes = _pdf(_white(_bt(banner, 72.0, 700.0, size=8.0)) + _body())
+
+    evidence = read_pdf_doi_evidence(pdf_bytes, [1])
+
+    assert not [line for line in evidence.lines if "10.1037" in line.text]
+    assert [(item.page, item.text) for item in evidence.hidden] == [(1, banner)]
 
 
 def test_white_text_with_a_dark_outline_is_kept():
@@ -190,6 +232,79 @@ def test_hidden_ocr_layer_of_a_scan_is_kept():
     text = _page_text(pdf_bytes)
     assert "OCR line 0" in text
     assert "OCR line 9" in text
+
+
+def _scan_route(pdf_bytes: bytes) -> tuple[str, bool]:
+    """The page text after the furniture strip, and whether the scan check still holds."""
+    with pdfium_lock:
+        doc = pypdfium2.PdfDocument(pdf_bytes)
+        try:
+            page = doc[0]
+            textpage = open_text_page(page)
+            try:
+                crop_box = native_text._page_crop_box(page)
+                return (
+                    textpage.get_text_range(),
+                    native_text._is_invisible_text_layer_page(page, textpage, crop_box),
+                )
+            finally:
+                textpage.close()
+                page.close()
+        finally:
+            doc.close()
+
+
+_OCR_LINES = [
+    f"Hidden OCR line {n} of a scanned article, read by the legacy engine long ago"
+    for n in range(6)
+]
+
+
+def _stamps() -> bytes:
+    """Ten visible one-glyph marks: page numbers, a stamp's letters."""
+    return b"".join(_layer_text([str(n)], x=40 + 50 * n, y=20, size=8) for n in range(10))
+
+
+def test_scan_with_long_ocr_lines_beside_one_glyph_stamps_keeps_its_scan_route():
+    """6 invisible OCR lines and 10 visible one-glyph objects over a page image.
+
+    By object count the layer was a minority (6 of 16) and was stripped, so
+    the scan check saw no invisible text and the page lost its scan route. By
+    characters, as the scan check counts, the layer is most of the page, and a
+    page images cover keeps it whatever the share.
+    """
+    layer = b"".join(
+        _layer_text([line], mode=3, x=40, y=700 - 20 * n, size=10)
+        for n, line in enumerate(_OCR_LINES)
+    )
+    pdf_bytes = _layer_pdf([{"content": _image(612, 792) + layer + _stamps()}])
+
+    text, scan = _scan_route(pdf_bytes)
+    assert all(line in text for line in _OCR_LINES)
+    assert scan
+
+
+def test_mostly_invisible_characters_stay_on_a_page_without_a_scan_image():
+    """The same text with no page image: the invisible share is by characters."""
+    layer = b"".join(
+        _layer_text([line], mode=3, x=40, y=700 - 20 * n, size=10)
+        for n, line in enumerate(_OCR_LINES)
+    )
+    pdf_bytes = _layer_pdf([{"content": layer + _stamps()}])
+
+    text, scan = _scan_route(pdf_bytes)
+    assert all(line in text for line in _OCR_LINES)
+    assert not scan
+
+
+def test_a_little_invisible_text_on_a_born_digital_page_still_goes():
+    """A few invisible characters on a born-digital page still go."""
+    hidden = _layer_text(["Powered by TCPDF"], mode=3, x=72, y=20, size=6)
+    pdf_bytes = _layer_pdf([{"content": _layer_text(["Visible body text"] * 4) + hidden}])
+
+    text, scan = _scan_route(pdf_bytes)
+    assert "TCPDF" not in text
+    assert not scan
 
 
 def test_white_ocr_layer_over_a_scan_is_kept():

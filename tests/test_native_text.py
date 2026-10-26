@@ -725,6 +725,15 @@ def test_formula_number_setting_defaults_off_and_resolves(monkeypatch):
         ("(IV)", "(IV)"),
         ("(a)", None),  # a letter alone is no equation number
         ("(S)", None),
+        ("(ix)", "(ix)"),
+        ("(xii)", "(xii)"),
+        ("(XIV)", "(XIV)"),
+        ("(c)", None),  # roman digits beyond i, v and x are letters here
+        ("(d)", None),
+        ("(L)", None),
+        ("(mid)", None),
+        ("(iiii)", None),  # not a well-formed numeral
+        ("(vx)", None),
         ("( 1 )", "(1)"),
         ("x = \\alpha + \\beta (3)", None),  # 22 chars: the box caught the formula
         ("g (3)", None),  # a formula glyph the box caught

@@ -394,6 +394,36 @@ def test_key_changes_with_native_header_footer_setting(monkeypatch):
     assert ocr_cache._key(fs, cfg, _identity()) != base
 
 
+def test_key_changes_with_the_header_footer_routing_rule(monkeypatch):
+    """Cached regions hold the routed header/footer text: a routing change re-reads them."""
+    import bibr.ocr.native_text as native_mod
+
+    fs = _fs()
+    cfg = RunConfig(ocr_backend="glm-llama")
+    monkeypatch.setattr(Settings.ocr, "native_text_header_footer", False)
+    off = ocr_cache._key(fs, cfg, _identity())
+    monkeypatch.setattr(Settings.ocr, "native_text_header_footer", True)
+    on = ocr_cache._key(fs, cfg, _identity())
+
+    monkeypatch.setattr(native_mod, "FURNITURE_ROUTE_RULE", "furniture_route/999")
+
+    assert ocr_cache._key(fs, cfg, _identity()) != on
+    monkeypatch.setattr(Settings.ocr, "native_text_header_footer", False)
+    assert ocr_cache._key(fs, cfg, _identity()) == off
+
+
+def test_key_changes_with_the_hidden_text_rule(monkeypatch):
+    import bibr.document.model as model_mod
+
+    fs = _fs()
+    cfg = RunConfig(ocr_backend="glm-llama")
+    base = ocr_cache._key(fs, cfg, _identity())
+
+    monkeypatch.setattr(model_mod, "HIDDEN_TEXT_RULE", "hidden_text/999")
+
+    assert ocr_cache._key(fs, cfg, _identity()) != base
+
+
 def test_key_changes_with_native_formula_number_setting(monkeypatch):
     fs = _fs()
     cfg = RunConfig(ocr_backend="glm-llama")

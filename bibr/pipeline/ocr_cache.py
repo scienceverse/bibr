@@ -131,6 +131,7 @@ def _key(
     table_recovery_limit = PADDLE_TABLE_RECOVERY_MAX_TOKENS if runs_table_recovery else 0
     from bibr import __version__
     from bibr.document.model import HIDDEN_TEXT_RULE
+    from bibr.ocr.native_text import FURNITURE_ROUTE_RULE
 
     parts = [
         str(_CACHE_FORMAT_VERSION),
@@ -173,7 +174,11 @@ def _key(
         f"native_text={int(effective.ocr.native_text_enabled)}",
         f"native_text_min_chars={effective.ocr.native_text_min_chars}",
         f"native_text_min_printable_ratio={effective.ocr.native_text_min_printable_ratio}",
-        f"native_text_header_footer={int(effective.ocr.native_text_header_footer)}",
+        # With headers and footers on, their routing (right-to-left text, the
+        # first-page masthead, scanned and mostly invisible pages, edge cuts)
+        # decides which of them the cached regions hold as text-layer text.
+        "native_text_header_footer="
+        + (f"1:{FURNITURE_ROUTE_RULE}" if effective.ocr.native_text_header_footer else "0"),
         # The hidden-text strip decides which text-layer glyphs exist at all.
         f"native_text_hidden={HIDDEN_TEXT_RULE}",
         "native_text_reject_invisible_layer="

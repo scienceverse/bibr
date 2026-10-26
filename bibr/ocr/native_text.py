@@ -1032,13 +1032,17 @@ _FORMULA_NUMBER_MAX_CHARS = 16
 # removed: an optional bracket, up to four letters (a section or appendix
 # prefix, a roman numeral), digits with up to two dotted or dashed parts, an
 # optional letter suffix and an optional closing bracket, with a digit
-# somewhere or, without one, a roman numeral between the brackets ("(ii)").
+# somewhere or, without one, a roman numeral of i, v and x between the
+# brackets ("(ii)", "(ix)", "(XII)"), the numerals equation numbering uses.
 # Anything else, such as brackets from a symbol font ("ð1Þ" for "(1)"), a
-# formula glyph the box caught ("g (3)") or a bare letter ("(a)"), goes to OCR.
+# formula glyph the box caught ("g (3)"), a bare letter ("(a)", also "(c)" and
+# "(d)", which are roman digits too) or a word ("(mid)"), goes to OCR.
 _FORMULA_NUMBER_RE = re.compile(
     r"[(\[]?[A-Za-z]{0,4}[.\-]?\d{0,3}(?:[.\-\u2013]\d{1,3}){0,2}[a-z]?[)\]]?"
 )
-_ROMAN_NUMERAL_RE = re.compile(r"[ivxlcdm]+|[IVXLCDM]+")
+_ROMAN_NUMERAL_RE = re.compile(
+    r"(?=[ivx])x{0,3}(?:ix|iv|v?i{0,3})|(?=[IVX])X{0,3}(?:IX|IV|V?I{0,3})"
+)
 
 _FONT_SAMPLE_SIZE = 15
 _FONT_BBOX_TOLERANCE = 5.0  # PDF points
@@ -1260,7 +1264,11 @@ def _sample_page_font_metadata(
 #   or whose native glyphs span less than _MASTHEAD_MIN_GLYPH_COVERAGE of its
 #   height. On the 390 dev exports (2026-10-26) that sends 11 of the 690
 #   fillable first-page header/footer boxes to OCR, gesec's raster
-#   "DOI: 10.7769/gesec.7i3.557" line among them;
+#   "DOI: 10.7769/gesec.7i3.557" line among them. The check runs on the PDF's
+#   first page only: behind a repository or download cover (HAL, ResearchGate,
+#   Taylor & Francis) the article's own first page is a later one, but bibr
+#   tells a cover page only from the parsed front matter
+#   (bibr.extract.front_matter._without_cover_pages), after this fill;
 # - a page whose text is mostly invisible (render mode 3/7), an OCR layer the
 #   scan check did not accept: its furniture stays with OCR like a scan's;
 # - a page images cover as a scan does (_coverage_qualifies) whose text is
@@ -1270,6 +1278,11 @@ def _sample_page_font_metadata(
 #   W2037590930: "1025" for the whole Lancet running head), so they go to
 #   OCR; body text keeps its route. On the 392 dev PDFs (2026-10-26) only
 #   gesec's first page and W4308442706 qualify; on scans_eval80, 7 PDFs.
+# A box that cuts a printed line is filled but marked (_box_cuts_a_line).
+# The OCR cache keeps the regions after the fill, so the routing has a version
+# in its key (bibr.pipeline.ocr_cache): bump FURNITURE_ROUTE_RULE with any
+# change to which header and footer boxes the text layer fills or marks.
+FURNITURE_ROUTE_RULE = "furniture_route/1"
 _MASTHEAD_MAX_IMAGE_COVERAGE = 0.5
 _MASTHEAD_MIN_GLYPH_COVERAGE = 0.2
 _RTL_BIDI_CLASSES = frozenset({"R", "AL"})
@@ -2083,40 +2096,58 @@ def _line_number_column(
 # repository stamps and whole abstracts set in white on white, TCPDF's
 # invisible "Powered by" line. Native text took them into headers, footers,
 # reference strings and DOIs ("...0654-7(0123456789().,-volV)"), so they are
-# removed from the in-memory page like the watermark (rule hidden_text/1) and
+# removed from the in-memory page like the watermark (rule hidden_text/2) and
 # every reader of the text layer drops them. pdfium keeps the render mode, fill
 # colour, font size and matrix per text object, so the rule judges objects:
-# - invisible: render mode 3 or 7, on a page where such objects are under
-#   _HIDDEN_TEXT_MAX_INVISIBLE_SHARE of the text objects. A hidden OCR layer
-#   over a scan stays for the invisible-layer check and its OCR fallback.
+# - invisible: render mode 3 or 7, on a page that is not covered by images
+#   as a scan is (_coverage_qualifies) and whose kept characters would not
+#   pass the scan check's own share test (_invisible_share and
+#   _share_qualifies: characters, not objects, once the other removed objects
+#   are left out). A hidden OCR layer over a scan, or one the scan check
+#   counts as mostly invisible, stays for the invisible-layer check and its
+#   OCR fallback: a count of objects dropped a scan's six long OCR lines
+#   beside ten one-glyph stamps, and the page lost its scan route.
 # - tiny: an effective size (Tf size times the matrix scale) and a page-space
 #   box both under _HIDDEN_TEXT_MAX_SIZE_PT.
 # - transparent: a fill alpha of 0 in a filling render mode.
 # - off the page: a box that misses the CropBox.
-# - background: a light fill (luma >= _HIDDEN_TEXT_MIN_LUMA) whose box,
-#   rendered with the page's light text hidden, has a median colour within
-#   _HIDDEN_TEXT_BACKGROUND_TOLERANCE of the fill on every channel. White text
-#   on a coloured masthead band keeps its band and stays, and so does text
-#   filled white but outlined in a dark stroke (render modes 2 and 6). Not on
-#   a page images cover as a scan does (_coverage_qualifies): there the light
-#   text is the scan's OCR layer filled white, and the "background" the
-#   render shows is the scan's paper around its ink, so the median kept some
-#   words and dropped others (W2037590930: 318 of 1078 objects on page 1).
-#   The page keeps its layer whole, as before the rule.
+# - background: a light fill (luma >= _HIDDEN_TEXT_MIN_LUMA) whose drawing
+#   changes at most _HIDDEN_TEXT_MAX_SHOWN_SHARE of its box's pixels (beyond
+#   _HIDDEN_TEXT_BACKGROUND_TOLERANCE on a channel; see _on_own_colour). The
+#   page is rendered with and without the light text: white on white, or white
+#   under a logo or line painted over it, changes nothing (Springer's
+#   "Vol.:(0123456789)" under its logo, SAGE's white DOI link under the printed
+#   DOI, PLOS's white placeholders under its update badge). The render also
+#   sees a clip path that hides the glyphs, which the clip points read below
+#   could not. White text on a coloured masthead band changes its pixels and
+#   stays, also when the band covers only part of its box (the median of the
+#   box, the rule before hidden_text/2, judged a line half on a band as all
+#   background), and so does text filled white but outlined in a dark stroke
+#   (render modes 2 and 6). On the 392 dev PDFs (2026-10-26) every light object
+#   changed either no pixel of its box or at least 13% of it (BMC's white
+#   "RESEARCH ARTICLE Open Access" on its band). Not on a page images cover as
+#   a scan does (_coverage_qualifies):
+#   there the light text is the scan's OCR layer filled white, and the
+#   "background" the render shows is the scan's paper around its ink, so the
+#   test kept some words and dropped others (W2037590930: 318 of 1078 objects
+#   on page 1). The page keeps its layer whole, as before the rule.
 # - overprint: a later copy of an earlier object, the same text at the same
 #   size, whose box covers at least _OVERPRINT_MIN_OVERLAP of the smaller box.
 #   "Fake bold" draws a running head two or three times a fraction of a point
 #   apart; the text layer read it as "Vol. 3, No. 12 Vol. 3, No. 12 ...".
 # Clip paths are not read: FPDFPageObj_GetClipPath's points did not line up
 # with the text boxes on the dev PDFs (2026-10-26: whole visible pages of 36
-# PDFs read as clipped away), so text hidden only by a clip path stays.
+# PDFs read as clipped away), so dark text hidden only by a clip path stays;
+# light text a clip hides is caught by the background render.
 # On the 392 dev PDFs (2026-10-26) the rule removes the Springer and Nature
-# glyph-set markers, three white-on-white blocks and TCPDF's line; no visible
-# masthead, page number or figure label it was checked against.
-_HIDDEN_TEXT_MAX_INVISIBLE_SHARE = 0.5
+# glyph-set markers, white-on-white blocks, PLOS's placeholders, a grey title
+# painted over by later drawing and TCPDF's line; no visible masthead, page number
+# or figure label it was checked against. On the 80 scans it removes only
+# overprinted copies, one tiny and one off-page object, as hidden_text/1 did.
 _HIDDEN_TEXT_MAX_SIZE_PT = 1.0
 _HIDDEN_TEXT_MIN_LUMA = 0.6
 _HIDDEN_TEXT_BACKGROUND_TOLERANCE = 16
+_HIDDEN_TEXT_MAX_SHOWN_SHARE = 0.01
 _HIDDEN_TEXT_RENDER_SCALE = 1.0
 _FILLING_RENDER_MODES = frozenset({0, 2, 4, 6})
 _FILL_AND_STROKE_RENDER_MODES = frozenset({2, 6})
@@ -2153,11 +2184,52 @@ def _boxes_meet(box: _Box, other: _Box) -> bool:
     return box[0] <= other[2] and other[0] <= box[2] and box[1] <= other[3] and other[1] <= box[3]
 
 
-def _find_hidden_text(pdfium_c, page, objects: list) -> list[tuple[tuple, str, _Box | None]]:
+def _object_address(obj) -> int | None:
+    """The pdfium handle of a page object as an int, to match it across APIs."""
+    return ctypes.cast(obj, ctypes.c_void_p).value
+
+
+def _kept_invisible_share(pdfium_c, page, dropped: list) -> float | None:
+    """The scan check's invisible share of *page* once the *dropped* entries are gone.
+
+    :func:`_invisible_share` over the page's characters, with the characters
+    of the ``(parent, object, matrix)`` entries in *dropped* left out, as the
+    text page built after their removal will have them.
+    """
+    text_object_of = getattr(pdfium_c, "FPDFText_GetTextObject", None)
+    if text_object_of is None:
+        raise RuntimeError("this PDFium build has no FPDFText_GetTextObject")
+    is_generated = getattr(pdfium_c, "FPDFText_IsGenerated", None)
+    gone = {_object_address(entry[1]) for entry in dropped}
+    textpage = page.get_textpage()
+    try:
+        handle = textpage.raw
+
+        def render_mode_of(index: int) -> int | None:
+            obj = text_object_of(handle, index)
+            if not obj or _object_address(obj) in gone:
+                return None
+            return pdfium_c.FPDFTextObj_GetTextRenderMode(obj)
+
+        return _invisible_share(
+            textpage.count_chars(),
+            lambda index: pdfium_c.FPDFText_GetUnicode(handle, index),
+            lambda index: is_generated is not None and is_generated(handle, index) == 1,
+            render_mode_of,
+        )
+    finally:
+        textpage.close()
+
+
+def _find_hidden_text(
+    pdfium_c, page, objects: list, removed: list | None = None
+) -> list[tuple[tuple, str, _Box | None]]:
     """``(entry, reason, page-space box)`` for every hidden text object in *objects*.
 
     *objects* are ``(parent, object, matrix)`` entries as collected by
-    :func:`_collect_text_objects`. Nothing is removed. See the rule above.
+    :func:`_collect_text_objects`; *removed* are entries the furniture strip
+    removes anyway (watermarks, line numbers), which the invisible test leaves
+    out of its share. Nothing is removed here. See the rule above.
     """
     crop_box = _page_crop_box(page)
     hidden: list[tuple[tuple, str, _Box | None]] = []
@@ -2192,12 +2264,28 @@ def _find_hidden_text(pdfium_c, page, objects: list) -> list[tuple[tuple, str, _
             hidden.append((entry, "transparent", box))
         elif box is not None and _is_light(rgba):
             light.append((entry, rgba, box))
-    if invisible and len(invisible) < _HIDDEN_TEXT_MAX_INVISIBLE_SHARE * len(objects):
-        hidden.extend(invisible)
-    if light and not _coverage_qualifies(_page_image_coverage(page, crop_box)):
+    scan_like: list[bool] = []
+
+    def covered_as_a_scan() -> bool:
+        if not scan_like:
+            scan_like.append(_coverage_qualifies(_page_image_coverage(page, crop_box)))
+        return scan_like[0]
+
+    if light and not covered_as_a_scan():
         hidden.extend(_on_own_colour(pdfium_c, page, light, crop_box))
     taken = {id(entry) for entry, _reason, _box in hidden}
     hidden.extend(_overprints(pdfium_c, page, [e for e in objects if id(e) not in taken]))
+    taken = {id(entry) for entry, _reason, _box in hidden}
+    invisible = [item for item in invisible if id(item[0]) not in taken]
+    if invisible and not covered_as_a_scan():
+        dropped = [*(removed or ()), *(entry for entry, _reason, _box in hidden)]
+        try:
+            share = _kept_invisible_share(pdfium_c, page, dropped)
+        except Exception:  # noqa: BLE001 - without the share the invisible text stays
+            logger.debug("Invisible-text share unavailable; the page keeps it", exc_info=True)
+        else:
+            if not _share_qualifies(share):
+                hidden.extend(invisible)
     return hidden
 
 
@@ -2269,37 +2357,57 @@ def _overprints(pdfium_c, page, objects: list) -> list[tuple[tuple, str, _Box]]:
 def _on_own_colour(
     pdfium_c, page, light: list, crop_box: tuple[float, float, float, float]
 ) -> list[tuple[tuple, str, _Box]]:
-    """The *light* entries whose box shows their own fill once the light text is hidden."""
+    """The *light* entries whose drawing leaves the page as it is (the background reason).
+
+    The page is rendered as it is and with the light text hidden (render
+    mode 3). An object is hidden when the two renders differ (beyond
+    :data:`_HIDDEN_TEXT_BACKGROUND_TOLERANCE` on a channel) in at most
+    :data:`_HIDDEN_TEXT_MAX_SHOWN_SHARE` of its box's pixels: white on white,
+    or white under a logo painted over it or a clip that hides it. Text that
+    shows on any part of its box, such as white on a band that covers half
+    of it, changes more of its box and stays.
+    """
     set_mode = getattr(pdfium_c, "FPDFTextObj_SetTextRenderMode", None)
     if set_mode is None:
         return []
-    from PIL import ImageStat
-
+    shown = _render_rgb(page)
     saved = []
     try:
         for entry, _rgba, _box in light:
             obj = entry[1]
             saved.append((obj, pdfium_c.FPDFTextObj_GetTextRenderMode(obj)))
             set_mode(obj, 3)
-        image = page.render(scale=_HIDDEN_TEXT_RENDER_SCALE).to_pil().convert("RGB")
+        bare = _render_rgb(page)
     finally:
         for obj, mode in saved:
             set_mode(obj, mode)
-    width, height = image.size
+    shows = _changed_pixels(shown, bare)
+    width, height = bare.size
     rotation = _page_rotation(page)
     hidden = []
-    for entry, rgba, box in light:
+    for entry, _rgba, box in light:
         x1, y1, x2, y2 = _pdf_points_to_normalized_bbox(box, crop_box, rotation)
         left = max(0, min(width - 1, int(x1 / 1000.0 * width)))
         top = max(0, min(height - 1, int(y1 / 1000.0 * height)))
         right = max(left + 1, min(width, math.ceil(x2 / 1000.0 * width)))
         bottom = max(top + 1, min(height, math.ceil(y2 / 1000.0 * height)))
-        median = ImageStat.Stat(image.crop((left, top, right, bottom))).median
-        if max(abs(m - c) for m, c in zip(median, rgba[:3], strict=True)) <= (
-            _HIDDEN_TEXT_BACKGROUND_TOLERANCE
-        ):
+        changed = shows.crop((left, top, right, bottom)).histogram()[255]
+        if changed <= _HIDDEN_TEXT_MAX_SHOWN_SHARE * (right - left) * (bottom - top):
             hidden.append((entry, "background", box))
     return hidden
+
+
+def _render_rgb(page):
+    return page.render(scale=_HIDDEN_TEXT_RENDER_SCALE).to_pil().convert("RGB")
+
+
+def _changed_pixels(image, base):
+    """An 8-bit mask: 255 where *image* differs from *base* beyond the tolerance on a channel."""
+    from PIL import ImageChops
+
+    red, green, blue = ImageChops.difference(image, base).split()
+    worst = ImageChops.lighter(ImageChops.lighter(red, green), blue)
+    return worst.point(lambda value: 255 if value > _HIDDEN_TEXT_BACKGROUND_TOLERANCE else 0)
 
 
 def _hidden_text_details(pdfium_c, page, hidden: list) -> list[tuple]:
@@ -2531,7 +2639,7 @@ def strip_furniture_objects(
     changes: nothing is written back, and the callers open the document from
     bytes for their own pass. Operates on a caller-provided (lock-held) page.
 
-    Hidden text objects (see the hidden_text/1 rule above
+    Hidden text objects (see the hidden_text/2 rule above
     :func:`_find_hidden_text`) go on every page.
 
     *furniture*, when given, gets ``(kind, box, text)`` for every object
@@ -2558,7 +2666,9 @@ def strip_furniture_objects(
     entries = watermarks + line_numbers
     taken = {id(entry) for entry in entries}
     try:
-        hidden = _find_hidden_text(pdfium_c, page, [e for e in found if id(e) not in taken])
+        hidden = _find_hidden_text(
+            pdfium_c, page, [e for e in found if id(e) not in taken], removed=entries
+        )
     except Exception:  # noqa: BLE001 - the hidden-text pass never costs the furniture strip
         logger.debug("Hidden-text scan failed; the page keeps its hidden text", exc_info=True)
         hidden = []
