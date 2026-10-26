@@ -2079,7 +2079,8 @@ def _line_number_column(
 # - background: a light fill (luma >= _HIDDEN_TEXT_MIN_LUMA) whose box,
 #   rendered with the page's light text hidden, has a median colour within
 #   _HIDDEN_TEXT_BACKGROUND_TOLERANCE of the fill on every channel. White text
-#   on a coloured masthead band keeps its band and stays.
+#   on a coloured masthead band keeps its band and stays, and so does text
+#   filled white but outlined in a dark stroke (render modes 2 and 6).
 # - overprint: a later copy of an earlier object, the same text at the same
 #   size, whose box covers at least _OVERPRINT_MIN_OVERLAP of the smaller box.
 #   "Fake bold" draws a running head two or three times a fraction of a point
@@ -2096,15 +2097,22 @@ _HIDDEN_TEXT_MIN_LUMA = 0.6
 _HIDDEN_TEXT_BACKGROUND_TOLERANCE = 16
 _HIDDEN_TEXT_RENDER_SCALE = 1.0
 _FILLING_RENDER_MODES = frozenset({0, 2, 4, 6})
+_FILL_AND_STROKE_RENDER_MODES = frozenset({2, 6})
 _OVERPRINT_MIN_OVERLAP = 0.5
 
 
-def _fill_rgba(pdfium_c, obj) -> tuple[int, int, int, int] | None:
+def _fill_rgba(pdfium_c, obj, *, stroke: bool = False) -> tuple[int, int, int, int] | None:
     channels = [ctypes.c_uint() for _ in range(4)]
-    if not pdfium_c.FPDFPageObj_GetFillColor(obj, *(ctypes.byref(c) for c in channels)):
+    getter = pdfium_c.FPDFPageObj_GetStrokeColor if stroke else pdfium_c.FPDFPageObj_GetFillColor
+    if not getter(obj, *(ctypes.byref(c) for c in channels)):
         return None
     red, green, blue, alpha = (c.value for c in channels)
     return (red, green, blue, alpha)
+
+
+def _is_light(rgba: tuple[int, int, int, int]) -> bool:
+    luma = (0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]) / 255
+    return luma >= _HIDDEN_TEXT_MIN_LUMA
 
 
 def _effective_font_size(pdfium_c, obj, matrix: tuple[float, ...] | None) -> float | None:
@@ -2154,11 +2162,13 @@ def _find_hidden_text(pdfium_c, page, objects: list) -> list[tuple[tuple, str, _
         rgba = _fill_rgba(pdfium_c, obj)
         if rgba is None:
             continue
+        if mode in _FILL_AND_STROKE_RENDER_MODES:
+            stroke = _fill_rgba(pdfium_c, obj, stroke=True)
+            if stroke is not None and stroke[3] > 0 and not _is_light(stroke):
+                continue  # outlined in a dark colour: it prints whatever the fill
         if rgba[3] == 0:
             hidden.append((entry, "transparent", box))
-        elif box is not None and (0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]) / 255 >= (
-            _HIDDEN_TEXT_MIN_LUMA
-        ):
+        elif box is not None and _is_light(rgba):
             light.append((entry, rgba, box))
     if invisible and len(invisible) < _HIDDEN_TEXT_MAX_INVISIBLE_SHARE * len(objects):
         hidden.extend(invisible)

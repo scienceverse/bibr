@@ -151,6 +151,13 @@ def test_white_text_on_white_is_dropped():
     assert "Body text line 0" in text
 
 
+def test_white_text_with_a_dark_outline_is_kept():
+    """Fill and stroke (render mode 2): the black outline prints on white."""
+    outlined = b"q 1 1 1 rg 0 0 0 RG BT 2 Tr /F1 18 Tf 1 0 0 1 72 700 Tm (Outlined Title) Tj ET Q\n"
+
+    assert "Outlined Title" in _page_text(_pdf(outlined + _body()))
+
+
 def test_light_grey_text_is_kept():
     """Grey well off the background (a 'Downloaded from' stamp) prints."""
     pdf_bytes = _pdf(

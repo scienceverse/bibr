@@ -32,8 +32,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   bold look ("Sensors 2024, 24, 572" three times). Springer's hidden
   "(0123456789().,-volV)" run no longer sticks to the DOI in the running head,
   and SAGE's hidden white DOI link no longer gives a second, cut-off DOI. A
-  scan's hidden OCR layer is kept, and white text on a coloured band still
-  counts as printed. The removed objects are reported as `hidden_text`
+  scan's hidden OCR layer is kept, and white text on a coloured band or with a
+  dark outline still counts as printed. The removed objects are reported as `hidden_text`
   furniture (rule `hidden_text/1`).
 - A DOI read from a text-layer header or footer whose box cuts the printed line
   ("10.1177/117793222311603" for "10.1177/11779322231160397") no longer
