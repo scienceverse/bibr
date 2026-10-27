@@ -36,6 +36,28 @@ class TestLocalRateLimiter:
         await limiter.close()
 
 
+class TestSecondsUntilSlot:
+    """``seconds_until_slot`` reads the window without taking a slot."""
+
+    async def test_a_free_slot_is_zero_and_is_not_taken(self):
+        limiter = AsyncLocalRateLimiter(resource_id="test", max_requests=2, window_seconds=300.0)
+        await limiter.acquire()
+        assert limiter.seconds_until_slot() == 0.0
+        assert len(limiter._timestamps) == 1
+
+    async def test_a_full_window_waits_for_its_oldest_slot(self):
+        limiter = AsyncLocalRateLimiter(resource_id="test", max_requests=1, window_seconds=300.0)
+        await limiter.acquire()
+        assert 290.0 < limiter.seconds_until_slot() <= 300.0
+        assert len(limiter._timestamps) == 1
+
+    def test_expired_slots_are_dropped(self):
+        limiter = AsyncLocalRateLimiter(resource_id="test", max_requests=1, window_seconds=1.0)
+        limiter._timestamps.append(time.monotonic() - 2.0)  # taken 2 s ago, out of the window
+        assert limiter.seconds_until_slot() == 0.0
+        assert not limiter._timestamps
+
+
 class TestLocalRateLimiterLoopRebinding:
     """M6: the limiter must survive a second ``asyncio.run()`` in one process.
 
