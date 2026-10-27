@@ -278,10 +278,10 @@ LLM and the OCR on llama.cpp there, as on a small card. This is a
 conservative routing rule, not a measured result: no batch on a Turing or
 Pascal card has been recorded, with this rule or with the vLLM routing before
 it. (The Pascal notes above are given with no measured run recorded.) An
-explicit `--llm vllm` or `--ocr paddle-vllm` still starts vLLM. Going by vLLM
-0.31's source, it then casts the bf16 models to float16, and its 4-bit kernels
-(the W4A16 build) need compute capability 7.5, which rules out Pascal; none of
-this has been run.
+explicit `--llm vllm` or `--ocr paddle-vllm` still starts vLLM. Going by vLLM's
+source (0.31 and 0.32), it then casts the bf16 models to float16, and its 4-bit
+kernels (the W4A16 build) need compute capability 7.5, which rules out Pascal;
+none of this has been run.
 
 While a job runs, `nvidia-smi` should show `llama-server` using the GPU. If
 doctor warns that llama.cpp is CPU-only, replace the binary with a CUDA build.

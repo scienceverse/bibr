@@ -259,21 +259,25 @@ by UUID to avoid that.
 The LLM server works out its share each time it starts, from the GPU memory
 free at that moment. It takes at most 0.85 of the card, and less when the card
 is busier: the share leaves room for vLLM's brief extra use while it starts
-(about 1 GB) and for bibr's models. That room is 6 GB less what bibr's models
-already hold, and at least 1 GB: about 0.70 of a free 24 GB card and 0.77 of a
-free 32 GB card. When that does not leave the model its minimum budget
-(12.25 GiB for the 4B student, 6.25 GiB for its W4A16 build and for the 2B),
-a server that takes turns with PaddleOCR-VL drops to the minimum while bibr's
-models keep at least 1 GB, since it starts again beside them in the next
-chunk. A server that stays up for the run (with cloud OCR, an OCR server at
-`--ocr-url` or GLM-OCR) keeps that room: it usually starts in the first chunk,
-before bibr's models have grown to the 5 GB or so they reach in a batch. So on
-a 24 GB card that also runs a PaddleOCR-VL server at `--ocr-url` (about
-5.4 GB), the 4B student cannot start, and its W4A16 build can. When the share
-does not fit, the start fails at once with an error that says how much memory
-was free and how much it needs, that chunk's papers fail, and the next chunk
-tries again. Set `LLM_LOCAL_MEM_FRACTION`, or `--gpu-memory-utilization` in
-`LLM_VLLM_EXTRA_ARGS`, to start the LLM server at exactly that share instead.
+(0.75 GiB for the 4B student's builds, 1 GiB for the 2B) and for bibr's
+models. That room is 6 GB less what bibr's models already hold, and at least
+1 GB: about 0.71 of a free 24 GB card and 0.78 of a free 32 GB card. When that
+does not leave the model its minimum budget (11.0 GiB for the 4B student,
+6.0 GiB for its W4A16 build, 6.25 GiB for the 2B; more with
+[speculative decoding](#speculative-decoding-on-vllm)), a server that takes
+turns with PaddleOCR-VL drops to the minimum while bibr's models keep at least
+1 GB, since it starts again beside them in the next chunk. A server that stays
+up for the run (with cloud OCR, an OCR server at `--ocr-url` or GLM-OCR) keeps
+that room: it usually starts in the first chunk, before bibr's models have
+grown to the 5 GB or so they reach in a batch. So on a 24 GB card that also
+runs a PaddleOCR-VL server at `--ocr-url` (about 5.4 GB), the 4B student just
+fits (it needs 17.25 GiB, and about 17.7 are free) with an 11.3 GiB budget,
+below MTP's minimum; with a desktop on the card as well it does not, and its
+W4A16 build does. When the share does not fit, the start fails at once with an
+error that says how much memory was free and how much it needs, that chunk's
+papers fail, and the next chunk tries again. Set `LLM_LOCAL_MEM_FRACTION`, or
+`--gpu-memory-utilization` in `LLM_VLLM_EXTRA_ARGS`, to start the LLM server at
+exactly that share instead.
 
 The LLM server starts after a chunk's OCR, and OCR only adds to what bibr
 holds. So while the LLM server is down, bibr checks before each chunk's OCR
@@ -287,25 +291,26 @@ pipeline in the same process started, without asking for memory.
 The minimum comes from bibr's model registry, which lists the published
 builds with the smallest budget each was measured to start with: a first
 start, before vLLM has filled its compile cache, that served one
-32,768-token request on an RTX 3090 with vLLM 0.31.0, rounded up to a quarter
-GiB. A later start reuses the cache and needs about 1 GiB less. The minimum is
-a budget, not a card size: on the swap path a start also needs vLLM's extra
-use while it starts (0.75 GiB at 64 sequences, 1 GiB at 128) and 1 GiB for
-bibr's models free beside it, so the W4A16 build needs 8 GiB free and the 4B
-student 14.25 GiB. A server that stays up needs 6 GiB less what bibr's models
-hold in place of that 1 GiB: 12.5 and 18.75 GiB while they hold 0.5 GiB. A
-model the registry does not list, such as a local path, has no minimum, so a
-start that cannot fit is launched and fails inside vLLM.
-Set `LLM_LOCAL_MIN_VRAM_GB` to give it one. For a model the registry lists,
-the setting can raise the minimum but not lower it: a lower value is ignored
-and bibr logs a warning once, so a value left over from a local build cannot
-start the 4B student below its 12.25 GiB. For a local copy of the 4B student's
-W4A16 build, the minimum is 6.25 GiB with at most 64 sequences (more with 128,
-since vLLM keeps a cache block for each sequence):
+32,768-token request on an RTX 3090, rounded up to a quarter GiB. The 4B
+student's builds were measured with vLLM 0.32.0 at 64 sequences, the 2B with
+vLLM 0.31.0 at 128. On vLLM 0.31 a later start reused the cache and needed
+about 1 GiB less. The minimum is a budget, not a card size: on the swap path a
+start also needs vLLM's extra use while it starts (0.75 GiB at 64 sequences,
+1 GiB at 128) and 1 GiB for bibr's models free beside it, so the W4A16 build
+needs 7.75 GiB free and the 4B student 12.75 GiB. A server that stays up needs
+6 GiB less what bibr's models hold in place of that 1 GiB: 12.25 and 17.25 GiB
+while they hold 0.5 GiB. A model the registry does not list, such as a local
+path, has no minimum, so a start that cannot fit is launched and fails inside
+vLLM. Set `LLM_LOCAL_MIN_VRAM_GB` to give it one. For a model the registry
+lists, the setting can raise the minimum but not lower it: a lower value is
+ignored and bibr logs a warning once, so a value left over from a local build
+cannot start the 4B student below its 11.0 GiB. For a local copy of the 4B
+student's W4A16 build, the minimum is 6.0 GiB with vLLM 0.32 and at most 64
+sequences (more with 128, since vLLM keeps a cache block for each sequence):
 
 ```bash
 LLM_LOCAL_MODEL=/path/to/bibr-extract-qwen35-4b-W4A16
-LLM_LOCAL_MIN_VRAM_GB=6.25
+LLM_LOCAL_MIN_VRAM_GB=6.0
 LLM_VLLM_EXTRA_ARGS='--language-model-only --generation-config vllm --max-model-len 32768 --max-num-seqs 64'
 LLM_CHAT_TEMPLATE_KWARGS='{"enable_thinking": false}'
 ```
@@ -324,8 +329,8 @@ has the measurements):
 
 | Runtime | Setup model | Registry memory floor |
 |---|---|---|
-| vLLM, 20 GB or more | `scienceverse/bibr-extract-qwen35-4b` (Qwen3.5-4B fine-tuned for bibr, bf16) | a 12.25 GiB budget; 14.25 GiB free to start |
-| vLLM, 10–19 GB | `scienceverse/bibr-extract-qwen35-4b-W4A16` (the same model with 4-bit weights) | a 6.25 GiB budget; 8 GiB free to start |
+| vLLM, 20 GB or more | `scienceverse/bibr-extract-qwen35-4b` (Qwen3.5-4B fine-tuned for bibr, bf16) | an 11.0 GiB budget; 12.75 GiB free to start |
+| vLLM, 10–19 GB | `scienceverse/bibr-extract-qwen35-4b-W4A16` (the same model with 4-bit weights) | a 6.0 GiB budget; 7.75 GiB free to start |
 | llama.cpp (Windows, cards below 10 GB) | `scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0`, else `:Q4_K_M`, else the 2B's `scienceverse/bibr-extract-qwen35-2b-GGUF` builds | 7 GB for the 4B Q8_0, down to 3 GB for the 2B Q4_K_M |
 | Rapid-MLX / vllm-mlx | `scienceverse/bibr-extract-qwen35-4b-mlx-8bit`, else the 2B's `-2b-mlx-8bit` | 6 GB for the 4B, 3 GB for the 2B |
 
@@ -350,7 +355,7 @@ resident OCR server) and refuses the start only if it is still short.
 
 Cards older than Ampere (compute capability below 8.0: Turing, Volta,
 Pascal) run the LLM and the automatic OCR on llama.cpp at any size: bibr's
-vLLM models are bf16, which vLLM 0.31 serves from compute capability 8.0, and
+vLLM models are bf16, which vLLM serves from compute capability 8.0, and
 on an older card it casts them to float16, which bibr has not tested. No
 batch on a Turing or Pascal card has been recorded with either runtime; this
 is a conservative routing rule. The advanced wizard
@@ -480,8 +485,52 @@ not in the registry either, so setup does not offer it and it has no measured
 memory floor. To try it on vLLM, set `LLM_LOCAL_MODEL` to that id and take
 `LLM_VLLM_EXTRA_ARGS` and `LLM_CHAT_TEMPLATE_KWARGS` from the local W4A16
 example above, with `--revision 101d1ee1d449195f6882019b0fd2aa4328ed8bef`
-added to the extra args. That example's `LLM_LOCAL_MIN_VRAM_GB=6.25` was
+added to the extra args. That example's `LLM_LOCAL_MIN_VRAM_GB=6.0` was
 measured for the W4A16 build, not this one.
+
+### Speculative decoding on vLLM
+
+`LLM_VLLM_SPEC_DECODE` sets speculative decoding for the managed vLLM LLM
+server. It applies to the published builds of the 4B student, which bibr's
+registry lists with the configs below; other models, local paths included,
+start without it unless `LLM_VLLM_EXTRA_ARGS` passes a `--speculative-config`,
+which always replaces bibr's choice.
+
+| Value | What the server starts with |
+|---|---|
+| `auto` (default) | MTP (3 tokens drafted by the model's own multi-token-prediction layers) when the server stays up for the whole run and its budget is at least MTP's minimum: 12.0 GiB for the 4B student, 7.25 GiB for its W4A16 build. Otherwise none. Below the minimum the server starts without MTP; `auto` never refuses a start. |
+| `none` | no speculative decoding |
+| `mtp` | MTP at every start, including starts that take turns with PaddleOCR-VL. The start needs MTP's minimum: on the swap path 13.75 GiB free for the 4B student and 9 GiB for the W4A16 build; a server that stays up for the run needs 18.25 and 13.5 GiB while bibr's models hold 0.5 GiB. |
+| `dflash` | DFlash (7 tokens drafted by [`z-lab/Qwen3.5-4B-DFlash`](https://huggingface.co/z-lab/Qwen3.5-4B-DFlash), a separate 1.27 GB model pinned to revision `9a1996cc`), for the 4B student's bf16 build only, with a 13.5 GiB minimum. Other models start without it, with a warning. |
+
+The server stays up for the run when no managed PaddleOCR-VL server takes
+turns with it: with cloud OCR, an OCR server at `OCR_BASE_URL`, or OCR on
+llama.cpp. With the automatic OCR on a card of up to 64 GB, PaddleOCR-VL and
+the LLM take turns, the LLM restarting every chunk, and `auto` leaves MTP off.
+Both MTP and DFlash add `--no-async-scheduling`, which every measured run
+used.
+
+What was measured, with vLLM 0.32.0 at 64 sequences:
+
+- **One LLM server for the run** (the 252 development papers, OCR read from a
+  cache, the server at 0.85 of the card): with MTP the 4B student passed 218
+  against 219 without it on an RTX 3090 and 218 against 218 on an RTX 5090;
+  its LLM stage took 0.80x and 0.74x as long, and papers an hour rose 5.7%
+  and 12.1%. With DFlash: 220 against 219 and 217 against 218, the LLM stage
+  0.72x and 0.64x as long, papers an hour +8.1% and +15.8%, but about half the
+  KV cache capacity (159,251 against 310,108 tokens at 0.85 of an RTX 3090).
+  These runs served the bf16 build at the registry's revision (`9199424d`).
+  The previous revision's W4A16 build (`a2af8f6e`) passed 218/252 with MTP,
+  as without it on vLLM 0.31; the pinned W4A16 build has not been scored with
+  MTP.
+- **The default plan on 12 and 16 GB cards** (the previous revision's W4A16
+  build taking turns with PaddleOCR-VL, 48 papers, emulated cards beside a
+  0.5 GiB desktop): MTP passed 40 and 39 of 48 against 39 and 40 without it,
+  but each LLM start took 51 s instead of 37 s, and papers an hour fell 5.0%
+  and 8.6%. On the 12 GB card three of its six starts fitted only after bibr
+  released its own models. This is why `auto` leaves MTP off there.
+- Speculative decoding has not been measured on 24 GB cards in the swap plan,
+  on the 2B student, or with DFlash on the W4A16 build.
 
 ### Managed local servers
 

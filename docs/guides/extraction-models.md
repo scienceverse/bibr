@@ -10,8 +10,8 @@ machine can run:
 
 | Scenario | Recommended model | Needs | Passes /252 |
 |---|---|---|---|
-| Linux, NVIDIA GPU (Ampere or newer) with 20 GB or more | **bibr extract 4B**, Qwen3.5-4B fine-tuned for bibr (`scienceverse/bibr-extract-qwen35-4b`) | vLLM, 14.25 GiB free to start | 218; the previous revision 217 on the same machine, +0.4 points [−0.8, +2.0] |
-| Linux, NVIDIA GPU (Ampere or newer) with 10–19 GB | **bibr extract 4B W4A16**, the same model with 4-bit weights (`scienceverse/bibr-extract-qwen35-4b-W4A16`) | vLLM, 8 GiB free to start | 218, level with the bf16 4B on the same machine: +0.0 points [−1.6, +1.6] |
+| Linux, NVIDIA GPU (Ampere or newer) with 20 GB or more | **bibr extract 4B**, Qwen3.5-4B fine-tuned for bibr (`scienceverse/bibr-extract-qwen35-4b`) | vLLM, 12.75 GiB free to start | 218; the previous revision 217 on the same machine, +0.4 points [−0.8, +2.0] |
+| Linux, NVIDIA GPU (Ampere or newer) with 10–19 GB | **bibr extract 4B W4A16**, the same model with 4-bit weights (`scienceverse/bibr-extract-qwen35-4b-W4A16`) | vLLM, 7.75 GiB free to start | 218, level with the bf16 4B on the same machine: +0.0 points [−1.6, +1.6] |
 | Linux, NVIDIA GPU with 5–9 GB or older than Ampere, or Windows | **bibr extract 4B GGUF**, the same model for llama.cpp (`scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0` from 7 GB, `:Q4_K_M` below) | llama.cpp, which you install; GLM-OCR runs on it too | Q8_0 218, +0.0 points [−1.2, +1.2] against the bf16 4B; Q4_K_M 217, −0.4 [−2.0, +0.8]; both on the same OCR as the rows above. With GLM-OCR, the previous revision was checked on 100 papers (Q8_0) and 48 (Q4_K_M) only |
 | No suitable GPU, or you prefer a hosted model | **Claude Haiku 5.5** (`claude-haiku-5-5`) | an Anthropic API key, about $0.004 a paper | 221, −0.8 points [−2.4, +0.8] against Qwen3.8-27B's 223 |
 
@@ -26,12 +26,14 @@ in [the evaluation below](#how-close-small-models-get-to-a-large-one). The curre
 
 The memory is what must be free on the card each time bibr starts the model
 (see [configuration](configuration.md) for how bibr sizes it): the model's own
-budget (12.25 GiB for the 4B, 6.25 GiB for the W4A16 build, measured on an RTX
-3090), plus what vLLM takes beyond it while it starts and 1 GiB for bibr's
-other models. That is when PaddleOCR-VL takes turns with the model, as in the
-defaults below. A model that stays up for the run beside cloud OCR or an OCR
-server at `--ocr-url` leaves bibr's other models 6 GiB less what they hold
-instead: about 18.75 GiB free for the 4B and 12.5 GiB for the W4A16 build.
+budget (11.0 GiB for the 4B, 6.0 GiB for the W4A16 build, measured on an RTX
+3090 with vLLM 0.32), plus what vLLM takes beyond it while it starts and 1 GiB
+for bibr's other models. That is when PaddleOCR-VL takes turns with the model,
+as in the defaults below. A model that stays up for the run beside cloud OCR or
+an OCR server at `--ocr-url` leaves bibr's other models 6 GiB less what they
+hold instead: about 17.25 GiB free for the 4B and 12.25 GiB for the W4A16
+build. Speculative decoding needs more and is off in these default plans (see
+[speculative decoding](configuration.md#speculative-decoding-on-vllm)).
 
 ### Defaults by card
 
@@ -84,14 +86,15 @@ beside a 1.5 GiB desktop it released them before 3 of its 6 starts and finished
 the batch. `PIPELINE_MEMORY_MODE=aggressive` makes room in every chunk, at the
 cost of speed. **An 8 GB card has too little memory for vLLM**: with a desktop
 on it about 7 GiB is free to CUDA, and bibr refused every start of the W4A16
-build (it needs 8 GiB free). There setup runs both OCR (GLM-OCR) and the 4B's
-GGUF build on llama.cpp, which take turns on the card. If nothing else uses an
-8 GB card, you can still run the W4A16 build on vLLM by setting the LLM's share
-yourself (`LLM_LOCAL_MEM_FRACTION=0.83`, about 6.3 GiB of 7.6, ran 48 papers
-with many ONNX out-of-memory retries); with a desktop on the card the same
-setting failed. The 2B student needs at least as much as the W4A16 build on
-vLLM (6.25 GiB at 128 sequences). On an emulated 8 GB card with no desktop,
-bibr refused every start of it at the default settings; with the LLM's share
+build (it needed 8 GiB free on vLLM 0.31, and needs 7.75 on vLLM 0.32).
+There setup runs both OCR (GLM-OCR) and the 4B's GGUF build on llama.cpp,
+which take turns on the card. If nothing else uses an 8 GB card, you can
+still run the W4A16 build on vLLM by setting the LLM's share yourself
+(`LLM_LOCAL_MEM_FRACTION=0.83`, about 6.3 GiB of 7.6, ran 48 papers with many
+ONNX out-of-memory retries); with a desktop on the card the same setting
+failed. The 2B student needs more than the W4A16 build on vLLM (6.25 GiB at
+128 sequences, measured on vLLM 0.31). On an emulated 8 GB card with no
+desktop, bibr refused every start of it at the default settings; with the LLM's share
 set by hand it ran 48 papers. No run at the default settings beside a desktop
 backs it, so it is no longer the default for any card.
 
@@ -249,7 +252,9 @@ Limits of this evidence:
 
 Both models are Qwen3.5 bases (Apache-2.0) with a LoRA adapter merged into the
 weights. Merging keeps the base model's multi-token prediction layers, so the
-checkpoints can use speculative decoding like their base.
+checkpoints can use speculative decoding like their base (see
+[speculative decoding](configuration.md#speculative-decoding-on-vllm) for when
+bibr turns it on).
 
 - **bibr extract 4B** was trained on 1,444 rows from 162 open-access PMC
   papers: 1,113 answers that Qwen3.8-27B gave to bibr's own prompts, which its
