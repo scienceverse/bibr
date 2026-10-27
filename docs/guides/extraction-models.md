@@ -47,11 +47,11 @@ for the card. On the same 100 papers the 8 GB default passed as many as the
 24 GB one (86 each, by bibr's per-paper scorer); on 48 papers the 6 GB default
 passed 38 to the bf16 4B's 41, a difference within chance at that size.
 
-The 16 GB run, on commit e99ae96c, had at least 4.74 GiB to spare at every
-start of the LLM (free memory beyond the 8 GiB a start needs). The 6 GB default
-has almost none: beside a 1.0 GiB desktop it finished, but the card fell to
-2 MiB free and the sentence segmenter fell back to the CPU 107 times. No run
-covers a 6 GB card beside a desktop above 1 GiB.
+The 16 GB run (2026-10-26, on this release's code) had at least 4.74 GiB to
+spare at every start of the LLM (free memory beyond the 8 GiB a start needs).
+The 6 GB default has almost none: beside a 1.0 GiB desktop it finished, but the
+card fell to 2 MiB free and the sentence segmenter fell back to the CPU 107
+times. No run covers a 6 GB card beside a desktop above 1 GiB.
 
 Cards older than Ampere (compute capability below 8.0: Turing, Volta, Pascal)
 get the llama.cpp row for their size at any size, because bibr's vLLM models

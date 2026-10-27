@@ -103,11 +103,11 @@ class LocalLLMModel:
 # - 4B bf16, 20: 48 papers on a 20 GB card (20,475 MiB, an RTX 4000 Ada; the
 #   last start found 16.76 GiB free of the 14.25 needed) and 100 on 24 GB. A
 #   card emulated at 16 GB refused its starts once bibr held 2 GiB, before
-#   bibr released its own models ahead of a refusal; 16 GB has not been run
-#   since.
+#   bibr released its own models ahead of a refusal; the bf16 4B has not been
+#   run on 16 GB since.
 # - 4B W4A16, 10: 48 papers on 10 GB in aggressive mode (0.27 GiB left at the
-#   LLM starts) and 100 on 12 GB in balanced mode. An 8 GB card (about 7.0 GiB
-#   to CUDA beside a desktop) refused every start.
+#   LLM starts), 100 on 12 GB and 48 on 16 GB in balanced mode. An 8 GB card
+#   (about 7.0 GiB to CUDA beside a desktop) refused every start.
 # - 4B GGUF Q8_0, 7: 100 papers on an 8 GB card (8,188 MiB, an RTX 4060), with
 #   GLM-OCR taking turns on llama.cpp. No card between 7 and 8 GB was run.
 # - 4B GGUF Q4_K_M, 5: 48 papers on a 6 GB card, with GLM-OCR taking turns on

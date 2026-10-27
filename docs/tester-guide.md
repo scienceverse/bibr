@@ -317,8 +317,8 @@ Ampere use GGUF (llama.cpp) builds of the same models, and Apple Silicon their
 8-bit MLX builds.
 Without a suitable GPU it recommends Claude Haiku 5.5 as a hosted model, for
 OCR and extraction alike. See
-[choosing an extraction model](guides/extraction-models.md). The card sizes come
-from batches only at 20, 12 and 10 GB, plus runs at 8 and 6 GB, each on one RTX
+[choosing an extraction model](guides/extraction-models.md). Of the card sizes
+that pick a default, 20, 12, 10, 8 and 6 GB were each run as a batch on one RTX
 3090 with its memory cut to that size beside a desktop; 7 and 5 GB follow the
 size rule. They are not guarantees that every document fits available memory,
 and that page's speeds are the RTX 3090's, not those of the cards it emulated.

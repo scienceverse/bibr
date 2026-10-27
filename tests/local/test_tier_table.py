@@ -32,8 +32,8 @@ TIER_TABLE = [
     (("RTX 5090", 32607, 12.0), ("vllm", _4B, "balanced", "paddle-vllm")),
     (("RTX 3090", 24576, 8.6), ("vllm", _4B, "balanced", "paddle-vllm")),  # ran: 100 papers
     (("RTX 4000 Ada", 20475, 8.9), ("vllm", _4B, "balanced", "paddle-vllm")),  # ran: 48
-    # 16 GB ran at 16,380 MiB on e99ae96c, with at least 4.74 GiB to spare at
-    # every LLM start.
+    # 16 GB ran at 16,380 MiB on 2026-10-26, on this change's code, with at
+    # least 4.74 GiB to spare at every LLM start.
     (("RTX 4080", 16376, 8.9), ("vllm", _W4A16, "balanced", "paddle-vllm")),  # ran: 48
     (("RTX 3060 12 GB", 12288, 8.6), ("vllm", _W4A16, "balanced", "paddle-vllm")),
     (("RTX 5070", 12227, 12.0), ("vllm", _W4A16, "balanced", "paddle-vllm")),  # ran: 100
