@@ -227,7 +227,7 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 quant="w4a16",
                 min_vram_gb=VLLM_LLM_MIN_CARD_GB,
                 min_budget_gb=QWEN35_4B_W4A16_BUDGET_GB,
-                approx_download_gb=3.8,  # 4,050,890,519 bytes at that revision
+                approx_download_gb=3.8,  # 4,050,886,734 bytes at that revision
                 server_args=(
                     "--revision",
                     _QWEN35_4B_W4A16_REVISION,
