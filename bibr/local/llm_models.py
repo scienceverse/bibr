@@ -99,7 +99,9 @@ class LocalLLMModel:
 # desktop, at bibr's default memory mode and batch size for that card (the
 # card's size was emulated, not its speed). On the swap path a vLLM start
 # needs the budget floor, vLLM's overshoot reserve and 1 GiB for bibr free
-# (bibr.local.vllm_share).
+# (bibr.local.vllm_share); a server that stays up for the run (any other OCR)
+# needs 6 GiB less what bibr holds in place of that 1 GiB. Every vLLM run
+# below took turns with PaddleOCR-VL.
 # - 4B bf16, 20: 48 papers on a 20 GB card (20,475 MiB, an RTX 4000 Ada; the
 #   last start found 16.76 GiB free of the 14.25 needed) and 100 on 24 GB. A
 #   card emulated at 16 GB refused its starts once bibr held 2 GiB, before

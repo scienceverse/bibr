@@ -34,10 +34,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   On the swap path a start needs that budget free, plus what vLLM takes beyond
   it while starting and 1 GB for bibr's models: 14.25 GiB for the 4B, which a
   16 GB card no longer has once bibr's models have grown, and 8 GiB for the
-  W4A16 build. An 8 GB card, with about 7.6 GiB free to CUDA (about 7 GiB
-  beside a desktop), cannot start any of them unless you set the share
-  yourself (`LLM_LOCAL_MEM_FRACTION`), and that works only when nothing else,
-  such as a desktop, uses the card.
+  W4A16 build. A server that stays up for the run (any other OCR) needs 6 GB
+  less what bibr's models hold in place of that 1 GB: 18.75 GiB for the 4B and
+  12.5 GiB for the W4A16 build while they hold 0.5 GiB. An 8 GB card, with
+  about 7.6 GiB free to CUDA (about 7 GiB beside a desktop), cannot start any
+  of them unless you set the share yourself (`LLM_LOCAL_MEM_FRACTION`), and
+  that works only when nothing else, such as a desktop, uses the card.
 - On Linux NVIDIA cards below 10 GB, `bibr setup` now runs both OCR (GLM-OCR)
   and the 4B student's Q8_0 GGUF build on llama.cpp, which you install. Such
   cards used to get the 2B student on vLLM from 8 GB, whose starts need more
@@ -149,13 +151,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `LLM_VLLM_EXTRA_ARGS`), which still wins, the share is now worked out at
   every start from the memory free then, less what vLLM takes beyond its share
   while starting and room for bibr's models to grow, with the configured share
-  as the cap. That room is bibr's 6 GB when PaddleOCR-VL takes turns with the
-  LLM (0.70 of a 24 GB card) and 1 GB with any other OCR, so a free 24 GB card
-  keeps 0.85. When even the model's minimum (12.25 GiB for the 4B student) does
-  not fit, that start fails at once with a clear error instead of launching
-  vLLM to crash. The Qwen3.5 students now run at
-  most 128 sequences at once, which halves vLLM's capture sizes and lets them
-  start on a smaller share.
+  as the cap. That room is 6 GB less what bibr's models already hold, and at
+  least 1 GB, with any OCR: 0.70 of a free 24 GB card, 0.77 of 32 GB. A server
+  that stays up for the run (with cloud OCR, an OCR server at `--ocr-url` or
+  GLM-OCR) usually starts in the first chunk, before bibr's models have grown;
+  when it left them only 1 GB beside a PaddleOCR-VL server at `--ocr-url` on an
+  RTX 5090, they ran out of memory at about 3.3 GiB and 31 of 48 papers failed.
+  Only a start that takes turns with PaddleOCR-VL, and so starts again next
+  chunk, is squeezed to the model's minimum with 1 GB left for bibr's models.
+  When even that does not fit, that start fails at once with a clear error
+  instead of launching vLLM to crash, and while the server is down the chunk
+  fails before its OCR. So the bf16 4B student cannot start beside a
+  PaddleOCR-VL server at `--ocr-url` on the same 24 GB card (it needs
+  18.75 GiB, and about 17.7 are free); its W4A16 build can. The Qwen3.5
+  students now run at most 128 sequences at once, which halves vLLM's capture
+  sizes and lets them start on a smaller share.
 - A nearly full GPU no longer fails papers, drops their references or sends
   their headings to the LLM. bibr's layout, sentence, reference-parser and
   section-classifier models now treat each GPU out-of-memory failure alike:

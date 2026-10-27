@@ -259,15 +259,20 @@ by UUID to avoid that.
 The LLM server works out its share each time it starts, from the GPU memory
 free at that moment. It takes at most 0.85 of the card, and less when the card
 is busier: the share leaves room for vLLM's brief extra use while it starts
-(about 1 GB) and for bibr's models. That room is 1 GB when no PaddleOCR-VL
-server takes turns with the LLM, so a free 24 GB card still gets 0.85, and
-6 GB in all when one does (about 0.70 of a 24 GB card). When that does not
-leave the model its minimum budget (12.25 GiB for the 4B student, 6.25 GiB for
-its W4A16 build and for the 2B), the share drops to the minimum while bibr's
-models keep at least 1 GB. When even that does not fit, the start fails at
-once with an error that says how much memory was free and how much it needs,
-that chunk's papers fail, and the next chunk tries again. Set
-`LLM_LOCAL_MEM_FRACTION`, or `--gpu-memory-utilization` in
+(about 1 GB) and for bibr's models. That room is 6 GB less what bibr's models
+already hold, and at least 1 GB: about 0.70 of a free 24 GB card and 0.77 of a
+free 32 GB card. When that does not leave the model its minimum budget
+(12.25 GiB for the 4B student, 6.25 GiB for its W4A16 build and for the 2B),
+a server that takes turns with PaddleOCR-VL drops to the minimum while bibr's
+models keep at least 1 GB, since it starts again beside them in the next
+chunk. A server that stays up for the run (with cloud OCR, an OCR server at
+`--ocr-url` or GLM-OCR) keeps that room: it usually starts in the first chunk,
+before bibr's models have grown to the 5 GB or so they reach in a batch. So on
+a 24 GB card that also runs a PaddleOCR-VL server at `--ocr-url` (about
+5.4 GB), the 4B student cannot start, and its W4A16 build can. When the share
+does not fit, the start fails at once with an error that says how much memory
+was free and how much it needs, that chunk's papers fail, and the next chunk
+tries again. Set `LLM_LOCAL_MEM_FRACTION`, or `--gpu-memory-utilization` in
 `LLM_VLLM_EXTRA_ARGS`, to start the LLM server at exactly that share instead.
 
 The LLM server starts after a chunk's OCR, and OCR only adds to what bibr
@@ -287,8 +292,10 @@ GiB. A later start reuses the cache and needs about 1 GiB less. The minimum is
 a budget, not a card size: on the swap path a start also needs vLLM's extra
 use while it starts (0.75 GiB at 64 sequences, 1 GiB at 128) and 1 GiB for
 bibr's models free beside it, so the W4A16 build needs 8 GiB free and the 4B
-student 14.25 GiB. A model the registry does not list, such as a local path,
-has no minimum, so a start that cannot fit is launched and fails inside vLLM.
+student 14.25 GiB. A server that stays up needs 6 GiB less what bibr's models
+hold in place of that 1 GiB: 12.5 and 18.75 GiB while they hold 0.5 GiB. A
+model the registry does not list, such as a local path, has no minimum, so a
+start that cannot fit is launched and fails inside vLLM.
 Set `LLM_LOCAL_MIN_VRAM_GB` to give it one. For a model the registry lists,
 the setting can raise the minimum but not lower it: a lower value is ignored
 and bibr logs a warning once, so a value left over from a local build cannot

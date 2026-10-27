@@ -19,6 +19,15 @@ unless the user set the share, the managed server's share is worked out from
 what is free when it starts (``size_managed_llm_share``), and a start that
 cannot meet the model's floor fails with ``ManagedLlmVramError`` before vLLM
 is launched.
+
+A server that stays up for the run (no managed PaddleOCR-VL server takes
+turns with it: an OCR server at an OCR URL, cloud OCR, GLM-OCR) starts in
+the first chunk, before bibr's sessions have grown. Beside an external
+PaddleOCR-VL server on an RTX 5090 it took all but 1 GiB of what was free
+while bibr held 1.03 GiB; bibr's sessions then ran out of memory at about
+3.3 GiB and 31 of 48 papers failed. So every start leaves bibr's sessions
+``MANAGED_VLLM_ONNX_RESERVE_GB`` less what they hold, and only a start that
+lasts one chunk (the swap) may be squeezed below that to reach the floor.
 """
 
 from __future__ import annotations
@@ -50,9 +59,10 @@ LLM_CONTEXT_RESERVE_GB = 0.5
 LLM_CAPTURE_RESERVE_GB_AT_512 = 1.0
 
 #: Room always left beside the LLM's share for bibr's own GPU sessions to
-#: grow within a chunk. It is all the room an LLM-only run leaves (no managed
-#: PaddleOCR-VL server takes turns with the LLM), so the configured share
-#: (0.85) still fits a free 24 GB card.
+#: grow within a chunk, however much they already hold. Otherwise the room is
+#: ``MANAGED_VLLM_ONNX_RESERVE_GB`` less what they hold, and this is all a
+#: start that takes turns with PaddleOCR-VL keeps when it is squeezed to the
+#: model's floor (it lasts one chunk).
 LLM_ONNX_MIN_HEADROOM_GB = 1.0
 
 #: vLLM's ``--max-num-seqs`` when neither bibr nor the user sets it.
@@ -79,9 +89,11 @@ class LlmShare:
 
     share: float
     #: ``cap``: the configured share fitted. ``free``: sized down to what is
-    #: free. ``floor``: squeezed to the model's floor, leaving bibr only
-    #: ``LLM_ONNX_MIN_HEADROOM_GB`` to grow into (also when the share sized
-    #: from free memory rounds down to just under the floor). ``unknown``: no
+    #: free. ``floor``: rounded up to the model's floor. A start that takes
+    #: turns with PaddleOCR-VL may be squeezed there, leaving bibr only
+    #: ``LLM_ONNX_MIN_HEADROOM_GB`` to grow into; any start whose share sized
+    #: from free memory rounds down to just under the floor gets it too, which
+    #: takes at most a hundredth of the card from bibr's room. ``unknown``: no
     #: reading, so the configured share as before.
     reason: str
     budget_gb: float | None = None
@@ -205,6 +217,17 @@ def llm_share_user_set(settings: GlobalSettings) -> bool:
     )
 
 
+def _room_text(room: float, own: float, *, stays_up: bool = False) -> str:
+    """The refusal's words for the room a start leaves bibr's GPU sessions."""
+    from bibr.ocr.registry import MANAGED_VLLM_ONNX_RESERVE_GB
+
+    text = f"{room:.2f} GiB for bibr's GPU sessions"
+    if room > LLM_ONNX_MIN_HEADROOM_GB:
+        text += f" ({MANAGED_VLLM_ONNX_RESERVE_GB:.1f} GiB less the {own:.2f} GiB they hold"
+        text += ", since the server stays up for the run)" if stays_up else ")"
+    return text
+
+
 def size_managed_llm_share(
     reading: GpuMemory | None,
     *,
@@ -217,15 +240,15 @@ def size_managed_llm_share(
 
     The budget is the configured share (*cap*) of the card or, when less is
     free, what is free less the server's overshoot reserve and room for bibr's
-    sessions to grow. That room depends on what else uses the card. When a
-    managed PaddleOCR-VL server takes turns with the LLM (*swaps_with_ocr*),
-    the LLM restarts every chunk beside bibr's grown sessions, and the room is
-    ``MANAGED_VLLM_ONNX_RESERVE_GB`` less what bibr already holds (at least
-    ``LLM_ONNX_MIN_HEADROOM_GB``). Otherwise it is ``LLM_ONNX_MIN_HEADROOM_GB``:
-    an LLM-only run shares the card with bibr's own sessions alone (what they
-    hold is already not free), and shares planned to run side by side already
-    leave that reserve out. Below the model's floor, the budget is squeezed to
-    the floor while the minimum room still fits; otherwise
+    sessions to grow: ``MANAGED_VLLM_ONNX_RESERVE_GB`` less what bibr already
+    holds, and at least ``LLM_ONNX_MIN_HEADROOM_GB``. What bibr holds is
+    already not free, so as its sessions grow the budget stays the same.
+    Below the model's floor, a start that takes turns with a managed
+    PaddleOCR-VL server (*swaps_with_ocr*) is squeezed to the floor while
+    ``LLM_ONNX_MIN_HEADROOM_GB`` still fits: it restarts next chunk beside
+    bibr's grown sessions and is sized again. Any other server stays up for
+    the run and often starts in the first chunk, before bibr's sessions have
+    grown, so it is never squeezed below the full room. Otherwise
     ``ManagedLlmVramError``.
     """
     from bibr.ocr.registry import MANAGED_VLLM_ONNX_RESERVE_GB
@@ -233,11 +256,7 @@ def size_managed_llm_share(
     if reading is None or reading.total_gb <= 0:
         return LlmShare(share=cap, reason="unknown")
     total, free, own = reading.total_gb, reading.free_gb, reading.own_gb
-    headroom = (
-        max(LLM_ONNX_MIN_HEADROOM_GB, MANAGED_VLLM_ONNX_RESERVE_GB - own)
-        if swaps_with_ocr
-        else LLM_ONNX_MIN_HEADROOM_GB
-    )
+    headroom = max(LLM_ONNX_MIN_HEADROOM_GB, MANAGED_VLLM_ONNX_RESERVE_GB - own)
     cap_gb = cap * total
     floor = None if floor_gb is None else min(floor_gb, cap_gb)
     target = free - reserve_gb - headroom
@@ -258,11 +277,13 @@ def size_managed_llm_share(
         share = math.floor(round(target / total * 100, 6)) / 100
         if share > 0 and (floor is None or share * total >= floor):
             return LlmShare(share=share, reason="free", budget_gb=share * total, **details)
-    squeezed = free - reserve_gb - LLM_ONNX_MIN_HEADROOM_GB
-    if floor is not None and squeezed >= floor:
-        # Round up so the model gets its floor; the minimum headroom absorbs it.
+    # Only a start that lasts one chunk may give up bibr's room down to the
+    # minimum; a server that stays up keeps it all beside the floor itself.
+    room = LLM_ONNX_MIN_HEADROOM_GB if swaps_with_ocr else headroom
+    if floor is not None and free - reserve_gb - room >= floor:
+        # Round up so the model gets its floor; the room absorbs the rounding.
         share = min(cap, math.ceil(round(floor / total * 100, 6)) / 100)
-        details["headroom_gb"] = LLM_ONNX_MIN_HEADROOM_GB
+        details["headroom_gb"] = min(room, free - reserve_gb - share * total)
         return LlmShare(share=share, reason="floor", budget_gb=share * total, **details)
     if floor is None:
         # Without a floor the smallest share, one hundredth of the card, would
@@ -275,14 +296,14 @@ def size_managed_llm_share(
         needs = (
             f"{need:.2f} GiB (the model has no floor, so the smallest share, one hundredth of "
             f"the card or {smallest:.2f} GiB; {reserve_gb:.2f} GiB vLLM takes beyond its share "
-            f"while starting; and {headroom:.2f} GiB for bibr's GPU sessions)"
+            f"while starting; and {_room_text(headroom, own)})"
         )
     else:
-        need = floor + reserve_gb + LLM_ONNX_MIN_HEADROOM_GB
+        need = floor + reserve_gb + room
         needs = (
             f"{need:.2f} GiB (the model's {floor:.2f} GiB floor, {reserve_gb:.2f} GiB vLLM "
-            f"takes beyond its share while starting, and {LLM_ONNX_MIN_HEADROOM_GB:.1f} GiB for "
-            "bibr's GPU sessions)"
+            f"takes beyond its share while starting, and "
+            f"{_room_text(room, own, stays_up=not swaps_with_ocr)})"
         )
     raise ManagedLlmVramError(
         f"not enough free GPU memory to start the managed vLLM LLM server: "

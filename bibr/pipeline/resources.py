@@ -801,10 +801,13 @@ class ResourceManager:
         """Whether a managed PaddleOCR-VL server takes turns with the vLLM LLM server.
 
         Only then does the LLM restart every chunk beside bibr's grown GPU
-        sessions, so its share leaves them ``MANAGED_VLLM_ONNX_RESERVE_GB``.
-        With any other OCR the LLM shares the card with bibr's own sessions
-        alone, and shares that fit together were planned with that reserve
-        left out: either way the configured share is kept while it fits.
+        sessions, so a start short of the model's floor may be squeezed to it,
+        leaving them ``LLM_ONNX_MIN_HEADROOM_GB`` for that chunk. With any
+        other OCR (an OCR URL, cloud OCR, GLM-OCR, or shares planned to fit
+        side by side) the LLM stays up for the run, usually from the first
+        chunk on, before bibr's sessions have grown: its share always leaves
+        them ``MANAGED_VLLM_ONNX_RESERVE_GB`` less what they hold, and a start
+        that cannot is refused (``bibr.local.vllm_share``).
         """
         return self._starts_managed_paddle_vllm() and self._vllm_shares_overcommit()
 
@@ -857,12 +860,15 @@ class ResourceManager:
         Checked before a chunk's OCR. The start comes after OCR, and on the
         swap path PaddleOCR-VL has stopped by then, so the memory free at the
         start is about what is free now, or less: bibr's own GPU sessions only
-        grow within a chunk. So when even what is free now cannot meet the
-        model's floor, the start would raise ``ManagedLlmVramError``, and the
-        chunk's OCR is skipped. That error is returned (raised, so it carries
-        a traceback) to fail the chunk exactly as the start would; ``None``
-        means the chunk goes ahead. Read again before every chunk, since
-        memory that other processes held can come back.
+        grow within a chunk, and the room a start leaves them is their reserve
+        less what they hold, so their growth cannot raise the budget. So when
+        what is free now cannot meet the model's floor beside that room (or,
+        on the swap path only, beside the minimum room), the start would raise
+        ``ManagedLlmVramError``, and the chunk's OCR is skipped. That error is
+        returned (raised, so it carries a traceback) to fail the chunk exactly
+        as the start would; ``None`` means the chunk goes ahead. Read again
+        before every chunk, since memory that other processes held can come
+        back.
 
         No prediction (``None``) when the share is the user's (it is launched
         as given), when the LLM server is up (it is reused, or restarted after

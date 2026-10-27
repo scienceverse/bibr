@@ -124,9 +124,11 @@ class VllmLlmServer:
         ``bibr.local.vllm_share``), and ``ManagedLlmVramError`` is raised
         before launching when the model's floor does not fit.
         ``swaps_with_ocr`` says a managed PaddleOCR-VL server takes turns with
-        this one on the card, so each restart leaves bibr's sessions their
-        whole ONNX reserve; otherwise (LLM-only, or both servers planned side
-        by side) the configured share is kept while it fits.
+        this one on the card, so the server restarts every chunk and a start
+        may be squeezed to the model's floor; otherwise (LLM-only, an OCR
+        server bibr does not manage, or both servers planned side by side) it
+        stays up for the run, and a start that cannot leave bibr's sessions
+        their whole reserve beside the floor is refused.
         """
         self._stop_event = stop_event
         self._settings = settings if settings is not None else snapshot_settings()
@@ -215,7 +217,7 @@ class VllmLlmServer:
         share = vllm_share.managed_llm_share(
             reading, self._settings, self._model, cap=cap, swaps_with_ocr=swaps_with_ocr
         )
-        if share.reason == "floor":
+        if share.reason == "floor" and swaps_with_ocr:
             logger.warning(
                 "Managed vLLM LLM share %s; bibr's GPU sessions have little room left, "
                 "so expect ONNX batches to split after CUDA out-of-memory",

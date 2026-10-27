@@ -112,49 +112,174 @@ class TestCapAndColocation:
         share = _size(reading)
         assert (share.share, share.reason) == (0.85, "cap")
 
-    def test_colocated_plan_keeps_its_share_beside_paddleocr(self):
-        # The planned 0.54 with PaddleOCR-VL's 5 GB and its context up.
-        reading = GpuMemory(total_gb=CUDA_3090, free_gb=CUDA_3090 - 5.4 - 0.5, own_gb=0.5)
-        share = _size(reading, cap=0.54, swaps_with_ocr=False)
-        assert (share.share, share.reason) == (0.54, "cap")
+    def test_colocated_plan_keeps_its_share_once_ocr_is_down(self):
+        # 0.85 beside PaddleOCR-VL fits only an 80 GB card. In balanced mode
+        # its OCR server is down when the LLM starts, which keeps the cap.
+        from bibr.ocr.registry import (
+            managed_vllm_shares_fit,
+            paddle_vllm_gpu_memory_utilization,
+        )
 
-    def test_colocated_start_on_a_crowded_card_shrinks(self):
-        # Free less the 1.0 GiB capture reserve and 1.0 GiB of room: 12.3 GiB.
+        total = 78.4
+        ocr = paddle_vllm_gpu_memory_utilization(vram_gb=total)
+        assert managed_vllm_shares_fit(0.85, ocr, vram_gb=total)
+        share = _size(_bibr_alone(0.5, total=total), swaps_with_ocr=False)
+        assert (share.share, share.reason) == (0.85, "cap")
+
+    def test_colocated_start_beside_a_running_ocr_server_leaves_bibr_its_reserve(self):
+        # keep_all mode: PaddleOCR-VL's 5.4 GiB is up when the LLM starts. The
+        # shares' plan leaves bibr 6 GB but not vLLM's overshoot, so the start
+        # gives up a hundredth of the card rather than bibr's room.
+        reading = GpuMemory(total_gb=78.4, free_gb=78.4 - 5.4 - 0.5, own_gb=0.5)
+        share = _size(reading, swaps_with_ocr=False)
+        assert (share.share, share.reason) == (0.84, "free")
+        assert share.headroom_gb == 5.5
+
+    def test_colocated_start_on_a_crowded_card_keeps_bibrs_room(self):
+        # A planned 0.54 on a crowded card: 14.3 GiB free with bibr holding
+        # 3.0. Less the capture reserve and bibr's 3.0 GiB of room, the bf16
+        # 4B's 12.25 GiB floor does not fit (16.25 needed); the W4A16 build
+        # takes what is left.
         reading = GpuMemory(total_gb=CUDA_3090, free_gb=14.3, own_gb=3.0)
-        share = _size(reading, cap=0.54, swaps_with_ocr=False)
-        assert (share.share, share.reason) == (0.52, "free")
+        with pytest.raises(ManagedLlmVramError, match="needs 16.25 GiB"):
+            _size(reading, cap=0.54, swaps_with_ocr=False)
+        share = _size(reading, cap=0.54, model=STUDENT_4B_W4A16, swaps_with_ocr=False)
+        assert (share.share, share.reason) == (0.44, "free")
 
     def test_no_reading_keeps_the_configured_share(self):
         assert _size(None) == LlmShare(share=0.85, reason="unknown")
 
 
-class TestLlmOnly:
-    """No managed PaddleOCR-VL takes turns with the LLM: only bibr's sessions share the card.
+class TestServerThatStaysUp:
+    """No managed PaddleOCR-VL server takes turns with the LLM: LLM-only runs,
+    cloud OCR, an OCR server at an OCR URL, GLM-OCR, or shares planned side
+    by side. The server starts once, often in the first chunk before bibr's
+    sessions have grown, and stays up for the run.
 
-    The swap headroom (bibr's 6 GB) dropped every such start on a 24 GB card
-    from 0.85 to 0.70; the configured share is kept while it fits.
+    E29r b-auto-1 (RTX 5090, PaddleOCR-VL at an OCR URL on the same card, the
+    bf16 4B at 64 sequences): the start found 24.94 GiB free with bibr
+    holding 1.03 and took 0.73, leaving bibr 1 GiB. bibr's sessions reached
+    3.2-3.4 GiB, ran out of memory, and 31 of 48 papers failed. With room
+    they peak at about 5 GiB (E27 V1: 5,064 MiB).
     """
 
-    def test_free_card_keeps_the_configured_share(self):
-        # E23 A's first LLM start: bibr held 504 MiB.
-        reading = _bibr_alone(504 * MIB)
-        share = _size(reading, swaps_with_ocr=False)
-        assert (share.share, share.reason) == (0.85, "cap")
-        assert share.headroom_gb == 1.0
-        # The share, vLLM's overshoot reserve, bibr and 1 GiB of room fit.
-        reserve = overshoot_reserve_gb(STUDENT_4B, None)
-        assert 0.85 * CUDA_3090 + reserve + 504 * MIB + 1.0 <= CUDA_3090
-        # The same reading with PaddleOCR-VL swapping in leaves bibr its 6 GB.
-        assert _size(reading).share == 0.70
+    E29R = GpuMemory(total_gb=31.45, free_gb=24.94, own_gb=1.03)
 
-    def test_a_busier_card_shrinks_only_as_needed(self):
-        # bibr at E23 A's 2,262 MiB: 21.35 GiB free, less 1.0 + 1.0 = 19.35.
-        share = _size(_bibr_alone(2262 * MIB), swaps_with_ocr=False)
-        assert (share.share, share.reason) == (0.82, "free")
+    @staticmethod
+    def _e29r(reading, *, swaps_with_ocr=False) -> LlmShare:
+        return size_managed_llm_share(
+            reading,
+            cap=0.85,
+            floor_gb=managed_llm_floor_gb(STUDENT_4B),
+            reserve_gb=overshoot_reserve_gb(STUDENT_4B, "--max-num-seqs 64"),
+            swaps_with_ocr=swaps_with_ocr,
+        )
+
+    def test_e29r_start_leaves_bibr_its_reserve(self):
+        share = self._e29r(self.E29R)
+        assert (share.share, share.reason) == (0.61, "free")  # was 0.73
+        assert share.headroom_gb == pytest.approx(6.0 - 1.03)
+        left = self.E29R.free_gb - share.share * 31.45 - 0.75
+        assert self.E29R.own_gb + left >= 6.0
+        # A start that takes turns with PaddleOCR-VL sizes the same reading alike.
+        assert self._e29r(self.E29R, swaps_with_ocr=True) == share
+
+    @pytest.mark.parametrize("own", [0.0, 0.5, 1.03, 2.0, 3.4, 4.9])
+    def test_the_share_does_not_depend_on_when_it_starts(self, own):
+        # What bibr holds is not free: the same card read before or after its
+        # sessions have grown (up to its reserve) gives the same share.
+        others = 31.45 - 24.94 - 1.03  # PaddleOCR-VL's server and the desktop
+        share = self._e29r(GpuMemory(total_gb=31.45, free_gb=31.45 - others - own, own_gb=own))
+        assert (share.share, share.reason) == (0.61, "free")
+
+    def test_free_24gb_card_leaves_bibr_its_reserve(self):
+        # E23 A's first LLM start (bibr 504 MiB): 0.85 left bibr 1 GiB.
+        share = _size(_bibr_alone(504 * MIB), swaps_with_ocr=False)
+        assert (share.share, share.reason) == (0.70, "free")
+        assert share.headroom_gb == pytest.approx(6.0 - 504 * MIB)
+        assert _size(_bibr_alone(504 * MIB)) == share
+
+    def test_free_32gb_card(self):
+        share = _size(_bibr_alone(0.5, total=31.45), swaps_with_ocr=False)
+        assert (share.share, share.reason) == (0.77, "free")
+
+    def test_roomy_card_keeps_the_configured_share(self):
+        share = _size(_bibr_alone(0.5, total=78.4), swaps_with_ocr=False)
+        assert (share.share, share.reason) == (0.85, "cap")
+
+    # A PaddleOCR-VL server at an OCR URL holds about 5.4 GiB of an RTX 3090
+    # (bibr's own 0.21 share) and bibr 0.5 when the bf16 4B starts beside it.
+    # The start needs the 12.25 GiB floor, the 1.0 GiB capture reserve and
+    # bibr's 5.5.
+    EDGE = 12.25 + 1.0 + 5.5
+
+    def test_at_the_edge_the_floor_fits_with_bibrs_room(self):
+        share = _size(
+            GpuMemory(total_gb=CUDA_3090, free_gb=self.EDGE, own_gb=0.5), swaps_with_ocr=False
+        )
+        assert (share.share, share.reason) == (0.52, "floor")
+        assert share.budget_gb >= 12.25
+        # Rounding up to the floor takes at most a hundredth of the card.
+        assert 5.5 - 0.01 * CUDA_3090 <= share.headroom_gb < 5.5
+
+    def test_below_the_edge_a_server_that_stays_up_is_refused(self):
+        reading = GpuMemory(total_gb=CUDA_3090, free_gb=self.EDGE - MIB, own_gb=0.5)
+        with pytest.raises(ManagedLlmVramError) as exc:
+            _size(reading, swaps_with_ocr=False)
+        assert (
+            "it needs 18.75 GiB (the model's 12.25 GiB floor, 1.00 GiB vLLM takes beyond its "
+            "share while starting, and 5.50 GiB for bibr's GPU sessions (6.0 GiB less the "
+            "0.50 GiB they hold, since the server stays up for the run))"
+        ) in str(exc.value)
+        # A start that restarts next chunk is squeezed to the floor instead.
+        squeezed = _size(reading)
+        assert (squeezed.share, squeezed.reason, squeezed.headroom_gb) == (0.52, "floor", 1.0)
+
+    def test_a_3090_beside_an_external_ocr_server(self):
+        # 23.56 GiB less the OCR server's 5.4 and bibr's 0.5 (worked out, not
+        # measured): refused for the bf16 4B, sized from free memory for the
+        # W4A16 build.
+        reading = GpuMemory(total_gb=CUDA_3090, free_gb=17.66, own_gb=0.5)
+        with pytest.raises(ManagedLlmVramError, match="needs 18.75 GiB"):
+            _size(reading, swaps_with_ocr=False)
+        share = _size(reading, model=STUDENT_4B_W4A16, swaps_with_ocr=False)
+        assert (share.share, share.reason) == (0.48, "free")
 
     def test_16gb_card(self):
-        share = _size(_bibr_alone(0.5, total=CUDA_16GB), swaps_with_ocr=False)
-        assert (share.share, share.reason) == (0.83, "free")
+        # The bf16 4B's floor and bibr's room do not fit a 16 GB card beside
+        # a server that stays up; the W4A16 build does.
+        reading = _bibr_alone(0.5, total=CUDA_16GB)
+        with pytest.raises(ManagedLlmVramError, match="needs 18.75 GiB"):
+            _size(reading, swaps_with_ocr=False)
+        share = _size(reading, model=STUDENT_4B_W4A16, swaps_with_ocr=False)
+        assert (share.share, share.reason) == (0.56, "free")
+
+    def test_no_start_leaves_bibr_less_than_its_reserve(self):
+        # Every model, card and reading in 0.25 GiB steps: a start that stays
+        # up launches only beside bibr's reserve (less a hundredth of the
+        # card where it rounds up to the floor) and refuses otherwise.
+        for model in (STUDENT_4B, STUDENT_4B_W4A16, STUDENT_2B, "org/unknown"):
+            reserve = overshoot_reserve_gb(model, None)
+            for total in (CUDA_16GB, CUDA_3090, 31.45, 47.5):
+                for own_q in range(0, 33):
+                    own = own_q * 0.25
+                    for free_q in range(0, int(total * 4) + 1):
+                        free = free_q * 0.25
+                        if free + own > total:
+                            break
+                        reading = GpuMemory(total_gb=total, free_gb=free, own_gb=own)
+                        try:
+                            share = _size(reading, model=model, swaps_with_ocr=False)
+                        except ManagedLlmVramError:
+                            continue
+                        left = free - reserve - share.share * total
+                        assert left >= max(1.0, 6.0 - own) - 0.01 * total - 1e-9, (
+                            model,
+                            total,
+                            own,
+                            free,
+                            share,
+                        )
 
 
 class TestFloorRounding:
@@ -182,7 +307,7 @@ class TestFloorRounding:
     @staticmethod
     def _reading_for_target(target: float, *, swaps_with_ocr: bool) -> GpuMemory:
         own = 0.5
-        headroom = max(1.0, 6.0 - own) if swaps_with_ocr else 1.0
+        headroom = max(1.0, 6.0 - own)
         free = target + overshoot_reserve_gb(STUDENT_4B, None) + headroom
         return GpuMemory(total_gb=CUDA_3090, free_gb=free, own_gb=own)
 
@@ -464,17 +589,47 @@ class TestServerStart:
         assert _launched_share(popen) == "0.7"
         assert any("Managed vLLM LLM share 0.70" in r.getMessage() for r in caplog.records)
 
-    def test_llm_only_start_keeps_the_configured_share(self, monkeypatch, caplog):
+    def test_llm_only_start_leaves_bibr_its_reserve(self, monkeypatch, caplog):
         self._probe(monkeypatch, _bibr_alone(504 * MIB))
         with caplog.at_level("INFO", logger="bibr.local.vllm_llm"):
             _server, popen = _mk_server(
                 model=STUDENT_4B, port=9999, mem_fraction=0.85, share_from_free_memory=True
             )
-        assert _launched_share(popen) == "0.85"
+        assert _launched_share(popen) == "0.7"
         assert any(
-            "Managed vLLM LLM share 0.85 of 23.56 GiB (cap)" in r.getMessage()
+            "Managed vLLM LLM share 0.70 of 23.56 GiB (free)" in r.getMessage()
             for r in caplog.records
         )
+
+    def test_a_server_that_stays_up_is_refused_without_launching(self, monkeypatch):
+        from bibr.local import vllm_llm
+
+        self._probe(monkeypatch, GpuMemory(total_gb=CUDA_3090, free_gb=17.66, own_gb=0.5))
+        with (
+            patch("importlib.util.find_spec", return_value=object()),
+            patch.object(vllm_llm.subprocess, "Popen") as popen,
+            pytest.raises(ManagedLlmVramError, match="since the server stays up for the run"),
+        ):
+            vllm_llm.VllmLlmServer(
+                model=STUDENT_4B, port=9999, mem_fraction=0.85, share_from_free_memory=True
+            )
+        popen.assert_not_called()
+
+    @pytest.mark.parametrize(("swaps_with_ocr", "warns"), [(True, True), (False, False)])
+    def test_only_a_squeezed_start_warns(self, monkeypatch, caplog, swaps_with_ocr, warns):
+        # At the edge both paths round up to the floor; only the swap may
+        # also have been squeezed there, so only it warns.
+        self._probe(monkeypatch, GpuMemory(total_gb=CUDA_3090, free_gb=18.75, own_gb=0.5))
+        with caplog.at_level("WARNING", logger="bibr.local.vllm_llm"):
+            _server, popen = _mk_server(
+                model=STUDENT_4B,
+                port=9999,
+                mem_fraction=0.85,
+                share_from_free_memory=True,
+                swaps_with_ocr=swaps_with_ocr,
+            )
+        assert _launched_share(popen) == "0.52"
+        assert any("little room left" in r.getMessage() for r in caplog.records) is warns
 
     def test_floor_that_does_not_fit_never_launches_vllm(self, monkeypatch):
         self._probe(monkeypatch, _bibr_alone(2.3, total=CUDA_16GB))
@@ -744,7 +899,7 @@ class TestW4a16Floor:
         assert (
             "it needs 5.01 GiB (the model has no floor, so the smallest share, one hundredth of "
             "the card or 0.24 GiB; 0.75 GiB vLLM takes beyond its share while starting; and "
-            "4.02 GiB for bibr's GPU sessions)"
+            "4.02 GiB for bibr's GPU sessions (6.0 GiB less the 1.98 GiB they hold))"
         ) in str(exc.value)
         assert "GiB floor," not in str(exc.value)
 

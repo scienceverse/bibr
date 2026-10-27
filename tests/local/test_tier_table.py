@@ -98,3 +98,38 @@ def test_the_runtime_default_equals_the_setup_default(card, row, expected):
     gb = card(mib, capability)
     assert _runtime(gb) == expected
     assert _setup(gb) == expected
+
+
+_VLLM_ROWS = [(row, expected) for row, expected in TIER_TABLE if expected[0] == "vllm"]
+
+
+@pytest.mark.parametrize(("row", "expected"), _VLLM_ROWS, ids=[r[0] for r, _e in _VLLM_ROWS])
+def test_every_vllm_default_takes_turns_with_paddleocr(card, monkeypatch, row, expected):
+    """A managed vLLM LLM that takes turns with PaddleOCR-VL may be squeezed to
+    the model's floor for a chunk; one that stays up for the run must leave
+    bibr's sessions their whole reserve (``bibr.local.vllm_share``). Every vLLM
+    default takes turns, as did every run that backs one, so that rule changes
+    none of them. The whole card counts as CUDA's here, which only makes the
+    shares fit together more easily."""
+    from bibr.config import GlobalSettings
+    from bibr.pipeline.resources import ResourceManager
+
+    _name, mib, capability = row
+    gb = card(mib, capability)
+    monkeypatch.setattr(registry, "_managed_gpu_vram_gb", lambda: gb)
+    env = _build_recommended_setup(
+        platform_key="cuda",
+        accelerator_memory_gb=gb,
+        system_memory_gb=32.0,
+        sys_platform="linux",
+        machine="x86_64",
+    ).env
+    settings = GlobalSettings()
+    rm = ResourceManager(
+        memory_mode=expected[2],
+        ocr_backend=env["OCR_BACKEND"],
+        managed_vllm_fraction=settings.llm.local_mem_fraction,
+        llm_backend=env["LLM_BACKEND"],
+        settings=settings,
+    )
+    assert rm._llm_swaps_with_ocr() is True

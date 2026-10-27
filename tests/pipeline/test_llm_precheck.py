@@ -285,79 +285,116 @@ class TestAgreesWithTheStart:
     """The precheck refuses exactly when the start would, with the start's own message.
 
     Covers what the 0.85 fixtures above cannot tell apart: a model without a
-    floor, where the swap path's room for bibr decides, and a planned share
-    below the model's floor, which caps it.
+    floor, where bibr's room decides; a planned share below the model's
+    floor, which caps it; and a server that stays up for the run (an OCR
+    server at an OCR URL, cloud OCR), which is refused where the swap would
+    be squeezed to the floor.
     """
 
     @pytest.mark.parametrize(
-        ("settings", "fraction", "reading", "refused"),
+        ("settings", "rm", "reading", "refused"),
         [
-            pytest.param(_settings, 0.85, FITS, False, id="bf16-fits"),
-            pytest.param(_settings, 0.85, REFUSED, True, id="bf16-refused"),
+            pytest.param(_settings, {}, FITS, False, id="bf16-fits"),
+            pytest.param(_settings, {}, REFUSED, True, id="bf16-refused"),
             # A local path with LLM_LOCAL_MIN_VRAM_GB=7 starts at its floor,
             # and is refused once bibr holds 2.9 GiB beside a 12 GiB hog
             # (8.75 GiB needed), where without the floor it would start at 0.20.
-            pytest.param(
-                lambda: _local_w4a16_settings(7.0), 0.85, REFUSED, False, id="w4a16-floor"
-            ),
+            pytest.param(lambda: _local_w4a16_settings(7.0), {}, REFUSED, False, id="w4a16-floor"),
             pytest.param(
                 lambda: _local_w4a16_settings(7.0),
-                0.85,
+                {},
                 GpuMemory(total_gb=CUDA_3090, free_gb=8.66, own_gb=2.90),
                 True,
                 id="w4a16-floor-refused",
             ),
-            # A local path without it has no floor. On the swap path a start
-            # still leaves bibr 6 GiB less what it holds (4.02 GiB here), so
-            # it is refused once that and the 0.75 GiB reserve use up what is
-            # free; with only the 1 GiB minimum it would start at 0.11.
+            # A local path without it has no floor. A start still leaves bibr
+            # 6 GiB less what it holds (4.02 GiB here), so it is refused once
+            # that and the 0.75 GiB reserve use up what is free; with only the
+            # 1 GiB minimum it would start at 0.11.
             pytest.param(
                 _local_w4a16_settings,
-                0.85,
+                {},
                 GpuMemory(total_gb=CUDA_3090, free_gb=4.50, own_gb=1.98),
                 True,
                 id="floorless-swap-refused",
             ),
             pytest.param(
                 _local_w4a16_settings,
-                0.85,
+                {},
                 GpuMemory(total_gb=CUDA_3090, free_gb=6.00, own_gb=1.98),
                 False,
                 id="floorless-swap-fits",
             ),
-            # The same reading with a planned share of 0.40, which runs beside
-            # PaddleOCR-VL instead of taking turns with it: bibr keeps only the
-            # 1 GiB minimum, so the start fits at 0.11. A precheck that assumed
-            # the swap path (bibr's 6 GiB) would refuse it.
+            # The same readings with a planned share of 0.40, which runs
+            # beside PaddleOCR-VL instead of taking turns with it: the server
+            # stays up and leaves bibr the same room.
             pytest.param(
                 _local_w4a16_settings,
-                0.40,
+                {"managed_vllm_fraction": 0.40},
                 GpuMemory(total_gb=CUDA_3090, free_gb=4.50, own_gb=1.98),
+                True,
+                id="floorless-no-swap-refused",
+            ),
+            pytest.param(
+                _local_w4a16_settings,
+                {"managed_vllm_fraction": 0.40},
+                GpuMemory(total_gb=CUDA_3090, free_gb=6.00, own_gb=1.98),
                 False,
                 id="floorless-no-swap-fits",
             ),
             # A planned share of 0.40 (9.42 GiB) caps the 4B's 12.25 GiB floor:
-            # with 10 GiB left after the reserve and bibr's room, the start
+            # with 9.5 GiB left after the reserve and bibr's room, the start
             # takes 0.40, where the 12.25 GiB floor would refuse it.
             pytest.param(
                 _settings,
-                0.40,
-                GpuMemory(total_gb=CUDA_3090, free_gb=12.00, own_gb=1.00),
+                {"managed_vllm_fraction": 0.40},
+                GpuMemory(total_gb=CUDA_3090, free_gb=15.50, own_gb=1.00),
                 False,
                 id="cap-below-floor-fits",
             ),
             pytest.param(
                 _settings,
-                0.40,
-                GpuMemory(total_gb=CUDA_3090, free_gb=11.00, own_gb=1.00),
+                {"managed_vllm_fraction": 0.40},
+                GpuMemory(total_gb=CUDA_3090, free_gb=15.00, own_gb=1.00),
                 True,
                 id="cap-below-floor-refused",
             ),
+            # PaddleOCR-VL at an OCR URL holds about 5.4 GiB of the 3090.
+            # The bf16 4B would stay up beside it and cannot leave bibr 5.5 GiB
+            # beside its floor; the swap squeezes the same reading to 0.52.
+            pytest.param(
+                _settings,
+                {"ocr_backend": "paddle-http", "ocr_url": "http://localhost:8897"},
+                GpuMemory(total_gb=CUDA_3090, free_gb=17.66, own_gb=0.50),
+                True,
+                id="ocr-url-refused",
+            ),
+            pytest.param(
+                _settings,
+                {"ocr_backend": "gemini"},
+                GpuMemory(total_gb=CUDA_3090, free_gb=17.66, own_gb=0.50),
+                True,
+                id="cloud-ocr-refused",
+            ),
+            pytest.param(
+                _settings,
+                {},
+                GpuMemory(total_gb=CUDA_3090, free_gb=17.66, own_gb=0.50),
+                False,
+                id="swap-squeezed",
+            ),
+            pytest.param(
+                _settings,
+                {"ocr_backend": "paddle-http", "ocr_url": "http://localhost:8897"},
+                GpuMemory(total_gb=CUDA_3090, free_gb=18.75, own_gb=0.50),
+                False,
+                id="ocr-url-fits",
+            ),
         ],
     )
-    async def test_refusal_matches_the_real_start(self, card, settings, fraction, reading, refused):
+    async def test_refusal_matches_the_real_start(self, card, settings, rm, reading, refused):
         card["reading"] = reading
-        rm = _rm(settings=settings(), managed_vllm_fraction=fraction)
+        rm = _rm(settings=settings(), **rm)
         predicted = await rm.llm_start_refusal("vllm")
         started = await _start_refusal(rm)
         assert (predicted is not None) is refused
@@ -533,6 +570,59 @@ async def test_e25_v2_chunks_after_a_refusal_skip_ocr_until_memory_comes_back(ca
     rm._llm_server._process = None  # never signal the mocked process
 
 
+async def test_a_server_that_would_stay_up_without_room_skips_ocr(card):
+    """PaddleOCR-VL at an OCR URL on a 3090 (about 5.4 GiB) and the bf16 4B managed.
+
+    The first chunk's check reads 17.66 GiB free with bibr at 0.50: the LLM
+    would stay up beside the OCR server and cannot leave bibr 5.5 GiB beside
+    its 12.25 GiB floor. The chunk fails with the start's typed outcome
+    before any OCR, and vLLM is never launched.
+    """
+    from bibr.api import ChewFailure
+    from bibr.batch.runner import _local_outcome
+    from bibr.config import snapshot_settings
+    from bibr.pipeline.context import RunConfig
+    from bibr.pipeline.pipeline import Pipeline
+    from bibr.pipeline.stages.llm_server import LlmServerPrecheckStage, LlmServerStage
+    from bibr.pipeline.state import FileState
+
+    ocred: list[str] = []
+
+    class _RenderOcr:
+        name = "render_ocr"
+        requires = ()
+        produces = ()
+
+        async def run(self, ctx):
+            ocred.extend(fs.path.name for fs in ctx.alive())
+
+    card["reading"] = GpuMemory(total_gb=CUDA_3090, free_gb=17.66, own_gb=0.50)
+    rm = _rm(memory_mode="balanced", ocr_backend="paddle-http", ocr_url="http://localhost:8897")
+    pipeline = Pipeline(
+        stages=[LlmServerPrecheckStage(), _RenderOcr(), LlmServerStage()],
+        resources=rm,
+        config=RunConfig(llm_backend="vllm"),
+        settings=snapshot_settings(),
+    )
+    chunk = [FileState(path=Path(f"p{i}.pdf")) for i in range(3)]
+    with _no_launch() as popen:
+        await pipeline.process_chunk(chunk)
+    popen.assert_not_called()
+    assert ocred == []
+    for fs in chunk:
+        failure = ChewFailure(
+            fs.path, fs.error, fs.error_code, fs.failed_stage, outage=fs.error_outage
+        )
+        o = _local_outcome(failure, "t0", "t1", 1.0)
+        assert (o.status, o.error_code, o.failed_stage) == (
+            "failed",
+            "upstream_unavailable",
+            "llm_server",
+        )
+        assert "since the server stays up for the run" in o.error
+        assert "needs 18.75 GiB" in o.error
+
+
 class _GpuModel:
     """One of bibr's own GPU models: unloading it frees ``frees_gb`` on the card."""
 
@@ -644,12 +734,24 @@ class TestReleaseBeforeRefusing:
 
     async def test_the_start_releases_a_resident_ocr_server_and_starts(self, card, ner):
         """From the second chunk the start, not the precheck, meets the refusal:
-        the precheck saw the LLM server up. A resident OCR server is stopped too."""
-        card["reading"] = GpuMemory(total_gb=CUDA_3090, free_gb=10.0, own_gb=1.98)
+        the precheck saw the LLM server up. A resident OCR server is stopped too.
+
+        GLM-OCR's llama.cpp server is its own process: stopping it frees 5.5
+        GiB of the card but none of what bibr holds. The LLM then stays up,
+        so it needs 12.25 + 1.0 + 4.02 GiB: 17.27 of 18.5 free.
+        """
+        card["reading"] = GpuMemory(total_gb=CUDA_3090, free_gb=13.0, own_gb=1.98)
         rm = _rm(memory_mode="balanced", ocr_backend="glm-llama")
         rm._layout = _GpuModel(card, 0.0)
         ocr = MagicMock()
-        ocr.shutdown.side_effect = lambda: _free(card, 5.5)
+
+        def stop_ocr_server():
+            r = card["reading"]
+            card["reading"] = GpuMemory(
+                total_gb=r.total_gb, free_gb=r.free_gb + 5.5, own_gb=r.own_gb
+            )
+
+        ocr.shutdown.side_effect = stop_ocr_server
         rm._ocr, rm.ocr_backend = ocr, "glm-llama"
         assert await _start_refusal(rm) is None
         ocr.shutdown.assert_called_once()

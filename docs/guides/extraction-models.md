@@ -19,7 +19,10 @@ The memory is what must be free on the card each time bibr starts the model
 (see [configuration](configuration.md) for how bibr sizes it): the model's own
 budget (12.25 GiB for the 4B, 6.25 GiB for the W4A16 build, measured on an RTX
 3090), plus what vLLM takes beyond it while it starts and 1 GiB for bibr's
-other models.
+other models. That is when PaddleOCR-VL takes turns with the model, as in the
+defaults below. A model that stays up for the run beside cloud OCR or an OCR
+server at `--ocr-url` leaves bibr's other models 6 GiB less what they hold
+instead: about 18.75 GiB free for the 4B and 12.5 GiB for the W4A16 build.
 
 ### Defaults by card
 

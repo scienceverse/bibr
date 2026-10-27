@@ -74,12 +74,11 @@ async def test_shares_that_fit_together_are_colocated(launches):
         {"ocr_backend": "paddle-vllm", "ocr_url": "http://ocr-host:8080"},
     ],
 )
-async def test_llm_only_runs_do_not_leave_room_for_an_ocr_swap(launches, ocr):
-    """No managed PaddleOCR-VL server takes turns with the LLM, so no swap headroom.
+async def test_without_a_managed_paddleocr_server_the_llm_stays_up(launches, ocr):
+    """No managed PaddleOCR-VL server takes turns with the LLM: no swap.
 
-    The swap headroom was applied whenever 0.85 and PaddleOCR-VL's share did
-    not fit together, whatever the OCR, which cut every LLM-only start on a
-    24 GB card from 0.85 to 0.70.
+    The server then stays up for the run, so its start is never squeezed
+    below bibr's reserve to reach the model's floor (bibr.local.vllm_share).
     """
     rm = ResourceManager(managed_vllm_fraction=0.85, **ocr)
     await rm.start_llm_server(backend="vllm")
@@ -108,10 +107,14 @@ async def test_ocr_that_fell_back_from_paddle_vllm_no_longer_swaps(monkeypatch, 
 
 @pytest.mark.parametrize(
     ("ocr_backend", "launched"),
-    [("gemini", "0.85"), ("paddle-vllm", "0.7")],
+    [("gemini", "0.7"), ("paddle-vllm", "0.7")],
 )
 async def test_e23_first_start_share_with_and_without_ocr(monkeypatch, ocr_backend, launched):
-    """The real server class sized from E23 A's first LLM start (bibr at 504 MiB)."""
+    """The real server class sized from E23 A's first LLM start (bibr at 504 MiB).
+
+    Both leave bibr 6 GiB less what it holds. With cloud OCR the start used
+    to keep 0.85, leaving bibr 1 GiB for the whole run.
+    """
     from unittest.mock import MagicMock, patch
 
     import bibr.local.vllm_llm as vllm_llm
@@ -237,7 +240,8 @@ def test_local_pipeline_reads_the_users_choice_before_planning(monkeypatch):
 
 
 def test_llm_only_pipeline_keeps_the_configured_share_as_its_cap(monkeypatch, launches):
-    """With OCR that is not managed paddle-vllm there is no swap: 0.85 stays the cap."""
+    """With OCR that is not managed paddle-vllm there is no swap: 0.85 stays the cap,
+    and the server, which stays up, sizes its share below it."""
     import asyncio
 
     from bibr.config import GlobalSettings
