@@ -2,7 +2,7 @@
 
 Torch-free: the models are the committed fixture bundles on CPU sessions,
 with their GPU session swapped for one that raises the errors ONNX Runtime
-raised on a nearly full RTX 3090 (E23, 2026-10-26). The CPU last resort
+raised on a nearly full RTX 3090 (2026-10-26). The CPU last resort
 then runs the real graph, so its answers must match the golden outputs.
 """
 
@@ -19,7 +19,7 @@ from bibr.utils import gpu_oom
 from bibr.utils.gpu_oom import is_gpu_oom_error, is_memory_error, split_on_gpu_oom
 from tests import test_onnx_runtime_core as core
 
-# A section-classifier arena failure (E23 C/chk1 04:28:39.203).
+# A section-classifier arena failure (that RTX 3090, 04:28:39.203).
 ARENA_OOM = (
     "[ONNXRuntimeError] : 6 : RUNTIME_EXCEPTION : Non-zero status code returned while "
     "running Add node. Name:'/inner/encoder/encoder/layer.0/attention/self/query/Add' "
@@ -44,13 +44,13 @@ ILLEGAL_ADDRESS = (
     "[ONNXRuntimeError] : 1 : FAIL : "
     + _CUDA_CALL.format(line=129)
     + _CUDA_CALL.format(line=121)
-    + "CUDA failure 700: an illegal memory access was encountered ; GPU=0 ; hostname=fridge ; "
+    + "CUDA failure 700: an illegal memory access was encountered ; GPU=0 ; hostname=gpu-host ; "
     "file=/onnxruntime_src/onnxruntime/core/providers/cuda/gpu_data_transfer.cc ; line=73 ; "
     "expr=cudaMemcpyAsync(dst_data, src_data, bytes, cudaMemcpyDeviceToHost, stream);"
 )
 CUDNN_EXECUTION_FAILED = (
     "[ONNXRuntimeError] : 1 : FAIL : CUDNN failure 8: CUDNN_STATUS_EXECUTION_FAILED ; GPU=0 ; "
-    "hostname=fridge ; expr=cudnnConvolutionForward(...); [with ERRTYPE = cudnnStatus_t]"
+    "hostname=gpu-host ; expr=cudnnConvolutionForward(...); [with ERRTYPE = cudnnStatus_t]"
 )
 
 
@@ -272,7 +272,7 @@ class TestSectionClassifier:
 
 
 class TestNerParser:
-    """A parser OOM dropped the paper's references (11 papers in E23's long run)."""
+    """A parser OOM dropped the paper's references (11 papers in a long run on that RTX 3090)."""
 
     def test_splits_then_matches_golden(self):
         from bibr.ner.parser_onnx import OnnxRefParser
@@ -494,7 +494,7 @@ class TestSentenceSegmenter:
 
 
 # The sentence segmenter's CUDA session could not even be created on an 8 GB
-# card with a desktop beside the managed vLLM server (E26 E8-w4xd, 15:32:12):
+# card with a desktop beside the managed vLLM server (an emulated card, 15:32:12):
 # ORT's constructor raised its arena failure, and the chunk failed parse_failed.
 SESSION_ARENA_OOM = (
     "[ONNXRuntimeError] : 1 : FAIL : Exception during initialization: "

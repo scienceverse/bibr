@@ -644,7 +644,7 @@ def test_segmenter_cuda_session_keeps_default_session_options(monkeypatch):
 
 
 # ORT's constructor failure when the segmenter's CUDA session could not be
-# created on a nearly full 8 GB card (E26 E8-w4xd, 15:32:12).
+# created on a nearly full 8 GB card (an emulated card with a desktop, 15:32:12).
 _SESSION_ARENA_OOM = (
     "[ONNXRuntimeError] : 1 : FAIL : Exception during initialization: "
     "/onnxruntime_src/onnxruntime/core/framework/bfc_arena.cc:358 void* "

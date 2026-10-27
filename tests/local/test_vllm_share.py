@@ -80,7 +80,7 @@ class TestOvershootReserve:
 
 
 class TestSwapRestartsBesideGrowingBibr:
-    """E23 arm A: bibr held 504 MiB at the first LLM start and 2,262 at the fourth."""
+    """A 24 GB run: bibr held 504 MiB at the first LLM start and 2,262 at the fourth."""
 
     @pytest.mark.parametrize("own_mib", [504, 2262, 3100, 4500])
     def test_every_restart_gets_the_same_share_and_fits(self, own_mib):
@@ -156,18 +156,18 @@ class TestServerThatStaysUp:
     by side. The server starts once, often in the first chunk before bibr's
     sessions have grown, and stays up for the run.
 
-    E29r b-auto-1 and b-none-1 (RTX 5090, PaddleOCR-VL at an OCR URL on the
+    Two runs (RTX 5090, PaddleOCR-VL at an OCR URL on the
     same card, the bf16 4B at 64 sequences on vLLM 0.32, sized by this rule
     with and without MTP): the start found 24.94 GiB free with bibr holding
     1.03 and took 0.73, leaving bibr 1 GiB. bibr's sessions reached 3.2-3.4
     GiB, ran out of memory, and 31 and 30 of 48 papers failed. With room
-    they peak at about 5 GiB (E27 V1: 5,064 MiB).
+    they peak at about 5 GiB (5,064 MiB on an RTX 3090).
     """
 
-    E29R = GpuMemory(total_gb=31.45, free_gb=24.94, own_gb=1.03)
+    READING_5090 = GpuMemory(total_gb=31.45, free_gb=24.94, own_gb=1.03)
 
     @staticmethod
-    def _e29r(reading, *, swaps_with_ocr=False) -> LlmShare:
+    def _resident(reading, *, swaps_with_ocr=False) -> LlmShare:
         return size_managed_llm_share(
             reading,
             cap=0.85,
@@ -176,25 +176,25 @@ class TestServerThatStaysUp:
             swaps_with_ocr=swaps_with_ocr,
         )
 
-    def test_e29r_start_leaves_bibr_its_reserve(self):
-        share = self._e29r(self.E29R)
+    def test_the_5090_start_leaves_bibr_its_reserve(self):
+        share = self._resident(self.READING_5090)
         assert (share.share, share.reason) == (0.61, "free")  # was 0.73
         assert share.headroom_gb == pytest.approx(6.0 - 1.03)
-        left = self.E29R.free_gb - share.share * 31.45 - 0.75
-        assert self.E29R.own_gb + left >= 6.0
+        left = self.READING_5090.free_gb - share.share * 31.45 - 0.75
+        assert self.READING_5090.own_gb + left >= 6.0
         # A start that takes turns with PaddleOCR-VL sizes the same reading alike.
-        assert self._e29r(self.E29R, swaps_with_ocr=True) == share
+        assert self._resident(self.READING_5090, swaps_with_ocr=True) == share
 
     @pytest.mark.parametrize("own", [0.0, 0.5, 1.03, 2.0, 3.4, 4.9])
     def test_the_share_does_not_depend_on_when_it_starts(self, own):
         # What bibr holds is not free: the same card read before or after its
         # sessions have grown (up to its reserve) gives the same share.
         others = 31.45 - 24.94 - 1.03  # PaddleOCR-VL's server and the desktop
-        share = self._e29r(GpuMemory(total_gb=31.45, free_gb=31.45 - others - own, own_gb=own))
+        share = self._resident(GpuMemory(total_gb=31.45, free_gb=31.45 - others - own, own_gb=own))
         assert (share.share, share.reason) == (0.61, "free")
 
     def test_free_24gb_card_leaves_bibr_its_reserve(self):
-        # E23 A's first LLM start (bibr 504 MiB): 0.85 left bibr 1 GiB.
+        # A 24 GB run's first LLM start (bibr 504 MiB): 0.85 left bibr 1 GiB.
         share = _size(_bibr_alone(504 * MIB), swaps_with_ocr=False)
         assert (share.share, share.reason) == (0.70, "free")
         assert share.headroom_gb == pytest.approx(6.0 - 504 * MIB)
@@ -894,7 +894,7 @@ class TestFloorSetting:
 class TestW4a16Floor:
     """The published 4B W4A16 build (6.25 GiB floor at 64 sequences) on emulated 16 and 12 GB cards.
 
-    Readings are E25 V2's (an 8 GiB hog on the 3090): bibr 0.50 GiB before
+    Readings from an emulated 16 GB card (an 8 GiB hog on an RTX 3090): bibr 0.50 GiB before
     the first LLM start, 1.98-2.06 GiB before the later ones, which refused
     the bf16 4B at 13.48-13.57 GiB free.
     """
@@ -969,7 +969,7 @@ class TestW4a16Floor:
         assert share.budget_gb < 6.25
 
     def test_a_floorless_refusal_names_the_swap_room_it_needs(self):
-        # E25 V2's second start, a local copy without the setting: on the swap
+        # The 16 GB card's second start, a local copy without the setting: on the swap
         # path bibr keeps 6 GiB less the 1.98 it holds, not the 1 GiB minimum.
         reading = GpuMemory(total_gb=CUDA_3090, free_gb=4.50, own_gb=1.98)
         with pytest.raises(ManagedLlmVramError) as exc:

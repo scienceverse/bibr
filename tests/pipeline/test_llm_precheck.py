@@ -1,6 +1,6 @@
 """A chunk whose managed vLLM LLM server start is sure to be refused skips OCR.
 
-On an emulated 16 GB card (E25 V2, an 8 GiB hog on an RTX 3090) the 4B
+On an emulated 16 GB card (an 8 GiB hog on an RTX 3090) the 4B
 student's first start fitted and every later one was refused by
 ``ManagedLlmVramError`` about a second after PaddleOCR-VL stopped, yet each
 of those chunks still started PaddleOCR-VL and OCRed its 8 papers first: 40
@@ -29,7 +29,7 @@ from bibr.pipeline.resources import ResourceManager
 STUDENT_4B = "scienceverse/bibr-extract-qwen35-4b"
 W4A16_LOCAL = "/models/bibr-extract-qwen35-4b-W4A16"
 CUDA_3090 = 23.56
-# E25 V2 readings beside the 8 GiB hog: before chunk 1's LLM start (fits at
+# The 16 GB card's readings beside the 8 GiB hog: before chunk 1's LLM start (fits at
 # the 4B's 12.25 GiB floor), before chunk 2's (refused: 14.25 GiB needed), and
 # a card whose other user has gone (memory came back).
 FITS = GpuMemory(total_gb=CUDA_3090, free_gb=15.04, own_gb=0.50)
@@ -495,7 +495,7 @@ def test_the_local_barrier_plan_checks_before_ocr_only():
         assert "llm_server_precheck" not in names
 
 
-async def test_e25_v2_chunks_after_a_refusal_skip_ocr_until_memory_comes_back(card, port):
+async def test_16gb_chunks_after_a_refusal_skip_ocr_until_memory_comes_back(card, port):
     """Real ResourceManager, VllmLlmServer and port check (Popen mocked) over four chunks.
 
     Chunk 1 passes the check, its OCR grows bibr to 1.98 GiB, and the start is

@@ -170,7 +170,7 @@ class TestCardSizeTolerance:
 
     def test_no_vllm_variant_reaches_an_8_gb_card(self):
         # Every managed vLLM start was refused on an emulated 8 GB card with a
-        # desktop (E26, E27), so the tolerance must not lift one onto it.
+        # desktop (two rounds of runs), so the tolerance must not lift one onto it.
         for key in ("bibr-extract-4b", "bibr-extract-2b"):
             assert variants_for(get_model(key), "cuda", 8188 / 1024, "vllm") == []
             assert variants_for(get_model(key), "cuda", 8.0, "vllm") == []

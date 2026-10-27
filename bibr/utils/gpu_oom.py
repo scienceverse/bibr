@@ -55,7 +55,7 @@ NEARLY_FULL_GB = 2.0
 _RECENT_OOM_S = 10.0
 
 # The window is process-wide, not per model or per session, on purpose: the
-# one bare ``cudaError`` seen (E23, layout) came 12 ms after an arena failure
+# one bare ``cudaError`` seen (RTX 3090, layout) came 12 ms after an arena failure
 # in another model (the section classifier), so a per-model window would have
 # missed it. The cost is that an undescribed real CUDA fault within 10 s of
 # any recognised out-of-memory failure in this process is retried (split, then

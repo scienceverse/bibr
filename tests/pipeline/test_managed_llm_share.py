@@ -109,8 +109,8 @@ async def test_ocr_that_fell_back_from_paddle_vllm_no_longer_swaps(monkeypatch, 
     ("ocr_backend", "launched"),
     [("gemini", "0.7"), ("paddle-vllm", "0.7")],
 )
-async def test_e23_first_start_share_with_and_without_ocr(monkeypatch, ocr_backend, launched):
-    """The real server class sized from E23 A's first LLM start (bibr at 504 MiB).
+async def test_24gb_first_start_share_with_and_without_ocr(monkeypatch, ocr_backend, launched):
+    """The real server class sized from a 24 GB run's first LLM start (bibr at 504 MiB).
 
     Both leave bibr 6 GiB less what it holds. With cloud OCR the start used
     to keep 0.85, leaving bibr 1 GiB for the whole run.

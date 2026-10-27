@@ -1,7 +1,7 @@
 """A managed llama.cpp LLM server stops for a GLM-OCR start that cannot fit beside it.
 
 The LLM server outlives a chunk while OCR is torn down after each one. On an
-emulated 8 GB card with a desktop on it (E27 L8), the second chunk's GLM-OCR
+emulated 8 GB card with a desktop on it (a hog on an RTX 3090), the second chunk's GLM-OCR
 llama.cpp server started beside the 4B Q8_0 LLM server (5,088 MiB), could not
 allocate its 482 MiB compute buffer, and every page of that chunk failed with
 connection errors.
@@ -31,7 +31,7 @@ def test_glm_ocr_needs_its_hold_and_the_minimum_room():
 
 
 def test_llama_cpp_llm_stops_when_glm_ocr_cannot_fit_beside_it(monkeypatch):
-    # L8's second chunk: 7.04 GiB to CUDA less the LLM's 4.97 and bibr's 0.27.
+    # That 8 GB run's second chunk: 7.04 GiB to CUDA less the LLM's 4.97 and bibr's 0.27.
     rm = _manager(monkeypatch, free_gb=1.80)
     assert rm._llm_server_blocks_ocr("glm-llama")
 

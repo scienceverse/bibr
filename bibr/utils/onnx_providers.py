@@ -520,7 +520,7 @@ def is_session_gpu_oom(exc: BaseException, providers: list[str | tuple[str, dict
     the session, so on a nearly full card the ``InferenceSession`` constructor
     itself raises the arena's ``BFCArena ... Failed to allocate memory`` (the
     sentence segmenter on an 8 GB card beside the managed vLLM server and a
-    desktop, E26). That is the shortage the run-time batch splits handle
+    desktop, 2026-10-26). That is the shortage the run-time batch splits handle
     (:func:`bibr.utils.gpu_oom.is_gpu_oom_error` recognises it); any other
     failure, and any failure of a chain without CUDA, is not.
     """
