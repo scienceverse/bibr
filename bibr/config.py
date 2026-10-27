@@ -1010,9 +1010,9 @@ class OcrOptions(_BibrSettings):
         "on born-digital PDFs, under the same printable-ratio gate as body text. "
         "Short running heads use the short-text allowance. A header or footer stays "
         "with OCR in a right-to-left script, as a first-page masthead the text layer "
-        "barely covers, and on scanned pages. On by default since the E12b eval "
-        "(2026-10-26: no scored change on born-digital PDFs or scans, about 42% fewer "
-        "OCR requests per born-digital paper); set false to OCR them.",
+        "barely covers, and on scanned pages. On by default: in the 2026-10-26 evaluation "
+        "it changed no scored field on born-digital PDFs or scans and sent about 42% fewer "
+        "OCR requests per born-digital paper. Set false to OCR them.",
     )
     native_text_formula_number: bool = Field(
         False,
