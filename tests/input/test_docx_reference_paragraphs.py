@@ -122,6 +122,8 @@ def test_one_entry_per_paragraph_is_the_segmentation():
         "Appendix A",
         "Supplementary Information",
         "Extended Data Fig. 1 | Recall by condition.",
+        "Extended Data Fig. 2 | Recall by condition and age group in the three samples, with the "
+        "means of each condition marked by a line and the sample sizes above the bars.",
     ],
 )
 def test_the_list_ends_at_a_float_or_an_end_of_list_heading(end):
@@ -258,8 +260,14 @@ def test_an_entry_that_opens_with_an_end_of_list_word_stays_in_the_list(entry):
     assert reference_entries(paragraphs) == ([*refs[:3], entry, *refs[3:]], "ok")
 
 
-def test_an_end_of_list_word_after_an_entrys_start_does_not_end_the_list():
-    entry = "World Health Organization. International classification of diseases, annex tables."
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "World Health Organization. International classification of diseases, annex tables.",
+        "Nakamura, K. (2020). Notes on extended data in memory research. Memory, 3, 1-9.",
+    ],
+)
+def test_an_end_of_list_word_after_an_entrys_start_does_not_end_the_list(entry):
     refs = [*REFS, *MORE_REFS]
     paragraphs = _paragraphs(*refs[:3], entry, *refs[3:])
     assert reference_entries(paragraphs) == ([*refs[:3], entry, *refs[3:]], "ok")
