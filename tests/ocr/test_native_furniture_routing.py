@@ -112,7 +112,7 @@ def test_mostly_invisible_page_keeps_its_furniture_on_ocr():
 
 
 def test_visible_ocr_layer_over_a_scan_keeps_its_furniture_on_ocr():
-    """A scanning service's OCR layer drawn visibly over the page image (W2052296118)."""
+    """A scanning service's OCR layer drawn visibly over the page image (an evaluation-set scan)."""
     layer = _image(612, 792)
     layer += _text(["Althof ef af.i Electronic portal imaging device"], x=60, y=760, size=9)
     layer += _text(_BODY * 4, y=600)

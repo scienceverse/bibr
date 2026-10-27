@@ -308,7 +308,7 @@ def test_a_little_invisible_text_on_a_born_digital_page_still_goes():
 
 
 def test_white_ocr_layer_over_a_scan_is_kept():
-    """A scan's OCR layer filled white over the page image (W2037590930) is its text.
+    """A scan's OCR layer filled white over the page image (a scanned Lancet paper) is its text.
 
     The render behind it is the scan's paper, so the background test would
     keep only the words over ink; a page images cover keeps the layer whole.

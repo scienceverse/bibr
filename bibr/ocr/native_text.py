@@ -1274,10 +1274,11 @@ def _sample_page_font_metadata(
 # - a page images cover as a scan does (_coverage_qualifies) whose text is
 #   visible: a scanning service's OCR layer drawn in a filling mode, so the
 #   scan check keeps it as text. Its running heads read worse than our OCR
-#   (scans_eval80 W2052296118: "althof ef af.i" for "Althof et al.:",
-#   W2037590930: "1025" for the whole Lancet running head), so they go to
-#   OCR; body text keeps its route. On the 392 dev PDFs (2026-10-26) only
-#   gesec's first page and W4308442706 qualify; on scans_eval80, 7 PDFs.
+#   (a scanned paper from the evaluation set: "althof ef af.i" for
+#   "Althof et al.:", a scanned Lancet paper: "1025" for the whole Lancet
+#   running head), so they go to OCR; body text keeps its route. On the 392
+#   dev PDFs (2026-10-26) only gesec's first page and one other paper
+#   qualify; on the 80 scans of the evaluation set, 7 PDFs.
 # A box that cuts a printed line is filled but marked (_box_cuts_a_line).
 # The OCR cache keeps the regions after the fill, so the routing has a version
 # in its key (bibr.pipeline.ocr_cache): bump FURNITURE_ROUTE_RULE with any
@@ -2129,8 +2130,9 @@ def _line_number_column(
 #   a scan does (_coverage_qualifies):
 #   there the light text is the scan's OCR layer filled white, and the
 #   "background" the render shows is the scan's paper around its ink, so the
-#   test kept some words and dropped others (W2037590930: 318 of 1078 objects
-#   on page 1). The page keeps its layer whole, as before the rule.
+#   test kept some words and dropped others (a scanned Lancet paper from the
+#   evaluation set: 318 of 1078 objects on page 1). The page keeps its layer
+#   whole, as before the rule.
 # - overprint: a later copy of an earlier object, the same text at the same
 #   size, whose box covers at least _OVERPRINT_MIN_OVERLAP of the smaller box.
 #   "Fake bold" draws a running head two or three times a fraction of a point
