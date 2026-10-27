@@ -450,7 +450,8 @@ such as its `main`, does not count: `bibr chew --dry-run` says
 `will download revision 0aa228e8` until the pinned one is there.
 
 Each repository's `main` still holds the builds of the 4B's previous revision
-(`6ab47a4e`). To run one of them, keep `LLM_LOCAL_MODEL` as setup wrote it
+(`6ab47a4e`), but `main` will move on, so the commands below name each
+build's commit. To run one of them, keep `LLM_LOCAL_MODEL` as setup wrote it
 and override the revision, or point `LLM_LOCAL_MODEL` at a local copy:
 
 ```bash
@@ -459,11 +460,11 @@ LLM_VLLM_EXTRA_ARGS='--revision 6ab47a4e4e8b1b76c1ab234aec66f360683ff9fc'   # bf
 LLM_VLLM_EXTRA_ARGS='--revision a2af8f6e90e6481251af9eb07d02c034c30e3446'   # W4A16
 
 # llama.cpp: a local .gguf file is loaded with -m
-hf download scienceverse/bibr-extract-qwen35-4b-GGUF bibr-extract-qwen35-4b-Q8_0.gguf --revision main
+hf download scienceverse/bibr-extract-qwen35-4b-GGUF bibr-extract-qwen35-4b-Q8_0.gguf --revision 8f5cb6f80329f800f17f3b25dd40be131068f872
 LLM_LOCAL_MODEL=/path/to/bibr-extract-qwen35-4b-Q8_0.gguf
 
 # MLX: a local model directory
-hf download scienceverse/bibr-extract-qwen35-4b-mlx-8bit --revision main --local-dir ./bibr-4b-mlx-6ab47a4e
+hf download scienceverse/bibr-extract-qwen35-4b-mlx-8bit --revision 16bf58c9e4f453176cdabf3cfe64665c92a006c3 --local-dir ./bibr-4b-mlx-6ab47a4e
 LLM_LOCAL_MODEL=./bibr-4b-mlx-6ab47a4e
 ```
 
