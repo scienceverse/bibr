@@ -143,16 +143,16 @@ def _answering(calls: list[str]):
 
 
 def test_a_lookup_does_not_wait_for_a_slot_past_its_deadline(monkeypatch):
-    # A 2 s window instead of 300 s: if the deadline check stops working, the
-    # lookup waits about 2 s for the slot and fails, rather than hanging.
-    monkeypatch.setattr("bibr.clients.ror._WINDOW_SECONDS", 2.0)
+    # A 4 s window instead of 300 s: if the deadline check stops working, the
+    # lookup waits about 4 s for the slot and fails, rather than hanging.
+    monkeypatch.setattr("bibr.clients.ror._WINDOW_SECONDS", 4.0)
     calls: list[str] = []
     client = _client(_answering(calls), requests_per_5min=1)
 
     async def run():
         first = await client.lookup("First University", deadline=time.monotonic() + 30)
         started = time.monotonic()
-        # The next slot frees about 2 s after the first request, after this
+        # The next slot frees about 4 s after the first request, after this
         # deadline: no wait, no request.
         second = await client.lookup("Second University", deadline=started + 0.5)
         return first, second, time.monotonic() - started
@@ -160,7 +160,7 @@ def test_a_lookup_does_not_wait_for_a_slot_past_its_deadline(monkeypatch):
     first, second, waited = asyncio.run(run())
     assert first[0] is not None and first[1] is None
     assert second == (None, "request budget spent")
-    assert waited < 1.0
+    assert waited < 2.0
     assert calls == ["First University"]
 
 
@@ -207,21 +207,26 @@ def test_the_429_backoff_reads_rate_limited_even_with_the_budget_spent(monkeypat
     assert calls == ["First University"]
 
 
-def test_a_cached_answer_is_returned_after_the_budget_is_spent():
+def test_a_cached_answer_is_returned_after_the_budget_is_spent(monkeypatch):
+    # A 4 s window instead of 300 s, so a lookup that waits for a slot fails
+    # in about 4 s rather than hanging.
+    monkeypatch.setattr("bibr.clients.ror._WINDOW_SECONDS", 4.0)
     calls: list[str] = []
     client = _client(_answering(calls), requests_per_5min=1)
 
     async def run():
-        deadline = time.monotonic() + 30
+        started = time.monotonic()
+        deadline = started + 1.0
         first = await client.lookup("First University", deadline=deadline)
-        # Same cache key; the only slot is taken until long after the deadline.
+        # Same cache key; the only slot is taken until after the deadline.
         again = await client.lookup("first  university", deadline=deadline)
-        return first, again
+        return first, again, time.monotonic() - started
 
-    first, again = asyncio.run(run())
+    first, again, elapsed = asyncio.run(run())
     assert first[0] is not None and first[1] is None
     assert again == first
     assert calls == ["First University"]
+    assert elapsed < 2.0  # the free slot was used at once
 
 
 def test_a_lookup_with_a_free_slot_ignores_its_deadline():
@@ -258,13 +263,13 @@ def test_an_exhausted_budget_ends_a_papers_matching_at_once():
 def test_the_deadline_is_the_papers_ror_time_budget(monkeypatch):
     """The deadline is the start plus the paper's timeout (``ROR_ENRICH_TIMEOUT``),
     not later: a slot that frees after the timeout is not waited for."""
-    # The next slot frees 1.5 s after the first request: after the paper's
-    # 1 s budget, before twice that.
-    monkeypatch.setattr("bibr.clients.ror._WINDOW_SECONDS", 1.5)
+    # The next slot frees 2.5 s after the first request: after the paper's
+    # 2 s budget, before 1.5 times that.
+    monkeypatch.setattr("bibr.clients.ror._WINDOW_SECONDS", 2.5)
     calls: list[str] = []
     client = _client(_answering(calls), requests_per_5min=1)
 
-    report = asyncio.run(enrich_organizations(_metadata(), client, timeout=1.0))
+    report = asyncio.run(enrich_organizations(_metadata(), client, timeout=2.0))
     assert len(calls) == 1
     assert not report.timed_out
     assert report.failed == 3 and report.failure_reasons == ("request budget spent",)
