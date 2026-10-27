@@ -171,16 +171,21 @@ def test_runtimes_without_a_revision_option_name_the_files_bibr_downloads():
 
 def test_speculative_configs_and_their_floors():
     by_id = {v.hf_id: v for v in _vllm_variants()}
+    # Configs are looked up by method, so their order does not matter, but a
+    # method listed twice would hide the second config.
+    for variant in by_id.values():
+        methods = [c.method for c in variant.speculative]
+        assert len(set(methods)) == len(methods), variant.hf_id
     configs = {
-        h: [(c.method, c.num_speculative_tokens, c.min_budget_gb) for c in v.speculative]
+        h: {(c.method, c.num_speculative_tokens, c.min_budget_gb) for c in v.speculative}
         for h, v in by_id.items()
     }
     assert configs == {
-        "scienceverse/bibr-extract-qwen35-4b": [("mtp", 3, 12.0), ("dflash", 7, 13.5)],
+        "scienceverse/bibr-extract-qwen35-4b": {("mtp", 3, 12.0), ("dflash", 7, 13.5)},
         # DFlash with the W4A16 build was floor-probed only, never scored.
-        "scienceverse/bibr-extract-qwen35-4b-W4A16": [("mtp", 3, 7.25)],
+        "scienceverse/bibr-extract-qwen35-4b-W4A16": {("mtp", 3, 7.25)},
         # The 2B was not measured with either.
-        "scienceverse/bibr-extract-qwen35-2b": [],
+        "scienceverse/bibr-extract-qwen35-2b": set(),
     }
     for variant in by_id.values():
         for config in variant.speculative:
