@@ -308,14 +308,24 @@ def _pinned_build_cache_status(repo_id: str, cache_dir: str | None) -> str | Non
 
 
 def _snapshot_has_weights(repo_id: str, revision: str, cache_dir: str | None) -> bool:
-    """Whether the HF cache holds safetensors files of *repo_id* at commit *revision*."""
+    """Whether the HF cache holds the safetensors weights of *repo_id* at commit *revision*.
+
+    Every shard its ``model.safetensors.index.json`` names, when it has one;
+    otherwise any safetensors file. A link whose blob is gone does not count.
+    """
+    import json
+
     from huggingface_hub import constants
 
     root = Path(cache_dir) if cache_dir else Path(constants.HF_HUB_CACHE)
     snapshot = root / f"models--{repo_id.replace('/', '--')}" / "snapshots" / revision
     try:
+        index = snapshot / "model.safetensors.index.json"
+        if index.exists():
+            shards = set(json.loads(index.read_text(encoding="utf-8"))["weight_map"].values())
+            return bool(shards) and all((snapshot / name).exists() for name in shards)
         return any(path.exists() for path in snapshot.glob("*.safetensors"))
-    except OSError:
+    except (OSError, ValueError, KeyError, AttributeError, TypeError):
         return False
 
 

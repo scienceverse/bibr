@@ -614,15 +614,23 @@ def test_pinned_vllm_build_cache_status_needs_weights_at_its_commit(monkeypatch,
 
     pinned = snapshots / "9199424d4bd200feb247e26e4a860b63da73cbaf"
     pinned.mkdir()
+    shards = ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"]
+    (pinned / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"a": shards[0], "b": shards[1]}})
+    )
+    # One shard of two is not the model.
+    (pinned / shards[0]).write_bytes(b"x")
+    assert _hf_cache_status(model) == will_download
     # A snapshot link whose blob was deleted is not a cached file.
     try:
-        (pinned / "model-00002-of-00002.safetensors").symlink_to(tmp_path / "gone")
+        (pinned / shards[1]).symlink_to(tmp_path / "gone")
     except OSError:  # Windows without the symlink privilege
         pass
     else:
         assert _hf_cache_status(model) == will_download
+        (pinned / shards[1]).unlink()
 
-    (pinned / "model-00001-of-00002.safetensors").write_bytes(b"x")
+    (pinned / shards[1]).write_bytes(b"x")
     assert _hf_cache_status(model) == "cached (revision 9199424d)"
 
 
