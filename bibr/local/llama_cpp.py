@@ -447,12 +447,21 @@ def _check_no_identity_override(extra: list[str], *, role: str) -> None:
     if role == "llm":
         extra_setting = "LLM_LLAMA_CPP_EXTRA_ARGS"
         port_setting = "LLM_LLAMA_CPP_PORT"
+        model_hint = "Set LLM_LOCAL_MODEL=<path>.gguf to load a local GGUF file instead."
     else:
         extra_setting = "OCR_LLAMA_CPP_EXTRA_ARGS"
         port_setting = "OCR_LLAMA_CPP_PORT"
+        model_hint = "Set OCR_LLAMA_CPP_MODEL to choose another model instead."
     for token in extra:
         bare = token.split("=", 1)[0]
-        if _canonical_option(bare) in _IDENTITY_OPTIONS:
+        canonical = _canonical_option(bare)
+        if canonical == "-m":
+            raise UpstreamServiceError(
+                "local inference",
+                f"{extra_setting} must not set {bare}: bibr chooses the model file the "
+                f"managed server loads and serves it under the model's id. {model_hint}",
+            )
+        if canonical in _IDENTITY_OPTIONS:
             raise UpstreamServiceError(
                 "local inference",
                 f"{extra_setting} must not set {bare}: the managed server's port, "

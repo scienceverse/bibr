@@ -1409,22 +1409,23 @@ def test_startup_no_retry_on_load_failure(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "flag",
+    ("flag", "hint"),
     [
-        "--port 9000",
-        "--alias other",
-        "-hf other/repo",
-        "-hfr other/repo",
-        "-m /models/other.gguf",
-        "--model=/models/other.gguf",
+        ("--port 9000", "LLM_LLAMA_CPP_PORT"),
+        ("--alias other", "LLM_LLAMA_CPP_PORT"),
+        ("-hf other/repo", "LLM_LLAMA_CPP_PORT"),
+        ("-hfr other/repo", "LLM_LLAMA_CPP_PORT"),
+        ("-m /models/other.gguf", "LLM_LOCAL_MODEL=<path>.gguf"),
+        ("--model=/models/other.gguf", "LLM_LOCAL_MODEL=<path>.gguf"),
     ],
 )
-def test_build_server_argv_rejects_identity_override(flag):
-    """Extra args must not move the server bibr polls — point at the port setting (14)."""
+def test_build_server_argv_rejects_identity_override(flag, hint):
+    """Extra args must not move the server bibr polls — point at the port
+    setting (14) — nor swap its model file, which LLM_LOCAL_MODEL chooses."""
     from bibr.exceptions import UpstreamServiceError
     from bibr.local.llama_cpp import build_server_argv
 
-    with pytest.raises(UpstreamServiceError, match="LLM_LLAMA_CPP_PORT"):
+    with pytest.raises(UpstreamServiceError) as excinfo:
         build_server_argv(
             ["llama-server"],
             model="m",
@@ -1434,20 +1435,28 @@ def test_build_server_argv_rejects_identity_override(flag):
             role="llm",
             available=frozenset(),
         )
+    message = str(excinfo.value)
+    assert f"LLM_LLAMA_CPP_EXTRA_ARGS must not set {flag.split()[0].split('=')[0]}" in message
+    assert hint in message
+    other = "LLM_LOCAL_MODEL" if hint == "LLM_LLAMA_CPP_PORT" else "LLM_LLAMA_CPP_PORT"
+    assert other not in message
 
 
-def test_build_server_argv_rejects_identity_override_ocr_role():
-    """The OCR role names its own extra-args and port settings (14)."""
+@pytest.mark.parametrize(
+    ("flag", "hint"), [("--port 9000", "OCR_LLAMA_CPP_PORT"), ("-m x.gguf", "OCR_LLAMA_CPP_MODEL")]
+)
+def test_build_server_argv_rejects_identity_override_ocr_role(flag, hint):
+    """The OCR role names its own extra-args, port and model settings (14)."""
     from bibr.exceptions import UpstreamServiceError
     from bibr.local.llama_cpp import build_server_argv
 
-    with pytest.raises(UpstreamServiceError, match="OCR_LLAMA_CPP_PORT"):
+    with pytest.raises(UpstreamServiceError, match=f"OCR_LLAMA_CPP_EXTRA_ARGS.*{hint}"):
         build_server_argv(
             ["llama-server"],
             model="m",
             port=8771,
             context_size=8192,
-            extra_args="--port 9000",
+            extra_args=flag,
             role="ocr",
             available=frozenset(),
         )
