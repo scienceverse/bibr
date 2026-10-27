@@ -251,14 +251,14 @@ class VllmLlmServer:
         if shutil.which("uv") is not None:
             logger.warning(
                 "vLLM is not installed in this environment; launching the local LLM through "
-                "an isolated `uv tool run --from vllm==0.31.0` environment instead. The first "
+                "an isolated `uv tool run --from vllm==0.32.0` environment instead. The first "
                 "run downloads several GB and can take minutes before the model loads. "
                 "Install it once with `uv sync --extra vllm` to skip this bootstrap."
             )
             cmd = ["uv", "tool", "run"]
             if sys.version_info >= (3, 14):
-                # vllm==0.31.0 ships no 3.14 wheels (the `vllm` extra is also
-                # marked python_version < 3.14), so ask uv for a managed 3.13.
+                # The `vllm` extra is marked python_version < 3.14, so ask uv
+                # for a managed 3.13.
                 cmd += ["--python", "3.13"]
             # `vllm serve` takes the model as a positional argument (not --model).
             # Match the audited `vllm` extra exactly. This fallback executes a
@@ -266,7 +266,7 @@ class VllmLlmServer:
             return [
                 *cmd,
                 "--from",
-                "vllm==0.31.0",
+                "vllm==0.32.0",
                 "--with",
                 "openai>=2.54.0,<3",
                 "vllm",
