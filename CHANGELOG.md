@@ -16,8 +16,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   enrichment on, a batch spent the 50 requests in its first minute and every
   later paper in that 5 minutes waited out the 60 s `ROR_ENRICH_TIMEOUT` and
   kept few affiliation matches. A string whose lookup cannot start before the
-  paper's ROR time budget ends is now left unmatched at once ("rate limited")
-  instead of holding the paper until the timeout.
+  paper's ROR time budget ends is now left unmatched at once instead of
+  holding the paper until the timeout. The `ROR_MATCHING_FAILED` warning gives
+  its reason as "request budget spent", so it is not confused with
+  "rate limited", the backoff after ROR answers 429.
 
 ## [0.7.4] - 2026-10-23
 

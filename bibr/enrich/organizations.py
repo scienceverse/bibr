@@ -53,7 +53,7 @@ async def enrich_organizations(
 
     failures: list[str] = []
     # A string whose request could not start before the paper's budget ends
-    # is "rate limited" at once rather than waiting out the budget.
+    # fails at once ("request budget spent") rather than waiting out the budget.
     deadline = time.monotonic() + timeout
 
     async def run() -> None:

@@ -159,7 +159,7 @@ def test_a_lookup_does_not_wait_for_a_slot_past_its_deadline(monkeypatch):
 
     first, second, waited = asyncio.run(run())
     assert first[0] is not None and first[1] is None
-    assert second == (None, "rate limited")
+    assert second == (None, "request budget spent")
     assert waited < 1.0
     assert calls == ["First University"]
 
@@ -194,7 +194,7 @@ def test_a_lookup_with_a_free_slot_ignores_its_deadline():
 
 
 def test_an_exhausted_budget_ends_a_papers_matching_at_once():
-    """With the budget spent, the paper's other strings are "rate limited"
+    """With the budget spent, the paper's other strings fail ("request budget spent")
     straight away instead of holding the paper for its whole ROR budget."""
     calls: list[str] = []
     client = _client(_answering(calls), requests_per_5min=1)
@@ -208,7 +208,7 @@ def test_an_exhausted_budget_ends_a_papers_matching_at_once():
     assert len(calls) == 1
     assert report.attempted == 4 and report.matched == 1
     assert not report.timed_out
-    assert report.failed == 3 and report.failure_reasons == ("rate limited",)
+    assert report.failed == 3 and report.failure_reasons == ("request budget spent",)
     assert elapsed < 5
 
 
@@ -224,7 +224,7 @@ def test_the_deadline_is_the_papers_ror_time_budget(monkeypatch):
     report = asyncio.run(enrich_organizations(_metadata(), client, timeout=1.0))
     assert len(calls) == 1
     assert not report.timed_out
-    assert report.failed == 3 and report.failure_reasons == ("rate limited",)
+    assert report.failed == 3 and report.failure_reasons == ("request budget spent",)
 
 
 def _metadata() -> PaperMetadata:

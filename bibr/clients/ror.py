@@ -14,8 +14,9 @@ so two processes on one address stay under it. With a client ID (sent as the
 The client keeps to the budget with a sliding window, remembers answers
 (misses too) in a process-wide cache, and backs off entirely after a 429 for
 the ``Retry-After`` interval (at most one window). A lookup given a deadline
-does not wait for a slot that would free after it: it reports "rate limited"
-at once, so a paper does not sit out its whole ROR time budget in the queue.
+does not wait for a slot that would free after it: it reports "request budget
+spent" at once (a 429 backoff reports "rate limited"), so a paper does not sit
+out its whole ROR time budget in the queue.
 Every failure degrades to "no match": ROR never fails enrichment.
 """
 
@@ -123,12 +124,13 @@ class RorClient:
 
         The failure is ``None`` for an answered lookup, matched or not, and a
         short reason when ROR could not be asked or did not answer usefully:
-        "HTTP 503", "rate limited", "invalid JSON", or the type name of the
-        error raised ("ConnectError"). It never raises an ``Exception``.
+        "HTTP 503", "rate limited" (backing off after a 429), "request budget
+        spent", "invalid JSON", or the type name of the error raised
+        ("ConnectError"). It never raises an ``Exception``.
 
         *deadline* is a ``time.monotonic()`` value: when the request budget
-        has no slot free before it, the lookup is "rate limited" without
-        waiting.
+        has no slot free before it, the lookup fails with "request budget
+        spent" without waiting.
         """
         try:
             return await self._lookup(text, deadline)
@@ -151,7 +153,7 @@ class RorClient:
         if deadline is not None and (
             time.monotonic() + self._limiter.seconds_until_slot() >= deadline
         ):
-            return None, "rate limited"
+            return None, "request budget spent"
         await self._limiter.acquire()
         try:
             response = await self._http().get(

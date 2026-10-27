@@ -208,8 +208,9 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.RESOLVER_FALLBACK_FAILED: "The resolver fallback failed.",
     WarningCode.ROR_MATCHING_TIMEOUT: "ROR matching stopped at its time budget; some "
     "affiliation and funder strings are unmatched.",
-    WarningCode.ROR_MATCHING_FAILED: "ROR lookups failed (an HTTP error, a transport failure "
-    "or the rate-limit backoff); those affiliation and funder strings are unmatched.",
+    WarningCode.ROR_MATCHING_FAILED: "ROR lookups failed (an HTTP error, a transport failure, "
+    "the backoff after ROR answered 429, or bibr's own ROR request budget spent until after "
+    "the paper's ROR time budget); those affiliation and funder strings are unmatched.",
     WarningCode.ENRICHER_FAILED: "An enricher raised an unexpected error.",
     WarningCode.ENRICHMENT_INCOMPLETE: "Enrichment ended incomplete; the message is the reason "
     "recorded with the checkpoint.",
