@@ -8,18 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- The same paper now sends the same prompts to the LLM on every run. Each
-  prompt fences the paper's text between marker lines whose 32-character hex
-  boundary keeps a document from posing as instructions. That boundary was
-  random per call, and at temperature 0 a local model's answer can depend on
-  it: in two identical runs of 10 papers with a 2B model on llama.cpp (CPU,
-  one request at a time), 7 of 57 LLM requests got different answers, each
-  where the two prompts differed only in the boundary. With the boundary now
-  derived from the fenced text (SHA-256), two such runs got the same answers
-  to all 58 requests they shared. Servers that batch concurrent requests,
-  such as vLLM, were not measured. The boundary never occurs in the fenced
-  text and keeps its shape, so LLM cache entries from earlier releases still
-  hit. A paper whose text changes still gets a new boundary.
+- Each LLM call now sends the same prompt on every run. Every prompt fences
+  the paper's text between marker lines whose 32-character hex boundary keeps
+  a document from posing as instructions. That boundary was random per call,
+  and at temperature 0 a local model's answer can depend on it: in two
+  identical runs of 10 papers with a 2B model on llama.cpp (CPU, one request
+  at a time), 7 of 57 LLM requests got different answers, each where the two
+  prompts differed only in the boundary. With the boundary now derived from
+  the fenced text (SHA-256), two such runs got the same answers to all 58
+  requests they shared. Which calls run can still change between runs: the
+  equation LLM fallback stops after 90 seconds
+  (`EQUATION_EXTRACTION_TIMEOUT_SECONDS`) and keeps the regex equations, so a
+  slower run can send fewer equation prompts. Servers that batch concurrent
+  requests were not measured, such as vLLM, or bibr's managed llama.cpp
+  server, which serves two requests at once (`--parallel 2`) when the build
+  supports it. The boundary never occurs in the fenced text and keeps its
+  shape, so LLM cache entries from earlier releases still hit. A paper whose
+  text changes still gets a new boundary.
 
 ## [0.7.4] - 2026-10-23
 
