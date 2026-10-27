@@ -25,7 +25,8 @@ turns with it: an OCR server at an OCR URL, cloud OCR, GLM-OCR) starts in
 the first chunk, before bibr's sessions have grown. Beside an external
 PaddleOCR-VL server on an RTX 5090 it took all but 1 GiB of what was free
 while bibr held 1.03 GiB; bibr's sessions then ran out of memory at about
-3.3 GiB and 31 of 48 papers failed. So every start leaves bibr's sessions
+3.3 GiB, and 31 and 30 of 48 papers failed in two runs (vLLM 0.32 at 64
+sequences, sized by the same rule). So every start leaves bibr's sessions
 ``MANAGED_VLLM_ONNX_RESERVE_GB`` less what they hold, and only a start that
 lasts one chunk (the swap) may be squeezed below that to reach the floor.
 """
@@ -228,6 +229,42 @@ def _room_text(room: float, own: float, *, stays_up: bool = False) -> str:
     return text
 
 
+def _model_that_would_start(budget_now: float) -> tuple[str, float] | None:
+    """The registry's vLLM model with the lowest floor, if that floor fits *budget_now*.
+
+    *budget_now* is what a refused start could have had beside the same
+    overshoot reserve and room for bibr, which is below its own floor, so a
+    model that fits it has a lower one. The first one listed when several
+    share the lowest floor. A 10-12 GB card beside cloud OCR gets none: the
+    W4A16 build does not fit there, and the 2B's floor is not below it.
+    """
+    from bibr.local.llm_models import REGISTRY
+
+    lowest: tuple[str, float] | None = None
+    for entry in REGISTRY:
+        for variant in entry.variants:
+            candidate = _registry_floor_gb(variant.hf_id)  # None unless a vLLM build
+            if candidate is not None and (lowest is None or candidate < lowest[1]):
+                lowest = (variant.hf_id, candidate)
+    if lowest is None or lowest[1] > budget_now:
+        return None
+    return lowest
+
+
+def _refusal_advice(budget_now: float) -> str:
+    """What still runs a refused start: a smaller model only where one would start."""
+    smaller = _model_that_would_start(budget_now)
+    pick = (
+        f"pick a model with a lower floor (LLM_LOCAL_MODEL={smaller[0]}, {smaller[1]:.2f} GiB), "
+        if smaller is not None
+        else ""
+    )
+    return (
+        f"Free GPU memory (other processes), {pick}set LLM_LOCAL_MEM_FRACTION to choose the "
+        "share yourself, or run the LLM on llama.cpp (--llm llama-cpp)"
+    )
+
+
 def size_managed_llm_share(
     reading: GpuMemory | None,
     *,
@@ -308,8 +345,7 @@ def size_managed_llm_share(
     raise ManagedLlmVramError(
         f"not enough free GPU memory to start the managed vLLM LLM server: "
         f"{free:.2f} of {total:.2f} GiB free (bibr itself holds {own:.2f} GiB), and it needs "
-        f"{needs}. Free GPU memory (other processes), pick a smaller model "
-        "(LLM_LOCAL_MODEL), or set LLM_LOCAL_MEM_FRACTION to choose the share yourself"
+        f"{needs}. {_refusal_advice(free - reserve_gb - room)}"
     )
 
 

@@ -156,16 +156,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that stays up for the run (with cloud OCR, an OCR server at `--ocr-url` or
   GLM-OCR) usually starts in the first chunk, before bibr's models have grown;
   when it left them only 1 GB beside a PaddleOCR-VL server at `--ocr-url` on an
-  RTX 5090, they ran out of memory at about 3.3 GiB and 31 of 48 papers failed.
-  Only a start that takes turns with PaddleOCR-VL, and so starts again next
-  chunk, is squeezed to the model's minimum with 1 GB left for bibr's models.
-  When even that does not fit, that start fails at once with a clear error
-  instead of launching vLLM to crash, and while the server is down the chunk
-  fails before its OCR. So the bf16 4B student cannot start beside a
-  PaddleOCR-VL server at `--ocr-url` on the same 24 GB card (it needs
-  18.75 GiB, and about 17.7 are free); its W4A16 build can. The Qwen3.5
-  students now run at most 128 sequences at once, which halves vLLM's capture
-  sizes and lets them start on a smaller share.
+  RTX 5090, they ran out of memory at about 3.3 GiB, and 31 and 30 of 48 papers
+  failed in two runs. Only a start that takes turns with PaddleOCR-VL, and so
+  starts again next chunk, is squeezed to the model's minimum with 1 GB left
+  for bibr's models. When even that does not fit, that start fails at once with
+  a clear error instead of launching vLLM to crash, and while the server is
+  down the chunk fails before its OCR. So the bf16 4B student cannot start
+  beside a PaddleOCR-VL server of about 5.4 GB at `--ocr-url` on the same 24 GB
+  card (it needs 18.75 GiB, and about 17.7 are free); its W4A16 build can. The
+  error names what still runs: a model with a lower minimum, only where one
+  would start (on a 10–12 GB card beside cloud OCR neither the W4A16 build nor
+  the 2B does), `LLM_LOCAL_MEM_FRACTION` to choose the share yourself, or a
+  llama.cpp LLM (`--llm llama-cpp`). The Qwen3.5 students now run at most 128
+  sequences at once, which halves vLLM's capture sizes and lets them start on a
+  smaller share.
 - A nearly full GPU no longer fails papers, drops their references or sends
   their headings to the LLM. bibr's layout, sentence, reference-parser and
   section-classifier models now treat each GPU out-of-memory failure alike:

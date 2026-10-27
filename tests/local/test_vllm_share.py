@@ -156,10 +156,11 @@ class TestServerThatStaysUp:
     by side. The server starts once, often in the first chunk before bibr's
     sessions have grown, and stays up for the run.
 
-    E29r b-auto-1 (RTX 5090, PaddleOCR-VL at an OCR URL on the same card, the
-    bf16 4B at 64 sequences): the start found 24.94 GiB free with bibr
-    holding 1.03 and took 0.73, leaving bibr 1 GiB. bibr's sessions reached
-    3.2-3.4 GiB, ran out of memory, and 31 of 48 papers failed. With room
+    E29r b-auto-1 and b-none-1 (RTX 5090, PaddleOCR-VL at an OCR URL on the
+    same card, the bf16 4B at 64 sequences on vLLM 0.32, sized by this rule
+    with and without MTP): the start found 24.94 GiB free with bibr holding
+    1.03 and took 0.73, leaving bibr 1 GiB. bibr's sessions reached 3.2-3.4
+    GiB, ran out of memory, and 31 and 30 of 48 papers failed. With room
     they peak at about 5 GiB (E27 V1: 5,064 MiB).
     """
 
@@ -280,6 +281,85 @@ class TestServerThatStaysUp:
                             free,
                             share,
                         )
+
+
+class TestRefusalText:
+    """What a refused start says about bibr's room and what still runs it."""
+
+    @pytest.mark.parametrize(
+        ("reading", "swaps_with_ocr"),
+        [
+            # A swap start squeezed to the floor keeps exactly the minimum.
+            (_bibr_alone(2.3, total=CUDA_16GB), True),
+            # A server that stays up beside bibr holding 5.5 GiB: 6.0 less
+            # that is under the minimum, so its room is exactly 1 GiB too.
+            (GpuMemory(total_gb=CUDA_16GB, free_gb=8.0, own_gb=5.5), False),
+        ],
+    )
+    def test_the_minimum_room_is_named_without_the_reserve(self, reading, swaps_with_ocr):
+        with pytest.raises(ManagedLlmVramError) as exc:
+            _size(reading, swaps_with_ocr=swaps_with_ocr)
+        message = str(exc.value)
+        assert f"needs {managed_llm_floor_gb(STUDENT_4B) + 2.0:.2f} GiB" in message
+        assert (
+            "takes beyond its share while starting, and 1.00 GiB for bibr's GPU sessions). "
+        ) in message
+        assert "GiB less the" not in message
+
+    @pytest.mark.parametrize(
+        ("reading", "swaps_with_ocr"),
+        [
+            # The bf16 4B on a 16 GB card: a grown bibr on the swap path, and
+            # a first start with cloud OCR. The W4A16 build fits both.
+            (_bibr_alone(2.3, total=CUDA_16GB), True),
+            (_bibr_alone(0.5, total=CUDA_16GB), False),
+        ],
+    )
+    def test_a_model_with_a_lower_floor_is_named_where_it_would_start(
+        self, reading, swaps_with_ocr
+    ):
+        with pytest.raises(ManagedLlmVramError) as exc:
+            _size(reading, swaps_with_ocr=swaps_with_ocr)
+        floor = managed_llm_floor_gb(STUDENT_4B_W4A16)
+        assert (
+            "Free GPU memory (other processes), pick a model with a lower floor "
+            f"(LLM_LOCAL_MODEL={STUDENT_4B_W4A16}, {floor:.2f} GiB), set "
+            "LLM_LOCAL_MEM_FRACTION to choose the share yourself, or run the LLM on "
+            "llama.cpp (--llm llama-cpp)"
+        ) in str(exc.value)
+
+    @pytest.mark.parametrize(("short_gb", "named"), [(0.0, True), (MIB, False)])
+    def test_a_smaller_model_is_named_only_when_its_floor_fits(self, short_gb, named):
+        # A swap start of the bf16 4B whose budget beside the reserve and the
+        # 1 GiB minimum is exactly the W4A16 build's floor, or 1 MiB less.
+        floor = managed_llm_floor_gb(STUDENT_4B_W4A16)
+        free = floor + overshoot_reserve_gb(STUDENT_4B, None) + 1.0 - short_gb
+        with pytest.raises(ManagedLlmVramError) as exc:
+            _size(GpuMemory(total_gb=CUDA_16GB, free_gb=free, own_gb=2.0))
+        assert (f"LLM_LOCAL_MODEL={STUDENT_4B_W4A16}, {floor:.2f} GiB" in str(exc.value)) is named
+
+    @pytest.mark.parametrize("model", [STUDENT_4B, STUDENT_4B_W4A16, STUDENT_2B])
+    def test_a_12gb_card_with_cloud_ocr_is_not_told_to_pick_a_smaller_model(self, model):
+        # An RTX 5070 (about 11.5 GiB to CUDA) with cloud OCR: the server
+        # stays up and needs its floor beside bibr's whole room. The W4A16
+        # build does not fit there, and the 2B's floor is not below its own,
+        # so only the share or llama.cpp helps.
+        assert managed_llm_floor_gb(STUDENT_2B) >= managed_llm_floor_gb(STUDENT_4B_W4A16)
+        reading = GpuMemory(total_gb=11.5, free_gb=11.0, own_gb=0.5)
+        with pytest.raises(ManagedLlmVramError) as exc:
+            _size(reading, model=model, swaps_with_ocr=False)
+        message = str(exc.value)
+        assert "pick a model" not in message
+        assert (
+            "Free GPU memory (other processes), set LLM_LOCAL_MEM_FRACTION to choose the "
+            "share yourself, or run the LLM on llama.cpp (--llm llama-cpp)"
+        ) in message
+
+    def test_a_model_without_a_floor_is_not_told_to_pick_one(self):
+        with pytest.raises(ManagedLlmVramError) as exc:
+            _size(GpuMemory(total_gb=CUDA_16GB, free_gb=1.0, own_gb=0.5), model="org/unknown")
+        assert "pick a model" not in str(exc.value)
+        assert "run the LLM on llama.cpp (--llm llama-cpp)" in str(exc.value)
 
 
 class TestFloorRounding:
