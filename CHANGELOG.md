@@ -41,6 +41,13 @@ every 12.2 export is still valid input for the 12.x reader.
   requests per born-digital paper by about 42% with no change in the scored
   fields on born-digital papers or scans. Set it to `false` to OCR them as
   before.
+- A DOI found only in text the PDF never prints is agreement-only and is never
+  selected on its own. A paper whose only DOI is hidden, such as a
+  white-on-white DOI banner, now gets a null DOI; before, that white text was
+  read like any other text-layer DOI. When a queue run expects that DOI, or
+  requires a DOI, identity now raises the blocking `VAL_EXPECTED_ID_MISSING`
+  (`VAL_EXPECTED_ID_MISMATCH` when the pages print another DOI), and the
+  export's disposition is `identity_conflict`.
 
 ### Fixed
 

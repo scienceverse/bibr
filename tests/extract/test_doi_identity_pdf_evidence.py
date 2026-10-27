@@ -10,6 +10,7 @@ from bibr.extract.doi_identity import (
     HIDDEN_TEXT_AGREEMENT,
     LINE_JOIN_OVERRUN,
     collect_doi_candidates,
+    doi_sha256,
     select_doi_candidates,
 )
 from bibr.extract.pdf_doi_evidence import (
@@ -26,6 +27,8 @@ from bibr.paper_contents import (
     PaperSentence,
     RegionSummary,
 )
+from bibr.pipeline.artifacts import ArtifactDisposition, disposition_for_issues
+from bibr.pipeline.identity import ExpectedIdentity
 
 # A point in the right page margin, outside every layout region below.
 _MARGIN = (970.0, 500.0)
@@ -447,6 +450,60 @@ def test_a_hidden_text_doi_never_names_the_paper_alone():
         (HIDDEN_TEXT, 1, "10.1037/cou0000324", HIDDEN_TEXT, HIDDEN_TEXT, AGREEMENT_ONLY)
     ]
     assert _hidden_rows(candidates) == _hidden_rows(selection.candidates)
+
+
+_OWN_DOI_ROWS = [
+    (CanonicalSection.TITLE, "A study of examples", 1),
+    (CanonicalSection.ABSTRACT, "https://doi.org/10.1234/own.9", 1),
+]
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected", "selected", "code"),
+    [
+        (
+            _TITLE_ONLY,
+            ExpectedIdentity("record-1", expected_doi="10.1037/cou0000324"),
+            None,
+            "VAL_EXPECTED_ID_MISSING",
+        ),
+        (
+            _TITLE_ONLY,
+            ExpectedIdentity("record-1", expected_doi_sha256=doi_sha256("10.1037/cou0000324")),
+            None,
+            "VAL_EXPECTED_ID_MISSING",
+        ),
+        (
+            _TITLE_ONLY,
+            ExpectedIdentity("record-1", doi_required=True),
+            None,
+            "VAL_EXPECTED_ID_MISSING",
+        ),
+        (
+            _OWN_DOI_ROWS,
+            ExpectedIdentity("record-1", expected_doi="10.1037/cou0000324"),
+            "10.1234/own.9",
+            "VAL_EXPECTED_ID_MISMATCH",
+        ),
+    ],
+    ids=["expected-doi", "expected-doi-hash", "doi-required", "another-printed-doi"],
+)
+def test_a_queue_run_whose_doi_is_only_hidden_is_an_identity_conflict(
+    rows, expected, selected, code
+):
+    """An expected DOI the PDF carries only in hidden text does not match it.
+
+    osf_mvfth's shape: its only DOI is in the white-on-white banner, so a queue
+    run that expects that DOI, or requires one, gets a blocking identity issue.
+    """
+    candidates = collect_doi_candidates(_contents(rows), _evidence(hidden=[HiddenDoi(1, _BANNER)]))
+
+    selection = select_doi_candidates(candidates, expected)
+
+    assert (selection.selected.normalized if selection.selected else None) == selected
+    assert [(i.code, i.blocking) for i in selection.issues] == [(code, True)]
+    assert disposition_for_issues(selection.issues) is ArtifactDisposition.IDENTITY_CONFLICT
+    assert [row[5] for row in _hidden_rows(selection.candidates)] == [AGREEMENT_ONLY]
 
 
 def test_a_hidden_text_doi_agrees_with_the_printed_one():
