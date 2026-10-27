@@ -46,11 +46,11 @@ import re
 from dataclasses import dataclass
 
 from bibr.input.heading_cues import (
+    _MAX_BOLD_HEADING_WORDS,
     reads_as_float_label,
     reads_as_reference_heading,
     starts_as_caption,
 )
-from bibr.ocr.ref_patterns import _looks_like_author_date_start
 from bibr.utils.text import YEARISH_RE
 
 # A list this short is not worth trusting over the segmenter.
@@ -93,7 +93,10 @@ _END_HEADING_RE = re.compile(
     r"\s*(?:appendix|appendices|annex|supplement(?:ary|al)?\b|supporting information)",
     re.IGNORECASE,
 )
-MAX_END_HEADING_WORDS = 20
+MAX_END_HEADING_WORDS = _MAX_BOLD_HEADING_WORDS
+# A byline's first surname and its comma ("Annex, K., & Lee, P."): in a
+# paragraph with no year, what is left of an author-date opening.
+_SURNAME_RE = re.compile(r"[\"'(]?[A-Z][A-Za-z'’.\-]+,")
 _SUPPLEMENT_RE = re.compile(r"\s*(?:supplement|supporting information)", re.IGNORECASE)
 # A year where an entry gives its date: in parentheses ("(2019)", "(2019a,
 # May 3)"), or closed by punctuation ("2019.", "2019;12:"), but not as the
@@ -154,7 +157,7 @@ def _reads_as_end_heading(text: str) -> bool:
         _END_HEADING_RE.match(text) is not None
         and len(text.split()) <= MAX_END_HEADING_WORDS
         and YEARISH_RE.search(text) is None
-        and not _looks_like_author_date_start(text)
+        and _SURNAME_RE.match(text) is None
     )
 
 
