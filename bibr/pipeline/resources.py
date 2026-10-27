@@ -1069,8 +1069,10 @@ class ResourceManager:
                 # from the VRAM free then: bibr's own GPU sessions grow over a
                 # batch, and a restart at the fixed 0.85 beside them ran out
                 # of memory in CUDA graph capture after its startup check.
+                # Whether it swaps with PaddleOCR-VL also decides the automatic
+                # speculative decoding choice, so it is passed either way.
                 share_from_free = not self._llm_share_fixed
-                swaps_with_ocr = share_from_free and self._llm_swaps_with_ocr()
+                swaps_with_ocr = self._llm_swaps_with_ocr()
                 server = await self._construct_llm_server(
                     lambda stop: _make_settings_aware(
                         vllm_llm.VllmLlmServer,

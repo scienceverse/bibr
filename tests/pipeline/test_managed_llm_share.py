@@ -106,14 +106,19 @@ async def test_ocr_that_fell_back_from_paddle_vllm_no_longer_swaps(monkeypatch, 
 
 
 @pytest.mark.parametrize(
-    ("ocr_backend", "launched"),
-    [("gemini", "0.7"), ("paddle-vllm", "0.7")],
+    ("ocr_backend", "launched", "speculative"),
+    [("gemini", "0.71", True), ("paddle-vllm", "0.71", False)],
 )
-async def test_24gb_first_start_share_with_and_without_ocr(monkeypatch, ocr_backend, launched):
+async def test_24gb_first_start_share_with_and_without_ocr(
+    monkeypatch, ocr_backend, launched, speculative
+):
     """The real server class sized from a 24 GB run's first LLM start (bibr at 504 MiB).
 
     Both leave bibr 6 GiB less what it holds. With cloud OCR the start used
-    to keep 0.85, leaving bibr 1 GiB for the whole run.
+    to keep 0.85, leaving bibr 1 GiB for the whole run. That server stays up
+    for the run, and its 16.73 GiB budget (0.71 of 23.56) meets the bf16 4B's
+    12.0 GiB MTP floor: MTP. Taking turns with PaddleOCR-VL it restarts every
+    chunk: no speculative decoding.
     """
     from unittest.mock import MagicMock, patch
 
@@ -146,6 +151,12 @@ async def test_24gb_first_start_share_with_and_without_ocr(monkeypatch, ocr_back
         await rm.start_llm_server(backend="vllm")
     cmd = popen.call_args[0][0]
     assert cmd[cmd.index("--gpu-memory-utilization") + 1] == launched
+    assert ("--speculative-config" in cmd) is speculative
+    assert ("--no-async-scheduling" in cmd) is speculative
+    if speculative:
+        assert cmd[cmd.index("--speculative-config") + 1] == (
+            '{"method":"mtp","num_speculative_tokens":3}'
+        )
     # Never signal the mocked process.
     rm._llm_server._process = None
 
@@ -157,6 +168,24 @@ async def test_user_set_share_is_launched_as_is(launches):
     await rm.start_llm_server(backend="vllm")
     assert launches[0]["share_from_free_memory"] is False
     assert launches[0]["mem_fraction"] == 0.6
+
+
+@pytest.mark.parametrize(("vram_gb", "swaps"), [(24.0, True), (48.0, False)])
+async def test_a_user_set_share_still_passes_whether_it_swaps(
+    monkeypatch, launches, vram_gb, swaps
+):
+    """The swap status decides the speculative decoding choice even for a fixed share.
+
+    0.6 and PaddleOCR-VL's share overcommit a 24 GB card (they take turns) and
+    fit a 48 GB one.
+    """
+    _pin_linux(monkeypatch, vram_gb=vram_gb)
+    rm = ResourceManager(
+        ocr_backend="paddle-vllm", managed_vllm_fraction=0.6, managed_llm_share_fixed=True
+    )
+    await rm.start_llm_server(backend="vllm")
+    assert launches[0]["share_from_free_memory"] is False
+    assert launches[0]["swaps_with_ocr"] is swaps
 
 
 async def test_user_set_share_is_read_from_the_settings(monkeypatch, launches):

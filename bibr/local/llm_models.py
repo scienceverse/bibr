@@ -8,12 +8,49 @@ escape hatch covers staleness in between.
 
 from __future__ import annotations
 
+import json
 import logging
 import platform
 import subprocess
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SpeculativeConfig:
+    """A vLLM speculative decoding config measured for one registry variant.
+
+    ``bibr.local.vllm_speculative`` decides at each managed vLLM start whether
+    to use it (``LLM_VLLM_SPEC_DECODE``).
+    """
+
+    #: vLLM's ``--speculative-config`` method: ``mtp`` (the checkpoint's own
+    #: multi-token-prediction layers) or ``dflash`` (a separate drafter model).
+    method: str
+    num_speculative_tokens: int
+    #: The budget floor with this config, measured as
+    #: ``LocalLLMVariant.min_budget_gb`` is (the drafted tokens need more KV
+    #: cache, and a drafter model its own weights).
+    min_budget_gb: float
+    #: The drafter's Hub id and pinned revision, for methods that need one.
+    drafter: str | None = None
+    drafter_revision: str | None = None
+
+    def server_args(self) -> tuple[str, ...]:
+        """The vLLM flags for this config."""
+        config: dict[str, object] = {"method": self.method}
+        if self.drafter is not None:
+            config["model"] = self.drafter
+            config["revision"] = self.drafter_revision
+        config["num_speculative_tokens"] = self.num_speculative_tokens
+        return (
+            "--speculative-config",
+            json.dumps(config, separators=(",", ":")),
+            # vLLM 0.32 turns async scheduling on for these methods; every
+            # speculative run bibr measured scheduled synchronously.
+            "--no-async-scheduling",
+        )
 
 
 @dataclass(frozen=True)
@@ -47,6 +84,16 @@ class LocalLLMVariant:
     #: quarter GiB. bibr sizes the managed LLM share against it
     #: (``bibr.local.vllm_share``). None: ``min_vram_gb`` stands in for it.
     min_budget_gb: float | None = None
+    #: Speculative decoding configs measured for this variant on vLLM, each
+    #: with its own budget floor (``SpeculativeConfig``). Empty: none.
+    speculative: tuple[SpeculativeConfig, ...] = ()
+
+    def speculative_config(self, method: str) -> SpeculativeConfig | None:
+        """This variant's config for ``method`` (``mtp``, ``dflash``), or None."""
+        for config in self.speculative:
+            if config.method == method:
+                return config
+        return None
 
 
 #: How far under a tier's whole GiB a card's nvidia-smi ``memory.total`` may be
@@ -115,10 +162,10 @@ class LocalLLMModel:
 # needs 6 GiB less what bibr holds in place of that 1 GiB. Every vLLM run
 # below took turns with PaddleOCR-VL.
 # - 4B bf16, 20: 48 papers on a 20 GB card (20,475 MiB, an RTX 4000 Ada; the
-#   last start found 16.76 GiB free of the 14.25 needed) and 100 on 24 GB. A
-#   card emulated at 16 GB refused its starts once bibr held 2 GiB, before
-#   bibr released its own models ahead of a refusal; the bf16 4B has not been
-#   run on 16 GB since.
+#   last start found 16.76 GiB free of the 14.25 needed then, at 128 sequences
+#   on vLLM 0.31) and 100 on 24 GB. A card emulated at 16 GB refused its starts
+#   once bibr held 2 GiB, before bibr released its own models ahead of a
+#   refusal; the bf16 4B has not been run on 16 GB since.
 # - 4B W4A16, 10: 48 papers on 10 GB in aggressive mode (0.27 GiB left at the
 #   LLM starts), 100 on 12 GB and 48 on 16 GB in balanced mode. An 8 GB card
 #   (about 7.0 GiB to CUDA beside a desktop) refused every start.
@@ -130,8 +177,8 @@ class LocalLLMModel:
 #   an emulated 8 GB card with no desktop, bibr refused all 6 of its starts at
 #   the default settings (48 papers, none done); with the LLM's share set by
 #   hand (about 6.4 GiB) the same 48 papers finished. Its budget (6.25 GiB at
-#   128 sequences) needs 0.25 GiB more free than the W4A16 build's; it scores
-#   less and is offered from 12 GB in advanced setup only.
+#   128 sequences) needs 0.25 GiB more free than the W4A16 build's did then;
+#   it scores less and is offered from 12 GB in advanced setup only.
 # - The 2B GGUF builds and every MLX build: a size rule, not a run. GGUF:
 #   ceil(1.25 x the file's GiB) + 1; MLX: ceil(1.25 x the estimated size).
 _QWEN35_STUDENT_SERVER_ARGS: tuple[str, ...] = (
@@ -144,27 +191,30 @@ _QWEN35_STUDENT_SERVER_ARGS: tuple[str, ...] = (
     "vllm",
     "--max-model-len",
     "32768",
-    # Qwen3.5 is a hybrid model: vLLM gives each running sequence one Mamba
-    # cache block, and its default of 256 sequences needs more blocks than the
-    # 4B's 0.54 share of a 24 GB card holds (165), so the server failed CUDA
-    # graph capture and never started. bibr ran at most 19 sequences at once
-    # in 20- and 60-paper batches; vLLM queues any beyond the cap. It also
-    # halves the CUDA graph capture sizes (256 instead of 512), which cut the
-    # memory capture takes beyond the share from about 1.3 to 0.75 GiB.
-    "--max-num-seqs",
-    "128",
 )
 
+#: The 2B student, served with at most 128 sequences. Qwen3.5 is a hybrid
+#: model: vLLM gives each running sequence one Mamba cache block, and its
+#: default of 256 sequences needs more blocks than the 4B's 0.54 share of a
+#: 24 GB card holds (165), so the server failed CUDA graph capture and never
+#: started. bibr ran at most 19 sequences at once in 20- and 60-paper
+#: batches; vLLM queues any beyond the cap. It also halves the CUDA graph
+#: capture sizes (256 instead of 512), which cut the memory capture takes
+#: beyond the share from about 1.3 to 0.75 GiB (vLLM 0.31). The 2B has not
+#: been measured on vLLM 0.32.
+_QWEN35_2B_SERVER_ARGS: tuple[str, ...] = (*_QWEN35_STUDENT_SERVER_ARGS, "--max-num-seqs", "128")
+
+#: Both vLLM builds of the 4B student, served with at most 64 sequences, the
+#: cap every vLLM 0.32 measurement of them used (128 and vLLM's default were
+#: not run on 0.32). At 128, vLLM 0.31 needed a Mamba cache block for each
+#: sequence, about 2.1 GiB of KV cache for the W4A16 build instead of the
+#: 1.1 GiB one 32,768-token request needs.
+QWEN35_4B_SERVER_ARGS: tuple[str, ...] = (*_QWEN35_STUDENT_SERVER_ARGS, "--max-num-seqs", "64")
+
 #: The 4B student's W4A16 GPTQ build (int4 weights, the Gated DeltaNet A_log
-#: and norm tensors kept in F32), served with at most 64 sequences: at 128,
-#: vLLM needs a Mamba cache block for each of them, about 2.1 GiB of KV cache
-#: instead of the 1.1 GiB one 32,768-token request needs. The pinned build
-#: scored 218/252, level with its bf16 build's 218 on the same box.
-QWEN35_4B_W4A16_SERVER_ARGS: tuple[str, ...] = (
-    *_QWEN35_STUDENT_SERVER_ARGS,
-    "--max-num-seqs",
-    "64",
-)
+#: and norm tensors kept in F32) takes the same args as its bf16 build. The
+#: pinned build scored 218/252, level with its bf16 build's 218 on the same box.
+QWEN35_4B_W4A16_SERVER_ARGS: tuple[str, ...] = QWEN35_4B_SERVER_ARGS
 
 #: Hub revisions. The 4B's are the commits on each repository's ``pointer-v1``
 #: branch (2026-10-26 and 27): the student retrained with pointer answers for
@@ -190,16 +240,56 @@ _QWEN35_4B_MLX_FILES: tuple[str, ...] = (
     "model.safetensors",
 )
 
-#: Budget floors (``LocalLLMVariant.min_budget_gb``) of the vLLM variants:
-#: cold starts (empty vLLM, Inductor and Triton caches) on an RTX 3090 with
-#: vLLM 0.31.0, stepping ``--gpu-memory-utilization`` by 0.01 (0.24 GiB) until
-#: one budget served a 32,768-token request and the next lower one failed
-#: vLLM's KV cache check. The smallest budget that served, rounded up to a
-#: quarter GiB. A warm start (the compile cache filled by an earlier start)
-#: needs about 1.1 GiB less.
-QWEN35_4B_BUDGET_GB = 12.25  # 128 seqs: served at 12.02 GiB; 11.78 had 127 Mamba blocks
-QWEN35_4B_W4A16_BUDGET_GB = 6.25  # 64 seqs: served at 6.13 GiB; 5.89 had too little KV cache
-QWEN35_2B_BUDGET_GB = 6.25  # 128 seqs: served at 6.13 GiB; 5.89 had 127 Mamba blocks
+#: Budget floors (``LocalLLMVariant.min_budget_gb``,
+#: ``SpeculativeConfig.min_budget_gb``): cold starts (empty vLLM, Inductor and
+#: Triton caches) on an RTX 3090, stepping ``--gpu-memory-utilization`` by
+#: 0.01 of the card until one budget served a 31,000-token prompt and the next
+#: lower one failed vLLM's startup check that its KV cache holds one
+#: 32,768-token request. The smallest budget that served, rounded up to a
+#: quarter GiB. The 4B's: vLLM 0.32.0 at 64 sequences (2026-10-27), on the
+#: pinned revisions above (9199424d and its W4A16 build a32f2048). The 2B's:
+#: vLLM 0.31.0 at 128 sequences. A warm start (the compile cache filled by an
+#: earlier start) needed about 1.1 GiB less on vLLM 0.31.
+QWEN35_4B_BUDGET_GB = 11.0  # served at 10.84 GiB; 10.60 had 1.09 of the 1.11 GiB KV cache
+QWEN35_4B_W4A16_BUDGET_GB = 6.0  # served at 5.89 GiB; 5.65 had 0.88 of 1.11 GiB
+QWEN35_2B_BUDGET_GB = 6.25  # vLLM 0.31: served at 6.13 GiB; 5.89 had 127 Mamba blocks
+#: With MTP k=3, which needs 1.42 GiB of KV cache for that request, and the
+#: MTP layers' own memory.
+QWEN35_4B_MTP_BUDGET_GB = 12.0  # served at 11.78 GiB; 11.54 had 1.29 of 1.42 GiB
+QWEN35_4B_W4A16_MTP_BUDGET_GB = 7.25  # served at 7.07 GiB; 6.83 had 1.29 of 1.42 GiB
+#: With DFlash k=7, which needs 1.72 GiB of KV cache and the drafter's weights.
+QWEN35_4B_DFLASH_BUDGET_GB = 13.5  # served at 13.43 GiB; 13.19 had 1.54 of 1.72 GiB
+
+#: MTP with 3 drafted tokens, from the checkpoint's own MTP layers (the base
+#: model's, kept by the merge). On the 252 dev papers (vLLM 0.32, one LLM
+#: server up for the whole run, at 0.85 of the card): the bf16 4B (pointer-v1
+#: weights) 218/252 against 219 without it on an RTX 3090 (-0.4 points
+#: [-1.2, 0]) and 218 against 218 on an RTX 5090, with 3.88 of 4 tokens
+#: accepted per step and the LLM stage 0.80x and 0.74x as long. The previous
+#: revision's W4A16 build (a2af8f6e) scored 218/252 with it, as without it
+#: on vLLM 0.31; the pinned W4A16 build has not been scored with it. In a batch
+#: where the LLM server restarts every chunk to take turns with PaddleOCR-VL,
+#: each start with it took 51 s instead of 37 s, and papers/h fell 5% and 9%
+#: (W4A16 on emulated 12 and 16 GB cards), so ``bibr.local.vllm_speculative``
+#: leaves it off there.
+_QWEN35_4B_MTP = SpeculativeConfig("mtp", 3, QWEN35_4B_MTP_BUDGET_GB)
+_QWEN35_4B_W4A16_MTP = SpeculativeConfig("mtp", 3, QWEN35_4B_W4A16_MTP_BUDGET_GB)
+#: DFlash with 7 drafted tokens from z-lab's drafter for Qwen3.5-4B
+#: (1.27 GB), pinned to the revision measured. bf16 4B on the 252 papers:
+#: 220/252 against 219 without it (RTX 3090) and 217 against 218 (RTX 5090),
+#: with the LLM stage 0.72x and 0.64x as long, but about half the
+#: KV cache capacity of no speculation (159,251 against 310,108 tokens at 0.85
+#: of an RTX 3090). Opt-in only (``LLM_VLLM_SPEC_DECODE=dflash``); not listed
+#: for the W4A16 build, whose quality with it was not measured.
+QWEN35_4B_DFLASH_DRAFTER = "z-lab/Qwen3.5-4B-DFlash"
+QWEN35_4B_DFLASH_DRAFTER_REVISION = "9a1996ccf887b79ab3af4fcbf8c1d1f4b5658bcf"
+_QWEN35_4B_DFLASH = SpeculativeConfig(
+    "dflash",
+    7,
+    QWEN35_4B_DFLASH_BUDGET_GB,
+    drafter=QWEN35_4B_DFLASH_DRAFTER,
+    drafter_revision=QWEN35_4B_DFLASH_DRAFTER_REVISION,
+)
 #: Thinking off per request too, for llama.cpp and MLX servers, which do not
 #: read ``server_args``.
 _QWEN35_STUDENT_ENV: dict[str, str] = {"LLM_CHAT_TEMPLATE_KWARGS": '{"enable_thinking": false}'}
@@ -216,8 +306,9 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 min_vram_gb=20,
                 min_budget_gb=QWEN35_4B_BUDGET_GB,
                 approx_download_gb=8.7,
-                server_args=("--revision", _QWEN35_4B_REVISION, *_QWEN35_STUDENT_SERVER_ARGS),
+                server_args=("--revision", _QWEN35_4B_REVISION, *QWEN35_4B_SERVER_ARGS),
                 runtime="vllm",
+                speculative=(_QWEN35_4B_MTP, _QWEN35_4B_DFLASH),
             ),
             # int4 weights: 218/252, level with the bf16 build on the same box, at
             # half its budget.
@@ -234,6 +325,7 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                     *QWEN35_4B_W4A16_SERVER_ARGS,
                 ),
                 runtime="vllm",
+                speculative=(_QWEN35_4B_W4A16_MTP,),
             ),
             # llama.cpp (Windows, cards below 10 GB, cards older than Ampere):
             # Q8_0 first, as the closest to the evaluated bf16 weights.
@@ -283,7 +375,7 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 min_vram_gb=12,  # 0.25 GiB more than the W4A16 build; no default run backs it
                 min_budget_gb=QWEN35_2B_BUDGET_GB,
                 approx_download_gb=4.2,
-                server_args=("--revision", _QWEN35_2B_REVISION, *_QWEN35_STUDENT_SERVER_ARGS),
+                server_args=("--revision", _QWEN35_2B_REVISION, *_QWEN35_2B_SERVER_ARGS),
                 runtime="vllm",
             ),
             LocalLLMVariant(
@@ -506,6 +598,15 @@ def pinned_download_variant(model: str) -> LocalLLMVariant | None:
     for m in REGISTRY:
         for v in m.variants:
             if v.hf_id == model and v.revision is not None and v.hub_files:
+                return v
+    return None
+
+
+def vllm_registry_variant(model: str) -> LocalLLMVariant | None:
+    """The registry's CUDA vLLM variant whose ``hf_id`` is *model*, or None."""
+    for m in REGISTRY:
+        for v in m.variants:
+            if v.platform == "cuda" and v.runtime == "vllm" and v.hf_id == model:
                 return v
     return None
 

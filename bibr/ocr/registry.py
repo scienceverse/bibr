@@ -284,8 +284,8 @@ def managed_gpu_memory() -> GpuMemory | None:
 
 #: The lowest CUDA compute capability bibr's automatic routing sends to vLLM.
 #: The published vLLM models (the extraction students and PaddleOCR-VL) are
-#: bf16 checkpoints, and vLLM 0.31 serves bf16 only from compute capability
-#: 8.0 (Ampere; ``vllm.platforms.cuda``). bibr passes no ``--dtype``, and with
+#: bf16 checkpoints, and vLLM (0.31 and 0.32) serves bf16 only from compute
+#: capability 8.0 (Ampere; ``vllm.platforms.cuda``). bibr passes no ``--dtype``, and with
 #: vLLM's default ``auto`` dtype an older card (Turing 7.5, Volta 7.0, Pascal
 #: 6.x) is not refused: vLLM casts the model to float16 with a warning, a
 #: numeric path bibr has never been measured on. So such cards run both the
