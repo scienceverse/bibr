@@ -58,6 +58,7 @@ class _Stub:
         usage: bool = True,
         answer: str = ANSWER,
         second_answer_delay: float = 0.0,
+        models_delay: float = 0.0,
     ):
         self.version = version
         self.lists_window = lists_window
@@ -65,10 +66,12 @@ class _Stub:
         self.usage = usage
         self.answer = answer
         self.second_answer_delay = second_answer_delay
+        self.models_delay = models_delay
         self.log: list[dict] = []
 
     def models(self) -> tuple[int, dict]:
         self.log.append({"route": "models"})
+        time.sleep(self.models_delay)
         entry: dict = {"id": "stub", "object": "model"}
         if self.lists_window:
             entry["max_model_len"] = WINDOW
@@ -314,6 +317,23 @@ def test_each_concurrent_call_that_stopped_at_the_window_is_asked_again(serve):
     assert stub.routes().count("chat") == 4
 
 
+def test_calls_that_stop_at_the_window_together_read_it_once(serve):
+    """Each waits for the read the first one started: before, four such calls
+    sent three."""
+    text = _room_300_text(serve)
+    stub = _Stub("0.32", models_delay=0.5)
+    client = _client(serve(stub))
+
+    async def four():
+        return await asyncio.gather(*(client.extract_title_keywords(text) for _ in range(4)))
+
+    results = asyncio.run(four())
+
+    assert [r.title for r in results] == ["A study of reading rooms"] * 4
+    assert stub.routes().count("models") == 1
+    assert stub.routes().count("chat") == 8
+
+
 def _listing(*entries: dict) -> dict:
     return {"object": "list", "data": list(entries)}
 
@@ -403,6 +423,86 @@ def test_a_server_that_answers_without_a_window_is_not_asked_again(answer):
     assert _listed(settings, transport) is None
     assert _listed(settings, transport) is None
     assert len(requests) == 1
+
+
+def test_calls_that_ask_together_share_one_read():
+    requests: list[httpx.Request] = []
+    answers = [
+        (503, {"error": "loading"}),
+        (200, _listing({"id": "org/model", "max_model_len": 4_096})),
+    ]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        status, body = answers[min(len(requests), len(answers)) - 1]
+        await asyncio.sleep(0.05)
+        return httpx.Response(status, json=body)
+
+    transport = httpx.MockTransport(handler)
+    settings = _settings()
+
+    async def run():
+        together = await asyncio.gather(
+            *(server_window.listed_window(settings, transport=transport) for _ in range(4))
+        )
+        # The server did not answer them: the next call asks again.
+        later = await server_window.listed_window(settings, transport=transport)
+        return together, later
+
+    assert asyncio.run(run()) == ([None] * 4, 4_096)
+    assert len(requests) == 2
+
+
+def test_a_call_cancelled_while_it_waits_leaves_the_read_to_the_others():
+    settings = _settings()
+
+    async def run():
+        asked, answer = asyncio.Event(), asyncio.Event()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            asked.set()
+            await answer.wait()
+            return httpx.Response(200, json=_listing({"id": "org/model", "max_model_len": 8_192}))
+
+        transport = httpx.MockTransport(handler)
+        first = asyncio.ensure_future(server_window.listed_window(settings, transport=transport))
+        second = asyncio.ensure_future(server_window.listed_window(settings, transport=transport))
+        await asyncio.wait_for(asked.wait(), 5)
+        first.cancel()
+        await asyncio.sleep(0)
+        answer.set()
+        return await asyncio.wait_for(second, 5), first.cancelled()
+
+    assert asyncio.run(run()) == (8_192, True)
+
+
+def test_a_read_in_flight_on_another_threads_event_loop_is_not_awaited():
+    """Each thread that calls bibr runs its own event loop, which cannot wait
+    for another loop's read: it sends its own."""
+    first_asked, answer_first = threading.Event(), threading.Event()
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            first_asked.set()
+            answer_first.wait(5)
+        return httpx.Response(200, json=_listing({"id": "org/model", "max_model_len": 8_192}))
+
+    transport = httpx.MockTransport(handler)
+    settings = _settings()
+    other: list[int | None] = []
+    thread = threading.Thread(target=lambda: other.append(_listed(settings, transport)))
+    thread.start()
+    try:
+        assert first_asked.wait(5)
+        assert _listed(settings, transport) == 8_192
+    finally:
+        answer_first.set()
+        thread.join(5)
+
+    assert other == [8_192]
+    assert len(requests) == 2
 
 
 def test_each_model_on_a_server_has_its_own_window():

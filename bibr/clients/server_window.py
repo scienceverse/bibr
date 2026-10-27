@@ -7,15 +7,17 @@ whose completion cap ran past the window with HTTP 400 and named the window,
 which bibr learns from (``_context_window_from_error``); vLLM 0.32 lowers the
 cap to what is left instead, so the answer stops there and names nothing.
 
-Answers are kept per server and model for the life of the process. A server
-that answers without a window (another runtime, a router listing several
-models, no ``/v1/models`` route) is kept as listing none. A server that does
-not answer (down, timed out, HTTP 5xx) is asked again the next time. Never
-raises.
+Answers are kept per server and model for the life of the process, and calls
+that ask while a read is in flight on the same event loop wait for it instead
+of sending their own. A server that answers without a window (another runtime,
+a router listing several models, no ``/v1/models`` route) is kept as listing
+none. A server that does not answer (down, timed out, HTTP 5xx) is asked again
+the next time. Never raises.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +34,9 @@ _CONNECT_TIMEOUT_SECONDS = 2.0
 # (models URL, model) -> the window the server lists, or None when it answered
 # without one.
 _listed: dict[tuple[str, str], int | None] = {}
+# (models URL, model) -> the read in flight and the event loop it runs on.
+_Read = tuple[asyncio.AbstractEventLoop, asyncio.Task[int | None]]
+_reading: dict[tuple[str, str], _Read] = {}
 
 
 class _NoAnswer(Exception):
@@ -41,6 +46,7 @@ class _NoAnswer(Exception):
 def clear() -> None:
     """Forget every server's answer."""
     _listed.clear()
+    _reading.clear()
 
 
 def _models_url(settings: GlobalSettings) -> str | None:
@@ -82,6 +88,28 @@ async def listed_window(
     key = (url, settings.llm.model)
     if key in _listed:
         return _listed[key]
+    loop = asyncio.get_running_loop()
+    reading = _reading.get(key)
+    # A read on another thread's event loop cannot be awaited on this one.
+    if reading is None or reading[0] is not loop:
+        task = loop.create_task(_read(settings, url, key, transport))
+        reading = _reading[key] = (loop, task)
+        task.add_done_callback(lambda _: _forget_read(key, reading))
+    # A caller cancelled while it waits leaves the read to the others.
+    return await asyncio.shield(reading[1])
+
+
+def _forget_read(key: tuple[str, str], reading: _Read) -> None:
+    if _reading.get(key) is reading:
+        del _reading[key]
+
+
+async def _read(
+    settings: GlobalSettings,
+    url: str,
+    key: tuple[str, str],
+    transport: httpx.AsyncBaseTransport | None,
+) -> int | None:
     try:
         window = await _ask(settings, url, transport)
     except Exception as exc:  # noqa: BLE001 - a window the server did not give is unknown
