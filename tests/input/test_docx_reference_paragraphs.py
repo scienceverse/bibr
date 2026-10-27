@@ -57,12 +57,16 @@ MORE_REFS = [
 ]
 
 
-def _para(*lines: str, style: str | None = None) -> str:
+def _run(line: str) -> str:
+    """One run of text; a tab in *line* is a ``w:tab``."""
+    texts = (f'<w:t xml:space="preserve">{escape(part)}</w:t>' for part in line.split("\t"))
+    return f"<w:r>{'<w:tab/>'.join(texts)}</w:r>"
+
+
+def _para(*lines: str, style: str | None = None, line_break: str = "<w:br/>") -> str:
     """One paragraph; several *lines* are joined by line breaks (Shift+Enter)."""
     ppr = f'<w:pPr><w:pStyle w:val="{style}"/></w:pPr>' if style else ""
-    runs = "<w:r><w:br/></w:r>".join(
-        f'<w:r><w:t xml:space="preserve">{escape(line)}</w:t></w:r>' for line in lines
-    )
+    runs = f"<w:r>{line_break}</w:r>".join(_run(line) for line in lines)
     return f"<w:p>{ppr}{runs}</w:p>"
 
 
@@ -289,10 +293,37 @@ def test_a_short_list_is_left_to_the_segmenter():
     assert reference_entries(_paragraphs(*REFS[:2])) == (None, "too_few")
 
 
+def test_three_entries_are_enough():
+    assert reference_entries(_paragraphs(*REFS[:3])) == (REFS[:3], "ok")
+
+
+def test_nine_in_ten_entries_with_a_year_are_enough():
+    refs = [*REFS, *MORE_REFS[:4]]
+    undated = ["Lee, K. Memory and the self. Unpublished manuscript.", "Kim, S. Untitled notes."]
+
+    assert reference_entries(_paragraphs(*refs, undated[0])) == ([*refs, undated[0]], "ok")
+    assert reference_entries(_paragraphs(*refs[:8], *undated)) == (None, "year_coverage")
+
+
 def test_entries_joined_by_line_breaks_are_split_at_them():
     joined = ReferenceParagraph(" ".join(REFS[1:4]), tuple(REFS[1:4]))
     paragraphs = [*_paragraphs(REFS[0]), joined, *_paragraphs(REFS[4])]
     assert reference_entries(paragraphs) == (REFS, "ok")
+
+
+def test_lines_that_do_not_rejoin_to_the_paragraphs_text_are_not_split():
+    # Text the lines do not hold (a text box, an equation): the line breaks
+    # cannot be placed in the paragraph's text.
+    joined = ReferenceParagraph(" ".join([*REFS[1:4], "[Text box]"]), tuple(REFS[1:4]))
+    paragraphs = [*_paragraphs(REFS[0]), joined, *_paragraphs(REFS[4])]
+    assert reference_entries(paragraphs) == ([REFS[0], joined.text, REFS[4]], "ok")
+
+
+def test_numbered_entries_joined_by_line_breaks_are_split_at_them():
+    numbered = [f"[{i}] {ref}" for i, ref in enumerate(REFS, start=1)]
+    joined = ReferenceParagraph(" ".join(numbered[1:4]), tuple(numbered[1:4]))
+    paragraphs = [*_paragraphs(numbered[0]), joined, *_paragraphs(numbered[4])]
+    assert reference_entries(paragraphs) == (numbered, "ok")
 
 
 def test_a_line_break_inside_one_entry_does_not_split_it():
@@ -333,6 +364,21 @@ def test_parser_reads_line_broken_entries_as_separate_entries():
     contents = DocxParser(_docx(_para(REFS[0]), _para(*REFS[1:4]), _para(REFS[4]))).parse()
 
     assert contents.native_ref_strings == REFS
+
+
+def test_parser_splits_entries_at_legacy_carriage_returns():
+    paragraphs = [_para(REFS[0]), _para(*REFS[1:4], line_break="<w:cr/>"), _para(REFS[4])]
+    contents = DocxParser(_docx(*paragraphs)).parse()
+
+    assert contents.native_ref_strings == REFS
+
+
+def test_parser_reads_a_tab_after_an_entry_number_as_a_space():
+    numbered = [f"[{i}]\t{ref}" for i, ref in enumerate(REFS, start=1)]
+    paragraphs = [_para(numbered[0]), _para(*numbered[1:4]), _para(numbered[4])]
+    contents = DocxParser(_docx(*paragraphs)).parse()
+
+    assert contents.native_ref_strings == [f"[{i}] {ref}" for i, ref in enumerate(REFS, start=1)]
 
 
 def test_parser_leaves_hard_wrapped_lists_to_the_segmenter():
