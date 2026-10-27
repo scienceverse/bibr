@@ -4,7 +4,7 @@ Each paragraph of a typed or generated reference list is one entry, so when
 the paragraphs pass the structure check (:mod:`bibr.input.docx_references`)
 they reach the reference parser as they are and no LLM call segments them.
 Lists whose paragraphs are not entries (hard-wrapped entries, floats and notes
-under the references heading) are left to the LLM segmenter as before.
+under the references heading) are left to the configured segmenter as before.
 """
 
 from __future__ import annotations

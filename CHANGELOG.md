@@ -9,14 +9,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - A Word manuscript's reference list is now segmented by its own paragraphs,
-  one entry each, instead of by an LLM call, when the paragraphs pass a
+  one entry each, instead of by the configured reference segmenter (by
+  default an LLM call), when the list is under a heading that is a reference
+  list's name ("References", "7. Literature Cited") and its paragraphs pass a
   structure check: at least three entries, nine in ten with a year, the list
   ending at the first table, figure, appendix or supplement heading under the
-  references heading. That call cost about 1.6k output tokens per .docx on the
-  4B model, and minutes on a CPU. Entries joined by line breaks within one
-  paragraph are split at them. A list that fails the check (entries
-  hard-wrapped into several paragraphs, floats the end rule missed) is
-  segmented by the LLM as before.
+  references heading. On 936 PsyArXiv Word manuscripts run with the 4B model
+  on a GPU, that LLM call produced a median of 1,277 output tokens per
+  manuscript (mean 1,600). Entries joined by line breaks within one paragraph
+  are split at them when every line opens like an entry and gives a date. A
+  list that fails the check (entries hard-wrapped into several paragraphs,
+  floats the end rule missed) goes to the configured segmenter as before.
 
 ## [0.7.4] - 2026-10-23
 
