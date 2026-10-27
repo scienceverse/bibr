@@ -255,7 +255,8 @@ checkpoints can use speculative decoding like their base.
   papers: 1,113 answers that Qwen3.8-27B gave to bibr's own prompts, which its
   previous revision (`6ab47a4e`) was trained on, plus 331 of the title and
   keywords and authors answers restated as pointer answers. A pointer row was
-  kept only when bibr's pointer resolver turned it back into the 27B's answer.
+  kept only when bibr's pointer resolver turned it back into the 27B's answer,
+  ignoring whitespace (and, in 7 title/keywords rows, punctuation).
 - **bibr extract 2B** was trained on the same 1,113 answers plus 4,186 author
   lists from JATS XML of 6,526 open-access papers, which made up for most of its
   weakness on authors.
