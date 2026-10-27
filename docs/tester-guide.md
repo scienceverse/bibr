@@ -28,7 +28,8 @@ bibr now has a native Windows path; WSL2 is not required. On Windows it uses
 the local LLM. For a 6 GB GPU, setup selects:
 
 - GLM-OCR Q8 (about 950 MB downloaded) for `glm-llama`;
-- the bibr extract 4B Q4_K_M GGUF (about 2.6 GB downloaded) for a fully local LLM; and
+- the bibr extract 4B Q4_K_M GGUF (about 2.6 GB, which bibr downloads into the
+  Hugging Face cache at the revision it pins) for a fully local LLM; and
 - `aggressive` memory mode, which unloads one model before loading the next.
 
 The code and automated tests explicitly cover the 6 GB selection, but this is a
@@ -509,5 +510,6 @@ for report formats and output options supported by your installed version.
 ## Uninstalling
 
 Delete the cloned `bibr` directory. Model caches are stored separately by
-Hugging Face/llama.cpp and can be removed independently if no other local-model
-tools use them.
+Hugging Face (including the bibr extract GGUF builds, which bibr downloads
+itself) and llama.cpp, and can be removed independently if no other
+local-model tools use them.

@@ -8,12 +8,21 @@ JSON. It does not parse references (see the
 `bibr setup` picks one of three recommended models for you, based on what your
 machine can run:
 
-| Scenario | Recommended model | Needs | Passes, vs Qwen3.8-27B |
+| Scenario | Recommended model | Needs | Passes /252 |
 |---|---|---|---|
-| Linux, NVIDIA GPU (Ampere or newer) with 20 GB or more | **bibr extract 4B**, Qwen3.5-4B fine-tuned for bibr (`scienceverse/bibr-extract-qwen35-4b`) | vLLM, 14.25 GiB free to start | 216/252, −2.8 points [−5.2, −0.8] |
-| Linux, NVIDIA GPU (Ampere or newer) with 10–19 GB | **bibr extract 4B W4A16**, the same model with 4-bit weights (`scienceverse/bibr-extract-qwen35-4b-W4A16`) | vLLM, 8 GiB free to start | 218/252; vs the bf16 4B on the same machine (217/252) +0.4 points [−0.8, +1.6] |
-| Linux, NVIDIA GPU with 5–9 GB or older than Ampere, or Windows | **bibr extract 4B GGUF**, the same model for llama.cpp (`scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0` from 7 GB, `:Q4_K_M` below) | llama.cpp, which you install; GLM-OCR runs on it too | Q8_0 218/252 on the same OCR as the rows above (a single run); with GLM-OCR, checked on 100 papers (Q8_0) and 48 (Q4_K_M) only |
-| No suitable GPU, or you prefer a hosted model | **Claude Haiku 5.5** (`claude-haiku-5-5`) | an Anthropic API key, about $0.004 a paper | 221/252, −0.8 points [−2.4, +0.8] |
+| Linux, NVIDIA GPU (Ampere or newer) with 20 GB or more | **bibr extract 4B**, Qwen3.5-4B fine-tuned for bibr (`scienceverse/bibr-extract-qwen35-4b`) | vLLM, 14.25 GiB free to start | 218; the previous revision 217 on the same machine, +0.4 points [−0.8, +2.0] |
+| Linux, NVIDIA GPU (Ampere or newer) with 10–19 GB | **bibr extract 4B W4A16**, the same model with 4-bit weights (`scienceverse/bibr-extract-qwen35-4b-W4A16`) | vLLM, 8 GiB free to start | 218, level with the bf16 4B on the same machine: +0.0 points [−1.6, +1.6] |
+| Linux, NVIDIA GPU with 5–9 GB or older than Ampere, or Windows | **bibr extract 4B GGUF**, the same model for llama.cpp (`scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0` from 7 GB, `:Q4_K_M` below) | llama.cpp, which you install; GLM-OCR runs on it too | Q8_0 218, +0.0 points [−1.2, +1.2] against the bf16 4B; Q4_K_M 217, −0.4 [−2.0, +0.8]; both on the same OCR as the rows above. With GLM-OCR, the previous revision was checked on 100 papers (Q8_0) and 48 (Q4_K_M) only |
+| No suitable GPU, or you prefer a hosted model | **Claude Haiku 5.5** (`claude-haiku-5-5`) | an Anthropic API key, about $0.004 a paper | 221, −0.8 points [−2.4, +0.8] against Qwen3.8-27B's 223 |
+
+The 4B's scores are from bibr commit e491ed64 on an RTX 5090, with OCR replayed
+from cache and pointer answers off (see
+[below](#pointer-answers-llm_pointer_outputs)); each build is paired paper by
+paper with the bf16 build of the same revision, and the bf16 build with the
+previous revision of the 4B (`6ab47a4e`). Haiku's score is from the evaluation
+in [the evaluation below](#how-close-small-models-get-to-a-large-one). The current
+4B has not been run against Qwen3.8-27B; its previous revision passed 216,
+−2.8 points [−5.2, −0.8], in that evaluation.
 
 The memory is what must be free on the card each time bibr starts the model
 (see [configuration](configuration.md) for how bibr sizes it): the model's own
@@ -43,7 +52,8 @@ RTX 4060 reports 8,188 MiB, an RTX 5070 12,227 MiB).
 **These runs emulate the card's memory, not its speed.** Each one ran on an
 RTX 3090 whose free memory a separate process cut to what the named card has,
 with 0.5 GiB more taken for a desktop (on 24 GB, only the desktop), and with
-bibr told the card's size. The papers an hour are that RTX 3090's speed with
+bibr told the card's size, and they served the previous revision of the 4B's
+builds, whose files have the same sizes. The papers an hour are that RTX 3090's speed with
 that much memory; a real card of that size runs at its own speed, which has
 not been measured. Each run used bibr's default memory mode and chunk size
 for the card. On the same 100 papers the 8 GB default passed as many as the
@@ -96,11 +106,23 @@ Apple Silicon runs the 4B, or the 2B on a Mac with less memory, through MLX:
 | llama.cpp | 4B Q8_0, 4B Q4_K_M, 2B Q8_0, 2B Q4_K_M (`scienceverse/bibr-extract-qwen35-4b-GGUF`, `-2b-GGUF`) | from 7 GB down to 3 GB of VRAM |
 | MLX (Apple Silicon) | 4B 8-bit, 2B 8-bit (`scienceverse/bibr-extract-qwen35-4b-mlx-8bit`, `-2b-mlx-8bit`) | from 6 GB down to 3 GB of memory |
 
-The quantized builds are made from the same merged weights. Served by
-llama.cpp on the same 252 papers, the 4B Q8_0 passes 218 (bf16 on vLLM in the
-reference run: 216),
-the 4B Q4_K_M 214 (216), the 2B Q8_0 209 (207) and the 2B Q4_K_M 204 (207).
-These are single runs, and the differences from bf16 have not been tested.
+The quantized builds are made from the same merged weights. Each 4B build
+was paired paper by paper with the 4B's bf16 build (218/252) on the same 252
+papers, at bibr commit e491ed64 on an RTX 5090, one run each:
+
+| 4B build | Runtime | Passes /252 | vs bf16, points |
+|---|---|---|---|
+| bf16 | vLLM 0.31 | 218 | — |
+| W4A16 | vLLM 0.31 | 218 | +0.0 [−1.6, +1.6] |
+| FP8-Dynamic (not offered by setup) | vLLM 0.31 | 219 | +0.4 [−0.8, +1.6] |
+| GGUF Q8_0 | llama.cpp b11783 | 218 | +0.0 [−1.2, +1.2] |
+| GGUF Q4_K_M | llama.cpp b11783 | 217 | −0.4 [−2.0, +0.8] |
+
+Each build stays within the −4 point rule of the bf16 build. On the same
+machine the previous revision's Q8_0 passed 217. The 2B's builds were scored
+only in the evaluation below: served by llama.cpp, its Q8_0 passes 209 and its
+Q4_K_M 204 (bf16 on vLLM: 207). These are single runs, and the differences
+from bf16 have not been tested.
 
 Setup gives Linux cards with 10–19 GB the W4A16 build on vLLM rather than a
 GGUF build: on those cards PaddleOCR-VL runs on vLLM too, and bibr can hand
@@ -111,14 +133,47 @@ without setup, the automatic OCR does the same whenever the LLM runs on
 llama.cpp.
 `bibr setup --advanced` offers the 4B Q8_0 build on llama.cpp on larger cards
 as well, but it may run out of memory while PaddleOCR-VL and extraction share
-the card. The W4A16
-build's 218/252 and its paired difference are from one run on vLLM 0.31 on an
-RTX 5090, against the published bf16 build on the same machine (217/252). The
-4B's 216/252 and its difference from Qwen3.8-27B are from the reference run,
-which served the fine-tune as an unmerged LoRA on another GPU. The
-MLX builds have only been smoke-tested, so setup marks them experimental. There
+the card. The 4B's 216/252 and its
+difference from Qwen3.8-27B belong to its previous revision and come from the
+reference run, which served the fine-tune as an unmerged LoRA on another GPU.
+The MLX builds have only been smoke-tested, so setup marks them experimental. There
 are no 4-bit MLX builds: in their smoke tests the 4B's duplicated a funding
 entry and the 2B's returned award IDs as numbers.
+
+### Builds and revisions
+
+bibr pins each 4B build to a commit on the Hugging Face Hub, so an update to a
+repository does not change what a bibr version runs. The current builds are on
+each repository's `pointer-v1` branch; `main` still holds the previous
+revision's builds.
+
+| 4B build | Revision bibr uses | How bibr gets it |
+|---|---|---|
+| bf16 | [`9199424d`](https://huggingface.co/scienceverse/bibr-extract-qwen35-4b/tree/9199424d4bd200feb247e26e4a860b63da73cbaf) | vLLM downloads it (`--revision`) |
+| W4A16 | [`a32f2048`](https://huggingface.co/scienceverse/bibr-extract-qwen35-4b-W4A16/tree/a32f20485181574d849cfb32f8eac1f266c4143d) | vLLM downloads it (`--revision`) |
+| GGUF Q8_0, Q4_K_M | [`0aa228e8`](https://huggingface.co/scienceverse/bibr-extract-qwen35-4b-GGUF/tree/0aa228e8c908512ad5e5e13fa55e7e7d3180c7d3) | bibr downloads the one file into the Hugging Face cache; llama.cpp loads it |
+| MLX 8-bit | [`432b8cd8`](https://huggingface.co/scienceverse/bibr-extract-qwen35-4b-mlx-8bit/tree/432b8cd80ea920919ef26c48401473c6d8c8a3e1) | bibr downloads it into the Hugging Face cache; vllm-mlx or Rapid-MLX serves it |
+| FP8-Dynamic | [`101d1ee1`](https://huggingface.co/scienceverse/bibr-extract-qwen35-4b-FP8-Dynamic/tree/101d1ee1d449195f6882019b0fd2aa4328ed8bef) | not in bibr's registry; see [configuration](configuration.md#pinned-model-revisions) |
+
+llama.cpp (`-hf`) and the MLX servers always download a repository's `main`,
+which is why bibr downloads those builds itself. Once a build is in the cache,
+it starts without the Hub, so offline runs work. The
+[configuration guide](configuration.md#pinned-model-revisions) shows how to run
+the previous revision.
+
+### Pointer answers (`LLM_POINTER_OUTPUTS`)
+
+The current 4B was also trained on bibr's pointer answers for its two
+front-matter calls: the title and keywords call names the abstract's first and
+last words instead of writing the abstract out, and the authors call lists each
+affiliation once. With `LLM_POINTER_OUTPUTS=true` it also passes 218/252
+(+0.4 points [−0.8, +1.6] against the previous revision with the flag off), and
+the longer of those two calls writes 300 output tokens a paper instead of 455.
+The flag stays off by default, for two reasons. First-author accuracy, which
+the pass rule does not include, is lower with the flag on: −0.015 [−0.031,
+−0.003], 7 papers worse and none better. And on 3 papers bibr's pointer
+resolver took a wrong span of the paper text as the abstract without any
+warning, a resolver bug that the previous revision hits too.
 
 The hosted setup uses Claude for OCR as well (`OCR_BACKEND=anthropic`,
 `OCR_VISION_MODEL=claude-haiku-5-5`), so it needs one Anthropic key. The 221/252
@@ -147,7 +202,7 @@ lower end of that interval stays above −4 points.
 |---|---|---|
 | Qwen3.8-27B (reference) | 223 | — |
 | Claude Haiku 5.5 (hosted) | 221 | −0.8 [−2.4, +0.8] |
-| bibr extract 4B (Qwen3.5-4B, fine-tuned) | 216 | −2.8 [−5.2, −0.8] |
+| bibr extract 4B, previous revision `6ab47a4e` (Qwen3.5-4B, fine-tuned) | 216 | −2.8 [−5.2, −0.8] |
 | Qwen3.5-4B, not fine-tuned | 208 | −6.0 [−9.1, −3.2] |
 | K2-Horizon-7B, not fine-tuned | 208 | −6.0 [−9.1, −3.2] |
 | bibr extract 2B (Qwen3.5-2B, fine-tuned) | 207 | −6.3 [−9.9, −3.2] |
@@ -155,6 +210,10 @@ lower end of that interval stays above −4 points.
 | Granite 4.2-8B, not fine-tuned | 195 | −11.1 [−15.1, −7.1] |
 | Qwen3.5-2B, not fine-tuned | 190 | −13.1 [−17.5, −9.1] |
 | Qwen3.5-0.8B, fine-tuned | 180 | −17.1 [−21.8, −12.7] |
+
+The current 4B revision was not part of this evaluation. On a later bibr
+commit (e491ed64) it passed 218 to the previous revision's 217 on the same
+machine, +0.4 points [−0.8, +2.0].
 
 What this shows:
 
@@ -166,12 +225,12 @@ What this shows:
   parameters trail it by 6 to 11 points and 2B models by about 13. Most of the
   loss is on author lists and non-English papers.
 - **Fine-tuning on bibr's tasks closes about half of that gap,** but no small
-  open model clears the −4 point rule yet. The fine-tuned 4B is 2.8 points
-  behind, closer than any 7–8B model off the shelf. The fine-tuned 2B is 6.3
+  open model clears the −4 point rule yet. The fine-tuned 4B (previous
+  revision) is 2.8 points behind, closer than any 7–8B model off the shelf. The fine-tuned 2B is 6.3
   points behind, ahead of NuExtract 3 at less than half its size. Below 2B the
   loss grows quickly.
 - **Non-English papers are the weak spot.** On the 29 non-English papers, the
-  fine-tuned 4B and Haiku 5.5 each trail the 27B by 6.9 points, the 2B by 13.8
+  fine-tuned 4B (previous revision) and Haiku 5.5 each trail the 27B by 6.9 points, the 2B by 13.8
   and NuExtract 3 by 20.7. These intervals are wide.
 
 Limits of this evidence:
@@ -192,15 +251,20 @@ Both models are Qwen3.5 bases (Apache-2.0) with a LoRA adapter merged into the
 weights. Merging keeps the base model's multi-token prediction layers, so the
 checkpoints can use speculative decoding like their base.
 
-- **bibr extract 4B** was trained on 1,113 answers that Qwen3.8-27B gave to
-  bibr's own prompts on 181 open-access PMC papers.
+- **bibr extract 4B** was trained on 1,444 rows from 162 open-access PMC
+  papers: 1,113 answers that Qwen3.8-27B gave to bibr's own prompts, which its
+  previous revision (`6ab47a4e`) was trained on, plus 331 of the title and
+  keywords and authors answers restated as pointer answers. A pointer row was
+  kept only when bibr's pointer resolver turned it back into the 27B's answer.
 - **bibr extract 2B** was trained on the same 1,113 answers plus 4,186 author
   lists from JATS XML of 6,526 open-access papers, which made up for most of its
   weakness on authors.
 
 The training papers were filtered by licence. For the 27B answers, the licence
-statement in each PDF was read: 181 CC BY papers were kept and 11 with
-non-commercial, no-derivatives or no licence statement were dropped. For the
+statement in each PDF was read: CC BY and CC0 papers were kept and 11 with
+non-commercial, no-derivatives or no licence statement were dropped. The 4B's
+training rows come from 162 of the kept papers and its validation rows from 19
+others. For the
 JATS author lists, the licence recorded in bibr's training pool was used: CC BY
 or CC0 papers were kept and 474 papers without a recorded licence were dropped.
 None of the training papers overlaps the evaluation papers above, matched by

@@ -1299,7 +1299,7 @@ class SetupWizard:
             "[dim]tip: bibr's extraction tasks don't need a frontier model. hosted, the\n"
             "recommended claude-haiku-5-5 is within a point of Qwen3.8-27B on bibr's\n"
             "dev set, at about $0.004 a paper. self-hosting? choose local for bibr's\n"
-            "fine-tuned 4B (2.8 points behind the 27B) or 2B (6.3 points) model.[/dim]"
+            "fine-tuned 4B or 2B model.[/dim]"
         )
         provider = Prompt.ask(
             "Provider",

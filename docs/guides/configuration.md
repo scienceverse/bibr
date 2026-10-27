@@ -381,7 +381,11 @@ front matter, and the authors call lists each affiliation once and gives each
 author its numbers. When the abstract cannot be placed in the text, or the
 answer is cut off or does not parse, bibr asks for the verbatim answer
 instead. The merged call (`LLM_MERGED_CORE_METADATA`) and the
-`nuextract-native` backend do not use it.
+`nuextract-native` backend do not use it. The current revision of bibr's 4B
+was trained on these answers and passes as many papers with the flag on as
+off, but first-author accuracy is lower with it on and bibr's resolver can
+take a wrong span as the abstract without a warning, so it stays off; see
+[choosing an extraction model](extraction-models.md#pointer-answers-llm_pointer_outputs).
 
 For `--llm llmster`, install LM Studio's `lms` CLI and download the desired model
 first, then set `LLM_LLMSTER_MODEL` to its model key. Bibr can start its daemon
@@ -428,6 +432,51 @@ them calls the model again; for `--llm llmster`, so does changing
 `LLM_LLMSTER_MODEL`. Another endpoint that serves different weights under the
 same model name and URL cannot be told apart: clear the directory after
 swapping the model behind it.
+
+### Pinned model revisions
+
+Each build of bibr's 4B student in the registry is pinned to a commit on the
+Hugging Face Hub ([the list](extraction-models.md#builds-and-revisions)).
+vLLM gets the commit as `--revision`. `llama-server -hf` and the MLX servers
+(vllm-mlx, Rapid-MLX) always download a repository's `main`, so for the GGUF
+and MLX builds bibr downloads the pinned files into the Hugging Face cache
+itself (`HF_HUB_CACHE`, or `HF_HOME/hub`; for Rapid-MLX,
+`RAPID_MLX_HF_HUB_CACHE` or `RAPID_MLX_HF_HOME/hub` when set) and starts the
+server on the local copy, still under the model's Hub id. A build already in
+the cache starts with no request to the Hub, so offline runs work once it has
+been downloaded. Offline without it, the start stops with the `hf download`
+command that fetches it. Another commit of the same repository in the cache,
+such as its `main`, does not count: `bibr chew --dry-run` says
+`will download revision 0aa228e8` until the pinned one is there.
+
+Each repository's `main` still holds the builds of the 4B's previous revision
+(`6ab47a4e`). To run one of them, keep `LLM_LOCAL_MODEL` as setup wrote it
+and override the revision, or point `LLM_LOCAL_MODEL` at a local copy:
+
+```bash
+# vLLM: the last --revision wins over the registry's.
+LLM_VLLM_EXTRA_ARGS='--revision 6ab47a4e4e8b1b76c1ab234aec66f360683ff9fc'   # bf16
+LLM_VLLM_EXTRA_ARGS='--revision a2af8f6e90e6481251af9eb07d02c034c30e3446'   # W4A16
+
+# llama.cpp: a local .gguf file is loaded with -m
+hf download scienceverse/bibr-extract-qwen35-4b-GGUF bibr-extract-qwen35-4b-Q8_0.gguf --revision main
+LLM_LOCAL_MODEL=/path/to/bibr-extract-qwen35-4b-Q8_0.gguf
+
+# MLX: a local model directory
+hf download scienceverse/bibr-extract-qwen35-4b-mlx-8bit --revision main --local-dir ./bibr-4b-mlx-6ab47a4e
+LLM_LOCAL_MODEL=./bibr-4b-mlx-6ab47a4e
+```
+
+A local path is not a registry model, so bibr applies none of the registry's
+memory floors or launch arguments to it; the vLLM `--revision` route keeps
+them. The 4B's FP8-Dynamic build
+(`scienceverse/bibr-extract-qwen35-4b-FP8-Dynamic`, 219/252 on an RTX 5090) is
+not in the registry either, so setup does not offer it and it has no measured
+memory floor. To try it on vLLM, set `LLM_LOCAL_MODEL` to that id and take
+`LLM_VLLM_EXTRA_ARGS` and `LLM_CHAT_TEMPLATE_KWARGS` from the local W4A16
+example above, with `--revision 101d1ee1d449195f6882019b0fd2aa4328ed8bef`
+added to the extra args. That example's `LLM_LOCAL_MIN_VRAM_GB=6.25` was
+measured for the W4A16 build, not this one.
 
 ### Managed local servers
 
