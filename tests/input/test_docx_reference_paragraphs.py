@@ -51,6 +51,10 @@ REFS = [
     "bisexual populations. Psychological Bulletin, 129(5), 674-697.",
     "van der Berg, P., & Ng, T. (in press). Minority stress in later life. Ageing & Society.",
 ]
+# Five more, so that one undated entry among them keeps the list at 10 of 11 dated.
+MORE_REFS = [
+    f"Author{i}, A. B. ({2010 + i}). Study {i} of recall. Memory, {i}(2), 10-20." for i in range(5)
+]
 
 
 def _para(*lines: str, style: str | None = None) -> str:
@@ -223,6 +227,54 @@ def test_a_supplementary_heading_over_references_does_not_end_the_list():
     assert reference_entries(paragraphs) == (REFS, "ok")
 
 
+@pytest.mark.parametrize(
+    "following",
+    [
+        "Participants completed the 2019 version of the survey.",  # dated, no entry opening
+        "Note. Items were rated on a seven-point scale.",  # an entry opening, no year
+    ],
+)
+def test_a_supplementary_heading_over_anything_but_an_entry_ends_the_list(following):
+    paragraphs = _paragraphs(*REFS[:3], "Supplementary Materials", following, *REFS[3:])
+    assert reference_entries(paragraphs) == (REFS[:3], "ok")
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "Supplementary Nutrition Assistance Program. (2020). Annual report. USDA.",
+        "Supporting Information Services. (2016). Annual review of library services. SIS.",
+        "Appendix Press. (2017). Collected essays on memory. Appendix Press.",
+        "Annex, K., & Lee, P. Memory in context. Unpublished manuscript.",
+    ],
+)
+def test_an_entry_that_opens_with_an_end_of_list_word_stays_in_the_list(entry):
+    refs = [*REFS, *MORE_REFS]
+    paragraphs = _paragraphs(*refs[:3], entry, *refs[3:])
+    assert reference_entries(paragraphs) == ([*refs[:3], entry, *refs[3:]], "ok")
+
+
+def test_an_end_of_list_word_after_an_entrys_start_does_not_end_the_list():
+    entry = "World Health Organization. International classification of diseases, annex tables."
+    refs = [*REFS, *MORE_REFS]
+    paragraphs = _paragraphs(*refs[:3], entry, *refs[3:])
+    assert reference_entries(paragraphs) == ([*refs[:3], entry, *refs[3:]], "ok")
+
+
+def test_an_end_of_list_heading_is_at_most_20_words():
+    words = "Appendix A: the wording of every item that participants answered in the three "
+    words += "studies reported in this manuscript and its supplement"
+    assert len(words.split()) == 21
+    heading = " ".join(words.split()[:20])
+    refs = [*REFS, *MORE_REFS]
+
+    ended = reference_entries(_paragraphs(*refs[:5], heading, *refs[5:]))
+    kept = reference_entries(_paragraphs(*refs[:5], words, *refs[5:]))
+
+    assert ended == (refs[:5], "ok")
+    assert kept == ([*refs[:5], words, *refs[5:]], "ok")
+
+
 def test_hard_wrapped_entries_are_left_to_the_segmenter():
     # Each entry broken into two paragraphs: the second halves carry no year.
     wrapped = []
@@ -249,6 +301,25 @@ def test_a_line_break_inside_one_entry_does_not_split_it():
     paragraphs += _paragraphs(*REFS[2:])
     entries, reason = reference_entries(paragraphs)
     assert reason == "ok" and entries[1] == f"{head} {doi}" and len(entries) == len(REFS)
+
+
+# An entry with its journal line after a line break: the journal line opens
+# like a byline, and its pages fall in the years' range.
+ENTRY_HEAD = "Zhang, L., & Ortiz, M. (2020). Attention and recall in older adults."
+JOURNAL = "Psychological Science, 31(12), 1601-1612."
+
+
+def test_a_line_break_before_a_journal_line_does_not_split_the_entry():
+    joined = ReferenceParagraph(f"{ENTRY_HEAD} {JOURNAL}", (ENTRY_HEAD, JOURNAL))
+    paragraphs = [*_paragraphs(REFS[0]), joined, *_paragraphs(*REFS[1:])]
+    assert reference_entries(paragraphs) == ([REFS[0], f"{ENTRY_HEAD} {JOURNAL}", *REFS[1:]], "ok")
+
+
+def test_parser_keeps_a_journal_line_after_a_line_break_in_its_entry():
+    contents = DocxParser(_docx(_para(REFS[0]), _para(ENTRY_HEAD, JOURNAL), *map(_para, REFS[1:])))
+    native = contents.parse().native_ref_strings
+
+    assert native == [REFS[0], f"{ENTRY_HEAD} {JOURNAL}", *REFS[1:]]
 
 
 def test_parser_hands_the_paragraphs_on_as_native_reference_strings():

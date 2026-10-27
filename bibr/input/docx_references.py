@@ -16,20 +16,27 @@ Searching") heads body text, whose dated paragraphs would pass the check.
 A references section's list ends at its first float label, caption or
 end-of-list heading ("Table 1", "Figure 2. ...", "Appendix", "Supplementary
 Information", "Extended Data"): manuscripts put their tables and figures
-after the references. A later references section (an appendix's own list)
-starts a new run of entries, and so does a paragraph that is a reference
-list's name ("Supplemental References", or "References" typed as a paragraph
-after a supplement under the same heading); inside a list such a paragraph is
-skipped. A supplementary heading directly followed by an entry (the
-supplement's own references) does not end the list. The check then asks for
-at least ``MIN_ENTRIES`` entries of which ``MIN_YEAR_SHARE`` carry a year:
-entries hard-wrapped into several paragraphs, and floats or notes the end
-rule missed, leave paragraphs without one ("Journal of Sport Psychology,
-6(1), 87–100.").
+after the references. An end-of-list word also opens some entries
+("Supplementary Nutrition Assistance Program. (2020). ..."), so it ends the
+list only in a paragraph shaped like a heading: at most
+``MAX_END_HEADING_WORDS`` words, with no year and no byline. A later
+references section (an appendix's own list) starts a new run of entries, and
+so does a paragraph that is a reference list's name ("Supplemental
+References", or "References" typed as a paragraph after a supplement under
+the same heading); inside a list such a paragraph is skipped. A
+supplementary heading directly followed by an entry (the supplement's own
+references) does not end the list. The check then asks for at least
+``MIN_ENTRIES`` entries of which ``MIN_YEAR_SHARE`` carry a year: entries
+hard-wrapped into several paragraphs, and floats or notes the end rule
+missed, leave paragraphs without one ("Journal of Sport Psychology, 6(1),
+87–100.").
 
 A paragraph whose explicit line breaks separate several entries is split at
-them. The strings are not authoritative: the junk filter and the merged
-reference splitter still run on them, as on HTML list items.
+them, when every line opens like an entry and gives a date ("(2019)",
+"2019.", "n.d."): a journal line on a line of its own ("Psychological
+Science, 31(12), 1601-1612.") stays in its entry. The strings are not
+authoritative: the junk filter and the merged reference splitter still run
+on them, as on HTML list items.
 """
 
 from __future__ import annotations
@@ -42,6 +49,7 @@ from bibr.input.heading_cues import (
     reads_as_reference_heading,
     starts_as_caption,
 )
+from bibr.ocr.ref_patterns import _looks_like_author_date_start
 from bibr.utils.text import YEARISH_RE
 
 # A list this short is not worth trusting over the LLM.
@@ -76,7 +84,19 @@ _END_OF_LIST_RE = re.compile(
     r"|(?:tabla|tabela|tabelle|tableau|figura|abbildung|abb\.)\s*[A-Z]?\d)",
     re.IGNORECASE,
 )
+# An end-of-list heading is at most this many words, as many as a bold
+# paragraph read as a heading may hold.
+MAX_END_HEADING_WORDS = 20
 _SUPPLEMENT_RE = re.compile(r"\s*(?:supplement|supporting information)", re.IGNORECASE)
+# A year where an entry gives its date: in parentheses ("(2019)", "(2019a,
+# May 3)"), or closed by punctuation ("2019.", "2019;12:"), but not as the
+# end of a page range ("1601-1612."); "n.d.", "in press", "forthcoming".
+_ENTRY_DATE_RE = re.compile(
+    r"\((?:1[6-9]|20)\d{2}[a-z]?\b[^()]{0,30}\)"
+    r"|(?<![\d‐‑–—-])\b(?:1[6-9]|20)\d{2}[a-z]?[.,;](?!\d)"
+    r"|\bn\.\s?d\.|\bin press\b|\bforthcoming\b",
+    re.IGNORECASE,
+)
 # An entry's opening: a list number ("[12]", "12.", "(12)"), a same-author
 # dash, or a byline: a capitalized name (after any lowercase particle) followed
 # by a comma, a full stop, initials, "&", "et al" or an opening parenthesis.
@@ -118,11 +138,24 @@ def opens_an_entry(text: str) -> bool:
     return _ENTRY_START_RE.match(text) is not None
 
 
+def _reads_as_end_heading(text: str) -> bool:
+    """Whether an end-of-list word opens a heading ("Appendix A",
+    "Supplementary Information") rather than an entry ("Supplementary
+    Nutrition Assistance Program. (2020). ..."): short, with no year and no
+    byline."""
+    return (
+        _END_OF_LIST_RE.match(text) is not None
+        and len(text.split()) <= MAX_END_HEADING_WORDS
+        and YEARISH_RE.search(text) is None
+        and not _looks_like_author_date_start(text)
+    )
+
+
 def _ends_the_list(text: str) -> bool:
     return bool(
         reads_as_float_label(text)
         or (starts_as_caption(text) and not YEARISH_RE.search(text))
-        or _END_OF_LIST_RE.match(text)
+        or _reads_as_end_heading(text)
     )
 
 
@@ -132,7 +165,7 @@ def _entries_of(paragraph: ReferenceParagraph) -> list[str]:
     if (
         len(lines) > 1
         and " ".join(" ".join(lines).split()) == " ".join(paragraph.text.split())
-        and all(opens_an_entry(line) and YEARISH_RE.search(line) for line in lines)
+        and all(opens_an_entry(line) and _ENTRY_DATE_RE.search(line) for line in lines)
     ):
         return list(lines)
     return [paragraph.text]
