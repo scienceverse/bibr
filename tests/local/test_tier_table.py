@@ -39,7 +39,7 @@ _G = "glm-llama"
 #: compute-capability routing rule, not measured cards. Every vLLM row's LLM
 #: server takes turns with PaddleOCR-VL, so ``auto`` leaves speculative
 #: decoding off: with MTP, batches on 12 and 16 GB cards ran 5% and 9%
-#: slower (E29, vLLM 0.32).
+#: slower (on vLLM 0.32).
 TIER_TABLE = [
     (("RTX 5090", 32607, 12.0), (_V, _4B, "balanced", _P, "none")),
     (("RTX 3090", 24576, 8.6), (_V, _4B, "balanced", _P, "none")),  # ran: 100 papers

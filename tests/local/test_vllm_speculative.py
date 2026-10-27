@@ -1,6 +1,6 @@
 """Speculative decoding for the managed vLLM LLM server (``LLM_VLLM_SPEC_DECODE``).
 
-E29 (vLLM 0.32): MTP k=3 was quality-neutral where one LLM server ran for the
+Runs on vLLM 0.32: MTP k=3 was quality-neutral where one LLM server ran for the
 whole batch, and cut its LLM stage to 0.80x / 0.74x (RTX 3090 / 5090). Where
 the server restarts every chunk to take turns with PaddleOCR-VL, each MTP
 start took 51 s instead of 37 s and 12 and 16 GB batches ran 5% and 9%
@@ -156,7 +156,7 @@ class TestExplicit:
         assert managed_llm_floor_gb(W4A16, settings) == 7.25
 
     def test_the_precheck_and_the_start_ask_for_the_mtp_floor(self):
-        # E29 W12m: an emulated 12 GB card (12.0 GiB hog) where a chunk found
+        # An MTP run on an emulated 12 GB card (12.0 GiB hog) where a chunk found
         # 8.96 GiB free: under MTP's 7.25 + 0.75 + 1.0 GiB, over the 7.75 the
         # base build needs.
         reading = GpuMemory(total_gb=CUDA_3090, free_gb=8.96, own_gb=2.60)

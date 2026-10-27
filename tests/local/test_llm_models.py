@@ -118,7 +118,7 @@ def test_vllm_variants_have_a_measured_budget_floor_below_their_tier(variant):
 def test_budget_floors_and_tiers():
     by_id = {v.hf_id: v for v in _vllm_variants()}
     floors = {h: (v.min_budget_gb, v.min_vram_gb) for h, v in by_id.items()}
-    # The 4B's: cold vLLM 0.32.0 probes at 64 sequences (E29 arm 2); the 2B's
+    # The 4B's: cold vLLM 0.32.0 probes at 64 sequences (on an RTX 3090); the 2B's
     # from vLLM 0.31.0 at 128.
     assert floors == {
         "scienceverse/bibr-extract-qwen35-4b": (11.0, 20),

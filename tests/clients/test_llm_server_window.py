@@ -4,7 +4,7 @@ vLLM 0.31 answered a prompt whose completion cap ran past the window with HTTP
 400 and named the window, and bibr asked again with the input cut to fit. vLLM
 0.32 lowers the cap to what is left instead: the answer stops at the window
 with ``finish_reason`` ``length``, and the title/keywords call failed as
-truncated (E29r's stub). bibr now reads the window from ``/v1/models`` then.
+truncated (a CPU stub of a vLLM 0.32 server). bibr now reads the window from ``/v1/models`` then.
 """
 
 from __future__ import annotations
