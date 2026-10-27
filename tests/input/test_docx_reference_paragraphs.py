@@ -22,7 +22,11 @@ pytest.importorskip("docx")
 from bibr.extract.ref_extractor import ReferenceExtractor
 from bibr.extract.ref_locator import RefLocator
 from bibr.input.docx_native import DocxParser
-from bibr.input.docx_references import ReferenceParagraph, reference_entries
+from bibr.input.docx_references import (
+    ReferenceParagraph,
+    is_reference_list_heading,
+    reference_entries,
+)
 from bibr.paper import PaperReference
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -129,14 +133,89 @@ def test_a_later_references_section_starts_a_new_run_of_entries():
     assert reference_entries(paragraphs) == (REFS, "ok")
 
 
-def test_references_typed_as_a_paragraph_after_a_supplement_start_its_list():
+def _name_of_length(chars: int) -> str:
+    name = "References (" + "x" * (chars - len("References ()")) + ")"
+    assert len(name) == chars
+    return name
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "References",
+        "Supplementary References",
+        "Appendix B: References",
+        "References (Level 1 Heading)",
+        _name_of_length(60),
+    ],
+)
+def test_references_typed_as_a_paragraph_after_a_supplement_start_its_list(name):
     # A supplement typed under the main references heading, then its own
     # "References" as a plain paragraph: the floats end the first list only.
     paragraphs = _paragraphs(
         *REFS[:3], "Figure S1. Network of all variables.", "Note. Edges are partial correlations."
     )
-    paragraphs += _paragraphs("References", *REFS[3:])
+    paragraphs += _paragraphs(name, *REFS[3:])
     assert reference_entries(paragraphs) == (REFS, "ok")
+
+
+def test_a_paragraph_over_60_characters_is_no_reference_list_name():
+    paragraphs = _paragraphs(*REFS[:3], "Figure S1. Network of all variables.")
+    paragraphs += _paragraphs(_name_of_length(61), *REFS[3:])
+    assert reference_entries(paragraphs) == (REFS[:3], "ok")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "References",
+        "REFERENCES",
+        "References:",
+        "7. References",
+        "7\tReferences",
+        "4.2 References",
+        "VII. References",
+        "VII References",
+        "References and Notes",
+        "Reference List",
+        "Bibliography",
+        "Works Cited",
+        "Literature Cited",
+        "Cited Literature",
+        "References Cited",
+        "Literaturverzeichnis",
+        "Supplementary References",
+        "SI References",
+        "Supplementary Materials References",
+        "Appendix B. References",
+        "9. References (data and method sources)",
+        _name_of_length(60),
+    ],
+)
+def test_a_reference_list_name_heads_a_list(name):
+    assert is_reference_list_heading(name)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Self-References in Memory",
+        "Reference List Searching",
+        "References to the self",
+        "A Bibliography of Memory",
+        "Smith, J. (2019). A bibliography of memory. Wiley.",
+        "Emotional Regulation: this category includes references to practical strategies",
+        _name_of_length(61),
+    ],
+)
+def test_text_that_only_holds_a_reference_list_word_heads_no_list(text):
+    assert not is_reference_list_heading(text)
+
+
+def test_a_short_entry_holding_a_reference_list_word_stays_in_the_list():
+    short = "Smith, J. (2019). A bibliography of memory. Wiley."
+    paragraphs = _paragraphs(*REFS[:3], short, *REFS[3:])
+    assert reference_entries(paragraphs) == ([*REFS[:3], short, *REFS[3:]], "ok")
 
 
 def test_a_supplementary_heading_over_references_does_not_end_the_list():
@@ -202,6 +281,35 @@ def test_a_long_heading_that_mentions_references_heads_no_list():
     )
     quotes = [_para(f'"...it helps me feel lighter in {y}..." (Hans)') for y in (2001, 2002, 2003)]
     contents = DocxParser(_docx(*(_para(ref) for ref in REFS), heading, *quotes)).parse()
+
+    assert contents.native_ref_strings == REFS
+
+
+PROSE = [
+    "Participants were asked to recall events that referred to themselves (Rogers et al., "
+    "1977; Symons & Johnson, 1997), and to rate them in 2019.",
+    "Self-reference effects were stronger in older adults (Gutchess et al., 2007), "
+    "replicating Klein (2012) and extending Sui and Humphreys (2015).",
+    "The effect was robust across samples collected in 2018 and 2019 (Cunningham et al., 2008).",
+]
+
+
+@pytest.mark.parametrize("heading", ["Self-References in Memory", "Reference List Searching"])
+def test_a_short_heading_that_holds_a_reference_list_word_heads_no_list(heading):
+    # A body subsection whose heading only holds a reference-list word: its
+    # dated prose would pass the check together with the real list.
+    body = [_para(heading, style="Heading1"), *(_para(text) for text in PROSE)]
+    body += [_para("References", style="Heading1"), *(_para(ref) for ref in REFS)]
+    contents = DocxParser(_docx(*body, heading="Introduction")).parse()
+
+    assert contents.native_ref_strings == REFS
+
+
+@pytest.mark.parametrize(
+    "heading", ["7. References", "VII. Literature Cited", "Bibliography", "References:"]
+)
+def test_a_numbered_or_other_reference_list_name_heads_a_list(heading):
+    contents = DocxParser(_docx(*(_para(ref) for ref in REFS), heading=heading)).parse()
 
     assert contents.native_ref_strings == REFS
 

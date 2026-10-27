@@ -8,13 +8,18 @@ minutes on a CPU). When the paragraphs pass a structure check they become
 ``PaperContents.native_ref_strings`` and the reference extractor takes them
 as its segmentation; otherwise the LLM segments the list as before.
 
+Only a heading that is a reference list's name ("References", "7. Literature
+Cited", "Supplementary References") heads such a list. One that only holds a
+reference-list word ("Self-References in Memory", "Reference List
+Searching") heads body text, whose dated paragraphs would pass the check.
+
 A references section's list ends at its first float label, caption or
 end-of-list heading ("Table 1", "Figure 2. ...", "Appendix", "Supplementary
 Information", "Extended Data"): manuscripts put their tables and figures
 after the references. A later references section (an appendix's own list)
-starts a new run of entries, and so does a paragraph that names a reference
-list ("Supplemental References", or "References" typed as a paragraph after
-a supplement under the same heading); inside a list such a paragraph is
+starts a new run of entries, and so does a paragraph that is a reference
+list's name ("Supplemental References", or "References" typed as a paragraph
+after a supplement under the same heading); inside a list such a paragraph is
 skipped. A supplementary heading directly followed by an entry (the
 supplement's own references) does not end the list. The check then asks for
 at least ``MIN_ENTRIES`` entries of which ``MIN_YEAR_SHARE`` carry a year:
@@ -32,7 +37,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from bibr.input.heading_cues import names_reference_list, reads_as_float_label, starts_as_caption
+from bibr.input.heading_cues import (
+    reads_as_float_label,
+    reads_as_reference_heading,
+    starts_as_caption,
+)
 from bibr.utils.text import YEARISH_RE
 
 # A list this short is not worth trusting over the LLM.
@@ -44,6 +53,20 @@ MIN_YEAR_SHARE = 0.9
 # that mentions references is a bold body paragraph ("Emotional Regulation:
 # This category includes references to ...").
 MAX_HEADING_CHARS = 60
+
+# What may stand around a reference list's name, which the shared heading
+# grammar (``reads_as_reference_heading``) reads with "7." or "VII." before
+# it: numbering it does not take ("VII", "4.2"), the supplement or appendix
+# the list belongs to ("Supplementary References", "Appendix B: References",
+# "SI References"), and a note after it ("References (Level 1 Heading)",
+# "References Cited").
+_NUMBERING_RE = re.compile(r"\s*(?:\d{1,2}(?:\.\d{1,2})+\.?|[IVXLC]{1,7})\s+")
+_LIST_OWNER_RE = re.compile(
+    r"(?:(?:online\s+)?supplement(?:ary|al)?(?:\s+(?:information|materials?))?"
+    r"|supporting\s+information|SI|appendix(?:\s+[A-Z\d]{1,3})?)\s*[.:]?\s+",
+    re.IGNORECASE,
+)
+_NOTE_RE = re.compile(r"\s+(?:\([^()]*\)|cited\b.*)$", re.IGNORECASE)
 
 # Headings that end a reference list when nothing marks them as headings.
 _END_OF_LIST_RE = re.compile(
@@ -73,6 +96,21 @@ class ReferenceParagraph:
     text: str  # as the parser reads it, line breaks as spaces
     lines: tuple[str, ...] = ()  # the text split at its explicit line breaks
     section: int = 0  # the parser's id of the references section it is in
+
+
+def is_reference_list_heading(text: str) -> bool:
+    """Whether *text* is a reference list's name ("References", "7. Literature
+    Cited", "Supplementary References"), not a heading or entry that only
+    holds a reference-list word ("Self-References in Memory", "Smith, J.
+    (2019). A bibliography of memory.")."""
+    name = " ".join(text.split())
+    if len(name) > MAX_HEADING_CHARS:
+        return False
+    for prefix in (_NUMBERING_RE, _LIST_OWNER_RE):
+        match = prefix.match(name)
+        if match:
+            name = name[match.end() :]
+    return reads_as_reference_heading(name) or reads_as_reference_heading(_NOTE_RE.sub("", name))
 
 
 def opens_an_entry(text: str) -> bool:
@@ -115,7 +153,7 @@ def reference_entries(
     for index, (paragraph, text) in enumerate(zip(paragraphs, texts, strict=True)):
         if not text:
             continue
-        if len(text) <= MAX_HEADING_CHARS and names_reference_list(text):
+        if is_reference_list_heading(text):
             # "References" typed as a paragraph, after a supplement under the
             # same heading: its list starts here.
             ended = None

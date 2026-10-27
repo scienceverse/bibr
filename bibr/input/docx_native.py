@@ -35,9 +35,10 @@ from bibr.input.docx_footnotes import load_endnotes as _load_endnotes
 from bibr.input.docx_footnotes import load_footnotes as _load_footnotes
 from bibr.input.docx_omml import omml_to_text as _omml_to_text
 from bibr.input.docx_references import (
-    MAX_HEADING_CHARS as _MAX_REFERENCE_HEADING_CHARS,
+    ReferenceParagraph,
+    is_reference_list_heading,
+    reference_entries,
 )
-from bibr.input.docx_references import ReferenceParagraph, reference_entries
 from bibr.input.heading_cues import (
     REFERENCES_HEADER,
     labels_a_title_page_part,
@@ -724,10 +725,10 @@ class DocxParser:
         self._previous_text = ""
         # Headings that can still parent the next one, levels increasing.
         self._open_headings: list[PaperSection] = []
-        # The paragraphs read under a references heading short enough to be
-        # one, for ``native_ref_strings`` (:mod:`bibr.input.docx_references`).
+        # The paragraphs read under a heading that is a reference list's name,
+        # for ``native_ref_strings`` (:mod:`bibr.input.docx_references`).
         self._reference_paragraphs: list[ReferenceParagraph] = []
-        self._reference_heading = ""
+        self._under_reference_list_name = False
 
         # Notes: text maps from footnotes.xml / endnotes.xml + deferred
         # references for xref linking. The two id spaces are independent (both
@@ -1390,7 +1391,7 @@ class DocxParser:
                 self._figure_counter += 1
 
         flush_body()
-        if self._in_references and len(self._reference_heading) <= _MAX_REFERENCE_HEADING_CHARS:
+        if self._in_references and self._under_reference_list_name:
             texts = [e.text for e in self.assembler.entries[first_entry:] if not e.is_formula]
             if texts:
                 self._reference_paragraphs.append(
@@ -1453,7 +1454,7 @@ class DocxParser:
         if in_references and not self._in_references:
             self._section_before_references = self._current_section_id
         self._in_references = in_references
-        self._reference_heading = text if in_references else ""
+        self._under_reference_list_name = in_references and is_reference_list_heading(text)
         self._in_generated_list = False
         # Capture the document Title style (or first Heading 1) as the paper title
         if self._detected_title is None and style_name in (
