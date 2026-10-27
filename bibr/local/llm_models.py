@@ -94,7 +94,7 @@ class LocalLLMModel:
 # Qwen3.8-27B answers to bibr's own prompts, merged into a full checkpoint so
 # the base model's MTP layers stay usable for speculative decoding (vLLM's spec
 # decoding does not combine well with unmerged LoRA). Scores are from the 9 Oct
-# harness (v5 scorer, gate192 + ci60 = 252 dev papers; see
+# harness (v5 scorer, the 252-paper development set; see
 # docs/guides/extraction-models.md): the 2B's paired against Qwen3.8-27B's
 # 223/252 at bibr's 0.7.0 prompts, the 4B's (pointer-v1) against its previous
 # revision at bibr e491ed64, 218 to 217 on the same box.

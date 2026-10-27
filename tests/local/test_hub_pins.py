@@ -166,7 +166,7 @@ def test_an_uncached_mlx_build_offline_names_the_whole_revision(real_hub_pins, m
     from bibr.exceptions import UpstreamServiceError
 
     monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
-    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", "/nonexistent-hf-cache-e30")
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", "/nonexistent-hf-cache-offline")
 
     with pytest.raises(UpstreamServiceError) as excinfo:
         hub_pins.fetch_pinned_build(MLX_REPO)
