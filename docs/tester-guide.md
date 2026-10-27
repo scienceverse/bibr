@@ -276,11 +276,11 @@ only from compute capability 8.0, so `bibr setup` and `--llm local` run the
 LLM and the OCR on llama.cpp there, as on a small card. This is a
 conservative routing rule, not a measured result: no batch on a Turing or
 Pascal card has been recorded, with this rule or with the vLLM routing before
-it. (The Pascal notes above came with earlier fixes for GTX 10-series cards,
-not from a measured run.) An explicit `--llm vllm` or `--ocr paddle-vllm` still starts
-vLLM. Going by vLLM 0.31's source, it then casts the bf16 models to float16,
-and its 4-bit kernels (the W4A16 build) need compute capability 7.5, which
-rules out Pascal; none of this has been run.
+it. (The Pascal notes above are given with no measured run recorded.) An
+explicit `--llm vllm` or `--ocr paddle-vllm` still starts vLLM. Going by vLLM
+0.31's source, it then casts the bf16 models to float16, and its 4-bit kernels
+(the W4A16 build) need compute capability 7.5, which rules out Pascal; none of
+this has been run.
 
 While a job runs, `nvidia-smi` should show `llama-server` using the GPU. If
 doctor warns that llama.cpp is CPU-only, replace the binary with a CUDA build.
@@ -318,9 +318,10 @@ Ampere use GGUF (llama.cpp) builds of the same models, and Apple Silicon their
 Without a suitable GPU it recommends Claude Haiku 5.5 as a hosted model, for
 OCR and extraction alike. See
 [choosing an extraction model](guides/extraction-models.md). The card sizes come
-from batches on one RTX 3090 with its memory cut to each size beside a desktop;
-they are not guarantees that every document fits available memory, and that
-page's speeds are the RTX 3090's, not those of the cards it emulated.
+from batches only at 20, 12 and 10 GB, plus runs at 8 and 6 GB, each on one RTX
+3090 with its memory cut to that size beside a desktop; 7 and 5 GB follow the
+size rule. They are not guarantees that every document fits available memory,
+and that page's speeds are the RTX 3090's, not those of the cards it emulated.
 
 Throughput depends on the model, backend, hardware, and document. Scanned PDFs
 require more OCR than PDFs with usable embedded text. Test a representative
