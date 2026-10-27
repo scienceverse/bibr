@@ -1525,8 +1525,9 @@ class RorOptions(_BibrSettings):
     )
     client_id: str | None = Field(
         None,
-        description="ROR API client ID (free from ror.org), sent as the Client-Id header. It "
-        "raises the default request budget from 1000 to 2000 requests per 5 minutes.",
+        description="ROR API client ID, sent as the Client-Id header. It raises the default "
+        "request budget from 1000 to 2000 requests per 5 minutes. ROR client IDs are free, but "
+        "ROR has paused new registrations.",
     )
     url: str = Field("https://api.ror.org/v2", description="ROR API base URL.")
     requests_per_5min: int | None = Field(
