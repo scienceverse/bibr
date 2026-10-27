@@ -41,8 +41,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   servers (vllm-mlx, Rapid-MLX) always download a repository's `main`, which
   still holds the previous builds, so bibr now downloads the pinned GGUF and
   MLX files into the Hugging Face cache itself and starts the server on the
-  local copy, under the same model id. A cached build starts offline; an
-  uncached one offline stops with the `hf download` command that fetches it.
+  local copy, under the same model id. vllm-mlx serves that copy, and any
+  local MLX directory in `LLM_LOCAL_MODEL`, as a text model: on its own it
+  would take the `image_token_id` in the build's `config.json` for a vision
+  model and fail to load it. A cached build starts offline; an uncached one
+  offline stops with the `hf download` command that fetches it.
   `LLM_LOCAL_MODEL` may now be a local `.gguf` file for llama.cpp, and
   `bibr chew --dry-run` counts a pinned build as cached only at its commit.
   The configuration guide shows how to run the previous revision.

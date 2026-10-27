@@ -131,10 +131,18 @@ class VllmMlxServer:
             "--port",
             str(port),
         ]
+        # vllm-mlx judges a local directory multimodal by its config.json,
+        # where bibr's Qwen3.5 builds keep image_token_id with no vision
+        # weights, so mlx-vlm would fail to load them. The shim judges a
+        # pinned build by its Hub id (--served-model-name) and serves any
+        # other local directory as text (--no-mllm, the shim's own flag), as
+        # Rapid-MLX does for every text LLM.
         if launch_model != model:
             cmd.extend(["--served-model-name", model])
         if multimodal:
             cmd.append("--mllm")
+        elif launch_model == model and Path(model).is_dir():
+            cmd.append("--no-mllm")
         if continuous_batching:
             cmd.append("--continuous-batching")
         if extra_args:

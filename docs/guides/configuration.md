@@ -467,6 +467,10 @@ hf download scienceverse/bibr-extract-qwen35-4b-mlx-8bit --revision main --local
 LLM_LOCAL_MODEL=./bibr-4b-mlx-6ab47a4e
 ```
 
+On vllm-mlx, bibr serves a local MLX directory as a text model, as it does the
+pinned build: vllm-mlx alone would take the `image_token_id` in its
+`config.json` for a vision model and fail to load it.
+
 A local path is not a registry model, so bibr applies none of the registry's
 memory floors or launch arguments to it; the vLLM `--revision` route keeps
 them. The 4B's FP8-Dynamic build
