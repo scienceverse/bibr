@@ -29,10 +29,11 @@ every 12.2 export is still valid input for the 12.x reader.
   `native_text_formula_number`. The keys are new in schema 12.3 and omitted
   when absent.
 - A DOI that the PDF carries only in text it never prints (white on white,
-  under a logo) is kept in the identity receipt as an agreement-only
-  `hidden_text` candidate. It never names the paper on its own; when it matches
-  the DOI chosen from printed evidence, its `semantic_context` is
-  `hidden_text_agreement`.
+  under a logo) on page 1 or 2 is kept in the identity receipt as an
+  agreement-only `hidden_text` candidate; on a later page it is removed with
+  the rest of the hidden text and leaves no row. It never names the paper on
+  its own; when it matches the DOI chosen from printed evidence, its
+  `semantic_context` is `hidden_text_agreement`.
 
 ### Changed
 
@@ -44,10 +45,14 @@ every 12.2 export is still valid input for the 12.x reader.
 - A DOI found only in text the PDF never prints is agreement-only and is never
   selected on its own. A paper whose only DOI is hidden, such as a
   white-on-white DOI banner, now gets a null DOI; before, that white text was
-  read like any other text-layer DOI. When a queue run expects that DOI, or
-  requires a DOI, identity now raises the blocking `VAL_EXPECTED_ID_MISSING`
-  (`VAL_EXPECTED_ID_MISMATCH` when the pages print another DOI), and the
-  export's disposition is `identity_conflict`.
+  read like any other text-layer DOI. For a manifest that expects that DOI, or
+  one that requires a DOI, identity now raises the blocking
+  `VAL_EXPECTED_ID_MISSING` (`VAL_EXPECTED_ID_MISMATCH` when the pages print
+  another DOI that could name the paper). The export then goes to
+  `_quarantine/identity_conflict/`, and its receipt records the
+  `identity_conflict` disposition. A hidden DOI that differs from the printed
+  one no longer makes the selection `VAL_DOI_AMBIGUOUS` with no DOI, so the
+  printed DOI is selected.
 
 ### Fixed
 
