@@ -21,12 +21,14 @@ after the references. Appendix, annex, supplement and supporting
 information also open some entries ("Supplementary Nutrition Assistance
 Program. (2020). ..."), so they end the list only in a paragraph shaped
 like a heading: at most ``MAX_END_HEADING_WORDS`` words, with no year and
-no byline. A later references section (an appendix's own list) starts a
-new run of entries, and so does a paragraph that is a reference list's name
-("Supplemental References", or "References" typed as a paragraph after a
-supplement under the same heading); inside a list such a paragraph is
-skipped. A supplementary heading directly followed by an entry (the
-supplement's own references) does not end the list. The check then asks for
+no byline. A paragraph that opens with one of these words and is directly
+followed by a dated entry does not end the list but is skipped: the heading
+over a supplement's or an appendix's own references, or an undated entry
+("Annex Publishing. Handbook of memory. Annex."). A later references
+section (an appendix's own list) starts a new run of entries, and so does a
+paragraph that is a reference list's name ("Supplemental References", or
+"References" typed as a paragraph after a supplement under the same
+heading); inside a list such a paragraph is skipped. The check then asks for
 at least ``MIN_ENTRIES`` entries of which ``MIN_YEAR_SHARE`` carry a year:
 entries hard-wrapped into several paragraphs, and floats or notes the end
 rule missed, leave paragraphs without one ("Journal of Sport Psychology,
@@ -97,7 +99,6 @@ MAX_END_HEADING_WORDS = _MAX_BOLD_HEADING_WORDS
 # A byline's first surname and its comma ("Annex, K., & Lee, P."): in a
 # paragraph with no year, what is left of an author-date opening.
 _SURNAME_RE = re.compile(r"[\"'(]?[A-Z][A-Za-z'’.\-]+,")
-_SUPPLEMENT_RE = re.compile(r"\s*(?:supplement|supporting information)", re.IGNORECASE)
 # A year where an entry gives its date: in parentheses ("(2019)", "(2019a,
 # May 3)"), closed by a full stop, comma or semicolon ("2019.", "2019; 12")
 # or run into a Vancouver volume ("2019;12:34-56", "2019:12"), but not as
@@ -210,11 +211,13 @@ def reference_entries(
         if entries and _ends_the_list(text):
             following = next((t for t in texts[index + 1 :] if t), "")
             if (
-                _SUPPLEMENT_RE.match(text)
+                _END_HEADING_RE.match(text)
                 and opens_an_entry(following)
                 and YEARISH_RE.search(following)
             ):
-                continue  # "Supplementary Materials" over the supplement's references
+                # "Supplementary Materials" over the supplement's references,
+                # or an undated entry such as "Annex Publishing. ..."
+                continue
             ended = paragraph.section
             continue
         entries.extend(_entries_of(paragraph))

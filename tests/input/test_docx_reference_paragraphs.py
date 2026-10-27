@@ -121,6 +121,8 @@ def test_one_entry_per_paragraph_is_the_segmentation():
         "Table 1",
         "Figure 2. Mean recall by condition.",
         "Appendix A",
+        "Appendices",
+        "Annex 2",
         "Supplementary Information",
         "Extended Data Fig. 1 | Recall by condition.",
         "Extended Data Fig. 2 | Recall by condition and age group in the three samples, with the "
@@ -236,11 +238,13 @@ def test_a_short_entry_holding_a_reference_list_word_stays_in_the_list():
     assert reference_entries(paragraphs) == ([*REFS[:3], short, *REFS[3:]], "ok")
 
 
-def test_a_supplementary_heading_over_references_does_not_end_the_list():
-    paragraphs = _paragraphs(*REFS[:3], "Supplementary Materials", *REFS[3:])
+@pytest.mark.parametrize("heading", ["Supplementary Materials", "Appendix B", "Annex 1"])
+def test_a_supplement_or_appendix_heading_over_references_does_not_end_the_list(heading):
+    paragraphs = _paragraphs(*REFS[:3], heading, *REFS[3:])
     assert reference_entries(paragraphs) == (REFS, "ok")
 
 
+@pytest.mark.parametrize("heading", ["Supplementary Materials", "Appendix B"])
 @pytest.mark.parametrize(
     "following",
     [
@@ -248,9 +252,27 @@ def test_a_supplementary_heading_over_references_does_not_end_the_list():
         "Note. Items were rated on a seven-point scale.",  # an entry opening, no year
     ],
 )
-def test_a_supplementary_heading_over_anything_but_an_entry_ends_the_list(following):
-    paragraphs = _paragraphs(*REFS[:3], "Supplementary Materials", following, *REFS[3:])
+def test_a_supplement_or_appendix_heading_over_anything_but_an_entry_ends_the_list(
+    heading, following
+):
+    paragraphs = _paragraphs(*REFS[:3], heading, following, *REFS[3:])
     assert reference_entries(paragraphs) == (REFS[:3], "ok")
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "Annex Publishing. Handbook of memory. Annex.",
+        "Appendix Press. Collected essays on memory.",
+        "Supplementary Nutrition Assistance Program. Program data. USDA.",
+    ],
+)
+def test_an_undated_entry_that_reads_as_an_end_of_list_heading_is_skipped(entry):
+    # Read as a heading, it does not end the list when a dated entry follows:
+    # the entries after it are kept, and only it is lost.
+    refs = [*REFS, *MORE_REFS]
+    paragraphs = _paragraphs(*refs[:3], entry, *refs[3:])
+    assert reference_entries(paragraphs) == (refs, "ok")
 
 
 @pytest.mark.parametrize(
@@ -286,13 +308,15 @@ def test_an_end_of_list_heading_is_at_most_20_words():
     words += "studies reported in this manuscript and its supplement"
     assert len(words.split()) == 21
     heading = " ".join(words.split()[:20])
+    # The appendix's text, not a dated entry, follows it.
+    following = "Participants completed the 2019 version of the survey."
     refs = [*REFS, *MORE_REFS]
 
-    ended = reference_entries(_paragraphs(*refs[:5], heading, *refs[5:]))
-    kept = reference_entries(_paragraphs(*refs[:5], words, *refs[5:]))
+    ended = reference_entries(_paragraphs(*refs[:5], heading, following, *refs[5:]))
+    kept = reference_entries(_paragraphs(*refs[:5], words, following, *refs[5:]))
 
     assert ended == (refs[:5], "ok")
-    assert kept == ([*refs[:5], words, *refs[5:]], "ok")
+    assert kept == ([*refs[:5], words, following, *refs[5:]], "ok")
 
 
 def test_hard_wrapped_entries_are_left_to_the_segmenter():
