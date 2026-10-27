@@ -51,6 +51,14 @@ class TestSecondsUntilSlot:
         assert 290.0 < limiter.seconds_until_slot() <= 300.0
         assert len(limiter._timestamps) == 1
 
+    def test_several_slots_wait_for_the_oldest_and_only_the_time_left(self):
+        limiter = AsyncLocalRateLimiter(resource_id="test", max_requests=2, window_seconds=10.0)
+        now = time.monotonic()
+        limiter._timestamps.extend([now - 6.0, now - 2.0])  # taken 6 s and 2 s ago
+        # The older slot frees in 4 s; the newer one would take 8 s, a fresh window 10 s.
+        assert 3.0 < limiter.seconds_until_slot() <= 4.0
+        assert len(limiter._timestamps) == 2
+
     def test_expired_slots_are_dropped(self):
         limiter = AsyncLocalRateLimiter(resource_id="test", max_requests=1, window_seconds=1.0)
         limiter._timestamps.append(time.monotonic() - 2.0)  # taken 2 s ago, out of the window

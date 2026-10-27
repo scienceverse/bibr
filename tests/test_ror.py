@@ -164,6 +164,49 @@ def test_a_lookup_does_not_wait_for_a_slot_past_its_deadline(monkeypatch):
     assert calls == ["First University"]
 
 
+def test_a_lookup_waits_for_the_oldest_slot_when_it_frees_before_the_deadline(monkeypatch):
+    # Two slots in a 10 s window, taken 9.5 s and 1 s ago: the older one frees
+    # in 0.5 s, before the 3 s deadline, so the lookup waits for it and is
+    # sent. Timing from the newer slot (9 s) or from the whole window (10 s)
+    # would turn it away.
+    monkeypatch.setattr("bibr.clients.ror._WINDOW_SECONDS", 10.0)
+    calls: list[str] = []
+    client = _client(_answering(calls), requests_per_5min=2)
+    now = time.monotonic()
+    client._limiter._timestamps.extend([now - 9.5, now - 1.0])
+
+    result, failure = asyncio.run(client.lookup("Late University", deadline=now + 3.0))
+    assert result is not None and failure is None
+    assert calls == ["Late University"]
+
+
+def test_the_429_backoff_reads_rate_limited_even_with_the_budget_spent(monkeypatch):
+    """The backoff after a 429 is checked before the request budget, so while
+    both hold a lookup reports "rate limited", not "request budget spent"."""
+    # A 5 s window caps the backoff at 5 s and frees the only slot after the
+    # 2 s deadline, so the deadline check alone would turn the lookup away.
+    monkeypatch.setattr("bibr.clients.ror._WINDOW_SECONDS", 5.0)
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.params["affiliation"])
+        return httpx.Response(429, headers={"Retry-After": "120"})
+
+    client = _client(handler, requests_per_5min=1)
+
+    async def run():
+        deadline = time.monotonic() + 2.0
+        first = await client.lookup("First University", deadline=deadline)
+        second = await client.lookup("Second University", deadline=deadline)
+        return first, second
+
+    first, second = asyncio.run(run())
+    assert first == (None, "rate limited")
+    assert second == (None, "rate limited")
+    assert client.blocked
+    assert calls == ["First University"]
+
+
 def test_a_cached_answer_is_returned_after_the_budget_is_spent():
     calls: list[str] = []
     client = _client(_answering(calls), requests_per_5min=1)
@@ -225,6 +268,27 @@ def test_the_deadline_is_the_papers_ror_time_budget(monkeypatch):
     assert len(calls) == 1
     assert not report.timed_out
     assert report.failed == 3 and report.failure_reasons == ("request budget spent",)
+
+
+def test_a_slot_that_frees_within_the_papers_ror_time_budget_is_waited_for(monkeypatch):
+    """The deadline is not earlier than the paper's timeout either: a slot that
+    frees before the timeout is waited for and the string is matched."""
+    # The next slot frees 1.2 s after the first request: before the paper's
+    # 2 s budget, after half of it.
+    monkeypatch.setattr("bibr.clients.ror._WINDOW_SECONDS", 1.2)
+    calls: list[str] = []
+    client = _client(_answering(calls), requests_per_5min=1)
+    metadata = PaperMetadata(
+        doi="",
+        title="A paper",
+        authors=[PaperAuthor(author_id=1, given="A", family="B", affiliation="Uni One")],
+        funding=[FundingEntry(funder="Wellcome Trust", award_ids=[])],
+    )
+
+    report = asyncio.run(enrich_organizations(metadata, client, timeout=2.0))
+    assert calls == ["Uni One", "Wellcome Trust"]
+    assert not report.timed_out
+    assert report.attempted == 2 and report.matched == 2 and report.failed == 0
 
 
 def _metadata() -> PaperMetadata:
