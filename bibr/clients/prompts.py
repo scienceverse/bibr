@@ -82,12 +82,12 @@ def fence_boundary(label: str, *blocks: str) -> str:
     the boundary will fence in that request (a prompt that fences several
     blocks, or a fan-out whose calls share one boundary, passes all of them).
     The boundary is SHA-256 over both, shaped like ``uuid4().hex``, so the
-    same request sends the same bytes on every run — a random one made a
-    temperature-0 model's answer depend on the draw — while a document author
-    still cannot choose text that closes the fence early: that needs the
-    boundary inside the text it is derived from, which is a hash fixed point.
-    A boundary that does occur in a block anyway is re-derived with a counter,
-    so it never appears in the fenced data.
+    same request sends the same bytes on every run (under a random boundary a
+    model's answer at temperature 0 could change with the draw). A document
+    author still cannot choose text that closes the fence early: that needs
+    the boundary inside the text it is derived from, which is a hash fixed
+    point. A boundary that does occur in a block anyway is re-derived with a
+    counter, so it never appears in the fenced data.
 
     Pass the data exactly as it is embedded, or text it is a prefix of (a
     string absent from a text is absent from every prefix of it).

@@ -10,12 +10,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - The same paper now sends the same prompts to the LLM on every run. Each
   prompt fences the paper's text between marker lines whose 32-character hex
-  boundary keeps a document from posing as instructions; that boundary was
+  boundary keeps a document from posing as instructions. That boundary was
   random per call, and at temperature 0 a local model's answer can depend on
-  it, so two identical runs agreed on only about 96% of LLM answers. The
-  boundary is now derived from the fenced text (SHA-256), never occurs in it,
-  and keeps its shape, so LLM cache entries from earlier releases still hit.
-  A paper whose text changes still draws a new boundary.
+  it: in two identical runs of 10 papers with a 2B model on llama.cpp (CPU,
+  one request at a time), 7 of 57 LLM requests got different answers, each
+  where the two prompts differed only in the boundary. With the boundary now
+  derived from the fenced text (SHA-256), two such runs got the same answers
+  to all 58 requests they shared. Servers that batch concurrent requests,
+  such as vLLM, were not measured. The boundary never occurs in the fenced
+  text and keeps its shape, so LLM cache entries from earlier releases still
+  hit. A paper whose text changes still gets a new boundary.
 
 ## [0.7.4] - 2026-10-23
 

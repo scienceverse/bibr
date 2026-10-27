@@ -2,11 +2,11 @@
 
 Every prompt fences document data between marker lines carrying a 32-hex
 boundary, a prompt-injection guard. The boundary used to be a fresh
-``uuid4().hex`` per call, and a temperature-0 model's answer can depend on it,
-so two identical runs sent different bytes and disagreed on a few percent of
-answers. It is now derived from the fenced data: the same request sends the
-same bytes, the boundary never occurs in the data, and its shape (which the
-extraction students were trained on and the LLM cache recognises) is unchanged.
+``uuid4().hex`` per call, so two identical runs sent different bytes, and a
+temperature-0 model's answer can depend on the boundary. It is now derived
+from the fenced data: the same request sends the same bytes, the boundary
+never occurs in the data, and its shape (which the extraction students were
+trained on and the LLM cache recognises) is unchanged.
 """
 
 import re
