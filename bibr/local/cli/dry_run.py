@@ -237,12 +237,14 @@ def display_wtpsplit_repo_id(value: str) -> str:
     return f"{resolved.hub_prefix}/{resolved.model_name}"
 
 
-def _hf_cache_status(repo_id: str) -> str:
+def _hf_cache_status(repo_id: str, *, llm_backend: str | None = None) -> str:
     """'cached' / 'will download (~size)' / 'will download (size unknown)' / cache-unknown.
 
     Reads the local Hugging Face cache index (``scan_cache_dir`` — no
     network) when ``huggingface_hub`` is importable; otherwise reports that
-    the cache state can't be determined rather than guessing.
+    the cache state can't be determined rather than guessing. *llm_backend*
+    is the run's LLM backend: bibr downloads a pinned MLX build into
+    Rapid-MLX's own cache only for Rapid-MLX (vllm-mlx reads the default one).
     """
     if repo_id.startswith("local bundle: "):
         return "available locally"
@@ -258,7 +260,7 @@ def _hf_cache_status(repo_id: str) -> str:
         cache_dir = Settings.rapid_mlx.hf_hub_cache
     elif Settings.rapid_mlx.hf_home:
         cache_dir = str(Path(Settings.rapid_mlx.hf_home) / "hub")
-    pinned = _pinned_build_cache_status(repo_id, cache_dir)
+    pinned = _pinned_build_cache_status(repo_id, cache_dir if llm_backend == "rapid-mlx" else None)
     if pinned is not None:
         return pinned
     cache_model_dir = (
@@ -285,9 +287,9 @@ def _pinned_build_cache_status(repo_id: str, cache_dir: str | None) -> str | Non
     Another revision of the same repository (such as its ``main``) does not
     count: the run downloads the pinned one. llama.cpp and MLX builds name
     their files (``hub_files``); a vLLM build counts as cached when the pinned
-    commit's snapshot holds safetensors weights. *cache_dir* (Rapid-MLX's) is
-    read for MLX builds only; vLLM and bibr's llama.cpp download use the
-    default Hugging Face cache.
+    commit's snapshot holds safetensors weights. *cache_dir* (Rapid-MLX's, on
+    a Rapid-MLX run) is read for MLX builds only; vLLM, vllm-mlx and bibr's
+    llama.cpp download use the default Hugging Face cache.
     """
     from bibr.local.hub_pins import pinned_build_cached
     from bibr.local.llm_models import REGISTRY, variant_revision
@@ -499,7 +501,7 @@ def _print_dry_run_plan(
     if not specs:
         out.print("  [dim]none[/dim]")
     for label, repo_id in specs:
-        status = _hf_cache_status(repo_id)
+        status = _hf_cache_status(repo_id, llm_backend=config.llm_backend)
         if status in ("cached", "available locally"):
             mark = f"[green]{ui.OK}[/green]"
         elif status.startswith("will download"):

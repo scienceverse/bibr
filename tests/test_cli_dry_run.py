@@ -634,6 +634,101 @@ def test_pinned_vllm_build_cache_status_needs_weights_at_its_commit(monkeypatch,
     assert _hf_cache_status(model) == "cached (revision 9199424d)"
 
 
+@pytest.mark.parametrize(
+    ("llm_backend", "hf_hub_cache", "hf_home", "expected"),
+    [
+        ("vllm-mlx", "/rapid/hub-cache", None, None),
+        ("vllm-mlx", None, "/rapid/home", None),
+        (None, "/rapid/hub-cache", None, None),
+        ("rapid-mlx", "/rapid/hub-cache", "/rapid/home", "/rapid/hub-cache"),
+        ("rapid-mlx", None, "/rapid/home", "hf_home/hub"),
+        ("rapid-mlx", None, None, None),
+    ],
+)
+def test_pinned_mlx_build_cache_status_reads_the_serving_backends_cache(
+    monkeypatch, llm_backend, hf_hub_cache, hf_home, expected
+):
+    """bibr downloads a pinned MLX build into Rapid-MLX's own cache only for
+    Rapid-MLX; vllm-mlx reads the default Hugging Face cache."""
+    from pathlib import Path
+
+    from bibr.config import Settings
+    from bibr.local import hub_pins
+    from bibr.local.cli.dry_run import _hf_cache_status
+
+    _neutralize_local_rapid_mlx_env(monkeypatch)
+    monkeypatch.setattr(Settings.rapid_mlx, "hf_hub_cache", hf_hub_cache)
+    monkeypatch.setattr(Settings.rapid_mlx, "hf_home", hf_home)
+    if expected == "hf_home/hub":
+        expected = str(Path("/rapid/home") / "hub")
+    seen = set()
+
+    def cached(repo_id, filename, revision, cache_dir):
+        seen.add(cache_dir)
+        return f"/hf/{filename}"
+
+    monkeypatch.setattr(hub_pins, "_cached_file", cached)
+
+    status = _hf_cache_status(
+        "scienceverse/bibr-extract-qwen35-4b-mlx-8bit", llm_backend=llm_backend
+    )
+
+    assert status == "cached (revision 432b8cd8)"
+    assert seen == {expected}
+
+
+def test_pinned_gguf_build_cache_status_never_reads_rapid_mlxs_cache(monkeypatch):
+    from bibr.config import Settings
+    from bibr.local import hub_pins
+    from bibr.local.cli.dry_run import _hf_cache_status
+
+    _neutralize_local_rapid_mlx_env(monkeypatch)
+    monkeypatch.setattr(Settings.rapid_mlx, "hf_hub_cache", "/rapid/hub-cache")
+    seen = set()
+
+    def cached(repo_id, filename, revision, cache_dir):
+        seen.add(cache_dir)
+        return f"/hf/{filename}"
+
+    monkeypatch.setattr(hub_pins, "_cached_file", cached)
+
+    status = _hf_cache_status(
+        "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0", llm_backend="rapid-mlx"
+    )
+
+    assert status == "cached (revision 0aa228e8)"
+    assert seen == {None}
+
+
+@pytest.mark.parametrize("backend", ["vllm-mlx", "rapid-mlx"])
+async def test_dry_run_checks_the_llm_build_for_its_backend(tmp_path, monkeypatch, backend):
+    from bibr.config import Settings
+    from bibr.local.cli import _build_parser, _run_process, dry_run
+
+    _neutralize_local_rapid_mlx_env(monkeypatch)
+    model = "scienceverse/bibr-extract-qwen35-4b-mlx-8bit"
+    monkeypatch.setattr(Settings.llm, "local_model", model)
+    calls = []
+
+    def status(repo_id, **kwargs):
+        calls.append((repo_id, kwargs))
+        return "cached"
+
+    monkeypatch.setattr(dry_run, "_hf_cache_status", status)
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(_pdf_bytes())
+    args = _build_parser().parse_args(
+        ["chew", str(pdf), "--dry-run", "--ocr", "glm-llama", "--llm", backend]
+    )
+
+    try:
+        await _run_process(args)
+    except SystemExit:  # a blocker (no MLX runtime here) still prints the plan
+        pass
+
+    assert (model, {"llm_backend": backend}) in calls
+
+
 async def test_dry_run_hf_cache_unknown_without_huggingface_hub(tmp_path, capsys, monkeypatch):
     """When huggingface_hub can't be imported, report cache-unknown instead
     of guessing or crashing."""
