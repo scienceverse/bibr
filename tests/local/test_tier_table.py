@@ -32,12 +32,17 @@ TIER_TABLE = [
     (("RTX 5090", 32607, 12.0), ("vllm", _4B, "balanced", "paddle-vllm")),
     (("RTX 3090", 24576, 8.6), ("vllm", _4B, "balanced", "paddle-vllm")),  # ran: 100 papers
     (("RTX 4000 Ada", 20475, 8.9), ("vllm", _4B, "balanced", "paddle-vllm")),  # ran: 48
-    (("RTX 4080", 16376, 8.9), ("vllm", _W4A16, "balanced", "paddle-vllm")),
+    # 16 GB ran at 16,380 MiB on e99ae96c, with at least 4.74 GiB to spare at
+    # every LLM start.
+    (("RTX 4080", 16376, 8.9), ("vllm", _W4A16, "balanced", "paddle-vllm")),  # ran: 48
     (("RTX 3060 12 GB", 12288, 8.6), ("vllm", _W4A16, "balanced", "paddle-vllm")),
     (("RTX 5070", 12227, 12.0), ("vllm", _W4A16, "balanced", "paddle-vllm")),  # ran: 100
     (("RTX 3080 10 GB", 10240, 8.6), ("vllm", _W4A16, "aggressive", "paddle-vllm")),  # ran: 48
     (("RTX 3070", 8192, 8.6), ("llama-cpp", _Q8, "aggressive", "glm-llama")),
     (("RTX 4060", 8188, 8.9), ("llama-cpp", _Q8, "aggressive", "glm-llama")),  # ran: 100
+    # 6 GB also ran beside a 1.0 GiB desktop: 48 of 48, but 2 MiB free at the
+    # minimum and 107 sentence-segmenter CPU fallbacks. No run beside a desktop
+    # above 1 GiB.
     (("RTX 3050 6 GB", 6144, 8.6), ("llama-cpp", _Q4, "aggressive", "glm-llama")),  # ran: 48
     (("TITAN RTX", 24576, 7.5), ("llama-cpp", _Q8, "balanced", "glm-llama")),
     (("RTX 2080 Ti", 11264, 7.5), ("llama-cpp", _Q8, "aggressive", "glm-llama")),

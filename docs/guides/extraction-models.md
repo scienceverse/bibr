@@ -32,10 +32,10 @@ RTX 4060 reports 8,188 MiB, an RTX 5070 12,227 MiB).
 | Card (Ampere or newer) | Default from `bibr setup` | Default from `--llm local` without setup | Memory mode | Batch run beside a 0.5 GiB desktop |
 |---|---|---|---|---|
 | 20 GB or more | 4B (bf16) on vLLM, PaddleOCR-VL on vLLM | the same | balanced, 8 papers a chunk | 20 GB: 48 of 48 papers, 138 an hour; 24 GB: 100 of 100, 161 an hour |
-| 12–19 GB | 4B W4A16 on vLLM, PaddleOCR-VL on vLLM | the same | balanced, 8 | 12 GB: 100 of 100, 187 an hour; 12 GB beside a 1.5 GiB desktop: 48 of 48, 188 an hour |
+| 12–19 GB | 4B W4A16 on vLLM, PaddleOCR-VL on vLLM | the same | balanced, 8 | 12 GB: 100 of 100, 187 an hour; 12 GB beside a 1.5 GiB desktop: 48 of 48, 188 an hour; 16 GB: 48 of 48, 161 an hour |
 | 10–11 GB | 4B W4A16 on vLLM, PaddleOCR-VL on vLLM | the same | aggressive, 3 | 10 GB: 48 of 48, 85 an hour |
 | 7–9 GB | 4B GGUF Q8_0 on llama.cpp, GLM-OCR on llama.cpp | the same | aggressive, 3 | 8 GB: 100 of 100, 141 an hour |
-| 5–6 GB | 4B GGUF Q4_K_M on llama.cpp, GLM-OCR on llama.cpp | the same | aggressive, 3 | 6 GB: 48 of 48, 151 an hour |
+| 5–6 GB | 4B GGUF Q4_K_M on llama.cpp, GLM-OCR on llama.cpp | the same | aggressive, 3 | 6 GB: 48 of 48, 151 an hour; 6 GB beside a 1.0 GiB desktop: 48 of 48, 144 an hour |
 
 **These runs emulate the card's memory, not its speed.** Each one ran on an
 RTX 3090 whose free memory a separate process cut to what the named card has,
@@ -46,6 +46,12 @@ not been measured. Each run used bibr's default memory mode and chunk size
 for the card. On the same 100 papers the 8 GB default passed as many as the
 24 GB one (86 each, by bibr's per-paper scorer); on 48 papers the 6 GB default
 passed 38 to the bf16 4B's 41, a difference within chance at that size.
+
+The 16 GB run, on commit e99ae96c, had at least 4.74 GiB to spare at every
+start of the LLM (free memory beyond the 8 GiB a start needs). The 6 GB default
+has almost none: beside a 1.0 GiB desktop it finished, but the card fell to
+2 MiB free and the sentence segmenter fell back to the CPU 107 times. No run
+covers a 6 GB card beside a desktop above 1 GiB.
 
 Cards older than Ampere (compute capability below 8.0: Turing, Volta, Pascal)
 get the llama.cpp row for their size at any size, because bibr's vLLM models
