@@ -95,7 +95,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   beside a 0.5 GiB desktop. vLLM 0.32 no longer rejects a request whose prompt
   plus completion cap runs past the context window, as 0.31 did with HTTP 400:
   it lowers the cap to what is left. A prompt longer than the window is still
-  rejected, with the message bibr reads the window from.
+  rejected, with the message bibr reads the window from. Where bibr does not
+  know the window (a server at `LLM_BASE_URL`, or a model outside the registry
+  started without `--max-model-len`) and an answer stops at it, the call failed
+  as truncated where 0.31's 400 let bibr cut the input and ask again. bibr now
+  reads the window then from the server's `/v1/models` (vLLM's
+  `max_model_len`, once per server and model) and asks again with the input cut
+  to fit. An answer that stops short of the window, and a server that lists no
+  window, still fail the call as truncated.
 - The managed vLLM LLM server's minimum is now the budget each published
   model was measured to need on an RTX 3090 with vLLM 0.31.0: a first start,
   before vLLM has filled its compile cache, that serves one 32,768-token
