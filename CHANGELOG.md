@@ -82,10 +82,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   build (was 12.25) and 6.0 GiB for the W4A16 build (was 6.25); the 2B's 6.25
   GiB is the vLLM 0.31.0 figure. On the swap path a start needs 12.75 GiB free
   for the bf16 4B and 7.75 GiB for the W4A16 build; a server that stays up for
-  the run needs 17.25 and 12.25 GiB while bibr's models hold 0.5 GiB. So the
-  bf16 4B now starts beside a PaddleOCR-VL server of about 5.4 GB at `--ocr-url`
-  on a 24 GB card (0.48 of the card, 11.3 GiB, below MTP's minimum, so without
-  MTP). Beside bibr's models at 0.5 GiB, a free 24 GB card now gives 0.71 and a
+  the run needs 17.25 and 12.25 GiB while bibr's models hold 0.5 GiB. So on a
+  24 GB card with no desktop, the bf16 4B now starts beside a PaddleOCR-VL
+  server of about 5.4 GB at `--ocr-url` (0.48 of the card, 11.3 GiB, below
+  MTP's minimum, so without MTP). With a 0.5 GiB desktop on the card as well
+  it is still refused (17.16 GiB free, 17.25 needed). Beside bibr's models at
+  0.5 GiB, a free 24 GB card now gives 0.71 and a
   free 32 GB card 0.78 (0.70 and 0.77 on 0.31). With one server for the run on
   the 252 development papers (the pinned bf16 build), vLLM 0.32 at 64 sequences
   passed 219 against 220 on 0.31 at vLLM's default 256 (−0.4 points [−1.2, 0]),
@@ -259,7 +261,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   sequences at once, which halves vLLM's capture sizes and lets them start on a
   smaller share. (These are the vLLM 0.31.0 figures; the vLLM 0.32.0 entry
   above has this release's, with which the bf16 4B does start beside that OCR
-  server.)
+  server when no desktop shares the card. Beside a 0.5 GiB desktop it is still
+  refused: 17.16 GiB free, 17.25 needed.)
 - A nearly full GPU no longer fails papers, drops their references or sends
   their headings to the LLM. bibr's layout, sentence, reference-parser and
   section-classifier models now treat each GPU out-of-memory failure alike:
