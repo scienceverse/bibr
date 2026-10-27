@@ -715,6 +715,13 @@ class TestReleaseBeforeRefusing:
             rm._layout.loaded = True
             card["reading"] = REFUSED
             assert await _start_refusal(rm) is None  # chunk 1's start
-        assert rm.llm_start_releases == 2
+            # Chunk 2's precheck finds the LLM server up and predicts nothing;
+            # PaddleOCR-VL then stops it, and its start meets the refusal.
+            assert await rm.llm_start_refusal("vllm") is None
+            rm.shutdown_llm_server()
+            rm._layout.loaded = True
+            card["reading"] = REFUSED
+            assert await _start_refusal(rm) is None  # chunk 2's start
+        assert rm.llm_start_releases == 3
         levels = [r.levelno for r in _released(caplog)]
-        assert levels == [logging.WARNING, logging.DEBUG]
+        assert levels == [logging.WARNING, logging.DEBUG, logging.WARNING]

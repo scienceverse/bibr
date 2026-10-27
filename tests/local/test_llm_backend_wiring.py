@@ -304,3 +304,33 @@ def test_preflight_llama_cpp_cpu_only_still_passes():
         patch("bibr.local.llama_cpp.probe_gpu_backend", return_value=False),
     ):
         assert cli._preflight_local_backend("llama-cpp") is None
+
+
+@pytest.mark.parametrize(
+    ("llm_backend", "expected"),
+    [
+        # Beside a llama.cpp LLM the automatic chain runs GLM-OCR on llama.cpp:
+        # no managed vLLM server starts, so the classifiers keep the card.
+        ("llama-cpp", 0.0),
+        # Beside a cloud LLM the same chain starts PaddleOCR-VL on vLLM, which
+        # claims 0.21 of a 24 GB card.
+        ("cloud", 0.21),
+    ],
+)
+def test_the_classifiers_leave_room_only_for_the_ocr_the_run_starts(
+    monkeypatch, llm_backend, expected
+):
+    """``_managed_gpu_fraction`` resolves the automatic ``paddle`` chain beside
+    the run's LLM backend. On a Linux 24 GB Ampere card the chain resolved
+    without it lists paddle-vllm, so a llama.cpp run would keep its classifiers
+    off PaddleOCR-VL's share for a server it never starts."""
+    from bibr.config import GlobalSettings
+    from bibr.local.pipeline import _managed_gpu_fraction
+    from bibr.ocr import registry
+
+    monkeypatch.setattr(registry.sys, "platform", "linux")
+    monkeypatch.setattr(registry.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: 24.0)
+    monkeypatch.setattr(registry, "_nvidia_compute_capability", lambda: 8.6)
+    fraction = _managed_gpu_fraction(llm_backend, "paddle", GlobalSettings())
+    assert fraction == pytest.approx(expected)

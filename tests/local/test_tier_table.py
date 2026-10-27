@@ -44,6 +44,8 @@ TIER_TABLE = [
     # minimum and 107 sentence-segmenter CPU fallbacks. No run beside a desktop
     # above 1 GiB.
     (("RTX 3050 6 GB", 6144, 8.6), ("llama-cpp", _Q4, "aggressive", "glm-llama")),  # ran: 48
+    # The Q4_K_M floor (its min_vram_gb, 5) follows the size rule: no 5 GB card ran.
+    (("5 GB card", 5120, 8.6), ("llama-cpp", _Q4, "aggressive", "glm-llama")),
     (("TITAN RTX", 24576, 7.5), ("llama-cpp", _Q8, "balanced", "glm-llama")),
     (("RTX 2080 Ti", 11264, 7.5), ("llama-cpp", _Q8, "aggressive", "glm-llama")),
     (("GTX 1080 Ti", 11264, 6.1), ("llama-cpp", _Q8, "aggressive", "glm-llama")),
