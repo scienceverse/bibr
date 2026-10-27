@@ -31,6 +31,7 @@ from bibr.paper import PaperReference
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+M = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 _RELS = "http://schemas.openxmlformats.org/package/2006/relationships"
 _WML = "application/vnd.openxmlformats-officedocument.wordprocessingml"
 _STYLES = (
@@ -129,6 +130,13 @@ def test_one_entry_per_paragraph_is_the_segmentation():
 def test_the_list_ends_at_a_float_or_an_end_of_list_heading(end):
     paragraphs = _paragraphs(*REFS, end, "Condition means and standard deviations", *REFS[:2])
     assert reference_entries(paragraphs) == (REFS, "ok")
+
+
+def test_a_float_before_the_first_entry_does_not_end_the_list():
+    # A table anchored at the top of the references page: the list after it
+    # is still read, and the label is left to the junk filter.
+    entries, reason = reference_entries(_paragraphs("Table 1", *REFS, *MORE_REFS))
+    assert reason == "ok" and entries[1:] == REFS + MORE_REFS
 
 
 def test_a_supplementary_reference_heading_does_not_end_the_list():
@@ -377,6 +385,28 @@ def test_parser_reads_line_broken_entries_as_separate_entries():
 def test_parser_splits_entries_at_legacy_carriage_returns():
     paragraphs = [_para(REFS[0]), _para(*REFS[1:4], line_break="<w:cr/>"), _para(REFS[4])]
     contents = DocxParser(_docx(*paragraphs)).parse()
+
+    assert contents.native_ref_strings == REFS
+
+
+def test_parser_does_not_split_a_paragraph_at_a_page_break():
+    # A page break is layout, not a line break: the paragraph stays one entry
+    # for the merged-reference splitter.
+    paragraphs = [
+        _para(REFS[0]),
+        _para(*REFS[1:3], line_break='<w:br w:type="page"/>'),
+        *map(_para, REFS[3:]),
+    ]
+    contents = DocxParser(_docx(*paragraphs)).parse()
+
+    assert contents.native_ref_strings == [REFS[0], " ".join(REFS[1:3]), *REFS[3:]]
+
+
+def test_parser_leaves_a_display_equation_out_of_its_reference_entry():
+    # A display equation is an entry of its own in the parser's text.
+    math = f'<m:oMathPara xmlns:m="{M}"><m:oMath><m:r><m:t>x+y</m:t></m:r></m:oMath></m:oMathPara>'
+    with_math = _para(REFS[1]).replace("</w:p>", f"{math}</w:p>")
+    contents = DocxParser(_docx(_para(REFS[0]), with_math, *map(_para, REFS[2:]))).parse()
 
     assert contents.native_ref_strings == REFS
 
