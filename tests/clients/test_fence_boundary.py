@@ -135,6 +135,16 @@ def test_a_collision_in_any_block_rederives_the_shared_boundary(monkeypatch):
     assert boundary not in refs and boundary not in cites
 
 
+def test_each_counter_gives_a_new_candidate():
+    """The collision tests replace the candidate function, so this pins that
+    the counter enters the hash: otherwise a collision would repeat for ever."""
+    blocks = ("a checksum in the paper",)
+
+    candidates = {prompts._boundary_candidate("equations", n, blocks) for n in range(3)}
+
+    assert len(candidates) == 3
+
+
 # --- call sites ---------------------------------------------------------------
 
 
@@ -178,6 +188,24 @@ def _boundaries(text):
     return set(_MARKER_BOUNDARY.findall(text))
 
 
+def _fenced_blocks(text, boundary):
+    """The data between each opening and closing marker line, in prompt order."""
+    b = re.escape(boundary)
+    return re.findall(
+        rf"^--- {b} (?:START|BEGIN[A-Z ]*) ---\n(.*?)\n--- {b} END[A-Z ]* ---$",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+
+
+def _assert_derived_from_the_fenced_text(recorded, label_of):
+    for name, text in recorded:
+        (boundary,) = _boundaries(text)
+        blocks = _fenced_blocks(text, boundary)
+        assert 2 * len(blocks) == len(_MARKER_BOUNDARY.findall(text))
+        assert boundary == fence_boundary(label_of(name), *blocks)
+
+
 _FRONT = "A Paper Title\nJane Doe1, John Smith2\n1 Uni A\nAbstract: things happened."
 
 _CALLS = {
@@ -215,6 +243,37 @@ async def test_every_fenced_call_sends_the_same_bytes_on_every_run(recorder, sit
         (boundary,) = _boundaries(text)  # one boundary per prompt, on every marker line
         assert _HEX32.fullmatch(boundary)
         assert text.count(boundary) == len(_MARKER_BOUNDARY.findall(text))
+
+
+# The label a call site derives its boundary under, where it is not the site's name.
+_LABELS = {"core_metadata_merged": "core_metadata"}
+
+
+@pytest.mark.parametrize("site", sorted(_CALLS))
+async def test_every_fenced_call_derives_its_boundary_from_the_fenced_text(recorder, site):
+    """A boundary derived without the fenced text would be one fixed string per
+    call site, which anyone can compute and a document could carry to close the
+    fence early."""
+    await _CALLS[site](LLMClient())
+
+    assert recorder
+    _assert_derived_from_the_fenced_text(recorder, lambda name: _LABELS.get(site, site))
+
+
+async def test_pointer_prompts_derive_their_boundary_from_the_fenced_text(recorder, monkeypatch):
+    monkeypatch.setattr(LLMClient, "_pointer_outputs_enabled", lambda self: True)
+    labels = {
+        "TitleKeywordsPointerLLM": "title_keywords_pointers",
+        "TitleKeywordsLLM": "title_keywords",
+        "AuthorsPointerLLM": "authors_pointers",
+        "AuthorsLLM": "authors",
+    }
+
+    await LLMClient().extract_title_keywords(_FRONT)
+    await LLMClient().extract_authors(_FRONT)
+
+    assert {"TitleKeywordsPointerLLM", "AuthorsPointerLLM"} <= {name for name, _ in recorder}
+    _assert_derived_from_the_fenced_text(recorder, labels.__getitem__)
 
 
 async def test_citation_resolution_fences_both_blocks_with_one_boundary(recorder):
@@ -274,6 +333,19 @@ async def test_core_metadata_fanout_keeps_the_shared_document_prefix(recorder, m
     prefixes = {text.split(" END ---", 1)[0] for _, text in recorder}
     assert len(recorder) == 3
     assert len(prefixes) == 1
+
+
+async def test_core_metadata_fanout_passes_its_boundary_to_the_pointer_prompts(
+    recorder, monkeypatch
+):
+    monkeypatch.setattr(Settings.llm, "merged_core_metadata", False, raising=False)
+    monkeypatch.setattr(LLMClient, "_pointer_outputs_enabled", lambda self: True)
+
+    await LLMClient().extract_core_metadata(_FRONT)
+
+    assert {"TitleKeywordsPointerLLM", "AuthorsPointerLLM"} <= {name for name, _ in recorder}
+    (boundary,) = set().union(*(_boundaries(text) for _, text in recorder))
+    assert boundary == fence_boundary("core_metadata_fanout", _FRONT, _FRONT, _FRONT)
 
 
 async def test_pointer_prompts_are_deterministic(recorder, monkeypatch):
