@@ -72,9 +72,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   bf16, which vLLM 0.31 serves only from compute capability 8.0; on an older
   card it does not refuse them but casts them to float16 with a warning, a
   path bibr has not been tested on. No batch on a Turing or Pascal card has
-  been recorded with either runtime: this is a conservative routing rule. When nvidia-smi
-  cannot report the compute capability, routing is as before; an explicit
-  `--llm vllm` or `OCR_BACKEND=paddle-vllm` still starts vLLM.
+  been recorded with either runtime: this is a conservative routing rule.
+  When nvidia-smi cannot report the compute capability, routing is as before;
+  an explicit `--llm vllm` or `OCR_BACKEND=paddle-vllm` still starts vLLM.
 - Setup counts a card that reports up to 0.25 GiB under a size (an RTX 5070
   reports 12,227 MiB) as that size, for the model it recommends and for its
   memory mode. Such cards used to get the next smaller tier. PaddleOCR-VL's
