@@ -95,9 +95,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   beside a 0.5 GiB desktop. vLLM 0.32 no longer rejects a request whose prompt
   plus completion cap runs past the context window, as 0.31 did with HTTP 400:
   it lowers the cap to what is left. A prompt longer than the window is still
-  rejected, with the message bibr reads the window from. In a new environment
-  `vllm==0.32.0` installs torch 2.13.0; reinstall `onnxruntime-gpu` after it, as
-  the install guide describes.
+  rejected, with the message bibr reads the window from.
 - The managed vLLM LLM server's minimum is now the budget each published
   model was measured to need on an RTX 3090 with vLLM 0.31.0: a first start,
   before vLLM has filled its compile cache, that serves one 32,768-token
@@ -162,7 +160,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (PYSEC-2026-4319, a denial of service through its penalty handling), fixed
   in 0.32.0, which the extra now pins. CI's dependency audit does not install
   the `vllm` extra and did not report it; `pip-audit` on the extra's locked
-  requirements now finds no known vulnerability (the three already documented
+  requirements now finds no known vulnerability (the two already documented
   exceptions aside).
 
 ### Fixed

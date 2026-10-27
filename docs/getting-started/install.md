@@ -105,11 +105,10 @@ GB on first use, so it logs a warning naming `uv sync --extra vllm`, and
 with at least 8 GB of VRAM; smaller GPUs and CPU-only Linux machines take the
 llama.cpp path (`glm-llama`) for OCR instead. The managed local LLM uses the
 same bootstrap from 10 GB of VRAM (the fine-tuned 4B's W4A16 build); below that,
-`--llm local` uses llama.cpp. On Python 3.14, where `vllm==0.32.0` cannot install from wheels
-(its `llguidance` dependency publishes none for 3.14) and the `vllm` extra
-therefore installs nothing, both launchers run the bootstrap
-inside a managed Python 3.13, and `bibr doctor` says so; a 3.11-3.13
-interpreter for the project avoids the detour.
+`--llm local` uses llama.cpp. On Python 3.14, where the `vllm` extra installs
+nothing (its requirements are marked `python_version < '3.14'`), both launchers
+run the bootstrap inside a managed Python 3.13, and `bibr doctor` says so; a
+3.11-3.13 interpreter for the project avoids the detour.
 
 ## GPU ONNX Runtime
 
