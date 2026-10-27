@@ -13,13 +13,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and does not enforce its lower anonymous limit, so the default budget is now
   1000 requests per 5 minutes per process, half the per-address limit (2000
   with `ROR_CLIENT_ID`; `ROR_REQUESTS_PER_5MIN` still sets it). With
-  enrichment on, a batch spent the 50 requests in its first minute and every
-  later paper in that 5 minutes waited out the 60 s `ROR_ENRICH_TIMEOUT` and
-  kept few affiliation matches. A string whose lookup cannot start before the
-  paper's ROR time budget ends is now left unmatched at once instead of
-  holding the paper until the timeout. The `ROR_MATCHING_FAILED` warning gives
-  its reason as "request budget spent", so it is not confused with
-  "rate limited", the backoff after ROR answers 429.
+  enrichment on, a batch spent the 50 requests in its first minute, and later
+  papers that needed a new ROR request waited out the 60 s
+  `ROR_ENRICH_TIMEOUT` and kept few affiliation matches. A string whose lookup
+  cannot start before the paper's ROR time budget ends is now left unmatched
+  at once instead of holding the paper until the timeout. The
+  `ROR_MATCHING_FAILED` warning gives its reason as "request budget spent", so
+  it is not confused with "rate limited", the backoff after ROR answers 429.
 
 ## [0.7.4] - 2026-10-23
 
