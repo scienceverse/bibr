@@ -362,6 +362,37 @@ def test_a_line_break_before_a_journal_line_does_not_split_the_entry():
     assert reference_entries(paragraphs) == ([REFS[0], f"{ENTRY_HEAD} {JOURNAL}", *REFS[1:]], "ok")
 
 
+def test_a_doi_on_a_journal_line_gives_no_date():
+    # The year inside a DOI is followed by a digit: the line is no entry of
+    # its own.
+    journal = "Cognition, 195, 104036. https://doi.org/10.1016/j.cognition.2019.104036"
+    joined = ReferenceParagraph(f"{ENTRY_HEAD} {journal}", (ENTRY_HEAD, journal))
+    paragraphs = [*_paragraphs(REFS[0]), joined, *_paragraphs(*REFS[1:])]
+    assert reference_entries(paragraphs) == ([REFS[0], joined.text, *REFS[1:]], "ok")
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "Kim, S. (2020, March 12). Memory on social media [Blog post]. Psych Blog.",
+        "Kim, S. (2020/2021). Annual report on memory. Psych Society.",
+        "World Health Organization. (n.d.). Depression fact sheet. WHO.",
+        "Ortiz, M. (in press). Recall and age. Memory.",
+        "Ortiz, M. (forthcoming). Recall and age. Memory.",
+        "Lee, K.; Park, J. Memory and sleep. J. Sleep Res. 2019, 28, 112-120.",
+        "Lee, K. Memory and sleep. Oxford University Press, 2019.",
+        "Smith J, Lee K. Recall in older adults. J Gerontol. 2019;12:34-56.",
+        "Smith J, Lee K. Recall in older adults. J Gerontol. 2019:12(3):34-56.",
+    ],
+)
+def test_each_form_of_an_entrys_date_splits_a_paragraph_at_its_line_breaks(entry):
+    # The entry under test is the only date on its line.
+    lines = (REFS[1], entry, REFS[2])
+    joined = ReferenceParagraph(" ".join(lines), lines)
+    paragraphs = [*_paragraphs(REFS[0]), joined, *_paragraphs(*REFS[3:])]
+    assert reference_entries(paragraphs) == ([REFS[0], *lines, *REFS[3:]], "ok")
+
+
 def test_parser_keeps_a_journal_line_after_a_line_break_in_its_entry():
     contents = DocxParser(_docx(_para(REFS[0]), _para(ENTRY_HEAD, JOURNAL), *map(_para, REFS[1:])))
     native = contents.parse().native_ref_strings

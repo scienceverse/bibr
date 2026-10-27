@@ -34,10 +34,10 @@ rule missed, leave paragraphs without one ("Journal of Sport Psychology,
 
 A paragraph whose explicit line breaks separate several entries is split at
 them, when every line opens like an entry and gives a date ("(2019)",
-"2019.", "n.d."): a journal line on a line of its own ("Psychological
-Science, 31(12), 1601-1612.") stays in its entry. The strings are not
-authoritative: the junk filter and the merged reference splitter still run
-on them, as on HTML list items.
+"2019.", "2019;12:", "n.d."): a journal line on a line of its own
+("Psychological Science, 31(12), 1601-1612.") stays in its entry. The
+strings are not authoritative: the junk filter and the merged reference
+splitter still run on them, as on HTML list items.
 """
 
 from __future__ import annotations
@@ -99,11 +99,13 @@ MAX_END_HEADING_WORDS = _MAX_BOLD_HEADING_WORDS
 _SURNAME_RE = re.compile(r"[\"'(]?[A-Z][A-Za-z'’.\-]+,")
 _SUPPLEMENT_RE = re.compile(r"\s*(?:supplement|supporting information)", re.IGNORECASE)
 # A year where an entry gives its date: in parentheses ("(2019)", "(2019a,
-# May 3)"), or closed by punctuation ("2019.", "2019;12:"), but not as the
-# end of a page range ("1601-1612."); "n.d.", "in press", "forthcoming".
+# May 3)"), closed by a full stop, comma or semicolon ("2019.", "2019; 12")
+# or run into a Vancouver volume ("2019;12:34-56", "2019:12"), but not as
+# the end of a page range ("1601-1612.") or inside a DOI
+# ("j.cognition.2019.104036"); "n.d.", "in press", "forthcoming".
 _ENTRY_DATE_RE = re.compile(
     r"\((?:1[6-9]|20)\d{2}[a-z]?\b[^()]{0,30}\)"
-    r"|(?<![\d‐‑–—-])\b(?:1[6-9]|20)\d{2}[a-z]?[.,;](?!\d)"
+    r"|(?<![\d‐‑–—-])\b(?:1[6-9]|20)\d{2}[a-z]?(?:[.,;](?!\d)|[;:]\s?\d)"
     r"|\bn\.\s?d\.|\bin press\b|\bforthcoming\b",
     re.IGNORECASE,
 )
