@@ -39,6 +39,8 @@ _STYLES = (
     '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>'
     '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/>'
     '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr></w:style>'
+    '<w:style w:type="paragraph" w:styleId="Bibliography"><w:name w:val="Bibliography"/>'
+    '<w:basedOn w:val="Normal"/></w:style>'
     "</w:styles>"
 )
 
@@ -522,6 +524,39 @@ def test_a_numbered_or_other_reference_list_name_heads_a_list(heading):
     contents = DocxParser(_docx(*(_para(ref) for ref in REFS), heading=heading)).parse()
 
     assert contents.native_ref_strings == REFS
+
+
+def _generated(entries: list[str], *, field: bool) -> list[str]:
+    """A reference manager's list: its entries in the Bibliography style, or
+    inside one field spanning their paragraphs, as EndNote's "ADDIN
+    EN.REFLIST"."""
+    if not field:
+        return [_para(entry, style="Bibliography") for entry in entries]
+    begin = (
+        '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+        "<w:r><w:instrText> ADDIN EN.REFLIST </w:instrText></w:r>"
+        '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+    )
+    paragraphs = [_para(entry) for entry in entries]
+    paragraphs[0] = paragraphs[0].replace("<w:p>", f"<w:p>{begin}", 1)
+    paragraphs[-1] = paragraphs[-1].replace(
+        "</w:p>", '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+    )
+    return paragraphs
+
+
+@pytest.mark.parametrize("field", [False, True], ids=["style", "field"])
+@pytest.mark.parametrize("heading", ["References", "Discussion"])
+def test_parser_reads_a_generated_list_by_its_paragraphs_up_to_its_end(field, heading):
+    # The paragraphs after a reference manager's list go back to the section
+    # before it, so they are no entries, dated or not. Under a heading that
+    # names no list, the parser opens a references section for the list.
+    refs = [*REFS, *MORE_REFS]
+    after = ["Note. Participants were asked about it.", "Participants in 2019 rated recall."]
+    body = [*_generated(refs, field=field), *map(_para, after)]
+    contents = DocxParser(_docx(*body, heading=heading)).parse()
+
+    assert contents.native_ref_strings == refs
 
 
 def test_paragraphs_under_another_heading_are_no_reference_list():
