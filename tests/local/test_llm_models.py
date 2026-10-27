@@ -124,13 +124,55 @@ def test_budget_floors_and_tiers():
     }
 
 
+#: The 4B student retrained with pointer answers (2026-10-26): every build's
+#: commit on its repository's ``pointer-v1`` branch. ``main`` still holds the
+#: previous 4B's builds.
+_POINTER_V1_REVISIONS = {
+    "scienceverse/bibr-extract-qwen35-4b": "9199424d4bd200feb247e26e4a860b63da73cbaf",
+    "scienceverse/bibr-extract-qwen35-4b-W4A16": "a32f20485181574d849cfb32f8eac1f266c4143d",
+    "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0": "0aa228e8c908512ad5e5e13fa55e7e7d3180c7d3",
+    "scienceverse/bibr-extract-qwen35-4b-GGUF:Q4_K_M": "0aa228e8c908512ad5e5e13fa55e7e7d3180c7d3",
+    "scienceverse/bibr-extract-qwen35-4b-mlx-8bit": "432b8cd80ea920919ef26c48401473c6d8c8a3e1",
+}
+
+
+def test_every_4b_build_is_pinned_to_its_pointer_v1_commit():
+    from bibr.local.llm_models import variant_revision
+
+    variants = get_model("bibr-extract-4b").variants
+    assert {v.hf_id: variant_revision(v) for v in variants} == _POINTER_V1_REVISIONS
+
+
+def test_runtimes_without_a_revision_option_name_the_files_bibr_downloads():
+    """llama.cpp's -hf and the MLX servers read main; bibr downloads these files itself."""
+    from bibr.local.llm_models import pinned_download_variant
+
+    for variant in get_model("bibr-extract-4b").variants:
+        if variant.runtime == "vllm":
+            assert (variant.revision, variant.hub_files) == (None, ())
+            assert pinned_download_variant(variant.hf_id) is None
+            continue
+        assert pinned_download_variant(variant.hf_id) is variant
+        if variant.runtime == "llama-cpp":
+            quant = variant.hf_id.rsplit(":", 1)[1]
+            assert variant.hub_files == (f"bibr-extract-qwen35-4b-{quant}.gguf",)
+        else:
+            assert variant.platform == "mlx"
+            assert {"config.json", "tokenizer.json", "model.safetensors"} <= set(variant.hub_files)
+            assert "README.md" not in variant.hub_files
+    # The 2B's GGUF and MLX builds follow main; its bf16 is pinned in server_args.
+    for variant in get_model("bibr-extract-2b").variants:
+        assert pinned_download_variant(variant.hf_id) is None
+    assert pinned_download_variant("org/custom:Q4") is None
+
+
 def test_w4a16_build_is_listed_at_its_published_revision():
     variant = get_model("bibr-extract-4b").variants[1]
     assert variant.hf_id == "scienceverse/bibr-extract-qwen35-4b-W4A16"
     assert (variant.platform, variant.quant, variant.runtime) == ("cuda", "w4a16", "vllm")
     assert variant.approx_download_gb == 3.8
     args = registry_server_args(variant.hf_id)
-    assert args[:2] == ("--revision", "a2af8f6e90e6481251af9eb07d02c034c30e3446")
+    assert args[:2] == ("--revision", "a32f20485181574d849cfb32f8eac1f266c4143d")
     assert args[-2:] == ("--max-num-seqs", "64")
 
 

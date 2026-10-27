@@ -31,6 +31,15 @@ class LocalLLMVariant:
     # for ``platform == "cuda"`` — the vllm-mlx server does not read these.
     server_args: tuple[str, ...] = ()
     runtime: str | None = None
+    #: The Hub commit of a llama.cpp or MLX build, whose servers download a
+    #: repository's ``main`` when given its name. bibr downloads ``hub_files``
+    #: at this commit into the Hugging Face cache itself and serves the local
+    #: copy (``bibr.local.hub_pins``). vLLM variants pin theirs with
+    #: ``--revision`` in ``server_args`` instead (``variant_revision``).
+    revision: str | None = None
+    #: The files of ``revision`` the runtime loads: the one GGUF for
+    #: llama.cpp, the model directory's files for MLX.
+    hub_files: tuple[str, ...] = ()
     #: The managed vLLM server's budget floor, in GiB of
     #: ``--gpu-memory-utilization`` x CUDA's total: the smallest budget measured
     #: to start with an empty compile cache and serve one ``--max-model-len``
@@ -80,18 +89,21 @@ class LocalLLMModel:
     experimental_platforms: frozenset[str] = frozenset()
 
 
-# bibr's fine-tuned extraction students (2026-10-14). Each is a Qwen3.5 base
-# with a LoRA trained on licence-filtered Qwen3.8-27B answers to bibr's own
-# prompts, merged into a full checkpoint so the base model's MTP layers stay
-# usable for speculative decoding (vLLM's spec decoding does not combine well
-# with unmerged LoRA). Scores are from the 9 Oct harness (bibr 0.7.0 prompts,
-# v5 scorer, gate192 + ci60 = 252 dev papers), paired against Qwen3.8-27B's
-# 223/252; see docs/guides/extraction-models.md.
+# bibr's fine-tuned extraction students (2026-10-14; the 4B retrained
+# 2026-10-26). Each is a Qwen3.5 base with a LoRA trained on licence-filtered
+# Qwen3.8-27B answers to bibr's own prompts, merged into a full checkpoint so
+# the base model's MTP layers stay usable for speculative decoding (vLLM's spec
+# decoding does not combine well with unmerged LoRA). Scores are from the 9 Oct
+# harness (v5 scorer, gate192 + ci60 = 252 dev papers; see
+# docs/guides/extraction-models.md): the 2B's paired against Qwen3.8-27B's
+# 223/252 at bibr's 0.7.0 prompts, the 4B's (pointer-v1) against its previous
+# revision at bibr e491ed64, 218 to 217 on the same box.
 #
 # bf16, W4A16 and GGUF sizes are the built files (2026-10-14 and 2026-10-26;
 # GGUF from llama.cpp 6868a52); MLX sizes are estimates until those builds
-# exist. bf16: the merged checkpoint (text, vision and MTP weights). The vLLM
-# variants pin the Hub revision they were published at.
+# exist. bf16: the merged checkpoint (text, vision and MTP weights). Every 4B
+# build and the 2B bf16 are pinned to a Hub commit (the revisions below); bibr
+# downloads the pinned llama.cpp and MLX files itself (bibr.local.hub_pins).
 #
 # min_vram_gb is the card size (``fits_card``) from which setup and
 # ``default_local_model`` pick a variant. What backs each one: batches on an
@@ -146,19 +158,37 @@ _QWEN35_STUDENT_SERVER_ARGS: tuple[str, ...] = (
 #: The 4B student's W4A16 GPTQ build (int4 weights, the Gated DeltaNet A_log
 #: and norm tensors kept in F32), served with at most 64 sequences: at 128,
 #: vLLM needs a Mamba cache block for each of them, about 2.1 GiB of KV cache
-#: instead of the 1.1 GiB one 32,768-token request needs. The same weights
-#: scored 218/252 against the bf16 build's 217 on the same box.
+#: instead of the 1.1 GiB one 32,768-token request needs. The pinned build
+#: scored 218/252, level with its bf16 build's 218 on the same box.
 QWEN35_4B_W4A16_SERVER_ARGS: tuple[str, ...] = (
     *_QWEN35_STUDENT_SERVER_ARGS,
     "--max-num-seqs",
     "64",
 )
 
-#: Hub revisions published 2026-10-14 (the merged safetensors repos) and
-#: 2026-10-26 (the W4A16 build).
-_QWEN35_4B_REVISION = "6ab47a4e4e8b1b76c1ab234aec66f360683ff9fc"
+#: Hub revisions. The 4B's are the commits on each repository's ``pointer-v1``
+#: branch (2026-10-26 and 27): the student retrained with pointer answers for
+#: the two front-matter calls (``LLM_POINTER_OUTPUTS``, still off by default)
+#: and the builds made from it. Each repository's ``main`` still holds the
+#: builds of the previous 4B, 6ab47a4e (bf16 6ab47a4e, W4A16 a2af8f6e, GGUF
+#: 8f5cb6f8, MLX 16bf58c9). The 2B's was published 2026-10-14; its GGUF and
+#: MLX builds are not pinned.
+_QWEN35_4B_REVISION = "9199424d4bd200feb247e26e4a860b63da73cbaf"
+_QWEN35_4B_GGUF_REVISION = "0aa228e8c908512ad5e5e13fa55e7e7d3180c7d3"
+_QWEN35_4B_MLX_REVISION = "432b8cd80ea920919ef26c48401473c6d8c8a3e1"
 _QWEN35_2B_REVISION = "81d0442d0ecadc20e1b9587d54bff42242123870"
-_QWEN35_4B_W4A16_REVISION = "a2af8f6e90e6481251af9eb07d02c034c30e3446"
+_QWEN35_4B_W4A16_REVISION = "a32f20485181574d849cfb32f8eac1f266c4143d"
+#: What mlx-lm loads from the 4B's MLX build: every file of the revision but
+#: its README.md and .gitattributes.
+_QWEN35_4B_MLX_FILES: tuple[str, ...] = (
+    "config.json",
+    "generation_config.json",
+    "chat_template.jinja",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "model.safetensors.index.json",
+    "model.safetensors",
+)
 
 #: Budget floors (``LocalLLMVariant.min_budget_gb``) of the vLLM variants:
 #: cold starts (empty vLLM, Inductor and Triton caches) on an RTX 3090 with
@@ -177,8 +207,7 @@ _QWEN35_STUDENT_ENV: dict[str, str] = {"LLM_CHAT_TEMPLATE_KWARGS": '{"enable_thi
 REGISTRY: tuple[LocalLLMModel, ...] = (
     LocalLLMModel(
         key="bibr-extract-4b",
-        label="bibr extract 4B (recommended) — Qwen3.5-4B fine-tuned on bibr's tasks, "
-        "2.8 points behind Qwen3.8-27B",
+        label="bibr extract 4B (recommended) — Qwen3.5-4B fine-tuned on bibr's tasks",
         variants=(
             LocalLLMVariant(
                 hf_id="scienceverse/bibr-extract-qwen35-4b",
@@ -190,7 +219,7 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 server_args=("--revision", _QWEN35_4B_REVISION, *_QWEN35_STUDENT_SERVER_ARGS),
                 runtime="vllm",
             ),
-            # int4 weights: 218/252 against the bf16 build's 217 on the same box, at
+            # int4 weights: 218/252, level with the bf16 build on the same box, at
             # half its budget.
             LocalLLMVariant(
                 hf_id="scienceverse/bibr-extract-qwen35-4b-W4A16",
@@ -215,6 +244,8 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 min_vram_gb=7,
                 approx_download_gb=4.3,
                 runtime="llama-cpp",
+                revision=_QWEN35_4B_GGUF_REVISION,
+                hub_files=("bibr-extract-qwen35-4b-Q8_0.gguf",),
             ),
             LocalLLMVariant(
                 hf_id="scienceverse/bibr-extract-qwen35-4b-GGUF:Q4_K_M",
@@ -223,6 +254,8 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 min_vram_gb=5,
                 approx_download_gb=2.6,
                 runtime="llama-cpp",
+                revision=_QWEN35_4B_GGUF_REVISION,
+                hub_files=("bibr-extract-qwen35-4b-Q4_K_M.gguf",),
             ),
             LocalLLMVariant(
                 hf_id="scienceverse/bibr-extract-qwen35-4b-mlx-8bit",
@@ -230,6 +263,8 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
                 quant="8bit",
                 min_vram_gb=6,
                 approx_download_gb=4.5,
+                revision=_QWEN35_4B_MLX_REVISION,
+                hub_files=_QWEN35_4B_MLX_FILES,
             ),
             # No 4-bit MLX build: it duplicated a funding entry in its smoke test.
         ),
@@ -443,6 +478,36 @@ def registry_server_args(model: str) -> tuple[str, ...]:
             if v.platform == "cuda" and v.hf_id == model:
                 return v.server_args
     return ()
+
+
+def variant_revision(variant: LocalLLMVariant) -> str | None:
+    """The Hub commit a registry variant is pinned to, or None when it follows ``main``.
+
+    ``revision`` for llama.cpp and MLX builds, the ``--revision`` in
+    ``server_args`` for vLLM ones.
+    """
+    if variant.revision is not None:
+        return variant.revision
+    args = variant.server_args
+    if "--revision" in args:
+        index = args.index("--revision")
+        if index + 1 < len(args):
+            return args[index + 1]
+    return None
+
+
+def pinned_download_variant(model: str) -> LocalLLMVariant | None:
+    """The registry variant whose pinned files bibr downloads itself, by exact ``hf_id``.
+
+    A llama.cpp or MLX build with a ``revision`` and ``hub_files``; None for
+    any other id (vLLM takes ``--revision`` itself; an unpinned build, a local
+    path or a custom id is handed to the runtime unchanged).
+    """
+    for m in REGISTRY:
+        for v in m.variants:
+            if v.hf_id == model and v.revision is not None and v.hub_files:
+                return v
+    return None
 
 
 def get_model(key: str) -> LocalLLMModel:

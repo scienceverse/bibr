@@ -917,7 +917,7 @@ class TestW4a16Floor:
         assert QWEN35_4B_W4A16_SERVER_ARGS[-2:] == ("--max-num-seqs", "64")
         assert registry_server_args(STUDENT_4B_W4A16) == (
             "--revision",
-            "a2af8f6e90e6481251af9eb07d02c034c30e3446",
+            "a32f20485181574d849cfb32f8eac1f266c4143d",
             *QWEN35_4B_W4A16_SERVER_ARGS,
         )
         # 64 sequences capture up to 128: 0.5 + 1.0 x 128 / 512, from the
@@ -1013,7 +1013,7 @@ class TestW4a16Floor:
         )
         cmd = popen.call_args[0][0]
         assert cmd[cmd.index("--model") + 1] == STUDENT_4B_W4A16
-        assert cmd[cmd.index("--revision") + 1] == "a2af8f6e90e6481251af9eb07d02c034c30e3446"
+        assert cmd[cmd.index("--revision") + 1] == "a32f20485181574d849cfb32f8eac1f266c4143d"
         assert _launched_share(popen) == "0.27"
         assert cmd[-2:] == ["--max-num-seqs", "64"]
         server._process = None

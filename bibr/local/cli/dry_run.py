@@ -258,6 +258,9 @@ def _hf_cache_status(repo_id: str) -> str:
         cache_dir = Settings.rapid_mlx.hf_hub_cache
     elif Settings.rapid_mlx.hf_home:
         cache_dir = str(Path(Settings.rapid_mlx.hf_home) / "hub")
+    pinned = _pinned_build_cache_status(repo_id, cache_dir)
+    if pinned is not None:
+        return pinned
     cache_model_dir = (
         Path(cache_dir) / f"models--{bare_repo_id.replace('/', '--')}" if cache_dir else None
     )
@@ -274,6 +277,46 @@ def _hf_cache_status(repo_id: str) -> str:
         return "cached"
     size = _APPROX_MODEL_SIZES.get(bare_repo_id)
     return f"will download (~{size})" if size else "will download (size unknown)"
+
+
+def _pinned_build_cache_status(repo_id: str, cache_dir: str | None) -> str | None:
+    """Cache status of a registry build pinned to a Hub commit, or None for any other id.
+
+    Another revision of the same repository (such as its ``main``) does not
+    count: the run downloads the pinned one. llama.cpp and MLX builds name
+    their files (``hub_files``); a vLLM build counts as cached when the pinned
+    commit's snapshot holds safetensors weights. *cache_dir* (Rapid-MLX's) is
+    read for MLX builds only; vLLM and bibr's llama.cpp download use the
+    default Hugging Face cache.
+    """
+    from bibr.local.hub_pins import pinned_build_cached
+    from bibr.local.llm_models import REGISTRY, variant_revision
+
+    variant = next((v for m in REGISTRY for v in m.variants if v.hf_id == repo_id), None)
+    revision = variant_revision(variant) if variant is not None else None
+    if variant is None or revision is None:
+        return None
+    if variant.platform != "mlx":
+        cache_dir = None
+    if variant.hub_files:
+        cached = bool(pinned_build_cached(repo_id, cache_dir=cache_dir))
+    else:
+        cached = _snapshot_has_weights(repo_id.split(":", 1)[0], revision, cache_dir)
+    if cached:
+        return f"cached (revision {revision[:8]})"
+    return f"will download revision {revision[:8]} (~{variant.approx_download_gb:.1f} GB)"
+
+
+def _snapshot_has_weights(repo_id: str, revision: str, cache_dir: str | None) -> bool:
+    """Whether the HF cache holds safetensors files of *repo_id* at commit *revision*."""
+    from huggingface_hub import constants
+
+    root = Path(cache_dir) if cache_dir else Path(constants.HF_HUB_CACHE)
+    snapshot = root / f"models--{repo_id.replace('/', '--')}" / "snapshots" / revision
+    try:
+        return any(path.exists() for path in snapshot.glob("*.safetensors"))
+    except OSError:
+        return False
 
 
 def _dry_run_model_specs(

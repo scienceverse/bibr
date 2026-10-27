@@ -94,6 +94,17 @@ class VllmMlxServer:
                 "  pip install vllm-mlx            # if using plain pip",
             )
 
+        # mlx-lm downloads a repository's ``main`` when given its id: a pinned
+        # registry build is downloaded at its commit into the HF cache and
+        # loaded from there. bibr's launcher shim then serves it under the Hub
+        # id (``--served-model-name``), which the requests, the port guard
+        # and the exports keep using.
+        from bibr.local.hub_pins import fetch_pinned_build
+
+        launch_model = (
+            fetch_pinned_build(model, stop_event=stop_event, server_label="vllm-mlx") or model
+        )
+
         # Use ``python -m vllm_mlx.server`` which supports ``--mllm`` (force
         # multimodal/VLM inference path via mlx-vlm).  The ``vllm-mlx serve``
         # CLI subcommand does not expose ``--mllm`` in all versions. Text-only
@@ -112,7 +123,7 @@ class VllmMlxServer:
             # validated 0.4.x server entrypoint. See bibr/local/_vllm_mlx_server.py.
             "bibr.local._vllm_mlx_server",
             "--model",
-            model,
+            launch_model,
             # Loopback only, like every other managed runtime: the server has
             # no authentication.
             "--host",
@@ -120,6 +131,8 @@ class VllmMlxServer:
             "--port",
             str(port),
         ]
+        if launch_model != model:
+            cmd.extend(["--served-model-name", model])
         if multimodal:
             cmd.append("--mllm")
         if continuous_batching:

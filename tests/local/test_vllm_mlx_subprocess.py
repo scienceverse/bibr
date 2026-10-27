@@ -305,3 +305,111 @@ def test_startup_error_reports_tail_end(tmp_path):
 
     assert "Metal OOM" in str(excinfo.value)
     assert "shard   0/200" not in str(excinfo.value)
+
+
+def _vllm_mlx_launch_cmd(monkeypatch, model: str) -> list[str]:
+    from bibr.local import ocr as mod
+
+    captured = {}
+
+    def fake_popen(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        proc = mock.MagicMock()
+        proc.poll.return_value = 0
+        proc.returncode = 1
+        return proc
+
+    monkeypatch.setattr(mod.subprocess, "Popen", fake_popen)
+    with pytest.raises(RuntimeError, match="exited during startup"):
+        mod.VllmMlxServer(model=model, port=8767, continuous_batching=True)
+    return captured["cmd"]
+
+
+def test_vllm_mlx_serves_a_pinned_build_from_its_snapshot_under_the_hub_id(monkeypatch):
+    """mlx-lm reads a repository's main: the pinned build is downloaded first
+    (bibr.local.hub_pins; stubbed by tests/conftest.py) and served by path,
+    under the Hub id the requests and the port guard use."""
+    model = "scienceverse/bibr-extract-qwen35-4b-mlx-8bit"
+
+    cmd = _vllm_mlx_launch_cmd(monkeypatch, model)
+
+    assert cmd[cmd.index("--model") + 1] == (
+        "/nonexistent-hf-cache/models--scienceverse--bibr-extract-qwen35-4b-mlx-8bit/"
+        "snapshots/432b8cd80ea920919ef26c48401473c6d8c8a3e1"
+    )
+    assert cmd[cmd.index("--served-model-name") + 1] == model
+
+
+def test_vllm_mlx_passes_unpinned_ids_unchanged(monkeypatch):
+    cmd = _vllm_mlx_launch_cmd(monkeypatch, "scienceverse/bibr-extract-qwen35-2b-mlx-8bit")
+
+    assert cmd[cmd.index("--model") + 1] == "scienceverse/bibr-extract-qwen35-2b-mlx-8bit"
+    assert "--served-model-name" not in cmd
+
+
+@pytest.mark.parametrize(
+    ("argv", "name", "rest"),
+    [
+        (
+            ["prog", "--model", "/snap", "--served-model-name", "org/m"],
+            "org/m",
+            ["prog", "--model", "/snap"],
+        ),
+        (["prog", "--served-model-name=org/m", "--port", "1"], "org/m", ["prog", "--port", "1"]),
+        (["prog", "--model", "org/m"], None, ["prog", "--model", "org/m"]),
+    ],
+)
+def test_vllm_mlx_shim_takes_the_served_model_name(argv, name, rest):
+    from bibr.local import _vllm_mlx_server as shim
+
+    assert shim._pop_served_model_name(argv) == name
+    assert argv == rest
+
+
+def _fake_vllm_mlx_server(monkeypatch):
+    """A stand-in ``vllm_mlx.server`` whose main() loads the model as 0.4.x does."""
+    import types
+
+    loads: list[tuple[tuple, dict]] = []
+    server = types.ModuleType("vllm_mlx.server")
+
+    def load_model(model_name, served_model_name=None, **kwargs):
+        loads.append(((model_name,), {"served_model_name": served_model_name, **kwargs}))
+
+    def main():
+        server.load_model("/snap", use_batching=True)
+
+    server.load_model = load_model
+    server.main = main
+    package = types.ModuleType("vllm_mlx")
+    package.server = server
+    monkeypatch.setitem(sys.modules, "vllm_mlx", package)
+    monkeypatch.setitem(sys.modules, "vllm_mlx.server", server)
+    return loads
+
+
+def test_vllm_mlx_shim_serves_the_model_under_the_given_name(monkeypatch):
+    from bibr.local import _vllm_mlx_server as shim
+
+    loads = _fake_vllm_mlx_server(monkeypatch)
+    argv = ["prog", "--model", "/snap", "--served-model-name", "org/m", "--port", "8767"]
+
+    shim._main(argv)
+
+    assert loads == [(("/snap",), {"served_model_name": "org/m", "use_batching": True})]
+    # vllm_mlx.server's own argparse sees no --served-model-name.
+    assert argv == ["prog", "--model", "/snap", "--port", "8767"]
+
+
+def test_vllm_mlx_shim_without_a_served_name_runs_the_server_module(monkeypatch):
+    from bibr.local import _vllm_mlx_server as shim
+
+    _fake_vllm_mlx_server(monkeypatch)
+    ran = []
+    monkeypatch.setattr(
+        shim.runpy, "run_module", lambda name, run_name: ran.append((name, run_name))
+    )
+
+    shim._main(["prog", "--model", "org/m"])
+
+    assert ran == [("vllm_mlx.server", "__main__")]

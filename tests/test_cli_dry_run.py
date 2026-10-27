@@ -564,6 +564,68 @@ async def test_dry_run_ocr_weight_repo_has_approximate_size(tmp_path, capsys, mo
     assert "OCR weights: ggml-org/GLM-OCR-GGUF:Q8_0 — will download (~1-2 GB)" in out
 
 
+def test_pinned_llama_cpp_build_cache_status_reads_its_commit(monkeypatch):
+    """A registry build pinned to a commit is cached only at that commit."""
+    from bibr.local import hub_pins
+    from bibr.local.cli.dry_run import _hf_cache_status
+
+    _neutralize_local_rapid_mlx_env(monkeypatch)
+    model = "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
+    # tests/conftest.py stubs the cache read to "not cached".
+    assert _hf_cache_status(model) == "will download revision 0aa228e8 (~4.3 GB)"
+
+    seen = []
+
+    def cached(repo_id, filename, revision, cache_dir):
+        seen.append((repo_id, filename, revision, cache_dir))
+        return f"/hf/{filename}"
+
+    monkeypatch.setattr(hub_pins, "_cached_file", cached)
+    assert _hf_cache_status(model) == "cached (revision 0aa228e8)"
+    assert seen == [
+        (
+            "scienceverse/bibr-extract-qwen35-4b-GGUF",
+            "bibr-extract-qwen35-4b-Q8_0.gguf",
+            "0aa228e8c908512ad5e5e13fa55e7e7d3180c7d3",
+            None,
+        )
+    ]
+
+
+def test_pinned_vllm_build_cache_status_needs_weights_at_its_commit(monkeypatch, tmp_path):
+    import huggingface_hub.constants
+
+    from bibr.local.cli.dry_run import _hf_cache_status
+    from bibr.local.llm_models import get_model
+
+    _neutralize_local_rapid_mlx_env(monkeypatch)
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(tmp_path))
+    model = "scienceverse/bibr-extract-qwen35-4b"
+    size = get_model("bibr-extract-4b").variants[0].approx_download_gb
+    will_download = f"will download revision 9199424d (~{size:.1f} GB)"
+    snapshots = tmp_path / "models--scienceverse--bibr-extract-qwen35-4b" / "snapshots"
+    assert _hf_cache_status(model) == will_download
+
+    # The previous revision's weights (still on main) do not count.
+    old = snapshots / "6ab47a4e4e8b1b76c1ab234aec66f360683ff9fc"
+    old.mkdir(parents=True)
+    (old / "model-00001-of-00002.safetensors").write_bytes(b"x")
+    assert _hf_cache_status(model) == will_download
+
+    pinned = snapshots / "9199424d4bd200feb247e26e4a860b63da73cbaf"
+    pinned.mkdir()
+    # A snapshot link whose blob was deleted is not a cached file.
+    try:
+        (pinned / "model-00002-of-00002.safetensors").symlink_to(tmp_path / "gone")
+    except OSError:  # Windows without the symlink privilege
+        pass
+    else:
+        assert _hf_cache_status(model) == will_download
+
+    (pinned / "model-00001-of-00002.safetensors").write_bytes(b"x")
+    assert _hf_cache_status(model) == "cached (revision 9199424d)"
+
+
 async def test_dry_run_hf_cache_unknown_without_huggingface_hub(tmp_path, capsys, monkeypatch):
     """When huggingface_hub can't be imported, report cache-unknown instead
     of guessing or crashing."""
