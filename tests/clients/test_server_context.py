@@ -1,12 +1,13 @@
 """Inputs sized to a self-hosted server's context window, read from the server.
 
-E10 replayed SURF's Ollama setup (16,384-token context, bibr's 300,000-character
-input cap). The Ollama library model cut over-long prompts from the front, the
-GGUF-template model answered HTTP 400 "request (N tokens) exceeds the available
-context size (16384 tokens)", and three papers lost their export because the
-title/keywords call failed on it. bibr now asks Ollama and llama.cpp for their
-window before the first prompt and caps inputs the way the managed llama.cpp
-server does. External vLLM is left as it was.
+An earlier run replayed a hosted deployment's Ollama setup (16,384-token
+context, bibr's 300,000-character input cap). The Ollama library model cut
+over-long prompts from the front, the GGUF-template model answered HTTP 400
+"request (N tokens) exceeds the available context size (16384 tokens)", and
+three papers lost their export because the title/keywords call failed on it.
+bibr now asks Ollama and llama.cpp for their window before the first prompt and
+caps inputs the way the managed llama.cpp server does. External vLLM is left as
+it was.
 """
 
 from __future__ import annotations
@@ -51,16 +52,16 @@ from bibr.schemas import (
 )
 from bibr.structure.section_classifier import _classify_llm_batch, _fitting_spans
 
-SURF_URL = "http://172.17.0.1:11434/v1"
+HOSTED_URL = "http://172.17.0.1:11434/v1"
 FT_MODEL = "hf.co/scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
 PAPER_TEXT = "A printed study of word growth."
 FRONT_MATTER = f"{PAPER_TEXT} " * 9_000
 
 
-def _surf_settings(**llm_fields) -> GlobalSettings:
-    """SURF's bibr.env LLM block: the openai provider pointed at Ollama's /v1."""
+def _hosted_settings(**llm_fields) -> GlobalSettings:
+    """A hosted deployment's bibr.env LLM block: the openai provider pointed at Ollama's /v1."""
     return GlobalSettings(
-        llm={"provider": "openai", "base_url": SURF_URL, "model": FT_MODEL, **llm_fields}
+        llm={"provider": "openai", "base_url": HOSTED_URL, "model": FT_MODEL, **llm_fields}
     )
 
 
@@ -179,7 +180,7 @@ def ollama_client(monkeypatch):
         http = httpx.AsyncClient(transport=transport)
 
         def create_client(mode_override=None, **_kwargs):
-            sdk = AsyncOpenAI(api_key="x", base_url=SURF_URL, http_client=http, max_retries=0)
+            sdk = AsyncOpenAI(api_key="x", base_url=HOSTED_URL, http_client=http, max_retries=0)
             return instructor.from_openai(
                 sdk, mode=mode_override or instructor.Mode.JSON_SCHEMA, model=FT_MODEL
             )
@@ -205,7 +206,7 @@ def _probe(settings: GlobalSettings, respond):
 
 async def test_ollama_behind_the_openai_provider_reports_its_running_context():
     server = FakeOllama(num_ctx=16_384)
-    found = await _probe(_surf_settings(), server.respond)
+    found = await _probe(_hosted_settings(), server.respond)
 
     assert found == ServerContext("ollama", 16_384)
     assert server.requests[:3] == [
@@ -217,12 +218,12 @@ async def test_ollama_behind_the_openai_provider_reports_its_running_context():
 
 async def test_an_ollama_model_that_is_not_loaded_falls_back_to_its_num_ctx():
     server = FakeOllama(loaded=False, parameters="temperature 1\nnum_ctx 8192\ntop_k 20")
-    assert await _probe(_surf_settings(), server.respond) == ServerContext("ollama", 8_192)
+    assert await _probe(_hosted_settings(), server.respond) == ServerContext("ollama", 8_192)
 
 
 async def test_the_trained_context_length_is_not_taken_for_the_running_one():
     server = FakeOllama(loaded=False)
-    assert await _probe(_surf_settings(), server.respond) == ServerContext("ollama", None)
+    assert await _probe(_hosted_settings(), server.respond) == ServerContext("ollama", None)
 
 
 async def test_the_ollama_provider_asks_ollama_routes_only():
@@ -354,15 +355,15 @@ async def test_a_server_that_is_down_or_starting_gives_none():
     def starting(request):
         return httpx.Response(503, json={"error": {"message": "Loading model"}})
 
-    assert await _probe(_surf_settings(), down) is None
-    assert await _probe(_surf_settings(), starting) is None
+    assert await _probe(_hosted_settings(), down) is None
+    assert await _probe(_hosted_settings(), starting) is None
 
 
 async def test_a_server_that_answers_on_no_known_route_is_other():
     def silent(request):
         return httpx.Response(404, text="not found")
 
-    assert await _probe(_surf_settings(), silent) == ServerContext("other", None)
+    assert await _probe(_hosted_settings(), silent) == ServerContext("other", None)
 
 
 @pytest.mark.parametrize(
@@ -390,7 +391,7 @@ async def test_an_unexpected_error_in_the_probe_is_not_raised():
     def broken(request):
         raise RuntimeError("a transport bug")
 
-    assert await _probe(_surf_settings(), broken) is None
+    assert await _probe(_hosted_settings(), broken) is None
 
 
 # --- Applying what the server said ------------------------------------------
@@ -453,7 +454,7 @@ def test_caps_bibr_set_are_not_taken_for_the_users(caplog):
     # Assigned fields land in pydantic's model_fields_set. Read from there,
     # the 16k caps looked user-set when a 4096-token window came in later:
     # max_tokens stayed 4096 and the input budget of a title call was 0.
-    settings = _surf_settings()
+    settings = _hosted_settings()
     apply_server_context(settings.llm, ServerContext("ollama", 16_384))
     with caplog.at_level(logging.WARNING, logger="bibr.clients.server_context"):
         apply_server_context(settings.llm, ServerContext("ollama", 4_096))
@@ -478,7 +479,7 @@ def test_a_larger_window_found_later_raises_the_caps_bibr_set_up_to_the_defaults
 
 
 def test_a_learned_window_moves_the_caps_bibr_owns_on_fixed_context_servers(caplog):
-    settings = _surf_settings(max_input_chars=50_000)
+    settings = _hosted_settings(max_input_chars=50_000)
     apply_server_context(settings.llm, ServerContext("ollama", None))
     settings.llm.context_tokens = 4_096
     with caplog.at_level(logging.WARNING, logger="bibr.clients.server_context"):
@@ -500,7 +501,7 @@ async def test_a_users_window_sizes_the_caps_and_wins_over_the_servers(ollama_cl
     # LLM_CONTEXT_TOKENS used to skip the probe, and with it every cap:
     # max_tokens went back to 65536 and the segmentation window to 16000.
     server = FakeOllama(num_ctx=16_384)
-    client = ollama_client(server, _surf_settings(context_tokens=8_192))
+    client = ollama_client(server, _hosted_settings(context_tokens=8_192))
 
     await client.ensure_server_context()
 
@@ -513,7 +514,7 @@ async def test_a_users_window_sizes_the_caps_and_wins_over_the_servers(ollama_cl
 
 async def test_explicit_caps_still_win_over_a_users_window(ollama_client):
     server = FakeOllama(num_ctx=16_384)
-    client = ollama_client(server, _surf_settings(context_tokens=8_192, max_input_chars=50_000))
+    client = ollama_client(server, _hosted_settings(context_tokens=8_192, max_input_chars=50_000))
 
     await client.ensure_server_context()
 
@@ -539,7 +540,7 @@ async def test_the_ollama_provider_with_a_users_window_is_not_asked(monkeypatch)
 async def test_a_server_bibr_started_is_not_asked(monkeypatch):
     probe = AsyncMock()
     monkeypatch.setattr(server_context, "probe_server_context", probe)
-    settings = _surf_settings()
+    settings = _hosted_settings()
     # What the managed llama.cpp and vLLM servers do when they start.
     settings.llm.context_tokens = 16_384
     client = LLMClient(settings=settings)
@@ -557,7 +558,7 @@ async def test_a_server_down_at_the_first_call_is_asked_again_later(ollama_clien
     # answer missed at the first call must not stick until a restart.
     server = FakeOllama(num_ctx=16_384)
     server.down = True
-    client = ollama_client(server, _surf_settings())
+    client = ollama_client(server, _hosted_settings())
 
     await client.ensure_server_context()
     assert client._settings.llm.context_tokens is None
@@ -583,7 +584,7 @@ async def test_an_unknown_ollama_window_is_asked_again_and_fits_4096(ollama_clie
     # The model was not loaded at the first call, so the 16k caps stood in.
     # It then loads with a 4,096-token context.
     server = FakeOllama(num_ctx=4_096, loaded=False)
-    client = ollama_client(server, _surf_settings())
+    client = ollama_client(server, _hosted_settings())
 
     await client.ensure_server_context()
     llm_options = client._settings.llm
@@ -614,7 +615,7 @@ async def test_concurrent_calls_ask_the_server_once(monkeypatch, clock):
         return ServerContext("ollama", None)
 
     monkeypatch.setattr(server_context, "probe_server_context", slow_probe)
-    client = LLMClient(settings=_surf_settings())
+    client = LLMClient(settings=_hosted_settings())
 
     # First calls wait for the one answer, so their prompts are sized.
     first = [asyncio.create_task(client.ensure_server_context()) for _ in range(8)]
@@ -640,7 +641,7 @@ async def test_concurrent_calls_ask_the_server_once(monkeypatch, clock):
 async def test_a_probe_that_raises_does_not_fail_the_call(monkeypatch, clock):
     probe = AsyncMock(side_effect=RuntimeError("a probe bug"))
     monkeypatch.setattr(server_context, "probe_server_context", probe)
-    client = LLMClient(settings=_surf_settings())
+    client = LLMClient(settings=_hosted_settings())
 
     await client.ensure_server_context()
     clock[0] += 31
@@ -721,7 +722,7 @@ async def test_a_new_endpoint_starts_with_the_shortest_wait_and_no_server_kind(m
     answers = [ServerContext("ollama", None)] * 3 + [None] * 3
     probe = AsyncMock(side_effect=answers)
     monkeypatch.setattr(server_context, "probe_server_context", probe)
-    client = LLMClient(settings=_surf_settings())
+    client = LLMClient(settings=_hosted_settings())
     for _ in range(3):  # an Ollama model that is not loaded: asked again
         await client.ensure_server_context()
         clock[0] += 600
@@ -804,9 +805,9 @@ async def test_an_external_vllm_gets_no_caps_before_the_first_call(monkeypatch, 
 # --- End to end against a fake Ollama ----------------------------------------
 
 
-async def test_surf_defaults_keep_every_front_matter_call_inside_16k(ollama_client):
+async def test_hosted_defaults_keep_every_front_matter_call_inside_16k(ollama_client):
     server = FakeOllama(num_ctx=16_384)
-    client = ollama_client(server, _surf_settings())
+    client = ollama_client(server, _hosted_settings())
 
     combined = await client.extract_core_metadata(FRONT_MATTER)
 
@@ -825,7 +826,7 @@ async def test_an_overflow_at_an_unknown_window_is_asked_again_cut_to_it(ollama_
     # once, learns the window from the 400 and asks again with its input cut
     # to fit. Before, only the first of the concurrent calls asked again.
     server = FakeOllama(num_ctx=6_000, loaded=False)
-    client = ollama_client(server, _surf_settings())
+    client = ollama_client(server, _hosted_settings())
 
     combined = await client.extract_core_metadata(FRONT_MATTER)
 
@@ -852,7 +853,7 @@ async def test_a_window_learned_from_a_rejection_leaves_room_for_the_paper(ollam
     # _context_budget(4096, 4096) == 0. The title and author prompts went
     # out with no paper text, were accepted, and no field was marked failed.
     server = FakeOllama(num_ctx=4_096, loaded=False)
-    client = ollama_client(server, _surf_settings())
+    client = ollama_client(server, _hosted_settings())
 
     combined = await client.extract_core_metadata(FRONT_MATTER)
 
@@ -893,7 +894,7 @@ async def test_no_prompt_goes_out_without_paper_text(ollama_client):
             return super().respond(request)
 
     server = UnplacedServer(num_ctx=4_096)
-    client = ollama_client(server, _surf_settings())
+    client = ollama_client(server, _hosted_settings())
 
     combined = await client.extract_core_metadata(FRONT_MATTER)
 
@@ -914,7 +915,7 @@ async def test_an_overflow_past_the_known_window_keeps_the_record(ollama_client)
     # low): asking again cannot help, and the paper is kept without the
     # fields of the calls that overflowed.
     server = FakeOllama(num_ctx=16_384, chars_per_token=1)
-    client = ollama_client(server, _surf_settings())
+    client = ollama_client(server, _hosted_settings())
 
     combined = await client.extract_core_metadata(FRONT_MATTER)
 
@@ -982,7 +983,7 @@ async def test_two_long_citation_lists_together_stay_inside_the_window(ollama_cl
     # A long reference list and a long citation list were each cut to the
     # whole window, so together they could still run past it.
     server = FakeOllama(num_ctx=16_384)
-    client = ollama_client(server, _surf_settings())
+    client = ollama_client(server, _hosted_settings())
     cites = [(i, "(Quill and Vexler, in press; Quill, in press)") for i in range(800)]
 
     await client.resolve_citations(cites, _refs(500))
@@ -995,7 +996,7 @@ async def test_a_short_citation_list_leaves_its_share_to_the_references(ollama_c
     # osf_bpkce: a 54,940-character reference list next to a short citation
     # list. An even split cut the references to about 28%.
     server = FakeOllama(num_ctx=16_384)
-    client = ollama_client(server, _surf_settings())
+    client = ollama_client(server, _hosted_settings())
     cites = [(i, "(Quill, 2019)") for i in range(20)]
 
     await client.resolve_citations(cites, _refs(500))
@@ -1011,7 +1012,7 @@ async def test_a_short_citation_list_leaves_its_share_to_the_references(ollama_c
 
 async def test_the_research_integrity_texts_share_the_window(ollama_client):
     server = FakeOllama(num_ctx=16_384)
-    client = ollama_client(server, _surf_settings())
+    client = ollama_client(server, _hosted_settings())
     authors = [("Mara", f"Quill{i}") for i in range(3_000)]
 
     await client.extract_research_integrity(
@@ -1030,7 +1031,7 @@ async def test_research_integrity_shares_the_char_cap_when_the_window_is_unknown
     # so only LLM_MAX_INPUT_CHARS bounds the prompt. Each text was cut to
     # all of it, up to 3 x 24,000 characters plus an uncapped author list.
     server = FakeOllama(num_ctx=16_384, loaded=False)
-    client = ollama_client(server, _surf_settings())
+    client = ollama_client(server, _hosted_settings())
 
     await client.extract_research_integrity(
         "Funded by the Word Growth Council. " * 900,
@@ -1166,8 +1167,8 @@ def _classifier_reply(model, messages, system, *, label, max_tokens=None):
 
 
 async def test_a_long_heading_list_is_classified_in_calls_that_fit():
-    # W4406122303 sent 80 headings with their opening text in one 17,332-token
-    # prompt; at the 16k caps it now goes out in parts.
+    # One paper in the Ollama replay sent 80 headings with their opening text in
+    # one 17,332-token prompt; at the 16k caps it now goes out in parts.
     settings = GlobalSettings(llm={"max_input_chars": 24_000, "context_tokens": 16_384})
     client = LLMClient(settings=settings)
     documents = []
@@ -1208,7 +1209,7 @@ async def test_a_short_heading_list_is_one_call_as_before():
 
 async def test_the_classifier_asks_the_server_before_splitting(ollama_client, monkeypatch):
     server = FakeOllama(num_ctx=16_384)
-    client = ollama_client(server, _surf_settings())
+    client = ollama_client(server, _hosted_settings())
     documents = []
 
     async def invoke(model, messages, system, **kwargs):
