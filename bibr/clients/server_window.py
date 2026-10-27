@@ -10,9 +10,9 @@ cap to what is left instead, so the answer stops there and names nothing.
 Answers are kept per server and model for the life of the process, and calls
 that ask while a read is in flight on the same event loop wait for it instead
 of sending their own. A server that answers without a window (another runtime,
-a router listing several models, no ``/v1/models`` route) is kept as listing
-none. A server that does not answer (down, timed out, HTTP 5xx) is asked again
-the next time. Never raises.
+a router listing several models, no ``/v1/models`` route, a redirect) is kept
+as listing none. A server that does not answer (down, timed out, HTTP 5xx) is
+asked again the next time. Never raises.
 """
 
 from __future__ import annotations
@@ -133,6 +133,8 @@ async def _ask(
         refuse_plaintext_llm_key(url, llm.api_key, allow_insecure_http=llm.allow_insecure_http)
         headers["Authorization"] = f"Bearer {llm.api_key}"
     timeout = httpx.Timeout(_TIMEOUT_SECONDS, connect=_CONNECT_TIMEOUT_SECONDS)
+    # A redirect is not followed, so the key goes to no other address; its
+    # answer lists no window.
     async with httpx.AsyncClient(
         timeout=timeout, headers=headers, transport=transport, follow_redirects=False
     ) as client:

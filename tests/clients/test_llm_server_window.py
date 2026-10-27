@@ -15,12 +15,14 @@ import math
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 
 import httpx
 import pytest
+from instructor.core.exceptions import IncompleteOutputException
 
 from bibr.clients import server_window
-from bibr.clients.llm import LLMClient
+from bibr.clients.llm import LLMClient, track_llm_usage
 from bibr.config import GlobalSettings
 from bibr.exceptions import LlmInvalidOutputError, LlmTruncatedError
 
@@ -46,7 +48,8 @@ class _Stub:
     past the window alone is rejected by both versions. When prompt plus the
     completion cap runs past it, 0.31 rejects the request and 0.32 lowers the
     cap to what is left. ``server_cap`` is a limit of the server's own, such as
-    a generation config's ``max_new_tokens``.
+    a generation config's ``max_new_tokens``; ``short_of_window`` stops every
+    answer that many tokens before the window.
     """
 
     def __init__(
@@ -58,6 +61,7 @@ class _Stub:
         usage: bool = True,
         answer: str = ANSWER,
         second_answer_delay: float = 0.0,
+        short_of_window: int = 0,
         models_delay: float = 0.0,
     ):
         self.version = version
@@ -66,6 +70,7 @@ class _Stub:
         self.usage = usage
         self.answer = answer
         self.second_answer_delay = second_answer_delay
+        self.short_of_window = short_of_window
         self.models_delay = models_delay
         self.log: list[dict] = []
 
@@ -99,7 +104,7 @@ class _Stub:
                     "code": 400,
                 }
             }
-        room = min(cap, WINDOW - prompt, self.server_cap or WINDOW)
+        room = min(cap, WINDOW - prompt - self.short_of_window, self.server_cap or WINDOW)
         if room < _tokens(self.answer):
             content, finish, done = self.answer[: room * 4], "length", room
         else:
@@ -239,11 +244,14 @@ def test_a_server_that_lists_no_window_fails_the_call_as_before_and_is_not_asked
     assert stub.routes() == ["chat", "models", "chat"]
 
 
-def test_an_answer_stopped_short_of_the_window_teaches_no_window(serve):
+@pytest.mark.parametrize(
+    "short", [{"server_cap": 100}, {"short_of_window": 1}], ids=["server-cap", "one-token-short"]
+)
+def test_an_answer_stopped_short_of_the_window_teaches_no_window(serve, short):
     """A limit of the server's own also stops an answer short of the cap. The
     window it lists is not reached, so it is not the cause and is not taken."""
     text = _room_300_text(serve)
-    stub = _Stub("0.32", server_cap=100)
+    stub = _Stub("0.32", **short)
     client = _client(serve(stub))
 
     with pytest.raises(LlmTruncatedError):
@@ -263,6 +271,41 @@ def test_an_answer_without_usage_cannot_be_measured_against_the_window(serve):
 
     assert client._settings.llm.context_tokens is None
     assert stub.routes() == ["chat"]
+
+
+class _Truncated(LLMClient):
+    @track_llm_usage
+    async def ask(self, error: BaseException) -> None:
+        raise error
+
+
+@pytest.mark.parametrize(("prompt", "completion"), [(WINDOW, None), (None, WINDOW)])
+def test_usage_without_token_counts_leaves_the_truncation_to_surface(
+    monkeypatch, prompt, completion
+):
+    """An answer whose usage lacks either count cannot be measured against the
+    window, even when the other count alone reaches it."""
+    reads = []
+
+    async def listed_window(settings, **_):
+        reads.append(settings)
+        return WINDOW
+
+    monkeypatch.setattr(server_window, "listed_window", listed_window)
+    usage = SimpleNamespace(prompt_tokens=prompt, completion_tokens=completion)
+    error = IncompleteOutputException(last_completion=SimpleNamespace(usage=usage))
+    settings = GlobalSettings()
+    settings.llm.provider = "openai"
+    settings.llm.base_url = "http://127.0.0.1:9/v1"
+    settings.llm.context_tokens = None
+    client = _Truncated(settings=settings)
+
+    with pytest.raises(IncompleteOutputException) as raised:
+        asyncio.run(client.ask(error))
+
+    assert raised.value is error
+    assert client._settings.llm.context_tokens is None
+    assert reads == []
 
 
 def test_an_answer_that_does_not_parse_is_not_put_down_to_the_window(serve):
@@ -401,11 +444,21 @@ def test_the_window_listed_for_the_model(listing, window):
 
     assert _listed(_settings(), transport) == window
     assert [str(r.url) for r in requests] == ["http://10.0.0.5:8000/v1/models"]
+    # No key, no Authorization header.
+    assert "Authorization" not in requests[0].headers
 
 
-def test_a_server_that_does_not_answer_is_asked_again():
+def test_the_model_list_is_beside_a_base_url_with_a_trailing_slash():
+    transport, requests = _transport((200, _listing({"id": "org/model", "max_model_len": 8_192})))
+
+    assert _listed(_settings(base_url="http://10.0.0.5:8000/v1/"), transport) == 8_192
+    assert [str(r.url) for r in requests] == ["http://10.0.0.5:8000/v1/models"]
+
+
+@pytest.mark.parametrize("status", [500, 503])
+def test_a_server_that_does_not_answer_is_asked_again(status):
     transport, requests = _transport(
-        (503, {"error": "loading"}), (200, _listing({"id": "org/model", "max_model_len": 4_096}))
+        (status, {"error": "loading"}), (200, _listing({"id": "org/model", "max_model_len": 4_096}))
     )
     settings = _settings()
 
@@ -423,6 +476,27 @@ def test_a_server_that_answers_without_a_window_is_not_asked_again(answer):
     assert _listed(settings, transport) is None
     assert _listed(settings, transport) is None
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize("status", [302, 307])
+def test_a_redirect_is_not_followed_or_read_as_a_listing(status):
+    listing = _listing({"id": "org/model", "max_model_len": 8_192})
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.host == "10.0.0.5":
+            return httpx.Response(
+                status, headers={"Location": "http://10.0.0.6:8000/v1/models"}, json=listing
+            )
+        return httpx.Response(200, json=listing)
+
+    transport = httpx.MockTransport(handler)
+    settings = _settings(api_key="secret-key")
+
+    assert _listed(settings, transport) is None
+    assert _listed(settings, transport) is None
+    assert [str(r.url) for r in requests] == ["http://10.0.0.5:8000/v1/models"]
 
 
 def test_calls_that_ask_together_share_one_read():
