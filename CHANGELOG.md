@@ -17,8 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `bibr chew` on several files, `chew()` or `Chewer` on a list; Linux with glibc
   only). In a 32-paper GPU batch at the default batch size of 8, the process now
   averages 6.6 GiB over the last third of the run instead of 8.4 GiB, peaks at
-  7.4 GiB instead of 8.9 GiB, and no longer climbs from chunk to chunk; the
-  throughput difference stayed within run-to-run noise.
+  7.4 GiB instead of 8.9 GiB, and no longer climbs from chunk to chunk. With
+  real OCR and LLM servers on a 24 GB card the trim had no measurable
+  throughput cost (-0.5%, 95% CI -3.4 to +2.2%).
   `PIPELINE_HEAP_TRIM=window` also trims between the render windows inside a
   chunk, which keeps large chunks (`--batch-size` 24 and up) lower but ran a
   24-paper chunk 20-30% slower; `PIPELINE_HEAP_TRIM=off` turns trimming off.

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import os
 import platform
+import signal
 import threading
+import time
 
 import pytest
 
@@ -185,3 +188,72 @@ def test_the_setting_defaults_to_chunk_and_reads_the_env(monkeypatch):
     monkeypatch.setenv("PIPELINE_HEAP_TRIM", "always")
     with pytest.raises(ValidationError):
         PipelineOptions()
+
+
+class _NoThread:
+    def submit(self, *args, **kwargs):
+        raise RuntimeError("can't start new thread")
+
+
+@pytest.mark.asyncio
+async def test_a_trim_that_cannot_be_scheduled_is_skipped(fake_trim, monkeypatch):
+    monkeypatch.setattr(heap, "_trim_executor", lambda: _NoThread())
+    assert await heap.arelease_free_heap() is False
+    assert await heap.trim_after_chunk(_settings("chunk")) is False
+    assert fake_trim == []
+
+
+@pytest.mark.parametrize("unresolved", [False, True])
+@pytest.mark.asyncio
+async def test_without_malloc_trim_no_trim_thread_starts(monkeypatch, unresolved):
+    if unresolved:
+        monkeypatch.setattr(heap, "_malloc_trim", heap._UNRESOLVED)
+        monkeypatch.setattr(heap, "_resolve", lambda: None)
+    else:
+        monkeypatch.setattr(heap, "_malloc_trim", None)
+    executors: list[int] = []
+
+    def executor():
+        executors.append(1)
+        raise RuntimeError("no trim thread should start")
+
+    monkeypatch.setattr(heap, "_trim_executor", executor)
+    assert await heap.arelease_free_heap(min_interval=0) is False
+    assert await heap.trim_after_chunk(_settings("chunk")) is False
+    assert await heap.trim_between_windows(_settings("window")) is False
+    assert executors == []
+    assert heap._malloc_trim is None
+
+
+def test_the_default_spacing_is_one_second(fake_trim, monkeypatch):
+    clock = iter([100.0, 100.9, 101.1])
+    monkeypatch.setattr(heap.time, "monotonic", lambda: next(clock))
+    assert heap.release_free_heap() is True
+    assert heap.release_free_heap() is False
+    assert heap.release_free_heap() is True
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
+def test_a_real_forked_child_trims_on_a_fresh_thread(fake_trim):
+    async def once():
+        return await asyncio.wait_for(heap.arelease_free_heap(min_interval=0), timeout=3)
+
+    assert asyncio.run(once()) is True  # the parent's trim thread now exists
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - child
+        try:
+            os._exit(0 if asyncio.run(once()) else 2)
+        except BaseException:
+            os._exit(3)
+    # Bounded: a child that deadlocks must fail the test, not hang the job.
+    deadline = time.monotonic() + 10
+    while True:
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            break
+        if time.monotonic() > deadline:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+            pytest.fail("the forked child's trim did not finish within 10 s")
+        time.sleep(0.05)
+    assert os.waitstatus_to_exitcode(status) == 0

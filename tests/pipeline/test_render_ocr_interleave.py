@@ -311,3 +311,25 @@ async def test_window_mode_returns_freed_pages_between_windows_only(monkeypatch,
     # which the batch driver's chunk-end trim covers. Each trim runs after its
     # window dropped its page images.
     assert resident_at_trim == [0] * trims
+
+
+@pytest.mark.parametrize(("n_files", "trims"), [(1, 0), (4, 0), (8, 1), (9, 2)])
+@pytest.mark.asyncio
+async def test_window_mode_never_trims_after_the_last_window(monkeypatch, n_files, trims):
+    from bibr.utils import heap
+
+    files = _mk_files(n_files)
+    calls: list[int] = []
+
+    async def trim():
+        calls.append(1)
+        return True
+
+    monkeypatch.setattr(heap, "arelease_free_heap", trim)
+    monkeypatch.setattr(Settings.ocr, "max_concurrent_files", 4)
+    monkeypatch.setattr(Settings.pipeline, "heap_trim", "window")
+    ctx = _ctx(files, RunConfig(ocr_backend="gemini", memory_mode="balanced"))
+
+    await _stage(files, [0]).run(ctx)
+
+    assert len(calls) == trims

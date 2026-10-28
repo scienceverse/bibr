@@ -1289,3 +1289,21 @@ def test_a_single_file_chew_never_trims(stub_pipeline, heap_trims):
     finally:
         chewer_batch.close()
     assert len(calls) == 1
+
+
+def test_a_trim_that_cannot_be_scheduled_keeps_the_batch_results(monkeypatch):
+    from bibr.api import _process_batch
+    from bibr.utils import heap
+
+    class _NoThread:
+        def submit(self, *args, **kwargs):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(heap, "_trim_executor", lambda: _NoThread())
+    monkeypatch.setattr(heap, "_malloc_trim", lambda pad: 1)
+    monkeypatch.setattr(heap, "_last_trim", float("-inf"))
+    results = asyncio.run(
+        _process_batch(_ScriptedPipeline(), [Path(f"p{i}.pdf") for i in range(6)], batch_size=4)
+    )
+    assert len(results) == 6
+    assert not any(isinstance(r, bibr.ChewFailure) for r in results)

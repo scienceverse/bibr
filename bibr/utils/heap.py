@@ -76,17 +76,23 @@ def _resolve() -> Callable[[int], int] | None:
     return fn
 
 
+def _resolved_trim() -> object:
+    """``malloc_trim``, or ``None`` where there is none. Call with ``_lock`` held."""
+    global _malloc_trim
+    if _malloc_trim is _UNRESOLVED:
+        _malloc_trim = _resolve()
+    return _malloc_trim
+
+
 def release_free_heap(*, min_interval: float = MIN_INTERVAL_SECONDS) -> bool:
     """Return the C heap's free pages to the OS; ``True`` when a trim ran.
 
     Thread-safe. Skips (``False``) when there is no ``malloc_trim`` or the
     last trim was less than *min_interval* seconds ago. Never raises.
     """
-    global _malloc_trim, _last_trim
+    global _last_trim
     with _lock:
-        if _malloc_trim is _UNRESOLVED:
-            _malloc_trim = _resolve()
-        trim = _malloc_trim
+        trim = _resolved_trim()
         now = time.monotonic()
         if trim is None or now - _last_trim < min_interval:
             return False
@@ -120,11 +126,26 @@ if hasattr(os, "register_at_fork"):
 
 
 async def arelease_free_heap(*, min_interval: float = MIN_INTERVAL_SECONDS) -> bool:
-    """:func:`release_free_heap` off the event loop, on a thread of its own."""
+    """:func:`release_free_heap` off the event loop, on a thread of its own.
+
+    Without ``malloc_trim`` (macOS, Windows, musl) it returns ``False`` and
+    starts no thread. A trim that cannot be handed to its thread (no new
+    thread can start, or the interpreter is shutting down) is logged and
+    skipped (``False``). Never raises, cancellation aside.
+    """
+    with _lock:
+        available = _resolved_trim() is not None
+    if not available:
+        return False
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        _trim_executor(), functools.partial(release_free_heap, min_interval=min_interval)
-    )
+    try:
+        future = loop.run_in_executor(
+            _trim_executor(), functools.partial(release_free_heap, min_interval=min_interval)
+        )
+    except Exception:  # noqa: BLE001 — no trim thread (shutdown, thread limit) must not fail a batch
+        logger.debug("heap trim could not be scheduled", exc_info=True)
+        return False
+    return await future
 
 
 def heap_trim_mode(settings: GlobalSettings | None) -> HeapTrimMode:
