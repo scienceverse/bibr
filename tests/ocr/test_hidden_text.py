@@ -186,7 +186,10 @@ def test_white_text_on_white_is_dropped():
 
 
 def test_a_white_on_white_doi_is_hidden_doi_evidence_not_a_printed_line():
-    """osf_mvfth: the postprint banner's DOI is white on white."""
+    """A postprint banner's DOI, white on white, that the page never shows.
+
+    Such a banner can carry another paper's DOI, left in a reused template.
+    """
     banner = "Final article available at: https://doi.org/10.1037/cou0000324"
     pdf_bytes = _pdf(_white(_bt(banner, 72.0, 700.0, size=8.0)) + _body())
 

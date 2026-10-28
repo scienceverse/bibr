@@ -1,6 +1,6 @@
 """A DOI cut short by a text-layer region's box never outranks the full DOI.
 
-10.1177_11779322231160397 (SAGE): the text-layer header box ended the line
+In a SAGE paper the text-layer header box ended the line
 "https://doi.org/10.1177/11779322231160397" at "...311603", so the header gave
 a truncated candidate beside the printed DOI. The native fill marks a region
 whose box cuts a printed line (``RegionSummary.native_text_edge_cut``); a DOI

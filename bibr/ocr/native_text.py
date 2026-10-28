@@ -1257,7 +1257,7 @@ def _sample_page_font_metadata(
 # Text-layer headers and footers go to OCR where the text layer is known to
 # miss or garble them:
 # - right-to-left scripts (Arabic, Hebrew): pdfium hands the glyphs over in
-#   visual order, so 10.37651_aujlps's Arabic running heads read "(14)" as
+#   visual order, so an Arabic journal's running heads read "(14)" as
 #   ")41(" and "2024" as "1 202", with the words scrambled;
 # - a first-page masthead drawn partly as an image: a header or footer box on
 #   the first page that images cover by at least _MASTHEAD_MAX_IMAGE_COVERAGE,

@@ -423,10 +423,12 @@ def test_without_pdf_evidence_the_pool_is_unchanged():
 
 # --- hidden text -----------------------------------------------------------------
 #
-# osf_mvfth prints no DOI; its only one is a white-on-white APA postprint banner
-# ("Not the version of record. Final article available at:
-# https://doi.org/10.1037/cou0000324"), which the hidden-text rule strips. Hidden
-# text may agree with the paper's DOI, never name it.
+# A white-on-white banner can carry a DOI the page never shows, even another
+# paper's, left in a reused template. Here a paper that prints no DOI carries an
+# APA postprint banner ("Not the version of record. Final article available at:
+# https://doi.org/10.1037/cou0000324") whose DOI belongs to a different paper;
+# the hidden-text rule strips it. Hidden text may agree with the paper's DOI,
+# never name it.
 
 _BANNER = "Final article available at: https://doi.org/10.1037/cou0000324"
 
@@ -493,8 +495,10 @@ def test_a_queue_run_whose_doi_is_only_hidden_is_an_identity_conflict(
 ):
     """An expected DOI the PDF carries only in hidden text does not match it.
 
-    osf_mvfth's shape: its only DOI is in the white-on-white banner, so a queue
-    run that expects that DOI, or requires one, gets a blocking identity issue.
+    The page prints no DOI of its own, and the white-on-white banner carries one
+    the page never shows (another paper's, left in a reused template), so a
+    queue run that expects the banner's DOI, or requires one, gets a blocking
+    identity issue.
     """
     candidates = collect_doi_candidates(_contents(rows), _evidence(hidden=[HiddenDoi(1, _BANNER)]))
 

@@ -85,7 +85,7 @@ def test_first_page_box_the_glyphs_barely_fill_goes_to_ocr():
     ("label", "filled"), [("header", False), ("footer", False), ("text", True)]
 )
 def test_right_to_left_furniture_goes_to_ocr(monkeypatch, label, filled):
-    """An Arabic running head as pdfium returns it (10.37651_aujlps)."""
+    """An Arabic journal's running head as pdfium returns it."""
     monkeypatch.setattr(
         native_text,
         "_text_from_bbox_on_textpage",
@@ -133,7 +133,7 @@ def _doi_header_page() -> dict:
 
 
 def test_box_that_cuts_the_line_marks_the_region():
-    """10.1177_11779322231160397: the header box ended the DOI at '...311603'."""
+    """A SAGE paper's header box ended the DOI at '...311603'."""
     cut_at = 34 + _width("https://doi.org/10.1177/117793222311603", 8.0) + 0.5
     pdf_bytes = _pdf([_doi_header_page(), _doi_header_page()])
 

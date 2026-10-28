@@ -32,10 +32,11 @@ TEXT_LAYER = "text_layer"
 LINK_ANNOTATION = "link_annotation"
 AGREEMENT_ONLY = "agreement_only"
 # Text the PDF carries but never prints (white on white, off the page; the
-# hidden_text rule of bibr.ocr.native_text) is an agreement-only row too:
-# osf_mvfth's only DOI is a white-on-white APA postprint banner. It may agree
-# with the selected DOI (semantic context HIDDEN_TEXT_AGREEMENT) and never
-# names the paper, breaks a tie or rejects another candidate.
+# hidden_text rule of bibr.ocr.native_text) is an agreement-only row too: a
+# white-on-white banner can carry a DOI the page never shows, even another
+# paper's, left in a reused template. It may agree with the selected DOI
+# (semantic context HIDDEN_TEXT_AGREEMENT) and never names the paper, breaks a
+# tie or rejects another candidate.
 HIDDEN_TEXT = "hidden_text"
 HIDDEN_TEXT_AGREEMENT = "hidden_text_agreement"
 LINE_JOIN_OVERRUN = "line_join_overrun"
