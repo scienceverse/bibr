@@ -1535,7 +1535,10 @@ class RorOptions(_BibrSettings):
         ge=1,
         description="Client-side ROR request budget per 5 minutes, per process. Default: 1000 "
         "without a client ID (half ROR's limit of 2000 per IP address, so two processes on one "
-        "address stay under it) and 2000 with one.",
+        "address stay under it) and 2000 with one. Every bibr process and other ROR client "
+        "behind one outgoing IP address shares ROR's 2000, so with N processes set at most "
+        "2000/N. A 429 from ROR halves the budget in that process (not below 50, or this value "
+        "if lower), and each hour without one doubles it back.",
     )
     request_timeout: float = Field(
         10.0, gt=0, description="Per-HTTP-request timeout in seconds for ROR calls."

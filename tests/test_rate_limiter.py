@@ -65,6 +65,17 @@ class TestSecondsUntilSlot:
         assert limiter.seconds_until_slot() == 0.0
         assert not limiter._timestamps
 
+    def test_a_lowered_budget_waits_until_the_window_drops_below_it(self):
+        limiter = AsyncLocalRateLimiter(resource_id="test", max_requests=3, window_seconds=10.0)
+        now = time.monotonic()
+        limiter._timestamps.extend([now - 9.0, now - 6.0, now - 2.0])
+        # Lowered after a 429: all three slots must leave the window, the
+        # newest in 8 s. The oldest alone frees in 1 s.
+        limiter.max_requests = 1
+        assert 7.0 < limiter.seconds_until_slot() <= 8.0
+        assert 7.0 < limiter._take_slot() <= 8.0
+        assert len(limiter._timestamps) == 3
+
 
 class TestLocalRateLimiterLoopRebinding:
     """M6: the limiter must survive a second ``asyncio.run()`` in one process.

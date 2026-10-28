@@ -216,6 +216,21 @@ Two consequences of keeping execution on the receiving replica:
   uploads to it, let its running jobs finish) to avoid even that.
 - Work spreads by which replica receives the upload, not by queue depth.
 
+**ROR request budget.** ROR matching, which runs with enrichment on, keeps its
+request budget per process: each replica, like each `bibr batch` or `bibr chew`
+process, sends at most 1000 ROR requests per 5 minutes (2000 with
+`ROR_CLIENT_ID`), and a replica's concurrent requests and `JOBS_MAX_RUNNING`
+jobs share that one budget. ROR allows 2000 requests per 5 minutes per IP
+address, shared by every bibr process and any other ROR client behind one
+outgoing address, so with N of them set `ROR_REQUESTS_PER_5MIN` to at most
+2000/N on each (500 for four replicas). If ROR still answers 429, that process
+pauses ROR lookups for 5 minutes (api.ror.org sends no `Retry-After`) and
+halves its budget, not below 50; each hour without a 429 doubles it back, up to
+the setting. A 403 means ROR has blocked the address, or `ROR_URL` names a
+wrong path: the process logs a warning that quotes ROR's answer and pauses ROR
+lookups for 5 minutes, without halving. Strings skipped during a pause stay
+unmatched, and the paper gets `ROR_MATCHING_FAILED`.
+
 **Follow-up (not implemented): a shared queue.** Letting an idle replica execute a
 job another replica accepted would need the upload bytes on shared storage and a
 Redis work queue with a visibility timeout, so a dead replica's jobs are re-run

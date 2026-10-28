@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 
 import httpx
@@ -205,6 +206,156 @@ def test_the_429_backoff_reads_rate_limited_even_with_the_budget_spent(monkeypat
     assert second == (None, "rate limited")
     assert client.blocked
     assert calls == ["First University"]
+
+
+class _Clock:
+    """The ROR client's ``time``: ``monotonic()`` moves only when a test moves it.
+
+    The limiter keeps the real clock, so these tests stay well inside its window.
+    """
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+def _fake_clock(monkeypatch) -> _Clock:
+    clock = _Clock()
+    monkeypatch.setattr("bibr.clients.ror.time", clock)
+    return clock
+
+
+def _warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+
+
+def _four_in_flight(status: int, text: str):
+    """Four lookups, all sent before ROR answers any of them with *status*."""
+    sent = 0
+
+    async def run():
+        nonlocal sent
+        all_sent = asyncio.Event()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal sent
+            sent += 1
+            if sent == 4:
+                all_sent.set()
+            await asyncio.wait_for(all_sent.wait(), timeout=5)
+            return httpx.Response(status, text=text)
+
+        client = _client(handler)
+        results = await asyncio.gather(*(client.lookup(f"University {i}") for i in range(4)))
+        return client, results
+
+    client, results = asyncio.run(run())
+    assert sent == 4
+    return client, results
+
+
+def test_a_429_halves_the_budget_once_per_pause(caplog):
+    # Four lookups are in flight when ROR starts answering 429, with no
+    # Retry-After as api.ror.org sends it. The budget halves once, not once per
+    # answer (1000 / 16 = 62), and one WARNING names the new ceiling.
+    with caplog.at_level(logging.WARNING, logger="bibr.clients.ror"):
+        client, results = _four_in_flight(429, "Rate Limit Exceeded.")
+    assert results == [(None, "rate limited")] * 4
+    assert client._limiter.max_requests == 500
+    assert _warnings(caplog) == [
+        "ROR rate limit reached; skipping ROR lookups for 300s, then at most 500 requests "
+        "per 5 minutes"
+    ]
+
+
+def test_403s_in_flight_warn_once(caplog):
+    with caplog.at_level(logging.WARNING, logger="bibr.clients.ror"):
+        client, results = _four_in_flight(403, "You have been blocked due to bad behavior.")
+    assert results == [(None, "blocked (HTTP 403)")] * 4
+    assert client._limiter.max_requests == 1000
+    assert len(_warnings(caplog)) == 1
+
+
+@pytest.mark.parametrize(
+    ("configured", "budgets"),
+    [
+        (None, [500, 250, 125, 62, 50, 50]),  # the default, down to the floor of 50
+        (60, [50, 50]),
+        (7, [7, 7]),  # a configured budget below 50 is its own floor
+    ],
+)
+def test_each_new_pause_halves_the_budget_down_to_its_floor(monkeypatch, configured, budgets):
+    clock = _fake_clock(monkeypatch)
+    client = _client(lambda request: httpx.Response(429), requests_per_5min=configured)
+    seen = []
+    for i in range(len(budgets)):
+        assert not client.blocked
+        assert asyncio.run(client.lookup(f"University {i}")) == (None, "rate limited")
+        seen.append(client._limiter.max_requests)
+        clock.now += 300.0  # the next 429 arrives just as this pause ends
+    assert seen == budgets
+
+
+def test_each_hour_without_a_429_doubles_the_budget_back(monkeypatch, caplog):
+    clock = _fake_clock(monkeypatch)
+    start = clock.now
+    calls: list[str] = []
+    answer = _answering(calls)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if not calls:
+            calls.append(request.url.params["affiliation"])
+            return httpx.Response(429)
+        return answer(request)
+
+    # An odd budget, so the second doubling would overshoot it.
+    client = _client(handler, requests_per_5min=999)
+
+    def budget_at(seconds: float, text: str) -> int:
+        clock.now = start + seconds
+        asyncio.run(client.lookup(text))  # a new string each time: cached answers skip all this
+        return client._limiter.max_requests
+
+    assert budget_at(0, "Uni 0") == 499  # the 429
+    assert budget_at(3599, "Uni 1") == 499
+    with caplog.at_level(logging.INFO, logger="bibr.clients.ror"):
+        assert budget_at(3600, "Uni 2") == 998
+    assert "ROR budget back up to 998 requests per 5 minutes" in caplog.text
+    assert budget_at(3600, "Uni 3") == 998  # one doubling per quiet hour
+    assert budget_at(7199, "Uni 4") == 998
+    assert budget_at(7200, "Uni 5") == 999  # never above the configured budget
+    assert budget_at(20000, "Uni 6") == 999
+    assert calls == [f"Uni {i}" for i in range(7)]
+
+
+def test_a_403_pauses_lookups_without_halving(caplog):
+    # ROR answers 403 only for addresses it has blocked: every later request
+    # would fail too.
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.params["affiliation"])
+        return httpx.Response(403, text="You have been blocked due to bad behavior.")
+
+    client = _client(handler)
+
+    async def run():
+        return [await client.lookup("First University"), await client.lookup("Second University")]
+
+    started = time.monotonic()
+    with caplog.at_level(logging.WARNING, logger="bibr.clients.ror"):
+        results = asyncio.run(run())
+    assert results == [(None, "blocked (HTTP 403)")] * 2
+    assert calls == ["First University"]
+    assert client.blocked
+    assert 300.0 <= client._blocked_until - started < 310.0
+    assert client._limiter.max_requests == 1000
+    warnings = _warnings(caplog)
+    assert len(warnings) == 1
+    assert "HTTP 403" in warnings[0]
+    assert "You have been blocked due to bad behavior." in warnings[0]
 
 
 def test_a_cached_answer_is_returned_after_the_budget_is_spent(monkeypatch):

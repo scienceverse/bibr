@@ -13,10 +13,17 @@ so two processes on one address stay under it. With a client ID (sent as the
 ``Client-Id`` header) the budget is 2000. ``ROR_REQUESTS_PER_5MIN`` sets it.
 The client keeps to the budget with a sliding window, remembers answers
 (misses too) in a process-wide cache, and backs off entirely after a 429 for
-the ``Retry-After`` interval (at most one window). A lookup given a deadline
-does not wait for a slot that would free after it: it reports "request budget
-spent" at once (a 429 backoff reports "rate limited"), so a paper does not sit
-out its whole ROR time budget in the queue.
+the ``Retry-After`` interval (at most one window). api.ror.org answers
+over-limit requests with a 429 and no ``Retry-After``, so the pause is one
+window, 5 minutes. The first 429 of a pause also halves the process's budget,
+not below 50 (or the configured budget, if lower), so processes that share an
+address settle under ROR's limit; each hour without a 429 doubles it back, up
+to the configured budget. A 403 means ROR has blocked the address (or
+``ROR_URL`` names a wrong path): lookups pause for one window, without
+halving. A lookup given a deadline does not wait for a slot that would free
+after it: it reports "request budget spent" at once (a 429 backoff reports
+"rate limited", a 403 pause "blocked (HTTP 403)"), so a paper does not sit out
+its whole ROR time budget in the queue.
 Every failure degrades to "no match": ROR never fails enrichment.
 """
 
@@ -41,9 +48,16 @@ logger = logging.getLogger(__name__)
 
 _WINDOW_SECONDS = 300.0
 # Per process. Two processes on one address at 1000 each stay under ROR's
-# 2000 per address; one 429 would stop ROR lookups for up to a window.
+# 2000 per address; one 429 stops ROR lookups for up to a window.
 _ANONYMOUS_REQUESTS_PER_WINDOW = 1000
 _CLIENT_ID_REQUESTS_PER_WINDOW = 2000
+# A 429 halves the budget, never below ROR's published figure for clients
+# without an ID (or the configured budget, if lower); an hour without a 429
+# doubles it back toward the configured budget.
+_MIN_BUDGET_AFTER_429 = 50
+_RECOVERY_QUIET_SECONDS = 3600.0
+_RATE_LIMITED = "rate limited"
+_BLOCKED = "blocked (HTTP 403)"
 # Strings outside these bounds are not affiliations worth a request.
 _MIN_CHARS = 3
 _MAX_CHARS = 500
@@ -67,6 +81,7 @@ class RorClient:
         budget = ror.requests_per_5min or (
             _CLIENT_ID_REQUESTS_PER_WINDOW if ror.client_id else _ANONYMOUS_REQUESTS_PER_WINDOW
         )
+        self._budget = budget
         self._limiter = AsyncLocalRateLimiter("ror", budget, _WINDOW_SECONDS)
         mailto = settings.crossref.api_email
         headers = {"User-Agent": f"bibr (mailto:{mailto})" if mailto else "bibr"}
@@ -80,6 +95,8 @@ class RorClient:
         self._cache_size = ror.cache_size
         self._cache: OrderedDict[str, OrganizationMatch | None] = OrderedDict()
         self._blocked_until = 0.0
+        self._block_reason = _RATE_LIMITED
+        self._last_429: float | None = None
 
     async def aclose(self) -> None:
         if self._owns_client and self._client is not None:
@@ -109,8 +126,26 @@ class RorClient:
 
     @property
     def blocked(self) -> bool:
-        """True while backing off after a 429."""
+        """True while backing off after a 429 or a 403."""
         return time.monotonic() < self._blocked_until
+
+    def _lower_budget(self) -> None:
+        floor = min(_MIN_BUDGET_AFTER_429, self._budget)
+        self._limiter.max_requests = max(floor, self._limiter.max_requests // 2)
+
+    def _recover_budget(self) -> None:
+        """Double a lowered budget back after an hour without a 429."""
+        if self._last_429 is None or self._limiter.max_requests >= self._budget:
+            return
+        now = time.monotonic()
+        if now - self._last_429 < _RECOVERY_QUIET_SECONDS:
+            return
+        self._limiter.max_requests = min(self._budget, self._limiter.max_requests * 2)
+        self._last_429 = now  # one doubling per quiet hour
+        logger.info(
+            "No ROR 429 for an hour; ROR budget back up to %d requests per 5 minutes",
+            self._limiter.max_requests,
+        )
 
     async def match(self, text: str) -> OrganizationMatch | None:
         """ROR's chosen organization for *text*, or ``None``."""
@@ -124,9 +159,10 @@ class RorClient:
 
         The failure is ``None`` for an answered lookup, matched or not, and a
         short reason when ROR could not be asked or did not answer usefully:
-        "HTTP 503", "rate limited" (backing off after a 429), "request budget
-        spent", "invalid JSON", or the type name of the error raised
-        ("ConnectError"). It never raises an ``Exception``.
+        "HTTP 503", "rate limited" (backing off after a 429), "blocked (HTTP
+        403)" (pausing after a 403), "request budget spent", "invalid JSON",
+        or the type name of the error raised ("ConnectError"). It never
+        raises an ``Exception``.
 
         *deadline* is a ``time.monotonic()`` value: when the request budget
         has no slot free before it, the lookup fails with "request budget
@@ -149,7 +185,8 @@ class RorClient:
             self._cache.move_to_end(key)
             return self._cache[key], None
         if self.blocked:
-            return None, "rate limited"
+            return None, self._block_reason
+        self._recover_budget()
         if deadline is not None and (
             time.monotonic() + self._limiter.seconds_until_slot() >= deadline
         ):
@@ -172,9 +209,34 @@ class RorClient:
             # matching for the life of the process.
             delay = float(retry_after) if retry_after.isdecimal() else _WINDOW_SECONDS
             delay = min(delay, _WINDOW_SECONDS)
-            self._blocked_until = time.monotonic() + delay
-            logger.warning("ROR rate limit reached; skipping ROR lookups for %.0fs", delay)
-            return None, "rate limited"
+            now = time.monotonic()
+            self._last_429 = now
+            # Lookups already in flight when ROR starts refusing answer 429
+            # too: only the first 429 of a pause lowers the budget and warns.
+            if now >= self._blocked_until:
+                self._lower_budget()
+                self._block_reason = _RATE_LIMITED
+                logger.warning(
+                    "ROR rate limit reached; skipping ROR lookups for %.0fs, then at most %d "
+                    "requests per 5 minutes",
+                    delay,
+                    self._limiter.max_requests,
+                )
+            self._blocked_until = max(self._blocked_until, now + delay)
+            return None, _RATE_LIMITED
+        if response.status_code == 403:
+            # ROR answers 403 only for addresses it has blocked (bad queries
+            # get 400), and its gateway answers 403 for a wrong ROR_URL path:
+            # every later request would fail too, so pause without halving.
+            if not (self.blocked and self._block_reason == _BLOCKED):
+                logger.warning(
+                    "ROR refused this address (HTTP 403): %r; skipping ROR lookups for %.0fs",
+                    response.text[:200],
+                    _WINDOW_SECONDS,
+                )
+            self._block_reason = _BLOCKED
+            self._blocked_until = max(self._blocked_until, time.monotonic() + _WINDOW_SECONDS)
+            return None, _BLOCKED
         if response.status_code != 200:
             logger.debug("ROR returned HTTP %d for %r", response.status_code, text[:80])
             return None, f"HTTP {response.status_code}"
