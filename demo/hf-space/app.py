@@ -5,19 +5,28 @@ Upload a paper; bibr extracts its metadata and references, and metacheck
 
 bibr's CPU models (layout, sentence segmenter, classifiers, reference NER)
 run in this process through ONNX Runtime. The three GPU models are served
-in-process by ``zerogpu_models`` and run only inside ``@spaces.GPU`` batches:
+in-process by ``zerogpu_models`` and run only on ZeroGPU's GPU:
 
 * OCR for tables, formulas and scanned pages: PaddleOCR-VL-1.6
 * front-page metadata: bibr's fine-tuned Qwen3.5-4B student (``DEMO_LLM=local``),
   or a cloud API
 * review of uncertain references: bibr's Qwen3.5-0.8B LoRA adapter
 
+ZeroGPU's per-request token expires about a minute into a request, so GPU
+calls made later in a paper fail. By default (``DEMO_GPU_MODE=paper``) the whole
+paper runs in one ``@spaces.GPU`` window requested at the start, sized by its
+page count. ``DEMO_GPU_MODE=batch`` keeps one GPU call per batch of requests.
+
 Settings (Space variables; API keys are Space secrets):
 
+DEMO_GPU_MODE       paper (default) | batch
+DEMO_GPU_SECONDS    longest GPU window a paper may ask for (default 170)
+DEMO_REQUIRE_LOGIN  1 (default): visitors sign in with Hugging Face first, since
+                    an anonymous visitor's 2 GPU minutes a day can't fit a paper
 DEMO_LLM            local (default) | anthropic | google | none
 DEMO_EXTRACTOR      4b (default) | 2b, the student DEMO_LLM=local serves
 DEMO_REF_REVIEW     1 (default) loads the reference adapter; 0 keeps NER only
-DEMO_MAX_PAGES      pages read per paper (default 30), bounds GPU time
+DEMO_MAX_PAGES      pages read per paper (default 20), bounds GPU time
 DEMO_MAX_FILE_SIZE_MB   upload limit (default 10)
 CROSSREF_API_EMAIL  turns Crossref reference matching on
 ANTHROPIC_API_KEY / GEMINI_API_KEY   for DEMO_LLM=anthropic / google
@@ -36,6 +45,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
 
 import gradio as gr
@@ -51,7 +61,15 @@ for _name in ("httpx", "httpx2"):
 HERE = Path(__file__).parent
 DEMO_LLM = os.environ.get("DEMO_LLM", "local").lower()
 REF_REVIEW = os.environ.get("DEMO_REF_REVIEW", "1") == "1"
-MAX_PAGES = int(os.environ.get("DEMO_MAX_PAGES", "30"))
+MAX_PAGES = int(os.environ.get("DEMO_MAX_PAGES", "20"))
+GPU_MODE = os.environ.get("DEMO_GPU_MODE", "paper").lower()
+GPU_SECONDS_MAX = int(os.environ.get("DEMO_GPU_SECONDS", "170"))
+# Window per paper: model loads and the front page, then OCR and reference
+# review per page. A first guess, to be replaced by measured seconds.
+GPU_SECONDS_BASE = 40
+GPU_SECONDS_PER_PAGE = 6
+# Only on Spaces: Gradio's local OAuth mock needs a Hugging Face login.
+REQUIRE_LOGIN = os.environ.get("DEMO_REQUIRE_LOGIN", "1") == "1" and bool(os.environ.get("SPACE_ID"))
 MAX_FILE_MB = int(os.environ.get("DEMO_MAX_FILE_SIZE_MB", "10"))
 
 # Pinned weights. The students' revisions are the ones bibr's vLLM registry pins
@@ -141,8 +159,6 @@ def _memory() -> str:
 
 
 def _loaded(name: str, make):
-    import time
-
     logger.info("loading %s (%s)", name, _memory())
     started = time.monotonic()
     backend = make()
@@ -181,7 +197,10 @@ def load_backends() -> dict[str, zm.Backend]:
 
 if os.environ.get("DEMO_FAKE_MODELS") != "1":  # tests install their own backends
     zm.BACKENDS.update(load_backends())
-    zm.install(zm.build_app(zm.BACKENDS))
+    # In paper mode the shim runs inside the paper's GPU window, so it calls
+    # the models directly instead of asking ZeroGPU for a GPU per batch.
+    runner = zm.generate_batch if GPU_MODE == "paper" else None
+    zm.install(zm.build_app(zm.BACKENDS, runner=runner))
 
 # ---------------------------------------------------------------------------
 # The pipeline (CPU stages in this process; GPU stages via the shim).
@@ -246,8 +265,8 @@ def run_checks(json_path: str) -> str:
     return "\n".join(rows)
 
 
-def _gpu_totals() -> tuple[float, float, float]:
-    stats = zm.STATS.values()
+def _gpu_totals(stats=None) -> tuple[float, float, float]:
+    stats = (zm.STATS if stats is None else stats).values()
     return (
         sum(s["seconds"] for s in stats),
         sum(s.get("wall", 0.0) for s in stats),
@@ -255,23 +274,96 @@ def _gpu_totals() -> tuple[float, float, float]:
     )
 
 
-async def chew(file_path, progress=gr.Progress()):
+def _page_count(path: str) -> int:
+    import pypdfium2 as pdfium
+
+    try:
+        pdf = pdfium.PdfDocument(path)
+    except Exception:  # noqa: BLE001 - not a PDF pypdfium2 opens; bibr reports why
+        return MAX_PAGES
+    try:
+        return len(pdf)
+    finally:
+        pdf.close()
+
+
+def paper_seconds(file_path: str) -> int:
+    """The GPU window to ask ZeroGPU for: the quota a visitor needs left."""
+    pages = min(_page_count(file_path), MAX_PAGES)
+    return min(GPU_SECONDS_MAX, GPU_SECONDS_BASE + GPU_SECONDS_PER_PAGE * pages)
+
+
+_paper_loop: asyncio.AbstractEventLoop | None = None
+
+
+@zm.gpu(duration=paper_seconds)
+def process_on_gpu(file_path: str) -> tuple[dict, dict]:
+    """Run the whole paper in one GPU window (``DEMO_GPU_MODE=paper``).
+
+    Runs in ZeroGPU's forked GPU worker, so the model stats come back with the
+    result. The pipeline and its event loop are kept in case ZeroGPU reuses
+    the worker for the next paper.
+    """
+    global _paper_loop
+    if _paper_loop is None or _paper_loop.is_closed():
+        _paper_loop = asyncio.new_event_loop()
+    zm.STATS.clear()
+    paper_json = _paper_loop.run_until_complete(get_pipeline().process_file(file_path))
+    return paper_json, dict(zm.STATS)
+
+
+def _signed_in(request: gr.Request | None) -> bool:
+    """Signed in through the LoginButton, or calling the API with a token.
+
+    API callers (gradio_client, space_measure.py) send a Hugging Face token
+    instead of an OAuth session; ZeroGPU bills that token's account.
+    """
+    if request is None:
+        return False
+    if (request.headers or {}).get("authorization"):
+        return True
+    try:
+        return bool(request.session.get("oauth_info"))
+    except (AssertionError, AttributeError):  # no session without OAuth
+        return False
+
+
+async def chew(file_path, request: gr.Request, progress=gr.Progress()):
+    if REQUIRE_LOGIN and not _signed_in(request):
+        raise gr.Error(
+            "Sign in with Hugging Face first (button at the top). A paper needs more GPU "
+            "time than ZeroGPU gives anonymous visitors."
+        )
     if not file_path:
         raise gr.Error("Upload a PDF first.")
     if os.path.getsize(file_path) > MAX_FILE_MB * 1024 * 1024:
         raise gr.Error(f"Files up to {MAX_FILE_MB} MB, please.")
     progress(0.0, desc="Reading the paper...")
     async with _lock:
-        before = _gpu_totals()
-        paper_json = await get_pipeline().process_file(file_path, progress=_GradioProgress(progress))
-        gpu_s, gpu_wall, gpu_calls = (a - b for a, b in zip(_gpu_totals(), before))
-    logger.info("paper used %.1f GPU s generating, %.1f s in %d GPU calls", gpu_s, gpu_wall, gpu_calls)
+        if GPU_MODE == "paper":
+            window = paper_seconds(file_path)
+            progress(0.1, desc=f"Running on the GPU (up to {window} s of your quota)...")
+            # to_thread copies this request's context, which ZeroGPU reads to
+            # bill the visitor.
+            called = time.monotonic()
+            paper_json, stats = await asyncio.to_thread(process_on_gpu, file_path)
+            gpu_s, _, gpu_calls = _gpu_totals(stats)
+            gpu_wall = time.monotonic() - called
+            logger.info("paper: %d s window asked, %.0f s used, %.1f s generating", window, gpu_wall, gpu_s)
+        else:
+            before = _gpu_totals()
+            paper_json = await get_pipeline().process_file(file_path, progress=_GradioProgress(progress))
+            gpu_s, gpu_wall, gpu_calls = (a - b for a, b in zip(_gpu_totals(), before))
+            logger.info("paper used %.1f GPU s generating, %.1f s in %d GPU calls", gpu_s, gpu_wall, gpu_calls)
     result = _parse_json_response(paper_json)
     out = Path(tempfile.mkdtemp()) / (Path(file_path).stem + ".bibr.json")
     out.write_text(json.dumps(paper_json, ensure_ascii=False, indent=2))
     progress(0.95, desc="Running metacheck...")
     checks_md = await asyncio.to_thread(run_checks, str(out))
-    gpu_line = f"\n\n*GPU: {gpu_wall:.0f} s in {gpu_calls:.0f} calls.*" if gpu_calls else ""
+    if GPU_MODE == "paper":
+        gpu_line = f"\n\n*GPU: {gpu_wall:.0f} s, {gpu_s:.0f} s of it generating.*"
+    else:
+        gpu_line = f"\n\n*GPU: {gpu_wall:.0f} s in {gpu_calls:.0f} calls.*" if gpu_calls else ""
     return (
         _build_summary_md(result) + gpu_line,
         _build_authors_data(result),
@@ -288,12 +380,16 @@ Upload a scientific paper (PDF). [bibr](https://bibr.org) extracts its metadata 
 references, and [metacheck](https://github.com/scienceverse/pytacheck) runs a few
 quick checks on the result. The first {MAX_PAGES} pages are read.
 
-GPU time comes from your Hugging Face ZeroGPU quota; signing in gives you more.
-Papers are deleted from the Space after processing.
+Sign in with Hugging Face to run a paper. Each paper uses up to
+{GPU_SECONDS_MAX} s of your ZeroGPU quota (free accounts get 5 minutes a day, PRO 40),
+so a free account runs about two papers a day. Papers are deleted from the Space
+after processing.
 """
 
 with gr.Blocks(title="bibr demo", delete_cache=(600, 3600)) as demo:
     gr.Markdown(INTRO)
+    if REQUIRE_LOGIN:
+        gr.LoginButton()
     with gr.Row():
         with gr.Column(scale=1):
             file_input = gr.File(label="Paper (PDF)", file_types=[".pdf"], type="filepath")

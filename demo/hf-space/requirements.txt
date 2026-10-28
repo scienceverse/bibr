@@ -1,4 +1,7 @@
 # Gradio itself comes from sdk_version in README.md.
+# Sign-in (hf_oauth in README.md) needs gradio's oauth extra.
+authlib
+itsdangerous
 bibr==0.7.1
 # bibr 0.7.1 allows numind 0.3.2, which needs a C compiler on Linux (fixed in 0.7.2).
 numind==0.3.0

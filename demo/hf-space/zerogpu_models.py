@@ -481,9 +481,9 @@ def _gpu_duration(alias: str, batch: list[ChatRequest]) -> int:
     return BACKENDS[alias].duration_for(batch)
 
 
-@gpu(duration=_gpu_duration)
-def run_batch(alias: str, batch: list[ChatRequest]) -> tuple[list[Completion], float]:
-    """Generate one batch on the GPU. Runs in ZeroGPU's forked GPU worker."""
+def generate_batch(alias: str, batch: list[ChatRequest]) -> tuple[list[Completion], float]:
+    """Generate one batch. On ZeroGPU, call it only where a GPU is attached:
+    through ``run_batch``, or inside a caller's own ``@spaces.GPU`` window."""
     started = time.monotonic()
     results = BACKENDS[alias].generate(batch)
     elapsed = time.monotonic() - started
@@ -496,6 +496,10 @@ def run_batch(alias: str, batch: list[ChatRequest]) -> tuple[list[Completion], f
         [r.finish_reason for r in results],
     )
     return results, elapsed
+
+
+#: One ``@spaces.GPU`` call per batch. Runs in ZeroGPU's forked GPU worker.
+run_batch = gpu(duration=_gpu_duration)(generate_batch)
 
 
 def build_app(

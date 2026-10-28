@@ -184,3 +184,24 @@ def test_structured_and_plain_requests_batch_separately():
     responses = asyncio.run(run())
     assert all(r.status_code == 200 for r in responses)
     assert sorted(backend.batches) == [3, 3]
+
+
+def test_paper_mode_runner_calls_the_models_directly():
+    """In paper mode the shim runs inside the paper's GPU window: no GPU call per batch."""
+    zm.install(zm.build_app(zm.BACKENDS, runner=zm.generate_batch))
+    try:
+        backend = zm.BACKENDS["llm"]
+        backend.batches.clear()
+
+        async def run():
+            async with httpx.AsyncClient() as c:
+                body = {"model": "llm", "messages": [{"role": "user", "content": "x"}], "max_tokens": 8}
+                return await asyncio.gather(
+                    *(c.post(f"{zm.BASE_URL}/v1/chat/completions", json=body) for _ in range(3))
+                )
+
+        responses = asyncio.run(run())
+        assert all(r.status_code == 200 for r in responses)
+        assert backend.batches == [3]
+    finally:
+        zm.install(zm.build_app(zm.BACKENDS, runner=runner))
