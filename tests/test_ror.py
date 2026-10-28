@@ -308,6 +308,9 @@ def test_each_hour_without_a_429_doubles_the_budget_back(monkeypatch, caplog):
         if not calls:
             calls.append(request.url.params["affiliation"])
             return httpx.Response(429)
+        if request.url.params["affiliation"] == "Blocked University":
+            calls.append(request.url.params["affiliation"])
+            return httpx.Response(403)
         return answer(request)
 
     # An odd budget, so the second doubling would overshoot it.
@@ -318,16 +321,53 @@ def test_each_hour_without_a_429_doubles_the_budget_back(monkeypatch, caplog):
         asyncio.run(client.lookup(text))  # a new string each time: cached answers skip all this
         return client._limiter.max_requests
 
-    assert budget_at(0, "Uni 0") == 499  # the 429
-    assert budget_at(3599, "Uni 1") == 499
     with caplog.at_level(logging.INFO, logger="bibr.clients.ror"):
+        assert budget_at(0, "Uni 0") == 499  # the 429
+        # A 403 is not a 429: it does not restart the quiet hour.
+        assert budget_at(1800, "Blocked University") == 499
+        assert budget_at(3599, "Uni 1") == 499
         assert budget_at(3600, "Uni 2") == 998
-    assert "ROR budget back up to 998 requests per 5 minutes" in caplog.text
-    assert budget_at(3600, "Uni 3") == 998  # one doubling per quiet hour
-    assert budget_at(7199, "Uni 4") == 998
-    assert budget_at(7200, "Uni 5") == 999  # never above the configured budget
-    assert budget_at(20000, "Uni 6") == 999
-    assert calls == [f"Uni {i}" for i in range(7)]
+        assert budget_at(3600, "Uni 3") == 998  # one doubling per quiet hour
+        assert budget_at(7199, "Uni 4") == 998
+        assert budget_at(7200, "Uni 5") == 999  # never above the configured budget
+        assert budget_at(20000, "Uni 6") == 999
+    recoveries = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "bibr.clients.ror" and r.levelno == logging.INFO
+    ]
+    assert recoveries == [
+        f"No ROR 429 for an hour; ROR budget back up to {n} requests per 5 minutes"
+        for n in (998, 999)
+    ]
+    assert calls == ["Uni 0", "Blocked University"] + [f"Uni {i}" for i in range(1, 7)]
+
+
+def test_an_idle_process_gains_one_doubling_at_a_time(monkeypatch):
+    # The budget recovers on a lookup: hours spent idle count as one quiet
+    # hour, and the next doubling needs another hour from then.
+    clock = _fake_clock(monkeypatch)
+    calls: list[str] = []
+    answer = _answering(calls)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if len(calls) < 2:
+            calls.append(request.url.params["affiliation"])
+            return httpx.Response(429)
+        return answer(request)
+
+    client = _client(handler)
+
+    def budget_after(seconds: float, text: str) -> int:
+        clock.now += seconds
+        asyncio.run(client.lookup(text))
+        return client._limiter.max_requests
+
+    assert budget_after(0, "Uni 0") == 500
+    assert budget_after(300, "Uni 1") == 250  # the next 429, as the first pause ends
+    assert budget_after(5 * 3600, "Uni 2") == 500
+    assert budget_after(0, "Uni 3") == 500
+    assert budget_after(3600, "Uni 4") == 1000
 
 
 def test_a_403_pauses_lookups_without_halving(caplog):
@@ -356,6 +396,66 @@ def test_a_403_pauses_lookups_without_halving(caplog):
     assert len(warnings) == 1
     assert "HTTP 403" in warnings[0]
     assert "You have been blocked due to bad behavior." in warnings[0]
+
+
+def test_a_429_after_a_403_pause_reads_rate_limited(monkeypatch):
+    clock = _fake_clock(monkeypatch)
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.params["affiliation"])
+        if len(calls) == 1:
+            return httpx.Response(403, text="You have been blocked due to bad behavior.")
+        return httpx.Response(429)
+
+    client = _client(handler)
+    assert asyncio.run(client.lookup("First University")) == (None, "blocked (HTTP 403)")
+    clock.now += 300.0  # the 403 pause ends; ROR now answers 429
+    assert asyncio.run(client.lookup("Second University")) == (None, "rate limited")
+    # During the 429 pause lookups read "rate limited", not the old 403 reason.
+    assert asyncio.run(client.lookup("Third University")) == (None, "rate limited")
+    assert client._limiter.max_requests == 500
+    assert calls == ["First University", "Second University"]
+
+
+def test_a_429_in_flight_does_not_shorten_a_403_pause():
+    # ROR blocks the address while a second lookup is in flight; that lookup
+    # comes back 429 with a short Retry-After after the 403 has opened its
+    # pause. The 403 pause keeps its 5 minutes and its reason.
+    sent: list[str] = []
+
+    async def run():
+        all_sent = asyncio.Event()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            sent.append(request.url.params["affiliation"])
+            if len(sent) == 2:
+                all_sent.set()
+            await asyncio.wait_for(all_sent.wait(), timeout=5)
+            if request.url.params["affiliation"] == "First University":
+                return httpx.Response(403, text="You have been blocked due to bad behavior.")
+
+            async def until_paused() -> None:
+                while not client.blocked:
+                    await asyncio.sleep(0)
+
+            await asyncio.wait_for(until_paused(), timeout=5)
+            return httpx.Response(429, headers={"Retry-After": "10"})
+
+        client = _client(handler)
+        started = time.monotonic()
+        results = await asyncio.gather(
+            client.lookup("First University"), client.lookup("Second University")
+        )
+        later = await client.lookup("Third University")
+        return client, started, results, later
+
+    client, started, results, later = asyncio.run(run())
+    assert results == [(None, "blocked (HTTP 403)"), (None, "rate limited")]
+    assert later == (None, "blocked (HTTP 403)")
+    assert sent == ["First University", "Second University"]
+    assert 300.0 <= client._blocked_until - started < 310.0
+    assert client._limiter.max_requests == 1000
 
 
 def test_a_cached_answer_is_returned_after_the_budget_is_spent(monkeypatch):

@@ -17,8 +17,10 @@ the ``Retry-After`` interval (at most one window). api.ror.org answers
 over-limit requests with a 429 and no ``Retry-After``, so the pause is one
 window, 5 minutes. The first 429 of a pause also halves the process's budget,
 not below 50 (or the configured budget, if lower), so processes that share an
-address settle under ROR's limit; each hour without a 429 doubles it back, up
-to the configured budget. A 403 means ROR has blocked the address (or
+address settle under ROR's limit. The first lookup after an hour without a 429
+doubles it back, and the next doubling needs another such hour, up to the
+configured budget: a process that sat idle for hours gains one doubling, not
+one per idle hour. A 403 means ROR has blocked the address (or
 ``ROR_URL`` names a wrong path): lookups pause for one window, without
 halving. A lookup given a deadline does not wait for a slot that would free
 after it: it reports "request budget spent" at once (a 429 backoff reports
@@ -52,8 +54,8 @@ _WINDOW_SECONDS = 300.0
 _ANONYMOUS_REQUESTS_PER_WINDOW = 1000
 _CLIENT_ID_REQUESTS_PER_WINDOW = 2000
 # A 429 halves the budget, never below ROR's published figure for clients
-# without an ID (or the configured budget, if lower); an hour without a 429
-# doubles it back toward the configured budget.
+# without an ID (or the configured budget, if lower); the first lookup after
+# an hour without a 429 doubles it back toward the configured budget.
 _MIN_BUDGET_AFTER_429 = 50
 _RECOVERY_QUIET_SECONDS = 3600.0
 _RATE_LIMITED = "rate limited"

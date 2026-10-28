@@ -21,10 +21,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `ROR_MATCHING_FAILED` warning gives its reason as "request budget spent", so
   it is not confused with "rate limited", the backoff after ROR answers 429.
 - A 429 from ROR now also halves that process's ROR request budget, not below
-  50 (or `ROR_REQUESTS_PER_5MIN`, if lower), and each hour without a 429
-  doubles it back up to the configured budget, so several bibr processes
-  behind one IP address settle under ROR's 2000 requests per 5 minutes instead
-  of drawing a 429 every window. The pause after a 429 is unchanged: its
+  50 (or `ROR_REQUESTS_PER_5MIN`, if lower); the first lookup after an hour
+  without a 429 doubles it back, and the next doubling needs another such
+  hour, up to the configured budget. Several bibr processes behind one IP
+  address then settle under ROR's 2000 requests per 5 minutes instead of
+  drawing a 429 every window. The pause after a 429 is unchanged: its
   `Retry-After`, at most 5 minutes (api.ror.org sends none, so 5 minutes). A
   403, which ROR answers only for addresses it has blocked, now pauses ROR
   lookups for 5 minutes without halving, logs a warning that quotes ROR's

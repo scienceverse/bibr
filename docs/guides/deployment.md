@@ -225,8 +225,10 @@ address, shared by every bibr process and any other ROR client behind one
 outgoing address, so with N of them set `ROR_REQUESTS_PER_5MIN` to at most
 2000/N on each (500 for four replicas). If ROR still answers 429, that process
 pauses ROR lookups for 5 minutes (api.ror.org sends no `Retry-After`) and
-halves its budget, not below 50; each hour without a 429 doubles it back, up to
-the setting. A 403 means ROR has blocked the address, or `ROR_URL` names a
+halves its budget, not below 50. The first ROR lookup after an hour without a
+429 doubles it back, and the next doubling needs another such hour, up to the
+setting, so a process that sat idle for hours gains one doubling, not one per
+idle hour. A 403 means ROR has blocked the address, or `ROR_URL` names a
 wrong path: the process logs a warning that quotes ROR's answer and pauses ROR
 lookups for 5 minutes, without halving. Strings skipped during a pause stay
 unmatched, and the paper gets `ROR_MATCHING_FAILED`.
