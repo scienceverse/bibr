@@ -993,7 +993,7 @@ async def test_two_long_citation_lists_together_stay_inside_the_window(ollama_cl
 
 
 async def test_a_short_citation_list_leaves_its_share_to_the_references(ollama_client):
-    # osf_bpkce: a 54,940-character reference list next to a short citation
+    # One preprint has a 54,940-character reference list next to a short citation
     # list. An even split cut the references to about 28%.
     server = FakeOllama(num_ctx=16_384)
     client = ollama_client(server, _hosted_settings())
