@@ -142,6 +142,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   12 GB card, which on a 10 GB card would leave less than 8 GiB from the
   second chunk. The 12 GB card stays balanced:
   it finished 100 papers with a desktop, its last starts finding 8.6 GiB free.
+- In the aggressive memory mode, a managed llama.cpp LLM server now always
+  stops before a managed GLM-OCR server starts (the LLM stage restarts it).
+  Under the free-memory rule (under Fixed) it stayed up whenever 3.25 GiB was
+  free, which left bibr's own GPU models too little room while OCR ran: on an
+  emulated 10 GB card with a 0.5 GiB desktop the LLM stayed up, bibr's models
+  had about 1.97 GiB against the 3.1 GiB or so they reach in aggressive mode,
+  and the layout model split its batches on running out of memory 75 times
+  over 48 papers. An emulated 8 GB card, which stopped the LLM in every chunk
+  after the first, split 26 times on the same papers and ran 149.5 papers an
+  hour, against 148.2 for the 10 GB card with the LLM resident, so stopping
+  cost no measured speed. Both runs read the model files from a warm page
+  cache; on a machine with little RAM and a slow disk each restart reads the
+  GGUF again. This changes Windows 10–11 GB NVIDIA cards, pre-Ampere 11 GB
+  cards (RTX 2080 Ti, GTX 1080 Ti), `--llm llama-cpp` below 12 GB and any run
+  that sets the aggressive mode itself (`--memory aggressive` or
+  `PIPELINE_MEMORY_MODE=aggressive`) with a managed llama.cpp LLM, on a card
+  of any size; on 6–9 GB cards the LLM already stopped in every measured chunk
+  after the first. The balanced and keep_all modes keep the free-memory rule.
 - On Linux the automatic OCR chain (`OCR_BACKEND` unset or `paddle`) now runs
   GLM-OCR on llama.cpp whenever the run's LLM runs on llama.cpp, the pair
   `bibr setup` writes: bibr hands GPU memory between two vLLM servers or two
@@ -211,7 +229,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   its compute buffer and refused every page (on an emulated 8 GB card with a
   desktop, 3 of 3 papers failed in each later chunk). bibr now stops the LLM
   server before that start when the memory free then cannot also hold GLM-OCR
-  (2.25 GiB) and 1 GiB for its own models; the LLM stage restarts it.
+  (2.25 GiB) and 1 GiB for its own models, and always in the aggressive
+  memory mode (see above); the LLM stage restarts it.
 - When the layout, sentence, reference-parser or a classifier model could not
   even open its CUDA session for lack of GPU memory, the whole chunk failed
   (`parse_failed` for the sentence segmenter). Such a model now opens on the

@@ -72,8 +72,9 @@ PADDLE_VLLM_MIN_VRAM_GB = 8.0
 #: with its vision projector, an 8,192-token context and one slot) holds while
 #: it OCRs: at most 2,206 MiB on an RTX 3090 over a chunk of three papers
 #: (llama.cpp b11282), rounded up to a quarter GiB. A start beside a managed
-#: llama.cpp LLM server stops that server first when less than this plus
-#: bibr's minimum room is free (``ResourceManager._llm_server_blocks_ocr``).
+#: llama.cpp LLM server stops that server first in the aggressive memory mode,
+#: and in any other when less than this plus bibr's minimum room is free
+#: (``ResourceManager._llm_server_blocks_ocr``).
 GLM_LLAMA_OCR_VRAM_GB = 2.25
 
 
