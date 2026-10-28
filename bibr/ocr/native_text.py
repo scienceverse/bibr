@@ -1263,9 +1263,9 @@ def _sample_page_font_metadata(
 #   the first page that images cover by at least _MASTHEAD_MAX_IMAGE_COVERAGE,
 #   or whose native glyphs span less than _MASTHEAD_MIN_GLYPH_COVERAGE of its
 #   height. On the 390 dev exports (2026-10-26) that sends 11 of the 690
-#   fillable first-page header/footer boxes to OCR, gesec's raster
-#   "DOI: 10.7769/gesec.7i3.557" line among them. The check runs on the PDF's
-#   first page only: behind a repository or download cover (HAL, ResearchGate,
+#   fillable first-page header/footer boxes to OCR, a Brazilian journal's
+#   raster "DOI: ..." line among them. The check runs on the PDF's first page
+#   only: behind a repository or download cover (HAL, ResearchGate,
 #   Taylor & Francis) the article's own first page is a later one, but bibr
 #   tells a cover page only from the parsed front matter
 #   (bibr.extract.front_matter._without_cover_pages), after this fill;
@@ -1277,7 +1277,7 @@ def _sample_page_font_metadata(
 #   (a scanned paper from the evaluation set: "althof ef af.i" for
 #   "Althof et al.:", a scanned Lancet paper: "1025" for the whole Lancet
 #   running head), so they go to OCR; body text keeps its route. On the 392
-#   dev PDFs (2026-10-26) only gesec's first page and one other paper
+#   dev PDFs (2026-10-26) only that journal's first page and one other paper
 #   qualify; on the 80 scans of the evaluation set, 7 PDFs.
 # A box that cuts a printed line is filled but marked (_box_cuts_a_line).
 # The OCR cache keeps the regions after the fill, so the routing has a version

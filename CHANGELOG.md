@@ -43,16 +43,18 @@ every 12.2 export is still valid input for the 12.x reader.
   fields on born-digital papers or scans. Set it to `false` to OCR them as
   before.
 - A DOI found only in text the PDF never prints is agreement-only and is never
-  selected on its own. A paper whose only DOI is hidden, such as a
-  white-on-white DOI banner, now gets a null DOI; before, that white text was
-  read like any other text-layer DOI. For a manifest that expects that DOI, or
-  one that requires a DOI, identity now raises the blocking
-  `VAL_EXPECTED_ID_MISSING` (`VAL_EXPECTED_ID_MISMATCH` when the pages print
-  another DOI that could name the paper). The export then goes to
-  `_quarantine/identity_conflict/`, and its receipt records the
-  `identity_conflict` disposition. A hidden DOI that differs from the printed
-  one no longer makes the selection `VAL_DOI_AMBIGUOUS` with no DOI, so the
-  printed DOI is selected.
+  selected on its own. A paper that prints no DOI and carries one only in
+  hidden text, such as a white-on-white banner, now gets a null DOI; before,
+  that white text was read like any other text-layer DOI. Such a banner can
+  hold another paper's DOI, left in a reused template. For a manifest that
+  expects the hidden DOI, identity now raises the blocking
+  `VAL_EXPECTED_ID_MISSING`, or `VAL_EXPECTED_ID_MISMATCH` when the pages print
+  another DOI that could name the paper. A manifest that only requires a DOI
+  gets the blocking `VAL_EXPECTED_ID_MISSING` when no printed DOI can name the
+  paper. In both cases the export goes to `_quarantine/identity_conflict/`,
+  and its receipt records the `identity_conflict` disposition. A hidden DOI
+  that differs from the printed one no longer makes the selection
+  `VAL_DOI_AMBIGUOUS` with no DOI, so the printed DOI is selected.
 
 ### Fixed
 

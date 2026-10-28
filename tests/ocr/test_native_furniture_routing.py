@@ -3,10 +3,10 @@
 With OCR_NATIVE_TEXT_HEADER_FOOTER on, a header or footer stays with OCR when
 its text is in a right-to-left script (pdfium's visual order turned "(14)"
 into ")41(" in an Arabic running head), when it is a first-page masthead
-drawn partly as an image (gesec's raster "DOI: 10.7769/..." line, of which the
-text layer has only the editor line), on a page whose text is mostly an
-invisible OCR layer, and on a page a scan image covers whatever the render mode
-of its OCR layer. Body text keeps its route in every case.
+drawn partly as an image (a Brazilian journal's raster "DOI: ..." line, of
+which the text layer has only the editor line), on a page whose text is mostly
+an invisible OCR layer, and on a page a scan image covers whatever the render
+mode of its OCR layer. Body text keeps its route in every case.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ def _fill(pdf_bytes: bytes, pages: list[list[dict]]) -> list[list[dict]]:
 
 
 def _masthead_page(*, image: bool) -> dict:
-    """An editor line under a raster masthead band (gesec's first page)."""
+    """An editor line under a raster masthead band (a Brazilian journal's first page)."""
     band = _image(270, 50, 30, 740) if image else b""
     return {
         "content": band
