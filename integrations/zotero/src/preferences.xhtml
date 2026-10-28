@@ -1,0 +1,24 @@
+<vbox id="bibr-prefs">
+	<groupbox>
+		<label><html:h2>bibr server</html:h2></label>
+		<description>
+			The bibr server the plugin sends files to: a local "bibr serve" (the default) or a hosted one.
+			The server needs its async jobs API (JOBS_ENABLED, on by default).
+		</description>
+		<hbox align="center">
+			<html:label for="bibr-server-url">Server URL</html:label>
+			<html:input type="text" id="bibr-server-url" size="40" preference="extensions.bibr.serverURL"/>
+		</hbox>
+		<hbox align="center">
+			<html:label for="bibr-api-key">API key (AUTH_API_KEY, if the server sets one)</html:label>
+			<html:input type="password" id="bibr-api-key" size="40" preference="extensions.bibr.apiKey"/>
+		</hbox>
+	</groupbox>
+	<groupbox>
+		<label><html:h2>What to write</html:h2></label>
+		<checkbox id="bibr-overwrite" preference="extensions.bibr.overwrite"
+			label="Replace fields that already have a value (off: fill empty fields only)"/>
+		<checkbox id="bibr-import-references" preference="extensions.bibr.importReferences"
+			label="Import the reference list into a new collection"/>
+	</groupbox>
+</vbox>

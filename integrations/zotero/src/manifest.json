@@ -1,0 +1,15 @@
+{
+	"manifest_version": 2,
+	"name": "bibr for Zotero",
+	"version": "0.1.1",
+	"description": "Fill an item's metadata and import its reference list with bibr.",
+	"homepage_url": "https://bibr.org",
+	"applications": {
+		"zotero": {
+			"id": "zotero@bibr.org",
+			"update_url": "https://raw.githubusercontent.com/scienceverse/bibr/main/integrations/zotero/updates.json",
+			"strict_min_version": "7.0",
+			"strict_max_version": "9.*"
+		}
+	}
+}

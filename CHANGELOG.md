@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- A Zotero 7–9 plugin prototype in `integrations/zotero/`: right-click an item to fill
+  its empty fields from what bibr reads on the paper and import its reference list
+  (values as printed) into a new collection, through a bibr server's jobs API. It is
+  not part of the Python package.
+
 ## [0.7.4] - 2026-10-23
 
 The reference parser is now v5.1 (UltraBERT-150M), which matches references far better
