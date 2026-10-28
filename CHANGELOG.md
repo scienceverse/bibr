@@ -9,8 +9,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 
 - A DOI printed in a publisher's box above the article title is found again
-  when the OCR runs with the GLM profile: GLM-OCR, and the Gemini, OpenAI and
-  Anthropic vision backends. The layout model often labels such a box as a
+  when the OCR runs with the GLM profile: GLM-OCR, the Gemini, OpenAI and
+  Anthropic vision backends, and any backend set to `OCR_PROFILE=glm`. The
+  layout model often labels such a box as a
   table, and bibr reads the DOI from the region's complete OCR text, because
   the region summary keeps only its first 200 characters. The GLM profile
   dropped that text after normalization, so these runs never saw the box. It

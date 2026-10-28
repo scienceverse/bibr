@@ -188,9 +188,9 @@ OCR_PROFILE=paddle
 
 Profiles also preserve output semantics. The Paddle profile decodes OTSL table
 markers (`<fcel>`, `<lcel>`, `<nl>`, `<ecel>`) into HTML and removes one outer
-Markdown/LaTeX fence or balanced display wrapper from formulas. It retains the
-unmodified model response as `raw_ocr_content` in the opt-in
-`extraction.regions` diagnostic payload. The selected backend, model, and
+Markdown/LaTeX fence or balanced display wrapper from formulas. The GLM profile
+leaves the output as it is. Both retain the unmodified model response as
+`raw_ocr_content` in the opt-in `extraction.regions` diagnostic payload. The selected backend, model, and
 profile are included in `extraction.ocr` and in the OCR-cache identity, so a
 cache hit never crosses a Paddle/GLM or normalizer boundary.
 
