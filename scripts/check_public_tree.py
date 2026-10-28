@@ -34,6 +34,7 @@ ARCHIVE_SUFFIXES = frozenset({".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".zs
 PUBLIC_DOCUMENTS = frozenset(
     {
         "bibr/data/sample_paper.pdf",
+        "integrations/zotero/src/preferences.xhtml",
         "tests/fixtures/cropbox_offset_sample.pdf",
         "tests/fixtures/footnotes_sample.docx",
         "tests/fixtures/jats/PMC4383902.xml",
