@@ -237,7 +237,12 @@ Silicon when that executable is available, otherwise vllm-mlx; llama.cpp on
 Windows, CUDA cards below 10 GB and CUDA cards older than Ampere (compute
 capability below 8.0); and vLLM on other Linux/CUDA systems with at least
 10 GB (or when VRAM detection is unavailable). With the same card it picks the
-model, the memory mode and the OCR that `bibr setup` writes.
+model, the memory mode and the OCR that `bibr setup` writes, except on a 10–11 GB
+card where setup found a CUDA llama.cpp server and wrote `LLM_BACKEND=llama-cpp`
+(see [choosing an extraction model](extraction-models.md#on-10-and-11-gb-cards)):
+`--llm local` never reads `PATH` and keeps vLLM there. After such a setup, run
+plain `bibr chew` (or `--llm llama-cpp`): `--llm local` would start vLLM with the
+GGUF build setup wrote, which vLLM cannot serve.
 Explicit choices are `vllm`, `vllm-mlx`, `rapid-mlx`, `llama-cpp`, and `llmster`.
 The OCR and LLM choices are independent, so local OCR with a cloud LLM is a
 supported hybrid configuration. A managed vLLM LLM server and the managed
@@ -331,7 +336,7 @@ has the measurements):
 |---|---|---|
 | vLLM, 20 GB or more | `scienceverse/bibr-extract-qwen35-4b` (Qwen3.5-4B fine-tuned for bibr, bf16) | an 11.0 GiB budget; 12.75 GiB free to start |
 | vLLM, 10–19 GB | `scienceverse/bibr-extract-qwen35-4b-W4A16` (the same model with 4-bit weights) | a 6.0 GiB budget; 7.75 GiB free to start |
-| llama.cpp (Windows, cards below 10 GB) | `scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0`, else `:Q4_K_M`, else the 2B's `scienceverse/bibr-extract-qwen35-2b-GGUF` builds | 7 GB for the 4B Q8_0, down to 3 GB for the 2B Q4_K_M |
+| llama.cpp (Windows, cards below 10 GB, and 10–11 GB cards where setup found a CUDA llama-server) | `scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0`, else `:Q4_K_M`, else the 2B's `scienceverse/bibr-extract-qwen35-2b-GGUF` builds | 7 GB for the 4B Q8_0, down to 3 GB for the 2B Q4_K_M |
 | Rapid-MLX / vllm-mlx | `scienceverse/bibr-extract-qwen35-4b-mlx-8bit`, else the 2B's `-2b-mlx-8bit` | 6 GB for the 4B, 3 GB for the 2B |
 
 When no local model fits, the recommended hosted model is Claude Haiku 5.5

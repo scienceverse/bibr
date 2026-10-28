@@ -2549,3 +2549,241 @@ def test_run_validation_tests_the_private_server_llm(monkeypatch):
     wizard._run_validation(setup)
 
     assert calls == ["llm"]
+
+
+# --- the 10–11 GB llama.cpp pair -------------------------------------------
+
+_LLAMA_SERVER = "/opt/llama.cpp/llama-server"
+
+
+def _pair_setup(**server):
+    from bibr.setup_wizard import SetupLlamaServer
+
+    return _build_recommended_setup(
+        platform_key="cuda",
+        accelerator_memory_gb=10.0,
+        system_memory_gb=32.0,
+        sys_platform="linux",
+        machine="x86_64",
+        llama_server=SetupLlamaServer(**server),
+    )
+
+
+def test_recommended_setup_10_gb_runs_the_pair_on_a_qualifying_llama_server():
+    """An RTX 3080 10 GB with a CUDA llama-server of build 11282 or newer gets
+    the 4B GGUF Q8_0 and GLM-OCR on it: 148 against 85 papers an hour on the
+    same 48 papers, passing 40 against W4A16's 39."""
+    setup = _pair_setup(command=(_LLAMA_SERVER,), build=11282)
+    assert setup.env["LLM_BACKEND"] == "llama-cpp"
+    assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
+    assert setup.env["OCR_BACKEND"] == "glm-llama"
+    assert setup.env["PIPELINE_MEMORY_MODE"] == "aggressive"
+    assert "vllm" not in setup.extras
+    summary = setup.runtime_summary
+    assert f"{_LLAMA_SERVER} (build 11282)" in summary
+    assert "GLM-OCR both run on the CUDA llama.cpp server" in summary
+    assert "148 papers an hour against 85" in summary
+    assert "40 and 39 of 48" in summary
+    assert "150" in summary and "141" in summary
+    assert "`bibr setup --advanced` sets up the W4A16 build on vLLM" in summary
+    # --llm local resolves vLLM on this card, which cannot serve the GGUF build.
+    assert "Run plain `bibr chew`: `--llm local` picks vLLM on this card" in summary
+    assert "--advanced" in setup.fallback_hint and "W4A16" in setup.fallback_hint
+    assert setup.note == ""
+
+
+def test_recommended_setup_10_gb_keeps_w4a16_beside_a_rejected_llama_server():
+    setup = _pair_setup(command=(_LLAMA_SERVER,), rejected="build 11000 below 11282")
+    assert setup.env["LLM_BACKEND"] == "vllm"
+    assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-W4A16"
+    assert "vllm" in setup.extras
+    assert setup.note == (
+        f"Found llama.cpp at {_LLAMA_SERVER} but not using it: build 11000 below 11282. "
+        "The 4B W4A16 build runs on vLLM instead."
+    )
+    assert setup.fallback_hint == ""
+
+
+def test_recommended_setup_10_gb_without_a_llama_server_is_unchanged():
+    setup = _pair_setup()
+    assert setup.env["LLM_BACKEND"] == "vllm"
+    assert setup.note == "" and setup.fallback_hint == ""
+
+
+@pytest.mark.parametrize("vram_gb", [12.0, 16.0, 24.0])
+def test_a_qualifying_llama_server_changes_nothing_from_12_gb(vram_gb):
+    from bibr.setup_wizard import SetupLlamaServer
+
+    setup = _build_recommended_setup(
+        platform_key="cuda",
+        accelerator_memory_gb=vram_gb,
+        system_memory_gb=32.0,
+        sys_platform="linux",
+        machine="x86_64",
+        llama_server=SetupLlamaServer(command=(_LLAMA_SERVER,), build=11282),
+    )
+    assert setup.env["LLM_BACKEND"] == "vllm"
+    assert "vllm" in setup.extras
+    assert _LLAMA_SERVER not in setup.runtime_summary
+
+
+def _run_easy_setup(monkeypatch, probe, *, build=11282, wizard=None):
+    """Run the easy wizard on an RTX 3080 10 GB up to the plan, then decline."""
+    wizard = wizard or _recording_wizard()
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 10.0))
+    monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 32.0)
+    monkeypatch.setattr("bibr.setup_wizard._probe_llama_server", probe)
+    monkeypatch.setattr("bibr.local.llama_cpp.probe_build_number", lambda prefix: build)
+    monkeypatch.setattr("bibr.local.llama_cpp.find_llama_server", lambda: [_LLAMA_SERVER])
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: False)
+    wizard.run()
+    return wizard.console.export_text()
+
+
+def test_easy_setup_prints_the_llama_server_it_runs_the_pair_on(monkeypatch):
+    text = " ".join(_run_easy_setup(monkeypatch, lambda: ([_LLAMA_SERVER], None)).split())
+    assert "bibr-extract-qwen35-4b-GGUF:Q8_0 via llama-cpp" in text
+    assert "glm-llama" in text
+    assert f"{_LLAMA_SERVER} (build 11282)" in text
+    assert "bibr setup --advanced" in text
+    assert "vllm" not in text.split("Extras", 1)[1].split("Memory", 1)[0]
+
+
+def test_easy_setup_prints_one_line_for_a_rejected_llama_server(monkeypatch):
+    reason = "CUDA could not start in this build (driver older than the build's CUDA?)"
+    text = " ".join(_run_easy_setup(monkeypatch, lambda: (None, reason)).split())
+    assert "bibr-extract-qwen35-4b-W4A16 via vllm" in text
+    assert f"Found llama.cpp at {_LLAMA_SERVER} but not using it: {reason}." in text
+
+
+def _record_statuses(monkeypatch, wizard, events):
+    """Record the wizard's status lines, and what ran while each was up."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def status(message, *args, **kwargs):
+        events.append(("status", message))
+        yield
+        events.append(("done", message))
+
+    monkeypatch.setattr(wizard.console, "status", status)
+
+
+def test_easy_setup_shows_a_status_line_while_it_probes_the_llama_server(monkeypatch):
+    events = []
+    wizard = _recording_wizard()
+    _record_statuses(monkeypatch, wizard, events)
+    _run_easy_setup(
+        monkeypatch,
+        lambda: events.append(("probe",)) or ([_LLAMA_SERVER], None),
+        wizard=wizard,
+    )
+    message = "Checking the llama.cpp server on PATH …"
+    assert events == [("status", message), ("probe",), ("done", message)]
+
+
+def test_easy_setup_on_a_12_gb_card_never_looks_for_a_llama_server(monkeypatch):
+    probed = []
+    events = []
+    wizard = _recording_wizard()
+    _record_statuses(monkeypatch, wizard, events)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 12.0))
+    monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 32.0)
+    monkeypatch.setattr(
+        "bibr.setup_wizard._probe_llama_server", lambda: probed.append(1) or ([_LLAMA_SERVER], None)
+    )
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: False)
+    wizard.run()
+    assert probed == []
+    assert events == []
+
+
+def test_smoke_test_failure_after_the_pair_names_the_w4a16_alternative(monkeypatch):
+    wizard = _recording_wizard()
+    setup = _pair_setup(command=(_LLAMA_SERVER,), build=11282)
+    monkeypatch.setattr(wizard, "_collect_required_prompts", lambda s: None)
+    monkeypatch.setattr(wizard, "_step_write_env", lambda **k: None)
+    monkeypatch.setattr(wizard, "_offer_extras_install", lambda: None)
+    monkeypatch.setattr(wizard, "_run_validation", lambda s: None)
+    monkeypatch.setattr(wizard, "_print_done", lambda: None)
+    with (
+        patch("bibr.setup_wizard.Confirm.ask", return_value=True),
+        patch("bibr.api.chew", side_effect=RuntimeError("GLM-OCR server failed to start")),
+    ):
+        wizard._finish_recommended_setup(setup)
+    text = " ".join(wizard.console.export_text().split())
+    assert "Test extraction failed" in text
+    assert "`bibr setup --advanced` sets up the 4B W4A16 build on vLLM instead" in text
+
+
+def test_smoke_test_failure_without_the_pair_names_no_alternative(monkeypatch):
+    wizard = _recording_wizard()
+    with (
+        patch("bibr.setup_wizard.Confirm.ask", return_value=True),
+        patch("bibr.api.chew", side_effect=RuntimeError("boom")),
+    ):
+        wizard._step_smoke_test()
+    assert "--advanced" not in wizard.console.export_text()
+
+
+def test_local_server_test_failure_after_the_pair_names_the_w4a16_alternative(monkeypatch):
+    wizard = _recording_wizard()
+    wizard._fallback_hint = _pair_setup(command=(_LLAMA_SERVER,), build=11282).fallback_hint
+    wizard.env_vars = {
+        "LLM_BACKEND": "llama-cpp",
+        "LLM_LOCAL_MODEL": "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0",
+    }
+
+    class _Failing:
+        def __init__(self):
+            raise RuntimeError("unknown model architecture: 'qwen35'")
+
+    monkeypatch.setattr("bibr.local.llama_cpp.LlamaCppLlmServer", _Failing)
+    # The test sets LLM_LOCAL_MODEL itself; setenv makes monkeypatch restore it.
+    monkeypatch.setenv("LLM_LOCAL_MODEL", "unset")
+    wizard._test_local_server()
+    text = " ".join(wizard.console.export_text().split())
+    assert "Local server test failed" in text
+    assert "retry with `bibr chew`." in text
+    assert "`bibr setup --advanced` sets up the 4B W4A16 build on vLLM instead" in text
+
+
+def test_windows_keeps_its_own_llama_cpp_plan_beside_a_qualifying_server():
+    """Windows runs llama.cpp at every size already; the pair's summary, which
+    compares it with vLLM, is for Linux."""
+    from bibr.setup_wizard import SetupLlamaServer
+
+    setup = _build_recommended_setup(
+        platform_key="cuda",
+        accelerator_memory_gb=10.0,
+        system_memory_gb=32.0,
+        sys_platform="win32",
+        machine="AMD64",
+        llama_server=SetupLlamaServer(command=(_LLAMA_SERVER,), build=11282),
+    )
+    assert setup.env["LLM_BACKEND"] == "llama-cpp"
+    assert "winget install llama.cpp" in setup.runtime_summary
+    assert "--advanced" not in setup.runtime_summary
+    assert setup.fallback_hint == ""
+
+
+@pytest.mark.parametrize(
+    ("vram_gb", "pair"),
+    [(9.74, False), (9.75, True), (10.0, True), (11.0, True), (11.74, True), (11.75, False)],
+)
+def test_the_pair_band_is_the_aggressive_vllm_band(vram_gb, pair):
+    from bibr.setup_wizard import _llama_pair_card
+
+    assert _llama_pair_card("cuda", vram_gb, "linux") is pair
+
+
+def test_the_pair_band_keeps_its_own_floor_if_vllm_reaches_smaller_cards(monkeypatch):
+    """The band starts at VLLM_LLM_MIN_CARD_GB, not wherever the registry's
+    smallest vLLM build happens to fit."""
+    from bibr.setup_wizard import _llama_pair_card
+
+    monkeypatch.setattr("bibr.setup_wizard.cuda_llm_backend_for", lambda memory_gb: "vllm")
+    assert _llama_pair_card("cuda", 9.5, "linux") is False
+    assert _llama_pair_card("cuda", 10.0, "linux") is True

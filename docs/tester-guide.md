@@ -238,7 +238,10 @@ uv run bibr demo
 
 Below 10 GB, `bibr setup` uses **llama.cpp** for OCR and the local LLM. From
 10 GB, on Ampere or newer cards, both run through vLLM, with the 4-bit W4A16 build of bibr's fine-tuned
-4B model below 20 GB and its bf16 build from 20 GB. Install a
+4B model below 20 GB and its bf16 build from 20 GB. On a 10–11 GB card, setup
+uses llama.cpp instead when it finds a CUDA build of `llama-server` of build
+11282 or newer on your `PATH`, and says so; `bibr setup --advanced` still
+offers W4A16. Install a
 **CUDA** (or Vulkan) build of llama.cpp separately:
 
 1. Install or build llama.cpp with CUDA support (`GGML_CUDA=ON` for a source
@@ -298,14 +301,16 @@ Optional overrides (already the managed defaults for low-VRAM) live in `.env`:
 
 `bibr setup` writes a model and runtime to `.env`; `--llm local` without setup
 resolves the same model, runtime, memory mode and OCR from the platform and
-the detected card (a test checks that the two agree on every row). The
-current defaults are:
+the detected card (a test checks that the two agree on every row). The one
+exception is a 10–11 GB card where setup found a qualifying llama.cpp server:
+setup looks on `PATH`, the runtime never does. The current defaults are:
 
 | Platform | OCR backend | Local LLM backend |
 |---|---|---|
 | Windows | `glm-llama` (llama.cpp) | llama.cpp |
 | Linux, NVIDIA GPU **≥ 20 GB** (e.g. RTX 3090) | `paddle-vllm` | vLLM, bibr extract 4B |
 | Linux, NVIDIA GPU **10–<20 GB** | `paddle-vllm` | vLLM, bibr extract 4B W4A16 (aggressive memory mode below 12 GB) |
+| Linux, NVIDIA GPU **10–<12 GB**, `bibr setup` with a CUDA `llama-server` of build 11282 or newer on `PATH` | `glm-llama` (llama.cpp) | llama.cpp, bibr extract 4B GGUF Q8_0 (aggressive memory mode); run plain `bibr chew`, since `--llm local` keeps vLLM, which cannot serve this GGUF build |
 | Linux, NVIDIA GPU **< 10 GB** | `glm-llama` (llama.cpp) | llama.cpp, bibr extract 4B GGUF (Q8_0 from 7 GB, Q4_K_M below) |
 | Linux, NVIDIA GPU older than Ampere (compute capability below 8.0), any size | `glm-llama` (llama.cpp) | llama.cpp, bibr extract 4B GGUF (untested on such cards) |
 | Apple Silicon (M-series) | `paddle-rapid-mlx` (rapid-mlx) | rapid-mlx, else vllm-mlx |
@@ -331,7 +336,8 @@ sample before starting a large batch, and inspect both metadata and references.
 If fully local inference does not run, or is too slow, walk down this ladder:
 
 1. try the llama.cpp build (`--ocr glm-llama`, and `--llm local` on Windows or a
-   small GPU already selects llama.cpp);
+   GPU below 10 GB already selects llama.cpp; on a 10–11 GB card where
+   `bibr setup` picked llama.cpp, run plain `bibr chew` or `--llm llama-cpp`);
 2. set an API key for a cloud LLM (Anthropic, Google, OpenAI, …) and keep OCR
    local — inexpensive and reliable; or
 3. self-host an open-source LLM on a GPU box and point bibr at it — OSS models

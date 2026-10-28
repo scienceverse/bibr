@@ -12,7 +12,7 @@ machine can run:
 |---|---|---|---|
 | Linux, NVIDIA GPU (Ampere or newer) with 20 GB or more | **bibr extract 4B**, Qwen3.5-4B fine-tuned for bibr (`scienceverse/bibr-extract-qwen35-4b`) | vLLM, 12.75 GiB free to start | 218; the previous revision 217 on the same machine, +0.4 points [−0.8, +2.0] |
 | Linux, NVIDIA GPU (Ampere or newer) with 10–19 GB | **bibr extract 4B W4A16**, the same model with 4-bit weights (`scienceverse/bibr-extract-qwen35-4b-W4A16`) | vLLM, 7.75 GiB free to start | 218, level with the bf16 4B on the same machine: +0.0 points [−1.6, +1.6] |
-| Linux, NVIDIA GPU with 5–9 GB or older than Ampere, or Windows | **bibr extract 4B GGUF**, the same model for llama.cpp (`scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0` from 7 GB, `:Q4_K_M` below) | llama.cpp, which you install; GLM-OCR runs on it too | Q8_0 218, +0.0 points [−1.2, +1.2] against the bf16 4B; Q4_K_M 217, −0.4 [−2.0, +0.8]; both on the same OCR as the rows above. With GLM-OCR, the previous revision was checked on 100 papers (Q8_0) and 48 (Q4_K_M) only |
+| Linux, NVIDIA GPU with 5–9 GB or older than Ampere, or Windows; also 10–11 GB when setup finds a CUDA build of llama.cpp ([below](#on-10-and-11-gb-cards)) | **bibr extract 4B GGUF**, the same model for llama.cpp (`scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0` from 7 GB, `:Q4_K_M` below) | llama.cpp, which you install; GLM-OCR runs on it too | Q8_0 218, +0.0 points [−1.2, +1.2] against the bf16 4B; Q4_K_M 217, −0.4 [−2.0, +0.8]; both on the same OCR as the rows above. With GLM-OCR, the previous revision was checked on 100 papers (Q8_0) and 48 (Q4_K_M) only |
 | No suitable GPU, or you prefer a hosted model | **Claude Haiku 5.5** (`claude-haiku-5-5`) | an Anthropic API key, about $0.004 a paper | 221, −0.8 points [−2.4, +0.8] against Qwen3.8-27B's 223 |
 
 The 4B's scores are from bibr commit e491ed64 on an RTX 5090, with OCR replayed
@@ -40,14 +40,16 @@ build. Speculative decoding needs more and is off in these default plans (see
 `bibr setup` writes the default for your card to `.env`. `--llm local` without
 setup resolves the same default from the card it detects: the model, the
 runtime, the memory mode and the OCR (a test checks that the two agree on every
-row). A card that reports up to 0.25 GiB under a size counts as that size (an
+row). The one exception is a 10–11 GB card where setup finds a CUDA build of
+llama.cpp ([below](#on-10-and-11-gb-cards)): setup looks on your PATH, the runtime
+never does. A card that reports up to 0.25 GiB under a size counts as that size (an
 RTX 4060 reports 8,188 MiB, an RTX 5070 12,227 MiB).
 
 | Card (Ampere or newer) | Default from `bibr setup` | Default from `--llm local` without setup | Memory mode | Batch run beside a 0.5 GiB desktop |
 |---|---|---|---|---|
 | 20 GB or more | 4B (bf16) on vLLM, PaddleOCR-VL on vLLM | the same | balanced, 8 papers a chunk | 20 GB: 48 of 48 papers, 138 an hour; 24 GB: 100 of 100, 161 an hour |
 | 12–19 GB | 4B W4A16 on vLLM, PaddleOCR-VL on vLLM | the same | balanced, 8 | 12 GB: 100 of 100, 187 an hour; 12 GB beside a 1.5 GiB desktop: 48 of 48, 188 an hour; 16 GB: 48 of 48, 161 an hour |
-| 10–11 GB | 4B W4A16 on vLLM, PaddleOCR-VL on vLLM | the same | aggressive, 3 | 10 GB: 48 of 48, 85 an hour |
+| 10–11 GB | 4B GGUF Q8_0 and GLM-OCR on llama.cpp when setup finds a CUDA `llama-server` of build 11282 or newer; otherwise 4B W4A16 on vLLM, PaddleOCR-VL on vLLM | 4B W4A16 on vLLM, PaddleOCR-VL on vLLM | aggressive, 3 | 10 GB, W4A16: 48 of 48, 85 an hour; the llama.cpp pair: see [below](#on-10-and-11-gb-cards) |
 | 7–9 GB | 4B GGUF Q8_0 on llama.cpp, GLM-OCR on llama.cpp | the same | aggressive, 3 | 8 GB: 100 of 100, 141 an hour |
 | 5–6 GB | 4B GGUF Q4_K_M on llama.cpp, GLM-OCR on llama.cpp | the same | aggressive, 3 | 6 GB: 48 of 48, 151 an hour; 6 GB beside a 1.0 GiB desktop: 48 of 48, 144 an hour |
 
@@ -72,6 +74,40 @@ spare at every start of the LLM (free memory beyond the 8 GiB a start needs).
 The 6 GB default has almost none: beside a 1.0 GiB desktop it finished, but the
 card fell to 2 MiB free and the sentence segmenter fell back to the CPU 107
 times. No run covers a 6 GB card beside a desktop above 1 GiB.
+
+#### On 10 and 11 GB cards
+
+On an RTX 3090 cut to 10 GB beside a 0.5 GiB desktop, the W4A16 build on vLLM
+finished 48 papers at 85 an hour: every chunk of 3 papers restarts two vLLM
+servers, PaddleOCR-VL and the LLM. The 4B GGUF Q8_0 with GLM-OCR, both on
+llama.cpp, finished the same 48 papers at 148 an hour and passed 40 of them to
+W4A16's 39, a difference within chance. That run kept the LLM up between
+chunks, which left bibr's own models about 2 GiB while OCR ran. bibr now stops
+it before each chunk's OCR in the aggressive mode, as the 8 GB runs of the same
+pair did in every chunk after the first (150 papers an hour over 48 papers, and
+141 over the 100 papers in the table above); no 10 GB run has used that rule
+yet.
+
+So on Linux and an Ampere or newer card of 10–11 GB, `bibr setup` runs both
+models on llama.cpp when it finds a CUDA build of `llama-server` (or of the
+unified `llama` binary) on your PATH that can start CUDA, with a `--version`
+build of 11282 or newer, the build behind every llama.cpp batch in the table
+above. It prints the server and its build, and `bibr setup --advanced` gives
+you the W4A16 build instead. A server it finds but does not use (a Vulkan, HIP
+or CPU build, a CUDA build whose CUDA cannot start on your driver, or an older
+build) gets one line saying why, and setup keeps W4A16. If you later remove or
+replace that llama.cpp build, rerun `bibr setup`. `--llm local` without setup
+never looks at PATH and keeps W4A16. After setup picked the llama.cpp pair,
+run plain `bibr chew` (or `--llm llama-cpp`), not `--llm local`: that would
+start vLLM with the GGUF build setup wrote, which vLLM cannot serve.
+
+Neither choice has been run on 10 GB beside a desktop larger than 0.5 GiB. By
+arithmetic from the W4A16 run, whose starts found 8.76 GiB free, its starts
+(7.75 GiB on vLLM 0.32, 8.00 on vLLM 0.31) would be refused beside a desktop
+above about 1.5 GiB (1.26 GiB on vLLM 0.31). The llama.cpp pair, stopping the
+LLM for OCR, would have as much memory free beside a 2.5 GiB desktop as the
+8 GB runs had beside 0.5 GiB, with the same models and settings: an inference
+from those runs, not a run.
 
 Cards older than Ampere (compute capability below 8.0: Turing, Volta, Pascal)
 get the llama.cpp row for their size at any size, because bibr's vLLM models

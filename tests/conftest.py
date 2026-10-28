@@ -191,6 +191,15 @@ def _pin_cuda_probe_for_platform_tests(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_llama_server_for_setup(monkeypatch):
+    """``bibr setup`` looks on PATH for a CUDA llama.cpp server on a 10–11 GB
+    card (``bibr.setup_wizard._probe_llama_server``) and runs its LLM and OCR
+    there when one qualifies. Pin it to none found, so the host's PATH never
+    changes a recommendation; tests of that pick pin it themselves."""
+    monkeypatch.setattr("bibr.setup_wizard._probe_llama_server", lambda: (None, None))
+
+
+@pytest.fixture(autouse=True)
 def _no_live_gpu_memory_reading(monkeypatch):
     """Keep the suite off the host GPU's free memory.
 
