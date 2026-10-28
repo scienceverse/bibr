@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- A Zotero 7/8 plugin prototype in `integrations/zotero/`: right-click an item to fill
+- A Zotero 7–9 plugin prototype in `integrations/zotero/`: right-click an item to fill
   its empty fields from what bibr reads on the paper and import its reference list
   (values as printed) into a new collection, through a bibr server's jobs API. It is
   not part of the Python package.

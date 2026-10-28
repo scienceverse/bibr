@@ -1,6 +1,6 @@
 # bibr for Zotero
 
-A Zotero 7/8 plugin that sends an item's PDF (or Word, EPUB, HTML) to a bibr
+A Zotero 7–9 plugin that sends an item's PDF (or Word, EPUB, HTML) to a bibr
 server and writes the answer back into the library:
 
 - **Metadata.** Fields the item leaves empty are filled from what bibr read on
@@ -34,7 +34,7 @@ reference's *Extra* field.
 ## Build and test
 
 ```bash
-python integrations/zotero/build.py          # → integrations/zotero/dist/bibr-zotero-0.1.0.xpi
+python integrations/zotero/build.py          # → integrations/zotero/dist/bibr-zotero-0.1.1.xpi
 node --test integrations/zotero/test/core.test.js
 ```
 
