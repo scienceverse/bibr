@@ -53,7 +53,7 @@ EXTRAS = {
     "local": "In-process local OCR/LLM runtime (vllm-mlx) for Apple Silicon",
     "local-mlx": "Local OCR optimized for Apple Silicon Macs",
     "cache": "Response caching for the HTTP API (requires Redis)",
-    "gpu": "GPU acceleration for sentence splitting (NVIDIA CUDA)",
+    "gpu": "GPU ONNX Runtime for layout, sentence splitting, NER and classifiers (NVIDIA CUDA)",
     "demo": "Interactive web demo UI",
 }
 
@@ -280,7 +280,7 @@ def _platform_local_extra(
     """Pip extras needed for the in-process local OCR/LLM runtime.
 
     ``glm-llama`` uses an external llama.cpp binary (not a Python extra), so
-    low-VRAM / Windows paths must not pull a GPU runtime. On Linux/CUDA the
+    low-VRAM / Windows paths must not pull the vLLM runtime. On Linux/CUDA the
     runtime is the ``vllm`` extra: both ``paddle-vllm`` OCR and the managed
     local LLM launch through it. The ``local`` extra resolves to nothing on
     Linux (its only member is Apple-Silicon-only vllm-mlx); selecting it here
@@ -294,6 +294,35 @@ def _platform_local_extra(
     if sys_platform_name == "darwin" and machine == "arm64":
         return {"local"}
     return set()
+
+
+#: The oldest NVIDIA cards (compute capability) whose recommended plan installs
+#: the ``gpu`` extra: Ampere, like every card the plan's defaults ran on.
+_GPU_EXTRA_MIN_COMPUTE_CAPABILITY = 8.0
+
+
+def _recommends_gpu_extra(sys_platform_name: str, machine: str) -> bool:
+    """Whether the recommended plan for an NVIDIA card installs the ``gpu`` extra.
+
+    Without ``onnxruntime-gpu``, layout, SaT, NER and the classifiers run on
+    the CPU beside an idle GPU (169 vs 591 papers an hour on an RTX 5090), and
+    every run behind the plan's CUDA defaults had it: Linux on x86_64, Ampere
+    and newer cards. Elsewhere the plan stays as it was:
+
+    - Windows: no run with ``onnxruntime-gpu`` has been measured there.
+    - Linux on Arm: none measured either, and the locked ``onnxruntime-gpu``
+      (1.26.0) has no Linux Arm wheel; the ``vllm`` extra is x86_64-only too.
+    - Cards older than Ampere: none measured with it, and the CUDA 13 builds
+      that follow 1.26.0 carry no kernels for cards older than Turing. An
+      unreadable compute capability counts as Ampere, as in the OCR and LLM
+      routing (``bibr.ocr.registry.vllm_compute_capability_blocker``).
+    """
+    if sys_platform_name != "linux" or machine != "x86_64":
+        return False
+    from bibr.ocr import registry
+
+    capability = registry._nvidia_compute_capability()
+    return capability is None or capability >= _GPU_EXTRA_MIN_COMPUTE_CAPABILITY
 
 
 def _registry_short_label(hf_id: str) -> str | None:
@@ -418,6 +447,8 @@ def _build_recommended_setup(
                 ocr_backend="glm-llama" if ocr_on_llama_cpp else ocr_backend,
             ),
         }
+        if platform_key == "cuda" and _recommends_gpu_extra(sys_platform_name, machine_name):
+            extras.add("gpu")
         if "vllm" in extras and sys.version_info >= (3, 14):
             runtime += (
                 " Python 3.14 has no vLLM wheels yet, so the vllm extra installs nothing; "

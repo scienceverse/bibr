@@ -94,8 +94,9 @@ The serving extras are still hardware-specific, so most people want a subset:
 - **`--extra all` is the superset to reach for.** It bundles `batch` + `cache` + `demo` + `mcp` + `torch` — everything that is useful regardless of hardware.
 - Add **`vllm`** on Linux/CUDA (managed vLLM for `--llm local`, and the
   `paddle-vllm` GPU OCR backend), **`local`** or **`local-mlx`** on Apple
-  Silicon, and **`gpu`** for GPU-accelerated ONNX sentence segmentation
-  (see [GPU ONNX Runtime](#gpu-onnx-runtime)).
+  Silicon, and **`gpu`** for ONNX Runtime's GPU build, which layout, sentence
+  splitting, the NER parser and the classifiers can run on (see
+  [GPU ONNX Runtime](#gpu-onnx-runtime)).
 
 If `vllm` isn't installed, bibr's managed vLLM server falls back to launching it
 via `uv tool run --from vllm==0.32.0 --with 'openai>=2.54.0,<3' vllm serve ...` in an isolated environment,
@@ -129,7 +130,10 @@ PyPI built for CUDA 12. In a project that installed `bibr[gpu]` from PyPI, use
 the version that install chose (`uv pip show onnxruntime-gpu`). With pip, the
 command is `python -m pip install --force-reinstall --no-deps
 "onnxruntime-gpu==<version>"`. `bibr setup` runs this step itself when it
-installs the `gpu` extra.
+installs the `gpu` extra. Its recommended plan for an NVIDIA card installs the
+extra on Linux (x86_64, Ampere or newer), where every run behind the plan's
+defaults had it; on Windows, on Arm Linux and on older cards, which no run has
+measured with it, the plan leaves it out.
 
 Leave `onnxruntime` installed too. `uv run` reinstalls it when it is missing,
 and its files would then replace the GPU build's. For the same reason, repeat

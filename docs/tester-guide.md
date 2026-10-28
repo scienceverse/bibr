@@ -465,7 +465,12 @@ uv run bibr doctor
 ```
 
 The `.env` file is not touched by an update. Repeat any hardware extras you
-installed, for example `uv sync --extra all --extra vllm` on Linux/CUDA. With
+installed, for example `uv sync --extra all --extra vllm` on Linux/CUDA. On
+Linux, `bibr setup`'s recommended plan for an NVIDIA card installs `gpu` on
+Ampere or newer cards and `vllm` on cards that run vLLM, so keep both:
+`uv sync --extra all --extra gpu --extra vllm`, without any the plan did not
+install. A sync without `--extra gpu` removes `onnxruntime-gpu` and the files
+it shares with `onnxruntime`, and `import onnxruntime` then fails. With
 `--extra gpu`, run the `onnxruntime-gpu` reinstall from
 [GPU ONNX Runtime](getting-started/install.md#gpu-onnx-runtime) again afterwards.
 
