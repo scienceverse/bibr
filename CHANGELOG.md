@@ -169,8 +169,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   papers an hour on an RTX 5090, without and with the extra). Every run
   behind the plan's defaults had the extra: layout and sentence splitting ran
   on the GPU, and the NER reference parser did too in the balanced memory
-  mode, while the classifiers stayed on the CPU. The plan now installs what
-  was measured. Windows, Linux on Arm and cards older than Ampere, where no
+  mode, while the classifiers stayed on the CPU. In a source checkout with
+  `uv.lock` the plan now installs what was measured (`onnxruntime-gpu`
+  1.26.0); an install from PyPI gets the newest `onnxruntime-gpu`, which no
+  run has used. Windows, Linux on Arm and cards older than Ampere, where no
   run with `onnxruntime-gpu` has been measured, are left as they were. After
   an update, keep `--extra gpu` on `uv sync` (see the tester guide's
   "Updating").
