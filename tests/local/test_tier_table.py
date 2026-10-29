@@ -373,7 +373,7 @@ def test_setup_with_a_llama_server_on_path(card, llama_server, row, expected):
     pair_card = name in ("RTX 3080 10 GB", "11 GB card")
     if expected == _PAIR and pair_card:
         assert "vllm" not in setup.extras
-        assert setup.extras == {"ml", "demo"}
+        assert setup.extras == {"ml", "demo", "gpu"}  # Ampere: the ONNX models run on the GPU
         assert _SERVER in setup.runtime_summary
         assert "build 11282" in setup.runtime_summary
         assert "GLM-OCR" in setup.runtime_summary
