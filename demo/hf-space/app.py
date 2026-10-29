@@ -104,12 +104,11 @@ MAX_PAGES = int(os.environ.get("DEMO_MAX_PAGES", "15"))
 GPU_MODE = os.environ.get("DEMO_GPU_MODE", "paper").lower()
 GPU_SECONDS_MAX = int(os.environ.get("DEMO_GPU_SECONDS", "240"))
 # Window per paper: model loads and the front page, then OCR and reference
-# review per page. Measured twice (2026-10-29): a 7-page born-digital paper
-# used 141 and 147 GPU s, 53 s of it generating. ZeroGPU billed what was
-# used, past the window asked, but the window is what it checks against the
-# visitor's quota, so err high.
-GPU_SECONDS_BASE = 75
-GPU_SECONDS_PER_PAGE = 12
+# review per page. With layout and NER on CUDA (2026-10-29), a 7-page
+# born-digital paper used 70 GPU s in a fresh worker and 44 s warm. ZeroGPU
+# checks the window against the visitor's quota and bills what is used.
+GPU_SECONDS_BASE = 45
+GPU_SECONDS_PER_PAGE = 6
 # Only on Spaces: Gradio's local OAuth mock needs a Hugging Face login.
 REQUIRE_LOGIN = os.environ.get("DEMO_REQUIRE_LOGIN", "1") == "1" and bool(os.environ.get("SPACE_ID"))
 MAX_FILE_MB = int(os.environ.get("DEMO_MAX_FILE_SIZE_MB", "10"))
@@ -487,7 +486,7 @@ quick checks on the result. The first {MAX_PAGES} pages are read.
 
 Sign in with Hugging Face to run a paper. Each paper uses up to
 {GPU_SECONDS_MAX} s of your ZeroGPU quota (free accounts get 5 minutes a day, PRO 40),
-so a free account runs about two short papers a day. Papers are deleted from the Space
+so a free account runs about three short papers a day. Papers are deleted from the Space
 after processing.
 """
 
