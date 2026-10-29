@@ -202,6 +202,18 @@ if os.environ.get("DEMO_FAKE_MODELS") != "1":  # tests install their own backend
     runner = zm.generate_batch if GPU_MODE == "paper" else None
     zm.install(zm.build_app(zm.BACKENDS, runner=runner))
 
+# bibr's CPU stages stay off CUDA. ZeroGPU reports CUDA as available in the main
+# process, and bibr's device probes (get_device_capability, mem_get_info) would
+# initialise it for real; after that every @spaces.GPU worker, forked from this
+# process, fails with "Cannot re-initialize CUDA in forked subprocess". In paper
+# mode the probes also run inside the forked worker, where the forks inherit
+# this override and keep bibr's ONNX/torch classifiers on the CPU.
+import bibr.pipeline.classifier_resources as _bibr_classifiers  # noqa: E402
+import bibr.utils.device as _bibr_device  # noqa: E402
+
+_bibr_device.cuda_incompatibility = lambda: "the GPU is only attached inside @spaces.GPU calls"
+_bibr_classifiers._cuda_memory_info = lambda: (False, None, None)
+
 # ---------------------------------------------------------------------------
 # The pipeline (CPU stages in this process; GPU stages via the shim).
 
