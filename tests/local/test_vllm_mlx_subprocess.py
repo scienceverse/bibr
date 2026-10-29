@@ -305,3 +305,426 @@ def test_startup_error_reports_tail_end(tmp_path):
 
     assert "Metal OOM" in str(excinfo.value)
     assert "shard   0/200" not in str(excinfo.value)
+
+
+def _vllm_mlx_launch_cmd(monkeypatch, model: str, *, multimodal: bool = False) -> list[str]:
+    """The command a vllm-mlx start runs; a text LLM's (``VllmMlxLlmServer``) by default."""
+    from bibr.local import ocr as mod
+
+    captured = {}
+
+    def fake_popen(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        proc = mock.MagicMock()
+        proc.poll.return_value = 0
+        proc.returncode = 1
+        return proc
+
+    monkeypatch.setattr(mod.subprocess, "Popen", fake_popen)
+    with pytest.raises(RuntimeError, match="exited during startup"):
+        mod.VllmMlxServer(model=model, port=8767, continuous_batching=True, multimodal=multimodal)
+    return captured["cmd"]
+
+
+def test_vllm_mlx_serves_a_pinned_build_from_its_snapshot_under_the_hub_id(monkeypatch):
+    """mlx-lm reads a repository's main: the pinned build is downloaded first
+    (bibr.local.hub_pins; stubbed by tests/conftest.py) and served by path,
+    under the Hub id the requests and the port guard use."""
+    model = "scienceverse/bibr-extract-qwen35-4b-mlx-8bit"
+
+    cmd = _vllm_mlx_launch_cmd(monkeypatch, model)
+
+    assert cmd[cmd.index("--model") + 1] == (
+        "/nonexistent-hf-cache/models--scienceverse--bibr-extract-qwen35-4b-mlx-8bit/"
+        "snapshots/432b8cd80ea920919ef26c48401473c6d8c8a3e1"
+    )
+    assert cmd[cmd.index("--served-model-name") + 1] == model
+    # The shim judges the snapshot by that Hub id: text, as served by id.
+    assert "--mllm" not in cmd
+    assert "--no-mllm" not in cmd
+
+
+def test_vllm_mlx_passes_unpinned_ids_unchanged(monkeypatch):
+    cmd = _vllm_mlx_launch_cmd(monkeypatch, "scienceverse/bibr-extract-qwen35-2b-mlx-8bit")
+
+    assert cmd[cmd.index("--model") + 1] == "scienceverse/bibr-extract-qwen35-2b-mlx-8bit"
+    assert "--served-model-name" not in cmd
+    assert "--no-mllm" not in cmd
+
+
+def test_vllm_mlx_serves_a_local_model_directory_as_text(monkeypatch, tmp_path):
+    """LLM_LOCAL_MODEL=<dir> (such as the 4B's previous MLX build): vllm-mlx
+    would judge the directory by its config.json, so the shim is told it is a
+    text LLM."""
+    cmd = _vllm_mlx_launch_cmd(monkeypatch, str(tmp_path))
+
+    assert cmd[cmd.index("--model") + 1] == str(tmp_path)
+    assert "--no-mllm" in cmd
+    assert "--served-model-name" not in cmd
+    assert "--mllm" not in cmd
+
+
+def test_vllm_mlx_multimodal_start_keeps_mllm_for_a_local_directory(monkeypatch, tmp_path):
+    cmd = _vllm_mlx_launch_cmd(monkeypatch, str(tmp_path), multimodal=True)
+
+    assert "--mllm" in cmd
+    assert "--no-mllm" not in cmd
+
+
+@pytest.mark.parametrize(
+    ("argv", "name", "rest"),
+    [
+        (
+            ["prog", "--model", "/snap", "--served-model-name", "org/m"],
+            "org/m",
+            ["prog", "--model", "/snap"],
+        ),
+        (["prog", "--served-model-name=org/m", "--port", "1"], "org/m", ["prog", "--port", "1"]),
+        (["prog", "--model", "org/m"], None, ["prog", "--model", "org/m"]),
+    ],
+)
+def test_vllm_mlx_shim_takes_the_served_model_name(argv, name, rest):
+    from bibr.local import _vllm_mlx_server as shim
+
+    assert shim._pop_served_model_name(argv) == name
+    assert argv == rest
+
+
+def _fake_vllm_mlx_server(monkeypatch):
+    """A stand-in ``vllm_mlx.server`` whose main() loads the model as 0.4.x does."""
+    import types
+
+    loads: list[tuple[tuple, dict]] = []
+    server = types.ModuleType("vllm_mlx.server")
+
+    def load_model(model_name, served_model_name=None, **kwargs):
+        loads.append(((model_name,), {"served_model_name": served_model_name, **kwargs}))
+
+    def main():
+        server.load_model("/snap", use_batching=True)
+
+    server.load_model = load_model
+    server.main = main
+    package = types.ModuleType("vllm_mlx")
+    package.server = server
+    monkeypatch.setitem(sys.modules, "vllm_mlx", package)
+    monkeypatch.setitem(sys.modules, "vllm_mlx.server", server)
+    return loads
+
+
+def test_vllm_mlx_shim_serves_the_model_under_the_given_name(monkeypatch):
+    from bibr.local import _vllm_mlx_server as shim
+
+    loads = _fake_vllm_mlx_server(monkeypatch)
+    argv = ["prog", "--model", "/snap", "--served-model-name", "org/m", "--port", "8767"]
+
+    shim._main(argv)
+
+    assert loads == [(("/snap",), {"served_model_name": "org/m", "use_batching": True})]
+    # vllm_mlx.server's own argparse sees no --served-model-name.
+    assert argv == ["prog", "--model", "/snap", "--port", "8767"]
+
+
+def test_vllm_mlx_shim_without_a_served_name_runs_the_server_module(monkeypatch):
+    from bibr.local import _vllm_mlx_server as shim
+
+    _fake_vllm_mlx_server(monkeypatch)
+    ran = []
+    monkeypatch.setattr(
+        shim.runpy, "run_module", lambda name, run_name: ran.append((name, run_name))
+    )
+
+    shim._main(["prog", "--model", "org/m"])
+
+    assert ran == [("vllm_mlx.server", "__main__")]
+
+
+# --- vllm-mlx's multimodal detection (is_mllm_model) -------------------------
+#
+# vllm-mlx is not installed on Linux CI, so these run the shim against stub
+# modules laid out as vllm-mlx 0.4.0 / 0.4.1 are: api.utils defines
+# is_mllm_model (a local directory judged by its config.json, a Hub id by its
+# name), and the engines, the server and the model registry each import their
+# own reference to it.
+
+_STUB_API_UTILS = """
+import json
+from pathlib import Path
+
+
+def is_mllm_model(model_name):
+    config = Path(model_name) / "config.json"
+    if Path(model_name).is_dir() and config.is_file():
+        return "image_token_id" in json.loads(config.read_text())
+    return "Qwen3.5-" in model_name
+
+
+is_vlm_model = is_mllm_model
+"""
+
+_STUB_ENGINE = """
+from vllm_mlx.api.utils import is_mllm_model
+
+
+class Engine:
+    def __init__(self, model_name, force_mllm=False):
+        self.is_mllm = force_mllm or is_mllm_model(model_name)
+"""
+
+_STUB_SERVER = """
+import argparse
+import sys
+
+from vllm_mlx.api.utils import is_mllm_model
+from vllm_mlx.engine import batched, simple
+
+loaded = []
+
+
+def load_model(model_name, use_batching=False, force_mllm=False, served_model_name=None):
+    engine = (batched if use_batching else simple).Engine(model_name, force_mllm=force_mllm)
+    loaded.append(
+        {
+            "model_name": served_model_name or model_name,
+            "is_mllm": engine.is_mllm,
+            # what /v1/models reports, judged on the model path
+            "reported_mllm": force_mllm or is_mllm_model(model_name),
+        }
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model")
+    parser.add_argument("--host")
+    parser.add_argument("--port")
+    parser.add_argument("--mllm", action="store_true")
+    parser.add_argument("--continuous-batching", action="store_true")
+    args = parser.parse_args(sys.argv[1:])
+    load_model(args.model, use_batching=args.continuous_batching, force_mllm=args.mllm)
+"""
+
+_PINNED_MLX = "scienceverse/bibr-extract-qwen35-4b-mlx-8bit"
+
+
+def _stub_vllm_mlx(monkeypatch, extra: dict[str, str] | None = None):
+    """Install the stub ``vllm_mlx`` package (plus *extra* modules); return its server."""
+    import types
+
+    sources = {
+        "vllm_mlx": "",
+        "vllm_mlx.engine": "",
+        "vllm_mlx.api.utils": _STUB_API_UTILS,
+        "vllm_mlx.api": "from vllm_mlx.api.utils import is_mllm_model, is_vlm_model\n",
+        "vllm_mlx.engine.simple": _STUB_ENGINE,
+        "vllm_mlx.engine.batched": _STUB_ENGINE,
+        "vllm_mlx.model_registry": "from vllm_mlx.api.utils import is_mllm_model\n",
+        "vllm_mlx.server": _STUB_SERVER,
+        **(extra or {}),
+    }
+    for name in sorted(sources, key=lambda n: n.count(".")):
+        module = types.ModuleType(name)
+        module.__path__ = []
+        monkeypatch.setitem(sys.modules, name, module)
+        parent, _, child = name.rpartition(".")
+        if parent:
+            monkeypatch.setattr(sys.modules[parent], child, module, raising=False)
+    for name, source in sources.items():
+        # nosemgrep: python.lang.security.audit.exec-detected.exec-detected
+        exec(compile(source, f"<stub {name}>", "exec"), sys.modules[name].__dict__)  # noqa: S102
+    return sys.modules["vllm_mlx.server"]
+
+
+def _qwen35_build(tmp_path, name: str = "snapshot") -> str:
+    """A local MLX build whose config.json has image_token_id, as bibr's Qwen3.5 builds' do."""
+    build = tmp_path / name
+    build.mkdir()
+    (build / "config.json").write_text(json.dumps({"model_type": "qwen3_5", "image_token_id": 7}))
+    return str(build)
+
+
+def _run_shim(monkeypatch, *args: str) -> list[str]:
+    """Run the shim as ``python -m`` would; return the argv vllm-mlx's server parsed."""
+    from bibr.local import _vllm_mlx_server as shim
+
+    monkeypatch.setattr(sys, "argv", ["prog", *args])
+    shim._main(sys.argv)
+    return sys.argv
+
+
+def test_stub_vllm_mlx_loads_a_qwen35_snapshot_as_multimodal(monkeypatch, tmp_path):
+    """The failure the shim works around: vllm-mlx alone picks mlx-vlm for the snapshot."""
+    server = _stub_vllm_mlx(monkeypatch)
+    snapshot = _qwen35_build(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["prog", "--model", snapshot])
+
+    server.main()
+
+    assert server.loaded[0]["is_mllm"] is True
+    assert sys.modules["vllm_mlx.api.utils"].is_mllm_model(_PINNED_MLX) is False
+
+
+@pytest.mark.parametrize("batching", [[], ["--continuous-batching"]])
+def test_vllm_mlx_shim_judges_a_snapshot_by_its_served_name(monkeypatch, tmp_path, batching):
+    server = _stub_vllm_mlx(monkeypatch)
+    snapshot = _qwen35_build(tmp_path)
+
+    argv = _run_shim(
+        monkeypatch,
+        "--model",
+        snapshot,
+        "--port",
+        "8767",
+        "--served-model-name",
+        _PINNED_MLX,
+        *batching,
+    )
+
+    assert server.loaded == [{"model_name": _PINNED_MLX, "is_mllm": False, "reported_mllm": False}]
+    assert argv == ["prog", "--model", snapshot, "--port", "8767", *batching]
+
+
+def test_vllm_mlx_shim_judges_by_the_served_name_both_ways(monkeypatch, tmp_path):
+    """A served name vllm-mlx reads as multimodal keeps the snapshot multimodal."""
+    server = _stub_vllm_mlx(monkeypatch)
+    snapshot = _qwen35_build(tmp_path)
+
+    _run_shim(monkeypatch, "--model", snapshot, "--served-model-name", "org/Qwen3.5-9B")
+
+    assert server.loaded[0]["is_mllm"] is True
+
+
+def test_vllm_mlx_shim_serves_a_local_directory_as_text_with_no_mllm(monkeypatch, tmp_path):
+    """The previous revision's MLX build from a local directory (LLM_LOCAL_MODEL=<dir>)."""
+    server = _stub_vllm_mlx(monkeypatch)
+    build = _qwen35_build(tmp_path, "bibr-4b-mlx-6ab47a4e")
+
+    argv = _run_shim(monkeypatch, "--model", build, "--port", "8767", "--no-mllm")
+
+    assert server.loaded == [{"model_name": build, "is_mllm": False, "reported_mllm": False}]
+    # --no-mllm is the shim's: vllm-mlx's own argparse never sees it.
+    assert argv == ["prog", "--model", build, "--port", "8767"]
+
+
+@pytest.mark.parametrize(
+    "flags", [["--mllm", "--no-mllm"], ["--served-model-name", _PINNED_MLX, "--mllm"]]
+)
+def test_vllm_mlx_shim_leaves_detection_alone_with_mllm(monkeypatch, tmp_path, flags):
+    """--mllm forces mlx-vlm and wins over --no-mllm (without the shim's flags,
+    --mllm alone runs vllm_mlx.server as before)."""
+    server = _stub_vllm_mlx(monkeypatch)
+    original = sys.modules["vllm_mlx.api.utils"].is_mllm_model
+    snapshot = _qwen35_build(tmp_path)
+
+    _run_shim(monkeypatch, "--model", snapshot, *flags)
+
+    assert server.loaded[0]["is_mllm"] is True
+    assert sys.modules["vllm_mlx.engine.simple"].is_mllm_model is original
+
+
+def test_vllm_mlx_shim_keeps_vllm_mlx_answers_for_other_models(monkeypatch, tmp_path):
+    from bibr.local import _vllm_mlx_server as shim
+
+    _stub_vllm_mlx(monkeypatch)
+    snapshot = _qwen35_build(tmp_path)
+    other = _qwen35_build(tmp_path, "other")
+
+    shim._judge_launch_model(snapshot, _PINNED_MLX)
+
+    detect = sys.modules["vllm_mlx.engine.batched"].is_mllm_model
+    assert detect(snapshot) is False
+    assert detect(str(pathlib.Path(snapshot) / ".." / "snapshot")) is False
+    assert detect(other) is True
+    assert detect("org/Qwen3.5-9B") is True
+    assert detect("org/text-model") is False
+
+
+def test_vllm_mlx_shim_judges_every_copy_of_is_mllm_model(monkeypatch, tmp_path):
+    """Fails when a copy of is_mllm_model in a vllm_mlx module still reads the
+    snapshot's config.json: one more module importing it, one defining its
+    own, one holding it under another name, or one imported afterwards."""
+    import types
+
+    from bibr.local import _vllm_mlx_server as shim
+
+    extra = {
+        "vllm_mlx.engine.hybrid": (
+            "from pathlib import Path\n\n\n"
+            "def is_mllm_model(model_name):\n"
+            "    return (Path(model_name) / 'config.json').is_file()\n"
+        ),
+        "vllm_mlx.engine.alias": "from vllm_mlx.api.utils import is_mllm_model as detect\n",
+    }
+    _stub_vllm_mlx(monkeypatch, extra)
+    snapshot = _qwen35_build(tmp_path)
+
+    replaced = shim._judge_launch_model(snapshot, _PINNED_MLX)
+    later = types.ModuleType("vllm_mlx.engine.later")
+    monkeypatch.setitem(sys.modules, later.__name__, later)
+    # nosemgrep: python.lang.security.audit.exec-detected.exec-detected
+    exec("from vllm_mlx.api.utils import is_mllm_model", later.__dict__)  # noqa: S102
+
+    copies = {
+        f"{name}.{attr}": value
+        for name, module in list(sys.modules.items())
+        if name == "vllm_mlx" or name.startswith("vllm_mlx.")
+        for attr, value in vars(module).items()
+        if getattr(value, "__name__", None) == "is_mllm_model"
+    }
+    assert {
+        f"vllm_mlx.{name}"
+        for name in (
+            "api.utils.is_mllm_model",
+            "api.utils.is_vlm_model",
+            "api.is_mllm_model",
+            "api.is_vlm_model",
+            "engine.simple.is_mllm_model",
+            "engine.batched.is_mllm_model",
+            "model_registry.is_mllm_model",
+            "server.is_mllm_model",
+            "engine.hybrid.is_mllm_model",
+            "engine.alias.detect",
+            "engine.later.is_mllm_model",
+        )
+    } <= set(copies)
+    assert sorted(name for name, detect in copies.items() if detect(snapshot)) == []
+    assert set(replaced) == set(copies) - {"vllm_mlx.engine.later.is_mllm_model"}
+    # Judging twice wraps nothing twice.
+    assert shim._judge_launch_model(snapshot, _PINNED_MLX) == []
+
+
+def test_vllm_mlx_shim_imports_the_modules_holding_the_detector(monkeypatch, tmp_path):
+    """A detector module not imported yet is imported, then judged; one this
+    vllm-mlx lacks is skipped, but a missing dependency still fails."""
+    from bibr.local import _vllm_mlx_server as shim
+
+    _stub_vllm_mlx(monkeypatch)
+    registry = sys.modules["vllm_mlx.model_registry"]
+    monkeypatch.delitem(sys.modules, "vllm_mlx.model_registry")
+    imported = []
+    real_import = importlib.import_module
+
+    def import_module(name):
+        imported.append(name)
+        if name == "vllm_mlx.model_registry":
+            sys.modules[name] = registry
+        return real_import(name)
+
+    monkeypatch.setattr(shim.importlib, "import_module", import_module)
+    snapshot = _qwen35_build(tmp_path)
+
+    assert "vllm_mlx.model_registry.is_mllm_model" in shim._judge_launch_model(snapshot, None)
+    assert imported == list(shim._MLLM_DETECTOR_MODULES)
+
+    def missing(name):
+        raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+
+    monkeypatch.setattr(shim.importlib, "import_module", missing)
+    assert shim._judge_launch_model(snapshot, None) == []
+
+    def missing_dependency(name):
+        raise ModuleNotFoundError("No module named 'mlx'", name="mlx")
+
+    monkeypatch.setattr(shim.importlib, "import_module", missing_dependency)
+    with pytest.raises(ModuleNotFoundError, match="mlx"):
+        shim._judge_launch_model(snapshot, None)

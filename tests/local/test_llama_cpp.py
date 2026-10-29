@@ -1409,14 +1409,23 @@ def test_startup_no_retry_on_load_failure(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "flag", ["--port 9000", "--alias other", "-hf other/repo", "-hfr other/repo"]
+    ("flag", "hint"),
+    [
+        ("--port 9000", "LLM_LLAMA_CPP_PORT"),
+        ("--alias other", "LLM_LLAMA_CPP_PORT"),
+        ("-hf other/repo", "LLM_LLAMA_CPP_PORT"),
+        ("-hfr other/repo", "LLM_LLAMA_CPP_PORT"),
+        ("-m /models/other.gguf", "LLM_LOCAL_MODEL=<path>.gguf"),
+        ("--model=/models/other.gguf", "LLM_LOCAL_MODEL=<path>.gguf"),
+    ],
 )
-def test_build_server_argv_rejects_identity_override(flag):
-    """Extra args must not move the server bibr polls — point at the port setting (14)."""
+def test_build_server_argv_rejects_identity_override(flag, hint):
+    """Extra args must not move the server bibr polls — point at the port
+    setting (14) — nor swap its model file, which LLM_LOCAL_MODEL chooses."""
     from bibr.exceptions import UpstreamServiceError
     from bibr.local.llama_cpp import build_server_argv
 
-    with pytest.raises(UpstreamServiceError, match="LLM_LLAMA_CPP_PORT"):
+    with pytest.raises(UpstreamServiceError) as excinfo:
         build_server_argv(
             ["llama-server"],
             model="m",
@@ -1426,20 +1435,28 @@ def test_build_server_argv_rejects_identity_override(flag):
             role="llm",
             available=frozenset(),
         )
+    message = str(excinfo.value)
+    assert f"LLM_LLAMA_CPP_EXTRA_ARGS must not set {flag.split()[0].split('=')[0]}" in message
+    assert hint in message
+    other = "LLM_LOCAL_MODEL" if hint == "LLM_LLAMA_CPP_PORT" else "LLM_LLAMA_CPP_PORT"
+    assert other not in message
 
 
-def test_build_server_argv_rejects_identity_override_ocr_role():
-    """The OCR role names its own extra-args and port settings (14)."""
+@pytest.mark.parametrize(
+    ("flag", "hint"), [("--port 9000", "OCR_LLAMA_CPP_PORT"), ("-m x.gguf", "OCR_LLAMA_CPP_MODEL")]
+)
+def test_build_server_argv_rejects_identity_override_ocr_role(flag, hint):
+    """The OCR role names its own extra-args, port and model settings (14)."""
     from bibr.exceptions import UpstreamServiceError
     from bibr.local.llama_cpp import build_server_argv
 
-    with pytest.raises(UpstreamServiceError, match="OCR_LLAMA_CPP_PORT"):
+    with pytest.raises(UpstreamServiceError, match=f"OCR_LLAMA_CPP_EXTRA_ARGS.*{hint}"):
         build_server_argv(
             ["llama-server"],
             model="m",
             port=8771,
             context_size=8192,
-            extra_args="--port 9000",
+            extra_args=flag,
             role="ocr",
             available=frozenset(),
         )
@@ -1648,3 +1665,119 @@ def test_health_200_with_live_process_is_readiness(monkeypatch):
             proc.terminate()
             proc.wait()
             httpd.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Pinned registry builds: ``-hf`` reads a repository's main, so bibr downloads
+# the pinned GGUF itself and loads it with ``-m`` (bibr.local.hub_pins).
+# ---------------------------------------------------------------------------
+
+_PINNED_Q8_0 = "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
+# Where tests/conftest.py's stub puts the pinned build.
+_PINNED_Q8_0_FILE = (
+    "/nonexistent-hf-cache/models--scienceverse--bibr-extract-qwen35-4b-GGUF/snapshots/"
+    "0aa228e8c908512ad5e5e13fa55e7e7d3180c7d3/bibr-extract-qwen35-4b-Q8_0.gguf"
+)
+
+
+def test_build_server_argv_loads_a_model_file_under_the_model_alias():
+    from bibr.local.llama_cpp import build_server_argv
+
+    argv = build_server_argv(
+        ["llama-server"],
+        model=_PINNED_Q8_0,
+        port=8770,
+        context_size=8192,
+        role="llm",
+        available=frozenset(),
+        model_file="/hf/model.gguf",
+    )
+    assert argv[1:5] == ["-m", "/hf/model.gguf", "--alias", _PINNED_Q8_0]
+    assert "-hf" not in argv
+
+
+def test_pinned_registry_build_launches_from_the_downloaded_file(monkeypatch):
+    from bibr.local import llama_cpp
+
+    launched = _healthy_stub_server(
+        monkeypatch, available=frozenset(), wait_side_effect=lambda self, t: None
+    )
+    server = llama_cpp.LlamaCppServer(model=_PINNED_Q8_0, port=8770, role="llm")
+
+    (cmd,) = launched
+    assert cmd[cmd.index("-m") + 1] == _PINNED_Q8_0_FILE
+    assert cmd[cmd.index("--alias") + 1] == _PINNED_Q8_0
+    assert "-hf" not in cmd
+    assert server.model == _PINNED_Q8_0
+    server._process = None
+    server.shutdown()
+
+
+def test_conservative_retry_keeps_the_downloaded_file(monkeypatch):
+    from bibr.local import llama_cpp
+
+    attempts = {"n": 0}
+
+    def wait(self, timeout):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("llama.cpp exited during startup (code 1): unknown argument")
+
+    launched = _healthy_stub_server(
+        monkeypatch, available=frozenset({"--kv-unified", "--spec-type"}), wait_side_effect=wait
+    )
+    server = llama_cpp.LlamaCppServer(model=_PINNED_Q8_0, port=8770, role="llm")
+
+    assert len(launched) == 2
+    assert all(cmd[cmd.index("-m") + 1] == _PINNED_Q8_0_FILE for cmd in launched)
+    server._process = None
+    server.shutdown()
+
+
+def test_a_local_gguf_path_is_loaded_with_m(monkeypatch, tmp_path):
+    """LLM_LOCAL_MODEL may name a GGUF file, such as a previous build downloaded by hand."""
+    from bibr.local import llama_cpp
+
+    gguf = tmp_path / "bibr-extract-qwen35-4b-Q8_0.gguf"
+    gguf.write_bytes(b"GGUF")
+    launched = _healthy_stub_server(
+        monkeypatch, available=frozenset(), wait_side_effect=lambda self, t: None
+    )
+    server = llama_cpp.LlamaCppServer(model=str(gguf), port=8770, role="llm")
+
+    (cmd,) = launched
+    assert cmd[cmd.index("-m") + 1] == str(gguf)
+    assert cmd[cmd.index("--alias") + 1] == str(gguf)
+    assert "-hf" not in cmd
+    server._process = None
+    server.shutdown()
+
+
+def test_unpinned_hub_ids_still_use_hf(monkeypatch):
+    from bibr.local import llama_cpp
+
+    launched = _healthy_stub_server(
+        monkeypatch, available=frozenset(), wait_side_effect=lambda self, t: None
+    )
+    server = llama_cpp.LlamaCppServer(model="org/model:Q4", port=8770, role="llm")
+
+    (cmd,) = launched
+    assert cmd[cmd.index("-hf") + 1] == "org/model:Q4"
+    assert "-m" not in cmd
+    server._process = None
+    server.shutdown()
+
+
+def test_bad_extra_args_fail_before_the_pinned_download(monkeypatch):
+    from bibr.exceptions import UpstreamServiceError
+    from bibr.local import hub_pins, llama_cpp
+
+    _healthy_stub_server(monkeypatch, available=frozenset(), wait_side_effect=lambda self, t: None)
+    monkeypatch.setattr(
+        hub_pins, "fetch_pinned_build", lambda *a, **k: pytest.fail("downloaded first")
+    )
+
+    with pytest.raises(UpstreamServiceError, match="LLM_LLAMA_CPP_EXTRA_ARGS must not set -m"):
+        llama_cpp.LlamaCppServer(
+            model=_PINNED_Q8_0, port=8770, role="llm", extra_args="-m /models/other.gguf"
+        )

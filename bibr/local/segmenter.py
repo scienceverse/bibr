@@ -59,6 +59,7 @@ class SentenceSegmenter(BaseSentenceSegmenter):
             return
         del self.model
         self.model = None
+        self._cpu_model = None
         self._loaded = False
         logger.info("SentenceSegmenter unloaded")
 

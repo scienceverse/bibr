@@ -36,6 +36,47 @@ class TestLocalRateLimiter:
         await limiter.close()
 
 
+class TestSecondsUntilSlot:
+    """``seconds_until_slot`` reads the window without taking a slot."""
+
+    async def test_a_free_slot_is_zero_and_is_not_taken(self):
+        limiter = AsyncLocalRateLimiter(resource_id="test", max_requests=2, window_seconds=300.0)
+        await limiter.acquire()
+        assert limiter.seconds_until_slot() == 0.0
+        assert len(limiter._timestamps) == 1
+
+    async def test_a_full_window_waits_for_its_oldest_slot(self):
+        limiter = AsyncLocalRateLimiter(resource_id="test", max_requests=1, window_seconds=300.0)
+        await limiter.acquire()
+        assert 290.0 < limiter.seconds_until_slot() <= 300.0
+        assert len(limiter._timestamps) == 1
+
+    def test_several_slots_wait_for_the_oldest_and_only_the_time_left(self):
+        limiter = AsyncLocalRateLimiter(resource_id="test", max_requests=2, window_seconds=10.0)
+        now = time.monotonic()
+        limiter._timestamps.extend([now - 6.0, now - 2.0])  # taken 6 s and 2 s ago
+        # The older slot frees in 4 s; the newer one would take 8 s, a fresh window 10 s.
+        assert 3.0 < limiter.seconds_until_slot() <= 4.0
+        assert len(limiter._timestamps) == 2
+
+    def test_expired_slots_are_dropped(self):
+        limiter = AsyncLocalRateLimiter(resource_id="test", max_requests=1, window_seconds=1.0)
+        limiter._timestamps.append(time.monotonic() - 2.0)  # taken 2 s ago, out of the window
+        assert limiter.seconds_until_slot() == 0.0
+        assert not limiter._timestamps
+
+    def test_a_lowered_budget_waits_until_the_window_drops_below_it(self):
+        limiter = AsyncLocalRateLimiter(resource_id="test", max_requests=3, window_seconds=10.0)
+        now = time.monotonic()
+        limiter._timestamps.extend([now - 9.0, now - 6.0, now - 2.0])
+        # Lowered after a 429: all three slots must leave the window, the
+        # newest in 8 s. The oldest alone frees in 1 s.
+        limiter.max_requests = 1
+        assert 7.0 < limiter.seconds_until_slot() <= 8.0
+        assert 7.0 < limiter._take_slot() <= 8.0
+        assert len(limiter._timestamps) == 3
+
+
 class TestLocalRateLimiterLoopRebinding:
     """M6: the limiter must survive a second ``asyncio.run()`` in one process.
 
