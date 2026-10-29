@@ -514,3 +514,24 @@ def test_a_lone_furniture_word_before_the_title_is_a_cut_first_word():
         ("FAMILY", "Lima"),
     )
     assert "untagged_title_edge" not in assemble(inp, tags, [1.0] * len(tags)).problems
+
+
+def test_parallel_keyword_lists_keep_the_first_printed():
+    inp = tagger_input(
+        ("doc_title", "Título en español"),
+        ("text", "Ana Ruiz"),
+        ("text", "Palabras clave: mano; familia"),
+        ("text", "Keywords: hand; family"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Título en español"),
+        ("GIVEN", "Ana"),
+        ("FAMILY", "Ruiz"),
+        ("KEYWORD", "mano"),
+        ("KEYWORD", "familia"),
+        ("KEYWORD", "hand"),
+        ("KEYWORD", "family"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags))
+    assert got.title_keywords.keywords == ["mano", "familia"]

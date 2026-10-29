@@ -45,6 +45,13 @@ _ABSTRACT_HEADING_RE = re.compile(
     r"аннотация|резюме|abstrakt|samenvatting|要旨|摘要|초록)$",
     re.IGNORECASE,
 )
+# A keyword label between two keyword runs starts a new printed list, which is
+# how parallel-language keyword lists separate ("Palabras clave" ... "Keywords").
+_KEYWORD_HEADING_RE = re.compile(
+    r"^(?:key\s?words?|index|palabras|palavras(?:-chave)?|mots-cl[ée]s|schl[üu]sselw[öo]rter|kata|"
+    r"kunci|parole|trefwoorden|ключові|ключевые|anahtar|kelimeler|słowa|klíčová|kulcsszavak)$",
+    re.IGNORECASE,
+)
 # A family name alone is complete for a group author ("ATLAS Collaboration").
 _COLLECTIVE_RE = re.compile(
     r"group|consorti|collaborat|network|team|committee|investigators|study|project|"
@@ -166,12 +173,16 @@ def _spans(inp: TaggerInput, tags: Sequence[str], conf: Sequence[float]) -> list
 
 
 def _clusters(
-    spans: list[Span], tags: Sequence[str], inp: TaggerInput, wanted: str
+    spans: list[Span],
+    tags: Sequence[str],
+    inp: TaggerInput,
+    wanted: str,
+    heading: re.Pattern[str] = _ABSTRACT_HEADING_RE,
 ) -> list[list[Span]]:
     """Groups of ``wanted`` spans interrupted only by untagged words or furniture.
 
-    A printed heading (an "Abstract"/"Resumen" label) between two runs also
-    starts a new group, which is how parallel-language abstracts separate.
+    A printed ``heading`` word (an "Abstract"/"Resumen" label) between two runs
+    also starts a new group, which is how parallel-language versions separate.
     """
     groups: list[list[Span]] = []
     for span in (s for s in spans if s.field == wanted):
@@ -179,7 +190,7 @@ def _clusters(
             gap = range(groups[-1][-1].words[-1] + 1, span.words[0])
             interrupted = any(
                 _field(tags[i]) not in (None, "FURNITURE")
-                or _ABSTRACT_HEADING_RE.match(inp.words[i].text.strip(_TRIM) or "-")
+                or heading.match(inp.words[i].text.strip(_TRIM) or "-")
                 for i in gap
             )
             if not interrupted:
@@ -345,6 +356,12 @@ def _abstract(spans: list[Span], tags, inp: TaggerInput, conf) -> tuple[str | No
     return _joined(group), sum(conf[i] for i in words) / len(words)
 
 
+def _keywords(spans: list[Span], tags, inp: TaggerInput) -> list[str]:
+    """The keywords of the list printed first; parallel-language lists are not joined."""
+    groups = _clusters(spans, tags, inp, "KEYWORD", heading=_KEYWORD_HEADING_RE)
+    return [k for span in (groups[0] if groups else []) if (k := _clean(span.text))]
+
+
 @dataclass
 class _Author:
     given: list[Span] = field(default_factory=list)
@@ -478,7 +495,7 @@ def assemble(
     title_keywords = TitleKeywordsLLM(
         title=title,
         abstract=abstract,
-        keywords=[k for s in spans if s.field == "KEYWORD" if (k := _clean(s.text))],
+        keywords=_keywords(spans, tags, inp),
         journal=_clean(getattr(_first(spans, "JOURNAL"), "text", None)),
         volume=_clean(getattr(_first(spans, "VOLUME"), "text", None)),
         issue=_clean(getattr(_first(spans, "ISSUE"), "text", None)),
