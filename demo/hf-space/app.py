@@ -44,19 +44,58 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
-
-import gradio as gr
-
-import zerogpu_models as zm
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("bibr-space")
 # At INFO, httpx logs ZeroGPU scheduler URLs, which carry the visitor's token.
 for _name in ("httpx", "httpx2"):
     logging.getLogger(_name).setLevel(logging.WARNING)
+
+
+def _ensure_onnxruntime_gpu() -> None:
+    """Make the onnxruntime-gpu build the one that loads, so bibr's ONNX models
+    (layout, sentence segmenter, NER parser) run on CUDA inside the GPU window.
+
+    bibr depends on onnxruntime and requirements.txt adds onnxruntime-gpu. The
+    two write the same onnxruntime/ directory, so whichever pip wrote last is
+    the build that loads. Probed in a subprocess, before this process imports
+    onnxruntime: the forked GPU worker inherits whichever build is loaded here.
+    """
+    from importlib import metadata
+
+    try:
+        gpu_version = metadata.version("onnxruntime-gpu")
+    except metadata.PackageNotFoundError:
+        return
+    probe = "import onnxruntime as o; print(o.get_available_providers())"
+
+    def providers() -> str:
+        out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
+        return out.stdout.strip() or out.stderr.strip()[-300:]
+
+    found = providers()
+    if "CUDAExecutionProvider" not in found:
+        logger.warning("onnxruntime loads its CPU build (%s); reinstalling onnxruntime-gpu %s", found, gpu_version)
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet", "--force-reinstall", "--no-deps",
+             f"onnxruntime-gpu=={gpu_version}"],
+            check=False,
+        )
+        found = providers()
+    logger.info("onnxruntime-gpu %s providers: %s", gpu_version, found)
+
+
+if os.environ.get("SPACE_ID"):
+    _ensure_onnxruntime_gpu()
+
+import gradio as gr  # noqa: E402
+
+import zerogpu_models as zm  # noqa: E402
 
 HERE = Path(__file__).parent
 DEMO_LLM = os.environ.get("DEMO_LLM", "local").lower()
@@ -105,6 +144,9 @@ for key, value in {
     "REF_LLM_MAX_CONCURRENCY": "32",
     "REF_LLM_TIMEOUT_SECONDS": "120",
     "REF_LLM_TOTAL_TIMEOUT_SECONDS": "240",
+    # bibr throttles an LLM_BASE_URL server to 60 requests a minute by default,
+    # a cloud quota guard the in-process shim doesn't need.
+    "LLM_RATE_LIMIT_RPM": "600",
 }.items():
     os.environ.setdefault(key, value)
 if DEMO_LLM == "local":
@@ -210,12 +252,59 @@ if os.environ.get("DEMO_FAKE_MODELS") != "1":  # tests install their own backend
 # initialise it for real; after that every @spaces.GPU worker, forked from this
 # process, fails with "Cannot re-initialize CUDA in forked subprocess". In paper
 # mode the probes also run inside the forked worker, where the forks inherit
-# this override and keep bibr's ONNX/torch classifiers on the CPU.
+# this override and keep bibr's torch code and its classifiers on the CPU.
+# ONNX Runtime picks its device from its own providers, so the layout model,
+# sentence segmenter and NER parser run on CUDA in the worker (with
+# onnxruntime-gpu); their sessions are only ever created there.
 import bibr.pipeline.classifier_resources as _bibr_classifiers  # noqa: E402
 import bibr.utils.device as _bibr_device  # noqa: E402
 
 _bibr_device.cuda_incompatibility = lambda: "the GPU is only attached inside @spaces.GPU calls"
 _bibr_classifiers._cuda_memory_info = lambda: (False, None, None)
+
+
+def prefetch_bibr_models() -> None:
+    """Download bibr's CPU-side model files now, so a paper's GPU window doesn't.
+
+    Files only, at the revisions bibr pins: no ONNX session is created in this
+    process. The lookups are bibr's own, so a cached file resolves offline.
+    """
+    from bibr.config import Settings
+    from bibr.segmenter_base import base_tokenizer_dir, materialize_hub_snapshot, resolve_wtpsplit_model
+    from bibr.utils.hf_cache import hf_download_or_cached
+    from bibr.utils.ml_runtime import find_onnx_bundle
+
+    started = time.monotonic()
+    ml = Settings.ml
+    bundles = [
+        ("layout", Settings.layout.onnx_model_id, Settings.layout.onnx_revision),
+        ("section classifier", ml.section_classifier_model_id, ml.section_classifier_revision),
+        ("paper classifier", ml.paper_classifier_model_id, ml.paper_classifier_revision),
+        ("NER parser", Settings.NER_PARSER_CKPT, Settings.NER_PARSER_REVISION),
+    ]
+    for label, model_id, revision in bundles:
+        if find_onnx_bundle(model_id, revision, label=label) is None:
+            logger.warning("no ONNX bundle prefetched for %s (%s@%s)", label, model_id, revision)
+    joblibs = [
+        (ml.front_role_model_id, ml.front_role_revision, "front_role.joblib"),
+        (Settings.REF_GEOM_SEG_MODEL_ID, Settings.REF_GEOM_SEG_REVISION, "geom_segmenter.joblib"),
+    ]
+    for model_id, revision, default_file in joblibs:
+        if model_id:
+            repo_id, _, filename = model_id.partition(":")
+            hf_download_or_cached(repo_id, filename or default_file, revision)
+    sat = resolve_wtpsplit_model(Settings.WTPSPLIT_MODEL, Settings.WTPSPLIT_MODEL_REVISION)
+    if not sat.is_local:
+        materialize_hub_snapshot(sat.repo_id, sat.revision)
+    base_tokenizer_dir()
+    logger.info("prefetched bibr's CPU-side models in %.0fs", time.monotonic() - started)
+
+
+if os.environ.get("DEMO_FAKE_MODELS") != "1":
+    try:
+        prefetch_bibr_models()
+    except Exception as exc:  # noqa: BLE001 - the window downloads what is missing
+        logger.warning("prefetching bibr's models failed: %s: %s", type(exc).__name__, exc)
 
 # ---------------------------------------------------------------------------
 # The pipeline (CPU stages in this process; GPU stages via the shim).
@@ -329,7 +418,7 @@ def process_on_gpu(file_path: str) -> tuple[dict, dict]:
     built = time.monotonic()
     paper_json = _paper_loop.run_until_complete(pipeline.process_file(file_path))
     done = time.monotonic()
-    timings = ((paper_json.get("extraction") or {}).get("diagnostics") or {}).get("timings") or {}
+    timings = (paper_json.get("extraction") or {}).get("timings") or {}
     logger.info(
         "in window: pipeline ready %.1fs, paper %.1fs, stages %s, models %s",
         built - entered,
