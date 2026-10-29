@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -30,7 +31,11 @@ from bibr.ner.crf_numpy import marginals, viterbi_decode
 from bibr.utils.ml_runtime import ONNX_MODEL, read_onnx_manifest
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from bibr.config import GlobalSettings
+    from bibr.extract.front_role_features import FrontRegion
+    from bibr.front_tagger.assemble import TaggedFrontMatter
 
 logger = logging.getLogger(__name__)
 
@@ -230,10 +235,65 @@ def load_front_tagger(settings: GlobalSettings) -> OnnxFrontTagger | None:
     return tagger
 
 
+# Later windows read for an abstract the first pages lack: a title-page
+# manuscript or a preprint cover sheet prints it on page 3 or 4.
+ABSTRACT_WINDOW_STARTS = (1, 2)
+
+
+def tag_front_matter(
+    tagger: OnnxFrontTagger, regions: Sequence[FrontRegion], *, first_page_index: int = 0
+) -> TaggedFrontMatter:
+    """Tag the first pages; with no abstract there, take it from a later window.
+
+    The tagger reads ``MAX_PAGES`` pages from ``first_page_index``. When that
+    window holds no abstract, the windows starting one and then two pages
+    later are tagged with the same model and the first abstract one yields
+    replaces the missing one; every other field keeps the first window's
+    answer.
+    """
+    from bibr.front_tagger.assemble import assemble
+    from bibr.front_tagger.contract import build_tagger_input
+
+    inp = build_tagger_input(regions, first_page_index=first_page_index)
+    result = assemble(inp, *tagger.tag(inp))
+    if "no_abstract" not in result.problems or result.title_keywords is None:
+        return result
+    pages = {region.page for region in regions}
+    for offset in ABSTRACT_WINDOW_STARTS:
+        start = first_page_index + offset
+        if start not in pages:
+            break
+        later_inp = build_tagger_input(regions, first_page_index=start)
+        if not later_inp.words:
+            continue
+        later = assemble(later_inp, *tagger.tag(later_inp))
+        abstract = later.title_keywords.abstract if later.title_keywords else None
+        if not (abstract or "").strip():
+            continue
+        problems = [p for p in result.problems if p != "no_abstract"]
+        problems += [p for p in later.problems if p == "short_abstract"]
+        confidence = dict(result.confidence)
+        if "abstract" in later.confidence:
+            confidence["abstract"] = later.confidence["abstract"]
+        return replace(
+            result,
+            title_keywords=result.title_keywords.model_copy(update={"abstract": abstract}),
+            confidence=confidence,
+            problems=problems,
+        )
+    return result
+
+
 def reset_front_tagger_cache() -> None:
     """Test hook: forget cached taggers (and cached failures)."""
     with _CACHE_LOCK:
         _CACHE.clear()
 
 
-__all__ = ["OnnxFrontTagger", "load_front_tagger", "reset_front_tagger_cache"]
+__all__ = [
+    "ABSTRACT_WINDOW_STARTS",
+    "OnnxFrontTagger",
+    "load_front_tagger",
+    "reset_front_tagger_cache",
+    "tag_front_matter",
+]

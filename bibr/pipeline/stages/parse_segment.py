@@ -78,14 +78,11 @@ async def _tag_front_matter(rm, ocr_regions, *, first_page_index: int):
         if tagger is None:
             return None
         from bibr.extract.front_role import build_front_regions
-        from bibr.front_tagger.assemble import assemble
-        from bibr.front_tagger.contract import build_tagger_input
+        from bibr.front_tagger.runtime import tag_front_matter
 
         def run():
             regions = build_front_regions(ocr_regions, first_page_index=first_page_index)
-            inp = build_tagger_input(regions, first_page_index=first_page_index)
-            tags, confidences = tagger.tag(inp)
-            return assemble(inp, tags, confidences)
+            return tag_front_matter(tagger, regions, first_page_index=first_page_index)
 
         return await asyncio.to_thread(run)
     except Exception:  # noqa: BLE001 - the LLM still covers front matter

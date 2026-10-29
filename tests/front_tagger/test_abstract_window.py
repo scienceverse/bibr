@@ -1,0 +1,64 @@
+from __future__ import annotations
+
+from bibr.front_tagger.runtime import tag_front_matter
+
+from .helpers import label, regions
+
+ABSTRACT = (
+    "We studied handedness in 400 families from three countries over two decades. Left "
+    "handedness was more common in sons than in daughters, ran in families, and was rarer "
+    "among older participants. Twin pairs agreed more often than siblings. It is heritable."
+)
+
+
+class _PhraseTagger:
+    """Tags whichever of its phrases the window prints."""
+
+    def __init__(self, *spans: tuple[str, str]):
+        self.spans = spans
+        self.windows: list[str] = []
+
+    def tag(self, inp):
+        self.windows.append(inp.text)
+        present = [(f, p) for f, p in self.spans if p in inp.text]
+        tags = label(inp, *present) if present else ["O"] * len(inp.words)
+        return tags, [1.0] * len(tags)
+
+
+def _manuscript(abstract_page: int):
+    rows = regions(("doc_title", "Handedness in families"), ("text", "Ana Ruiz"), page=0)
+    rows += regions(("text", "Author note and contact details"), page=1)
+    rows += regions(("text", "Abstract"), ("abstract", ABSTRACT), page=abstract_page)
+    return rows
+
+
+def _tagger():
+    return _PhraseTagger(
+        ("TITLE", "Handedness in families"),
+        ("GIVEN", "Ana"),
+        ("FAMILY", "Ruiz"),
+        ("ABSTRACT", ABSTRACT),
+    )
+
+
+def test_an_abstract_on_page_three_comes_from_the_next_window():
+    tagger = _tagger()
+    got = tag_front_matter(tagger, _manuscript(abstract_page=2))
+    assert got.title_keywords.title == "Handedness in families"
+    assert got.title_keywords.abstract == ABSTRACT
+    assert "no_abstract" not in got.problems
+    assert [a.family for a in got.byline.authors] == ["Ruiz"]
+    assert len(tagger.windows) == 2
+
+
+def test_a_window_reads_at_most_two_pages_later():
+    got = tag_front_matter(_tagger(), _manuscript(abstract_page=4))
+    assert got.title_keywords.abstract is None
+    assert "no_abstract" in got.problems
+
+
+def test_an_abstract_on_the_first_pages_reads_one_window():
+    tagger = _tagger()
+    got = tag_front_matter(tagger, _manuscript(abstract_page=1))
+    assert got.title_keywords.abstract == ABSTRACT
+    assert len(tagger.windows) == 1
