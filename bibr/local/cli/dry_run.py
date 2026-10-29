@@ -19,6 +19,7 @@ from bibr.local.cli.run_config import (
     _preflight_local_backend,
     _preflight_ocr_runtime,
     _preflight_opencv,
+    _run_llm_backend,
 )
 from bibr.ocr.profiles import GLM_SERVED_MODEL_ALIAS
 
@@ -90,7 +91,9 @@ def _dry_run_ocr_model(config: ResolvedRunConfig) -> tuple[str, str | None]:
 
     backend = config.ocr_backend
     if backend == "paddle":
-        candidate = resolve_backend_candidates(backend, Settings)[0]
+        candidate = resolve_backend_candidates(
+            backend, Settings, llm_backend=_run_llm_backend(config)
+        )[0]
         # Served identity vs weight repo: the first candidate's display model
         # may be a server alias (paddle-vllm advertises
         # ``Settings.ocr.paddle_served_model``), while the HF cache holds the
@@ -132,7 +135,9 @@ def _dry_run_ocr_candidates(config: ResolvedRunConfig):
     from bibr.config import Settings
     from bibr.ocr.registry import resolve_backend_candidates
 
-    return resolve_backend_candidates(config.ocr_backend, Settings)
+    return resolve_backend_candidates(
+        config.ocr_backend, Settings, llm_backend=_run_llm_backend(config)
+    )
 
 
 def _dry_run_device_label(config: ResolvedRunConfig) -> str:
@@ -171,7 +176,7 @@ def _dry_run_memory_mode_label(args, config: ResolvedRunConfig) -> str:
 
     if Settings.pipeline.memory_mode:
         return f"{config.memory_mode} (PIPELINE_MEMORY_MODE setting)"
-    return f"{config.memory_mode} (auto-detected from system RAM)"
+    return f"{config.memory_mode} (auto-detected from system RAM, CUDA VRAM and the LLM backend)"
 
 
 def _dry_run_enrichment_lines(config: ResolvedRunConfig, parse_strategy: str) -> list[str]:

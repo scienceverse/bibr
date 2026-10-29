@@ -233,11 +233,11 @@ uv run bibr doctor
 uv run bibr demo
 ```
 
-### Linux, NVIDIA GPU below 8 GB (e.g. GTX 1060)
+### Linux, NVIDIA GPU below 10 GB (e.g. GTX 1060, RTX 4060)
 
-Below 8 GB, the automatic selectors use **llama.cpp** for OCR and the local
-LLM. From 8 GB, both run through vLLM, with bibr's fine-tuned 2B model below
-12 GB and its 4B model from 12 GB. Install a
+Below 10 GB, `bibr setup` uses **llama.cpp** for OCR and the local LLM. From
+10 GB, on Ampere or newer cards, both run through vLLM, with the 4-bit W4A16 build of bibr's fine-tuned
+4B model below 20 GB and its bf16 build from 20 GB. Install a
 **CUDA** (or Vulkan) build of llama.cpp separately:
 
 1. Install or build llama.cpp with CUDA support (`GGML_CUDA=ON` for a source
@@ -251,14 +251,17 @@ uv sync --extra all
 # No additional Python serving extra is needed for llama.cpp.
 ```
 
-3. Run advanced setup for a cloud LLM plus `glm-llama`, then check the resolved
-   configuration. Accept the extras-install offer if dependencies are missing;
-   setup installs with `--inexact` to retain other installed extras.
+3. Run setup and accept its recommended local plan (GLM-OCR and the 4B
+   GGUF build, both on llama.cpp, in the aggressive memory mode), then check
+   the resolved configuration. Accept the extras-install offer if dependencies
+   are missing; setup installs with `--inexact` to retain other installed
+   extras. To use a cloud LLM instead, choose it in `bibr setup --advanced`
+   and keep `glm-llama` for OCR.
 
 ```bash
-uv run bibr setup --advanced
+uv run bibr setup
 uv run bibr doctor
-uv run bibr chew paper.pdf --pages 1-3 --ocr glm-llama --memory aggressive -v
+uv run bibr chew paper.pdf --pages 1-3 -v
 ```
 
 **About “CUDA problems” on older cards (Pascal / GTX 10-series):** current
@@ -266,6 +269,18 @@ PyTorch wheels no longer ship kernels for compute capability 6.x. Layout and
 NER then run on **CPU** automatically — that is expected and not fatal. GPU
 work for OCR/LLM goes through llama.cpp. Do not try to “fix” this by
 installing a different PyTorch inside the venv or enabling the `gpu` extra.
+
+**Cards older than Ampere (Turing, e.g. RTX 20-series, GTX 16-series; Volta;
+Pascal), at any memory size:** bibr's vLLM models are bf16, which vLLM serves
+only from compute capability 8.0, so `bibr setup` and `--llm local` run the
+LLM and the OCR on llama.cpp there, as on a small card. This is a
+conservative routing rule, not a measured result: no batch on a Turing or
+Pascal card has been recorded, with this rule or with the vLLM routing before
+it. (The Pascal notes above are given with no measured run recorded.) An
+explicit `--llm vllm` or `--ocr paddle-vllm` still starts vLLM. Going by vLLM
+0.31's source, it then casts the bf16 models to float16, and its 4-bit kernels
+(the W4A16 build) need compute capability 7.5, which rules out Pascal; none of
+this has been run.
 
 While a job runs, `nvidia-smi` should show `llama-server` using the GPU. If
 doctor warns that llama.cpp is CPU-only, replace the binary with a CUDA build.
@@ -280,26 +295,33 @@ Optional overrides (already the managed defaults for low-VRAM) live in `.env`:
 
 ### Which backend, and how fast
 
-`bibr setup` chooses a model and runtime; `--llm local` only resolves the runtime
-from the platform and detected memory. The current defaults are:
+`bibr setup` writes a model and runtime to `.env`; `--llm local` without setup
+resolves the same model, runtime, memory mode and OCR from the platform and
+the detected card (a test checks that the two agree on every row). The
+current defaults are:
 
 | Platform | OCR backend | Local LLM backend |
 |---|---|---|
 | Windows | `glm-llama` (llama.cpp) | llama.cpp |
-| Linux, NVIDIA GPU **≥ 12 GB** (e.g. RTX 3090) | `paddle-vllm` | vLLM, bibr extract 4B |
-| Linux, NVIDIA GPU **8–<12 GB** | `paddle-vllm` | vLLM, bibr extract 2B |
-| Linux, NVIDIA GPU **< 8 GB** | `glm-llama` (llama.cpp) | llama.cpp |
+| Linux, NVIDIA GPU **≥ 20 GB** (e.g. RTX 3090) | `paddle-vllm` | vLLM, bibr extract 4B |
+| Linux, NVIDIA GPU **10–<20 GB** | `paddle-vllm` | vLLM, bibr extract 4B W4A16 (aggressive memory mode below 12 GB) |
+| Linux, NVIDIA GPU **< 10 GB** | `glm-llama` (llama.cpp) | llama.cpp, bibr extract 4B GGUF (Q8_0 from 7 GB, Q4_K_M below) |
+| Linux, NVIDIA GPU older than Ampere (compute capability below 8.0), any size | `glm-llama` (llama.cpp) | llama.cpp, bibr extract 4B GGUF (untested on such cards) |
 | Apple Silicon (M-series) | `paddle-rapid-mlx` (rapid-mlx) | rapid-mlx, else vllm-mlx |
 | No suitable GPU | cloud vision OCR or an external OCR server | a cloud LLM |
 
 The setup wizard defaults to bibr's fine-tuned Qwen3.5 models for local
-structured extraction on Linux with an NVIDIA GPU: the 4B from 12 GB and the 2B
-from 8 GB. Windows and GPUs below 8 GB use GGUF (llama.cpp) builds of the same
-models, and Apple Silicon their 8-bit MLX builds.
+structured extraction on Linux with an NVIDIA GPU: the 4B from 20 GB and its
+4-bit W4A16 build from 10 GB. Windows, GPUs below 10 GB and GPUs older than
+Ampere use GGUF (llama.cpp) builds of the same models, and Apple Silicon their
+8-bit MLX builds.
 Without a suitable GPU it recommends Claude Haiku 5.5 as a hosted model, for
 OCR and extraction alike. See
-[choosing an extraction model](guides/extraction-models.md). These thresholds are
-model-fit estimates, not guarantees that every document fits available memory.
+[choosing an extraction model](guides/extraction-models.md). Of the card sizes
+that pick a default, 20, 12, 10, 8 and 6 GB were each run as a batch on one RTX
+3090 with its memory cut to that size beside a desktop; 7 and 5 GB follow the
+size rule. They are not guarantees that every document fits available memory,
+and that page's speeds are the RTX 3090's, not those of the cards it emulated.
 
 Throughput depends on the model, backend, hardware, and document. Scanned PDFs
 require more OCR than PDFs with usable embedded text. Test a representative

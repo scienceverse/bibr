@@ -138,7 +138,10 @@ def _add_pipeline_options(parser: argparse.ArgumentParser) -> None:
         "--memory",
         choices=["aggressive", "balanced", "keep_all"],
         default=None,
-        help="Memory management mode (default: auto-detected from system RAM and CUDA VRAM)",
+        help=(
+            "Memory management mode (default: auto-detected from system RAM, CUDA VRAM "
+            "and the LLM backend)"
+        ),
     )
     parser.add_argument(
         "--ocr",
@@ -702,7 +705,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--memory",
         choices=["aggressive", "balanced", "keep_all"],
         default=None,
-        help="Memory management mode (default: auto-detected from system RAM and CUDA VRAM)",
+        help=(
+            "Memory management mode (default: auto-detected from system RAM, CUDA VRAM "
+            "and the LLM backend)"
+        ),
     )
     mcp_parser.add_argument(
         "--device",

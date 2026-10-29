@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import functools
 import logging
+import math
+import os
 import platform
 import sys
 from dataclasses import dataclass
@@ -37,17 +39,42 @@ class OcrBackendCandidate:
     profile: OcrProfileName
 
 
-# The managed PaddleOCR-VL vLLM server's ``--gpu-memory-utilization``. vLLM
-# claims this fraction of total VRAM and will not start when less is free, so
-# the classifier device picker leaves it free (``bibr.local.pipeline``).
+# VRAM the managed PaddleOCR-VL vLLM server is given: its ~2.1 GiB of weights
+# and non-torch memory, the vision encoder's ~0.6 GiB profiling peak at 16,384
+# batched tokens, and about 2.2 GiB of KV cache (~130,000 tokens; its peak use
+# in 20-paper runs on a 24 GB card was under 16,000). vLLM's
+# ``--gpu-memory-utilization`` is a share of the whole card that must be free
+# when the server starts, so the launcher turns this into a share of the card
+# (``paddle_vllm_gpu_memory_utilization``) instead of claiming most of it.
+PADDLE_VLLM_GPU_MEMORY_GB = 5.0
+
+# The largest share the managed PaddleOCR-VL server is launched with, and its
+# share when the card it starts on cannot be identified.
 PADDLE_VLLM_GPU_MEMORY_UTILIZATION = 0.92
 
+# VRAM kept outside both managed vLLM servers' shares (the LLM and
+# PaddleOCR-VL) whenever they may be up at the same time. A server that starts
+# beside the other needs room for bibr's own GPU sessions (layout, SaT, the
+# NER parser, the classifiers: 2.4-2.8 GiB when an RTX 5090's later chunks
+# restarted OCR, and layout grows to about 5 GiB when it has room) plus its own
+# ~0.5 GiB CUDA context, or it never starts. Below about 4 GiB of room layout
+# also halves its batch after CUDA OOM (78 times per 20 papers on a 24 GB card,
+# none with 6 GiB).
+MANAGED_VLLM_ONNX_RESERVE_GB = 6.0
+
 # PaddleOCR-VL through the managed vLLM server needs an NVIDIA GPU with room
-# for the ~1.8 GB bf16 weights plus vLLM's KV/activation budget at
-# ``PADDLE_VLLM_GPU_MEMORY_UTILIZATION``. Below this floor bibr's documented
-# Linux contract ("NVIDIA GPU <= 8 GB uses llama.cpp") routes OCR to
-# ``glm-llama``.
+# for ``PADDLE_VLLM_GPU_MEMORY_GB``. Below this floor the automatic chain runs
+# OCR on ``glm-llama``. Setup also picks ``glm-llama`` on larger cards whose LLM
+# runs on llama.cpp (below ``bibr.local.llm_models.VLLM_LLM_MIN_CARD_GB``), the
+# pair bibr hands GPU memory between.
 PADDLE_VLLM_MIN_VRAM_GB = 8.0
+#: GPU memory a managed GLM-OCR llama.cpp server (``glm-llama``, the Q8_0 GGUF
+#: with its vision projector, an 8,192-token context and one slot) holds while
+#: it OCRs: at most 2,206 MiB on an RTX 3090 over a chunk of three papers
+#: (llama.cpp b11282), rounded up to a quarter GiB. A start beside a managed
+#: llama.cpp LLM server stops that server first when less than this plus
+#: bibr's minimum room is free (``ResourceManager._llm_server_blocks_ocr``).
+GLM_LLAMA_OCR_VRAM_GB = 2.25
 
 
 @functools.cache
@@ -69,6 +96,249 @@ def _cuda_vram_gb() -> float | None:
 _PROBE = object()
 
 
+@functools.cache
+def _nvidia_gpu_inventory() -> tuple[tuple[str, float], ...] | None:
+    """``(uuid, total GiB)`` of each NVIDIA GPU in nvidia-smi's (PCI bus) order, or None."""
+    import subprocess
+
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["nvidia-smi", "--query-gpu=uuid,memory.total", "--format=csv,noheader,nounits"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    gpus = []
+    for line in result.stdout.strip().splitlines():
+        uuid, _, total = line.partition(",")
+        try:
+            gpus.append((uuid.strip(), float(total) / 1024.0))  # MiB -> GiB
+        except ValueError:
+            return None
+    return tuple(gpus) or None
+
+
+def _visible_gpu_indices(
+    uuids: tuple[str, ...], visible_devices: str | None, device_order: str | None
+) -> tuple[int, ...] | None:
+    """Indices into ``uuids`` of the cards that may be CUDA's device 0, or None.
+
+    ``uuids`` is nvidia-smi's list, which is in PCI bus order. CUDA numbers the
+    cards fastest first unless ``CUDA_DEVICE_ORDER=PCI_BUS_ID``, and
+    ``CUDA_VISIBLE_DEVICES`` picks by that number or by UUID (a unique prefix
+    is enough), so without PCI order a number leaves every card a candidate.
+    None when the choice names no card, a MIG slice or something unparsable.
+    """
+    if not uuids:
+        return None
+    pci_order = (device_order or "").strip().upper() == "PCI_BUS_ID"
+    every = tuple(range(len(uuids)))
+    if visible_devices is None:
+        return every[:1] if pci_order else every
+    first = visible_devices.split(",")[0].strip()
+    if first.startswith("GPU-"):
+        matches = tuple(i for i, uuid in enumerate(uuids) if uuid.startswith(first))
+        return matches if len(matches) == 1 else None
+    if first.isdigit():
+        index = int(first)
+        if index >= len(uuids):
+            return None
+        return (index,) if pci_order else every
+    return None
+
+
+def _visible_gpu_vram_gb(
+    gpus: tuple[tuple[str, float], ...] | None,
+    visible_devices: str | None,
+    device_order: str | None,
+) -> float | None:
+    """Total VRAM (GiB) of the card CUDA numbers 0, where a vLLM server starts.
+
+    ``gpus`` is nvidia-smi's list (see ``_visible_gpu_indices`` for how the
+    card is picked). None when the choice still spans cards of different
+    sizes, or when it names no card, a MIG slice or something unparsable.
+    """
+    if not gpus:
+        return None
+    indices = _visible_gpu_indices(tuple(uuid for uuid, _ in gpus), visible_devices, device_order)
+    if not indices:
+        return None
+    sizes = {gpus[i][1] for i in indices}
+    return sizes.pop() if len(sizes) == 1 else None
+
+
+@functools.cache
+def _managed_gpu_vram_gb() -> float | None:
+    """Total VRAM (GiB) of the GPU the managed vLLM servers start on, or None.
+
+    That is CUDA's device 0 under this process's ``CUDA_VISIBLE_DEVICES``
+    (the servers inherit it), not nvidia-smi's GPU 0 that ``_cuda_vram_gb``
+    reports. None when no NVIDIA GPU is visible or the card cannot be told
+    apart from cards of other sizes: the PaddleOCR-VL share then stays at
+    ``PADDLE_VLLM_GPU_MEMORY_UTILIZATION`` and the two servers never count as
+    fitting together. Probed once per process; tests patch this name.
+    """
+    return _visible_gpu_vram_gb(
+        _nvidia_gpu_inventory(),
+        os.environ.get("CUDA_VISIBLE_DEVICES"),
+        os.environ.get("CUDA_DEVICE_ORDER"),
+    )
+
+
+@dataclass(frozen=True)
+class GpuMemory:
+    """Memory of the card the managed vLLM servers start on, in GiB, read just now."""
+
+    #: What CUDA reports as the card's total (nvidia-smi's ``memory.total``
+    #: less ``memory.reserved``): the amount vLLM's ``--gpu-memory-utilization``
+    #: is a share of. 23.56 GiB on an RTX 3090.
+    total_gb: float
+    free_gb: float
+    #: This process's own use of the card (bibr's ONNX sessions and CUDA
+    #: context); 0 when nvidia-smi does not list it.
+    own_gb: float
+
+
+def _nvidia_smi_rows(query: str, fields: str) -> list[list[str]] | None:
+    """nvidia-smi ``--query-<query>=<fields>`` rows, split on commas, or None."""
+    import subprocess
+
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["nvidia-smi", f"--query-{query}={fields}", "--format=csv,noheader,nounits"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return [
+        [cell.strip() for cell in line.split(",")] for line in result.stdout.strip().splitlines()
+    ]
+
+
+def _mib_to_gib(value: str) -> float | None:
+    try:
+        return float(value) / 1024.0
+    except ValueError:
+        return None
+
+
+def _own_gpu_memory_gb(uuid: str) -> float:
+    """GiB this process holds on the card ``uuid`` (0 when nvidia-smi cannot say)."""
+    rows = _nvidia_smi_rows("compute-apps", "pid,gpu_uuid,used_memory") or []
+    pid = str(os.getpid())
+    used = 0.0
+    for row in rows:
+        if len(row) == 3 and row[0] == pid and row[1] == uuid:
+            used += _mib_to_gib(row[2]) or 0.0
+    return used
+
+
+def managed_gpu_memory() -> GpuMemory | None:
+    """Total, free and own memory of the managed vLLM servers' card, or None.
+
+    Read now, not cached: the managed LLM server sizes its share from it at
+    every start, and bibr's own GPU sessions grow during a batch. The card is
+    CUDA's device 0 under ``CUDA_VISIBLE_DEVICES``, picked as for
+    ``_managed_gpu_vram_gb``; when several cards of one size may be device 0,
+    the one with the least free memory. None when no NVIDIA GPU is visible,
+    the candidates differ in size, or nvidia-smi fails. Drivers without
+    ``memory.reserved`` count the whole card as CUDA's total, which only makes
+    the shares computed from it smaller. Tests patch this name.
+    """
+    rows = _nvidia_smi_rows("gpu", "uuid,memory.total,memory.reserved,memory.free")
+    if rows is not None and all(len(row) == 4 for row in rows):
+        cards = [(row[0], row[1], row[2], row[3]) for row in rows]
+    else:
+        rows = _nvidia_smi_rows("gpu", "uuid,memory.total,memory.free")
+        if rows is None or not all(len(row) == 3 for row in rows):
+            return None
+        cards = [(row[0], row[1], "0", row[2]) for row in rows]
+    parsed = []
+    for uuid, total, reserved, free in cards:
+        total_gb, free_gb = _mib_to_gib(total), _mib_to_gib(free)
+        if total_gb is None or free_gb is None:
+            return None
+        parsed.append((uuid, total_gb, _mib_to_gib(reserved) or 0.0, free_gb))
+    indices = _visible_gpu_indices(
+        tuple(card[0] for card in parsed),
+        os.environ.get("CUDA_VISIBLE_DEVICES"),
+        os.environ.get("CUDA_DEVICE_ORDER"),
+    )
+    if not indices or len({parsed[i][1] for i in indices}) != 1:
+        return None
+    uuid, total_gb, reserved_gb, free_gb = min((parsed[i] for i in indices), key=lambda c: c[3])
+    return GpuMemory(
+        total_gb=total_gb - reserved_gb, free_gb=free_gb, own_gb=_own_gpu_memory_gb(uuid)
+    )
+
+
+#: The lowest CUDA compute capability bibr's automatic routing sends to vLLM.
+#: The published vLLM models (the extraction students and PaddleOCR-VL) are
+#: bf16 checkpoints, and vLLM 0.31 serves bf16 only from compute capability
+#: 8.0 (Ampere; ``vllm.platforms.cuda``). bibr passes no ``--dtype``, and with
+#: vLLM's default ``auto`` dtype an older card (Turing 7.5, Volta 7.0, Pascal
+#: 6.x) is not refused: vLLM casts the model to float16 with a warning, a
+#: numeric path bibr has never been measured on. So such cards run both the
+#: LLM and the OCR on llama.cpp. A routing rule, not a refusal: an explicit
+#: ``paddle-vllm`` or ``--llm vllm`` still starts there.
+VLLM_MIN_COMPUTE_CAPABILITY = 8.0
+
+
+@functools.cache
+def _nvidia_compute_capability() -> float | None:
+    """Compute capability of the card the managed servers start on, or None.
+
+    That is CUDA's device 0 under this process's ``CUDA_VISIBLE_DEVICES``
+    (see ``_visible_gpu_indices``); when several cards may be device 0, the
+    lowest of theirs. None when nvidia-smi is missing, too old to report
+    ``compute_cap``, or the choice names no card. Probed once per process;
+    tests patch this name.
+    """
+    rows = _nvidia_smi_rows("gpu", "uuid,compute_cap")
+    if not rows or not all(len(row) == 2 for row in rows):
+        return None
+    indices = _visible_gpu_indices(
+        tuple(row[0] for row in rows),
+        os.environ.get("CUDA_VISIBLE_DEVICES"),
+        os.environ.get("CUDA_DEVICE_ORDER"),
+    )
+    if not indices:
+        return None
+    try:
+        return min(float(rows[i][1]) for i in indices)
+    except ValueError:
+        return None
+
+
+def vllm_compute_capability_blocker(*, capability: float | None | object = _PROBE) -> str | None:
+    """Why bibr's automatic routing keeps vLLM off this card, or ``None``.
+
+    ``None`` when the compute capability is ``VLLM_MIN_COMPUTE_CAPABILITY`` or
+    more, or cannot be read (routing then stays as it was). Consulted by the
+    automatic ``paddle`` OCR chain, by the ``local`` LLM backend's choice
+    (``bibr.local.llm_models.cuda_llm_backend_for``) and by setup; never by an
+    explicit ``paddle-vllm`` or ``vllm`` start.
+    """
+    cap = _nvidia_compute_capability() if capability is _PROBE else capability
+    if not isinstance(cap, int | float) or cap >= VLLM_MIN_COMPUTE_CAPABILITY:
+        return None
+    return (
+        f"the GPU's compute capability is {cap:.1f}; bibr's vLLM models are bf16, "
+        f"which vLLM serves from {VLLM_MIN_COMPUTE_CAPABILITY:.1f} (Ampere) on, and "
+        "would run cast to float16, which bibr has not tested"
+    )
+
+
 def paddle_vllm_unavailable_reason(*, vram_gb: float | None | object = _PROBE) -> str | None:
     """Why the managed ``paddle-vllm`` runtime cannot start here, or ``None``.
 
@@ -77,14 +347,67 @@ def paddle_vllm_unavailable_reason(*, vram_gb: float | None | object = _PROBE) -
     itself, and by the ``bibr chew`` preflight.
     """
     vram = _cuda_vram_gb() if vram_gb is _PROBE else vram_gb
-    if vram is None:
+    if not isinstance(vram, int | float):
         return "no NVIDIA GPU detected (paddle-vllm needs CUDA)"
+    # No card-size tolerance here (bibr.local.llm_models.fits_card): an RTX
+    # 4060 (8,188 MiB) keeps GLM-OCR on llama.cpp, the OCR of its default pair.
     if vram < PADDLE_VLLM_MIN_VRAM_GB:
         return (
             f"the GPU has {vram:.0f} GB of VRAM and paddle-vllm needs at least "
             f"{PADDLE_VLLM_MIN_VRAM_GB:.0f} GB (llama.cpp is the low-VRAM OCR path)"
         )
     return None
+
+
+def paddle_vllm_gpu_memory_utilization(*, vram_gb: float | None | object = _PROBE) -> float:
+    """``--gpu-memory-utilization`` for the managed PaddleOCR-VL vLLM server.
+
+    ``PADDLE_VLLM_GPU_MEMORY_GB`` as a share of the card the server starts on,
+    rounded up to the next hundredth and capped at
+    ``PADDLE_VLLM_GPU_MEMORY_UTILIZATION`` (also the answer when that card
+    cannot be identified): 0.16 on a 32 GB card, 0.21 on 24 GB, 0.32 on 16 GB.
+
+    vLLM refuses to start unless that share of the whole card is free. bibr
+    keeps its layout, SaT and NER ONNX sessions on the GPU between chunks, so
+    a fixed 0.92 left 8% of the card for them and for vLLM's own CUDA context:
+    on an RTX 5090 the second chunk's restart found 28.52 of the 28.93 GiB it
+    asked for, and every later paper failed.
+    """
+    vram = _managed_gpu_vram_gb() if vram_gb is _PROBE else vram_gb
+    if not isinstance(vram, int | float) or vram <= 0:
+        return PADDLE_VLLM_GPU_MEMORY_UTILIZATION
+    # round() first, so float noise (7 / 35 * 100 = 20.000000000000004) cannot
+    # push the share up a hundredth.
+    share = math.ceil(round(PADDLE_VLLM_GPU_MEMORY_GB / vram * 100, 6)) / 100
+    return min(PADDLE_VLLM_GPU_MEMORY_UTILIZATION, share)
+
+
+def managed_vllm_onnx_reserve_share(*, vram_gb: float | None | object = _PROBE) -> float:
+    """``MANAGED_VLLM_ONNX_RESERVE_GB`` as a share of the managed servers' card (0 if unknown)."""
+    vram = _managed_gpu_vram_gb() if vram_gb is _PROBE else vram_gb
+    if not isinstance(vram, int | float) or vram <= 0:
+        return 0.0
+    return MANAGED_VLLM_ONNX_RESERVE_GB / vram
+
+
+def managed_vllm_shares_fit(
+    llm_share: float, ocr_share: float, *, vram_gb: float | None | object = _PROBE
+) -> bool:
+    """Whether the managed vLLM LLM and PaddleOCR-VL servers can be up at once.
+
+    Both shares plus ``MANAGED_VLLM_ONNX_RESERVE_GB`` must fit on the card the
+    servers start on; on a card that cannot be identified they never do.
+    Shares summing to at most 1 are not enough: at 0.85 + 0.15 of a 48 GB
+    card, the server starting second would find bibr's own GPU sessions inside
+    its share and never start.
+    """
+    vram = _managed_gpu_vram_gb() if vram_gb is _PROBE else vram_gb
+    if not isinstance(vram, int | float) or vram <= 0:
+        return False
+    reserve = managed_vllm_onnx_reserve_share(vram_gb=vram)
+    # The tolerance absorbs float noise in shares that fit exactly
+    # (0.54 + 0.21 + 0.25 on 24 GB).
+    return llm_share + ocr_share + reserve <= 1.0 + 1e-9
 
 
 def default_backend() -> str:
@@ -135,13 +458,15 @@ def _candidate(backend: str, settings: GlobalSettings) -> OcrBackendCandidate:
 
 
 def resolve_backend_candidates(
-    name: str | None, settings: GlobalSettings
+    name: str | None, settings: GlobalSettings, *, llm_backend: str | None = None
 ) -> tuple[OcrBackendCandidate, ...]:
     """Resolve an OCR request to concrete, deterministic startup candidates.
 
     Only the ``paddle`` automatic selector has more than one candidate.
     Explicit concrete backends are deliberately single-candidate requests so a
     user-selected runtime is never silently replaced by another implementation.
+    ``llm_backend`` is the run's resolved LLM backend, when the caller knows
+    it (see ``automatic_backend_names``).
     """
     if name is None:
         ocr_opts = settings.ocr
@@ -153,11 +478,29 @@ def resolve_backend_candidates(
 
     if name != "paddle":
         return (_candidate(name, settings),)
-    return tuple(_candidate(backend, settings) for backend in automatic_backend_names())
+    return tuple(
+        _candidate(backend, settings)
+        for backend in automatic_backend_names(llm_backend=llm_backend)
+    )
 
 
-def automatic_backend_names() -> tuple[str, ...]:
-    """The concrete runtimes the automatic ``paddle`` selector tries here, in order."""
+#: Why the automatic chain leaves out paddle-vllm beside a llama.cpp LLM.
+_LLAMA_CPP_LLM_KEEPS_OCR_ON_LLAMA_CPP = (
+    "the LLM runs on llama.cpp, and bibr hands GPU memory between two vLLM servers "
+    "or two llama.cpp servers but not between PaddleOCR-VL on vLLM and a llama.cpp "
+    "LLM (bibr setup pairs a llama.cpp LLM with GLM-OCR on llama.cpp too)"
+)
+
+
+def automatic_backend_names(*, llm_backend: str | None = None) -> tuple[str, ...]:
+    """The concrete runtimes the automatic ``paddle`` selector tries here, in order.
+
+    ``llm_backend`` is the run's resolved LLM backend (``"cloud"`` for
+    ``--no-llm``; None when the caller does not know it). On Linux a
+    ``llama-cpp`` LLM leaves paddle-vllm out, so the OCR runs GLM-OCR on
+    llama.cpp, the pair setup recommends, and so does a card whose compute
+    capability is below ``VLLM_MIN_COMPUTE_CAPABILITY``.
+    """
     if sys.platform == "darwin" and platform.machine() == "arm64":
         return ("paddle-rapid-mlx", "paddle-mlx-vlm", "glm-rapid-mlx", "glm-llama")
     if sys.platform == "win32":
@@ -166,7 +509,11 @@ def automatic_backend_names() -> tuple[str, ...]:
         # The managed vLLM runtime is only a candidate on hardware that can
         # run it. Otherwise a CPU-only or small-GPU box spent the whole 900 s
         # startup budget bootstrapping vLLM before falling through to llama.cpp.
-        vllm_blocker = paddle_vllm_unavailable_reason()
+        vllm_blocker = (
+            _LLAMA_CPP_LLM_KEEPS_OCR_ON_LLAMA_CPP
+            if llm_backend == "llama-cpp"
+            else paddle_vllm_unavailable_reason() or vllm_compute_capability_blocker()
+        )
         if vllm_blocker is None:
             return ("paddle-vllm", "glm-llama")
         logger.debug("paddle-vllm skipped in the automatic OCR chain: %s", vllm_blocker)

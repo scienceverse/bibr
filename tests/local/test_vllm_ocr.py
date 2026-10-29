@@ -55,7 +55,8 @@ def test_launch_command_uses_audited_paddle_runtime_settings(monkeypatch):
     expected = {
         "--revision": "66317acc4c9fc17bd154591ce650735cd2855f3e",
         "--served-model-name": "paddle-ocr-vl-1.6",
-        "--gpu-memory-utilization": "0.92",
+        # PaddleOCR-VL's ~5 GB on the suite's 24 GB card, not 92% of it.
+        "--gpu-memory-utilization": "0.21",
         "--max-model-len": "16384",
         "--max-num-seqs": "12",
         "--max-num-batched-tokens": "16384",
@@ -67,6 +68,24 @@ def test_launch_command_uses_audited_paddle_runtime_settings(monkeypatch):
     assert not any("flashinfer" in part.lower() or "attention" in part.lower() for part in cmd)
     # Explicit operator flags are appended last and override defaults.
     assert cmd[-2:] == ["--max-model-len", "8192"]
+
+
+def test_launch_share_is_sized_from_the_card(monkeypatch):
+    """A 32 GB card gets 0.16: room to restart beside bibr's resident ONNX sessions."""
+    from bibr.local import vllm_ocr
+
+    with (
+        patch("bibr.ocr.registry._managed_gpu_vram_gb", return_value=31.84),
+        patch("importlib.util.find_spec", return_value=object()),
+        patch.object(vllm_ocr, "guard_managed_server_port", return_value=False),
+        patch.object(vllm_ocr.subprocess, "Popen") as popen,
+        patch.object(vllm_ocr.VllmOcrServer, "_wait_until_ready"),
+    ):
+        popen.return_value = MagicMock()
+        vllm_ocr.VllmOcrServer(model="PaddlePaddle/PaddleOCR-VL-1.6", port=9123)
+
+    cmd = popen.call_args.args[0]
+    assert cmd[cmd.index("--gpu-memory-utilization") + 1] == "0.16"
 
 
 def test_readiness_requires_the_exact_served_alias(monkeypatch):

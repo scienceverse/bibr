@@ -14,8 +14,8 @@ from types import SimpleNamespace
 import pytest
 
 
-def _cfg(backend, url=None):
-    return SimpleNamespace(ocr_backend=backend, ocr_url=url)
+def _cfg(backend, url=None, llm_backend="cloud", no_llm=False):
+    return SimpleNamespace(ocr_backend=backend, ocr_url=url, llm_backend=llm_backend, no_llm=no_llm)
 
 
 def _pin_install(monkeypatch, *, torch, cv2):
@@ -160,3 +160,74 @@ async def test_chew_refuses_pdfs_without_a_working_opencv_when_torch_is_installe
     err = capsys.readouterr().err
     assert f"Layout/OCR image runtime unavailable: {reason}" in err
     assert f"Repair with: {repair}" in err
+
+
+@pytest.mark.parametrize(
+    ("llm_backend", "no_llm", "passed"),
+    [
+        ("llama-cpp", False, "llama-cpp"),
+        ("vllm", False, "vllm"),
+        ("llama-cpp", True, "cloud"),
+    ],
+)
+def test_the_preflight_resolves_the_chain_with_the_runs_llm_backend(
+    monkeypatch, llm_backend, no_llm, passed
+):
+    """Beside a llama.cpp LLM the chain is GLM-OCR alone, so the preflight
+    checks llama.cpp, not paddle-vllm."""
+    from bibr.local.cli import run_config
+
+    seen = []
+    monkeypatch.setattr(
+        run_config, "_ocr_runtime_blocker", lambda backend, **kw: seen.append(kw) or None
+    )
+    assert (
+        run_config._preflight_ocr_runtime(_cfg("paddle", llm_backend=llm_backend, no_llm=no_llm))
+        is None
+    )
+    assert seen == [{"llm_backend": passed}]
+
+
+@pytest.mark.parametrize(
+    ("llm_backend", "blocked"),
+    [("llama-cpp", True), ("vllm", False), ("cloud", False)],
+)
+def test_the_blocker_resolves_its_own_chain_with_the_llm_backend(
+    monkeypatch, linux, llm_backend, blocked
+):
+    """On a 24 GB card without llama.cpp, paddle-vllm could start, but beside a
+    llama.cpp LLM the chain is GLM-OCR alone, which cannot: refused."""
+    from bibr.local.cli import run_config
+
+    monkeypatch.setattr(linux, "_cuda_vram_gb", lambda: 24.0)
+    monkeypatch.setattr("bibr.local.llama_cpp.find_llama_server", lambda: None)
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+    monkeypatch.setattr("shutil.which", lambda name, *a, **k: "/usr/bin/uv")
+
+    blocker = run_config._ocr_runtime_blocker("paddle", llm_backend=llm_backend)
+
+    if blocked:
+        assert blocker is not None
+        assert "glm-llama" in blocker and "paddle-vllm" not in blocker
+    else:
+        assert blocker is None
+
+
+@pytest.mark.parametrize(
+    ("llm_backend", "no_llm", "chain"),
+    [
+        ("llama-cpp", False, ["glm-llama"]),
+        ("vllm", False, ["paddle-vllm", "glm-llama"]),
+        ("llama-cpp", True, ["paddle-vllm", "glm-llama"]),
+    ],
+)
+def test_the_dry_run_lists_the_chain_the_run_starts(monkeypatch, linux, llm_backend, no_llm, chain):
+    from bibr.local.cli import dry_run
+
+    monkeypatch.setattr(linux, "_cuda_vram_gb", lambda: 24.0)
+
+    candidates = dry_run._dry_run_ocr_candidates(
+        _cfg("paddle", llm_backend=llm_backend, no_llm=no_llm)
+    )
+
+    assert [c.backend for c in candidates] == chain

@@ -57,6 +57,31 @@ def max_model_len(model: str, extra_args: str | None) -> int | None:
         return None
 
 
+def _server_url(port: int) -> str:
+    return f"http://localhost:{port}"
+
+
+def reuses_running_server(model: str, port: int) -> bool:
+    """Whether a managed vLLM LLM server start for *model* reuses the server on *port*.
+
+    The check ``VllmLlmServer`` makes before anything else
+    (``guard_managed_server_port``): True when a server for *model* already
+    listens on the port, one that another pipeline in this process started
+    (its key is shared) or another process's, and the start reuses it without
+    sizing a share or launching vLLM; False when the port is free and vLLM is
+    launched. Raises ``UpstreamServiceError`` for a listener the start cannot
+    use. ``ResourceManager.llm_start_refusal`` asks the same before a chunk's
+    OCR, so it never predicts a refusal for a start that would reuse a server.
+    """
+    return guard_managed_server_port(
+        "llm",
+        base_url=_server_url(port),
+        model=model,
+        server_label="vLLM",
+        request_fn=request_bytes,
+    )
+
+
 # Grace period between SIGTERM and SIGKILL on shutdown.
 _TERM_GRACE_S = 10
 
@@ -88,29 +113,41 @@ class VllmLlmServer:
         settings=None,
         *,
         stop_event: threading.Event | None = None,
+        share_from_free_memory: bool = False,
+        swaps_with_ocr: bool = False,
     ):
+        """Start (or reuse) the server; blocking.
+
+        ``mem_fraction`` (default ``llm.local_mem_fraction``) is the share
+        vLLM is launched with. With ``share_from_free_memory`` it is only the
+        cap: the share is worked out from the VRAM free right now (see
+        ``bibr.local.vllm_share``), and ``ManagedLlmVramError`` is raised
+        before launching when the model's floor does not fit.
+        ``swaps_with_ocr`` says a managed PaddleOCR-VL server takes turns with
+        this one on the card, so the server restarts every chunk and a start
+        may be squeezed to the model's floor; otherwise (LLM-only, an OCR
+        server bibr does not manage, or both servers planned side by side) it
+        stays up for the run, and a start that cannot leave bibr's sessions
+        their whole reserve beside the floor is refused.
+        """
         self._stop_event = stop_event
         self._settings = settings if settings is not None else snapshot_settings()
-        from bibr.local.llm_models import default_local_model
+        from bibr.local.vllm_share import managed_llm_model
 
-        self._model = model or self._settings.llm.local_model or default_local_model("vllm")
+        self._model = managed_llm_model(self._settings, model)
         self._port = port if port is not None else self._settings.llm.vllm_port
         if mem_fraction is None:
             mem_fraction = self._settings.llm.local_mem_fraction
         self._process: subprocess.Popen | None = None
         self._stderr_fh = None
         self._stderr_log: Path | None = None
-        self._reused = guard_managed_server_port(
-            "llm",
-            base_url=self.base_url,
-            model=self._model,
-            server_label="vLLM",
-            request_fn=request_bytes,
-        )
+        self._reused = reuses_running_server(self._model, self._port)
         if self._reused:
             # Another pipeline in this process may have started it.
             self.api_key = own_server_key(self.base_url)
             return
+        if share_from_free_memory:
+            mem_fraction = self._share_from_free_memory(mem_fraction, swaps_with_ocr=swaps_with_ocr)
 
         cmd = self._resolve_launch_cmd(self._model)
         cmd.extend(
@@ -167,6 +204,28 @@ class VllmLlmServer:
             self.shutdown()
             raise
         register_server_key(self.base_url, self.api_key)
+
+    def _share_from_free_memory(self, cap: float, *, swaps_with_ocr: bool) -> float:
+        """The share for this start, sized from the VRAM free now (at most *cap*)."""
+        from bibr.local import vllm_share
+        from bibr.ocr import registry
+
+        reading = vllm_share.settled_gpu_memory(
+            registry.managed_gpu_memory,
+            wait=lambda seconds: pause_startup_poll(seconds, self._stop_event, "vLLM"),
+        )
+        share = vllm_share.managed_llm_share(
+            reading, self._settings, self._model, cap=cap, swaps_with_ocr=swaps_with_ocr
+        )
+        if share.reason == "floor" and swaps_with_ocr:
+            logger.warning(
+                "Managed vLLM LLM share %s; bibr's GPU sessions have little room left, "
+                "so expect ONNX batches to split after CUDA out-of-memory",
+                share.describe(),
+            )
+        else:
+            logger.info("Managed vLLM LLM share %s", share.describe())
+        return share.share
 
     @staticmethod
     def _resolve_launch_cmd(model: str) -> list[str]:
@@ -230,7 +289,7 @@ class VllmLlmServer:
 
     @property
     def base_url(self) -> str:
-        return f"http://localhost:{self._port}"
+        return _server_url(self._port)
 
     @property
     def _effective_settings(self):
