@@ -33,7 +33,7 @@ def captured_prompt(monkeypatch):
     return captured
 
 
-async def test_resolve_citations_uses_uuid_boundary(captured_prompt):
+async def test_resolve_citations_uses_hex_boundary(captured_prompt):
     from bibr.clients.llm import LLMClient
 
     c = LLMClient()
@@ -43,11 +43,11 @@ async def test_resolve_citations_uses_uuid_boundary(captured_prompt):
     )
     content = prompt_text(captured_prompt["messages"][0]["content"])
     assert re.search(r"[0-9a-f]{32}", content), (
-        "expected a UUID boundary marker in the resolve_citations prompt"
+        "expected a 32-hex boundary marker in the resolve_citations prompt"
     )
 
 
-async def test_extract_equations_uses_uuid_boundary(captured_prompt):
+async def test_extract_equations_uses_hex_boundary(captured_prompt):
     from bibr.clients.llm import LLMClient
 
     c = LLMClient()

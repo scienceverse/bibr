@@ -13,8 +13,8 @@ from bibr.config import GlobalSettings, snapshot_settings
 
 logger = logging.getLogger(__name__)
 
-# Stands in for the per-call random fence boundary so a prompt hashes the same
-# on every call.
+# Stands in for the fence boundary, which is derived from each call's data, so
+# the prompt fingerprint depends only on the template.
 _PROMPT_BOUNDARY = "<boundary>"
 
 
