@@ -6,6 +6,8 @@ Previously this logic lived only in the CLI, so library calls ignored
 
 import pytest
 
+from bibr.ocr import registry as _registry_for_probe
+
 
 class _OcrSettings:
     paddle_model = "paddle/source"
@@ -331,3 +333,412 @@ class TestLinuxChainIsHardwareAware:
         assert "no NVIDIA GPU" in registry.paddle_vllm_unavailable_reason(vram_gb=None)
         low = registry.paddle_vllm_unavailable_reason(vram_gb=6.0)
         assert "6 GB" in low and "llama.cpp" in low
+
+    def test_an_rtx_4060_keeps_glm_ocr_on_llama_cpp(self):
+        # An RTX 4060 reports 8,188 MiB: no card-size tolerance for OCR, so
+        # its automatic chain stays on llama.cpp, the OCR of its default pair.
+        from bibr.ocr import registry
+
+        assert registry.paddle_vllm_unavailable_reason(vram_gb=8188 / 1024) is not None
+        assert registry.paddle_vllm_unavailable_reason(vram_gb=8.0) is None
+
+
+class TestLinuxChainFollowsTheLlmBackend:
+    """The automatic chain runs GLM-OCR on llama.cpp beside a llama.cpp LLM, as
+    setup pairs them: bibr hands GPU memory between two vLLM servers or two
+    llama.cpp servers, not between PaddleOCR-VL on vLLM and a llama.cpp LLM."""
+
+    @staticmethod
+    def _linux(monkeypatch, vram, capability=None):
+        from bibr.ocr import registry
+
+        monkeypatch.setattr(registry.sys, "platform", "linux")
+        monkeypatch.setattr(registry.platform, "machine", lambda: "x86_64")
+        monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: vram)
+        monkeypatch.setattr(registry, "_nvidia_compute_capability", lambda: capability)
+        return registry
+
+    @pytest.mark.parametrize("vram", [8.0, 10.0, 12.0, 24.0])
+    def test_a_llama_cpp_llm_keeps_ocr_on_llama_cpp(self, monkeypatch, vram):
+        registry = self._linux(monkeypatch, vram)
+        chain = registry.resolve_backend_candidates(
+            "paddle", _CandidateSettings(), llm_backend="llama-cpp"
+        )
+        assert [c.backend for c in chain] == ["glm-llama"]
+        assert registry.automatic_backend_names(llm_backend="llama-cpp") == ("glm-llama",)
+
+    @pytest.mark.parametrize("llm", [None, "cloud", "vllm", "llmster"])
+    def test_other_llm_backends_keep_paddle_vllm_first(self, monkeypatch, llm):
+        registry = self._linux(monkeypatch, 24.0)
+        assert registry.automatic_backend_names(llm_backend=llm) == ("paddle-vllm", "glm-llama")
+
+    def test_an_explicit_paddle_vllm_is_kept_beside_a_llama_cpp_llm(self, monkeypatch):
+        registry = self._linux(monkeypatch, 24.0)
+        chain = registry.resolve_backend_candidates(
+            "paddle-vllm", _CandidateSettings(), llm_backend="llama-cpp"
+        )
+        assert [c.backend for c in chain] == ["paddle-vllm"]
+
+    def test_the_resource_manager_resolves_with_its_llm_backend(self, monkeypatch):
+        self._linux(monkeypatch, 24.0)
+        from bibr.pipeline.resources import ResourceManager
+
+        beside_llama = ResourceManager(ocr_backend="paddle", llm_backend="llama-cpp")
+        assert [c.backend for c in beside_llama._resolve_ocr_candidates()] == ["glm-llama"]
+        assert not beside_llama._starts_managed_paddle_vllm()
+        beside_vllm = ResourceManager(ocr_backend="paddle", llm_backend="vllm")
+        assert [c.backend for c in beside_vllm._resolve_ocr_candidates()] == [
+            "paddle-vllm",
+            "glm-llama",
+        ]
+        assert beside_vllm._starts_managed_paddle_vllm()
+
+
+class TestComputeCapabilityGuard:
+    """vLLM 0.31 serves bf16 from compute capability 8.0; on older cards the
+    automatic chain runs GLM-OCR on llama.cpp. Unreadable keeps the chain."""
+
+    @staticmethod
+    def _linux(monkeypatch, capability):
+        return TestLinuxChainFollowsTheLlmBackend._linux(monkeypatch, 24.0, capability)
+
+    @pytest.mark.parametrize("capability", [6.1, 7.0, 7.5])
+    def test_pre_ampere_cards_skip_paddle_vllm(self, monkeypatch, capability):
+        registry = self._linux(monkeypatch, capability)
+        assert registry.automatic_backend_names() == ("glm-llama",)
+        assert registry.automatic_backend_names(llm_backend="cloud") == ("glm-llama",)
+        blocker = registry.vllm_compute_capability_blocker()
+        assert blocker is not None and f"{capability:.1f}" in blocker
+
+    @pytest.mark.parametrize("capability", [8.0, 8.6, 8.9, 12.0, None])
+    def test_ampere_and_newer_or_unknown_keep_paddle_vllm(self, monkeypatch, capability):
+        registry = self._linux(monkeypatch, capability)
+        assert registry.automatic_backend_names() == ("paddle-vllm", "glm-llama")
+        assert registry.vllm_compute_capability_blocker() is None
+
+    def test_explicit_paddle_vllm_is_not_refused_on_an_old_card(self, monkeypatch):
+        """A routing rule, not a refusal: the launcher's own check ignores it."""
+        registry = self._linux(monkeypatch, 7.5)
+        chain = registry.resolve_backend_candidates("paddle-vllm", _CandidateSettings())
+        assert [c.backend for c in chain] == ["paddle-vllm"]
+        assert registry.paddle_vllm_unavailable_reason(vram_gb=24.0) is None
+
+    def test_the_probe_reads_the_card_cuda_numbers_0(self, monkeypatch):
+        from bibr.ocr import registry
+
+        probe = _CAPABILITY_PROBE.__wrapped__
+        rows = [["GPU-aaa", "8.6"], ["GPU-bbb", "7.5"]]
+        monkeypatch.setattr(registry, "_nvidia_smi_rows", lambda query, fields: rows)
+        monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+        assert probe() == 7.5
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-aaa")
+        assert probe() == 8.6
+        # Without PCI order either card may be device 0: the lower one counts.
+        monkeypatch.delenv("CUDA_DEVICE_ORDER")
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+        assert probe() == 7.5
+
+    @pytest.mark.parametrize(
+        "rows", [None, [], [["GPU-aaa"]], [["GPU-aaa", "[N/A]"]], [["GPU-aaa", "8.6", "x"]]]
+    )
+    def test_an_unreadable_capability_is_none(self, monkeypatch, rows):
+        from bibr.ocr import registry
+
+        monkeypatch.setattr(registry, "_nvidia_smi_rows", lambda query, fields: rows)
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        assert _CAPABILITY_PROBE.__wrapped__() is None
+
+
+# Captured at collection, before the suite's conftest pins it for each test.
+_CAPABILITY_PROBE = _registry_for_probe._nvidia_compute_capability
+# Captured at collection, before the suite's conftest pins it for each test.
+_MANAGED_GPU_PROBE = _registry_for_probe._managed_gpu_vram_gb
+
+# nvidia-smi totals (GiB) of common cards, as the VRAM probes report them.
+_CARDS = {
+    "12 GB": 12.0,
+    "16 GB": 15.99,
+    "24 GB": 24.0,
+    "32 GB (RTX 5090)": 31.84,
+    "48 GB": 47.99,
+    "64 GB": 64.0,
+    "80 GB": 79.65,
+}
+# vLLM multiplies its share by CUDA's total, which is smaller than
+# nvidia-smi's: 31.45 vs 31.84 GiB on an RTX 5090, 23.56 vs 24.0 on an RTX 3090.
+_CUDA_OF_SMI = 0.98
+# What a server restarting beside bibr's resident ONNX sessions needs outside
+# its share on an RTX 5090: bibr held 2.43-2.77 GiB at the later chunks' OCR
+# restarts, and the new server's CUDA context takes about 0.49 GiB.
+_RESTART_NEED_GIB = 2.77 + 0.49
+
+
+class TestPaddleVllmShareIsSizedFromItsNeed:
+    """The managed PaddleOCR-VL server asks vLLM for about 5 GB, not 92% of the card.
+
+    vLLM will not start unless its whole share is free, and bibr's layout, SaT
+    and NER ONNX sessions stay on the GPU between chunks. On an RTX 5090 they
+    held 2.43 GiB when the second chunk restarted OCR, so 0.92 (28.93 of 31.45
+    GiB) never fitted again and every paper after the first chunk failed.
+    """
+
+    @pytest.mark.parametrize(
+        ("vram_gb", "share"),
+        [
+            (12.0, 0.42),
+            (15.99, 0.32),
+            (24.0, 0.21),
+            (23.99, 0.21),  # RTX 4090
+            (31.84, 0.16),  # RTX 5090
+            (47.99, 0.11),
+            (64.0, 0.08),
+            (79.65, 0.07),
+            (10.0, 0.50),
+            (8.0, 0.63),  # paddle-vllm's floor
+        ],
+    )
+    def test_share_by_card(self, vram_gb, share):
+        from bibr.ocr import registry
+
+        assert registry.paddle_vllm_gpu_memory_utilization(vram_gb=vram_gb) == share
+
+    @pytest.mark.parametrize("vram_gb", [None, 0.0, 4.0])
+    def test_unknown_or_tiny_card_keeps_the_cap(self, vram_gb):
+        from bibr.ocr import registry
+
+        assert (
+            registry.paddle_vllm_gpu_memory_utilization(vram_gb=vram_gb)
+            == registry.PADDLE_VLLM_GPU_MEMORY_UTILIZATION
+        )
+
+    def test_probes_the_managed_servers_card_by_default(self, monkeypatch):
+        from bibr.ocr import registry
+
+        monkeypatch.setattr(registry, "_managed_gpu_vram_gb", lambda: 31.84)
+        assert registry.paddle_vllm_gpu_memory_utilization() == 0.16
+
+    @pytest.mark.parametrize("vram_gb", [8.0, 10.0, *_CARDS.values()])
+    def test_share_holds_paddleocr_vl(self, vram_gb):
+        """At 0.20 of a 24 GB card (4.71 GiB of CUDA memory) PaddleOCR-VL ran 20/20
+        papers with a 2.26 GiB KV cache, at least 10x its peak use."""
+        from bibr.ocr import registry
+
+        share = registry.paddle_vllm_gpu_memory_utilization(vram_gb=vram_gb)
+        assert share * vram_gb * _CUDA_OF_SMI >= 4.7
+
+    @pytest.mark.parametrize("vram_gb", [10.0, *_CARDS.values()])
+    def test_share_leaves_room_to_restart_beside_the_onnx_sessions(self, vram_gb):
+        """0.92 left 2.5 GiB of a 32 GB card and 1.9 of 24 GB."""
+        from bibr.ocr import registry
+
+        share = registry.paddle_vllm_gpu_memory_utilization(vram_gb=vram_gb)
+        assert (1 - share) * vram_gb * _CUDA_OF_SMI >= _RESTART_NEED_GIB
+
+
+class TestManagedVllmSharesFit:
+    """Both managed vLLM servers count as fitting only with bibr's ONNX reserve left over.
+
+    Shares summing to 1 are not enough: at 0.85 + 0.15 on a 48 GB card, a
+    later chunk's PaddleOCR-VL restart would find bibr's own sessions inside its
+    share and never start, so every later paper would fail.
+    """
+
+    @pytest.mark.parametrize(
+        ("card", "fits"),
+        [
+            ("12 GB", False),
+            ("16 GB", False),
+            ("24 GB", False),
+            ("32 GB (RTX 5090)", False),
+            ("48 GB", False),  # 0.85 + 0.11 = 0.96 leaves 1.9 GiB
+            ("64 GB", False),  # 0.85 + 0.08 = 0.93 leaves 4.4 GiB
+            ("80 GB", True),  # 0.85 + 0.07 = 0.92 leaves 6.2 GiB
+        ],
+    )
+    def test_default_llm_share(self, card, fits):
+        from bibr.ocr import registry
+
+        vram = _CARDS[card]
+        ocr = registry.paddle_vllm_gpu_memory_utilization(vram_gb=vram)
+        assert registry.managed_vllm_shares_fit(0.85, ocr, vram_gb=vram) is fits
+
+    @pytest.mark.parametrize(
+        ("llm_share", "card", "fits"),
+        [
+            # LLM_LOCAL_MEM_FRACTION set by the user.
+            (0.6, "24 GB", False),  # 0.81 of the card leaves 4.5 GiB
+            (0.5, "24 GB", True),
+            (0.85, "48 GB", False),
+            (0.7, "48 GB", True),
+            (0.5, "32 GB (RTX 5090)", True),
+            (0.7, "32 GB (RTX 5090)", False),
+            (0.05, "12 GB", True),  # 0.05 + 0.42 leaves 6.2 GiB
+        ],
+    )
+    def test_user_set_llm_share(self, llm_share, card, fits):
+        from bibr.ocr import registry
+
+        vram = _CARDS[card]
+        ocr = registry.paddle_vllm_gpu_memory_utilization(vram_gb=vram)
+        assert registry.managed_vllm_shares_fit(llm_share, ocr, vram_gb=vram) is fits
+
+    @pytest.mark.parametrize("card", list(_CARDS))
+    @pytest.mark.parametrize("llm_share", [0.3, 0.5, 0.6, 0.7, 0.76, 0.85])
+    def test_shares_that_fit_leave_the_reserve(self, card, llm_share):
+        """Whenever the servers may be up together, at least ~5.9 GiB of CUDA memory
+        stays outside both: what a restart needs, and the room at which layout
+        stopped retrying after OOM on a 24 GB card (6.1 GiB)."""
+        from bibr.ocr import registry
+
+        vram = _CARDS[card]
+        ocr = registry.paddle_vllm_gpu_memory_utilization(vram_gb=vram)
+        if registry.managed_vllm_shares_fit(llm_share, ocr, vram_gb=vram):
+            room = (1 - llm_share - ocr) * vram * _CUDA_OF_SMI
+            assert room >= registry.MANAGED_VLLM_ONNX_RESERVE_GB * _CUDA_OF_SMI - 1e-6
+            assert room >= _RESTART_NEED_GIB
+
+    @pytest.mark.parametrize("vram_gb", [None, 0.0])
+    def test_unknown_card_never_fits(self, vram_gb):
+        from bibr.ocr import registry
+
+        assert registry.managed_vllm_shares_fit(0.05, 0.05, vram_gb=vram_gb) is False
+
+    def test_exact_fit_survives_float_noise(self):
+        from bibr.ocr import registry
+
+        # 0.54 + 0.21 + 6/24 is 1.0000000000000002 in floats.
+        assert registry.managed_vllm_shares_fit(0.54, 0.21, vram_gb=24.0) is True
+
+
+class TestManagedServersCard:
+    """The PaddleOCR-VL share is sized from the card CUDA_VISIBLE_DEVICES exposes.
+
+    vLLM runs on CUDA's device 0, which need not be nvidia-smi's GPU 0. An
+    80 GB GPU 0 beside a visible 16 GB card used to give 0.09 of the 16 GB
+    card, 1.4 GiB, less than PaddleOCR-VL's weights.
+    """
+
+    A100 = ("GPU-aaaaaaaa-1111-2222-3333-444444444444", 79.65)
+    RTX4080 = ("GPU-bbbbbbbb-1111-2222-3333-444444444444", 15.99)
+    RTX3090 = ("GPU-cccccccc-1111-2222-3333-444444444444", 24.0)
+    RTX3090_2 = ("GPU-dddddddd-1111-2222-3333-444444444444", 24.0)
+
+    @pytest.mark.parametrize(
+        ("visible", "order", "expected"),
+        [
+            # PCI bus order: CUDA numbers the cards as nvidia-smi does.
+            (None, "PCI_BUS_ID", 79.65),
+            ("1", "PCI_BUS_ID", 15.99),
+            ("1,0", "PCI_BUS_ID", 15.99),
+            (" 0 ", "pci_bus_id", 79.65),
+            # By UUID, full or a unique prefix: no ordering question.
+            ("GPU-bbbbbbbb-1111-2222-3333-444444444444", None, 15.99),
+            ("GPU-bbbb", None, 15.99),
+            ("GPU-bbbb,GPU-aaaa", None, 15.99),
+            # CUDA's default order is fastest first: cards of different sizes
+            # cannot be told apart by number.
+            (None, None, None),
+            ("1", None, None),
+            ("0", "FASTEST_FIRST", None),
+            # No card, a MIG slice, an unknown UUID or an index out of range.
+            ("", "PCI_BUS_ID", None),
+            ("-1", "PCI_BUS_ID", None),
+            ("NoDevFiles", None, None),
+            ("MIG-12345678-1111-2222-3333-444444444444", None, None),
+            ("GPU-ffff", None, None),
+            ("GPU-", None, None),
+            ("2", "PCI_BUS_ID", None),
+        ],
+    )
+    def test_mixed_cards(self, visible, order, expected):
+        from bibr.ocr import registry
+
+        gpus = (self.A100, self.RTX4080)
+        assert registry._visible_gpu_vram_gb(gpus, visible, order) == expected
+
+    @pytest.mark.parametrize("visible", [None, "0", "1", "1,0"])
+    @pytest.mark.parametrize("order", [None, "PCI_BUS_ID"])
+    def test_cards_of_one_size_need_no_ordering(self, visible, order):
+        from bibr.ocr import registry
+
+        gpus = (self.RTX3090, self.RTX3090_2)
+        assert registry._visible_gpu_vram_gb(gpus, visible, order) == 24.0
+
+    @pytest.mark.parametrize("visible", [None, "0", "GPU-cccc"])
+    def test_single_card(self, visible):
+        from bibr.ocr import registry
+
+        assert registry._visible_gpu_vram_gb((self.RTX3090,), visible, None) == 24.0
+
+    @pytest.mark.parametrize("gpus", [None, ()])
+    def test_no_inventory(self, gpus):
+        from bibr.ocr import registry
+
+        assert registry._visible_gpu_vram_gb(gpus, None, None) is None
+
+    def _use_real_probe(self, monkeypatch, gpus, env):
+        from bibr.ocr import registry
+
+        monkeypatch.setattr(registry, "_nvidia_gpu_inventory", lambda: gpus)
+        for name in ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER"):
+            if name in env:
+                monkeypatch.setenv(name, env[name])
+            else:
+                monkeypatch.delenv(name, raising=False)
+        # The suite's conftest pins this probe; put the real one back, uncached.
+        monkeypatch.setattr(registry, "_managed_gpu_vram_gb", _MANAGED_GPU_PROBE.__wrapped__)
+        return registry
+
+    def test_share_follows_the_visible_card(self, monkeypatch):
+        registry = self._use_real_probe(
+            monkeypatch,
+            (self.A100, self.RTX4080),
+            {"CUDA_VISIBLE_DEVICES": "1", "CUDA_DEVICE_ORDER": "PCI_BUS_ID"},
+        )
+        assert registry.paddle_vllm_gpu_memory_utilization() == 0.32
+        # GPU 0's 80 GB would have let 0.85 + 0.07 run together on the 16 GB card.
+        assert registry.managed_vllm_shares_fit(0.85, 0.32) is False
+
+    def test_card_that_cannot_be_told_keeps_the_cap_and_swaps(self, monkeypatch):
+        registry = self._use_real_probe(
+            monkeypatch, (self.A100, self.RTX4080), {"CUDA_VISIBLE_DEVICES": "1"}
+        )
+        assert registry.paddle_vllm_gpu_memory_utilization() == 0.92
+        assert registry.managed_vllm_shares_fit(0.05, 0.05) is False
+
+    def test_nothing_visible(self, monkeypatch):
+        registry = self._use_real_probe(monkeypatch, (self.RTX3090,), {"CUDA_VISIBLE_DEVICES": ""})
+        assert registry.paddle_vllm_gpu_memory_utilization() == 0.92
+
+    def test_inventory_parses_nvidia_smi(self, monkeypatch):
+        import subprocess
+
+        from bibr.ocr import registry
+
+        def fake_run(cmd, **kwargs):
+            assert cmd[:2] == ["nvidia-smi", "--query-gpu=uuid,memory.total"]
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=f"{self.A100[0]}, 81559\n{self.RTX4080[0]}, 16376\n", stderr=""
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        gpus = registry._nvidia_gpu_inventory.__wrapped__()
+        assert [uuid for uuid, _ in gpus] == [self.A100[0], self.RTX4080[0]]
+        assert [round(total, 2) for _, total in gpus] == [79.65, 15.99]
+
+    @pytest.mark.parametrize("outcome", ["error", "garbage", "missing"])
+    def test_inventory_failures(self, monkeypatch, outcome):
+        import subprocess
+
+        from bibr.ocr import registry
+
+        def fake_run(cmd, **kwargs):
+            if outcome == "missing":
+                raise FileNotFoundError("nvidia-smi")
+            if outcome == "error":
+                return subprocess.CompletedProcess(cmd, 9, stdout="", stderr="NVML init failed")
+            return subprocess.CompletedProcess(cmd, 0, stdout="GPU-x, [N/A]\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert registry._nvidia_gpu_inventory.__wrapped__() is None

@@ -56,9 +56,9 @@ def test_every_answer_changing_field_changes_the_key(field, value):
 
 
 def test_fence_boundary_is_canonicalised_out_of_the_key():
-    """10 of 13 call sites mint a fresh uuid4 boundary per call. Without this
-    the same logical request hashes differently every run and the cache could
-    never hit."""
+    """Releases before the derived boundary minted a fresh uuid4 per call;
+    their entries must keep hitting, and a fan-out's shared boundary must key
+    like a standalone call's."""
     a = _key(user_text="instructions" + fence(_BOUNDARY_A, "the document"))
     b = _key(user_text="instructions" + fence(_BOUNDARY_B, "the document"))
 

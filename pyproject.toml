@@ -136,8 +136,10 @@ nuextract = ["numind>=0.3,<0.3.1"]
 # PYSEC-2026-3985, a trust_remote_code bypass); the `uv tool run` bootstrap in
 # bibr/local/vllm_*.py repeats this pin. vLLM 0.27 imported NamespaceTool under an
 # openai>=2.0 floor that was too low; the openai pair keeps the floor bibr validated.
+# The 4B student's budget floors and speculative decoding configs
+# (bibr/local/llm_models.py) were measured on 0.32.0.
 vllm = [
-    "vllm==0.31.0; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version < '3.14'",
+    "vllm==0.32.0; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version < '3.14'",
     "openai>=2.54.0,<3; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version < '3.14'",
 ]
 # The PyTorch path. Core installs already run layout, both classifiers and the
@@ -223,7 +225,7 @@ environments = [
 # HIGH) and wheel-0.45.1 (CVE-2026-24049, HIGH), which Trivy finds in the serve
 # image via their dist-info METADATA. 80.10.2 vendors jaraco.context 6.1.0 and
 # wheel 0.46.3 — both fixed — and stays under vllm's setuptools<81.0.0 pin
-# (still in vllm 0.31.0, on Python >3.11), so the linux/x86_64 Python 3.12-3.13
+# (still in vllm 0.32.0, on Python >3.11), so the linux/x86_64 Python 3.12-3.13
 # branch of the lock still resolves. Do not raise this floor past 81 without
 # checking that pin.
 # (setuptools' own PYSEC-2026-3447 and GHSA-xmj3-9gf7-h52w can't be floored —

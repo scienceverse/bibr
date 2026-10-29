@@ -142,6 +142,14 @@ bibr chew paper.pdf --ocr paddle-http --ocr-url https://ocr.example.org
 bibr chew paper.pdf --ocr glm-http --ocr-url https://ocr.example.org
 ```
 
+Each cloud vision OCR call asks for at most `OCR_VISION_MAX_TOKENS` output
+tokens (16384 by default). With `anthropic`, a region asks for one token per 32
+pixels of its crop at 200 DPI (fewer pixels per token at a lower `LAYOUT_DPI`),
+at least 2048 and never more than the setting, so a model that loops on a small
+region stops sooner. Gemini and the OpenAI backend keep the full setting:
+Gemini's thinking tokens and an OpenAI-compatible reasoning model's reasoning
+tokens count against the same limit.
+
 Remote OCR requires HTTPS by default. For a trusted private network without
 TLS, explicitly set `OCR_ALLOW_INSECURE_HTTP=true`; loopback HTTP is allowed.
 
@@ -188,9 +196,9 @@ OCR_PROFILE=paddle
 
 Profiles also preserve output semantics. The Paddle profile decodes OTSL table
 markers (`<fcel>`, `<lcel>`, `<nl>`, `<ecel>`) into HTML and removes one outer
-Markdown/LaTeX fence or balanced display wrapper from formulas. It retains the
-unmodified model response as `raw_ocr_content` in the opt-in
-`extraction.regions` diagnostic payload. The selected backend, model, and
+Markdown/LaTeX fence or balanced display wrapper from formulas. The GLM profile
+leaves the output as it is. Both retain the unmodified model response as
+`raw_ocr_content` in the opt-in `extraction.regions` diagnostic payload. The selected backend, model, and
 profile are included in `extraction.ocr` and in the OCR-cache identity, so a
 cache hit never crosses a Paddle/GLM or normalizer boundary.
 
@@ -259,15 +267,91 @@ kept, with a warning when they exceed the cap for a known window.
 
 `--llm local` starts a managed server. It resolves to Rapid-MLX on Apple
 Silicon when that executable is available, otherwise vllm-mlx; llama.cpp on
-Windows or CUDA cards below 8 GB; and vLLM on Linux/CUDA systems with at
-least 8 GB (or when VRAM detection is unavailable).
+Windows, CUDA cards below 10 GB and CUDA cards older than Ampere (compute
+capability below 8.0); and vLLM on other Linux/CUDA systems with at least
+10 GB (or when VRAM detection is unavailable). With the same card it picks the
+model, the memory mode and the OCR that `bibr setup` writes, except on a 10–11 GB
+card where setup found a CUDA llama.cpp server and wrote `LLM_BACKEND=llama-cpp`
+(see [choosing an extraction model](extraction-models.md#on-10-and-11-gb-cards)):
+`--llm local` never reads `PATH` and keeps vLLM there. After such a setup, run
+plain `bibr chew` (or `--llm llama-cpp`): `--llm local` would start vLLM with the
+GGUF build setup wrote, which vLLM cannot serve.
 Explicit choices are `vllm`, `vllm-mlx`, `rapid-mlx`, `llama-cpp`, and `llmster`.
 The OCR and LLM choices are independent, so local OCR with a cloud LLM is a
 supported hybrid configuration. A managed vLLM LLM server and the managed
-`paddle-vllm` OCR server each reserve a share of GPU memory (0.85 and 0.92 by
-default) and cannot run together, so bibr stops the one that is running before
-starting the other: in a batch, each chunk's OCR stops the LLM server and that
-chunk's LLM stage starts it again.
+`paddle-vllm` OCR server each reserve a share of GPU memory. The LLM server
+takes at most 0.85 of the card (see below); PaddleOCR-VL takes about 5 GB, so
+0.16 of a 32 GB card, 0.21 of 24 GB and 0.32 of 16 GB. A vLLM server starts
+only when its whole share is free, and the rest of the card holds bibr's
+layout, sentence and reference models, which stay on the GPU between chunks
+when `onnxruntime-gpu` is installed. Unless the two shares leave at least 6 GB
+of the card for those models (with the LLM at 0.85, only on cards of about
+80 GB), bibr stops the server that is running before starting the other: in a
+batch, each chunk's OCR stops the LLM server and that chunk's LLM stage starts
+it again. The shares are sized from the card that `CUDA_VISIBLE_DEVICES`
+exposes; when bibr cannot tell which card that is (cards of different sizes
+numbered in CUDA's default fastest-first order), PaddleOCR-VL keeps 0.92 and
+the servers take turns. Set `CUDA_DEVICE_ORDER=PCI_BUS_ID` or select the card
+by UUID to avoid that.
+
+The LLM server works out its share each time it starts, from the GPU memory
+free at that moment. It takes at most 0.85 of the card, and less when the card
+is busier: the share leaves room for vLLM's brief extra use while it starts
+(0.75 GiB for the 4B student's builds, 1 GiB for the 2B) and for bibr's
+models. That room is 6 GB less what bibr's models already hold, and at least
+1 GB: about 0.71 of a free 24 GB card and 0.78 of a free 32 GB card. When that
+does not leave the model its minimum budget (11.0 GiB for the 4B student,
+6.0 GiB for its W4A16 build, 6.25 GiB for the 2B; more with
+[speculative decoding](#speculative-decoding-on-vllm)), a server that takes
+turns with PaddleOCR-VL drops to the minimum while bibr's models keep at least
+1 GB, since it starts again beside them in the next chunk. A server that stays
+up for the run (with cloud OCR, an OCR server at `--ocr-url` or GLM-OCR) keeps
+that room: it usually starts in the first chunk, before bibr's models have
+grown to the 5 GB or so they reach in a batch. So on a 24 GB card that also
+runs a PaddleOCR-VL server at `--ocr-url` (about 5.4 GB), the 4B student just
+fits (it needs 17.25 GiB, and about 17.7 are free) with an 11.3 GiB budget,
+below MTP's minimum; with a desktop on the card as well it does not, and its
+W4A16 build does. When the share does not fit, the start fails at once with an
+error that says how much memory was free and how much it needs, that chunk's
+papers fail, and the next chunk tries again. Set `LLM_LOCAL_MEM_FRACTION`, or
+`--gpu-memory-utilization` in `LLM_VLLM_EXTRA_ARGS`, to start the LLM server at
+exactly that share instead.
+
+The LLM server starts after a chunk's OCR, and OCR only adds to what bibr
+holds. So while the LLM server is down, bibr checks before each chunk's OCR
+whether the memory free then could start it. When it could not, the chunk's
+papers fail with the same error before any OCR runs, and the check is made
+again before the next chunk, which goes ahead once enough memory is free. A
+server already listening on the LLM server's port (`LLM_VLLM_PORT`) is never
+checked: the start reuses one that serves the model, such as one another
+pipeline in the same process started, without asking for memory.
+
+The minimum comes from bibr's model registry, which lists the published
+builds with the smallest budget each was measured to start with: a first
+start, before vLLM has filled its compile cache, that served one
+32,768-token request on an RTX 3090, rounded up to a quarter GiB. The 4B
+student's builds were measured with vLLM 0.32.0 at 64 sequences, the 2B with
+vLLM 0.31.0 at 128. On vLLM 0.31 a later start reused the cache and needed
+about 1 GiB less. The minimum is a budget, not a card size: on the swap path a
+start also needs vLLM's extra use while it starts (0.75 GiB at 64 sequences,
+1 GiB at 128) and 1 GiB for bibr's models free beside it, so the W4A16 build
+needs 7.75 GiB free and the 4B student 12.75 GiB. A server that stays up needs
+6 GiB less what bibr's models hold in place of that 1 GiB: 12.25 and 17.25 GiB
+while they hold 0.5 GiB. A model the registry does not list, such as a local
+path, has no minimum, so a start that cannot fit is launched and fails inside
+vLLM. Set `LLM_LOCAL_MIN_VRAM_GB` to give it one. For a model the registry
+lists, the setting can raise the minimum but not lower it: a lower value is
+ignored and bibr logs a warning once, so a value left over from a local build
+cannot start the 4B student below its 11.0 GiB. For a local copy of the 4B
+student's W4A16 build, the minimum is 6.0 GiB with vLLM 0.32 and at most 64
+sequences (more with 128, since vLLM keeps a cache block for each sequence):
+
+```bash
+LLM_LOCAL_MODEL=/path/to/bibr-extract-qwen35-4b-W4A16
+LLM_LOCAL_MIN_VRAM_GB=6.0
+LLM_VLLM_EXTRA_ARGS='--language-model-only --generation-config vllm --max-model-len 32768 --max-num-seqs 64'
+LLM_CHAT_TEMPLATE_KWARGS='{"enable_thinking": false}'
+```
 
 `bibr chew`, `bibr batch` and `bibr mcp` stop the managed servers they started
 when the command ends, including on Ctrl-C, SIGTERM (`kill`, `docker stop`,
@@ -283,9 +367,9 @@ has the measurements):
 
 | Runtime | Setup model | Registry memory floor |
 |---|---|---|
-| vLLM, 12 GB or more | `scienceverse/bibr-extract-qwen35-4b` (Qwen3.5-4B fine-tuned for bibr, bf16) | 12 GB VRAM |
-| vLLM, 8–11 GB | `scienceverse/bibr-extract-qwen35-2b` (Qwen3.5-2B fine-tuned for bibr, bf16) | 8 GB VRAM |
-| llama.cpp (Windows, cards below 8 GB) | `scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0`, else `:Q4_K_M`, else the 2B's `scienceverse/bibr-extract-qwen35-2b-GGUF` builds | 7 GB for the 4B Q8_0, down to 3 GB for the 2B Q4_K_M |
+| vLLM, 20 GB or more | `scienceverse/bibr-extract-qwen35-4b` (Qwen3.5-4B fine-tuned for bibr, bf16) | an 11.0 GiB budget; 12.75 GiB free to start |
+| vLLM, 10–19 GB | `scienceverse/bibr-extract-qwen35-4b-W4A16` (the same model with 4-bit weights) | a 6.0 GiB budget; 7.75 GiB free to start |
+| llama.cpp (Windows, cards below 10 GB, and 10–11 GB cards where setup found a CUDA llama-server) | `scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0`, else `:Q4_K_M`, else the 2B's `scienceverse/bibr-extract-qwen35-2b-GGUF` builds | 7 GB for the 4B Q8_0, down to 3 GB for the 2B Q4_K_M |
 | Rapid-MLX / vllm-mlx | `scienceverse/bibr-extract-qwen35-4b-mlx-8bit`, else the 2B's `-2b-mlx-8bit` | 6 GB for the 4B, 3 GB for the 2B |
 
 When no local model fits, the recommended hosted model is Claude Haiku 5.5
@@ -293,12 +377,37 @@ When no local model fits, the recommended hosted model is Claude Haiku 5.5
 also uses for cloud OCR (`OCR_BACKEND=anthropic`,
 `OCR_VISION_MODEL=claude-haiku-5-5`), so one Anthropic key covers both.
 
-These are model-fit estimates, not total pipeline memory guarantees. The
-advanced wizard also offers Gemma 4 E4B on CUDA, and custom model IDs.
+These are model-fit estimates, not total pipeline memory guarantees. Setup
+matches a card that reports up to 0.25 GiB under a size (an RTX 5070 reports
+12,227 MiB) to that size, for the model and for the memory mode; PaddleOCR-VL's
+8 GB minimum has no such slack. On a Linux card below 10 GB that could run
+PaddleOCR-VL, setup sets `OCR_BACKEND=glm-llama`, so OCR and the LLM both run
+on llama.cpp and take turns on the card; without setup, the automatic OCR
+chain does the same whenever the LLM runs on llama.cpp. Cards below 12 GB
+whose LLM server bibr manages get the aggressive memory mode
+(`PIPELINE_MEMORY_MODE=aggressive`, 3 papers a chunk), which unloads bibr's
+own models before each start of the LLM; with a cloud or remote LLM, only
+cards of 8 GB or less do. A managed llama.cpp LLM server stops before each
+start of GLM-OCR on llama.cpp in the aggressive mode, and in the others only
+when the memory free cannot also hold GLM-OCR (2.25 GiB) and 1 GiB for bibr's
+models. In the balanced mode, when the memory free cannot
+start the managed vLLM LLM server, bibr first releases the same models (and a
+resident OCR server) and refuses the start only if it is still short.
+
+Cards older than Ampere (compute capability below 8.0: Turing, Volta,
+Pascal) run the LLM and the automatic OCR on llama.cpp at any size: bibr's
+vLLM models are bf16, which vLLM serves from compute capability 8.0, and
+on an older card it casts them to float16, which bibr has not tested. No
+batch on a Turing or Pascal card has been recorded with either runtime; this
+is a conservative routing rule. The advanced wizard
+also offers the 2B student on vLLM from 12 GB
+(`scienceverse/bibr-extract-qwen35-2b`, a 6.25 GiB budget at 128 sequences and
+8.25 GiB free to start), Gemma 4 E4B on CUDA, and custom model IDs.
 `LLM_LOCAL_MODEL` selects managed local weights; `LLM_MODEL` and `--llm-model`
 select the provider model. When `LLM_LOCAL_MODEL` is unset, every managed
-runtime uses the 4B model: bf16 on vLLM, the Q8_0 GGUF on llama.cpp and the
-8-bit build on vllm-mlx. The managed llama.cpp server starts with thinking off
+runtime uses the build `bibr setup` recommends for the card: on vLLM the 4B
+bf16 from 20 GB and its W4A16 build below, on llama.cpp the 4B Q8_0 from 7 GB
+and Q4_K_M below, and the 8-bit build on vllm-mlx. The managed llama.cpp server starts with thinking off
 (`--reasoning off`, or `--reasoning-budget 0` on older builds, plus
 `--chat-template-kwargs '{"enable_thinking": false}'`) when the installed
 build supports it, and `bibr setup` also writes
@@ -318,7 +427,11 @@ front matter, and the authors call lists each affiliation once and gives each
 author its numbers. When the abstract cannot be placed in the text, or the
 answer is cut off or does not parse, bibr asks for the verbatim answer
 instead. The merged call (`LLM_MERGED_CORE_METADATA`) and the
-`nuextract-native` backend do not use it.
+`nuextract-native` backend do not use it. The current revision of bibr's 4B
+was trained on these answers and passes as many papers with the flag on as
+off, but first-author accuracy is lower with it on and bibr's resolver can
+take a wrong span as the abstract without a warning, so it stays off; see
+[choosing an extraction model](extraction-models.md#pointer-answers-llm_pointer_outputs).
 
 For `--llm llmster`, install LM Studio's `lms` CLI and download the desired model
 first, then set `LLM_LLMSTER_MODEL` to its model key. Bibr can start its daemon
@@ -365,6 +478,100 @@ them calls the model again; for `--llm llmster`, so does changing
 `LLM_LLMSTER_MODEL`. Another endpoint that serves different weights under the
 same model name and URL cannot be told apart: clear the directory after
 swapping the model behind it.
+
+### Pinned model revisions
+
+Each build of bibr's 4B student in the registry is pinned to a commit on the
+Hugging Face Hub ([the list](extraction-models.md#builds-and-revisions)).
+vLLM gets the commit as `--revision`. `llama-server -hf` and the MLX servers
+(vllm-mlx, Rapid-MLX) always download a repository's `main`, so for the GGUF
+and MLX builds bibr downloads the pinned files into the Hugging Face cache
+itself (`HF_HUB_CACHE`, or `HF_HOME/hub`; for Rapid-MLX,
+`RAPID_MLX_HF_HUB_CACHE` or `RAPID_MLX_HF_HOME/hub` when set) and starts the
+server on the local copy, still under the model's Hub id. A build already in
+the cache starts with no request to the Hub, so offline runs work once it has
+been downloaded. Offline without it, the start stops with the `hf download`
+command that fetches it. Another commit of the same repository in the cache,
+such as its `main`, does not count: `bibr chew --dry-run` says
+`will download revision 0aa228e8` until the pinned one is there.
+
+Each repository's `main` still holds the builds of the 4B's previous revision
+(`6ab47a4e`), but `main` will move on, so the commands below name each
+build's commit. To run one of them, keep `LLM_LOCAL_MODEL` as setup wrote it
+and override the revision, or point `LLM_LOCAL_MODEL` at a local copy:
+
+```bash
+# vLLM: the last --revision wins over the registry's.
+LLM_VLLM_EXTRA_ARGS='--revision 6ab47a4e4e8b1b76c1ab234aec66f360683ff9fc'   # bf16
+LLM_VLLM_EXTRA_ARGS='--revision a2af8f6e90e6481251af9eb07d02c034c30e3446'   # W4A16
+
+# llama.cpp: a local .gguf file is loaded with -m
+hf download scienceverse/bibr-extract-qwen35-4b-GGUF bibr-extract-qwen35-4b-Q8_0.gguf --revision 8f5cb6f80329f800f17f3b25dd40be131068f872
+LLM_LOCAL_MODEL=/path/to/bibr-extract-qwen35-4b-Q8_0.gguf
+
+# MLX: a local model directory
+hf download scienceverse/bibr-extract-qwen35-4b-mlx-8bit --revision 16bf58c9e4f453176cdabf3cfe64665c92a006c3 --local-dir ./bibr-4b-mlx-6ab47a4e
+LLM_LOCAL_MODEL=./bibr-4b-mlx-6ab47a4e
+```
+
+On vllm-mlx, bibr serves a local MLX directory as a text model, as it does the
+pinned build: vllm-mlx alone would take the `image_token_id` in its
+`config.json` for a vision model and fail to load it.
+
+A local path is not a registry model, so bibr applies none of the registry's
+memory floors or launch arguments to it; the vLLM `--revision` route keeps
+them. The 4B's FP8-Dynamic build
+(`scienceverse/bibr-extract-qwen35-4b-FP8-Dynamic`, 219/252 on an RTX 5090) is
+not in the registry either, so setup does not offer it and it has no measured
+memory floor. To try it on vLLM, set `LLM_LOCAL_MODEL` to that id and take
+`LLM_VLLM_EXTRA_ARGS` and `LLM_CHAT_TEMPLATE_KWARGS` from the local W4A16
+example above, with `--revision 101d1ee1d449195f6882019b0fd2aa4328ed8bef`
+added to the extra args. That example's `LLM_LOCAL_MIN_VRAM_GB=6.0` was
+measured for the W4A16 build, not this one.
+
+### Speculative decoding on vLLM
+
+`LLM_VLLM_SPEC_DECODE` sets speculative decoding for the managed vLLM LLM
+server. It applies to the published builds of the 4B student, which bibr's
+registry lists with the configs below; other models, local paths included,
+start without it unless `LLM_VLLM_EXTRA_ARGS` passes a `--speculative-config`,
+which always replaces bibr's choice.
+
+| Value | What the server starts with |
+|---|---|
+| `auto` (default) | MTP (3 tokens drafted by the model's own multi-token-prediction layers) when the server stays up for the whole run and its budget is at least MTP's minimum: 12.0 GiB for the 4B student, 7.25 GiB for its W4A16 build. Otherwise none. Below the minimum the server starts without MTP; `auto` never refuses a start. |
+| `none` | no speculative decoding |
+| `mtp` | MTP at every start, including starts that take turns with PaddleOCR-VL. The start needs MTP's minimum: on the swap path 13.75 GiB free for the 4B student and 9 GiB for the W4A16 build; a server that stays up for the run needs 18.25 and 13.5 GiB while bibr's models hold 0.5 GiB. |
+| `dflash` | DFlash (7 tokens drafted by [`z-lab/Qwen3.5-4B-DFlash`](https://huggingface.co/z-lab/Qwen3.5-4B-DFlash), a separate 1.27 GB model pinned to revision `9a1996cc`), for the 4B student's bf16 build only, with a 13.5 GiB minimum. Other models start without it, with a warning. |
+
+The server stays up for the run when no managed PaddleOCR-VL server takes
+turns with it: with cloud OCR, an OCR server at `OCR_BASE_URL`, or OCR on
+llama.cpp. With the automatic OCR on a card of up to 64 GB, PaddleOCR-VL and
+the LLM take turns, the LLM restarting every chunk, and `auto` leaves MTP off.
+Both MTP and DFlash add `--no-async-scheduling`, which every measured run
+used.
+
+What was measured, with vLLM 0.32.0 at 64 sequences:
+
+- **One LLM server for the run** (the 252 development papers, OCR read from a
+  cache, the server at 0.85 of the card): with MTP the 4B student passed 218
+  against 219 without it on an RTX 3090 and 218 against 218 on an RTX 5090;
+  its LLM stage took 0.80x and 0.74x as long, and papers an hour rose 5.7%
+  and 12.1%. With DFlash: 220 against 219 and 217 against 218, the LLM stage
+  0.72x and 0.64x as long, papers an hour +8.1% and +15.8%, but about half the
+  KV cache capacity (159,251 against 310,108 tokens at 0.85 of an RTX 3090).
+  These runs served the bf16 build at the registry's revision (`9199424d`).
+  The previous revision's W4A16 build (`a2af8f6e`) passed 218/252 with MTP,
+  as without it on vLLM 0.31; the pinned W4A16 build has not been scored with
+  MTP.
+- **The default plan on 12 and 16 GB cards** (the previous revision's W4A16
+  build taking turns with PaddleOCR-VL, 48 papers, emulated cards beside a
+  0.5 GiB desktop): MTP passed 40 and 39 of 48 against 39 and 40 without it,
+  but each LLM start took 51 s instead of 37 s, and papers an hour fell 5.0%
+  and 8.6%. On the 12 GB card three of its six starts fitted only after bibr
+  released its own models. This is why `auto` leaves MTP off there.
+- Speculative decoding has not been measured on 24 GB cards in the swap plan,
+  on the 2B student, or with DFlash on the W4A16 build.
 
 ### Managed local servers
 

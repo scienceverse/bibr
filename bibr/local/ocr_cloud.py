@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import random
 import time
@@ -135,6 +136,20 @@ class CloudOcrClient:
     # regions at once for _RATE_LIMIT_COOLDOWN_S so the other pages stop too.
     _RATE_LIMIT_TRIP_REGIONS: ClassVar[int] = 5
     _RATE_LIMIT_COOLDOWN_S: ClassVar[float] = 120.0
+    # A vision model now and then loops on a region until it reaches its output
+    # cap: Claude Haiku answered a one-line footer (708x28 px) with 16,384
+    # tokens in 43 s, all discarded. A region cannot hold more text than its
+    # pixels show, so Anthropic regions ask for one output token per 32 crop
+    # pixels at 200 DPI (scaled with LAYOUT_DPI), at least 2,048, at most
+    # OCR_VISION_MAX_TOKENS. On 252 papers the largest real answers were 1,455
+    # tokens for text, 5,734 for a table, and text and tables carried at most
+    # 0.013 characters per crop pixel at 200 DPI. These calls make no thinking
+    # tokens: Instructor's default Anthropic mode forces the tool call, which
+    # turns thinking off. Gemini and the OpenAI backend keep the full cap:
+    # Gemini's thinking tokens and the reasoning tokens of reasoning models
+    # behind an OpenAI-compatible API count against the same limit.
+    _REGION_PIXELS_PER_TOKEN: ClassVar[int] = 32
+    _REGION_MIN_TOKENS: ClassVar[int] = 2048
 
     def __init__(self, provider: str = "google", settings=None, **_kw: object):
         self._settings = settings if settings is not None else snapshot_settings()
@@ -208,6 +223,18 @@ class CloudOcrClient:
     def loaded(self) -> bool:
         return self._loaded
 
+    def _max_tokens_for(self, image: Any) -> int:
+        """Output cap for one region crop (see ``_REGION_PIXELS_PER_TOKEN``)."""
+        settings = self._effective_settings
+        cap = settings.ocr_vision.max_tokens
+        size = getattr(image, "size", None)  # recognize also takes bytes and paths
+        if self._provider != "anthropic" or not (isinstance(size, tuple) and len(size) == 2):
+            return cap
+        # Fewer pixels show the same text at a lower DPI.
+        pixels_per_token = self._REGION_PIXELS_PER_TOKEN * (settings.layout.dpi / 200) ** 2
+        budget = math.ceil(size[0] * size[1] / pixels_per_token)
+        return min(cap, max(self._REGION_MIN_TOKENS, budget))
+
     def _resolve_prompt(self, glm_prompt: str) -> str:
         """Map a GLM-OCR task prompt to a verbose vision-LLM prompt."""
         key = _PROMPT_MAP.get(glm_prompt, "text")
@@ -248,7 +275,8 @@ class CloudOcrClient:
                 "safety_settings": [],
             }
         else:
-            extra_kwargs = {"max_tokens": cfg.max_tokens}
+            extra_kwargs = {"max_tokens": self._max_tokens_for(image)}
+        max_tokens = extra_kwargs.get("max_tokens", cfg.max_tokens)
 
         last_exc: BaseException | None = None
         for attempt in range(self._MAX_RETRIES):
@@ -303,10 +331,18 @@ class CloudOcrClient:
                 if is_last and (status == 429 or _is_provider_429(exc)):
                     self._note_rate_limited_region(exc)
                 if not transient or is_last:
+                    # A cut-off answer names the cap it hit, so a region that
+                    # needed more than its budget can be found in the log.
+                    cap_note = ""
+                    if type(exc).__name__ == "IncompleteOutputException":
+                        cap_note = (
+                            f" (output cap {max_tokens} tokens, crop {getattr(image, 'size', '?')})"
+                        )
                     logger.warning(
-                        "CloudOcrClient(%s) failed after %d attempt(s): %s",
+                        "CloudOcrClient(%s) failed after %d attempt(s)%s: %s",
                         self._provider,
                         attempt + 1,
+                        cap_note,
                         exc,
                     )
                     return ""

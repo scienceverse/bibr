@@ -30,10 +30,12 @@ from bibr.env_utils import merge_env as _merge_env  # re-exported for tests
 from bibr.local.cli import ui
 from bibr.local.llm_models import (
     REGISTRY,
+    VLLM_LLM_MIN_CARD_GB,
     cuda_llm_backend_for,
+    default_variant,
     detect_hardware,
+    fits_card,
     get_model,
-    recommended_variant,
     variants_for,
 )
 from bibr.presets import PresetManager
@@ -53,7 +55,7 @@ EXTRAS = {
     "local": "In-process local OCR/LLM runtime (vllm-mlx) for Apple Silicon",
     "local-mlx": "Local OCR optimized for Apple Silicon Macs",
     "cache": "Response caching for the HTTP API (requires Redis)",
-    "gpu": "GPU acceleration for sentence splitting (NVIDIA CUDA)",
+    "gpu": "GPU ONNX Runtime for layout, sentence splitting, NER and classifiers (NVIDIA CUDA)",
     "demo": "Interactive web demo UI",
 }
 
@@ -214,19 +216,111 @@ class RecommendedSetup:
     download_summary: str
     runtime_summary: str
     required_prompts: tuple[SetupPrompt, ...]
+    #: One line printed under the plan (a llama.cpp server found but not used).
+    note: str = ""
+    #: Printed when the LLM server test or the smoke test fails.
+    fallback_hint: str = ""
+
+
+@dataclass(frozen=True)
+class SetupLlamaServer:
+    """The llama.cpp server easy setup found for the 10–11 GB llama.cpp pair.
+
+    ``command`` is the server on PATH (empty when there is none), ``build`` its
+    build number, and ``rejected`` why it does not qualify
+    (``bibr.local.llama_cpp.cuda_llama_server_for_setup``), empty when it does.
+    """
+
+    command: tuple[str, ...] = ()
+    build: int | None = None
+    rejected: str = ""
+
+    @property
+    def qualifies(self) -> bool:
+        return bool(self.command) and not self.rejected
+
+
+def _llama_pair_card(
+    platform_key: str | None, memory_gb: float | None, sys_platform_name: str
+) -> bool:
+    """Whether easy setup runs this card's LLM and OCR on a qualifying llama.cpp server.
+
+    Linux and an Ampere or newer NVIDIA card whose default is otherwise the 4B's
+    W4A16 build on vLLM in the aggressive memory mode: 9.75 to under 11.75 GiB
+    (``VLLM_LLM_MIN_CARD_GB`` up to ``bibr.local.pipeline.CUDA_BALANCED_MIN_GB``),
+    in practice an RTX 3080 10 GB. There, on an RTX 3090 cut to 10 GB beside a
+    0.5 GiB desktop, the 4B GGUF Q8_0 with GLM-OCR, both on llama.cpp, ran 148
+    papers an hour against W4A16's 85 on the same 48 papers, passing 40 against
+    39, because W4A16 restarts two vLLM servers every chunk of 3 papers. Smaller
+    and older cards get the llama.cpp pair from the size and compute-capability
+    rules, and larger ones keep vLLM.
+    """
+    if sys_platform_name != "linux" or platform_key != "cuda" or memory_gb is None:
+        return False
+    from bibr.local.pipeline import CUDA_BALANCED_MIN_GB
+
+    return (
+        cuda_llm_backend_for(memory_gb) == "vllm"
+        and fits_card(VLLM_LLM_MIN_CARD_GB, memory_gb)
+        and not fits_card(CUDA_BALANCED_MIN_GB, memory_gb)
+    )
+
+
+def _probe_llama_server() -> tuple[list[str] | None, str | None]:
+    """Setup's one look at PATH for the llama.cpp pair; the test suite pins it to none found."""
+    from bibr.local.llama_cpp import cuda_llama_server_for_setup
+
+    return cuda_llama_server_for_setup()
+
+
+def _llama_server_for_card(
+    platform_key: str | None, memory_gb: float | None, sys_platform_name: str
+) -> SetupLlamaServer:
+    """The llama.cpp server on PATH, probed only on a card that may get the pair."""
+    if not _llama_pair_card(platform_key, memory_gb, sys_platform_name):
+        return SetupLlamaServer()
+    prefix, reason = _probe_llama_server()
+    from bibr.local.llama_cpp import find_llama_server, probe_build_number
+
+    if prefix:
+        return SetupLlamaServer(command=tuple(prefix), build=probe_build_number(prefix))
+    if reason:
+        found = find_llama_server()
+        return SetupLlamaServer(command=tuple(found or ("llama-server",)), rejected=reason)
+    return SetupLlamaServer()
+
+
+def _llama_pair_summary(server: SetupLlamaServer) -> str:
+    from rich.markup import escape
+
+    build = f"build {server.build}" if server.build is not None else "build unknown"
+    return (
+        "The 4B GGUF build (Q8_0) and GLM-OCR both run on the CUDA llama.cpp server at "
+        f"{escape(' '.join(server.command))} ({build}), which bibr does not install. On an "
+        "RTX 3090 cut to 10 GB this pair ran 148 papers an hour against 85 for the 4B W4A16 "
+        "build on vLLM, with the same accuracy (40 and 39 of 48 papers); stopping the LLM "
+        "for each chunk's OCR, as bibr now does here, the same pair cut to 8 GB ran 150 "
+        "papers an hour over 48 papers and 141 an hour over 100. `bibr setup --advanced` "
+        "sets up the W4A16 build on vLLM instead. Run plain `bibr chew`: `--llm local` "
+        "picks vLLM on this card, which cannot serve the GGUF build."
+    )
 
 
 def _local_llm_env(
     platform_key: str,
     memory_gb: float | None,
     sys_platform_name: str,
+    *,
+    llama_server_ok: bool = False,
 ) -> dict[str, str]:
     """Choose the default managed local LLM env for easy setup."""
-    backend = _default_local_llm_backend(platform_key, memory_gb, sys_platform_name)
-    runtime = _BACKEND_RUNTIME.get(backend)
-    picked = recommended_variant(platform_key, memory_gb, runtime) or recommended_variant(
-        platform_key, None, runtime
+    backend = _default_local_llm_backend(
+        platform_key, memory_gb, sys_platform_name, llama_server_ok=llama_server_ok
     )
+    runtime = _BACKEND_RUNTIME.get(backend)
+    # The runtime serves the same variant when LLM_LOCAL_MODEL is unset
+    # (bibr.local.llm_models.default_local_model).
+    picked = default_variant(platform_key, memory_gb, runtime)
     if picked is None:  # pragma: no cover - registry invariant
         raise ValueError(f"no recommended local model for {platform_key}/{backend}")
     model, variant = picked
@@ -242,7 +336,16 @@ def _default_local_llm_backend(
     platform_key: str,
     memory_gb: float | None,
     sys_platform_name: str,
+    *,
+    llama_server_ok: bool = False,
 ) -> str:
+    """The managed LLM backend setup writes for a machine.
+
+    ``llama_server_ok``: easy setup found a qualifying CUDA llama.cpp server
+    (``SetupLlamaServer``), which moves a 10–11 GB card (``_llama_pair_card``)
+    to llama.cpp. The runtime's ``--llm local`` never reads PATH, so it keeps
+    the W4A16 build on vLLM there.
+    """
     if platform_key == "mlx":
         from bibr.local.rapid_mlx import rapid_mlx_unavailable_reason
 
@@ -250,6 +353,8 @@ def _default_local_llm_backend(
             return "rapid-mlx"
         return "vllm-mlx"
     if sys_platform_name == "win32":
+        return "llama-cpp"
+    if llama_server_ok and _llama_pair_card(platform_key, memory_gb, sys_platform_name):
         return "llama-cpp"
     return cuda_llm_backend_for(memory_gb)
 
@@ -280,7 +385,7 @@ def _platform_local_extra(
     """Pip extras needed for the in-process local OCR/LLM runtime.
 
     ``glm-llama`` uses an external llama.cpp binary (not a Python extra), so
-    low-VRAM / Windows paths must not pull a GPU runtime. On Linux/CUDA the
+    low-VRAM / Windows paths must not pull the vLLM runtime. On Linux/CUDA the
     runtime is the ``vllm`` extra: both ``paddle-vllm`` OCR and the managed
     local LLM launch through it. The ``local`` extra resolves to nothing on
     Linux (its only member is Apple-Silicon-only vllm-mlx); selecting it here
@@ -294,6 +399,35 @@ def _platform_local_extra(
     if sys_platform_name == "darwin" and machine == "arm64":
         return {"local"}
     return set()
+
+
+#: The oldest NVIDIA cards (compute capability) whose recommended plan installs
+#: the ``gpu`` extra: Ampere, like every card the plan's defaults ran on.
+_GPU_EXTRA_MIN_COMPUTE_CAPABILITY = 8.0
+
+
+def _recommends_gpu_extra(sys_platform_name: str, machine: str) -> bool:
+    """Whether the recommended plan for an NVIDIA card installs the ``gpu`` extra.
+
+    Without ``onnxruntime-gpu``, layout, SaT, NER and the classifiers run on
+    the CPU beside an idle GPU (169 vs 591 papers an hour on an RTX 5090), and
+    every run behind the plan's CUDA defaults had it: Linux on x86_64, Ampere
+    and newer cards. Elsewhere the plan stays as it was:
+
+    - Windows: no run with ``onnxruntime-gpu`` has been measured there.
+    - Linux on Arm: none measured either, and the locked ``onnxruntime-gpu``
+      (1.26.0) has no Linux Arm wheel; the ``vllm`` extra is x86_64-only too.
+    - Cards older than Ampere: none measured with it, and the CUDA 13 builds
+      that follow 1.26.0 carry no kernels for cards older than Turing. An
+      unreadable compute capability counts as Ampere, as in the OCR and LLM
+      routing (``bibr.ocr.registry.vllm_compute_capability_blocker``).
+    """
+    if sys_platform_name != "linux" or machine != "x86_64":
+        return False
+    from bibr.ocr import registry
+
+    capability = registry._nvidia_compute_capability()
+    return capability is None or capability >= _GPU_EXTRA_MIN_COMPUTE_CAPABILITY
 
 
 def _registry_short_label(hf_id: str) -> str | None:
@@ -318,31 +452,51 @@ def _build_recommended_setup(
     sys_platform: str | None = None,
     machine: str | None = None,
     allow_cloud: bool = False,
+    llama_server: SetupLlamaServer | None = None,
 ) -> RecommendedSetup:
-    """Build the easy setup recommendation without touching terminal state."""
-    if (
+    """Build the easy setup recommendation without touching terminal state.
+
+    ``llama_server`` is the llama.cpp server found on PATH
+    (``_llama_server_for_card``). When it is not given, PATH is read only when
+    the hardware is probed here too (no machine argument given); otherwise
+    there is none, so a recommendation for a described machine stays pure.
+    """
+    probe_machine = (
         platform_key is None
         and accelerator_memory_gb is None
         and system_memory_gb is None
         and sys_platform is None
         and machine is None
-    ):
+    )
+    if probe_machine:
         platform_key, accelerator_memory_gb = detect_hardware()
 
     sys_platform_name = sys_platform or sys.platform
     machine_name = machine or platform_lib.machine()
+    if llama_server is None:
+        llama_server = (
+            _llama_server_for_card(platform_key, accelerator_memory_gb, sys_platform_name)
+            if probe_machine
+            else SetupLlamaServer()
+        )
     if system_memory_gb is None:
         from bibr.local.pipeline import _get_system_memory_gb
 
         system_memory_gb = _get_system_memory_gb()
     from bibr.local.pipeline import _auto_memory_mode
 
-    memory_mode = _auto_memory_mode(platform_key, accelerator_memory_gb, system_memory_gb)
+    def memory_mode_for(llm_backend: str | None) -> str:
+        # The runtime's rule: on a CUDA card it depends on whether the LLM
+        # server bibr manages shares the card.
+        return _auto_memory_mode(
+            platform_key, accelerator_memory_gb, system_memory_gb, llm_backend=llm_backend
+        )
+
     base_env = {
         "WTPSPLIT_MODEL": "sat-6l-sm",
         "REF_SEG_STRATEGY": "geom",
         "REF_PARSE_STRATEGY": "ner",
-        "PIPELINE_MEMORY_MODE": memory_mode,
+        "PIPELINE_MEMORY_MODE": memory_mode_for(None),
         "CROSSREF_CONSOLIDATE": "off",
     }
 
@@ -352,26 +506,57 @@ def _build_recommended_setup(
     if viable_local:
         ocr_backend = "paddle"
         env = {**base_env, "OCR_BACKEND": ocr_backend}
-        env.update(_local_llm_env(platform_key, accelerator_memory_gb, sys_platform_name))
+        pair_card = _llama_pair_card(platform_key, accelerator_memory_gb, sys_platform_name)
+        llama_pair = pair_card and llama_server.qualifies
+        env.update(
+            _local_llm_env(
+                platform_key,
+                accelerator_memory_gb,
+                sys_platform_name,
+                llama_server_ok=llama_pair,
+            )
+        )
+        env["PIPELINE_MEMORY_MODE"] = memory_mode_for(env.get("LLM_BACKEND"))
         # On Linux each half has its own VRAM gate: the automatic OCR chain
-        # runs paddle-vllm from 8 GB (bibr.ocr.registry) and the LLM picks
-        # vLLM only when a vLLM variant of a recommended model fits (8 GB for
-        # the 2B student, bibr.local.llm_models). Below its gate a half runs
-        # through llama.cpp, which needs llama-server on PATH — something only
-        # the user can install — while the other half may still need the
-        # vllm extra.
+        # runs paddle-vllm from 8 GB (bibr.ocr.registry), and the LLM runs on
+        # vLLM only from the card size where a vLLM variant of a recommended
+        # model is the default (bibr.local.llm_models). Below its gate a half
+        # runs through llama.cpp, which needs llama-server on PATH — something
+        # only the user can install. bibr hands GPU memory between two vLLM
+        # servers and between two llama.cpp servers, but not between
+        # PaddleOCR-VL on vLLM and a llama.cpp LLM, so a card that could run
+        # paddle-vllm but gets its LLM on llama.cpp runs GLM-OCR on llama.cpp
+        # too: the pair that finished a batch on an emulated 8 GB card.
         llm_on_llama_cpp = sys_platform_name == "linux" and env.get("LLM_BACKEND") == "llama-cpp"
         # Native Windows has no vLLM: the automatic chain is glm-llama alone
         # (bibr.ocr.registry), so OCR always runs through llama.cpp there.
-        ocr_on_llama_cpp = ocr_backend == "glm-llama" or sys_platform_name == "win32"
+        ocr_on_llama_cpp = sys_platform_name == "win32"
         if sys_platform_name == "linux" and accelerator_memory_gb is not None:
             from bibr.ocr.registry import paddle_vllm_unavailable_reason
 
-            ocr_on_llama_cpp = ocr_on_llama_cpp or (
+            ocr_on_llama_cpp = (
                 paddle_vllm_unavailable_reason(vram_gb=accelerator_memory_gb) is not None
             )
+            if llm_on_llama_cpp and not ocr_on_llama_cpp:
+                ocr_backend = "glm-llama"
+                env["OCR_BACKEND"] = ocr_backend
+                ocr_on_llama_cpp = True
         runtime = "Fully local runs can be slow and may download several GB."
-        if sys_platform_name == "win32":
+        note = fallback_hint = ""
+        if pair_card and llama_server.rejected:
+            from rich.markup import escape
+
+            note = (
+                f"Found llama.cpp at {escape(' '.join(llama_server.command))} but not using it: "
+                f"{escape(llama_server.rejected)}. The 4B W4A16 build runs on vLLM instead."
+            )
+        if llama_pair:
+            runtime = _llama_pair_summary(llama_server)
+            fallback_hint = (
+                "If llama.cpp keeps failing here, `bibr setup --advanced` sets up the 4B "
+                "W4A16 build on vLLM instead."
+            )
+        elif sys_platform_name == "win32":
             from bibr.local.llama_cpp import install_hint
 
             runtime = (
@@ -383,12 +568,6 @@ def _build_recommended_setup(
             runtime = (
                 "Uses llama.cpp for OCR/LLM: install a CUDA (or Vulkan) build separately "
                 "and put llama-server on PATH."
-            )
-        elif llm_on_llama_cpp:
-            runtime = (
-                "Uses vLLM for OCR and llama.cpp for the LLM (the smallest recommended vLLM "
-                "model needs 8 GB of VRAM): install a CUDA (or Vulkan) build of llama.cpp "
-                "separately and put llama-server on PATH."
             )
         elif platform_key == "mlx" and env.get("LLM_BACKEND") == "rapid-mlx":
             runtime = (
@@ -410,6 +589,8 @@ def _build_recommended_setup(
                 ocr_backend="glm-llama" if ocr_on_llama_cpp else ocr_backend,
             ),
         }
+        if platform_key == "cuda" and _recommends_gpu_extra(sys_platform_name, machine_name):
+            extras.add("gpu")
         if "vllm" in extras and sys.version_info >= (3, 14):
             runtime += (
                 " Python 3.14 has no vLLM wheels yet, so the vllm extra installs nothing; "
@@ -425,6 +606,8 @@ def _build_recommended_setup(
             download_summary="downloads several GB of local OCR, layout, reference, and LLM weights",
             runtime_summary=runtime,
             required_prompts=("install_extras", "smoke_test"),
+            note=note,
+            fallback_hint=fallback_hint,
         )
 
     if allow_cloud:
@@ -894,6 +1077,7 @@ class SetupWizard:
         self._env_written = False
         self.env_path = _setup_env_file()
         self._warned_env_overrides: set[str] = set()
+        self._fallback_hint = ""
 
     # ---- public -----------------------------------------------------------
 
@@ -908,10 +1092,18 @@ class SetupWizard:
         system_gb = _get_system_memory_gb()
         self._print_detection(platform_key, accel_gb)
 
+        llama_server = SetupLlamaServer()
+        if _llama_pair_card(platform_key, accel_gb, sys.platform):
+            # Up to two 8 s probes of the server on PATH (a CUDA build can be
+            # slow on its first run).
+            with self.console.status("Checking the llama.cpp server on PATH …"):
+                llama_server = _llama_server_for_card(platform_key, accel_gb, sys.platform)
+
         setup = _build_recommended_setup(
             platform_key=platform_key,
             accelerator_memory_gb=accel_gb,
             system_memory_gb=system_gb,
+            llama_server=llama_server,
         )
 
         if setup.tier == "fully_local":
@@ -981,6 +1173,7 @@ class SetupWizard:
         """
         self.env_vars.update(setup.env)
         self.selected_extras.update(setup.extras)
+        self._fallback_hint = setup.fallback_hint
 
         self._collect_required_prompts(setup)
         self._step_write_env(save_preset_name=setup.preset_name, header="Save configuration")
@@ -1090,6 +1283,8 @@ class SetupWizard:
         self.console.print(f"\n[bold]Recommended for this machine:[/bold] {tier_label}")
         for label, value in self._plan_rows(setup):
             self.console.print(ui.kv(label, value))
+        if setup.note:
+            self.console.print(f"[dim]{setup.note}[/dim]")
 
     def _plan_rows(self, setup: RecommendedSetup) -> list[tuple[str, str]]:
         extras = ", ".join(sorted(setup.extras)) or "(none)"
@@ -1291,7 +1486,7 @@ class SetupWizard:
             "[dim]tip: bibr's extraction tasks don't need a frontier model. hosted, the\n"
             "recommended claude-haiku-5-5 is within a point of Qwen3.8-27B on bibr's\n"
             "dev set, at about $0.004 a paper. self-hosting? choose local for bibr's\n"
-            "fine-tuned 4B (2.8 points behind the 27B) or 2B (6.3 points) model.[/dim]"
+            "fine-tuned 4B or 2B model.[/dim]"
         )
         provider = Prompt.ask(
             "Provider",
@@ -1410,9 +1605,7 @@ class SetupWizard:
             self.console.print(f"  [bold]{m.key}[/bold] — {m.label}{tag}")
         self.console.print("  [bold]custom[/bold] — any HF model id (you own quant/flags)")
 
-        recommended = recommended_variant(
-            platform_key, memory_gb, _BACKEND_RUNTIME.get(backend)
-        ) or recommended_variant(platform_key, None, _BACKEND_RUNTIME.get(backend))
+        recommended = default_variant(platform_key, memory_gb, _BACKEND_RUNTIME.get(backend))
         default_key = (
             recommended[0].key
             if recommended and recommended[0].key in keys
@@ -1494,9 +1687,9 @@ class SetupWizard:
             from rich.markup import escape
 
             ui.error(self.console, f"Local server test failed: {escape(self._redact(str(e)))}")
-            self.console.print(
-                "[dim]Config kept — fix and retry with `bibr chew --llm local`.[/dim]"
-            )
+            self.console.print("[dim]Config kept — fix and retry with `bibr chew`.[/dim]")
+            if self._fallback_hint:
+                self.console.print(f"[dim]{self._fallback_hint}[/dim]")
 
     def _step_test_connection(self) -> None:
         ui.step(self.console, 3, 6, "Test connection")
@@ -1513,9 +1706,7 @@ class SetupWizard:
             "[dim]First launch downloads the model (several GB) and can take several minutes.[/dim]"
         )
         if not Confirm.ask("Launch the local server once to test it now?", default=False):
-            self.console.print(
-                "[dim]Skipped — `bibr chew --llm local` starts it automatically.[/dim]"
-            )
+            self.console.print("[dim]Skipped — `bibr chew` starts it automatically.[/dim]")
             return
         self._test_local_server()
 
@@ -1722,13 +1913,20 @@ class SetupWizard:
 
         The runtime already auto-detects this each chew, but persisting it here
         makes the choice explicit for a first-time tester — and lets low-memory
-        machines (a 6 GB GPU, or an 8 GB Apple Silicon Mac running fully local)
-        see why they are in ``aggressive`` mode.
+        machines (a CUDA card below 12 GB that runs bibr's own LLM server, one of
+        8 GB or less, or an 8 GB Apple Silicon Mac running fully local) see why
+        they are in ``aggressive`` mode. It runs after the LLM step, whose
+        ``LLM_BACKEND`` the rule depends on.
         """
         from bibr.local.pipeline import _auto_memory_mode, _get_system_memory_gb
 
         platform_key, accel_gb = detect_hardware()
-        mode = _auto_memory_mode(platform_key, accel_gb, _get_system_memory_gb())
+        mode = _auto_memory_mode(
+            platform_key,
+            accel_gb,
+            _get_system_memory_gb(),
+            llm_backend=self.env_vars.get("LLM_BACKEND"),
+        )
         self.env_vars["PIPELINE_MEMORY_MODE"] = mode
         if mode == "aggressive":
             self.console.print(
@@ -2001,6 +2199,8 @@ class SetupWizard:
                 msg = self._redact(str(exc))
                 ui.error(self.console, f"Test extraction failed: {escape(msg)}")
                 self.console.print(self._smoke_failure_hint(exc))
+                if self._fallback_hint:
+                    self.console.print(f"[dim]{self._fallback_hint}[/dim]")
                 return
 
         elapsed = time.monotonic() - t0

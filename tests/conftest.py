@@ -176,8 +176,44 @@ def _pin_cuda_probe_for_platform_tests(monkeypatch):
     """The automatic Linux OCR chain now asks the hardware before listing
     ``paddle-vllm``. Tests that pin ``sys.platform`` to linux were written
     against the old unconditional chain, so pin a roomy GPU here; tests that
-    exercise the CPU-only / small-GPU paths patch the probe themselves."""
-    monkeypatch.setattr("bibr.ocr.registry._cuda_vram_gb", lambda: 24.0)
+    exercise the CPU-only / small-GPU paths patch the probe themselves.
+
+    The managed vLLM servers' card (``_managed_gpu_vram_gb``, which reads
+    ``CUDA_VISIBLE_DEVICES``) follows whatever a test pins ``_cuda_vram_gb``
+    to, so the suite never sizes shares from the host's own GPU. The compute
+    capability reads as unknown (routing as before the guard), so the host's
+    card never decides between vLLM and llama.cpp; tests of the guard pin it."""
+    from bibr.ocr import registry
+
+    monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: 24.0)
+    monkeypatch.setattr(registry, "_managed_gpu_vram_gb", lambda: registry._cuda_vram_gb())
+    monkeypatch.setattr(registry, "_nvidia_compute_capability", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_llama_server_for_setup(monkeypatch):
+    """``bibr setup`` looks on PATH for a CUDA llama.cpp server on a 10–11 GB
+    card (``bibr.setup_wizard._probe_llama_server``) and runs its LLM and OCR
+    there when one qualifies. Pin it to none found, so the host's PATH never
+    changes a recommendation; tests of that pick pin it themselves."""
+    monkeypatch.setattr("bibr.setup_wizard._probe_llama_server", lambda: (None, None))
+
+
+@pytest.fixture(autouse=True)
+def _no_live_gpu_memory_reading(monkeypatch):
+    """Keep the suite off the host GPU's free memory.
+
+    The managed vLLM LLM server sizes its share from ``managed_gpu_memory``
+    (None keeps the configured share), and a bare ORT ``cudaError`` counts as
+    out-of-memory only on a nearly full card or after a recent recognised
+    out-of-memory failure, which ``bibr.utils.gpu_oom`` remembers per process.
+    Tests that exercise either patch them back themselves.
+    """
+    from bibr.ocr import registry
+    from bibr.utils import gpu_oom
+
+    monkeypatch.setattr(registry, "managed_gpu_memory", lambda: None)
+    monkeypatch.setattr(gpu_oom, "_last_oom_at", None)
 
 
 @pytest.fixture(autouse=True)
@@ -191,6 +227,38 @@ def _skip_installed_onnxruntime_builds_check(monkeypatch):
     tests/test_onnx_providers_builds.py resets it with stubbed metadata.
     """
     monkeypatch.setattr("bibr.utils.onnx_providers._gpu_build_shadowed", False)
+
+
+#: Where the stub below puts pinned registry builds; nothing is created there.
+FAKE_PINNED_HF_CACHE = "/nonexistent-hf-cache"
+
+
+def _fake_pinned_download(repo_id, files, revision, cache_dir):
+    snapshot = (
+        Path(cache_dir or FAKE_PINNED_HF_CACHE)
+        / f"models--{repo_id.replace('/', '--')}"
+        / "snapshots"
+        / revision
+    )
+    return [str(snapshot / name) for name in files]
+
+
+@pytest.fixture(autouse=True)
+def _no_pinned_build_downloads(monkeypatch, request):
+    """Pinned registry builds resolve to paths in a fake Hugging Face cache.
+
+    A managed llama.cpp or MLX server given a registry build pinned to a Hub
+    commit downloads it before launching (``bibr.local.hub_pins``). Unit tests
+    get its would-be cache path instead of a download, and the real HF cache
+    is not read. Opt-in ``slow`` tests launch real servers and keep the real
+    download; tests/local/test_hub_pins.py restores the real functions.
+    """
+    if request.node.get_closest_marker("slow") is not None:
+        return
+    from bibr.local import hub_pins
+
+    monkeypatch.setattr(hub_pins, "_cached_file", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hub_pins, "_download_files", _fake_pinned_download)
 
 
 @pytest.fixture(autouse=True)

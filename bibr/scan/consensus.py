@@ -109,6 +109,9 @@ class Recognizer:
     backend: OcrBackend
     profile: OcrProfile
     concurrency: int = 4
+    # The registry name of *backend* ("glm-http", ...), recorded on a region
+    # whose escalation keeps this recognizer's reading.
+    backend_name: str = ""
     _sem: asyncio.Semaphore | None = field(default=None, init=False, repr=False)
 
     async def read(self, image: Any, task: str = "text") -> str:
@@ -273,6 +276,9 @@ async def apply_consensus(
             source = "second" if not primary.strip() and second_text.strip() else "primary"
         meta["chosen"] = source
         if source != "primary":
+            kept = second if source == "second" else escalation
+            if kept is not None and kept.backend_name:
+                meta["chosen_backend"] = kept.backend_name
             region["content"] = dict(readings)[source]
             region["_raw_ocr_content"] = primary
             report.replaced += 1
@@ -322,6 +328,7 @@ def _build_recognizer(
         backend=client,
         profile=resolved,
         concurrency=settings.ocr.concurrent_regions_per_file,
+        backend_name=backend,
     )
 
 

@@ -1231,7 +1231,10 @@ def _assert_glm_chunk_captures(captures, cache_store):
         "<fcel>A<nl>",
         "<fcel>A<nl>",
     ]
-    assert [capture["regions"][0][1].raw_content for capture in captures] == [None, None]
+    assert [capture["regions"][0][1].raw_content for capture in captures] == [
+        "<fcel>A<nl>",
+        "<fcel>A<nl>",
+    ]
     assert [
         (
             capture["provenance"]["backend"],
@@ -1269,7 +1272,7 @@ async def test_automatic_glm_fallback_identity_survives_two_retained_process_chu
     )
     requested_names = []
 
-    def resolve(name, settings):  # noqa: ARG001
+    def resolve(name, settings, **_):  # noqa: ARG001
         requested_names.append(name)
         return candidates
 
@@ -1326,7 +1329,7 @@ async def test_automatic_glm_fallback_restarts_chain_after_unloaded_process_chun
     )
     requested_names = []
 
-    def resolve(name, settings):  # noqa: ARG001
+    def resolve(name, settings, **_):  # noqa: ARG001
         requested_names.append(name)
         if name == "paddle":
             return candidates
@@ -1396,7 +1399,7 @@ async def test_automatic_selector_refreshes_identity_when_retained_client_dies_b
     )
     requested_names = []
 
-    def resolve(name, settings):  # noqa: ARG001
+    def resolve(name, settings, **_):  # noqa: ARG001
         requested_names.append(name)
         return candidates
 
@@ -1442,7 +1445,7 @@ async def test_automatic_selector_refreshes_identity_when_retained_client_dies_b
         "<table><tr><td>A</td></tr></table>",
     ]
     assert [capture["regions"][0][1].raw_content for capture in stage.captures] == [
-        None,
+        "<fcel>A<nl>",
         "<fcel>A<nl>",
     ]
     assert [
@@ -1523,6 +1526,30 @@ async def test_paddle_output_is_normalized_before_region_postprocessing():
     assert out[0]["_raw_ocr_content"] == "$$\nx^2\n$$"
     assert out[1]["content"] == "<table><tr><td>A</td><td>B</td></tr></table>"
     assert out[1]["_raw_ocr_content"] == "<fcel>A<ecel>B<nl>"
+
+
+@pytest.mark.asyncio
+async def test_glm_output_keeps_complete_raw_ocr_content():
+    from PIL import Image
+
+    from bibr.ocr.profiles import GLM_PROFILE
+    from bibr.pipeline.stages.ocr import ocr_page_regions
+
+    img = Image.new("RGB", (100, 100), "white")
+    regions = [
+        {"label": "display_formula", "bbox_2d": [0, 0, 500, 500], "task_type": "formula"},
+        {"label": "table", "bbox_2d": [500, 0, 1000, 500], "task_type": "table"},
+    ]
+    outputs = iter(["$$\nx^2\n$$", "<table><tr><td>A</td><td>B</td></tr></table>"])
+
+    async def ocr_fn(cropped, prompt):  # noqa: ARG001
+        return next(outputs)
+
+    out = await ocr_page_regions(img, regions, 0, "f.pdf", ocr_fn, None, profile=GLM_PROFILE)
+
+    assert out[0]["content"] == out[0]["_raw_ocr_content"] == "$$\nx^2\n$$"
+    assert out[1]["content"] == out[1]["_raw_ocr_content"]
+    assert out[1]["_raw_ocr_content"] == "<table><tr><td>A</td><td>B</td></tr></table>"
 
 
 @pytest.mark.asyncio

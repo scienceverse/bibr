@@ -944,6 +944,8 @@ def _export_paper_payload(
     regions_data: list[RegionExport] | None = None
     if include_regions and paper.contents.region_summaries:
         regions_data = []
+        run_ocr = paper.extraction.get("ocr") if isinstance(paper.extraction, dict) else None
+        run_ocr_backend = run_ocr.get("backend") if isinstance(run_ocr, dict) else None
         for region in paper.contents.region_summaries:
             # The summary measures in layout units; the export in points.
             scale = geometry.scale(region.page)
@@ -968,6 +970,10 @@ def _export_paper_payload(
                     raw_ocr_content=region.raw_ocr_content,
                     char_density=char_density,
                     estimated_line_height=line_height,
+                    source=region.source,
+                    ocr_backend=(
+                        (region.ocr_backend or run_ocr_backend) if region.source == "ocr" else None
+                    ),
                 )
             )
 
