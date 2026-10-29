@@ -1559,15 +1559,21 @@ class RorOptions(_BibrSettings):
     )
     client_id: str | None = Field(
         None,
-        description="ROR API client ID (free from ror.org), sent as the Client-Id header. It "
-        "raises ROR's published rate limit from 50 to 2000 requests per 5 minutes.",
+        description="ROR API client ID, sent as the Client-Id header. It raises the default "
+        "request budget from 1000 to 2000 requests per 5 minutes. ROR client IDs are free, but "
+        "ROR has paused new registrations.",
     )
     url: str = Field("https://api.ror.org/v2", description="ROR API base URL.")
     requests_per_5min: int | None = Field(
         None,
         ge=1,
-        description="Client-side ROR request budget per 5 minutes. Default: ROR's published "
-        "limit, 50 without a client ID and 2000 with one.",
+        description="Client-side ROR request budget per 5 minutes, per process. Default: 1000 "
+        "without a client ID (half ROR's limit of 2000 per IP address, so two processes on one "
+        "address stay under it) and 2000 with one. Every bibr process and other ROR client "
+        "behind one outgoing IP address shares ROR's 2000, so with N processes set at most "
+        "2000/N. A 429 from ROR halves the budget in that process (not below 50, or this value "
+        "if lower); the first lookup after an hour without one doubles it back, and the next "
+        "doubling needs another such hour.",
     )
     request_timeout: float = Field(
         10.0, gt=0, description="Per-HTTP-request timeout in seconds for ROR calls."

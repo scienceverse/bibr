@@ -51,7 +51,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   choice.
 
 ### Changed
-
 - bibr's 4B extraction student is now the revision retrained with pointer
   answers for the two front-matter calls, from each repository's `pointer-v1`
   branch: bf16 `9199424d`, W4A16 `a32f2048`, GGUF `0aa228e8` and MLX 8-bit
@@ -214,6 +213,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   run with `onnxruntime-gpu` has been measured, are left as they were. After
   an update, keep `--extra gpu` on `uv sync` (see the tester guide's
   "Updating").
+
+- ROR matching no longer throttles itself to 50 requests per 5 minutes when no
+  client ID is set. ROR limits each IP address to 2000 requests per 5 minutes
+  and does not enforce its lower anonymous limit, so the default budget is now
+  1000 requests per 5 minutes per process, half the per-address limit (2000
+  with `ROR_CLIENT_ID`; `ROR_REQUESTS_PER_5MIN` still sets it). With
+  enrichment on, a batch spent the 50 requests in its first minute, and later
+  papers that needed a new ROR request waited out the 60 s
+  `ROR_ENRICH_TIMEOUT` and kept few affiliation matches. A string whose lookup
+  cannot start before the paper's ROR time budget ends is now left unmatched
+  at once instead of holding the paper until the timeout. The
+  `ROR_MATCHING_FAILED` warning gives its reason as "request budget spent", so
+  it is not confused with "rate limited", the backoff after ROR answers 429.
+- A 429 from ROR now also halves that process's ROR request budget, not below
+  50 (or `ROR_REQUESTS_PER_5MIN`, if lower); the first lookup after an hour
+  without a 429 doubles it back, and the next doubling needs another such
+  hour, up to the configured budget. Several bibr processes behind one IP
+  address then settle under ROR's 2000 requests per 5 minutes instead of
+  drawing a 429 every window. The pause after a 429 is unchanged: its
+  `Retry-After`, at most 5 minutes (api.ror.org sends none, so 5 minutes). A
+  403, which ROR answers only for addresses it has blocked, now pauses ROR
+  lookups for 5 minutes without halving, logs a warning that quotes ROR's
+  answer, and reads "blocked (HTTP 403)" in `ROR_MATCHING_FAILED`; before,
+  every later lookup was still sent and logged only at debug level. The
+  deployment guide now says the budget is per process: with N bibr processes
+  behind one address, set `ROR_REQUESTS_PER_5MIN` to at most 2000/N.
 
 ### Security
 
