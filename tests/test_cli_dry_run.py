@@ -564,6 +564,171 @@ async def test_dry_run_ocr_weight_repo_has_approximate_size(tmp_path, capsys, mo
     assert "OCR weights: ggml-org/GLM-OCR-GGUF:Q8_0 — will download (~1-2 GB)" in out
 
 
+def test_pinned_llama_cpp_build_cache_status_reads_its_commit(monkeypatch):
+    """A registry build pinned to a commit is cached only at that commit."""
+    from bibr.local import hub_pins
+    from bibr.local.cli.dry_run import _hf_cache_status
+
+    _neutralize_local_rapid_mlx_env(monkeypatch)
+    model = "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
+    # tests/conftest.py stubs the cache read to "not cached".
+    assert _hf_cache_status(model) == "will download revision 0aa228e8 (~4.3 GB)"
+
+    seen = []
+
+    def cached(repo_id, filename, revision, cache_dir):
+        seen.append((repo_id, filename, revision, cache_dir))
+        return f"/hf/{filename}"
+
+    monkeypatch.setattr(hub_pins, "_cached_file", cached)
+    assert _hf_cache_status(model) == "cached (revision 0aa228e8)"
+    assert seen == [
+        (
+            "scienceverse/bibr-extract-qwen35-4b-GGUF",
+            "bibr-extract-qwen35-4b-Q8_0.gguf",
+            "0aa228e8c908512ad5e5e13fa55e7e7d3180c7d3",
+            None,
+        )
+    ]
+
+
+def test_pinned_vllm_build_cache_status_needs_weights_at_its_commit(monkeypatch, tmp_path):
+    import huggingface_hub.constants
+
+    from bibr.local.cli.dry_run import _hf_cache_status
+    from bibr.local.llm_models import get_model
+
+    _neutralize_local_rapid_mlx_env(monkeypatch)
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(tmp_path))
+    model = "scienceverse/bibr-extract-qwen35-4b"
+    size = get_model("bibr-extract-4b").variants[0].approx_download_gb
+    will_download = f"will download revision 9199424d (~{size:.1f} GB)"
+    snapshots = tmp_path / "models--scienceverse--bibr-extract-qwen35-4b" / "snapshots"
+    assert _hf_cache_status(model) == will_download
+
+    # The previous revision's weights (still on main) do not count.
+    old = snapshots / "6ab47a4e4e8b1b76c1ab234aec66f360683ff9fc"
+    old.mkdir(parents=True)
+    (old / "model-00001-of-00002.safetensors").write_bytes(b"x")
+    assert _hf_cache_status(model) == will_download
+
+    pinned = snapshots / "9199424d4bd200feb247e26e4a860b63da73cbaf"
+    pinned.mkdir()
+    shards = ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"]
+    (pinned / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"a": shards[0], "b": shards[1]}})
+    )
+    # One shard of two is not the model.
+    (pinned / shards[0]).write_bytes(b"x")
+    assert _hf_cache_status(model) == will_download
+    # A snapshot link whose blob was deleted is not a cached file.
+    try:
+        (pinned / shards[1]).symlink_to(tmp_path / "gone")
+    except OSError:  # Windows without the symlink privilege
+        pass
+    else:
+        assert _hf_cache_status(model) == will_download
+        (pinned / shards[1]).unlink()
+
+    (pinned / shards[1]).write_bytes(b"x")
+    assert _hf_cache_status(model) == "cached (revision 9199424d)"
+
+
+@pytest.mark.parametrize(
+    ("llm_backend", "hf_hub_cache", "hf_home", "expected"),
+    [
+        ("vllm-mlx", "/rapid/hub-cache", None, None),
+        ("vllm-mlx", None, "/rapid/home", None),
+        (None, "/rapid/hub-cache", None, None),
+        ("rapid-mlx", "/rapid/hub-cache", "/rapid/home", "/rapid/hub-cache"),
+        ("rapid-mlx", None, "/rapid/home", "hf_home/hub"),
+        ("rapid-mlx", None, None, None),
+    ],
+)
+def test_pinned_mlx_build_cache_status_reads_the_serving_backends_cache(
+    monkeypatch, llm_backend, hf_hub_cache, hf_home, expected
+):
+    """bibr downloads a pinned MLX build into Rapid-MLX's own cache only for
+    Rapid-MLX; vllm-mlx reads the default Hugging Face cache."""
+    from pathlib import Path
+
+    from bibr.config import Settings
+    from bibr.local import hub_pins
+    from bibr.local.cli.dry_run import _hf_cache_status
+
+    _neutralize_local_rapid_mlx_env(monkeypatch)
+    monkeypatch.setattr(Settings.rapid_mlx, "hf_hub_cache", hf_hub_cache)
+    monkeypatch.setattr(Settings.rapid_mlx, "hf_home", hf_home)
+    if expected == "hf_home/hub":
+        expected = str(Path("/rapid/home") / "hub")
+    seen = set()
+
+    def cached(repo_id, filename, revision, cache_dir):
+        seen.add(cache_dir)
+        return f"/hf/{filename}"
+
+    monkeypatch.setattr(hub_pins, "_cached_file", cached)
+
+    status = _hf_cache_status(
+        "scienceverse/bibr-extract-qwen35-4b-mlx-8bit", llm_backend=llm_backend
+    )
+
+    assert status == "cached (revision 432b8cd8)"
+    assert seen == {expected}
+
+
+def test_pinned_gguf_build_cache_status_never_reads_rapid_mlxs_cache(monkeypatch):
+    from bibr.config import Settings
+    from bibr.local import hub_pins
+    from bibr.local.cli.dry_run import _hf_cache_status
+
+    _neutralize_local_rapid_mlx_env(monkeypatch)
+    monkeypatch.setattr(Settings.rapid_mlx, "hf_hub_cache", "/rapid/hub-cache")
+    seen = set()
+
+    def cached(repo_id, filename, revision, cache_dir):
+        seen.add(cache_dir)
+        return f"/hf/{filename}"
+
+    monkeypatch.setattr(hub_pins, "_cached_file", cached)
+
+    status = _hf_cache_status(
+        "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0", llm_backend="rapid-mlx"
+    )
+
+    assert status == "cached (revision 0aa228e8)"
+    assert seen == {None}
+
+
+@pytest.mark.parametrize("backend", ["vllm-mlx", "rapid-mlx"])
+async def test_dry_run_checks_the_llm_build_for_its_backend(tmp_path, monkeypatch, backend):
+    from bibr.config import Settings
+    from bibr.local.cli import _build_parser, _run_process, dry_run
+
+    _neutralize_local_rapid_mlx_env(monkeypatch)
+    model = "scienceverse/bibr-extract-qwen35-4b-mlx-8bit"
+    monkeypatch.setattr(Settings.llm, "local_model", model)
+    calls = []
+
+    def status(repo_id, **kwargs):
+        calls.append((repo_id, kwargs))
+        return "cached"
+
+    monkeypatch.setattr(dry_run, "_hf_cache_status", status)
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(_pdf_bytes())
+    args = _build_parser().parse_args(
+        ["chew", str(pdf), "--dry-run", "--ocr", "glm-llama", "--llm", backend]
+    )
+
+    try:
+        await _run_process(args)
+    except SystemExit:  # a blocker (no MLX runtime here) still prints the plan
+        pass
+
+    assert (model, {"llm_backend": backend}) in calls
+
+
 async def test_dry_run_hf_cache_unknown_without_huggingface_hub(tmp_path, capsys, monkeypatch):
     """When huggingface_hub can't be imported, report cache-unknown instead
     of guessing or crashing."""

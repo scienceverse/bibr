@@ -11,8 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The 4B student's W4A16 build (`scienceverse/bibr-extract-qwen35-4b-W4A16`,
   4-bit weights, a 3.8 GB download) is in bibr's model registry, served by
   vLLM with at most 64 sequences. It passed 218 of 252 development papers,
-  against 217 for the bf16 build on the same machine, and needs half its
-  memory. `bibr setup` now recommends it for Linux NVIDIA cards with 10–19 GB,
+  level with the bf16 build of the same revision on the same machine, and
+  needs half its memory. `bibr setup` now recommends it for Linux NVIDIA cards with 10–19 GB,
   where it replaces the 2B student, and recommends the bf16 4B from 20 GB
   (was 12).
 - `LLM_LOCAL_MIN_VRAM_GB` sets the minimum budget of the managed vLLM LLM
@@ -26,6 +26,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- bibr's 4B extraction student is now the revision retrained with pointer
+  answers for the two front-matter calls, from each repository's `pointer-v1`
+  branch: bf16 `9199424d`, W4A16 `a32f2048`, GGUF `0aa228e8` and MLX 8-bit
+  `432b8cd8`. On the 252 development papers the bf16 build passes 218, against
+  217 for the previous revision (`6ab47a4e`) on the same machine (+0.4 points
+  [−0.8, +2.0]); the W4A16, GGUF Q8_0 and GGUF Q4_K_M builds pass 218, 218 and
+  217, each within the −4 point rule of the bf16 build. The 216/252 and the
+  2.8 points behind Qwen3.8-27B in the docs belong to the previous revision.
+  `LLM_POINTER_OUTPUTS` stays off by default: with it on, first-author
+  accuracy is lower (−0.015 [−0.031, −0.003]), and on 3 papers bibr's
+  resolver took a wrong span of the text as the abstract without a warning.
+- Every 4B build is pinned to a Hub commit. `llama-server -hf` and the MLX
+  servers (vllm-mlx, Rapid-MLX) always download a repository's `main`, which
+  still holds the previous builds, so bibr now downloads the pinned GGUF and
+  MLX files into the Hugging Face cache itself and starts the server on the
+  local copy, under the same model id. vllm-mlx serves that copy, and any
+  local MLX directory in `LLM_LOCAL_MODEL`, as a text model: on its own it
+  would take the `image_token_id` in the build's `config.json` for a vision
+  model and fail to load it. A cached build starts offline; an uncached one
+  offline stops with the `hf download` command that fetches it.
+  `LLM_LOCAL_MODEL` may now be a local `.gguf` file for llama.cpp, and
+  `bibr chew --dry-run` counts a pinned build as cached only at its commit.
+  The configuration guide shows how to run the previous revision.
 - The managed vLLM LLM server's minimum is now the budget each published
   model was measured to need on an RTX 3090 with vLLM 0.31.0: a first start,
   before vLLM has filled its compile cache, that serves one 32,768-token

@@ -709,7 +709,8 @@ class LlmOptions(_BibrSettings):
         "Apple Silicon its 8-bit MLX build. The 2B student only when a 2B build fits and "
         "no 4B build does; when nothing fits, the build with the smallest minimum. Unknown "
         "memory gets the backend's first build (4B bf16 on vLLM, Q8_0 on llama.cpp). "
-        "`bibr setup` writes it explicitly.",
+        "`bibr setup` writes it explicitly. The registry's 4B builds are pinned to a Hub "
+        "commit; on llama.cpp this may also be the path of a local .gguf file.",
     )
     local_mem_fraction: float = Field(
         0.85,

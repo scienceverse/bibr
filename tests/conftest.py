@@ -220,6 +220,38 @@ def _skip_installed_onnxruntime_builds_check(monkeypatch):
     monkeypatch.setattr("bibr.utils.onnx_providers._gpu_build_shadowed", False)
 
 
+#: Where the stub below puts pinned registry builds; nothing is created there.
+FAKE_PINNED_HF_CACHE = "/nonexistent-hf-cache"
+
+
+def _fake_pinned_download(repo_id, files, revision, cache_dir):
+    snapshot = (
+        Path(cache_dir or FAKE_PINNED_HF_CACHE)
+        / f"models--{repo_id.replace('/', '--')}"
+        / "snapshots"
+        / revision
+    )
+    return [str(snapshot / name) for name in files]
+
+
+@pytest.fixture(autouse=True)
+def _no_pinned_build_downloads(monkeypatch, request):
+    """Pinned registry builds resolve to paths in a fake Hugging Face cache.
+
+    A managed llama.cpp or MLX server given a registry build pinned to a Hub
+    commit downloads it before launching (``bibr.local.hub_pins``). Unit tests
+    get its would-be cache path instead of a download, and the real HF cache
+    is not read. Opt-in ``slow`` tests launch real servers and keep the real
+    download; tests/local/test_hub_pins.py restores the real functions.
+    """
+    if request.node.get_closest_marker("slow") is not None:
+        return
+    from bibr.local import hub_pins
+
+    monkeypatch.setattr(hub_pins, "_cached_file", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hub_pins, "_download_files", _fake_pinned_download)
+
+
 # ---------------------------------------------------------------------------
 # Isolation: the process-global Settings must not leak between tests.
 #

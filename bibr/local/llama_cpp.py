@@ -78,6 +78,7 @@ _OPTION_ALIASES: dict[str, frozenset[str]] = {
     "--port": frozenset({"--port"}),
     "--alias": frozenset({"--alias"}),
     "-hf": frozenset({"-hf", "-hfr", "--hf-repo"}),
+    "-m": frozenset({"-m", "--model"}),
 }
 
 # Cache of ``--help`` text keyed by ``tuple(prefix)`` so repeated launches in
@@ -438,7 +439,7 @@ def _n_slots_from_argv(argv: list[str]) -> int:
 # the configured port/alias and would lose (then kill) a server that moved.
 # `--host` is deliberately allowed: the base argv binds loopback and a user
 # `--host` (e.g. 0.0.0.0, as on main) still answers the loopback health poll.
-_IDENTITY_OPTIONS = frozenset({"--port", "--alias", "-hf"})
+_IDENTITY_OPTIONS = frozenset({"--port", "--alias", "-hf", "-m"})
 
 
 def _check_no_identity_override(extra: list[str], *, role: str) -> None:
@@ -446,12 +447,21 @@ def _check_no_identity_override(extra: list[str], *, role: str) -> None:
     if role == "llm":
         extra_setting = "LLM_LLAMA_CPP_EXTRA_ARGS"
         port_setting = "LLM_LLAMA_CPP_PORT"
+        model_hint = "Set LLM_LOCAL_MODEL=<path>.gguf to load a local GGUF file instead."
     else:
         extra_setting = "OCR_LLAMA_CPP_EXTRA_ARGS"
         port_setting = "OCR_LLAMA_CPP_PORT"
+        model_hint = "Set OCR_LLAMA_CPP_MODEL to choose another model instead."
     for token in extra:
         bare = token.split("=", 1)[0]
-        if _canonical_option(bare) in _IDENTITY_OPTIONS:
+        canonical = _canonical_option(bare)
+        if canonical == "-m":
+            raise UpstreamServiceError(
+                "local inference",
+                f"{extra_setting} must not set {bare}: bibr chooses the model file the "
+                f"managed server loads and serves it under the model's id. {model_hint}",
+            )
+        if canonical in _IDENTITY_OPTIONS:
             raise UpstreamServiceError(
                 "local inference",
                 f"{extra_setting} must not set {bare}: the managed server's port, "
@@ -473,22 +483,27 @@ def build_server_argv(
     # semantics; the "llm" role must be opted into explicitly.
     role: str = "ocr",
     available: frozenset[str] | None = None,
+    model_file: str | None = None,
 ) -> list[str]:
     """Assemble the full ``llama-server`` argv including role-based optim defaults.
 
     *available* is the set of ``--long-option`` flags the installed server
     supports; ``None`` probes it via ``supported_flags(prefix)``. Pass an
     explicit set (e.g. ``frozenset()``) to keep tests subprocess-free.
+    *model_file* is a local GGUF to load with ``-m`` (a pinned registry
+    build bibr downloaded, or a local path); otherwise llama.cpp downloads
+    *model* with ``-hf``, from the repository's ``main``. Either way the
+    server answers under the alias *model*.
     """
     if available is None:
         available = supported_flags(prefix)
     setting = "LLM_LLAMA_CPP_EXTRA_ARGS" if role == "llm" else "OCR_LLAMA_CPP_EXTRA_ARGS"
     extra = split_extra_args(extra_args, setting=setting)
     _check_no_identity_override(extra, role=role)
+    source = ["-m", model_file] if model_file else ["-hf", model]
     fixed = [
         *prefix,
-        "-hf",
-        model,
+        *source,
         "--alias",
         model,
         "--host",
@@ -825,6 +840,22 @@ class LlamaCppServer:
                 missing_binary_message(),
             )
 
+        # ``-hf`` downloads a repository's ``main``: a pinned registry build is
+        # downloaded at its commit first and loaded from the HF cache. Bad
+        # extra args fail before that download, not after it.
+        from bibr.local.hub_pins import fetch_pinned_build, local_gguf_file
+
+        _check_no_identity_override(
+            split_extra_args(
+                extra_args,
+                setting="LLM_LLAMA_CPP_EXTRA_ARGS" if role == "llm" else "OCR_LLAMA_CPP_EXTRA_ARGS",
+            ),
+            role=role,
+        )
+        model_file = local_gguf_file(model) or fetch_pinned_build(
+            model, stop_event=stop_event, server_label="llama.cpp"
+        )
+
         available = supported_flags(prefix)
         # Build both argvs BEFORE opening the log handle: extra-args parsing
         # (shlex errors, identity-flag overrides) must fail without leaking it.
@@ -836,6 +867,7 @@ class LlamaCppServer:
             extra_args=extra_args,
             role=role,
             available=available,
+            model_file=model_file,
         )
         # Conservative launch = role defaults minus every probed optional
         # feature flag; used as the single startup-retry fallback.
@@ -847,6 +879,7 @@ class LlamaCppServer:
             extra_args=extra_args,
             role=role,
             available=frozenset(),
+            model_file=model_file,
         )
         has_optional_features = cmd != conservative_cmd
 
