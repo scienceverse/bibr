@@ -46,7 +46,7 @@ _LLAMA_CPP_DEFAULT_TIMEOUT_SECONDS = 300
 _LLAMA_CPP_RELEASES_URL = "https://github.com/ggml-org/llama.cpp/releases"
 
 # Flags applied for every managed server regardless of role. llama.cpp is
-# bibr's low-memory path (Windows + ≤8 GB CUDA), so flash-attn + quantized KV
+# bibr's low-memory path (Windows, and CUDA cards below 10 GB), so flash-attn + quantized KV
 # are on by default. User ``extra_args`` can override any of these
 # (see ``_merge_cli_args``). Role- and probe-specific flags are added by
 # ``_role_runtime_args``.
@@ -78,6 +78,7 @@ _OPTION_ALIASES: dict[str, frozenset[str]] = {
     "--port": frozenset({"--port"}),
     "--alias": frozenset({"--alias"}),
     "-hf": frozenset({"-hf", "-hfr", "--hf-repo"}),
+    "-m": frozenset({"-m", "--model"}),
 }
 
 # Cache of ``--help`` text keyed by ``tuple(prefix)`` so repeated launches in
@@ -438,7 +439,7 @@ def _n_slots_from_argv(argv: list[str]) -> int:
 # the configured port/alias and would lose (then kill) a server that moved.
 # `--host` is deliberately allowed: the base argv binds loopback and a user
 # `--host` (e.g. 0.0.0.0, as on main) still answers the loopback health poll.
-_IDENTITY_OPTIONS = frozenset({"--port", "--alias", "-hf"})
+_IDENTITY_OPTIONS = frozenset({"--port", "--alias", "-hf", "-m"})
 
 
 def _check_no_identity_override(extra: list[str], *, role: str) -> None:
@@ -446,12 +447,21 @@ def _check_no_identity_override(extra: list[str], *, role: str) -> None:
     if role == "llm":
         extra_setting = "LLM_LLAMA_CPP_EXTRA_ARGS"
         port_setting = "LLM_LLAMA_CPP_PORT"
+        model_hint = "Set LLM_LOCAL_MODEL=<path>.gguf to load a local GGUF file instead."
     else:
         extra_setting = "OCR_LLAMA_CPP_EXTRA_ARGS"
         port_setting = "OCR_LLAMA_CPP_PORT"
+        model_hint = "Set OCR_LLAMA_CPP_MODEL to choose another model instead."
     for token in extra:
         bare = token.split("=", 1)[0]
-        if _canonical_option(bare) in _IDENTITY_OPTIONS:
+        canonical = _canonical_option(bare)
+        if canonical == "-m":
+            raise UpstreamServiceError(
+                "local inference",
+                f"{extra_setting} must not set {bare}: bibr chooses the model file the "
+                f"managed server loads and serves it under the model's id. {model_hint}",
+            )
+        if canonical in _IDENTITY_OPTIONS:
             raise UpstreamServiceError(
                 "local inference",
                 f"{extra_setting} must not set {bare}: the managed server's port, "
@@ -473,22 +483,27 @@ def build_server_argv(
     # semantics; the "llm" role must be opted into explicitly.
     role: str = "ocr",
     available: frozenset[str] | None = None,
+    model_file: str | None = None,
 ) -> list[str]:
     """Assemble the full ``llama-server`` argv including role-based optim defaults.
 
     *available* is the set of ``--long-option`` flags the installed server
     supports; ``None`` probes it via ``supported_flags(prefix)``. Pass an
     explicit set (e.g. ``frozenset()``) to keep tests subprocess-free.
+    *model_file* is a local GGUF to load with ``-m`` (a pinned registry
+    build bibr downloaded, or a local path); otherwise llama.cpp downloads
+    *model* with ``-hf``, from the repository's ``main``. Either way the
+    server answers under the alias *model*.
     """
     if available is None:
         available = supported_flags(prefix)
     setting = "LLM_LLAMA_CPP_EXTRA_ARGS" if role == "llm" else "OCR_LLAMA_CPP_EXTRA_ARGS"
     extra = split_extra_args(extra_args, setting=setting)
     _check_no_identity_override(extra, role=role)
+    source = ["-m", model_file] if model_file else ["-hf", model]
     fixed = [
         *prefix,
-        "-hf",
-        model,
+        *source,
         "--alias",
         model,
         "--host",
@@ -575,17 +590,25 @@ def probe_gpu_backend(
         except (OSError, subprocess.TimeoutExpired):
             continue
         combined = f"{result.stdout or ''}\n{result.stderr or ''}"
-        verdict = _text_suggests_gpu_backend(combined)
+        verdict = _gpu_backend_from_output(probe_args, combined)
         if verdict is not None:
             return verdict
-        # ``--list-devices`` with non-empty GPU-looking device table.
-        if probe_args == ["--list-devices"] and combined.strip():
-            lower = combined.lower()
-            if any(h in lower for h in _GPU_DEVICE_HINTS):
-                return True
-            # Non-empty list-devices with no GPU keyword → treat as CPU-only.
-            if "cpu" in lower:
-                return False
+    return None
+
+
+def _gpu_backend_from_output(probe_args: list[str], combined: str) -> bool | None:
+    """:func:`probe_gpu_backend`'s verdict on one probe's output, or None if inconclusive."""
+    verdict = _text_suggests_gpu_backend(combined)
+    if verdict is not None:
+        return verdict
+    # ``--list-devices`` with non-empty GPU-looking device table.
+    if probe_args == ["--list-devices"] and combined.strip():
+        lower = combined.lower()
+        if any(h in lower for h in _GPU_DEVICE_HINTS):
+            return True
+        # Non-empty list-devices with no GPU keyword → treat as CPU-only.
+        if "cpu" in lower:
+            return False
     return None
 
 
@@ -667,6 +690,158 @@ def probe_backend_kind(
             break
     _BACKEND_KIND_CACHE[key] = kind
     return kind
+
+
+#: The oldest llama.cpp build ``bibr setup`` runs its 10–11 GB llama.cpp pair on
+#: (``cuda_llama_server_for_setup``): every run behind bibr's GGUF tiers used a
+#: CUDA build of b11282, so an older build has not been run with these models
+#: (the 4B's qwen35 architecture and GLM-OCR need recent builds).
+LLAMA_CPP_MIN_MEASURED_BUILD = 11282
+
+# ``version: 11282 (abc1234)`` in ``--version`` output. llama.cpp reports 0
+# when it was built without git metadata, which says nothing about the build.
+_BUILD_NUMBER_RE = re.compile(r"^\s*version:\s*(\d+)", re.MULTILINE)
+
+# A CUDA device in probe output: a ``CUDA0: NVIDIA GeForce ...`` line of
+# ``--list-devices``, or ``ggml_cuda_init: found 1 CUDA devices:`` with at least
+# one device. A HIP build logs through ``ggml_cuda_init`` too (so its kind reads
+# as "cuda"), but its devices are ``ROCm0`` and its count says "ROCm".
+_CUDA_DEVICE_RE = re.compile(r"^\s*CUDA\d+\s*:|\bfound\s+[1-9]\d*\s+CUDA\s+devices", re.MULTILINE)
+_OTHER_GPU_DEVICE_RE = re.compile(r"^\s*(?:ROCm|MUSA|Vulkan|SYCL)\d+\s*:", re.MULTILINE)
+
+
+class _ProbeRun:
+    """One ``[*prefix, arg]`` probe: its combined output, or why there is none."""
+
+    __slots__ = ("text", "timed_out")
+
+    def __init__(self, text: str | None, *, timed_out: bool = False) -> None:
+        self.text = text
+        self.timed_out = timed_out
+
+
+# Probe runs keyed by ``(tuple(prefix), arg)``, so the setup check and
+# ``probe_build_number`` share one ``--list-devices`` and one ``--version`` run
+# per server. A timeout is kept too: setup asks once per process.
+_PROBE_RUN_CACHE: dict[tuple[tuple[str, ...], str], _ProbeRun] = {}
+
+
+def _probe_run(prefix: list[str], arg: str, *, timeout: float) -> _ProbeRun:
+    key = (tuple(prefix), arg)
+    cached = _PROBE_RUN_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        result = subprocess.run(  # noqa: S603
+            [*prefix, arg],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        run = _ProbeRun(None, timed_out=True)
+    except OSError:
+        run = _ProbeRun(None)
+    else:
+        run = _ProbeRun(f"{result.stdout or ''}\n{result.stderr or ''}")
+    _PROBE_RUN_CACHE[key] = run
+    return run
+
+
+def _parse_build_number(text: str | None) -> int | None:
+    match = _BUILD_NUMBER_RE.search(text or "")
+    if match is None:
+        return None
+    build = int(match.group(1))
+    return build if build > 0 else None
+
+
+def probe_build_number(prefix: list[str] | None = None, *, timeout: float = 8.0) -> int | None:
+    """The installed llama.cpp server's build number from ``--version``, or None.
+
+    None when the binary is missing, cannot run, times out, or prints no build
+    number (or 0, which a build without git metadata reports). The run is
+    cached per ``tuple(prefix)``.
+    """
+    cmd_prefix = find_llama_server() if prefix is None else prefix
+    if not cmd_prefix:
+        return None
+    return _parse_build_number(_probe_run(cmd_prefix, "--version", timeout=timeout).text)
+
+
+#: Rejection reasons of ``cuda_llama_server_for_setup``.
+SETUP_REJECT_CUDA_FAILED = (
+    "CUDA could not start in this build (driver older than the build's CUDA?)"
+)
+SETUP_REJECT_NOT_CUDA = "Vulkan/HIP/CPU build"
+SETUP_REJECT_NO_BACKEND = "backend unreadable"
+SETUP_REJECT_BUILD_UNREADABLE = "build unreadable"
+SETUP_REJECT_TIMED_OUT = "probe timed out"
+
+
+def cuda_llama_server_for_setup(*, timeout: float = 8.0) -> tuple[list[str] | None, str | None]:
+    """The llama.cpp server on PATH, if ``bibr setup`` may run its 10–11 GB pair on it.
+
+    ``(prefix, None)`` when the server qualifies, ``(None, None)`` when there
+    is none, and ``(None, reason)`` when one was found but does not qualify. It
+    qualifies when its device list shows a working GPU backend (as
+    :func:`probe_gpu_backend` reads it: a CUDA build on a driver older than
+    its CUDA lists no device, and llama.cpp would run on the CPU), that
+    backend is CUDA (as :func:`probe_backend_kind` reads it) and names a CUDA
+    device (``_CUDA_DEVICE_RE``: output that mentions CUDA only in a library
+    that failed to load names none), and its build is at least
+    ``LLAMA_CPP_MIN_MEASURED_BUILD``. One ``--list-devices`` and one
+    ``--version`` run answer every check, cached per prefix
+    (``_PROBE_RUN_CACHE``).
+
+    Only setup calls this: the runtime never reads PATH to choose a default.
+    """
+    prefix = find_llama_server()
+    if not prefix:
+        return None, None
+    runs = [
+        (probe_args, _probe_run(prefix, probe_args[0], timeout=timeout))
+        for probe_args in (["--list-devices"], ["--version"])
+    ]
+    gpu = kind = None
+    for probe_args, run in runs:
+        if gpu is None and run.text is not None:
+            gpu = _gpu_backend_from_output(probe_args, run.text)
+        if kind is None and run.text is not None:
+            kind = _classify_backend_kind(run.text)
+    if kind is not None:
+        _BACKEND_KIND_CACHE.setdefault(tuple(prefix), kind)
+    version_run = runs[1][1]
+    build = _parse_build_number(version_run.text)
+    reason: str | None
+    if kind == "cuda":
+        # Output naming CUDA always gives a verdict: a failure marker or a device.
+        # A verdict of True still needs a CUDA device named: a build whose CUDA
+        # library failed to load names CUDA only in its path, and a HIP build
+        # logs through ggml_cuda_init but lists ROCm devices.
+        texts = [run.text or "" for _args, run in runs]
+        if gpu is not True:
+            reason = SETUP_REJECT_CUDA_FAILED
+        elif not any(_CUDA_DEVICE_RE.search(text) for text in texts):
+            other_gpu = any(_OTHER_GPU_DEVICE_RE.search(text) for text in texts)
+            reason = SETUP_REJECT_NOT_CUDA if other_gpu else SETUP_REJECT_CUDA_FAILED
+        elif build is None:
+            reason = (
+                SETUP_REJECT_TIMED_OUT if version_run.timed_out else SETUP_REJECT_BUILD_UNREADABLE
+            )
+        elif build < LLAMA_CPP_MIN_MEASURED_BUILD:
+            reason = f"build {build} below {LLAMA_CPP_MIN_MEASURED_BUILD}"
+        else:
+            reason = None
+    elif kind is not None or gpu is False:
+        # Another backend, or no device at all (a CPU build lists none).
+        reason = SETUP_REJECT_NOT_CUDA
+    elif any(run.timed_out for _args, run in runs):
+        reason = SETUP_REJECT_TIMED_OUT
+    else:
+        reason = SETUP_REJECT_NO_BACKEND
+    return (prefix, None) if reason is None else (None, reason)
 
 
 def cuda_steering_hint(kind: str | None) -> str | None:
@@ -825,6 +1000,22 @@ class LlamaCppServer:
                 missing_binary_message(),
             )
 
+        # ``-hf`` downloads a repository's ``main``: a pinned registry build is
+        # downloaded at its commit first and loaded from the HF cache. Bad
+        # extra args fail before that download, not after it.
+        from bibr.local.hub_pins import fetch_pinned_build, local_gguf_file
+
+        _check_no_identity_override(
+            split_extra_args(
+                extra_args,
+                setting="LLM_LLAMA_CPP_EXTRA_ARGS" if role == "llm" else "OCR_LLAMA_CPP_EXTRA_ARGS",
+            ),
+            role=role,
+        )
+        model_file = local_gguf_file(model) or fetch_pinned_build(
+            model, stop_event=stop_event, server_label="llama.cpp"
+        )
+
         available = supported_flags(prefix)
         # Build both argvs BEFORE opening the log handle: extra-args parsing
         # (shlex errors, identity-flag overrides) must fail without leaking it.
@@ -836,6 +1027,7 @@ class LlamaCppServer:
             extra_args=extra_args,
             role=role,
             available=available,
+            model_file=model_file,
         )
         # Conservative launch = role defaults minus every probed optional
         # feature flag; used as the single startup-retry fallback.
@@ -847,6 +1039,7 @@ class LlamaCppServer:
             extra_args=extra_args,
             role=role,
             available=frozenset(),
+            model_file=model_file,
         )
         has_optional_features = cmd != conservative_cmd
 

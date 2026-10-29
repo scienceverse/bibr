@@ -1269,7 +1269,7 @@ async def test_automatic_glm_fallback_identity_survives_two_retained_process_chu
     )
     requested_names = []
 
-    def resolve(name, settings):  # noqa: ARG001
+    def resolve(name, settings, **_):  # noqa: ARG001
         requested_names.append(name)
         return candidates
 
@@ -1326,7 +1326,7 @@ async def test_automatic_glm_fallback_restarts_chain_after_unloaded_process_chun
     )
     requested_names = []
 
-    def resolve(name, settings):  # noqa: ARG001
+    def resolve(name, settings, **_):  # noqa: ARG001
         requested_names.append(name)
         if name == "paddle":
             return candidates
@@ -1396,7 +1396,7 @@ async def test_automatic_selector_refreshes_identity_when_retained_client_dies_b
     )
     requested_names = []
 
-    def resolve(name, settings):  # noqa: ARG001
+    def resolve(name, settings, **_):  # noqa: ARG001
         requested_names.append(name)
         return candidates
 

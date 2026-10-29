@@ -15,7 +15,7 @@ from bibr.api import Records, Result, _pipeline_kwargs
 def _export_fixture() -> dict:
     return {
         "paper_id": "10.1234/example",
-        "schema_version": "12.2",
+        "schema_version": "12.3",
         "source": {
             "file_name": "paper.pdf",
             "sha256": "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12",
@@ -456,7 +456,7 @@ def test_result_still_rejects_a_known_field_of_the_wrong_type():
         ("section", lambda d: d["section"][0].update(numbering="1.")),
         ("bib", lambda d: d["bib"][0].update(raw="Doe J.")),
         ("extraction", lambda d: d["extraction"]["settings"].update(future_knob="on")),
-        ("schema_version", lambda d: d.update(schema_version="12.3")),
+        ("schema_version", lambda d: d.update(schema_version="12.4")),
     ],
 )
 def test_producer_models_still_reject_fields_they_do_not_define(location, mutate):

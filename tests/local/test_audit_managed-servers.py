@@ -295,7 +295,7 @@ async def test_stale_paddle_rapid_mlx_server_is_refused_by_the_whole_paddle_chai
         monkeypatch.setattr(mod, "request_bytes", listener)
         monkeypatch.setattr(mod.subprocess, "Popen", MagicMock(side_effect=AssertionError("spawn")))
     monkeypatch.setattr(
-        registry, "automatic_backend_names", lambda: ("paddle-rapid-mlx", "paddle-mlx-vlm")
+        registry, "automatic_backend_names", lambda **_: ("paddle-rapid-mlx", "paddle-mlx-vlm")
     )
     settings = GlobalSettings()
     settings.ocr.paddle_mlx_port = 8797
