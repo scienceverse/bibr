@@ -66,6 +66,9 @@ class OcrRegionResult:
     # Two-recognizer consensus on a scanned region (bibr.scan.consensus): the
     # disagreement score, and whether and how the region was escalated.
     ocr_consensus: dict[str, Any] | None = None
+    # A text-layer header/footer whose box cuts a printed line, so its text
+    # may end mid-token (native_text._box_cuts_a_line).
+    native_text_edge_cut: bool | None = None
 
     @classmethod
     def from_layout_region(
@@ -104,6 +107,7 @@ class OcrRegionResult:
             finish_reason=finish_reason,
             native_text_candidate=layout.get("_native_text_candidate"),
             native_text_rejection_reason=layout.get("_native_text_rejection_reason"),
+            native_text_edge_cut=layout.get("_native_text_edge_cut"),
         )
 
     @classmethod
@@ -135,6 +139,7 @@ class OcrRegionResult:
             native_text_candidate=d.get("_native_text_candidate"),
             native_text_rejection_reason=d.get("_native_text_rejection_reason"),
             ocr_consensus=d.get("_ocr_consensus"),
+            native_text_edge_cut=d.get("_native_text_edge_cut"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -174,4 +179,6 @@ class OcrRegionResult:
             out["_native_text_rejection_reason"] = self.native_text_rejection_reason
         if self.ocr_consensus is not None:
             out["_ocr_consensus"] = self.ocr_consensus
+        if self.native_text_edge_cut is not None:
+            out["_native_text_edge_cut"] = self.native_text_edge_cut
         return out

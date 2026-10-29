@@ -1447,7 +1447,7 @@ class TestExportTopLevel:
     def test_metadata_and_source_blocks(self):
         paper = _minimal_paper()
         result = export_paper_to_json(paper)
-        assert result["schema_version"] == "12.2"
+        assert result["schema_version"] == "12.3"
         assert result["metadata"]["title"] == "Test Paper"
         assert result["metadata"]["doi"] == "10.1234/test"
         # v11 split the input artifact's identity out of the paper's metadata;
@@ -2289,6 +2289,64 @@ class TestIncludeRegionsToggle:
         assert opted_in["extraction"]["regions"][0]["content"] == "canonical diagnostic"
         assert opted_in["extraction"]["regions"][0]["raw_ocr_content"] == raw_content
 
+    def test_regions_name_their_text_route(self):
+        """``source`` says text layer or OCR; ``ocr_backend`` names the reader of an OCR region."""
+        from bibr.paper_contents import RegionSummary
+
+        paper = _minimal_paper()
+        paper.contents.region_summaries = [
+            RegionSummary(
+                page=1,
+                index=0,
+                label="header",
+                bbox=None,
+                content="J Things 12",
+                source="text_layer",
+            ),
+            RegionSummary(page=1, index=1, label="text", bbox=None, content="Body", source="ocr"),
+            RegionSummary(
+                page=1,
+                index=2,
+                label="text",
+                bbox=None,
+                content="Fixed",
+                source="ocr",
+                ocr_backend="glm-http",
+            ),
+            RegionSummary(page=1, index=3, label="image", bbox=None, content=""),
+        ]
+        paper.extraction = _extraction_block(
+            ocr={"backend": "paddle-http", "model": "PaddleOCR-VL-1.6", "profile": "paddle"}
+        )
+        regions = export_paper_to_json(paper, include_regions=True)["extraction"]["regions"]
+
+        assert [(r.get("source"), r.get("ocr_backend")) for r in regions] == [
+            ("text_layer", None),
+            ("ocr", "paddle-http"),
+            ("ocr", "glm-http"),
+            (None, None),
+        ]
+        # Absent, not null: a reader of an earlier 12.2 export sees the same keys.
+        assert "source" not in regions[3] and "ocr_backend" not in regions[0]
+
+    def test_settings_record_the_native_text_flags_only_when_set(self):
+        from bibr.export.models import ExtractionSettingsExport
+
+        base = {
+            "ref_seg": "geom",
+            "ref_parse": "ner",
+            "crossref_enrich": False,
+            "consolidate": "off",
+        }
+        assert "native_text_header_footer" not in ExtractionSettingsExport(**base).model_dump()
+        dumped = ExtractionSettingsExport(
+            **base, native_text_header_footer=True, native_text_formula_number=False
+        ).model_dump()
+        assert (dumped["native_text_header_footer"], dumped["native_text_formula_number"]) == (
+            True,
+            False,
+        )
+
 
 # ── v4 training region metadata on text blocks ─────────────────────────
 
@@ -2404,7 +2462,7 @@ class TestExtractionProvenance:
         paper = _minimal_paper()
         paper.extraction = _extraction_block(producer={"name": "bibr", "version": "9.9.9-test"})
         result = export_paper_to_json(paper)
-        assert result["schema_version"] == "12.2"
+        assert result["schema_version"] == "12.3"
         assert result["extraction"]["producer"]["version"] == "9.9.9-test"
         assert "schema_version" not in result["metadata"]
         assert "bibr_version" not in result["metadata"]

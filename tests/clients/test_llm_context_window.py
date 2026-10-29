@@ -61,6 +61,26 @@ def test_the_window_is_read_through_wrapped_errors():
     assert _context_window_from_error(RuntimeError("HTTP 400")) is None
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        # vLLM 0.32's own wording (vllm/renderers/params.py). 0.32 no longer
+        # rejects a prompt whose completion cap runs past the window: it
+        # lowers the cap to what is left. A prompt longer than the window
+        # alone is still rejected, by tokens or, before tokenizing, by
+        # characters.
+        "This model's maximum context length is 32768 tokens. However, your prompt contains "
+        "at least 32769 input tokens, which exceeds this limit even without any output tokens. "
+        "Please reduce the length of the input prompt.",
+        "This model's maximum context length is 32768 tokens. However, your prompt contains "
+        "500000 characters (more than 491520 characters, which is the upper bound for 32768 "
+        "input tokens). Please reduce the length of the input prompt.",
+    ],
+)
+def test_vllm_032_prompt_overflows_still_name_the_window(message):
+    assert _context_window_from_error(RuntimeError(f"Error code: 400 - {message}")) == 32_768
+
+
 @pytest.mark.asyncio
 async def test_an_overflow_is_asked_again_with_the_input_cut():
     client = LLMClient(settings=_settings())

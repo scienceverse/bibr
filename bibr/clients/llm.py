@@ -1038,13 +1038,19 @@ def track_llm_usage(func):
     @functools.wraps(func)
     async def wrapper(self, *args, **kwargs):
         async def call():
+            # The window the call's input is cut to, if one is known yet.
+            window = self._settings.llm.context_tokens
             try:
                 return await func(self, *args, **kwargs)
             except Exception as exc:
-                if not self._learn_context_window(exc):
+                if not (
+                    self._learn_context_window(exc)
+                    or await self._learn_window_from_truncation(exc, window)
+                ):
                     raise
             # The server rejected the prompt as longer than its context window
-            # and named the window: ask again with the input cut to fit it.
+            # and named the window, or the answer stopped at a window bibr did
+            # not know: ask again with the input cut to fit it.
             return await func(self, *args, **kwargs)
 
         return await self._run_labeled_call(func.__name__, call)
@@ -1361,6 +1367,45 @@ class LLMClient:
             window,
         )
         self._settings.llm.context_tokens = window
+        return True
+
+    async def _learn_window_from_truncation(
+        self, exc: BaseException, window_before: int | None
+    ) -> bool:
+        """Remember the context window an answer stopped at, read from the server.
+
+        vLLM 0.31 rejected a prompt whose completion cap ran past the window
+        with HTTP 400, naming the window (:meth:`_learn_context_window`).
+        vLLM 0.32 lowers the cap to what is left instead, so the answer stops
+        there and the call fails as truncated. For a call that ran without a
+        known window (*window_before* ``None``: an ``LLM_BASE_URL`` server, or
+        a managed one started without ``--max-model-len``), the window the
+        server lists (:func:`bibr.clients.server_window.listed_window`) is
+        read. True when prompt plus completion reached it, so asking again
+        with :meth:`_cap_input` cutting to it can succeed. An answer that
+        stopped short of the window, at the call's own cap or at a limit the
+        server sets, is not explained by the window: False.
+        """
+        if window_before is not None or _classify_llm_failure(exc) is not LlmTruncatedError:
+            return False
+        usage = getattr(_find_last_completion(exc), "usage", None)
+        prompt = getattr(usage, "prompt_tokens", None)
+        completion = getattr(usage, "completion_tokens", None)
+        if not isinstance(prompt, int) or not isinstance(completion, int):
+            return False
+        from bibr.clients.server_window import listed_window
+
+        window = await listed_window(self._settings)
+        if window is None or prompt + completion < window:
+            return False
+        current = self._settings.llm.context_tokens
+        if current is None or window < current:
+            logger.warning(
+                "The LLM server's context window is %d tokens (from its model list), and an "
+                "answer stopped at it; cutting long inputs to fit it",
+                window,
+            )
+            self._settings.llm.context_tokens = window
         return True
 
     def _settings_signature(self) -> tuple:

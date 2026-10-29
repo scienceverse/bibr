@@ -132,12 +132,14 @@ _VISION_OCR_KEY_HINTS = {
 }
 
 
-def _check_ocr_backend(ok, warn, fail) -> None:
+def _check_ocr_backend(ok, warn, fail, *, llm_backend: str | None = None) -> None:
     """Probe whether the configured OCR backend is importable and instantiable.
 
     The check stops short of actually starting a server / loading weights —
     it just verifies the necessary Python deps are present so users don't
     discover ``vllm-mlx not installed`` halfway through their first run.
+    ``llm_backend`` is the configured LLM backend as chew resolves it: the
+    automatic ``paddle`` chain leaves paddle-vllm out beside a llama.cpp LLM.
     """
     import importlib.util
 
@@ -197,12 +199,16 @@ def _check_ocr_backend(ok, warn, fail) -> None:
     # below, which looks for llama.cpp exactly as chew's preflight does.
     from bibr.ocr.registry import resolve_backend_candidates
 
-    candidates = resolve_backend_candidates(backend, Settings) if backend == "paddle" else ()
+    candidates = (
+        resolve_backend_candidates(backend, Settings, llm_backend=llm_backend)
+        if backend == "paddle"
+        else ()
+    )
     if len(candidates) > 1:
         from bibr.local.cli.run_config import _ocr_runtime_blocker
 
         # chew refuses the run when no candidate can start; so does doctor.
-        blocker = _ocr_runtime_blocker(backend)
+        blocker = _ocr_runtime_blocker(backend, llm_backend=llm_backend)
         if blocker is not None:
             fail("OCR backend: paddle (automatic) — no OCR runtime can start here", hint=blocker)
             return
@@ -267,7 +273,8 @@ def _check_ocr_backend(ok, warn, fail) -> None:
     # registry table) so the dependency check below inspects the right package.
     from bibr.ocr.registry import resolve_backend_name
 
-    resolved = resolve_backend_name(backend)
+    # A one-candidate automatic chain was resolved above with the LLM backend.
+    resolved = candidates[0].backend if len(candidates) == 1 else resolve_backend_name(backend)
 
     label = f"OCR backend: {backend}"
     if resolved != backend:
@@ -599,8 +606,8 @@ def _check_llm_local_backend(backend: str, model: str, ok, fail) -> None:
     if backend == "vllm" and importlib.util.find_spec("vllm") is None:
         # Honest about the cost: the first chew bootstraps vLLM through uv
         # (several GB), and on Python 3.14 — where the vllm extra installs
-        # nothing because vllm==0.31.0 has no 3.14 wheels — inside a
-        # managed Python 3.13.
+        # nothing (it is marked python_version < 3.14) — inside a managed
+        # Python 3.13.
         hint = "Install with: uv sync --extra vllm, or install uv (https://astral.sh/uv)"
         note = "uv-managed vLLM runner; the first run downloads several GB"
         if sys.version_info >= (3, 14):
@@ -850,7 +857,7 @@ def _run_doctor() -> None:
     # --- OCR (needs Settings) -------------------------------------------------
     if config_ok:
         ui.section(console, "OCR")
-        _check_ocr_backend(ok, warn, fail)
+        _check_ocr_backend(ok, warn, fail, llm_backend=llm_backend)
 
     # --- Pipeline -------------------------------------------------------------
     ui.section(console, "Pipeline")

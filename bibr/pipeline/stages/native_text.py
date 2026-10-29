@@ -84,7 +84,12 @@ class NativeTextStage:
             getattr(run_config, "ref_seg_strategy", None),
             settings=settings,
         )[0]
-        eligible_labels = resolve_eligible_labels(bool(settings.ocr.native_text_header_footer))
+        # "is True", not truthiness, for the formula-number setting: tests run
+        # stages with Mock settings, whose attributes are all truthy.
+        eligible_labels = resolve_eligible_labels(
+            bool(settings.ocr.native_text_header_footer),
+            getattr(settings.ocr, "native_text_formula_number", False) is True,
+        )
         # The document layer's arguments are passed only when it is on, so the
         # default call is unchanged. "is True", not truthiness: tests run
         # stages with Mock settings, whose attributes are all truthy.

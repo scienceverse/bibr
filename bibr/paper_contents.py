@@ -641,6 +641,17 @@ class RegionSummary:
     bbox_width: float | None = None
     char_density: float | None = None
     estimated_line_height: float | None = None
+    # Where the region's text came from: "text_layer" (the PDF's own text,
+    # including a scan's hidden OCR layer kept for an OCR failure) or "ocr".
+    # None for a region without text. A region merged from a text-layer half
+    # and an OCR half is "ocr".
+    source: str | None = None
+    # The backend of the reading a scan-consensus escalation kept instead of
+    # the primary OCR's; None when the primary reading stands.
+    ocr_backend: str | None = None
+    # A text-layer region whose box cuts a printed line (its text may end
+    # mid-token); see bibr.ocr.native_text._box_cuts_a_line.
+    native_text_edge_cut: bool = False
 
 
 @dataclass

@@ -204,6 +204,7 @@ def inspect_pdf(
                                         page_idx=page_index,
                                         rotation=rotation,
                                         records=records,
+                                        page=page,
                                     )
                                 except Exception as exc:  # noqa: BLE001
                                     component_errors[f"native_text:{page_index}"] = _error_text(exc)
