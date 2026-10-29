@@ -323,7 +323,20 @@ def process_on_gpu(file_path: str) -> tuple[dict, dict]:
     if _paper_loop is None or _paper_loop.is_closed():
         _paper_loop = asyncio.new_event_loop()
     zm.STATS.clear()
-    paper_json = _paper_loop.run_until_complete(get_pipeline().process_file(file_path))
+    entered = time.monotonic()
+    logger.info("window entered at %.1f", time.time())
+    pipeline = get_pipeline()
+    built = time.monotonic()
+    paper_json = _paper_loop.run_until_complete(pipeline.process_file(file_path))
+    done = time.monotonic()
+    timings = ((paper_json.get("extraction") or {}).get("diagnostics") or {}).get("timings") or {}
+    logger.info(
+        "in window: pipeline ready %.1fs, paper %.1fs, stages %s, models %s",
+        built - entered,
+        done - built,
+        json.dumps(timings.get("stages") or {}),
+        json.dumps(zm.STATS),
+    )
     return paper_json, dict(zm.STATS)
 
 
@@ -348,6 +361,7 @@ async def chew(file_path, oauth_token: gr.OAuthToken | None = None, progress=gr.
             # to_thread copies this request's context, which ZeroGPU reads to
             # bill the visitor.
             called = time.monotonic()
+            logger.info("asking ZeroGPU for %d s at %.1f", window, time.time())
             paper_json, stats = await asyncio.to_thread(process_on_gpu, file_path)
             gpu_s, _, gpu_calls = _gpu_totals(stats)
             gpu_wall = time.monotonic() - called
