@@ -13,6 +13,7 @@ it was.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -73,14 +74,26 @@ class FakeOllama:
     counted at ``chars_per_token`` characters a token and rejected past
     ``num_ctx`` the way Ollama rejects them for a model that uses its GGUF
     chat template.
+
+    ``hold_chats`` keeps the first that many chat requests waiting until all of
+    them have arrived, as calls over a network are: none hears its answer
+    before every one has been sent. A mock transport answers at once, so
+    without it how many concurrent calls overflow before the first 400 is
+    read depends on how the event loop happens to interleave them, and that
+    differs between Python releases.
     """
 
-    def __init__(self, *, num_ctx=16_384, loaded=True, parameters="", chars_per_token=3):
+    def __init__(
+        self, *, num_ctx=16_384, loaded=True, parameters="", chars_per_token=3, hold_chats=0
+    ):
         self.num_ctx = num_ctx
         self.loaded = loaded
         self.down = False
         self.parameters = parameters
         self.chars_per_token = chars_per_token
+        self.hold_chats = hold_chats
+        self._held = 0
+        self._all_in: asyncio.Event | None = None
         self.requests: list[tuple[str, str]] = []
         self.prompts: list[str] = []
         self.prompt_tokens: list[int] = []
@@ -113,6 +126,21 @@ class FakeOllama:
         if path == "/v1/chat/completions":
             return self._chat(json.loads(request.content))
         return httpx.Response(404, text="404 page not found")
+
+    async def respond_held(self, request: httpx.Request) -> httpx.Response:
+        """``respond``, with the first ``hold_chats`` chat requests held until they have all arrived."""
+        response = self.respond(request)
+        if request.url.path == "/v1/chat/completions" and self._held < self.hold_chats:
+            self._held += 1
+            if self._all_in is None:
+                self._all_in = asyncio.Event()
+            if self._held == self.hold_chats:
+                self._all_in.set()
+            # Fewer calls than expected get their answer after the wait, and the test's counts fail.
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(5):
+                    await self._all_in.wait()
+        return response
 
     def probes(self) -> int:
         return self.requests.count(("GET", "/api/version"))
@@ -176,7 +204,9 @@ def ollama_client(monkeypatch):
     """An ``LLMClient`` whose probe and chat calls both reach a ``FakeOllama``."""
 
     def make(server: FakeOllama, settings: GlobalSettings) -> LLMClient:
-        transport = httpx.MockTransport(server.respond)
+        transport = httpx.MockTransport(
+            server.respond_held if server.hold_chats else server.respond
+        )
         http = httpx.AsyncClient(transport=transport)
 
         def create_client(mode_override=None, **_kwargs):
@@ -825,7 +855,7 @@ async def test_an_overflow_at_an_unknown_window_is_asked_again_cut_to_it(ollama_
     # caps, but the server runs a smaller context: every call overflows
     # once, learns the window from the 400 and asks again with its input cut
     # to fit. Before, only the first of the concurrent calls asked again.
-    server = FakeOllama(num_ctx=6_000, loaded=False)
+    server = FakeOllama(num_ctx=6_000, loaded=False, hold_chats=3)
     client = ollama_client(server, _hosted_settings())
 
     combined = await client.extract_core_metadata(FRONT_MATTER)
@@ -852,7 +882,7 @@ async def test_a_window_learned_from_a_rejection_leaves_room_for_the_paper(ollam
     # retry, and every call until the next probe, had an input budget of
     # _context_budget(4096, 4096) == 0. The title and author prompts went
     # out with no paper text, were accepted, and no field was marked failed.
-    server = FakeOllama(num_ctx=4_096, loaded=False)
+    server = FakeOllama(num_ctx=4_096, loaded=False, hold_chats=3)
     client = ollama_client(server, _hosted_settings())
 
     combined = await client.extract_core_metadata(FRONT_MATTER)
@@ -893,7 +923,7 @@ async def test_no_prompt_goes_out_without_paper_text(ollama_client):
                 return httpx.Response(404, text="not found")
             return super().respond(request)
 
-    server = UnplacedServer(num_ctx=4_096)
+    server = UnplacedServer(num_ctx=4_096, hold_chats=3)
     client = ollama_client(server, _hosted_settings())
 
     combined = await client.extract_core_metadata(FRONT_MATTER)
