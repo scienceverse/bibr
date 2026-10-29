@@ -18,11 +18,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `LLM_LOCAL_MIN_VRAM_GB` sets the minimum budget of the managed vLLM LLM
   server's model, for a model bibr's registry does not list (a local path has
   no minimum, so a start that cannot fit used to be launched and fail inside
-  vLLM). For a local copy of the 4B student's W4A16 build it is 6.25 GiB,
-  served with `--max-num-seqs 64`; the configuration guide has the settings.
-  For a model the registry lists it can raise the minimum but not lower it: a
-  lower value is ignored with a warning, so a value left from a local build
-  never starts the bf16 4B student below its 12.25 GiB.
+  vLLM). For a local copy of the 4B student's W4A16 build it is 6.0 GiB on
+  vLLM 0.32 (6.25 on 0.31), served with `--max-num-seqs 64`; the configuration
+  guide has the settings. For a model the registry lists it can raise the
+  minimum but not lower it: a lower value is ignored with a warning, so a
+  value left from a local build never starts the bf16 4B student below its
+  own minimum.
+- `LLM_VLLM_SPEC_DECODE` sets speculative decoding for the managed vLLM LLM
+  server: `auto` (the default), `none`, `mtp` or `dflash`. With `auto`, the 4B
+  student's builds start with MTP (3 tokens drafted by the model's own
+  multi-token-prediction layers, with `--no-async-scheduling`) when the server
+  stays up for the whole run and its budget is at least MTP's minimum, 12.0 GiB
+  for the bf16 build and 7.25 GiB for the W4A16 build; otherwise without it,
+  and `auto` never refuses a start. The server stays up when no managed
+  PaddleOCR-VL server takes turns with it (cloud OCR, an OCR server at
+  `OCR_BASE_URL`, or OCR on llama.cpp). With one server for the run on the 252
+  development papers (vLLM 0.32.0, OCR read from a cache, the pinned bf16
+  build), MTP passed 218 against 219 without it on an RTX 3090 and 218
+  against 218 on an RTX 5090, the LLM stage took 0.80x and 0.74x as long, and
+  papers an hour rose 5.7% and 12.1%. In bibr's default plan on cards up to
+  64 GB, where the LLM server restarts every chunk to take turns with
+  PaddleOCR-VL, `auto` leaves MTP off: on emulated 12 and 16 GB cards (the
+  previous revision's W4A16 build) each MTP start took 51 s instead of 37 s
+  and 48-paper batches ran 5.0% and 8.6% slower, with the same scores (40 and
+  39 of 48 against 39 and 40). It has not been measured in the 24 GB swap
+  plan. `mtp` uses MTP at every start and needs its minimum. `dflash`
+  (opt-in) uses DFlash with 7 drafted tokens from `z-lab/Qwen3.5-4B-DFlash`, a
+  separate 1.27 GB model pinned to revision `9a1996cc`, for the bf16 4B only,
+  with a 13.5 GiB minimum: 220 against 219 and 217 against 218 on the same
+  runs, the LLM stage 0.72x and 0.64x as long, but about half the KV cache
+  capacity. A `--speculative-config` in `LLM_VLLM_EXTRA_ARGS` replaces bibr's
+  choice.
 
 ### Changed
 
@@ -49,6 +75,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `LLM_LOCAL_MODEL` may now be a local `.gguf` file for llama.cpp, and
   `bibr chew --dry-run` counts a pinned build as cached only at its commit.
   The configuration guide shows how to run the previous revision.
+- The `vllm` extra and bibr's `uv tool run` fallback now use vLLM 0.32.0 (was
+  0.31.0) for the managed LLM and PaddleOCR-VL servers. The 4B student's vLLM
+  builds now run with at most 64 sequences (the bf16 build had 128), and their
+  minimums, measured again with vLLM 0.32.0 as below, are 11.0 GiB for the bf16
+  build (was 12.25) and 6.0 GiB for the W4A16 build (was 6.25); the 2B's 6.25
+  GiB is the vLLM 0.31.0 figure. On the swap path a start needs 12.75 GiB free
+  for the bf16 4B and 7.75 GiB for the W4A16 build; a server that stays up for
+  the run needs 17.25 and 12.25 GiB while bibr's models hold 0.5 GiB. So on a
+  24 GB card with no desktop, the bf16 4B now starts beside a PaddleOCR-VL
+  server of about 5.4 GB at `--ocr-url` (0.48 of the card, 11.3 GiB, below
+  MTP's minimum, so without MTP). With a 0.5 GiB desktop on the card as well
+  it is still refused (17.16 GiB free, 17.25 needed). Beside bibr's models at
+  0.5 GiB, a free 24 GB card now gives 0.71 and a
+  free 32 GB card 0.78 (0.70 and 0.77 on 0.31). With one server for the run on
+  the 252 development papers (the pinned bf16 build), vLLM 0.32 at 64 sequences
+  passed 219 against 220 on 0.31 at vLLM's default 256 (−0.4 points [−1.2, 0]),
+  at the same speed. On emulated 12 and 16 GB cards in the default plan (with
+  the previous revision's W4A16 build and its minimum still at 6.25 GiB),
+  PaddleOCR-VL and the W4A16 build on vLLM 0.32 finished 48 of 48 papers each
+  beside a 0.5 GiB desktop. vLLM 0.32 no longer rejects a request whose prompt
+  plus completion cap runs past the context window, as 0.31 did with HTTP 400:
+  it lowers the cap to what is left. A prompt longer than the window is still
+  rejected, with the message bibr reads the window from. Where bibr does not
+  know the window (a server at `LLM_BASE_URL`, or a model outside the registry
+  started without `--max-model-len`) and an answer stops at it, the call failed
+  as truncated where 0.31's 400 let bibr cut the input and ask again. bibr now
+  reads the window then from the server's `/v1/models` (vLLM's
+  `max_model_len`, once per server and model) and asks again with the input cut
+  to fit. An answer that stops short of the window, and a server that lists no
+  window, still fail the call as truncated.
 - The managed vLLM LLM server's minimum is now the budget each published
   model was measured to need on an RTX 3090 with vLLM 0.31.0: a first start,
   before vLLM has filled its compile cache, that serves one 32,768-token
@@ -62,7 +118,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   12.5 GiB for the W4A16 build while they hold 0.5 GiB. An 8 GB card, with
   about 7.6 GiB free to CUDA (about 7 GiB beside a desktop), cannot start any
   of them unless you set the share yourself (`LLM_LOCAL_MEM_FRACTION`), and
-  that works only when nothing else, such as a desktop, uses the card.
+  that works only when nothing else, such as a desktop, uses the card. (These
+  are the vLLM 0.31.0 figures; the vLLM 0.32.0 entry above has this
+  release's.)
 - On Linux NVIDIA cards below 10 GB, `bibr setup` now runs both OCR (GLM-OCR)
   and the 4B student's Q8_0 GGUF build on llama.cpp, which you install. Such
   cards used to get the 2B student on vLLM from 8 GB, whose starts need more
@@ -94,7 +152,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - NVIDIA cards older than Ampere (compute capability below 8.0: Turing,
   Volta, Pascal) now run the extraction LLM and the automatic OCR on
   llama.cpp, in `bibr setup` and for `--llm local`. bibr's vLLM models are
-  bf16, which vLLM 0.31 serves only from compute capability 8.0; on an older
+  bf16, which vLLM 0.31 and 0.32 serve only from compute capability 8.0; on an older
   card it does not refuse them but casts them to float16 with a warning, a
   path bibr has not been tested on. No batch on a Turing or Pascal card has
   been recorded with either runtime: this is a conservative routing rule.
@@ -104,6 +162,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reports 12,227 MiB) as that size, for the model it recommends and for its
   memory mode. Such cards used to get the next smaller tier. PaddleOCR-VL's
   8 GB minimum has no such slack, so an RTX 4060 (8,188 MiB) keeps GLM-OCR.
+
+### Security
+
+- vLLM 0.31.0, which the `vllm` extra pinned, has a published advisory
+  (PYSEC-2026-4319, a denial of service through its penalty handling), fixed
+  in 0.32.0, which the extra now pins. CI's dependency audit does not install
+  the `vllm` extra and did not report it; `pip-audit` on the extra's locked
+  requirements now finds no known vulnerability (the two already documented
+  exceptions aside).
 
 ### Fixed
 
@@ -192,7 +259,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the 2B does), `LLM_LOCAL_MEM_FRACTION` to choose the share yourself, or a
   llama.cpp LLM (`--llm llama-cpp`). The Qwen3.5 students now run at most 128
   sequences at once, which halves vLLM's capture sizes and lets them start on a
-  smaller share.
+  smaller share. (These are the vLLM 0.31.0 figures; the vLLM 0.32.0 entry
+  above has this release's, with which the bf16 4B does start beside that OCR
+  server when no desktop shares the card. Beside a 0.5 GiB desktop it is still
+  refused: 17.16 GiB free, 17.25 needed.)
 - A nearly full GPU no longer fails papers, drops their references or sends
   their headings to the LLM. bibr's layout, sentence, reference-parser and
   section-classifier models now treat each GPU out-of-memory failure alike:

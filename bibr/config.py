@@ -618,8 +618,9 @@ class LlmOptions(_BibrSettings):
         None,
         ge=1,
         description="The LLM server's context window in tokens. When set, long inputs are cut "
-        "so prompt plus completion fits it. bibr fills it in for the servers it starts and "
-        "learns it from a context-length rejection otherwise.",
+        "so prompt plus completion fits it. bibr fills it in for the servers it starts. "
+        "Otherwise it learns it from a context-length rejection, or from the server's "
+        "/v1/models listing when an answer stops at the window.",
     )
     # Reference-segmentation OUTPUT bound: the anchor-emit call produces ~1 short
     # anchor per reference, so a long bibliography in one window emits too many
@@ -729,9 +730,10 @@ class LlmOptions(_BibrSettings):
             "Minimum budget (GiB) of a managed vLLM LLM server's model: when bibr sizes the "
             "server's share at a start, a share below it is refused before vLLM is launched. "
             "It sets the minimum of a model that bibr's registry does not list, such as a local "
-            "path (6.25 for a local copy of the 4B student's W4A16 build served with "
-            "--max-num-seqs 64). For a model the registry lists it can raise the registry's "
-            "minimum but not lower it: a lower value is ignored with a warning."
+            "path (6.0 for a local copy of the 4B student's W4A16 build served with "
+            "--max-num-seqs 64 on vLLM 0.32, 7.25 with an MTP --speculative-config of your "
+            "own). For a model the registry lists it can raise the registry's minimum but not "
+            "lower it: a lower value is ignored with a warning."
         ),
     )
     vllm_mlx_port: int = Field(8767, description="Port for the managed vllm-mlx LLM server.")
@@ -762,6 +764,16 @@ class LlmOptions(_BibrSettings):
         "",
         description="Extra CLI args appended to the managed vLLM LLM server command "
         "(overrides registry defaults on repeated flags).",
+    )
+    vllm_spec_decode: Literal["auto", "none", "mtp", "dflash"] = Field(
+        "auto",
+        description="Speculative decoding for the managed vLLM LLM server: 'auto' (MTP when "
+        "bibr's model registry lists an MTP config for the model, the server stays up for the "
+        "whole run, and its budget meets MTP's minimum; none when it restarts every chunk to "
+        "take turns with a managed PaddleOCR-VL server, as by default on cards up to 64 GB), "
+        "'none', or 'mtp' / 'dflash' at every start when the registry lists that config for "
+        "the model (DFlash: the 4B student's bf16 build only); the start then needs that "
+        "config's larger minimum. A --speculative-config in LLM_VLLM_EXTRA_ARGS wins.",
     )
     # Managed Rapid-MLX LLM server (Apple Silicon experimental fast path).
     rapid_mlx_model: str = Field(
@@ -847,7 +859,7 @@ class LlmOptions(_BibrSettings):
         description="Poll interval in seconds for the offline batch LLM layer's job status checks.",
     )
 
-    @field_validator("provider", "backend", "structured_backend", mode="before")
+    @field_validator("provider", "backend", "structured_backend", "vllm_spec_decode", mode="before")
     @classmethod
     def _lower_llm_choice(cls, v):
         """Normalize choice-like values so the Literal check is case-insensitive."""

@@ -56,9 +56,12 @@ def _size(reading, *, cap=0.85, model=STUDENT_4B, swaps_with_ocr=True, extra=Non
 class TestOvershootReserve:
     """vLLM's peak beyond its share follows the capture sizes, not the share."""
 
-    def test_students_capture_up_to_256(self):
-        # 128 sequences: capture sizes up to 256, measured 0.75 GiB above 0.54.
-        assert overshoot_reserve_gb(STUDENT_4B, None) == pytest.approx(1.0)
+    def test_students_capture_up_to_128_or_256(self):
+        # The 4B at 64 sequences: capture sizes up to 128; its managed starts
+        # on vLLM 0.32 peaked 440-454 MiB above the share.
+        assert overshoot_reserve_gb(STUDENT_4B, None) == pytest.approx(0.75)
+        assert overshoot_reserve_gb(STUDENT_4B_W4A16, None) == pytest.approx(0.75)
+        # The 2B at 128: capture sizes up to 256, measured 0.75 GiB above 0.54.
         assert overshoot_reserve_gb(STUDENT_2B, None) == pytest.approx(1.0)
 
     def test_vllm_default_captures_up_to_512(self):
@@ -87,7 +90,7 @@ class TestSwapRestartsBesideGrowingBibr:
         own = own_mib * MIB
         share = _size(_bibr_alone(own))
         assert share.reason == "free"
-        assert share.share == 0.70
+        assert share.share == 0.71
         reserve = overshoot_reserve_gb(STUDENT_4B, None)
         # Share, capture overshoot and bibr's 6 GB reserve all fit the card.
         assert share.share * CUDA_3090 + reserve + max(own, 6.0) <= CUDA_3090
@@ -97,13 +100,13 @@ class TestSwapRestartsBesideGrowingBibr:
         share = _size(_bibr_alone(own))
         assert share.reason == "free"
         assert share.headroom_gb == 1.0
-        assert share.share * CUDA_3090 + 1.0 + own + 1.0 <= CUDA_3090
+        assert share.share * CUDA_3090 + share.reserve_gb + own + 1.0 <= CUDA_3090
 
     def test_describe_names_the_inputs(self):
         text = _size(_bibr_alone(2262 * MIB)).describe()
-        assert "0.70 of 23.56 GiB (free)" in text
+        assert "0.71 of 23.56 GiB (free)" in text
         assert "bibr 2.21 GiB" in text
-        assert "floor 12.25 GiB" in text
+        assert "floor 11.00 GiB" in text
 
 
 class TestCapAndColocation:
@@ -138,10 +141,10 @@ class TestCapAndColocation:
     def test_colocated_start_on_a_crowded_card_keeps_bibrs_room(self):
         # A planned 0.54 on a crowded card: 14.3 GiB free with bibr holding
         # 3.0. Less the capture reserve and bibr's 3.0 GiB of room, the bf16
-        # 4B's 12.25 GiB floor does not fit (16.25 needed); the W4A16 build
+        # 4B's 11.0 GiB floor does not fit (14.75 needed); the W4A16 build
         # takes what is left.
         reading = GpuMemory(total_gb=CUDA_3090, free_gb=14.3, own_gb=3.0)
-        with pytest.raises(ManagedLlmVramError, match="needs 16.25 GiB"):
+        with pytest.raises(ManagedLlmVramError, match="needs 14.75 GiB"):
             _size(reading, cap=0.54, swaps_with_ocr=False)
         share = _size(reading, cap=0.54, model=STUDENT_4B_W4A16, swaps_with_ocr=False)
         assert (share.share, share.reason) == (0.44, "free")
@@ -196,13 +199,13 @@ class TestServerThatStaysUp:
     def test_free_24gb_card_leaves_bibr_its_reserve(self):
         # A 24 GB run's first LLM start (bibr 504 MiB): 0.85 left bibr 1 GiB.
         share = _size(_bibr_alone(504 * MIB), swaps_with_ocr=False)
-        assert (share.share, share.reason) == (0.70, "free")
+        assert (share.share, share.reason) == (0.71, "free")
         assert share.headroom_gb == pytest.approx(6.0 - 504 * MIB)
         assert _size(_bibr_alone(504 * MIB)) == share
 
     def test_free_32gb_card(self):
         share = _size(_bibr_alone(0.5, total=31.45), swaps_with_ocr=False)
-        assert (share.share, share.reason) == (0.77, "free")
+        assert (share.share, share.reason) == (0.78, "free")
 
     def test_roomy_card_keeps_the_configured_share(self):
         share = _size(_bibr_alone(0.5, total=78.4), swaps_with_ocr=False)
@@ -210,16 +213,16 @@ class TestServerThatStaysUp:
 
     # A PaddleOCR-VL server at an OCR URL holds about 5.4 GiB of an RTX 3090
     # (bibr's own 0.21 share) and bibr 0.5 when the bf16 4B starts beside it.
-    # The start needs the 12.25 GiB floor, the 1.0 GiB capture reserve and
+    # The start needs the 11.0 GiB floor, the 0.75 GiB capture reserve and
     # bibr's 5.5.
-    EDGE = 12.25 + 1.0 + 5.5
+    EDGE = 11.0 + 0.75 + 5.5
 
     def test_at_the_edge_the_floor_fits_with_bibrs_room(self):
         share = _size(
             GpuMemory(total_gb=CUDA_3090, free_gb=self.EDGE, own_gb=0.5), swaps_with_ocr=False
         )
-        assert (share.share, share.reason) == (0.52, "floor")
-        assert share.budget_gb >= 12.25
+        assert (share.share, share.reason) == (0.47, "floor")
+        assert share.budget_gb >= 11.0
         # Rounding up to the floor takes at most a hundredth of the card.
         assert 5.5 - 0.01 * CUDA_3090 <= share.headroom_gb < 5.5
 
@@ -228,29 +231,33 @@ class TestServerThatStaysUp:
         with pytest.raises(ManagedLlmVramError) as exc:
             _size(reading, swaps_with_ocr=False)
         assert (
-            "it needs 18.75 GiB (the model's 12.25 GiB floor, 1.00 GiB vLLM takes beyond its "
+            "it needs 17.25 GiB (the model's 11.00 GiB floor, 0.75 GiB vLLM takes beyond its "
             "share while starting, and 5.50 GiB for bibr's GPU sessions (6.0 GiB less the "
             "0.50 GiB they hold, since the server stays up for the run))"
         ) in str(exc.value)
         # A start that restarts next chunk is squeezed to the floor instead.
         squeezed = _size(reading)
-        assert (squeezed.share, squeezed.reason, squeezed.headroom_gb) == (0.52, "floor", 1.0)
+        assert (squeezed.share, squeezed.reason, squeezed.headroom_gb) == (0.47, "floor", 1.0)
 
     def test_a_3090_beside_an_external_ocr_server(self):
         # 23.56 GiB less the OCR server's 5.4 and bibr's 0.5 (worked out, not
-        # measured): refused for the bf16 4B, sized from free memory for the
-        # W4A16 build.
+        # measured). The bf16 4B needs 17.25 GiB on vLLM 0.32 (18.75 at 128
+        # sequences on 0.31) and both builds are sized from free memory; the
+        # bf16 budget (11.31 GiB) is below MTP's 12.0 GiB floor.
         reading = GpuMemory(total_gb=CUDA_3090, free_gb=17.66, own_gb=0.5)
-        with pytest.raises(ManagedLlmVramError, match="needs 18.75 GiB"):
-            _size(reading, swaps_with_ocr=False)
+        share = _size(reading, swaps_with_ocr=False)
+        assert (share.share, share.reason) == (0.48, "free")
+        assert 11.0 <= share.budget_gb < 12.0
         share = _size(reading, model=STUDENT_4B_W4A16, swaps_with_ocr=False)
         assert (share.share, share.reason) == (0.48, "free")
+        with pytest.raises(ManagedLlmVramError, match="needs 17.25 GiB"):
+            _size(GpuMemory(total_gb=CUDA_3090, free_gb=17.0, own_gb=0.5), swaps_with_ocr=False)
 
     def test_16gb_card(self):
         # The bf16 4B's floor and bibr's room do not fit a 16 GB card beside
         # a server that stays up; the W4A16 build does.
         reading = _bibr_alone(0.5, total=CUDA_16GB)
-        with pytest.raises(ManagedLlmVramError, match="needs 18.75 GiB"):
+        with pytest.raises(ManagedLlmVramError, match="needs 17.25 GiB"):
             _size(reading, swaps_with_ocr=False)
         share = _size(reading, model=STUDENT_4B_W4A16, swaps_with_ocr=False)
         assert (share.share, share.reason) == (0.56, "free")
@@ -290,7 +297,7 @@ class TestRefusalText:
         ("reading", "swaps_with_ocr"),
         [
             # A swap start squeezed to the floor keeps exactly the minimum.
-            (_bibr_alone(2.3, total=CUDA_16GB), True),
+            (_bibr_alone(3.0, total=CUDA_16GB), True),
             # A server that stays up beside bibr holding 5.5 GiB: 6.0 less
             # that is under the minimum, so its room is exactly 1 GiB too.
             (GpuMemory(total_gb=CUDA_16GB, free_gb=8.0, own_gb=5.5), False),
@@ -300,7 +307,8 @@ class TestRefusalText:
         with pytest.raises(ManagedLlmVramError) as exc:
             _size(reading, swaps_with_ocr=swaps_with_ocr)
         message = str(exc.value)
-        assert f"needs {managed_llm_floor_gb(STUDENT_4B) + 2.0:.2f} GiB" in message
+        need = managed_llm_floor_gb(STUDENT_4B) + overshoot_reserve_gb(STUDENT_4B, None) + 1.0
+        assert f"needs {need:.2f} GiB" in message
         assert (
             "takes beyond its share while starting, and 1.00 GiB for bibr's GPU sessions). "
         ) in message
@@ -311,7 +319,7 @@ class TestRefusalText:
         [
             # The bf16 4B on a 16 GB card: a grown bibr on the swap path, and
             # a first start with cloud OCR. The W4A16 build fits both.
-            (_bibr_alone(2.3, total=CUDA_16GB), True),
+            (_bibr_alone(3.0, total=CUDA_16GB), True),
             (_bibr_alone(0.5, total=CUDA_16GB), False),
         ],
     )
@@ -419,23 +427,23 @@ class TestFloorRounding:
 
 
 class TestFloor:
-    """A 16 GB card: the 4B's 12.25 GiB floor fits only while bibr is small."""
+    """A 16 GB card: the 4B's 11.0 GiB floor fits only while bibr is small."""
 
     def test_first_chunk_squeezes_to_the_floor(self):
         share = _size(_bibr_alone(0.5, total=CUDA_16GB))
         assert share.reason == "floor"
-        assert share.share * CUDA_16GB >= 12.25
-        assert share.share == 0.79
+        assert share.share * CUDA_16GB >= 11.0
+        assert share.share == 0.71
         assert share.headroom_gb == 1.0
 
     def test_a_grown_bibr_fails_with_a_typed_error(self):
         with pytest.raises(ManagedLlmVramError) as exc:
-            _size(_bibr_alone(2.3, total=CUDA_16GB))
+            _size(_bibr_alone(3.0, total=CUDA_16GB))
         message = str(exc.value)
         assert "Error in llm" in message
-        assert "13.30 of 15.60 GiB free" in message
-        assert "bibr itself holds 2.30 GiB" in message
-        assert "needs 14.25 GiB (the model's 12.25 GiB floor, 1.00 GiB vLLM" in message
+        assert "12.60 of 15.60 GiB free" in message
+        assert "bibr itself holds 3.00 GiB" in message
+        assert "needs 12.75 GiB (the model's 11.00 GiB floor, 0.75 GiB vLLM" in message
         assert "LLM_LOCAL_MEM_FRACTION" in message
 
     def test_the_error_is_an_upstream_failure(self):
@@ -449,7 +457,7 @@ class TestFloor:
         assert share.share * CUDA_16GB >= 6.25
 
     def test_cap_below_the_floor_is_the_floor(self):
-        # 0.6 of a 16 GB card is 9.4 GiB, below the 4B's 12.25: the cap decides.
+        # 0.6 of a 16 GB card is 9.4 GiB, below the 4B's 11.0: the cap decides.
         share = _size(_bibr_alone(0.5, total=CUDA_16GB), cap=0.6)
         assert share.share == 0.6
 
@@ -462,8 +470,8 @@ class TestFloor:
 
     def test_registry_floors(self):
         # The measured budget floors, not the card-size tiers (20, 12 and 8).
-        assert managed_llm_floor_gb(STUDENT_4B) == 12.25
-        assert managed_llm_floor_gb(STUDENT_4B_W4A16) == 6.25
+        assert managed_llm_floor_gb(STUDENT_4B) == 11.0
+        assert managed_llm_floor_gb(STUDENT_4B_W4A16) == 6.0
         assert managed_llm_floor_gb(STUDENT_2B) == 6.25
         assert managed_llm_floor_gb("scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0") is None
         assert managed_llm_floor_gb("org/unknown") is None
@@ -666,8 +674,8 @@ class TestServerStart:
                 share_from_free_memory=True,
                 swaps_with_ocr=True,
             )
-        assert _launched_share(popen) == "0.7"
-        assert any("Managed vLLM LLM share 0.70" in r.getMessage() for r in caplog.records)
+        assert _launched_share(popen) == "0.71"
+        assert any("Managed vLLM LLM share 0.71" in r.getMessage() for r in caplog.records)
 
     def test_llm_only_start_leaves_bibr_its_reserve(self, monkeypatch, caplog):
         self._probe(monkeypatch, _bibr_alone(504 * MIB))
@@ -675,16 +683,16 @@ class TestServerStart:
             _server, popen = _mk_server(
                 model=STUDENT_4B, port=9999, mem_fraction=0.85, share_from_free_memory=True
             )
-        assert _launched_share(popen) == "0.7"
+        assert _launched_share(popen) == "0.71"
         assert any(
-            "Managed vLLM LLM share 0.70 of 23.56 GiB (free)" in r.getMessage()
+            "Managed vLLM LLM share 0.71 of 23.56 GiB (free)" in r.getMessage()
             for r in caplog.records
         )
 
     def test_a_server_that_stays_up_is_refused_without_launching(self, monkeypatch):
         from bibr.local import vllm_llm
 
-        self._probe(monkeypatch, GpuMemory(total_gb=CUDA_3090, free_gb=17.66, own_gb=0.5))
+        self._probe(monkeypatch, _bibr_alone(0.5, total=CUDA_16GB))
         with (
             patch("importlib.util.find_spec", return_value=object()),
             patch.object(vllm_llm.subprocess, "Popen") as popen,
@@ -699,7 +707,7 @@ class TestServerStart:
     def test_only_a_squeezed_start_warns(self, monkeypatch, caplog, swaps_with_ocr, warns):
         # At the edge both paths round up to the floor; only the swap may
         # also have been squeezed there, so only it warns.
-        self._probe(monkeypatch, GpuMemory(total_gb=CUDA_3090, free_gb=18.75, own_gb=0.5))
+        self._probe(monkeypatch, GpuMemory(total_gb=CUDA_3090, free_gb=17.25, own_gb=0.5))
         with caplog.at_level("WARNING", logger="bibr.local.vllm_llm"):
             _server, popen = _mk_server(
                 model=STUDENT_4B,
@@ -708,11 +716,11 @@ class TestServerStart:
                 share_from_free_memory=True,
                 swaps_with_ocr=swaps_with_ocr,
             )
-        assert _launched_share(popen) == "0.52"
+        assert _launched_share(popen) == "0.47"
         assert any("little room left" in r.getMessage() for r in caplog.records) is warns
 
     def test_floor_that_does_not_fit_never_launches_vllm(self, monkeypatch):
-        self._probe(monkeypatch, _bibr_alone(2.3, total=CUDA_16GB))
+        self._probe(monkeypatch, _bibr_alone(3.0, total=CUDA_16GB))
         from bibr.local import vllm_llm
 
         with (
@@ -735,11 +743,21 @@ class TestServerStart:
                 share_from_free_memory=True,
                 swaps_with_ocr=True,
             )
-        assert _launched_share(popen) == "0.79"
+        assert _launched_share(popen) == "0.71"
         assert any("little room left" in r.getMessage() for r in caplog.records)
 
-    def test_fixed_share_never_reads_the_card(self, monkeypatch):
-        calls = self._probe(monkeypatch, _bibr_alone(2.3, total=CUDA_16GB))
+    def test_fixed_share_is_never_sized_from_the_card(self, monkeypatch):
+        # Free memory that refuses a sized start; the fixed share is launched
+        # as given. The card's total is read once, for the speculative
+        # decoding choice's budget.
+        calls = self._probe(monkeypatch, _bibr_alone(3.0, total=CUDA_16GB))
+        _server, popen = _mk_server(model=STUDENT_4B, port=9999, mem_fraction=0.85)
+        assert _launched_share(popen) == "0.85"
+        assert calls == [True]
+
+    def test_fixed_share_with_spec_decode_off_never_reads_the_card(self, monkeypatch):
+        monkeypatch.setattr(Settings.llm, "vllm_spec_decode", "none")
+        calls = self._probe(monkeypatch, _bibr_alone(3.0, total=CUDA_16GB))
         _server, popen = _mk_server(model=STUDENT_4B, port=9999, mem_fraction=0.85)
         assert _launched_share(popen) == "0.85"
         assert calls == []
@@ -766,7 +784,7 @@ class TestServerStart:
 W4A16_LOCAL = "/models/bibr-extract-qwen35-4b-W4A16"
 
 
-def _w4a16_settings(floor: float | None = 6.25):
+def _w4a16_settings(floor: float | None = 6.0):
     """Settings for a local copy of the 4B W4A16 build, selected as documented."""
     import shlex
 
@@ -826,34 +844,35 @@ class TestFloorSetting:
     def test_covers_a_local_path(self):
         assert managed_llm_floor_gb(W4A16_LOCAL) is None
         assert managed_llm_floor_gb(W4A16_LOCAL, _w4a16_settings(floor=None)) is None
-        assert managed_llm_floor_gb(W4A16_LOCAL, _w4a16_settings()) == 6.25
+        assert managed_llm_floor_gb(W4A16_LOCAL, _w4a16_settings()) == 6.0
 
     def test_a_lower_setting_keeps_a_listed_floor_with_one_warning(self, caplog):
         # 7 left set after switching from a local build back to the bf16 4B.
         settings = _w4a16_settings(floor=7.0)
         with caplog.at_level(logging.WARNING, logger="bibr.local.vllm_share"):
-            assert managed_llm_floor_gb(STUDENT_4B, settings) == 12.25
-            assert managed_llm_floor_gb(STUDENT_4B, settings) == 12.25
+            assert managed_llm_floor_gb(STUDENT_4B, settings) == 11.0
+            assert managed_llm_floor_gb(STUDENT_4B, settings) == 11.0
             assert managed_llm_floor_gb(W4A16_LOCAL, settings) == 7.0
         warnings = [r.getMessage() for r in caplog.records]
         assert warnings == [
             f"LLM_LOCAL_MIN_VRAM_GB=7 is ignored for {STUDENT_4B}: bibr's model registry lists "
-            "that model with a minimum of 12.25 GiB, and the setting can raise a listed model's "
+            "that model with a minimum of 11 GiB, and the setting can raise a listed model's "
             "minimum but not lower it. Unset it, or set LLM_LOCAL_MEM_FRACTION to choose the "
             "share yourself."
         ]  # once per listed model, not at every start
-        assert managed_llm_floor_gb(STUDENT_4B, _w4a16_settings(floor=None)) == 12.25
+        assert managed_llm_floor_gb(STUDENT_4B, _w4a16_settings(floor=None)) == 11.0
 
     def test_a_higher_setting_raises_a_listed_floor_silently(self, caplog):
         with caplog.at_level(logging.WARNING, logger="bibr.local.vllm_share"):
             assert managed_llm_floor_gb(STUDENT_2B, _w4a16_settings(floor=7.0)) == 7.0
             assert managed_llm_floor_gb(STUDENT_4B, _w4a16_settings(floor=13.0)) == 13.0
             assert managed_llm_floor_gb(STUDENT_4B_W4A16, _w4a16_settings(floor=6.25)) == 6.25
+            assert managed_llm_floor_gb(STUDENT_4B_W4A16, _w4a16_settings(floor=6.0)) == 6.0
         assert caplog.records == []
 
     def test_a_raised_floor_refuses_where_the_registry_floor_starts(self):
         settings = _hub_w4a16_settings()
-        reading = _hog(12.0, 2.9)  # 8.66 GiB free: 6.25 + 0.75 + 1.0 fits
+        reading = _hog(12.0, 2.9)  # 8.66 GiB free: 6.0 + 0.75 + 1.0 fits
         assert (
             vllm_share.managed_llm_share(
                 reading, settings, STUDENT_4B_W4A16, cap=0.85, swaps_with_ocr=True
@@ -867,12 +886,12 @@ class TestFloorSetting:
             )
 
     def test_a_left_over_setting_never_starts_the_bf16_4b_below_its_floor(self):
-        # The emulated 12 GB card where a local W4A16 copy starts at its 6.25
-        # GiB floor: the bf16 4B is refused at its own 12.25, not squeezed.
+        # The emulated 12 GB card where a local W4A16 copy starts at its 6.0
+        # GiB floor: the bf16 4B is refused at its own 11.0, not squeezed.
         settings = _w4a16_settings()
         settings.llm.local_model = STUDENT_4B
         settings.llm.vllm_extra_args = ""
-        with pytest.raises(ManagedLlmVramError, match=r"the model's 12\.25 GiB floor"):
+        with pytest.raises(ManagedLlmVramError, match=r"the model's 11\.00 GiB floor"):
             vllm_share.managed_llm_share(
                 _hog(12.0, 0.50), settings, STUDENT_4B, cap=0.85, swaps_with_ocr=True
             )
@@ -892,11 +911,12 @@ class TestFloorSetting:
 
 
 class TestW4a16Floor:
-    """The published 4B W4A16 build (6.25 GiB floor at 64 sequences) on emulated 16 and 12 GB cards.
+    """The published 4B W4A16 build (6.0 GiB floor at 64 sequences) on emulated 16 and 12 GB cards.
 
-    Readings from an emulated 16 GB card (an 8 GiB hog on an RTX 3090): bibr 0.50 GiB before
-    the first LLM start, 1.98-2.06 GiB before the later ones, which refused
-    the bf16 4B at 13.48-13.57 GiB free.
+    Readings from an emulated 16 GB card (an 8 GiB hog on an RTX 3090): bibr 0.50 GiB
+    before the first LLM start, 1.98-2.06 GiB before the later ones, which
+    refused the bf16 4B at 13.48-13.57 GiB free on vLLM 0.31 (14.25 GiB needed
+    at 128 sequences then; 12.75 on vLLM 0.32 at 64).
     """
 
     def _share(self, reading):
@@ -911,9 +931,9 @@ class TestW4a16Floor:
             registry_server_args,
         )
 
-        assert QWEN35_4B_W4A16_BUDGET_GB == 6.25
-        # Same student args, with the last --max-num-seqs (which vLLM keeps) at 64.
-        assert QWEN35_4B_W4A16_SERVER_ARGS[:-2] == registry_server_args(STUDENT_4B)[2:]
+        assert QWEN35_4B_W4A16_BUDGET_GB == 6.0
+        # The bf16 build's args, --max-num-seqs 64 included.
+        assert registry_server_args(STUDENT_4B)[2:] == QWEN35_4B_W4A16_SERVER_ARGS
         assert QWEN35_4B_W4A16_SERVER_ARGS[-2:] == ("--max-num-seqs", "64")
         assert registry_server_args(STUDENT_4B_W4A16) == (
             "--revision",
@@ -930,32 +950,32 @@ class TestW4a16Floor:
         share = self._share(GpuMemory(total_gb=CUDA_3090, free_gb=free, own_gb=own))
         assert share.reason == "free"
         assert share.share == 0.37
-        assert share.budget_gb >= 6.25
+        assert share.budget_gb >= 6.0
 
     def test_12gb_first_start_takes_the_floor(self):
         share = self._share(_hog(12.0, 0.50))
         assert share.reason == "floor"
-        assert share.share == 0.27
-        assert share.budget_gb >= 6.25
+        assert share.share == 0.26
+        assert share.budget_gb >= 6.0
         assert share.headroom_gb == 1.0
 
-    def test_12gb_grown_bibr_still_fits_until_3_5_gib(self):
-        assert self._share(_hog(12.0, 3.50)).reason == "floor"
+    def test_12gb_grown_bibr_still_fits_until_3_8_gib(self):
+        assert self._share(_hog(12.0, 3.80)).reason == "floor"
         with pytest.raises(ManagedLlmVramError) as exc:
-            self._share(_hog(12.0, 3.60))
+            self._share(_hog(12.0, 3.85))
         message = str(exc.value)
-        assert "the model's 6.25 GiB floor, 0.75 GiB vLLM takes beyond its share" in message
-        assert "needs 8.00 GiB" in message
+        assert "the model's 6.00 GiB floor, 0.75 GiB vLLM takes beyond its share" in message
+        assert "needs 7.75 GiB" in message
 
     def test_8gb_card_is_refused_even_with_bibr_off_the_gpu(self):
-        # About 7.6 GiB to CUDA (an RTX 4060 reports 8,188 MiB): 6.25 + 0.75 +
+        # About 7.6 GiB to CUDA (an RTX 4060 reports 8,188 MiB): 6.0 + 0.75 +
         # 1.0 GiB is more than the whole card, so no start is sized. Both the
         # card's cap (0.85 x 7.6 = 6.46 GiB) and a 3090 behind a hog agree.
         for reading in (
             GpuMemory(total_gb=7.6, free_gb=7.6, own_gb=0.0),
             _hog(CUDA_3090 - 7.6, 0.0),
         ):
-            with pytest.raises(ManagedLlmVramError, match="needs 8.00 GiB"):
+            with pytest.raises(ManagedLlmVramError, match="needs 7.75 GiB"):
                 self._share(reading)
 
     def test_without_the_setting_a_local_path_has_no_floor(self):
@@ -966,7 +986,7 @@ class TestW4a16Floor:
         )
         assert share.reason == "free"
         assert share.floor_gb is None
-        assert share.budget_gb < 6.25
+        assert share.budget_gb < 6.0
 
     def test_a_floorless_refusal_names_the_swap_room_it_needs(self):
         # The 16 GB card's second start, a local copy without the setting: on the swap
@@ -996,10 +1016,11 @@ class TestW4a16Floor:
         assert "it needs 5.01 GiB" in str(exc.value)
 
     def test_the_bf16_4b_is_refused_where_w4a16_starts(self):
-        reading = GpuMemory(total_gb=CUDA_3090, free_gb=13.57, own_gb=1.98)
-        with pytest.raises(ManagedLlmVramError):
+        # 0.25 GiB short of the bf16 4B's 12.75 GiB on the swap path.
+        reading = GpuMemory(total_gb=CUDA_3090, free_gb=12.50, own_gb=1.98)
+        with pytest.raises(ManagedLlmVramError, match="needs 12.75 GiB"):
             _size(reading)
-        assert self._share(reading).share == 0.37
+        assert self._share(reading).share == 0.32
 
     def test_server_launches_the_published_build_with_its_args(self, monkeypatch):
         monkeypatch.setattr(vllm_share, "_SETTLE_INTERVAL_S", 0.0)
@@ -1014,7 +1035,7 @@ class TestW4a16Floor:
         cmd = popen.call_args[0][0]
         assert cmd[cmd.index("--model") + 1] == STUDENT_4B_W4A16
         assert cmd[cmd.index("--revision") + 1] == "a32f20485181574d849cfb32f8eac1f266c4143d"
-        assert _launched_share(popen) == "0.27"
+        assert _launched_share(popen) == "0.26"
         assert cmd[-2:] == ["--max-num-seqs", "64"]
         server._process = None
 
@@ -1030,7 +1051,7 @@ class TestW4a16Floor:
         )
         cmd = popen.call_args[0][0]
         assert cmd[cmd.index("--model") + 1] == W4A16_LOCAL
-        assert _launched_share(popen) == "0.27"
+        assert _launched_share(popen) == "0.26"
         assert cmd[-2:] == ["--max-num-seqs", "64"]
         server._process = None
 
@@ -1038,7 +1059,7 @@ class TestW4a16Floor:
         from bibr.local import vllm_llm
 
         monkeypatch.setattr(vllm_share, "_SETTLE_INTERVAL_S", 0.0)
-        monkeypatch.setattr("bibr.ocr.registry.managed_gpu_memory", lambda: _hog(12.0, 3.6))
+        monkeypatch.setattr("bibr.ocr.registry.managed_gpu_memory", lambda: _hog(12.0, 3.85))
         with (
             patch("importlib.util.find_spec", return_value=object()),
             patch.object(vllm_llm.subprocess, "Popen") as popen,

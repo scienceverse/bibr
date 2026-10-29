@@ -1,5 +1,6 @@
 """Registry invariants + hardware detection for local LLM onboarding."""
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -117,9 +118,11 @@ def test_vllm_variants_have_a_measured_budget_floor_below_their_tier(variant):
 def test_budget_floors_and_tiers():
     by_id = {v.hf_id: v for v in _vllm_variants()}
     floors = {h: (v.min_budget_gb, v.min_vram_gb) for h, v in by_id.items()}
+    # The 4B's: cold vLLM 0.32.0 probes at 64 sequences (on an RTX 3090); the 2B's
+    # from vLLM 0.31.0 at 128.
     assert floors == {
-        "scienceverse/bibr-extract-qwen35-4b": (12.25, 20),
-        "scienceverse/bibr-extract-qwen35-4b-W4A16": (6.25, 10),
+        "scienceverse/bibr-extract-qwen35-4b": (11.0, 20),
+        "scienceverse/bibr-extract-qwen35-4b-W4A16": (6.0, 10),
         "scienceverse/bibr-extract-qwen35-2b": (6.25, 12),
     }
 
@@ -166,6 +169,63 @@ def test_runtimes_without_a_revision_option_name_the_files_bibr_downloads():
     assert pinned_download_variant("org/custom:Q4") is None
 
 
+def test_speculative_configs_and_their_floors():
+    by_id = {v.hf_id: v for v in _vllm_variants()}
+    # Configs are looked up by method, so their order does not matter, but a
+    # method listed twice would hide the second config.
+    for variant in by_id.values():
+        methods = [c.method for c in variant.speculative]
+        assert len(set(methods)) == len(methods), variant.hf_id
+    configs = {
+        h: {(c.method, c.num_speculative_tokens, c.min_budget_gb) for c in v.speculative}
+        for h, v in by_id.items()
+    }
+    assert configs == {
+        "scienceverse/bibr-extract-qwen35-4b": {("mtp", 3, 12.0), ("dflash", 7, 13.5)},
+        # DFlash with the W4A16 build was floor-probed only, never scored.
+        "scienceverse/bibr-extract-qwen35-4b-W4A16": {("mtp", 3, 7.25)},
+        # The 2B was not measured with either.
+        "scienceverse/bibr-extract-qwen35-2b": set(),
+    }
+    for variant in by_id.values():
+        for config in variant.speculative:
+            assert config.min_budget_gb > variant.min_budget_gb
+            assert config.min_budget_gb < variant.min_vram_gb
+
+
+def test_speculative_server_args():
+    four_b = get_model("bibr-extract-4b").variants[0]
+    mtp = four_b.speculative_config("mtp")
+    assert mtp is not None
+    assert mtp.server_args() == (
+        "--speculative-config",
+        '{"method":"mtp","num_speculative_tokens":3}',
+        "--no-async-scheduling",
+    )
+    dflash = four_b.speculative_config("dflash")
+    assert dflash is not None
+    flag, config, sync = dflash.server_args()
+    assert (flag, sync) == ("--speculative-config", "--no-async-scheduling")
+    assert json.loads(config) == {
+        "method": "dflash",
+        "model": "z-lab/Qwen3.5-4B-DFlash",
+        # Pinned to the drafter revision that was measured, not a branch.
+        "revision": "9a1996ccf887b79ab3af4fcbf8c1d1f4b5658bcf",
+        "num_speculative_tokens": 7,
+    }
+    assert four_b.speculative_config("eagle") is None
+    w4a16 = get_model("bibr-extract-4b").variants[1]
+    assert w4a16.speculative_config("dflash") is None
+
+
+def test_vllm_registry_variant_finds_only_vllm_builds():
+    from bibr.local.llm_models import vllm_registry_variant
+
+    assert vllm_registry_variant(_4B) is get_model("bibr-extract-4b").variants[0]
+    assert vllm_registry_variant(_4B_Q8) is None
+    assert vllm_registry_variant("/models/local-copy") is None
+
+
 def test_w4a16_build_is_listed_at_its_published_revision():
     variant = get_model("bibr-extract-4b").variants[1]
     assert variant.hf_id == "scienceverse/bibr-extract-qwen35-4b-W4A16"
@@ -174,6 +234,23 @@ def test_w4a16_build_is_listed_at_its_published_revision():
     args = registry_server_args(variant.hf_id)
     assert args[:2] == ("--revision", "a32f20485181574d849cfb32f8eac1f266c4143d")
     assert args[-2:] == ("--max-num-seqs", "64")
+
+
+def test_both_4b_vllm_builds_run_64_sequences_and_the_2b_128():
+    """The 4B's floors were measured at 64 sequences on vLLM 0.32; the 2B's at 128 on 0.31."""
+    for hf_id, seqs in (
+        ("scienceverse/bibr-extract-qwen35-4b", "64"),
+        ("scienceverse/bibr-extract-qwen35-4b-W4A16", "64"),
+        ("scienceverse/bibr-extract-qwen35-2b", "128"),
+    ):
+        args = registry_server_args(hf_id)
+        assert args[-2:] == ("--max-num-seqs", seqs)
+        assert args.count("--max-num-seqs") == 1
+    # Same flags apart from the revision.
+    assert (
+        registry_server_args("scienceverse/bibr-extract-qwen35-4b")[2:]
+        == registry_server_args("scienceverse/bibr-extract-qwen35-4b-W4A16")[2:]
+    )
 
 
 class TestCardSizeTolerance:

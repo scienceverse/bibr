@@ -154,15 +154,14 @@ def _registry_floor_gb(model: str) -> float | None:
     The variant's ``min_budget_gb``, or its ``min_vram_gb`` card size when it
     has none (the floor before budget floors were measured).
     """
-    from bibr.local.llm_models import REGISTRY
+    from bibr.local.llm_models import vllm_registry_variant
 
-    for entry in REGISTRY:
-        for variant in entry.variants:
-            if variant.platform == "cuda" and variant.runtime == "vllm" and variant.hf_id == model:
-                if variant.min_budget_gb is not None:
-                    return float(variant.min_budget_gb)
-                return float(variant.min_vram_gb)
-    return None
+    variant = vllm_registry_variant(model)
+    if variant is None:
+        return None
+    if variant.min_budget_gb is not None:
+        return float(variant.min_budget_gb)
+    return float(variant.min_vram_gb)
 
 
 # Models whose lower LLM_LOCAL_MIN_VRAM_GB was already reported as ignored: once
@@ -177,15 +176,24 @@ def managed_llm_floor_gb(model: str, settings: GlobalSettings | None = None) -> 
     (``LocalLLMVariant.min_budget_gb``): the weights, vLLM's profiling
     activations with an empty compile cache, and the KV cache the server
     needs to start (one Mamba block per sequence for the hybrid Qwen3.5
-    students, and ``--max-model-len`` tokens). ``LLM_LOCAL_MIN_VRAM_GB``
-    (*settings*) sets the floor of a model the registry does not list, such
-    as a local path, and can raise a listed model's floor but not lower it:
-    a lower value is ignored with a warning, so a value left over from a
-    local build (6.25 for the W4A16 build) never sizes the bf16 4B's starts
-    below what it needs. This matches ``LLM_LOCAL_MEM_FRACTION``, the way to
-    choose a share yourself.
+    students, and ``--max-model-len`` tokens). When ``LLM_VLLM_SPEC_DECODE``
+    names a speculative config the registry lists for the model, that
+    config's floor instead (``bibr.local.vllm_speculative``); the automatic
+    choice never raises it. ``LLM_LOCAL_MIN_VRAM_GB`` (*settings*) sets the
+    floor of a model the registry does not list, such as a local path, and
+    can raise a listed model's floor but not lower it: a lower value is
+    ignored with a warning, so a value left over from a local build (6.0 for
+    the W4A16 build) never sizes the bf16 4B's starts below what it needs.
+    This matches ``LLM_LOCAL_MEM_FRACTION``, the way to choose a share
+    yourself.
     """
     floor = _registry_floor_gb(model)
+    if settings is not None and floor is not None:
+        from bibr.local.vllm_speculative import explicit_config
+
+        speculative = explicit_config(settings, model)
+        if speculative is not None:
+            floor = max(floor, float(speculative.min_budget_gb))
     setting = settings.llm.local_min_vram_gb if settings is not None else None
     if setting is None:
         return floor
@@ -310,7 +318,7 @@ def size_managed_llm_share(
     if target > 0 and (floor is None or target >= floor):
         # Round down so the reserve and headroom stay free. Rounding down can
         # land just under the floor (on an RTX 3090, 12.008 GiB gives 0.50, or
-        # 11.78 GiB, below the 4B's 12): such a start takes the floor path.
+        # 11.78 GiB, below a 12 GiB floor): such a start takes the floor path.
         share = math.floor(round(target / total * 100, 6)) / 100
         if share > 0 and (floor is None or share * total >= floor):
             return LlmShare(share=share, reason="free", budget_gb=share * total, **details)

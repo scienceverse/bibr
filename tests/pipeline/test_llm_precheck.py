@@ -29,11 +29,13 @@ from bibr.pipeline.resources import ResourceManager
 STUDENT_4B = "scienceverse/bibr-extract-qwen35-4b"
 W4A16_LOCAL = "/models/bibr-extract-qwen35-4b-W4A16"
 CUDA_3090 = 23.56
-# The 16 GB card's readings beside the 8 GiB hog: before chunk 1's LLM start (fits at
-# the 4B's 12.25 GiB floor), before chunk 2's (refused: 14.25 GiB needed), and
-# a card whose other user has gone (memory came back).
+# The 16 GB card's reading beside the 8 GiB hog before chunk 1's LLM start (fits at
+# the 4B's floor); a later chunk's, 1.07 GiB below that card's chunk 2 reading
+# (13.57 GiB free, refused then at the 14.25 GiB vLLM 0.31 needed at 128
+# sequences), so the 12.75 GiB needed on vLLM 0.32 at 64 does not fit either;
+# and a card whose other user has gone (memory came back).
 FITS = GpuMemory(total_gb=CUDA_3090, free_gb=15.04, own_gb=0.50)
-REFUSED = GpuMemory(total_gb=CUDA_3090, free_gb=13.57, own_gb=1.98)
+REFUSED = GpuMemory(total_gb=CUDA_3090, free_gb=12.50, own_gb=1.98)
 CAME_BACK = GpuMemory(total_gb=CUDA_3090, free_gb=21.58, own_gb=1.98)
 
 
@@ -126,8 +128,8 @@ class TestLlmStartRefusal:
         refusal = await _rm().llm_start_refusal("vllm")
         assert isinstance(refusal, ManagedLlmVramError)
         assert refusal.__traceback__ is not None  # raised, so the log shows where
-        assert "13.57 of 23.56 GiB free (bibr itself holds 1.98 GiB)" in str(refusal)
-        assert "needs 14.25 GiB" in str(refusal)
+        assert "12.50 of 23.56 GiB free (bibr itself holds 1.98 GiB)" in str(refusal)
+        assert "needs 12.75 GiB" in str(refusal)
 
     async def test_the_message_is_the_starts_own(self, card):
         card["reading"] = REFUSED
@@ -144,7 +146,7 @@ class TestLlmStartRefusal:
         assert await _rm().llm_start_refusal("vllm") is None
 
     async def test_floor_setting_is_used(self, card):
-        # A local W4A16 copy's 7 GiB floor fits where the bf16 4B's 12.25 does not.
+        # A local W4A16 copy's 7 GiB floor fits where the bf16 4B's 11.0 does not.
         card["reading"] = REFUSED
         assert await _rm(settings=_local_w4a16_settings(7.0)).llm_start_refusal("vllm") is None
 
@@ -156,7 +158,7 @@ class TestLlmStartRefusal:
         settings.llm.local_min_vram_gb = 7.0
         refusal = await _rm(settings=settings).llm_start_refusal("vllm")
         assert isinstance(refusal, ManagedLlmVramError)
-        assert "the model's 12.25 GiB floor" in str(refusal)
+        assert "the model's 11.00 GiB floor" in str(refusal)
 
     @pytest.mark.parametrize("backend", ["cloud", "llama-cpp", "vllm-mlx", "llmster"])
     async def test_only_the_managed_vllm_server_is_checked(self, card, backend):
@@ -342,9 +344,9 @@ class TestAgreesWithTheStart:
                 False,
                 id="floorless-no-swap-fits",
             ),
-            # A planned share of 0.40 (9.42 GiB) caps the 4B's 12.25 GiB floor:
-            # with 9.5 GiB left after the reserve and bibr's room, the start
-            # takes 0.40, where the 12.25 GiB floor would refuse it.
+            # A planned share of 0.40 (9.42 GiB) caps the 4B's 11.0 GiB floor:
+            # with 9.75 GiB left after the reserve and bibr's room, the start
+            # takes 0.40, where the 11.0 GiB floor would refuse it.
             pytest.param(
                 _settings,
                 {"managed_vllm_fraction": 0.40},
@@ -359,34 +361,36 @@ class TestAgreesWithTheStart:
                 True,
                 id="cap-below-floor-refused",
             ),
-            # PaddleOCR-VL at an OCR URL holds about 5.4 GiB of the 3090.
-            # The bf16 4B would stay up beside it and cannot leave bibr 5.5 GiB
-            # beside its floor; the swap squeezes the same reading to 0.52.
+            # PaddleOCR-VL at an OCR URL holds about 5.4 GiB of the 3090 and
+            # a desktop 0.5 GiB. The bf16 4B would stay up beside it and
+            # cannot leave bibr 5.5 GiB beside its floor (17.25 GiB needed);
+            # the swap squeezes the same reading to 0.47. Without the desktop
+            # (17.66 free) it starts.
             pytest.param(
                 _settings,
                 {"ocr_backend": "paddle-http", "ocr_url": "http://localhost:8897"},
-                GpuMemory(total_gb=CUDA_3090, free_gb=17.66, own_gb=0.50),
+                GpuMemory(total_gb=CUDA_3090, free_gb=17.16, own_gb=0.50),
                 True,
                 id="ocr-url-refused",
             ),
             pytest.param(
                 _settings,
                 {"ocr_backend": "gemini"},
-                GpuMemory(total_gb=CUDA_3090, free_gb=17.66, own_gb=0.50),
+                GpuMemory(total_gb=CUDA_3090, free_gb=17.16, own_gb=0.50),
                 True,
                 id="cloud-ocr-refused",
             ),
             pytest.param(
                 _settings,
                 {},
-                GpuMemory(total_gb=CUDA_3090, free_gb=17.66, own_gb=0.50),
+                GpuMemory(total_gb=CUDA_3090, free_gb=17.16, own_gb=0.50),
                 False,
                 id="swap-squeezed",
             ),
             pytest.param(
                 _settings,
                 {"ocr_backend": "paddle-http", "ocr_url": "http://localhost:8897"},
-                GpuMemory(total_gb=CUDA_3090, free_gb=18.75, own_gb=0.50),
+                GpuMemory(total_gb=CUDA_3090, free_gb=17.66, own_gb=0.50),
                 False,
                 id="ocr-url-fits",
             ),
@@ -408,7 +412,7 @@ class TestAgreesWithTheStart:
         )
         assert vllm_share.managed_llm_floor_gb(W4A16_LOCAL, _local_w4a16_settings()) is None
         # 0.40 + PaddleOCR-VL's 0.21 + the 0.25 ONNX reserve fit a 24 GB card:
-        # no swap, and the cap is below the 4B's 12.25 GiB floor.
+        # no swap, and the cap is below the 4B's 11.0 GiB floor.
         capped = _rm(managed_vllm_fraction=0.40)
         assert capped._llm_swaps_with_ocr() is False
         floor = vllm_share.managed_llm_floor_gb(STUDENT_4B)
@@ -573,10 +577,10 @@ async def test_16gb_chunks_after_a_refusal_skip_ocr_until_memory_comes_back(card
 async def test_a_server_that_would_stay_up_without_room_skips_ocr(card):
     """PaddleOCR-VL at an OCR URL on a 3090 (about 5.4 GiB) and the bf16 4B managed.
 
-    The first chunk's check reads 17.66 GiB free with bibr at 0.50: the LLM
-    would stay up beside the OCR server and cannot leave bibr 5.5 GiB beside
-    its 12.25 GiB floor. The chunk fails with the start's typed outcome
-    before any OCR, and vLLM is never launched.
+    The first chunk's check reads 17.16 GiB free with bibr at 0.50 and a
+    0.5 GiB desktop: the LLM would stay up beside the OCR server and cannot
+    leave bibr 5.5 GiB beside its 11.0 GiB floor. The chunk fails with the
+    start's typed outcome before any OCR, and vLLM is never launched.
     """
     from bibr.api import ChewFailure
     from bibr.batch.runner import _local_outcome
@@ -596,7 +600,7 @@ async def test_a_server_that_would_stay_up_without_room_skips_ocr(card):
         async def run(self, ctx):
             ocred.extend(fs.path.name for fs in ctx.alive())
 
-    card["reading"] = GpuMemory(total_gb=CUDA_3090, free_gb=17.66, own_gb=0.50)
+    card["reading"] = GpuMemory(total_gb=CUDA_3090, free_gb=17.16, own_gb=0.50)
     rm = _rm(memory_mode="balanced", ocr_backend="paddle-http", ocr_url="http://localhost:8897")
     pipeline = Pipeline(
         stages=[LlmServerPrecheckStage(), _RenderOcr(), LlmServerStage()],
@@ -620,7 +624,7 @@ async def test_a_server_that_would_stay_up_without_room_skips_ocr(card):
             "llm_server",
         )
         assert "since the server stays up for the run" in o.error
-        assert "needs 18.75 GiB" in o.error
+        assert "needs 17.25 GiB" in o.error
 
 
 class _GpuModel:
@@ -669,9 +673,9 @@ class TestReleaseBeforeRefusing:
     """Balanced mode releases bibr's own GPU models (and a resident OCR server)
     before it refuses a managed vLLM LLM start, then reads the card again.
 
-    REFUSED (13.57 GiB free, bibr holding 1.98) is short of the 4B's 14.25;
-    releasing 1.5 GiB of bibr's models brings it to 15.07 with 0.48 held,
-    which fits as FITS does.
+    REFUSED (12.50 GiB free, bibr holding 1.98) is short of the 4B's 12.75;
+    releasing 1.5 GiB of bibr's models brings it to 14.00 with 0.48 held,
+    which fits at the floor.
     """
 
     async def test_the_precheck_releases_and_goes_ahead(self, card, ner, caplog, monkeypatch):
@@ -695,7 +699,7 @@ class TestReleaseBeforeRefusing:
         [record] = _released(caplog)
         assert record.levelno == logging.WARNING
         assert "layout, sentence segmenter, NER reference parser" in record.message
-        assert "needs 14.25 GiB" in record.message  # the refusal it avoided
+        assert "needs 12.75 GiB" in record.message  # the refusal it avoided
 
     async def test_still_short_after_the_release_is_refused(self, card, ner):
         card["reading"] = REFUSED
@@ -703,7 +707,7 @@ class TestReleaseBeforeRefusing:
         rm._layout = _GpuModel(card, 0.1)
         refusal = await rm.llm_start_refusal("vllm")
         assert isinstance(refusal, ManagedLlmVramError)
-        assert "13.67 of 23.56 GiB free" in str(refusal)  # read again after the release
+        assert "12.60 of 23.56 GiB free" in str(refusal)  # read again after the release
         assert rm._layout.unloads == 1
         assert rm.llm_start_releases == 1
 
@@ -764,7 +768,7 @@ class TestReleaseBeforeRefusing:
         rm = _rm(memory_mode="balanced")
         rm._layout = _GpuModel(card, 0.1)
         started = await _start_refusal(rm)
-        assert started is not None and "13.67 of 23.56 GiB free" in started
+        assert started is not None and "12.60 of 23.56 GiB free" in started
         assert rm.llm_start_releases == 1
 
     async def test_a_reused_server_releases_nothing(self, card, ner, port):

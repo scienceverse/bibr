@@ -128,7 +128,11 @@ class VllmLlmServer:
         may be squeezed to the model's floor; otherwise (LLM-only, an OCR
         server bibr does not manage, or both servers planned side by side) it
         stays up for the run, and a start that cannot leave bibr's sessions
-        their whole reserve beside the floor is refused.
+        their whole reserve beside the floor is refused. It also decides the
+        automatic speculative decoding choice, which leaves MTP off for a
+        server that restarts every chunk (``bibr.local.vllm_speculative``,
+        which also needs the start's budget: the launched share of CUDA's
+        total).
         """
         self._stop_event = stop_event
         self._settings = settings if settings is not None else snapshot_settings()
@@ -146,8 +150,11 @@ class VllmLlmServer:
             # Another pipeline in this process may have started it.
             self.api_key = own_server_key(self.base_url)
             return
+        total_gb: float | None = None
         if share_from_free_memory:
-            mem_fraction = self._share_from_free_memory(mem_fraction, swaps_with_ocr=swaps_with_ocr)
+            mem_fraction, total_gb = self._share_from_free_memory(
+                mem_fraction, swaps_with_ocr=swaps_with_ocr
+            )
 
         cmd = self._resolve_launch_cmd(self._model)
         cmd.extend(
@@ -166,12 +173,18 @@ class VllmLlmServer:
                 '{"backend":"xgrammar"}',
             ]
         )
-        # Registry-supplied args for this model (e.g. NuExtract3 MTP config),
+        # Registry-supplied args for this model, then its speculative config,
         # before user extra args so user flags win on repeated keys.
         from bibr.local.llm_models import registry_server_args
 
+        user_args = shlex.split(self._settings.llm.vllm_extra_args or "")
         cmd.extend(registry_server_args(self._model))
-        cmd.extend(shlex.split(self._settings.llm.vllm_extra_args or ""))
+        cmd.extend(
+            self._spec_decode_args(
+                mem_fraction, user_args, total_gb=total_gb, swaps_with_ocr=swaps_with_ocr
+            )
+        )
+        cmd.extend(user_args)
 
         # stderr to a file, never PIPE — an unread pipe deadlocks the server
         # once the OS buffer fills (same failure mode as vllm-mlx/sglang).
@@ -205,8 +218,52 @@ class VllmLlmServer:
             raise
         register_server_key(self.base_url, self.api_key)
 
-    def _share_from_free_memory(self, cap: float, *, swaps_with_ocr: bool) -> float:
-        """The share for this start, sized from the VRAM free now (at most *cap*)."""
+    def _spec_decode_args(
+        self,
+        mem_fraction: float,
+        user_args: list[str],
+        *,
+        total_gb: float | None,
+        swaps_with_ocr: bool,
+    ) -> tuple[str, ...]:
+        """The speculative decoding flags for this start (``bibr.local.vllm_speculative``).
+
+        The budget is the launched share (a ``--gpu-memory-utilization`` in
+        the user's extra args wins) of CUDA's total: *total_gb* from the
+        reading the share was sized from, else read now.
+        """
+        from bibr.local import vllm_speculative
+        from bibr.local.vllm_share import _last_flag_value
+
+        share: float | None = mem_fraction
+        raw = _last_flag_value(user_args, "--gpu-memory-utilization")
+        if raw is not None:
+            try:
+                share = float(raw)
+            except ValueError:
+                share = None
+        budget_gb = None
+        if share is not None and share > 0 and self._settings.llm.vllm_spec_decode == "auto":
+            if total_gb is None:
+                from bibr.ocr import registry
+
+                reading = registry.managed_gpu_memory()
+                total_gb = reading.total_gb if reading is not None else None
+            if total_gb is not None and total_gb > 0:
+                budget_gb = share * total_gb
+        choice = vllm_speculative.choose_spec_decode(
+            self._settings, self._model, swaps_with_ocr=swaps_with_ocr, budget_gb=budget_gb
+        )
+        logger.info("Managed vLLM LLM speculative decoding: %s", choice.describe())
+        return choice.server_args()
+
+    def _share_from_free_memory(
+        self, cap: float, *, swaps_with_ocr: bool
+    ) -> tuple[float, float | None]:
+        """The share for this start, sized from the VRAM free now (at most *cap*).
+
+        Returned with CUDA's total from the same reading (None without one).
+        """
         from bibr.local import vllm_share
         from bibr.ocr import registry
 
@@ -225,7 +282,7 @@ class VllmLlmServer:
             )
         else:
             logger.info("Managed vLLM LLM share %s", share.describe())
-        return share.share
+        return share.share, share.total_gb
 
     @staticmethod
     def _resolve_launch_cmd(model: str) -> list[str]:
@@ -251,14 +308,14 @@ class VllmLlmServer:
         if shutil.which("uv") is not None:
             logger.warning(
                 "vLLM is not installed in this environment; launching the local LLM through "
-                "an isolated `uv tool run --from vllm==0.31.0` environment instead. The first "
+                "an isolated `uv tool run --from vllm==0.32.0` environment instead. The first "
                 "run downloads several GB and can take minutes before the model loads. "
                 "Install it once with `uv sync --extra vllm` to skip this bootstrap."
             )
             cmd = ["uv", "tool", "run"]
             if sys.version_info >= (3, 14):
-                # vllm==0.31.0 ships no 3.14 wheels (the `vllm` extra is also
-                # marked python_version < 3.14), so ask uv for a managed 3.13.
+                # The `vllm` extra is marked python_version < 3.14, so ask uv
+                # for a managed 3.13.
                 cmd += ["--python", "3.13"]
             # `vllm serve` takes the model as a positional argument (not --model).
             # Match the audited `vllm` extra exactly. This fallback executes a
@@ -266,7 +323,7 @@ class VllmLlmServer:
             return [
                 *cmd,
                 "--from",
-                "vllm==0.31.0",
+                "vllm==0.32.0",
                 "--with",
                 "openai>=2.54.0,<3",
                 "vllm",

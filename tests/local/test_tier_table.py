@@ -1,10 +1,11 @@
 """The CUDA tier table: what ``bibr setup`` writes equals what the runtime picks.
 
 For each card row, setup's recommended plan (``LLM_BACKEND``, ``LLM_LOCAL_MODEL``,
-``PIPELINE_MEMORY_MODE``, and the OCR its ``OCR_BACKEND`` resolves to) must equal
-the runtime's own resolution with nothing set but ``--llm local``: the
-``local`` alias, the default model, the auto memory mode and the automatic
-``paddle`` OCR chain. The rows are the docs' tier table
+``PIPELINE_MEMORY_MODE``, the OCR its ``OCR_BACKEND`` resolves to, and the
+managed vLLM server's speculative decoding) must equal the runtime's own
+resolution with nothing set but ``--llm local``: the ``local`` alias, the
+default model, the auto memory mode, the automatic ``paddle`` OCR chain and
+``LLM_VLLM_SPEC_DECODE=auto``. The rows are the docs' tier table
 (docs/guides/extraction-models.md).
 """
 
@@ -12,8 +13,10 @@ import sys
 
 import pytest
 
+from bibr.config import GlobalSettings
 from bibr.local.llm_models import default_local_model
 from bibr.local.pipeline import _auto_memory_mode, resolve_llm_backend
+from bibr.local.vllm_speculative import choose_spec_decode
 from bibr.ocr import registry
 from bibr.setup_wizard import _build_recommended_setup
 
@@ -22,34 +25,43 @@ _W4A16 = "scienceverse/bibr-extract-qwen35-4b-W4A16"
 _Q8 = "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
 _Q4 = "scienceverse/bibr-extract-qwen35-4b-GGUF:Q4_K_M"
 
+_V = "vllm"
+_L = "llama-cpp"
+_P = "paddle-vllm"
+_G = "glm-llama"
+
 #: (card, nvidia-smi memory.total MiB, compute capability) -> (LLM backend,
-#: model, memory mode, OCR runtime). Rows marked "ran" finished a batch with
+#: model, memory mode, OCR runtime, speculative decoding of the managed vLLM
+#: LLM server; None for llama.cpp). Rows marked "ran" finished a batch with
 #: this default on an RTX 3090 cut to that card's memory beside a 0.5 GiB
 #: desktop, with no refused start and no failed paper (2026-10-24..26); the
 #: others follow the same size rule. Turing and Pascal rows are the
-#: compute-capability routing rule, not measured cards.
+#: compute-capability routing rule, not measured cards. Every vLLM row's LLM
+#: server takes turns with PaddleOCR-VL, so ``auto`` leaves speculative
+#: decoding off: with MTP, batches on 12 and 16 GB cards ran 5% and 9%
+#: slower (on vLLM 0.32).
 TIER_TABLE = [
-    (("RTX 5090", 32607, 12.0), ("vllm", _4B, "balanced", "paddle-vllm")),
-    (("RTX 3090", 24576, 8.6), ("vllm", _4B, "balanced", "paddle-vllm")),  # ran: 100 papers
-    (("RTX 4000 Ada", 20475, 8.9), ("vllm", _4B, "balanced", "paddle-vllm")),  # ran: 48
+    (("RTX 5090", 32607, 12.0), (_V, _4B, "balanced", _P, "none")),
+    (("RTX 3090", 24576, 8.6), (_V, _4B, "balanced", _P, "none")),  # ran: 100 papers
+    (("RTX 4000 Ada", 20475, 8.9), (_V, _4B, "balanced", _P, "none")),  # ran: 48
     # 16 GB ran at 16,380 MiB on 2026-10-26, on this change's code, with at
     # least 4.74 GiB to spare at every LLM start.
-    (("RTX 4080", 16376, 8.9), ("vllm", _W4A16, "balanced", "paddle-vllm")),  # ran: 48
-    (("RTX 3060 12 GB", 12288, 8.6), ("vllm", _W4A16, "balanced", "paddle-vllm")),
-    (("RTX 5070", 12227, 12.0), ("vllm", _W4A16, "balanced", "paddle-vllm")),  # ran: 100
-    (("RTX 3080 10 GB", 10240, 8.6), ("vllm", _W4A16, "aggressive", "paddle-vllm")),  # ran: 48
-    (("RTX 3070", 8192, 8.6), ("llama-cpp", _Q8, "aggressive", "glm-llama")),
-    (("RTX 4060", 8188, 8.9), ("llama-cpp", _Q8, "aggressive", "glm-llama")),  # ran: 100
+    (("RTX 4080", 16376, 8.9), (_V, _W4A16, "balanced", _P, "none")),  # ran: 48
+    (("RTX 3060 12 GB", 12288, 8.6), (_V, _W4A16, "balanced", _P, "none")),
+    (("RTX 5070", 12227, 12.0), (_V, _W4A16, "balanced", _P, "none")),  # ran: 100
+    (("RTX 3080 10 GB", 10240, 8.6), (_V, _W4A16, "aggressive", _P, "none")),  # ran: 48
+    (("RTX 3070", 8192, 8.6), (_L, _Q8, "aggressive", _G, None)),
+    (("RTX 4060", 8188, 8.9), (_L, _Q8, "aggressive", _G, None)),  # ran: 100
     # 6 GB also ran beside a 1.0 GiB desktop: 48 of 48, but 2 MiB free at the
     # minimum and 107 sentence-segmenter CPU fallbacks. No run beside a desktop
     # above 1 GiB.
-    (("RTX 3050 6 GB", 6144, 8.6), ("llama-cpp", _Q4, "aggressive", "glm-llama")),  # ran: 48
+    (("RTX 3050 6 GB", 6144, 8.6), (_L, _Q4, "aggressive", _G, None)),  # ran: 48
     # The Q4_K_M floor (its min_vram_gb, 5) follows the size rule: no 5 GB card ran.
-    (("5 GB card", 5120, 8.6), ("llama-cpp", _Q4, "aggressive", "glm-llama")),
-    (("TITAN RTX", 24576, 7.5), ("llama-cpp", _Q8, "balanced", "glm-llama")),
-    (("RTX 2080 Ti", 11264, 7.5), ("llama-cpp", _Q8, "aggressive", "glm-llama")),
-    (("GTX 1080 Ti", 11264, 6.1), ("llama-cpp", _Q8, "aggressive", "glm-llama")),
-    (("RTX 2060", 6144, 7.5), ("llama-cpp", _Q4, "aggressive", "glm-llama")),
+    (("5 GB card", 5120, 8.6), (_L, _Q4, "aggressive", _G, None)),
+    (("TITAN RTX", 24576, 7.5), (_L, _Q8, "balanced", _G, None)),
+    (("RTX 2080 Ti", 11264, 7.5), (_L, _Q8, "aggressive", _G, None)),
+    (("GTX 1080 Ti", 11264, 6.1), (_L, _Q8, "aggressive", _G, None)),
+    (("RTX 2060", 6144, 7.5), (_L, _Q4, "aggressive", _G, None)),
 ]
 
 
@@ -68,17 +80,38 @@ def card(monkeypatch):
     return pin
 
 
-def _runtime(gb: float) -> tuple[str, str, str, str]:
+def _spec_decode(backend: str, model: str, ocr: str, gb: float, mode: str) -> str | None:
+    """The speculative decoding choice of the plan's managed vLLM LLM starts.
+
+    Its server swaps with a managed PaddleOCR-VL server unless both shares
+    fit (``ResourceManager._llm_swaps_with_ocr``); the budget is the
+    configured 0.85 of the card, the most a start takes.
+    """
+    if backend != "vllm":
+        return None
+    swaps = ocr == "paddle-vllm" and not registry.managed_vllm_shares_fit(
+        0.85, registry.paddle_vllm_gpu_memory_utilization(vram_gb=gb), vram_gb=gb
+    )
+    settings = GlobalSettings()
+    settings.llm.vllm_spec_decode = mode
+    choice = choose_spec_decode(settings, model, swaps_with_ocr=swaps, budget_gb=0.85 * gb)
+    return "none" if choice.config is None else choice.config.method
+
+
+def _runtime(gb: float) -> tuple[str, str, str, str, str | None]:
     backend = resolve_llm_backend("local")
+    model = default_local_model(backend)
+    ocr = registry.automatic_backend_names(llm_backend=backend)[0]
     return (
         backend,
-        default_local_model(backend),
+        model,
         _auto_memory_mode("cuda", gb, 32.0, llm_backend=backend),
-        registry.automatic_backend_names(llm_backend=backend)[0],
+        ocr,
+        _spec_decode(backend, model, ocr, gb, GlobalSettings().llm.vllm_spec_decode),
     )
 
 
-def _setup(gb: float) -> tuple[str, str, str, str]:
+def _setup(gb: float) -> tuple[str, str, str, str, str | None]:
     env = _build_recommended_setup(
         platform_key="cuda",
         accelerator_memory_gb=gb,
@@ -89,7 +122,16 @@ def _setup(gb: float) -> tuple[str, str, str, str]:
     ocr = env["OCR_BACKEND"]
     if ocr == "paddle":
         ocr = registry.automatic_backend_names(llm_backend=env["LLM_BACKEND"])[0]
-    return env["LLM_BACKEND"], env["LLM_LOCAL_MODEL"], env["PIPELINE_MEMORY_MODE"], ocr
+    # Setup writes no speculative decoding setting: the runtime's default applies.
+    assert "LLM_VLLM_SPEC_DECODE" not in env
+    backend, model = env["LLM_BACKEND"], env["LLM_LOCAL_MODEL"]
+    return (
+        backend,
+        model,
+        env["PIPELINE_MEMORY_MODE"],
+        ocr,
+        _spec_decode(backend, model, ocr, gb, "auto"),
+    )
 
 
 @pytest.mark.parametrize(("row", "expected"), TIER_TABLE, ids=[row[0][0] for row in TIER_TABLE])

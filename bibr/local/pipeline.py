@@ -151,8 +151,9 @@ def resolve_llm_backend(raw: str, settings: GlobalSettings | None = None) -> str
 #: registry's ``CARD_SIZE_TOLERANCE_GB``) run the aggressive memory mode when
 #: bibr manages the LLM server on the same card (``GPU_LLM_SERVER_BACKENDS``).
 #: There the managed vLLM LLM server starts every chunk with only about 1 GiB
-#: to spare (the 4B's W4A16 build needs 8 GiB free; a 10 GB card beside a
-#: desktop has about 9 GiB), and aggressive mode unloads bibr's GPU sessions
+#: to spare (the 4B's W4A16 build needed 8 GiB free on vLLM 0.31, 7.75 on
+#: vLLM 0.32; a 10 GB card beside a desktop has about 9 GiB), and aggressive
+#: mode unloads bibr's GPU sessions
 #: before it starts (0.27 GiB left, against about 2.4 GiB once balanced
 #: mode's have grown). A 12 GB card finished 100 papers in balanced mode
 #: beside a desktop, its last starts finding 8.6 GiB free. Without a local LLM
