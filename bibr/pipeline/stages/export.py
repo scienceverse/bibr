@@ -144,6 +144,13 @@ def _build_extraction(ctx: PipelineContext, paper, fs=None) -> dict:
             "ref_parse": parse_strategy,
             "crossref_enrich": ctx.config.enrichment_enabled(ctx.settings),
             "consolidate": ctx.config.consolidate or ctx.settings.crossref.consolidate,
+            # ``is True``: a stubbed settings object records False, not a mock.
+            "native_text_header_footer": (
+                getattr(ctx.settings.ocr, "native_text_header_footer", False) is True
+            ),
+            "native_text_formula_number": (
+                getattr(ctx.settings.ocr, "native_text_formula_number", False) is True
+            ),
         },
         "timings": timings,
         "usage": build_usage_export(paper.llm_usage_labels or None),

@@ -181,10 +181,25 @@ class RapidMlxServer:
             no_thinking = not multimodal
         prefill_step_size = prefill_step_size or self._settings.rapid_mlx.prefill_step_size
 
+        # Rapid-MLX downloads a repository's ``main``: a pinned registry build
+        # is downloaded at its commit into the cache the server would use and
+        # served from there, still under its Hub id.
+        from bibr.local.hub_pins import fetch_pinned_build
+
+        launch_model = (
+            fetch_pinned_build(
+                model,
+                cache_dir=self._hf_hub_cache(),
+                stop_event=stop_event,
+                server_label="Rapid-MLX",
+            )
+            or model
+        )
+
         cmd = [
             exe,
             "serve",
-            model,
+            launch_model,
             "--served-model-name",
             self._served_model_name,
             "--host",
@@ -273,6 +288,14 @@ class RapidMlxServer:
     @property
     def loaded(self) -> bool:
         return self._reused or (self._process is not None and self._process.poll() is None)
+
+    def _hf_hub_cache(self) -> str | None:
+        """The HF hub cache the server's environment points at, if bibr overrides it."""
+        if self._settings.rapid_mlx.hf_hub_cache:
+            return self._settings.rapid_mlx.hf_hub_cache
+        if self._settings.rapid_mlx.hf_home:
+            return str(Path(self._settings.rapid_mlx.hf_home) / "hub")
+        return None
 
     def _subprocess_env(self) -> dict[str, str]:
         env = os.environ.copy()

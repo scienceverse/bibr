@@ -9,6 +9,8 @@ install (no torch/transformers) classifies section headers locally.
 from __future__ import annotations
 
 import logging
+import threading
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +24,7 @@ from bibr.structure.section_classifier_common import (
     _build_input_text,
     _coerce_header_context,
 )
+from bibr.utils.gpu_oom import split_on_gpu_oom
 from bibr.utils.ml_runtime import ONNX_MODEL, read_onnx_manifest
 from bibr.utils.onnx_tokenizer import encode_batch, load_tokenizer, require_added_token
 
@@ -49,12 +52,15 @@ class OnnxSectionClassifierModel:
         self.max_length = int(self.manifest.get("max_length", 256))
         self.tokenizer = load_tokenizer(self.bundle_dir, self.manifest)
         require_added_token(self.tokenizer, TEMPLATE_SEPARATOR, label="section classifier")
+        self._model_path = self.bundle_dir / self.manifest.get("model_file", ONNX_MODEL)
         self.session, self.device = create_session(
-            self.bundle_dir / self.manifest.get("model_file", ONNX_MODEL),
+            self._model_path,
             device=device,
             model_name="section classifier (ONNX)",
         )
         self._input_names = [i.name for i in self.session.get_inputs()]
+        self._cpu_session = None
+        self._cpu_session_lock = threading.Lock()
 
     @classmethod
     def from_pretrained(
@@ -75,11 +81,50 @@ class OnnxSectionClassifierModel:
         results: list[SectionPrediction] = []
         for start in range(0, len(contexts), _MAX_INFERENCE_BATCH):
             chunk = contexts[start : start + _MAX_INFERENCE_BATCH]
-            results.extend(self._forward_chunk(chunk, max_length))
+            # A GPU out-of-memory failure halves the chunk and finally runs a
+            # single header on the CPU, instead of failing the whole paper's
+            # headers over to the alias/LLM tier. A CPU session's failure is
+            # raised as before.
+            on_gpu = getattr(self, "device", None) == "cuda"
+            results.extend(
+                split_on_gpu_oom(
+                    chunk,
+                    lambda part: self._forward_chunk(part, max_length),
+                    label="Section classifier",
+                    run_on_cpu=(
+                        (
+                            lambda one: self._forward_chunk(
+                                one, max_length, session=self._session_on_cpu()
+                            )
+                        )
+                        if on_gpu
+                        else None
+                    ),
+                    on_gpu=on_gpu,
+                )
+            )
         return results
 
+    def _session_on_cpu(self):
+        """A CPU session on the same graph, opened on first use (GPU OOM last resort).
+
+        Without ORT's CPU arena, as layout's: it runs one heading at a time,
+        and an arena would keep its peak allocation for the rest of the run.
+        """
+        with self._cpu_session_lock:
+            if self._cpu_session is None:
+                from bibr.utils.onnx_providers import create_session
+
+                self._cpu_session, _device = create_session(
+                    self._model_path,
+                    device="cpu",
+                    model_name="section classifier (ONNX, CPU)",
+                    disable_cpu_arena=True,
+                )
+            return self._cpu_session
+
     def _forward_chunk(
-        self, contexts: list[HeaderContext], max_length: int
+        self, contexts: Sequence[HeaderContext], max_length: int, *, session=None
     ) -> list[SectionPrediction]:
         if not contexts:
             return []
@@ -87,7 +132,9 @@ class OnnxSectionClassifierModel:
         batch = encode_batch(self.tokenizer, texts, max_length=max_length)
         feeds = {"input_ids": batch.input_ids, "attention_mask": batch.attention_mask}
         feeds = {k: v for k, v in feeds.items() if k in self._input_names}
-        type_logits, top_logits = self.session.run(["type_logits", "top_level_logits"], feeds)
+        type_logits, top_logits = (session or self.session).run(
+            ["type_logits", "top_level_logits"], feeds
+        )
         type_probs = _softmax(np.asarray(type_logits, dtype=np.float32))
         top_probs = 1.0 / (1.0 + np.exp(-np.asarray(top_logits, dtype=np.float32).reshape(-1)))
         results: list[SectionPrediction] = []

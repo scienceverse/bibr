@@ -223,3 +223,25 @@ async def test_aclose_continues_after_a_teardown_failure():
     pl._resources.close_llm_server.assert_awaited_once()
     pl._resources.shutdown_ocr.assert_awaited_once()
     pl._resources.close_llm_client.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_chunk_itself_never_trims_the_heap(monkeypatch):
+    # Serve requests and single-paper calls run process_chunk directly; only
+    # the batch drivers trim, after the chunk (bibr.utils.heap).
+    from bibr.utils import heap
+
+    trims: list[str] = []
+
+    async def trim():
+        trims.append("trim")
+        return True
+
+    monkeypatch.setattr(heap, "arelease_free_heap", trim)
+    pipeline = _make_pipeline([_NoopStage(), _ExportStage()])
+    monkeypatch.setattr(pipeline.settings.pipeline, "heap_trim", "window")
+
+    await pipeline.process_chunk([FileState(path=Path("a.pdf")), FileState(path=Path("b.pdf"))])
+    await pipeline.process_file("c.pdf")
+
+    assert trims == []

@@ -123,6 +123,14 @@ pipeline flags apply: `--ocr`, `--ocr-url`, `--llm`, `--refs`, `--ref-seg`,
 `--consolidate`, `--no-crossref`, `--no-llm`, `--pages`, `--memory`,
 `--device`, `--figure-images`, `--include-regions`, `--preset`, …
 
+After each chunk the local executor returns the memory the chunk freed to the
+system (`malloc_trim`, Linux with glibc only). Without that, freed page images
+stay in the allocator and a long run keeps every chunk's high-water mark.
+`PIPELINE_HEAP_TRIM` sets when this happens: `chunk` (the default), `window`
+(also between the render windows inside a chunk: a lower footprint with a large
+`--batch-size`, at a speed cost; a 24-paper chunk ran 20-30% slower) or
+`off`.
+
 **Remote** (`--serve-url URL`) submits papers to a
 [`bibr serve`](deployment.md) async job API (`POST /papers/jobs`, poll
 `GET /papers/jobs/{id}`, fetch `…/result`). The bearer token comes from

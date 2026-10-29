@@ -19,11 +19,15 @@ caches (Gemini implicit caching) actually hit. Two layouts exist:
 Non-caching providers join the parts back into one string
 (:func:`prompt_text`) — the flat prompt is byte-equivalent to the parts.
 
-Document-derived data is always embedded behind a caller-supplied UUID
-boundary fence (:func:`fence`) as a prompt-injection guard; callers cap the
-data (``LLM_MAX_INPUT_CHARS`` etc.) before building.
+Document-derived data is always embedded behind a caller-supplied boundary
+fence (:func:`fence`) as a prompt-injection guard; callers cap the data
+(``LLM_MAX_INPUT_CHARS`` etc.) before building and derive the boundary from
+that data with :func:`fence_boundary`.
 """
 
+import hashlib
+import itertools
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
@@ -49,6 +53,50 @@ from bibr.utils.constants import ANCHOR_PROMPT_CHARS
 def fence(boundary: str, data: str) -> str:
     """Wrap document data in the standard injection-guard boundary block."""
     return f"\n--- {boundary} START ---\n" + data + f"\n--- {boundary} END ---"
+
+
+# The shape of the ``uuid4().hex`` boundaries bibr used to mint: 32 lowercase
+# hex characters with the version nibble "4" at index 12 and the variant
+# nibble (8, 9, a or b) at index 16. The extraction students were trained on
+# that shape, and the LLM cache's marker regex (``bibr.clients.llm_cache``)
+# recognises it.
+FENCE_BOUNDARY_CHARS = 32
+
+
+def _boundary_candidate(label: str, counter: int, blocks: tuple[str, ...]) -> str:
+    digest = hashlib.sha256()
+    # Length-prefixed fields, so no rearrangement of adjacent blocks collides.
+    for field in (label, str(counter), *blocks):
+        encoded = field.encode("utf-8", "surrogatepass")
+        digest.update(str(len(encoded)).encode("ascii"))
+        digest.update(b"\x00")
+        digest.update(encoded)
+    # 122 derived bits; the version and variant bits are fixed as in uuid4().
+    return uuid.UUID(bytes=digest.digest()[:16], version=4).hex
+
+
+def fence_boundary(label: str, *blocks: str) -> str:
+    """The fence boundary for one request, derived from what it fences.
+
+    *label* names the call site and *blocks* are every piece of document data
+    the boundary will fence in that request (a prompt that fences several
+    blocks, or a fan-out whose calls share one boundary, passes all of them).
+    The boundary is SHA-256 over both, shaped like ``uuid4().hex``, so the
+    same request sends the same bytes on every run (under a random boundary a
+    model's answer at temperature 0 could change with the draw). A document
+    author still cannot choose text that closes the fence early: that needs
+    the boundary inside the text it is derived from, which is a hash fixed
+    point. A boundary that does occur in a block anyway is re-derived with a
+    counter, so it never appears in the fenced data.
+
+    Pass the data exactly as it is embedded, or text it is a prefix of (a
+    string absent from a text is absent from every prefix of it).
+    """
+    for counter in itertools.count():
+        boundary = _boundary_candidate(label, counter, blocks)
+        if not any(boundary in block for block in blocks):
+            return boundary
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 NuExtractRole = Literal["document", "instructions"]
