@@ -287,7 +287,7 @@ def _move_caps(llm: LlmOptions, server: str, window: int | None) -> None:
             replaced.setdefault(field, current)
             setattr(llm, field, target)
             logger.info(
-                "%s LLM server — llm.%s set to %d for a %d-token context%s",
+                "%s LLM server — llm.%s set to %d for a context window of %d%s",
                 server,
                 field,
                 target,
