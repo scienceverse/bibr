@@ -1215,8 +1215,9 @@ class OcrVisionOptions(_BibrSettings):
     )
     max_tokens: int = Field(
         16384,
-        description="Vision LLM max completion tokens. With anthropic it caps a per-region budget: "
-        "one token per 32 pixels of the region crop, at least 2048.",
+        description="Vision LLM max completion tokens. With anthropic each region asks for one "
+        "token per 32 crop pixels at 200 DPI (scaled with LAYOUT_DPI), at least 2048, never more "
+        "than this.",
     )
     timeout_seconds: int = Field(60, description="Vision LLM request timeout in seconds.")
 

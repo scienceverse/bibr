@@ -551,11 +551,12 @@ def test_ocr_result_schema():
 # ---------------------------------------------------------------------------
 
 
-def _client_for(provider, max_tokens=16384):
+def _client_for(provider, max_tokens=16384, dpi=200):
     from bibr.config import GlobalSettings
 
     settings = GlobalSettings()
     settings.ocr_vision.max_tokens = max_tokens
+    settings.layout.dpi = dpi
     return CloudOcrClient(provider=provider, settings=settings)
 
 
@@ -571,6 +572,18 @@ def test_anthropic_region_budget_follows_crop_area(size, expected):
     from PIL import Image
 
     assert _client_for("anthropic")._max_tokens_for(Image.new("RGB", size)) == expected
+
+
+def test_anthropic_region_budget_scales_with_layout_dpi():
+    from PIL import Image
+
+    crop = Image.new("RGB", (400, 100))  # 40,000 px
+    assert _client_for("anthropic", dpi=200)._max_tokens_for(crop) == 2048  # 1,250: the floor
+    assert _client_for("anthropic", dpi=100)._max_tokens_for(crop) == 5000  # 8 px per token
+
+
+def test_anthropic_region_budget_without_an_image_size_keeps_the_setting():
+    assert _client_for("anthropic")._max_tokens_for(b"\x89PNG") == 16384
 
 
 def test_anthropic_region_budget_never_exceeds_the_setting():
@@ -611,3 +624,20 @@ async def test_recognize_keeps_gemini_on_the_setting(mock_cloud_client, _mock_im
     kwargs = mock_cloud_client._client.create.call_args.kwargs
     assert kwargs["generation_config"]["max_tokens"] == 4096
     assert "max_tokens" not in kwargs
+
+
+async def test_cut_off_answer_logs_its_cap_and_crop(_mock_image_utils, caplog):
+    from instructor.core.exceptions import IncompleteOutputException
+    from PIL import Image
+
+    client = _client_for("anthropic")
+    client._client = AsyncMock()
+    client._client.create = AsyncMock(side_effect=IncompleteOutputException())
+
+    with caplog.at_level("WARNING", logger="bibr.local.ocr_cloud"):
+        text = await client.recognize(Image.new("RGB", (708, 28)), "Text Recognition:")
+
+    assert text == ""
+    assert client._client.create.await_count == 1  # not retried
+    assert "failed after 1 attempt(s) (output cap 2048 tokens, crop (708, 28)): " in caplog.text
+    assert "max_tokens length limit" in caplog.text

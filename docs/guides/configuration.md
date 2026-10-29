@@ -135,17 +135,20 @@ The cloud vision backends all use `OCR_VISION_MODEL`, whose default
 (`gemini-3-flash-preview`) is a Gemini model, so with `--ocr openai` or
 `--ocr anthropic` set it to one of that provider's vision models, such as
 `OCR_VISION_MODEL=claude-haiku-5-5`.
-Each region asks for at most `OCR_VISION_MAX_TOKENS` output tokens (16384 by
-default). With `anthropic`, a region asks for one token per 32 pixels of its
-crop, at least 2048 and at most that setting, so a model that loops on a small
-region stops sooner. Gemini and OpenAI count thinking or reasoning tokens
-against the same limit, so they keep the full setting.
 For example:
 
 ```bash
 bibr chew paper.pdf --ocr paddle-http --ocr-url https://ocr.example.org
 bibr chew paper.pdf --ocr glm-http --ocr-url https://ocr.example.org
 ```
+
+Each cloud vision OCR call asks for at most `OCR_VISION_MAX_TOKENS` output
+tokens (16384 by default). With `anthropic`, a region asks for one token per 32
+pixels of its crop at 200 DPI (fewer pixels per token at a lower `LAYOUT_DPI`),
+at least 2048 and never more than the setting, so a model that loops on a small
+region stops sooner. Gemini and the OpenAI backend keep the full setting:
+Gemini's thinking tokens and an OpenAI-compatible reasoning model's reasoning
+tokens count against the same limit.
 
 Remote OCR requires HTTPS by default. For a trusted private network without
 TLS, explicitly set `OCR_ALLOW_INSECURE_HTTP=true`; loopback HTTP is allowed.
