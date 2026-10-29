@@ -487,6 +487,82 @@ every 12.2 export is still valid input for the 12.x reader.
   GLM normalizer version moves to `glm-canonical-v2`, so OCR cache entries
   written without the complete text are not reused.
 
+- bibr now sizes its prompts to the context window of an Ollama or llama.cpp
+  server it did not start itself. The input cap is sized for cloud models
+  (`LLM_MAX_INPUT_CHARS` 300,000 characters), so on an Ollama server with a
+  16,384-token context a long front matter either failed the paper with HTTP
+  400 "exceeds the available context size" (models run with their GGUF chat
+  template) or came back without its title or authors (Ollama library models,
+  which shorten an over-long prompt and answer anyway). Before the first call,
+  bibr asks an `LLM_BASE_URL` server, or the `ollama` provider's server, what
+  it is and how long its context is: Ollama's `/api/ps` (or the model's
+  `num_ctx`), llama.cpp's `/props`. Ollama and llama.cpp then get the caps the
+  managed llama.cpp server uses (`LLM_MAX_INPUT_CHARS` 24,000,
+  `LLM_REF_SEG_WINDOW_CHARS` 12,000 and `LLM_MAX_TOKENS` 4,096 at 16,384
+  tokens, scaled with the context), and inputs are cut to fit the window.
+  When Ollama does not give its window (the model is not loaded and sets no
+  `num_ctx`), or the `ollama` provider's server cannot be reached, the caps
+  for 16,384 tokens apply. While the server cannot be reached or has not
+  given its window, bibr asks again on a later call: after 30 seconds, then
+  after twice as long each time it still has no answer, up to once every 10
+  minutes. Values you set yourself are kept. A warning says when one of them
+  exceeds the cap for the window; it is logged only when the window is known
+  (reported by the server, set in `LLM_CONTEXT_TOKENS` or named in a
+  rejection), not while the caps for an assumed 16,384 tokens apply.
+- `LLM_CONTEXT_TOKENS` now also sizes those caps: for an Ollama or llama.cpp
+  server, the caps follow the window you set, which wins over the window the
+  server reports. `LLM_MAX_INPUT_CHARS`, `LLM_MAX_TOKENS` and
+  `LLM_REF_SEG_WINDOW_CHARS` set explicitly still win over the caps.
+- An external vLLM server is not sized in advance; it keeps today's
+  behaviour, in which bibr learns its window from a rejected request. bibr
+  asks its `/v1/models` once to tell it apart from Ollama and llama.cpp.
+- llama.cpp's and Ollama's "request (N tokens) exceeds the available context
+  size (M tokens)" is now read like vLLM's "maximum context length". When the
+  window M is smaller than the one the call's input was cut to (or the call
+  had none), the call is sent once more with its input cut, by a conservative
+  token estimate, to M tokens minus the completion reserve (the call's
+  `max_tokens`, or a quarter of the window when it sends none, at most half
+  the window) minus 2,048 tokens for the instructions and chat template. When
+  several concurrent calls overflow, each is sent again, not only the first to
+  fail. A title/keywords call that still runs past the window leaves its
+  fields empty and marked failed, as a truncated response does, instead of
+  failing the paper. Reference-segmentation windows are also split to fit a
+  known window, so the second attempt after such a rejection sends smaller
+  windows instead of the same ones. For an Ollama or llama.cpp server, a
+  window learned from a rejection also moves the caps to it, as the server's
+  own answer would. Before, a 4,096-token window learned while the caps for
+  16,384 tokens applied (Ollama's model not loaded when bibr asked) kept
+  `LLM_MAX_TOKENS` at 4,096 and left the title and author calls no room for
+  input: their prompts went out without any paper text and were answered.
+- A call whose context window leaves fewer than 256 tokens for its input, when
+  its text would have to be cut, is no longer sent. It fails as a
+  context-length rejection does (`llm_failed`; core metadata keeps the record
+  and marks that call's fields failed). This holds for every provider.
+- The LLM section-classification call is split into parts that fit
+  `LLM_MAX_INPUT_CHARS` and the server's context window. A paper with 80
+  unrecognised headings sent them in one 17,332-token prompt, which a
+  16,384-token server rejected. The paper-classification, paper-type and
+  implicit-section calls are cut to the same limits; the implicit-section call
+  read the process settings and missed the caps set for the pipeline's server.
+- Prompts that carry several texts now share one input budget between them,
+  by need: citation resolution (reference list and citations), research
+  integrity (funding, contributions, affiliations and the author list) and
+  the paper-type label (title and abstract). Together the texts get
+  `LLM_MAX_INPUT_CHARS` and the context window's room; a text shorter than an
+  equal share is kept whole, and the rest goes to the longer ones. Before,
+  each text was cut to the whole budget on its own (the integrity author list
+  not at all), so a long reference list with many citations could still run
+  past the window. This applies to every provider, cloud ones included: the
+  texts of one prompt are now cut to `LLM_MAX_INPUT_CHARS` (300,000 characters
+  by default) in total rather than each, and the paper-type label's title and
+  abstract, which were not cut at all, are now cut to it too. Only prompts
+  whose texts together run past that limit change.
+- Not changed: the experimental single-call core metadata
+  (`LLM_MERGED_CORE_METADATA`, off by default) still fails the paper when its
+  prompt runs past the window. With `OLLAMA_NUM_PARALLEL` above 1, whether
+  Ollama's `/api/ps` reports one slot's context or all slots' has not been
+  checked.
+
 ## [0.7.4] - 2026-10-23
 
 The reference parser is now v5.1 (UltraBERT-150M), which matches references far better

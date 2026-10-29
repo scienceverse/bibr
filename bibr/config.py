@@ -618,9 +618,10 @@ class LlmOptions(_BibrSettings):
         None,
         ge=1,
         description="The LLM server's context window in tokens. When set, long inputs are cut "
-        "so prompt plus completion fits it. bibr fills it in for the servers it starts. "
-        "Otherwise it learns it from a context-length rejection, or from the server's "
-        "/v1/models listing when an answer stops at the window.",
+        "so prompt plus completion fits it, and an Ollama or llama.cpp server gets input and "
+        "completion caps sized to it. bibr fills it in for the servers it starts and asks an "
+        "Ollama or llama.cpp server for it. Otherwise it learns it from a context-length "
+        "rejection, or from the server's /v1/models listing when an answer stops at the window.",
     )
     # Reference-segmentation OUTPUT bound: the anchor-emit call produces ~1 short
     # anchor per reference, so a long bibliography in one window emits too many
@@ -894,6 +895,39 @@ class LlmOptions(_BibrSettings):
             except ValueError:
                 return v
         return v
+
+    # Fields the USER provided (env var / .env / init kwarg), recorded when the
+    # settings are built. bibr later assigns llm fields for the server it talks
+    # to (bibr.clients.server_context's caps, a window learned from a
+    # rejection), and pydantic v2 adds assigned fields to ``model_fields_set``.
+    # See ``OcrOptions.user_set_concurrency``.
+    _user_set_fields: frozenset[str] = PrivateAttr(default=frozenset())
+    # The values bibr.clients.server_context's caps replaced, by field.
+    _server_cap_replaced: dict[str, int] = PrivateAttr(default_factory=dict)
+
+    @property
+    def user_set_fields(self) -> frozenset[str]:
+        """Fields the user set, recorded before bibr assigned any.
+
+        ``model_fields_set`` alone cannot answer "did the user set this":
+        caps bibr assigns for an Ollama or llama.cpp server, or a context
+        window it learns, land in it too and would later count as the user's.
+        """
+        return self._user_set_fields
+
+    @property
+    def server_cap_replaced(self) -> dict[str, int]:
+        """The values the server-context caps replaced, by field (mutable).
+
+        Lets a later, larger window raise a cap again, never past the value
+        it replaced. See :func:`bibr.clients.server_context.apply_server_context`.
+        """
+        return self._server_cap_replaced
+
+    @model_validator(mode="after")
+    def _record_user_set_fields(self) -> "LlmOptions":
+        self._user_set_fields = frozenset(self.model_fields_set)
+        return self
 
     @model_validator(mode="after")
     def _default_model_for_provider(self) -> "LlmOptions":

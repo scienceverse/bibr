@@ -81,6 +81,16 @@ def test_vllm_032_prompt_overflows_still_name_the_window(message):
     assert _context_window_from_error(RuntimeError(f"Error code: 400 - {message}")) == 32_768
 
 
+def test_the_llama_cpp_and_ollama_rejection_names_the_window():
+    # Ollama 0.40 with a GGUF-template model, as logged in a replay of a hosted deployment's setup.
+    ollama = (
+        "Error code: 400 - {'error': {'message': 'request (127771 tokens) exceeds the "
+        "available context size (16384 tokens), try increasing it', "
+        "'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    )
+    assert _context_window_from_error(RuntimeError(ollama)) == 16_384
+
+
 @pytest.mark.asyncio
 async def test_an_overflow_is_asked_again_with_the_input_cut():
     client = LLMClient(settings=_settings())
