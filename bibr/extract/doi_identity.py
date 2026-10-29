@@ -32,6 +32,7 @@ TEXT_LAYER = "text_layer"
 LINK_ANNOTATION = "link_annotation"
 AGREEMENT_ONLY = "agreement_only"
 LINE_JOIN_OVERRUN = "line_join_overrun"
+TEMPLATE_PLACEHOLDER = "template_placeholder"
 
 _DOI_RE = DOI_CANDIDATE_RE
 _REFERENCE_PREFIX_RE = re.compile(r"^\s*(?:\[\d+[A-Za-z]?\]|\d+[.)]\s)")
@@ -104,6 +105,10 @@ _REPOSITORY_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 _FUNDER_REGISTRY_PREFIX = "10.13039/"
+# A journal template's sample DOI, printed where the article's will go once it
+# is published ("10.1364/ao.XX.XXXXXX", "10.1109/XXXX.2022.1234567"). A suffix
+# part made only of x's names no work.
+_TEMPLATE_PLACEHOLDER_RE = re.compile(r"(?:^|[./_-])x{4,}(?=$|[./_-])")
 # Registrants that mint DOIs only for deposited data, code and materials:
 # Zenodo, OSF projects and registrations, Figshare and Dryad. The OSF-hosted
 # preprint servers (PsyArXiv ``10.31234/osf.io/...``, SocArXiv ``10.31235``, OSF
@@ -367,6 +372,10 @@ def _candidate_from_match(
     if rejection_reason is None and normalized.endswith("/"):
         semantic_context = "line_join_overrun"
         rejection_reason = LINE_JOIN_OVERRUN
+        tier = 0
+    if rejection_reason is None and _TEMPLATE_PLACEHOLDER_RE.search(normalized.partition("/")[2]):
+        semantic_context = TEMPLATE_PLACEHOLDER
+        rejection_reason = TEMPLATE_PLACEHOLDER
         tier = 0
 
     return DoiCandidate(
