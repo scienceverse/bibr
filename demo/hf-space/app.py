@@ -324,24 +324,11 @@ def process_on_gpu(file_path: str) -> tuple[dict, dict]:
     return paper_json, dict(zm.STATS)
 
 
-def _signed_in(request: gr.Request | None) -> bool:
-    """Signed in through the LoginButton, or calling the API with a token.
-
-    API callers (gradio_client, space_measure.py) send a Hugging Face token
-    instead of an OAuth session; ZeroGPU bills that token's account.
-    """
-    if request is None:
-        return False
-    if (request.headers or {}).get("authorization"):
-        return True
-    try:
-        return bool(request.session.get("oauth_info"))
-    except (AssertionError, AttributeError):  # no session without OAuth
-        return False
-
-
-async def chew(file_path, request: gr.Request, progress=gr.Progress()):
-    if REQUIRE_LOGIN and not _signed_in(request):
+async def chew(file_path, oauth_token: gr.OAuthToken | None = None, progress=gr.Progress()):
+    # Gradio fills oauth_token from the LoginButton's session, or from an API
+    # caller's Client(..., oauth_token=...). Hugging Face's proxy strips the
+    # Authorization header, so a plain API token does not reach the app.
+    if REQUIRE_LOGIN and oauth_token is None:
         raise gr.Error(
             "Sign in with Hugging Face first (button at the top). A paper needs more GPU "
             "time than ZeroGPU gives anonymous visitors."

@@ -142,7 +142,8 @@ def run_paper(api: HfApi, args, pdf: Path) -> bool:
     from huggingface_hub import get_token
 
     repo = space_id(api, args)
-    client = Client(repo, token=get_token(), verbose=False)
+    # oauth_token passes the Space's sign-in check; token opens the private Space.
+    client = Client(repo, token=get_token(), oauth_token=get_token(), verbose=False)
     print("ZeroGPU quota before:", quota(api))
     started = time.monotonic()
     try:
