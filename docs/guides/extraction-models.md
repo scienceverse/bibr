@@ -58,9 +58,14 @@ bibr told the card's size, and they served the previous revision of the 4B's
 builds, whose files have the same sizes. The papers an hour are that RTX 3090's speed with
 that much memory; a real card of that size runs at its own speed, which has
 not been measured. Each run used bibr's default memory mode and chunk size
-for the card. On the same 100 papers the 8 GB default passed as many as the
-24 GB one (86 each, by bibr's per-paper scorer); on 48 papers the 6 GB default
-passed 38 to the bf16 4B's 41, a difference within chance at that size.
+for the card, with the `gpu` extra installed: bibr's layout model and
+sentence segmenter ran on the GPU, and so did the NER reference parser in
+the balanced rows (the aggressive mode keeps it on the CPU). The classifiers
+stayed on the CPU in every row. `bibr setup` installs the extra on Linux for
+every row here. On the same 100 papers the 8 GB default passed as many as the
+24 GB one (86 each, by bibr's per-paper scorer); on 48 papers the 6 GB
+default passed 38 to the bf16 4B's 41, a difference within chance at that
+size.
 
 The 16 GB run (2026-10-26, on this release's code) had at least 4.74 GiB to
 spare at every start of the LLM (free memory beyond the 8 GiB a start needs).

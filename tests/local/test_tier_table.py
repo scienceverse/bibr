@@ -175,3 +175,21 @@ def test_every_vllm_default_takes_turns_with_paddleocr(card, monkeypatch, row, e
         settings=settings,
     )
     assert rm._llm_swaps_with_ocr() is True
+
+
+@pytest.mark.parametrize(("row", "expected"), TIER_TABLE, ids=[row[0][0] for row in TIER_TABLE])
+def test_setup_installs_the_gpu_extra_on_every_ampere_row(card, row, expected):
+    """Every run that backs a row had onnxruntime-gpu, so layout and the sentence
+    segmenter ran on the GPU (and the NER parser in balanced mode); setup
+    installs it on every Ampere or newer row. The older rows were never
+    measured with it and keep the CPU build."""
+    _name, mib, capability = row
+    gb = card(mib, capability)
+    extras = _build_recommended_setup(
+        platform_key="cuda",
+        accelerator_memory_gb=gb,
+        system_memory_gb=32.0,
+        sys_platform="linux",
+        machine="x86_64",
+    ).extras
+    assert ("gpu" in extras) is (capability >= 8.0)

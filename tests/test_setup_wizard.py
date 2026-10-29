@@ -1275,6 +1275,8 @@ def test_recommended_setup_cuda_uses_fully_local_defaults():
     assert {"ml", "vllm"} <= setup.extras
     assert "local" not in setup.extras
     assert "demo" in setup.extras
+    # onnxruntime-gpu, or layout, SaT and the NER parser run on the CPU.
+    assert "gpu" in setup.extras
     assert setup.required_prompts == ("install_extras", "smoke_test")
 
 
@@ -1294,12 +1296,15 @@ def test_recommended_setup_low_vram_cuda_keeps_paddle_automatic_ocr():
     assert setup.env["LLM_CHAT_TEMPLATE_KWARGS"] == '{"enable_thinking": false}'
     assert "demo" in setup.extras
     assert "ml" in setup.extras
-    # At 6 GB the automatic chain runs OCR and the LLM through llama.cpp, so no
-    # GPU-runtime extra is installed and the plan says what to install instead.
+    # At 6 GB the automatic chain runs OCR and the LLM through llama.cpp, so the
+    # vLLM runtime is not installed and the plan says what to install instead.
     assert "vllm" not in setup.extras
     assert "local" not in setup.extras
     assert "local-cuda" not in setup.extras
     assert "llama.cpp" in setup.runtime_summary
+    # Layout and the sentence segmenter still run on the GPU, as in the 6 and
+    # 8 GB runs.
+    assert "gpu" in setup.extras
 
 
 def test_recommended_setup_mid_vram_cuda_runs_the_4b_w4a16_build_on_vllm():
@@ -1407,6 +1412,37 @@ def test_recommended_setup_windows_uses_the_4b_gguf():
     # bibr cannot install llama.cpp itself, so the plan says how to get it.
     assert "winget install llama.cpp" in setup.runtime_summary
     assert "llama-server" in setup.runtime_summary
+    # No run with onnxruntime-gpu has been measured on Windows: left as it was.
+    assert "gpu" not in setup.extras
+
+
+@pytest.mark.parametrize(
+    ("machine", "capability", "installs_gpu"),
+    [
+        ("x86_64", None, True),  # nvidia-smi cannot tell: as in routing
+        ("x86_64", 12.0, True),  # RTX 5090
+        ("x86_64", 8.6, True),  # RTX 3090, the card cut to each tier's memory
+        ("x86_64", 8.0, True),
+        ("x86_64", 7.5, False),  # Turing: never measured with it
+        ("x86_64", 6.1, False),  # Pascal
+        ("aarch64", None, False),  # never measured; the locked build has no Arm wheel
+    ],
+)
+def test_recommended_setup_installs_the_gpu_extra_where_it_was_measured(
+    monkeypatch, machine, capability, installs_gpu
+):
+    from bibr.ocr import registry
+
+    monkeypatch.setattr(registry, "_nvidia_compute_capability", lambda: capability)
+    setup = _build_recommended_setup(
+        platform_key="cuda",
+        accelerator_memory_gb=24.0,
+        system_memory_gb=32.0,
+        sys_platform="linux",
+        machine=machine,
+    )
+    assert setup.tier == "fully_local"
+    assert ("gpu" in setup.extras) is installs_gpu
 
 
 def test_recommended_setup_apple_silicon_warns_about_runtime():
@@ -1431,6 +1467,7 @@ def test_recommended_setup_apple_silicon_warns_about_runtime():
     assert "demo" in setup.extras
     assert "Apple Silicon" in setup.runtime_summary
     assert "slow" in setup.runtime_summary
+    assert "gpu" not in setup.extras
     # Honest about the real cost: a full extraction is tens of minutes.
     assert "15-30" in setup.runtime_summary
 

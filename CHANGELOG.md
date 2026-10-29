@@ -162,6 +162,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reports 12,227 MiB) as that size, for the model it recommends and for its
   memory mode. Such cards used to get the next smaller tier. PaddleOCR-VL's
   8 GB minimum has no such slack, so an RTX 4060 (8,188 MiB) keeps GLM-OCR.
+- `bibr setup`'s recommended plan for an NVIDIA card on Linux (x86_64,
+  compute capability 8.0 or newer, or unreadable) now installs the `gpu`
+  extra and makes `onnxruntime-gpu` the onnxruntime build that loads. Without
+  it, every ONNX model ran on the CPU beside an idle GPU (169 against 591
+  papers an hour on an RTX 5090, without and with the extra). Every run
+  behind the plan's defaults had the extra: layout and sentence splitting ran
+  on the GPU, and the NER reference parser did too in the balanced memory
+  mode, while the classifiers stayed on the CPU. In a source checkout with
+  `uv.lock` the plan now installs what was measured (`onnxruntime-gpu`
+  1.26.0); an install from PyPI gets the newest `onnxruntime-gpu`, which no
+  run has used. Windows, Linux on Arm and cards older than Ampere, where no
+  run with `onnxruntime-gpu` has been measured, are left as they were. After
+  an update, keep `--extra gpu` on `uv sync` (see the tester guide's
+  "Updating").
 
 ### Security
 
