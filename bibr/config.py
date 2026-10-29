@@ -1039,11 +1039,21 @@ class OcrOptions(_BibrSettings):
         "to be trusted; below this the page falls back to OCR.",
     )
     native_text_header_footer: bool = Field(
-        False,
+        True,
         description="Read header/footer regions from the PDF text layer instead of OCR "
         "on born-digital PDFs, under the same printable-ratio gate as body text. "
-        "Off by default pending an eval of DOI furniture and front-matter effects; "
-        "enable to A/B. Short running heads use the short-text allowance.",
+        "Short running heads use the short-text allowance. A header or footer stays "
+        "with OCR in a right-to-left script, as a first-page masthead the text layer "
+        "barely covers, and on scanned pages. On by default: in the 2026-10-26 evaluation "
+        "it changed no scored field on born-digital PDFs or scans and sent about 42% fewer "
+        "OCR requests per born-digital paper. Set false to OCR them.",
+    )
+    native_text_formula_number: bool = Field(
+        False,
+        description='Read equation-number regions (formula_number, e.g. "(3)") from the PDF '
+        "text layer instead of OCR on born-digital PDFs, under the same printable-ratio gate. "
+        "They are 1-16 characters, so they get their own short-text allowance; longer text "
+        "(the box caught part of the formula) falls back to OCR. Off by default; enable to A/B.",
     )
     native_text_reject_invisible_layer: bool = Field(
         True,

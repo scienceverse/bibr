@@ -50,6 +50,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   capacity. A `--speculative-config` in `LLM_VLLM_EXTRA_ARGS` replaces bibr's
   choice.
 
+### Added — export schema 12.3 (additive)
+
+The export moves to schema `12.3`, which adds optional keys and receipt values;
+every 12.2 export is still valid input for the 12.x reader.
+
+- `OCR_NATIVE_TEXT_HEADER_FOOTER=true` reads running heads and page footers
+  from the PDF's text layer instead of OCR, and `OCR_NATIVE_TEXT_FORMULA_NUMBER=true`
+  does the same for equation numbers that read like "(12)", "(3a)" or "(iv)".
+  The header/footer setting is on by default (see Changed); the formula-number
+  one stays off. A header or footer stays with OCR when its text is
+  in a right-to-left script (the text layer reverses brackets and digits), when
+  it is a first-page masthead drawn partly as an image or barely covered by the
+  text layer's glyphs, and on a scanned page: one whose text is mostly an
+  invisible OCR layer, or one a page-sized image covers under a visible OCR
+  layer.
+- The opt-in `extraction.regions[]` rows name where each region's text came
+  from: `source` is `text_layer` or `ocr`, and `ocr_backend` names the OCR
+  backend that read an `ocr` region, including a consensus or escalation
+  recognizer whose reading replaced the primary one.
+  `extraction.settings` records `native_text_header_footer` and
+  `native_text_formula_number`. The keys are new in schema 12.3 and omitted
+  when absent.
+- A DOI that the PDF carries only in text it never prints (white on white,
+  under a logo) on page 1 or 2 is kept in the identity receipt as an
+  agreement-only `hidden_text` candidate; on a later page it is removed with
+  the rest of the hidden text and leaves no row. It never names the paper on
+  its own; when it matches the DOI chosen from printed evidence, its
+  `semantic_context` is `hidden_text_agreement`.
+
 ### Changed
 - bibr's 4B extraction student is now the revision retrained with pointer
   answers for the two front-matter calls, from each repository's `pointer-v1`
@@ -253,6 +282,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   list that fails the check (entries hard-wrapped into several paragraphs,
   floats the end rule missed) goes to the configured segmenter as before.
 
+- Running heads and page footers of born-digital PDFs are now read from the
+  text layer by default (`OCR_NATIVE_TEXT_HEADER_FOOTER=true`), which cuts OCR
+  requests per born-digital paper by about 42% with no change in the scored
+  fields on born-digital papers or scans. Set it to `false` to OCR them as
+  before.
+- A DOI found only in text the PDF never prints is agreement-only and is never
+  selected on its own. A paper that prints no DOI and carries one only in
+  hidden text, such as a white-on-white banner, now gets a null DOI; before,
+  that white text was read like any other text-layer DOI. Such a banner can
+  hold another paper's DOI, left in a reused template. For a manifest that
+  expects the hidden DOI, identity now raises the blocking
+  `VAL_EXPECTED_ID_MISSING`, or `VAL_EXPECTED_ID_MISMATCH` when the pages print
+  another DOI that could name the paper. A manifest that only requires a DOI
+  gets the blocking `VAL_EXPECTED_ID_MISSING` when no printed DOI can name the
+  paper. In both cases the export goes to `_quarantine/identity_conflict/`,
+  and its receipt records the `identity_conflict` disposition. A hidden DOI
+  that differs from the printed one no longer makes the selection
+  `VAL_DOI_AMBIGUOUS` with no DOI, so the printed DOI is selected.
+
 ### Security
 
 - vLLM 0.31.0, which the `vllm` extra pinned, has a published advisory
@@ -263,7 +311,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   exceptions aside).
 
 ### Fixed
-
 - In the balanced memory mode, bibr no longer refuses a managed vLLM LLM
   server start that would fit once its own GPU models were released. When
   the memory free cannot start the model, bibr first releases what the
@@ -365,6 +412,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   errors (the paper shipped without references) and section-classifier ones
   (its headings fell back to the LLM tier). Other CUDA errors still fail as
   before.
+
+- Text that never prints no longer enters what bibr reads from the PDF text
+  layer, for any region and for the DOI evidence: light text whose drawing
+  changes no pixel of the page (white on white, or under a logo painted over
+  it), text in invisible render mode on a born-digital page, glyphs under 1 pt,
+  text outside the page's crop box, and the extra copies of a line overprinted
+  for a bold look ("Sensors 2024, 24, 572" three times). Springer's hidden
+  "(0123456789().,-volV)" run no longer sticks to the DOI in the running head,
+  and SAGE's hidden white DOI link no longer gives a second, cut-off DOI. A
+  scan's OCR layer is kept, whether hidden or filled white over the page
+  image: invisible text stays on a page images cover as a scan does, and on a
+  page whose characters the scan check counts as mostly invisible. White text
+  on a coloured band, also one that covers only part of the line, or with a
+  dark outline still counts as printed. The removed objects are reported as
+  `hidden_text` furniture (rule `hidden_text/2`).
+- A DOI read from a text-layer header or footer whose box cuts the printed line
+  ("10.1177/117793222311603" for "10.1177/11779322231160397") no longer
+  outranks the full DOI it is a prefix of. It is kept in the identity receipt
+  with `rejection_reason` `edge_truncated`.
 
 ## [0.7.4] - 2026-10-23
 

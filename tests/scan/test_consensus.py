@@ -124,7 +124,17 @@ def test_empty_primary_takes_the_second_reading():
     report = _run(pages, {0: "scan"}, _recognizer({100: "Recovered text"}))
     assert pages[0][0]["content"] == "Recovered text"
     assert pages[0][0]["_ocr_consensus"]["chosen"] == "second"
+    assert "chosen_backend" not in pages[0][0]["_ocr_consensus"]
     assert report.replaced == 1
+
+
+def test_a_replaced_reading_names_the_backend_that_read_it():
+    """The export labels the region with this backend instead of the run's primary OCR."""
+    pages = [[_region(0, "", 100)]]
+    second = _recognizer({100: "Recovered text"})
+    second.backend_name = "glm-http"
+    _run(pages, {0: "scan"}, second)
+    assert pages[0][0]["_ocr_consensus"]["chosen_backend"] == "glm-http"
 
 
 def test_escalation_keeps_the_medoid_reading():
@@ -179,6 +189,7 @@ def test_recognizers_build_http_clients_with_their_own_profile(monkeypatch):
     second, escalation = asyncio.run(start_recognizers(settings))
     assert isinstance(second.backend, HttpOcrClient)
     assert second.profile.name == "glm"
+    assert (second.backend_name, escalation.backend_name) == ("glm-http", "paddle-http")
     assert isinstance(escalation.backend, PaddleHttpOcrClient)
     assert escalation.profile.name == "paddle"
 

@@ -178,6 +178,30 @@ async def test_stage_header_footer_setting_reaches_inspection(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stage_formula_number_setting_reaches_inspection(monkeypatch):
+    """Off keeps formula_number out of the eligible labels; on adds it."""
+    import bibr.pipeline.stages.native_text as stage_mod
+    from bibr.ocr.pdf_inspection import PdfInspection
+
+    async def eligible_for(flag):
+        monkeypatch.setattr(Settings.ocr, "native_text_formula_number", flag)
+        captured = {}
+
+        def fake_inspect(pdf_bytes, layout_results, **kwargs):
+            captured.update(kwargs)
+            return PdfInspection((), deepcopy(layout_results), {}, [], [])
+
+        monkeypatch.setattr(stage_mod, "inspect_pdf", fake_inspect)
+        fs = FileState(path=Path("paper.pdf"), pdf_bytes=b"%PDF")
+        fs.layout_results = [[{"label": "text", "content": ""}]]
+        await NativeTextStage().run(_ctx([fs]))
+        return captured["eligible_labels"]
+
+    assert "formula_number" not in await eligible_for(False)
+    assert "formula_number" in await eligible_for(True)
+
+
+@pytest.mark.asyncio
 async def test_stage_invisible_layer_setting_reaches_inspection(monkeypatch, caplog):
     """The setting decides whether hidden OCR layers on scans are rejected, and
     the stage reports how many pages it sent to OCR for that reason."""
