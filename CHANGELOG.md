@@ -160,6 +160,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `PIPELINE_MEMORY_MODE=aggressive`) with a managed llama.cpp LLM, on a card
   of any size; on 6–9 GB cards the LLM already stopped in every measured chunk
   after the first. The balanced and keep_all modes keep the free-memory rule.
+- On Linux and an Ampere or newer NVIDIA card of 10–11 GB, `bibr setup` now
+  runs the 4B's GGUF Q8_0 build and GLM-OCR on llama.cpp, in the aggressive
+  memory mode and without the `vllm` extra, when it finds on PATH a CUDA build
+  of `llama-server` (or of the unified `llama` binary) that can start CUDA and
+  whose `--version` build is 11282 or newer, the build behind every llama.cpp
+  batch run for the defaults. On an RTX 3090 cut to 10 GB beside a 0.5 GiB
+  desktop, that pair ran 148 papers an hour against 85 for the W4A16 build on
+  vLLM, which restarts two vLLM servers every chunk, and passed 40 of the same
+  48 papers against 39. That run kept the LLM up between chunks; stopping it
+  for each chunk's OCR, as above, the same pair cut to 8 GB ran 150 papers an
+  hour over 48 papers and 141 over 100. Setup prints the server and its build,
+  and `bibr setup --advanced` gives the W4A16 build instead. A server it finds
+  but does not use (a Vulkan, HIP or CPU build, a CUDA build that cannot start
+  CUDA on the installed driver, an older or unreadable build, or a probe that
+  timed out) gets one line saying why, and setup keeps W4A16. `--llm local`
+  never reads PATH and keeps W4A16 on these cards, so after setup picked the
+  pair, run plain `bibr chew` (or `--llm llama-cpp`): `--llm local` would start
+  vLLM with the GGUF build setup wrote, which vLLM cannot serve. After a
+  failed local server test the wizard now suggests `bibr chew`, which uses the
+  backend setup wrote, instead of `bibr chew --llm local`.
 - On Linux the automatic OCR chain (`OCR_BACKEND` unset or `paddle`) now runs
   GLM-OCR on llama.cpp whenever the run's LLM runs on llama.cpp, the pair
   `bibr setup` writes: bibr hands GPU memory between two vLLM servers or two
@@ -222,7 +242,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   refuses below 20 GB; on a 10–19 GB card it is now the W4A16 build, and on
   llama.cpp a card below 7 GB gets the Q4_K_M build instead of Q8_0. The
   runtime and setup now pick the model, the backend, the memory mode and the
-  OCR through the same rules on every card.
+  OCR through the same rules on every card, except where setup found a CUDA
+  llama.cpp server on a 10–11 GB card (above).
 - On a small card, a fully local batch with both servers on llama.cpp no longer
   fails every paper after the first chunk. The LLM server outlived the chunk,
   and the next chunk's GLM-OCR server started beside it, could not allocate

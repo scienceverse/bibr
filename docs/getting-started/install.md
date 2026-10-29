@@ -106,7 +106,11 @@ GB on first use, so it logs a warning naming `uv sync --extra vllm`, and
 with at least 8 GB of VRAM; smaller GPUs and CPU-only Linux machines take the
 llama.cpp path (`glm-llama`) for OCR instead. The managed local LLM uses the
 same bootstrap from 10 GB of VRAM (the fine-tuned 4B's W4A16 build); below that,
-`--llm local` uses llama.cpp. On Python 3.14, where the `vllm` extra installs
+`--llm local` uses llama.cpp. On a 10–11 GB card, `bibr setup` runs the LLM and
+OCR on llama.cpp instead, without `vllm`, when it finds a CUDA `llama-server` of
+build 11282 or newer (see
+[choosing an extraction model](../guides/extraction-models.md#on-10-and-11-gb-cards)).
+On Python 3.14, where the `vllm` extra installs
 nothing (its requirements are marked `python_version < '3.14'`), both launchers
 run the bootstrap inside a managed Python 3.13, and `bibr doctor` says so; a
 3.11-3.13 interpreter for the project avoids the detour.

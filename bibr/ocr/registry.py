@@ -65,8 +65,9 @@ MANAGED_VLLM_ONNX_RESERVE_GB = 6.0
 # PaddleOCR-VL through the managed vLLM server needs an NVIDIA GPU with room
 # for ``PADDLE_VLLM_GPU_MEMORY_GB``. Below this floor the automatic chain runs
 # OCR on ``glm-llama``. Setup also picks ``glm-llama`` on larger cards whose LLM
-# runs on llama.cpp (below ``bibr.local.llm_models.VLLM_LLM_MIN_CARD_GB``), the
-# pair bibr hands GPU memory between.
+# runs on llama.cpp (below ``bibr.local.llm_models.VLLM_LLM_MIN_CARD_GB``, or a
+# 10–11 GB card where setup found a CUDA llama.cpp server), the pair bibr hands
+# GPU memory between.
 PADDLE_VLLM_MIN_VRAM_GB = 8.0
 #: GPU memory a managed GLM-OCR llama.cpp server (``glm-llama``, the Q8_0 GGUF
 #: with its vision projector, an 8,192-token context and one slot) holds while
