@@ -544,3 +544,70 @@ def test_ocr_result_schema():
     r = OcrResult(text="hello")
     assert r.text == "hello"
     assert set(OcrResult.model_fields.keys()) == {"text"}
+
+
+# ---------------------------------------------------------------------------
+# Per-region output budget (Anthropic)
+# ---------------------------------------------------------------------------
+
+
+def _client_for(provider, max_tokens=16384):
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.ocr_vision.max_tokens = max_tokens
+    return CloudOcrClient(provider=provider, settings=settings)
+
+
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [
+        ((708, 28), 2048),  # one footer line: the floor
+        ((1000, 200), 6250),  # 200,000 px / 32
+        ((1654, 2339), 16384),  # a whole A4 page at 200 DPI: the setting
+    ],
+)
+def test_anthropic_region_budget_follows_crop_area(size, expected):
+    from PIL import Image
+
+    assert _client_for("anthropic")._max_tokens_for(Image.new("RGB", size)) == expected
+
+
+def test_anthropic_region_budget_never_exceeds_the_setting():
+    from PIL import Image
+
+    client = _client_for("anthropic", max_tokens=1024)
+    assert client._max_tokens_for(Image.new("RGB", (708, 28))) == 1024
+
+
+@pytest.mark.parametrize("provider", ["openai", "google", "gemini"])
+def test_other_providers_keep_the_full_setting(provider):
+    from PIL import Image
+
+    client = _client_for(provider)
+    assert client._max_tokens_for(Image.new("RGB", (708, 28))) == 16384
+
+
+async def test_recognize_sends_the_region_budget_to_anthropic(_mock_image_utils):
+    from PIL import Image
+
+    client = _client_for("anthropic")
+    client._client = AsyncMock()
+    client._client.create = AsyncMock(return_value=OcrResult(text="ok"))
+
+    await client.recognize(Image.new("RGB", (708, 28)), "Text Recognition:")
+
+    assert client._client.create.call_args.kwargs["max_tokens"] == 2048
+
+
+async def test_recognize_keeps_gemini_on_the_setting(mock_cloud_client, _mock_image_utils):
+    from PIL import Image
+
+    mock_cloud_client._client = AsyncMock()
+    mock_cloud_client._client.create = AsyncMock(return_value=OcrResult(text="ok"))
+
+    await mock_cloud_client.recognize(Image.new("RGB", (708, 28)), "Text Recognition:")
+
+    kwargs = mock_cloud_client._client.create.call_args.kwargs
+    assert kwargs["generation_config"]["max_tokens"] == 4096
+    assert "max_tokens" not in kwargs

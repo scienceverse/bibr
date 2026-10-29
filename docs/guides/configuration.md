@@ -135,6 +135,11 @@ The cloud vision backends all use `OCR_VISION_MODEL`, whose default
 (`gemini-3-flash-preview`) is a Gemini model, so with `--ocr openai` or
 `--ocr anthropic` set it to one of that provider's vision models, such as
 `OCR_VISION_MODEL=claude-haiku-5-5`.
+Each region asks for at most `OCR_VISION_MAX_TOKENS` output tokens (16384 by
+default). With `anthropic`, a region asks for one token per 32 pixels of its
+crop, at least 2048 and at most that setting, so a model that loops on a small
+region stops sooner. Gemini and OpenAI count thinking or reasoning tokens
+against the same limit, so they keep the full setting.
 For example:
 
 ```bash

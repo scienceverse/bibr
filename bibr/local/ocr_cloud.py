@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import random
 import time
@@ -135,6 +136,17 @@ class CloudOcrClient:
     # regions at once for _RATE_LIMIT_COOLDOWN_S so the other pages stop too.
     _RATE_LIMIT_TRIP_REGIONS: ClassVar[int] = 5
     _RATE_LIMIT_COOLDOWN_S: ClassVar[float] = 120.0
+    # A vision model now and then loops on a region until it reaches its output
+    # cap: Claude Haiku answered a one-line footer (708x28 px) with 16,384
+    # tokens in 43 s, all discarded. A region cannot hold more text than its
+    # pixels show, so Anthropic regions ask for one output token per 32 crop
+    # pixels, at least 2,048, at most OCR_VISION_MAX_TOKENS. On 252 papers the
+    # largest real answers were 1,455 tokens for text, 5,734 for a table, and
+    # text and tables carried at most 0.013 characters per crop pixel. Gemini
+    # and OpenAI keep the full cap: their thinking or reasoning tokens count
+    # against the same limit.
+    _REGION_PIXELS_PER_TOKEN: ClassVar[int] = 32
+    _REGION_MIN_TOKENS: ClassVar[int] = 2048
 
     def __init__(self, provider: str = "google", settings=None, **_kw: object):
         self._settings = settings if settings is not None else snapshot_settings()
@@ -208,6 +220,15 @@ class CloudOcrClient:
     def loaded(self) -> bool:
         return self._loaded
 
+    def _max_tokens_for(self, image: Any) -> int:
+        """Output cap for one region crop (see ``_REGION_PIXELS_PER_TOKEN``)."""
+        cap = self._effective_settings.ocr_vision.max_tokens
+        if self._provider != "anthropic":
+            return cap
+        width, height = image.size
+        budget = math.ceil(width * height / self._REGION_PIXELS_PER_TOKEN)
+        return min(cap, max(self._REGION_MIN_TOKENS, budget))
+
     def _resolve_prompt(self, glm_prompt: str) -> str:
         """Map a GLM-OCR task prompt to a verbose vision-LLM prompt."""
         key = _PROMPT_MAP.get(glm_prompt, "text")
@@ -248,7 +269,7 @@ class CloudOcrClient:
                 "safety_settings": [],
             }
         else:
-            extra_kwargs = {"max_tokens": cfg.max_tokens}
+            extra_kwargs = {"max_tokens": self._max_tokens_for(image)}
 
         last_exc: BaseException | None = None
         for attempt in range(self._MAX_RETRIES):

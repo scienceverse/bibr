@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Anthropic vision OCR (`--ocr anthropic`) asks for one output token per 32 pixels of
+  each region crop, at least 2,048 and at most `OCR_VISION_MAX_TOKENS`, instead of the
+  full setting for every region. A model that loops on a small region now stops after
+  2,048 tokens instead of 16,384 (one footer line took 43 s and was discarded). Gemini
+  and OpenAI keep the full setting, because their thinking or reasoning tokens count
+  against the same limit.
+
 ## [0.7.4] - 2026-10-23
 
 The reference parser is now v5.1 (UltraBERT-150M), which matches references far better
