@@ -20,13 +20,13 @@ page count. ``DEMO_GPU_MODE=batch`` keeps one GPU call per batch of requests.
 Settings (Space variables; API keys are Space secrets):
 
 DEMO_GPU_MODE       paper (default) | batch
-DEMO_GPU_SECONDS    longest GPU window a paper may ask for (default 170)
+DEMO_GPU_SECONDS    longest GPU window a paper may ask for (default 240)
 DEMO_REQUIRE_LOGIN  1 (default): visitors sign in with Hugging Face first, since
                     an anonymous visitor's 2 GPU minutes a day can't fit a paper
 DEMO_LLM            local (default) | anthropic | google | none
 DEMO_EXTRACTOR      4b (default) | 2b, the student DEMO_LLM=local serves
 DEMO_REF_REVIEW     1 (default) loads the reference adapter; 0 keeps NER only
-DEMO_MAX_PAGES      pages read per paper (default 20), bounds GPU time
+DEMO_MAX_PAGES      pages read per paper (default 15), bounds GPU time
 DEMO_MAX_FILE_SIZE_MB   upload limit (default 10)
 CROSSREF_API_EMAIL  turns Crossref reference matching on
 ANTHROPIC_API_KEY / GEMINI_API_KEY   for DEMO_LLM=anthropic / google
@@ -61,13 +61,15 @@ for _name in ("httpx", "httpx2"):
 HERE = Path(__file__).parent
 DEMO_LLM = os.environ.get("DEMO_LLM", "local").lower()
 REF_REVIEW = os.environ.get("DEMO_REF_REVIEW", "1") == "1"
-MAX_PAGES = int(os.environ.get("DEMO_MAX_PAGES", "20"))
+MAX_PAGES = int(os.environ.get("DEMO_MAX_PAGES", "15"))
 GPU_MODE = os.environ.get("DEMO_GPU_MODE", "paper").lower()
-GPU_SECONDS_MAX = int(os.environ.get("DEMO_GPU_SECONDS", "170"))
+GPU_SECONDS_MAX = int(os.environ.get("DEMO_GPU_SECONDS", "240"))
 # Window per paper: model loads and the front page, then OCR and reference
-# review per page. A first guess, to be replaced by measured seconds.
-GPU_SECONDS_BASE = 40
-GPU_SECONDS_PER_PAGE = 6
+# review per page. Measured once (2026-10-29): a 7-page born-digital paper
+# used 141 GPU s. ZeroGPU billed what was used, past the window asked, but
+# the window is what it checks against the visitor's quota, so err high.
+GPU_SECONDS_BASE = 60
+GPU_SECONDS_PER_PAGE = 12
 # Only on Spaces: Gradio's local OAuth mock needs a Hugging Face login.
 REQUIRE_LOGIN = os.environ.get("DEMO_REQUIRE_LOGIN", "1") == "1" and bool(os.environ.get("SPACE_ID"))
 MAX_FILE_MB = int(os.environ.get("DEMO_MAX_FILE_SIZE_MB", "10"))
@@ -381,7 +383,7 @@ quick checks on the result. The first {MAX_PAGES} pages are read.
 
 Sign in with Hugging Face to run a paper. Each paper uses up to
 {GPU_SECONDS_MAX} s of your ZeroGPU quota (free accounts get 5 minutes a day, PRO 40),
-so a free account runs about two papers a day. Papers are deleted from the Space
+so a free account runs about two short papers a day. Papers are deleted from the Space
 after processing.
 """
 

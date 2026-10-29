@@ -50,10 +50,10 @@ Text regions of born-digital PDFs come from the PDF's text layer and skip OCR.
 ## Settings
 
 Space variables: `DEMO_GPU_MODE` (`paper`, or `batch` for one GPU call per
-batch), `DEMO_GPU_SECONDS` (170), `DEMO_REQUIRE_LOGIN` (`1`/`0`),
+batch), `DEMO_GPU_SECONDS` (240), `DEMO_REQUIRE_LOGIN` (`1`/`0`),
 `DEMO_LLM` (`local`, `anthropic`, `google`, `none`),
 `DEMO_EXTRACTOR` (`4b`, `2b`),
-`DEMO_REF_REVIEW` (`1`/`0`), `DEMO_MAX_PAGES` (20), `DEMO_MAX_FILE_SIZE_MB` (10),
+`DEMO_REF_REVIEW` (`1`/`0`), `DEMO_MAX_PAGES` (15), `DEMO_MAX_FILE_SIZE_MB` (10),
 `CROSSREF_API_EMAIL` (turns Crossref matching on).
 
 Space secrets, only for the cloud LLM modes: `ANTHROPIC_API_KEY` or `GEMINI_API_KEY`.
