@@ -1213,3 +1213,97 @@ def test_chew_ref_seg_rides_run_config(stub_pipeline, monkeypatch):
 def test_chew_ref_seg_invalid_raises():
     with pytest.raises(ValueError, match="ref_seg must be"):
         bibr.chew("paper.pdf", ref_seg="bogus")
+
+
+@pytest.fixture
+def heap_trims(monkeypatch):
+    from bibr.utils import heap
+
+    calls: list[int] = []
+    pipelines: list = []
+
+    async def trim():
+        calls.append(len(pipelines[0].chunks) if pipelines else -1)
+        return True
+
+    monkeypatch.setattr(heap, "arelease_free_heap", trim)
+    return calls, pipelines
+
+
+def test_a_batch_hands_freed_heap_back_after_each_chunk(heap_trims):
+    from bibr.api import _process_batch
+
+    calls, pipelines = heap_trims
+    pipeline = _ScriptedPipeline()
+    pipelines.append(pipeline)
+
+    asyncio.run(_process_batch(pipeline, [Path(f"p{i}.pdf") for i in range(10)], batch_size=4))
+
+    assert calls == [1, 2, 3]
+
+
+def test_a_crashed_chunk_trims_once_after_its_files_ran_again(heap_trims):
+    from bibr.api import _process_batch
+
+    def script(stems, states):
+        if "p5" in stems:
+            raise RuntimeError("CUDA error: an illegal memory access was encountered")
+
+    calls, pipelines = heap_trims
+    pipeline = _ScriptedPipeline(script)
+    pipelines.append(pipeline)
+
+    asyncio.run(_process_batch(pipeline, [Path(f"p{i}.pdf") for i in range(8)], batch_size=4))
+
+    # Chunk 1, then chunk 2 crashes and its four files run alone (chunks 3-6).
+    assert calls == [1, 6]
+
+
+def test_heap_trim_off_never_trims(heap_trims):
+    from types import SimpleNamespace
+
+    from bibr.api import _process_batch
+
+    calls, pipelines = heap_trims
+    pipeline = _ScriptedPipeline()
+    pipeline.settings = SimpleNamespace(pipeline=SimpleNamespace(heap_trim="off"))
+    pipelines.append(pipeline)
+
+    asyncio.run(_process_batch(pipeline, [Path(f"p{i}.pdf") for i in range(8)], batch_size=4))
+
+    assert calls == []
+
+
+def test_a_single_file_chew_never_trims(stub_pipeline, heap_trims):
+    calls, _ = heap_trims
+
+    bibr.chew("paper.pdf")
+    with bibr.Chewer() as chewer:
+        chewer.chew("a.pdf")
+        chewer.chew("b.pdf")
+
+    assert calls == []
+    chewer_batch = bibr.Chewer()
+    try:
+        chewer_batch.chew(["a.pdf", "b.pdf"])
+    finally:
+        chewer_batch.close()
+    assert len(calls) == 1
+
+
+def test_a_trim_that_cannot_be_scheduled_keeps_the_batch_results(monkeypatch):
+    from bibr.api import _process_batch
+    from bibr.utils import heap
+
+    class _NoThread:
+        def submit(self, *args, **kwargs):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(heap, "_trim_executor", lambda: _NoThread())
+    monkeypatch.setattr(heap, "_malloc_trim", lambda pad: 1)
+    monkeypatch.setattr(heap, "_last_trim", float("-inf"))
+    results = asyncio.run(
+        _process_batch(_ScriptedPipeline(), [Path(f"p{i}.pdf") for i in range(6)], batch_size=4)
+    )
+    assert len(results) == 6
+    assert not any(isinstance(r, bibr.ChewFailure) for r in results)

@@ -539,3 +539,49 @@ class TestBackhalfProgress:
         assert prog.ends == []
         assert a.result_json == {"paper_id": "a.pdf"}
         assert b.result_json == {"paper_id": "b.pdf"}
+
+
+@pytest.mark.asyncio
+async def test_window_mode_trims_after_spawning_a_back_half_but_not_after_the_last(monkeypatch):
+    from bibr.utils import heap
+
+    events: list[str] = []
+
+    async def trim():
+        events.append("trim")
+        return True
+
+    monkeypatch.setattr(heap, "arelease_free_heap", trim)
+    monkeypatch.setattr(Settings.ocr, "max_concurrent_files", 1)
+    monkeypatch.setattr(Settings.pipeline, "heap_trim", "window")
+    files = [_mk("a.pdf"), _mk("b.pdf"), _mk("c.pdf")]
+    ctx = _ctx(files, _cfg(ocr_backend="gemini"))
+
+    await _stage(events).run(ctx)
+
+    assert events.count("trim") == 2
+    first, second = (i for i, e in enumerate(events) if e == "trim")
+    assert events.index("ocr_end:a.pdf") < first < events.index("ocr_start:b.pdf")
+    assert events.index("ocr_end:b.pdf") < second < events.index("ocr_start:c.pdf")
+    assert all(fs.page_images is None for fs in files)
+
+
+@pytest.mark.parametrize("mode", ["chunk", "off"])
+@pytest.mark.asyncio
+async def test_other_modes_never_trim_inside_the_stage(monkeypatch, mode):
+    from bibr.utils import heap
+
+    events: list[str] = []
+
+    async def trim():
+        events.append("trim")
+        return True
+
+    monkeypatch.setattr(heap, "arelease_free_heap", trim)
+    monkeypatch.setattr(Settings.ocr, "max_concurrent_files", 1)
+    monkeypatch.setattr(Settings.pipeline, "heap_trim", mode)
+    files = [_mk("a.pdf"), _mk("b.pdf")]
+
+    await _stage(events).run(_ctx(files, _cfg(ocr_backend="gemini")))
+
+    assert "trim" not in events

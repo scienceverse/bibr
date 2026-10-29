@@ -432,6 +432,23 @@ every 12.2 export is still valid input for the 12.x reader.
   outranks the full DOI it is a prefix of. It is kept in the identity receipt
   with `rejection_reason` `edge_truncated`.
 
+- A long `bibr batch` run no longer grows its memory from chunk to chunk.
+  Freed page images and model buffers stayed in glibc's malloc arenas instead of
+  going back to the system, so the process kept the high-water mark of every
+  chunk: with layout on a GPU it held about 11 GiB after 48 papers and peaked at
+  16-19 GiB over 200, while its heap in use stayed near 2 GiB. bibr now hands
+  free heap back with `malloc_trim` after each chunk of a batch (`bibr batch`,
+  `bibr chew` on several files, `chew()` or `Chewer` on a list; Linux with glibc
+  only). In a 32-paper GPU batch at the default batch size of 8, the process now
+  averages 6.6 GiB over the last third of the run instead of 8.4 GiB, peaks at
+  7.4 GiB instead of 8.9 GiB, and no longer climbs from chunk to chunk. With
+  real OCR and LLM servers on a 24 GB card the trim had no measurable
+  throughput cost (-0.5%, 95% CI -3.4 to +2.2%).
+  `PIPELINE_HEAP_TRIM=window` also trims between the render windows inside a
+  chunk, which keeps large chunks (`--batch-size` 24 and up) lower but ran a
+  24-paper chunk 20-30% slower; `PIPELINE_HEAP_TRIM=off` turns trimming off.
+  Single-paper calls and `bibr serve` requests never trim.
+
 ## [0.7.4] - 2026-10-23
 
 The reference parser is now v5.1 (UltraBERT-150M), which matches references far better

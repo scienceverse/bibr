@@ -2279,6 +2279,17 @@ class PipelineOptions(_BibrSettings):
         "mode not aggressive); managed local LLM backends keep the stage barrier. Escape hatch "
         "for debugging.",
     )
+    # glibc keeps freed page images and model buffers in its per-thread malloc
+    # arenas, so a long batch keeps every chunk's high-water mark unless the
+    # free pages are handed back (bibr.utils.heap). Batch drivers only:
+    # single-paper calls and serve requests never trim.
+    heap_trim: Literal["off", "chunk", "window"] = Field(
+        "chunk",
+        description='When a batch hands freed heap back to the OS (glibc malloc_trim): "chunk" '
+        'after each chunk, "window" also between the render/OCR windows inside a chunk (lower '
+        'footprint in large chunks, some throughput cost), "off" never. Single-paper calls and '
+        "serve requests never trim; no effect off glibc.",
+    )
     # Max requests running the pipeline concurrently per worker (0 = unlimited).
     # The LitServe async loop dispatches unbounded concurrent predicts; this
     # bounds peak host RAM (page images) under an upload flood. GPU peak VRAM is
@@ -2341,6 +2352,12 @@ class PipelineOptions(_BibrSettings):
         description="Type the model/LLM-typed body headings of reviews and commentaries with no "
         "Methods or Results heading as discussion.",
     )
+
+    @field_validator("heap_trim", mode="before")
+    @classmethod
+    def _lower_heap_trim(cls, v):
+        """Case-insensitive, like the other choice settings."""
+        return v.strip().lower() if isinstance(v, str) else v
 
 
 class JobsOptions(_BibrSettings):
