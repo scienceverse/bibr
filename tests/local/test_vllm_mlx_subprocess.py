@@ -530,6 +530,7 @@ def _stub_vllm_mlx(monkeypatch, extra: dict[str, str] | None = None):
         if parent:
             monkeypatch.setattr(sys.modules[parent], child, module, raising=False)
     for name, source in sources.items():
+        # nosemgrep: python.lang.security.audit.exec-detected.exec-detected
         exec(compile(source, f"<stub {name}>", "exec"), sys.modules[name].__dict__)  # noqa: S102
     return sys.modules["vllm_mlx.server"]
 
@@ -660,6 +661,7 @@ def test_vllm_mlx_shim_judges_every_copy_of_is_mllm_model(monkeypatch, tmp_path)
     replaced = shim._judge_launch_model(snapshot, _PINNED_MLX)
     later = types.ModuleType("vllm_mlx.engine.later")
     monkeypatch.setitem(sys.modules, later.__name__, later)
+    # nosemgrep: python.lang.security.audit.exec-detected.exec-detected
     exec("from vllm_mlx.api.utils import is_mllm_model", later.__dict__)  # noqa: S102
 
     copies = {
