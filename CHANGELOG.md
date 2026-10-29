@@ -467,6 +467,18 @@ every 12.2 export is still valid input for the 12.x reader.
   shape, so LLM cache entries from earlier releases still hit. A paper whose
   text changes still gets a new boundary.
 
+- A DOI printed in a publisher's box above the article title is found again
+  when the OCR runs with the GLM profile: GLM-OCR, the Gemini, OpenAI and
+  Anthropic vision backends, and any backend set to `OCR_PROFILE=glm`. The
+  layout model often labels such a box as a
+  table, and bibr reads the DOI from the region's complete OCR text, because
+  the region summary keeps only its first 200 characters. The GLM profile
+  dropped that text after normalization, so these runs never saw the box. It
+  now keeps it, as the PaddleOCR-VL profile always did. Region exports
+  (`--regions`) now also carry `raw_ocr_content` for GLM-profile regions. The
+  GLM normalizer version moves to `glm-canonical-v2`, so OCR cache entries
+  written without the complete text are not reused.
+
 ## [0.7.4] - 2026-10-23
 
 The reference parser is now v5.1 (UltraBERT-150M), which matches references far better

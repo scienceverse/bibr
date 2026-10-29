@@ -227,7 +227,7 @@ Opt-in Crossref (and optional bibr-resolver) enrichment of extracted references:
 - Captions and footnotes are not sections. Their sentences are `text` rows after the body, with a null `section_id`; `figure` and `table` rows point at their caption row with `text_id`, and their `section_id` is the section they are printed in; `footnote` has one row per footnote or endnote (printed `label`, `text_id`), which `foot` references target
 - Enrichment matches are in a separate top-level `bib_match` array (flat, keyed by `bib_id` + `service`)
 - `paper_id` is required: the `--paper-id`, else the input file's stem (its name without the extension); `bibr batch` sets it to the corpus-unique id its JSON file is named after.
-- Optional `extraction.regions` debug payload (per-region bbox/font/content) is opt-in via `include_regions=True` on `Paper.export_to_json()` / `export_paper_to_json()` / the `include_regions` form field on `POST /papers/extract` / the `--regions` CLI flag. It also preserves `raw_ocr_content` when Paddle normalization changed a table or formula response, so diagnostics can compare the original model output with canonical content.
+- Optional `extraction.regions` debug payload (per-region bbox/font/content) is opt-in via `include_regions=True` on `Paper.export_to_json()` / `export_paper_to_json()` / the `include_regions` form field on `POST /papers/extract` / the `--regions` CLI flag. It also carries `raw_ocr_content`, the unmodified model response of each OCR'd region, so diagnostics can compare the original model output with canonical content (they differ where Paddle normalization decoded a table or formula).
 
 **Parquet** (`bibr/export/tables.py`): `bibr tables <exports> --out DIR`,
 `bibr.write_tables()`, and `bibr batch` (into `<out>/tables/`, after every run)
@@ -285,8 +285,9 @@ which stores the warnings with their codes, invalidates older entries.
 Paddle table output uses OTSL markers (such as `<fcel>`, `<lcel>`, `<nl>`, and
 `<ecel>`) that bibr decodes into canonical HTML. Paddle formula output has one
 outer Markdown/LaTeX fence or balanced display delimiter removed; the LaTeX
-body is otherwise preserved. The normalized value feeds parsing, while raw
-Paddle output remains available in `raw_ocr_content` through `extraction.regions`.
+body is otherwise preserved. The normalized value feeds parsing, while the raw
+model output of either profile remains available in `raw_ocr_content` through
+`extraction.regions`.
 
 ## Key data structures
 

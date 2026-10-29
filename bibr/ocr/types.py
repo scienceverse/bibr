@@ -53,8 +53,9 @@ class OcrRegionResult:
     # Set by NativeTextStage's fill_regions_from_native_text; carried through
     # so the OCR success gate can exclude regions that bypassed OCR entirely.
     native_text_used: bool | None = None
-    # Original model response retained for diagnostics when normalization altered
-    # it. Canonical ``content`` remains the sole downstream contract.
+    # Original model response, kept by both profiles. Diagnostics compare it with
+    # the canonical ``content``; the publisher-box DOI check reads it because
+    # region summaries keep only the first 200 characters of ``content``.
     raw_content: str | None = None
     # OpenAI-compatible completion stop reason retained for diagnostics.
     finish_reason: str | None = None
