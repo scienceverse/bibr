@@ -360,3 +360,93 @@ def test_cpu_ort_session_options_is_none_without_onnxruntime():
     ort_kwargs then)."""
     with patch.dict("sys.modules", {"onnxruntime": None}):
         assert onnx_providers.cpu_ort_session_options() is None
+
+
+_SESSION_ARENA_OOM = (
+    "[ONNXRuntimeError] : 1 : FAIL : Exception during initialization: "
+    "/onnxruntime_src/onnxruntime/core/framework/bfc_arena.cc:358 void* "
+    "onnxruntime::BFCArena::AllocateRawInternal(size_t, bool, onnxruntime::Stream*) "
+    "Failed to allocate memory for requested buffer of size 384003072"
+)
+
+
+def _ort_whose_sessions_fail(message: str, *, fail_on: str = "CUDAExecutionProvider"):
+    """A mock CUDA-build onnxruntime whose sessions with *fail_on* in their chain raise *message*."""
+    mock_ort = _cuda_build_ort()
+    opened: list[dict] = []
+
+    class _RecordingOptions:
+        def __init__(self):
+            object.__setattr__(self, "written", {})
+
+        def __setattr__(self, name, value):
+            self.written[name] = value
+
+    cpu_session = MagicMock()
+    cpu_session.get_providers.return_value = ["CPUExecutionProvider"]
+
+    def open_session(path, sess_options=None, providers=None):
+        names = [p[0] if isinstance(p, tuple) else p for p in providers]
+        opened.append({"providers": names, "options": dict(sess_options.written)})
+        if fail_on in names:
+            raise RuntimeError(message)
+        return cpu_session
+
+    mock_ort.SessionOptions = _RecordingOptions
+    mock_ort.InferenceSession.side_effect = open_session
+    return mock_ort, opened, cpu_session
+
+
+@pytest.mark.parametrize("disable_cpu_arena", [True, False])
+def test_create_session_opens_on_cpu_when_the_cuda_session_is_out_of_memory(
+    caplog, disable_cpu_arena
+):
+    mock_ort, opened, cpu_session = _ort_whose_sessions_fail(_SESSION_ARENA_OOM)
+    with (
+        patch.dict("sys.modules", {"onnxruntime": mock_ort}),
+        caplog.at_level(logging.WARNING, logger="bibr.utils.onnx_providers"),
+    ):
+        session, device = onnx_providers.create_session(
+            "model.onnx", model_name="layout", disable_cpu_arena=disable_cpu_arena
+        )
+
+    assert device == "cpu"
+    assert session is cpu_session
+    assert [o["providers"] for o in opened] == [
+        ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        ["CPUExecutionProvider"],
+    ]
+    expected = {"log_severity_level": 3}
+    if disable_cpu_arena:
+        expected["enable_cpu_mem_arena"] = False
+    assert opened[1]["options"] == expected
+    assert (
+        "layout could not open its CUDA session: GPU out of memory (RuntimeError); "
+        "opening it on the CPU"
+    ) in caplog.text
+    assert "requested CUDA" not in caplog.text
+
+
+def test_create_session_raises_other_cuda_session_failures():
+    mock_ort, opened, _ = _ort_whose_sessions_fail(
+        "[ONNXRuntimeError] : 1 : FAIL : CUDA failure 100: no CUDA-capable device is detected"
+    )
+    with (
+        patch.dict("sys.modules", {"onnxruntime": mock_ort}),
+        pytest.raises(RuntimeError, match="no CUDA-capable device"),
+    ):
+        onnx_providers.create_session("model.onnx", model_name="layout")
+    assert len(opened) == 1
+
+
+def test_create_session_raises_a_cpu_sessions_arena_failure():
+    """ORT's CPU arena words its failures like the CUDA one; that is no GPU shortage."""
+    mock_ort, opened, _ = _ort_whose_sessions_fail(
+        _SESSION_ARENA_OOM, fail_on="CPUExecutionProvider"
+    )
+    with (
+        patch.dict("sys.modules", {"onnxruntime": mock_ort}),
+        pytest.raises(RuntimeError, match="BFCArena"),
+    ):
+        onnx_providers.create_session("model.onnx", device="cpu", model_name="layout")
+    assert len(opened) == 1

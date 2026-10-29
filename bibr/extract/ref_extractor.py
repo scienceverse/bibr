@@ -623,6 +623,11 @@ def resolve_ner_device(settings: GlobalSettings, memory_mode: str | None = None)
     return settings.NER_DEVICE
 
 
+def ner_parser_loaded() -> bool:
+    """Whether the NER reference-parser singleton is loaded (``unload_ner_parser`` drops it)."""
+    return _NER_PARSER is not None
+
+
 def unload_ner_parser() -> None:
     """Drop the cached NER parser singleton reference, if one is loaded.
 

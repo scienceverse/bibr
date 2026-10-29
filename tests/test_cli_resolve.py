@@ -192,10 +192,60 @@ def test_resolve_unset_default_paddle_preserves_automatic_selector(monkeypatch):
 
 
 def test_resolve_default_memory_mode_autodetected(monkeypatch):
-    monkeypatch.setattr("bibr.local.pipeline._default_memory_mode", lambda: "aggressive")
+    monkeypatch.setattr("bibr.local.pipeline._default_memory_mode", lambda **_: "aggressive")
     config = _resolve("paper.pdf", "--ocr", "glm-llama")
     assert config.memory_mode == "aggressive"
     assert config.chunk_size == 3
+
+
+@pytest.mark.parametrize(
+    ("argv", "passed"),
+    [
+        (("--llm", "cloud"), "cloud"),
+        (("--llm", "vllm"), "vllm"),
+        (("--llm", "llama-cpp"), "llama-cpp"),
+        (("--llm", "vllm", "--no-llm"), "cloud"),
+    ],
+)
+def test_resolve_memory_mode_sees_the_llm_backend(monkeypatch, argv, passed):
+    """The auto memory mode depends on whether bibr's own LLM server shares the card."""
+    seen = []
+
+    def fake_default(settings=None, *, llm_backend=None):
+        seen.append(llm_backend)
+        return "balanced"
+
+    monkeypatch.setattr("bibr.local.pipeline._default_memory_mode", fake_default)
+    config = _resolve("paper.pdf", "--ocr", "glm-llama", *argv)
+    assert seen == [passed]
+    assert config.memory_mode == "balanced"
+
+
+@pytest.mark.parametrize(
+    ("argv", "first"),
+    [
+        (("--llm", "llama-cpp"), "glm-llama"),
+        (("--llm", "vllm"), "paddle-vllm"),
+        (("--llm", "llama-cpp", "--no-llm"), "paddle-vllm"),
+    ],
+)
+def test_the_ocr_summary_names_the_model_the_run_starts(monkeypatch, argv, first):
+    """The plan summary's OCR model comes from the chain beside the run's LLM server."""
+    from bibr.config import Settings
+    from bibr.ocr import registry
+
+    monkeypatch.setattr(registry.sys, "platform", "linux")
+    monkeypatch.setattr(registry.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: 24.0)
+    models = {
+        c.backend: c.model
+        for c in registry.resolve_backend_candidates("paddle", Settings, llm_backend="vllm")
+    }
+    assert models["paddle-vllm"] != models["glm-llama"]
+
+    config = _resolve("paper.pdf", "--ocr", "paddle", "--memory", "balanced", *argv)
+
+    assert config.ocr_summary_model == models[first]
 
 
 @pytest.mark.parametrize(
