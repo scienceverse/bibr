@@ -5,6 +5,11 @@ emulated 8 GB card with a desktop on it (a hog on an RTX 3090), the second chunk
 llama.cpp server started beside the 4B Q8_0 LLM server (5,088 MiB), could not
 allocate its 482 MiB compute buffer, and every page of that chunk failed with
 connection errors.
+
+In the aggressive memory mode it always stops. On an emulated 10 GB card with a
+0.5 GiB desktop, 3.79 GiB was free before each GLM-OCR start, enough for the
+free-memory rule to keep the LLM resident, and bibr's own GPU sessions were left
+about 1.97 GiB while OCR ran (75 layout splits on running out of memory).
 """
 
 from __future__ import annotations
@@ -36,9 +41,21 @@ def test_llama_cpp_llm_stops_when_glm_ocr_cannot_fit_beside_it(monkeypatch):
     assert rm._llm_server_blocks_ocr("glm-llama")
 
 
-@pytest.mark.parametrize("memory_mode", ["aggressive", "balanced"])
+@pytest.mark.parametrize("memory_mode", ["balanced", "keep_all"])
 def test_llama_cpp_llm_stays_up_when_glm_ocr_fits_beside_it(monkeypatch, memory_mode):
     rm = _manager(monkeypatch, free_gb=NEED_GB + 0.01, memory_mode=memory_mode)
+    assert not rm._llm_server_blocks_ocr("glm-llama")
+
+
+@pytest.mark.parametrize("free_gb", [3.79, NEED_GB + 0.01, 20.0])
+def test_aggressive_mode_stops_it_even_when_glm_ocr_would_fit_beside_it(monkeypatch, free_gb):
+    # 3.79 GiB: the emulated 10 GB card's reading before each GLM-OCR start.
+    rm = _manager(monkeypatch, free_gb=free_gb)
+    assert rm._llm_server_blocks_ocr("glm-llama")
+
+
+def test_the_10gb_reading_keeps_it_up_in_balanced_mode(monkeypatch):
+    rm = _manager(monkeypatch, free_gb=3.79, memory_mode="balanced")
     assert not rm._llm_server_blocks_ocr("glm-llama")
 
 
@@ -54,8 +71,11 @@ def test_without_a_reading_only_aggressive_mode_stops_it(monkeypatch, memory_mod
     assert rm._llm_server_blocks_ocr("glm-llama") is stops
 
 
-def test_an_ocr_url_is_never_a_reason_to_stop_it(monkeypatch):
-    rm = _manager(monkeypatch, free_gb=0.5, ocr_url="http://127.0.0.1:9/v1")
+@pytest.mark.parametrize("memory_mode", ["aggressive", "balanced"])
+def test_an_ocr_url_is_never_a_reason_to_stop_it(monkeypatch, memory_mode):
+    rm = _manager(
+        monkeypatch, free_gb=0.5, memory_mode=memory_mode, ocr_url="http://127.0.0.1:9/v1"
+    )
     assert not rm._llm_server_blocks_ocr("glm-llama")
 
 

@@ -822,8 +822,8 @@ class ResourceManager:
         next chunk's GLM-OCR llama.cpp server started beside it could not
         allocate its compute buffer and failed every page (an emulated 8 GB
         card with a desktop on it, from the second chunk on), so it stops
-        when the memory free then cannot also hold GLM-OCR
-        (``_llama_cpp_llm_blocks_glm_ocr``).
+        in the aggressive memory mode, and in any other when the memory free
+        then cannot also hold GLM-OCR (``_llama_cpp_llm_blocks_glm_ocr``).
         """
         if ocr_backend == "glm-llama" and self._llm_server_backend == "llama-cpp":
             return self._llama_cpp_llm_blocks_glm_ocr()
@@ -836,22 +836,39 @@ class ResourceManager:
     def _llama_cpp_llm_blocks_glm_ocr(self) -> bool:
         """Whether a managed GLM-OCR start needs the llama.cpp LLM server's memory.
 
-        It does when less is free than GLM-OCR holds
+        The aggressive memory mode, which bibr picks for CUDA cards below
+        12 GB whose LLM server it manages, always stops it. Beside a resident
+        LLM, an emulated 10 GB card with a 0.5 GiB desktop left bibr about
+        1.97 GiB for its own GPU sessions while OCR ran, against their
+        aggressive-mode peak of about 3.1 GiB, and the layout model split its
+        batches on running out of memory 75 times. Stopping costs no measured
+        speed: on the same 48 papers that card ran 148.2 papers an hour with
+        the LLM resident, and an emulated 8 GB card that stopped it before
+        every chunk's OCR after the first ran 149.5, with 26 layout splits
+        (each restart read the GGUF from a warm page cache). The rule covers
+        Windows 10–11 GB cards, pre-Ampere 11 GB cards, ``--llm llama-cpp``
+        below 12 GB and any run that sets the aggressive mode itself
+        (``--memory aggressive`` or ``PIPELINE_MEMORY_MODE=aggressive``, on a
+        card of any size), which kept the LLM resident whenever the
+        free-memory rule below allowed it; 6–9 GB cards already stopped it in
+        every measured chunk after the first.
+
+        Any other mode stops it when less is free than GLM-OCR holds
         (``GLM_LLAMA_OCR_VRAM_GB``) plus the minimum room bibr keeps for its
-        own GPU sessions (``LLM_ONNX_MIN_HEADROOM_GB``). With no reading of
-        the card (no NVIDIA GPU visible to nvidia-smi), the aggressive memory
-        mode, which bibr picks for CUDA cards below 12 GB, stops it and any
-        other mode keeps it. An OCR URL names someone else's server, which bibr
-        does not start.
+        own GPU sessions (``LLM_ONNX_MIN_HEADROOM_GB``), and keeps it with no
+        reading of the card (no NVIDIA GPU visible to nvidia-smi). An OCR URL
+        names someone else's server, which bibr does not start.
         """
         if self.ocr_url:
             return False
+        if self.memory_mode == "aggressive":
+            return True
         from bibr.local.vllm_share import LLM_ONNX_MIN_HEADROOM_GB
         from bibr.ocr.registry import GLM_LLAMA_OCR_VRAM_GB, managed_gpu_memory
 
         reading = managed_gpu_memory()
         if reading is None:
-            return self.memory_mode == "aggressive"
+            return False
         return reading.free_gb < GLM_LLAMA_OCR_VRAM_GB + LLM_ONNX_MIN_HEADROOM_GB
 
     async def llm_start_refusal(self, backend: str) -> ManagedLlmVramError | None:
