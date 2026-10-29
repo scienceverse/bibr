@@ -43,6 +43,7 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import os
+import threading
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -661,6 +662,9 @@ class OnnxLayoutBackend:
         )
         self.threshold = threshold
         model_path = self.bundle_dir / self.manifest.get("model_file", ONNX_MODEL)
+        self._model_path = model_path
+        self._cpu_session = None
+        self._cpu_session_lock = threading.Lock()
         self.session, self.device = create_session(
             model_path,
             device=device,
@@ -692,13 +696,35 @@ class OnnxLayoutBackend:
 
     def close(self) -> None:
         self.session = None
+        self._cpu_session = None
 
-    def forward(self, pixel_values: np.ndarray) -> tuple[np.ndarray, ...]:
+    def _session_on_cpu(self):
+        """A CPU session on the same graph, opened on first use (GPU OOM last resort)."""
+        if self.device == "cpu":
+            return self.session
+        with self._cpu_session_lock:
+            if self._cpu_session is None:
+                from bibr.utils.onnx_providers import create_session
+
+                self._cpu_session, _device = create_session(
+                    self._model_path,
+                    device="cpu",
+                    model_name=f"layout ({architecture_label(self.architecture)} ONNX, CPU)",
+                    disable_cpu_arena=True,
+                )
+            return self._cpu_session
+
+    def forward(self, pixel_values: np.ndarray, *, session=None) -> tuple[np.ndarray, ...]:
         """Raw graph outputs, in :attr:`output_names` order."""
-        outs = self.session.run(list(self.output_names), {self._input_name: pixel_values})
+        session = self.session if session is None else session
+        outs = session.run(list(self.output_names), {self._input_name: pixel_values})
         return tuple(outs)
 
-    def run(self, images: list[Image.Image]) -> list[dict[str, Any]]:
+    def run_on_cpu(self, images: list[Image.Image]) -> list[dict[str, Any]]:
+        """``run`` on a CPU session: for a page the GPU has no memory left for."""
+        return self.run(images, session=self._session_on_cpu())
+
+    def run(self, images: list[Image.Image], *, session=None) -> list[dict[str, Any]]:
         """Detect on PIL page images; one HF-shaped result dict per image."""
         if not images:
             return []
@@ -711,7 +737,7 @@ class OnnxLayoutBackend:
             image_std=self.image_std,
             rescale_before_resize=self.rescale_before_resize,
         )
-        outputs = self.forward(pixel_values)
+        outputs = self.forward(pixel_values, session=session)
         if self.architecture == PP_DOCLAYOUT_V4:
             return decode_detections_v4(*outputs, orig_sizes, self.threshold)
         return decode_detections(*outputs, orig_sizes, self.threshold)

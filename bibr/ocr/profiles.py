@@ -130,7 +130,8 @@ PADDLE_PROFILE = OcrProfile(
 
 GLM_PROFILE = OcrProfile(
     name="glm",
-    normalizer_version="glm-canonical-v1",
+    # v2 keeps the complete OCR text, so v1 cache entries without it are not reused.
+    normalizer_version="glm-canonical-v2",
     prompts={
         "text": "Text Recognition:",
         "table": "Table Recognition:",

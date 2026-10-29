@@ -1259,3 +1259,61 @@ def test_spawn_and_wait_shuts_down_on_task_cancellation(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         server._spawn_and_wait(["sleep", "30"])
     assert server._process is None
+
+
+# Rapid-MLX downloads a repository's main: the 4B's pinned MLX build is
+# downloaded at its commit (bibr.local.hub_pins; stubbed by tests/conftest.py)
+# and served from its snapshot directory under the Hub id.
+_PINNED_MLX = "scienceverse/bibr-extract-qwen35-4b-mlx-8bit"
+_PINNED_MLX_SNAPSHOT = (
+    "models--scienceverse--bibr-extract-qwen35-4b-mlx-8bit/snapshots/"
+    "432b8cd80ea920919ef26c48401473c6d8c8a3e1"
+)
+
+
+def test_pinned_mlx_build_is_served_from_its_snapshot_under_the_hub_id(monkeypatch):
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.rapid_mlx.spec_decode = "auto"
+
+    cmd = _capture_server_cmd(monkeypatch, model=_PINNED_MLX, multimodal=False, settings=settings)
+
+    assert cmd[1:3] == ["serve", f"/nonexistent-hf-cache/{_PINNED_MLX_SNAPSHOT}"]
+    assert cmd[cmd.index("--served-model-name") + 1] == _PINNED_MLX
+    # MTP is still picked from the Hub id.
+    assert cmd[cmd.index("--spec-decode") + 1] == "mtp"
+
+
+@pytest.mark.parametrize(
+    ("hf_home", "hf_hub_cache", "expected"),
+    [
+        ("/Volumes/hf", None, "/Volumes/hf/hub"),
+        ("/Volumes/hf", "/Volumes/hub-cache", "/Volumes/hub-cache"),
+    ],
+)
+def test_pinned_mlx_build_is_downloaded_into_rapid_mlx_cache(
+    monkeypatch, hf_home, hf_hub_cache, expected
+):
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.rapid_mlx.hf_home = hf_home
+    settings.rapid_mlx.hf_hub_cache = hf_hub_cache
+
+    cmd = _capture_server_cmd(monkeypatch, model=_PINNED_MLX, multimodal=False, settings=settings)
+
+    assert cmd[2] == f"{expected}/{_PINNED_MLX_SNAPSHOT}"
+
+
+def test_unpinned_mlx_ids_are_passed_to_rapid_mlx_unchanged(monkeypatch):
+    from bibr.config import GlobalSettings
+
+    cmd = _capture_server_cmd(
+        monkeypatch,
+        model="scienceverse/bibr-extract-qwen35-2b-mlx-8bit",
+        multimodal=False,
+        settings=GlobalSettings(),
+    )
+
+    assert cmd[2] == "scienceverse/bibr-extract-qwen35-2b-mlx-8bit"

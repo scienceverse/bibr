@@ -55,10 +55,15 @@ _FILE_MODE = 0o600
 _KEY_CHARS = 32
 
 
-# Prompts fence document data behind a per-call `uuid4().hex` boundary as an
-# injection guard (bibr.clients.prompts.fence), so the same logical request has
-# different bytes on every run. Marker lines look like `--- <hex32> START ---`
-# or `--- <hex32> BEGIN REFERENCES ---`; matching the marker *line* rather than
+# Prompts fence document data behind a 32-hex boundary as an injection guard
+# (bibr.clients.prompts.fence). The boundary is now derived from the request's
+# own data (bibr.clients.prompts.fence_boundary), but releases before that
+# minted a random `uuid4().hex` per call, and a fan-out shares one boundary
+# across calls that a standalone call derives differently. Canonicalising the
+# boundary out of the key keeps those entries reachable, and it merges nothing
+# new: the rest of the canonical text holds the data the boundary derives from.
+# Marker lines look like `--- <hex32> START ---` or
+# `--- <hex32> BEGIN REFERENCES ---`; matching the marker *line* rather than
 # any bare 32-hex token keeps an MD5 that happens to appear in a paper's text
 # from being canonicalised away and merging two genuinely different documents.
 _FENCE_MARKER_RE = re.compile(r"^--- ([0-9a-f]{32}) [A-Z][A-Z ]*---$", re.MULTILINE)
@@ -66,10 +71,11 @@ _BOUNDARY_PLACEHOLDER = "<bibr:boundary>"
 
 
 def canonical_user_text(text: str) -> str:
-    """Replace per-call fence boundaries so the same request hashes the same.
+    """Replace fence boundaries so the same request hashes the same.
 
-    Without this the cache could never hit: 10 of bibr's 13 call sites mint a
-    fresh boundary per call, so identical work produces a fresh key every run.
+    Entries written by releases that minted a random boundary per call, and the
+    same prompt fenced under a fan-out's shared boundary, key the same as a
+    request fenced under its own derived boundary.
     """
     for boundary in set(_FENCE_MARKER_RE.findall(text)):
         text = text.replace(boundary, _BOUNDARY_PLACEHOLDER)

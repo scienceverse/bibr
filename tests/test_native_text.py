@@ -551,10 +551,9 @@ def test_fill_skips_table_regions():
 
 
 def test_eligible_labels_include_header_footer():
-    """x-performance-3 behind OCR_NATIVE_TEXT_HEADER_FOOTER (default off).
+    """x-performance-3 behind OCR_NATIVE_TEXT_HEADER_FOOTER (default on).
 
-    Default output is unchanged (header/footer go to OCR); opting in adds
-    them to the eligible set. Short running heads keep the short-text
+    The setting adds header/footer to the eligible set; off, they go to OCR. Short running heads keep the short-text
     allowance in both cases (it only matters once they are eligible).
     """
     from bibr.config import GlobalSettings
@@ -565,7 +564,7 @@ def test_eligible_labels_include_header_footer():
         resolve_eligible_labels,
     )
 
-    assert GlobalSettings().ocr.native_text_header_footer is False
+    assert GlobalSettings().ocr.native_text_header_footer is True
     assert "header" not in DEFAULT_ELIGIBLE_LABELS
     assert "footer" not in DEFAULT_ELIGIBLE_LABELS
     assert resolve_eligible_labels(False) == DEFAULT_ELIGIBLE_LABELS
@@ -576,13 +575,16 @@ def test_eligible_labels_include_header_footer():
     assert "footer" in _SHORT_NATIVE_TEXT_LABELS
 
 
-def test_header_footer_setting_defaults_off_but_enables_fill(monkeypatch):
+def test_header_footer_setting_gates_the_fill(monkeypatch):
     """The setting gates the behavior: off skips header/footer, on fills."""
+    import bibr.ocr.native_text as native_mod
     from bibr.config import GlobalSettings
     from bibr.ocr.native_text import resolve_eligible_labels
 
-    monkeypatch.setenv("OCR_NATIVE_TEXT_HEADER_FOOTER", "true")
-    assert GlobalSettings().ocr.native_text_header_footer is True
+    # A whole-page box around two lines is no first-page masthead.
+    monkeypatch.setattr(native_mod, "_masthead_needs_ocr", lambda *a, **k: False)
+    monkeypatch.setenv("OCR_NATIVE_TEXT_HEADER_FOOTER", "false")
+    assert GlobalSettings().ocr.native_text_header_footer is False
 
     pdf_bytes = FIXTURE_PDF.read_bytes()
     regions_off = [
@@ -606,11 +608,14 @@ def test_header_footer_setting_defaults_off_but_enables_fill(monkeypatch):
     assert filled_on[0][0]["_native_text_used"] is True
 
 
-def test_fill_populates_header_footer_from_native_pdf():
+def test_fill_populates_header_footer_from_native_pdf(monkeypatch):
     """Header/footer regions fill from the text layer like body text (same
     printable-ratio gate): every such region otherwise costs an OCR call."""
+    import bibr.ocr.native_text as native_mod
     from bibr.ocr.native_text import resolve_eligible_labels
 
+    # A whole-page box around two lines is no first-page masthead.
+    monkeypatch.setattr(native_mod, "_masthead_needs_ocr", lambda *a, **k: False)
     pdf_bytes = FIXTURE_PDF.read_bytes()
     regions = [
         [
@@ -637,6 +642,8 @@ def test_fill_accepts_short_header_footer_below_body_min_chars(monkeypatch):
 
     pdf_bytes = FIXTURE_PDF.read_bytes()
     monkeypatch.setattr(native_mod, "_text_from_bbox_on_textpage", lambda *a, **k: "Cell Biology")
+    # A whole-page box around two lines is no first-page masthead.
+    monkeypatch.setattr(native_mod, "_masthead_needs_ocr", lambda *a, **k: False)
 
     regions = [
         [
@@ -678,6 +685,115 @@ def test_fill_header_footer_still_reject_corrupt_text(monkeypatch):
 
     for region in filled[0]:
         assert "_native_text_used" not in region, region["label"]
+
+
+def test_formula_number_setting_defaults_off_and_resolves(monkeypatch):
+    """OCR_NATIVE_TEXT_FORMULA_NUMBER (default off) adds formula_number to the
+    eligible labels; off leaves the default set unchanged."""
+    from bibr.config import GlobalSettings
+    from bibr.ocr.native_text import (
+        DEFAULT_ELIGIBLE_LABELS,
+        FORMULA_NUMBER_LABELS,
+        HEADER_FOOTER_LABELS,
+        resolve_eligible_labels,
+    )
+
+    assert GlobalSettings().ocr.native_text_formula_number is False
+    assert "formula_number" not in DEFAULT_ELIGIBLE_LABELS
+    assert {"formula_number"} == FORMULA_NUMBER_LABELS
+    assert resolve_eligible_labels(False, False) == DEFAULT_ELIGIBLE_LABELS
+    assert resolve_eligible_labels(False, True) == DEFAULT_ELIGIBLE_LABELS | FORMULA_NUMBER_LABELS
+    assert resolve_eligible_labels(True, True) == (
+        DEFAULT_ELIGIBLE_LABELS | HEADER_FOOTER_LABELS | FORMULA_NUMBER_LABELS
+    )
+
+    monkeypatch.setenv("OCR_NATIVE_TEXT_FORMULA_NUMBER", "true")
+    assert GlobalSettings().ocr.native_text_formula_number is True
+
+
+@pytest.mark.parametrize(
+    ("native", "filled"),
+    [
+        ("(3)", "(3)"),
+        ("7", "7"),
+        ("(2.14a)", "(2.14a)"),
+        ("(S12)", "(S12)"),
+        ("(A.1)", "(A.1)"),
+        ("ii", "ii"),
+        ("(iv)", "(iv)"),
+        ("(IV)", "(IV)"),
+        ("(a)", None),  # a letter alone is no equation number
+        ("(S)", None),
+        ("(ix)", "(ix)"),
+        ("(xii)", "(xii)"),
+        ("(XIV)", "(XIV)"),
+        ("(c)", None),  # roman digits beyond i, v and x are letters here
+        ("(d)", None),
+        ("(L)", None),
+        ("(mid)", None),
+        ("(iiii)", None),  # not a well-formed numeral
+        ("(vx)", None),
+        ("( 1 )", "(1)"),
+        ("x = \\alpha + \\beta (3)", None),  # 22 chars: the box caught the formula
+        ("g (3)", None),  # a formula glyph the box caught
+        ("\u00f01\u00de", None),  # "(1)" in a symbol font's encoding
+        ("()", None),
+    ],
+)
+def test_fill_formula_number_short_text_allowance(monkeypatch, native, filled):
+    """Equation numbers fill below the body min_chars when they look like one;
+    longer or malformed text falls back to OCR."""
+    import bibr.ocr.native_text as native_mod
+    from bibr.ocr.native_text import resolve_eligible_labels
+
+    pdf_bytes = FIXTURE_PDF.read_bytes()
+    monkeypatch.setattr(native_mod, "_text_from_bbox_on_textpage", lambda *a, **k: native)
+
+    def regions():
+        return [
+            [
+                {
+                    "label": "formula_number",
+                    "task_type": "text",
+                    "bbox_2d": [0, 0, 1000, 1000],
+                    "content": "",
+                }
+            ]
+        ]
+
+    off = fill_regions_from_native_text(
+        pdf_bytes, regions(), min_chars=20, eligible_labels=resolve_eligible_labels(True, False)
+    )
+    assert "_native_text_used" not in off[0][0]
+
+    on = fill_regions_from_native_text(
+        pdf_bytes, regions(), min_chars=20, eligible_labels=resolve_eligible_labels(False, True)
+    )
+    assert on[0][0].get("_native_text_used", False) is (filled is not None)
+    assert on[0][0]["content"] == (filled or "")
+
+
+def test_fill_formula_number_still_rejects_corrupt_text(monkeypatch):
+    """The printable-ratio gate still applies to equation numbers."""
+    import bibr.ocr.native_text as native_mod
+    from bibr.ocr.native_text import resolve_eligible_labels
+
+    pdf_bytes = FIXTURE_PDF.read_bytes()
+    monkeypatch.setattr(native_mod, "_text_from_bbox_on_textpage", lambda *a, **k: "(\ufffd\ufffd)")
+    regions = [
+        [
+            {
+                "label": "formula_number",
+                "task_type": "text",
+                "bbox_2d": [0, 0, 1000, 1000],
+                "content": "",
+            }
+        ]
+    ]
+    filled = fill_regions_from_native_text(
+        pdf_bytes, regions, min_chars=5, eligible_labels=resolve_eligible_labels(False, True)
+    )
+    assert "_native_text_used" not in filled[0][0]
 
 
 def test_fill_respects_min_chars_threshold():

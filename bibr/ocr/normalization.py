@@ -22,7 +22,9 @@ def normalize_ocr_output(
 ) -> NormalizedOcrOutput:
     """Normalize raw model output according to its model profile."""
     if profile.name == "glm":
-        return NormalizedOcrOutput(content=raw_content, raw_content=None)
+        # GLM output is already canonical, but readers of the complete OCR text
+        # (the publisher-box DOI check) need it as for any other profile.
+        return NormalizedOcrOutput(content=raw_content, raw_content=raw_content)
 
     content = raw_content
     if profile.name == "paddle" and task == "table":

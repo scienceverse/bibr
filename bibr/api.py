@@ -431,6 +431,15 @@ def _settled(fs: Any) -> bool:
     return bool(fs.error) or fs.result_json is not None
 
 
+async def _release_heap_after_chunk(pipeline: Any) -> None:
+    # Freed page images stay in glibc's malloc arenas, so without this a long
+    # batch keeps each chunk's high-water mark (PIPELINE_HEAP_TRIM, see
+    # bibr.utils.heap). A single-file chew never comes through here.
+    from bibr.utils.heap import trim_after_chunk
+
+    await trim_after_chunk(getattr(pipeline, "settings", None))
+
+
 async def _process_batch(
     pipeline: Any,
     files: list[Path],
@@ -465,6 +474,7 @@ async def _process_batch(
             if len(chunk) == 1 and not _settled(chunk[0]):
                 _crash(chunk[0], exc)  # it crashed on its own already
         else:
+            await _release_heap_after_chunk(pipeline)
             continue
         # Out of the except block, so the crash's traceback, and the frames
         # holding the chunk's pages, are released before its files run again;
@@ -481,6 +491,7 @@ async def _process_batch(
             except Exception as solo_exc:  # noqa: BLE001
                 _crash(alone, solo_exc)
                 alone.free_all()
+        await _release_heap_after_chunk(pipeline)
     results: list[Result | ChewFailure] = []
     for fs in states:
         if not fs.error and fs.result_json is None:
