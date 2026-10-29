@@ -618,8 +618,9 @@ class LlmOptions(_BibrSettings):
         None,
         ge=1,
         description="The LLM server's context window in tokens. When set, long inputs are cut "
-        "so prompt plus completion fits it. bibr fills it in for the servers it starts and "
-        "learns it from a context-length rejection otherwise.",
+        "so prompt plus completion fits it. bibr fills it in for the servers it starts. "
+        "Otherwise it learns it from a context-length rejection, or from the server's "
+        "/v1/models listing when an answer stops at the window.",
     )
     # Reference-segmentation OUTPUT bound: the anchor-emit call produces ~1 short
     # anchor per reference, so a long bibliography in one window emits too many
@@ -701,16 +702,39 @@ class LlmOptions(_BibrSettings):
     local_model: str | None = Field(
         None,
         description="Model id served by the managed local LLM backends. Unset picks the "
-        "recommended model the selected backend can load: bibr's fine-tuned Qwen3.5-4B "
-        "(scienceverse/bibr-extract-qwen35-4b): bf16 for vLLM, the GGUF Q8_0 build for "
-        "llama.cpp and the 8-bit MLX build for Apple Silicon. `bibr setup` writes it "
-        "explicitly and picks a smaller build, or the 2B student, when memory is short.",
+        "build `bibr setup` would write for the selected backend and the detected memory "
+        "(the NVIDIA card's, or system RAM on Apple Silicon; the tier table in "
+        "docs/guides/extraction-models.md): bibr's fine-tuned Qwen3.5-4B "
+        "(scienceverse/bibr-extract-qwen35-4b) as bf16 on vLLM from 20 GB and its W4A16 "
+        "build below; on llama.cpp its GGUF Q8_0 build from 7 GB and Q4_K_M below; on "
+        "Apple Silicon its 8-bit MLX build. The 2B student only when a 2B build fits and "
+        "no 4B build does; when nothing fits, the build with the smallest minimum. Unknown "
+        "memory gets the backend's first build (4B bf16 on vLLM, Q8_0 on llama.cpp). "
+        "`bibr setup` writes it explicitly. The registry's 4B builds are pinned to a Hub "
+        "commit; on llama.cpp this may also be the path of a local .gguf file.",
     )
     local_mem_fraction: float = Field(
         0.85,
         ge=0.0,
         le=1.0,
-        description="GPU memory fraction reserved for the managed local LLM server (0.0-1.0).",
+        description=(
+            "Share of GPU memory (0.0-1.0) for the managed vLLM LLM server. Left unset, it is "
+            "the most the server takes: bibr sizes the share from the GPU memory free when the "
+            "server starts. Set it to start the server at exactly this share."
+        ),
+    )
+    local_min_vram_gb: float | None = Field(
+        None,
+        gt=0.0,
+        description=(
+            "Minimum budget (GiB) of a managed vLLM LLM server's model: when bibr sizes the "
+            "server's share at a start, a share below it is refused before vLLM is launched. "
+            "It sets the minimum of a model that bibr's registry does not list, such as a local "
+            "path (6.0 for a local copy of the 4B student's W4A16 build served with "
+            "--max-num-seqs 64 on vLLM 0.32, 7.25 with an MTP --speculative-config of your "
+            "own). For a model the registry lists it can raise the registry's minimum but not "
+            "lower it: a lower value is ignored with a warning."
+        ),
     )
     vllm_mlx_port: int = Field(8767, description="Port for the managed vllm-mlx LLM server.")
     # Extra CLI args appended to the managed ``vllm_mlx.server`` command
@@ -740,6 +764,16 @@ class LlmOptions(_BibrSettings):
         "",
         description="Extra CLI args appended to the managed vLLM LLM server command "
         "(overrides registry defaults on repeated flags).",
+    )
+    vllm_spec_decode: Literal["auto", "none", "mtp", "dflash"] = Field(
+        "auto",
+        description="Speculative decoding for the managed vLLM LLM server: 'auto' (MTP when "
+        "bibr's model registry lists an MTP config for the model, the server stays up for the "
+        "whole run, and its budget meets MTP's minimum; none when it restarts every chunk to "
+        "take turns with a managed PaddleOCR-VL server, as by default on cards up to 64 GB), "
+        "'none', or 'mtp' / 'dflash' at every start when the registry lists that config for "
+        "the model (DFlash: the 4B student's bf16 build only); the start then needs that "
+        "config's larger minimum. A --speculative-config in LLM_VLLM_EXTRA_ARGS wins.",
     )
     # Managed Rapid-MLX LLM server (Apple Silicon experimental fast path).
     rapid_mlx_model: str = Field(
@@ -825,7 +859,7 @@ class LlmOptions(_BibrSettings):
         description="Poll interval in seconds for the offline batch LLM layer's job status checks.",
     )
 
-    @field_validator("provider", "backend", "structured_backend", mode="before")
+    @field_validator("provider", "backend", "structured_backend", "vllm_spec_decode", mode="before")
     @classmethod
     def _lower_llm_choice(cls, v):
         """Normalize choice-like values so the Literal check is case-insensitive."""
@@ -2175,7 +2209,7 @@ class PipelineOptions(_BibrSettings):
         None,
         description="Default memory mode when no --memory flag / LocalPipeline arg is given: "
         '"aggressive", "balanced", or "keep_all". Null selects aggressive on systems '
-        "with <=8 GB RAM or CUDA GPUs with <=8 GB VRAM; otherwise balanced.",
+        "with <=8 GB RAM or CUDA GPUs below 12 GB of VRAM; otherwise balanced.",
     )
     integrity_statement_mode: Literal["legacy", "shadow", "active"] = Field(
         "shadow",

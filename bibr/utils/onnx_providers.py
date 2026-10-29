@@ -467,7 +467,15 @@ def create_session(
     whose provider chain includes CUDA: the CUDA EP has its own arena
     (``kSameAsRequested`` plus per-run shrinkage) and disabling the CPU arena
     there is unverified. Only pass it for models where the arena cost was
-    measured (layout, SaT), not blindly for every model.
+    measured (layout, SaT) and for the CPU sessions that run single inputs
+    after a GPU out-of-memory failure (layout, NER parser, section
+    classifier), not blindly for every model.
+
+    When the CUDA session cannot be opened because the GPU is out of memory
+    (:func:`is_session_gpu_oom`), the model is opened on the CPU instead, with
+    a warning, and ``device`` is ``"cpu"``: the same last resort the models
+    take for a single input that does not fit at run time. Other failures
+    raise.
     """
     ort = import_onnxruntime(model_name or "ONNX Runtime inference")
     allow_accelerators = enable_cuda_for(device)
@@ -484,6 +492,47 @@ def create_session(
     options.log_severity_level = 3  # errors only; ORT's warnings are noisy at load
     if disable_cpu_arena and selected_device(providers) != "cuda":
         options.enable_cpu_mem_arena = False
-    session = ort.InferenceSession(str(model_path), sess_options=options, providers=providers)
+    session = None
+    try:
+        session = ort.InferenceSession(str(model_path), sess_options=options, providers=providers)
+    except Exception as exc:
+        if not is_session_gpu_oom(exc, providers):
+            raise
+        warn_session_on_cpu(model_name, exc)
+    if session is None:
+        # Opened outside the handler, so the failed session's buffers are
+        # released first. The CPU session gets the options a CPU request for
+        # this model would have had.
+        providers = get_ort_providers(enable_cuda=False, enable_coreml=False, model_name=model_name)
+        options = ort.SessionOptions()
+        options.log_severity_level = 3
+        if disable_cpu_arena:
+            options.enable_cpu_mem_arena = False
+        session = ort.InferenceSession(str(model_path), sess_options=options, providers=providers)
     device = session_device(session, providers, model_name=model_name)
     return shrink_arena_after_runs(session), device
+
+
+def is_session_gpu_oom(exc: BaseException, providers: list[str | tuple[str, dict]]) -> bool:
+    """Whether opening a session on *providers* failed because the GPU is out of memory.
+
+    ORT places a CUDA session's weights in its CUDA arena while it initialises
+    the session, so on a nearly full card the ``InferenceSession`` constructor
+    itself raises the arena's ``BFCArena ... Failed to allocate memory`` (the
+    sentence segmenter on an 8 GB card beside the managed vLLM server and a
+    desktop, 2026-10-26). That is the shortage the run-time batch splits handle
+    (:func:`bibr.utils.gpu_oom.is_gpu_oom_error` recognises it); any other
+    failure, and any failure of a chain without CUDA, is not.
+    """
+    from bibr.utils.gpu_oom import is_gpu_oom_error
+
+    return selected_device(providers) == "cuda" and is_gpu_oom_error(exc)
+
+
+def warn_session_on_cpu(model_name: str, exc: BaseException) -> None:
+    """Log that a model whose CUDA session could not be opened runs on the CPU instead."""
+    logger.warning(
+        "%s could not open its CUDA session: GPU out of memory (%s); opening it on the CPU",
+        model_name or "ONNX model",
+        type(exc).__name__,
+    )

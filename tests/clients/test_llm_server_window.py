@@ -1,0 +1,615 @@
+"""A context window bibr did not know, read from the server when an answer stops at it.
+
+vLLM 0.31 answered a prompt whose completion cap ran past the window with HTTP
+400 and named the window, and bibr asked again with the input cut to fit. vLLM
+0.32 lowers the cap to what is left instead: the answer stops at the window
+with ``finish_reason`` ``length``, and the title/keywords call failed as
+truncated (a CPU stub of a vLLM 0.32 server). bibr now reads the window from ``/v1/models`` then.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import math
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
+
+import httpx
+import pytest
+from instructor.core.exceptions import IncompleteOutputException
+
+from bibr.clients import server_window
+from bibr.clients.llm import LLMClient, track_llm_usage
+from bibr.config import GlobalSettings
+from bibr.exceptions import LlmInvalidOutputError, LlmTruncatedError
+
+WINDOW = 8_192
+ANSWER = json.dumps(
+    {
+        "title": "A study of reading rooms",
+        "abstract": " ".join(["We describe the reading rooms of public libraries in detail."] * 50),
+        "keywords": ["libraries", "reading rooms"],
+    }
+)
+WORD = "library "  # 2 tokens to the stub
+
+
+def _tokens(text: str) -> int:
+    return math.ceil(len(text) / 4)
+
+
+class _Stub:
+    """An OpenAI-compatible server that answers like vLLM 0.31 or 0.32.
+
+    A token is 4 characters of the messages and the response format. A prompt
+    past the window alone is rejected by both versions. When prompt plus the
+    completion cap runs past it, 0.31 rejects the request and 0.32 lowers the
+    cap to what is left. ``server_cap`` is a limit of the server's own, such as
+    a generation config's ``max_new_tokens``; ``short_of_window`` stops every
+    answer that many tokens before the window.
+    """
+
+    def __init__(
+        self,
+        version: str,
+        *,
+        lists_window: bool = True,
+        server_cap: int | None = None,
+        usage: bool = True,
+        answer: str = ANSWER,
+        second_answer_delay: float = 0.0,
+        short_of_window: int = 0,
+        models_delay: float = 0.0,
+    ):
+        self.version = version
+        self.lists_window = lists_window
+        self.server_cap = server_cap
+        self.usage = usage
+        self.answer = answer
+        self.second_answer_delay = second_answer_delay
+        self.short_of_window = short_of_window
+        self.models_delay = models_delay
+        self.log: list[dict] = []
+
+    def models(self) -> tuple[int, dict]:
+        self.log.append({"route": "models"})
+        time.sleep(self.models_delay)
+        entry: dict = {"id": "stub", "object": "model"}
+        if self.lists_window:
+            entry["max_model_len"] = WINDOW
+        return 200, {"object": "list", "data": [entry]}
+
+    def chat(self, body: dict) -> tuple[int, dict]:
+        text = "".join(
+            m["content"] if isinstance(m.get("content"), str) else json.dumps(m.get("content"))
+            for m in body.get("messages", [])
+        )
+        prompt = _tokens(text) + _tokens(json.dumps(body.get("response_format") or ""))
+        cap = body.get("max_tokens") or body.get("max_completion_tokens") or WINDOW - prompt
+        record = {"route": "chat", "prompt_tokens": prompt, "max_tokens": cap}
+        self.log.append(record)
+        if self.second_answer_delay and self.routes().count("chat") == 2:
+            time.sleep(self.second_answer_delay)
+        if prompt > WINDOW or (prompt + cap > WINDOW and self.version == "0.31"):
+            record["status"] = 400
+            return 400, {
+                "error": {
+                    "message": f"This model's maximum context length is {WINDOW} tokens. "
+                    f"However, you requested {cap} output tokens and your prompt contains at "
+                    f"least {prompt} input tokens.",
+                    "type": "BadRequestError",
+                    "code": 400,
+                }
+            }
+        room = min(cap, WINDOW - prompt - self.short_of_window, self.server_cap or WINDOW)
+        if room < _tokens(self.answer):
+            content, finish, done = self.answer[: room * 4], "length", room
+        else:
+            content, finish, done = self.answer, "stop", _tokens(self.answer)
+        record.update(status=200, finish_reason=finish, completion_tokens=done)
+        usage = {"prompt_tokens": prompt, "completion_tokens": done, "total_tokens": prompt + done}
+        return 200, {
+            "id": "x",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "stub",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": finish,
+                }
+            ],
+            **({"usage": usage} if self.usage else {}),
+        }
+
+    def routes(self) -> list[str]:
+        return [r["route"] for r in self.log]
+
+
+@pytest.fixture(autouse=True)
+def _forget_servers():
+    server_window.clear()
+    yield
+    server_window.clear()
+
+
+@pytest.fixture
+def serve():
+    servers = []
+
+    def start(stub: _Stub) -> str:
+        class Handler(BaseHTTPRequestHandler):
+            def _send(self, status: int, payload: dict) -> None:
+                data = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):  # noqa: N802
+                self._send(*stub.models())
+
+            def do_POST(self):  # noqa: N802
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                self._send(*stub.chat(body))
+
+            def log_message(self, format, *args):  # noqa: A002, ARG002
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(
+            target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        )
+        thread.start()
+        servers.append((server, thread))
+        return f"http://127.0.0.1:{server.server_port}/v1"
+
+    yield start
+    for server, thread in servers:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def _client(base_url: str, **llm) -> LLMClient:
+    settings = GlobalSettings()
+    settings.llm.provider = "openai"
+    settings.llm.base_url = base_url
+    settings.llm.model = "stub"
+    settings.llm.api_key = "stub-key"
+    settings.llm.context_tokens = None
+    settings.llm.pointer_outputs = False
+    for key, value in llm.items():
+        setattr(settings.llm, key, value)
+    return LLMClient(settings=settings)
+
+
+def _room_300_text(serve) -> str:
+    """Front matter whose prompt fits the window but leaves 300 tokens, fewer
+    than the answer needs. The prompt around the text is measured first."""
+    probe = _Stub("0.32")
+    url = serve(probe)
+    asyncio.run(_client(url).extract_title_keywords(WORD * 200))
+    around = probe.log[0]["prompt_tokens"] - _tokens(WORD * 200)
+    return WORD * ((WINDOW - 300 - around) // 2)
+
+
+def test_vllm_031_names_the_window_in_a_400_and_the_call_is_asked_again(serve):
+    text = _room_300_text(serve)
+    stub = _Stub("0.31")
+    client = _client(serve(stub))
+
+    result = asyncio.run(client.extract_title_keywords(text))
+
+    assert result.title == "A study of reading rooms"
+    assert client._settings.llm.context_tokens == WINDOW
+    # Learned from the rejection: the model list is not read.
+    assert stub.routes() == ["chat", "chat"]
+    assert [r["status"] for r in stub.log] == [400, 200]
+
+
+def test_vllm_032_stops_at_the_window_and_the_window_is_read_from_the_model_list(serve):
+    text = _room_300_text(serve)
+    stub = _Stub("0.32")
+    client = _client(serve(stub))
+
+    result = asyncio.run(client.extract_title_keywords(text))
+
+    assert result.title == "A study of reading rooms"
+    assert client._settings.llm.context_tokens == WINDOW
+    assert stub.routes() == ["chat", "models", "chat"]
+    first, retry = stub.log[0], stub.log[2]
+    assert first["finish_reason"] == "length"
+    assert first["prompt_tokens"] + first["completion_tokens"] == WINDOW
+    # Asked again with the input cut so the answer's cap fits beside it.
+    assert retry["prompt_tokens"] + retry["max_tokens"] <= WINDOW
+    assert retry["finish_reason"] == "stop"
+
+
+def test_a_server_that_lists_no_window_fails_the_call_as_before_and_is_not_asked_again(serve):
+    text = _room_300_text(serve)
+    stub = _Stub("0.32", lists_window=False)
+    client = _client(serve(stub))
+
+    for _ in range(2):
+        with pytest.raises(LlmTruncatedError):
+            asyncio.run(client.extract_title_keywords(text))
+
+    assert client._settings.llm.context_tokens is None
+    assert stub.routes() == ["chat", "models", "chat"]
+
+
+@pytest.mark.parametrize(
+    "short", [{"server_cap": 100}, {"short_of_window": 1}], ids=["server-cap", "one-token-short"]
+)
+def test_an_answer_stopped_short_of_the_window_teaches_no_window(serve, short):
+    """A limit of the server's own also stops an answer short of the cap. The
+    window it lists is not reached, so it is not the cause and is not taken."""
+    text = _room_300_text(serve)
+    stub = _Stub("0.32", **short)
+    client = _client(serve(stub))
+
+    with pytest.raises(LlmTruncatedError):
+        asyncio.run(client.extract_title_keywords(text))
+
+    assert client._settings.llm.context_tokens is None
+    assert stub.routes() == ["chat", "models"]
+
+
+def test_an_answer_without_usage_cannot_be_measured_against_the_window(serve):
+    text = _room_300_text(serve)
+    stub = _Stub("0.32", usage=False)
+    client = _client(serve(stub))
+
+    with pytest.raises(LlmTruncatedError):
+        asyncio.run(client.extract_title_keywords(text))
+
+    assert client._settings.llm.context_tokens is None
+    assert stub.routes() == ["chat"]
+
+
+class _Truncated(LLMClient):
+    @track_llm_usage
+    async def ask(self, error: BaseException) -> None:
+        raise error
+
+
+@pytest.mark.parametrize(("prompt", "completion"), [(WINDOW, None), (None, WINDOW)])
+def test_usage_without_token_counts_leaves_the_truncation_to_surface(
+    monkeypatch, prompt, completion
+):
+    """An answer whose usage lacks either count cannot be measured against the
+    window, even when the other count alone reaches it."""
+    reads = []
+
+    async def listed_window(settings, **_):
+        reads.append(settings)
+        return WINDOW
+
+    monkeypatch.setattr(server_window, "listed_window", listed_window)
+    usage = SimpleNamespace(prompt_tokens=prompt, completion_tokens=completion)
+    error = IncompleteOutputException(last_completion=SimpleNamespace(usage=usage))
+    settings = GlobalSettings()
+    settings.llm.provider = "openai"
+    settings.llm.base_url = "http://127.0.0.1:9/v1"
+    settings.llm.context_tokens = None
+    client = _Truncated(settings=settings)
+
+    with pytest.raises(IncompleteOutputException) as raised:
+        asyncio.run(client.ask(error))
+
+    assert raised.value is error
+    assert client._settings.llm.context_tokens is None
+    assert reads == []
+
+
+def test_an_answer_that_does_not_parse_is_not_put_down_to_the_window(serve):
+    stub = _Stub("0.32", answer="not json at all")
+    client = _client(serve(stub))
+
+    with pytest.raises(LlmInvalidOutputError):
+        asyncio.run(client.extract_title_keywords(WORD * 1_000))
+
+    assert stub.routes() == ["chat"]
+
+
+def test_a_call_cut_to_a_known_window_does_not_read_the_model_list(serve):
+    stub = _Stub("0.32", server_cap=100)
+    client = _client(serve(stub), context_tokens=WINDOW)
+
+    with pytest.raises(LlmTruncatedError):
+        asyncio.run(client.extract_title_keywords(WORD * 1_000))
+
+    assert client._settings.llm.context_tokens == WINDOW
+    assert stub.routes() == ["chat"]
+
+
+def test_the_window_is_read_once_per_server(serve):
+    text = _room_300_text(serve)
+    stub = _Stub("0.32")
+    url = serve(stub)
+
+    for _ in range(2):
+        # A new client with its own settings, as each pipeline has.
+        assert asyncio.run(_client(url).extract_title_keywords(text)).title
+
+    assert stub.routes() == ["chat", "models", "chat", "chat", "chat"]
+
+
+def test_each_concurrent_call_that_stopped_at_the_window_is_asked_again(serve):
+    """Also the one whose answer comes after the other call learned the
+    window: it was sent without one, so its input was not cut."""
+    text = _room_300_text(serve)
+    stub = _Stub("0.32", second_answer_delay=0.5)
+    client = _client(serve(stub))
+
+    async def both():
+        return await asyncio.gather(
+            client.extract_title_keywords(text), client.extract_title_keywords(text)
+        )
+
+    results = asyncio.run(both())
+
+    assert [r.title for r in results] == ["A study of reading rooms"] * 2
+    assert client._settings.llm.context_tokens == WINDOW
+    assert stub.routes().count("chat") == 4
+
+
+def test_calls_that_stop_at_the_window_together_read_it_once(serve):
+    """Each waits for the read the first one started: before, four such calls
+    sent three."""
+    text = _room_300_text(serve)
+    stub = _Stub("0.32", models_delay=0.5)
+    client = _client(serve(stub))
+
+    async def four():
+        return await asyncio.gather(*(client.extract_title_keywords(text) for _ in range(4)))
+
+    results = asyncio.run(four())
+
+    assert [r.title for r in results] == ["A study of reading rooms"] * 4
+    assert stub.routes().count("models") == 1
+    assert stub.routes().count("chat") == 8
+
+
+def _listing(*entries: dict) -> dict:
+    return {"object": "list", "data": list(entries)}
+
+
+def _settings(base_url: str = "http://10.0.0.5:8000/v1", **llm) -> GlobalSettings:
+    settings = GlobalSettings()
+    settings.llm.provider = "openai"
+    settings.llm.base_url = base_url
+    settings.llm.model = "org/model"
+    settings.llm.api_key = None
+    for key, value in llm.items():
+        setattr(settings.llm, key, value)
+    return settings
+
+
+def _transport(*answers: tuple[int, object]):
+    requests: list[httpx.Request] = []
+    pending = list(answers)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        status, body = pending.pop(0) if len(pending) > 1 else pending[0]
+        if isinstance(body, str):
+            return httpx.Response(status, text=body)
+        return httpx.Response(status, json=body)
+
+    return httpx.MockTransport(handler), requests
+
+
+def _listed(settings: GlobalSettings, transport) -> int | None:
+    return asyncio.run(server_window.listed_window(settings, transport=transport))
+
+
+@pytest.mark.parametrize(
+    ("listing", "window"),
+    [
+        (_listing({"id": "org/model", "max_model_len": 32_768}), 32_768),
+        # One listed model is the one served, whatever it is called.
+        (_listing({"id": "/models/local-copy", "max_model_len": 16_384}), 16_384),
+        # A router listing several lends none of them its window.
+        (
+            _listing(
+                {"id": "org/other", "max_model_len": 32_768},
+                {"id": "org/model", "max_model_len": 8_192},
+            ),
+            8_192,
+        ),
+        (
+            _listing(
+                {"id": "org/other", "max_model_len": 32_768},
+                {"id": "org/third", "max_model_len": 8_192},
+            ),
+            None,
+        ),
+        (_listing({"id": "org/model"}), None),
+        (_listing({"id": "org/model", "max_model_len": 0}), None),
+        (_listing({"id": "org/model", "max_model_len": True}), None),
+        (_listing({"id": "org/model", "max_model_len": "32768"}), None),
+        ({"data": "none"}, None),
+        ([1, 2], None),
+    ],
+)
+def test_the_window_listed_for_the_model(listing, window):
+    transport, requests = _transport((200, listing))
+
+    assert _listed(_settings(), transport) == window
+    assert [str(r.url) for r in requests] == ["http://10.0.0.5:8000/v1/models"]
+    # No key, no Authorization header.
+    assert "Authorization" not in requests[0].headers
+
+
+def test_the_model_list_is_beside_a_base_url_with_a_trailing_slash():
+    transport, requests = _transport((200, _listing({"id": "org/model", "max_model_len": 8_192})))
+
+    assert _listed(_settings(base_url="http://10.0.0.5:8000/v1/"), transport) == 8_192
+    assert [str(r.url) for r in requests] == ["http://10.0.0.5:8000/v1/models"]
+
+
+@pytest.mark.parametrize("status", [500, 503])
+def test_a_server_that_does_not_answer_is_asked_again(status):
+    transport, requests = _transport(
+        (status, {"error": "loading"}), (200, _listing({"id": "org/model", "max_model_len": 4_096}))
+    )
+    settings = _settings()
+
+    assert _listed(settings, transport) is None
+    assert _listed(settings, transport) == 4_096
+    assert _listed(settings, transport) == 4_096
+    assert len(requests) == 2
+
+
+@pytest.mark.parametrize("answer", [(404, {"detail": "Not Found"}), (200, "not json")])
+def test_a_server_that_answers_without_a_window_is_not_asked_again(answer):
+    transport, requests = _transport(answer)
+    settings = _settings()
+
+    assert _listed(settings, transport) is None
+    assert _listed(settings, transport) is None
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("status", [302, 307])
+def test_a_redirect_is_not_followed_or_read_as_a_listing(status):
+    listing = _listing({"id": "org/model", "max_model_len": 8_192})
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.host == "10.0.0.5":
+            return httpx.Response(
+                status, headers={"Location": "http://10.0.0.6:8000/v1/models"}, json=listing
+            )
+        return httpx.Response(200, json=listing)
+
+    transport = httpx.MockTransport(handler)
+    settings = _settings(api_key="secret-key")
+
+    assert _listed(settings, transport) is None
+    assert _listed(settings, transport) is None
+    assert [str(r.url) for r in requests] == ["http://10.0.0.5:8000/v1/models"]
+
+
+def test_calls_that_ask_together_share_one_read():
+    requests: list[httpx.Request] = []
+    answers = [
+        (503, {"error": "loading"}),
+        (200, _listing({"id": "org/model", "max_model_len": 4_096})),
+    ]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        status, body = answers[min(len(requests), len(answers)) - 1]
+        await asyncio.sleep(0.05)
+        return httpx.Response(status, json=body)
+
+    transport = httpx.MockTransport(handler)
+    settings = _settings()
+
+    async def run():
+        together = await asyncio.gather(
+            *(server_window.listed_window(settings, transport=transport) for _ in range(4))
+        )
+        # The server did not answer them: the next call asks again.
+        later = await server_window.listed_window(settings, transport=transport)
+        return together, later
+
+    assert asyncio.run(run()) == ([None] * 4, 4_096)
+    assert len(requests) == 2
+
+
+def test_a_call_cancelled_while_it_waits_leaves_the_read_to_the_others():
+    settings = _settings()
+
+    async def run():
+        asked, answer = asyncio.Event(), asyncio.Event()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            asked.set()
+            await answer.wait()
+            return httpx.Response(200, json=_listing({"id": "org/model", "max_model_len": 8_192}))
+
+        transport = httpx.MockTransport(handler)
+        first = asyncio.ensure_future(server_window.listed_window(settings, transport=transport))
+        second = asyncio.ensure_future(server_window.listed_window(settings, transport=transport))
+        await asyncio.wait_for(asked.wait(), 5)
+        first.cancel()
+        await asyncio.sleep(0)
+        answer.set()
+        return await asyncio.wait_for(second, 5), first.cancelled()
+
+    assert asyncio.run(run()) == (8_192, True)
+
+
+def test_a_read_in_flight_on_another_threads_event_loop_is_not_awaited():
+    """Each thread that calls bibr runs its own event loop, which cannot wait
+    for another loop's read: it sends its own."""
+    first_asked, answer_first = threading.Event(), threading.Event()
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            first_asked.set()
+            answer_first.wait(5)
+        return httpx.Response(200, json=_listing({"id": "org/model", "max_model_len": 8_192}))
+
+    transport = httpx.MockTransport(handler)
+    settings = _settings()
+    other: list[int | None] = []
+    thread = threading.Thread(target=lambda: other.append(_listed(settings, transport)))
+    thread.start()
+    try:
+        assert first_asked.wait(5)
+        assert _listed(settings, transport) == 8_192
+    finally:
+        answer_first.set()
+        thread.join(5)
+
+    assert other == [8_192]
+    assert len(requests) == 2
+
+
+def test_each_model_on_a_server_has_its_own_window():
+    transport, requests = _transport(
+        (
+            200,
+            _listing(
+                {"id": "org/model", "max_model_len": 8_192},
+                {"id": "org/other", "max_model_len": 32_768},
+            ),
+        )
+    )
+
+    assert _listed(_settings(), transport) == 8_192
+    assert _listed(_settings(model="org/other"), transport) == 32_768
+    assert len(requests) == 2
+
+
+def test_a_cloud_provider_is_not_asked():
+    transport, requests = _transport((200, _listing({"id": "org/model", "max_model_len": 8_192})))
+
+    assert _listed(_settings(provider="anthropic"), transport) is None
+    assert _listed(_settings(base_url=None), transport) is None
+    assert requests == []
+
+
+def test_the_key_goes_only_where_the_chat_call_may_send_it():
+    transport, requests = _transport((200, _listing({"id": "org/model", "max_model_len": 8_192})))
+
+    public = _settings(base_url="http://example.org/v1", api_key="secret-key")
+    assert _listed(public, transport) is None
+    assert requests == []
+
+    private = _settings(api_key="secret-key")
+    assert _listed(private, transport) == 8_192
+    assert requests[0].headers["Authorization"] == "Bearer secret-key"

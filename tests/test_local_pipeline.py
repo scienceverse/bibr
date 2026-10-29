@@ -370,6 +370,36 @@ class TestLlmBackendResolution:
         assert pipe.llm_backend == "cloud"
         assert pipe._config.llm_backend == "cloud"
 
+    @pytest.mark.parametrize(
+        ("llm_backend", "no_llm", "chain"),
+        [
+            ("llama-cpp", False, ["glm-llama"]),
+            ("vllm", False, ["paddle-vllm", "glm-llama"]),
+            # --no-llm starts no LLM server, so nothing displaces paddle-vllm.
+            ("llama-cpp", True, ["paddle-vllm", "glm-llama"]),
+        ],
+    )
+    def test_the_resources_resolve_ocr_beside_the_pipelines_llm_backend(
+        self, monkeypatch, llm_backend, no_llm, chain
+    ):
+        """LocalPipeline hands its LLM backend to ResourceManager.
+
+        Without it the automatic OCR chain on a 24 GB Linux card starts
+        PaddleOCR-VL on vLLM beside a llama.cpp LLM, a pair bibr does not hand
+        GPU memory between (setup pairs GLM-OCR with it).
+        """
+        from bibr.ocr import registry
+
+        monkeypatch.setattr(registry.sys, "platform", "linux")
+        monkeypatch.setattr(registry.platform, "machine", lambda: "x86_64")
+        monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: 24.0)
+        pipe = LocalPipeline(
+            llm_backend=llm_backend, no_llm=no_llm, ocr_backend="paddle", memory_mode="balanced"
+        )
+        resources = pipe._resources
+        assert [c.backend for c in resources._resolve_ocr_candidates()] == chain
+        assert resources._starts_managed_paddle_vllm() is (chain[0] == "paddle-vllm")
+
 
 # --- PIPELINE_MEMORY_MODE wiring ---
 
@@ -404,9 +434,41 @@ class TestMemoryModeSetting:
     def test_auto_memory_mode_rule(self):
         from bibr.local.pipeline import _auto_memory_mode
 
-        # Discrete NVIDIA GPUs: the VRAM ceiling is 8 GB.
-        assert _auto_memory_mode("cuda", 6.0, 64.0) == "aggressive"
-        assert _auto_memory_mode("cuda", 24.0, 64.0) == "balanced"
+        # Discrete NVIDIA GPUs with bibr's own LLM server on the card: below
+        # 12 GB (an RTX 5070's 12,227 MiB counts as 12) cards run aggressive.
+        for llm in ("local", "vllm", "llama-cpp"):
+            assert _auto_memory_mode("cuda", 6.0, 64.0, llm_backend=llm) == "aggressive"
+            assert _auto_memory_mode("cuda", 8.0, 64.0, llm_backend=llm) == "aggressive"
+            assert _auto_memory_mode("cuda", 10.0, 64.0, llm_backend=llm) == "aggressive"
+            assert _auto_memory_mode("cuda", 11.0, 64.0, llm_backend=llm) == "aggressive"
+            assert _auto_memory_mode("cuda", 12227 / 1024, 64.0, llm_backend=llm) == "balanced"
+            assert _auto_memory_mode("cuda", 12.0, 64.0, llm_backend=llm) == "balanced"
+            assert _auto_memory_mode("cuda", 24.0, 64.0, llm_backend=llm) == "balanced"
+
+    @pytest.mark.parametrize("llm", [None, "cloud", "llmster"])
+    def test_auto_memory_mode_without_a_local_llm_server_keeps_the_8_gb_rule(self, llm):
+        """A cloud or remote LLM with local OCR keeps the rule from before the
+        12 GB threshold: batches of 8, a resident OCR server and the streaming
+        back half on a 10 or 11 GB card."""
+        from bibr.local.pipeline import _auto_memory_mode
+
+        assert _auto_memory_mode("cuda", 6.0, 64.0, llm_backend=llm) == "aggressive"
+        assert _auto_memory_mode("cuda", 8.0, 64.0, llm_backend=llm) == "aggressive"
+        assert _auto_memory_mode("cuda", 8188 / 1024, 64.0, llm_backend=llm) == "aggressive"
+        assert _auto_memory_mode("cuda", 10.0, 64.0, llm_backend=llm) == "balanced"
+        assert _auto_memory_mode("cuda", 11.0, 64.0, llm_backend=llm) == "balanced"
+        assert _auto_memory_mode("cuda", 24.0, 64.0, llm_backend=llm) == "balanced"
+
+    def test_mlx_ignores_the_llm_backend(self):
+        from bibr.local.pipeline import _auto_memory_mode
+
+        for llm in (None, "cloud", "vllm-mlx", "rapid-mlx"):
+            assert _auto_memory_mode("mlx", 8.0, 8.0, llm_backend=llm) == "aggressive"
+            assert _auto_memory_mode("mlx", 16.0, 16.0, llm_backend=llm) == "balanced"
+
+    def test_auto_memory_mode_rule_platforms(self):
+        from bibr.local.pipeline import _auto_memory_mode
+
         # Apple Silicon hands unified memory from OCR to LLM sequentially and
         # the MLX models are small, so 16 GB runs balanced; only ≤8 GB needs
         # aggressive (via the system-RAM rule — accel_gb is unified memory).
@@ -416,6 +478,28 @@ class TestMemoryModeSetting:
         # No detected accelerator: fall back to total system RAM.
         assert _auto_memory_mode(None, None, 4.0) == "aggressive"
         assert _auto_memory_mode(None, None, 32.0) == "balanced"
+
+    @pytest.mark.parametrize(
+        ("llm_backend", "no_llm", "expected"),
+        [
+            ("cloud", False, "balanced"),
+            ("vllm", False, "aggressive"),
+            ("llama-cpp", False, "aggressive"),
+            # --no-llm never starts the LLM server it names.
+            ("vllm", True, "balanced"),
+        ],
+    )
+    def test_pipeline_default_follows_the_llm_backend(
+        self, monkeypatch, llm_backend, no_llm, expected
+    ):
+        """A 10 GB card: aggressive only when bibr's own LLM server shares it."""
+        from bibr.config import Settings
+
+        monkeypatch.setattr(Settings.pipeline, "memory_mode", None)
+        monkeypatch.setattr("bibr.local.llm_models.detect_hardware", lambda: ("cuda", 10.0))
+        monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 32.0)
+        pipeline = LocalPipeline(llm_backend=llm_backend, no_llm=no_llm)
+        assert pipeline.memory_mode == expected
 
     def test_pipeline_default_uses_setting(self, monkeypatch):
         from bibr.config import Settings
