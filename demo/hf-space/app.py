@@ -65,10 +65,11 @@ MAX_PAGES = int(os.environ.get("DEMO_MAX_PAGES", "15"))
 GPU_MODE = os.environ.get("DEMO_GPU_MODE", "paper").lower()
 GPU_SECONDS_MAX = int(os.environ.get("DEMO_GPU_SECONDS", "240"))
 # Window per paper: model loads and the front page, then OCR and reference
-# review per page. Measured once (2026-10-29): a 7-page born-digital paper
-# used 141 GPU s. ZeroGPU billed what was used, past the window asked, but
-# the window is what it checks against the visitor's quota, so err high.
-GPU_SECONDS_BASE = 60
+# review per page. Measured twice (2026-10-29): a 7-page born-digital paper
+# used 141 and 147 GPU s, 53 s of it generating. ZeroGPU billed what was
+# used, past the window asked, but the window is what it checks against the
+# visitor's quota, so err high.
+GPU_SECONDS_BASE = 75
 GPU_SECONDS_PER_PAGE = 12
 # Only on Spaces: Gradio's local OAuth mock needs a Hugging Face login.
 REQUIRE_LOGIN = os.environ.get("DEMO_REQUIRE_LOGIN", "1") == "1" and bool(os.environ.get("SPACE_ID"))
