@@ -142,6 +142,14 @@ bibr chew paper.pdf --ocr paddle-http --ocr-url https://ocr.example.org
 bibr chew paper.pdf --ocr glm-http --ocr-url https://ocr.example.org
 ```
 
+Each cloud vision OCR call asks for at most `OCR_VISION_MAX_TOKENS` output
+tokens (16384 by default). With `anthropic`, a region asks for one token per 32
+pixels of its crop at 200 DPI (fewer pixels per token at a lower `LAYOUT_DPI`),
+at least 2048 and never more than the setting, so a model that loops on a small
+region stops sooner. Gemini and the OpenAI backend keep the full setting:
+Gemini's thinking tokens and an OpenAI-compatible reasoning model's reasoning
+tokens count against the same limit.
+
 Remote OCR requires HTTPS by default. For a trusted private network without
 TLS, explicitly set `OCR_ALLOW_INSECURE_HTTP=true`; loopback HTTP is allowed.
 

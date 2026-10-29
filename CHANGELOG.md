@@ -301,6 +301,14 @@ every 12.2 export is still valid input for the 12.x reader.
   that differs from the printed one no longer makes the selection
   `VAL_DOI_AMBIGUOUS` with no DOI, so the printed DOI is selected.
 
+- Anthropic vision OCR (`--ocr anthropic`) asks for one output token per 32 pixels of
+  each region crop at 200 DPI (scaled with `LAYOUT_DPI`), at least 2,048 and never more
+  than `OCR_VISION_MAX_TOKENS`, instead of the full setting for every region. A model
+  that loops on a small region now stops after 2,048 tokens instead of 16,384 (one
+  footer line took 43 s and was discarded). The log line of a cut-off answer names the
+  cap and the crop size. Gemini and the OpenAI backend keep the full setting, because
+  their thinking or reasoning tokens count against the same limit.
+
 ### Security
 
 - vLLM 0.31.0, which the `vllm` extra pinned, has a published advisory
