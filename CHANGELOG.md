@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-30
+
+bibr's 4B extraction student is now the revision retrained with pointer answers,
+pinned to a Hub commit in every build, and the `vllm` extra moves to vLLM 0.32.0,
+which fixes a published advisory in 0.31.0. `bibr setup` now picks the local LLM,
+OCR and memory mode from the GPU card, and bibr sizes its prompts to the context
+window of an external Ollama or llama.cpp server. Word reference lists, running
+heads read from the PDF text layer and a long batch's memory are fixed too. The
+export moves to schema 12.3, which only adds keys. See Changed for the new
+defaults.
+
 ### Added
 
 - The 4B student's W4A16 build (`scienceverse/bibr-extract-qwen35-4b-W4A16`,
