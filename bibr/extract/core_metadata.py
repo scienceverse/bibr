@@ -34,7 +34,11 @@ from bibr.extract.field_decisions import (
     decide_value,
     with_transforms,
 )
-from bibr.extract.front_matter import AFFILIATION_MARKER_RE
+from bibr.extract.front_matter import (
+    AFFILIATION_MARKER_RE,
+    _has_person_name_evidence,
+    _is_front_gap_editorial_line,
+)
 from bibr.extract.metadata_precision import refine_publication_date, repair_author_partitions
 from bibr.extract.ref_locator import _ORCID_BARE_INLINE_RE, RefLocator
 from bibr.extract.research_integrity import affiliation_key
@@ -374,6 +378,8 @@ class BylineGroup:
     # are deliberately absent from ``missing_inference_raw_texts``: see
     # ``_composite_recovery_text``.
     composite_recovery_raw_texts: tuple[str, ...] = ()
+    # The ``raw_texts`` index each ``missing_inference_raw_texts`` entry comes from.
+    missing_inference_indices: tuple[int, ...] = ()
 
 
 def build_byline_group(resolution: FrontMatterResolution) -> BylineGroup:
@@ -384,15 +390,17 @@ def build_byline_group(resolution: FrontMatterResolution) -> BylineGroup:
         for candidate in _selected_block_candidates(resolution)
         if "byline" in candidate.roles
     )
+    missing_inference = tuple(
+        (index, bounded)
+        for index, candidate in enumerate(candidates)
+        if (bounded := _missing_inference_text(candidate.raw_text, candidate.roles))
+    )
     return BylineGroup(
         candidate_ids=tuple(candidate.candidate_id for candidate in candidates),
         text_ids=tuple(text_id for candidate in candidates for text_id in candidate.text_ids),
         raw_texts=tuple(candidate.raw_text for candidate in candidates),
-        missing_inference_raw_texts=tuple(
-            bounded
-            for candidate in candidates
-            if (bounded := _missing_inference_text(candidate.raw_text, candidate.roles))
-        ),
+        missing_inference_raw_texts=tuple(bounded for _, bounded in missing_inference),
+        missing_inference_indices=tuple(index for index, _ in missing_inference),
         title_candidate_ids=tuple(
             candidate.candidate_id for candidate in candidates if "title" in candidate.roles
         ),
@@ -1160,9 +1168,44 @@ def _split_byline_entries(value: str) -> tuple[tuple[str, ...], ...]:
     return tuple(entry for entry in entries if entry)
 
 
-def _expected_byline_entries(byline: BylineGroup) -> tuple[tuple[str, ...], ...]:
+def _prints_a_name_row(text: str) -> bool:
+    """Whether a byline row no extracted author was found in still reads as names.
+
+    The byline role also lands on rows that name nobody: a letter's "Dear
+    Editor", "Cite This: ACS Omega 2026, 11, 40460-40467", "Accepted: July 22,
+    2026", "(c) The Author(s) 2026", a journal banner or an all-capitals section
+    heading. Each reads as one two-word name. A row of authors the model
+    dropped carries initials or affiliation markers, or lists two names.
+    """
+
+    if _has_person_name_evidence(text):
+        return True
+    if _is_front_gap_editorial_line(text):
+        return False
+    return sum(1 for entry in _split_byline_entries(text) if _has_name_like_residual(entry)) >= 2
+
+
+def _expected_byline_entries(
+    byline: BylineGroup,
+    *,
+    located_rows: frozenset[int] | None = None,
+) -> tuple[tuple[str, ...], ...]:
+    """Name-like entries of the byline rows; with *located_rows*, of name rows only.
+
+    *located_rows* are the ``raw_texts`` indices the extracted authors were
+    found in. Any other row counts only when it prints a name row.
+    """
+
     entries: list[tuple[str, ...]] = []
-    for text in byline.missing_inference_raw_texts:
+    indices = byline.missing_inference_indices
+    for position, text in enumerate(byline.missing_inference_raw_texts):
+        if (
+            located_rows is not None
+            and len(indices) == len(byline.missing_inference_raw_texts)
+            and indices[position] not in located_rows
+            and not _prints_a_name_row(text)
+        ):
+            continue
         for entry in _split_byline_entries(text):
             if _has_name_like_residual(entry):
                 entries.append(entry)
@@ -1715,6 +1758,20 @@ def assess_author_grounding(
         )
 
     grounded_locations = [location for location in locations if location is not None]
+    # With no author found, the whole byline is evidence against the list.
+    located_rows = (
+        frozenset(location[0] for location in grounded_locations) if grounded_locations else None
+    )
+    expected_entries = _expected_byline_entries(byline, located_rows=located_rows)
+    # Rows that name nobody leave no residual between or after the located authors.
+    evidence_tokens = tuple(
+        tokens
+        if located_rows is None
+        or index in located_rows
+        or _prints_a_name_row(grounding_texts[index])
+        else ()
+        for index, tokens in enumerate(byline_tokens)
+    )
     grounded_authors = [
         author for author, location in zip(authors, locations, strict=True) if location is not None
     ]
@@ -1746,7 +1803,7 @@ def assess_author_grounding(
         missing_count == 0
         and byline.missing_inference_raw_texts == byline.raw_texts
         and grounded_locations
-        and _has_unmatched_author_evidence(byline_tokens, grounded_locations)
+        and _has_unmatched_author_evidence(evidence_tokens, grounded_locations)
     ):
         missing_count = 1
 
