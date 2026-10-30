@@ -789,6 +789,83 @@ async def test_trained_batch_uses_managed_classifier_resource(monkeypatch):
     assert result == [(CanonicalSection.METHODS, 0.91, True)]
 
 
+@pytest.mark.parametrize(
+    ("configured", "escalation", "expected"),
+    [
+        (None, True, 0.9),
+        (None, False, 0.5),
+        (0.7, True, 0.7),
+        (0.7, False, 0.7),
+        (0.0, True, 0.0),
+    ],
+)
+def test_min_confidence_follows_escalation_only_when_unset(configured, escalation, expected):
+    import bibr.structure.section_classifier as sc
+
+    settings = GlobalSettings()
+    settings.ml.section_classifier_min_confidence = configured
+    settings.ml.section_classifier_llm_escalation = escalation
+    assert sc._min_confidence(settings) == expected
+
+
+class _ManagedAt:
+    """Serve-side classifier resource answering METHODS at one fixed score."""
+
+    def __init__(self, score):
+        self.score = score
+
+    async def classify_sections(self, items):
+        from bibr.structure.section_classifier_common import SectionPrediction
+
+        return [SectionPrediction(CanonicalSection.METHODS, True, self.score) for _ in items]
+
+
+async def test_unset_threshold_collapses_uncertain_labels_only_with_escalation():
+    import bibr.structure.section_classifier as sc
+
+    settings = GlobalSettings()
+    settings.ml.section_classifier_min_confidence = None
+    items = [sc.HeaderContext("The model", "body")]
+
+    settings.ml.section_classifier_llm_escalation = True
+    escalating = await sc._classify_trained_batch(
+        items, classifier_resources=_ManagedAt(0.8), settings=settings
+    )
+    settings.ml.section_classifier_llm_escalation = False
+    kept = await sc._classify_trained_batch(
+        items, classifier_resources=_ManagedAt(0.8), settings=settings
+    )
+
+    assert escalating == [(CanonicalSection.UNKNOWN, 0.8, None)]
+    assert kept == [(CanonicalSection.METHODS, 0.8, True)]
+
+
+async def test_unset_threshold_sends_uncertain_labels_to_the_llm(monkeypatch):
+    import bibr.structure.section_classifier as sc
+
+    llm_calls = []
+
+    async def fake_llm(texts, **_kwargs):
+        llm_calls.append(list(texts))
+        return [(CanonicalSection.RESULTS, 0.85) for _ in texts]
+
+    monkeypatch.setattr(sc, "_classify_llm_batch", fake_llm)
+    settings = GlobalSettings()
+    settings.ml.section_classifier_min_confidence = None
+    settings.ml.section_classifier_llm_escalation = True
+
+    uncertain = await sc.classify_headers_batch_async(
+        ["mystery header"], classifier_resources=_ManagedAt(0.8), settings=settings
+    )
+    confident = await sc.classify_headers_batch_async(
+        ["mystery header"], classifier_resources=_ManagedAt(0.95), settings=settings
+    )
+
+    assert llm_calls == [["mystery header"]]
+    assert uncertain == [(CanonicalSection.RESULTS, 0.85, None, "llm")]
+    assert confident == [(CanonicalSection.METHODS, 0.95, True, "model")]
+
+
 async def test_trained_inference_failure_falls_back_and_warns(monkeypatch):
     import bibr.structure.section_classifier as sc
 

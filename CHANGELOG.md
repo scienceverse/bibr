@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- With LLM section escalation on (the default), the section classifier now
+  sends every heading it labels with less than 0.9 probability to the LLM (was
+  0.5). `ML_SECTION_CLASSIFIER_MIN_CONFIDENCE` is unset by default: 0.9 while
+  `ML_SECTION_CLASSIFIER_LLM_ESCALATION` is on, and 0.5 when it is off, where a
+  collapsed heading stays `unknown` and 0.9 lost 1.3 to 2.8 points. A value you
+  set applies either way. On 388 open-access PMC papers held out from the
+  classifier's training and from the choice of 0.9 (10,074 headings labelled in
+  their JATS XML), heading accuracy rises from 0.822 to 0.831 (+0.9 points
+  [+0.5, +1.4]), while the headings sent to the LLM rise from 430 to 1,026 and
+  the papers with a section LLM call from 232 to 305. On the 119 development
+  papers and 86 psychology and social-science papers the threshold was chosen
+  on, accuracy rises by 2.4 and 2.9 points. Qwen3.8-27B answered the
+  escalations in these runs.
+
 ## [0.8.0] - 2026-10-30
 
 bibr's 4B extraction student is now the revision retrained with pointer answers,

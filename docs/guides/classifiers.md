@@ -24,7 +24,10 @@ For lookup misses, headers route through a trained MiniLM two-head model
 (`ML_SECTION_CLASSIFIER_MODEL_ID`, default `scienceverse/bibr-section-classifier`).
 It predicts the canonical type and whether the heading is top-level, using
 relative position and neighboring headings. Predictions below
-`ML_SECTION_CLASSIFIER_MIN_CONFIDENCE` (default `0.5`) collapse to `unknown`.
+`ML_SECTION_CLASSIFIER_MIN_CONFIDENCE` collapse to `unknown`. Left unset, the
+threshold is `0.9` while `ML_SECTION_CLASSIFIER_LLM_ESCALATION` is on, so the
+LLM types the headers the model is less sure of, and `0.5` when escalation is
+off, where a collapsed header stays `unknown`. A value you set applies either way.
 If the model is disabled or unavailable, the pipeline uses the LLM path.
 Classifier load and inference failures are recorded as degraded operation;
 `ML_CLASSIFIERS_REQUIRED=true` makes configured classifier availability a

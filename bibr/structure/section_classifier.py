@@ -163,6 +163,28 @@ async def _get_trained_model_async(
     return await asyncio.to_thread(_locked_load)
 
 
+# Collapse thresholds for an unset ``ml.section_classifier_min_confidence``.
+# With LLM escalation on, every collapse goes to the LLM, which types the
+# headers the model is less sure of better than the model does; with it off a
+# collapse stays UNKNOWN, and the higher threshold only discards labels.
+_MIN_CONFIDENCE_WITH_ESCALATION = 0.9
+_MIN_CONFIDENCE_WITHOUT_ESCALATION = 0.5
+
+
+def _min_confidence(settings: GlobalSettings) -> float:
+    """Type-head probability below which a trained prediction collapses to UNKNOWN.
+
+    An explicit ``ml.section_classifier_min_confidence`` applies as set; unset,
+    the threshold follows ``ml.section_classifier_llm_escalation``.
+    """
+    ml = settings.ml
+    if ml.section_classifier_min_confidence is not None:
+        return float(ml.section_classifier_min_confidence)
+    if ml.section_classifier_llm_escalation:
+        return _MIN_CONFIDENCE_WITH_ESCALATION
+    return _MIN_CONFIDENCE_WITHOUT_ESCALATION
+
+
 async def _classify_trained_batch(
     items: list[HeaderContext],
     *,
@@ -172,10 +194,10 @@ async def _classify_trained_batch(
     """Run the trained MiniLM classifier on document-context items.
 
     Returns ``(canonical, score, is_top_level)`` per item. When the type-head
-    softmax probability falls below ``Settings.ml.section_classifier_min_confidence``
-    the prediction collapses to ``UNKNOWN`` and ``is_top_level`` is set to
-    ``None`` — failures in the tail (rare classes) typically show up as
-    low-confidence spreads, and acting on them adds noise downstream.
+    softmax probability falls below :func:`_min_confidence` the prediction
+    collapses to ``UNKNOWN`` and ``is_top_level`` is set to ``None`` —
+    failures in the tail (rare classes) typically show up as low-confidence
+    spreads, and acting on them adds noise downstream.
     ``classify_batch`` is a synchronous PyTorch forward pass; we offload to a
     thread so the async caller stays non-blocking.
     """
@@ -200,7 +222,7 @@ async def _classify_trained_batch(
                 return model.classify_batch(items)
 
         preds = await asyncio.to_thread(_locked_classify)
-    threshold = float(effective.ml.section_classifier_min_confidence)
+    threshold = _min_confidence(effective)
     out: list[tuple[CanonicalSection, float, bool | None]] = []
     for p in preds:
         score = float(p.score)

@@ -1977,15 +1977,21 @@ class MlOptions(_BibrSettings):
         "output; 'main' tracks the repo head.",
     )
     # Type-head softmax probability below which a trained-model prediction
-    # collapses to UNKNOWN. With 16 classes the uniform baseline is ~0.06, so
-    # 0.5 keeps only predictions where the model is meaningfully decisive.
-    # Set to 0.0 to disable.
-    section_classifier_min_confidence: float = Field(
-        0.5,
+    # collapses to UNKNOWN. Unset, it follows section_classifier_llm_escalation
+    # (see section_classifier._min_confidence): 0.9 while escalation is on,
+    # because the LLM types the headers the model is less sure of better than
+    # the model does, and 0.5 when it is off, because there a collapse stays
+    # UNKNOWN and 0.9 discards labels the model mostly gets right. With 16
+    # classes the uniform baseline is ~0.06, so 0.5 keeps only predictions
+    # where the model is meaningfully decisive. Set to 0.0 to disable.
+    section_classifier_min_confidence: float | None = Field(
+        None,
         ge=0.0,
         le=1.0,
         description="Type-head softmax probability below which a section-classifier prediction "
-        "collapses to UNKNOWN. Set to 0.0 to disable.",
+        "collapses to UNKNOWN. Unset, it is 0.9 while ML_SECTION_CLASSIFIER_LLM_ESCALATION is "
+        "on (the LLM types the collapsed headers) and 0.5 when it is off. Set to 0.0 to "
+        "disable.",
     )
     # When the trained classifier's prediction is UNKNOWN — either collapsed
     # below ``section_classifier_min_confidence`` or confidently predicted as
@@ -1997,7 +2003,8 @@ class MlOptions(_BibrSettings):
         True,
         description="Escalate section headers the trained classifier leaves UNKNOWN "
         "(below-confidence collapses and confident unknown predictions) to the batched LLM "
-        "classifier instead of discarding them.",
+        "classifier instead of discarding them. Also sets the default of "
+        "ML_SECTION_CLASSIFIER_MIN_CONFIDENCE.",
     )
     # Override the device the classifier runs on. ``None`` picks automatically
     # (CUDA → CPU). MPS is opt-in via ``ML_SECTION_CLASSIFIER_DEVICE=mps`` —
