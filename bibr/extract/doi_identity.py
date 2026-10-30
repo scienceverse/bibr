@@ -1266,11 +1266,21 @@ def _with_pdf_evidence(
             line, regions_by_page.get(line.page, []), section_map
         )
     ]
+    # A DOI the text layer prints whole on a line of its own did not come from
+    # a line join, even where another line breaks the same DOI at its end and
+    # runs on into a path (PNAS's ".../doi:10.1073/pnas." over
+    # "2620354123/-/DCSupplemental." beside a footer printing it whole).
+    printed_whole = {(reading.page, reading.normalized) for reading, _tail, _line in readings}
     checked: list[DoiCandidate] = []
     for candidate in parsed:
+        if candidate.page is None:
+            whole = any(normalized == candidate.normalized for _page, normalized in printed_whole)
+        else:
+            whole = (candidate.page, candidate.normalized) in printed_whole
         for reading, tail, line in readings:
             if (
                 candidate.rejection_reason is None
+                and not whole
                 and candidate.page in (None, reading.page)
                 and len(candidate.normalized) > len(reading.normalized)
                 and candidate.normalized.startswith(reading.normalized)
