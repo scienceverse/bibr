@@ -436,20 +436,42 @@ def _unglue_letter_keys(authors: list[_Author], by_mark: dict[str, str]) -> None
             author.marks = [key]
 
 
+def _given_first(names: list[Span]) -> bool:
+    """Whether the byline prints given names first.
+
+    Read from tight pairs: a given and a family part on adjacent words with no
+    comma or semicolon between them.
+    """
+    given_family = family_given = 0
+    for a, b in zip(names, names[1:], strict=False):
+        if a.field != b.field and b.words[0] == a.words[-1] + 1 and not a.text.endswith((",", ";")):
+            given_family += a.field == "GIVEN"
+            family_given += a.field == "FAMILY"
+    return given_family > family_given
+
+
 def _group_authors(spans: list[Span]) -> list[_Author]:
     """One author per given/family pair, in either printed order.
 
     An author is complete once it holds one name part of each kind; the next
     name part of a kind it already holds starts the next author. That reads
     "John Smith, Mary Jones" and "Smith J, Jones M" alike, and an organisation
-    (a family part alone) followed by another one as two authors.
+    (a family part alone) followed by another one as two authors. In a byline
+    that prints given names first, a given name also starts the next author
+    after a family name, so a one-name author ("Suprihatin, Siti Nuraini") does
+    not take the next author's given name.
     """
+    names = [span for span in spans if span.field in _NAME_FIELDS]
+    given_first = _given_first(names)
     authors: list[_Author] = []
-    for span in spans:
-        if span.field not in _NAME_FIELDS:
-            continue
+    for span in names:
         slot = "given" if span.field == "GIVEN" else "family"
-        if not authors or getattr(authors[-1], slot):
+        current = authors[-1] if authors else None
+        if (
+            current is None
+            or getattr(current, slot)
+            or (given_first and slot == "given" and current.family)
+        ):
             authors.append(_Author(first_word=span.words[0]))
         getattr(authors[-1], slot).append(span)
         authors[-1].last_word = span.words[-1]

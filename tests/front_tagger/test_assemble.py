@@ -535,3 +535,36 @@ def test_parallel_keyword_lists_keep_the_first_printed():
     )
     got = assemble(inp, tags, [1.0] * len(tags))
     assert got.title_keywords.keywords == ["mano", "familia"]
+
+
+def test_a_one_name_author_in_a_given_first_byline_keeps_alone():
+    inp = tagger_input(
+        ("doc_title", "Pengaruh pembelajaran daring"),
+        ("text", "Suprihatin, Siti Nuraini Purnamawati, Budi Santoso"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Pengaruh pembelajaran daring"),
+        ("FAMILY", "Suprihatin"),
+        ("GIVEN", "Siti Nuraini"),
+        ("FAMILY", "Purnamawati"),
+        ("GIVEN", "Budi"),
+        ("FAMILY", "Santoso"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags))
+    names = [(a.given, a.family) for a in got.byline.authors]
+    assert names == [("", "Suprihatin"), ("Siti Nuraini", "Purnamawati"), ("Budi", "Santoso")]
+
+
+def test_a_family_first_byline_still_pairs_initials():
+    inp = tagger_input(("doc_title", "A title"), ("text", "Smith J, Jones M"))
+    tags = label(
+        inp,
+        ("TITLE", "A title"),
+        ("FAMILY", "Smith"),
+        ("GIVEN", "J"),
+        ("FAMILY", "Jones"),
+        ("GIVEN", "M"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags))
+    assert [(a.family, a.given) for a in got.byline.authors] == [("Smith", "J"), ("Jones", "M")]
