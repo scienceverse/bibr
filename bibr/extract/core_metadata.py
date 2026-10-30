@@ -34,7 +34,7 @@ from bibr.extract.field_decisions import (
     decide_value,
     with_transforms,
 )
-from bibr.extract.front_matter import AFFILIATION_MARKER_RE
+from bibr.extract.front_matter import AFFILIATION_MARKER_RE, BYLINE_PROBATION_ROLE
 from bibr.extract.metadata_precision import refine_publication_date, repair_author_partitions
 from bibr.extract.ref_locator import _ORCID_BARE_INLINE_RE, RefLocator
 from bibr.extract.research_integrity import affiliation_key
@@ -2711,9 +2711,14 @@ class CoreMetadataExtractor:
 
         if not authors or not all(_author_token_variants(author) for author in authors):
             return authors
-        if build_byline_group(resolution).raw_texts:
+        if build_byline_group(resolution).raw_texts or any(
+            BYLINE_PROBATION_ROLE in candidate.roles
+            for candidate in _selected_block_candidates(resolution)
+        ):
             # A byline was printed: a name that fails to match it is a grounding
-            # failure (script, OCR, glued marker), not evidence of invention.
+            # failure (script, OCR, glued marker), not evidence of invention. A
+            # row on byline probation counts too, though it took the title role
+            # instead: it passed the byline shape test on the first page.
             return authors
         grounded, _ = grounded_authors_in_context(authors, context)
         if grounded:
