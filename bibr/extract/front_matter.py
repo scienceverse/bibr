@@ -1278,6 +1278,24 @@ def _has_person_name_evidence(text: str) -> bool:
     return bool(_AFFILIATION_SUPERSCRIPT_RE.search(text))
 
 
+def names_a_person(text: str) -> bool:
+    """Whether a byline-zone row carries at least one person's name.
+
+    A row with an initial or an affiliation superscript does ("Jane A. Smith1").
+    A label ("Author Note"), an editorial line or an institution ("Baylor
+    University") does not, though each is as capitalised as a name.
+    """
+
+    if _has_person_name_evidence(text):
+        return True
+    words = [word.casefold() for word in _WORD_RE.findall(text)]
+    if any(word in _FRONT_GAP_LABEL_WORDS for word in words) or _is_front_gap_editorial_line(text):
+        return False
+    if AFFILIATION_MARKER_RE.search(text) or _INSTITUTION_WORD_RE.search(text):
+        return False
+    return _looks_like_person_name_row(text) or _looks_like_person_name_list(text)
+
+
 def _looks_like_affiliation(text: str) -> bool:
     return bool(AFFILIATION_MARKER_RE.search(text))
 

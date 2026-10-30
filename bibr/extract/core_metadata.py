@@ -34,7 +34,7 @@ from bibr.extract.field_decisions import (
     decide_value,
     with_transforms,
 )
-from bibr.extract.front_matter import AFFILIATION_MARKER_RE
+from bibr.extract.front_matter import AFFILIATION_MARKER_RE, names_a_person
 from bibr.extract.metadata_precision import refine_publication_date, repair_author_partitions
 from bibr.extract.ref_locator import _ORCID_BARE_INLINE_RE, RefLocator
 from bibr.extract.research_integrity import affiliation_key
@@ -298,7 +298,19 @@ def render_author_context(
     ):
         return full_text
 
-    start = title_index if "byline" in selected[title_index].roles else title_index + 1
+    # A title set without a stop runs on into the name line below it ("...
+    # Latent Network Modeling" + "Fatih Ozkan" become one row). The rows after
+    # it then hold only an affiliation or an "Author Note" label, so the zone
+    # keeps the title row unless a row below it names someone.
+    names_below = any(
+        names_a_person(candidate.raw_text)
+        for candidate in selected[title_index + 1 : last_byline + 1]
+    )
+    start = (
+        title_index + 1
+        if names_below and "byline" not in selected[title_index].roles
+        else title_index
+    )
     end = next(
         (
             index
