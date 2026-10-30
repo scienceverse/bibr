@@ -165,6 +165,24 @@ def _first_processed_page(contents: PaperContents) -> int | None:
     )
 
 
+# Front-matter roles are read off word lists, so an abstract paragraph that
+# mentions an institution ("at a tertiary high-volume academic centre",
+# "patients of a university hospital") carries the affiliation role. Inside an
+# explicit abstract that role alone does not end the span when the paragraph
+# reads as prose: enough words, most of them lowercase. Affiliation lines are
+# mostly capitalized ("Department of Surgery, Lausanne University Hospital").
+_PROSE_MIN_WORDS = 15
+_PROSE_MIN_LOWERCASE_SHARE = 0.6
+_PROSE_WORD_RE = re.compile(r"[^\W\d_]+")
+
+
+def _reads_as_prose(text: str) -> bool:
+    words = _PROSE_WORD_RE.findall(text)
+    return len(words) >= _PROSE_MIN_WORDS and sum(
+        word[0].islower() for word in words
+    ) >= _PROSE_MIN_LOWERCASE_SHARE * len(words)
+
+
 def select_abstract_span(contents: PaperContents, resolution) -> AbstractSelection:
     """Select one ordered, source-owned abstract candidate span.
 
@@ -216,7 +234,7 @@ def select_abstract_span(contents: PaperContents, resolution) -> AbstractSelecti
             and candidate.roles.isdisjoint(unsafe_roles)
         )
 
-    def _has_explicit_abstract_boundary(candidate) -> bool:
+    def _has_explicit_abstract_boundary(candidate, unsafe_held) -> bool:
         current_sections = [
             sections_by_id.get(current_section_ids.get(text_id)) for text_id in candidate.text_ids
         ]
@@ -231,7 +249,7 @@ def select_abstract_span(contents: PaperContents, resolution) -> AbstractSelecti
         )
         return bool(
             ("abstract" in candidate.roles or generated_abstract)
-            and candidate.roles.isdisjoint(unsafe_roles)
+            and not unsafe_held
             and (
                 (candidate.region_label or "").casefold() == "abstract"
                 or section_types.get(candidate.section_id) == CanonicalSection.ABSTRACT
@@ -266,9 +284,19 @@ def select_abstract_span(contents: PaperContents, resolution) -> AbstractSelecti
     continuation = False
     for candidate in candidates:
         is_abstract_heading = _is_abstract_heading(candidate)
-        explicit = _has_explicit_abstract_boundary(candidate)
+        unsafe_held = candidate.roles & unsafe_roles
+        # An abstract paragraph whose only unsafe role came from an institution
+        # word in its prose is still the abstract.
+        if (
+            unsafe_held == {"affiliation"}
+            and candidate.source_kind == "paragraph"
+            and "abstract" in candidate.roles
+            and _reads_as_prose(candidate.raw_text)
+        ):
+            unsafe_held = frozenset()
+        explicit = _has_explicit_abstract_boundary(candidate, unsafe_held)
         unsafe = bool(
-            not candidate.roles.isdisjoint(unsafe_roles)
+            unsafe_held
             or _is_metadata_or_structural(candidate)
             or (candidate.source_kind == "heading" and not is_abstract_heading)
         )
