@@ -603,6 +603,7 @@ def decide_title(
     abstained: bool,
     prefer_byline_adjacent: bool,
     doc_info: FieldCandidate | None,
+    running_headers: Sequence[str] = (),
 ) -> FieldDecision:
     """Title: the extracted title, the printed-row fallbacks, then the doc-info.
 
@@ -622,7 +623,10 @@ def decide_title(
        title is printed in the selected record, or it is a masthead the title
        disagrees with; then, still without a title, the first unclassified
        heading.
-    4. Still without a title: the doc-info title.
+    4. A title that opens with the running head (a page header in capitals
+       repeated in *running_headers*): the title without it, or the layout
+       title when the head is all the title is.
+    5. Still without a title: the doc-info title.
     """
     from bibr.extract import title_candidates as titles
     from bibr.utils.metadata import is_exact_generic_article_label
@@ -709,6 +713,18 @@ def decide_title(
             header = titles.section_header_candidate(sections)
             if header is not None:
                 use(header, "section_header", "first unclassified heading")
+
+    if selected is not None and selected.value and running_headers:
+        candidate, reason = titles.running_head_candidate(
+            selected.value,
+            running_headers,
+            detected_title,
+            journal=journal,
+            publisher=publisher,
+        )
+        if candidate is not None:
+            logger.info("Dropped the running head from the title %r", selected.value)
+            use(candidate, "running_head", reason)
 
     if doc_info is not None and (selected is None or not selected.value):
         if doc_info.value:
