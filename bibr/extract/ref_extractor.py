@@ -1109,6 +1109,44 @@ def _backfill_page_range(fields: dict[str, Any], segment: str | None) -> None:
             fields["first_page"] = partner
 
 
+# The tail of a reference style that prints no article title (RSC: "T. Angata
+# and A. Varki, Chem. Rev., 2002, 102, 439–470."): the journal, then year,
+# volume and pages, each closed by a comma.
+_TITLELESS_JOURNAL_TAIL_RE = re.compile(
+    r"(?P<container>[^,]{2,100}?),\s*(?:19|20)\d{2}[a-z]?\s*,\s*(?P<volume>\d+)\s*,\s*"
+    r"(?P<first>[A-Za-z]?\d+)(?:\s*[-–—]\s*(?P<last>[A-Za-z]?\d+))?\s*\.?\s*$"
+)
+
+
+def _comparable(text: str | None) -> str:
+    return re.sub(r"[\s.,;:]+", " ", text or "").strip().casefold()
+
+
+def _move_journal_title_to_container(fields: dict[str, Any], segment: str | None) -> None:
+    """Read a journal parsed as the title of a title-less reference as its container.
+
+    The parser takes "Chem. Rev." in "T. Angata and A. Varki, Chem. Rev., 2002,
+    102, 439–470." for the article title and leaves the container, volume and
+    pages empty, so the title search finds nothing and the title-less
+    fingerprint match never runs. Only a title that is the journal of the
+    segment's own year-volume-pages tail moves; volume and pages are filled
+    where empty.
+    """
+    if not segment or fields.get("container") or not fields.get("title"):
+        return
+    m = _TITLELESS_JOURNAL_TAIL_RE.search(segment.strip())
+    if m is None or _comparable(fields["title"]) != _comparable(m.group("container")):
+        return
+    fields["container"] = str(fields["title"]).strip().rstrip(",;:").strip()
+    fields["title"] = ""
+    if not fields.get("volume"):
+        fields["volume"] = m.group("volume")
+    if not fields.get("first_page"):
+        fields["first_page"] = m.group("first")
+        if m.group("last") and not fields.get("last_page"):
+            fields["last_page"] = m.group("last")
+
+
 def _finalize_reference_fields(fields: dict[str, Any], segment: str | None) -> dict[str, Any]:
     """Strategy-independent reference finalize shared by every parse path.
 
@@ -1116,9 +1154,11 @@ def _finalize_reference_fields(fields: dict[str, Any], segment: str | None) -> d
     covers a DOI the parser under-emitted, but never overrides an emitted one.
     Also completes a half-emitted page range from the segment, expands compact
     last pages ("782-92" → "792"), backfills a dropped Vancouver year/container
-    from the segment, and migrates/infers ``bib_type``.
+    from the segment, moves a journal parsed as a title-less reference's title
+    to its container, and migrates/infers ``bib_type``.
     Parser-specific steps (issue handling, author rescue) stay in each parse path.
     """
+    _move_journal_title_to_container(fields, segment)
     _backfill_vancouver_tail(fields, segment)
     _backfill_page_range(fields, segment)
     if fields.get("year") is not None and not fields.get("year_suffix") and segment:
