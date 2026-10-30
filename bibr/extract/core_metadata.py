@@ -13,6 +13,7 @@ import difflib
 import logging
 import re
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -804,6 +805,64 @@ def _split_line_merged_authors(authors: list[PaperAuthor], context: str) -> list
     for author_id, author in enumerate(kept, start=1):
         author.author_id = author_id
     return kept
+
+
+def _printed_word(word: str, text: str) -> bool:
+    return (
+        re.search(rf"(?<![^\W\d_]){re.escape(word)}(?![^\W\d_])", text, re.IGNORECASE) is not None
+    )
+
+
+# A letter marker opening an affiliation entry: "aDepartment of ...",
+# "; b Department of ...". Layout order can leave it alone at the end of the
+# line above its entry: "Dustin A. Heldmana a\nGreat Lakes NeuroTechnologies".
+_LETTER_MARKED_ENTRY_RE = re.compile(
+    r"(?:^|;)[ \t]*([a-z])\s*(?=[A-Z])|(?<=[ \t])([a-z])[ \t]*\r?$", re.MULTILINE
+)
+
+
+def _drop_glued_marker_letters(
+    authors: list[PaperAuthor], context: str, printed: Callable[[], str]
+) -> list[PaperAuthor]:
+    """Drop a lowercase affiliation letter the model left on a family name.
+
+    Letter superscripts flatten into the name they mark: "Muhammet Ozera,
+    Suleyman Y. Goksub, Amy L. Jonesa". The model strips most of them and
+    keeps one, usually the first ("Ozera"). A lowercase last letter is any
+    surname's last letter, so it goes only on the paper's own evidence: an
+    affiliation entry opens with the letter, another listed author is printed
+    with that letter glued on, this family is printed as a whole word and
+    never with a further letter glued on, and the paper prints the family
+    without the letter as a whole word (a correspondence line, a running
+    head). Listed families are never evidence: in "Li, Liu, Yan, Yang" the
+    "u" after "Li" and the "g" after "Yan" are names, not markers.
+    """
+    markers = {first or last for first, last in _LETTER_MARKED_ENTRY_RE.findall(context)}
+    listed = {author.family.casefold() for author in authors if author.family}
+    for author in authors:
+        family = author.family or ""
+        stem = family[:-1]
+        letter = family[-1:]
+        if (
+            len(stem) < 3
+            or letter not in markers
+            or stem.casefold() in listed
+            or not _LETTER_RUN_RE.fullmatch(family)
+            or not _printed_word(family, context)
+            or re.search(rf"(?<![^\W\d_]){re.escape(family)}[a-z](?![^\W\d_])", context)
+        ):
+            continue
+        if not any(
+            other is not author
+            and other.family
+            and f"{other.family}{letter}".casefold() not in listed
+            and re.search(rf"(?<![^\W\d_]){re.escape(other.family)}{letter}(?![^\W\d_])", context)
+            for other in authors
+        ):
+            continue
+        if _printed_word(stem, context) or _printed_word(stem, printed()):
+            author.family = stem
+    return authors
 
 
 # The last word of a group author's name ("MChart Expert Panel").
@@ -2878,7 +2937,8 @@ class CoreMetadataExtractor:
     def _sanitize_authors(
         self, authors: list[PaperAuthor], context: str
     ) -> tuple[list[PaperAuthor], list[str]]:
-        """Drop translator credits and split glued names; say which repairs applied."""
+        """Drop translator credits, split glued names and drop glued marker letters;
+        say which repairs applied."""
 
         kept = self._drop_translator_credits(authors, context)
         dropped_translators = len(kept) != len(authors)
@@ -2897,7 +2957,18 @@ class CoreMetadataExtractor:
             transforms.append("group_authors_rewritten")
         if len(self.validation_issues) != repairs:
             transforms.append("glued_names_split")
+        before_markers = [author.family for author in kept]
+        _drop_glued_marker_letters(kept, context, self._printed_text)
+        if [author.family for author in kept] != before_markers:
+            transforms.append("glued_marker_letters_dropped")
         return kept, transforms
+
+    def _printed_text(self) -> str:
+        """Every printed row of the paper as one string; empty without rows."""
+        df = getattr(self, "sentences_df", None)
+        if df is None or "text" not in df.columns:
+            return ""
+        return " ".join(df["text"].dropna().astype(str))
 
     def _record_author_anomaly(self, llm_authors, cleaned: list[PaperAuthor]) -> None:
         """Record ONE ``AUTHORS_ANOMALY`` warning when the author sanitizer had
