@@ -2973,6 +2973,17 @@ def _fold_accents(text: str) -> str:
     return "".join(char for char in folded if not unicodedata.combining(char))
 
 
+# A citation's year in brackets: "Zhao P and Qiao Z (2026) <title>".
+_CITATION_YEAR_RE = re.compile(r"\((?:18|19|20)\d{2}[a-z]?\)")
+
+
+def _citing_titles(identity: _RecordIdentity) -> tuple[str, ...]:
+    """Title rows that read as a citation line: Frontiers' "CITATION" box
+    beside the title page, which the role model can take for a title."""
+
+    return tuple(title for title in identity.titles if _CITATION_YEAR_RE.search(title))
+
+
 def _titles_agree(left: _RecordIdentity, right: _RecordIdentity) -> bool:
     """Same printed title, allowing a subtitle split, light OCR noise, or a
     citation box that prints the other's title."""
@@ -2989,7 +3000,10 @@ def _titles_agree(left: _RecordIdentity, right: _RecordIdentity) -> bool:
                 return True
     return any(
         _cites_title(title, citation)
-        for titles, citations in ((left.titles, right.citations), (right.titles, left.citations))
+        for titles, citations in (
+            (left.titles, right.citations + _citing_titles(right)),
+            (right.titles, left.citations + _citing_titles(left)),
+        )
         for title in titles
         for citation in citations
     )
