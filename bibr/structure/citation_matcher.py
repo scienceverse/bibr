@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from bibr.models import PaperReference
@@ -590,20 +591,52 @@ def _find_candidates(text: str, text_id: int) -> list[_Candidate]:
 # ---------------------------------------------------------------------------
 
 
-def _score_ref(ref: _RefIdx, cand: _Candidate) -> tuple[int, int, int]:
+def _overlap_exact(cited: frozenset[str], listed: frozenset[str]) -> bool:
+    """A cited family and a listed author share a match-key."""
+    return not cited.isdisjoint(listed)
+
+
+# The prefix match needs at least this many characters on both sides, so that
+# "Lee" never reaches "Leeuwen" and "Li" never reaches "Lindqvist".
+_PREFIX_MIN_LEN = 4
+
+
+def _compact(key: str) -> str:
+    return key.replace(" ", "").replace("-", "").replace("\u2010", "")
+
+
+def _overlap_prefix(cited: frozenset[str], listed: frozenset[str]) -> bool:
+    """A cited family and a listed author agree once spaces and hyphens are
+    dropped, or one starts with the other: "Berg" reaches a "Family Given"
+    entry parsed as the family "Berg Anna"."""
+    for cited_key in map(_compact, cited):
+        for listed_key in map(_compact, listed):
+            if cited_key == listed_key:
+                return True
+            if min(len(cited_key), len(listed_key)) >= _PREFIX_MIN_LEN and (
+                cited_key.startswith(listed_key) or listed_key.startswith(cited_key)
+            ):
+                return True
+    return False
+
+
+_Overlap = Callable[[frozenset[str], frozenset[str]], bool]
+
+
+def _score_ref(
+    ref: _RefIdx, cand: _Candidate, overlaps: _Overlap = _overlap_exact
+) -> tuple[int, int, int]:
     """Score how well ``ref`` matches ``cand``. Higher is better.
 
     Returns ``(matched_families, et_al_bonus, neg_extra_authors)`` for tuple
     sort. The third element prefers refs with fewer extra authors when match
     counts tie.
     """
-    cand_keys_all: set[str] = set()
-    for f in cand.families:
-        cand_keys_all |= _family_keys_for(f)
+    cited = [_family_keys_for(f) for f in cand.families]
     ref_key_sets = ref.family_key_sets
-    if not ref_key_sets or not (ref_key_sets[0] & cand_keys_all):
+    if not ref_key_sets or not any(overlaps(keys, ref_key_sets[0]) for keys in cited):
         return (0, 0, 0)
-    matched = sum(1 for ks in ref_key_sets if ks & cand_keys_all)
+    matched = sum(1 for author in ref_key_sets if any(overlaps(keys, author) for keys in cited))
     et_al_bonus = 0
     if cand.has_et_al:
         # "et al." supports a multi-author ref, but list length is never
@@ -613,7 +646,7 @@ def _score_ref(ref: _RefIdx, cand: _Candidate) -> tuple[int, int, int]:
     return (matched, et_al_bonus, -extra)
 
 
-def _tie_key(ref: _RefIdx, cand: _Candidate) -> tuple[bool, int, int]:
+def _tie_key(ref: _RefIdx, cand: _Candidate, overlaps: _Overlap) -> tuple[bool, int, int]:
     """Rank a reference that ties with others on the same family and year.
 
     Returns ``(count_ok, order_ok, any_author)``. ``count_ok``: the number of
@@ -631,23 +664,70 @@ def _tie_key(ref: _RefIdx, cand: _Candidate) -> tuple[bool, int, int]:
         count_ok = len(listed) == 1
     else:
         count_ok = len(listed) == len(cited)
-    order_ok = sum(1 for keys, author in zip(cited, listed, strict=False) if keys & author)
-    any_author = sum(1 for keys in cited if any(keys & author for author in listed))
+    order_ok = sum(1 for keys, author in zip(cited, listed, strict=False) if overlaps(keys, author))
+    any_author = sum(1 for keys in cited if any(overlaps(keys, author) for author in listed))
     return count_ok, order_ok, any_author
 
 
-def _break_tie(tied: list[_RefIdx], cand: _Candidate) -> _RefIdx | None:
+def _break_tie(tied: list[_RefIdx], cand: _Candidate, overlaps: _Overlap) -> _RefIdx | None:
     """The one reference of ``tied`` that fits the citation best, if any.
 
     It must fit the author count and strictly out-rank every other reference
     on ``_tie_key``; two references that fit equally stay tied (a bare "et al."
     does not tell a three-author reference from a six-author one).
     """
-    ranked = sorted(((_tie_key(ref, cand), ref) for ref in tied), key=lambda p: p[0], reverse=True)
+    ranked = sorted(
+        ((_tie_key(ref, cand, overlaps), ref) for ref in tied), key=lambda p: p[0], reverse=True
+    )
     best_key, best = ranked[0]
     if best_key[0] and best_key > ranked[1][0]:
         return best
     return None
+
+
+def _match_pool(
+    pool: list[_RefIdx], cand: _Candidate, overlaps: _Overlap
+) -> tuple[_RefIdx | None, list[int]]:
+    """Score ``cand`` against the references of its year; see ``_match``."""
+    # A bare first-family/year citation cannot distinguish references that
+    # share that first family and year by the author list alone: a coauthor or
+    # year suffix must disambiguate. The one thing the count of authors does
+    # settle is a single-author reference against multi-author ones, because a
+    # work by several authors is not cited by its first author alone; an
+    # "et al." citation separates three or more authors from one or two, never
+    # three from six (``_break_tie``).
+    if len(cand.families) == 1 and cand.year_suffix is None:
+        candidate_keys = _family_keys_for(cand.families[0])
+        same_first = [
+            ref
+            for ref in pool
+            if ref.family_key_sets and overlaps(candidate_keys, ref.family_key_sets[0])
+        ]
+        if len(same_first) > 1:
+            winner = _break_tie(same_first, cand, overlaps)
+            if winner is not None:
+                return winner, []
+            return None, sorted(ref.bib_id for ref in same_first)
+
+    scored = [(r, _score_ref(r, cand, overlaps)) for r in pool]
+    scored = [(r, s) for r, s in scored if s[0] > 0]
+    if not scored:
+        return None, []
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    if len(scored) > 1 and scored[1][1] == scored[0][1]:
+        top_score = scored[0][1]
+        top = [r for r, s in scored if s == top_score]
+        winner = _break_tie(top, cand, overlaps)
+        if winner is not None:
+            return winner, []
+        return None, [r.bib_id for r in top]
+    return scored[0][0], []
+
+
+# Looser ways to read a family name, tried in turn only when no listed author
+# shares a match-key with the citation.
+_LOOSE_OVERLAPS: tuple[_Overlap, ...] = (_overlap_prefix,)
 
 
 def _match(
@@ -664,6 +744,12 @@ def _match(
       route this to a Tier 3 disambiguator using ``tied_bib_ids`` as a
       shortlist.
     - ``(None, [])`` — no candidate ref scored > 0; nothing to disambiguate.
+
+    Names are compared by their match-keys first. Only when no reference of the
+    year shares one with the citation are the looser readings tried
+    (``_LOOSE_OVERLAPS``); they link a single reference or none, and never
+    offer a shortlist, so a citation the exact keys could not place is never
+    narrowed to a wrong pair.
     """
     pool: list[_RefIdx]
     if cand.is_in_press:
@@ -685,38 +771,16 @@ def _match(
     if not pool:
         return None, []
 
-    # A bare first-family/year citation cannot distinguish references that
-    # share that first family and year by the author list alone: a coauthor or
-    # year suffix must disambiguate. The one thing the count of authors does
-    # settle is a single-author reference against multi-author ones, because a
-    # work by several authors is not cited by its first author alone; an
-    # "et al." citation separates three or more authors from one or two, never
-    # three from six (``_break_tie``).
-    if len(cand.families) == 1 and cand.year_suffix is None:
-        candidate_keys = _family_keys_for(cand.families[0])
-        same_first = [
-            ref for ref in pool if ref.family_key_sets and ref.family_key_sets[0] & candidate_keys
-        ]
-        if len(same_first) > 1:
-            winner = _break_tie(same_first, cand)
-            if winner is not None:
-                return winner, []
-            return None, sorted(ref.bib_id for ref in same_first)
-
-    scored = [(r, _score_ref(r, cand)) for r in pool]
-    scored = [(r, s) for r, s in scored if s[0] > 0]
-    if not scored:
-        return None, []
-
-    scored.sort(key=lambda x: x[1], reverse=True)
-    if len(scored) > 1 and scored[1][1] == scored[0][1]:
-        top_score = scored[0][1]
-        top = [r for r, s in scored if s == top_score]
-        winner = _break_tie(top, cand)
-        if winner is not None:
-            return winner, []
-        return None, [r.bib_id for r in top]
-    return scored[0][0], []
+    ref, tied = _match_pool(pool, cand, _overlap_exact)
+    if ref is not None or tied:
+        return ref, tied
+    for overlaps in _LOOSE_OVERLAPS:
+        ref, tied = _match_pool(pool, cand, overlaps)
+        if ref is not None:
+            return ref, []
+        if tied:
+            break
+    return None, []
 
 
 # ---------------------------------------------------------------------------

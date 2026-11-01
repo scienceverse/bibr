@@ -318,6 +318,49 @@ class TestTieBreak:
         assert detect_author_year_xrefs(sents, refs) == []
 
 
+class TestLooseFamilyMatch:
+    """Prefix reading of a family name, tried only when no exact key matches."""
+
+    def test_family_given_entry_is_reached_by_its_family(self):
+        refs = [_ref(1, "Okafor Chidi, Lund Karl, Brandt Hana", title="A")]
+        sents = [_sent(0, "As shown (Okafor et al., 2020) here.")]
+        assert [x.xref_id for x in detect_author_year_xrefs(sents, refs)] == [1]
+
+    def test_spaces_and_hyphens_do_not_matter(self):
+        refs = [_ref(1, "Hernandez Lopez, M.", title="A"), _ref(2, "Brandt, H.", title="B")]
+        sents = [_sent(0, "As shown (Hernandez-Lopez, 2020) here.")]
+        assert [x.xref_id for x in detect_author_year_xrefs(sents, refs)] == [1]
+
+    def test_prefix_needs_four_characters_on_both_sides(self):
+        refs = [_ref(1, "Leeuwen, A.", title="A"), _ref(2, "Lindqvist, K.", title="B")]
+        sents = [_sent(0, "As shown (Lee, 2020) and (Li, 2020) here.")]
+        assert detect_author_year_xrefs(sents, refs) == []
+
+    def test_exact_key_wins_over_a_longer_name(self):
+        refs = [_ref(1, "Lundgren, K.", title="A"), _ref(2, "Lund, K.", title="B")]
+        sents = [_sent(0, "As shown (Lund, 2020) here.")]
+        assert [x.xref_id for x in detect_author_year_xrefs(sents, refs)] == [2]
+
+    def test_tie_between_loose_matches_links_nothing_and_offers_no_shortlist(self):
+        from bibr.structure.citation_matcher import match_with_ambiguous
+
+        refs = [
+            _ref(1, "Okafor Chidi, Lund Karl", title="A"),
+            _ref(2, "Okafor Dayo, Lund Karl", title="B"),
+        ]
+        xrefs, ambiguous = match_with_ambiguous([_sent(0, "As shown (Okafor & Lund, 2020).")], refs)
+        assert xrefs == []
+        assert ambiguous == []
+
+    def test_author_count_still_breaks_a_loose_tie(self):
+        refs = [
+            _ref(1, "Okafor Chidi, Lund Karl", title="A"),
+            _ref(2, "Okafor Dayo", title="B"),
+        ]
+        sents = [_sent(0, "As Okafor (2020) showed, this holds.")]
+        assert [x.xref_id for x in detect_author_year_xrefs(sents, refs)] == [2]
+
+
 class TestYearSuffix:
     def test_suffix_disambiguation(self):
         refs = [
