@@ -17,6 +17,8 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 
+from bibr.extract.equation_extractor import repair_statistic_glitches
+
 Span = tuple[int, int]
 
 _WS = re.compile(r"\s+")
@@ -107,6 +109,7 @@ class SpanLocator:
         self._texts = texts
         self._shared = shared
         self._taken: dict[tuple[int, str], int] = {}
+        self._repaired: dict[int, str] = {}
 
     def locate(
         self,
@@ -125,6 +128,38 @@ class SpanLocator:
         if index >= len(matches):
             return None
         self._taken[(text_id, key)] = index + 1
+        return matches[index]
+
+    def locate_repaired(
+        self,
+        text_id: int,
+        key: str,
+        pattern: Callable[[], re.Pattern[str] | None],
+    ) -> Span | None:
+        """Like ``locate``, among the matches that are there once glitches are repaired.
+
+        An expression read through ``repair_statistic_glitches`` ("t(59) = 0.66"
+        of the printed "t(59) 5 0.66") is not in the sentence as read. The
+        repaired text has as many characters, so a span found in it is a span of
+        the printed one. Only matches the printed text does not hold are taken,
+        since ``locate`` has placed those.
+        """
+        text = self._texts.get(text_id)
+        compiled = pattern()
+        if text is None or compiled is None:
+            return None
+        if text_id not in self._repaired:
+            self._repaired[text_id] = repair_statistic_glitches(text)
+        repaired = self._repaired[text_id]
+        if repaired == text:
+            return None
+        printed = {m.span() for m in compiled.finditer(text)}
+        matches = [m.span() for m in compiled.finditer(repaired) if m.span() not in printed]
+        taken = (text_id, key + "\x1frepaired")
+        index = self._taken.get(taken, 0)
+        if index >= len(matches):
+            return None
+        self._taken[taken] = index + 1
         return matches[index]
 
 
@@ -162,13 +197,25 @@ def equation_span(locator: SpanLocator, eq) -> Span | None:
     A name with spaces that is not printed with them is looked for printed
     closer together (see ``equation_pattern``), among the places where it is
     not printed with them, so a row placed as parsed keeps its place.
+
+    A row read through a repaired glitch ("t(59) = 0.66" for "t(59) 5 0.66")
+    is last looked for in the repaired sentence, which has the span of the
+    printed one.
     """
     key = "\x1f".join((eq.lhs, eq.df or "", eq.comp, eq.rhs))
-    span = locator.locate(eq.text_id, key, lambda: equation_pattern(eq.lhs, eq.df, eq.comp, eq.rhs))
-    if span is None and len(eq.lhs.split()) > 1:
-        span = locator.locate(
-            eq.text_id,
-            key + "\x1ffused",
-            lambda: equation_pattern(eq.lhs, eq.df, eq.comp, eq.rhs, fused_lhs=True),
-        )
+
+    def as_parsed():
+        return equation_pattern(eq.lhs, eq.df, eq.comp, eq.rhs)
+
+    def fused():
+        return equation_pattern(eq.lhs, eq.df, eq.comp, eq.rhs, fused_lhs=True)
+
+    spaced = len(eq.lhs.split()) > 1
+    span = locator.locate(eq.text_id, key, as_parsed)
+    if span is None and spaced:
+        span = locator.locate(eq.text_id, key + "\x1ffused", fused)
+    if span is None:
+        span = locator.locate_repaired(eq.text_id, key, as_parsed)
+    if span is None and spaced:
+        span = locator.locate_repaired(eq.text_id, key + "\x1ffused", fused)
     return span

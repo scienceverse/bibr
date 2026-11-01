@@ -130,6 +130,55 @@ def test_a_name_read_with_spaces_is_located_where_printed_without_them():
     assert equation_span(locator, eq(3, "r s", ".4")) == (21, 29)
 
 
+def test_an_expression_read_through_a_glitch_is_located_where_it_is_printed():
+    # The extractor reads "t(59) 5 0.66, p , .01" as "t(59) = 0.66, p < .01"
+    # when asked to repair the text layer; the span is the printed one.
+    texts = {
+        1: "It held, t(59) 5 0.66, p , .01, and F (1, 20) 4.1, p .03.",
+        2: "Then \U0001d440 = 3.2 and \u25a1p\u25a1=\u25a1.04.",
+    }
+    locator = SpanLocator(texts, shared=False)
+
+    def eq(text_id, lhs, df, comp, rhs):
+        return SimpleNamespace(text_id=text_id, lhs=lhs, df=df, comp=comp, rhs=rhs)
+
+    def printed(text_id, lhs, df, comp, rhs):
+        span = equation_span(locator, eq(text_id, lhs, df, comp, rhs))
+        return None if span is None else texts[text_id][span[0] : span[1]]
+
+    assert printed(1, "t", "59", "=", "0.66") == "t(59) 5 0.66"
+    assert printed(1, "p", "", "<", ".01") == "p , .01"
+    assert printed(1, "F", "1, 20", "=", "4.1") == "F (1, 20) 4.1"
+    assert printed(1, "p", "", "=", ".03") == "p .03"
+    assert printed(2, "M", "", "=", "3.2") == "\U0001d440 = 3.2"
+    assert printed(2, "p", "", "=", ".04") == "p\u25a1=\u25a1.04"
+
+
+def test_a_repaired_expression_is_not_placed_where_another_row_is_printed():
+    texts = {1: "First t(59) 5 0.66, then t(59) = 0.66, then again t(59) = 0.66."}
+    locator = SpanLocator(texts, shared=False)
+    row = SimpleNamespace(text_id=1, lhs="t", df="59", comp="=", rhs="0.66")
+
+    spans = [equation_span(locator, row) for _ in range(4)]
+
+    assert [texts[1][a:b] for a, b in spans[:3]] == ["t(59) = 0.66", "t(59) = 0.66", "t(59) 5 0.66"]
+    assert spans[3] is None  # three places, three rows
+    assert len({*spans[:3]}) == 3
+
+
+def test_an_expression_that_is_not_in_the_repaired_text_either_stays_null():
+    texts = {1: "It held, t(59) 5 0.66, p , .01."}
+    locator = SpanLocator(texts, shared=False)
+
+    def eq(lhs, df, comp, rhs):
+        return SimpleNamespace(text_id=1, lhs=lhs, df=df, comp=comp, rhs=rhs)
+
+    assert equation_span(locator, eq("t", "59", "=", "0.67")) is None
+    assert equation_span(locator, eq("p", "", "<", ".02")) is None
+    assert equation_span(locator, eq("t", "59", "=", "0.66")) == (9, 21)
+    assert equation_span(SpanLocator({}, shared=False), eq("t", "59", "=", "0.66")) is None
+
+
 def test_export_emits_spans_and_fills_eq_verbatim(demo_paper):
     from bibr.export.json_export import _export_paper_payload
 
@@ -145,3 +194,15 @@ def test_export_emits_spans_and_fills_eq_verbatim(demo_paper):
     assert text[url["start"] : url["end"]] == "data"
     eq = payload["eq"][0]
     assert eq["verbatim"] == "t(28) = 3.42" == text[eq["start"] : eq["end"]]
+
+
+def test_export_gives_the_printed_span_of_an_expression_read_through_a_glitch(demo_paper):
+    from bibr.export.json_export import _export_paper_payload
+
+    demo_paper.contents.sentences[1].text = "It replicated prior work, t(28) 5 3.42, see Table 1."
+    payload = _export_paper_payload(demo_paper)
+    text = payload["text"][1]["text"]
+
+    eq = payload["eq"][0]
+    assert (eq["lhs"], eq["df"], eq["comp"], eq["rhs"]) == ("t", "28", "=", "3.42")
+    assert eq["verbatim"] == "t(28) 5 3.42" == text[eq["start"] : eq["end"]]
