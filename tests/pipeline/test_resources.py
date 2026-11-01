@@ -721,7 +721,7 @@ def test_the_manager_falls_back_to_its_own_settings():
 
 @pytest.mark.asyncio
 async def test_closing_the_manager_releases_the_cached_tagger():
-    rm = _tagger_manager("primary")
+    rm = _tagger_manager("primary", memory_mode="aggressive")
     with patch("bibr.front_tagger.runtime.load_front_tagger", return_value="tagger"):
         rm.ensure_front_tagger()
     with patch("bibr.front_tagger.runtime.release_front_tagger") as release:
@@ -730,6 +730,28 @@ async def test_closing_the_manager_releases_the_cached_tagger():
     assert rm._front_tagger is None
     with patch("bibr.front_tagger.runtime.load_front_tagger", return_value="again") as load:
         assert rm.ensure_front_tagger() == "again"
+    load.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({"memory_mode": "balanced"}, id="balanced"),
+        pytest.param({"memory_mode": "aggressive", "owns_models": False}, id="not-the-owner"),
+    ],
+)
+async def test_closing_the_manager_keeps_the_tagger_loaded_for_the_next_one_shot_call(kwargs):
+    rm = _tagger_manager("primary", **kwargs)
+    with patch("bibr.front_tagger.runtime.load_front_tagger", return_value="tagger"):
+        rm.ensure_front_tagger()
+    with patch("bibr.front_tagger.runtime.release_front_tagger") as release:
+        await rm.close_models()
+    release.assert_not_called()
+    # The manager lets go of it either way; the process-wide cache keeps it.
+    assert rm._front_tagger is None
+    with patch("bibr.front_tagger.runtime.load_front_tagger", return_value="tagger") as load:
+        assert rm.ensure_front_tagger() == "tagger"
     load.assert_called_once()
 
 

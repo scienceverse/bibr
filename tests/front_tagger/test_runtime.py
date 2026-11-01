@@ -179,10 +179,9 @@ def test_a_word_a_token_starts_in_keeps_that_tokens_tag():
     assert conf == [0.9, 0.5, 0.6]
 
 
-def _fake_loader(monkeypatch, tmp_path):
-    """``load_front_tagger`` over a recording stand-in, so no session (or GPU) is made."""
+def _recording_tagger(monkeypatch):
+    """``OnnxFrontTagger`` swapped for a recording stand-in, so no session (or GPU) is made."""
     from bibr.front_tagger import runtime
-    from bibr.utils import ml_runtime
 
     built: list[tuple] = []
 
@@ -191,8 +190,17 @@ def _fake_loader(monkeypatch, tmp_path):
             built.append((bundle, device))
 
     monkeypatch.setattr(runtime, "OnnxFrontTagger", _Tagger)
-    monkeypatch.setattr(ml_runtime, "find_onnx_bundle", lambda *a, **k: tmp_path)
+    monkeypatch.setattr("sys.platform", "linux")  # the device tests are not macOS ones
     runtime.reset_front_tagger_cache()
+    return runtime, built
+
+
+def _fake_loader(monkeypatch, tmp_path):
+    """``load_front_tagger`` over a recording stand-in that finds ``tmp_path`` as the bundle."""
+    from bibr.utils import ml_runtime
+
+    runtime, built = _recording_tagger(monkeypatch)
+    monkeypatch.setattr(ml_runtime, "find_onnx_bundle", lambda *a, **k: tmp_path)
     return runtime, built
 
 
@@ -250,3 +258,101 @@ def test_releasing_a_tagger_drops_only_the_cache_entries_that_hold_it(monkeypatc
 def test_releasing_a_tagger_the_cache_never_held_is_harmless(monkeypatch, tmp_path):
     runtime, _built = _fake_loader(monkeypatch, tmp_path)
     runtime.release_front_tagger(object())
+
+
+def test_macos_runs_the_tagger_on_the_cpu_provider(monkeypatch, tmp_path):
+    runtime, built = _fake_loader(monkeypatch, tmp_path)
+    monkeypatch.setattr("sys.platform", "darwin")
+    settings = _tagger_settings("only")
+    tagger = runtime.load_front_tagger(settings)
+    # Whatever device the run asked for, and one cache entry for all of them.
+    assert runtime.load_front_tagger(settings, device="cuda") is tagger
+    assert runtime.load_front_tagger(settings, device="auto") is tagger
+    assert built == [(tmp_path, "cpu")]
+    runtime.reset_front_tagger_cache()
+
+
+def _hub_bundle(tmp_path):
+    onnx_dir = tmp_path / "onnx"
+    onnx_dir.mkdir()
+    (onnx_dir / "bibr_onnx.json").write_text(json.dumps({"schema_version": 1}))
+    (onnx_dir / "model.onnx").write_bytes(b"")
+    return onnx_dir
+
+
+def _hub_that_fails_with(monkeypatch, tmp_path, failure):
+    """A Hub that raises ``failure`` while ``failure`` is set, then serves a bundle."""
+    onnx_dir = _hub_bundle(tmp_path)
+    calls: list[str] = []
+
+    def download(repo_id, filename, revision=None):
+        calls.append(filename)
+        if failure:
+            raise failure[0]
+        return str(onnx_dir / filename.split("/")[-1])
+
+    monkeypatch.setattr("bibr.utils.hf_cache.hf_download_or_cached", download)
+    return calls
+
+
+def _network_blips():
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    return [ConnectionError("network is unreachable"), LocalEntryNotFoundError("offline")]
+
+
+@pytest.mark.parametrize("blip", _network_blips(), ids=lambda exc: type(exc).__name__)
+def test_a_network_blip_does_not_disable_the_tagger_for_the_process(monkeypatch, tmp_path, blip):
+    runtime, built = _recording_tagger(monkeypatch)
+    failure = [blip]
+    calls = _hub_that_fails_with(monkeypatch, tmp_path, failure)
+    settings = _tagger_settings("only")
+
+    assert runtime.load_front_tagger(settings) is None
+    failure.clear()  # the network is back
+    assert runtime.load_front_tagger(settings) is not None
+    assert len(built) == 1
+    assert calls[0] == calls[1] == "onnx/bibr_onnx.json"  # the second paper looked again
+    runtime.reset_front_tagger_cache()
+
+
+def test_a_bundle_the_hub_does_not_have_is_looked_for_once(monkeypatch, tmp_path):
+    runtime, built = _recording_tagger(monkeypatch)
+    calls = _hub_that_fails_with(monkeypatch, tmp_path, [FileNotFoundError("no such file")])
+    settings = _tagger_settings("only")
+
+    assert runtime.load_front_tagger(settings) is None
+    assert runtime.load_front_tagger(settings) is None
+    assert calls == ["onnx/bibr_onnx.json"]
+    assert built == []
+    runtime.reset_front_tagger_cache()
+
+
+def test_chunks_that_ask_together_read_the_bundle_once(monkeypatch, tmp_path):
+    import threading
+    import time
+
+    runtime, built = _fake_loader(monkeypatch, tmp_path)
+    reads = []
+
+    def slow_find(*args, **kwargs):
+        reads.append(args)
+        time.sleep(0.2)
+        return tmp_path
+
+    monkeypatch.setattr("bibr.utils.ml_runtime.find_onnx_bundle", slow_find)
+    settings = _tagger_settings("only")
+    got = []
+    threads = [
+        threading.Thread(target=lambda: got.append(runtime.load_front_tagger(settings)))
+        for _ in range(4)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(reads) == 1
+    assert len(built) == 1
+    assert len({id(tagger) for tagger in got}) == 1
+    runtime.reset_front_tagger_cache()

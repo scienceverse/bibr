@@ -73,13 +73,15 @@ async def _tag_front_matter(rm, ocr_regions, *, first_page_index: int, settings=
     """Run the optional front-matter tagger off the event loop; never raise.
 
     ``settings`` are the run's: a fast run turns the tagger on for itself, so
-    the resource manager's own settings would leave it off.
+    the resource manager's own settings would leave it off. Loading the tagger
+    is off the loop too: the first paper reads the bundle (a download, on a
+    first run) and opens the session.
     """
     ensure = getattr(rm, "ensure_front_tagger", None)
     if ensure is None:
         return None
     try:
-        tagger = ensure(settings)
+        tagger = await asyncio.to_thread(ensure, settings)
         if tagger is None:
             return None
         from bibr.extract.front_role import build_front_regions

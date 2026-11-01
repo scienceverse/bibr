@@ -283,7 +283,14 @@ class ResourceManager:
             release_front_role_classifier(self._front_role)
         self._front_role = None
         self._front_role_resolved = False
-        if self._front_tagger is not None:
+        if (
+            self._front_tagger is not None
+            and self._owns_models
+            and self.memory_mode == "aggressive"
+        ):
+            # Process-global like the NER parser below, and about half a gigabyte:
+            # balanced one-shot chew() calls share the process, and releasing it
+            # there would reload it on every file.
             from bibr.front_tagger.runtime import release_front_tagger
 
             release_front_tagger(self._front_tagger)

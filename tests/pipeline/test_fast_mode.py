@@ -1247,23 +1247,35 @@ class _ReferenceParser:
 
 
 async def fast_page_run(
-    tmp_path, monkeypatch, *, tagger=None, page=_PAGE, configure=None, classifier_loaders=None
+    tmp_path,
+    monkeypatch,
+    *,
+    tagger=None,
+    page=_PAGE,
+    configure=None,
+    classifier_loaders=None,
+    tagger_loads=None,
 ):
     """The pipeline's stages over a one-page PDF in fast mode, with the models faked.
 
     The layout detector, the sentence splitter, the reference segmenter and parser
-    and the front-matter tagger (*tagger*; ``None`` is a bundle that would not load)
-    are stand-ins; nothing else is, and the LLM is not wired. No trained classifier
-    is configured (the suite's default), so the paper type stays empty. A test that
-    wants them sets their ids on the pipeline's settings with *configure* and gives
-    *classifier_loaders*, the ``(paper, section)`` loaders of the managed classifiers.
+    and the front-matter tagger's session (*tagger*; ``None`` is a bundle that
+    would not load) are stand-ins; nothing else is, and the LLM is not wired. The
+    tagger is found and loaded the way a run does it, from the run's settings and
+    device; each load appends ``(model_id, revision, device)`` to *tagger_loads*.
+    No trained classifier is configured (the suite's default), so the paper type
+    stays empty. A test that wants them sets their ids on the pipeline's settings
+    with *configure* and gives *classifier_loaders*, the ``(paper, section)``
+    loaders of the managed classifiers.
     """
     import dataclasses
 
     from bibr.config import Settings
     from bibr.extract import ref_extractor
+    from bibr.front_tagger import runtime as tagger_runtime
     from bibr.local.pipeline import LocalPipeline
     from bibr.pipeline.resources import ResourceManager
+    from bibr.utils import ml_runtime
     from tests import test_pipeline_smoke as smoke
 
     monkeypatch.setattr(Settings.ocr, "native_text_min_chars", 4)
@@ -1302,13 +1314,28 @@ async def fast_page_run(
         classifier_resources=classifiers,
     )
     rm._ocr = smoke.FakeOcr()
-    rm.ensure_front_tagger = lambda settings=None: tagger
+
+    loads = tagger_loads if tagger_loads is not None else []
+    found = {}
+
+    def find_bundle(model_id, revision=None, **_kw):
+        found["id"], found["revision"] = model_id, revision
+        return tmp_path if tagger is not None else None
+
+    def open_session(_bundle, device=None):
+        loads.append((found["id"], found["revision"], device))
+        return tagger
+
+    monkeypatch.setattr(ml_runtime, "find_onnx_bundle", find_bundle)
+    monkeypatch.setattr(tagger_runtime, "OnnxFrontTagger", open_session)
+    tagger_runtime.reset_front_tagger_cache()
     pipeline._resources = rm
     try:
         return await pipeline.process_file(
             path, config=dataclasses.replace(pipeline._config, mode="fast")
         )
     finally:
+        tagger_runtime.reset_front_tagger_cache()
         await pipeline.aclose()
 
 
@@ -1386,6 +1413,22 @@ async def test_a_fast_run_end_to_end(tmp_path, monkeypatch):
         "issues": ["LLM_SKIPPED"],
         "rule": "skipped_fast_mode",
     }
+
+
+async def test_a_fast_run_loads_the_tagger_from_its_own_settings_and_device(tmp_path, monkeypatch):
+    from bibr.config import GlobalSettings
+    from bibr.local.pipeline import LocalPipeline
+
+    loads: list[tuple] = []
+    result = await fast_page_run(tmp_path, monkeypatch, tagger=PageTagger(), tagger_loads=loads)
+
+    # The pipeline's settings have the tagger off; the fast overlay turned it on, with the
+    # configured model, and the session opened on the device the run uses.
+    assert GlobalSettings().ml.front_tagger_mode == "off"
+    assert loads == [
+        (GlobalSettings().ml.front_tagger_model_id, None, LocalPipeline(crossref=False).device)
+    ]
+    assert result["metadata"]["title"] == _TITLE
 
 
 async def test_a_fast_run_whose_tagger_did_not_load_says_so(tmp_path, monkeypatch):

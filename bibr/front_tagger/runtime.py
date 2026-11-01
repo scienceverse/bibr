@@ -19,6 +19,7 @@ stitched sequence.
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -190,6 +191,9 @@ class OnnxFrontTagger:
 
 _CACHE: dict[tuple[str, str | None, str | None], OnnxFrontTagger | None] = {}
 _CACHE_LOCK = threading.Lock()
+# One load at a time, taken before ``_CACHE_LOCK``: chunks that ask for the tagger
+# together would each read the bundle (about half a gigabyte) and open a session.
+_LOAD_LOCK = threading.Lock()
 
 
 def load_front_tagger(
@@ -198,42 +202,57 @@ def load_front_tagger(
     """The configured tagger, or ``None`` when it is off or cannot be loaded.
 
     ``settings`` are the run's (a fast run turns the tagger on for itself) and
-    ``device`` is its ``--device``. Like the region-role classifier, the tagger
-    is optional: a missing bundle logs once and the run goes on without its
-    answer, which a full run covers with the LLM and a fast run reports as a
-    warning.
+    ``device`` is its ``--device``; macOS always uses the CPU provider, as CoreML
+    is untested on this model. Like the region-role classifier, the tagger is
+    optional: a missing bundle logs once and the run goes on without its answer,
+    which a full run covers with the LLM and a fast run reports as a warning. A
+    network failure is not remembered, so the next paper tries again.
+
+    Blocking: the first call reads the bundle (a download, on a first run) and
+    opens the session, so async callers run it off the event loop.
     """
     from bibr.utils.ml_runtime import find_onnx_bundle
 
     ml = settings.ml
-    model_id = getattr(ml, "front_tagger_model_id", None)
-    if getattr(ml, "front_tagger_mode", "off") == "off" or not model_id:
+    model_id = getattr(ml, "front_tagger_mode", "off") != "off" and getattr(
+        ml, "front_tagger_model_id", None
+    )
+    if not model_id:
         return None
     revision = getattr(ml, "front_tagger_revision", None) or None
+    if sys.platform == "darwin":
+        device = "cpu"
     key = (str(model_id), revision, str(device) if device else None)
     with _CACHE_LOCK:
         if key in _CACHE:
             return _CACHE[key]
-    tagger: OnnxFrontTagger | None = None
-    try:
-        bundle = find_onnx_bundle(str(model_id), revision, label="front-matter tagger")
-        if bundle is None:
-            logger.warning(
-                "Front-matter tagger %s has no ONNX bundle; the run goes on without it", model_id
+    with _LOAD_LOCK:
+        with _CACHE_LOCK:  # loaded by the call this one waited for
+            if key in _CACHE:
+                return _CACHE[key]
+        tagger: OnnxFrontTagger | None = None
+        try:
+            bundle = find_onnx_bundle(
+                str(model_id), revision, label="front-matter tagger", raise_transient=True
             )
-        else:
-            tagger = OnnxFrontTagger(bundle, device)
-            logger.info("Front-matter tagger loaded from %s", bundle)
-    except Exception as exc:  # noqa: BLE001 - optional model, never fatal
-        logger.warning(
-            "Front-matter tagger %s unavailable (%s); the run goes on without it", model_id, exc
-        )
-        from bibr.utils.transient import is_transient_network_error
+            if bundle is None:
+                logger.warning(
+                    "Front-matter tagger %s has no ONNX bundle; the run goes on without it",
+                    model_id,
+                )
+            else:
+                tagger = OnnxFrontTagger(bundle, device)
+                logger.info("Front-matter tagger loaded from %s", bundle)
+        except Exception as exc:  # noqa: BLE001 - optional model, never fatal
+            logger.warning(
+                "Front-matter tagger %s unavailable (%s); the run goes on without it", model_id, exc
+            )
+            from bibr.utils.transient import is_transient_network_error
 
-        if is_transient_network_error(exc):
-            return None
-    with _CACHE_LOCK:
-        _CACHE[key] = tagger
+            if is_transient_network_error(exc):
+                return None
+        with _CACHE_LOCK:
+            _CACHE[key] = tagger
     return tagger
 
 

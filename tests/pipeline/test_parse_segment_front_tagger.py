@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -110,6 +111,22 @@ def test_the_tagger_is_given_the_runs_settings():
     assert settings.ml.front_tagger_mode == "only"
     assert contents.front_tagger_result.title_keywords.title == "Handedness in families"
     assert fs.error is None
+
+
+def test_the_tagger_is_loaded_off_the_event_loop():
+    loop_thread = threading.get_ident()
+    loaded_on: list[int] = []
+    tagger = _Tagger()
+    rm = _rm(tagger)
+
+    def ensure(settings):
+        loaded_on.append(threading.get_ident())
+        return tagger
+
+    rm.ensure_front_tagger = MagicMock(side_effect=ensure)
+    _, contents, _ = _run(_fast(), rm, pages=_manuscript())
+    assert loaded_on and loop_thread not in loaded_on
+    assert contents.front_tagger_result.title_keywords.title == "Handedness in families"
 
 
 def test_a_full_run_hands_over_its_own_settings_too():

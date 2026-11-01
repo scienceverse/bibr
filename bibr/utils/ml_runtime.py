@@ -30,6 +30,7 @@ from typing import Any, Literal
 
 from bibr.exceptions import ConfigurationError
 from bibr.utils.ml_extra import TORCH_EXTRA_HINT
+from bibr.utils.transient import is_transient_network_error
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +112,11 @@ def _local_bundle(path: Path) -> Path | None:
 
 
 def find_onnx_bundle(
-    model_id: str | None, revision: str | None = None, *, label: str = "model"
+    model_id: str | None,
+    revision: str | None = None,
+    *,
+    label: str = "model",
+    raise_transient: bool = False,
 ) -> Path | None:
     """Locate the ``onnx/`` bundle for ``model_id``, or ``None``.
 
@@ -124,7 +129,10 @@ def find_onnx_bundle(
     a fully cached bundle resolves offline; a repo, revision or file that does
     not exist, or an unreachable Hub with nothing cached, yields ``None``
     (logged at INFO — this is the normal state until the artifacts are
-    published).
+    published). With ``raise_transient`` a network failure (see
+    :func:`~bibr.utils.transient.is_transient_network_error`) is raised
+    instead, for a caller that retries later and must not read a blip as "no
+    bundle"; a bundle that is confirmed missing still yields ``None``.
     """
     if not model_id:
         return None
@@ -144,6 +152,8 @@ def find_onnx_bundle(
         for name in files:
             hf_download_or_cached(repo_id, f"{ONNX_DIRNAME}/{name}", revision)
     except Exception as exc:  # noqa: BLE001 — absence is the expected outcome
+        if raise_transient and is_transient_network_error(exc):
+            raise
         logger.info(
             "No ONNX bundle for %s (%s@%s): %s: %s",
             label,
