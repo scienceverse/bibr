@@ -650,6 +650,9 @@ class RegionSummary:
     # The backend of the reading a scan-consensus escalation kept instead of
     # the primary OCR's; None when the primary reading stands.
     ocr_backend: str | None = None
+    # How the text-layer OCR backend read the region: "text", "table_rebuilt",
+    # "formula_plain" or "unread"; None on every other route.
+    read_as: str | None = None
     # A text-layer region whose box cuts a printed line (its text may end
     # mid-token); see bibr.ocr.native_text._box_cuts_a_line.
     native_text_edge_cut: bool = False

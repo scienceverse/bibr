@@ -6,13 +6,14 @@ the layouts are synthetic region boxes: no layout model, no OCR model.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from bibr.ocr import registry
 from bibr.ocr.text_layer import read_text_layer
 from bibr.ocr.text_layer_quality import judge_page, lexical_profile
 from bibr.ocr.text_layer_tables import build_table_html
-from bibr.ocr.utils import pdfium_lock
 from bibr.processing_warnings import WarningCode
 from tests.document._pdfs import FIXTURES, PAGE_H, PAGE_W, SAMPLE_PAPER, PageSpec, build_pdf, text
 
@@ -39,17 +40,6 @@ def _box(x0: float, y0: float, x1: float, y1: float) -> list[float]:
 
 def _region(label: str, box: list[float], task: str = "text") -> dict:
     return {"label": label, "task_type": task, "bbox_2d": box, "content": ""}
-
-
-def _render(pdf: bytes, scale: float = 2.0):
-    import pypdfium2
-
-    with pdfium_lock:
-        doc = pypdfium2.PdfDocument(pdf)
-        try:
-            return [doc[i].render(scale=scale).to_pil() for i in range(len(doc))]
-        finally:
-            doc.close()
 
 
 def _lines(lines: list[str], *, x: float = 72.0, top: float = 700.0, step: float = 14.0) -> bytes:
@@ -106,7 +96,7 @@ def test_sample_paper_fills_every_readable_region():
     pdf = SAMPLE_PAPER.read_bytes()
     layout = _sample_paper_layout()
 
-    read = read_text_layer(pdf, layout, page_images=_render(pdf))
+    read = read_text_layer(pdf, layout)
 
     assert [(page.index, page.ok) for page in read.pages] == [(0, True), (1, True)]
     first, second = read.layout_results
@@ -139,7 +129,7 @@ def test_sample_paper_fills_every_readable_region():
 def test_native_text_fixture_is_read():
     pdf = (FIXTURES / "native_text_sample.pdf").read_bytes()
 
-    read = read_text_layer(pdf, [[_region("text", [50, 50, 950, 950])]], page_images=_render(pdf))
+    read = read_text_layer(pdf, [[_region("text", [50, 50, 950, 950])]])
 
     assert read.pages[0].ok
     assert read.layout_results[0][0]["content"] == (
@@ -179,6 +169,14 @@ def test_page_furniture_formulas_and_short_regions():
     assert body["content"].startswith("We measured the reading speed")
     assert formula["content"] == "x = a + b"
     assert formula["_formula_source"] == "text_layer"
+    assert [r["_text_layer_kind"] for r in read.layout_results[0]] == [
+        "text",
+        "text",
+        "formula_plain",
+        "text",
+        "text",
+        "unread",
+    ]
     assert number["content"] == "(1)"
     assert heading["content"] == "2.1"
     # One digit is below the three-character allowance of a footer.
@@ -264,11 +262,10 @@ def test_three_by_three_table_becomes_html_the_table_parser_reads():
 
     pdf = _table_pdf()
 
-    read = read_text_layer(
-        pdf, [[_region("table", _box(90, 560, 360, 615), task="table")]], page_images=_render(pdf)
-    )
+    read = read_text_layer(pdf, [[_region("table", _box(90, 560, 360, 615), task="table")]])
 
     html = read.layout_results[0][0]["content"]
+    assert read.layout_results[0][0]["_text_layer_kind"] == "table_rebuilt"
     assert html == (
         "<table>"
         "<tr><td>Name</td><td>Age</td><td>Score</td></tr>"
@@ -393,51 +390,23 @@ def _prose_pdf(lines: list[str], extra: bytes = b"") -> bytes:
 def test_good_prose_page_passes_every_gate():
     pdf = _prose_pdf(_PROSE)
 
-    read = read_text_layer(pdf, [[_region("text", _paragraph_box(6))]], page_images=_render(pdf))
+    read = read_text_layer(pdf, [[_region("text", _paragraph_box(6))]])
 
     page = read.pages[0]
     assert page.ok, page.metrics
     assert page.metrics["coverage"] == 1.0
-    assert page.metrics["glyphs_on_ink"] > 0.9
     assert page.metrics["stopword_share"] > 0.2
-
-
-def test_text_layer_off_its_ink_fails():
-    from PIL import Image
-
-    pdf = _prose_pdf(_PROSE)
-    image = _render(pdf)[0]
-    shifted = Image.new("RGB", image.size, "white")
-    shifted.paste(image, (0, 400))
-
-    read = read_text_layer(pdf, [[_region("text", _paragraph_box(6))]], page_images=[shifted])
-
-    page = read.pages[0]
-    assert (page.ok, page.reason) == (False, "text_off_ink")
-    assert read.layout_results[0][0]["content"] == ""
-    assert read.layout_results[0][0]["_text_layer_unread"] is True
-    assert [w.code for w in read.warnings] == [WarningCode.TEXT_LAYER_PAGE_UNUSABLE]
-
-
-def test_ink_the_text_layer_does_not_hold_fails():
-    # A block of printed matter drawn as paths, with a heading in the text layer.
-    pdf = _prose_pdf(["Results"], b"q 0 g 72 450 300 230 re f Q\n")
-
-    read = read_text_layer(
-        pdf, [[_region("text", _box(60, 440, 400, 714))]], page_images=_render(pdf)
-    )
-
-    assert read.pages[0].reason == "ink_without_text"
 
 
 def test_caesar_shifted_text_layer_fails():
     pdf = _prose_pdf([_caesar(line) for line in _PROSE])
 
-    read = read_text_layer(pdf, [[_region("text", _paragraph_box(6))]], page_images=_render(pdf))
+    read = read_text_layer(pdf, [[_region("text", _paragraph_box(6))]])
 
     page = read.pages[0]
     assert (page.ok, page.reason) == (False, "implausible_text")
     assert page.metrics["stopword_share"] < 0.04
+    assert read.layout_results[0][0]["_text_layer_kind"] == "unread"
 
 
 def test_text_layer_without_word_spaces_fails():
@@ -456,7 +425,7 @@ def _minus_29(line: str) -> str:
 def test_text_layer_29_code_points_down_fails():
     pdf = _prose_pdf([_minus_29(line) for line in _PROSE])
 
-    read = read_text_layer(pdf, [[_region("text", _paragraph_box(6))]], page_images=_render(pdf))
+    read = read_text_layer(pdf, [[_region("text", _paragraph_box(6))]])
 
     page = read.pages[0]
     assert (page.ok, page.reason) == (False, "implausible_text")
@@ -484,7 +453,7 @@ def test_text_without_function_words_still_passes(text_):
     lexical = lexical_profile([text_])
 
     assert lexical["stopword_share"] < 0.04
-    assert judge_page(coverage=1.0, rejected_regions=0, read_regions=1, ink={}, lexical=lexical).ok
+    assert judge_page(coverage=1.0, rejected_regions=0, read_regions=1, lexical=lexical).ok
 
 
 def test_a_region_the_text_layer_has_nothing_for_leaves_the_page_read():
@@ -493,7 +462,7 @@ def test_a_region_the_text_layer_has_nothing_for_leaves_the_page_read():
     pdf = _prose_pdf(_PROSE, b"q 0 g 72 80 450 500 re f Q\n")
     layout = [[_region("text", _paragraph_box(6)), _region("text", _box(60, 70, 560, 590))]]
 
-    read = read_text_layer(pdf, layout, page_images=_render(pdf))
+    read = read_text_layer(pdf, layout)
 
     page = read.pages[0]
     assert page.ok, page.metrics
@@ -507,7 +476,7 @@ def test_a_region_the_text_layer_has_nothing_for_leaves_the_page_read():
 def test_scanned_fixture_has_no_text_layer():
     pdf = (FIXTURES / "scanned_sample.pdf").read_bytes()
 
-    read = read_text_layer(pdf, [[_region("text", [50, 50, 950, 950])]], page_images=_render(pdf))
+    read = read_text_layer(pdf, [[_region("text", [50, 50, 950, 950])]])
 
     assert (read.pages[0].ok, read.pages[0].reason) == (False, "no_text_layer")
     assert read.layout_results[0][0]["_text_layer_unread"] is True
@@ -590,23 +559,20 @@ def test_lexical_profile_leaves_other_scripts_and_short_text_alone():
 
 
 def test_judge_page_names_the_first_failing_gate():
-    assert judge_page(coverage=None, rejected_regions=0, read_regions=0, ink={}, lexical={}).ok
-    low = judge_page(
-        coverage=0.1, rejected_regions=3, read_regions=3, ink={"glyphs_on_ink": 0}, lexical={}
-    )
+    assert judge_page(coverage=None, rejected_regions=0, read_regions=0, lexical={}).ok
+    low = judge_page(coverage=0.1, rejected_regions=3, read_regions=3, lexical={})
     assert low.reason == "low_coverage"
-    one_bad = judge_page(coverage=1.0, rejected_regions=1, read_regions=1, ink={}, lexical={})
+    one_bad = judge_page(coverage=1.0, rejected_regions=1, read_regions=1, lexical={})
     assert one_bad.ok
     # Little area but most regions covered: one large region without text.
     assert judge_page(
-        coverage=0.3, rejected_regions=0, read_regions=3, ink={}, lexical={}, region_coverage=0.75
+        coverage=0.3, rejected_regions=0, read_regions=3, lexical={}, region_coverage=0.75
     ).ok
     assert (
         judge_page(
             coverage=0.3,
             rejected_regions=0,
             read_regions=1,
-            ink={},
             lexical={},
             region_coverage=0.25,
         ).reason
@@ -620,7 +586,6 @@ def test_judge_page_names_the_first_failing_gate():
         ("no_text_layer", "scan"),
         ("low_coverage", "scan"),
         ("invisible_ocr_layer", "scan"),
-        ("text_off_ink", "broken_text_layer"),
         ("implausible_text", "broken_text_layer"),
         ("corrupt_text", "broken_text_layer"),
     ],
@@ -640,3 +605,46 @@ def test_page_triage_follows_the_text_layer_verdict(reason, kind):
     )
 
     assert classify_page(page, [{"label": "text", "_native_text_used": True}]).value == kind
+
+
+def test_private_use_code_points_are_dropped_and_counted(monkeypatch):
+    from bibr.ocr import text_layer
+
+    monkeypatch.setattr(
+        text_layer,
+        "_read_text",
+        lambda page, bbox: "Jane Doe \ue0a1 and Joe Roe \ue0a1, 2020 \ue001",
+    )
+    region = _region("text", [0, 0, 1000, 1000])
+
+    outcome = text_layer._fill_region(object(), region, min_printable_ratio=0.85)
+
+    assert outcome == "filled"
+    assert region["content"] == "Jane Doe  and Joe Roe , 2020 "
+    assert region["_private_use_dropped"] == 3
+
+
+def test_private_use_code_point_inside_a_word_rejects_a_citation_critical_region(monkeypatch):
+    from bibr.ocr import text_layer
+
+    monkeypatch.setattr(text_layer, "_read_text", lambda page, bbox: "Ren\ue0a1e Smith, University")
+    region = _region("text", [0, 0, 1000, 1000])
+    assert text_layer._fill_region(object(), region, min_printable_ratio=0.85) == "rejected"
+    assert region["_native_gate"] == "private_use"
+
+    # A caption is not read for names or references; the glyph is dropped and counted.
+    caption = _region("figure_title", [0, 0, 1000, 1000])
+    page = SimpleNamespace(lines=[])
+    assert text_layer._fill_region(page, caption, min_printable_ratio=0.85) == "filled"
+    assert caption["content"] == "Rene Smith, University"
+    assert caption["_private_use_dropped"] == 1
+
+
+def test_drop_private_use_counts_the_ones_inside_a_word():
+    from bibr.ocr.text_layer import _drop_private_use
+
+    assert _drop_private_use("plain text") == ("plain text", 0, 0)
+    assert _drop_private_use("a \ue000 b") == ("a  b", 1, 0)
+    assert _drop_private_use("\ue000x") == ("x", 1, 1)
+    assert _drop_private_use("end\ue000") == ("end", 1, 0)
+    assert _drop_private_use("fi\ue001nd \ue002.") == ("find .", 2, 1)

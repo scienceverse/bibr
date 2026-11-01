@@ -40,6 +40,7 @@ class WarningCode(StrEnum):
     TEXT_LAYER_REGION_UNREAD = "TEXT_LAYER_REGION_UNREAD"
     TEXT_LAYER_TABLE_REBUILT = "TEXT_LAYER_TABLE_REBUILT"
     TEXT_LAYER_FORMULA_TEXT = "TEXT_LAYER_FORMULA_TEXT"
+    TEXT_LAYER_PRIVATE_USE_DROPPED = "TEXT_LAYER_PRIVATE_USE_DROPPED"
     SCAN_ARTICLE_SPLIT = "SCAN_ARTICLE_SPLIT"
     LOW_TEXT_QUALITY = "LOW_TEXT_QUALITY"
     PAGE_DPI_REDUCED = "PAGE_DPI_REDUCED"
@@ -141,6 +142,9 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     "not read by an OCR model; merged cells and multi-line cells may be split.",
     WarningCode.TEXT_LAYER_FORMULA_TEXT: "Display formulas were read from the PDF text layer as "
     "plain text, not LaTeX; their formatted text may lose sub- and superscripts.",
+    WarningCode.TEXT_LAYER_PRIVATE_USE_DROPPED: "Private-use code points (publisher icons or "
+    "unmapped glyphs) were dropped from the PDF text layer; a letter drawn that way inside a "
+    "word is missing from it.",
     WarningCode.SCAN_ARTICLE_SPLIT: "Regions of neighbouring articles on scanned pages (the "
     "previous article's tail, the next article's start, floats above the title) were dropped "
     "before parsing.",

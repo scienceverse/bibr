@@ -45,7 +45,9 @@ def no_ocr_runtime(monkeypatch):
     monkeypatch.setattr(
         registry,
         "resolve_backend_candidates",
-        lambda backend, settings: llama if backend == "paddle" else real(backend, settings),
+        lambda backend, settings, **kw: (
+            llama if backend == "paddle" else real(backend, settings, **kw)
+        ),
     )
     monkeypatch.setattr("bibr.local.llama_cpp.find_llama_server", lambda: None)
     monkeypatch.setattr(
@@ -238,7 +240,7 @@ async def test_a_runtime_that_fails_to_start_is_not_a_reason_to_fall_back(
     from bibr.pipeline.resources import ResourceManager
 
     monkeypatch.setattr(Settings.ocr, "fallback_to_text_layer", "auto")
-    monkeypatch.setattr(registry, "automatic_chain_blockers", lambda settings: [])
+    monkeypatch.setattr(registry, "automatic_chain_blockers", lambda settings, **_: [])
     monkeypatch.setattr(
         ResourceManager, "await_ocr", AsyncMock(side_effect=RuntimeError("CUDA out of memory"))
     )
@@ -328,7 +330,7 @@ def test_automatic_chain_blockers_names_every_candidate_or_none(monkeypatch):
         registry.OcrBackendCandidate("paddle-vllm", "paddle-ocr", "paddle"),
         registry.OcrBackendCandidate("glm-llama", "glm-ocr", "glm"),
     )
-    monkeypatch.setattr(registry, "resolve_backend_candidates", lambda backend, s: candidates)
+    monkeypatch.setattr(registry, "resolve_backend_candidates", lambda backend, s, **_: candidates)
     reasons = {"paddle-vllm": "no NVIDIA GPU", "glm-llama": "llama.cpp not installed"}
     monkeypatch.setattr(registry, "local_runtime_unavailable_reason", reasons.get)
 

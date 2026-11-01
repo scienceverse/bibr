@@ -16,7 +16,7 @@ What changes against the native-text pass that runs before OCR:
 - short regions need three characters, as headings do in the native pass;
 - each page passes the gates in :mod:`bibr.ocr.text_layer_quality` or loses
   all its text, since there is no OCR to correct a wrong layer: a scan, a
-  text layer off its ink, a broken font encoding. Such a page is recorded as
+  broken font encoding. Such a page is recorded as
   ``PdfPageInspection.text_layer_ok = False`` with a reason, and page triage
   (:mod:`bibr.scan.page_kind`) counts it as a scan or a broken text layer;
 - regions left without text are marked ``_text_layer_unread``; the OCR stage
@@ -42,8 +42,6 @@ from bibr.ocr.registry import TEXT_LAYER_BACKEND, TEXT_LAYER_MODEL, register
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 
 if TYPE_CHECKING:
-    from PIL import Image
-
     from bibr.config import GlobalSettings
     from bibr.ocr.text_layer_quality import PageGateResult
 
@@ -167,8 +165,6 @@ _REASON_TEXT = {
     "invisible_ocr_layer": "the text layer is invisible (an OCR layer over a scanned image)",
     "low_coverage": "the text layer covers too little of the page's text (a scanned page)",
     "corrupt_text": "most of its text is corrupt (a broken font encoding)",
-    "text_off_ink": "the text layer does not sit on the printed text",
-    "ink_without_text": "much of the printed text is not in the text layer",
     "implausible_text": "the text layer does not read as words (a broken font encoding)",
 }
 
@@ -194,6 +190,7 @@ class TextLayerRead:
     unread: Counter = field(default_factory=Counter)
     tables_rebuilt: int = 0
     formulas_read: int = 0
+    private_use_dropped: int = 0
 
 
 @dataclass
@@ -328,6 +325,28 @@ def _read_text(page: _PageText, bbox: Sequence[float]) -> str:
     return _reconstruct_text_from_records(page.records, left, bottom, right, top)
 
 
+def _drop_private_use(text: str) -> tuple[str, int, int]:
+    """Remove private-use code points: (text, dropped, dropped inside a word).
+
+    Publisher fonts put icons (an ORCID badge, an e-mail or affiliation
+    mark) and unmapped glyphs in the private-use area. They carry no text.
+    One followed directly by a letter or digit may be a glyph standing for a
+    letter of that word, so it is counted separately as *inside a word*.
+    """
+    if not any(unicodedata.category(ch) == "Co" for ch in text):
+        return text, 0, 0
+    kept: list[str] = []
+    dropped = inside = 0
+    for index, ch in enumerate(text):
+        if unicodedata.category(ch) != "Co":
+            kept.append(ch)
+            continue
+        dropped += 1
+        if index + 1 < len(text) and text[index + 1].isalnum():
+            inside += 1
+    return "".join(kept), dropped, inside
+
+
 def _fill_region(
     page: _PageText,
     region: dict[str, Any],
@@ -356,6 +375,7 @@ def _fill_region(
         region["content"] = table
         region["_native_text_used"] = True
         region["_text_layer_table"] = True
+        region["_text_layer_kind"] = "table_rebuilt"
         return "filled"
     read_box = bbox
     if label in _CAPTION_LABELS:
@@ -365,11 +385,18 @@ def _fill_region(
         text = fix_ocr_artifacts(text)
     if not text.strip():
         return "empty"
-    if label in _CITATION_CRITICAL_NATIVE_LABELS and any(
-        unicodedata.category(ch) == "Co" for ch in text
-    ):
+    text, dropped, unsafe = _drop_private_use(text)
+    if unsafe and label in _CITATION_CRITICAL_NATIVE_LABELS:
+        # A private-use glyph inside a word stands for a letter the layer does
+        # not name; the name or reference cannot be trusted without it.
         region["_native_gate"] = "private_use"
         return "rejected"
+    if dropped:
+        region["_private_use_dropped"] = dropped
+    else:
+        region.pop("_private_use_dropped", None)
+    if not text.strip():
+        return "empty"
     is_formula = label in _FORMULA_LABELS or _region_task(region) == "formula"
     min_chars = (
         _FORMULA_MIN_CHARS
@@ -387,6 +414,7 @@ def _fill_region(
         # Plain text: the parser keeps it as printed, without LaTeX.
         text = text.strip()
         region["_formula_source"] = "text_layer"
+        region["_text_layer_kind"] = "formula_plain"
     region["content"] = text
     return "filled"
 
@@ -395,13 +423,11 @@ def _judge(
     page: _PageText,
     regions: list[dict[str, Any]],
     outcomes: dict[int, str],
-    page_image: Image.Image | None,
 ) -> PageGateResult:
     """Gate one page whose readable regions *outcomes* records."""
     from bibr.ocr.text_layer_quality import (
         PageGateResult,
         covered_regions,
-        ink_agreement,
         judge_page,
         lexical_profile,
         text_coverage,
@@ -420,17 +446,8 @@ def _judge(
     coverage = text_coverage(prose_boxes, glyph_boxes)
     covered = covered_regions(prose_boxes, glyph_boxes)
     region_coverage = sum(covered) / len(covered) if covered else None
-    # The ink gate reads the regions the layer has text for: a region it has
-    # none for (text drawn as an image) is left unread on its own.
-    covered_boxes = [box for box, hit in zip(prose_boxes, covered, strict=True) if hit]
     read = [id(r) for r in prose if outcomes.get(id(r)) in ("filled", "rejected")]
     rejected = sum(1 for key in read if outcomes.get(key) == "rejected")
-    ink: dict[str, float] = {}
-    if page_image is not None:
-        try:
-            ink = ink_agreement(page_image, glyph_boxes, covered_boxes)
-        except Exception:  # noqa: BLE001 - the ink gate is advisory without an image
-            logger.debug("Ink gate failed on page %d", page.index, exc_info=True)
     lexical = lexical_profile(
         str(r.get("content") or "") for r in prose if outcomes.get(id(r)) == "filled"
     )
@@ -438,7 +455,6 @@ def _judge(
         coverage=coverage,
         rejected_regions=rejected,
         read_regions=len(read),
-        ink=ink,
         lexical=lexical,
         region_coverage=region_coverage,
     )
@@ -449,6 +465,7 @@ def _blank(region: dict[str, Any]) -> None:
     region.pop("_native_text_used", None)
     region.pop("_formula_source", None)
     region.pop("_text_layer_table", None)
+    region["_text_layer_kind"] = "unread"
     region["_text_layer_unread"] = True
 
 
@@ -457,16 +474,13 @@ def read_text_layer(
     layout_results: list[list[dict[str, Any]]],
     *,
     page_indices: Sequence[int] | None = None,
-    page_images: Sequence[Image.Image | None] | None = None,
     min_printable_ratio: float = 0.85,
 ) -> TextLayerRead:
     """Fill every region OCR would read from the PDF text layer, page-gated.
 
     *layout_results* is not modified: the filled copy is returned with each
     page's verdict and the file's warnings. Regions the native-text pass
-    already filled keep their text. *page_images* (the rendered pages the
-    layout model saw, aligned with *layout_results*) feed the ink gate; it is
-    skipped for a page without one.
+    already filled keep their text.
     """
     import pypdfium2
 
@@ -474,7 +488,6 @@ def read_text_layer(
 
     layouts = deepcopy(layout_results)
     indices = list(page_indices) if page_indices is not None else list(range(len(layouts)))
-    images = list(page_images or [])
     result = TextLayerRead(layout_results=layouts, pages=[], warnings=[])
 
     with pdfium_lock:
@@ -486,9 +499,8 @@ def read_text_layer(
             with pdfium_lock:
                 page = _load_page(doc, page_index)
             regions = layouts[slot]
-            image = images[slot] if slot < len(images) else None
             result.pages.append(
-                _read_page(page, regions, image, result, min_printable_ratio=min_printable_ratio)
+                _read_page(page, regions, result, min_printable_ratio=min_printable_ratio)
             )
     finally:
         with pdfium_lock:
@@ -510,13 +522,20 @@ def read_text_layer(
                 "as plain text, not LaTeX",
             )
         )
+    if result.private_use_dropped:
+        result.warnings.append(
+            ProcessingWarning(
+                WarningCode.TEXT_LAYER_PRIVATE_USE_DROPPED,
+                f"{result.private_use_dropped} private-use code point(s) (publisher icons or "
+                "unmapped glyphs) were dropped from the PDF text layer",
+            )
+        )
     return result
 
 
 def _read_page(
     page: _PageText,
     regions: list[dict[str, Any]],
-    image: Image.Image | None,
     result: TextLayerRead,
     *,
     min_printable_ratio: float,
@@ -531,7 +550,7 @@ def _read_page(
             outcomes[id(region)] = _fill_region(
                 page, region, min_printable_ratio=min_printable_ratio
             )
-    verdict = _judge(page, regions, outcomes, image)
+    verdict = _judge(page, regions, outcomes)
     number = page.index + 1
     if not verdict.ok:
         for region in readable:
@@ -552,10 +571,12 @@ def _read_page(
         label = str(region.get("label") or "")
         if region.get("_native_text_used") and region.get("content"):
             result.filled[label] += 1
+            region.setdefault("_text_layer_kind", "text")
             if region.get("_text_layer_table"):
                 result.tables_rebuilt += 1
             if region.get("_formula_source") == "text_layer":
                 result.formulas_read += 1
+            result.private_use_dropped += int(region.get("_private_use_dropped") or 0)
         else:
             _blank(region)
             unread_labels[label] += 1
@@ -649,7 +670,6 @@ async def read_file_text_layer(
             fs.pdf_bytes,
             fs.layout_results,
             page_indices=fs.page_indices,
-            page_images=fs.page_images,
             min_printable_ratio=settings.ocr.native_text_min_printable_ratio,
         )
     except Exception:  # noqa: BLE001 - an unreadable layer leaves the regions empty

@@ -73,6 +73,10 @@ class OcrRegionResult:
     # "text_layer" for a formula read from the PDF text layer by the
     # text-layer backend (bibr.ocr.text_layer): plain text, not LaTeX.
     formula_source: str | None = None
+    # How the text-layer backend read the region, for the export's
+    # ``regions[].read_as``: "text", "table_rebuilt", "formula_plain" or
+    # "unread". None on every other route.
+    text_layer_kind: str | None = None
 
     @classmethod
     def from_layout_region(
@@ -113,6 +117,7 @@ class OcrRegionResult:
             native_text_rejection_reason=layout.get("_native_text_rejection_reason"),
             native_text_edge_cut=layout.get("_native_text_edge_cut"),
             formula_source=layout.get("_formula_source"),
+            text_layer_kind=layout.get("_text_layer_kind"),
         )
 
     @classmethod
@@ -146,6 +151,7 @@ class OcrRegionResult:
             ocr_consensus=d.get("_ocr_consensus"),
             native_text_edge_cut=d.get("_native_text_edge_cut"),
             formula_source=d.get("_formula_source"),
+            text_layer_kind=d.get("_text_layer_kind"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -189,4 +195,6 @@ class OcrRegionResult:
             out["_native_text_edge_cut"] = self.native_text_edge_cut
         if self.formula_source is not None:
             out["_formula_source"] = self.formula_source
+        if self.text_layer_kind is not None:
+            out["_text_layer_kind"] = self.text_layer_kind
         return out

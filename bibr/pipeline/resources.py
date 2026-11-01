@@ -395,7 +395,7 @@ class ResourceManager:
             return None
         from bibr.ocr.registry import automatic_chain_blockers
 
-        blockers = automatic_chain_blockers(self._settings)
+        blockers = automatic_chain_blockers(self._settings, llm_backend=self._llm_backend)
         if not blockers:
             return None
         self.ocr_text_layer_fallback = "; ".join(blockers)

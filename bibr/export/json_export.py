@@ -971,6 +971,7 @@ def _export_paper_payload(
                     char_density=char_density,
                     estimated_line_height=line_height,
                     source=region.source,
+                    read_as=region.read_as,
                     ocr_backend=(
                         (region.ocr_backend or run_ocr_backend) if region.source == "ocr" else None
                     ),

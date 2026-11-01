@@ -1221,6 +1221,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 estimated_line_height=est_lh,
                 source=("text_layer" if region.native_text_used else "ocr") if content else None,
                 ocr_backend=(region.ocr_consensus or {}).get("chosen_backend"),
+                read_as=region.text_layer_kind,
                 native_text_edge_cut=bool(region.native_text_used and region.native_text_edge_cut),
             )
             self.region_summaries.append(region_summary)

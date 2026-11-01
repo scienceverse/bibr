@@ -616,7 +616,9 @@ def local_runtime_unavailable_reason(backend: str) -> str | None:
     return None
 
 
-def automatic_chain_blockers(settings: GlobalSettings) -> list[str]:
+def automatic_chain_blockers(
+    settings: GlobalSettings, *, llm_backend: str | None = None
+) -> list[str]:
     """Why no candidate of the automatic ``paddle`` chain can start here.
 
     One ``"<backend>: <reason>"`` per candidate, checked without starting
@@ -625,7 +627,7 @@ def automatic_chain_blockers(settings: GlobalSettings) -> list[str]:
     run to the text layer (:mod:`bibr.ocr.text_layer`).
     """
     blockers: list[str] = []
-    for candidate in resolve_backend_candidates("paddle", settings):
+    for candidate in resolve_backend_candidates("paddle", settings, llm_backend=llm_backend):
         reason = local_runtime_unavailable_reason(candidate.backend)
         if reason is None:
             return []

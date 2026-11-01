@@ -11,11 +11,6 @@ lies:
   low: one large region the layer has no text for (a screenshot of a
   questionnaire) lowers the area share of a born-digital page, but not the
   share of its regions, and is left unread on its own.
-- **ink**: on the page image the layout model already saw, glyph boxes
-  should sit on ink, and the ink inside the text regions that hold glyphs
-  should be under glyph boxes. A text layer shifted off its page, or one
-  drawn over a different image, fails the first; a region whose text is
-  partly drawn as an image or as paths fails the second.
 - **lexical**: Latin-script text should have the letters and function words
   of prose. A broken font encoding that maps every letter to another one (a
   Caesar shift, or the common offset of 29 code points that turns "The" into
@@ -35,10 +30,6 @@ import re
 import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from PIL import Image
 
 #: A glyph box ``(x0, y0, x1, y1)`` in the 0..1000 layout space, y down.
 Box = tuple[float, float, float, float]
@@ -50,18 +41,6 @@ Box = tuple[float, float, float, float]
 MIN_TEXT_COVERAGE = 0.5
 #: A text region counts as covered when it holds at least this many glyphs.
 MIN_REGION_GLYPHS = 2
-#: A page fails when less than this share of its glyph boxes touch ink.
-MIN_GLYPHS_ON_INK = 0.6
-#: ... or when less than this share of the ink in its text regions that hold
-#: glyphs lies under glyph boxes.
-MIN_INK_UNDER_GLYPHS = 0.35
-#: The ink gates need at least this many glyphs / ink pixels to say anything.
-MIN_INK_GLYPHS = 40
-MIN_INK_PIXELS = 400
-#: Pixels darker than this (0..255 grey) are ink.
-INK_THRESHOLD = 160
-#: The page image is reduced to about this width before the ink gates.
-INK_WORK_WIDTH = 1000
 #: The lexical gate reads pages with at least this many letters, at least
 #: this share of them Latin script ...
 MIN_LEXICAL_LETTERS = 200
@@ -169,62 +148,6 @@ def text_coverage(region_boxes: Sequence[Box], glyph_boxes: Sequence[Box]) -> fl
     return sum(_area(box) for box, hit in zip(region_boxes, covered, strict=True) if hit) / total
 
 
-def _pixel_box(box: Box, width: int, height: int, pad: int) -> tuple[int, int, int, int]:
-    x0 = int(box[0] * width / 1000.0) - pad
-    y0 = int(box[1] * height / 1000.0) - pad
-    x1 = int(round(box[2] * width / 1000.0)) + pad
-    y1 = int(round(box[3] * height / 1000.0)) + pad
-    return max(0, x0), max(0, y0), min(width, max(x1, x0 + 1)), min(height, max(y1, y0 + 1))
-
-
-def ink_agreement(
-    page_image: Image.Image,
-    glyph_boxes: Sequence[Box],
-    region_boxes: Sequence[Box],
-) -> dict[str, float]:
-    """How well the glyph boxes and the page's ink agree.
-
-    Returns ``glyphs_on_ink`` (share of glyph boxes touching ink) and
-    ``ink_under_glyphs`` (share of the ink inside *region_boxes* under a
-    glyph box; callers pass the regions that hold glyphs). A measure is left
-    out when there is too little to measure.
-    """
-    import numpy as np
-
-    image = page_image.convert("L")
-    factor = max(1, image.width // INK_WORK_WIDTH)
-    if factor > 1:
-        image = image.reduce(factor)
-    ink = np.asarray(image, dtype=np.uint8) < INK_THRESHOLD
-    height, width = ink.shape
-    out: dict[str, float] = {}
-
-    if len(glyph_boxes) >= MIN_INK_GLYPHS:
-        integral = np.zeros((height + 1, width + 1), dtype=np.int32)
-        integral[1:, 1:] = ink.cumsum(axis=0, dtype=np.int32).cumsum(axis=1, dtype=np.int32)
-        on_ink = 0
-        for box in glyph_boxes:
-            x0, y0, x1, y1 = _pixel_box(box, width, height, pad=1)
-            total = integral[y1, x1] - integral[y0, x1] - integral[y1, x0] + integral[y0, x0]
-            if total > 0:
-                on_ink += 1
-        out["glyphs_on_ink"] = on_ink / len(glyph_boxes)
-
-    region_mask = np.zeros_like(ink)
-    for box in region_boxes:
-        x0, y0, x1, y1 = _pixel_box(box, width, height, pad=0)
-        region_mask[y0:y1, x0:x1] = True
-    region_ink = ink & region_mask
-    ink_pixels = int(region_ink.sum())
-    if ink_pixels >= MIN_INK_PIXELS:
-        glyph_mask = np.zeros_like(ink)
-        for box in glyph_boxes:
-            x0, y0, x1, y1 = _pixel_box(box, width, height, pad=2)
-            glyph_mask[y0:y1, x0:x1] = True
-        out["ink_under_glyphs"] = int((region_ink & glyph_mask).sum()) / ink_pixels
-    return out
-
-
 def _is_latin_letter(ch: str) -> bool:
     try:
         return unicodedata.name(ch).startswith("LATIN")
@@ -284,7 +207,6 @@ def judge_page(
     coverage: float | None,
     rejected_regions: int,
     read_regions: int,
-    ink: dict[str, float],
     lexical: dict[str, float],
     region_coverage: float | None = None,
 ) -> PageGateResult:
@@ -298,7 +220,7 @@ def judge_page(
     private-use characters); most of them failing is a broken font encoding,
     the rule :mod:`bibr.scan.page_kind` uses.
     """
-    metrics: dict[str, float] = {**ink, **lexical}
+    metrics: dict[str, float] = dict(lexical)
     if coverage is not None:
         metrics["coverage"] = coverage
     if region_coverage is not None:
@@ -313,10 +235,6 @@ def judge_page(
         return PageGateResult("low_coverage", metrics)
     if rejected_regions >= 2 and rejected_regions >= 0.5 * read_regions:
         return PageGateResult("corrupt_text", metrics)
-    if ink.get("glyphs_on_ink", 1.0) < MIN_GLYPHS_ON_INK:
-        return PageGateResult("text_off_ink", metrics)
-    if ink.get("ink_under_glyphs", 1.0) < MIN_INK_UNDER_GLYPHS:
-        return PageGateResult("ink_without_text", metrics)
     if is_implausible(lexical):
         return PageGateResult("implausible_text", metrics)
     return PageGateResult(None, metrics)

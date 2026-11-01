@@ -150,7 +150,9 @@ def test_the_refusal_names_the_text_layer_backend(monkeypatch):
     monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: None)
     monkeypatch.setattr("bibr.local.llama_cpp.find_llama_server", lambda: None)
 
-    message = run_config._preflight_ocr_runtime(SimpleNamespace(ocr_backend="paddle", ocr_url=None))
+    message = run_config._preflight_ocr_runtime(
+        SimpleNamespace(ocr_backend="paddle", ocr_url=None, no_llm=False, llm_backend="vllm")
+    )
 
     assert message is not None
     assert "--ocr text-layer" in message and "OCR_FALLBACK_TO_TEXT_LAYER=auto" in message
@@ -277,7 +279,7 @@ async def test_chew_without_fallback_refuses_and_names_the_option(tmp_path, monk
     monkeypatch.setattr(
         run_config_module,
         "_ocr_runtime_blocker",
-        lambda backend: f"OCR backend cannot start here. (--ocr text-layer) [{backend}]",
+        lambda backend, **_: f"OCR backend cannot start here. (--ocr text-layer) [{backend}]",
     )
     monkeypatch.setattr("bibr.local.pipeline.LocalPipeline", _recording_pipeline({}))
     pdf = tmp_path / "paper.pdf"
@@ -371,7 +373,7 @@ def test_doctor_warns_instead_of_failing_with_the_fallback(monkeypatch, fallback
     monkeypatch.setattr(Settings.ocr, "fallback_to_text_layer", fallback)
     monkeypatch.setattr(
         "bibr.ocr.registry.resolve_backend_candidates",
-        lambda backend, settings: (OcrBackendCandidate("glm-llama", "glm-ocr", "glm"),),
+        lambda backend, settings, **_: (OcrBackendCandidate("glm-llama", "glm-ocr", "glm"),),
     )
     monkeypatch.setattr("bibr.local.llama_cpp.find_llama_server", lambda: None)
     monkeypatch.setattr("bibr.local.llama_cpp.install_hint", lambda: "Install llama.cpp")
