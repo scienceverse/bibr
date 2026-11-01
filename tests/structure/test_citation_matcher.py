@@ -1184,6 +1184,69 @@ class TestResolveCitationsByRules:
         out = self._resolve(refs, "Ng (2022)", "BCS (2022)", "OK (2022)")
         assert [bib_ids for _t, _c, bib_ids in out] == [(), (), ()]
 
+    @pytest.mark.parametrize(
+        ("cited", "listed"),
+        [
+            ("WHO", "Wang Hong Ou"),
+            ("NHS", "Nguyen Hong Son"),
+            ("AI", "Anna Ivanova"),
+            ("BA", "Berg Anna"),
+            ("SES", "Sa e Silva, J."),
+        ],
+    )
+    def test_initials_do_not_reach_a_person(self, cited, listed):
+        refs = [_ref(1, listed, year=2020, title="A")]
+        assert self._resolve(refs, f"({cited}, 2020)")[0][2] == ()
+
+    def test_initials_reach_a_body_of_any_kind(self):
+        refs = [
+            _ref(1, "World Health Organization", year=2020, title="A"),
+            _ref(2, "National Institute of Mental Health", year=2020, title="B"),
+            _ref(3, "Okafor, C.", year=2020, title="C"),
+        ]
+        out = self._resolve(refs, "(WHO, 2020)", "(NIMH, 2020)")
+        assert [bib_ids for _t, _c, bib_ids in out] == [(1,), (2,)]
+
+    def test_a_later_author_needs_the_name_as_cited(self):
+        # "Freedman" is near "Friedman" and "John" opens "Johnson": neither is
+        # the name of the second author.
+        refs = [_ref(1, "Okafor, C., & Friedman, H.", year=2018, title="A")]
+        assert self._resolve(refs, "Freedman (2018)")[0][2] == ()
+        refs = [_ref(1, "Okafor, C., & Johnson, H.", year=2018, title="A")]
+        assert self._resolve(refs, "John (2018)")[0][2] == ()
+
+    def test_every_marker_in_a_group_names_the_work_read(self):
+        refs = [
+            _ref(1, "Smith, A.", year=2010, title="A"),
+            _ref(2, "Jones, B.", year=2012, title="B"),
+            _ref(3, "Lee, C.", year=2013, title="C"),
+            _ref(4, "Kim, D.", year=2014, title="D"),
+        ]
+        text = "(Smith, 2010, cited in Jones, 2012; Lee, 2013, cited in Kim, 2014)"
+        assert self._resolve(refs, text)[0][2] == (2, 4)
+
+    def test_a_citation_without_a_marker_beside_one_that_has_it_is_read_whole(self):
+        refs = [
+            _ref(1, "Smith, A.", year=2010, title="A"),
+            _ref(2, "Jones, B.", year=2012, title="B"),
+            _ref(3, "Lee, C.", year=2013, title="C"),
+        ]
+        text = "(Lee, 2013; Smith, 2010, cited in Jones, 2012)"
+        assert self._resolve(refs, text)[0][2] == (2, 3)
+
+    def test_a_marker_followed_by_no_name_is_no_marker(self):
+        refs = [_ref(1, "Smith, A.", year=2010, title="A"), _ref(2, "Jones, B.", year=2012)]
+        text = "Smith (2010) is cited in many papers (Jones, 2012)."
+        assert self._resolve(refs, text)[0][2] == (1, 2)
+
+    def test_a_marker_followed_by_a_name_without_a_year_leaves_the_work_before_it(self):
+        refs = [_ref(1, "Smith, A.", year=2010, title="A"), _ref(2, "Jones, B.", year=2012)]
+        assert self._resolve(refs, "(Smith, 2010, as cited in Jones)")[0][2] == (1,)
+
+    def test_cited_by_is_no_marker_and_leaves_the_work_before_it(self):
+        refs = [_ref(1, "Smith, A.", year=2010, title="A"), _ref(2, "Jones, B.", year=2012)]
+        assert self._resolve(refs, "(Smith, 2010, cited by Jones, 2012)")[0][2] == (1,)
+
     def test_unknown_citation_links_nothing(self):
         refs = [_ref(1, "Okafor, C.", year=2018, title="A")]
         assert self._resolve(refs, "Sato (2018)", "Okafor (2012)")[0][2] == ()

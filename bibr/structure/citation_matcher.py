@@ -1317,6 +1317,69 @@ def _match_any_author(pool: list[_RefIdx], cand: _Candidate) -> _RefIdx | None:
 _ORG_INITIALS_SKIP = frozenset(
     {"of", "the", "for", "and", "de", "la", "des", "du", "del", "in", "on", "et", "und", "y", "e"}
 )
+# What makes a name an organisation's rather than a person's: a word that names
+# a kind of body or a field it works in, or one of the words that join them
+# ("Bureau of Coastal Survey"). "Wang Hong Ou" and "Anna Ivanova" have none, and
+# the initials "WHO" and "AI" do not reach them.
+_ORGANISATION_WORDS = frozenset(
+    {
+        "academy",
+        "administration",
+        "agency",
+        "alliance",
+        "association",
+        "authority",
+        "board",
+        "bureau",
+        "center",
+        "centre",
+        "college",
+        "commission",
+        "committee",
+        "company",
+        "conference",
+        "consortium",
+        "corporation",
+        "council",
+        "department",
+        "directorate",
+        "federation",
+        "foundation",
+        "fund",
+        "group",
+        "institute",
+        "international",
+        "laboratory",
+        "league",
+        "ministry",
+        "national",
+        "network",
+        "observatory",
+        "office",
+        "organisation",
+        "organization",
+        "panel",
+        "program",
+        "programme",
+        "research",
+        "service",
+        "services",
+        "society",
+        "survey",
+        "technology",
+        "trust",
+        "union",
+        "united",
+        "university",
+        "world",
+    }
+)
+_ORGANISATION_CONNECTORS = frozenset({"of", "the", "for", "and"})
+
+
+def _reads_as_organisation(words: list[str]) -> bool:
+    """Whether the words of a name (folded) are an organisation's."""
+    return any(word in _ORGANISATION_WORDS or word in _ORGANISATION_CONNECTORS for word in words)
 
 
 def _match_by_initials(pool: list[_RefIdx], cand: _Candidate) -> _RefIdx | None:
@@ -1324,7 +1387,9 @@ def _match_by_initials(pool: list[_RefIdx], cand: _Candidate) -> _RefIdx | None:
     year whose first author spells them out ("Bureau of Coastal Survey").
 
     The cited name must read as initials: at least two capitals, and at least
-    half of its letters. A name such as "Ng" never reaches "Nguyen Giang".
+    half of its letters. A name such as "Ng" never reaches "Nguyen Giang", and
+    the entry must read as an organisation's (``_reads_as_organisation``): "WHO"
+    never reaches "Wang Hong Ou" nor "AI" "Anna Ivanova".
     """
     if len(cand.families) != 1:
         return None
@@ -1336,7 +1401,7 @@ def _match_by_initials(pool: list[_RefIdx], cand: _Candidate) -> _RefIdx | None:
     hits = []
     for ref in pool:
         words = re.findall(r"[^\W\d_]+", _fold(ref.families[0])) if ref.families else []
-        if len(words) < 2:
+        if len(words) < 2 or not _reads_as_organisation(words):
             continue
         spelled = {
             "".join(word[0] for word in words),
@@ -1348,12 +1413,43 @@ def _match_by_initials(pool: list[_RefIdx], cand: _Candidate) -> _RefIdx | None:
 
 
 # "Harlow (2010, citado en Mendoza et al., 2015)": the work to link is the one the
-# paper read, named after the marker.
+# paper read, named after the marker. "Cited by" says the opposite ("Harlow
+# (2010), cited by Mendoza (2015)": the work before it is the one cited), so it
+# is no marker.
 _SECONDARY_SOURCE_RE = re.compile(
-    r"\b(?:citado\s+(?:en|por)|cited\s+(?:in|by)|as\s+cited\s+in|cit[eé]e?s?\s+(?:dans|par)"
-    r"|zitiert\s+nach|apud|citat[oa]\s+in)\b",
+    r"\b(?:citado\s+en|cited\s+in|as\s+cited\s+in|cit[eé]e?s?\s+dans"
+    r"|zitiert\s+nach|apud|citat[oa]\s+in)\b(?=\s*[(\[]?\s*(?-i:[A-ZÀ-Ý]))",
     re.IGNORECASE,
 )
+
+
+def _rule_candidates(text: str, text_id: int) -> list[_Candidate]:
+    """The citations ``text`` names, as ``resolve_citations_by_rules`` reads them.
+
+    A bare "Smith, 2010" is read as if parenthesised. Where a ";"-separated
+    citation says it was read through another ("Harlow, 2010, cited in
+    Mendoza, 2015"), the work named after the last marker of that citation is
+    the one cited, or, when the words after the marker give no year, the work
+    before it. Words after a marker that is no name ("cited in many papers")
+    leave the text as it is.
+    """
+
+    def read(part: str) -> list[_Candidate]:
+        return _find_candidates(part, text_id, rules=True) or _find_candidates(
+            f"({part})", text_id, rules=True
+        )
+
+    segments = text.split(";")
+    markers = [list(_SECONDARY_SOURCE_RE.finditer(segment)) for segment in segments]
+    if not any(markers):
+        return read(text)
+    out: list[_Candidate] = []
+    for segment, found in zip(segments, markers, strict=True):
+        if not found:
+            out.extend(read(segment))
+            continue
+        out.extend(read(segment[found[-1].end() :]) or read(segment[: found[-1].start()]))
+    return out
 
 
 def resolve_citations_by_rules(
@@ -1376,13 +1472,8 @@ def resolve_citations_by_rules(
     _refs, by_year, in_press_refs = _build_ref_index(references, rules=True)
     resolved: list[tuple[int, str, tuple[int, ...]]] = []
     for text_id, text in cites:
-        secondary = list(_SECONDARY_SOURCE_RE.finditer(text))
-        cited_text = text[secondary[-1].end() :] if secondary else text
-        candidates = _find_candidates(cited_text, text_id, rules=True) or _find_candidates(
-            f"({cited_text})", text_id, rules=True
-        )
         linked: set[int] = set()
-        for cand in candidates:
+        for cand in _rule_candidates(text, text_id):
             ref, _tied = _match(cand, by_year, in_press_refs, rules=True)
             if ref is None and not _tied:
                 pool = _year_pool(cand, by_year, in_press_refs)
