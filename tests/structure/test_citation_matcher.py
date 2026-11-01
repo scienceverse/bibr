@@ -17,17 +17,16 @@ def _rule_xrefs(sents, refs):
     return detect_author_year_xrefs(sents, refs, rules=True)
 
 
-def _ref(bib_id, authors, year=2020, year_suffix=None, is_in_press=False, title=""):
+def _ref(bib_id, authors, year=2020, year_suffix=None, is_in_press=False, title="", **printed):
     return PaperReference(
         bib_id=bib_id,
         title=title,
-        first_page=None,
-        volume=None,
         authors=authors,
         year=year,
         container=None,
         year_suffix=year_suffix,
         is_in_press=is_in_press,
+        **{"first_page": None, "volume": None, **printed},
     )
 
 
@@ -346,6 +345,75 @@ class TestDuplicateReferences:
         ]
         out = _rule_xrefs(sents, refs)
         assert [(x.text_id, x.xref_id) for x in out] == [(0, 1), (1, 2)]
+
+    @pytest.mark.parametrize(
+        ("first", "second"),
+        [
+            # The first 40 characters are the same; the number that tells the
+            # reports apart comes after them.
+            (
+                "Weekly outbreak situation report number 51",
+                "Weekly outbreak situation report number 72",
+            ),
+            (
+                "Surveillance of respiratory infections in the clinic, Part I",
+                "Surveillance of respiratory infections in the clinic, Part II",
+            ),
+            (
+                "Surveillance of respiratory infections in the clinic: methods",
+                "Surveillance of respiratory infections in the clinic: results",
+            ),
+        ],
+    )
+    def test_titles_that_differ_after_the_first_forty_characters_are_two_works(self, first, second):
+        from bibr.structure.citation_matcher import match_with_ambiguous
+
+        refs = [_ref(1, "Lindqvist, K.", title=first), _ref(2, "Lindqvist, K.", title=second)]
+        xrefs, ambiguous = match_with_ambiguous(
+            [_sent(0, "As shown (Lindqvist, 2020).")], refs, rules=True
+        )
+        assert xrefs == []
+        assert ambiguous[0].candidate_bib_ids == [1, 2]
+
+    @pytest.mark.parametrize(
+        "printed",
+        [
+            ({"volume": "12"}, {"volume": "13"}),
+            ({"first_page": "101"}, {"first_page": "245"}),
+            ({"last_page": "120"}, {"last_page": "260"}),
+            ({"doi": "10.1000/abc.1"}, {"doi": "10.1000/abc.2"}),
+            ({"edition": "2nd"}, {"edition": "3rd"}),
+        ],
+    )
+    def test_one_title_with_another_volume_or_pages_is_two_works(self, printed):
+        from bibr.structure.citation_matcher import match_with_ambiguous
+
+        first, second = printed
+        refs = [
+            _ref(1, "Lindqvist, K.", title=self.TITLE, **first),
+            _ref(2, "Lindqvist, K.", title=self.TITLE, **second),
+        ]
+        xrefs, ambiguous = match_with_ambiguous(
+            [_sent(0, "As shown (Lindqvist, 2020).")], refs, rules=True
+        )
+        assert xrefs == []
+        assert ambiguous[0].candidate_bib_ids == [1, 2]
+
+    def test_a_volume_one_entry_prints_and_the_other_leaves_out_does_not_part_them(self):
+        refs = [
+            _ref(1, "Lindqvist, K.", title=self.TITLE, volume="12", first_page="101"),
+            _ref(2, "Lindqvist, K.", title=self.TITLE),
+        ]
+        sents = [_sent(0, "As shown (Lindqvist, 2020) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
+    def test_the_same_work_printed_with_other_punctuation_is_one_work(self):
+        refs = [
+            _ref(1, "Lindqvist, K.", title=self.TITLE, volume="12", first_page="101"),
+            _ref(2, "Lindqvist K", title=self.TITLE + ".", volume="12", first_page="101"),
+        ]
+        sents = [_sent(0, "As shown (Lindqvist, 2020) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
 
     def test_index_keeps_every_entry_in_refs_list(self):
         from bibr.structure.citation_matcher import _build_ref_index

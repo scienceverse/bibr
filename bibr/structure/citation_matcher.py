@@ -265,10 +265,34 @@ class _RefIdx:
     families: tuple[str, ...]
     is_in_press: bool
     family_key_sets: tuple[frozenset[str], ...]
-    # Authors, year and the first 40 characters of the title, folded: two
-    # entries with the same key are one work listed twice. None when the entry
-    # prints no author or no title, so nothing vouches that it is a repeat.
+    # Authors, year and the whole title, folded: two entries with the same key
+    # are one work listed twice unless the volume or pages they print differ
+    # (``_is_same_work``). None when the entry prints no author or no title, so
+    # nothing vouches that it is a repeat.
     duplicate_key: tuple[str, int | None, str] | None = None
+
+
+_NON_WORD_RE = re.compile(r"[\W_]+")
+# What tells two entries with the same authors, year and title apart: the
+# issues of a series, the parts of a work, the editions of a book
+_WORK_FIELDS = ("volume", "issue", "first_page", "last_page", "doi", "edition", "version")
+
+
+def _folded_alnum(text: str | None) -> str:
+    """The letters and digits of ``text``, lowercased and without diacritics."""
+    return _NON_WORD_RE.sub("", _fold(text))
+
+
+def _is_same_work(a: PaperReference, b: PaperReference) -> bool:
+    """Whether two entries that print one title are one work: no field both print differs."""
+    for name in _WORK_FIELDS:
+        printed_a, printed_b = (
+            _folded_alnum(getattr(a, name, None)),
+            _folded_alnum(getattr(b, name, None)),
+        )
+        if printed_a and printed_b and printed_a != printed_b:
+            return False
+    return True
 
 
 def _build_ref_index(
@@ -280,21 +304,22 @@ def _build_ref_index(
 ]:
     """Build (refs, year_suffix_index, in_press_refs) from PaperReference list.
 
-    With *rules*, a work listed twice (the same authors, year and title start)
-    is indexed once, under its first entry: a citation of it is not
-    ambiguous. Entries that print different year suffixes ("2018a", "2018b")
-    stay apart, since a citation names one of them by its suffix. Names are
+    With *rules*, a work listed twice (the same authors, year and whole title,
+    and no volume or page that differs) is indexed once, under its first
+    entry: a citation of it is not ambiguous. Entries that print different
+    year suffixes ("2018a", "2018b") stay apart, since a citation names one of
+    them by its suffix. Names are
     read as ``extract_families`` and ``_family_key`` read them with *rules*.
     """
     refs: list[_RefIdx] = []
     in_press: list[_RefIdx] = []
     by_year: dict[tuple[int | None, str | None], list[_RefIdx]] = defaultdict(list)
-    listed: set[tuple[tuple[str, int | None, str], str | None]] = set()
+    listed: dict[tuple[tuple[str, int | None, str], str | None], list[PaperReference]] = {}
     for r in references:
         is_in_press = bool(getattr(r, "is_in_press", False) or r.year == 0)
         year = None if r.year in (0, None) else r.year
         families = tuple(extract_families(r.authors, rules=rules))
-        authors, title = _fold(r.authors).strip(), _fold(r.title).strip()[:40]
+        authors, title = _folded_alnum(r.authors), _folded_alnum(r.title)
         idx = _RefIdx(
             bib_id=r.bib_id,
             year=year,
@@ -306,10 +331,10 @@ def _build_ref_index(
         )
         refs.append(idx)
         if idx.duplicate_key is not None:
-            slot = (idx.duplicate_key, idx.year_suffix)
-            if slot in listed:
+            twins = listed.setdefault((idx.duplicate_key, idx.year_suffix), [])
+            if any(_is_same_work(r, twin) for twin in twins):
                 continue
-            listed.add(slot)
+            twins.append(r)
         by_year[(idx.year, idx.year_suffix)].append(idx)
         if is_in_press:
             in_press.append(idx)
