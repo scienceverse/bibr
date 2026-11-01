@@ -2692,6 +2692,16 @@ class GlobalSettings(_BibrSettings):
     IMPLICIT_SECTION_DETECTION: bool = Field(
         True, description="Infer implicit sections from body text when headers are absent."
     )
+    FRONT_TAGGER_RULES: bool = Field(
+        False,
+        description="Read the front matter with the local rules that put right what the tagger "
+        "alone leaves wrong. Fast mode sets it; a full run leaves those readings to the LLM.",
+    )
+    EQUATION_REPAIR_GLITCHES: bool = Field(
+        False,
+        description="Read statistic text through the equation rules and leave out a value whose "
+        "power of ten was not read, as a run with no LLM fallback needs. Fast mode sets it.",
+    )
     FIGURE_IMAGES: bool = Field(False, description="Extract figure images from PDFs.")
     # Reference extraction strategy — DECOUPLED segmentation + parsing axes
     # (resolved in bibr.extract.ref_extractor._resolve_ref_strategies; per-run

@@ -126,7 +126,9 @@ def fast_settings(settings: GlobalSettings) -> GlobalSettings:
     section and paper classifiers keep their label instead of escalating (the
     section threshold then follows its no-escalation default of 0.5, unless set),
     and implicit-section detection, the reference segmenter and parser fallbacks,
-    and the merged core-metadata call are off. A setting-level reference strategy
+    and the merged core-metadata call are off; the local rules that stand in for what
+    an LLM would put right (front matter, statistic text) are on.
+    A setting-level reference strategy
     that names the LLM becomes the local one. ``settings`` itself is not changed.
     """
     fast = snapshot_settings(settings)
@@ -134,6 +136,8 @@ def fast_settings(settings: GlobalSettings) -> GlobalSettings:
     fast.ml.section_classifier_llm_escalation = False
     fast.ml.paper_classifier_llm_escalation = False
     fast.IMPLICIT_SECTION_DETECTION = False
+    fast.FRONT_TAGGER_RULES = True
+    fast.EQUATION_REPAIR_GLITCHES = True
     fast.REF_SEG_LLM_FALLBACK = False
     fast.REF_NER_LLM_FALLBACK = False
     fast.llm.merged_core_metadata = False

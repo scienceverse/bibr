@@ -84,12 +84,17 @@ async def _tag_front_matter(rm, ocr_regions, *, first_page_index: int, settings=
         tagger = await asyncio.to_thread(ensure, settings)
         if tagger is None:
             return None
+        # The run decides: a fast run reads the front matter with the local rules,
+        # a full run leaves those readings to the LLM.
+        rules = bool(getattr(settings, "FRONT_TAGGER_RULES", False))
         from bibr.extract.front_role import build_front_regions
         from bibr.front_tagger.runtime import tag_front_matter
 
         def run():
             regions = build_front_regions(ocr_regions, first_page_index=first_page_index)
-            return tag_front_matter(tagger, regions, first_page_index=first_page_index)
+            return tag_front_matter(
+                tagger, regions, first_page_index=first_page_index, rules=rules
+            )
 
         return await asyncio.to_thread(run)
     except Exception:  # noqa: BLE001 - an optional reading must never fail parsing
@@ -227,7 +232,10 @@ class ParseSegmentStage:
                         )
                     else:
                         tagged = await _tag_front_matter(
-                            rm, fs.ocr_regions, first_page_index=first_page, settings=ctx.settings
+                            rm,
+                            fs.ocr_regions,
+                            first_page_index=first_page,
+                            settings=ctx.settings,
                         )
                         if tagged is not None and scanned:
                             tagged = replace(

@@ -920,7 +920,10 @@ async def _extract_metadata_and_equations(
         # export shipped "eq": [] with nothing in the log. Threaded because
         # this runs on the shared serve event loop.
         regex_equations = await asyncio.to_thread(
-            eq_extractor.extract_from_sentences, contents.sentences, contents.sections
+            eq_extractor.extract_from_sentences,
+            contents.sentences,
+            contents.sections,
+            repair_glitches=effective_settings.EQUATION_REPAIR_GLITCHES,
         )
         eq_coro = asyncio.wait_for(
             eq_extractor.extract_with_llm_fallback(
