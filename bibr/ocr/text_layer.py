@@ -347,6 +347,16 @@ def _drop_private_use(text: str) -> tuple[str, int, int]:
     return "".join(kept), dropped, inside
 
 
+def _accept(region: dict[str, Any]) -> None:
+    """Mark *region* as read from the text layer, clearing the native pass's rejection."""
+    region["_native_text_used"] = True
+    # The native-text pass may have set the region aside (private-use glyphs)
+    # for OCR to read; with no OCR the text layer's own reading stands, so
+    # the export must not say OCR read it instead.
+    for key in ("_native_gate", "_native_text_candidate", "_native_text_rejection_reason"):
+        region.pop(key, None)
+
+
 def _fill_region(
     page: _PageText,
     region: dict[str, Any],
@@ -373,7 +383,7 @@ def _fill_region(
         if table is None:
             return "empty"
         region["content"] = table
-        region["_native_text_used"] = True
+        _accept(region)
         region["_text_layer_table"] = True
         region["_text_layer_kind"] = "table_rebuilt"
         return "filled"
@@ -408,8 +418,7 @@ def _fill_region(
     if not _is_native_text_usable(text, min_printable_ratio):
         region["_native_gate"] = "usability"
         return "rejected"
-    region.pop("_native_gate", None)
-    region["_native_text_used"] = True
+    _accept(region)
     if is_formula:
         # Plain text: the parser keeps it as printed, without LaTeX.
         text = text.strip()

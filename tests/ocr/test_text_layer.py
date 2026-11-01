@@ -616,10 +616,15 @@ def test_private_use_code_points_are_dropped_and_counted(monkeypatch):
         lambda page, bbox: "Jane Doe \ue0a1 and Joe Roe \ue0a1, 2020 \ue001",
     )
     region = _region("text", [0, 0, 1000, 1000])
+    # The native-text pass set this region aside for OCR; the text layer reads it.
+    region["_native_text_candidate"] = "Jane Doe \ue0a1"
+    region["_native_text_rejection_reason"] = "private_use"
 
     outcome = text_layer._fill_region(object(), region, min_printable_ratio=0.85)
 
     assert outcome == "filled"
+    assert "_native_text_candidate" not in region
+    assert "_native_text_rejection_reason" not in region
     assert region["content"] == "Jane Doe  and Joe Roe , 2020 "
     assert region["_private_use_dropped"] == 3
 
