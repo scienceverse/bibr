@@ -2616,9 +2616,15 @@ class ReferenceExtractor:
             with LOCAL_INFERENCE_LOCK:
                 ref_strings = _get_ner_segmenter(self._settings).segment(ref_text)
         except Exception as e:  # noqa: BLE001 — a CRF load/inference failure must not 0 the refs
-            failure_reason = "segmentation_error"
-            self._record_warning(WarningCode.REF_SEG_CRF_ERROR, f"CRF segmenter error: {e!r}")
             ref_strings = []
+            if self._llm_skipped and isinstance(e, ImportError):
+                # A fast run on an install without the torch extra: the CRF was never
+                # going to be there, so this is a missing optional dependency, not an error.
+                failure_reason = "crf_unavailable"
+                logger.info("CRF segmenter not installed; falling through (%s)", e)
+            else:
+                failure_reason = "segmentation_error"
+                self._record_warning(WarningCode.REF_SEG_CRF_ERROR, f"CRF segmenter error: {e!r}")
         if ref_strings:
             self._record_segmentation_attempt("crf", ref_text, segments=ref_strings, selected=True)
             return ref_strings
