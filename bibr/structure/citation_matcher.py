@@ -780,6 +780,29 @@ _LOOSE_OVERLAPS: tuple[tuple[_Overlap, bool], ...] = (
 )
 
 
+def _year_pool(
+    cand: _Candidate,
+    by_year: dict[tuple[int | None, str | None], list[_RefIdx]],
+    in_press_refs: list[_RefIdx],
+) -> list[_RefIdx]:
+    """The references a candidate may cite: those of its exact year (and suffix)."""
+    if cand.is_in_press:
+        return in_press_refs
+    pool: list[_RefIdx] = []
+    seen: set[int] = set()
+    for key in (
+        (cand.year, cand.year_suffix) if cand.year_suffix else None,
+        (cand.year, None),
+    ):
+        if key is None:
+            continue
+        for r in by_year.get(key, []):
+            if r.bib_id not in seen:
+                seen.add(r.bib_id)
+                pool.append(r)
+    return pool
+
+
 def _match(
     cand: _Candidate,
     by_year: dict[tuple[int | None, str | None], list[_RefIdx]],
@@ -801,23 +824,7 @@ def _match(
     offer a shortlist, so a citation the exact keys could not place is never
     narrowed to a wrong pair.
     """
-    pool: list[_RefIdx]
-    if cand.is_in_press:
-        pool = in_press_refs
-    else:
-        pool = []
-        seen: set[int] = set()
-        for key in (
-            (cand.year, cand.year_suffix) if cand.year_suffix else None,
-            (cand.year, None),
-        ):
-            if key is None:
-                continue
-            for r in by_year.get(key, []):
-                if r.bib_id not in seen:
-                    seen.add(r.bib_id)
-                    pool.append(r)
-
+    pool = _year_pool(cand, by_year, in_press_refs)
     if not pool:
         return None, []
 
@@ -975,6 +982,81 @@ def detect_author_year_xrefs(
     """
     xrefs, _ = match_with_ambiguous(body_sents, references)
     return xrefs
+
+
+# ---------------------------------------------------------------------------
+# Tier 3 without an LLM
+# ---------------------------------------------------------------------------
+
+
+def _match_any_author(pool: list[_RefIdx], cand: _Candidate) -> _RefIdx | None:
+    """The one reference of the year that lists every cited family, in any position.
+
+    Last resort for a citation whose first family fits no first author: a
+    byline in another order, or a name taken from the end of the list. Reads
+    names as ``_overlap_fuzzy`` does and links only a single reference, or one
+    that ``_break_tie`` picks from several.
+    """
+    cited = [_family_keys_for(family) for family in cand.families]
+    if not cited:
+        return None
+    fits = [
+        ref
+        for ref in pool
+        if ref.family_key_sets
+        and all(
+            any(_overlap_fuzzy(keys, author) for author in ref.family_key_sets) for keys in cited
+        )
+    ]
+    if len(fits) == 1:
+        return fits[0]
+    if len(fits) > 1:
+        return _break_tie(fits, cand)
+    return None
+
+
+# "Harlow (2010, citado en Mendoza et al., 2015)": the work to link is the one the
+# paper read, named after the marker.
+_SECONDARY_SOURCE_RE = re.compile(
+    r"\b(?:citado\s+(?:en|por)|cited\s+(?:in|by)|as\s+cited\s+in|cit[eé]e?s?\s+(?:dans|par)"
+    r"|zitiert\s+nach|apud|citat[oa]\s+in)\b",
+    re.IGNORECASE,
+)
+
+
+def resolve_citations_by_rules(
+    cites: list[tuple[int, str]],
+    references: list[PaperReference],
+) -> list[tuple[int, str, tuple[int, ...]]]:
+    """Resolve citation texts to references with rules only, no LLM.
+
+    Stands in for the Tier-3 LLM when none is available. Each ``(text_id,
+    citation_text)`` is read as Tier 2 reads a sentence: a bare "Smith, 2010"
+    is read as if parenthesised. Each citation it names is matched with
+    ``_match``, then, failing that, to the one reference of the year that lists
+    every cited family in any position. A citation that names no reference
+    uniquely links nothing. Returns ``(text_id, citation_text, bib_ids)`` per
+    input, ``bib_ids`` sorted.
+    """
+    if not references:
+        return [(text_id, text, ()) for text_id, text in cites]
+    _refs, by_year, in_press_refs = _build_ref_index(references)
+    resolved: list[tuple[int, str, tuple[int, ...]]] = []
+    for text_id, text in cites:
+        secondary = list(_SECONDARY_SOURCE_RE.finditer(text))
+        cited_text = text[secondary[-1].end() :] if secondary else text
+        candidates = _find_candidates(cited_text, text_id) or _find_candidates(
+            f"({cited_text})", text_id
+        )
+        linked: set[int] = set()
+        for cand in candidates:
+            ref, _tied = _match(cand, by_year, in_press_refs)
+            if ref is None and not _tied:
+                ref = _match_any_author(_year_pool(cand, by_year, in_press_refs), cand)
+            if ref is not None:
+                linked.add(ref.bib_id)
+        resolved.append((text_id, text, tuple(sorted(linked))))
+    return resolved
 
 
 # ---------------------------------------------------------------------------

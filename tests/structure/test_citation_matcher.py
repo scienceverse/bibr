@@ -701,3 +701,69 @@ def test_nested_group_cite_inner_parens():
     assert (("Caves",), 1992) in pairs
     assert (("Green", "Mayes"), 1991) in pairs
     assert (("Hart", "Shipman"), 1992) in pairs
+
+
+class TestResolveCitationsByRules:
+    """Tier 3 without an LLM: citation texts the sentence-level matcher left over."""
+
+    def _resolve(self, refs, *texts):
+        from bibr.structure.citation_matcher import resolve_citations_by_rules
+
+        return resolve_citations_by_rules(list(enumerate(texts, start=10)), refs)
+
+    def test_bare_author_year_without_parentheses(self):
+        refs = [_ref(1, "Lindqvist, K., & Okafor, C.", year=2018, title="A")]
+        assert self._resolve(refs, "Lindqvist & Okafor, 2018") == [
+            (10, "Lindqvist & Okafor, 2018", (1,))
+        ]
+
+    def test_bracketed_and_narrative_forms(self):
+        refs = [_ref(1, "Lindqvist, K.", year=2018, title="A"), _ref(2, "Brandt, H.", year=2019)]
+        out = self._resolve(refs, "[Lindqvist, 2018]", "As Brandt (2019) found")
+        assert [bib_ids for _t, _c, bib_ids in out] == [(1,), (2,)]
+
+    def test_several_years_link_several_references(self):
+        refs = [
+            _ref(1, "Okafor, C.", year=2018, title="A"),
+            _ref(2, "Okafor, C.", year=2019, title="B"),
+            _ref(3, "Okafor, C.", year=2020, title="C"),
+        ]
+        assert self._resolve(refs, "Okafor, 2018, 2019")[0][2] == (1, 2)
+
+    def test_secondary_source_links_the_work_read(self):
+        refs = [
+            _ref(1, "Mendoza, F., Valdivia, S., & Rojas, S.", year=2015, title="A"),
+            _ref(2, "Harlow, C.", year=2010, title="B"),
+        ]
+        assert self._resolve(refs, "(Harlow, 2010, citado en Mendoza et al., 2015)")[0][2] == (1,)
+        assert self._resolve(refs, "(Harlow, 2010, as cited in Mendoza et al., 2015)")[0][2] == (1,)
+
+    def test_a_later_author_links_when_no_first_author_fits(self):
+        from bibr.structure.citation_matcher import detect_author_year_xrefs
+
+        refs = [_ref(1, "Okafor, C., & Brandt, H.", year=2018, title="A")]
+        assert detect_author_year_xrefs([_sent(0, "As Brandt (2018) found.")], refs) == []
+        assert self._resolve(refs, "Brandt (2018)")[0][2] == (1,)
+
+    def test_a_later_author_shared_by_two_references_links_nothing(self):
+        refs = [
+            _ref(1, "Okafor, C., & Brandt, H.", year=2018, title="A"),
+            _ref(2, "Lund, K., & Brandt, H.", year=2018, title="B"),
+        ]
+        assert self._resolve(refs, "Brandt (2018)")[0][2] == ()
+
+    def test_unknown_citation_links_nothing(self):
+        refs = [_ref(1, "Okafor, C.", year=2018, title="A")]
+        assert self._resolve(refs, "Sato (2018)", "Okafor (2012)")[0][2] == ()
+        assert self._resolve(refs, "Sato (2018)", "Okafor (2012)")[1][2] == ()
+
+    def test_same_family_same_year_without_other_evidence_links_nothing(self):
+        refs = [
+            _ref(1, "Okafor, C.", year=2018, title="A"),
+            _ref(2, "Okafor, C.", year=2018, title="B"),
+        ]
+        assert self._resolve(refs, "Okafor (2018)")[0][2] == ()
+
+    def test_no_references_and_no_citations(self):
+        assert self._resolve([], "Okafor (2018)") == [(10, "Okafor (2018)", ())]
+        assert self._resolve([_ref(1, "Okafor, C.", year=2018)]) == []
