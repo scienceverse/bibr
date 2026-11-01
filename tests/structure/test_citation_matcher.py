@@ -52,6 +52,15 @@ class TestExtractFamilies:
     def test_hyphenated(self):
         assert extract_families("Fei-Fei, L.") == ["Fei-Fei"]
 
+    def test_all_caps_surname_is_not_initials(self):
+        assert extract_families("NGUYEN, T., & BERGSTROM, K.") == ["NGUYEN", "BERGSTROM"]
+        assert extract_families("KOWALSKI T., LINDQVIST K.") == ["KOWALSKI", "LINDQVIST"]
+
+    def test_short_caps_runs_stay_initials(self):
+        assert extract_families("Smith, JA, & Jones, K. B.") == ["Smith", "Jones"]
+        assert extract_families("Smith, J. A. B. C.") == ["Smith"]
+        assert extract_families("Lindqvist AJB, Okafor CD") == ["Lindqvist", "Okafor"]
+
 
 class TestFamilyKeys:
     def test_simple(self):

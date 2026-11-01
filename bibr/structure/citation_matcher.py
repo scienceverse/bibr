@@ -44,6 +44,10 @@ def _is_initials(s: str) -> bool:
     alphas = [c for c in s if c.isalpha()]
     if not alphas:
         return False
+    # An unspaced, undotted all-caps run of four letters or more ("NGUYEN") is
+    # a surname printed in capitals; initials come as "JA", "J. A." or "J.A.".
+    if len(s) >= 4 and s.isalpha() and s.isupper():
+        return False
     upper_ratio = sum(1 for c in alphas if c.isupper()) / len(alphas)
     return len(alphas) <= 6 and upper_ratio >= 0.6 and all(c.isalpha() or c in ". " for c in s)
 
