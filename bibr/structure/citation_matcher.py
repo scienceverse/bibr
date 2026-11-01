@@ -607,28 +607,67 @@ def _overlap_exact(cited: frozenset[str], listed: frozenset[str]) -> bool:
     return not cited.isdisjoint(listed)
 
 
-# The prefix match needs at least this many characters on both sides, so that
-# "Lee" never reaches "Leeuwen" and "Li" never reaches "Lindqvist".
-_PREFIX_MIN_LEN = 4
+def _full_key(keys: frozenset[str]) -> str:
+    """The key of the whole family name, from a set ``_family_keys_for`` built.
+
+    The key of a multi-word name's last word, which the set also holds, is a
+    tail of the whole name's, so the whole name's is the longest.
+    """
+    return max(keys, key=len, default="")
+
+
+_NAME_WORD_SPLIT_RE = re.compile(r"[\s\-\u2010\u2011.]+")
+# A prefix needs this many letters, so that "Li" never opens "Lindqvist" (it
+# needs a word boundary besides, see ``_overlap_prefix``).
+_PREFIX_MIN_LEN = 3
+
+
+def _name_words(key: str) -> list[str]:
+    return [word for word in _NAME_WORD_SPLIT_RE.split(key) if word]
 
 
 def _compact(key: str) -> str:
-    return key.replace(" ", "").replace("-", "").replace("\u2010", "")
+    return "".join(_name_words(key))
+
+
+_HYPHEN_RE = re.compile(r"[\-\u2010\u2011]+")
+# A part of a hyphenated name needs this many letters to stand for the name.
+_HYPHEN_PART_MIN_LEN = 4
+
+
+def _is_part_of_hyphenated(name: str, whole: str) -> bool:
+    """Whether ``name`` is one of the hyphen-joined parts of ``whole``."""
+    parts = [part for part in _HYPHEN_RE.split(whole) if part]
+    return (
+        len(parts) > 1 and " " not in name and len(name) >= _HYPHEN_PART_MIN_LEN and name in parts
+    )
 
 
 def _overlap_prefix(cited: frozenset[str], listed: frozenset[str]) -> bool:
-    """A cited family and a listed author agree once spaces and hyphens are
-    dropped, or one starts with the other: "Berg" reaches a "Family Given"
-    entry parsed as the family "Berg Anna"."""
-    for cited_key in map(_compact, cited):
-        for listed_key in map(_compact, listed):
-            if cited_key == listed_key:
-                return True
-            if min(len(cited_key), len(listed_key)) >= _PREFIX_MIN_LEN and (
-                cited_key.startswith(listed_key) or listed_key.startswith(cited_key)
-            ):
-                return True
-    return False
+    """The whole cited family is the listed one printed with other spaces or
+    hyphens, or its opening words: "Berg" reaches an entry parsed as the
+    family "Berg Anna" (a "Family Given" order), and "Hernandez-Lopez" reaches
+    "Hernandez Lopez". A double surname joined by a hyphen reaches either of
+    its parts and is reached by it ("Hedman-Lagerlof" and "Lagerlof"). Never
+    the opening *letters* of a longer name ("John" of "Johnson") and never the
+    last word of a name ("Health Council" of "Ministry of Health"): those are
+    other people and other bodies.
+    """
+    cited_key, listed_key = _full_key(cited), _full_key(listed)
+    if not cited_key or not listed_key:
+        return False
+    if _compact(cited_key) == _compact(listed_key):
+        return True
+    if _is_part_of_hyphenated(cited_key, listed_key) or _is_part_of_hyphenated(
+        listed_key, cited_key
+    ):
+        return True
+    cited_words, listed_words = _name_words(cited_key), _name_words(listed_key)
+    return (
+        len(cited_words) < len(listed_words)
+        and listed_words[: len(cited_words)] == cited_words
+        and len(_compact(cited_key)) >= _PREFIX_MIN_LEN
+    )
 
 
 # A misspelt or differently transliterated family ("Kowalczyk" / "Kowalchyk"):
@@ -642,39 +681,93 @@ def _overlap_fuzzy(cited: frozenset[str], listed: frozenset[str]) -> bool:
     """``_overlap_prefix``, or two long names spelt almost alike."""
     if _overlap_prefix(cited, listed):
         return True
-    for cited_key in map(_compact, cited):
-        if len(cited_key) < _FUZZY_MIN_LEN:
-            continue
-        for listed_key in map(_compact, listed):
-            if len(listed_key) < _FUZZY_MIN_LEN:
-                continue
-            matcher = SequenceMatcher(None, cited_key, listed_key)
-            if (
-                matcher.real_quick_ratio() >= _FUZZY_MIN_RATIO
-                and matcher.quick_ratio() >= _FUZZY_MIN_RATIO
-                and matcher.ratio() >= _FUZZY_MIN_RATIO
-            ):
-                return True
-    return False
+    cited_key, listed_key = _compact(_full_key(cited)), _compact(_full_key(listed))
+    if min(len(cited_key), len(listed_key)) < _FUZZY_MIN_LEN:
+        return False
+    matcher = SequenceMatcher(None, cited_key, listed_key)
+    return (
+        matcher.real_quick_ratio() >= _FUZZY_MIN_RATIO
+        and matcher.quick_ratio() >= _FUZZY_MIN_RATIO
+        and matcher.ratio() >= _FUZZY_MIN_RATIO
+    )
 
 
 _Overlap = Callable[[frozenset[str], frozenset[str]], bool]
 
+# Capitalised words that open a sentence or title a name and are no part of it:
+# a narrative citation read from "As Okafor (2020)" names "Okafor", not
+# "As Okafor". The exact reading gets there through the key of the name's last
+# word; the looser ones compare whole names and drop these instead.
+_OPENER_WORDS = frozenset(word.lower() for word in _STOP_WORDS) | {
+    "as",
+    "according",
+    "following",
+    "like",
+    "using",
+    "from",
+    "with",
+    "after",
+    "before",
+    "under",
+    "than",
+    "versus",
+    "vs",
+    "dr",
+    "prof",
+    "professor",
+    "mr",
+    "mrs",
+    "ms",
+}
 
-def _score_ref(
-    ref: _RefIdx, cand: _Candidate, overlaps: _Overlap = _overlap_exact
-) -> tuple[int, int, int]:
+
+def _whole_name_keys(family: str) -> frozenset[str]:
+    """The key of a cited family as printed, less the words that open the sentence."""
+    words = _family_key(family).split()
+    while len(words) > 1 and words[0] in _OPENER_WORDS:
+        words = words[1:]
+    return frozenset({" ".join(words)} if words else ())
+
+
+@dataclass(frozen=True)
+class _Reading:
+    """A way of comparing a cited family with a listed author."""
+
+    name: str
+    # The keys a cited family is compared by
+    cited_keys: Callable[[str], frozenset[str]]
+    overlaps: _Overlap
+    # Whether it places a citation only when one reference of the year fits
+    only_one: bool = False
+
+
+def _exact_keys(family: str) -> frozenset[str]:
+    return frozenset(_family_keys_for(family))
+
+
+_EXACT = _Reading("exact", _exact_keys, _overlap_exact)
+# Looser ways to read a family name, tried in turn only when no listed author
+# shares a match-key with the citation.
+_LOOSE_READINGS = (
+    _Reading("prefix", _whole_name_keys, _overlap_prefix),
+    _Reading("fuzzy", _whole_name_keys, _overlap_fuzzy, only_one=True),
+)
+
+
+def _score_ref(ref: _RefIdx, cand: _Candidate, reading: _Reading = _EXACT) -> tuple[int, int, int]:
     """Score how well ``ref`` matches ``cand``. Higher is better.
 
     Returns ``(matched_families, et_al_bonus, neg_extra_authors)`` for tuple
     sort. The third element prefers refs with fewer extra authors when match
     counts tie.
     """
-    cited = [_family_keys_for(f) for f in cand.families]
+    cited = [reading.cited_keys(f) for f in cand.families]
     ref_key_sets = ref.family_key_sets
-    if not ref_key_sets or not any(overlaps(keys, ref_key_sets[0]) for keys in cited):
+    if not ref_key_sets or not any(reading.overlaps(keys, ref_key_sets[0]) for keys in cited):
         return (0, 0, 0)
-    matched = sum(1 for author in ref_key_sets if any(overlaps(keys, author) for keys in cited))
+    matched = sum(
+        1 for author in ref_key_sets if any(reading.overlaps(keys, author) for keys in cited)
+    )
     et_al_bonus = 0
     if cand.has_et_al:
         # "et al." supports a multi-author ref, but list length is never
@@ -684,7 +777,7 @@ def _score_ref(
     return (matched, et_al_bonus, -extra)
 
 
-def _tie_key(ref: _RefIdx, cand: _Candidate) -> tuple[bool, int, int]:
+def _tie_key(ref: _RefIdx, cand: _Candidate, reading: _Reading) -> tuple[bool, int, int]:
     """Rank a reference that ties with others on the same family and year.
 
     Returns ``(count_ok, order_ok, any_author)``. ``count_ok``: the number of
@@ -692,10 +785,10 @@ def _tie_key(ref: _RefIdx, cand: _Candidate) -> tuple[bool, int, int]:
     more, one cited family needs a single-author reference, otherwise the
     counts are equal. ``order_ok``: cited families that match the listed author
     at the same position. ``any_author``: cited families that match any listed
-    author. Names are read as ``_overlap_prefix`` and ``_overlap_fuzzy`` read
-    them, whichever way the tie arose.
+    author. Names are compared as *reading* compares them, the reading the tie
+    arose in.
     """
-    cited = [_family_keys_for(family) for family in cand.families]
+    cited = [reading.cited_keys(family) for family in cand.families]
     listed = ref.family_key_sets
     if cand.has_et_al:
         count_ok = len(listed) >= 3
@@ -704,13 +797,13 @@ def _tie_key(ref: _RefIdx, cand: _Candidate) -> tuple[bool, int, int]:
     else:
         count_ok = len(listed) == len(cited)
     order_ok = sum(
-        1 for keys, author in zip(cited, listed, strict=False) if _overlap_prefix(keys, author)
+        1 for keys, author in zip(cited, listed, strict=False) if reading.overlaps(keys, author)
     )
-    any_author = sum(1 for keys in cited if any(_overlap_fuzzy(keys, author) for author in listed))
+    any_author = sum(1 for keys in cited if any(reading.overlaps(keys, a) for a in listed))
     return count_ok, order_ok, any_author
 
 
-def _break_tie(tied: list[_RefIdx], cand: _Candidate) -> _RefIdx | None:
+def _break_tie(tied: list[_RefIdx], cand: _Candidate, reading: _Reading) -> _RefIdx | None:
     """The one reference of ``tied`` that fits the citation best, if any.
 
     A reference whose first author is the first family cited wins when it is
@@ -721,7 +814,7 @@ def _break_tie(tied: list[_RefIdx], cand: _Candidate) -> _RefIdx | None:
     three-author reference from a six-author one).
     """
     if cand.families:
-        first_cited = _family_keys_for(cand.families[0])
+        first_cited = _whole_name_keys(cand.families[0])
         first = [
             ref
             for ref in tied
@@ -730,7 +823,9 @@ def _break_tie(tied: list[_RefIdx], cand: _Candidate) -> _RefIdx | None:
         if len(first) == 1:
             return first[0]
         tied = first or tied
-    ranked = sorted(((_tie_key(ref, cand), ref) for ref in tied), key=lambda p: p[0], reverse=True)
+    ranked = sorted(
+        ((_tie_key(ref, cand, reading), ref) for ref in tied), key=lambda p: p[0], reverse=True
+    )
     best_key, best = ranked[0]
     if best_key[0] and best_key > ranked[1][0]:
         return best
@@ -740,17 +835,17 @@ def _break_tie(tied: list[_RefIdx], cand: _Candidate) -> _RefIdx | None:
 def _match_pool(
     pool: list[_RefIdx],
     cand: _Candidate,
-    overlaps: _Overlap,
+    reading: _Reading,
     *,
-    only_one: bool = False,
     break_ties: bool = True,
-) -> tuple[_RefIdx | None, list[int]]:
+) -> tuple[_RefIdx | None, list[int], bool]:
     """Score ``cand`` against the references of its year; see ``_match``.
 
-    With ``only_one``, a reference is linked only when no other reference of
-    the year fits the citation, or when ``_break_tie`` picks it from those
-    that do; a higher score is not enough. Without ``break_ties`` references
-    that tie stay tied.
+    Returns ``(ref, tied_bib_ids, by_tie_break)``. With the reading's
+    ``only_one``, a reference is linked only when no other reference of the
+    year fits the citation, or when ``_break_tie`` picks it from those that do;
+    a higher score is not enough. Without ``break_ties`` references that tie
+    stay tied.
     """
     # A bare first-family/year citation cannot distinguish references that
     # share that first family and year by the author list alone: a coauthor or
@@ -760,40 +855,32 @@ def _match_pool(
     # "et al." citation separates three or more authors from one or two, never
     # three from six (``_break_tie``).
     if len(cand.families) == 1 and cand.year_suffix is None:
-        candidate_keys = _family_keys_for(cand.families[0])
+        candidate_keys = reading.cited_keys(cand.families[0])
         same_first = [
             ref
             for ref in pool
-            if ref.family_key_sets and overlaps(candidate_keys, ref.family_key_sets[0])
+            if ref.family_key_sets and reading.overlaps(candidate_keys, ref.family_key_sets[0])
         ]
         if len(same_first) > 1:
-            winner = _break_tie(same_first, cand) if break_ties else None
+            winner = _break_tie(same_first, cand, reading) if break_ties else None
             if winner is not None:
-                return winner, []
-            return None, sorted(ref.bib_id for ref in same_first)
+                return winner, [], True
+            return None, sorted(ref.bib_id for ref in same_first), False
 
-    scored = [(r, _score_ref(r, cand, overlaps)) for r in pool]
+    scored = [(r, _score_ref(r, cand, reading)) for r in pool]
     scored = [(r, s) for r, s in scored if s[0] > 0]
     if not scored:
-        return None, []
+        return None, [], False
 
     scored.sort(key=lambda x: x[1], reverse=True)
-    if len(scored) > 1 and (only_one or scored[1][1] == scored[0][1]):
+    if len(scored) > 1 and (reading.only_one or scored[1][1] == scored[0][1]):
         top_score = scored[0][1]
-        top = [r for r, s in scored if only_one or s == top_score]
-        winner = _break_tie(top, cand) if break_ties else None
+        top = [r for r, s in scored if reading.only_one or s == top_score]
+        winner = _break_tie(top, cand, reading) if break_ties else None
         if winner is not None:
-            return winner, []
-        return None, [r.bib_id for r in top]
-    return scored[0][0], []
-
-
-# Looser ways to read a family name, tried in turn only when no listed author
-# shares a match-key with the citation.
-_LOOSE_OVERLAPS: tuple[tuple[_Overlap, bool], ...] = (
-    (_overlap_prefix, False),
-    (_overlap_fuzzy, True),
-)
+            return winner, [], True
+        return None, [r.bib_id for r in top], False
+    return scored[0][0], [], False
 
 
 def _year_pool(
@@ -819,6 +906,71 @@ def _year_pool(
     return pool
 
 
+def _spelt_as_listed_elsewhere(
+    cand: _Candidate,
+    ref: _RefIdx,
+    by_year: dict[tuple[int | None, str | None], list[_RefIdx]],
+) -> bool:
+    """Whether a cited family, as spelt, is an author of another year's reference.
+
+    The citation then names that author with the wrong year, or somebody else:
+    a guess at the spelling adds nothing. A further cited family that is an
+    author of ``ref`` as spelt (the pair "Crockett and Carlo" against
+    "Crocket, Carlo") vouches for it all the same.
+    """
+    cited = [_exact_keys(family) for family in cand.families]
+    if any(_overlap_exact(keys, author) for keys in cited for author in ref.family_key_sets):
+        return False
+    listed = {
+        _compact(_full_key(author))
+        for refs in by_year.values()
+        for other in refs
+        for author in other.family_key_sets
+    }
+    return any(_compact(_full_key(keys)) in listed for keys in cited)
+
+
+# How a candidate was placed: "exact" and "tie_break" are the exact reading of
+# the names, the others the looser readings (``_LOOSE_READINGS``). The evidence
+# and confidence a receipt records for each: the looser the reading, the less
+# it vouches for the link.
+_READING_EVIDENCE = {
+    "exact": ("family_match", "year_match"),
+    "tie_break": ("family_match", "year_match", "author_list_tie_break"),
+    "prefix": ("family_prefix_match", "year_match"),
+    "fuzzy": ("family_fuzzy_match", "year_match"),
+}
+_READING_CONFIDENCE = {"exact": 0.95, "tie_break": 0.9, "prefix": 0.8, "fuzzy": 0.7}
+
+
+def _match_reading(
+    cand: _Candidate,
+    by_year: dict[tuple[int | None, str | None], list[_RefIdx]],
+    in_press_refs: list[_RefIdx],
+    *,
+    rules: bool = False,
+) -> tuple[_RefIdx | None, list[int], str | None]:
+    """``_match``, and how the reference was placed (a key of ``_READING_EVIDENCE``)."""
+    pool = _year_pool(cand, by_year, in_press_refs)
+    if not pool:
+        return None, [], None
+
+    ref, tied, by_tie_break = _match_pool(pool, cand, _EXACT, break_ties=rules)
+    if ref is not None:
+        return ref, [], "tie_break" if by_tie_break else "exact"
+    if tied or not rules:
+        return None, tied, None
+    for reading in _LOOSE_READINGS:
+        ref, tied, _by_tie_break = _match_pool(pool, cand, reading)
+        if ref is not None:
+            if reading.name == "fuzzy" and _spelt_as_listed_elsewhere(cand, ref, by_year):
+                return None, [], None
+            return ref, [], reading.name
+        if tied:
+            break
+    return None, [], None
+
+
 def _match(
     cand: _Candidate,
     by_year: dict[tuple[int | None, str | None], list[_RefIdx]],
@@ -839,24 +991,12 @@ def _match(
     Names are compared by their match-keys. With *rules* (a run with no LLM),
     references that tie are told apart by their author lists (``_break_tie``),
     and when no reference of the year shares a match-key with the citation the
-    looser readings are tried (``_LOOSE_OVERLAPS``); they link a single
+    looser readings are tried (``_LOOSE_READINGS``); they link a single
     reference or none, and never offer a shortlist, so a citation the exact
     keys could not place is never narrowed to a wrong pair.
     """
-    pool = _year_pool(cand, by_year, in_press_refs)
-    if not pool:
-        return None, []
-
-    ref, tied = _match_pool(pool, cand, _overlap_exact, break_ties=rules)
-    if ref is not None or tied or not rules:
-        return ref, tied
-    for overlaps, only_one in _LOOSE_OVERLAPS:
-        ref, tied = _match_pool(pool, cand, overlaps, only_one=only_one)
-        if ref is not None:
-            return ref, []
-        if tied:
-            break
-    return None, []
+    ref, tied, _reading = _match_reading(cand, by_year, in_press_refs, rules=rules)
+    return ref, tied
 
 
 # ---------------------------------------------------------------------------
@@ -893,7 +1033,7 @@ def match_with_candidates(
     what the exact reading leaves over. A work listed twice is one work, and
     references that tie are told apart by author count and order
     (``_break_tie``); a family spelt a little differently links when only
-    one reference of the year is close to it (``_LOOSE_OVERLAPS``); a
+    one reference of the year is close to it (``_LOOSE_READINGS``); a
     reference list's leading marker and a surname in capitals are read
     through (``_family_key``, ``_is_initials``). Off, none of it applies and
     the output is that of the exact reading alone.
@@ -913,7 +1053,7 @@ def match_with_candidates(
         if not sent.text:
             continue
         for cand in _find_candidates(sent.text, sent.text_id):
-            ref, tied = _match(cand, by_year, in_press_refs, rules=rules)
+            ref, tied, reading = _match_reading(cand, by_year, in_press_refs, rules=rules)
             surface_evidence = (
                 ("separated_possessive", "work_noun_bridge")
                 if cand.surface_kind == "separated_possessive"
@@ -928,8 +1068,8 @@ def match_with_candidates(
                         raw=cand.raw,
                         style="author-year",
                         bib_ids=(ref.bib_id,),
-                        evidence=("family_match", "year_match", *surface_evidence),
-                        confidence=0.95,
+                        evidence=(*_READING_EVIDENCE[reading or "exact"], *surface_evidence),
+                        confidence=_READING_CONFIDENCE[reading or "exact"],
                         accepted=True,
                         rejection_reasons=(),
                     )
@@ -1028,10 +1168,12 @@ def _match_any_author(pool: list[_RefIdx], cand: _Candidate) -> _RefIdx | None:
 
     Last resort for a citation whose first family fits no first author: a
     byline in another order, or a name taken from the end of the list. Reads
-    names as ``_overlap_fuzzy`` does and links only a single reference, or one
-    that ``_break_tie`` picks from several.
+    names by their match-keys, as the exact reading does: a name that is only
+    near another ("Lee" in a list of three, "Freedman" for "Friedman") is not
+    evidence of a position the first author does not hold. Links only a single
+    reference, or one that ``_break_tie`` picks from several.
     """
-    cited = [_family_keys_for(family) for family in cand.families]
+    cited = [_EXACT.cited_keys(family) for family in cand.families]
     if not cited:
         return None
     fits = [
@@ -1039,13 +1181,13 @@ def _match_any_author(pool: list[_RefIdx], cand: _Candidate) -> _RefIdx | None:
         for ref in pool
         if ref.family_key_sets
         and all(
-            any(_overlap_fuzzy(keys, author) for author in ref.family_key_sets) for keys in cited
+            any(_overlap_exact(keys, author) for author in ref.family_key_sets) for keys in cited
         )
     ]
     if len(fits) == 1:
         return fits[0]
     if len(fits) > 1:
-        return _break_tie(fits, cand)
+        return _break_tie(fits, cand, _EXACT)
     return None
 
 

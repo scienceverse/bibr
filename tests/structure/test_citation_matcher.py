@@ -8,6 +8,7 @@ from bibr.structure.citation_matcher import (
     _family_keys_for,
     detect_author_year_xrefs,
     extract_families,
+    match_with_candidates,
 )
 
 
@@ -517,6 +518,136 @@ class TestFuzzyFamilyMatch:
         refs = [_ref(1, "Nakamura, K.", title="A"), _ref(2, "Nakamora, T.", title="B")]
         sents = [_sent(0, "As shown (Nakamura, 2020) here.")]
         assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
+
+class TestLooseLinksNeedAWholeName:
+    """A name that opens, ends or looks like another's is another's."""
+
+    @pytest.mark.parametrize(
+        ("cited", "listed"),
+        [
+            ("John", "Johnson, A."),
+            ("Johnson", "John, A."),
+            ("Park", "Parker, S."),
+            ("Rose", "Rosenberg, T."),
+            ("March", "Marchant, T."),
+            ("Gold", "Goldberg, T."),
+            ("Kant", "Kanter, T."),
+        ],
+    )
+    def test_a_name_is_not_the_opening_letters_of_a_longer_one(self, cited, listed):
+        refs = [_ref(1, listed, year=2016, title="A")]
+        sents = [_sent(0, f"As shown ({cited}, 2016) here.")]
+        assert _rule_xrefs(sents, refs) == []
+
+    def test_a_first_author_with_et_al_is_not_the_opening_letters_of_a_name(self):
+        refs = [_ref(1, "John, A., Lee, B., & Kim, C.", year=2016, title="A")]
+        sents = [_sent(0, "As shown (Johnson et al., 2016) here.")]
+        assert _rule_xrefs(sents, refs) == []
+
+    @pytest.mark.parametrize(
+        ("cited", "listed"),
+        [
+            ("European Commission", "Commission on Human Rights"),
+            ("Health Council", "Ministry of Health"),
+            ("Education Commission", "Department of Education"),
+        ],
+    )
+    def test_a_body_is_not_the_last_words_of_another(self, cited, listed):
+        refs = [_ref(1, listed, year=2016, title="A")]
+        sents = [_sent(0, f"As shown ({cited}, 2016) here.")]
+        assert _rule_xrefs(sents, refs) == []
+
+    def test_a_listed_family_given_entry_is_reached_by_its_whole_family(self):
+        refs = [_ref(1, "Berg Anna, Lund Karl", year=2016, title="A")]
+        sents = [_sent(0, "As shown (Berg & Lund, 2016) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
+    def test_a_name_printed_with_other_spaces_or_hyphens_is_the_same_name(self):
+        refs = [_ref(1, "Hernandez Lopez, M.", year=2016, title="A")]
+        sents = [_sent(0, "As shown (Hernandez-Lopez, 2016) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
+    def test_a_double_surname_is_reached_by_either_part_and_reaches_it(self):
+        listed_whole = [_ref(1, "Hedman-Lagerlof, E.", year=2016, title="A")]
+        listed_part = [_ref(1, "Lagerlof, E.", year=2016, title="A")]
+        assert [
+            x.xref_id for x in _rule_xrefs([_sent(0, "As (Lagerlof, 2016) said.")], listed_whole)
+        ] == [1]
+        assert [
+            x.xref_id
+            for x in _rule_xrefs([_sent(0, "As (Hedman-Lagerlof, 2016) said.")], listed_part)
+        ] == [1]
+
+    def test_a_short_part_does_not_stand_for_a_double_surname(self):
+        refs = [_ref(1, "Kim, A.", year=2016, title="A")]
+        sents = [_sent(0, "As shown (Kim-Lee, 2016) here.")]
+        assert _rule_xrefs(sents, refs) == []
+
+    def test_a_domain_name_is_reached_by_its_first_label(self):
+        refs = [_ref(1, "Calculator.net", year=2016, title="")]
+        sents = [_sent(0, "As shown (Calculator, 2016) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
+    def test_off_by_default_none_of_the_loose_readings_apply(self):
+        refs = [_ref(1, "Berg Anna", year=2016, title="A")]
+        sents = [_sent(0, "As shown (Berg, 2016) here.")]
+        assert detect_author_year_xrefs(sents, refs) == []
+
+
+class TestLooseLinkEvidence:
+    """A link read loosely says so, and vouches for itself less."""
+
+    @staticmethod
+    def _candidate(text, refs):
+        _xrefs, _amb, candidates = match_with_candidates([_sent(0, text)], refs, rules=True)
+        (candidate,) = [c for c in candidates if c.accepted]
+        return candidate
+
+    def test_exact_link_keeps_its_evidence_and_confidence(self):
+        refs = [_ref(1, "Okafor, C.", year=2016, title="A")]
+        candidate = self._candidate("As shown (Okafor, 2016) here.", refs)
+        assert candidate.evidence == ("family_match", "year_match")
+        assert candidate.confidence == 0.95
+
+    def test_prefix_link_has_its_own_evidence_and_a_lower_confidence(self):
+        refs = [_ref(1, "Berg Anna", year=2016, title="A")]
+        candidate = self._candidate("As shown (Berg, 2016) here.", refs)
+        assert candidate.evidence == ("family_prefix_match", "year_match")
+        assert candidate.confidence == 0.8
+
+    def test_fuzzy_link_has_its_own_evidence_and_the_lowest_confidence(self):
+        refs = [_ref(1, "Kowalczyk, A.", year=2016, title="A")]
+        candidate = self._candidate("As shown (Kowalchyk, 2016) here.", refs)
+        assert candidate.evidence == ("family_fuzzy_match", "year_match")
+        assert candidate.confidence == 0.7
+
+    def test_tie_break_link_says_so(self):
+        refs = [
+            _ref(1, "Okafor, C., & Lund, K.", year=2016, title="Two authors"),
+            _ref(2, "Okafor, C., Lund, K., & Brandt, H.", year=2016, title="Three authors"),
+        ]
+        candidate = self._candidate("As Okafor et al. (2016) showed, this holds.", refs)
+        assert candidate.evidence == ("family_match", "year_match", "author_list_tie_break")
+        assert candidate.confidence == 0.9
+
+    def test_a_name_listed_as_cited_under_another_year_is_not_guessed_at(self):
+        # "Kowalchyk" is an author of the 2015 entry as spelt: the 2016 entry
+        # is not that author's work with a typo.
+        refs = [
+            _ref(1, "Kowalchyk, B.", year=2015, title="A"),
+            _ref(2, "Kowalczyk, A.", year=2016, title="B"),
+        ]
+        sents = [_sent(0, "As shown (Kowalchyk, 2016) here.")]
+        assert _rule_xrefs(sents, refs) == []
+
+    def test_a_second_cited_author_vouches_for_the_spelling(self):
+        refs = [
+            _ref(1, "Kowalchyk, B.", year=2015, title="A"),
+            _ref(2, "Kowalczyk, A., & Lund, K.", year=2016, title="B"),
+        ]
+        sents = [_sent(0, "As shown (Kowalchyk & Lund, 2016) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [2]
 
 
 class TestYearSuffix:
