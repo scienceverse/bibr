@@ -24,6 +24,7 @@ import unicodedata
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 
 from bibr.models import PaperReference
 from bibr.paper_contents import CitationCandidate, PaperSentence, PaperXref
@@ -620,6 +621,33 @@ def _overlap_prefix(cited: frozenset[str], listed: frozenset[str]) -> bool:
     return False
 
 
+# A misspelt or differently transliterated family ("Kowalczyk" / "Kowalchyk"):
+# both names this long and at least this similar. Short names differ by one
+# letter and still belong to two people.
+_FUZZY_MIN_LEN = 6
+_FUZZY_MIN_RATIO = 0.86
+
+
+def _overlap_fuzzy(cited: frozenset[str], listed: frozenset[str]) -> bool:
+    """``_overlap_prefix``, or two long names spelt almost alike."""
+    if _overlap_prefix(cited, listed):
+        return True
+    for cited_key in map(_compact, cited):
+        if len(cited_key) < _FUZZY_MIN_LEN:
+            continue
+        for listed_key in map(_compact, listed):
+            if len(listed_key) < _FUZZY_MIN_LEN:
+                continue
+            matcher = SequenceMatcher(None, cited_key, listed_key)
+            if (
+                matcher.real_quick_ratio() >= _FUZZY_MIN_RATIO
+                and matcher.quick_ratio() >= _FUZZY_MIN_RATIO
+                and matcher.ratio() >= _FUZZY_MIN_RATIO
+            ):
+                return True
+    return False
+
+
 _Overlap = Callable[[frozenset[str], frozenset[str]], bool]
 
 
@@ -686,9 +714,14 @@ def _break_tie(tied: list[_RefIdx], cand: _Candidate, overlaps: _Overlap) -> _Re
 
 
 def _match_pool(
-    pool: list[_RefIdx], cand: _Candidate, overlaps: _Overlap
+    pool: list[_RefIdx], cand: _Candidate, overlaps: _Overlap, *, only_one: bool = False
 ) -> tuple[_RefIdx | None, list[int]]:
-    """Score ``cand`` against the references of its year; see ``_match``."""
+    """Score ``cand`` against the references of its year; see ``_match``.
+
+    With ``only_one``, a reference is linked only when no other reference of
+    the year fits the citation, or when ``_break_tie`` picks it from those
+    that do; a higher score is not enough.
+    """
     # A bare first-family/year citation cannot distinguish references that
     # share that first family and year by the author list alone: a coauthor or
     # year suffix must disambiguate. The one thing the count of authors does
@@ -715,9 +748,9 @@ def _match_pool(
         return None, []
 
     scored.sort(key=lambda x: x[1], reverse=True)
-    if len(scored) > 1 and scored[1][1] == scored[0][1]:
+    if len(scored) > 1 and (only_one or scored[1][1] == scored[0][1]):
         top_score = scored[0][1]
-        top = [r for r, s in scored if s == top_score]
+        top = [r for r, s in scored if only_one or s == top_score]
         winner = _break_tie(top, cand, overlaps)
         if winner is not None:
             return winner, []
@@ -727,7 +760,10 @@ def _match_pool(
 
 # Looser ways to read a family name, tried in turn only when no listed author
 # shares a match-key with the citation.
-_LOOSE_OVERLAPS: tuple[_Overlap, ...] = (_overlap_prefix,)
+_LOOSE_OVERLAPS: tuple[tuple[_Overlap, bool], ...] = (
+    (_overlap_prefix, False),
+    (_overlap_fuzzy, True),
+)
 
 
 def _match(
@@ -774,8 +810,8 @@ def _match(
     ref, tied = _match_pool(pool, cand, _overlap_exact)
     if ref is not None or tied:
         return ref, tied
-    for overlaps in _LOOSE_OVERLAPS:
-        ref, tied = _match_pool(pool, cand, overlaps)
+    for overlaps, only_one in _LOOSE_OVERLAPS:
+        ref, tied = _match_pool(pool, cand, overlaps, only_one=only_one)
         if ref is not None:
             return ref, []
         if tied:

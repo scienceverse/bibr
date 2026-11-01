@@ -361,6 +361,43 @@ class TestLooseFamilyMatch:
         assert [x.xref_id for x in detect_author_year_xrefs(sents, refs)] == [2]
 
 
+class TestFuzzyFamilyMatch:
+    """A misspelt family links when one reference of the exact year is close."""
+
+    def test_close_spelling_links(self):
+        refs = [_ref(1, "Kowalczyk, A.", title="A"), _ref(2, "Brandt, H.", title="B")]
+        sents = [_sent(0, "As shown (Kowalchyk, 2020) here.")]
+        assert [x.xref_id for x in detect_author_year_xrefs(sents, refs)] == [1]
+
+    def test_year_must_be_exact(self):
+        refs = [_ref(1, "Kowalczyk, A.", year=2019, title="A")]
+        sents = [_sent(0, "As shown (Kowalchyk, 2020) here.")]
+        assert detect_author_year_xrefs(sents, refs) == []
+
+    def test_short_names_are_never_fuzzy(self):
+        refs = [_ref(1, "Smith, A.", title="A")]
+        sents = [_sent(0, "As shown (Smyth, 2020) here.")]
+        assert detect_author_year_xrefs(sents, refs) == []
+
+    def test_dissimilar_names_do_not_link(self):
+        refs = [_ref(1, "Kowalczyk, A.", title="A")]
+        sents = [_sent(0, "As shown (Kowalski, 2020) here.")]
+        assert detect_author_year_xrefs(sents, refs) == []
+
+    def test_two_close_references_link_nothing_and_offer_no_shortlist(self):
+        from bibr.structure.citation_matcher import match_with_ambiguous
+
+        refs = [_ref(1, "Nakamura, K.", title="A"), _ref(2, "Nakamora, T.", title="B")]
+        xrefs, ambiguous = match_with_ambiguous([_sent(0, "As shown (Nakamara, 2020).")], refs)
+        assert xrefs == []
+        assert ambiguous == []
+
+    def test_a_better_exact_candidate_is_not_overridden(self):
+        refs = [_ref(1, "Nakamura, K.", title="A"), _ref(2, "Nakamora, T.", title="B")]
+        sents = [_sent(0, "As shown (Nakamura, 2020) here.")]
+        assert [x.xref_id for x in detect_author_year_xrefs(sents, refs)] == [1]
+
+
 class TestYearSuffix:
     def test_suffix_disambiguation(self):
         refs = [
