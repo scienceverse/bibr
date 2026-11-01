@@ -2288,9 +2288,9 @@ class TestRepairedExtraction:
                 [("F", "1, 208", "=", "5.01"), ("p", "", "=", "0.026")],
             ),
             (
-                "Here t 2.73, p .008 and r .73, p .01.",
+                "Here t 2.73, p .008 and r .73, p .02.",
                 [("t", "", "=", "2.73"), ("p", "", "=", ".008"), ("r", "", "=", ".73")]
-                + [("p", "", "=", ".01")],
+                + [("p", "", "=", ".02")],
             ),
             (
                 "It rose, M 5 3.2, p 5 .02.",
@@ -2371,6 +2371,90 @@ class TestRepairedExtraction:
             extractor.extract_from_sentences([sentence], _make_sections(), repair_glitches=False)
             == []
         )
+
+
+class TestRepairGuards:
+    """Where a repair would put in a value the text does not hold, it leaves the text as printed."""
+
+    @pytest.mark.parametrize("value", [".05", "0.05", ".01", "0.01", ".001", "0.001", ".0001"])
+    def test_a_dropped_comparator_before_a_threshold_is_not_made_an_equals(self, value):
+        text = f"The model fit (F (1, 208) 16.23, p {value}) in the sample."
+
+        assert ("p", "", "=", value) not in _components(_extract_repaired(text))
+        assert _components(_extract_repaired(text))[:1] == [("F", "1, 208", "=", "16.23")]
+
+    @pytest.mark.parametrize("value", [".026", ".03", ".0011", ".002", ".049", "0.5"])
+    def test_a_dropped_comparator_before_another_value_is_an_equals(self, value):
+        text = f"The model fit (F (1, 208) 16.23, p {value}) in the sample."
+
+        assert ("p", "", "=", value) in _components(_extract_repaired(text))
+
+    def test_a_page_after_a_year_is_no_p_value(self):
+        assert _extract_repaired("As argued (Smith, 2010, p .5) before.") == []
+        assert _extract_repaired("As argued (Smith, 1998; Lee, 2010, p .45) before.") == []
+
+    def test_a_p_value_after_a_count_is_one(self):
+        eqs = _extract_repaired("In the group (n = 12, p .03) it held.")
+
+        assert ("p", "", "=", ".03") in _components(eqs)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "See Smith J. Psychol Rev 12, p 5 10.",
+            "See Smith J. Psychol Rev 12, p , 12.",
+            "A value of p 5 1.5 was read.",
+        ],
+    )
+    def test_a_p_value_over_one_is_not_repaired_into_one(self, text):
+        assert not [eq for eq in _extract_repaired(text) if eq.lhs == "p"]
+
+    @pytest.mark.parametrize(
+        ("text", "repaired"),
+        [
+            ("It held, p 5 .03.", "It held, p = .03."),
+            ("It held, p , .01.", "It held, p < .01."),
+            ("It held, p 5 1.", "It held, p = 1."),
+            ("It held, p 5 1.0, ok", "It held, p = 1.0, ok"),
+            ("It held, ps , 0.05.", "It held, ps < 0.05."),
+        ],
+    )
+    def test_a_p_value_up_to_one_is_still_repaired(self, text, repaired):
+        assert repair_statistic_glitches(text) == repaired
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "See Smith J. Psychol Rev 12, p 5 10.",
+            "See Smith J. Psychol Rev 12, p , 12.",
+            "A value of p 5 1.5 was read.",
+            "A value of p 5 -.5 was read.",
+        ],
+    )
+    def test_the_text_of_a_p_value_over_one_is_left_as_printed(self, text):
+        assert repair_statistic_glitches(text) == text
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "M 5 3.2 2.1 4.0",
+            "Age M (SD) 5 3.2 1.2",
+            "The row M 5 3.2 2.1 4.0 was flattened.",
+        ],
+    )
+    def test_a_flattened_table_row_is_not_a_mean(self, text):
+        assert not [eq for eq in _extract_repaired(text) if eq.lhs == "M"]
+
+    def test_a_unit_before_the_name_is_no_name(self):
+        assert _extract_repaired("Treated for 7 d 5 10 mg/kg per day.") == []
+
+    def test_a_name_after_a_number_is_a_name_when_a_comma_separates_them(self):
+        eqs = _extract_repaired("In study 2, t(59) 5 0.66 and n = 60, d 5 0.45, it held.")
+
+        assert [c for c in _components(eqs) if c[0] in ("t", "d")] == [
+            ("t", "59", "=", "0.66"),
+            ("d", "", "=", "0.45"),
+        ]
 
 
 class TestRepairedRows:

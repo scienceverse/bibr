@@ -707,8 +707,12 @@ _CYRILLIC_P_RE = re.compile(r"(?<!\w)\u0440(?=\s*[<>=≤≥])")
 # "p 5 .03", "M 5 3.2", "χ2 5 3.84". The 5 stands alone and a value follows, so
 # a 5 that is a value ("t(59) = 5.2", "N = 5 40") or part of one stays.
 _NAME_BEFORE_FIVE = r"\b(?:[tFrRZUHpPdgM]s?|x2|χ2|χ²)"
+# It is no name after a number ("7 d 5 10 mg/kg": days), and its value is no
+# first of a run of numbers ("M 5 3.2 2.1 4.0": a flattened table row). A p-value
+# is at most 1 (``_is_possible_p``).
 _FIVE_FOR_EQUALS_RE = re.compile(
-    r"(" + _NAME_BEFORE_FIVE + r"\s*(?:\([^)]{1,20}\))?\s)5(\s+(?=[-−–]?\d*\.?\d))"
+    r"(?<!\d\s)(" + _NAME_BEFORE_FIVE + r"\s*(?:\([^)]{1,20}\))?\s)5"
+    r"(\s+(?=[-−–]?(?:\d+\.\d+|\d+|\.\d+)(?!\d|\.\d)(?!\s+[-−–]?\.?\d)))"
 )
 # "p , .01", the "<" of "p < .01" printed as a comma
 _COMMA_FOR_LESS_RE = re.compile(r"(\bps?\s),(\s+(?=\.?\d))")
@@ -718,8 +722,45 @@ _NAME_BEFORE_DROPPED_EQUALS = r"\b(?:[tFZUWrdg]|χ2|χ²|X2)\s*(?:\([\d.,\s=]{1,
 _DROPPED_EQUALS_RE = re.compile(
     r"(" + _NAME_BEFORE_DROPPED_EQUALS + r")\s(?=[-−]?(?:\d+)?\.\d+\s*[,;]\s*[pP]\b)"
 )
-# "p 0.026" after a number and a comma, the "=" of "p = 0.026" not printed
-_DROPPED_P_EQUALS_RE = re.compile(r"(\d\s*[,;]\s*[pP])\s(?=0?\.\d)")
+# "p 0.026" after a number and a comma, the "=" of "p = 0.026" not printed. Not
+# after a year ("(Smith, 2010, p .5)"), and not for the values p is compared
+# with: the glyph lost in "p 0.001" is more likely a "<" than an "=", and it
+# cannot be recovered.
+_DROPPED_P_EQUALS_RE = re.compile(
+    r"(?<!\b(?:18|19|20)\d)(\d\s*[,;]\s*[pP])\s(?=0?\.\d)(?!0?\.(?:05|01|001|0001)0*(?!\d))"
+)
+_P_NAME_RE = re.compile(r"\bps?\s*$", re.IGNORECASE)
+_NUMBER_AT_RE = re.compile(r"[-−–]?\s*(?:\d+\.?\d*|\.\d+)")
+
+
+def _is_possible_p(text: str, end: int) -> bool:
+    """Whether the number at ``text[end:]`` can be a p-value, at most 1."""
+    match = _NUMBER_AT_RE.match(text, end)
+    if match is None:
+        return False
+    try:
+        value = float(match.group().replace("−", "-").replace("–", "-").replace(" ", ""))
+    except ValueError:
+        return False
+    return 0 <= value <= 1
+
+
+def _stand_in_for(glyph: str, pattern: re.Pattern[str]) -> Callable[[str], str]:
+    """A rule that replaces the stand-in character of *pattern*'s matches with *glyph*.
+
+    The pattern's first group is the name and what lies before the stand-in,
+    its second what lies after. A match naming a p-value that the number after
+    it cannot be is left as printed: "Smith J. Psychol Rev 12, p 5 10." has a
+    page, "p , 12" none either.
+    """
+
+    def put(match: re.Match[str]) -> str:
+        name, after = match.group(1), match.group(2)
+        if _P_NAME_RE.search(name) and not _is_possible_p(match.string, match.end(2)):
+            return match.group(0)
+        return name + glyph + after
+
+    return lambda text: pattern.sub(put, text)
 
 
 def _fold_math_alnum(text: str) -> str:
@@ -739,8 +780,8 @@ _GLITCH_RULES: tuple[Callable[[str], str], ...] = (
     _fold_math_alnum,
     lambda text: text.replace(_BOX, " "),
     lambda text: _CYRILLIC_P_RE.sub("p", text),
-    lambda text: _FIVE_FOR_EQUALS_RE.sub(r"\1=\2", text),
-    lambda text: _COMMA_FOR_LESS_RE.sub(r"\1<\2", text),
+    _stand_in_for("=", _FIVE_FOR_EQUALS_RE),
+    _stand_in_for("<", _COMMA_FOR_LESS_RE),
     lambda text: _DROPPED_EQUALS_RE.sub(r"\1=", text),
     lambda text: _DROPPED_P_EQUALS_RE.sub(r"\1=", text),
 )
