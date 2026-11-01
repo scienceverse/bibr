@@ -537,6 +537,54 @@ def test_parallel_keyword_lists_keep_the_first_printed():
     assert got.title_keywords.keywords == ["mano", "familia"]
 
 
+def test_a_keyword_is_closed_over_the_parenthesis_the_tagger_left_outside():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Ana Lima"),
+        (
+            "text",
+            "Keywords: grade point average (GPA); Zimbabwe (code: Q1, Q2); model (A (B)); pain",
+        ),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Ana"),
+        ("FAMILY", "Lima"),
+        ("KEYWORD", "grade point average (GPA"),
+        ("KEYWORD", "Zimbabwe (code: Q1, Q2"),
+        ("KEYWORD", "model (A (B"),
+        ("KEYWORD", "pain"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags))
+    assert got.title_keywords.keywords == [
+        "grade point average (GPA)",
+        "Zimbabwe (code: Q1, Q2)",
+        "model (A (B))",
+        "pain",
+    ]
+
+
+def test_a_keyword_is_not_closed_over_a_parenthesis_that_is_not_directly_after_it():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Ana Lima"),
+        ("text", "Keywords: stress (acute pain); cell (s"),
+        ("text", ") note"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Ana"),
+        ("FAMILY", "Lima"),
+        ("KEYWORD", "stress (acute"),
+        ("KEYWORD", "cell (s"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags))
+    # A word, or another region, lies between the span and the ")".
+    assert got.title_keywords.keywords == ["stress (acute", "cell (s"]
+
+
 def test_a_one_name_author_in_a_given_first_byline_keeps_alone():
     inp = tagger_input(
         ("doc_title", "Pengaruh pembelajaran daring"),

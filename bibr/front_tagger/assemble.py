@@ -350,7 +350,32 @@ def _abstract(spans: list[Span], tags, inp: TaggerInput, conf) -> tuple[str | No
 def _keywords(spans: list[Span], tags, inp: TaggerInput) -> list[str]:
     """The keywords of the list printed first; parallel-language lists are not joined."""
     groups = _clusters(spans, tags, inp, "KEYWORD", heading=_KEYWORD_HEADING_RE)
-    return [k for span in (groups[0] if groups else []) if (k := _clean(span.text))]
+    return [
+        k for span in (groups[0] if groups else []) if (k := _clean(_closed_text(span, tags, inp)))
+    ]
+
+
+def _closed_text(span: Span, tags, inp: TaggerInput) -> str:
+    """The span's text, closed over the ")" words the tagger left just after it.
+
+    The model ends a keyword before the parenthesis that closes its
+    abbreviation ("non-small cell lung cancer (NSCLC" then ")"). Only a ")" the
+    paper prints directly after the span, in its region and in no field, is
+    taken, and only for as many "(" as the span leaves open.
+    """
+    text = span.text
+    last = span.words[-1]
+    while text.count("(") > text.count(")"):
+        last += 1
+        if (
+            last >= len(inp.words)
+            or inp.words[last].text != ")"
+            or inp.words[last].region != inp.words[span.words[-1]].region
+            or _field(tags[last]) not in (None, "FURNITURE")
+        ):
+            break
+        text += ")"
+    return text
 
 
 @dataclass
