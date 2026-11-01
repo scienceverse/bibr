@@ -3,8 +3,9 @@ from __future__ import annotations
 import pytest
 
 from bibr.front_tagger.assemble import assemble
+from bibr.front_tagger.contract import build_tagger_input
 
-from .helpers import label, tagger_input
+from .helpers import label, regions, tagger_input
 
 
 def _ones(inp):
@@ -1118,3 +1119,95 @@ def test_one_keyed_line_that_names_no_institution_keys_nothing():
     )
     got = assemble(inp, tags, _ones(inp), rules=True)
     assert [a.family for a in got.byline.authors] == ["Vegaa", "Mallenb"]
+
+
+_BYLINE = [("GIVEN", "Anna"), ("FAMILY", "Smith")]
+
+
+def _untagged(*rows, spans=()):
+    """The institution text read from the print, with the byline "Anna Smith" tagged."""
+    inp = tagger_input(("doc_title", "Prevalence of handedness"), *rows)
+    tags = label(inp, ("TITLE", "Prevalence of handedness"), *spans)
+    return assemble(inp, tags, _ones(inp), rules=True).untagged_affiliations
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Journal of Medical Internet Research",
+        "Academy of Management Journal",
+        "BMC Medical Education (2020) 20:123",
+        "Downloaded from https://academic.oup.com by University of Liverpool on 3 March 2020",
+        "Access provided by University of Michigan Library",
+        "Funded by the National Science Foundation grant 12345",
+        "Supported by the Wellcome Trust Foundation",
+        "2020 Elsevier Ltd. All rights reserved.",
+        "Wiley Periodicals, Inc.",
+        "Send reprint requests to Jane Doe, Department of Psychology, Yale",
+        "Jane Doe is a professor at the University of Michigan.",
+        "Cite this article as: Smith A. Medical care in Spain. Hosp Med 2020.",
+        "123 Hospital Road, Springfield, IL 62704, USA",
+    ],
+)
+def test_a_line_that_is_no_affiliation_is_not_read_as_one(line):
+    rows = [("text", "Anna Smith"), ("text", line), ("abstract", "Abstract")]
+    assert _untagged(*rows, spans=[*_BYLINE]) == []
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["Department of Psychology, Yale University", "Professor of Medical Education, Univ of Oslo"],
+)
+def test_a_line_that_names_an_institution_is_read(line):
+    rows = [("text", "Anna Smith"), ("text", line), ("abstract", "Abstract")]
+    assert _untagged(*rows, spans=[*_BYLINE]) == [line]
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        "Professor of Medical Education",
+        "and the Medical Research Council Trial Group",
+        "A Study of Medical Students in Spain",
+        "Received 3 March from the College of Medicine",
+    ],
+)
+def test_a_run_after_a_name_that_is_no_affiliation_is_not_read_as_one(run):
+    rows = [("text", f"Anna Smith {run}"), ("abstract", "Abstract")]
+    assert _untagged(*rows, spans=[*_BYLINE]) == []
+
+
+def test_a_run_after_a_name_that_names_an_institution_is_read():
+    rows = [("text", "Anna Smith University of Michigan"), ("abstract", "Abstract")]
+    assert _untagged(*rows, spans=[*_BYLINE]) == ["University of Michigan"]
+
+
+def test_text_after_the_first_heading_of_the_body_is_not_read():
+    rows = [
+        ("text", "Anna Smith"),
+        ("paragraph_title", "1. Introduction"),
+        ("text", "University of Michigan Medical School"),
+    ]
+    assert _untagged(*rows, spans=[*_BYLINE]) == []
+    # The same text before any heading is read.
+    rows = [("text", "Anna Smith"), ("text", "University of Michigan Medical School")]
+    assert _untagged(*rows, spans=[*_BYLINE]) == ["University of Michigan Medical School"]
+
+
+def test_a_sentence_of_the_paper_is_not_read_when_no_abstract_was_tagged():
+    rows = [
+        ("text", "Anna Smith"),
+        ("text", "We recruited students at the University of Michigan and a medical school."),
+    ]
+    assert _untagged(*rows, spans=[*_BYLINE]) == []
+
+
+def test_affiliations_on_the_second_page_after_a_cover_sheet_are_read():
+    pages = regions(("doc_title", "Prevalence of handedness"), ("text", "Cover sheet"), page=0)
+    pages += regions(
+        ("text", "Anna Smith"), ("text", "Department of Psychology, Yale University"), page=1
+    )
+    inp = build_tagger_input(pages)
+    tags = label(inp, ("TITLE", "Prevalence of handedness"), *_BYLINE)
+    got = assemble(inp, tags, _ones(inp), rules=True)
+    assert got.untagged_affiliations == ["Department of Psychology, Yale University"]

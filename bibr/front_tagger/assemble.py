@@ -100,8 +100,45 @@ _INSTITUTION_RE = re.compile(
 )
 _NOT_AFFILIATION_RE = re.compile(
     r"^(correspond|received|accepted|published|email|e-mail|address|keywords?|abstract|copyright|©|"
-    r"running head|this (article|paper|work)|\*|note|we thank|thanks|acknowledg|author note|"
-    r"declaration|conflict)",
+    r"running head|this (article|paper|work|is)|\*|note|we thank|thanks|acknowledg|author note|"
+    r"declaration|conflict|"
+    # What a page prints around the byline: a stamp, a funder, a citation, a
+    # journal's name or an imprint, a reference to the paper's own record.
+    r"downloaded|access provided|funded|funding|supported by|presented|cite[sd]?\b|"
+    r"send reprint|reprints?\b|journal|proceedings|transactions|annals|bulletin|volume|vol\.|"
+    r"issn|doi|https?:|www\.|(?:19|20)\d\d\b|"
+    # A line that goes on from a name ("and the ... Group"), or names the paper.
+    r"and\b|&|with\b|on behalf|a (?:study|review|survey|trial|case)\b)",
+    re.IGNORECASE,
+)
+# Cues that make a line something else wherever they stand in it.
+_NOT_AFFILIATION_ANYWHERE_RE = re.compile(
+    r"rights reserved|downloaded (?:from|by)|creative commons|licen[cs]e|grants?\s+(?:no\b|number|from|\d)|funded by|"
+    r"supported by|reprint requests|\bpress\b|periodicals|publishing|\bjournal\b|https?://|www\.|\bdoi\b|"
+    r"\(\s*(?:19|20)\d\d\s*\)\s*\d+\s*[:(]|^\d+\s+[\w ]{0,30}?"
+    r"\b(?:road|rd|street|st|avenue|ave|boulevard|blvd|lane|drive)\b",
+    re.IGNORECASE,
+)
+# A job title alone ("Professor of Medical Education") names no institution; with
+# one after a comma it is an affiliation line.
+_JOB_TITLE_RE = re.compile(
+    r"^(?:(?:associate|assistant|adjunct|emeritus|visiting|senior|full)\s+)*"
+    r"(?:professor|lecturer|reader|director|editor|dean|chair|head)\b",
+    re.IGNORECASE,
+)
+# Words of running prose: an affiliation line holds none of them.
+_PROSE_RE = re.compile(
+    r"\b(?:we|our|were|was|is|are|has|have|had|been|will|would|should|could|that|which|these|"
+    r"those|their|they|its|it)\b",
+    re.IGNORECASE,
+)
+# A heading that opens the body (or the abstract the tags did not find): the
+# front matter ends there.
+_SECTION_HEADING_RE = re.compile(
+    r"^\W*(?:(?:\d+|[ivx]+)[.)]?\s+)?(?:abstract|summary|introduction|background|methods?|"
+    r"materials? and methods?|methodology|results?|discussion|conclusions?|literature review|"
+    r"theoretical (?:background|framework)|related work|overview|resumen|r[ée]sum[ée]|resumo|"
+    r"zusammenfassung|einleitung|introducci[oó]n|introdu[cç][aã]o)\W*$",
     re.IGNORECASE,
 )
 # Where an address line, run on after an affiliation, starts ("..., USA; email: ").
@@ -885,6 +922,21 @@ def _link_affiliations(
     return [text for text in tagged if text not in taken]
 
 
+def _reads_as_affiliation(text: str) -> bool:
+    """Whether a line of untagged text names an institution and nothing else.
+
+    An institution word is not enough: a journal's name, a download stamp, a
+    funder, an imprint or a sentence of the paper holds one as well.
+    """
+    return (
+        bool(_INSTITUTION_RE.search(text))
+        and not _NOT_AFFILIATION_RE.match(text)
+        and not _NOT_AFFILIATION_ANYWHERE_RE.search(text)
+        and not _PROSE_RE.search(text)
+        and not (_JOB_TITLE_RE.match(text) and "," not in text)
+    )
+
+
 def _untagged_institutions(inp: TaggerInput, tags) -> list[str]:
     """Institution text the tagger left out of every field, before the abstract.
 
@@ -893,7 +945,12 @@ def _untagged_institutions(inp: TaggerInput, tags) -> list[str]:
     * a run of untagged words after a family name, in the byline's region
       ("Arnold K. Ho University of Michigan"), when it names an institution;
     * a region with no tagged word at all, of text, heading or header kind,
-      that names an institution and does not open as a note ("Received ...").
+      that names an institution.
+
+    Both stop at the abstract or at the first heading of the body (the input
+    is the tagger's window of pages, and a paper with a cover sheet prints its
+    affiliations on the second), and both leave out what reads as something
+    else (see :func:`_reads_as_affiliation`).
     """
     words = inp.words
     by_region: dict[int, list[int]] = {}
@@ -914,7 +971,7 @@ def _untagged_institutions(inp: TaggerInput, tags) -> list[str]:
     found: list[str] = []
     for region, indices in by_region.items():
         fields = [_field(tags[i]) for i in indices]
-        if "ABSTRACT" in fields:
+        if "ABSTRACT" in fields or _SECTION_HEADING_RE.match(inp.regions[region].text):
             break
         if any(f in _NAME_FIELDS for f in fields):
             at = 0
@@ -927,7 +984,7 @@ def _untagged_institutions(inp: TaggerInput, tags) -> list[str]:
                     end += 1
                 run = [indices[n] for n in range(at + 1, end) if fields[n] is None]
                 text = printed(run)
-                if 2 <= len(run) <= _MAX_UNTAGGED_RUN_WORDS and _INSTITUTION_RE.search(text):
+                if 2 <= len(run) <= _MAX_UNTAGGED_RUN_WORDS and _reads_as_affiliation(text):
                     found.append(text)
                 at = end
         elif all(f is None for f in fields) and inp.regions[region].label in (
@@ -936,11 +993,7 @@ def _untagged_institutions(inp: TaggerInput, tags) -> list[str]:
             "header",
         ):
             text = printed(indices)
-            if (
-                2 <= len(indices) <= _MAX_UNTAGGED_LINE_WORDS
-                and _INSTITUTION_RE.search(text)
-                and not _NOT_AFFILIATION_RE.match(text)
-            ):
+            if 2 <= len(indices) <= _MAX_UNTAGGED_LINE_WORDS and _reads_as_affiliation(text):
                 found.append(text)
     return list(dict.fromkeys(found))
 
