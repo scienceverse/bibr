@@ -115,6 +115,8 @@ _LETTER_KEY_RE = re.compile(r"[a-h]")
 # A letter key glued to the next word of an affiliation line ("aComputational").
 _KEYED_WORD_RE = re.compile(r"[a-h][A-Z][a-z]{3,}")
 _MAX_GLUED_LETTERS = 3
+# Lines keyed by a glued letter that stand for each other: two, with distinct letters.
+_MIN_KEYED_LINES = 2
 # A lower-case run followed by a capitalised one: two of them in one word
 # ("AnxietyinCollegeStudents") are words a text layer printed without spaces.
 # Short pieces are acronyms and brand names ("CoViD", "ConvNeXt").
@@ -526,9 +528,13 @@ def _printed_letter_keys(inp: TaggerInput, tags) -> set[str]:
     Besides the letters it tagged as marks: a lower-case letter alone at the
     start of a line that goes on with an affiliation ("a Department of X"
     with the "a" untagged), and a letter glued to the line's first word
-    ("aComputational Science").
+    ("aComputational Science"). A glued word is taken only where it opens a
+    line the model did not read as a name or a title, and only when that line
+    reads as an affiliation or a second one opens with another letter:
+    "eHealth" in a title and the "eLife" of a running head key nothing.
     """
     letters: set[str] = set()
+    keyed: list[tuple[str, bool]] = []
     words = inp.words
     for i, word in enumerate(words):
         starts_line = i == 0 or words[i - 1].region != word.region
@@ -537,9 +543,38 @@ def _printed_letter_keys(inp: TaggerInput, tags) -> set[str]:
                 starts_line and i + 1 < len(words) and tags[i + 1] == "B-AFFILIATION"
             ):
                 letters.add(word.text)
-        elif _KEYED_WORD_RE.fullmatch(word.text) and (starts_line or tags[i - 1] != "O"):
-            letters.add(word.text[0])
+        elif _KEYED_WORD_RE.fullmatch(word.text) and _opens_keyed_line(tags, i, starts_line):
+            keyed.append((word.text[0], _keyed_line_reads_as_affiliation(inp, tags, i)))
+    if len({letter for letter, _ in keyed}) >= _MIN_KEYED_LINES:
+        letters.update(letter for letter, _ in keyed)
+    else:
+        letters.update(letter for letter, reads in keyed if reads)
     return letters
+
+
+def _opens_keyed_line(tags, i: int, starts_line: bool) -> bool:
+    """Whether the word at ``i`` can be an affiliation line's first word, key glued on.
+
+    Its own tag leaves it outside every field but an affiliation's start or a
+    mark: a word inside a title, a name, a keyword or an affiliation's text is
+    not the head of a line. Away from a region's start it is also untagged and
+    follows a tagged word (the name or the affiliation before it).
+    """
+    if tags[i] not in ("O", "B-AFFILIATION", "B-AFF_MARK"):
+        return False
+    return starts_line or (tags[i] == "O" and tags[i - 1] != "O")
+
+
+def _keyed_line_reads_as_affiliation(inp: TaggerInput, tags, i: int) -> bool:
+    """Whether the line a glued key opens goes on as an affiliation."""
+    words = inp.words
+    if i + 1 < len(words) and _field(tags[i + 1]) == "AFFILIATION":
+        return True
+    last = i
+    while last + 1 < len(words) and words[last + 1].region == words[i].region:
+        last += 1
+    # From the word's second letter on: the key is no part of the institution's name.
+    return bool(_INSTITUTION_RE.search(inp.text[words[i].start + 1 : words[last].end]))
 
 
 def _unglue_letter_keys(

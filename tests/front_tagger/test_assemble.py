@@ -978,3 +978,143 @@ def test_a_family_first_byline_still_pairs_initials():
     )
     got = assemble(inp, tags, [1.0] * len(tags))
     assert [(a.family, a.given) for a in got.byline.authors] == [("Smith", "J"), ("Jones", "M")]
+
+
+def _keyed_page(title_row, byline, *rows, spans):
+    inp = tagger_input(title_row, ("text", byline), *rows)
+    return inp, label(inp, *spans)
+
+
+_VEGA_MALLEN = [("GIVEN", "Juan"), ("FAMILY", "Vegaa"), ("GIVEN", "Ana"), ("FAMILY", "Mallenb")]
+
+
+def test_a_title_word_with_a_letter_and_a_capital_keys_no_affiliation():
+    inp, tags = _keyed_page(
+        ("doc_title", "Effects of eHealth on Depression in Adults"),
+        "Anna Moore, Ben Clarke",
+        spans=[
+            ("TITLE", "Effects of eHealth on Depression in Adults"),
+            ("GIVEN", "Anna"),
+            ("FAMILY", "Moore"),
+            ("GIVEN", "Ben"),
+            ("FAMILY", "Clarke"),
+        ],
+    )
+    got = assemble(inp, tags, _ones(inp), rules=True)
+    assert [a.family for a in got.byline.authors] == ["Moore", "Clarke"]
+
+
+def test_a_running_head_with_a_letter_and_a_capital_keys_no_affiliation():
+    inp = tagger_input(
+        ("header", "eLife 2020;9:e12345"),
+        ("doc_title", "Prevalence of handedness"),
+        ("text", "Anna Moore, Ben Clarke"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Prevalence of handedness"),
+        ("GIVEN", "Anna"),
+        ("FAMILY", "Moore"),
+        ("GIVEN", "Ben"),
+        ("FAMILY", "Clarke"),
+    )
+    got = assemble(inp, tags, _ones(inp), rules=True)
+    assert [a.family for a in got.byline.authors] == ["Moore", "Clarke"]
+
+
+def test_a_title_word_beside_a_marked_author_leaves_the_next_name_whole():
+    inp = tagger_input(
+        ("doc_title", "Reading an eBook in Class"),
+        ("text", "Anna Moore1 and Lee Blake"),
+        ("text", "1 University of Twente"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Reading an eBook in Class"),
+        ("GIVEN", "Anna"),
+        ("FAMILY", "Moore"),
+        ("AUTHOR_MARK", "1"),
+        ("GIVEN", "Lee"),
+        ("FAMILY", "Blake"),
+        ("AFF_MARK", "1"),
+        ("AFFILIATION", "University of Twente"),
+    )
+    got = assemble(inp, tags, _ones(inp), rules=True)
+    assert [a.family for a in got.byline.authors] == ["Moore", "Blake"]
+    assert "affiliation_mark_unresolved" not in got.problems
+
+
+def test_a_word_inside_an_affiliation_keys_no_affiliation():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Anna Moore, Ben Clarke"),
+        ("footnote", "1 Centre for eHealth Research, University of Twente"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Anna"),
+        ("FAMILY", "Moore"),
+        ("GIVEN", "Ben"),
+        ("FAMILY", "Clarke"),
+        ("AFF_MARK", "1"),
+        ("AFFILIATION", "Centre for eHealth Research, University of Twente"),
+    )
+    got = assemble(inp, tags, _ones(inp), rules=True)
+    assert [a.family for a in got.byline.authors] == ["Moore", "Clarke"]
+
+
+def test_a_key_glued_to_one_line_that_reads_as_an_affiliation_unglues_names():
+    inp, tags = _keyed_page(
+        ("doc_title", "Title words"),
+        "Juan Vegaa, Ana Mallen",
+        ("text", "aDepartment of Physics, Univ A"),
+        spans=[
+            ("TITLE", "Title words"),
+            ("GIVEN", "Juan"),
+            ("FAMILY", "Vegaa"),
+            ("GIVEN", "Ana"),
+            ("FAMILY", "Mallen"),
+        ],
+    )
+    got = assemble(inp, tags, _ones(inp), rules=True)
+    assert [a.family for a in got.byline.authors] == ["Vega", "Mallen"]
+
+
+def test_a_key_glued_to_the_head_of_an_affiliation_after_a_name_unglues_names():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Juan Vegaa aDepartment of Physics, Univ A"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Juan"),
+        ("FAMILY", "Vegaa"),
+    )
+    got = assemble(inp, tags, _ones(inp), rules=True)
+    # The word is untagged, just after the name, and the line goes on as an institution.
+    assert [a.family for a in got.byline.authors] == ["Vega"]
+
+
+def test_two_keyed_lines_with_distinct_letters_key_names_whatever_they_say():
+    inp, tags = _keyed_page(
+        ("doc_title", "Title words"),
+        "Juan Vegaa, Ana Mallenb",
+        ("text", "aAdvanced Modeling Group"),
+        ("text", "bQuantum Systems Team"),
+        spans=[("TITLE", "Title words"), *_VEGA_MALLEN],
+    )
+    got = assemble(inp, tags, _ones(inp), rules=True)
+    assert [a.family for a in got.byline.authors] == ["Vega", "Mallen"]
+
+
+def test_one_keyed_line_that_names_no_institution_keys_nothing():
+    inp, tags = _keyed_page(
+        ("doc_title", "Title words"),
+        "Juan Vegaa, Ana Mallenb",
+        ("text", "aAdvanced Modeling Group"),
+        spans=[("TITLE", "Title words"), *_VEGA_MALLEN],
+    )
+    got = assemble(inp, tags, _ones(inp), rules=True)
+    assert [a.family for a in got.byline.authors] == ["Vegaa", "Mallenb"]
