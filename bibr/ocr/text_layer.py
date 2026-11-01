@@ -191,6 +191,7 @@ class TextLayerRead:
     tables_rebuilt: int = 0
     formulas_read: int = 0
     private_use_dropped: int = 0
+    private_use_inside: int = 0
 
 
 @dataclass
@@ -347,6 +348,11 @@ def _drop_private_use(text: str) -> tuple[str, int, int]:
     return "".join(kept), dropped, inside
 
 
+#: A name or reference region with a private-use glyph next to a letter or
+#: digit is rejected (left unread) when True; False drops the glyph and counts it.
+_REJECT_UNSAFE_PRIVATE_USE = True
+
+
 def _accept(region: dict[str, Any]) -> None:
     """Mark *region* as read from the text layer, clearing the native pass's rejection."""
     region["_native_text_used"] = True
@@ -396,15 +402,16 @@ def _fill_region(
     if not text.strip():
         return "empty"
     text, dropped, unsafe = _drop_private_use(text)
-    if unsafe and label in _CITATION_CRITICAL_NATIVE_LABELS:
+    if unsafe and _REJECT_UNSAFE_PRIVATE_USE and label in _CITATION_CRITICAL_NATIVE_LABELS:
         # A private-use glyph inside a word stands for a letter the layer does
         # not name; the name or reference cannot be trusted without it.
         region["_native_gate"] = "private_use"
         return "rejected"
+    region.pop("_private_use_dropped", None)
+    region.pop("_private_use_inside", None)
     if dropped:
         region["_private_use_dropped"] = dropped
-    else:
-        region.pop("_private_use_dropped", None)
+        region["_private_use_inside"] = unsafe
     if not text.strip():
         return "empty"
     is_formula = label in _FORMULA_LABELS or _region_task(region) == "formula"
@@ -536,7 +543,13 @@ def read_text_layer(
             ProcessingWarning(
                 WarningCode.TEXT_LAYER_PRIVATE_USE_DROPPED,
                 f"{result.private_use_dropped} private-use code point(s) (publisher icons or "
-                "unmapped glyphs) were dropped from the PDF text layer",
+                "unmapped glyphs) were dropped from the PDF text layer"
+                + (
+                    f"; {result.private_use_inside} sat next to a letter or digit, where "
+                    "the glyph may have stood for one (a ligature, a minus sign, a degree sign)"
+                    if result.private_use_inside
+                    else ""
+                ),
             )
         )
     return result
@@ -586,6 +599,7 @@ def _read_page(
             if region.get("_formula_source") == "text_layer":
                 result.formulas_read += 1
             result.private_use_dropped += int(region.get("_private_use_dropped") or 0)
+            result.private_use_inside += int(region.get("_private_use_inside") or 0)
         else:
             _blank(region)
             unread_labels[label] += 1
