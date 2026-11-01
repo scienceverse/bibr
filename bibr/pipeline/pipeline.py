@@ -110,8 +110,10 @@ class Pipeline:
         off (:func:`bibr.run_mode.fast_settings`); every other run gets the
         pipeline's own. Deciding it here, from the chunk's ``RunConfig``, lets a
         long-lived pipeline (serve) run fast and full requests side by side.
+        ``no_llm`` is structure only and wins over fast: it never turns the
+        front-matter tagger on, so it never loads or downloads it.
         """
-        if config.mode != "fast":
+        if config.mode != "fast" or config.no_llm:
             return self._settings
         from bibr.run_mode import fast_settings
 

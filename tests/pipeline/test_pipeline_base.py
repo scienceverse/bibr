@@ -140,6 +140,23 @@ async def test_no_llm_alone_keeps_the_pipelines_settings():
 
 
 @pytest.mark.asyncio
+async def test_no_llm_wins_over_fast_and_keeps_the_pipelines_settings():
+    """Structure only never turns the tagger on, so it loads or downloads no model."""
+    stage = _SettingsRecorder()
+    pipeline = _make_pipeline([stage])
+    pipeline.settings.ml.front_tagger_mode = "off"
+
+    await pipeline.process_chunk(
+        [FileState(path=Path("a.pdf"))],
+        progress=NullProgress(),
+        config=RunConfig(mode="fast", no_llm=True),
+    )
+
+    assert stage.seen == [pipeline.settings]
+    assert pipeline.settings.ml.front_tagger_mode == "off"
+
+
+@pytest.mark.asyncio
 async def test_pipeline_runner_cleans_up_when_stage_raises():
     class _RaisingParseStage:
         name = "parse"
