@@ -19,10 +19,14 @@ import re
 import unicodedata
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING
 
 from bibr.export.normalize import license_ids
 from bibr.front_tagger.contract import WORD_RE, TaggerInput
 from bibr.schemas import AuthorLLM, AuthorsLLM, TitleKeywordsLLM
+
+if TYPE_CHECKING:
+    from bibr.models import Affiliation
 
 _NAME_FIELDS = frozenset({"GIVEN", "FAMILY"})
 _LIST_SEPARATORS = frozenset({",", ";", "，", "；", "、"})
@@ -84,6 +88,27 @@ _PUBLISHER_NAMES = frozenset(
         "cambridgeuniversitypress",
     }
 )
+# A word that makes a line of untagged text read as an institution, and the
+# openings that make one read as something else (a note, a date line, a heading).
+_INSTITUTION_RE = re.compile(
+    r"\b(universit\w*|universid\w*|université|universität|uniwersytet|institut\w*|college|"
+    r"school of|faculty|department|dept\.?|centre|center|hospital|laborator\w*|academy|"
+    r"akademi\w*|polytechnic|hochschule|clinic|ministry|observatory|foundation|council|"
+    r"research unit|medical|hemocentro|escola|facultad|facultat|instituto|institution|société|"
+    r"company|ltd|inc\.?|gmbh|llc)\b",
+    re.IGNORECASE,
+)
+_NOT_AFFILIATION_RE = re.compile(
+    r"^(correspond|received|accepted|published|email|e-mail|address|keywords?|abstract|copyright|©|"
+    r"running head|this (article|paper|work)|\*|note|we thank|thanks|acknowledg|author note|"
+    r"declaration|conflict)",
+    re.IGNORECASE,
+)
+# Where an address line, run on after an affiliation, starts ("..., USA; email: ").
+_ADDRESS_CUE_RE = re.compile(r"[;,]?\s*\b(?:e-?mail|correspondence)\b.*$", re.IGNORECASE)
+_MIN_AFFILIATION_LETTERS = 3
+_MAX_UNTAGGED_RUN_WORDS = 30
+_MAX_UNTAGGED_LINE_WORDS = 40
 _MIN_ABSTRACT_WORDS = 40
 _ROMAN_KEY_RE = re.compile(r"[IVX]{1,4}")
 _LETTER_KEY_RE = re.compile(r"[a-h]")
@@ -133,6 +158,36 @@ class TaggedFrontMatter:
     #: "short_abstract") hold back the title/keywords answer, every other
     #: problem the authors answer.
     problems: list[str] = field(default_factory=list)
+    #: Affiliations the tags printed that no author carries: their marks did not
+    #: resolve, several unmarked ones followed the byline, or an author's turn
+    #: came after the list was used up. In print order.
+    unattached_affiliations: list[str] = field(default_factory=list)
+    #: Institution text the tags left out of every field, read from the print only
+    #: where no author carries an affiliation (the rules in
+    #: :func:`_untagged_institutions`). In print order.
+    untagged_affiliations: list[str] = field(default_factory=list)
+
+    def affiliation_rows(self, *, untagged: bool = True) -> list[Affiliation]:
+        """The affiliations no author carries, as rows that name no author.
+
+        For a run with no LLM to parse them: the export lists every author's
+        affiliation already, and these are the printed ones it would miss.
+        ``untagged`` adds the text the tagger left untagged (see
+        :attr:`untagged_affiliations`). Rows that differ only in case, accents
+        or punctuation are one row.
+        """
+        from bibr.extract.research_integrity import affiliation_key
+        from bibr.models import Affiliation
+
+        texts = [*self.unattached_affiliations, *(self.untagged_affiliations if untagged else [])]
+        seen: set[str] = set()
+        rows: list[Affiliation] = []
+        for text in texts:
+            key = affiliation_key(text)
+            if key and key not in seen:
+                seen.add(key)
+                rows.append(Affiliation(text=text))
+        return rows
 
     def _low(self, names: tuple[str, ...], min_confidence: float) -> list[str]:
         return [
@@ -661,9 +716,18 @@ def assemble(
 
     affiliation_by_mark, unmarked_affiliations = _affiliations(spans, inp, tags)
     _unglue_letter_keys(authors, affiliation_by_mark, _printed_letter_keys(inp, tags))
-    _link_affiliations(authors, affiliation_by_mark, unmarked_affiliations, problems)
+    unattached = _link_affiliations(authors, affiliation_by_mark, unmarked_affiliations, problems)
     _assign_loose_emails(authors, spans)
     _flag_corresponding(authors, inp, tags)
+    first_word = {
+        text: span.words[0]
+        for span in reversed(spans)
+        if span.field == "AFFILIATION" and (text := _clean(span.text))
+    }
+    # Initials in brackets, tagged as an affiliation, are no row of the table.
+    unattached = [t for t in unattached if sum(c.isalpha() for c in t) >= _MIN_AFFILIATION_LETTERS]
+    unattached.sort(key=lambda text: first_word.get(text, 0))
+    carried = any(_fold(a.affiliation) for a in authors)
 
     author_rows = [
         AuthorLLM(
@@ -681,6 +745,8 @@ def assemble(
         byline=AuthorsLLM(authors=author_rows),
         confidence=confidence,
         problems=problems,
+        unattached_affiliations=unattached,
+        untagged_affiliations=[] if carried else _untagged_institutions(inp, tags),
     )
 
 
@@ -716,9 +782,12 @@ def _link_affiliations(
     by_mark: dict[str, str],
     unmarked: list[tuple[int, str]],
     problems: list[str],
-) -> None:
+) -> list[str]:
+    """Give each author their affiliations; return the tagged ones no author took."""
+    tagged = list(dict.fromkeys([*by_mark.values(), *(text for _, text in unmarked)]))
     if not authors:
-        return
+        return tagged
+    taken: set[str] = set()
     if by_mark:
         for author in authors:
             texts: list[str] = []
@@ -733,24 +802,87 @@ def _link_affiliations(
                 if text not in texts:
                     texts.append(text)
             author.affiliation = "; ".join(texts)
-        return
+            taken.update(texts)
+        return [text for text in tagged if text not in taken]
     if not unmarked:
-        return
+        return []
     if len(unmarked) == 1:
         for author in authors:
             author.affiliation = unmarked[0][1]
-        return
+        return []
     # Several unmarked affiliations: link each to the authors printed between
     # it and the previous one ("Name / Institution / Name / Institution").
     starts = [start for start, _ in unmarked]
     if all(start > authors[-1].last_word for start in starts):
         problems.append("affiliations_unlinked")
-        return
+        return tagged
     for author in authors:
         following = [text for start, text in unmarked if start > author.last_word]
         author.affiliation = following[0] if following else ""
+        taken.add(author.affiliation)
     if any(not a.affiliation for a in authors):
         problems.append("affiliations_unlinked")
+    return [text for text in tagged if text not in taken]
+
+
+def _untagged_institutions(inp: TaggerInput, tags) -> list[str]:
+    """Institution text the tagger left out of every field, before the abstract.
+
+    Two rules, for a paper in which no author took an affiliation:
+
+    * a run of untagged words after a family name, in the byline's region
+      ("Arnold K. Ho University of Michigan"), when it names an institution;
+    * a region with no tagged word at all, of text, heading or header kind,
+      that names an institution and does not open as a note ("Received ...").
+    """
+    words = inp.words
+    by_region: dict[int, list[int]] = {}
+    for i, word in enumerate(words):
+        by_region.setdefault(word.region, []).append(i)
+
+    def printed(indices: list[int]) -> str:
+        """The words as printed: each run of adjacent words as one slice of the input."""
+        runs: list[list[int]] = []
+        for i in indices:
+            if runs and i == runs[-1][-1] + 1:
+                runs[-1].append(i)
+            else:
+                runs.append([i])
+        text = " ".join(inp.text[words[run[0]].start : words[run[-1]].end] for run in runs)
+        return _ADDRESS_CUE_RE.sub("", re.sub(r"\s+", " ", text)).strip(" ,;·•*")
+
+    found: list[str] = []
+    for region, indices in by_region.items():
+        fields = [_field(tags[i]) for i in indices]
+        if "ABSTRACT" in fields:
+            break
+        if any(f in _NAME_FIELDS for f in fields):
+            at = 0
+            while at < len(indices):
+                if fields[at] != "FAMILY":
+                    at += 1
+                    continue
+                end = at + 1
+                while end < len(indices) and fields[end] in (None, "AUTHOR_MARK", "AFF_MARK"):
+                    end += 1
+                run = [indices[n] for n in range(at + 1, end) if fields[n] is None]
+                text = printed(run)
+                if 2 <= len(run) <= _MAX_UNTAGGED_RUN_WORDS and _INSTITUTION_RE.search(text):
+                    found.append(text)
+                at = end
+        elif all(f is None for f in fields) and inp.regions[region].label in (
+            "text",
+            "paragraph_title",
+            "header",
+        ):
+            text = printed(indices)
+            if (
+                2 <= len(indices) <= _MAX_UNTAGGED_LINE_WORDS
+                and _INSTITUTION_RE.search(text)
+                and not _NOT_AFFILIATION_RE.match(text)
+            ):
+                found.append(text)
+    return list(dict.fromkeys(found))
 
 
 def _fold(text: str) -> str:

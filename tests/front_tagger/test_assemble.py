@@ -224,6 +224,205 @@ def test_unmarked_affiliations_after_the_byline_are_ambiguous():
     assert "affiliations_unlinked" in got.problems
 
 
+def test_affiliations_no_author_carries_are_returned_in_print_order():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Ann Lee, Bo Kim"),
+        ("text", "Univ A"),
+        ("text", "Univ B"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Ann"),
+        ("FAMILY", "Lee"),
+        ("GIVEN", "Bo"),
+        ("FAMILY", "Kim"),
+        ("AFFILIATION", "Univ A"),
+        ("AFFILIATION", "Univ B"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags))
+    assert [a.affiliation for a in got.byline.authors] == ["", ""]
+    assert got.unattached_affiliations == ["Univ A", "Univ B"]
+    rows = got.affiliation_rows()
+    assert [(r.text, r.author_ids, r.institution) for r in rows] == [
+        ("Univ A", [], None),
+        ("Univ B", [], None),
+    ]
+
+
+def test_an_affiliation_whose_mark_no_author_prints_is_returned():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Ann Lee1, Bo Kim1"),
+        ("text", "1 Univ A"),
+        ("text", "2 Univ B"),
+        ("text", "Univ C"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Ann"),
+        ("FAMILY", "Lee"),
+        ("AUTHOR_MARK", "1"),
+        ("GIVEN", "Bo"),
+        ("FAMILY", "Kim"),
+        ("AUTHOR_MARK", "1"),
+        ("AFF_MARK", "1"),
+        ("AFFILIATION", "Univ A"),
+        ("AFF_MARK", "2"),
+        ("AFFILIATION", "Univ B"),
+        ("AFFILIATION", "Univ C"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags))
+    assert [a.affiliation for a in got.byline.authors] == ["Univ A", "Univ A"]
+    assert got.unattached_affiliations == ["Univ B", "Univ C"]
+
+
+def test_a_second_unmarked_affiliation_after_an_author_is_returned():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Ann Lee"),
+        ("text", "Univ A"),
+        ("text", "Univ B"),
+        ("text", "Bo Kim"),
+        ("text", "Univ C"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Ann"),
+        ("FAMILY", "Lee"),
+        ("AFFILIATION", "Univ A"),
+        ("AFFILIATION", "Univ B"),
+        ("GIVEN", "Bo"),
+        ("FAMILY", "Kim"),
+        ("AFFILIATION", "Univ C"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags))
+    assert [a.affiliation for a in got.byline.authors] == ["Univ A", "Univ C"]
+    assert got.unattached_affiliations == ["Univ B"]
+
+
+def test_nothing_is_returned_when_every_affiliation_is_linked():
+    inp = _page()
+    got = assemble(inp, _tags(inp), _ones(inp))
+    assert got.unattached_affiliations == []
+    assert got.untagged_affiliations == []
+    assert got.affiliation_rows() == []
+
+
+def test_initials_tagged_as_an_affiliation_are_not_returned():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Ann Lee, Bo Kim"),
+        ("text", "Univ A"),
+        ("text", "Univ B"),
+        ("text", "(J.P.)"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Ann"),
+        ("FAMILY", "Lee"),
+        ("GIVEN", "Bo"),
+        ("FAMILY", "Kim"),
+        ("AFFILIATION", "Univ A"),
+        ("AFFILIATION", "Univ B"),
+        ("AFFILIATION", "(J.P.)"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags))
+    assert got.unattached_affiliations == ["Univ A", "Univ B"]
+
+
+def test_affiliation_rows_merge_variants_and_can_leave_untagged_text_out():
+    from bibr.front_tagger.assemble import TaggedFrontMatter
+
+    got = TaggedFrontMatter(
+        title_keywords=None,
+        byline=None,
+        unattached_affiliations=["Université de Lyon, France", "Univ A"],
+        untagged_affiliations=["UNIVERSITE DE LYON FRANCE.", "Univ B"],
+    )
+    assert [r.text for r in got.affiliation_rows()] == [
+        "Université de Lyon, France",
+        "Univ A",
+        "Univ B",
+    ]
+    assert [r.text for r in got.affiliation_rows(untagged=False)] == [
+        "Université de Lyon, France",
+        "Univ A",
+    ]
+
+
+def test_an_institution_run_after_a_family_name_is_read_when_no_author_has_one():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Ann Lee University of Michigan, USA; email: ann@umich.example"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Ann"),
+        ("FAMILY", "Lee"),
+        ("EMAIL", "ann@umich.example"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags))
+    assert got.untagged_affiliations == ["University of Michigan, USA"]
+    assert got.unattached_affiliations == []
+    assert [r.text for r in got.affiliation_rows()] == ["University of Michigan, USA"]
+    assert got.affiliation_rows(untagged=False) == []
+
+
+def test_an_untagged_institution_line_is_read_before_the_abstract_only():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Ann Lee, Bo Kim"),
+        ("text", "Department of Physics, Univ of Oslo"),
+        ("text", "Received 3 May 2020, accepted at University of Bergen"),
+        ("text", "Correspondence to the Institute of Law"),
+        ("abstract", "A short abstract."),
+        ("text", "School of Law, Univ X"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Ann"),
+        ("FAMILY", "Lee"),
+        ("GIVEN", "Bo"),
+        ("FAMILY", "Kim"),
+        ("ABSTRACT", "A short abstract."),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags))
+    # The notes open as notes, and the line past the abstract is not front matter.
+    assert got.untagged_affiliations == ["Department of Physics, Univ of Oslo"]
+
+
+def test_untagged_institutions_are_not_read_where_an_author_has_an_affiliation():
+    inp = _page()
+    tags = _tags(inp)
+    got = assemble(inp, tags, _ones(inp))
+    assert got.byline.authors[0].affiliation
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Ann Lee1"),
+        ("text", "1 Univ A"),
+        ("text", "School of Law, Univ X"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Ann"),
+        ("FAMILY", "Lee"),
+        ("AUTHOR_MARK", "1"),
+        ("AFF_MARK", "1"),
+        ("AFFILIATION", "Univ A"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags))
+    assert [a.affiliation for a in got.byline.authors] == ["Univ A"]
+    assert got.untagged_affiliations == []
+
+
 def test_parallel_abstracts_and_titles_keep_the_first_printed():
     inp = tagger_input(
         ("doc_title", "Título en español"),
