@@ -51,6 +51,10 @@ _OTHER_OBJECTS = {
     ("extract/footnote_citations.py", "ref.authors"),
     # The model's response, before any candidate is built from it.
     ("extract/core_metadata.py", "llm_metadata.model_copy"),
+    # The front-matter tagger's answer, which stands in for that response: a
+    # later window's abstract replaces the missing one before the extractor
+    # builds any candidate from it.
+    ("front_tagger/runtime.py", "result.title_keywords.model_copy"),
     # PaperMetadata's own copy, which drops the receipts of the fields an
     # update rewrites.
     ("models.py", "super().model_copy"),
