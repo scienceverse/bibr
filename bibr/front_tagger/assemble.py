@@ -152,6 +152,8 @@ _LETTER_KEY_RE = re.compile(r"[a-h]")
 # A letter key glued to the next word of an affiliation line ("aComputational").
 _KEYED_WORD_RE = re.compile(r"[a-h][A-Z][a-z]{3,}")
 _MAX_GLUED_LETTERS = 3
+# Letters a family name keeps once a run of keys is taken off its end.
+_MIN_RUN_NAME_LETTERS = 4
 # Lines keyed by a glued letter that stand for each other: two, with distinct letters.
 _MIN_KEYED_LINES = 2
 # A lower-case run followed by a capitalised one: two of them in one word
@@ -629,7 +631,7 @@ def _unglue_letter_keys(
     "LIMAII" is "LIMA" keyed "II". With ``runs``, a list of letter keys
     ("a,b") glues on as a run, taken from the end while the letters rise and
     the name keeps four letters or more, at most three: "Riosab" is "Rios"
-    keyed "a" and "b", and "Costaa" only loses its last "a".
+    keyed "a" and "b", "Sarab" only loses its "b", and "Costaa" its last "a".
 
     ``printed_letters`` are letter keys the print shows that no affiliation
     was tagged behind (see :func:`_printed_letter_keys`).
@@ -650,7 +652,7 @@ def _unglue_letter_keys(
             runs
             and len(key) == 1
             and len(keys) < _MAX_GLUED_LETTERS
-            and len(stem) >= 4
+            and len(stem) > _MIN_RUN_NAME_LETTERS
             and stem[-1] in letters
             and stem[-1] < keys[0]
             and stem[-2].isalpha()

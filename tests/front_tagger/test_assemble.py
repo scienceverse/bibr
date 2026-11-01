@@ -1211,3 +1211,28 @@ def test_affiliations_on_the_second_page_after_a_cover_sheet_are_read():
     tags = label(inp, ("TITLE", "Prevalence of handedness"), *_BYLINE)
     got = assemble(inp, tags, _ones(inp), rules=True)
     assert got.untagged_affiliations == ["Department of Psychology, Yale University"]
+
+
+def test_a_run_of_keys_leaves_a_family_name_four_letters():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Ali Sarab, Juan Riosab"),
+        ("text", "a Univ A"),
+        ("text", "b Univ B"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Ali"),
+        ("FAMILY", "Sarab"),
+        ("GIVEN", "Juan"),
+        ("FAMILY", "Riosab"),
+        ("AFF_MARK", "a"),
+        ("AFFILIATION", "Univ A"),
+        ("AFF_MARK", "b"),
+        ("AFFILIATION", "Univ B"),
+    )
+    got = assemble(inp, tags, _ones(inp), rules=True)
+    rows = [(a.family, a.affiliation) for a in got.byline.authors]
+    # "Sarab" would be "Sar" keyed "a" and "b"; only the "b" goes, as for a single key.
+    assert rows == [("Sara", "Univ B"), ("Rios", "Univ A; Univ B")]
