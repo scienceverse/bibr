@@ -331,8 +331,10 @@ def _drop_private_use(text: str) -> tuple[str, int, int]:
 
     Publisher fonts put icons (an ORCID badge, an e-mail or affiliation
     mark) and unmapped glyphs in the private-use area. They carry no text.
-    One followed directly by a letter or digit may be a glyph standing for a
-    letter of that word, so it is counted separately as *inside a word*.
+    One followed directly by a letter or digit may stand for a letter of that
+    word (a ligature) or for a sign before a number (a minus), so it is counted
+    separately as *inside a word*: the text may have changed there. Rejecting
+    the region instead loses whole paragraphs and reference lists for a few glyphs.
     """
     if not any(unicodedata.category(ch) == "Co" for ch in text):
         return text, 0, 0
@@ -346,11 +348,6 @@ def _drop_private_use(text: str) -> tuple[str, int, int]:
         if index + 1 < len(text) and text[index + 1].isalnum():
             inside += 1
     return "".join(kept), dropped, inside
-
-
-#: A name or reference region with a private-use glyph next to a letter or
-#: digit is rejected (left unread) when True; False drops the glyph and counts it.
-_REJECT_UNSAFE_PRIVATE_USE = True
 
 
 def _accept(region: dict[str, Any]) -> None:
@@ -371,11 +368,7 @@ def _fill_region(
 ) -> str:
     """Fill one region from the text layer: "filled", "rejected" or "empty"."""
     from bibr.input.consolidate_text import fix_ocr_artifacts
-    from bibr.ocr.native_text import (
-        _CITATION_CRITICAL_NATIVE_LABELS,
-        _SHORT_NATIVE_TEXT_MIN_CHARS,
-        _is_native_text_usable,
-    )
+    from bibr.ocr.native_text import _SHORT_NATIVE_TEXT_MIN_CHARS, _is_native_text_usable
     from bibr.ocr.text_layer_tables import build_table_html
 
     label = str(region.get("label") or "")
@@ -401,17 +394,12 @@ def _fill_region(
         text = fix_ocr_artifacts(text)
     if not text.strip():
         return "empty"
-    text, dropped, unsafe = _drop_private_use(text)
-    if unsafe and _REJECT_UNSAFE_PRIVATE_USE and label in _CITATION_CRITICAL_NATIVE_LABELS:
-        # A private-use glyph inside a word stands for a letter the layer does
-        # not name; the name or reference cannot be trusted without it.
-        region["_native_gate"] = "private_use"
-        return "rejected"
+    text, dropped, inside = _drop_private_use(text)
     region.pop("_private_use_dropped", None)
     region.pop("_private_use_inside", None)
     if dropped:
         region["_private_use_dropped"] = dropped
-        region["_private_use_inside"] = unsafe
+        region["_private_use_inside"] = inside
     if not text.strip():
         return "empty"
     is_formula = label in _FORMULA_LABELS or _region_task(region) == "formula"

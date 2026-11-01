@@ -6,8 +6,6 @@ the layouts are synthetic region boxes: no layout model, no OCR model.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 from bibr.ocr import registry
@@ -629,20 +627,16 @@ def test_private_use_code_points_are_dropped_and_counted(monkeypatch):
     assert region["_private_use_dropped"] == 3
 
 
-def test_private_use_code_point_inside_a_word_rejects_a_citation_critical_region(monkeypatch):
+def test_private_use_code_point_inside_a_word_is_dropped_and_counted_separately(monkeypatch):
     from bibr.ocr import text_layer
 
     monkeypatch.setattr(text_layer, "_read_text", lambda page, bbox: "Ren\ue0a1e Smith, University")
     region = _region("text", [0, 0, 1000, 1000])
-    assert text_layer._fill_region(object(), region, min_printable_ratio=0.85) == "rejected"
-    assert region["_native_gate"] == "private_use"
 
-    # A caption is not read for names or references; the glyph is dropped and counted.
-    caption = _region("figure_title", [0, 0, 1000, 1000])
-    page = SimpleNamespace(lines=[])
-    assert text_layer._fill_region(page, caption, min_printable_ratio=0.85) == "filled"
-    assert caption["content"] == "Rene Smith, University"
-    assert caption["_private_use_dropped"] == 1
+    assert text_layer._fill_region(object(), region, min_printable_ratio=0.85) == "filled"
+    assert region["content"] == "Rene Smith, University"
+    assert (region["_private_use_dropped"], region["_private_use_inside"]) == (1, 1)
+    assert region.get("_native_gate") is None
 
 
 def test_drop_private_use_counts_the_ones_inside_a_word():
