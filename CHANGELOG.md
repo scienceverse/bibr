@@ -21,6 +21,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   papers and 86 psychology and social-science papers the threshold was chosen
   on, accuracy rises by 2.4 and 2.9 points. Qwen3.8-27B answered the
   escalations in these runs.
+- A paper that prints its abstract in more than one language now gets the
+  version printed first, even when a later version is in English. The
+  front-matter prompts used to ask for the printed English version; the title,
+  the byline and the keywords already kept the version printed first, and the
+  abstract now follows the same rule, in the prompts and in the front-matter
+  tagger. Re-extracting a paper that prints a non-English abstract before an
+  English one changes its `abstract` field.
 
 ## [0.8.0] - 2026-10-30
 

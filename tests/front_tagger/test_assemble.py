@@ -224,7 +224,7 @@ def test_unmarked_affiliations_after_the_byline_are_ambiguous():
     assert "affiliations_unlinked" in got.problems
 
 
-def test_parallel_abstracts_prefer_english_and_titles_the_first_printed():
+def test_parallel_abstracts_and_titles_keep_the_first_printed():
     inp = tagger_input(
         ("doc_title", "Título en español"),
         ("doc_title", "Title in English"),
@@ -246,7 +246,7 @@ def test_parallel_abstracts_prefer_english_and_titles_the_first_printed():
     # untagged, so the model learns to tag the printed-first version only.
     got = assemble(inp, tags, [1.0] * len(tags))
     assert got.title_keywords.title == "Título en español"
-    assert got.title_keywords.abstract == "We studied the hand in families."
+    assert got.title_keywords.abstract == "Estudiamos la mano en familias."
 
 
 def test_title_split_across_regions_and_subtitle():

@@ -5,8 +5,8 @@ back as printed text (character offsets into the tagger input, so nothing is
 retyped) and builds the :class:`~bibr.schemas.TitleKeywordsLLM` and
 :class:`~bibr.schemas.AuthorsLLM` the two LLM calls would have returned. The
 rules mirror the prompts' (``bibr/clients/prompts.py``): the title printed
-first, the English abstract when parallel ones are printed, given/family as
-printed, affiliations resolved through their marks and joined with "; ".
+first, the abstract printed first when parallel ones are printed, given/family
+as printed, affiliations resolved through their marks and joined with "; ".
 
 Anything the tags leave undecided is reported in
 :attr:`TaggedFrontMatter.problems`; with a problem, or a field below the
@@ -69,10 +69,6 @@ _ROMAN_KEY_RE = re.compile(r"[IVX]{1,4}")
 # ("AnxietyinCollegeStudents") are words a text layer printed without spaces.
 # Short pieces are acronyms and brand names ("CoViD", "ConvNeXt").
 _CASE_JOIN_RE = re.compile(r"[a-z]{3}(?=[A-Z][a-z]{2})")
-_ENGLISH_WORDS = frozenset(
-    {"the", "of", "and", "in", "to", "a", "is", "was", "we", "for", "with", "that", "this"}
-    | {"are", "were", "on", "by", "as", "from"}
-)
 
 
 @dataclass(frozen=True)
@@ -277,11 +273,6 @@ def _published(printed: str | None) -> str | None:
     return None
 
 
-def _englishness(text: str) -> float:
-    words = re.findall(r"[a-z]+", text.lower())
-    return sum(w in _ENGLISH_WORDS for w in words) / len(words) if words else 0.0
-
-
 def _title_text_problems(inp: TaggerInput, tags, first_word: int, last_word: int) -> list[str]:
     """What makes the printed title unsafe to copy as is.
 
@@ -347,11 +338,11 @@ def _title(spans: list[Span], tags, inp: TaggerInput, conf) -> tuple[str | None,
 
 
 def _abstract(spans: list[Span], tags, inp: TaggerInput, conf) -> tuple[str | None, float | None]:
+    """The abstract printed first; parallel-language versions are not joined."""
     groups = _clusters(spans, tags, inp, "ABSTRACT")
     if not groups:
         return None, None
-    english = [g for g in groups if _englishness(_joined(g)) >= 0.08]
-    group = (english or groups)[0]
+    group = groups[0]
     words = [i for span in group for i in span.words]
     return _joined(group), sum(conf[i] for i in words) / len(words)
 
