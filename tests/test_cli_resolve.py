@@ -686,40 +686,71 @@ def test_the_ocr_backend_setting_counts_as_choosing_the_route(keyless):
     assert _resolve("paper.pdf").ocr_requested is True
 
 
-def test_fast_without_a_chosen_ocr_route_may_not_bootstrap_vllm(keyless):
+def test_the_ocr_model_and_profile_flags_count_as_choosing_the_route(keyless):
+    assert _resolve(
+        "paper.pdf", "--ocr-model", "glm/some-model", "--ocr-profile", "glm"
+    ).ocr_requested
+    assert _resolve("paper.pdf", "--ocr-profile", "paddle").ocr_requested is True
+
+
+def test_fast_without_a_chosen_ocr_route_reads_the_text_layer(keyless):
     config = _resolve("paper.pdf")
+
     assert config.mode == "fast"
-    assert config.vllm_bootstrap is False
-
-
-def test_fast_with_a_chosen_ocr_route_may_bootstrap_vllm(keyless):
-    assert _resolve("paper.pdf", "--ocr", "paddle").vllm_bootstrap is True
-
-
-def test_a_full_run_may_always_bootstrap_vllm(keyed):
-    assert _resolve("paper.pdf").vllm_bootstrap is True
+    assert config.ocr_backend == "text-layer"
+    assert config.ocr_summary_backend == "text-layer"
+    assert config.ocr_summary_model == "pdf-text-layer"
 
 
 @pytest.mark.parametrize(
-    ("argv", "bootstrap"),
-    [((), False), (("--ocr", "paddle"), True), (("--full",), True)],
+    "argv",
+    [
+        ("--ocr", "paddle"),
+        ("--ocr", "glm-llama"),
+        ("--ocr", "anthropic"),
+        ("--ocr-url", "http://host:8080"),
+        ("--ocr-model", "glm/some-model", "--ocr-profile", "glm"),
+    ],
 )
-def test_the_summary_chain_is_resolved_with_the_bootstrap_rule(
-    keyless, monkeypatch, argv, bootstrap
-):
+def test_fast_with_a_chosen_ocr_route_keeps_that_route(keyless, argv):
+    config = _resolve("paper.pdf", *argv)
+
+    assert config.mode == "fast"
+    assert config.ocr_backend != "text-layer"
+
+
+def test_fast_reads_the_text_layer_whatever_the_gpu(keyless, monkeypatch):
+    """A card that could run PaddleOCR-VL does not change the route nobody chose."""
     from bibr.ocr import registry
 
-    seen = []
-    real = registry.resolve_backend_candidates
+    monkeypatch.setattr(registry.sys, "platform", "linux")
+    monkeypatch.setattr(registry.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: 24.0)
+    monkeypatch.setattr(registry, "_nvidia_compute_capability", lambda: 8.9)
 
-    def spy(*args, **kwargs):
-        seen.append(kwargs.get("vllm_bootstrap", True))
-        return real(*args, **kwargs)
+    assert _resolve("paper.pdf").ocr_backend == "text-layer"
+    assert _resolve("paper.pdf", "--ocr", "paddle").ocr_summary_backend == "paddle-vllm"
 
-    monkeypatch.setattr(registry, "resolve_backend_candidates", spy)
-    _resolve("paper.pdf", *argv)
 
-    assert seen == [bootstrap]
+def test_the_ocr_backend_setting_keeps_a_fast_run_off_the_text_layer(keyless):
+    keyless.ocr.backend = "paddle"
+    keyless.ocr.model_fields_set.add("backend")
+
+    assert _resolve("paper.pdf").ocr_backend == "paddle"
+
+
+def test_a_full_run_keeps_the_automatic_chain(keyed):
+    config = _resolve("paper.pdf")
+
+    assert config.mode == "full"
+    assert config.ocr_backend == "paddle"
+
+
+def test_a_structure_only_run_keeps_the_automatic_chain(keyless):
+    config = _resolve("paper.pdf", "--no-llm")
+
+    assert config.mode == "full"
+    assert config.ocr_backend == "paddle"
 
 
 def test_the_summary_names_the_first_concrete_ocr_backend(monkeypatch, keyless):

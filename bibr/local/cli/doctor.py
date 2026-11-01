@@ -133,7 +133,7 @@ _VISION_OCR_KEY_HINTS = {
 
 
 def _check_ocr_backend(
-    ok, warn, fail, *, llm_backend: str | None = None, vllm_bootstrap: bool = True
+    ok, warn, fail, *, llm_backend: str | None = None, text_layer: bool = False
 ) -> None:
     """Probe whether the configured OCR backend is importable and instantiable.
 
@@ -142,23 +142,25 @@ def _check_ocr_backend(
     discover ``vllm-mlx not installed`` halfway through their first run.
     ``llm_backend`` is the configured LLM backend as chew resolves it: the
     automatic ``paddle`` chain leaves paddle-vllm out beside a llama.cpp LLM;
-    ``vllm_bootstrap`` is false for a fast run that did not choose the OCR route,
-    which leaves it out while vLLM is not installed.
+    ``text_layer`` is true for a fast run that did not choose an OCR route, which
+    reads the PDF text layer whatever ``OCR_BACKEND`` would otherwise resolve to.
     """
     import importlib.util
+
+    from bibr.ocr.registry import SCAN_NEEDS_OCR_ROUTES, TEXT_LAYER_BACKEND
 
     try:
         from bibr.config import Settings
 
-        backend = Settings.ocr.backend
+        backend = TEXT_LAYER_BACKEND if text_layer else Settings.ocr.backend
     except Exception as e:  # noqa: BLE001
         fail(f"OCR config: {e}")
         return
 
-    if backend == "text-layer":
+    if backend == TEXT_LAYER_BACKEND:
         ok(
             "OCR backend: text-layer — no OCR model; born-digital PDFs are read from their "
-            "embedded text layer, scanned PDFs fail"
+            f"embedded text layer. A scanned PDF needs {SCAN_NEEDS_OCR_ROUTES}"
         )
         return
     # OCR_FALLBACK_TO_TEXT_LAYER=auto: an automatic chain that cannot start here
@@ -217,12 +219,10 @@ def _check_ocr_backend(
     # A one-candidate chain (Windows, and Linux without a GPU that fits
     # paddle-vllm, where it is glm-llama alone) is checked as that backend
     # below, which looks for llama.cpp exactly as chew's preflight does.
-    from bibr.ocr.registry import bootstrap_kwargs, resolve_backend_candidates
+    from bibr.ocr.registry import resolve_backend_candidates
 
     candidates = (
-        resolve_backend_candidates(
-            backend, Settings, llm_backend=llm_backend, **bootstrap_kwargs(vllm_bootstrap)
-        )
+        resolve_backend_candidates(backend, Settings, llm_backend=llm_backend)
         if backend == "paddle"
         else ()
     )
@@ -230,9 +230,7 @@ def _check_ocr_backend(
         from bibr.local.cli.run_config import _ocr_runtime_blocker
 
         # chew refuses the run when no candidate can start; so does doctor.
-        blocker = _ocr_runtime_blocker(
-            backend, llm_backend=llm_backend, **bootstrap_kwargs(vllm_bootstrap)
-        )
+        blocker = _ocr_runtime_blocker(backend, llm_backend=llm_backend)
         if blocker is not None:
             if fallback_auto:
                 warn(
@@ -933,16 +931,17 @@ def _run_doctor() -> None:
     # --- OCR (needs Settings) -------------------------------------------------
     if config_ok:
         ui.section(console, "OCR")
-        # A fast run starts no LLM server, so its OCR chain is the cloud one; it
-        # bootstraps vLLM only when OCR_BACKEND names the route.
+        # A fast run starts no LLM server, so its OCR chain is the cloud one, and
+        # with no OCR route chosen it reads the PDF text layer.
+        from bibr.ocr.registry import ocr_route_chosen
+
         fast = mode == "fast"
-        bootstrap = not fast or "backend" in settings.ocr.model_fields_set
         _check_ocr_backend(
             ok,
             warn,
             fail,
             llm_backend="cloud" if fast else llm_backend,
-            **({} if bootstrap else {"vllm_bootstrap": False}),
+            text_layer=fast and not ocr_route_chosen(settings),
         )
 
     # --- Pipeline -------------------------------------------------------------

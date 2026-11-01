@@ -630,44 +630,63 @@ class TestLocalPipelineMode:
         assert pipe.llm_usage_snapshot() == {}
 
 
-class TestLocalPipelineVllmOptIn:
-    """A fast run starts the multi-GB vLLM bootstrap only for an OCR route the caller chose."""
+class TestLocalPipelineOcrRoute:
+    """A fast run reads the PDF text layer unless the caller chose an OCR route."""
 
-    def _bootstrap(self, pipe) -> bool:
-        return pipe._resources._vllm_bootstrap
+    def _route(self, pipe) -> str:
+        assert pipe._resources.ocr_backend == pipe.ocr_backend
+        return pipe.ocr_backend
 
-    def test_fast_without_an_ocr_choice_refuses_the_bootstrap(self, keyless_settings):
-        assert self._bootstrap(LocalPipeline(mode="fast", settings=keyless_settings)) is False
+    def test_fast_without_an_ocr_choice_reads_the_text_layer(self, keyless_settings):
+        assert self._route(LocalPipeline(mode="fast", settings=keyless_settings)) == "text-layer"
 
     @pytest.mark.parametrize(
-        "kwargs",
+        ("kwargs", "backend"),
         [
-            {"ocr_backend": "paddle"},
-            {"ocr_url": "http://127.0.0.1:8118"},
-            {"ocr_requested": True},
+            ({"ocr_backend": "paddle"}, "paddle"),
+            ({"ocr_backend": "glm-llama"}, "glm-llama"),
+            ({"ocr_url": "http://127.0.0.1:8118"}, "paddle-http"),
+            ({"ocr_requested": True}, "paddle"),
+            ({"ocr_profile": "glm"}, "paddle"),
         ],
+        ids=["paddle", "glm-llama", "server-url", "caller-says-so", "profile"],
     )
-    def test_fast_with_an_ocr_choice_allows_it(self, keyless_settings, kwargs):
+    def test_fast_with_an_ocr_choice_keeps_that_route(self, keyless_settings, kwargs, backend):
         pipe = LocalPipeline(mode="fast", settings=keyless_settings, **kwargs)
-        assert self._bootstrap(pipe) is True
+        assert self._route(pipe) == backend
 
-    def test_fast_with_ocr_backend_set_in_the_environment_allows_it(self, monkeypatch):
+    @pytest.mark.parametrize(
+        ("variable", "value", "backend"),
+        [("OCR_BACKEND", "paddle", "paddle"), ("OCR_PROFILE", "glm", "paddle")],
+    )
+    def test_fast_with_an_ocr_route_set_in_the_environment_keeps_it(
+        self, monkeypatch, variable, value, backend
+    ):
         from bibr.config import GlobalSettings
 
         for var in _RUN_MODE_ENV:
             monkeypatch.delenv(var, raising=False)
-        monkeypatch.setenv("OCR_BACKEND", "paddle")
+        monkeypatch.setenv(variable, value)
         pipe = LocalPipeline(mode="fast", settings=GlobalSettings())
-        assert self._bootstrap(pipe) is True
+        assert self._route(pipe) == backend
 
     def test_the_caller_can_say_no_even_when_a_backend_is_named(self, keyless_settings):
         pipe = LocalPipeline(
             mode="fast", ocr_backend="paddle", ocr_requested=False, settings=keyless_settings
         )
-        assert self._bootstrap(pipe) is False
+        assert self._route(pipe) == "text-layer"
 
-    def test_full_always_allows_it(self, keyed_settings):
-        assert self._bootstrap(LocalPipeline(mode="full", settings=keyed_settings)) is True
+    def test_auto_with_no_llm_is_a_fast_run_and_reads_the_text_layer(self, keyless_settings):
+        assert self._route(LocalPipeline(settings=keyless_settings)) == "text-layer"
 
-    def test_no_llm_is_a_full_run_and_allows_it(self, keyless_settings):
-        assert self._bootstrap(LocalPipeline(no_llm=True, settings=keyless_settings)) is True
+    def test_full_keeps_the_automatic_chain(self, keyed_settings):
+        assert self._route(LocalPipeline(mode="full", settings=keyed_settings)) == "paddle"
+
+    def test_no_llm_is_a_full_run_and_keeps_the_automatic_chain(self, keyless_settings):
+        assert self._route(LocalPipeline(no_llm=True, settings=keyless_settings)) == "paddle"
+
+    def test_the_text_layer_route_leaves_the_gpu_to_the_classifiers(self, keyless_settings):
+        """No managed OCR server starts, so no share of the card is held back for one."""
+        from bibr.local.pipeline import _managed_gpu_fraction
+
+        assert _managed_gpu_fraction("cloud", "text-layer", keyless_settings) == 0.0

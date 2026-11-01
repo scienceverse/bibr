@@ -313,19 +313,30 @@ async def test_chew_dry_run_shows_the_text_layer_plan(tmp_path, monkeypatch, cap
     assert printed.count("OCR_FALLBACK_TO_TEXT_LAYER=auto") == 1
 
 
-def test_batch_falls_back_and_warns_once(monkeypatch, capsys, auto, tmp_path):
+@pytest.mark.parametrize(
+    ("ocr_args", "handed_over"),
+    [([], None), (["--ocr", "paddle"], "paddle")],
+    ids=["no-route-chosen", "paddle-chosen"],
+)
+def test_batch_falls_back_and_warns_once(
+    monkeypatch, capsys, auto, tmp_path, ocr_args, handed_over
+):
     from rich.console import Console
 
     from bibr.local.cli.batch import _local_options
 
     monkeypatch.setattr("bibr.local.cli._opencv_unavailable_reason", lambda: None)
     monkeypatch.setattr("bibr.local.cli.run_config._preflight_ocr_runtime", _blocked)
-    args = _build_parser().parse_args(["batch", str(tmp_path), "--out", "out", "--no-llm"])
+    args = _build_parser().parse_args(
+        ["batch", str(tmp_path), "--out", "out", "--no-llm", *ocr_args]
+    )
     console = Console(stderr=True)
 
     options = _local_options(args, console)
 
-    assert options.chew_options["ocr_backend"] == "paddle"
+    # The pipeline gets the automatic backend (unset, or named): it falls back
+    # itself and marks each export, as a library run does.
+    assert options.chew_options["ocr_backend"] == handed_over
     assert any(line.startswith("ocr text-layer") for line in options.summary)
     pdfs = [tmp_path / "a.pdf"]
     assert options.preflight([tmp_path / "a.docx"]) is None
@@ -361,7 +372,26 @@ def test_doctor_passes_the_text_layer_backend(monkeypatch):
 
     [(kind, message, _)] = rec.calls
     assert kind == "ok"
-    assert "text-layer" in message and "scanned PDFs fail" in message
+    assert "text-layer" in message and "A scanned PDF needs an OCR route" in message
+    assert "--ocr anthropic" in message and "try.bibr.org" in message
+
+
+def test_doctor_reports_the_text_layer_for_a_fast_run_that_chose_no_route(monkeypatch):
+    """Whatever OCR_BACKEND would resolve to here, a fast run with none set reads the text layer."""
+    from bibr.local.cli import _check_ocr_backend
+
+    monkeypatch.setattr(Settings.ocr, "backend", "paddle")
+    monkeypatch.setattr(
+        "bibr.ocr.registry.resolve_backend_candidates",
+        lambda *a, **k: pytest.fail("no OCR chain is resolved for the text layer"),
+    )
+    rec = _Recorder()
+
+    _check_ocr_backend(rec.ok, rec.warn, rec.fail, text_layer=True)
+
+    [(kind, message, _)] = rec.calls
+    assert kind == "ok"
+    assert "text-layer" in message and "A scanned PDF needs an OCR route" in message
 
 
 @pytest.mark.parametrize("fallback", ["off", "auto"])

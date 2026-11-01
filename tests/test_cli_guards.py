@@ -494,7 +494,7 @@ async def test_a_fast_run_announces_the_downloads_before_the_pipeline_is_built(
     assert order == ["announce", "pipeline"]
 
 
-# --- the vLLM bootstrap is opt-in for a fast run --------------------------------------
+# --- a fast run reads the text layer unless the user chose an OCR route ---------------
 
 
 @pytest.fixture
@@ -507,10 +507,9 @@ def gpu_without_vllm(monkeypatch):
     monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: 24.0)
     monkeypatch.setattr(registry, "paddle_vllm_unavailable_reason", lambda: None)
     monkeypatch.setattr(registry, "vllm_compute_capability_blocker", lambda: None)
-    monkeypatch.setattr(registry, "vllm_bootstrap_pending", lambda: True)
 
 
-async def test_a_fast_run_with_no_chosen_ocr_route_announces_the_vllm_opt_in(
+async def test_a_fast_run_with_no_chosen_ocr_route_reads_the_text_layer_on_a_gpu_box(
     tmp_path, first_run, gpu_without_vllm, capsys
 ):
     from bibr.local.cli import _build_parser, _run_process
@@ -518,12 +517,15 @@ async def test_a_fast_run_with_no_chosen_ocr_route_announces_the_vllm_opt_in(
     await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path))]))
 
     err = capsys.readouterr().err
-    assert "paddle-vllm not started" in err
-    assert "--ocr paddle" in err
-    assert "glm-llama (automatic)" in err
+    assert "OCR backend: text-layer" in err
+    assert "mode fast" in err and "OCR text-layer" in err
+    assert "paddle-vllm" not in err
+    built = _RecordingPipeline.built[0]
+    assert built["ocr_backend"] == "text-layer"
+    assert built["ocr_requested"] is False
 
 
-async def test_a_fast_run_that_chose_paddle_ocr_does_not_hold_back_vllm(
+async def test_a_fast_run_that_chose_paddle_ocr_keeps_the_gpu_route(
     tmp_path, first_run, gpu_without_vllm, capsys
 ):
     from bibr.local.cli import _build_parser, _run_process
@@ -531,6 +533,8 @@ async def test_a_fast_run_that_chose_paddle_ocr_does_not_hold_back_vllm(
     await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--ocr", "paddle"]))
 
     err = capsys.readouterr().err
-    assert "paddle-vllm not started" not in err
+    assert "text-layer" not in err
     assert "paddle-vllm (automatic)" in err
-    assert _RecordingPipeline.built[0]["ocr_requested"] is True
+    built = _RecordingPipeline.built[0]
+    assert built["ocr_backend"] == "paddle"
+    assert built["ocr_requested"] is True

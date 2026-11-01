@@ -11,7 +11,6 @@ Extra keyword arguments not consumed by the backend are silently ignored
 from __future__ import annotations
 
 import functools
-import importlib.util
 import logging
 import math
 import os
@@ -47,6 +46,14 @@ class OcrBackendCandidate:
 #: entries never mix with a model's.
 TEXT_LAYER_BACKEND = "text-layer"
 TEXT_LAYER_MODEL = "pdf-text-layer"
+
+#: The routes that read a scanned PDF, named wherever the text layer cannot
+#: (the refusal of a scan, ``bibr doctor``).
+SCAN_NEEDS_OCR_ROUTES = (
+    "an OCR route: --ocr anthropic (a cloud model; the page images leave this machine), "
+    "a GPU OCR server (--ocr paddle starts PaddleOCR-VL, --ocr-url points at one you run) "
+    "or the hosted demo at try.bibr.org"
+)
 
 
 # VRAM the managed PaddleOCR-VL vLLM server is given: its ~2.1 GiB of weights
@@ -471,12 +478,30 @@ def _candidate(backend: str, settings: GlobalSettings) -> OcrBackendCandidate:
     )
 
 
+def ocr_route_chosen(
+    settings: GlobalSettings,
+    *,
+    backend: str | None = None,
+    url: str | None = None,
+    model: str | None = None,
+    profile: str | None = None,
+) -> bool:
+    """Whether the caller chose an OCR route: named it, or set it in the settings.
+
+    A backend, a server URL, a model or a profile, given directly (``--ocr``,
+    ``--ocr-url``, ``--ocr-model``, ``--ocr-profile``) or set as ``OCR_BACKEND``,
+    ``OCR_MODEL`` or ``OCR_PROFILE``. A fast run with none of them reads the PDF text
+    layer; ``bibr setup`` writes ``OCR_BACKEND`` only for a route the user picks.
+    """
+    configured = settings.ocr.model_fields_set & {"backend", "model", "profile"}
+    return bool(backend or url or model or profile or configured)
+
+
 def resolve_backend_candidates(
     name: str | None,
     settings: GlobalSettings,
     *,
     llm_backend: str | None = None,
-    vllm_bootstrap: bool = True,
 ) -> tuple[OcrBackendCandidate, ...]:
     """Resolve an OCR request to concrete, deterministic startup candidates.
 
@@ -484,8 +509,7 @@ def resolve_backend_candidates(
     Explicit concrete backends are deliberately single-candidate requests so a
     user-selected runtime is never silently replaced by another implementation.
     ``llm_backend`` is the run's resolved LLM backend, when the caller knows
-    it, and ``vllm_bootstrap`` says whether a missing vLLM may be bootstrapped
-    (see ``automatic_backend_names``).
+    it (see ``automatic_backend_names``).
     """
     if name is None:
         ocr_opts = settings.ocr
@@ -499,9 +523,7 @@ def resolve_backend_candidates(
         return (_candidate(name, settings),)
     return tuple(
         _candidate(backend, settings)
-        for backend in automatic_backend_names(
-            llm_backend=llm_backend, vllm_bootstrap=vllm_bootstrap
-        )
+        for backend in automatic_backend_names(llm_backend=llm_backend)
     )
 
 
@@ -513,47 +535,14 @@ _LLAMA_CPP_LLM_KEEPS_OCR_ON_LLAMA_CPP = (
 )
 
 
-#: Why a fast run with no chosen OCR route leaves paddle-vllm out of the chain
-#: when vLLM is not installed: starting it means a multi-GB download.
-VLLM_BOOTSTRAP_NOT_REQUESTED = (
-    "vLLM is not installed, so starting paddle-vllm would download several GB first; "
-    "a fast run does that only when you choose it"
-)
-
-#: What to type to accept that download.
-VLLM_BOOTSTRAP_OPT_IN = (
-    "pass --ocr paddle (or set OCR_BACKEND=paddle) to download vLLM on first use, "
-    "or install it once with `uv sync --extra vllm`"
-)
-
-
-def bootstrap_kwargs(vllm_bootstrap: bool) -> dict[str, bool]:
-    """``{"vllm_bootstrap": False}`` for a run that may not bootstrap vLLM, else nothing.
-
-    The default (allowed) needs no mention, so callers splat this into
-    :func:`resolve_backend_candidates` / :func:`automatic_backend_names` and the
-    calls stay as they were for every run that is not a fast run nobody chose OCR for.
-    """
-    return {} if vllm_bootstrap else {"vllm_bootstrap": False}
-
-
-def vllm_bootstrap_pending() -> bool:
-    """Whether managed vLLM would have to be bootstrapped: it is not importable here."""
-    return importlib.util.find_spec("vllm") is None
-
-
-def automatic_backend_names(
-    *, llm_backend: str | None = None, vllm_bootstrap: bool = True
-) -> tuple[str, ...]:
+def automatic_backend_names(*, llm_backend: str | None = None) -> tuple[str, ...]:
     """The concrete runtimes the automatic ``paddle`` selector tries here, in order.
 
     ``llm_backend`` is the run's resolved LLM backend (``"cloud"`` for
     ``--no-llm`` or a fast run; None when the caller does not know it). On Linux a
     ``llama-cpp`` LLM leaves paddle-vllm out, so the OCR runs GLM-OCR on
     llama.cpp, the pair setup recommends, and so does a card whose compute
-    capability is below ``VLLM_MIN_COMPUTE_CAPABILITY``. With ``vllm_bootstrap``
-    false it is left out too while vLLM is not installed, so the multi-GB
-    ``uv tool run`` bootstrap starts only when the user chose the OCR route.
+    capability is below ``VLLM_MIN_COMPUTE_CAPABILITY``.
     """
     if sys.platform == "darwin" and platform.machine() == "arm64":
         return ("paddle-rapid-mlx", "paddle-mlx-vlm", "glm-rapid-mlx", "glm-llama")
@@ -568,8 +557,6 @@ def automatic_backend_names(
             if llm_backend == "llama-cpp"
             else paddle_vllm_unavailable_reason() or vllm_compute_capability_blocker()
         )
-        if vllm_blocker is None and not vllm_bootstrap and vllm_bootstrap_pending():
-            vllm_blocker = VLLM_BOOTSTRAP_NOT_REQUESTED
         if vllm_blocker is None:
             return ("paddle-vllm", "glm-llama")
         logger.debug("paddle-vllm skipped in the automatic OCR chain: %s", vllm_blocker)

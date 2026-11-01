@@ -247,7 +247,7 @@ def test_effective_refs_shows_the_local_parser_for_a_fast_run():
 async def test_a_preset_swap_carries_an_explicit_mode():
     settings = SimpleNamespace(
         llm=SimpleNamespace(provider="google", model="m", backend="cloud"),
-        ocr=SimpleNamespace(backend="glm-mlx"),
+        ocr=SimpleNamespace(backend="glm-mlx", model_fields_set={"backend"}),
         REF_PARSE_STRATEGY="llm",
     )
 
@@ -288,7 +288,7 @@ async def test_a_preset_swap_carries_an_explicit_mode():
 async def test_a_preset_swap_in_an_automatic_demo_leaves_the_mode_to_the_settings():
     settings = SimpleNamespace(
         llm=SimpleNamespace(provider="google", model="m", backend="cloud"),
-        ocr=SimpleNamespace(backend="glm-mlx"),
+        ocr=SimpleNamespace(backend="glm-mlx", model_fields_set={"backend"}),
         REF_PARSE_STRATEGY="ner",
     )
 
@@ -371,7 +371,7 @@ async def test_preset_replacement_applies_full_settings_and_closes_old_pipeline(
 
     settings = SimpleNamespace(
         llm=SimpleNamespace(provider="google", model="old", backend="cloud"),
-        ocr=SimpleNamespace(backend="glm-mlx"),
+        ocr=SimpleNamespace(backend="glm-mlx", model_fields_set={"backend"}),
         OCR_BASE_URL="http://old",
         REF_PARSE_STRATEGY="ner",
     )
@@ -427,7 +427,7 @@ async def test_failed_preset_replacement_keeps_old_pipeline_open():
 
     settings = SimpleNamespace(
         llm=SimpleNamespace(provider="google", model="old", backend="cloud"),
-        ocr=SimpleNamespace(backend="glm-mlx"),
+        ocr=SimpleNamespace(backend="glm-mlx", model_fields_set={"backend"}),
         REF_PARSE_STRATEGY="ner",
     )
 
@@ -463,3 +463,113 @@ async def test_failed_preset_replacement_keeps_old_pipeline_open():
     old_pipeline.aclose.assert_not_awaited()
     assert settings.llm.model == "old"
     assert settings.ocr.backend == "glm-mlx"
+
+
+def test_a_demo_with_no_ocr_choice_names_no_ocr_route(monkeypatch):
+    """No ``--ocr``: the pipeline decides (the text layer for a fast run), not the demo."""
+    captured = _capture_pipeline_kwargs(monkeypatch)
+    local_app.create_local_demo(mode="fast")
+    assert captured["ocr_backend"] is None
+
+
+def test_a_fast_demo_reports_the_text_layer_route_it_resolved(monkeypatch, caplog):
+    for var in ("OCR_BACKEND", "OCR_MODEL", "OCR_PROFILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr("bibr.local.pipeline.LocalPipeline", _FakePipeline)
+    with caplog.at_level(logging.INFO):
+        local_app.create_local_demo(mode="fast")
+    assert any("mode=fast, ocr=text-layer" in r.message for r in caplog.records)
+
+
+class _FakePipeline:
+    """Stands in for ``LocalPipeline``: a fast run with no OCR name resolves to the text layer."""
+
+    def __init__(self, *, ocr_backend=None, mode=None, **_kwargs):
+        self.ocr_backend = ocr_backend or "text-layer"
+        self.mode = mode
+        self.llm_backend = None
+
+
+def test_a_fast_demo_with_an_explicit_ocr_backend_keeps_it(monkeypatch):
+    captured = _capture_pipeline_kwargs(monkeypatch)
+    local_app.create_local_demo(mode="fast", ocr_backend="glm-mlx")
+    assert captured["ocr_backend"] == "glm-mlx"
+
+
+async def test_a_preset_that_names_no_ocr_route_leaves_it_unchosen():
+    settings = SimpleNamespace(
+        llm=SimpleNamespace(provider="google", model="m", backend="cloud"),
+        ocr=SimpleNamespace(backend="paddle", model_fields_set=set()),
+        REF_PARSE_STRATEGY="ner",
+    )
+
+    class Manager:
+        def apply_to_settings(self, name, target):  # noqa: ARG002
+            return []
+
+    captured = {}
+
+    def pipeline_factory(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(llm_backend=None, mode="fast", ocr_backend="text-layer")
+
+    state = {
+        "pipeline": SimpleNamespace(aclose=AsyncMock()),
+        "ocr_backend": "text-layer",
+        "memory_mode": None,
+        "llm_backend": None,
+        "mode": "fast",
+    }
+    status = await local_app._replace_demo_pipeline_with_preset(
+        "p",
+        manager=Manager(),
+        settings=settings,
+        pipeline_state=state,
+        pipeline_factory=pipeline_factory,
+        normalize_ocr_backend=lambda value: value,
+        refs=None,
+    )
+
+    assert captured["ocr_backend"] is None
+    assert state["ocr_backend"] == "text-layer"
+    assert "**OCR** `text-layer`" in status
+
+
+async def test_restoring_the_demo_goes_back_to_an_unchosen_ocr_route():
+    settings = SimpleNamespace(
+        llm=SimpleNamespace(provider="google", model="preset", backend="cloud"),
+        ocr=SimpleNamespace(backend="glm-http", model_fields_set={"backend"}),
+        REF_PARSE_STRATEGY="ner",
+    )
+    initial = {
+        "settings": {
+            "llm": SimpleNamespace(provider="google", model="m", backend="cloud"),
+            "ocr": SimpleNamespace(backend="paddle", model_fields_set=set()),
+            "REF_PARSE_STRATEGY": "ner",
+        },
+        "ocr_backend": None,
+    }
+    captured = {}
+
+    def pipeline_factory(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(llm_backend=None, mode="fast", ocr_backend="text-layer")
+
+    state = {
+        "pipeline": SimpleNamespace(aclose=AsyncMock()),
+        "ocr_backend": "glm-http",
+        "memory_mode": None,
+        "llm_backend": None,
+        "mode": "fast",
+    }
+    # ``vars(settings)`` is replaced wholesale, as it is for the real singleton.
+    status = await local_app._restore_demo_pipeline(
+        initial,
+        settings=settings,
+        pipeline_state=state,
+        pipeline_factory=pipeline_factory,
+        refs=None,
+    )
+
+    assert captured["ocr_backend"] is None
+    assert "**OCR** `text-layer`" in status

@@ -656,12 +656,15 @@ async def _replace_demo_pipeline_with_preset(
     refs: str | None,
 ) -> str:
     """Apply one preset, atomically replace the demo pipeline, and close the old one."""
+    from bibr.ocr.registry import ocr_route_chosen
 
-    def apply() -> str:
+    def apply() -> str | None:
         unknown = manager.apply_to_settings(name, settings)
         if unknown:
             logger.warning("Preset %s has unknown settings: %s", name, ", ".join(sorted(unknown)))
-        return normalize_ocr_backend(settings.ocr.backend)
+        # A preset that names no OCR route leaves it unchosen, so a fast run
+        # reads the PDF text layer as it does without a preset.
+        return normalize_ocr_backend(settings.ocr.backend) if ocr_route_chosen(settings) else None
 
     return await _swap_demo_pipeline(
         apply,
@@ -682,12 +685,13 @@ async def _restore_demo_pipeline(
 ) -> str:
     """Put back the settings the demo started with and rebuild its pipeline on them.
 
-    *initial* holds the settings (``vars`` of the singleton) and OCR backend
+    *initial* holds the settings (``vars`` of the singleton) and the OCR backend
+    the demo was started with (``None`` when it chose no OCR route), both
     captured when the demo was created. "(current .env)" after a preset must
     undo the preset, not only the status line.
     """
 
-    def apply() -> str:
+    def apply() -> str | None:
         vars(settings).clear()
         vars(settings).update(copy.deepcopy(initial["settings"]))
         return initial["ocr_backend"]
@@ -711,7 +715,8 @@ async def _swap_demo_pipeline(
 ) -> str:
     """Change *settings* with *apply*, replace the demo pipeline, and close the old one.
 
-    *apply* mutates *settings* and returns the OCR backend for the new pipeline.
+    *apply* mutates *settings* and returns the OCR backend for the new pipeline,
+    or ``None`` when no OCR route is chosen (the pipeline then picks one).
     """
     settings_snapshot = copy.deepcopy(vars(settings))
     try:
@@ -735,8 +740,11 @@ async def _swap_demo_pipeline(
         raise
 
     old_pipeline = pipeline_state["pipeline"]
+    # The route the pipeline resolved: the text layer for a fast run with no OCR
+    # route chosen, else the chosen or platform-default backend.
+    effective_ocr = getattr(replacement, "ocr_backend", None) or new_ocr
     pipeline_state["pipeline"] = replacement
-    pipeline_state["ocr_backend"] = new_ocr
+    pipeline_state["ocr_backend"] = effective_ocr
 
     try:
         await old_pipeline.aclose()
@@ -746,7 +754,7 @@ async def _swap_demo_pipeline(
     new_mode = getattr(replacement, "mode", "full")
     effective_backend = getattr(replacement, "llm_backend", new_llm)
     return _build_status_md(
-        new_ocr,
+        effective_ocr,
         settings.llm.provider,
         settings.llm.model,
         _effective_refs(refs, settings, new_mode),
@@ -777,7 +785,10 @@ def create_local_demo(
     # fails before models load.
     cache_lifetime = _cache_lifetime()
     _max_file_size_mb()
-    ocr_backend = normalize_ocr_backend(ocr_backend)
+    # No --ocr stays unset: the pipeline then reads the PDF text layer in fast
+    # mode unless OCR_BACKEND, OCR_MODEL or OCR_PROFILE names a route, and takes
+    # the platform default OCR backend otherwise.
+    ocr_backend = normalize_ocr_backend(ocr_backend) if ocr_backend else None
 
     if cache_lifetime is None and "ocr" not in Settings.cache.model_fields_set:
         # Demo users repeatedly re-run the same PDF while poking at the UI;
@@ -814,9 +825,11 @@ def create_local_demo(
         ref_parse_strategy=refs,
         mode=run_mode,
     )
+    # What the pipeline resolved, for the log and the status line.
+    effective_ocr = getattr(pipeline, "ocr_backend", None) or ocr_backend
     pipeline_state: dict[str, Any] = {
         "pipeline": pipeline,
-        "ocr_backend": ocr_backend,
+        "ocr_backend": effective_ocr,
         "memory_mode": memory_mode,
         "llm_backend": llm_backend,
         # What the user asked for, not what it resolved to: a preset that
@@ -827,13 +840,13 @@ def create_local_demo(
     logger.info(
         "Local pipeline ready (mode=%s, ocr=%s, llm=%s, memory=%s)",
         run_mode,
-        ocr_backend,
+        effective_ocr,
         "none" if run_mode == "fast" else llm_backend or Settings.llm.backend,
         getattr(pipeline, "memory_mode", memory_mode),
     )
 
     status_md = _build_status_md(
-        ocr_backend,
+        effective_ocr,
         Settings.llm.provider,
         Settings.llm.model,
         effective_refs,

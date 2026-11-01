@@ -99,7 +99,6 @@ class ResourceManager:
         managed_gpu_fraction: float | None = None,
         managed_llm_share_fixed: bool | None = None,
         llm_backend: str | None = None,
-        vllm_bootstrap: bool = True,
         settings: GlobalSettings | None = None,
         layout=None,
         segmenter=None,
@@ -123,9 +122,6 @@ class ResourceManager:
         # owner does not say): the automatic ``paddle`` OCR chain leaves
         # paddle-vllm out beside a llama.cpp LLM (``automatic_backend_names``).
         self._llm_backend = llm_backend
-        # False leaves paddle-vllm out of the automatic chain while vLLM is not
-        # installed (a fast run nobody asked to bootstrap it for).
-        self._vllm_bootstrap = vllm_bootstrap
         self.ocr_backend = ocr_backend
         self.ocr_url = ocr_url
         self.ocr_model = ocr_model
@@ -421,10 +417,7 @@ class ResourceManager:
                 url_request(requested, self._settings.ocr.backend), self.ocr_url
             )
         candidates = resolve_backend_candidates(
-            requested,
-            self._settings,
-            llm_backend=self._llm_backend,
-            vllm_bootstrap=self._vllm_bootstrap,
+            requested, self._settings, llm_backend=self._llm_backend
         )
         if len(candidates) != 1 or requested == "paddle":
             return candidates
@@ -892,9 +885,7 @@ class ResourceManager:
             return False
         from bibr.ocr.registry import automatic_backend_names
 
-        return "paddle-vllm" in automatic_backend_names(
-            llm_backend=self._llm_backend, vllm_bootstrap=self._vllm_bootstrap
-        )
+        return "paddle-vllm" in automatic_backend_names(llm_backend=self._llm_backend)
 
     def _llm_swaps_with_ocr(self) -> bool:
         """Whether a managed PaddleOCR-VL server takes turns with the vLLM LLM server.

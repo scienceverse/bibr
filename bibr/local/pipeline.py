@@ -252,8 +252,6 @@ def _managed_gpu_fraction(
     llm_backend: str,
     ocr_backend: str,
     settings: GlobalSettings,
-    *,
-    vllm_bootstrap: bool = True,
 ) -> float:
     """Share of total VRAM the classifiers must leave to the managed vLLM servers.
 
@@ -280,8 +278,7 @@ def _managed_gpu_fraction(
     # can run it, so a small GPU keeps its room for the classifiers.
     starts_paddle_vllm = ocr_backend == "paddle-vllm" or (
         ocr_backend == "paddle"
-        and "paddle-vllm"
-        in automatic_backend_names(llm_backend=llm_backend, vllm_bootstrap=vllm_bootstrap)
+        and "paddle-vllm" in automatic_backend_names(llm_backend=llm_backend)
     )
     ocr_share = paddle_vllm_gpu_memory_utilization() if starts_paddle_vllm else 0.0
     if not (llm_share and ocr_share):
@@ -346,6 +343,7 @@ class LocalPipeline(Pipeline):
         from bibr.ocr.registry import (
             CLOUD_VISION_OCR_BACKENDS,
             TEXT_LAYER_BACKEND,
+            ocr_route_chosen,
             resolve_backend_name,
             resolve_url_backend,
             url_request,
@@ -367,9 +365,13 @@ class LocalPipeline(Pipeline):
             configured_ocr.backend if "backend" in configured_ocr.model_fields_set else None
         )
         if ocr_requested is None:
-            # The caller chose the OCR route by naming a backend or a server, or
-            # the OCR_BACKEND setting did.
-            ocr_requested = bool(ocr_backend or ocr_url or configured_backend)
+            ocr_requested = ocr_route_chosen(
+                settings_snapshot,
+                backend=ocr_backend,
+                url=ocr_url,
+                model=ocr_model,
+                profile=ocr_profile,
+            )
         if ocr_url:
             # A URL names one OCR server. The shared rule (as for
             # ``bibr chew --ocr-url``) picks its backend — Paddle unless GLM
@@ -413,9 +415,12 @@ class LocalPipeline(Pipeline):
             # No LLM call and no managed LLM server: the memory plan, OCR chain
             # and streamed back half follow the cloud backend's.
             llm_backend = "cloud"
-        # A fast run starts the multi-GB vLLM bootstrap only for an OCR route the
-        # caller chose (see ``ocr_requested`` above).
-        vllm_bootstrap = run_mode != "fast" or ocr_requested
+        if run_mode == "fast" and not ocr_requested:
+            # No OCR route was chosen, so a fast run reads each PDF's own text
+            # layer whatever the machine has: no GPU, server or multi-GB bootstrap
+            # is needed to start. A route the caller chose (``--ocr``, a server URL,
+            # OCR_BACKEND, a model or profile) is kept; a scan needs one of those.
+            ocr_backend = TEXT_LAYER_BACKEND
         # None → PIPELINE_MEMORY_MODE, else hardware auto-detect (which looks
         # at whether a managed LLM server shares the card) — same resolution
         # ladder as the CLI, so the library API behaves identically.
@@ -467,12 +472,9 @@ class LocalPipeline(Pipeline):
                 if llm_backend in ("local", "vllm")
                 else 0.0
             ),
-            managed_gpu_fraction=_managed_gpu_fraction(
-                llm_backend, ocr_backend, settings_snapshot, vllm_bootstrap=vllm_bootstrap
-            ),
+            managed_gpu_fraction=_managed_gpu_fraction(llm_backend, ocr_backend, settings_snapshot),
             managed_llm_share_fixed=llm_share_user_set(settings_snapshot),
             llm_backend=llm_backend,
-            vllm_bootstrap=vllm_bootstrap,
             settings=settings_snapshot,
         )
 

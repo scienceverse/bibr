@@ -744,109 +744,54 @@ class TestManagedServersCard:
         assert registry._nvidia_gpu_inventory.__wrapped__() is None
 
 
-class TestVllmBootstrapIsOptIn:
-    """A fast run nobody chose OCR for does not start the multi-GB ``uv tool run`` vLLM bootstrap.
+class TestOcrRouteChosen:
+    """A fast run reads the text layer unless the caller chose an OCR route.
 
-    The automatic chain lists paddle-vllm on a capable GPU. When vLLM is not installed,
-    starting it downloads several GB first, so such a run leaves it out unless the user
-    chose the OCR route (``--ocr``, ``--ocr-url`` or ``OCR_BACKEND``).
+    ``ocr_route_chosen`` is the one rule the CLI and the library share: a backend, a
+    server URL, a model or a profile, given directly or set in the settings.
     """
 
     @staticmethod
-    def _gpu_box(monkeypatch, *, vllm_installed):
-        registry = TestLinuxChainFollowsTheLlmBackend._linux(monkeypatch, 24.0, 8.9)
-        monkeypatch.setattr(registry, "vllm_bootstrap_pending", lambda: not vllm_installed)
-        return registry
-
-    def test_without_vllm_the_chain_skips_paddle_vllm_when_bootstrap_is_not_allowed(
-        self, monkeypatch
-    ):
-        registry = self._gpu_box(monkeypatch, vllm_installed=False)
-
-        assert registry.automatic_backend_names(vllm_bootstrap=False) == ("glm-llama",)
-        chain = registry.resolve_backend_candidates(
-            "paddle", _CandidateSettings(), vllm_bootstrap=False
-        )
-        assert [c.backend for c in chain] == ["glm-llama"]
-
-    def test_bootstrap_is_allowed_by_default(self, monkeypatch):
-        registry = self._gpu_box(monkeypatch, vllm_installed=False)
-
-        assert registry.automatic_backend_names() == ("paddle-vllm", "glm-llama")
-        assert registry.automatic_backend_names(vllm_bootstrap=True) == (
-            "paddle-vllm",
-            "glm-llama",
-        )
-
-    def test_an_installed_vllm_needs_no_bootstrap_so_it_stays_in_the_chain(self, monkeypatch):
-        registry = self._gpu_box(monkeypatch, vllm_installed=True)
-
-        assert registry.automatic_backend_names(vllm_bootstrap=False) == (
-            "paddle-vllm",
-            "glm-llama",
-        )
-
-    def test_an_explicit_paddle_vllm_is_never_held_back(self, monkeypatch):
-        registry = self._gpu_box(monkeypatch, vllm_installed=False)
-
-        chain = registry.resolve_backend_candidates(
-            "paddle-vllm", _CandidateSettings(), vllm_bootstrap=False
-        )
-        assert [c.backend for c in chain] == ["paddle-vllm"]
-
-    def test_the_other_platforms_chains_are_untouched(self, monkeypatch):
-        from bibr.ocr import registry
-
-        monkeypatch.setattr(registry.sys, "platform", "win32")
-        assert registry.automatic_backend_names(vllm_bootstrap=False) == ("glm-llama",)
-        monkeypatch.setattr(registry.sys, "platform", "darwin")
-        monkeypatch.setattr(registry.platform, "machine", lambda: "arm64")
-        assert registry.automatic_backend_names(vllm_bootstrap=False)[0] == "paddle-rapid-mlx"
-
-    def test_bootstrap_kwargs_mention_only_the_refusal(self):
-        from bibr.ocr.registry import bootstrap_kwargs
-
-        assert bootstrap_kwargs(True) == {}
-        assert bootstrap_kwargs(False) == {"vllm_bootstrap": False}
-
-    def test_pending_means_vllm_is_not_importable(self, monkeypatch):
-        import importlib.util
-
-        from bibr.ocr import registry
-
-        monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
-        assert registry.vllm_bootstrap_pending() is True
-        monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
-        assert registry.vllm_bootstrap_pending() is False
-
-    def test_the_resource_manager_holds_back_the_bootstrap_too(self, monkeypatch):
-        from bibr.pipeline.resources import ResourceManager
-
-        self._gpu_box(monkeypatch, vllm_installed=False)
-
-        opted_out = ResourceManager(ocr_backend="paddle", llm_backend="cloud", vllm_bootstrap=False)
-        assert [c.backend for c in opted_out._resolve_ocr_candidates()] == ["glm-llama"]
-        assert not opted_out._starts_managed_paddle_vllm()
-
-        default = ResourceManager(ocr_backend="paddle", llm_backend="cloud")
-        assert [c.backend for c in default._resolve_ocr_candidates()] == [
-            "paddle-vllm",
-            "glm-llama",
-        ]
-        assert default._starts_managed_paddle_vllm()
-
-    def test_the_gpu_budget_reserves_room_only_for_a_server_that_starts(self, monkeypatch):
-        """A skipped paddle-vllm needs no share of the card, so the classifiers keep it."""
+    def _settings(**ocr):
         from bibr.config import GlobalSettings
-        from bibr.local.pipeline import _managed_gpu_fraction
-        from bibr.ocr.registry import paddle_vllm_gpu_memory_utilization
 
-        self._gpu_box(monkeypatch, vllm_installed=False)
-        settings = GlobalSettings()
+        return GlobalSettings(ocr=ocr)
 
-        assert _managed_gpu_fraction("cloud", "paddle", settings) == pytest.approx(
-            paddle_vllm_gpu_memory_utilization()
-        )
-        assert _managed_gpu_fraction(
-            "cloud", "paddle", settings, vllm_bootstrap=False
-        ) == pytest.approx(0.0)
+    def test_nothing_named_or_set_is_no_choice(self):
+        from bibr.ocr.registry import ocr_route_chosen
+
+        assert ocr_route_chosen(self._settings()) is False
+
+    @pytest.mark.parametrize(
+        "named",
+        [
+            {"backend": "paddle"},
+            {"url": "http://ocr.example:8080"},
+            {"model": "some/model"},
+            {"profile": "paddle"},
+        ],
+        ids=["backend", "url", "model", "profile"],
+    )
+    def test_a_route_named_directly_is_a_choice(self, named):
+        from bibr.ocr.registry import ocr_route_chosen
+
+        assert ocr_route_chosen(self._settings(), **named) is True
+
+    @pytest.mark.parametrize("field", ["backend", "model", "profile"])
+    def test_a_route_set_in_the_settings_is_a_choice(self, field):
+        from bibr.ocr.registry import ocr_route_chosen
+
+        value = {"backend": "glm-llama", "model": "some/model", "profile": "glm"}[field]
+        assert ocr_route_chosen(self._settings(**{field: value})) is True
+
+    def test_a_tuning_setting_is_not_a_choice(self):
+        from bibr.ocr.registry import ocr_route_chosen
+
+        assert ocr_route_chosen(self._settings(request_timeout=30)) is False
+
+    def test_the_scan_routes_name_the_cloud_the_gpu_server_and_the_demo(self):
+        from bibr.ocr.registry import SCAN_NEEDS_OCR_ROUTES
+
+        for route in ("--ocr anthropic", "--ocr paddle", "--ocr-url", "try.bibr.org"):
+            assert route in SCAN_NEEDS_OCR_ROUTES
+        assert "llama.cpp" not in SCAN_NEEDS_OCR_ROUTES

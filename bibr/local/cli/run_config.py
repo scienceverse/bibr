@@ -45,8 +45,8 @@ class ResolvedRunConfig:
     ocr_summary_backend: str | None = None
     """The first concrete OCR candidate (``paddle`` expands to an ordered chain)."""
     ocr_requested: bool = True
-    """Whether the user chose the OCR route (``--ocr``, ``--ocr-url`` or ``OCR_BACKEND``).
-    A fast run starts the multi-GB vLLM bootstrap only when this is set."""
+    """Whether the user chose the OCR route (``--ocr``, ``--ocr-url``, ``OCR_BACKEND``, ...).
+    A fast run that did not reads the PDF text layer."""
     ocr_text_layer_fallback: str | None = None
     """Why no automatic OCR runtime can start here, when
     ``OCR_FALLBACK_TO_TEXT_LAYER=auto`` swapped ``ocr_backend`` to
@@ -56,11 +56,6 @@ class ResolvedRunConfig:
     def skips_llm(self) -> bool:
         """Whether the run makes no LLM call: fast mode, or ``--no-llm``."""
         return self.no_llm or self.mode == "fast"
-
-    @property
-    def vllm_bootstrap(self) -> bool:
-        """Whether a missing vLLM may be bootstrapped: not in a fast run nobody chose OCR for."""
-        return self.mode != "fast" or self.ocr_requested
 
     @property
     def uses_llm(self) -> bool:
@@ -167,7 +162,7 @@ def resolve_run_config(args) -> ResolvedRunConfig:
 
     chunk_size = args.batch_size if args.batch_size > 0 else _auto_batch_size(memory_mode)
 
-    from bibr.ocr.registry import bootstrap_kwargs, resolve_backend_candidates
+    from bibr.ocr.registry import TEXT_LAYER_BACKEND, resolve_backend_candidates
 
     explicit_profile = getattr(args, "ocr_profile", None)
     configured_profile = getattr(Settings.ocr, "profile", None)
@@ -177,11 +172,12 @@ def resolve_run_config(args) -> ResolvedRunConfig:
             raise ValueError("Custom --ocr-model aliases require --ocr-profile {paddle,glm}.")
 
     ocr_requested = _ocr_requested(args, Settings)
+    if mode == "fast" and not ocr_requested:
+        # Nobody chose an OCR route: a fast run reads the PDF's own text layer
+        # whatever the machine has (LocalPipeline makes the same choice).
+        ocr_backend = TEXT_LAYER_BACKEND
     summary_candidate = resolve_backend_candidates(
-        ocr_backend,
-        Settings,
-        llm_backend=server_llm_backend,
-        **bootstrap_kwargs(mode != "fast" or ocr_requested),
+        ocr_backend, Settings, llm_backend=server_llm_backend
     )[0]
     return ResolvedRunConfig(
         ocr_backend=ocr_backend,
@@ -246,11 +242,15 @@ def _resolve_run_mode(args, settings) -> str:
 
 
 def _ocr_requested(args, settings) -> bool:
-    """Whether the user chose the OCR route: ``--ocr``, ``--ocr-url`` or a set ``OCR_BACKEND``."""
-    return bool(
-        getattr(args, "ocr", None)
-        or getattr(args, "ocr_url", None)
-        or "backend" in settings.ocr.model_fields_set
+    """Whether the user chose the OCR route (see :func:`bibr.ocr.registry.ocr_route_chosen`)."""
+    from bibr.ocr.registry import ocr_route_chosen
+
+    return ocr_route_chosen(
+        settings,
+        backend=getattr(args, "ocr", None),
+        url=getattr(args, "ocr_url", None),
+        model=getattr(args, "ocr_model", None),
+        profile=getattr(args, "ocr_profile", None),
     )
 
 
@@ -455,16 +455,12 @@ def _preflight_ocr_runtime(config: ResolvedRunConfig) -> str | None:
     """
     if config.ocr_url:
         return None
-    from bibr.ocr.registry import TEXT_LAYER_BACKEND, bootstrap_kwargs
+    from bibr.ocr.registry import TEXT_LAYER_BACKEND
 
     if config.ocr_backend == TEXT_LAYER_BACKEND:
         # Reads the PDF's own text layer: there is no runtime to start.
         return None
-    return _ocr_runtime_blocker(
-        config.ocr_backend,
-        llm_backend=_run_llm_backend(config),
-        **bootstrap_kwargs(getattr(config, "vllm_bootstrap", True)),
-    )
+    return _ocr_runtime_blocker(config.ocr_backend, llm_backend=_run_llm_backend(config))
 
 
 def _run_llm_backend(config: ResolvedRunConfig) -> str:
@@ -521,42 +517,23 @@ def apply_text_layer_fallback(
     return swapped, warning
 
 
-def _ocr_runtime_blocker(
-    ocr_backend: str, *, llm_backend: str | None = None, vllm_bootstrap: bool = True
-) -> str | None:
+def _ocr_runtime_blocker(ocr_backend: str, *, llm_backend: str | None = None) -> str | None:
     """Why no candidate of ``ocr_backend``'s startup chain can start here, or ``None``.
 
     Shared by the ``bibr chew``/``bibr batch`` preflight and ``bibr doctor``.
-    ``llm_backend`` is the run's resolved LLM backend and ``vllm_bootstrap``
-    whether a missing vLLM may be bootstrapped (see
-    ``bibr.ocr.registry.automatic_backend_names``). When the chain has nothing
-    else, the error names the paddle-vllm bootstrap it left out and how to opt in.
+    ``llm_backend`` is the run's resolved LLM backend (see
+    ``bibr.ocr.registry.automatic_backend_names``).
     """
     from bibr.config import Settings
-    from bibr.ocr.registry import (
-        VLLM_BOOTSTRAP_NOT_REQUESTED,
-        VLLM_BOOTSTRAP_OPT_IN,
-        automatic_backend_names,
-        bootstrap_kwargs,
-        resolve_backend_candidates,
-    )
+    from bibr.ocr.registry import resolve_backend_candidates
 
-    candidates = resolve_backend_candidates(
-        ocr_backend, Settings, llm_backend=llm_backend, **bootstrap_kwargs(vllm_bootstrap)
-    )
+    candidates = resolve_backend_candidates(ocr_backend, Settings, llm_backend=llm_backend)
     blockers: list[str] = []
     for candidate in candidates:
         reason = _ocr_candidate_unavailable_reason(candidate.backend)
         if reason is None:
             return None
         blockers.append(f"{candidate.backend}: {reason}")
-    if (
-        ocr_backend == "paddle"
-        and not vllm_bootstrap
-        and "paddle-vllm" in automatic_backend_names(llm_backend=llm_backend)
-        and "paddle-vllm" not in {c.backend for c in candidates}
-    ):
-        blockers.insert(0, f"paddle-vllm: {VLLM_BOOTSTRAP_NOT_REQUESTED}; {VLLM_BOOTSTRAP_OPT_IN}")
     if not blockers:
         return None
     alternatives = (

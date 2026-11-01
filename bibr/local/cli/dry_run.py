@@ -96,15 +96,12 @@ def _dry_run_ocr_model(config: ResolvedRunConfig) -> tuple[str, str | None]:
     remotely (HTTP servers, cloud vision providers) — nothing local to check.
     """
     from bibr.config import Settings
-    from bibr.ocr.registry import bootstrap_kwargs, resolve_backend_candidates
+    from bibr.ocr.registry import resolve_backend_candidates
 
     backend = config.ocr_backend
     if backend == "paddle":
         candidate = resolve_backend_candidates(
-            backend,
-            Settings,
-            llm_backend=_run_llm_backend(config),
-            **bootstrap_kwargs(getattr(config, "vllm_bootstrap", True)),
+            backend, Settings, llm_backend=_run_llm_backend(config)
         )[0]
         # Served identity vs weight repo: the first candidate's display model
         # may be a server alias (paddle-vllm advertises
@@ -150,13 +147,10 @@ def _dry_run_ocr_model(config: ResolvedRunConfig) -> tuple[str, str | None]:
 def _dry_run_ocr_candidates(config: ResolvedRunConfig):
     """Return the ordered runtime identities without importing or starting one."""
     from bibr.config import Settings
-    from bibr.ocr.registry import bootstrap_kwargs, resolve_backend_candidates
+    from bibr.ocr.registry import resolve_backend_candidates
 
     return resolve_backend_candidates(
-        config.ocr_backend,
-        Settings,
-        llm_backend=_run_llm_backend(config),
-        **bootstrap_kwargs(getattr(config, "vllm_bootstrap", True)),
+        config.ocr_backend, Settings, llm_backend=_run_llm_backend(config)
     )
 
 

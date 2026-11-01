@@ -25,7 +25,6 @@ from bibr.local.cli.run_config import (
     _preflight_local_backend,
     _preflight_ocr_runtime,
     _preflight_opencv,
-    _run_llm_backend,
     apply_text_layer_fallback,
     resolve_run_config,
 )
@@ -147,26 +146,6 @@ def _format_mode_line(config: ResolvedRunConfig) -> str:
             f"{escape(str(config.memory_mode))}"
         )
     return f"  {head}{sep}{route}{sep}[dim]{escape(tail)}[/dim]"
-
-
-def _vllm_bootstrap_notice(config: ResolvedRunConfig) -> str | None:
-    """Why a fast run left paddle-vllm out of the OCR chain, with the opt-in; else ``None``.
-
-    The automatic chain lists paddle-vllm on a capable GPU, but with vLLM not
-    installed it starts only for a user who chose the OCR route: the bootstrap
-    downloads several GB. The notice is the announcement; ``--ocr paddle`` is the opt-in.
-    """
-    if config.vllm_bootstrap or config.ocr_backend != "paddle" or config.ocr_url:
-        return None
-    from bibr.ocr.registry import VLLM_BOOTSTRAP_OPT_IN, automatic_backend_names
-
-    llm_backend = _run_llm_backend(config)
-    in_chain = "paddle-vllm" in automatic_backend_names(llm_backend=llm_backend)
-    if not in_chain or "paddle-vllm" in automatic_backend_names(
-        llm_backend=llm_backend, vllm_bootstrap=False
-    ):
-        return None
-    return f"  [dim]paddle-vllm not started: vLLM is not installed; {VLLM_BOOTSTRAP_OPT_IN}[/dim]"
 
 
 def _print_actual_ocr_summary(console, resources) -> None:
@@ -485,9 +464,6 @@ async def _run_process(args) -> None:
     config, fallback_warning = apply_text_layer_fallback(config, _preflight_ocr_runtime)
 
     console.print(_format_run_summary(config))
-    bootstrap_notice = _vllm_bootstrap_notice(config)
-    if bootstrap_notice is not None:
-        console.print(bootstrap_notice)
 
     # Collect files
     if source_mode == "manifest":

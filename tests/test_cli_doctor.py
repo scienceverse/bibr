@@ -1357,7 +1357,7 @@ def test_doctor_checks_the_ocr_chain_beside_the_configured_llm_backend(monkeypat
     with contextlib.suppress(SystemExit):
         doctor._run_doctor()
 
-    assert seen == [{"llm_backend": backend}]
+    assert seen == [{"llm_backend": backend, "text_layer": False}]
 
 
 # --- the Mode section: doctor says which run a plain `bibr chew` takes ------------------
@@ -1506,16 +1506,18 @@ def _ocr_calls(monkeypatch, **mode_args):
     return seen
 
 
-def test_doctor_vets_a_fast_run_against_the_cloud_chain_without_the_vllm_bootstrap(monkeypatch):
-    assert _ocr_calls(monkeypatch) == [{"llm_backend": "cloud", "vllm_bootstrap": False}]
+def test_doctor_vets_a_fast_run_with_no_ocr_route_as_the_text_layer(monkeypatch):
+    assert _ocr_calls(monkeypatch) == [{"llm_backend": "cloud", "text_layer": True}]
 
 
-def test_doctor_lets_a_fast_run_that_chose_the_ocr_route_bootstrap_vllm(monkeypatch):
-    assert _ocr_calls(monkeypatch, ocr="paddle") == [{"llm_backend": "cloud"}]
+def test_doctor_vets_a_fast_run_that_chose_the_ocr_route_against_the_cloud_chain(monkeypatch):
+    assert _ocr_calls(monkeypatch, ocr="paddle") == [{"llm_backend": "cloud", "text_layer": False}]
 
 
 def test_doctor_passes_a_full_runs_llm_backend_to_the_ocr_check(monkeypatch):
-    assert _ocr_calls(monkeypatch, key="test-key") == [{"llm_backend": "cloud"}]
+    assert _ocr_calls(monkeypatch, key="test-key") == [
+        {"llm_backend": "cloud", "text_layer": False}
+    ]
 
 
 def test_doctor_warns_but_does_not_fail_when_libmagic_is_missing(monkeypatch):
