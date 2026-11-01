@@ -1738,12 +1738,14 @@ def _dedupe_candidates(candidates: list[CitationCandidate]) -> list[CitationCand
     return out
 
 
-def _detect_candidates(sentences, sections, references, references_from_notes=False):
+def _detect_candidates(sentences, sections, references, references_from_notes=False, rules=False):
     """Run every non-LLM citation tier. Synchronous; see the caller's note.
 
     With *references_from_notes* (the list was read from the paper's notes) a
     number in the text is a note mark, not a reference number, so the numeric
-    tiers resolve none; the notes are linked by their footnote xrefs.
+    tiers resolve none; the notes are linked by their footnote xrefs. With
+    *rules*, the author-year tier reads names as ``match_with_candidates``
+    does with its own *rules*.
     """
     body_sents = _get_body_sentences(sentences, sections)
     valid_bib_ids = {reference.bib_id for reference in references}
@@ -1784,7 +1786,9 @@ def _detect_candidates(sentences, sections, references, references_from_notes=Fa
 
     from bibr.structure.citation_matcher import match_with_candidates
 
-    _tier2, _tier2_ambiguous, author_year = match_with_candidates(body_sents, references)
+    _tier2, _tier2_ambiguous, author_year = match_with_candidates(
+        body_sents, references, rules=rules
+    )
     # Detect ranges and ground superscripts in printed-number space, then keep
     # both the receipt and emitted links in internal-ID space. Author-year and
     # LLM matches already use internal IDs and must not be remapped.
@@ -1821,10 +1825,14 @@ async def detect_bib_xrefs_with_receipt(
     *references_from_notes*: the references were read from the paper's notes
     (``REF_FOOTNOTE_CITATIONS``), so only author-year citations link to them.
 
-    *rule_tier3*: with no *llm_client*, resolve the citations Tier 3 would send
-    to the LLM with matcher rules instead (``_resolve_with_rules``). Off, a run
-    with no LLM leaves them unlinked, as before. An *llm_client* always wins.
+    *rule_tier3*: with no *llm_client*, read the citations with matcher rules
+    in place of the LLM. Tier 2 reads names as ``match_with_candidates`` does
+    with its *rules*, and the citations Tier 3 would send to the LLM are
+    resolved by ``_resolve_with_rules``. Off, a run with no LLM links what the
+    exact reading links and leaves the rest unlinked, as before. An
+    *llm_client* always wins, and a run with one reads as it always did.
     """
+    use_rules = bool(rule_tier3 and not llm_client)
 
     # Every tier below the LLM one is synchronous regex work over the whole
     # body — median 23 ms, p99 120 ms, max 438 ms on 479 real PMC exports.
@@ -1839,7 +1847,7 @@ async def detect_bib_xrefs_with_receipt(
         flattened_score,
         candidates,
     ) = await asyncio.to_thread(
-        _detect_candidates, sentences, sections, references, references_from_notes
+        _detect_candidates, sentences, sections, references, references_from_notes, use_rules
     )
 
     all_xrefs: list[PaperXref] = []
@@ -1869,7 +1877,6 @@ async def detect_bib_xrefs_with_receipt(
         ]
     )
 
-    use_rules = bool(rule_tier3 and not llm_client)
     if llm_client or use_rules:
         # How the candidates this tier handles are labelled in the receipt.
         resolver = "rules" if use_rules else "llm"

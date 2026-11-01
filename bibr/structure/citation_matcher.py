@@ -38,28 +38,34 @@ from bibr.utils.text import IN_PRESS_LABEL, collapse_ws
 _FAMILY_CORE = r"[A-Z][a-zA-ZÀ-ɏ'\-]+"
 
 
-def _is_initials(s: str) -> bool:
-    """True if s looks like author initials (e.g., 'J.', 'J. A.', 'JA')."""
+def _is_initials(s: str, *, caps_surnames: bool = False) -> bool:
+    """True if s looks like author initials (e.g., 'J.', 'J. A.', 'JA').
+
+    With *caps_surnames*, an unspaced, undotted all-caps run of four letters or
+    more ("NGUYEN") is a surname printed in capitals, not initials: those come
+    as "JA", "J. A." or "J.A.".
+    """
     s = s.strip().rstrip(".")
     if not s or len(s) > 12:
         return False
     alphas = [c for c in s if c.isalpha()]
     if not alphas:
         return False
-    # An unspaced, undotted all-caps run of four letters or more ("NGUYEN") is
-    # a surname printed in capitals; initials come as "JA", "J. A." or "J.A.".
-    if len(s) >= 4 and s.isalpha() and s.isupper():
+    if caps_surnames and len(s) >= 4 and s.isalpha() and s.isupper():
         return False
     upper_ratio = sum(1 for c in alphas if c.isupper()) / len(alphas)
     return len(alphas) <= 6 and upper_ratio >= 0.6 and all(c.isalpha() or c in ". " for c in s)
 
 
-def extract_families(authors_str: str | None) -> list[str]:
+def extract_families(authors_str: str | None, *, rules: bool = False) -> list[str]:
     """Best-effort APA-style author parsing — returns family names in order.
 
     Handles APA "Family, J. A., Family, J., & Family, J." patterns plus
     multi-word names ("Della Sala", "van der Vyver"), hyphenated names
     ("Fei-Fei"), continuation dots ". . ." and "and"/"&" connectors.
+
+    With *rules* (a run with no LLM, see ``match_with_candidates``) a surname
+    printed in capitals is read as one (``_is_initials``).
     """
     if not authors_str:
         return []
@@ -88,7 +94,7 @@ def extract_families(authors_str: str | None) -> list[str]:
         part = re.sub(r"^(?:and|&)\s+", "", part, flags=re.IGNORECASE)
         tokens = part.rstrip(".").split()
         suffix_start = len(tokens)
-        while suffix_start > 0 and _is_initials(tokens[suffix_start - 1]):
+        while suffix_start > 0 and _is_initials(tokens[suffix_start - 1], caps_surnames=rules):
             initials = "".join(c for c in tokens[suffix_start - 1] if c.isalpha())
             if not initials or not all(c.isupper() for c in initials):
                 break
@@ -108,11 +114,11 @@ def extract_families(authors_str: str | None) -> list[str]:
     i = 0
     while i < len(parts):
         cur = parts[i]
-        if _is_initials(cur):
+        if _is_initials(cur, caps_surnames=rules):
             i += 1
             continue
         families.append(cur)
-        if i + 1 < len(parts) and _is_initials(parts[i + 1]):
+        if i + 1 < len(parts) and _is_initials(parts[i + 1], caps_surnames=rules):
             i += 2
         else:
             i += 1
@@ -201,15 +207,18 @@ _POSSESSIVE_RE = re.compile("[" + _APOS + "]s?$")
 _LEADING_NON_WORD_RE = re.compile(r"^\W+")
 
 
-def _family_key(family: str) -> str:
+def _family_key(family: str, *, rules: bool = False) -> str:
     """Normalize a family name for matching.
 
     Strips trailing possessive ``’s`` / ``’s`` / ``‘s``
     ("Perruchet’s" -> "perruchet", "Andersson’s" -> "andersson"),
-    trailing lone apostrophes, trailing punctuation, leading marker characters
-    ("*Berg", "†Berg"), and lowercases.
+    trailing lone apostrophes, trailing punctuation, and lowercases. With
+    *rules*, also leading marker characters ("*Berg", "†Berg").
     """
-    s = _LEADING_NON_WORD_RE.sub("", family.strip()).rstrip(",.").lower()
+    s = family.strip()
+    if rules:
+        s = _LEADING_NON_WORD_RE.sub("", s)
+    s = s.rstrip(",.").lower()
     s = _POSSESSIVE_RE.sub("", s)
     # Citations often omit reference-list diacritics (Garcia vs García). Keep
     # the displayed family untouched, but compare on a decomposed ASCII key.
@@ -218,11 +227,11 @@ def _family_key(family: str) -> str:
     )
 
 
-def _family_keys_for(family: str) -> set[str]:
+def _family_keys_for(family: str, *, rules: bool = False) -> set[str]:
     """All match-keys for a family name. Multi-word names also index under
     their last token so a candidate ``Toorn`` can match a ref ``van der Toorn``.
     """
-    base = _family_key(family)
+    base = _family_key(family, rules=rules)
     if not base:
         return set()
     keys = {base}
@@ -263,7 +272,7 @@ class _RefIdx:
 
 
 def _build_ref_index(
-    references: list[PaperReference],
+    references: list[PaperReference], *, rules: bool = False
 ) -> tuple[
     list[_RefIdx],
     dict[tuple[int | None, str | None], list[_RefIdx]],
@@ -271,10 +280,11 @@ def _build_ref_index(
 ]:
     """Build (refs, year_suffix_index, in_press_refs) from PaperReference list.
 
-    A work listed twice (the same authors, year and title start) is indexed
-    once, under its first entry: a citation of it is not ambiguous. Entries
-    that print different year suffixes ("2018a", "2018b") stay apart, since
-    a citation names one of them by its suffix.
+    With *rules*, a work listed twice (the same authors, year and title start)
+    is indexed once, under its first entry: a citation of it is not
+    ambiguous. Entries that print different year suffixes ("2018a", "2018b")
+    stay apart, since a citation names one of them by its suffix. Names are
+    read as ``extract_families`` and ``_family_key`` read them with *rules*.
     """
     refs: list[_RefIdx] = []
     in_press: list[_RefIdx] = []
@@ -283,7 +293,7 @@ def _build_ref_index(
     for r in references:
         is_in_press = bool(getattr(r, "is_in_press", False) or r.year == 0)
         year = None if r.year in (0, None) else r.year
-        families = tuple(extract_families(r.authors))
+        families = tuple(extract_families(r.authors, rules=rules))
         authors, title = _fold(r.authors).strip(), _fold(r.title).strip()[:40]
         idx = _RefIdx(
             bib_id=r.bib_id,
@@ -291,8 +301,8 @@ def _build_ref_index(
             year_suffix=r.year_suffix,
             families=families,
             is_in_press=is_in_press,
-            family_key_sets=tuple(frozenset(_family_keys_for(f)) for f in families),
-            duplicate_key=(authors, year, title) if authors and title else None,
+            family_key_sets=tuple(frozenset(_family_keys_for(f, rules=rules)) for f in families),
+            duplicate_key=(authors, year, title) if rules and authors and title else None,
         )
         refs.append(idx)
         if idx.duplicate_key is not None:
@@ -728,13 +738,19 @@ def _break_tie(tied: list[_RefIdx], cand: _Candidate) -> _RefIdx | None:
 
 
 def _match_pool(
-    pool: list[_RefIdx], cand: _Candidate, overlaps: _Overlap, *, only_one: bool = False
+    pool: list[_RefIdx],
+    cand: _Candidate,
+    overlaps: _Overlap,
+    *,
+    only_one: bool = False,
+    break_ties: bool = True,
 ) -> tuple[_RefIdx | None, list[int]]:
     """Score ``cand`` against the references of its year; see ``_match``.
 
     With ``only_one``, a reference is linked only when no other reference of
     the year fits the citation, or when ``_break_tie`` picks it from those
-    that do; a higher score is not enough.
+    that do; a higher score is not enough. Without ``break_ties`` references
+    that tie stay tied.
     """
     # A bare first-family/year citation cannot distinguish references that
     # share that first family and year by the author list alone: a coauthor or
@@ -751,7 +767,7 @@ def _match_pool(
             if ref.family_key_sets and overlaps(candidate_keys, ref.family_key_sets[0])
         ]
         if len(same_first) > 1:
-            winner = _break_tie(same_first, cand)
+            winner = _break_tie(same_first, cand) if break_ties else None
             if winner is not None:
                 return winner, []
             return None, sorted(ref.bib_id for ref in same_first)
@@ -765,7 +781,7 @@ def _match_pool(
     if len(scored) > 1 and (only_one or scored[1][1] == scored[0][1]):
         top_score = scored[0][1]
         top = [r for r, s in scored if only_one or s == top_score]
-        winner = _break_tie(top, cand)
+        winner = _break_tie(top, cand) if break_ties else None
         if winner is not None:
             return winner, []
         return None, [r.bib_id for r in top]
@@ -807,6 +823,8 @@ def _match(
     cand: _Candidate,
     by_year: dict[tuple[int | None, str | None], list[_RefIdx]],
     in_press_refs: list[_RefIdx],
+    *,
+    rules: bool = False,
 ) -> tuple[_RefIdx | None, list[int]]:
     """Resolve a candidate to a ref.
 
@@ -818,18 +836,19 @@ def _match(
       shortlist.
     - ``(None, [])`` — no candidate ref scored > 0; nothing to disambiguate.
 
-    Names are compared by their match-keys first. Only when no reference of the
-    year shares one with the citation are the looser readings tried
-    (``_LOOSE_OVERLAPS``); they link a single reference or none, and never
-    offer a shortlist, so a citation the exact keys could not place is never
-    narrowed to a wrong pair.
+    Names are compared by their match-keys. With *rules* (a run with no LLM),
+    references that tie are told apart by their author lists (``_break_tie``),
+    and when no reference of the year shares a match-key with the citation the
+    looser readings are tried (``_LOOSE_OVERLAPS``); they link a single
+    reference or none, and never offer a shortlist, so a citation the exact
+    keys could not place is never narrowed to a wrong pair.
     """
     pool = _year_pool(cand, by_year, in_press_refs)
     if not pool:
         return None, []
 
-    ref, tied = _match_pool(pool, cand, _overlap_exact)
-    if ref is not None or tied:
+    ref, tied = _match_pool(pool, cand, _overlap_exact, break_ties=rules)
+    if ref is not None or tied or not rules:
         return ref, tied
     for overlaps, only_one in _LOOSE_OVERLAPS:
         ref, tied = _match_pool(pool, cand, overlaps, only_one=only_one)
@@ -861,17 +880,28 @@ class AmbiguousCandidate:
 def match_with_candidates(
     body_sents: list[PaperSentence],
     references: list[PaperReference],
+    *,
+    rules: bool = False,
 ) -> tuple[list[PaperXref], list[AmbiguousCandidate], list[CitationCandidate]]:
     """Run Tier 2 matching and retain every accepted/rejected source span.
 
     Caller is responsible for feeding only body sentences (use
     ``_get_body_sentences`` to filter references / abstract / title /
     captions / footnotes).
+
+    *rules*: read the names more loosely, for a run with no LLM to settle
+    what the exact reading leaves over. A work listed twice is one work, and
+    references that tie are told apart by author count and order
+    (``_break_tie``); a family spelt a little differently links when only
+    one reference of the year is close to it (``_LOOSE_OVERLAPS``); a
+    reference list's leading marker and a surname in capitals are read
+    through (``_family_key``, ``_is_initials``). Off, none of it applies and
+    the output is that of the exact reading alone.
     """
     if not references:
         return [], [], []
 
-    _refs, by_year, in_press_refs = _build_ref_index(references)
+    _refs, by_year, in_press_refs = _build_ref_index(references, rules=rules)
 
     xrefs: list[PaperXref] = []
     ambiguous: list[AmbiguousCandidate] = []
@@ -883,7 +913,7 @@ def match_with_candidates(
         if not sent.text:
             continue
         for cand in _find_candidates(sent.text, sent.text_id):
-            ref, tied = _match(cand, by_year, in_press_refs)
+            ref, tied = _match(cand, by_year, in_press_refs, rules=rules)
             surface_evidence = (
                 ("separated_possessive", "work_noun_bridge")
                 if cand.surface_kind == "separated_possessive"
@@ -964,23 +994,27 @@ def match_with_candidates(
 def match_with_ambiguous(
     body_sents: list[PaperSentence],
     references: list[PaperReference],
+    *,
+    rules: bool = False,
 ) -> tuple[list[PaperXref], list[AmbiguousCandidate]]:
     """Run Tier 2 matching; return unambiguous xrefs and ambiguous ties."""
 
-    xrefs, ambiguous, _candidates = match_with_candidates(body_sents, references)
+    xrefs, ambiguous, _candidates = match_with_candidates(body_sents, references, rules=rules)
     return xrefs, ambiguous
 
 
 def detect_author_year_xrefs(
     body_sents: list[PaperSentence],
     references: list[PaperReference],
+    *,
+    rules: bool = False,
 ) -> list[PaperXref]:
     """Detect author-year citations; return only unambiguous matches.
 
     Thin wrapper around ``match_with_ambiguous``. Use that function directly
     if you also need the ambiguous-tie list for Tier 3 routing.
     """
-    xrefs, _ = match_with_ambiguous(body_sents, references)
+    xrefs, _ = match_with_ambiguous(body_sents, references, rules=rules)
     return xrefs
 
 
@@ -1076,7 +1110,7 @@ def resolve_citations_by_rules(
     """
     if not references:
         return [(text_id, text, ()) for text_id, text in cites]
-    _refs, by_year, in_press_refs = _build_ref_index(references)
+    _refs, by_year, in_press_refs = _build_ref_index(references, rules=True)
     resolved: list[tuple[int, str, tuple[int, ...]]] = []
     for text_id, text in cites:
         secondary = list(_SECONDARY_SOURCE_RE.finditer(text))
@@ -1086,7 +1120,7 @@ def resolve_citations_by_rules(
         )
         linked: set[int] = set()
         for cand in candidates:
-            ref, _tied = _match(cand, by_year, in_press_refs)
+            ref, _tied = _match(cand, by_year, in_press_refs, rules=True)
             if ref is None and not _tied:
                 pool = _year_pool(cand, by_year, in_press_refs)
                 ref = _match_any_author(pool, cand) or _match_by_initials(pool, cand)

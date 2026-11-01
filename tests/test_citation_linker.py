@@ -228,7 +228,7 @@ class TestVancouverFamilyExtraction:
     def test_same_surname_same_year_abstains_without_initial_or_coauthor_evidence(self):
         refs = [
             _ref(1, author="Smith AB, Jones CD", year=2020),
-            _ref(2, author="Smith CD, Brown EF", year=2020),
+            _ref(2, author="Smith CD", year=2020),
         ]
 
         xrefs, ambiguous = match_with_ambiguous(
@@ -239,7 +239,7 @@ class TestVancouverFamilyExtraction:
         assert len(ambiguous) == 1
         assert set(ambiguous[0].candidate_bib_ids) == {1, 2}
 
-    def test_bare_surname_takes_the_single_author_reference(self):
+    def test_bare_surname_takes_the_single_author_reference_with_rules(self):
         # A work by two authors is cited "Smith and Jones", so a bare "Smith"
         # can only be the one-author work of the same year.
         refs = [
@@ -248,7 +248,7 @@ class TestVancouverFamilyExtraction:
         ]
 
         xrefs, ambiguous = match_with_ambiguous(
-            [_sent(1, "Smith (2020) reported this result.")], refs
+            [_sent(1, "Smith (2020) reported this result.")], refs, rules=True
         )
 
         assert [(xref.text_id, xref.xref_id) for xref in xrefs] == [(1, 2)]
@@ -261,7 +261,7 @@ class TestVancouverFamilyExtraction:
         ]
 
         xrefs, ambiguous = match_with_ambiguous(
-            [_sent(1, "Smith (2020) reported this result.")], refs
+            [_sent(1, "Smith (2020) reported this result.")], refs, rules=True
         )
 
         assert xrefs == []
@@ -895,6 +895,44 @@ class TestRuleTier3:
             rule_tier3=True,
         )
 
+        llm.resolve_citations.assert_called_once()
+        assert xrefs == []
+
+    async def test_tier_two_reads_names_exactly_unless_the_rules_are_on(self):
+        # The same work listed twice: the exact reading cannot tell the entries apart.
+        title = "Gradient methods for sparse signal recovery"
+        refs = [
+            _ref(1, author="Lindqvist, K.", year=2018, title=title),
+            _ref(2, author="Lindqvist, K.", year=2018, title=title),
+        ]
+        sents = [_sent(0, "As shown (Lindqvist, 2018) here.")]
+
+        plain = await detect_bib_xrefs(sents, self.SECTIONS, refs)
+        with_rules = await detect_bib_xrefs(sents, self.SECTIONS, refs, rule_tier3=True)
+
+        assert plain == []
+        assert [(x.xref_id, x.tier) for x in with_rules] == [(1, "author-year")]
+
+    async def test_an_llm_client_keeps_the_exact_reading_of_tier_two(self):
+        from unittest.mock import AsyncMock
+
+        title = "Gradient methods for sparse signal recovery"
+        refs = [
+            _ref(1, author="Lindqvist, K.", year=2018, title=title),
+            _ref(2, author="Lindqvist, K.", year=2018, title=title),
+        ]
+        llm = AsyncMock()
+        llm.resolve_citations = AsyncMock(return_value=[])
+
+        xrefs = await detect_bib_xrefs(
+            [_sent(0, "As shown (Lindqvist, 2018) here.")],
+            self.SECTIONS,
+            refs,
+            llm_client=llm,
+            rule_tier3=True,
+        )
+
+        # still tied, so still the LLM's question
         llm.resolve_citations.assert_called_once()
         assert xrefs == []
 
