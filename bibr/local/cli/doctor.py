@@ -132,14 +132,18 @@ _VISION_OCR_KEY_HINTS = {
 }
 
 
-def _check_ocr_backend(ok, warn, fail, *, llm_backend: str | None = None) -> None:
+def _check_ocr_backend(
+    ok, warn, fail, *, llm_backend: str | None = None, vllm_bootstrap: bool = True
+) -> None:
     """Probe whether the configured OCR backend is importable and instantiable.
 
     The check stops short of actually starting a server / loading weights —
     it just verifies the necessary Python deps are present so users don't
     discover ``vllm-mlx not installed`` halfway through their first run.
     ``llm_backend`` is the configured LLM backend as chew resolves it: the
-    automatic ``paddle`` chain leaves paddle-vllm out beside a llama.cpp LLM.
+    automatic ``paddle`` chain leaves paddle-vllm out beside a llama.cpp LLM;
+    ``vllm_bootstrap`` is false for a fast run that did not choose the OCR route,
+    which leaves it out while vLLM is not installed.
     """
     import importlib.util
 
@@ -197,10 +201,12 @@ def _check_ocr_backend(ok, warn, fail, *, llm_backend: str | None = None) -> Non
     # A one-candidate chain (Windows, and Linux without a GPU that fits
     # paddle-vllm, where it is glm-llama alone) is checked as that backend
     # below, which looks for llama.cpp exactly as chew's preflight does.
-    from bibr.ocr.registry import resolve_backend_candidates
+    from bibr.ocr.registry import bootstrap_kwargs, resolve_backend_candidates
 
     candidates = (
-        resolve_backend_candidates(backend, Settings, llm_backend=llm_backend)
+        resolve_backend_candidates(
+            backend, Settings, llm_backend=llm_backend, **bootstrap_kwargs(vllm_bootstrap)
+        )
         if backend == "paddle"
         else ()
     )
@@ -208,7 +214,9 @@ def _check_ocr_backend(ok, warn, fail, *, llm_backend: str | None = None) -> Non
         from bibr.local.cli.run_config import _ocr_runtime_blocker
 
         # chew refuses the run when no candidate can start; so does doctor.
-        blocker = _ocr_runtime_blocker(backend, llm_backend=llm_backend)
+        blocker = _ocr_runtime_blocker(
+            backend, llm_backend=llm_backend, **bootstrap_kwargs(vllm_bootstrap)
+        )
         if blocker is not None:
             fail("OCR backend: paddle (automatic) — no OCR runtime can start here", hint=blocker)
             return
@@ -720,6 +728,30 @@ def _check_redis(ok, warn) -> None:
         warn("Redis: not configured", hint="Only needed for bibr serve with caching")
 
 
+def _check_run_mode(settings, backend_setting: str, ok, fail) -> str | None:
+    """Report the run mode a plain ``bibr chew`` would take, and why; ``None`` if it can't be told."""
+    from bibr.run_mode import FAST_SKIPS, llm_configured, resolve_mode
+
+    try:
+        mode = resolve_mode(settings, None, backend_setting)
+        configured = settings.pipeline.mode
+        llm_ready = llm_configured(settings, backend_setting)
+    except Exception as e:  # noqa: BLE001 — a bad PIPELINE_MODE is a failed check, not a crash
+        fail(f"Mode: {e}", hint="Set PIPELINE_MODE to auto, fast or full")
+        return None
+    if configured != "auto":
+        why = f"PIPELINE_MODE={configured}"
+    elif llm_ready:
+        why = "auto: a model or API key is configured"
+    else:
+        why = "auto: no model or API key is configured"
+    if mode == "fast":
+        ok(f"Mode: fast ({why}); makes no model calls, skips {FAST_SKIPS}")
+    else:
+        ok(f"Mode: full ({why}); the model reads what the local models are unsure of")
+    return mode
+
+
 def _run_doctor() -> None:
     """Validate the bibr setup and print a diagnostic report."""
     from rich.console import Console
@@ -773,7 +805,12 @@ def _run_doctor() -> None:
     if libmagic_problem is None:
         ok("libmagic available")
     else:
-        fail("libmagic not found", hint=libmagic_problem)
+        # bibr falls back to its own signature check for the formats it reads
+        # (PDF, DOCX, EPUB, XML, HTML), so this no longer stops a run.
+        warn(
+            "libmagic not found; bibr checks file types itself (PDF, DOCX, EPUB, XML, HTML)",
+            hint=libmagic_problem,
+        )
 
     # --- Configuration -------------------------------------------------------
     ui.section(console, "Configuration")
@@ -811,6 +848,12 @@ def _run_doctor() -> None:
                 f"Config: {problem}", hint="Fix it in your .env or environment, then re-run doctor"
             )
 
+    # --- Mode (fast runs on the local models alone; full uses the LLM) --------
+    mode = None
+    if config_ok:
+        ui.section(console, "Mode")
+        mode = _check_run_mode(settings, backend_setting, ok, fail)
+
     # --- LLM (provider + key, or managed local backend; needs Settings) ------
     llm_backend: str | None = None
     if config_ok:
@@ -821,7 +864,11 @@ def _run_doctor() -> None:
         except InputValidationError as e:
             fail(f"LLM backend: {e}", hint="Fix LLM_BACKEND in your .env or environment")
 
-    if llm_backend is None:
+    if mode == "fast":
+        # A fast run makes no LLM call, so a missing key or an unreachable
+        # server is not a failure of the setup; the Mode line above says why.
+        ok("LLM: not used in fast mode (no provider or key checked)")
+    elif llm_backend is None:
         pass
     elif llm_backend in LOCAL_LLM_BACKENDS:
         # Managed local server: report backend + model, check the launcher and
@@ -857,7 +904,17 @@ def _run_doctor() -> None:
     # --- OCR (needs Settings) -------------------------------------------------
     if config_ok:
         ui.section(console, "OCR")
-        _check_ocr_backend(ok, warn, fail, llm_backend=llm_backend)
+        # A fast run starts no LLM server, so its OCR chain is the cloud one; it
+        # bootstraps vLLM only when OCR_BACKEND names the route.
+        fast = mode == "fast"
+        bootstrap = not fast or "backend" in settings.ocr.model_fields_set
+        _check_ocr_backend(
+            ok,
+            warn,
+            fail,
+            llm_backend="cloud" if fast else llm_backend,
+            **({} if bootstrap else {"vllm_bootstrap": False}),
+        )
 
     # --- Pipeline -------------------------------------------------------------
     ui.section(console, "Pipeline")

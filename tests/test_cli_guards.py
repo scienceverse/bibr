@@ -299,3 +299,238 @@ async def test_paper_id_with_single_file_directory_exits_2(tmp_path, monkeypatch
     with pytest.raises(SystemExit) as exc_info:
         await _run_process(args)
     assert exc_info.value.code == 2
+
+
+# --- Guard 4: the first-run walls (no key, no OCR runtime, no vLLM) -----------------
+
+_KEY_VARS = (
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "LANGEXTRACT_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_API_KEY",
+    "GROQ_API_KEY",
+    "OPENAI_API_KEY",
+    "LLM_API_KEY",
+    "LLM_BASE_URL",
+    "LLM_PROVIDER",
+    "LLM_MODEL",
+    "LLM_BACKEND",
+    "PIPELINE_MODE",
+    "OCR_BACKEND",
+)
+
+
+class _RecordingPipeline(_FakePipeline):
+    """A fake pipeline that keeps the kwargs ``bibr chew`` built it with."""
+
+    built: list[dict] = []
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        _RecordingPipeline.built.append(kwargs)
+
+
+@pytest.fixture
+def first_run(monkeypatch):
+    """A machine with no LLM configured, a fake pipeline and a credential check that fails.
+
+    Returns the list of credential-check calls: a run that must not ask for a key leaves it empty.
+    """
+    from bibr.config import GlobalSettings
+
+    for var in _KEY_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr("bibr.config.Settings", GlobalSettings())
+    _disable_ocr_runtime_preflight(monkeypatch)
+    # What the real download announcement would say depends on this machine's cache.
+    monkeypatch.setattr("bibr.local.cli.process.announce_downloads", lambda *a, **k: None)
+    _RecordingPipeline.built = []
+    monkeypatch.setattr("bibr.local.pipeline.LocalPipeline", _RecordingPipeline)
+
+    asked: list[str] = []
+
+    def no_key(settings=None):  # noqa: ARG001
+        asked.append("asked")
+        raise ValueError("Google API key required: set GOOGLE_API_KEY")
+
+    monkeypatch.setattr("bibr.clients.llm.preflight_credentials", no_key)
+    return asked
+
+
+def _pdf(tmp_path):
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    return pdf
+
+
+async def test_a_run_with_no_key_and_no_flag_runs_fast_without_asking_for_one(
+    tmp_path, first_run, capsys
+):
+    """The credential check was the first wall of a fresh install; with nothing to call it is moot."""
+    from bibr.local.cli import _build_parser, _run_process
+
+    await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path))]))
+
+    assert first_run == []
+    (kwargs,) = _RecordingPipeline.built
+    assert kwargs["mode"] == "fast"
+    assert kwargs["llm_backend"] == "cloud"
+    assert kwargs["no_llm"] is False
+    assert kwargs["ocr_requested"] is False
+    err = capsys.readouterr().err
+    assert "mode fast" in err
+    assert "no LLM calls" in err
+
+
+async def test_fast_flag_runs_fast_even_with_a_key(tmp_path, first_run, monkeypatch):
+    from bibr.local.cli import _build_parser, _run_process
+
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--fast"]))
+
+    assert first_run == []
+    assert _RecordingPipeline.built[0]["mode"] == "fast"
+
+
+async def test_full_flag_with_no_key_stops_at_the_credential_check_and_suggests_fast(
+    tmp_path, first_run, capsys
+):
+    from bibr.local.cli import _build_parser, _run_process
+
+    with pytest.raises(SystemExit) as exc_info:
+        await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--full"]))
+
+    assert exc_info.value.code == 1
+    assert first_run == ["asked"]
+    assert _RecordingPipeline.built == []
+    err = capsys.readouterr().err
+    assert "Google API key required" in err
+    assert "--fast" in err
+    assert "--no-llm" in err
+
+
+async def test_a_configured_llm_with_no_flag_still_asks_for_its_key(
+    tmp_path, first_run, monkeypatch
+):
+    """Naming a provider is choosing an LLM: the run is full and a missing key is an error."""
+    from bibr.config import GlobalSettings
+    from bibr.local.cli import _build_parser, _run_process
+
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setattr("bibr.config.Settings", GlobalSettings())
+
+    with pytest.raises(SystemExit) as exc_info:
+        await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path))]))
+
+    assert exc_info.value.code == 1
+    assert first_run == ["asked"]
+
+
+async def test_no_llm_does_not_ask_for_a_key_and_stays_structure_only(tmp_path, first_run):
+    from bibr.local.cli import _build_parser, _run_process
+
+    await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--no-llm"]))
+
+    assert first_run == []
+    (kwargs,) = _RecordingPipeline.built
+    assert kwargs["no_llm"] is True
+    assert kwargs["mode"] == "full"
+
+
+async def test_the_ocr_check_comes_before_the_credential_check(
+    tmp_path, first_run, monkeypatch, capsys
+):
+    """A machine that cannot OCR at all hears that before it is asked for a key."""
+    from bibr.local.cli import _build_parser, _run_process
+
+    monkeypatch.setattr(
+        "bibr.local.cli.process._preflight_ocr_runtime",
+        lambda config: "No local OCR runtime can start on this machine for PDF input",
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--full"]))
+
+    assert exc_info.value.code == 1
+    assert first_run == []
+    err = capsys.readouterr().err
+    assert "No local OCR runtime" in err
+    assert "API key" not in err
+
+
+async def test_fast_refuses_an_llm_only_option_before_doing_anything(tmp_path, first_run, capsys):
+    from bibr.local.cli import _build_parser, _run_process
+
+    with pytest.raises(SystemExit) as exc_info:
+        await _run_process(
+            _build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--fast", "--refs", "llm"])
+        )
+
+    assert exc_info.value.code == 2
+    assert "calls an LLM" in capsys.readouterr().err
+    assert _RecordingPipeline.built == []
+    assert first_run == []
+
+
+async def test_a_fast_run_announces_the_downloads_before_the_pipeline_is_built(
+    tmp_path, first_run, monkeypatch
+):
+    from bibr.local.cli import _build_parser, _run_process
+
+    order: list[str] = []
+    monkeypatch.setattr(
+        "bibr.local.cli.process.announce_downloads", lambda *a, **k: order.append("announce")
+    )
+
+    class _Ordered(_RecordingPipeline):
+        def __init__(self, **kwargs):
+            order.append("pipeline")
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr("bibr.local.pipeline.LocalPipeline", _Ordered)
+    await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path))]))
+
+    assert order == ["announce", "pipeline"]
+
+
+# --- the vLLM bootstrap is opt-in for a fast run --------------------------------------
+
+
+@pytest.fixture
+def gpu_without_vllm(monkeypatch):
+    """A Linux x86 box with a roomy GPU, where vLLM is not installed."""
+    from bibr.ocr import registry
+
+    monkeypatch.setattr(registry.sys, "platform", "linux")
+    monkeypatch.setattr(registry.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: 24.0)
+    monkeypatch.setattr(registry, "paddle_vllm_unavailable_reason", lambda: None)
+    monkeypatch.setattr(registry, "vllm_compute_capability_blocker", lambda: None)
+    monkeypatch.setattr(registry, "vllm_bootstrap_pending", lambda: True)
+
+
+async def test_a_fast_run_with_no_chosen_ocr_route_announces_the_vllm_opt_in(
+    tmp_path, first_run, gpu_without_vllm, capsys
+):
+    from bibr.local.cli import _build_parser, _run_process
+
+    await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path))]))
+
+    err = capsys.readouterr().err
+    assert "paddle-vllm not started" in err
+    assert "--ocr paddle" in err
+    assert "glm-llama (automatic)" in err
+
+
+async def test_a_fast_run_that_chose_paddle_ocr_does_not_hold_back_vllm(
+    tmp_path, first_run, gpu_without_vllm, capsys
+):
+    from bibr.local.cli import _build_parser, _run_process
+
+    await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--ocr", "paddle"]))
+
+    err = capsys.readouterr().err
+    assert "paddle-vllm not started" not in err
+    assert "paddle-vllm (automatic)" in err
+    assert _RecordingPipeline.built[0]["ocr_requested"] is True

@@ -6,6 +6,7 @@ ones the real run already does via ``resolve_run_config``/``_default_memory_mode
 — none of them construct a pipeline, backend client, or HTTP/HF-hub session.
 """
 
+import re
 from pathlib import Path
 
 from rich.markup import escape
@@ -50,10 +51,18 @@ _OCR_LOCAL_WEIGHT_FIELD = {
 # download" (a download is happening either way) but with "(size unknown)"
 # rather than guessing a figure.
 _APPROX_MODEL_SIZES: dict[str, str] = {
-    # bibr/local/segmenter.py module docstring: "Tiny model (~0.1 GB)".
-    "segment-any-text/sat-6l-sm": "0.1 GB",
-    # MiniLM two-head classifier, ~22M params (bibr/config.py comment).
+    # model_optimized.onnx of the pinned SaT 6-layer model, plus the XLM-R tokenizer.
+    "segment-any-text/sat-6l-sm": "0.45 GB",
+    # ONNX layout detector (onnx/model.onnx).
+    "scienceverse/bibr-layout-onnx": "0.13 GB",
+    # MiniLM two-head classifiers, ~22M params (bibr/config.py comment).
     "scienceverse/bibr-section-classifier": "90 MB",
+    "scienceverse/bibr-paper-classifier": "90 MB",
+    # Frozen sklearn bundle (joblib), a few MB.
+    "scienceverse/bibr-front-role-v1": "6 MB",
+    # Front-matter tagger: encoder + CRF as one ONNX file (fast mode's title,
+    # author and abstract reader).
+    "scienceverse/bibr-front-tagger": "0.3 GB",
     # Frozen sklearn GBM bundle (joblib) — tabular model, negligible size.
     "scienceverse/bibr-geom-segmenter-v1": "1 MB",
     # answerdotai/ModernBERT-base (~150M params) encoder + CRF head.
@@ -87,12 +96,15 @@ def _dry_run_ocr_model(config: ResolvedRunConfig) -> tuple[str, str | None]:
     remotely (HTTP servers, cloud vision providers) — nothing local to check.
     """
     from bibr.config import Settings
-    from bibr.ocr.registry import resolve_backend_candidates
+    from bibr.ocr.registry import bootstrap_kwargs, resolve_backend_candidates
 
     backend = config.ocr_backend
     if backend == "paddle":
         candidate = resolve_backend_candidates(
-            backend, Settings, llm_backend=_run_llm_backend(config)
+            backend,
+            Settings,
+            llm_backend=_run_llm_backend(config),
+            **bootstrap_kwargs(getattr(config, "vllm_bootstrap", True)),
         )[0]
         # Served identity vs weight repo: the first candidate's display model
         # may be a server alias (paddle-vllm advertises
@@ -133,10 +145,13 @@ def _dry_run_ocr_model(config: ResolvedRunConfig) -> tuple[str, str | None]:
 def _dry_run_ocr_candidates(config: ResolvedRunConfig):
     """Return the ordered runtime identities without importing or starting one."""
     from bibr.config import Settings
-    from bibr.ocr.registry import resolve_backend_candidates
+    from bibr.ocr.registry import bootstrap_kwargs, resolve_backend_candidates
 
     return resolve_backend_candidates(
-        config.ocr_backend, Settings, llm_backend=_run_llm_backend(config)
+        config.ocr_backend,
+        Settings,
+        llm_backend=_run_llm_backend(config),
+        **bootstrap_kwargs(getattr(config, "vllm_bootstrap", True)),
     )
 
 
@@ -159,6 +174,8 @@ def _dry_run_llm_label(config: ResolvedRunConfig) -> str:
     """LLM provider/model the real run would use, or the disabled marker."""
     if config.no_llm:
         return "disabled (--no-llm)"
+    if config.mode == "fast":
+        return "disabled (fast mode)"
     from bibr.config import Settings
     from bibr.local.pipeline import LOCAL_LLM_BACKENDS
 
@@ -166,6 +183,33 @@ def _dry_run_llm_label(config: ResolvedRunConfig) -> str:
         model = _managed_llm_model(config.llm_backend, Settings)
         return f"{config.llm_backend} (managed local server, model={model})"
     return f"{Settings.llm.provider}/{Settings.llm.model}"
+
+
+def _dry_run_mode_label(config: ResolvedRunConfig) -> str:
+    """The run mode and what it leaves out, as the real run's mode line puts it."""
+    from bibr.run_mode import FAST_SKIPS
+
+    if config.no_llm:
+        return "structure only (--no-llm): skips authors, references, equations and Crossref"
+    if config.mode == "fast":
+        return f"fast: no LLM calls, skips {FAST_SKIPS}"
+    return "full: the configured LLM reads what the local models are unsure of"
+
+
+def _dry_run_ref_strategies(config: ResolvedRunConfig) -> tuple[str, str]:
+    """``(segmentation, parse)`` the run uses, with the LLM ones swapped out in a fast run."""
+    from bibr.extract.ref_extractor import _resolve_ref_strategies
+    from bibr.run_mode import LLM_PARSE_STRATEGIES
+
+    seg, parse = _resolve_ref_strategies(config.ref_seg, config.refs)
+    if config.mode == "fast" and not config.no_llm:
+        # What ``fast_settings`` does to the setting-level strategies; a per-run
+        # LLM strategy was refused when the options were resolved.
+        if seg == "llm":
+            seg = "geom"
+        if parse in LLM_PARSE_STRATEGIES:
+            parse = "ner"
+    return seg, parse
 
 
 def _dry_run_memory_mode_label(args, config: ResolvedRunConfig) -> str:
@@ -272,13 +316,27 @@ def _hf_cache_status(repo_id: str, *, llm_backend: str | None = None) -> str:
     except Exception:  # noqa: BLE001 — a broken/unreadable cache dir shouldn't crash the preview
         if cache_model_dir is not None and cache_model_dir.exists():
             return "cached"
-        return "cache state unknown (could not scan HF cache)"
+        if _hf_cache_root(cache_dir).exists():
+            return "cache state unknown (could not scan HF cache)"
+        # A fresh machine has no Hugging Face cache yet (``scan_cache_dir``
+        # raises for a missing directory): nothing is cached, so every model is
+        # a download, which is the answer the preview exists to give.
+        cached_ids = set()
     if cache_model_dir is not None and cache_model_dir.exists():
         return "cached"
     if bare_repo_id in cached_ids:
         return "cached"
     size = _APPROX_MODEL_SIZES.get(bare_repo_id)
     return f"will download (~{size})" if size else "will download (size unknown)"
+
+
+def _hf_cache_root(cache_dir: str | None) -> Path:
+    """The Hugging Face hub cache directory a status check reads."""
+    if cache_dir:
+        return Path(cache_dir)
+    from huggingface_hub import constants
+
+    return Path(constants.HF_HUB_CACHE)
 
 
 def _pinned_build_cache_status(repo_id: str, cache_dir: str | None) -> str | None:
@@ -331,6 +389,15 @@ def _snapshot_has_weights(repo_id: str, revision: str, cache_dir: str | None) ->
         return False
 
 
+def _hub_or_local(model_id: str) -> str:
+    """*model_id* as the cache check reads it: a Hub id as is, a local path as a local bundle."""
+    from bibr.utils.ml_runtime import is_hub_repo_id
+
+    if is_hub_repo_id(model_id.partition(":")[0], warn=False):
+        return model_id
+    return f"local bundle: {model_id}"
+
+
 def _dry_run_model_specs(
     config: ResolvedRunConfig,
     seg_strategy: str,
@@ -339,26 +406,35 @@ def _dry_run_model_specs(
     needs_ocr: bool,
 ) -> list[tuple[str, str]]:
     """``(label, repo_id)`` for every model this run's resolved config implies."""
-    import importlib.util
-
     from bibr.config import Settings
+    from bibr.utils.ml_runtime import torch_available
 
     specs: list[tuple[str, str]] = []
     if needs_ocr:
-        specs.append(("layout (PP-DocLayout)", Settings.layout.model_id))
+        # The ONNX bundle is what a core install (ML_RUNTIME=auto) loads for layout.
+        layout_id = Settings.layout.model_id
+        if Settings.ml.runtime != "torch" and Settings.layout.onnx_model_id:
+            layout_id = Settings.layout.onnx_model_id
+        specs.append(("layout (PP-DocLayout)", layout_id))
     specs.append(
         ("sentence segmenter (wtpsplit)", display_wtpsplit_repo_id(Settings.WTPSPLIT_MODEL))
     )
 
-    # The trained MiniLM section classifier needs the ml extra and is not
-    # used at all under --no-llm (lookup-only alias path — see post_parse.py
-    # ``_classify_sections``).
-    if (
-        not config.no_llm
-        and importlib.util.find_spec("torch") is not None
-        and Settings.ml.section_classifier_model_id
-    ):
-        specs.append(("section classifier", Settings.ml.section_classifier_model_id))
+    ml = Settings.ml
+    # The trained classifiers run on ONNX Runtime (core install) or torch, and
+    # none of them is used at all under --no-llm (lookup-only alias path — see
+    # post_parse.py ``_classify_sections``).
+    if not config.no_llm and (ml.runtime != "torch" or torch_available()):
+        for label, model_id in (
+            ("section classifier", ml.section_classifier_model_id),
+            ("paper classifier", ml.paper_classifier_model_id),
+            ("front-role classifier", ml.front_role_model_id),
+        ):
+            if model_id:
+                specs.append((label, _hub_or_local(model_id)))
+    # Fast mode answers title, authors and abstract from the front-matter tagger.
+    if config.mode == "fast" and not config.no_llm and ml.front_tagger_model_id:
+        specs.append(("front-matter tagger", _hub_or_local(ml.front_tagger_model_id)))
 
     # Reference seg/parse models only load under LLM-enabled PDF/OCR runs —
     # --no-llm skips reference extraction entirely for OCR'd input (see
@@ -376,7 +452,7 @@ def _dry_run_model_specs(
         _, ocr_weight_repo = _dry_run_ocr_model(config)
         if ocr_weight_repo:
             specs.append(("OCR weights", ocr_weight_repo))
-    if not config.no_llm:
+    if config.uses_llm:
         from bibr.local.pipeline import LOCAL_LLM_BACKENDS
 
         if config.llm_backend in LOCAL_LLM_BACKENDS:
@@ -385,6 +461,81 @@ def _dry_run_model_specs(
                 specs.append(("LLM weights", llm_weight_repo))
 
     return specs
+
+
+_SIZE_TEXT = re.compile(r"~([\d.]+)(?:-([\d.]+))?\s*(GB|MB)")
+
+
+def _status_size_mb(status: str) -> float | None:
+    """The (upper-bound) download size a cache status names, in MB, or ``None``."""
+    found = _SIZE_TEXT.search(status)
+    if found is None:
+        return None
+    amount = float(found.group(2) or found.group(1))
+    return amount * 1000 if found.group(3) == "GB" else amount
+
+
+def _download_total(statuses: list[str]) -> str:
+    """``3 models (about 1.2 GB and 1 of unknown size)`` for the "will download" *statuses*."""
+    sizes = [_status_size_mb(status) for status in statuses]
+    known = sum(size for size in sizes if size is not None)
+    unknown = sum(1 for size in sizes if size is None)
+    total = f"{known / 1000:.1f} GB" if known >= 1000 else f"{known:.0f} MB"
+    extra = f" and {unknown} of unknown size" if unknown else ""
+    noun = "model" if len(statuses) == 1 else "models"
+    return f"{len(statuses)} {noun} (about {total}{extra})"
+
+
+def pending_downloads(config: ResolvedRunConfig, files: list[Path]) -> list[tuple[str, str, str]]:
+    """``(label, repo_id, status)`` for each model this run would download, nothing fetched.
+
+    The same rows ``--dry-run`` lists under Models, kept to the ones whose cache
+    status says "will download". A cache that cannot be read yields none: the
+    notice is a courtesy and never a reason to stop.
+    """
+    seg, parse = _dry_run_ref_strategies(config)
+    needs_ocr = any(f.suffix.lower() == ".pdf" for f in files)
+    try:
+        specs = _dry_run_model_specs(config, seg, parse, needs_ocr=needs_ocr)
+        rows = [
+            (label, repo_id, _hf_cache_status(repo_id, llm_backend=config.llm_backend))
+            for label, repo_id in specs
+        ]
+    except Exception:  # noqa: BLE001 — the announcement must not fail the run it announces
+        return []
+    return [row for row in rows if row[2].startswith("will download")]
+
+
+def format_download_notice(pending: list[tuple[str, str, str]]) -> list[str]:
+    """Rich lines announcing the downloads in *pending*, with the total and each model's size."""
+    if not pending:
+        return []
+    lines = [
+        f"  [yellow]↓[/yellow] First run: downloading {_download_total([s for *_, s in pending])}. "
+        "They are cached, so later runs start without this."
+    ]
+    for label, repo_id, status in pending:
+        found = _SIZE_TEXT.search(status)
+        shown = found.group(0) if found else "size unknown"
+        lines.append(f"    [dim]{escape(label)}: {escape(repo_id)} {ui.SEP} {escape(shown)}[/dim]")
+    return lines
+
+
+def announce_downloads(config: ResolvedRunConfig, files: list[Path], console) -> None:
+    """Say what is about to be downloaded, with the total, before the first byte moves.
+
+    Silent on a warm cache. When something is pending and stderr is a terminal,
+    the download progress bars that follow carry the model's name; piped, there
+    are no bars (``_suppress_progress_bars_if_not_tty``) and the notice is the
+    whole record.
+    """
+    from bibr.utils.hf_cache import name_download_bars
+
+    pending = pending_downloads(config, list(files))
+    for line in format_download_notice(pending):
+        console.print(line, soft_wrap=True)
+    if pending:
+        name_download_bars(True)
 
 
 def _dry_run_output_destinations(
@@ -440,10 +591,8 @@ def _print_dry_run_plan(
     """
     from rich.console import Console
 
-    from bibr.extract.ref_extractor import _resolve_ref_strategies
-
     out = Console()
-    seg_strategy, parse_strategy = _resolve_ref_strategies(config.ref_seg, config.refs)
+    seg_strategy, parse_strategy = _dry_run_ref_strategies(config)
     needs_ocr = any(f.suffix.lower() == ".pdf" for f in files)
 
     ui.brand_header(
@@ -462,6 +611,7 @@ def _print_dry_run_plan(
     # MarkupError.
     model_label = escape(_dry_run_ocr_model(config)[0])
     ui.section(out, "Plan")
+    out.print(ui.kv("mode", escape(_dry_run_mode_label(config))), soft_wrap=True)
     out.print(
         ui.kv(
             "ocr",
@@ -500,15 +650,21 @@ def _print_dry_run_plan(
     specs = _dry_run_model_specs(config, seg_strategy, parse_strategy, needs_ocr=needs_ocr)
     if not specs:
         out.print("  [dim]none[/dim]")
+    downloads: list[str] = []
     for label, repo_id in specs:
         status = _hf_cache_status(repo_id, llm_backend=config.llm_backend)
         if status in ("cached", "available locally"):
             mark = f"[green]{ui.OK}[/green]"
         elif status.startswith("will download"):
             mark = "[yellow]↓[/yellow]"
+            downloads.append(status)
         else:
             mark = "[dim]?[/dim]"
         out.print(f"  {mark} {escape(f'{label}: {repo_id} — {status}')}", soft_wrap=True)
+    if downloads:
+        # What a fresh machine needs to hear before it commits to the run.
+        summary = f"Would download {_download_total(downloads)} on the first run; later runs use the cache."
+        out.print(f"  [dim]{escape(summary)}[/dim]", soft_wrap=True)
 
     ui.section(out, "Output")
     for line in _dry_run_output_destinations(
@@ -582,13 +738,13 @@ def _dry_run_blockers(config, files: list, missing_count: int) -> list[str]:
     blockers: list[str] = []
     if missing_count:
         blockers.append(f"{missing_count} input(s) not found — the real run counts them as errors.")
-    if not config.no_llm and config.llm_backend == "cloud":
+    if config.uses_llm and config.llm_backend == "cloud":
         credential_blocker = _dry_run_cloud_credential_blocker()
         if credential_blocker is not None:
             blockers.append(credential_blocker)
     from bibr.local.pipeline import LOCAL_LLM_BACKENDS
 
-    if not config.no_llm and config.llm_backend in LOCAL_LLM_BACKENDS:
+    if config.uses_llm and config.llm_backend in LOCAL_LLM_BACKENDS:
         err = _preflight_local_backend(config.llm_backend)
         if err:
             blockers.append(err)

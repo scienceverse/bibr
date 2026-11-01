@@ -410,8 +410,8 @@ def _build_server(upload_stores):
 
                 raise ConfigurationError(
                     "MCP_ENABLED=true requires the optional 'mcp' dependency — install "
-                    "it with 'uv sync --extra mcp' (source checkout) or "
-                    "pip install 'bibr[mcp]'."
+                    "it with: uv tool install 'bibr[mcp]' "
+                    "(in a source checkout: uv sync --extra mcp)."
                 ) from e
             raise
         mount_mcp(

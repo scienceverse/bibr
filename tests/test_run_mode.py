@@ -9,7 +9,14 @@ from bibr.clients.llm import preflight_credentials
 from bibr.config import GlobalSettings, compute_behavior_fingerprint
 from bibr.exceptions import InputValidationError
 from bibr.presets import InvalidPresetError, PresetManager
-from bibr.run_mode import _log_local_strategy, fast_settings, llm_configured, resolve_mode
+from bibr.run_mode import (
+    FAST_SKIPS,
+    _log_local_strategy,
+    fast_settings,
+    llm_configured,
+    resolve_mode,
+    resolve_run_mode,
+)
 from bibr.structure.section_classifier import _min_confidence
 
 _KEY_VARS = (
@@ -405,3 +412,65 @@ def test_a_preset_with_a_bad_mode_is_refused(tmp_path):
     manager.save("bad", {"PIPELINE_MODE": "turbo"})
     with pytest.raises(InvalidPresetError, match="PIPELINE_MODE"):
         manager.apply("bad", tmp_path / ".env")
+
+
+# --- resolve_run_mode: what the entry points (bibr chew, bibr batch, bibr.chew) take ----------
+
+
+@pytest.mark.parametrize("key", [None, "k"])
+@pytest.mark.parametrize("explicit", [None, "auto", "fast", "full"])
+def test_no_llm_is_structure_only_and_never_fast(monkeypatch, explicit, key):
+    """--no-llm stays "full" so it never takes the fast overlay, whatever else is asked or set."""
+    s = _settings(monkeypatch, google=key)
+    assert resolve_run_mode(s, explicit=explicit, no_llm=True) == "full"
+
+
+def test_no_llm_stays_full_even_when_the_setting_says_fast(monkeypatch):
+    s = _settings(monkeypatch, mode="fast")
+    assert resolve_run_mode(s, no_llm=True) == "full"
+
+
+def test_a_run_with_no_llm_and_no_flag_is_fast(monkeypatch):
+    assert resolve_run_mode(_settings(monkeypatch)) == "fast"
+
+
+def test_a_run_with_a_key_and_no_flag_is_full(monkeypatch):
+    assert resolve_run_mode(_settings(monkeypatch, google="k")) == "full"
+
+
+def test_the_flag_beats_the_setting_in_both_directions(monkeypatch):
+    assert (
+        resolve_run_mode(_settings(monkeypatch, google="k", mode="full"), explicit="fast") == "fast"
+    )
+    assert resolve_run_mode(_settings(monkeypatch, mode="fast"), explicit="full") == "full"
+
+
+def test_an_llm_only_option_under_auto_asks_for_an_llm_so_the_run_is_full(monkeypatch):
+    """--refs llm with no key must reach the credential error, not quietly run fast."""
+    s = _settings(monkeypatch)
+    assert resolve_run_mode(s, llm_flags=["--refs llm"]) == "full"
+    assert resolve_run_mode(s, explicit="auto", llm_flags=["--llm vllm"]) == "full"
+
+
+def test_an_llm_only_option_with_an_explicit_fast_is_refused(monkeypatch):
+    s = _settings(monkeypatch, google="k")
+    with pytest.raises(ValueError, match=r"--refs llm calls an LLM, which fast mode \(--fast\)"):
+        resolve_run_mode(s, explicit="fast", llm_flags=["--refs llm"])
+
+
+def test_the_refusal_names_how_fast_was_chosen(monkeypatch):
+    s = _settings(monkeypatch, mode="fast")
+    with pytest.raises(ValueError, match=r"PIPELINE_MODE=fast"):
+        resolve_run_mode(s, llm_flags=["--ref-seg llm"])
+    with pytest.raises(ValueError, match=r"mode='fast'"):
+        resolve_run_mode(s, explicit="fast", llm_flags=["llm='vllm'"], fast_label="mode='fast'")
+
+
+def test_an_llm_only_option_with_an_explicit_full_runs_full(monkeypatch):
+    s = _settings(monkeypatch, mode="fast")
+    assert resolve_run_mode(s, explicit="full", llm_flags=["--refs llm"]) == "full"
+
+
+def test_fast_skips_names_what_fast_mode_leaves_out():
+    assert "LLM" in FAST_SKIPS
+    assert "sections" in FAST_SKIPS

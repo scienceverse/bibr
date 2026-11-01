@@ -45,3 +45,28 @@ def test_demo_parser_accepts_explicit_memory_mode():
     args = build_parser().parse_args(["--memory", "aggressive"])
 
     assert args.memory == "aggressive"
+
+
+def test_missing_gradio_names_the_tool_install(monkeypatch, capsys):
+    """``bibr demo`` without Gradio tells an installed-tool user how to add the extra."""
+    import sys
+
+    from bibr.demo.server import main
+
+    monkeypatch.setitem(sys.modules, "gradio", None)
+    monkeypatch.setattr(sys, "argv", ["bibr-demo"])
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+    assert exc_info.value.code == 1
+    err = " ".join(capsys.readouterr().err.split())
+    assert "uv tool install 'bibr[demo]'" in err
+
+
+def test_create_local_demo_without_gradio_names_the_tool_install(monkeypatch):
+    import sys
+
+    from bibr.demo import create_local_demo
+
+    monkeypatch.setitem(sys.modules, "bibr.demo.local_app", None)
+    with pytest.raises(ImportError, match=r"uv tool install 'bibr\[demo\]'"):
+        create_local_demo()

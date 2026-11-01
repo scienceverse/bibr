@@ -1581,7 +1581,9 @@ def test_print_done_demo_hint_when_install_declined(monkeypatch):
     declined = _recording_wizard()
     declined.selected_extras = {"demo", "ml"}
     declined._print_done()
-    assert "needs the demo extra" in declined.console.export_text()
+    declined_text = declined.console.export_text()
+    assert "needs the demo extra" in declined_text
+    assert "uv tool install 'bibr[demo]'" in declined_text
 
     installed = _recording_wizard()
     installed.selected_extras = {"demo", "ml"}

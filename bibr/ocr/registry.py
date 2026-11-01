@@ -11,6 +11,7 @@ Extra keyword arguments not consumed by the backend are silently ignored
 from __future__ import annotations
 
 import functools
+import importlib.util
 import logging
 import math
 import os
@@ -460,7 +461,11 @@ def _candidate(backend: str, settings: GlobalSettings) -> OcrBackendCandidate:
 
 
 def resolve_backend_candidates(
-    name: str | None, settings: GlobalSettings, *, llm_backend: str | None = None
+    name: str | None,
+    settings: GlobalSettings,
+    *,
+    llm_backend: str | None = None,
+    vllm_bootstrap: bool = True,
 ) -> tuple[OcrBackendCandidate, ...]:
     """Resolve an OCR request to concrete, deterministic startup candidates.
 
@@ -468,7 +473,8 @@ def resolve_backend_candidates(
     Explicit concrete backends are deliberately single-candidate requests so a
     user-selected runtime is never silently replaced by another implementation.
     ``llm_backend`` is the run's resolved LLM backend, when the caller knows
-    it (see ``automatic_backend_names``).
+    it, and ``vllm_bootstrap`` says whether a missing vLLM may be bootstrapped
+    (see ``automatic_backend_names``).
     """
     if name is None:
         ocr_opts = settings.ocr
@@ -482,7 +488,9 @@ def resolve_backend_candidates(
         return (_candidate(name, settings),)
     return tuple(
         _candidate(backend, settings)
-        for backend in automatic_backend_names(llm_backend=llm_backend)
+        for backend in automatic_backend_names(
+            llm_backend=llm_backend, vllm_bootstrap=vllm_bootstrap
+        )
     )
 
 
@@ -494,14 +502,47 @@ _LLAMA_CPP_LLM_KEEPS_OCR_ON_LLAMA_CPP = (
 )
 
 
-def automatic_backend_names(*, llm_backend: str | None = None) -> tuple[str, ...]:
+#: Why a fast run with no chosen OCR route leaves paddle-vllm out of the chain
+#: when vLLM is not installed: starting it means a multi-GB download.
+VLLM_BOOTSTRAP_NOT_REQUESTED = (
+    "vLLM is not installed, so starting paddle-vllm would download several GB first; "
+    "a fast run does that only when you choose it"
+)
+
+#: What to type to accept that download.
+VLLM_BOOTSTRAP_OPT_IN = (
+    "pass --ocr paddle (or set OCR_BACKEND=paddle) to download vLLM on first use, "
+    "or install it once with `uv sync --extra vllm`"
+)
+
+
+def bootstrap_kwargs(vllm_bootstrap: bool) -> dict[str, bool]:
+    """``{"vllm_bootstrap": False}`` for a run that may not bootstrap vLLM, else nothing.
+
+    The default (allowed) needs no mention, so callers splat this into
+    :func:`resolve_backend_candidates` / :func:`automatic_backend_names` and the
+    calls stay as they were for every run that is not a fast run nobody chose OCR for.
+    """
+    return {} if vllm_bootstrap else {"vllm_bootstrap": False}
+
+
+def vllm_bootstrap_pending() -> bool:
+    """Whether managed vLLM would have to be bootstrapped: it is not importable here."""
+    return importlib.util.find_spec("vllm") is None
+
+
+def automatic_backend_names(
+    *, llm_backend: str | None = None, vllm_bootstrap: bool = True
+) -> tuple[str, ...]:
     """The concrete runtimes the automatic ``paddle`` selector tries here, in order.
 
     ``llm_backend`` is the run's resolved LLM backend (``"cloud"`` for
-    ``--no-llm``; None when the caller does not know it). On Linux a
+    ``--no-llm`` or a fast run; None when the caller does not know it). On Linux a
     ``llama-cpp`` LLM leaves paddle-vllm out, so the OCR runs GLM-OCR on
     llama.cpp, the pair setup recommends, and so does a card whose compute
-    capability is below ``VLLM_MIN_COMPUTE_CAPABILITY``.
+    capability is below ``VLLM_MIN_COMPUTE_CAPABILITY``. With ``vllm_bootstrap``
+    false it is left out too while vLLM is not installed, so the multi-GB
+    ``uv tool run`` bootstrap starts only when the user chose the OCR route.
     """
     if sys.platform == "darwin" and platform.machine() == "arm64":
         return ("paddle-rapid-mlx", "paddle-mlx-vlm", "glm-rapid-mlx", "glm-llama")
@@ -516,6 +557,8 @@ def automatic_backend_names(*, llm_backend: str | None = None) -> tuple[str, ...
             if llm_backend == "llama-cpp"
             else paddle_vllm_unavailable_reason() or vllm_compute_capability_blocker()
         )
+        if vllm_blocker is None and not vllm_bootstrap and vllm_bootstrap_pending():
+            vllm_blocker = VLLM_BOOTSTRAP_NOT_REQUESTED
         if vllm_blocker is None:
             return ("paddle-vllm", "glm-llama")
         logger.debug("paddle-vllm skipped in the automatic OCR chain: %s", vllm_blocker)

@@ -30,7 +30,9 @@ examples:
     bibr chew paper.pdf --ocr glm-http           # use remote GLM-OCR server
     bibr chew paper.pdf --ocr-url http://host:8080  # explicit remote OCR server
     bibr chew paper.pdf --memory aggressive      # low-RAM machines (≤8 GB)
-    bibr chew paper.pdf --no-llm                 # skip downstream LLM extraction (OCR unchanged)
+    bibr chew paper.pdf --fast                   # no LLM, no API key: local models only
+    bibr chew paper.pdf --full                   # use the configured LLM (the default when set)
+    bibr chew paper.pdf --no-llm                 # structure only: no authors or references (OCR unchanged)
 
   references & output:
     bibr chew paper.pdf --crossref               # enrich references via Crossref (off by default)
@@ -223,15 +225,36 @@ def _add_pipeline_options(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Disable equation extraction",
     )
-    parser.add_argument(
+    run_mode = parser.add_mutually_exclusive_group()
+    run_mode.add_argument(
+        "--fast",
+        action="store_true",
+        help=(
+            "Fast mode: no LLM call and no API key. Local models read the title, authors and "
+            "abstract and parse the references; the run skips only what needs an LLM (the "
+            "unsure cases the local models would hand to one). This is what a run with no LLM "
+            "configured does without the flag. Overrides PIPELINE_MODE."
+        ),
+    )
+    run_mode.add_argument(
+        "--full",
+        action="store_true",
+        help=(
+            "Full mode: the configured LLM reads what the local models are unsure of, so it "
+            "needs an LLM provider (an API key or a local backend). Overrides PIPELINE_MODE. "
+            "The default (PIPELINE_MODE=auto) is full when an LLM is configured, else fast."
+        ),
+    )
+    run_mode.add_argument(
         "--no-llm",
         action="store_true",
         help=(
-            "Skip downstream LLM extraction, reference parsing, citation linking, equations, "
-            "and Crossref. Preserves document structure, plus the metadata a JATS or HTML "
-            "input already carries and JATS references; PDF and DOCX output has no authors "
-            "or references. "
-            "OCR still uses the selected backend, including cloud vision providers."
+            "Structure only: skip downstream LLM extraction, reference parsing, citation "
+            "linking, equations, and Crossref. Preserves document structure, plus the "
+            "metadata a JATS or HTML input already carries and JATS references; PDF and DOCX "
+            "output has no authors or references. "
+            "OCR still uses the selected backend, including cloud vision providers. "
+            "For a run that still extracts authors and references without an LLM, use --fast."
         ),
     )
     parser.add_argument(

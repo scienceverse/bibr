@@ -39,6 +39,29 @@ class ResolvedRunConfig:
     ref_seg: str | None = None
     refs: str | None = None
     ocr_summary_model: str | None = None
+    mode: str = "full"
+    """The run mode: ``fast`` makes no LLM call, ``full`` uses the configured LLM
+    (``--no-llm`` is a ``full`` run that skips the LLM stages, see ``skips_llm``)."""
+    ocr_summary_backend: str | None = None
+    """The first concrete OCR candidate (``paddle`` expands to an ordered chain)."""
+    ocr_requested: bool = True
+    """Whether the user chose the OCR route (``--ocr``, ``--ocr-url`` or ``OCR_BACKEND``).
+    A fast run starts the multi-GB vLLM bootstrap only when this is set."""
+
+    @property
+    def skips_llm(self) -> bool:
+        """Whether the run makes no LLM call: fast mode, or ``--no-llm``."""
+        return self.no_llm or self.mode == "fast"
+
+    @property
+    def vllm_bootstrap(self) -> bool:
+        """Whether a missing vLLM may be bootstrapped: not in a fast run nobody chose OCR for."""
+        return self.mode != "fast" or self.ocr_requested
+
+    @property
+    def uses_llm(self) -> bool:
+        """Whether the run calls the configured LLM (a full run without ``--no-llm``)."""
+        return not self.skips_llm
 
     def enrichment_enabled(self) -> bool:
         """Whether this run enriches references (mirrors ``RunConfig.enrichment_enabled``).
@@ -101,8 +124,13 @@ def resolve_run_config(args) -> ResolvedRunConfig:
     # --llm unset (None) falls back to the LLM_BACKEND setting (default "cloud").
     from bibr.config import Settings
 
+    mode = _resolve_run_mode(args, Settings)
     llm_backend = _resolve_llm_backend(args.llm or Settings.llm.backend)
-    # The LLM server the run starts: none under --no-llm.
+    if mode == "fast":
+        # A fast run starts no LLM server and calls no provider, so it runs with
+        # the cloud backend's memory, OCR-chain and streaming semantics.
+        llm_backend = "cloud"
+    # The LLM server the run starts: none under --no-llm or in a fast run.
     server_llm_backend = "cloud" if getattr(args, "no_llm", False) else llm_backend
 
     # Determine memory mode: on a CUDA card it depends on whether a managed
@@ -123,7 +151,7 @@ def resolve_run_config(args) -> ResolvedRunConfig:
 
     chunk_size = args.batch_size if args.batch_size > 0 else _auto_batch_size(memory_mode)
 
-    from bibr.ocr.registry import resolve_backend_candidates
+    from bibr.ocr.registry import bootstrap_kwargs, resolve_backend_candidates
 
     explicit_profile = getattr(args, "ocr_profile", None)
     configured_profile = getattr(Settings.ocr, "profile", None)
@@ -132,8 +160,12 @@ def resolve_run_config(args) -> ResolvedRunConfig:
         if "paddle" not in model_name and "glm" not in model_name:
             raise ValueError("Custom --ocr-model aliases require --ocr-profile {paddle,glm}.")
 
+    ocr_requested = _ocr_requested(args, Settings)
     summary_candidate = resolve_backend_candidates(
-        ocr_backend, Settings, llm_backend=server_llm_backend
+        ocr_backend,
+        Settings,
+        llm_backend=server_llm_backend,
+        **bootstrap_kwargs(mode != "fast" or ocr_requested),
     )[0]
     return ResolvedRunConfig(
         ocr_backend=ocr_backend,
@@ -156,6 +188,53 @@ def resolve_run_config(args) -> ResolvedRunConfig:
         ref_seg=getattr(args, "ref_seg", None) or None,
         refs=getattr(args, "refs", None) or None,
         ocr_summary_model=summary_candidate.model,
+        mode=mode,
+        ocr_summary_backend=summary_candidate.backend,
+        ocr_requested=ocr_requested,
+    )
+
+
+def _llm_only_flags(args) -> list[str]:
+    """The per-run flags in ``args`` that can only run with an LLM, as typed."""
+    from bibr.run_mode import LLM_PARSE_STRATEGIES
+
+    flags: list[str] = []
+    if getattr(args, "llm", None) is not None:
+        flags.append(f"--llm {args.llm}")
+    refs = getattr(args, "refs", None)
+    if refs in LLM_PARSE_STRATEGIES:
+        flags.append(f"--refs {refs}")
+    if getattr(args, "ref_seg", None) == "llm":
+        flags.append("--ref-seg llm")
+    return flags
+
+
+def _resolve_run_mode(args, settings) -> str:
+    """The mode this run takes: ``--fast`` / ``--full``, else ``PIPELINE_MODE``, else auto.
+
+    See :func:`bibr.run_mode.resolve_run_mode` for how ``--no-llm`` and the
+    LLM-only options (``--llm``, ``--refs llm``, ``--ref-seg llm``) take part.
+    """
+    from bibr.run_mode import resolve_run_mode
+
+    explicit = (
+        "fast" if getattr(args, "fast", False) else "full" if getattr(args, "full", False) else None
+    )
+    return resolve_run_mode(
+        settings,
+        explicit=explicit,
+        llm_backend=getattr(args, "llm", None),
+        llm_flags=_llm_only_flags(args),
+        no_llm=getattr(args, "no_llm", False),
+    )
+
+
+def _ocr_requested(args, settings) -> bool:
+    """Whether the user chose the OCR route: ``--ocr``, ``--ocr-url`` or a set ``OCR_BACKEND``."""
+    return bool(
+        getattr(args, "ocr", None)
+        or getattr(args, "ocr_url", None)
+        or "backend" in settings.ocr.model_fields_set
     )
 
 
@@ -386,31 +465,58 @@ def _preflight_ocr_runtime(config: ResolvedRunConfig) -> str | None:
     """
     if config.ocr_url:
         return None
-    return _ocr_runtime_blocker(config.ocr_backend, llm_backend=_run_llm_backend(config))
+    from bibr.ocr.registry import bootstrap_kwargs
+
+    return _ocr_runtime_blocker(
+        config.ocr_backend,
+        llm_backend=_run_llm_backend(config),
+        **bootstrap_kwargs(getattr(config, "vllm_bootstrap", True)),
+    )
 
 
 def _run_llm_backend(config: ResolvedRunConfig) -> str:
-    """The LLM backend whose server the run starts: ``cloud`` under ``--no-llm``."""
-    return "cloud" if config.no_llm else config.llm_backend
+    """The LLM backend whose server the run starts: ``cloud`` under ``--no-llm`` or fast."""
+    # ``getattr``: the preflights also take any object shaped like the config.
+    skips = config.no_llm or getattr(config, "mode", "full") == "fast"
+    return "cloud" if skips else config.llm_backend
 
 
-def _ocr_runtime_blocker(ocr_backend: str, *, llm_backend: str | None = None) -> str | None:
+def _ocr_runtime_blocker(
+    ocr_backend: str, *, llm_backend: str | None = None, vllm_bootstrap: bool = True
+) -> str | None:
     """Why no candidate of ``ocr_backend``'s startup chain can start here, or ``None``.
 
     Shared by the ``bibr chew``/``bibr batch`` preflight and ``bibr doctor``.
-    ``llm_backend`` is the run's resolved LLM backend (see
-    ``bibr.ocr.registry.automatic_backend_names``).
+    ``llm_backend`` is the run's resolved LLM backend and ``vllm_bootstrap``
+    whether a missing vLLM may be bootstrapped (see
+    ``bibr.ocr.registry.automatic_backend_names``). When the chain has nothing
+    else, the error names the paddle-vllm bootstrap it left out and how to opt in.
     """
     from bibr.config import Settings
-    from bibr.ocr.registry import resolve_backend_candidates
+    from bibr.ocr.registry import (
+        VLLM_BOOTSTRAP_NOT_REQUESTED,
+        VLLM_BOOTSTRAP_OPT_IN,
+        automatic_backend_names,
+        bootstrap_kwargs,
+        resolve_backend_candidates,
+    )
 
-    candidates = resolve_backend_candidates(ocr_backend, Settings, llm_backend=llm_backend)
+    candidates = resolve_backend_candidates(
+        ocr_backend, Settings, llm_backend=llm_backend, **bootstrap_kwargs(vllm_bootstrap)
+    )
     blockers: list[str] = []
     for candidate in candidates:
         reason = _ocr_candidate_unavailable_reason(candidate.backend)
         if reason is None:
             return None
         blockers.append(f"{candidate.backend}: {reason}")
+    if (
+        ocr_backend == "paddle"
+        and not vllm_bootstrap
+        and "paddle-vllm" in automatic_backend_names(llm_backend=llm_backend)
+        and "paddle-vllm" not in {c.backend for c in candidates}
+    ):
+        blockers.insert(0, f"paddle-vllm: {VLLM_BOOTSTRAP_NOT_REQUESTED}; {VLLM_BOOTSTRAP_OPT_IN}")
     if not blockers:
         return None
     alternatives = (

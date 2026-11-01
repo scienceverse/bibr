@@ -98,7 +98,8 @@ def main():
         ui.error(
             Console(stderr=True),
             "Gradio is not installed.",
-            hint="Install with: [cyan]uv sync --extra=demo[/cyan]",
+            hint="Install with: [cyan]uv tool install 'bibr\\[demo]'[/cyan] "
+            "(in a source checkout: [cyan]uv sync --extra=demo[/cyan])",
         )
         sys.exit(1)
 

@@ -2,7 +2,7 @@
 bibr Demo Module
 
 Optional Gradio demo for interactive paper processing.
-Install with: uv sync --extra=demo
+Install with: uv tool install 'bibr[demo]'  (in a source checkout: uv sync --extra=demo)
 
 Usage:
     # CLI
@@ -24,7 +24,10 @@ def create_local_demo(*args, **kwargs):
     try:
         from bibr.demo.local_app import create_local_demo as _create
     except ImportError as e:
-        raise ImportError("Gradio not installed. Install with: uv sync --extra=demo") from e
+        raise ImportError(
+            "Gradio not installed. Install with: uv tool install 'bibr[demo]' "
+            "(in a source checkout: uv sync --extra=demo)"
+        ) from e
     return _create(*args, **kwargs)
 
 

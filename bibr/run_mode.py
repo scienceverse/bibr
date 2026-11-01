@@ -16,14 +16,20 @@ from bibr.config import GlobalSettings, snapshot_settings
 from bibr.exceptions import InputValidationError
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from bibr.pipeline.context import RunMode
 
 logger = logging.getLogger(__name__)
 
+#: What a fast run leaves undone, for the one-line summaries (``bibr chew``, ``bibr doctor``,
+#: ``--dry-run``). It mirrors :func:`fast_settings`: the local models answer alone.
+FAST_SKIPS = "implicit sections and every LLM fallback for metadata, sections and references"
+
 # Reference-parse strategies that call an LLM. A per-run ``--refs`` or
 # ``--ref-seg`` that names one is refused by the entry points; only the
 # setting is swapped here.
-_LLM_PARSE_STRATEGIES = frozenset({"llm", "llm-chunked", "ref-llm"})
+LLM_PARSE_STRATEGIES = frozenset({"llm", "llm-chunked", "ref-llm"})
 
 # The LLM settings whose being set says the user chose an LLM.
 _LLM_CHOICES = frozenset({"provider", "model", "base_url"})
@@ -75,6 +81,44 @@ def resolve_mode(
     return cast("RunMode", chosen)
 
 
+def resolve_run_mode(
+    settings: GlobalSettings,
+    *,
+    explicit: str | None = None,
+    llm_backend: str | None = None,
+    llm_flags: Sequence[str] = (),
+    no_llm: bool = False,
+    fast_label: str = "--fast",
+) -> RunMode:
+    """The mode a user-facing entry point (``bibr chew``, ``bibr batch``, ``bibr.chew``) takes.
+
+    :func:`resolve_mode` plus the rules about what the user asked for:
+
+    * ``no_llm`` is a structure-only run. It stays ``full``: its LLM stages are
+      skipped by ``no_llm`` itself, and it never takes the fast overlay.
+    * ``llm_flags`` names the options given that only make sense with an LLM
+      (``--llm``, ``--refs llm``, ``--ref-seg llm``). Under auto they are asking
+      for an LLM, so the run is ``full`` and the credential check reports a missing
+      key. In a fast run they are refused: they would make the call the mode
+      promises not to make. ``fast_label`` names how fast was chosen when it was
+      explicit.
+    """
+    if no_llm:
+        return "full"
+    if explicit == "auto":
+        explicit = None
+    if explicit is None and llm_flags and settings.pipeline.mode == "auto":
+        return "full"
+    mode = resolve_mode(settings, explicit, backend=llm_backend)
+    if mode == "fast" and llm_flags:
+        origin = fast_label if explicit == "fast" else f"PIPELINE_MODE={settings.pipeline.mode}"
+        raise ValueError(
+            f"{', '.join(llm_flags)} calls an LLM, which fast mode ({origin}) never does. "
+            "Run in full mode to use the LLM, or drop the option."
+        )
+    return mode
+
+
 def fast_settings(settings: GlobalSettings) -> GlobalSettings:
     """A snapshot of ``settings`` with every LLM path turned off, for a fast run.
 
@@ -96,7 +140,7 @@ def fast_settings(settings: GlobalSettings) -> GlobalSettings:
     if fast.REF_SEG_STRATEGY == "llm":
         _log_local_strategy("REF_SEG_STRATEGY", "llm", "geom")
         fast.REF_SEG_STRATEGY = "geom"
-    if fast.REF_PARSE_STRATEGY in _LLM_PARSE_STRATEGIES:
+    if fast.REF_PARSE_STRATEGY in LLM_PARSE_STRATEGIES:
         _log_local_strategy("REF_PARSE_STRATEGY", fast.REF_PARSE_STRATEGY, "ner")
         fast.REF_PARSE_STRATEGY = "ner"
     return fast

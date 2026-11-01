@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from rich.markup import escape
 
 from bibr.local.cli import ui
-from bibr.local.cli.dry_run import _dry_run_blockers, _print_dry_run_plan
+from bibr.local.cli.dry_run import _dry_run_blockers, _print_dry_run_plan, announce_downloads
 from bibr.local.cli.inputs import (
     _find_stem_collisions,
     _output_path_problem,
@@ -25,6 +25,7 @@ from bibr.local.cli.run_config import (
     _preflight_local_backend,
     _preflight_ocr_runtime,
     _preflight_opencv,
+    _run_llm_backend,
     resolve_run_config,
 )
 from bibr.validation import payload_validation
@@ -109,9 +110,58 @@ def _format_run_summary(config: ResolvedRunConfig) -> str:
         f"  [dim]OCR backend:[/dim] {escape(str(backend))}\n"
         f"  [dim]OCR model:[/dim] {escape(str(model))}\n"
         f"  [dim]OCR profile:[/dim] {escape(str(profile))}\n"
-        f"  [dim]llm[/dim] {escape(str(config.llm_backend))} [dim]{ui.SEP}[/dim] "
-        f"[dim]memory[/dim] {escape(str(config.memory_mode))}"
+        f"{_format_mode_line(config)}"
     )
+
+
+def _ocr_route(config: ResolvedRunConfig) -> str:
+    """The OCR route in one phrase: the backend, or the first of the automatic chain."""
+    if config.ocr_url:
+        return f"{config.ocr_backend} at {config.ocr_url}"
+    if config.ocr_backend == "paddle" and config.ocr_summary_backend:
+        return f"{config.ocr_summary_backend} (automatic)"
+    return str(config.ocr_backend)
+
+
+def _format_mode_line(config: ResolvedRunConfig) -> str:
+    """One line: the run mode, the OCR route and what the mode leaves out."""
+    from bibr.run_mode import FAST_SKIPS
+
+    sep = f" [dim]{ui.SEP}[/dim] "
+    route = f"[dim]OCR[/dim] {escape(_ocr_route(config))}"
+    if config.no_llm:
+        head = "[dim]mode[/dim] structure only (--no-llm)"
+        tail = "skips authors, references, equations and Crossref"
+    elif config.mode == "fast":
+        head = "[dim]mode[/dim] fast"
+        tail = f"no LLM calls, skips {FAST_SKIPS}"
+    else:
+        return (
+            f"  [dim]mode[/dim] full{sep}{route}{sep}[dim]llm[/dim] "
+            f"{escape(str(config.llm_backend))}{sep}[dim]memory[/dim] "
+            f"{escape(str(config.memory_mode))}"
+        )
+    return f"  {head}{sep}{route}{sep}[dim]{escape(tail)}[/dim]"
+
+
+def _vllm_bootstrap_notice(config: ResolvedRunConfig) -> str | None:
+    """Why a fast run left paddle-vllm out of the OCR chain, with the opt-in; else ``None``.
+
+    The automatic chain lists paddle-vllm on a capable GPU, but with vLLM not
+    installed it starts only for a user who chose the OCR route: the bootstrap
+    downloads several GB. The notice is the announcement; ``--ocr paddle`` is the opt-in.
+    """
+    if config.vllm_bootstrap or config.ocr_backend != "paddle" or config.ocr_url:
+        return None
+    from bibr.ocr.registry import VLLM_BOOTSTRAP_OPT_IN, automatic_backend_names
+
+    llm_backend = _run_llm_backend(config)
+    in_chain = "paddle-vllm" in automatic_backend_names(llm_backend=llm_backend)
+    if not in_chain or "paddle-vllm" in automatic_backend_names(
+        llm_backend=llm_backend, vllm_bootstrap=False
+    ):
+        return None
+    return f"  [dim]paddle-vllm not started: vLLM is not installed; {VLLM_BOOTSTRAP_OPT_IN}[/dim]"
 
 
 def _print_actual_ocr_summary(console, resources) -> None:
@@ -420,6 +470,9 @@ async def _run_process(args) -> None:
         sys.exit(2)
 
     console.print(_format_run_summary(config))
+    bootstrap_notice = _vllm_bootstrap_notice(config)
+    if bootstrap_notice is not None:
+        console.print(bootstrap_notice)
 
     # Collect files
     if source_mode == "manifest":
@@ -467,33 +520,13 @@ async def _run_process(args) -> None:
             )
             sys.exit(2)
 
-    # Fail fast on missing LLM credentials, after the inputs resolved so a
-    # mistyped path is reported as such — the provider would otherwise
-    # raise only on the first LLM call, after the user already sat through OCR.
-    # Skipped under --dry-run: it constructs a real provider client (no
-    # network call, but --dry-run previews the plan without touching any
-    # client/model machinery at all — see ``_print_dry_run_plan``).
-    if not args.dry_run and not config.no_llm and config.llm_backend == "cloud":
-        try:
-            from bibr.clients.llm import preflight_credentials
-
-            preflight_credentials()
-        except ValueError as e:
-            ui.error(
-                console,
-                escape(str(e)),
-                hint="Run [cyan]bibr setup[/cyan] to configure an LLM provider, "
-                "or pass [cyan]--no-llm[/cyan] for structural output only.",
-            )
-            sys.exit(1)
-
     # Fail fast on a managed local backend that can't run here (unsupported
     # hardware or a missing launcher) — otherwise the run crashes deep in vLLM
     # after OCR. Skipped under --no-llm (no server is started) and --dry-run
     # (nothing is started).
     from bibr.local.pipeline import LOCAL_LLM_BACKENDS
 
-    if not args.dry_run and not config.no_llm and config.llm_backend in LOCAL_LLM_BACKENDS:
+    if not args.dry_run and config.uses_llm and config.llm_backend in LOCAL_LLM_BACKENDS:
         err = _preflight_local_backend(config.llm_backend)
         if err:
             ui.error(console, escape(err))
@@ -512,6 +545,30 @@ async def _run_process(args) -> None:
         ocr_reason = _preflight_ocr_runtime(config)
         if ocr_reason is not None:
             ui.error(console, escape(ocr_reason))
+            sys.exit(1)
+
+    # Fail fast on missing LLM credentials, after the inputs resolved so a
+    # mistyped path is reported as such — the provider would otherwise
+    # raise only on the first LLM call, after the user already sat through OCR.
+    # It comes after the OCR check above: a machine that cannot OCR at all
+    # should hear that before it is asked for a key. A fast run calls no LLM and
+    # needs no key (it is what a run with none configured takes without a flag),
+    # so only a full run is asked. Skipped under --dry-run: it constructs a real
+    # provider client (no network call, but --dry-run previews the plan without
+    # touching any client/model machinery at all — see ``_print_dry_run_plan``).
+    if not args.dry_run and config.uses_llm and config.llm_backend == "cloud":
+        try:
+            from bibr.clients.llm import preflight_credentials
+
+            preflight_credentials()
+        except ValueError as e:
+            ui.error(
+                console,
+                escape(str(e)),
+                hint="Run [cyan]bibr setup[/cyan] to configure an LLM provider, "
+                "or pass [cyan]--fast[/cyan] to run on the local models alone "
+                "([cyan]--no-llm[/cyan] for structural output only).",
+            )
             sys.exit(1)
 
     # --dry-run: print the fully-resolved plan and exit — no pipeline is
@@ -552,6 +609,8 @@ async def _run_process(args) -> None:
             ui.error(console, escape(f"Cannot write output {args.output!r}: {exc}"))
             sys.exit(2)
 
+    announce_downloads(config, files, console)
+
     # Create pipeline
     from bibr.local.pipeline import LocalPipeline
 
@@ -568,6 +627,8 @@ async def _run_process(args) -> None:
         end_page=config.end_page,
         llm_backend=config.llm_backend,
         no_llm=config.no_llm,
+        mode=config.mode,
+        ocr_requested=config.ocr_requested,
         figure_images=config.figure_images,
         include_regions=config.include_regions,
         include_region_meta=config.include_region_meta,

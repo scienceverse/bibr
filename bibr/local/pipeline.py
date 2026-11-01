@@ -30,6 +30,7 @@ if TYPE_CHECKING:
         MemoryMode,
         RefParseStrategy,
         RefSegStrategy,
+        RunMode,
     )
 
 logger = logging.getLogger(__name__)
@@ -247,7 +248,13 @@ def _auto_batch_size(memory_mode: str) -> int:
     return 8  # balanced default
 
 
-def _managed_gpu_fraction(llm_backend: str, ocr_backend: str, settings: GlobalSettings) -> float:
+def _managed_gpu_fraction(
+    llm_backend: str,
+    ocr_backend: str,
+    settings: GlobalSettings,
+    *,
+    vllm_bootstrap: bool = True,
+) -> float:
     """Share of total VRAM the classifiers must leave to the managed vLLM servers.
 
     The classifiers load before these servers start (before Paddle OCR in the
@@ -273,7 +280,8 @@ def _managed_gpu_fraction(llm_backend: str, ocr_backend: str, settings: GlobalSe
     # can run it, so a small GPU keeps its room for the classifiers.
     starts_paddle_vllm = ocr_backend == "paddle-vllm" or (
         ocr_backend == "paddle"
-        and "paddle-vllm" in automatic_backend_names(llm_backend=llm_backend)
+        and "paddle-vllm"
+        in automatic_backend_names(llm_backend=llm_backend, vllm_bootstrap=vllm_bootstrap)
     )
     ocr_share = paddle_vllm_gpu_memory_utilization() if starts_paddle_vllm else 0.0
     if not (llm_share and ocr_share):
@@ -326,6 +334,8 @@ class LocalPipeline(Pipeline):
         ref_seg_strategy: RefSegStrategy | None = None,
         ref_parse_strategy: RefParseStrategy | None = None,
         settings: GlobalSettings | None = None,
+        mode: str | None = None,
+        ocr_requested: bool | None = None,
     ):
         from bibr.config import snapshot_settings
         from bibr.local.vllm_share import llm_share_user_set
@@ -343,6 +353,7 @@ class LocalPipeline(Pipeline):
         from bibr.pipeline.enricher import CrossrefEnricher, RorEnricher
         from bibr.pipeline.plans import build_stage_plan
         from bibr.pipeline.resources import ResourceManager
+        from bibr.run_mode import resolve_mode
 
         settings_snapshot = snapshot_settings(settings)
 
@@ -354,6 +365,10 @@ class LocalPipeline(Pipeline):
         configured_backend = (
             configured_ocr.backend if "backend" in configured_ocr.model_fields_set else None
         )
+        if ocr_requested is None:
+            # The caller chose the OCR route by naming a backend or a server, or
+            # the OCR_BACKEND setting did.
+            ocr_requested = bool(ocr_backend or ocr_url or configured_backend)
         if ocr_url:
             # A URL names one OCR server. The shared rule (as for
             # ``bibr chew --ocr-url``) picks its backend — Paddle unless GLM
@@ -383,6 +398,17 @@ class LocalPipeline(Pipeline):
         llm_backend = resolve_llm_backend(
             llm_backend or settings_snapshot.llm.backend, settings=settings_snapshot
         )
+        # ``mode`` is "fast", "full" or "auto"/None (PIPELINE_MODE, then whether an
+        # LLM is configured). ``no_llm`` is a structure-only run and stays "full":
+        # it skips the LLM stages itself and never takes the fast overlay.
+        run_mode = "full" if no_llm else resolve_mode(settings_snapshot, mode, llm_backend)
+        if run_mode == "fast":
+            # No LLM call and no managed LLM server: the memory plan, OCR chain
+            # and streamed back half follow the cloud backend's.
+            llm_backend = "cloud"
+        # A fast run starts the multi-GB vLLM bootstrap only for an OCR route the
+        # caller chose (see ``ocr_requested`` above).
+        vllm_bootstrap = run_mode != "fast" or ocr_requested
         # None → PIPELINE_MEMORY_MODE, else hardware auto-detect (which looks
         # at whether a managed LLM server shares the card) — same resolution
         # ladder as the CLI, so the library API behaves identically.
@@ -420,6 +446,7 @@ class LocalPipeline(Pipeline):
             consolidate=consolidate,
             ref_seg_strategy=ref_seg_strategy,
             ref_parse_strategy=ref_parse_strategy,
+            mode=cast("RunMode", run_mode),
         )
         resources = ResourceManager(
             memory_mode=memory_mode,
@@ -433,9 +460,12 @@ class LocalPipeline(Pipeline):
                 if llm_backend in ("local", "vllm")
                 else 0.0
             ),
-            managed_gpu_fraction=_managed_gpu_fraction(llm_backend, ocr_backend, settings_snapshot),
+            managed_gpu_fraction=_managed_gpu_fraction(
+                llm_backend, ocr_backend, settings_snapshot, vllm_bootstrap=vllm_bootstrap
+            ),
             managed_llm_share_fixed=llm_share_user_set(settings_snapshot),
             llm_backend=llm_backend,
+            vllm_bootstrap=vllm_bootstrap,
             settings=settings_snapshot,
         )
 
@@ -485,6 +515,7 @@ class LocalPipeline(Pipeline):
         self.end_page = end_page
         self.llm_backend = llm_backend
         self.no_llm = no_llm
+        self.mode = run_mode
 
     def llm_usage_snapshot(self) -> dict[str, dict[str, int]]:
         """Cumulative LLM token usage by model, captured before pipeline teardown.

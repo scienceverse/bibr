@@ -107,6 +107,7 @@ _OPTION_TO_PIPELINE_ARG = {
     "crossref": "crossref",
     "equations": "equations",
     "no_llm": "no_llm",
+    "mode": "mode",
     "figure_images": "figure_images",
     "include_regions": "include_regions",
     "include_region_meta": "include_region_meta",
@@ -131,6 +132,7 @@ class ChewOptions(TypedDict, total=False):
     crossref: bool | None
     equations: bool
     no_llm: bool
+    mode: Literal["auto", "fast", "full"] | None
     figure_images: bool | None
     include_regions: bool
     include_region_meta: bool
@@ -374,6 +376,14 @@ def _pipeline_kwargs(options: Mapping[str, Any]) -> dict[str, Any]:
                 raise ValueError(f"consolidate must be a bool, 'fill' or 'replace', got {value!r}")
             kwargs["consolidate"] = value
             continue
+        if name == "mode":
+            # "fast" makes no LLM call and needs no key, "full" uses the configured
+            # LLM, "auto"/None (PIPELINE_MODE) is fast when none is configured.
+            if value not in (None, "auto", "fast", "full"):
+                raise ValueError(f"mode must be 'auto', 'fast' or 'full', got {value!r}")
+            if value is not None:
+                kwargs["mode"] = value
+            continue
         arg = _OPTION_TO_PIPELINE_ARG.get(name)
         if arg is None:
             valid = ", ".join(
@@ -531,28 +541,61 @@ async def _chew_on(
     return await _process_batch(pipeline, batch, batch_size, progress)
 
 
-def _preflight_llm(settings: GlobalSettings | None, pipeline_kwargs: Mapping[str, Any]) -> None:
-    """Fail before any model loads when the configured LLM cannot run.
+def _llm_only_options(pipeline_kwargs: Mapping[str, Any]) -> list[str]:
+    """The options given that only make sense with an LLM, as the caller spelled them."""
+    given: list[str] = []
+    if pipeline_kwargs.get("llm_backend"):
+        given.append(f"llm={pipeline_kwargs['llm_backend']!r}")
+    if pipeline_kwargs.get("ref_parse_strategy") in ("llm", "llm-chunked", "ref-llm"):
+        given.append(f"refs={pipeline_kwargs['ref_parse_strategy']!r}")
+    if pipeline_kwargs.get("ref_seg_strategy") == "llm":
+        given.append("ref_seg='llm'")
+    return given
 
-    Mirrors ``bibr chew``: a missing cloud credential, or a managed local
-    backend with no launcher or unsupported hardware, used to surface only on
-    the first LLM call — after the caller had already paid for layout and
-    OCR. Raises the provider's ``ValueError`` for credentials and
-    :class:`~bibr.exceptions.ConfigurationError` for a local backend.
+
+def _preflight_llm(settings: GlobalSettings | None, pipeline_kwargs: Mapping[str, Any]) -> str:
+    """Resolve the run mode and fail before any model loads when its LLM cannot run.
+
+    Returns the mode the pipeline is built with: ``mode=`` (else ``PIPELINE_MODE``,
+    else fast when no LLM is configured, full when one is). A fast run calls no
+    LLM, so it checks nothing. A full run mirrors ``bibr chew``: a missing cloud
+    credential, or a managed local backend with no launcher or unsupported
+    hardware, used to surface only on the first LLM call — after the caller had
+    already paid for layout and OCR. Raises the provider's ``ValueError`` for
+    credentials (with the way out) and :class:`~bibr.exceptions.ConfigurationError`
+    for a local backend. ``mode='fast'`` together with ``llm=`` or ``refs='llm'``
+    raises ``ValueError``: they would make the call fast mode never makes.
     """
-    if pipeline_kwargs.get("no_llm"):
-        return
     from bibr.config import snapshot_settings
-    from bibr.local.pipeline import LOCAL_LLM_BACKENDS, resolve_llm_backend
+    from bibr.run_mode import resolve_run_mode
 
     effective = settings if settings is not None else snapshot_settings()
+    no_llm = bool(pipeline_kwargs.get("no_llm"))
+    mode = resolve_run_mode(
+        effective,
+        explicit=pipeline_kwargs.get("mode"),
+        llm_backend=pipeline_kwargs.get("llm_backend"),
+        llm_flags=_llm_only_options(pipeline_kwargs),
+        no_llm=no_llm,
+        fast_label="mode='fast'",
+    )
+    if no_llm or mode == "fast":
+        return mode
+    from bibr.local.pipeline import LOCAL_LLM_BACKENDS, resolve_llm_backend
+
     backend = resolve_llm_backend(
         pipeline_kwargs.get("llm_backend") or effective.llm.backend, settings=effective
     )
     if backend == "cloud":
         from bibr.clients.llm import preflight_credentials
 
-        preflight_credentials(settings)
+        try:
+            preflight_credentials(settings)
+        except ValueError as exc:
+            raise ValueError(
+                f"{exc} To run on the local models without an LLM, pass mode='fast' "
+                "(no_llm=True keeps the document structure only)."
+            ) from exc
     elif backend in LOCAL_LLM_BACKENDS:
         from bibr.local.cli.run_config import _preflight_local_backend
 
@@ -561,6 +604,7 @@ def _preflight_llm(settings: GlobalSettings | None, pipeline_kwargs: Mapping[str
             from bibr.exceptions import ConfigurationError
 
             raise ConfigurationError(problem)
+    return mode
 
 
 def _refs_kwargs(refs: str | bool | None) -> dict[str, Any]:
@@ -604,7 +648,7 @@ async def achew(
 
     from bibr.local.pipeline import LocalPipeline
 
-    _preflight_llm(settings, kwargs)
+    kwargs["mode"] = _preflight_llm(settings, kwargs)
     pipeline = LocalPipeline(settings=settings, **kwargs)
     try:
         return await _chew_on(pipeline, path, paper_id=paper_id, batch_size=batch_size)
@@ -652,7 +696,7 @@ class Chewer:
             **_refs_kwargs(refs),
             "settings": self._settings,
         }
-        _preflight_llm(self._settings, self._kwargs)
+        self._kwargs["mode"] = _preflight_llm(self._settings, self._kwargs)
         self._pipeline: Any = None
         self._runner: asyncio.Runner | None = None
         self._closed = False
@@ -833,7 +877,10 @@ def chew(
     ``ocr`` (backend), ``llm`` (backend), ``memory`` (mode), ``refs``
     (``"llm"``/``"ner"``/``"llm-chunked"``/``"ref-llm"``, or ``"off"``/``False`` to skip
     reference extraction entirely), ``ref_seg`` (segmentation strategy:
-    ``"geom"``/``"region"``/``"llm"``/``"crf"``), ``no_llm``, ``device``,
+    ``"geom"``/``"region"``/``"llm"``/``"crf"``), ``no_llm`` (structure only),
+    ``mode`` (``"fast"``: no LLM call and no key, local models only; ``"full"``: the
+    configured LLM; ``"auto"``/omitted: ``PIPELINE_MODE``, which is fast when no LLM
+    is configured), ``device``,
     ``crossref`` (tri-state: ``True`` runs Crossref/resolver reference
     enrichment for this call, ``False`` skips it, ``None``/omitted follows
     the ``CROSSREF_ENRICH`` setting, which is off by default),

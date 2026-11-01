@@ -29,6 +29,8 @@ _LOCAL_ONLY_FLAGS = (
     "memory",
     "device",
     "no_llm",
+    "fast",
+    "full",
     "no_equations",
     "batch_size",
     "preset",
@@ -42,8 +44,9 @@ def chew_options_from_config(config: Any) -> dict[str, Any]:
     field, through the public option names ``bibr.api`` accepts.
     """
     options: dict[str, Any] = {
-        "ocr_backend": config.ocr_backend,
-        "llm_backend": config.llm_backend,
+        # An OCR route nobody chose stays unset, so a fast run can tell the
+        # automatic chain from a request to bootstrap vLLM.
+        "ocr_backend": config.ocr_backend if config.ocr_requested else None,
         "memory_mode": config.memory_mode,
         "ocr_url": config.ocr_url,
         "ocr_model": config.ocr_model,
@@ -58,6 +61,10 @@ def chew_options_from_config(config: Any) -> dict[str, Any]:
         "start_page": config.start_page,
         "end_page": config.end_page,
     }
+    options["mode"] = config.mode
+    if config.mode != "fast":
+        # A fast run starts no LLM; naming a backend beside it would be refused.
+        options["llm_backend"] = config.llm_backend
     if config.consolidate:
         options["consolidate"] = config.consolidate
     if config.ref_seg:
@@ -69,12 +76,17 @@ def chew_options_from_config(config: Any) -> dict[str, Any]:
 
 def _local_summary(config: Any) -> list[str]:
     """Dry-run lines describing the resolved local pipeline (no model loads)."""
-    from bibr.extract.ref_extractor import _resolve_ref_strategies
-    from bibr.local.cli.dry_run import _dry_run_enrichment_lines, _dry_run_llm_label
+    from bibr.local.cli.dry_run import (
+        _dry_run_enrichment_lines,
+        _dry_run_llm_label,
+        _dry_run_mode_label,
+        _dry_run_ref_strategies,
+    )
 
-    seg, parse = _resolve_ref_strategies(config.ref_seg, config.refs)
+    seg, parse = _dry_run_ref_strategies(config)
     model = config.ocr_model or config.ocr_summary_model or "(resolved at startup)"
     lines = [
+        f"mode {_dry_run_mode_label(config)}",
         f"ocr {config.ocr_backend} {ui.SEP} {model}",
         f"llm {_dry_run_llm_label(config)}",
         f"refs {'disabled (--no-llm)' if config.no_llm else f'seg {seg} {ui.SEP} parse {parse}'}",
@@ -188,6 +200,7 @@ def _remote_options(args: Any, console: Any) -> Any:
 def _local_options(args: Any, console: Any) -> Any:
     """Resolve the local pipeline exactly as ``bibr chew`` does; ``None`` on error."""
     from bibr.batch.runner import LocalOptions
+    from bibr.local.cli.dry_run import announce_downloads
     from bibr.local.cli.run_config import (
         _apply_runtime_settings,
         _preflight_ocr_runtime,
@@ -202,14 +215,24 @@ def _local_options(args: Any, console: Any) -> Any:
         ui.error(console, f"Invalid option: {exc}")
         return None
 
+    announced = False
+
     def preflight(files: Sequence[Path]) -> str | None:
-        if not any(f.suffix.lower() == ".pdf" for f in files):
-            return None
-        opencv_problem = _preflight_opencv()
-        if opencv_problem is not None:
-            message, repair = opencv_problem
-            return f"{message} (repair with: {repair})"
-        return _preflight_ocr_runtime(config)
+        nonlocal announced
+        if any(f.suffix.lower() == ".pdf" for f in files):
+            opencv_problem = _preflight_opencv()
+            if opencv_problem is not None:
+                message, repair = opencv_problem
+                return f"{message} (repair with: {repair})"
+            problem = _preflight_ocr_runtime(config)
+            if problem is not None:
+                return problem
+        if not announced:
+            # Once, and after the checks above: a run that cannot start has
+            # downloaded nothing to announce.
+            announced = True
+            announce_downloads(config, files, console)
+        return None
 
     return LocalOptions(
         chew_options=chew_options_from_config(config),

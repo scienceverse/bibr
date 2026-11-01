@@ -1346,7 +1346,8 @@ class SetupWizard:
         else:
             lines.append(
                 "  [dim]bibr demo needs the demo extra — install it with[/dim] "
-                "[cyan]uv sync --extra demo[/cyan] [dim](or pip install 'bibr\\[demo]')[/dim]"
+                "[cyan]uv tool install 'bibr\\[demo]'[/cyan] "
+                "[dim](in a source checkout: uv sync --extra demo)[/dim]"
             )
         lines.append("  [cyan]bibr chew paper.pdf[/cyan]     — process a paper directly")
         lines.append("  [cyan]bibr doctor[/cyan]             — validate your setup")

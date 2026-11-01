@@ -1358,3 +1358,178 @@ def test_doctor_checks_the_ocr_chain_beside_the_configured_llm_backend(monkeypat
         doctor._run_doctor()
 
     assert seen == [{"llm_backend": backend}]
+
+
+# --- the Mode section: doctor says which run a plain `bibr chew` takes ------------------
+
+_MODE_ENV = (
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "LANGEXTRACT_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_API_KEY",
+    "GROQ_API_KEY",
+    "OPENAI_API_KEY",
+    "LLM_API_KEY",
+    "LLM_BASE_URL",
+    "LLM_PROVIDER",
+    "LLM_MODEL",
+    "LLM_BACKEND",
+    "PIPELINE_MODE",
+    "OCR_BACKEND",
+)
+
+
+def _mode_settings(monkeypatch, *, key=None, mode="auto", backend="cloud", ocr=None):
+    """Replace the global settings with ones holding exactly what the test names."""
+    from bibr.config import GlobalSettings
+
+    for var in _MODE_ENV:
+        monkeypatch.delenv(var, raising=False)
+    settings = GlobalSettings()
+    settings.GOOGLE_API_KEY = key
+    settings.llm.backend = backend
+    settings.pipeline.mode = mode
+    if ocr is not None:
+        settings.ocr.backend = ocr
+        settings.ocr.model_fields_set.add("backend")
+    monkeypatch.setattr("bibr.config.Settings", settings)
+    return settings
+
+
+def _section(lines: list[str], name: str) -> list[str]:
+    """The lines of one report section (up to the next heading)."""
+    start = lines.index(name)
+    end = next((i for i in range(start + 1, len(lines)) if lines[i] in _SECTION_NAMES), len(lines))
+    return lines[start + 1 : end]
+
+
+_SECTION_NAMES = {
+    "Environment",
+    "Configuration",
+    "Mode",
+    "LLM",
+    "OCR",
+    "Pipeline",
+    "Data",
+    "Services",
+}
+
+
+def test_doctor_reports_fast_when_no_llm_is_configured(monkeypatch):
+    _mode_settings(monkeypatch)
+
+    lines, _code, fake = _run_doctor_lines(monkeypatch)
+
+    (mode_line,) = _section(lines, "Mode")
+    assert mode_line.startswith("✓ Mode: fast (auto: no model or API key is configured)")
+    assert "makes no model calls" in mode_line
+
+
+def test_doctor_reports_full_when_an_llm_is_configured(monkeypatch):
+    _mode_settings(monkeypatch, key="test-key")
+
+    lines, _code, _fake = _run_doctor_lines(monkeypatch)
+
+    (mode_line,) = _section(lines, "Mode")
+    assert mode_line.startswith("✓ Mode: full (auto: a model or API key is configured)")
+
+
+@pytest.mark.parametrize(("setting", "key"), [("fast", "test-key"), ("full", None)])
+def test_doctor_names_a_pipeline_mode_override(monkeypatch, setting, key):
+    _mode_settings(monkeypatch, key=key, mode=setting)
+
+    lines, _code, _fake = _run_doctor_lines(monkeypatch)
+
+    (mode_line,) = _section(lines, "Mode")
+    assert f"Mode: {setting} (PIPELINE_MODE={setting})" in mode_line
+
+
+def test_doctor_in_fast_mode_does_not_fail_on_the_llm(monkeypatch):
+    """No key, no provider: the LLM section used to fail the whole report here."""
+    _mode_settings(monkeypatch)
+
+    lines, code, fake = _run_doctor_lines(monkeypatch)
+
+    assert _section(lines, "LLM") == ["✓ LLM: not used in fast mode (no provider or key checked)"]
+    assert fake.requests == []  # no connection ping either
+    assert not [line for line in lines if line.startswith("✗")]
+    assert code == 0
+
+
+def test_doctor_in_full_mode_still_fails_on_a_missing_key(monkeypatch):
+    _mode_settings(monkeypatch, mode="full")
+
+    lines, code, _fake = _run_doctor_lines(monkeypatch)
+
+    assert any(line.startswith("✗ LLM provider") for line in _section(lines, "LLM"))
+    assert code == 1
+
+
+def test_doctor_reports_a_bad_pipeline_mode_as_a_failed_check(monkeypatch):
+    settings = _mode_settings(monkeypatch)
+    monkeypatch.setattr(settings.pipeline, "mode", "turbo")
+
+    lines, code, _fake = _run_doctor_lines(monkeypatch)
+
+    assert any(line.startswith("✗ Mode:") for line in _section(lines, "Mode"))
+    assert "Set PIPELINE_MODE to auto, fast or full" in " ".join(_section(lines, "Mode"))
+    assert code == 1
+
+
+def _ocr_calls(monkeypatch, **mode_args):
+    """The kwargs ``_run_doctor`` hands its OCR check."""
+    import contextlib
+    import io
+
+    import rich.console
+
+    import bibr.local.cli.doctor as doctor
+
+    _mode_settings(monkeypatch, **mode_args)
+    real_console = rich.console.Console
+    monkeypatch.setattr(
+        rich.console,
+        "Console",
+        lambda *a, **k: real_console(file=io.StringIO(), width=400, color_system=None),
+    )
+    monkeypatch.setattr(doctor, "_check_device", lambda ok, warn, fail: ok("Device: stub"))
+    monkeypatch.setattr(doctor, "_check_llm_connection", lambda *a, **k: None)
+    seen = []
+    monkeypatch.setattr(
+        doctor,
+        "_check_ocr_backend",
+        lambda ok, warn, fail, **kw: seen.append(kw) or ok("OCR: stub"),
+    )
+    with contextlib.suppress(SystemExit):
+        doctor._run_doctor()
+    return seen
+
+
+def test_doctor_vets_a_fast_run_against_the_cloud_chain_without_the_vllm_bootstrap(monkeypatch):
+    assert _ocr_calls(monkeypatch) == [{"llm_backend": "cloud", "vllm_bootstrap": False}]
+
+
+def test_doctor_lets_a_fast_run_that_chose_the_ocr_route_bootstrap_vllm(monkeypatch):
+    assert _ocr_calls(monkeypatch, ocr="paddle") == [{"llm_backend": "cloud"}]
+
+
+def test_doctor_passes_a_full_runs_llm_backend_to_the_ocr_check(monkeypatch):
+    assert _ocr_calls(monkeypatch, key="test-key") == [{"llm_backend": "cloud"}]
+
+
+def test_doctor_warns_but_does_not_fail_when_libmagic_is_missing(monkeypatch):
+    """bibr falls back to its own signature sniff, so a missing libmagic is advice, not an error."""
+    from bibr.input import validate
+
+    _mode_settings(monkeypatch)
+    monkeypatch.setattr(validate, "magic", None)
+    monkeypatch.setattr(validate, "_MAGIC_IMPORT_ERROR", ImportError("failed to find libmagic"))
+
+    lines, code, _fake = _run_doctor_lines(monkeypatch)
+
+    assert any(
+        line.startswith("! libmagic not found; bibr checks file types itself") for line in lines
+    ), lines
+    assert not [line for line in lines if line.startswith("✗ libmagic")]
+    assert code == 0

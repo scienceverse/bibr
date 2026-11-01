@@ -11,8 +11,10 @@ branch, so a colliding batch still hard-errors instead of previewing).
 
 from __future__ import annotations
 
+import io
 import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -753,3 +755,288 @@ async def test_dry_run_hf_cache_unknown_without_huggingface_hub(tmp_path, capsys
 
     out = capsys.readouterr().out
     assert "cache state unknown (ml extra not installed)" in out
+
+
+# --- run mode and the first-run download preview --------------------------------------
+
+_MODE_ENV = (
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "LANGEXTRACT_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_API_KEY",
+    "GROQ_API_KEY",
+    "OPENAI_API_KEY",
+    "LLM_API_KEY",
+    "LLM_BASE_URL",
+    "LLM_PROVIDER",
+    "LLM_MODEL",
+    "LLM_BACKEND",
+    "PIPELINE_MODE",
+    "OCR_BACKEND",
+)
+
+
+@pytest.fixture
+def fresh_machine(tmp_path, monkeypatch):
+    """A core install with no LLM configured and no Hugging Face cache directory at all."""
+    import huggingface_hub.constants as hf_constants
+    from huggingface_hub.utils import _cache_manager as cache_manager
+
+    from bibr.config import GlobalSettings
+
+    for var in _MODE_ENV:
+        monkeypatch.delenv(var, raising=False)
+    # The suite pins ML_RUNTIME=torch (tests/conftest.py); a core install runs on ONNX.
+    monkeypatch.setenv("ML_RUNTIME", "auto")
+    for var in (  # blanked by the suite so no test downloads a classifier
+        "ML_SECTION_CLASSIFIER_MODEL_ID",
+        "ML_PAPER_CLASSIFIER_MODEL_ID",
+        "ML_FRONT_ROLE_MODEL_ID",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr("bibr.config.Settings", GlobalSettings())
+    cache = tmp_path / "no-such-hub-cache"
+    monkeypatch.setattr(hf_constants, "HF_HUB_CACHE", str(cache))
+    # ``scan_cache_dir`` bound the default at import.
+    monkeypatch.setattr(cache_manager, "HF_HUB_CACHE", str(cache))
+    monkeypatch.setenv("HF_HUB_CACHE", str(cache))
+    return cache
+
+
+def _plan(argv, tmp_path, capsys):
+    """The ``--dry-run`` output for one PDF and *argv*."""
+    import asyncio
+
+    from bibr.local.cli import _build_parser, _run_process
+
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(_pdf_bytes())
+    args = _build_parser().parse_args(["chew", str(pdf), "--dry-run", *argv])
+    try:
+        asyncio.run(_run_process(args))
+    except SystemExit:  # a blocker still prints the plan
+        pass
+    return capsys.readouterr().out
+
+
+def test_a_fresh_machine_with_no_hub_cache_says_every_model_will_download(fresh_machine):
+    """``scan_cache_dir`` raises when the cache directory does not exist; that is an empty cache."""
+    from bibr.local.cli.dry_run import _hf_cache_status
+
+    assert not fresh_machine.exists()
+    status = _hf_cache_status("scienceverse/bibr-layout-onnx")
+    assert status.startswith("will download")
+    assert "0.13 GB" in status
+
+
+def test_a_hub_cache_that_exists_but_cannot_be_scanned_stays_unknown(fresh_machine, monkeypatch):
+    import huggingface_hub as hf_hub
+
+    from bibr.local.cli.dry_run import _hf_cache_status
+
+    fresh_machine.mkdir()
+
+    def broken():
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(hf_hub, "scan_cache_dir", broken)
+
+    assert _hf_cache_status("scienceverse/bibr-layout-onnx").startswith("cache state unknown")
+
+
+def test_dry_run_on_a_fresh_machine_names_the_models_and_the_total(fresh_machine, tmp_path, capsys):
+    out = _plan(["--ocr", "glm-llama"], tmp_path, capsys)
+
+    assert "↓ layout (PP-DocLayout): scienceverse/bibr-layout-onnx — will download" in out
+    assert "↓ sentence segmenter" in out
+    assert "cache state unknown" not in out
+    assert re.search(r"Would download \d+ models? \(about [\d.]+ (GB|MB)", out)
+    assert "later runs use the cache" in out
+
+
+def test_dry_run_with_a_warm_cache_has_no_download_total(
+    fresh_machine, tmp_path, capsys, monkeypatch
+):
+    from bibr.local.cli import dry_run
+
+    monkeypatch.setattr(dry_run, "_hf_cache_status", lambda *a, **k: "cached")
+    out = _plan(["--ocr", "glm-llama"], tmp_path, capsys)
+
+    assert "Would download" not in out
+
+
+def test_dry_run_without_a_key_plans_a_fast_run(fresh_machine, tmp_path, capsys):
+    out = _plan(["--ocr", "glm-llama"], tmp_path, capsys)
+
+    assert re.search(r"^  mode\s+fast: no LLM calls, skips ", out, re.MULTILINE)
+    assert re.search(r"^  llm\s+disabled \(fast mode\)", out, re.MULTILINE)
+    assert "API key" not in out  # no credential blocker for a run that calls no LLM
+    assert "Blockers" not in out
+
+
+def test_dry_run_fast_lists_the_front_matter_tagger(fresh_machine, tmp_path, capsys):
+    out = _plan(["--ocr", "glm-llama"], tmp_path, capsys)
+
+    assert "front-matter tagger: scienceverse/bibr-front-tagger — will download" in out
+
+
+def test_dry_run_fast_swaps_the_llm_reference_strategies_for_local_ones(
+    fresh_machine, tmp_path, capsys
+):
+    fresh_machine  # noqa: B018 - the fixture sets up the keyless machine
+    out = _plan(["--ocr", "glm-llama", "--fast"], tmp_path, capsys)
+
+    assert not re.search(r"^  refs\s+seg llm", out, re.MULTILINE)
+    assert not re.search(r"parse (llm|llm-chunked|ref-llm)\b", out)
+
+
+def test_dry_run_full_names_the_llm_and_does_not_list_the_tagger(
+    fresh_machine, tmp_path, capsys, monkeypatch
+):
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    from bibr.config import GlobalSettings
+
+    monkeypatch.setattr("bibr.config.Settings", GlobalSettings())
+    out = _plan(["--ocr", "glm-llama"], tmp_path, capsys)
+
+    assert re.search(r"^  mode\s+full: the configured LLM reads", out, re.MULTILINE)
+    assert re.search(r"^  llm\s+\S+/\S+", out, re.MULTILINE)
+    assert "front-matter tagger" not in out
+
+
+def test_dry_run_full_without_a_key_still_blocks_on_the_missing_key(
+    fresh_machine, tmp_path, capsys
+):
+    out = _plan(["--ocr", "glm-llama", "--full"], tmp_path, capsys)
+
+    assert "Blockers" in out
+    assert "API key" in out
+
+
+def test_dry_run_no_llm_is_structure_only(fresh_machine, tmp_path, capsys):
+    out = _plan(["--ocr", "glm-llama", "--no-llm"], tmp_path, capsys)
+
+    assert re.search(r"^  mode\s+structure only \(--no-llm\)", out, re.MULTILINE)
+    assert re.search(r"^  llm\s+disabled \(--no-llm\)", out, re.MULTILINE)
+    assert "front-matter tagger" not in out
+    assert "section classifier" not in out
+
+
+def test_dry_run_lists_the_classifiers_the_run_uses(fresh_machine, tmp_path, capsys):
+    out = _plan(["--ocr", "glm-llama"], tmp_path, capsys)
+
+    for label in ("section classifier", "paper classifier", "front-role classifier"):
+        assert label in out
+
+
+# --- the same preview announced before a real run ---------------------------------------
+
+
+def _config(*argv):
+    from bibr.local.cli import _build_parser, resolve_run_config
+
+    return resolve_run_config(_build_parser().parse_args(["chew", "paper.pdf", *argv]))
+
+
+def test_pending_downloads_lists_only_what_the_cache_lacks(fresh_machine, monkeypatch):
+    from bibr.local.cli import dry_run
+
+    def status(repo_id, **_kwargs):
+        return "cached" if "segment-any-text" in repo_id else "will download (~90 MB)"
+
+    monkeypatch.setattr(dry_run, "_hf_cache_status", status)
+    pending = dry_run.pending_downloads(_config("--ocr", "glm-llama"), [Path("paper.pdf")])
+
+    assert pending
+    assert all(row[2].startswith("will download") for row in pending)
+    assert not [row for row in pending if "segment-any-text" in row[1]]
+
+
+def test_pending_downloads_is_empty_when_the_cache_cannot_be_read(fresh_machine, monkeypatch):
+    from bibr.local.cli import dry_run
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("cache exploded")
+
+    monkeypatch.setattr(dry_run, "_hf_cache_status", broken)
+
+    assert dry_run.pending_downloads(_config("--ocr", "glm-llama"), [Path("paper.pdf")]) == []
+
+
+def test_the_download_notice_gives_the_count_the_total_and_each_models_size():
+    from bibr.local.cli.dry_run import format_download_notice
+
+    lines = format_download_notice(
+        [
+            ("layout", "org/layout", "will download (~0.13 GB)"),
+            ("segmenter", "org/sat", "will download (~0.45 GB)"),
+            ("OCR weights", "org/ocr", "will download (~1-2 GB)"),
+            ("mystery", "org/other", "will download (size unknown)"),
+        ]
+    )
+
+    assert "4 models" in lines[0]
+    assert "about 2.6 GB" in lines[0]
+    assert "1 of unknown size" in lines[0]
+    assert len(lines) == 5
+    assert "org/layout" in lines[1]
+    assert "size unknown" in lines[4]
+
+
+def test_the_download_notice_says_megabytes_for_a_small_total():
+    from bibr.local.cli.dry_run import format_download_notice
+
+    (head, row) = format_download_notice([("classifier", "org/c", "will download (~90 MB)")])
+
+    assert "1 model " in head
+    assert "about 90 MB" in head
+    assert "org/c" in row
+
+
+def test_there_is_no_notice_when_nothing_is_pending():
+    from bibr.local.cli.dry_run import format_download_notice
+
+    assert format_download_notice([]) == []
+
+
+def test_announce_downloads_prints_before_anything_moves_and_names_the_bars(
+    fresh_machine, monkeypatch
+):
+    from rich.console import Console
+
+    from bibr.local.cli import dry_run
+    from bibr.utils import hf_cache
+
+    monkeypatch.setattr(
+        dry_run,
+        "pending_downloads",
+        lambda config, files: [("layout", "org/layout", "will download (~0.13 GB)")],
+    )
+    named = []
+    monkeypatch.setattr(hf_cache, "name_download_bars", lambda enabled=True: named.append(enabled))
+    console = Console(file=io.StringIO(), width=200)
+
+    dry_run.announce_downloads(_config("--ocr", "glm-llama"), [Path("paper.pdf")], console)
+
+    text = console.file.getvalue()
+    assert "First run: downloading 1 model (about 130 MB)" in text
+    assert "org/layout" in text
+    assert named == [True]
+
+
+def test_announce_downloads_is_silent_on_a_warm_cache(fresh_machine, monkeypatch):
+    from rich.console import Console
+
+    from bibr.local.cli import dry_run
+    from bibr.utils import hf_cache
+
+    monkeypatch.setattr(dry_run, "pending_downloads", lambda config, files: [])
+    named = []
+    monkeypatch.setattr(hf_cache, "name_download_bars", lambda enabled=True: named.append(enabled))
+    console = Console(file=io.StringIO(), width=200)
+
+    dry_run.announce_downloads(_config("--ocr", "glm-llama"), [Path("paper.pdf")], console)
+
+    assert console.file.getvalue() == ""
+    assert named == []

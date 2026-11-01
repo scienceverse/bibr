@@ -510,3 +510,226 @@ def test_help_examples_mention_refs_off():
     from bibr.local.cli import _EXAMPLES
 
     assert "--refs off" in _EXAMPLES
+
+
+# ---- run mode: --fast / --full / --no-llm --------------------------------------
+
+_LLM_ENV = (
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "LANGEXTRACT_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_API_KEY",
+    "GROQ_API_KEY",
+    "OPENAI_API_KEY",
+    "LLM_API_KEY",
+    "LLM_BASE_URL",
+    "LLM_PROVIDER",
+    "LLM_MODEL",
+    "LLM_BACKEND",
+    "PIPELINE_MODE",
+    "OCR_BACKEND",
+)
+
+
+@pytest.fixture
+def keyless(monkeypatch):
+    """Settings on a machine with no LLM configured, whatever the test environment holds."""
+    from bibr.config import GlobalSettings
+
+    for var in _LLM_ENV:
+        monkeypatch.delenv(var, raising=False)
+    settings = GlobalSettings()
+    monkeypatch.setattr("bibr.config.Settings", settings)
+    return settings
+
+
+@pytest.fixture
+def keyed(keyless):
+    keyless.GOOGLE_API_KEY = "test-key"
+    return keyless
+
+
+def test_run_mode_flags_default_off():
+    args = _chew_args("paper.pdf")
+    assert args.fast is False
+    assert args.full is False
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [("--fast", "--full"), ("--fast", "--no-llm"), ("--full", "--no-llm")],
+)
+def test_run_mode_flags_are_mutually_exclusive(flags):
+    with pytest.raises(SystemExit):
+        _chew_args("paper.pdf", *flags)
+
+
+def test_help_examples_mention_fast_and_full():
+    from bibr.local.cli import _EXAMPLES
+
+    assert "--fast" in _EXAMPLES
+    assert "--full" in _EXAMPLES
+
+
+def test_the_help_text_for_each_mode_says_what_it_does():
+    helps = {
+        action.dest: action.help
+        for action in _build_parser()._subparsers._group_actions[0].choices["chew"]._actions
+        if action.dest in {"fast", "full", "no_llm"}
+    }
+    assert "no API key" in helps["fast"]
+    assert "configured LLM" in helps["full"]
+    assert "Structure only" in helps["no_llm"]
+    assert "--fast" in helps["no_llm"]
+
+
+def test_no_llm_configured_and_no_flag_resolves_fast(keyless):
+    config = _resolve("paper.pdf", "--ocr", "glm-llama")
+    assert config.mode == "fast"
+    assert config.skips_llm
+    assert not config.uses_llm
+
+
+def test_a_configured_llm_and_no_flag_resolves_full(keyed):
+    config = _resolve("paper.pdf", "--ocr", "glm-llama")
+    assert config.mode == "full"
+    assert config.uses_llm
+
+
+def test_fast_flag_wins_over_a_configured_llm(keyed):
+    assert _resolve("paper.pdf", "--ocr", "glm-llama", "--fast").mode == "fast"
+
+
+def test_full_flag_wins_over_a_missing_llm(keyless):
+    """--full with no key is left to the credential check, which suggests --fast."""
+    config = _resolve("paper.pdf", "--ocr", "glm-llama", "--full")
+    assert config.mode == "full"
+    assert config.uses_llm
+
+
+@pytest.mark.parametrize("setting", ["fast", "full"])
+def test_the_pipeline_mode_setting_is_overridden_by_the_opposite_flag(keyed, setting):
+    keyed.pipeline.mode = setting
+    flag, expected = ("--full", "full") if setting == "fast" else ("--fast", "fast")
+    assert _resolve("paper.pdf", "--ocr", "glm-llama", flag).mode == expected
+
+
+def test_the_pipeline_mode_setting_applies_without_a_flag(keyed):
+    keyed.pipeline.mode = "fast"
+    assert _resolve("paper.pdf", "--ocr", "glm-llama").mode == "fast"
+
+
+def test_no_llm_is_structure_only_not_fast(keyless):
+    config = _resolve("paper.pdf", "--ocr", "glm-llama", "--no-llm")
+    assert config.mode == "full"
+    assert config.no_llm
+    assert config.skips_llm
+    assert not config.uses_llm
+
+
+def test_fast_runs_with_the_cloud_backends_semantics(keyed, monkeypatch):
+    """A fast run starts no LLM server: the memory plan sees the cloud backend, whatever LLM_BACKEND says."""
+    keyed.llm.backend = "vllm"
+    seen = []
+
+    def fake_default(settings=None, *, llm_backend=None):
+        seen.append(llm_backend)
+        return "balanced"
+
+    monkeypatch.setattr("bibr.local.pipeline._default_memory_mode", fake_default)
+    config = _resolve("paper.pdf", "--ocr", "glm-llama", "--fast")
+
+    assert config.llm_backend == "cloud"
+    assert seen == ["cloud"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [("--llm", "vllm"), ("--refs", "llm"), ("--refs", "ref-llm"), ("--ref-seg", "llm")],
+)
+def test_fast_refuses_an_option_that_needs_an_llm(keyed, extra):
+    with pytest.raises(ValueError, match="fast mode"):
+        _resolve("paper.pdf", "--ocr", "glm-llama", "--fast", *extra)
+
+
+def test_an_llm_only_option_without_a_flag_asks_for_an_llm(keyless):
+    """--refs llm on a keyless machine is not quietly fast: it reaches the credential error."""
+    config = _resolve("paper.pdf", "--ocr", "glm-llama", "--refs", "llm")
+    assert config.mode == "full"
+
+
+def test_fast_accepts_the_reference_strategies_that_need_no_llm(keyed):
+    config = _resolve("paper.pdf", "--ocr", "glm-llama", "--fast", "--refs", "ner")
+    assert config.mode == "fast"
+    assert config.refs == "ner"
+
+
+# ---- the OCR route a fast run may start ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [("--ocr", "glm-llama"), ("--ocr", "paddle"), ("--ocr-url", "http://host:8080")],
+)
+def test_choosing_the_ocr_route_is_recorded(keyless, argv):
+    assert _resolve("paper.pdf", *argv).ocr_requested is True
+
+
+def test_no_ocr_choice_is_recorded_as_not_requested(keyless):
+    assert _resolve("paper.pdf").ocr_requested is False
+
+
+def test_the_ocr_backend_setting_counts_as_choosing_the_route(keyless):
+    keyless.ocr.backend = "paddle"
+    keyless.ocr.model_fields_set.add("backend")
+    assert _resolve("paper.pdf").ocr_requested is True
+
+
+def test_fast_without_a_chosen_ocr_route_may_not_bootstrap_vllm(keyless):
+    config = _resolve("paper.pdf")
+    assert config.mode == "fast"
+    assert config.vllm_bootstrap is False
+
+
+def test_fast_with_a_chosen_ocr_route_may_bootstrap_vllm(keyless):
+    assert _resolve("paper.pdf", "--ocr", "paddle").vllm_bootstrap is True
+
+
+def test_a_full_run_may_always_bootstrap_vllm(keyed):
+    assert _resolve("paper.pdf").vllm_bootstrap is True
+
+
+@pytest.mark.parametrize(
+    ("argv", "bootstrap"),
+    [((), False), (("--ocr", "paddle"), True), (("--full",), True)],
+)
+def test_the_summary_chain_is_resolved_with_the_bootstrap_rule(
+    keyless, monkeypatch, argv, bootstrap
+):
+    from bibr.ocr import registry
+
+    seen = []
+    real = registry.resolve_backend_candidates
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("vllm_bootstrap", True))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(registry, "resolve_backend_candidates", spy)
+    _resolve("paper.pdf", *argv)
+
+    assert seen == [bootstrap]
+
+
+def test_the_summary_names_the_first_concrete_ocr_backend(monkeypatch, keyless):
+    from bibr.ocr import registry
+
+    monkeypatch.setattr(registry.sys, "platform", "linux")
+    monkeypatch.setattr(registry.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: None)
+
+    config = _resolve("paper.pdf", "--ocr", "paddle")
+
+    assert config.ocr_backend == "paddle"
+    assert config.ocr_summary_backend == "glm-llama"

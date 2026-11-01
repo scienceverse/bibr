@@ -513,3 +513,161 @@ class TestMemoryModeSetting:
         monkeypatch.setattr(Settings.pipeline, "memory_mode", "keep_all")
         pipe = LocalPipeline(memory_mode="aggressive", llm_backend="cloud")
         assert pipe.memory_mode == "aggressive"
+
+
+# --- run mode: LocalPipeline(mode=...) ---
+
+_RUN_MODE_ENV = (
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "LANGEXTRACT_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_API_KEY",
+    "GROQ_API_KEY",
+    "OPENAI_API_KEY",
+    "LLM_API_KEY",
+    "LLM_BASE_URL",
+    "LLM_PROVIDER",
+    "LLM_MODEL",
+    "LLM_BACKEND",
+    "PIPELINE_MODE",
+    "OCR_BACKEND",
+)
+
+
+@pytest.fixture
+def keyless_settings(monkeypatch):
+    """Settings for a machine with no LLM configured, whatever the test environment holds."""
+    from bibr.config import GlobalSettings
+
+    for var in _RUN_MODE_ENV:
+        monkeypatch.delenv(var, raising=False)
+    return GlobalSettings()
+
+
+@pytest.fixture
+def keyed_settings(keyless_settings):
+    keyless_settings.GOOGLE_API_KEY = "test-key"
+    return keyless_settings
+
+
+class TestLocalPipelineMode:
+    def test_fast_takes_the_cloud_backends_semantics(self, keyless_settings):
+        pipe = LocalPipeline(mode="fast", settings=keyless_settings)
+        assert pipe.mode == "fast"
+        assert pipe._config.mode == "fast"
+        assert pipe.llm_backend == "cloud"
+        assert pipe._config.llm_backend == "cloud"
+
+    def test_fast_does_not_start_a_managed_llm_server(self, keyless_settings):
+        pipe = LocalPipeline(mode="fast", llm_backend="vllm", settings=keyless_settings)
+        assert pipe.llm_backend == "cloud"
+        assert pipe._resources._llm_backend == "cloud"
+
+    def test_full_keeps_the_requested_backend(self, keyless_settings):
+        pipe = LocalPipeline(mode="full", llm_backend="vllm", settings=keyless_settings)
+        assert pipe.mode == "full"
+        assert pipe.llm_backend == "vllm"
+
+    def test_no_llm_stays_full(self, keyless_settings):
+        """Structure only is not fast: it never takes the tagger overlay."""
+        pipe = LocalPipeline(no_llm=True, mode="fast", settings=keyless_settings)
+        assert pipe.mode == "full"
+        assert pipe._config.mode == "full"
+        assert pipe._settings_for(pipe._config) is pipe.settings
+
+    def test_auto_with_no_llm_configured_is_fast(self, keyless_settings):
+        for requested in (None, "auto"):
+            pipe = LocalPipeline(mode=requested, settings=keyless_settings)
+            assert pipe.mode == "fast"
+
+    def test_auto_with_a_key_is_full(self, keyed_settings):
+        for requested in (None, "auto"):
+            pipe = LocalPipeline(mode=requested, settings=keyed_settings)
+            assert pipe.mode == "full"
+
+    def test_pipeline_mode_setting_decides_when_no_flag_is_given(self, monkeypatch):
+        from bibr.config import GlobalSettings
+
+        for var in _RUN_MODE_ENV:
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("PIPELINE_MODE", "full")
+        assert LocalPipeline(settings=GlobalSettings()).mode == "full"
+        monkeypatch.setenv("PIPELINE_MODE", "fast")
+        monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+        assert LocalPipeline(settings=GlobalSettings()).mode == "fast"
+
+    def test_the_argument_wins_over_the_setting(self, monkeypatch):
+        from bibr.config import GlobalSettings
+
+        for var in _RUN_MODE_ENV:
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("PIPELINE_MODE", "fast")
+        assert LocalPipeline(mode="full", settings=GlobalSettings()).mode == "full"
+
+    def test_unknown_mode_is_rejected(self, keyless_settings):
+        from bibr.exceptions import InputValidationError
+
+        with pytest.raises(InputValidationError, match="Unknown run mode"):
+            LocalPipeline(mode="turbo", settings=keyless_settings)
+
+    def test_a_fast_run_turns_the_front_tagger_on_and_a_full_run_leaves_it(self, keyed_settings):
+        fast = LocalPipeline(mode="fast", settings=keyed_settings)
+        full = LocalPipeline(mode="full", settings=keyed_settings)
+        assert fast._settings_for(fast._config).ml.front_tagger_mode == "only"
+        assert full._settings_for(full._config) is full.settings
+        assert full.settings.ml.front_tagger_mode == keyed_settings.ml.front_tagger_mode
+
+    def test_the_fast_overlay_leaves_the_pipelines_own_settings_alone(self, keyless_settings):
+        pipe = LocalPipeline(mode="fast", settings=keyless_settings)
+        before = pipe.settings.ml.front_tagger_mode
+        assert pipe._settings_for(pipe._config) is not pipe.settings
+        assert pipe.settings.ml.front_tagger_mode == before
+
+    def test_a_fast_run_reports_no_llm_usage(self, keyless_settings):
+        """A fast run builds no client, so there is nothing to ask for token counts."""
+        pipe = LocalPipeline(mode="fast", settings=keyless_settings)
+        assert pipe.llm_usage_snapshot() == {}
+
+
+class TestLocalPipelineVllmOptIn:
+    """A fast run starts the multi-GB vLLM bootstrap only for an OCR route the caller chose."""
+
+    def _bootstrap(self, pipe) -> bool:
+        return pipe._resources._vllm_bootstrap
+
+    def test_fast_without_an_ocr_choice_refuses_the_bootstrap(self, keyless_settings):
+        assert self._bootstrap(LocalPipeline(mode="fast", settings=keyless_settings)) is False
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"ocr_backend": "paddle"},
+            {"ocr_url": "http://127.0.0.1:8118"},
+            {"ocr_requested": True},
+        ],
+    )
+    def test_fast_with_an_ocr_choice_allows_it(self, keyless_settings, kwargs):
+        pipe = LocalPipeline(mode="fast", settings=keyless_settings, **kwargs)
+        assert self._bootstrap(pipe) is True
+
+    def test_fast_with_ocr_backend_set_in_the_environment_allows_it(self, monkeypatch):
+        from bibr.config import GlobalSettings
+
+        for var in _RUN_MODE_ENV:
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("OCR_BACKEND", "paddle")
+        pipe = LocalPipeline(mode="fast", settings=GlobalSettings())
+        assert self._bootstrap(pipe) is True
+
+    def test_the_caller_can_say_no_even_when_a_backend_is_named(self, keyless_settings):
+        pipe = LocalPipeline(
+            mode="fast", ocr_backend="paddle", ocr_requested=False, settings=keyless_settings
+        )
+        assert self._bootstrap(pipe) is False
+
+    def test_full_always_allows_it(self, keyed_settings):
+        assert self._bootstrap(LocalPipeline(mode="full", settings=keyed_settings)) is True
+
+    def test_no_llm_is_a_full_run_and_allows_it(self, keyless_settings):
+        assert self._bootstrap(LocalPipeline(no_llm=True, settings=keyless_settings)) is True
