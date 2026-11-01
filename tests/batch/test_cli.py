@@ -440,6 +440,19 @@ def test_form_fields_map_flags_to_the_job_api(tmp_path):
     assert _form_fields(parse([*base, "--pages", "0-3"]), console) is None
 
 
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [(["--fast"], {"mode": "fast"}), (["--full"], {"mode": "full"}), ([], {})],
+)
+def test_form_fields_map_the_run_mode_flags_to_mode(flags, expected):
+    from rich.console import Console
+
+    args = _build_parser().parse_args(
+        ["batch", "x", "--out", "y", "--serve-url", "http://s", *flags]
+    )
+    assert _form_fields(args, Console(stderr=True)) == expected
+
+
 def test_chew_options_from_config_mirrors_the_pipeline_construction():
     config = ResolvedRunConfig(
         ocr_backend="glm-http",
@@ -754,9 +767,8 @@ def test_batch_announces_no_download_for_a_run_that_cannot_start(tmp_path, keyle
     assert keyless == []
 
 
-def test_remote_batch_warns_that_the_mode_flags_are_ignored(tmp_path, capsys, monkeypatch):
-    monkeypatch.delenv("AUTH_API_KEY", raising=False)
-    args = _build_parser().parse_args(
+def _remote_dry_run(tmp_path, *flags):
+    return _build_parser().parse_args(
         [
             "batch",
             str(_pdf(tmp_path)),
@@ -767,9 +779,36 @@ def test_remote_batch_warns_that_the_mode_flags_are_ignored(tmp_path, capsys, mo
             "http://serve:8000/",
             "--token",
             "t0k",
-            "--fast",
+            *flags,
         ]
     )
 
-    assert _run_batch(args) == 0
-    assert "--fast" in capsys.readouterr().err
+
+@pytest.mark.parametrize("flag", ["--fast", "--full"])
+def test_remote_batch_sends_the_run_mode_as_a_form_field(tmp_path, capsys, monkeypatch, flag):
+    """The serve takes a mode per request, so the flag is sent and not reported as ignored."""
+    monkeypatch.delenv("AUTH_API_KEY", raising=False)
+
+    assert _run_batch(_remote_dry_run(tmp_path, flag)) == 0
+
+    captured = capsys.readouterr()
+    assert f"mode={flag[2:]}" in captured.out
+    assert flag not in captured.err
+
+
+def test_remote_batch_without_a_mode_flag_leaves_the_mode_to_the_serve(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.delenv("AUTH_API_KEY", raising=False)
+
+    assert _run_batch(_remote_dry_run(tmp_path)) == 0
+
+    assert "mode=" not in capsys.readouterr().out
+
+
+def test_remote_batch_still_warns_that_no_llm_is_ignored(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("AUTH_API_KEY", raising=False)
+
+    assert _run_batch(_remote_dry_run(tmp_path, "--no-llm")) == 0
+
+    assert "--no-llm" in capsys.readouterr().err

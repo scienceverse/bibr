@@ -47,6 +47,26 @@ def test_demo_parser_accepts_explicit_memory_mode():
     assert args.memory == "aggressive"
 
 
+def test_demo_parser_run_mode_flags_default_off():
+    args = build_parser().parse_args([])
+    assert args.fast is False
+    assert args.full is False
+
+
+@pytest.mark.parametrize("flag", ["fast", "full"])
+def test_demo_parser_accepts_a_run_mode_flag(flag):
+    args = build_parser().parse_args([f"--{flag}"])
+    assert getattr(args, flag) is True
+    assert getattr(args, "full" if flag == "fast" else "fast") is False
+
+
+def test_demo_parser_run_mode_flags_are_mutually_exclusive(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(["--fast", "--full"])
+    assert exc_info.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
+
+
 def test_missing_gradio_names_the_tool_install(monkeypatch, capsys):
     """``bibr demo`` without Gradio tells an installed-tool user how to add the extra."""
     import sys

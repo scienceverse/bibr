@@ -707,10 +707,24 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable equation extraction",
     )
-    mcp_parser.add_argument(
+    mcp_run_mode = mcp_parser.add_mutually_exclusive_group()
+    mcp_run_mode.add_argument(
+        "--fast",
+        action="store_true",
+        help="Fast mode: no LLM call and no API key, local models only (as for 'bibr chew'). "
+        "What the server does with no LLM configured, without the flag.",
+    )
+    mcp_run_mode.add_argument(
+        "--full",
+        action="store_true",
+        help="Full mode: the configured LLM reads what the local models are unsure of "
+        "(as for 'bibr chew')",
+    )
+    mcp_run_mode.add_argument(
         "--no-llm",
         action="store_true",
-        help="Skip downstream LLM extraction and Crossref; OCR remains active (as for 'bibr chew')",
+        help="Structure only: skip downstream LLM extraction and Crossref; OCR remains active "
+        "(as for 'bibr chew'). For authors and references without an LLM, use --fast.",
     )
     mcp_parser.add_argument(
         "--consolidate",

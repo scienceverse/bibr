@@ -140,6 +140,231 @@ def test_create_local_demo_passes_explicit_memory_mode(monkeypatch):
     assert captured["memory_mode"] == "aggressive"
 
 
+# --- run mode: --fast / --full -----------------------------------------------
+
+
+@pytest.fixture
+def _no_llm(monkeypatch):
+    """A demo started on a machine with no LLM configured."""
+    from bibr.config import GlobalSettings
+
+    for var in (
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "LLM_API_KEY",
+        "LLM_BASE_URL",
+        "LLM_PROVIDER",
+        "LLM_MODEL",
+        "LLM_BACKEND",
+        "PIPELINE_MODE",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    settings = GlobalSettings()
+    monkeypatch.setattr("bibr.config.Settings", settings)
+    return settings
+
+
+def test_create_local_demo_passes_fast_mode_to_the_pipeline(monkeypatch, _no_llm):
+    captured = _capture_pipeline_kwargs(monkeypatch)
+
+    local_app.create_local_demo(ocr_backend="glm-mlx", mode="fast")
+
+    assert captured["mode"] == "fast"
+
+
+def test_create_local_demo_with_no_llm_configured_runs_fast(monkeypatch, _no_llm):
+    captured = _capture_pipeline_kwargs(monkeypatch)
+
+    local_app.create_local_demo(ocr_backend="glm-mlx")
+
+    assert captured["mode"] == "fast"
+
+
+def test_create_local_demo_with_a_key_runs_full(monkeypatch, _no_llm):
+    captured = _capture_pipeline_kwargs(monkeypatch)
+    _no_llm.GOOGLE_API_KEY = "test-key"
+
+    local_app.create_local_demo(ocr_backend="glm-mlx")
+
+    assert captured["mode"] == "full"
+
+
+def test_create_local_demo_full_flag_beats_auto(monkeypatch, _no_llm):
+    captured = _capture_pipeline_kwargs(monkeypatch)
+
+    local_app.create_local_demo(ocr_backend="glm-mlx", mode="full")
+
+    assert captured["mode"] == "full"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "named"),
+    [({"llm_backend": "llama-cpp"}, "--llm llama-cpp"), ({"refs": "llm"}, "--refs llm")],
+)
+def test_create_local_demo_fast_refuses_an_llm_option(monkeypatch, _no_llm, kwargs, named):
+    _capture_pipeline_kwargs(monkeypatch)
+
+    with pytest.raises(ValueError, match="calls an LLM, which fast mode"):
+        local_app.create_local_demo(ocr_backend="glm-mlx", mode="fast", **kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs", [{"llm_backend": "llama-cpp"}, {"refs": "llm"}], ids=["llm", "refs"]
+)
+def test_create_local_demo_an_llm_option_asks_for_full_under_auto(monkeypatch, _no_llm, kwargs):
+    captured = _capture_pipeline_kwargs(monkeypatch)
+
+    local_app.create_local_demo(ocr_backend="glm-mlx", **kwargs)
+
+    assert captured["mode"] == "full"
+
+
+def test_status_md_names_the_mode_and_no_llm_for_a_fast_run():
+    md = _build_status_md("glm-mlx", "google", "gemini-flash", refs_strategy="ner", mode="fast")
+    assert "**Mode** `fast`" in md
+    assert "none (fast mode)" in md
+    assert "gemini-flash" not in md
+    assert "google" not in md
+
+
+def test_status_md_names_the_mode_and_llm_for_a_full_run():
+    md = _build_status_md("glm-mlx", "google", "gemini-flash", refs_strategy="llm", mode="full")
+    assert "**Mode** `full`" in md
+    assert "`google/gemini-flash`" in md
+
+
+def test_status_md_without_a_mode_is_a_full_banner():
+    assert "**Mode** `full`" in _build_status_md("glm-mlx", "google", "gemini-flash")
+
+
+def test_effective_refs_shows_the_local_parser_for_a_fast_run():
+    settings = SimpleNamespace(REF_PARSE_STRATEGY="llm")
+    assert local_app._effective_refs(None, settings, "fast") == "ner"
+    assert local_app._effective_refs(None, settings, "full") == "llm"
+    assert local_app._effective_refs("ner", settings, "full") == "ner"
+
+
+async def test_a_preset_swap_carries_an_explicit_mode():
+    settings = SimpleNamespace(
+        llm=SimpleNamespace(provider="google", model="m", backend="cloud"),
+        ocr=SimpleNamespace(backend="glm-mlx"),
+        REF_PARSE_STRATEGY="llm",
+    )
+
+    class Manager:
+        def apply_to_settings(self, name, target):  # noqa: ARG002
+            return []
+
+    captured = {}
+
+    def pipeline_factory(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(llm_backend=None, mode="fast")
+
+    state = {
+        "pipeline": SimpleNamespace(aclose=AsyncMock()),
+        "ocr_backend": "glm-mlx",
+        "memory_mode": None,
+        "llm_backend": None,
+        "mode": "fast",
+    }
+    status = await local_app._replace_demo_pipeline_with_preset(
+        "p",
+        manager=Manager(),
+        settings=settings,
+        pipeline_state=state,
+        pipeline_factory=pipeline_factory,
+        normalize_ocr_backend=lambda value: value,
+        refs=None,
+    )
+
+    assert captured["mode"] == "fast"
+    # The banner follows the replacement's mode, and a fast run parses with the local model.
+    assert "**Mode** `fast`" in status
+    assert "none (fast mode)" in status
+    assert "**Refs** `ner`" in status
+
+
+async def test_a_preset_swap_in_an_automatic_demo_leaves_the_mode_to_the_settings():
+    settings = SimpleNamespace(
+        llm=SimpleNamespace(provider="google", model="m", backend="cloud"),
+        ocr=SimpleNamespace(backend="glm-mlx"),
+        REF_PARSE_STRATEGY="ner",
+    )
+
+    class Manager:
+        def apply_to_settings(self, name, target):  # noqa: ARG002
+            return []
+
+    captured = {}
+
+    def pipeline_factory(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(llm_backend=None, mode="full")
+
+    state = {
+        "pipeline": SimpleNamespace(aclose=AsyncMock()),
+        "ocr_backend": "glm-mlx",
+        "memory_mode": None,
+        "llm_backend": None,
+        "mode": None,
+    }
+    status = await local_app._replace_demo_pipeline_with_preset(
+        "p",
+        manager=Manager(),
+        settings=settings,
+        pipeline_state=state,
+        pipeline_factory=pipeline_factory,
+        normalize_ocr_backend=lambda value: value,
+        refs=None,
+    )
+
+    assert "mode" not in captured
+    assert "**Mode** `full`" in status
+
+
+def _demo_main(monkeypatch, argv, create):
+    import sys
+
+    from bibr.demo.server import main
+
+    launched = []
+
+    class _Demo:
+        def launch(self, **kwargs):
+            launched.append(kwargs)
+
+    monkeypatch.setattr(sys, "argv", ["bibr-demo", *argv])
+    monkeypatch.setattr(local_app, "create_local_demo", lambda **kw: create(_Demo(), kw))
+    main()
+    return launched
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"), [(["--fast"], "fast"), (["--full"], "full"), ([], None)]
+)
+def test_demo_main_passes_the_run_mode(monkeypatch, flags, expected):
+    seen = {}
+
+    def create(demo, kwargs):
+        seen.update(kwargs)
+        return demo
+
+    assert len(_demo_main(monkeypatch, flags, create)) == 1
+    assert seen["mode"] == expected
+
+
+def test_demo_main_reports_fast_with_an_llm_option_as_a_usage_error(monkeypatch, capsys):
+    def create(_demo, _kwargs):
+        raise ValueError("--refs llm calls an LLM, which fast mode (--fast) never does.")
+
+    with pytest.raises(SystemExit) as exc_info:
+        _demo_main(monkeypatch, ["--fast", "--refs", "llm"], create)
+
+    assert exc_info.value.code == 2
+    assert "calls an LLM, which fast mode" in " ".join(capsys.readouterr().err.split())
+
+
 async def test_preset_replacement_applies_full_settings_and_closes_old_pipeline():
     helper = getattr(local_app, "_replace_demo_pipeline_with_preset", None)
     assert helper is not None

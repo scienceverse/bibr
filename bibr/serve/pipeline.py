@@ -17,6 +17,7 @@ from bibr.pipeline.context import RunConfig
 from bibr.pipeline.pipeline import Pipeline
 from bibr.pipeline.plans import build_stage_plan
 from bibr.pipeline.resources import ResourceManager
+from bibr.run_mode import resolve_mode
 
 if TYPE_CHECKING:
     import httpx
@@ -77,6 +78,7 @@ class ServePipeline(Pipeline):
         equations: bool = True,
         ocr_profile: str | None = None,
         settings: GlobalSettings | None = None,
+        mode: str | None = None,
     ) -> None:
         # Ensure BibrServeOcrBackend is imported so its ``@register``
         # decorator runs before ResourceManager tries to instantiate it.
@@ -90,11 +92,13 @@ class ServePipeline(Pipeline):
         ocr_model, default_ocr_profile = serve_ocr_defaults(settings_snapshot)
 
         # Per-request fields (start_page / end_page / include_figures /
-        # crossref) are supplied via ``process_file(config=...)`` so a single
-        # ServePipeline instance can be shared across concurrent requests on
-        # one worker. ``crossref`` here is the deployment-level tri-state
+        # crossref / mode) are supplied via ``process_file(config=...)`` so a
+        # single ServePipeline instance can be shared across concurrent requests
+        # on one worker. ``crossref`` here is the deployment-level tri-state
         # (None = follow CROSSREF_ENRICH); a request's ``crossref`` form field
-        # overrides it per run.
+        # overrides it per run. ``mode`` is the deployment's (the argument, else
+        # PIPELINE_MODE, which under auto is fast when no LLM is configured);
+        # a request's ``mode`` field overrides it the same way.
         config = RunConfig(
             memory_mode="keep_all",
             ocr_backend="serve-http",
@@ -105,6 +109,7 @@ class ServePipeline(Pipeline):
             crossref=crossref,
             equations=equations,
             llm_backend="cloud",
+            mode=resolve_mode(settings_snapshot, mode, backend="cloud"),
         )
         resources = ResourceManager(
             memory_mode="keep_all",

@@ -224,6 +224,7 @@ def _client_processing_message(exc: ProcessingError) -> str:
 # `refs=llm` for full-precision parsing without redeploying the server.
 _VALID_REF_PARSE = frozenset({"ner", "llm", "llm-chunked", "ref-llm", "off"})
 _VALID_REF_SEG = frozenset({"geom", "region", "llm", "crf"})
+_VALID_MODE = frozenset({"auto", "fast", "full"})
 
 # Default in-flight LLM concurrency for serve. The library default
 # (LLM_MAX_CONCURRENCY=0 = unlimited) suits CLI/cloud batch, but a single
@@ -374,6 +375,10 @@ class BibrPipelineAPI(ls.LitAPI):
         ``off`` skips reference extraction entirely for a fast core-metadata pass.
       - ``ref_seg`` (optional, ``geom``/``region``/``llm``/``crf``): per-request
         reference segmentation strategy (absent → server-side REF_SEG_STRATEGY).
+      - ``mode`` (optional, ``auto``/``fast``/``full``): run this request without
+        any LLM call (``fast``) or with the configured one (``full``); absent or
+        ``auto`` → the deployment's mode (PIPELINE_MODE, which is fast when no
+        LLM is configured). The response cache keys on the effective mode.
     """
 
     def __init__(
@@ -615,6 +620,14 @@ class BibrPipelineAPI(ls.LitAPI):
             "ref_seg must be one of: " + ", ".join(sorted(_VALID_REF_SEG)),
         )
 
+        mode = self._opt_choice(
+            request.get("mode"),
+            _VALID_MODE,
+            "mode must be one of: " + ", ".join(sorted(_VALID_MODE)),
+        )
+        if mode == "auto":
+            mode = None  # follow the deployment, as an absent field does
+
         return {
             "filename": filename,
             "content": content,
@@ -628,6 +641,7 @@ class BibrPipelineAPI(ls.LitAPI):
             "consolidate": consolidate,
             "refs": refs,
             "ref_seg": ref_seg,
+            "mode": mode,
             "request_id": _link_id(request.get("request_id")),
             "job_id": _link_id(request.get("job_id")),
         }
@@ -676,6 +690,10 @@ class BibrPipelineAPI(ls.LitAPI):
         from bibr.extract.ref_extractor import _resolve_ref_strategies
 
         eff_ref_seg, eff_refs = _resolve_ref_strategies(ref_seg, refs)
+        # The effective run mode, for the same reason: an auto deployment flips
+        # between fast and full when an API key is added, and a request can name
+        # either, so a fast result must never answer a full request.
+        effective_mode = self._effective_mode(inputs.get("mode"))
 
         # decode_request computes this while streaming. Direct embedders that
         # bypass decode retain a compatibility fallback.
@@ -701,6 +719,7 @@ class BibrPipelineAPI(ls.LitAPI):
             crossref=effective_crossref,
             input_format=Path(filename).suffix,
             include_region_meta=include_region_meta,
+            mode=effective_mode,
         )
 
         if not self._cache:
@@ -1084,6 +1103,7 @@ class BibrPipelineAPI(ls.LitAPI):
         refs = inputs.get("refs")
         ref_seg = inputs.get("ref_seg")
         crossref = inputs.get("crossref")
+        mode = inputs.get("mode")
 
         # Per-request fields ride on a fresh RunConfig; the pipeline is shared.
         overrides: dict[str, object] = {
@@ -1101,6 +1121,9 @@ class BibrPipelineAPI(ls.LitAPI):
         # with (normally None → CROSSREF_ENRICH).
         if crossref is not None:
             overrides["crossref"] = crossref
+        # Likewise the mode: absent keeps the deployment's.
+        if mode is not None:
+            overrides["mode"] = mode
         config = dataclasses.replace(self._pipeline._config, **overrides)
 
         # Gate entry into the expensive pipeline run. The async loop dispatches
@@ -1212,6 +1235,18 @@ class BibrPipelineAPI(ls.LitAPI):
             return bool(deployment_default)
         return bool(self._settings.crossref.enrich)
 
+    def _effective_mode(self, requested: str | None) -> str:
+        """Resolve a request's ``mode`` the way the pipeline will: its value, else the deployment's."""
+        if requested in ("fast", "full"):
+            return requested
+        pipeline = getattr(self, "_pipeline", None)
+        deployment_mode = getattr(getattr(pipeline, "_config", None), "mode", None)
+        if deployment_mode in ("fast", "full"):
+            return deployment_mode
+        from bibr.run_mode import resolve_mode
+
+        return resolve_mode(self._settings, backend="cloud")
+
     @staticmethod
     def _cache_key(
         content_hash: str,
@@ -1225,11 +1260,13 @@ class BibrPipelineAPI(ls.LitAPI):
         crossref: bool = False,
         input_format: str | None = None,
         include_region_meta: bool = False,
+        mode: str | None = None,
     ) -> str:
         """Response-cache key: the full SHA-256 of the upload (never the 16-hex
         ``file_hash`` display id) plus every option that changes the export.
         An option at its default adds nothing, so a new option leaves every
-        existing key — and the results cached under it — as it was."""
+        existing key — and the results cached under it — as it was. A full-mode
+        run is the default and adds nothing; a fast run adds ``:fast``."""
         key = f"json:{content_hash}"
         if start_page is not None:
             key += f":sp{start_page}"
@@ -1249,6 +1286,8 @@ class BibrPipelineAPI(ls.LitAPI):
             key += f":rseg:{ref_seg}"
         if crossref:
             key += ":enrich"
+        if mode == "fast":
+            key += ":fast"
         if input_format:
             key += f":fmt:{input_format.lstrip('.').lower()}"
         return key

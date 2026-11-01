@@ -21,6 +21,13 @@ default to loopback at `127.0.0.1:8000`. Two flags control the bind address:
 |---|---|---|
 | `--host` | Host to bind to | `127.0.0.1` |
 | `--port` | Port to bind to | `8000` |
+| `--fast` | Serve in fast mode: no LLM call and no API key, local models only (`PIPELINE_MODE=fast`) | follow what is configured |
+| `--full` | Serve in full mode, with the configured LLM; refuses to start with none (`PIPELINE_MODE=full`) | follow what is configured |
+
+With neither flag, `PIPELINE_MODE=auto` serves fast when no LLM is configured and
+full when one is. A request can name its own `mode` form field (`fast` or `full`);
+`mode=full` on a server with no LLM is refused with a 400 before any job is created, and
+`/ready` names the server's mode to authenticated callers only.
 
 ```bash
 bibr serve --host 127.0.0.1 --port 9000

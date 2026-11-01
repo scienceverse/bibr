@@ -177,6 +177,54 @@ async def test_chew_paper_omits_crossref_when_not_given():
         assert "crossref" not in descriptor
 
 
+async def test_chew_paper_passes_mode_through():
+    """The tool's ``mode`` rides the descriptor exactly like the form field."""
+    tracker = _FakeTracker()
+    async with _tool_session(tracker) as client:
+        await client.call_tool(
+            "chew_paper",
+            {"filename": "paper.pdf", "content_base64": PDF_B64, "mode": "fast"},
+        )
+        (descriptor,) = tracker.descriptors
+        assert descriptor["mode"] == "fast"
+
+
+async def test_chew_paper_omits_mode_when_not_given():
+    tracker = _FakeTracker()
+    async with _tool_session(tracker) as client:
+        await client.call_tool("chew_paper", {"filename": "paper.pdf", "content_base64": PDF_B64})
+        (descriptor,) = tracker.descriptors
+        assert "mode" not in descriptor
+
+
+async def test_chew_paper_refuses_mode_full_with_no_llm_before_dispatch(monkeypatch):
+    """A server with no LLM turns ``mode=full`` into a tool error, not a failed run."""
+    monkeypatch.setattr("bibr.run_mode.llm_configured", lambda *_a, **_k: False)
+    tracker = _FakeTracker()
+    async with _tool_session(tracker) as client:
+        result = await client.call_tool(
+            "chew_paper",
+            {"filename": "paper.pdf", "content_base64": PDF_B64, "mode": "full"},
+        )
+        assert "mode=full needs an LLM" in _error_text(result)
+        assert tracker.descriptors == []
+
+
+async def test_chew_url_refuses_a_bad_mode_before_fetch(monkeypatch):
+    import bibr.serve.mcp as serve_mcp
+
+    async def must_not_run(*a, **k):
+        raise AssertionError("fetch must not run for invalid options")
+
+    monkeypatch.setattr(serve_mcp, "fetch_url_safely", must_not_run)
+    async with _tool_session(_FakeTracker()) as client:
+        assert "mode must be one of" in _error_text(
+            await client.call_tool(
+                "chew_url", {"url": "https://arxiv.org/pdf/1.pdf", "mode": "turbo"}
+            )
+        )
+
+
 async def test_chew_url_option_validation_precedes_fetch(monkeypatch):
     import bibr.serve.mcp as serve_mcp
 

@@ -21,6 +21,7 @@ on by default and independently toggleable.
 import functools
 import json
 import logging
+import os
 import time
 import uuid
 from pathlib import Path
@@ -41,23 +42,35 @@ _CLASSIFIER_CHECK_RETRY_SECONDS = 30.0
 _READINESS_PROBE_TTL_SECONDS = 2.0
 
 
-def classifier_artifact_readiness(settings, *, snapshot_download=None) -> tuple[str, bool]:
-    """Verify configured classifier snapshots exist locally without downloading."""
+def classifier_artifact_readiness(
+    settings, *, snapshot_download=None, fast: bool = False
+) -> tuple[str, bool]:
+    """Verify configured classifier snapshots exist locally without downloading.
+
+    A fast deployment (``fast=True``) also needs the front-matter tagger, which
+    reads the title, authors and abstract there, so its bundle is checked too.
+    """
     if snapshot_download is None:
         from huggingface_hub import snapshot_download
 
-    configured = (
+    configured = [
         (
             settings.ml.paper_classifier_model_id,
             settings.ml.paper_classifier_revision,
+            False,
         ),
         (
             settings.ml.section_classifier_model_id,
             settings.ml.section_classifier_revision,
+            False,
         ),
-    )
+    ]
+    if fast:
+        configured.append(
+            (settings.ml.front_tagger_model_id, settings.ml.front_tagger_revision, True)
+        )
     try:
-        for model_id, revision in configured:
+        for model_id, revision, onnx_only in configured:
             if not model_id:
                 continue
             # A local directory or file counts as present when the
@@ -71,6 +84,11 @@ def classifier_artifact_readiness(settings, *, snapshot_download=None) -> tuple[
             if Path(str(model_id)).expanduser().exists():
                 from bibr.utils.ml_runtime import find_onnx_bundle, resolve_runtime
 
+                if onnx_only:
+                    # The tagger has no torch form: only an onnx/ bundle will load.
+                    if find_onnx_bundle(model_id, revision) is None:
+                        raise FileNotFoundError(model_id)
+                    continue
                 resolve_runtime(
                     "classifier",
                     settings=settings,
@@ -103,7 +121,12 @@ def _request_metering_line(
 
 
 def readiness_payload(
-    status: str, checks: dict[str, str], settings, *, include_detail: bool = True
+    status: str,
+    checks: dict[str, str],
+    settings,
+    *,
+    include_detail: bool = True,
+    mode: str | None = None,
 ) -> dict[str, object]:
     """Build the readiness body.
 
@@ -111,14 +134,18 @@ def readiness_payload(
     health and the deployment ``build_sha`` are disclosed only to authenticated
     callers — anonymous callers get just the overall status (audit L1). Probes
     rely on the HTTP status code, not the body, so nothing operational is lost.
+    The deployment's run ``mode`` (fast or full) is detail of the same kind.
     """
     if not include_detail:
         return {"status": status}
-    return {
+    payload: dict[str, object] = {
         "status": status,
         "checks": checks,
         "build_sha": settings.BIBR_BUILD_SHA,
     }
+    if mode is not None:
+        payload["mode"] = mode
+    return payload
 
 
 # Metering records (one JSON line each) go through ``bibr.serve.logsetup``; the
@@ -217,6 +244,22 @@ def _build_server(upload_stores):
     # Fail fast on misconfigured production deployments (missing Redis
     # password / API key, wildcard CORS) before any model loads.
     validate_production_settings(Settings)
+
+    # An explicit full mode (--full, PIPELINE_MODE=full) with no LLM would answer
+    # every request with a credential error. Auto never gets here: with no LLM
+    # it is fast.
+    from bibr.run_mode import llm_configured, resolve_mode
+
+    if resolve_mode(Settings, backend="cloud") == "full" and not llm_configured(
+        Settings, backend="cloud"
+    ):
+        from bibr.exceptions import ConfigurationError
+
+        raise ConfigurationError(
+            "bibr serve was told to run in full mode, but no LLM is configured. "
+            "Set LLM_API_KEY (or a provider, model and base URL), or run in fast mode "
+            "(bibr serve --fast, PIPELINE_MODE=fast), which needs none."
+        )
 
     # The outer body cap is the file limit plus multipart headroom — except that the
     # MCP endpoint carries its file base64-encoded inside a JSON-RPC body, so with
@@ -470,6 +513,7 @@ def _register_readiness_route(server, Settings) -> None:
 
     from bibr.ocr.http_security import normalize_ocr_base_url, ocr_request_headers
     from bibr.ocr.profiles import GLM_SERVED_MODEL_ALIAS
+    from bibr.run_mode import resolve_mode
     from bibr.serve.auth import check_bearer
     from bibr.serve.pipeline import serve_ocr_defaults
 
@@ -627,7 +671,13 @@ def _register_readiness_route(server, Settings) -> None:
                 and time.monotonic() - classifier_checked_at >= _CLASSIFIER_CHECK_RETRY_SECONDS
             )
         ):
-            classifier_check = await asyncio.to_thread(classifier_artifact_readiness, Settings)
+            classifier_check = await asyncio.to_thread(
+                functools.partial(
+                    classifier_artifact_readiness,
+                    Settings,
+                    fast=resolve_mode(Settings, backend="cloud") == "fast",
+                )
+            )
             state["classifier_check"] = classifier_check
             state["classifier_check_at"] = time.monotonic()
         classifier_status, classifier_ok = classifier_check
@@ -639,7 +689,13 @@ def _register_readiness_route(server, Settings) -> None:
         status = "ready" if all_ok else "not_ready"
         return Response(
             content=json.dumps(
-                readiness_payload(status, checks, Settings, include_detail=include_detail)
+                readiness_payload(
+                    status,
+                    checks,
+                    Settings,
+                    include_detail=include_detail,
+                    mode=resolve_mode(Settings, backend="cloud"),
+                )
             ),
             media_type="application/json",
             status_code=200 if all_ok else 503,
@@ -660,12 +716,36 @@ def main():
     parser.add_argument(
         "--port", type=int, default=8000, help="Port to bind to (default: %(default)s)"
     )
+    run_mode = parser.add_mutually_exclusive_group()
+    run_mode.add_argument(
+        "--fast",
+        action="store_true",
+        help="Serve in fast mode: no LLM call and no API key, local models only "
+        "(PIPELINE_MODE=fast). This is what a server with no LLM configured does by default. "
+        "A request's mode field can still ask for full where an LLM is configured.",
+    )
+    run_mode.add_argument(
+        "--full",
+        action="store_true",
+        help="Serve in full mode: the configured LLM reads what the local models are unsure of "
+        "(PIPELINE_MODE=full). Refuses to start with no LLM configured.",
+    )
 
     args = parser.parse_args()
+
+    # The workers (a fresh interpreter each) read the mode from the environment.
+    chosen_mode = "fast" if args.fast else "full" if args.full else None
+    if chosen_mode:
+        os.environ["PIPELINE_MODE"] = chosen_mode
 
     from bibr.config import Settings
     from bibr.serve.auth import validate_bind_auth
     from bibr.serve.logsetup import configure_serve_logging, install_litserve_logging_hook
+
+    if chosen_mode:
+        # Settings may have been built before the flag was parsed; the master's
+        # own copy follows the flag too.
+        Settings.pipeline.mode = chosen_mode
 
     # The CLI's own logging setup never runs for `serve`; install the serve sink
     # first so every warning below (and every bibr.* record) is formatted and

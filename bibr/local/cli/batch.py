@@ -29,8 +29,6 @@ _LOCAL_ONLY_FLAGS = (
     "memory",
     "device",
     "no_llm",
-    "fast",
-    "full",
     "no_equations",
     "batch_size",
     "preset",
@@ -112,6 +110,12 @@ def _form_fields(args: Any, console: Any) -> dict[str, str] | None:
         form["ref_seg"] = args.ref_seg
     if args.consolidate:
         form["consolidate"] = args.consolidate
+    # The serve runs each request in its own mode when asked: --fast / --full
+    # become the form field, and neither leaves it to the serve's PIPELINE_MODE.
+    if getattr(args, "fast", False):
+        form["mode"] = "fast"
+    elif getattr(args, "full", False):
+        form["mode"] = "full"
     # The serve honours a per-request enrichment switch; forward an explicit
     # --crossref / --no-crossref and let the serve's CROSSREF_ENRICH decide otherwise.
     if getattr(args, "crossref", False):

@@ -1,7 +1,7 @@
 """Local Gradio Demo for bibr
 
 Standalone demo that runs the full bibr pipeline in-process.
-No external API server required — just an LLM API key and OCR backend.
+No external API server required — just an OCR backend, and an LLM API key for full mode.
 """
 
 import asyncio
@@ -619,19 +619,30 @@ class _GradioProgress:
         pass
 
 
+def _effective_refs(refs: str | None, settings, mode: str) -> str:
+    """The reference-parse strategy a run in ``mode`` uses, as the status line shows it."""
+    from bibr.run_mode import LLM_PARSE_STRATEGIES
+
+    strategy = refs or settings.REF_PARSE_STRATEGY or "ner"
+    # Fast mode makes no LLM call, so a setting that names one runs as the local parser.
+    return "ner" if mode == "fast" and strategy in LLM_PARSE_STRATEGIES else strategy
+
+
 def _build_status_md(
     ocr_backend: str,
     llm_provider: str,
     llm_model: str,
     refs_strategy: str = "llm",
     llm_backend: str | None = None,
+    mode: str = "full",
 ) -> str:
     """Build a compact status line showing active backend configuration."""
-    backend = f" `{llm_backend}`" if llm_backend else ""
-    return (
-        f"**OCR** `{ocr_backend}` · **LLM**{backend} `{llm_provider}/{llm_model}` "
-        f"· **Refs** `{refs_strategy}` "
-    )
+    if mode == "fast":
+        llm = "**LLM** none (fast mode)"
+    else:
+        backend = f" `{llm_backend}`" if llm_backend else ""
+        llm = f"**LLM**{backend} `{llm_provider}/{llm_model}`"
+    return f"**Mode** `{mode}` · **OCR** `{ocr_backend}` · {llm} · **Refs** `{refs_strategy}` "
 
 
 async def _replace_demo_pipeline_with_preset(
@@ -711,6 +722,9 @@ async def _swap_demo_pipeline(
             ocr_backend=new_ocr,
             llm_backend=new_llm,
             ref_parse_strategy=refs,
+            # Only an explicit --fast / --full is carried over; otherwise the
+            # replacement resolves it afresh from the preset's settings.
+            **({"mode": pipeline_state["mode"]} if pipeline_state.get("mode") else {}),
         )
     except Exception:
         # apply_to_settings mutates the singleton incrementally. If validation
@@ -729,14 +743,15 @@ async def _swap_demo_pipeline(
     except Exception:  # noqa: BLE001 — replacement is live; cleanup stays best-effort
         logger.warning("Previous demo pipeline cleanup failed", exc_info=True)
 
-    effective_refs = refs or settings.REF_PARSE_STRATEGY or "ner"
+    new_mode = getattr(replacement, "mode", "full")
     effective_backend = getattr(replacement, "llm_backend", new_llm)
     return _build_status_md(
         new_ocr,
         settings.llm.provider,
         settings.llm.model,
-        effective_refs,
+        _effective_refs(refs, settings, new_mode),
         effective_backend,
+        new_mode,
     )
 
 
@@ -746,11 +761,17 @@ def create_local_demo(
     llm_backend: str | None = None,
     presets_enabled: bool = False,
     refs: str | None = None,
+    mode: str | None = None,
 ) -> gr.Blocks:
-    """Create a Gradio demo that runs the bibr pipeline locally."""
+    """Create a Gradio demo that runs the bibr pipeline locally.
+
+    ``mode`` is ``"fast"`` (no LLM call, no key), ``"full"`` (the configured LLM)
+    or ``None``/``"auto"`` (``PIPELINE_MODE``, which is fast when no LLM is configured).
+    """
     from bibr.config import Settings
     from bibr.local.cli import normalize_ocr_backend
     from bibr.local.pipeline import LocalPipeline
+    from bibr.run_mode import LLM_PARSE_STRATEGIES, resolve_run_mode
 
     # Read first, so a bad DEMO_CACHE_TTL_SECONDS or DEMO_MAX_FILE_SIZE_MB
     # fails before models load.
@@ -767,10 +788,19 @@ def create_local_demo(
         Settings.cache.ocr = True
         logger.info("Local demo — enabling OCR disk cache (CACHE_OCR) by default")
 
+    # Like `bibr chew`: --llm or --refs llm under auto ask for an LLM (full mode),
+    # and in an explicit fast mode they are refused.
+    llm_flags = [f"--llm {llm_backend}"] if llm_backend else []
+    if refs in LLM_PARSE_STRATEGIES:
+        llm_flags.append(f"--refs {refs}")
+    run_mode = resolve_run_mode(
+        Settings, explicit=mode, llm_backend=llm_backend, llm_flags=llm_flags
+    )
+
     # The reference-parse strategy rides the pipeline's per-run config
     # (mirrors `bibr chew --refs`) instead of mutating the process-global
     # Settings; the status line shows the effective value.
-    effective_refs = refs or Settings.REF_PARSE_STRATEGY or "ner"
+    effective_refs = _effective_refs(refs, Settings, run_mode)
 
     # Figure base64 images are only emitted when FIGURE_IMAGES is on; without
     # them a "no images" download would be identical to the full one, so we
@@ -782,18 +812,23 @@ def create_local_demo(
         ocr_backend=ocr_backend,
         llm_backend=llm_backend,
         ref_parse_strategy=refs,
+        mode=run_mode,
     )
     pipeline_state: dict[str, Any] = {
         "pipeline": pipeline,
         "ocr_backend": ocr_backend,
         "memory_mode": memory_mode,
         "llm_backend": llm_backend,
+        # What the user asked for, not what it resolved to: a preset that
+        # configures an LLM turns an automatic demo into a full one.
+        "mode": None if mode == "auto" else mode,
     }
     pipeline_lock = asyncio.Lock()
     logger.info(
-        "Local pipeline ready (ocr=%s, llm=%s, memory=%s)",
+        "Local pipeline ready (mode=%s, ocr=%s, llm=%s, memory=%s)",
+        run_mode,
         ocr_backend,
-        llm_backend or Settings.llm.backend,
+        "none" if run_mode == "fast" else llm_backend or Settings.llm.backend,
         getattr(pipeline, "memory_mode", memory_mode),
     )
 
@@ -803,6 +838,7 @@ def create_local_demo(
         Settings.llm.model,
         effective_refs,
         getattr(pipeline_state["pipeline"], "llm_backend", llm_backend or Settings.llm.backend),
+        run_mode,
     )
 
     with gr.Blocks(title="bibr 🦫 Demo", delete_cache=cache_lifetime) as demo:
