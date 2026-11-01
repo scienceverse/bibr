@@ -2719,22 +2719,92 @@ def _title_language(text: str) -> str | None:
 # Fewer words than this and one function word decides the language: too little
 # to write the language into the record.
 _MIN_LANGUAGE_WORDS = 4
-# What _title_language names as a language, as opposed to a script ("cyrillic").
-_LANGUAGE_CODES = frozenset(_TITLE_FUNCTION_WORDS) | {"uk", "ru"}
+# What the record's language is guessed from. Polish "do" and "we" are English
+# and Portuguese words too ("where do we stand"), so they do not count there.
+_GUESS_WORDS: dict[str, frozenset[str]] = {
+    **_TITLE_FUNCTION_WORDS,
+    "pl": _TITLE_FUNCTION_WORDS["pl"] - {"do", "we"},
+}
+# Letters that mark Polish, and letters of the languages that share some of
+# them (Lithuanian, Czech, Turkish, Romanian, Portuguese, Spanish).
+_POLISH_LETTERS = frozenset("ąęłńśźż")
+_NOT_POLISH_LETTERS = frozenset("ėįųūčšžřěůťďňľĺŕığşăâîțșõãñ")
+# A Polish letter counts as this many function words.
+_POLISH_LETTER_HITS = 2
+# Cyrillic letters Russian and Ukrainian do not print: Kazakh, Uzbek, Tatar,
+# Mongolian, Belarusian, Serbian, Macedonian.
+_OTHER_CYRILLIC_LETTERS = frozenset("әғқңөұүһҳўӣӯҗҙҡҫӧӓђјљњћџѓќѕ")
+# Indonesian function words are not words of any other language in the table
+# or of English, so one of them is enough; elsewhere "Die Young" is not German.
+_ONE_WORD_LANGUAGES = frozenset({"id"})
+
+
+def _guess_cyrillic_language(text: str) -> str | None:
+    """Ukrainian or Russian by the letters only one of them prints, else None.
+
+    ъ is no evidence: Bulgarian prints it. A letter of any other Cyrillic
+    language, or Belarusian і beside Russian ы э ё, leaves the title unnamed.
+    """
+
+    letters = set(text.casefold())
+    if letters & _OTHER_CYRILLIC_LETTERS:
+        return None
+    if letters & set("їєґ") or ("і" in letters and "и" in letters and not letters & set("ыэёъ")):
+        return "uk"
+    return "ru" if letters & set("ыэё") and "і" not in letters else None
+
+
+def _guess_latin_language(text: str) -> str | None:
+    """The language whose function words a Latin-script title uses most, else None.
+
+    Stricter than :func:`_title_language`, which a title's translation is
+    compared with: the winner is unique and has a word of two or more letters
+    ("I", "D" and "O" are function words in several languages); a language
+    other than English needs two such words, or one with an accented letter
+    beside it; Polish letters count for Polish.
+    """
+
+    folded = text.casefold().replace("\u0307", "")
+    words = [part for word in _WORD_RE.findall(folded) for part in re.split(r"['’]", word)]
+    hits = {
+        language: sum(word in vocabulary for word in words)
+        for language, vocabulary in _GUESS_WORDS.items()
+    }
+    long_hits = {
+        language: sum(len(word) > 1 and word in vocabulary for word in words)
+        for language, vocabulary in _GUESS_WORDS.items()
+    }
+    letters = set(folded)
+    if letters & _POLISH_LETTERS and not letters & _NOT_POLISH_LETTERS:
+        hits["pl"] += _POLISH_LETTER_HITS
+        long_hits["pl"] += _POLISH_LETTER_HITS
+    ranked = sorted(hits.items(), key=lambda item: item[1], reverse=True)
+    (language, best), (_, runner_up) = ranked[0], ranked[1]
+    if best <= runner_up or long_hits[language] < 1:
+        return None
+    if language == "en" or language in _ONE_WORD_LANGUAGES:
+        return language
+    accented = any(char.isalpha() and not char.isascii() for char in text)
+    return language if best >= 2 or accented else None
 
 
 def language_from_title(title: str | None) -> str | None:
     """The ISO 639-1 code of the paper's language read from its title, or None.
 
-    A guess from function words and script letters (see
-    :func:`_title_language`): it names only a language, never a script, and
-    only from a title of at least four words. A title that no language's
-    function words win, or that is too short, gives None.
+    A guess from function words and script letters, from a title of at least
+    four words, that names only a language, never a script. Where the evidence
+    is thin it gives None: a title that no language's function words win, a
+    lone function word that English shares ("Die Young or Live Forever"), a
+    language outside the table, or a Cyrillic title without letters that tell
+    Russian from Ukrainian.
     """
-    if len(_WORD_RE.findall(title or "")) < _MIN_LANGUAGE_WORDS:
+    title = title or ""
+    if len(_WORD_RE.findall(title)) < _MIN_LANGUAGE_WORDS:
         return None
-    language = _title_language(title or "")
-    return language if language in _LANGUAGE_CODES else None
+    script = _dominant_script(title)
+    if script == "CYRILLIC":
+        return _guess_cyrillic_language(title)
+    return _guess_latin_language(title) if script == "LATIN" else None
 
 
 def fill_language(metadata: PaperMetadata) -> None:
