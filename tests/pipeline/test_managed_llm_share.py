@@ -224,6 +224,7 @@ async def test_the_stage_fails_the_chunk_as_an_llm_outage(monkeypatch):
     paper = MagicMock()
     ctx = MagicMock()
     ctx.config.no_llm = False
+    ctx.config.skips_llm = False
     ctx.config.llm_backend = "vllm"
     ctx.alive.return_value = [paper]
 

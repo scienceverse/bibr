@@ -26,6 +26,7 @@ from pydantic import ValidationError
 
 from bibr.clients.llm import LLMClient, incomplete_output_text
 from bibr.clients.llm_protocol import LlmClient
+from bibr.clients.skipped import is_skipped
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.exceptions import ProcessingError, UpstreamServiceError
 from bibr.extract.anchor_snap import find_anchor_starts, segment_by_anchors
@@ -729,6 +730,7 @@ def _resolve_ref_strategies(
     parse_override: str | None = None,
     *,
     settings: GlobalSettings | None = None,
+    llm_skipped: bool = False,
 ) -> tuple[str, str]:
     """Resolve effective ``(seg_strategy, parse_strategy)``.
 
@@ -749,6 +751,10 @@ def _resolve_ref_strategies(
     tier from the cascade entirely (region → CRF only). Force the LLM
     segmenter with ``REF_SEG_STRATEGY=llm``; the CRF segmenter is opt-in via
     ``=crf``.
+
+    A run with no LLM (*llm_skipped*, fast mode) parses with the local parser
+    whatever was asked; the entry points refuse an LLM parse flag there, so
+    this only catches a setting or a direct caller.
     """
     effective = settings if settings is not None else snapshot_settings()
     seg = seg_override if seg_override is not None else effective.REF_SEG_STRATEGY
@@ -757,7 +763,10 @@ def _resolve_ref_strategies(
         seg = "geom"
     if parse is None:
         parse = "ner"
-    return seg.lower(), parse.lower()
+    parse = parse.lower()
+    if llm_skipped and parse not in ("ner", "off"):
+        parse = "ner"
+    return seg.lower(), parse
 
 
 def _is_in_press(year_str: str | None) -> bool:
@@ -1682,6 +1691,7 @@ async def _parse_refs_via_ner(
         ext._settings.REF_NER_LLM_FALLBACK
         and ext._settings.REF_LLM_BASE_URL
         and ext._settings.REF_LLM_MODEL
+        and not ext._llm_skipped
     ):
         aligned = await ext._parse_references_ner_review_aligned(ref_strings)
         return _sequence_references([ref for ref in aligned if ref is not None])
@@ -1784,7 +1794,10 @@ class ReferenceExtractor:
         self.file_hash = file_hash
         self._settings = settings if settings is not None else snapshot_settings()
         self._memory_mode = memory_mode
-        self.llm_client = llm_client or LLMClient(settings=self._settings)
+        # ``is None``, not ``or``: the fast-mode client is falsy and must be kept.
+        self.llm_client = (
+            llm_client if llm_client is not None else LLMClient(settings=self._settings)
+        )
         self._ref_seg_strategy = seg_strategy
         self._ref_parse_strategy = parse_strategy
         # Diagnostics the reference line stream adds to the yield receipt.
@@ -1795,6 +1808,11 @@ class ReferenceExtractor:
         self._credible_source_starts: int | None = None
         self._source_record_count: int | None = None
         self._reference_pages: tuple[int, int] | None = None
+
+    @property
+    def _llm_skipped(self) -> bool:
+        """Whether this is a fast run, which asks no LLM (read live: the client can be swapped)."""
+        return is_skipped(self.llm_client)
 
     # Class-attribute seams so tests can patch capture without touching the
     # module functions other callers share.
@@ -1823,6 +1841,7 @@ class ReferenceExtractor:
             self._ref_seg_strategy,
             self._ref_parse_strategy,
             settings=self._settings,
+            llm_skipped=self._llm_skipped,
         )
         source_rows = ref_df["text"].astype(str).tolist()
         source_record_count = sum(bool(collapse_ws(row)) for row in source_rows)
@@ -1891,6 +1910,7 @@ class ReferenceExtractor:
             and self._settings.REF_NER_LLM_FALLBACK
             and self._settings.REF_LLM_BASE_URL
             and self._settings.REF_LLM_MODEL
+            and not self._llm_skipped
         ):
             aligned = (
                 await self._parse_references_ref_llm_aligned(ref_strings)
@@ -1974,6 +1994,7 @@ class ReferenceExtractor:
             self._ref_seg_strategy,
             self._ref_parse_strategy,
             settings=self._settings,
+            llm_skipped=self._llm_skipped,
         )
         strings = [citation.text for citation in found.citations]
         logger.info(
@@ -2259,7 +2280,7 @@ class ReferenceExtractor:
                     f"{self._settings.REF_SEG_MIN_SOURCE_RECALL:.2f} × {records} "
                     "reference-section source records",
                 )
-        if self._settings.REF_SEG_LLM_FALLBACK:
+        if self._settings.REF_SEG_LLM_FALLBACK and not self._llm_skipped:
             return await self._segment_llm_then_crf(
                 ref_text, try_region=False, reserve=region_reserve
             )
@@ -2267,7 +2288,10 @@ class ReferenceExtractor:
             "llm_anchor", ref_text, selected=False, reason_flags=("tier_disabled",)
         )
         self._record_warning(
-            WarningCode.REF_SEG_CRF_FALLBACK, "LLM seg tier disabled (REF_SEG_LLM_FALLBACK=false)"
+            WarningCode.REF_SEG_CRF_FALLBACK,
+            "fast mode has no LLM tier"
+            if self._llm_skipped
+            else "LLM seg tier disabled (REF_SEG_LLM_FALLBACK=false)",
         )
         if region_reserve:
             return self._select_region_reserve(ref_text, region_reserve)
@@ -2459,6 +2483,13 @@ class ReferenceExtractor:
         *reserve* is a region segmentation the caller held back on a recall
         shortfall; it is preferred over the CRF last resort if the LLM fails.
         """
+        if self._llm_skipped:
+            # A fast run reaches here only through an explicit ``llm`` strategy.
+            self._record_segmentation_attempt(
+                "llm_anchor", ref_text, selected=False, reason_flags=("tier_disabled",)
+            )
+            self._record_warning(WarningCode.REF_SEG_CRF_FALLBACK, "fast mode has no LLM tier")
+            return await self._segment_after_llm(ref_text, try_region, reserve)
         try:
             anchors = await self.llm_client.segment_references(ref_text, file_hash=self.file_hash)
             ref_strings = segment_by_anchors(ref_text, anchors)
@@ -2482,6 +2513,13 @@ class ReferenceExtractor:
                 "llm_anchor", ref_text, selected=False, reason_flags=("segmentation_error",)
             )
             self._record_warning(WarningCode.REF_SEG_CRF_FALLBACK, f"LLM segmentation error: {e!r}")
+        return await self._segment_after_llm(ref_text, try_region, reserve)
+
+    async def _segment_after_llm(
+        self, ref_text: str, try_region: bool, reserve: list[str] | None
+    ) -> list[str]:
+        """What follows an LLM tier that gave nothing: region anchors, the held-back
+        region reserve, then the CRF last resort."""
         if try_region:
             region_strings = self._segment_region_anchors(ref_text)
             if region_strings:
@@ -3176,7 +3214,7 @@ class ReferenceExtractor:
         from bibr.extract.ref_review import fold, improves, reasons
 
         aligned = await asyncio.to_thread(self._parse_references_ner_aligned, ref_strings)
-        if not self._settings.REF_NER_LLM_FALLBACK:
+        if not self._settings.REF_NER_LLM_FALLBACK or self._llm_skipped:
             return aligned
         kwargs: dict[str, Any] = {
             "min_coverage": self._settings.REF_NER_LLM_MIN_COVERAGE,

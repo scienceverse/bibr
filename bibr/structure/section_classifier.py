@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, ClassVar
 from pydantic import BaseModel, Field, model_validator
 
 from bibr.clients.nuextract_schema import NuExtractSchemaPolicy
+from bibr.clients.skipped import is_skipped
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.exceptions import ProcessingError
 from bibr.paper_contents import (
@@ -49,23 +50,33 @@ SECTION_CLASSIFIER_DEGRADED_WARNING = ProcessingWarning(
     "The trained section classifier is configured but did not answer; the LLM tier classified "
     "the section headers",
 )
+# The same, for a fast run, which has no LLM tier to take over.
+SECTION_CLASSIFIER_DEGRADED_FAST_WARNING = ProcessingWarning(
+    WarningCode.SECTION_CLASSIFIER_DEGRADED,
+    "No trained section classifier answered and fast mode has no LLM tier; headers the alias "
+    "table does not settle keep their alias prior or stay unknown",
+)
 
 
 def _note_section_classifier_degraded(
     degradation_warnings: list[ProcessingWarning] | None,
+    *,
+    llm_tier: bool = True,
 ) -> None:
     """Record once per paper that the configured trained tier did not answer.
 
     Whatever the cause — a core install without torch, weights that failed
     to load, a serve-side classifier resource in its degraded state, or an
-    inference error — the LLM tier decides instead, and the export must say
-    so rather than look like a healthy run.
+    inference error — the LLM tier decides instead (*llm_tier*; a fast run has
+    none), and the export must say so rather than look like a healthy run.
     """
-    if (
-        degradation_warnings is not None
-        and SECTION_CLASSIFIER_DEGRADED_WARNING not in degradation_warnings
-    ):
-        degradation_warnings.append(SECTION_CLASSIFIER_DEGRADED_WARNING)
+    warning = (
+        SECTION_CLASSIFIER_DEGRADED_WARNING
+        if llm_tier
+        else SECTION_CLASSIFIER_DEGRADED_FAST_WARNING
+    )
+    if degradation_warnings is not None and warning not in degradation_warnings:
+        degradation_warnings.append(warning)
 
 
 def _normalize_header_echo(header: str | None) -> str:
@@ -700,6 +711,8 @@ async def classify_headers_batch_async(
     """
     effective = settings if settings is not None else snapshot_settings()
     explicit_runtime = classifier_resources is not None or settings is not None
+    # A fast run asks no LLM: the trained model and the alias table decide.
+    llm_tier = not is_skipped(llm_client)
     n = len(header_texts)
     results: list[tuple[CanonicalSection, float, bool | None, str | None] | None] = [None] * n
     unknown_indices: list[int] = []
@@ -767,7 +780,7 @@ async def classify_headers_batch_async(
             )
             trained_available = model is not None
             if not trained_available and effective.ml.section_classifier_model_id:
-                _note_section_classifier_degraded(degradation_warnings)
+                _note_section_classifier_degraded(degradation_warnings, llm_tier=llm_tier)
         if trained_available:
             # Composite dedup key: header text alone collapses two headers
             # with the same wording but different document context (e.g. two
@@ -810,7 +823,7 @@ async def classify_headers_batch_async(
                     "falling back to alias/LLM classification",
                     type(exc).__name__,
                 )
-                _note_section_classifier_degraded(degradation_warnings)
+                _note_section_classifier_degraded(degradation_warnings, llm_tier=llm_tier)
                 trained_results = []
             if len(trained_results) != len(unique_keys):
                 logger.warning(
@@ -820,7 +833,7 @@ async def classify_headers_batch_async(
                     len(unique_keys),
                 )
                 if effective.ml.section_classifier_model_id:
-                    _note_section_classifier_degraded(degradation_warnings)
+                    _note_section_classifier_degraded(degradation_warnings, llm_tier=llm_tier)
                 trained_results = [(CanonicalSection.UNKNOWN, 0.0, None)] * len(unique_keys)
             unique_map: dict[str, tuple[CanonicalSection, float, bool | None, str | None]] = {
                 key: (
@@ -839,7 +852,7 @@ async def classify_headers_batch_async(
             # escalation to collapses-only needs a val-set measurement
             # showing it does not lose section types, which this change
             # does not attempt.
-            if effective.ml.section_classifier_llm_escalation:
+            if effective.ml.section_classifier_llm_escalation and llm_tier:
                 esc_keys = [k for k in unique_keys if unique_map[k][0] == CanonicalSection.UNKNOWN]
                 n_collapsed = sum(
                     1
@@ -924,7 +937,12 @@ async def classify_headers_batch_async(
                 llm_kwargs["settings"] = effective
             if degradation_warnings is not None:
                 llm_kwargs["degradation_warnings"] = degradation_warnings
-            llm_results_unique = await _classify_llm_batch(unique_texts, **llm_kwargs)
+            if llm_tier:
+                llm_results_unique = await _classify_llm_batch(unique_texts, **llm_kwargs)
+            else:
+                # No trained model and no LLM: the alias prior below is all there is.
+                _note_section_classifier_degraded(degradation_warnings, llm_tier=False)
+                llm_results_unique = [(CanonicalSection.UNKNOWN, 0.0)] * len(unique_texts)
             unique_map_by_text = {
                 text: (canon, score, None, "llm" if canon != CanonicalSection.UNKNOWN else None)
                 for text, (canon, score) in zip(unique_texts, llm_results_unique, strict=True)

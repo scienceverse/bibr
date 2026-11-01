@@ -874,6 +874,12 @@ class PaperContents:
     # segmentation falling back to CRF); surfaced onto
     # ``Paper.processing_warnings`` in post_parse.
     processing_warnings: list[ProcessingWarning] = field(default_factory=list)
+    # What a fast run left undone for want of an LLM, by name and count:
+    # ``citations`` (author-year citations no regex tier linked), ``equations``
+    # (sentences the regex pass kept alone) and ``integrity`` (1 when the
+    # structured funders, author roles and affiliation parts were not parsed).
+    # Empty in a full run. Internal-only.
+    llm_skipped: dict[str, int] = field(default_factory=dict)
     # Per-line reference-section geometry (serialized LineRecords) captured in
     # the OCR-stage native-text pass; consumed by the geom segmenter in extract.
     # None for DOCX / non-native / no-text-layer input (→ LLM cascade).

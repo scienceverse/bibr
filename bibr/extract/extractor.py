@@ -215,7 +215,10 @@ class MetadataExtractor:
         self.contents = contents
         self.sentences_df = contents.sentences_df
         self._settings = settings if settings is not None else snapshot_settings()
-        self._llm_client = llm_client or LLMClient(settings=self._settings)
+        # ``is None``, not ``or``: the fast-mode client is falsy and must be kept.
+        self._llm_client = (
+            llm_client if llm_client is not None else LLMClient(settings=self._settings)
+        )
         self.metadata: PaperMetadata | None = None
         self.file_hash = file_hash
         self._ref_seg_strategy = ref_seg_strategy

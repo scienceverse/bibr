@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from bibr.clients.skipped import SkippedLlmClient, is_skipped, note_skipped
 from bibr.exceptions import LlmCallError, ProcessingError
 from bibr.field_states import FieldScope
 from bibr.processing_warnings import ProcessingWarning, WarningCode
@@ -972,6 +973,8 @@ async def _extract_metadata_and_equations(
         contents.equations = regex_equations
     else:
         contents.equations = results[1]
+    if is_skipped(llm_client):
+        note_skipped(contents, "equations", eq_extractor.llm_skipped_candidates)
     failed_batches = eq_extractor.llm_batch_failures
     if failed_batches:
         # Each failed batch kept only its regex equations; say how many and why.
@@ -1272,6 +1275,17 @@ async def _link_citations(
     )
     contents.xrefs.extend(bib_xrefs)
     contents.citation_receipt = receipt_sink[0] if receipt_sink else None
+    if is_skipped(llm_client) and contents.citation_receipt is not None:
+        # Tier 3 never ran: these are the author-year citations it would have been offered.
+        note_skipped(
+            contents,
+            "citations",
+            sum(
+                1
+                for candidate in contents.citation_receipt.candidates
+                if candidate.style == "author-year" and not candidate.accepted
+            ),
+        )
     if contents.citation_receipt is not None:
         failed = [
             reason.removeprefix("llm_failed:")
@@ -1469,6 +1483,7 @@ async def post_parse(
         ref_seg_strategy,
         ref_parse_strategy,
         settings=effective_settings,
+        llm_skipped=is_skipped(llm_client),
     )
 
     file_usage: dict[str, dict[str, int]] = {}
@@ -1866,7 +1881,15 @@ class PostParseStage:
                     layout_hints=fs.contents.layout_hints or None if fs.contents else None,
                     no_llm=ctx.config.no_llm,
                     extract_equations=ctx.config.equations,
-                    llm_client=None if ctx.config.no_llm else ctx.resources.llm_client,
+                    # --no-llm passes none; a fast run, the client that makes no
+                    # call, so that nothing builds a real one.
+                    llm_client=(
+                        None
+                        if ctx.config.no_llm
+                        else SkippedLlmClient()
+                        if ctx.config.mode == "fast"
+                        else ctx.resources.llm_client
+                    ),
                     ref_seg_strategy=ctx.config.ref_seg_strategy,
                     ref_parse_strategy=ctx.config.ref_parse_strategy,
                     settings=ctx.settings,

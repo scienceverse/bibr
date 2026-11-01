@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 from rapidfuzz.fuzz import partial_ratio
 
+from bibr.clients.skipped import is_skipped
 from bibr.config import snapshot_settings
 from bibr.exceptions import ProcessingError, UpstreamServiceError
 from bibr.extract.archive_cover import reground_title_off_archive_cover
@@ -2400,7 +2401,8 @@ class CoreMetadataExtractor:
             usable = authors if veto is None else []
             # Gate recovery on the sanitized author list: a nonempty raw response may contain no
             # usable names. Prefer the selected byline over repeating the same wide context.
-            if not usable:
+            # A fast run has no recovery to try, so it leaves no trace of one.
+            if not usable and not is_skipped(self.llm_client):
                 recovered = await self._recover_empty_authors(
                     context=byline_recovery_context(resolution) or authors_text or full_text,
                 )
@@ -3673,8 +3675,12 @@ class CoreMetadataExtractor:
                 degraded_reason = type(exc).__name__
         if result is None:
             fallback_failure: str | None = None
+            skipped = is_skipped(self.llm_client)
             if self._settings.llm.merged_core_metadata:
                 fallback = llm_metadata
+            elif skipped:
+                # Fast mode has no LLM to fall back on: the class stays empty.
+                fallback = PaperClassificationLLM()
             else:
                 try:
                     fallback = await self.llm_client.extract_paper_classification(
@@ -3703,6 +3709,8 @@ class CoreMetadataExtractor:
                     + (
                         f"; the LLM fallback failed too ({fallback_failure})"
                         if fallback_failure
+                        else "; fast mode has no LLM fallback"
+                        if skipped
                         else "; the LLM classified the paper"
                     ),
                 )
@@ -3754,7 +3762,11 @@ class CoreMetadataExtractor:
                 oecd_l2 = ""
 
         threshold = float(self._settings.ml.paper_classifier_min_confidence)
-        if pt_score < threshold and self._settings.ml.paper_classifier_llm_escalation:
+        if (
+            pt_score < threshold
+            and self._settings.ml.paper_classifier_llm_escalation
+            and not is_skipped(self.llm_client)
+        ):
             try:
                 label = await self.llm_client.label_paper_type(
                     title, abstract, file_hash=self.file_hash

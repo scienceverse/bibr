@@ -20,6 +20,7 @@ import re
 import unicodedata
 from typing import TYPE_CHECKING
 
+from bibr.clients.skipped import is_skipped, note_skipped
 from bibr.exceptions import ProcessingError
 from bibr.models import Affiliation, FundingEntry
 from bibr.paper_contents import CanonicalSection
@@ -258,6 +259,12 @@ async def extract_structured_integrity(
     unique_affils, affil_author_ids = collect_affiliations(metadata.authors)
     if not funding_text and not contributions_text and not unique_affils:
         _keep_unparsed(metadata, "nothing_to_parse")
+        return
+
+    if is_skipped(llm_client):
+        # Fast mode: the statements stay as printed, with no structured parts.
+        _keep_unparsed(metadata, "skipped_fast_mode")
+        note_skipped(contents, "integrity")
         return
 
     author_names = [(a.given, a.family) for a in metadata.authors]

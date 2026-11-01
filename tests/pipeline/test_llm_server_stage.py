@@ -58,6 +58,14 @@ async def test_no_llm_skips_server_start():
 
 
 @pytest.mark.asyncio
+async def test_fast_mode_skips_server_start():
+    """Fast mode makes no LLM call, so it must not start a managed local server either."""
+    rm = MagicMock(start_llm_server=AsyncMock())
+    await LlmServerStage().run(_ctx(rm, RunConfig(llm_backend="vllm", mode="fast")))
+    rm.start_llm_server.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_start_failure_marks_files_errored_without_raising():
     """LLM server start failure must fail per-file, not crash the chunk."""
     rm = MagicMock(start_llm_server=AsyncMock(side_effect=RuntimeError("no weights")))

@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from bibr.clients.skipped import is_skipped
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.exceptions import ProcessingError
 from bibr.paper_contents import CanonicalSection, PaperContents, PaperSection, PaperSentence
@@ -925,7 +926,9 @@ async def detect_implicit_sections(
             _apply_positional_abstract_fallback(contents)
         return
 
-    if not effective.IMPLICIT_SECTION_DETECTION:
+    # A fast run has no LLM to detect with: the positional fallback decides, as
+    # it does with detection off, and no failure is recorded.
+    if not effective.IMPLICIT_SECTION_DETECTION or is_skipped(llm_client):
         if CanonicalSection.ABSTRACT not in section_types:
             _apply_positional_abstract_fallback(contents)
         return

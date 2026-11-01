@@ -38,6 +38,7 @@ import re
 from bisect import bisect_right
 from collections.abc import Iterator
 
+from bibr.clients.skipped import is_skipped
 from bibr.exceptions import ProcessingError
 from bibr.paper_contents import PaperEquation, PaperSection, PaperSentence
 
@@ -709,6 +710,8 @@ class EquationExtractor:
         # ``extract_with_llm_fallback`` call, and how many batches it sent.
         self.llm_batch_failures: list[str] = []
         self.llm_batch_count = 0
+        # Sentences that call would have sent, when it was skipped (fast mode).
+        self.llm_skipped_candidates = 0
 
     def _next_grp_id(self) -> int:
         self._grp_counter += 1
@@ -793,7 +796,9 @@ class EquationExtractor:
         sections : list[PaperSection]
             Section metadata.
         llm_client : LLMClient | None
-            Optional LLM client for fallback extraction.
+            Optional LLM client for fallback extraction. The fast-mode client
+            makes no call: the candidates are counted in
+            ``llm_skipped_candidates`` and the regex equations are returned.
         regex_equations : list[PaperEquation] | None
             Results of an already-completed regex pass. Callers that bound
             this coroutine with a timeout run step 1 themselves so a slow LLM
@@ -814,6 +819,7 @@ class EquationExtractor:
 
         self.llm_batch_failures = []
         self.llm_batch_count = 0
+        self.llm_skipped_candidates = 0
         # Step 1: regex extraction
         equations = (
             self.extract_from_sentences(sentences, sections)
@@ -876,6 +882,12 @@ class EquationExtractor:
             )
 
         if not candidates:
+            return equations
+
+        if is_skipped(llm_client):
+            # Fast mode: the regex components stand. Count what the fallback
+            # would have read, so the export can say what was left.
+            self.llm_skipped_candidates = len(candidates)
             return equations
 
         # Step 3: LLM extraction in batches

@@ -490,7 +490,10 @@ class LocalPipeline(Pipeline):
         """Cumulative LLM token usage by model, captured before pipeline teardown.
 
         Returns an empty dict if no LLM client was instantiated (e.g. ``--no-llm``)
-        or if usage tracking is disabled (``LLM_TRACK_USAGE=false``).
+        or if usage tracking is disabled (``LLM_TRACK_USAGE=false``). A fast run
+        makes no call, so it builds no client to ask.
         """
+        if self._config.mode == "fast":
+            return {}
         client = self._resources.llm_client
         return {model: dict(counts) for model, counts in client.usage.items()}

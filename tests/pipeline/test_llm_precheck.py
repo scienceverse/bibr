@@ -475,6 +475,13 @@ class TestPrecheckStage:
         await LlmServerPrecheckStage().run(dead)
         rm.llm_start_refusal.assert_not_awaited()
 
+    async def test_fast_mode_is_not_checked(self):
+        from bibr.pipeline.stages.llm_server import LlmServerPrecheckStage
+
+        rm = MagicMock(llm_start_refusal=AsyncMock(return_value=None))
+        await LlmServerPrecheckStage().run(_ctx(rm, "a.pdf", mode="fast"))
+        rm.llm_start_refusal.assert_not_awaited()
+
     @pytest.mark.parametrize("answer", [RuntimeError("nvidia-smi hung"), MagicMock()])
     async def test_a_failed_or_odd_check_goes_ahead(self, answer):
         from bibr.pipeline.stages.llm_server import LlmServerPrecheckStage
