@@ -816,6 +816,98 @@ class TestDetectBibXrefsTier3Widened:
 # ---------------------------------------------------------------------------
 
 
+class TestRuleTier3:
+    """With no LLM, ``rule_tier3`` resolves the citations Tier 3 would have been asked."""
+
+    SECTIONS = [
+        PaperSection(section_id=0, header="Root", level=0, parent_section_id=None),
+        PaperSection(section_id=1, header="Intro", level=1, parent_section_id=0),
+    ]
+    # Tier 2 reads "Brandt" against first authors only; Brandt is listed second.
+    REFS = [_ref(1, author="Okafor, C., & Brandt, H.", year=2018, title="A study")]
+
+    async def test_off_by_default_without_an_llm(self):
+        xrefs, receipt = await _detect_with_receipt(
+            [_sent(0, "As Brandt (2018) found, this holds.")], self.SECTIONS, self.REFS
+        )
+
+        assert xrefs == []
+        assert all(candidate.style != "rules" for candidate in receipt.candidates)
+
+    async def test_links_what_the_rules_can_place(self):
+        xrefs, receipt = await _detect_with_receipt(
+            [_sent(0, "As Brandt (2018) found, this holds.")],
+            self.SECTIONS,
+            self.REFS,
+            rule_tier3=True,
+        )
+
+        assert [(x.text_id, x.xref_id, x.tier, x.contents) for x in xrefs] == [
+            (0, 1, "author-year", "As Brandt (2018)")
+        ]
+        [candidate] = receipt.candidates
+        assert candidate.accepted
+        assert candidate.bib_ids == (1,)
+        assert candidate.evidence[-2:] == ("rules_overrode:no_reference_match", "rules_resolution")
+        assert candidate.confidence < 0.95  # below the Tier-2 matcher's
+
+    async def test_a_bracketed_citation_gets_a_rules_candidate(self):
+        xrefs, receipt = await _detect_with_receipt(
+            [_sent(0, "This holds [Brandt, 2018] and [Sato, 2018].")],
+            self.SECTIONS,
+            self.REFS,
+            rule_tier3=True,
+        )
+
+        assert [(x.xref_id, x.tier, x.contents) for x in xrefs] == [
+            (1, "author-year", "[Brandt, 2018]")
+        ]
+        by_raw = {candidate.raw: candidate for candidate in receipt.candidates}
+        assert by_raw["[Brandt, 2018]"].style == "rules"
+        assert by_raw["[Brandt, 2018]"].accepted
+        assert by_raw["[Brandt, 2018]"].evidence[-1] == "rules_resolution"
+        assert by_raw["[Sato, 2018]"].style == "rules"
+        assert not by_raw["[Sato, 2018]"].accepted
+        assert by_raw["[Sato, 2018]"].rejection_reasons == ("unresolved_rules_candidate",)
+
+    async def test_leaves_an_unplaceable_citation_unlinked(self):
+        xrefs, receipt = await _detect_with_receipt(
+            [_sent(0, "As Sato (2018) found, this holds.")],
+            self.SECTIONS,
+            self.REFS,
+            rule_tier3=True,
+        )
+
+        assert xrefs == []
+        assert [c.rejection_reasons for c in receipt.candidates] == [("no_reference_match",)]
+
+    async def test_an_llm_client_takes_precedence(self):
+        from unittest.mock import AsyncMock
+
+        llm = AsyncMock()
+        llm.resolve_citations = AsyncMock(return_value=[])
+
+        xrefs = await detect_bib_xrefs(
+            [_sent(0, "As Brandt (2018) found, this holds.")],
+            self.SECTIONS,
+            self.REFS,
+            llm_client=llm,
+            rule_tier3=True,
+        )
+
+        llm.resolve_citations.assert_called_once()
+        assert xrefs == []
+
+    async def test_leaves_what_tier_two_linked_alone(self):
+        sents = [_sent(0, "As Okafor (2018) found, this holds.")]
+
+        plain = await detect_bib_xrefs(sents, self.SECTIONS, self.REFS)
+        with_rules = await detect_bib_xrefs(sents, self.SECTIONS, self.REFS, rule_tier3=True)
+
+        assert [(x.text_id, x.xref_id, x.tier) for x in plain] == [(0, 1, "author-year")]
+        assert [(x.text_id, x.xref_id, x.tier) for x in with_rules] == [(0, 1, "author-year")]
+
+
 class TestNonCitationBracketPrefilter:
     def test_confidence_intervals_filtered(self):
         from bibr.structure.citation_linker import _looks_like_non_citation_bracket

@@ -743,6 +743,27 @@ async def _resolve_with_llm(
     return xrefs
 
 
+def _resolve_with_rules(ambiguous, references) -> list[PaperXref]:
+    """Tier 3 without an LLM: resolve the same citation texts with matcher rules.
+
+    Takes what ``_resolve_with_llm`` takes, minus the client, and answers the
+    same way, one xref per link. A citation the rules cannot place at one
+    reference gets none.
+    """
+    from bibr.structure.citation_matcher import resolve_citations_by_rules
+
+    return [
+        PaperXref(
+            xref_id=bib_id,
+            xref_type="bib",
+            contents=_normalize_citation_text(cite_text),
+            text_id=text_id,
+        )
+        for text_id, cite_text, bib_ids in resolve_citations_by_rules(list(ambiguous), references)
+        for bib_id in bib_ids
+    ]
+
+
 async def _resolve_batch_with_llm(
     ambiguous, reference_summary, references, llm_client, file_hash, failures=None
 ) -> list[PaperXref]:
@@ -1793,11 +1814,16 @@ async def detect_bib_xrefs_with_receipt(
     file_hash="unknown",
     *,
     references_from_notes: bool = False,
+    rule_tier3: bool = False,
 ) -> tuple[list[PaperXref], CitationLinkingReceipt]:
     """Detect bib xrefs and return the full evidence/rejection receipt.
 
     *references_from_notes*: the references were read from the paper's notes
     (``REF_FOOTNOTE_CITATIONS``), so only author-year citations link to them.
+
+    *rule_tier3*: with no *llm_client*, resolve the citations Tier 3 would send
+    to the LLM with matcher rules instead (``_resolve_with_rules``). Off, a run
+    with no LLM leaves them unlinked, as before. An *llm_client* always wins.
     """
 
     # Every tier below the LLM one is synchronous regex work over the whole
@@ -1843,7 +1869,10 @@ async def detect_bib_xrefs_with_receipt(
         ]
     )
 
-    if llm_client:
+    use_rules = bool(rule_tier3 and not llm_client)
+    if llm_client or use_rules:
+        # How the candidates this tier handles are labelled in the receipt.
+        resolver = "rules" if use_rules else "llm"
         # From the accepted candidates, not from ``all_xrefs``: those are
         # de-duplicated on ``(text_id, xref_id)``, so when one sentence cites
         # the same reference twice in different surface forms the second form
@@ -1945,12 +1974,12 @@ async def detect_bib_xrefs_with_receipt(
                         start=start,
                         end=end,
                         raw=source[start:end] if source else cite_text,
-                        style="llm",
+                        style=resolver,
                         bib_ids=(),
-                        evidence=("llm_candidate",),
+                        evidence=(f"{resolver}_candidate",),
                         confidence=0.0,
                         accepted=False,
-                        rejection_reasons=("unresolved_llm_candidate",),
+                        rejection_reasons=(f"unresolved_{resolver}_candidate",),
                     )
                 )
 
@@ -1958,13 +1987,13 @@ async def detect_bib_xrefs_with_receipt(
             for text_id, cite_text, _start, _end in ambiguous:
                 unique_cites.setdefault(_normalize_citation_text(cite_text), text_id)
             tier3_failures: list[tuple[str, list[str]]] = []
-            tier3 = await _resolve_with_llm(
-                [(text_id, cite_text) for cite_text, text_id in unique_cites.items()],
-                references,
-                llm_client,
-                file_hash,
-                tier3_failures,
-            )
+            tier3_questions = [(text_id, cite_text) for cite_text, text_id in unique_cites.items()]
+            if use_rules:
+                tier3 = await asyncio.to_thread(_resolve_with_rules, tier3_questions, references)
+            else:
+                tier3 = await _resolve_with_llm(
+                    tier3_questions, references, llm_client, file_hash, tier3_failures
+                )
             if tier3_failures:
                 # Record on the receipt why the candidates a failed batch was
                 # asked about stay unresolved, instead of looking like no match.
@@ -2035,8 +2064,11 @@ async def detect_bib_xrefs_with_receipt(
                         candidate,
                         bib_ids=fitting,
                         evidence=candidate.evidence
-                        + tuple(f"llm_overrode:{reason}" for reason in candidate.rejection_reasons)
-                        + ("llm_resolution",),
+                        + tuple(
+                            f"{resolver}_overrode:{reason}"
+                            for reason in candidate.rejection_reasons
+                        )
+                        + (f"{resolver}_resolution",),
                         confidence=max(candidate.confidence, 0.85),
                         accepted=True,
                         rejection_reasons=(),
@@ -2050,9 +2082,9 @@ async def detect_bib_xrefs_with_receipt(
                             start=start,
                             end=end,
                             raw=source[start:end] if source else normalized_contents,
-                            style="llm",
+                            style=resolver,
                             bib_ids=tuple(picks),
-                            evidence=("llm_resolution",),
+                            evidence=(f"{resolver}_resolution",),
                             confidence=0.85,
                             accepted=True,
                             rejection_reasons=(),
@@ -2064,7 +2096,7 @@ async def detect_bib_xrefs_with_receipt(
                         xref_type="bib",
                         contents=normalized_contents,
                         text_id=text_id,
-                        tier="llm",
+                        tier="llm" if not use_rules else "author-year",
                         start=start,
                         end=end,
                     )
@@ -2116,6 +2148,7 @@ async def detect_bib_xrefs(
     *,
     receipt_sink: list[CitationLinkingReceipt] | None = None,
     references_from_notes: bool = False,
+    rule_tier3: bool = False,
 ) -> list[PaperXref]:
     """Compatibility wrapper preserving the public list-return contract."""
 
@@ -2126,6 +2159,7 @@ async def detect_bib_xrefs(
         llm_client=llm_client,
         file_hash=file_hash,
         references_from_notes=references_from_notes,
+        rule_tier3=rule_tier3,
     )
     if receipt_sink is not None:
         receipt_sink.append(receipt)
