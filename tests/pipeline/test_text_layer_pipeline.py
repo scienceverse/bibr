@@ -198,8 +198,14 @@ async def test_scanned_pdf_fails_as_needing_ocr(tmp_path, monkeypatch, created_b
         await _run(pipeline, SCANNED)
 
     assert raised.value.error_code == "scan_needs_ocr"
-    assert "scanned PDF, which needs OCR" in str(raised.value)
-    # Asked for: the file's own verdict, which a resumed batch does not retry.
+    message = str(raised.value)
+    # The page verdicts and the routes that read a scan; llama.cpp is not one of them.
+    assert "1 of 1 pages: no text layer (a scanned page)" in message
+    assert "--ocr anthropic" in message
+    assert "--ocr paddle" in message and "--ocr-url" in message
+    assert "try.bibr.org" in message
+    assert "llama.cpp" not in message
+    # The same text layer gives the same empty regions: a resumed batch does not retry.
     assert raised.value.outage is False
     assert set(created_backends) <= {registry.TEXT_LAYER_BACKEND}
 
@@ -255,10 +261,10 @@ async def test_a_runtime_that_fails_to_start_is_not_a_reason_to_fall_back(
     assert rm.ocr_text_layer_fallback is None
 
 
-async def test_a_scanned_pdf_under_the_fallback_fails_as_an_outage(
+async def test_a_scanned_pdf_under_the_fallback_is_not_retried_either(
     monkeypatch, created_backends, no_ocr_runtime
 ):
-    """Not the file's verdict: a resumed batch reads it again once OCR is installed."""
+    """The fallback reads the same empty regions on every run, so it is no outage."""
     monkeypatch.setattr(Settings.ocr, "fallback_to_text_layer", "auto")
     pipeline, _ = _pipeline(monkeypatch)
 
@@ -266,7 +272,8 @@ async def test_a_scanned_pdf_under_the_fallback_fails_as_an_outage(
         await _run(pipeline, SCANNED)
 
     assert raised.value.error_code == "scan_needs_ocr"
-    assert raised.value.outage is True
+    assert raised.value.outage is False
+    assert "--ocr anthropic" in str(raised.value)
 
 
 async def test_a_cached_text_layer_read_under_the_fallback_says_why(

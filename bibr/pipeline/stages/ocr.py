@@ -1166,16 +1166,18 @@ class OcrStage:
                         region["_text_layer_unread"] = True
 
     @staticmethod
-    def _check_text_layer_success(fs, threshold: float, fallback_reason: str | None) -> None:
+    def _check_text_layer_success(fs, threshold: float) -> None:
         """Fail a file read from its text layer whose text regions are mostly empty.
 
         The share counts the running-text regions (``bibr.scan.page_kind``'s
         text labels); formulas and tables drawn as paths do not make a file a
         scan. Below ``OCR_MIN_SUCCESS_RATE`` the file is a scanned PDF (or one
-        with a broken text layer), which needs OCR. With *fallback_reason* (the
-        automatic backend fell back because no OCR runtime starts here) that is
-        an outage, which a resumed batch retries.
+        with a broken text layer), which needs an OCR route. Reading it again
+        gives the same empty regions, so the failure is not retryable: a resumed
+        batch skips it until the user picks an OCR route.
         """
+        from bibr.ocr.registry import SCAN_NEEDS_OCR_ROUTES
+        from bibr.ocr.text_layer import page_verdict_summary
         from bibr.scan.page_kind import _TEXT_LABELS
 
         needed = 0
@@ -1193,17 +1195,14 @@ class OcrStage:
         rate = filled / needed
         if rate >= threshold:
             return
+        verdicts = page_verdict_summary(fs)
         msg = (
             f"no usable text layer: only {filled}/{needed} text regions could be read from "
-            f"the PDF text layer ({rate:.0%} < {threshold:.0%} threshold). This looks like a "
-            "scanned PDF, which needs OCR: install llama.cpp for local OCR, pass --ocr-url "
-            "for an OCR server, or use a cloud OCR backend (--ocr gemini, openai or anthropic)"
+            f"the PDF text layer ({rate:.0%} < {threshold:.0%} threshold"
+            f"{f'; {verdicts}' if verdicts else ''}). This looks like a scanned PDF, or "
+            f"one whose fonts carry no usable text, and needs {SCAN_NEEDS_OCR_ROUTES}"
         )
-        # Read this way only because no OCR runtime could start here
-        # (OCR_FALLBACK_TO_TEXT_LAYER=auto): an outage, not the file's own
-        # failure, so a resumed batch reads it again once OCR is installed.
-        outage = fallback_reason is not None
-        fs.set_error(msg, code="scan_needs_ocr", stage="ocr", outage=outage)
+        fs.set_error(msg, code="scan_needs_ocr", stage="ocr")
         logger.warning("%s: %s", fs.path.name, msg)
 
     @staticmethod
@@ -1221,15 +1220,14 @@ class OcrStage:
         threshold = ctx.settings.ocr.min_success_rate
         if threshold <= 0:
             return
-        from bibr.ocr.text_layer import is_text_layer_mode, text_layer_fallback_reason
+        from bibr.ocr.text_layer import is_text_layer_mode
 
         text_layer = is_text_layer_mode(ctx)
-        fallback_reason = text_layer_fallback_reason(ctx.resources) if text_layer else None
         for fs in ctx.alive():
             if fs.ocr_regions is None:
                 continue
             if text_layer:
-                OcrStage._check_text_layer_success(fs, threshold, fallback_reason)
+                OcrStage._check_text_layer_success(fs, threshold)
                 continue
             # A page that failed wholesale yields no regions at all, so it
             # lands in neither the numerator nor the denominator below: a file

@@ -647,3 +647,52 @@ def test_drop_private_use_counts_the_ones_inside_a_word():
     assert _drop_private_use("\ue000x") == ("x", 1, 1)
     assert _drop_private_use("end\ue000") == ("end", 1, 0)
     assert _drop_private_use("fi\ue001nd \ue002.") == ("find .", 2, 1)
+
+
+def _page_verdicts(*verdicts: tuple[bool | None, str | None]):
+    """A file state whose inspected pages carry the given ``(text_layer_ok, reason)`` verdicts."""
+    from types import SimpleNamespace
+
+    from bibr.ocr.pdf_inspection import PdfPageInspection
+
+    pages = [
+        PdfPageInspection(
+            index=number,
+            width=PAGE_W,
+            height=PAGE_H,
+            crop_box=(0.0, 0.0, PAGE_W, PAGE_H),
+            char_count=0,
+            text_layer_ok=ok,
+            text_layer_reason=reason,
+        )
+        for number, (ok, reason) in enumerate(verdicts)
+    ]
+    return SimpleNamespace(pdf_inspection=SimpleNamespace(pages=pages))
+
+
+def test_page_verdict_summary_counts_the_failed_pages_by_reason():
+    from bibr.ocr.text_layer import page_verdict_summary
+
+    fs = _page_verdicts(
+        (False, "no_text_layer"),
+        (False, "no_text_layer"),
+        (False, "corrupt_text"),
+        (True, None),
+        (None, None),  # never judged: not counted in either part
+    )
+
+    assert page_verdict_summary(fs) == (
+        "2 of 4 pages: no text layer (a scanned page); "
+        "1 of 4 pages: most of its text is corrupt (a broken font encoding)"
+    )
+
+
+def test_page_verdict_summary_is_empty_without_a_failed_page():
+    from types import SimpleNamespace
+
+    from bibr.ocr.text_layer import page_verdict_summary
+
+    assert page_verdict_summary(_page_verdicts((True, None), (True, None))) == ""
+    assert page_verdict_summary(_page_verdicts()) == ""
+    assert page_verdict_summary(SimpleNamespace(pdf_inspection=None)) == ""
+    assert page_verdict_summary(SimpleNamespace()) == ""

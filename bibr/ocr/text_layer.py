@@ -639,6 +639,22 @@ def _mark_all_unread(fs: Any) -> int:
     return count
 
 
+def page_verdict_summary(fs: Any) -> str:
+    """The page verdicts of a file read from its text layer, in a phrase, or "".
+
+    ``7 of 8 pages: most of its text is corrupt (a broken font encoding)``: how many
+    of the judged pages failed, for each reason, so a refusal says whether the file
+    is a scan or has a broken font.
+    """
+    inspection = getattr(fs, "pdf_inspection", None)
+    judged = [page for page in getattr(inspection, "pages", ()) if page.text_layer_ok is not None]
+    failed = Counter(page.text_layer_reason for page in judged if not page.text_layer_ok)
+    return "; ".join(
+        f"{count} of {len(judged)} pages: {_REASON_TEXT.get(reason or '', reason)}"
+        for reason, count in failed.most_common()
+    )
+
+
 def note_text_layer_fallback(fs: Any, reason: str | None) -> None:
     """Record on *fs* that OCR could not read it here, once (``OCR_BACKEND_UNAVAILABLE``).
 
