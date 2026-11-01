@@ -2103,6 +2103,9 @@ async def detect_bib_xrefs_with_receipt(
                         xref_type="bib",
                         contents=normalized_contents,
                         text_id=text_id,
+                        # The export's tier vocabulary is closed: a link the rules
+                        # placed is an author-year link; the receipt records the
+                        # resolver ("rules").
                         tier="llm" if not use_rules else "author-year",
                         start=start,
                         end=end,
