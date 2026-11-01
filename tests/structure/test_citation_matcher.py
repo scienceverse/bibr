@@ -111,6 +111,19 @@ class TestExtractFamilies:
         sents = [_sent(0, "As shown (Li & Wu, 2016) here.")]
         assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
 
+    @pytest.mark.parametrize("name", ["MITRE ATLAS", "WORLD BANK", "CENTER TOSUCC"])
+    def test_a_two_word_name_in_capitals_is_not_a_family_and_initials(self, name):
+        assert extract_families(name, rules=True) == [name]
+        assert extract_families(name) == [name]
+
+    def test_a_two_word_capitalised_organisation_still_links(self):
+        refs = [_ref(1, "MITRE ATLAS", year=2026, title="A")]
+        sents = [_sent(0, "As shown (Mitre Atlas, 2026) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
+    def test_a_capitals_family_keeps_short_initials(self):
+        assert extract_families("NGUYEN TA, BERGSTROM K", rules=True) == ["NGUYEN", "BERGSTROM"]
+
     def test_short_caps_runs_stay_initials(self):
         for rules in (False, True):
             assert extract_families("Smith, JA, & Jones, K. B.", rules=rules) == ["Smith", "Jones"]

@@ -82,6 +82,21 @@ def _is_caps_family(s: str, following: str | None, *, last: bool) -> bool:
     return _is_dotted_initials(following) or (last and _is_dotted_initials(following + "."))
 
 
+# The longest run of capitals that ends "Family Initials" ("Li JAMK"); after a
+# family printed in capitals ("NGUYEN TA") it is shorter, because longer runs
+# are the second word of a name ("WORLD BANK", "MITRE ATLAS").
+_MAX_TRAILING_INITIALS = 4
+_MAX_INITIALS_AFTER_CAPS_FAMILY = 3
+
+
+def _is_caps_name_end(tokens: list[str]) -> bool:
+    """True when the last word is too long to be the initials of the word before it."""
+    letters = sum(c.isalpha() for c in tokens[-1])
+    after_caps = len(tokens) > 1 and len(tokens[-2]) >= 4 and tokens[-2].isalpha()
+    after_caps = after_caps and tokens[-2].isupper()
+    return letters > (_MAX_INITIALS_AFTER_CAPS_FAMILY if after_caps else _MAX_TRAILING_INITIALS)
+
+
 def extract_families(authors_str: str | None, *, rules: bool = False) -> list[str]:
     """Best-effort APA-style author parsing — returns family names in order.
 
@@ -121,8 +136,12 @@ def extract_families(authors_str: str | None, *, rules: bool = False) -> list[st
         suffix_start = len(tokens)
         # The last word of "Family Initials" is the initials, as long as it
         # looks like some ("Li JAMK"); a word before it in capitals is the family.
-        while suffix_start > 0 and _is_initials(
-            tokens[suffix_start - 1], caps_surnames=rules and suffix_start < len(tokens)
+        while (
+            suffix_start > 0
+            and _is_initials(
+                tokens[suffix_start - 1], caps_surnames=rules and suffix_start < len(tokens)
+            )
+            and not (rules and suffix_start == len(tokens) and _is_caps_name_end(tokens))
         ):
             initials = "".join(c for c in tokens[suffix_start - 1] if c.isalpha())
             if not initials or not all(c.isupper() for c in initials):
