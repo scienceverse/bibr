@@ -283,6 +283,10 @@ class ResourceManager:
             release_front_role_classifier(self._front_role)
         self._front_role = None
         self._front_role_resolved = False
+        if self._front_tagger is not None:
+            from bibr.front_tagger.runtime import release_front_tagger
+
+            release_front_tagger(self._front_tagger)
         self._front_tagger = None
         self._front_tagger_resolved = False
         if not self._owns_models:
@@ -328,17 +332,23 @@ class ResourceManager:
     def front_role(self):
         return self._front_role
 
-    def ensure_front_tagger(self):
+    def ensure_front_tagger(self, settings: GlobalSettings | None = None):
         """Return the front-matter tagger, loading it on first use.
 
-        ``None`` when ``ML_FRONT_TAGGER_MODE`` is off or the bundle cannot be
-        loaded; front matter then goes to the LLM as before.
+        ``settings`` are the run's (default: the manager's own): a fast run
+        turns the tagger on for itself, and a full run on the same manager must
+        not get a loaded one. ``None`` when ``ML_FRONT_TAGGER_MODE`` is off or
+        the bundle cannot be loaded; a full run then leaves front matter to the
+        LLM.
         """
+        settings = settings if settings is not None else self._settings
+        if getattr(settings.ml, "front_tagger_mode", "off") == "off":
+            return None
         if self._front_tagger_resolved:
             return self._front_tagger
         from bibr.front_tagger.runtime import load_front_tagger
 
-        self._front_tagger = load_front_tagger(self._settings)
+        self._front_tagger = load_front_tagger(settings, device=self.device)
         self._front_tagger_resolved = self._front_tagger is not None
         return self._front_tagger
 

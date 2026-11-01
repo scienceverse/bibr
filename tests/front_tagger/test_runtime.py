@@ -177,3 +177,76 @@ def test_a_word_a_token_starts_in_keeps_that_tokens_tag():
     tags, conf = _word_tags(words_of, ["B-TITLE", "B-ABSTRACT", "I-ABSTRACT"], [0.9, 0.5, 0.6], 3)
     assert tags == ["B-TITLE", "B-ABSTRACT", "I-ABSTRACT"]
     assert conf == [0.9, 0.5, 0.6]
+
+
+def _fake_loader(monkeypatch, tmp_path):
+    """``load_front_tagger`` over a recording stand-in, so no session (or GPU) is made."""
+    from bibr.front_tagger import runtime
+    from bibr.utils import ml_runtime
+
+    built: list[tuple] = []
+
+    class _Tagger:
+        def __init__(self, bundle, device=None):
+            built.append((bundle, device))
+
+    monkeypatch.setattr(runtime, "OnnxFrontTagger", _Tagger)
+    monkeypatch.setattr(ml_runtime, "find_onnx_bundle", lambda *a, **k: tmp_path)
+    runtime.reset_front_tagger_cache()
+    return runtime, built
+
+
+def _tagger_settings(mode, model_id="x/y"):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        ml=SimpleNamespace(
+            front_tagger_mode=mode, front_tagger_model_id=model_id, front_tagger_revision=None
+        )
+    )
+
+
+@pytest.mark.parametrize("mode", ["primary", "only"])
+def test_loader_reads_the_bundle_in_every_mode_that_uses_it(monkeypatch, tmp_path, mode):
+    runtime, built = _fake_loader(monkeypatch, tmp_path)
+    assert runtime.load_front_tagger(_tagger_settings(mode)) is not None
+    assert built == [(tmp_path, None)]
+    runtime.reset_front_tagger_cache()
+
+
+def test_loader_gives_the_run_device_to_the_session(monkeypatch, tmp_path):
+    runtime, built = _fake_loader(monkeypatch, tmp_path)
+    runtime.load_front_tagger(_tagger_settings("only"), device="cpu")
+    assert built == [(tmp_path, "cpu")]
+    runtime.reset_front_tagger_cache()
+
+
+def test_a_tagger_is_cached_per_device(monkeypatch, tmp_path):
+    runtime, built = _fake_loader(monkeypatch, tmp_path)
+    settings = _tagger_settings("only")
+    on_cpu = runtime.load_front_tagger(settings, device="cpu")
+    assert runtime.load_front_tagger(settings, device="cpu") is on_cpu
+    assert runtime.load_front_tagger(settings, device="cuda") is not on_cpu
+    assert [device for _bundle, device in built] == ["cpu", "cuda"]
+    runtime.reset_front_tagger_cache()
+
+
+def test_releasing_a_tagger_drops_only_the_cache_entries_that_hold_it(monkeypatch, tmp_path):
+    runtime, built = _fake_loader(monkeypatch, tmp_path)
+    settings = _tagger_settings("only")
+    on_cpu = runtime.load_front_tagger(settings, device="cpu")
+    on_gpu = runtime.load_front_tagger(settings, device="cuda")
+
+    runtime.release_front_tagger(on_cpu)
+
+    assert runtime.load_front_tagger(settings, device="cuda") is on_gpu
+    assert len(built) == 2
+    # The released one is read again, not handed back from the cache.
+    assert runtime.load_front_tagger(settings, device="cpu") is not on_cpu
+    assert len(built) == 3
+    runtime.reset_front_tagger_cache()
+
+
+def test_releasing_a_tagger_the_cache_never_held_is_harmless(monkeypatch, tmp_path):
+    runtime, _built = _fake_loader(monkeypatch, tmp_path)
+    runtime.release_front_tagger(object())

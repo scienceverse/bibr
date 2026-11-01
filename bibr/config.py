@@ -2132,13 +2132,14 @@ class MlOptions(_BibrSettings):
         "off",
         description="'primary' takes title, abstract, keywords and authors from the front-matter "
         "tagger when it is confident and asks the LLM otherwise; 'only' takes the tagger's "
-        "answer whatever its confidence and never asks the LLM (what fast mode sets); 'off' "
-        "always asks the LLM.",
+        "answer whatever its confidence and never asks the LLM for them (what fast mode sets); "
+        "'off' always asks the LLM.",
     )
     front_tagger_model_id: str | None = Field(
-        None,
+        "scienceverse/bibr-front-tagger",
         description="HF Hub repo id or local directory of the front-matter tagger's ONNX bundle "
-        "(an onnx/ directory with bibr_onnx.json). Null leaves the tagger off.",
+        "(an onnx/ directory with bibr_onnx.json). Only read when ML_FRONT_TAGGER_MODE is "
+        "'primary' or 'only'; null leaves the tagger off.",
     )
     front_tagger_revision: str | None = Field(
         None,

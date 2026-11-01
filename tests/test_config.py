@@ -1396,3 +1396,20 @@ def test_llm_provider_swap_follows_an_unset_model():
     opts.provider = "groq"
     opts.apply_provider_default_model()
     assert opts.model == "llama-3.3-70b-versatile"
+
+
+def test_front_tagger_names_the_published_repo_and_stays_off_for_full_runs(monkeypatch):
+    """The id is ready for fast mode, which turns the tagger on for itself; a full run
+    keeps it off until ML_FRONT_TAGGER_MODE says otherwise."""
+    monkeypatch.delenv("ML_FRONT_TAGGER_MODEL_ID", raising=False)
+    monkeypatch.delenv("ML_FRONT_TAGGER_MODE", raising=False)
+    from bibr.config import GlobalSettings
+    from bibr.run_mode import fast_settings
+
+    s = GlobalSettings()
+    assert s.ml.front_tagger_model_id == "scienceverse/bibr-front-tagger"
+    assert s.ml.front_tagger_mode == "off"
+    fast = fast_settings(s)
+    assert fast.ml.front_tagger_mode == "only"
+    assert fast.ml.front_tagger_model_id == "scienceverse/bibr-front-tagger"
+    assert s.ml.front_tagger_mode == "off"

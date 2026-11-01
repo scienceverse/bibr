@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from bibr.processing_warnings import ProcessingWarning, WarningCode
@@ -68,13 +69,17 @@ async def _predict_front_roles(rm, ocr_regions, *, first_page_index: int):
     return predictions if isinstance(predictions, FrontRolePredictions) else None
 
 
-async def _tag_front_matter(rm, ocr_regions, *, first_page_index: int):
-    """Run the optional front-matter tagger off the event loop; never raise."""
+async def _tag_front_matter(rm, ocr_regions, *, first_page_index: int, settings=None):
+    """Run the optional front-matter tagger off the event loop; never raise.
+
+    ``settings`` are the run's: a fast run turns the tagger on for itself, so
+    the resource manager's own settings would leave it off.
+    """
     ensure = getattr(rm, "ensure_front_tagger", None)
     if ensure is None:
         return None
     try:
-        tagger = ensure()
+        tagger = ensure(settings)
         if tagger is None:
             return None
         from bibr.extract.front_role import build_front_regions
@@ -85,8 +90,8 @@ async def _tag_front_matter(rm, ocr_regions, *, first_page_index: int):
             return tag_front_matter(tagger, regions, first_page_index=first_page_index)
 
         return await asyncio.to_thread(run)
-    except Exception:  # noqa: BLE001 - the LLM still covers front matter
-        logger.warning("Front-matter tagging failed; the LLM reads the front matter", exc_info=True)
+    except Exception:  # noqa: BLE001 - an optional reading must never fail parsing
+        logger.warning("Front-matter tagging failed; continuing without it", exc_info=True)
         return None
 
 
@@ -94,8 +99,9 @@ def _front_page_was_read(fs, first_page_index: int) -> bool:
     """Whether OCR read the paper's first page (a scan or a broken text layer).
 
     The front-matter tagger learned from born-digital pages and misses most
-    abstracts on scans, so those keep the LLM. A page with no class (no
-    inspection) counts as born-digital, as everywhere else.
+    abstracts on scans, so a run that has an LLM leaves those to it; a fast run
+    tags them anyway and notes it. A page with no class (no inspection) counts
+    as born-digital, as everywhere else.
     """
     try:
         from bibr.scan.page_kind import PageKind, ensure_page_kinds
@@ -209,15 +215,23 @@ class ParseSegmentStage:
                     if predictions is not None:
                         contents.front_role_predictions = predictions
                     first_page = ctx.config.start_page or 0
-                    if _front_page_was_read(fs, first_page):
+                    scanned = _front_page_was_read(fs, first_page)
+                    # With the tagger alone there is no LLM to leave a scan to.
+                    tagger_alone = ctx.settings.ml.front_tagger_mode == "only"
+                    if scanned and not tagger_alone:
                         logger.debug(
-                            "%s: front page went through OCR; the LLM reads the front matter",
+                            "%s: front page went through OCR; the front-matter tagger skips it",
                             fs.path.name,
                         )
                     else:
-                        contents.front_tagger_result = await _tag_front_matter(
-                            rm, fs.ocr_regions, first_page_index=first_page
+                        tagged = await _tag_front_matter(
+                            rm, fs.ocr_regions, first_page_index=first_page, settings=ctx.settings
                         )
+                        if tagged is not None and scanned:
+                            tagged = replace(
+                                tagged, problems=[*tagged.problems, "scanned_front_page"]
+                            )
+                        contents.front_tagger_result = tagged
 
                 assembler = parser.assembler
                 if len(assembler):

@@ -188,15 +188,20 @@ class OnnxFrontTagger:
         )
 
 
-_CACHE: dict[tuple[str, str | None], OnnxFrontTagger | None] = {}
+_CACHE: dict[tuple[str, str | None, str | None], OnnxFrontTagger | None] = {}
 _CACHE_LOCK = threading.Lock()
 
 
-def load_front_tagger(settings: GlobalSettings) -> OnnxFrontTagger | None:
+def load_front_tagger(
+    settings: GlobalSettings, device: str | None = None
+) -> OnnxFrontTagger | None:
     """The configured tagger, or ``None`` when it is off or cannot be loaded.
 
-    Like the region-role classifier, the tagger is optional: a missing bundle
-    logs once and front matter goes to the LLM as before.
+    ``settings`` are the run's (a fast run turns the tagger on for itself) and
+    ``device`` is its ``--device``. Like the region-role classifier, the tagger
+    is optional: a missing bundle logs once and the run goes on without its
+    answer, which a full run covers with the LLM and a fast run reports as a
+    warning.
     """
     from bibr.utils.ml_runtime import find_onnx_bundle
 
@@ -205,7 +210,7 @@ def load_front_tagger(settings: GlobalSettings) -> OnnxFrontTagger | None:
     if getattr(ml, "front_tagger_mode", "off") == "off" or not model_id:
         return None
     revision = getattr(ml, "front_tagger_revision", None) or None
-    key = (str(model_id), revision)
+    key = (str(model_id), revision, str(device) if device else None)
     with _CACHE_LOCK:
         if key in _CACHE:
             return _CACHE[key]
@@ -214,17 +219,14 @@ def load_front_tagger(settings: GlobalSettings) -> OnnxFrontTagger | None:
         bundle = find_onnx_bundle(str(model_id), revision, label="front-matter tagger")
         if bundle is None:
             logger.warning(
-                "Front-matter tagger %s has no ONNX bundle; front matter goes to the LLM",
-                model_id,
+                "Front-matter tagger %s has no ONNX bundle; the run goes on without it", model_id
             )
         else:
-            tagger = OnnxFrontTagger(bundle)
+            tagger = OnnxFrontTagger(bundle, device)
             logger.info("Front-matter tagger loaded from %s", bundle)
     except Exception as exc:  # noqa: BLE001 - optional model, never fatal
         logger.warning(
-            "Front-matter tagger %s unavailable (%s); front matter goes to the LLM",
-            model_id,
-            exc,
+            "Front-matter tagger %s unavailable (%s); the run goes on without it", model_id, exc
         )
         from bibr.utils.transient import is_transient_network_error
 
@@ -284,6 +286,19 @@ def tag_front_matter(
     return result
 
 
+def release_front_tagger(tagger: OnnxFrontTagger) -> None:
+    """Drop the cache's hold on ``tagger`` so its session can be freed.
+
+    The cache is process-wide and otherwise keeps a loaded model (about half a
+    gigabyte) for the life of the process. Only the cache's reference goes: a
+    pipeline still holding the tagger keeps it, and the next load reads the
+    bundle again.
+    """
+    with _CACHE_LOCK:
+        for key in [key for key, value in _CACHE.items() if value is tagger]:
+            del _CACHE[key]
+
+
 def reset_front_tagger_cache() -> None:
     """Test hook: forget cached taggers (and cached failures)."""
     with _CACHE_LOCK:
@@ -294,6 +309,7 @@ __all__ = [
     "ABSTRACT_WINDOW_STARTS",
     "OnnxFrontTagger",
     "load_front_tagger",
+    "release_front_tagger",
     "reset_front_tagger_cache",
     "tag_front_matter",
 ]

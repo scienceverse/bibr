@@ -669,3 +669,73 @@ def test_shutdown_survives_a_preload_that_raised():
     asyncio.run(rm.shutdown_ocr())
 
     assert rm._ocr_future is None
+
+
+# ---------------------------------------------------------------------------
+# The front-matter tagger follows the run's settings, not the manager's
+# ---------------------------------------------------------------------------
+
+
+def _tagger_manager(mode="off", **kwargs):
+    from bibr.config import GlobalSettings
+
+    return ResourceManager(
+        settings=GlobalSettings(ml={"front_tagger_mode": mode}), device="cpu", **kwargs
+    )
+
+
+def test_ensure_front_tagger_loads_nothing_while_the_mode_is_off():
+    rm = _tagger_manager("off")
+    with patch("bibr.front_tagger.runtime.load_front_tagger") as load:
+        assert rm.ensure_front_tagger() is None
+    load.assert_not_called()
+
+
+def test_a_run_can_turn_the_tagger_on_for_itself():
+    from bibr.run_mode import fast_settings
+
+    rm = _tagger_manager("off")
+    run_settings = fast_settings(rm._settings)
+    with patch("bibr.front_tagger.runtime.load_front_tagger", return_value="tagger") as load:
+        assert rm.ensure_front_tagger(run_settings) == "tagger"
+        assert rm.ensure_front_tagger(run_settings) == "tagger"
+    load.assert_called_once_with(run_settings, device="cpu")
+
+
+def test_a_full_run_gets_no_tagger_from_a_manager_a_fast_run_loaded_it_on():
+    from bibr.run_mode import fast_settings
+
+    rm = _tagger_manager("off")
+    with patch("bibr.front_tagger.runtime.load_front_tagger", return_value="tagger"):
+        assert rm.ensure_front_tagger(fast_settings(rm._settings)) == "tagger"
+        assert rm.ensure_front_tagger() is None
+        assert rm.ensure_front_tagger(rm._settings) is None
+
+
+def test_the_manager_falls_back_to_its_own_settings():
+    rm = _tagger_manager("primary")
+    with patch("bibr.front_tagger.runtime.load_front_tagger", return_value="tagger") as load:
+        assert rm.ensure_front_tagger() == "tagger"
+    load.assert_called_once_with(rm._settings, device="cpu")
+
+
+@pytest.mark.asyncio
+async def test_closing_the_manager_releases_the_cached_tagger():
+    rm = _tagger_manager("primary")
+    with patch("bibr.front_tagger.runtime.load_front_tagger", return_value="tagger"):
+        rm.ensure_front_tagger()
+    with patch("bibr.front_tagger.runtime.release_front_tagger") as release:
+        await rm.close_models()
+    release.assert_called_once_with("tagger")
+    assert rm._front_tagger is None
+    with patch("bibr.front_tagger.runtime.load_front_tagger", return_value="again") as load:
+        assert rm.ensure_front_tagger() == "again"
+    load.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_closing_a_manager_that_never_loaded_the_tagger_releases_nothing():
+    rm = _tagger_manager("primary")
+    with patch("bibr.front_tagger.runtime.release_front_tagger") as release:
+        await rm.close_models()
+    release.assert_not_called()
