@@ -57,6 +57,31 @@ def _is_initials(s: str, *, caps_surnames: bool = False) -> bool:
     return len(alphas) <= 6 and upper_ratio >= 0.6 and all(c.isalpha() or c in ". " for c in s)
 
 
+_DOTTED_INITIALS_RE = re.compile(r"(?:[^\W\d_]\.[\s\-\u2010]*)+")
+
+
+def _is_dotted_initials(s: str) -> bool:
+    """True for initials printed with their dots ("J.", "J. A.", "J.-P.")."""
+    s = s.strip()
+    return bool(_DOTTED_INITIALS_RE.fullmatch(s)) and re.sub(r"[.\s\-\u2010]", "", s).isupper()
+
+
+def _is_caps_family(s: str, following: str | None, *, last: bool) -> bool:
+    """True for a surname in capitals of any length that dotted initials follow.
+
+    "LEE, J., NGUYEN, T.": the short names "LEE" and "SÁ" read like initials
+    ("JA", "LEE" are both three capitals) until the initials after the comma
+    show which is which. *last*: ``following`` ends the string, which lost its
+    final dot.
+    """
+    letters = [c for c in s if c.isalpha()]
+    if following is None or len(letters) < 2 or not all(c.isupper() for c in letters):
+        return False
+    if not all(c.isalpha() or c in " -'\u2019" for c in s):
+        return False
+    return _is_dotted_initials(following) or (last and _is_dotted_initials(following + "."))
+
+
 def extract_families(authors_str: str | None, *, rules: bool = False) -> list[str]:
     """Best-effort APA-style author parsing — returns family names in order.
 
@@ -65,7 +90,7 @@ def extract_families(authors_str: str | None, *, rules: bool = False) -> list[st
     ("Fei-Fei"), continuation dots ". . ." and "and"/"&" connectors.
 
     With *rules* (a run with no LLM, see ``match_with_candidates``) a surname
-    printed in capitals is read as one (``_is_initials``).
+    printed in capitals is read as one (``_is_initials``, ``_is_caps_family``).
     """
     if not authors_str:
         return []
@@ -94,7 +119,11 @@ def extract_families(authors_str: str | None, *, rules: bool = False) -> list[st
         part = re.sub(r"^(?:and|&)\s+", "", part, flags=re.IGNORECASE)
         tokens = part.rstrip(".").split()
         suffix_start = len(tokens)
-        while suffix_start > 0 and _is_initials(tokens[suffix_start - 1], caps_surnames=rules):
+        # The last word of "Family Initials" is the initials, as long as it
+        # looks like some ("Li JAMK"); a word before it in capitals is the family.
+        while suffix_start > 0 and _is_initials(
+            tokens[suffix_start - 1], caps_surnames=rules and suffix_start < len(tokens)
+        ):
             initials = "".join(c for c in tokens[suffix_start - 1] if c.isalpha())
             if not initials or not all(c.isupper() for c in initials):
                 break
@@ -114,7 +143,10 @@ def extract_families(authors_str: str | None, *, rules: bool = False) -> list[st
     i = 0
     while i < len(parts):
         cur = parts[i]
-        if _is_initials(cur, caps_surnames=rules):
+        following = parts[i + 1] if i + 1 < len(parts) else None
+        if _is_initials(cur, caps_surnames=rules) and not (
+            rules and _is_caps_family(cur, following, last=i + 2 == len(parts))
+        ):
             i += 1
             continue
         families.append(cur)

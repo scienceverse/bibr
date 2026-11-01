@@ -72,6 +72,45 @@ class TestExtractFamilies:
     def test_all_caps_surname_is_initials_without_rules(self):
         assert extract_families("NGUYEN, T., & BERGSTROM, K.") == ["BERGSTROM"]
 
+    @pytest.mark.parametrize(
+        ("authors", "families"),
+        [
+            ("LEE, J., NGUYEN, T.", ["LEE", "NGUYEN"]),
+            ("SÁ, J., SILVA, T.", ["SÁ", "SILVA"]),
+            ("LI, J.", ["LI"]),
+            ("MA, J. A., & LEE, K.", ["MA", "LEE"]),
+            ("DE LA CRUZ, M., LEE, K.", ["DE LA CRUZ", "LEE"]),
+        ],
+    )
+    def test_short_caps_surname_before_dotted_initials_is_a_surname(self, authors, families):
+        assert extract_families(authors, rules=True) == families
+
+    def test_short_caps_surname_is_initials_without_rules(self):
+        assert extract_families("LEE, J., NGUYEN, T.") == []
+
+    def test_short_caps_surname_does_not_link_its_coauthor_alone(self):
+        refs = [_ref(1, "LEE, J., NGUYEN, T.", year=2016, title="A")]
+        sents = [_sent(0, "As shown (Nguyen, 2016) here.")]
+        assert _rule_xrefs(sents, refs) == []
+        refs = [_ref(1, "SÁ, J., SILVA, T.", year=2016, title="A")]
+        sents = [_sent(0, "As shown (Silva, 2016) here.")]
+        assert _rule_xrefs(sents, refs) == []
+
+    def test_first_author_of_a_short_caps_pair_is_the_one_cited_first(self):
+        refs = [_ref(1, "LEE, J., NGUYEN, T.", year=2016, title="A")]
+        sents = [_sent(0, "As shown (Lee & Nguyen, 2016) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
+    def test_four_capital_initials_after_a_family_stay_initials(self):
+        for rules in (False, True):
+            assert extract_families("Li JAMK, Wu AB", rules=rules) == ["Li", "Wu"]
+            assert extract_families("Smith JAMK, Jones AB", rules=rules) == ["Smith", "Jones"]
+
+    def test_four_capital_initials_link_their_family(self):
+        refs = [_ref(1, "Li JAMK, Wu AB", year=2016, title="A")]
+        sents = [_sent(0, "As shown (Li & Wu, 2016) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
     def test_short_caps_runs_stay_initials(self):
         for rules in (False, True):
             assert extract_families("Smith, JA, & Jones, K. B.", rules=rules) == ["Smith", "Jones"]
