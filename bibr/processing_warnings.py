@@ -51,6 +51,7 @@ class WarningCode(StrEnum):
     AUTHORS_TRUNCATED = "AUTHORS_TRUNCATED"
     AUTHORS_PARTIAL = "AUTHORS_PARTIAL"
     LLM_RESPONSE_REPAIRED = "LLM_RESPONSE_REPAIRED"
+    LLM_SKIPPED = "LLM_SKIPPED"
     FRONT_TAGGER_UNAVAILABLE = "FRONT_TAGGER_UNAVAILABLE"
     FRONT_TAGGER_FLAGGED = "FRONT_TAGGER_FLAGGED"
     FRONT_MATTER_NOT_READ = "FRONT_MATTER_NOT_READ"
@@ -153,6 +154,10 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.LLM_RESPONSE_REPAIRED: "A finished core-metadata LLM response failed validation "
     "and was repaired locally (invalid backslash escapes, or prose around its JSON); the "
     "repaired response passed the same validation.",
+    WarningCode.LLM_SKIPPED: "A fast run made no LLM call, so what an LLM adds is missing: the "
+    "message lists what this paper's run left undone (structured funding, author roles and "
+    "affiliation parts, ambiguous citations left unlinked, statistics left to the regex pass). "
+    "It is not a failure and an export carrying it is final.",
     WarningCode.FRONT_TAGGER_UNAVAILABLE: "A fast run could not read the front matter: the "
     "front-matter tagger's model was missing or failed to load, so the title, authors and "
     "abstract are empty or come from fallbacks.",
@@ -188,8 +193,8 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.REF_SEG_REGION_ERROR: "Region-anchor reference segmentation raised an error.",
     WarningCode.REF_SEG_REGION_RECOVERY: "References were segmented from layout regions after "
     "another tier declined.",
-    WarningCode.REF_SEG_CRF_FALLBACK: "LLM reference segmentation failed or is disabled; "
-    "segmentation fell back to layout regions or the CRF.",
+    WarningCode.REF_SEG_CRF_FALLBACK: "LLM reference segmentation failed, is disabled, or is not "
+    "part of a fast run; segmentation fell back to layout regions or the CRF.",
     WarningCode.REF_SEG_CRF_ERROR: "The CRF reference segmenter raised an error.",
     WarningCode.REF_SEG_MARKER_SPLIT_RECOVERY: "Every segmenter failed; the references were "
     "split on their printed markers.",

@@ -55,7 +55,7 @@ def _build_engines(ctx: PipelineContext, paper=None) -> tuple[dict | None, dict 
     """Resolve the OCR and core-LLM engine identities for ``extraction``.
 
     ``None`` is meaningful for both: no OCR engine ran (the DOCX/XML native
-    paths), or the run deliberately had no LLM (``--no-llm``).
+    paths), or the run made no LLM call (``--no-llm``, or fast mode).
 
     ``resolve_ocr_runtime_identity`` is pure config resolution — it answers
     "which backend *would* run", not "which one did" — so the native-parse
@@ -79,7 +79,7 @@ def _build_engines(ctx: PipelineContext, paper=None) -> tuple[dict | None, dict 
             }
 
     llm = None
-    if not ctx.config.no_llm:
+    if not ctx.config.skips_llm:
         llm = {
             "provider": ctx.settings.llm.provider,
             "model": ctx.settings.llm.model,

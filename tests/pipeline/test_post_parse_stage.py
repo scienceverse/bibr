@@ -315,6 +315,105 @@ async def test_no_llm_skips_all_llm_calls():
     assert unknown.section_type == CanonicalSection.UNKNOWN
 
 
+def _skipped_codes(paper) -> list[WarningCode]:
+    return [w.code for w in paper.contents.processing_warnings if w.code == WarningCode.LLM_SKIPPED]
+
+
+@pytest.mark.asyncio
+async def test_fast_run_records_what_it_skipped_in_one_warning():
+    from bibr.clients.skipped import SkippedLlmClient
+    from bibr.models import PaperMetadata
+
+    contents = _root_only_contents()
+    # What the guards counted on their way through the stages.
+    contents.llm_skipped = {"integrity": 1, "citations": 3, "equations": 12}
+    extractor = MagicMock()
+    extractor.extract_all_metadata = AsyncMock(return_value=PaperMetadata(doi="", title="T"))
+
+    with patch("bibr.extract.extractor.MetadataExtractor", return_value=extractor):
+        paper = await post_parse(
+            contents=contents,
+            file_name="x.pdf",
+            file_hash="deadbeef",
+            llm_client=SkippedLlmClient(),
+        )
+
+    [warning] = [w for w in paper.contents.processing_warnings if w.code == WarningCode.LLM_SKIPPED]
+    assert warning.message == (
+        "Fast mode made no LLM calls. Not produced: structured funders, author roles and "
+        "affiliation parts; 3 ambiguous citations left unlinked; statistics in 12 sentences "
+        "left to the regex pass."
+    )
+
+
+@pytest.mark.parametrize(
+    ("counted", "message"),
+    [
+        ({}, "Fast mode made no LLM calls."),
+        (
+            {"citations": 1},
+            "Fast mode made no LLM calls. Not produced: 1 ambiguous citation left unlinked.",
+        ),
+        (
+            {"equations": 1},
+            "Fast mode made no LLM calls. Not produced: "
+            "statistics in 1 sentence left to the regex pass.",
+        ),
+        (
+            {"integrity": 2},
+            "Fast mode made no LLM calls. Not produced: "
+            "structured funders, author roles and affiliation parts.",
+        ),
+        # A count that is zero names nothing.
+        ({"citations": 0, "equations": 0}, "Fast mode made no LLM calls."),
+    ],
+)
+def test_llm_skipped_message_names_only_what_was_counted(counted, message):
+    from types import SimpleNamespace
+
+    from bibr.pipeline.stages.post_parse import _llm_skipped_warning
+
+    warning = _llm_skipped_warning(SimpleNamespace(llm_skipped=counted))
+
+    assert warning.code == WarningCode.LLM_SKIPPED
+    assert warning.message == message
+
+
+@pytest.mark.asyncio
+async def test_no_llm_run_does_not_carry_the_fast_run_warning():
+    """--no-llm keeps the record it always had; LLM_SKIPPED belongs to fast mode."""
+    paper = await post_parse(
+        contents=_root_only_contents(), file_name="x.pdf", file_hash="deadbeef", no_llm=True
+    )
+
+    assert _skipped_codes(paper) == []
+
+
+@pytest.mark.asyncio
+async def test_full_run_does_not_carry_the_fast_run_warning():
+    from bibr.models import PaperMetadata
+
+    extractor = MagicMock()
+    extractor.extract_all_metadata = AsyncMock(return_value=PaperMetadata(doi="", title="T"))
+
+    with (
+        patch("bibr.extract.extractor.MetadataExtractor", return_value=extractor),
+        patch(
+            "bibr.structure.implicit_sections.detect_implicit_sections",
+            AsyncMock(return_value=None),
+        ),
+        patch("bibr.structure.citation_linker.detect_bib_xrefs", AsyncMock(return_value=[])),
+    ):
+        paper = await post_parse(
+            contents=_root_only_contents(),
+            file_name="x.pdf",
+            file_hash="deadbeef",
+            llm_client=MagicMock(),
+        )
+
+    assert _skipped_codes(paper) == []
+
+
 @pytest.mark.asyncio
 async def test_no_llm_empty_authors_keep_author_specific_funding_conservative():
     from bibr.config import snapshot_settings

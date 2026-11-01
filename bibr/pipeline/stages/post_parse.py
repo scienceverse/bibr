@@ -1333,6 +1333,31 @@ def _usage_totals_by_label(
     return collapsed
 
 
+def _llm_skipped_warning(contents) -> ProcessingWarning:
+    """The one warning a fast run carries: no LLM call was made, and what that left undone.
+
+    The counts come from the guards that skipped a call (``PaperContents.llm_skipped``),
+    so a paper that gave them nothing to skip says only that no call was made.
+    """
+    skipped = contents.llm_skipped
+    left = []
+    if skipped.get("integrity"):
+        left.append("structured funders, author roles and affiliation parts")
+    if citations := skipped.get("citations"):
+        left.append(
+            f"{citations} ambiguous {'citation' if citations == 1 else 'citations'} left unlinked"
+        )
+    if equations := skipped.get("equations"):
+        left.append(
+            f"statistics in {equations} {'sentence' if equations == 1 else 'sentences'} "
+            "left to the regex pass"
+        )
+    message = "Fast mode made no LLM calls."
+    if left:
+        message += f" Not produced: {'; '.join(left)}."
+    return ProcessingWarning(WarningCode.LLM_SKIPPED, message)
+
+
 def _build_paper(contents, paper_metadata, file_name: str, file_hash: str, paper_id: str | None):
     """Assemble the final ``Paper`` object from extracted parts."""
     from bibr.input.file import InputFile, InputFormat
@@ -1794,6 +1819,10 @@ async def post_parse(
     from bibr.structure.section_tree import build_section_tree
 
     build_section_tree(contents.sections)
+
+    if is_skipped(llm_client):
+        # Every guard that skipped a call has counted it by now.
+        contents.processing_warnings.append(_llm_skipped_warning(contents))
 
     paper = _build_paper(contents, paper_metadata, file_name, file_hash, paper_id)
     paper.field_scope = FieldScope(

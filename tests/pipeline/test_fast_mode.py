@@ -1033,3 +1033,260 @@ def test_a_fast_run_reports_no_usage_and_builds_no_client():
     )
 
     assert pipeline.llm_usage_snapshot() == {}
+
+
+# ---------------------------------------------------------------------------
+# A whole fast run: the pipeline's stages from a PDF to the export
+# ---------------------------------------------------------------------------
+
+_TITLE = "Cues and Recall in Toddlers"
+_ABSTRACT = (
+    "We studied recall in 40 toddlers aged two to three years across two sessions. Half of the "
+    "children heard a spoken cue before each recall test and half did not. Cued children "
+    "recalled more items, and the benefit held a week later. Attention at encoding predicted "
+    "recall in both groups. We discuss what the results mean for early memory."
+)
+_REFERENCES = (
+    "Smith, J. (2018). Attention in toddlers. Journal of Tests, 5, 1-10.",
+    "Jones, K. (2019). Memory span. Testing Review, 7(2), 11-20.",
+)
+# (layout label, font size, text) from the top of the page down. Smith and Jones
+# are in the reference list, Lee is not; the second sentence of the results holds
+# a statistic the regex pass does not read, which a full run sends to the LLM.
+_PAGE = (
+    ("doc_title", 18, _TITLE),
+    ("text", 12, "Ana Ruiz"),
+    ("paragraph_title", 14, "Abstract"),
+    ("text", 10, _ABSTRACT),
+    ("paragraph_title", 14, "Introduction"),
+    (
+        "text",
+        10,
+        "Smith (2018) showed that attention matters. Lee (2020) disagreed. "
+        "Jones (2019) studied span.",
+    ),
+    ("paragraph_title", 14, "Results"),
+    (
+        "text",
+        10,
+        "Recall was higher with cues, t(28) = 3.42, p < .001. Fewer errors followed (n 12 vs 9).",
+    ),
+    ("paragraph_title", 14, "Funding"),
+    ("text", 10, "This work was supported by the Example Foundation (grant 123)."),
+    ("paragraph_title", 14, "Data availability"),
+    ("text", 10, "The data are available on request from the authors."),
+    ("paragraph_title", 14, "References"),
+    ("reference", 10, _REFERENCES[0]),
+    ("reference", 10, _REFERENCES[1]),
+)
+
+
+def _page_pdf_and_regions() -> tuple[bytes, list[dict]]:
+    import textwrap
+
+    from tests import test_pipeline_smoke as smoke
+
+    lines, regions = [], []
+    baseline = 750.0
+    for index, (label, size, text) in enumerate(_PAGE):
+        wrapped = textwrap.wrap(text, 85)
+        lines += [(72, baseline - 12 * n, size, row) for n, row in enumerate(wrapped)]
+        last = baseline - 12 * (len(wrapped) - 1)
+        box = smoke._norm_bbox(60, baseline + size, 552, last - 6)
+        regions.append(smoke._layout_region(index, label, box))
+        baseline = last - 30
+    return smoke._build_pdf(lines), regions
+
+
+class _PageLayout:
+    loaded = True
+
+    def __init__(self, regions):
+        self._regions = regions
+
+    async def detect_batch(self, images_list):
+        import copy
+
+        return [copy.deepcopy(self._regions) for _ in images_list]
+
+
+class _SentenceSegmenter:
+    loaded = True
+
+    async def segment_batch(self, texts):
+        import re
+
+        return [re.split(r"(?<=[.!?])\s+", text.strip()) for text in texts]
+
+
+class PageTagger:
+    """Tags the title, the byline and the abstract of the page above."""
+
+    def tag(self, inp):
+        from tests.front_tagger.helpers import label
+
+        tags = label(
+            inp, ("TITLE", _TITLE), ("GIVEN", "Ana"), ("FAMILY", "Ruiz"), ("ABSTRACT", _ABSTRACT)
+        )
+        return tags, [1.0] * len(tags)
+
+
+class _ReferenceSegmenter:
+    def segment(self, text):
+        return list(_REFERENCES)
+
+
+class _ReferenceParser:
+    def parse_batch(self, segments):
+        return [
+            {"authors": "Smith, J.", "year": "2018", "title": "Attention in toddlers"},
+            {"authors": "Jones, K.", "year": "2019", "title": "Memory span"},
+        ][: len(segments)]
+
+
+async def fast_page_run(tmp_path, monkeypatch, *, tagger=None):
+    """The pipeline's stages over a one-page PDF in fast mode, with the models faked.
+
+    The layout detector, the sentence splitter, the reference segmenter and parser
+    and the front-matter tagger (*tagger*; ``None`` is a bundle that would not load)
+    are stand-ins; nothing else is, and the LLM is not wired. No trained classifier
+    is configured (the suite's default), so the paper type stays empty.
+    """
+    import dataclasses
+
+    from bibr.config import Settings
+    from bibr.extract import ref_extractor
+    from bibr.local.pipeline import LocalPipeline
+    from bibr.pipeline.resources import ResourceManager
+    from tests import test_pipeline_smoke as smoke
+
+    monkeypatch.setattr(Settings.ocr, "native_text_min_chars", 4)
+    monkeypatch.setattr(ref_extractor, "_get_geom_segmenter", lambda *_a: None)
+    monkeypatch.setattr(ref_extractor, "_get_ner_segmenter", lambda *_a: _ReferenceSegmenter())
+    monkeypatch.setattr(ref_extractor, "_get_ner_parser", lambda *_a, **_k: _ReferenceParser())
+
+    pdf, regions = _page_pdf_and_regions()
+    path = tmp_path / "page.pdf"
+    path.write_bytes(pdf)
+    pipeline = LocalPipeline(crossref=False)
+    rm = ResourceManager(
+        memory_mode=pipeline.memory_mode,
+        ocr_backend=pipeline.ocr_backend,
+        ocr_url=pipeline.ocr_url,
+        ocr_model=pipeline.ocr_model,
+        device=pipeline.device,
+        settings=pipeline.settings,
+        layout=_PageLayout(regions),
+        segmenter=_SentenceSegmenter(),
+    )
+    rm._ocr = smoke.FakeOcr()
+    rm.ensure_front_tagger = lambda settings=None: tagger
+    pipeline._resources = rm
+    try:
+        return await pipeline.process_file(
+            path, config=dataclasses.replace(pipeline._config, mode="fast")
+        )
+    finally:
+        await pipeline.aclose()
+
+
+def _count_llm_reaches(monkeypatch) -> list[str]:
+    """Record every way a fast run could reach a model: a call the stand-in refuses, or a
+    real client built. The list stays empty when no stage went near an LLM."""
+    reached: list[str] = []
+    refuse = skipped._refused
+
+    def counting_refuse(name):
+        reached.append(name)
+        return refuse(name)
+
+    def building(self, *args, **kwargs):
+        reached.append("LLMClient()")
+        raise AssertionError("a fast run built an LLM client")
+
+    monkeypatch.setattr(skipped, "_refused", counting_refuse)
+    monkeypatch.setattr(LLMClient, "__init__", building)
+    return reached
+
+
+def _export_codes(result) -> list[str]:
+    extraction = result["extraction"]
+    return [w["code"] for w in extraction["warnings"]] + [
+        i["code"] for i in extraction["validation"]["issues"]
+    ]
+
+
+async def test_a_fast_run_end_to_end(tmp_path, monkeypatch):
+    from bibr.export import PaperExport
+    from bibr.export.json_export import validate_export
+    from bibr.serve.deployments.pipeline import _is_final_result
+
+    reached = _count_llm_reaches(monkeypatch)
+    result = await fast_page_run(tmp_path, monkeypatch, tagger=PageTagger())
+
+    # Not one call reached the stand-in, and no client was built; the export says so too.
+    assert reached == []
+    assert validate_export(result) == []
+    PaperExport.model_validate(result)
+    assert result["extraction"]["llm"] is None
+    assert "usage" not in result["extraction"]
+
+    codes = _export_codes(result)
+    assert not [c for c in codes if c.endswith("_LLM_FAILED") or c.endswith("_DEGRADED")]
+    [skipped] = [w for w in result["extraction"]["warnings"] if w["code"] == "LLM_SKIPPED"]
+    assert skipped["message"] == (
+        "Fast mode made no LLM calls. Not produced: structured funders, author roles and "
+        "affiliation parts; 1 ambiguous citation left unlinked; statistics in 1 sentence "
+        "left to the regex pass."
+    )
+    assert "FRONT_TAGGER_UNAVAILABLE" not in codes
+    # Serve may cache it: a fast run's skips are not the kind of failure a retry cures.
+    assert _is_final_result(result)
+
+    # What the run did produce.
+    assert result["metadata"]["title"] == _TITLE
+    assert [(a["given"], a["family"]) for a in result["author"]] == [("Ana", "Ruiz")]
+    assert result["metadata"]["abstract"] == _ABSTRACT
+    assert [b["title"] for b in result["bib"]] == ["Attention in toddlers", "Memory span"]
+    types = {s["section_type"] for s in result["section"]}
+    assert {"abstract", "intro", "results", "funding", "references"} <= types
+    assert result["metadata"]["funding_statement"].startswith("This work was supported by")
+    assert result["metadata"]["data_availability"].startswith("The data are available")
+    assert [e["verbatim"] for e in result["eq"]] == ["t(28) = 3.42", "p < .001"]
+    # The citation the reference list settles is linked; the other is the one left over.
+    assert [(x["xref_type"], x["target_id"]) for x in result["xref"]] == [("bib", 1), ("bib", 2)]
+
+    fields = result["extraction"]["fields"]
+    assert fields["title"]["source"] == "front_tagger"
+    assert fields["funding"] == {
+        "state": "not_attempted",
+        "source": None,
+        "issues": ["LLM_SKIPPED"],
+        "rule": "skipped_fast_mode",
+    }
+
+
+async def test_a_fast_run_whose_tagger_did_not_load_says_so(tmp_path, monkeypatch):
+    from bibr.export.json_export import validate_export
+    from bibr.serve.deployments.pipeline import _is_final_result
+
+    reached = _count_llm_reaches(monkeypatch)
+    result = await fast_page_run(tmp_path, monkeypatch, tagger=None)
+
+    assert reached == []
+    assert validate_export(result) == []
+    codes = _export_codes(result)
+    assert codes.count("FRONT_TAGGER_UNAVAILABLE") == 1
+    assert codes.count("LLM_SKIPPED") == 1
+    assert not [c for c in codes if c.endswith("_LLM_FAILED") or c.endswith("_DEGRADED")]
+    # A retry (the model downloaded, say) may read the front matter, so serve does not cache it.
+    assert not _is_final_result(result)
+    # No byline was read, and the field says the step that reads it did not run.
+    assert result["author"] == []
+    fields = result["extraction"]["fields"]
+    assert fields["author"]["state"] == "failed"
+    assert "FRONT_TAGGER_UNAVAILABLE" in fields["author"]["issues"]
+    # The rest of the paper does not depend on the tagger.
+    assert [b["title"] for b in result["bib"]] == ["Attention in toddlers", "Memory span"]
+    assert result["metadata"]["funding_statement"].startswith("This work was supported by")
+    assert [e["verbatim"] for e in result["eq"]] == ["t(28) = 3.42", "p < .001"]

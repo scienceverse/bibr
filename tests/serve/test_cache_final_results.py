@@ -62,6 +62,12 @@ async def test_degraded_result_is_not_cached_and_the_next_request_reruns(tmp_pat
         # Text read from a scan's layer during an OCR outage; OCR may answer next time.
         (_payload(warnings=[{"code": "OCR_TEXT_LAYER_FALLBACK", "message": "m"}]), False),
         (_payload(warnings=[{"code": "CITATION_LLM_FAILED", "message": "m"}]), False),
+        # A fast run is what it is: asking again gives the same export.
+        (_payload(warnings=[{"code": "LLM_SKIPPED", "message": "m"}]), True),
+        (_payload(warnings=[{"code": "FRONT_TAGGER_FLAGGED", "message": "m"}]), True),
+        (_payload(warnings=[{"code": "FRONT_MATTER_NOT_READ", "message": "m"}]), True),
+        # A tagger that did not load may load on the next request.
+        (_payload(warnings=[{"code": "FRONT_TAGGER_UNAVAILABLE", "message": "m"}]), False),
         (
             _payload(
                 validation={
