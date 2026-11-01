@@ -1255,6 +1255,7 @@ async def fast_page_run(
     configure=None,
     classifier_loaders=None,
     tagger_loads=None,
+    config=None,
 ):
     """The pipeline's stages over a one-page PDF in fast mode, with the models faked.
 
@@ -1266,7 +1267,8 @@ async def fast_page_run(
     No trained classifier is configured (the suite's default), so the paper type
     stays empty. A test that wants them sets their ids on the pipeline's settings
     with *configure* and gives *classifier_loaders*, the ``(paper, section)``
-    loaders of the managed classifiers.
+    loaders of the managed classifiers. *config* changes the run's ``RunConfig``
+    (``{"mode": "full", "no_llm": True}`` is a structure-only run of the same page).
     """
     import dataclasses
 
@@ -1332,7 +1334,7 @@ async def fast_page_run(
     pipeline._resources = rm
     try:
         return await pipeline.process_file(
-            path, config=dataclasses.replace(pipeline._config, mode="fast")
+            path, config=dataclasses.replace(pipeline._config, **{"mode": "fast", **(config or {})})
         )
     finally:
         tagger_runtime.reset_front_tagger_cache()

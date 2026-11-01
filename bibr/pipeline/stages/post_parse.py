@@ -1042,6 +1042,25 @@ def _decide_record_fields(paper_metadata, *, native: bool, doc_info_authors=None
     )
 
 
+def _apply_front_matter_rules(contents, paper_metadata) -> None:
+    """What the local front-matter rules add to the tagger's answer, in a run with no LLM.
+
+    The title's language, which a PDF does not declare, and the affiliations the
+    tagger printed that no author carries, which the LLM parse would have listed.
+    """
+    from bibr.extract.field_decisions import FieldCandidate, apply_decision, decide_value
+    from bibr.extract.front_matter import fill_language
+
+    fill_language(paper_metadata)
+    tagged = getattr(contents, "front_tagger_result", None)
+    rows = tagged.affiliation_rows() if tagged is not None else []
+    if rows and not paper_metadata.affiliations:
+        apply_decision(
+            paper_metadata,
+            decide_value("affiliations", FieldCandidate("affiliations", "front_tagger", rows)),
+        )
+
+
 def _body_text_excluding_references(contents) -> str:
     """Concatenate body sentence text, excluding the reference-list section
     (whose author-year entries would otherwise dominate the citation count)."""
@@ -1252,6 +1271,7 @@ async def _link_citations(
     file_hash: str,
     llm_client,
     *,
+    rule_tier3: bool = False,
     validation_issue_sink: list[ValidationIssue] | None = None,
 ) -> None:
     """Inline citation → bib linking.
@@ -1275,6 +1295,7 @@ async def _link_citations(
         file_hash=file_hash,
         receipt_sink=receipt_sink,
         references_from_notes=_references_from_notes(contents),
+        rule_tier3=rule_tier3,
     )
     contents.xrefs.extend(bib_xrefs)
     contents.citation_receipt = receipt_sink[0] if receipt_sink else None
@@ -1641,6 +1662,8 @@ async def post_parse(
             )
             apply_decision(paper_metadata, title_decision)
             metadata_issues.extend(title_decision.issues)
+            if effective_settings.FRONT_TAGGER_RULES:
+                _apply_front_matter_rules(contents, paper_metadata)
 
             # Build statement candidates while section labels and source IDs
             # are stable, but delay materialization until after late cleaning.
@@ -1674,6 +1697,7 @@ async def post_parse(
                     paper_metadata,
                     file_hash,
                     llm_client,
+                    rule_tier3=effective_settings.CITATION_RULE_TIER3,
                     validation_issue_sink=metadata_issues,
                 )
 

@@ -92,9 +92,7 @@ async def _tag_front_matter(rm, ocr_regions, *, first_page_index: int, settings=
 
         def run():
             regions = build_front_regions(ocr_regions, first_page_index=first_page_index)
-            return tag_front_matter(
-                tagger, regions, first_page_index=first_page_index, rules=rules
-            )
+            return tag_front_matter(tagger, regions, first_page_index=first_page_index, rules=rules)
 
         return await asyncio.to_thread(run)
     except Exception:  # noqa: BLE001 - an optional reading must never fail parsing
@@ -232,10 +230,7 @@ class ParseSegmentStage:
                         )
                     else:
                         tagged = await _tag_front_matter(
-                            rm,
-                            fs.ocr_regions,
-                            first_page_index=first_page,
-                            settings=ctx.settings,
+                            rm, fs.ocr_regions, first_page_index=first_page, settings=ctx.settings
                         )
                         if tagged is not None and scanned:
                             tagged = replace(

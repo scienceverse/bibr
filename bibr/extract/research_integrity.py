@@ -338,9 +338,14 @@ async def extract_structured_integrity(
 
 def _keep_unparsed(metadata: PaperMetadata, rule: str) -> None:
     """Record that the structured-integrity call left funding and affiliations as they were."""
-    from bibr.extract.field_decisions import FieldDecision, apply_decision
+    from bibr.extract.field_decisions import FieldDecision, apply_decision, field_decisions_of
 
+    ledger = field_decisions_of(metadata)
     for name, attribute in (("funding", "funding"), ("affiliations", "affiliations")):
+        decided = ledger.get(name) if ledger is not None else None
+        if decided is not None and decided.source == "front_tagger":
+            # The tagger's rows were decided already (the local front-matter rules).
+            continue
         apply_decision(
             metadata, FieldDecision(name, getattr(metadata, attribute), None, rule, producer="llm")
         )

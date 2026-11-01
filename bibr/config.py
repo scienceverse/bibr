@@ -2695,12 +2695,20 @@ class GlobalSettings(_BibrSettings):
     FRONT_TAGGER_RULES: bool = Field(
         False,
         description="Read the front matter with the local rules that put right what the tagger "
-        "alone leaves wrong. Fast mode sets it; a full run leaves those readings to the LLM.",
+        "alone leaves wrong: author names and keywords it cut short, affiliations it left "
+        "untagged, and the title's language. Fast mode sets it; a full run leaves those "
+        "readings to the LLM.",
     )
     EQUATION_REPAIR_GLITCHES: bool = Field(
         False,
         description="Read statistic text through the equation rules and leave out a value whose "
         "power of ten was not read, as a run with no LLM fallback needs. Fast mode sets it.",
+    )
+    CITATION_RULE_TIER3: bool = Field(
+        False,
+        description="Link the author-year citations the exact reading leaves over with the "
+        "matcher's rules (family prefixes, a close spelling, et al. forms) where an LLM "
+        "would be asked. Fast mode sets it; a full run asks the LLM.",
     )
     FIGURE_IMAGES: bool = Field(False, description="Extract figure images from PDFs.")
     # Reference extraction strategy — DECOUPLED segmentation + parsing axes

@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+A fast run, which makes no LLM call, now reads citations, statistics and the
+front matter with local rules where a full run asks the LLM. Each has a setting
+that is off by default and that fast mode turns on, so a full run, and a
+`--no-llm` run, read them as before.
+
+- `CITATION_RULE_TIER3` links the author-year citations that the exact reading
+  of the names leaves over, in place of the LLM question. It reads a family
+  printed with other spaces or hyphens, or as the opening words of a listed name
+  (never as the first letters of a longer one), a name of six letters or more
+  misspelt when one reference of that year fits, "et al." in the ways papers
+  write it, and an organisation cited by its initials. A work listed twice
+  counts once. A link from a looser reading keeps the `author-year` tier and
+  records its reading and a lower confidence in the citation receipt.
+- `EQUATION_REPAIR_GLITCHES` reads statistics through the damage a PDF's text
+  layer does to them: math italic letters, a box in place of a space, a Cyrillic
+  "р" for "p", a "5" or a comma printed where "=" or "<" belongs, and a dropped
+  "=". A p-value whose power of ten was not read is left out instead of reading
+  its coefficient. The exported expression is located where it is printed.
+- `FRONT_TAGGER_RULES` puts right what the front-matter tagger leaves wrong:
+  a keyword cut off before its closing bracket, a publisher's name read as an
+  author, a letter key printed against a name read as part of it, and the
+  affiliations it printed but no author carries or left untagged where no
+  author has one, which the export lists as affiliations with no author.
+- `FRONT_TAGGER_RULES` also reads the paper's `language` from its title (a PDF
+  declares none). The title's function words or letters decide it; a title they
+  do not decide leaves it empty, and an input that declares a language keeps it.
+
 ### Added — export schema 12.4 (additive)
 
 The export moves to schema `12.4`, which adds two optional keys; every 12.x
