@@ -195,14 +195,19 @@ _APOS = chr(0x27) + chr(0x2018) + chr(0x2019)
 _POSSESSIVE_RE = re.compile("[" + _APOS + "]s?$")
 
 
+# Footnote and equal-contribution marks a reference list prints before a name.
+_LEADING_NON_WORD_RE = re.compile(r"^\W+")
+
+
 def _family_key(family: str) -> str:
     """Normalize a family name for matching.
 
     Strips trailing possessive ``’s`` / ``’s`` / ``‘s``
     ("Perruchet’s" -> "perruchet", "Andersson’s" -> "andersson"),
-    trailing lone apostrophes, trailing punctuation, and lowercases.
+    trailing lone apostrophes, trailing punctuation, leading marker characters
+    ("*Berg", "†Berg"), and lowercases.
     """
-    s = family.strip().rstrip(",.").lower()
+    s = _LEADING_NON_WORD_RE.sub("", family.strip()).rstrip(",.").lower()
     s = _POSSESSIVE_RE.sub("", s)
     # Citations often omit reference-list diacritics (Garcia vs García). Keep
     # the displayed family untouched, but compare on a decomposed ASCII key.

@@ -75,6 +75,21 @@ class TestFamilyKeys:
     def test_della_sala(self):
         assert _family_keys_for("Della Sala") == {"della sala", "sala"}
 
+    def test_leading_marker_stripped(self):
+        assert _family_keys_for("*Lindqvist") == {"lindqvist"}
+        assert _family_keys_for("† Okafor") == {"okafor"}
+        assert _family_keys_for("(van der Toorn") == {"van der toorn", "toorn"}
+
+
+def test_reference_with_leading_marker_links():
+    refs = [
+        _ref(1, "*Lindqvist, K., & †Okafor, C.", year=2018),
+        _ref(2, "Brandt, H.", year=2018),
+    ]
+    sents = [_sent(0, "This holds (Lindqvist & Okafor, 2018) and elsewhere (Brandt, 2018).")]
+    out = detect_author_year_xrefs(sents, refs)
+    assert sorted(x.xref_id for x in out) == [1, 2]
+
 
 class TestRefIndexKeySets:
     def test_family_key_sets_precomputed(self):
