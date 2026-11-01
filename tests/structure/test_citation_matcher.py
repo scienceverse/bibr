@@ -309,6 +309,24 @@ class TestTieBreak:
         assert ref is not None and ref.bib_id == 2
         assert tied == []
 
+    def test_the_reference_led_by_the_first_cited_family_wins(self):
+        # Both organisation names end in "Education", the key a second cited
+        # word shares with each; only one begins with the first cited name.
+        refs = [
+            _ref(1, "Greenfield Digital Education", title="Lessons from remote teaching"),
+            _ref(2, "Harbor Ad Hoc Committee on Learning Education", title="Report"),
+        ]
+        sents = [_sent(0, "As reported (Greenfield Digital Education, 2020) here.")]
+        assert [x.xref_id for x in detect_author_year_xrefs(sents, refs)] == [1]
+
+    def test_two_references_led_by_the_first_cited_family_are_ranked_by_fit(self):
+        refs = [
+            _ref(1, "Okafor Chidi, Lund Karl, Brandt Hana", title="Three authors"),
+            _ref(2, "Okafor Dayo, Lund Karl", title="Two authors"),
+        ]
+        sents = [_sent(0, "As shown (Okafor & Lund, 2020) here.")]
+        assert [x.xref_id for x in detect_author_year_xrefs(sents, refs)] == [2]
+
     def test_one_cited_family_with_no_single_author_reference_stays_ambiguous(self):
         refs = [
             _ref(1, "Okafor, C., & Lund, K.", title="Pair one"),

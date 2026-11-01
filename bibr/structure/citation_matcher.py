@@ -674,7 +674,7 @@ def _score_ref(
     return (matched, et_al_bonus, -extra)
 
 
-def _tie_key(ref: _RefIdx, cand: _Candidate, overlaps: _Overlap) -> tuple[bool, int, int]:
+def _tie_key(ref: _RefIdx, cand: _Candidate) -> tuple[bool, int, int]:
     """Rank a reference that ties with others on the same family and year.
 
     Returns ``(count_ok, order_ok, any_author)``. ``count_ok``: the number of
@@ -682,7 +682,8 @@ def _tie_key(ref: _RefIdx, cand: _Candidate, overlaps: _Overlap) -> tuple[bool, 
     more, one cited family needs a single-author reference, otherwise the
     counts are equal. ``order_ok``: cited families that match the listed author
     at the same position. ``any_author``: cited families that match any listed
-    author.
+    author. Names are read as ``_overlap_prefix`` and ``_overlap_fuzzy`` read
+    them, whichever way the tie arose.
     """
     cited = [_family_keys_for(family) for family in cand.families]
     listed = ref.family_key_sets
@@ -692,21 +693,34 @@ def _tie_key(ref: _RefIdx, cand: _Candidate, overlaps: _Overlap) -> tuple[bool, 
         count_ok = len(listed) == 1
     else:
         count_ok = len(listed) == len(cited)
-    order_ok = sum(1 for keys, author in zip(cited, listed, strict=False) if overlaps(keys, author))
-    any_author = sum(1 for keys in cited if any(overlaps(keys, author) for author in listed))
+    order_ok = sum(
+        1 for keys, author in zip(cited, listed, strict=False) if _overlap_prefix(keys, author)
+    )
+    any_author = sum(1 for keys in cited if any(_overlap_fuzzy(keys, author) for author in listed))
     return count_ok, order_ok, any_author
 
 
-def _break_tie(tied: list[_RefIdx], cand: _Candidate, overlaps: _Overlap) -> _RefIdx | None:
+def _break_tie(tied: list[_RefIdx], cand: _Candidate) -> _RefIdx | None:
     """The one reference of ``tied`` that fits the citation best, if any.
 
-    It must fit the author count and strictly out-rank every other reference
-    on ``_tie_key``; two references that fit equally stay tied (a bare "et al."
-    does not tell a three-author reference from a six-author one).
+    A reference whose first author is the first family cited wins when it is
+    the only one ("Stanford Digital Education" cited against two entries that
+    both end in "Education"). Otherwise the best-ranked reference wins if it
+    fits the author count and strictly out-ranks every other on ``_tie_key``;
+    two references that fit equally stay tied (a bare "et al." does not tell a
+    three-author reference from a six-author one).
     """
-    ranked = sorted(
-        ((_tie_key(ref, cand, overlaps), ref) for ref in tied), key=lambda p: p[0], reverse=True
-    )
+    if cand.families:
+        first_cited = _family_keys_for(cand.families[0])
+        first = [
+            ref
+            for ref in tied
+            if ref.family_key_sets and _overlap_prefix(first_cited, ref.family_key_sets[0])
+        ]
+        if len(first) == 1:
+            return first[0]
+        tied = first or tied
+    ranked = sorted(((_tie_key(ref, cand), ref) for ref in tied), key=lambda p: p[0], reverse=True)
     best_key, best = ranked[0]
     if best_key[0] and best_key > ranked[1][0]:
         return best
@@ -737,7 +751,7 @@ def _match_pool(
             if ref.family_key_sets and overlaps(candidate_keys, ref.family_key_sets[0])
         ]
         if len(same_first) > 1:
-            winner = _break_tie(same_first, cand, overlaps)
+            winner = _break_tie(same_first, cand)
             if winner is not None:
                 return winner, []
             return None, sorted(ref.bib_id for ref in same_first)
@@ -751,7 +765,7 @@ def _match_pool(
     if len(scored) > 1 and (only_one or scored[1][1] == scored[0][1]):
         top_score = scored[0][1]
         top = [r for r, s in scored if only_one or s == top_score]
-        winner = _break_tie(top, cand, overlaps)
+        winner = _break_tie(top, cand)
         if winner is not None:
             return winner, []
         return None, [r.bib_id for r in top]
