@@ -2371,3 +2371,25 @@ class TestRepairedExtraction:
             extractor.extract_from_sentences([sentence], _make_sections(), repair_glitches=False)
             == []
         )
+
+
+class TestRepairedRows:
+    """A row says whether it was read from repaired text."""
+
+    def test_rows_of_a_repaired_sentence_say_so(self):
+        eqs = _extract_repaired("The groups differed, t(59) 5 0.66, p , .01.")
+
+        assert eqs
+        assert all(eq.repaired for eq in eqs)
+
+    def test_rows_of_a_sentence_that_needed_no_repair_do_not(self):
+        eqs = _extract_repaired("The groups differed, t(59) = 0.66, p < .01.")
+
+        assert eqs
+        assert not any(eq.repaired for eq in eqs)
+
+    def test_rows_of_a_run_that_repairs_nothing_do_not(self):
+        eqs = _extract("The groups differed, t(59) = 0.66, p < .01.")
+
+        assert eqs
+        assert not any(eq.repaired for eq in eqs)

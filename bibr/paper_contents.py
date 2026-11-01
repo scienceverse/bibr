@@ -836,6 +836,10 @@ class PaperEquation:
     comp: str  # comparison operator ("=", "<", ">", "≤", "≥", "≈")
     rhs: str  # right-hand side (e.g., "3.42", ".003", "[2.0, 4.7]")
     df: str = ""  # degrees of freedom from the LHS parenthetical (e.g., "28" for t(28))
+    # Read from the sentence once its text-layer glitches were put right
+    # ("t(59) = 0.66" for the printed "t(59) 5 0.66"), so that its printed form is
+    # found there: see ``repair_statistic_glitches``
+    repaired: bool = False
 
 
 @dataclass

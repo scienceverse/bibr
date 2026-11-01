@@ -839,9 +839,9 @@ class EquationExtractor:
         equations: list[PaperEquation] = []
 
         for sent in sentences:
-            text = _single_char_line_breaks(sent.text)
+            text = printed = _single_char_line_breaks(sent.text)
             if repair_glitches:
-                text = repair_statistic_glitches(text)
+                text = repair_statistic_glitches(printed)
             # Each pass marks the characters of the components it emitted,
             # and a later pass skips any match overlapping them. Only those
             # characters: a statistic the structured patterns do not know,
@@ -863,6 +863,7 @@ class EquationExtractor:
             found += self._group_by_position(text, loose, parens)
             for eq in found:
                 _print_on_one_line(eq)
+                eq.repaired = text != printed
             equations.extend(found)
 
         logger.info(
