@@ -2475,6 +2475,23 @@ class TestRepairGuards:
         )
         assert repair_statistic_glitches("\U0001d712\U0001d7d0 = 3.84") == "\u03c72 = 3.84"
 
+    def test_a_count_before_a_product_keeps_its_count_whatever_follows_the_ten(self):
+        eqs = _extract_repaired("The N = 20 \u00d7 10 trials were run.")
+
+        assert _components(eqs) == [("N", "", "=", "20")]
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "The rate was p = 1.57 \u00d7 10 \u25a1\u207f in the group.",
+            "The rate was p = 1.57 \u00d7 10 n in the group.",
+            "The rate was (p = 1.57 \u00d7 10 \u25a1).",
+            "The rate was p = 1.57 \u00d7 10 \u2212 in the group.",
+        ],
+    )
+    def test_a_power_of_ten_that_lost_its_exponent_is_left_out(self, text):
+        assert _extract_repaired(text) == []
+
 
 class TestRepairedRows:
     """A row says whether it was read from repaired text."""

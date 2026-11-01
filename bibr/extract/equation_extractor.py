@@ -366,8 +366,12 @@ _THOUSANDS_RE = re.compile(r"[−–-]?\s*\d{1,3}(?:,\d{3})+(?!\d)")
 
 # A power of ten whose exponent the value pattern could not read, because the
 # text layer printed it as boxes, spaces or a letter: "p = 1.57 × 10 □ⁿ". The
-# rhs stops before the "×" and is not the value printed.
-_CUT_POWER_RE = re.compile(r"\s*×\s*10")
+# rhs stops before the "×" and is not the value printed. Something of an
+# exponent must follow the 10 (a sign, a superscript, one letter), or nothing
+# at all (a box is a space by then): "N = 20 × 10 trials" is a product.
+_CUT_POWER_RE = re.compile(
+    r"\s*×\s*10(?=\s*(?:[⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻ⁿ^−–-]|[A-Za-z](?![A-Za-z])|[,;.)\]]|$))"
+)
 
 
 def _misread(
