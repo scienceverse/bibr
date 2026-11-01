@@ -3144,8 +3144,8 @@ class CoreMetadataExtractor:
         reading is the best there is.
 
         With no answer the record is empty, and the warning says why: the tagger
-        did not load (an input with page regions), or the input has no page
-        layout for it to read.
+        did not answer (an input with page regions: its model did not load, or
+        it failed on this paper), or the input has no page layout for it to read.
         """
         parts = frozenset({"title_keywords", "authors"})
         result = getattr(self.contents, "front_tagger_result", None)
@@ -3157,8 +3157,8 @@ class CoreMetadataExtractor:
                 )
                 self._record_metadata_warning(
                     WarningCode.FRONT_TAGGER_UNAVAILABLE,
-                    "the front-matter tagger's model could not be loaded; the title, authors "
-                    "and abstract were not read",
+                    "the front-matter tagger did not answer (its model could not be loaded, or "
+                    "it failed on this paper); the title, authors and abstract were not read",
                 )
             else:
                 logger.info(

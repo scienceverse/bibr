@@ -270,7 +270,7 @@ def tag_front_matter(
     window holds no abstract, the windows starting one and then two pages
     later are tagged with the same model and the first abstract one yields
     replaces the missing one; every other field keeps the first window's
-    answer.
+    answer, also when a later window fails to run.
     """
     from bibr.front_tagger.assemble import assemble
     from bibr.front_tagger.contract import build_tagger_input
@@ -283,11 +283,19 @@ def tag_front_matter(
     for offset in ABSTRACT_WINDOW_STARTS:
         start = first_page_index + offset
         if start not in pages:
-            break
+            continue  # a blank page does not end the paper
         later_inp = build_tagger_input(regions, first_page_index=start)
         if not later_inp.words:
             continue
-        later = assemble(later_inp, *tagger.tag(later_inp))
+        try:
+            later = assemble(later_inp, *tagger.tag(later_inp))
+        except Exception:  # noqa: BLE001 - the first window's answer still stands
+            logger.warning(
+                "Front-matter tagger failed on the window from page %d; keeping the first window",
+                start,
+                exc_info=True,
+            )
+            continue
         abstract = later.title_keywords.abstract if later.title_keywords else None
         if not (abstract or "").strip():
             continue

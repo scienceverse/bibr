@@ -62,3 +62,58 @@ def test_an_abstract_on_the_first_pages_reads_one_window():
     got = tag_front_matter(tagger, _manuscript(abstract_page=1))
     assert got.title_keywords.abstract == ABSTRACT
     assert len(tagger.windows) == 1
+
+
+def test_a_blank_page_does_not_end_the_search():
+    # The title page, a page with nothing on it, then the abstract.
+    rows = regions(("doc_title", "Handedness in families"), ("text", "Ana Ruiz"), page=0)
+    rows += regions(("text", "Abstract"), ("abstract", ABSTRACT), page=2)
+    got = tag_front_matter(_tagger(), rows)
+    assert got.title_keywords.abstract == ABSTRACT
+    assert "no_abstract" not in got.problems
+
+
+class _FailsOnWindow(_PhraseTagger):
+    """``_PhraseTagger`` that raises on the given windows (counted from 1), like an out-of-memory GPU."""
+
+    def __init__(self, *spans: tuple[str, str], fail_on: set[int]):
+        super().__init__(*spans)
+        self.fail_on = fail_on
+
+    def tag(self, inp):
+        if len(self.windows) + 1 in self.fail_on:
+            self.windows.append(inp.text)
+            raise RuntimeError("out of memory")
+        return super().tag(inp)
+
+
+def _failing_tagger(fail_on: set[int]):
+    return _FailsOnWindow(
+        ("TITLE", "Handedness in families"),
+        ("GIVEN", "Ana"),
+        ("FAMILY", "Ruiz"),
+        ("ABSTRACT", ABSTRACT),
+        fail_on=fail_on,
+    )
+
+
+def test_later_windows_that_fail_keep_the_first_windows_answer():
+    got = tag_front_matter(_failing_tagger({2, 3}), _manuscript(abstract_page=2))
+    assert got.title_keywords.title == "Handedness in families"
+    assert [a.family for a in got.byline.authors] == ["Ruiz"]
+    assert "no_abstract" in got.problems
+
+
+def test_a_failed_window_does_not_stop_the_next_one():
+    tagger = _failing_tagger({2})
+    got = tag_front_matter(tagger, _manuscript(abstract_page=2))
+    assert len(tagger.windows) == 3  # the window from page 1 failed, the one from page 2 read it
+    assert got.title_keywords.abstract == ABSTRACT
+    assert "no_abstract" not in got.problems
+
+
+def test_a_first_window_that_fails_still_raises():
+    import pytest
+
+    with pytest.raises(RuntimeError):
+        tag_front_matter(_failing_tagger({1}), _manuscript(abstract_page=2))

@@ -163,8 +163,8 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     "affiliation parts, ambiguous citations left unlinked, statistics left to the regex pass). "
     "It is not a failure and an export carrying it is final.",
     WarningCode.FRONT_TAGGER_UNAVAILABLE: "A fast run could not read the front matter: the "
-    "front-matter tagger's model was missing or failed to load, so the title, authors and "
-    "abstract are empty or come from fallbacks.",
+    "front-matter tagger's model was missing, failed to load or failed on this paper, so the "
+    "title, authors and abstract are empty or come from fallbacks.",
     WarningCode.FRONT_TAGGER_FLAGGED: "A fast run took the front-matter tagger's answer although "
     "it reported problems with it (the message lists them); the title, authors or abstract may "
     "be incomplete.",

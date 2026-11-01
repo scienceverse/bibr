@@ -1431,6 +1431,27 @@ async def test_a_fast_run_loads_the_tagger_from_its_own_settings_and_device(tmp_
     assert result["metadata"]["title"] == _TITLE
 
 
+class _BrokenTagger:
+    def tag(self, inp):
+        raise RuntimeError("CUDA out of memory")
+
+
+async def test_a_fast_run_whose_tagger_failed_on_the_paper_says_it_did_not_answer(
+    tmp_path, monkeypatch
+):
+    from bibr.serve.deployments.pipeline import _is_final_result
+
+    result = await fast_page_run(tmp_path, monkeypatch, tagger=_BrokenTagger())
+
+    [unavailable] = [
+        w for w in result["extraction"]["warnings"] if w["code"] == "FRONT_TAGGER_UNAVAILABLE"
+    ]
+    # The model loaded and then failed on the paper: the message does not blame the load.
+    assert unavailable["message"].startswith("the front-matter tagger did not answer")
+    assert result["author"] == []
+    assert not _is_final_result(result)
+
+
 async def test_a_fast_run_whose_tagger_did_not_load_says_so(tmp_path, monkeypatch):
     from bibr.export.json_export import validate_export
     from bibr.serve.deployments.pipeline import _is_final_result
