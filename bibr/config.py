@@ -976,7 +976,10 @@ class OcrOptions(_BibrSettings):
         '"glm-rapid-mlx" (Apple Silicon/Rapid-MLX), "glm-llama" (Windows default; llama.cpp), '
         'or "glm-http" (external GLM server) — plus the cloud vision-LLM providers "gemini", '
         '"openai", and "anthropic", and "text-layer", which runs no OCR model and reads '
-        "born-digital PDFs from their embedded text layer (scanned pages stay unread).",
+        "born-digital PDFs from their embedded text layer (a scanned PDF is refused: it needs "
+        "a real OCR route). A fast run (no LLM call) with none of OCR_BACKEND, OCR_MODEL or "
+        "OCR_PROFILE set, and no --ocr or --ocr-url, uses the text-layer backend, whatever GPU "
+        "the machine has.",
     )
     fallback_to_text_layer: Literal["off", "auto"] = Field(
         "off",

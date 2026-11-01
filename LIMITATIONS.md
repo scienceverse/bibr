@@ -1,6 +1,6 @@
 # Known limitations
 
-Last updated: 2026-10-16
+Last updated: 2026-11-01
 
 bibr is alpha software. It already exports rich paper structure, metadata,
 references, cross-references, tables, figures, equations, and provenance fields,
@@ -182,6 +182,40 @@ Known caveats:
 - Scanned papers with skewed pages, low contrast, dense footnotes, two-column
   reference lists, or noisy page artifacts need manual spot-checking before the
   extracted `bib`, `xref`, and `bib_match` fields are trusted.
+
+## The text-layer route reads born-digital PDFs only
+
+A fast run (no LLM call) that names no OCR route reads each PDF from its
+embedded text layer and starts no OCR model, whatever GPU the machine has. That
+needs no GPU and no OCR server, but it reads less than OCR does. Naming a route
+(`--ocr`, `--ocr-url`, or `OCR_BACKEND`, `OCR_MODEL` or `OCR_PROFILE`) keeps
+that route; `--ocr text-layer` asks for the text layer on any run.
+
+Known caveats:
+
+- Tables are rebuilt from the positions of the glyphs, not recognised from an
+  image. They have no merged cells, and a cell whose text wraps becomes a row of
+  its own, so they come out less accurately than with OCR. Each export says so
+  with `TEXT_LAYER_TABLE_REBUILT`, and the table's region carries
+  `read_as: table_rebuilt`.
+- Display formulas are read as plain text, not LaTeX, so sub- and superscripts
+  and fractions can flatten (`TEXT_LAYER_FORMULA_TEXT`, `read_as: formula_plain`).
+- Private-use glyphs, such as publisher icons and symbols a font draws without
+  mapping them to text, are always dropped and counted
+  (`TEXT_LAYER_PRIVATE_USE_DROPPED`). A letter a font draws that way inside a word
+  is missing from the text, so a name or term can be misspelt; the warning's
+  count of glyphs next to a letter or digit shows where to look.
+- A scan needs a real OCR route. A page with no usable text layer (a scan, or
+  text in a broken font encoding) stays unread (`TEXT_LAYER_PAGE_UNUSABLE`,
+  `read_as: unread`), and the rest of the file is still read. A file with fewer
+  than half of its text regions readable is refused as `scan_needs_ocr`, which
+  is not worth retrying. The routes that read it are `--ocr anthropic` (the page
+  images leave your machine), a GPU OCR server (`--ocr paddle` starts PaddleOCR-VL,
+  `--ocr-url` points at one you run), or the hosted demo.
+- This route has not been validated as the other rows of the table above have, and
+  its accuracy on tables and formulas is not measured on its own.
+- `bibr serve` always reads PDFs through its OCR server (`OCR_BASE_URL`) and does not
+  take this route: a fast `bibr serve` with no OCR server is not ready.
 
 ## `xref` is not yet a fully trusted citation graph
 

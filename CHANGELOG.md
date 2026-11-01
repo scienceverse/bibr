@@ -35,6 +35,35 @@ that is off by default and that fast mode turns on, so a full run, and a
   declares none). The title's function words or letters decide it; a title they
   do not decide leaves it empty, and an input that declares a language keeps it.
 
+### Added — the text-layer OCR route
+
+A fast run with no OCR route chosen (no `--ocr`, `--ocr-url`, `--ocr-model` or
+`--ocr-profile`, and none of `OCR_BACKEND`, `OCR_MODEL` or `OCR_PROFILE` set)
+reads each PDF from its own text layer with the new `text-layer` OCR backend,
+whatever GPU the machine has, so it starts with no OCR server, no GPU and no
+multi-GB download. `bibr chew`, the library, `bibr doctor`, `--dry-run` and the
+local demo choose the route by the same rule, and the run summary says
+`OCR text-layer`. A route you choose is kept: `--ocr paddle`, a configured OCR
+server or a backend written to `.env` still reads scans.
+
+- `--ocr text-layer` (or `OCR_BACKEND=text-layer`) reads born-digital PDFs from
+  their embedded text with no OCR model, on any run. Tables are rebuilt from
+  glyph positions, display formulas are read as plain text, and private-use
+  glyphs are dropped; each says so in a warning (`TEXT_LAYER_TABLE_REBUILT`,
+  `TEXT_LAYER_FORMULA_TEXT`, `TEXT_LAYER_PRIVATE_USE_DROPPED`, which also counts
+  the glyphs next to a letter or digit). A page with no usable text layer gets a
+  `TEXT_LAYER_PAGE_UNUSABLE` warning and its regions `read_as: unread`.
+- A PDF with fewer than half of its text regions readable is refused as
+  `scan_needs_ocr`. The failure is not retryable now, and its message gives the
+  page verdicts and names the routes that read a scan: `--ocr anthropic`, a GPU
+  OCR server, or the hosted demo.
+- `OCR_FALLBACK_TO_TEXT_LAYER=auto` makes a run whose automatic OCR chain cannot
+  start on the machine (no NVIDIA GPU, no llama.cpp, no Apple silicon) read the
+  text layer instead of stopping, and marks the export `OCR_BACKEND_UNAVAILABLE`.
+  It is off by default.
+- `LIMITATIONS.md` lists what the text-layer route reads less well: tables,
+  formulas, private-use glyphs and scans.
+
 ### Added — export schema 12.4 (additive)
 
 The export moves to schema `12.4`, which adds two optional keys; every 12.x

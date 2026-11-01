@@ -333,6 +333,10 @@ paper: tables, formulas and regions without usable embedded text go to OCR,
 and when the service cannot be reached the whole job fails after about two
 minutes with `OCR server is unreachable`.
 
+`bibr serve` does not use the `text-layer` OCR backend, the route a fast
+`bibr chew` takes when no OCR route is chosen: a fast `bibr serve` still needs an
+OCR service to be ready.
+
 `OCR_BASE_URL` is the server **root**: bibr appends `/v1/models` and
 `/v1/chat/completions` itself and probes `/health` at the root, so do not
 include a `/v1` suffix (a trailing `/v1` is stripped with a warning). For a
