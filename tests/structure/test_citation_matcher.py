@@ -261,6 +261,63 @@ class TestDuplicateReferences:
         assert [r.bib_id for r in by_year[(2020, None)]] == [1]
 
 
+class TestTieBreak:
+    """Same first family and year: the author count and order can still settle it."""
+
+    def test_et_al_takes_the_reference_with_three_or_more_authors(self):
+        refs = [
+            _ref(1, "Okafor, C., & Lund, K.", title="Two authors"),
+            _ref(2, "Okafor, C., Lund, K., & Brandt, H.", title="Three authors"),
+        ]
+        sents = [_sent(0, "As Okafor et al. (2020) showed, this holds.")]
+        assert [x.xref_id for x in detect_author_year_xrefs(sents, refs)] == [2]
+
+    def test_et_al_between_two_long_lists_stays_ambiguous(self):
+        refs = [
+            _ref(1, "Okafor, C., Lund, K., & Brandt, H.", title="Three authors"),
+            _ref(2, "Okafor, C., Lund, K., Brandt, H., & Sato, M.", title="Four authors"),
+        ]
+        sents = [_sent(0, "As Okafor et al. (2020) showed, this holds.")]
+        assert detect_author_year_xrefs(sents, refs) == []
+
+    def test_cited_order_follows_listed_order(self):
+        refs = [
+            _ref(1, "Okafor, C., & Lund, K.", title="Okafor first"),
+            _ref(2, "Lund, K., & Okafor, C.", title="Lund first"),
+        ]
+        sents = [_sent(0, "As shown (Lund & Okafor, 2020) here.")]
+        assert [x.xref_id for x in detect_author_year_xrefs(sents, refs)] == [2]
+
+    def test_equal_fit_stays_ambiguous(self):
+        refs = [
+            _ref(1, "Okafor, C., & Lund, K.", title="First paper"),
+            _ref(2, "Okafor, C., & Lund, K.", title="Second paper"),
+        ]
+        sents = [_sent(0, "As shown (Okafor & Lund, 2020) here.")]
+        assert detect_author_year_xrefs(sents, refs) == []
+
+    def test_one_cited_family_needs_a_single_author_reference(self):
+        from bibr.structure import citation_matcher as cm
+
+        refs = [
+            _ref(1, "Okafor, C., & Lund, K.", title="Two authors"),
+            _ref(2, "Okafor, C.", title="One author"),
+        ]
+        _r, by_year, ip = cm._build_ref_index(refs)
+        cand = next(c for c in cm._find_candidates("As Okafor (2020) showed,", 1) if c.year == 2020)
+        ref, tied = cm._match(cand, by_year, ip)
+        assert ref is not None and ref.bib_id == 2
+        assert tied == []
+
+    def test_one_cited_family_with_no_single_author_reference_stays_ambiguous(self):
+        refs = [
+            _ref(1, "Okafor, C., & Lund, K.", title="Pair one"),
+            _ref(2, "Okafor, D., & Brandt, H.", title="Pair two"),
+        ]
+        sents = [_sent(0, "As Okafor (2020) showed, this holds.")]
+        assert detect_author_year_xrefs(sents, refs) == []
+
+
 class TestYearSuffix:
     def test_suffix_disambiguation(self):
         refs = [

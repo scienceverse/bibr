@@ -613,6 +613,43 @@ def _score_ref(ref: _RefIdx, cand: _Candidate) -> tuple[int, int, int]:
     return (matched, et_al_bonus, -extra)
 
 
+def _tie_key(ref: _RefIdx, cand: _Candidate) -> tuple[bool, int, int]:
+    """Rank a reference that ties with others on the same family and year.
+
+    Returns ``(count_ok, order_ok, any_author)``. ``count_ok``: the number of
+    listed authors fits how the citation names them: "et al." needs three or
+    more, one cited family needs a single-author reference, otherwise the
+    counts are equal. ``order_ok``: cited families that match the listed author
+    at the same position. ``any_author``: cited families that match any listed
+    author.
+    """
+    cited = [_family_keys_for(family) for family in cand.families]
+    listed = ref.family_key_sets
+    if cand.has_et_al:
+        count_ok = len(listed) >= 3
+    elif len(cited) == 1:
+        count_ok = len(listed) == 1
+    else:
+        count_ok = len(listed) == len(cited)
+    order_ok = sum(1 for keys, author in zip(cited, listed, strict=False) if keys & author)
+    any_author = sum(1 for keys in cited if any(keys & author for author in listed))
+    return count_ok, order_ok, any_author
+
+
+def _break_tie(tied: list[_RefIdx], cand: _Candidate) -> _RefIdx | None:
+    """The one reference of ``tied`` that fits the citation best, if any.
+
+    It must fit the author count and strictly out-rank every other reference
+    on ``_tie_key``; two references that fit equally stay tied (a bare "et al."
+    does not tell a three-author reference from a six-author one).
+    """
+    ranked = sorted(((_tie_key(ref, cand), ref) for ref in tied), key=lambda p: p[0], reverse=True)
+    best_key, best = ranked[0]
+    if best_key[0] and best_key > ranked[1][0]:
+        return best
+    return None
+
+
 def _match(
     cand: _Candidate,
     by_year: dict[tuple[int | None, str | None], list[_RefIdx]],
@@ -649,14 +686,21 @@ def _match(
         return None, []
 
     # A bare first-family/year citation cannot distinguish references that
-    # share that first family and year. Do not let author-count tie-breakers
-    # manufacture certainty; a coauthor or year suffix must disambiguate.
+    # share that first family and year by the author list alone: a coauthor or
+    # year suffix must disambiguate. The one thing the count of authors does
+    # settle is a single-author reference against multi-author ones, because a
+    # work by several authors is not cited by its first author alone; an
+    # "et al." citation separates three or more authors from one or two, never
+    # three from six (``_break_tie``).
     if len(cand.families) == 1 and cand.year_suffix is None:
         candidate_keys = _family_keys_for(cand.families[0])
         same_first = [
             ref for ref in pool if ref.family_key_sets and ref.family_key_sets[0] & candidate_keys
         ]
         if len(same_first) > 1:
+            winner = _break_tie(same_first, cand)
+            if winner is not None:
+                return winner, []
             return None, sorted(ref.bib_id for ref in same_first)
 
     scored = [(r, _score_ref(r, cand)) for r in pool]
@@ -667,8 +711,11 @@ def _match(
     scored.sort(key=lambda x: x[1], reverse=True)
     if len(scored) > 1 and scored[1][1] == scored[0][1]:
         top_score = scored[0][1]
-        tied = [r.bib_id for r, s in scored if s == top_score]
-        return None, tied
+        top = [r for r, s in scored if s == top_score]
+        winner = _break_tie(top, cand)
+        if winner is not None:
+            return winner, []
+        return None, [r.bib_id for r in top]
     return scored[0][0], []
 
 

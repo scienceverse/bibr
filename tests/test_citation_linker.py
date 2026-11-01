@@ -228,7 +228,7 @@ class TestVancouverFamilyExtraction:
     def test_same_surname_same_year_abstains_without_initial_or_coauthor_evidence(self):
         refs = [
             _ref(1, author="Smith AB, Jones CD", year=2020),
-            _ref(2, author="Smith CD", year=2020),
+            _ref(2, author="Smith CD, Brown EF", year=2020),
         ]
 
         xrefs, ambiguous = match_with_ambiguous(
@@ -237,6 +237,34 @@ class TestVancouverFamilyExtraction:
 
         assert xrefs == []
         assert len(ambiguous) == 1
+        assert set(ambiguous[0].candidate_bib_ids) == {1, 2}
+
+    def test_bare_surname_takes_the_single_author_reference(self):
+        # A work by two authors is cited "Smith and Jones", so a bare "Smith"
+        # can only be the one-author work of the same year.
+        refs = [
+            _ref(1, author="Smith AB, Jones CD", year=2020),
+            _ref(2, author="Smith CD", year=2020),
+        ]
+
+        xrefs, ambiguous = match_with_ambiguous(
+            [_sent(1, "Smith (2020) reported this result.")], refs
+        )
+
+        assert [(xref.text_id, xref.xref_id) for xref in xrefs] == [(1, 2)]
+        assert ambiguous == []
+
+    def test_bare_surname_with_two_single_author_references_abstains(self):
+        refs = [
+            _ref(1, author="Smith AB", year=2020),
+            _ref(2, author="Smith CD", year=2020),
+        ]
+
+        xrefs, ambiguous = match_with_ambiguous(
+            [_sent(1, "Smith (2020) reported this result.")], refs
+        )
+
+        assert xrefs == []
         assert set(ambiguous[0].candidate_bib_ids) == {1, 2}
 
     def test_same_surname_same_year_et_al_abstains_without_coauthor_evidence(self):
