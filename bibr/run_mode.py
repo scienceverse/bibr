@@ -25,14 +25,21 @@ logger = logging.getLogger(__name__)
 # setting is swapped here.
 _LLM_PARSE_STRATEGIES = frozenset({"llm", "llm-chunked", "ref-llm"})
 
+# The LLM settings whose being set says the user chose an LLM.
+_LLM_CHOICES = frozenset({"provider", "model", "base_url"})
+
 
 def llm_configured(settings: GlobalSettings, backend: str | None = None) -> bool:
     """Whether an LLM is set up to be called, judged from the settings alone.
 
-    A managed local backend always counts. For the cloud backend the provider
-    needs what its adapter asks for: an API key (``LLM_API_KEY`` or the
-    provider's own), or for ``openai`` a ``LLM_BASE_URL``. Ollama and adapters
-    registered by other packages count as configured.
+    A managed local backend always counts. For the cloud backend, so does naming
+    a provider, a model or an endpoint (``LLM_PROVIDER``, ``LLM_MODEL``,
+    ``LLM_BASE_URL``, from the environment, a ``.env`` file or an assignment):
+    whoever did meant to call an LLM, and a missing key or a mistyped key
+    variable then stops the run at the credential check, instead of quietly
+    turning it into a fast one. Naming none of them leaves the default provider
+    (Google), which is configured once its key is set (``LLM_API_KEY`` or
+    ``GOOGLE_API_KEY``).
 
     This does not build a client. The credential check (``preflight_credentials``)
     also raises for a key that would cross the internet in clear text, and
@@ -45,16 +52,10 @@ def llm_configured(settings: GlobalSettings, backend: str | None = None) -> bool
     if (backend or settings.llm.backend) != "cloud":
         return True
     llm = settings.llm
-    provider = llm.provider.lower()
-    if provider == "google":
-        return bool(llm.api_key or settings.GOOGLE_API_KEY)
-    if provider == "openai":
-        return bool(llm.api_key or llm.base_url)
-    if provider == "anthropic":
-        return bool(llm.api_key or settings.ANTHROPIC_API_KEY)
-    if provider == "groq":
-        return bool(llm.api_key or settings.GROQ_API_KEY)
-    return True
+    # Not the whole set: ``rate_limit_rpm`` and others are filled in on their own.
+    if llm.model_fields_set & _LLM_CHOICES:
+        return True
+    return bool(llm.api_key or settings.GOOGLE_API_KEY)
 
 
 def resolve_mode(

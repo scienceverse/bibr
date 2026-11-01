@@ -19,8 +19,11 @@ _KEY_VARS = (
     "ANTHROPIC_API_KEY",
     "CLAUDE_API_KEY",
     "GROQ_API_KEY",
+    "OPENAI_API_KEY",
     "LLM_API_KEY",
     "LLM_BASE_URL",
+    "LLM_PROVIDER",
+    "LLM_MODEL",
     "PIPELINE_MODE",
 )
 
@@ -28,7 +31,8 @@ _KEY_VARS = (
 def _settings(
     monkeypatch,
     *,
-    provider="google",
+    provider=None,
+    model=None,
     llm_key=None,
     base_url=None,
     google=None,
@@ -37,13 +41,18 @@ def _settings(
     backend="cloud",
     mode="auto",
 ) -> GlobalSettings:
-    """Settings with exactly the credentials named, whatever the test environment holds."""
+    """Settings with exactly the credentials and choices named, whatever the test environment holds.
+
+    ``provider``, ``model`` and ``base_url`` are assigned only when given, as a user's
+    ``LLM_PROVIDER``, ``LLM_MODEL`` and ``LLM_BASE_URL`` would set them.
+    """
     for var in _KEY_VARS:
         monkeypatch.delenv(var, raising=False)
     s = GlobalSettings()
-    s.llm.provider = provider
+    for name, value in (("provider", provider), ("model", model), ("base_url", base_url)):
+        if value is not None:
+            setattr(s.llm, name, value)
     s.llm.api_key = llm_key
-    s.llm.base_url = base_url
     s.llm.backend = backend
     s.GOOGLE_API_KEY = google
     s.ANTHROPIC_API_KEY = anthropic
@@ -52,32 +61,98 @@ def _settings(
     return s
 
 
-# provider, credentials, is an LLM configured
+# what the settings name and hold, whether an LLM is configured
 CONFIGURED = [
-    ("google", {}, False),
-    ("google", {"llm_key": "k"}, True),
-    ("google", {"google": "k"}, True),
-    ("google", {"anthropic": "k", "groq": "k"}, False),  # another provider's key
-    ("openai", {}, False),
-    ("openai", {"llm_key": "k"}, True),
-    ("openai", {"base_url": "http://localhost:8000/v1"}, True),  # a keyless local server
-    ("openai", {"google": "k"}, False),
-    ("anthropic", {}, False),
-    ("anthropic", {"anthropic": "k"}, True),
-    ("anthropic", {"llm_key": "k"}, True),
-    ("anthropic", {"google": "k"}, False),
-    ("groq", {}, False),
-    ("groq", {"groq": "k"}, True),
-    ("groq", {"llm_key": "k"}, True),
-    ("ollama", {}, True),  # no key to look for
-    ("acme", {}, True),  # an adapter registered by another package
+    ({}, False),  # a fresh install
+    ({"llm_key": "k"}, True),
+    ({"google": "k"}, True),
+    ({"anthropic": "k", "groq": "k"}, False),  # another provider's key, and Google is the default
+    # Naming a provider, a model or an endpoint is choosing an LLM, key or no key.
+    ({"provider": "openai"}, True),
+    ({"provider": "anthropic"}, True),
+    ({"provider": "groq"}, True),
+    ({"provider": "ollama"}, True),  # no key to look for
+    ({"provider": "acme"}, True),  # an adapter registered by another package
+    ({"provider": "openai", "base_url": "http://localhost:8000/v1"}, True),  # a keyless server
+    ({"provider": "anthropic", "model": "claude-haiku-5-5"}, True),
+    ({"model": "gemini-2.5-flash"}, True),
+    ({"base_url": "http://localhost:8000/v1", "model": "m"}, True),
+    ({"provider": "openai", "google": "k"}, True),  # a key for a provider that was not chosen
 ]
 
 
-@pytest.mark.parametrize(("provider", "creds", "expected"), CONFIGURED)
-def test_llm_configured_follows_what_the_provider_needs(monkeypatch, provider, creds, expected):
-    s = _settings(monkeypatch, provider=provider, **creds)
+@pytest.mark.parametrize(("choices", "expected"), CONFIGURED)
+def test_llm_configured_follows_what_the_settings_name_and_hold(monkeypatch, choices, expected):
+    assert llm_configured(_settings(monkeypatch, **choices)) is expected
+
+
+def test_the_default_provider_is_the_one_whose_key_a_fresh_install_lacks():
+    assert GlobalSettings().llm.provider == "google"
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({}, False),
+        ({"LLM_PROVIDER": "anthropic"}, True),
+        ({"LLM_MODEL": "claude-haiku-5-5"}, True),
+        ({"LLM_BASE_URL": "http://localhost:8000/v1"}, True),
+        ({"LLM_PROVIDER": "groq", "LLM_MODEL": "m"}, True),
+        # Nothing here names an LLM or holds the default provider's key.
+        ({"OPENAI_API_KEY": "sk-x", "ANTHROPIC_API_KEY": "k"}, False),
+    ],
+)
+def test_a_provider_model_or_endpoint_in_the_environment_is_a_configured_llm(
+    monkeypatch, env, expected
+):
+    """The same through the environment, where a user sets them."""
+    for var in _KEY_VARS:
+        monkeypatch.delenv(var, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    s = GlobalSettings()
     assert llm_configured(s) is expected
+    assert resolve_mode(s) == ("full" if expected else "fast")
+
+
+def test_a_setting_filled_in_on_its_own_does_not_count_as_a_choice(monkeypatch):
+    """``rate_limit_rpm`` and the like are set for the user; only the three choices count."""
+    s = _settings(monkeypatch)
+    s.llm.rate_limit_rpm = 10
+    s.llm.reasoning_effort = "low"
+    assert {"rate_limit_rpm", "reasoning_effort"} <= s.llm.model_fields_set
+    assert llm_configured(s) is False
+
+
+# The configurations that are a hard credential error on a full run. A user who set
+# them up meant to call an LLM, so they must run full and reach that error.
+BROKEN = [
+    ({"provider": "anthropic", "model": "claude-haiku-5-5"}, "Anthropic API key required"),
+    ({"provider": "groq"}, "Groq API key required"),
+    ({"provider": "openai"}, "OpenAI API key required"),
+    ({"base_url": "http://localhost:8000/v1", "model": "m"}, "Google API key required"),
+]
+
+
+@pytest.mark.parametrize(("choices", "message"), BROKEN)
+def test_a_broken_llm_configuration_runs_full_and_reaches_the_credential_error(
+    monkeypatch, choices, message
+):
+    s = _settings(monkeypatch, **choices)
+    assert resolve_mode(s) == "full"
+    with pytest.raises(ValueError, match=message):
+        preflight_credentials(s)
+
+
+def test_a_key_in_a_variable_the_adapter_does_not_read_is_still_a_broken_configuration(
+    monkeypatch,
+):
+    """The openai adapter reads ``LLM_API_KEY`` only, so OPENAI_API_KEY alone leaves it keyless."""
+    s = _settings(monkeypatch, provider="openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-x")
+    assert resolve_mode(s) == "full"
+    with pytest.raises(ValueError, match="OpenAI API key required"):
+        preflight_credentials(s)
 
 
 @pytest.mark.parametrize(
@@ -94,10 +169,9 @@ def test_the_run_backend_overrides_the_setting(monkeypatch):
     assert llm_configured(s, backend="local") is True
 
 
-@pytest.mark.parametrize(("provider", "creds", "expected"), CONFIGURED)
-def test_auto_is_fast_without_an_llm_and_full_with_one(monkeypatch, provider, creds, expected):
-    s = _settings(monkeypatch, provider=provider, **creds)
-    assert resolve_mode(s) == ("full" if expected else "fast")
+@pytest.mark.parametrize(("choices", "expected"), CONFIGURED)
+def test_auto_is_fast_without_an_llm_and_full_with_one(monkeypatch, choices, expected):
+    assert resolve_mode(_settings(monkeypatch, **choices)) == ("full" if expected else "fast")
 
 
 def test_auto_with_a_local_backend_is_full(monkeypatch):
@@ -131,30 +205,33 @@ def test_an_unknown_mode_is_an_input_error(monkeypatch):
         resolve_mode(s)
 
 
-PLAINTEXT = {"llm_key": "sk-test-key", "base_url": "http://llm.example.org/v1"}
+PLAINTEXT = {
+    "provider": "openai",
+    "llm_key": "sk-test-key",
+    "base_url": "http://llm.example.org/v1",
+}
 
 
 def test_a_refused_plaintext_key_stays_a_full_run_that_the_preflight_stops(monkeypatch):
     """The refusal is a ValueError the credential check raises. Reading it as "no LLM" would
     turn a broken configuration into a fast run that quietly sends nothing."""
-    s = _settings(monkeypatch, provider="openai", **PLAINTEXT)
+    s = _settings(monkeypatch, **PLAINTEXT)
     with pytest.raises(ValueError, match="LLM API key over plain HTTP"):
         preflight_credentials(s)
     assert llm_configured(s) is True
     assert resolve_mode(s) == "full"
 
 
-def test_a_missing_key_is_the_only_credential_error_that_means_fast(monkeypatch):
-    s = _settings(monkeypatch, provider="openai")
-    with pytest.raises(ValueError, match="OpenAI API key required"):
+def test_only_a_missing_default_key_is_a_credential_error_that_means_fast(monkeypatch):
+    """A fresh install has chosen nothing, so its missing Google key is the absence of an LLM."""
+    s = _settings(monkeypatch)
+    with pytest.raises(ValueError, match="Google API key required"):
         preflight_credentials(s)
     assert resolve_mode(s) == "fast"
 
 
-@pytest.mark.parametrize(
-    ("provider", "creds", "expected"), CONFIGURED + [("openai", PLAINTEXT, True)]
-)
-def test_resolving_a_mode_builds_no_client(monkeypatch, provider, creds, expected):
+@pytest.mark.parametrize(("choices", "expected"), [*CONFIGURED, (PLAINTEXT, True)])
+def test_resolving_a_mode_builds_no_client(monkeypatch, choices, expected):
     """Nothing in the mode decision reaches a provider, so no credential error is read as fast."""
 
     def refuse(*args, **kwargs):
@@ -162,7 +239,7 @@ def test_resolving_a_mode_builds_no_client(monkeypatch, provider, creds, expecte
 
     monkeypatch.setattr("bibr.clients.llm._create_client", refuse)
     monkeypatch.setattr("bibr.clients.providers.get", refuse)
-    s = _settings(monkeypatch, provider=provider, **creds)
+    s = _settings(monkeypatch, **choices)
     assert llm_configured(s) is expected
     assert resolve_mode(s) == ("full" if expected else "fast")
 
