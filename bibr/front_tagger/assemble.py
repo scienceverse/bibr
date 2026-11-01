@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field, replace
 
 from bibr.export.normalize import license_ids
@@ -86,6 +86,10 @@ _PUBLISHER_NAMES = frozenset(
 )
 _MIN_ABSTRACT_WORDS = 40
 _ROMAN_KEY_RE = re.compile(r"[IVX]{1,4}")
+_LETTER_KEY_RE = re.compile(r"[a-h]")
+# A letter key glued to the next word of an affiliation line ("aComputational").
+_KEYED_WORD_RE = re.compile(r"[a-h][A-Z][a-z]{3,}")
+_MAX_GLUED_LETTERS = 3
 # A lower-case run followed by a capitalised one: two of them in one word
 # ("AnxietyinCollegeStudents") are words a text layer printed without spaces.
 # Short pieces are acronyms and brand names ("CoViD", "ConvNeXt").
@@ -456,15 +460,45 @@ def _glued_key(name: str, letters: set[str], romans: set[str]) -> str | None:
     return None
 
 
-def _unglue_letter_keys(authors: list[_Author], by_mark: dict[str, str]) -> None:
+def _printed_letter_keys(inp: TaggerInput, tags) -> set[str]:
+    """Letters "a"-"h" the print keys an affiliation with, wherever the model left one.
+
+    Besides the letters it tagged as marks: a lower-case letter alone at the
+    start of a line that goes on with an affiliation ("a Department of X"
+    with the "a" untagged), and a letter glued to the line's first word
+    ("aComputational Science").
+    """
+    letters: set[str] = set()
+    words = inp.words
+    for i, word in enumerate(words):
+        starts_line = i == 0 or words[i - 1].region != word.region
+        if _LETTER_KEY_RE.fullmatch(word.text):
+            if _field(tags[i]) == "AFF_MARK" or (
+                starts_line and i + 1 < len(words) and tags[i + 1] == "B-AFFILIATION"
+            ):
+                letters.add(word.text)
+        elif _KEYED_WORD_RE.fullmatch(word.text) and (starts_line or tags[i - 1] != "O"):
+            letters.add(word.text[0])
+    return letters
+
+
+def _unglue_letter_keys(
+    authors: list[_Author], by_mark: dict[str, str], printed_letters: Collection[str] = ()
+) -> None:
     """Split a superscript letter or numeral key OCR glued to a family name.
 
     On a paper whose affiliations are keyed "a", "b", ... (or "I", "II", ...),
     an author with no mark of their own whose family name ends in one of
     those keys printed it as a superscript: "Vegaa" is "Vega" keyed "a",
-    "LIMAII" is "LIMA" keyed "II".
+    "LIMAII" is "LIMA" keyed "II". A list of letter keys ("a,b") glues on as a
+    run, taken from the end while the letters rise and the name keeps four
+    letters or more, at most three: "Riosab" is "Rios" keyed "a" and "b", and
+    "Costaa" only loses its last "a".
+
+    ``printed_letters`` are letter keys the print shows that no affiliation
+    was tagged behind (see :func:`_printed_letter_keys`).
     """
-    letters = {key for key in by_mark if len(key) == 1 and key.islower()}
+    letters = {key for key in by_mark if len(key) == 1 and key.islower()} | set(printed_letters)
     romans = {key for key in by_mark if _ROMAN_KEY_RE.fullmatch(key)}
     if not letters and not romans:
         return
@@ -473,9 +507,21 @@ def _unglue_letter_keys(authors: list[_Author], by_mark: dict[str, str]) -> None
             continue
         last = author.family[-1]
         key = _glued_key(last.text, letters, romans)
-        if key is not None:
-            author.family[-1] = replace(last, text=last.text[: -len(key)])
-            author.marks = [key]
+        if key is None:
+            continue
+        keys, stem = [key], last.text[: -len(key)]
+        while (
+            len(key) == 1
+            and len(keys) < _MAX_GLUED_LETTERS
+            and len(stem) >= 4
+            and stem[-1] in letters
+            and stem[-1] < keys[0]
+            and stem[-2].isalpha()
+        ):
+            keys.insert(0, stem[-1])
+            stem = stem[:-1]
+        author.family[-1] = replace(last, text=stem)
+        author.marks = keys
 
 
 def _given_first(names: list[Span]) -> bool:
@@ -614,7 +660,7 @@ def assemble(
                 author.orcid = "-".join(m.groups()).upper()
 
     affiliation_by_mark, unmarked_affiliations = _affiliations(spans, inp, tags)
-    _unglue_letter_keys(authors, affiliation_by_mark)
+    _unglue_letter_keys(authors, affiliation_by_mark, _printed_letter_keys(inp, tags))
     _link_affiliations(authors, affiliation_by_mark, unmarked_affiliations, problems)
     _assign_loose_emails(authors, spans)
     _flag_corresponding(authors, inp, tags)

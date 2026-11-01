@@ -353,6 +353,82 @@ def test_letter_keys_glued_to_family_names():
     assert rows == [("Vega", "Univ A"), ("Mallenb", "Univ C")]
 
 
+def test_a_run_of_letter_keys_glued_to_a_family_name_is_split_off():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Juan Riosab, Ana Costaa, Bo Wangd"),
+        ("text", "a Univ A"),
+        ("text", "b Univ B"),
+        ("text", "c Univ C"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Juan"),
+        ("FAMILY", "Riosab"),
+        ("GIVEN", "Ana"),
+        ("FAMILY", "Costaa"),
+        ("GIVEN", "Bo"),
+        ("FAMILY", "Wangd"),
+        ("AFF_MARK", "a"),
+        ("AFFILIATION", "Univ A"),
+        ("AFF_MARK", "b"),
+        ("AFFILIATION", "Univ B"),
+        ("AFF_MARK", "c"),
+        ("AFFILIATION", "Univ C"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags))
+    rows = [(a.family, a.affiliation) for a in got.byline.authors]
+    # Both keys of "ab" go and link; a doubled "aa" is the name's own "a" and
+    # one key; "d" keys nothing printed, so it stays on the name.
+    assert rows == [("Rios", "Univ A; Univ B"), ("Costa", "Univ A"), ("Wangd", "")]
+
+
+def test_letter_keys_the_tagger_did_not_mark_still_unglue_names():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Juan Vegaa, Ana Mallenb"),
+        ("text", "a Univ A"),
+        ("text", "b Univ B"),
+    )
+    # The "a" opening the first affiliation line is in no field.
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Juan"),
+        ("FAMILY", "Vegaa"),
+        ("GIVEN", "Ana"),
+        ("FAMILY", "Mallenb"),
+        ("AFFILIATION", "Univ A"),
+        ("AFF_MARK", "b"),
+        ("AFFILIATION", "Univ B"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags))
+    assert [a.family for a in got.byline.authors] == ["Vega", "Mallen"]
+
+
+def test_a_letter_key_glued_to_an_affiliation_line_unglues_names():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Juan Vegaa, Ana Mallenb"),
+        ("text", "aComputational Science, Univ A"),
+        ("text", "bPhysics, Univ B"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Juan"),
+        ("FAMILY", "Vegaa"),
+        ("GIVEN", "Ana"),
+        ("FAMILY", "Mallenb"),
+        ("AFFILIATION", "aComputational Science, Univ A"),
+        ("AFFILIATION", "bPhysics, Univ B"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags))
+    # Each line opens with a key glued to its first word, and no mark was tagged.
+    assert [a.family for a in got.byline.authors] == ["Vega", "Mallen"]
+
+
 def test_digit_keyed_names_keep_their_last_letter():
     inp = tagger_input(
         ("doc_title", "Title words"),
