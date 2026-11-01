@@ -2456,6 +2456,25 @@ class TestRepairGuards:
             ("d", "", "=", "0.45"),
         ]
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Then \U0001d446\U0001d446\U0001d446\U0001d446 = 1.65 was found.",
+            "Then \U0001d43c\U0001d43c\U0001d43c\U0001d43c\U0001d43c\U0001d43c = 0.83.",
+            "Then \U0001d440\U0001d440 = 304.15 here.",
+            "Then \U0001d435\U0001d435\U0001d435\U0001d435\U0001d7ce\U0001d7cf = 1.46.",
+        ],
+    )
+    def test_a_run_of_one_repeated_math_letter_is_left_as_printed(self, text):
+        assert repair_statistic_glitches(text) == text
+        assert _extract_repaired(text) == []
+
+    def test_a_math_letter_that_names_a_statistic_is_folded(self):
+        assert repair_statistic_glitches("\U0001d440 = 3.2, \U0001d446\U0001d437 = 1.1") == (
+            "M = 3.2, SD = 1.1"
+        )
+        assert repair_statistic_glitches("\U0001d712\U0001d7d0 = 3.84") == "\u03c72 = 3.84"
+
 
 class TestRepairedRows:
     """A row says whether it was read from repaired text."""

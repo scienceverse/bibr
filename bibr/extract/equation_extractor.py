@@ -696,9 +696,9 @@ def _single_char_line_breaks(text: str) -> str:
 # puts the usual ones right, one character for one character, so a position
 # in the repaired text is a position in the printed one.
 
-# The mathematical alphanumeric symbols: every one of them folds to a single
-# character under NFKC.
-_MATH_ALNUM_RE = re.compile("[\U0001d400-\U0001d7ff]")
+# Runs of the mathematical alphanumeric symbols: every one of them folds to a
+# single character under NFKC.
+_MATH_ALNUM_RE = re.compile("[\U0001d400-\U0001d7ff]+")
 _BOX = "\u25a1"  # □
 # The Cyrillic letter that looks like p, alone before a comparator
 _CYRILLIC_P_RE = re.compile(r"(?<!\w)\u0440(?=\s*[<>=≤≥])")
@@ -764,13 +764,24 @@ def _stand_in_for(glyph: str, pattern: re.Pattern[str]) -> Callable[[str], str]:
 
 
 def _fold_math_alnum(text: str) -> str:
-    """*text* with each mathematical alphanumeric folded to its plain character."""
+    """*text* with each run of mathematical alphanumerics folded to plain characters.
+
+    A run that folds to one letter repeated ("𝑆𝑆𝑆𝑆" is "SSSS") is left as
+    printed: a text layer that prints each glyph over itself makes it, and
+    no statistic is named so.
+    """
 
     def fold(match: re.Match[str]) -> str:
-        folded = unicodedata.normalize("NFKC", match.group())
         # One character for one: NFKC does not lengthen any of them, but a
         # character it would lengthen stays as printed.
-        return folded if len(folded) == 1 else match.group()
+        folded = "".join(
+            plain if len(plain := unicodedata.normalize("NFKC", char)) == 1 else char
+            for char in match.group()
+        )
+        letters = [char for char in folded if char.isalpha()]
+        if len(letters) > 1 and len(set(letters)) == 1:
+            return match.group()
+        return folded
 
     return _MATH_ALNUM_RE.sub(fold, text)
 
