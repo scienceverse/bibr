@@ -201,17 +201,28 @@ def _warned(*codes):
     return [ProcessingWarning(code, "m") for code in codes]
 
 
-def test_fast_run_did_not_attempt_the_structured_funding():
+def test_fast_run_has_no_structured_funding_to_attempt_without_a_statement():
+    # A full run reports this paper's funding as absent, and so does a fast one: with
+    # no statement there was nothing for the skipped call to parse.
     skipped = _warned(WarningCode.LLM_SKIPPED)
     states = _states(warnings=skipped)
+    for field in ("title", "author", "abstract", "bib", "funding_statement", "funding", "doi"):
+        assert states[field] == ("absent", None, []), field
+    assert states == _states()
+
+
+def test_fast_run_did_not_attempt_the_structured_funding():
+    skipped = _warned(WarningCode.LLM_SKIPPED)
+    present = {"funding_statement"}
+    states = _states(present, sources={"funding_statement": "lexical_anchor"}, warnings=skipped)
     assert states["funding"] == ("not_attempted", None, ["LLM_SKIPPED"])
     # Nothing else depends on the LLM that a fast run skipped.
-    for field in ("title", "author", "abstract", "bib", "funding_statement", "doi"):
+    for field in ("title", "author", "abstract", "bib", "doi"):
         assert states[field] == ("absent", None, []), field
 
     records = build_field_states(
-        present=dict.fromkeys(TRACKED_FIELDS, False),
-        sources={},
+        present={**dict.fromkeys(TRACKED_FIELDS, False), "funding_statement": True},
+        sources={"funding_statement": "lexical_anchor"},
         scope=FieldScope(),
         issues=(),
         warnings=skipped,
@@ -242,7 +253,7 @@ def test_unavailable_tagger_fails_the_front_matter_it_would_have_read():
         assert states[field] == ("failed", None, ["FRONT_TAGGER_UNAVAILABLE"]), field
     # The paper type is the classifier's, and the rest is not front matter.
     assert states["paper_type"][0] == "absent"
-    assert states["funding"] == ("not_attempted", None, ["LLM_SKIPPED"])
+    assert states["funding"] == ("absent", None, [])
     assert states["doi"][0] == states["bib"][0] == "extracted"
 
 

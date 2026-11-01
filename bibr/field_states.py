@@ -181,9 +181,13 @@ def build_field_states(
             if code in _NOT_ATTEMPTED_CODES:
                 not_attempted[field] = _NOT_ATTEMPTED_RULES.get(code)
     # Structured funding is parsed from the funding statement; without one
-    # there was nothing for the failed call to parse.
+    # there was nothing for a failed call to parse, or for a skipped one to.
     if not present.get("funding_statement"):
         failed["funding"].clear()
+        if "funding" in not_attempted:
+            del not_attempted["funding"]
+            skipped = {code for code, fields in _NOT_ATTEMPTED_CODES.items() if "funding" in fields}
+            qualified["funding"] = [c for c in qualified["funding"] if c not in skipped]
 
     sources = {**sources, **({"bib": scope.references_source} if scope.references_source else {})}
     rules = rules or {}
