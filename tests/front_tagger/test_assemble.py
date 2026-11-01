@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from bibr.front_tagger.assemble import assemble
 
 from .helpers import label, tagger_input
@@ -367,9 +369,11 @@ def test_an_institution_run_after_a_family_name_is_read_when_no_author_has_one()
         ("FAMILY", "Lee"),
         ("EMAIL", "ann@umich.example"),
     )
-    got = assemble(inp, tags, [1.0] * len(tags))
+    got = assemble(inp, tags, [1.0] * len(tags), rules=True)
     assert got.untagged_affiliations == ["University of Michigan, USA"]
     assert got.unattached_affiliations == []
+    # Without rules the text stays unread.
+    assert assemble(inp, tags, [1.0] * len(tags)).untagged_affiliations == []
     assert [r.text for r in got.affiliation_rows()] == ["University of Michigan, USA"]
     assert got.affiliation_rows(untagged=False) == []
 
@@ -393,15 +397,16 @@ def test_an_untagged_institution_line_is_read_before_the_abstract_only():
         ("FAMILY", "Kim"),
         ("ABSTRACT", "A short abstract."),
     )
-    got = assemble(inp, tags, [1.0] * len(tags))
+    got = assemble(inp, tags, [1.0] * len(tags), rules=True)
     # The notes open as notes, and the line past the abstract is not front matter.
     assert got.untagged_affiliations == ["Department of Physics, Univ of Oslo"]
+    assert assemble(inp, tags, [1.0] * len(tags)).untagged_affiliations == []
 
 
 def test_untagged_institutions_are_not_read_where_an_author_has_an_affiliation():
     inp = _page()
     tags = _tags(inp)
-    got = assemble(inp, tags, _ones(inp))
+    got = assemble(inp, tags, _ones(inp), rules=True)
     assert got.byline.authors[0].affiliation
     inp = tagger_input(
         ("doc_title", "Title words"),
@@ -418,7 +423,7 @@ def test_untagged_institutions_are_not_read_where_an_author_has_an_affiliation()
         ("AFF_MARK", "1"),
         ("AFFILIATION", "Univ A"),
     )
-    got = assemble(inp, tags, [1.0] * len(tags))
+    got = assemble(inp, tags, [1.0] * len(tags), rules=True)
     assert [a.affiliation for a in got.byline.authors] == ["Univ A"]
     assert got.untagged_affiliations == []
 
@@ -552,7 +557,15 @@ def test_letter_keys_glued_to_family_names():
     assert rows == [("Vega", "Univ A"), ("Mallenb", "Univ C")]
 
 
-def test_a_run_of_letter_keys_glued_to_a_family_name_is_split_off():
+@pytest.mark.parametrize(
+    ("rules", "expected"),
+    [
+        (True, [("Rios", "Univ A; Univ B"), ("Costa", "Univ A"), ("Wangd", "")]),
+        # Without rules only the last letter of a run goes.
+        (False, [("Riosa", "Univ B"), ("Costa", "Univ A"), ("Wangd", "")]),
+    ],
+)
+def test_a_run_of_letter_keys_glued_to_a_family_name_is_split_off(rules, expected):
     inp = tagger_input(
         ("doc_title", "Title words"),
         ("text", "Juan Riosab, Ana Costaa, Bo Wangd"),
@@ -576,14 +589,18 @@ def test_a_run_of_letter_keys_glued_to_a_family_name_is_split_off():
         ("AFF_MARK", "c"),
         ("AFFILIATION", "Univ C"),
     )
-    got = assemble(inp, tags, [1.0] * len(tags))
+    got = assemble(inp, tags, [1.0] * len(tags), rules=rules)
     rows = [(a.family, a.affiliation) for a in got.byline.authors]
     # Both keys of "ab" go and link; a doubled "aa" is the name's own "a" and
     # one key; "d" keys nothing printed, so it stays on the name.
-    assert rows == [("Rios", "Univ A; Univ B"), ("Costa", "Univ A"), ("Wangd", "")]
+    assert rows == expected
 
 
-def test_letter_keys_the_tagger_did_not_mark_still_unglue_names():
+@pytest.mark.parametrize(
+    ("rules", "families"),
+    [(True, ["Vega", "Mallen"]), (False, ["Vegaa", "Mallen"])],
+)
+def test_letter_keys_the_tagger_did_not_mark_still_unglue_names(rules, families):
     inp = tagger_input(
         ("doc_title", "Title words"),
         ("text", "Juan Vegaa, Ana Mallenb"),
@@ -602,11 +619,15 @@ def test_letter_keys_the_tagger_did_not_mark_still_unglue_names():
         ("AFF_MARK", "b"),
         ("AFFILIATION", "Univ B"),
     )
-    got = assemble(inp, tags, [1.0] * len(tags))
-    assert [a.family for a in got.byline.authors] == ["Vega", "Mallen"]
+    got = assemble(inp, tags, [1.0] * len(tags), rules=rules)
+    assert [a.family for a in got.byline.authors] == families
 
 
-def test_a_letter_key_glued_to_an_affiliation_line_unglues_names():
+@pytest.mark.parametrize(
+    ("rules", "families"),
+    [(True, ["Vega", "Mallen"]), (False, ["Vegaa", "Mallenb"])],
+)
+def test_a_letter_key_glued_to_an_affiliation_line_unglues_names(rules, families):
     inp = tagger_input(
         ("doc_title", "Title words"),
         ("text", "Juan Vegaa, Ana Mallenb"),
@@ -623,9 +644,9 @@ def test_a_letter_key_glued_to_an_affiliation_line_unglues_names():
         ("AFFILIATION", "aComputational Science, Univ A"),
         ("AFFILIATION", "bPhysics, Univ B"),
     )
-    got = assemble(inp, tags, [1.0] * len(tags))
+    got = assemble(inp, tags, [1.0] * len(tags), rules=rules)
     # Each line opens with a key glued to its first word, and no mark was tagged.
-    assert [a.family for a in got.byline.authors] == ["Vega", "Mallen"]
+    assert [a.family for a in got.byline.authors] == families
 
 
 def test_digit_keyed_names_keep_their_last_letter():
@@ -723,7 +744,7 @@ def test_a_publisher_logo_tagged_as_a_name_is_no_author():
         ("FAMILY", "Springer"),
         ("FAMILY", "Elsevier"),
     )
-    got = assemble(inp, tags, [1.0] * len(tags))
+    got = assemble(inp, tags, [1.0] * len(tags), rules=True)
     # The logo goes whole; a person named like a publisher stays.
     assert [(a.given, a.family) for a in got.byline.authors] == [
         ("ANA", "LIMA"),
@@ -732,10 +753,27 @@ def test_a_publisher_logo_tagged_as_a_name_is_no_author():
     assert got.byline_reasons(0.9) == []
 
 
+def test_without_rules_a_publisher_logo_tagged_as_a_name_stays_an_author():
+    inp = tagger_input(("doc_title", "Title words"), ("text", "DE GRUYTER OPEN, ANA LIMA"))
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "DE GRUYTER"),
+        ("FAMILY", "OPEN"),
+        ("GIVEN", "ANA"),
+        ("FAMILY", "LIMA"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags))
+    assert [(a.given, a.family) for a in got.byline.authors] == [
+        ("DE GRUYTER", "OPEN"),
+        ("ANA", "LIMA"),
+    ]
+
+
 def test_a_byline_of_only_a_publisher_logo_has_no_authors():
     inp = tagger_input(("doc_title", "Title words"), ("text", "Elsevier"))
     tags = label(inp, ("TITLE", "Title words"), ("FAMILY", "Elsevier"))
-    got = assemble(inp, tags, [1.0] * len(tags))
+    got = assemble(inp, tags, [1.0] * len(tags), rules=True)
     assert got.byline.authors == []
     assert "no_authors" in got.problems
 
@@ -848,7 +886,25 @@ def test_parallel_keyword_lists_keep_the_first_printed():
     assert got.title_keywords.keywords == ["mano", "familia"]
 
 
-def test_a_keyword_is_closed_over_the_parenthesis_the_tagger_left_outside():
+@pytest.mark.parametrize(
+    ("rules", "keywords"),
+    [
+        (
+            True,
+            [
+                "grade point average (GPA)",
+                "Zimbabwe (code: Q1, Q2)",
+                "model (A (B))",
+                "pain",
+            ],
+        ),
+        (
+            False,
+            ["grade point average (GPA", "Zimbabwe (code: Q1, Q2", "model (A (B", "pain"],
+        ),
+    ],
+)
+def test_a_keyword_is_closed_over_the_parenthesis_the_tagger_left_outside(rules, keywords):
     inp = tagger_input(
         ("doc_title", "Title words"),
         ("text", "Ana Lima"),
@@ -867,13 +923,8 @@ def test_a_keyword_is_closed_over_the_parenthesis_the_tagger_left_outside():
         ("KEYWORD", "model (A (B"),
         ("KEYWORD", "pain"),
     )
-    got = assemble(inp, tags, [1.0] * len(tags))
-    assert got.title_keywords.keywords == [
-        "grade point average (GPA)",
-        "Zimbabwe (code: Q1, Q2)",
-        "model (A (B))",
-        "pain",
-    ]
+    got = assemble(inp, tags, [1.0] * len(tags), rules=rules)
+    assert got.title_keywords.keywords == keywords
 
 
 def test_a_keyword_is_not_closed_over_a_parenthesis_that_is_not_directly_after_it():
@@ -891,7 +942,7 @@ def test_a_keyword_is_not_closed_over_a_parenthesis_that_is_not_directly_after_i
         ("KEYWORD", "stress (acute"),
         ("KEYWORD", "cell (s"),
     )
-    got = assemble(inp, tags, [1.0] * len(tags))
+    got = assemble(inp, tags, [1.0] * len(tags), rules=True)
     # A word, or another region, lies between the span and the ")".
     assert got.title_keywords.keywords == ["stress (acute", "cell (s"]
 

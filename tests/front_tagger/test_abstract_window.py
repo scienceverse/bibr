@@ -117,3 +117,16 @@ def test_a_first_window_that_fails_still_raises():
 
     with pytest.raises(RuntimeError):
         tag_front_matter(_failing_tagger({1}), _manuscript(abstract_page=2))
+
+
+def test_the_rules_flag_reaches_the_assembler():
+    rows = regions(("doc_title", "Handedness in families"), ("text", "Ana Ruiz Elsevier"))
+    tagger = _PhraseTagger(
+        ("TITLE", "Handedness in families"),
+        ("GIVEN", "Ana"),
+        ("FAMILY", "Ruiz"),
+        ("FAMILY", "Elsevier"),
+    )
+    assert [a.family for a in tag_front_matter(tagger, rows).byline.authors] == ["Ruiz", "Elsevier"]
+    got = tag_front_matter(tagger, rows, rules=True)
+    assert [a.family for a in got.byline.authors] == ["Ruiz"]

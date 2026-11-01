@@ -263,9 +263,16 @@ ABSTRACT_WINDOW_STARTS = (1, 2)
 
 
 def tag_front_matter(
-    tagger: OnnxFrontTagger, regions: Sequence[FrontRegion], *, first_page_index: int = 0
+    tagger: OnnxFrontTagger,
+    regions: Sequence[FrontRegion],
+    *,
+    first_page_index: int = 0,
+    rules: bool = False,
 ) -> TaggedFrontMatter:
     """Tag the first pages; with no abstract there, take it from a later window.
+
+    ``rules`` is passed to :func:`~bibr.front_tagger.assemble.assemble`: the
+    readings for a run with no LLM behind the tagger.
 
     The tagger reads ``MAX_PAGES`` pages from ``first_page_index``. When that
     window holds no abstract, the windows starting one and then two pages
@@ -277,7 +284,7 @@ def tag_front_matter(
     from bibr.front_tagger.contract import build_tagger_input
 
     inp = build_tagger_input(regions, first_page_index=first_page_index)
-    result = assemble(inp, *tagger.tag(inp))
+    result = assemble(inp, *tagger.tag(inp), rules=rules)
     if "no_abstract" not in result.problems or result.title_keywords is None:
         return result
     pages = {region.page for region in regions}
@@ -289,7 +296,7 @@ def tag_front_matter(
         if not later_inp.words:
             continue
         try:
-            later = assemble(later_inp, *tagger.tag(later_inp))
+            later = assemble(later_inp, *tagger.tag(later_inp), rules=rules)
         except Exception:  # noqa: BLE001 - the first window's answer still stands
             logger.warning(
                 "Front-matter tagger failed on the window from page %d; keeping the first window",

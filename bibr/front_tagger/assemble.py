@@ -164,7 +164,7 @@ class TaggedFrontMatter:
     unattached_affiliations: list[str] = field(default_factory=list)
     #: Institution text the tags left out of every field, read from the print only
     #: where no author carries an affiliation (the rules in
-    #: :func:`_untagged_institutions`). In print order.
+    #: :func:`_untagged_institutions`). In print order. Empty unless ``rules``.
     untagged_affiliations: list[str] = field(default_factory=list)
 
     def affiliation_rows(self, *, untagged: bool = True) -> list[Affiliation]:
@@ -427,11 +427,16 @@ def _abstract(spans: list[Span], tags, inp: TaggerInput, conf) -> tuple[str | No
     return _joined(group), sum(conf[i] for i in words) / len(words)
 
 
-def _keywords(spans: list[Span], tags, inp: TaggerInput) -> list[str]:
-    """The keywords of the list printed first; parallel-language lists are not joined."""
+def _keywords(spans: list[Span], tags, inp: TaggerInput, *, rules: bool = False) -> list[str]:
+    """The keywords of the list printed first; parallel-language lists are not joined.
+
+    With ``rules`` a keyword is closed over the ")" the tagger left outside it.
+    """
     groups = _clusters(spans, tags, inp, "KEYWORD", heading=_KEYWORD_HEADING_RE)
     return [
-        k for span in (groups[0] if groups else []) if (k := _clean(_closed_text(span, tags, inp)))
+        k
+        for span in (groups[0] if groups else [])
+        if (k := _clean(_closed_text(span, tags, inp) if rules else span.text))
     ]
 
 
@@ -538,17 +543,21 @@ def _printed_letter_keys(inp: TaggerInput, tags) -> set[str]:
 
 
 def _unglue_letter_keys(
-    authors: list[_Author], by_mark: dict[str, str], printed_letters: Collection[str] = ()
+    authors: list[_Author],
+    by_mark: dict[str, str],
+    printed_letters: Collection[str] = (),
+    *,
+    runs: bool = False,
 ) -> None:
     """Split a superscript letter or numeral key OCR glued to a family name.
 
     On a paper whose affiliations are keyed "a", "b", ... (or "I", "II", ...),
     an author with no mark of their own whose family name ends in one of
     those keys printed it as a superscript: "Vegaa" is "Vega" keyed "a",
-    "LIMAII" is "LIMA" keyed "II". A list of letter keys ("a,b") glues on as a
-    run, taken from the end while the letters rise and the name keeps four
-    letters or more, at most three: "Riosab" is "Rios" keyed "a" and "b", and
-    "Costaa" only loses its last "a".
+    "LIMAII" is "LIMA" keyed "II". With ``runs``, a list of letter keys
+    ("a,b") glues on as a run, taken from the end while the letters rise and
+    the name keeps four letters or more, at most three: "Riosab" is "Rios"
+    keyed "a" and "b", and "Costaa" only loses its last "a".
 
     ``printed_letters`` are letter keys the print shows that no affiliation
     was tagged behind (see :func:`_printed_letter_keys`).
@@ -566,7 +575,8 @@ def _unglue_letter_keys(
             continue
         keys, stem = [key], last.text[: -len(key)]
         while (
-            len(key) == 1
+            runs
+            and len(key) == 1
             and len(keys) < _MAX_GLUED_LETTERS
             and len(stem) >= 4
             and stem[-1] in letters
@@ -629,11 +639,21 @@ def assemble(
     inp: TaggerInput,
     tags: Sequence[str],
     confidences: Sequence[float],
+    *,
+    rules: bool = False,
 ) -> TaggedFrontMatter:
     """Build the front-matter answers from one paper's word tags.
 
     ``tags`` holds one BIO tag per ``inp.words`` entry and ``confidences`` the
     posterior of that tag (``1.0`` everywhere when the runtime has none).
+
+    ``rules`` adds the readings that put right what a run with no LLM behind
+    it would otherwise keep: a keyword closed over its parenthesis, a
+    publisher's logo dropped from the authors, letter keys glued to family
+    names split off (from the print and as a run), and the institution text
+    the tags left out (:attr:`TaggedFrontMatter.untagged_affiliations`).
+    Without it the answers are the tagger's as before, and the LLM, when
+    there is one, covers the rest.
     """
     if not len(tags) == len(confidences) == len(inp.words):
         raise ValueError("tags and confidences must have one entry per tagger word")
@@ -660,7 +680,7 @@ def assemble(
     title_keywords = TitleKeywordsLLM(
         title=title,
         abstract=abstract,
-        keywords=_keywords(spans, tags, inp),
+        keywords=_keywords(spans, tags, inp, rules=rules),
         journal=_clean(getattr(_first(spans, "JOURNAL"), "text", None)),
         volume=_clean(getattr(_first(spans, "VOLUME"), "text", None)),
         issue=_clean(getattr(_first(spans, "ISSUE"), "text", None)),
@@ -672,7 +692,7 @@ def assemble(
         license=_license_short(license_span.text if license_span else None),
     )
 
-    authors = [a for a in _group_authors(spans) if not _is_publisher(a)]
+    authors = [a for a in _group_authors(spans) if not (rules and _is_publisher(a))]
     if not authors:
         problems.append("no_authors")
     name_words = [i for a in authors for s in (*a.given, *a.family) for i in s.words]
@@ -715,7 +735,12 @@ def assemble(
                 author.orcid = "-".join(m.groups()).upper()
 
     affiliation_by_mark, unmarked_affiliations = _affiliations(spans, inp, tags)
-    _unglue_letter_keys(authors, affiliation_by_mark, _printed_letter_keys(inp, tags))
+    _unglue_letter_keys(
+        authors,
+        affiliation_by_mark,
+        _printed_letter_keys(inp, tags) if rules else (),
+        runs=rules,
+    )
     unattached = _link_affiliations(authors, affiliation_by_mark, unmarked_affiliations, problems)
     _assign_loose_emails(authors, spans)
     _flag_corresponding(authors, inp, tags)
@@ -746,7 +771,7 @@ def assemble(
         confidence=confidence,
         problems=problems,
         unattached_affiliations=unattached,
-        untagged_affiliations=[] if carried else _untagged_institutions(inp, tags),
+        untagged_affiliations=_untagged_institutions(inp, tags) if rules and not carried else [],
     )
 
 
