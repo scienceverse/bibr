@@ -476,6 +476,11 @@ below), but it can only process PDFs when an OCR server is reachable: the
 bundled `bibr-ocr` needs a GPU, so a CPU-only host needs an external
 `OCR_BASE_URL` (see the split deployment above).
 
+The image builds on the PyTorch stack by default. `--build-arg ML_STACK=onnx` builds
+it without PyTorch or the `ml` extra: every model, layout included, runs on ONNX
+Runtime, and the image pins `ML_RUNTIME=onnx`. Either stack bakes the front-matter
+tagger's `onnx/` bundle, which fast mode reads titles, authors and abstracts with.
+
 ### Environment variables
 
 Set these in `.env` (run `bibr config example --full` or see the

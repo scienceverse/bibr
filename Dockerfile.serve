@@ -11,6 +11,11 @@
 # ---------------------------------------------------------------------------
 
 ARG WITH_GPU=true
+# Which model runtime the image carries. "torch" (the default) is the full
+# PyTorch stack, which serve uses for torch.compile on layout; "onnx" ships
+# no torch at all and runs every model, layout and classifiers included, on
+# ONNX Runtime. This is also the ML_RUNTIME the image pins.
+ARG ML_STACK=torch
 
 # ===========================================================================
 # Stage 1: builder — install Python, build venv, populate model wheels
@@ -42,27 +47,32 @@ ENV UV_COMPILE_BYTECODE=1 \
     PATH="/app/.venv/bin:$PATH"
 
 ARG WITH_GPU
+ARG ML_STACK
 
 # Resolve deps first (layer-cached across code changes).
-# --extra ml is load-bearing: the runtime stage bakes the PP-DocLayoutV3 layout
-# model (transformers) and the CRF segmenter (torch). Those live in the optional
-# `ml` extra (pyproject.toml); without it the model-cache steps below fail at
-# build time with ModuleNotFoundError.
+# --extra ml is load-bearing on the torch stack: the runtime stage bakes the
+# PP-DocLayoutV3 layout model (transformers) and the CRF segmenter (torch).
+# Those live in the optional `ml` extra (pyproject.toml); without it the
+# model-cache steps below fail at build time with ModuleNotFoundError. The
+# ONNX stack leaves the extra out, and with it about 5.5 GB of torch and CUDA wheels.
 # --extra mcp ships the optional MCP server so an operator can flip
 # MCP_ENABLED=true on the Compose stack without a custom image; it is a small
 # pure-Python dependency and stays inert unless enabled.
 # --locked fails the build when uv.lock is stale instead of re-resolving it.
 COPY pyproject.toml uv.lock README.md ./
-RUN if [ "$WITH_GPU" = "true" ]; then \
-      uv sync --locked --no-install-project --extra cache --extra gpu --extra ml --extra mcp --no-dev; \
+RUN case "$ML_STACK" in torch) ml_extra="--extra ml";; onnx) ml_extra="";; \
+      *) echo "ML_STACK must be torch or onnx, got '$ML_STACK'" >&2; exit 1;; esac && \
+    if [ "$WITH_GPU" = "true" ]; then \
+      uv sync --locked --no-install-project --extra cache --extra gpu $ml_extra --extra mcp --no-dev; \
     else \
-      uv sync --locked --no-install-project --extra cache --extra ml --extra mcp --no-dev; \
+      uv sync --locked --no-install-project --extra cache $ml_extra --extra mcp --no-dev; \
     fi
 
 # Install the project, then swap onnxruntime → onnxruntime-gpu on GPU builds.
 COPY bibr ./bibr
-RUN if [ "$WITH_GPU" = "true" ]; then \
-      uv sync --locked --extra cache --extra gpu --extra ml --extra mcp --no-dev && \
+RUN if [ "$ML_STACK" = "onnx" ]; then ml_extra=""; else ml_extra="--extra ml"; fi && \
+    if [ "$WITH_GPU" = "true" ]; then \
+      uv sync --locked --extra cache --extra gpu $ml_extra --extra mcp --no-dev && \
       # onnxruntime (CPU) and onnxruntime-gpu share an `onnxruntime/` import
       # namespace, so installing both leaves a broken venv where the CPU
       # pybind11_state.so shadows the GPU one. Uninstall both and reinstall just
@@ -79,7 +89,7 @@ RUN if [ "$WITH_GPU" = "true" ]; then \
       # commit could ship different ORT binaries and CUDA/cuDNN wheels. The
       # export pins onnxruntime-gpu and its nvidia-* wheels to the locked versions.
       uv export --quiet --locked --no-dev --no-emit-project --no-hashes \
-        --extra cache --extra gpu --extra ml --extra mcp -o /tmp/locked-requirements.txt && \
+        --extra cache --extra gpu $ml_extra --extra mcp -o /tmp/locked-requirements.txt && \
       uv pip install --python /app/.venv/bin/python \
         --constraint /tmp/locked-requirements.txt 'onnxruntime-gpu[cuda,cudnn]' && \
       # Assert the swap actually took. get_available_providers() can't be used
@@ -92,7 +102,7 @@ RUN if [ "$WITH_GPU" = "true" ]; then \
         assert got == ['onnxruntime-gpu'], \
         f'GPU build must ship onnxruntime-gpu alone — got {got}.'"; \
     else \
-      uv sync --locked --extra cache --extra ml --extra mcp --no-dev; \
+      uv sync --locked --extra cache $ml_extra --extra mcp --no-dev; \
     fi
 
 # ===========================================================================
@@ -128,6 +138,8 @@ RUN apt-get update && \
 
 RUN useradd -ms /bin/bash bibr
 WORKDIR /app
+
+ARG ML_STACK
 
 ENV PATH="/app/.venv/bin:$PATH" \
     HF_HOME=/app/.hf_cache
@@ -186,17 +198,29 @@ ARG LAYOUT_MODEL_ID=PaddlePaddle/PP-DocLayoutV3_safetensors
 ARG LAYOUT_MODEL_REVISION=97d101e6db2642e162a1d05392d1b0231c91033e
 ENV LAYOUT_MODEL_ID=${LAYOUT_MODEL_ID}
 ENV LAYOUT_MODEL_REVISION=${LAYOUT_MODEL_REVISION}
-RUN python -c "\
+# The torch stack bakes the layout checkpoint above; the ONNX stack has no
+# transformers and bakes the layout's ONNX bundle (bibr's own pinned default) instead.
+RUN if [ "$ML_STACK" = "onnx" ]; then \
+      python -c "\
+from huggingface_hub import snapshot_download; \
+from bibr.config import GlobalSettings; \
+layout = GlobalSettings().layout; \
+snapshot_download(layout.onnx_model_id, revision=layout.onnx_revision); \
+print('layout ONNX bundle cached')"; \
+    else \
+      python -c "\
 from transformers import AutoModelForObjectDetection, AutoImageProcessor; \
 AutoModelForObjectDetection.from_pretrained('${LAYOUT_MODEL_ID}', revision='${LAYOUT_MODEL_REVISION}'); \
 AutoImageProcessor.from_pretrained('${LAYOUT_MODEL_ID}', revision='${LAYOUT_MODEL_REVISION}'); \
-print('${LAYOUT_MODEL_ID} cached')"
+print('${LAYOUT_MODEL_ID} cached')"; \
+    fi
 
-# This is the torch image: it carries the full PyTorch stack precisely so serve
-# can use torch.compile on layout, so it pins ML_RUNTIME rather than letting
-# "auto" pick the ONNX bundle that now also lives at these revisions. The
-# bundles are skipped in the download for the same reason (~180 MB unused).
-ENV ML_RUNTIME=torch
+# The torch stack carries the full PyTorch stack precisely so serve can use
+# torch.compile on layout, so it pins ML_RUNTIME rather than letting "auto"
+# pick the ONNX bundle that now also lives at these revisions. The bundles are
+# skipped in its download for the same reason (~180 MB unused). The ONNX stack
+# pins "onnx" and downloads the whole repository, bundles included.
+ENV ML_RUNTIME=${ML_STACK}
 
 ARG PAPER_CLASSIFIER_MODEL=scienceverse/bibr-paper-classifier
 ARG PAPER_CLASSIFIER_REVISION=6046171b3198a255acb1f07f81a586a32f399ac4
@@ -206,11 +230,36 @@ ENV ML_PAPER_CLASSIFIER_MODEL_ID=${PAPER_CLASSIFIER_MODEL} \
     ML_PAPER_CLASSIFIER_REVISION=${PAPER_CLASSIFIER_REVISION} \
     ML_SECTION_CLASSIFIER_MODEL_ID=${SECTION_CLASSIFIER_MODEL} \
     ML_SECTION_CLASSIFIER_REVISION=${SECTION_CLASSIFIER_REVISION}
-RUN python -c "\
+RUN if [ "$ML_STACK" = "onnx" ]; then \
+      python -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('${PAPER_CLASSIFIER_MODEL}', revision='${PAPER_CLASSIFIER_REVISION}'); \
+snapshot_download('${SECTION_CLASSIFIER_MODEL}', revision='${SECTION_CLASSIFIER_REVISION}'); \
+print('paper and section classifiers cached')"; \
+    else \
+      python -c "\
 from huggingface_hub import snapshot_download; \
 snapshot_download('${PAPER_CLASSIFIER_MODEL}', revision='${PAPER_CLASSIFIER_REVISION}', ignore_patterns=['onnx/*']); \
 snapshot_download('${SECTION_CLASSIFIER_MODEL}', revision='${SECTION_CLASSIFIER_REVISION}', ignore_patterns=['onnx/*']); \
-print('paper and section classifiers cached')"
+print('paper and section classifiers cached')"; \
+    fi
+
+# The front-matter tagger reads the title, authors and abstract in fast mode, and
+# it has no torch form: only its onnx/ bundle loads, on either stack. The id and
+# revision are bibr's own defaults, so the image bakes what the code will ask for
+# (and a re-pin there needs no edit here). While the bundle is unpublished and
+# unpinned the build goes on without it and says so; once a revision is pinned
+# a missing bundle fails the build.
+RUN python -c "\
+from huggingface_hub import snapshot_download; \
+from bibr.config import GlobalSettings; \
+ml = GlobalSettings().ml; \
+snapshot_download(ml.front_tagger_model_id, revision=ml.front_tagger_revision, allow_patterns=['onnx/*']); \
+print('front-matter tagger cached')" \
+    || python -c "\
+from bibr.config import GlobalSettings; \
+assert GlobalSettings().ml.front_tagger_revision is None, 'the pinned front-matter tagger bundle is missing'; \
+print('WARNING: the front-matter tagger is not published yet, so the image does not carry it')"
 
 ARG WTPSPLIT_MODEL=sat-6l-sm
 ARG WTPSPLIT_LOCAL_BUNDLE
