@@ -30,6 +30,7 @@ from bibr.validation import IssueSeverity, ValidationIssue
 if TYPE_CHECKING:
     from bibr.config import GlobalSettings
     from bibr.extract.front_role import FrontRolePredictions, RoleScores
+    from bibr.models import PaperMetadata
     from bibr.paper_contents import PaperContents, PaperSentence, RegionSummary
     from bibr.pipeline.identity import ExpectedIdentity
 
@@ -2715,6 +2716,37 @@ def _title_language(text: str) -> str | None:
     return language if best > runner_up else None
 
 
+# Fewer words than this and one function word decides the language: too little
+# to write the language into the record.
+_MIN_LANGUAGE_WORDS = 4
+# What _title_language names as a language, as opposed to a script ("cyrillic").
+_LANGUAGE_CODES = frozenset(_TITLE_FUNCTION_WORDS) | {"uk", "ru"}
+
+
+def language_from_title(title: str | None) -> str | None:
+    """The ISO 639-1 code of the paper's language read from its title, or None.
+
+    A guess from function words and script letters (see
+    :func:`_title_language`): it names only a language, never a script, and
+    only from a title of at least four words. A title that no language's
+    function words win, or that is too short, gives None.
+    """
+    if len(_WORD_RE.findall(title or "")) < _MIN_LANGUAGE_WORDS:
+        return None
+    language = _title_language(title or "")
+    return language if language in _LANGUAGE_CODES else None
+
+
+def fill_language(metadata: PaperMetadata) -> None:
+    """Set ``metadata.language`` from the title when the record has none.
+
+    A PDF declares no language, so the field stays empty unless something
+    fills it; an input that declares its own (JATS, HTML) is kept as it is.
+    """
+    if not metadata.language:
+        metadata.language = language_from_title(metadata.title)
+
+
 def _person_surnames(text: str) -> frozenset[str]:
     """Surnames of the name-shaped chunks printed before any affiliation.
 
@@ -3461,7 +3493,9 @@ __all__ = [
     "FrontMatterResolution",
     "FrontRolePolicy",
     "collect_front_matter_candidates",
+    "fill_language",
     "group_front_matter_blocks",
     "is_exact_front_matter_furniture",
+    "language_from_title",
     "resolve_front_matter",
 ]
