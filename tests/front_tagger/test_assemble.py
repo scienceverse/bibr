@@ -429,6 +429,42 @@ def test_a_group_author_needs_no_given_name():
     assert assemble(inp, tags, [1.0] * len(tags)).byline_reasons(0.9) == []
 
 
+def test_a_publisher_logo_tagged_as_a_name_is_no_author():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "DE GRUYTER OPEN"),
+        ("text", "ANA LIMA, Univ A"),
+        ("text", "Bo Springer, Elsevier"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "DE GRUYTER"),
+        ("FAMILY", "OPEN"),
+        ("GIVEN", "ANA"),
+        ("FAMILY", "LIMA"),
+        ("AFFILIATION", "Univ A"),
+        ("GIVEN", "Bo"),
+        ("FAMILY", "Springer"),
+        ("FAMILY", "Elsevier"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags))
+    # The logo goes whole; a person named like a publisher stays.
+    assert [(a.given, a.family) for a in got.byline.authors] == [
+        ("ANA", "LIMA"),
+        ("Bo", "Springer"),
+    ]
+    assert got.byline_reasons(0.9) == []
+
+
+def test_a_byline_of_only_a_publisher_logo_has_no_authors():
+    inp = tagger_input(("doc_title", "Title words"), ("text", "Elsevier"))
+    tags = label(inp, ("TITLE", "Title words"), ("FAMILY", "Elsevier"))
+    got = assemble(inp, tags, [1.0] * len(tags))
+    assert got.byline.authors == []
+    assert "no_authors" in got.problems
+
+
 def test_roman_numeral_keys_glued_to_family_names():
     inp = tagger_input(
         ("doc_title", "Title words"),

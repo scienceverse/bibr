@@ -63,6 +63,27 @@ _BYLINE_FILLERS = frozenset(
     {"and", "und", "et", "y", "e", "i", "og", "en", "och", "a", "&", "with", "on", "behalf", "of"}
     | {"the", "for", "md", "phd", "msc", "bsc", "mph", "rn", "dphil", "dr", "prof", "jr", "sr"}
 )
+# A publisher's name printed beside the byline (a logo, an imprint) is no one's
+# name: an author whose whole name is one of these is dropped. Folded to letters
+# and digits (see _fold). A short list of the ones seen, not a complete one, and
+# without the ones that are surnames too ("Wiley", "Sage", "Springer").
+_PUBLISHER_NAMES = frozenset(
+    {
+        "degruyter",
+        "degruyteropen",
+        "elsevier",
+        "springernature",
+        "johnwileysons",
+        "wileyonlinelibrary",
+        "taylorfrancis",
+        "taylorfrancisgroup",
+        "sagepublications",
+        "mdpi",
+        "frontiersmedia",
+        "oxforduniversitypress",
+        "cambridgeuniversitypress",
+    }
+)
 _MIN_ABSTRACT_WORDS = 40
 _ROMAN_KEY_RE = re.compile(r"[IVX]{1,4}")
 # A lower-case run followed by a capitalised one: two of them in one word
@@ -399,6 +420,11 @@ def _incomplete_name(author: _Author) -> bool:
     return not any(_COLLECTIVE_RE.search(s.text) for s in parts)
 
 
+def _is_publisher(author: _Author) -> bool:
+    """Whether the whole name is a publisher's, tagged as a person by its logo."""
+    return _fold(" ".join(s.text for s in (*author.given, *author.family))) in _PUBLISHER_NAMES
+
+
 def _untagged_byline_words(inp: TaggerInput, tags, lo: int, hi: int) -> bool:
     """Whether a capitalised word between the first and last author is in no
     field: a name the tagger dropped from the list."""
@@ -545,7 +571,7 @@ def assemble(
         license=_license_short(license_span.text if license_span else None),
     )
 
-    authors = _group_authors(spans)
+    authors = [a for a in _group_authors(spans) if not _is_publisher(a)]
     if not authors:
         problems.append("no_authors")
     name_words = [i for a in authors for s in (*a.given, *a.family) for i in s.words]
