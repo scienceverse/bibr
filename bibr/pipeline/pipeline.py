@@ -103,6 +103,20 @@ class Pipeline:
         """Concrete immutable-by-convention settings snapshot owned by this pipeline."""
         return self._settings
 
+    def _settings_for(self, config: RunConfig) -> GlobalSettings:
+        """The settings one chunk runs under.
+
+        A fast-mode run gets the pipeline's settings with the LLM paths turned
+        off (:func:`bibr.run_mode.fast_settings`); every other run gets the
+        pipeline's own. Deciding it here, from the chunk's ``RunConfig``, lets a
+        long-lived pipeline (serve) run fast and full requests side by side.
+        """
+        if config.mode != "fast":
+            return self._settings
+        from bibr.run_mode import fast_settings
+
+        return fast_settings(self._settings)
+
     async def process_file(
         self,
         path: str | Path,
@@ -189,12 +203,13 @@ class Pipeline:
         from bibr.pipeline.context import PipelineContext
 
         prog = progress or NullProgress()
+        run_config = config or self._config
         ctx = PipelineContext(
             file_states=file_states,
             progress=prog,
             resources=self._resources,
-            config=config or self._config,
-            settings=self._settings,
+            config=run_config,
+            settings=self._settings_for(run_config),
         )
 
         try:

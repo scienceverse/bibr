@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 ConsolidationMode = Literal["off", "fill", "replace"]
 FigureExtractTier = Literal["off", "meta"]
 MemoryMode = Literal["aggressive", "balanced", "keep_all"]
+RunMode = Literal["fast", "full"]
 RefParseStrategy = Literal["ner", "llm", "llm-chunked", "ref-llm", "off"]
 RefSegStrategy = Literal["geom", "region", "llm", "crf"]
 
@@ -92,6 +93,11 @@ class RunConfig:
     implicit section detection, metadata extraction, equation extraction,
     citation linking) and Crossref enrichment. Produces structural output
     only — intended for training-data preprocessing."""
+    mode: RunMode = "full"
+    """Resolved run mode. ``"fast"`` makes no LLM call: the pipeline runs on
+    the :func:`~bibr.run_mode.fast_settings` overlay, with the front-matter
+    tagger reading the title, authors and abstract. ``"auto"`` never reaches a
+    run — :func:`~bibr.run_mode.resolve_mode` turns it into one of these two."""
     consolidate: ConsolidationMode | None = None
     """Per-run consolidation mode ("off"/"fill"/"replace"). ``None`` defers
     to ``Settings.crossref.consolidate``."""
@@ -101,6 +107,11 @@ class RunConfig:
     ref_parse_strategy: RefParseStrategy | None = None
     """Per-run reference parse strategy ("ner"/"llm"). ``None`` defers to
     ``Settings.REF_PARSE_STRATEGY`` / the legacy alias."""
+
+    @property
+    def skips_llm(self) -> bool:
+        """True when this run makes no LLM call: fast mode, or ``no_llm``."""
+        return self.no_llm or self.mode == "fast"
 
     def enrichment_enabled(self, settings: GlobalSettings) -> bool:
         """Whether Crossref/resolver reference enrichment runs for this chunk.

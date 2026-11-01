@@ -2126,11 +2126,14 @@ class MlOptions(_BibrSettings):
     # Front-matter tagger (bibr/front_tagger/): an encoder + CRF that labels the
     # printed title, names, affiliations and abstract on the first two pages, so
     # the title/keywords and authors LLM calls run only when it is unsure.
-    # Off by default until it is measured against the LLM on the dev sets.
-    front_tagger_mode: Literal["off", "primary"] = Field(
+    # Off by default until it is measured against the LLM on the dev sets; fast
+    # mode (PIPELINE_MODE) sets 'only' for the run.
+    front_tagger_mode: Literal["off", "primary", "only"] = Field(
         "off",
         description="'primary' takes title, abstract, keywords and authors from the front-matter "
-        "tagger when it is confident and asks the LLM otherwise; 'off' always asks the LLM.",
+        "tagger when it is confident and asks the LLM otherwise; 'only' takes the tagger's "
+        "answer whatever its confidence and never asks the LLM (what fast mode sets); 'off' "
+        "always asks the LLM.",
     )
     front_tagger_model_id: str | None = Field(
         None,
@@ -2275,6 +2278,13 @@ class PipelineOptions(_BibrSettings):
     model_config = _section("PIPELINE_")
 
     timeout: int = Field(300, description="Pipeline timeout in seconds.")
+    mode: Literal["auto", "fast", "full"] = Field(
+        "auto",
+        description='Run mode: "fast" makes no LLM call (the front-matter tagger reads the title, '
+        'authors and abstract), "full" uses the configured LLM, and "auto" (default) runs fast '
+        "when no LLM is configured and full when one is. The --fast and --full flags override "
+        "it for one run.",
+    )
     bibr_sha: str | None = Field(
         None,
         description="Deployed bibr commit SHA surfaced in qualification_provenance "
@@ -2424,9 +2434,9 @@ class PipelineOptions(_BibrSettings):
         "Methods or Results heading as discussion.",
     )
 
-    @field_validator("heap_trim", mode="before")
+    @field_validator("heap_trim", "mode", mode="before")
     @classmethod
-    def _lower_heap_trim(cls, v):
+    def _lower_choice(cls, v):
         """Case-insensitive, like the other choice settings."""
         return v.strip().lower() if isinstance(v, str) else v
 
