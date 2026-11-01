@@ -51,6 +51,9 @@ class WarningCode(StrEnum):
     AUTHORS_TRUNCATED = "AUTHORS_TRUNCATED"
     AUTHORS_PARTIAL = "AUTHORS_PARTIAL"
     LLM_RESPONSE_REPAIRED = "LLM_RESPONSE_REPAIRED"
+    FRONT_TAGGER_UNAVAILABLE = "FRONT_TAGGER_UNAVAILABLE"
+    FRONT_TAGGER_FLAGGED = "FRONT_TAGGER_FLAGGED"
+    FRONT_MATTER_NOT_READ = "FRONT_MATTER_NOT_READ"
     STATEMENT_LEXICAL_FALLBACK = "STATEMENT_LEXICAL_FALLBACK"
     RESEARCH_INTEGRITY_LLM_FAILED = "RESEARCH_INTEGRITY_LLM_FAILED"
     EQUATION_LLM_FALLBACK_TIMEOUT = "EQUATION_LLM_FALLBACK_TIMEOUT"
@@ -150,6 +153,15 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.LLM_RESPONSE_REPAIRED: "A finished core-metadata LLM response failed validation "
     "and was repaired locally (invalid backslash escapes, or prose around its JSON); the "
     "repaired response passed the same validation.",
+    WarningCode.FRONT_TAGGER_UNAVAILABLE: "A fast run could not read the front matter: the "
+    "front-matter tagger's model was missing or failed to load, so the title, authors and "
+    "abstract are empty or come from fallbacks.",
+    WarningCode.FRONT_TAGGER_FLAGGED: "A fast run took the front-matter tagger's answer although "
+    "it reported problems with it (the message lists them); the title, authors or abstract may "
+    "be incomplete.",
+    WarningCode.FRONT_MATTER_NOT_READ: "A fast run has no page layout for the front-matter "
+    "tagger to read (a DOCX, for one): the title and abstract come from the document's headings "
+    "and sections where it has them, and the authors were not read.",
     WarningCode.STATEMENT_LEXICAL_FALLBACK: "A research-integrity statement was filled by "
     "lexical anchor matching.",
     WarningCode.RESEARCH_INTEGRITY_LLM_FAILED: "The research-integrity LLM call failed; "
@@ -249,6 +261,7 @@ NOT_FINAL_CODES: frozenset[WarningCode] = frozenset(
         WarningCode.IMPLICIT_SECTIONS_LLM_FAILED,
         WarningCode.PAPER_CLASSIFICATION_FAILED,
         WarningCode.AUTHORS_LLM_FAILED,
+        WarningCode.FRONT_TAGGER_UNAVAILABLE,
         WarningCode.RESEARCH_INTEGRITY_LLM_FAILED,
         WarningCode.EQUATION_LLM_FALLBACK_TIMEOUT,
         WarningCode.EQUATION_LLM_FALLBACK_FAILED,

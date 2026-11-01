@@ -46,7 +46,7 @@ from bibr.models import ORGANIZATION_ROLE, ErrorCode
 from bibr.paper import PaperAuthor, PaperMetadata
 from bibr.paper_contents import FRONT_MATTER_FURNITURE_LABELS, CanonicalSection, PaperContents
 from bibr.processing_warnings import ProcessingWarning, WarningCode
-from bibr.schemas import PaperClassificationLLM
+from bibr.schemas import AuthorsLLM, CoreMetadataLLM, PaperClassificationLLM, TitleKeywordsLLM
 from bibr.utils.metadata import EXACT_GENERIC_ARTICLE_LABELS
 from bibr.validation import IssueSeverity, ValidationIssue
 
@@ -3131,6 +3131,72 @@ class CoreMetadataExtractor:
             byline=None if byline_reasons else result.byline,
         )
 
+    def _tagged_core_metadata(self) -> CoreMetadataLLM:
+        """The front-matter tagger's answer as the core-metadata record.
+
+        What ``ML_FRONT_TAGGER_MODE=only`` (fast mode) puts in place of the LLM
+        calls. The tagger's whole answer is taken whatever its confidence, and
+        the problems it reports become one ``FRONT_TAGGER_FLAGGED`` warning
+        rather than a reason to ask a model, so the author sanitising, the
+        fabrication vetoes and the field decisions run on it as they do on an
+        LLM answer. The "title printed in the selected record" check of
+        ``primary`` mode is not applied: with no LLM to defer to, the tagger's
+        reading is the best there is.
+
+        With no answer the record is empty, and the warning says why: the tagger
+        did not load (an input with page regions), or the input has no page
+        layout for it to read.
+        """
+        parts = frozenset({"title_keywords", "authors"})
+        result = getattr(self.contents, "front_tagger_result", None)
+        if result is None:
+            if getattr(self.contents, "region_summaries", None):
+                logger.warning(
+                    "Front-matter tagger gave no answer (hash=%s); the front matter is empty",
+                    self.file_hash,
+                )
+                self._record_metadata_warning(
+                    WarningCode.FRONT_TAGGER_UNAVAILABLE,
+                    "the front-matter tagger's model could not be loaded; the title, authors "
+                    "and abstract were not read",
+                )
+            else:
+                logger.info(
+                    "No page layout for the front-matter tagger (hash=%s); front matter not read",
+                    self.file_hash,
+                )
+                self._record_metadata_warning(
+                    WarningCode.FRONT_MATTER_NOT_READ,
+                    "the input has no page layout for the front-matter tagger to read; the "
+                    "title and abstract come from the document's headings and sections where "
+                    "it has them, and the authors were not read",
+                )
+            return CoreMetadataLLM.from_calls(
+                TitleKeywordsLLM(),
+                AuthorsLLM(authors=[]),
+                PaperClassificationLLM(),
+                front_tagger_parts=parts,
+            )
+        flags = result.rejection_reasons(
+            float(getattr(self._settings.ml, "front_tagger_min_confidence", 0.9))
+        )
+        if flags:
+            logger.info(
+                "Front-matter tagger answer taken despite %s (hash=%s)",
+                ", ".join(flags),
+                self.file_hash,
+            )
+            self._record_metadata_warning(
+                WarningCode.FRONT_TAGGER_FLAGGED,
+                "the front-matter tagger's answer was taken despite: " + ", ".join(flags),
+            )
+        return CoreMetadataLLM.from_calls(
+            result.title_keywords or TitleKeywordsLLM(),
+            result.byline or AuthorsLLM(authors=[]),
+            PaperClassificationLLM(),
+            front_tagger_parts=parts,
+        )
+
     async def _call_core_llm(
         self,
         full_text: str,
@@ -3141,7 +3207,10 @@ class CoreMetadataExtractor:
         """Call the core-metadata LLM.
 
         ``UpstreamServiceError`` propagates; non-systemic compatibility failures return ``None``.
+        With the front-matter tagger alone (``ML_FRONT_TAGGER_MODE=only``) no LLM is called.
         """
+        if getattr(self._settings.ml, "front_tagger_mode", "off") == "only":
+            return self._tagged_core_metadata()
         try:
             return await self.llm_client.extract_core_metadata(
                 full_text,

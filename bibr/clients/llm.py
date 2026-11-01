@@ -3225,36 +3225,16 @@ class LLMClient:
                 )
             )
 
-        combined = CoreMetadataLLM(
-            title=title_kw.title,
-            **({"abstract": title_kw.abstract} if "abstract" in title_kw.model_fields_set else {}),
-            keywords=title_kw.keywords,
-            authors=authors.authors,
-            oecd_domain=classification.oecd_domain,
-            oecd_subdomain=classification.oecd_subdomain,
-            paper_type=classification.paper_type,
-            journal=title_kw.journal,
-            volume=title_kw.volume,
-            issue=title_kw.issue,
-            first_page=title_kw.first_page,
-            last_page=title_kw.last_page,
-            issn=title_kw.issn,
-            publisher=title_kw.publisher,
-            published=title_kw.published,
-            license=title_kw.license,
-        )
-
-        combined._abstract_explicitly_absent = title_kw._abstract_explicitly_absent
-        combined._repair_note = title_kw._repair_note
-        combined._field_failures = field_failures
-        combined._front_tagger_parts = frozenset(
-            part
-            for part, answer in (("title_keywords", tagged_title), ("authors", tagged_byline))
-            if answer is not None
-        )
-        salvaged_after = getattr(authors, "_salvaged_after", None)
-        combined._authors_salvaged_after = (
-            salvaged_after if isinstance(salvaged_after, str) else None
+        combined = CoreMetadataLLM.from_calls(
+            title_kw,
+            authors,
+            classification,
+            field_failures=field_failures,
+            front_tagger_parts=frozenset(
+                part
+                for part, answer in (("title_keywords", tagged_title), ("authors", tagged_byline))
+                if answer is not None
+            ),
         )
 
         logger.info(f"Successfully extracted core metadata (hash={file_hash})")

@@ -128,6 +128,93 @@ async def test_empty_authors_skip_the_recovery_and_leave_no_trace():
     assert WarningCode.AUTHORS_LLM_FAILED not in codes
 
 
+def _tagger_alone_extractor(tagged, *, paged: bool = True):
+    """A real extractor under fast settings: the tagger's answer, no client to ask."""
+    from bibr.extract.extractor import MetadataExtractor
+    from bibr.run_mode import fast_settings
+
+    ext = _core_extractor(SkippedLlmClient())
+    ext.contents.front_tagger_result = tagged
+    ext.contents.region_summaries = (
+        [RegionSummary(page=1, index=0, label="text", bbox=None)] if paged else []
+    )
+    settings = fast_settings(GlobalSettings())
+    ext = MetadataExtractor(ext.contents, llm_client=SkippedLlmClient(), settings=settings)
+    return ext
+
+
+def _tagged(*, conf: float = 0.99, problems=(), title="A Tagged Title"):
+    from bibr.front_tagger.assemble import TaggedFrontMatter
+    from bibr.schemas import AuthorLLM, AuthorsLLM, TitleKeywordsLLM
+
+    return TaggedFrontMatter(
+        title_keywords=TitleKeywordsLLM(
+            title=title, abstract="The tagger read this abstract.", keywords=["memory"]
+        ),
+        byline=AuthorsLLM(authors=[AuthorLLM(given="Ana", family="Ruiz")]),
+        confidence={"title": conf, "authors": conf, "abstract": conf},
+        problems=list(problems),
+    )
+
+
+async def test_fast_settings_take_the_core_metadata_from_the_tagger_alone():
+    ext = _tagger_alone_extractor(_tagged())
+
+    await ext.extract_core_metadata()
+
+    assert ext.metadata.title == "A Tagged Title"
+    assert ext.metadata.abstract == "The tagger read this abstract."
+    assert ext.metadata.keywords == ["memory"]
+    assert [(a.given, a.family) for a in ext.metadata.authors] == [("Ana", "Ruiz")]
+    assert ext.metadata._field_decisions.sources()["author"] == "front_tagger"
+    assert _codes(ext.contents.processing_warnings) == []
+
+
+async def test_a_flagged_answer_is_kept_and_reported_not_sent_to_a_model():
+    ext = _tagger_alone_extractor(_tagged(conf=0.3, problems=["affiliations_unlinked"]))
+
+    await ext.extract_core_metadata()
+
+    assert ext.metadata.title == "A Tagged Title"
+    assert [a.family for a in ext.metadata.authors] == ["Ruiz"]
+    warnings = {w.code: w.message for w in ext.contents.processing_warnings}
+    assert "affiliations_unlinked" in warnings[WarningCode.FRONT_TAGGER_FLAGGED]
+    assert "low_confidence_title" in warnings[WarningCode.FRONT_TAGGER_FLAGGED]
+
+
+async def test_no_tagger_answer_on_a_paged_input_leaves_the_front_matter_empty():
+    ext = _tagger_alone_extractor(None, paged=True)
+
+    await ext.extract_core_metadata()
+
+    codes = _codes(ext.contents.processing_warnings)
+    assert WarningCode.FRONT_TAGGER_UNAVAILABLE in codes
+    assert WarningCode.FRONT_MATTER_NOT_READ not in codes
+    assert ext.metadata.authors == []
+    assert not ext.metadata.abstract
+
+
+async def test_the_full_run_settings_still_ask_the_client_for_the_core_call():
+    from bibr.extract.extractor import MetadataExtractor
+    from bibr.schemas import AuthorLLM
+
+    ext = _core_extractor(SkippedLlmClient())
+    answering = MagicMock(
+        extract_core_metadata=AsyncMock(
+            return_value=CoreMetadataLLM(
+                title="From The Model", authors=[AuthorLLM(given="Bo", family="Lee")]
+            )
+        )
+    )
+    ext = MetadataExtractor(ext.contents, llm_client=answering, settings=GlobalSettings())
+
+    await ext.extract_core_metadata()
+
+    answering.extract_core_metadata.assert_awaited_once()
+    assert ext.metadata.title == "From The Model"
+    assert WarningCode.FRONT_TAGGER_FLAGGED not in _codes(ext.contents.processing_warnings)
+
+
 async def test_the_credit_statement_still_recovers_authors_in_fast_mode():
     ext = _core_extractor(SkippedLlmClient())
 
@@ -729,6 +816,154 @@ async def test_post_parse_runs_end_to_end_on_the_stand_in_client():
     assert flurbulations.section_type == CanonicalSection.UNKNOWN
     assert SECTION_CLASSIFIER_DEGRADED_FAST_WARNING in paper.contents.processing_warnings
     assert paper.contents.llm_skipped == {}
+
+
+def _fast_settings() -> GlobalSettings:
+    from bibr.run_mode import fast_settings
+
+    return fast_settings(GlobalSettings())
+
+
+def _segmented(parser) -> PaperContents:
+    contents = parser.parse()
+    texts = [[entry.text] for entry in parser.assembler.entries if entry.needs_segmentation]
+    parser.apply_segmentation(contents, texts)
+    parser.create_content_sections(contents)
+    return contents
+
+
+def _docx_contents(build) -> PaperContents:
+    import io
+
+    docx = pytest.importorskip("docx")
+    from bibr.input.docx_native import DocxParser
+
+    doc = docx.Document()
+    build(doc)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return _segmented(DocxParser(buf.getvalue()))
+
+
+def _titled_docx(doc) -> None:
+    doc.add_heading("Memory and Attention in Toddlers", level=0)  # the Title style
+    doc.add_paragraph("Ana Ruiz and Ben Okafor")
+    doc.add_heading("Abstract", level=1)
+    doc.add_paragraph("We studied memory in 400 toddlers. Attention predicted recall.")
+    doc.add_heading("Introduction", level=1)
+    doc.add_paragraph("Memory matters. It is studied widely.")
+
+
+def _headingless_docx(doc) -> None:
+    doc.add_paragraph("We studied memory in 400 toddlers. Attention predicted recall.")
+    doc.add_paragraph("Memory matters. It is studied widely.")
+
+
+def _epub_bytes() -> bytes:
+    import io
+    import zipfile
+
+    container = b"""<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"""
+    package = b"""<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/"
+         version="3.0">
+  <metadata>
+    <dc:title>Memory and Attention in Toddlers</dc:title>
+    <dc:creator>Ana Ruiz</dc:creator>
+  </metadata>
+  <manifest><item id="c1" href="chapter1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"""
+    chapter = b"""<html xmlns="http://www.w3.org/1999/xhtml"><body><section>
+  <h1>Introduction</h1><p>Memory matters. It is studied widely.</p>
+</section></body></html>"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        zf.writestr("META-INF/container.xml", container)
+        zf.writestr("OEBPS/content.opf", package)
+        zf.writestr("OEBPS/chapter1.xhtml", chapter)
+    return buf.getvalue()
+
+
+async def _fast_post_parse(contents, name, **kwargs):
+    from bibr.pipeline.stages.post_parse import post_parse
+
+    return await post_parse(
+        contents,
+        name,
+        "deadbeef",
+        llm_client=SkippedLlmClient(),
+        settings=_fast_settings(),
+        **kwargs,
+    )
+
+
+async def test_a_docx_has_no_layout_for_the_tagger_and_says_so():
+    contents = _docx_contents(_titled_docx)
+    assert contents.region_summaries == [] and contents.front_tagger_result is None
+
+    paper = await _fast_post_parse(contents, "x.docx")
+
+    codes = _codes(paper.contents.processing_warnings)
+    assert WarningCode.FRONT_MATTER_NOT_READ in codes
+    assert WarningCode.FRONT_TAGGER_UNAVAILABLE not in codes
+    # What the document's own headings and sections say is kept; the byline is not read.
+    assert paper.metadata.title == "Memory and Attention in Toddlers"
+    assert paper.metadata.abstract.startswith("We studied memory in 400 toddlers")
+    assert paper.metadata.authors == []
+
+
+async def test_doc_info_fills_what_a_docx_without_a_layout_leaves_empty():
+    doc_info = {"title": "Properties Title", "keywords": ["memory"]}
+
+    paper = await _fast_post_parse(
+        _docx_contents(_headingless_docx), "x.docx", ocr_metadata=doc_info
+    )
+
+    assert WarningCode.FRONT_MATTER_NOT_READ in _codes(paper.contents.processing_warnings)
+    assert paper.metadata.title == "Properties Title"
+    assert paper.metadata.keywords == ["memory"]
+    assert paper.metadata._field_decisions.sources()["title"] == "doc_info"
+
+
+async def test_a_paged_input_the_tagger_missed_keeps_the_front_matter_record_in_charge():
+    # The same text with page regions: the tagger's model failing to load is not
+    # "no layout", so the front-matter record still owns the fields and the
+    # doc-info may not fill them.
+    contents = _docx_contents(_headingless_docx)
+    contents.region_summaries.append(RegionSummary(page=1, index=0, label="text", bbox=None))
+
+    paper = await _fast_post_parse(
+        contents, "x.pdf", ocr_metadata={"title": "Properties Title", "keywords": ["memory"]}
+    )
+
+    codes = _codes(paper.contents.processing_warnings)
+    assert WarningCode.FRONT_TAGGER_UNAVAILABLE in codes
+    assert WarningCode.FRONT_MATTER_NOT_READ not in codes
+    assert not paper.metadata.title
+    assert not paper.metadata.keywords
+
+
+async def test_an_epub_takes_its_metadata_from_the_package_and_never_asks_the_tagger():
+    from bibr.input.epub_native import EpubParser
+
+    contents = _segmented(EpubParser(_epub_bytes()))
+    assert contents.preparsed_metadata is not None
+
+    paper = await _fast_post_parse(contents, "x.epub")
+
+    codes = _codes(paper.contents.processing_warnings)
+    assert paper.metadata.title == "Memory and Attention in Toddlers"
+    assert [a.family for a in paper.metadata.authors] == ["Ruiz"]
+    assert WarningCode.FRONT_MATTER_NOT_READ not in codes
+    assert WarningCode.FRONT_TAGGER_UNAVAILABLE not in codes
+    assert WarningCode.FRONT_TAGGER_FLAGGED not in codes
 
 
 def _ctx(resources, config, *papers):

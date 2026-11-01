@@ -1552,9 +1552,18 @@ async def post_parse(
                 on_references_ready=on_references_ready,
                 memory_mode=memory_mode,
             )
+            # A fast run on an input with no page layout (a DOCX) has no
+            # tagger reading to put in the front-matter record's place, so the
+            # record owns nothing: the title and abstract come from the
+            # document's headings and sections, and any doc-info can fill.
+            front_matter_not_read = any(
+                warning.code == WarningCode.FRONT_MATTER_NOT_READ
+                for warning in contents.processing_warnings
+            )
             metadata_ownership_scoped = bool(
                 contents.preparsed_metadata is None
                 and contents.front_matter_resolution is not None
+                and not front_matter_not_read
                 and (not no_llm or any(issue.blocking for issue in front_matter_issues))
             )
             metadata_abstained = bool(

@@ -60,8 +60,8 @@ _OTHER_OBJECTS = {
     ("models.py", "super().model_copy"),
     # References, their candidates and matches, the model's responses, the
     # doc-info parse: lists handed to helpers that are not the paper's.
-    ("clients/llm.py", "authors.authors"),
-    ("clients/llm.py", "title_kw.keywords"),
+    ("schemas.py", "authors.authors"),
+    ("schemas.py", "title_kw.keywords"),
     ("enrich/references.py", "cand.authors"),
     ("enrich/references.py", "ref.authors"),
     ("export/json_export.py", "m.authors"),
