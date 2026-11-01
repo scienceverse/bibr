@@ -9,10 +9,10 @@ from bibr.structure.citation_matcher import (
 )
 
 
-def _ref(bib_id, authors, year=2020, year_suffix=None, is_in_press=False):
+def _ref(bib_id, authors, year=2020, year_suffix=None, is_in_press=False, title=""):
     return PaperReference(
         bib_id=bib_id,
-        title="",
+        title=title,
         first_page=None,
         volume=None,
         authors=authors,
@@ -196,6 +196,69 @@ class TestSameFirstAuthorYearDisambiguation:
         sents = [_sent(0, "As shown (Smith, 2020) this works.")]
         out = detect_author_year_xrefs(sents, refs)
         assert out == []
+
+
+class TestDuplicateReferences:
+    """A work listed twice is one work: citing it is not ambiguous."""
+
+    TITLE = "Gradient methods for sparse signal recovery"
+
+    def test_listed_twice_links_first_entry(self):
+        from bibr.structure.citation_matcher import match_with_ambiguous
+
+        refs = [
+            _ref(4, "Lindqvist, K.", title=self.TITLE),
+            _ref(9, "Brandt, H.", title="Another paper entirely"),
+            _ref(15, "Lindqvist, K.", title=self.TITLE),
+        ]
+        xrefs, ambiguous = match_with_ambiguous([_sent(0, "As shown (Lindqvist, 2020).")], refs)
+        assert [x.xref_id for x in xrefs] == [4]
+        assert ambiguous == []
+
+    def test_case_and_diacritics_do_not_hide_a_repeat(self):
+        refs = [
+            _ref(1, "Müller, K.", title=self.TITLE),
+            _ref(2, "MULLER, K.", title=self.TITLE.upper()),
+        ]
+        sents = [_sent(0, "As shown (Muller, 2020) here.")]
+        assert [x.xref_id for x in detect_author_year_xrefs(sents, refs)] == [1]
+
+    def test_different_titles_stay_ambiguous(self):
+        from bibr.structure.citation_matcher import match_with_ambiguous
+
+        refs = [
+            _ref(1, "Lindqvist, K.", title=self.TITLE),
+            _ref(2, "Lindqvist, K.", title="A second study by the same author"),
+        ]
+        xrefs, ambiguous = match_with_ambiguous([_sent(0, "As shown (Lindqvist, 2020).")], refs)
+        assert xrefs == []
+        assert ambiguous[0].candidate_bib_ids == [1, 2]
+
+    def test_entries_without_a_title_are_not_merged(self):
+        refs = [_ref(1, "Lindqvist, K."), _ref(2, "Lindqvist, K.")]
+        out = detect_author_year_xrefs([_sent(0, "As shown (Lindqvist, 2020).")], refs)
+        assert out == []
+
+    def test_repeat_under_another_year_suffix_stays_citable_by_it(self):
+        refs = [
+            _ref(1, "Lindqvist, K.", year_suffix="a", title=self.TITLE),
+            _ref(2, "Lindqvist, K.", year_suffix="b", title=self.TITLE),
+        ]
+        sents = [
+            _sent(0, "As shown (Lindqvist, 2020a) here."),
+            _sent(1, "As shown (Lindqvist, 2020b) here."),
+        ]
+        out = detect_author_year_xrefs(sents, refs)
+        assert [(x.text_id, x.xref_id) for x in out] == [(0, 1), (1, 2)]
+
+    def test_index_keeps_every_entry_in_refs_list(self):
+        from bibr.structure.citation_matcher import _build_ref_index
+
+        refs, by_year, _ = _build_ref_index(
+            [_ref(1, "Lindqvist, K.", title=self.TITLE), _ref(2, "Lindqvist, K.", title=self.TITLE)]
+        )
+        assert [r.bib_id for r in refs] == [1, 2]
+        assert [r.bib_id for r in by_year[(2020, None)]] == [1]
 
 
 class TestYearSuffix:

@@ -237,6 +237,15 @@ def _family_keys_for(family: str) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
+def _fold(text: str | None) -> str:
+    """Lowercase and strip diacritics, for comparing printed strings."""
+    return "".join(
+        char
+        for char in unicodedata.normalize("NFKD", (text or "").lower())
+        if not unicodedata.combining(char)
+    )
+
+
 @dataclass(frozen=True)
 class _RefIdx:
     bib_id: int
@@ -245,6 +254,10 @@ class _RefIdx:
     families: tuple[str, ...]
     is_in_press: bool
     family_key_sets: tuple[frozenset[str], ...]
+    # Authors, year and the first 40 characters of the title, folded: two
+    # entries with the same key are one work listed twice. None when the entry
+    # prints no author or no title, so nothing vouches that it is a repeat.
+    duplicate_key: tuple[str, int | None, str] | None = None
 
 
 def _build_ref_index(
@@ -254,13 +267,22 @@ def _build_ref_index(
     dict[tuple[int | None, str | None], list[_RefIdx]],
     list[_RefIdx],
 ]:
-    """Build (refs, year_suffix_index, in_press_refs) from PaperReference list."""
+    """Build (refs, year_suffix_index, in_press_refs) from PaperReference list.
+
+    A work listed twice (the same authors, year and title start) is indexed
+    once, under its first entry: a citation of it is not ambiguous. Entries
+    that print different year suffixes ("2018a", "2018b") stay apart, since
+    a citation names one of them by its suffix.
+    """
     refs: list[_RefIdx] = []
     in_press: list[_RefIdx] = []
+    by_year: dict[tuple[int | None, str | None], list[_RefIdx]] = defaultdict(list)
+    listed: set[tuple[tuple[str, int | None, str], str | None]] = set()
     for r in references:
         is_in_press = bool(getattr(r, "is_in_press", False) or r.year == 0)
         year = None if r.year in (0, None) else r.year
         families = tuple(extract_families(r.authors))
+        authors, title = _fold(r.authors).strip(), _fold(r.title).strip()[:40]
         idx = _RefIdx(
             bib_id=r.bib_id,
             year=year,
@@ -268,14 +290,17 @@ def _build_ref_index(
             families=families,
             is_in_press=is_in_press,
             family_key_sets=tuple(frozenset(_family_keys_for(f)) for f in families),
+            duplicate_key=(authors, year, title) if authors and title else None,
         )
         refs.append(idx)
+        if idx.duplicate_key is not None:
+            slot = (idx.duplicate_key, idx.year_suffix)
+            if slot in listed:
+                continue
+            listed.add(slot)
+        by_year[(idx.year, idx.year_suffix)].append(idx)
         if is_in_press:
             in_press.append(idx)
-
-    by_year: dict[tuple[int | None, str | None], list[_RefIdx]] = defaultdict(list)
-    for ref_idx in refs:
-        by_year[(ref_idx.year, ref_idx.year_suffix)].append(ref_idx)
     return refs, by_year, in_press
 
 
