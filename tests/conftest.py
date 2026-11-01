@@ -546,3 +546,18 @@ def _block_non_loopback_sockets(monkeypatch, request):
         )
         monkeypatch.setattr(socket, "getaddrinfo", _guarded_getaddrinfo(socket.getaddrinfo))
         monkeypatch.setattr(socket, "gethostbyname", _guarded_gethostbyname(socket.gethostbyname))
+
+
+@pytest.fixture(autouse=True)
+def _no_pinned_cache_lookups(monkeypatch, request):
+    """A file cached at a pinned commit is not served from the developer's real HF cache.
+
+    ``hf_download_or_cached`` returns a file the cache holds at a full commit
+    hash without asking the Hub (``bibr.utils.hf_cache``). Unit tests stub the
+    download to see what is fetched, so a hit in the real cache would hide it
+    and make the result depend on the machine. tests/test_hf_cache.py restores
+    the real lookup against a cache it builds.
+    """
+    if request.node.get_closest_marker("slow") is not None:
+        return
+    monkeypatch.setattr("bibr.utils.hf_cache.cached_at_pinned_revision", lambda *args: None)

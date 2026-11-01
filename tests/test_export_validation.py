@@ -728,6 +728,35 @@ def test_ref_count_matched_ok():
     assert "VAL_REF_COUNT_MISMATCH" not in _codes(validate_export(p))
 
 
+def _references_section_without_rows(bib_state: str | None) -> dict:
+    p = _base()
+    p["section"] = [
+        {
+            "section_id": 1,
+            "header": "References",
+            "section_type": "references",
+            "parent_section_id": None,
+        }
+    ]
+    p["text"] = [{"text_id": i, "section_id": 1, "text": f"ref {i}"} for i in range(10)]
+    p["bib"] = []
+    if bib_state is not None:
+        p["extraction"] = {"fields": {"bib": {"state": bib_state}}}
+    return p
+
+
+def test_ref_count_mismatch_is_not_raised_when_references_were_not_attempted():
+    """Refs off (or --no-llm) leaves the bib table empty on purpose; that is no finding."""
+    p = _references_section_without_rows("not_attempted")
+    assert "VAL_REF_COUNT_MISMATCH" not in _codes(validate_export(p))
+
+
+@pytest.mark.parametrize("state", ["extracted", "absent", "abstained", "failed", None])
+def test_ref_count_mismatch_still_fires_when_references_were_tried(state):
+    p = _references_section_without_rows(state)
+    assert "VAL_REF_COUNT_MISMATCH" in _codes(validate_export(p))
+
+
 def test_statement_orphan():
     p = _base()
     p["text"] = [

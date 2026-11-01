@@ -167,3 +167,76 @@ def test_the_shipped_bundles_still_load(repo, revision, filename):
     bundle = safe_joblib_load(path)
     assert type(bundle["model"]).__name__ == "HistGradientBoostingClassifier"
     assert type(bundle["vectorizer"]).__name__ == "DictVectorizer"
+
+
+def _bundle_written_by_another_sklearn(tmp_path, monkeypatch):
+    """A joblib bundle that unpickles as if scikit-learn had been upgraded since it was written."""
+    np = pytest.importorskip("numpy")
+    ensemble = pytest.importorskip("sklearn.ensemble")
+    feature_extraction = pytest.importorskip("sklearn.feature_extraction")
+    sklearn_base = pytest.importorskip("sklearn.base")
+
+    rows = [{"a": float(i), "b": float(i % 3)} for i in range(40)]
+    dv = feature_extraction.DictVectorizer(sparse=False)
+    x = dv.fit_transform(rows)
+    model = ensemble.HistGradientBoostingClassifier(max_iter=5, random_state=0)
+    model.fit(x, np.arange(len(rows)) % 2)
+    path = tmp_path / "bundle.joblib"
+    joblib.dump({"model": model, "vectorizer": dv, "feature_keys": ["a", "b"]}, path)
+    # What the estimators compare their stored version with on load.
+    monkeypatch.setattr(sklearn_base, "__version__", "0.0.1")
+    return path
+
+
+def test_a_bundle_from_another_sklearn_release_loads_without_the_version_warning(
+    tmp_path, monkeypatch
+):
+    import warnings
+
+    from sklearn.exceptions import InconsistentVersionWarning
+
+    path = _bundle_written_by_another_sklearn(tmp_path, monkeypatch)
+
+    # The premise: an unguarded load of this bundle does warn.
+    with warnings.catch_warnings(record=True) as unguarded:
+        warnings.simplefilter("always")
+        joblib.load(path)
+    assert any(issubclass(w.category, InconsistentVersionWarning) for w in unguarded)
+
+    with warnings.catch_warnings(record=True) as guarded:
+        warnings.simplefilter("always")
+        loaded = safe_joblib_load(path)
+    assert not [w for w in guarded if issubclass(w.category, InconsistentVersionWarning)]
+    assert type(loaded["model"]).__name__ == "HistGradientBoostingClassifier"
+
+
+def test_the_sklearn_version_filter_is_scoped_to_that_one_warning():
+    import warnings
+
+    from bibr.utils.safe_pickle import _quiet_sklearn_version_warnings
+
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        with _quiet_sklearn_version_warnings():
+            warnings.warn("something else entirely", UserWarning, stacklevel=1)
+    assert [str(w.message) for w in seen] == ["something else entirely"]
+
+
+def test_the_sklearn_version_filter_does_not_leak_past_the_load():
+    import warnings
+
+    from sklearn.exceptions import InconsistentVersionWarning
+
+    from bibr.utils.safe_pickle import _quiet_sklearn_version_warnings
+
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        with _quiet_sklearn_version_warnings():
+            pass
+        warnings.warn(
+            InconsistentVersionWarning(
+                estimator_name="Est", current_sklearn_version="2", original_sklearn_version="1"
+            ),
+            stacklevel=1,
+        )
+    assert len(seen) == 1

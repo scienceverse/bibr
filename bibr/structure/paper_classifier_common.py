@@ -88,7 +88,8 @@ def load_paper_classifier(
     if runtime == "onnx":
         from bibr.structure.paper_classifier_onnx import OnnxPaperClassifierModel
 
-        logger.info("Paper classifier runtime: onnx (%s)", bundle)
+        logger.info("Paper classifier runtime: onnx")
+        logger.debug("Paper classifier bundle: %s", bundle)
         return OnnxPaperClassifierModel(bundle, device=device)
 
     from bibr.structure.paper_classifier_model import PaperClassifierModel

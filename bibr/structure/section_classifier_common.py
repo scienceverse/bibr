@@ -160,7 +160,8 @@ def load_section_classifier(
     if runtime == "onnx":
         from bibr.structure.section_classifier_onnx import OnnxSectionClassifierModel
 
-        logger.info("Section classifier runtime: onnx (%s)", bundle)
+        logger.info("Section classifier runtime: onnx")
+        logger.debug("Section classifier bundle: %s", bundle)
         return OnnxSectionClassifierModel(bundle, device=device)
 
     from bibr.structure.section_classifier_model import SectionClassifierModel

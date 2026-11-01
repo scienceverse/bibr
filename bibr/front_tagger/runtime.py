@@ -242,7 +242,8 @@ def load_front_tagger(
                 )
             else:
                 tagger = OnnxFrontTagger(bundle, device)
-                logger.info("Front-matter tagger loaded from %s", bundle)
+                logger.info("Front-matter tagger loaded")
+                logger.debug("Front-matter tagger bundle: %s", bundle)
         except Exception as exc:  # noqa: BLE001 - optional model, never fatal
             logger.warning(
                 "Front-matter tagger %s unavailable (%s); the run goes on without it", model_id, exc
