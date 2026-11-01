@@ -414,10 +414,68 @@ class _Candidate:
     has_et_al: bool
     is_in_press: bool = False
     surface_kind: str = "standard"
+    # Whether only the year follows the last family cited, so that nothing
+    # says the work has more authors than are named
+    bare: bool = True
 
 
-def _find_candidates(text: str, text_id: int) -> list[_Candidate]:
-    """Walk a sentence; return all parenthetical + narrative citation candidates."""
+# "et al." as the papers print it. A citation with this after its family cites
+# a work of several authors, and the exact spelling is not the same in any two
+# of them.
+_ET_AL_RE = re.compile(r"(?<!\w)et[\s.,\-\u2010\u2011]*al(?!\w)", re.IGNORECASE)
+# The same said in other words and languages: "and colleagues", "y cols.",
+# "e col.", "et coll.", "und Kollegen", "e.a.", "dkk.", "ve ark.", "и др."
+_AND_OTHERS_RE = re.compile(
+    r"(?<!\w)(?:"
+    r"and\s+(?:colleagues|others|co-?authors)"
+    r"|y\s+(?:cols?|colaboradores|otros)"
+    r"|e\s+(?:coll?s?|colaboradores|collaboratori|outros|altri)"
+    r"|et\s+(?:coll?|collab\.?|autres)"
+    r"|und\s+(?:kollegen|mitarbeiter|andere)"
+    r"|u\.\s?a"
+    r"|en\s+(?:collega[\u2019']?s|anderen)"
+    r"|e\.\s?a"
+    r"|dkk"
+    r"|ve\s+ark"
+    r"|и\s+др"
+    r")(?!\w)",
+    re.IGNORECASE,
+)
+
+
+def _has_et_al(text: str, *, rules: bool = False) -> bool:
+    """Whether a citation's names are followed by "et al." or its equivalent.
+
+    The literal "et al" only, unless *rules*: "et. al.", "etal", a non-breaking
+    space or a line break inside it, "and colleagues" and the same in other
+    languages.
+    """
+    if not rules:
+        return "et al" in text.lower()
+    return bool(_ET_AL_RE.search(text) or _AND_OTHERS_RE.search(text))
+
+
+def _is_bare(before_year: str) -> bool:
+    """Whether the text before a citation's year ends with its last family.
+
+    "(Smith, 2010)" and "Smith (2010)" do; "(Smith et. al., 2010)", "Smith and
+    colleagues (2010)" and "Smith J (2010)" have more words after the name,
+    which may say the work has more authors than are named.
+    """
+    last_end = None
+    for match in _FAMILY_MULTI_RE.finditer(before_year):
+        last_end = match.end()
+    if last_end is None:
+        return False
+    return re.search(r"[^\W\d_]", before_year[last_end:]) is None
+
+
+def _find_candidates(text: str, text_id: int, *, rules: bool = False) -> list[_Candidate]:
+    """Walk a sentence; return all parenthetical + narrative citation candidates.
+
+    *rules* reads "et al." in more of the ways it is written and notes whether
+    a citation is bare (``_Candidate.bare``).
+    """
     out: list[_Candidate] = []
 
     # Parenthetical: split on ";" for multi-cites.
@@ -455,7 +513,8 @@ def _find_candidates(text: str, text_id: int) -> list[_Candidate]:
                             year=int(ym.group("year")),
                             year_suffix=ym.group("suffix"),
                             families=families,
-                            has_et_al="et al" in sub.lower(),
+                            has_et_al=_has_et_al(sub, rules=rules),
+                            bare=_is_bare(_YEAR_RE.split(sub, maxsplit=1)[0]),
                         )
                     )
             else:
@@ -468,8 +527,9 @@ def _find_candidates(text: str, text_id: int) -> list[_Candidate]:
                         year=None,
                         year_suffix=None,
                         families=families,
-                        has_et_al="et al" in sub.lower(),
+                        has_et_al=_has_et_al(sub, rules=rules),
                         is_in_press=True,
+                        bare=_is_bare(_IN_PRESS_RE.split(sub, maxsplit=1)[0]),
                     )
                 )
 
@@ -538,8 +598,9 @@ def _find_candidates(text: str, text_id: int) -> list[_Candidate]:
                     year=int(yr.group(1)),
                     year_suffix=yr.group(2),
                     families=families,
-                    has_et_al="et al" in prefix.lower(),
+                    has_et_al=_has_et_al(prefix, rules=rules),
                     surface_kind=surface_kind,
+                    bare=surface_kind == "standard" and _is_bare(prefix),
                 )
             )
 
@@ -589,8 +650,9 @@ def _find_candidates(text: str, text_id: int) -> list[_Candidate]:
                 year=None,
                 year_suffix=None,
                 families=families,
-                has_et_al="et al" in prefix.lower(),
+                has_et_al=_has_et_al(prefix, rules=rules),
                 is_in_press=True,
+                bare=_is_bare(prefix),
             )
         )
 
@@ -782,8 +844,8 @@ def _tie_key(ref: _RefIdx, cand: _Candidate, reading: _Reading) -> tuple[bool, i
 
     Returns ``(count_ok, order_ok, any_author)``. ``count_ok``: the number of
     listed authors fits how the citation names them: "et al." needs three or
-    more, one cited family needs a single-author reference, otherwise the
-    counts are equal. ``order_ok``: cited families that match the listed author
+    more, one cited family needs a single-author reference (when nothing but
+    the year follows it), otherwise the counts are equal. ``order_ok``: cited families that match the listed author
     at the same position. ``any_author``: cited families that match any listed
     author. Names are compared as *reading* compares them, the reading the tie
     arose in.
@@ -793,7 +855,9 @@ def _tie_key(ref: _RefIdx, cand: _Candidate, reading: _Reading) -> tuple[bool, i
     if cand.has_et_al:
         count_ok = len(listed) >= 3
     elif len(cited) == 1:
-        count_ok = len(listed) == 1
+        # A single author is the answer only to a bare "Family (year)": the
+        # words after the name may be a way of saying "and the others"
+        count_ok = len(listed) == 1 and cand.bare
     else:
         count_ok = len(listed) == len(cited)
     order_ok = sum(
@@ -1052,7 +1116,7 @@ def match_with_candidates(
     for sent in body_sents:
         if not sent.text:
             continue
-        for cand in _find_candidates(sent.text, sent.text_id):
+        for cand in _find_candidates(sent.text, sent.text_id, rules=rules):
             ref, tied, reading = _match_reading(cand, by_year, in_press_refs, rules=rules)
             surface_evidence = (
                 ("separated_possessive", "work_noun_bridge")
@@ -1257,8 +1321,8 @@ def resolve_citations_by_rules(
     for text_id, text in cites:
         secondary = list(_SECONDARY_SOURCE_RE.finditer(text))
         cited_text = text[secondary[-1].end() :] if secondary else text
-        candidates = _find_candidates(cited_text, text_id) or _find_candidates(
-            f"({cited_text})", text_id
+        candidates = _find_candidates(cited_text, text_id, rules=True) or _find_candidates(
+            f"({cited_text})", text_id, rules=True
         )
         linked: set[int] = set()
         for cand in candidates:

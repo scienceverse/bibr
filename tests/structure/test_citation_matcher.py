@@ -436,6 +436,77 @@ class TestTieBreak:
         assert _rule_xrefs(sents, refs) == []
 
 
+class TestAndOthersMarkers:
+    """ "et al." is written many ways, and each of them says more than one author."""
+
+    _REFS = [
+        _ref(1, "Okafor, C.", year=2016, title="One author"),
+        _ref(2, "Okafor, C., Lund, K., & Brandt, H.", year=2016, title="Three authors"),
+    ]
+
+    @pytest.mark.parametrize(
+        "marker",
+        [
+            "et al.",
+            "et. al.",
+            "et.al.",
+            "etal",
+            "et\u00a0al.",
+            "et\nal.",
+            "et al",
+            "y cols.",
+            "y colaboradores",
+            "e col.",
+            "et coll.",
+            "und Kollegen",
+            "dkk.",
+            "ve ark.",
+            "and colleagues",
+            "and others",
+        ],
+    )
+    def test_the_marker_takes_the_reference_with_several_authors(self, marker):
+        sents = [_sent(0, f"As shown (Okafor {marker}, 2016) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, self._REFS)] == [2]
+
+    def test_a_bare_citation_still_takes_the_single_author_reference(self):
+        sents = [_sent(0, "As shown (Okafor, 2016) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, self._REFS)] == [1]
+
+    def test_a_narrative_citation_still_takes_the_single_author_reference(self):
+        sents = [_sent(0, "As Okafor (2016) showed, this holds.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, self._REFS)] == [1]
+
+    def test_words_after_the_name_that_are_no_marker_decline_the_single_author_win(self):
+        # "Okafor, C." might be a reference to the three-author work or to the
+        # one-author work: the initial after the name settles nothing.
+        sents = [_sent(0, "As shown (Okafor, C., 2016) here.")]
+        assert _rule_xrefs(sents, self._REFS) == []
+
+    def test_the_page_after_the_year_is_no_word_after_the_name(self):
+        sents = [_sent(0, "As shown (Okafor, 2016, p. 12) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, self._REFS)] == [1]
+
+    def test_the_words_before_the_name_are_no_word_after_it(self):
+        sents = [_sent(0, "As shown (see also Okafor, 2016) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, self._REFS)] == [1]
+
+    def test_off_by_default_only_the_literal_et_al_counts(self):
+        from bibr.structure import citation_matcher as cm
+
+        (plain,) = cm._find_candidates("As (Okafor etal, 2016).", 1)
+        (rules,) = cm._find_candidates("As (Okafor etal, 2016).", 1, rules=True)
+        assert (plain.has_et_al, rules.has_et_al) == (False, True)
+        (literal,) = cm._find_candidates("As (Okafor et al., 2016).", 1)
+        assert literal.has_et_al is True
+
+    def test_et_al_inside_a_word_is_no_marker(self):
+        from bibr.structure import citation_matcher as cm
+
+        (cand,) = cm._find_candidates("As (Ostetalova, 2016) said.", 1, rules=True)
+        assert cand.has_et_al is False
+
+
 class TestLooseFamilyMatch:
     """Prefix reading of a family name, tried only when no exact key matches."""
 
