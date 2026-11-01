@@ -68,6 +68,12 @@ async def test_degraded_result_is_not_cached_and_the_next_request_reruns(tmp_pat
         (_payload(warnings=[{"code": "FRONT_MATTER_NOT_READ", "message": "m"}]), True),
         # A tagger that did not load may load on the next request.
         (_payload(warnings=[{"code": "FRONT_TAGGER_UNAVAILABLE", "message": "m"}]), False),
+        # A trained classifier that did not answer a fast run (nothing took over) may answer
+        # the next time. Where an LLM tier took over, the same outage is a final answer.
+        (_payload(warnings=[{"code": "SECTION_CLASSIFIER_FAILED", "message": "m"}]), False),
+        (_payload(warnings=[{"code": "PAPER_CLASSIFICATION_FAILED", "message": "m"}]), False),
+        (_payload(warnings=[{"code": "SECTION_CLASSIFIER_DEGRADED", "message": "m"}]), True),
+        (_payload(warnings=[{"code": "PAPER_CLASSIFIER_DEGRADED", "message": "m"}]), True),
         (
             _payload(
                 validation={

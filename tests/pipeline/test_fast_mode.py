@@ -227,22 +227,67 @@ async def test_the_credit_statement_still_recovers_authors_in_fast_mode():
     assert "VAL_AUTHOR_CREDIT_RECOVERED" in {i.code for i in ext.core.validation_issues}
 
 
-async def test_an_unavailable_paper_classifier_leaves_the_class_empty(monkeypatch):
+def _classifier_extractor(model_id="some/model"):
+    ext = _core_extractor(SkippedLlmClient())
+    ext.core._settings = GlobalSettings(ml={"paper_classifier_model_id": model_id})
+    ext.core._explicit_classifier_runtime = False
+    return ext
+
+
+@pytest.mark.parametrize(
+    ("outage", "reason"),
+    [
+        (AsyncMock(return_value=None), "trained classifier unavailable"),
+        (AsyncMock(side_effect=RuntimeError("gone")), "trained classifier raised RuntimeError"),
+    ],
+)
+async def test_an_unavailable_paper_classifier_leaves_the_class_empty_and_the_export_not_final(
+    monkeypatch, outage, reason
+):
+    from bibr.processing_warnings import NOT_FINAL_CODES
     from bibr.structure import paper_classifier
 
-    ext = _core_extractor(SkippedLlmClient())
-    ext.core._settings = GlobalSettings(ml={"paper_classifier_model_id": "some/model"})
-    ext.core._explicit_classifier_runtime = False
-    monkeypatch.setattr(paper_classifier, "classify_paper_async", AsyncMock(return_value=None))
+    ext = _classifier_extractor()
+    monkeypatch.setattr(paper_classifier, "classify_paper_async", outage)
 
     await ext.extract_core_metadata()
 
     warnings = {w.code: w.message for w in ext.contents.processing_warnings}
     assert warnings[WarningCode.PAPER_CLASSIFIER_DEGRADED] == (
-        "trained classifier unavailable; fast mode has no LLM fallback"
+        f"{reason}; fast mode has no LLM fallback"
     )
-    assert WarningCode.PAPER_CLASSIFICATION_FAILED not in warnings
+    # With no LLM to cover the gap, an outage is a failure, not a final answer.
+    assert warnings[WarningCode.PAPER_CLASSIFICATION_FAILED] == (
+        "the trained classifier did not answer and fast mode has no LLM fallback"
+    )
+    assert warnings.keys() & NOT_FINAL_CODES == {WarningCode.PAPER_CLASSIFICATION_FAILED}
     assert not ext.metadata.paper_type
+
+
+async def test_a_paper_with_nothing_to_classify_is_not_a_classifier_outage(monkeypatch):
+    from bibr.structure import paper_classifier
+
+    ext = _classifier_extractor()
+    classify = AsyncMock(return_value=None)
+    monkeypatch.setattr(paper_classifier, "classify_paper_async", classify)
+
+    result = await ext.core._classify_paper("", "", CoreMetadataLLM(authors=[]), "text")
+
+    classify.assert_not_awaited()
+    assert result[0] == ""
+    assert ext.contents.processing_warnings == []
+
+
+async def test_a_paper_classifier_set_to_none_leaves_the_class_empty_and_final(monkeypatch):
+    """Turning the classifier off is a setting: the same input gives the same export."""
+    ext = _classifier_extractor(model_id=None)
+
+    result = await ext.core._classify_paper(
+        "A Title", "An abstract.", CoreMetadataLLM(authors=[]), "text"
+    )
+
+    assert result == ("", "", "", None, None)
+    assert ext.contents.processing_warnings == []
 
 
 async def test_a_low_confidence_paper_type_is_not_escalated(monkeypatch):
@@ -328,19 +373,31 @@ async def test_section_escalation_is_not_sent_to_the_llm(monkeypatch):
     assert answered == [(CanonicalSection.ETHICS, 0.85, None, "llm")]
 
 
-@pytest.mark.parametrize("model_id", [None, "some/model"])
-async def test_headers_with_no_trained_model_keep_their_alias_prior(monkeypatch, model_id):
+_HEADERS = ["limitations of existing theories", "wholly unfamiliar heading"]
+
+
+@pytest.mark.parametrize(
+    ("model_id", "warning", "final"),
+    [
+        # A setting, not an outage: the alias table is the classifier, and the answer is final.
+        (None, "SECTION_CLASSIFIER_DEGRADED_FAST_WARNING", True),
+        # A classifier that is set up and did not load, with no LLM tier to take over.
+        ("some/model", "SECTION_CLASSIFIER_FAILED_WARNING", False),
+    ],
+)
+async def test_headers_with_no_trained_model_keep_their_alias_prior(
+    monkeypatch, model_id, warning, final
+):
     from bibr.config import Settings
-    from bibr.structure.section_classifier import SECTION_CLASSIFIER_DEGRADED_FAST_WARNING
+    from bibr.processing_warnings import NOT_FINAL_CODES
+    from bibr.structure import section_classifier
 
     monkeypatch.setattr(Settings.ml, "section_classifier_model_id", model_id)
     sc, calls = await _trained_model_gives_unknown(monkeypatch, model_available=False)
     warnings: list = []
 
     results = await sc.classify_headers_batch_async(
-        ["limitations of existing theories", "wholly unfamiliar heading"],
-        llm_client=SkippedLlmClient(),
-        degradation_warnings=warnings,
+        _HEADERS, llm_client=SkippedLlmClient(), degradation_warnings=warnings
     )
 
     assert calls["llm"] == 0
@@ -349,8 +406,53 @@ async def test_headers_with_no_trained_model_keep_their_alias_prior(monkeypatch,
         (CanonicalSection.UNKNOWN, 0.0, None, None),
     ]
     # One warning, however many places noticed the missing tier.
-    assert warnings == [SECTION_CLASSIFIER_DEGRADED_FAST_WARNING]
-    assert warnings[0].code == WarningCode.SECTION_CLASSIFIER_DEGRADED
+    assert warnings == [getattr(section_classifier, warning)]
+    assert (warnings[0].code in NOT_FINAL_CODES) is not final
+
+
+async def _classify_with_the_model_set_up(sc, *, classifier_resources=None):
+    from bibr.run_mode import fast_settings
+
+    settings = fast_settings(GlobalSettings(ml={"section_classifier_model_id": "some/model"}))
+    warnings: list = []
+    results = await sc.classify_headers_batch_async(
+        _HEADERS,
+        llm_client=SkippedLlmClient(),
+        classifier_resources=classifier_resources,
+        settings=settings,
+        degradation_warnings=warnings,
+    )
+    return results, warnings
+
+
+async def test_a_trained_classifier_that_fails_to_classify_is_a_failure_in_fast(monkeypatch):
+    from bibr.structure.section_classifier import SECTION_CLASSIFIER_FAILED_WARNING
+
+    sc, calls = await _trained_model_gives_unknown(monkeypatch, model_available=True)
+
+    async def exploding(items, **kwargs):
+        raise RuntimeError("out of memory")
+
+    monkeypatch.setattr(sc, "_classify_trained_batch", exploding)
+
+    results, warnings = await _classify_with_the_model_set_up(sc)
+
+    assert calls["llm"] == 0
+    assert results[0] == (CanonicalSection.DISCUSSION, 0.6, None, "alias_prior")
+    assert warnings == [SECTION_CLASSIFIER_FAILED_WARNING]
+
+
+async def test_a_degraded_serve_classifier_resource_is_a_failure_in_fast():
+    from bibr.structure import section_classifier as sc
+
+    class Degraded:
+        async def classify_sections(self, items):
+            return None
+
+    results, warnings = await _classify_with_the_model_set_up(sc, classifier_resources=Degraded())
+
+    assert results[0] == (CanonicalSection.DISCUSSION, 0.6, None, "alias_prior")
+    assert warnings == [sc.SECTION_CLASSIFIER_FAILED_WARNING]
 
 
 # ---------------------------------------------------------------------------
@@ -1081,14 +1183,14 @@ _PAGE = (
 )
 
 
-def _page_pdf_and_regions() -> tuple[bytes, list[dict]]:
+def _page_pdf_and_regions(page=_PAGE) -> tuple[bytes, list[dict]]:
     import textwrap
 
     from tests import test_pipeline_smoke as smoke
 
     lines, regions = [], []
     baseline = 750.0
-    for index, (label, size, text) in enumerate(_PAGE):
+    for index, (label, size, text) in enumerate(page):
         wrapped = textwrap.wrap(text, 85)
         lines += [(72, baseline - 12 * n, size, row) for n, row in enumerate(wrapped)]
         last = baseline - 12 * (len(wrapped) - 1)
@@ -1144,13 +1246,17 @@ class _ReferenceParser:
         ][: len(segments)]
 
 
-async def fast_page_run(tmp_path, monkeypatch, *, tagger=None):
+async def fast_page_run(
+    tmp_path, monkeypatch, *, tagger=None, page=_PAGE, configure=None, classifier_loaders=None
+):
     """The pipeline's stages over a one-page PDF in fast mode, with the models faked.
 
     The layout detector, the sentence splitter, the reference segmenter and parser
     and the front-matter tagger (*tagger*; ``None`` is a bundle that would not load)
     are stand-ins; nothing else is, and the LLM is not wired. No trained classifier
-    is configured (the suite's default), so the paper type stays empty.
+    is configured (the suite's default), so the paper type stays empty. A test that
+    wants them sets their ids on the pipeline's settings with *configure* and gives
+    *classifier_loaders*, the ``(paper, section)`` loaders of the managed classifiers.
     """
     import dataclasses
 
@@ -1165,10 +1271,25 @@ async def fast_page_run(tmp_path, monkeypatch, *, tagger=None):
     monkeypatch.setattr(ref_extractor, "_get_ner_segmenter", lambda *_a: _ReferenceSegmenter())
     monkeypatch.setattr(ref_extractor, "_get_ner_parser", lambda *_a, **_k: _ReferenceParser())
 
-    pdf, regions = _page_pdf_and_regions()
+    pdf, regions = _page_pdf_and_regions(page)
     path = tmp_path / "page.pdf"
     path.write_bytes(pdf)
     pipeline = LocalPipeline(crossref=False)
+    classifiers = None
+    if configure is not None:
+        configure(pipeline.settings)
+    if classifier_loaders is not None:
+        from bibr.pipeline.classifier_resources import ClassifierResources
+
+        paper_loader, section_loader = classifier_loaders
+        classifiers = ClassifierResources(
+            pipeline.settings,
+            memory_mode=pipeline.memory_mode,
+            managed_vllm_fraction=0.0,
+            cuda_available=False,
+            paper_loader=paper_loader,
+            section_loader=section_loader,
+        )
     rm = ResourceManager(
         memory_mode=pipeline.memory_mode,
         ocr_backend=pipeline.ocr_backend,
@@ -1178,6 +1299,7 @@ async def fast_page_run(tmp_path, monkeypatch, *, tagger=None):
         settings=pipeline.settings,
         layout=_PageLayout(regions),
         segmenter=_SentenceSegmenter(),
+        classifier_resources=classifiers,
     )
     rm._ocr = smoke.FakeOcr()
     rm.ensure_front_tagger = lambda settings=None: tagger
@@ -1290,3 +1412,123 @@ async def test_a_fast_run_whose_tagger_did_not_load_says_so(tmp_path, monkeypatc
     assert [b["title"] for b in result["bib"]] == ["Attention in toddlers", "Memory span"]
     assert result["metadata"]["funding_statement"].startswith("This work was supported by")
     assert [e["verbatim"] for e in result["eq"]] == ["t(28) = 3.42", "p < .001"]
+
+
+# Two headings the alias table does not know, so the trained section classifier decides them.
+_ODD = (
+    ("paragraph_title", 14, "Wholly unfamiliar heading"),
+    ("text", 10, "Participants gave written consent before the first session."),
+    ("paragraph_title", 14, "Another odd heading"),
+    ("text", 10, "Nothing else was recorded in the study."),
+)
+_PAGE_WITH_ODD_HEADINGS = _PAGE[:-3] + _ODD + _PAGE[-3:]
+
+
+def _both_classifiers_set_up(settings):
+    settings.ml.paper_classifier_model_id = "some/paper-model"
+    settings.ml.section_classifier_model_id = "some/section-model"
+
+
+class _SectionModel:
+    """A trained section classifier that is sure of one odd heading and not of the other."""
+
+    def classify_batch(self, items):
+        scores = {"wholly unfamiliar heading": 0.6, "another odd heading": 0.4}
+        return [
+            SimpleNamespace(
+                score=scores.get(item.heading, 0.0),
+                canonical_type=CanonicalSection.ETHICS,
+                is_top_level=True,
+            )
+            for item in items
+        ]
+
+
+class _PaperModel:
+    def classify_batch(self, items):
+        return [
+            SimpleNamespace(
+                oecd_l1="Social Sciences",
+                oecd_l1_score=0.8,
+                oecd_l2="Psychology",
+                oecd_l2_score=0.7,
+                paper_type="empirical",
+                paper_type_score=0.95,
+            )
+            for _item in items
+        ]
+
+
+def _loader(model):
+    """A managed classifier's loader: the model, or an error when it is an exception."""
+
+    def load(_model_id, _revision, _device):
+        if isinstance(model, Exception):
+            raise model
+        return model
+
+    return load
+
+
+def _section_types(result) -> dict[str, str]:
+    return {s["header"]: s["section_type"] for s in result["section"]}
+
+
+async def test_fast_run_with_trained_classifiers_keeps_their_answers_at_the_fast_threshold(
+    tmp_path, monkeypatch
+):
+    from bibr.export.json_export import validate_export
+    from bibr.serve.deployments.pipeline import _is_final_result
+
+    reached = _count_llm_reaches(monkeypatch)
+
+    result = await fast_page_run(
+        tmp_path,
+        monkeypatch,
+        tagger=PageTagger(),
+        page=_PAGE_WITH_ODD_HEADINGS,
+        configure=_both_classifiers_set_up,
+        classifier_loaders=(_loader(_PaperModel()), _loader(_SectionModel())),
+    )
+
+    assert reached == []
+    assert validate_export(result) == []
+    # 0.6 is under the 0.9 a run with an LLM to escalate to asks for, and over fast mode's 0.5.
+    types = _section_types(result)
+    assert types["Wholly unfamiliar heading"] == "ethics"
+    assert types["Another odd heading"] == "unknown"
+    assert result["metadata"]["paper_type"] == "empirical"
+    codes = _export_codes(result)
+    assert not [c for c in codes if c.endswith("_FAILED") and c != "REF_SEG_FAILED"]
+    assert not [c for c in codes if c.endswith("_DEGRADED")]
+    assert _is_final_result(result)
+
+
+async def test_fast_run_whose_trained_classifiers_did_not_load_is_not_final(tmp_path, monkeypatch):
+    from bibr.export.json_export import validate_export
+    from bibr.serve.deployments.pipeline import _is_final_result
+
+    reached = _count_llm_reaches(monkeypatch)
+    outage = RuntimeError("the bundle is not there")
+
+    result = await fast_page_run(
+        tmp_path,
+        monkeypatch,
+        tagger=PageTagger(),
+        page=_PAGE_WITH_ODD_HEADINGS,
+        configure=_both_classifiers_set_up,
+        classifier_loaders=(_loader(outage), _loader(outage)),
+    )
+
+    assert reached == []
+    assert validate_export(result) == []
+    codes = _export_codes(result)
+    assert codes.count("SECTION_CLASSIFIER_FAILED") == 1
+    assert codes.count("PAPER_CLASSIFICATION_FAILED") == 1
+    assert "FRONT_TAGGER_UNAVAILABLE" not in codes
+    # Nothing took the classifiers' place, so a retry may do better: serve must not cache it.
+    assert not _is_final_result(result)
+    assert not result["metadata"].get("paper_type")
+    assert result["extraction"]["fields"]["paper_type"]["state"] == "failed"
+    # The heading keeps no model label; it folds into the Results section it sits under.
+    assert _section_types(result)["Wholly unfamiliar heading"] == "results"

@@ -3745,11 +3745,13 @@ class CoreMetadataExtractor:
         if result is None:
             fallback_failure: str | None = None
             skipped = is_skipped(self.llm_client)
+            no_fallback = False
             if self._settings.llm.merged_core_metadata:
                 fallback = llm_metadata
             elif skipped:
                 # Fast mode has no LLM to fall back on: the class stays empty.
                 fallback = PaperClassificationLLM()
+                no_fallback = True
             else:
                 try:
                     fallback = await self.llm_client.extract_paper_classification(
@@ -3788,6 +3790,13 @@ class CoreMetadataExtractor:
                     WarningCode.PAPER_CLASSIFICATION_FAILED,
                     f"{fallback_failure}: neither the trained classifier nor the LLM fallback "
                     "answered",
+                )
+            elif no_fallback and not empty_input:
+                # The classifier was set up and had a paper to read, so an empty class is an
+                # outage, not an answer: with no LLM to cover it the export is not final.
+                self._record_metadata_warning(
+                    WarningCode.PAPER_CLASSIFICATION_FAILED,
+                    "the trained classifier did not answer and fast mode has no LLM fallback",
                 )
             pt, l1, l2 = self._validate_classification(
                 oecd_domain=fallback.oecd_domain,

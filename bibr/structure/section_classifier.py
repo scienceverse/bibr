@@ -50,12 +50,26 @@ SECTION_CLASSIFIER_DEGRADED_WARNING = ProcessingWarning(
     "The trained section classifier is configured but did not answer; the LLM tier classified "
     "the section headers",
 )
-# The same, for a fast run, which has no LLM tier to take over.
+# A fast run has no LLM tier to take over. With no trained classifier set up, the
+# alias table and its prior are the whole classifier, which is a setting, not a
+# failure: the export stays final.
 SECTION_CLASSIFIER_DEGRADED_FAST_WARNING = ProcessingWarning(
     WarningCode.SECTION_CLASSIFIER_DEGRADED,
-    "No trained section classifier answered and fast mode has no LLM tier; headers the alias "
+    "No trained section classifier is set up and fast mode has no LLM tier; headers the alias "
     "table does not settle keep their alias prior or stay unknown",
 )
+# With one set up that did not answer (an outage, a failed load), nothing took its
+# place, so the export is not final and serve does not cache it.
+SECTION_CLASSIFIER_FAILED_WARNING = ProcessingWarning(
+    WarningCode.SECTION_CLASSIFIER_FAILED,
+    "The trained section classifier is configured but did not answer, and fast mode has no LLM "
+    "tier; headers the alias table does not settle keep their alias prior or stay unknown",
+)
+
+
+def _note_once(degradation_warnings: list[ProcessingWarning] | None, warning: ProcessingWarning):
+    if degradation_warnings is not None and warning not in degradation_warnings:
+        degradation_warnings.append(warning)
 
 
 def _note_section_classifier_degraded(
@@ -67,16 +81,13 @@ def _note_section_classifier_degraded(
 
     Whatever the cause — a core install without torch, weights that failed
     to load, a serve-side classifier resource in its degraded state, or an
-    inference error — the LLM tier decides instead (*llm_tier*; a fast run has
-    none), and the export must say so rather than look like a healthy run.
+    inference error — the LLM tier decides instead (*llm_tier*). A fast run has
+    none, so nothing covered the gap and the failure is recorded as one.
     """
-    warning = (
-        SECTION_CLASSIFIER_DEGRADED_WARNING
-        if llm_tier
-        else SECTION_CLASSIFIER_DEGRADED_FAST_WARNING
+    _note_once(
+        degradation_warnings,
+        SECTION_CLASSIFIER_DEGRADED_WARNING if llm_tier else SECTION_CLASSIFIER_FAILED_WARNING,
     )
-    if degradation_warnings is not None and warning not in degradation_warnings:
-        degradation_warnings.append(warning)
 
 
 def _normalize_header_echo(header: str | None) -> str:
@@ -941,7 +952,9 @@ async def classify_headers_batch_async(
                 llm_results_unique = await _classify_llm_batch(unique_texts, **llm_kwargs)
             else:
                 # No trained model and no LLM: the alias prior below is all there is.
-                _note_section_classifier_degraded(degradation_warnings, llm_tier=False)
+                # A configured model that did not answer was recorded above.
+                if not effective.ml.section_classifier_model_id:
+                    _note_once(degradation_warnings, SECTION_CLASSIFIER_DEGRADED_FAST_WARNING)
                 llm_results_unique = [(CanonicalSection.UNKNOWN, 0.0)] * len(unique_texts)
             unique_map_by_text = {
                 text: (canon, score, None, "llm" if canon != CanonicalSection.UNKNOWN else None)

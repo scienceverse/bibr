@@ -39,6 +39,7 @@ class WarningCode(StrEnum):
     PAGE_DPI_REDUCED = "PAGE_DPI_REDUCED"
     # Classifiers
     SECTION_CLASSIFIER_DEGRADED = "SECTION_CLASSIFIER_DEGRADED"
+    SECTION_CLASSIFIER_FAILED = "SECTION_CLASSIFIER_FAILED"
     SECTION_CLASSIFIER_LLM_FAILED = "SECTION_CLASSIFIER_LLM_FAILED"
     IMPLICIT_SECTIONS_LLM_FAILED = "IMPLICIT_SECTIONS_LLM_FAILED"
     PAPER_CLASSIFIER_DEGRADED = "PAPER_CLASSIFIER_DEGRADED"
@@ -131,6 +132,9 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     "DPI was rendered at a lower DPI for layout and OCR.",
     WarningCode.SECTION_CLASSIFIER_DEGRADED: "The trained section classifier did not answer; "
     "the LLM classified the section headers.",
+    WarningCode.SECTION_CLASSIFIER_FAILED: "A fast run's trained section classifier did not answer "
+    "(it failed to load or to classify), and fast mode has no LLM tier to take over; the headers "
+    "the alias table does not settle keep their alias prior or stay unknown.",
     WarningCode.SECTION_CLASSIFIER_LLM_FAILED: "The LLM section classification call failed; "
     "the headers it was asked about keep an alias prior or stay unknown.",
     WarningCode.IMPLICIT_SECTIONS_LLM_FAILED: "The LLM front-matter section detection call "
@@ -262,6 +266,7 @@ NOT_FINAL_CODES: frozenset[WarningCode] = frozenset(
         WarningCode.OCR_REGION_FAILED,
         WarningCode.OCR_PAGE_FAILED,
         WarningCode.OCR_TEXT_LAYER_FALLBACK,
+        WarningCode.SECTION_CLASSIFIER_FAILED,
         WarningCode.SECTION_CLASSIFIER_LLM_FAILED,
         WarningCode.IMPLICIT_SECTIONS_LLM_FAILED,
         WarningCode.PAPER_CLASSIFICATION_FAILED,
