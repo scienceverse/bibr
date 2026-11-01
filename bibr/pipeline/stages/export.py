@@ -151,6 +151,7 @@ def _build_extraction(ctx: PipelineContext, paper, fs=None) -> dict:
             "native_text_formula_number": (
                 getattr(ctx.settings.ocr, "native_text_formula_number", False) is True
             ),
+            "mode": ctx.config.mode,
         },
         "timings": timings,
         "usage": build_usage_export(paper.llm_usage_labels or None),

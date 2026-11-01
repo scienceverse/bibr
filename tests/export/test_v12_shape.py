@@ -92,7 +92,7 @@ def test_gate_findings_are_not_mirrored_into_warnings():
 
 
 def test_schema_version_is_at_the_root(export_payload):
-    assert export_payload["schema_version"] == "12.3"
+    assert export_payload["schema_version"] == "12.4"
     assert "schema_version" not in export_payload.get("metadata", {})
 
 
@@ -841,3 +841,104 @@ def test_floats_export_their_printed_label_and_xrefs_how_they_resolved(demo_pape
     }
     assert tiers[rows[("figure", "Figure 1")]["xref_id"]] == "position"
     assert tiers[unresolved["xref_id"]] == "label"
+
+
+# ── 12.4: extraction.settings.mode and regions[].read_as ─────────────────
+
+
+def _recorded_settings_and_llm(**config):
+    """``extraction.settings`` and ``extraction.llm`` as ``ExportStage`` builds them for a run
+    with this ``RunConfig``."""
+    from bibr.pipeline.context import RunConfig
+    from bibr.pipeline.stages.export import _build_extraction
+    from tests.test_export_units import TestExtractionProvenance, _minimal_paper
+
+    ctx = TestExtractionProvenance()._ctx(timings={})
+    ctx.config = RunConfig(**config)
+    extraction = _build_extraction(ctx, _minimal_paper())
+    return extraction["settings"], extraction["llm"]
+
+
+@pytest.mark.parametrize(
+    ("config", "mode", "has_llm"),
+    [
+        ({"mode": "fast"}, "fast", False),
+        ({}, "full", True),
+        ({"mode": "full"}, "full", True),
+        # A structure-only run is a full run that skips its LLM stages: its export says
+        # "full" and tells it apart by the missing engine.
+        ({"no_llm": True}, "full", False),
+    ],
+    ids=["fast", "default", "full", "no-llm"],
+)
+def test_the_export_records_the_run_mode(config, mode, has_llm):
+    from bibr.export.json_export import export_paper_to_json, validate_export
+    from tests.test_export_units import _extraction_block, _minimal_paper
+
+    settings, llm = _recorded_settings_and_llm(**config)
+    assert settings["mode"] == mode
+    assert (llm is not None) is has_llm
+
+    paper = _minimal_paper()
+    paper.extraction = _extraction_block(settings=settings, llm=llm)
+    result = export_paper_to_json(paper)
+    assert result["extraction"]["settings"]["mode"] == mode
+    assert validate_export(result) == []
+
+
+def test_the_run_mode_is_left_out_when_absent_and_is_one_of_two_values():
+    from pydantic import ValidationError
+
+    from bibr.export.models import ExtractionSettingsExport
+
+    base = {"ref_seg": "geom", "ref_parse": "ner", "crossref_enrich": False, "consolidate": "off"}
+    # Absent, not null: a 12.3 export has no such key and neither does a run made outside
+    # the pipeline.
+    assert "mode" not in ExtractionSettingsExport(**base).model_dump()
+    assert "mode" not in ExtractionSettingsExport(**base, mode=None).model_dump()
+    for mode in ("fast", "full"):
+        assert ExtractionSettingsExport(**base, mode=mode).model_dump()["mode"] == mode
+    with pytest.raises(ValidationError):
+        ExtractionSettingsExport(**base, mode="auto")
+
+
+def test_a_region_names_how_the_text_layer_read_it_only_when_it_did():
+    from pydantic import ValidationError
+
+    from bibr.export.models import RegionExport
+
+    base = {"page": 1, "index": 0, "label": "text", "bbox": [0.0, 0.0, 1.0, 1.0]}
+    assert "read_as" not in RegionExport(**base).model_dump()
+    for read_as in ("text", "table_rebuilt", "formula_plain", "unread"):
+        assert RegionExport(**base, read_as=read_as).model_dump()["read_as"] == read_as
+    with pytest.raises(ValidationError):
+        RegionExport(**base, read_as="ocr")
+
+
+def test_both_12_4_keys_are_optional_in_the_strict_schema():
+    """A 12.3 export carries neither key, so the schemas must not require them."""
+    from bibr.export.schema_artifact import build_export_schema
+
+    defs = build_export_schema()["$defs"]
+    assert "mode" not in defs["ExtractionSettingsExport"]["required"]
+    assert defs["ExtractionSettingsExport"]["properties"]["mode"]["enum"] == ["fast", "full", None]
+    assert "read_as" not in defs["RegionExport"]["required"]
+    assert defs["RegionExport"]["properties"]["read_as"]["enum"] == [
+        "text",
+        "table_rebuilt",
+        "formula_plain",
+        "unread",
+        None,
+    ]
+
+
+def test_a_12_3_export_without_the_new_keys_still_reads(demo_paper):
+    """The reader takes an export written before 12.4, and the strict schema keeps naming the
+    current version only."""
+    from bibr.export import PaperExport, PaperExportReader, export_paper_to_json
+
+    older = {**export_paper_to_json(demo_paper), "schema_version": "12.3"}
+    assert "mode" not in older["extraction"].get("settings", {})
+    assert PaperExportReader.model_validate(older).schema_version == "12.3"
+    with pytest.raises(ValueError, match="schema_version"):
+        PaperExport.model_validate(older)

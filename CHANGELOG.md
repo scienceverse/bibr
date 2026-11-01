@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — export schema 12.4 (additive)
+
+The export moves to schema `12.4`, which adds two optional keys; every 12.x
+export, 12.3 included, is still valid input for the 12.x reader. A consumer that
+validates with the 12.3 strict schema rejects 12.4 exports (the version
+constant) and needs the 12.4 schema.
+
+- `extraction.settings.mode` is `fast` or `full`: the run mode that produced
+  the export. A `--no-llm` run is `full` with `extraction.llm` null.
+- The opt-in `extraction.regions[]` rows carry `read_as` when the text-layer
+  OCR backend read the region: `text`, `table_rebuilt`, `formula_plain` or
+  `unread`. It is omitted on every other route.
+
+Both keys are omitted when absent, so an export made outside the pipeline, or
+by an earlier version, carries neither.
+
 ### Changed
 
 - With LLM section escalation on (the default), the section classifier now

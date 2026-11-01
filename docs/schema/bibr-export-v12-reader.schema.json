@@ -1716,6 +1716,19 @@
           "title": "Crossref Enrich",
           "type": "boolean"
         },
+        "mode": {
+          "default": null,
+          "description": "The run mode that produced this export: 'fast' (no LLM call: the local models read the title, authors, abstract, references and sections) or 'full' (the configured LLM is used). A --no-llm run is 'full' with extraction.llm null. Omitted before schema 12.4.",
+          "examples": [
+            "fast",
+            "full"
+          ],
+          "title": "Mode",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "native_text_formula_number": {
           "default": null,
           "description": "Whether formula_number regions could be read from the PDF text layer (OCR_NATIVE_TEXT_FORMULA_NUMBER). Omitted before schema 12.3.",
@@ -3471,6 +3484,21 @@
           "default": null,
           "description": "Region text as OCR returned it.",
           "title": "Raw Ocr Content",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "read_as": {
+          "default": null,
+          "description": "How the text-layer OCR backend (--ocr text-layer, or the automatic fallback to it) read the region: 'text' (the PDF's text), 'table_rebuilt' (a table rebuilt from glyph positions: merged cells and multi-line cells may be split), 'formula_plain' (a display formula as plain text, not LaTeX) or 'unread' (no usable text in the layer: the region is empty). Omitted on every other route, and before schema 12.4.",
+          "examples": [
+            "text",
+            "table_rebuilt",
+            "formula_plain",
+            "unread"
+          ],
+          "title": "Read As",
           "type": [
             "string",
             "null"

@@ -24,11 +24,21 @@ from typing import Annotated, Any, ClassVar, Literal, Union, cast, get_args, get
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 from pydantic.fields import FieldInfo
 
-_SCHEMA_VERSION = "12.3"
+_SCHEMA_VERSION = "12.4"
 
 
 # ---------------------------------------------------------------------------
-# Pydantic v12.3 export schema — single source of truth for validation
+# Pydantic v12.4 export schema — single source of truth for validation
+#
+# v12.4 (vs 12.3) — additive:
+#   - New ``extraction.settings.mode`` (``fast`` or ``full``): the run mode
+#     that produced the export. A ``--no-llm`` run is ``full`` with
+#     ``extraction.llm`` null.
+#   - New ``extraction.regions[].read_as`` (``text``, ``table_rebuilt``,
+#     ``formula_plain`` or ``unread``): how the text-layer OCR backend read
+#     the region. Omitted on every other route.
+#   Both keys are omitted when absent, so every 12.3 export is still a valid
+#   12.4 reader input.
 #
 # v12.3 (vs 12.2) — additive:
 #   - New ``extraction.regions[].source`` (``text_layer`` or ``ocr``: where the
@@ -1298,9 +1308,19 @@ class RegionExport(BaseModel):
         "consensus or escalation recognizer whose reading replaced it. Omitted for other regions, "
         "and before schema 12.3.",
     )
+    read_as: Literal["text", "table_rebuilt", "formula_plain", "unread"] | None = Field(
+        default=None,
+        description="How the text-layer OCR backend (--ocr text-layer, or the automatic "
+        "fallback to it) read the region: 'text' (the PDF's text), 'table_rebuilt' (a table "
+        "rebuilt from glyph positions: merged cells and multi-line cells may be split), "
+        "'formula_plain' (a display formula as plain text, not LaTeX) or 'unread' (no usable "
+        "text in the layer: the region is empty). Omitted on every other route, and before "
+        "schema 12.4.",
+    )
 
-    # A reader of a 12.2 export finds neither key (both are 12.3).
-    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("source", "ocr_backend")
+    # A reader of a 12.2 export finds none of these keys (source and ocr_backend are 12.3,
+    # read_as is 12.4).
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("source", "ocr_backend", "read_as")
 
     @model_serializer(mode="wrap")
     def _omit_absent(self, handler):
@@ -1926,11 +1946,20 @@ class ExtractionSettingsExport(BaseModel):
         description="Whether formula_number regions could be read from the PDF text layer "
         "(OCR_NATIVE_TEXT_FORMULA_NUMBER). Omitted before schema 12.3.",
     )
+    mode: Literal["fast", "full"] | None = Field(
+        default=None,
+        description="The run mode that produced this export: 'fast' (no LLM call: the local "
+        "models read the title, authors, abstract, references and sections) or 'full' (the "
+        "configured LLM is used). A --no-llm run is 'full' with extraction.llm null. Omitted "
+        "before schema 12.4.",
+    )
 
-    # A reader of a 12.2 export finds neither key (both are 12.3).
+    # A reader of a 12.2 export finds none of these keys (the two flags are 12.3, mode is
+    # 12.4).
     OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = (
         "native_text_header_footer",
         "native_text_formula_number",
+        "mode",
     )
 
     @model_serializer(mode="wrap")
@@ -2290,7 +2319,7 @@ class PaperExport(BaseModel):
         "(bibr batch writes its corpus-unique id, the name of the JSON file). A converter uses "
         "the name of source.file_name without its extension.",
     )
-    schema_version: Literal["12.3"] = Field(
+    schema_version: Literal["12.4"] = Field(
         description="Export schema version. Its presence at the root is how readers "
         "distinguish v11 and later from all earlier versions.",
     )

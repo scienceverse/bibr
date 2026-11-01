@@ -1378,6 +1378,7 @@ async def test_a_fast_run_end_to_end(tmp_path, monkeypatch):
     assert validate_export(result) == []
     PaperExport.model_validate(result)
     assert result["extraction"]["llm"] is None
+    assert result["extraction"]["settings"]["mode"] == "fast"
     assert "usage" not in result["extraction"]
 
     codes = _export_codes(result)
