@@ -1015,6 +1015,41 @@ def _match_any_author(pool: list[_RefIdx], cand: _Candidate) -> _RefIdx | None:
     return None
 
 
+# Words an organisation's initials may skip: "Council for Reef Studies" is
+# "CfRS" or "CRS".
+_ORG_INITIALS_SKIP = frozenset(
+    {"of", "the", "for", "and", "de", "la", "des", "du", "del", "in", "on", "et", "und", "y", "e"}
+)
+
+
+def _match_by_initials(pool: list[_RefIdx], cand: _Candidate) -> _RefIdx | None:
+    """An organisation cited by its initials ("BCS"): the one reference of the
+    year whose first author spells them out ("Bureau of Coastal Survey").
+
+    The cited name must read as initials: at least two capitals, and at least
+    half of its letters. A name such as "Ng" never reaches "Nguyen Giang".
+    """
+    if len(cand.families) != 1:
+        return None
+    letters = [char for char in cand.families[0] if char.isalpha()]
+    capitals = sum(1 for char in letters if char.isupper())
+    if not 2 <= len(letters) <= 8 or capitals < 2 or capitals * 2 < len(letters):
+        return None
+    cited = _fold("".join(letters))
+    hits = []
+    for ref in pool:
+        words = re.findall(r"[^\W\d_]+", _fold(ref.families[0])) if ref.families else []
+        if len(words) < 2:
+            continue
+        spelled = {
+            "".join(word[0] for word in words),
+            "".join(word[0] for word in words if word not in _ORG_INITIALS_SKIP),
+        }
+        if cited in spelled:
+            hits.append(ref)
+    return hits[0] if len(hits) == 1 else None
+
+
 # "Harlow (2010, citado en Mendoza et al., 2015)": the work to link is the one the
 # paper read, named after the marker.
 _SECONDARY_SOURCE_RE = re.compile(
@@ -1034,7 +1069,8 @@ def resolve_citations_by_rules(
     citation_text)`` is read as Tier 2 reads a sentence: a bare "Smith, 2010"
     is read as if parenthesised. Each citation it names is matched with
     ``_match``, then, failing that, to the one reference of the year that lists
-    every cited family in any position. A citation that names no reference
+    every cited family in any position, or that an organisation's initials
+    stand for. A citation that names no reference
     uniquely links nothing. Returns ``(text_id, citation_text, bib_ids)`` per
     input, ``bib_ids`` sorted.
     """
@@ -1052,7 +1088,8 @@ def resolve_citations_by_rules(
         for cand in candidates:
             ref, _tied = _match(cand, by_year, in_press_refs)
             if ref is None and not _tied:
-                ref = _match_any_author(_year_pool(cand, by_year, in_press_refs), cand)
+                pool = _year_pool(cand, by_year, in_press_refs)
+                ref = _match_any_author(pool, cand) or _match_by_initials(pool, cand)
             if ref is not None:
                 linked.add(ref.bib_id)
         resolved.append((text_id, text, tuple(sorted(linked))))

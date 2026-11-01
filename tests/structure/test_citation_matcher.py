@@ -752,6 +752,26 @@ class TestResolveCitationsByRules:
         ]
         assert self._resolve(refs, "Brandt (2018)")[0][2] == ()
 
+    def test_organisation_cited_by_its_initials(self):
+        refs = [
+            _ref(1, "Bureau of Coastal Survey", year=2022, title="A"),
+            _ref(2, "Council for Reef Studies", year=2022, title="B"),
+            _ref(3, "Okafor, C.", year=2022, title="C"),
+        ]
+        out = self._resolve(refs, "(BCS, 2022)", "e.g., CfRS, 2022", "CRS (2022)")
+        assert [bib_ids for _t, _c, bib_ids in out] == [(1,), (2,), (2,)]
+
+    def test_initials_must_read_as_initials_and_be_unique(self):
+        refs = [
+            _ref(1, "Nguyen Giang, Pham Binh", year=2022, title="A"),
+            _ref(2, "Bureau of Coastal Survey", year=2022, title="B"),
+            _ref(3, "Board of Cartographic Studies", year=2022, title="C"),
+            _ref(4, "Okafor", year=2022, title="D"),
+        ]
+        # lower-case "Ng", an ambiguous "BCS", and a one-word author link nothing
+        out = self._resolve(refs, "Ng (2022)", "BCS (2022)", "OK (2022)")
+        assert [bib_ids for _t, _c, bib_ids in out] == [(), (), ()]
+
     def test_unknown_citation_links_nothing(self):
         refs = [_ref(1, "Okafor, C.", year=2018, title="A")]
         assert self._resolve(refs, "Sato (2018)", "Okafor (2012)")[0][2] == ()
