@@ -563,6 +563,13 @@ class BaseSentenceSegmenter:
         Processes texts in sub-batches of SEGMENTER_SUB_BATCH_SIZE to prevent
         GPU OOM when many texts are batched together (large papers or
         concurrent requests sharing the same GPU).
+
+        The texts are batched shortest first and the results put back in input
+        order. wtpsplit pads every text of a call to the longest one in it, so
+        in document order a single long paragraph made its 31 neighbours run at
+        its length; sorted, a sub-batch holds texts of similar length. A break's
+        score moves a little with the batch (about 0.002), so a break right at
+        the threshold can flip; almost every text keeps its sentences.
         """
         if not texts:
             return []
@@ -571,10 +578,17 @@ class BaseSentenceSegmenter:
         if len(texts) > sub_batch:
             logger.debug("Sub-batching %d texts into groups of %d", len(texts), sub_batch)
 
-        results: list[list[str]] = []
-        for start in range(0, len(texts), sub_batch):
-            batch = texts[start : start + sub_batch]
-            results.extend(self._split_batch_with_retry(batch))
+        # Stable sort on character length (a cheap stand-in for token count).
+        order = sorted(
+            range(len(texts)),
+            key=lambda i: len(texts[i]) if isinstance(texts[i], str | bytes) else 0,
+        )
+        results: list[list[str]] = [[] for _ in texts]
+        for start in range(0, len(order), sub_batch):
+            positions = order[start : start + sub_batch]
+            split = self._split_batch_with_retry([texts[i] for i in positions])
+            for position, sentences in zip(positions, split, strict=True):
+                results[position] = sentences
 
         return results
 

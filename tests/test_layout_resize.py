@@ -47,3 +47,47 @@ def test_resize_kernels_agree_with_threaded_x_pass(monkeypatch):
     monkeypatch.setattr(mod, "_RESIZE_THREADS", 8)
     assert np.array_equal(mod.resize_bicubic_no_antialias(img, 96, 80), serial_u8)
     assert np.array_equal(mod.resize_bicubic_float(img.astype(np.float32), 96, 80), serial_f)
+
+
+def _u8_reference(img: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
+    """The float32 passes with rounding between them: what the uint8 resize replaced."""
+    if img.shape[1:] == (out_h, out_w):
+        return img.copy()
+    passes = mod._bicubic_passes(img.astype(np.float32), out_h, out_w, round_between=True)
+    return mod._to_uint8(passes).astype(np.uint8)
+
+
+def test_u8_planar_resize_is_bit_identical_to_the_float_passes():
+    """The block-wise uint8 resize returns exactly the float32 passes' bytes.
+
+    Random noise is the hard case (bicubic overshoot clips at 0 and 255 on almost
+    every pixel). The shapes cover a page-size downscale, ratios that do not divide,
+    an upscale, a block-size boundary, single rows and columns, and no resize at all.
+    """
+    rng = np.random.default_rng(13)
+    shapes = [
+        (2339, 1654, 800, 800),
+        (97, 61, 40, 24),
+        (30, 50, 64, 96),
+        (33, 31, 32, 33),
+        (65, 64, 64, 65),
+        (5, 7, 3, 4),
+        (1, 9, 2, 3),
+        (33, 1, 8, 8),
+        (64, 64, 64, 64),
+    ]
+    for in_h, in_w, out_h, out_w in shapes:
+        img = rng.integers(0, 256, size=(3, in_h, in_w), dtype=np.uint8)
+        ours = mod.resize_bicubic_no_antialias(img, out_h, out_w)
+        assert ours.dtype == np.uint8
+        assert np.array_equal(ours, _u8_reference(img, out_h, out_w)), (in_h, in_w, out_h, out_w)
+
+
+def test_u8_planar_resize_accepts_non_contiguous_views():
+    """``preprocess_images`` hands the resize a transposed view of the PIL buffer."""
+    rng = np.random.default_rng(14)
+    hwc = rng.integers(0, 256, size=(150, 110, 3), dtype=np.uint8)
+    chw = hwc.transpose(2, 0, 1)
+    assert not chw.flags["C_CONTIGUOUS"]
+    ours = mod.resize_bicubic_no_antialias(chw, 48, 40)
+    assert np.array_equal(ours, _u8_reference(np.ascontiguousarray(chw), 48, 40))

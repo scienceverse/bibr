@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
-import os
 import threading
 from collections import defaultdict
 from pathlib import Path
@@ -53,6 +52,7 @@ from PIL import Image
 
 from bibr.exceptions import ConfigurationError
 from bibr.utils.ml_runtime import ONNX_MODEL, read_onnx_manifest
+from bibr.utils.onnx_providers import available_cpu_count
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ _CUBIC_A = -0.75
 # Column scaling is the slow pass (strided gathers): split it into row blocks
 # across at most this many threads. Each block runs the exact per-tap loop,
 # so threaded output is bit-identical to the serial one.
-_RESIZE_THREADS = min(8, os.cpu_count() or 1)
+_RESIZE_THREADS = min(8, available_cpu_count())
 _RESIZE_ROWS_PER_THREAD = 256
 
 
@@ -209,11 +209,73 @@ def resize_bicubic_no_antialias(chw: np.ndarray, out_h: int, out_w: int) -> np.n
     implementation does, moves pixels by up to 20 levels and changes which
     regions the detector finds. Rounding and clamping between the passes brings
     it back to within one level of the torch path.
+
+    A uint8 input takes :func:`_resize_u8_planar`, which computes the same
+    float32 products and sums in the same order, so its output is bit for bit
+    that of the float32 passes (:func:`_bicubic_passes`, kept for other dtypes).
     """
+    if chw.dtype == np.uint8:
+        if chw.shape[1:] == (out_h, out_w):
+            return chw.copy()
+        return _resize_u8_planar(chw, out_h, out_w)
     src = chw.astype(np.float32)
     if chw.shape[1:] != (out_h, out_w):
         src = _bicubic_passes(src, out_h, out_w, round_between=True)
     return _to_uint8(src).astype(np.uint8)
+
+
+# Rows of the planar uint8 resize handled at a time: small enough that the float32
+# temporaries of a block stay in cache, which is most of the speed.
+_U8_RESIZE_BLOCK = 32
+
+
+def _u8_pass(src: np.ndarray, axis: int, idx: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    """One bicubic pass of ``resize_bicubic_no_antialias`` over a ``(C, H, W)`` uint8 array.
+
+    ``axis`` is 2 for the x pass and 1 for the y pass; ``idx`` and ``weights`` are the
+    ``(out, 4)`` tap plan of :func:`_resize_plan`. Per element this does what
+    :func:`_bicubic_passes` does: float32 tap times float32 weight, summed over taps
+    0 to 3 in order, rounded half to even and clipped to [0, 255]. The gathers move
+    uint8, the sums run block by block, and the result is uint8 again.
+    """
+    channels, height, width = src.shape
+    n_out = idx.shape[0]
+    if axis == 2:
+        out = np.empty((channels, height, n_out), dtype=np.uint8)
+        extent = height
+    else:
+        out = np.empty((channels, n_out, width), dtype=np.uint8)
+        extent = n_out
+    for lo in range(0, extent, _U8_RESIZE_BLOCK):
+        hi = min(lo + _U8_RESIZE_BLOCK, extent)
+        block = src[:, lo:hi, :] if axis == 2 else src
+        acc = np.empty((channels, hi - lo, n_out if axis == 2 else width), dtype=np.float32)
+        term = np.empty_like(acc)
+        for k in range(4):
+            if axis == 2:
+                taps = np.take(block, idx[:, k], axis=2)
+                weight = weights[:, k]
+            else:
+                taps = np.take(block, idx[lo:hi, k], axis=1)
+                weight = weights[lo:hi, k, None]
+            if k == 0:
+                np.multiply(taps, weight, out=acc)
+            else:
+                np.multiply(taps, weight, out=term)
+                acc += term
+        np.rint(acc, out=acc)
+        np.clip(acc, 0, 255, out=acc)
+        out[:, lo:hi, :] = acc
+    return out
+
+
+def _resize_u8_planar(chw: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
+    """Bicubic ``(C, H, W)`` uint8 resize, x pass then y pass, rounding between the passes."""
+    _, in_h, in_w = chw.shape
+    ix, wx = _resize_plan(in_w, out_w)
+    iy, wy = _resize_plan(in_h, out_h)
+    planes = np.ascontiguousarray(chw)
+    return _u8_pass(_u8_pass(planes, 2, ix, wx), 1, iy, wy)
 
 
 def resize_bicubic_float(chw: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
