@@ -2110,7 +2110,13 @@ def _line_number_column(
 #   beside ten one-glyph stamps, and the page lost its scan route.
 # - tiny: an effective size (Tf size times the matrix scale) and a page-space
 #   box both under _HIDDEN_TEXT_MAX_SIZE_PT.
-# - transparent: a fill alpha of 0 in a filling render mode.
+# - transparent: a fill alpha of 0 in a filling render mode, unless the page's
+#   vector or image ink under it has the shape of its glyphs (_without_ink).
+#   Chromium's PDF writer draws fake-bold text as outlines and sets the words
+#   over them with alpha 0, so that they can be selected: a preprint server's
+#   cover page keeps its title and author names only there. Ink of any other
+#   shape (a band, a rule, a different line) and visible text under it do not
+#   count. Whitespace stays with the words around it.
 # - off the page: a box that misses the CropBox.
 # - background: a light fill (luma >= _HIDDEN_TEXT_MIN_LUMA) whose drawing
 #   changes at most _HIDDEN_TEXT_MAX_SHOWN_SHARE of its box's pixels (beyond
@@ -2151,6 +2157,15 @@ _HIDDEN_TEXT_MIN_LUMA = 0.6
 _HIDDEN_TEXT_BACKGROUND_TOLERANCE = 16
 _HIDDEN_TEXT_MAX_SHOWN_SHARE = 0.01
 _HIDDEN_TEXT_RENDER_SCALE = 1.0
+# Transparent text over its own outlines (_without_ink). On about 37,000 such
+# objects in real PDFs these hide 87, in 3 PDFs. A band behind single letters of
+# 9 pt or more mostly fails the second; at smaller sizes, or with a box the size
+# of each letter, it can pass: at this scale that ink looks like bold.
+_HIDDEN_TEXT_INK_RENDER_SCALE = 4.0
+_HIDDEN_TEXT_MIN_GLYPHS_ON_INK = 0.6
+_HIDDEN_TEXT_MIN_INK_NEAR_GLYPHS = 0.7
+_HIDDEN_TEXT_MIN_BACKGROUND_MARGIN_PX = 16
+_HIDDEN_TEXT_PAINT_COLOURS = ((255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 0, 255))
 _FILLING_RENDER_MODES = frozenset({0, 2, 4, 6})
 _FILL_AND_STROKE_RENDER_MODES = frozenset({2, 6})
 _OVERPRINT_MIN_OVERLAP = 0.5
@@ -2237,6 +2252,7 @@ def _find_hidden_text(
     hidden: list[tuple[tuple, str, _Box | None]] = []
     invisible: list[tuple[tuple, str, _Box | None]] = []
     light: list[tuple[tuple, tuple[int, int, int, int], _Box]] = []
+    transparent: list[tuple[tuple, tuple[int, int, int, int], _Box]] = []
     for entry in objects:
         _parent, obj, matrix = entry
         bounds = _object_bounds(pdfium_c, obj)
@@ -2263,7 +2279,10 @@ def _find_hidden_text(
             if stroke is not None and stroke[3] > 0 and not _is_light(stroke):
                 continue  # outlined in a dark colour: it prints whatever the fill
         if rgba[3] == 0:
-            hidden.append((entry, "transparent", box))
+            if box is not None:
+                transparent.append((entry, rgba, box))
+            else:
+                hidden.append((entry, "transparent", box))
         elif box is not None and _is_light(rgba):
             light.append((entry, rgba, box))
     scan_like: list[bool] = []
@@ -2275,6 +2294,8 @@ def _find_hidden_text(
 
     if light and not covered_as_a_scan():
         hidden.extend(_on_own_colour(pdfium_c, page, light, crop_box))
+    if transparent:
+        hidden.extend(_without_ink(pdfium_c, page, objects, transparent, crop_box))
     taken = {id(entry) for entry, _reason, _box in hidden}
     hidden.extend(_overprints(pdfium_c, page, [e for e in objects if id(e) not in taken]))
     taken = {id(entry) for entry, _reason, _box in hidden}
@@ -2396,6 +2417,105 @@ def _on_own_colour(
         changed = shows.crop((left, top, right, bottom)).histogram()[255]
         if changed <= _HIDDEN_TEXT_MAX_SHOWN_SHARE * (right - left) * (bottom - top):
             hidden.append((entry, "background", box))
+    return hidden
+
+
+def _without_ink(
+    pdfium_c, page, objects: list, transparent: list, crop_box: tuple[float, float, float, float]
+) -> list[tuple[tuple, str, _Box]]:
+    """The *transparent* entries not printed as outlines under them (the transparent reason).
+
+    The page is rendered with its visible text off, so only vector and image
+    ink remains, and again with the transparent text painted in a colour the
+    page hardly uses. An object stays when at least
+    :data:`_HIDDEN_TEXT_MIN_GLYPHS_ON_INK` of its glyph pixels lie on ink and
+    at least :data:`_HIDDEN_TEXT_MIN_INK_NEAR_GLYPHS` of the ink in its box
+    lies within a pixel of a glyph (fake bold is a little wider than the font,
+    and a band also fills the gaps in a letter). Ink is what differs from the
+    most common colour around the box (the box alone can be mostly ink, on one
+    bold letter or a hyphen). On a page that cannot be rendered they all count
+    as hidden.
+    """
+    from PIL import Image, ImageChops, ImageFilter
+
+    def everything() -> list[tuple[tuple, str, _Box]]:
+        return [(entry, "transparent", box) for entry, _rgba, box in transparent]
+
+    set_mode = getattr(pdfium_c, "FPDFTextObj_SetTextRenderMode", None)
+    set_fill = getattr(pdfium_c, "FPDFPageObj_SetFillColor", None)
+    if set_mode is None or set_fill is None:
+        return everything()
+    painted_ids = {id(entry) for entry, _rgba, _box in transparent}
+    saved_modes = []
+    saved_fills = []
+    try:
+        for entry in objects:
+            if id(entry) not in painted_ids:
+                saved_modes.append((entry[1], pdfium_c.FPDFTextObj_GetTextRenderMode(entry[1])))
+                set_mode(entry[1], 3)
+        bare = page.render(scale=_HIDDEN_TEXT_INK_RENDER_SCALE).to_pil().convert("RGB")
+        colour = min(
+            _HIDDEN_TEXT_PAINT_COLOURS,
+            key=lambda c: _changed_pixels(bare, Image.new("RGB", bare.size, c)).histogram()[0],
+        )
+        for entry, rgba, _box in transparent:
+            saved_fills.append((entry[1], rgba))
+            set_fill(entry[1], *colour, 255)
+        painted = page.render(scale=_HIDDEN_TEXT_INK_RENDER_SCALE).to_pil().convert("RGB")
+    except Exception:  # noqa: BLE001 - no render, no evidence of ink
+        logger.debug("Render for the transparent-text check failed", exc_info=True)
+        return everything()
+    finally:
+        for obj, rgba in saved_fills:
+            set_fill(obj, *rgba)
+        for obj, mode in saved_modes:
+            set_mode(obj, mode)
+    glyphs = _changed_pixels(painted, bare)
+    width, height = bare.size
+    rotation = _page_rotation(page)
+    textpage = None
+    hidden = []
+    try:
+        for entry, _rgba, box in transparent:
+            x1, y1, x2, y2 = _pdf_points_to_normalized_bbox(box, crop_box, rotation)
+            left = max(0, min(width - 1, int(x1 / 1000.0 * width)))
+            top = max(0, min(height - 1, int(y1 / 1000.0 * height)))
+            right = max(left + 1, min(width, math.ceil(x2 / 1000.0 * width)))
+            bottom = max(top + 1, min(height, math.ceil(y2 / 1000.0 * height)))
+            margin = max(bottom - top, _HIDDEN_TEXT_MIN_BACKGROUND_MARGIN_PX)
+            around = bare.crop(
+                (
+                    max(0, left - margin),
+                    max(0, top - margin),
+                    min(width, right + margin),
+                    min(height, bottom + margin),
+                )
+            )
+            colours = around.getcolors(around.size[0] * around.size[1])
+            paper = max(colours)[1] if colours else (255, 255, 255)
+            area = (left, top, right, bottom)
+            in_box = bare.crop(area)
+            ink = _changed_pixels(in_box, Image.new("RGB", in_box.size, paper))
+            shape = glyphs.crop(area)
+            near = (
+                glyphs.crop((left - 1, top - 1, right + 1, bottom + 1))
+                .filter(ImageFilter.MaxFilter(3))
+                .crop((1, 1, right - left + 1, bottom - top + 1))
+            )
+            shared = ImageChops.multiply(shape, ink).histogram()[255]
+            if shared and (
+                shared >= _HIDDEN_TEXT_MIN_GLYPHS_ON_INK * shape.histogram()[255]
+                and ImageChops.multiply(near, ink).histogram()[255]
+                >= _HIDDEN_TEXT_MIN_INK_NEAR_GLYPHS * ink.histogram()[255]
+            ):
+                continue
+            if textpage is None:
+                textpage = page.get_textpage()
+            if _text_object_text(pdfium_c, entry[1], textpage).strip():
+                hidden.append((entry, "transparent", box))
+    finally:
+        if textpage is not None:
+            textpage.close()
     return hidden
 
 

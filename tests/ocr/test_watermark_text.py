@@ -87,10 +87,12 @@ def _pdf(
     *,
     pages: int = 1,
     extra_pages: tuple[bytes, ...] = (),
+    resources: bytes = b"",
 ) -> bytes:
     """A PDF of *pages* identical pages, then one page per *extra_pages* content.
 
-    *form* is the content of a Form XObject ``/Fm1``.
+    *form* is the content of a Form XObject ``/Fm1``; *resources* go into each
+    page's resource dictionary as they are.
     """
     objects: list[bytes] = [b"", b""]
 
@@ -119,6 +121,7 @@ def _pdf(
             b"/Resources << /Font << /F1 %d 0 R >>"
             % font
             + xobjects
+            + resources
             + b" >> /Contents %d 0 R >>" % stream
         )
         for stream in [streams[0]] * pages + streams[1:]
