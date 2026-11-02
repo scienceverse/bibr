@@ -1236,3 +1236,318 @@ def test_a_run_of_keys_leaves_a_family_name_four_letters():
     rows = [(a.family, a.affiliation) for a in got.byline.authors]
     # "Sarab" would be "Sar" keyed "a" and "b"; only the "b" goes, as for a single key.
     assert rows == [("Sara", "Univ B"), ("Rios", "Univ A; Univ B")]
+
+
+def _names(inp, tags, *, rules=True):
+    got = assemble(inp, tags, [1.0] * len(tags), rules=rules)
+    return [(a.given, a.family) for a in got.byline.authors]
+
+
+def test_rules_read_the_rest_of_a_name_and_a_last_author_from_print():
+    inp = tagger_input(
+        ("doc_title", "A title here"),
+        (
+            "text",
+            "Keri A. Pekaar, Marise Ph. Born, and Dimitri van der Linden "
+            "Online First Publication, October 4",
+        ),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "A title here"),
+        ("GIVEN", "Keri A."),
+        ("FAMILY", "Pekaar"),
+        ("GIVEN", "Marise Ph."),
+    )
+    assert _names(inp, tags, rules=False) == [("Keri A.", "Pekaar"), ("Marise Ph.", "")]
+    assert _names(inp, tags) == [
+        ("Keri A.", "Pekaar"),
+        ("Marise Ph.", "Born"),
+        ("Dimitri", "van der Linden"),
+    ]
+
+
+def test_rules_read_given_names_before_a_family_name_over_tight_hyphens():
+    inp = tagger_input(
+        ("doc_title", "A title here"),
+        ("text", "Haangik Park1, Myeong‑Ha Hwang1, Prof. Mark Shrime2"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "A title here"),
+        ("GIVEN", "Haangik"),
+        ("FAMILY", "Park"),
+        ("FAMILY", "Hwang"),
+        ("FAMILY", "Shrime"),
+    )
+    assert _names(inp, tags) == [
+        ("Haangik", "Park"),
+        ("Myeong‑Ha", "Hwang"),
+        ("Mark", "Shrime"),
+    ]
+
+
+def test_rules_stop_a_surname_at_an_institution():
+    inp = tagger_input(
+        ("doc_title", "A title here"),
+        ("text", "Nguyen Van Hiep Thu Dau Mot University, Vietnam"),
+        ("text", "Maria Department of Physics"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "A title here"),
+        ("GIVEN", "Nguyen Van"),
+        ("GIVEN", "Maria"),
+    )
+    assert _names(inp, tags) == [("Nguyen Van", "Hiep"), ("Maria", "")]
+
+
+def test_rules_keep_an_all_capitals_title_out_of_a_given_name():
+    inp = tagger_input(
+        ("doc_title", "A title here"),
+        ("text", "LONELINESS Yeon Ji Ryou, Natasha Peterson"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "A title here"),
+        ("FAMILY", "Ryou"),
+        ("GIVEN", "Natasha"),
+        ("FAMILY", "Peterson"),
+    )
+    assert _names(inp, tags) == [("Yeon Ji", "Ryou"), ("Natasha", "Peterson")]
+
+
+def test_rules_read_a_whole_name_skipped_between_two_authors():
+    inp = tagger_input(
+        ("doc_title", "A title here"),
+        ("text", "Ibrahima DIALLO, MD"),
+        ("text", "Fatoumata B. Y BAH, MD"),
+        ("text", "Alhassane CONDE, MD"),
+        ("text", "Etienne MILLIMOUNOU"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "A title here"),
+        ("GIVEN", "Ibrahima"),
+        ("FAMILY", "DIALLO"),
+        ("GIVEN", "Fatoumata B. Y"),
+        ("GIVEN", "Etienne"),
+        ("FAMILY", "MILLIMOUNOU"),
+    )
+    assert _names(inp, tags) == [
+        ("Ibrahima", "DIALLO"),
+        ("Fatoumata B. Y", "BAH"),
+        ("Alhassane", "CONDE"),
+        ("Etienne", "MILLIMOUNOU"),
+    ]
+
+
+def test_rules_read_no_name_out_of_an_affiliation_or_prose_between_authors():
+    for between in ("Stanford Medical School", "is a student at Erasmus"):
+        inp = tagger_input(
+            ("doc_title", "A title here"),
+            ("text", f"Esther Kuis {between} Anne Goossensen"),
+        )
+        tags = label(
+            inp,
+            ("TITLE", "A title here"),
+            ("GIVEN", "Esther"),
+            ("FAMILY", "Kuis"),
+            ("GIVEN", "Anne"),
+            ("FAMILY", "Goossensen"),
+        )
+        assert _names(inp, tags) == [("Esther", "Kuis"), ("Anne", "Goossensen")]
+
+
+def test_rules_read_a_byline_under_the_title_tagged_as_furniture():
+    inp = tagger_input(
+        ("doc_title", "A title here"),
+        ("text", "CHANGZHENG QU, ZHIZHANG WANG, AND WEIFENG WO"),
+        ("abstract", "Abstract. In this paper we study a flow."),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "A title here"),
+        ("FURNITURE", "CHANGZHENG QU, ZHIZHANG WANG, AND WEIFENG WO"),
+    )
+    assert _names(inp, tags, rules=False) == []
+    assert _names(inp, tags) == [
+        ("CHANGZHENG", "QU"),
+        ("ZHIZHANG", "WANG"),
+        ("WEIFENG", "WO"),
+    ]
+
+
+def test_rules_read_no_byline_from_one_label_or_a_sentence_under_the_title():
+    for under in ("Research Article", "We study a flow, and the results follow"):
+        inp = tagger_input(("doc_title", "A title here"), ("text", under))
+        tags = label(inp, ("TITLE", "A title here"))
+        assert _names(inp, tags) == []
+
+
+def test_rules_cut_titles_and_list_words_from_a_name_part():
+    inp = tagger_input(
+        ("doc_title", "A title here"),
+        ("text", "Olukunle, O. F.* and Sanusi, A. I."),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "A title here"),
+        ("FAMILY", "Olukunle"),
+        ("GIVEN", "O. F.* and"),
+        ("FAMILY", "Sanusi"),
+        ("GIVEN", "A. I."),
+    )
+    assert _names(inp, tags) == [("O. F.", "Olukunle"), ("A. I.", "Sanusi")]
+    inp = tagger_input(("doc_title", "A title here"), ("text", "Dr. Sania Bashir"))
+    tags = label(inp, ("TITLE", "A title here"), ("GIVEN", "Dr. Sania"), ("FAMILY", "Bashir"))
+    assert _names(inp, tags) == [("Sania", "Bashir")]
+
+
+def test_rules_read_no_name_out_of_a_membership_between_authors():
+    inp = tagger_input(
+        ("doc_title", "A title here"),
+        ("text", "GUOYING ZHAO Fellow IEEE XIAOBAI LI Senior Member IEEE YANTE WU"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "A title here"),
+        ("GIVEN", "GUOYING"),
+        ("FAMILY", "ZHAO"),
+        ("GIVEN", "XIAOBAI"),
+        ("FAMILY", "LI"),
+        ("GIVEN", "YANTE"),
+        ("FAMILY", "WU"),
+    )
+    assert _names(inp, tags) == [("GUOYING", "ZHAO"), ("XIAOBAI", "LI"), ("YANTE", "WU")]
+
+
+def test_rules_read_no_name_out_of_a_degree_and_cut_it_from_a_family_name():
+    inp = tagger_input(
+        ("doc_title", "A title here"),
+        ("text", "Carol Hughes Helen French PG Dip Therapeutic Counselling Wayne Hawkins"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "A title here"),
+        ("GIVEN", "Carol"),
+        ("FAMILY", "Hughes"),
+        ("GIVEN", "Helen"),
+        ("FAMILY", "French PG"),
+        ("GIVEN", "Wayne"),
+        ("FAMILY", "Hawkins"),
+    )
+    assert _names(inp, tags) == [("Carol", "Hughes"), ("Helen", "French"), ("Wayne", "Hawkins")]
+
+
+def test_rules_keep_a_family_name_that_reads_as_a_title_or_a_credential():
+    inp = tagger_input(
+        ("doc_title", "A title here"),
+        ("text", "Jennifer Senior, Anna Miss, Dip Das"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "A title here"),
+        ("GIVEN", "Jennifer"),
+        ("FAMILY", "Senior"),
+        ("GIVEN", "Anna"),
+        ("FAMILY", "Miss"),
+        ("GIVEN", "Dip"),
+        ("FAMILY", "Das"),
+    )
+    assert _names(inp, tags) == [("Jennifer", "Senior"), ("Anna", "Miss"), ("Dip", "Das")]
+
+
+def test_rules_stop_at_labels_and_at_the_region_after_a_connective():
+    inp = tagger_input(
+        ("doc_title", "A title here"),
+        ("text", "Mary Jones, Tom Hardy and"),
+        ("text", "Open Access"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "A title here"),
+        ("GIVEN", "Mary"),
+        ("FAMILY", "Jones"),
+        ("GIVEN", "Tom"),
+        ("FAMILY", "Hardy"),
+    )
+    assert _names(inp, tags) == [("Mary", "Jones"), ("Tom", "Hardy")]
+
+    inp = tagger_input(
+        ("doc_title", "A title here"),
+        ("text", "Mary Jones, Tom Hardy and Received January 2020"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "A title here"),
+        ("GIVEN", "Mary"),
+        ("FAMILY", "Jones"),
+        ("GIVEN", "Tom"),
+        ("FAMILY", "Hardy"),
+    )
+    assert _names(inp, tags) == [("Mary", "Jones"), ("Tom", "Hardy")]
+
+
+def test_rules_read_no_byline_from_labels_under_the_title():
+    inp = tagger_input(("doc_title", "A title here"), ("text", "Open Access, Peer Reviewed"))
+    tags = label(inp, ("TITLE", "A title here"))
+    assert _names(inp, tags) == []
+
+
+def test_rules_leave_an_initial_tagged_as_something_else_where_it_is():
+    inp = tagger_input(("doc_title", "A title here"), ("text", "Tom Smith A. Jones"))
+    tags = label(
+        inp,
+        ("TITLE", "A title here"),
+        ("GIVEN", "Tom"),
+        ("FAMILY", "Smith"),
+        ("AUTHOR_MARK", "A"),
+        ("FAMILY", "Jones"),
+    )
+    got = _names(inp, tags)
+    assert ("Tom", "Smith") in got
+    assert all("A" not in given.split() for given, _family in got)
+
+
+def test_rules_complete_no_publisher_name():
+    inp = tagger_input(("doc_title", "A title here"), ("text", "Mary Jones, Reed Elsevier"))
+    tags = label(
+        inp,
+        ("TITLE", "A title here"),
+        ("GIVEN", "Mary"),
+        ("FAMILY", "Jones"),
+        ("FAMILY", "Elsevier"),
+    )
+    assert _names(inp, tags) == [("Mary", "Jones")]
+
+
+def test_rules_read_a_whole_name_between_authors_past_their_marks():
+    inp = tagger_input(
+        ("doc_title", "A title here"), ("text", "Mary Jones 1 , Li Wei 2 , Tom Hardy 3")
+    )
+    tags = label(
+        inp,
+        ("TITLE", "A title here"),
+        ("GIVEN", "Mary"),
+        ("FAMILY", "Jones"),
+        ("AUTHOR_MARK", "1"),
+        ("AUTHOR_MARK", "2"),
+        ("GIVEN", "Tom"),
+        ("FAMILY", "Hardy"),
+        ("AUTHOR_MARK", "3"),
+    )
+    assert _names(inp, tags) == [("Mary", "Jones"), ("Li", "Wei"), ("Tom", "Hardy")]
+
+
+def test_rules_join_a_name_part_tagged_in_two():
+    inp = tagger_input(("doc_title", "A title here"), ("text", "Alberto Lombo Montañés"))
+    tags = label(
+        inp,
+        ("TITLE", "A title here"),
+        ("GIVEN", "Alberto"),
+        ("FAMILY", "Lombo"),
+        ("FAMILY", "Montañés"),
+    )
+    assert _names(inp, tags, rules=False) == [("Alberto", "Lombo"), ("", "Montañés")]
+    assert _names(inp, tags) == [("Alberto", "Lombo Montañés")]

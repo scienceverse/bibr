@@ -705,6 +705,352 @@ def _group_authors(spans: list[Span]) -> list[_Author]:
     return authors
 
 
+# Byline repair (``rules``). The tagger often finds one part of a name and leaves
+# the rest untagged ("Marise/GIVEN Ph. Born", "Muhammad Muddasir/FAMILY"), skips a
+# whole name in a list, or reads a byline printed right under the title as page
+# furniture. These words are in print, so they can be read back without a model.
+_HONORIFICS = frozenset(
+    {"dr", "drs", "prof", "professor", "mr", "mrs", "ms", "miss", "sir", "assoc", "assist", "rev"}
+)
+# Memberships and degrees printed after a name ("Fellow, IEEE", "PG Dip"). "MA" and
+# "BA" stay out, being surnames too ("Ma", "Ba").
+_CREDENTIALS = frozenset(
+    {"fellow", "member", "senior", "student", "graduate", "ieee", "acm"}
+    | {"phd", "dphil", "mphil", "msc", "bsc", "mres", "mph", "pg", "dip", "pgdip", "diploma"}
+)
+_NOT_GIVEN_WORDS = (
+    _HONORIFICS
+    | _CREDENTIALS
+    | frozenset(
+        {"author", "authors", "by", "editor", "editors", "corresponding", "correspondence"}
+        | {"citation", "contact", "cite", "article", "reviewer", "reviewers"}
+        | {"open", "access", "peer", "reviewed", "original", "research", "review", "brief"}
+        | {"report", "received", "revised", "accepted", "published", "contributed", "equally"}
+    )
+)
+_NAME_PARTICLES = frozenset(
+    {"van", "der", "den", "de", "del", "della", "di", "da", "dos", "das", "du", "la", "le"}
+    | {"von", "zu", "ter", "ten", "bin", "ibn", "al", "el"}
+)
+_NAME_CONNECTIVES = frozenset({"and", "und", "et", "y", "&"})
+_NAME_HYPHENS = frozenset("-\u2010\u2011")
+_MIN_NAME_UNITS = 2
+_MAX_NAME_UNITS = 4
+_MAX_GIVEN_UNITS = 3
+_MAX_NAME_GAP_WORDS = 12
+
+
+def _is_connective(text: str) -> bool:
+    """A list word, in any case but a lone capital, which is an initial ("B. Y. Bah")."""
+    return text in _NAME_CONNECTIVES or (len(text) > 1 and text.casefold() in _NAME_CONNECTIVES)
+
+
+def _is_name_word(text: str) -> bool:
+    """A capitalised word of letters that is no filler, title or institution."""
+    letters = text.replace("-", "").replace("'", "").replace("\u2019", "")
+    return (
+        text[:1].isupper()
+        and letters.isalpha()
+        and len(letters) >= 2
+        and text.casefold() not in _BYLINE_FILLERS
+        and text.casefold() not in _NOT_GIVEN_WORDS
+        and not _INSTITUTION_RE.search(text)
+    )
+
+
+def _name_unit_end(inp: TaggerInput, tags: list[str], i: int) -> int:
+    """Last word of the name word at ``i``, over hyphens printed tight ("Myeong\u2011Ha")."""
+    words = inp.words
+    while (
+        i + 2 < len(words)
+        and words[i + 1].text in _NAME_HYPHENS
+        and words[i + 1].start == words[i].end
+        and words[i + 2].start == words[i + 1].end
+        and words[i + 2].text.isalpha()
+        and tags[i + 1] == tags[i + 2] == "O"
+    ):
+        i += 2
+    return i
+
+
+def _surname_after(inp: TaggerInput, tags: list[str], i: int) -> list[int]:
+    """The untagged surname printed from word ``i``: particles and one capitalised
+    word, or two when a separator closes them ("García López,")."""
+    words = inp.words
+    region = words[i - 1].region
+
+    def untagged(j: int) -> bool:
+        return j < len(words) and words[j].region == region and tags[j] == "O"
+
+    picked: list[int] = []
+    while untagged(i) and words[i].text in _NAME_PARTICLES:
+        picked.append(i)
+        i += 1
+    if not untagged(i) or not _is_name_word(words[i].text):
+        return []
+    end = _name_unit_end(inp, tags, i)
+    had_particle = bool(picked)
+    picked.extend(range(i, end + 1))
+    following = end + 1
+    if had_particle or not untagged(following) or not _is_name_word(words[following].text):
+        return picked
+    second_end = _name_unit_end(inp, tags, following)
+    after = second_end + 1
+    closed = (
+        after >= len(words)
+        or words[after].region != region
+        or not words[after].text[:1].isalpha()
+        or _is_connective(words[after].text)
+    )
+    if closed:
+        picked.extend(range(following, second_end + 1))
+    return picked
+
+
+def _given_before(inp: TaggerInput, tags: list[str], i: int) -> list[int]:
+    """The untagged given names printed right before word ``i + 1``, nearest last."""
+    words = inp.words
+    region = words[i + 1].region
+    family_in_capitals = words[i + 1].text.isupper()
+    picked: list[int] = []
+    units = 0
+    while i >= 0 and units < _MAX_GIVEN_UNITS and words[i].region == region and tags[i] == "O":
+        text = words[i].text
+        if len(text) > 1 and text.isupper() and not family_in_capitals:
+            break  # the end of a title in capitals, run on into the byline
+        if (
+            text == "."
+            and i > 0
+            and len(words[i - 1].text) == 1
+            and words[i - 1].text.isupper()
+            and words[i - 1].region == region
+            and tags[i - 1] == "O"
+        ):
+            picked += [i, i - 1]
+            i -= 2
+        elif len(text) == 1 and text.isupper():
+            picked.append(i)
+            i -= 1
+        elif _is_name_word(text):
+            picked.append(i)
+            i -= 1
+            while (
+                i >= 1
+                and words[i].text in _NAME_HYPHENS
+                and words[i].end == words[i + 1].start
+                and words[i - 1].end == words[i].start
+                and words[i - 1].text.isalpha()
+                and tags[i] == tags[i - 1] == "O"
+            ):
+                picked += [i, i - 1]
+                i -= 2
+        else:
+            break
+        units += 1
+    return sorted(picked)
+
+
+def _name_units(inp: TaggerInput, tags: list[str], i: int, stop: int) -> list[list[int]]:
+    """Name units (a word, an initial and its dot, a particle) in a row from word ``i``."""
+    words = inp.words
+    units: list[list[int]] = []
+    while i < stop and (not units or words[i].region == words[units[-1][-1]].region):
+        text = words[i].text
+        if text in _NAME_PARTICLES:
+            units.append([i])
+            i += 1
+        elif _is_name_word(text):
+            end = _name_unit_end(inp, tags, i)
+            units.append(list(range(i, end + 1)))
+            i = end + 1
+        elif len(text) == 1 and text.isupper():
+            has_dot = i + 1 < stop and words[i + 1].text == "."
+            units.append([i, i + 1] if has_dot else [i])
+            i += 2 if has_dot else 1
+        else:
+            break
+    return units
+
+
+def _whole_name(inp: TaggerInput, units: list[list[int]]) -> bool:
+    """Whether the units read as one person: two to four, a word at each end."""
+    if not _MIN_NAME_UNITS <= len(units) <= _MAX_NAME_UNITS:
+        return False
+    return _is_name_word(inp.words[units[0][0]].text) and _is_name_word(
+        inp.words[units[-1][0]].text
+    )
+
+
+def _tag_whole_name(inp: TaggerInput, tags: list[str], units: list[list[int]]) -> None:
+    """Tag units as given names and a family name, the particles going to the family."""
+    family_from = len(units) - 1
+    while family_from > 1 and inp.words[units[family_from - 1][0]].text in _NAME_PARTICLES:
+        family_from -= 1
+    for pos, unit in enumerate(units):
+        name = "GIVEN" if pos < family_from else "FAMILY"
+        for i in unit:
+            starts = pos in (0, family_from) and i == unit[0]
+            tags[i] = f"{'B' if starts else 'I'}-{name}"
+
+
+def _tidy_name_spans(inp: TaggerInput, tags: list[str], spans: list[Span]) -> None:
+    """Cut titles, credentials and list words from the ends of name parts; join a part split in two."""
+    words = inp.words
+    names = [s for s in spans if s.field in _NAME_FIELDS]
+    for span in names:
+        kept = list(span.words)
+        while kept and (
+            _is_connective(words[kept[-1]].text)
+            or words[kept[-1]].text in _SYMBOL_MARKS
+            or words[kept[-1]].text in _LIST_SEPARATORS
+            or (len(kept) > 1 and words[kept[-1]].text.casefold() in _CREDENTIALS)
+        ):
+            tags[kept.pop()] = "O"
+        # A family name alone is a surname, whatever it reads as ("Jennifer Senior").
+        while (
+            kept
+            and (len(kept) > 1 or span.field == "GIVEN")
+            and words[kept[0]].text.casefold() in _HONORIFICS
+        ):
+            tags[kept.pop(0)] = "O"
+            if kept and words[kept[0]].text == ".":
+                tags[kept.pop(0)] = "O"
+        if kept:
+            tags[kept[0]] = f"B-{span.field}"
+    for a, b in zip(names, names[1:], strict=False):
+        if (
+            a.field == b.field
+            and b.words[0] == a.words[-1] + 1
+            and words[a.words[-1]].region == words[b.words[0]].region
+            and tags[b.words[0]] == f"B-{b.field}"
+            and tags[a.words[-1]] != "O"
+            and _fold(b.text) not in _PUBLISHER_NAMES
+        ):
+            tags[b.words[0]] = f"I-{b.field}"
+
+
+def _complete_names(inp: TaggerInput, tags: list[str], authors: list[_Author]) -> None:
+    """Tag the part of a name printed next to the tagged part."""
+    for author in authors:
+        if author.given and author.family or not _incomplete_name(author) or _is_publisher(author):
+            continue
+        if author.given:
+            picked = _surname_after(inp, tags, author.last_word + 1)
+            name = "FAMILY"
+        else:
+            picked = _given_before(inp, tags, author.first_word - 1) if author.first_word else []
+            name = "GIVEN"
+        for pos, i in enumerate(picked):
+            tags[i] = f"{'I' if pos else 'B'}-{name}"
+
+
+def _names_between(inp: TaggerInput, tags: list[str], authors: list[_Author]) -> None:
+    """Tag whole names the tagger skipped in a list: between two authors, and after
+    the last one when a connective leads to it ("..., and Dimitri van der Linden")."""
+    words = inp.words
+    for a, b in zip(authors, authors[1:], strict=False):
+        lo, hi = a.last_word + 1, b.first_word
+        gap = range(lo, hi)
+        if not 0 < len(gap) <= _MAX_NAME_GAP_WORDS or any(
+            _field(tags[i]) not in (None, "AUTHOR_MARK", "AFF_MARK") for i in gap
+        ):
+            continue
+        if any(
+            _INSTITUTION_RE.search(words[i].text)
+            or words[i].text.casefold() in _CREDENTIALS
+            or (
+                words[i].text[:1].islower()
+                and words[i].text not in _NAME_PARTICLES
+                and not _is_connective(words[i].text)
+            )
+            for i in gap
+        ):
+            continue
+        i = lo
+        while i < hi:
+            units = _name_units(inp, tags, i, hi)
+            if not units:
+                i += 1
+                continue
+            if _whole_name(inp, units) and all(tags[j] == "O" for unit in units for j in unit):
+                _tag_whole_name(inp, tags, units)
+            i = units[-1][-1] + 1
+    if not authors:
+        return
+    i = authors[-1].last_word + 1
+    region = words[i - 1].region
+    while (
+        i < len(words)
+        and _field(tags[i]) in ("AUTHOR_MARK", "AFF_MARK")
+        or (i < len(words) and words[i].text in _LIST_SEPARATORS)
+    ):
+        i += 1
+    if i >= len(words) or not _is_connective(words[i].text):
+        return
+    if words[i].region != region or tags[i] != "O":
+        return
+    if i + 1 >= len(words) or words[i + 1].region != region:
+        return
+    units = _name_units(inp, tags, i + 1, len(words))
+    for cut, unit in enumerate(units):
+        if words[unit[0]].text in _NAME_PARTICLES:
+            family = cut
+            while family < len(units) and words[units[family][0]].text in _NAME_PARTICLES:
+                family += 1
+            units = units[: family + 1]
+            break
+    named = units if all(tags[i] == "O" for unit in units for i in unit) else []
+    if _whole_name(inp, named):
+        _tag_whole_name(inp, tags, named)
+
+
+def _byline_under_title(inp: TaggerInput, tags: list[str], spans: list[Span]) -> None:
+    """Tag a list of names printed right under the title when no author is tagged.
+
+    The region after the title, tagged nothing or furniture, has to read as at
+    least two people split by list separators and nothing else. One name alone
+    is no evidence: "Research Article" reads the same.
+    """
+    words = inp.words
+    title = _first(spans, "TITLE")
+    if title is None:
+        return
+    last = next((s for s in reversed(spans) if s.field == "TITLE"), title).words[-1]
+    region = words[last].region + 1
+    members = [i for i, w in enumerate(words) if w.region == region]
+    if not members or any(_field(tags[i]) not in (None, "FURNITURE") for i in members):
+        return
+    names: list[list[list[int]]] = []
+    i, stop = members[0], members[-1] + 1
+    while i < stop:
+        if words[i].text in _LIST_SEPARATORS or _is_connective(words[i].text):
+            i += 1
+            continue
+        units = _name_units(inp, tags, i, stop)
+        if not _whole_name(inp, units):
+            return
+        names.append(units)
+        i = units[-1][-1] + 1
+    if len(names) < _MIN_NAME_UNITS:
+        return
+    for units in names:
+        _tag_whole_name(inp, tags, units)
+
+
+def _repair_byline(inp: TaggerInput, tags: Sequence[str], conf: Sequence[float]) -> list[str]:
+    """The tags with the name parts in print that the tagger left out added back."""
+    repaired = list(tags)
+    _tidy_name_spans(inp, repaired, _spans(inp, repaired, conf))
+    spans = _spans(inp, repaired, conf)
+    authors = _group_authors(spans)
+    if not authors:
+        _byline_under_title(inp, repaired, spans)
+        return repaired
+    _complete_names(inp, repaired, authors)
+    _names_between(inp, repaired, _group_authors(_spans(inp, repaired, conf)))
+    return repaired
+
+
 def _words_between(inp: TaggerInput, tags, lo: int, hi: int, name: str) -> list[str]:
     return [inp.words[i].text for i in range(lo, hi) if _field(tags[i]) == name]
 
@@ -724,13 +1070,16 @@ def assemble(
     ``rules`` adds the readings that put right what a run with no LLM behind
     it would otherwise keep: a keyword closed over its parenthesis, a
     publisher's logo dropped from the authors, letter keys glued to family
-    names split off (from the print and as a run), and the institution text
+    names split off (from the print and as a run), the parts of names and
+    the whole names in a byline the tags left out, and the institution text
     the tags left out (:attr:`TaggedFrontMatter.untagged_affiliations`).
     Without it the answers are the tagger's as before, and the LLM, when
     there is one, covers the rest.
     """
     if not len(tags) == len(confidences) == len(inp.words):
         raise ValueError("tags and confidences must have one entry per tagger word")
+    if rules:
+        tags = _repair_byline(inp, tags, confidences)
     spans = _spans(inp, tags, confidences)
     problems: list[str] = []
     confidence: dict[str, float] = {}
