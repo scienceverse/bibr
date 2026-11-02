@@ -194,7 +194,7 @@ mcp = ["mcp>=2.2.0,<3"]
 all = ["bibr[batch,cache,demo,mcp,torch]"]
 
 [project.scripts]
-bibr = "bibr.local.cli:main"
+bibr = "bibr.local.cli:entrypoint"
 
 [tool.uv]
 environments = [
