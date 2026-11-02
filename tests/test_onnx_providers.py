@@ -294,6 +294,9 @@ def _cpu_only_ort_with_recording_options():
         def __setattr__(self, name, value):
             recorded[name] = value
 
+        def add_session_config_entry(self, key, value):
+            recorded[f"config:{key}"] = value
+
     mock_ort.SessionOptions = _RecordingOptions
     return mock_ort, recorded
 
@@ -330,6 +333,9 @@ def test_create_session_cpu_arena_opt_in_is_noop_for_cuda():
     class _RecordingOptions:
         def __setattr__(self, name, value):
             recorded[name] = value
+
+        def add_session_config_entry(self, key, value):
+            recorded[f"config:{key}"] = value
 
     mock_ort.SessionOptions = _RecordingOptions
     mock_ort.InferenceSession.return_value.get_providers.return_value = [
@@ -382,6 +388,9 @@ def _ort_whose_sessions_fail(message: str, *, fail_on: str = "CUDAExecutionProvi
         def __setattr__(self, name, value):
             self.written[name] = value
 
+        def add_session_config_entry(self, key, value):
+            self.written[f"config:{key}"] = value
+
     cpu_session = MagicMock()
     cpu_session.get_providers.return_value = ["CPUExecutionProvider"]
 
@@ -416,10 +425,16 @@ def test_create_session_opens_on_cpu_when_the_cuda_session_is_out_of_memory(
         ["CUDAExecutionProvider", "CPUExecutionProvider"],
         ["CPUExecutionProvider"],
     ]
-    expected = {"log_severity_level": 3}
+    expected = {
+        "log_severity_level": 3,
+        "intra_op_num_threads": onnx_providers.available_cpu_count(),
+        "config:session.intra_op.allow_spinning": "0",
+    }
     if disable_cpu_arena:
         expected["enable_cpu_mem_arena"] = False
     assert opened[1]["options"] == expected
+    # The CUDA attempt is not sized: only CPU sessions take the thread settings.
+    assert "intra_op_num_threads" not in opened[0]["options"]
     assert (
         "layout could not open its CUDA session: GPU out of memory (RuntimeError); "
         "opening it on the CPU"
@@ -450,3 +465,209 @@ def test_create_session_raises_a_cpu_sessions_arena_failure():
     ):
         onnx_providers.create_session("model.onnx", device="cpu", model_name="layout")
     assert len(opened) == 1
+
+
+# -- CPU thread sizing --------------------------------------------------------
+
+
+def _cgroup_tree(tmp_path, *, own="/", files=None):
+    """A fake /proc/self/cgroup and /sys/fs/cgroup; *files* maps relative path to content."""
+    proc = tmp_path / "proc_cgroup"
+    proc.write_text(f"0::{own}\n")
+    root = tmp_path / "cg"
+    root.mkdir()
+    for rel, content in (files or {}).items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+    return str(proc), str(root)
+
+
+def test_cgroup_cpu_limit_reads_the_container_quota(tmp_path):
+    proc, root = _cgroup_tree(tmp_path, files={"cpu.max": "250000 100000\n"})
+    assert onnx_providers._cgroup_cpu_limit(proc, root) == 2.5
+
+
+def test_cgroup_cpu_limit_is_none_when_unlimited(tmp_path):
+    proc, root = _cgroup_tree(tmp_path, files={"cpu.max": "max 100000\n"})
+    assert onnx_providers._cgroup_cpu_limit(proc, root) is None
+
+
+def test_cgroup_cpu_limit_takes_the_smallest_quota_up_the_tree(tmp_path):
+    proc, root = _cgroup_tree(
+        tmp_path,
+        own="/a/b",
+        files={
+            "a/b/cpu.max": "max 100000\n",
+            "a/cpu.max": "400000 100000\n",
+            "cpu.max": "800000 100000\n",
+        },
+    )
+    assert onnx_providers._cgroup_cpu_limit(proc, root) == 4.0
+
+
+def test_cgroup_cpu_limit_reads_cgroup_v1(tmp_path):
+    proc, root = _cgroup_tree(
+        tmp_path,
+        files={"cpu/cpu.cfs_quota_us": "150000\n", "cpu/cpu.cfs_period_us": "100000\n"},
+    )
+    assert onnx_providers._cgroup_cpu_limit(proc, root) == 1.5
+
+
+def test_cgroup_cpu_limit_v1_unlimited_is_none(tmp_path):
+    proc, root = _cgroup_tree(
+        tmp_path,
+        files={"cpu/cpu.cfs_quota_us": "-1\n", "cpu/cpu.cfs_period_us": "100000\n"},
+    )
+    assert onnx_providers._cgroup_cpu_limit(proc, root) is None
+
+
+def test_cgroup_cpu_limit_is_none_without_cgroup_files(tmp_path):
+    assert (
+        onnx_providers._cgroup_cpu_limit(str(tmp_path / "missing"), str(tmp_path / "none")) is None
+    )
+
+
+def test_available_cpu_count_follows_the_affinity_mask(monkeypatch):
+    monkeypatch.setattr(onnx_providers.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(
+        onnx_providers.os, "sched_getaffinity", lambda _pid: {4, 5, 6, 7}, raising=False
+    )
+    monkeypatch.setattr(onnx_providers, "_cgroup_cpu_limit", lambda: None)
+    assert onnx_providers.available_cpu_count() == 4
+
+
+def test_available_cpu_count_follows_the_cgroup_quota_rounded_up(monkeypatch):
+    monkeypatch.setattr(onnx_providers.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(
+        onnx_providers.os, "sched_getaffinity", lambda _pid: set(range(16)), raising=False
+    )
+    monkeypatch.setattr(onnx_providers, "_cgroup_cpu_limit", lambda: 2.5)
+    assert onnx_providers.available_cpu_count() == 3
+    monkeypatch.setattr(onnx_providers, "_cgroup_cpu_limit", lambda: 0.25)
+    assert onnx_providers.available_cpu_count() == 1
+
+
+def test_available_cpu_count_without_affinity_support(monkeypatch):
+    """macOS has no sched_getaffinity: the machine's CPU count stands."""
+    monkeypatch.setattr(onnx_providers.os, "cpu_count", lambda: 8)
+    monkeypatch.delattr(onnx_providers.os, "sched_getaffinity", raising=False)
+    monkeypatch.setattr(onnx_providers, "_cgroup_cpu_limit", lambda: None)
+    assert onnx_providers.available_cpu_count() == 8
+
+
+def test_cpu_session_threads_prefers_the_explicit_setting(monkeypatch):
+    monkeypatch.setattr(onnx_providers, "available_cpu_count", lambda: 6)
+    assert onnx_providers.cpu_session_threads(0) == 6
+    assert onnx_providers.cpu_session_threads(3) == 3
+
+
+class _Options:
+    def __init__(self):
+        self.entries: dict[str, str] = {}
+
+    def add_session_config_entry(self, key, value):
+        self.entries[key] = value
+
+
+def test_apply_cpu_threading_sizes_the_pool_and_stops_spinning(monkeypatch):
+    monkeypatch.setattr(onnx_providers, "available_cpu_count", lambda: 4)
+    monkeypatch.setattr(onnx_providers, "_onnx_thread_settings", lambda: (0, False))
+    options = _Options()
+    onnx_providers.apply_cpu_threading(options)
+    assert options.intra_op_num_threads == 4
+    assert options.entries == {"session.intra_op.allow_spinning": "0"}
+
+
+def test_apply_cpu_threading_honours_settings(monkeypatch):
+    monkeypatch.setattr(onnx_providers, "available_cpu_count", lambda: 16)
+    monkeypatch.setattr(onnx_providers, "_onnx_thread_settings", lambda: (2, True))
+    options = _Options()
+    onnx_providers.apply_cpu_threading(options)
+    assert options.intra_op_num_threads == 2
+    assert options.entries == {}
+
+
+def test_ml_options_read_the_ml_env(monkeypatch):
+    from bibr.config import MlOptions
+
+    monkeypatch.setenv("ML_ONNX_THREADS", "3")
+    monkeypatch.setenv("ML_ONNX_SPINNING", "true")
+    options = MlOptions()
+    assert (options.onnx_threads, options.onnx_spinning) == (3, True)
+    monkeypatch.delenv("ML_ONNX_THREADS")
+    monkeypatch.delenv("ML_ONNX_SPINNING")
+    options = MlOptions()
+    assert (options.onnx_threads, options.onnx_spinning) == (0, False)
+
+
+def test_onnx_thread_settings_read_the_environment(monkeypatch):
+    monkeypatch.setenv("BIBR_DISABLE_DOTENV", "1")
+    monkeypatch.setenv("ML_ONNX_THREADS", "5")
+    monkeypatch.setenv("ML_ONNX_SPINNING", "true")
+    assert onnx_providers._onnx_thread_settings() == (5, True)
+
+
+def test_onnx_thread_settings_read_the_dotenv_chain(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("ML_ONNX_THREADS=3\nML_ONNX_SPINNING=true\n")
+    monkeypatch.setenv("BIBR_ENV_FILE", str(env_file))
+    monkeypatch.delenv("BIBR_DISABLE_DOTENV", raising=False)
+    monkeypatch.delenv("ML_ONNX_THREADS", raising=False)
+    monkeypatch.delenv("ML_ONNX_SPINNING", raising=False)
+    assert onnx_providers._onnx_thread_settings() == (3, True)
+    monkeypatch.setenv("ML_ONNX_THREADS", "2")  # a real environment variable wins
+    assert onnx_providers._onnx_thread_settings() == (2, True)
+
+
+def test_onnx_thread_settings_default_when_unset_or_invalid(monkeypatch):
+    monkeypatch.setenv("BIBR_DISABLE_DOTENV", "1")
+    monkeypatch.delenv("ML_ONNX_THREADS", raising=False)
+    monkeypatch.delenv("ML_ONNX_SPINNING", raising=False)
+    assert onnx_providers._onnx_thread_settings() == (0, False)
+    monkeypatch.setenv("ML_ONNX_THREADS", "many")
+    assert onnx_providers._onnx_thread_settings() == (0, False)
+    monkeypatch.setenv("ML_ONNX_THREADS", "-2")
+    assert onnx_providers._onnx_thread_settings() == (0, False)
+
+
+def test_cpu_session_gets_the_thread_settings_and_cuda_session_does_not():
+    mock_ort, recorded = _cpu_only_ort_with_recording_options()
+    with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
+        onnx_providers.create_session("model.onnx", device="cpu", model_name="layout")
+    assert recorded["intra_op_num_threads"] == onnx_providers.available_cpu_count()
+    assert recorded["config:session.intra_op.allow_spinning"] == "0"
+
+
+def test_cuda_session_keeps_ort_thread_defaults():
+    mock_ort = _cuda_build_ort()
+    recorded: dict = {}
+
+    class _RecordingOptions:
+        def __setattr__(self, name, value):
+            recorded[name] = value
+
+        def add_session_config_entry(self, key, value):
+            recorded[f"config:{key}"] = value
+
+    mock_ort.SessionOptions = _RecordingOptions
+    mock_ort.InferenceSession.return_value.get_providers.return_value = [
+        "CUDAExecutionProvider",
+        "CPUExecutionProvider",
+    ]
+    with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
+        _, device = onnx_providers.create_session("model.onnx", device="cuda", model_name="layout")
+    assert device == "cuda"
+    assert "intra_op_num_threads" not in recorded
+    assert not any(key.startswith("config:") for key in recorded)
+
+
+def test_cpu_ort_session_options_carry_the_thread_settings(monkeypatch):
+    ort = pytest.importorskip("onnxruntime")
+    monkeypatch.setattr(onnx_providers, "_onnx_thread_settings", lambda: (3, False))
+
+    options = onnx_providers.cpu_ort_session_options()
+
+    assert isinstance(options, ort.SessionOptions)
+    assert options.intra_op_num_threads == 3
+    assert options.get_session_config_entry("session.intra_op.allow_spinning") == "0"

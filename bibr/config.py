@@ -1978,6 +1978,25 @@ class MlOptions(_BibrSettings):
         "(require the torch extra).",
     )
 
+    # CPU sessions of bibr's own ONNX models (layout, sentence segmenter, NER
+    # parser, section/paper classifiers, front-matter tagger). onnxruntime sizes
+    # each session's thread pool from the machine's CPU count and ignores a CPU
+    # affinity mask or a cgroup CPU quota, and its idle workers spin-wait.
+    # See bibr/utils/onnx_providers.py.
+    onnx_threads: int = Field(
+        0,
+        ge=0,
+        description="Intra-op threads of each CPU ONNX session. 0 (default) uses the CPUs this "
+        "process may run on (the CPU affinity mask and any cgroup CPU quota applied to the "
+        "machine's CPU count), instead of onnxruntime's own count, which ignores both.",
+    )
+    onnx_spinning: bool = Field(
+        False,
+        description="Let idle onnxruntime worker threads spin-wait for the next operator "
+        "(onnxruntime's own default). Off by default: spinning burns CPU that the next "
+        "stage or a second batch process could use.",
+    )
+
     # Trained section classifier (MiniLM two-head, document-context input
     # template). When ``section_classifier_model_id`` is None, classification
     # falls back to the LLM path. Env: ``ML_SECTION_CLASSIFIER_MODEL_ID``,

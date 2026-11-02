@@ -10,6 +10,8 @@ from __future__ import annotations
 import contextlib
 import io
 import logging
+import math
+import os
 import sys
 import threading
 from pathlib import Path
@@ -428,6 +430,112 @@ def cuda_device_id_for(device: str | None) -> int | None:
     return int(index)
 
 
+def _read_quota(quota_file: str, period_file: str | None = None) -> float | None:
+    """CPUs a cgroup quota file allows (quota / period), or ``None`` when unlimited or unreadable."""
+    try:
+        with open(quota_file, encoding="utf-8") as fh:
+            fields = fh.read().split()
+        if period_file is None:  # cgroup v2 ``cpu.max``: "<quota|max> <period>"
+            quota, period = fields[0], fields[1] if len(fields) > 1 else "100000"
+        else:  # cgroup v1: separate quota and period files
+            with open(period_file, encoding="utf-8") as fh:
+                quota, period = fields[0], fh.read().split()[0]
+        if quota in ("max", "-1"):
+            return None
+        return int(quota) / int(period)
+    except (OSError, ValueError, IndexError, ZeroDivisionError):
+        return None
+
+
+def _cgroup_cpu_limit(
+    proc_cgroup: str = "/proc/self/cgroup", fs_root: str = "/sys/fs/cgroup"
+) -> float | None:
+    """CPUs the cgroup CPU quota allows (``docker --cpus``, Kubernetes limits), or ``None``.
+
+    Reads cgroup v2 ``cpu.max`` of the process's cgroup and of every parent up to
+    the mount root (the smallest quota wins; inside a container the root is the
+    container's own cgroup), then cgroup v1 ``cpu.cfs_quota_us``.
+    """
+    parts: list[str] = []
+    try:
+        with open(proc_cgroup, encoding="utf-8") as fh:
+            for line in fh:
+                hierarchy, _, rest = line.strip().partition(":")
+                if hierarchy == "0":
+                    parts = [p for p in rest.partition(":")[2].split("/") if p]
+    except (OSError, UnicodeDecodeError):
+        pass
+    quotas = [
+        _read_quota(os.path.join(fs_root, *parts[:depth], "cpu.max"))
+        for depth in range(len(parts), -1, -1)
+    ]
+    found = [q for q in quotas if q is not None]
+    if found:
+        return min(found)
+    return _read_quota(
+        os.path.join(fs_root, "cpu", "cpu.cfs_quota_us"),
+        os.path.join(fs_root, "cpu", "cpu.cfs_period_us"),
+    )
+
+
+def available_cpu_count() -> int:
+    """How many CPUs this process can actually run on (at least 1).
+
+    ``os.cpu_count()`` is the machine's CPU count. A CPU affinity mask (``taskset``,
+    Slurm and cpuset containers) and a cgroup CPU quota (``docker --cpus``,
+    Kubernetes limits) cut the process down to fewer, and onnxruntime ignores both
+    when it sizes a session's thread pool: on a 16-thread machine every session gets
+    16 workers, whatever the process may use. The smaller of the three is returned.
+    """
+    count = os.cpu_count() or 1
+    with contextlib.suppress(AttributeError, OSError):
+        count = min(count, len(os.sched_getaffinity(0)))
+    quota = _cgroup_cpu_limit()
+    if quota is not None:
+        count = min(count, max(1, math.ceil(quota)))
+    return max(1, count)
+
+
+def cpu_session_threads(requested: int = 0) -> int:
+    """Intra-op threads for a CPU session: *requested* when positive, else :func:`available_cpu_count`.
+
+    ``requested`` is the ``ML_ONNX_THREADS`` setting (0 = automatic).
+    """
+    return requested if requested > 0 else available_cpu_count()
+
+
+def _onnx_thread_settings() -> tuple[int, bool]:
+    """``(ML_ONNX_THREADS, ML_ONNX_SPINNING)``: the environment, then bibr's ``.env`` chain.
+
+    Read from a fresh ``MlOptions`` rather than the global ``Settings`` (only process
+    boundaries read that); defaults when the values cannot be read, so a bad ``.env``
+    never stops a session from opening (the CLI reports it itself).
+    """
+    try:
+        from bibr.config import MlOptions
+
+        options = MlOptions()
+        return int(options.onnx_threads), bool(options.onnx_spinning)
+    except Exception:  # noqa: BLE001
+        return 0, False
+
+
+def apply_cpu_threading(options) -> None:
+    """Size and tune a CPU session's thread pool on ``options`` (an ``ort.SessionOptions``).
+
+    Intra-op threads default to the CPUs this process can use (see
+    :func:`available_cpu_count`; ``ML_ONNX_THREADS`` overrides), and workers block
+    when idle instead of spinning (``ML_ONNX_SPINNING=true`` restores ORT's spin-wait).
+    """
+    requested, spinning = _onnx_thread_settings()
+    options.intra_op_num_threads = cpu_session_threads(requested)
+    if not spinning:
+        options.add_session_config_entry(_INTRA_OP_SPINNING, "0")
+
+
+_INTRA_OP_SPINNING = "session.intra_op.allow_spinning"
+
+
 def cpu_ort_session_options():
     """``SessionOptions`` with ORT's CPU memory arena disabled, if available.
 
@@ -443,6 +551,7 @@ def cpu_ort_session_options():
         return None
     options = ort.SessionOptions()
     options.enable_cpu_mem_arena = False
+    apply_cpu_threading(options)
     return options
 
 
@@ -490,8 +599,10 @@ def create_session(
     )
     options = ort.SessionOptions()
     options.log_severity_level = 3  # errors only; ORT's warnings are noisy at load
-    if disable_cpu_arena and selected_device(providers) != "cuda":
-        options.enable_cpu_mem_arena = False
+    if selected_device(providers) != "cuda":
+        apply_cpu_threading(options)
+        if disable_cpu_arena:
+            options.enable_cpu_mem_arena = False
     session = None
     try:
         session = ort.InferenceSession(str(model_path), sess_options=options, providers=providers)
@@ -506,6 +617,7 @@ def create_session(
         providers = get_ort_providers(enable_cuda=False, enable_coreml=False, model_name=model_name)
         options = ort.SessionOptions()
         options.log_severity_level = 3
+        apply_cpu_threading(options)
         if disable_cpu_arena:
             options.enable_cpu_mem_arena = False
         session = ort.InferenceSession(str(model_path), sess_options=options, providers=providers)
