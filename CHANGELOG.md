@@ -31,6 +31,13 @@ that is off by default and that fast mode turns on, so a full run, and a
   author, a letter key printed against a name read as part of it, and the
   affiliations it printed but no author carries or left untagged where no
   author has one, which the export lists as affiliations with no author.
+- `FRONT_TAGGER_RULES` also reads back the parts of a byline the tagger left
+  out when they are in print: the rest of a name it found one part of ("Marise
+  Ph. Born", "Kevin le Roux", "Myeong‑Ha Hwang"), a whole name it skipped in a
+  list, and a list of names right under the title that it read as page
+  furniture, when it tagged no author at all. Titles such as "Dr." and a trailing
+  "and" or mark come off a name part, and a family name tagged in two parts is
+  joined.
 - `FRONT_TAGGER_RULES` also reads the paper's `language` from its title (a PDF
   declares none). The title's function words or letters decide it; a title they
   do not decide leaves it empty, and an input that declares a language keeps it.
@@ -82,6 +89,31 @@ by an earlier version, carries neither.
 
 ### Changed
 
+- On the CPU, bibr's ONNX models (layout, sentence segmenter, reference parser,
+  section and paper classifiers, front-matter tagger) now size each session's
+  thread pool to the CPUs the process may run on, and idle workers block
+  instead of spin-waiting. onnxruntime sizes each pool from the machine's CPU
+  count, ignores a CPU affinity mask and a container CPU quota, and spins its
+  idle workers, so a process pinned to four CPUs on a 16-thread machine ran 16
+  workers in each of its six sessions. On 20 open-access papers (373 pages)
+  run on four pinned CPUs, the whole pipeline used 1,381 CPU-seconds instead of
+  7,506 (5.4 times less), and all 20 results are identical. `ML_ONNX_THREADS`
+  (default `0`, the CPUs the process may use) and `ML_ONNX_SPINNING` (default
+  `false`) set either back; see
+  [Configuration](docs/guides/configuration.md#cpu-threads).
+- `bibr batch` and `bibr chew` end the process right after their outputs are
+  written, without the interpreter's teardown. On a machine short of memory the
+  teardown spent 12 to 24 s paging the models back in after the last log line,
+  against about 1 s now. Exit codes and output are unchanged;
+  `BIBR_FAST_EXIT=0` restores the normal shutdown. The `bibr` console script
+  now points at `bibr.local.cli:entrypoint`; `bibr.local.cli.main` is unchanged.
+- The sentence segmenter batches its texts shortest first, because it pads every
+  text in a batch to the longest one. On 24 papers (1,183 texts) on four threads
+  this took 345 CPU-seconds instead of 464 and 651 MB instead of 902. A break's
+  score moves slightly with its batch, so a break right at the threshold can
+  flip: over 534 papers, 5 changed one sentence boundary.
+- The layout detector's page resize works on uint8 planes block by block, at 28
+  CPU-ms a page instead of 111 on 59 test pages, with identical bytes.
 - With LLM section escalation on (the default), the section classifier now
   sends every heading it labels with less than 0.9 probability to the LLM (was
   0.5). `ML_SECTION_CLASSIFIER_MIN_CONFIDENCE` is unset by default: 0.9 while
@@ -102,6 +134,17 @@ by an earlier version, carries neither.
   abstract now follows the same rule, in the prompts and in the front-matter
   tagger. Re-extracting a paper that prints a non-English abstract before an
   English one changes its `abstract` field.
+
+### Fixed
+
+- Text drawn with alpha 0 over its own printed outlines is no longer dropped as
+  hidden text. PDFs written by Chromium draw fake bold as vector outlines and lay
+  transparent text over them to keep it selectable, so on preprint cover pages
+  the title, the author names and the labels disappeared. The ink under the text
+  has to have the shape of its glyphs: transparent text over an empty part of the
+  page, a band, a rule, other outlines or visible text still counts as hidden.
+  The check can be fooled by single letters under about 9 pt over a band, or by a
+  filled box the size of each letter.
 
 ## [0.8.0] - 2026-10-30
 

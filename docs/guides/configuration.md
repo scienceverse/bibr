@@ -773,6 +773,30 @@ classifier revisions it bakes now also carry an `onnx/` bundle, leaving the
 setting unset would let `auto` move serve onto ONNX Runtime the next time the
 image is built. Switching it is a deliberate choice, not a build-time accident.
 
+### CPU threads
+
+On the CPU provider every ONNX model (layout, sentence segmenter, reference
+parser, section and paper classifiers, front-matter tagger) opens its own
+onnxruntime session with its own thread pool. onnxruntime sizes each pool from
+the machine's CPU count and ignores a CPU affinity mask (`taskset`, Slurm, a
+cpuset container) and a container CPU quota (`docker --cpus`, Kubernetes
+limits), so a process pinned to four CPUs on a 16-thread machine still runs
+sixteen workers per session. Its idle workers also spin-wait for the next
+operator, which keeps cores busy between calls. bibr sizes each CPU session to
+the CPUs the process may use and lets idle workers block:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `ML_ONNX_THREADS` | `0` | Intra-op threads per CPU session. `0` uses the CPUs this process may run on: the machine's CPU count cut by the affinity mask and by any cgroup CPU quota (rounded up). |
+| `ML_ONNX_SPINNING` | `false` | `true` restores onnxruntime's spin-wait. |
+
+The models run one stage at a time, so one session works while the others are
+idle: a pool the size of the CPU budget is not oversubscribed. To run several
+`bibr batch` processes side by side, pin each one (`taskset -c 0-3 bibr batch
+…`) or set `ML_ONNX_THREADS` to its share of the machine. Neither setting
+changes a result: thread count and spinning only change how the same operators
+are scheduled. CUDA sessions are not touched.
+
 ### Layout model generation
 
 bibr ships with PP-DocLayoutV3 and can also run PP-DocLayoutV4, which keeps
