@@ -210,6 +210,15 @@ by an earlier version, carries neither.
   the model's boundary F1 on 86 gold papers stays at 0.996.
 - A hyphenated initial broken at a line end ("Falk, L.-" / "S.") no longer keeps
   the line break's space in `authors` ("L.- S."), which is now "L.-S.".
+- Text too small to read no longer reaches the text layer, where an LLM would
+  read it. Visible text under 3 pt, measured through the text, page and form
+  matrices, whatever its rotation, and hairline letters squeezed to a sliver
+  now count as hidden (rule `hidden_text/3`); the limit was 1 pt, and rotation
+  could escape it. A short exponent or subscript beside readable small print
+  stays. Small plot and diagram labels leave the text layer too, as do some
+  table cells shrunk below 3 pt. PDFs that insert hairline letters into words
+  ("lalin" printed as "lain") now read correctly. The new rule version changes
+  the OCR cache key, so cached papers are read again.
 
 ## [0.8.0] - 2026-10-30
 

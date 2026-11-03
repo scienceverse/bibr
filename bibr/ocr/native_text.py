@@ -2099,7 +2099,7 @@ def _line_number_column(
 # repository stamps and whole abstracts set in white on white, TCPDF's
 # invisible "Powered by" line. Native text took them into headers, footers,
 # reference strings and DOIs ("...0654-7(0123456789().,-volV)"), so they are
-# removed from the in-memory page like the watermark (rule hidden_text/2) and
+# removed from the in-memory page like the watermark (rule hidden_text/3) and
 # every reader of the text layer drops them. pdfium keeps the render mode, fill
 # colour, font size and matrix per text object, so the rule judges objects:
 # - invisible: render mode 3 or 7, on a page that is not covered by images
@@ -2110,8 +2110,20 @@ def _line_number_column(
 #   counts as mostly invisible, stays for the invisible-layer check and its
 #   OCR fallback: a count of objects dropped a scan's six long OCR lines
 #   beside ten one-glyph stamps, and the page lost its scan route.
-# - tiny: an effective size (Tf size times the matrix scale) and a page-space
-#   box both under _HIDDEN_TEXT_MAX_SIZE_PT.
+# - tiny: an effective size (Tf size times the matrix scale) under
+#   _HIDDEN_TEXT_MAX_SIZE_PT, so a reader at 100% sees a grey line, not words,
+#   and an LLM reads whatever it says. The object's own height on the page
+#   (_ink_height, across the line whatever its rotation) must be under
+#   _HIDDEN_TEXT_MAX_INK_HEIGHT_PT too: a Type 3 font can draw 7 pt glyphs at
+#   Tf 0.75. Not relative to the page's body size: a payload longer than the
+#   page's other text would become the body. See _is_tiny_text. A mark of at
+#   most _HIDDEN_TEXT_MAX_MARK_CHARS beside readable text no more than
+#   1/_HIDDEN_TEXT_MIN_MARK_RATIO its size stays (_marks_beside_small_print): a
+#   5 pt table's p-values read "10-5" with the exponent and "10" without.
+# - squeezed (reported as tiny): one axis under _HIDDEN_TEXT_MAX_SIZE_PT and under
+#   _HIDDEN_TEXT_MAX_SQUEEZE of the other. Some PDFs slip hairline letters into
+#   words at a horizontal scale of 5% ("lalin" prints as "lain"), the same trick
+#   that shows any string as a thin bar.
 # - transparent: a fill alpha of 0 in a filling render mode, unless the page's
 #   vector or image ink under it has the shape of its glyphs (_without_ink).
 #   Chromium's PDF writer draws fake-bold text as outlines and sets the words
@@ -2154,7 +2166,20 @@ def _line_number_column(
 # painted over by later drawing and TCPDF's line; no visible masthead, page number
 # or figure label it was checked against. On the 80 scans it removes only
 # overprinted copies, one tiny and one off-page object, as hidden_text/1 did.
-_HIDDEN_TEXT_MAX_SIZE_PT = 1.0
+# hidden_text/3 (2026-11-03) raised the tiny limit from 1 pt, and on 6,690 real
+# PDFs with a text layer, 336 million characters, it removes 273,000 more, 0.08%,
+# in 238 PDFs: 206,000 from one PDF's heatmaps, the rest mostly plot labels and
+# diagram text, and squeezed objects in 15 PDFs, which repairs the words of 7. At
+# 3.0 pt the first whole table appears, so the limit stops just short of it
+# (float noise puts a 3 pt object at 2.9999). It also takes a few table cells
+# shrunk to fit a column and small cover-page lines. It drops 10 objects from the
+# OCR layers of 100 scans.
+_HIDDEN_TEXT_MAX_SIZE_PT = 2.95
+_HIDDEN_TEXT_MAX_INK_HEIGHT_PT = 4.5
+_HIDDEN_TEXT_MAX_SQUEEZE = 0.5
+_HIDDEN_TEXT_MAX_MARK_CHARS = 4
+_HIDDEN_TEXT_MIN_MARK_RATIO = 0.5
+_HIDDEN_TEXT_MAX_MARK_PAIRS = 1_000_000
 _HIDDEN_TEXT_MIN_LUMA = 0.6
 _HIDDEN_TEXT_BACKGROUND_TOLERANCE = 16
 _HIDDEN_TEXT_MAX_SHOWN_SHARE = 0.01
@@ -2187,8 +2212,8 @@ def _is_light(rgba: tuple[int, int, int, int]) -> bool:
     return luma >= _HIDDEN_TEXT_MIN_LUMA
 
 
-def _effective_font_size(pdfium_c, obj, matrix: tuple[float, ...] | None) -> float | None:
-    """The object's Tf size times the scale of its matrix composed through its forms."""
+def _glyph_sizes(pdfium_c, obj, matrix: tuple[float, ...] | None) -> tuple[float, float] | None:
+    """Tf size times the scale of the matrix composed through its forms: (along, across) the line."""
     own = _object_matrix(pdfium_c, obj)
     if own is None:
         return None
@@ -2196,7 +2221,89 @@ def _effective_font_size(pdfium_c, obj, matrix: tuple[float, ...] | None) -> flo
     size = ctypes.c_float(0.0)
     if not pdfium_c.FPDFTextObj_GetFontSize(obj, ctypes.byref(size)):
         return None
-    return size.value * math.sqrt(abs(a * d - b * c))
+    return size.value * math.hypot(a, b), size.value * math.hypot(c, d)
+
+
+def _ink_height(pdfium_c, obj, matrix: tuple[float, ...] | None, box: _Box | None) -> float | None:
+    """The object's height across its line in points, whatever its rotation.
+
+    The page-space box says nothing about a rotated object, whose box grows with
+    its length. Without FPDFPageObj_GetRotatedBounds the box's short side stands in.
+    """
+    short_side = None if box is None else min(box[2] - box[0], box[3] - box[1])
+    get_quad = getattr(pdfium_c, "FPDFPageObj_GetRotatedBounds", None)
+    if get_quad is None:
+        return short_side
+    quad = pdfium_c.FS_QUADPOINTSF()
+    if not get_quad(obj, ctypes.byref(quad)):
+        return short_side
+    a, b, c, d, _e, _f = _compose((1.0, 0.0, 0.0, 1.0, 0.0, 0.0), matrix)
+    across_x, across_y = quad.x4 - quad.x1, quad.y4 - quad.y1
+    return math.hypot(a * across_x + c * across_y, b * across_x + d * across_y)
+
+
+def _is_tiny_text(pdfium_c, obj, matrix: tuple[float, ...] | None, box: _Box | None) -> bool:
+    """Whether the object's glyphs are too small or too squeezed to read (see the rule above)."""
+    sizes = _glyph_sizes(pdfium_c, obj, matrix)
+    if sizes is None or min(sizes) >= _HIDDEN_TEXT_MAX_SIZE_PT:
+        return False
+    if min(sizes) < _HIDDEN_TEXT_MAX_SQUEEZE * max(sizes):
+        return True
+    if math.sqrt(sizes[0] * sizes[1]) >= _HIDDEN_TEXT_MAX_SIZE_PT:
+        return False
+    height = _ink_height(pdfium_c, obj, matrix, box)
+    return height is not None and height < _HIDDEN_TEXT_MAX_INK_HEIGHT_PT
+
+
+def _marks_beside_small_print(pdfium_c, page, objects: list, tiny: list) -> set[int]:
+    """``id()`` of the *tiny* entries that are a sub- or superscript of readable small print.
+
+    A neighbour must be readable itself, so tiny text cannot anchor tiny text,
+    and at most 1/_HIDDEN_TEXT_MIN_MARK_RATIO the mark's size, so ordinary
+    body text anchors nothing under half of it. Squeezed objects never count.
+    Past _HIDDEN_TEXT_MAX_MARK_PAIRS comparisons the page keeps no marks.
+    """
+    tiny_ids = {id(entry) for entry, _box in tiny}
+    readable: list[tuple[_Box, float]] = []
+    for entry in objects:
+        _parent, obj, matrix = entry
+        if id(entry) in tiny_ids:
+            continue
+        if pdfium_c.FPDFTextObj_GetTextRenderMode(obj) in _INVISIBLE_TEXT_RENDER_MODES:
+            continue
+        bounds = _object_bounds(pdfium_c, obj)
+        sizes = _glyph_sizes(pdfium_c, obj, matrix)
+        if bounds is None or sizes is None:
+            continue
+        readable.append((_transform_box(matrix, bounds) if matrix else bounds, sizes[1]))
+    if len(tiny) * len(readable) > _HIDDEN_TEXT_MAX_MARK_PAIRS:
+        return set()
+    beside: list[tuple] = []
+    for entry, box in tiny:
+        sizes = _glyph_sizes(pdfium_c, entry[1], entry[2])
+        if box is None or sizes is None or min(sizes) < _HIDDEN_TEXT_MAX_SQUEEZE * max(sizes):
+            continue
+        size = math.sqrt(sizes[0] * sizes[1])
+        for other, other_size in readable:
+            if (
+                size >= _HIDDEN_TEXT_MIN_MARK_RATIO * other_size
+                and max(other[0] - box[2], box[0] - other[2]) <= size
+                and min(box[3], other[3]) - max(box[1], other[1]) >= -0.5 * size
+            ):
+                beside.append(entry)
+                break
+    if not beside:
+        return set()
+    textpage = page.get_textpage()
+    try:
+        return {
+            id(entry)
+            for entry in beside
+            if len(_text_object_text(pdfium_c, entry[1], textpage).strip())
+            <= _HIDDEN_TEXT_MAX_MARK_CHARS
+        }
+    finally:
+        textpage.close()
 
 
 def _boxes_meet(box: _Box, other: _Box) -> bool:
@@ -2255,6 +2362,7 @@ def _find_hidden_text(
     invisible: list[tuple[tuple, str, _Box | None]] = []
     light: list[tuple[tuple, tuple[int, int, int, int], _Box]] = []
     transparent: list[tuple[tuple, tuple[int, int, int, int], _Box]] = []
+    tiny: list[tuple[tuple, _Box | None]] = []
     for entry in objects:
         _parent, obj, matrix = entry
         bounds = _object_bounds(pdfium_c, obj)
@@ -2266,11 +2374,9 @@ def _find_hidden_text(
         if box is not None and not _boxes_meet(box, crop_box):
             hidden.append((entry, "off_page", box))
             continue
-        if box is not None and min(box[2] - box[0], box[3] - box[1]) < _HIDDEN_TEXT_MAX_SIZE_PT:
-            size = _effective_font_size(pdfium_c, obj, matrix)
-            if size is not None and size < _HIDDEN_TEXT_MAX_SIZE_PT:
-                hidden.append((entry, "tiny", box))
-                continue
+        if _is_tiny_text(pdfium_c, obj, matrix, box):
+            tiny.append((entry, box))
+            continue
         if mode not in _FILLING_RENDER_MODES:
             continue
         rgba = _fill_rgba(pdfium_c, obj)
@@ -2287,6 +2393,9 @@ def _find_hidden_text(
                 hidden.append((entry, "transparent", box))
         elif box is not None and _is_light(rgba):
             light.append((entry, rgba, box))
+    if tiny:
+        marks = _marks_beside_small_print(pdfium_c, page, objects, tiny)
+        hidden.extend((entry, "tiny", box) for entry, box in tiny if id(entry) not in marks)
     scan_like: list[bool] = []
 
     def covered_as_a_scan() -> bool:
@@ -2763,7 +2872,7 @@ def strip_furniture_objects(
     changes: nothing is written back, and the callers open the document from
     bytes for their own pass. Operates on a caller-provided (lock-held) page.
 
-    Hidden text objects (see the hidden_text/2 rule above
+    Hidden text objects (see the hidden_text/3 rule above
     :func:`_find_hidden_text`) go on every page.
 
     *furniture*, when given, gets ``(kind, box, text)`` for every object
