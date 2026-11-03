@@ -727,6 +727,7 @@ def _resourced_pdf(
     *,
     gstates: bytes = b"",
     form: bytes | None = None,
+    form_bbox: bytes = b"0 0 612 792",
     image: tuple[int, int, bytes] | None = None,
 ) -> bytes:
     """One page with /F1, ExtGStates *gstates*, a form /Fm1 and a DeviceGray image /Im1."""
@@ -742,9 +743,9 @@ def _resourced_pdf(
     ]
     form = form or b""
     bodies.append(
-        b"<< /Type /XObject /Subtype /Form /BBox [0 0 612 792] "
+        b"<< /Type /XObject /Subtype /Form /BBox [%s] "
         b"/Resources << /Font << /F1 4 0 R >> >> /Length %d >>\nstream\n"
-        % len(form)
+        % (form_bbox, len(form))
         + form
         + b"\nendstream"
     )
@@ -1017,6 +1018,8 @@ def test_the_passes_leave_the_page_as_they_found_it():
         + _bt("A pale line.", 72.0, 200.0, size=10.0)
         + b"Q\nq 0.5 g\n"
         + _bt("A grey line.", 72.0, 180.0, size=10.0)
+        + b"Q\nq 0 0 612 100 re W n\n"
+        + _bt("A clipped line.", 72.0, 240.0, size=10.0)
         + b"Q\n"
     )
     with pdfium_lock:
@@ -1037,5 +1040,96 @@ def test_the_passes_leave_the_page_as_they_found_it():
                 page.close()
         finally:
             doc.close()
-    assert sorted(reason for _entry, reason, _box in found) == ["covered", "faint"]
+    assert sorted(reason for _entry, reason, _box in found) == ["clipped", "covered", "faint"]
     assert after == before
+
+
+_CLIP_ELSEWHERE = b"q 0 0 612 100 re W n\n"
+
+
+@pytest.mark.parametrize(
+    "clip",
+    [
+        pytest.param(_CLIP_ELSEWHERE, id="rectangle"),
+        pytest.param(b"q 0 0 612 100 re 0 500 612 100 re W n\n", id="two-strips-around-it"),
+        pytest.param(b"q 0 0 m 612 0 l 612 100 l 0 200 l h W n\n", id="polygon"),
+        pytest.param(b"q 0 0 612 500 re W n 0 400 612 100 re W n\n", id="two-rectangles"),
+    ],
+)
+def test_text_a_clip_hides_leaves_the_layer(clip):
+    pdf_bytes = _resourced_pdf(_body() + clip + _payload() + b"Q\n")
+
+    assert "Ignore prior" not in _page_text(pdf_bytes)
+    assert "clipped" in _reasons(pdf_bytes)
+    assert "Body text line 3" in _page_text(pdf_bytes)
+
+
+def test_the_bbox_of_a_form_clips_its_text():
+    pdf_bytes = _resourced_pdf(_body() + b"/Fm1 Do\n", form=_payload(), form_bbox=b"0 0 612 100")
+
+    assert "Ignore prior" not in _page_text(pdf_bytes)
+
+
+def test_a_clip_around_a_form_clips_its_text():
+    pdf_bytes = _resourced_pdf(_body() + _CLIP_ELSEWHERE + b"/Fm1 Do\nQ\n", form=_payload())
+
+    assert "Ignore prior" not in _page_text(pdf_bytes)
+
+
+def test_a_clip_inside_a_form_is_moved_with_the_form():
+    """The clip's points match the text's box only before the form's move onto the page."""
+    moved = b"q 1 0 0 1 0 190 cm /Fm1 Do Q\n"
+    form = b"q 0 490 612 30 re W n\n" + _payload() + b"Q\n"
+
+    assert "Ignore prior" not in _page_text(_resourced_pdf(_body() + moved, form=form))
+
+
+def test_a_clip_around_a_form_is_not_moved_with_it():
+    moved = b"q 0 280 612 40 re W n q 1 0 0 1 0 -200 cm /Fm1 Do Q Q\n"
+    form = _bt(_HIDDEN_WORDS, 72.0, 500.0, size=10.0)
+
+    assert "Ignore prior" in _page_text(_resourced_pdf(_body() + moved, form=form))
+
+
+@pytest.mark.parametrize(
+    "clip",
+    [
+        pytest.param(b"q 60 290 500 30 re W n\n", id="inside"),
+        pytest.param(b"q 60 290 120 30 re W n\n", id="cut-short"),
+        pytest.param(b"q 60 300 500 4 re W n\n", id="cut-low"),
+        pytest.param(b"q 60 290 m 560 290 l 560 320 l 60 320 l 40 305 l h W n\n", id="polygon"),
+        pytest.param(b"q 0 280 612 40 re 0 500 612 100 re W n\n", id="one-strip-of-two"),
+    ],
+)
+def test_text_a_clip_still_shows_stays(clip):
+    assert "Ignore prior" in _page_text(_resourced_pdf(_body() + clip + _payload() + b"Q\n"))
+
+
+def test_a_single_letter_a_clip_still_shows_keeps_the_object():
+    """Under one letter's worth of a box inside the clip, the object still prints."""
+    clip = b"q 72 290 7 30 re 0 500 612 100 re W n\n"
+
+    assert "Ignore prior" in _page_text(_resourced_pdf(_body() + clip + _payload() + b"Q\n"))
+
+
+def test_the_render_outvotes_a_clip_that_is_read_wrongly(monkeypatch):
+    monkeypatch.setattr(native_text, "_clip_box", lambda _c, _obj: ((0.0, 0.0, 1.0, 1.0), False))
+    pdf_bytes = _resourced_pdf(_body() + _payload())
+
+    assert "Ignore prior" in _page_text(pdf_bytes)
+
+
+def test_clipped_text_on_a_scan_stays():
+    layer = _CLIP_ELSEWHERE + _payload() + b"Q\n"
+    pdf_bytes = _resourced_pdf(b"q 612 0 0 792 0 0 cm /Im1 Do Q\n" + layer)
+
+    assert "Ignore prior" in _page_text(pdf_bytes)
+
+
+def test_clip_pass_without_the_page_edit_calls_keeps_the_text(monkeypatch):
+    import pypdfium2.raw as pdfium_c
+
+    monkeypatch.delattr(pdfium_c, "FPDFPageObj_SetFillColor")
+    pdf_bytes = _resourced_pdf(_body() + _CLIP_ELSEWHERE + _payload() + b"Q\n")
+
+    assert "Ignore prior" in _page_text(pdf_bytes)

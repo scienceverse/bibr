@@ -228,6 +228,11 @@ by an earlier version, carries neither.
   images. Replaced running heads and corrected values now read as printed. Across a
   large mixed corpus the removed text is 0.005% of the characters, in about 4% of
   the PDFs. Rendering adds about 3.5 ms per page.
+- Text a clip hides no longer reaches the text layer (also rule `hidden_text/4`). A
+  figure cropped from a whole page used to bring that page's text along, so pages
+  read twice. An object goes when its box lies outside its clip, or its clip is not
+  one rectangle, and it draws no ink rendered alone. A few labels of figures printed
+  as pictures go with such copies, because the copy was their only text.
 
 ## [0.8.0] - 2026-10-30
 

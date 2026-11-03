@@ -2174,10 +2174,13 @@ def _line_number_column(
 #   size, whose box covers at least _OVERPRINT_MIN_OVERLAP of the smaller box.
 #   "Fake bold" draws a running head two or three times a fraction of a point
 #   apart; the text layer read it as "Vol. 3, No. 12 Vol. 3, No. 12 ...".
-# Clip paths are not read: FPDFPageObj_GetClipPath's points did not line up
-# with the text boxes on the dev PDFs (2026-10-26: whole visible pages of 36
-# PDFs read as clipped away), so dark text hidden only by a clip path stays;
-# light text a clip hides is caught by the background render.
+# - clipped: a text object with at most _HIDDEN_TEXT_MAX_CLIP_SHARE of its box
+#   inside its clip's bounding box, its forms' clips included, or under a clip that
+#   is not one rectangle, and without a single pixel of ink when only such objects
+#   are rendered, in opaque black. A figure cropped from a whole page brings that
+#   page's text along, hidden by the crop. Clip points are in the object's own
+#   frame, before its forms' matrices. Text a clip only cuts stays. So does text
+#   inside a clip made of glyphs, which pdfium's clip API does not show.
 # On the 392 dev PDFs (2026-10-26) the rule removes the Springer and Nature
 # glyph-set markers, white-on-white blocks, PLOS's placeholders, a grey title
 # painted over by later drawing and TCPDF's line; no visible masthead, page number
@@ -2199,6 +2202,13 @@ def _line_number_column(
 # also appear elsewhere on the page. It costs the pale top copy of one embossed ISSN
 # and a few pale chart labels. It leaves the OCR layers of 100 scans as they were. A
 # pattern search found no instruction to an LLM among the objects it removes.
+# The clipped test, in the same version, removes about 209,000 more characters of
+# text on 604 pages of 283 of those PDFs, mostly whole draft pages behind cropped
+# figures. On those pages the word count falls from 133,000 to 113,000 and moves
+# closer to an OCR of the page on 207 of 257 pages checked, farther on 46. It costs
+# about 0.75 ms per page. Of 3,177 words gone per page, OCR still reads 104, mostly
+# labels of figures and tables printed as pictures; an embedded clipped copy draws
+# no glyphs to compare, so those cannot be told from a stale copy. Scans are unchanged.
 _HIDDEN_TEXT_MAX_SIZE_PT = 2.95
 _HIDDEN_TEXT_MAX_INK_HEIGHT_PT = 4.5
 _HIDDEN_TEXT_MAX_SQUEEZE = 0.5
@@ -2225,6 +2235,7 @@ _HIDDEN_TEXT_MIN_GLYPHS_ON_INK = 0.6
 _HIDDEN_TEXT_MIN_INK_NEAR_GLYPHS = 0.7
 _HIDDEN_TEXT_MIN_PAPER_MARGIN_PX = 16
 _HIDDEN_TEXT_PAINT_COLOURS = ((255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 0, 255))
+_HIDDEN_TEXT_MAX_CLIP_SHARE = 0.05
 _FILLING_RENDER_MODES = frozenset({0, 2, 4, 6})
 _FILL_AND_STROKE_RENDER_MODES = frozenset({2, 6})
 _OVERPRINT_MIN_OVERLAP = 0.5
@@ -2447,6 +2458,13 @@ def _find_hidden_text(
     taken = {id(entry) for entry, _reason, _box in hidden}
     invisible = [item for item in invisible if id(item[0]) not in taken]
     taken.update(id(item[0]) for item in invisible)
+    outside = _outside_their_clips(
+        pdfium_c, page, [item for item in boxes if id(item[0]) not in taken]
+    )
+    if outside and not covered_as_a_scan():
+        clipped = _clipped_away(pdfium_c, page, outside, crop_box)
+        hidden.extend(clipped)
+        taken.update(id(entry) for entry, _reason, _box in clipped)
     covered = _under_later_objects(
         pdfium_c, page, [item for item in boxes if id(item[0]) not in taken]
     )
@@ -2781,6 +2799,141 @@ def _under_later_objects(pdfium_c, page, items: list) -> list[tuple[tuple, _Box,
     return found
 
 
+def _clip_box(pdfium_c, obj) -> tuple[_Box | None, bool]:
+    """*obj*'s clip in its own frame: its bounding box, and whether it is not one rectangle."""
+    clip = pdfium_c.FPDFPageObj_GetClipPath(obj)
+    if not clip:
+        return None, False
+    found = None
+    shaped = False
+    x, y = ctypes.c_float(), ctypes.c_float()
+    for path in range(pdfium_c.FPDFClipPath_CountPaths(clip)):
+        points: list[tuple[float, float]] = []
+        for index in range(pdfium_c.FPDFClipPath_CountPathSegments(clip, path)):
+            segment = pdfium_c.FPDFClipPath_GetPathSegment(clip, path, index)
+            if segment and pdfium_c.FPDFPathSegment_GetPoint(
+                segment, ctypes.byref(x), ctypes.byref(y)
+            ):
+                points.append((x.value, y.value))
+        if points:
+            shaped = shaped or not _is_rectangle(points)
+            xs, ys = zip(*points, strict=True)
+            found = _intersection(found, (min(xs), min(ys), max(xs), max(ys)))
+    return found, shaped
+
+
+def _is_rectangle(points: list[tuple[float, float]]) -> bool:
+    """Whether *points* walk one axis-aligned rectangle, closing point or not."""
+    if len(points) not in (4, 5) or (len(points) == 5 and points[0] != points[4]):
+        return False
+    return all(
+        (first[0] == second[0]) != (first[1] == second[1])
+        for first, second in zip(points[:4], [*points[1:4], points[0]], strict=True)
+    )
+
+
+def _intersection(box: _Box | None, other: _Box | None) -> _Box | None:
+    """Both boxes in one; it can come out inside out, which overlaps nothing."""
+    if box is None or other is None:
+        return box or other
+    return (
+        max(box[0], other[0]),
+        max(box[1], other[1]),
+        min(box[2], other[2]),
+        min(box[3], other[3]),
+    )
+
+
+def _collect_clips(
+    pdfium_c, objects, matrix, inherited: tuple[_Box | None, bool], depth: int, found: dict
+) -> None:
+    """Add each clipped text object's page-space clip to *found*, its forms' clips included."""
+    for obj in objects:
+        own, shaped = _clip_box(pdfium_c, obj)
+        if own is not None and matrix:
+            own = _transform_box(matrix, own)
+        clip = (_intersection(inherited[0], own), inherited[1] or shaped)
+        kind = pdfium_c.FPDFPageObj_GetType(obj)
+        if kind == pdfium_c.FPDF_PAGEOBJ_FORM:
+            if depth >= _SCAN_PAGE_MAX_FORM_DEPTH:
+                continue
+            own_matrix = _object_matrix(pdfium_c, obj)
+            if own_matrix is None:
+                continue
+            children = [
+                pdfium_c.FPDFFormObj_GetObject(obj, index)
+                for index in range(pdfium_c.FPDFFormObj_CountObjects(obj))
+            ]
+            _collect_clips(pdfium_c, children, _compose(own_matrix, matrix), clip, depth + 1, found)
+        elif kind == pdfium_c.FPDF_PAGEOBJ_TEXT and clip[0] is not None:
+            found[_object_address(obj)] = clip
+
+
+def _outside_their_clips(pdfium_c, page, items: list) -> list[tuple[tuple, _Box]]:
+    """The ``(entry, box)`` *items* a clip may hide: box next to nothing inside, or shaped."""
+    clips: dict = {}
+    top = [
+        pdfium_c.FPDFPage_GetObject(page.raw, index)
+        for index in range(pdfium_c.FPDFPage_CountObjects(page.raw))
+    ]
+    _collect_clips(pdfium_c, top, None, (None, False), 0, clips)
+    outside = []
+    for entry, box in items:
+        clip, shaped = clips.get(_object_address(entry[1]), (None, False))
+        if clip is None:
+            continue
+        area = (box[2] - box[0]) * (box[3] - box[1])
+        width = min(box[2], clip[2]) - max(box[0], clip[0])
+        height = min(box[3], clip[3]) - max(box[1], clip[1])
+        inside = width * height if width > 0 and height > 0 else 0.0
+        if area > 0 and (shaped or inside <= _HIDDEN_TEXT_MAX_CLIP_SHARE * area):
+            outside.append((entry, box))
+    return outside
+
+
+def _clipped_away(
+    pdfium_c, page, outside: list, crop_box: tuple[float, float, float, float]
+) -> list[tuple[tuple, str, _Box]]:
+    """The *outside* entries that draw nothing rendered alone in black (the clipped reason)."""
+    set_active = getattr(pdfium_c, "FPDFPageObj_SetIsActive", None)
+    set_fill = getattr(pdfium_c, "FPDFPageObj_SetFillColor", None)
+    if set_active is None or set_fill is None:
+        return []
+    from PIL import Image
+
+    item_ids = {_object_address(entry[1]) for entry, _box in outside}
+    others = [
+        obj
+        for obj, _kind, _box in _paint_order(pdfium_c, page)
+        if _object_address(obj) not in item_ids
+    ]
+    saved_fills = []
+    try:
+        for entry, _box in outside:
+            rgba = _fill_rgba(pdfium_c, entry[1])
+            if rgba is not None:
+                saved_fills.append((entry[1], rgba))
+                set_fill(entry[1], 0, 0, 0, 255)
+        for obj in others:
+            set_active(obj, False)
+        alone = _render_rgb(page)
+    except Exception:  # noqa: BLE001 - no render, no evidence: the text stays
+        logger.debug("Render for the clipped-text check failed", exc_info=True)
+        return []
+    finally:
+        for obj in others:
+            set_active(obj, True)
+        for obj, rgba in saved_fills:
+            set_fill(obj, *rgba)
+    ink = _changed_pixels(alone, Image.new("RGB", alone.size, (255, 255, 255)))
+    rotation = _page_rotation(page)
+    found = []
+    for entry, box in outside:
+        if not ink.crop(_pixel_area(box, crop_box, rotation, alone.size)).histogram()[255]:
+            found.append((entry, "clipped", box))
+    return found
+
+
 def _painted_over(
     pdfium_c, page, covered: list, crop_box: tuple[float, float, float, float]
 ) -> list[tuple[tuple, str, _Box]]:
@@ -2841,7 +2994,7 @@ def _without_printed_shape(
     :data:`_HIDDEN_TEXT_MIN_INK_NEAR_GLYPHS` of the ink in its box lies within a
     pixel of a glyph: outlines of the same words, or a picture of them. Ink is what
     differs from the most common colour around the box. An item that draws nothing
-    on its own stays: its font may just be missing here, or a clip may hide it.
+    on its own stays: its font may just be missing here.
     """
     from PIL import Image, ImageChops, ImageFilter
 
