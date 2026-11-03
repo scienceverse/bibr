@@ -208,6 +208,8 @@ by an earlier version, carries neither.
   ASCII line keeps the value it was trained on. On 330 PDFs with reference lines
   the two fixes change 23 line labels, all of which read as correct by hand, and
   the model's boundary F1 on 86 gold papers stays at 0.996.
+- A hyphenated initial broken at a line end ("Falk, L.-" / "S.") no longer keeps
+  the line break's space in `authors` ("L.- S."), which is now "L.-S.".
 
 ## [0.8.0] - 2026-10-30
 
