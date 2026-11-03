@@ -219,6 +219,15 @@ by an earlier version, carries neither.
   table cells shrunk below 3 pt. PDFs that insert hairline letters into words
   ("lalin" printed as "lain") now read correctly. The new rule version changes
   the OCR cache key, so cached papers are read again.
+- Text painted over by a later rectangle, image or form, text too pale to read and
+  text at a near-zero fill alpha no longer reach the text layer (rule
+  `hidden_text/4`). The page is rendered without such an object, and the object
+  goes only when nothing changes. Grey of about 0.88 and paler goes under 14 pt;
+  darker grey stays, and so does larger pale text. Words the page still prints, as
+  outlines or a picture of them, stay, and so does a scan's OCR layer under its
+  images. Replaced running heads and corrected values now read as printed. Across a
+  large mixed corpus the removed text is 0.005% of the characters, in about 4% of
+  the PDFs. Rendering adds about 3.5 ms per page.
 
 ## [0.8.0] - 2026-10-30
 
