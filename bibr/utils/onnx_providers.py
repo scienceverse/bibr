@@ -269,19 +269,21 @@ def get_ort_providers(
     enable_cuda: bool = True,
     model_name: str = "",
     gpu_mem_limit: int | None = None,
-    enable_coreml: bool = True,
+    enable_coreml: bool = False,
     cuda_device_id: int | None = None,
 ) -> list[str | tuple[str, dict]]:
     """Build ONNX Runtime provider list.
 
-    Falls back gracefully: CUDA → CoreML → CPU. Including CUDA first loads
-    the CUDA libraries it needs (see :func:`_preload_cuda_libraries`).
+    Falls back gracefully: CUDA → CPU, with CoreML before the CPU only on
+    request. Including CUDA first loads the CUDA libraries it needs (see
+    :func:`_preload_cuda_libraries`).
 
     Args:
         enable_cuda: Whether to include CUDAExecutionProvider.
         model_name: Human-readable model name for logging and import errors.
         gpu_mem_limit: Optional cap on the CUDA EP arena size in bytes.
-        enable_coreml: Whether to include CoreMLExecutionProvider.
+        enable_coreml: Whether to include CoreMLExecutionProvider. Off by
+            default: it may compute in FP16, and the layout model fails on it.
         cuda_device_id: GPU the CUDA provider runs on (ORT's default is 0).
 
     Returns:
@@ -420,6 +422,11 @@ def enable_cuda_for(device: str | None) -> bool:
     if device is None:
         return True
     return str(device).split(":", 1)[0].strip().lower() != "cpu"
+
+
+def coreml_requested(device: str | None) -> bool:
+    """Whether a device request names Apple's accelerator: ``mps``, never the default."""
+    return str(device or "").partition(":")[0].strip().lower() == "mps"
 
 
 def cuda_device_id_for(device: str | None) -> int | None:
@@ -562,6 +569,7 @@ def create_session(
     model_name: str = "",
     gpu_mem_limit: int | None = None,
     disable_cpu_arena: bool = False,
+    allow_coreml: bool = True,
 ):
     """Open an ``InferenceSession`` on ``model_path`` and report its device.
 
@@ -580,6 +588,10 @@ def create_session(
     after a GPU out-of-memory failure (layout, NER parser, section
     classifier), not blindly for every model.
 
+    CoreML joins the chain only when ``device`` asks for ``mps`` (see
+    :func:`coreml_requested`). ``allow_coreml=False`` refuses even that, for a
+    model known to fail on it.
+
     When the CUDA session cannot be opened because the GPU is out of memory
     (:func:`is_session_gpu_oom`), the model is opened on the CPU instead, with
     a warning, and ``device`` is ``"cpu"``: the same last resort the models
@@ -592,9 +604,9 @@ def create_session(
         enable_cuda=allow_accelerators,
         model_name=model_name,
         gpu_mem_limit=gpu_mem_limit,
-        # ``cpu`` means the CPU provider: CoreML may compute in FP16, which
-        # breaks the parity a CPU run is asked for.
-        enable_coreml=allow_accelerators,
+        # CoreML may compute in FP16, which breaks the parity with a CPU run,
+        # so a run gets it only by asking for it.
+        enable_coreml=allow_coreml and coreml_requested(device),
         cuda_device_id=cuda_device_id_for(device),
     )
     options = ort.SessionOptions()

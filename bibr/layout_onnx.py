@@ -734,6 +734,9 @@ class OnnxLayoutBackend:
             # CPU-only layout sessions skip ORT's CPU arena (audit-measured
             # ~5 GB at batch 8); a no-op when the chain includes CUDA.
             disable_cpu_arena=True,
+            # Every CoreML configuration fails on this graph at run time: the
+            # default format errors on any input and MLProgram aborts the process.
+            allow_coreml=False,
         )
         self._input_name = self.session.get_inputs()[0].name
         outputs = {o.name for o in self.session.get_outputs()}

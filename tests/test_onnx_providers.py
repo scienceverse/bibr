@@ -75,8 +75,8 @@ def test_cuda_with_gpu_mem_limit():
     assert providers[0][1]["gpu_mem_limit"] == 1024 * 1024 * 1024
 
 
-def test_coreml_included_when_available():
-    """CoreMLExecutionProvider is included when available (macOS)."""
+def test_coreml_included_only_when_asked_for():
+    """CoreMLExecutionProvider exists on macOS, but a chain has it only on request."""
     mock_ort = MagicMock()
     mock_ort.get_available_providers.return_value = [
         "CoreMLExecutionProvider",
@@ -86,9 +86,11 @@ def test_coreml_included_when_available():
     with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
         from bibr.utils.onnx_providers import get_ort_providers
 
-        providers = get_ort_providers(enable_cuda=False)
+        default = get_ort_providers(enable_cuda=False)
+        asked_for = get_ort_providers(enable_cuda=False, enable_coreml=True)
 
-    assert providers == ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    assert default == ["CPUExecutionProvider"]
+    assert asked_for == ["CoreMLExecutionProvider", "CPUExecutionProvider"]
 
 
 def test_cuda_provider_available_true():

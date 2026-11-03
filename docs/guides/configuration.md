@@ -762,10 +762,14 @@ directory or a commit SHA. The section-classifier pin is the model retrained in 
 keep the previous one.
 
 Execution providers come from the same chain the sentence segmenter uses
-(CUDA → CoreML → CPU), so `bibr[gpu]` accelerates all four models, not just
-segmentation. `--device cpu` runs these models on the CPU provider alone (no
-CoreML, which may compute in FP16), and `device="cuda:1"` in the Python API puts
-them on that GPU.
+(CUDA → CPU), so `bibr[gpu]` accelerates all four models, not just
+segmentation. `--device cpu` runs these models on the CPU provider alone, and
+`device="cuda:1"` in the Python API puts them on that GPU.
+
+On a Mac these models run on the CPU provider. CoreML is opt-in, because it may
+compute in FP16: set a model's own device to `mps`, such as `NER_DEVICE=mps` or
+`ML_SECTION_CLASSIFIER_DEVICE=mps`. The layout model stays on the CPU provider
+even then, because it fails on CoreML.
 
 `Dockerfile.serve` sets `ML_RUNTIME=torch` explicitly. That image exists for the
 PyTorch stack — `torch.compile` on the layout model in particular — and since the

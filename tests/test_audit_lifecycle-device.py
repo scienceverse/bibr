@@ -33,7 +33,14 @@ def test_cpu_device_keeps_coreml_out_of_the_session():
     available = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
 
     assert _session_providers(available, "cpu") == ["CPUExecutionProvider"]
-    assert _session_providers(available, None) == available
+
+
+@pytest.mark.parametrize("device", [None, "cuda"])
+def test_only_an_mps_request_puts_coreml_in_the_session(device):
+    """A Mac's default run stays on the CPU provider; ``--device mps`` opts in to CoreML."""
+    available = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+
+    assert _session_providers(available, device) == ["CPUExecutionProvider"]
     assert _session_providers(available, "mps") == available
 
 

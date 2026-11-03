@@ -189,6 +189,12 @@ by an earlier version, carries neither.
   page, a band, a rule, other outlines or visible text still counts as hidden.
   The check can be fooled by single letters under about 9 pt over a band, or by a
   filled box the size of each letter.
+- On a Mac, `bibr chew` no longer fails every PDF with `Layout analysis failed`
+  unless you pass `--device cpu` (#257). ONNX Runtime's CoreML provider came
+  before the CPU in the default chain, and the layout model fails on every
+  CoreML configuration. The local ONNX models now run on the CPU provider by
+  default. Setting a model's own device to `mps` still opts in to CoreML, except
+  for layout, which stays on the CPU provider.
 
 ## [0.8.0] - 2026-10-30
 
