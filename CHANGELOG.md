@@ -105,8 +105,11 @@ by an earlier version, carries neither.
   count, ignores a CPU affinity mask and a container CPU quota, and spins its
   idle workers, so a process pinned to four CPUs on a 16-thread machine ran 16
   workers in each of its six sessions. On 20 open-access papers (373 pages)
-  run on four pinned CPUs, the whole pipeline used 1,381 CPU-seconds instead of
-  7,506 (5.4 times less), and all 20 results are identical. `ML_ONNX_THREADS`
+  in fast mode on four pinned CPUs, the whole pipeline used 1,381 CPU-seconds
+  instead of 7,506 (5.4 times less), and all 20 results are identical. In full
+  mode with a stubbed LLM and the text-layer route, 10 papers (186 pages) took
+  175 s instead of 540 on four pinned CPUs and 123 s instead of 219 on 16, with
+  identical results and no clear change in peak memory. `ML_ONNX_THREADS`
   (default `0`, the CPUs the process may use) and `ML_ONNX_SPINNING` (default
   `false`) set either back; see
   [Configuration](docs/guides/configuration.md#cpu-threads).
@@ -118,7 +121,8 @@ by an earlier version, carries neither.
   now points at `bibr.local.cli:entrypoint`; `bibr.local.cli.main` is unchanged.
 - The sentence segmenter batches its texts shortest first, because it pads every
   text in a batch to the longest one. On 24 papers (1,183 texts) on four threads
-  this took 345 CPU-seconds instead of 464 and 651 MB instead of 902. A break's
+  this took 345 CPU-seconds instead of 464 and 651 MB instead of 902. In the
+  full-mode runs above, the parse stage took about a third less time. A break's
   score moves slightly with its batch, so a break right at the threshold can
   flip: over 534 papers, 5 changed one sentence boundary.
 - The layout detector's page resize works on uint8 planes block by block, at 28

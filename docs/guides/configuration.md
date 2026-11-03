@@ -790,10 +790,12 @@ the CPUs the process may use and lets idle workers block:
 | `ML_ONNX_THREADS` | `0` | Intra-op threads per CPU session. `0` uses the CPUs this process may run on: the machine's CPU count cut by the affinity mask and by any cgroup CPU quota (rounded up). |
 | `ML_ONNX_SPINNING` | `false` | `true` restores onnxruntime's spin-wait. |
 
-The models run one stage at a time, so one session works while the others are
-idle: a pool the size of the CPU budget is not oversubscribed. To run several
-`bibr batch` processes side by side, pin each one (`taskset -c 0-3 bibr batch
-…`) or set `ML_ONNX_THREADS` to its share of the machine. Neither setting
+Each session gets the whole CPU budget, and sessions can overlap: papers are
+parsed and post-processed concurrently, and with a hosted LLM one window's back
+half can run beside the next window's layout. Overlaps can briefly oversubscribe
+the budget. To run several `bibr batch` processes side by side, pin each one
+(`taskset -c 0-3 bibr batch …`) or set `ML_ONNX_THREADS` to its share of the
+machine. Neither setting
 changes a result: thread count and spinning only change how the same operators
 are scheduled. CUDA sessions are not touched.
 
