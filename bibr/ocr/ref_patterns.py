@@ -105,9 +105,18 @@ _REF_HEADER_RE = re.compile(
 # A line that starts like "Surname," — the classic author-date reference opener.
 _AUTHOR_DATE_START = re.compile(r"^[\"'(]?[A-Z][A-Za-z'’.\-]+,")
 
-# Unicode/full-given-name fallback for already reference-shaped regions. Keep
-# the trained geometry feature above byte-for-byte stable; callers that need a
-# higher-recall structural onset check use this helper instead. Both sides of
+# The same opener with a surname in any script ("Novák,", "Šimić,"), for the
+# geometry model's ``starts_author_date`` feature. ``re`` has no upper-case class
+# past Latin-1, so ``_starts_with_surname`` checks the case of the match.
+_SURNAME_START = re.compile(r"^[\"'(]?([^\W\d_](?:[^\W\d_]|['’.\-])+),")
+
+# A line that leaves an author list open ("Ware, J. J., &"): the next line cannot
+# open a reference. The connector has to stand alone, since a DOI can end in a
+# letter after a hyphen ("10.1000/abc-0035-y").
+_OPEN_AUTHOR_LIST = re.compile(r"(?:^|[\s,;])(?:&|and)\s*$")
+
+# Unicode/full-given-name fallback for already reference-shaped regions. Callers
+# that need a higher-recall structural onset check use this helper. Both sides of
 # the comma stay name-shaped so prose such as "The report, published in 2020"
 # cannot become a reference anchor merely because it contains a year.
 _NAME_COMPONENT_RE = r"[A-ZÀ-ÖØ-Þ][^\W\d_]*(?:[-'’][^\W\d_]+)*\.?"
@@ -123,12 +132,17 @@ _AUTHOR_DATE_COMMA_LEAD = re.compile(
 _YEAR = re.compile(r"\(in press[a-z]?\)|\b(?:19|20)\d\d[a-z]?\b", re.IGNORECASE)
 
 
+def _starts_with_surname(text: str) -> bool:
+    """Whether *text* opens with a capitalised ``Surname,``, in any script."""
+    match = _SURNAME_START.match(text)
+    return match is not None and match.group(1)[0].isupper()
+
+
 def _looks_like_author_date_start(text: str) -> bool:
     """Return whether *text* has a credible ``Family, Given ... Year`` onset.
 
-    ``_AUTHOR_DATE_START`` is an intentionally stable ASCII feature consumed
-    by the trained geometry model.  This structural fallback adds Unicode
-    surnames and full given names without changing that model feature.
+    ``_AUTHOR_DATE_START`` is ASCII; this structural fallback adds Unicode
+    surnames and full given names, with a year to back them up.
     """
     if _AUTHOR_DATE_START.match(text):
         return True

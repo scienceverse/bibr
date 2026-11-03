@@ -195,6 +195,19 @@ by an earlier version, carries neither.
   CoreML configuration. The local ONNX models now run on the CPU provider by
   default. Setting a model's own device to `mps` still opts in to CoreML, except
   for layout, which stays on the CPU provider.
+- A long author list no longer loses all but its last author when it wraps right
+  after its "&" or "and" (#217). The geometry segmenter could take the last
+  author's line, which reads like a one-author entry, for the start of a
+  reference, and that entry then took the date, title and DOI. A line after one
+  ending in "&" or "and" no longer opens an entry, in the geometry segmenter and
+  in the reference line stream.
+- A reference whose first surname has a non-ASCII letter ("Novák,", "Šimić,") is
+  now read as opening an entry even when its first line holds no year. The
+  geometry model's `starts_author_date` feature only knew ASCII surnames, so such
+  a line was glued to the entry before it. The model is not retrained, and every
+  ASCII line keeps the value it was trained on. On 330 PDFs with reference lines
+  the two fixes change 23 line labels, all of which read as correct by hand, and
+  the model's boundary F1 on 86 gold papers stays at 0.996.
 
 ## [0.8.0] - 2026-10-30
 

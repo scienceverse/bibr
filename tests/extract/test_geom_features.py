@@ -52,3 +52,28 @@ def test_early_year_paren_silent_on_continuations():
     for s in conts:
         f = line_features([_ln(s, 263.0)])[0]
         assert f["early_year_paren"] is False, s
+
+
+def test_author_date_start_takes_a_non_ascii_surname():
+    # The same opener as "Novak, T. R.,": without it the model read a flush line
+    # holding a long author list and no year as the middle of an entry.
+    for s in (
+        "Novák, T. R., Ostrom, B. A.,",
+        "Šimić, N.,",
+        "Øster, K.,",
+        "Łęcki, A.,",
+        "O’Brién, T.",
+    ):
+        assert line_features([_ln(s, 72.0)])[0]["starts_author_date"] is True, s
+
+
+def test_author_date_start_stays_off_for_lower_case_and_ascii_is_unchanged():
+    for s, expected in (
+        ("étude, a study", False),
+        ("the quick, brown fox", False),
+        ("Carstensen, L. L.", True),
+        ("D’Angelo, M.", True),
+        ("A, B", False),
+        ("2017, a year", False),
+    ):
+        assert line_features([_ln(s, 72.0)])[0]["starts_author_date"] is expected, s

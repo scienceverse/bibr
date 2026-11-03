@@ -27,6 +27,7 @@ from bibr.extract.geom_adjacent_features import (
 from bibr.extract.geom_features import PROD_FEATURE_KEYS, line_features
 from bibr.ner.checkpoint import resolve_checkpoint
 from bibr.ocr.ref_geometry import LineRecord, records_from_dicts
+from bibr.ocr.ref_patterns import _OPEN_AUTHOR_LIST
 from bibr.utils.ml_runtime import is_hub_repo_id
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,12 @@ class GeomSegmenter:
         x = self.vectorizer.transform([{k: r[k] for k in self.feature_keys} for r in rows])
         probs = [float(p) for p in self.model.predict_proba(x)[:, 1]]
         labels = ["B-REF" if p >= 0.5 else "I-REF" for p in probs]
+        for i in range(1, len(labels)):
+            # The last author of a list wrapped at its "&" reads like a one-author
+            # entry ("Ibarra, J. P. A. (2017). ..."), and would take the date,
+            # title and DOI from the authors before it.
+            if _OPEN_AUTHOR_LIST.search(lines[i - 1].text):
+                labels[i] = "I-REF"
         if labels:
             # The first region line always opens the first reference — it cannot
             # be a *continuation* of a prior entry (there is none). The model can
