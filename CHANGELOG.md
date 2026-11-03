@@ -38,6 +38,9 @@ that is off by default and that fast mode turns on, so a full run, and a
   furniture, when it tagged no author at all. Titles such as "Dr." and a trailing
   "and" or mark come off a name part, and a family name tagged in two parts is
   joined.
+- `FRONT_TAGGER_RULES` also keeps an abstract whole when an email, a date, a
+  volume, an affiliation or a licence line is set into its column. A title, an
+  author, keywords or a printed abstract heading still end it.
 - `FRONT_TAGGER_RULES` also reads the paper's `language` from its title (a PDF
   declares none). The title's function words or letters decide it; a title they
   do not decide leaves it empty, and an input that declares a language keeps it.

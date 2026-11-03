@@ -429,6 +429,73 @@ def test_untagged_institutions_are_not_read_where_an_author_has_an_affiliation()
     assert got.untagged_affiliations == []
 
 
+def _abstract_around(field, text):
+    inp = tagger_input(
+        ("doc_title", "Title of the paper"),
+        ("abstract", "We studied the hand in families."),
+        ("text", text),
+        ("abstract", "Left handedness ran in families."),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title of the paper"),
+        ("ABSTRACT", "We studied the hand in families."),
+        (field, text),
+        ("ABSTRACT", "Left handedness ran in families."),
+    )
+    return inp, tags
+
+
+@pytest.mark.parametrize(
+    ("field", "text"),
+    [
+        ("EMAIL", "a.ruiz@example.org"),
+        ("DATE", "12 March 2021"),
+        ("VOLUME", "26"),
+        ("AFFILIATION", "University of Twente"),
+        ("LICENSE", "CC BY 4.0"),
+    ],
+)
+def test_rules_join_an_abstract_across_what_floats_into_it(field, text):
+    inp, tags = _abstract_around(field, text)
+    got = assemble(inp, tags, [1.0] * len(tags), rules=True)
+    assert (
+        got.title_keywords.abstract
+        == "We studied the hand in families. Left handedness ran in families."
+    )
+    # Without the rules the first run alone stands, as the LLM covers the rest.
+    got = assemble(inp, tags, [1.0] * len(tags))
+    assert got.title_keywords.abstract == "We studied the hand in families."
+
+
+@pytest.mark.parametrize(
+    ("field", "text"),
+    [("KEYWORD", "handedness"), ("GIVEN", "Ana"), ("FAMILY", "Ruiz"), ("TITLE", "Second title")],
+)
+def test_rules_keep_an_abstract_apart_at_what_ends_it(field, text):
+    inp, tags = _abstract_around(field, text)
+    got = assemble(inp, tags, [1.0] * len(tags), rules=True)
+    assert got.title_keywords.abstract == "We studied the hand in families."
+
+
+def test_rules_keep_a_parallel_abstract_apart_at_its_heading():
+    inp = tagger_input(
+        ("doc_title", "Título en español"),
+        ("abstract", "Resumen"),
+        ("abstract", "Estudiamos la mano en familias."),
+        ("abstract", "Abstract"),
+        ("abstract", "We studied the hand in families."),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Título en español"),
+        ("ABSTRACT", "Estudiamos la mano en familias."),
+        ("ABSTRACT", "We studied the hand in families."),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags), rules=True)
+    assert got.title_keywords.abstract == "Estudiamos la mano en familias."
+
+
 def test_parallel_abstracts_and_titles_keep_the_first_printed():
     inp = tagger_input(
         ("doc_title", "Título en español"),

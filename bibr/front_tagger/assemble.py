@@ -289,24 +289,35 @@ def _spans(inp: TaggerInput, tags: Sequence[str], conf: Sequence[float]) -> list
     return spans
 
 
+# What ends a printed abstract, beside a heading: the next title, a byline, keywords.
+_ABSTRACT_ENDS = frozenset({"TITLE", "SUBTITLE", "GIVEN", "FAMILY", "AUTHOR_MARK", "KEYWORD"})
+
+
 def _clusters(
     spans: list[Span],
     tags: Sequence[str],
     inp: TaggerInput,
     wanted: str,
     heading: re.Pattern[str] = _ABSTRACT_HEADING_RE,
+    ends: frozenset[str] | None = None,
 ) -> list[list[Span]]:
     """Groups of ``wanted`` spans interrupted only by untagged words or furniture.
 
     A printed ``heading`` word (an "Abstract"/"Resumen" label) between two runs
     also starts a new group, which is how parallel-language versions separate.
+    With ``ends`` only those fields interrupt, and any other tag between two
+    runs is taken for something set into the text.
     """
     groups: list[list[Span]] = []
     for span in (s for s in spans if s.field == wanted):
         if groups:
             gap = range(groups[-1][-1].words[-1] + 1, span.words[0])
             interrupted = any(
-                _field(tags[i]) not in (None, "FURNITURE")
+                (
+                    _field(tags[i]) not in (None, "FURNITURE")
+                    if ends is None
+                    else _field(tags[i]) in ends
+                )
                 or heading.match(inp.words[i].text.strip(_TRIM) or "-")
                 for i in gap
             )
@@ -458,9 +469,15 @@ def _title(spans: list[Span], tags, inp: TaggerInput, conf) -> tuple[str | None,
     return title, confidence, problems
 
 
-def _abstract(spans: list[Span], tags, inp: TaggerInput, conf) -> tuple[str | None, float | None]:
-    """The abstract printed first; parallel-language versions are not joined."""
-    groups = _clusters(spans, tags, inp, "ABSTRACT")
+def _abstract(
+    spans: list[Span], tags, inp: TaggerInput, conf, *, rules: bool = False
+) -> tuple[str | None, float | None]:
+    """The abstract printed first; parallel-language versions are not joined.
+
+    With ``rules`` an email, date, volume, affiliation or licence line between
+    two runs does not end the abstract: such lines float into its column.
+    """
+    groups = _clusters(spans, tags, inp, "ABSTRACT", ends=_ABSTRACT_ENDS if rules else None)
     if not groups:
         return None, None
     group = groups[0]
@@ -1071,8 +1088,9 @@ def assemble(
     it would otherwise keep: a keyword closed over its parenthesis, a
     publisher's logo dropped from the authors, letter keys glued to family
     names split off (from the print and as a run), the parts of names and
-    the whole names in a byline the tags left out, and the institution text
-    the tags left out (:attr:`TaggedFrontMatter.untagged_affiliations`).
+    the whole names in a byline the tags left out, an abstract kept whole
+    across what floats into it, and the institution text the tags left out
+    (:attr:`TaggedFrontMatter.untagged_affiliations`).
     Without it the answers are the tagger's as before, and the LLM, when
     there is one, covers the rest.
     """
@@ -1087,7 +1105,7 @@ def assemble(
     title, title_conf, title_problems = _title(spans, tags, inp, confidences)
     problems.extend(title_problems)
     confidence["title"] = title_conf
-    abstract, abstract_conf = _abstract(spans, tags, inp, confidences)
+    abstract, abstract_conf = _abstract(spans, tags, inp, confidences, rules=rules)
     if abstract_conf is not None:
         confidence["abstract"] = abstract_conf
     if abstract is None:

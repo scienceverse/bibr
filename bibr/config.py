@@ -2731,9 +2731,9 @@ class GlobalSettings(_BibrSettings):
     FRONT_TAGGER_RULES: bool = Field(
         False,
         description="Read the front matter with the local rules that put right what the tagger "
-        "alone leaves wrong: author names and keywords it cut short, affiliations it left "
-        "untagged, and the title's language. Fast mode sets it; a full run leaves those "
-        "readings to the LLM.",
+        "alone leaves wrong: author names and keywords it cut short, abstracts it split, "
+        "affiliations it left untagged, and the title's language. Fast mode sets it; a full "
+        "run leaves those readings to the LLM.",
     )
     EQUATION_REPAIR_GLITCHES: bool = Field(
         False,
