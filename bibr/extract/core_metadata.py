@@ -2029,6 +2029,11 @@ _AFFILIATION_ABBREVIATION_RE = re.compile(
 _IGNORECASE_I_TRANSLATION = str.maketrans({"İ": "i", "ı": "i"})
 
 
+# The fields a run with the tagger alone leaves empty: against the Crossref record
+# of papers with a DOI, fewer than nine in ten of its readings of them are right.
+_TAGGER_WITHHELD_FIELDS = ("issue", "publisher")
+
+
 def _ignorecase_key(word: str) -> str:
     """The lowercase ASCII key of a word an ignore-case pattern matched."""
     return word.translate(_IGNORECASE_I_TRANSLATION).casefold()
@@ -3141,7 +3146,8 @@ class CoreMetadataExtractor:
         fabrication vetoes and the field decisions run on it as they do on an
         LLM answer. The "title printed in the selected record" check of
         ``primary`` mode is not applied: with no LLM to defer to, the tagger's
-        reading is the best there is.
+        reading is the best there is. Its issue and publisher are left out
+        (``_TAGGER_WITHHELD_FIELDS``).
 
         With no answer the record is empty, and the warning says why: the tagger
         did not answer (an input with page regions: its model did not load, or
@@ -3190,8 +3196,9 @@ class CoreMetadataExtractor:
                 WarningCode.FRONT_TAGGER_FLAGGED,
                 "the front-matter tagger's answer was taken despite: " + ", ".join(flags),
             )
+        title_keywords = result.title_keywords or TitleKeywordsLLM()
         return CoreMetadataLLM.from_calls(
-            result.title_keywords or TitleKeywordsLLM(),
+            title_keywords.model_copy(update=dict.fromkeys(_TAGGER_WITHHELD_FIELDS)),
             result.byline or AuthorsLLM(authors=[]),
             PaperClassificationLLM(),
             front_tagger_parts=parts,

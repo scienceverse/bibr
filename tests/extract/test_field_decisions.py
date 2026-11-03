@@ -55,6 +55,8 @@ _OTHER_OBJECTS = {
     # later window's abstract replaces the missing one before the extractor
     # builds any candidate from it.
     ("front_tagger/runtime.py", "result.title_keywords.model_copy"),
+    # The same answer without what a run with the tagger alone does not export.
+    ("extract/core_metadata.py", "title_keywords.model_copy"),
     # PaperMetadata's own copy, which drops the receipts of the fields an
     # update rewrites.
     ("models.py", "super().model_copy"),

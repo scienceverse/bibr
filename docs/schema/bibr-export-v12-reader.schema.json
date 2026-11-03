@@ -2510,7 +2510,7 @@
         },
         "issue": {
           "default": null,
-          "description": "The paper's own issue, as printed.",
+          "description": "The paper's own issue, as printed. A fast run leaves it empty unless the input declares it.",
           "title": "Issue",
           "type": [
             "string",
@@ -2702,7 +2702,7 @@
         },
         "publisher": {
           "default": null,
-          "description": "The publisher, as printed.",
+          "description": "The publisher, as printed. A fast run leaves it empty unless the input declares it.",
           "title": "Publisher",
           "type": [
             "string",

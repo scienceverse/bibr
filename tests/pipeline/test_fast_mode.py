@@ -149,7 +149,14 @@ def _tagged(*, conf: float = 0.99, problems=(), title="A Tagged Title"):
 
     return TaggedFrontMatter(
         title_keywords=TitleKeywordsLLM(
-            title=title, abstract="The tagger read this abstract.", keywords=["memory"]
+            title=title,
+            abstract="The tagger read this abstract.",
+            keywords=["memory"],
+            journal="Journal of Memory",
+            volume="12",
+            issue="3",
+            publisher="Example Press",
+            published="2021-05-04",
         ),
         byline=AuthorsLLM(authors=[AuthorLLM(given="Ana", family="Ruiz")]),
         confidence={"title": conf, "authors": conf, "abstract": conf},
@@ -168,6 +175,22 @@ async def test_fast_settings_take_the_core_metadata_from_the_tagger_alone():
     assert [(a.given, a.family) for a in ext.metadata.authors] == [("Ana", "Ruiz")]
     assert ext.metadata._field_decisions.sources()["author"] == "front_tagger"
     assert _codes(ext.contents.processing_warnings) == []
+
+
+async def test_a_fast_run_withholds_the_tagged_issue_and_publisher():
+    tagged = _tagged()
+    ext = _tagger_alone_extractor(tagged)
+
+    await ext.extract_core_metadata()
+
+    assert ext.metadata.issue is None
+    assert ext.metadata.publisher is None
+    # The fields that pass the same check stay, an exact date among them.
+    assert ext.metadata.journal == "Journal of Memory"
+    assert ext.metadata.volume == "12"
+    assert ext.metadata.published == "2021-05-04"
+    # The tagger's own answer is not changed: the title decision still reads it.
+    assert tagged.title_keywords.publisher == "Example Press"
 
 
 async def test_a_flagged_answer_is_kept_and_reported_not_sent_to_a_model():

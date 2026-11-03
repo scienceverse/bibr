@@ -522,7 +522,11 @@ class MetadataExport(BaseModel):
         default=None, description="Journal or venue name from the paper's own front matter."
     )
     volume: str | None = Field(default=None, description="The paper's own volume, as printed.")
-    issue: str | None = Field(default=None, description="The paper's own issue, as printed.")
+    issue: str | None = Field(
+        default=None,
+        description="The paper's own issue, as printed. A fast run leaves it empty unless the "
+        "input declares it.",
+    )
     first_page: str | None = Field(
         default=None, description="The paper's own first page or article number, as printed."
     )
@@ -530,7 +534,11 @@ class MetadataExport(BaseModel):
         default=None, description="The paper's own last page, as printed."
     )
     issn: str | None = Field(default=None, description="The journal ISSN, as printed.")
-    publisher: str | None = Field(default=None, description="The publisher, as printed.")
+    publisher: str | None = Field(
+        default=None,
+        description="The publisher, as printed. A fast run leaves it empty unless the input "
+        "declares it.",
+    )
     published: str | None = Field(
         default=None, description="Publication date as printed (free text, not normalized)."
     )

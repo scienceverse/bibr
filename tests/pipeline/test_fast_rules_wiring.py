@@ -181,6 +181,47 @@ def _front_matter(affiliations=(), language=None, tagged=None):
     return metadata, SimpleNamespace(front_tagger_result=tagged)
 
 
+@pytest.mark.parametrize(
+    ("mode", "record", "expected"),
+    [
+        # A fast run does not export what the tagger read, but the title still may not be it.
+        ("only", None, "Example Press"),
+        # An input that declares its publisher keeps its own.
+        ("only", "Declared Press", "Declared Press"),
+        # With an LLM the record's answer stands, empty or not.
+        ("primary", None, None),
+        ("off", "Model Press", "Model Press"),
+    ],
+)
+def test_the_title_decision_still_knows_the_tagged_publisher(mode, record, expected):
+    from bibr.front_tagger.assemble import TaggedFrontMatter
+    from bibr.pipeline.stages.post_parse import _masthead_publisher
+    from bibr.schemas import TitleKeywordsLLM
+
+    tagged = TaggedFrontMatter(
+        title_keywords=TitleKeywordsLLM(title="A Title", publisher="Example Press"), byline=None
+    )
+    settings = SimpleNamespace(ml=SimpleNamespace(front_tagger_mode=mode))
+    metadata = SimpleNamespace(publisher=record)
+
+    publisher = _masthead_publisher(SimpleNamespace(front_tagger_result=tagged), metadata, settings)
+
+    assert publisher == expected
+
+
+def test_the_title_decision_needs_no_tagger_answer():
+    from bibr.front_tagger.assemble import TaggedFrontMatter
+    from bibr.pipeline.stages.post_parse import _masthead_publisher
+
+    settings = SimpleNamespace(ml=SimpleNamespace(front_tagger_mode="only"))
+    metadata = SimpleNamespace(publisher=None)
+    empty = TaggedFrontMatter(title_keywords=None, byline=None)
+
+    for tagged in (None, empty):
+        contents = SimpleNamespace(front_tagger_result=tagged)
+        assert _masthead_publisher(contents, metadata, settings) is None
+
+
 def test_the_front_matter_rules_add_a_language_and_the_tagged_affiliations():
     from bibr.front_tagger.assemble import TaggedFrontMatter
     from bibr.pipeline.stages.post_parse import _apply_front_matter_rules

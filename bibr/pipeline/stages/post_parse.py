@@ -1061,6 +1061,19 @@ def _apply_front_matter_rules(contents, paper_metadata) -> None:
         )
 
 
+def _masthead_publisher(contents, paper_metadata, settings) -> str | None:
+    """The publisher a title must not be.
+
+    A run with the tagger alone does not export the publisher it read, but the
+    reading still tells a masthead from a title.
+    """
+    if paper_metadata.publisher or settings.ml.front_tagger_mode != "only":
+        return paper_metadata.publisher
+    tagged = getattr(contents, "front_tagger_result", None)
+    read = tagged.title_keywords if tagged is not None else None
+    return read.publisher if read is not None else None
+
+
 def _body_text_excluding_references(contents) -> str:
     """Concatenate body sentence text, excluding the reference-list section
     (whose author-year entries would otherwise dominate the citation count)."""
@@ -1648,7 +1661,7 @@ async def post_parse(
                 detected_title=contents.detected_title,
                 sections=contents.sections,
                 journal=paper_metadata.journal,
-                publisher=paper_metadata.publisher,
+                publisher=_masthead_publisher(contents, paper_metadata, effective_settings),
                 scoped=metadata_ownership_scoped,
                 abstained=metadata_abstained,
                 prefer_byline_adjacent=bool(

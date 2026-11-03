@@ -45,6 +45,12 @@ that is off by default and that fast mode turns on, so a full run, and a
   declares none). The title's function words or letters decide it; a title they
   do not decide leaves it empty, and an input that declares a language keeps it.
 
+A fast run leaves `metadata.issue` and `metadata.publisher` empty on an input it
+reads with the front-matter tagger: checked against the Crossref record of papers
+with a DOI, fewer than nine in ten of those readings were right. An input that
+declares them (JATS, HTML, ePub) keeps them, and `metadata_match` still reports
+what the registry holds. A full run is unchanged.
+
 ### Added — the text-layer OCR route
 
 A fast run with no OCR route chosen (no `--ocr`, `--ocr-url`, `--ocr-model` or
