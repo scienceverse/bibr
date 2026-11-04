@@ -148,8 +148,9 @@ text layer passes the coverage, corrupt-text and lexical gates
 (`bibr/ocr/text_layer_quality.py`); any other page gets a
 `TEXT_LAYER_PAGE_UNUSABLE` warning and its regions stay unread. Tables are
 rebuilt from glyph positions (`bibr/ocr/text_layer_tables.py`), display formulas
-are read as plain text, and private-use code points are always dropped and
-counted. `extraction.regions[].read_as` says which of these read each region
+are read as plain text, private-use code points are always dropped and counted,
+and rare glyphs with no character mapping are shown as U+FFFD and counted
+(`TEXT_LAYER_GLYPHS_UNMAPPED`). `extraction.regions[].read_as` says which of these read each region
 (`text`, `table_rebuilt`, `formula_plain` or `unread`). A file with fewer than
 `OCR_MIN_SUCCESS_RATE` (0.5) of its text regions readable stops with
 `scan_needs_ocr`, which is not retryable. `OCR_FALLBACK_TO_TEXT_LAYER=auto` also

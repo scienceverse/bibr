@@ -146,6 +146,17 @@ by an earlier version, carries neither.
 
 ### Fixed
 
+- On the text-layer route, one glyph with no character mapping no longer empties
+  its whole region. Such a glyph reads as a control character, and any control
+  character made the region unusable, which suited a route where OCR reads it next
+  but here left abstracts blank. A region with one, or at most one per 100
+  characters, is now read with U+FFFD in place of each, and a
+  `TEXT_LAYER_GLYPHS_UNMAPPED` warning counts them. The mark stays because what the
+  glyph stood for cannot be recovered and leaving it out can change the meaning
+  (a superscript minus in "W m-1"). More of them, and any in a display formula,
+  still reject the region. A region with U+FFFD rates 0 in
+  `extraction.diagnostics.text_quality`, so many of them can lower that score and
+  raise `LOW_TEXT_QUALITY`.
 - Text drawn with alpha 0 over its own printed outlines is no longer dropped as
   hidden text. PDFs written by Chromium draw fake bold as vector outlines and lay
   transparent text over them to keep it selectable, so on preprint cover pages

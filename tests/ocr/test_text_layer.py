@@ -639,6 +639,86 @@ def test_private_use_code_point_inside_a_word_is_dropped_and_counted_separately(
     assert region.get("_native_gate") is None
 
 
+def _fill_with_text_layer(monkeypatch, text, label="text"):
+    from bibr.ocr import text_layer
+
+    monkeypatch.setattr(text_layer, "_read_text", lambda page, bbox: text)
+    region = _region(label, [0, 0, 1000, 1000])
+    return text_layer._fill_region(object(), region, min_printable_ratio=0.85), region
+
+
+def test_a_rare_unmapped_glyph_is_shown_and_counted_rather_than_losing_the_region(monkeypatch):
+    # A glyph with no mapping comes out as a control character. Nothing reads the
+    # region after this route, so one of them must not empty a whole abstract.
+    text = (
+        "The conductivity reached 0.2 W m\x011 K\x011 at room temperature. " + "Plain text. " * 12
+    )
+
+    outcome, region = _fill_with_text_layer(monkeypatch, text)
+
+    assert outcome == "filled"
+    assert region["content"] == text.replace("\x01", "\ufffd")
+    assert region["_unmapped_glyphs"] == 2
+    assert region.get("_native_gate") is None
+
+
+def test_a_mark_stays_where_the_glyph_was_so_a_unit_cannot_read_as_another(monkeypatch):
+    _, region = _fill_with_text_layer(monkeypatch, "The flux was 400 W cm\x012 in every run.")
+
+    assert region["content"] == "The flux was 400 W cm\ufffd2 in every run."
+
+
+def test_a_short_region_may_carry_one_unmapped_glyph(monkeypatch):
+    outcome, region = _fill_with_text_layer(monkeypatch, "Jane Doe\x01")
+
+    assert outcome == "filled"
+    assert region["content"] == "Jane Doe\ufffd"
+    assert region["_unmapped_glyphs"] == 1
+
+
+def test_many_unmapped_glyphs_still_reject_the_region(monkeypatch):
+    # Two in a short paragraph, more than one per hundred characters: a broken font.
+    outcome, region = _fill_with_text_layer(monkeypatch, "Sev\x01ral gl\x03phs in a line of text")
+
+    assert outcome == "rejected"
+    assert region["_native_gate"] == "usability"
+    assert "_unmapped_glyphs" not in region
+
+
+def test_marking_does_not_excuse_the_other_usability_gates(monkeypatch):
+    text = "(cid:12) (cid:13) a line that a broken font left behind in the layer \x01"
+
+    outcome, region = _fill_with_text_layer(monkeypatch, text)
+
+    assert outcome == "rejected"
+    assert "_unmapped_glyphs" not in region
+
+
+def test_a_formula_with_an_unmapped_glyph_stays_unread(monkeypatch):
+    # A control character in a formula is usually a math symbol, and the result
+    # would read as another formula.
+    outcome, region = _fill_with_text_layer(monkeypatch, "x = \x0f + y", label="display_formula")
+
+    assert outcome == "rejected"
+    assert region["_native_gate"] == "usability"
+
+
+def test_whitespace_controls_are_not_unmapped_glyphs(monkeypatch):
+    outcome, region = _fill_with_text_layer(monkeypatch, "Plain words\r\non two lines\there.")
+
+    assert outcome == "filled"
+    assert "_unmapped_glyphs" not in region
+
+
+def test_unmapped_glyphs_are_reported_for_the_document():
+    from bibr.ocr.text_layer import _unmapped_glyph_warning
+
+    assert _unmapped_glyph_warning(0) is None
+    warning = _unmapped_glyph_warning(3)
+    assert warning.code == WarningCode.TEXT_LAYER_GLYPHS_UNMAPPED
+    assert warning.message.startswith("3 glyph(s)")
+
+
 def test_drop_private_use_counts_the_ones_inside_a_word():
     from bibr.ocr.text_layer import _drop_private_use
 

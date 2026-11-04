@@ -41,6 +41,7 @@ class WarningCode(StrEnum):
     TEXT_LAYER_TABLE_REBUILT = "TEXT_LAYER_TABLE_REBUILT"
     TEXT_LAYER_FORMULA_TEXT = "TEXT_LAYER_FORMULA_TEXT"
     TEXT_LAYER_PRIVATE_USE_DROPPED = "TEXT_LAYER_PRIVATE_USE_DROPPED"
+    TEXT_LAYER_GLYPHS_UNMAPPED = "TEXT_LAYER_GLYPHS_UNMAPPED"
     SCAN_ARTICLE_SPLIT = "SCAN_ARTICLE_SPLIT"
     LOW_TEXT_QUALITY = "LOW_TEXT_QUALITY"
     PAGE_DPI_REDUCED = "PAGE_DPI_REDUCED"
@@ -145,6 +146,9 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.TEXT_LAYER_PRIVATE_USE_DROPPED: "Private-use code points (publisher icons or "
     "unmapped glyphs) were dropped from the PDF text layer; a letter drawn that way inside a "
     "word is missing from it.",
+    WarningCode.TEXT_LAYER_GLYPHS_UNMAPPED: "Glyphs with no character mapping in the PDF text "
+    "layer are shown as U+FFFD; a letter or a symbol such as a minus or degree sign is missing "
+    "there.",
     WarningCode.SCAN_ARTICLE_SPLIT: "Regions of neighbouring articles on scanned pages (the "
     "previous article's tail, the next article's start, floats above the title) were dropped "
     "before parsing.",

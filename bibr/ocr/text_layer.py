@@ -62,6 +62,10 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+# A text-layer region may carry one unmapped glyph, or one per this many characters.
+_CHARS_PER_UNMAPPED_GLYPH = 100
+_UNMAPPED_GLYPH = "\ufffd"
+
 
 class TextLayerOcrClient:
     """The registry entry for ``text-layer``: always ready, never asked to OCR."""
@@ -192,6 +196,7 @@ class TextLayerRead:
     formulas_read: int = 0
     private_use_dropped: int = 0
     private_use_inside: int = 0
+    unmapped_glyphs: int = 0
 
 
 @dataclass
@@ -350,6 +355,37 @@ def _drop_private_use(text: str) -> tuple[str, int, int]:
     return "".join(kept), dropped, inside
 
 
+def _mark_unmapped_glyphs(text: str) -> tuple[str, int]:
+    """Show rare unmapped glyphs as U+FFFD: (text, how many), or (text, 0) if none or too many.
+
+    A font with no character map for a glyph hands out its raw code, which reads
+    as a control character. That is the mark of a broken font when there are many,
+    but one or two in a paragraph are single symbols: a ligature, a superscript
+    minus, a degree sign. What they stood for depends on the font and cannot be
+    recovered, and dropping them changes the text without a trace ("W m-1" reads
+    as "W m1"), so the mark stays in their place. No OCR follows on this route, so
+    rejecting the region would lose the whole paragraph for one symbol.
+    """
+    from bibr.ocr.native_text import _is_disallowed_control_char
+
+    count = sum(1 for ch in text if _is_disallowed_control_char(ch))
+    if not count or count > max(1, len(text) // _CHARS_PER_UNMAPPED_GLYPH):
+        return text, 0
+    return "".join(_UNMAPPED_GLYPH if _is_disallowed_control_char(ch) else ch for ch in text), count
+
+
+def _unmapped_glyph_warning(count: int) -> ProcessingWarning | None:
+    """The document's warning for *count* glyphs shown as U+FFFD, if any."""
+    if not count:
+        return None
+    return ProcessingWarning(
+        WarningCode.TEXT_LAYER_GLYPHS_UNMAPPED,
+        f"{count} glyph(s) in the PDF text layer have no character mapping and are shown as "
+        "U+FFFD; each may have stood for a letter or a symbol (a ligature, a minus sign, a "
+        "degree sign)",
+    )
+
+
 def _accept(region: dict[str, Any]) -> None:
     """Mark *region* as read from the text layer, clearing the native pass's rejection."""
     region["_native_text_used"] = True
@@ -410,9 +446,18 @@ def _fill_region(
     )
     if len(text.strip()) < min_chars:
         return "empty"
+    region.pop("_unmapped_glyphs", None)
     if not _is_native_text_usable(text, min_printable_ratio):
-        region["_native_gate"] = "usability"
-        return "rejected"
+        # A formula stays unread: its control characters are usually math symbols.
+        marked, unmapped = (text, 0) if is_formula else _mark_unmapped_glyphs(text)
+        # The other gates judge the text around the marks, which are not its own fault.
+        if not unmapped or not _is_native_text_usable(
+            marked.replace(_UNMAPPED_GLYPH, ""), min_printable_ratio
+        ):
+            region["_native_gate"] = "usability"
+            return "rejected"
+        text = marked
+        region["_unmapped_glyphs"] = unmapped
     _accept(region)
     if is_formula:
         # Plain text: the parser keeps it as printed, without LaTeX.
@@ -540,6 +585,9 @@ def read_text_layer(
                 ),
             )
         )
+    unmapped_warning = _unmapped_glyph_warning(result.unmapped_glyphs)
+    if unmapped_warning is not None:
+        result.warnings.append(unmapped_warning)
     return result
 
 
@@ -588,6 +636,7 @@ def _read_page(
                 result.formulas_read += 1
             result.private_use_dropped += int(region.get("_private_use_dropped") or 0)
             result.private_use_inside += int(region.get("_private_use_inside") or 0)
+            result.unmapped_glyphs += int(region.get("_unmapped_glyphs") or 0)
         else:
             _blank(region)
             unread_labels[label] += 1

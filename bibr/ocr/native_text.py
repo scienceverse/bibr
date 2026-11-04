@@ -1635,6 +1635,11 @@ _CID_ARTIFACT_MIN_COUNT = 2
 _FFFD_MAX_DENSITY = 0.05
 
 
+def _is_disallowed_control_char(ch: str) -> bool:
+    """Return True for a Unicode category-Cc char other than the whitespace controls."""
+    return ch not in _REASONABLE_WHITESPACE_CONTROLS and unicodedata.category(ch) == "Cc"
+
+
 def _has_disallowed_control_char(text: str) -> bool:
     """Return True if *text* contains any Unicode category-Cc char other than
     the common whitespace controls (tab/newline/CR/FF/VT).
@@ -1645,10 +1650,7 @@ def _has_disallowed_control_char(text: str) -> bool:
     never contains raw control bytes, so any occurrence is disqualifying.
     Known STX soft-hyphen markers are resolved before this function is called.
     """
-    return any(
-        ch not in _REASONABLE_WHITESPACE_CONTROLS and unicodedata.category(ch) == "Cc"
-        for ch in text
-    )
+    return any(_is_disallowed_control_char(ch) for ch in text)
 
 
 def _printable_ratio(text: str) -> float:
