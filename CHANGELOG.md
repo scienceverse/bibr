@@ -154,6 +154,11 @@ by an earlier version, carries neither.
   abstain, as does a tagger answer with no title or no author, a title no block
   prints, or a title in a block that is no record. A full run, and a run given an
   expected identity, abstain as before.
+- A byline printed under a title no longer ends up in the title when the names are
+  written in Han, kana or Hangul with no space inside them. The check that a row
+  names an author looked for separate words of more than two letters, so it missed
+  such names and took the row for a subtitle. It now also looks for the whole name
+  in the row. One character of a name does not count, so a real subtitle still folds.
 - On the text-layer route, one glyph with no character mapping no longer empties
   its whole region. Such a glyph reads as a control character, and any control
   character made the region unusable, which suited a route where OCR reads it next

@@ -169,6 +169,70 @@ def test_a_row_naming_an_extracted_author_is_a_byline():
     assert fold_printed_subtitle(_TITLE, resolution, authors=[author])[0] == _TITLE
 
 
+_ZH_TITLE = "城市小菜园叶色的季节变化研究"
+
+
+def _zh_author(given, family):
+    return PaperAuthor(author_id=1, given=given, family=family, affiliation="", role=[])
+
+
+@pytest.mark.parametrize(
+    "row_text, author",
+    [
+        pytest.param("林若溪, 陈思远, 何明哲*", _zh_author("若溪", "林"), id="family-then-given"),
+        pytest.param("林若溪, 陈思远, 何明哲*", _zh_author("林", "若溪"), id="fields-swapped"),
+        pytest.param("林若溪, 陈思远", _zh_author("", "林若溪"), id="whole-name-in-family"),
+        pytest.param("欧阳若, 陈思远", _zh_author("若", "欧阳"), id="two-character-surname"),
+        pytest.param("刘 权 1 , 何明哲 2", _zh_author("权", "刘"), id="letter-spaced-name"),
+        pytest.param(
+            "林若溪 1,2 , 陈思远 1* (1. 示范大学园艺学院,北京 100000)",
+            _zh_author("若溪", "林"),
+            id="markers-and-affiliation",
+        ),
+        pytest.param("山田花子, 田中一郎", _zh_author("花子", "山田"), id="japanese"),
+    ],
+)
+def test_a_row_printing_an_unspaced_author_name_is_a_byline(row_text, author):
+    resolution = _resolution(_title(_ZH_TITLE), _row("c2", row_text))
+
+    title, issue = fold_printed_subtitle(_ZH_TITLE, resolution, authors=[author])
+
+    assert title == _ZH_TITLE
+    assert issue is None
+
+
+def test_a_row_printing_an_unspaced_hangul_name_is_a_byline():
+    title = "도시 텃밭 잎 색의 계절 변화"
+    resolution = _resolution(_title(title), _row("c2", "김서연, 박지훈"))
+
+    assert fold_printed_subtitle(title, resolution, authors=[_zh_author("서연", "김")])[0] == title
+
+
+@pytest.mark.parametrize(
+    "row_text",
+    [
+        pytest.param("基于两年课堂项目的经验", id="no-author-character"),
+        # One character of a name is an ordinary word: 林 is also "forest".
+        pytest.param("以林下菜园为例的课堂项目", id="shares-the-surname-character"),
+    ],
+)
+def test_a_chinese_subtitle_still_folds_beside_unspaced_authors(row_text):
+    resolution = _resolution(_title(_ZH_TITLE), _row("c2", row_text))
+
+    title, issue = fold_printed_subtitle(_ZH_TITLE, resolution, authors=[_zh_author("若溪", "林")])
+
+    assert title == f"{_ZH_TITLE}: {row_text}"
+    assert issue is not None
+
+
+def test_a_latin_name_inside_a_longer_word_does_not_make_a_byline():
+    row_text = "Notes from Ellison"
+    resolution = _resolution(_title(), _row("c2", row_text))
+    author = PaperAuthor(author_id=1, given="Ann", family="Ellis", affiliation="", role=[])
+
+    assert fold_printed_subtitle(_TITLE, resolution, authors=[author])[0] == f"{_TITLE}: {row_text}"
+
+
 def test_parallel_title_in_the_same_script_is_left_out():
     # The original title first, then its translation directly under it: the
     # model keeps the version printed first, and the fold must not undo that.

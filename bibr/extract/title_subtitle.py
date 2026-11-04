@@ -75,6 +75,9 @@ _LEADING_NUMBERING_RE = re.compile(
 _BAD_OPENING = frozenset("*-–—•·‣○●◦■□[")
 # Name-list separators; a subtitle does not use them.
 _NAME_SEPARATOR_RE = re.compile(r"[·•‣⁃∙⋅・]")
+_UNSPACED_NAME_RE = re.compile(
+    r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]+"
+)
 _CONTACT_RE = re.compile(r"@|https?://|\bwww\.|\bdoi\b|\b10\.\d{4,9}/", re.IGNORECASE)
 # History, citation, copyright, correspondence, and classification lines, and
 # row labels such as "Running title:" or "Keywords:".
@@ -276,16 +279,36 @@ def _is_bare_name(text: str) -> bool:
     )
 
 
+def _unspaced_names(author: PaperAuthor) -> set[str]:
+    """The ways a Han, kana or Hangul name prints with its parts run together.
+
+    Only the whole name counts: one character of it is an ordinary word.
+    """
+
+    given = _normalize(author.given or "").replace(" ", "")
+    family = _normalize(author.family or "").replace(" ", "")
+    return {
+        name
+        for name in (f"{family}{given}", f"{given}{family}")
+        if len(name) >= 2 and _UNSPACED_NAME_RE.fullmatch(name)
+    }
+
+
 def _names_an_author(text: str, authors: Iterable[PaperAuthor]) -> bool:
     """Whether the row prints a given or family name of an extracted author."""
 
-    words = set(_normalize(text).split())
-    return any(
+    normalized = _normalize(text)
+    words = set(normalized.split())
+    authors = tuple(authors)
+    if any(
         name in words
         for author in authors
         for name in _normalize(f"{author.given or ''} {author.family or ''}").split()
         if len(name) > 2 and name not in _NON_NAME_WORDS and name not in _NAME_PARTICLES
-    )
+    ):
+        return True
+    unspaced = normalized.replace(" ", "")
+    return any(name in unspaced for author in authors for name in _unspaced_names(author))
 
 
 def _is_label_row(text: str) -> bool:
