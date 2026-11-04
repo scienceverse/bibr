@@ -3430,6 +3430,50 @@ def _select_agreeing_record(
     return primary.block, tuple(flags)
 
 
+def _select_tagger_record(
+    blocks: tuple[FrontMatterBlock, ...],
+    by_id: dict[str, FrontMatterCandidate],
+    *,
+    contents: PaperContents,
+    settings: GlobalSettings | None,
+) -> tuple[FrontMatterBlock | None, tuple[str, ...]]:
+    """In fast mode, the block printing the title the tagger read, if one paper is in sight.
+
+    The abstention exists because a model reads the selected block only, so a
+    wrong block means another paper's metadata. Fast mode's tagger reads the
+    page and has already answered: a second title on its own (a translation, a
+    journal masthead, a running head) costs nothing there. Two blocks that each
+    print a byline can be two papers (an abstract book, a proceedings page), so
+    those still abstain, as does a tagger answer without a title or an author,
+    or a title that no block prints as a record: a title in a block without one
+    is the tail of the article before.
+    """
+
+    ml = getattr(settings, "ml", None)
+    if getattr(ml, "front_tagger_mode", "off") != "only":
+        return None, ()
+    tagged = getattr(contents, "front_tagger_result", None)
+    title = getattr(getattr(tagged, "title_keywords", None), "title", None)
+    if not title or not getattr(getattr(tagged, "byline", None), "authors", None):
+        return None, ("tagger_record_incomplete",)
+    identities = [
+        _record_identity(block, order, by_id, detected_title=contents.detected_title)
+        for order, block in enumerate(blocks)
+    ]
+    if sum(1 for identity in identities if identity.byline) > 1:
+        return None, ("several_bylines",)
+    title_key = _identity_key(title)
+    for identity in identities:
+        printed = "".join(
+            _identity_key(row.raw_text) for row in _block_candidates(identity.block, by_id)
+        )
+        if title_key and title_key in printed:
+            if identity.is_record:
+                return identity.block, (f"tagger_record:{identity.block.block_id}",)
+            return None, (f"tagger_title_outside_record:{identity.block.block_id}",)
+    return None, ("tagger_title_outside_blocks",)
+
+
 def _multi_item_issue(
     blocks: tuple[FrontMatterBlock, ...],
     expected_identity: ExpectedIdentity | None,
@@ -3522,7 +3566,22 @@ def resolve_front_matter(
                     agreed if block.block_id == agreed.block_id else block for block in blocks
                 )
             else:
-                reason_flags.append("multiple_plausible_blocks")
+                tagger_flags: tuple[str, ...] = ()
+                if not _has_expected_selectors(expected_identity):
+                    try:
+                        selected, tagger_flags = _select_tagger_record(
+                            blocks, by_id, contents=contents, settings=settings
+                        )
+                    except Exception:  # noqa: BLE001 — a fallback must never fail an abstaining paper
+                        logger.warning(
+                            "Front-matter tagger record failed; abstaining", exc_info=True
+                        )
+                        selected, tagger_flags = None, ("tagger_record_error",)
+                if selected is not None:
+                    method = "tagger_record"
+                else:
+                    reason_flags.append("multiple_plausible_blocks")
+                reason_flags.extend(tagger_flags)
             reason_flags.extend(agreement_flags)
     elif not blocks:
         reason_flags.append("no_candidates")

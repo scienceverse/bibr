@@ -146,6 +146,14 @@ by an earlier version, carries neither.
 
 ### Fixed
 
+- A fast run no longer empties a paper's title, authors and abstract because its
+  first pages print a second title, such as a translation, a journal masthead or a
+  running head. Abstaining protects a model that reads only the selected block, and
+  the tagger has read the page by then, so the block printing the tagger's title is
+  selected. Two blocks that each print a byline can be two papers, so they still
+  abstain, as does a tagger answer with no title or no author, a title no block
+  prints, or a title in a block that is no record. A full run, and a run given an
+  expected identity, abstain as before.
 - On the text-layer route, one glyph with no character mapping no longer empties
   its whole region. Such a glyph reads as a control character, and any control
   character made the region unusable, which suited a route where OCR reads it next
