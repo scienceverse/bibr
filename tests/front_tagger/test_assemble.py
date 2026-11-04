@@ -872,6 +872,313 @@ def test_roman_numeral_keys_glued_to_family_names():
     assert rows == [("LIMA", "Univ B"), ("GANDHI", "")]
 
 
+def _with_rules(inp, *fields):
+    tags = label(inp, ("TITLE", "Title words"), *fields)
+    return assemble(inp, tags, _ones(inp), rules=True)
+
+
+def _family_names(got):
+    return [a.family for a in got.byline.authors]
+
+
+def test_keys_run_through_an_affiliation_block_read_as_one():
+    # The model tagged one affiliation and left the keys inside the block.
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Lena Morna, Omar Tessb, Ines Quilc"),
+        ("text", "a Univ A, Norland bDept B, Norland c College C, Norland"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Lena"),
+        ("FAMILY", "Morna"),
+        ("GIVEN", "Omar"),
+        ("FAMILY", "Tessb"),
+        ("GIVEN", "Ines"),
+        ("FAMILY", "Quilc"),
+        ("AFFILIATION", "Univ A, Norland"),
+    )
+    assert _family_names(got) == ["Morn", "Tess", "Quil"]
+
+
+def test_a_key_chain_may_skip_a_damaged_key_and_still_counts_it():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Lena Morna, Omar Tessb, Ines Quilc"),
+        ("text", "a Univ A, Nb Dept B, Norland c College C, Norland"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Lena"),
+        ("FAMILY", "Morna"),
+        ("GIVEN", "Omar"),
+        ("FAMILY", "Tessb"),
+        ("GIVEN", "Ines"),
+        ("FAMILY", "Quilc"),
+        ("AFFILIATION", "Univ A"),
+    )
+    assert _family_names(got) == ["Morn", "Tess", "Quil"]
+
+
+def test_keys_glued_to_a_word_with_an_accent_are_keys():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Lena Morna, Omar Tessb"),
+        ("text", "aUniversité de Norland"),
+        ("text", "bÉcole de Norland"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Lena"),
+        ("FAMILY", "Morna"),
+        ("GIVEN", "Omar"),
+        ("FAMILY", "Tessb"),
+        ("AFFILIATION", "de Norland"),
+    )
+    assert _family_names(got) == ["Morn", "Tess"]
+
+
+def test_a_mark_glued_to_an_affiliation_keys_it_by_its_letter():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Lena Morna"),
+        ("text", "aUniversità di Norland"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Lena"),
+        ("FAMILY", "Morna"),
+        ("AFF_MARK", "aUniversità"),
+        ("AFFILIATION", "di Norland"),
+    )
+    assert got.byline.authors[0].family == "Morn"
+    assert got.byline.authors[0].affiliation == "Università di Norland"
+    assert "affiliation_mark_unresolved" not in got.problems
+
+
+def test_a_key_line_opens_after_a_footnote_symbol():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Lena Morna*, Omar Tessb"),
+        ("footnote", " a Department of Forestry, Norland University"),
+        ("footnote", "b Naval Command, Norland"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Lena"),
+        ("FAMILY", "Morna"),
+        ("AUTHOR_MARK", "*"),
+        ("GIVEN", "Omar"),
+        ("FAMILY", "Tessb"),
+        ("AFFILIATION", "Naval Command, Norland"),
+    )
+    assert _family_names(got) == ["Morn", "Tess"]
+
+
+@pytest.mark.parametrize(("mark", "family"), [("*", "Morn"), ("1", "Morna")])
+def test_a_symbol_leaves_a_glued_key_but_a_digit_shows_how_the_paper_keys(mark, family):
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", f"Lena Morna {mark}"),
+        ("text", "a Univ A"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Lena"),
+        ("FAMILY", "Morna"),
+        ("AUTHOR_MARK", mark),
+        ("AFFILIATION", "Univ A"),
+    )
+    assert _family_names(got) == [family]
+
+
+@pytest.mark.parametrize(
+    ("byline", "family"),
+    [
+        # The key is printed apart, so the "a" is the name's own.
+        ("Lena Silva a, Omar Tess b", "Silva"),
+        ("Lena Silva, a, Omar Tess, b", "Silva"),
+        # A higher letter after the comma is the rest of a list with its first glued on.
+        ("Lena Morna, b, Omar Tess", "Morn"),
+    ],
+)
+def test_keys_printed_after_a_name_decide_whether_its_last_letter_is_a_key(byline, family):
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", byline),
+        ("text", "a Univ A"),
+        ("text", "b Univ B"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Lena"),
+        ("FAMILY", byline.split()[1].rstrip(",")),
+        ("GIVEN", "Omar"),
+        ("FAMILY", "Tess"),
+        ("AFFILIATION", "Univ A"),
+        ("AFFILIATION", "Univ B"),
+    )
+    assert _family_names(got)[0] == family
+
+
+def test_a_lower_letter_comes_off_a_run_only_if_the_byline_has_not_shown_it():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Lena Moreab, Omar Moreirab, Ines Fordd, Kim Holtsonh"),
+        ("text", "a Univ A"),
+        ("text", "b Univ B"),
+        ("text", "c Univ C"),
+        ("text", "d Univ D"),
+        ("text", "e Univ E"),
+        ("text", "f Univ F"),
+        ("text", "g Univ G"),
+        ("text", "h Univ H"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Lena"),
+        ("FAMILY", "Moreab"),
+        ("GIVEN", "Omar"),
+        ("FAMILY", "Moreirab"),
+        ("GIVEN", "Ines"),
+        ("FAMILY", "Fordd"),
+        ("GIVEN", "Kim"),
+        ("FAMILY", "Holtsonh"),
+        ("AFF_MARK", "a"),
+        ("AFFILIATION", "Univ A"),
+        ("AFF_MARK", "b"),
+        ("AFFILIATION", "Univ B"),
+        ("AFF_MARK", "c"),
+        ("AFFILIATION", "Univ C"),
+        ("AFF_MARK", "d"),
+        ("AFFILIATION", "Univ D"),
+        ("AFF_MARK", "e"),
+        ("AFFILIATION", "Univ E"),
+        ("AFF_MARK", "f"),
+        ("AFFILIATION", "Univ F"),
+        ("AFF_MARK", "g"),
+        ("AFFILIATION", "Univ G"),
+        ("AFF_MARK", "h"),
+        ("AFFILIATION", "Univ H"),
+    )
+    # "Moreab" opens the byline, so its "a" has to be a key. By "Moreirab" the "a"
+    # has been shown, so it stays; "Holtsonh" keeps its "d" after "Fordd" showed it.
+    assert _family_names(got) == ["More", "Moreira", "Ford", "Holtson"]
+
+
+def test_a_byline_with_a_bare_key_shows_that_key_for_later_runs():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Lena Morna, d, Kim Holtsonh"),
+        (
+            "text",
+            "a Univ A, Norland b Univ B c Univ C d Univ D e Univ E f Univ F g Univ G h Univ H",
+        ),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Lena"),
+        ("FAMILY", "Morna"),
+        ("GIVEN", "Kim"),
+        ("FAMILY", "Holtsonh"),
+        ("AFFILIATION", "Univ A, Norland"),
+    )
+    assert _family_names(got) == ["Morn", "Holtson"]
+
+
+def test_a_capital_key_the_byline_prints_alone_splits_only_after_a_small_letter():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Cora Venn, A Ivo TessA and Ana COSTAA"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Cora"),
+        ("FAMILY", "Venn"),
+        ("GIVEN", "Ivo"),
+        ("FAMILY", "TessA"),
+        ("GIVEN", "Ana"),
+        ("FAMILY", "COSTAA"),
+    )
+    assert _family_names(got) == ["Venn", "Tess", "COSTAA"]
+
+
+def test_letters_in_prose_are_no_key_chain():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Lena Silva, Omar Bacab"),
+        ("text", "a Bayesian view and b Spline view of the same data"),
+        ("text", "Univ A"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Lena"),
+        ("FAMILY", "Silva"),
+        ("GIVEN", "Omar"),
+        ("FAMILY", "Bacab"),
+        ("AFFILIATION", "Univ A"),
+    )
+    assert _family_names(got) == ["Silva", "Bacab"]
+
+
+def test_a_letter_no_line_keys_stays_on_the_name():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Lena Silva, Omar Bacab"),
+        ("text", "a Univ A"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Lena"),
+        ("FAMILY", "Silva"),
+        ("GIVEN", "Omar"),
+        ("FAMILY", "Bacab"),
+        ("AFFILIATION", "Univ A"),
+    )
+    # One keyed line is no chain, so "b" keys nothing here.
+    assert _family_names(got)[1] == "Bacab"
+
+
+def test_an_all_capitals_name_keeps_a_final_numeral_key_of_one():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "RITA LIMAII, JOSE GANDHI"),
+        ("text", "I Univ A"),
+        ("text", "II Univ B"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "RITA"),
+        ("FAMILY", "LIMAII"),
+        ("GIVEN", "JOSE"),
+        ("FAMILY", "GANDHI"),
+        ("AFF_MARK", "I"),
+        ("AFFILIATION", "Univ A"),
+        ("AFF_MARK", "II"),
+        ("AFFILIATION", "Univ B"),
+    )
+    assert _family_names(got) == ["LIMA", "GANDHI"]
+
+
+def test_a_loose_email_goes_to_the_longer_of_two_names_it_holds():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Lena Berg, Omar Steinberg"),
+        ("text", "Univ A"),
+        ("text", "Contact: omsteinberg@example.org"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Lena"),
+        ("FAMILY", "Berg"),
+        ("GIVEN", "Omar"),
+        ("FAMILY", "Steinberg"),
+        ("AFFILIATION", "Univ A"),
+        ("EMAIL", "omsteinberg@example.org"),
+    )
+    assert [a.email for a in got.byline.authors] == [None, "omsteinberg@example.org"]
+
+
 def _title_reasons(title_region: str, title: str) -> list[str]:
     inp = tagger_input(("doc_title", title_region), ("text", "Ana Lima"))
     tags = label(inp, ("TITLE", title), ("GIVEN", "Ana"), ("FAMILY", "Lima"))

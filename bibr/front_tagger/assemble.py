@@ -149,8 +149,13 @@ _MAX_UNTAGGED_LINE_WORDS = 40
 _MIN_ABSTRACT_WORDS = 40
 _ROMAN_KEY_RE = re.compile(r"[IVX]{1,4}")
 _LETTER_KEY_RE = re.compile(r"[a-h]")
+_LONE_LETTER_RE = re.compile(r"[a-z]")
+_AFFILIATION_FIELDS = ("AFFILIATION", "AFF_MARK")
 # A letter key glued to the next word of an affiliation line ("aComputational").
-_KEYED_WORD_RE = re.compile(r"[a-h][A-Z][a-z]{3,}")
+# The word may be in any script ("aUniversité"); :func:`_keyed_word_letter` reads it.
+_KEYED_WORD_RE = re.compile(r"([a-z])([^\W\d_]{4,})")
+# A capital key printed alone after a name in the byline ("Eng, A").
+_CAPITAL_KEY_RE = re.compile(r"[A-H]")
 _MAX_GLUED_LETTERS = 3
 # Letters a family name keeps once a run of keys is taken off its end.
 _MIN_RUN_NAME_LETTERS = 4
@@ -573,7 +578,13 @@ def _glued_key(name: str, letters: set[str], romans: set[str]) -> str | None:
         ):
             return key
     key = name[-1:]
-    if key in letters and len(name) >= 3 and name[-2].isalpha():
+    # A capital key only after a small letter: "TessA" splits, "COSTAA" does not.
+    if (
+        key in letters
+        and len(name) >= 3
+        and name[-2].isalpha()
+        and (key.islower() or name[-2].islower())
+    ):
         return key
     return None
 
@@ -588,6 +599,10 @@ def _printed_letter_keys(inp: TaggerInput, tags) -> set[str]:
     line the model did not read as a name or a title, and only when that line
     reads as an affiliation or a second one opens with another letter:
     "eHealth" in a title and the "eLife" of a running head key nothing.
+
+    Also the letters of a run of keys through the affiliation block
+    (:func:`_key_chain`) and capitals printed alone in the byline
+    (:func:`_capital_keys`).
     """
     letters: set[str] = set()
     keyed: list[tuple[str, bool]] = []
@@ -599,13 +614,84 @@ def _printed_letter_keys(inp: TaggerInput, tags) -> set[str]:
                 starts_line and i + 1 < len(words) and tags[i + 1] == "B-AFFILIATION"
             ):
                 letters.add(word.text)
-        elif _KEYED_WORD_RE.fullmatch(word.text) and _opens_keyed_line(tags, i, starts_line):
+        elif _LETTER_KEY_RE.fullmatch(_keyed_word_letter(word.text) or "") and _opens_keyed_line(
+            tags, i, starts_line
+        ):
             keyed.append((word.text[0], _keyed_line_reads_as_affiliation(inp, tags, i)))
     if len({letter for letter, _ in keyed}) >= _MIN_KEYED_LINES:
         letters.update(letter for letter, _ in keyed)
     else:
         letters.update(letter for letter, reads in keyed if reads)
-    return letters
+    return letters | _key_chain(inp, tags) | _capital_keys(inp, tags)
+
+
+def _keyed_word_letter(text: str) -> str | None:
+    """The key of a word that opens with one glued on: "a" of "aUniversité"."""
+    m = _KEYED_WORD_RE.fullmatch(text)
+    if m is None or not m[2][0].isupper() or not m[2][1:].islower():
+        return None
+    return m[1]
+
+
+def _key_chain(inp: TaggerInput, tags) -> set[str]:
+    """Letters the affiliation block prints as a rising run of keys, however tagged.
+
+    The model often tags one affiliation's key, or none, and runs the block
+    together: "a Univ A, USA bDept B, USA c Univ C". The letters themselves show
+    what they are by keying the block in order, where a lone "a" or an "eHealth"
+    shows nothing. Only a region with an affiliation in it counts, or a line that
+    opens with the key and reads as one; one letter may be skipped, for a key OCR
+    damaged, and the skipped letter is a key too.
+    """
+    words = inp.words
+    block = {w.region for i, w in enumerate(words) if _field(tags[i]) in _AFFILIATION_FIELDS}
+    chain: list[str] = []
+    for i, word in enumerate(words):
+        if _field(tags[i]) not in (None, *_AFFILIATION_FIELDS):
+            continue
+        if not (
+            word.region in block
+            or (_opens_region(inp, i) and _keyed_line_reads_as_affiliation(inp, tags, i))
+        ):
+            continue
+        if _LONE_LETTER_RE.fullmatch(word.text):
+            follows = i + 1 < len(words) and words[i + 1].region == word.region
+            letter = word.text if follows and words[i + 1].text[:1].isupper() else None
+        else:
+            letter = _keyed_word_letter(word.text)
+        if letter is None:
+            continue
+        expected = ord(chain[-1]) + 1 if chain else ord("a")
+        if ord(letter) in (expected, expected + 1):
+            chain.append(letter)
+    if len(chain) < _MIN_KEYED_LINES:
+        return set()
+    return {chr(c) for c in range(ord("a"), ord(chain[-1]) + 1)}
+
+
+def _opens_region(inp: TaggerInput, i: int) -> bool:
+    """Whether only symbols come before word ``i`` in its region (a footnote's "*")."""
+    words = inp.words
+    j = i - 1
+    while j >= 0 and words[j].region == words[i].region:
+        if any(c.isalnum() for c in words[j].text):
+            return False
+        j -= 1
+    return True
+
+
+def _capital_keys(inp: TaggerInput, tags) -> set[str]:
+    """Capitals the byline prints alone as keys: the "A" of "Cindy Eng, A"."""
+    words = inp.words
+    return {
+        words[i].text
+        for i in range(2, len(words))
+        if _CAPITAL_KEY_RE.fullmatch(words[i].text)
+        and _field(tags[i]) in (None, "AUTHOR_MARK")
+        and words[i - 1].text == ","
+        and _field(tags[i - 2]) == "FAMILY"
+        and words[i].region == words[i - 2].region
+    }
 
 
 def _opens_keyed_line(tags, i: int, starts_line: bool) -> bool:
@@ -633,37 +719,92 @@ def _keyed_line_reads_as_affiliation(inp: TaggerInput, tags, i: int) -> bool:
     return bool(_INSTITUTION_RE.search(inp.text[words[i].start + 1 : words[last].end]))
 
 
+def _keys_stand_apart(inp: TaggerInput, tags, last_word: int, key: str) -> bool:
+    """Whether the keys printed after a name show its last letter is its own.
+
+    "Silva a" and "Silva, a" print the key apart from the name. "Vegaa, b" is the
+    run "a, b" with its first letter glued on, so a higher letter says nothing.
+    """
+    words = inp.words
+    following = [
+        words[i]
+        for i in range(last_word + 1, min(last_word + 3, len(words)))
+        if words[i].region == words[last_word].region and _field(tags[i]) != "GIVEN"
+    ]
+    if following and _LONE_LETTER_RE.fullmatch(following[0].text):
+        return True
+    return (
+        len(following) == 2
+        and following[0].text == ","
+        and _LONE_LETTER_RE.fullmatch(following[1].text) is not None
+        and following[1].text <= key
+    )
+
+
+def _glue_is_ruled_out(author: _Author, key: str, *, runs: bool) -> bool:
+    """Whether the author's own marks rule a glued ``key`` out.
+
+    A mark of any kind does, without ``runs``. With them a symbol ("Vegaa*") says
+    nothing about a letter, and neither does a higher letter ("Vegaa,b" read as
+    "a" glued and "b" tagged); a digit or numeral shows how this paper keys.
+    """
+    if not runs:
+        return bool(author.marks)
+    return any(m.isalnum() and not (_LONE_LETTER_RE.fullmatch(m) and m > key) for m in author.marks)
+
+
+def _letters_shown_before(inp: TaggerInput, tags, authors: list[_Author], pos: int) -> set[str]:
+    """Letter keys the byline has already shown when it reaches author ``pos``."""
+    shown = {m for a in authors[:pos] for m in a.marks if _LONE_LETTER_RE.fullmatch(m)}
+    if pos:
+        for i in range(authors[0].first_word, authors[pos].first_word):
+            if _field(tags[i]) is None and _LONE_LETTER_RE.fullmatch(inp.words[i].text):
+                shown.add(inp.words[i].text)
+    return shown
+
+
 def _unglue_letter_keys(
     authors: list[_Author],
     by_mark: dict[str, str],
     printed_letters: Collection[str] = (),
     *,
-    runs: bool = False,
+    inp: TaggerInput | None = None,
+    tags=None,
 ) -> None:
     """Split a superscript letter or numeral key OCR glued to a family name.
 
     On a paper whose affiliations are keyed "a", "b", ... (or "I", "II", ...),
     an author with no mark of their own whose family name ends in one of
     those keys printed it as a superscript: "Vegaa" is "Vega" keyed "a",
-    "LIMAII" is "LIMA" keyed "II". With ``runs``, a list of letter keys
-    ("a,b") glues on as a run, taken from the end while the letters rise and
-    the name keeps four letters or more, at most three: "Riosab" is "Rios"
-    keyed "a" and "b", "Sarab" only loses its "b", and "Costaa" its last "a".
+    "LIMAII" is "LIMA" keyed "II".
 
     ``printed_letters`` are letter keys the print shows that no affiliation
     was tagged behind (see :func:`_printed_letter_keys`).
+
+    With ``inp`` and ``tags`` (the front-matter rules), a list of letter keys
+    ("a,b") glues on as a run, taken from the end while the letters rise and
+    the name keeps four letters or more, at most three. Keys are lettered in
+    the order the byline first shows them, so a lower letter comes off only if
+    the byline has not shown it yet: "Riosab" opening a byline is "Rios" keyed
+    "a" and "b", while "Moreirab" after a name keyed "a" only loses its "b".
+    "Sarab" is too short to lose more than its "b", and "Costaa" its last "a".
+    A name whose keys the print sets apart keeps its letters.
     """
+    runs = inp is not None
     letters = {key for key in by_mark if len(key) == 1 and key.islower()} | set(printed_letters)
     romans = {key for key in by_mark if _ROMAN_KEY_RE.fullmatch(key)}
     if not letters and not romans:
         return
-    for author in authors:
-        if author.marks or not author.family:
+    for pos, author in enumerate(authors):
+        if not author.family:
             continue
         last = author.family[-1]
         key = _glued_key(last.text, letters, romans)
-        if key is None:
+        if key is None or _glue_is_ruled_out(author, key, runs=runs):
             continue
+        if inp is not None and _keys_stand_apart(inp, tags, last.words[-1], key):
+            continue
+        shown = _letters_shown_before(inp, tags, authors, pos) if inp is not None else set()
         keys, stem = [key], last.text[: -len(key)]
         while (
             runs
@@ -672,12 +813,13 @@ def _unglue_letter_keys(
             and len(stem) > _MIN_RUN_NAME_LETTERS
             and stem[-1] in letters
             and stem[-1] < keys[0]
+            and stem[-1] not in shown
             and stem[-2].isalpha()
         ):
             keys.insert(0, stem[-1])
             stem = stem[:-1]
         author.family[-1] = replace(last, text=stem)
-        author.marks = keys
+        author.marks = [*keys, *author.marks]
 
 
 def _given_first(names: list[Span]) -> bool:
@@ -1175,15 +1317,16 @@ def assemble(
             ):
                 author.orcid = "-".join(m.groups()).upper()
 
-    affiliation_by_mark, unmarked_affiliations = _affiliations(spans, inp, tags)
+    affiliation_by_mark, unmarked_affiliations = _affiliations(spans, inp, tags, rules=rules)
     _unglue_letter_keys(
         authors,
         affiliation_by_mark,
         _printed_letter_keys(inp, tags) if rules else (),
-        runs=rules,
+        inp=inp if rules else None,
+        tags=tags if rules else None,
     )
     unattached = _link_affiliations(authors, affiliation_by_mark, unmarked_affiliations, problems)
-    _assign_loose_emails(authors, spans)
+    _assign_loose_emails(authors, spans, rules=rules)
     _flag_corresponding(authors, inp, tags)
     first_word = {
         text: span.words[0]
@@ -1217,11 +1360,13 @@ def assemble(
 
 
 def _affiliations(
-    spans: list[Span], inp: TaggerInput, tags
+    spans: list[Span], inp: TaggerInput, tags, *, rules: bool = False
 ) -> tuple[dict[str, str], list[tuple[int, str]]]:
     """Affiliations keyed by the mark printed in front of them, and unmarked ones.
 
     Unmarked affiliations keep their first word index, for linking by position.
+    With ``rules``, a mark that is a letter glued to the affiliation's first word
+    ("aUniversità") keys it with the letter and gives the word back to its text.
     """
     by_mark: dict[str, str] = {}
     unmarked: list[tuple[int, str]] = []
@@ -1232,8 +1377,11 @@ def _affiliations(
         text = _clean(span.text)
         if not text:
             continue
-        keys = _mark_keys(_words_between(inp, tags, previous_end, span.words[0], "AFF_MARK"))
+        marks = _words_between(inp, tags, previous_end, span.words[0], "AFF_MARK")
+        keys = _mark_keys(marks)
         previous_end = span.words[-1] + 1
+        if rules and len(marks) == 1 and (letter := _keyed_word_letter(marks[0])):
+            keys, text = [letter], f"{marks[0][1:]} {text}"
         if keys:
             # "1 Dept A" keys the span with "1"; a run "a,b Dept" keys both.
             for key in keys:
@@ -1372,8 +1520,12 @@ def _fold(text: str) -> str:
     return "".join(c for c in decomposed if c.isalnum() and not unicodedata.combining(c)).lower()
 
 
-def _assign_loose_emails(authors: list[_Author], spans: list[Span]) -> None:
-    """Give an email printed away from the byline to the author it names."""
+def _assign_loose_emails(authors: list[_Author], spans: list[Span], *, rules: bool = False) -> None:
+    """Give an email printed away from the byline to the author it names.
+
+    With ``rules``, of two names the address holds, one inside the other ("Berg"
+    and "Steinberg" in "omsteinberg@"), it names the longer.
+    """
     taken = {a.email for a in authors if a.email}
     for span in spans:
         if span.field != "EMAIL":
@@ -1390,6 +1542,13 @@ def _assign_loose_emails(authors: list[_Author], spans: list[Span]) -> None:
             and len(family) >= 3
             and family in local
         ]
+        if rules:
+            families = [_fold(" ".join(s.text for s in a.family)) for a in matches]
+            matches = [
+                a
+                for a, family in zip(matches, families, strict=True)
+                if not any(family != other and family in other for other in families)
+            ]
         if len(matches) == 1:
             matches[0].email = email
             taken.add(email)

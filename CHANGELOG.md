@@ -157,6 +157,19 @@ by an earlier version, carries neither.
   names an author looked for separate words of more than two letters, so it missed
   such names and took the row for a subtitle. It now also looks for the whole name
   in the row. One character of a name does not count, so a real subtitle still folds.
+- Under the front-matter rules, an affiliation key glued to a family name now comes
+  off when the paper shows the letter is a key, also where the model tagged none of
+  them: "Tessb" reads "Tess". The letters count when they run in order through the
+  affiliation block, lone or glued to a word in any script ("bÉcole"), when a line
+  opens with one after a footnote symbol, or, for a capital, when the byline prints
+  it alone. A symbol after the name no longer hides the key, a key printed apart
+  ("Silva a") keeps the name's last letter, and a lower letter leaves a run only if
+  the byline has not shown it yet, so "Moreirab" after a name keyed "a" keeps its
+  "a". An all-capitals name still keeps a final "I". A key taken this way that the
+  tagged affiliations do not hold reports `affiliation_mark_unresolved`, as any such
+  key does. A mark glued to an affiliation's first word ("aUniversità") keys it with
+  the letter, and a loose email goes to the longer of two family names it holds.
+  These apply with `FRONT_TAGGER_RULES`, which fast mode turns on.
 - On the text-layer route, one glyph with no character mapping no longer empties
   its whole region. Such a glyph reads as a control character, and any control
   character made the region unusable, which suited a route where OCR reads it next
