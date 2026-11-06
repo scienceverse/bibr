@@ -1042,16 +1042,20 @@ def _decide_record_fields(paper_metadata, *, native: bool, doc_info_authors=None
     )
 
 
-def _apply_front_matter_rules(contents, paper_metadata) -> None:
+def _apply_front_matter_rules(contents, paper_metadata, *, abstained: bool = False) -> None:
     """What the local front-matter rules add to the tagger's answer, in a run with no LLM.
 
     The title's language, which a PDF does not declare, and the affiliations the
     tagger printed that no author carries, which the LLM parse would have listed.
+    When front-matter selection *abstained*, the tagger's rows can be two papers',
+    so no affiliation is added.
     """
     from bibr.extract.field_decisions import FieldCandidate, apply_decision, decide_value
     from bibr.extract.front_matter import fill_language
 
     fill_language(paper_metadata)
+    if abstained:
+        return
     tagged = getattr(contents, "front_tagger_result", None)
     rows = tagged.affiliation_rows() if tagged is not None else []
     if rows and not paper_metadata.affiliations:
@@ -1676,7 +1680,7 @@ async def post_parse(
             apply_decision(paper_metadata, title_decision)
             metadata_issues.extend(title_decision.issues)
             if effective_settings.FRONT_TAGGER_RULES:
-                _apply_front_matter_rules(contents, paper_metadata)
+                _apply_front_matter_rules(contents, paper_metadata, abstained=metadata_abstained)
 
             # Build statement candidates while section labels and source IDs
             # are stable, but delay materialization until after late cleaning.

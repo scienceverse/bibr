@@ -237,6 +237,19 @@ def test_the_front_matter_rules_add_a_language_and_the_tagged_affiliations():
     assert (decision.source, decision.rule) == ("front_tagger", "extracted")
 
 
+def test_the_front_matter_rules_add_no_affiliation_when_the_record_abstained():
+    from bibr.front_tagger.assemble import TaggedFrontMatter
+    from bibr.pipeline.stages.post_parse import _apply_front_matter_rules
+
+    tagged = TaggedFrontMatter(title_keywords=None, byline=None, unattached_affiliations=["Univ A"])
+    metadata, contents = _front_matter(tagged=tagged)
+
+    _apply_front_matter_rules(contents, metadata, abstained=True)
+
+    assert metadata.affiliations == []
+    assert metadata._field_decisions.get("affiliations") is None
+
+
 def test_the_front_matter_rules_keep_what_the_input_declared():
     from bibr.front_tagger.assemble import TaggedFrontMatter
     from bibr.models import Affiliation
