@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+
+- The lock moves to pyasn1 0.6.5, and the constraint floor in `pyproject.toml` with it.
+  0.6.4 and earlier spend quadratic time decoding some BER input (CVE-2026-119194,
+  -119195, -119196, -119197).
+
 ## [0.8.0] - 2026-10-30
 
 bibr's 4B extraction student is now the revision retrained with pointer answers,
