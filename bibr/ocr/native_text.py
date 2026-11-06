@@ -2117,9 +2117,10 @@ def _line_number_column(
 #   _HIDDEN_TEXT_MAX_INK_HEIGHT_PT too: a Type 3 font can draw 7 pt glyphs at
 #   Tf 0.75. Not relative to the page's body size: a payload longer than the
 #   page's other text would become the body. See _is_tiny_text. A mark of at
-#   most _HIDDEN_TEXT_MAX_MARK_CHARS beside readable text no more than
-#   1/_HIDDEN_TEXT_MIN_MARK_RATIO its size stays (_marks_beside_small_print): a
-#   5 pt table's p-values read "10-5" with the exponent and "10" without.
+#   most _HIDDEN_TEXT_MAX_MARK_CHARS, printed in an opaque colour that is not
+#   light, beside readable text no more than 1/_HIDDEN_TEXT_MIN_MARK_RATIO its
+#   size that is not hidden itself, stays (_marks_beside_small_print): a 5 pt
+#   table's p-values read "10-5" with the exponent and "10" without.
 # - squeezed (reported as tiny): one axis under _HIDDEN_TEXT_MAX_SIZE_PT and under
 #   _HIDDEN_TEXT_MAX_SQUEEZE of the other. Some PDFs slip hairline letters into
 #   words at a horizontal scale of 5% ("lalin" prints as "lain"), the same trick
@@ -2236,6 +2237,9 @@ _HIDDEN_TEXT_MIN_INK_NEAR_GLYPHS = 0.7
 _HIDDEN_TEXT_MIN_PAPER_MARGIN_PX = 16
 _HIDDEN_TEXT_PAINT_COLOURS = ((255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 0, 255))
 _HIDDEN_TEXT_MAX_CLIP_SHARE = 0.05
+# Clip points read per page; past them the page's remaining text keeps its clips unread
+# and stays. Every object of a page can carry the same long clip path.
+_HIDDEN_TEXT_MAX_CLIP_POINTS = 100_000
 _FILLING_RENDER_MODES = frozenset({0, 2, 4, 6})
 _FILL_AND_STROKE_RENDER_MODES = frozenset({2, 6})
 _OVERPRINT_MIN_OVERLAP = 0.5
@@ -2298,19 +2302,34 @@ def _is_tiny_text(pdfium_c, obj, matrix: tuple[float, ...] | None, box: _Box | N
     return height is not None and height < _HIDDEN_TEXT_MAX_INK_HEIGHT_PT
 
 
-def _marks_beside_small_print(pdfium_c, page, objects: list, tiny: list) -> set[int]:
+def _prints_in_ink(pdfium_c, obj, mode: int) -> bool:
+    """Whether *obj* is filled, or outlined, in an opaque colour that is not light."""
+    if mode in _FILL_AND_STROKE_RENDER_MODES:
+        stroke = _fill_rgba(pdfium_c, obj, stroke=True)
+        if stroke is not None and stroke[3] == 255 and not _is_light(stroke):
+            return True
+    if mode not in _FILLING_RENDER_MODES:
+        return False
+    rgba = _fill_rgba(pdfium_c, obj)
+    return rgba is not None and rgba[3] == 255 and not _is_light(rgba)
+
+
+def _marks_beside_small_print(
+    pdfium_c, page, objects: list, tiny: list, unreadable: set[int]
+) -> set[int]:
     """``id()`` of the *tiny* entries that are a sub- or superscript of readable small print.
 
-    A neighbour must be readable itself, so tiny text cannot anchor tiny text,
-    and at most 1/_HIDDEN_TEXT_MIN_MARK_RATIO the mark's size, so ordinary
-    body text anchors nothing under half of it. Squeezed objects never count.
-    Past _HIDDEN_TEXT_MAX_MARK_PAIRS comparisons the page keeps no marks.
+    A neighbour must be readable itself: no entry whose ``id()`` is in
+    *unreadable* (tiny or hidden text) counts, so tiny text cannot anchor tiny
+    text and white small print anchors nothing. It must also be at most
+    1/_HIDDEN_TEXT_MIN_MARK_RATIO the mark's size, so ordinary body text
+    anchors nothing under half of it. Squeezed objects never count. Past
+    _HIDDEN_TEXT_MAX_MARK_PAIRS comparisons the page keeps no marks.
     """
-    tiny_ids = {id(entry) for entry, _box in tiny}
     readable: list[tuple[_Box, float]] = []
     for entry in objects:
         _parent, obj, matrix = entry
-        if id(entry) in tiny_ids:
+        if id(entry) in unreadable:
             continue
         if pdfium_c.FPDFTextObj_GetTextRenderMode(obj) in _INVISIBLE_TEXT_RENDER_MODES:
             continue
@@ -2405,7 +2424,7 @@ def _find_hidden_text(
     invisible: list[tuple[tuple, str, _Box | None]] = []
     light: list[tuple[tuple, tuple[int, int, int, int], _Box]] = []
     transparent: list[tuple[tuple, tuple[int, int, int, int], _Box]] = []
-    tiny: list[tuple[tuple, _Box | None]] = []
+    tiny: list[tuple[tuple, _Box | None, bool]] = []
     boxes: list[tuple[tuple, _Box]] = []
     for entry in objects:
         _parent, obj, matrix = entry
@@ -2421,7 +2440,7 @@ def _find_hidden_text(
             hidden.append((entry, "off_page", box))
             continue
         if _is_tiny_text(pdfium_c, obj, matrix, box):
-            tiny.append((entry, box))
+            tiny.append((entry, box, _prints_in_ink(pdfium_c, obj, mode)))
             continue
         if mode not in _FILLING_RENDER_MODES:
             continue
@@ -2439,9 +2458,6 @@ def _find_hidden_text(
                 hidden.append((entry, "transparent", box))
         elif box is not None and (_is_light(rgba) or rgba[3] < 255):
             light.append((entry, rgba, box))
-    if tiny:
-        marks = _marks_beside_small_print(pdfium_c, page, objects, tiny)
-        hidden.extend((entry, "tiny", box) for entry, box in tiny if id(entry) not in marks)
     scan_like: list[bool] = []
 
     def covered_as_a_scan() -> bool:
@@ -2453,6 +2469,18 @@ def _find_hidden_text(
         hidden.extend(_on_own_colour(pdfium_c, page, light, crop_box))
     if transparent:
         hidden.extend(_without_ink(pdfium_c, page, objects, transparent, crop_box))
+    if tiny:
+        # A mark is printed in ink beside small print that is not hidden itself:
+        # a white or alpha-0 piece is hidden as tiny whatever stands beside it.
+        unreadable = {id(entry) for entry, _box, _inked in tiny}
+        unreadable.update(id(entry) for entry, _reason, _box in hidden)
+        inked = [(entry, box) for entry, box, in_ink in tiny if in_ink]
+        marks = (
+            _marks_beside_small_print(pdfium_c, page, objects, inked, unreadable)
+            if inked
+            else set()
+        )
+        hidden.extend((entry, "tiny", box) for entry, box, _inked in tiny if id(entry) not in marks)
     taken = {id(entry) for entry, _reason, _box in hidden}
     hidden.extend(_overprints(pdfium_c, page, [e for e in objects if id(e) not in taken]))
     taken = {id(entry) for entry, _reason, _box in hidden}
@@ -2647,7 +2675,8 @@ def _without_ink(
             if id(entry) not in painted_ids:
                 saved_modes.append((entry[1], pdfium_c.FPDFTextObj_GetTextRenderMode(entry[1])))
                 set_mode(entry[1], 3)
-        bare = page.render(scale=_HIDDEN_TEXT_SHAPE_RENDER_SCALE).to_pil().convert("RGB")
+        scale = _shape_render_scale(page)
+        bare = page.render(scale=scale).to_pil().convert("RGB")
         colour = min(
             _HIDDEN_TEXT_PAINT_COLOURS,
             key=lambda c: _changed_pixels(bare, Image.new("RGB", bare.size, c)).histogram()[0],
@@ -2655,7 +2684,7 @@ def _without_ink(
         for entry, rgba, _box in transparent:
             saved_fills.append((entry[1], rgba))
             set_fill(entry[1], *colour, 255)
-        painted = page.render(scale=_HIDDEN_TEXT_SHAPE_RENDER_SCALE).to_pil().convert("RGB")
+        painted = page.render(scale=scale).to_pil().convert("RGB")
     except Exception:  # noqa: BLE001 - no render, no evidence of ink
         logger.debug("Render for the transparent-text check failed", exc_info=True)
         return everything()
@@ -2799,15 +2828,25 @@ def _under_later_objects(pdfium_c, page, items: list) -> list[tuple[tuple, _Box,
     return found
 
 
-def _clip_box(pdfium_c, obj) -> tuple[_Box | None, bool]:
-    """*obj*'s clip in its own frame: its bounding box, and whether it is not one rectangle."""
+def _clip_box(pdfium_c, obj, budget: list[int]) -> tuple[_Box | None, bool]:
+    """*obj*'s clip in its own frame: its bounding box, and whether it is not one rectangle.
+
+    Reading the clip spends its point count from *budget*; one the budget no
+    longer covers reads as no clip.
+    """
     clip = pdfium_c.FPDFPageObj_GetClipPath(obj)
     if not clip:
         return None, False
+    paths = range(pdfium_c.FPDFClipPath_CountPaths(clip))
+    points_in_clip = sum(max(0, pdfium_c.FPDFClipPath_CountPathSegments(clip, p)) for p in paths)
+    if points_in_clip > budget[0]:
+        budget[0] = 0
+        return None, False
+    budget[0] -= points_in_clip
     found = None
     shaped = False
     x, y = ctypes.c_float(), ctypes.c_float()
-    for path in range(pdfium_c.FPDFClipPath_CountPaths(clip)):
+    for path in paths:
         points: list[tuple[float, float]] = []
         for index in range(pdfium_c.FPDFClipPath_CountPathSegments(clip, path)):
             segment = pdfium_c.FPDFClipPath_GetPathSegment(clip, path, index)
@@ -2845,15 +2884,23 @@ def _intersection(box: _Box | None, other: _Box | None) -> _Box | None:
 
 
 def _collect_clips(
-    pdfium_c, objects, matrix, inherited: tuple[_Box | None, bool], depth: int, found: dict
+    pdfium_c,
+    objects,
+    matrix,
+    inherited: tuple[_Box | None, bool],
+    depth: int,
+    found: dict,
+    budget: list[int],
 ) -> None:
     """Add each clipped text object's page-space clip to *found*, its forms' clips included."""
     for obj in objects:
-        own, shaped = _clip_box(pdfium_c, obj)
+        kind = pdfium_c.FPDFPageObj_GetType(obj)
+        if kind not in (pdfium_c.FPDF_PAGEOBJ_FORM, pdfium_c.FPDF_PAGEOBJ_TEXT):
+            continue
+        own, shaped = _clip_box(pdfium_c, obj, budget)
         if own is not None and matrix:
             own = _transform_box(matrix, own)
         clip = (_intersection(inherited[0], own), inherited[1] or shaped)
-        kind = pdfium_c.FPDFPageObj_GetType(obj)
         if kind == pdfium_c.FPDF_PAGEOBJ_FORM:
             if depth >= _SCAN_PAGE_MAX_FORM_DEPTH:
                 continue
@@ -2864,7 +2911,9 @@ def _collect_clips(
                 pdfium_c.FPDFFormObj_GetObject(obj, index)
                 for index in range(pdfium_c.FPDFFormObj_CountObjects(obj))
             ]
-            _collect_clips(pdfium_c, children, _compose(own_matrix, matrix), clip, depth + 1, found)
+            _collect_clips(
+                pdfium_c, children, _compose(own_matrix, matrix), clip, depth + 1, found, budget
+            )
         elif kind == pdfium_c.FPDF_PAGEOBJ_TEXT and clip[0] is not None:
             found[_object_address(obj)] = clip
 
@@ -2876,7 +2925,7 @@ def _outside_their_clips(pdfium_c, page, items: list) -> list[tuple[tuple, _Box]
         pdfium_c.FPDFPage_GetObject(page.raw, index)
         for index in range(pdfium_c.FPDFPage_CountObjects(page.raw))
     ]
-    _collect_clips(pdfium_c, top, None, (None, False), 0, clips)
+    _collect_clips(pdfium_c, top, None, (None, False), 0, clips, [_HIDDEN_TEXT_MAX_CLIP_POINTS])
     outside = []
     for entry, box in items:
         clip, shaped = clips.get(_object_address(entry[1]), (None, False))
@@ -3008,10 +3057,7 @@ def _without_printed_shape(
         for obj, _kind, _box in _paint_order(pdfium_c, page)
         if _object_address(obj) not in item_ids
     ]
-    width, height = page.get_size()
-    scale = min(
-        _HIDDEN_TEXT_SHAPE_RENDER_SCALE, _HIDDEN_TEXT_MAX_SHAPE_RENDER_PX / max(width, height, 1.0)
-    )
+    scale = _shape_render_scale(page)
     saved_fills = []
     try:
         for entry, _box in items:
@@ -3073,6 +3119,14 @@ def _without_printed_shape(
             continue
         kept.append((entry, box))
     return kept
+
+
+def _shape_render_scale(page) -> float:
+    """The glyph-shape render scale, lowered so the page's long side stays under the pixel cap."""
+    width, height = page.get_size()
+    return min(
+        _HIDDEN_TEXT_SHAPE_RENDER_SCALE, _HIDDEN_TEXT_MAX_SHAPE_RENDER_PX / max(width, height, 1.0)
+    )
 
 
 def _render_rgb(page):

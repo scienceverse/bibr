@@ -671,6 +671,28 @@ def test_marks_only_stay_beside_readable_small_print(pdf_bytes):
     assert "tiny" in _reasons(pdf_bytes)
 
 
+def _coloured_mark_pdf(*, mark: bytes = b"", small_print: bytes = b"") -> bytes:
+    """The exponent page with graphics state *mark* or *small_print* set around one of its parts."""
+    text = "4.2 x 10"
+    small = b"q " + small_print + b"\n" + _bt(text, 72.0, 700.0, size=5.0) + b"Q\n"
+    exponent = _bt("-5", 72.0 + _width(text, 5.0), 702.0, size=2.9)
+    return _pdf(small + b"q " + mark + b"\n" + exponent + b"Q\n" + _body(), resources=_ALPHA_ZERO)
+
+
+@pytest.mark.parametrize(
+    "pdf_bytes",
+    [
+        pytest.param(_coloured_mark_pdf(mark=b"1 1 1 rg"), id="white-mark"),
+        pytest.param(_coloured_mark_pdf(mark=b"/GS0 gs"), id="alpha-zero-mark"),
+        pytest.param(_coloured_mark_pdf(small_print=b"1 1 1 rg"), id="beside-white-small-print"),
+    ],
+)
+def test_a_mark_that_does_not_print_beside_print_that_does_is_tiny(pdf_bytes):
+    """Only ink makes a mark: tiny text in white or at alpha 0 goes, as before the mark rule."""
+    assert _reasons(pdf_bytes).count("tiny") == 1
+    assert "10-5" not in _page_text(pdf_bytes).replace(" ", "")
+
+
 def _type3_pdf(content: bytes) -> bytes:
     """A page whose font /F1 is Type 3, with a FontMatrix that scales its glyphs by 10."""
     glyph = b"70 0 0 0 70 70 d1 0 0 70 70 re f"
@@ -1113,9 +1135,20 @@ def test_a_single_letter_a_clip_still_shows_keeps_the_object():
 
 
 def test_the_render_outvotes_a_clip_that_is_read_wrongly(monkeypatch):
-    monkeypatch.setattr(native_text, "_clip_box", lambda _c, _obj: ((0.0, 0.0, 1.0, 1.0), False))
+    monkeypatch.setattr(
+        native_text, "_clip_box", lambda _c, _obj, _budget: ((0.0, 0.0, 1.0, 1.0), False)
+    )
     pdf_bytes = _resourced_pdf(_body() + _payload())
 
+    assert "Ignore prior" in _page_text(pdf_bytes)
+
+
+def test_a_page_past_the_clip_point_budget_keeps_its_clipped_text(monkeypatch):
+    """Every object of a page can carry one long clip: past the budget, clips go unread."""
+    monkeypatch.setattr(native_text, "_HIDDEN_TEXT_MAX_CLIP_POINTS", 4)
+    pdf_bytes = _resourced_pdf(_body() + _CLIP_ELSEWHERE + _payload() + b"Q\n")
+
+    assert "clipped" not in _reasons(pdf_bytes)
     assert "Ignore prior" in _page_text(pdf_bytes)
 
 

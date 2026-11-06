@@ -217,8 +217,9 @@ by an earlier version, carries neither.
   read it. Visible text under 3 pt, measured through the text, page and form
   matrices, whatever its rotation, and hairline letters squeezed to a sliver
   now count as hidden (rule `hidden_text/3`); the limit was 1 pt, and rotation
-  could escape it. A short exponent or subscript beside readable small print
-  stays. Small plot and diagram labels leave the text layer too, as do some
+  could escape it. A short exponent or subscript printed in ink beside readable
+  small print stays; one in white or at alpha 0, or beside small print that is
+  hidden itself, goes. Small plot and diagram labels leave the text layer too, as do some
   table cells shrunk below 3 pt. PDFs that insert hairline letters into words
   ("lalin" printed as "lain") now read correctly. The new rule version changes
   the OCR cache key, so cached papers are read again.
