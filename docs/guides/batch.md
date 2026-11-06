@@ -131,14 +131,6 @@ stay in the allocator and a long run keeps every chunk's high-water mark.
 `--batch-size`, at a speed cost; a 24-paper chunk ran 20-30% slower) or
 `off`.
 
-When the run is over, `bibr batch` and `bibr chew` end the process as soon as the
-outputs are written, without the interpreter's teardown (freeing the loaded
-models object by object). On a machine short of memory that teardown pages the
-swapped-out heap back in and took 17 to 20 s after the last log line in our
-runs, against about 1 s without it. Output files are complete and flushed before
-the process ends, and exit codes are unchanged. `BIBR_FAST_EXIT=0` restores the
-normal shutdown.
-
 **Remote** (`--serve-url URL`) submits papers to a
 [`bibr serve`](deployment.md) async job API (`POST /papers/jobs`, poll
 `GET /papers/jobs/{id}`, fetch `…/result`). The bearer token comes from

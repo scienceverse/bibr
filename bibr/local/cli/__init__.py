@@ -16,7 +16,6 @@ consumed elsewhere in ``bibr`` (and by the test suite) under the historical
 
 import argparse
 import asyncio
-import atexit
 import contextlib
 import logging
 import os
@@ -121,7 +120,6 @@ __all__ = [
     "_write_chunk_results",
     "_write_stdout_json",
     "_zip_payload_suffix",
-    "entrypoint",
     "main",
     "normalize_ocr_backend",
     "resolve_run_config",
@@ -228,19 +226,11 @@ def _exit_at_once_on_termination() -> None:
 
 
 def _exit_now(code: int) -> NoReturn:
-    """Flush stdout and stderr, then exit without unwinding the interpreter.
-
-    Output lost in the flush turns a success into status 120, as at a normal exit.
-    """
+    """Flush stdout and stderr, then exit without unwinding the interpreter."""
     try:
         for stream in (sys.stdout, sys.stderr):
-            try:
+            with contextlib.suppress(Exception):
                 stream.flush()
-            except (AttributeError, ValueError):
-                pass  # no stream, or one that is closed
-            except Exception:  # noqa: BLE001 - the exit goes ahead whatever failed
-                if stream is sys.stdout and code == 0:
-                    code = 120
     finally:
         os._exit(code)
 
@@ -483,64 +473,5 @@ def _main():
         sys.exit(1)
 
 
-# Commands whose process ends right after a run that loaded several ONNX models
-# and a few GB of weights. See ``entrypoint``.
-_HARD_EXIT_COMMANDS = frozenset({"batch", "chew"})
-
-
-def _hard_exit_wanted() -> bool:
-    """Whether this ``bibr`` invocation should skip interpreter teardown.
-
-    ``BIBR_FAST_EXIT=0`` (or ``false``/``no``/``off``) opts out.
-    """
-    if os.environ.get("BIBR_FAST_EXIT", "1").strip().lower() in {"0", "false", "no", "off"}:
-        return False
-    return len(sys.argv) >= 2 and sys.argv[1] in _HARD_EXIT_COMMANDS
-
-
-def _exit_status(code: object) -> int:
-    """The process status a ``SystemExit`` carries (``None`` is 0, a message is 1)."""
-    if code is None:
-        return 0
-    return code if isinstance(code, int) else 1
-
-
-def _hard_exit_hook(status: list[int | None]) -> None:
-    """Last ``atexit`` handler: end the process once everything else has run.
-
-    A finished ``bibr batch`` or ``bibr chew`` has written and fsynced its
-    outputs; what is left of the interpreter's teardown is freeing the loaded
-    models object by object. On a machine under memory pressure that pages the
-    swapped-out heap back in first, which measured 17 to 20 s after the last log
-    line against 1.3 s without it. Registered before anything else, so the other
-    handlers (temporary-file cleanup, ``logging``) have already run.
-    """
-    if status[0] is None:
-        # No normal finish (an unhandled exception): leave Python's own path.
-        return
-    with contextlib.suppress(Exception):
-        logging.shutdown()
-    _exit_now(status[0])
-
-
-def entrypoint() -> None:
-    """Console-script entry point: ``main`` plus a hard exit for ``batch``/``chew``.
-
-    ``main`` itself stays free of ``os._exit``, so tests and embedders that call
-    it keep the normal ``SystemExit`` and teardown.
-    """
-    if not _hard_exit_wanted():
-        main()
-        return
-    status: list[int | None] = [None]
-    atexit.register(_hard_exit_hook, status)
-    try:
-        main()
-    except SystemExit as exc:
-        status[0] = _exit_status(exc.code)
-        raise
-    status[0] = 0
-
-
 if __name__ == "__main__":
-    entrypoint()
+    main()

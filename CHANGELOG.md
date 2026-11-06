@@ -113,12 +113,6 @@ by an earlier version, carries neither.
   (default `0`, the CPUs the process may use) and `ML_ONNX_SPINNING` (default
   `false`) set either back; see
   [Configuration](docs/guides/configuration.md#cpu-threads).
-- `bibr batch` and `bibr chew` end the process right after their outputs are
-  written, without the interpreter's teardown. On a machine short of memory the
-  teardown spent 12 to 24 s paging the models back in after the last log line,
-  against about 1 s now. Exit codes and output are unchanged;
-  `BIBR_FAST_EXIT=0` restores the normal shutdown. The `bibr` console script
-  now points at `bibr.local.cli:entrypoint`; `bibr.local.cli.main` is unchanged.
 - The sentence segmenter batches its texts shortest first, because it pads every
   text in a batch to the longest one. On 24 papers (1,183 texts) on four threads
   this took 345 CPU-seconds instead of 464 and 651 MB instead of 902. In the
