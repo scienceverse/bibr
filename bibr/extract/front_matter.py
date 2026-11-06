@@ -3481,7 +3481,7 @@ def _select_tagger_record(
             families = [
                 key
                 for author in tagged.byline.authors
-                if (key := _identity_key(getattr(author, "family", None) or ""))
+                if (key := _identity_key(author.family or ""))
             ]
             if not families or any(key not in printed for key in families):
                 return None, (f"tagger_authors_outside_record:{identity.block.block_id}",)
