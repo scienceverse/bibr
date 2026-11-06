@@ -164,7 +164,9 @@ by an earlier version, carries neither.
   written in Han, kana or Hangul with no space inside them. The check that a row
   names an author looked for separate words of more than two letters, so it missed
   such names and took the row for a subtitle. It now also looks for the whole name
-  in the row. One character of a name does not count, so a real subtitle still folds.
+  in the row. One character of a name does not count, and a two-character name
+  counts only where no other Han, kana or Hangul touches it, so a real subtitle
+  still folds.
 - Under the front-matter rules, an affiliation key glued to a family name now comes
   off when the paper shows the letter is a key, also where the model tagged none of
   them: "Tessb" reads "Tess". The letters count when they run in order through the

@@ -190,6 +190,8 @@ def _zh_author(given, family):
             id="markers-and-affiliation",
         ),
         pytest.param("山田花子, 田中一郎", _zh_author("花子", "山田"), id="japanese"),
+        pytest.param("文明1, 陈思远2", _zh_author("明", "文"), id="two-character-name"),
+        pytest.param("文 明 1 , 何明哲 2", _zh_author("明", "文"), id="two-letter-spaced"),
     ],
 )
 def test_a_row_printing_an_unspaced_author_name_is_a_byline(row_text, author):
@@ -214,12 +216,15 @@ def test_a_row_printing_an_unspaced_hangul_name_is_a_byline():
         pytest.param("基于两年课堂项目的经验", id="no-author-character"),
         # One character of a name is an ordinary word: 林 is also "forest".
         pytest.param("以林下菜园为例的课堂项目", id="shares-the-surname-character"),
+        # A two-character name is often a word too: 文明 is "civilization".
+        pytest.param("城市文明建设中的课堂项目", id="a-two-character-name-as-a-word"),
     ],
 )
 def test_a_chinese_subtitle_still_folds_beside_unspaced_authors(row_text):
     resolution = _resolution(_title(_ZH_TITLE), _row("c2", row_text))
+    authors = [_zh_author("若溪", "林"), _zh_author("明", "文")]
 
-    title, issue = fold_printed_subtitle(_ZH_TITLE, resolution, authors=[_zh_author("若溪", "林")])
+    title, issue = fold_printed_subtitle(_ZH_TITLE, resolution, authors=authors)
 
     assert title == f"{_ZH_TITLE}: {row_text}"
     assert issue is not None

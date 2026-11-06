@@ -75,9 +75,8 @@ _LEADING_NUMBERING_RE = re.compile(
 _BAD_OPENING = frozenset("*-–—•·‣○●◦■□[")
 # Name-list separators; a subtitle does not use them.
 _NAME_SEPARATOR_RE = re.compile(r"[·•‣⁃∙⋅・]")
-_UNSPACED_NAME_RE = re.compile(
-    r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]+"
-)
+_UNSPACED_CHARS = r"\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af"
+_UNSPACED_NAME_RE = re.compile(f"[{_UNSPACED_CHARS}]+")
 _CONTACT_RE = re.compile(r"@|https?://|\bwww\.|\bdoi\b|\b10\.\d{4,9}/", re.IGNORECASE)
 # History, citation, copyright, correspondence, and classification lines, and
 # row labels such as "Running title:" or "Keywords:".
@@ -282,7 +281,9 @@ def _is_bare_name(text: str) -> bool:
 def _unspaced_names(author: PaperAuthor) -> set[str]:
     """The ways a Han, kana or Hangul name prints with its parts run together.
 
-    Only the whole name counts: one character of it is an ordinary word.
+    Only the whole name counts: one character of it is an ordinary word. So
+    can two (文明 is "civilization"), so a two-character name counts only where
+    it stands apart from other Han, kana and Hangul (_prints_unspaced_name).
     """
 
     given = _normalize(author.given or "").replace(" ", "")
@@ -307,8 +308,22 @@ def _names_an_author(text: str, authors: Iterable[PaperAuthor]) -> bool:
         if len(name) > 2 and name not in _NON_NAME_WORDS and name not in _NAME_PARTICLES
     ):
         return True
-    unspaced = normalized.replace(" ", "")
-    return any(name in unspaced for author in authors for name in _unspaced_names(author))
+    return any(
+        _prints_unspaced_name(normalized, name)
+        for author in authors
+        for name in _unspaced_names(author)
+    )
+
+
+def _prints_unspaced_name(normalized: str, name: str) -> bool:
+    """Whether *normalized* prints *name*, letter-spaced or not (see _unspaced_names)."""
+    if len(name) > 2:
+        return name in normalized.replace(" ", "")
+    spaced = r" ?".join(re.escape(char) for char in name)
+    return (
+        re.search(f"(?<![{_UNSPACED_CHARS}]){spaced}(?![{_UNSPACED_CHARS}])", normalized)
+        is not None
+    )
 
 
 def _is_label_row(text: str) -> bool:
