@@ -747,6 +747,23 @@ def _setup_env_file() -> Path:
     return (chain[-1] if chain else Path(".env")).absolute()
 
 
+# The settings that make a fast run use an OCR route instead of the PDF text layer
+# (bibr.ocr.registry.ocr_route_chosen).
+_OCR_ROUTE_KEYS = ("OCR_BACKEND", "OCR_MODEL", "OCR_PROFILE")
+
+
+def _earlier_ocr_route_keys(env_vars: dict[str, str]) -> tuple[str, ...]:
+    """The OCR route settings a merge must turn off for *env_vars* to mean what setup said.
+
+    A fast setup that picked no OCR route promises the text layer and no cloud
+    calls, but an ``OCR_BACKEND`` left by an earlier setup (the cloud plan
+    writes ``anthropic``) would still choose a route.
+    """
+    if env_vars.get("PIPELINE_MODE") != "fast" or any(k in env_vars for k in _OCR_ROUTE_KEYS):
+        return ()
+    return _OCR_ROUTE_KEYS
+
+
 def _with_llm_routing(env_vars: dict[str, str]) -> dict[str, str]:
     """The wizard's answers plus a value for every LLM routing setting it left unset.
 
@@ -2054,9 +2071,20 @@ class SetupWizard:
                 self._note_mode_not_saved()
                 return
             if action == "merge":
-                _merge_env(self.env_path, _with_llm_routing(self.env_vars))
+                commented = _merge_env(
+                    self.env_path,
+                    _with_llm_routing(self.env_vars),
+                    comment_out=_earlier_ocr_route_keys(self.env_vars),
+                )
                 self._env_written = True
                 ui.ok(self.console, f"Merged new settings into {self.env_path}")
+                if commented:
+                    self.console.print(
+                        f"[yellow]Commented out {', '.join(commented)}, an OCR route from an "
+                        "earlier setup: fast mode reads the PDF's text layer, so document "
+                        "contents stay on this machine. `bibr chew --ocr <route>` picks an "
+                        "OCR route for one run.[/yellow]"
+                    )
                 self._warn_environment_overrides()
                 if save_preset_name:
                     self._save_preset(save_preset_name)

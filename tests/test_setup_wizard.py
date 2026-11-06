@@ -3466,6 +3466,54 @@ def test_fast_over_an_old_env_with_an_llm_and_no_mode_stays_fast(monkeypatch, tm
     assert "switches it to fast" in " ".join(wizard.console.export_text().split())
 
 
+_OLD_CLOUD_ENV = (
+    "PIPELINE_MODE=full\n"
+    "LLM_PROVIDER=anthropic\n"
+    "ANTHROPIC_API_KEY=sk-ant-old-key-000000\n"
+    "OCR_BACKEND=anthropic\n"
+    "OCR_VISION_MODEL=claude-haiku-5-5\n"
+    "MY_OWN_SETTING=keep-me\n"
+)
+
+
+def test_fast_over_an_earlier_cloud_ocr_route_turns_the_route_off(monkeypatch, tmp_path):
+    """Fast setup says contents stay local: an earlier OCR_BACKEND must not still apply."""
+    from bibr.ocr.registry import ocr_route_chosen
+
+    env = tmp_path / ".env"
+    env.write_text(_OLD_CLOUD_ENV, encoding="utf-8")
+    assert ocr_route_chosen(_read_back(monkeypatch, env))
+    _settings_as_of(monkeypatch, env)
+
+    wizard = _drive_easy_setup(monkeypatch, tmp_path, existing=_OLD_CLOUD_ENV)
+
+    lines = env.read_text().splitlines()
+    assert "# OCR_BACKEND=anthropic" in lines
+    assert "OCR_BACKEND=anthropic" not in lines
+    assert "MY_OWN_SETTING=keep-me" in lines
+    assert not ocr_route_chosen(_read_back(monkeypatch, env))
+    assert "Commented out OCR_BACKEND" in " ".join(wizard.console.export_text().split())
+
+
+def test_merge_env_comments_out_only_keys_it_does_not_set(tmp_path):
+    from bibr.env_utils import merge_env
+
+    env = tmp_path / ".env"
+    env.write_text("OCR_BACKEND=anthropic\nexport OCR_MODEL=x\nOCR_PROFILE=glm\nA=1\n")
+
+    commented = merge_env(
+        env, {"OCR_PROFILE": "paddle"}, comment_out=("OCR_BACKEND", "OCR_MODEL", "OCR_PROFILE")
+    )
+
+    assert commented == ["OCR_BACKEND", "OCR_MODEL"]
+    assert env.read_text().splitlines() == [
+        "# OCR_BACKEND=anthropic",
+        "# export OCR_MODEL=x",
+        "OCR_PROFILE=paddle",
+        "A=1",
+    ]
+
+
 def test_fast_over_an_existing_env_when_overwriting_writes_only_the_new_settings(
     monkeypatch, tmp_path
 ):

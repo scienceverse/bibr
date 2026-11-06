@@ -144,6 +144,11 @@ by an earlier version, carries neither.
 
 ### Fixed
 
+- Choosing fast mode when `bibr setup` merges into an existing `.env` now comments
+  out an `OCR_BACKEND`, `OCR_MODEL` or `OCR_PROFILE` left by an earlier setup, and
+  says so. Fast mode reads the PDF's text layer and setup says document contents
+  stay on the machine, but an `OCR_BACKEND=anthropic` written by the cloud plan
+  still sent page images to Anthropic. A fast setup that picks an OCR route keeps it.
 - A fast run no longer empties a paper's title, authors and abstract because its
   first pages print a second title, such as a translation, a journal masthead or a
   running head. Abstaining protects a model that reads only the selected block, and
