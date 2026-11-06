@@ -173,7 +173,8 @@ by an earlier version, carries neither.
   affiliation block, lone or glued to a word in any script ("bÉcole"), when a line
   opens with one after a footnote symbol, or, for a capital, when the byline prints
   it alone. A symbol after the name no longer hides the key, a key printed apart
-  ("Silva a") keeps the name's last letter, and a lower letter leaves a run only if
+  ("Silva a", "Silva ᵇ", or a letter in marks after a space, "Silva *,b") keeps the
+  name's last letter, and a lower letter leaves a run only if
   the byline has not shown it yet, so "Moreirab" after a name keyed "a" keeps its
   "a". An all-capitals name still keeps a final "I". A key taken this way that the
   tagged affiliations do not hold reports `affiliation_mark_unresolved`, as any such

@@ -998,6 +998,11 @@ def test_a_symbol_leaves_a_glued_key_but_a_digit_shows_how_the_paper_keys(mark, 
         # The key is printed apart, so the "a" is the name's own.
         ("Lena Silva a, Omar Tess b", "Silva"),
         ("Lena Silva, a, Omar Tess, b", "Silva"),
+        ("Lena Silva ᵇ, Omar Tess b", "Silva"),
+        # A run of marks after a space holds the author's letter keys.
+        ("Lena Silva *,b, Omar Tess b", "Silva"),
+        # A symbol alone after the space says nothing about a letter.
+        ("Lena Morna *, Omar Tess b", "Morn"),
         # A higher letter after the comma is the rest of a list with its first glued on.
         ("Lena Morna, b, Omar Tess", "Morn"),
     ],

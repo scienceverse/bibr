@@ -722,23 +722,45 @@ def _keyed_line_reads_as_affiliation(inp: TaggerInput, tags, i: int) -> bool:
 def _keys_stand_apart(inp: TaggerInput, tags, last_word: int, key: str) -> bool:
     """Whether the keys printed after a name show its last letter is its own.
 
-    "Silva a" and "Silva, a" print the key apart from the name. "Vegaa, b" is the
-    run "a, b" with its first letter glued on, so a higher letter says nothing.
+    "Silva a", "Silva ᵇ" and "Silva, a" print the key apart from the name, and
+    so does "Silva *,b", a run of marks set off by a space that holds a letter.
+    "Vegaa, b" is the run "a, b" with its first letter glued on, so a higher
+    letter says nothing, and neither does a symbol alone ("Morna *").
     """
     words = inp.words
+    region = words[last_word].region
     following = [
         words[i]
         for i in range(last_word + 1, min(last_word + 3, len(words)))
-        if words[i].region == words[last_word].region and _field(tags[i]) != "GIVEN"
+        if words[i].region == region and _field(tags[i]) != "GIVEN"
     ]
-    if following and _LONE_LETTER_RE.fullmatch(following[0].text):
+    if not following:
+        return False
+    if _letter_key(following[0].text) is not None:
         return True
-    return (
+    if (
         len(following) == 2
         and following[0].text == ","
-        and _LONE_LETTER_RE.fullmatch(following[1].text) is not None
-        and following[1].text <= key
-    )
+        and (letter := _letter_key(following[1].text)) is not None
+        and letter <= key
+    ):
+        return True
+    if following[0].start <= words[last_word].end:
+        return False
+    for word in words[last_word + 1 :]:
+        if word.region != region or not (word.text == "," or _is_symbol_mark(word.text)):
+            return _letter_key(word.text) is not None and word.region == region
+    return False
+
+
+def _letter_key(text: str) -> str | None:
+    """*text* as a lone small letter, superscript forms included ("ᵇ" is "b")."""
+    letter = unicodedata.normalize("NFKC", text)
+    return letter if _LONE_LETTER_RE.fullmatch(letter) else None
+
+
+def _is_symbol_mark(text: str) -> bool:
+    return len(text) == 1 and not unicodedata.normalize("NFKC", text).isalnum()
 
 
 def _glue_is_ruled_out(author: _Author, key: str, *, runs: bool) -> bool:
