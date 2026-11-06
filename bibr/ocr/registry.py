@@ -492,8 +492,12 @@ def ocr_route_chosen(
     ``--ocr-url``, ``--ocr-model``, ``--ocr-profile``) or set as ``OCR_BACKEND``,
     ``OCR_MODEL`` or ``OCR_PROFILE``. A fast run with none of them reads the PDF text
     layer; ``bibr setup`` writes ``OCR_BACKEND`` only for a route the user picks.
+    A setting left blank (``OCR_MODEL=``) or null names nothing.
     """
-    configured = settings.ocr.model_fields_set & {"backend", "model", "profile"}
+    configured = any(
+        getattr(settings.ocr, field)
+        for field in settings.ocr.model_fields_set & {"backend", "model", "profile"}
+    )
     return bool(backend or url or model or profile or configured)
 
 

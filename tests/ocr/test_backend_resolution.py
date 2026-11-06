@@ -784,6 +784,14 @@ class TestOcrRouteChosen:
         value = {"backend": "glm-llama", "model": "some/model", "profile": "glm"}[field]
         assert ocr_route_chosen(self._settings(**{field: value})) is True
 
+    @pytest.mark.parametrize("field", ["model", "profile"])
+    def test_a_setting_left_blank_or_null_is_not_a_choice(self, field):
+        from bibr.ocr.registry import ocr_route_chosen
+
+        assert ocr_route_chosen(self._settings(**{field: None})) is False
+        if field == "model":
+            assert ocr_route_chosen(self._settings(model="")) is False
+
     def test_a_tuning_setting_is_not_a_choice(self):
         from bibr.ocr.registry import ocr_route_chosen
 
