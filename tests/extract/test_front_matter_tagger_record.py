@@ -25,7 +25,8 @@ def _tagged(
     contents: PaperContents, title: str | None = FIRST_TITLE, authors: tuple[str, ...] = ("Lin",)
 ) -> PaperContents:
     contents.front_tagger_result = SimpleNamespace(
-        title_keywords=SimpleNamespace(title=title), byline=SimpleNamespace(authors=list(authors))
+        title_keywords=SimpleNamespace(title=title),
+        byline=SimpleNamespace(authors=[SimpleNamespace(family=family) for family in authors]),
     )
     return contents
 
@@ -70,6 +71,38 @@ def test_two_blocks_with_bylines_keep_abstaining_in_fast_mode():
     assert resolution.selected_block_id is None
     assert "several_bylines" in resolution.reason_flags
     assert "multiple_plausible_blocks" in resolution.reason_flags
+    assert [issue.code for issue in issues] == ["VAL_METADATA_MULTI_ITEM"]
+
+
+def test_a_title_beside_another_blocks_byline_keeps_abstaining():
+    # The tagger missed the first paper's title and read the second's: the one
+    # byline and the first abstract belong to the first paper.
+    contents = _contents(
+        [
+            _row(1, FIRST_TITLE, y=60.0, label="paragraph_title"),
+            _row(2, "Mei Lin, Jordan Smith", y=100.0),
+            _row(3, "We interviewed older immigrants about loneliness.", y=140.0, label="abstract"),
+            _row(4, SECOND_TITLE, y=300.0, label="doc_title"),
+            _row(5, "We surveyed adults about social technology use.", y=340.0, label="abstract"),
+        ]
+    )
+    _tagged(contents, title=SECOND_TITLE, authors=("Lin", "Smith"))
+
+    resolution, issues = resolve_front_matter(contents, target_required=True, settings=_fast())
+
+    assert resolution.selected_block_id is None
+    assert "tagger_title_outside_byline:front-matter-block-2" in resolution.reason_flags
+    assert [issue.code for issue in issues] == ["VAL_METADATA_MULTI_ITEM"]
+
+
+def test_tagged_authors_the_record_does_not_print_keep_abstaining():
+    # The tagger took in a second byline that no block shows as one.
+    contents = _tagged(_two_abstracts(None), authors=("Lin", "Smith", "Reader", "Writer"))
+
+    resolution, issues = resolve_front_matter(contents, target_required=True, settings=_fast())
+
+    assert resolution.selected_block_id is None
+    assert "tagger_authors_outside_record:front-matter-block-1" in resolution.reason_flags
     assert [issue.code for issue in issues] == ["VAL_METADATA_MULTI_ITEM"]
 
 

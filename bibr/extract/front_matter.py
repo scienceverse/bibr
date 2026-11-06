@@ -3460,7 +3460,8 @@ def _select_tagger_record(
         _record_identity(block, order, by_id, detected_title=contents.detected_title)
         for order, block in enumerate(blocks)
     ]
-    if sum(1 for identity in identities if identity.byline) > 1:
+    bylined = [identity for identity in identities if identity.byline]
+    if len(bylined) > 1:
         return None, ("several_bylines",)
     title_key = _identity_key(title)
     for identity in identities:
@@ -3468,9 +3469,23 @@ def _select_tagger_record(
             _identity_key(row.raw_text) for row in _block_candidates(identity.block, by_id)
         )
         if title_key and title_key in printed:
-            if identity.is_record:
-                return identity.block, (f"tagger_record:{identity.block.block_id}",)
-            return None, (f"tagger_title_outside_record:{identity.block.block_id}",)
+            if not identity.is_record:
+                return None, (f"tagger_title_outside_record:{identity.block.block_id}",)
+            # The one byline in sight is another block's: the title the tagger
+            # read can be a second paper's, with the first paper's authors and
+            # abstract around it.
+            if bylined and bylined[0] is not identity:
+                return None, (f"tagger_title_outside_byline:{identity.block.block_id}",)
+            # Every family name the tagger read must be printed in the block, or
+            # its byline took in names from a second byline the blocks missed.
+            families = [
+                key
+                for author in tagged.byline.authors
+                if (key := _identity_key(getattr(author, "family", None) or ""))
+            ]
+            if not families or any(key not in printed for key in families):
+                return None, (f"tagger_authors_outside_record:{identity.block.block_id}",)
+            return identity.block, (f"tagger_record:{identity.block.block_id}",)
     return None, ("tagger_title_outside_blocks",)
 
 

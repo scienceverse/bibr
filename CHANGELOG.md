@@ -150,8 +150,11 @@ by an earlier version, carries neither.
   the tagger has read the page by then, so the block printing the tagger's title is
   selected. Two blocks that each print a byline can be two papers, so they still
   abstain, as does a tagger answer with no title or no author, a title no block
-  prints, or a title in a block that is no record. A full run, and a run given an
-  expected identity, abstain as before.
+  prints, or a title in a block that is no record. So does a title in a block
+  without a byline while another block prints one, and a tagger author whose
+  family name the selected block doesn't print, since both can mean the tagger
+  joined two papers. A full run, and a run given an expected identity, abstain as
+  before.
 - A byline printed under a title no longer ends up in the title when the names are
   written in Han, kana or Hangul with no space inside them. The check that a row
   names an author looked for separate words of more than two letters, so it missed
