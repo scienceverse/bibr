@@ -6,14 +6,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Security
-
-- The lock moves to pyasn1 0.6.5, and the constraint floor in `pyproject.toml` with it.
-  0.6.4 and earlier spend quadratic time decoding some BER input (CVE-2026-119194,
-  -119195, -119196, -119197).
-- The serve image upgrades apt and libapt-pkg6.0 to 2.4.15ubuntu0.1 from jammy-security
-  (CVE-2026-109518, code execution via hard-link reuse); the CUDA base ships 2.4.14.
-
 ## [0.8.0] - 2026-10-30
 
 bibr's 4B extraction student is now the revision retrained with pointer answers,
@@ -336,8 +328,17 @@ every 12.2 export is still valid input for the 12.x reader.
   the `vllm` extra and did not report it; `pip-audit` on the extra's locked
   requirements now finds no known vulnerability (the two already documented
   exceptions aside).
+- The lock moves to pyasn1 0.6.5, and the constraint floor in `pyproject.toml` with it.
+  0.6.4 and earlier spend quadratic time decoding some BER input (CVE-2026-119194,
+  -119195, -119196, -119197).
+- The serve image upgrades apt and libapt-pkg6.0 to 2.4.15ubuntu0.1 from jammy-security
+  (CVE-2026-109518, code execution via hard-link reuse); the CUDA base ships 2.4.14.
 
 ### Fixed
+- Release validation and the weekly Maintenance check run their macOS core suite on
+  `macos-15`, since GitHub retired the `macos-14` runner and those jobs no longer
+  started. The Windows core suite passes again: its local-model, cancellation and
+  ROR tests no longer assume POSIX paths.
 - In the balanced memory mode, bibr no longer refuses a managed vLLM LLM
   server start that would fit once its own GPU models were released. When
   the memory free cannot start the model, bibr first releases what the
