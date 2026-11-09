@@ -121,7 +121,7 @@ _PLACES = frozenset(
 # One-word funders that are neither an acronym nor an organisation word.
 _KNOWN_SINGLE = frozenset(
     {"Wellcome", "Inria", "Novartis", "Pfizer", "Google", "Amazon", "Microsoft", "Meta", "IBM", "Intel",
-     "Nvidia", "NVIDIA", "Horizon", "Erasmus", "Leverhulme", "Nuffield", "Carlsberg", "Volkswagen", "Mitacs",
+     "Nvidia", "NVIDIA", "Erasmus", "Leverhulme", "Nuffield", "Carlsberg", "Volkswagen", "Mitacs",
      "Fulbright", "Rockefeller", "Gates", "Templeton"}
 )  # fmt: skip
 # Lower-case words an acronym funder may be followed by ("NSF grant", "ERC research grant"); any
@@ -140,6 +140,11 @@ _ACRONYM = re.compile(
 _POSSESSIVE = re.compile(r"[’']s$")
 _EXPANSION = re.compile(r"\s*\(([A-Z][^()]{6,90})\)")  # "MRC (Medical Research Council)"
 _ACRONYM_AFTER = re.compile(r"\s*\(([A-Z][A-Za-z&.\-]{1,12})\)")  # "Medical Research Council (MRC)"
+# An acronym that opens a bracket holding more: "(DFG, German Research Foundation)", "(NWO; grant 452-17-002)".
+_ACRONYM_LEADS = re.compile(r"\s*\(([A-Z][A-Za-z&.\-]{1,12})\s*[,;]\s*([^()]{1,90})\)")
+# The EU named as the owner of a programme ("... Council under the European Union's Horizon 2020
+# programme"), not as a funder of its own.
+_PROGRAMME_OWNER = re.compile(r"[’']s\s+(?:Horizon|Seventh|FP7|H2020|Framework)\b")
 _JOIN = re.compile(r"\s+(?:and|&)\s+(?:the|The)\s+|\s+(?:and|&)\s+(?=[A-Z])")
 _STRONG_CUE = re.compile(
     r"\b(?:supported|funded|financed|sponsored|supplied|provided)\s+(?:in part\s+|partly\s+|partially\s+)?by\s+"
@@ -324,8 +329,24 @@ def _candidate_names(text: str) -> list[Span]:
             end = expansion.end()
         else:
             acronym = _ACRONYM_AFTER.match(text, end)
+            leads = _ACRONYM_LEADS.match(text, end)
             if acronym and _ACRONYM.match(acronym.group(1).replace(".", "")):
                 end = acronym.end()
+            elif leads and _ACRONYM.match(leads.group(1).replace(".", "")):
+                rest = leads.group(2).strip()
+                if not re.search(r"\d", rest) and all(
+                    _CAPWORD.match(w) or w.lower() in _CONNECT for w in rest.split()
+                ):
+                    # A second name of the funder ("DFG, German Research Foundation"): all of it.
+                    end = leads.end()
+                else:
+                    # An award or a note after the acronym: the funder is "Name (Acronym)",
+                    # and what follows is left for the identifiers.
+                    spans.append((start, leads.end(1), f"{name} ({leads.group(1)})"))
+                    i = last + 1
+                    while i < len(toks) and toks[i][1] < leads.end(1):
+                        i += 1
+                    continue
         spans.append((start, end, text[start:end].strip() if end > start else name))
         i = last + 1
         while i < len(toks) and toks[i][1] < end:
@@ -336,7 +357,7 @@ def _candidate_names(text: str) -> list[Span]:
 def _split_joined(text: str, spans: list[Span]) -> list[Span]:
     """Split "X and the Y", and "X and Y" when both sides name an organisation."""
     out: list[Span] = []
-    for start, end, _ in spans:
+    for start, end, name in spans:
         cut = start
         for m in _JOIN.finditer(text, start, end):
             left, right = text[cut : m.start()], text[m.end() : end]
@@ -345,7 +366,13 @@ def _split_joined(text: str, spans: list[Span]) -> list[Span]:
             ):
                 out.append((cut, m.start(), text[cut : m.start()].strip(" .")))
                 cut = m.end()
-        out.append((cut, end, text[cut:end].strip(" .")))
+        # A name closed by its acronym ("Name (NWO", the bracket going on) keeps its own spelling.
+        tail = (
+            name
+            if cut == start and name.endswith(")") and not text[start:end].endswith(")")
+            else None
+        )
+        out.append((cut, end, tail or text[cut:end].strip(" .")))
     return out
 
 
@@ -366,6 +393,8 @@ def _is_funder(
     if not words or low in _PLACES or low in _NOT_FUNDER:
         return False
     before = text[max(0, start - 40) : start]
+    if re.search(r"\bunder\s+the\s+$", before) and _PROGRAMME_OWNER.match(text, end):
+        return False  # "... under the European Union's Horizon 2020 programme"
     if not _HEAD.search(bare) and (
         any(re.search(rf"\b{re.escape(f)}\b", bare) for f in families)
         or (_PERSON_CUE.search(before) and _PERSON.fullmatch(bare))
@@ -504,6 +533,7 @@ def _name_keys(name: str) -> set[str]:
 
     keys = {norm(name), norm(re.sub(r"\s*\([^)]*\)", "", name))}
     for inner in re.findall(r"\(([^)]*)\)", name):
-        if _ACRONYM.match(inner.replace(".", "").replace("-", "")) or len(inner.split()) > 1:
-            keys.add(norm(inner))
+        for part in [inner, *re.split(r"\s*[,;]\s*", inner)]:
+            if _ACRONYM.match(part.replace(".", "").replace("-", "")) or len(part.split()) > 1:
+                keys.add(norm(part))
     return {k for k in keys if len(k) >= 2}

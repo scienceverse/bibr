@@ -79,6 +79,9 @@ _REGIONS = frozenset(
      "west virginia", "western australia", "wisconsin", "wyoming"}
 )  # fmt: skip
 
+# Where "Georgia" closing an address is the country, not the US state.
+_GEORGIAN_CITIES = frozenset({"tbilisi", "batumi", "kutaisi", "rustavi", "telavi", "zugdidi"})
+
 _UNI = re.compile(
     r"\b(?:universit\w*|univ\.|universidad\w*|universidade|università|universita|université|"
     r"universite|universiteit|universitat|uniklinik\w*|hochschule|polytechnic|politecnico|"
@@ -227,7 +230,8 @@ def parse_affiliation(text: str) -> AffiliationParts:
 def _segments(text: str) -> list[str]:
     """``text`` cut at commas and semicolons outside brackets."""
     out: list[str] = []
-    depth, current = 0, []
+    depth = 0
+    current: list[str] = []
     for ch in text:
         if ch in "([":
             depth += 1
@@ -270,8 +274,18 @@ def _placeish(seg: str) -> bool:
 
 
 def _take_country(segs: list[str], out: AffiliationParts) -> list[str]:
-    """Move the country, the last segment or its last words ("London UK"), into ``out``."""
+    """Move the country, the last segment or its last words ("London UK"), into ``out``.
+
+    A state printed last ("Albuquerque, New Mexico", "Atlanta, Georgia") is no
+    country: the address simply stops there. Georgia is the country only after
+    one of its cities.
+    """
     last = segs[-1]
+    region = last.lower().strip(" .")
+    if region in _REGIONS and not (
+        region == "georgia" and len(segs) >= 2 and segs[-2].strip().lower() in _GEORGIAN_CITIES
+    ):
+        return segs
     if _is_country(last):
         out["country"] = last.strip(" .")
         return segs[:-1]

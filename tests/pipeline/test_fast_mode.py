@@ -919,6 +919,7 @@ async def test_the_funding_rules_read_the_funders_and_leave_the_rest_unparsed():
     ]
     ledger = field_decisions_of(metadata)
     assert ledger.sources()["funding"] == "rules"
+    assert ledger.superseded == []  # decided once, by the rules
     assert ledger.rules()["affiliations"] == "skipped_fast_mode"
     assert metadata.affiliations == []
     assert contents.llm_skipped == {"integrity_parts": 1, "integrity_affiliations": 1}
@@ -947,6 +948,36 @@ async def test_the_funding_rules_keep_the_funders_an_input_declares():
 
     assert metadata.funding == declared
     assert contents.llm_skipped == {"integrity": 1}
+
+
+async def test_declared_funders_are_not_reported_as_not_produced():
+    from bibr.extract.research_integrity import extract_structured_integrity
+    from bibr.models import FundingEntry
+
+    contents = PaperContents(sentences=[], sections=[], tables=[], links=[], sections_text={})
+    declared = [FundingEntry(funder="Example Council", award_ids=["EC-1"])]
+    metadata = PaperMetadata(
+        doi="",
+        title="T",
+        funding_statement="Funded by the Example Council (EC-1).",
+        funding=declared,
+        authors=[
+            PaperAuthor(
+                author_id=1,
+                given="A",
+                family="B",
+                affiliation="Example University, Utrecht, The Netherlands",
+            )
+        ],
+    )
+    contents.preparsed_metadata = metadata
+
+    await extract_structured_integrity(
+        contents, metadata, SkippedLlmClient(), "h", funding_rules=True, affiliation_rules=True
+    )
+
+    assert metadata.funding == declared
+    assert contents.llm_skipped == {"integrity_parts": 1, "integrity_institutions": 1}
 
 
 async def test_the_affiliation_rules_read_the_city_and_country_of_each_row():
@@ -988,6 +1019,7 @@ async def test_the_affiliation_rules_read_the_city_and_country_of_each_row():
     ]
     assert all(a.institution is a.department is None for a in metadata.affiliations)
     assert field_decisions_of(metadata).sources()["affiliations"] == "rules"
+    assert field_decisions_of(metadata).superseded == []
     assert contents.llm_skipped == {"integrity_parts": 1, "integrity_institutions": 1}
     assert _llm_skipped_warning_message(contents) == (
         "Fast mode made no LLM calls. Not produced: author roles and affiliation institutions "

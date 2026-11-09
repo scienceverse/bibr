@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
+from collections.abc import Collection
 from typing import TYPE_CHECKING
 
 from bibr.clients.skipped import is_skipped, note_skipped
@@ -273,21 +274,30 @@ async def extract_structured_integrity(
 
     if is_skipped(llm_client):
         # Fast mode: the statements stay as printed, with no structured parts,
-        # except what the local rules read when they are on.
-        _keep_unparsed(metadata, "skipped_fast_mode")
+        # except what the local rules read when they are on. A field the rules
+        # decide is decided once, by them.
         # The rules fill an empty field: funders the input declares (JATS) stay.
         read_funders = bool(funding_rules and funding_text and not metadata.funding)
-        if read_funders:
+        if read_funders and funding_text:
             _apply_funding_rules(metadata, funding_text)
         read_places = affiliation_rules and _apply_affiliation_rules(
             metadata, unique_affils, affil_author_ids
+        )
+        _keep_unparsed(
+            metadata,
+            "skipped_fast_mode",
+            skip={
+                name
+                for name, read in (("funding", read_funders), ("affiliations", read_places))
+                if read
+            },
         )
         if not (read_funders or read_places):
             note_skipped(contents, "integrity")
         else:
             # What is still left undone, for the LLM_SKIPPED message.
             note_skipped(contents, "integrity_parts")
-            if not read_funders and funding_text:
+            if not read_funders and funding_text and not metadata.funding:
                 note_skipped(contents, "integrity_funders")
             if read_places:
                 note_skipped(contents, "integrity_institutions")
@@ -415,12 +425,17 @@ def _apply_affiliation_rules(
     return True
 
 
-def _keep_unparsed(metadata: PaperMetadata, rule: str) -> None:
-    """Record that the structured-integrity call left funding and affiliations as they were."""
+def _keep_unparsed(metadata: PaperMetadata, rule: str, skip: Collection[str] = ()) -> None:
+    """Record that the structured-integrity call left funding and affiliations as they were.
+
+    A field in *skip* was decided already, by the local rules.
+    """
     from bibr.extract.field_decisions import FieldDecision, apply_decision, field_decisions_of
 
     ledger = field_decisions_of(metadata)
     for name, attribute in (("funding", "funding"), ("affiliations", "affiliations")):
+        if name in skip:
+            continue
         decided = ledger.get(name) if ledger is not None else None
         if decided is not None and decided.source == "front_tagger":
             # The tagger's rows were decided already (the local front-matter rules).

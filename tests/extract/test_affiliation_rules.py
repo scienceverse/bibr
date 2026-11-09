@@ -25,6 +25,23 @@ from bibr.extract.affiliation_rules import parse_affiliation
             "Muncie",
             "United States",
         ),
+        # A state that ends the address is no country, though it ends in one ("Mexico").
+        (
+            "Department of Psychology, University of Example, Albuquerque, New Mexico",
+            "University of Example",
+            "Department of Psychology",
+            "Albuquerque",
+            None,
+        ),
+        ("Example University, Atlanta, Georgia", "Example University", None, "Atlanta", None),
+        # After one of its cities, Georgia is the country.
+        (
+            "Example State University, Tbilisi, Georgia",
+            "Example State University",
+            None,
+            "Tbilisi",
+            "Georgia",
+        ),
         # City, state code and country in one segment.
         (
             "Department of Psychology, Example University, Cambridge MA USA",

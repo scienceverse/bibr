@@ -30,6 +30,30 @@ from bibr.extract.funding_rules import parse_funding_statement
             "MRC grant MR/N0137941/1.",
             [("Medical Research Council (MRC)", ["MR/N0137941/1"]), ("Wellcome Trust", [])],
         ),
+        # A bracket that names the funder again keeps that second name with it.
+        (
+            "Funded by the Deutsche Forschungsgemeinschaft (DFG, German Research Foundation) – "
+            "Project-ID 390685813.",
+            [("Deutsche Forschungsgemeinschaft (DFG, German Research Foundation)", ["390685813"])],
+        ),
+        # An award after the acronym inside its bracket belongs to the funder.
+        (
+            "Supported by a Vidi grant from the Netherlands Organization for Scientific Research "
+            "(NWO; grant ID 452-17-002).",
+            [("Netherlands Organization for Scientific Research (NWO)", ["452-17-002"])],
+        ),
+        # Horizon 2020 is the EU's programme, not a funder of its own ...
+        (
+            "This project has received funding from the European Union's Horizon 2020 research "
+            "and innovation programme under grant agreement No 101025041.",
+            [("European Union", ["101025041"])],
+        ),
+        # ... and a council funding "under" it keeps the award.
+        (
+            "This work was supported by the European Research Council (ERC) under the European "
+            "Union's Horizon 2020 research and innovation programme (grant agreement No 817962).",
+            [("European Research Council (ERC)", ["817962"])],
+        ),
         # A line-break hyphen inside an identifier is closed up.
         (
             "Supported by the Research Council of Norway (grant CMS- CSST-2021-A01).",
