@@ -224,9 +224,14 @@ async def extract_structured_integrity(
     file_hash: str,
     *,
     integrity_resolution: IntegrityStatementResolution | None = None,
+    funding_rules: bool = False,
 ) -> None:
     """Parse structured funding, author contributions, and affiliations via a
     single LLM call.
+
+    With no LLM (fast mode), ``funding_rules`` reads the funders and award
+    numbers from the funding statement with the local rules
+    (:mod:`bibr.extract.funding_rules`); affiliations and roles stay unparsed.
 
     Skips the call when the funding statement, author-contributions statement,
     and (deduped) affiliation list are all empty. Populates
@@ -262,9 +267,15 @@ async def extract_structured_integrity(
         return
 
     if is_skipped(llm_client):
-        # Fast mode: the statements stay as printed, with no structured parts.
+        # Fast mode: the statements stay as printed, with no structured parts,
+        # except the funders when the funding rules are on.
         _keep_unparsed(metadata, "skipped_fast_mode")
-        note_skipped(contents, "integrity")
+        # The rules fill an empty field: funders the input declares (JATS) stay.
+        if funding_rules and funding_text and not metadata.funding:
+            _apply_funding_rules(metadata, funding_text)
+            note_skipped(contents, "integrity_parts")
+        else:
+            note_skipped(contents, "integrity")
         return
 
     author_names = [(a.given, a.family) for a in metadata.authors]
@@ -334,6 +345,18 @@ async def extract_structured_integrity(
             ),
         ),
     )
+
+
+def _apply_funding_rules(metadata: PaperMetadata, funding_text: str) -> None:
+    """Decide ``funding`` from the statement with the local rules (no LLM)."""
+    from bibr.extract.field_decisions import FieldCandidate, apply_decision, decide_value
+    from bibr.extract.funding_rules import parse_funding_statement
+
+    parsed = parse_funding_statement(
+        funding_text, [(a.given or "", a.family or "") for a in metadata.authors]
+    )
+    entries = [FundingEntry(funder=name, award_ids=awards) for name, awards in parsed]
+    apply_decision(metadata, decide_value("funding", FieldCandidate("funding", "rules", entries)))
 
 
 def _keep_unparsed(metadata: PaperMetadata, rule: str) -> None:

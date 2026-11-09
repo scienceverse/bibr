@@ -243,6 +243,16 @@ def test_fast_run_keeps_a_funding_statement_it_found_without_the_llm():
     assert states["funding"] == ("not_attempted", None, ["LLM_SKIPPED"])
 
 
+def test_fast_run_funding_read_by_the_rules_is_theirs():
+    skipped = _warned(WarningCode.LLM_SKIPPED)
+    sources = {"funding_statement": "lexical_anchor", "funding": "rules"}
+    states = _states({"funding_statement", "funding"}, sources=sources, warnings=skipped)
+    assert states["funding"] == ("extracted", "rules", [])
+    # A statement the rules found no funder in ("no funding was received") is absent.
+    states = _states({"funding_statement"}, sources=sources, warnings=skipped)
+    assert states["funding"] == ("absent", None, [])
+
+
 def test_unavailable_tagger_fails_the_front_matter_it_would_have_read():
     states = _states(
         {"doi", "bib"},
@@ -489,11 +499,11 @@ async def test_fast_run_field_states(tmp_path, monkeypatch):
     assert fields["title"]["source"] == fields["author"]["source"] == "front_tagger"
     assert fields["abstract"]["source"] == "front_tagger"
     assert fields["bib"]["state"] == "extracted"
-    # The statement is found by the lexical pass; the structured funders need the LLM.
+    # The statement is found by the lexical pass; the funding rules read its funders.
     assert fields["funding_statement"]["state"] == "extracted"
     assert fields["funding"] == {
-        "state": "not_attempted",
-        "source": None,
-        "issues": ["LLM_SKIPPED"],
-        "rule": "skipped_fast_mode",
+        "state": "extracted",
+        "source": "rules",
+        "issues": [],
+        "rule": "extracted",
     }

@@ -44,6 +44,21 @@ that is off by default and that fast mode turns on, so a full run, and a
 - `FRONT_TAGGER_RULES` also reads the paper's `language` from its title (a PDF
   declares none). The title's function words or letters decide it; a title they
   do not decide leaves it empty, and an input that declares a language keeps it.
+- `FUNDING_RULES` reads `funding` (each funder and the award numbers printed for
+  it) from the funding statement, where a fast run left it empty. A funder is a
+  run of capitalised words that names an organisation, an acronym, or a name
+  with its grant number after it; an award goes to the funder right after it
+  when only "from", "by" or "of" stands between them, and otherwise to the
+  nearest one before it. An acronym and its expansion are one funder. Author
+  initials and names, places, years and call identifiers are not read, and a
+  statement saying no funding was received gives none. An input that declares
+  its funders (JATS) keeps them. Against an LLM's reading
+  of 150 statements the rules were not tuned on, they found nine in ten of its
+  funders, and the award numbers matched with an F1 of 0.83; they also name
+  funders the LLM missed, and some that are not funders (a programme, an
+  affiliation). The
+  field's `extraction.fields` source is `rules`, and the `LLM_SKIPPED` message
+  then lists only the author roles and affiliation parts as not produced.
 
 A fast run leaves `metadata.issue` and `metadata.publisher` empty on an input it
 reads with the front-matter tagger: checked against the Crossref record of papers

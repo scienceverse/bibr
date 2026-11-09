@@ -880,6 +880,93 @@ async def test_research_integrity_keeps_the_statements_unparsed():
     assert field_decisions_of(metadata).rules()["funding"] == "skipped_fast_mode"
 
 
+async def test_the_funding_rules_read_the_funders_and_leave_the_rest_unparsed():
+    from bibr.extract.field_decisions import field_decisions_of
+    from bibr.extract.research_integrity import extract_structured_integrity
+    from bibr.paper_contents import CanonicalSection, PaperSection, PaperSentence
+    from bibr.pipeline.stages.post_parse import _llm_skipped_warning
+
+    statement = (
+        "This work was supported by the National Science Foundation (grant no. BCS-1734304)."
+    )
+    contents = PaperContents(
+        sentences=[PaperSentence(text_id=1, text=statement, section_id=1, paragraph_id=1)],
+        sections=[
+            PaperSection(
+                section_id=1,
+                header="Funding",
+                level=1,
+                parent_section_id=None,
+                section_type=CanonicalSection.FUNDING,
+            )
+        ],
+        tables=[],
+        links=[],
+        sections_text={},
+    )
+    metadata = PaperMetadata(
+        doi="",
+        title="T",
+        authors=[PaperAuthor(author_id=1, given="A", family="B", affiliation="Uni X")],
+    )
+
+    await extract_structured_integrity(
+        contents, metadata, SkippedLlmClient(), "h", funding_rules=True
+    )
+
+    assert [(f.funder, f.award_ids) for f in metadata.funding] == [
+        ("National Science Foundation", ["BCS-1734304"])
+    ]
+    ledger = field_decisions_of(metadata)
+    assert ledger.sources()["funding"] == "rules"
+    assert ledger.rules()["affiliations"] == "skipped_fast_mode"
+    assert metadata.affiliations == []
+    assert contents.llm_skipped == {"integrity_parts": 1}
+    assert _llm_skipped_warning(contents).message == (
+        "Fast mode made no LLM calls. Not produced: author roles and affiliation parts."
+    )
+
+
+async def test_the_funding_rules_keep_the_funders_an_input_declares():
+    from bibr.extract.research_integrity import extract_structured_integrity
+    from bibr.models import FundingEntry
+
+    contents = PaperContents(sentences=[], sections=[], tables=[], links=[], sections_text={})
+    declared = [FundingEntry(funder="Example Council", award_ids=["EC-1"])]
+    metadata = PaperMetadata(
+        doi="",
+        title="T",
+        funding_statement="Funded by the Example Council (EC-1) and the Other Foundation.",
+        funding=declared,
+    )
+    contents.preparsed_metadata = metadata
+
+    await extract_structured_integrity(
+        contents, metadata, SkippedLlmClient(), "h", funding_rules=True
+    )
+
+    assert metadata.funding == declared
+    assert contents.llm_skipped == {"integrity": 1}
+
+
+async def test_the_funding_rules_need_a_statement():
+    from bibr.extract.research_integrity import extract_structured_integrity
+
+    contents = PaperContents(sentences=[], sections=[], tables=[], links=[], sections_text={})
+    metadata = PaperMetadata(
+        doi="",
+        title="T",
+        authors=[PaperAuthor(author_id=1, given="A", family="B", affiliation="Uni X")],
+    )
+
+    await extract_structured_integrity(
+        contents, metadata, SkippedLlmClient(), "h", funding_rules=True
+    )
+
+    assert metadata.funding == []
+    assert contents.llm_skipped == {"integrity": 1}
+
+
 async def test_nothing_to_parse_is_not_counted_as_skipped():
     from bibr.extract.research_integrity import extract_structured_integrity
 
@@ -1410,9 +1497,8 @@ async def test_a_fast_run_end_to_end(tmp_path, monkeypatch):
     assert not [c for c in codes if c.endswith("_LLM_FAILED") or c.endswith("_DEGRADED")]
     [skipped] = [w for w in result["extraction"]["warnings"] if w["code"] == "LLM_SKIPPED"]
     assert skipped["message"] == (
-        "Fast mode made no LLM calls. Not produced: structured funders, author roles and "
-        "affiliation parts; 1 ambiguous citation left unlinked; statistics in 1 sentence "
-        "left to the regex pass."
+        "Fast mode made no LLM calls. Not produced: author roles and affiliation parts; "
+        "1 ambiguous citation left unlinked; statistics in 1 sentence left to the regex pass."
     )
     assert "FRONT_TAGGER_UNAVAILABLE" not in codes
     # Serve may cache it: a fast run's skips are not the kind of failure a retry cures.
@@ -1431,13 +1517,18 @@ async def test_a_fast_run_end_to_end(tmp_path, monkeypatch):
     # The citation the reference list settles is linked; the other is the one left over.
     assert [(x["xref_type"], x["target_id"]) for x in result["xref"]] == [("bib", 1), ("bib", 2)]
 
+    # The funding rules read the funder and its grant from the statement.
+    assert [(f["funder"], f["award_ids"]) for f in result["funding"]] == [
+        ("Example Foundation", ["123"])
+    ]
+
     fields = result["extraction"]["fields"]
     assert fields["title"]["source"] == "front_tagger"
     assert fields["funding"] == {
-        "state": "not_attempted",
-        "source": None,
-        "issues": ["LLM_SKIPPED"],
-        "rule": "skipped_fast_mode",
+        "state": "extracted",
+        "source": "rules",
+        "issues": [],
+        "rule": "extracted",
     }
 
 

@@ -184,9 +184,10 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     "and was repaired locally (invalid backslash escapes, or prose around its JSON); the "
     "repaired response passed the same validation.",
     WarningCode.LLM_SKIPPED: "A fast run made no LLM call, so what an LLM adds is missing: the "
-    "message lists what this paper's run left undone (structured funding, author roles and "
-    "affiliation parts, ambiguous citations left unlinked, statistics left to the regex pass). "
-    "It is not a failure and an export carrying it is final.",
+    "message lists what this paper's run left undone (author roles and affiliation parts, "
+    "structured funders where the local rules did not read them, ambiguous citations left "
+    "unlinked, statistics left to the regex pass). It is not a failure and an export carrying "
+    "it is final.",
     WarningCode.FRONT_TAGGER_UNAVAILABLE: "A fast run could not read the front matter: the "
     "front-matter tagger's model was missing, failed to load or failed on this paper, so the "
     "title, authors and abstract are empty or come from fallbacks.",

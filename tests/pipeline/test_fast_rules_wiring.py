@@ -25,17 +25,22 @@ from tests.pipeline.test_fast_mode import (
     fast_page_run,
 )
 
-_RULES = ("FRONT_TAGGER_RULES", "EQUATION_REPAIR_GLITCHES", "CITATION_RULE_TIER3")
+_RULES = (
+    "FRONT_TAGGER_RULES",
+    "EQUATION_REPAIR_GLITCHES",
+    "CITATION_RULE_TIER3",
+    "FUNDING_RULES",
+)
 
 
 def test_the_rules_are_off_in_a_default_run():
     settings = GlobalSettings()
-    assert [getattr(settings, name) for name in _RULES] == [False, False, False]
+    assert [getattr(settings, name) for name in _RULES] == [False] * len(_RULES)
 
 
 def test_a_fast_run_turns_the_rules_on():
     fast = fast_settings(GlobalSettings())
-    assert [getattr(fast, name) for name in _RULES] == [True, True, True]
+    assert [getattr(fast, name) for name in _RULES] == [True] * len(_RULES)
 
 
 def test_the_run_picks_the_settings_the_rules_follow():
@@ -48,13 +53,13 @@ def test_the_run_picks_the_settings_the_rules_follow():
         settings = pipeline._settings_for(dataclasses.replace(config, **changes))
         return [getattr(settings, name) for name in _RULES]
 
-    assert flags(mode="fast") == [True, True, True]
-    assert flags(mode="full") == [False, False, False]
+    assert flags(mode="fast") == [True] * len(_RULES)
+    assert flags(mode="full") == [False] * len(_RULES)
     # Structure only wins over fast: it never takes the overlay.
-    assert flags(mode="full", no_llm=True) == [False, False, False]
-    assert flags(mode="fast", no_llm=True) == [False, False, False]
+    assert flags(mode="full", no_llm=True) == [False] * len(_RULES)
+    assert flags(mode="fast", no_llm=True) == [False] * len(_RULES)
     # The overlay is a copy: the pipeline's own settings stay as they were.
-    assert [getattr(pipeline.settings, name) for name in _RULES] == [False, False, False]
+    assert [getattr(pipeline.settings, name) for name in _RULES] == [False] * len(_RULES)
 
 
 async def test_the_parse_stage_reads_the_rules_flag_from_the_runs_settings(monkeypatch):

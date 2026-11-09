@@ -1384,6 +1384,8 @@ def _llm_skipped_warning(contents) -> ProcessingWarning:
     left = []
     if skipped.get("integrity"):
         left.append("structured funders, author roles and affiliation parts")
+    elif skipped.get("integrity_parts"):  # the funding rules read the funders
+        left.append("author roles and affiliation parts")
     if citations := skipped.get("citations"):
         left.append(
             f"{citations} ambiguous {'citation' if citations == 1 else 'citations'} left unlinked"
@@ -1774,6 +1776,7 @@ async def post_parse(
                     llm_client,
                     file_hash,
                     integrity_resolution=integrity_resolution,
+                    funding_rules=effective_settings.FUNDING_RULES,
                 )
             extraction_completed = True
 

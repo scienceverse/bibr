@@ -188,6 +188,12 @@ def build_field_states(
             del not_attempted["funding"]
             skipped = {code for code, fields in _NOT_ATTEMPTED_CODES.items() if "funding" in fields}
             qualified["funding"] = [c for c in qualified["funding"] if c not in skipped]
+    # The funding rules read the statement without an LLM: what they found, or
+    # that they found nothing, is theirs, not a step the run skipped.
+    if sources.get("funding") == "rules" and "funding" in not_attempted:
+        del not_attempted["funding"]
+        skipped = {code for code, fields in _NOT_ATTEMPTED_CODES.items() if "funding" in fields}
+        qualified["funding"] = [c for c in qualified["funding"] if c not in skipped]
 
     sources = {**sources, **({"bib": scope.references_source} if scope.references_source else {})}
     rules = rules or {}
