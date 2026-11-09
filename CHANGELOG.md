@@ -77,6 +77,12 @@ with a DOI, fewer than nine in ten of those readings were right. An input that
 declares them (JATS, HTML, ePub) keeps them, and `metadata_match` still reports
 what the registry holds. A full run is unchanged.
 
+The evaluator reports `authors_exact_f1`, a diagnostic that counts an author
+only when the words of the name equal the gold's, in any order and after
+lowercasing and removing diacritics and punctuation. `authors_fullname_f1` is
+fuzzy and scores a name with an affiliation letter glued on, or with an extra
+word, as right. Neither the gate nor `metrics_version` changes.
+
 ### Added — the text-layer OCR route
 
 A fast run with no OCR route chosen (no `--ocr`, `--ocr-url`, `--ocr-model` or
