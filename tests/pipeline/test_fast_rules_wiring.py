@@ -30,6 +30,7 @@ _RULES = (
     "EQUATION_REPAIR_GLITCHES",
     "CITATION_RULE_TIER3",
     "FUNDING_RULES",
+    "AFFILIATION_RULES",
 )
 
 
@@ -153,6 +154,10 @@ async def test_a_fast_run_reads_the_page_with_the_rules(tmp_path, monkeypatch):
     # The title's language, and the institution line the tagger left untagged.
     assert result["metadata"]["language"] == "en"
     assert [(a["text"], a["author_ids"]) for a in result["affiliation"]] == [(_INSTITUTION, [])]
+    # Its city and country, read by the affiliation rules; the rest is left to an LLM.
+    [row] = result["affiliation"]
+    assert (row["city"], row["country"]) == ("Utrecht", "The Netherlands")
+    assert row["institution"] is row["department"] is None
     assert result["metadata"]["title"] == _TITLE
     assert result["metadata"]["abstract"] == _ABSTRACT
 

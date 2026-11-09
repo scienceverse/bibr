@@ -921,7 +921,7 @@ async def test_the_funding_rules_read_the_funders_and_leave_the_rest_unparsed():
     assert ledger.sources()["funding"] == "rules"
     assert ledger.rules()["affiliations"] == "skipped_fast_mode"
     assert metadata.affiliations == []
-    assert contents.llm_skipped == {"integrity_parts": 1}
+    assert contents.llm_skipped == {"integrity_parts": 1, "integrity_affiliations": 1}
     assert _llm_skipped_warning(contents).message == (
         "Fast mode made no LLM calls. Not produced: author roles and affiliation parts."
     )
@@ -947,6 +947,80 @@ async def test_the_funding_rules_keep_the_funders_an_input_declares():
 
     assert metadata.funding == declared
     assert contents.llm_skipped == {"integrity": 1}
+
+
+async def test_the_affiliation_rules_read_the_city_and_country_of_each_row():
+    from bibr.extract.field_decisions import field_decisions_of
+    from bibr.extract.research_integrity import extract_structured_integrity
+    from bibr.models import Affiliation
+
+    contents = PaperContents(sentences=[], sections=[], tables=[], links=[], sections_text={})
+    metadata = PaperMetadata(
+        doi="",
+        title="T",
+        authors=[
+            PaperAuthor(
+                author_id=1,
+                given="A",
+                family="B",
+                affiliation="Department of Psychology, Example University, Utrecht, The Netherlands",
+            ),
+            PaperAuthor(author_id=2, given="C", family="D", affiliation="Example University"),
+        ],
+        # A row the tagger printed that no author carries.
+        affiliations=[Affiliation(text="Example Agency, London UK")],
+    )
+
+    await extract_structured_integrity(
+        contents, metadata, SkippedLlmClient(), "h", affiliation_rules=True
+    )
+
+    rows = [(a.text, a.city, a.country, a.author_ids) for a in metadata.affiliations]
+    assert rows == [
+        (
+            "Department of Psychology, Example University, Utrecht, The Netherlands",
+            "Utrecht",
+            "The Netherlands",
+            [1],
+        ),
+        ("Example University", None, None, [2]),
+        ("Example Agency, London UK", "London", "UK", []),
+    ]
+    assert all(a.institution is a.department is None for a in metadata.affiliations)
+    assert field_decisions_of(metadata).sources()["affiliations"] == "rules"
+    assert contents.llm_skipped == {"integrity_parts": 1, "integrity_institutions": 1}
+    assert _llm_skipped_warning_message(contents) == (
+        "Fast mode made no LLM calls. Not produced: author roles and affiliation institutions "
+        "and departments."
+    )
+
+
+async def test_the_affiliation_rules_keep_a_parse_already_made():
+    from bibr.extract.research_integrity import extract_structured_integrity
+    from bibr.models import Affiliation
+
+    contents = PaperContents(sentences=[], sections=[], tables=[], links=[], sections_text={})
+    text = "Univ A, Paris, France"
+    declared = [Affiliation(text=text, institution="Univ A", country="France", author_ids=[1])]
+    metadata = PaperMetadata(
+        doi="",
+        title="T",
+        authors=[PaperAuthor(author_id=1, given="A", family="B", affiliation=text)],
+        affiliations=declared,
+    )
+
+    await extract_structured_integrity(
+        contents, metadata, SkippedLlmClient(), "h", affiliation_rules=True
+    )
+
+    assert metadata.affiliations == declared
+    assert contents.llm_skipped == {"integrity": 1}
+
+
+def _llm_skipped_warning_message(contents) -> str:
+    from bibr.pipeline.stages.post_parse import _llm_skipped_warning
+
+    return _llm_skipped_warning(contents).message
 
 
 async def test_the_funding_rules_need_a_statement():
@@ -1497,8 +1571,8 @@ async def test_a_fast_run_end_to_end(tmp_path, monkeypatch):
     assert not [c for c in codes if c.endswith("_LLM_FAILED") or c.endswith("_DEGRADED")]
     [skipped] = [w for w in result["extraction"]["warnings"] if w["code"] == "LLM_SKIPPED"]
     assert skipped["message"] == (
-        "Fast mode made no LLM calls. Not produced: author roles and affiliation parts; "
-        "1 ambiguous citation left unlinked; statistics in 1 sentence left to the regex pass."
+        "Fast mode made no LLM calls. Not produced: author roles; 1 ambiguous citation left "
+        "unlinked; statistics in 1 sentence left to the regex pass."
     )
     assert "FRONT_TAGGER_UNAVAILABLE" not in codes
     # Serve may cache it: a fast run's skips are not the kind of failure a retry cures.

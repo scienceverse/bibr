@@ -225,13 +225,16 @@ async def extract_structured_integrity(
     *,
     integrity_resolution: IntegrityStatementResolution | None = None,
     funding_rules: bool = False,
+    affiliation_rules: bool = False,
 ) -> None:
     """Parse structured funding, author contributions, and affiliations via a
     single LLM call.
 
     With no LLM (fast mode), ``funding_rules`` reads the funders and award
     numbers from the funding statement with the local rules
-    (:mod:`bibr.extract.funding_rules`); affiliations and roles stay unparsed.
+    (:mod:`bibr.extract.funding_rules`), and ``affiliation_rules`` the city and
+    country of each affiliation (:mod:`bibr.extract.affiliation_rules`); the
+    roles, institutions and departments stay unparsed.
 
     Skips the call when the funding statement, author-contributions statement,
     and (deduped) affiliation list are all empty. Populates
@@ -262,20 +265,34 @@ async def extract_structured_integrity(
         funding_text = metadata.funding_statement if canonical_legacy else None
     contributions_text = _text_for_type(contents, text_map, CanonicalSection.AUTHOR_CONTRIBUTIONS)
     unique_affils, affil_author_ids = collect_affiliations(metadata.authors)
-    if not funding_text and not contributions_text and not unique_affils:
+    # The tagger's rows that no author carries are only the local rules' to read.
+    tagged_rows = affiliation_rules and is_skipped(llm_client) and bool(metadata.affiliations)
+    if not funding_text and not contributions_text and not unique_affils and not tagged_rows:
         _keep_unparsed(metadata, "nothing_to_parse")
         return
 
     if is_skipped(llm_client):
         # Fast mode: the statements stay as printed, with no structured parts,
-        # except the funders when the funding rules are on.
+        # except what the local rules read when they are on.
         _keep_unparsed(metadata, "skipped_fast_mode")
         # The rules fill an empty field: funders the input declares (JATS) stay.
-        if funding_rules and funding_text and not metadata.funding:
+        read_funders = bool(funding_rules and funding_text and not metadata.funding)
+        if read_funders:
             _apply_funding_rules(metadata, funding_text)
-            note_skipped(contents, "integrity_parts")
-        else:
+        read_places = affiliation_rules and _apply_affiliation_rules(
+            metadata, unique_affils, affil_author_ids
+        )
+        if not (read_funders or read_places):
             note_skipped(contents, "integrity")
+        else:
+            # What is still left undone, for the LLM_SKIPPED message.
+            note_skipped(contents, "integrity_parts")
+            if not read_funders and funding_text:
+                note_skipped(contents, "integrity_funders")
+            if read_places:
+                note_skipped(contents, "integrity_institutions")
+            elif unique_affils or metadata.affiliations:
+                note_skipped(contents, "integrity_affiliations")
         return
 
     author_names = [(a.given, a.family) for a in metadata.authors]
@@ -357,6 +374,45 @@ def _apply_funding_rules(metadata: PaperMetadata, funding_text: str) -> None:
     )
     entries = [FundingEntry(funder=name, award_ids=awards) for name, awards in parsed]
     apply_decision(metadata, decide_value("funding", FieldCandidate("funding", "rules", entries)))
+
+
+def _apply_affiliation_rules(
+    metadata: PaperMetadata, unique: list[str], author_ids: list[list[int]]
+) -> bool:
+    """Decide ``affiliations`` with the city and country the local rules read (no LLM).
+
+    One row per byline string, and the rows already decided (the tagger's
+    affiliations that no author carries) with their places added. Rows that
+    already carry a parsed part are left as they are. False when there was
+    nothing to read.
+    """
+    from bibr.extract.affiliation_rules import parse_affiliation
+    from bibr.extract.field_decisions import FieldCandidate, apply_decision, decide_value
+
+    existing = list(metadata.affiliations)
+    if not unique and not existing:
+        return False
+    if any(a.institution or a.department or a.city or a.country for a in existing):
+        return False
+
+    def places(text: str) -> dict[str, str | None]:
+        parts = parse_affiliation(text)
+        return {"city": parts["city"], "country": parts["country"]}
+
+    rows = [
+        Affiliation(text=text, author_ids=ids, **places(text))
+        for text, ids in zip(unique, author_ids, strict=True)
+    ]
+    seen = {affiliation_key(text) for text in unique}
+    carried = [a for a in existing if affiliation_key(a.text) not in seen]
+    rows += [
+        Affiliation(text=a.text, author_ids=list(a.author_ids), **places(a.text)) for a in carried
+    ]
+    candidate = FieldCandidate(
+        "affiliations", "rules", rows, transforms=("front_tagger_rows",) if carried else ()
+    )
+    apply_decision(metadata, decide_value("affiliations", candidate))
+    return True
 
 
 def _keep_unparsed(metadata: PaperMetadata, rule: str) -> None:

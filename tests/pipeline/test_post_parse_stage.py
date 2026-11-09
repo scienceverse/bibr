@@ -365,9 +365,15 @@ async def test_fast_run_records_what_it_skipped_in_one_warning():
             "structured funders, author roles and affiliation parts.",
         ),
         (
-            {"integrity_parts": 1},
+            {"integrity_parts": 1, "integrity_affiliations": 1},
             "Fast mode made no LLM calls. Not produced: author roles and affiliation parts.",
         ),
+        (
+            {"integrity_parts": 1, "integrity_funders": 1, "integrity_institutions": 1},
+            "Fast mode made no LLM calls. Not produced: structured funders, author roles and "
+            "affiliation institutions and departments.",
+        ),
+        ({"integrity_parts": 1}, "Fast mode made no LLM calls. Not produced: author roles."),
         # A count that is zero names nothing.
         ({"citations": 0, "equations": 0}, "Fast mode made no LLM calls."),
     ],
@@ -485,7 +491,14 @@ async def test_integrity_runs_after_linking_and_final_text_cleaning(monkeypatch)
     order = []
 
     async def fake_integrity(
-        contents, metadata, llm_client, file_hash, *, integrity_resolution, funding_rules
+        contents,
+        metadata,
+        llm_client,
+        file_hash,
+        *,
+        integrity_resolution,
+        funding_rules,
+        affiliation_rules,
     ):
         assert order == ["linking"]
         assert integrity_resolution is not None

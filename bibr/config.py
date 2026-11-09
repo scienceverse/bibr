@@ -2752,6 +2752,11 @@ class GlobalSettings(_BibrSettings):
         "with the local rules, so ``funding`` is not left empty. Fast mode sets it; a full run "
         "asks the LLM, which reads long multi-agency statements better.",
     )
+    AFFILIATION_RULES: bool = Field(
+        False,
+        description="With no LLM, read the city and country of each affiliation string with the "
+        "local rules (the institution and department are left to the LLM). Fast mode sets it.",
+    )
     FIGURE_IMAGES: bool = Field(False, description="Extract figure images from PDFs.")
     # Reference extraction strategy — DECOUPLED segmentation + parsing axes
     # (resolved in bibr.extract.ref_extractor._resolve_ref_strategies; per-run

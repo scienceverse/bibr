@@ -57,8 +57,19 @@ that is off by default and that fast mode turns on, so a full run, and a
   funders, and the award numbers matched with an F1 of 0.83; they also name
   funders the LLM missed, and some that are not funders (a programme, an
   affiliation). The
-  field's `extraction.fields` source is `rules`, and the `LLM_SKIPPED` message
-  then lists only the author roles and affiliation parts as not produced.
+  field's `extraction.fields` source is `rules`.
+- `AFFILIATION_RULES` fills the `city` and `country` of each `affiliation` row,
+  which a fast run left empty. The string is cut at its commas; the country is
+  the last part when it names one ("USA", "Deutschland", "Cambridge MA USA"),
+  streets, boxes, postcodes and state codes are dropped, and the city is the
+  first place after the university, or without one the last place, never a
+  region after it ("Muncie, Indiana"). No country is inferred from a city.
+  Against an LLM's parse of affiliation strings the rules were not tuned on,
+  the country agreed in more than nine in ten rows and the city in about three
+  in four; the institution and department agreed less often, so they stay
+  empty for the LLM.
+- The `LLM_SKIPPED` message now names only what the run left undone: author
+  roles, and the funders and affiliation parts the rules did not read.
 
 A fast run leaves `metadata.issue` and `metadata.publisher` empty on an input it
 reads with the front-matter tagger: checked against the Crossref record of papers

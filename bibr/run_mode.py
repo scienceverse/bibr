@@ -127,7 +127,8 @@ def fast_settings(settings: GlobalSettings) -> GlobalSettings:
     section threshold then follows its no-escalation default of 0.5, unless set),
     and implicit-section detection, the reference segmenter and parser fallbacks,
     and the merged core-metadata call are off. The local rules that stand in for what
-    an LLM would put right (front matter, statistic text, citation linking, funders) are on.
+    an LLM would put right (front matter, statistic text, citation linking, funders,
+    affiliation places) are on.
     A setting-level reference strategy that names the LLM becomes the local one.
     ``settings`` itself is not changed.
     """
@@ -140,6 +141,7 @@ def fast_settings(settings: GlobalSettings) -> GlobalSettings:
     fast.EQUATION_REPAIR_GLITCHES = True
     fast.CITATION_RULE_TIER3 = True
     fast.FUNDING_RULES = True
+    fast.AFFILIATION_RULES = True
     fast.REF_SEG_LLM_FALLBACK = False
     fast.REF_NER_LLM_FALLBACK = False
     fast.llm.merged_core_metadata = False

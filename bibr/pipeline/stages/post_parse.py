@@ -1384,8 +1384,14 @@ def _llm_skipped_warning(contents) -> ProcessingWarning:
     left = []
     if skipped.get("integrity"):
         left.append("structured funders, author roles and affiliation parts")
-    elif skipped.get("integrity_parts"):  # the funding rules read the funders
-        left.append("author roles and affiliation parts")
+    elif skipped.get("integrity_parts"):  # the local rules read some of them
+        parts = ["structured funders"] if skipped.get("integrity_funders") else []
+        parts.append("author roles")
+        if skipped.get("integrity_affiliations"):
+            parts.append("affiliation parts")
+        elif skipped.get("integrity_institutions"):
+            parts.append("affiliation institutions and departments")
+        left.append(", ".join(parts[:-1]) + " and " + parts[-1] if len(parts) > 1 else parts[0])
     if citations := skipped.get("citations"):
         left.append(
             f"{citations} ambiguous {'citation' if citations == 1 else 'citations'} left unlinked"
@@ -1777,6 +1783,7 @@ async def post_parse(
                     file_hash,
                     integrity_resolution=integrity_resolution,
                     funding_rules=effective_settings.FUNDING_RULES,
+                    affiliation_rules=effective_settings.AFFILIATION_RULES,
                 )
             extraction_completed = True
 
