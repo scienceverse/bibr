@@ -378,6 +378,122 @@ def test_table_builder_joins_tight_digit_boxes_and_escapes_cells():
     assert build_table_html([(" ", 0, 0, 0, 0)]) is None
 
 
+def _placed(lines: list[list[tuple[str, float]]], tops: list[float]) -> list:
+    """Glyphs for printed lines of (text, x) cells, each line at its own top."""
+    chars: list = []
+    for cells, top in zip(lines, tops, strict=True):
+        for cell, x in cells:
+            chars += _glyphs(cell, x, top) + [(" ", 0, 0, 0, 0)]
+    return chars
+
+
+def test_a_wrapped_text_cell_stays_in_its_row():
+    # The description wraps onto a second line set closer than the rows are,
+    # and a word broken at the line end is joined again.
+    lines = [
+        [("Theme", 100), ("Description", 300)],
+        [("Access", 100), ("Long wait for infor-", 300)],
+        [("mation", 300)],
+        [("Cost", 100), ("Fees", 300)],
+    ]
+
+    html = build_table_html(_placed(lines, [10, 40, 54, 80]))
+
+    assert html is not None
+    assert _cells(html) == [
+        ["Theme", "Description"],
+        ["Access", "Long wait for information"],
+        ["Cost", "Fees"],
+    ]
+
+
+def test_a_table_set_solid_keeps_each_heading_line_a_row():
+    # Every line sits as close as wrapped text would, but the data rows show
+    # that is the table's row pitch: a heading in the stub is not glued to the
+    # data row next to it.
+    lines = [
+        [("Gender, n (%)", 100)],
+        [("Male", 110), ("100 (50.5)", 250), ("6 (24.0)", 350)],
+        [("Female", 110), ("98 (49.5)", 250), ("19 (76.0)", 350)],
+        [("Age (years)", 100)],
+        [("Mean (SD)", 110), ("74.4 (5.94)", 250), ("75.6 (4.93)", 350)],
+    ]
+
+    html = build_table_html(_placed(lines, [10 + 13 * k for k in range(5)]))
+
+    assert html is not None
+    assert [row[0] for row in _cells(html)] == [
+        "Gender, n (%)",
+        "Male",
+        "Female",
+        "Age (years)",
+        "Mean (SD)",
+    ]
+
+
+def test_a_glossary_set_solid_keeps_each_line_a_row():
+    # A table of text: every line fills every column, so each one is a row.
+    lines = [
+        [("Term", 100), ("Meaning", 160), ("Term", 400), ("Meaning", 460)],
+        [("BAM", 100), ("Beacon Alert Message", 160), ("CS", 400), ("Content Store", 460)],
+        [("CSR", 100), ("Camper Server", 160), ("DM", 400), ("Data Message", 460)],
+        [("FS", 100), ("Fire Sensor", 160), ("HC", 400), ("Hop Count", 460)],
+    ]
+
+    html = build_table_html(_placed(lines, [10 + 13 * k for k in range(4)]))
+
+    assert html is not None
+    assert _cells(html)[1:] == [
+        ["BAM", "Beacon Alert Message", "CS", "Content Store"],
+        ["CSR", "Camper Server", "DM", "Data Message"],
+        ["FS", "Fire Sensor", "HC", "Hop Count"],
+    ]
+
+
+def test_a_table_printed_turned_a_quarter_is_read_upright():
+    upright = _table_glyphs(_SMALL_TABLE)
+    # Turned anticlockwise: the text runs up the page.
+    turned = [(ch, y0, 1000.0 - x1, y1, 1000.0 - x0) for ch, x0, y0, x1, y1 in upright]
+
+    assert build_table_html(turned) == build_table_html(upright)
+    assert _cells(build_table_html(turned) or "")[1] == ["G0", "12", "0.90", "0.14"]
+
+
+def test_page_aspect_follows_the_rendered_page():
+    from types import SimpleNamespace
+
+    from bibr.ocr.text_layer import _page_aspect
+
+    assert _page_aspect(SimpleNamespace(crop_box=(0, 0, 595, 842), rotation=0)) == 842 / 595
+    assert _page_aspect(SimpleNamespace(crop_box=(0, 0, 595, 842), rotation=90)) == 595 / 842
+    assert _page_aspect(SimpleNamespace(crop_box=(0, 0, 0, 842), rotation=0)) is None
+    # The gap constants were set on A4, which reads as with no aspect at all.
+    chars = _table_glyphs(_SMALL_TABLE)
+    assert build_table_html(chars, aspect=2**0.5) == build_table_html(chars)
+
+
+def test_table_region_marks_unmapped_glyphs_and_drops_private_use():
+    from bibr.ocr.text_layer import _fill_region, _PageText
+
+    glyphs = _table_glyphs(_SMALL_TABLE)
+    # A math font's unmapped bracket, an icon from the private-use area, and a
+    # separator control, which only ends a word.
+    glyphs += _glyphs("\x05x", 100, 90) + [("", 120, 90, 124, 100)] + _glyphs("y\x1fz", 200, 90)
+    page = _PageText(
+        0, (0, 0, 595, 842), 0, len(glyphs), False, [], [(ch, box) for ch, *box in glyphs], []
+    )
+    region = _region("table", [0, 0, 1000, 1000], task="table")
+
+    assert _fill_region(page, region, min_printable_ratio=0.85) == "filled"
+
+    last = _cells(region["content"])[-1]
+    assert last[0] == "�x"
+    assert "y z" in " ".join(last)
+    assert "\x05" not in region["content"] and "" not in region["content"]
+    assert region["_unmapped_glyphs"] == 1
+    assert region["_private_use_dropped"] == 1
+
+
 # --- Page gates ----------------------------------------------------------------
 
 

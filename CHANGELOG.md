@@ -218,6 +218,19 @@ by an earlier version, carries neither.
   still reject the region. A region with U+FFFD rates 0 in
   `extraction.diagnostics.text_quality`, so many of them can lower that score and
   raise `LOW_TEXT_QUALITY`.
+- Tables rebuilt from the text layer keep a cell whose text wraps in its row:
+  a line set closer under the text above it than the table's rows sit to each
+  other continues that cell, and a word broken at the line end is joined again.
+  Before, every printed line became a row. A line of numbers always starts a
+  row, and in a table set solid, where every line sits that close, each line
+  stays a row. A table printed turned a quarter is read upright, a comma or full
+  stop no longer makes a row of its own, and gaps along a line are measured for
+  the page's shape, so a Letter or landscape page splits words and columns as an
+  A4 page does. A table region gets the text checks other regions get: private-
+  use glyphs are dropped and counted, a glyph with no character mapping shows as
+  U+FFFD and is counted in `TEXT_LAYER_GLYPHS_UNMAPPED` (in a table however many
+  there are, since a math font can map none of its brackets), and a region of
+  broken text is left unread.
 - Text drawn with alpha 0 over its own printed outlines is no longer dropped as
   hidden text. PDFs written by Chromium draw fake bold as vector outlines and lay
   transparent text over them to keep it selectable, so on preprint cover pages

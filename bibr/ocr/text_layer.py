@@ -396,6 +396,57 @@ def _accept(region: dict[str, Any]) -> None:
         region.pop(key, None)
 
 
+def _page_aspect(page: _PageText) -> float | None:
+    """The rendered page's height over its width, or None for an empty box."""
+    left, bottom, right, top = page.crop_box
+    width, height = right - left, top - bottom
+    if page.rotation % 180:
+        width, height = height, width
+    if width <= 0 or height <= 0:
+        return None
+    return height / width
+
+
+_TableChar = tuple[str, float, float, float, float]
+
+
+def _clean_table_chars(chars: list[_TableChar], region: dict[str, Any]) -> list[_TableChar]:
+    """A table region's chars with private-use glyphs dropped and unmapped ones marked.
+
+    As for text (:func:`_drop_private_use`), a private-use glyph is an icon or
+    an unmapped glyph and is dropped, counted as *inside a word* when a letter
+    or digit follows it. A control character is a glyph with no character map
+    (a bracket or a sign in a math font) and shows as U+FFFD in its cell
+    however many there are: a table is numbers and labels, and rejecting it for
+    its symbols would lose every cell.
+    """
+    from bibr.ocr.native_text import _is_disallowed_control_char
+
+    region.pop("_private_use_dropped", None)
+    region.pop("_private_use_inside", None)
+    region.pop("_unmapped_glyphs", None)
+    kept: list[_TableChar] = []
+    dropped = inside = unmapped = 0
+    for index, glyph in enumerate(chars):
+        ch = glyph[0]
+        if ch and unicodedata.category(ch) == "Co":
+            dropped += 1
+            following = chars[index + 1][0] if index + 1 < len(chars) else ""
+            inside += bool(following) and following.isalnum()
+            continue
+        # The separator controls (U+001C..U+001F) count as whitespace and only end a word.
+        if ch and not ch.isspace() and _is_disallowed_control_char(ch):
+            unmapped += 1
+            glyph = (_UNMAPPED_GLYPH, *glyph[1:])
+        kept.append(glyph)
+    if dropped:
+        region["_private_use_dropped"] = dropped
+        region["_private_use_inside"] = inside
+    if unmapped:
+        region["_unmapped_glyphs"] = unmapped
+    return kept
+
+
 def _fill_region(
     page: _PageText,
     region: dict[str, Any],
@@ -413,8 +464,17 @@ def _fill_region(
         return "empty"
     if _region_task(region) == "table":
         # Whitespace stays in, wherever it sits: it only ever ends a word.
-        chars = [(ch, *box) for ch, box in page.chars if ch.isspace() or _centre_in(box, bbox)]
-        table = build_table_html(chars)
+        chars = _clean_table_chars(
+            [(ch, *box) for ch, box in page.chars if ch.isspace() or _centre_in(box, bbox)], region
+        )
+        text = "".join(" " if g[0].isspace() else g[0] for g in chars)
+        if region.get("_unmapped_glyphs"):
+            # The other gates judge the text around the marks, which are not its own fault.
+            text = text.replace(_UNMAPPED_GLYPH, "")
+        if not _is_native_text_usable(text, min_printable_ratio):
+            region["_native_gate"] = "usability"
+            return "rejected"
+        table = build_table_html(chars, aspect=_page_aspect(page))
         if table is None:
             return "empty"
         region["content"] = table

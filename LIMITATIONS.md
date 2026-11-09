@@ -194,8 +194,10 @@ that route; `--ocr text-layer` asks for the text layer on any run.
 Known caveats:
 
 - Tables are rebuilt from the positions of the glyphs, not recognised from an
-  image. They have no merged cells, and a cell whose text wraps becomes a row of
-  its own, so they come out less accurately than with OCR. Each export says so
+  image. They have no merged cells (a label printed once beside several rows
+  sits in the first of them), and a table of text whose lines all sit close
+  together keeps each line as a row even where a cell wrapped, so they come out
+  less accurately than with OCR. Each export says so
   with `TEXT_LAYER_TABLE_REBUILT`, and the table's region carries
   `read_as: table_rebuilt`.
 - Display formulas are read as plain text, not LaTeX, so sub- and superscripts
