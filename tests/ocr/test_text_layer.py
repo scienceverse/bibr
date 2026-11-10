@@ -519,6 +519,32 @@ def test_table_region_reads_a_letter_composed_with_its_accent():
     assert "_unmapped_glyphs" not in region
 
 
+def test_a_region_that_fails_inside_bibr_costs_only_itself(monkeypatch):
+    import bibr.ocr.text_layer as text_layer
+
+    def fail(*args, **kwargs):
+        raise TypeError("a fault in the table reader")
+
+    monkeypatch.setattr(text_layer, "_clean_table_chars", fail)
+    pdf = _prose_pdf(_PROSE)
+    layout = [
+        [
+            _region("text", _paragraph_box(6)),
+            _region("table", _box(60, 100, 560, 300), task="table"),
+        ]
+    ]
+
+    read = read_text_layer(pdf, layout)
+
+    prose, table = read.layout_results[0]
+    assert read.pages[0].ok
+    assert prose["content"] and prose["_native_text_used"]
+    assert table["content"] == "" and table["_text_layer_unread"]
+    assert read.unread == {"table": 1}
+    assert [w.code for w in read.warnings] == [WarningCode.TEXT_LAYER_READ_ERROR]
+    assert "table x1" in read.warnings[0].message
+
+
 # --- Page gates ----------------------------------------------------------------
 
 

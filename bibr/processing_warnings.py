@@ -42,6 +42,7 @@ class WarningCode(StrEnum):
     TEXT_LAYER_FORMULA_TEXT = "TEXT_LAYER_FORMULA_TEXT"
     TEXT_LAYER_PRIVATE_USE_DROPPED = "TEXT_LAYER_PRIVATE_USE_DROPPED"
     TEXT_LAYER_GLYPHS_UNMAPPED = "TEXT_LAYER_GLYPHS_UNMAPPED"
+    TEXT_LAYER_READ_ERROR = "TEXT_LAYER_READ_ERROR"
     SCAN_ARTICLE_SPLIT = "SCAN_ARTICLE_SPLIT"
     LOW_TEXT_QUALITY = "LOW_TEXT_QUALITY"
     PAGE_DPI_REDUCED = "PAGE_DPI_REDUCED"
@@ -149,6 +150,8 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.TEXT_LAYER_GLYPHS_UNMAPPED: "Glyphs with no character mapping in the PDF text "
     "layer are shown as U+FFFD; a letter or a symbol such as a minus or degree sign is missing "
     "there.",
+    WarningCode.TEXT_LAYER_READ_ERROR: "bibr failed while reading layout regions from the PDF "
+    "text layer (a fault in bibr, not in the PDF); those regions are empty. Please report it.",
     WarningCode.SCAN_ARTICLE_SPLIT: "Regions of neighbouring articles on scanned pages (the "
     "previous article's tail, the next article's start, floats above the title) were dropped "
     "before parsing.",

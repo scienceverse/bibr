@@ -662,16 +662,39 @@ def _read_page(
 ) -> TextLayerPage:
     readable = [r for r in regions if _region_task(r) not in _UNREAD_TASKS]
     outcomes: dict[int, str] = {}
+    failed: Counter = Counter()
+    failed_ids: set[int] = set()
     if page.char_count and not page.invisible:
         for region in readable:
             if region.get("_native_text_used") and region.get("content"):
                 outcomes[id(region)] = "filled"
                 continue
-            outcomes[id(region)] = _fill_region(
-                page, region, min_printable_ratio=min_printable_ratio
-            )
+            try:
+                outcomes[id(region)] = _fill_region(
+                    page, region, min_printable_ratio=min_printable_ratio
+                )
+            except Exception:  # noqa: BLE001 - a fault in one region must not cost the paper its text
+                label = str(region.get("label") or "")
+                logger.warning(
+                    "Reading a %s region on page %d from the text layer failed",
+                    label or "layout",
+                    page.index + 1,
+                    exc_info=True,
+                )
+                outcomes[id(region)] = "rejected"
+                failed[label] += 1
+                failed_ids.add(id(region))
     verdict = _judge(page, regions, outcomes)
     number = page.index + 1
+    if failed:
+        listed = ", ".join(f"{label} x{count}" for label, count in sorted(failed.items()))
+        result.warnings.append(
+            ProcessingWarning(
+                WarningCode.TEXT_LAYER_READ_ERROR,
+                f"page {number}: reading {sum(failed.values())} region(s) from the PDF text "
+                f"layer failed inside bibr and they are empty ({listed})",
+            )
+        )
     if not verdict.ok:
         for region in readable:
             _blank(region)
@@ -699,6 +722,9 @@ def _read_page(
             result.private_use_dropped += int(region.get("_private_use_dropped") or 0)
             result.private_use_inside += int(region.get("_private_use_inside") or 0)
             result.unmapped_glyphs += int(region.get("_unmapped_glyphs") or 0)
+        elif id(region) in failed_ids:  # reported above, as bibr's fault and not the PDF's
+            _blank(region)
+            result.unread[label] += 1
         else:
             _blank(region)
             unread_labels[label] += 1
@@ -817,9 +843,9 @@ async def read_file_text_layer(
         if unread:
             fs.warnings.append(
                 ProcessingWarning(
-                    WarningCode.TEXT_LAYER_REGION_UNREAD,
-                    f"the PDF text layer could not be read; {unread} region(s) are empty "
-                    "without OCR",
+                    WarningCode.TEXT_LAYER_READ_ERROR,
+                    f"reading the PDF text layer failed inside bibr; {unread} region(s) are "
+                    "empty without OCR",
                 )
             )
         return

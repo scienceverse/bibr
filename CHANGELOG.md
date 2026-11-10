@@ -186,6 +186,11 @@ by an earlier version, carries neither.
 
 ### Fixed
 
+- A fault inside bibr while it reads one layout region from the PDF text layer now
+  leaves that region empty and reports it (`TEXT_LAYER_READ_ERROR`, with the page and
+  the kind of region); the rest of the paper is read. Before, the whole paper lost its
+  text layer and stopped with `scan_needs_ocr`, which told the user to run OCR on a
+  PDF that had a good text layer.
 - On Linux, the memory mode and the batch size chosen from it now follow a cgroup
   memory limit when it is smaller than the machine's RAM. In a container or a batch
   job given 8 GB on a larger host, bibr read the host's RAM, chose `balanced` and
