@@ -187,8 +187,9 @@ by an earlier version, carries neither.
 ### Fixed
 
 - An affiliation list printed at the end of the article under its own heading
-  ("Author details" in BMC and Springer journals, also "Author information" and
-  "Author affiliations") is now read whatever section type the heading was given.
+  ("Author details" in BMC journals, "Affiliations" in Springer's, also "Author
+  information" and "Author affiliations") is now read whatever section type the
+  heading was given.
   In fast mode that section is typed `unknown`, so the list was skipped: authors
   whose affiliation is defined only there were exported without one, or with the
   corresponding author's.

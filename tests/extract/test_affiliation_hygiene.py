@@ -504,7 +504,15 @@ def _headed_frame(*rows: tuple[int, str, str | None, str]) -> pd.DataFrame:
 
 
 @pytest.mark.parametrize(
-    "heading", ["Author details", "Author information", "Authors\u2019 affiliations:"]
+    "heading",
+    [
+        "Author details",
+        "Author information",
+        "Authors\u2019 affiliations:",
+        "Affiliations",
+        "Authors and Affiliations",
+        "Information about the authors",
+    ],
 )
 def test_an_end_of_article_list_is_read_under_its_own_heading_whatever_its_type(heading):
     """A run with no LLM types the "Author details" section unknown. Page 1

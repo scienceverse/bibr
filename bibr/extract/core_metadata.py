@@ -159,14 +159,16 @@ _LATE_AFFILIATION_SECTION_TYPES = (
     CanonicalSection.OPEN_DATA,
 )
 # The heading an end-of-article affiliation list is printed under: "Author
-# details" in BMC and Springer journals, "Author information" and "Author
-# affiliations" elsewhere. No canonical section type stands for it, so a
+# details" in BMC journals, "Affiliations" and "Authors and Affiliations" in
+# Springer's, "Author information" and "Information about the authors"
+# elsewhere. No canonical section type stands for it, so a
 # classifier with no opinion calls the section unknown and the type list above
 # never admits it. The heading does, whatever the type. The same heading also
 # opens biographical notes ("KS is professor at ..."), which the marker-first
 # rule for late lines keeps out.
 _LATE_AFFILIATION_HEADING_RE = re.compile(
-    r"\s*authors?['\u2019]?s?['\u2019]?\s+(?:details|information|affiliations?)\s*[:.]?\s*",
+    r"\s*(?:authors?['\u2019]?s?['\u2019]?\s+(?:and\s+)?(?:details|information|affiliations?)"
+    r"|affiliations?|information\s+about\s+the\s+authors?)\s*[:.]?\s*",
     re.IGNORECASE,
 )
 _AFFILIATION_ORG_RE = re.compile(
