@@ -192,6 +192,13 @@ by an earlier version, carries neither.
   In fast mode that section is typed `unknown`, so the list was skipped: authors
   whose affiliation is defined only there were exported without one, or with the
   corresponding author's.
+- Fast mode now links an affiliation to its authors by the key printed in front
+  of it ("a Department of ...", "1. Department of ...") and after the author's name
+  ("Tan a,b,d") when the front-matter tagger read the names and the affiliations and
+  left the keys untagged. Such affiliations were exported with no author. A key is
+  read only directly in front of an affiliation, where it opens the line or follows
+  a name, a mark or another affiliation, and in the run of keys after a name; on a
+  paper where the tagger marked no key at all, only when every author carries one.
 - A fault inside bibr while it reads one layout region from the PDF text layer now
   leaves that region empty and reports it (`TEXT_LAYER_READ_ERROR`, with the page and
   the kind of region); the rest of the paper is read. Before, the whole paper lost its

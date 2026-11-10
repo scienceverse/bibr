@@ -150,6 +150,10 @@ _MIN_ABSTRACT_WORDS = 40
 _ROMAN_KEY_RE = re.compile(r"[IVX]{1,4}")
 _LETTER_KEY_RE = re.compile(r"[a-h]")
 _LONE_LETTER_RE = re.compile(r"[a-z]")
+# A number key: "1" to "99", after superscripts are folded ("²" is "2").
+_NUMBER_KEY_RE = re.compile(r"[1-9]\d?")
+# What may close a printed key: "1. Institute", "1) Institute".
+_KEY_CLOSERS = frozenset({".", ")"})
 _AFFILIATION_FIELDS = ("AFFILIATION", "AFF_MARK")
 # A letter key glued to the next word of an affiliation line ("aComputational").
 # The word may be in any script ("aUniversité"); :func:`_keyed_word_letter` reads it.
@@ -844,6 +848,119 @@ def _unglue_letter_keys(
         author.marks = [*keys, *author.marks]
 
 
+def _printed_key(text: str) -> str | None:
+    """*text* as a key printed alone: a small letter or a number, superscripts included."""
+    key = unicodedata.normalize("NFKC", text)
+    return key if _LONE_LETTER_RE.fullmatch(key) or _NUMBER_KEY_RE.fullmatch(key) else None
+
+
+def _untagged_line_keys(
+    inp: TaggerInput, tags, unmarked: list[tuple[int, str]]
+) -> dict[str, tuple[int, str]]:
+    """Unmarked affiliations by the key the print sets in front of them.
+
+    "a Department of X" with the "a" left untagged, also printed "1. Department"
+    or "1) Department". The affiliation follows the key directly, and the key
+    opens the line or follows a tagged word (a name, a mark, the affiliation
+    before it): a number inside untagged prose keys nothing.
+    """
+    words = inp.words
+    keyed: dict[str, tuple[int, str]] = {}
+    for start, text in unmarked:
+        region = words[start].region
+        i = start - 1
+        if i > 0 and tags[i] == "O" and words[i].text in _KEY_CLOSERS and words[i].region == region:
+            i -= 1
+        if i < 0 or tags[i] != "O" or words[i].region != region:
+            continue
+        key = _printed_key(words[i].text)
+        if key is None:
+            continue
+        follows_tagged = i > 0 and tags[i - 1] != "O" and words[i - 1].region == region
+        if follows_tagged or _opens_region(inp, i):
+            keyed.setdefault(key, (start, text))
+    return keyed
+
+
+def _read_untagged_marks(
+    authors: list[_Author], inp: TaggerInput, tags, keys: Collection[str]
+) -> None:
+    """Give an author the affiliation keys printed after their name and left untagged.
+
+    "Tana , b , d , e" where the model tagged the name alone, or one key of
+    several. A word counts only if it is one of ``keys``, the keys this paper
+    prints in front of an affiliation, and the reading stops at the first word
+    that is neither a key nor punctuation, so degrees and job titles ("BA,
+    MPhil") leave the author as tagged. A letter that is also a connective
+    ("a", "e", "i", "y") is a key only inside a list ("a , b", ", e").
+    """
+    words = inp.words
+    for pos, author in enumerate(authors):
+        region = words[author.last_word].region
+        stop = authors[pos + 1].first_word if pos + 1 < len(authors) else len(words)
+        zone = [i for i in range(author.last_word + 1, stop) if words[i].region == region]
+        marks: list[str] = []
+        found = False
+        for n, i in enumerate(zone):
+            text = words[i].text
+            field = _field(tags[i])
+            if field == "AUTHOR_MARK" or (field is None and text in _LIST_SEPARATORS):
+                marks.append(text)
+                continue
+            if field is not None:
+                break
+            if _is_symbol_mark(text) or text in _RANGE_DASHES:
+                continue
+            key = _printed_key(text)
+            if key not in keys:
+                break
+            if key in _BYLINE_FILLERS:
+                before = n > 0 and words[zone[n - 1]].text in _LIST_SEPARATORS
+                after = n + 1 < len(zone) and words[zone[n + 1]].text in _LIST_SEPARATORS
+                if not (before or after):
+                    break
+            marks.append(text)
+            found = True
+        if found:
+            read = _mark_keys(marks)
+            author.marks = [*(m for m in author.marks if m not in read), *read]
+
+
+def _keyed_by_print(
+    authors: list[_Author],
+    by_mark: dict[str, str],
+    unmarked: list[tuple[int, str]],
+    inp: TaggerInput,
+    tags,
+) -> tuple[dict[str, str], list[tuple[int, str]]]:
+    """Link by the keys the print shows where the model tagged none, or some.
+
+    The model often reads the affiliations and leaves their keys untagged, in
+    front of the affiliation, after the author's name or both; the affiliations
+    were then exported with no author. A key in front of an affiliation is
+    taken when an author carries it. On a paper with no tagged key at all,
+    that is only when every author carries one: otherwise the affiliations stay
+    unmarked and are linked by position, as before.
+    """
+    line_keys = _untagged_line_keys(inp, tags, unmarked)
+    if not line_keys and not by_mark:
+        return by_mark, unmarked
+    _read_untagged_marks(authors, inp, tags, {*by_mark, *line_keys})
+    carried = {mark for author in authors for mark in author.marks}
+    taken = {
+        key: entry for key, entry in line_keys.items() if key in carried and key not in by_mark
+    }
+    if not taken:
+        return by_mark, unmarked
+    if not by_mark and not all(any(m in taken for m in author.marks) for author in authors):
+        return by_mark, unmarked
+    moved = set(taken.values())
+    return (
+        {**by_mark, **{key: text for key, (_, text) in taken.items()}},
+        [entry for entry in unmarked if entry not in moved],
+    )
+
+
 def _given_first(names: list[Span]) -> bool:
     """Whether the byline prints given names first.
 
@@ -1347,6 +1464,10 @@ def assemble(
         inp=inp if rules else None,
         tags=tags if rules else None,
     )
+    if rules:
+        affiliation_by_mark, unmarked_affiliations = _keyed_by_print(
+            authors, affiliation_by_mark, unmarked_affiliations, inp, tags
+        )
     unattached = _link_affiliations(authors, affiliation_by_mark, unmarked_affiliations, problems)
     _assign_loose_emails(authors, spans, rules=rules)
     _flag_corresponding(authors, inp, tags)

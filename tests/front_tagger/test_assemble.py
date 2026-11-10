@@ -1930,3 +1930,272 @@ def test_rules_join_a_name_part_tagged_in_two():
     )
     assert _names(inp, tags, rules=False) == [("Alberto", "Lombo"), ("", "Montañés")]
     assert _names(inp, tags) == [("Alberto", "Lombo Montañés")]
+
+
+# ── Affiliation keys the tagger read past ─────────────────────────────────
+
+
+def _linked(got):
+    return [(a.family, a.affiliation) for a in got.byline.authors]
+
+
+def test_keys_in_front_of_affiliations_link_them_when_left_untagged():
+    """Elsevier style: the authors' keys are tagged, and of the affiliation
+    lines only "b" has its key tagged. "a" and "c" were exported with no author."""
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Lena Morn a,b,∗, Omar Tess b,c"),
+        ("text", "a Department of Forestry, Norland University"),
+        ("text", "b Naval Command, Norland"),
+        ("text", "c Institute of Tides, Southport"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Lena"),
+        ("FAMILY", "Morn"),
+        ("AUTHOR_MARK", "a,b,∗"),
+        ("GIVEN", "Omar"),
+        ("FAMILY", "Tess"),
+        ("AUTHOR_MARK", "b,c"),
+        ("AFFILIATION", "Department of Forestry, Norland University"),
+        ("AFF_MARK", "b"),
+        ("AFFILIATION", "Naval Command, Norland"),
+        ("AFFILIATION", "Institute of Tides, Southport"),
+    )
+    assert _linked(got) == [
+        ("Morn", "Department of Forestry, Norland University; Naval Command, Norland"),
+        ("Tess", "Naval Command, Norland; Institute of Tides, Southport"),
+    ]
+    assert got.unattached_affiliations == []
+    assert "affiliation_mark_unresolved" not in got.problems
+
+
+def test_keys_after_a_name_are_read_when_no_key_was_tagged():
+    """Names and affiliations tagged, no key anywhere: "Morna,b,c" is "Morn"
+    keyed a, b and c. The affiliations were all exported with no author."""
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Lena Morna,b,c and Omar Tessa,d,∗"),
+        ("text", "a Department of Forestry, Norland University"),
+        ("text", "b Naval Command, Norland"),
+        ("text", "c Institute of Tides, Southport"),
+        ("text", "d School of Maps, Norland University"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Lena"),
+        ("FAMILY", "Morna"),
+        ("GIVEN", "Omar"),
+        ("FAMILY", "Tessa"),
+        ("AFFILIATION", "Department of Forestry, Norland University"),
+        ("AFFILIATION", "Naval Command, Norland"),
+        ("AFFILIATION", "Institute of Tides, Southport"),
+        ("AFFILIATION", "School of Maps, Norland University"),
+    )
+    assert _linked(got) == [
+        (
+            "Morn",
+            "Department of Forestry, Norland University; Naval Command, Norland; "
+            "Institute of Tides, Southport",
+        ),
+        ("Tess", "Department of Forestry, Norland University; School of Maps, Norland University"),
+    ]
+    assert "affiliations_unlinked" not in got.problems
+
+
+def test_a_key_before_the_next_name_is_read_after_a_comma():
+    """ASM style: "Wehr, a Lotte Berth, b, c Pat Bill": the key follows a comma
+    and runs into the next name."""
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Matt Wehr , a Lotte Berth , b , c Pat Bill"),
+        ("text", "a University of Norland, Institute of Tides"),
+        ("text", "b Université de Southport"),
+        ("text", "c Naval Command, Norland"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Matt"),
+        ("FAMILY", "Wehr"),
+        ("GIVEN", "Lotte"),
+        ("FAMILY", "Berth"),
+        ("GIVEN", "Pat"),
+        ("FAMILY", "Bill"),
+        ("AFF_MARK", "a"),
+        ("AFFILIATION", "University of Norland, Institute of Tides"),
+        ("AFF_MARK", "b"),
+        ("AFFILIATION", "Université de Southport"),
+        ("AFFILIATION", "Naval Command, Norland"),
+    )
+    assert _linked(got) == [
+        ("Wehr", "University of Norland, Institute of Tides"),
+        ("Berth", "Université de Southport; Naval Command, Norland"),
+        ("Bill", ""),
+    ]
+
+
+def test_a_connective_letter_between_two_names_is_no_key():
+    """Czech "a" and Portuguese "e" join two names; alone between them they key nothing."""
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Jana Morn a Omar Tess"),
+        ("text", "a Department of Forestry, Norland University"),
+        ("text", "b Naval Command, Norland"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Jana"),
+        ("FAMILY", "Morn"),
+        ("GIVEN", "Omar"),
+        ("FAMILY", "Tess"),
+        ("AFFILIATION", "Department of Forestry, Norland University"),
+        ("AFFILIATION", "Naval Command, Norland"),
+    )
+    assert _linked(got) == [("Morn", ""), ("Tess", "")]
+    assert "affiliations_unlinked" in got.problems
+
+
+def test_degrees_after_a_name_leave_its_keys_unread():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Lena Morn BA , b and Omar Tess MSc , a"),
+        ("text", "a Department of Forestry, Norland University"),
+        ("text", "b Naval Command, Norland"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Lena"),
+        ("FAMILY", "Morn"),
+        ("GIVEN", "Omar"),
+        ("FAMILY", "Tess"),
+        ("AFFILIATION", "Department of Forestry, Norland University"),
+        ("AFFILIATION", "Naval Command, Norland"),
+    )
+    assert _linked(got) == [("Morn", ""), ("Tess", "")]
+
+
+def test_one_keyed_affiliation_still_goes_to_authors_who_show_no_key():
+    """With no tagged key, a printed key links only when every author carries
+    one. Here one author shows none, so the single affiliation is everyone's,
+    as before."""
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Lena Morn 1 , ∗ and Omar Tess"),
+        ("text", "1 Department of Forestry, Norland University"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Lena"),
+        ("FAMILY", "Morn"),
+        ("AUTHOR_MARK", "1"),
+        ("GIVEN", "Omar"),
+        ("FAMILY", "Tess"),
+        ("AFFILIATION", "Department of Forestry, Norland University"),
+    )
+    assert _linked(got) == [
+        ("Morn", "Department of Forestry, Norland University"),
+        ("Tess", "Department of Forestry, Norland University"),
+    ]
+
+
+def test_printed_keys_are_not_read_without_the_rules():
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Lena Morn a , Omar Tess b"),
+        ("text", "a Department of Forestry, Norland University"),
+        ("text", "b Naval Command, Norland"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words"),
+        ("GIVEN", "Lena"),
+        ("FAMILY", "Morn"),
+        ("AUTHOR_MARK", "a"),
+        ("GIVEN", "Omar"),
+        ("FAMILY", "Tess"),
+        ("AUTHOR_MARK", "b"),
+        ("AFFILIATION", "Department of Forestry, Norland University"),
+        ("AFFILIATION", "Naval Command, Norland"),
+    )
+    assert _linked(assemble(inp, tags, _ones(inp), rules=False)) == [("Morn", ""), ("Tess", "")]
+    assert _linked(assemble(inp, tags, _ones(inp), rules=True)) == [
+        ("Morn", "Department of Forestry, Norland University"),
+        ("Tess", "Naval Command, Norland"),
+    ]
+
+
+@pytest.mark.parametrize("closer", [".", ")"])
+def test_a_key_closed_by_a_stop_or_a_bracket_links_its_affiliation(closer):
+    """ "1. Institute" and "1) Institute": the mark after the number is no part
+    of the key, and the affiliation still follows it directly."""
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Lena Morn 1, Omar Tess 2"),
+        ("text", f"1{closer} Department of Forestry, Norland University"),
+        ("text", f"2{closer} Naval Command, Norland"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Lena"),
+        ("FAMILY", "Morn"),
+        ("AUTHOR_MARK", "1"),
+        ("GIVEN", "Omar"),
+        ("FAMILY", "Tess"),
+        ("AUTHOR_MARK", "2"),
+        ("AFFILIATION", "Department of Forestry, Norland University"),
+        ("AFFILIATION", "Naval Command, Norland"),
+    )
+    assert _linked(got) == [
+        ("Morn", "Department of Forestry, Norland University"),
+        ("Tess", "Naval Command, Norland"),
+    ]
+
+
+def test_a_key_after_the_affiliation_before_it_links_the_next_one():
+    """Affiliations printed on one line: "a Univ A, Norland b Naval Command"."""
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Lena Morn a, Omar Tess b"),
+        ("text", "a Department of Forestry, Norland University b Naval Command, Norland"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Lena"),
+        ("FAMILY", "Morn"),
+        ("AUTHOR_MARK", "a"),
+        ("GIVEN", "Omar"),
+        ("FAMILY", "Tess"),
+        ("AUTHOR_MARK", "b"),
+        ("AFF_MARK", "a"),
+        ("AFFILIATION", "Department of Forestry, Norland University"),
+        ("AFFILIATION", "Naval Command, Norland"),
+    )
+    assert _linked(got) == [
+        ("Morn", "Department of Forestry, Norland University"),
+        ("Tess", "Naval Command, Norland"),
+    ]
+
+
+def test_a_number_inside_untagged_prose_keys_nothing():
+    """ "Received 2 Department ..." : the number follows an untagged word and
+    does not open the line, so the affiliation stays unmarked."""
+    inp = tagger_input(
+        ("doc_title", "Title words"),
+        ("text", "Lena Morn 1, Omar Tess 2"),
+        ("text", "1 Department of Forestry, Norland University"),
+        ("text", "Sent from room 2 Naval Command, Norland"),
+    )
+    got = _with_rules(
+        inp,
+        ("GIVEN", "Lena"),
+        ("FAMILY", "Morn"),
+        ("AUTHOR_MARK", "1"),
+        ("GIVEN", "Omar"),
+        ("FAMILY", "Tess"),
+        ("AUTHOR_MARK", "2"),
+        ("AFF_MARK", "1"),
+        ("AFFILIATION", "Department of Forestry, Norland University"),
+        ("AFFILIATION", "Naval Command, Norland"),
+    )
+    assert _linked(got) == [("Morn", "Department of Forestry, Norland University"), ("Tess", "")]
+    assert got.unattached_affiliations == ["Naval Command, Norland"]
