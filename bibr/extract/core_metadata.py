@@ -158,6 +158,17 @@ _LATE_AFFILIATION_SECTION_TYPES = (
     CanonicalSection.ETHICS,
     CanonicalSection.OPEN_DATA,
 )
+# The heading an end-of-article affiliation list is printed under: "Author
+# details" in BMC and Springer journals, "Author information" and "Author
+# affiliations" elsewhere. No canonical section type stands for it, so a
+# classifier with no opinion calls the section unknown and the type list above
+# never admits it. The heading does, whatever the type. The same heading also
+# opens biographical notes ("KS is professor at ..."), which the marker-first
+# rule for late lines keeps out.
+_LATE_AFFILIATION_HEADING_RE = re.compile(
+    r"\s*authors?['\u2019]?s?['\u2019]?\s+(?:details|information|affiliations?)\s*[:.]?\s*",
+    re.IGNORECASE,
+)
 _AFFILIATION_ORG_RE = re.compile(
     r"\b(?:department|faculty|institute|university|college|school|hospital|"
     r"centre|center|clinic|laborator(?:y|ies))\b",
@@ -3508,13 +3519,20 @@ class CoreMetadataExtractor:
         # often as author_contributions. This third tier is read only for
         # numbers neither of the first two defines, even ambiguously, so the
         # page-1 and author-contributions behaviour is unchanged.
-        late_lines: list[str] = []
+        # The block's own heading ("Author details") admits it as well: a run
+        # with no LLM types that section unknown.
+        late = pd.Series(False, index=meta_df.index)
         if "section_type" in meta_df.columns:
-            late_rows = meta_df.loc[
-                (meta_df["page_number"] > _front_page(meta_df))
-                & meta_df["section_type"].isin(_LATE_AFFILIATION_SECTION_TYPES)
-            ]
-            late_lines = [str(value) for value in late_rows["text"].values if pd.notna(value)]
+            late |= meta_df["section_type"].isin(_LATE_AFFILIATION_SECTION_TYPES)
+        if "section_name" in meta_df.columns:
+            late |= meta_df["section_name"].map(
+                lambda name: (
+                    isinstance(name, str)
+                    and _LATE_AFFILIATION_HEADING_RE.fullmatch(name) is not None
+                )
+            )
+        late_rows = meta_df.loc[late & (meta_df["page_number"] > _front_page(meta_df))]
+        late_lines = [str(value) for value in late_rows["text"].values if pd.notna(value)]
         late_definitions = _definitions(
             [line for line in late_lines if _LATE_DEFINITION_LINE_RE.match(line)]
         )
