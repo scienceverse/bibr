@@ -186,6 +186,14 @@ by an earlier version, carries neither.
 
 ### Fixed
 
+- A region the cloud vision OCR (`--ocr anthropic`, `openai`, `gemini`) could not
+  read after its retries, or whose answer was cut off at its output cap, now
+  shows in the export as an `OCR_REGION_FAILED` warning with the page, the
+  region and the reason. Before, the region was exported blank and only the log
+  said so, so a paper could lose paragraphs behind a clean export and exit
+  code 0. The file still goes on, a key with no quota left still fails it after
+  five such regions in a row, and a region the model reads as empty is not a
+  failure.
 - An affiliation list printed at the end of the article under its own heading
   ("Author details" in BMC journals, "Affiliations" in Springer's, also "Author
   information" and "Author affiliations") is now read whatever section type the
