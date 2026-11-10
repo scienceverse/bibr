@@ -23,6 +23,7 @@ default to loopback at `127.0.0.1:8000`. Two flags control the bind address:
 | `--port` | Port to bind to | `8000` |
 | `--fast` | Serve in fast mode: no LLM call and no API key, local models only (`PIPELINE_MODE=fast`) | follow what is configured |
 | `--full` | Serve in full mode, with the configured LLM; refuses to start with none (`PIPELINE_MODE=full`) | follow what is configured |
+| `--ocr text-layer` | Read each PDF's own text layer and contact no OCR server (`OCR_BACKEND=text-layer`); a scanned PDF is refused | text layer for a fast server with no OCR setting, else the server at `OCR_BASE_URL` |
 
 With neither flag, `PIPELINE_MODE=auto` serves fast when no LLM is configured and
 full when one is. A request can name its own `mode` form field (`fast` or `full`);
@@ -323,19 +324,37 @@ the same worker path as `POST /papers/extract`.
 
 ## OCR server
 
-Unlike `bibr chew`, `bibr serve` has no in-process OCR mode: PDF regions that
-need recognition use the external OCR service at `OCR_BASE_URL` (default
-`http://localhost:8080`; Compose overrides it with its private `bibr-ocr`
-service name). Native document formats skip OCR, and eligible PDF regions use
-embedded text; the server still checks the configured OCR service in `/ready`.
-A PDF job still needs that service to be reachable, even for a born-digital
-paper: tables, formulas and regions without usable embedded text go to OCR,
-and when the service cannot be reached the whole job fails after about two
-minutes with `OCR server is unreachable`.
+`bibr serve` reads PDFs by one of two routes, fixed when the server starts.
 
-`bibr serve` does not use the `text-layer` OCR backend, the route a fast
-`bibr chew` takes when no OCR route is chosen: a fast `bibr serve` still needs an
-OCR service to be ready.
+**The text layer, with no OCR server.** A fast server where nobody chose an OCR
+route (none of `OCR_BACKEND`, `OCR_MODEL`, `OCR_PROFILE` and `OCR_BASE_URL` is
+set) reads each PDF from its own text layer, as a fast `bibr chew` does. So
+does any server started with `bibr serve --ocr text-layer` or
+`OCR_BACKEND=text-layer`. This needs no GPU and no second service:
+
+```bash
+bibr serve --fast          # no OCR setting: the text layer
+bibr serve --ocr text-layer   # the text layer, whatever else is configured
+```
+
+On this route `/ready` reports `ocr: not_used (text layer)` and probes no OCR
+server, and `OCR_BASE_URL` is neither validated nor contacted. Born-digital
+PDFs only: tables are rebuilt from glyph positions and display formulas are
+read as plain text (see `LIMITATIONS.md`), and a scanned PDF is answered with
+`422` and `error_code: scan_needs_ocr`. A request's `mode` field does not
+change the route.
+
+**An OCR server.** Every other server sends the PDF regions that need
+recognition to the external OCR service at `OCR_BASE_URL` (default
+`http://localhost:8080`; Compose overrides it with its private `bibr-ocr`
+service name). `bibr serve` has no in-process OCR model. Native document
+formats skip OCR, and eligible PDF regions use embedded text; the server checks
+the OCR service in `/ready`. A PDF job needs that service to be reachable, even
+for a born-digital paper: tables, formulas and regions without usable embedded
+text go to OCR, and when the service cannot be reached the whole job fails
+after about two minutes with `OCR server is unreachable`. A fast server with an
+OCR server on the default address must say so (`OCR_BASE_URL=http://localhost:8080`),
+or it reads the text layer.
 
 `OCR_BASE_URL` is the server **root**: bibr appends `/v1/models` and
 `/v1/chat/completions` itself and probes `/health` at the root, so do not
@@ -378,7 +397,7 @@ private network.
 
 The local `paddle-*` and `glm-*` backends, and the cloud vision OCR providers
 (`gemini`/`openai`/`anthropic`), are `bibr chew` options for single-machine
-runs; `bibr serve` always expects an external HTTP OCR endpoint. Its runtime
+runs; off the text-layer route, `bibr serve` always expects an external HTTP OCR endpoint. Its runtime
 selection is explicit, so serving GLM does not create a silent per-request GLM
 fallback for a configured Paddle endpoint.
 
@@ -498,7 +517,7 @@ Set these in `.env` (run `bibr config example --full` or see the
 | `LLM_API_KEY` | OpenAI-compatible API key (`openai` provider) | — |
 | `ANTHROPIC_API_KEY` | Anthropic API key (`anthropic` provider) | — |
 | `GROQ_API_KEY` | Groq API key (`groq` provider) | — |
-| `OCR_BACKEND` | Which family of server sits at `OCR_BASE_URL`: `paddle-http` (Paddle alias + profile defaults) or `glm-http` (GLM defaults). `bibr serve` always proxies over HTTP; the local `paddle-*`/`glm-*` runtimes are `bibr chew` only | `paddle` (GLM defaults for `bibr serve`; set `paddle-http` for a Paddle endpoint) |
+| `OCR_BACKEND` | Which family of server sits at `OCR_BASE_URL`: `paddle-http` (Paddle alias + profile defaults) or `glm-http` (GLM defaults); or `text-layer` for no OCR server at all. `bibr serve` otherwise proxies over HTTP; the local `paddle-*`/`glm-*` runtimes are `bibr chew` only | `paddle` (GLM defaults for `bibr serve`; set `paddle-http` for a Paddle endpoint) |
 | `OCR_BASE_URL` | External OCR server root URL, without a `/v1` suffix | `http://localhost:8080` (Compose: private `bibr-ocr`) |
 | `OCR_MODEL` | Served model name | `glm-ocr`; `paddle-ocr-vl-1.6` under `OCR_BACKEND=paddle-http` |
 | `OCR_PROFILE` | `paddle` or `glm`; required for custom aliases | inferred for known names |

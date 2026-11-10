@@ -979,7 +979,7 @@ class OcrOptions(_BibrSettings):
         "born-digital PDFs from their embedded text layer (a scanned PDF is refused: it needs "
         "a real OCR route). A fast run (no LLM call) with none of OCR_BACKEND, OCR_MODEL or "
         "OCR_PROFILE set, and no --ocr or --ocr-url, uses the text-layer backend, whatever GPU "
-        "the machine has.",
+        "the machine has. A fast bibr serve does the same when OCR_BASE_URL is not set either.",
     )
     fallback_to_text_layer: Literal["off", "auto"] = Field(
         "off",

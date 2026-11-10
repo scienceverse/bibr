@@ -3,7 +3,9 @@
 Builds the same stage list as ``LocalPipeline`` but with an
 ``OcrBackend`` of type ``"serve-http"`` and a ``ResourceManager``
 populated with HTTP client + semaphores + breaker injected from the
-LitServe worker.
+LitServe worker. A deployment on the text-layer route
+(:func:`serve_ocr_route`) uses the ``"text-layer"`` backend instead and
+contacts no OCR server.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from bibr.config import snapshot_settings
+from bibr.ocr.registry import TEXT_LAYER_BACKEND, ocr_route_chosen
 from bibr.pipeline.context import RunConfig
 from bibr.pipeline.pipeline import Pipeline
 from bibr.pipeline.plans import build_stage_plan
@@ -56,13 +59,43 @@ def serve_ocr_defaults(settings: GlobalSettings) -> tuple[str | None, str | None
     return model, profile
 
 
+#: The OCR backend of a deployment that proxies to an OCR server.
+SERVE_HTTP_BACKEND = "serve-http"
+
+
+def serve_ocr_route(settings: GlobalSettings, mode: str | None = None) -> str:
+    """The OCR backend a ``bibr serve`` deployment runs: ``"text-layer"`` or ``"serve-http"``.
+
+    The text layer (no OCR server, born-digital PDFs only; a scan is refused
+    with ``scan_needs_ocr``) when ``OCR_BACKEND=text-layer`` asks for it, and
+    for a fast deployment where nobody chose an OCR route: none of
+    ``OCR_BACKEND``, ``OCR_MODEL``, ``OCR_PROFILE`` or ``OCR_BASE_URL`` is set.
+    That is the rule ``bibr chew --fast`` follows, with ``OCR_BASE_URL`` in the
+    place of ``--ocr-url``. Every other deployment sends regions to the server
+    at ``OCR_BASE_URL``.
+
+    The route belongs to the deployment: *mode* is the deployment's (the
+    argument, else ``PIPELINE_MODE``), and a request's ``mode`` field does not
+    move it.
+    """
+    if (settings.ocr.backend or "").lower() == TEXT_LAYER_BACKEND:
+        return TEXT_LAYER_BACKEND
+    if resolve_mode(settings, mode, backend="cloud") != "fast":
+        return SERVE_HTTP_BACKEND
+    if ocr_route_chosen(settings) or "OCR_BASE_URL" in settings.model_fields_set:
+        return SERVE_HTTP_BACKEND
+    return TEXT_LAYER_BACKEND
+
+
 class ServePipeline(Pipeline):
     """Serve-flavoured stage pipeline.
 
     Layout + segmenter are pre-constructed by the LitServe worker (loaded
     once per process) and handed to the ``ResourceManager`` as-is. OCR
     runs over HTTP against a co-located OCR server via
-    ``BibrServeOcrBackend`` registered as ``"serve-http"``.
+    ``BibrServeOcrBackend`` registered as ``"serve-http"``, or not at all on
+    the text-layer route (:func:`serve_ocr_route`), which reads each PDF's own
+    text and leaves the HTTP client, semaphore and breaker unused.
     """
 
     def __init__(
@@ -70,7 +103,7 @@ class ServePipeline(Pipeline):
         *,
         layout,
         segmenter,
-        http_client: httpx.AsyncClient,
+        http_client: httpx.AsyncClient | None,
         ocr_base_url: str,
         ocr_sem_global: asyncio.Semaphore,
         ocr_breaker: AsyncCircuitBreaker,
@@ -89,7 +122,15 @@ class ServePipeline(Pipeline):
         # ``OCR_PROFILE=paddle``; set ``OCR_MODEL`` to target any other served model — vLLM 404s on a
         # mismatch.
         settings_snapshot = snapshot_settings(settings)
-        ocr_model, default_ocr_profile = serve_ocr_defaults(settings_snapshot)
+        run_mode = resolve_mode(settings_snapshot, mode, backend="cloud")
+        self.ocr_route = serve_ocr_route(settings_snapshot, run_mode)
+        if self.ocr_route == TEXT_LAYER_BACKEND:
+            # No server and no model: nothing to address or to profile.
+            ocr_url, ocr_model, run_ocr_profile = None, None, None
+        else:
+            ocr_url = ocr_base_url
+            ocr_model, default_ocr_profile = serve_ocr_defaults(settings_snapshot)
+            run_ocr_profile = ocr_profile if ocr_profile is not None else default_ocr_profile
 
         # Per-request fields (start_page / end_page / include_figures /
         # crossref / mode) are supplied via ``process_file(config=...)`` so a
@@ -101,20 +142,20 @@ class ServePipeline(Pipeline):
         # a request's ``mode`` field overrides it the same way.
         config = RunConfig(
             memory_mode="keep_all",
-            ocr_backend="serve-http",
-            ocr_url=ocr_base_url,
+            ocr_backend=self.ocr_route,
+            ocr_url=ocr_url,
             ocr_model=ocr_model,
-            ocr_profile=ocr_profile if ocr_profile is not None else default_ocr_profile,
+            ocr_profile=run_ocr_profile,
             device=None,
             crossref=crossref,
             equations=equations,
             llm_backend="cloud",
-            mode=resolve_mode(settings_snapshot, mode, backend="cloud"),
+            mode=run_mode,
         )
         resources = ResourceManager(
             memory_mode="keep_all",
-            ocr_backend="serve-http",
-            ocr_url=ocr_base_url,
+            ocr_backend=self.ocr_route,
+            ocr_url=ocr_url,
             ocr_model=ocr_model,
             ocr_profile=config.ocr_profile,
             http_client=http_client,

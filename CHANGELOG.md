@@ -118,6 +118,16 @@ server or a backend written to `.env` still reads scans.
   It is off by default.
 - `LIMITATIONS.md` lists what the text-layer route reads less well: tables,
   formulas, private-use glyphs and scans.
+- `bibr serve` follows the same rule, so a CPU-only machine can serve: a fast
+  server with none of `OCR_BACKEND`, `OCR_MODEL`, `OCR_PROFILE` and
+  `OCR_BASE_URL` set reads each PDF from its text layer and contacts no OCR
+  server, and `bibr serve --ocr text-layer` (or `OCR_BACKEND=text-layer`) asks
+  for that route in any mode. `/ready` then reports `ocr: not_used (text layer)`
+  without probing anything, the start-up log names the route, and a scanned PDF
+  is answered with a 422 and `error_code: scan_needs_ocr`. The route belongs to
+  the server: a request's `mode` field does not change it. Responses cached on
+  this route have their own keys, so a server that shares its Redis cache with
+  an OCR deployment never answers with the other's reading.
 - `OCR_TEXT_LAYER_READ_OCR_LAYER=true` lets the text-layer route read a scan
   from the OCR text layer the PDF carries (invisible text over an image that
   covers the page, as scanners and publishers add to make a scan searchable)
@@ -146,6 +156,12 @@ by an earlier version, carries neither.
 
 ### Changed
 
+- A fast `bibr serve` with no OCR route chosen no longer waits for an OCR
+  server at the default `http://localhost:8080`: it reads the text layer (see
+  the text-layer route above) and refuses scans. If you run an OCR server on
+  that default address and relied on the default, set
+  `OCR_BASE_URL=http://localhost:8080` to keep sending regions to it. Docker
+  Compose sets `OCR_BASE_URL` and is unchanged, as is every full-mode server.
 - `bibr chew --fast` and `bibr batch --fast` now check, before the first PDF,
   that the front-matter tagger's model can be loaded, and stop with exit code 1
   when it cannot. A fast run reads the title, the authors and the abstract with

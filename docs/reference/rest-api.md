@@ -17,7 +17,7 @@ bearer token as extraction when authentication is enabled.
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/health` | Liveness probe -- LitServe's built-in endpoint; returns plain-text `ok` (status `200`) |
-| `GET` | `/ready` | Readiness probe -- checks OCR service, configured classifier artifacts, and Redis when response caching is enabled; `200` when ready, `503` otherwise |
+| `GET` | `/ready` | Readiness probe -- checks OCR service (not on the text-layer route, where `checks.ocr` reads `not_used (text layer)`), configured classifier artifacts, and Redis when response caching is enabled; `200` when ready, `503` otherwise |
 
 The probes are public. With authentication enabled, an anonymous `/ready`
 response contains only `{"status": "ready"}` or `{"status": "not_ready"}`.

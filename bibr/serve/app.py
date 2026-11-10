@@ -41,6 +41,10 @@ _CLASSIFIER_CHECK_RETRY_SECONDS = 30.0
 #: request cost two OCR requests and the store pings.
 _READINESS_PROBE_TTL_SECONDS = 2.0
 
+#: The ``ocr`` check of a deployment on the text-layer route, which has no OCR
+#: server: nothing was probed, so it does not say ``ok``.
+_TEXT_LAYER_OCR_CHECK = "not_used (text layer)"
+
 
 def classifier_artifact_readiness(
     settings, *, snapshot_download=None, fast: bool = False
@@ -502,8 +506,9 @@ def _register_readiness_route(server, Settings) -> None:
 
     Layout/segmenter readiness is covered by LitServe's own worker lifecycle
     (requests simply queue until workers are ready), so this only probes
-    external dependencies: the SGLang OCR server, Redis (when the cache is
-    enabled), and the shared job store (when ``JOBS_STORE=redis``).
+    external dependencies: the OCR server (unless the deployment reads the
+    text layer, see ``serve_ocr_route``), Redis (when the cache is enabled),
+    and the shared job store (when ``JOBS_STORE=redis``).
     """
     import asyncio
     import json
@@ -513,16 +518,23 @@ def _register_readiness_route(server, Settings) -> None:
 
     from bibr.ocr.http_security import normalize_ocr_base_url, ocr_request_headers
     from bibr.ocr.profiles import GLM_SERVED_MODEL_ALIAS
+    from bibr.ocr.registry import TEXT_LAYER_BACKEND
     from bibr.run_mode import resolve_mode
     from bibr.serve.auth import check_bearer
-    from bibr.serve.pipeline import serve_ocr_defaults
+    from bibr.serve.pipeline import serve_ocr_defaults, serve_ocr_route
 
-    ocr_base_url = normalize_ocr_base_url(Settings.OCR_BASE_URL)
-    ocr_headers = ocr_request_headers(
-        ocr_base_url,
-        Settings.ocr.api_key,
-        allow_insecure_http=Settings.ocr.allow_insecure_http,
-    )
+    # A deployment on the text-layer route has no OCR server to probe, and
+    # whatever OCR_BASE_URL holds there is neither validated nor contacted.
+    text_layer_route = serve_ocr_route(Settings) == TEXT_LAYER_BACKEND
+    ocr_base_url = ""
+    ocr_headers: dict[str, str] = {}
+    if not text_layer_route:
+        ocr_base_url = normalize_ocr_base_url(Settings.OCR_BASE_URL)
+        ocr_headers = ocr_request_headers(
+            ocr_base_url,
+            Settings.ocr.api_key,
+            allow_insecure_http=Settings.ocr.allow_insecure_http,
+        )
     # The served-model alias extraction requires on /v1/models — the same
     # alias ServePipeline asks the server for, so /ready fails while the
     # server is still loading it or serves a different name.
@@ -560,6 +572,15 @@ def _register_readiness_route(server, Settings) -> None:
         """Check OCR, Redis and the job store: the probes that cost requests."""
         checks: dict[str, str] = {}
         check_results: list[bool] = []
+        if text_layer_route:
+            checks["ocr"] = _TEXT_LAYER_OCR_CHECK
+            check_results.append(True)
+        else:
+            await _probe_ocr(checks, check_results)
+        await _probe_stores(checks, check_results)
+        return checks, check_results
+
+    async def _probe_ocr(checks: dict[str, str], check_results: list[bool]) -> None:
         client = await _get_http_client()
         try:
             resp = await client.get(f"{ocr_base_url}/health")
@@ -600,6 +621,7 @@ def _register_readiness_route(server, Settings) -> None:
             checks["ocr"] = "unreachable"
             check_results.append(False)
 
+    async def _probe_stores(checks: dict[str, str], check_results: list[bool]) -> None:
         cache = await _get_cache()
         if cache is not None:
             try:
@@ -626,7 +648,6 @@ def _register_readiness_route(server, Settings) -> None:
                 logger.warning("Readiness job-store check failed", exc_info=True)
                 checks["jobs_store"] = "error"
                 check_results.append(False)
-        return checks, check_results
 
     async def _refresh_services() -> tuple[dict[str, str], list[bool]]:
         result = await _probe_services()
@@ -730,6 +751,14 @@ def main():
         help="Serve in full mode: the configured LLM reads what the local models are unsure of "
         "(PIPELINE_MODE=full). Refuses to start with no LLM configured.",
     )
+    parser.add_argument(
+        "--ocr",
+        choices=["text-layer"],
+        help="text-layer: read each PDF's own text layer and contact no OCR server "
+        "(OCR_BACKEND=text-layer). Born-digital PDFs only: a scanned PDF is refused with the "
+        "code scan_needs_ocr. A fast server with none of OCR_BACKEND, OCR_MODEL, OCR_PROFILE "
+        "and OCR_BASE_URL set does this by default. An OCR server is chosen with OCR_BASE_URL.",
+    )
 
     args = parser.parse_args()
 
@@ -737,6 +766,8 @@ def main():
     chosen_mode = "fast" if args.fast else "full" if args.full else None
     if chosen_mode:
         os.environ["PIPELINE_MODE"] = chosen_mode
+    if args.ocr:
+        os.environ["OCR_BACKEND"] = args.ocr
 
     from bibr.config import Settings
     from bibr.serve.auth import validate_bind_auth
@@ -746,6 +777,8 @@ def main():
         # Settings may have been built before the flag was parsed; the master's
         # own copy follows the flag too.
         Settings.pipeline.mode = chosen_mode
+    if args.ocr:
+        Settings.ocr.backend = args.ocr
 
     # The CLI's own logging setup never runs for `serve`; install the serve sink
     # first so every warning below (and every bibr.* record) is formatted and
@@ -756,6 +789,15 @@ def main():
     validate_bind_auth(args.host, Settings.auth.api_key)
 
     server = build_server()
+    from bibr.serve.pipeline import SERVE_HTTP_BACKEND, serve_ocr_route
+
+    if serve_ocr_route(Settings) == SERVE_HTTP_BACKEND:
+        logger.info("OCR route: the OCR server at OCR_BASE_URL")
+    else:
+        logger.info(
+            "OCR route: text layer (no OCR server; a scanned PDF is refused). "
+            "Set OCR_BASE_URL to send regions to an OCR server instead."
+        )
     logger.info("bibr serving on %s:%d", args.host, args.port)
 
     # Upload-root ownership, dispatch tracking, admission, readiness state, and

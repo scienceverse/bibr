@@ -401,7 +401,7 @@ class BibrPipelineAPI(ls.LitAPI):
 
         from bibr.serve.deployments.layout import LayoutDetector
         from bibr.serve.deployments.segmenter import SentenceSegmenter
-        from bibr.serve.pipeline import ServePipeline
+        from bibr.serve.pipeline import SERVE_HTTP_BACKEND, ServePipeline, serve_ocr_route
         from bibr.utils.circuit_breaker import AsyncCircuitBreaker
 
         # Bound LLM concurrency for serve unless the operator set it explicitly
@@ -444,29 +444,33 @@ class BibrPipelineAPI(ls.LitAPI):
         self._ocr_sem = asyncio.Semaphore(self._settings.ocr.max_concurrent_regions)
         self.ocr_base_url = self._settings.OCR_BASE_URL.rstrip("/")
 
-        from bibr.ocr.http_security import ocr_request_headers
+        # A deployment on the text-layer route contacts no OCR server, so
+        # whatever OCR_BASE_URL holds there is neither validated nor opened.
+        self._http_client: httpx.AsyncClient | None = None
+        if serve_ocr_route(self._settings) == SERVE_HTTP_BACKEND:
+            from bibr.ocr.http_security import ocr_request_headers
 
-        ocr_headers = ocr_request_headers(
-            self.ocr_base_url,
-            self._settings.ocr.api_key,
-            allow_insecure_http=self._settings.ocr.allow_insecure_http,
-        )
+            ocr_headers = ocr_request_headers(
+                self.ocr_base_url,
+                self._settings.ocr.api_key,
+                allow_insecure_http=self._settings.ocr.allow_insecure_http,
+            )
 
-        self._http_client = httpx.AsyncClient(
-            headers=ocr_headers,
-            timeout=httpx.Timeout(
-                connect=10.0,
-                read=float(self._settings.ocr.request_timeout),
-                write=30.0,
-                pool=10.0,
-            ),
-            http2=True,
-            limits=httpx.Limits(
-                max_connections=100,
-                max_keepalive_connections=50,
-                keepalive_expiry=30.0,
-            ),
-        )
+            self._http_client = httpx.AsyncClient(
+                headers=ocr_headers,
+                timeout=httpx.Timeout(
+                    connect=10.0,
+                    read=float(self._settings.ocr.request_timeout),
+                    write=30.0,
+                    pool=10.0,
+                ),
+                http2=True,
+                limits=httpx.Limits(
+                    max_connections=100,
+                    max_keepalive_connections=50,
+                    keepalive_expiry=30.0,
+                ),
+            )
 
         # Build the pipeline once per worker. Per-request fields (start_page /
         # end_page / include_figures) ride along on a fresh RunConfig in
@@ -502,11 +506,17 @@ class BibrPipelineAPI(ls.LitAPI):
             self._pipeline._resources,
         )
 
-        logger.info(
-            "BibrPipelineAPI ready (ocr via HTTP at %s, OCR sem=%d)",
-            self.ocr_base_url,
-            self._settings.ocr.max_concurrent_regions,
-        )
+        if self._pipeline.ocr_route == "text-layer":
+            logger.info(
+                "BibrPipelineAPI ready (text-layer route: PDFs are read from their own text, "
+                "no OCR server is contacted, a scanned PDF is refused)"
+            )
+        else:
+            logger.info(
+                "BibrPipelineAPI ready (ocr via HTTP at %s, OCR sem=%d)",
+                self.ocr_base_url,
+                self._settings.ocr.max_concurrent_regions,
+            )
 
     def _ensure_cache(self) -> None:
         if self._cache_inited:
@@ -720,6 +730,7 @@ class BibrPipelineAPI(ls.LitAPI):
             input_format=Path(filename).suffix,
             include_region_meta=include_region_meta,
             mode=effective_mode,
+            ocr_route=getattr(getattr(self, "_pipeline", None), "ocr_route", None),
         )
 
         if not self._cache:
@@ -1261,12 +1272,16 @@ class BibrPipelineAPI(ls.LitAPI):
         input_format: str | None = None,
         include_region_meta: bool = False,
         mode: str | None = None,
+        ocr_route: str | None = None,
     ) -> str:
         """Response-cache key: the full SHA-256 of the upload (never the 16-hex
         ``file_hash`` display id) plus every option that changes the export.
         An option at its default adds nothing, so a new option leaves every
         existing key — and the results cached under it — as it was. A full-mode
-        run is the default and adds nothing; a fast run adds ``:fast``."""
+        run is the default and adds nothing; a fast run adds ``:fast``. A
+        deployment on the text-layer route adds ``:textlayer``, so one that
+        shares its cache with an OCR deployment never answers with the other's
+        reading of a PDF."""
         key = f"json:{content_hash}"
         if start_page is not None:
             key += f":sp{start_page}"
@@ -1288,6 +1303,8 @@ class BibrPipelineAPI(ls.LitAPI):
             key += ":enrich"
         if mode == "fast":
             key += ":fast"
+        if ocr_route == "text-layer":
+            key += ":textlayer"
         if input_format:
             key += f":fmt:{input_format.lstrip('.').lower()}"
         return key
