@@ -703,6 +703,70 @@ def test_invisible_ocr_layer_over_a_scan_is_not_read(scan):
     assert read.layout_results[0][0]["content"] == ""
 
 
+def _invisible_lines(lines: list[str]) -> bytes:
+    return b"".join(text(line, 72.0, 700.0 - 14.0 * k, mode=3) for k, line in enumerate(lines))
+
+
+def test_the_ocr_layer_of_a_scan_is_read_when_asked_for():
+    from tests.document._pdfs import image
+
+    pdf = build_pdf([PageSpec(image(PAGE_W, PAGE_H) + _invisible_lines(_PROSE))])
+    layout = [[_region("text", _paragraph_box(len(_PROSE)))]]
+
+    unread = read_text_layer(pdf, layout)
+    assert unread.pages[0].reason == "invisible_ocr_layer"
+    assert unread.ocr_layer_pages == []
+
+    read = read_text_layer(pdf, layout, read_ocr_layer=True)
+
+    assert read.pages[0].ok
+    assert read.layout_results[0][0]["content"].startswith("We measured the reading speed")
+    assert read.ocr_layer_pages == [1]
+    (warning,) = [w for w in read.warnings if w.code == WarningCode.TEXT_LAYER_OCR_LAYER_READ]
+    assert "1 scanned page(s)" in warning.message and "(page 1)" in warning.message
+
+
+def test_invisible_text_without_a_page_sized_image_stays_unread_when_asked_for():
+    from tests.document._pdfs import image
+
+    hidden_on_purpose = build_pdf([PageSpec(_invisible_lines(_PROSE))])
+    cropped_scan = build_pdf(
+        [PageSpec(image(400.0, 500.0, 100.0, 200.0) + _invisible_lines(_PROSE))]
+    )
+    layout = [[_region("text", _paragraph_box(len(_PROSE)))]]
+
+    for pdf in (hidden_on_purpose, cropped_scan):
+        read = read_text_layer(pdf, layout, read_ocr_layer=True)
+
+        assert read.pages[0].reason == "invisible_ocr_layer"
+        assert read.layout_results[0][0]["content"] == ""
+        assert read.ocr_layer_pages == []
+        assert not [w for w in read.warnings if w.code == WarningCode.TEXT_LAYER_OCR_LAYER_READ]
+
+
+def test_an_ocr_layer_that_does_not_read_as_words_is_still_turned_down():
+    from tests.document._pdfs import image
+
+    garbage = ["xq zvk jjw qpx zzk vvq wxj kqz pqv jxw zqk vjx qqz kxv jzq wvx"] * len(_PROSE)
+    pdf = build_pdf([PageSpec(image(PAGE_W, PAGE_H) + _invisible_lines(garbage))])
+
+    read = read_text_layer(
+        pdf, [[_region("text", _paragraph_box(len(garbage)))]], read_ocr_layer=True
+    )
+
+    assert not read.pages[0].ok
+    assert read.ocr_layer_pages == []
+    assert read.layout_results[0][0]["content"] == ""
+
+
+def test_the_ocr_layer_warning_folds_page_runs():
+    from bibr.ocr.text_layer import _page_ranges
+
+    assert _page_ranges([3]) == "page 3"
+    assert _page_ranges([1, 2, 3, 4, 7]) == "pages 1-4, 7"
+    assert _page_ranges([5, 2, 1]) == "pages 1-2, 5"
+
+
 def test_a_little_invisible_text_on_a_born_digital_page_is_read():
     lines = _lines(_PROSE)
     pdf = build_pdf([PageSpec(lines + text("hidden", 72, 760, mode=3))])

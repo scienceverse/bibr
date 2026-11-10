@@ -192,6 +192,9 @@ class TextLayerRead:
     warnings: list[ProcessingWarning]
     filled: Counter = field(default_factory=Counter)
     unread: Counter = field(default_factory=Counter)
+    # 1-based numbers of the scanned pages read from the OCR layer the PDF
+    # carries (``read_ocr_layer``).
+    ocr_layer_pages: list[int] = field(default_factory=list)
     tables_rebuilt: int = 0
     formulas_read: int = 0
     private_use_dropped: int = 0
@@ -213,6 +216,9 @@ class _PageText:
     chars: list[tuple[str, tuple[float, float, float, float]]]
     # (text, layout-space box, font size) per printed line.
     lines: list[tuple[str, tuple[float, float, float, float], float]]
+    # The characters are a scan's embedded OCR layer (invisible text over a
+    # page-sized image), read because the caller asked for it.
+    ocr_layer: bool = False
 
     @property
     def glyphs(self) -> list[tuple[str, tuple[float, float, float, float]]]:
@@ -239,12 +245,21 @@ def _centre_in(box: tuple[float, float, float, float], bbox: Sequence[float]) ->
     return bbox[0] <= cx <= bbox[2] and bbox[1] <= cy <= bbox[3]
 
 
-def _load_page(doc: Any, page_index: int) -> _PageText:
-    """Read one page's text layer under the (caller-held) PDFium lock."""
+def _load_page(doc: Any, page_index: int, *, read_ocr_layer: bool = False) -> _PageText:
+    """Read one page's text layer under the (caller-held) PDFium lock.
+
+    With *read_ocr_layer*, a scanned page's embedded OCR layer is read like
+    printed text: mostly invisible text over images that cover the page, the
+    test the native pass uses to send a page to OCR. Invisible text on any
+    other page stays unread: it was hidden on purpose, or the scan is cropped
+    and the test cannot tell it from that.
+    """
     from bibr.ocr.native_text import (
         _build_page_char_records,
+        _coverage_qualifies,
         _invisible_text_share,
         _page_crop_box,
+        _page_image_coverage,
         _page_rotation,
         _pdf_points_to_normalized_bbox,
         _share_qualifies,
@@ -271,7 +286,15 @@ def _load_page(doc: Any, page_index: int) -> _PageText:
             except Exception:  # noqa: BLE001 - an unreadable check keeps the layer
                 logger.debug("Invisible-layer check failed on page %d", page_index, exc_info=True)
                 invisible = False
-            if invisible:
+            ocr_layer = False
+            if invisible and read_ocr_layer:
+                try:
+                    ocr_layer = _coverage_qualifies(_page_image_coverage(page, crop_box))
+                except Exception:  # noqa: BLE001 - an unreadable check leaves the page unread
+                    logger.debug(
+                        "Image-coverage check failed on page %d", page_index, exc_info=True
+                    )
+            if invisible and not ocr_layer:
                 return _PageText(page_index, crop_box, rotation, char_count, True, [], [], [])
             records = _build_page_char_records(textpage)
             chars = _extract_page_chars(textpage)
@@ -289,7 +312,7 @@ def _load_page(doc: Any, page_index: int) -> _PageText:
         for line in group_chars_into_lines(_break_wrapped_lines(chars), page_index)
     ]
     return _PageText(
-        page_index, crop_box, rotation, char_count, False, records, layout_chars, lines
+        page_index, crop_box, rotation, char_count, False, records, layout_chars, lines, ocr_layer
     )
 
 
@@ -571,6 +594,19 @@ def _judge(
     )
 
 
+def _page_ranges(numbers: Sequence[int]) -> str:
+    """``pages 1-4, 7``: sorted page numbers with runs folded."""
+    ordered = sorted(set(numbers))
+    runs: list[tuple[int, int]] = []
+    for number in ordered:
+        if runs and number == runs[-1][1] + 1:
+            runs[-1] = (runs[-1][0], number)
+        else:
+            runs.append((number, number))
+    listed = ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in runs)
+    return f"page{'s' if len(ordered) != 1 else ''} {listed}"
+
+
 def _blank(region: dict[str, Any]) -> None:
     region["content"] = ""
     region.pop("_native_text_used", None)
@@ -586,12 +622,16 @@ def read_text_layer(
     *,
     page_indices: Sequence[int] | None = None,
     min_printable_ratio: float = 0.85,
+    read_ocr_layer: bool = False,
 ) -> TextLayerRead:
     """Fill every region OCR would read from the PDF text layer, page-gated.
 
     *layout_results* is not modified: the filled copy is returned with each
     page's verdict and the file's warnings. Regions the native-text pass
-    already filled keep their text.
+    already filled keep their text. *read_ocr_layer* also reads the embedded
+    OCR layer of a scanned page (see :func:`_load_page`); such a page passes
+    the same gate as printed text and is named in a
+    ``TEXT_LAYER_OCR_LAYER_READ`` warning.
     """
     import pypdfium2
 
@@ -608,15 +648,25 @@ def read_text_layer(
             if slot >= len(layouts):
                 break
             with pdfium_lock:
-                page = _load_page(doc, page_index)
+                page = _load_page(doc, page_index, read_ocr_layer=read_ocr_layer)
             regions = layouts[slot]
-            result.pages.append(
-                _read_page(page, regions, result, min_printable_ratio=min_printable_ratio)
-            )
+            verdict = _read_page(page, regions, result, min_printable_ratio=min_printable_ratio)
+            result.pages.append(verdict)
+            if page.ocr_layer and verdict.ok:
+                result.ocr_layer_pages.append(page_index + 1)
     finally:
         with pdfium_lock:
             doc.close()
 
+    if result.ocr_layer_pages:
+        result.warnings.append(
+            ProcessingWarning(
+                WarningCode.TEXT_LAYER_OCR_LAYER_READ,
+                f"{len(result.ocr_layer_pages)} scanned page(s) were read from the OCR text "
+                f"layer the PDF carries ({_page_ranges(result.ocr_layer_pages)}), not by an "
+                "OCR model",
+            )
+        )
     if result.tables_rebuilt:
         result.warnings.append(
             ProcessingWarning(
@@ -792,6 +842,20 @@ def page_verdict_summary(fs: Any) -> str:
     )
 
 
+def has_unread_ocr_layer(fs: Any) -> bool:
+    """Whether ``OCR_TEXT_LAYER_READ_OCR_LAYER`` would read a page this read left out.
+
+    A page the gate turned down for its invisible text that the native pass
+    found to be a scan under a page-sized image. With the option on such a page
+    is read, so this is true only when it is off.
+    """
+    inspection = getattr(fs, "pdf_inspection", None)
+    return any(
+        page.text_layer_reason == "invisible_ocr_layer" and page.invisible_text_layer
+        for page in getattr(inspection, "pages", ())
+    )
+
+
 def note_text_layer_fallback(fs: Any, reason: str | None) -> None:
     """Record on *fs* that OCR could not read it here, once (``OCR_BACKEND_UNAVAILABLE``).
 
@@ -835,6 +899,7 @@ async def read_file_text_layer(
             fs.layout_results,
             page_indices=fs.page_indices,
             min_printable_ratio=settings.ocr.native_text_min_printable_ratio,
+            read_ocr_layer=settings.ocr.text_layer_read_ocr_layer is True,
         )
     except Exception:  # noqa: BLE001 - an unreadable layer leaves the regions empty
         logger.warning("Could not read the text layer of %s", name, exc_info=True)

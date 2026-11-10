@@ -1110,6 +1110,16 @@ class OcrOptions(_BibrSettings):
         "OCR engine adds to a scan). The legacy layer is often worse than OCR; disable "
         "to trust it as before.",
     )
+    text_layer_read_ocr_layer: bool = Field(
+        False,
+        description="With the text-layer backend (no OCR model), read a scanned page from the "
+        "OCR text layer the PDF carries, when it has one: invisible text over an image that "
+        "covers the page, as scanners and publishers add to make a scan searchable. Off by "
+        "default, so such a PDF is refused as a scan (scan_needs_ocr). The layer is somebody "
+        "else's OCR and is often less accurate than an OCR model; pages read this way are "
+        "named in a TEXT_LAYER_OCR_LAYER_READ warning. A scan with no such layer, or one "
+        "cropped to its text block, is still refused.",
+    )
     # Scan path (bibr.scan.consensus): a second recognizer re-reads the text
     # regions of scanned pages and the regions where the two disagree most are
     # escalated. Off until a backend is named; only server or cloud clients

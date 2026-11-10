@@ -458,3 +458,74 @@ def test_the_fallback_warning_is_recorded_once_and_only_for_the_fallback():
     [warning] = fs.warnings
     assert warning.code == WarningCode.OCR_BACKEND_UNAVAILABLE
     assert "glm-llama: llama.cpp not installed" in warning.message
+
+
+# --- A scan's embedded OCR layer (OCR_TEXT_LAYER_READ_OCR_LAYER) -------------------
+
+_OCR_LAYER_LINES = [
+    "We measured the reading speed of the participants in the two groups and",
+    "found that the effect of the training was larger than in the earlier work.",
+    "The results show that the method is robust to the choice of the stimuli,",
+    "and that it can be used with the samples that are common in the field.",
+    "This is in line with the theory of the authors, but it is not a proof of",
+    "the model, which was tested on a larger set of data from the same lab.",
+]
+
+
+def _scan_with_ocr_layer(tmp_path) -> Path:
+    from tests.document._pdfs import PAGE_H, PAGE_W, PageSpec, build_pdf, image, text
+
+    layer = b"".join(
+        text(line, 72.0, 700.0 - 14.0 * k, mode=3) for k, line in enumerate(_OCR_LAYER_LINES)
+    )
+    pdf = tmp_path / "scan-with-ocr-layer.pdf"
+    pdf.write_bytes(build_pdf([PageSpec(image(PAGE_W, PAGE_H) + layer)]))
+    return pdf
+
+
+class _ParagraphLayout:
+    loaded = True
+
+    async def detect_batch(self, images_list):
+        from tests.document._pdfs import PAGE_H, PAGE_W
+
+        box = [60 / PAGE_W * 1000, (PAGE_H - 714) / PAGE_H * 1000, 560 / PAGE_W * 1000, 0.0]
+        box[3] = (PAGE_H - (700 - 14 * 5 - 6)) / PAGE_H * 1000
+        return [[smoke._layout_region(0, "text", box)] for _ in images_list]
+
+
+async def test_a_scan_with_an_ocr_layer_is_refused_with_a_pointer_to_the_option(
+    tmp_path, monkeypatch, created_backends
+):
+    pipeline, _ = _pipeline(monkeypatch, layout=_ParagraphLayout(), ocr_backend="text-layer")
+
+    with pytest.raises(ProcessingError) as raised:
+        await _run(pipeline, _scan_with_ocr_layer(tmp_path))
+
+    assert raised.value.error_code == "scan_needs_ocr"
+    message = str(raised.value)
+    assert "the text layer is invisible (an OCR layer over a scanned image)" in message
+    assert "OCR_TEXT_LAYER_READ_OCR_LAYER=true" in message
+
+
+async def test_a_scan_without_an_ocr_layer_gets_no_pointer(tmp_path, monkeypatch, created_backends):
+    pipeline, _ = _pipeline(monkeypatch, ocr_backend="text-layer")
+
+    with pytest.raises(ProcessingError) as raised:
+        await _run(pipeline, SCANNED)
+
+    assert "OCR_TEXT_LAYER_READ_OCR_LAYER" not in str(raised.value)
+
+
+async def test_a_scan_is_read_from_its_ocr_layer_when_the_option_is_on(
+    tmp_path, monkeypatch, created_backends
+):
+    monkeypatch.setattr(Settings.ocr, "text_layer_read_ocr_layer", True)
+    pipeline, _ = _pipeline(monkeypatch, layout=_ParagraphLayout(), ocr_backend="text-layer")
+
+    result = await _run(pipeline, _scan_with_ocr_layer(tmp_path))
+
+    body = " ".join(entry["text"] for entry in result["text"])
+    assert "reading speed of the participants" in body
+    assert "TEXT_LAYER_OCR_LAYER_READ" in _codes(result)
+    assert set(created_backends) <= {registry.TEXT_LAYER_BACKEND}

@@ -43,6 +43,7 @@ class WarningCode(StrEnum):
     TEXT_LAYER_PRIVATE_USE_DROPPED = "TEXT_LAYER_PRIVATE_USE_DROPPED"
     TEXT_LAYER_GLYPHS_UNMAPPED = "TEXT_LAYER_GLYPHS_UNMAPPED"
     TEXT_LAYER_READ_ERROR = "TEXT_LAYER_READ_ERROR"
+    TEXT_LAYER_OCR_LAYER_READ = "TEXT_LAYER_OCR_LAYER_READ"
     SCAN_ARTICLE_SPLIT = "SCAN_ARTICLE_SPLIT"
     LOW_TEXT_QUALITY = "LOW_TEXT_QUALITY"
     PAGE_DPI_REDUCED = "PAGE_DPI_REDUCED"
@@ -152,6 +153,9 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     "there.",
     WarningCode.TEXT_LAYER_READ_ERROR: "bibr failed while reading layout regions from the PDF "
     "text layer (a fault in bibr, not in the PDF); those regions are empty. Please report it.",
+    WarningCode.TEXT_LAYER_OCR_LAYER_READ: "Scanned pages were read from the OCR text layer the "
+    "PDF carries (OCR_TEXT_LAYER_READ_OCR_LAYER), not by an OCR model; that layer is the "
+    "scanner's or publisher's reading and is often less accurate than OCR.",
     WarningCode.SCAN_ARTICLE_SPLIT: "Regions of neighbouring articles on scanned pages (the "
     "previous article's tail, the next article's start, floats above the title) were dropped "
     "before parsing.",

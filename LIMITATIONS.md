@@ -214,6 +214,13 @@ Known caveats:
   is not worth retrying. The routes that read it are `--ocr anthropic` (the page
   images leave your machine), a GPU OCR server (`--ocr paddle` starts PaddleOCR-VL,
   `--ocr-url` points at one you run), or the hosted demo.
+- Many scans carry an OCR text layer of their own: invisible text over the page
+  image, added by the scanner or the publisher. This route leaves it unread by
+  default, because it is somebody else's OCR and is often less accurate than an
+  OCR model. `OCR_TEXT_LAYER_READ_OCR_LAYER=true` reads it, for pages where the
+  image covers the page, and names those pages in a `TEXT_LAYER_OCR_LAYER_READ`
+  warning. A scan cropped to its text block, or with no such layer, is still
+  refused. How well papers read this way score has not been measured.
 - This route has not been validated as the other rows of the table above have, and
   its accuracy on tables and formulas is not measured on its own.
 - `bibr serve` always reads PDFs through its OCR server (`OCR_BASE_URL`) and does not

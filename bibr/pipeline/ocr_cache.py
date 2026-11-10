@@ -190,6 +190,12 @@ def _key(
         f"native_text_hidden={HIDDEN_TEXT_RULE}",
         "native_text_reject_invisible_layer="
         f"{int(effective.ocr.native_text_reject_invisible_layer)}",
+        # Off adds nothing, so every key written before the option stays valid.
+        *(
+            ["text_layer_read_ocr_layer=1"]
+            if effective.ocr.text_layer_read_ocr_layer is True
+            else []
+        ),
         f"outline_headings={int(effective.pipeline.outline_headings)}",
         f"ref_seg={_effective_ref_seg(cfg, effective)}",
         # Which *weights* produced the cached artifacts. A complete entry lets

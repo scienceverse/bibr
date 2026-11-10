@@ -118,6 +118,15 @@ server or a backend written to `.env` still reads scans.
   It is off by default.
 - `LIMITATIONS.md` lists what the text-layer route reads less well: tables,
   formulas, private-use glyphs and scans.
+- `OCR_TEXT_LAYER_READ_OCR_LAYER=true` lets the text-layer route read a scan
+  from the OCR text layer the PDF carries (invisible text over an image that
+  covers the page, as scanners and publishers add to make a scan searchable)
+  instead of refusing it. It is off by default: that layer is somebody else's
+  OCR and is often less accurate than an OCR model. A page read this way passes
+  the same checks as printed text, and the export names such pages in a
+  `TEXT_LAYER_OCR_LAYER_READ` warning. Invisible text on a page with no
+  page-sized image stays unread. The refusal of a scan that has such a layer
+  now names the setting.
 
 ### Added — export schema 12.4 (additive)
 

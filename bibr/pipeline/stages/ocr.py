@@ -1177,7 +1177,7 @@ class OcrStage:
         batch skips it until the user picks an OCR route.
         """
         from bibr.ocr.registry import SCAN_NEEDS_OCR_ROUTES
-        from bibr.ocr.text_layer import page_verdict_summary
+        from bibr.ocr.text_layer import has_unread_ocr_layer, page_verdict_summary
         from bibr.scan.page_kind import _TEXT_LABELS
 
         needed = 0
@@ -1202,6 +1202,11 @@ class OcrStage:
             f"{f'; {verdicts}' if verdicts else ''}). This looks like a scanned PDF, or "
             f"one whose fonts carry no usable text, and needs {SCAN_NEEDS_OCR_ROUTES}"
         )
+        if has_unread_ocr_layer(fs):
+            msg += (
+                ". The PDF carries its own OCR text layer: OCR_TEXT_LAYER_READ_OCR_LAYER=true "
+                "reads that instead (less accurate than an OCR model)"
+            )
         fs.set_error(msg, code="scan_needs_ocr", stage="ocr")
         logger.warning("%s: %s", fs.path.name, msg)
 
