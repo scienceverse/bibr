@@ -494,6 +494,31 @@ def test_table_region_marks_unmapped_glyphs_and_drops_private_use():
     assert region["_private_use_dropped"] == 1
 
 
+def test_table_region_reads_a_letter_composed_with_its_accent():
+    # "x" under a circumflex has no single code point, so the page reader hands
+    # the pair over as one glyph of two characters (an estimate in a statistics
+    # table). Reading it as one character raised, and the paper lost its text layer.
+    from bibr.ocr.text_layer import _fill_region, _PageText
+
+    glyphs = _table_glyphs(_SMALL_TABLE)
+    glyphs += [("x\u0302", 100, 90, 104, 100)] + _glyphs("=1", 106, 90)
+    # A private-use glyph of two code points, right before a composed letter.
+    glyphs += [("\ue000\ue001", 200, 90, 204, 100), ("d\u0304", 206, 90, 210, 100)]
+    page = _PageText(
+        0, (0, 0, 595, 842), 0, len(glyphs), False, [], [(ch, box) for ch, *box in glyphs], []
+    )
+    region = _region("table", [0, 0, 1000, 1000], task="table")
+
+    assert _fill_region(page, region, min_printable_ratio=0.85) == "filled"
+
+    last = " ".join(_cells(region["content"])[-1])
+    assert "x\u0302=1" in last and "d\u0304" in last
+    assert "\ue000" not in region["content"]
+    assert region["_private_use_dropped"] == 1
+    assert region["_private_use_inside"] == 1
+    assert "_unmapped_glyphs" not in region
+
+
 # --- Page gates ----------------------------------------------------------------
 
 

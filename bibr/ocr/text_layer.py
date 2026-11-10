@@ -428,14 +428,16 @@ def _clean_table_chars(chars: list[_TableChar], region: dict[str, Any]) -> list[
     kept: list[_TableChar] = []
     dropped = inside = unmapped = 0
     for index, glyph in enumerate(chars):
+        # A glyph is one code point, or a letter and the accent composed onto it
+        # when Unicode has no single code point for the pair ("x" + U+0302).
         ch = glyph[0]
-        if ch and unicodedata.category(ch) == "Co":
+        if ch and all(unicodedata.category(c) == "Co" for c in ch):
             dropped += 1
             following = chars[index + 1][0] if index + 1 < len(chars) else ""
-            inside += bool(following) and following.isalnum()
+            inside += following[:1].isalnum()
             continue
         # The separator controls (U+001C..U+001F) count as whitespace and only end a word.
-        if ch and not ch.isspace() and _is_disallowed_control_char(ch):
+        if ch and not ch.isspace() and any(_is_disallowed_control_char(c) for c in ch):
             unmapped += 1
             glyph = (_UNMAPPED_GLYPH, *glyph[1:])
         kept.append(glyph)
