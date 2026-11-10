@@ -22,6 +22,7 @@ from bibr.local.cli.inputs import (
 from bibr.local.cli.run_config import (
     ResolvedRunConfig,
     _apply_runtime_settings,
+    _preflight_front_tagger,
     _preflight_local_backend,
     _preflight_ocr_runtime,
     _preflight_opencv,
@@ -539,6 +540,12 @@ async def _run_process(args) -> None:
         ocr_reason = _preflight_ocr_runtime(config)
         if ocr_reason is not None:
             ui.error(console, escape(ocr_reason))
+            sys.exit(1)
+        # A fast run reads the front matter with the tagger alone; without its
+        # bundle every paper would come out with no title, authors or abstract.
+        tagger_reason = _preflight_front_tagger(config)
+        if tagger_reason is not None:
+            ui.error(console, escape(tagger_reason))
             sys.exit(1)
 
     # Fail fast on missing LLM credentials, after the inputs resolved so a

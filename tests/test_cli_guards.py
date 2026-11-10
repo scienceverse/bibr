@@ -538,3 +538,96 @@ async def test_a_fast_run_that_chose_paddle_ocr_keeps_the_gpu_route(
     built = _RecordingPipeline.built[0]
     assert built["ocr_backend"] == "paddle"
     assert built["ocr_requested"] is True
+
+
+# --- Fast mode needs the front-matter tagger ----------------------------------
+
+
+async def test_fast_refuses_to_start_when_the_tagger_bundle_is_missing(
+    tmp_path, first_run, monkeypatch, capsys
+):
+    """Without the bundle every paper would come out with no title, authors or abstract."""
+    from bibr.local.cli import _build_parser, _run_process
+
+    monkeypatch.setattr(
+        "bibr.local.cli.run_config._front_tagger_bundle", lambda model_id, revision: None
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--fast"]))
+
+    assert exc_info.value.code == 1
+    assert _RecordingPipeline.built == []
+    err = " ".join(capsys.readouterr().err.split())
+    assert "front-matter tagger" in err
+    assert "scienceverse/bibr-front-tagger" in err
+    assert "was not found" in err
+    assert "ML_FRONT_TAGGER_MODEL_ID" in err
+
+
+async def test_fast_reports_a_network_failure_as_one(tmp_path, first_run, monkeypatch, capsys):
+    from bibr.local.cli import _build_parser, _run_process
+
+    def unreachable(model_id, revision):
+        raise ConnectionError("Hub unreachable")
+
+    monkeypatch.setattr("bibr.local.cli.run_config._front_tagger_bundle", unreachable)
+
+    with pytest.raises(SystemExit) as exc_info:
+        await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--fast"]))
+
+    assert exc_info.value.code == 1
+    err = " ".join(capsys.readouterr().err.split())
+    assert "could not be downloaded (Hub unreachable)" in err
+    assert "network connection" in err
+
+
+def test_the_tagger_check_names_the_pinned_revision(monkeypatch):
+    from types import SimpleNamespace
+
+    from bibr.config import GlobalSettings
+    from bibr.local.cli.run_config import _preflight_front_tagger
+
+    settings = GlobalSettings()
+    settings.ml.front_tagger_revision = "abc123"
+    monkeypatch.setattr("bibr.config.Settings", settings)
+    asked = []
+
+    def missing(model_id, revision):
+        asked.append((model_id, revision))
+        return None
+
+    monkeypatch.setattr("bibr.local.cli.run_config._front_tagger_bundle", missing)
+
+    problem = _preflight_front_tagger(SimpleNamespace(mode="fast", no_llm=False))
+
+    assert asked == [("scienceverse/bibr-front-tagger", "abc123")]
+    assert "scienceverse/bibr-front-tagger@abc123" in problem
+
+
+@pytest.mark.parametrize(
+    ("mode", "no_llm", "model_id"),
+    [
+        ("full", False, "scienceverse/bibr-front-tagger"),  # an LLM reads the front matter
+        ("fast", True, "scienceverse/bibr-front-tagger"),  # --no-llm never loads the tagger
+        ("fast", False, None),  # a null id is a choice to run without it
+    ],
+)
+def test_the_tagger_check_is_skipped_when_the_run_does_not_load_it(
+    monkeypatch, mode, no_llm, model_id
+):
+    from types import SimpleNamespace
+
+    from bibr.config import GlobalSettings
+    from bibr.local.cli.run_config import _preflight_front_tagger
+
+    settings = GlobalSettings()
+    settings.ml.front_tagger_model_id = model_id
+    monkeypatch.setattr("bibr.config.Settings", settings)
+
+    def never(model_id, revision):
+        raise AssertionError("the bundle must not be looked up")
+
+    monkeypatch.setattr("bibr.local.cli.run_config._front_tagger_bundle", never)
+
+    assert _preflight_front_tagger(SimpleNamespace(mode=mode, no_llm=no_llm)) is None

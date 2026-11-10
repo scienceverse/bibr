@@ -463,6 +463,56 @@ def _preflight_ocr_runtime(config: ResolvedRunConfig) -> str | None:
     return _ocr_runtime_blocker(config.ocr_backend, llm_backend=_run_llm_backend(config))
 
 
+def _front_tagger_bundle(model_id: str, revision: str | None) -> Path | None:
+    """The tagger's ONNX bundle as the pipeline finds it; network failures are raised."""
+    from bibr.utils.ml_runtime import find_onnx_bundle
+
+    return find_onnx_bundle(model_id, revision, label="front-matter tagger", raise_transient=True)
+
+
+def _preflight_front_tagger(config: ResolvedRunConfig) -> str | None:
+    """Fail fast when a fast run cannot load the front-matter tagger.
+
+    A fast run takes the title, the authors and the abstract from the tagger
+    alone. Without its bundle the pipeline goes on, exports every paper with
+    those fields empty and a warning, and exits 0. The bundle is resolved the
+    way the pipeline resolves it (a download on a first run, the cache after
+    that), so a run that passes the check does not download it twice. A null
+    ``ML_FRONT_TAGGER_MODEL_ID`` is a choice to run without the tagger and is
+    not checked.
+    """
+    if getattr(config, "mode", "full") != "fast" or config.no_llm:
+        return None
+    from bibr.config import Settings
+
+    ml = Settings.ml
+    model_id = ml.front_tagger_model_id
+    if not model_id:
+        return None
+    revision = ml.front_tagger_revision or None
+    name = f"{model_id}@{revision}" if revision else str(model_id)
+    lead = (
+        "Fast mode reads the title, the authors and the abstract with the front-matter "
+        f"tagger, and its model ({name}) "
+    )
+    tail = " Without it every paper would be exported with those fields empty."
+    try:
+        bundle = _front_tagger_bundle(str(model_id), revision)
+    except Exception as exc:  # noqa: BLE001 - raise_transient passes on network failures only
+        detail = str(exc).splitlines()[0][:200] if str(exc) else type(exc).__name__
+        return (
+            f"{lead}could not be downloaded ({detail}).{tail} Check the network connection "
+            "and run again; a bundle that is already downloaded is used offline."
+        )
+    if bundle is None:
+        return (
+            f"{lead}was not found.{tail} Check ML_FRONT_TAGGER_MODEL_ID (a Hub repo id or a "
+            "local directory that holds an onnx/ bundle) and ML_FRONT_TAGGER_REVISION, or "
+            "run without --fast to read the front matter with an LLM."
+        )
+    return None
+
+
 def _run_llm_backend(config: ResolvedRunConfig) -> str:
     """The LLM backend whose server the run starts: ``cloud`` under ``--no-llm`` or fast."""
     # ``getattr``: the preflights also take any object shaped like the config.

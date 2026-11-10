@@ -209,6 +209,7 @@ def _local_options(args: Any, console: Any) -> Any:
     from bibr.local.cli.dry_run import announce_downloads
     from bibr.local.cli.run_config import (
         _apply_runtime_settings,
+        _preflight_front_tagger,
         _preflight_ocr_runtime,
         _preflight_opencv,
         apply_text_layer_fallback,
@@ -238,6 +239,9 @@ def _local_options(args: Any, console: Any) -> Any:
                 warned = True
                 ui.warn(console, fallback_warning)
             problem = _preflight_ocr_runtime(config)
+            if problem is not None:
+                return problem
+            problem = _preflight_front_tagger(config)
             if problem is not None:
                 return problem
         if not announced:

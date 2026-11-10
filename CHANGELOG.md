@@ -130,6 +130,16 @@ by an earlier version, carries neither.
 
 ### Changed
 
+- `bibr chew --fast` and `bibr batch --fast` now check, before the first PDF,
+  that the front-matter tagger's model can be loaded, and stop with exit code 1
+  when it cannot. A fast run reads the title, the authors and the abstract with
+  that model alone. Before, a run that could not find or download it went on,
+  exported every paper with those three fields empty and a
+  `FRONT_TAGGER_UNAVAILABLE` warning, and exited 0. The message says whether
+  the model was not found or could not be downloaded. The check resolves the
+  model the way the run does, so nothing is downloaded twice, and a model that
+  is already downloaded passes offline. A null `ML_FRONT_TAGGER_MODEL_ID` still
+  runs without the tagger. Library calls and `bibr serve` are unchanged.
 - On the CPU, bibr's ONNX models (layout, sentence segmenter, reference parser,
   section and paper classifiers, front-matter tagger) now size each session's
   thread pool to the CPUs the process may run on, and idle workers block

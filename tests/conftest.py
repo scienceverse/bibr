@@ -262,6 +262,20 @@ def _no_pinned_build_downloads(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def _front_tagger_bundle_present(monkeypatch, tmp_path_factory):
+    """Keep ``bibr chew --fast`` and ``bibr batch --fast`` off the Hub.
+
+    Before a fast run starts, the CLI resolves the front-matter tagger's bundle
+    (``bibr.local.cli.run_config._preflight_front_tagger``), which downloads it
+    on a first run. Tests that run those commands with a fake pipeline get a
+    path that is never opened; tests of the check replace this themselves."""
+    monkeypatch.setattr(
+        "bibr.local.cli.run_config._front_tagger_bundle",
+        lambda model_id, revision: Path("front-tagger-bundle-for-tests") / "onnx",
+    )
+
+
+@pytest.fixture(autouse=True)
 def _no_llm_server_context_probe(monkeypatch):
     """Keep ``LLMClient`` from asking an ``LLM_BASE_URL`` server for its
     context window before the first call. Tests that point a client at a
