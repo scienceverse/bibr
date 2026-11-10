@@ -1,6 +1,7 @@
 """Tests for local pipeline chunked processing (FileState, _alive, _auto_batch_size)."""
 
 import concurrent.futures
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -430,6 +431,67 @@ class TestMemoryModeSetting:
         assert lp._default_memory_mode() == "aggressive"
         monkeypatch.setattr(lp, "_get_system_memory_gb", lambda: 32.0)
         assert lp._default_memory_mode() == "balanced"
+
+    @staticmethod
+    def _cgroup_tree(tmp_path, *, own="/", files=None):
+        """A fake /proc/self/cgroup and /sys/fs/cgroup; *files* maps relative path to content."""
+        proc = tmp_path / "proc_cgroup"
+        proc.write_text(f"0::{own}\n")
+        root = tmp_path / "cg"
+        root.mkdir()
+        for rel, content in (files or {}).items():
+            target = root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        return str(proc), str(root)
+
+    def test_cgroup_memory_limit_takes_the_smallest_limit_up_the_tree(self, tmp_path):
+        from bibr.local.pipeline import _cgroup_memory_limit_bytes
+
+        proc, root = self._cgroup_tree(
+            tmp_path,
+            own="/job/step",
+            files={
+                "job/step/memory.max": "max\n",
+                "job/memory.max": f"{6 * 1024**3}\n",
+                "memory.max": f"{16 * 1024**3}\n",
+            },
+        )
+        assert _cgroup_memory_limit_bytes(proc, root) == 6 * 1024**3
+
+    def test_cgroup_memory_limit_is_none_without_a_limit(self, tmp_path):
+        from bibr.local.pipeline import _cgroup_memory_limit_bytes
+
+        proc, root = self._cgroup_tree(tmp_path, files={"memory.max": "max\n"})
+        assert _cgroup_memory_limit_bytes(proc, root) is None
+        assert _cgroup_memory_limit_bytes(str(tmp_path / "absent"), str(tmp_path / "none")) is None
+
+    def test_cgroup_memory_limit_reads_cgroup_v1(self, tmp_path):
+        from bibr.local.pipeline import _cgroup_memory_limit_bytes
+
+        proc, root = self._cgroup_tree(
+            tmp_path, files={"memory/memory.limit_in_bytes": f"{4 * 1024**3}\n"}
+        )
+        assert _cgroup_memory_limit_bytes(proc, root) == 4 * 1024**3
+
+    @pytest.mark.skipif(not hasattr(os, "sysconf"), reason="reads RAM through os.sysconf")
+    def test_system_memory_is_the_cgroup_limit_when_that_is_smaller(self, monkeypatch):
+        import bibr.local.pipeline as lp
+
+        # A machine with 64 GB: 4 KiB pages. macOS and Windows never reach this branch.
+        monkeypatch.setattr(lp.os, "name", "posix")
+        monkeypatch.setattr(
+            lp.os, "sysconf", lambda key: 4096 if key == "SC_PAGE_SIZE" else 64 * 1024**3 // 4096
+        )
+        monkeypatch.setattr("subprocess.run", MagicMock(return_value=MagicMock(returncode=1)))
+        monkeypatch.setattr(lp, "_cgroup_memory_limit_bytes", lambda: 8 * 1024**3)
+        assert lp._get_system_memory_gb() == 8.0
+        assert lp._auto_memory_mode(None, None, lp._get_system_memory_gb()) == "aggressive"
+        # cgroup v1 writes "no limit" as a number near 2**63: the machine's RAM stands.
+        monkeypatch.setattr(lp, "_cgroup_memory_limit_bytes", lambda: 2**63 - 4096)
+        assert lp._get_system_memory_gb() == 64.0
+        monkeypatch.setattr(lp, "_cgroup_memory_limit_bytes", lambda: None)
+        assert lp._get_system_memory_gb() == 64.0
 
     def test_auto_memory_mode_rule(self):
         from bibr.local.pipeline import _auto_memory_mode

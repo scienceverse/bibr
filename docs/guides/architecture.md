@@ -395,7 +395,8 @@ Memory management modes control GPU VRAM usage: `aggressive` (load/unload per ph
 
 Auto-selection uses `aggressive` with ≤8 GB system RAM, a CUDA card below 12 GB
 that a managed local LLM server shares, or a CUDA card of 8 GB or less;
-otherwise it uses `balanced`. With a cloud LLM and non-aggressive memory
+otherwise it uses `balanced`. On Linux, system RAM is the machine's RAM or a
+smaller cgroup memory limit (a container, or a batch job's allocation). With a cloud LLM and non-aggressive memory
 mode, `PIPELINE_STREAM_BACKHALF=true` allows completed files' parsing,
 extraction, enrichment, and export to overlap subsequent OCR work. Managed
 local LLMs retain the stage barrier for the OCR-to-LLM memory handoff.

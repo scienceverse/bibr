@@ -41,8 +41,41 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _cgroup_memory_limit_bytes(
+    proc_cgroup: str = "/proc/self/cgroup", fs_root: str = "/sys/fs/cgroup"
+) -> int | None:
+    """Bytes a cgroup memory limit allows (``docker --memory``, Kubernetes, Slurm), or ``None``.
+
+    Reads cgroup v2 ``memory.max`` of the process's cgroup and of every parent (the
+    smallest limit wins), then cgroup v1 ``memory.limit_in_bytes``. cgroup v1 writes
+    "no limit" as a number near 2**63; the caller takes the smaller of this and the
+    machine's RAM, so that needs no special case here.
+    """
+    from bibr.utils.onnx_providers import _cgroup_v2_dirs
+
+    def read(path: str) -> int | None:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                value = int(fh.read().split()[0])  # "max" is no limit: ValueError
+        except (OSError, ValueError, IndexError):
+            return None
+        return value if value > 0 else None
+
+    limits = [
+        read(os.path.join(folder, "memory.max")) for folder in _cgroup_v2_dirs(proc_cgroup, fs_root)
+    ]
+    found = [limit for limit in limits if limit is not None]
+    if found:
+        return min(found)
+    return read(os.path.join(fs_root, "memory", "memory.limit_in_bytes"))
+
+
 def _get_system_memory_gb() -> float:
-    """Detect total system RAM in GB on Windows, macOS, and Linux."""
+    """RAM this process can use, in GB, on Windows, macOS and Linux.
+
+    The machine's physical RAM; on Linux, a smaller cgroup memory limit instead
+    (a container or a batch job given 8 GB on a 64 GB host has 8 GB).
+    """
     if os.name == "nt":
         try:
             import ctypes
@@ -83,9 +116,11 @@ def _get_system_memory_gb() -> float:
         pass
     # Linux: os.sysconf
     try:
-        pages = os.sysconf("SC_PHYS_PAGES")
-        page_size = os.sysconf("SC_PAGE_SIZE")
-        return (pages * page_size) / (1024**3)
+        total = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+        limit = _cgroup_memory_limit_bytes()
+        if limit is not None:
+            total = min(total, limit)
+        return total / (1024**3)
     except (ValueError, OSError):
         pass
     return 16.0  # safe default

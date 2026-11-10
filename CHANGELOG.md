@@ -186,6 +186,11 @@ by an earlier version, carries neither.
 
 ### Fixed
 
+- On Linux, the memory mode and the batch size chosen from it now follow a cgroup
+  memory limit when it is smaller than the machine's RAM. In a container or a batch
+  job given 8 GB on a larger host, bibr read the host's RAM, chose `balanced` and
+  could be killed for memory; it now chooses `aggressive`, as on an 8 GB machine.
+  `bibr setup` reports the same figure.
 - Choosing fast mode when `bibr setup` merges into an existing `.env` now comments
   out an `OCR_BACKEND`, `OCR_MODEL` or `OCR_PROFILE` left by an earlier setup, and
   says so. Fast mode reads the PDF's text layer and setup says document contents

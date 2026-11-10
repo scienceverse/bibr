@@ -454,14 +454,13 @@ def _read_quota(quota_file: str, period_file: str | None = None) -> float | None
         return None
 
 
-def _cgroup_cpu_limit(
+def _cgroup_v2_dirs(
     proc_cgroup: str = "/proc/self/cgroup", fs_root: str = "/sys/fs/cgroup"
-) -> float | None:
-    """CPUs the cgroup CPU quota allows (``docker --cpus``, Kubernetes limits), or ``None``.
+) -> list[str]:
+    """The process's cgroup v2 folder and every parent up to the mount root, deepest first.
 
-    Reads cgroup v2 ``cpu.max`` of the process's cgroup and of every parent up to
-    the mount root (the smallest quota wins; inside a container the root is the
-    container's own cgroup), then cgroup v1 ``cpu.cfs_quota_us``.
+    Inside a container the root is the container's own cgroup. Only the root is
+    returned when ``/proc/self/cgroup`` cannot be read or names no v2 hierarchy.
     """
     parts: list[str] = []
     try:
@@ -472,9 +471,21 @@ def _cgroup_cpu_limit(
                     parts = [p for p in rest.partition(":")[2].split("/") if p]
     except (OSError, UnicodeDecodeError):
         pass
+    return [os.path.join(fs_root, *parts[:depth]) for depth in range(len(parts), -1, -1)]
+
+
+def _cgroup_cpu_limit(
+    proc_cgroup: str = "/proc/self/cgroup", fs_root: str = "/sys/fs/cgroup"
+) -> float | None:
+    """CPUs the cgroup CPU quota allows (``docker --cpus``, Kubernetes limits), or ``None``.
+
+    Reads cgroup v2 ``cpu.max`` of the process's cgroup and of every parent up to
+    the mount root (the smallest quota wins; inside a container the root is the
+    container's own cgroup), then cgroup v1 ``cpu.cfs_quota_us``.
+    """
     quotas = [
-        _read_quota(os.path.join(fs_root, *parts[:depth], "cpu.max"))
-        for depth in range(len(parts), -1, -1)
+        _read_quota(os.path.join(folder, "cpu.max"))
+        for folder in _cgroup_v2_dirs(proc_cgroup, fs_root)
     ]
     found = [q for q in quotas if q is not None]
     if found:
