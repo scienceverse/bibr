@@ -68,6 +68,13 @@ that is off by default and that fast mode turns on, so a full run, and a
   the country agreed in more than nine in ten rows and the city in about three
   in four; the institution and department agreed less often, so they stay
   empty for the LLM.
+- `python -m bibr.export.compare RUN_A RUN_B` compares two folders of exports by
+  content and counts what differs per place in the schema. It leaves out the run
+  stamps (`extraction.completed_at`, `timings`, `producer`), treats numbers
+  closer than 0.0001 as equal, and exits 1 when anything else differs. Fast
+  runs of one build on the text-layer route gave the same content for 60 papers
+  on two machines, so there the comparison works as a regression check. See
+  "Comparing two runs" in the batch guide.
 - The `LLM_SKIPPED` message now names only what the run left undone: author
   roles, and the funders and affiliation parts the rules did not read.
 

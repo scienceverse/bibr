@@ -283,6 +283,36 @@ remotely, the serve's `error_code` when it gave one, else `http_<status>`,
 `bad_submit_response`, `bad_result_json`, `invalid_remote_export`,
 `client_error`, `unreadable_input`, `interrupted`.
 
+## Comparing two runs
+
+`python -m bibr.export.compare RUN_A RUN_B` compares the exports of two output
+folders paper by paper, matched by file name, and counts what differs per place
+in the schema:
+
+```
+60 papers in both folders: 57 the same, 3 differ (2 outside the extraction record)
+papers  places  kind     path
+     2       2  length   .affiliation[]
+     1       1  value    .extraction.warnings[].message
+```
+
+It leaves out what a run writes about itself (`extraction.completed_at`,
+`extraction.timings`, `extraction.producer`) and treats two numbers closer than
+`--tolerance` (default 0.0001) as equal, because classifier scores differ in
+their last digits between CPUs. Whole numbers are compared exactly. Rows are
+compared by position, and two lists of different length count as one `length`
+difference. It exits 0 when both folders hold the same content and 1 otherwise,
+so it can gate a script; `--json` prints the counts and the changed papers.
+
+On the CPU path (`--fast` on the text-layer route) two runs of one build should
+give the same content, so a difference there is a change in what bibr read. In
+our check, 60 papers run on two x86 desktops, one of them capped at 8 GB and so
+in the other memory mode, came out the same; the largest score difference was
+0.0000016. A route through an OCR or LLM server is not exactly repeatable, and
+the comparison says little about it. The same functions
+are importable: `bibr.export.compare.diff_exports` for two exports and
+`compare_export_dirs` for two folders.
+
 ## Reading the report
 
 `bibr batch report <out>` (or `--report`, and `--json` for the same as JSON)
