@@ -788,7 +788,7 @@ setting and once with it. No other setting changes:
 |---|---|---|
 | Reference parser | `NER_PARSER_CKPT` | ONNX bundle directory (`model: ner_parser`) |
 | Geometry reference segmenter | `REF_GEOM_SEG_MODEL_ID` | `.joblib` bundle file |
-| Geometry line tagger | `REF_GEOM_TAGGER_MODEL_ID` | directory with `gate.json` and `tagger.onnx` + `tagger.json` (beside it or in `onnx/`) |
+| Geometry line tagger | `REF_GEOM_TAGGER_MODEL_ID` | directory with `gate.json` and `tagger.onnx` + `tagger.json` (beside it or in `onnx/`), or a Hub repo id |
 | CRF reference segmenter | `NER_SEG_CKPT` | checkpoint file (`torch` extra) |
 | Front-role classifier | `ML_FRONT_ROLE_MODEL_ID` | `.joblib` bundle file |
 | Front-matter tagger | `ML_FRONT_TAGGER_MODEL_ID` | ONNX bundle directory |
@@ -796,35 +796,61 @@ setting and once with it. No other setting changes:
 | Paper classifier | `ML_PAPER_CLASSIFIER_MODEL_ID` | ONNX bundle directory (`model: paper_classifier`) |
 
 A setting is an *override* when its value, or its revision, differs from the
-shipped default. Three rules apply to overrides only, so a run on the shipped
-models behaves and exports exactly as before:
+shipped default. That includes a mirror of a shipped model, an offline copy
+of it, and the shipped repo at another revision such as `main`: all of these
+are recorded as overrides, and all of them load and run as before. Four rules
+apply to overrides only, so a run on the shipped models behaves and exports
+exactly as before:
 
-- **Checked first.** `bibr chew` and `bibr batch` check every override that is a
-  local path before the first paper: the path must exist and hold a model of
-  the right kind in a format this bibr runs. A problem stops the run with a
-  message naming the setting. A Hub id is checked when it loads.
-- **No fallback.** Several shipped models are optional: when one cannot load,
-  the run goes on without it (heuristics for the front-role prior, the next
-  segmentation tier for the geometry models, the LLM for the classifiers and
-  the front-matter tagger). An override that cannot load stops the run
-  instead, and an overridden classifier is required whatever
-  `ML_CLASSIFIERS_REQUIRED` says, so a comparison never measures the shipped
-  path under the candidate's name.
-- **Identity recorded.** Each loaded override logs the sha256 of every file
-  it read, and `bibr batch` writes the same records to `run_info.json` under
-  `model_overrides` (setting, value, revision, and each file's path, size and
-  sha256). The key is absent for a run on the shipped models. Per-paper
-  exports do not carry model identity.
+- **A model that does not exist stops the run.** When the named model cannot
+  be loaded for a permanent reason (the path is missing; the Hub has no such
+  repo, revision or file; a file is unreadable or of the wrong kind; the
+  bundle fails its contract check), the run stops with an error naming the
+  setting, instead of going on without the model, so a comparison never
+  measures the shipped path, or no model, under the candidate's name. `bibr
+  chew` exits with status 1; `bibr batch` marks the papers it was running as
+  `model_override_failed` (a resumed run takes them again) and stops. This is
+  the only change in behaviour, and it reaches only a setting that names a
+  model that is not there.
+- **Everything else behaves as for the shipped model.** A network failure or
+  timeout while fetching from the Hub is handled exactly as for a default
+  setting: the front-role prior and the front-matter tagger try again at the
+  next paper, a classifier is degraded (or, with `ML_CLASSIFIERS_REQUIRED`, an
+  outage a resumed batch retries). A missing optional dependency (the `torch`
+  extra for `NER_SEG_CKPT`) leaves the tier out, as it would with the default.
+  An error on one paper's inference is that paper's, as before.
+- **Checked first.** `bibr chew` and `bibr batch` check every local-path
+  override this run will load (given its mode, `--refs` and `--ref-seg`)
+  before the first paper: the path must exist and hold a model of the right
+  kind in a format this bibr runs. A problem stops the run with one line
+  naming the setting; a stale setting for a model the run does not use is
+  ignored, and a model the run will go without (the CRF segmenter without
+  `torch`) gets a warning line. A Hub id is checked when it loads.
+- **Recorded per run.** Each loaded override logs the sha256 of every file it
+  read, and `bibr batch` writes one record per override to `run_info.json`
+  under `model_overrides`: setting, value, revision, `loaded` (`true` with
+  each file's path, size and sha256, or `false` with a short `reason` such as
+  `not used in this run` or `torch extra not installed`). The key is absent
+  for a run on the shipped models. Per-paper exports do not carry model
+  identity.
 
 `REF_GEOM_TAGGER_MODEL_ID` is unset by default and adds a tier rather than
-replacing one: with `REF_SEG_STRATEGY=geom` the tagger is asked first, and its
-answer is taken when its calibrated paper confidence reaches the threshold in
-its `gate.json` and the geometry tier's own checks (alignment yield, segment
-count against the layout's reference onsets) pass. Otherwise the shipped
-geometry segmenter and the rest of the cascade run unchanged. The export's
-reference diagnostics list it as a `geom_tagger` attempt. The tagger reads the
-same 29 line features as the shipped geometry segmenter, in sorted name order,
-and needs only ONNX Runtime.
+replacing one. It takes a local directory or a Hub repo id (with
+`REF_GEOM_TAGGER_REVISION`; `gate.json` at the top, `tagger.onnx` and
+`tagger.json` in `onnx/`); a Hub-shaped id is never read from the working
+directory, so write a local copy as a path (`./org/name`). With
+`REF_SEG_STRATEGY=geom` the tagger is asked first, and its answer is taken when
+its calibrated paper confidence reaches the threshold in its `gate.json` and
+the geometry tier's own checks (alignment yield, segment count against the
+layout's reference onsets) pass. An answer it takes is final: the reference
+line stream does not replace it. Otherwise, including an error on one paper,
+the shipped geometry segmenter and the rest of the cascade run exactly as
+without the tagger. The export's reference diagnostics list each attempt as
+`geom_tagger`, with its reason (`final`, `low_confidence_or_empty`,
+`tagger_error`, ...), confidence and counts in `reason_flags`; a declined
+attempt carries no spans or credible starts. The tagger reads the same 29
+line features as the shipped geometry segmenter, in sorted name order, and
+needs only ONNX Runtime; loading it runs the graph once to check its shape.
 
 ### CPU threads
 

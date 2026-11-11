@@ -93,16 +93,33 @@ word, as right. Neither the gate nor `metrics_version` changes.
 ### Added — running a candidate model
 
 A model setting pointed at anything other than its shipped default is an
-override, for comparing a retrained model with the shipped one. An override that
-is a local path is checked before the first paper, one that cannot load stops
-the run instead of falling back to the shipped model or the next tier, and
-`bibr batch` records the sha256 of every file each override loaded in
-`run_info.json` under `model_overrides`. A local ONNX bundle may now hold its
-files in the named directory itself, not only in an `onnx/` subdirectory.
-`REF_GEOM_TAGGER_MODEL_ID` (unset by default) adds a geometry line tagger that the
-`geom` segmentation tier asks first; when its gate declines, the shipped geometry
-segmenter runs as before. A run with every model setting at its default is
-unchanged. See "Running a candidate model" in the configuration guide.
+override, for comparing a retrained model with the shipped one. A mirror, an
+offline copy or a pinned or `main` revision of a shipped model is an override
+too: it is recorded as one, and it loads and runs as before.
+
+- Who is affected: only a run whose model setting names a model that does not
+  exist or cannot be read (a missing path; a Hub repo, revision or file that
+  is not there; an unreadable or wrong-kind file). That run now stops with an
+  error naming the setting instead of going on without the model: `bibr chew`
+  exits 1, and `bibr batch` marks the running papers `model_override_failed`
+  (retried on resume) and stops. Network failures and a missing `torch` extra
+  behave as before, override or not.
+- `bibr chew` and `bibr batch` check the local-path overrides the run will load
+  before the first paper; a stale setting for a model the run does not use is
+  ignored.
+- `bibr batch` writes one record per override to `run_info.json` under
+  `model_overrides`: `loaded` with the sha256 of every file read, or not
+  loaded and why.
+- A local ONNX bundle may now hold its files in the named directory itself,
+  not only in an `onnx/` subdirectory.
+- `REF_GEOM_TAGGER_MODEL_ID` (unset by default; a directory or a Hub id with
+  `REF_GEOM_TAGGER_REVISION`) adds a geometry line tagger that the `geom`
+  segmentation tier asks first. An answer it takes is final; when it declines
+  or fails on a paper, the shipped geometry segmenter runs exactly as without
+  it.
+
+A run with every model setting at its default is unchanged. See "Running a
+candidate model" in the configuration guide.
 
 ### Added — the text-layer OCR route
 
