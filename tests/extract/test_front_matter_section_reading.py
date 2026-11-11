@@ -429,3 +429,94 @@ def test_body_numbered_section_ids_follow_the_document_scheme():
     assert body_numbered_section_ids(sections) == frozenset({1, 2, 6})
     roman = [_root(), _section(1, "I. SCOPE", U), _section(2, "II. METHOD", U)]
     assert body_numbered_section_ids(roman) == frozenset({1, 2})
+
+
+GAP_TITLE = "Groundwater Recharge Under Irrigated Orchards"
+GAP_BYLINE = "Anna Berger1 and Tomas Lind2"
+GAP_ROW = "E-mail: anna.berger@example.org; Tel.: +47 22 85 50 00"
+
+
+def _gap_paper(
+    section_type: CanonicalSection,
+    *,
+    source: str | None,
+    score: float,
+    after_abstract: bool = False,
+    header: str = "Correspondence",
+) -> PaperContents:
+    """A paper that prints a "Correspondence" block between its byline and abstract.
+
+    ``after_abstract`` moves the block below the abstract, out of the gap.
+    """
+
+    corr_top = 300.0 if after_abstract else 160.0
+    abstract_top = 200.0 if after_abstract else 240.0
+    sections = [
+        _root(),
+        _section(1, GAP_TITLE, CanonicalSection.TITLE, top=60.0, source="title", score=1.0),
+        _section(
+            3,
+            "Abstract",
+            CanonicalSection.ABSTRACT,
+            top=abstract_top,
+            source="exact_alias",
+            score=1.0,
+        ),
+        _section(2, header, section_type, top=corr_top, source=source, score=score),
+        _section(
+            4,
+            "1. Introduction",
+            CanonicalSection.INTRODUCTION,
+            top=400.0,
+            source="exact_alias",
+            score=1.0,
+        ),
+    ]
+    if not after_abstract:
+        sections[2], sections[3] = sections[3], sections[2]
+    sentences = [
+        _row(1, GAP_BYLINE, section_id=1, top=100.0),
+        _row(2, GAP_ROW, section_id=2, top=corr_top + 20.0),
+        _row(
+            3,
+            "Orchard irrigation raises recharge in dry years.",
+            section_id=3,
+            top=abstract_top + 20.0,
+            label="abstract",
+        ),
+        _row(4, "Recharge under orchards is poorly measured.", section_id=4, top=420.0),
+    ]
+    return _contents(sections, sentences, title=GAP_TITLE)
+
+
+def test_guessed_back_matter_type_between_title_and_abstract_reads_as_front_matter():
+    guessed = _gap_paper(CanonicalSection.ACKNOWLEDGMENT, source="model", score=0.96)
+    untyped = _gap_paper(U, source=None, score=0.99)
+
+    texts = [text for text, _, _ in _reading(guessed)]
+
+    assert GAP_ROW in texts
+    assert _reading(guessed) == _reading(untyped)
+
+
+@pytest.mark.parametrize(
+    ("source", "header", "after_abstract"),
+    [
+        # A type matched from the printed heading keeps its type.
+        ("exact_alias", "Acknowledgments", False),
+        # Below the abstract the block is outside the gap.
+        ("model", "Correspondence", True),
+    ],
+)
+def test_back_matter_type_outside_a_guess_in_the_gap_stays(source, header, after_abstract):
+    contents = _gap_paper(
+        CanonicalSection.ACKNOWLEDGMENT,
+        source=source,
+        score=0.96,
+        after_abstract=after_abstract,
+        header=header,
+    )
+
+    texts = [text for text, _, _ in _reading(contents)]
+
+    assert GAP_ROW not in texts

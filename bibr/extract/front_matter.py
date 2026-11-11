@@ -363,7 +363,8 @@ class _SectionReading:
     """Sections whose place in the paper overrides their classified type.
 
     ``body`` holds sections read as body text whatever their type; ``untyped``
-    holds body-typed sections read as untyped, which is to say as front matter.
+    holds sections read as untyped, which is to say as front matter, whatever
+    their guessed type.
     """
 
     body: frozenset[int] = frozenset()
@@ -406,7 +407,8 @@ def _section_reading(contents: PaperContents, first_page: int | None) -> _Sectio
       unnumbered first-page section whose body type is a guess -- a trained
       type below :data:`TRUSTED_TYPE_CONFIDENCE`, an inherited type, a fallback
       alias -- is read as untyped. Nothing between the title and the abstract
-      is body text.
+      is body text. :func:`_read_front_gap_as_untyped` extends this to the
+      guessed back-matter types of the sections printed there.
 
     Unnumbered headings after the body opens keep their type. An untyped one
     there can be front matter printed late (an affiliation list or author
@@ -518,6 +520,34 @@ def _looks_like_name_email_cell(text: str) -> bool:
 
 
 _URL_TEXT_RE = re.compile(r"https?://|\bwww\.", re.IGNORECASE)
+
+
+def _read_front_gap_as_untyped(
+    reading: _SectionReading, contents: PaperContents, front_gap: frozenset[int]
+) -> _SectionReading:
+    """Read the front gap as front matter whatever type the classifier guessed.
+
+    What is printed between the first-page title and the abstract or body is
+    front matter: a byline, affiliations, a "Correspondence" or "Affiliations:"
+    block, an author note. The classifier types such headings as
+    acknowledgments, endnotes, footnotes or funding with high confidence, and
+    a confident guess dropped the corresponding author's e-mail with its
+    section. A gap section whose non-front type is the classifier's guess is
+    therefore read as untyped, whatever the confidence. A type matched from the
+    printed heading (an "Acknowledgments" alias) keeps its type, and so does
+    every section outside the gap.
+    """
+
+    guessed = frozenset(
+        section.section_id
+        for section in contents.sections
+        if section.section_id in front_gap
+        and section.classification_source in _GUESSED_TYPE_SOURCES
+        and section.section_type not in _FRONT_MATTER_SECTION_TYPES
+    )
+    if not guessed:
+        return reading
+    return replace(reading, untyped=reading.untyped | guessed)
 
 
 def _front_gap_byline_evidence(text: str, summary: RegionSummary | None, *, regions: int) -> bool:
@@ -1868,6 +1898,7 @@ def _collect_candidates(
     first_page = _first_page(contents)
     reading = _section_reading(contents, first_page)
     front_gap = _front_gap_section_ids(contents, first_page, reading)
+    reading = _read_front_gap_as_untyped(reading, contents, front_gap)
     paragraph_drafts = _paragraph_drafts(
         contents,
         first_page=first_page,
