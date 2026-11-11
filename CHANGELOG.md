@@ -123,6 +123,11 @@ too: it is recorded as one, and it loads and runs as before.
   no `torch`. The CRF is then not loaded; setting both is an error. Its
   answer goes through the same receipt and next tier as the CRF's, and the
   receipt lists it as `text_tagger`.
+- For maintainers, `scripts/switch_model_defaults.py SETTING=org/name@<commit>`
+  moves a default model to a new Hub pin: the defaults in `bibr/config.py`,
+  the matching `ARG`s in `Dockerfile.serve`, the default-model table and
+  model-card links in the docs. It stops, writing nothing, when the old pin
+  is written anywhere else, and lists the tests that name it.
 
 A run with every model setting at its default is unchanged. See "Running a
 candidate model" in the configuration guide.
