@@ -360,6 +360,7 @@ def test_started_lines_are_on_disk_but_not_in_verdict_readers(tmp_path, monkeypa
         "failed": 1,
         "stopped_on_model_override": 0,
         "fell_back_on_model_override": 0,
+        "fell_back_capped": 0,
         "attempts": 4,
     }
 

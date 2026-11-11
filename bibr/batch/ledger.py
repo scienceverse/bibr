@@ -300,6 +300,10 @@ class ResumePlan:
     unfinished: set[str] = field(default_factory=set)
     # Papers in ``to_run`` whose last export fell back from an overridden model.
     override_fallbacks: set[str] = field(default_factory=set)
+    # Papers skipped because their export fell back from an overridden model
+    # MAX_UNSETTLED_FAILURES times in a row: they wait for ``--retry-failed``.
+    # Not in ``skipped_failed``: none of them failed.
+    override_capped: list[BatchItem] = field(default_factory=list)
 
 
 def _same_input(entry: Mapping[str, Any], item: BatchItem) -> bool:
@@ -410,15 +414,14 @@ class Ledger:
         a crash. An ``ok`` line whose export fell back from an overridden model
         (:func:`fell_back_on_override`) runs again until the paper has fallen
         back :data:`MAX_UNSETTLED_FAILURES` times in a row; then it waits for
-        ``--retry-failed``, with the failed papers.
+        ``--retry-failed`` in :attr:`ResumePlan.override_capped`.
         """
         entries = self.read(started=True) if entries is None else entries
         latest = self.latest(entries)
         self._attempts = self.attempts(entries)
         unsettled: dict[str, int] = {}
         unfinished: set[str] = set()
-        # ok lines in a row whose export fell back from an overridden model.
-        fallbacks: dict[str, int] = {}
+        fallbacks = self.fallbacks_in_a_row(entries)
         for entry in entries:
             pid = str(entry["paper_id"])
             status = entry.get("status")
@@ -430,10 +433,6 @@ class Ledger:
             unfinished.discard(pid)
             if status == "ok":
                 unsettled.pop(pid, None)
-                if fell_back_on_override(entry):
-                    fallbacks[pid] = fallbacks.get(pid, 0) + 1
-                else:
-                    fallbacks.pop(pid, None)
             elif is_unsettled_failure(entry):
                 unsettled[pid] = unsettled.get(pid, 0) + 1
         for pid in unfinished:
@@ -455,7 +454,7 @@ class Ledger:
                     plan.to_run.append(item)
                     plan.override_fallbacks.add(pid)
                 else:
-                    plan.skipped_failed.append(item)
+                    plan.override_capped.append(item)
                 continue
             if pid in unfinished:
                 plan.unfinished.add(pid)
@@ -469,6 +468,26 @@ class Ledger:
             else:
                 plan.skipped_failed.append(item)
         return plan
+
+    def fallbacks_in_a_row(
+        self, entries: Iterable[Mapping[str, Any]] | None = None
+    ) -> dict[str, int]:
+        """``ok`` lines in a row per ``paper_id`` whose export fell back from an overridden model.
+
+        Counted back from the paper's last ``ok`` line; an ``ok`` line the
+        candidate answered ends the run of them. Failed lines do not count and
+        do not end it.
+        """
+        fallbacks: dict[str, int] = {}
+        for entry in self.read() if entries is None else entries:
+            if entry.get("status") != "ok":
+                continue
+            pid = str(entry["paper_id"])
+            if fell_back_on_override(entry):
+                fallbacks[pid] = fallbacks.get(pid, 0) + 1
+            else:
+                fallbacks.pop(pid, None)
+        return fallbacks
 
     # -- writing ---------------------------------------------------------
 

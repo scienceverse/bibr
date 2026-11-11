@@ -206,6 +206,7 @@ def test_report_subcommand_text_and_json(tmp_path, capsys):
         "failed": 1,
         "stopped_on_model_override": 0,
         "fell_back_on_model_override": 0,
+        "fell_back_capped": 0,
         "attempts": 2,
     }
     assert report["references"]["match_rate"] == 0.5

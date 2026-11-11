@@ -79,7 +79,11 @@ answer: a resumed run takes it again too, without `--retry-failed`, until it
 has fallen back three times in a row. The end-of-run summary counts the
 papers a model override stopped as `not finished`, not as failed, and names
 the papers that fell back (`run_info.json` lists them under
-`override_fallbacks`). A crash or
+`override_fallbacks`) with the re-runs each has left. Once a paper has fallen
+back three times in a row, a resumed run skips it and says so apart from the
+failed papers ("fell back on a model override 3 times in a row ... rerun with
+`--retry-failed` after fixing the model"; `run_info.json`
+`n_skipped_override_capped`), and a run that has nothing else to do exits 1. A crash or
 a service outage — the OCR or LLM server unreachable or unable to start, a
 serve that kept answering 502/503 until the retries ran out, an export that
 could not be written (a full disk, a permission) — is usually the machine's

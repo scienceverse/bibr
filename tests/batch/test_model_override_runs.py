@@ -279,3 +279,66 @@ def test_a_no_llm_run_neither_loads_nor_records_a_classifier_it_never_asks(
         assert record["setting"] == "ML_SECTION_CLASSIFIER_MODEL_ID"
         assert record["loaded"] is False and record["reason"] == NOT_USED
         assert {row["status"] for row in _rows(out).values()} == {"ok"}
+
+
+def test_the_summary_counts_down_the_reruns_and_names_the_cap(
+    corpus, tmp_path, monkeypatch, capsys
+):
+    """Two papers fall back on every run: runs 1-3 rerun them, run 4 skips them and exits 1.
+
+    Two papers, so the streak never reaches the stop and each run completes.
+    """
+    from bibr.structure.paper_classifier_onnx import OnnxPaperClassifierModel
+
+    (corpus / "gamma.pdf").unlink()
+    bundle = tmp_path / "models" / "paper-candidate"
+    shutil.copytree(FIXTURES / "paper" / "onnx", bundle / "onnx")
+    monkeypatch.setattr(Settings.ml, "paper_classifier_model_id", str(bundle))
+
+    def broken(self, items):
+        raise RuntimeError("the graph fails on this input")
+
+    monkeypatch.setattr(OnnxPaperClassifierModel, "classify_batch", broken)
+    out = tmp_path / "out"
+    printed = []
+    for _ in range(4):
+        reset_loaded_model_overrides()
+        code = _run(corpus, out)
+        captured = capsys.readouterr()
+        printed.append((code, " ".join((captured.out + captured.err).split())))
+
+    for run, left in ((0, 2), (1, 1)):
+        code, text = printed[run]
+        assert code == 0
+        assert "2 papers fell back from an overridden model" in text
+        assert f"processes them again ({left} re-run{'s' if left > 1 else ''} left" in text
+        assert "rerun with --retry-failed" not in text
+    code, text = printed[2]
+    assert code == 0
+    assert "re-runs left" not in text and "re-run left" not in text
+    assert "fell back on a model override 3 times in a row" in text
+    assert "rerun with --retry-failed after fixing the model" in text
+    code, text = printed[3]
+    assert code == 1, "a run that processed nothing because of the cap is not a success"
+    assert "0 to run" in text and "0 skipped failed" in text
+    assert "2 skipped, fell back on a model override" in text
+    assert (
+        "2 papers fell back on a model override 3 times in a row and are skipped: alpha, beta; "
+        "rerun with --retry-failed after fixing the model"
+    ) in text
+    info = _run_info(out)
+    assert info["n_skipped_override_capped"] == 2 and info["n_skipped_failed"] == 0
+    # --retry-failed takes them again.
+    reset_loaded_model_overrides()
+    options = BatchOptions(
+        inputs=[str(corpus)],
+        out=out,
+        retry_failed=True,
+        local=LocalOptions(
+            chew_options={"memory_mode": "balanced", "crossref": False, "mode": "full"},
+            batch_size=2,
+        ),
+        tables=False,
+    )
+    assert run_batch(options) == 0
+    assert _run_info(out)["n_planned"] == 2
