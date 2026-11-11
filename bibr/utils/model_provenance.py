@@ -42,7 +42,11 @@ _ROWS: dict[tuple, dict[str, Any]] = {}
 _FILES: dict[tuple[str, str], tuple[Path, list[Path]]] = {}
 # The short name of a local model whose own name is empty or private.
 _NEUTRAL_NAME = "local-model"
-_HOME_ROOTS = ("home", "Users")
+# The directories that hold one directory per user (compared without case:
+# Windows and macOS paths are case-insensitive).
+_HOME_ROOTS = ("home", "users", "documents and settings")
+# A Windows drive (``C:``) or a UNC share root, which is no part of the model's name.
+_DRIVE = re.compile(r"[A-Za-z]:(?=/|$)|//[^/]+/[^/]+")
 
 
 def _resolved_revision(repo_id: str, revision: str | None) -> str | None:
@@ -73,15 +77,29 @@ def _private_names() -> set[str]:
     return names
 
 
+def _path_parts(path: Path) -> list[str]:
+    """The names along ``path``, read the same on every system.
+
+    A Windows path is split on either slash and its drive or share is left out,
+    so ``C:\\Users\\<user>\\onnx`` reads as ``Users``, ``<user>``, ``onnx`` here too.
+    """
+    text = str(path.expanduser()).replace("\\", "/")
+    drive = _DRIVE.match(text)
+    if drive is not None:
+        text = text[drive.end() :]
+    return [p for p in text.split("/") if p not in ("", ".", "..")]
+
+
 def _short_name(path: Path, rows: list[dict[str, Any]]) -> str:
     """``name@<12 hex>``: the model's own name and a hash over its files (``rows``)."""
-    parts = [p for p in path.expanduser().parts if p not in ("", "/", ".", "..")]
+    parts = _path_parts(path)
     at = len(parts) - 1
-    if at >= 1 and parts[at] == "onnx":
+    if at >= 1 and parts[at].lower() == "onnx":
         at -= 1
     name = parts[at] if at >= 0 else ""
-    # Any user's home directory (/home/<user>, /Users/<user>, /root) names its user.
-    a_home = (at == 1 and parts[0] in _HOME_ROOTS) or (at == 0 and name == "root")
+    # Any user's home directory (/home/<user>, /Users/<user>, C:\Users\<user>, /root)
+    # names its user.
+    a_home = (at == 1 and parts[0].lower() in _HOME_ROOTS) or (at == 0 and name == "root")
     if not name or a_home or name in _private_names() or name.startswith("~"):
         name = _NEUTRAL_NAME
     digest = hashlib.sha256()

@@ -129,6 +129,15 @@ def test_a_local_model_never_names_the_user_or_the_home_directory(tmp_path, monk
         ("/root/onnx", "local-model"),
         ("/home/other/models/section/onnx", "section"),
         ("/srv/models/section", "section"),
+        # Windows paths, read on any system: the drive is no part of the name.
+        ("C:/Users/other/onnx", "local-model"),
+        ("C:\\Users\\other\\onnx", "local-model"),
+        ("c:\\users\\other", "local-model"),
+        ("C:\\Documents and Settings\\other\\onnx", "local-model"),
+        ("\\\\server\\share\\Users\\other\\onnx", "local-model"),
+        ("/Users/other/onnx", "local-model"),
+        ("C:\\Users\\other\\models\\section\\onnx", "section"),
+        ("D:/models/section", "section"),
     ],
 )
 def test_the_home_directory_of_any_user_is_never_a_short_name(value, name):
