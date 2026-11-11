@@ -194,6 +194,21 @@ def _escape_controls(text: str) -> str:
     return _CONTROL_CHARS_RE.sub(lambda match: repr(match.group())[1:-1], text)
 
 
+#: What the refusal of a scan says to a client in place of the command-line
+#: routes: a client cannot pass ``--ocr``, the operator chooses the route.
+_SCAN_NEEDS_OCR_SERVER = (
+    "an OCR route, which this server did not use: it read the PDF text layer only, and "
+    "its operator chooses the route (OCR_BASE_URL points the server at an OCR server)"
+)
+
+
+def _scan_refusal_for_a_client(message: str) -> str:
+    """The pipeline's ``scan_needs_ocr`` message without its command-line flags."""
+    from bibr.ocr.registry import SCAN_NEEDS_OCR_ROUTES
+
+    return message.replace(SCAN_NEEDS_OCR_ROUTES, _SCAN_NEEDS_OCR_SERVER)
+
+
 def _client_processing_message(exc: ProcessingError) -> str:
     """What a client may read of a processing failure.
 
@@ -211,6 +226,8 @@ def _client_processing_message(exc: ProcessingError) -> str:
     # The invalid-output error chains its own filtered diagnostic.
     if exc.__cause__ is None or type(exc.safe_diagnostics) is SafeLlmDiagnostics:
         message = str(exc)
+        if exc.error_code == "scan_needs_ocr":
+            message = _scan_refusal_for_a_client(message)
     else:
         stage = f" in {exc.failed_stage}" if exc.failed_stage else ""
         code = f" ({exc.error_code})" if exc.error_code else ""

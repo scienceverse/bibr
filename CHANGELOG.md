@@ -124,7 +124,9 @@ server or a backend written to `.env` still reads scans.
   server, and `bibr serve --ocr text-layer` (or `OCR_BACKEND=text-layer`) asks
   for that route in any mode. `/ready` then reports `ocr: not_used (text layer)`
   without probing anything, the start-up log names the route, and a scanned PDF
-  is answered with a 422 and `error_code: scan_needs_ocr`. The route belongs to
+  is answered with a 422 and `error_code: scan_needs_ocr`, in words for a
+  client: the message names the server's `OCR_BASE_URL` setting, not the
+  command-line flags. The route belongs to
   the server: a request's `mode` field does not change it. Responses cached on
   this route have their own keys, so a server that shares its Redis cache with
   an OCR deployment never answers with the other's reading.
