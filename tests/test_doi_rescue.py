@@ -140,6 +140,22 @@ class TestRescueDoiFromUrlField:
     def test_identifier_broken_by_a_space_declined(self):
         assert _rescue_doi_from_url_field("https://doi.org/10.1037/abc 123") is None
 
+    def test_text_glued_onto_the_identifier_declined(self):
+        for url in (
+            "https://doi.org/10.1000/abc,2019",
+            "https://doi.org/10.1000/abc;10.1000/def",
+            "https://doi.org/10.1000/abc'",
+            "https://doi.org/10.1000/abc’",
+            "https://doi.org/10.1000/abc&x=1",
+        ):
+            assert _rescue_doi_from_url_field(url) is None, url
+
+    def test_unusual_but_whole_identifiers_kept(self):
+        sici = "10.1002/(SICI)1097-4679(199911)55:11<1395::AID-JCLP7>3.0.CO;2-9"
+        assert _rescue_doi_from_url_field(f"https://doi.org/{sici}") == sici
+        assert _rescue_doi_from_url_field("https://doi.org/10.1000/a,b") == "10.1000/a,b"
+        assert _rescue_doi_from_url_field("https://doi.org/10.1000/abc?utm=x") == "10.1000/abc"
+
     def test_empty(self):
         assert _rescue_doi_from_url_field(None) is None
         assert _rescue_doi_from_url_field("") is None

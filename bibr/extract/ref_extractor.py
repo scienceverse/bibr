@@ -465,6 +465,12 @@ _DOI_RESOLVER_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# What marks a resolver-link identifier as carrying text that is not part of
+# it: a second DOI glued on, a closing quote, a number glued on after a comma
+# (a year or a page), or a query parameter. Each is legal inside a DOI but far
+# more often printed text that ran into the link.
+_URL_FIELD_DOI_GLUED_RE = re.compile(r"/.*10\.\d{4,9}/|['\"‘’“”]$|,\d+$|&[\w.-]+=")
+
 
 def _rescue_doi_from_url_field(url: str | None) -> str | None:
     """Recover a DOI from a resolver link the parser filed under ``url``.
@@ -473,12 +479,16 @@ def _rescue_doi_from_url_field(url: str | None) -> str | None:
     as ``url`` and no ``doi``, most often when the printed link is broken by a
     line wrap: the segment rescue then finds no clean marker in the text. Fires
     only when the whole value is a resolver link; a publisher URL, or a link
-    followed by other text, is declined.
+    followed by other text, is declined. So is an identifier with other text
+    glued on: a wrong DOI is worse than none, and nothing here repairs one.
     """
     if not url:
         return None
     m = _DOI_RESOLVER_URL_RE.match(url.strip())
-    return _clean_url_doi_token(m.group(1)) if m else None
+    doi = _clean_url_doi_token(m.group(1)) if m else None
+    if doi and _URL_FIELD_DOI_GLUED_RE.search(doi):
+        return None
+    return doi
 
 
 # An author-date publication year in parentheses ("(2014)", "(2012a)",
