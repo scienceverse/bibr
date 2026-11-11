@@ -340,6 +340,27 @@ def test_a_no_llm_run_neither_loads_nor_records_a_classifier_it_never_asks(
         assert {row["status"] for row in _rows(out).values()} == {"ok"}
 
 
+def test_a_no_llm_run_neither_loads_nor_records_a_statement_tagger(corpus, tmp_path, monkeypatch):
+    """--no-llm runs no statement tagger: a broken candidate does not stop the run."""
+    pytest.importorskip("onnx")
+    from bibr.statement_tagger import pipeline as statement_tagger
+    from tests.statement_tagger.bundle import write_bundle
+
+    statement_tagger.reset_statement_tagger()
+    bundle = write_bundle(tmp_path / "models" / "statements-candidate")
+    (bundle / "onnx" / "model.onnx").write_bytes(b"not an onnx graph")
+    monkeypatch.setattr(Settings.ml, "statement_tagger_model_id", str(bundle))
+    out = tmp_path / "out"
+    assert _run(corpus, out, no_llm=True) == 0
+    info = _run_info(out)
+    assert info["reason"] == "completed"
+    (record,) = info["model_overrides"]
+    assert record["setting"] == "ML_STATEMENT_TAGGER_MODEL_ID"
+    assert record["loaded"] is False and record["reason"] == NOT_USED
+    assert {row["status"] for row in _rows(out).values()} == {"ok"}
+    statement_tagger.reset_statement_tagger()
+
+
 def test_the_summary_counts_down_the_reruns_and_names_the_cap(
     corpus, tmp_path, monkeypatch, capsys
 ):

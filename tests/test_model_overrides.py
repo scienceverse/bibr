@@ -327,7 +327,10 @@ def test_unused_models_name_why_for_each_mode_and_strategy():
             "ML_FRONT_TAGGER_MODE=off; a fast run, or the mode primary or only, turns it on"
         ),
         "REF_TEXT_SEG_MODEL_ID": "it is unset",
+        "ML_STATEMENT_TAGGER_MODEL_ID": "it is unset",
     }
+    settings.ml.statement_tagger_model_id = "./statements"
+    assert "ML_STATEMENT_TAGGER_MODEL_ID" not in unused_models(settings)
     settings.REF_SEG_STRATEGY = "region"
     assert "--ref-seg region" in unused_models(settings)["REF_GEOM_TAGGER_MODEL_ID"]
     settings.REF_PARSE_STRATEGY = "off"
@@ -338,6 +341,7 @@ def test_unused_models_name_why_for_each_mode_and_strategy():
     no_llm = unused_models(settings, no_llm=True)
     assert "heading lookup" in no_llm["ML_SECTION_CLASSIFIER_MODEL_ID"]
     assert no_llm["REF_TEXT_SEG_MODEL_ID"] == "--no-llm extracts no references"
+    assert no_llm["ML_STATEMENT_TAGGER_MODEL_ID"] == "--no-llm runs no statement tagger"
 
 
 def test_a_no_llm_preflight_neither_checks_nor_refuses_a_model_it_never_asks(tmp_path, monkeypatch):
