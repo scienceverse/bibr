@@ -18,6 +18,8 @@ def _defaults(monkeypatch) -> GlobalSettings:
         "LAYOUT_ONNX_REVISION",
         "NER_PARSER_REVISION",
         "ML_FRONT_ROLE_REVISION",
+        "ML_FRONT_TAGGER_MODEL_ID",
+        "ML_FRONT_TAGGER_REVISION",
         "WTPSPLIT_MODEL_REVISION",
     ):
         monkeypatch.delenv(var, raising=False)
@@ -33,6 +35,7 @@ def test_config_defaults_pin_every_hub_model(monkeypatch):
         s.layout.model_revision,
         s.layout.onnx_revision,
         s.ml.front_role_revision,
+        s.ml.front_tagger_revision,
         s.NER_PARSER_REVISION,
         s.NER_SEG_REVISION,
     ):
@@ -108,3 +111,11 @@ def test_docs_and_dry_run_mirror_the_parser_pin():
     row = f"| Reference parser | `{Settings.NER_PARSER_CKPT}` | `{Settings.NER_PARSER_REVISION[:8]}` |"
     assert row in docs
     assert Settings.NER_PARSER_CKPT in _APPROX_MODEL_SIZES
+
+
+def test_docs_mirror_the_front_tagger_pin(monkeypatch):
+    """The configuration guide names the front-matter tagger bundle and its pinned commit."""
+    s = _defaults(monkeypatch)
+    docs = Path("docs/guides/configuration.md").read_text()
+    row = f"| Front-matter tagger | `{s.ml.front_tagger_model_id}` | `{s.ml.front_tagger_revision[:8]}` |"
+    assert row in docs

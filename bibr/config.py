@@ -2188,7 +2188,7 @@ class MlOptions(_BibrSettings):
         "'primary' or 'only'; null leaves the tagger off.",
     )
     front_tagger_revision: str | None = Field(
-        None,
+        "13a0f5c386ea9325e9197d789a93c2c39fdf336a",
         description="Pinned revision of the front-matter tagger bundle on the Hub.",
     )
     front_tagger_min_confidence: float = Field(

@@ -773,7 +773,7 @@ absolute, or starting with `./`, `../` or `~`. Layout is the one model
 whose PyTorch weights live in a third-party repo, so its ONNX artifact has its
 own pair of settings, `LAYOUT_ONNX_MODEL_ID` and `LAYOUT_ONNX_REVISION`.
 
-All four bundles are published, so a core install needs no configuration:
+These bundles are published, so a core install needs no configuration (the front-matter tagger additionally stays off in a full run until `ML_FRONT_TAGGER_MODE=primary`; fast mode turns it on):
 
 | Model | Repo | Pinned revision |
 |---|---|---|
@@ -781,6 +781,7 @@ All four bundles are published, so a core install needs no configuration:
 | Section classifier | `scienceverse/bibr-section-classifier` | `cf7c2d85` |
 | Paper classifier | `scienceverse/bibr-paper-classifier` | `6046171b` |
 | Reference parser | `scienceverse/bibr-parser-v5-1-ultrabert` | `97b06cc7` |
+| Front-matter tagger | `scienceverse/bibr-front-tagger` | `13a0f5c3` |
 
 The paper-classifier pin is the commit that added `onnx/` to the previously
 audited weights, so its PyTorch weights are unchanged. The reference-parser pin
