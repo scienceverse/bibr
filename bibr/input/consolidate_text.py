@@ -398,19 +398,31 @@ _DOI_MIDWORD_WRAP_RE = re.compile(
 )
 
 
-def _bridge_doi_midword_wraps(text: str) -> str:
+# What the mid-word bridge joined in the releases before it learned the shapes above. Text that
+# is no reference entry keeps these.
+_DOI_MIDWORD_WRAP_PLAIN_RE = re.compile(
+    r"(10\.(?!1146/)\d{4,9}/[-._;()/:A-Za-z0-9]*[A-Za-z][A-Za-z])"
+    r"[ \t]*\r?\n[ \t]*"
+    r"(?=[a-z0-9][-._;()/:A-Za-z0-9]*[.\d])"
+)
+
+
+def _bridge_doi_midword_wraps(text: str, reference: bool = True) -> str:
     """Re-join mid-word line-wraps inside a DOI token (no hyphen at the break).
 
     See :data:`_DOI_MIDWORD_WRAP_RE` for the gating that keeps complete DOIs,
     following references, and hyphen-structured prefixes (Annual Reviews)
-    untouched. Repeated passes handle a DOI wrapped across several lines.
+    untouched. Repeated passes handle a DOI wrapped across several lines. Text that is
+    no reference entry (*reference* False) keeps the plainer
+    :data:`_DOI_MIDWORD_WRAP_PLAIN_RE`.
     """
     if "\n" not in text or "10." not in text:
         return text
+    pattern = _DOI_MIDWORD_WRAP_RE if reference else _DOI_MIDWORD_WRAP_PLAIN_RE
     prev: str | None = None
     while prev != text:
         prev = text
-        text = _DOI_MIDWORD_WRAP_RE.sub(r"\1", text)
+        text = pattern.sub(r"\1", text)
     return text
 
 
@@ -426,21 +438,35 @@ _DOI_DOT_WRAP_RE = re.compile(
 )
 
 
-def _bridge_doi_dot_wraps(text: str) -> str:
+# What the dot bridge joined before it learned Annual Reviews DOIs and the PubMed marker
+# after a number. Text that is no reference entry keeps these.
+_DOI_DOT_WRAP_PLAIN_RE = re.compile(
+    r"(10\.(?!1146/)\d{4,9}/[-._;()/:A-Za-z0-9]*[A-Za-z0-9]\.)"
+    r"[ \t]*\r?\n?[ \t]*"
+    r"(?!\d{1,4}[.,]\s+[A-Z])"
+    r"(?!\d{1,2}\.\d{1,2}\s+[A-Z])"
+    r"(?!https?:|www\.)"
+    r"(?=[a-z0-9][-._;()/:a-z0-9]*[.\d])"
+)
+
+
+def _bridge_doi_dot_wraps(text: str, reference: bool = True) -> str:
     """Re-join a DOI wrap that falls right after an internal period.
 
     See :data:`_DOI_DOT_WRAP_RE` for the gating that accepts both a newline and
     a plain-space separator while rejecting prose, numbered references, and
     numbered headings. Repeated passes handle a DOI wrapped at two internal
     dots (e.g. "journal." then "pone." then "0279511"), matching the sibling
-    bridges.
+    bridges. Text that is no reference entry (*reference* False) keeps the plainer
+    :data:`_DOI_DOT_WRAP_PLAIN_RE`.
     """
     if "10." not in text:
         return text
+    pattern = _DOI_DOT_WRAP_RE if reference else _DOI_DOT_WRAP_PLAIN_RE
     prev: str | None = None
     while prev != text:
         prev = text
-        text = _DOI_DOT_WRAP_RE.sub(r"\1", text)
+        text = pattern.sub(r"\1", text)
     return text
 
 
@@ -471,15 +497,21 @@ _URL_PATH_CHARS = r"A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-"
 _URL_CRLF_WRAP_RE = re.compile(rf"(?<=[{_URL_PATH_CHARS}])\r?\n[ \t]*(?=[{_URL_PATH_CHARS}])")
 _CAP_WORD_RE = re.compile(r"[A-Z][a-z]")
 _DOI_BODY_RE = re.compile(DOI_BODY)
-# A line that ends on the registrant of a DOI ("10." or "10.NNNN/") and the continuation:
-# the suffix after the slash, or the registrant number and its slash after "10.".
+# A line that ends on the registrant of a DOI: "10." (the registrant number follows) or
+# "10.NNNN/" (the suffix follows). The suffix opens with a word that carries a digit, a
+# dot or a bracket ("Nmat2630", "PhysRevLett.78.1190"); a first word with none of these is
+# a name or a word of prose.
 _DOI_REGISTRANT_END_RE = re.compile(r"(?<![\w.-])10\.(?:\d{4,9}/)?$")
-_DOI_AFTER_REGISTRANT_RE = re.compile(r"[A-Za-z0-9(<\[]|\d{4,9}/")
-# What a URL continuation looks like when the wrap falls inside a word of its path: the
-# next characters hold a path or query character or a digit ("sults-pbr-arrangements").
-_URL_PATH_AHEAD_RE = re.compile(r"[./\-_=?&%#\d]")
-# Characters that mark a token as part of a URL path or query, not a capitalized word.
+_DOI_REGISTRANT_NUMBER_RE = re.compile(r"\d{4,9}(?:/|%2[Ff]|$)")
+_DOI_SUFFIX_START_RE = re.compile(r"\d|\(|[A-Za-z<\[]\S*?[\d.(<\[]")
+# A token that holds one of these is part of a URL path or query, not a capitalized word
+# or a label.
 _URL_PATH_TOKEN_RE = re.compile(r"[/_%=?&#\d]")
+# A token with a dot inside it is a file name or a host name ("Register.aspx"), not a name.
+_URL_FILE_TOKEN_RE = re.compile(r"\.[A-Za-z0-9]")
+# A lower-case slug: words and numbers joined by hyphens ("sults-pbr-2012-13").
+_URL_SLUG_RE = re.compile(r"[a-z0-9]+(?:[-\u2010\u2011\u2013][a-z0-9]+)+(?:\.[a-z]{2,5})?[.,;:)]*$")
+_URL_PATH_CHAR_RE = re.compile(r"[/_%=?&#]")
 # A file extension or top-level domain after a wrap that follows a dot ("index." + "php").
 _URL_EXTENSION_RE = re.compile(
     r"(?:html?|xhtml|shtml|php|aspx?|jsp|cfm|pdf|docx?|xlsx?|pptx?|txt|xml|json|csv|zip"
@@ -488,25 +520,104 @@ _URL_EXTENSION_RE = re.compile(
 # A DOI whose registrant is itself split by the wrap ("10.\n1016/...", "10\n.1016/..."):
 # the text has no "10.NNNN/" until the wrap is joined, so it must still reach the bridge.
 _DOI_SPLIT_START_RE = re.compile(r"10\.?\d{0,8}[ \t]*\r?\n")
-# How far back a CRLF wrap looks for the scheme or "10.NNNN/" that opens its token.
+# How far back a CRLF wrap looks for the scheme or "10.NNNN/" that opens its token, and how
+# far the earlier releases looked: a wrap whose context lies beyond that is a long URL's.
 _URL_TOKEN_WINDOW = 2000
+_URL_NARROW_WINDOW = 40
 _HOST_SCHEME_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
 _DOMAINISH_START_RE = re.compile(r"[A-Za-z0-9-]")
+_HOST_OR_PATH_RE = re.compile(r"[./]")
 
+# The first word of a line after a URL or a DOI that does not continue it: a new
+# identifier ("doi:10.5194/..." under a journal link), a label ("DOI:", "E-ISSN", "e-mail:",
+# "@"), an acronym ("ISSN"), a name followed by a comma ("Smith,"), or the number or page
+# range that starts the next reference ("112.", "12-34") before a capitalized word.
+_NEW_IDENTIFIER_RE = re.compile(r"(?:https?:|www\.|doi\b)", re.IGNORECASE)
+# The word of a citation that follows a link: "accessed 30 June 2018", "Retrieved from".
+_CITATION_WORD_RE = re.compile(
+    r"(?:accessed|retrieved|available|cited|visited|viewed)[.,;:]*$", re.IGNORECASE
+)
+_LABEL_TOKEN_RE = re.compile(
+    r"(?:(?:[A-Za-z][A-Za-z-]*:|@|[A-Za-z]-[A-Za-z]+[.:]?)$|[A-Za-z]-[A-Z]{2,}:)"
+)
+_ACRONYM_TOKEN_RE = re.compile(r"[A-Z]{2,}[.,;:)]*$")
+_NAME_TOKEN_RE = re.compile(r"[A-Z][a-z]+(?:[-'][A-Z][a-z]+)*[,;]$")
+_NUMBER_TOKEN_RE = re.compile(r"\d{1,4}(?:[-\u2013]\d{1,4})?[.,;:)]*$")
 
-# The rest of an Elsevier-style suffix after a bracketed group: "S0959-4388(96)" + "80080-8".
-_DOI_BRACKET_TAIL_RE = re.compile(r"\d[0-9A-Za-z\-:<>\[\]();.]*[-:<>\[(]\w")
+# The rest of an Elsevier-style suffix after a bracketed group: "S0959-4388(96)" + "80080-8"
+# (four to six digits, a hyphen, a check character, or the rest of the digits), a suffix
+# of three numbers joined by hyphens ("(2015)" + "01-0151-06"), and the rest of a SICI
+# suffix: a number followed by a separator or bracket ("1097-4679(1999", "41:7<1196").
+# A page range ("12-34") is none of these.
+_DOI_BRACKET_TAIL_RE = re.compile(
+    r"\d{4,6}-[0-9A-Za-z](?![\w-])|\d{5,6}-\d{1,3}(?![\w-])|\d{4}-\d{3}[\dXx](?![\w-])"
+    r"|\d{1,6}-\d{1,6}-\d{1,6}(?![\w-])|\d[0-9A-Za-z\-]*[:<\[(]\w"
+)
 # A bracketed group opening the next line: "S0304-3940" + "(03)00880-2".
 _DOI_BRACKET_OPEN_RE = re.compile(r"\(\d{2,8}\)\d")
 # After a dot, an upper-case continuation made of letters and digits: "jbc." + "M705403200",
 # "CSHPERSPECT." + "A031583". Not a PubMed or PMC identifier, which follow a DOI as text.
 _DOI_DOT_UPPER_RE = re.compile(
-    r"(?!PM|S\d{4}[-\u2010-\u2015]\d{3}[\dXx][(\[])[A-Z]{1,8}[.-]?\d[A-Za-z0-9.\-;()/:]*"
+    r"(?!PM|S\d{4}[-‐-―]\d{3}[\dXx][(\[])[A-Z]{1,8}[.-]?\d[A-Za-z0-9.\-;()/:]*"
 )
 
 
-def _doi_suffix_wrap(last: str, right: str) -> bool:
+def _next_token(s: str, pos: int) -> str:
+    """The word after *pos* on the same line, or ""."""
+    end = len(s)
+    while pos < end and s[pos] in " \t":
+        pos += 1
+    stop = pos
+    while stop < end and s[stop] not in " \t\r\n":
+        stop += 1
+    return s[pos:stop]
+
+
+def _is_prose_after(right: str, following: str, last: str) -> bool:
+    """Whether the first word of the next line, with the word after it, is no identifier.
+
+    *right* is the first word of the line a break leads to, *following* the next one on
+    that line, *last* the character before the break. A line that opens a new identifier,
+    a label, a name, or the number of the next reference is a new thing, however the URL
+    or DOI above it ended. A number after a digit continues that number.
+    """
+    if _NEW_IDENTIFIER_RE.match(right) or _LABEL_TOKEN_RE.match(right):
+        return True
+    if _CITATION_WORD_RE.match(right):
+        return True
+    if _NAME_TOKEN_RE.match(right):
+        return True
+    if _ACRONYM_TOKEN_RE.match(right) and following[:1] in (":", *"0123456789"):
+        return True  # "ISSN 2469-6501", "ISBN: 978"
+    return bool(_NUMBER_TOKEN_RE.match(right) and following[:1].isupper() and not last.isdigit())
+
+
+def _continues_path_word(right: str, left: str = "") -> bool:
+    """Whether the word a wrap leads to reads as the rest of a word of a URL path."""
+    head = right[:20]
+    if _HOST_OR_PATH_RE.search(head) or _URL_PATH_TOKEN_RE.search(head):
+        return True
+    if _URL_PATH_CHAR_RE.search(right):
+        return True
+    if not _URL_SLUG_RE.match(right):
+        return False  # a label ("E-ISSN") or a word without a hyphen
+    parts = re.split(r"[-\u2010\u2011\u2013]", re.sub(r"[.,;:)/]+$", "", right))
+    if any(part.isdigit() for part in parts):
+        return True
+    if right.endswith(":") and len(parts) == 2:
+        return False  # "e-mail:" under a link
+    run = re.search(r"[A-Za-z]+$", left)
+    if run and _max_zipf((run.group() + parts[0]).lower(), ("en",)) >= _ZIPF_VALID_WORD:
+        return True  # "cys" + "tic-fibrosis": the wrap splits a word
+    # "co-authored" and "state-of-the-art" are prose; "ducing-recaptcha" and
+    # "l-activity" are not.
+    return not all(len(part) > 1 and _max_zipf(part, ("en",)) >= _ZIPF_VALID_WORD for part in parts)
+
+
+def _doi_suffix_wrap(last: str, right: str, following: str) -> bool:
     """Whether a line break inside a DOI suffix falls where a wrapped DOI continues."""
+    if _is_prose_after(right, following, last):
+        return False
     if last in ")]" and _DOI_BRACKET_TAIL_RE.match(right):
         return True
     if right[0] == "(" and last.isdigit() and _DOI_BRACKET_OPEN_RE.match(right):
@@ -516,8 +627,12 @@ def _doi_suffix_wrap(last: str, right: str) -> bool:
     return last == "." and bool(_DOI_DOT_UPPER_RE.match(right))
 
 
-def _join_url_crlf(m: "re.Match[str]") -> str:
-    """Decide whether a CRLF wrap sits inside a URL/DOI token and should join."""
+def _join_url_crlf(m: "re.Match[str]", reference: bool = True) -> str:
+    """Decide whether a CRLF wrap sits inside a URL/DOI token and should join.
+
+    *reference* is False for text that is not a reference entry: the shapes that repair
+    the suffix of a DOI after a bracket, an underscore or a dot are then left out.
+    """
     s = m.string
     lstart = (
         max(
@@ -538,22 +653,43 @@ def _join_url_crlf(m: "re.Match[str]") -> str:
     # URL/DOI context on the JOINED form (handles scheme-splits like https:/ //doi.org).
     # The whole token to the left is searched: its scheme or "10.NNNN/" lies far back in
     # a long URL, and a window of its last characters would never see it.
-    if not DOI_URL_CONTEXT_RE.search(left[-_URL_TOKEN_WINDOW:] + right[:8]):
+    joined_tail = right[:8]
+    if not DOI_URL_CONTEXT_RE.search(left[-_URL_TOKEN_WINDOW:] + joined_tail):
         return m.group(0)
     last, first = left[-1], right[0]
-    # A DOI never ends at its registrant: "10.NNNN/" or "10." at the end of a line is
-    # followed by the rest of the identifier, whatever its case ("10.1038/\nNmat2630").
-    if _DOI_REGISTRANT_END_RE.search(left) and _DOI_AFTER_REGISTRANT_RE.match(right):
-        return ""
-    # A URL path or query does not end on "_", "=" or "&": the wrap continues it.
-    if last in "_=&" and not _DOI_BODY_RE.search(left):
+    following = _next_token(s, rend)
+    # A token whose scheme or registrant lies beyond the last 40 characters is a long
+    # URL's; the earlier releases never joined it. It joins where the line that follows
+    # is no new thing.
+    long_token = not DOI_URL_CONTEXT_RE.search(left[-_URL_NARROW_WINDOW:] + joined_tail)
+    if long_token and _is_prose_after(right, following, last):
+        return m.group(0)
+    # A DOI never ends at its registrant: "10." is followed by the registrant number and
+    # its slash, "10.NNNN/" by the rest of the identifier, whatever its case
+    # ("10.1038/\nNmat2630"), never by a name or the numbers of a page range.
+    if _DOI_REGISTRANT_END_RE.search(left):
+        if left.endswith("/"):
+            if _DOI_SUFFIX_START_RE.match(right) and not _is_prose_after(right, following, last):
+                return ""
+        elif _DOI_REGISTRANT_NUMBER_RE.match(right):
+            return ""
+    in_doi_body = bool(_DOI_BODY_RE.search(left))
+    # A URL query does not end on "=" or "&": the wrap continues it, whatever the value.
+    if last in "=&" and not in_doi_body and not _is_prose_after(right, following, last):
         return ""
     # Veto prose: a capitalized word continuation is a name/sentence, not a URL. A token
     # that carries path or query characters ("Enrollment-File/", "Salzburg_Bakom.pdf") is
-    # no name.
-    if _CAP_WORD_RE.match(right) and not _URL_PATH_TOKEN_RE.search(right.split(None, 1)[0]):
+    # no name, nor is a file name ("Register.aspx") after a slash or an underscore. After a
+    # letter, a capitalized word with a dot is the name of a site ("YouTube.com").
+    if (
+        _CAP_WORD_RE.match(right)
+        and not _URL_PATH_TOKEN_RE.search(right)
+        and not (last in "_/" and _URL_FILE_TOKEN_RE.search(right))
+    ):
         return m.group(0)
-    in_doi_body = bool(_DOI_BODY_RE.search(left))
+    # A URL path does not end on "_" either.
+    if last == "_" and not in_doi_body and not _is_prose_after(right, following, last):
+        return ""
     # Never join a 10.NNNN/ DOI-body letter->letter wrap: that is
     # _bridge_doi_midword_wraps's domain (incl. the annurev structural-hyphen
     # guard). Make the invariant explicit rather than relying on fall-through.
@@ -561,7 +697,7 @@ def _join_url_crlf(m: "re.Match[str]") -> str:
         return m.group(0)
     # Rules for the suffix of a DOI (the text after "10.NNNN/"): a wrap there continues
     # the identifier when what follows has the shape of the rest of a DOI, never a word.
-    if in_doi_body and _doi_suffix_wrap(last, right):
+    if reference and in_doi_body and _doi_suffix_wrap(last, right, following):
         return ""
     # Rule 1: digit -> digit (mid-number / registrant-internal). A complete DOI
     # ending ".x" has a letter before the wrap, so the page-range guard is free.
@@ -588,20 +724,16 @@ def _join_url_crlf(m: "re.Match[str]") -> str:
     # Rule 2d: a wrap after the dot before a file extension ("index." + "php/...").
     if last == "." and not in_doi_body and _URL_EXTENSION_RE.match(right):
         return ""
-    # Rule 3: host continuation (letter->letter) OUTSIDE a 10.NNNN/ DOI body,
-    # only when the continuation carries a path or query character, a host '.' or '/',
-    # or a digit.
-    if (
-        not in_doi_body
-        and last.isalpha()
-        and first.isalpha()
-        and _URL_PATH_AHEAD_RE.search(right[:20])
-    ):
+    # Rule 3: host continuation (letter->letter) OUTSIDE a 10.NNNN/ DOI body. The
+    # continuation carries a host "." or "/", a query or path character or a digit, or a
+    # hyphen ("sults-pbr-arrangements"). A word of two dictionary words with one hyphen
+    # ("co-authored") and a label ("E-ISSN") are prose.
+    if not in_doi_body and last.isalpha() and first.isalpha() and _continues_path_word(right, left):
         return ""
     return m.group(0)
 
 
-def _bridge_doi_url_crlf_wraps(text: str) -> str:
+def _bridge_doi_url_crlf_wraps(text: str, reference: bool = True) -> str:
     """Re-join CRLF wraps inside a URL/DOI token at positions the mid-word DOI
     bridge does not cover. Additive to :func:`_bridge_doi_midword_wraps`; never
     joins a 10.NNNN/ DOI-body letter->letter wrap (that function's domain, incl.
@@ -614,7 +746,7 @@ def _bridge_doi_url_crlf_wraps(text: str) -> str:
     prev: str | None = None
     while prev != text:
         prev = text
-        text = _URL_CRLF_WRAP_RE.sub(_join_url_crlf, text)
+        text = _URL_CRLF_WRAP_RE.sub(lambda m: _join_url_crlf(m, reference), text)
     return text
 
 
@@ -781,7 +913,7 @@ _LATEX_SYMBOL_RE = re.compile(
 _LATEX_BACKSLASH_CMD_RE = re.compile(r"\\([a-zA-Z]+)")
 
 
-def fix_ocr_artifacts(text: str) -> str:
+def fix_ocr_artifacts(text: str, *, reference: bool | None = None) -> str:
     """Replace common OCR artifacts with correct characters.
 
     Handles ligatures (ff, fi, fl, ffi, ffl), soft hyphens, and the
@@ -789,21 +921,27 @@ def fix_ocr_artifacts(text: str) -> str:
 
     Args:
         text: Input text potentially containing OCR artifacts.
+        reference: Whether the text is a reference entry or list (True), any other
+            region (False), or not known (None, the default). The shapes that rejoin
+            a DOI broken after a bracket, an underscore or a dot, or inside a word
+            that opens upper-case, run on reference text and on text of unknown
+            kind, not on a body paragraph, a caption or a title.
 
     Returns:
         Cleaned text.
     """
+    ref_shapes = reference is not False
     text = normalize_unicode(text)
     text = _resolve_stx_marks(text)
     text = CONTROL_CHAR_RE.sub("", text)
     for artifact, replacement in _OCR_ARTIFACT_MAP.items():
         text = text.replace(artifact, replacement)
     text = _bridge_url_linewraps(text)
-    text = _bridge_doi_url_crlf_wraps(text)
+    text = _bridge_doi_url_crlf_wraps(text, ref_shapes)
     # Wraps bridged above can bring a hyphen wrap into a URL that began on an earlier line.
     text = _bridge_url_linewraps(text)
-    text = _bridge_doi_midword_wraps(text)
-    text = _bridge_doi_dot_wraps(text)
+    text = _bridge_doi_midword_wraps(text, ref_shapes)
+    text = _bridge_doi_dot_wraps(text, ref_shapes)
     text = _bridge_doi_slash_space(text)
     text = _bridge_doi_space_wraps(text)
     text = _bridge_alphanumeric_linewraps(text)

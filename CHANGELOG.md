@@ -220,16 +220,30 @@ by an earlier version, carries neither.
 ### Fixed
 
 - A DOI or URL printed across a line break is joined again in more of the shapes
-  a PDF's text layer produces. A reference line that ends on "10." before the
-  rest of the DOI, right after the registrant slash, after a closing bracket or
-  an underscore, or inside a word of the suffix, no longer leaves a space inside
-  the DOI, which cost the link the DOI makes. A long URL whose scheme lies far
-  back on the line is joined as a short one is, and a wrap after "/", "_" or "="
-  or before a file extension is read as part of the path. A dot that ends a DOI
-  no longer pulls a following link or reference into it. A hyphen at a line end
-  printed as U+2010 or U+2011 is joined or kept by the rule an ASCII hyphen
-  follows. Text without a DOI, a URL or such a hyphen at a line break comes out
-  as before.
+  a PDF's text layer produces. A line that ends on "10." before the rest of the
+  DOI, right after the registrant slash, or inside a word of the suffix no longer
+  leaves a space inside the DOI, which cost the link the DOI makes. A long URL
+  whose scheme lies far back on the line is joined as a short one is, and a wrap
+  after "/", "_" or "=", inside a word of the path or before a file extension is
+  read as part of the path. A dot that ends a DOI no longer pulls a following
+  link or reference into it. A hyphen at a line end printed as U+2010 or U+2011
+  is joined or kept by the rule an ASCII hyphen follows.
+  - The new shapes join a wrap only when the line after it can continue the
+    identifier. A line that opens with a label ("DOI:", "E-ISSN", "e-mail:", "@"),
+    a new link or DOI, a name and a comma, the number of the next reference or a
+    page range before a capitalized word, or a hyphenated word such as
+    "co-authored" stays on its own line, and so does a line after a page range
+    that ends on "10.". A link of fewer than 40 characters before the break keeps
+    the joins it had.
+  - The shapes that rejoin the suffix of a DOI after a closing bracket, an
+    underscore or a dot, and inside a word that opens upper-case, run on reference
+    entries and on text of unknown kind. `fix_ocr_artifacts` takes `reference`
+    (default `None`, unknown); the PDF parser passes `False` for every region whose
+    layout label is not a reference, and the reference line stream passes `True`.
+    In a replay over the stored text of about 4,000 papers none of these shapes
+    fired outside reference entries, so they are not applied there. The other
+    shapes run on every region.
+  - Text without a DOI, a URL or such a hyphen at a line break comes out as before.
 - A region the cloud vision OCR (`--ocr anthropic`, `openai`, `gemini`) could not
   read after its retries, or whose answer was cut off at its output cap, now
   shows in the export as an `OCR_REGION_FAILED` warning with the page, the

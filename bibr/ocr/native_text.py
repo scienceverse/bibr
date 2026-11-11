@@ -75,6 +75,9 @@ _CITATION_CRITICAL_NATIVE_LABELS = frozenset(
     {"text", "content", "vertical_text", "reference", "reference_content"}
 )
 _PRIVATE_USE_REJECTION_REASON = "private_use"
+# Layout labels of reference entries and lists, whose text gets the line-break repairs
+# written for a printed reference (see ``fix_ocr_artifacts``).
+_REFERENCE_LABELS = frozenset({"reference", "reference_content"})
 
 # Backward-compat alias — callers that imported _pdfium_lock from this module
 # continue to work and share the same canonical lock object.
@@ -1487,7 +1490,7 @@ def _fill_page_regions_from_textpage(
         # the control-character corruption gate, otherwise one benign marker
         # sends an entire, otherwise clean region through the vision model.
         if "\x02" in native_text:
-            native_text = fix_ocr_artifacts(native_text)
+            native_text = fix_ocr_artifacts(native_text, reference=label in _REFERENCE_LABELS)
         if label in _CITATION_CRITICAL_NATIVE_LABELS and any(
             unicodedata.category(ch) == "Co" for ch in native_text
         ):

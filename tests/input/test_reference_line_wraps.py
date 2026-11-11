@@ -229,3 +229,190 @@ def test_entry_text_joins_the_printed_lines_of_one_reference() -> None:
 )
 def test_text_without_these_patterns_is_unchanged(text: str) -> None:
     assert fix_ocr_artifacts(text) == text
+
+
+# --- what the line after a DOI or URL starts, and where the rules run -------------------------
+
+NEWLINES = ["\r\n", "\n"]
+REFERENCE_FLAGS = [None, True, False]
+LONG_HOST = "https://journal.example.org/jurnal/index.php/JPDP/"
+
+
+@pytest.mark.parametrize("reference", REFERENCE_FLAGS)
+@pytest.mark.parametrize("newline", NEWLINES)
+@pytest.mark.parametrize(
+    "template",
+    [
+        # a name after a registrant slash, a hyphenated word after a path word, a page range
+        # after a bracket, a capitalized word or a numbered reference after an underscore
+        "doi:10.1038/{nl}Smith, J. (2020) A study.",
+        "Code at https://github.com/example-org/example-repo{nl}co-authored the software.",
+        "doi:10.1000/a.b){nl}12-34 Smith J.",
+        "http://example.com/x_{nl}Another Ref",
+        "doi:10.1000/xyz_{nl}2. Jones K.",
+        # a label, a new identifier or a copyright mark under a URL that ends on a slash
+        LONG_HOST + "{nl}P-ISSN 2461-078X | E-ISSN 2654-783X",
+        LONG_HOST + "{nl}E-ISSN:2461-078X",
+        "www.example-research.org/Volumes/Vol30/13/{nl}DOI: 10.4054/ExampleRes.2014.30.13",
+        "https://creativecommons.example.org/licenses/by-sa/4.0/{nl}@ 2026 by the authors",
+        # the next reference's number after a URL
+        "https://example.org/ecology/vol13/iss2/art14/{nl}112. Eppo C. European plant",
+        # a label or an address under the URL of a journal's page, no path word
+        "Home: https://journal.example.org/index.php/jex{nl}e-mail: editor@example.org",
+        "ORCID https://orcid.org/0000-0001-7998-920X{nl}E-mail: author@example.org",
+        # the word of a citation after a long link that ends on a slash
+        "https://example.org/committees/inquiries/parliament-2015/evidence-and-reports/publications/{nl}accessed 30 June 2018.",
+        # the name of a site on the line after a link
+        "Uploaded 8 May 2020, https://video.example.org/watch?v=cLwQ-eBA2sc{nl}YouTube.com 2020e: Clips",
+        # a page range that ends on "10." before a DOI link: no DOI starts there
+        "Pages 1\u201310.{nl}https://doi.org/10.1000/example.2020.1",
+        "Vol. 3, 4\u201310.{nl}https://doi.org/10.1000/example.2020.1",
+    ],
+)
+def test_a_line_that_starts_something_new_is_not_joined(
+    template: str, newline: str, reference: bool | None
+) -> None:
+    printed = template.format(nl=newline)
+    assert fix_ocr_artifacts(printed, reference=reference) == printed
+
+
+@pytest.mark.parametrize("reference", REFERENCE_FLAGS)
+@pytest.mark.parametrize("newline", NEWLINES)
+@pytest.mark.parametrize(
+    ("template", "joined"),
+    [
+        # the registrant, in running text
+        (
+            "(https://doi.org/10.{nl}5555/example.2024.001).",
+            "(https://doi.org/10.5555/example.2024.001).",
+        ),
+        ("data at doi:10.5555/{nl}ex.2024.001.", "data at doi:10.5555/ex.2024.001."),
+        # a long URL: a wrap after a slash, inside a word of the path, after a query "="
+        (
+            "https://www.example.gov.uk/government/publications/consultation-responses/{nl}"
+            "summary-of-responses.pdf",
+            "https://www.example.gov.uk/government/publications/consultation-responses/"
+            "summary-of-responses.pdf",
+        ),
+        (
+            "https://example.org/docs/reform/annual_summary_of_resu{nl}lts_2012.pdf",
+            "https://example.org/docs/reform/annual_summary_of_results_2012.pdf",
+        ),
+        (
+            "http://www.example.org/repository/intro{nl}ducing-new-methods-for-wrapped-text",
+            "http://www.example.org/repository/introducing-new-methods-for-wrapped-text",
+        ),
+        ("https://example.org/search?q={nl}Smith", "https://example.org/search?q=Smith"),
+        # a capitalized path token, after a slash or an underscore
+        (
+            "see https://example.org/{nl}Example-Org/Example-Repo for",
+            "see https://example.org/Example-Org/Example-Repo for",
+        ),
+        (
+            "https://example.org/files/Annual_{nl}Report.pdf (accessed 2020)",
+            "https://example.org/files/Annual_Report.pdf (accessed 2020)",
+        ),
+        (
+            "https://example.org/files/annual_{nl}report_2020.pdf",
+            "https://example.org/files/annual_report_2020.pdf",
+        ),
+        # a hyphenated slug that holds the rest of a split word, or a path character
+        (
+            "https://example.org/2019/02/cys{nl}tic-fibrosis-medicines-wars-in-europe/ (last visited)",
+            "https://example.org/2019/02/cystic-fibrosis-medicines-wars-in-europe/ (last visited)",
+        ),
+        (
+            "https://example.org/docs/adapter-trimm{nl}ed-from-only-the\u2013ends-of-reads.html",
+            "https://example.org/docs/adapter-trimmed-from-only-the\u2013ends-of-reads.html",
+        ),
+        (
+            "http://example.org/guides/shared-{nl}governance-programme",
+            "http://example.org/guides/shared-governance-programme",
+        ),
+        # a file extension after the dot, a number after a digit, a bracketed host label
+        ("http://example.org/pages/index.{nl}php?id=3", "http://example.org/pages/index.php?id=3"),
+        (
+            "https://example.org/a/b/c/d/e/f/g/h/i/j/k/16217{nl}534. Accessed 1 Feb 2023",
+            "https://example.org/a/b/c/d/e/f/g/h/i/j/k/16217534. Accessed 1 Feb 2023",
+        ),
+    ],
+)
+def test_identifier_wraps_in_any_text_are_joined(
+    template: str, joined: str, newline: str, reference: bool | None
+) -> None:
+    assert fix_ocr_artifacts(template.format(nl=newline), reference=reference) == joined
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "joined"),
+    [
+        (
+            "doi:10.1016/S0959-4388(96)",
+            "80080-8 PMID: 3",
+            "doi:10.1016/S0959-4388(96)80080-8 PMID: 3",
+        ),
+        ("doi:10.1016/0006-8993(91)", "90927-N", "doi:10.1016/0006-8993(91)90927-N"),
+        ("doi: 10.1016/S0304-3940", "(03)00880-2", "doi: 10.1016/S0304-3940(03)00880-2"),
+        ("doi: 10.1016/s1474-4422(16)", "00114-119", "doi: 10.1016/s1474-4422(16)00114-119"),
+        (
+            "(doi:10.3964/j.issn.1000-0593(2015)",
+            "01-0151-06)",
+            "(doi:10.3964/j.issn.1000-0593(2015)01-0151-06)",
+        ),
+        ("doi:10.1074/jbc.", "M705403200", "doi:10.1074/jbc.M705403200"),
+        ("doi:10.1162/dint_a_", "00032", "doi:10.1162/dint_a_00032"),
+        ("doi:10.1161/STROK", "EAHA.119.025015", "doi:10.1161/STROKEAHA.119.025015"),
+        ("doi:10.1093/nar/g", "kq873", "doi:10.1093/nar/gkq873"),
+        (
+            "doi:10.1093/cercor/9.7.",
+            "722, PMID: 10554995",
+            "doi:10.1093/cercor/9.7.722, PMID: 10554995",
+        ),
+        (
+            "10.1146/annurev.arplant.57.",
+            "032905.105346",
+            "10.1146/annurev.arplant.57.032905.105346",
+        ),
+    ],
+)
+class TestDoiSuffixShapesRunOnReferenceText:
+    """Shapes that rejoin the suffix of a DOI run on a reference and on text of unknown kind.
+
+    No body paragraph, caption or title of the papers measured held one, so they are left to
+    reference text until they are shown to be right elsewhere.
+    """
+
+    def test_a_reference_is_joined(self, left: str, right: str, joined: str) -> None:
+        assert fix_ocr_artifacts(_wrap(left, right), reference=True) == joined
+
+    def test_text_of_unknown_kind_is_joined(self, left: str, right: str, joined: str) -> None:
+        assert fix_ocr_artifacts(_wrap(left, right)) == joined
+
+    def test_another_region_is_left_alone(self, left: str, right: str, joined: str) -> None:
+        printed = _wrap(left, right)
+        assert fix_ocr_artifacts(printed, reference=False) == printed
+
+
+@pytest.mark.parametrize("reference", REFERENCE_FLAGS)
+def test_a_page_range_after_a_bracket_is_no_doi_tail(reference: bool | None) -> None:
+    for tail in ("12-34 Smith J.", "1234-1240 Smith J.", "12-34"):
+        printed = _wrap("doi:10.1000/a.b)", tail)
+        assert fix_ocr_artifacts(printed, reference=reference) == printed
+
+
+def test_entry_text_runs_the_reference_shapes() -> None:
+    lines = ["Author A. A study. doi:10.1016/S0959-4388(96)", "80080-8 PMID: 3"]
+    out = _entry_text([SimpleNamespace(text=t) for t in lines])
+    assert out == "Author A. A study. doi:10.1016/S0959-4388(96)80080-8 PMID: 3"
+
+
+def test_a_reference_entry_keeps_a_page_range_apart_from_the_doi_link() -> None:
+    lines = [
+        "Author A. A study. J Things 2018;4:1\u201310.",
+        "https://doi.org/10.1000/example.2020.1",
+    ]
+    out = _entry_text([SimpleNamespace(text=t) for t in lines])
+    assert (
+        out
+        == "Author A. A study. J Things 2018;4:1\u201310. https://doi.org/10.1000/example.2020.1"
+    )
