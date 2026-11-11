@@ -18,7 +18,7 @@ import pytest
 from bibr.clients import ref_llm, skipped
 from bibr.clients.llm import LLMClient
 from bibr.clients.skipped import SkippedLlmClient
-from bibr.config import GlobalSettings
+from bibr.config import GlobalSettings, MlOptions
 from bibr.models import PaperAuthor, PaperMetadata, PaperReference
 from bibr.paper_contents import (
     CanonicalSection,
@@ -250,7 +250,13 @@ async def test_the_credit_statement_still_recovers_authors_in_fast_mode():
     assert "VAL_AUTHOR_CREDIT_RECOVERED" in {i.code for i in ext.core.validation_issues}
 
 
-def _classifier_extractor(model_id="some/model"):
+# The shipped classifiers: a model set away from its default is an override, whose
+# errors also carry MODEL_OVERRIDE_INFERENCE_FAILED (bibr.utils.model_overrides).
+_SHIPPED_PAPER = MlOptions.model_fields["paper_classifier_model_id"].default
+_SHIPPED_SECTION = MlOptions.model_fields["section_classifier_model_id"].default
+
+
+def _classifier_extractor(model_id=_SHIPPED_PAPER):
     ext = _core_extractor(SkippedLlmClient())
     ext.core._settings = GlobalSettings(ml={"paper_classifier_model_id": model_id})
     ext.core._explicit_classifier_runtime = False
@@ -436,7 +442,7 @@ async def test_headers_with_no_trained_model_keep_their_alias_prior(
 async def _classify_with_the_model_set_up(sc, *, classifier_resources=None):
     from bibr.run_mode import fast_settings
 
-    settings = fast_settings(GlobalSettings(ml={"section_classifier_model_id": "some/model"}))
+    settings = fast_settings(GlobalSettings(ml={"section_classifier_model_id": _SHIPPED_SECTION}))
     warnings: list = []
     results = await sc.classify_headers_batch_async(
         _HEADERS,
