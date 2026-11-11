@@ -793,6 +793,7 @@ setting and once with it. No other setting changes:
 | Text reference segmenter (replaces the CRF) | `REF_TEXT_SEG_MODEL_ID` | directory with `segmenter.json`, `model.onnx` and `tokenizer.json` (in it or in `onnx/`), or a Hub repo id |
 | Front-role classifier | `ML_FRONT_ROLE_MODEL_ID` | `.joblib` bundle file |
 | Front-matter tagger | `ML_FRONT_TAGGER_MODEL_ID` | ONNX bundle directory |
+| Statement tagger (adds a source) | `ML_STATEMENT_TAGGER_MODEL_ID` | ONNX bundle directory (`model: statement_tagger`), or a Hub repo id |
 | Section classifier | `ML_SECTION_CLASSIFIER_MODEL_ID` | ONNX bundle directory (`model: section_classifier`) |
 | Paper classifier | `ML_PAPER_CLASSIFIER_MODEL_ID` | ONNX bundle directory (`model: paper_classifier`) |
 
@@ -910,6 +911,28 @@ a `MODEL_OVERRIDE_INFERENCE_FAILED` warning; errors on three papers in a row
 stop the run. The preflight checks the files, the manifest and the tokenizer,
 and runs the graph once on a full window of tokenised reference text,
 checking that it returns three label scores per token.
+
+`ML_STATEMENT_TAGGER_MODEL_ID` is unset by default and adds a source to
+statement resolution. It takes a local directory or a Hub repo id (with
+`ML_STATEMENT_TAGGER_REVISION`; `bibr_onnx.json`, `model.onnx` and
+`tokenizer.json` in `onnx/`) and needs only ONNX Runtime and `tokenizers`.
+The model reads the paper's paragraphs in order, each section heading a block
+of its own and the reference list left out, each block paired with the first
+200 characters of the block before it, and gives each block a probability per
+statement type; a block is of a type at or above that type's threshold in
+`bibr_onnx.json`, and neighbouring blocks of a type join into one statement.
+Where it finds a funding, competing interests, ethics or data availability
+statement, that field takes the tagger's statements (all of them, in reading
+order, each cut at the next statement label in its rows) instead of the
+rules'; a field it finds nothing for keeps the rules' value. The field's
+source in `extraction.fields` is then `statement_tagger`. When the paper has
+no acknowledgments or author contributions section and the tagger finds one,
+its paragraphs become that section: a section all of whose rows it tagged is
+retyped, otherwise the rows move to a new section with a synthetic heading
+right after the one they were in; `classification_source` is
+`statement_tagger` either way. Each field or section it supplied adds a
+`STATEMENT_TAGGER` warning. A `--no-llm` run does not use it. The preflight
+opens the bundle and runs the graph once.
 
 ### CPU threads
 

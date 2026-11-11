@@ -128,6 +128,14 @@ MODEL_SETTINGS: tuple[ModelSetting, ...] = (
         "onnx",
     ),
     ModelSetting(
+        "ML_STATEMENT_TAGGER_MODEL_ID",
+        "statement tagger",
+        ("ml", "statement_tagger_model_id"),
+        ("ml", "statement_tagger_revision"),
+        "onnx",
+        "statement_tagger",
+    ),
+    ModelSetting(
         "ML_SECTION_CLASSIFIER_MODEL_ID",
         "section classifier",
         ("ml", "section_classifier_model_id"),
@@ -510,7 +518,8 @@ def models_in_use(settings: Any) -> set[str]:
     ``REF_TEXT_SEG_MODEL_ID`` is set), and the geometry segmenter and the line
     tagger only for ``REF_SEG_STRATEGY=geom``.
     The front-matter tagger when its mode is on, the front-role classifier
-    unless ``ML_FRONT_ROLE_ENABLED=false``, the classifiers when configured.
+    unless ``ML_FRONT_ROLE_ENABLED=false``, the classifiers when configured,
+    the statement tagger when it is set.
     """
     ml = getattr(settings, "ml", None)
     used = {"ML_SECTION_CLASSIFIER_MODEL_ID", "ML_PAPER_CLASSIFIER_MODEL_ID"}
@@ -518,6 +527,8 @@ def models_in_use(settings: Any) -> set[str]:
         used.add("ML_FRONT_ROLE_MODEL_ID")
     if getattr(ml, "front_tagger_mode", "off") != "off":
         used.add("ML_FRONT_TAGGER_MODEL_ID")
+    if getattr(ml, "statement_tagger_model_id", None):
+        used.add("ML_STATEMENT_TAGGER_MODEL_ID")
     parse = str(getattr(settings, "REF_PARSE_STRATEGY", None) or "ner").lower()
     if parse != "off":
         used.add("NER_PARSER_CKPT")
@@ -587,6 +598,13 @@ def _check_onnx(spec: ModelSetting, value: str, settings: Any = None) -> None:
     missing = [p.name for p in onnx_bundle_files(bundle) if not p.is_file()]
     if missing:
         raise ConfigurationError(f"the bundle lacks {', '.join(missing)}")
+    if spec.env == "ML_STATEMENT_TAGGER_MODEL_ID":
+        from bibr.statement_tagger.runtime import StatementTagger, StatementTaggerError
+
+        try:
+            StatementTagger(bundle, threads=1)  # reads the manifest, opens the graph, runs it once
+        except StatementTaggerError as exc:
+            raise ConfigurationError(str(exc)) from exc
 
 
 def _check_local(spec: ModelSetting, value: str, settings: Any = None) -> None:

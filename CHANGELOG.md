@@ -157,6 +157,17 @@ too: it is recorded as one, and it loads and runs as before.
   start comes back as one reference, flagged `no_reference_start` in the
   receipt and with a new `REF_SEG_NOT_SPLIT` warning, and does not go on to
   the marker split.
+- `ML_STATEMENT_TAGGER_MODEL_ID` (unset by default; a directory or a Hub id
+  with `ML_STATEMENT_TAGGER_REVISION`) adds a statement tagger, an ONNX
+  classifier over the paper's paragraphs that needs no `torch`. Where it finds
+  a funding, competing interests, ethics or data availability statement, that
+  field takes its statements instead of the rules', with the source
+  `statement_tagger`; a field it finds nothing for keeps the rules' value.
+  When the paper has no acknowledgments or author contributions section, the
+  paragraphs it finds become one. Each adds a `STATEMENT_TAGGER` warning. A
+  `--no-llm` run does not use it. The runtime (`bibr.statement_tagger.runtime`)
+  needs nothing else from bibr: block texts in reading order in, typed
+  statements out.
 - For maintainers, `scripts/switch_model_defaults.py SETTING=org/name@<commit>`
   moves a default model to a new Hub pin: the defaults in `bibr/config.py`,
   the matching `ARG`s in `Dockerfile.serve`, the default-model table and the

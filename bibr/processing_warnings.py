@@ -67,6 +67,7 @@ class WarningCode(StrEnum):
     FRONT_TAGGER_FLAGGED = "FRONT_TAGGER_FLAGGED"
     FRONT_MATTER_NOT_READ = "FRONT_MATTER_NOT_READ"
     STATEMENT_LEXICAL_FALLBACK = "STATEMENT_LEXICAL_FALLBACK"
+    STATEMENT_TAGGER = "STATEMENT_TAGGER"
     RESEARCH_INTEGRITY_LLM_FAILED = "RESEARCH_INTEGRITY_LLM_FAILED"
     EQUATION_LLM_FALLBACK_TIMEOUT = "EQUATION_LLM_FALLBACK_TIMEOUT"
     EQUATION_LLM_FALLBACK_FAILED = "EQUATION_LLM_FALLBACK_FAILED"
@@ -209,6 +210,10 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     "and sections where it has them, and the authors were not read.",
     WarningCode.STATEMENT_LEXICAL_FALLBACK: "A research-integrity statement was filled by "
     "lexical anchor matching.",
+    WarningCode.STATEMENT_TAGGER: "A funding, competing interests, ethics or data "
+    "availability statement, or an acknowledgments or author contributions section the "
+    "paper had none of, was taken from the opt-in statement tagger "
+    "(ML_STATEMENT_TAGGER_MODEL_ID); the message names it.",
     WarningCode.RESEARCH_INTEGRITY_LLM_FAILED: "The research-integrity LLM call failed; "
     "structured funding, author roles and parsed affiliation parts are missing.",
     WarningCode.EQUATION_LLM_FALLBACK_TIMEOUT: "The equation LLM fallback timed out; only "

@@ -556,8 +556,9 @@ class PaperSection:
     # Provenance of the classification decision — which tier produced
     # ``section_type``/``classification_score``: "exact_alias", "substring_alias",
     # "alias_prior", "model", "llm", "parent_context", "title", "implicit",
-    # "positional", "appendix_repair", or "imrad_dedup" (type reset because a
-    # higher-trust duplicate kept it). None when unclassified. Exported, with
+    # "positional", "appendix_repair", "imrad_dedup" (type reset because a
+    # higher-trust duplicate kept it), or "statement_tagger" (the opt-in
+    # statement tagger). None when unclassified. Exported, with
     # the score, as ``extraction.diagnostics.section_classification``.
     classification_source: str | None = None
     # Optional signal from the trained section classifier — True/False when the

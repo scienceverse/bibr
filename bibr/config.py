@@ -2191,6 +2191,24 @@ class MlOptions(_BibrSettings):
         None,
         description="Pinned revision of the front-matter tagger bundle on the Hub.",
     )
+    # Statement tagger (bibr/statement_tagger/): a small encoder that types the
+    # paper's paragraphs as funding, competing interests, ethics, data
+    # availability, acknowledgments or author contributions. Opt-in: no bundle is
+    # published, and unset nothing loads and exports are unchanged.
+    statement_tagger_model_id: str | None = Field(
+        None,
+        description="Statement tagger: a local directory or Hub repo id of its ONNX bundle "
+        "(bibr_onnx.json with model statement_tagger, model.onnx and tokenizer.json, in onnx/ or "
+        "the directory itself). When set, the statements it finds replace the rules' funding, "
+        "competing interests, ethics and data availability statements of their type, and give "
+        "acknowledgments and author contributions a section when the paper has none. Unset "
+        "(default): not used.",
+    )
+    statement_tagger_revision: str | None = Field(
+        None,
+        description="Hub revision (commit, branch or tag) of ML_STATEMENT_TAGGER_MODEL_ID when it "
+        "is a Hub repo id; unset reads main. Ignored for a local directory.",
+    )
     front_tagger_min_confidence: float = Field(
         0.9,
         ge=0.0,

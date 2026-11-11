@@ -1694,8 +1694,9 @@ class SectionClassificationExport(BaseModel):
     source: str | None = Field(
         description="Which tier decided the type: 'exact_alias', 'substring_alias' or "
         "'alias_prior' (heading lookup), 'model' (trained classifier), 'llm', "
-        "'parent_context', 'title', 'implicit', 'positional', 'appendix_repair' or "
-        "'imrad_dedup'; null when unclassified."
+        "'parent_context', 'title', 'implicit', 'positional', 'appendix_repair', "
+        "'imrad_dedup' or 'statement_tagger' (the opt-in statement tagger); null when "
+        "unclassified."
     )
 
 

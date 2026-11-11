@@ -1712,6 +1712,15 @@ async def post_parse(
                     (author.given, author.family) for author in paper_metadata.authors
                 ),
             )
+            if effective_settings.ml.statement_tagger_model_id and not no_llm:
+                # Opt-in statement tagger: its statements join the resolution
+                # (bibr/statement_tagger/pipeline.py). Unset, nothing loads; a
+                # --no-llm run, which uses no extraction model, does not run it.
+                from bibr.statement_tagger.pipeline import apply_statement_tagger
+
+                integrity_resolution = await asyncio.to_thread(
+                    apply_statement_tagger, contents, integrity_resolution, effective_settings
+                )
 
             # Citation linking must see the raw superscript/LaTeX patterns.
             # Structured integrity is intentionally sequenced later because it
