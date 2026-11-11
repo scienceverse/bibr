@@ -47,7 +47,7 @@ def load_ref_parser(
         logger.debug("NER parser bundle: %s", bundle)
         parser = OnnxRefParser(bundle, device=device)
         if is_model_override(settings, "NER_PARSER_CKPT"):
-            parser.check_graph()  # a candidate's graph runs once at load; the default is not probed
+            parser.check_graph()  # a candidate's graph is probed at load; the default is not
         return parser
 
     import bibr.ner.parser as parser_mod

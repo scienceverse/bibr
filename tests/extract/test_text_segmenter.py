@@ -324,6 +324,21 @@ def test_a_graph_of_the_wrong_shape_is_refused_at_load(tmp_path):
         OnnxTextSegmenter(bundle)
 
 
+def test_a_graph_exported_for_one_window_length_is_refused_at_load(tmp_path):
+    from tests.onnx_fixtures import fix_input_dims
+
+    # A full window runs; a short reference list, or the last window of a long
+    # one, is shorter and would fail at inference.
+    bundle = _bundle(tmp_path / "fixed")
+    fix_input_dims(bundle / "model.onnx", {"input_ids": [1, 1024], "attention_mask": [1, 1024]})
+    with pytest.raises(ConfigurationError, match=r"does not run on a \(1, 24\) window"):
+        OnnxTextSegmenter(bundle)
+    # A paper's windows go one at a time: a graph fixed to a batch of one loads.
+    bundle = _bundle(tmp_path / "batch1")
+    fix_input_dims(bundle / "model.onnx", {"input_ids": [1], "attention_mask": [1]})
+    assert OnnxTextSegmenter(bundle).window == 1024
+
+
 def test_a_hub_id_is_downloaded_at_its_revision(tmp_path, monkeypatch):
     cached = _bundle(tmp_path / "cache", in_onnx_dir=True)
     monkeypatch.chdir(tmp_path)

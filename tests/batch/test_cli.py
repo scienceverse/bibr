@@ -206,6 +206,7 @@ def test_report_subcommand_text_and_json(tmp_path, capsys):
         "failed": 1,
         "stopped_on_model_override": 0,
         "fell_back_on_model_override": 0,
+        "fell_back_capped": 0,
         "attempts": 2,
     }
     assert report["references"]["match_rate"] == 0.5
@@ -826,21 +827,28 @@ def test_batch_refuses_a_model_override_that_does_not_exist(tmp_path, monkeypatc
 
     monkeypatch.setattr("bibr.local.cli._opencv_unavailable_reason", lambda: None)
     monkeypatch.setattr("bibr.local.cli.run_config._preflight_ocr_runtime", lambda config: None)
-    monkeypatch.setattr(Settings, "NER_PARSER_CKPT", str(tmp_path / "no-parser"))
+    # The front-role classifier is the one model a --no-llm run on a PDF asks.
+    monkeypatch.setattr(Settings.ml, "front_role_model_id", str(tmp_path / "no-front-role"))
     pdf = _pdf(tmp_path)
     out = tmp_path / "out"
     args = _build_parser().parse_args(["batch", str(pdf), "--out", str(out), "--no-llm"])
     assert _run_batch(args) == 1
     err = " ".join(capsys.readouterr().err.split())
-    assert "Model override problem: NER_PARSER_CKPT=" in err
+    assert "Model override problem: ML_FRONT_ROLE_MODEL_ID=" in err
     assert not out.exists()
-    # With references off the parser is not loaded, and the stale setting does not block.
+    # A --no-llm run extracts no references: a stale parser setting does not block it,
+    # and one warning says so.
+    monkeypatch.setattr(Settings.ml, "front_role_model_id", None)
+    monkeypatch.setattr(Settings, "NER_PARSER_CKPT", str(tmp_path / "no-parser"))
     monkeypatch.setattr("bibr.batch.runner.open_chew_many", lambda local: _no_pipeline())
     args = _build_parser().parse_args(
-        ["batch", str(pdf), "--out", str(out), "--no-llm", "--refs", "off", "--dry-run"]
+        ["batch", str(pdf), "--out", str(out), "--no-llm", "--dry-run"]
     )
     assert _run_batch(args) == 0
-    assert "Model override problem" not in capsys.readouterr().err
+    err = " ".join(capsys.readouterr().err.split())
+    assert "Model override problem" not in err
+    assert err.count("Model override: NER_PARSER_CKPT=") == 1
+    assert "--no-llm extracts no references" in err
 
 
 def _no_pipeline():

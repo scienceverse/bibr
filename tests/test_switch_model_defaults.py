@@ -250,3 +250,29 @@ def test_in_a_git_checkout_only_tracked_files_are_searched(tree):
     subprocess.run([git, "-C", str(tree), "add", "tracked.md", *FILES], check=True)
     _, stale, _ = switch.plan(tree, {setting: (repo, NEW)})
     assert [entry.split(":")[0] for entry in stale] == ["tracked.md"]
+
+
+@pytest.mark.parametrize("length", [7, 10, 12, 39])
+@pytest.mark.parametrize(
+    ("name", "line"),
+    [
+        ("docs/guides/zz_short.md", "Pinned at `{short}` until the retrain."),
+        ("evaluation/zz_short.json", '{{"rev": "{short}"}}'),
+        ("bibr/zz_short.py", "URL = 'https://huggingface.co/{repo}/resolve/{short}/x'"),
+    ],
+)
+def test_any_abbreviation_of_seven_or_more_digits_stops_it(tree, capsys, length, name, line):
+    setting, repo, old = _section_pin(tree)
+    target = tree / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(line.format(repo=repo, short=old[:length]) + "\n")
+    assert switch.main([f"{setting}={repo}@{NEW}", "--check", "--root", str(tree)]) == 1
+    assert f"{name}:1" in capsys.readouterr().err
+
+
+def test_six_digits_or_another_commit_of_the_same_prefix_is_not_the_old_pin(tree):
+    setting, repo, old = _section_pin(tree)
+    other = old[:7] + ("0" if old[7] != "0" else "1") + old[8:]
+    (tree / "bibr/zz_other.py").write_text(f'A = "{old[:6]}"\nB = "{other}"\nC = "{other[:9]}"\n')
+    _, stale, _ = switch.plan(tree, {setting: (repo, NEW)})
+    assert not any(entry.startswith("bibr/zz_other.py") for entry in stale)

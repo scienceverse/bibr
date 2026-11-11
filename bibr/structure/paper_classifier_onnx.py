@@ -70,58 +70,73 @@ class OnnxPaperClassifierModel:
         return cls(bundle, device=device)
 
     def check_graph(self) -> None:
-        """Run the graph once on a title and abstract, as ``classify_batch`` sends them.
+        """Run the graph on titles and abstracts, in two shapes ``classify_batch`` sends.
 
         The load probe of an overridden classifier (:mod:`bibr.utils.onnx_probe`):
         titles and abstracts through the bundle's template and tokenizer at the
-        manifest's ``max_length``, one of them long enough to fill it, with the
-        tokenizer's last id in it. The graph must give finite logits for each
-        head, one per class the manifest lists for it, and the paper-type
-        temperature must be a positive number. Raises
-        :class:`~bibr.exceptions.ConfigurationError`.
+        manifest's ``max_length``, as a batch of two padded to the longest, which
+        fills the length and holds the tokenizer's last id, and as one paper
+        alone, cut short (:func:`~bibr.utils.onnx_probe.cut_short`): a run
+        classifies its papers in batches of any size, padded to their longest.
+        On both the graph must give finite logits for each head, one per class
+        the manifest lists for it, and the paper-type temperature must be a
+        positive number. Raises :class:`~bibr.exceptions.ConfigurationError`.
         """
         import math
 
         from bibr.exceptions import ConfigurationError
-        from bibr.utils.onnx_probe import PROBE_BODY, check_output, run_probe, with_last_token
+        from bibr.utils.onnx_probe import (
+            PROBE_BODY,
+            check_output,
+            cut_short,
+            run_probe,
+            with_last_token,
+        )
 
         if not (math.isfinite(self.paper_type_temperature) and self.paper_type_temperature > 0):
             raise ConfigurationError(
                 f"{self.bundle_dir}: the manifest's paper_type_temperature "
                 f"{self.paper_type_temperature!r} is not a positive number"
             )
-        items = [
+        full = [
             ("Memory consolidation during sleep: a preregistered replication", PROBE_BODY * 8),
             ("A short note", "We comment on a recent meta-analysis."),
         ]
-        texts = [_build_input_text(title, abstract) for title, abstract in items]
-        batch = encode_batch(self.tokenizer, texts, max_length=self.max_length)
-        ids = with_last_token(batch.input_ids, batch.attention_mask, self.tokenizer)
-        feeds = {"input_ids": ids, "attention_mask": batch.attention_mask}
-        feeds = {k: v for k, v in feeds.items() if k in self._input_names}
-        shape = f"a {ids.shape} batch of titles and abstracts"
+        short = [("Erratum", "")]
         model_path = self.bundle_dir / self.manifest.get("model_file", ONNX_MODEL)
-        outputs = run_probe(
-            model_path,
-            shape,
-            lambda: self.session.run(["l1_logits", "l2_logits", "paper_type_logits"], feeds),
-        )
-        for name, value, classes, key in zip(
-            ("l1_logits", "l2_logits", "paper_type_logits"),
-            outputs,
-            (self.l1_classes, self.l2_classes, self.paper_type_classes),
-            ("l1_classes", "l2_classes", "paper_type_classes"),
-            strict=True,
-        ):
-            # A head without a class space is read as no answer, whatever its width.
-            check_output(
+        for items in (full, short):
+            texts = [_build_input_text(title, abstract) for title, abstract in items]
+            batch = encode_batch(self.tokenizer, texts, max_length=self.max_length)
+            ids = with_last_token(batch.input_ids, batch.attention_mask, self.tokenizer)
+            mask = batch.attention_mask
+            if items is short:
+                ids, mask = cut_short(ids, mask, self.max_length)
+            feeds = {"input_ids": ids, "attention_mask": mask}
+            feeds = {k: v for k, v in feeds.items() if k in self._input_names}
+            shape = f"a {ids.shape} batch of titles and abstracts"
+            outputs = run_probe(
                 model_path,
-                name,
-                value,
-                (len(items), len(classes) if classes else None),
                 shape,
-                f"one per class of the manifest's {len(classes)} {key}",
+                lambda feeds=feeds: self.session.run(
+                    ["l1_logits", "l2_logits", "paper_type_logits"], feeds
+                ),
             )
+            for name, value, classes, key in zip(
+                ("l1_logits", "l2_logits", "paper_type_logits"),
+                outputs,
+                (self.l1_classes, self.l2_classes, self.paper_type_classes),
+                ("l1_classes", "l2_classes", "paper_type_classes"),
+                strict=True,
+            ):
+                # A head without a class space is read as no answer, whatever its width.
+                check_output(
+                    model_path,
+                    name,
+                    value,
+                    (len(items), len(classes) if classes else None),
+                    shape,
+                    f"one per class of the manifest's {len(classes)} {key}",
+                )
 
     def classify_batch(self, items: list[tuple[str, str]]) -> list[PaperClassificationPrediction]:
         results: list[PaperClassificationPrediction] = []

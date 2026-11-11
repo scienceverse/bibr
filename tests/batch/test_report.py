@@ -66,6 +66,7 @@ def test_compute_report_counts_latest_attempt_per_paper():
         "failed": 2,
         "stopped_on_model_override": 0,
         "fell_back_on_model_override": 0,
+        "fell_back_capped": 0,
         "attempts": 6,
     }
 
@@ -143,6 +144,7 @@ def test_compute_report_filters_by_run_id():
         "failed": 1,
         "stopped_on_model_override": 0,
         "fell_back_on_model_override": 0,
+        "fell_back_capped": 0,
         "attempts": 2,
     }
 
@@ -189,6 +191,7 @@ def test_papers_a_model_override_stopped_are_not_counted_as_failed():
         "failed": 1,
         "stopped_on_model_override": 2,
         "fell_back_on_model_override": 1,
+        "fell_back_capped": 0,
         "attempts": 4,
     }
     assert report["failures"]["by_error_code"] == {"REF_PARSE": 1}
@@ -204,3 +207,21 @@ def test_a_report_without_model_overrides_reads_as_before():
     lines = render_report(compute_report(_ledger())).splitlines()
     assert not any(line.strip().startswith("override") for line in lines)
     assert not any("not finished" in line for line in lines)
+
+
+def test_a_paper_that_fell_back_three_times_in_a_row_is_reported_as_capped():
+    fell_back = {"count": 1, "codes": {"MODEL_OVERRIDE_INFERENCE_FAILED": 1}}
+    rows = [_row("a", warnings=fell_back) for _ in range(3)]
+    rows += [_row("b", warnings=fell_back), _row("b", warnings=fell_back)]
+    papers = compute_report(rows)["papers"]
+    assert papers["fell_back_on_model_override"] == 2 and papers["fell_back_capped"] == 1
+    lines = render_report(compute_report(rows)).splitlines()
+    override = [line for line in lines if line.strip().startswith("override")]
+    assert len(override) == 2
+    assert "1 paper fell back from an overridden model" in override[0]
+    assert "until each has fallen back 3 times in a row" in override[0]
+    assert "1 paper fell back on a model override 3 times in a row" in override[1]
+    assert "rerun with --retry-failed after fixing the model" in override[1]
+    # A paper the candidate answered in between starts counting again.
+    rows.insert(1, _row("a"))
+    assert compute_report(rows)["papers"]["fell_back_capped"] == 0

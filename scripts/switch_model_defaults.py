@@ -12,8 +12,8 @@ For each setting it rewrites:
   old short revision, and ``huggingface.co/<repo>/blob|tree|resolve|commit/<revision>``
   links in the docs.
 
-Then it looks for the old pin anywhere else (the full revision, its first eight
-characters, and the old repo id when the repo changes, also inside a URL such
+Then it looks for the old pin anywhere else (the revision, or any abbreviation
+of it of seven or more hex digits, and the old repo id when the repo changes, also inside a URL such
 as ``huggingface.co/<repo>/resolve/<revision>``) in every text file of the
 tree: the code, the scripts, the Dockerfiles and shell scripts, ``.github/``,
 ``evaluation/``, the TOML, JSON and YAML files and the docs (the files git
@@ -37,6 +37,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _REVISION = re.compile(r"[0-9a-f]{40}")
+# The shortest abbreviation of a commit the stale-pin search looks for (git's default).
+MIN_ABBREVIATION = 7
 _REPO = re.compile(r"[A-Za-z0-9][\w.-]*/[\w.-]+(:[\w./-]+)?")
 
 
@@ -246,6 +248,30 @@ def _read_text(path: Path) -> str | None:
         return None
 
 
+# A revision abbreviation git and the Hub accept: 7 or more hex digits, standing
+# alone or inside a URL or path, not inside a longer name or hex string.
+_ABBREVIATION = re.compile(rf"(?<![\w-])[0-9a-f]{{{MIN_ABBREVIATION},40}}(?![\w-])")
+
+
+def _old_pin_matcher(old_revs: list[str], old_repos: list[str]):
+    """Whether a text names one of the old revisions (any abbreviation) or repos."""
+    repos = [
+        re.compile(rf"(?<![\w-]){re.escape(repo)}(?![\w-])")
+        for repo in sorted(set(old_repos), key=len, reverse=True)
+    ]
+
+    def names(text: str) -> bool:
+        if any(pattern.search(text) for pattern in repos):
+            return True
+        return any(
+            rev.startswith(match.group(0))
+            for match in _ABBREVIATION.finditer(text)
+            for rev in old_revs
+        )
+
+    return names
+
+
 def plan(
     root: Path, pins: dict[str, tuple[str, str]]
 ) -> tuple[dict[Path, str], list[str], list[str]]:
@@ -313,30 +339,26 @@ def plan(
 
     # Anything still naming an old pin is a place this script does not know.
     stale: list[str] = []
-    needles: list[str] = []
+    old_revs: list[str] = []
+    old_repos: list[str] = []
     for setting, (repo, revision) in pins.items():
         old_repo, old_rev = olds[setting]
         if old_rev and old_rev != revision:
-            needles += [old_rev, old_rev[:8]]
+            old_revs.append(old_rev)
         if old_repo and old_repo != repo:
-            needles.append(old_repo)
-    needles = sorted(set(needles), key=len, reverse=True)
-    # A needle stands alone or inside a URL or path (``/resolve/<rev>``,
-    # ``huggingface.co/<repo>``), but not inside a longer name or hex string.
-    patterns = [re.compile(rf"(?<![\w-]){re.escape(needle)}(?![\w-])") for needle in needles]
+            old_repos.append(old_repo)
+    names_old_pin = _old_pin_matcher(old_revs, old_repos)
     for path in _search_files(root):
         text = files[path] if path in files else _read_text(path)
         if text is None:
             continue
         for number, line in enumerate(text.splitlines(), 1):
-            for pattern in patterns:
-                if pattern.search(line):
-                    stale.append(f"{path.relative_to(root)}:{number}: {line.strip()[:120]}")
-                    break
+            if names_old_pin(line):
+                stale.append(f"{path.relative_to(root)}:{number}: {line.strip()[:120]}")
     tests = []
     for path in sorted((root / "tests").glob("**/*.py")):
         text = path.read_text(encoding="utf-8")
-        if any(needle in text for needle in needles):
+        if names_old_pin(text):
             tests.append(str(path.relative_to(root)))
     changed = {p: t for p, t in files.items() if t != p.read_text(encoding="utf-8")}
     return changed, stale, tests

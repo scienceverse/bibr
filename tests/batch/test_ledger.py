@@ -431,7 +431,10 @@ def test_a_paper_that_keeps_falling_back_waits_for_retry_failed(tmp_path):
     assert _run_ids(ledger, tmp_path) == ["p"]
     ledger.append(_fell_back())
     plan = ledger.plan(_items(tmp_path, ["p"]))
-    assert plan.to_run == [] and [i.paper_id for i in plan.skipped_failed] == ["p"]
+    # Skipped, but not as a failure: it waits for --retry-failed in a bucket of its own.
+    assert plan.to_run == [] and plan.skipped_failed == []
+    assert [i.paper_id for i in plan.override_capped] == ["p"]
+    assert ledger.fallbacks_in_a_row() == {"p": 3}
     assert _run_ids(ledger, tmp_path, retry_failed=True) == ["p"]
     # An export the candidate answered settles it; a later fallback counts from one.
     ledger.append({"paper_id": "p", "status": "ok"})

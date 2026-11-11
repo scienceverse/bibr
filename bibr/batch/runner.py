@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Collection, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,6 +36,7 @@ from bibr.batch.ledger import (
     CHUNK_ERROR,
     INTERRUPTED,
     LEDGER_FILENAME,
+    MAX_UNSETTLED_FAILURES,
     MODEL_OVERRIDE_FAILED,
     OUTPUT_WRITE_FAILED,
     UPSTREAM_UNAVAILABLE,
@@ -605,6 +606,8 @@ def _print_plan(options: BatchOptions, plan: BatchPlan, ledger: Ledger) -> None:
                 "model (MODEL_OVERRIDE_INFERENCE_FAILED)",
             )
         )
+    if plan.resume.override_capped:
+        console.print(kv("skip fell back", override_capped_text(plan.resume.override_capped)))
     detail = []
     if options.limit:
         detail.append(f"limit {options.limit}")
@@ -817,6 +820,7 @@ def _execute(
         "n_planned": len(plan.to_run),
         "n_skipped_ok": len(plan.resume.skipped_ok),
         "n_skipped_failed": len(plan.resume.skipped_failed),
+        "n_skipped_override_capped": len(plan.resume.override_capped),
         "shuffle_seed": plan.seed if options.shuffle else None,
         "deadline": (
             datetime.fromtimestamp(options.deadline, tz=UTC).isoformat(timespec="seconds")
@@ -907,10 +911,12 @@ def _execute(
                 soft_wrap=True,
             )
 
+    capped = plan.resume.override_capped
     console.print(
         f"  [dim]{total} to run {ui.SEP} {len(plan.resume.skipped_ok)} already ok "
         f"{ui.SEP} {len(plan.resume.skipped_failed)} skipped failed {ui.SEP} "
-        f"{options.executor} {ui.SEP} run {run_id}[/dim]"
+        + (f"{len(capped)} skipped, fell back on a model override {ui.SEP} " if capped else "")
+        + f"{options.executor} {ui.SEP} run {run_id}[/dim]"
     )
 
     reason = "completed"
@@ -1048,18 +1054,66 @@ def _execute(
                 soft_wrap=True,
             )
         if fell_back:
-            names = ", ".join(fell_back[:10]) + (" …" if len(fell_back) > 10 else "")
-            console.print(
-                f"  {len(fell_back)} {'paper' if len(fell_back) == 1 else 'papers'} fell back "
-                f"from an overridden model (MODEL_OVERRIDE_INFERENCE_FAILED): {names}; their "
-                "exports do not hold the candidate's answer, and a re-run of the same command "
-                "processes them again (run_info.json override_fallbacks lists them all)",
-                soft_wrap=True,
-            )
+            for line in _fell_back_lines(fell_back, ledger.fallbacks_in_a_row(entries)):
+                console.print(f"  {line}", soft_wrap=True)
+        if capped:
+            console.print(f"  {override_capped_text(capped)}", soft_wrap=True)
 
     if fatal:
         ui.error(console, fatal)
         return EXIT_USAGE
     if interrupted or reason == "stopped":
         return EXIT_INTERRUPTED
+    if total == 0 and capped:
+        # Nothing ran, and the papers left are waiting on a model that failed them.
+        return EXIT_FAILURES
     return EXIT_FAILURES if n_failed else EXIT_OK
+
+
+def _names(paper_ids: Sequence[str]) -> str:
+    return ", ".join(paper_ids[:10]) + (" …" if len(paper_ids) > 10 else "")
+
+
+def override_capped_text(items: Sequence[BatchItem]) -> str:
+    """The line for papers a resume skips because they fell back on an override too often."""
+    n = len(items)
+    return (
+        f"{n} {'paper' if n == 1 else 'papers'} fell back on a model override "
+        f"{MAX_UNSETTLED_FAILURES} times in a row and {'is' if n == 1 else 'are'} skipped: "
+        f"{_names([item.paper_id for item in items])}; rerun with --retry-failed after fixing "
+        "the model"
+    )
+
+
+def _fell_back_lines(fell_back: Sequence[str], in_a_row: Mapping[str, int]) -> list[str]:
+    """What happens next to this run's papers that fell back, grouped by the reruns left."""
+    by_left: dict[int, list[str]] = {}
+    for pid in fell_back:
+        left = max(MAX_UNSETTLED_FAILURES - in_a_row.get(pid, 1), 0)
+        by_left.setdefault(left, []).append(pid)
+    lines = []
+    for left in sorted(by_left, reverse=True):
+        pids = by_left[left]
+        n = len(pids)
+        head = (
+            f"{n} {'paper' if n == 1 else 'papers'} fell back from an overridden model "
+            f"(MODEL_OVERRIDE_INFERENCE_FAILED): {_names(pids)}; "
+            f"{'its export does' if n == 1 else 'their exports do'} not hold the candidate's "
+            "answer"
+        )
+        if left:
+            lines.append(
+                f"{head}, and a re-run of the same command processes "
+                f"{'it' if n == 1 else 'them'} again ({left} "
+                f"{'re-run' if left == 1 else 're-runs'} left before "
+                f"{'it waits' if n == 1 else 'they wait'} for --retry-failed)"
+            )
+        else:
+            lines.append(
+                f"{head}; {'it' if n == 1 else 'they'} fell back on a model override "
+                f"{MAX_UNSETTLED_FAILURES} times in a row, so a re-run of the same command "
+                "skips them: rerun with --retry-failed after fixing the model"
+            )
+    if lines:
+        lines[-1] += " (run_info.json override_fallbacks lists them all)"
+    return lines
