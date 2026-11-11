@@ -70,6 +70,19 @@ class KeywordTagger:
         return sorted(out, key=lambda s: (s.start, s.type))
 
 
+class AllRowsTagger:
+    """Tags every paragraph block acknowledgment, and the funding one funding too."""
+
+    def tag(self, texts):
+        out = [TaggedStatement("acknowledgment", k, k, 0.95) for k in range(len(texts))]
+        out += [
+            TaggedStatement("funding", k, k, 0.95)
+            for k, text in enumerate(texts)
+            if "funded" in text.lower()
+        ]
+        return sorted(out, key=lambda s: (s.start, s.type))
+
+
 def _paper(spec) -> PaperContents:
     """``spec``: ``(section_id, header, level, type, [(text, paragraph_id), ...])`` per section."""
     sections = [PaperSection(0, "Root", 0, None, CanonicalSection.UNKNOWN)]
@@ -332,6 +345,48 @@ def test_a_section_of_tagged_rows_only_is_retyped():
     assert notes.header == "Notes" and notes.section_type == CanonicalSection.AUTHOR_CONTRIBUTIONS
     assert notes.classification_source == "statement_tagger"
     assert len(contents.sections) == 3
+
+
+@pytest.mark.parametrize("heading", ["Discussion", "2. Methods", "Conclusions", "Appendix A"])
+def test_a_section_under_a_printed_body_heading_is_never_retyped(heading):
+    contents = _paper(
+        [
+            (1, "Introduction", 1, CanonicalSection.INTRODUCTION, [("Text.", 1)]),
+            (
+                2,
+                heading,
+                1,
+                CanonicalSection.DISCUSSION,
+                [("We thank the staff.", 2), ("This study was funded by the Council.", 3)],
+            ),
+        ]
+    )
+    before = [(s.section_id, s.header, s.section_type) for s in contents.sections]
+    resolution = resolve_integrity_statements(contents, mode="shadow")
+    resolution = apply_statement_tagger(contents, resolution, None, tagger=AllRowsTagger())
+    # Every row is tagged acknowledgment, yet the heading says what the section is.
+    assert [(s.section_id, s.header, s.section_type) for s in contents.sections] == before
+    assert {r.section_id for r in contents.sentences if r.text_id in (2, 3)} == {2}
+    messages = [w.message for w in contents.processing_warnings]
+    assert "acknowledgment filled by the statement tagger" not in messages
+    # Its rows still give the statement fields their values.
+    metadata = PaperMetadata(doi="", title="T")
+    apply_integrity_resolution(contents, metadata, resolution)
+    assert "funded by the Council" in metadata.funding_statement
+
+
+def test_a_section_under_an_unrecognised_printed_heading_is_still_retyped():
+    contents = _paper(
+        [
+            (1, "Introduction", 1, CanonicalSection.INTRODUCTION, [("Text.", 1)]),
+            (2, "Thanks", 1, CanonicalSection.UNKNOWN, [("We thank the staff.", 2)]),
+        ]
+    )
+    statements = KeywordTagger().tag([b.text for b in content_blocks(contents)])
+    assert apply_section_statements(contents, statements, content_blocks(contents)) == [
+        "acknowledgment"
+    ]
+    assert contents.sections[2].section_type == CanonicalSection.ACKNOWLEDGMENT
 
 
 def test_a_paper_that_has_the_section_keeps_it_untouched():

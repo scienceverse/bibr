@@ -25,8 +25,10 @@ adds what they missed:
   eight times as often.)
 * **Acknowledgments, author contributions** (section types): when the paper
   has no section of the type, the tagger's paragraphs of that type become one:
-  a section whose rows all carry the type is retyped; otherwise the rows move
-  to a new section right after the one they sat in, with a synthetic heading.
+  a section whose rows all carry the type is retyped, unless its printed
+  heading reads as a body section (it then stays as it is); otherwise the rows
+  move to a new section right after the one they sat in, with a synthetic
+  heading.
   Either way ``classification_source`` is ``statement_tagger``.
 * Each statement the tagger supplied adds a ``STATEMENT_TAGGER`` warning naming
   the field or section type.
@@ -84,6 +86,19 @@ _SKIPPED_SECTION_TYPES = frozenset({CanonicalSection.REFERENCES})
 # Section headings that are bibr's own labels, not printed headings.
 _LABEL_HEADING_TYPES = frozenset(
     {CanonicalSection.TABLE, CanonicalSection.FIGURE, CanonicalSection.FOOTNOTE}
+)
+# Body section types: a section whose printed heading bibr's heading lookup reads
+# as one of these is that section, whatever its rows say. Notes and author notes
+# ("Notes", "Author note" read as footnotes) are left out: they are where papers
+# print acknowledgments and contributions without a heading of their own.
+_BODY_HEADING_TYPES = frozenset(
+    {
+        CanonicalSection.INTRODUCTION,
+        CanonicalSection.METHODS,
+        CanonicalSection.RESULTS,
+        CanonicalSection.DISCUSSION,
+        CanonicalSection.APPENDIX,
+    }
 )
 # Sections whose rows a tagged statement never moves out of or retypes. Footnotes
 # are exported apart from the sections, so a section made of their rows would not
@@ -299,9 +314,14 @@ def apply_section_statements(
 ) -> list[str]:
     """Give tagged acknowledgments and author contributions a section of their type.
 
-    Only for a type the paper has no section of. Returns the section types set.
+    Only for a type the paper has no section of. A section whose printed
+    heading bibr's heading lookup reads as a body section (a "Discussion", a
+    "Methods", a "Conclusions") is never retyped, and its rows stay in it: the
+    heading says what the section is. Its rows still give the statement
+    fields their values. Returns the section types set.
     """
     from bibr.structure.implicit_sections import _insert_after_source, _rebuild_sections_text
+    from bibr.structure.section_classifier import classify_header
 
     present = {section.section_type for section in contents.sections}
     sections = {section.section_id: section for section in contents.sections}
@@ -331,6 +351,8 @@ def apply_section_statements(
                 continue
             own = [row.text_id for row in rows_of.get(section_id, []) if row.text.strip()]
             if set(own) <= set(members) and source.level > 0:
+                if _printed_heading_type(source, classify_header) in _BODY_HEADING_TYPES:
+                    continue
                 source.section_type = section_type
                 source.classification_source = METHOD
                 source.classification_score = score
@@ -361,6 +383,15 @@ def apply_section_statements(
     if affected:
         _rebuild_sections_text(contents, affected)
     return done
+
+
+def _printed_heading_type(section: PaperSection, classify_header) -> CanonicalSection | None:
+    """The type the section's printed heading names by bibr's heading lookup, if any."""
+    header = " ".join((section.header or "").split())
+    if not header or section.header_is_synthetic:
+        return None
+    kind, _score = classify_header(header)
+    return None if kind == CanonicalSection.UNKNOWN else kind
 
 
 # -- loading ---------------------------------------------------------------------------
