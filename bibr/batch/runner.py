@@ -951,6 +951,12 @@ def _execute(
             "fatal": fatal,
         }
     )
+    from bibr.utils.model_overrides import loaded_model_overrides
+
+    # Which files each overridden model loaded, with their sha256; absent for a
+    # run on the shipped models (and for --serve, whose models load elsewhere).
+    if overrides := loaded_model_overrides():
+        info["model_overrides"] = overrides
     write_run_info(options.out, info, append_history=False)
 
     entries = ledger.read()

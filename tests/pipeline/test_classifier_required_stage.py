@@ -12,16 +12,23 @@ from bibr.pipeline.classifier_resources import ClassifierResources
 from bibr.pipeline.stages.classifiers import ClassifierStage
 
 
+def _shipped(name):
+    from bibr.config import MlOptions
+
+    return MlOptions.model_fields[name].default
+
+
 def _settings(*, required):
+    # The shipped models: an overridden one is required whatever the setting says.
     ml = SimpleNamespace(
-        paper_classifier_model_id="paper/model",
-        paper_classifier_revision="rev",
+        paper_classifier_model_id=_shipped("paper_classifier_model_id"),
+        paper_classifier_revision=_shipped("paper_classifier_revision"),
         paper_classifier_device=None,
         paper_classifier_batch_size=8,
         paper_classifier_batch_timeout_ms=2.0,
         paper_classifier_estimated_peak_mb=1,
-        section_classifier_model_id="section/model",
-        section_classifier_revision="rev",
+        section_classifier_model_id=_shipped("section_classifier_model_id"),
+        section_classifier_revision=_shipped("section_classifier_revision"),
         section_classifier_device=None,
         section_classifier_batch_size=8,
         section_classifier_batch_timeout_ms=2.0,
@@ -90,3 +97,30 @@ def test_required_success_leaves_files_alone():
     )
     assert resources.status()["paper"].state.value == "ready"
     assert files[0].error is None
+
+
+def test_an_overridden_classifier_is_required_whatever_the_setting(tmp_path):
+    settings = _settings(required=False)
+    settings.ml.paper_classifier_model_id = str(tmp_path / "paper-candidate")
+    resources = ClassifierResources(
+        settings,
+        memory_mode="balanced",
+        managed_vllm_fraction=0.0,
+        cuda_available=False,
+        paper_loader=_boom,
+        section_loader=_boom,
+    )
+    files = [_File()]
+    ctx = SimpleNamespace(
+        resources=SimpleNamespace(start_classifiers=resources.start, classifiers=resources),
+        file_states=files,
+    )
+    asyncio.run(ClassifierStage().run(ctx))
+    states = resources.status()
+    assert states["paper"].state.value == "failed_required"
+    assert states["paper"].override
+    # The shipped section model may still degrade.
+    assert states["section"].state.value == "degraded"
+    assert files[0].error_code == "classifier_required_failed"
+    assert files[0].error.startswith("Overridden classifier(s) failed to start")
+    assert "never falls back" in files[0].error

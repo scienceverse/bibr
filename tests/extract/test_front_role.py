@@ -186,11 +186,12 @@ def test_bundle_with_foreign_feature_keys_is_rejected(tmp_path):
 
 
 def test_loader_is_soft_and_caches_failures(monkeypatch, caplog):
-    from bibr.config import snapshot_settings
+    from bibr.config import MlOptions, snapshot_settings
 
     reset_front_role_cache()
     settings = snapshot_settings()
-    settings.ml.front_role_model_id = "/nonexistent/front_role.joblib"
+    # The suite runs with the prior off; the shipped model loads softly, an override does not.
+    settings.ml.front_role_model_id = MlOptions.model_fields["front_role_model_id"].default
     calls = []
 
     def _boom(*a, **k):
@@ -210,11 +211,12 @@ def test_loader_retries_after_a_network_failure(monkeypatch):
     """One Hub blip must not disable the default prior for the process."""
     import httpx
 
-    from bibr.config import snapshot_settings
+    from bibr.config import MlOptions, snapshot_settings
 
     reset_front_role_cache()
     settings = snapshot_settings()
-    settings.ml.front_role_model_id = "org/front-role"
+    # The suite runs with the prior off; the shipped model loads softly, an override does not.
+    settings.ml.front_role_model_id = MlOptions.model_fields["front_role_model_id"].default
     loaded = object()
     attempts = []
 
@@ -258,3 +260,56 @@ def test_loader_respects_disabled_and_unset(monkeypatch):
     settings.ml.front_role_model_id = "org/repo"
     settings.ml.front_role_enabled = False
     assert load_front_role_classifier(settings) is None
+
+
+def test_an_overridden_bundle_loads_and_is_recorded_by_checksum(bundle_path):
+    import hashlib
+
+    from bibr.config import snapshot_settings
+    from bibr.utils.model_overrides import loaded_model_overrides, reset_loaded_model_overrides
+
+    reset_front_role_cache()
+    reset_loaded_model_overrides()
+    settings = snapshot_settings()
+    settings.ml.front_role_model_id = str(bundle_path)
+    clf = load_front_role_classifier(settings)
+    assert clf is not None and clf.path == str(bundle_path)
+    (record,) = loaded_model_overrides()
+    assert record["setting"] == "ML_FRONT_ROLE_MODEL_ID"
+    assert record["files"] == [
+        {
+            "path": str(bundle_path),
+            "bytes": bundle_path.stat().st_size,
+            "sha256": hashlib.sha256(bundle_path.read_bytes()).hexdigest(),
+        }
+    ]
+    reset_front_role_cache()
+    reset_loaded_model_overrides()
+
+
+def test_an_overridden_bundle_that_cannot_load_stops_the_run(tmp_path):
+    from bibr.config import snapshot_settings
+    from bibr.exceptions import ConfigurationError
+
+    reset_front_role_cache()
+    settings = snapshot_settings()
+    settings.ml.front_role_model_id = str(tmp_path / "front_role.joblib")
+    for _ in range(2):  # not cached as "no model": the second paper fails the same way
+        with pytest.raises(ConfigurationError, match="never falls back"):
+            load_front_role_classifier(settings)
+    reset_front_role_cache()
+
+
+async def test_the_parse_stage_lets_an_override_failure_through(tmp_path):
+    from types import SimpleNamespace
+
+    from bibr.exceptions import ConfigurationError
+    from bibr.pipeline.stages.parse_segment import _predict_front_roles
+
+    def ensure():
+        raise ConfigurationError("ML_FRONT_ROLE_MODEL_ID='x' names a front-role classifier ...")
+
+    with pytest.raises(ConfigurationError):
+        await _predict_front_roles(
+            SimpleNamespace(ensure_front_role=ensure), [], first_page_index=0
+        )

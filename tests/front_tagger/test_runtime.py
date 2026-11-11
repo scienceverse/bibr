@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -204,8 +205,13 @@ def _fake_loader(monkeypatch, tmp_path):
     return runtime, built
 
 
-def _tagger_settings(mode, model_id="x/y"):
+def _tagger_settings(mode, model_id=None):
+    """Settings naming the shipped tagger (another id is an override, which never falls back)."""
     from types import SimpleNamespace
+
+    from bibr.config import MlOptions
+
+    model_id = model_id or MlOptions.model_fields["front_tagger_model_id"].default
 
     return SimpleNamespace(
         ml=SimpleNamespace(
@@ -356,3 +362,31 @@ def test_chunks_that_ask_together_read_the_bundle_once(monkeypatch, tmp_path):
     assert len(built) == 1
     assert len({id(tagger) for tagger in got}) == 1
     runtime.reset_front_tagger_cache()
+
+
+def test_an_overridden_tagger_without_a_bundle_stops_the_run(tmp_path):
+    from bibr.exceptions import ConfigurationError
+    from bibr.front_tagger import runtime
+
+    runtime.reset_front_tagger_cache()
+    with pytest.raises(ConfigurationError, match="never falls back"):
+        runtime.load_front_tagger(_tagger_settings("only", model_id=str(tmp_path / "missing")))
+    runtime.reset_front_tagger_cache()
+
+
+def test_an_overridden_tagger_is_recorded_by_checksum(tmp_path):
+    import hashlib
+
+    from bibr.front_tagger import runtime
+    from bibr.utils.model_overrides import loaded_model_overrides, reset_loaded_model_overrides
+
+    runtime.reset_front_tagger_cache()
+    reset_loaded_model_overrides()
+    _bundle(tmp_path)
+    assert runtime.load_front_tagger(_tagger_settings("primary", model_id=str(tmp_path)))
+    (record,) = loaded_model_overrides()
+    assert record["setting"] == "ML_FRONT_TAGGER_MODEL_ID"
+    model = next(f for f in record["files"] if f["path"].endswith("model.onnx"))
+    assert model["sha256"] == hashlib.sha256(Path(model["path"]).read_bytes()).hexdigest()
+    runtime.reset_front_tagger_cache()
+    reset_loaded_model_overrides()

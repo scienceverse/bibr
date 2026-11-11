@@ -210,6 +210,7 @@ def _local_options(args: Any, console: Any) -> Any:
     from bibr.local.cli.run_config import (
         _apply_runtime_settings,
         _preflight_front_tagger,
+        _preflight_model_overrides,
         _preflight_ocr_runtime,
         _preflight_opencv,
         apply_text_layer_fallback,
@@ -242,6 +243,9 @@ def _local_options(args: Any, console: Any) -> Any:
             if problem is not None:
                 return problem
             problem = _preflight_front_tagger(config)
+            if problem is not None:
+                return problem
+            problem = _preflight_model_overrides(config)
             if problem is not None:
                 return problem
         if not announced:

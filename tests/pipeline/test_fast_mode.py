@@ -1712,8 +1712,11 @@ _PAGE_WITH_ODD_HEADINGS = _PAGE[:-3] + _ODD + _PAGE[-3:]
 
 
 def _both_classifiers_set_up(settings):
-    settings.ml.paper_classifier_model_id = "some/paper-model"
-    settings.ml.section_classifier_model_id = "some/section-model"
+    # The shipped models (the suite runs with them unset); an override never degrades.
+    from bibr.config import MlOptions
+
+    for name in ("paper_classifier_model_id", "section_classifier_model_id"):
+        setattr(settings.ml, name, MlOptions.model_fields[name].default)
 
 
 class _SectionModel:

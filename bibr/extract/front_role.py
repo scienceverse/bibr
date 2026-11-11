@@ -16,7 +16,8 @@ and a confident masthead cannot root a record. ``RefLocator`` uses the
 
 Loading is soft: a missing/unloadable bundle logs once and disables the model
 (``load_front_role_classifier`` returns ``None``), so extraction never fails
-because an optional prior is absent.
+because an optional prior is absent. An overridden bundle (see
+:mod:`bibr.utils.model_overrides`) is the exception: its failure raises.
 """
 
 from __future__ import annotations
@@ -140,6 +141,7 @@ class FrontRoleClassifier:
         from bibr.utils.safe_pickle import safe_joblib_load
 
         path = resolve_checkpoint(_resolve_spec(model_spec), revision=revision)
+        self.path = path
         # Same trust boundary as the geom segmenter: joblib executes code on
         # load, so only the gadget-restricted loader touches the file.
         bundle = safe_joblib_load(path)
@@ -216,9 +218,18 @@ def load_front_role_classifier(settings: GlobalSettings) -> FrontRoleClassifier 
     with _CACHE_LOCK:
         if key in _CACHE:
             return _CACHE[key]
+    from bibr.utils.model_overrides import (
+        is_model_override,
+        override_load_error,
+        record_model_load,
+    )
+
     try:
         clf: FrontRoleClassifier | None = FrontRoleClassifier(str(model_id), revision=revision)
     except Exception as exc:  # noqa: BLE001 - optional prior, never fatal
+        if (strict := override_load_error(settings, "ML_FRONT_ROLE_MODEL_ID", exc)) is not None:
+            # An overridden classifier never falls back to the heuristics.
+            raise strict from exc
         logger.warning(
             "Front-role classifier %s unavailable (%s); falling back to heuristics",
             model_id,
@@ -229,6 +240,8 @@ def load_front_role_classifier(settings: GlobalSettings) -> FrontRoleClassifier 
         if is_transient_network_error(exc):
             return None
         clf = None
+    if clf is not None and is_model_override(settings, "ML_FRONT_ROLE_MODEL_ID"):
+        record_model_load(settings, "ML_FRONT_ROLE_MODEL_ID", [clf.path])
     with _CACHE_LOCK:
         _CACHE[key] = clf
     return clf

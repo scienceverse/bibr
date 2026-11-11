@@ -470,6 +470,24 @@ def _front_tagger_bundle(model_id: str, revision: str | None) -> Path | None:
     return find_onnx_bundle(model_id, revision, label="front-matter tagger", raise_transient=True)
 
 
+def _preflight_model_overrides(config: ResolvedRunConfig) -> str | None:
+    """Fail fast when a model setting overridden with a local path cannot be loaded.
+
+    An override (a model setting other than its shipped default, see
+    :mod:`bibr.utils.model_overrides`) never falls back to the shipped model,
+    so a bad path would otherwise fail the run at its first paper, or, for a
+    model only some papers reach, part-way through. With every model setting at
+    its default nothing is checked.
+    """
+    from bibr.config import Settings
+    from bibr.utils.model_overrides import check_model_overrides
+
+    problems = check_model_overrides(Settings, fast=getattr(config, "mode", "full") == "fast")
+    if not problems:
+        return None
+    return "Model override problem: " + "; ".join(problems)
+
+
 def _preflight_front_tagger(config: ResolvedRunConfig) -> str | None:
     """Fail fast when a fast run cannot load the front-matter tagger.
 

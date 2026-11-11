@@ -28,7 +28,7 @@ from bibr.clients.llm import LLMClient, incomplete_output_text
 from bibr.clients.llm_protocol import LlmClient
 from bibr.clients.skipped import is_skipped
 from bibr.config import GlobalSettings, snapshot_settings
-from bibr.exceptions import ProcessingError, UpstreamServiceError
+from bibr.exceptions import ConfigurationError, ProcessingError, UpstreamServiceError
 from bibr.extract.anchor_snap import find_anchor_starts, segment_by_anchors
 from bibr.extract.footnote_citations import (
     MAX_LISTED_REFERENCES,
@@ -76,6 +76,7 @@ from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.schemas import PaperReferenceLLM
 from bibr.utils.json_salvage import salvage_array_objects
 from bibr.utils.locks import LOCAL_INFERENCE_LOCK
+from bibr.utils.model_overrides import is_model_override, override_load_error, record_model_load
 from bibr.utils.text import collapse_ws, normalize_doi
 from bibr.utils.transient import is_transient_network_error
 from bibr.validation import IssueSeverity, ValidationIssue
@@ -514,11 +515,24 @@ def _get_ner_segmenter(settings: GlobalSettings | None = None):
                 from bibr.ner.segmenter import RefSegmenter
 
                 logger.info("loading NER segmenter: %s", settings.NER_SEG_CKPT)
-                _NER_SEGMENTER = RefSegmenter(
-                    settings.NER_SEG_CKPT,
-                    device=settings.NER_DEVICE,
-                    revision=settings.NER_SEG_REVISION,
-                )
+                try:
+                    segmenter = RefSegmenter(
+                        settings.NER_SEG_CKPT,
+                        device=settings.NER_DEVICE,
+                        revision=settings.NER_SEG_REVISION,
+                    )
+                except Exception as e:
+                    if (strict := override_load_error(settings, "NER_SEG_CKPT", e)) is not None:
+                        raise strict from e
+                    raise
+                if is_model_override(settings, "NER_SEG_CKPT"):
+                    from bibr.ner.checkpoint import resolve_checkpoint
+
+                    checkpoint = resolve_checkpoint(
+                        settings.NER_SEG_CKPT, revision=settings.NER_SEG_REVISION
+                    )
+                    record_model_load(settings, "NER_SEG_CKPT", [checkpoint])
+                _NER_SEGMENTER = segmenter
                 _NER_SEGMENTER_KEY = key
     return _NER_SEGMENTER
 
@@ -550,12 +564,20 @@ def _get_geom_segmenter(settings: GlobalSettings | None = None):
 
                 logger.info("loading geom segmenter: %s", settings.REF_GEOM_SEG_MODEL_ID)
                 try:
-                    _GEOM_SEGMENTER = GeomSegmenter(
+                    segmenter = GeomSegmenter(
                         settings.REF_GEOM_SEG_MODEL_ID,
                         revision=settings.REF_GEOM_SEG_REVISION,
                     )
+                    if is_model_override(settings, "REF_GEOM_SEG_MODEL_ID"):
+                        record_model_load(settings, "REF_GEOM_SEG_MODEL_ID", [segmenter.path])
+                    _GEOM_SEGMENTER = segmenter
                     _GEOM_SEGMENTER_KEY = key
                 except Exception as e:  # noqa: BLE001 — unavailable deps/artifact → cascade
+                    # An overridden model never cascades past itself: the run
+                    # would measure the next tier under the candidate's name.
+                    strict = override_load_error(settings, "REF_GEOM_SEG_MODEL_ID", e)
+                    if strict is not None:
+                        raise strict from e
                     # Only a *definitive* failure is cached. A missing extra or
                     # absent artifact will fail identically forever, so the
                     # sticky flag saves repeated load attempts. A network-shaped
@@ -570,6 +592,38 @@ def _get_geom_segmenter(settings: GlobalSettings | None = None):
                         "geom segmenter unavailable (%r); cascading to LLM segmentation", e
                     )
     return _GEOM_SEGMENTER
+
+
+_GEOM_TAGGER = None
+_GEOM_TAGGER_KEY: str | None = None
+
+
+def _get_geom_tagger(settings: GlobalSettings | None = None):
+    """The opt-in geometry line tagger (``REF_GEOM_TAGGER_MODEL_ID``), or ``None`` when unset.
+
+    It exists only as an override, so a load failure raises
+    :class:`~bibr.exceptions.ConfigurationError` and is never cached.
+    """
+    global _GEOM_TAGGER, _GEOM_TAGGER_KEY
+    settings = settings if settings is not None else snapshot_settings()
+    path = getattr(settings, "REF_GEOM_TAGGER_MODEL_ID", None)
+    if not isinstance(path, str) or not path:
+        return None
+    if _GEOM_TAGGER is None or path != _GEOM_TAGGER_KEY:
+        with _NER_LOCK:
+            if _GEOM_TAGGER is None or path != _GEOM_TAGGER_KEY:
+                from bibr.extract.geom_tagger import GeomLineTagger
+
+                logger.info("loading geometry line tagger: %s", path)
+                try:
+                    tagger = GeomLineTagger(path)
+                except Exception as e:
+                    strict = override_load_error(settings, "REF_GEOM_TAGGER_MODEL_ID", e)
+                    raise (strict or e) from e
+                record_model_load(settings, "REF_GEOM_TAGGER_MODEL_ID", tagger.files)
+                _GEOM_TAGGER = tagger
+                _GEOM_TAGGER_KEY = path
+    return _GEOM_TAGGER
 
 
 def _get_ner_parser(settings: GlobalSettings | None = None, memory_mode: str | None = None):
@@ -597,14 +651,29 @@ def _get_ner_parser(settings: GlobalSettings | None = None, memory_mode: str | N
                 from bibr.ner.runtime import load_ref_parser
 
                 logger.info("loading NER parser: %s", settings.NER_PARSER_CKPT)
-                _NER_PARSER = load_ref_parser(
+                parser = load_ref_parser(
                     settings.NER_PARSER_CKPT,
                     device=device,
                     revision=settings.NER_PARSER_REVISION,
                     settings=settings,
                 )
+                if is_model_override(settings, "NER_PARSER_CKPT"):
+                    record_model_load(settings, "NER_PARSER_CKPT", _parser_files(parser, settings))
+                _NER_PARSER = parser
                 _NER_PARSER_KEY = key
     return _NER_PARSER
+
+
+def _parser_files(parser, settings: GlobalSettings) -> list:
+    """The files a loaded reference parser was read from (its ONNX bundle, or the checkpoint)."""
+    bundle_dir = getattr(parser, "bundle_dir", None)
+    if bundle_dir is not None:
+        from bibr.utils.model_overrides import onnx_bundle_files
+
+        return onnx_bundle_files(bundle_dir)
+    from bibr.ner.checkpoint import resolve_checkpoint
+
+    return [resolve_checkpoint(settings.NER_PARSER_CKPT, revision=settings.NER_PARSER_REVISION)]
 
 
 def resolve_ner_device(settings: GlobalSettings, memory_mode: str | None = None) -> str | None:
@@ -2331,6 +2400,10 @@ class ReferenceExtractor:
                 else "no ref-line geometry (DOCX/non-native)",
             )
             return None
+        if getattr(self._settings, "REF_GEOM_TAGGER_MODEL_ID", None):
+            tagged = self._segment_geom_tagger(ref_text, lines)
+            if tagged is not None:
+                return tagged
         with LOCAL_INFERENCE_LOCK:
             segmenter = _get_geom_segmenter(self._settings)
         if segmenter is None:
@@ -2391,14 +2464,7 @@ class ReferenceExtractor:
         # layout reference-onset count is an independent lower bound — when geom
         # emits fewer than GEOM_MIN_REGION_RATIO of it, decline and cascade like a
         # low-confidence result rather than trust the merged spans.
-        region_onsets = self._region_onset_count()
-        receipt_region_onsets = self._aligned_region_onset_count(ref_text) if region_onsets else 0
-        min_region_ratio = GEOM_MIN_REGION_RATIO
-        if (
-            region_onsets
-            and receipt_region_onsets >= GEOM_STRONG_REGION_ALIGN_FRACTION * region_onsets
-        ):
-            min_region_ratio = GEOM_STRONG_REGION_RATIO
+        region_onsets, receipt_region_onsets, min_region_ratio = self._geom_region_floor(ref_text)
         if region_onsets and len(spans) < min_region_ratio * region_onsets:
             self._record_segmentation_attempt(
                 "geom",
@@ -2436,6 +2502,65 @@ class ReferenceExtractor:
             f"{self._settings.REF_GEOM_SEG_CASCADE_THRESHOLD}) or empty",
         )
         return None
+
+    def _geom_region_floor(self, ref_text: str) -> tuple[int, int, float]:
+        """Layout onsets, the onsets that align onto *ref_text*, and the segment-count floor.
+
+        A geometry result with fewer than ``ratio × onsets`` spans is declined.
+        The floor rises to ``GEOM_STRONG_REGION_RATIO`` when nearly every onset
+        aligns, since the onset count is then a reliable lower bound.
+        """
+        region_onsets = self._region_onset_count()
+        receipt_region_onsets = self._aligned_region_onset_count(ref_text) if region_onsets else 0
+        min_region_ratio = GEOM_MIN_REGION_RATIO
+        if (
+            region_onsets
+            and receipt_region_onsets >= GEOM_STRONG_REGION_ALIGN_FRACTION * region_onsets
+        ):
+            min_region_ratio = GEOM_STRONG_REGION_RATIO
+        return region_onsets, receipt_region_onsets, min_region_ratio
+
+    def _segment_geom_tagger(self, ref_text: str, lines: list[dict]) -> list[str] | None:
+        """The opt-in geometry line tagger, asked before the GBM.
+
+        Returns ref strings when its calibrated paper confidence clears the
+        bundle's gate and the geometry tier's own checks pass, else ``None`` so
+        the shipped geometry tier runs unchanged. A decline is recorded as a
+        ``geom_tagger`` attempt and adds no warning: the tier after it reports
+        its own outcome.
+        """
+        with LOCAL_INFERENCE_LOCK:
+            tagger = _get_geom_tagger(self._settings)
+            spans, confidence, labeled, aligned = tagger.segment_spans(ref_text, lines)
+        aligned_starts = aligned or None
+
+        def decline(flag: str, credible: int | None = aligned_starts) -> None:
+            self._record_segmentation_attempt(
+                "geom_tagger",
+                ref_text,
+                spans=spans,
+                credible_starts=credible,
+                selected=False,
+                reason_flags=(flag,),
+            )
+
+        if labeled == 0:
+            decline("zero_labeled_starts", None)
+            return None
+        if aligned / labeled < self._settings.REF_GEOM_MIN_ALIGN_YIELD:
+            decline("low_alignment_yield")
+            return None
+        region_onsets, receipt_region_onsets, min_region_ratio = self._geom_region_floor(ref_text)
+        if region_onsets and len(spans) < min_region_ratio * region_onsets:
+            decline("low_segment_count", max(aligned_starts or 0, receipt_region_onsets) or None)
+            return None
+        if not spans or confidence < tagger.threshold:
+            decline("low_confidence_or_empty")
+            return None
+        self._record_segmentation_attempt(
+            "geom_tagger", ref_text, spans=spans, credible_starts=aligned_starts, selected=True
+        )
+        return [ref_text[s:e] for s, e in spans]
 
     def _region_onset_count(self) -> int:
         """Count of layout reference-onset anchors, or 0 when unavailable.
@@ -2616,6 +2741,9 @@ class ReferenceExtractor:
             with LOCAL_INFERENCE_LOCK:
                 ref_strings = _get_ner_segmenter(self._settings).segment(ref_text)
         except Exception as e:  # noqa: BLE001 — a CRF load/inference failure must not 0 the refs
+            if (strict := override_load_error(self._settings, "NER_SEG_CKPT", e)) is not None:
+                # An overridden CRF never falls through to the marker split.
+                raise (e if isinstance(e, ConfigurationError) else strict) from e
             ref_strings = []
             if self._llm_skipped and isinstance(e, ImportError):
                 # A fast run on an install without the torch extra: the CRF was never

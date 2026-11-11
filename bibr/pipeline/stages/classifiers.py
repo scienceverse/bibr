@@ -69,10 +69,15 @@ def _fail_on_required_failure(ctx: PipelineContext) -> None:
     detail = "; ".join(
         f"{name}: {status.error or 'load failed'}" for name, status in failures.items()
     )
-    message = (
-        f"Required classifier(s) failed to start with ML_CLASSIFIERS_REQUIRED=true "
-        f"({detail}); set ML_CLASSIFIERS_REQUIRED=false to allow the run to continue without them"
-    )
+    if all(getattr(status, "override", False) for status in failures.values()):
+        # An overridden classifier is required whatever ML_CLASSIFIERS_REQUIRED says.
+        message = f"Overridden classifier(s) failed to start ({detail})"
+    else:
+        message = (
+            f"Required classifier(s) failed to start with ML_CLASSIFIERS_REQUIRED=true "
+            f"({detail}); set ML_CLASSIFIERS_REQUIRED=false to allow the run to continue "
+            "without them"
+        )
     for fs in ctx.file_states:
         if fs.error is None:
             # An outage: the model, not the file, is at fault, so bibr batch

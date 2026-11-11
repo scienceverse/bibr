@@ -196,6 +196,9 @@ _CACHE_LOCK = threading.Lock()
 _LOAD_LOCK = threading.Lock()
 
 
+ENV_MODEL_ID = "ML_FRONT_TAGGER_MODEL_ID"
+
+
 def load_front_tagger(
     settings: GlobalSettings, device: str | None = None
 ) -> OnnxFrontTagger | None:
@@ -206,7 +209,9 @@ def load_front_tagger(
     is untested on this model. Like the region-role classifier, the tagger is
     optional: a missing bundle logs once and the run goes on without its answer,
     which a full run covers with the LLM and a fast run reports as a warning. A
-    network failure is not remembered, so the next paper tries again.
+    network failure is not remembered, so the next paper tries again. An
+    overridden bundle (:mod:`bibr.utils.model_overrides`) that cannot load
+    raises :class:`~bibr.exceptions.ConfigurationError` instead.
 
     Blocking: the first call reads the bundle (a download, on a first run) and
     opens the session, so async callers run it off the event loop.
@@ -230,12 +235,22 @@ def load_front_tagger(
         with _CACHE_LOCK:  # loaded by the call this one waited for
             if key in _CACHE:
                 return _CACHE[key]
+        from bibr.utils.model_overrides import (
+            is_model_override,
+            onnx_bundle_files,
+            override_load_error,
+            record_model_load,
+        )
+
         tagger: OnnxFrontTagger | None = None
         try:
             bundle = find_onnx_bundle(
                 str(model_id), revision, label="front-matter tagger", raise_transient=True
             )
             if bundle is None:
+                missing = FileNotFoundError(f"no ONNX bundle for {model_id}")
+                if (strict := override_load_error(settings, ENV_MODEL_ID, missing)) is not None:
+                    raise strict
                 logger.warning(
                     "Front-matter tagger %s has no ONNX bundle; the run goes on without it",
                     model_id,
@@ -244,7 +259,12 @@ def load_front_tagger(
                 tagger = OnnxFrontTagger(bundle, device)
                 logger.info("Front-matter tagger loaded")
                 logger.debug("Front-matter tagger bundle: %s", bundle)
+                if is_model_override(settings, ENV_MODEL_ID):
+                    record_model_load(settings, ENV_MODEL_ID, onnx_bundle_files(bundle))
         except Exception as exc:  # noqa: BLE001 - optional model, never fatal
+            if (strict := override_load_error(settings, ENV_MODEL_ID, exc)) is not None:
+                # An overridden tagger never leaves the run without its answer.
+                raise (exc if exc is strict else strict) from exc
             logger.warning(
                 "Front-matter tagger %s unavailable (%s); the run goes on without it", model_id, exc
             )
