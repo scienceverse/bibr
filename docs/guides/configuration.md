@@ -846,21 +846,21 @@ DOIs that a line break split:
   will use (given its mode, `--no-llm`, `--refs` and `--ref-seg`), local or
   Hub, before the first paper, whatever the input (PDF, DOCX, XML or HTML),
   `--dry-run` included. Every overridden ONNX model (the reference parser, the
-  text segmenter, the geometry tagger, the front-matter tagger and the section
-  and paper classifiers) is also run at the preflight and whenever the run
-  loads it on inputs built as a paper's are (its tokenizer, its feature
-  layout, the tokenizer's last id), in the shapes the run sends it: the
-  longest window and a short one, and, for the models that take a batch, a
-  batch of several and a batch of one. An export fixed to one batch size or
-  one length fails there. Each output shape is checked against the labels or
-  tags its manifest lists (for the parser and the tagger, also the size of the
-  CRF's scores); a model that fails the probe has not loaded. A shipped
-  default is not probed. A problem stops the run with one line per setting. A
-  setting for a model the run does not ask (the classifiers and the reference
-  models under `--no-llm`, the geometry models without `--ref-seg geom`, any
-  reference model under `--refs off`) is neither checked nor loaded: the run warns once at the
-  start, naming the setting and why, and records it as `not used in this
-  run`.
+  text segmenter, the geometry tagger, the front-matter tagger, the section
+  and paper classifiers and the statement tagger) is also run at the preflight
+  and whenever the run loads it on inputs built as a paper's are (its
+  tokenizer, its feature layout, the tokenizer's last id), in the shapes the
+  run sends it: the longest window and a short one, and, for the models that
+  take a batch, a batch of several and a batch of one. An export fixed to one
+  batch size or one length fails there. Each output shape is checked against
+  the labels or tags its manifest lists (for the parser and the tagger, also
+  the size of the CRF's scores); a model that fails the probe has not loaded.
+  A shipped default is not probed. A problem stops the run with one line per
+  setting. A setting for a model the run does not ask (the classifiers, the
+  statement tagger and the reference models under `--no-llm`, the geometry
+  models without `--ref-seg geom`, any reference model under `--refs off`) is
+  neither checked nor loaded: the run warns once at the start, naming the
+  setting and why, and records it as `not used in this run`.
   `bibr serve` checks the files of every local-path override at startup and
   loads a model when a request first needs it; an override that fails there
   answers `500` with `error_code` `model_override_failed`.
@@ -954,8 +954,11 @@ right after the one they were in; `classification_source` is
 has no default, so a bundle it names is always an override: when it cannot be
 loaded, the Hub being out of reach included, the run stops. The preflight
 (and `bibr serve` at startup, for a local directory) opens the bundle and runs
-the graph once on two blocks, checking that it returns one finite probability
-per type. An error on one paper leaves that paper with the rules' statements
+the graph on a batch of three blocks that fills the manifest's `max_length`
+and holds the tokenizer's last id, and on one short block, checking that it
+returns one finite probability per type: a graph with fewer positions than
+`max_length`, a vocabulary smaller than the tokenizer's, or an export fixed to
+one batch size or one length is refused there. An error on one paper leaves that paper with the rules' statements
 and a `MODEL_OVERRIDE_INFERENCE_FAILED` warning; errors on three papers in a
 row stop the run.
 

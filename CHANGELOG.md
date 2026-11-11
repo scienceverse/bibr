@@ -138,7 +138,8 @@ too: it is recorded as one, and it loads and runs as before.
   `not used in this run`. A `--no-llm` run no longer starts the section and
   paper classifiers, which it never asks. Every overridden ONNX model (the
   reference parser, the text segmenter, the geometry tagger, the front-matter
-  tagger, the section and paper classifiers) runs when it loads, at the
+  tagger, the section and paper classifiers, the statement tagger) runs when
+  it loads, at the
   preflight and in the run, on inputs built as a paper's are, in the shapes
   the run sends it: the longest window and a short one, and a batch of
   several and a batch of one for the models that take a batch. Its output
