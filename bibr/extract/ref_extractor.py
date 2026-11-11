@@ -455,6 +455,32 @@ def _rescue_doi_from_segment(segment: str | None) -> str | None:
     return None
 
 
+# A whole ``url`` value that is a DOI resolver link. The optional spaces are a
+# line wrap inside the printed host ("https://doi. org/10.…"); the missing
+# "org/" is a misprint ("https://doi.10.1016/…"), still unambiguous because no
+# host is named "doi.10.NNNN". The identifier itself must be one unbroken token
+# running to the end of the value.
+_DOI_RESOLVER_URL_RE = re.compile(
+    r"^https?://\s?(?:dx\.\s?)?doi\.\s?(?:org\s?/\s?)?(10\.\d{4,9}/\S+)$",
+    re.IGNORECASE,
+)
+
+
+def _rescue_doi_from_url_field(url: str | None) -> str | None:
+    """Recover a DOI from a resolver link the parser filed under ``url``.
+
+    A reference that prints its DOI only as a link can come back with the link
+    as ``url`` and no ``doi``, most often when the printed link is broken by a
+    line wrap: the segment rescue then finds no clean marker in the text. Fires
+    only when the whole value is a resolver link; a publisher URL, or a link
+    followed by other text, is declined.
+    """
+    if not url:
+        return None
+    m = _DOI_RESOLVER_URL_RE.match(url.strip())
+    return _clean_url_doi_token(m.group(1)) if m else None
+
+
 # An author-date publication year in parentheses ("(2014)", "(2012a)",
 # "(2014, March)"). It marks the end of the leading author block, so the text
 # before it is the printed byline. Vancouver / numbered styles (bare year at the
@@ -1122,7 +1148,8 @@ def _finalize_reference_fields(fields: dict[str, Any], segment: str | None) -> d
     """Strategy-independent reference finalize shared by every parse path.
 
     DOI rescue: a clean printed doi:/doi.org token in the ref's own segment
-    covers a DOI the parser under-emitted, but never overrides an emitted one.
+    covers a DOI the parser under-emitted, but never overrides an emitted one;
+    failing that, a resolver link the parser filed under ``url`` gives the DOI.
     Also completes a half-emitted page range from the segment, expands compact
     last pages ("782-92" → "792"), backfills a dropped Vancouver year/container
     from the segment, and migrates/infers ``bib_type``.
@@ -1134,7 +1161,11 @@ def _finalize_reference_fields(fields: dict[str, Any], segment: str | None) -> d
         suffixes = set(re.findall(rf"(?<!\d){fields['year']}([a-z])(?!\w)", segment))
         if len(suffixes) == 1:
             fields["year_suffix"] = suffixes.pop()
-    fields["doi"] = normalize_doi(fields.get("doi")) or _rescue_doi_from_segment(segment)
+    fields["doi"] = (
+        normalize_doi(fields.get("doi"))
+        or _rescue_doi_from_segment(segment)
+        or _rescue_doi_from_url_field(fields.get("url"))
+    )
     fields["last_page"] = _expand_compact_last_page(
         fields.get("first_page"), fields.get("last_page")
     )

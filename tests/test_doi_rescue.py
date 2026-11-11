@@ -11,6 +11,7 @@ and the rescue declines rather than emitting a corrupt, non-resolving DOI.
 """
 
 from bibr.extract.extractor import _rescue_doi_from_segment
+from bibr.extract.ref_extractor import _finalize_reference_fields, _rescue_doi_from_url_field
 
 
 class TestRescueDoiFromSegment:
@@ -112,3 +113,58 @@ class TestRescueDoiFromPublisherUrl:
         # arbitrary URL (could be a page id, not a DOI).
         seg = "Available online: https://www.jstor.org/stable/10.2307/1912352 (accessed 2020)."
         assert _rescue_doi_from_segment(seg) is None
+
+
+class TestRescueDoiFromUrlField:
+    """A resolver link the parser filed under ``url`` while ``doi`` stayed empty."""
+
+    def test_resolver_link(self):
+        assert _rescue_doi_from_url_field("https://doi.org/10.2307/3151312") == "10.2307/3151312"
+        assert _rescue_doi_from_url_field("http://dx.doi.org/10.1037/abc123") == "10.1037/abc123"
+
+    def test_line_wrap_inside_the_resolver_host(self):
+        url = "https://doi. org/10.1016/0165-1781(95)02757-2"
+        assert _rescue_doi_from_url_field(url) == "10.1016/0165-1781(95)02757-2"
+
+    def test_resolver_printed_without_org(self):
+        url = "https://doi.10.1016/j.tate.2017.06.017"
+        assert _rescue_doi_from_url_field(url) == "10.1016/j.tate.2017.06.017"
+
+    def test_publisher_url_declined(self):
+        assert _rescue_doi_from_url_field("https://www.jstor.org/stable/10.2307/1912352") is None
+        assert _rescue_doi_from_url_field("https://example.org/doi.org/10.1000/x") is None
+
+    def test_link_followed_by_text_declined(self):
+        assert _rescue_doi_from_url_field("https://doi.org/10.1037/abc123 (accessed 2020)") is None
+
+    def test_identifier_broken_by_a_space_declined(self):
+        assert _rescue_doi_from_url_field("https://doi.org/10.1037/abc 123") is None
+
+    def test_empty(self):
+        assert _rescue_doi_from_url_field(None) is None
+        assert _rescue_doi_from_url_field("") is None
+
+
+class TestFinalizeUsesTheUrlField:
+    SEGMENT = (
+        "Fornell, C., & Larcker, D. F. (1981). Evaluating Structural Equation Models. "
+        "Journal of Marketing Research, 18(1), 39–50. https://doi. org/10.2307/3151312"
+    )
+
+    def test_doi_filled_from_the_url_field(self):
+        fields = {"doi": None, "url": "https://doi. org/10.2307/3151312", "year": 1981}
+        assert _finalize_reference_fields(fields, self.SEGMENT)["doi"] == "10.2307/3151312"
+
+    def test_an_emitted_doi_is_kept(self):
+        fields = {"doi": "10.1000/emitted", "url": "https://doi.org/10.2307/3151312"}
+        assert _finalize_reference_fields(fields, self.SEGMENT)["doi"] == "10.1000/emitted"
+
+    def test_the_segment_is_asked_first(self):
+        segment = "Smith, J. (2020). A paper. Journal, 1, 2. doi:10.1037/printed"
+        fields = {"doi": None, "url": "https://doi.org/10.2307/3151312"}
+        assert _finalize_reference_fields(fields, segment)["doi"] == "10.1037/printed"
+
+    def test_no_doi_without_a_resolver_link(self):
+        fields = {"doi": None, "url": "https://www.jstor.org/stable/1912352"}
+        segment = "Smith, J. (2020). A paper. Journal, 1, 2. https://www.jstor.org/stable/1912352"
+        assert _finalize_reference_fields(fields, segment)["doi"] is None
