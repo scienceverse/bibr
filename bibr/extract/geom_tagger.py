@@ -63,6 +63,34 @@ OUTPUT_NAME = "logits"
 FEATURE_KEYS: tuple[str, ...] = tuple(sorted({*PROD_FEATURE_KEYS, *ADJACENT_FEATURE_KEYS}))
 
 
+def _probe_line(text: str, row: int, indent: float) -> dict[str, Any]:
+    top = 700.0 - 12.0 * row
+    return {
+        "text": text,
+        "page": 9,
+        "x0": 72.0 + indent,
+        "y_top": top,
+        "x1": 523.0,
+        "y_bottom": top - 9.5,
+        "font_size": 9.0,
+    }
+
+
+# What the load probe reads: three hanging-indent entries of a reference section.
+_PROBE_LINES: list[dict[str, Any]] = [
+    _probe_line(text, row, indent)
+    for row, (text, indent) in enumerate(
+        [
+            ("Smith, J. A., & Müller, K. (2019). A title of the first work that", 0.0),
+            ("runs on to a second line. Journal of Examples, 12(3), 45–67.", 12.0),
+            ("Lee, S., & García-López, M. (2020). Second title. Proceedings of the", 0.0),
+            ("National Academy of Sciences, 117, 1–9. https://doi.org/10.1000/xyz", 12.0),
+            ("Ōtsuka, H. (2021). Third title. Example Press.", 0.0),
+        ]
+    )
+]
+
+
 def tagger_bundle_files(path: str | Path, revision: str | None = None) -> tuple[Path, Path, Path]:
     """``(tagger.onnx, tagger.json, gate.json)`` of the bundle ``path`` names.
 
@@ -221,19 +249,28 @@ class GeomLineTagger:
         self._check_graph()
 
     def _check_graph(self) -> None:
-        """Run the graph once on a dummy paper; it must give one logit pair per line."""
-        probe = np.zeros((3, len(FEATURE_KEYS)), dtype=np.float32)
+        """Run the graph once on a short reference section, as a paper's lines reach it.
+
+        The features of :data:`_PROBE_LINES` (hanging-indent entries on one page)
+        go through the graph, which must give one finite logit pair per line.
+        """
+        probe = feature_matrix(records_from_dicts(_PROBE_LINES))
+        shape = f"({len(probe)}, {len(FEATURE_KEYS)}) feature matrix of a reference section"
         try:
             out = np.asarray(self._session.run([OUTPUT_NAME], {INPUT_NAME: probe})[0])
         except Exception as exc:
             raise ConfigurationError(
-                f"{self.onnx_path}: the graph does not run on a ({len(probe)}, "
-                f"{len(FEATURE_KEYS)}) feature matrix ({type(exc).__name__}: {exc})"
+                f"{self.onnx_path}: the graph does not run on a {shape} "
+                f"({type(exc).__name__}: {exc})"
             ) from exc
         if out.shape != (len(probe), 2):
             raise ConfigurationError(
                 f"{self.onnx_path}: the graph returns {OUTPUT_NAME} of shape {out.shape} for "
-                f"{len(probe)} lines; want ({len(probe)}, 2)"
+                f"a {shape}; want ({len(probe)}, 2), one logit per class (inside, opens)"
+            )
+        if not np.isfinite(out).all():
+            raise ConfigurationError(
+                f"{self.onnx_path}: the graph returns non-finite {OUTPUT_NAME} for a {shape}"
             )
 
     def line_probabilities(self, lines: list[LineRecord]) -> np.ndarray:

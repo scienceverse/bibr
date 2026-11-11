@@ -268,7 +268,7 @@ def test_a_graph_of_the_wrong_shape_is_refused_at_load(tmp_path):
         bias=(0.0, 1.0, 2.0),
         weights=np.zeros((len(FEATURE_KEYS), 3), np.float32),
     )
-    with pytest.raises(ConfigurationError, match=r"shape \(3, 3\)"):
+    with pytest.raises(ConfigurationError, match=r"shape \(5, 3\)"):
         GeomLineTagger(bundle)
     (bundle / "onnx" / "tagger.onnx").write_bytes(b"not a graph")
     with pytest.raises(Exception):  # noqa: B017 - onnxruntime's own error
@@ -314,7 +314,7 @@ def test_the_tier_resolves_a_hub_id_at_its_revision(tmp_path, monkeypatch):
     assert set(seen) == {"v2"}
 
 
-def test_a_network_failure_on_a_hub_tagger_runs_the_shipped_tier(tmp_path, monkeypatch):
+def test_a_network_failure_on_a_hub_tagger_stops(tmp_path, monkeypatch):
     import httpx
 
     def offline(repo_id, filename, revision=None):
@@ -323,11 +323,12 @@ def test_a_network_failure_on_a_hub_tagger_runs_the_shipped_tier(tmp_path, monke
     monkeypatch.setattr("bibr.utils.hf_cache.hf_download_or_cached", offline)
     ex = _extractor(_lines(), "org/unreachable-tagger", monkeypatch)
     gbm = MagicMock()
-    spans = [(0, len(_REF_TEXT))]
-    gbm.segment_spans.return_value = (spans, 0.99, 1, 1)
-    with patch("bibr.extract.ref_extractor._get_geom_segmenter", return_value=gbm):
-        assert ex._segment_geom(_REF_TEXT) == [_REF_TEXT]
-    assert _attempts(ex) == [("geom_tagger", False, ("tagger_unavailable",)), ("geom", True, ())]
+    with (
+        patch("bibr.extract.ref_extractor._get_geom_segmenter", return_value=gbm),
+        pytest.raises(ModelOverrideError, match="the Hub could not be reached"),
+    ):
+        ex._segment_geom(_REF_TEXT)
+    gbm.segment_spans.assert_not_called()  # the shipped tier never answers in its place
 
 
 def test_a_missing_hub_tagger_stops(tmp_path, monkeypatch):

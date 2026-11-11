@@ -17,8 +17,8 @@ and a confident masthead cannot root a record. ``RefLocator`` uses the
 Loading is soft: a missing/unloadable bundle logs once and disables the model
 (``load_front_role_classifier`` returns ``None``), so extraction never fails
 because an optional prior is absent. An overridden bundle (see
-:mod:`bibr.utils.model_overrides`) that does not exist or cannot be read is the
-exception: it raises. A network failure behaves the same for both.
+:mod:`bibr.utils.model_overrides`) that cannot be loaded, for any reason (a
+Hub that cannot be reached included), is the exception: it raises.
 """
 
 from __future__ import annotations
@@ -224,8 +224,8 @@ def load_front_role_classifier(settings: GlobalSettings) -> FrontRoleClassifier 
     try:
         clf: FrontRoleClassifier | None = FrontRoleClassifier(str(model_id), revision=revision)
     except Exception as exc:  # noqa: BLE001 - optional prior, never fatal
-        # An overridden classifier that does not exist stops the run; a network
-        # failure behaves as for the default (retried by the next caller).
+        # An overridden classifier that cannot be loaded stops the run, whatever the
+        # reason; the default goes on without it (a network failure retried later).
         if (strict := override_load_error(settings, "ML_FRONT_ROLE_MODEL_ID", exc)) is not None:
             raise strict from exc
         logger.warning(

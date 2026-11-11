@@ -377,24 +377,21 @@ def test_an_overridden_tagger_without_a_bundle_stops_the_run(tmp_path):
     runtime.reset_front_tagger_cache()
 
 
-def test_a_network_blip_on_a_hub_override_behaves_as_for_the_default(monkeypatch):
+def test_a_network_blip_on_a_hub_override_stops_too(monkeypatch):
     import httpx
 
+    from bibr.exceptions import ModelOverrideError
     from bibr.front_tagger import runtime
 
     runtime.reset_front_tagger_cache()
-    calls = []
 
     def blip(*args, **kwargs):
-        calls.append(kwargs.get("raise_transient"))
         raise httpx.ConnectError("temporary failure in name resolution")
 
     monkeypatch.setattr("bibr.utils.ml_runtime.find_onnx_bundle", blip)
     settings = _tagger_settings("only", model_id="myorg/front-tagger-mirror")
-    assert runtime.load_front_tagger(settings) is None
-    # Not cached: the next paper tries again.
-    assert runtime.load_front_tagger(settings) is None
-    assert calls == [True, True]
+    with pytest.raises(ModelOverrideError, match="the Hub could not be reached"):
+        runtime.load_front_tagger(settings)
     runtime.reset_front_tagger_cache()
 
 

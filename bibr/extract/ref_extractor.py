@@ -529,8 +529,8 @@ def _get_ner_segmenter(settings: GlobalSettings | None = None):
                         revision=settings.NER_SEG_REVISION,
                     )
                 except Exception as e:
-                    # An override that names no model stops the run; a network
-                    # error or a missing torch behaves as for the default.
+                    # An override that cannot be loaded stops the run, whatever the
+                    # reason; the default goes on without the CRF as before.
                     if (strict := override_load_error(settings, "NER_SEG_CKPT", e)) is not None:
                         raise strict from e
                     raise
@@ -612,10 +612,10 @@ _GEOM_TAGGER_KEY: tuple[str, str | None] | None = None
 def _get_geom_tagger(settings: GlobalSettings | None = None):
     """The opt-in geometry line tagger (``REF_GEOM_TAGGER_MODEL_ID``), or ``None``.
 
-    ``None`` when it is unset, and when the Hub cannot be reached for it (not
-    remembered: the next paper tries again, and this one runs the shipped
-    tier). It exists only as an override, so a tagger that does not exist or
-    cannot be read raises :class:`~bibr.exceptions.ModelOverrideError`.
+    ``None`` when it is unset. It exists only as an override, so a tagger that
+    cannot be loaded, for any reason (a Hub that cannot be reached with the
+    files not cached included), raises
+    :class:`~bibr.exceptions.ModelOverrideError`.
     """
     global _GEOM_TAGGER, _GEOM_TAGGER_KEY
     settings = settings if settings is not None else snapshot_settings()
@@ -657,9 +657,9 @@ _TEXT_SEGMENTER_KEY: tuple[str, str | None] | None = None
 def _get_text_segmenter(settings: GlobalSettings | None = None):
     """The opt-in text segmenter (``REF_TEXT_SEG_MODEL_ID``), or ``None``.
 
-    ``None`` when the Hub cannot be reached for it (not remembered: the next
-    paper tries again, and this one goes on as without the tier). It exists only
-    as an override, so a segmenter that does not exist or cannot be read raises
+    ``None`` when it is unset. It exists only as an override, so a segmenter
+    that cannot be loaded, for any reason (a Hub that cannot be reached with the
+    files not cached included), raises
     :class:`~bibr.exceptions.ModelOverrideError`, as does setting it together
     with an overridden ``NER_SEG_CKPT``.
     """
@@ -2879,8 +2879,7 @@ class ReferenceExtractor:
             with LOCAL_INFERENCE_LOCK:
                 ref_strings = _get_ner_segmenter(self._settings).segment(ref_text)
         except ModelOverrideError:
-            # An overridden CRF that does not exist (raised by the loader, never
-            # by inference on one paper) stops the run.
+            # An overridden CRF that cannot be loaded stops the run.
             raise
         except Exception as e:  # noqa: BLE001 — a CRF load/inference failure must not 0 the refs
             ref_strings = []

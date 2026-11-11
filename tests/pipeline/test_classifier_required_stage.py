@@ -141,11 +141,26 @@ def _blip(model_id, revision, device):
     raise httpx.ConnectError("temporary failure in name resolution")
 
 
-def test_a_network_blip_on_an_overridden_classifier_behaves_as_for_the_default():
-    for required, state in ((False, "degraded"), (True, "failed_required")):
+def test_a_network_blip_on_an_overridden_classifier_stops_the_run_too():
+    import pytest
+
+    from bibr.exceptions import ModelOverrideError
+
+    for required in (False, True):
         settings = _settings(required=required)
         settings.ml.paper_classifier_model_id = "myorg/paper-classifier-mirror"
         resources, files, ctx = _run_override(settings, _blip)
+        with pytest.raises(ModelOverrideError, match="the Hub could not be reached"):
+            asyncio.run(ClassifierStage().run(ctx))
+        status = resources.status()["paper"]
+        assert status.state.value == "failed_required" and status.override
+        # No verdict on the paper: a resumed batch runs it again.
+        assert files[0].error is None
+
+
+def test_a_network_blip_on_the_shipped_classifier_degrades_as_before():
+    for required, state in ((False, "degraded"), (True, "failed_required")):
+        resources, files, ctx = _run_override(_settings(required=required), _blip)
         asyncio.run(ClassifierStage().run(ctx))
         status = resources.status()["paper"]
         assert status.state.value == state and not status.override

@@ -238,9 +238,9 @@ class ClassifierResources:
         except Exception as exc:  # noqa: BLE001 - sticky degraded startup state
             env = _MODEL_SETTINGS[resource.name]
             if (strict := override_load_error(self._settings, env, exc)) is not None:
-                # An overridden classifier that does not exist stops the run (not an
-                # outage: a resumed batch would fail the same way). A network failure
-                # falls through to the shipped behaviour below.
+                # An overridden classifier that cannot be loaded stops the run,
+                # whatever the reason (bibr.utils.model_overrides); the papers get no
+                # verdict, so a resumed batch runs them again.
                 resource.status = ClassifierStatus(
                     ClassifierState.FAILED_REQUIRED, device, str(strict)[:500], override=True
                 )

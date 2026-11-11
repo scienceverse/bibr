@@ -328,27 +328,26 @@ async def test_the_parse_stage_lets_an_override_failure_through(tmp_path):
     )
 
 
-def test_a_network_blip_on_a_hub_override_behaves_as_for_the_default():
+def test_a_network_blip_on_a_hub_override_stops_too():
     import httpx
 
     from bibr.config import snapshot_settings
+    from bibr.exceptions import ModelOverrideError
     from bibr.extract import front_role
 
     reset_front_role_cache()
     settings = snapshot_settings()
     settings.ml.front_role_model_id = "myorg/front-role-mirror"
     settings.ml.front_role_enabled = True
-    calls = []
 
     def blip(*args, **kwargs):
-        calls.append(1)
         raise httpx.ConnectError("temporary failure in name resolution")
 
-    with patch.object(front_role, "FrontRoleClassifier", side_effect=blip):
-        assert load_front_role_classifier(settings) is None
-        # Not cached: the next paper tries again.
-        assert load_front_role_classifier(settings) is None
-    assert len(calls) == 2
+    with (
+        patch.object(front_role, "FrontRoleClassifier", side_effect=blip),
+        pytest.raises(ModelOverrideError, match="the Hub could not be reached"),
+    ):
+        load_front_role_classifier(settings)
     reset_front_role_cache()
 
 

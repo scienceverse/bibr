@@ -11,30 +11,43 @@ can be compared with the shipped models, so these rules hold for them:
    (:func:`begin_run`, :func:`run_records`; ``bibr batch`` writes it to
    ``run_info.json`` under ``model_overrides``) with ``loaded`` true and the
    sha256 of every file it read, or ``loaded`` false and why.
-2. **A model that does not exist stops the run.** When the named model cannot
-   be loaded for a permanent reason (a missing path, a repo, revision or file
-   the Hub does not have, an unreadable or wrong-kind file), the loader raises
+2. **A model that does not load stops the run.** When the named model cannot
+   be loaded, whatever the reason (a missing path, a repo, revision or file the
+   Hub does not have, a Hub that cannot be reached with the files not in the
+   local cache, an unreadable or wrong-kind file, a failed load probe, a
+   missing optional dependency), the loader raises
    :class:`~bibr.exceptions.ModelOverrideError` instead of going on without
-   the model, and the extraction code passes it to the caller. A comparison
-   must never report the shipped path, or no model, under the candidate's name.
-3. **Everything else behaves as for the shipped model.** A network failure
-   while fetching from the Hub, and a missing optional dependency (``torch``
-   for the CRF segmenter), are handled exactly as for a default setting: the
-   loaders retry or leave the tier out as they always did. The record says so.
-4. **Checked before the run.** ``bibr chew`` and ``bibr batch`` check every
-   local-path override the run will load (:func:`check_model_overrides`) before
-   the first paper. A Hub id is checked when it loads.
+   the model, and the pipeline stops the run with it
+   (:func:`find_model_override_error`): no paper gets a verdict for it, so a
+   resumed ``bibr batch`` runs them all again once the setting is fixed. A
+   comparison must never report the shipped path, or no model, under the
+   candidate's name.
+3. **An inference error is recorded per paper, and repeated ones stop the run.**
+   A loaded override that raises on one paper falls back for that paper as the
+   shipped model would, and the paper's export says so with a
+   ``MODEL_OVERRIDE_INFERENCE_FAILED`` warning. When it raised on
+   :data:`INFERENCE_FAILURE_LIMIT` papers in a row, the run stops with
+   :class:`~bibr.exceptions.ModelOverrideError` (:func:`note_inference_failure`).
+4. **Checked before the run.** ``bibr chew`` and ``bibr batch`` load every
+   override the run will use, a local path or a Hub id, before the first paper
+   (:func:`check_model_overrides`), so a model that does not load stops the run
+   before any paper is processed.
 
-With every model setting at its default nothing here changes what bibr does.
+With every model setting at its default nothing here changes what bibr does:
+the shipped models keep their own fallbacks (a network failure retried, a
+missing ``torch`` leaving the CRF tier out).
 """
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hashlib
+import itertools
 import logging
 import math
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -258,30 +271,193 @@ def load_failure_kind(exc: BaseException) -> LoadFailure:
     return "permanent"
 
 
+_KIND_REASON = {
+    "transient": "the Hub could not be reached and the files are not in the local cache",
+    "missing_dependency": "the torch extra is not installed",
+}
+
+
 def override_load_error(settings: Any, env: str, exc: BaseException) -> ModelOverrideError | None:
     """The error to raise when a model failed to load, or ``None`` to behave as for a default.
 
-    ``None`` for a default setting, and for an override whose failure is a
-    network error or a missing optional dependency (rule 3); that failure is
-    written to the run's record instead.
+    ``None`` only for a default setting. For an override every failure is the
+    run's (rule 2), a network failure and a missing optional dependency
+    included: the shipped model's retry or fallback would run the comparison on
+    something other than the candidate. The failure is written to the run's
+    record and to the run's pending failures (:func:`override_failure_scope`).
     """
     if not is_model_override(settings, env):
         return None
     if isinstance(exc, ModelOverrideError):
+        _note_pending(exc)
         return exc
     kind = load_failure_kind(exc)
-    if kind != "permanent":
-        reason = "torch extra not installed" if kind == "missing_dependency" else "network error"
-        record_model_unavailable(settings, env, f"{reason}: {type(exc).__name__}: {exc}")
-        return None
+    detail = f"{type(exc).__name__}: {exc}"
+    if kind in _KIND_REASON:
+        detail = f"{_KIND_REASON[kind]}; {detail}"
+    record_model_unavailable(settings, env, detail)
     spec = _BY_ENV[env]
     value, revision = setting_value(settings, env)
     where = f"{value}@{revision}" if revision and not is_local_model(value or "") else value
-    return ModelOverrideError(
+    error = ModelOverrideError(
         f"{spec.env}={where!r} names a {spec.label} that cannot be loaded "
-        f"({type(exc).__name__}: {exc}). A model setting changed from its default never "
+        f"({detail}). A model setting changed from its default never "
         f"falls back to the shipped model; fix the setting, or unset {spec.env}."
     )
+    _note_pending(error)
+    return error
+
+
+def find_model_override_error(exc: BaseException | None) -> ModelOverrideError | None:
+    """The :class:`~bibr.exceptions.ModelOverrideError` ``exc`` is or was raised from, if any."""
+    if exc is None:
+        return None
+    for link in _chain(exc):
+        if isinstance(link, ModelOverrideError):
+            return link
+    return None
+
+
+# -- the run's pending failures -----------------------------------------------------------
+#
+# A model override that fails stops the run. The loaders raise, and the stages
+# pass the error on or record it on the paper (``FileState.original_error``),
+# which :meth:`bibr.pipeline.pipeline.Pipeline.process_chunk` turns back into
+# a raise. Code that catches every exception around a model call would still
+# swallow it; for that, each failure is also noted here, in a list owned by the
+# chunk that is running (a context variable, so concurrent chunks of a server
+# do not see each other's), and the chunk raises it after the stage.
+
+_PENDING: contextvars.ContextVar[list[ModelOverrideError] | None] = contextvars.ContextVar(
+    "bibr_model_override_failures", default=None
+)
+
+
+def _note_pending(error: ModelOverrideError) -> None:
+    pending = _PENDING.get()
+    if pending is not None and all(error is not e for e in pending):
+        pending.append(error)
+
+
+@contextlib.contextmanager
+def override_failure_scope() -> Iterator[list[ModelOverrideError]]:
+    """Collect the model override failures of the code run inside (one chunk).
+
+    Tasks and :func:`asyncio.to_thread` workers started inside inherit the
+    scope; a scope already open (a chunk inside a chunk) is kept.
+    """
+    if _PENDING.get() is not None:
+        yield _PENDING.get()  # type: ignore[misc]
+        return
+    pending: list[ModelOverrideError] = []
+    token = _PENDING.set(pending)
+    try:
+        yield pending
+    finally:
+        _PENDING.reset(token)
+
+
+def pending_override_failure(
+    pending: list[ModelOverrideError], file_states: Iterable[Any] = ()
+) -> ModelOverrideError | None:
+    """The first override failure noted in ``pending`` or recorded on one of ``file_states``."""
+    if pending:
+        return pending[0]
+    for fs in file_states:
+        if (found := find_model_override_error(getattr(fs, "original_error", None))) is not None:
+            return found
+    return None
+
+
+# -- inference failures ---------------------------------------------------------------------
+
+# Papers in a row on which one overridden model raised at inference before the run stops.
+INFERENCE_FAILURE_LIMIT = 3
+
+_PAPER: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "bibr_model_override_paper", default=None
+)
+_ANONYMOUS = itertools.count()
+_STREAK_LOCK = threading.Lock()
+# (setting, value, revision) -> the papers, in order, of the current run of failures.
+_STREAKS: dict[tuple[str, str | None, str | None], list[str]] = {}
+
+
+@contextlib.contextmanager
+def paper_scope(paper: Any) -> Iterator[None]:
+    """Name the paper the code run inside works on, for :func:`note_inference_failure`."""
+    token = _PAPER.set(None if paper is None else str(paper))
+    try:
+        yield
+    finally:
+        _PAPER.reset(token)
+
+
+def _paper_key(paper: Any) -> str:
+    if paper is not None and str(paper):
+        return str(paper)
+    current = _PAPER.get()
+    # A call outside any paper's scope counts as a paper of its own.
+    return current if current else f"#{next(_ANONYMOUS)}"
+
+
+def note_inference_failure(
+    settings: Any, env: str, exc: BaseException, *, paper: Any = None
+) -> Any:
+    """Note that the model of ``env`` raised ``exc`` at inference on one paper.
+
+    ``None`` for a default setting, which falls back as it always did. For an
+    override, the :class:`~bibr.processing_warnings.ProcessingWarning` the
+    caller records on the paper before it falls back for that paper; when the
+    override has raised on :data:`INFERENCE_FAILURE_LIMIT` papers in a row
+    (``paper``, else the paper of the enclosing :func:`paper_scope`), raises
+    :class:`~bibr.exceptions.ModelOverrideError` instead.
+    """
+    if isinstance(exc, ModelOverrideError) or not is_model_override(settings, env):
+        return None
+    from bibr.processing_warnings import ProcessingWarning, WarningCode
+
+    spec = _BY_ENV[env]
+    value, revision = setting_value(settings, env)
+    key = (env, value, revision)
+    paper_key = _paper_key(paper)
+    with _STREAK_LOCK:
+        streak = _STREAKS.setdefault(key, [])
+        if paper_key not in streak:
+            streak.append(paper_key)
+        papers = len(streak)
+    if papers >= INFERENCE_FAILURE_LIMIT:
+        error = ModelOverrideError(
+            f"{spec.env}={value!r} names a {spec.label} that loaded but raised at inference "
+            f"on {papers} papers in a row (last: {type(exc).__name__}: {str(exc)[:200]}). A "
+            "model setting changed from its default never falls back to the shipped model "
+            f"run-wide; fix the model, or unset {spec.env}."
+        )
+        _note_pending(error)
+        raise error from exc
+    logger.warning(
+        "Model override %s: the %s raised on this paper (%s); this paper falls back",
+        spec.env,
+        spec.label,
+        type(exc).__name__,
+    )
+    return ProcessingWarning(
+        WarningCode.MODEL_OVERRIDE_INFERENCE_FAILED,
+        f"{spec.env} ({spec.label}) raised {type(exc).__name__} on this paper; the paper "
+        "fell back as it would without the override",
+    )
+
+
+def note_inference_success(settings: Any, env: str, *, paper: Any = None) -> None:
+    """Note that the model of ``env`` ran on a paper: a paper without a failure ends the streak."""
+    if not _STREAKS or not is_model_override(settings, env):
+        return
+    value, revision = setting_value(settings, env)
+    paper_key = _paper_key(paper)
+    with _STREAK_LOCK:
+        streak = _STREAKS.get((env, value, revision))
+        if streak and paper_key not in streak:
+            streak.clear()
 
 
 # -- bundle files ------------------------------------------------------------------------
@@ -348,7 +524,34 @@ def models_in_use(settings: Any) -> set[str]:
     return used
 
 
-def _check_onnx(spec: ModelSetting, value: str) -> None:
+# The classifiers' torch runtime reads a transformers directory (``from_pretrained``).
+_TORCH_CLASSIFIERS = frozenset({"ML_SECTION_CLASSIFIER_MODEL_ID", "ML_PAPER_CLASSIFIER_MODEL_ID"})
+_TORCH_WEIGHTS = ("model.safetensors", "model.safetensors.index.json", "pytorch_model.bin")
+
+
+def _torch_runtime(settings: Any) -> bool:
+    """Whether the classifiers would load with torch when no ONNX bundle is found."""
+    from bibr.utils.ml_runtime import torch_available
+
+    mode = getattr(getattr(settings, "ml", None), "runtime", "auto")
+    return mode != "onnx" and torch_available()
+
+
+def _check_torch_classifier(path: Path) -> None:
+    """A transformers directory: its config and its weights (the load reads them)."""
+    if not path.is_dir():
+        raise ConfigurationError("name the model directory (config.json and its weights)")
+    missing = [] if (path / "config.json").is_file() else ["config.json"]
+    if not any((path / name).is_file() for name in _TORCH_WEIGHTS):
+        missing.append(" or ".join(_TORCH_WEIGHTS))
+    if missing:
+        raise ConfigurationError(
+            f"neither an ONNX bundle (bibr_onnx.json and model.onnx) nor a torch model "
+            f"directory: it lacks {', '.join(missing)}"
+        )
+
+
+def _check_onnx(spec: ModelSetting, value: str, settings: Any = None) -> None:
     from bibr.utils.ml_runtime import local_onnx_bundle, read_onnx_manifest, torch_available
 
     path = Path(value).expanduser()
@@ -356,6 +559,9 @@ def _check_onnx(spec: ModelSetting, value: str) -> None:
     if bundle is None:
         if spec.env == "NER_PARSER_CKPT" and path.is_file() and torch_available():
             return  # a torch checkpoint, loaded by the torch parser
+        if spec.env in _TORCH_CLASSIFIERS and _torch_runtime(settings):
+            _check_torch_classifier(path)  # loaded with from_pretrained
+            return
         raise ConfigurationError(
             "no ONNX bundle there (want bibr_onnx.json and model.onnx in the directory "
             "itself or in its onnx/ subdirectory)"
@@ -379,12 +585,12 @@ def _check_onnx(spec: ModelSetting, value: str) -> None:
         raise ConfigurationError(f"the bundle lacks {', '.join(missing)}")
 
 
-def _check_local(spec: ModelSetting, value: str) -> None:
+def _check_local(spec: ModelSetting, value: str, settings: Any = None) -> None:
     path = Path(value).expanduser()
     if not path.exists():
         raise ConfigurationError("no such file or directory")
     if spec.kind == "onnx":
-        _check_onnx(spec, value)
+        _check_onnx(spec, value, settings)
     elif spec.kind == "geom_tagger":
         from bibr.extract.geom_tagger import GeomLineTagger
 
@@ -432,16 +638,89 @@ def text_segmenter_conflict(settings: Any) -> str | None:
     )
 
 
-def check_model_overrides(settings: Any) -> tuple[list[str], list[str]]:
-    """``(problems, warnings)`` for the local-path overrides this run will load.
+def load_model_override(settings: Any, env: str, *, memory_mode: str | None = None) -> None:
+    """Load the model of ``env`` as the run loads it, probe included.
+
+    The reference models, the front-role classifier and the front-matter tagger
+    stay in their loaders' process caches, so the run that follows does not
+    load them again; a classifier is loaded on the CPU and released (the
+    pipeline places it). Raises what the loader raises: for an override, a
+    :class:`~bibr.exceptions.ModelOverrideError` for any failure.
+    """
+    if env in _TORCH_CLASSIFIERS:
+        import importlib
+
+        module, loader = {
+            "ML_SECTION_CLASSIFIER_MODEL_ID": (
+                "bibr.structure.section_classifier_common",
+                "load_section_classifier",
+            ),
+            "ML_PAPER_CLASSIFIER_MODEL_ID": (
+                "bibr.structure.paper_classifier_common",
+                "load_paper_classifier",
+            ),
+        }[env]
+        value, revision = setting_value(settings, env)
+        try:
+            model = getattr(importlib.import_module(module), loader)(
+                value, revision=revision or "main", device="cpu", settings=settings
+            )
+        except Exception as exc:
+            if (strict := override_load_error(settings, env, exc)) is not None:
+                raise strict from exc
+            raise
+        del model
+        return
+    if env == "ML_FRONT_ROLE_MODEL_ID":
+        from bibr.extract.front_role import load_front_role_classifier
+
+        load_front_role_classifier(settings)
+        return
+    if env == "ML_FRONT_TAGGER_MODEL_ID":
+        from bibr.front_tagger.runtime import load_front_tagger
+
+        load_front_tagger(settings)
+        return
+    from bibr.extract import ref_extractor
+
+    if env == "NER_PARSER_CKPT":
+        ref_extractor._get_ner_parser(settings, memory_mode)
+    elif env == "NER_SEG_CKPT":
+        ref_extractor._get_ner_segmenter(settings)
+    elif env == "REF_GEOM_SEG_MODEL_ID":
+        ref_extractor._get_geom_segmenter(settings)
+    elif env == "REF_GEOM_TAGGER_MODEL_ID":
+        ref_extractor._get_geom_tagger(settings)
+    elif env == "REF_TEXT_SEG_MODEL_ID":
+        ref_extractor._get_text_segmenter(settings)
+
+
+def _problem(spec: ModelSetting, value: str, exc: BaseException) -> str:
+    if isinstance(exc, ModelOverrideError):
+        detail = str(exc)
+    elif isinstance(exc, ConfigurationError):
+        detail = f"{value!r}: {exc}"
+    else:
+        detail = f"{value!r}: {type(exc).__name__}: {exc}"
+    if not detail.startswith(spec.env):
+        detail = f"{spec.env}={detail}"
+    return " ".join(detail.split())[:600]
+
+
+def check_model_overrides(
+    settings: Any, *, load: bool = True, memory_mode: str | None = None
+) -> tuple[list[str], list[str]]:
+    """``(problems, warnings)`` for the overrides this run will load.
 
     One line per problem: the run cannot load that model. A model the run does
-    not load (:func:`models_in_use`) is not checked, and a Hub id is checked
-    when it loads. A warning is a model the run will go without, as it would
-    with the default (the CRF segmenter without ``torch``). Never raises.
+    not load (:func:`models_in_use`) is not checked. A local path's files are
+    checked first; then, with ``load`` (``bibr chew`` and ``bibr batch``), every
+    override, a local path or a Hub id, is loaded as the run loads it
+    (:func:`load_model_override`): the Hub files are fetched or found in the
+    cache, the graph is opened and probed. Without ``load`` only the local
+    paths' files are checked. ``warnings`` is kept for callers and is empty: an
+    override the run would go without is a problem (rule 2). Never raises.
     """
-    from bibr.utils.ml_runtime import torch_available
-
     problems: list[str] = []
     warnings: list[str] = []
     try:
@@ -454,21 +733,17 @@ def check_model_overrides(settings: Any) -> tuple[list[str], list[str]]:
         problems.append(conflict)
     for spec in specs:
         value, _revision = setting_value(settings, spec.env)
-        if value is None or not is_local_model(value):
-            continue
-        if spec.env == "NER_SEG_CKPT" and not torch_available():
-            warnings.append(
-                f"{spec.env}={value!r}: the CRF segmenter needs the torch extra, which is not "
-                "installed; this run goes without it, as it would with the default"
-            )
+        if value is None:
             continue
         try:
-            _check_local(spec, value)
+            if is_local_model(value):
+                _check_local(spec, value, settings)
+            elif not load:
+                continue
+            if load and not (conflict and spec.env == "REF_TEXT_SEG_MODEL_ID"):
+                load_model_override(settings, spec.env, memory_mode=memory_mode)
         except Exception as exc:  # noqa: BLE001 - any failure is the override's problem
-            detail = (
-                str(exc) if isinstance(exc, ConfigurationError) else f"{type(exc).__name__}: {exc}"
-            )
-            problems.append(f"{spec.env}={value!r}: {detail}".splitlines()[0][:400])
+            problems.append(_problem(spec, value, exc))
     return problems, warnings
 
 
@@ -480,12 +755,29 @@ _RUN: dict[str, dict[str, Any]] = {}
 _IDENTITY: dict[tuple[str, str | None, str | None], list[dict[str, Any]]] = {}
 
 
+_SHA_LOCK = threading.Lock()
+# sha256 per (resolved path, size, mtime): a model file is hashed once per process,
+# for the run's record and the export's provenance alike, and again only when it changes.
+_SHA: dict[tuple[str, int, int], str] = {}
+
+
 def _sha256(path: Path) -> str:
+    """The file's sha256, from the process cache while its size and mtime are unchanged."""
+    resolved = Path(path).resolve()
+    st = resolved.stat()
+    key = (str(resolved), st.st_size, st.st_mtime_ns)
+    with _SHA_LOCK:
+        cached = _SHA.get(key)
+    if cached is not None:
+        return cached
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
+    with resolved.open("rb") as handle:
         while block := handle.read(_HASH_CHUNK):
             digest.update(block)
-    return digest.hexdigest()
+    value = digest.hexdigest()
+    with _SHA_LOCK:
+        _SHA[key] = value
+    return value
 
 
 def _file_rows(files: Iterable[str | Path]) -> list[dict[str, Any]]:
@@ -520,6 +812,8 @@ def begin_run(settings: Any) -> None:
         _RUN.clear()
         for spec in model_overrides(settings):
             _RUN[spec.env] = _entry(settings, spec)
+    with _STREAK_LOCK:
+        _STREAKS.clear()
 
 
 def record_model_load(
@@ -580,10 +874,14 @@ def loaded_model_overrides() -> list[dict]:
 
 
 def reset_loaded_model_overrides() -> None:
-    """Test hook: forget the run's record and the cached file hashes."""
+    """Test hook: forget the run's record, the cached file hashes and the inference streaks."""
     with _LOCK:
         _RUN.clear()
         _IDENTITY.clear()
+    with _STREAK_LOCK:
+        _STREAKS.clear()
+    with _SHA_LOCK:
+        _SHA.clear()
 
 
 def is_finite_number(value: Any) -> bool:
@@ -596,18 +894,26 @@ def is_finite_number(value: Any) -> bool:
 __all__ = [
     "MODEL_SETTINGS",
     "NOT_USED",
+    "INFERENCE_FAILURE_LIMIT",
     "ModelSetting",
     "begin_run",
     "bundle_member",
     "check_model_overrides",
+    "find_model_override_error",
     "is_local_model",
     "is_model_override",
     "load_failure_kind",
+    "load_model_override",
     "loaded_model_overrides",
     "model_overrides",
     "models_in_use",
+    "note_inference_failure",
+    "note_inference_success",
     "onnx_bundle_files",
+    "override_failure_scope",
     "override_load_error",
+    "paper_scope",
+    "pending_override_failure",
     "record_model_load",
     "record_model_unavailable",
     "reset_loaded_model_overrides",

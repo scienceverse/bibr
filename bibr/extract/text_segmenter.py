@@ -32,7 +32,8 @@ subdirectory, or a Hub repo with the three files in ``onnx/``, fetched at
 ``REF_TEXT_SEG_REVISION``. The graph takes ``input_ids`` and
 ``attention_mask`` (int64, batch x tokens) and returns ``logits`` (float32,
 batch x tokens x 3, in the order of the manifest's ``tags``); loading runs it
-once on a short window to check that.
+once on a full window of tokenised reference text (with the tokenizer's last id
+in it) to check that.
 """
 
 from __future__ import annotations
@@ -59,6 +60,14 @@ INPUT_IDS = "input_ids"
 ATTENTION_MASK = "attention_mask"
 OUTPUT_NAME = "logits"
 _LABEL = "text reference segmenter"
+# What the load probe tokenises: a short reference list in the shapes papers print.
+_PROBE_TEXT = (
+    "[1] Smith, J. A., & Müller, K. (2019). A title of the first work. Journal of "
+    "Examples, 12(3), 45–67. https://doi.org/10.1000/xyz123\n"
+    "[2] Lee S, Nguyễn T, García-López M. Second title: with a subtitle. Proc Natl "
+    "Acad Sci USA. 2020;117:1–9.\n"
+    "3. Ōtsuka, H. 2021. 第三の題名. Tokyo: Example Press, pp. 10-20.\n"
+)
 
 
 def segmenter_bundle_files(
@@ -271,20 +280,44 @@ class OnnxTextSegmenter:
             out = self._session.run([OUTPUT_NAME], {INPUT_IDS: x, ATTENTION_MASK: np.ones_like(x)})
         return np.asarray(out[0])
 
+    def _probe_ids(self) -> np.ndarray:
+        """A full window of token ids as a paper sends them, and the tokenizer's last id.
+
+        The ids of a short reference list through the bundle's tokenizer, repeated to
+        the manifest's ``window``: a graph with fewer positions than the window, or
+        a vocabulary smaller than the tokenizer's, fails on it as it would on a paper.
+        """
+        ids, _offsets = self.encode(_PROBE_TEXT)
+        if not len(ids):
+            raise ConfigurationError(
+                f"{self.onnx_path}: the tokenizer gives no tokens for a reference list"
+            )
+        ids = np.resize(ids, self.window)
+        last = int(self._tokenizer.get_vocab_size(with_added_tokens=False)) - 1
+        if last >= 0:
+            ids[-1] = last
+        return ids
+
     def _check_graph(self) -> None:
-        """Run the graph once on a short window; it must give one logit per tag per token."""
-        probe = np.zeros(4, dtype=np.int64)
+        """Run the graph once on a full window; it must give one finite logit per tag per token."""
+        probe = self._probe_ids()
+        shape = f"(1, {len(probe)}) window of tokenised reference text"
         try:
             out = self._run(probe)
         except Exception as exc:
             raise ConfigurationError(
-                f"{self.onnx_path}: the graph does not run on a (1, {len(probe)}) window "
+                f"{self.onnx_path}: the graph does not run on a {shape} "
                 f"({type(exc).__name__}: {exc})"
             ) from exc
         if out.shape != (1, len(probe), len(TAGS)):
             raise ConfigurationError(
                 f"{self.onnx_path}: the graph returns {OUTPUT_NAME} of shape {out.shape} for "
-                f"a (1, {len(probe)}) window; want (1, {len(probe)}, {len(TAGS)})"
+                f"a {shape}; want (1, {len(probe)}, {len(TAGS)}), one logit per tag "
+                f"{list(TAGS)}"
+            )
+        if not np.isfinite(out).all():
+            raise ConfigurationError(
+                f"{self.onnx_path}: the graph returns non-finite {OUTPUT_NAME} for a {shape}"
             )
 
     def encode(self, text: str) -> tuple[np.ndarray, list[tuple[int, int]]]:

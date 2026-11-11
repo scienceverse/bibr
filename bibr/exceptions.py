@@ -403,10 +403,12 @@ class ConfigurationError(BibrError):
 class ModelOverrideError(ConfigurationError):
     """A model setting set away from its shipped default names a model that cannot be loaded.
 
-    Raised only for a permanent reason (the path or Hub file does not exist,
-    the file is unreadable or the wrong kind); see
+    Raised for any failure to load it (a path or Hub file that does not exist,
+    a Hub that cannot be reached with nothing cached, an unreadable or
+    wrong-kind file, a failed load probe, a missing optional dependency), and
+    when it raised at inference on several papers in a row; see
     :mod:`bibr.utils.model_overrides`. Unlike a load failure of a shipped
-    model, it is never turned into a degraded result: the extraction code
-    passes it to the caller, so a run never reports the shipped path (or no
+    model, it is never turned into a degraded result: the pipeline passes it
+    to the caller and stops, so a run never reports the shipped path (or no
     model) under the candidate's name.
     """

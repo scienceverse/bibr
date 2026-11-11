@@ -136,13 +136,23 @@ def test_the_load_error_says_there_is_no_fallback():
     assert override_load_error(settings, "REF_GEOM_SEG_MODEL_ID", err) is err
 
 
-def test_a_transient_failure_of_an_override_behaves_as_for_the_default():
+@pytest.mark.parametrize(
+    ("exc", "reason"),
+    [
+        (httpx.ConnectError("x"), "the Hub could not be reached"),
+        (ModuleNotFoundError("no torch", name="torch"), "the torch extra is not installed"),
+    ],
+)
+def test_every_load_failure_of_an_override_stops(exc, reason):
     settings = snapshot_settings()
     settings.ml.front_role_model_id = "myorg/front-role-mirror"
     begin_run(settings)
-    assert override_load_error(settings, "ML_FRONT_ROLE_MODEL_ID", httpx.ConnectError("x")) is None
+    err = override_load_error(settings, "ML_FRONT_ROLE_MODEL_ID", exc)
+    assert isinstance(err, ModelOverrideError) and reason in str(err)
     (record,) = run_records()
-    assert record["loaded"] is False and record["reason"].startswith("network error")
+    assert record["loaded"] is False and record["reason"].startswith(reason)
+    # The shipped setting keeps its own fallback.
+    assert override_load_error(snapshot_settings(), "ML_FRONT_ROLE_MODEL_ID", exc) is None
 
 
 def test_an_overridden_geom_segmenter_that_does_not_exist_stops(tmp_path):
@@ -201,11 +211,38 @@ def test_preflight_names_a_bundle_of_the_wrong_model(tmp_path):
     assert "'paper_classifier' model, not a 'ner_parser'" in problem
 
 
-def test_preflight_passes_a_loadable_bundle_and_skips_hub_ids(tmp_path):
+def test_preflight_loads_a_bundle_and_a_hub_id(tmp_path, monkeypatch):
+    from bibr.extract.ref_extractor import unload_ner_parser
+
     settings = snapshot_settings()
+    settings.ml.runtime = "onnx"
     settings.NER_PARSER_CKPT = str(_flat_bundle("ner", tmp_path / "ner"))
     settings.ml.section_classifier_model_id = "org/another-section-model"
-    assert check_model_overrides(settings) == ([], [])
+    # Without load (bibr serve's startup), only the local files are checked.
+    assert check_model_overrides(settings, load=False) == ([], [])
+    loaded = []
+
+    def section(model_id, revision="main", device=None, settings=None):
+        loaded.append((model_id, device))
+        return object()
+
+    monkeypatch.setattr("bibr.structure.section_classifier_common.load_section_classifier", section)
+    try:
+        assert check_model_overrides(settings) == ([], [])
+    finally:
+        unload_ner_parser()
+    assert loaded == [("org/another-section-model", "cpu")]
+
+    def unreachable(model_id, revision="main", device=None, settings=None):
+        raise httpx.ConnectError("name resolution")
+
+    monkeypatch.setattr(
+        "bibr.structure.section_classifier_common.load_section_classifier", unreachable
+    )
+    settings.NER_PARSER_CKPT = snapshot_settings().NER_PARSER_CKPT
+    (problem,), _ = check_model_overrides(settings)
+    assert problem.startswith("ML_SECTION_CLASSIFIER_MODEL_ID='org/another-section-model")
+    assert "the Hub could not be reached" in problem
 
 
 def test_preflight_never_raises(tmp_path):
@@ -263,13 +300,61 @@ def test_preflight_skips_a_front_tagger_the_run_leaves_off(tmp_path):
     assert "ML_FRONT_TAGGER_MODEL_ID" in problem
 
 
-def test_a_crf_override_without_torch_is_a_warning_not_a_problem(tmp_path, monkeypatch):
-    monkeypatch.setattr("bibr.utils.ml_runtime.torch_available", lambda: False)
+def test_a_crf_override_without_torch_is_a_problem(tmp_path, monkeypatch):
+    import sys
+
+    from bibr.extract import ref_extractor
+    from bibr.utils.ml_extra import ml_import_error
+
+    def no_torch(*args, **kwargs):
+        raise ml_import_error("The CRF segmenter")
+
+    monkeypatch.setitem(sys.modules, "bibr.ner.segmenter", SimpleNamespace(RefSegmenter=no_torch))
+    monkeypatch.setattr(ref_extractor, "_NER_SEGMENTER", None)
+    checkpoint = tmp_path / "seg.pt"
+    checkpoint.write_bytes(b"weights")
     settings = snapshot_settings()
-    settings.NER_SEG_CKPT = str(tmp_path / "seg.pt")
-    problems, (warning,) = check_model_overrides(settings)
-    assert problems == []
-    assert warning.startswith("NER_SEG_CKPT=") and "torch extra" in warning
+    settings.NER_SEG_CKPT = str(checkpoint)
+    (problem,), warnings = check_model_overrides(settings)
+    assert warnings == []
+    assert problem.startswith("NER_SEG_CKPT=") and "the torch extra is not installed" in problem
+
+
+def test_preflight_accepts_a_local_torch_classifier_and_refuses_a_broken_one(tmp_path, monkeypatch):
+    monkeypatch.setattr("bibr.utils.ml_runtime.torch_available", lambda: True)
+    model = tmp_path / "section-torch"
+    model.mkdir()
+    (model / "config.json").write_text("{}")
+    (model / "model.safetensors").write_bytes(b"weights")
+    settings = snapshot_settings()
+    settings.ml.runtime = "torch"
+    settings.ml.section_classifier_model_id = str(model)
+    assert check_model_overrides(settings, load=False) == ([], [])
+    # The load reads it with from_pretrained, as the run does.
+    loaded = []
+    monkeypatch.setattr(
+        "bibr.structure.section_classifier_common.load_section_classifier",
+        lambda model_id, revision="main", device=None, settings=None: loaded.append(model_id),
+    )
+    assert check_model_overrides(settings) == ([], [])
+    assert loaded == [str(model)]
+    # A directory without weights is neither a bundle nor a torch model.
+    (model / "model.safetensors").unlink()
+    (problem,), _ = check_model_overrides(settings, load=False)
+    assert "nor a torch model directory" in problem and "model.safetensors" in problem
+    # Weights that do not load are refused by the load.
+    (model / "model.safetensors").write_bytes(b"not weights")
+
+    def broken(model_id, revision="main", device=None, settings=None):
+        raise OSError("unable to load weights")
+
+    monkeypatch.setattr("bibr.structure.section_classifier_common.load_section_classifier", broken)
+    (problem,), _ = check_model_overrides(settings)
+    assert "unable to load weights" in problem
+    # An ONNX-only run still wants a bundle.
+    settings.ml.runtime = "onnx"
+    (problem,), _ = check_model_overrides(settings, load=False)
+    assert "no ONNX bundle there" in problem
 
 
 # -- the CLI preflight -------------------------------------------------------------------
@@ -304,16 +389,21 @@ def test_cli_preflight_follows_the_run_options(tmp_path, monkeypatch):
     assert _preflight_model_overrides(_cli_config(refs="off")) is None
 
 
-def test_cli_preflight_passes_warnings_on(tmp_path, monkeypatch):
+def test_cli_preflight_loads_a_hub_override(monkeypatch):
     from bibr.local.cli.run_config import _preflight_model_overrides
 
-    monkeypatch.setattr("bibr.utils.ml_runtime.torch_available", lambda: False)
     settings = snapshot_settings()
-    settings.NER_SEG_CKPT = str(tmp_path / "seg.pt")
+    settings.ml.front_role_model_id = "no-such-org/front-role"
     monkeypatch.setattr("bibr.config.Settings", settings)
+
+    def unreachable(*args, **kwargs):
+        raise httpx.ConnectError("name resolution")
+
+    monkeypatch.setattr("bibr.extract.front_role.FrontRoleClassifier", unreachable)
     seen: list[str] = []
-    assert _preflight_model_overrides(_cli_config(), warn=seen.append) is None
-    assert len(seen) == 1 and seen[0].startswith("Model override: NER_SEG_CKPT=")
+    problem = _preflight_model_overrides(_cli_config(), warn=seen.append)
+    assert problem.startswith("Model override problem: ML_FRONT_ROLE_MODEL_ID=")
+    assert "the Hub could not be reached" in problem and seen == []
 
 
 # -- the run's record ----------------------------------------------------------------------
@@ -456,7 +546,7 @@ async def test_an_overridden_crf_that_does_not_exist_stops(monkeypatch):
         await ex.refs._segment_references("\n".join(_REFS), "crf")
 
 
-async def test_an_overridden_crf_without_torch_behaves_as_the_default(monkeypatch):
+async def test_an_overridden_crf_without_torch_stops(monkeypatch):
     import sys
 
     from bibr.extract import ref_extractor
@@ -471,10 +561,11 @@ async def test_an_overridden_crf_without_torch_behaves_as_the_default(monkeypatc
     settings.NER_SEG_CKPT = "/elsewhere/seg.pt"
     begin_run(settings)
     ex = _metadata_extractor(settings, seg="crf")
-    out = await ex.refs._segment_references("\n".join(_REFS), "crf")
-    assert isinstance(out, list)  # the marker split or nothing, as for the default
+    with pytest.raises(ModelOverrideError, match="the torch extra is not installed"):
+        await ex.refs._segment_references("\n".join(_REFS), "crf")
     (record,) = run_records()
-    assert record["loaded"] is False and record["reason"].startswith("torch extra not installed")
+    assert record["loaded"] is False
+    assert record["reason"].startswith("the torch extra is not installed")
 
 
 async def test_a_crf_inference_error_is_not_a_load_failure(monkeypatch):
@@ -561,3 +652,32 @@ def test_an_overridden_classifier_tells_the_network_from_a_missing_bundle(
     with pytest.raises(ConfigurationError):
         load(MlOptions.model_fields[attr].default, revision="main", settings=settings)
     assert asked == [True, False]
+
+
+# -- a Hub id that is not cached, offline -------------------------------------------
+
+
+def test_an_uncached_hub_override_offline_stops_the_preflight_and_the_run(tmp_path, monkeypatch):
+    from huggingface_hub import constants
+
+    from bibr.extract import ref_extractor
+
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", True)
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path / "hub-cache"))
+    monkeypatch.setattr(ref_extractor, "_TEXT_SEGMENTER", None)
+    monkeypatch.setattr(ref_extractor, "_TEXT_SEGMENTER_KEY", None)
+    settings = snapshot_settings()
+    settings.REF_TEXT_SEG_MODEL_ID = "no-such-org-for-tests/never-cached-text-segmenter"
+    settings.REF_SEG_STRATEGY = "crf"
+
+    problems, warnings = check_model_overrides(settings)
+    assert warnings == []
+    (problem,) = [p for p in problems if "REF_TEXT_SEG_MODEL_ID" in p]
+    assert "the Hub could not be reached and the files are not in the local cache" in problem
+
+    begin_run(settings)
+    with pytest.raises(ModelOverrideError, match="REF_TEXT_SEG_MODEL_ID"):
+        ref_extractor._get_text_segmenter(settings)
+    (record,) = [r for r in run_records() if r["setting"] == "REF_TEXT_SEG_MODEL_ID"]
+    assert record["loaded"] is False

@@ -307,7 +307,7 @@ def test_a_graph_of_the_wrong_shape_is_refused_at_load(tmp_path):
     bundle = _bundle(tmp_path / "wide")
     # Two logits per token instead of three.
     _write_graph(bundle / "model.onnx", table=np.zeros((3, 2), np.float32), slope=(0, 0), n_out=2)
-    with pytest.raises(ConfigurationError, match=r"shape \(1, 4, 2\)"):
+    with pytest.raises(ConfigurationError, match=r"shape \(1, 1024, 2\)"):
         OnnxTextSegmenter(bundle)
     (bundle / "model.onnx").write_bytes(b"not a graph")
     with pytest.raises(Exception):  # noqa: B017 - onnxruntime's own error
@@ -417,7 +417,7 @@ async def test_an_error_on_one_paper_declines_to_the_next_tier(tmp_path, monkeyp
     assert "text reference segmenter failed on this paper" in caplog.text
 
 
-async def test_a_network_failure_on_a_hub_id_leaves_the_tier_out_for_this_paper(monkeypatch):
+async def test_a_network_failure_on_a_hub_id_stops(monkeypatch):
     import httpx
 
     def offline(repo_id, filename, revision=None):
@@ -426,13 +426,16 @@ async def test_a_network_failure_on_a_hub_id_leaves_the_tier_out_for_this_paper(
     monkeypatch.setattr("bibr.utils.hf_cache.hf_download_or_cached", offline)
     ex = _extractor(monkeypatch, "org/unreachable-seg")
     begin_run(ex._settings)
-    with patch("bibr.extract.ref_extractor._get_ner_segmenter", side_effect=_no_crf):
-        out = await ex._segment_references(_REF_TEXT, "crf")
-    assert isinstance(out, list)
-    assert _attempts(ex)[0] == ("text_tagger", False, ("tagger_unavailable",))
+    with (
+        patch("bibr.extract.ref_extractor._get_ner_segmenter", side_effect=_no_crf),
+        pytest.raises(ModelOverrideError, match="the Hub could not be reached"),
+    ):
+        await ex._segment_references(_REF_TEXT, "crf")
+    assert not ex._segmentation_attempts  # no tier answered in its place
     (record,) = run_records()
-    assert record["loaded"] is False and record["reason"].startswith("network error")
-    assert ref_extractor._TEXT_SEGMENTER is None  # the next paper tries again
+    assert record["loaded"] is False
+    assert record["reason"].startswith("the Hub could not be reached")
+    assert ref_extractor._TEXT_SEGMENTER is None
 
 
 async def test_a_missing_hub_segmenter_stops(monkeypatch):

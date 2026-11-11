@@ -210,8 +210,8 @@ def load_front_tagger(
     optional: a missing bundle logs once and the run goes on without its answer,
     which a full run covers with the LLM and a fast run reports as a warning. A
     network failure is not remembered, so the next paper tries again. An
-    overridden bundle (:mod:`bibr.utils.model_overrides`) that does not exist
-    or cannot be read raises :class:`~bibr.exceptions.ModelOverrideError` instead.
+    overridden bundle (:mod:`bibr.utils.model_overrides`) that cannot be loaded,
+    for any reason, raises :class:`~bibr.exceptions.ModelOverrideError` instead.
 
     Blocking: the first call reads the bundle (a download, on a first run) and
     opens the session, so async callers run it off the event loop.
@@ -258,8 +258,8 @@ def load_front_tagger(
         except ModelOverrideError:
             raise
         except Exception as exc:  # noqa: BLE001 - optional model, never fatal
-            # An overridden bundle that does not exist stops the run; a network
-            # failure behaves as for the default (retried at the next paper).
+            # An overridden bundle that cannot be loaded stops the run, whatever the
+            # reason; the default goes on without it (a network failure retried).
             if (strict := override_load_error(settings, ENV_MODEL_ID, exc)) is not None:
                 raise strict from exc
             logger.warning(
