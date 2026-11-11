@@ -100,6 +100,11 @@ _BODY_HEADING_TYPES = frozenset(
         CanonicalSection.APPENDIX,
     }
 )
+#: Off, the design: where the tagger found a field's statements, they replace the
+#: rules'. On: a field whose every rules candidate lies inside one of the tagger's
+#: statements of its type keeps the rules' bounded text (the tagger confirms it,
+#: the rules bound it). Off until it is measured on more papers.
+_TAGGER_CONFIRMS_RULES_BOUND = False
 # Sections whose rows a tagged statement never moves out of or retypes. Footnotes
 # are exported apart from the sections, so a section made of their rows would not
 # show in the export.
@@ -280,6 +285,31 @@ def unchanged_fields(
             continue
         rules_ids = [i for k in rules for i in resolution.candidates[k].text_ids]
         if _rows_text(rules_ids, rows_by_id) == _rows_text(ids, rows_by_id):
+            out.add(field)
+    return out
+
+
+def tagger_confirms_rules(
+    resolution: IntegrityStatementResolution,
+    statements: Sequence[TaggedStatement],
+    blocks: Sequence[ContentBlock],
+) -> set[str]:
+    """The fields whose every rules candidate lies inside a tagger statement of its type.
+
+    The tagger's statement is its whole run of blocks, before
+    :func:`statement_rows` trims it.
+    """
+    out = set()
+    for tagger_type, field in FIELD_TYPES.items():
+        rules = resolution.candidate_indices(field)
+        runs = [
+            {i for block in blocks[s.start : s.end + 1] for i in block.text_ids}
+            for s in statements
+            if s.type == tagger_type
+        ]
+        if not rules or not runs:
+            continue
+        if all(any(set(resolution.candidates[k].text_ids) <= run for run in runs) for k in rules):
             out.add(field)
     return out
 
@@ -519,6 +549,8 @@ def apply_statement_tagger(
     # A field the tagger reads exactly as the rules did keeps the rules'
     # candidates and source, and gets no warning: nothing changed.
     kept = unchanged_fields(contents, resolution, additions)
+    if _TAGGER_CONFIRMS_RULES_BOUND:
+        kept |= tagger_confirms_rules(resolution, statements, blocks)
     additions = [(field, candidate) for field, candidate in additions if field not in kept]
     resolution = merge_field_candidates(resolution, additions)
     sections = apply_section_statements(contents, statements, blocks)
@@ -544,5 +576,6 @@ __all__ = [
     "merge_field_candidates",
     "reset_statement_tagger",
     "statement_rows",
+    "tagger_confirms_rules",
     "unchanged_fields",
 ]
