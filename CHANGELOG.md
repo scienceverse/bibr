@@ -219,6 +219,17 @@ by an earlier version, carries neither.
 
 ### Fixed
 
+- A DOI or URL printed across a line break is joined again in more of the shapes
+  a PDF's text layer produces. A reference line that ends on "10." before the
+  rest of the DOI, right after the registrant slash, after a closing bracket or
+  an underscore, or inside a word of the suffix, no longer leaves a space inside
+  the DOI, which cost the link the DOI makes. A long URL whose scheme lies far
+  back on the line is joined as a short one is, and a wrap after "/", "_" or "="
+  or before a file extension is read as part of the path. A dot that ends a DOI
+  no longer pulls a following link or reference into it. A hyphen at a line end
+  printed as U+2010 or U+2011 is joined or kept by the rule an ASCII hyphen
+  follows. Text without a DOI, a URL or such a hyphen at a line break comes out
+  as before.
 - A region the cloud vision OCR (`--ocr anthropic`, `openai`, `gemini`) could not
   read after its retries, or whose answer was cut off at its output cap, now
   shows in the export as an `OCR_REGION_FAILED` warning with the page, the

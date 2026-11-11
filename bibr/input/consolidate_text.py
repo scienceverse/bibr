@@ -242,15 +242,20 @@ def _resolve_stx_marks(text: str) -> str:
     return "".join(parts)
 
 
+# A printed hyphen at a line break: ASCII hyphen-minus, U+2010 HYPHEN or U+2011
+# NON-BREAKING HYPHEN. The text layer of some typesets prints U+2010 where others
+# print "-"; all three follow the same join/keep rules below.
+_HYPHEN = "[-\u2010\u2011]"
+
 # Literal line-wrap hyphens: GLM-OCR usually marks wrap hyphens with STX but
 # sometimes emits them literally, either at line end ("Lak-\nens") or — APA
 # style, which breaks URLs *before* punctuation — at line start ("Lak\n-ens").
 # ``(?=\S)`` keeps paragraph breaks and markdown bullets ("\n- item") intact.
-_URL_LINEWRAP_RE = re.compile(r"-[ \t]*\r?\n[ \t]*(?=\S)|[ \t]*\r?\n[ \t]*-(?=\S)")
+_URL_LINEWRAP_RE = re.compile(rf"{_HYPHEN}[ \t]*\r?\n[ \t]*(?=\S)|[ \t]*\r?\n[ \t]*{_HYPHEN}(?=\S)")
 
 # Cheap prefilter: a hyphen touching a line break on either side (spaces/tabs
 # allowed).  Strict superset of what _URL_LINEWRAP_RE can match.
-_HYPHEN_AT_LINEBREAK_RE = re.compile(r"-[ \t]*\r?\n|\n[ \t]*-")
+_HYPHEN_AT_LINEBREAK_RE = re.compile(rf"{_HYPHEN}[ \t]*\r?\n|\n[ \t]*{_HYPHEN}")
 
 
 def _bridge_url_linewraps(text: str) -> str:
@@ -296,13 +301,13 @@ def _bridge_url_linewraps(text: str) -> str:
 
 
 _WORD_LINEWRAP_RE = re.compile(
-    r"(?P<left>[^\W\d_]{2,})-[ \t]*\r?\n[ \t]*(?P<right>[^\W\d_]{2,})",
+    rf"(?P<left>[^\W\d_]{{2,}}){_HYPHEN}[ \t]*\r?\n[ \t]*(?P<right>[^\W\d_]{{2,}})",
     re.UNICODE,
 )
 
 _ALPHANUMERIC_LINEWRAP_RE = re.compile(
-    r"(?P<alpha>[^\W\d_]+)-[ \t]*\r?\n[ \t]*(?P<digits>\d+)"
-    r"|(?P<short_number>\b\d{1,2})-[ \t]*\r?\n[ \t]*(?P<word>[^\W\d_]{2,})",
+    rf"(?P<alpha>[^\W\d_]+){_HYPHEN}[ \t]*\r?\n[ \t]*(?P<digits>\d+)"
+    rf"|(?P<short_number>\b\d{{1,2}}){_HYPHEN}[ \t]*\r?\n[ \t]*(?P<word>[^\W\d_]{{2,}})",
     re.UNICODE,
 )
 
@@ -379,11 +384,17 @@ def _dehyphenate_word_linewraps(text: str) -> str:
 #     rejects joining into a following reference ("…\nvan der Berg");
 #   - registrant 10.1146 (Annual Reviews) is excluded: its DOIs are
 #     "annurev-{subject}-…" and the text layer drops the structural hyphen at
-#     the wrap, so joining would fabricate a wrong DOI.
+#     the wrap, so joining would fabricate a wrong DOI. The older dotted form
+#     "annurev.{subject}.…" has no hyphen to lose and is bridged;
+#   - the continuation may open upper-case when it carries a digit and is no
+#     PubMed marker ("2018J" + "G004669", "STROK" + "EAHA.119.025015"), and a
+#     single letter right after the registrant slash or a later slash ("nar/g" +
+#     "kq873") may end the first line.
 _DOI_MIDWORD_WRAP_RE = re.compile(
-    r"(10\.(?!1146/)\d{4,9}/[-._;()/:A-Za-z0-9]*[A-Za-z][A-Za-z])"
+    r"(10\.(?!1146/(?!annurev\.))\d{4,9}/"
+    r"(?:[-._;()/:A-Za-z0-9]*[A-Za-z][A-Za-z]|(?:[-._;()/:A-Za-z0-9]*/)?[A-Za-z]))"
     r"[ \t]*\r?\n[ \t]*"
-    r"(?=[a-z0-9][-._;()/:A-Za-z0-9]*[.\d])"
+    r"(?=[a-z0-9][-._;()/:A-Za-z0-9]*[.\d]|(?!PM)[A-Z](?![a-z])[-._;()/A-Za-z0-9]*\d)"
 )
 
 
@@ -406,10 +417,11 @@ def _bridge_doi_midword_wraps(text: str) -> str:
 # A permissive DOI continuation can absorb adjacent prose or a URL. Keep the documented
 # continuation grammar rather than narrowing it in ways that reject legitimate suffixes.
 _DOI_DOT_WRAP_RE = re.compile(
-    r"(10\.(?!1146/)\d{4,9}/[-._;()/:A-Za-z0-9]*[A-Za-z0-9]\.)"
+    r"(10\.\d{4,9}/[-._;()/:A-Za-z0-9]*[A-Za-z0-9]\.)"
     r"[ \t]*\r?\n?[ \t]*"
-    r"(?!\d{1,4}[.,]\s+[A-Z])"
+    r"(?!\d{1,4}[.,]\s+(?!PMID|PMCID|PubMed)[A-Z])"
     r"(?!\d{1,2}\.\d{1,2}\s+[A-Z])"
+    r"(?!https?:|www\.)"
     r"(?=[a-z0-9][-._;()/:a-z0-9]*[.\d])"
 )
 
@@ -459,9 +471,49 @@ _URL_PATH_CHARS = r"A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-"
 _URL_CRLF_WRAP_RE = re.compile(rf"(?<=[{_URL_PATH_CHARS}])\r?\n[ \t]*(?=[{_URL_PATH_CHARS}])")
 _CAP_WORD_RE = re.compile(r"[A-Z][a-z]")
 _DOI_BODY_RE = re.compile(DOI_BODY)
-_URL_STRUCT_AHEAD_RE = re.compile(r"[./]")
+# A line that ends on the registrant of a DOI ("10." or "10.NNNN/") and the continuation:
+# the suffix after the slash, or the registrant number and its slash after "10.".
+_DOI_REGISTRANT_END_RE = re.compile(r"(?<![\w.-])10\.(?:\d{4,9}/)?$")
+_DOI_AFTER_REGISTRANT_RE = re.compile(r"[A-Za-z0-9(<\[]|\d{4,9}/")
+# What a URL continuation looks like when the wrap falls inside a word of its path: the
+# next characters hold a path or query character or a digit ("sults-pbr-arrangements").
+_URL_PATH_AHEAD_RE = re.compile(r"[./\-_=?&%#\d]")
+# Characters that mark a token as part of a URL path or query, not a capitalized word.
+_URL_PATH_TOKEN_RE = re.compile(r"[/_%=?&#\d]")
+# A file extension or top-level domain after a wrap that follows a dot ("index." + "php").
+_URL_EXTENSION_RE = re.compile(
+    r"(?:html?|xhtml|shtml|php|aspx?|jsp|cfm|pdf|docx?|xlsx?|pptx?|txt|xml|json|csv|zip"
+    r"|org|com|net|edu|gov)(?![A-Za-z])"
+)
+# A DOI whose registrant is itself split by the wrap ("10.\n1016/...", "10\n.1016/..."):
+# the text has no "10.NNNN/" until the wrap is joined, so it must still reach the bridge.
+_DOI_SPLIT_START_RE = re.compile(r"10\.?\d{0,8}[ \t]*\r?\n")
+# How far back a CRLF wrap looks for the scheme or "10.NNNN/" that opens its token.
+_URL_TOKEN_WINDOW = 2000
 _HOST_SCHEME_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
 _DOMAINISH_START_RE = re.compile(r"[A-Za-z0-9-]")
+
+
+# The rest of an Elsevier-style suffix after a bracketed group: "S0959-4388(96)" + "80080-8".
+_DOI_BRACKET_TAIL_RE = re.compile(r"\d[0-9A-Za-z\-:<>\[\]();.]*[-:<>\[(]\w")
+# A bracketed group opening the next line: "S0304-3940" + "(03)00880-2".
+_DOI_BRACKET_OPEN_RE = re.compile(r"\(\d{2,8}\)\d")
+# After a dot, an upper-case continuation made of letters and digits: "jbc." + "M705403200",
+# "CSHPERSPECT." + "A031583". Not a PubMed or PMC identifier, which follow a DOI as text.
+_DOI_DOT_UPPER_RE = re.compile(
+    r"(?!PM|S\d{4}[-\u2010-\u2015]\d{3}[\dXx][(\[])[A-Z]{1,8}[.-]?\d[A-Za-z0-9.\-;()/:]*"
+)
+
+
+def _doi_suffix_wrap(last: str, right: str) -> bool:
+    """Whether a line break inside a DOI suffix falls where a wrapped DOI continues."""
+    if last in ")]" and _DOI_BRACKET_TAIL_RE.match(right):
+        return True
+    if right[0] == "(" and last.isdigit() and _DOI_BRACKET_OPEN_RE.match(right):
+        return True
+    if last == "_":
+        return True  # a DOI never ends on an underscore
+    return last == "." and bool(_DOI_DOT_UPPER_RE.match(right))
 
 
 def _join_url_crlf(m: "re.Match[str]") -> str:
@@ -484,18 +536,33 @@ def _join_url_crlf(m: "re.Match[str]") -> str:
     if not left or not right:
         return m.group(0)
     # URL/DOI context on the JOINED form (handles scheme-splits like https:/ //doi.org).
-    if not DOI_URL_CONTEXT_RE.search(left[-40:] + right[:8]):
-        return m.group(0)
-    # Veto prose: a capitalized word continuation is a name/sentence, not a URL.
-    if _CAP_WORD_RE.match(right):
+    # The whole token to the left is searched: its scheme or "10.NNNN/" lies far back in
+    # a long URL, and a window of its last characters would never see it.
+    if not DOI_URL_CONTEXT_RE.search(left[-_URL_TOKEN_WINDOW:] + right[:8]):
         return m.group(0)
     last, first = left[-1], right[0]
+    # A DOI never ends at its registrant: "10.NNNN/" or "10." at the end of a line is
+    # followed by the rest of the identifier, whatever its case ("10.1038/\nNmat2630").
+    if _DOI_REGISTRANT_END_RE.search(left) and _DOI_AFTER_REGISTRANT_RE.match(right):
+        return ""
+    # A URL path or query does not end on "_", "=" or "&": the wrap continues it.
+    if last in "_=&" and not _DOI_BODY_RE.search(left):
+        return ""
+    # Veto prose: a capitalized word continuation is a name/sentence, not a URL. A token
+    # that carries path or query characters ("Enrollment-File/", "Salzburg_Bakom.pdf") is
+    # no name.
+    if _CAP_WORD_RE.match(right) and not _URL_PATH_TOKEN_RE.search(right.split(None, 1)[0]):
+        return m.group(0)
     in_doi_body = bool(_DOI_BODY_RE.search(left))
     # Never join a 10.NNNN/ DOI-body letter->letter wrap: that is
     # _bridge_doi_midword_wraps's domain (incl. the annurev structural-hyphen
     # guard). Make the invariant explicit rather than relying on fall-through.
     if in_doi_body and last.isalpha() and first.isalpha():
         return m.group(0)
+    # Rules for the suffix of a DOI (the text after "10.NNNN/"): a wrap there continues
+    # the identifier when what follows has the shape of the rest of a DOI, never a word.
+    if in_doi_body and _doi_suffix_wrap(last, right):
+        return ""
     # Rule 1: digit -> digit (mid-number / registrant-internal). A complete DOI
     # ending ".x" has a letter before the wrap, so the page-range guard is free.
     if last.isdigit() and first.isdigit():
@@ -518,13 +585,17 @@ def _join_url_crlf(m: "re.Match[str]") -> str:
         scheme_m = _HOST_SCHEME_RE.search(left)
         if scheme_m and "/" not in left[scheme_m.end() :]:
             return ""
+    # Rule 2d: a wrap after the dot before a file extension ("index." + "php/...").
+    if last == "." and not in_doi_body and _URL_EXTENSION_RE.match(right):
+        return ""
     # Rule 3: host continuation (letter->letter) OUTSIDE a 10.NNNN/ DOI body,
-    # only when the continuation carries a host '.' or '/'.
+    # only when the continuation carries a path or query character, a host '.' or '/',
+    # or a digit.
     if (
         not in_doi_body
         and last.isalpha()
         and first.isalpha()
-        and _URL_STRUCT_AHEAD_RE.search(right[:20])
+        and _URL_PATH_AHEAD_RE.search(right[:20])
     ):
         return ""
     return m.group(0)
@@ -536,7 +607,9 @@ def _bridge_doi_url_crlf_wraps(text: str) -> str:
     joins a 10.NNNN/ DOI-body letter->letter wrap (that function's domain, incl.
     the annurev structural-hyphen guard). Repeated passes handle multi-line
     wraps."""
-    if "\n" not in text or not DOI_URL_CONTEXT_RE.search(text):
+    if "\n" not in text or not (
+        DOI_URL_CONTEXT_RE.search(text) or _DOI_SPLIT_START_RE.search(text)
+    ):
         return text
     prev: str | None = None
     while prev != text:
@@ -727,6 +800,8 @@ def fix_ocr_artifacts(text: str) -> str:
         text = text.replace(artifact, replacement)
     text = _bridge_url_linewraps(text)
     text = _bridge_doi_url_crlf_wraps(text)
+    # Wraps bridged above can bring a hyphen wrap into a URL that began on an earlier line.
+    text = _bridge_url_linewraps(text)
     text = _bridge_doi_midword_wraps(text)
     text = _bridge_doi_dot_wraps(text)
     text = _bridge_doi_slash_space(text)
