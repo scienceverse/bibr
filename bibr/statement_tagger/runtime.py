@@ -26,7 +26,9 @@ less accurate.
 version, the types in output order with one threshold each, the token budget
 and the input rule. The graph takes ``input_ids`` and ``attention_mask``
 (int64, batch x tokens) and returns ``probs`` (batch x types, sigmoid applied).
-Loading runs it once on two dummy blocks and checks the output shape.
+Loading runs it on blocks in two shapes (a batch of three that fills
+``max_length``, with the tokenizer's last id, and one short block) and checks
+the output shape.
 
 **Input rule** (``manifest["input"]``): each block is encoded as the tokenizer
 pair (context, text), where the context is the first ``context_chars``
@@ -62,6 +64,17 @@ INPUT_RULE = "pair:previous_block"
 INPUT_NAMES = ("input_ids", "attention_mask")
 OUTPUT_NAME = "probs"
 DEFAULT_BATCH = 32
+
+#: Sentences of a paper's back matter, repeated where the load probe needs a full block.
+_PROBE_SENTENCES = (
+    "This work was supported by the National Science Foundation (grant 1234567) and by "
+    "the Example Research Council.",
+    "The authors declare no competing interests.",
+    "The study was approved by the local ethics committee (protocol 2019-12).",
+    "Data and analysis code are available at https://osf.io/abcde/.",
+)
+#: The most tokens of the short block the load probe sends besides the full-length batch.
+_SHORT_PROBE_TOKENS = 24
 
 _WS = re.compile(r"\s+")
 _INVISIBLE = str.maketrans("", "", "­​﻿")
@@ -270,19 +283,52 @@ class StatementTagger:
         self._check_graph()
 
     def _check_graph(self) -> None:
-        """Run the graph on two dummy blocks: it must give one probability per type."""
-        try:
-            probs = self.probabilities(["Funding", "This work was supported by a grant."])
-        except Exception as exc:
-            raise StatementTaggerError(
-                f"{self.directory}: the graph does not run on two dummy blocks "
-                f"({type(exc).__name__}: {exc})"
-            ) from exc
-        if probs.shape != (2, len(self.labels)) or not np.all(np.isfinite(probs)):
-            raise StatementTaggerError(
-                f"{self.directory}: the graph returns {OUTPUT_NAME} of shape {probs.shape} for "
-                f"2 blocks; want (2, {len(self.labels)}) finite values"
-            )
+        """Run the graph on blocks in the shapes :meth:`probabilities` sends.
+
+        A batch of three blocks padded to the longest, which fills the
+        manifest's ``max_length`` and holds the tokenizer's last id, and one
+        short block alone: a paper's blocks come in batches of any size up to
+        :attr:`batch_size`, padded to their longest. On both the graph must give
+        one finite probability per type. A graph with fewer positions than
+        ``max_length``, an embedding table smaller than the tokenizer's
+        vocabulary, or an input fixed to one batch size or one length fails here
+        as it would on a paper.
+        """
+        long_text = " ".join(_PROBE_SENTENCES) * (1 + self.max_length // 8)
+        full = self.pairs(["Funding", "This work was supported by a grant.", long_text])
+        short = self.pairs(["Ethics approval was not required."])
+        last = int(self._tokenizer.get_vocab_size(with_added_tokens=False)) - 1
+        for pairs in (full, short):
+            encoded = self._tokenizer.encode_batch(pairs)
+            ids = np.asarray([e.ids for e in encoded], dtype=np.int64)
+            mask = np.asarray([e.attention_mask for e in encoded], dtype=np.int64)
+            if pairs is full:
+                lengths = mask.sum(axis=1)
+                row = int(lengths.argmax())
+                if last >= 0 and lengths[row] > 0:
+                    ids[row, int(lengths[row]) - 1] = last
+            else:
+                n = min(ids.shape[1], max(1, min(_SHORT_PROBE_TOKENS, self.max_length // 2)))
+                ids, mask = ids[:, :n], mask[:, :n]
+            shape = f"a {ids.shape} batch of blocks"
+            try:
+                with self._lock:
+                    probs = self._session.run(
+                        [OUTPUT_NAME], {"input_ids": ids, "attention_mask": mask}
+                    )[0]
+            except Exception as exc:
+                raise StatementTaggerError(
+                    f"{self.directory}: the graph does not run on {shape} "
+                    f"({type(exc).__name__}: {exc})"
+                ) from exc
+            probs = np.asarray(probs)
+            want = (len(pairs), len(self.labels))
+            if probs.shape != want or not np.all(np.isfinite(probs)):
+                raise StatementTaggerError(
+                    f"{self.directory}: the graph returns {OUTPUT_NAME} of shape {probs.shape} "
+                    f"for {shape}; want {want} finite values, one per type of the manifest's "
+                    f"{len(self.labels)} labels"
+                )
 
     def pairs(self, texts: Sequence[str]) -> list[tuple[str, str]]:
         """The (context, text) pair each block is encoded as."""

@@ -67,7 +67,14 @@ def write_tokenizer(path: Path) -> list[str]:
     return list(vocab)
 
 
-def write_graph(path: Path, vocab: list[str], *, n_out: int | None = None) -> None:
+def write_graph(
+    path: Path, vocab: list[str], *, n_out: int | None = None, positions: int | None = None
+) -> None:
+    """The lookup graph; with ``positions``, plus a zero bias read per token position.
+
+    A position table of ``positions`` rows makes a longer input fail, as a
+    real encoder's position embeddings do.
+    """
     import onnx
     from onnx import TensorProto, helper, numpy_helper
 
@@ -76,9 +83,27 @@ def write_graph(path: Path, vocab: list[str], *, n_out: int | None = None) -> No
     for word, label in KEYWORDS.items():
         if LABELS.index(label) < n_out:
             table[vocab.index(word), LABELS.index(label)] = 6.0
+    by_position = []
+    extra = []
+    if positions is not None:
+        by_position = [
+            helper.make_node("CumSum", ["attention_mask", "axis1_scalar"], ["count"]),
+            helper.make_node("Sub", ["count", "one_int"], ["position"]),
+            helper.make_node("Relu", ["position"], ["position0"]),
+            helper.make_node("Gather", ["P", "position0"], ["pos_emb"]),
+            helper.make_node("Add", ["tok_emb", "pos_emb"], ["emb"]),
+        ]
+        extra = [
+            numpy_helper.from_array(np.zeros((positions, n_out), np.float32), "P"),
+            numpy_helper.from_array(np.asarray(1, np.int64), "axis1_scalar"),
+            numpy_helper.from_array(np.asarray(1, np.int64), "one_int"),
+        ]
     graph = helper.make_graph(
         [
-            helper.make_node("Gather", ["E", "input_ids"], ["emb"]),
+            helper.make_node(
+                "Gather", ["E", "input_ids"], ["tok_emb" if positions is not None else "emb"]
+            ),
+            *by_position,
             helper.make_node("Cast", ["attention_mask"], ["maskf"], to=TensorProto.FLOAT),
             helper.make_node("Unsqueeze", ["maskf", "axis"], ["mask3"]),
             helper.make_node("Sub", ["mask3", "one"], ["off"]),
@@ -101,6 +126,7 @@ def write_graph(path: Path, vocab: list[str], *, n_out: int | None = None) -> No
             numpy_helper.from_array(np.asarray([1], np.int64), "axis1"),
             numpy_helper.from_array(np.asarray(1.0, np.float32), "one"),
             numpy_helper.from_array(np.asarray(100.0, np.float32), "big"),
+            *extra,
         ],
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)])
@@ -125,11 +151,13 @@ def manifest(**changes) -> dict:
     return data
 
 
-def write_bundle(root: Path, *, n_out: int | None = None, **changes) -> Path:
+def write_bundle(
+    root: Path, *, n_out: int | None = None, positions: int | None = None, **changes
+) -> Path:
     """``root/onnx`` holding a working bundle (or one broken by ``changes``); returns root."""
     onnx_dir = root / "onnx"
     onnx_dir.mkdir(parents=True, exist_ok=True)
     vocab = write_tokenizer(onnx_dir / "tokenizer.json")
-    write_graph(onnx_dir / "model.onnx", vocab, n_out=n_out)
+    write_graph(onnx_dir / "model.onnx", vocab, n_out=n_out, positions=positions)
     (onnx_dir / "bibr_onnx.json").write_text(json.dumps(manifest(**changes)), encoding="utf-8")
     return root

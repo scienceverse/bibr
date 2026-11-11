@@ -532,7 +532,7 @@ def test_a_graph_that_fails_its_probe_stops_the_run_at_load(tmp_path):
     from tests.statement_tagger.bundle import write_bundle
 
     settings = _settings(statement_tagger_model_id=str(write_bundle(tmp_path / "s", n_out=3)))
-    with pytest.raises(ModelOverrideError, match="the graph does not run on two dummy blocks"):
+    with pytest.raises(ModelOverrideError, match=r"the graph returns probs of shape \(3, 3\)"):
         get_statement_tagger(settings)
 
 

@@ -121,10 +121,58 @@ def test_a_missing_bundle_and_a_missing_file_are_refused(tmp_path, bundle):
         StatementTagger(bundle)
 
 
-def test_the_graph_is_run_once_at_load(tmp_path):
+def test_the_graph_is_run_at_load(tmp_path):
     # A graph with fewer outputs than the manifest has labels fails at load.
-    with pytest.raises(StatementTaggerError, match="shape"):
+    with pytest.raises(StatementTaggerError, match=r"shape \(3, 3\) .* want \(3, 7\)"):
         StatementTagger(write_bundle(tmp_path / "short", n_out=3))
+
+
+def _grow_vocabulary(bundle: Path, extra: int = 40) -> None:
+    """A tokenizer with more ids than the graph's embedding table has rows."""
+    path = bundle / "onnx" / "tokenizer.json"
+    data = json.loads(path.read_text())
+    vocab = data["model"]["vocab"]
+    for i in range(extra):
+        vocab[f"extra{i}"] = len(vocab)
+    path.write_text(json.dumps(data))
+
+
+def test_a_graph_smaller_than_its_tokenizer_is_refused_at_load(tmp_path):
+    # Every word of a paper's text maps to an id the tokenizer can give; the
+    # probe sends the last one.
+    bundle = write_bundle(tmp_path / "vocab")
+    _grow_vocabulary(bundle)
+    with pytest.raises(StatementTaggerError, match=r"does not run on a \(3, 64\) batch"):
+        StatementTagger(bundle)
+
+
+def test_a_manifest_length_beyond_the_graph_positions_is_refused_at_load(tmp_path):
+    # The graph has 64 positions; a manifest that allows 128 tokens would
+    # fail on the first paper with a long paragraph.
+    assert StatementTagger(write_bundle(tmp_path / "fits", positions=64)).max_length == 64
+    bundle = write_bundle(
+        tmp_path / "long",
+        positions=64,
+        input={"rule": "pair:previous_block", "context_chars": 200, "max_length": 128},
+    )
+    with pytest.raises(StatementTaggerError, match=r"does not run on a \(3, 128\) batch"):
+        StatementTagger(bundle)
+
+
+@pytest.mark.parametrize(
+    ("dims", "refused_on"),
+    [
+        ([2, None], r"\(3, 64\)"),  # one batch size: a paper's blocks come in any
+        ([None, 64], r"\(1, \d+\)"),  # one length: a short block is shorter
+    ],
+)
+def test_a_graph_exported_for_one_shape_is_refused_at_load(tmp_path, dims, refused_on):
+    from tests.onnx_fixtures import fix_input_dims
+
+    bundle = write_bundle(tmp_path / "fixed")
+    fix_input_dims(bundle / "onnx" / "model.onnx", {"input_ids": dims, "attention_mask": dims})
+    with pytest.raises(StatementTaggerError, match=rf"does not run on a {refused_on} batch"):
+        StatementTagger(bundle)
 
 
 def test_a_manifest_that_is_not_json_is_refused(bundle):
