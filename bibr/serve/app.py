@@ -52,55 +52,60 @@ def classifier_artifact_readiness(
     """Verify configured classifier snapshots exist locally without downloading.
 
     A fast deployment (``fast=True``) also needs the front-matter tagger, which
-    reads the title, authors and abstract there, so its bundle is checked too.
+    reads the title, authors and abstract there, so its bundle is checked too,
+    and first. Nothing stands in for it: without the bundle every paper comes
+    back with those fields empty, so a fast deployment that cannot find a
+    configured tagger is not ready, whatever ``ML_CLASSIFIERS_REQUIRED`` says
+    (``bibr chew --fast`` stops for the same reason). A null
+    ``ML_FRONT_TAGGER_MODEL_ID`` is a choice to serve without the tagger and is
+    not checked.
     """
     if snapshot_download is None:
         from huggingface_hub import snapshot_download
 
-    configured = [
-        (
-            settings.ml.paper_classifier_model_id,
-            settings.ml.paper_classifier_revision,
-            False,
-        ),
-        (
-            settings.ml.section_classifier_model_id,
-            settings.ml.section_classifier_revision,
-            False,
-        ),
-    ]
-    if fast:
-        configured.append(
-            (settings.ml.front_tagger_model_id, settings.ml.front_tagger_revision, True)
-        )
-    try:
-        for model_id, revision, onnx_only in configured:
-            if not model_id:
-                continue
-            # A local directory or file counts as present when the
-            # configured runtime could load from it (resolve_runtime)
-            # without loading any model: torch loads the directory
-            # itself, so the ONNX bundle is required only when
-            # ML_RUNTIME=onnx. snapshot_download rejects
-            # filesystem paths outright, so without this a baked-in
-            # classifier is reported missing. Local-only: no Hub access,
-            # so this never slows the readiness probe.
-            if Path(str(model_id)).expanduser().exists():
-                from bibr.utils.ml_runtime import find_onnx_bundle, resolve_runtime
+    def present(model_id, revision, *, onnx_only: bool) -> None:
+        """Raise when the model is not available locally."""
+        # A local directory or file counts as present when the
+        # configured runtime could load from it (resolve_runtime)
+        # without loading any model: torch loads the directory
+        # itself, so the ONNX bundle is required only when
+        # ML_RUNTIME=onnx. snapshot_download rejects
+        # filesystem paths outright, so without this a baked-in
+        # classifier is reported missing. Local-only: no Hub access,
+        # so this never slows the readiness probe.
+        if Path(str(model_id)).expanduser().exists():
+            from bibr.utils.ml_runtime import find_onnx_bundle, resolve_runtime
 
-                if onnx_only:
-                    # The tagger has no torch form: only an onnx/ bundle will load.
-                    if find_onnx_bundle(model_id, revision) is None:
-                        raise FileNotFoundError(model_id)
-                    continue
-                resolve_runtime(
-                    "classifier",
-                    settings=settings,
-                    bundle=functools.partial(find_onnx_bundle, model_id, revision),
-                    bundle_hint="publish an onnx/ bundle or run a torch runtime",
-                )
-                continue
-            snapshot_download(model_id, revision=revision, local_files_only=True)
+            if onnx_only:
+                # The tagger has no torch form: only an onnx/ bundle will load.
+                if find_onnx_bundle(model_id, revision) is None:
+                    raise FileNotFoundError(model_id)
+                return
+            resolve_runtime(
+                "classifier",
+                settings=settings,
+                bundle=functools.partial(find_onnx_bundle, model_id, revision),
+                bundle_hint="publish an onnx/ bundle or run a torch runtime",
+            )
+            return
+        snapshot_download(model_id, revision=revision, local_files_only=True)
+
+    if fast and settings.ml.front_tagger_model_id:
+        try:
+            present(
+                settings.ml.front_tagger_model_id,
+                settings.ml.front_tagger_revision,
+                onnx_only=True,
+            )
+        except Exception:  # noqa: BLE001 - readiness reports missing/corrupt cache
+            return ("failed_required", False)
+    try:
+        for model_id, revision in (
+            (settings.ml.paper_classifier_model_id, settings.ml.paper_classifier_revision),
+            (settings.ml.section_classifier_model_id, settings.ml.section_classifier_revision),
+        ):
+            if model_id:
+                present(model_id, revision, onnx_only=False)
     except Exception:  # noqa: BLE001 - readiness reports missing/corrupt cache
         if settings.ml.classifiers_required:
             return ("failed_required", False)

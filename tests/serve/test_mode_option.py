@@ -584,10 +584,11 @@ def test_a_fast_deployment_checks_the_tagger_in_the_local_cache():
         "ok",
         True,
     )
+    # The tagger first: a missing classifier must not hide a missing tagger.
     assert calls == [
+        ("tagger/model", "tagger-rev", True),
         ("paper/model", "paper-rev", True),
         ("section/model", "section-rev", True),
-        ("tagger/model", "tagger-rev", True),
     ]
 
 
@@ -604,8 +605,9 @@ def test_a_full_deployment_never_asks_for_the_tagger():
     assert "tagger/model" not in calls
 
 
-@pytest.mark.parametrize(("required", "expected"), [(False, "degraded"), (True, "failed_required")])
-def test_a_missing_tagger_is_degraded_or_a_required_failure(required, expected):
+@pytest.mark.parametrize("required", [False, True])
+def test_a_fast_deployment_without_its_tagger_is_not_ready(required):
+    """Nothing stands in for the tagger in fast mode, so the classifier switch does not apply."""
     from bibr.serve.app import classifier_artifact_readiness
 
     def cached_but_the_tagger(model_id, *, revision, local_files_only):  # noqa: ARG001
@@ -614,15 +616,44 @@ def test_a_missing_tagger_is_degraded_or_a_required_failure(required, expected):
         return "/cache/model"
 
     settings = _ml_settings(classifiers_required=required)
-    status, ok = classifier_artifact_readiness(
+    assert classifier_artifact_readiness(
         settings, snapshot_download=cached_but_the_tagger, fast=True
-    )
-    assert status == expected
-    assert ok is (not required)
+    ) == ("failed_required", False)
     # The same cache reads ready to a full deployment, which never loads the tagger.
     assert classifier_artifact_readiness(
         settings, snapshot_download=cached_but_the_tagger, fast=False
     ) == ("ok", True)
+
+
+def test_a_missing_classifier_does_not_hide_a_missing_tagger():
+    from bibr.serve.app import classifier_artifact_readiness
+
+    def nothing_cached(model_id, *, revision, local_files_only):  # noqa: ARG001
+        raise FileNotFoundError("not cached")
+
+    assert classifier_artifact_readiness(
+        _ml_settings(), snapshot_download=nothing_cached, fast=True
+    ) == ("failed_required", False)
+    assert classifier_artifact_readiness(
+        _ml_settings(), snapshot_download=nothing_cached, fast=False
+    ) == ("degraded", True)
+
+
+def test_a_fast_deployment_set_to_run_without_the_tagger_is_ready():
+    from bibr.serve.app import classifier_artifact_readiness
+
+    calls = []
+
+    def cached(model_id, *, revision, local_files_only):  # noqa: ARG001
+        calls.append(model_id)
+        return "/cache/model"
+
+    settings = _ml_settings(front_tagger_model_id=None)
+    assert classifier_artifact_readiness(settings, snapshot_download=cached, fast=True) == (
+        "ok",
+        True,
+    )
+    assert calls == ["paper/model", "section/model"]
 
 
 def _onnx_bundle(root, *, files=("model.onnx", "bibr_onnx.json")):
@@ -661,8 +692,8 @@ def test_a_local_tagger_directory_needs_an_onnx_bundle(tmp_path):
         )
 
     assert check(with_bundle) == ("ok", True)
-    assert check(without) == ("degraded", True)
-    assert check(partial) == ("degraded", True)
+    assert check(without) == ("failed_required", False)
+    assert check(partial) == ("failed_required", False)
 
 
 # --- starting the server in a mode ---------------------------------------------------

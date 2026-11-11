@@ -344,6 +344,13 @@ read as plain text (see `LIMITATIONS.md`), and a scanned PDF is answered with
 `422` and `error_code: scan_needs_ocr`. A request's `mode` field does not
 change the route.
 
+A fast server reads the title, the authors and the abstract with the
+front-matter tagger alone. When the model named by `ML_FRONT_TAGGER_MODEL_ID`
+is not on the machine, `/ready` answers `503` with `classifiers:
+failed_required`, whatever `ML_CLASSIFIERS_REQUIRED` says: the server would
+otherwise return every paper with those three fields empty. Setting
+`ML_FRONT_TAGGER_MODEL_ID` to null serves without the tagger on purpose.
+
 **An OCR server.** Every other server sends the PDF regions that need
 recognition to the external OCR service at `OCR_BASE_URL` (default
 `http://localhost:8080`; Compose overrides it with its private `bibr-ocr`

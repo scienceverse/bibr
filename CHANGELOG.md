@@ -174,7 +174,11 @@ by an earlier version, carries neither.
   the model was not found or could not be downloaded. The check resolves the
   model the way the run does, so nothing is downloaded twice, and a model that
   is already downloaded passes offline. A null `ML_FRONT_TAGGER_MODEL_ID` still
-  runs without the tagger. Library calls and `bibr serve` are unchanged.
+  runs without the tagger. Library calls are unchanged. A fast `bibr serve`
+  whose tagger model is not on the machine now answers `/ready` with 503 and
+  `classifiers: failed_required`, whatever `ML_CLASSIFIERS_REQUIRED` says;
+  before, it reported `degraded`, stayed ready and returned papers with
+  those fields empty.
 - On the CPU, bibr's ONNX models (layout, sentence segmenter, reference parser,
   section and paper classifiers, front-matter tagger) now size each session's
   thread pool to the CPUs the process may run on, and idle workers block
