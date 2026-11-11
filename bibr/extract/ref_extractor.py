@@ -2615,11 +2615,14 @@ class ReferenceExtractor:
         Returns ref strings when its calibrated paper confidence clears the
         bundle's gate and the geometry tier's own checks pass; that answer is
         final (the line stream does not run over it). Otherwise ``None``, and
-        the shipped geometry tier runs exactly as without the tagger: the
-        declined ``geom_tagger`` attempt is listed in the receipt with its
-        reason, confidence and counts in ``reason_flags``, but carries no spans
-        or credible starts that later code reads, and adds no warning. An
-        error on one paper is a decline (``tagger_error``), logged.
+        the shipped geometry tier runs exactly as without the tagger, so a
+        decline has no effect on the references. The declined ``geom_tagger``
+        attempt is still listed in the receipt (``reference_yield.attempts``)
+        with its reason, confidence and counts in ``reason_flags``, but carries
+        no spans or credible starts that later code reads, and adds no warning.
+        An error on one paper is a decline (``tagger_error``) that also adds a
+        ``MODEL_OVERRIDE_INFERENCE_FAILED`` warning; errors on
+        ``INFERENCE_FAILURE_LIMIT`` papers in a row stop the run.
         """
         try:
             with LOCAL_INFERENCE_LOCK:
@@ -2669,7 +2672,7 @@ class ReferenceExtractor:
         return [ref_text[s:e] for s, e in spans]
 
     def _decline_geom_tagger(self, ref_text: str, reason: str, *detail: str) -> None:
-        """List a declined tagger answer in the receipt, leaving nothing later code reads."""
+        """List a declined tagger answer in the receipt; it has no effect on the references."""
         self._record_segmentation_attempt(
             "geom_tagger", ref_text, selected=False, reason_flags=(reason, *detail)
         )

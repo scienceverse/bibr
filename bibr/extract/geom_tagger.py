@@ -27,12 +27,14 @@ A bundle is a directory holding ``gate.json`` and the exported graph
 or in an ``onnx/`` subdirectory, or a Hub repo laid out the same way (graph and
 manifest in ``onnx/``), fetched at ``REF_GEOM_TAGGER_REVISION``. The graph
 takes ``features`` (lines x 29, float32, raw values: the standardisation is
-inside it) and returns ``logits`` (lines x 2); loading runs it once on a dummy
-paper to check that. Only onnxruntime is needed.
+inside it) and returns ``logits`` (lines x 2); loading runs it once on the
+features of a short reference section to check that. Only onnxruntime is needed.
 
-A declined answer leaves nothing behind that later code reads: the paper goes
-on exactly as without the tagger, and the receipt lists the attempt. An
-accepted answer is final: the line stream does not run over it.
+A declined answer has no effect on the references: the paper goes on exactly
+as without the tagger. It is not invisible: the receipt lists the attempt, and
+the export carries it in ``reference_yield.attempts``. An error on a paper is
+also a ``MODEL_OVERRIDE_INFERENCE_FAILED`` warning. An accepted answer is
+final: the line stream does not run over it.
 """
 
 from __future__ import annotations

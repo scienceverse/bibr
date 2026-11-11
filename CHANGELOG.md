@@ -97,16 +97,29 @@ override, for comparing a retrained model with the shipped one. A mirror, an
 offline copy or a pinned or `main` revision of a shipped model is an override
 too: it is recorded as one, and it loads and runs as before.
 
-- Who is affected: only a run whose model setting names a model that does not
-  exist or cannot be read (a missing path; a Hub repo, revision or file that
-  is not there; an unreadable or wrong-kind file). That run now stops with an
-  error naming the setting instead of going on without the model: `bibr chew`
-  exits 1, and `bibr batch` marks the running papers `model_override_failed`
-  (retried on resume) and stops. Network failures and a missing `torch` extra
-  behave as before, override or not.
-- `bibr chew` and `bibr batch` check the local-path overrides the run will load
-  before the first paper; a stale setting for a model the run does not use is
-  ignored.
+- Who is affected: only a run whose model setting names a model that cannot
+  be loaded, for any reason: a missing path; a Hub repo, revision or file that
+  is not there; a Hub that cannot be reached for files that are not in the
+  local cache; an unreadable or wrong-kind file, or one that does not run on a
+  sample input; a missing `torch` extra. That run now stops with an error
+  naming the setting and the reason instead of going on without the model:
+  `bibr chew` exits 1, and `bibr batch` exits non-zero with `run_info.json`
+  `reason` `model_override_failed`, marks the running papers
+  `model_override_failed` (retried on resume) and records none of them as
+  failed. `bibr serve` answers such a request `500` with `error_code`
+  `model_override_failed`, and `bibr batch --serve-url` stops on it. The same
+  failures of a shipped default behave as before.
+- An overridden model that loads but raises on a paper leaves that paper to
+  fall back as it would without it, and the paper's export carries a
+  `MODEL_OVERRIDE_INFERENCE_FAILED` warning naming the setting. When the same
+  model raises on three papers in a row, the run stops as above.
+- `bibr chew` and `bibr batch` load every override the run will use, from a
+  local path or the Hub, before the first paper (`--dry-run` too), and run
+  the ONNX reference segmenter and geometry tagger once on a sample of the
+  input they get in a run; a stale setting for a model the run does not use
+  is ignored. A local torch directory for a classifier (`config.json` and its
+  weights) passes this check on an install with `torch`. `bibr serve` checks
+  the files of its local-path overrides at startup.
 - `bibr batch` writes one record per override to `run_info.json` under
   `model_overrides`: `loaded` with the sha256 of every file read, or not
   loaded and why.
@@ -116,7 +129,8 @@ too: it is recorded as one, and it loads and runs as before.
   `REF_GEOM_TAGGER_REVISION`) adds a geometry line tagger that the `geom`
   segmentation tier asks first. An answer it takes is final; when it declines
   or fails on a paper, the shipped geometry segmenter runs exactly as without
-  it.
+  it, so a decline has no effect on the references. The attempt is still
+  listed in the reference diagnostics (`reference_yield.attempts`).
 - `REF_TEXT_SEG_MODEL_ID` (unset by default; a directory or a Hub id with
   `REF_TEXT_SEG_REVISION`) replaces the CRF reference segmenter, the last
   resort of every segmentation strategy, with an ONNX token tagger that needs
@@ -125,9 +139,13 @@ too: it is recorded as one, and it loads and runs as before.
   receipt lists it as `text_tagger`.
 - For maintainers, `scripts/switch_model_defaults.py SETTING=org/name@<commit>`
   moves a default model to a new Hub pin: the defaults in `bibr/config.py`,
-  the matching `ARG`s in `Dockerfile.serve`, the default-model table and
-  model-card links in the docs. It stops, writing nothing, when the old pin
-  is written anywhere else, and lists the tests that name it.
+  the matching `ARG`s in `Dockerfile.serve`, the default-model table and the
+  `blob`, `tree`, `resolve` and `commit` links in the docs. It stops, writing
+  nothing, when the old pin is written anywhere else in the tree (the old
+  revision or its first eight characters, also inside a URL, and the old repo
+  id when the repo changes; code, scripts, `.github/`, `evaluation/`, shell,
+  TOML, JSON and YAML files and the docs), lists every such place, and lists
+  the tests that name it.
 
 A run with every model setting at its default is unchanged. See "Running a
 candidate model" in the configuration guide.
@@ -198,8 +216,11 @@ constant) and needs the 12.4 schema.
   setting that names it, what it does, its Hub repo id and revision (a branch
   or tag resolved to its commit through the local Hub cache), and whether it
   differs from the shipped default. A local model is recorded by a short name
-  (the last part of its path) and the sha256 of each of its files, never by
-  its path. The layout model is the one the runtime loads (the ONNX export, or
+  and the sha256 of each of its files, never by its path. The short name is
+  the directory's own name and `@` the first 12 hex digits of a hash over its
+  files; a name that is a home directory or the user name is recorded as
+  `local-model`. Each file is hashed once per process, and a model directory
+  is listed once, not per paper. The layout model is the one the runtime loads (the ONNX export, or
   the torch checkpoint with `ML_RUNTIME=torch`); the CRF segmenter is listed
   only on an install with `torch`. Rows are per run, not per paper: the
   reference receipts say which segmentation tier ran. `bibr serve` exports

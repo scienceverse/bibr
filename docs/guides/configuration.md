@@ -803,30 +803,35 @@ are recorded as overrides, and all of them load and run as before. Four rules
 apply to overrides only, so a run on the shipped models behaves and exports
 exactly as before:
 
-- **A model that does not exist stops the run.** When the named model cannot
-  be loaded for a permanent reason (the path is missing; the Hub has no such
-  repo, revision or file; a file is unreadable or of the wrong kind; the
-  bundle fails its contract check), the run stops with an error naming the
-  setting, instead of going on without the model, so a comparison never
+- **A model that cannot be loaded stops the run.** Whatever the reason (the
+  path is missing; the Hub has no such repo, revision or file; the Hub cannot
+  be reached and the files are not in the local Hub cache; a file is
+  unreadable or of the wrong kind; the bundle fails its contract check or does
+  not run on a sample input; the `torch` extra that `NER_SEG_CKPT` needs is
+  not installed), the run stops with an error naming the setting and the
+  reason, instead of going on without the model, so a comparison never
   measures the shipped path, or no model, under the candidate's name. `bibr
-  chew` exits with status 1; `bibr batch` marks the papers it was running as
-  `model_override_failed` (a resumed run takes them again) and stops. This is
-  the only change in behaviour, and it reaches only a setting that names a
-  model that is not there.
-- **Everything else behaves as for the shipped model.** A network failure or
-  timeout while fetching from the Hub is handled exactly as for a default
-  setting: the front-role prior and the front-matter tagger try again at the
-  next paper, a classifier is degraded (or, with `ML_CLASSIFIERS_REQUIRED`, an
-  outage a resumed batch retries). A missing optional dependency (the `torch`
-  extra for `NER_SEG_CKPT`) leaves the tier out, as it would with the default.
-  An error on one paper's inference is that paper's, as before.
-- **Checked first.** `bibr chew` and `bibr batch` check every local-path
-  override this run will load (given its mode, `--refs` and `--ref-seg`)
-  before the first paper: the path must exist and hold a model of the right
-  kind in a format this bibr runs. A problem stops the run with one line
-  naming the setting; a stale setting for a model the run does not use is
-  ignored, and a model the run will go without (the CRF segmenter without
-  `torch`) gets a warning line. A Hub id is checked when it loads.
+  chew` exits with status 1. `bibr batch` exits non-zero with `run_info.json`
+  `reason` `model_override_failed`, and marks the papers it was running
+  `model_override_failed` (a resumed run takes them again) rather than failed,
+  so no paper is recorded as `extraction_failed` or `parse_failed` for it. A
+  `bibr batch --serve-url` run stops the same way when the server answers
+  `model_override_failed`.
+- **An error at inference is recorded, and a repeated one stops the run.**
+  When a loaded override raises on one paper, the paper falls back as it would
+  without the override, and its export carries a
+  `MODEL_OVERRIDE_INFERENCE_FAILED` processing warning naming the setting.
+  When the same overridden model raises on three papers in a row, the run
+  stops as for a model that cannot be loaded.
+- **Checked first.** `bibr chew` and `bibr batch` load every override this run
+  will use (given its mode, `--refs` and `--ref-seg`), local or Hub, before
+  the first paper, `--dry-run` included; an ONNX segmenter or tagger is also
+  run once on a sample of the input it gets in a run, and its output shape is
+  checked against its labels. A problem stops the run with one line per
+  setting; a stale setting for a model the run does not use is ignored.
+  `bibr serve` checks the files of every local-path override at startup and
+  loads a model when a request first needs it; an override that fails there
+  answers `500` with `error_code` `model_override_failed`.
 - **Recorded per run.** Each loaded override logs the sha256 of every file it
   read, and `bibr batch` writes one record per override to `run_info.json`
   under `model_overrides`: setting, value, revision (null for a local model),
@@ -836,9 +841,11 @@ exactly as before:
   for a run on the shipped models. Every export, from `bibr chew`, `bibr
   batch` or `bibr serve`, also names the models its run was set to load in
   `extraction.settings.models`: the setting, the Hub repo id and revision, and
-  `override`; for a local model a short name (the last part of its path) and
-  the sha256 of each file instead of the path, so an export shared with
-  others does not show how the producing machine is laid out.
+  `override`; for a local model, instead of the path, a short name (the
+  directory's own name and `@` the first 12 hex digits of a hash over its
+  files, `local-model@...` when that name is a home directory or the user
+  name) and the sha256 of each file, so an export shared with others does not
+  show how the producing machine is laid out or who ran it.
 
 `REF_GEOM_TAGGER_MODEL_ID` is unset by default and adds a tier rather than
 replacing one. It takes a local directory or a Hub repo id (with
@@ -851,12 +858,17 @@ the geometry tier's own checks (alignment yield, segment count against the
 layout's reference onsets) pass. An answer it takes is final: the reference
 line stream does not replace it. Otherwise, including an error on one paper,
 the shipped geometry segmenter and the rest of the cascade run exactly as
-without the tagger. The export's reference diagnostics list each attempt as
-`geom_tagger`, with its reason (`final`, `low_confidence_or_empty`,
-`tagger_error`, ...), confidence and counts in `reason_flags`; a declined
-attempt carries no spans or credible starts. The tagger reads the same 29
-line features as the shipped geometry segmenter, in sorted name order, and
-needs only ONNX Runtime; loading it runs the graph once to check its shape.
+without the tagger: a declined answer has no effect on the references. It is
+not invisible, though: the export's reference diagnostics list each attempt,
+declined or not, in `reference_yield.attempts` as `geom_tagger`, with its
+reason (`final`, `low_confidence_or_empty`, `tagger_error`, ...), confidence
+and counts in `reason_flags`; a declined attempt carries no spans or credible
+starts. An error (`tagger_error`) also adds a `MODEL_OVERRIDE_INFERENCE_FAILED`
+warning to the paper, and errors on three papers in a row stop the run. The
+tagger reads the same 29 line features as the shipped geometry segmenter, in
+sorted name order, and needs only ONNX Runtime; loading it runs the graph once
+on the features of a short reference section and checks that it returns two
+logits per line.
 
 `REF_TEXT_SEG_MODEL_ID` is unset by default and replaces a tier: the CRF
 segmenter, the last resort of every segmentation strategy (and the whole of
@@ -875,11 +887,13 @@ same receipt and the same next tier (the split on printed reference markers)
 as the CRF's. The export's reference diagnostics list it as `text_tagger`,
 with its token and window counts, the references it opened, an uncalibrated
 `expected_entry_precision` and the lowest opening probability in
-`reason_flags`. When the Hub cannot be reached for it, the paper goes on
-without the tier (`tagger_unavailable`) and the next paper tries again; an
-error on one paper is a `segmentation_error` with a `REF_SEG_CRF_ERROR`
-warning, as for the CRF. The preflight checks the files, the manifest and the
-tokenizer; the graph is opened and run once when the tier first loads.
+`reason_flags`. When it cannot be loaded, the Hub being out of reach
+included, the run stops (it is always an override). An error on one paper is
+a `segmentation_error` with a `REF_SEG_CRF_ERROR` warning, as for the CRF, and
+a `MODEL_OVERRIDE_INFERENCE_FAILED` warning; errors on three papers in a row
+stop the run. The preflight checks the files, the manifest and the tokenizer,
+and runs the graph once on a full window of tokenised reference text,
+checking that it returns three label scores per token.
 
 ### CPU threads
 
