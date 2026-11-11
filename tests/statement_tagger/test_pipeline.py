@@ -302,6 +302,20 @@ def test_a_paper_that_has_the_section_keeps_it_untouched():
     assert len(contents.sections) == 3
 
 
+def test_rows_of_a_footnote_never_become_a_section():
+    contents = _paper(
+        [
+            (1, "Body", 1, CanonicalSection.DISCUSSION, [("Text.", 1)]),
+            (2, "Footnote 3", 1, CanonicalSection.FOOTNOTE, [("Each author contributed.", 2)]),
+        ]
+    )
+    statements = KeywordTagger().tag([b.text for b in content_blocks(contents)])
+    assert statements
+    assert apply_section_statements(contents, statements, content_blocks(contents)) == []
+    assert [s.section_type for s in contents.sections][2] == CanonicalSection.FOOTNOTE
+    assert [r.section_id for r in contents.sentences] == [1, 2]
+
+
 def test_applying_twice_adds_each_warning_once():
     contents = _discussion_paper()
     resolution = resolve_integrity_statements(contents, mode="shadow")

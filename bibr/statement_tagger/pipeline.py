@@ -78,10 +78,13 @@ _SKIPPED_SECTION_TYPES = frozenset({CanonicalSection.REFERENCES})
 _LABEL_HEADING_TYPES = frozenset(
     {CanonicalSection.TABLE, CanonicalSection.FIGURE, CanonicalSection.FOOTNOTE}
 )
-# Sections whose rows a tagged statement never moves out of or retypes.
+# Sections whose rows a tagged statement never moves out of or retypes. Footnotes
+# are exported apart from the sections, so a section made of their rows would not
+# show in the export.
 _KEPT_SECTION_TYPES = frozenset(
     {
         CanonicalSection.TITLE,
+        CanonicalSection.FOOTNOTE,
         CanonicalSection.ABSTRACT,
         CanonicalSection.KEYWORDS,
         CanonicalSection.REFERENCES,
