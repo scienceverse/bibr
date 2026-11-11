@@ -895,11 +895,15 @@ one (`I-REF`), in windows and with the stride its `segmenter.json` names; a
 token read by two windows keeps the answer of the window it sits furthest
 from the edge of. A reference opens at every `B-REF` token and at the first
 character of the text, and runs to the next one. Its answer goes through the
-same receipt and the same next tier (the split on printed reference markers)
-as the CRF's. The export's reference diagnostics list it as `text_tagger`,
-with its token and window counts, the references it opened, an uncalibrated
-`expected_entry_precision` and the lowest opening probability in
-`reason_flags`. When it cannot be loaded, the Hub being out of reach
+same receipt as the CRF's. Unlike the CRF, it always answers for a reference
+list that is not blank and never declines to the next tier (the split on
+printed reference markers): when it finds no reference start at all, the
+whole list comes back as one reference, with `no_reference_start` in its
+`reason_flags` and a `REF_SEG_NOT_SPLIT` warning on the paper, so one
+unsplit block is not read as a parsed list. The export's reference
+diagnostics list it as `text_tagger`, with its token and window counts, the
+references it opened, an uncalibrated `expected_entry_precision` and the
+lowest opening probability in `reason_flags`. When it cannot be loaded, the Hub being out of reach
 included, the run stops (it is always an override). An error on one paper is
 a `segmentation_error` with a `REF_SEG_CRF_ERROR` warning, as for the CRF, and
 a `MODEL_OVERRIDE_INFERENCE_FAILED` warning; errors on three papers in a row

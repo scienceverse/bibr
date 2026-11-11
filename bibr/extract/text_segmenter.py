@@ -25,6 +25,13 @@ procedure the model was trained and selected with:
    next start, and is stripped (empty ones are dropped). ``O`` and ``I-REF``
    never start or end one.
 
+The tier always answers for a text that is not blank: it does not decline to
+the next tier as the CRF does when it finds no reference. A text in which the
+model tags no token ``B-REF`` comes back as one reference, the whole list in
+one block, and its :class:`TextSegmentation` says so (``no_reference_start``):
+the reference extractor lists it in the attempt's ``reason_flags`` and gives
+the paper a ``REF_SEG_NOT_SPLIT`` warning.
+
 A bundle is a directory holding ``segmenter.json`` (the tags, window, stride
 and tokenisation the model was trained with), ``model.onnx`` and
 ``tokenizer.json``, either in the directory itself or in an ``onnx/``
@@ -231,6 +238,8 @@ class TextSegmentation:
     start_probs: np.ndarray
     #: ``1 - 2 * sum(min(p, 1 - p)) / starts`` over every token's P(B-REF), uncalibrated.
     expected_entry_precision: float
+    #: The model tagged no token ``B-REF``: the one segment is the whole text, not split.
+    no_reference_start: bool = False
 
     def receipt_flags(self) -> tuple[str, ...]:
         """The model's figures for the receipt's ``reason_flags``."""
@@ -239,6 +248,8 @@ class TextSegmentation:
             flags.append(f"expected_entry_precision={self.expected_entry_precision:.4f}")
         if len(self.start_probs):
             flags.append(f"start_prob_min={float(self.start_probs.min()):.4f}")
+        if self.no_reference_start:
+            flags.append("no_reference_start")
         return tuple(flags)
 
 
@@ -334,7 +345,11 @@ class OnnxTextSegmenter:
         return tags, probs, offsets, len(spans)
 
     def segment_text(self, text: str) -> TextSegmentation:
-        """Split ``text`` into references; empty for an empty or blank text."""
+        """Split ``text`` into references; empty for an empty or blank text.
+
+        A text the model opens no reference in is one segment, flagged
+        ``no_reference_start``.
+        """
         text = strip_lone_surrogates(text or "")
         if not text.strip():
             return TextSegmentation(text, [], np.zeros(0, np.int64), [], 0, 0, np.zeros(0), 0.0)
@@ -348,7 +363,17 @@ class OnnxTextSegmenter:
         opened = p_start[tags == B_REF]
         doubt = float(np.minimum(p_start, 1.0 - p_start).sum())
         score = max(0.0, 1.0 - 2.0 * doubt / max(1, len(starts)))
-        return TextSegmentation(text, segments, tags, starts, len(tags), n_windows, opened, score)
+        return TextSegmentation(
+            text,
+            segments,
+            tags,
+            starts,
+            len(tags),
+            n_windows,
+            opened,
+            score,
+            no_reference_start=not len(opened),
+        )
 
     def segment(self, text: str) -> list[str]:
         """Reference strings of ``text``, as the CRF segmenter's ``segment`` returns them."""

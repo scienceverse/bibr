@@ -152,8 +152,11 @@ too: it is recorded as one, and it loads and runs as before.
   `REF_TEXT_SEG_REVISION`) replaces the CRF reference segmenter, the last
   resort of every segmentation strategy, with an ONNX token tagger that needs
   no `torch`. The CRF is then not loaded; setting both is an error. Its
-  answer goes through the same receipt and next tier as the CRF's, and the
-  receipt lists it as `text_tagger`.
+  answer goes through the same receipt as the CRF's, and the receipt lists it
+  as `text_tagger`. It always answers: a list in which it finds no reference
+  start comes back as one reference, flagged `no_reference_start` in the
+  receipt and with a new `REF_SEG_NOT_SPLIT` warning, and does not go on to
+  the marker split.
 - For maintainers, `scripts/switch_model_defaults.py SETTING=org/name@<commit>`
   moves a default model to a new Hub pin: the defaults in `bibr/config.py`,
   the matching `ARG`s in `Dockerfile.serve`, the default-model table and the

@@ -2914,8 +2914,11 @@ class ReferenceExtractor:
         """The text segmenter's references (``REF_TEXT_SEG_MODEL_ID``), in the CRF's place.
 
         Returns ``(references, reason when there are none, the model's figures)``.
-        A segmenter that cannot be loaded stops the run. An error on this paper
-        is a ``segmentation_error`` with a ``REF_SEG_CRF_ERROR`` and a
+        The segmenter always answers a text that is not blank: when it finds
+        no reference start, the list comes back as one reference, with
+        ``no_reference_start`` in the figures and a ``REF_SEG_NOT_SPLIT``
+        warning, and no later tier runs. A segmenter that cannot be loaded
+        stops the run. An error on this paper is a ``segmentation_error`` with a ``REF_SEG_CRF_ERROR`` and a
         ``MODEL_OVERRIDE_INFERENCE_FAILED`` warning, and the paper goes on to the
         CRF's own next tier; an error on several papers in a row stops the run
         (:func:`~bibr.utils.model_overrides.note_inference_failure`).
@@ -2936,6 +2939,13 @@ class ReferenceExtractor:
             self._override_inference_failed("REF_TEXT_SEG_MODEL_ID", e)
             return [], "segmentation_error", (f"error={type(e).__name__}",)
         self._override_inference_ran("REF_TEXT_SEG_MODEL_ID")
+        if result.no_reference_start and result.segments:
+            self._record_warning(
+                WarningCode.REF_SEG_NOT_SPLIT,
+                f"the text reference segmenter found no reference start in the reference list "
+                f"({len(ref_text.strip())} chars); it could not be split into entries and is "
+                "exported as one block",
+            )
         return list(result.segments), "no_segments", result.receipt_flags()
 
     def _authoritative_native_selected(self) -> bool:

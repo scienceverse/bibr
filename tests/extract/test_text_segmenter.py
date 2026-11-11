@@ -230,6 +230,7 @@ def test_references_open_at_b_ref_and_run_to_the_next(tmp_path):
     assert "starts=3" in flags and "windows=1" in flags
     assert any(f.startswith("expected_entry_precision=") for f in flags)
     assert any(f.startswith("start_prob_min=") for f in flags)
+    assert not result.no_reference_start and "no_reference_start" not in flags
 
 
 def test_o_tags_never_end_a_reference(tmp_path):
@@ -254,6 +255,15 @@ def test_a_text_with_no_reference_opening_is_one_reference(tmp_path):
     assert result.segments == [text.strip()]
     assert result.starts == [2]
     assert len(result.start_probs) == 0
+    assert result.no_reference_start
+    assert "no_reference_start" in result.receipt_flags()
+
+
+def test_a_reference_opened_at_the_first_token_is_not_flagged(tmp_path):
+    seg = OnnxTextSegmenter(_bundle(tmp_path / "b"))
+    result = seg.segment_text("@ the only reference of the list")
+    assert result.segments == ["@ the only reference of the list"]
+    assert not result.no_reference_start
 
 
 def test_lone_surrogates_are_read_as_replacement_characters(tmp_path):
@@ -364,7 +374,25 @@ async def test_the_tier_takes_the_crf_place_and_the_crf_is_not_loaded(tmp_path, 
     (attempt,) = ex._segmentation_attempts
     assert attempt.spans == tuple((_REF_TEXT.index(r), _REF_TEXT.index(r) + len(r)) for r in _REFS)
     assert "starts=3" in attempt.reason_flags
+    assert "no_reference_start" not in attempt.reason_flags
     assert not ex.contents.processing_warnings
+
+
+async def test_a_list_with_no_reference_start_is_one_flagged_block(tmp_path, monkeypatch):
+    # Printed markers the marker split would cut on, but no token the model opens a
+    # reference at: the tier still answers, with the whole list as one reference.
+    text = "\n".join(f"[{i}] Author {i}. A title number {i}. Journal, 2010." for i in range(1, 8))
+    ex = _extractor(monkeypatch, str(_bundle(tmp_path / "b")))
+    with patch("bibr.extract.ref_extractor._get_ner_segmenter", side_effect=_no_crf):
+        out = await ex._segment_references(text, "crf")
+    assert out == [text]
+    (attempt,) = ex._segmentation_attempts
+    assert (attempt.strategy, attempt.selected) == ("text_tagger", True)
+    assert attempt.reason_flags[-1] == "no_reference_start"
+    assert "starts=1" in attempt.reason_flags
+    (warning,) = ex.contents.processing_warnings
+    assert warning.code == WarningCode.REF_SEG_NOT_SPLIT
+    assert "could not be split into entries" in warning.message
 
 
 async def test_the_tier_is_the_last_resort_of_the_geom_cascade(tmp_path, monkeypatch):
