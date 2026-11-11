@@ -118,6 +118,10 @@ server or a backend written to `.env` still reads scans.
   It is off by default.
 - `LIMITATIONS.md` lists what the text-layer route reads less well: tables,
   formulas, private-use glyphs and scans.
+- The configuration guide has a section on what leaves the machine: what each
+  setup sends and where, the model downloads of a first run, and that a
+  Google or `LLM_API_KEY` key in the environment alone makes a plain run a
+  full-mode run that sends the paper's text to the LLM provider.
 - `bibr serve` follows the same rule, so a CPU-only machine can serve: a fast
   server with none of `OCR_BACKEND`, `OCR_MODEL`, `OCR_PROFILE` and
   `OCR_BASE_URL` set reads each PDF from its text layer and contacts no OCR

@@ -107,6 +107,43 @@ again with the whole reference string for references the title searches
 left unmatched; see
 [Reference extraction at scale](deployment.md#reference-extraction-at-scale).
 
+## What leaves your machine
+
+bibr sends nothing about a paper anywhere unless a setting below says so, and
+it has no usage reporting of its own. It also turns off the usage statistics
+of the vLLM servers it starts (`VLLM_NO_USAGE_STATS`); a vLLM server you run
+yourself keeps vLLM's default. What a run contacts depends on how it is set
+up:
+
+| Setup | What is sent | Where |
+|---|---|---|
+| Fast mode on the text layer (`bibr chew --fast` with no OCR setting) | Nothing from the paper | — |
+| A local OCR or LLM server that bibr starts or that you run (`--ocr paddle`, `--llm vllm`, `--ocr-url`, `LLM_BASE_URL` on your own host) | Page images and text from the paper | That server only |
+| A cloud OCR model (`--ocr anthropic`, `gemini` or `openai`, also as `OCR_BACKEND` or `OCR_CONSENSUS_BACKEND`) | Images of the paper's pages, or parts of them | The OCR provider |
+| A cloud LLM (full mode with `LLM_PROVIDER` `google`, `openai`, `anthropic` or `groq`, or an `LLM_BASE_URL` on someone else's host) | Text from the paper | The LLM provider |
+| Enrichment (`--crossref`, or `CROSSREF_ENRICH=true`; off by default) | The references' DOIs, titles and author names; affiliation strings and funder names unless `ROR_ENRICH=false`; your `CROSSREF_API_EMAIL` if set | `api.crossref.org`, `api.ror.org`, and the resolver at `BIBR_RESOLVER_URL` if you set one |
+| `bibr batch --serve-url` | The whole file | The bibr server you name |
+| The MCP tool `chew_url` | A request for the URL it is given | The site that hosts it |
+
+Two things happen without a setting of yours:
+
+- **Model downloads.** The first run downloads bibr's models from the Hugging
+  Face Hub. Those requests name the models and the library versions, nothing
+  from a paper. Once the models are in the cache, `HF_HUB_OFFLINE=1` keeps bibr
+  from contacting the Hub at all.
+- **A Google key in the environment.** With no mode chosen, bibr runs in full
+  mode when an LLM is configured and in fast mode when none is. A
+  `GOOGLE_API_KEY`, `GEMINI_API_KEY` or `LLM_API_KEY` in the shell or in `.env`
+  counts as a configured LLM, even one exported for another tool, so a plain
+  `bibr chew paper.pdf` then sends the paper's text to Google. `--fast` or
+  `PIPELINE_MODE=fast` keeps a run on the machine whatever keys are set, and
+  `bibr chew --dry-run` shows the mode and the routes a run would take before
+  it starts.
+
+For papers that must not leave the machine: `PIPELINE_MODE=fast`, no OCR
+setting (or `--ocr text-layer`), enrichment left off, and `HF_HUB_OFFLINE=1`
+after the first run.
+
 ## Choosing an OCR backend
 
 `bibr chew` defaults to the `paddle` startup selector. It selects a concrete
