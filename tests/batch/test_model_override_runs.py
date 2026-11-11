@@ -19,7 +19,7 @@ import pytest
 from bibr.batch.ledger import LEDGER_FILENAME, MODEL_OVERRIDE_FAILED, Ledger
 from bibr.batch.runner import RUN_INFO_FILENAME, BatchOptions, LocalOptions, run_batch
 from bibr.config import Settings
-from bibr.utils.model_overrides import reset_loaded_model_overrides
+from bibr.utils.model_overrides import NOT_USED, reset_loaded_model_overrides
 from tests.test_pipeline_smoke import (
     _LINES,
     FakeLayout,
@@ -253,3 +253,29 @@ def test_papers_that_fell_back_before_a_stop_are_run_again_on_resume(
     for export in exports:
         codes = {w["code"] for w in export["extraction"]["warnings"]}
         assert "MODEL_OVERRIDE_INFERENCE_FAILED" not in codes
+
+
+def test_a_no_llm_run_neither_loads_nor_records_a_classifier_it_never_asks(
+    corpus, tmp_path, monkeypatch
+):
+    """--no-llm types sections by the heading lookup alone: the classifiers are not asked.
+
+    A broken candidate does not stop such a run, and a working one is not
+    recorded as loaded, since it gave no answer.
+    """
+    bundle = tmp_path / "models" / "section-candidate"
+    shutil.copytree(FIXTURES / "section" / "onnx", bundle / "onnx")
+    good = (bundle / "onnx" / "model.onnx").read_bytes()
+    monkeypatch.setattr(Settings.ml, "section_classifier_model_id", str(bundle))
+    for name, graph in (("working", good), ("broken", b"not an onnx graph")):
+        (bundle / "onnx" / "model.onnx").write_bytes(graph)
+        reset_loaded_model_overrides()
+        out = tmp_path / f"out-{name}"
+        code = _run(corpus, out, no_llm=True)
+        assert code == 0, name
+        info = _run_info(out)
+        assert info["reason"] == "completed"
+        (record,) = info["model_overrides"]
+        assert record["setting"] == "ML_SECTION_CLASSIFIER_MODEL_ID"
+        assert record["loaded"] is False and record["reason"] == NOT_USED
+        assert {row["status"] for row in _rows(out).values()} == {"ok"}

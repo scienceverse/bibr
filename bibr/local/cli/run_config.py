@@ -477,9 +477,10 @@ def _preflight_model_overrides(config: ResolvedRunConfig, warn=None) -> str | No
     stops the run instead of falling back to the shipped model, so a bad
     setting would otherwise stop it at its first paper, or, for a model only
     some papers reach, part-way through. Every override this run loads (its
-    mode, ``--refs`` and ``--ref-seg``), a local path or a Hub id, is loaded
-    here as the run loads it, probe included; with every model setting at its
-    default nothing is. ``warn`` receives each warning line.
+    mode, ``--no-llm``, ``--refs`` and ``--ref-seg``), a local path or a Hub
+    id, is loaded here as the run loads it, probe included; with every model
+    setting at its default nothing is. An override this run never asks is not
+    loaded: ``warn`` receives one line for it, naming the setting and why.
     """
     from bibr.config import Settings, snapshot_settings
     from bibr.utils.model_overrides import check_model_overrides
@@ -497,7 +498,10 @@ def _preflight_model_overrides(config: ResolvedRunConfig, warn=None) -> str | No
     except Exception as exc:  # noqa: BLE001 - the preflight reports, it never crashes
         return f"Model override problem: the run's settings could not be read ({exc})"
     problems, warnings = check_model_overrides(
-        settings, load=True, memory_mode=getattr(config, "memory_mode", None)
+        settings,
+        load=True,
+        memory_mode=getattr(config, "memory_mode", None),
+        no_llm=getattr(config, "no_llm", False) is True,
     )
     for line in warnings:
         if warn is not None:

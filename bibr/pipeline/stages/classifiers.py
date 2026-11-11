@@ -23,6 +23,11 @@ class ClassifierStage:
     produces = ()
 
     async def run(self, ctx: PipelineContext) -> None:
+        if getattr(getattr(ctx, "config", None), "no_llm", False) is True:
+            # A --no-llm run types sections by the heading lookup alone and does
+            # not classify the paper (post_parse.py): nothing asks either model,
+            # so neither is loaded, and an overridden one is not recorded as used.
+            return
         try:
             start = ctx.resources.start_classifiers()
             if inspect.isawaitable(start):

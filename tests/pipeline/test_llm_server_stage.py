@@ -31,15 +31,19 @@ async def test_cloud_backend_is_noop():
 
 
 @pytest.mark.asyncio
-async def test_classifier_stage_starts_even_with_no_llm():
+async def test_classifier_stage_starts_without_an_llm_server_but_not_for_no_llm():
+    """The classifiers do not wait for an LLM server; a --no-llm run never asks them."""
     module_name = "bibr.pipeline.stages.classifiers"
     assert importlib.util.find_spec(module_name) is not None, "classifier stage module is missing"
     classifier_stage = importlib.import_module(module_name)
     rm = MagicMock(start_classifiers=AsyncMock())
 
-    await classifier_stage.ClassifierStage().run(_ctx(rm, RunConfig(no_llm=True)))
-
+    await classifier_stage.ClassifierStage().run(_ctx(rm, RunConfig(llm_backend="cloud")))
     rm.start_classifiers.assert_awaited_once()
+
+    rm = MagicMock(start_classifiers=AsyncMock())
+    await classifier_stage.ClassifierStage().run(_ctx(rm, RunConfig(no_llm=True)))
+    rm.start_classifiers.assert_not_awaited()
 
 
 @pytest.mark.asyncio

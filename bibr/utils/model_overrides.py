@@ -499,33 +499,69 @@ def onnx_bundle_files(bundle_dir: str | Path) -> list[Path]:
 # -- preflight -----------------------------------------------------------------------------
 
 
-def models_in_use(settings: Any) -> set[str]:
-    """The model settings a run with these (effective) settings can load.
+_REFERENCE_MODELS = (
+    "NER_PARSER_CKPT",
+    "REF_GEOM_SEG_MODEL_ID",
+    "REF_GEOM_TAGGER_MODEL_ID",
+    "NER_SEG_CKPT",
+    "REF_TEXT_SEG_MODEL_ID",
+)
+
+
+def unused_models(settings: Any, *, no_llm: bool = False) -> dict[str, str]:
+    """``{setting: why}`` for each model setting a run with these settings never asks.
 
     ``settings`` are the run's: for a fast run, :func:`bibr.run_mode.fast_settings`
-    of them, with the run's ``--refs`` / ``--ref-seg`` applied. Reference models
-    only when references are parsed (``REF_PARSE_STRATEGY`` other than ``off``):
-    the reference parser and the last-resort text segmenter of every
-    segmentation strategy (the CRF, or the token tagger that replaces it when
-    ``REF_TEXT_SEG_MODEL_ID`` is set), and the geometry segmenter and the line
-    tagger only for ``REF_SEG_STRATEGY=geom``.
-    The front-matter tagger when its mode is on, the front-role classifier
-    unless ``ML_FRONT_ROLE_ENABLED=false``, the classifiers when configured.
+    of them, with the run's ``--refs`` / ``--ref-seg`` applied; ``no_llm`` is
+    ``--no-llm``, which wins over fast. A ``--no-llm`` run extracts no metadata
+    or references and types sections by the heading lookup alone
+    (``bibr.pipeline.stages.post_parse``), so it asks the front-role classifier
+    and, when its mode is on, the front-matter tagger, and nothing else.
+    Otherwise the reference models only when references are parsed
+    (``REF_PARSE_STRATEGY`` other than ``off``): the reference parser and the
+    last-resort text segmenter of every segmentation strategy (the CRF, or the
+    token tagger that replaces it when ``REF_TEXT_SEG_MODEL_ID`` is set), and
+    the geometry segmenter and the line tagger only for
+    ``REF_SEG_STRATEGY=geom``. The front-matter tagger when its mode is on,
+    the front-role classifier unless ``ML_FRONT_ROLE_ENABLED=false``, the
+    classifiers always.
     """
     ml = getattr(settings, "ml", None)
-    used = {"ML_SECTION_CLASSIFIER_MODEL_ID", "ML_PAPER_CLASSIFIER_MODEL_ID"}
-    if getattr(ml, "front_role_enabled", True) is not False:
-        used.add("ML_FRONT_ROLE_MODEL_ID")
-    if getattr(ml, "front_tagger_mode", "off") != "off":
-        used.add("ML_FRONT_TAGGER_MODEL_ID")
+    unused: dict[str, str] = {}
+    if getattr(ml, "front_role_enabled", True) is False:
+        unused["ML_FRONT_ROLE_MODEL_ID"] = "ML_FRONT_ROLE_ENABLED=false turns it off"
+    if getattr(ml, "front_tagger_mode", "off") == "off":
+        unused["ML_FRONT_TAGGER_MODEL_ID"] = (
+            "ML_FRONT_TAGGER_MODE=off; a fast run, or the mode primary or only, turns it on"
+        )
+    if no_llm:
+        unused["ML_SECTION_CLASSIFIER_MODEL_ID"] = (
+            "--no-llm types sections by the heading lookup alone"
+        )
+        unused["ML_PAPER_CLASSIFIER_MODEL_ID"] = "--no-llm does not classify the paper"
+        for env in _REFERENCE_MODELS:
+            unused[env] = "--no-llm extracts no references"
+        return unused
     parse = str(getattr(settings, "REF_PARSE_STRATEGY", None) or "ner").lower()
-    if parse != "off":
-        used.add("NER_PARSER_CKPT")
-        text_seg = _text(getattr(settings, "REF_TEXT_SEG_MODEL_ID", None))
-        used.add("REF_TEXT_SEG_MODEL_ID" if text_seg else "NER_SEG_CKPT")
-        if str(getattr(settings, "REF_SEG_STRATEGY", None) or "geom").lower() == "geom":
-            used |= {"REF_GEOM_SEG_MODEL_ID", "REF_GEOM_TAGGER_MODEL_ID"}
-    return used
+    if parse == "off":
+        for env in _REFERENCE_MODELS:
+            unused[env] = "REF_PARSE_STRATEGY=off (--refs off) extracts no references"
+        return unused
+    if _text(getattr(settings, "REF_TEXT_SEG_MODEL_ID", None)):
+        unused["NER_SEG_CKPT"] = "REF_TEXT_SEG_MODEL_ID is set and replaces the CRF segmenter"
+    else:
+        unused["REF_TEXT_SEG_MODEL_ID"] = "it is unset"
+    seg = str(getattr(settings, "REF_SEG_STRATEGY", None) or "geom").lower()
+    if seg != "geom":
+        for env in ("REF_GEOM_SEG_MODEL_ID", "REF_GEOM_TAGGER_MODEL_ID"):
+            unused[env] = f"REF_SEG_STRATEGY={seg} (--ref-seg {seg}) skips the geometry tier"
+    return unused
+
+
+def models_in_use(settings: Any, *, no_llm: bool = False) -> set[str]:
+    """The model settings a run with these (effective) settings asks (:func:`unused_models`)."""
+    unused = unused_models(settings, no_llm=no_llm)
+    return {spec.env for spec in MODEL_SETTINGS if spec.env not in unused}
 
 
 # The classifiers' torch runtime reads a transformers directory (``from_pretrained``).
@@ -711,30 +747,44 @@ def _problem(spec: ModelSetting, value: str, exc: BaseException) -> str:
     return " ".join(detail.split())[:600]
 
 
+def unused_override_warning(spec: ModelSetting, value: str | None, reason: str) -> str:
+    """The start-of-run line for an override this run never asks."""
+    return (
+        f"{spec.env}={value!r} is set, but this run does not use the {spec.label} ({reason}); "
+        f"the setting is not checked or loaded, and the run records it as {NOT_USED!r}"
+    )
+
+
 def check_model_overrides(
-    settings: Any, *, load: bool = True, memory_mode: str | None = None
+    settings: Any, *, load: bool = True, memory_mode: str | None = None, no_llm: bool = False
 ) -> tuple[list[str], list[str]]:
     """``(problems, warnings)`` for the overrides this run will load.
 
     One line per problem: the run cannot load that model. A model the run does
-    not load (:func:`models_in_use`) is not checked. A local path's files are
-    checked first; then, with ``load`` (``bibr chew`` and ``bibr batch``), every
-    override, a local path or a Hub id, is loaded as the run loads it
-    (:func:`load_model_override`): the Hub files are fetched or found in the
-    cache, the graph is opened and probed. Without ``load`` only the local
-    paths' files are checked. ``warnings`` is kept for callers and is empty: an
-    override the run would go without is a problem (rule 2). Never raises.
+    not ask (:func:`unused_models`; ``no_llm`` for ``--no-llm``) is not checked
+    or loaded: it gets one line in ``warnings`` that names the setting and why.
+    A local path's files are checked first; then, with ``load`` (``bibr chew``
+    and ``bibr batch``), every override, a local path or a Hub id, is loaded as
+    the run loads it (:func:`load_model_override`): the Hub files are fetched or
+    found in the cache, the graph is opened and probed. Without ``load`` only
+    the local paths' files are checked. Never raises.
     """
     problems: list[str] = []
     warnings: list[str] = []
     try:
-        used = models_in_use(settings)
-        specs = [spec for spec in model_overrides(settings) if spec.env in used]
+        unused = unused_models(settings, no_llm=no_llm)
+        used = models_in_use(settings, no_llm=no_llm)
+        overrides = model_overrides(settings)
+        specs = [spec for spec in overrides if spec.env in used]
     except Exception as exc:  # noqa: BLE001 - the preflight reports, it never crashes
         return [f"model settings could not be read ({type(exc).__name__}: {exc})"], []
     conflict = text_segmenter_conflict(settings)
     if conflict and "REF_TEXT_SEG_MODEL_ID" in used:
         problems.append(conflict)
+    for spec in overrides:
+        if spec.env in unused and not (conflict and spec.env == "NER_SEG_CKPT"):
+            value, _revision = setting_value(settings, spec.env)
+            warnings.append(unused_override_warning(spec, value, unused[spec.env]))
     for spec in specs:
         value, _revision = setting_value(settings, spec.env)
         if value is None:
@@ -924,4 +974,6 @@ __all__ = [
     "run_records",
     "setting_value",
     "text_segmenter_conflict",
+    "unused_models",
+    "unused_override_warning",
 ]

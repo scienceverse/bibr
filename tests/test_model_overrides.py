@@ -30,6 +30,7 @@ from bibr.utils.model_overrides import (
     record_model_load,
     reset_loaded_model_overrides,
     run_records,
+    unused_models,
 )
 
 BUNDLES = Path(__file__).parent / "fixtures" / "onnx"
@@ -264,8 +265,14 @@ def test_preflight_checks_only_the_models_the_run_loads(tmp_path):
     settings.REF_SEG_STRATEGY = "llm"
     settings.REF_GEOM_SEG_MODEL_ID = stale + ".joblib"
     settings.REF_GEOM_TAGGER_MODEL_ID = stale
-    # The geometry models belong to REF_SEG_STRATEGY=geom only.
-    assert check_model_overrides(settings) == ([], [])
+    # The geometry models belong to REF_SEG_STRATEGY=geom only: a line each says so.
+    problems, warnings = check_model_overrides(settings)
+    assert problems == []
+    assert [w.split("=")[0] for w in warnings] == [
+        "REF_GEOM_SEG_MODEL_ID",
+        "REF_GEOM_TAGGER_MODEL_ID",
+    ]
+    assert all("--ref-seg llm" in w and "skips the geometry tier" in w for w in warnings)
     settings.REF_SEG_STRATEGY = "geom"
     problems, _ = check_model_overrides(settings)
     assert [p.split("=")[0] for p in problems] == [
@@ -275,7 +282,9 @@ def test_preflight_checks_only_the_models_the_run_loads(tmp_path):
     # No reference model is loaded when references are off.
     settings.REF_PARSE_STRATEGY = "off"
     settings.NER_PARSER_CKPT = stale
-    assert check_model_overrides(settings) == ([], [])
+    problems, warnings = check_model_overrides(settings)
+    assert problems == [] and len(warnings) == 3
+    assert all("--refs off" in w for w in warnings)
 
 
 def test_models_in_use_follow_the_run():
@@ -289,14 +298,84 @@ def test_models_in_use_follow_the_run():
     assert "ML_FRONT_TAGGER_MODEL_ID" in models_in_use(fast_settings(settings))
 
 
+def test_a_no_llm_run_asks_the_front_models_only():
+    settings = snapshot_settings()
+    settings.REF_SEG_STRATEGY = "geom"
+    assert models_in_use(settings, no_llm=True) == {"ML_FRONT_ROLE_MODEL_ID"}
+    settings.ml.front_tagger_mode = "primary"
+    assert models_in_use(settings, no_llm=True) == {
+        "ML_FRONT_ROLE_MODEL_ID",
+        "ML_FRONT_TAGGER_MODEL_ID",
+    }
+    # Without --no-llm the same settings ask the classifiers and the reference models.
+    assert {
+        "ML_SECTION_CLASSIFIER_MODEL_ID",
+        "ML_PAPER_CLASSIFIER_MODEL_ID",
+        "NER_PARSER_CKPT",
+        "NER_SEG_CKPT",
+        "REF_GEOM_SEG_MODEL_ID",
+        "REF_GEOM_TAGGER_MODEL_ID",
+    } <= models_in_use(settings)
+
+
+def test_unused_models_name_why_for_each_mode_and_strategy():
+    settings = snapshot_settings()
+    settings.REF_SEG_STRATEGY = "geom"
+    settings.ml.front_tagger_mode = "off"
+    assert unused_models(settings) == {
+        "ML_FRONT_TAGGER_MODEL_ID": (
+            "ML_FRONT_TAGGER_MODE=off; a fast run, or the mode primary or only, turns it on"
+        ),
+        "REF_TEXT_SEG_MODEL_ID": "it is unset",
+    }
+    settings.REF_SEG_STRATEGY = "region"
+    assert "--ref-seg region" in unused_models(settings)["REF_GEOM_TAGGER_MODEL_ID"]
+    settings.REF_PARSE_STRATEGY = "off"
+    assert "--refs off" in unused_models(settings)["NER_PARSER_CKPT"]
+    settings.REF_PARSE_STRATEGY = "ner"
+    settings.REF_TEXT_SEG_MODEL_ID = "./text-seg"
+    assert "replaces the CRF" in unused_models(settings)["NER_SEG_CKPT"]
+    no_llm = unused_models(settings, no_llm=True)
+    assert "heading lookup" in no_llm["ML_SECTION_CLASSIFIER_MODEL_ID"]
+    assert no_llm["REF_TEXT_SEG_MODEL_ID"] == "--no-llm extracts no references"
+
+
+def test_a_no_llm_preflight_neither_checks_nor_refuses_a_model_it_never_asks(tmp_path, monkeypatch):
+    from bibr.local.cli.run_config import _preflight_model_overrides
+
+    settings = snapshot_settings()
+    settings.NER_PARSER_CKPT = str(tmp_path / "no-parser")
+    settings.ml.section_classifier_model_id = str(tmp_path / "no-section")
+    monkeypatch.setattr("bibr.config.Settings", settings)
+    loads: list[str] = []
+    monkeypatch.setattr(
+        "bibr.utils.model_overrides.load_model_override",
+        lambda settings, env, memory_mode=None: loads.append(env),
+    )
+    seen: list[str] = []
+    assert _preflight_model_overrides(_cli_config(no_llm=True), warn=seen.append) is None
+    assert loads == []
+    assert len(seen) == 2
+    parser, section = seen
+    assert parser.startswith("Model override: NER_PARSER_CKPT=")
+    assert "--no-llm extracts no references" in parser and NOT_USED in parser
+    assert section.startswith("Model override: ML_SECTION_CLASSIFIER_MODEL_ID=")
+    assert "--no-llm types sections by the heading lookup alone" in section
+    # The same settings without --no-llm are refused, both of them.
+    problem = _preflight_model_overrides(_cli_config(), warn=seen.append)
+    assert "NER_PARSER_CKPT=" in problem and "ML_SECTION_CLASSIFIER_MODEL_ID=" in problem
+
+
 def test_preflight_skips_a_front_tagger_the_run_leaves_off(tmp_path):
     from bibr.run_mode import fast_settings
 
     settings = snapshot_settings()
     settings.ml.front_tagger_mode = "off"
     settings.ml.front_tagger_model_id = str(tmp_path / "missing")
-    assert check_model_overrides(settings) == ([], [])
-    (problem,), _ = check_model_overrides(fast_settings(settings))
+    problems, (warning,) = check_model_overrides(settings)
+    assert problems == [] and warning.startswith("ML_FRONT_TAGGER_MODEL_ID=")
+    (problem,), warnings = check_model_overrides(fast_settings(settings))
+    assert warnings == []
     assert "ML_FRONT_TAGGER_MODEL_ID" in problem
 
 

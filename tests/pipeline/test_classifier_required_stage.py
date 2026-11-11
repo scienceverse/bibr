@@ -170,3 +170,21 @@ def test_a_network_blip_on_the_shipped_classifier_degrades_as_before():
             assert files[0].error_outage is True
         else:
             assert files[0].error is None
+
+
+def test_a_no_llm_run_starts_no_classifier():
+    """--no-llm types sections by the heading lookup alone and classifies no paper."""
+    loaded = []
+
+    def loader(model_id, revision, device):
+        loaded.append(model_id)
+        return SimpleNamespace(classify_batch=list)
+
+    resources, files, ctx = _run_override(_settings(required=True), loader)
+    ctx.config = SimpleNamespace(no_llm=True)
+    asyncio.run(ClassifierStage().run(ctx))
+    assert loaded == [] and not resources.started
+    assert files[0].error is None
+    ctx.config = SimpleNamespace(no_llm=False)
+    asyncio.run(ClassifierStage().run(ctx))
+    assert len(loaded) == 2 and resources.started
