@@ -708,7 +708,7 @@ def test_run_info_records_each_override_of_this_run(corpus, tmp_path, monkeypatc
         "setting": "NER_SEG_CKPT",
         "model": "CRF reference segmenter",
         "value": str(tmp_path / "seg.pt"),
-        "revision": Settings.NER_SEG_REVISION,
+        "revision": None,  # a local file: the revision setting is not used
         "loaded": False,
         "reason": "not used in this run",
         "files": [],

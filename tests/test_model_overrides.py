@@ -356,6 +356,9 @@ def test_the_record_is_per_run(tmp_path):
     record_model_load(settings, "ML_FRONT_ROLE_MODEL_ID", [tmp_path / "front_role.joblib"])
     loaded = {r["setting"]: r for r in run_records()}
     assert loaded["ML_FRONT_ROLE_MODEL_ID"]["loaded"] is True
+    # A local model has no revision, whatever the (default) revision setting says.
+    assert loaded["ML_FRONT_ROLE_MODEL_ID"]["revision"] is None
+    assert loaded["NER_PARSER_CKPT"]["revision"] == "0" * 40
     assert (
         loaded["ML_FRONT_ROLE_MODEL_ID"]["files"][0]["sha256"] == hashlib.sha256(b"x").hexdigest()
     )

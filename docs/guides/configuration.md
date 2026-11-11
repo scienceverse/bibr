@@ -829,9 +829,10 @@ exactly as before:
   `torch`) gets a warning line. A Hub id is checked when it loads.
 - **Recorded per run.** Each loaded override logs the sha256 of every file it
   read, and `bibr batch` writes one record per override to `run_info.json`
-  under `model_overrides`: setting, value, revision, `loaded` (`true` with
-  each file's path, size and sha256, or `false` with a short `reason` such as
-  `not used in this run` or `torch extra not installed`). The key is absent
+  under `model_overrides`: setting, value, revision (null for a local model),
+  `loaded` (`true` with each file's path, size and sha256, or `false` with a
+  short `reason` such as `not used in this run` or `torch extra not
+  installed`). The key is absent
   for a run on the shipped models. Every export, from `bibr chew`, `bibr
   batch` or `bibr serve`, also names the models its run was set to load in
   `extraction.settings.models`: the setting, the Hub repo id and revision, and

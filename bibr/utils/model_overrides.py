@@ -501,6 +501,8 @@ def _file_rows(files: Iterable[str | Path]) -> list[dict[str, Any]]:
 
 def _entry(settings: Any, spec: ModelSetting) -> dict[str, Any]:
     value, revision = setting_value(settings, spec.env)
+    if isinstance(value, str) and is_local_model(value):
+        revision = None  # a local model is read as it is; the (default) revision is not used
     return {
         "setting": spec.env,
         "model": spec.label,
