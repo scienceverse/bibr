@@ -27,10 +27,13 @@ from bibr.statement_tagger.pipeline import (
 )
 from bibr.statement_tagger.runtime import TaggedStatement
 from bibr.utils.model_overrides import (
+    begin_run,
     check_model_overrides,
     loaded_model_overrides,
     models_in_use,
+    paper_scope,
     reset_loaded_model_overrides,
+    run_records,
 )
 
 KEYWORDS = {
@@ -423,7 +426,9 @@ def test_the_export_lists_the_tagger_by_name_and_checksums(tmp_path):
     }
     rows = export_models(_settings(statement_tagger_model_id=str(bundle)))
     (row,) = [r for r in rows if r["setting"] == "ML_STATEMENT_TAGGER_MODEL_ID"]
-    assert row["model"] == "statement tagger" and row["id"] == "statements-candidate"
+    # A local bundle is named by its directory and a checksum of its files.
+    assert row["model"] == "statement tagger"
+    assert row["id"].partition("@")[0] == "statements-candidate"
     assert row["override"] is True and row["revision"] is None
     assert {f["name"] for f in row["files"]} == {
         "onnx/bibr_onnx.json",
@@ -448,3 +453,145 @@ def test_end_to_end_with_a_bundle_on_disk(tmp_path):
     apply_integrity_resolution(contents, metadata, resolution)
     assert field_decisions_of(metadata).sources()["funding_statement"] == "statement_tagger"
     assert "funded by the Science Council" in metadata.funding_statement
+
+
+# -- an override that does not load, or does not run -----------------------------------------
+
+
+def _hub_from(bundle: Path, calls: list[str]):
+    """``hf_download_or_cached`` answering from ``bundle``'s ``onnx/`` as a Hub repo would."""
+
+    def download(repo_id, filename, revision=None):
+        calls.append(f"{repo_id}@{revision}:{filename}")
+        return str(bundle / filename)
+
+    return download
+
+
+def test_a_hub_bundle_is_fetched_at_its_revision_and_loaded(tmp_path, monkeypatch):
+    pytest.importorskip("onnx")
+    from tests.statement_tagger.bundle import write_bundle
+
+    calls: list[str] = []
+    bundle = write_bundle(tmp_path / "hub")
+    monkeypatch.setattr("bibr.utils.hf_cache.hf_download_or_cached", _hub_from(bundle, calls))
+    settings = _settings(
+        statement_tagger_model_id="org/statements", statement_tagger_revision="abc123"
+    )
+    assert check_model_overrides(settings) == ([], [])
+    assert calls[0] == "org/statements@abc123:onnx/bibr_onnx.json"
+    assert set(calls[1:]) == {
+        "org/statements@abc123:onnx/model.onnx",
+        "org/statements@abc123:onnx/tokenizer.json",
+    }
+    tagger = get_statement_tagger(settings)
+    assert tagger is not None and tagger.directory == bundle / "onnx"
+
+
+def test_a_hub_bundle_offline_and_not_cached_stops_the_run(monkeypatch):
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    def offline(repo_id, filename, revision=None):
+        raise LocalEntryNotFoundError(
+            "Cannot find the requested files in the disk cache and outgoing traffic has been "
+            "disabled."
+        )
+
+    monkeypatch.setattr("bibr.utils.hf_cache.hf_download_or_cached", offline)
+    settings = _settings(statement_tagger_model_id="org/statements")
+    (problem,), _ = check_model_overrides(settings)
+    assert problem.startswith("ML_STATEMENT_TAGGER_MODEL_ID=")
+    assert "the Hub could not be reached and the files are not in the local cache" in problem
+    pipeline.reset_statement_tagger()
+    begin_run(settings)
+    contents = _discussion_paper()
+    resolution = resolve_integrity_statements(contents, mode="shadow")
+    with pytest.raises(ModelOverrideError, match="the Hub could not be reached"):
+        apply_statement_tagger(contents, resolution, settings)
+    (record,) = run_records()
+    assert record["setting"] == "ML_STATEMENT_TAGGER_MODEL_ID" and record["loaded"] is False
+    assert record["reason"].startswith("the Hub could not be reached")
+    assert pipeline._TAGGER is None  # nothing in the tagger's place
+
+
+def test_a_graph_that_does_not_open_stops_the_run(tmp_path):
+    pytest.importorskip("onnx")
+    from tests.statement_tagger.bundle import write_bundle
+
+    bundle = write_bundle(tmp_path / "broken")
+    (bundle / "onnx" / "model.onnx").write_bytes(b"not an onnx graph")
+    settings = _settings(statement_tagger_model_id=str(bundle))
+    (problem,), _ = check_model_overrides(settings)
+    assert "does not open as an ONNX graph" in problem
+    with pytest.raises(ModelOverrideError, match="does not open as an ONNX graph"):
+        get_statement_tagger(settings)
+
+
+def test_a_graph_that_fails_its_probe_stops_the_run_at_load(tmp_path):
+    pytest.importorskip("onnx")
+    from tests.statement_tagger.bundle import write_bundle
+
+    settings = _settings(statement_tagger_model_id=str(write_bundle(tmp_path / "s", n_out=3)))
+    with pytest.raises(ModelOverrideError, match="the graph does not run on two dummy blocks"):
+        get_statement_tagger(settings)
+
+
+def test_serve_refuses_to_start_on_a_broken_tagger(tmp_path):
+    pytest.importorskip("onnx")
+    from bibr.exceptions import ConfigurationError
+    from bibr.serve.app import _check_model_overrides
+    from tests.statement_tagger.bundle import write_bundle
+
+    settings = _settings(statement_tagger_model_id=str(write_bundle(tmp_path / "s", n_out=3)))
+    with pytest.raises(ConfigurationError, match="ML_STATEMENT_TAGGER_MODEL_ID"):
+        _check_model_overrides(settings)
+    settings.ml.statement_tagger_model_id = str(write_bundle(tmp_path / "good"))
+    _check_model_overrides(settings)
+
+
+class RaisingTagger:
+    def tag(self, texts):
+        raise RuntimeError("the graph fails on this input")
+
+
+def test_an_inference_error_keeps_the_rules_and_three_in_a_row_stop_the_run(tmp_path):
+    settings = _settings(statement_tagger_model_id=str(tmp_path / "candidate"))
+    for paper in ("p1", "p2"):
+        contents = _discussion_paper()
+        resolution = resolve_integrity_statements(contents, mode="shadow")
+        with paper_scope(paper):
+            out = apply_statement_tagger(contents, resolution, settings, tagger=RaisingTagger())
+        assert out is resolution  # the rules' statements, untouched
+        assert [w.code for w in contents.processing_warnings] == [
+            WarningCode.MODEL_OVERRIDE_INFERENCE_FAILED
+        ]
+        assert "ML_STATEMENT_TAGGER_MODEL_ID" in contents.processing_warnings[0].message
+    contents = _discussion_paper()
+    resolution = resolve_integrity_statements(contents, mode="shadow")
+    with (
+        paper_scope("p3"),
+        pytest.raises(ModelOverrideError, match="raised at inference on 3 papers in a row"),
+    ):
+        apply_statement_tagger(contents, resolution, settings, tagger=RaisingTagger())
+
+
+def test_a_paper_the_tagger_ran_on_ends_the_streak(tmp_path):
+    settings = _settings(statement_tagger_model_id=str(tmp_path / "candidate"))
+    for paper, tagger in (
+        ("p1", RaisingTagger()),
+        ("p2", RaisingTagger()),
+        ("p3", KeywordTagger()),
+        ("p4", RaisingTagger()),
+        ("p5", RaisingTagger()),
+    ):
+        contents = _discussion_paper()
+        resolution = resolve_integrity_statements(contents, mode="shadow")
+        with paper_scope(paper):
+            apply_statement_tagger(contents, resolution, settings, tagger=tagger)
+
+
+def test_an_injected_tagger_without_the_setting_raises_as_before():
+    contents = _discussion_paper()
+    resolution = resolve_integrity_statements(contents, mode="shadow")
+    with pytest.raises(RuntimeError, match="the graph fails"):
+        apply_statement_tagger(contents, resolution, _settings(), tagger=RaisingTagger())

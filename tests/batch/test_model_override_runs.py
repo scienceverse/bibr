@@ -253,3 +253,62 @@ def test_papers_that_fell_back_before_a_stop_are_run_again_on_resume(
     for export in exports:
         codes = {w["code"] for w in export["extraction"]["warnings"]}
         assert "MODEL_OVERRIDE_INFERENCE_FAILED" not in codes
+
+
+def test_a_statement_tagger_that_does_not_load_stops_the_run(corpus, tmp_path, monkeypatch):
+    pytest.importorskip("onnx")
+    from bibr.statement_tagger import pipeline as statement_tagger
+    from tests.statement_tagger.bundle import write_bundle
+
+    statement_tagger.reset_statement_tagger()
+    bundle = write_bundle(tmp_path / "models" / "statements-candidate")
+    good = (bundle / "onnx" / "model.onnx").read_bytes()
+    (bundle / "onnx" / "model.onnx").write_bytes(b"not an onnx graph")
+    monkeypatch.setattr(Settings.ml, "statement_tagger_model_id", str(bundle))
+    out = tmp_path / "out"
+
+    _assert_stopped_on(out, _run(corpus, out), "ML_STATEMENT_TAGGER_MODEL_ID")
+
+    (bundle / "onnx" / "model.onnx").write_bytes(good)
+    reset_loaded_model_overrides()
+    statement_tagger.reset_statement_tagger()
+    exports = _assert_all_done(out, _run(corpus, out), "ML_STATEMENT_TAGGER_MODEL_ID")
+    for export in exports:
+        models = {row["setting"]: row for row in export["extraction"]["settings"]["models"]}
+        row = models["ML_STATEMENT_TAGGER_MODEL_ID"]
+        assert row["id"].partition("@")[0] == "statements-candidate"
+    statement_tagger.reset_statement_tagger()
+
+
+def test_a_statement_tagger_raising_on_three_papers_stops_the_run(corpus, tmp_path, monkeypatch):
+    pytest.importorskip("onnx")
+    from bibr.statement_tagger import pipeline as statement_tagger
+    from bibr.statement_tagger.runtime import StatementTagger
+    from tests.statement_tagger.bundle import write_bundle
+
+    statement_tagger.reset_statement_tagger()
+    bundle = write_bundle(tmp_path / "models" / "statements-candidate")
+    monkeypatch.setattr(Settings.ml, "statement_tagger_model_id", str(bundle))
+
+    def broken(self, texts):
+        raise RuntimeError("the graph fails on this input")
+
+    monkeypatch.setattr(StatementTagger, "tag", broken)
+    out = tmp_path / "out"
+
+    assert _run(corpus, out) != 0
+    info = _run_info(out)
+    assert info["reason"] == MODEL_OVERRIDE_FAILED
+    assert "ML_STATEMENT_TAGGER_MODEL_ID" in info["fatal"]
+    assert "raised at inference on 3 papers in a row" in info["fatal"]
+    rows = _rows(out)
+    assert {pid: row["status"] for pid, row in rows.items()} == {
+        "alpha": "ok",
+        "beta": "ok",
+        "gamma": "failed",
+    }
+    assert rows["gamma"]["error_code"] == MODEL_OVERRIDE_FAILED
+    for name in ("alpha", "beta"):
+        assert rows[name]["warnings"]["codes"]["MODEL_OVERRIDE_INFERENCE_FAILED"] == 1
+    assert sorted(info["override_fallbacks"]) == ["alpha", "beta"]
+    statement_tagger.reset_statement_tagger()

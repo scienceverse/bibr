@@ -931,8 +931,14 @@ its paragraphs become that section: a section all of whose rows it tagged is
 retyped, otherwise the rows move to a new section with a synthetic heading
 right after the one they were in; `classification_source` is
 `statement_tagger` either way. Each field or section it supplied adds a
-`STATEMENT_TAGGER` warning. A `--no-llm` run does not use it. The preflight
-opens the bundle and runs the graph once.
+`STATEMENT_TAGGER` warning. A `--no-llm` run does not use it. The setting
+has no default, so a bundle it names is always an override: when it cannot be
+loaded, the Hub being out of reach included, the run stops. The preflight
+(and `bibr serve` at startup, for a local directory) opens the bundle and runs
+the graph once on two blocks, checking that it returns one finite probability
+per type. An error on one paper leaves that paper with the rules' statements
+and a `MODEL_OVERRIDE_INFERENCE_FAILED` warning; errors on three papers in a
+row stop the run.
 
 ### CPU threads
 

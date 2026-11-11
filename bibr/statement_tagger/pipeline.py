@@ -29,10 +29,14 @@ adds what they missed:
 * Each statement the tagger supplied adds a ``STATEMENT_TAGGER`` warning naming
   the field or section type.
 
-A setting that names a bundle that does not exist or cannot be read stops the
-run (:class:`~bibr.exceptions.ModelOverrideError`, see
-:mod:`bibr.utils.model_overrides`); a Hub that cannot be reached leaves this
-paper without the tagger, as for any model.
+The setting has no shipped default, so a bundle it names is always a model
+override (:mod:`bibr.utils.model_overrides`): one that cannot be loaded, for
+any reason (a missing path or Hub repo, a Hub that cannot be reached with the
+files not in the local cache, an unreadable manifest, a graph that fails its
+probe), stops the run with :class:`~bibr.exceptions.ModelOverrideError`. A
+tagger that loaded but raises on a paper leaves that paper with the rules'
+statements and a ``MODEL_OVERRIDE_INFERENCE_FAILED`` warning; raising on
+several papers in a row stops the run.
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ import logging
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from bibr.paper_contents import CanonicalSection, PaperSection
@@ -340,9 +345,9 @@ _KEY: tuple[str, str | None] | None = None
 def get_statement_tagger(settings: Any) -> StatementTagger | None:
     """The configured tagger, loaded once per setting value; ``None`` when unset.
 
-    ``None`` also when the Hub cannot be reached (not remembered: the next
-    paper tries again). A bundle that does not exist or cannot be read raises
-    :class:`~bibr.exceptions.ModelOverrideError`.
+    A bundle that cannot be loaded, the Hub being out of reach included,
+    raises :class:`~bibr.exceptions.ModelOverrideError` (the setting is always
+    an override). Each call writes the load into the run's record.
     """
     global _TAGGER, _KEY
     from bibr.utils.model_overrides import override_load_error, record_model_load
@@ -360,35 +365,48 @@ def get_statement_tagger(settings: Any) -> StatementTagger | None:
                 _TAGGER = _load(value, revision)
                 _KEY = key
             except Exception as exc:
-                if (strict := override_load_error(settings, SETTING, exc)) is not None:
-                    raise strict from exc
-                logger.warning(
-                    "statement tagger %s unavailable (%r); paper runs without it", value, exc
-                )
-                return None
+                strict = override_load_error(settings, SETTING, exc)
+                if strict is None:  # only for a setting read as its default, which is unset
+                    raise
+                raise strict from exc
         tagger = _TAGGER
     record_model_load(settings, SETTING, tagger.files)
     return tagger
 
 
+def _bundle_path(value: str, revision: str | None) -> Path:
+    """The bundle directory ``value`` names: a local directory, or a Hub repo's ``onnx/``.
+
+    A Hub repo's manifest is fetched first, then the model and tokenizer it
+    names (the cache first at a pinned commit). A Hub error is raised as the
+    Hub client raised it, so the run's record says whether the Hub could not
+    be reached or does not have the files.
+    """
+    from bibr.statement_tagger.runtime import MANIFEST, bundle_dir, bundle_files
+    from bibr.utils.ml_runtime import is_hub_repo_id
+
+    if not is_hub_repo_id(value):
+        return bundle_dir(value)
+    from bibr.utils.hf_cache import hf_download_or_cached
+
+    directory = Path(hf_download_or_cached(value, f"onnx/{MANIFEST}", revision)).parent
+    for path in bundle_files(directory)[1:]:
+        hf_download_or_cached(value, f"onnx/{path.relative_to(directory).as_posix()}", revision)
+    return directory
+
+
 def _load(value: str, revision: str | None) -> StatementTagger:
-    from bibr.exceptions import ConfigurationError
     from bibr.statement_tagger.runtime import StatementTagger
-    from bibr.utils.ml_runtime import find_onnx_bundle
     from bibr.utils.onnx_providers import apply_cpu_threading
 
-    bundle = find_onnx_bundle(value, revision, label="statement tagger", raise_transient=True)
-    if bundle is None:
-        raise ConfigurationError(
-            f"no statement tagger bundle at {value!r} (want bibr_onnx.json, model.onnx and "
-            "tokenizer.json in the directory or its onnx/ subdirectory)"
-        )
+    bundle = _bundle_path(value, revision)
     import onnxruntime as ort
 
     options = ort.SessionOptions()
     apply_cpu_threading(options)
     options.inter_op_num_threads = 1
     logger.info("loading statement tagger: %s", value)
+    # Opens the graph and runs it once on two blocks (StatementTagger._check_graph).
     return StatementTagger(bundle, session_options=options)
 
 
@@ -409,14 +427,35 @@ def apply_statement_tagger(
     *,
     tagger: StatementTagger | None = None,
 ) -> IntegrityStatementResolution:
-    """Add the tagger's statements to the resolution and the sections; unset, a no-op."""
+    """Add the tagger's statements to the resolution and the sections; unset, a no-op.
+
+    Raises :class:`~bibr.exceptions.ModelOverrideError` when the tagger cannot
+    be loaded, or has raised on this paper and the ones before it
+    (:func:`~bibr.utils.model_overrides.note_inference_failure`).
+    """
     tagger = tagger if tagger is not None else get_statement_tagger(settings)
     if tagger is None:
         return resolution
     blocks = content_blocks(contents)
     if not blocks:
         return resolution
-    statements = tagger.tag([block.text for block in blocks])
+    from bibr.utils.model_overrides import (
+        is_model_override,
+        note_inference_failure,
+        note_inference_success,
+    )
+
+    try:
+        statements = tagger.tag([block.text for block in blocks])
+    except Exception as exc:
+        if not is_model_override(settings, SETTING):
+            raise
+        # The paper keeps the rules' statements; several papers in a row stop the run.
+        warning = note_inference_failure(settings, SETTING, exc)
+        if warning is not None and warning not in contents.processing_warnings:
+            contents.processing_warnings.append(warning)
+        return resolution
+    note_inference_success(settings, SETTING)
     additions = _field_candidates(contents, resolution, statements, blocks)
     resolution = merge_field_candidates(resolution, additions)
     sections = apply_section_statements(contents, statements, blocks)

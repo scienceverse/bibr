@@ -167,7 +167,9 @@ too: it is recorded as one, and it loads and runs as before.
   paragraphs it finds become one. Each adds a `STATEMENT_TAGGER` warning. A
   `--no-llm` run does not use it. The runtime (`bibr.statement_tagger.runtime`)
   needs nothing else from bibr: block texts in reading order in, typed
-  statements out.
+  statements out. It follows the rules of every model override: a bundle that
+  does not load stops the run, and an error on a paper keeps the rules'
+  statements with a `MODEL_OVERRIDE_INFERENCE_FAILED` warning.
 - For maintainers, `scripts/switch_model_defaults.py SETTING=org/name@<commit>`
   moves a default model to a new Hub pin: the defaults in `bibr/config.py`,
   the matching `ARG`s in `Dockerfile.serve`, the default-model table and the

@@ -663,8 +663,8 @@ def text_segmenter_conflict(settings: Any) -> str | None:
 def load_model_override(settings: Any, env: str, *, memory_mode: str | None = None) -> None:
     """Load the model of ``env`` as the run loads it, probe included.
 
-    The reference models, the front-role classifier and the front-matter tagger
-    stay in their loaders' process caches, so the run that follows does not
+    The reference models, the front-role classifier, the front-matter tagger
+    and the statement tagger stay in their loaders' process caches, so the run that follows does not
     load them again; a classifier is loaded on the CPU and released (the
     pipeline places it). Raises what the loader raises: for an override, a
     :class:`~bibr.exceptions.ModelOverrideError` for any failure.
@@ -702,6 +702,11 @@ def load_model_override(settings: Any, env: str, *, memory_mode: str | None = No
         from bibr.front_tagger.runtime import load_front_tagger
 
         load_front_tagger(settings)
+        return
+    if env == "ML_STATEMENT_TAGGER_MODEL_ID":
+        from bibr.statement_tagger.pipeline import get_statement_tagger
+
+        get_statement_tagger(settings)
         return
     from bibr.extract import ref_extractor
 
