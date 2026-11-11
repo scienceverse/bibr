@@ -90,6 +90,20 @@ lowercasing and removing diacritics and punctuation. `authors_fullname_f1` is
 fuzzy and scores a name with an affiliation letter glued on, or with an extra
 word, as right. Neither the gate nor `metrics_version` changes.
 
+### Added — running a candidate model
+
+A model setting pointed at anything other than its shipped default is an
+override, for comparing a retrained model with the shipped one. An override that
+is a local path is checked before the first paper, one that cannot load stops
+the run instead of falling back to the shipped model or the next tier, and
+`bibr batch` records the sha256 of every file each override loaded in
+`run_info.json` under `model_overrides`. A local ONNX bundle may now hold its
+files in the named directory itself, not only in an `onnx/` subdirectory.
+`REF_GEOM_TAGGER_MODEL_ID` (unset by default) adds a geometry line tagger that the
+`geom` segmentation tier asks first; when its gate declines, the shipped geometry
+segmenter runs as before. A run with every model setting at its default is
+unchanged. See "Running a candidate model" in the configuration guide.
+
 ### Added — the text-layer OCR route
 
 A fast run with no OCR route chosen (no `--ocr`, `--ocr-url`, `--ocr-model` or

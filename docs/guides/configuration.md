@@ -727,9 +727,10 @@ through ONNX Runtime — with no `torch`, `transformers` or OpenCV in the
 environment. The `torch` extra remains the training-parity runtime, the Apple
 MPS path, and the `torch.compile` path `bibr serve` uses for layout.
 
-A bundle resolves from a local directory containing `onnx/` (point the model's
-existing `*_MODEL_ID` / `NER_PARSER_CKPT` setting at it) or from the Hub at the
-pinned revision, offline-tolerant through the Hub cache. A value shaped like a
+A bundle resolves from a local directory containing `onnx/`, or holding
+`bibr_onnx.json` and `model.onnx` itself (point the model's existing
+`*_MODEL_ID` / `NER_PARSER_CKPT` setting at it), or from the Hub at the pinned
+revision, offline-tolerant through the Hub cache. A value shaped like a
 Hub id (`org/name`) is always fetched from the Hub, even when a directory of
 that name exists in the working directory; write a local directory as a path —
 absolute, or starting with `./`, `../` or `~`. Layout is the one model
@@ -776,6 +777,54 @@ PyTorch stack — `torch.compile` on the layout model in particular — and sinc
 classifier revisions it bakes now also carry an `onnx/` bundle, leaving the
 setting unset would let `auto` move serve onto ONNX Runtime the next time the
 image is built. Switching it is a deliberate choice, not a build-time accident.
+
+### Running a candidate model
+
+To compare a retrained model with the shipped one, point the shipped model's
+own setting at the candidate and run the same papers twice, once without the
+setting and once with it. No other setting changes:
+
+| Model | Setting | Candidate format |
+|---|---|---|
+| Reference parser | `NER_PARSER_CKPT` | ONNX bundle directory (`model: ner_parser`) |
+| Geometry reference segmenter | `REF_GEOM_SEG_MODEL_ID` | `.joblib` bundle file |
+| Geometry line tagger | `REF_GEOM_TAGGER_MODEL_ID` | directory with `gate.json` and `tagger.onnx` + `tagger.json` (beside it or in `onnx/`) |
+| CRF reference segmenter | `NER_SEG_CKPT` | checkpoint file (`torch` extra) |
+| Front-role classifier | `ML_FRONT_ROLE_MODEL_ID` | `.joblib` bundle file |
+| Front-matter tagger | `ML_FRONT_TAGGER_MODEL_ID` | ONNX bundle directory |
+| Section classifier | `ML_SECTION_CLASSIFIER_MODEL_ID` | ONNX bundle directory (`model: section_classifier`) |
+| Paper classifier | `ML_PAPER_CLASSIFIER_MODEL_ID` | ONNX bundle directory (`model: paper_classifier`) |
+
+A setting is an *override* when its value, or its revision, differs from the
+shipped default. Three rules apply to overrides only, so a run on the shipped
+models behaves and exports exactly as before:
+
+- **Checked first.** `bibr chew` and `bibr batch` check every override that is a
+  local path before the first paper: the path must exist and hold a model of
+  the right kind in a format this bibr runs. A problem stops the run with a
+  message naming the setting. A Hub id is checked when it loads.
+- **No fallback.** Several shipped models are optional: when one cannot load,
+  the run goes on without it (heuristics for the front-role prior, the next
+  segmentation tier for the geometry models, the LLM for the classifiers and
+  the front-matter tagger). An override that cannot load stops the run
+  instead, and an overridden classifier is required whatever
+  `ML_CLASSIFIERS_REQUIRED` says, so a comparison never measures the shipped
+  path under the candidate's name.
+- **Identity recorded.** Each loaded override logs the sha256 of every file
+  it read, and `bibr batch` writes the same records to `run_info.json` under
+  `model_overrides` (setting, value, revision, and each file's path, size and
+  sha256). The key is absent for a run on the shipped models. Per-paper
+  exports do not carry model identity.
+
+`REF_GEOM_TAGGER_MODEL_ID` is unset by default and adds a tier rather than
+replacing one: with `REF_SEG_STRATEGY=geom` the tagger is asked first, and its
+answer is taken when its calibrated paper confidence reaches the threshold in
+its `gate.json` and the geometry tier's own checks (alignment yield, segment
+count against the layout's reference onsets) pass. Otherwise the shipped
+geometry segmenter and the rest of the cascade run unchanged. The export's
+reference diagnostics list it as a `geom_tagger` attempt. The tagger reads the
+same 29 line features as the shipped geometry segmenter, in sorted name order,
+and needs only ONNX Runtime.
 
 ### CPU threads
 
