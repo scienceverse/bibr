@@ -115,7 +115,13 @@ too: it is recorded as one, and it loads and runs as before.
   model raises on three papers in a row, the run stops as above. A resumed
   `bibr batch` runs the papers written with that warning again, without
   `--retry-failed`, so they get the repaired model's answer (a paper that keeps
-  falling back waits for `--retry-failed` after three runs).
+  falling back waits for `--retry-failed` after three runs); the run's summary
+  names them, and `run_info.json` lists them under `override_fallbacks`.
+- The `bibr batch` summary counts the papers a model override stopped as `not
+  finished`, says that the run stopped on a model override and that a resume
+  processes them, and no longer counts them as failed; `bibr batch report`
+  gives the counts as `papers.stopped_on_model_override` and
+  `papers.fell_back_on_model_override`.
 - `bibr chew` and `bibr batch` load every override the run will use, from a
   local path or the Hub, before the first paper (`--dry-run` too); a stale
   setting for a model the run does not use is ignored. Every overridden ONNX

@@ -76,7 +76,10 @@ override (see "Model overrides" in the configuration guide), never got a
 verdict, so it always runs again. A paper on which an overridden model raised
 was written with the fallback, so its export does not hold the candidate's
 answer: a resumed run takes it again too, without `--retry-failed`, until it
-has fallen back three times in a row. A crash or
+has fallen back three times in a row. The end-of-run summary counts the
+papers a model override stopped as `not finished`, not as failed, and names
+the papers that fell back (`run_info.json` lists them under
+`override_fallbacks`). A crash or
 a service outage — the OCR or LLM server unreachable or unable to start, a
 serve that kept answering 502/503 until the retries ran out, an export that
 could not be written (a full disk, a permission) — is usually the machine's

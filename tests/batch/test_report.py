@@ -60,7 +60,14 @@ def _ledger():
 
 def test_compute_report_counts_latest_attempt_per_paper():
     report = compute_report(_ledger())
-    assert report["papers"] == {"total": 5, "ok": 3, "failed": 2, "attempts": 6}
+    assert report["papers"] == {
+        "total": 5,
+        "ok": 3,
+        "failed": 2,
+        "stopped_on_model_override": 0,
+        "fell_back_on_model_override": 0,
+        "attempts": 6,
+    }
 
 
 def test_compute_report_window_and_throughput():
@@ -130,7 +137,14 @@ def test_compute_report_failure_breakdown_and_warning_top():
 def test_compute_report_filters_by_run_id():
     report = compute_report(_ledger(), run_id="r2")
     assert report["run_id"] == "r2"
-    assert report["papers"] == {"total": 2, "ok": 1, "failed": 1, "attempts": 2}
+    assert report["papers"] == {
+        "total": 2,
+        "ok": 1,
+        "failed": 1,
+        "stopped_on_model_override": 0,
+        "fell_back_on_model_override": 0,
+        "attempts": 2,
+    }
 
 
 def test_compute_report_on_empty_ledger():
@@ -159,3 +173,34 @@ def test_render_report_is_compact_and_json_roundtrips():
     )
     assert any("VALIDATION:warning:X ×3" in line for line in lines)
     assert json.loads(json.dumps(report)) == report
+
+
+def test_papers_a_model_override_stopped_are_not_counted_as_failed():
+    rows = [
+        _row("a", warnings={"count": 1, "codes": {"MODEL_OVERRIDE_INFERENCE_FAILED": 1}}),
+        _row("b", status="failed", error_code="model_override_failed"),
+        _row("c", status="failed", error_code="model_override_failed"),
+        _row("d", status="failed", error_code="REF_PARSE"),
+    ]
+    report = compute_report(rows)
+    assert report["papers"] == {
+        "total": 4,
+        "ok": 1,
+        "failed": 1,
+        "stopped_on_model_override": 2,
+        "fell_back_on_model_override": 1,
+        "attempts": 4,
+    }
+    assert report["failures"]["by_error_code"] == {"REF_PARSE": 1}
+    lines = render_report(report).splitlines()
+    assert any("1 ok · 1 failed · 2 not finished · 4 total" in line for line in lines)
+    (override,) = [line for line in lines if line.strip().startswith("override")]
+    assert "the run stopped on a model override: 2 papers not finished" in override
+    assert "1 paper fell back from an overridden model" in override
+    assert "a resumed run processes them again" in override
+
+
+def test_a_report_without_model_overrides_reads_as_before():
+    lines = render_report(compute_report(_ledger())).splitlines()
+    assert not any(line.strip().startswith("override") for line in lines)
+    assert not any("not finished" in line for line in lines)

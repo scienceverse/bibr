@@ -822,10 +822,13 @@ exactly as before:
   without the override, and its export carries a
   `MODEL_OVERRIDE_INFERENCE_FAILED` processing warning naming the setting.
   When the same overridden model raises on three papers in a row, the run
-  stops as for a model that cannot be loaded. A resumed `bibr batch` runs the
-  papers written with the fallback again without `--retry-failed`, so once
-  the model is repaired their exports hold its answers (a paper that keeps
-  falling back waits for `--retry-failed` after three runs).
+  stops as for a model that cannot be loaded. The papers written with the
+  fallback before the stop are named in the run's summary and in
+  `run_info.json` under `override_fallbacks`, and a resumed `bibr batch` runs
+  them again without `--retry-failed`, so once the model is repaired their
+  exports hold its answers (a paper that keeps falling back waits for
+  `--retry-failed` after three runs). The summary counts the papers the stop
+  left unfinished as `not finished`, not as failed.
 - **Checked first.** `bibr chew` and `bibr batch` load every override this run
   will use (given its mode, `--refs` and `--ref-seg`), local or Hub, before
   the first paper, `--dry-run` included. Every overridden ONNX model (the

@@ -12,6 +12,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
+from bibr.batch.ledger import MODEL_OVERRIDE_FAILED, fell_back_on_override
 from bibr.pipeline.stages.export import _OVERLAPPED_TIMINGS
 
 TOP_WARNINGS = 10
@@ -57,7 +58,18 @@ def compute_report(
     for row in rows:
         latest[str(row.get("paper_id"))] = row
     ok_latest = [r for r in latest.values() if r.get("status") == "ok"]
-    failed_latest = [r for r in latest.values() if r.get("status") != "ok"]
+    # A paper the run stopped on a model override before it finished has no
+    # verdict of its own (bibr.utils.model_overrides): not a failed paper.
+    not_finished = [
+        r
+        for r in latest.values()
+        if r.get("status") != "ok" and r.get("error_code") == MODEL_OVERRIDE_FAILED
+    ]
+    failed_latest = [
+        r
+        for r in latest.values()
+        if r.get("status") != "ok" and r.get("error_code") != MODEL_OVERRIDE_FAILED
+    ]
     ok_attempts = [r for r in rows if r.get("status") == "ok"]
 
     # Run window: earliest start to latest finish across every attempt.
@@ -139,6 +151,10 @@ def compute_report(
             "total": len(latest),
             "ok": len(ok_latest),
             "failed": len(failed_latest),
+            # Not finished because the run stopped on a model override; a resume runs them.
+            "stopped_on_model_override": len(not_finished),
+            # ok, but an overridden model raised on them and they fell back; a resume runs them.
+            "fell_back_on_model_override": sum(1 for r in ok_latest if fell_back_on_override(r)),
             "attempts": len(rows),
         },
         "window": {
@@ -177,6 +193,10 @@ def compute_report(
     }
 
 
+def _papers(n: int) -> str:
+    return "paper" if n == 1 else "papers"
+
+
 def _round(value: float | None, digits: int = 3) -> float | None:
     return None if value is None else round(value, digits)
 
@@ -203,13 +223,29 @@ def render_report(report: Mapping[str, Any], *, title: str = "bibr batch report"
     warnings = report["warnings"]
 
     rows: list[tuple[str, str]] = []
+    stopped = papers.get("stopped_on_model_override") or 0
+    fell_back = papers.get("fell_back_on_model_override") or 0
     rows.append(
         (
             "papers",
-            f"{papers['ok']} ok · {papers['failed']} failed · {papers['total']} total "
-            f"({papers['attempts']} attempts)",
+            f"{papers['ok']} ok · {papers['failed']} failed · "
+            + (f"{stopped} not finished · " if stopped else "")
+            + f"{papers['total']} total ({papers['attempts']} attempts)",
         )
     )
+    if stopped or fell_back:
+        parts = []
+        if stopped:
+            parts.append(
+                f"the run stopped on a model override: {stopped} "
+                f"{_papers(stopped)} not finished, through no fault of the PDF"
+            )
+        if fell_back:
+            parts.append(
+                f"{fell_back} {_papers(fell_back)} fell back from an overridden model "
+                "(MODEL_OVERRIDE_INFERENCE_FAILED)"
+            )
+        rows.append(("override", "; ".join(parts) + "; a resumed run processes them again"))
     if window["started_at"]:
         rows.append(
             (

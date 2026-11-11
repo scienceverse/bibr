@@ -197,3 +197,59 @@ def test_a_classifier_that_opens_but_fails_its_probe_stops_before_any_paper(
     _assert_stopped_on(out, _run(corpus, out), "ML_SECTION_CLASSIFIER_MODEL_ID")
     assert "type_logits of shape" in json.dumps(_run_info(out))
 
+
+def test_papers_that_fell_back_before_a_stop_are_run_again_on_resume(
+    corpus, tmp_path, monkeypatch, capsys
+):
+    """Three papers in a row on which the candidate raises: two written, then the stop.
+
+    The paper classifier runs in the classifier resources' thread pool, so its
+    error comes back to each paper through the inference batcher. The first
+    chunk's two papers fall back and are written with the warning; the third
+    paper stops the run. Once the model is repaired, a plain resume runs all
+    three, the two written ones included.
+    """
+    from bibr.structure.paper_classifier_onnx import OnnxPaperClassifierModel
+
+    bundle = tmp_path / "models" / "paper-candidate"
+    shutil.copytree(FIXTURES / "paper" / "onnx", bundle / "onnx")
+    monkeypatch.setattr(Settings.ml, "paper_classifier_model_id", str(bundle))
+    working = OnnxPaperClassifierModel.classify_batch
+
+    def broken(self, items):
+        raise RuntimeError("the graph fails on this input")
+
+    monkeypatch.setattr(OnnxPaperClassifierModel, "classify_batch", broken)
+    out = tmp_path / "out"
+
+    code = _run(corpus, out)
+    assert code != 0
+    assert _run_info(out)["reason"] == MODEL_OVERRIDE_FAILED
+    assert "raised at inference on 3 papers in a row" in _run_info(out)["fatal"]
+    rows = _rows(out)
+    assert {pid: row["status"] for pid, row in rows.items()} == {
+        "alpha": "ok",
+        "beta": "ok",
+        "gamma": "failed",
+    }
+    assert rows["gamma"]["error_code"] == MODEL_OVERRIDE_FAILED
+    for name in ("alpha", "beta"):
+        assert rows[name]["warnings"]["codes"]["MODEL_OVERRIDE_INFERENCE_FAILED"] == 1
+    assert sorted(_run_info(out)["override_fallbacks"]) == ["alpha", "beta"]
+    printed = capsys.readouterr().out
+    assert "the run stopped on a model override: 1 paper not finished" in printed
+    assert "2 papers fell back from an overridden model" in printed
+    assert "0 failed" in printed and "1 not finished" in printed
+
+    monkeypatch.setattr(OnnxPaperClassifierModel, "classify_batch", working)
+    reset_loaded_model_overrides()
+    exports = _assert_all_done(out, _run(corpus, out), "ML_PAPER_CLASSIFIER_MODEL_ID")
+    resumed = [
+        row
+        for row in Ledger(out / LEDGER_FILENAME).read()
+        if row["run_id"] != rows["alpha"]["run_id"]
+    ]
+    assert sorted(row["paper_id"] for row in resumed) == sorted(PAPERS)
+    for export in exports:
+        codes = {w["code"] for w in export["extraction"]["warnings"]}
+        assert "MODEL_OVERRIDE_INFERENCE_FAILED" not in codes

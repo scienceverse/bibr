@@ -43,6 +43,7 @@ from bibr.batch.ledger import (
     LedgerContext,
     Outcome,
     ResumePlan,
+    fell_back_on_override,
     summarize_export,
     utc_now_iso,
 )
@@ -596,6 +597,14 @@ def _print_plan(options: BatchOptions, plan: BatchPlan, ledger: Ledger) -> None:
     console.print(kv("skip ok", str(len(plan.resume.skipped_ok))))
     hint = " (use --retry-failed)" if plan.resume.skipped_failed else ""
     console.print(kv("skip failed", f"{len(plan.resume.skipped_failed)}{hint}"))
+    if plan.resume.override_fallbacks:
+        console.print(
+            kv(
+                "rerun",
+                f"{len(plan.resume.override_fallbacks)} ok but fell back from an overridden "
+                "model (MODEL_OVERRIDE_INFERENCE_FAILED)",
+            )
+        )
     detail = []
     if options.limit:
         detail.append(f"limit {options.limit}")
@@ -837,11 +846,15 @@ def _execute(
 
     n_ok = 0
     n_failed = 0
+    # Papers the run stopped on a model override before they finished: no verdict.
+    n_not_finished = 0
     done = 0
     total = len(plan.to_run)
+    # Papers of this run whose export fell back from an overridden model.
+    fell_back: list[str] = []
 
     def record(item: BatchItem, outcome: Outcome) -> None:
-        nonlocal n_ok, n_failed, done
+        nonlocal n_ok, n_failed, n_not_finished, done
         if outcome.ok and outcome.export is not None:
             # The batch's own id is the corpus key: unique by construction and
             # the name of the JSON file, where the export's default (the input
@@ -870,9 +883,20 @@ def _execute(
             detail = f"{duration:.1f}s" if isinstance(duration, (int, float)) else ""
             if isinstance(refs, int):
                 detail += f" {ui.SEP} {refs} refs"
+            if fell_back_on_override(entry):
+                fell_back.append(item.paper_id)
+                detail += f" {ui.SEP} fell back from an overridden model"
             console.print(
                 f"  [green]{ui.OK}[/green] [dim]\\[{done}/{total}][/dim] {item.paper_id}"
                 f"  [dim]{detail}[/dim]",
+                soft_wrap=True,
+            )
+        elif outcome.error_code == MODEL_OVERRIDE_FAILED:
+            # Not the paper's failure: the run stops, and the reason is printed once.
+            n_not_finished += 1
+            console.print(
+                f"  [yellow]-[/yellow] [dim]\\[{done}/{total}][/dim] {item.paper_id}: "
+                "not finished, the run stopped on a model override",
                 soft_wrap=True,
             )
         else:
@@ -984,6 +1008,12 @@ def _execute(
             "fatal": fatal,
         }
     )
+    if reason == MODEL_OVERRIDE_FAILED:
+        info["n_not_finished"] = n_not_finished
+        info["n_not_attempted"] = total - done
+    if fell_back:
+        # Exports written with the fallback of an overridden model; a resume runs them again.
+        info["override_fallbacks"] = list(fell_back)
     if options.remote is None:
         from bibr.utils.model_overrides import run_records
 
@@ -1008,6 +1038,23 @@ def _execute(
             console.print(
                 "  [dim]interrupted — re-run the same command to continue "
                 "(interrupted papers are retried by default)[/dim]"
+            )
+        elif reason == MODEL_OVERRIDE_FAILED:
+            console.print(
+                f"  the run stopped on a model override: {n_not_finished} "
+                f"{'paper' if n_not_finished == 1 else 'papers'} not finished and "
+                f"{total - done} not attempted, none of them through a fault of its PDF; "
+                "fix or unset the setting below and re-run the same command to process them",
+                soft_wrap=True,
+            )
+        if fell_back:
+            names = ", ".join(fell_back[:10]) + (" …" if len(fell_back) > 10 else "")
+            console.print(
+                f"  {len(fell_back)} {'paper' if len(fell_back) == 1 else 'papers'} fell back "
+                f"from an overridden model (MODEL_OVERRIDE_INFERENCE_FAILED): {names}; their "
+                "exports do not hold the candidate's answer, and a re-run of the same command "
+                "processes them again (run_info.json override_fallbacks lists them all)",
+                soft_wrap=True,
             )
 
     if fatal:

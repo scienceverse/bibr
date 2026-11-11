@@ -200,7 +200,14 @@ def test_report_subcommand_text_and_json(tmp_path, capsys):
         == 0
     )
     report = json.loads(capsys.readouterr().out)
-    assert report["papers"] == {"total": 2, "ok": 1, "failed": 1, "attempts": 2}
+    assert report["papers"] == {
+        "total": 2,
+        "ok": 1,
+        "failed": 1,
+        "stopped_on_model_override": 0,
+        "fell_back_on_model_override": 0,
+        "attempts": 2,
+    }
     assert report["references"]["match_rate"] == 0.5
 
 
