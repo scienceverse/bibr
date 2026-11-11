@@ -1,6 +1,7 @@
 import os
 import subprocess
 import threading
+from pathlib import Path
 from unittest.mock import ANY, MagicMock
 
 import pytest
@@ -1279,7 +1280,8 @@ def test_pinned_mlx_build_is_served_from_its_snapshot_under_the_hub_id(monkeypat
 
     cmd = _capture_server_cmd(monkeypatch, model=_PINNED_MLX, multimodal=False, settings=settings)
 
-    assert cmd[1:3] == ["serve", f"/nonexistent-hf-cache/{_PINNED_MLX_SNAPSHOT}"]
+    assert cmd[1] == "serve"
+    assert Path(cmd[2]) == Path(f"/nonexistent-hf-cache/{_PINNED_MLX_SNAPSHOT}")
     assert cmd[cmd.index("--served-model-name") + 1] == _PINNED_MLX
     # MTP is still picked from the Hub id.
     assert cmd[cmd.index("--spec-decode") + 1] == "mtp"
@@ -1303,7 +1305,7 @@ def test_pinned_mlx_build_is_downloaded_into_rapid_mlx_cache(
 
     cmd = _capture_server_cmd(monkeypatch, model=_PINNED_MLX, multimodal=False, settings=settings)
 
-    assert cmd[2] == f"{expected}/{_PINNED_MLX_SNAPSHOT}"
+    assert Path(cmd[2]) == Path(f"{expected}/{_PINNED_MLX_SNAPSHOT}")
 
 
 def test_unpinned_mlx_ids_are_passed_to_rapid_mlx_unchanged(monkeypatch):

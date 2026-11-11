@@ -246,7 +246,7 @@ def test_maintenance_runs_cross_platform_core_coverage_weekly() -> None:
     assert "schedule" in maintenance["on"]
     assert "workflow_dispatch" in maintenance["on"]
     assert set(compatibility["strategy"]["matrix"]["os"]) == {
-        "macos-14",
+        "macos-15",
         "windows-latest",
     }
     assert "3.12" in yaml.dump(compatibility)
@@ -426,7 +426,7 @@ def test_release_repeats_linux_and_cross_platform_critical_tests() -> None:
     assert "--extra all" in linux
     assert 'pytest -m "not slow"' in linux
     assert set(cross_platform["strategy"]["matrix"]["os"]) == {
-        "macos-14",
+        "macos-15",
         "windows-latest",
     }
 

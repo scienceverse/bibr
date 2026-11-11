@@ -115,7 +115,9 @@ ENV DEBIAN_FRONTEND=noninteractive TZ=UTC
 # layer inherits whatever was current then: openssl/libssl3 3.0.2-0ubuntu1.15
 # (CVE-2026-45447, PKCS7_verify use-after-free) and the gnupg2 set at
 # 2.2.27-3ubuntu2.1 (CVE-2025-68973, out-of-bounds write) — together the 14 HIGH
-# findings that block the image scan. Both are fixed in jammy-security.
+# findings that block the image scan — and apt/libapt-pkg6.0 2.4.14
+# (CVE-2026-109518, code execution via hard-link reuse). All are fixed in
+# jammy-security.
 #
 # Named explicitly rather than a blanket `apt-get upgrade`: this base also has
 # NVIDIA's apt repo enabled, and a blanket upgrade would drift the CUDA runtime
@@ -125,7 +127,8 @@ RUN apt-get update && \
     apt-get install -y --only-upgrade \
         openssl libssl3 \
         dirmngr gnupg gnupg-l10n gnupg-utils gnupg2 \
-        gpg gpg-agent gpg-wks-client gpg-wks-server gpgconf gpgsm gpgv && \
+        gpg gpg-agent gpg-wks-client gpg-wks-server gpgconf gpgsm gpgv \
+        apt libapt-pkg6.0 && \
     apt-get install -y --no-install-recommends software-properties-common && \
     add-apt-repository -y ppa:deadsnakes/ppa && \
     apt-get update && \

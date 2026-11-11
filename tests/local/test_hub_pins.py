@@ -230,7 +230,9 @@ def test_a_download_error_surfaces_through_the_stoppable_wait(monkeypatch):
 def test_the_stoppable_wait_returns_the_download(monkeypatch):
     monkeypatch.setattr(hub_pins, "_download_files", lambda *a: ["/hf/snap/rev/config.json"])
 
-    assert hub_pins.fetch_pinned_build(MLX_REPO, stop_event=threading.Event()) == "/hf/snap/rev"
+    assert hub_pins.fetch_pinned_build(MLX_REPO, stop_event=threading.Event()) == str(
+        Path("/hf/snap/rev")
+    )
 
 
 def test_local_gguf_file(tmp_path):
