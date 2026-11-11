@@ -569,7 +569,8 @@ def _check_ref_strategies(ok, fail) -> None:
     from bibr.config import Settings
 
     torch_missing = importlib.util.find_spec("torch") is None
-    if seg_strategy == "crf" and torch_missing:
+    text_seg = getattr(Settings, "REF_TEXT_SEG_MODEL_ID", None)
+    if seg_strategy == "crf" and torch_missing and not text_seg:
         # The CRF segmenter has no ONNX export; it is a torch-only opt-in.
         fail(
             f"{label}: the crf segmenter is torch-only",

@@ -53,7 +53,8 @@ class ModelSetting:
     attr: tuple[str, ...]
     revision_attr: tuple[str, ...] | None
     # "onnx" (an onnx/ bundle; ``onnx_model`` is the manifest's ``model`` field, or None for a
-    # bundle checked otherwise), "joblib" (one bundle file), "geom_tagger", "checkpoint" (a file).
+    # bundle checked otherwise), "joblib" (one bundle file), "geom_tagger", "text_segmenter",
+    # "checkpoint" (a file).
     kind: str
     onnx_model: str | None = None
 
@@ -87,6 +88,13 @@ MODEL_SETTINGS: tuple[ModelSetting, ...] = (
         ("NER_SEG_CKPT",),
         ("NER_SEG_REVISION",),
         "checkpoint",
+    ),
+    ModelSetting(
+        "REF_TEXT_SEG_MODEL_ID",
+        "text reference segmenter",
+        ("REF_TEXT_SEG_MODEL_ID",),
+        ("REF_TEXT_SEG_REVISION",),
+        "text_segmenter",
     ),
     ModelSetting(
         "ML_FRONT_ROLE_MODEL_ID",
@@ -317,9 +325,10 @@ def models_in_use(settings: Any) -> set[str]:
     ``settings`` are the run's: for a fast run, :func:`bibr.run_mode.fast_settings`
     of them, with the run's ``--refs`` / ``--ref-seg`` applied. Reference models
     only when references are parsed (``REF_PARSE_STRATEGY`` other than ``off``):
-    the reference parser and the CRF segmenter (the last resort of every
-    segmentation strategy, and the recovery of the LLM parsers), and the
-    geometry segmenter and the line tagger only for ``REF_SEG_STRATEGY=geom``.
+    the reference parser and the last-resort text segmenter of every
+    segmentation strategy (the CRF, or the token tagger that replaces it when
+    ``REF_TEXT_SEG_MODEL_ID`` is set), and the geometry segmenter and the line
+    tagger only for ``REF_SEG_STRATEGY=geom``.
     The front-matter tagger when its mode is on, the front-role classifier
     unless ``ML_FRONT_ROLE_ENABLED=false``, the classifiers when configured.
     """
@@ -331,7 +340,9 @@ def models_in_use(settings: Any) -> set[str]:
         used.add("ML_FRONT_TAGGER_MODEL_ID")
     parse = str(getattr(settings, "REF_PARSE_STRATEGY", None) or "ner").lower()
     if parse != "off":
-        used |= {"NER_PARSER_CKPT", "NER_SEG_CKPT"}
+        used.add("NER_PARSER_CKPT")
+        text_seg = _text(getattr(settings, "REF_TEXT_SEG_MODEL_ID", None))
+        used.add("REF_TEXT_SEG_MODEL_ID" if text_seg else "NER_SEG_CKPT")
         if str(getattr(settings, "REF_SEG_STRATEGY", None) or "geom").lower() == "geom":
             used |= {"REF_GEOM_SEG_MODEL_ID", "REF_GEOM_TAGGER_MODEL_ID"}
     return used
@@ -378,6 +389,16 @@ def _check_local(spec: ModelSetting, value: str) -> None:
         from bibr.extract.geom_tagger import GeomLineTagger
 
         GeomLineTagger(path)  # reads the bundle, opens the graph and runs it once
+    elif spec.kind == "text_segmenter":
+        # The files, the manifest and the tokenizer; the graph (hundreds of MB)
+        # is opened and run once when the tier first loads.
+        from tokenizers import Tokenizer
+
+        from bibr.extract.text_segmenter import read_segmenter_manifest, segmenter_bundle_files
+
+        _graph, manifest, tokenizer = segmenter_bundle_files(path)
+        read_segmenter_manifest(manifest)
+        Tokenizer.from_file(str(tokenizer))
     elif spec.kind == "joblib":
         if not path.is_file():
             raise ConfigurationError("name the .joblib bundle file itself")
@@ -392,6 +413,23 @@ def _check_local(spec: ModelSetting, value: str) -> None:
             FrontRoleClassifier(str(path))
     elif not path.is_file():
         raise ConfigurationError("name the checkpoint file itself")
+
+
+def text_segmenter_conflict(settings: Any) -> str | None:
+    """The problem when both the text segmenter and an overridden CRF are set, else ``None``.
+
+    The text segmenter replaces the CRF, so a run with both would measure one of
+    them under the other's name.
+    """
+    text_seg, _revision = setting_value(settings, "REF_TEXT_SEG_MODEL_ID")
+    if text_seg is None or not is_model_override(settings, "NER_SEG_CKPT"):
+        return None
+    crf, _revision = setting_value(settings, "NER_SEG_CKPT")
+    return (
+        f"REF_TEXT_SEG_MODEL_ID={text_seg!r} and NER_SEG_CKPT={crf!r} are both set: the text "
+        "segmenter replaces the CRF segmenter, so set one of them (unset REF_TEXT_SEG_MODEL_ID "
+        "to run the CRF, or leave NER_SEG_CKPT at its default)"
+    )
 
 
 def check_model_overrides(settings: Any) -> tuple[list[str], list[str]]:
@@ -411,6 +449,9 @@ def check_model_overrides(settings: Any) -> tuple[list[str], list[str]]:
         specs = [spec for spec in model_overrides(settings) if spec.env in used]
     except Exception as exc:  # noqa: BLE001 - the preflight reports, it never crashes
         return [f"model settings could not be read ({type(exc).__name__}: {exc})"], []
+    conflict = text_segmenter_conflict(settings)
+    if conflict and "REF_TEXT_SEG_MODEL_ID" in used:
+        problems.append(conflict)
     for spec in specs:
         value, _revision = setting_value(settings, spec.env)
         if value is None or not is_local_model(value):
@@ -570,4 +611,5 @@ __all__ = [
     "reset_loaded_model_overrides",
     "run_records",
     "setting_value",
+    "text_segmenter_conflict",
 ]

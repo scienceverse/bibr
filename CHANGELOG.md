@@ -117,6 +117,12 @@ too: it is recorded as one, and it loads and runs as before.
   segmentation tier asks first. An answer it takes is final; when it declines
   or fails on a paper, the shipped geometry segmenter runs exactly as without
   it.
+- `REF_TEXT_SEG_MODEL_ID` (unset by default; a directory or a Hub id with
+  `REF_TEXT_SEG_REVISION`) replaces the CRF reference segmenter, the last
+  resort of every segmentation strategy, with an ONNX token tagger that needs
+  no `torch`. The CRF is then not loaded; setting both is an error. Its
+  answer goes through the same receipt and next tier as the CRF's, and the
+  receipt lists it as `text_tagger`.
 
 A run with every model setting at its default is unchanged. See "Running a
 candidate model" in the configuration guide.

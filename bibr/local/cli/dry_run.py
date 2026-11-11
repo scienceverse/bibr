@@ -442,6 +442,8 @@ def _dry_run_model_specs(
     if not config.no_llm and parse_strategy != "off":
         if seg_strategy == "geom":
             specs.append(("ref segmenter (geom)", Settings.REF_GEOM_SEG_MODEL_ID))
+        elif seg_strategy == "crf" and Settings.REF_TEXT_SEG_MODEL_ID:
+            specs.append(("ref segmenter (text)", _hub_or_local(Settings.REF_TEXT_SEG_MODEL_ID)))
         elif seg_strategy == "crf":
             specs.append(("ref segmenter (crf)", Settings.NER_SEG_CKPT))
         if parse_strategy == "ner":

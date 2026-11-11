@@ -790,6 +790,7 @@ setting and once with it. No other setting changes:
 | Geometry reference segmenter | `REF_GEOM_SEG_MODEL_ID` | `.joblib` bundle file |
 | Geometry line tagger | `REF_GEOM_TAGGER_MODEL_ID` | directory with `gate.json` and `tagger.onnx` + `tagger.json` (beside it or in `onnx/`), or a Hub repo id |
 | CRF reference segmenter | `NER_SEG_CKPT` | checkpoint file (`torch` extra) |
+| Text reference segmenter (replaces the CRF) | `REF_TEXT_SEG_MODEL_ID` | directory with `segmenter.json`, `model.onnx` and `tokenizer.json` (in it or in `onnx/`), or a Hub repo id |
 | Front-role classifier | `ML_FRONT_ROLE_MODEL_ID` | `.joblib` bundle file |
 | Front-matter tagger | `ML_FRONT_TAGGER_MODEL_ID` | ONNX bundle directory |
 | Section classifier | `ML_SECTION_CLASSIFIER_MODEL_ID` | ONNX bundle directory (`model: section_classifier`) |
@@ -851,6 +852,29 @@ without the tagger. The export's reference diagnostics list each attempt as
 attempt carries no spans or credible starts. The tagger reads the same 29
 line features as the shipped geometry segmenter, in sorted name order, and
 needs only ONNX Runtime; loading it runs the graph once to check its shape.
+
+`REF_TEXT_SEG_MODEL_ID` is unset by default and replaces a tier: the CRF
+segmenter, the last resort of every segmentation strategy (and the whole of
+`REF_SEG_STRATEGY=crf`). When it is set, the CRF is not loaded at all, and
+setting it together with `NER_SEG_CKPT` away from its default is an error
+the run stops on. It takes a local directory or a Hub repo id (with
+`REF_TEXT_SEG_REVISION`; `segmenter.json`, `model.onnx` and `tokenizer.json`
+in `onnx/`) and needs only ONNX Runtime and `tokenizers`, not the `torch`
+extra. The model tags each token of the reference-section text, the same text
+the CRF reads, as outside a reference (`O`), opening one (`B-REF`) or inside
+one (`I-REF`), in windows and with the stride its `segmenter.json` names; a
+token read by two windows keeps the answer of the window it sits furthest
+from the edge of. A reference opens at every `B-REF` token and at the first
+character of the text, and runs to the next one. Its answer goes through the
+same receipt and the same next tier (the split on printed reference markers)
+as the CRF's. The export's reference diagnostics list it as `text_tagger`,
+with its token and window counts, the references it opened, an uncalibrated
+`expected_entry_precision` and the lowest opening probability in
+`reason_flags`. When the Hub cannot be reached for it, the paper goes on
+without the tier (`tagger_unavailable`) and the next paper tries again; an
+error on one paper is a `segmentation_error` with a `REF_SEG_CRF_ERROR`
+warning, as for the CRF. The preflight checks the files, the manifest and the
+tokenizer; the graph is opened and run once when the tier first loads.
 
 ### CPU threads
 

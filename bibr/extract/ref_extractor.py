@@ -141,7 +141,7 @@ _MARKER_LINE_RE = re.compile(r"(?m)^\s*(?:\[\d{1,3}\]|\d{1,3}[.)])\s+")
 # coverage times the share of entries that look like one complete reference,
 # scored alike for both. Module constants on purpose, like the geom gates
 # above.
-_STREAM_FALLBACK_TIERS = frozenset({"region", "crf", "marker_split"})
+_STREAM_FALLBACK_TIERS = frozenset({"region", "crf", "text_tagger", "marker_split"})
 _STREAM_OVERRIDE_MARGIN = 0.15
 # Pre-parse form of the receipt's credible-start check: segments below this
 # share of the section's credible entry starts.
@@ -648,6 +648,57 @@ def _get_geom_tagger(settings: GlobalSettings | None = None):
                 _GEOM_TAGGER_KEY = key
     record_model_load(settings, "REF_GEOM_TAGGER_MODEL_ID", _GEOM_TAGGER.files)
     return _GEOM_TAGGER
+
+
+_TEXT_SEGMENTER = None
+_TEXT_SEGMENTER_KEY: tuple[str, str | None] | None = None
+
+
+def _get_text_segmenter(settings: GlobalSettings | None = None):
+    """The opt-in text segmenter (``REF_TEXT_SEG_MODEL_ID``), or ``None``.
+
+    ``None`` when the Hub cannot be reached for it (not remembered: the next
+    paper tries again, and this one goes on as without the tier). It exists only
+    as an override, so a segmenter that does not exist or cannot be read raises
+    :class:`~bibr.exceptions.ModelOverrideError`, as does setting it together
+    with an overridden ``NER_SEG_CKPT``.
+    """
+    global _TEXT_SEGMENTER, _TEXT_SEGMENTER_KEY
+    settings = settings if settings is not None else snapshot_settings()
+    path = getattr(settings, "REF_TEXT_SEG_MODEL_ID", None)
+    if not isinstance(path, str) or not path:
+        return None
+    from bibr.utils.model_overrides import text_segmenter_conflict
+
+    if (conflict := text_segmenter_conflict(settings)) is not None:
+        raise ModelOverrideError(conflict)
+    revision = getattr(settings, "REF_TEXT_SEG_REVISION", None)
+    revision = revision if isinstance(revision, str) and revision else None
+    key = (path, revision)
+    if _TEXT_SEGMENTER is None or key != _TEXT_SEGMENTER_KEY:
+        with _NER_LOCK:
+            if _TEXT_SEGMENTER is None or key != _TEXT_SEGMENTER_KEY:
+                from bibr.extract.text_segmenter import OnnxTextSegmenter
+
+                logger.info("loading text reference segmenter: %s", path)
+                try:
+                    segmenter = OnnxTextSegmenter(path, revision)
+                except Exception as e:
+                    if (
+                        strict := override_load_error(settings, "REF_TEXT_SEG_MODEL_ID", e)
+                    ) is not None:
+                        raise strict from e
+                    logger.warning(
+                        "text reference segmenter %s unavailable (%r); this paper goes on "
+                        "without it",
+                        path,
+                        e,
+                    )
+                    return None
+                _TEXT_SEGMENTER = segmenter
+                _TEXT_SEGMENTER_KEY = key
+    record_model_load(settings, "REF_TEXT_SEG_MODEL_ID", _TEXT_SEGMENTER.files)
+    return _TEXT_SEGMENTER
 
 
 def _get_ner_parser(settings: GlobalSettings | None = None, memory_mode: str | None = None):
@@ -2786,29 +2837,19 @@ class ReferenceExtractor:
         checkpoint), try a zero-LLM marker split; if that also fails on a
         substantial region, surface a HIGH-severity warning instead of 0 refs.
         """
-        failure_reason = "no_segments"
-        try:
-            with LOCAL_INFERENCE_LOCK:
-                ref_strings = _get_ner_segmenter(self._settings).segment(ref_text)
-        except ModelOverrideError:
-            # An overridden CRF that does not exist (raised by the loader, never
-            # by inference on one paper) stops the run.
-            raise
-        except Exception as e:  # noqa: BLE001 — a CRF load/inference failure must not 0 the refs
-            ref_strings = []
-            if self._llm_skipped and isinstance(e, ImportError):
-                # A fast run on an install without the torch extra: the CRF was never
-                # going to be there, so this is a missing optional dependency, not an error.
-                failure_reason = "crf_unavailable"
-                logger.info("CRF segmenter not installed; falling through (%s)", e)
-            else:
-                failure_reason = "segmentation_error"
-                self._record_warning(WarningCode.REF_SEG_CRF_ERROR, f"CRF segmenter error: {e!r}")
+        if getattr(self._settings, "REF_TEXT_SEG_MODEL_ID", None):
+            strategy = "text_tagger"
+            ref_strings, failure_reason, flags = self._text_tagger_segment(ref_text)
+        else:
+            strategy, flags = "crf", ()
+            ref_strings, failure_reason = self._crf_segment(ref_text)
         if ref_strings:
-            self._record_segmentation_attempt("crf", ref_text, segments=ref_strings, selected=True)
+            self._record_segmentation_attempt(
+                strategy, ref_text, segments=ref_strings, selected=True, reason_flags=flags
+            )
             return ref_strings
         self._record_segmentation_attempt(
-            "crf", ref_text, selected=False, reason_flags=(failure_reason,)
+            strategy, ref_text, selected=False, reason_flags=(failure_reason, *flags)
         )
         if len(ref_text.strip()) >= _REF_REGION_NONEMPTY_MIN_CHARS:
             recovered = _marker_split_refs(ref_text)
@@ -2830,6 +2871,53 @@ class ReferenceExtractor:
                 f"references region present ({len(ref_text.strip())} chars) but 0 segments",
             )
         return ref_strings
+
+    def _crf_segment(self, ref_text: str) -> tuple[list[str], str]:
+        """The CRF segmenter's references, and the reason when there are none."""
+        failure_reason = "no_segments"
+        try:
+            with LOCAL_INFERENCE_LOCK:
+                ref_strings = _get_ner_segmenter(self._settings).segment(ref_text)
+        except ModelOverrideError:
+            # An overridden CRF that does not exist (raised by the loader, never
+            # by inference on one paper) stops the run.
+            raise
+        except Exception as e:  # noqa: BLE001 — a CRF load/inference failure must not 0 the refs
+            ref_strings = []
+            if self._llm_skipped and isinstance(e, ImportError):
+                # A fast run on an install without the torch extra: the CRF was never
+                # going to be there, so this is a missing optional dependency, not an error.
+                failure_reason = "crf_unavailable"
+                logger.info("CRF segmenter not installed; falling through (%s)", e)
+            else:
+                failure_reason = "segmentation_error"
+                self._record_warning(WarningCode.REF_SEG_CRF_ERROR, f"CRF segmenter error: {e!r}")
+        return ref_strings, failure_reason
+
+    def _text_tagger_segment(self, ref_text: str) -> tuple[list[str], str, tuple[str, ...]]:
+        """The text segmenter's references (``REF_TEXT_SEG_MODEL_ID``), in the CRF's place.
+
+        Returns ``(references, reason when there are none, the model's figures)``.
+        A segmenter the Hub cannot serve now is absent for this paper
+        (``tagger_unavailable``); an error on this paper is a
+        ``segmentation_error`` with a ``REF_SEG_CRF_ERROR`` warning, as for the
+        CRF. Either way the paper goes on to the CRF's own next tier.
+        """
+        try:
+            with LOCAL_INFERENCE_LOCK:
+                segmenter = _get_text_segmenter(self._settings)
+                if segmenter is None:
+                    return [], "tagger_unavailable", ()
+                result = segmenter.segment_text(ref_text)
+        except _PASS_THROUGH:
+            raise
+        except Exception as e:  # noqa: BLE001 — one paper's failure must not 0 the refs
+            logger.warning("text reference segmenter failed on this paper (%r); declining", e)
+            self._record_warning(
+                WarningCode.REF_SEG_CRF_ERROR, f"text reference segmenter error: {e!r}"
+            )
+            return [], "segmentation_error", (f"error={type(e).__name__}",)
+        return list(result.segments), "no_segments", result.receipt_flags()
 
     def _authoritative_native_selected(self) -> bool:
         """Whether the selected segmentation is a JATS ref-list taken verbatim.

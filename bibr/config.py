@@ -2984,6 +2984,21 @@ class GlobalSettings(_BibrSettings):
         description="Local path or HF Hub repo id for the NER reference-segmenter checkpoint "
         "(optionally suffixed :filename.pt).",
     )
+    # Opt-in ONNX token tagger that takes the CRF segmenter's place
+    # (bibr/extract/text_segmenter.py). Unset by default: no model is published.
+    REF_TEXT_SEG_MODEL_ID: str | None = Field(
+        None,
+        description="Text reference segmenter: a Hub repo id or a local directory (segmenter.json, "
+        "model.onnx and tokenizer.json, in it or in onnx/). When set, it replaces the CRF "
+        "segmenter (NER_SEG_CKPT) as the last-resort segmentation tier and needs no torch; the "
+        "CRF is then not loaded. Setting both this and NER_SEG_CKPT away from its default is an "
+        "error. Unset (default): not used.",
+    )
+    REF_TEXT_SEG_REVISION: str | None = Field(
+        None,
+        description="Hub revision (commit, branch or tag) of REF_TEXT_SEG_MODEL_ID when it is a "
+        "Hub repo id; unset reads main. Ignored for a local directory.",
+    )
     # Parser default is v5.1: UltraBERT-150M + feature-gated CRF trained on the
     # reference markup of CC BY / CC0 JATS papers, LinkedBooks and the v4.5 gold
     # rows (refsets sealed test ref_exact 0.75 vs 0.42 for v4.5, RenoBench 0.73
