@@ -351,6 +351,44 @@ by an earlier version, carries neither.
   printed link was broken by a line wrap (`https://doi. org/10.…`) or misprinted
   without `org/`. The DOI is now read from a `url` value that is, as a whole, a
   resolver link; a DOI the parser emitted is never replaced.
+- A DOI or URL printed across a line break is joined again in more of the shapes
+  a PDF's text layer produces, and a line that is not part of it is no longer
+  glued on. A line that ends on "10." before the rest of the DOI, right after the
+  registrant slash, or inside a word of the suffix no longer leaves a space inside
+  the DOI, which cost the link the DOI makes. A long URL whose scheme lies far back
+  on the line is joined as a short one is, and a wrap after "/", "_", "=" or "&",
+  inside a word of the path or before a file extension is read as part of the path.
+  A dot that ends a DOI no longer pulls a following link or reference into it. A
+  hyphen at a line end printed as U+2010 or U+2011 is joined or kept by the rule an
+  ASCII hyphen follows.
+  - A wrap inside a link joins only when the first word of the next line is made
+    like the rest of it: it holds a path or query character, a file name, an
+    identifier (a run of digits among letters, a long mix of letters and digits,
+    several colons or dots), a hyphenated slug of three words or more, the end of a
+    word the wrap split, or it stands alone, that is, ends its line, is followed by
+    a citation ("accessed 2024") or by no word of prose. Prose ("results show",
+    "well-being"), a code ("COVID-19", "H1N1"), a name and its initials, a label
+    ("ISSN", "E-ISSN", "DOI:", "e-mail:"), a bracketed date or note, a new link or
+    DOI and the number of the next reference stay on their own line. This holds for
+    a link of any length: some wraps that the earlier releases joined after a
+    trailing "/", such as "/" before "(accessed on 3 March 2020)", "[Last accessed
+    ...]" or "2016 Volume 4", are now left as printed.
+  - A no-break or thin space ends a word of the text, as a space does, when the wrap
+    is read, and a host that a wrap splits at its dot is joined inside a link that
+    holds another address ("web/2012/http://www." and "communities.example.gov").
+  - The shapes that rejoin the suffix of a DOI after a closing bracket, an
+    underscore or a dot, and inside a word, run on reference entries and on text of
+    unknown kind. `fix_ocr_artifacts` takes `reference` (default `None`, unknown); the
+    PDF parser passes `False` for every region whose layout label is not a
+    reference, and the reference line stream passes `True`. In a replay over the
+    stored text of about 4,000 papers none of these shapes fired outside reference
+    entries, so they are not applied there. The other shapes run on every region.
+  - The work per link is bounded: the text before a wrap is read back to the last
+    space but at most 1,000 characters, and the text is scanned in one pass (at most
+    three when a pass changed something), so a link printed over thousands of short
+    lines is joined in time that grows with the number of lines. A link that holds a
+    word of more than 1,000 characters without a space is left as printed.
+  - Text without a DOI, a URL or such a hyphen at a line break comes out as before.
 - A region the cloud vision OCR (`--ocr anthropic`, `openai`, `gemini`) could not
   read after its retries, or whose answer was cut off at its output cap, now
   shows in the export as an `OCR_REGION_FAILED` warning with the page, the

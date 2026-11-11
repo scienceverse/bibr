@@ -149,6 +149,8 @@ def is_text_layer_mode(ctx: Any) -> bool:
 _UNREAD_TASKS = frozenset({"skip", "abandon"})
 _FORMULA_LABELS = frozenset({"formula", "display_formula", "inline_formula"})
 _CAPTION_LABELS = frozenset({"figure_title", "table_title", "chart_title"})
+# Layout labels of reference entries and lists (see ``fix_ocr_artifacts``).
+_REFERENCE_LABELS = frozenset({"reference", "reference_content"})
 # Formula numbers ("(3)") and one-symbol formulas are shorter than the
 # three-character allowance every other region gets.
 _FORMULA_MIN_CHARS = 1
@@ -512,7 +514,7 @@ def _fill_region(
         read_box = _snapped_caption_box(page, bbox) or bbox
     text = _read_text(page, read_box)
     if "\x02" in text:
-        text = fix_ocr_artifacts(text)
+        text = fix_ocr_artifacts(text, reference=label in _REFERENCE_LABELS)
     if not text.strip():
         return "empty"
     text, dropped, inside = _drop_private_use(text)
