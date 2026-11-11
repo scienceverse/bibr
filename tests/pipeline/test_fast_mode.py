@@ -1649,7 +1649,11 @@ async def test_a_fast_run_loads_the_tagger_from_its_own_settings_and_device(tmp_
     # configured model, and the session opened on the device the run uses.
     assert GlobalSettings().ml.front_tagger_mode == "off"
     assert loads == [
-        (GlobalSettings().ml.front_tagger_model_id, None, LocalPipeline(crossref=False).device)
+        (
+            GlobalSettings().ml.front_tagger_model_id,
+            GlobalSettings().ml.front_tagger_revision,
+            LocalPipeline(crossref=False).device,
+        )
     ]
     assert result["metadata"]["title"] == _TITLE
 
