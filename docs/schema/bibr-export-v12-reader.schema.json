@@ -1729,6 +1729,18 @@
             "null"
           ]
         },
+        "models": {
+          "default": null,
+          "description": "The models the run was set to load (layout, sentence splitter, reference, front-matter and classifier models), one row each with its setting and identity. A paper need not reach every one; the reference receipts in extraction.diagnostics say which segmentation tier ran. A model the install cannot run (the torch-only CRF segmenter without torch) is left out. Omitted before schema 12.4.",
+          "items": {
+            "$ref": "#/$defs/ModelProvenanceExportReader"
+          },
+          "title": "Models",
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "native_text_formula_number": {
           "default": null,
           "description": "Whether formula_number regions could be read from the PDF text layer (OCR_NATIVE_TEXT_FORMULA_NUMBER). Omitted before schema 12.3.",
@@ -2973,6 +2985,91 @@
         "service"
       ],
       "title": "MetadataMatchExportReader",
+      "type": "object"
+    },
+    "ModelFileExportReader": {
+      "additionalProperties": true,
+      "description": "One file of a local model, by its name in the model's directory and its content.",
+      "properties": {
+        "name": {
+          "description": "The file's path inside the model's directory, e.g. 'onnx/x'.",
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "sha256": {
+          "description": "sha256 of the file's bytes; null for a directory.",
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "sha256"
+      ],
+      "title": "ModelFileExportReader",
+      "type": "object"
+    },
+    "ModelProvenanceExportReader": {
+      "additionalProperties": true,
+      "description": "One model the run was set to load, by the setting that names it and its identity.",
+      "properties": {
+        "files": {
+          "default": null,
+          "description": "For a local model, each file it is read from with its sha256. Omitted for a Hub model, which its id and revision identify.",
+          "items": {
+            "$ref": "#/$defs/ModelFileExportReader"
+          },
+          "title": "Files",
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "The Hub repo id of the model, or for a local model a short name (the last part of its path; the path itself is not recorded).",
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "model": {
+          "description": "What the model does, e.g. 'reference parser'.",
+          "minLength": 1,
+          "title": "Model",
+          "type": "string"
+        },
+        "override": {
+          "description": "Whether the setting differs from the shipped default (a candidate model, a mirror or local copy, or another revision).",
+          "title": "Override",
+          "type": "boolean"
+        },
+        "revision": {
+          "description": "The Hub revision loaded: a commit SHA, or the configured branch or tag when the local Hub cache does not name its commit; null for a local model or an unpinned one the cache does not hold.",
+          "title": "Revision",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "setting": {
+          "description": "The setting that names the model, e.g. 'NER_PARSER_CKPT'.",
+          "minLength": 1,
+          "title": "Setting",
+          "type": "string"
+        }
+      },
+      "required": [
+        "setting",
+        "model",
+        "id",
+        "revision",
+        "override"
+      ],
+      "title": "ModelProvenanceExportReader",
       "type": "object"
     },
     "OcrEngineExportReader": {

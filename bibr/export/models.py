@@ -37,7 +37,10 @@ _SCHEMA_VERSION = "12.4"
 #   - New ``extraction.regions[].read_as`` (``text``, ``table_rebuilt``,
 #     ``formula_plain`` or ``unread``): how the text-layer OCR backend read
 #     the region. Omitted on every other route.
-#   Both keys are omitted when absent, so every 12.3 export is still a valid
+#   - New ``extraction.settings.models``: one row per model the run was set to
+#     load, {setting, model, id, revision, files, override}; a local model is
+#     a short name and the sha256 of its files, never its path.
+#   Every key is omitted when absent, so every 12.3 export is still a valid
 #   12.4 reader input.
 #
 # v12.3 (vs 12.2) — additive:
@@ -1935,6 +1938,59 @@ class LlmEngineExport(BaseModel):
     backend: str | None = Field(default=None, description="Structured-output backend.")
 
 
+class ModelFileExport(BaseModel):
+    """One file of a local model, by its name in the model's directory and its content."""
+
+    model_config = _STRICT
+
+    name: str = Field(
+        min_length=1, description="The file's path inside the model's directory, e.g. 'onnx/x'."
+    )
+    sha256: str | None = Field(
+        pattern=r"^[0-9a-f]{64}$", description="sha256 of the file's bytes; null for a directory."
+    )
+
+
+class ModelProvenanceExport(BaseModel):
+    """One model the run was set to load, by the setting that names it and its identity."""
+
+    model_config = _STRICT
+
+    setting: str = Field(
+        min_length=1, description="The setting that names the model, e.g. 'NER_PARSER_CKPT'."
+    )
+    model: str = Field(min_length=1, description="What the model does, e.g. 'reference parser'.")
+    id: str = Field(
+        min_length=1,
+        description="The Hub repo id of the model, or for a local model a short name (the last "
+        "part of its path; the path itself is not recorded).",
+    )
+    revision: str | None = Field(
+        description="The Hub revision loaded: a commit SHA, or the configured branch or tag when "
+        "the local Hub cache does not name its commit; null for a local model or an unpinned one "
+        "the cache does not hold."
+    )
+    files: list[ModelFileExport] | None = Field(
+        default=None,
+        description="For a local model, each file it is read from with its sha256. Omitted for "
+        "a Hub model, which its id and revision identify.",
+    )
+    override: bool = Field(
+        description="Whether the setting differs from the shipped default (a candidate model, a "
+        "mirror or local copy, or another revision)."
+    )
+
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("files",)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent(self, handler):
+        data = handler(self)
+        for key in self.OMITTED_WHEN_ABSENT:
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
+
+
 class ExtractionSettingsExport(BaseModel):
     """Per-run resolutions of the reference/enrichment knobs."""
 
@@ -1961,13 +2017,22 @@ class ExtractionSettingsExport(BaseModel):
         "configured LLM is used). A --no-llm run is 'full' with extraction.llm null. Omitted "
         "before schema 12.4.",
     )
+    models: list[ModelProvenanceExport] | None = Field(
+        default=None,
+        description="The models the run was set to load (layout, sentence splitter, reference, "
+        "front-matter and classifier models), one row each with its setting and identity. A "
+        "paper need not reach every one; the reference receipts in extraction.diagnostics say "
+        "which segmentation tier ran. A model the install cannot run (the torch-only CRF "
+        "segmenter without torch) is left out. Omitted before schema 12.4.",
+    )
 
-    # A reader of a 12.2 export finds none of these keys (the two flags are 12.3, mode is
-    # 12.4).
+    # A reader of a 12.2 export finds none of these keys (the two flags are 12.3, mode and
+    # models are 12.4).
     OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = (
         "native_text_header_footer",
         "native_text_formula_number",
         "mode",
+        "models",
     )
 
     @model_serializer(mode="wrap")

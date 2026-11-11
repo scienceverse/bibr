@@ -178,7 +178,7 @@ server or a backend written to `.env` still reads scans.
 
 ### Added — export schema 12.4 (additive)
 
-The export moves to schema `12.4`, which adds two optional keys; every 12.x
+The export moves to schema `12.4`, which adds three optional keys; every 12.x
 export, 12.3 included, is still valid input for the 12.x reader. A consumer that
 validates with the 12.3 strict schema rejects 12.4 exports (the version
 constant) and needs the 12.4 schema.
@@ -188,6 +188,17 @@ constant) and needs the 12.4 schema.
 - The opt-in `extraction.regions[]` rows carry `read_as` when the text-layer
   OCR backend read the region: `text`, `table_rebuilt`, `formula_plain` or
   `unread`. It is omitted on every other route.
+- `extraction.settings.models` names the models the run was set to load, so
+  one export says which models produced it: one row per model with the
+  setting that names it, what it does, its Hub repo id and revision (a branch
+  or tag resolved to its commit through the local Hub cache), and whether it
+  differs from the shipped default. A local model is recorded by a short name
+  (the last part of its path) and the sha256 of each of its files, never by
+  its path. The layout model is the one the runtime loads (the ONNX export, or
+  the torch checkpoint with `ML_RUNTIME=torch`); the CRF segmenter is listed
+  only on an install with `torch`. Rows are per run, not per paper: the
+  reference receipts say which segmentation tier ran. `bibr serve` exports
+  carry them too.
 
 Both keys are omitted when absent, so an export made outside the pipeline, or
 by an earlier version, carries neither.
