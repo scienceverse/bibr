@@ -800,8 +800,11 @@ A setting is an *override* when its value, or its revision, differs from the
 shipped default. That includes a mirror of a shipped model, an offline copy
 of it, and the shipped repo at another revision such as `main`: all of these
 are recorded as overrides, and all of them load and run as before. Four rules
-apply to overrides only, so a run on the shipped models behaves and exports
-exactly as before:
+apply to overrides only. A run on the shipped models extracts what it did
+before; its exports differ in two ways that have nothing to do with these
+rules: they name the models the run was set to load in
+`extraction.settings.models`, and the text reading joins more of the URLs and
+DOIs that a line break split:
 
 - **A model that cannot be loaded stops the run.** Whatever the reason (the
   path is missing; the Hub has no such repo, revision or file; the Hub cannot
@@ -818,9 +821,12 @@ exactly as before:
   `bibr batch --serve-url` run stops the same way when the server answers
   `model_override_failed`.
 - **An error at inference is recorded, and a repeated one stops the run.**
-  When a loaded override raises on one paper, the paper falls back as it would
-  without the override, and its export carries a
-  `MODEL_OVERRIDE_INFERENCE_FAILED` processing warning naming the setting.
+  When a loaded override raises on one paper, the paper takes that tier's
+  error path (the path the code takes when that model raises: a failing text
+  segmenter, for instance, sends the paper on to the split on printed
+  reference markers, not to the CRF a run without the override would use),
+  and its export carries a `MODEL_OVERRIDE_INFERENCE_FAILED` processing
+  warning naming the setting.
   When the same overridden model raises on three papers in a row, the run
   stops as for a model that cannot be loaded. The papers written with the
   fallback before the stop are named in the run's summary and in

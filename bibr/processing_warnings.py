@@ -294,9 +294,10 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     "without contents when its caption labels it (JATS: when it has a label or caption) and "
     "dropped otherwise.",
     WarningCode.MODEL_OVERRIDE_INFERENCE_FAILED: "A model set away from its shipped default "
-    "(a model override) loaded but raised on this paper; the paper fell back as it would "
-    "without the model, so this export does not show the candidate's answer. The run stops "
-    "after the override raised on several papers in a row.",
+    "(a model override) loaded but raised on this paper; the paper took that tier's error "
+    "path, which is not always what a run without the override would do, so this export does "
+    "not show the candidate's answer. The run stops after the override raised on several "
+    "papers in a row on which it ran.",
 }
 
 

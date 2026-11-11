@@ -109,8 +109,9 @@ too: it is recorded as one, and it loads and runs as before.
   failed. `bibr serve` answers such a request `500` with `error_code`
   `model_override_failed`, and `bibr batch --serve-url` stops on it. The same
   failures of a shipped default behave as before.
-- An overridden model that loads but raises on a paper leaves that paper to
-  fall back as it would without it, and the paper's export carries a
+- An overridden model that loads but raises on a paper sends that paper down
+  the tier's error path, which is not always what a run without the override
+  would do, and the paper's export carries a
   `MODEL_OVERRIDE_INFERENCE_FAILED` warning naming the setting. When the same
   model raises on three papers in a row, the run stops as above. A resumed
   `bibr batch` runs the papers written with that warning again, without
@@ -167,8 +168,10 @@ too: it is recorded as one, and it loads and runs as before.
   TOML, JSON and YAML files and the docs), lists every such place, and lists
   the tests that name it.
 
-A run with every model setting at its default is unchanged. See "Running a
-candidate model" in the configuration guide.
+A run with every model setting at its default extracts what it did before; its
+exports gain the `extraction.settings.models` block, and the text reading joins
+more of the URLs and DOIs that a line break split. See "Running a candidate model" in the configuration
+guide.
 
 ### Added — the text-layer OCR route
 

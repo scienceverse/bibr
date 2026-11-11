@@ -23,8 +23,9 @@ can be compared with the shipped models, so these rules hold for them:
    comparison must never report the shipped path, or no model, under the
    candidate's name.
 3. **An inference error is recorded per paper, and repeated ones stop the run.**
-   A loaded override that raises on one paper falls back for that paper as the
-   shipped model would, and the paper's export says so with a
+   A loaded override that raises on one paper takes that tier's error path for
+   that paper (the path a model error takes, which is not always what a run
+   without the override would do), and the paper's export says so with a
    ``MODEL_OVERRIDE_INFERENCE_FAILED`` warning. When it raised on
    :data:`INFERENCE_FAILURE_LIMIT` papers in a row, the run stops with
    :class:`~bibr.exceptions.ModelOverrideError` (:func:`note_inference_failure`).
@@ -448,7 +449,8 @@ def note_inference_failure(
     return ProcessingWarning(
         WarningCode.MODEL_OVERRIDE_INFERENCE_FAILED,
         f"{spec.env} ({spec.label}) raised {type(exc).__name__} on this paper; the paper "
-        "fell back as it would without the override",
+        "took that tier's error path, which is not always what a run without the override "
+        "would do",
     )
 
 
