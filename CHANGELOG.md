@@ -346,6 +346,11 @@ by an earlier version, carries neither.
 
 ### Fixed
 
+- A reference whose DOI is printed only as a resolver link no longer loses the
+  DOI when the parser files the link under `url`. This happened when the
+  printed link was broken by a line wrap (`https://doi. org/10.…`) or misprinted
+  without `org/`. The DOI is now read from a `url` value that is, as a whole, a
+  resolver link; a DOI the parser emitted is never replaced.
 - A region the cloud vision OCR (`--ocr anthropic`, `openai`, `gemini`) could not
   read after its retries, or whose answer was cut off at its output cap, now
   shows in the export as an `OCR_REGION_FAILED` warning with the page, the
