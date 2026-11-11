@@ -112,7 +112,10 @@ too: it is recorded as one, and it loads and runs as before.
 - An overridden model that loads but raises on a paper leaves that paper to
   fall back as it would without it, and the paper's export carries a
   `MODEL_OVERRIDE_INFERENCE_FAILED` warning naming the setting. When the same
-  model raises on three papers in a row, the run stops as above.
+  model raises on three papers in a row, the run stops as above. A resumed
+  `bibr batch` runs the papers written with that warning again, without
+  `--retry-failed`, so they get the repaired model's answer (a paper that keeps
+  falling back waits for `--retry-failed` after three runs).
 - `bibr chew` and `bibr batch` load every override the run will use, from a
   local path or the Hub, before the first paper (`--dry-run` too); a stale
   setting for a model the run does not use is ignored. Every overridden ONNX

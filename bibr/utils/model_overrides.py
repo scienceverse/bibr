@@ -28,6 +28,8 @@ can be compared with the shipped models, so these rules hold for them:
    ``MODEL_OVERRIDE_INFERENCE_FAILED`` warning. When it raised on
    :data:`INFERENCE_FAILURE_LIMIT` papers in a row, the run stops with
    :class:`~bibr.exceptions.ModelOverrideError` (:func:`note_inference_failure`).
+   A resumed ``bibr batch`` runs the papers written with the warning again
+   (:func:`bibr.batch.ledger.fell_back_on_override`).
 4. **Checked before the run.** ``bibr chew`` and ``bibr batch`` load every
    override the run will use, a local path or a Hub id, before the first paper
    (:func:`check_model_overrides`), so a model that does not load stops the run

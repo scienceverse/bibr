@@ -403,3 +403,38 @@ def test_record_failed_line_leaves_validation_counts_empty(tmp_path):
 
     assert entry["n_validation_errors"] is None
     assert entry["n_validation_warnings"] is None
+
+
+def _fell_back(paper_id: str = "p") -> dict:
+    return {
+        "paper_id": paper_id,
+        "status": "ok",
+        "warnings": {"count": 1, "codes": {"MODEL_OVERRIDE_INFERENCE_FAILED": 1}},
+    }
+
+
+def test_plan_reruns_an_export_that_fell_back_from_an_overridden_model(tmp_path):
+    """Written with the fallback, it does not hold the candidate's answer: run it again."""
+    ledger = Ledger(tmp_path / "outcomes.jsonl")
+    ledger.append(_fell_back())
+    ledger.append({"paper_id": "q", "status": "ok", "warnings": {"count": 0, "codes": {}}})
+    plan = ledger.plan(_items(tmp_path, ["p", "q"]))
+    assert [i.paper_id for i in plan.to_run] == ["p"]
+    assert plan.override_fallbacks == {"p"}
+    assert [i.paper_id for i in plan.skipped_ok] == ["q"]
+
+
+def test_a_paper_that_keeps_falling_back_waits_for_retry_failed(tmp_path):
+    ledger = Ledger(tmp_path / "outcomes.jsonl")
+    for _ in range(2):
+        ledger.append(_fell_back())
+    assert _run_ids(ledger, tmp_path) == ["p"]
+    ledger.append(_fell_back())
+    plan = ledger.plan(_items(tmp_path, ["p"]))
+    assert plan.to_run == [] and [i.paper_id for i in plan.skipped_failed] == ["p"]
+    assert _run_ids(ledger, tmp_path, retry_failed=True) == ["p"]
+    # An export the candidate answered settles it; a later fallback counts from one.
+    ledger.append({"paper_id": "p", "status": "ok"})
+    assert _run_ids(ledger, tmp_path) == []
+    ledger.append(_fell_back())
+    assert _run_ids(ledger, tmp_path) == ["p"]
