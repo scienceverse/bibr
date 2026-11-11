@@ -55,7 +55,7 @@ from bibr.batch.manifest import (
 )
 from bibr.batch.remote import RemoteAuthError, RemoteExecutor, RemoteOptions, configured_value
 from bibr.batch.report import compute_report, render_report
-from bibr.exceptions import ModelOverrideError
+from bibr.utils.model_overrides import find_model_override_error
 from bibr.utils.transient import is_service_outage
 
 logger = logging.getLogger(__name__)
@@ -480,9 +480,29 @@ class LocalExecutor:
                         ),
                     )
                 return "interrupted"
-            except ModelOverrideError as exc:
-                # A model the settings name does not exist: every later paper would
-                # fail the same way, so the run stops; the chunk never got a verdict.
+            except Exception as raised:  # noqa: BLE001 — sorted below
+                exc = find_model_override_error(raised)
+                if exc is None:
+                    logger.exception("chunk %d/%d crashed", index, total_chunks)
+                    elapsed = self._clock() - t0
+                    finished_at = utc_now_iso()
+                    code = UPSTREAM_UNAVAILABLE if is_service_outage(raised) else CHUNK_ERROR
+                    for item in chunk:
+                        on_outcome(
+                            item,
+                            Outcome(
+                                "failed",
+                                error_code=code,
+                                error=f"{type(raised).__name__}: {raised}",
+                                started_at=started_at,
+                                finished_at=finished_at,
+                                duration_s=elapsed,
+                            ),
+                        )
+                    continue
+                # A model the settings name does not load, or keeps raising: every
+                # later paper would fail the same way, so the run stops; the chunk
+                # never got a verdict, and a resumed run runs it again.
                 finished_at = utc_now_iso()
                 for item in chunk:
                     on_outcome(
@@ -498,24 +518,6 @@ class LocalExecutor:
                     )
                 self.fatal = f"Model override problem: {exc}"
                 return "model_override_failed"
-            except Exception as exc:  # noqa: BLE001 — a crashed chunk is N failed papers
-                logger.exception("chunk %d/%d crashed", index, total_chunks)
-                elapsed = self._clock() - t0
-                finished_at = utc_now_iso()
-                code = UPSTREAM_UNAVAILABLE if is_service_outage(exc) else CHUNK_ERROR
-                for item in chunk:
-                    on_outcome(
-                        item,
-                        Outcome(
-                            "failed",
-                            error_code=code,
-                            error=f"{type(exc).__name__}: {exc}",
-                            started_at=started_at,
-                            finished_at=finished_at,
-                            duration_s=elapsed,
-                        ),
-                    )
-                continue
             elapsed = self._clock() - t0
             finished_at = utc_now_iso()
             if len(results) != len(chunk):

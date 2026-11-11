@@ -214,11 +214,21 @@ class Pipeline:
             settings=self._settings_for(run_config),
         )
 
+        from bibr.utils.model_overrides import override_failure_scope, pending_override_failure
+
         try:
-            for stage in self._stages:
-                await run_stage(ctx, stage)
-                if not ctx.alive() and stage.name != "export":
-                    break
+            # A model override that does not load, or keeps raising, stops the run
+            # (bibr.utils.model_overrides): whether a stage passed the error on,
+            # recorded it on a paper or swallowed it, the chunk raises it after
+            # the stage, so no paper gets a verdict for it.
+            with override_failure_scope() as override_failures:
+                for stage in self._stages:
+                    await run_stage(ctx, stage)
+                    failure = pending_override_failure(override_failures, file_states)
+                    if failure is not None:
+                        raise failure
+                    if not ctx.alive() and stage.name != "export":
+                        break
         finally:
             # A file that errored after post-parse but kept its result (so it
             # was not freed at a stage boundary) never reaches the enrich

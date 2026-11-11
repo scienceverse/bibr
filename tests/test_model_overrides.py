@@ -681,3 +681,136 @@ def test_an_uncached_hub_override_offline_stops_the_preflight_and_the_run(tmp_pa
         ref_extractor._get_text_segmenter(settings)
     (record,) = [r for r in run_records() if r["setting"] == "REF_TEXT_SEG_MODEL_ID"]
     assert record["loaded"] is False
+
+
+# -- the error reaches the run, whatever caught it ----------------------------------
+
+
+def _override_error(settings=None):
+    settings = settings or snapshot_settings()
+    settings.REF_GEOM_SEG_MODEL_ID = "/nonexistent/geom.joblib"
+    error = override_load_error(settings, "REF_GEOM_SEG_MODEL_ID", FileNotFoundError("gone"))
+    assert isinstance(error, ModelOverrideError)
+    return error
+
+
+class _Stage:
+    requires = None
+    produces = None
+
+    def __init__(self, name, run):
+        self.name = name
+        self._run = run
+        self.ran = 0
+
+    async def run(self, ctx):
+        self.ran += 1
+        await self._run(ctx)
+
+
+def _pipeline(*stages):
+    from bibr.pipeline.context import RunConfig
+    from bibr.pipeline.pipeline import Pipeline
+
+    return Pipeline(
+        stages=stages, resources=MagicMock(), config=RunConfig(), settings=snapshot_settings()
+    )
+
+
+async def _swallowed(ctx):
+    try:
+        raise _override_error()
+    except ModelOverrideError:
+        pass  # a stage that keeps going on any error
+
+
+async def _on_the_paper(ctx):
+    for fs in ctx.file_states:
+        error = _override_error()
+        fs.set_error(f"Post-parse failed: {error}", code="extraction_failed", exc=error)
+
+
+async def _in_a_thread(ctx):
+    import asyncio
+
+    def load():
+        try:
+            raise _override_error()
+        except ModelOverrideError:
+            return None
+
+    await asyncio.to_thread(load)
+
+
+async def _nothing(ctx):
+    return None
+
+
+@pytest.mark.parametrize("stage", [_swallowed, _on_the_paper, _in_a_thread])
+async def test_a_chunk_raises_an_override_failure_whatever_the_stage_did_with_it(tmp_path, stage):
+    from bibr.pipeline.state import FileState
+
+    first, after = _Stage("parse_segment", stage), _Stage("export", _nothing)
+    with pytest.raises(ModelOverrideError, match="REF_GEOM_SEG_MODEL_ID"):
+        await _pipeline(first, after).process_chunk([FileState(path=tmp_path / "a.pdf")])
+    assert (first.ran, after.ran) == (1, 0)
+
+
+async def test_a_chunk_with_an_ordinary_paper_error_does_not_raise(tmp_path):
+    from bibr.pipeline.state import FileState
+
+    async def paper_error(ctx):
+        for fs in ctx.file_states:
+            fs.set_error("bad paper", code="extraction_failed", exc=ValueError("bad"))
+
+    fs = FileState(path=tmp_path / "a.pdf")
+    await _pipeline(_Stage("parse_segment", paper_error), _Stage("export", _nothing)).process_chunk(
+        [fs]
+    )
+    assert fs.error_code == "extraction_failed"
+
+
+def test_find_model_override_error_follows_the_cause_chain():
+    from bibr.exceptions import ProcessingError
+    from bibr.utils.model_overrides import find_model_override_error
+
+    error = _override_error()
+    try:
+        try:
+            raise error
+        except ModelOverrideError as inner:
+            raise ProcessingError("wrapped") from inner
+    except ProcessingError as outer:
+        assert find_model_override_error(outer) is error
+    assert find_model_override_error(ValueError("x")) is None
+    assert find_model_override_error(None) is None
+
+
+# -- serve ------------------------------------------------------------------------
+
+
+def test_serve_answers_an_override_failure_as_model_override_failed_without_paths():
+    from bibr.batch.ledger import MODEL_OVERRIDE_FAILED
+    from bibr.exceptions import ProcessingError
+    from bibr.serve.deployments.pipeline import _ERROR_KIND_TO_HTTP, BibrPipelineAPI
+
+    error = _override_error()
+    wrapped = ProcessingError("Post-parse failed")
+    wrapped.__cause__ = error
+    for exc in (error, wrapped):
+        failure = BibrPipelineAPI._translate_error("x.pdf", exc)
+        assert failure["error_kind"] == "model_override"
+        assert failure["error_code"] == MODEL_OVERRIDE_FAILED
+        assert "/nonexistent" not in failure["error"]
+        assert failure["outage"] is False
+    assert _ERROR_KIND_TO_HTTP["model_override"] == 500
+
+
+def test_serve_refuses_to_start_on_a_missing_local_override(tmp_path):
+    from bibr.serve.app import _check_model_overrides
+
+    settings = snapshot_settings()
+    _check_model_overrides(settings)  # the shipped models: no problem, and nothing loads
+    settings.REF_GEOM_SEG_MODEL_ID = str(tmp_path / "missing.joblib")
+    with pytest.raises(ConfigurationError, match="REF_GEOM_SEG_MODEL_ID"):
+        _check_model_overrides(settings)
