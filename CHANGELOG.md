@@ -113,25 +113,38 @@ too: it is recorded as one, and it loads and runs as before.
   the tier's error path, which is not always what a run without the override
   would do, and the paper's export carries a
   `MODEL_OVERRIDE_INFERENCE_FAILED` warning naming the setting. When the same
-  model raises on three papers in a row, the run stops as above. A resumed
+  model raises on three papers in a row on which it ran, the run stops as
+  above (`bibr serve` keeps that count across requests for the life of the
+  process; a paper the model runs on without an error ends it). A resumed
   `bibr batch` runs the papers written with that warning again, without
   `--retry-failed`, so they get the repaired model's answer (a paper that keeps
   falling back waits for `--retry-failed` after three runs); the run's summary
-  names them, and `run_info.json` lists them under `override_fallbacks`.
+  names them with the re-runs each has left, and `run_info.json` lists them
+  under `override_fallbacks`. A paper that has fallen back three times in a
+  row is named as skipped, with the advice to rerun with `--retry-failed`
+  after fixing the model, and a run that processed nothing because of that
+  exits non-zero.
 - The `bibr batch` summary counts the papers a model override stopped as `not
   finished`, says that the run stopped on a model override and that a resume
   processes them, and no longer counts them as failed; `bibr batch report`
   gives the counts as `papers.stopped_on_model_override` and
   `papers.fell_back_on_model_override`.
 - `bibr chew` and `bibr batch` load every override the run will use, from a
-  local path or the Hub, before the first paper (`--dry-run` too); a stale
-  setting for a model the run does not use is ignored. Every overridden ONNX
-  model (the reference parser, the text segmenter, the geometry tagger, the
-  front-matter tagger, the section and paper classifiers) runs once when it
-  loads, at the preflight and in the run, on an input built as a paper's is
-  and filling the longest window the run sends it, and its output shape is
-  checked against the labels or tags of its manifest, so a graph that opens
-  but would fail on papers stops the run before the first one. A shipped
+  local path or the Hub, before the first paper, for every kind of input
+  (`--dry-run` too). A setting for a model the run does not ask (under
+  `--no-llm`, the section and paper classifiers and the reference models; the
+  geometry models without `--ref-seg geom`) is neither checked nor loaded: the
+  run warns once at the start, naming the setting and why, and records it as
+  `not used in this run`. A `--no-llm` run no longer starts the section and
+  paper classifiers, which it never asks. Every overridden ONNX model (the
+  reference parser, the text segmenter, the geometry tagger, the front-matter
+  tagger, the section and paper classifiers) runs when it loads, at the
+  preflight and in the run, on inputs built as a paper's are, in the shapes
+  the run sends it: the longest window and a short one, and a batch of
+  several and a batch of one for the models that take a batch. Its output
+  shape is checked against the labels or tags of its manifest, so a graph
+  that opens but would fail on papers, an export fixed to one batch size or
+  one length included, stops the run before the first one. A shipped
   default is not probed. The section and paper classifiers loaded outside the
   pipeline's classifier resources (calling the classification functions of
   the library directly) stop on such a failure too, instead of going on with
@@ -163,7 +176,8 @@ too: it is recorded as one, and it loads and runs as before.
   the matching `ARG`s in `Dockerfile.serve`, the default-model table and the
   `blob`, `tree`, `resolve` and `commit` links in the docs. It stops, writing
   nothing, when the old pin is written anywhere else in the tree (the old
-  revision or its first eight characters, also inside a URL, and the old repo
+  revision or any abbreviation of it of seven or more characters, also inside
+  a URL, and the old repo
   id when the repo changes; code, scripts, `.github/`, `evaluation/`, shell,
   TOML, JSON and YAML files and the docs), lists every such place, and lists
   the tests that name it.
@@ -241,8 +255,8 @@ constant) and needs the 12.4 schema.
   differs from the shipped default. A local model is recorded by a short name
   and the sha256 of each of its files, never by its path. The short name is
   the directory's own name and `@` the first 12 hex digits of a hash over its
-  files; a name that is a home directory or the user name is recorded as
-  `local-model`. Each file is hashed once per process, and a model directory
+  files; a name that is a home directory or the user name, on Windows and
+  macOS paths too, is recorded as `local-model`. Each file is hashed once per process, and a model directory
   is listed once, not per paper. The layout model is the one the runtime loads (the ONNX export, or
   the torch checkpoint with `ML_RUNTIME=torch`); the CRF segmenter is listed
   only on an install with `torch`. Rows are per run, not per paper: the

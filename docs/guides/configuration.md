@@ -827,26 +827,39 @@ DOIs that a line break split:
   reference markers, not to the CRF a run without the override would use),
   and its export carries a `MODEL_OVERRIDE_INFERENCE_FAILED` processing
   warning naming the setting.
-  When the same overridden model raises on three papers in a row, the run
-  stops as for a model that cannot be loaded. The papers written with the
+  When the same overridden model raises on three papers in a row on which it
+  ran (a paper it is not asked about neither counts nor ends the row; one it
+  runs on without an error ends it), the run stops as for a model that cannot
+  be loaded. The papers written with the
   fallback before the stop are named in the run's summary and in
   `run_info.json` under `override_fallbacks`, and a resumed `bibr batch` runs
   them again without `--retry-failed`, so once the model is repaired their
   exports hold its answers (a paper that keeps falling back waits for
   `--retry-failed` after three runs). The summary counts the papers the stop
-  left unfinished as `not finished`, not as failed.
+  left unfinished as `not finished`, not as failed. `bibr serve` keeps one
+  count per overridden model for the life of the process, across requests:
+  the request of the third paper in a row the model raised on answers `500`
+  with `error_code` `model_override_failed`, and so does every later one it
+  raises on, until a paper it runs on without an error ends the row.
 - **Checked first.** `bibr chew` and `bibr batch` load every override this run
-  will use (given its mode, `--refs` and `--ref-seg`), local or Hub, before
-  the first paper, `--dry-run` included. Every overridden ONNX model (the
-  reference parser, the text segmenter, the geometry tagger, the front-matter
-  tagger and the section and paper classifiers) is also run once, at the
-  preflight and whenever the run loads it, on an input built as a paper's is
-  (its tokenizer, its feature layout, the longest window the run sends it,
-  the tokenizer's last id), and its output shape is checked against the
-  labels or tags its manifest lists (for the parser and the tagger, also the
-  size of the CRF's scores); a model that fails the probe has not loaded. A
-  shipped default is not probed. A problem stops the run with one line per
-  setting; a stale setting for a model the run does not use is ignored.
+  will use (given its mode, `--no-llm`, `--refs` and `--ref-seg`), local or
+  Hub, before the first paper, whatever the input (PDF, DOCX, XML or HTML),
+  `--dry-run` included. Every overridden ONNX model (the reference parser, the
+  text segmenter, the geometry tagger, the front-matter tagger and the section
+  and paper classifiers) is also run at the preflight and whenever the run
+  loads it on inputs built as a paper's are (its tokenizer, its feature
+  layout, the tokenizer's last id), in the shapes the run sends it: the
+  longest window and a short one, and, for the models that take a batch, a
+  batch of several and a batch of one. An export fixed to one batch size or
+  one length fails there. Each output shape is checked against the labels or
+  tags its manifest lists (for the parser and the tagger, also the size of the
+  CRF's scores); a model that fails the probe has not loaded. A shipped
+  default is not probed. A problem stops the run with one line per setting. A
+  setting for a model the run does not ask (the classifiers and the reference
+  models under `--no-llm`, the geometry models without `--ref-seg geom`, any
+  reference model under `--refs off`) is neither checked nor loaded: the run warns once at the
+  start, naming the setting and why, and records it as `not used in this
+  run`.
   `bibr serve` checks the files of every local-path override at startup and
   loads a model when a request first needs it; an override that fails there
   answers `500` with `error_code` `model_override_failed`.
@@ -884,9 +897,9 @@ and counts in `reason_flags`; a declined attempt carries no spans or credible
 starts. An error (`tagger_error`) also adds a `MODEL_OVERRIDE_INFERENCE_FAILED`
 warning to the paper, and errors on three papers in a row stop the run. The
 tagger reads the same 29 line features as the shipped geometry segmenter, in
-sorted name order, and needs only ONNX Runtime; loading it runs the graph once
-on the features of a short reference section and checks that it returns two
-logits per line.
+sorted name order, and needs only ONNX Runtime; loading it runs the graph on
+the features of two short reference sections of different lengths and checks
+that it returns two logits per line.
 
 `REF_TEXT_SEG_MODEL_ID` is unset by default and replaces a tier: the CRF
 segmenter, the last resort of every segmentation strategy (and the whole of
