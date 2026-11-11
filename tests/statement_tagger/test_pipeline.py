@@ -103,6 +103,27 @@ def _discussion_paper() -> PaperContents:
     )
 
 
+def _shared_paragraph_paper() -> PaperContents:
+    """The rules bound the funding statement to its sentence; the tagger reads the paragraph."""
+    return _paper(
+        [
+            (1, "Introduction", 1, CanonicalSection.INTRODUCTION, [("We study things.", 1)]),
+            (
+                2,
+                "Discussion",
+                1,
+                CanonicalSection.DISCUSSION,
+                [
+                    ("The results hold.", 2),
+                    ("We thank the staff for their help.", 3),
+                    ("This study was funded by the Science Council.", 3),
+                    ("Competing interests: none declared.", 4),
+                ],
+            ),
+        ]
+    )
+
+
 def _settings(**ml):
     settings = snapshot_settings()
     for name, value in ml.items():
@@ -185,50 +206,67 @@ def _resolve(contents, tagger):
 
 
 def test_the_tagger_statement_takes_the_field_and_says_so():
-    contents = _discussion_paper()
+    contents = _shared_paragraph_paper()
     before, resolution, metadata = _resolve(contents, KeywordTagger())
-    assert metadata.funding_statement == "This study was funded by the Science Council."
-    assert metadata.coi_statement == "Competing interests: none declared."
+    (rules,) = before.candidate_indices("funding_statement")
+    assert before.candidates[rules].text_ids == (4,)
+    # The tagger's statement is its paragraph, the acknowledgment sentence with it.
+    assert metadata.funding_statement == (
+        "We thank the staff for their help. This study was funded by the Science Council."
+    )
     sources = field_decisions_of(metadata).sources()
     assert sources["funding_statement"] == "statement_tagger"
-    assert sources["coi_statement"] == "statement_tagger"
     (index,) = resolution.selected_indices("funding_statement")
     candidate = resolution.candidates[index]
     assert candidate.method == "statement_tagger"
     assert candidate.classification_source == "statement_tagger"
     assert candidate.classification_score == pytest.approx(0.97)
-    assert candidate.text_ids == (5,)
-    assert candidate.reason_flags[0] == "statement_tagger"
+    assert candidate.text_ids == (3, 4)
+    assert candidate.reason_flags == ("statement_tagger", "replaces_rules")
     # The rules' candidates stay in the resolution.
     assert resolution.candidates[: len(before.candidates)] == before.candidates
+    codes = [(w.code, w.message) for w in contents.processing_warnings]
+    assert (
+        WarningCode.STATEMENT_TAGGER,
+        "funding_statement filled by the statement tagger",
+    ) in codes
 
 
-def test_the_rules_value_stays_where_the_tagger_found_nothing():
-    contents = _paper(
-        [
-            (
-                1,
-                "Funding",
-                1,
-                CanonicalSection.FUNDING,
-                [("This work received support from the Council.", 1)],
-            )
-        ]
-    )
+def test_a_tagger_statement_that_reads_as_the_rules_changes_nothing():
+    contents = _discussion_paper()
+    before, resolution, metadata = _resolve(contents, KeywordTagger())
     expected = PaperMetadata(doi="", title="T")
-    apply_integrity_resolution(
-        contents, expected, resolve_integrity_statements(contents, mode="shadow")
-    )
-    assert expected.funding_statement
-    _before, _resolution, metadata = _resolve(_paper_copy(contents), KeywordTagger())
-    assert metadata.funding_statement == expected.funding_statement
+    apply_integrity_resolution(_discussion_paper(), expected, before)
+    # The tagger reads the funding and competing interests rows the rules chose.
+    assert metadata.funding_statement == "This study was funded by the Science Council."
+    assert metadata.coi_statement == "Competing interests: none declared."
+    assert field_decisions_of(metadata).sources() == field_decisions_of(expected).sources()
     assert field_decisions_of(metadata).sources()["funding_statement"] != "statement_tagger"
+    for field in ("funding_statement", "coi_statement"):
+        assert resolution.selected_indices(field) == before.selected_indices(field)
+        assert resolution.legacy_indices(field) == before.legacy_indices(field)
+    assert not [c for c in resolution.candidates if c.method == "statement_tagger"]
+    messages = [w.message for w in contents.processing_warnings]
+    assert "funding_statement filled by the statement tagger" not in messages
+    assert "coi_statement filled by the statement tagger" not in messages
 
 
-def _paper_copy(contents: PaperContents) -> PaperContents:
-    import copy
+def test_rows_that_differ_in_whitespace_only_read_as_the_same_statement():
+    from dataclasses import replace
 
-    return copy.deepcopy(contents)
+    contents = _discussion_paper()
+    resolution = resolve_integrity_statements(contents, mode="shadow")
+    (rules,) = resolution.candidate_indices("funding_statement")
+    # The same sentence printed twice, the second time with other spacing.
+    contents.sentences.append(
+        PaperSentence(50, "This  study was funded\nby the Science  Council. ", 2, 9)
+    )
+    same = replace(resolution.candidates[rules], method="statement_tagger", text_ids=(50,))
+    other = replace(same, text_ids=(4,))
+    assert pipeline.unchanged_fields(contents, resolution, [("funding_statement", same)]) == {
+        "funding_statement"
+    }
+    assert pipeline.unchanged_fields(contents, resolution, [("funding_statement", other)]) == set()
 
 
 def test_flags_say_whether_the_tagger_replaced_the_rules_or_filled_a_gap():
@@ -236,10 +274,13 @@ def test_flags_say_whether_the_tagger_replaced_the_rules_or_filled_a_gap():
         [
             (
                 1,
-                "Funding",
+                "Discussion",
                 1,
-                CanonicalSection.FUNDING,
-                [("This work was funded by the Council.", 1)],
+                CanonicalSection.DISCUSSION,
+                [
+                    ("We thank the staff for their help.", 1),
+                    ("This study was funded by the Science Council.", 1),
+                ],
             ),
             (2, "Notes", 1, CanonicalSection.DISCUSSION, [("Competing claims were set.", 2)]),
         ]
@@ -270,10 +311,11 @@ def test_an_acknowledgment_inside_a_body_section_gets_a_section_of_its_own():
     assert "We thank" not in contents.sections_text.get(2, "")
     codes = [(w.code, w.message) for w in contents.processing_warnings]
     assert (WarningCode.STATEMENT_TAGGER, "acknowledgment filled by the statement tagger") in codes
+    # The tagger read the funding row the rules chose: no change, no warning.
     assert (
         WarningCode.STATEMENT_TAGGER,
         "funding_statement filled by the statement tagger",
-    ) in codes
+    ) not in codes
 
 
 def test_a_section_of_tagged_rows_only_is_retyped():
@@ -446,12 +488,13 @@ def test_end_to_end_with_a_bundle_on_disk(tmp_path):
     from tests.statement_tagger.bundle import write_bundle
 
     settings = _settings(statement_tagger_model_id=str(write_bundle(tmp_path / "t")))
-    contents = _discussion_paper()
+    contents = _shared_paragraph_paper()
     resolution = resolve_integrity_statements(contents, mode="shadow")
     resolution = apply_statement_tagger(contents, resolution, settings)
     metadata = PaperMetadata(doi="", title="T")
     apply_integrity_resolution(contents, metadata, resolution)
     assert field_decisions_of(metadata).sources()["funding_statement"] == "statement_tagger"
+    assert metadata.funding_statement.startswith("We thank the staff")
     assert "funded by the Science Council" in metadata.funding_statement
 
 

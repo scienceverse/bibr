@@ -16,7 +16,9 @@ adds what they missed:
   when its paragraph holds another statement before it and cut at the next
   end-matter label (:func:`statement_rows`); the rules' candidates stay in the
   resolution, unselected. A field the tagger found nothing for keeps the rules'
-  value. The candidate says where it came from (method ``statement_tagger``,
+  value, and so does a field whose tagger statements read exactly as the
+  rules' (whitespace aside): its candidates and source stay the rules', with no
+  warning. The candidate says where it came from (method ``statement_tagger``,
   its score, ``replaces_rules`` or ``rules_found_none``) and the field's source
   is ``statement_tagger``. (Chosen on development papers with publisher-tagged
   statements: where both had a statement, the tagger's was the right one about
@@ -241,6 +243,32 @@ def _field_candidates(
     return out
 
 
+def _rows_text(ids: Sequence[int], rows_by_id: dict) -> str:
+    """The rows' text joined, whitespace collapsed: what a field renders to from them."""
+    return " ".join(" ".join(rows_by_id[i].text.split()) for i in ids if i in rows_by_id)
+
+
+def unchanged_fields(
+    contents: PaperContents,
+    resolution: IntegrityStatementResolution,
+    additions: Sequence[tuple[str, Any]],
+) -> set[str]:
+    """The fields whose tagger statements read exactly as the rules' (whitespace aside)."""
+    rows_by_id = {row.text_id: row for row in contents.sentences}
+    tagger_ids: dict[str, list[int]] = {}
+    for field, candidate in additions:
+        tagger_ids.setdefault(field, []).extend(candidate.text_ids)
+    out = set()
+    for field, ids in tagger_ids.items():
+        rules = resolution.candidate_indices(field)
+        if not rules:
+            continue
+        rules_ids = [i for k in rules for i in resolution.candidates[k].text_ids]
+        if _rows_text(rules_ids, rows_by_id) == _rows_text(ids, rows_by_id):
+            out.add(field)
+    return out
+
+
 def merge_field_candidates(
     resolution: IntegrityStatementResolution, additions: Sequence[tuple[str, Any]]
 ) -> IntegrityStatementResolution:
@@ -457,6 +485,10 @@ def apply_statement_tagger(
         return resolution
     note_inference_success(settings, SETTING)
     additions = _field_candidates(contents, resolution, statements, blocks)
+    # A field the tagger reads exactly as the rules did keeps the rules'
+    # candidates and source, and gets no warning: nothing changed.
+    kept = unchanged_fields(contents, resolution, additions)
+    additions = [(field, candidate) for field, candidate in additions if field not in kept]
     resolution = merge_field_candidates(resolution, additions)
     sections = apply_section_statements(contents, statements, blocks)
     for name in dict.fromkeys([field for field, _ in additions] + sections):
@@ -481,4 +513,5 @@ __all__ = [
     "merge_field_candidates",
     "reset_statement_tagger",
     "statement_rows",
+    "unchanged_fields",
 ]
