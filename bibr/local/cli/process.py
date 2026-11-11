@@ -548,6 +548,9 @@ async def _run_process(args) -> None:
         if tagger_reason is not None:
             ui.error(console, escape(tagger_reason))
             sys.exit(1)
+    if not args.dry_run:
+        # Every input kind: a DOCX, XML or HTML paper loads the reference,
+        # classifier and statement models too.
         override_reason = _preflight_model_overrides(
             config, warn=lambda m: ui.warn(console, escape(m))
         )

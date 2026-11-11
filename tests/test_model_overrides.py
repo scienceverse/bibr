@@ -999,3 +999,36 @@ def test_serve_refuses_to_start_on_a_missing_local_override(tmp_path):
     settings.REF_GEOM_SEG_MODEL_ID = str(tmp_path / "missing.joblib")
     with pytest.raises(ConfigurationError, match="REF_GEOM_SEG_MODEL_ID"):
         _check_model_overrides(settings)
+
+
+@pytest.mark.parametrize("name", ["paper.docx", "paper.xml", "paper.html"])
+def test_batch_preflight_checks_overrides_for_inputs_that_are_not_pdfs(
+    tmp_path, monkeypatch, capsys, name
+):
+    """A DOCX, XML or HTML paper loads the reference and classifier models too."""
+    from rich.console import Console
+
+    from bibr.local.cli import _build_parser
+    from bibr.local.cli.batch import _local_options
+
+    settings = snapshot_settings()
+    settings.NER_PARSER_CKPT = str(tmp_path / "no-parser")
+    monkeypatch.setattr("bibr.config.Settings", settings)
+    args = _build_parser().parse_args(["batch", str(tmp_path), "--out", "out", "--fast"])
+    options = _local_options(args, Console(stderr=True))
+    problem = options.preflight([tmp_path / name])
+    assert problem is not None and problem.startswith("Model override problem: NER_PARSER_CKPT=")
+
+
+async def test_chew_preflight_checks_overrides_for_a_docx(tmp_path, monkeypatch, capsys):
+    from bibr.local.cli import _build_parser, _run_process
+
+    settings = snapshot_settings()
+    settings.NER_PARSER_CKPT = str(tmp_path / "no-parser")
+    monkeypatch.setattr("bibr.config.Settings", settings)
+    docx = tmp_path / "paper.docx"
+    docx.write_bytes(b"PK\x03\x04")
+    with pytest.raises(SystemExit) as exc:
+        await _run_process(_build_parser().parse_args(["chew", str(docx), "--fast"]))
+    assert exc.value.code == 1
+    assert "Model override problem: NER_PARSER_CKPT=" in capsys.readouterr().err

@@ -245,9 +245,11 @@ def _local_options(args: Any, console: Any) -> Any:
             problem = _preflight_front_tagger(config)
             if problem is not None:
                 return problem
-            problem = _preflight_model_overrides(config, warn=lambda m: ui.warn(console, m))
-            if problem is not None:
-                return problem
+        # Every input kind: a DOCX, XML or HTML paper loads the reference,
+        # classifier and statement models too.
+        problem = _preflight_model_overrides(config, warn=lambda m: ui.warn(console, m))
+        if problem is not None:
+            return problem
         if not announced:
             # Once, and after the checks above: a run that cannot start has
             # downloaded nothing to announce.
