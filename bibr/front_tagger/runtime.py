@@ -210,8 +210,8 @@ def load_front_tagger(
     optional: a missing bundle logs once and the run goes on without its answer,
     which a full run covers with the LLM and a fast run reports as a warning. A
     network failure is not remembered, so the next paper tries again. An
-    overridden bundle (:mod:`bibr.utils.model_overrides`) that cannot load
-    raises :class:`~bibr.exceptions.ConfigurationError` instead.
+    overridden bundle (:mod:`bibr.utils.model_overrides`) that does not exist
+    or cannot be read raises :class:`~bibr.exceptions.ModelOverrideError` instead.
 
     Blocking: the first call reads the bundle (a download, on a first run) and
     opens the session, so async callers run it off the event loop.
@@ -230,18 +230,14 @@ def load_front_tagger(
     key = (str(model_id), revision, str(device) if device else None)
     with _CACHE_LOCK:
         if key in _CACHE:
-            return _CACHE[key]
+            return _note_use(settings, _CACHE[key])
+    from bibr.exceptions import ModelOverrideError
+    from bibr.utils.model_overrides import override_load_error
+
     with _LOAD_LOCK:
         with _CACHE_LOCK:  # loaded by the call this one waited for
             if key in _CACHE:
-                return _CACHE[key]
-        from bibr.utils.model_overrides import (
-            is_model_override,
-            onnx_bundle_files,
-            override_load_error,
-            record_model_load,
-        )
-
+                return _note_use(settings, _CACHE[key])
         tagger: OnnxFrontTagger | None = None
         try:
             bundle = find_onnx_bundle(
@@ -259,12 +255,13 @@ def load_front_tagger(
                 tagger = OnnxFrontTagger(bundle, device)
                 logger.info("Front-matter tagger loaded")
                 logger.debug("Front-matter tagger bundle: %s", bundle)
-                if is_model_override(settings, ENV_MODEL_ID):
-                    record_model_load(settings, ENV_MODEL_ID, onnx_bundle_files(bundle))
+        except ModelOverrideError:
+            raise
         except Exception as exc:  # noqa: BLE001 - optional model, never fatal
+            # An overridden bundle that does not exist stops the run; a network
+            # failure behaves as for the default (retried at the next paper).
             if (strict := override_load_error(settings, ENV_MODEL_ID, exc)) is not None:
-                # An overridden tagger never leaves the run without its answer.
-                raise (exc if exc is strict else strict) from exc
+                raise strict from exc
             logger.warning(
                 "Front-matter tagger %s unavailable (%s); the run goes on without it", model_id, exc
             )
@@ -274,6 +271,21 @@ def load_front_tagger(
                 return None
         with _CACHE_LOCK:
             _CACHE[key] = tagger
+    return _note_use(settings, tagger)
+
+
+def _note_use(settings: GlobalSettings, tagger: OnnxFrontTagger | None) -> OnnxFrontTagger | None:
+    """Write an overridden tagger into the run's record (:mod:`bibr.utils.model_overrides`)."""
+    if tagger is not None:
+        from bibr.utils.model_overrides import (
+            is_model_override,
+            onnx_bundle_files,
+            record_model_load,
+        )
+
+        bundle = getattr(tagger, "bundle_dir", None)
+        if bundle is not None and is_model_override(settings, ENV_MODEL_ID):
+            record_model_load(settings, ENV_MODEL_ID, lambda: onnx_bundle_files(bundle))
     return tagger
 
 

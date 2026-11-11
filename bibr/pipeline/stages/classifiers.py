@@ -6,6 +6,7 @@ import inspect
 import logging
 from typing import TYPE_CHECKING
 
+from bibr.exceptions import ModelOverrideError
 from bibr.pipeline.classifier_resources import ClassifierState
 
 if TYPE_CHECKING:
@@ -69,15 +70,20 @@ def _fail_on_required_failure(ctx: PipelineContext) -> None:
     detail = "; ".join(
         f"{name}: {status.error or 'load failed'}" for name, status in failures.items()
     )
-    if all(getattr(status, "override", False) for status in failures.values()):
-        # An overridden classifier is required whatever ML_CLASSIFIERS_REQUIRED says.
-        message = f"Overridden classifier(s) failed to start ({detail})"
-    else:
-        message = (
-            f"Required classifier(s) failed to start with ML_CLASSIFIERS_REQUIRED=true "
-            f"({detail}); set ML_CLASSIFIERS_REQUIRED=false to allow the run to continue "
-            "without them"
+    overridden = {name: s for name, s in failures.items() if getattr(s, "override", False)}
+    if overridden:
+        # A model setting changed from its default names a classifier that does
+        # not exist: the run's fault, not the papers', and no outage a resumed
+        # batch could outlast (bibr.utils.model_overrides).
+        raise ModelOverrideError(
+            "; ".join(
+                f"{name} classifier: {s.error or 'load failed'}" for name, s in overridden.items()
+            )
         )
+    message = (
+        f"Required classifier(s) failed to start with ML_CLASSIFIERS_REQUIRED=true "
+        f"({detail}); set ML_CLASSIFIERS_REQUIRED=false to allow the run to continue without them"
+    )
     for fs in ctx.file_states:
         if fs.error is None:
             # An outage: the model, not the file, is at fault, so bibr batch

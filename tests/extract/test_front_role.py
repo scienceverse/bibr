@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import joblib
 import pytest
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.feature_extraction import DictVectorizer
 
+from bibr.exceptions import ModelOverrideError
 from bibr.extract import front_role
 from bibr.extract.front_role import (
     FrontRoleClassifier,
@@ -289,13 +292,12 @@ def test_an_overridden_bundle_loads_and_is_recorded_by_checksum(bundle_path):
 
 def test_an_overridden_bundle_that_cannot_load_stops_the_run(tmp_path):
     from bibr.config import snapshot_settings
-    from bibr.exceptions import ConfigurationError
 
     reset_front_role_cache()
     settings = snapshot_settings()
     settings.ml.front_role_model_id = str(tmp_path / "front_role.joblib")
     for _ in range(2):  # not cached as "no model": the second paper fails the same way
-        with pytest.raises(ConfigurationError, match="never falls back"):
+        with pytest.raises(ModelOverrideError, match="never falls back"):
             load_front_role_classifier(settings)
     reset_front_role_cache()
 
@@ -307,9 +309,83 @@ async def test_the_parse_stage_lets_an_override_failure_through(tmp_path):
     from bibr.pipeline.stages.parse_segment import _predict_front_roles
 
     def ensure():
-        raise ConfigurationError("ML_FRONT_ROLE_MODEL_ID='x' names a front-role classifier ...")
+        raise ModelOverrideError("ML_FRONT_ROLE_MODEL_ID='x' names a front-role classifier ...")
 
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ModelOverrideError):
         await _predict_front_roles(
             SimpleNamespace(ensure_front_role=ensure), [], first_page_index=0
         )
+
+    # Any other configuration error of the optional prior is logged, as before.
+    def broken():
+        raise ConfigurationError("the shipped bundle cannot load")
+
+    assert (
+        await _predict_front_roles(
+            SimpleNamespace(ensure_front_role=broken), [], first_page_index=0
+        )
+        is None
+    )
+
+
+def test_a_network_blip_on_a_hub_override_behaves_as_for_the_default():
+    import httpx
+
+    from bibr.config import snapshot_settings
+    from bibr.extract import front_role
+
+    reset_front_role_cache()
+    settings = snapshot_settings()
+    settings.ml.front_role_model_id = "myorg/front-role-mirror"
+    settings.ml.front_role_enabled = True
+    calls = []
+
+    def blip(*args, **kwargs):
+        calls.append(1)
+        raise httpx.ConnectError("temporary failure in name resolution")
+
+    with patch.object(front_role, "FrontRoleClassifier", side_effect=blip):
+        assert load_front_role_classifier(settings) is None
+        # Not cached: the next paper tries again.
+        assert load_front_role_classifier(settings) is None
+    assert len(calls) == 2
+    reset_front_role_cache()
+
+
+def test_a_hub_override_that_does_not_exist_stops():
+    import httpx
+    from huggingface_hub.errors import RepositoryNotFoundError
+
+    from bibr.config import snapshot_settings
+    from bibr.extract import front_role
+
+    reset_front_role_cache()
+    settings = snapshot_settings()
+    settings.ml.front_role_model_id = "myorg/no-such-repo"
+    settings.ml.front_role_enabled = True
+    response = httpx.Response(404, request=httpx.Request("GET", "https://huggingface.co/x"))
+    missing = RepositoryNotFoundError("no such repo", response=response)
+    with (
+        patch.object(front_role, "FrontRoleClassifier", side_effect=missing),
+        pytest.raises(ModelOverrideError, match="myorg/no-such-repo"),
+    ):
+        load_front_role_classifier(settings)
+    reset_front_role_cache()
+
+
+def test_a_cached_override_is_recorded_in_each_run(bundle_path):
+    from bibr.config import snapshot_settings
+    from bibr.utils.model_overrides import begin_run, reset_loaded_model_overrides, run_records
+
+    reset_front_role_cache()
+    reset_loaded_model_overrides()
+    settings = snapshot_settings()
+    settings.ml.front_role_model_id = str(bundle_path)
+    settings.ml.front_role_enabled = True
+    for _ in range(2):
+        begin_run(settings)
+        assert load_front_role_classifier(settings) is not None
+        (record,) = run_records()
+        assert record["loaded"] is True
+    reset_front_role_cache()
+    reset_loaded_model_overrides()

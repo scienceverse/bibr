@@ -38,7 +38,7 @@ class ClassifierStatus:
     device: str | None = None
     error: str | None = None
     peak_vram_bytes: int | None = None
-    # FAILED_REQUIRED because the model setting is an override (bibr.utils.model_overrides).
+    # FAILED_REQUIRED because an overridden model does not exist (bibr.utils.model_overrides).
     override: bool = False
 
 
@@ -137,9 +137,11 @@ class ClassifierResources:
         if self._closed:
             raise RuntimeError("classifier resources are closed")
         if self._started:
+            self._note_use()
             return
         async with self._start_lock:
             if self._started:
+                self._note_use()
                 return
             if self._cuda_available is None:
                 (
@@ -158,6 +160,21 @@ class ClassifierResources:
                 if resource.model is not None and _on_measured_device(resource.status.device):
                     placed += resource.estimated_peak_bytes
             self._started = True
+        self._note_use()
+
+    def _note_use(self) -> None:
+        """Write the loaded overridden classifiers into the run's record."""
+        for resource in (self._paper, self._section):
+            env = _MODEL_SETTINGS[resource.name]
+            if resource.model is None or not is_model_override(self._settings, env):
+                continue
+            # A torch model has no bundle directory; its record names the setting only.
+            bundle_dir = getattr(resource.model, "bundle_dir", None)
+            record_model_load(
+                self._settings,
+                env,
+                lambda d=bundle_dir: onnx_bundle_files(d) if isinstance(d, Path) else (),
+            )
 
     async def classify_paper(self, item):
         await self.start()
@@ -221,7 +238,9 @@ class ClassifierResources:
         except Exception as exc:  # noqa: BLE001 - sticky degraded startup state
             env = _MODEL_SETTINGS[resource.name]
             if (strict := override_load_error(self._settings, env, exc)) is not None:
-                # An overridden classifier is required: no LLM fallback under its name.
+                # An overridden classifier that does not exist stops the run (not an
+                # outage: a resumed batch would fail the same way). A network failure
+                # falls through to the shipped behaviour below.
                 resource.status = ClassifierStatus(
                     ClassifierState.FAILED_REQUIRED, device, str(strict)[:500], override=True
                 )
@@ -231,13 +250,6 @@ class ClassifierResources:
             resource.status = ClassifierStatus(state, device, _safe_error(exc))
             logger.warning("%s classifier load failed: %s", resource.name, exc)
             return
-        env = _MODEL_SETTINGS[resource.name]
-        if is_model_override(self._settings, env):
-            # A torch model has no bundle directory; its record names the setting only.
-            bundle_dir = getattr(resource.model, "bundle_dir", None)
-            files = onnx_bundle_files(bundle_dir) if isinstance(bundle_dir, Path) else ()
-            record_model_load(self._settings, env, files)
-
         peak_vram = _peak_vram_bytes(device)
         resource.status = ClassifierStatus(ClassifierState.READY, device, peak_vram_bytes=peak_vram)
         resource.batcher = InferenceBatcher(

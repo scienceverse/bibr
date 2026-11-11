@@ -51,10 +51,13 @@ CHUNK_ERROR = "chunk_error"
 # The export could not be written: usually the machine's (a full disk, a
 # permission), so it counts as a crash below.
 OUTPUT_WRITE_FAILED = "output_write_failed"
+# A model setting changed from its default names a model that does not exist;
+# the run stops (bibr.utils.model_overrides).
+MODEL_OVERRIDE_FAILED = "model_override_failed"
 # Failed lines that say nothing about the paper, which never got a verdict:
 # the run was stopped, or the serve refused the token. Resume always runs the
 # paper again.
-NEVER_RAN_CODES = frozenset({INTERRUPTED, "http_401", "http_403"})
+NEVER_RAN_CODES = frozenset({INTERRUPTED, MODEL_OVERRIDE_FAILED, "http_401", "http_403"})
 # A crash or a service outage (``chunk_error``, a run killed mid-paper, an
 # export that could not be written, ``upstream_unavailable``, or a remote line
 # whose transient retries ran out) is usually the machine's or the service's,

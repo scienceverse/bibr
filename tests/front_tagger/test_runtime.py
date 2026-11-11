@@ -365,12 +365,36 @@ def test_chunks_that_ask_together_read_the_bundle_once(monkeypatch, tmp_path):
 
 
 def test_an_overridden_tagger_without_a_bundle_stops_the_run(tmp_path):
-    from bibr.exceptions import ConfigurationError
+    from bibr.exceptions import ModelOverrideError
     from bibr.front_tagger import runtime
 
     runtime.reset_front_tagger_cache()
-    with pytest.raises(ConfigurationError, match="never falls back"):
+    with pytest.raises(ModelOverrideError, match="never falls back") as raised:
         runtime.load_front_tagger(_tagger_settings("only", model_id=str(tmp_path / "missing")))
+    # Said once, not wrapped in itself.
+    assert str(raised.value).count("names a front-matter tagger") == 1
+    assert "ModelOverrideError" not in str(raised.value)
+    runtime.reset_front_tagger_cache()
+
+
+def test_a_network_blip_on_a_hub_override_behaves_as_for_the_default(monkeypatch):
+    import httpx
+
+    from bibr.front_tagger import runtime
+
+    runtime.reset_front_tagger_cache()
+    calls = []
+
+    def blip(*args, **kwargs):
+        calls.append(kwargs.get("raise_transient"))
+        raise httpx.ConnectError("temporary failure in name resolution")
+
+    monkeypatch.setattr("bibr.utils.ml_runtime.find_onnx_bundle", blip)
+    settings = _tagger_settings("only", model_id="myorg/front-tagger-mirror")
+    assert runtime.load_front_tagger(settings) is None
+    # Not cached: the next paper tries again.
+    assert runtime.load_front_tagger(settings) is None
+    assert calls == [True, True]
     runtime.reset_front_tagger_cache()
 
 

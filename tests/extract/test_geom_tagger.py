@@ -6,6 +6,7 @@ features, with a constant or feature-weighted logit, and a gate.json.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 from pathlib import Path
@@ -14,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 
-from bibr.exceptions import ConfigurationError
+from bibr.exceptions import ConfigurationError, ModelOverrideError
 from bibr.extract import geom_tagger
 from bibr.extract.geom_segmenter import MODEL_KIND_ADJACENT_BOUNDARY_V2, _feature_rows_for_kind
 from bibr.extract.geom_tagger import (
@@ -205,11 +206,150 @@ def test_bundle_problems_are_named(tmp_path):
         GeomLineTagger(gate)
 
 
+def _gate(root: Path, **gate) -> Path:
+    bundle = _bundle(root)
+    base = {
+        "temperature": 1.0,
+        "threshold": 0.9,
+        "score": "expected_entry_precision",
+        "isotonic_x": [0.0, 0.5, 1.0],
+        "isotonic_y": [0.0, 0.2, 1.0],
+    }
+    (bundle / "gate.json").write_text(json.dumps({**base, **gate}))
+    return bundle
+
+
+def test_a_non_identity_isotonic_map_is_read_as_x_to_y(tmp_path):
+    tagger = GeomLineTagger(_gate(tmp_path / "ok"))
+    # Score 0.5 maps to 0.2; read the other way round it would be 0.5 -> about 0.69.
+    assert tagger.confidence(np.array([1.0, 0.5])) == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize(
+    ("gate", "message"),
+    [
+        # Raw scores in the confidence column (a map written the wrong way round).
+        ({"isotonic_x": [0.0, 0.2, 1.0], "isotonic_y": [0.0, 1.5, 2.0]}, "within"),
+        ({"isotonic_x": [0.0, 1.0, 0.5]}, "isotonic_x must be non-decreasing"),
+        ({"isotonic_y": [0.0, 0.8, 0.5]}, "isotonic_y must be non-decreasing"),
+        ({"isotonic_x": [0.0, 1.0]}, "equal-length"),
+        ({"isotonic_x": [0.0, float("nan"), 1.0]}, "finite"),
+        ({"isotonic_y": [0.0, float("inf"), 1.0]}, "finite"),
+        ({"threshold": 0.0}, "threshold"),
+        ({"threshold": 1.0001}, "threshold"),
+        ({"threshold": float("nan")}, "threshold"),
+        ({"temperature": float("inf")}, "temperature"),
+    ],
+)
+def test_unusable_gates_are_refused(tmp_path, gate, message):
+    with pytest.raises(ConfigurationError, match=message):
+        GeomLineTagger(_gate(tmp_path / "bad", **gate))
+
+
+def test_the_threshold_boundary_is_inclusive(tmp_path):
+    tagger = GeomLineTagger(_gate(tmp_path / "one", threshold=1.0))
+    assert tagger.accepts(1.0)
+    assert not tagger.accepts(0.9999)
+    assert not tagger.accepts(float("nan"))
+
+
+def test_a_nan_confidence_declines(tmp_path, monkeypatch):
+    ex = _extractor(_lines(), _bundle(tmp_path / "tagger"), monkeypatch)
+    with patch.object(GeomLineTagger, "confidence", return_value=float("nan")):
+        assert ex._segment_geom_tagger(_REF_TEXT, _lines()) is None
+    assert _attempts(ex) == [("geom_tagger", False, ("low_confidence_or_empty",))]
+
+
+def test_a_graph_of_the_wrong_shape_is_refused_at_load(tmp_path):
+    bundle = _bundle(tmp_path / "wide")
+    # Three logits per line instead of two.
+    _write_graph(
+        bundle / "onnx" / "tagger.onnx",
+        bias=(0.0, 1.0, 2.0),
+        weights=np.zeros((len(FEATURE_KEYS), 3), np.float32),
+    )
+    with pytest.raises(ConfigurationError, match=r"shape \(3, 3\)"):
+        GeomLineTagger(bundle)
+    (bundle / "onnx" / "tagger.onnx").write_bytes(b"not a graph")
+    with pytest.raises(Exception):  # noqa: B017 - onnxruntime's own error
+        GeomLineTagger(bundle)
+
+
+def test_a_hub_id_is_downloaded_and_never_read_from_the_working_directory(tmp_path, monkeypatch):
+    cached = _bundle(tmp_path / "cache")
+    # A directory of the same name in the working directory must not be read.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "org" / "tagger").mkdir(parents=True)
+    calls = []
+
+    def download(repo_id, filename, revision=None):
+        calls.append((repo_id, filename, revision))
+        return str(cached / filename)
+
+    monkeypatch.setattr("bibr.utils.hf_cache.hf_download_or_cached", download)
+    tagger = GeomLineTagger("org/tagger", "0123abcd")
+    assert calls == [
+        ("org/tagger", "gate.json", "0123abcd"),
+        ("org/tagger", "onnx/tagger.json", "0123abcd"),
+        ("org/tagger", "onnx/tagger.onnx", "0123abcd"),
+    ]
+    assert tagger.onnx_path == cached / "onnx" / "tagger.onnx"
+
+
+def test_the_tier_resolves_a_hub_id_at_its_revision(tmp_path, monkeypatch):
+    cached = _bundle(tmp_path / "cache")
+    seen = []
+
+    def download(repo_id, filename, revision=None):
+        seen.append(revision)
+        return str(cached / filename)
+
+    monkeypatch.setattr("bibr.utils.hf_cache.hf_download_or_cached", download)
+    ex = _extractor(_lines(), "org/hub-tagger", monkeypatch)
+    monkeypatch.setattr(ex._settings, "REF_GEOM_TAGGER_REVISION", "v2")
+    with patch("bibr.extract.ref_extractor._get_geom_segmenter") as get_gbm:
+        out = ex._segment_geom(_REF_TEXT)
+    get_gbm.assert_not_called()
+    assert [s.strip() for s in out] == list(_REFS)
+    assert set(seen) == {"v2"}
+
+
+def test_a_network_failure_on_a_hub_tagger_runs_the_shipped_tier(tmp_path, monkeypatch):
+    import httpx
+
+    def offline(repo_id, filename, revision=None):
+        raise httpx.ConnectError("name resolution")
+
+    monkeypatch.setattr("bibr.utils.hf_cache.hf_download_or_cached", offline)
+    ex = _extractor(_lines(), "org/unreachable-tagger", monkeypatch)
+    gbm = MagicMock()
+    spans = [(0, len(_REF_TEXT))]
+    gbm.segment_spans.return_value = (spans, 0.99, 1, 1)
+    with patch("bibr.extract.ref_extractor._get_geom_segmenter", return_value=gbm):
+        assert ex._segment_geom(_REF_TEXT) == [_REF_TEXT]
+    assert _attempts(ex) == [("geom_tagger", False, ("tagger_unavailable",)), ("geom", True, ())]
+
+
+def test_a_missing_hub_tagger_stops(tmp_path, monkeypatch):
+    import httpx
+    from huggingface_hub.errors import RepositoryNotFoundError
+
+    def missing(repo_id, filename, revision=None):
+        response = httpx.Response(404, request=httpx.Request("GET", "https://huggingface.co/x"))
+        raise RepositoryNotFoundError("no such repo", response=response)
+
+    monkeypatch.setattr("bibr.utils.hf_cache.hf_download_or_cached", missing)
+    ex = _extractor(_lines(), "org/no-such-tagger", monkeypatch)
+    with pytest.raises(ModelOverrideError, match="REF_GEOM_TAGGER_MODEL_ID='org/no-such-tagger'"):
+        ex._segment_geom(_REF_TEXT)
+
+
 # -- the geom tier -----------------------------------------------------------------
 
 
 def _attempts(ex):
-    return [(a.strategy, a.selected, a.reason_flags) for a in ex._segmentation_attempts]
+    """Strategy, selected, and the reason (the first flag; the rest are counts)."""
+    return [(a.strategy, a.selected, a.reason_flags[:1]) for a in ex._segmentation_attempts]
 
 
 def test_a_confident_tagger_answers_and_the_gbm_is_not_asked(tmp_path, monkeypatch):
@@ -220,7 +360,9 @@ def test_a_confident_tagger_answers_and_the_gbm_is_not_asked(tmp_path, monkeypat
         out = ex._segment_geom(_REF_TEXT)
     get_gbm.assert_not_called()
     assert [s.strip() for s in out] == list(_REFS)
-    assert _attempts(ex) == [("geom_tagger", True, ())]
+    assert _attempts(ex) == [("geom_tagger", True, ("final",))]
+    flags = ex._segmentation_attempts[0].reason_flags
+    assert "labeled=3" in flags and "aligned=3" in flags
     # No cascade warning: the tier answered.
     assert not ex.contents.processing_warnings
 
@@ -276,7 +418,7 @@ def test_a_missing_tagger_stops_instead_of_falling_back(tmp_path, monkeypatch):
     gbm = MagicMock()
     with (
         patch("bibr.extract.ref_extractor._get_geom_segmenter", return_value=gbm),
-        pytest.raises(ConfigurationError, match="never falls back"),
+        pytest.raises(ModelOverrideError, match="never falls back"),
     ):
         ex._segment_geom(_REF_TEXT)
     gbm.segment_spans.assert_not_called()
@@ -295,3 +437,119 @@ def test_the_loaded_tagger_is_recorded_by_checksum(tmp_path, monkeypatch):
     assert by_name["tagger.onnx"]["sha256"] == hashlib.sha256(onnx_file.read_bytes()).hexdigest()
     assert by_name["tagger.onnx"]["bytes"] == onnx_file.stat().st_size
     assert set(by_name) == {"tagger.onnx", "tagger.json", "gate.json"}
+
+
+# -- a declined or failing tagger leaves no trace ----------------------------------------
+
+
+_GBM_SPANS = [(0, len(_REFS[0])), (len(_REFS[0]) + 1, len(_REF_TEXT))]
+
+
+async def _extract(tmp_path, monkeypatch, tagger: str | None, *, tagger_error=None):
+    """A whole reference extraction with a stand-in GBM (2 spans) and parser."""
+    from bibr.extract.ref_extractor import REF_PARSE_STRATEGIES
+    from bibr.models import PaperReference
+
+    contents = PaperContents(
+        sentences=[], sections=[], tables=[], links=[], sections_text={}, ref_line_geometry=_lines()
+    )
+    ex = ReferenceExtractor(
+        contents, file_hash="h", llm_client=MagicMock(), seg_strategy="geom", parse_strategy="ner"
+    )
+    ex.llm_client.segment_references = AsyncMock(return_value=[])
+    monkeypatch.setattr(ex._settings, "REF_GEOM_TAGGER_MODEL_ID", tagger)
+
+    async def parse(_extractor, _ref_text, segments):
+        return [
+            PaperReference(
+                bib_id=i + 1,
+                title=seg[:30],
+                authors="A",
+                year=2010,
+                container="J",
+                volume=None,
+                first_page=None,
+            )
+            for i, seg in enumerate(segments)
+        ]
+
+    monkeypatch.setitem(REF_PARSE_STRATEGIES, "ner", parse)
+    gbm = MagicMock()
+    gbm.segment_spans.return_value = (_GBM_SPANS, 0.99, 2, 2)
+    with (
+        patch("bibr.extract.ref_extractor._get_geom_segmenter", return_value=gbm),
+        patch.object(GeomLineTagger, "segment_spans", side_effect=tagger_error)
+        if tagger_error
+        else contextlib.nullcontext(),
+    ):
+        refs = await ex.extract(__import__("pandas").DataFrame({"text": list(_REFS)}))
+    receipt = contents.reference_yield_receipt
+    tagger_attempts = [a for a in receipt.attempts if a.strategy == "geom_tagger"]
+    kept = {
+        "refs": [r.model_dump() for r in refs],
+        "receipt": dataclasses_replace(
+            receipt, attempts=tuple(a for a in receipt.attempts if a.strategy != "geom_tagger")
+        ),
+        "issues": [(i.code, i.message, i.count) for i in ex.validation_issues],
+        "warnings": list(contents.processing_warnings),
+        "credible": ex._credible_source_starts,
+    }
+    return kept, tagger_attempts
+
+
+def dataclasses_replace(obj, **kw):
+    import dataclasses
+
+    return dataclasses.replace(obj, **kw)
+
+
+async def test_a_declining_tagger_changes_nothing_but_its_receipt_line(tmp_path, monkeypatch):
+    # Every line is an opening (3 starts, against the GBM's 2), and the gate declines.
+    declining = str(_bundle(tmp_path / "declining", bias=(0.0, 0.5)))
+    without, _ = await _extract(tmp_path, monkeypatch, None)
+    with_tagger, (attempt,) = await _extract(tmp_path, monkeypatch, declining)
+    assert with_tagger == without
+    assert attempt.selected is False and attempt.credible_starts is None and attempt.spans == ()
+    assert attempt.reason_flags[0] == "low_confidence_or_empty"
+    assert "labeled=3" in attempt.reason_flags
+
+
+async def test_a_tagger_error_on_one_paper_is_a_decline(tmp_path, monkeypatch, caplog):
+    bundle = str(_bundle(tmp_path / "erroring"))
+    without, _ = await _extract(tmp_path, monkeypatch, None)
+    with caplog.at_level("WARNING"):
+        with_tagger, (attempt,) = await _extract(
+            tmp_path, monkeypatch, bundle, tagger_error=RuntimeError("bad input")
+        )
+    assert with_tagger == without
+    assert attempt.reason_flags == ("tagger_error", "error=RuntimeError")
+    assert "geometry line tagger failed on this paper" in caplog.text
+
+
+def test_an_accepted_tagger_answer_is_final_over_the_line_stream(tmp_path, monkeypatch):
+    from bibr.paper_contents import ReferenceSegmentationAttempt
+
+    ex = _extractor(_lines(), _bundle(tmp_path / "tagger"), monkeypatch)
+    ex._segmentation_attempts.append(
+        ReferenceSegmentationAttempt("geom_tagger", ((0, 10),), 1, True, ("final",))
+    )
+    segmentation = MagicMock(
+        entries=list(_REFS),
+        numbered=[False] * 3,
+        link_dois=[None] * 3,
+        section_key=_REF_TEXT,
+        text=_REF_TEXT,
+        reason_flags=(),
+    )
+    stream = MagicMock(rotated=False, lines=[])
+    with (
+        patch("bibr.extract.ref_extractor.build_line_stream", return_value=stream),
+        patch("bibr.extract.ref_extractor.stream_probabilities", return_value=[]),
+        patch("bibr.extract.ref_extractor.segment_line_stream", return_value=segmentation),
+        patch("bibr.extract.ref_extractor.segmentation_quality", side_effect=[0.1, 0.9]),
+        patch.object(ex, "_geom_line_predictor", return_value=None),
+    ):
+        choice = ex._line_stream_choice(MagicMock(), _REF_TEXT, [_REF_TEXT])
+    assert choice.selected is False and choice.ref_strings == [_REF_TEXT]
+    assert ex._segmentation_attempts[0].selected is True
+    assert ex._segmentation_attempts[-1].reason_flags[0] == "tagger_final"

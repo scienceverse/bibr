@@ -21,6 +21,7 @@ def load_ref_parser(
     ``onnx/`` directory (local) or ``onnx/`` in the same repo at ``revision``.
     """
     from bibr.utils.ml_runtime import find_onnx_bundle, hub_bundle_hint, resolve_runtime
+    from bibr.utils.model_overrides import is_model_override
 
     if settings is None:
         from bibr.config import snapshot_settings
@@ -30,7 +31,13 @@ def load_ref_parser(
     runtime, bundle = resolve_runtime(
         "NER reference parser",
         settings=settings,
-        bundle=lambda: find_onnx_bundle(ckpt_str, revision, label="NER reference parser"),
+        # An override tells a network failure from a missing bundle (bibr.utils.model_overrides).
+        bundle=lambda: find_onnx_bundle(
+            ckpt_str,
+            revision,
+            label="NER reference parser",
+            raise_transient=is_model_override(settings, "NER_PARSER_CKPT"),
+        ),
         bundle_hint=hub_bundle_hint("NER_PARSER_CKPT", ckpt_str, revision),
     )
     if runtime == "onnx":

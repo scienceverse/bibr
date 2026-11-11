@@ -17,7 +17,8 @@ and a confident masthead cannot root a record. ``RefLocator`` uses the
 Loading is soft: a missing/unloadable bundle logs once and disables the model
 (``load_front_role_classifier`` returns ``None``), so extraction never fails
 because an optional prior is absent. An overridden bundle (see
-:mod:`bibr.utils.model_overrides`) is the exception: its failure raises.
+:mod:`bibr.utils.model_overrides`) that does not exist or cannot be read is the
+exception: it raises. A network failure behaves the same for both.
 """
 
 from __future__ import annotations
@@ -217,18 +218,15 @@ def load_front_role_classifier(settings: GlobalSettings) -> FrontRoleClassifier 
     key = (str(model_id), revision)
     with _CACHE_LOCK:
         if key in _CACHE:
-            return _CACHE[key]
-    from bibr.utils.model_overrides import (
-        is_model_override,
-        override_load_error,
-        record_model_load,
-    )
+            return _note_use(settings, _CACHE[key])
+    from bibr.utils.model_overrides import override_load_error
 
     try:
         clf: FrontRoleClassifier | None = FrontRoleClassifier(str(model_id), revision=revision)
     except Exception as exc:  # noqa: BLE001 - optional prior, never fatal
+        # An overridden classifier that does not exist stops the run; a network
+        # failure behaves as for the default (retried by the next caller).
         if (strict := override_load_error(settings, "ML_FRONT_ROLE_MODEL_ID", exc)) is not None:
-            # An overridden classifier never falls back to the heuristics.
             raise strict from exc
         logger.warning(
             "Front-role classifier %s unavailable (%s); falling back to heuristics",
@@ -240,10 +238,19 @@ def load_front_role_classifier(settings: GlobalSettings) -> FrontRoleClassifier 
         if is_transient_network_error(exc):
             return None
         clf = None
-    if clf is not None and is_model_override(settings, "ML_FRONT_ROLE_MODEL_ID"):
-        record_model_load(settings, "ML_FRONT_ROLE_MODEL_ID", [clf.path])
     with _CACHE_LOCK:
         _CACHE[key] = clf
+    return _note_use(settings, clf)
+
+
+def _note_use(settings: GlobalSettings, clf: FrontRoleClassifier | None):
+    """Write an overridden classifier into the run's record (:mod:`bibr.utils.model_overrides`)."""
+    if clf is not None:
+        from bibr.utils.model_overrides import is_model_override, record_model_load
+
+        path = getattr(clf, "path", None)
+        if path is not None and is_model_override(settings, "ML_FRONT_ROLE_MODEL_ID"):
+            record_model_load(settings, "ML_FRONT_ROLE_MODEL_ID", [path])
     return clf
 
 

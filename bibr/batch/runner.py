@@ -36,6 +36,7 @@ from bibr.batch.ledger import (
     CHUNK_ERROR,
     INTERRUPTED,
     LEDGER_FILENAME,
+    MODEL_OVERRIDE_FAILED,
     OUTPUT_WRITE_FAILED,
     UPSTREAM_UNAVAILABLE,
     Ledger,
@@ -54,6 +55,7 @@ from bibr.batch.manifest import (
 )
 from bibr.batch.remote import RemoteAuthError, RemoteExecutor, RemoteOptions, configured_value
 from bibr.batch.report import compute_report, render_report
+from bibr.exceptions import ModelOverrideError
 from bibr.utils.transient import is_service_outage
 
 logger = logging.getLogger(__name__)
@@ -424,6 +426,8 @@ class LocalExecutor:
     ):
         self._chew_many = chew_many
         self.batch_size = max(1, batch_size)
+        # Why the run stopped early, for a model override that does not load.
+        self.fatal: str | None = None
         self._clock = clock
         self._wall = wall
 
@@ -437,7 +441,9 @@ class LocalExecutor:
         on_chunk: Callable[[int, int, Sequence[BatchItem]], None] | None = None,
         alone: Collection[str] = (),
     ) -> str:
-        """Returns ``completed`` | ``deadline`` | ``stopped`` | ``interrupted``.
+        """Returns ``completed`` | ``deadline`` | ``stopped`` | ``interrupted``, or
+        ``model_override_failed`` (with :attr:`fatal` set) when a model setting
+        changed from its default names a model that does not exist.
 
         Papers whose ids are in *alone* (their last attempt killed the run)
         come last, each in a chunk of its own: one that kills the run again
@@ -474,6 +480,24 @@ class LocalExecutor:
                         ),
                     )
                 return "interrupted"
+            except ModelOverrideError as exc:
+                # A model the settings name does not exist: every later paper would
+                # fail the same way, so the run stops; the chunk never got a verdict.
+                finished_at = utc_now_iso()
+                for item in chunk:
+                    on_outcome(
+                        item,
+                        Outcome(
+                            "failed",
+                            error_code=MODEL_OVERRIDE_FAILED,
+                            error=str(exc),
+                            started_at=started_at,
+                            finished_at=finished_at,
+                            duration_s=self._clock() - t0,
+                        ),
+                    )
+                self.fatal = f"Model override problem: {exc}"
+                return "model_override_failed"
             except Exception as exc:  # noqa: BLE001 — a crashed chunk is N failed papers
                 logger.exception("chunk %d/%d crashed", index, total_chunks)
                 elapsed = self._clock() - t0
@@ -802,6 +826,11 @@ def _execute(
             "form": dict(options.remote.form),
             "ready": None,
         }
+    if options.remote is None:
+        from bibr.config import snapshot_settings
+        from bibr.utils.model_overrides import begin_run
+
+        begin_run(snapshot_settings())
     write_run_info(options.out, info, append_history=True)
 
     n_ok = 0
@@ -923,8 +952,9 @@ def _execute(
                 # (out of memory, a native crash) leaves no verdict to resume by.
                 ledger.start(item, context=context_holder["context"])
 
+        local_executor = LocalExecutor(chew_many, batch_size=batch_size)
         try:
-            reason = LocalExecutor(chew_many, batch_size=batch_size).run(
+            reason = local_executor.run(
                 plan.to_run,
                 on_outcome=record,
                 deadline=options.deadline,
@@ -940,6 +970,7 @@ def _execute(
                 except Exception:  # noqa: BLE001 — teardown must not mask the run's result
                     logger.warning("pipeline teardown failed", exc_info=True)
         interrupted = reason == "interrupted"
+        fatal = local_executor.fatal
 
     finished_at = utc_now_iso()
     info.update(
@@ -951,12 +982,14 @@ def _execute(
             "fatal": fatal,
         }
     )
-    from bibr.utils.model_overrides import loaded_model_overrides
+    if options.remote is None:
+        from bibr.utils.model_overrides import run_records
 
-    # Which files each overridden model loaded, with their sha256; absent for a
-    # run on the shipped models (and for --serve, whose models load elsewhere).
-    if overrides := loaded_model_overrides():
-        info["model_overrides"] = overrides
+        # Each overridden model of this run: loaded (with the sha256 of the files
+        # read) or not, and why. Absent for a run on the shipped models, and for
+        # --serve, whose models load in the server.
+        if overrides := run_records():
+            info["model_overrides"] = overrides
     write_run_info(options.out, info, append_history=False)
 
     entries = ledger.read()

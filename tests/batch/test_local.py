@@ -675,3 +675,79 @@ def test_tables_of_an_older_major_stay_when_no_current_export_exists(tmp_path, c
         "! 1 export(s) of another schema major left out of the tables (old.json: 11.0); "
         "re-run them with --force to include them"
     )
+
+
+# --- model overrides ----------------------------------------------------------------
+
+
+def test_run_info_records_each_override_of_this_run(corpus, tmp_path, monkeypatch):
+    from bibr.config import Settings
+    from bibr.utils.model_overrides import record_model_load, reset_loaded_model_overrides
+
+    reset_loaded_model_overrides()
+    bundle = tmp_path / "front_role.joblib"
+    bundle.write_bytes(b"candidate")
+    monkeypatch.setattr(Settings.ml, "front_role_model_id", str(bundle))
+    monkeypatch.setattr(Settings, "NER_SEG_CKPT", str(tmp_path / "seg.pt"))
+
+    class _Loading(_FakeChewMany):
+        def __call__(self, paths, batch_size):
+            from bibr.config import snapshot_settings
+
+            record_model_load(snapshot_settings(), "ML_FRONT_ROLE_MODEL_ID", [bundle])
+            return super().__call__(paths, batch_size)
+
+    _install(monkeypatch, _Loading())
+    out = tmp_path / "out"
+    run_batch(_options(corpus, out))
+    info = json.loads((out / RUN_INFO_FILENAME).read_text(encoding="utf-8"))
+    by_setting = {r["setting"]: r for r in info["model_overrides"]}
+    assert by_setting["ML_FRONT_ROLE_MODEL_ID"]["loaded"] is True
+    assert by_setting["ML_FRONT_ROLE_MODEL_ID"]["files"][0]["path"] == str(bundle)
+    assert by_setting["NER_SEG_CKPT"] == {
+        "setting": "NER_SEG_CKPT",
+        "model": "CRF reference segmenter",
+        "value": str(tmp_path / "seg.pt"),
+        "revision": Settings.NER_SEG_REVISION,
+        "loaded": False,
+        "reason": "not used in this run",
+        "files": [],
+    }
+
+    # A second run in the same process starts its record afresh.
+    monkeypatch.setattr(Settings.ml, "front_role_model_id", "")
+    _install(monkeypatch, _FakeChewMany())
+    out2 = tmp_path / "out2"
+    run_batch(_options(corpus, out2))
+    info = json.loads((out2 / RUN_INFO_FILENAME).read_text(encoding="utf-8"))
+    assert [r["setting"] for r in info["model_overrides"]] == ["NER_SEG_CKPT"]
+    reset_loaded_model_overrides()
+
+
+def test_a_run_on_the_shipped_models_has_no_override_record(corpus, tmp_path, monkeypatch):
+    _install(monkeypatch, _FakeChewMany())
+    out = tmp_path / "out"
+    run_batch(_options(corpus, out))
+    assert "model_overrides" not in json.loads((out / RUN_INFO_FILENAME).read_text())
+
+
+def test_an_override_that_does_not_exist_stops_the_run(corpus, tmp_path, monkeypatch, capsys):
+    from bibr.batch.ledger import MODEL_OVERRIDE_FAILED, reruns_by_default
+    from bibr.exceptions import ModelOverrideError
+
+    fake = _FakeChewMany(
+        raise_on_call=1, exc=ModelOverrideError("NER_PARSER_CKPT='/x' names a reference parser ...")
+    )
+    _install(monkeypatch, fake)
+    out = tmp_path / "out"
+    code = run_batch(_options(corpus, out))
+    assert code != 0
+    # The first chunk (2 papers) failed and the run stopped: no second chunk.
+    assert len(fake.calls) == 1
+    rows = [r for r in _ledger(out) if r.get("status") == "failed"]
+    assert len(rows) == 2 and {r["error_code"] for r in rows} == {MODEL_OVERRIDE_FAILED}
+    # Those papers never got a verdict, so a resumed run takes them again.
+    assert all(reruns_by_default(r) for r in rows)
+    info = json.loads((out / RUN_INFO_FILENAME).read_text(encoding="utf-8"))
+    assert info["reason"] == "model_override_failed"
+    assert info["fatal"].startswith("Model override problem: NER_PARSER_CKPT=")

@@ -2897,10 +2897,16 @@ class GlobalSettings(_BibrSettings):
     # (bibr/extract/geom_tagger.py). Unset by default: no model is published.
     REF_GEOM_TAGGER_MODEL_ID: str | None = Field(
         None,
-        description="Local directory of a geometry line tagger (gate.json plus tagger.onnx and "
-        "tagger.json, beside it or in onnx/). When set, the geom reference segmentation tier asks "
-        "it first and takes its answer when its gate accepts; otherwise the tier goes on with "
-        "REF_GEOM_SEG_MODEL_ID as without it. Unset (default): not used.",
+        description="Geometry line tagger: a Hub repo id or a local directory (gate.json plus "
+        "tagger.onnx and tagger.json, beside it or in onnx/). When set, the geom reference "
+        "segmentation tier asks it first and its answer is final when its gate accepts; otherwise "
+        "the tier goes on with REF_GEOM_SEG_MODEL_ID exactly as without it. Unset (default): "
+        "not used.",
+    )
+    REF_GEOM_TAGGER_REVISION: str | None = Field(
+        None,
+        description="Hub revision (commit, branch or tag) of REF_GEOM_TAGGER_MODEL_ID when it is "
+        "a Hub repo id; unset reads main. Ignored for a local directory.",
     )
     # Per-paper geometry confidence below which segmentation cascades to the LLM.
     REF_GEOM_SEG_CASCADE_THRESHOLD: float = Field(

@@ -245,7 +245,7 @@ def _local_options(args: Any, console: Any) -> Any:
             problem = _preflight_front_tagger(config)
             if problem is not None:
                 return problem
-            problem = _preflight_model_overrides(config)
+            problem = _preflight_model_overrides(config, warn=lambda m: ui.warn(console, m))
             if problem is not None:
                 return problem
         if not announced:

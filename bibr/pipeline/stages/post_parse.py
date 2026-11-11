@@ -11,7 +11,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from bibr.clients.skipped import SkippedLlmClient, is_skipped, note_skipped
-from bibr.exceptions import LlmCallError, ProcessingError
+from bibr.exceptions import LlmCallError, ModelOverrideError, ProcessingError
 from bibr.field_states import FieldScope
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.semaphore import clamped_semaphore
@@ -778,7 +778,7 @@ async def _resolve_preparsed_references(
                 paper_metadata.references = await extractor.refs.extract_from_notes(from_notes, [])
             except asyncio.CancelledError:
                 raise
-            except ProcessingError:
+            except (ProcessingError, ModelOverrideError):
                 raise
             except Exception as exc:  # noqa: BLE001 — refs are best-effort, never fatal
                 from bibr.validation import mark_references_incomplete
@@ -795,7 +795,7 @@ async def _resolve_preparsed_references(
         logger.warning(f"Reference section not found: {e}")
         contents.processing_warnings.append(reference_section_not_found(e, from_notes=False))
         return paper_metadata
-    except ProcessingError:
+    except (ProcessingError, ModelOverrideError):
         raise
     except Exception as e:  # noqa: BLE001 — core metadata already exists
         from bibr.validation import mark_references_incomplete
@@ -812,7 +812,7 @@ async def _resolve_preparsed_references(
             _notify_references(on_references_ready, paper_metadata.references)
         except asyncio.CancelledError:
             raise
-        except ProcessingError:
+        except (ProcessingError, ModelOverrideError):
             raise
         except Exception as e:  # noqa: BLE001 — refs are best-effort, never fatal
             from bibr.validation import mark_references_incomplete

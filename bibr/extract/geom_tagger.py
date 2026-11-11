@@ -24,9 +24,15 @@ The gate comes with the model and is fitted on its development papers:
 
 A bundle is a directory holding ``gate.json`` and the exported graph
 ``tagger.onnx`` with its manifest ``tagger.json``, either beside ``gate.json``
-or in an ``onnx/`` subdirectory. The graph takes ``features`` (lines x 29,
-float32, raw values: the standardisation is inside it) and returns ``logits``
-(lines x 2). Only onnxruntime is needed.
+or in an ``onnx/`` subdirectory, or a Hub repo laid out the same way (graph and
+manifest in ``onnx/``), fetched at ``REF_GEOM_TAGGER_REVISION``. The graph
+takes ``features`` (lines x 29, float32, raw values: the standardisation is
+inside it) and returns ``logits`` (lines x 2); loading runs it once on a dummy
+paper to check that. Only onnxruntime is needed.
+
+A declined answer leaves nothing behind that later code reads: the paper goes
+on exactly as without the tagger, and the receipt lists the attempt. An
+accepted answer is final: the line stream does not run over it.
 """
 
 from __future__ import annotations
@@ -57,15 +63,26 @@ OUTPUT_NAME = "logits"
 FEATURE_KEYS: tuple[str, ...] = tuple(sorted({*PROD_FEATURE_KEYS, *ADJACENT_FEATURE_KEYS}))
 
 
-def tagger_bundle_files(path: str | Path) -> tuple[Path, Path, Path]:
-    """``(tagger.onnx, tagger.json, gate.json)`` of the bundle at ``path``.
+def tagger_bundle_files(path: str | Path, revision: str | None = None) -> tuple[Path, Path, Path]:
+    """``(tagger.onnx, tagger.json, gate.json)`` of the bundle ``path`` names.
 
-    Raises :class:`ConfigurationError` naming what is missing.
+    ``path`` is a local directory, or a Hub repo id (``org/name``) fetched at
+    ``revision`` the way the other ONNX bundles are: ``gate.json``, then
+    ``onnx/tagger.json`` and ``onnx/tagger.onnx`` (the cache first at a pinned
+    commit). A Hub-shaped id is never read from the working directory; write a
+    local copy as a path (``./org/name``). Raises :class:`ConfigurationError`
+    naming what is missing; a Hub error (a missing repo, revision or file, or
+    the network) is raised as the Hub client raised it.
     """
-    root = Path(path).expanduser()
+    from bibr.utils.ml_runtime import is_hub_repo_id
+
+    text = str(path)
+    if is_hub_repo_id(text):
+        return _hub_bundle_files(text, revision)
+    root = Path(text).expanduser()
     if not root.is_dir():
         raise ConfigurationError(
-            f"geometry line tagger {str(path)!r} is not a directory; it must hold {GATE_FILE} "
+            f"geometry line tagger {text!r} is not a directory; it must hold {GATE_FILE} "
             f"and {TAGGER_ONNX} with {TAGGER_MANIFEST} (beside it or in onnx/)"
         )
     gate = root / GATE_FILE
@@ -80,10 +97,19 @@ def tagger_bundle_files(path: str | Path) -> tuple[Path, Path, Path]:
         missing.append(TAGGER_MANIFEST)
     if missing or graph_dir is None:
         raise ConfigurationError(
-            f"geometry line tagger {str(path)!r} lacks {', '.join(missing)} "
+            f"geometry line tagger {text!r} lacks {', '.join(missing)} "
             f"({TAGGER_ONNX} and {TAGGER_MANIFEST} may sit in an onnx/ subdirectory)"
         )
     return graph_dir / TAGGER_ONNX, graph_dir / TAGGER_MANIFEST, gate
+
+
+def _hub_bundle_files(repo_id: str, revision: str | None) -> tuple[Path, Path, Path]:
+    from bibr.utils.hf_cache import hf_download_or_cached
+
+    gate = Path(hf_download_or_cached(repo_id, GATE_FILE, revision))
+    manifest = Path(hf_download_or_cached(repo_id, f"onnx/{TAGGER_MANIFEST}", revision))
+    graph = Path(hf_download_or_cached(repo_id, f"onnx/{TAGGER_ONNX}", revision))
+    return graph, manifest, gate
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -113,6 +139,10 @@ def _check_manifest(manifest: dict[str, Any], path: Path) -> None:
         raise ConfigurationError(f"{path}: the tagger has no {OUTPUT_NAME!r} output")
 
 
+def _finite(values: np.ndarray) -> bool:
+    return bool(np.all(np.isfinite(values)))
+
+
 def _check_gate(gate: dict[str, Any], path: Path) -> tuple[float, np.ndarray, np.ndarray, float]:
     try:
         temperature = float(gate["temperature"])
@@ -127,12 +157,21 @@ def _check_gate(gate: dict[str, Any], path: Path) -> tuple[float, np.ndarray, np
     problems = []
     if score != GATE_SCORE:
         problems.append(f"score {score!r} (this bibr computes {GATE_SCORE!r})")
-    if not temperature > 0:
-        problems.append(f"temperature {temperature}")
-    if not 0.0 <= threshold <= 1.0:
-        problems.append(f"threshold {threshold}")
-    if xs.ndim != 1 or xs.shape != ys.shape or len(xs) < 2 or np.any(np.diff(xs) < 0):
-        problems.append("isotonic_x/isotonic_y must be equal-length increasing breakpoints")
+    if not (np.isfinite(temperature) and temperature > 0):
+        problems.append(f"temperature {temperature} (want a finite number above 0)")
+    if not (np.isfinite(threshold) and 0.0 < threshold <= 1.0):
+        problems.append(f"threshold {threshold} (want a finite number in (0, 1])")
+    if xs.ndim != 1 or ys.ndim != 1 or xs.shape != ys.shape or len(xs) < 2:
+        problems.append("isotonic_x and isotonic_y must be equal-length lists of 2 or more")
+    elif not (_finite(xs) and _finite(ys)):
+        problems.append("isotonic breakpoints must be finite numbers")
+    else:
+        if np.any(np.diff(xs) < 0):
+            problems.append("isotonic_x must be non-decreasing")
+        if np.any(np.diff(ys) < 0):
+            problems.append("isotonic_y must be non-decreasing")
+        if np.any(ys < 0.0) or np.any(ys > 1.0):
+            problems.append("isotonic_y must lie within [0, 1]")
     if problems:
         raise ConfigurationError(f"{path}: unusable gate: {'; '.join(problems)}")
     return temperature, xs, ys, threshold
@@ -159,8 +198,8 @@ def feature_matrix(lines: list[LineRecord]) -> np.ndarray:
 class GeomLineTagger:
     """Loads a tagger bundle and segments reference lines; safe to share across threads."""
 
-    def __init__(self, path: str | Path) -> None:
-        self.onnx_path, manifest_path, gate_path = tagger_bundle_files(path)
+    def __init__(self, path: str | Path, revision: str | None = None) -> None:
+        self.onnx_path, manifest_path, gate_path = tagger_bundle_files(path, revision)
         _check_manifest(_read_json(manifest_path), manifest_path)
         self.temperature, self._iso_x, self._iso_y, self.threshold = _check_gate(
             _read_json(gate_path), gate_path
@@ -179,6 +218,23 @@ class GeomLineTagger:
                 f"{INPUT_NAME!r} in and {OUTPUT_NAME!r} out"
             )
         self._lock = threading.Lock()
+        self._check_graph()
+
+    def _check_graph(self) -> None:
+        """Run the graph once on a dummy paper; it must give one logit pair per line."""
+        probe = np.zeros((3, len(FEATURE_KEYS)), dtype=np.float32)
+        try:
+            out = np.asarray(self._session.run([OUTPUT_NAME], {INPUT_NAME: probe})[0])
+        except Exception as exc:
+            raise ConfigurationError(
+                f"{self.onnx_path}: the graph does not run on a ({len(probe)}, "
+                f"{len(FEATURE_KEYS)}) feature matrix ({type(exc).__name__}: {exc})"
+            ) from exc
+        if out.shape != (len(probe), 2):
+            raise ConfigurationError(
+                f"{self.onnx_path}: the graph returns {OUTPUT_NAME} of shape {out.shape} for "
+                f"{len(probe)} lines; want ({len(probe)}, 2)"
+            )
 
     def line_probabilities(self, lines: list[LineRecord]) -> np.ndarray:
         """Tempered probability that each line opens a reference."""
@@ -193,8 +249,12 @@ class GeomLineTagger:
         return e[:, 1] / e.sum(axis=1)
 
     def confidence(self, probs: np.ndarray) -> float:
-        """Calibrated paper confidence, compared with :attr:`threshold`."""
+        """Calibrated paper confidence, compared with :attr:`threshold` (NaN never passes)."""
         return float(np.interp(expected_entry_precision(probs), self._iso_x, self._iso_y))
+
+    def accepts(self, confidence: float) -> bool:
+        """Whether the gate takes an answer of this confidence; NaN is declined."""
+        return bool(confidence >= self.threshold)
 
     def segment_spans(
         self, ref_text: str, line_dicts: list[dict]

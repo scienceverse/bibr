@@ -548,7 +548,9 @@ async def _run_process(args) -> None:
         if tagger_reason is not None:
             ui.error(console, escape(tagger_reason))
             sys.exit(1)
-        override_reason = _preflight_model_overrides(config)
+        override_reason = _preflight_model_overrides(
+            config, warn=lambda m: ui.warn(console, escape(m))
+        )
         if override_reason is not None:
             ui.error(console, escape(override_reason))
             sys.exit(1)

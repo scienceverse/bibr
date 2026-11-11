@@ -8,7 +8,7 @@ import time
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from bibr.exceptions import ConfigurationError
+from bibr.exceptions import ModelOverrideError
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 
 if TYPE_CHECKING:
@@ -53,7 +53,7 @@ async def _document_layer(fs, settings, *, start_page, end_page):
 async def _predict_front_roles(rm, ocr_regions, *, first_page_index: int):
     """Run the optional front-role classifier off the event loop.
 
-    Never raises, except for an overridden classifier that cannot be loaded.
+    Never raises, except for an overridden classifier that does not exist.
     """
     from bibr.extract.front_role import FrontRolePredictions
 
@@ -67,7 +67,7 @@ async def _predict_front_roles(rm, ocr_regions, *, first_page_index: int):
         predictions = await asyncio.to_thread(
             classifier.predict_pages, ocr_regions, first_page_index=first_page_index
         )
-    except ConfigurationError:
+    except ModelOverrideError:
         raise  # an overridden model that cannot load (bibr.utils.model_overrides)
     except Exception:  # noqa: BLE001 - an optional prior must never fail parsing
         logger.warning("Front-role classification failed; continuing without it", exc_info=True)
@@ -78,7 +78,7 @@ async def _predict_front_roles(rm, ocr_regions, *, first_page_index: int):
 async def _tag_front_matter(rm, ocr_regions, *, first_page_index: int, settings=None):
     """Run the optional front-matter tagger off the event loop.
 
-    Never raises, except for an overridden tagger that cannot be loaded.
+    Never raises, except for an overridden tagger that does not exist.
 
     ``settings`` are the run's: a fast run turns the tagger on for itself, so
     the resource manager's own settings would leave it off. Loading the tagger
@@ -103,7 +103,7 @@ async def _tag_front_matter(rm, ocr_regions, *, first_page_index: int, settings=
             return tag_front_matter(tagger, regions, first_page_index=first_page_index, rules=rules)
 
         return await asyncio.to_thread(run)
-    except ConfigurationError:
+    except ModelOverrideError:
         raise  # an overridden model that cannot load (bibr.utils.model_overrides)
     except Exception:  # noqa: BLE001 - an optional reading must never fail parsing
         logger.warning("Front-matter tagging failed; continuing without it", exc_info=True)

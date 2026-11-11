@@ -470,19 +470,36 @@ def _front_tagger_bundle(model_id: str, revision: str | None) -> Path | None:
     return find_onnx_bundle(model_id, revision, label="front-matter tagger", raise_transient=True)
 
 
-def _preflight_model_overrides(config: ResolvedRunConfig) -> str | None:
-    """Fail fast when a model setting overridden with a local path cannot be loaded.
+def _preflight_model_overrides(config: ResolvedRunConfig, warn=None) -> str | None:
+    """Fail fast when a model setting changed from its default cannot be loaded.
 
-    An override (a model setting other than its shipped default, see
-    :mod:`bibr.utils.model_overrides`) never falls back to the shipped model,
-    so a bad path would otherwise fail the run at its first paper, or, for a
-    model only some papers reach, part-way through. With every model setting at
-    its default nothing is checked.
+    An override (see :mod:`bibr.utils.model_overrides`) that names a model
+    that does not exist stops the run instead of falling back to the shipped
+    model, so a bad local path would otherwise stop it at its first paper, or,
+    for a model only some papers reach, part-way through. Only the models this
+    run loads are checked (its mode, ``--refs`` and ``--ref-seg``); with every
+    model setting at its default nothing is. ``warn`` receives each warning
+    line (a model the run will go without, as it would with the default).
     """
-    from bibr.config import Settings
+    from bibr.config import Settings, snapshot_settings
     from bibr.utils.model_overrides import check_model_overrides
 
-    problems = check_model_overrides(Settings, fast=getattr(config, "mode", "full") == "fast")
+    try:
+        settings = snapshot_settings(Settings)
+        if getattr(config, "mode", "full") == "fast" and not getattr(config, "no_llm", False):
+            from bibr.run_mode import fast_settings
+
+            settings = fast_settings(settings)
+        if getattr(config, "refs", None):
+            settings.REF_PARSE_STRATEGY = config.refs
+        if getattr(config, "ref_seg", None):
+            settings.REF_SEG_STRATEGY = config.ref_seg
+    except Exception as exc:  # noqa: BLE001 - the preflight reports, it never crashes
+        return f"Model override problem: the run's settings could not be read ({exc})"
+    problems, warnings = check_model_overrides(settings)
+    for line in warnings:
+        if warn is not None:
+            warn(f"Model override: {line}")
     if not problems:
         return None
     return "Model override problem: " + "; ".join(problems)

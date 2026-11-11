@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 
 from bibr.clients.llm import LLMClient
 from bibr.clients.llm_protocol import LlmClient
-from bibr.exceptions import BibrError, ProcessingError
+from bibr.exceptions import BibrError, ModelOverrideError, ProcessingError
 from bibr.extract.core_metadata import (  # noqa: F401 — re-exported for back-compat
     _CORRECTION_NOTICE_TITLE_RE,
     CoreMetadataExtractor,
@@ -139,7 +139,7 @@ async def _await_core_and_reference_tasks(
                 await _cancel_and_await(core_task)
                 raise asyncio.CancelledError
             ref_error = ref_task.exception()
-            if isinstance(ref_error, ProcessingError):
+            if isinstance(ref_error, (ProcessingError, ModelOverrideError)):
                 await _cancel_and_await(core_task)
                 raise ref_error
             if ref_error is not None and not isinstance(ref_error, Exception):
@@ -156,7 +156,8 @@ async def _await_core_and_reference_tasks(
             return await ref_task
         except asyncio.CancelledError:
             raise
-        except ProcessingError:
+        except (ProcessingError, ModelOverrideError):
+            # An overridden model that cannot load is the run's fault, not the paper's.
             raise
         except Exception as exc:  # noqa: BLE001 — caller marks references incomplete
             return exc

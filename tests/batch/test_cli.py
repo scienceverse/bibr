@@ -812,3 +812,29 @@ def test_remote_batch_still_warns_that_no_llm_is_ignored(tmp_path, capsys, monke
     assert _run_batch(_remote_dry_run(tmp_path, "--no-llm")) == 0
 
     assert "--no-llm" in capsys.readouterr().err
+
+
+def test_batch_refuses_a_model_override_that_does_not_exist(tmp_path, monkeypatch, capsys):
+    from bibr.config import Settings
+
+    monkeypatch.setattr("bibr.local.cli._opencv_unavailable_reason", lambda: None)
+    monkeypatch.setattr("bibr.local.cli.run_config._preflight_ocr_runtime", lambda config: None)
+    monkeypatch.setattr(Settings, "NER_PARSER_CKPT", str(tmp_path / "no-parser"))
+    pdf = _pdf(tmp_path)
+    out = tmp_path / "out"
+    args = _build_parser().parse_args(["batch", str(pdf), "--out", str(out), "--no-llm"])
+    assert _run_batch(args) == 1
+    err = " ".join(capsys.readouterr().err.split())
+    assert "Model override problem: NER_PARSER_CKPT=" in err
+    assert not out.exists()
+    # With references off the parser is not loaded, and the stale setting does not block.
+    monkeypatch.setattr("bibr.batch.runner.open_chew_many", lambda local: _no_pipeline())
+    args = _build_parser().parse_args(
+        ["batch", str(pdf), "--out", str(out), "--no-llm", "--refs", "off", "--dry-run"]
+    )
+    assert _run_batch(args) == 0
+    assert "Model override problem" not in capsys.readouterr().err
+
+
+def _no_pipeline():
+    raise AssertionError("dry-run must not open a pipeline")

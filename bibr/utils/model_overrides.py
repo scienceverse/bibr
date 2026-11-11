@@ -3,39 +3,43 @@
 Each model bibr loads is named by one setting (``NER_PARSER_CKPT``,
 ``ML_FRONT_ROLE_MODEL_ID``, ...; :data:`MODEL_SETTINGS`), which takes a Hub id
 or a local path. Set to anything but its default (or with a revision other than
-its pinned one), that setting is an *override*. Overrides exist to run a
-candidate model in place of the shipped one, so three rules hold for them that
-the defaults do not need:
+its pinned one), that setting is an *override*: a candidate model, a mirror, an
+offline copy or another revision of the shipped one. Overrides exist so a run
+can be compared with the shipped models, so these rules hold for them:
 
-1. **Checked before the run.** ``bibr chew`` and ``bibr batch`` check every
-   override that names a local path before the first paper
-   (:func:`check_model_overrides`): the path must exist and hold the files that
-   model's loader reads, in a format this bibr can run. A problem stops the run.
-   A Hub id is checked when it loads.
-2. **No fallback.** Where the shipped model's load failure lets the pipeline go
-   on without it (the front-role prior, the geometry segmenter, the classifiers,
-   the front-matter tagger, the CRF segmenter), an override's failure raises
-   :class:`~bibr.exceptions.ConfigurationError`. A comparison run must never
-   measure the shipped model under a candidate's name.
-3. **Identity recorded.** The loader records the sha256 of every file it read
-   (:func:`record_model_load`), logs it, and ``bibr batch`` writes the records to
-   ``run_info.json`` under ``model_overrides``.
+1. **Recorded.** Every override is listed in the run's record
+   (:func:`begin_run`, :func:`run_records`; ``bibr batch`` writes it to
+   ``run_info.json`` under ``model_overrides``) with ``loaded`` true and the
+   sha256 of every file it read, or ``loaded`` false and why.
+2. **A model that does not exist stops the run.** When the named model cannot
+   be loaded for a permanent reason (a missing path, a repo, revision or file
+   the Hub does not have, an unreadable or wrong-kind file), the loader raises
+   :class:`~bibr.exceptions.ModelOverrideError` instead of going on without
+   the model, and the extraction code passes it to the caller. A comparison
+   must never report the shipped path, or no model, under the candidate's name.
+3. **Everything else behaves as for the shipped model.** A network failure
+   while fetching from the Hub, and a missing optional dependency (``torch``
+   for the CRF segmenter), are handled exactly as for a default setting: the
+   loaders retry or leave the tier out as they always did. The record says so.
+4. **Checked before the run.** ``bibr chew`` and ``bibr batch`` check every
+   local-path override the run will load (:func:`check_model_overrides`) before
+   the first paper. A Hub id is checked when it loads.
 
-With every model setting at its default nothing here runs: no check, no record,
-no change to the exports.
+With every model setting at its default nothing here changes what bibr does.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal
 
-from bibr.exceptions import ConfigurationError
+from bibr.exceptions import ConfigurationError, ModelOverrideError
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +78,7 @@ MODEL_SETTINGS: tuple[ModelSetting, ...] = (
         "REF_GEOM_TAGGER_MODEL_ID",
         "geometry line tagger",
         ("REF_GEOM_TAGGER_MODEL_ID",),
-        None,
+        ("REF_GEOM_TAGGER_REVISION",),
         "geom_tagger",
     ),
     ModelSetting(
@@ -117,9 +121,11 @@ MODEL_SETTINGS: tuple[ModelSetting, ...] = (
 )
 _BY_ENV = {spec.env: spec for spec in MODEL_SETTINGS}
 
-_LOCK = threading.Lock()
-_LOADED: dict[str, dict[str, Any]] = {}
 _HASH_CHUNK = 1 << 20
+NOT_USED = "not used in this run"
+
+
+# -- what is an override ---------------------------------------------------------------
 
 
 def _default(attr: tuple[str, ...]) -> Any:
@@ -174,11 +180,115 @@ def model_overrides(settings: Any) -> list[ModelSetting]:
     return [spec for spec in MODEL_SETTINGS if is_model_override(settings, spec.env)]
 
 
-def _is_local(value: str) -> bool:
+def is_local_model(value: str) -> bool:
+    """Whether a model value is a local path (anything not shaped like a Hub repo id)."""
     from bibr.utils.ml_runtime import is_hub_repo_id
 
     repo, _, filename = value.partition(":")
     return not is_hub_repo_id(repo, filename=filename or None, warn=False)
+
+
+# -- why a load failed -----------------------------------------------------------------
+
+LoadFailure = Literal["permanent", "transient", "missing_dependency"]
+
+# huggingface_hub's answers that the repo, revision or file does not exist (or may
+# not be read): no later attempt can fix them. LocalEntryNotFoundError subclasses
+# EntryNotFoundError but means "Hub unreachable and not cached", so it is checked first.
+_HUB_TRANSIENT = frozenset({"LocalEntryNotFoundError"})
+_HUB_PERMANENT = frozenset(
+    {
+        "RepositoryNotFoundError",
+        "RevisionNotFoundError",
+        "EntryNotFoundError",
+        "RemoteEntryNotFoundError",
+        "GatedRepoError",
+        "DisabledRepoError",
+        "HFValidationError",
+    }
+)
+_MAX_CHAIN = 6
+# Packages of the optional torch extra. An ImportError naming one means "this
+# install has no such tier", as for the default; any other ImportError (a pickled
+# bundle that names a module bibr does not have) is the model's problem.
+_OPTIONAL_PACKAGES = frozenset({"torch", "torchvision", "transformers", "safetensors"})
+
+
+def _missing_optional(link: BaseException) -> bool:
+    if not isinstance(link, ImportError):
+        return False
+    from bibr.utils.ml_extra import TORCH_EXTRA
+
+    name = (getattr(link, "name", None) or "").split(".")[0]
+    return name in _OPTIONAL_PACKAGES or f"'{TORCH_EXTRA}' extra" in str(link)
+
+
+def _chain(exc: BaseException) -> list[BaseException]:
+    out: list[BaseException] = []
+    current: BaseException | None = exc
+    while current is not None and len(out) < _MAX_CHAIN and all(current is not e for e in out):
+        out.append(current)
+        current = current.__cause__ or current.__context__
+    return out
+
+
+def load_failure_kind(exc: BaseException) -> LoadFailure:
+    """Whether a model load failed for good, on the network, or for a missing dependency."""
+    from bibr.utils.transient import is_transient_network_error
+
+    for link in _chain(exc):
+        names = {klass.__name__ for klass in type(link).__mro__}
+        if names & _HUB_TRANSIENT:
+            # Unless the cache recorded the Hub's 404 at a pinned commit (hf_cache).
+            return "permanent" if "recorded by an earlier request" in str(link) else "transient"
+        if names & _HUB_PERMANENT:
+            return "permanent"
+    if is_transient_network_error(exc):
+        return "transient"
+    if any(_missing_optional(link) for link in _chain(exc)):
+        return "missing_dependency"
+    return "permanent"
+
+
+def override_load_error(settings: Any, env: str, exc: BaseException) -> ModelOverrideError | None:
+    """The error to raise when a model failed to load, or ``None`` to behave as for a default.
+
+    ``None`` for a default setting, and for an override whose failure is a
+    network error or a missing optional dependency (rule 3); that failure is
+    written to the run's record instead.
+    """
+    if not is_model_override(settings, env):
+        return None
+    if isinstance(exc, ModelOverrideError):
+        return exc
+    kind = load_failure_kind(exc)
+    if kind != "permanent":
+        reason = "torch extra not installed" if kind == "missing_dependency" else "network error"
+        record_model_unavailable(settings, env, f"{reason}: {type(exc).__name__}: {exc}")
+        return None
+    spec = _BY_ENV[env]
+    value, revision = setting_value(settings, env)
+    where = f"{value}@{revision}" if revision and not is_local_model(value or "") else value
+    return ModelOverrideError(
+        f"{spec.env}={where!r} names a {spec.label} that cannot be loaded "
+        f"({type(exc).__name__}: {exc}). A model setting changed from its default never "
+        f"falls back to the shipped model; fix the setting, or unset {spec.env}."
+    )
+
+
+# -- bundle files ------------------------------------------------------------------------
+
+
+def bundle_member(bundle_dir: str | Path, name: Any) -> Path:
+    """``bundle_dir / name`` for a file name read from a manifest, kept inside the bundle."""
+    if not isinstance(name, str) or not name:
+        raise ConfigurationError(f"{bundle_dir}: manifest file name {name!r} is not a file name")
+    pure = PurePosixPath(name.replace("\\", "/"))
+    if pure.is_absolute() or ".." in pure.parts or Path(name).is_absolute():
+        raise ConfigurationError(
+            f"{bundle_dir}: manifest file name {name!r} points outside the bundle directory"
+        )
+    return Path(bundle_dir) / Path(*pure.parts)
 
 
 def onnx_bundle_files(bundle_dir: str | Path) -> list[Path]:
@@ -187,12 +297,44 @@ def onnx_bundle_files(bundle_dir: str | Path) -> list[Path]:
 
     bundle_dir = Path(bundle_dir)
     manifest = read_onnx_manifest(bundle_dir)
-    names = list(manifest.get("files") or [])
+    listed = manifest.get("files") or []
+    if not isinstance(listed, list):
+        raise ConfigurationError(f"{bundle_dir}: manifest 'files' must be a list of file names")
+    names = list(listed)
     for key, fallback in (("model_file", ONNX_MODEL), ("tokenizer_file", None)):
         name = manifest.get(key, fallback)
         if name and name not in names:
             names.append(name)
-    return [bundle_dir / ONNX_MANIFEST, *(bundle_dir / name for name in names)]
+    return [bundle_dir / ONNX_MANIFEST, *(bundle_member(bundle_dir, name) for name in names)]
+
+
+# -- preflight -----------------------------------------------------------------------------
+
+
+def models_in_use(settings: Any) -> set[str]:
+    """The model settings a run with these (effective) settings can load.
+
+    ``settings`` are the run's: for a fast run, :func:`bibr.run_mode.fast_settings`
+    of them, with the run's ``--refs`` / ``--ref-seg`` applied. Reference models
+    only when references are parsed (``REF_PARSE_STRATEGY`` other than ``off``):
+    the reference parser and the CRF segmenter (the last resort of every
+    segmentation strategy, and the recovery of the LLM parsers), and the
+    geometry segmenter and the line tagger only for ``REF_SEG_STRATEGY=geom``.
+    The front-matter tagger when its mode is on, the front-role classifier
+    unless ``ML_FRONT_ROLE_ENABLED=false``, the classifiers when configured.
+    """
+    ml = getattr(settings, "ml", None)
+    used = {"ML_SECTION_CLASSIFIER_MODEL_ID", "ML_PAPER_CLASSIFIER_MODEL_ID"}
+    if getattr(ml, "front_role_enabled", True) is not False:
+        used.add("ML_FRONT_ROLE_MODEL_ID")
+    if getattr(ml, "front_tagger_mode", "off") != "off":
+        used.add("ML_FRONT_TAGGER_MODEL_ID")
+    parse = str(getattr(settings, "REF_PARSE_STRATEGY", None) or "ner").lower()
+    if parse != "off":
+        used |= {"NER_PARSER_CKPT", "NER_SEG_CKPT"}
+        if str(getattr(settings, "REF_SEG_STRATEGY", None) or "geom").lower() == "geom":
+            used |= {"REF_GEOM_SEG_MODEL_ID", "REF_GEOM_TAGGER_MODEL_ID"}
+    return used
 
 
 def _check_onnx(spec: ModelSetting, value: str) -> None:
@@ -204,14 +346,13 @@ def _check_onnx(spec: ModelSetting, value: str) -> None:
         if spec.env == "NER_PARSER_CKPT" and path.is_file() and torch_available():
             return  # a torch checkpoint, loaded by the torch parser
         raise ConfigurationError(
-            f"{spec.env}={value!r}: no ONNX bundle there (want bibr_onnx.json and model.onnx "
-            "in the directory itself or in its onnx/ subdirectory)"
+            "no ONNX bundle there (want bibr_onnx.json and model.onnx in the directory "
+            "itself or in its onnx/ subdirectory)"
         )
     manifest = read_onnx_manifest(bundle)
     if spec.onnx_model is not None and manifest.get("model") != spec.onnx_model:
         raise ConfigurationError(
-            f"{spec.env}={value!r}: the bundle is a {manifest.get('model')!r} model, not a "
-            f"{spec.onnx_model!r} one"
+            f"the bundle is a {manifest.get('model')!r} model, not a {spec.onnx_model!r} one"
         )
     if spec.env == "ML_FRONT_TAGGER_MODEL_ID":
         from bibr.front_tagger.contract import CONTRACT_VERSION, FEATURE_KEYS
@@ -219,89 +360,83 @@ def _check_onnx(spec: ModelSetting, value: str) -> None:
         keys = tuple(manifest.get("feature_keys") or ())
         if keys != FEATURE_KEYS or manifest.get("contract_version") != CONTRACT_VERSION:
             raise ConfigurationError(
-                f"{spec.env}={value!r}: the bundle uses tagger contract "
-                f"{manifest.get('contract_version')!r}; this bibr reads contract {CONTRACT_VERSION}"
+                f"the bundle uses tagger contract {manifest.get('contract_version')!r}; this "
+                f"bibr reads contract {CONTRACT_VERSION}"
             )
     missing = [p.name for p in onnx_bundle_files(bundle) if not p.is_file()]
     if missing:
-        raise ConfigurationError(f"{spec.env}={value!r}: the bundle lacks {', '.join(missing)}")
+        raise ConfigurationError(f"the bundle lacks {', '.join(missing)}")
 
 
 def _check_local(spec: ModelSetting, value: str) -> None:
     path = Path(value).expanduser()
     if not path.exists():
-        raise ConfigurationError(f"{spec.env}={value!r}: no such file or directory")
+        raise ConfigurationError("no such file or directory")
     if spec.kind == "onnx":
         _check_onnx(spec, value)
     elif spec.kind == "geom_tagger":
         from bibr.extract.geom_tagger import GeomLineTagger
 
-        GeomLineTagger(path)
+        GeomLineTagger(path)  # reads the bundle, opens the graph and runs it once
     elif spec.kind == "joblib":
         if not path.is_file():
-            raise ConfigurationError(f"{spec.env}={value!r}: name the .joblib bundle file itself")
+            raise ConfigurationError("name the .joblib bundle file itself")
         # The loaders check the bundle's kind and feature contract; both bundles are small.
-        try:
-            if spec.env == "REF_GEOM_SEG_MODEL_ID":
-                from bibr.extract.geom_segmenter import GeomSegmenter
+        if spec.env == "REF_GEOM_SEG_MODEL_ID":
+            from bibr.extract.geom_segmenter import GeomSegmenter
 
-                GeomSegmenter(str(path))
-            else:
-                from bibr.extract.front_role import FrontRoleClassifier
+            GeomSegmenter(str(path))
+        else:
+            from bibr.extract.front_role import FrontRoleClassifier
 
-                FrontRoleClassifier(str(path))
-        except ConfigurationError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - reported as the override's problem
-            raise ConfigurationError(f"{spec.env}={value!r}: cannot be loaded: {exc}") from exc
+            FrontRoleClassifier(str(path))
     elif not path.is_file():
-        raise ConfigurationError(f"{spec.env}={value!r}: name the checkpoint file itself")
+        raise ConfigurationError("name the checkpoint file itself")
 
 
-def check_model_overrides(settings: Any, *, fast: bool = False) -> list[str]:
-    """One line per override with a local path that this run cannot load; empty when fine.
+def check_model_overrides(settings: Any) -> tuple[list[str], list[str]]:
+    """``(problems, warnings)`` for the local-path overrides this run will load.
 
-    ``fast`` is a fast run, which turns the front-matter tagger on for itself. A
-    model the run leaves off (the tagger outside primary/only/fast mode, the
-    front-role classifier with ``ML_FRONT_ROLE_ENABLED=false``) is not checked.
+    One line per problem: the run cannot load that model. A model the run does
+    not load (:func:`models_in_use`) is not checked, and a Hub id is checked
+    when it loads. A warning is a model the run will go without, as it would
+    with the default (the CRF segmenter without ``torch``). Never raises.
     """
+    from bibr.utils.ml_runtime import torch_available
+
     problems: list[str] = []
-    ml = getattr(settings, "ml", None)
-    for spec in model_overrides(settings):
-        tagger_off = getattr(ml, "front_tagger_mode", "off") == "off"
-        if spec.env == "ML_FRONT_TAGGER_MODEL_ID" and not fast and tagger_off:
-            continue
-        if (
-            spec.env == "ML_FRONT_ROLE_MODEL_ID"
-            and getattr(ml, "front_role_enabled", True) is False
-        ):
-            continue
+    warnings: list[str] = []
+    try:
+        used = models_in_use(settings)
+        specs = [spec for spec in model_overrides(settings) if spec.env in used]
+    except Exception as exc:  # noqa: BLE001 - the preflight reports, it never crashes
+        return [f"model settings could not be read ({type(exc).__name__}: {exc})"], []
+    for spec in specs:
         value, _revision = setting_value(settings, spec.env)
-        if value is None or not _is_local(value):
+        if value is None or not is_local_model(value):
+            continue
+        if spec.env == "NER_SEG_CKPT" and not torch_available():
+            warnings.append(
+                f"{spec.env}={value!r}: the CRF segmenter needs the torch extra, which is not "
+                "installed; this run goes without it, as it would with the default"
+            )
             continue
         try:
             _check_local(spec, value)
-        except ConfigurationError as exc:
-            problems.append(str(exc))
-    return problems
+        except Exception as exc:  # noqa: BLE001 - any failure is the override's problem
+            detail = (
+                str(exc) if isinstance(exc, ConfigurationError) else f"{type(exc).__name__}: {exc}"
+            )
+            problems.append(f"{spec.env}={value!r}: {detail}".splitlines()[0][:400])
+    return problems, warnings
 
 
-def override_load_error(settings: Any, env: str, exc: BaseException) -> ConfigurationError | None:
-    """The error to raise when an override's model failed to load, or None for a default.
+# -- the run's record ----------------------------------------------------------------------
 
-    Callers whose default model may be missing (and then go on without it) raise
-    this instead when the setting is an override.
-    """
-    if not is_model_override(settings, env):
-        return None
-    spec = _BY_ENV[env]
-    value, revision = setting_value(settings, env)
-    where = f"{value}@{revision}" if revision and not _is_local(value or "") else value
-    return ConfigurationError(
-        f"{spec.env}={where!r} names a {spec.label} that could not be loaded "
-        f"({type(exc).__name__}: {exc}). An overridden model never falls back to the shipped "
-        f"one; fix the path, or unset {spec.env} to use the default."
-    )
+_LOCK = threading.Lock()
+_RUN: dict[str, dict[str, Any]] = {}
+# sha256 rows per (setting, value, revision), so a model used by every paper is hashed once.
+_IDENTITY: dict[tuple[str, str | None, str | None], list[dict[str, Any]]] = {}
 
 
 def _sha256(path: Path) -> str:
@@ -312,12 +447,7 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def record_model_load(settings: Any, env: str, files: Iterable[str | Path]) -> dict | None:
-    """Record which files an override loaded (no-op for a default); returns the record."""
-    if not is_model_override(settings, env):
-        return None
-    spec = _BY_ENV[env]
-    value, revision = setting_value(settings, env)
+def _file_rows(files: Iterable[str | Path]) -> list[dict[str, Any]]:
     rows = []
     for name in files:
         path = Path(name)
@@ -325,47 +455,119 @@ def record_model_load(settings: Any, env: str, files: Iterable[str | Path]) -> d
             rows.append({"path": str(path), "bytes": path.stat().st_size, "sha256": _sha256(path)})
         else:  # a directory a loader read as a whole (a torch checkpoint dir)
             rows.append({"path": str(path), "bytes": None, "sha256": None})
-    record = {
+    return rows
+
+
+def _entry(settings: Any, spec: ModelSetting) -> dict[str, Any]:
+    value, revision = setting_value(settings, spec.env)
+    return {
         "setting": spec.env,
         "model": spec.label,
         "value": value,
         "revision": revision,
-        "files": rows,
+        "loaded": False,
+        "reason": NOT_USED,
+        "files": [],
     }
+
+
+def begin_run(settings: Any) -> None:
+    """Start a run's record: every override in ``settings``, none loaded yet."""
     with _LOCK:
-        _LOADED[spec.env] = record
-    logger.info(
-        "Model override %s=%s: %s loaded from %s",
-        spec.env,
-        value,
-        spec.label,
-        ", ".join(f"{Path(r['path']).name} sha256 {(r['sha256'] or '-')[:16]}" for r in rows),
-    )
-    return record
+        _RUN.clear()
+        for spec in model_overrides(settings):
+            _RUN[spec.env] = _entry(settings, spec)
+
+
+def record_model_load(
+    settings: Any, env: str, files: Iterable[str | Path] | Callable[[], Iterable[str | Path]]
+) -> dict | None:
+    """Note that the override ``env`` was loaded (or used again); no-op for a default.
+
+    ``files`` (or a callable returning them) are the files the loader read; they
+    are hashed once per setting value and revision in a process.
+    """
+    if not is_model_override(settings, env):
+        return None
+    spec = _BY_ENV[env]
+    value, revision = setting_value(settings, env)
+    key = (env, value, revision)
+    with _LOCK:
+        rows = _IDENTITY.get(key)
+    if rows is None:
+        rows = _file_rows(files() if callable(files) else files)
+        with _LOCK:
+            _IDENTITY[key] = rows
+        logger.info(
+            "Model override %s=%s: %s loaded from %s",
+            spec.env,
+            value,
+            spec.label,
+            ", ".join(f"{Path(r['path']).name} sha256 {(r['sha256'] or '-')[:16]}" for r in rows),
+        )
+    with _LOCK:
+        entry = _RUN.get(env) or _entry(settings, spec)
+        if entry["loaded"] and entry["files"] == rows:
+            return dict(entry)
+        entry.update(loaded=True, reason=None, files=[dict(r) for r in rows])
+        _RUN[env] = entry
+        return dict(entry)
+
+
+def record_model_unavailable(settings: Any, env: str, reason: str) -> None:
+    """Note that the override ``env`` was not loaded, and why; no-op for a default."""
+    if not is_model_override(settings, env):
+        return
+    with _LOCK:
+        entry = _RUN.get(env) or _entry(settings, _BY_ENV[env])
+        if not entry["loaded"]:
+            entry["reason"] = reason[:300]
+            _RUN[env] = entry
+
+
+def run_records() -> list[dict]:
+    """The run's record, one entry per override, in :data:`MODEL_SETTINGS` order."""
+    with _LOCK:
+        return [dict(_RUN[spec.env]) for spec in MODEL_SETTINGS if spec.env in _RUN]
 
 
 def loaded_model_overrides() -> list[dict]:
-    """The records of every override loaded in this process, in :data:`MODEL_SETTINGS` order."""
-    with _LOCK:
-        return [dict(_LOADED[spec.env]) for spec in MODEL_SETTINGS if spec.env in _LOADED]
+    """The entries of :func:`run_records` whose model was loaded."""
+    return [entry for entry in run_records() if entry["loaded"]]
 
 
 def reset_loaded_model_overrides() -> None:
-    """Test hook: forget the load records."""
+    """Test hook: forget the run's record and the cached file hashes."""
     with _LOCK:
-        _LOADED.clear()
+        _RUN.clear()
+        _IDENTITY.clear()
+
+
+def is_finite_number(value: Any) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
 
 
 __all__ = [
     "MODEL_SETTINGS",
+    "NOT_USED",
     "ModelSetting",
+    "begin_run",
+    "bundle_member",
     "check_model_overrides",
+    "is_local_model",
     "is_model_override",
+    "load_failure_kind",
     "loaded_model_overrides",
     "model_overrides",
+    "models_in_use",
     "onnx_bundle_files",
     "override_load_error",
     "record_model_load",
+    "record_model_unavailable",
     "reset_loaded_model_overrides",
+    "run_records",
     "setting_value",
 ]

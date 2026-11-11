@@ -28,7 +28,11 @@ from bibr.clients.llm import LLMClient, incomplete_output_text
 from bibr.clients.llm_protocol import LlmClient
 from bibr.clients.skipped import is_skipped
 from bibr.config import GlobalSettings, snapshot_settings
-from bibr.exceptions import ConfigurationError, ProcessingError, UpstreamServiceError
+from bibr.exceptions import (
+    ModelOverrideError,
+    ProcessingError,
+    UpstreamServiceError,
+)
 from bibr.extract.anchor_snap import find_anchor_starts, segment_by_anchors
 from bibr.extract.footnote_citations import (
     MAX_LISTED_REFERENCES,
@@ -107,6 +111,9 @@ logger = logging.getLogger(__name__)
 # A GBM that confidently under-segments an OOD reference style (arXiv/ACL
 # bare-year) clears the confidence and align-yield gates, so this ratio is the
 # backstop. Module constant on purpose — not a tunable in config.py.
+# Errors no tier turns into a fallback: a typed processing failure, and an
+# overridden model that cannot load (bibr.utils.model_overrides).
+_PASS_THROUGH = (ProcessingError, ModelOverrideError)
 GEOM_MIN_REGION_RATIO = 0.6
 # When nearly every filtered layout onset aligns back to the exact reference
 # text, the layout denominator is much stronger than a raw label count.  In
@@ -522,19 +529,22 @@ def _get_ner_segmenter(settings: GlobalSettings | None = None):
                         revision=settings.NER_SEG_REVISION,
                     )
                 except Exception as e:
+                    # An override that names no model stops the run; a network
+                    # error or a missing torch behaves as for the default.
                     if (strict := override_load_error(settings, "NER_SEG_CKPT", e)) is not None:
                         raise strict from e
                     raise
-                if is_model_override(settings, "NER_SEG_CKPT"):
-                    from bibr.ner.checkpoint import resolve_checkpoint
-
-                    checkpoint = resolve_checkpoint(
-                        settings.NER_SEG_CKPT, revision=settings.NER_SEG_REVISION
-                    )
-                    record_model_load(settings, "NER_SEG_CKPT", [checkpoint])
                 _NER_SEGMENTER = segmenter
                 _NER_SEGMENTER_KEY = key
+    if is_model_override(settings, "NER_SEG_CKPT"):
+        record_model_load(settings, "NER_SEG_CKPT", lambda: [_seg_checkpoint(settings)])
     return _NER_SEGMENTER
+
+
+def _seg_checkpoint(settings: GlobalSettings):
+    from bibr.ner.checkpoint import resolve_checkpoint
+
+    return resolve_checkpoint(settings.NER_SEG_CKPT, revision=settings.NER_SEG_REVISION)
 
 
 _GEOM_SEGMENTER = None
@@ -568,8 +578,6 @@ def _get_geom_segmenter(settings: GlobalSettings | None = None):
                         settings.REF_GEOM_SEG_MODEL_ID,
                         revision=settings.REF_GEOM_SEG_REVISION,
                     )
-                    if is_model_override(settings, "REF_GEOM_SEG_MODEL_ID"):
-                        record_model_load(settings, "REF_GEOM_SEG_MODEL_ID", [segmenter.path])
                     _GEOM_SEGMENTER = segmenter
                     _GEOM_SEGMENTER_KEY = key
                 except Exception as e:  # noqa: BLE001 — unavailable deps/artifact → cascade
@@ -591,38 +599,54 @@ def _get_geom_segmenter(settings: GlobalSettings | None = None):
                     logger.warning(
                         "geom segmenter unavailable (%r); cascading to LLM segmentation", e
                     )
+    loaded = _GEOM_SEGMENTER is not None and key == _GEOM_SEGMENTER_KEY
+    if loaded and is_model_override(settings, "REF_GEOM_SEG_MODEL_ID"):
+        record_model_load(settings, "REF_GEOM_SEG_MODEL_ID", [_GEOM_SEGMENTER.path])
     return _GEOM_SEGMENTER
 
 
 _GEOM_TAGGER = None
-_GEOM_TAGGER_KEY: str | None = None
+_GEOM_TAGGER_KEY: tuple[str, str | None] | None = None
 
 
 def _get_geom_tagger(settings: GlobalSettings | None = None):
-    """The opt-in geometry line tagger (``REF_GEOM_TAGGER_MODEL_ID``), or ``None`` when unset.
+    """The opt-in geometry line tagger (``REF_GEOM_TAGGER_MODEL_ID``), or ``None``.
 
-    It exists only as an override, so a load failure raises
-    :class:`~bibr.exceptions.ConfigurationError` and is never cached.
+    ``None`` when it is unset, and when the Hub cannot be reached for it (not
+    remembered: the next paper tries again, and this one runs the shipped
+    tier). It exists only as an override, so a tagger that does not exist or
+    cannot be read raises :class:`~bibr.exceptions.ModelOverrideError`.
     """
     global _GEOM_TAGGER, _GEOM_TAGGER_KEY
     settings = settings if settings is not None else snapshot_settings()
     path = getattr(settings, "REF_GEOM_TAGGER_MODEL_ID", None)
     if not isinstance(path, str) or not path:
         return None
-    if _GEOM_TAGGER is None or path != _GEOM_TAGGER_KEY:
+    revision = getattr(settings, "REF_GEOM_TAGGER_REVISION", None)
+    revision = revision if isinstance(revision, str) and revision else None
+    key = (path, revision)
+    if _GEOM_TAGGER is None or key != _GEOM_TAGGER_KEY:
         with _NER_LOCK:
-            if _GEOM_TAGGER is None or path != _GEOM_TAGGER_KEY:
+            if _GEOM_TAGGER is None or key != _GEOM_TAGGER_KEY:
                 from bibr.extract.geom_tagger import GeomLineTagger
 
                 logger.info("loading geometry line tagger: %s", path)
                 try:
-                    tagger = GeomLineTagger(path)
+                    tagger = GeomLineTagger(path, revision)
                 except Exception as e:
-                    strict = override_load_error(settings, "REF_GEOM_TAGGER_MODEL_ID", e)
-                    raise (strict or e) from e
-                record_model_load(settings, "REF_GEOM_TAGGER_MODEL_ID", tagger.files)
+                    if (
+                        strict := override_load_error(settings, "REF_GEOM_TAGGER_MODEL_ID", e)
+                    ) is not None:
+                        raise strict from e
+                    logger.warning(
+                        "geometry line tagger %s unavailable (%r); this paper runs without it",
+                        path,
+                        e,
+                    )
+                    return None
                 _GEOM_TAGGER = tagger
-                _GEOM_TAGGER_KEY = path
+                _GEOM_TAGGER_KEY = key
+    record_model_load(settings, "REF_GEOM_TAGGER_MODEL_ID", _GEOM_TAGGER.files)
     return _GEOM_TAGGER
 
 
@@ -651,16 +675,22 @@ def _get_ner_parser(settings: GlobalSettings | None = None, memory_mode: str | N
                 from bibr.ner.runtime import load_ref_parser
 
                 logger.info("loading NER parser: %s", settings.NER_PARSER_CKPT)
-                parser = load_ref_parser(
-                    settings.NER_PARSER_CKPT,
-                    device=device,
-                    revision=settings.NER_PARSER_REVISION,
-                    settings=settings,
-                )
-                if is_model_override(settings, "NER_PARSER_CKPT"):
-                    record_model_load(settings, "NER_PARSER_CKPT", _parser_files(parser, settings))
+                try:
+                    parser = load_ref_parser(
+                        settings.NER_PARSER_CKPT,
+                        device=device,
+                        revision=settings.NER_PARSER_REVISION,
+                        settings=settings,
+                    )
+                except Exception as e:
+                    if (strict := override_load_error(settings, "NER_PARSER_CKPT", e)) is not None:
+                        raise strict from e
+                    raise
                 _NER_PARSER = parser
                 _NER_PARSER_KEY = key
+    if is_model_override(settings, "NER_PARSER_CKPT"):
+        parser = _NER_PARSER
+        record_model_load(settings, "NER_PARSER_CKPT", lambda: _parser_files(parser, settings))
     return _NER_PARSER
 
 
@@ -2524,43 +2554,63 @@ class ReferenceExtractor:
         """The opt-in geometry line tagger, asked before the GBM.
 
         Returns ref strings when its calibrated paper confidence clears the
-        bundle's gate and the geometry tier's own checks pass, else ``None`` so
-        the shipped geometry tier runs unchanged. A decline is recorded as a
-        ``geom_tagger`` attempt and adds no warning: the tier after it reports
-        its own outcome.
+        bundle's gate and the geometry tier's own checks pass; that answer is
+        final (the line stream does not run over it). Otherwise ``None``, and
+        the shipped geometry tier runs exactly as without the tagger: the
+        declined ``geom_tagger`` attempt is listed in the receipt with its
+        reason, confidence and counts in ``reason_flags``, but carries no spans
+        or credible starts that later code reads, and adds no warning. An
+        error on one paper is a decline (``tagger_error``), logged.
         """
-        with LOCAL_INFERENCE_LOCK:
-            tagger = _get_geom_tagger(self._settings)
-            spans, confidence, labeled, aligned = tagger.segment_spans(ref_text, lines)
-        aligned_starts = aligned or None
-
-        def decline(flag: str, credible: int | None = aligned_starts) -> None:
-            self._record_segmentation_attempt(
-                "geom_tagger",
-                ref_text,
-                spans=spans,
-                credible_starts=credible,
-                selected=False,
-                reason_flags=(flag,),
-            )
-
+        try:
+            with LOCAL_INFERENCE_LOCK:
+                tagger = _get_geom_tagger(self._settings)
+                if tagger is None:
+                    self._decline_geom_tagger(ref_text, "tagger_unavailable")
+                    return None
+                spans, confidence, labeled, aligned = tagger.segment_spans(ref_text, lines)
+        except _PASS_THROUGH:
+            raise
+        except Exception as e:  # noqa: BLE001 — one paper's tagger failure is a decline
+            logger.warning("geometry line tagger failed on this paper (%r); declining", e)
+            self._decline_geom_tagger(ref_text, "tagger_error", f"error={type(e).__name__}")
+            return None
+        counts = (
+            f"confidence={confidence:.4f}",
+            f"threshold={tagger.threshold:.4f}",
+            f"labeled={labeled}",
+            f"aligned={aligned}",
+            f"spans={len(spans)}",
+        )
         if labeled == 0:
-            decline("zero_labeled_starts", None)
+            self._decline_geom_tagger(ref_text, "zero_labeled_starts", *counts)
             return None
         if aligned / labeled < self._settings.REF_GEOM_MIN_ALIGN_YIELD:
-            decline("low_alignment_yield")
+            self._decline_geom_tagger(ref_text, "low_alignment_yield", *counts)
             return None
-        region_onsets, receipt_region_onsets, min_region_ratio = self._geom_region_floor(ref_text)
+        region_onsets, _receipt_onsets, min_region_ratio = self._geom_region_floor(ref_text)
         if region_onsets and len(spans) < min_region_ratio * region_onsets:
-            decline("low_segment_count", max(aligned_starts or 0, receipt_region_onsets) or None)
+            self._decline_geom_tagger(ref_text, "low_segment_count", *counts)
             return None
-        if not spans or confidence < tagger.threshold:
-            decline("low_confidence_or_empty")
+        # ``accepts`` is False for a NaN confidence.
+        if not spans or not tagger.accepts(confidence):
+            self._decline_geom_tagger(ref_text, "low_confidence_or_empty", *counts)
             return None
         self._record_segmentation_attempt(
-            "geom_tagger", ref_text, spans=spans, credible_starts=aligned_starts, selected=True
+            "geom_tagger",
+            ref_text,
+            spans=spans,
+            credible_starts=aligned or None,
+            selected=True,
+            reason_flags=("final", *counts),
         )
         return [ref_text[s:e] for s, e in spans]
+
+    def _decline_geom_tagger(self, ref_text: str, reason: str, *detail: str) -> None:
+        """List a declined tagger answer in the receipt, leaving nothing later code reads."""
+        self._record_segmentation_attempt(
+            "geom_tagger", ref_text, selected=False, reason_flags=(reason, *detail)
+        )
 
     def _region_onset_count(self) -> int:
         """Count of layout reference-onset anchors, or 0 when unavailable.
@@ -2631,7 +2681,7 @@ class ReferenceExtractor:
             self._record_segmentation_attempt(
                 "llm_anchor", ref_text, selected=False, reason_flags=("no_usable_spans",)
             )
-        except ProcessingError:
+        except _PASS_THROUGH:
             raise
         except Exception as e:  # noqa: BLE001 — any seg failure triggers fallback
             self._record_segmentation_attempt(
@@ -2740,10 +2790,11 @@ class ReferenceExtractor:
         try:
             with LOCAL_INFERENCE_LOCK:
                 ref_strings = _get_ner_segmenter(self._settings).segment(ref_text)
+        except ModelOverrideError:
+            # An overridden CRF that does not exist (raised by the loader, never
+            # by inference on one paper) stops the run.
+            raise
         except Exception as e:  # noqa: BLE001 — a CRF load/inference failure must not 0 the refs
-            if (strict := override_load_error(self._settings, "NER_SEG_CKPT", e)) is not None:
-                # An overridden CRF never falls through to the marker split.
-                raise (e if isinstance(e, ConfigurationError) else strict) from e
             ref_strings = []
             if self._llm_skipped and isinstance(e, ImportError):
                 # A fast run on an install without the torch extra: the CRF was never
@@ -2861,7 +2912,7 @@ class ReferenceExtractor:
             return refs, []
         except asyncio.CancelledError:
             raise
-        except ProcessingError:
+        except _PASS_THROUGH:
             raise
         except BaseException as exc:  # noqa: BLE001 — every failure lands in a NER span
             if depth > 0 and len(batch) > 1 and _is_degenerate_ref_failure(exc):
@@ -2899,7 +2950,7 @@ class ReferenceExtractor:
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for result in results:
-            if isinstance(result, ProcessingError):
+            if isinstance(result, _PASS_THROUGH):
                 raise result
         llm_refs = []
         failures: list[BaseException] = []
@@ -2920,7 +2971,7 @@ class ReferenceExtractor:
             """Recover a failed span's refs via the NER parser, tagged with
             their document position so they merge back in order. Logs and gives
             up on just this span if NER itself fails."""
-            if isinstance(cause, ProcessingError):
+            if isinstance(cause, _PASS_THROUGH):
                 raise cause
             failures.append(cause)
             last_index = offset + len(segs) - 1
@@ -2932,7 +2983,7 @@ class ReferenceExtractor:
                 # survivors — the filtered variant silently pulled every ref
                 # after a dropped slot one position earlier.
                 aligned = await asyncio.to_thread(self._parse_references_ner_aligned, segs)
-            except ProcessingError:
+            except _PASS_THROUGH:
                 raise
             except Exception as ner_exc:  # noqa: BLE001
                 logger.error(
@@ -3029,7 +3080,7 @@ class ReferenceExtractor:
                     # Cancellation is not a parse failure — propagate it so the
                     # cancelled coroutine actually stops, never divert to NER.
                     raise
-                except ProcessingError:
+                except _PASS_THROUGH:
                     raise
                 except BaseException as retry_exc:  # noqa: BLE001
                     await _fallback_to_ner(batch_offsets[bi], batches[bi], retry_exc)
@@ -3158,7 +3209,7 @@ class ReferenceExtractor:
             aligned = await asyncio.to_thread(
                 self._parse_references_ner_aligned, [ref_strings[i - 1] for i in missing]
             )
-        except ProcessingError:
+        except _PASS_THROUGH:
             raise
         except Exception as ner_exc:  # noqa: BLE001 — recovery is best-effort
             logger.error("NER recovery of %d skipped refs failed: %s", len(missing), ner_exc)
@@ -3233,7 +3284,7 @@ class ReferenceExtractor:
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for result in results:
-            if isinstance(result, ProcessingError):
+            if isinstance(result, _PASS_THROUGH):
                 raise result
 
         ordered_refs: list[PaperReference] = []
@@ -3245,7 +3296,7 @@ class ReferenceExtractor:
             chunk was built from raw region text with no matching segment
             (rare) — a zero-LLM marker split, or the whole chunk as a single
             entry as the last resort."""
-            if isinstance(cause, ProcessingError):
+            if isinstance(cause, _PASS_THROUGH):
                 raise cause
             failures.append(cause)
             chunk = chunks[ci]
@@ -3254,7 +3305,7 @@ class ReferenceExtractor:
                 # Same offload as _parse_refs_via_ner: keep the CRF forward
                 # pass off the shared serve event loop.
                 recovered = await asyncio.to_thread(self._parse_references_ner, members)
-            except ProcessingError:
+            except _PASS_THROUGH:
                 raise
             except Exception as ner_exc:  # noqa: BLE001
                 logger.error(
@@ -3296,7 +3347,7 @@ class ReferenceExtractor:
                     # Cancellation is not a parse failure — propagate it so the
                     # cancelled coroutine actually stops, never divert to NER.
                     raise
-                except ProcessingError:
+                except _PASS_THROUGH:
                     raise
                 except BaseException as retry_exc:  # noqa: BLE001
                     ordered_refs.extend(await _fallback_to_ner(ci, retry_exc))
@@ -3456,6 +3507,8 @@ class ReferenceExtractor:
                 )
                 for index, ref in zip(missing, recovered, strict=True):
                     aligned[index] = ref
+            except ModelOverrideError:
+                raise
             except Exception:  # noqa: BLE001 — keep successful model entries
                 self._record_warning(
                     WarningCode.REF_PARSE_LOST,
@@ -3580,6 +3633,8 @@ class ReferenceExtractor:
             return None
         try:
             return self._line_stream_choice(ref_df, ref_text, ref_strings)
+        except ModelOverrideError:
+            raise
         except Exception as e:  # noqa: BLE001 — an alternative must never break extraction
             logger.warning("Reference line stream failed: %r", e)
             return None
@@ -3605,7 +3660,11 @@ class ReferenceExtractor:
         cascade_quality = segmentation_quality(ref_strings, section_text, typical_length=typical)
         stream_quality = segmentation_quality(entries, section_text, typical_length=typical)
         tier, tier_spans = self._cascade_selected_tier()
-        if ref_strings and len(entries) < _distinct_count(ref_strings):
+        if tier == "geom_tagger":
+            # An accepted tagger answer is final: the stream only lends it the
+            # link DOIs it reads off the page, as for any kept cascade answer.
+            trigger, selected = "tagger_final", False
+        elif ref_strings and len(entries) < _distinct_count(ref_strings):
             trigger, selected = "fewer_entries", False
         elif ref_strings and stream.rotated:
             trigger, selected = "rotated_page", False

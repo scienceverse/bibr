@@ -99,28 +99,59 @@ def test_required_success_leaves_files_alone():
     assert files[0].error is None
 
 
-def test_an_overridden_classifier_is_required_whatever_the_setting(tmp_path):
-    settings = _settings(required=False)
-    settings.ml.paper_classifier_model_id = str(tmp_path / "paper-candidate")
+def _run_override(settings, loader):
     resources = ClassifierResources(
         settings,
         memory_mode="balanced",
         managed_vllm_fraction=0.0,
         cuda_available=False,
-        paper_loader=_boom,
-        section_loader=_boom,
+        paper_loader=loader,
+        section_loader=loader,
     )
     files = [_File()]
     ctx = SimpleNamespace(
         resources=SimpleNamespace(start_classifiers=resources.start, classifiers=resources),
         file_states=files,
     )
-    asyncio.run(ClassifierStage().run(ctx))
+    return resources, files, ctx
+
+
+def test_an_overridden_classifier_that_does_not_exist_stops_the_run(tmp_path):
+    import pytest
+
+    from bibr.exceptions import ModelOverrideError
+
+    settings = _settings(required=False)
+    settings.ml.paper_classifier_model_id = str(tmp_path / "paper-candidate")
+    resources, files, ctx = _run_override(settings, _boom)
+    with pytest.raises(ModelOverrideError, match="never falls back"):
+        asyncio.run(ClassifierStage().run(ctx))
     states = resources.status()
     assert states["paper"].state.value == "failed_required"
     assert states["paper"].override
     # The shipped section model may still degrade.
     assert states["section"].state.value == "degraded"
-    assert files[0].error_code == "classifier_required_failed"
-    assert files[0].error.startswith("Overridden classifier(s) failed to start")
-    assert "never falls back" in files[0].error
+    # Not an outage on the papers: a resumed batch would fail the same way.
+    assert files[0].error is None
+
+
+def _blip(model_id, revision, device):
+    import httpx
+
+    raise httpx.ConnectError("temporary failure in name resolution")
+
+
+def test_a_network_blip_on_an_overridden_classifier_behaves_as_for_the_default():
+    for required, state in ((False, "degraded"), (True, "failed_required")):
+        settings = _settings(required=required)
+        settings.ml.paper_classifier_model_id = "myorg/paper-classifier-mirror"
+        resources, files, ctx = _run_override(settings, _blip)
+        asyncio.run(ClassifierStage().run(ctx))
+        status = resources.status()["paper"]
+        assert status.state.value == state and not status.override
+        if required:
+            # The shipped outage: bibr batch runs the paper again on resume.
+            assert files[0].error_code == "classifier_required_failed"
+            assert files[0].error_outage is True
+        else:
+            assert files[0].error is None

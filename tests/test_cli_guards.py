@@ -631,3 +631,39 @@ def test_the_tagger_check_is_skipped_when_the_run_does_not_load_it(
     monkeypatch.setattr("bibr.local.cli.run_config._front_tagger_bundle", never)
 
     assert _preflight_front_tagger(SimpleNamespace(mode=mode, no_llm=no_llm)) is None
+
+
+# --- A model setting changed from its default ---------------------------------
+
+
+async def test_chew_refuses_a_model_override_that_does_not_exist(
+    tmp_path, first_run, monkeypatch, capsys
+):
+    from bibr.config import Settings
+    from bibr.local.cli import _build_parser, _run_process
+
+    monkeypatch.setattr(Settings, "REF_GEOM_TAGGER_MODEL_ID", str(tmp_path / "no-tagger"))
+    with pytest.raises(SystemExit) as exc_info:
+        await _run_process(
+            _build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--fast", "--ref-seg", "geom"])
+        )
+    assert exc_info.value.code == 1
+    assert _RecordingPipeline.built == []
+    err = " ".join(capsys.readouterr().err.split())
+    assert "Model override problem: REF_GEOM_TAGGER_MODEL_ID=" in err
+    assert "no such file or directory" in err
+
+
+async def test_chew_ignores_a_stale_setting_the_run_does_not_use(
+    tmp_path, first_run, monkeypatch, capsys
+):
+    from bibr.config import Settings
+    from bibr.local.cli import _build_parser, _run_process
+
+    monkeypatch.setattr(Settings, "REF_GEOM_TAGGER_MODEL_ID", str(tmp_path / "no-tagger"))
+    # --ref-seg crf never asks the geometry tier, so the tagger is not loaded.
+    await _run_process(
+        _build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--fast", "--ref-seg", "crf"])
+    )
+    assert len(_RecordingPipeline.built) == 1
+    assert "Model override problem" not in capsys.readouterr().err
