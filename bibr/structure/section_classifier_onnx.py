@@ -78,18 +78,27 @@ class OnnxSectionClassifierModel:
         return cls(bundle, device=device)
 
     def check_graph(self) -> None:
-        """Run the graph once on headings in context, as ``classify_batch`` sends them.
+        """Run the graph on headings in context, in two shapes ``classify_batch`` sends.
 
         The load probe of an overridden classifier (:mod:`bibr.utils.onnx_probe`):
         headings with their neighbours, position and a body through the bundle's
-        template and tokenizer at :data:`RUNTIME_MAX_LENGTH` tokens, one of them
-        long enough to fill it, with the tokenizer's last id in it. The graph must
-        give finite type logits, one per class of the manifest's
+        template and tokenizer at :data:`RUNTIME_MAX_LENGTH` tokens, as a batch of
+        three padded to the longest, which fills the length and holds the
+        tokenizer's last id, and as one heading alone, cut short
+        (:func:`~bibr.utils.onnx_probe.cut_short`): a paper's headings
+        come in batches of any size, padded to their longest. On both the graph
+        must give finite type logits, one per class of the manifest's
         ``label_classes``, and one top-level logit per heading; every class must
         be a section type bibr knows. Raises :class:`~bibr.exceptions.ConfigurationError`.
         """
         from bibr.exceptions import ConfigurationError
-        from bibr.utils.onnx_probe import PROBE_BODY, check_output, run_probe, with_last_token
+        from bibr.utils.onnx_probe import (
+            PROBE_BODY,
+            check_output,
+            cut_short,
+            run_probe,
+            with_last_token,
+        )
 
         known = {section.value for section in CanonicalSection}
         unknown = [label for label in self.label_classes if label not in known]
@@ -98,7 +107,7 @@ class OnnxSectionClassifierModel:
                 f"{self.bundle_dir}: the manifest's label_classes name section types bibr does "
                 f"not know: {unknown[:5]}"
             )
-        contexts = [
+        full = [
             HeaderContext(
                 heading="2. Methods",
                 body=PROBE_BODY * 8,
@@ -111,35 +120,40 @@ class OnnxSectionClassifierModel:
                 heading="References", body="[1] Smith, J. (2019).", relative_position=1.0
             ),
         ]
-        texts = [_build_input_text(ctx, self.template_version) for ctx in contexts]
-        batch = encode_batch(self.tokenizer, texts, max_length=RUNTIME_MAX_LENGTH)
-        ids = with_last_token(batch.input_ids, batch.attention_mask, self.tokenizer)
-        feeds = {"input_ids": ids, "attention_mask": batch.attention_mask}
-        feeds = {k: v for k, v in feeds.items() if k in self._input_names}
-        shape = f"a {ids.shape} batch of headings in context"
-        type_logits, top_logits = run_probe(
-            self._model_path,
-            shape,
-            lambda: self.session.run(["type_logits", "top_level_logits"], feeds),
-        )
-        n = len(contexts)
-        check_output(
-            self._model_path,
-            "type_logits",
-            type_logits,
-            (n, len(self.label_classes)),
-            shape,
-            f"one per class of the manifest's {len(self.label_classes)} label_classes",
-        )
-        top = np.asarray(top_logits)
-        check_output(
-            self._model_path,
-            "top_level_logits",
-            top.reshape(-1) if top.size == n else top,
-            (n,),
-            shape,
-            "one per heading",
-        )
+        short = [HeaderContext(heading="Funding", body="None.", relative_position=0.9)]
+        for contexts in (full, short):
+            texts = [_build_input_text(ctx, self.template_version) for ctx in contexts]
+            batch = encode_batch(self.tokenizer, texts, max_length=RUNTIME_MAX_LENGTH)
+            ids = with_last_token(batch.input_ids, batch.attention_mask, self.tokenizer)
+            mask = batch.attention_mask
+            if contexts is short:
+                ids, mask = cut_short(ids, mask, RUNTIME_MAX_LENGTH)
+            feeds = {"input_ids": ids, "attention_mask": mask}
+            feeds = {k: v for k, v in feeds.items() if k in self._input_names}
+            shape = f"a {ids.shape} batch of headings in context"
+            type_logits, top_logits = run_probe(
+                self._model_path,
+                shape,
+                lambda feeds=feeds: self.session.run(["type_logits", "top_level_logits"], feeds),
+            )
+            n = len(contexts)
+            check_output(
+                self._model_path,
+                "type_logits",
+                type_logits,
+                (n, len(self.label_classes)),
+                shape,
+                f"one per class of the manifest's {len(self.label_classes)} label_classes",
+            )
+            top = np.asarray(top_logits)
+            check_output(
+                self._model_path,
+                "top_level_logits",
+                top.reshape(-1) if top.size == n else top,
+                (n,),
+                shape,
+                "one per heading",
+            )
 
     def classify_batch(
         self,

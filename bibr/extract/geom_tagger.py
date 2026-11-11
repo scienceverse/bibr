@@ -251,29 +251,32 @@ class GeomLineTagger:
         self._check_graph()
 
     def _check_graph(self) -> None:
-        """Run the graph once on a short reference section, as a paper's lines reach it.
+        """Run the graph on two reference sections of different lengths, as papers send them.
 
         The features of :data:`_PROBE_LINES` (hanging-indent entries on one page)
-        go through the graph, which must give one finite logit pair per line.
+        and of its first two lines go through the graph: a paper's reference
+        section is one call of as many rows as it has lines. On both the graph
+        must give one finite logit pair per line.
         """
-        probe = feature_matrix(records_from_dicts(_PROBE_LINES))
-        shape = f"({len(probe)}, {len(FEATURE_KEYS)}) feature matrix of a reference section"
-        try:
-            out = np.asarray(self._session.run([OUTPUT_NAME], {INPUT_NAME: probe})[0])
-        except Exception as exc:
-            raise ConfigurationError(
-                f"{self.onnx_path}: the graph does not run on a {shape} "
-                f"({type(exc).__name__}: {exc})"
-            ) from exc
-        if out.shape != (len(probe), 2):
-            raise ConfigurationError(
-                f"{self.onnx_path}: the graph returns {OUTPUT_NAME} of shape {out.shape} for "
-                f"a {shape}; want ({len(probe)}, 2), one logit per class (inside, opens)"
-            )
-        if not np.isfinite(out).all():
-            raise ConfigurationError(
-                f"{self.onnx_path}: the graph returns non-finite {OUTPUT_NAME} for a {shape}"
-            )
+        for lines in (_PROBE_LINES, _PROBE_LINES[:2]):
+            probe = feature_matrix(records_from_dicts(lines))
+            shape = f"({len(probe)}, {len(FEATURE_KEYS)}) feature matrix of a reference section"
+            try:
+                out = np.asarray(self._session.run([OUTPUT_NAME], {INPUT_NAME: probe})[0])
+            except Exception as exc:
+                raise ConfigurationError(
+                    f"{self.onnx_path}: the graph does not run on a {shape} "
+                    f"({type(exc).__name__}: {exc})"
+                ) from exc
+            if out.shape != (len(probe), 2):
+                raise ConfigurationError(
+                    f"{self.onnx_path}: the graph returns {OUTPUT_NAME} of shape {out.shape} "
+                    f"for a {shape}; want ({len(probe)}, 2), one logit per class (inside, opens)"
+                )
+            if not np.isfinite(out).all():
+                raise ConfigurationError(
+                    f"{self.onnx_path}: the graph returns non-finite {OUTPUT_NAME} for a {shape}"
+                )
 
     def line_probabilities(self, lines: list[LineRecord]) -> np.ndarray:
         """Tempered probability that each line opens a reference."""

@@ -1,7 +1,8 @@
 """The load probes of the ONNX reference parser, front-matter tagger and classifiers.
 
-An overridden model runs once at load on the input a paper sends, and its
-output shape is checked against its manifest; a graph that opens but fails
+An overridden model runs at load on the shapes of input a paper sends (the
+full length and a short one, two batch sizes where the runtime batches), and
+its output shape is checked against its manifest; a graph that opens but fails
 that probe stops the run at the preflight or at its first load. A shipped
 default is not probed.
 """
@@ -132,6 +133,24 @@ def test_a_parser_graph_smaller_than_its_tokenizer_stops_at_load(tmp_path):
         _get_ner_parser(_parser_settings(bundle))
 
 
+@pytest.mark.parametrize(
+    ("dims", "refused_on"),
+    [
+        ([4, None], r"\(1, \d+\) batch"),  # one batch size: a paper sends any
+        ([None, 16], r"\(1, 8\) batch"),  # one length: a short reference is shorter
+    ],
+)
+def test_a_parser_exported_for_one_shape_stops_at_load(tmp_path, dims, refused_on):
+    from bibr.extract.ref_extractor import _get_ner_parser
+    from tests.onnx_fixtures import fix_input_dims
+
+    bundle = _copy("ner", tmp_path / "parser-candidate")
+    assert _manifest(bundle)["max_length"] == 16
+    fix_input_dims(bundle / "onnx" / "model.onnx", {"input_ids": dims, "attention_mask": dims})
+    with pytest.raises(ModelOverrideError, match=rf"does not run on a {refused_on}"):
+        _get_ner_parser(_parser_settings(bundle))
+
+
 def test_the_shipped_parser_is_not_probed(tmp_path, monkeypatch):
     from bibr.ner.parser_onnx import OnnxRefParser
     from bibr.ner.runtime import load_ref_parser
@@ -165,6 +184,39 @@ def _load_paper(bundle: Path):
 def test_overridden_classifiers_that_run_load(tmp_path):
     assert _load_section(_copy("section", tmp_path / "section")).label_classes
     assert _load_paper(_copy("paper", tmp_path / "paper")).l1_classes
+
+
+@pytest.mark.parametrize(
+    ("dims", "refused_on"),
+    [
+        ([3, None], r"\(1, \d+\) batch"),  # one batch size: a paper sends any
+        ([None, 256], r"\(1, \d+\) batch"),  # one length: a short heading is shorter
+    ],
+)
+def test_a_section_classifier_exported_for_one_shape_is_refused(tmp_path, dims, refused_on):
+    from tests.onnx_fixtures import fix_input_dims
+
+    bundle = _copy("section", tmp_path / "section")
+    fix_input_dims(bundle / "onnx" / "model.onnx", {"input_ids": dims, "attention_mask": dims})
+    with pytest.raises(ConfigurationError, match=rf"does not run on a {refused_on}"):
+        _load_section(bundle)
+
+
+@pytest.mark.parametrize(
+    ("dims", "refused_on"),
+    [
+        ([2, None], r"\(1, \d+\) batch"),  # one batch size: a run sends any
+        ([None, 32], r"\(1, \d+\) batch"),  # one length: a short paper is shorter
+    ],
+)
+def test_a_paper_classifier_exported_for_one_shape_is_refused(tmp_path, dims, refused_on):
+    from tests.onnx_fixtures import fix_input_dims
+
+    bundle = _copy("paper", tmp_path / "paper")
+    assert _manifest(bundle)["max_length"] == 32
+    fix_input_dims(bundle / "onnx" / "model.onnx", {"input_ids": dims, "attention_mask": dims})
+    with pytest.raises(ConfigurationError, match=rf"does not run on a {refused_on}"):
+        _load_paper(bundle)
 
 
 def test_a_section_classifier_with_another_label_count_is_refused(tmp_path):
@@ -278,11 +330,48 @@ def _positional_tagger(tmp_path: Path, *, positions: int, max_length: int) -> Pa
     return tmp_path
 
 
-def test_an_overridden_tagger_that_runs_on_a_full_window_loads(tmp_path):
+def test_an_overridden_tagger_that_runs_on_any_window_loads(tmp_path):
+    from bibr.front_tagger.runtime import load_front_tagger
+    from tests.front_tagger.test_runtime import _bundle
+
+    _bundle(tmp_path, max_length=256)
+    assert load_front_tagger(_tagger_settings(tmp_path)) is not None
+
+
+def test_a_tagger_that_runs_on_its_longest_window_only_stops_at_load(tmp_path):
     from bibr.front_tagger.runtime import load_front_tagger
 
+    # A window as long as the manifest's max_length runs; a paper with little
+    # front matter, or the last window of a long one, is shorter and fails.
     bundle = _positional_tagger(tmp_path, positions=256, max_length=256)
-    assert load_front_tagger(_tagger_settings(bundle)) is not None
+    with pytest.raises(ModelOverrideError, match=r"does not run on a \(1, 24\) window"):
+        load_front_tagger(_tagger_settings(bundle))
+
+
+def test_a_tagger_exported_for_one_window_length_stops_at_load(tmp_path):
+    from bibr.front_tagger.runtime import load_front_tagger
+    from tests.front_tagger.test_runtime import _bundle
+    from tests.onnx_fixtures import fix_input_dims
+
+    bundle = _bundle(tmp_path, max_length=256)
+    fix_input_dims(
+        bundle / "model.onnx",
+        {name: [None, 256] for name in ("input_ids", "attention_mask", "token_features")},
+    )
+    with pytest.raises(ModelOverrideError, match=r"does not run on a \(1, 24\) window"):
+        load_front_tagger(_tagger_settings(tmp_path))
+    # One window at a time is what a paper sends: a graph fixed to a batch of
+    # one loads.
+    reset_loaded_model_overrides()
+    from bibr.front_tagger.runtime import reset_front_tagger_cache
+
+    reset_front_tagger_cache()
+    bundle = _bundle(tmp_path / "batch1", max_length=256)
+    fix_input_dims(
+        bundle / "model.onnx",
+        {name: [1] for name in ("input_ids", "attention_mask", "token_features")},
+    )
+    assert load_front_tagger(_tagger_settings(tmp_path / "batch1")) is not None
 
 
 def test_a_tagger_that_fails_on_its_longest_window_stops_at_load(tmp_path):

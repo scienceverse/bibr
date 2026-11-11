@@ -162,22 +162,31 @@ class OnnxFrontTagger:
         return ids, words_of, feats
 
     def check_graph(self) -> None:
-        """Run the graph once on a full window of front matter, as ``tag`` sends it.
+        """Run the graph on front matter, in the two window lengths ``tag`` sends.
 
         The load probe of an overridden tagger (:mod:`bibr.utils.onnx_probe`):
         the regions of a paper's first two pages through
         :func:`~bibr.front_tagger.contract.build_tagger_input`, the bundle's
         tokenizer and the feature rows ``tag`` builds, repeated to the
-        manifest's ``max_length`` (the longest window a paper sends), with the
-        tokenizer's last id in it. The graph must give finite emissions, one per
-        tag of the manifest for every token, and the CRF's scores must match the
-        tag count; the window is decoded as a paper's is. Raises
-        :class:`~bibr.exceptions.ConfigurationError`.
+        manifest's ``max_length`` (the longest window a paper sends) with the
+        tokenizer's last id in it, and cut to a short window
+        (:func:`~bibr.utils.onnx_probe.short_length`: a paper with little front
+        matter, or the last window of a long one). ``tag`` sends one window
+        at a time, so both are batches of one. On both the graph must give
+        finite emissions, one per tag of the manifest for every token, and the
+        CRF's scores must match the tag count; each window is decoded as a
+        paper's is. Raises :class:`~bibr.exceptions.ConfigurationError`.
         """
         from bibr.exceptions import ConfigurationError
         from bibr.front_tagger.contract import build_tagger_input
         from bibr.ner.crf_numpy import marginals, viterbi_decode
-        from bibr.utils.onnx_probe import check_crf, check_output, last_token_id, run_probe
+        from bibr.utils.onnx_probe import (
+            check_crf,
+            check_output,
+            last_token_id,
+            run_probe,
+            short_length,
+        )
 
         check_crf(self.bundle_dir, self.tags, self.start, self.end, self.transitions)
         ids, _words_of, feats = self._token_inputs(build_tagger_input(_probe_regions()))
@@ -186,26 +195,36 @@ class OnnxFrontTagger:
                 f"{self.bundle_dir}: the tokenizer gives no tokens for a paper's front matter"
             )
         positions = np.arange(self.max_length) % len(ids)
-        ids, feats = ids[positions], feats[positions]
+        full_ids, full_feats = ids[positions], feats[positions]
         if (last := last_token_id(self.tokenizer)) >= 0:
-            ids[-1] = last
+            full_ids[-1] = last
+        short = min(short_length(self.max_length), len(ids))
         model_path = self.bundle_dir / self.manifest.get("model_file", ONNX_MODEL)
-        shape = f"a (1, {len(ids)}) window of front matter with {len(FEATURE_KEYS)} features"
-        emissions = check_output(
-            model_path,
-            "emissions",
-            run_probe(model_path, shape, lambda: self._emissions(ids, feats)[None]),
-            (1, len(ids), len(self.tags)),
-            shape,
-            f"one score per tag of the manifest's {len(self.tags)} bio_tags",
-        )[0]
         crf = {
             "start_transitions": self.start,
             "end_transitions": self.end,
             "transitions": self.transitions,
         }
-        viterbi_decode(emissions[None], np.ones((1, len(ids)), dtype=bool), **crf)
-        marginals(emissions, **crf)
+        for window_ids, window_feats in ((full_ids, full_feats), (ids[:short], feats[:short])):
+            if not len(window_ids):
+                continue
+            shape = (
+                f"a (1, {len(window_ids)}) window of front matter with {len(FEATURE_KEYS)} features"
+            )
+            emissions = check_output(
+                model_path,
+                "emissions",
+                run_probe(
+                    model_path,
+                    shape,
+                    lambda i=window_ids, f=window_feats: self._emissions(i, f)[None],
+                ),
+                (1, len(window_ids), len(self.tags)),
+                shape,
+                f"one score per tag of the manifest's {len(self.tags)} bio_tags",
+            )[0]
+            viterbi_decode(emissions[None], np.ones((1, len(window_ids)), dtype=bool), **crf)
+            marginals(emissions, **crf)
 
     def tag(self, inp: TaggerInput) -> tuple[list[str], list[float]]:
         """One BIO tag and its posterior per word of ``inp``."""
@@ -345,7 +364,7 @@ def load_front_tagger(
             else:
                 tagger = OnnxFrontTagger(bundle, device)
                 if is_model_override(settings, ENV_MODEL_ID):
-                    # A candidate's graph runs once at load; the default is not probed.
+                    # A candidate's graph is probed at load; the default is not.
                     tagger.check_graph()
                 logger.info("Front-matter tagger loaded")
                 logger.debug("Front-matter tagger bundle: %s", bundle)

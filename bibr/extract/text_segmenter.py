@@ -39,8 +39,8 @@ subdirectory, or a Hub repo with the three files in ``onnx/``, fetched at
 ``REF_TEXT_SEG_REVISION``. The graph takes ``input_ids`` and
 ``attention_mask`` (int64, batch x tokens) and returns ``logits`` (float32,
 batch x tokens x 3, in the order of the manifest's ``tags``); loading runs it
-once on a full window of tokenised reference text (with the tokenizer's last id
-in it) to check that.
+on a full window of tokenised reference text (with the tokenizer's last id in
+it) and on a short one to check that.
 """
 
 from __future__ import annotations
@@ -291,45 +291,50 @@ class OnnxTextSegmenter:
             out = self._session.run([OUTPUT_NAME], {INPUT_IDS: x, ATTENTION_MASK: np.ones_like(x)})
         return np.asarray(out[0])
 
-    def _probe_ids(self) -> np.ndarray:
-        """A full window of token ids as a paper sends them, and the tokenizer's last id.
+    def _probe_ids(self) -> list[np.ndarray]:
+        """Token ids in the two window lengths a paper sends, one with the tokenizer's last id.
 
         The ids of a short reference list through the bundle's tokenizer, repeated to
-        the manifest's ``window``: a graph with fewer positions than the window, or
-        a vocabulary smaller than the tokenizer's, fails on it as it would on a paper.
+        the manifest's ``window`` (a long list's windows), and cut to a few tokens (a
+        short list, or a long one's last window): a graph with fewer positions than
+        the window, one fixed to a single length, or a vocabulary smaller than the
+        tokenizer's, fails on one of them as it would on a paper.
         """
+        from bibr.utils.onnx_probe import short_length
+
         ids, _offsets = self.encode(_PROBE_TEXT)
         if not len(ids):
             raise ConfigurationError(
                 f"{self.onnx_path}: the tokenizer gives no tokens for a reference list"
             )
-        ids = np.resize(ids, self.window)
+        full = np.resize(ids, self.window)
         last = int(self._tokenizer.get_vocab_size(with_added_tokens=False)) - 1
         if last >= 0:
-            ids[-1] = last
-        return ids
+            full[-1] = last
+        short = ids[: min(short_length(self.window), len(ids))]
+        return [full, short] if len(short) else [full]
 
     def _check_graph(self) -> None:
-        """Run the graph once on a full window; it must give one finite logit per tag per token."""
-        probe = self._probe_ids()
-        shape = f"(1, {len(probe)}) window of tokenised reference text"
-        try:
-            out = self._run(probe)
-        except Exception as exc:
-            raise ConfigurationError(
-                f"{self.onnx_path}: the graph does not run on a {shape} "
-                f"({type(exc).__name__}: {exc})"
-            ) from exc
-        if out.shape != (1, len(probe), len(TAGS)):
-            raise ConfigurationError(
-                f"{self.onnx_path}: the graph returns {OUTPUT_NAME} of shape {out.shape} for "
-                f"a {shape}; want (1, {len(probe)}, {len(TAGS)}), one logit per tag "
-                f"{list(TAGS)}"
-            )
-        if not np.isfinite(out).all():
-            raise ConfigurationError(
-                f"{self.onnx_path}: the graph returns non-finite {OUTPUT_NAME} for a {shape}"
-            )
+        """Run the graph on each probe window; it must give one finite logit per tag per token."""
+        for probe in self._probe_ids():
+            shape = f"(1, {len(probe)}) window of tokenised reference text"
+            try:
+                out = self._run(probe)
+            except Exception as exc:
+                raise ConfigurationError(
+                    f"{self.onnx_path}: the graph does not run on a {shape} "
+                    f"({type(exc).__name__}: {exc})"
+                ) from exc
+            if out.shape != (1, len(probe), len(TAGS)):
+                raise ConfigurationError(
+                    f"{self.onnx_path}: the graph returns {OUTPUT_NAME} of shape {out.shape} "
+                    f"for a {shape}; want (1, {len(probe)}, {len(TAGS)}), one logit per tag "
+                    f"{list(TAGS)}"
+                )
+            if not np.isfinite(out).all():
+                raise ConfigurationError(
+                    f"{self.onnx_path}: the graph returns non-finite {OUTPUT_NAME} for a {shape}"
+                )
 
     def encode(self, text: str) -> tuple[np.ndarray, list[tuple[int, int]]]:
         """Token ids and character offsets, without special tokens."""

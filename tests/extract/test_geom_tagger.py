@@ -275,6 +275,17 @@ def test_a_graph_of_the_wrong_shape_is_refused_at_load(tmp_path):
         GeomLineTagger(bundle)
 
 
+def test_a_graph_exported_for_one_line_count_is_refused_at_load(tmp_path):
+    from tests.onnx_fixtures import fix_input_dims
+
+    # It runs on the probe's five lines; a reference section of any other
+    # length would fail at inference.
+    bundle = _bundle(tmp_path / "fixed")
+    fix_input_dims(bundle / "onnx" / "tagger.onnx", {"features": [5, None]})
+    with pytest.raises(ConfigurationError, match=r"does not run on a \(2, \d+\) feature matrix"):
+        GeomLineTagger(bundle)
+
+
 def test_a_hub_id_is_downloaded_and_never_read_from_the_working_directory(tmp_path, monkeypatch):
     cached = _bundle(tmp_path / "cache")
     # A directory of the same name in the working directory must not be read.

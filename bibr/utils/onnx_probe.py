@@ -1,13 +1,15 @@
-"""Load probes of the ONNX text models: one run on the input a paper sends.
+"""Load probes of the ONNX models: runs on the shapes of input a paper sends.
 
 A model override (:mod:`bibr.utils.model_overrides`) whose graph opens but does
 not run on a paper's input (too few positions for the window the runtime
-sends, a vocabulary smaller than its tokenizer's, another label count than its
-manifest lists) would otherwise be found only at inference, after papers were
-written with a fallback. The ONNX loaders run such a model once at load, on an
-input built the way the runtime builds it, and check the output shape against
-the manifest; a failed probe is a load failure. A shipped default is not
-probed.
+sends, an input fixed to one batch size or one length, a vocabulary smaller
+than its tokenizer's, another label count than its manifest lists) would
+otherwise be found only at inference, after papers were written with a
+fallback. The ONNX loaders run such a model at load on inputs built the way
+the runtime builds them, in at least two shapes: the full length the runtime
+can send and a short one, and, where the runtime batches, two batch sizes
+padded to their longest row. Each output shape is checked against the
+manifest; a failed probe is a load failure. A shipped default is not probed.
 """
 
 from __future__ import annotations
@@ -38,6 +40,23 @@ PROBE_BODY = (
     "recorded with a standard keyboard. We report how we determined our sample size, all "
     "data exclusions, all manipulations, and all measures in the study [12, 13]. "
 )
+
+#: The most tokens of the short input each probe sends besides the full-length one.
+SHORT_PROBE_TOKENS = 24
+
+
+def short_length(full: int) -> int:
+    """The token length of a probe's short input when its full one is ``full`` tokens."""
+    return max(1, min(SHORT_PROBE_TOKENS, full // 2))
+
+
+def cut_short(ids: np.ndarray, mask: np.ndarray, full: int) -> tuple[np.ndarray, np.ndarray]:
+    """A tokenised batch cut to :func:`short_length` positions, the shape of a shorter text.
+
+    Cutting the arrays leaves the tokenizer's truncation as the bundle set it.
+    """
+    n = min(np.asarray(ids).shape[1], short_length(full))
+    return np.asarray(ids)[:, :n], np.asarray(mask)[:, :n]
 
 
 def last_token_id(tokenizer: Any) -> int:
@@ -120,9 +139,12 @@ def check_crf(
 __all__ = [
     "PROBE_BODY",
     "PROBE_REFERENCES",
+    "SHORT_PROBE_TOKENS",
     "check_crf",
     "check_output",
+    "cut_short",
     "last_token_id",
     "run_probe",
+    "short_length",
     "with_last_token",
 ]
