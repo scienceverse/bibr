@@ -9,13 +9,16 @@ For each setting it rewrites:
 * the matching ``ARG`` pair in ``Dockerfile.serve``, for the models the image
   pins itself (the others it reads from bibr's config at build time);
 * the rows of Markdown tables under ``docs/`` that name the old repo and the
-  old short revision, and ``huggingface.co/<repo>/blob|tree/<revision>`` links
-  in the docs.
+  old short revision, and ``huggingface.co/<repo>/blob|tree|resolve|commit/<revision>``
+  links in the docs.
 
 Then it looks for the old pin anywhere else (the full revision, its first eight
-characters, and the old repo id when the repo changes) in the code, the
-Dockerfiles, the README and the docs. A pin it finds there is one it does not
-know how to update, and it stops with a list of them, writing nothing. The
+characters, and the old repo id when the repo changes, also inside a URL such
+as ``huggingface.co/<repo>/resolve/<revision>``) in every text file of the
+tree: the code, the scripts, the Dockerfiles and shell scripts, ``.github/``,
+``evaluation/``, the TOML, JSON and YAML files and the docs (the files git
+tracks when ``--root`` is a git checkout). A pin it finds there is one it did
+not change, and it stops with a list of every such place, writing nothing. The
 CHANGELOG is history and is not searched; tests that assert the old pin are
 listed for a hand update but do not stop it. ``--check`` reports without
 writing; ``--root`` runs on a copy of the tree.
@@ -161,11 +164,83 @@ def _docker_arg(text: str, name: str) -> re.Match[str]:
     return found[0]
 
 
+# Text files searched for a pin left behind, besides every file under ``.github/``
+# and every ``Dockerfile*``.
+_SEARCHED_SUFFIXES = frozenset(
+    {".py", ".md", ".yml", ".yaml", ".toml", ".sh", ".json", ".cfg", ".ini", ".txt", ".r", ".R"}
+)
+# Not searched: history, the tests (listed separately), and what is not the tree's own.
+_NOT_SEARCHED = frozenset({"CHANGELOG.md"})
+_PRUNED_DIRS = frozenset({"tests", "node_modules", "__pycache__", "site", "build", "dist"})
+# A larger file is data, not a place a pin is written by hand.
+_MAX_SEARCHED_BYTES = 4_000_000
+
+
+def _tracked_files(root: Path) -> list[Path] | None:
+    """The files git tracks under ``root``, or None when ``root`` is not a git checkout."""
+    import subprocess
+
+    try:
+        top = subprocess.run(  # noqa: S603 - fixed read-only Git command, no shell
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],  # noqa: S607 - Git on PATH
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        if Path(top).resolve() != root.resolve():
+            return None
+        listed = subprocess.run(  # noqa: S603 - fixed read-only Git command, no shell
+            ["git", "-C", str(root), "ls-files", "-z"],  # noqa: S607 - Git on PATH
+            capture_output=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return [root / name for name in listed.decode("utf-8", "replace").split("\0") if name]
+
+
+def _walked_files(root: Path) -> list[Path]:
+    import os
+
+    out: list[Path] = []
+    for here, dirs, names in os.walk(root):
+        dirs[:] = sorted(
+            d for d in dirs if d not in _PRUNED_DIRS and (not d.startswith(".") or d == ".github")
+        )
+        out.extend(Path(here) / name for name in sorted(names))
+    return out
+
+
 def _search_files(root: Path) -> list[Path]:
-    paths = [root / "README.md", *sorted(root.glob("Dockerfile*"))]
-    for pattern in ("bibr/**/*.py", "scripts/**/*.py", "docs/**/*.md", "docs/**/*.yml"):
-        paths.extend(sorted(root.glob(pattern)))
-    return [p for p in paths if p.is_file()]
+    """Every text file of the tree that may name a pin, tests and the CHANGELOG aside."""
+    candidates = _tracked_files(root)
+    if candidates is None:
+        candidates = _walked_files(root)
+    paths = []
+    for candidate in candidates:
+        rel = candidate.relative_to(root)
+        if rel.parts[0] == "tests" or rel.as_posix() in _NOT_SEARCHED:
+            continue
+        if not (
+            rel.parts[0] == ".github"
+            or candidate.name.startswith("Dockerfile")
+            or candidate.suffix in _SEARCHED_SUFFIXES
+        ):
+            continue
+        try:
+            if not candidate.is_file() or candidate.stat().st_size > _MAX_SEARCHED_BYTES:
+                continue
+        except OSError:
+            continue
+        paths.append(candidate)
+    return sorted(paths)
+
+
+def _read_text(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 def plan(
@@ -225,7 +300,7 @@ def plan(
                     rows.append(line)
                 new = "".join(rows)
                 new = re.sub(
-                    rf"huggingface\.co/{re.escape(old_repo)}/(blob|tree)/{old_rev}",
+                    rf"huggingface\.co/{re.escape(old_repo)}/(blob|tree|resolve|commit)/{old_rev}",
                     lambda m, repo=repo, revision=revision: (
                         f"huggingface.co/{repo}/{m.group(1)}/{revision}"
                     ),
@@ -243,11 +318,16 @@ def plan(
         if old_repo and old_repo != repo:
             needles.append(old_repo)
     needles = sorted(set(needles), key=len, reverse=True)
+    # A needle stands alone or inside a URL or path (``/resolve/<rev>``,
+    # ``huggingface.co/<repo>``), but not inside a longer name or hex string.
+    patterns = [re.compile(rf"(?<![\w-]){re.escape(needle)}(?![\w-])") for needle in needles]
     for path in _search_files(root):
-        text = files.get(path) if path in files else path.read_text(encoding="utf-8")
+        text = files[path] if path in files else _read_text(path)
+        if text is None:
+            continue
         for number, line in enumerate(text.splitlines(), 1):
-            for needle in needles:
-                if re.search(rf"(?<![\w/-]){re.escape(needle)}(?![\w-])", line):
+            for pattern in patterns:
+                if pattern.search(line):
                     stale.append(f"{path.relative_to(root)}:{number}: {line.strip()[:120]}")
                     break
     tests = []
@@ -274,7 +354,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if stale:
-        print("error: pins this script does not know how to update:", file=sys.stderr)
+        print(
+            "error: places that still name the old pin, which this script does not know how "
+            "to update:",
+            file=sys.stderr,
+        )
         for line in stale:
             print(f"  {line}", file=sys.stderr)
         print("Update them by hand (or teach the script), then run it again.", file=sys.stderr)

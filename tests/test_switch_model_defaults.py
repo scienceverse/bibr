@@ -179,3 +179,74 @@ def test_the_real_tree_has_no_pin_the_script_cannot_move(setting):
         pytest.skip("no default model")
     _, stale, _ = switch.plan(REPO, {setting: (repo, NEW)})
     assert stale == []
+
+
+def _section_pin(tree):
+    setting = "ML_SECTION_CLASSIFIER_MODEL_ID"
+    return setting, _default(tree, setting, "id"), _default(tree, setting, "revision")
+
+
+@pytest.mark.parametrize(
+    ("name", "line"),
+    [
+        ("bibr/fetch.py", 'URL = "https://huggingface.co/{repo}/resolve/{rev}/onnx/model.onnx"'),
+        ("README.md", "See https://huggingface.co/{repo}/commit/{rev} for the export."),
+        (".github/workflows/models.yml", "      - run: hf download {repo} --revision {rev}"),
+        ("pyproject.toml", 'section-revision = "{rev}"'),
+        ("entrypoint.sh", "REV={short}"),
+        ("evaluation/pins.json", '{{"section": "{rev}"}}'),
+        ("ci/models.yaml", "section: /models/{short}/onnx"),
+    ],
+)
+def test_an_old_revision_anywhere_in_the_tree_stops_it(tree, capsys, name, line):
+    setting, repo, old = _section_pin(tree)
+    target = tree / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(line.format(repo=repo, rev=old, short=old[:8]) + "\n")
+    before = {f: (tree / f).read_bytes() for f in FILES}
+    assert switch.main([f"{setting}={repo}@{NEW}", "--root", str(tree)]) == 1
+    err = capsys.readouterr().err
+    assert f"{name}:1" in err
+    assert {f: (tree / f).read_bytes() for f in FILES} == before
+
+
+def test_a_model_card_link_to_the_old_repo_stops_a_repo_change(tree, capsys):
+    setting, repo, old = _section_pin(tree)
+    (tree / "docs/guides/other.md").write_text(f"The [card](https://huggingface.co/{repo}).\n")
+    assert switch.main([f"{setting}=org/new-section@{NEW}", "--root", str(tree)]) == 1
+    assert "docs/guides/other.md:1" in capsys.readouterr().err
+
+
+def test_resolve_and_commit_links_in_the_docs_follow_the_revision(tree):
+    setting, repo, old = _section_pin(tree)
+    doc = tree / "docs/guides/other.md"
+    doc.write_text(
+        f"[graph](https://huggingface.co/{repo}/resolve/{old}/onnx/model.onnx) and "
+        f"[the commit](https://huggingface.co/{repo}/commit/{old}).\n"
+    )
+    assert switch.main([f"{setting}={repo}@{NEW}", "--root", str(tree)]) == 0
+    text = doc.read_text()
+    assert old not in text
+    assert f"{repo}/resolve/{NEW}/onnx" in text and f"{repo}/commit/{NEW})" in text
+
+
+def test_a_longer_hex_string_or_name_is_not_the_old_pin(tree):
+    setting, repo, old = _section_pin(tree)
+    (tree / "bibr/other.py").write_text(f'A = "{old[:8]}ff"\nB = "{repo}-v2"\nC = "x{old}"\n')
+    _, stale, _ = switch.plan(tree, {setting: ("org/new-section", NEW)})
+    assert not any(entry.startswith("bibr/other.py") for entry in stale)
+
+
+def test_in_a_git_checkout_only_tracked_files_are_searched(tree):
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git is not installed")
+    import subprocess
+
+    setting, repo, old = _section_pin(tree)
+    (tree / "notes.md").write_text(f"pinned at {old}\n")
+    (tree / "tracked.md").write_text(f"pinned at {old}\n")
+    subprocess.run([git, "init", "-q", str(tree)], check=True)
+    subprocess.run([git, "-C", str(tree), "add", "tracked.md", *FILES], check=True)
+    _, stale, _ = switch.plan(tree, {setting: (repo, NEW)})
+    assert [entry.split(":")[0] for entry in stale] == ["tracked.md"]
