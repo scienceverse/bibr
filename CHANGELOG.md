@@ -177,9 +177,11 @@ too: it is recorded as one, and it loads and runs as before.
   classifier over the paper's paragraphs that needs no `torch`. Where it finds
   a funding, competing interests, ethics or data availability statement, that
   field takes its statements instead of the rules', with the source
-  `statement_tagger`; a field it finds nothing for keeps the rules' value.
-  When the paper has no acknowledgments or author contributions section, the
-  paragraphs it finds become one. Each adds a `STATEMENT_TAGGER` warning. A
+  `statement_tagger`; a field it finds nothing for, or reads exactly as the
+  rules did, keeps the rules' value and source. When the paper has no
+  acknowledgments or author contributions section, the paragraphs it finds
+  become one; a section under a printed body heading (a "Discussion") is never
+  retyped. Each adds a `STATEMENT_TAGGER` warning. A
   `--no-llm` run does not use it. The runtime (`bibr.statement_tagger.runtime`)
   needs nothing else from bibr: block texts in reading order in, typed
   statements out. It follows the rules of every model override: a bundle that

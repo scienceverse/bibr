@@ -943,13 +943,17 @@ statement type; a block is of a type at or above that type's threshold in
 Where it finds a funding, competing interests, ethics or data availability
 statement, that field takes the tagger's statements (all of them, in reading
 order, each cut at the next statement label in its rows) instead of the
-rules'; a field it finds nothing for keeps the rules' value. The field's
-source in `extraction.fields` is then `statement_tagger`. When the paper has
-no acknowledgments or author contributions section and the tagger finds one,
-its paragraphs become that section: a section all of whose rows it tagged is
-retyped, otherwise the rows move to a new section with a synthetic heading
-right after the one they were in; `classification_source` is
-`statement_tagger` either way. Each field or section it supplied adds a
+rules'; a field it finds nothing for keeps the rules' value, and so does a
+field whose statements it reads exactly as the rules did (whitespace aside).
+Otherwise the field's source in `extraction.fields` is `statement_tagger`.
+When the paper has no acknowledgments or author contributions section and
+the tagger finds one, its paragraphs become that section: a section all of
+whose rows it tagged is retyped, unless its printed heading is one bibr's
+heading lookup reads as a body section (an introduction, methods, results,
+discussion or appendix heading; the section then stays as it is, and its
+rows still give the statement fields their values), otherwise the rows move
+to a new section with a synthetic heading right after the one they were in;
+`classification_source` is `statement_tagger` either way. Each field or section it supplied adds a
 `STATEMENT_TAGGER` warning. A `--no-llm` run does not use it. The setting
 has no default, so a bundle it names is always an override: when it cannot be
 loaded, the Hub being out of reach included, the run stops. The preflight
