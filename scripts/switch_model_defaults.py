@@ -78,6 +78,9 @@ PINS: dict[str, Pin] = {
         "paper_classifier_revision",
         ("PAPER_CLASSIFIER_MODEL", "PAPER_CLASSIFIER_REVISION"),
     ),
+    "ML_STATEMENT_TAGGER_MODEL_ID": Pin(
+        "MlOptions", "statement_tagger_model_id", "statement_tagger_revision"
+    ),
     "LAYOUT_ONNX_MODEL_ID": Pin("LayoutOptions", "onnx_model_id", "onnx_revision"),
     "LAYOUT_MODEL_ID": Pin(
         "LayoutOptions",
