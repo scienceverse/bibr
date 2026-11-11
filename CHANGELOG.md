@@ -136,7 +136,8 @@ server or a backend written to `.env` still reads scans.
   the same checks as printed text, and the export names such pages in a
   `TEXT_LAYER_OCR_LAYER_READ` warning. Invisible text on a page with no
   page-sized image stays unread. The refusal of a scan that has such a layer
-  now names the setting.
+  now names the setting. On 70 development scans a fast run read 64 with the
+  setting and 5 without; `LIMITATIONS.md` has the scores.
 
 ### Added — export schema 12.4 (additive)
 

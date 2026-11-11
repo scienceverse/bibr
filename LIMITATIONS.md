@@ -220,11 +220,16 @@ Known caveats:
   OCR model. `OCR_TEXT_LAYER_READ_OCR_LAYER=true` reads it, for pages where the
   image covers the page, and names those pages in a `TEXT_LAYER_OCR_LAYER_READ`
   warning. A scan cropped to its text block, or with no such layer, is still
-  refused. How well papers read this way score has not been measured.
+  refused. On 70 scanned papers of a development set the setting let a fast run
+  read 64 instead of 5. Of the 59 it added, 38 met the pass floors (title,
+  authors, reference matching), against 41 when the same build read them with an
+  OCR model and 47 for bibr 0.8.0 with an OCR model and the LLM.
 - This route has not been validated as the other rows of the table above have, and
   its accuracy on tables and formulas is not measured on its own.
-- `bibr serve` always reads PDFs through its OCR server (`OCR_BASE_URL`) and does not
-  take this route: a fast `bibr serve` with no OCR server is not ready.
+- `bibr serve` takes this route under the same rule as the command line: a fast
+  server with no OCR setting, or any server started with `--ocr text-layer`. It
+  answers a scanned PDF with a 422 and `error_code: scan_needs_ocr`. The route
+  belongs to the server; a request cannot change it.
 
 ## `xref` is not yet a fully trusted citation graph
 
