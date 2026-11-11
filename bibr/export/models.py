@@ -40,6 +40,10 @@ _SCHEMA_VERSION = "12.4"
 #   - New ``extraction.settings.models``: one row per model the run was set to
 #     load, {setting, model, id, revision, files, override}; a local model is
 #     a short name and the sha256 of its files, never its path.
+#   - New ``extraction.diagnostics.section_classification[].header_supplied``
+#     (``true``): the paper prints no heading for the section and
+#     ``section[].header`` is bibr's own wording. Omitted for a printed
+#     heading.
 #   Every key is omitted when absent, so every 12.3 export is still a valid
 #   12.4 reader input.
 #
@@ -1698,6 +1702,29 @@ class SectionClassificationExport(BaseModel):
         "'imrad_dedup' or 'statement_tagger' (the opt-in statement tagger); null when "
         "unclassified."
     )
+    # A plain bool, not ``Literal[True]``: the lenient reader opens every Literal to
+    # ``str`` and would then refuse the value this model writes.
+    header_supplied: bool | None = Field(
+        default=None,
+        description="True when the paper prints no heading for this section, so section[].header "
+        "is bibr's own wording and not text of the paper: an abstract or introduction found by "
+        "its position ('Abstract', 'Introduction'), a section named after a layout region, or "
+        "a statement section the opt-in statement tagger added ('Acknowledgments', 'Author "
+        "contributions'). A list of the paper's printed headings leaves these sections out. "
+        "Omitted for a printed heading, and before schema 12.4.",
+    )
+
+    # A reader of a 12.3 export finds no such key. Written only when true: false and
+    # absent both mean a printed heading.
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("header_supplied",)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent(self, handler):
+        data = handler(self)
+        for key in self.OMITTED_WHEN_ABSENT:
+            if not data.get(key):
+                data.pop(key, None)
+        return data
 
 
 class XrefTierExport(BaseModel):

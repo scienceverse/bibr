@@ -45,6 +45,15 @@ The export records each section's `score` and `source` in
 consumers can distinguish model, lookup, LLM, and later hierarchy decisions. With `no_llm=True`, heading classification
 uses the lookup-only path.
 
+Some sections have no printed heading: an abstract or introduction found by its
+position, a section named after a layout region, and the acknowledgment and
+author-contribution sections the opt-in statement tagger adds. Their
+`section[].header` is bibr's own wording ("Abstract", "Introduction",
+"Acknowledgments", "Author contributions"), and their row in
+`extraction.diagnostics.section_classification` carries `header_supplied: true`.
+The key is absent for a printed heading. To list the headings a paper prints,
+leave out the sections whose row has it.
+
 ### Canonical section types
 
 | Type | Value | Examples |
