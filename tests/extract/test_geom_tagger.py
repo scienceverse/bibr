@@ -522,7 +522,12 @@ async def test_a_tagger_error_on_one_paper_is_a_decline(tmp_path, monkeypatch, c
         with_tagger, (attempt,) = await _extract(
             tmp_path, monkeypatch, bundle, tagger_error=RuntimeError("bad input")
         )
+    # The paper goes on as without the tagger, and its warnings say the override raised.
+    override_warnings = [w for w in with_tagger.pop("warnings") if w not in without["warnings"]]
+    without.pop("warnings")
     assert with_tagger == without
+    assert [w.code for w in override_warnings] == ["MODEL_OVERRIDE_INFERENCE_FAILED"]
+    assert "REF_GEOM_TAGGER_MODEL_ID" in override_warnings[0].message
     assert attempt.reason_flags == ("tagger_error", "error=RuntimeError")
     assert "geometry line tagger failed on this paper" in caplog.text
 

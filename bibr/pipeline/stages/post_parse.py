@@ -1961,35 +1961,41 @@ class PostParseStage:
         enrichment_prefetch = bool(ctx.config.enrichment_enabled(ctx.settings))
 
         async def _gated(fs):
+            from bibr.pipeline.stages.parse_segment import paper_key
+            from bibr.utils.model_overrides import paper_scope
+
             async with sem:
                 fs_t0 = time.monotonic()
                 file_hash = fs.file_hash or ""
-                result = await post_parse(
-                    contents=fs.contents,
-                    file_name=fs.path.name,
-                    file_hash=file_hash,
-                    paper_id=fs.paper_id,
-                    ocr_metadata=fs.native_metadata,
-                    layout_hints=fs.contents.layout_hints or None if fs.contents else None,
-                    no_llm=ctx.config.no_llm,
-                    extract_equations=ctx.config.equations,
-                    # --no-llm passes none; a fast run, the client that makes no
-                    # call, so that nothing builds a real one.
-                    llm_client=(
-                        None
-                        if ctx.config.no_llm
-                        else SkippedLlmClient()
-                        if ctx.config.mode == "fast"
-                        else ctx.resources.llm_client
-                    ),
-                    ref_seg_strategy=ctx.config.ref_seg_strategy,
-                    ref_parse_strategy=ctx.config.ref_parse_strategy,
-                    settings=ctx.settings,
-                    classifier_resources=ctx.resources.classifiers,
-                    expected_identity=fs.expected_identity,
-                    enrichment_prefetch=enrichment_prefetch,
-                    memory_mode=ctx.config.memory_mode,
-                )
+                # Names the paper an overridden model's inference error is counted
+                # under (bibr.utils.model_overrides.note_inference_failure).
+                with paper_scope(paper_key(fs)):
+                    result = await post_parse(
+                        contents=fs.contents,
+                        file_name=fs.path.name,
+                        file_hash=file_hash,
+                        paper_id=fs.paper_id,
+                        ocr_metadata=fs.native_metadata,
+                        layout_hints=fs.contents.layout_hints or None if fs.contents else None,
+                        no_llm=ctx.config.no_llm,
+                        extract_equations=ctx.config.equations,
+                        # --no-llm passes none; a fast run, the client that makes no
+                        # call, so that nothing builds a real one.
+                        llm_client=(
+                            None
+                            if ctx.config.no_llm
+                            else SkippedLlmClient()
+                            if ctx.config.mode == "fast"
+                            else ctx.resources.llm_client
+                        ),
+                        ref_seg_strategy=ctx.config.ref_seg_strategy,
+                        ref_parse_strategy=ctx.config.ref_parse_strategy,
+                        settings=ctx.settings,
+                        classifier_resources=ctx.resources.classifiers,
+                        expected_identity=fs.expected_identity,
+                        enrichment_prefetch=enrichment_prefetch,
+                        memory_mode=ctx.config.memory_mode,
+                    )
                 fs.stage_times[self.name] = time.monotonic() - fs_t0
                 return result
 

@@ -654,6 +654,112 @@ def test_an_overridden_classifier_tells_the_network_from_a_missing_bundle(
     assert asked == [True, False]
 
 
+# -- an override that loads but raises at inference ---------------------------------
+
+
+def _crf_extractor(settings, monkeypatch, segmenter, file_hash):
+    from bibr.extract import ref_extractor
+    from bibr.extract.ref_extractor import ReferenceExtractor
+    from bibr.paper_contents import PaperContents
+
+    monkeypatch.setattr(ref_extractor, "_get_ner_segmenter", lambda settings: segmenter)
+    contents = PaperContents(sentences=[], sections=[], tables=[], links=[], sections_text={})
+    ex = ReferenceExtractor(
+        contents,
+        file_hash=file_hash,
+        llm_client=MagicMock(),
+        seg_strategy="crf",
+        parse_strategy="off",
+        settings=settings,
+    )
+    return ex
+
+
+def _codes(ex):
+    return [str(w.code) for w in ex.contents.processing_warnings]
+
+
+def _raising_segmenter():
+    segmenter = MagicMock()
+    segmenter.segment.side_effect = RuntimeError("bad input")
+    return segmenter
+
+
+def test_one_inference_failure_falls_back_and_is_recorded_on_the_paper(monkeypatch):
+    from bibr.processing_warnings import WarningCode
+
+    settings = snapshot_settings()
+    settings.NER_SEG_CKPT = "/elsewhere/seg.pt"
+    begin_run(settings)
+    ex = _crf_extractor(settings, monkeypatch, _raising_segmenter(), "paper-1")
+    ex._crf_segment_or_recover("\n".join(_REFS))
+    assert ex._segmentation_attempts[0].reason_flags == ("segmentation_error",)
+    assert _codes(ex).count(WarningCode.MODEL_OVERRIDE_INFERENCE_FAILED) == 1
+    (warning,) = [
+        w
+        for w in ex.contents.processing_warnings
+        if w.code == WarningCode.MODEL_OVERRIDE_INFERENCE_FAILED
+    ]
+    assert "NER_SEG_CKPT" in warning.message and "RuntimeError" in warning.message
+    assert "/elsewhere" not in warning.message
+
+
+def test_a_default_model_that_raises_falls_back_as_before(monkeypatch):
+    from bibr.processing_warnings import WarningCode
+    from bibr.utils.model_overrides import INFERENCE_FAILURE_LIMIT
+
+    settings = snapshot_settings()
+    begin_run(settings)
+    for paper in range(INFERENCE_FAILURE_LIMIT + 1):
+        ex = _crf_extractor(settings, monkeypatch, _raising_segmenter(), f"paper-{paper}")
+        ex._crf_segment_or_recover("\n".join(_REFS))
+        assert WarningCode.MODEL_OVERRIDE_INFERENCE_FAILED not in _codes(ex)
+
+
+def test_failures_on_three_papers_in_a_row_stop_the_run(monkeypatch):
+    from bibr.utils.model_overrides import INFERENCE_FAILURE_LIMIT
+
+    assert INFERENCE_FAILURE_LIMIT == 3
+    settings = snapshot_settings()
+    settings.NER_SEG_CKPT = "/elsewhere/seg.pt"
+    begin_run(settings)
+    for paper in ("paper-1", "paper-2"):
+        ex = _crf_extractor(settings, monkeypatch, _raising_segmenter(), paper)
+        ex._crf_segment_or_recover("\n".join(_REFS))
+        # The same paper failing again is still one paper.
+        ex._crf_segment_or_recover("\n".join(_REFS))
+    ex = _crf_extractor(settings, monkeypatch, _raising_segmenter(), "paper-3")
+    with pytest.raises(ModelOverrideError, match=r"NER_SEG_CKPT.*raised at inference on 3 papers"):
+        ex._crf_segment_or_recover("\n".join(_REFS))
+
+
+def test_a_paper_the_override_ran_on_ends_the_streak(monkeypatch):
+    settings = snapshot_settings()
+    settings.NER_SEG_CKPT = "/elsewhere/seg.pt"
+    begin_run(settings)
+    working = MagicMock()
+    working.segment.return_value = list(_REFS)
+    for paper, segmenter in (
+        ("paper-1", _raising_segmenter()),
+        ("paper-2", _raising_segmenter()),
+        ("paper-3", working),
+        ("paper-4", _raising_segmenter()),
+        ("paper-5", _raising_segmenter()),
+    ):
+        ex = _crf_extractor(settings, monkeypatch, segmenter, paper)
+        ex._crf_segment_or_recover("\n".join(_REFS))  # never three in a row: no raise
+
+
+def test_a_new_run_starts_a_new_streak(monkeypatch):
+    settings = snapshot_settings()
+    settings.NER_SEG_CKPT = "/elsewhere/seg.pt"
+    for run in range(2):
+        begin_run(settings)
+        for paper in ("paper-1", "paper-2"):
+            ex = _crf_extractor(settings, monkeypatch, _raising_segmenter(), f"{run}-{paper}")
+            ex._crf_segment_or_recover("\n".join(_REFS))
+
+
 # -- a Hub id that is not cached, offline -------------------------------------------
 
 

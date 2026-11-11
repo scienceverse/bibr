@@ -22,7 +22,7 @@ from rapidfuzz.fuzz import partial_ratio
 
 from bibr.clients.skipped import is_skipped
 from bibr.config import snapshot_settings
-from bibr.exceptions import ProcessingError, UpstreamServiceError
+from bibr.exceptions import ModelOverrideError, ProcessingError, UpstreamServiceError
 from bibr.extract.archive_cover import reground_title_off_archive_cover
 from bibr.extract.author_email_harvester import _CORRESPONDING_MARKER_RE, AuthorEmailHarvester
 from bibr.extract.field_decisions import (
@@ -48,6 +48,7 @@ from bibr.paper_contents import FRONT_MATTER_FURNITURE_LABELS, CanonicalSection,
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.schemas import AuthorsLLM, CoreMetadataLLM, PaperClassificationLLM, TitleKeywordsLLM
 from bibr.utils.metadata import EXACT_GENERIC_ARTICLE_LABELS
+from bibr.utils.model_overrides import note_inference_failure, note_inference_success
 from bibr.validation import IssueSeverity, ValidationIssue
 
 if TYPE_CHECKING:
@@ -3763,12 +3764,25 @@ class CoreMetadataExtractor:
                     )
                 else:
                     result = await paper_classifier.classify_paper_async(title, abstract)
-            except ProcessingError:
+            except (ProcessingError, ModelOverrideError):
                 raise
             except Exception as exc:
                 logger.warning("Trained paper classifier unavailable; using LLM fallback: %s", exc)
                 result = None
                 degraded_reason = type(exc).__name__
+                # An overridden classifier's error is recorded on the paper too, and
+                # several papers in a row stop the run (bibr.utils.model_overrides).
+                override_warning = note_inference_failure(
+                    self._settings, "ML_PAPER_CLASSIFIER_MODEL_ID", exc, paper=self.file_hash
+                )
+                if override_warning is not None:
+                    self._record_metadata_warning(
+                        WarningCode(override_warning.code), override_warning.message
+                    )
+            else:
+                note_inference_success(
+                    self._settings, "ML_PAPER_CLASSIFIER_MODEL_ID", paper=self.file_hash
+                )
         if result is None:
             fallback_failure: str | None = None
             skipped = is_skipped(self.llm_client)

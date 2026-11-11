@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field, model_validator
 from bibr.clients.nuextract_schema import NuExtractSchemaPolicy
 from bibr.clients.skipped import is_skipped
 from bibr.config import GlobalSettings, snapshot_settings
-from bibr.exceptions import ProcessingError
+from bibr.exceptions import ModelOverrideError, ProcessingError
 from bibr.paper_contents import (
     CANONICAL_SECTION_ALIASES,
     CanonicalSection,
@@ -34,6 +34,7 @@ from bibr.processing_warnings import ProcessingWarning, WarningCode
 # module, so building the composite dedup key never forces torch).
 from bibr.structure.section_classifier_common import _position_bucket
 from bibr.utils.locks import LOCAL_INFERENCE_LOCK
+from bibr.utils.model_overrides import note_inference_failure, note_inference_success
 from bibr.utils.text import normalize_text
 
 if TYPE_CHECKING:
@@ -828,6 +829,8 @@ async def classify_headers_batch_async(
                     )
                 else:
                     trained_results = await _classify_trained_batch(items)
+            except ModelOverrideError:
+                raise  # an overridden classifier that cannot be used stops the run
             except Exception as exc:  # noqa: BLE001 - trained inference is an optional tier
                 logger.warning(
                     "Trained section classifier inference failed (%s); "
@@ -835,7 +838,16 @@ async def classify_headers_batch_async(
                     type(exc).__name__,
                 )
                 _note_section_classifier_degraded(degradation_warnings, llm_tier=llm_tier)
+                # An overridden classifier's error is recorded on the paper too, and
+                # several papers in a row stop the run (bibr.utils.model_overrides).
+                override_warning = note_inference_failure(
+                    effective, "ML_SECTION_CLASSIFIER_MODEL_ID", exc
+                )
+                if override_warning is not None:
+                    _note_once(degradation_warnings, override_warning)
                 trained_results = []
+            else:
+                note_inference_success(effective, "ML_SECTION_CLASSIFIER_MODEL_ID")
             if len(trained_results) != len(unique_keys):
                 logger.warning(
                     "Trained section classifier returned %d predictions for %d headers; "

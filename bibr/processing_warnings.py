@@ -112,6 +112,8 @@ class WarningCode(StrEnum):
     DOCX_FIGURES_DROPPED = "DOCX_FIGURES_DROPPED"
     DOCX_FIGURE_IMAGES_OMITTED = "DOCX_FIGURE_IMAGES_OMITTED"
     TABLE_CONTENTS_OMITTED = "TABLE_CONTENTS_OMITTED"
+    # Model overrides
+    MODEL_OVERRIDE_INFERENCE_FAILED = "MODEL_OVERRIDE_INFERENCE_FAILED"
 
 
 DESCRIPTIONS: dict[WarningCode, str] = {
@@ -287,6 +289,10 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     "cell's text once per cell it covers) or its cells passed the table limits; it is kept "
     "without contents when its caption labels it (JATS: when it has a label or caption) and "
     "dropped otherwise.",
+    WarningCode.MODEL_OVERRIDE_INFERENCE_FAILED: "A model set away from its shipped default "
+    "(a model override) loaded but raised on this paper; the paper fell back as it would "
+    "without the model, so this export does not show the candidate's answer. The run stops "
+    "after the override raised on several papers in a row.",
 }
 
 
@@ -323,6 +329,7 @@ NOT_FINAL_CODES: frozenset[WarningCode] = frozenset(
         WarningCode.ROR_MATCHING_FAILED,
         WarningCode.ENRICHER_FAILED,
         WarningCode.ENRICHMENT_INCOMPLETE,
+        WarningCode.MODEL_OVERRIDE_INFERENCE_FAILED,
     }
 )
 

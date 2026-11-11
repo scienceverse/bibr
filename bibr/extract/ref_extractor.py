@@ -80,7 +80,13 @@ from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.schemas import PaperReferenceLLM
 from bibr.utils.json_salvage import salvage_array_objects
 from bibr.utils.locks import LOCAL_INFERENCE_LOCK
-from bibr.utils.model_overrides import is_model_override, override_load_error, record_model_load
+from bibr.utils.model_overrides import (
+    is_model_override,
+    note_inference_failure,
+    note_inference_success,
+    override_load_error,
+    record_model_load,
+)
 from bibr.utils.text import collapse_ws, normalize_doi
 from bibr.utils.transient import is_transient_network_error
 from bibr.validation import IssueSeverity, ValidationIssue
@@ -2503,7 +2509,9 @@ class ReferenceExtractor:
                 "geom", ref_text, selected=False, reason_flags=("segmentation_error",)
             )
             self._record_warning(WarningCode.REF_SEG_GEOM_CASCADE, f"geom error: {e!r}")
+            self._override_inference_failed("REF_GEOM_SEG_MODEL_ID", e)
             return None
+        self._override_inference_ran("REF_GEOM_SEG_MODEL_ID")
         # Alignment-yield gate: see REF_GEOM_MIN_ALIGN_YIELD in config.py for
         # the OOD rationale. Rides the same cascade path as a sub-threshold
         # confidence result.
@@ -2625,7 +2633,10 @@ class ReferenceExtractor:
         except Exception as e:  # noqa: BLE001 — one paper's tagger failure is a decline
             logger.warning("geometry line tagger failed on this paper (%r); declining", e)
             self._decline_geom_tagger(ref_text, "tagger_error", f"error={type(e).__name__}")
+            # Unlike a decline, an error is recorded on the paper; several in a row stop the run.
+            self._override_inference_failed("REF_GEOM_TAGGER_MODEL_ID", e)
             return None
+        self._override_inference_ran("REF_GEOM_TAGGER_MODEL_ID")
         counts = (
             f"confidence={confidence:.4f}",
             f"threshold={tagger.threshold:.4f}",
@@ -2891,16 +2902,20 @@ class ReferenceExtractor:
             else:
                 failure_reason = "segmentation_error"
                 self._record_warning(WarningCode.REF_SEG_CRF_ERROR, f"CRF segmenter error: {e!r}")
+                self._override_inference_failed("NER_SEG_CKPT", e)
+        else:
+            self._override_inference_ran("NER_SEG_CKPT")
         return ref_strings, failure_reason
 
     def _text_tagger_segment(self, ref_text: str) -> tuple[list[str], str, tuple[str, ...]]:
         """The text segmenter's references (``REF_TEXT_SEG_MODEL_ID``), in the CRF's place.
 
         Returns ``(references, reason when there are none, the model's figures)``.
-        A segmenter the Hub cannot serve now is absent for this paper
-        (``tagger_unavailable``); an error on this paper is a
-        ``segmentation_error`` with a ``REF_SEG_CRF_ERROR`` warning, as for the
-        CRF. Either way the paper goes on to the CRF's own next tier.
+        A segmenter that cannot be loaded stops the run. An error on this paper
+        is a ``segmentation_error`` with a ``REF_SEG_CRF_ERROR`` and a
+        ``MODEL_OVERRIDE_INFERENCE_FAILED`` warning, and the paper goes on to the
+        CRF's own next tier; an error on several papers in a row stops the run
+        (:func:`~bibr.utils.model_overrides.note_inference_failure`).
         """
         try:
             with LOCAL_INFERENCE_LOCK:
@@ -2915,7 +2930,9 @@ class ReferenceExtractor:
             self._record_warning(
                 WarningCode.REF_SEG_CRF_ERROR, f"text reference segmenter error: {e!r}"
             )
+            self._override_inference_failed("REF_TEXT_SEG_MODEL_ID", e)
             return [], "segmentation_error", (f"error={type(e).__name__}",)
+        self._override_inference_ran("REF_TEXT_SEG_MODEL_ID")
         return list(result.segments), "no_segments", result.receipt_flags()
 
     def _authoritative_native_selected(self) -> bool:
@@ -2948,6 +2965,19 @@ class ReferenceExtractor:
                 f"split merged reference strings into {n_new} more segment(s)",
             )
         return split
+
+    def _override_inference_failed(self, env: str, exc: BaseException) -> None:
+        """Record an overridden model's inference error on this paper; no-op for a default.
+
+        Raises :class:`~bibr.exceptions.ModelOverrideError` when the override has
+        raised on several papers in a row (:mod:`bibr.utils.model_overrides`).
+        """
+        warning = note_inference_failure(self._settings, env, exc, paper=self.file_hash or None)
+        if warning is not None:
+            self._record_warning(WarningCode(warning.code), warning.message)
+
+    def _override_inference_ran(self, env: str) -> None:
+        note_inference_success(self._settings, env, paper=self.file_hash or None)
 
     def _record_warning(self, code: WarningCode, message: str) -> None:
         """Log and persist a segmentation/parse fallback, recovery or loss so
@@ -3627,7 +3657,14 @@ class ReferenceExtractor:
         with LOCAL_INFERENCE_LOCK:
             ref_parser = _get_ner_parser(self._settings, self._memory_mode)
             parser_inputs = _strip_enum_markers(ref_strings)
-            parsed = ref_parser.parse_batch(parser_inputs)
+            try:
+                parsed = ref_parser.parse_batch(parser_inputs)
+            except Exception as e:
+                # The callers record the lost references; an overridden parser's
+                # error is recorded on the paper too, and several stop the run.
+                self._override_inference_failed("NER_PARSER_CKPT", e)
+                raise
+            self._override_inference_ran("NER_PARSER_CKPT")
             truncated = getattr(ref_parser, "last_truncated_count", 0)
         if isinstance(truncated, int) and truncated > 0:
             self._record_warning(
@@ -3909,7 +3946,13 @@ class ReferenceExtractor:
                 segmenter = _get_geom_segmenter(self._settings)
                 if segmenter is None:
                     return []
-                return list(segmenter.line_start_probabilities(records))
+                try:
+                    return list(segmenter.line_start_probabilities(records))
+                except Exception as e:
+                    # The line stream's caller keeps the cascade's result; an
+                    # overridden segmenter's error is recorded on the paper too.
+                    self._override_inference_failed("REF_GEOM_SEG_MODEL_ID", e)
+                    raise
 
         return predict
 
