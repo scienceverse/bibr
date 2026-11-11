@@ -203,6 +203,10 @@ async def _get_trained_model_async(
 # collapse stays UNKNOWN, and the higher threshold only discards labels.
 _MIN_CONFIDENCE_WITH_ESCALATION = 0.9
 _MIN_CONFIDENCE_WITHOUT_ESCALATION = 0.5
+# A trained type at or above this probability is one the pipeline trusts without
+# asking the LLM. Below it, a type that a lower threshold kept is the model's
+# guess; readers that must not hinge on a guess compare against this.
+TRUSTED_TYPE_CONFIDENCE = _MIN_CONFIDENCE_WITH_ESCALATION
 
 
 def _min_confidence(settings: GlobalSettings) -> float:
