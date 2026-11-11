@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import types
 from pathlib import Path
@@ -81,7 +82,7 @@ def test_a_local_model_is_a_short_name_and_file_checksums_never_a_path(tmp_path)
     settings = _shipped()
     settings.ml.section_classifier_model_id = str(bundle)
     row = _by_setting(export_models(settings))["ML_SECTION_CLASSIFIER_MODEL_ID"]
-    assert row["id"] == "section-candidate"
+    assert re.fullmatch(r"section-candidate@[0-9a-f]{12}", row["id"])
     assert row["revision"] is None and row["override"] is True
     names = {f["name"]: f["sha256"] for f in row["files"]}
     assert "onnx/bibr_onnx.json" in names and "onnx/model.onnx" in names
@@ -97,8 +98,88 @@ def test_a_bundle_directory_named_onnx_takes_its_parent_name(tmp_path):
     settings = _shipped()
     settings.ml.paper_classifier_model_id = str(bundle)
     row = _by_setting(export_models(settings))["ML_PAPER_CLASSIFIER_MODEL_ID"]
-    assert row["id"] == "paper-candidate"
+    assert row["id"].startswith("paper-candidate@")
     assert {f["name"] for f in row["files"]} >= {"bibr_onnx.json", "model.onnx"}
+
+
+@pytest.mark.parametrize("layout", ["home", "home/onnx", "user/onnx"])
+def test_a_local_model_never_names_the_user_or_the_home_directory(tmp_path, monkeypatch, layout):
+    home = tmp_path / "people" / "someone"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(model_provenance.getpass, "getuser", lambda: "someone")
+    target = {
+        "home": home,
+        "home/onnx": home / "onnx",
+        "user/onnx": tmp_path / "elsewhere" / "someone" / "onnx",
+    }[layout]
+    shutil.copytree(BUNDLES / "paper" / "onnx", target)
+    settings = _shipped()
+    settings.ml.paper_classifier_model_id = str(target)
+    row = _by_setting(export_models(settings))["ML_PAPER_CLASSIFIER_MODEL_ID"]
+    assert re.fullmatch(r"local-model@[0-9a-f]{12}", row["id"])
+    text = json.dumps(row)
+    assert "someone" not in text and "people" not in text and str(tmp_path) not in text
+
+
+@pytest.mark.parametrize(
+    ("value", "name"),
+    [
+        ("/home/other/onnx", "local-model"),
+        ("/Users/other", "local-model"),
+        ("/root/onnx", "local-model"),
+        ("/home/other/models/section/onnx", "section"),
+        ("/srv/models/section", "section"),
+    ],
+)
+def test_the_home_directory_of_any_user_is_never_a_short_name(value, name):
+    assert model_provenance._short_name(Path(value), []).partition("@")[0] == name
+
+
+def test_two_local_models_of_one_name_differ_by_their_files(tmp_path):
+    first, second = tmp_path / "a" / "candidate", tmp_path / "b" / "candidate"
+    shutil.copytree(BUNDLES / "paper" / "onnx", first / "onnx")
+    shutil.copytree(BUNDLES / "paper" / "onnx", second / "onnx")
+    (second / "onnx" / "model.onnx").write_bytes(b"other weights")
+    ids = []
+    for bundle in (first, first, second):
+        reset_model_provenance()
+        settings = _shipped()
+        settings.ml.paper_classifier_model_id = str(bundle)
+        ids.append(_by_setting(export_models(settings))["ML_PAPER_CLASSIFIER_MODEL_ID"]["id"])
+    assert ids[0] == ids[1] != ids[2]
+    assert all(i.startswith("candidate@") for i in ids)
+
+
+def test_a_model_directory_is_listed_once_per_process(tmp_path, monkeypatch):
+    bundle = tmp_path / "tagger"
+    shutil.copytree(BUNDLES / "paper" / "onnx", bundle / "onnx")
+    settings = _shipped()
+    settings.ml.paper_classifier_model_id = str(bundle)
+    listed = []
+    real = model_provenance._list_local_files
+    monkeypatch.setattr(
+        model_provenance,
+        "_list_local_files",
+        lambda env, value: listed.append(env) or real(env, value),
+    )
+    for _paper in range(5):
+        export_models(settings)
+    assert listed.count("ML_PAPER_CLASSIFIER_MODEL_ID") == 1
+
+
+def test_a_changed_model_file_is_hashed_again(tmp_path):
+    import os
+
+    from bibr.utils import model_overrides
+
+    weights = tmp_path / "model.onnx"
+    weights.write_bytes(b"one")
+    first = model_overrides._sha256(weights)
+    assert model_overrides._sha256(weights) == first
+    weights.write_bytes(b"two")
+    st = weights.stat()
+    os.utime(weights, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+    assert model_overrides._sha256(weights) == hashlib.sha256(b"two").hexdigest() != first
 
 
 def test_files_are_hashed_once_per_process(tmp_path, monkeypatch):

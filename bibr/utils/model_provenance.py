@@ -3,21 +3,28 @@
 One row per model the run's settings load: the setting that names it, the
 model's role, and its identity. A Hub model is its repo id and revision, the
 revision resolved to a commit through the local Hub cache when it is a branch
-or tag. A local model is a short name (the last part of its path, never the
-path: exports are shared, and a path tells the reader how the producing
-machine is laid out) and the sha256 of each file of it, named relative to the
-model's directory. ``override`` is true when the setting differs from the
-shipped default (:mod:`bibr.utils.model_overrides`).
+or tag. A local model is a short name and the sha256 of each file of it, named
+relative to the model's directory. The short name is the directory's own name
+(its parent's for a bundle directory named ``onnx``) and ``@`` the first 12
+hex digits of a hash over its files, so two different models of the same name
+differ. It is never the path, and never a part of the home directory or the
+user name: exports are shared, and a path tells the reader how the producing
+machine is laid out and who ran it. ``override`` is true when the setting
+differs from the shipped default (:mod:`bibr.utils.model_overrides`).
 
 The rows are what the run was set up with, not a trace of one paper: a paper
 may not reach every tier (the reference receipts in ``extraction.diagnostics``
 say which ran). A model the install cannot run at all is left out: the CRF
-segmenter without ``torch``. Building the rows never raises; file hashes are
-computed once per process.
+segmenter without ``torch``. Building the rows never raises. A local model's
+file list is read once per process and each file is hashed once per process
+(keyed by path, size and mtime), so a run does not walk a model directory or
+re-read its files per paper.
 """
 
 from __future__ import annotations
 
+import getpass
+import hashlib
 import logging
 import re
 import threading
@@ -31,6 +38,11 @@ _COMMIT = re.compile(r"[0-9a-f]{40}")
 _LOCK = threading.Lock()
 # (setting, value, revision, local file identity) -> row; a row is built once per process.
 _ROWS: dict[tuple, dict[str, Any]] = {}
+# (setting, value) -> (root, files) of a local model; listed once per process.
+_FILES: dict[tuple[str, str], tuple[Path, list[Path]]] = {}
+# The short name of a local model whose own name is empty or private.
+_NEUTRAL_NAME = "local-model"
+_HOME_ROOTS = ("home", "Users")
 
 
 def _resolved_revision(repo_id: str, revision: str | None) -> str | None:
@@ -48,15 +60,54 @@ def _resolved_revision(repo_id: str, revision: str | None) -> str | None:
     return commit if _COMMIT.fullmatch(commit) else revision
 
 
-def _short_name(path: Path) -> str:
+def _private_names() -> set[str]:
+    names: set[str] = set()
+    try:
+        names.update(p for p in Path.home().parts if p not in ("", "/"))
+    except (KeyError, RuntimeError, OSError):  # no home directory: nothing to leave out
+        pass
+    try:
+        names.add(getpass.getuser())
+    except (KeyError, OSError):  # no user name: nothing to leave out
+        pass
+    return names
+
+
+def _short_name(path: Path, rows: list[dict[str, Any]]) -> str:
+    """``name@<12 hex>``: the model's own name and a hash over its files (``rows``)."""
     parts = [p for p in path.expanduser().parts if p not in ("", "/", ".", "..")]
-    if len(parts) >= 2 and parts[-1] == "onnx":
-        return parts[-2]
-    return parts[-1] if parts else str(path)
+    at = len(parts) - 1
+    if at >= 1 and parts[at] == "onnx":
+        at -= 1
+    name = parts[at] if at >= 0 else ""
+    # Any user's home directory (/home/<user>, /Users/<user>, /root) names its user.
+    a_home = (at == 1 and parts[0] in _HOME_ROOTS) or (at == 0 and name == "root")
+    if not name or a_home or name in _private_names() or name.startswith("~"):
+        name = _NEUTRAL_NAME
+    digest = hashlib.sha256()
+    for row in sorted(rows, key=lambda r: r["name"]):
+        digest.update(f"{row['name']}\0{row['sha256'] or ''}\n".encode())
+    return f"{name}@{digest.hexdigest()[:12]}"
 
 
 def _local_files(env: str, value: str) -> tuple[Path, list[Path]]:
-    """``(root, files)`` a local model of setting ``env`` is read from."""
+    """``(root, files)`` a local model of setting ``env`` is read from, listed once per process.
+
+    An empty listing (the path is missing) is not kept, so a model that
+    appears later in the run is listed then.
+    """
+    key = (env, value)
+    with _LOCK:
+        listed = _FILES.get(key)
+    if listed is None:
+        listed = _list_local_files(env, value)
+        if listed[1]:
+            with _LOCK:
+                _FILES[key] = listed
+    return listed[0], list(listed[1])
+
+
+def _list_local_files(env: str, value: str) -> tuple[Path, list[Path]]:
     from bibr.utils.ml_runtime import local_onnx_bundle
 
     path = Path(value).expanduser()
@@ -141,7 +192,7 @@ def _model_row(
             rows.append({"name": name, "sha256": _sha256(f) if f.is_file() else None})
         cached = {
             **row,
-            "id": _short_name(Path(value)),
+            "id": _short_name(Path(value), rows),
             "revision": None,
             "files": rows,
             "override": override,
@@ -249,9 +300,10 @@ def export_models(
 
 
 def reset_model_provenance() -> None:
-    """Test hook: forget the cached rows."""
+    """Test hook: forget the cached rows and file listings."""
     with _LOCK:
         _ROWS.clear()
+        _FILES.clear()
 
 
 __all__ = ["export_models", "reset_model_provenance"]

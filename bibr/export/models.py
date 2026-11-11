@@ -1962,8 +1962,10 @@ class ModelProvenanceExport(BaseModel):
     model: str = Field(min_length=1, description="What the model does, e.g. 'reference parser'.")
     id: str = Field(
         min_length=1,
-        description="The Hub repo id of the model, or for a local model a short name (the last "
-        "part of its path; the path itself is not recorded).",
+        description="The Hub repo id of the model, or for a local model a short name: its "
+        "directory's own name and '@' the first 12 hex digits of a hash over its files, e.g. "
+        "'section-candidate@3f2a9c41d0b7'. The path is not recorded, and a name that is part "
+        "of the home directory or the user name is recorded as 'local-model'.",
     )
     revision: str | None = Field(
         description="The Hub revision loaded: a commit SHA, or the configured branch or tag when "
