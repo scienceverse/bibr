@@ -422,7 +422,15 @@ def _get_paper_model(settings: GlobalSettings | None = None) -> PaperClassifierM
             _paper_model_cache = load_paper_classifier(
                 model_id, revision=revision, device=device, settings=effective
             )
-        except (ImportError, ConfigurationError) as e:
+        except Exception as e:
+            # An overridden classifier that cannot be loaded stops the run, whatever
+            # the reason (bibr.utils.model_overrides); nothing is cached for it.
+            from bibr.utils.model_overrides import override_load_error
+
+            if (strict := override_load_error(effective, _PAPER_SETTING, e)) is not None:
+                raise strict from e
+            if not isinstance(e, (ImportError, ConfigurationError)):
+                raise
             # No usable runtime (core install without a published ONNX bundle,
             # or the torch extra missing). Fall back to the LLM classifier
             # rather than aborting extraction.
@@ -430,6 +438,9 @@ def _get_paper_model(settings: GlobalSettings | None = None) -> PaperClassifierM
             _paper_model_cache = False
             return None
         return _paper_model_cache  # type: ignore[return-value]
+
+
+_PAPER_SETTING = "ML_PAPER_CLASSIFIER_MODEL_ID"
 
 
 async def _get_paper_model_async(

@@ -169,7 +169,10 @@ def load_section_classifier(
 
         logger.info("Section classifier runtime: onnx")
         logger.debug("Section classifier bundle: %s", bundle)
-        return OnnxSectionClassifierModel(bundle, device=device)
+        model = OnnxSectionClassifierModel(bundle, device=device)
+        if is_model_override(settings, "ML_SECTION_CLASSIFIER_MODEL_ID"):
+            model.check_graph()  # a candidate's graph runs once at load; the default is not probed
+        return model
 
     from bibr.structure.section_classifier_model import SectionClassifierModel
 

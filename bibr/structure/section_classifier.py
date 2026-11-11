@@ -155,7 +155,15 @@ def _get_trained_model(settings: GlobalSettings | None = None) -> SectionClassif
             _model_cache = load_section_classifier(
                 model_id, revision=revision, device=device, settings=effective
             )
-        except (ImportError, ConfigurationError) as e:
+        except Exception as e:
+            # An overridden classifier that cannot be loaded stops the run, whatever
+            # the reason (bibr.utils.model_overrides); nothing is cached for it.
+            from bibr.utils.model_overrides import override_load_error
+
+            if (strict := override_load_error(effective, _SECTION_SETTING, e)) is not None:
+                raise strict from e
+            if not isinstance(e, (ImportError, ConfigurationError)):
+                raise
             # No usable runtime (core install without a published ONNX bundle,
             # or the torch extra missing). Fall back to the LLM classifier
             # rather than aborting the structure stage.
@@ -163,6 +171,9 @@ def _get_trained_model(settings: GlobalSettings | None = None) -> SectionClassif
             _model_cache = False
             return None
         return _model_cache  # type: ignore[return-value]
+
+
+_SECTION_SETTING = "ML_SECTION_CLASSIFIER_MODEL_ID"
 
 
 async def _get_trained_model_async(

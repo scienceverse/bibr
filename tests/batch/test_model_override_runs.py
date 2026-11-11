@@ -179,3 +179,21 @@ def test_a_broken_lazy_override_stops_the_run_and_a_repaired_one_runs_it(
     )
     for export in exports:
         assert "text_tagger" in json.dumps(export["extraction"]["diagnostics"])
+
+
+def test_a_classifier_that_opens_but_fails_its_probe_stops_before_any_paper(
+    corpus, tmp_path, monkeypatch
+):
+    """The graph is a valid ONNX file; its manifest lists one class more than it returns."""
+    bundle = tmp_path / "models" / "section-candidate"
+    shutil.copytree(FIXTURES / "section" / "onnx", bundle / "onnx")
+    manifest_path = bundle / "onnx" / "bibr_onnx.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["label_classes"] = [*manifest["label_classes"], "references"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(Settings.ml, "section_classifier_model_id", str(bundle))
+    out = tmp_path / "out"
+
+    _assert_stopped_on(out, _run(corpus, out), "ML_SECTION_CLASSIFIER_MODEL_ID")
+    assert "type_logits of shape" in json.dumps(_run_info(out))
+

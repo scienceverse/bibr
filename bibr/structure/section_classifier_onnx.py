@@ -30,6 +30,9 @@ from bibr.utils.onnx_tokenizer import encode_batch, load_tokenizer, require_adde
 
 logger = logging.getLogger(__name__)
 
+#: The token length callers classify at: ``classify_batch``'s default, which none overrides.
+RUNTIME_MAX_LENGTH = 256
+
 
 def _softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
     shifted = x - x.max(axis=axis, keepdims=True)
@@ -74,8 +77,74 @@ class OnnxSectionClassifierModel:
             raise ConfigurationError(f"No ONNX bundle for section classifier {repo_id}@{revision}")
         return cls(bundle, device=device)
 
+    def check_graph(self) -> None:
+        """Run the graph once on headings in context, as ``classify_batch`` sends them.
+
+        The load probe of an overridden classifier (:mod:`bibr.utils.onnx_probe`):
+        headings with their neighbours, position and a body through the bundle's
+        template and tokenizer at :data:`RUNTIME_MAX_LENGTH` tokens, one of them
+        long enough to fill it, with the tokenizer's last id in it. The graph must
+        give finite type logits, one per class of the manifest's
+        ``label_classes``, and one top-level logit per heading; every class must
+        be a section type bibr knows. Raises :class:`~bibr.exceptions.ConfigurationError`.
+        """
+        from bibr.exceptions import ConfigurationError
+        from bibr.utils.onnx_probe import PROBE_BODY, check_output, run_probe, with_last_token
+
+        known = {section.value for section in CanonicalSection}
+        unknown = [label for label in self.label_classes if label not in known]
+        if unknown:
+            raise ConfigurationError(
+                f"{self.bundle_dir}: the manifest's label_classes name section types bibr does "
+                f"not know: {unknown[:5]}"
+            )
+        contexts = [
+            HeaderContext(
+                heading="2. Methods",
+                body=PROBE_BODY * 8,
+                relative_position=0.3,
+                prev_heading="1. Introduction",
+                next_heading="3. Results",
+            ),
+            HeaderContext(heading="Abstract", body=PROBE_BODY[:200], relative_position=0.0),
+            HeaderContext(
+                heading="References", body="[1] Smith, J. (2019).", relative_position=1.0
+            ),
+        ]
+        texts = [_build_input_text(ctx, self.template_version) for ctx in contexts]
+        batch = encode_batch(self.tokenizer, texts, max_length=RUNTIME_MAX_LENGTH)
+        ids = with_last_token(batch.input_ids, batch.attention_mask, self.tokenizer)
+        feeds = {"input_ids": ids, "attention_mask": batch.attention_mask}
+        feeds = {k: v for k, v in feeds.items() if k in self._input_names}
+        shape = f"a {ids.shape} batch of headings in context"
+        type_logits, top_logits = run_probe(
+            self._model_path,
+            shape,
+            lambda: self.session.run(["type_logits", "top_level_logits"], feeds),
+        )
+        n = len(contexts)
+        check_output(
+            self._model_path,
+            "type_logits",
+            type_logits,
+            (n, len(self.label_classes)),
+            shape,
+            f"one per class of the manifest's {len(self.label_classes)} label_classes",
+        )
+        top = np.asarray(top_logits)
+        check_output(
+            self._model_path,
+            "top_level_logits",
+            top.reshape(-1) if top.size == n else top,
+            (n,),
+            shape,
+            "one per heading",
+        )
+
     def classify_batch(
-        self, items: list[HeaderContext] | list[tuple[str, str]], max_length: int = 256
+        self,
+        items: list[HeaderContext] | list[tuple[str, str]],
+        max_length: int = RUNTIME_MAX_LENGTH,
     ) -> list[SectionPrediction]:
         contexts = [_coerce_header_context(item) for item in items]
         results: list[SectionPrediction] = []

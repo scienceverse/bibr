@@ -31,7 +31,9 @@ can be compared with the shipped models, so these rules hold for them:
 4. **Checked before the run.** ``bibr chew`` and ``bibr batch`` load every
    override the run will use, a local path or a Hub id, before the first paper
    (:func:`check_model_overrides`), so a model that does not load stops the run
-   before any paper is processed.
+   before any paper is processed. An overridden ONNX model runs once at every
+   load on the input a paper sends, and its output shape is checked against its
+   manifest (:mod:`bibr.utils.onnx_probe`).
 
 With every model setting at its default nothing here changes what bibr does:
 the shipped models keep their own fallbacks (a network failure retried, a

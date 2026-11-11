@@ -825,9 +825,15 @@ exactly as before:
   stops as for a model that cannot be loaded.
 - **Checked first.** `bibr chew` and `bibr batch` load every override this run
   will use (given its mode, `--refs` and `--ref-seg`), local or Hub, before
-  the first paper, `--dry-run` included; an ONNX segmenter or tagger is also
-  run once on a sample of the input it gets in a run, and its output shape is
-  checked against its labels. A problem stops the run with one line per
+  the first paper, `--dry-run` included. Every overridden ONNX model (the
+  reference parser, the text segmenter, the geometry tagger, the front-matter
+  tagger and the section and paper classifiers) is also run once, at the
+  preflight and whenever the run loads it, on an input built as a paper's is
+  (its tokenizer, its feature layout, the longest window the run sends it,
+  the tokenizer's last id), and its output shape is checked against the
+  labels or tags its manifest lists (for the parser and the tagger, also the
+  size of the CRF's scores); a model that fails the probe has not loaded. A
+  shipped default is not probed. A problem stops the run with one line per
   setting; a stale setting for a model the run does not use is ignored.
   `bibr serve` checks the files of every local-path override at startup and
   loads a model when a request first needs it; an override that fails there

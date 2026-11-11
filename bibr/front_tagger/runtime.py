@@ -149,10 +149,8 @@ class OnnxFrontTagger:
         (emissions,) = self.session.run(["emissions"], feeds)
         return np.asarray(emissions, dtype=np.float32)[0]
 
-    def tag(self, inp: TaggerInput) -> tuple[list[str], list[float]]:
-        """One BIO tag and its posterior per word of ``inp``."""
-        if not inp.words:
-            return [], []
+    def _token_inputs(self, inp: TaggerInput) -> tuple[np.ndarray, list[list[int]], np.ndarray]:
+        """``(token ids, words of each token, token feature rows)`` of ``inp``."""
         encoding = self.tokenizer.encode(inp.text, add_special_tokens=False)
         ids = np.asarray(encoding.ids, dtype=np.int64)
         words_of = _words_of_tokens(list(encoding.offsets), inp)
@@ -161,6 +159,59 @@ class OnnxFrontTagger:
         for t, hit in enumerate(words_of):
             if hit:
                 feats[t] = rows[hit[0]]
+        return ids, words_of, feats
+
+    def check_graph(self) -> None:
+        """Run the graph once on a full window of front matter, as ``tag`` sends it.
+
+        The load probe of an overridden tagger (:mod:`bibr.utils.onnx_probe`):
+        the regions of a paper's first two pages through
+        :func:`~bibr.front_tagger.contract.build_tagger_input`, the bundle's
+        tokenizer and the feature rows ``tag`` builds, repeated to the
+        manifest's ``max_length`` (the longest window a paper sends), with the
+        tokenizer's last id in it. The graph must give finite emissions, one per
+        tag of the manifest for every token, and the CRF's scores must match the
+        tag count; the window is decoded as a paper's is. Raises
+        :class:`~bibr.exceptions.ConfigurationError`.
+        """
+        from bibr.exceptions import ConfigurationError
+        from bibr.front_tagger.contract import build_tagger_input
+        from bibr.ner.crf_numpy import marginals, viterbi_decode
+        from bibr.utils.onnx_probe import check_crf, check_output, last_token_id, run_probe
+
+        check_crf(self.bundle_dir, self.tags, self.start, self.end, self.transitions)
+        ids, _words_of, feats = self._token_inputs(build_tagger_input(_probe_regions()))
+        if not len(ids):
+            raise ConfigurationError(
+                f"{self.bundle_dir}: the tokenizer gives no tokens for a paper's front matter"
+            )
+        positions = np.arange(self.max_length) % len(ids)
+        ids, feats = ids[positions], feats[positions]
+        if (last := last_token_id(self.tokenizer)) >= 0:
+            ids[-1] = last
+        model_path = self.bundle_dir / self.manifest.get("model_file", ONNX_MODEL)
+        shape = f"a (1, {len(ids)}) window of front matter with {len(FEATURE_KEYS)} features"
+        emissions = check_output(
+            model_path,
+            "emissions",
+            run_probe(model_path, shape, lambda: self._emissions(ids, feats)[None]),
+            (1, len(ids), len(self.tags)),
+            shape,
+            f"one score per tag of the manifest's {len(self.tags)} bio_tags",
+        )[0]
+        crf = {
+            "start_transitions": self.start,
+            "end_transitions": self.end,
+            "transitions": self.transitions,
+        }
+        viterbi_decode(emissions[None], np.ones((1, len(ids)), dtype=bool), **crf)
+        marginals(emissions, **crf)
+
+    def tag(self, inp: TaggerInput) -> tuple[list[str], list[float]]:
+        """One BIO tag and its posterior per word of ``inp``."""
+        if not inp.words:
+            return [], []
+        ids, words_of, feats = self._token_inputs(inp)
 
         emissions = np.zeros((len(ids), len(self.tags)), dtype=np.float32)
         depth = np.full(len(ids), -1, dtype=np.int64)
@@ -187,6 +238,46 @@ class OnnxFrontTagger:
             [float(posterior[t, k]) for t, k in enumerate(path)],
             len(inp.words),
         )
+
+
+def _probe_regions() -> list[FrontRegion]:
+    """The layout regions of a paper's first two pages, for the load probe."""
+    from bibr.extract.front_role_features import FrontRegion
+    from bibr.utils.onnx_probe import PROBE_BODY
+
+    rows = [
+        (0, "header", "Journal of Examples 12 (2021) 45–67", 0.04, 8.0),
+        (
+            0,
+            "doc_title",
+            "Memory consolidation during sleep: a preregistered replication",
+            0.1,
+            16.0,
+        ),
+        (0, "text", "Jana Nováková¹*, Kenji Ōtsuka², and María García-López¹", 0.18, 10.0),
+        (0, "text", "¹ Department of Psychology, Example University, Brno, Czechia", 0.23, 8.0),
+        (0, "text", "* Corresponding author: jana.novakova@example.org", 0.27, 8.0),
+        (0, "abstract", "Abstract. " + PROBE_BODY * 2, 0.32, 9.0),
+        (0, "text", "Keywords: sleep; memory; replication", 0.6, 9.0),
+        (0, "text", PROBE_BODY * 2, 0.66, 10.0),
+        (0, "footer", "https://doi.org/10.1000/xyz123 © 2021 The Authors. CC BY 4.0", 0.95, 7.0),
+        (1, "text", PROBE_BODY * 4, 0.08, 10.0),
+    ]
+    return [
+        FrontRegion(
+            page=page,
+            index=index,
+            label=label,
+            text=text,
+            x0=0.1,
+            y0=top,
+            x1=0.9,
+            y1=min(top + 0.04 + len(text) / 6000, 0.99),
+            font_size=size,
+            font_bold=label == "doc_title",
+        )
+        for index, (page, label, text, top, size) in enumerate(rows)
+    ]
 
 
 _CACHE: dict[tuple[str, str | None, str | None], OnnxFrontTagger | None] = {}
@@ -232,7 +323,7 @@ def load_front_tagger(
         if key in _CACHE:
             return _note_use(settings, _CACHE[key])
     from bibr.exceptions import ModelOverrideError
-    from bibr.utils.model_overrides import override_load_error
+    from bibr.utils.model_overrides import is_model_override, override_load_error
 
     with _LOAD_LOCK:
         with _CACHE_LOCK:  # loaded by the call this one waited for
@@ -253,6 +344,9 @@ def load_front_tagger(
                 )
             else:
                 tagger = OnnxFrontTagger(bundle, device)
+                if is_model_override(settings, ENV_MODEL_ID):
+                    # A candidate's graph runs once at load; the default is not probed.
+                    tagger.check_graph()
                 logger.info("Front-matter tagger loaded")
                 logger.debug("Front-matter tagger bundle: %s", bundle)
         except ModelOverrideError:

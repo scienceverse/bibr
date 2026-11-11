@@ -97,7 +97,10 @@ def load_paper_classifier(
 
         logger.info("Paper classifier runtime: onnx")
         logger.debug("Paper classifier bundle: %s", bundle)
-        return OnnxPaperClassifierModel(bundle, device=device)
+        model = OnnxPaperClassifierModel(bundle, device=device)
+        if is_model_override(settings, "ML_PAPER_CLASSIFIER_MODEL_ID"):
+            model.check_graph()  # a candidate's graph runs once at load; the default is not probed
+        return model
 
     from bibr.structure.paper_classifier_model import PaperClassifierModel
 

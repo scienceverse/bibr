@@ -114,10 +114,18 @@ too: it is recorded as one, and it loads and runs as before.
   `MODEL_OVERRIDE_INFERENCE_FAILED` warning naming the setting. When the same
   model raises on three papers in a row, the run stops as above.
 - `bibr chew` and `bibr batch` load every override the run will use, from a
-  local path or the Hub, before the first paper (`--dry-run` too), and run
-  the ONNX reference segmenter and geometry tagger once on a sample of the
-  input they get in a run; a stale setting for a model the run does not use
-  is ignored. A local torch directory for a classifier (`config.json` and its
+  local path or the Hub, before the first paper (`--dry-run` too); a stale
+  setting for a model the run does not use is ignored. Every overridden ONNX
+  model (the reference parser, the text segmenter, the geometry tagger, the
+  front-matter tagger, the section and paper classifiers) runs once when it
+  loads, at the preflight and in the run, on an input built as a paper's is
+  and filling the longest window the run sends it, and its output shape is
+  checked against the labels or tags of its manifest, so a graph that opens
+  but would fail on papers stops the run before the first one. A shipped
+  default is not probed. The section and paper classifiers loaded outside the
+  pipeline's classifier resources (calling the classification functions of
+  the library directly) stop on such a failure too, instead of going on with
+  the LLM. A local torch directory for a classifier (`config.json` and its
   weights) passes this check on an install with `torch`. `bibr serve` checks
   the files of its local-path overrides at startup.
 - `bibr batch` writes one record per override to `run_info.json` under

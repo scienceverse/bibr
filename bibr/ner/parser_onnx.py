@@ -86,6 +86,56 @@ class OnnxRefParser:
         self._cpu_session = None
         self._cpu_session_lock = threading.Lock()
 
+    def check_graph(self) -> None:
+        """Run the graph once on a batch of references, as ``parse_batch`` sends them.
+
+        The load probe of an overridden parser (:mod:`bibr.utils.onnx_probe`):
+        reference strings through the bundle's tokenizer at ``max_seq_len``, one
+        of them long enough to fill it, with the tokenizer's last id in it. The
+        graph must give finite emissions, one per tag of the manifest for every
+        token, and the CRF's scores must match the tag count; the paths are
+        decoded as a paper's are. Raises :class:`~bibr.exceptions.ConfigurationError`.
+        """
+        from bibr.utils.onnx_probe import (
+            PROBE_REFERENCES,
+            check_crf,
+            check_output,
+            run_probe,
+            with_last_token,
+        )
+
+        check_crf(
+            self.bundle_dir,
+            self.tags,
+            self.start_transitions,
+            self.end_transitions,
+            self.transitions,
+        )
+        long_ref = " ".join(PROBE_REFERENCES) * (1 + self.max_seq_len // 16)
+        texts = [*PROBE_REFERENCES, long_ref]
+        batch = encode_batch(
+            self.tokenizer, texts, max_length=self.max_seq_len, add_special_tokens=False
+        )
+        ids = with_last_token(batch.input_ids, batch.attention_mask, self.tokenizer)
+        shape = f"a {ids.shape} batch of tokenised references"
+        emissions = check_output(
+            self._model_path,
+            "emissions",
+            run_probe(self._model_path, shape, lambda: self._emissions(ids, batch.attention_mask)),
+            (len(texts), ids.shape[1], len(self.tags)),
+            shape,
+            f"one score per tag of the manifest's {len(self.tags)} bio_tags",
+        )
+        paths = viterbi_decode(
+            emissions,
+            batch.attention_mask,
+            start_transitions=self.start_transitions,
+            end_transitions=self.end_transitions,
+            transitions=self.transitions,
+        )
+        for path, offsets, text in zip(paths, batch.offsets, texts, strict=True):
+            self._decode(path, offsets[: len(path)], text)
+
     def parse(self, ref_text: str) -> dict[str, str | int]:
         """Parse one reference. Returns a dict with PaperReference field names."""
         if not ref_text or not ref_text.strip():
