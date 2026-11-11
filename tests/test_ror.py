@@ -390,7 +390,9 @@ def test_a_403_pauses_lookups_without_halving(caplog):
     assert results == [(None, "blocked (HTTP 403)")] * 2
     assert calls == ["First University"]
     assert client.blocked
-    assert 300.0 <= client._blocked_until - started < 310.0
+    # Windows' monotonic clock ticks about every 16 ms, so the 403 can land on the
+    # tick the test started on, and the sum then rounds a hair under 300.
+    assert 300.0 - 1e-6 <= client._blocked_until - started < 310.0
     assert client._limiter.max_requests == 1000
     warnings = _warnings(caplog)
     assert len(warnings) == 1
@@ -454,7 +456,9 @@ def test_a_429_in_flight_does_not_shorten_a_403_pause():
     assert results == [(None, "blocked (HTTP 403)"), (None, "rate limited")]
     assert later == (None, "blocked (HTTP 403)")
     assert sent == ["First University", "Second University"]
-    assert 300.0 <= client._blocked_until - started < 310.0
+    # Windows' monotonic clock ticks about every 16 ms, so the 403 can land on the
+    # tick the test started on, and the sum then rounds a hair under 300.
+    assert 300.0 - 1e-6 <= client._blocked_until - started < 310.0
     assert client._limiter.max_requests == 1000
 
 
