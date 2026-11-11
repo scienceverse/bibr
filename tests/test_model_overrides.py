@@ -370,6 +370,21 @@ def test_a_no_llm_preflight_neither_checks_nor_refuses_a_model_it_never_asks(tmp
     assert "NER_PARSER_CKPT=" in problem and "ML_SECTION_CLASSIFIER_MODEL_ID=" in problem
 
 
+def test_a_no_llm_preflight_leaves_a_statement_tagger_unchecked(tmp_path, monkeypatch):
+    from bibr.local.cli.run_config import _preflight_model_overrides
+
+    settings = snapshot_settings()
+    settings.ml.statement_tagger_model_id = str(tmp_path / "no-statements")
+    monkeypatch.setattr("bibr.config.Settings", settings)
+    seen: list[str] = []
+    assert _preflight_model_overrides(_cli_config(no_llm=True), warn=seen.append) is None
+    (warning,) = seen
+    assert warning.startswith("Model override: ML_STATEMENT_TAGGER_MODEL_ID=")
+    assert "--no-llm runs no statement tagger" in warning and NOT_USED in warning
+    problem = _preflight_model_overrides(_cli_config(), warn=seen.append)
+    assert "ML_STATEMENT_TAGGER_MODEL_ID=" in problem
+
+
 def test_preflight_skips_a_front_tagger_the_run_leaves_off(tmp_path):
     from bibr.run_mode import fast_settings
 
