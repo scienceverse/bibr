@@ -9,11 +9,13 @@ complete DOI or URL and must stay on its own line.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from types import SimpleNamespace
 
 import pytest
 
 from bibr.extract.ref_line_stream import _entry_text
+from bibr.input import consolidate_text
 from bibr.input.consolidate_text import fix_ocr_artifacts
 
 CRLF = "\r\n"
@@ -416,3 +418,234 @@ def test_a_reference_entry_keeps_a_page_range_apart_from_the_doi_link() -> None:
         out
         == "Author A. A study. J Things 2018;4:1\u201310. https://doi.org/10.1000/example.2020.1"
     )
+
+
+# --- a line of prose, a code or a name after a link stays on its own line ---------------------
+
+LONG_PATH = "https://www.example.org/government/publications/consultation-responses/archive/2019/"
+
+
+@pytest.mark.parametrize("reference", REFERENCE_FLAGS)
+@pytest.mark.parametrize("newline", NEWLINES)
+@pytest.mark.parametrize(
+    "template",
+    [
+        # a code or a hyphenated word after a link that ends mid-line
+        "Data are available at https://osf.io/abcd{nl}COVID-19 patients were included.",
+        "See https://www.who.int/emergencies{nl}H1N1 influenza spread in 2009.",
+        "A. 2019. https://github.com/org/repo{nl}V2 of the data set",
+        "https://example.org/data{nl}anti-inflammatory drugs were",
+        "https://example.org/data{nl}pre-registered hypotheses",
+        "https://example.org/data{nl}within-subject design",
+        "Brown, A. (2019). Retrieved from https://osf.io/xyz{nl}G*Power 3.1 was used",
+        # a name, a word of prose or a single letter after a query that ends on "=" or "_"
+        "Retrieved from https://example.org/page?id={nl}Smith J. (2020). Next.",
+        "https://example.org/page?q={nl}results were counted",
+        "www.example.org/a={nl}b",
+        "https://example.org/path_{nl}Smith J. 2020",
+        # the top-level domain that is also a word, after the dot that ends a sentence
+        "cited at https://example.org/a.{nl}org members said",
+        "Available from: http://example.com/report.{nl}PDF version 2",
+        # a lower-case or hyphenated word of prose after a link that ends on a slash,
+        # whether the scheme lies within 40 characters or further back
+        "see https://example.org/data/{nl}results show that",
+        "see " + LONG_PATH + "{nl}results show",
+        "see " + LONG_PATH + "{nl}well-being matters",
+        "see " + LONG_PATH + "{nl}follow-up visits",
+        "see " + LONG_PATH + "{nl}age-matched controls",
+        "see " + LONG_PATH + "{nl}The results show",
+        "https://example.org/q/{nl}2019 survey",
+        # the words in brackets that follow a link, a label, and the next reference
+        "Semantic Versioning. https://semver.example.org/{nl}(last access: 18 March 2026), 2013.",
+        "Available online: https://www.example.org/weo2017/{nl}(accessed on 30 March 2019).",
+        "Name UK. https://www.example.org/uk/{nl}[Accessed 3 Sept 2022].",
+        "https://example.org/eli/treaty/teu/sign{nl}UE. (25 de marzo de 1957). Tratado",
+        "Online at https://example.org/jesi/{nl}2016 Volume 4 Number 1 (September)",
+        "Journal homepage: https://example.org/journals/er/{nl}ISSN Online: 2575-7946",
+        "Home: https://example.org/index.php/JAM{nl}editor@example.org",
+        # an address after a link
+        "see https://example.org/data/{nl}12 participants were tested.",
+        # a label of an export link under a DOI, and a name in capitals after a path
+        "https://doi.org/10.3389/FNMOL.2020.00028/{nl}BIBTEX",
+        "https://example.org/Files/{nl}SMITH J. (2020)",
+        "https://example.org/Files/{nl}Well-Being-Of-Adults",
+    ],
+)
+def test_prose_a_code_or_a_name_is_not_glued_to_a_link(
+    template: str, newline: str, reference: bool | None
+) -> None:
+    printed = template.format(nl=newline)
+    assert fix_ocr_artifacts(printed, reference=reference) == printed
+
+
+@pytest.mark.parametrize("newline", NEWLINES)
+@pytest.mark.parametrize("reference", REFERENCE_FLAGS[:2])
+@pytest.mark.parametrize(
+    "template",
+    [
+        # the line after a DOI is a code, a name, a bracket or the number of the next reference
+        "Smith J. 2020. Title. doi:10.1016/j.jinf.2020.03.037.{nl}COVID-19 Genomics UK Consortium.",
+        "Lee K. 2021. Title. https://doi.org/10.1000/abc{nl}COVID-19 Genomics UK Consortium (2020).",
+        "doi:10.1000/abc.{nl}A2 Smith, J. (2020)",
+        "Jones K. 2018. doi:10.1037/x{nl}2. Smith B. (2019)",
+        "Paper. https://doi.org/10.1016/S0140-6736(20){nl}2020-2021 survey",
+        "Smith J. 2019. doi:10.1038/{nl}12 participants were tested.",
+        "Smith J. 2019. https://doi.org/10.1038/{nl}(2019). Jones K.",
+        "Smith J. 2019. doi:10.1093/nar/g{nl}Kim J. (2020)",
+        "Jones K. 2018. doi:10.1037/a{nl}B. Smith (2019)",
+    ],
+)
+def test_text_after_a_doi_is_not_glued_to_it(
+    template: str, newline: str, reference: bool | None
+) -> None:
+    printed = template.format(nl=newline)
+    assert fix_ocr_artifacts(printed, reference=reference) == printed
+    assert fix_ocr_artifacts(printed, reference=False) == printed
+
+
+# The wraps below were printed in real texts (the hosts here are made up).
+URL_WRAPS = [
+    # after a slash, with a capitalized path word or a file
+    (
+        "https://www.example.org/NZEducation/EducationPolicies/",
+        "SpecialEducation/PolicyAndStrategy/",
+    ),
+    ("http://www.example.org/Taxonomy/taxonomyhome.", "html/). Taxonomic classification into"),
+    ("see https://www.example.org/en-US/", "cloud-gaming, 2022."),
+    ("Repository. https://github.com/", "smec-project, 2025."),
+    ("https://apnews.example.org/article/", "44695c678bdb44f19172cae4ef842381, 2018, [Accessed"),
+    ("(https://www.example.org/item/%E8%81%8A%E5%9F%8E/", "127583). Among the residents"),
+    ("https://www.example.org/licences/by/4.0/", "legalcode"),
+    # a slug of five words or more, whatever its case, and a no-break space in the text
+    (
+        "see https://www.example.org/guidance/chapter/",
+        "Quality-statement-3-Referring-people-at-high-risk-of-diabetes.",
+    ),
+    (
+        "2011.\u00a0(https://www.example.org/en/",
+        "bioanalytical-method-validation-scientific-guideline).\u00a0Access at",
+    ),
+    ("https://doi.org/10.7910/DVN/", "GKULIW"),
+    ("https://web.example.org/20120919/http://www.", "communities.example.org/documents/a.pdf."),
+    ("https://www.example.org/guide/ecuad", "or."),
+    # inside a word of a hyphenated slug, a path word or a file name
+    ("https://www.example.org/uploads/Addressing-Nurse-F", "atigue-ANA-Position-Statement.pdf"),
+    ("https://www.example.org/news/better-sleep-ant", "idote-to-on-the-job-fatigue/"),
+    ("https://www.example.org/2013/03/stud", "ent-health-and-effects-of-sleep-deprivation-on"),
+    ("https://www.example.org/news/futur", "e-of-transportation-self-driving-cars-reality"),
+    ("https://www.example.org/news/bette", "r-to-ask-how-well-reckon-the-sleep"),
+    ("https://www.example.org/news/lose-lose-ethic", "s-self-driving-public/. Accessed 5 Feb 2019"),
+    ("https://www.example.org/monetizing-cardata/confe", "rence-2019/."),
+    ("https://www.example.org/media/136625/do", "wnload. Last accessed: April 7, 2020."),
+    ("https://www.example.org/x?other%20commercial%20or%20private%20bui", "ldings. (2022)."),
+    ("https://www.example.org/search?uri=C", "OM:2025:89:FIN"),
+    ("from http://www.example.org/portal?p=DevEx.L", "B.1,5521.1"),
+    # underscores and query strings
+    (
+        "https://www.example.org/docs/ACHA-NCHA-II_Refere",
+        "nceGroup_ExecutiveSummary_Spring2012.pdf",
+    ),
+    ("https://openlibrary.example.org/books/OL14443859M/The_socia", "l_control_of_technology"),
+    ("https://www.example.com/x?guce_referrer_", "us=aHR0cHM6Ly9leGFtcGxl&guce_referrer_cs=abc"),
+    (
+        "https://www.example.com/x?a=b&guce_refer",
+        "rer_cs=pmZoo_6QvPsHoyCNnb8SnQ. Accessed 30 Oct 2019.",
+    ),
+    (
+        "https://colab.example.org/drive/1ASpdSpk02qSVypTx_",
+        "nU4IL1jDODpAp6a?usp=sharing in body text.",
+    ),
+    (
+        "https://www.example.org/x?casa_token=sa_",
+        "Dt7Osp38AAAAA:R0kjPsd-eRdL6PDaVbiamjJGMsAzXzan-Flr",
+    ),
+    ("https://www.example.org/search?q=", "Smith"),
+    ("https://www.example.org/packages/package=", "BayesFactor"),
+    # digits and encoded characters
+    ("https://www.example.org/sleep-newzzz/201105", "/the-night-shift-nurses-and-sleep-health"),
+    (
+        "https://www.example.eu/RegData/STUD/2016/IPOL_STU%28201",
+        "6%29573434_EN.pdf. ISBN 978-92-823",
+    ),
+    (
+        "https://www.example.org/bitstream/2027.42/109433/10313",
+        "9.pdf?sequence=1. Accessed 10 Feb 2019",
+    ),
+    ("http://www.example.br/scielo.php?script=sci_arttext&pid=S2318-92822016", "000100003&lng=pt"),
+    ("https://www.example.org/x;jsessionid=E7BAA7EA68493A32128", "1B5CC3322F89F?sequence=1"),
+    # a file extension after the dot that ends the line
+    ("Smith J. https://cran.example.org/web/packages/lme4/index.", "html was used"),
+    ("see http://www.example.org/pages/default.", "aspx. The funder had no role"),
+    ("a site http://www.example.org/web/aphekom.", "org/publications"),
+]
+
+
+@pytest.mark.parametrize("reference", REFERENCE_FLAGS)
+@pytest.mark.parametrize("newline", NEWLINES)
+@pytest.mark.parametrize("scheme_far_back", [False, True], ids=["short", "scheme-far-back"])
+@pytest.mark.parametrize(("left", "right"), URL_WRAPS)
+def test_a_wrap_inside_the_text_of_a_link_is_joined(
+    left: str, right: str, scheme_far_back: bool, newline: str, reference: bool | None
+) -> None:
+    if scheme_far_back:
+        left = left.replace("://", "://padding.example.org/archive/consultation-responses/2019/", 1)
+    printed = f"{left}{newline}{right}"
+    assert fix_ocr_artifacts(printed, reference=reference) == f"{left}{right}"
+
+
+@pytest.mark.parametrize("reference", [None, True])
+@pytest.mark.parametrize("newline", NEWLINES)
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        ("doi:10.", "1016/j.ijbiomac.2006.11.003"),
+        ("https://doi.org/10.1016/J.JENGT", "ECMAN.2018.04.006"),
+        ("https://doi.org/10.1016/S0140-6736(20)", "30183-5. Next reference"),
+    ],
+)
+def test_a_wrap_inside_a_doi_is_joined_in_reference_text(
+    left: str, right: str, newline: str, reference: bool | None
+) -> None:
+    assert fix_ocr_artifacts(f"{left}{newline}{right}", reference=reference) == f"{left}{right}"
+
+
+# --- the work a wrapped link costs ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda n: "https://x.org/?" + "a=\n" * n,
+        lambda n: "https://x.org/" + "a_\n" * n,
+        lambda n: "https://x.org/" + "abcdefghij/\n" * n,
+        lambda n: "doi:10.1234/" + "ab1/\n" * n,
+    ],
+    ids=["query", "underscore", "slash", "doi"],
+)
+def test_a_link_over_many_lines_costs_work_in_proportion_to_its_wraps(
+    make: Callable[[int], str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One URL printed over thousands of short lines was joined at one wrap per pass over the
+    text, which took time with the square of the number of lines. Count the wraps looked at
+    instead of timing them: a pass looks at each wrap once, and never at more than a window of
+    the token before it."""
+    looked_at: list[int] = []
+    decide = consolidate_text._wrap_joins
+
+    def spy(left: str, right: str, following: str, reference: bool = True) -> bool:
+        looked_at.append(len(left))
+        return decide(left, right, following, reference)
+
+    monkeypatch.setattr(consolidate_text, "_wrap_joins", spy)
+    wraps = 4000
+    out = fix_ocr_artifacts(make(wraps), reference=False)
+    assert len(looked_at) <= consolidate_text._URL_BRIDGE_PASSES * wraps
+    assert max(looked_at) <= consolidate_text._URL_TOKEN_WINDOW
+    # the part of the link inside the window is joined, the rest is left as printed
+    assert 0 < out.count("\n") < wraps
+
+
+def test_a_link_over_many_lines_inside_the_window_is_joined_whole() -> None:
+    segments = [f"seg{i:02d}/" for i in range(60)]
+    printed = "https://x.org/" + "\n".join(segments)
+    assert fix_ocr_artifacts(printed, reference=False) == "https://x.org/" + "".join(segments)
