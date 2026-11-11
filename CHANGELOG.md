@@ -168,10 +168,13 @@ too: it is recorded as one, and it loads and runs as before.
   resort of every segmentation strategy, with an ONNX token tagger that needs
   no `torch`. The CRF is then not loaded; setting both is an error. Its
   answer goes through the same receipt as the CRF's, and the receipt lists it
-  as `text_tagger`. It always answers: a list in which it finds no reference
-  start comes back as one reference, flagged `no_reference_start` in the
-  receipt and with a new `REF_SEG_NOT_SPLIT` warning, and does not go on to
-  the marker split.
+  as `text_tagger`. For a list found by its heading it always answers: a list
+  in which it finds no reference start comes back as one reference, flagged
+  `no_reference_start` in the receipt and with a new `REF_SEG_NOT_SPLIT`
+  warning, and does not go on to the marker split. A list that was only
+  guessed from the layout (`REF_SECTION_INFERRED`) and holds no reference
+  start is declined instead, so a section that is not a reference list is not
+  exported as one reference and the citations in the notes can stand in.
 - `ML_STATEMENT_TAGGER_MODEL_ID` (unset by default; a directory or a Hub id
   with `ML_STATEMENT_TAGGER_REVISION`) adds a statement tagger, an ONNX
   classifier over the paper's paragraphs that needs no `torch`. Where it finds

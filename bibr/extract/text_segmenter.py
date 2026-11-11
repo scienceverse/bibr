@@ -25,12 +25,15 @@ procedure the model was trained and selected with:
    next start, and is stripped (empty ones are dropped). ``O`` and ``I-REF``
    never start or end one.
 
-The tier always answers for a text that is not blank: it does not decline to
-the next tier as the CRF does when it finds no reference. A text in which the
-model tags no token ``B-REF`` comes back as one reference, the whole list in
-one block, and its :class:`TextSegmentation` says so (``no_reference_start``):
-the reference extractor lists it in the attempt's ``reason_flags`` and gives
-the paper a ``REF_SEG_NOT_SPLIT`` warning.
+The segmenter always answers for a text that is not blank: it does not decline
+as the CRF does when it finds no reference. A text in which the model tags no
+token ``B-REF`` comes back as one reference, the whole list in one block, and
+its :class:`TextSegmentation` says so (``no_reference_start``). The reference
+extractor keeps that block for a list found by its heading, lists the flag in
+the attempt's ``reason_flags`` and gives the paper a ``REF_SEG_NOT_SPLIT``
+warning; for a list the locator only guessed (``REF_SECTION_INFERRED``) it
+declines the block and goes on to the next tier, since a guessed section with
+no reference start is more likely not a reference list.
 
 A bundle is a directory holding ``segmenter.json`` (the tags, window, stride
 and tokenisation the model was trained with), ``model.onnx`` and
