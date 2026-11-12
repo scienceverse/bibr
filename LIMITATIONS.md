@@ -226,6 +226,13 @@ Known caveats:
   OCR model and 47 for bibr 0.8.0 with an OCR model and the LLM.
 - This route has not been validated as the other rows of the table above have, and
   its accuracy on tables and formulas is not measured on its own.
+- Memory. A fast batch of 60 papers peaked at 10.3 GB with its batches of 8
+  (8.7 GB with 0.8.0's models). Under an 8 GB limit bibr runs batches of 3, but a
+  long batch can still run out when there is no swap: with the limit set and swap
+  off, runs of the same 60 papers stopped after 33 to 51 of them, with 0.8.0's
+  models as well as this release's. The batch's memory rises from paper to paper,
+  and the cause is not found yet. On such a machine keep swap on, or give each
+  `bibr batch` 30 papers or fewer.
 - `bibr serve` takes this route under the same rule as the command line: a fast
   server with no OCR setting, or any server started with `--ocr text-layer`. It
   answers a scanned PDF with a 422 and `error_code: scan_needs_ocr`. The route

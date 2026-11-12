@@ -388,9 +388,15 @@ by an earlier version, carries neither.
     runs in its place.
   - The statement tagger, `scienceverse/bibr-statement-tagger-v1`, adds its
     statements to the rules'. The acknowledgments and author contributions
-    sections it adds carry a synthetic heading that the export does not yet
-    mark as supplied, so heading detection reads about half a point lower on
-    papers that print such a statement without a heading of its own.
+    sections it adds carry a heading bibr supplies; the export marks it
+    (`header_supplied` in `extraction.diagnostics.section_classification`) but
+    does not carry the printed run-in label ("Author Contributions:") instead,
+    so heading detection reads about half a point lower on papers that print
+    such a statement without a heading of its own.
+
+  On 60 papers on four CPU cores, with bibr's batches of 8, the new models cost
+  about 4% more CPU time than 0.8.0's (124 against 119 CPU seconds a paper) and
+  raise the batch's peak memory from 8.7 to 10.3 GB; the median stays at 6.5 GB.
 
   Each of the last three turns off with its setting set to null
   (`REF_GEOM_TAGGER_MODEL_ID=null`, `REF_TEXT_SEG_MODEL_ID=null`,
@@ -614,7 +620,10 @@ by an earlier version, carries neither.
   memory limit when it is smaller than the machine's RAM. In a container or a batch
   job given 8 GB on a larger host, bibr read the host's RAM, chose `balanced` and
   could be killed for memory; it now chooses `aggressive`, as on an 8 GB machine.
-  `bibr setup` reports the same figure.
+  `bibr setup` reports the same figure. That is not yet enough for a long fast-mode
+  batch with no swap: under an 8 GB limit with swap off, runs of 60 papers stopped for
+  memory after 33 to 51 of them, with 0.8.0's models as well as this release's,
+  because the batch's memory rises from paper to paper (see LIMITATIONS.md).
 - Choosing fast mode when `bibr setup` merges into an existing `.env` now comments
   out an `OCR_BACKEND`, `OCR_MODEL` or `OCR_PROFILE` left by an earlier setup, and
   says so. Fast mode reads the PDF's text layer and setup says document contents

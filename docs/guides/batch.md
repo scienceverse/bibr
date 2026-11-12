@@ -321,8 +321,9 @@ On the CPU path (`--fast` on the text-layer route) two runs of one build should
 give the same content, so a difference there is a change in what bibr read. In
 our check, 60 papers run on two x86 desktops, one of them capped at 8 GB and so
 in the other memory mode, came out the same; the largest score difference was
-0.0000016. A route through an OCR or LLM server is not exactly repeatable, and
-the comparison says little about it. The same functions
+0.0000016. (That 8 GB run finished with little room to spare; LIMITATIONS.md
+says how far a fast batch goes under 8 GB.) A route through an OCR or LLM
+server is not exactly repeatable, and the comparison says little about it. The same functions
 are importable: `bibr.export.compare.diff_exports` for two exports and
 `compare_export_dirs` for two folders.
 
