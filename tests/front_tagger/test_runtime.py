@@ -211,11 +211,13 @@ def _tagger_settings(mode, model_id=None):
 
     from bibr.config import MlOptions
 
-    model_id = model_id or MlOptions.model_fields["front_tagger_model_id"].default
+    fields = MlOptions.model_fields
+    revision = None if model_id else fields["front_tagger_revision"].default
+    model_id = model_id or fields["front_tagger_model_id"].default
 
     return SimpleNamespace(
         ml=SimpleNamespace(
-            front_tagger_mode=mode, front_tagger_model_id=model_id, front_tagger_revision=None
+            front_tagger_mode=mode, front_tagger_model_id=model_id, front_tagger_revision=revision
         )
     )
 
