@@ -208,13 +208,16 @@ def test_page_indices_map_layout_to_absolute_pages():
 
 
 def test_caption_box_drops_figure_text_above_the_caption():
+    # The figure text is set at 6 pt. A line's size is its median glyph height, and
+    # digits stand taller than lowercase, so 7 pt axis numbers measure 0.915 of the
+    # 10 pt caption with Linux's Helvetica and over the 0.92 cut with macOS's.
     pdf = build_pdf(
         [
             PageSpec(
-                text("0", 100, 440, size=7)
-                + text("10", 200, 440, size=7)
-                + text("20", 300, 440, size=7)
-                + text("Time (s)", 190, 428, size=7)
+                text("0", 100, 440, size=6)
+                + text("10", 200, 440, size=6)
+                + text("20", 300, 440, size=6)
+                + text("Time (s)", 190, 428, size=6)
                 + text("Figure 2. Response time by condition in the two", 72, 410)
                 + text("experiments of the study.", 72, 397)
             )

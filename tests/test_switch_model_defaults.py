@@ -30,14 +30,14 @@ def tree(tmp_path):
 
 def _default(root, setting, which):
     pin = switch.PINS[setting]
-    text = (root / "bibr/config.py").read_text()
+    text = (root / "bibr/config.py").read_text(encoding="utf-8")
     field = pin.id_field if which == "id" else pin.revision_field
     return switch._field_default(text, pin.config_class, field)[2]
 
 
 def _changed_lines(root, name):
-    old = (REPO / name).read_text().splitlines()
-    new = (root / name).read_text().splitlines()
+    old = (REPO / name).read_text(encoding="utf-8").splitlines()
+    new = (root / name).read_text(encoding="utf-8").splitlines()
     assert len(old) == len(new)
     return [(a, b) for a, b in zip(old, new, strict=True) if a != b]
 
@@ -87,10 +87,9 @@ def test_several_pins_from_json_and_an_unset_revision_gets_one(tree):
     assert _default(tree, "REF_TEXT_SEG_MODEL_ID", "id") == "org/text-seg"
     assert _default(tree, "REF_TEXT_SEG_MODEL_ID", "revision") == "c" * 40
     assert _default(tree, "ML_FRONT_TAGGER_MODEL_ID", "revision") == "d" * 40
-    assert (
-        "| Reference parser | `org/parser-new` | `bbbbbbbb` |"
-        in (tree / "docs/guides/configuration.md").read_text()
-    )
+    assert "| Reference parser | `org/parser-new` | `bbbbbbbb` |" in (
+        tree / "docs/guides/configuration.md"
+    ).read_text(encoding="utf-8")
 
 
 def test_an_old_pin_in_an_unknown_place_stops_it_and_nothing_is_written(tree, capsys):
@@ -117,10 +116,11 @@ def test_a_new_repo_id_fails_on_every_other_mention_of_the_old_one(tree, capsys)
 
 def test_a_dockerfile_arg_that_disagrees_with_the_config_is_refused(tree, capsys):
     docker = tree / "Dockerfile.serve"
-    text = docker.read_text()
+    text = docker.read_text(encoding="utf-8")
     old = _default(tree, "LAYOUT_MODEL_ID", "revision")
     docker.write_text(
-        text.replace(f"ARG LAYOUT_MODEL_REVISION={old}", "ARG LAYOUT_MODEL_REVISION=main")
+        text.replace(f"ARG LAYOUT_MODEL_REVISION={old}", "ARG LAYOUT_MODEL_REVISION=main"),
+        encoding="utf-8",
     )
     repo = _default(tree, "LAYOUT_MODEL_ID", "id")
     assert switch.main([f"LAYOUT_MODEL_ID={repo}@{NEW}", "--root", str(tree)]) == 2
@@ -225,7 +225,7 @@ def test_resolve_and_commit_links_in_the_docs_follow_the_revision(tree):
         f"[the commit](https://huggingface.co/{repo}/commit/{old}).\n"
     )
     assert switch.main([f"{setting}={repo}@{NEW}", "--root", str(tree)]) == 0
-    text = doc.read_text()
+    text = doc.read_text(encoding="utf-8")
     assert old not in text
     assert f"{repo}/resolve/{NEW}/onnx" in text and f"{repo}/commit/{NEW})" in text
 
