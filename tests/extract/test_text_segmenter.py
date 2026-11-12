@@ -28,7 +28,7 @@ from bibr.extract.text_segmenter import (
     windows,
 )
 from bibr.paper_contents import PaperContents
-from bibr.processing_warnings import WarningCode
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.model_overrides import (
     begin_run,
     check_model_overrides,
@@ -408,6 +408,58 @@ async def test_a_list_with_no_reference_start_is_one_flagged_block(tmp_path, mon
     (warning,) = ex.contents.processing_warnings
     assert warning.code == WarningCode.REF_SEG_NOT_SPLIT
     assert "could not be split into entries" in warning.message
+
+
+def _guessed_list(ex) -> None:
+    ex.contents.processing_warnings.append(
+        ProcessingWarning(WarningCode.REF_SECTION_INFERRED, "took the last unclassified section")
+    )
+
+
+async def test_a_guessed_list_with_no_reference_start_is_declined(tmp_path, monkeypatch):
+    # The locator took the last unclassified section on a layout guess and the model opens
+    # no reference in it: prose, not a list. It is not exported as one reference; the
+    # paper ends as it does after the CRF, so the notes' citations can stand in.
+    text = " ".join(f"Sentence {i} of a closing section that cites nobody." for i in range(1, 9))
+    assert len(text) >= ref_extractor._REF_REGION_NONEMPTY_MIN_CHARS
+    ex = _extractor(monkeypatch, str(_bundle(tmp_path / "b")))
+    _guessed_list(ex)
+    with patch("bibr.extract.ref_extractor._get_ner_segmenter", side_effect=_no_crf):
+        out = await ex._segment_references(text, "crf")
+    assert out == []
+    (attempt,) = ex._segmentation_attempts
+    assert (attempt.strategy, attempt.selected) == ("text_tagger", False)
+    assert attempt.reason_flags[0] == "inferred_list_without_reference_start"
+    assert attempt.reason_flags[-1] == "no_reference_start"
+    codes = [w.code for w in ex.contents.processing_warnings]
+    assert WarningCode.REF_SEG_NOT_SPLIT not in codes
+    assert codes[-1] == WarningCode.REF_SEG_FAILED
+
+
+async def test_a_guessed_list_with_printed_markers_is_split_on_them(tmp_path, monkeypatch):
+    text = "\n".join(f"[{i}] Author {i}. A title number {i}. Journal, 2010." for i in range(1, 8))
+    ex = _extractor(monkeypatch, str(_bundle(tmp_path / "b")))
+    _guessed_list(ex)
+    with patch("bibr.extract.ref_extractor._get_ner_segmenter", side_effect=_no_crf):
+        out = await ex._segment_references(text, "crf")
+    assert len(out) == 7 and all(s.startswith("[") for s in out)
+    assert [(a.strategy, a.selected) for a in ex._segmentation_attempts] == [
+        ("text_tagger", False),
+        ("marker_split", True),
+    ]
+    codes = [w.code for w in ex.contents.processing_warnings]
+    assert WarningCode.REF_SEG_NOT_SPLIT not in codes
+    assert WarningCode.REF_SEG_MARKER_SPLIT_RECOVERY in codes
+
+
+async def test_a_guessed_list_the_model_splits_is_kept(tmp_path, monkeypatch):
+    ex = _extractor(monkeypatch, str(_bundle(tmp_path / "b")))
+    _guessed_list(ex)
+    with patch("bibr.extract.ref_extractor._get_ner_segmenter", side_effect=_no_crf):
+        out = await ex._segment_references(_REF_TEXT, "crf")
+    assert out == list(_REFS)
+    (attempt,) = ex._segmentation_attempts
+    assert (attempt.strategy, attempt.selected) == ("text_tagger", True)
 
 
 async def test_the_tier_is_the_last_resort_of_the_geom_cascade(tmp_path, monkeypatch):

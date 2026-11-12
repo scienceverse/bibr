@@ -245,8 +245,8 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     "split on their printed markers.",
     WarningCode.REF_SEG_FAILED: "A non-empty reference section produced no references.",
     WarningCode.REF_SEG_NOT_SPLIT: "The text reference segmenter found no reference start in "
-    "the reference list, so the list could not be split into entries; it is exported as one "
-    "block (the merged-reference splitter may still cut it).",
+    "a reference list found by its heading, so the list could not be split into entries; it is "
+    "exported as one block (the merged-reference splitter may still cut it).",
     WarningCode.REF_SEG_MERGE_SPLIT: "Reference strings holding several references were split.",
     WarningCode.REF_PARSE_NER_FALLBACK: "LLM reference parsing failed or skipped entries; the "
     "local NER parser parsed them.",

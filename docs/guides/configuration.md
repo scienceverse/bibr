@@ -915,12 +915,17 @@ one (`I-REF`), in windows and with the stride its `segmenter.json` names; a
 token read by two windows keeps the answer of the window it sits furthest
 from the edge of. A reference opens at every `B-REF` token and at the first
 character of the text, and runs to the next one. Its answer goes through the
-same receipt as the CRF's. Unlike the CRF, it always answers for a reference
-list that is not blank and never declines to the next tier (the split on
-printed reference markers): when it finds no reference start at all, the
-whole list comes back as one reference, with `no_reference_start` in its
-`reason_flags` and a `REF_SEG_NOT_SPLIT` warning on the paper, so one
-unsplit block is not read as a parsed list. The export's reference
+same receipt as the CRF's. Unlike the CRF, it answers for a reference
+list found by its heading whenever the list is not blank, and does not
+decline to the next tier (the split on printed reference markers): when it
+finds no reference start at all, the whole list comes back as one reference,
+with `no_reference_start` in its `reason_flags` and a `REF_SEG_NOT_SPLIT`
+warning on the paper, so one unsplit block is not read as a parsed list. A
+list that was only guessed from the layout (`REF_SECTION_INFERRED`) and holds
+no reference start is declined instead, with
+`inferred_list_without_reference_start` in the receipt: the text is not
+exported as a reference, the marker split runs, and the citations in the
+paper's notes can stand in for the list. The export's reference
 diagnostics list it as `text_tagger`, with its token and window counts, the
 references it opened, an uncalibrated `expected_entry_precision` and the
 lowest opening probability in `reason_flags`. When it cannot be loaded, the Hub being out of reach
