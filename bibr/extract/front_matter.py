@@ -24,6 +24,8 @@ from bibr.paper_contents import (
     CanonicalSection,
     is_exact_front_matter_furniture,
 )
+from bibr.structure.section_classifier import TRUSTED_TYPE_CONFIDENCE
+from bibr.structure.section_tree import body_numbered_section_ids
 from bibr.utils.text import DOI_CANDIDATE_RE, normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
@@ -31,7 +33,7 @@ if TYPE_CHECKING:
     from bibr.config import GlobalSettings
     from bibr.extract.front_role import FrontRolePredictions, RoleScores
     from bibr.models import PaperMetadata
-    from bibr.paper_contents import PaperContents, PaperSentence, RegionSummary
+    from bibr.paper_contents import PaperContents, PaperSection, PaperSentence, RegionSummary
     from bibr.pipeline.identity import ExpectedIdentity
 
 logger = logging.getLogger(__name__)
@@ -350,11 +352,111 @@ def _first_page(contents: PaperContents) -> int | None:
     return min(pages) if pages else None
 
 
+# Where a section's type is the classifier's guess rather than an alias match
+# or the parser's title: the trained model, a type inherited from the parent
+# heading, and an untrusted alias hit taken as a fallback.
+_GUESSED_TYPE_SOURCES = frozenset({"model", "parent_context", "alias_prior"})
+
+
+@dataclass(frozen=True)
+class _SectionReading:
+    """Sections whose place in the paper overrides their classified type.
+
+    ``body`` holds sections read as body text whatever their type; ``untyped``
+    holds sections read as untyped, which is to say as front matter, whatever
+    their guessed type.
+    """
+
+    body: frozenset[int] = frozenset()
+    untyped: frozenset[int] = frozenset()
+
+    def reads_as_front_matter(self, section: PaperSection | None) -> bool:
+        if section is None:
+            return True
+        if section.section_id in self.body:
+            return False
+        return (
+            section.section_id in self.untyped
+            or section.section_type in _FRONT_MATTER_SECTION_TYPES
+        )
+
+
+def _on_page(section: PaperSection, page: int | None) -> bool:
+    return page is not None and any(item.page_no == page for item in section.provenance)
+
+
+def _section_reading(contents: PaperContents, first_page: int | None) -> _SectionReading:
+    """Read from position and printed numbering where front matter ends.
+
+    Front matter takes in every untyped section, and the section classifier
+    has no byline class and no idea where the front matter ends, so whether a
+    section's rows were front-matter candidates turned on a type the model was
+    often unsure of. A retrained classifier that leaves more numbered body
+    headings untyped ("II. MARKET RULES AND ...") fed whole body sections in:
+    a capitalised body heading is title-shaped and roots a second record,
+    short capitalised subheadings read as its byline, and with two bylines in
+    sight the paper abstains. One that guesses "introduction" for a
+    byline set as a heading under the title drops the byline with its section.
+    Two readings take precedence over the type:
+
+    - The body opens at the first section typed as body, a guess (below) aside.
+      From there on, a heading printed with a number of the document's body
+      numbering ("II.", "3.2") is body text whatever its type, and so is a
+      section nested under one.
+    - Before the body opens and before any abstract or keywords section, an
+      unnumbered first-page section whose body type is a guess -- a trained
+      type below :data:`TRUSTED_TYPE_CONFIDENCE`, an inherited type, a fallback
+      alias -- is read as untyped. Nothing between the title and the abstract
+      is body text. :func:`_read_front_gap_as_untyped` extends this to the
+      guessed back-matter types of the sections printed there.
+
+    Unnumbered headings after the body opens keep their type. An untyped one
+    there can be front matter printed late (an affiliation list or author
+    information after the conclusions) or the next paper of an abstract book,
+    whose title and byline must stay in sight for the multi-record checks.
+    """
+
+    numbered = body_numbered_section_ids(contents.sections)
+    body: set[int] = set()
+    untyped: set[int] = set()
+    opened = False
+    front_closed = False
+    for section in contents.sections:
+        if section.level <= 0:
+            continue
+        section_id = section.section_id
+        if not opened:
+            if section.section_type in {CanonicalSection.ABSTRACT, CanonicalSection.KEYWORDS}:
+                front_closed = True
+                continue
+            if section.section_type not in _BODY_SECTION_TYPES:
+                continue
+            if (
+                not front_closed
+                and section_id not in numbered
+                and section.classification_source in _GUESSED_TYPE_SOURCES
+                and section.classification_score < TRUSTED_TYPE_CONFIDENCE
+                and _on_page(section, first_page)
+            ):
+                untyped.add(section_id)
+                continue
+            opened = True
+        if section.classification_source != "title" and (
+            section_id in numbered or section.parent_section_id in body
+        ):
+            body.add(section_id)
+    return _SectionReading(body=frozenset(body), untyped=frozenset(untyped))
+
+
 # Section types that close the title-to-abstract gap on the first page.
 _FRONT_GAP_END_TYPES = _BODY_SECTION_TYPES | {CanonicalSection.ABSTRACT, CanonicalSection.KEYWORDS}
 
 
-def _front_gap_section_ids(contents: PaperContents, first_page: int | None) -> frozenset[int]:
+def _front_gap_section_ids(
+    contents: PaperContents,
+    first_page: int | None,
+    reading: _SectionReading | None = None,
+) -> frozenset[int]:
     """Sections printed between the first-page title and the abstract or body.
 
     The header classifier has no byline class. When the parser promotes the
@@ -370,12 +472,14 @@ def _front_gap_section_ids(contents: PaperContents, first_page: int | None) -> f
     parser's detected title: a body heading the classifier calls TITLE
     ("1.1.1. An Efficient ...") would otherwise open one over related-work
     citations. Without a closing abstract or body section the gap has no end,
-    and nothing is admitted.
+    and nothing is admitted. A body section that ``reading`` reads as untyped
+    does not close the gap.
     """
 
     detected_title = (contents.detected_title or "").strip()
     if first_page is None or not detected_title:
         return frozenset()
+    untyped = reading.untyped if reading is not None else frozenset()
     gap: list[int] = []
     title_seen = False
     for section in contents.sections:
@@ -386,7 +490,7 @@ def _front_gap_section_ids(contents: PaperContents, first_page: int | None) -> f
                 item.page_no == first_page for item in section.provenance
             )
             continue
-        if section.section_type in _FRONT_GAP_END_TYPES:
+        if section.section_type in _FRONT_GAP_END_TYPES and section.section_id not in untyped:
             return frozenset(gap)
         gap.append(section.section_id)
     return frozenset()
@@ -416,6 +520,34 @@ def _looks_like_name_email_cell(text: str) -> bool:
 
 
 _URL_TEXT_RE = re.compile(r"https?://|\bwww\.", re.IGNORECASE)
+
+
+def _read_front_gap_as_untyped(
+    reading: _SectionReading, contents: PaperContents, front_gap: frozenset[int]
+) -> _SectionReading:
+    """Read the front gap as front matter whatever type the classifier guessed.
+
+    What is printed between the first-page title and the abstract or body is
+    front matter: a byline, affiliations, a "Correspondence" or "Affiliations:"
+    block, an author note. The classifier types such headings as
+    acknowledgments, endnotes, footnotes or funding with high confidence, and
+    a confident guess dropped the corresponding author's e-mail with its
+    section. A gap section whose non-front type is the classifier's guess is
+    therefore read as untyped, whatever the confidence. A type matched from the
+    printed heading (an "Acknowledgments" alias) keeps its type, and so does
+    every section outside the gap.
+    """
+
+    guessed = frozenset(
+        section.section_id
+        for section in contents.sections
+        if section.section_id in front_gap
+        and section.classification_source in _GUESSED_TYPE_SOURCES
+        and section.section_type not in _FRONT_MATTER_SECTION_TYPES
+    )
+    if not guessed:
+        return reading
+    return replace(reading, untyped=reading.untyped | guessed)
 
 
 def _front_gap_byline_evidence(text: str, summary: RegionSummary | None, *, regions: int) -> bool:
@@ -883,8 +1015,10 @@ def _paragraph_drafts(
     allow_byline_probation: bool,
     policy: FrontRolePolicy | None = None,
     front_gap: frozenset[int] = frozenset(),
+    reading: _SectionReading | None = None,
 ) -> list[_CandidateDraft]:
     policy = policy or FrontRolePolicy()
+    reading = reading or _SectionReading()
     predictions = contents.front_role_predictions
     section_map = {section.section_id: section for section in contents.sections}
     groups: OrderedDict[tuple[int, int], list[tuple[int, PaperSentence]]] = OrderedDict()
@@ -895,9 +1029,8 @@ def _paragraph_drafts(
     byline_probation: set[tuple[int, int]] = set()
     for source_order, sentence in enumerate(contents.sentences):
         section = section_map.get(sentence.section_id)
-        section_type = section.section_type if section is not None else CanonicalSection.UNKNOWN
         key = (sentence.section_id, sentence.paragraph_id)
-        if section_type not in _FRONT_MATTER_SECTION_TYPES and sentence.section_id != 0:
+        if not reading.reads_as_front_matter(section) and sentence.section_id != 0:
             if not (allow_byline_probation or sentence.section_id in front_gap):
                 continue
             if first_page is None or first_page not in _sentence_pages(sentence):
@@ -996,8 +1129,10 @@ def _heading_drafts(
     allow_byline_probation: bool,
     policy: FrontRolePolicy | None = None,
     front_gap: frozenset[int] = frozenset(),
+    reading: _SectionReading | None = None,
 ) -> list[_CandidateDraft]:
     policy = policy or FrontRolePolicy()
+    reading = reading or _SectionReading()
     predictions = contents.front_role_predictions
     summaries = list(contents.region_summaries or [])
     drafts: list[_CandidateDraft] = []
@@ -1015,7 +1150,7 @@ def _heading_drafts(
             bbox=bbox,
             section_id=section.section_id,
         )
-        probation = section.section_type not in _FRONT_MATTER_SECTION_TYPES
+        probation = not reading.reads_as_front_matter(section)
         if probation:
             # A byline promoted to a section header (common for Cyrillic and
             # Latin-American layouts where the byline is set above the
@@ -1761,13 +1896,16 @@ def _collect_candidates(
     policy = policy or FrontRolePolicy()
     predictions = contents.front_role_predictions if use_model else None
     first_page = _first_page(contents)
-    front_gap = _front_gap_section_ids(contents, first_page)
+    reading = _section_reading(contents, first_page)
+    front_gap = _front_gap_section_ids(contents, first_page, reading)
+    reading = _read_front_gap_as_untyped(reading, contents, front_gap)
     paragraph_drafts = _paragraph_drafts(
         contents,
         first_page=first_page,
         allow_byline_probation=allow_byline_probation,
         policy=policy,
         front_gap=front_gap,
+        reading=reading,
     )
     drafts = paragraph_drafts + _heading_drafts(
         contents,
@@ -1776,6 +1914,7 @@ def _collect_candidates(
         allow_byline_probation=allow_byline_probation,
         policy=policy,
         front_gap=front_gap,
+        reading=reading,
     )
     if page_heads:
         # A page head counts as author text only on a first page that prints

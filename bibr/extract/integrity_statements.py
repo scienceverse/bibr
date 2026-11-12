@@ -1572,8 +1572,11 @@ def _render_indices(
         for index in indices
         if (
             rendered := (
+                # Rows the statement tagger chose are rendered as the compatibility
+                # copies are: whole rows, clipped at publisher furniture.
                 _render_legacy_candidate(contents, resolution.candidates[index])
                 if resolution.candidates[index].method.startswith("legacy_")
+                or resolution.candidates[index].method == "statement_tagger"
                 else _render_candidate(contents, resolution.candidates[index])
             )
         )
@@ -1842,8 +1845,17 @@ def apply_integrity_resolution(
             {resolution.candidates[index].method for index in selected}
             & {"legacy_lexical_capture", "anchored_paragraph"}
         )
+        tagger = any(
+            resolution.candidates[index].method == "statement_tagger" for index in selected
+        )
         source = (
-            "native" if native_metadata else "lexical_anchor" if lexical else "integrity_statement"
+            "native"
+            if native_metadata
+            else "statement_tagger"
+            if tagger
+            else "lexical_anchor"
+            if lexical
+            else "integrity_statement"
         )
         apply_decision(
             metadata,

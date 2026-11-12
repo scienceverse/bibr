@@ -64,14 +64,46 @@ def test_parse_cleans_each_region_once(monkeypatch):
     original = module.fix_ocr_artifacts
     calls = []
 
-    def counted(text):
+    def counted(text, **kwargs):
         calls.append(text)
-        return original(text)
+        return original(text, **kwargs)
 
     monkeypatch.setattr(module, "fix_ocr_artifacts", counted)
     module.PDFParser([[_region(0, "doc_title", "Title"), _region(1, "text", "Body text.")]]).parse()
 
     assert calls == ["Title", "Body text."]
+
+
+def test_parse_tells_the_cleanup_which_regions_are_references(monkeypatch):
+    from bibr.structure import pdf_parser as module
+
+    original = module.fix_ocr_artifacts
+    seen = {}
+
+    def recorded(text, **kwargs):
+        seen[text] = kwargs.get("reference")
+        return original(text, **kwargs)
+
+    monkeypatch.setattr(module, "fix_ocr_artifacts", recorded)
+    module.PDFParser(
+        [
+            [
+                _region(0, "doc_title", "Title"),
+                _region(1, "text", "Body text."),
+                _region(2, "figure_title", "Figure 1. A caption."),
+                _region(3, "reference_content", "Smith J. A study. 2020."),
+                _region(4, "text", "Jones K. Another study. 2019.", native_label="reference"),
+            ]
+        ]
+    ).parse()
+
+    assert seen == {
+        "Title": False,
+        "Body text.": False,
+        "Figure 1. A caption.": False,
+        "Smith J. A study. 2020.": True,
+        "Jones K. Another study. 2019.": True,
+    }
 
 
 # ---------------------------------------------------------------------------

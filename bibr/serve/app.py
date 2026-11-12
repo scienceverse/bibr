@@ -182,6 +182,23 @@ def _safe_cors_credentials(origins: list[str], allow_credentials: bool) -> bool:
     return allow_credentials
 
 
+def _check_model_overrides(settings) -> None:
+    """Refuse to start when a model override's local files cannot be used."""
+    from bibr.run_mode import fast_settings
+    from bibr.utils.model_overrides import check_model_overrides
+
+    problems: list[str] = []
+    for effective in (settings, fast_settings(settings)):
+        found, _warnings = check_model_overrides(effective, load=False)
+        problems.extend(line for line in found if line not in problems)
+    if problems:
+        from bibr.exceptions import ConfigurationError
+
+        raise ConfigurationError(
+            "Model override problem: " + "; ".join(problems), problems=problems
+        )
+
+
 def _compose_lifespan_cleanup(app, cleanup) -> None:
     """Run router and bibr cleanup inside LitServe's custom app lifespan."""
     from contextlib import asynccontextmanager
@@ -269,6 +286,12 @@ def _build_server(upload_stores):
             "Set LLM_API_KEY (or a provider, model and base URL), or run in fast mode "
             "(bibr serve --fast, PIPELINE_MODE=fast), which needs none."
         )
+
+    # A model setting changed from its default whose local files are missing or
+    # wrong would fail every request (bibr.utils.model_overrides). The workers
+    # load the models, so only the files are checked here, for full and fast
+    # requests alike; a model that fails later answers model_override_failed.
+    _check_model_overrides(Settings)
 
     # The outer body cap is the file limit plus multipart headroom — except that the
     # MCP endpoint carries its file base64-encoded inside a JSON-RPC body, so with

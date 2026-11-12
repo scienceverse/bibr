@@ -437,6 +437,17 @@ def _crash(fs: Any, exc: BaseException) -> None:
     )
 
 
+def _override_failure(chunk: list[Any]) -> BaseException | None:
+    """A model override failure a file of *chunk* recorded (the pipeline raises it itself)."""
+    from bibr.utils.model_overrides import pending_override_failure
+
+    failure = pending_override_failure([], chunk)
+    if failure is not None:
+        for fs in chunk:
+            fs.free_all()
+    return failure
+
+
 def _settled(fs: Any) -> bool:
     return bool(fs.error) or fs.result_json is not None
 
@@ -462,11 +473,15 @@ async def _process_batch(
     results can be joined (and passed to :func:`bibr.write_tables`). A chunk
     that crashes does not take its neighbours with it: every file it left
     unfinished runs again on its own, and only a file that crashes the
-    pipeline by itself fails, with ``error_code="chunk_error"``.
+    pipeline by itself fails, with ``error_code="chunk_error"``. A model
+    override that does not load or keeps raising
+    (:class:`~bibr.exceptions.ModelOverrideError`, raised or recorded on a file)
+    is the run's failure, not a file's: it is raised, and no file gets a result.
     """
     from bibr.batch.manifest import assign_paper_ids
     from bibr.local.pipeline import _auto_batch_size
     from bibr.pipeline.state import FileState
+    from bibr.utils.model_overrides import find_model_override_error
     from bibr.utils.transient import is_service_outage
 
     if not batch_size or batch_size < 1:
@@ -480,10 +495,20 @@ async def _process_batch(
         try:
             await pipeline.process_chunk(chunk, progress=progress)
         except Exception as exc:  # noqa: BLE001 — a crashed chunk is per-file failures
+            if (override := find_model_override_error(exc)) is not None:
+                # A model setting names a model that does not load, or keeps raising:
+                # the run's fault, so no file of it gets a verdict, and running the
+                # files again one by one would only fail them for the same reason
+                # (bibr.utils.model_overrides).
+                for fs in chunk:
+                    fs.free_all()
+                raise override from override.__cause__
             logger.warning("chunk of %d file(s) crashed", len(chunk), exc_info=True)
             if len(chunk) == 1 and not _settled(chunk[0]):
                 _crash(chunk[0], exc)  # it crashed on its own already
         else:
+            if (override := _override_failure(chunk)) is not None:
+                raise override
             await _release_heap_after_chunk(pipeline)
             continue
         # Out of the except block, so the crash's traceback, and the frames
@@ -499,8 +524,14 @@ async def _process_batch(
             try:
                 await pipeline.process_chunk([alone], progress=progress)
             except Exception as solo_exc:  # noqa: BLE001
+                if (override := find_model_override_error(solo_exc)) is not None:
+                    alone.free_all()
+                    raise override from override.__cause__
                 _crash(alone, solo_exc)
                 alone.free_all()
+            else:
+                if (override := _override_failure([alone])) is not None:
+                    raise override
         await _release_heap_after_chunk(pipeline)
     results: list[Result | ChewFailure] = []
     for fs in states:

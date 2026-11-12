@@ -6,6 +6,7 @@ import inspect
 import logging
 from typing import TYPE_CHECKING
 
+from bibr.exceptions import ModelOverrideError
 from bibr.pipeline.classifier_resources import ClassifierState
 
 if TYPE_CHECKING:
@@ -22,6 +23,11 @@ class ClassifierStage:
     produces = ()
 
     async def run(self, ctx: PipelineContext) -> None:
+        if getattr(getattr(ctx, "config", None), "no_llm", False) is True:
+            # A --no-llm run types sections by the heading lookup alone and does
+            # not classify the paper (post_parse.py): nothing asks either model,
+            # so neither is loaded, and an overridden one is not recorded as used.
+            return
         try:
             start = ctx.resources.start_classifiers()
             if inspect.isawaitable(start):
@@ -69,6 +75,16 @@ def _fail_on_required_failure(ctx: PipelineContext) -> None:
     detail = "; ".join(
         f"{name}: {status.error or 'load failed'}" for name, status in failures.items()
     )
+    overridden = {name: s for name, s in failures.items() if getattr(s, "override", False)}
+    if overridden:
+        # A model setting changed from its default names a classifier that does
+        # not exist: the run's fault, not the papers', and no outage a resumed
+        # batch could outlast (bibr.utils.model_overrides).
+        raise ModelOverrideError(
+            "; ".join(
+                f"{name} classifier: {s.error or 'load failed'}" for name, s in overridden.items()
+            )
+        )
     message = (
         f"Required classifier(s) failed to start with ML_CLASSIFIERS_REQUIRED=true "
         f"({detail}); set ML_CLASSIFIERS_REQUIRED=false to allow the run to continue without them"

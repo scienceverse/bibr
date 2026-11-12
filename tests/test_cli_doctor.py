@@ -1535,3 +1535,20 @@ def test_doctor_warns_but_does_not_fail_when_libmagic_is_missing(monkeypatch):
     ), lines
     assert not [line for line in lines if line.startswith("✗ libmagic")]
     assert code == 0
+
+
+def test_check_ref_strategies_crf_place_taken_by_the_text_segmenter_needs_no_torch(monkeypatch):
+    """With REF_TEXT_SEG_MODEL_ID set, the crf strategy runs the ONNX text segmenter."""
+    import importlib.util
+
+    import bibr.config
+
+    monkeypatch.setattr(bibr.config.Settings, "REF_SEG_STRATEGY", "crf")
+    monkeypatch.setattr(bibr.config.Settings, "REF_PARSE_STRATEGY", "ner")
+    monkeypatch.setattr(bibr.config.Settings, "REF_TEXT_SEG_MODEL_ID", "org/text-seg")
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    from bibr.local.cli import _check_ref_strategies
+
+    rec = _Recorder()
+    _check_ref_strategies(rec.ok, rec.fail)
+    assert all("torch-only" not in call[1] for call in rec.calls)

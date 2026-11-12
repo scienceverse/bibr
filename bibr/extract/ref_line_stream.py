@@ -1188,7 +1188,7 @@ def _printed_dois(text: str) -> list[str]:
 
 
 def _entry_text(lines: Sequence[StreamLine]) -> str:
-    return collapse_ws(fix_ocr_artifacts("\r\n".join(line.text for line in lines)))
+    return collapse_ws(fix_ocr_artifacts("\r\n".join(line.text for line in lines), reference=True))
 
 
 def segment_line_stream(

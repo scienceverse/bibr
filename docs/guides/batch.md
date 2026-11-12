@@ -64,13 +64,26 @@ The ledger's latest line per `paper_id` decides what a new run does with it:
 |---|---|---|---|
 | none | run | run | run |
 | `ok` | skip | skip | run |
+| `ok`, with a `MODEL_OVERRIDE_INFERENCE_FAILED` warning: an overridden model raised on the paper and it fell back | run until the paper has fallen back 3 times in a row, then skip | run | run |
 | `failed` | skip | run | run |
-| `failed` before the paper got a verdict: `error_code` `interrupted`, `http_401` or `http_403` | run | run | run |
+| `failed` before the paper got a verdict: `error_code` `interrupted`, `model_override_failed`, `http_401` or `http_403` | run | run | run |
 | `failed` on a crash or a service outage: `error_code` `chunk_error`, `upstream_unavailable` or `output_write_failed`, or `transient_exhausted: true` | run until the paper has failed this way 3 times, then skip | run | run |
 | `started` with no verdict after it: the run was killed outright (after an `ok`, the `ok` row applies: its export is intact) | as a crash: run (alone) until it happened 3 times, then skip | run | run |
 
-A paper the run was interrupted on (Ctrl-C), or whose upload the serve refused
-because of the token, never got a verdict, so it always runs again. A crash or
+A paper the run was interrupted on (Ctrl-C), whose upload the serve refused
+because of the token, or that was running when the run stopped on a model
+override (see "Model overrides" in the configuration guide), never got a
+verdict, so it always runs again. A paper on which an overridden model raised
+was written with the fallback, so its export does not hold the candidate's
+answer: a resumed run takes it again too, without `--retry-failed`, until it
+has fallen back three times in a row. The end-of-run summary counts the
+papers a model override stopped as `not finished`, not as failed, and names
+the papers that fell back (`run_info.json` lists them under
+`override_fallbacks`) with the re-runs each has left. Once a paper has fallen
+back three times in a row, a resumed run skips it and says so apart from the
+failed papers ("fell back on a model override 3 times in a row ... rerun with
+`--retry-failed` after fixing the model"; `run_info.json`
+`n_skipped_override_capped`), and a run that has nothing else to do exits 1. A crash or
 a service outage — the OCR or LLM server unreachable or unable to start, a
 serve that kept answering 502/503 until the retries ran out, an export that
 could not be written (a full disk, a permission) — is usually the machine's

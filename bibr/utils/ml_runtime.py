@@ -99,15 +99,23 @@ def is_hub_repo_id(
     return True
 
 
-def _local_bundle(path: Path) -> Path | None:
+def local_onnx_bundle(path: str | Path) -> Path | None:
+    """The ONNX bundle a local model path names, or ``None``.
+
+    For a directory: its ``onnx/`` subdirectory, else the directory itself when
+    it holds the bundle (a directory named ``onnx`` is always read as the
+    bundle). For a file: the sibling ``onnx/`` directory.
+    """
+    path = Path(path).expanduser()
     if path.is_dir():
-        bundle = path if path.name == ONNX_DIRNAME else path / ONNX_DIRNAME
+        candidates = (path,) if path.name == ONNX_DIRNAME else (path / ONNX_DIRNAME, path)
     elif path.is_file():
-        bundle = path.parent / ONNX_DIRNAME
+        candidates = (path.parent / ONNX_DIRNAME,)
     else:
         return None
-    return (
-        bundle if (bundle / ONNX_MODEL).is_file() and (bundle / ONNX_MANIFEST).is_file() else None
+    return next(
+        (b for b in candidates if (b / ONNX_MODEL).is_file() and (b / ONNX_MANIFEST).is_file()),
+        None,
     )
 
 
@@ -122,9 +130,9 @@ def find_onnx_bundle(
 
     ``model_id`` may be a Hub repo id — optionally ``org/repo:filename`` —
     resolved at ``revision``, or a local directory (the bundle is
-    ``<dir>/onnx``, or the directory itself when it is already named
-    ``onnx``) or file (a sibling ``onnx/`` directory, for ``NER_PARSER_CKPT``
-    style checkpoint paths); see :func:`is_hub_repo_id` for which is which.
+    ``<dir>/onnx``, or the directory itself when it holds one) or file (a
+    sibling ``onnx/`` directory, for ``NER_PARSER_CKPT`` style checkpoint
+    paths); see :func:`local_onnx_bundle` and :func:`is_hub_repo_id`.
     Hub lookups download the manifest first and then every file it lists, so
     a fully cached bundle resolves offline; a repo, revision or file that does
     not exist, or an unreachable Hub with nothing cached, yields ``None``
@@ -138,8 +146,7 @@ def find_onnx_bundle(
         return None
     repo_id, _, filename = str(model_id).partition(":")
     if not is_hub_repo_id(repo_id, filename=filename):
-        local = Path(str(model_id)).expanduser()
-        return _local_bundle(local) if local.exists() else None
+        return local_onnx_bundle(str(model_id))
 
     from bibr.utils.hf_cache import hf_download_or_cached
 

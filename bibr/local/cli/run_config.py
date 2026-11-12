@@ -470,6 +470,47 @@ def _front_tagger_bundle(model_id: str, revision: str | None) -> Path | None:
     return find_onnx_bundle(model_id, revision, label="front-matter tagger", raise_transient=True)
 
 
+def _preflight_model_overrides(config: ResolvedRunConfig, warn=None) -> str | None:
+    """Fail fast when a model setting changed from its default cannot be loaded.
+
+    An override (see :mod:`bibr.utils.model_overrides`) that does not load
+    stops the run instead of falling back to the shipped model, so a bad
+    setting would otherwise stop it at its first paper, or, for a model only
+    some papers reach, part-way through. Every override this run loads (its
+    mode, ``--no-llm``, ``--refs`` and ``--ref-seg``), a local path or a Hub
+    id, is loaded here as the run loads it, probe included; with every model
+    setting at its default nothing is. An override this run never asks is not
+    loaded: ``warn`` receives one line for it, naming the setting and why.
+    """
+    from bibr.config import Settings, snapshot_settings
+    from bibr.utils.model_overrides import check_model_overrides
+
+    try:
+        settings = snapshot_settings(Settings)
+        if getattr(config, "mode", "full") == "fast" and not getattr(config, "no_llm", False):
+            from bibr.run_mode import fast_settings
+
+            settings = fast_settings(settings)
+        if getattr(config, "refs", None):
+            settings.REF_PARSE_STRATEGY = config.refs
+        if getattr(config, "ref_seg", None):
+            settings.REF_SEG_STRATEGY = config.ref_seg
+    except Exception as exc:  # noqa: BLE001 - the preflight reports, it never crashes
+        return f"Model override problem: the run's settings could not be read ({exc})"
+    problems, warnings = check_model_overrides(
+        settings,
+        load=True,
+        memory_mode=getattr(config, "memory_mode", None),
+        no_llm=getattr(config, "no_llm", False) is True,
+    )
+    for line in warnings:
+        if warn is not None:
+            warn(f"Model override: {line}")
+    if not problems:
+        return None
+    return "Model override problem: " + "; ".join(problems)
+
+
 def _preflight_front_tagger(config: ResolvedRunConfig) -> str | None:
     """Fail fast when a fast run cannot load the front-matter tagger.
 

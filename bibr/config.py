@@ -2191,6 +2191,24 @@ class MlOptions(_BibrSettings):
         "13a0f5c386ea9325e9197d789a93c2c39fdf336a",
         description="Pinned revision of the front-matter tagger bundle on the Hub.",
     )
+    # Statement tagger (bibr/statement_tagger/): a small encoder that types the
+    # paper's paragraphs as funding, competing interests, ethics, data
+    # availability, acknowledgments or author contributions. Opt-in: no bundle is
+    # published, and unset nothing loads and exports are unchanged.
+    statement_tagger_model_id: str | None = Field(
+        None,
+        description="Statement tagger: a local directory or Hub repo id of its ONNX bundle "
+        "(bibr_onnx.json with model statement_tagger, model.onnx and tokenizer.json, in onnx/ or "
+        "the directory itself). When set, the statements it finds replace the rules' funding, "
+        "competing interests, ethics and data availability statements of their type, and give "
+        "acknowledgments and author contributions a section when the paper has none. Unset "
+        "(default): not used.",
+    )
+    statement_tagger_revision: str | None = Field(
+        None,
+        description="Hub revision (commit, branch or tag) of ML_STATEMENT_TAGGER_MODEL_ID when it "
+        "is a Hub repo id; unset reads main. Ignored for a local directory.",
+    )
     front_tagger_min_confidence: float = Field(
         0.9,
         ge=0.0,
@@ -2474,11 +2492,12 @@ class PipelineOptions(_BibrSettings):
     # Reviews and commentaries argue rather than report: their body headings
     # are discussion, not the introduction/methods/results the classifier
     # guesses one heading at a time. Applies only when the paper type says so
-    # and no heading is alias-typed methods or results.
+    # and the paper prints no methods or results part (a heading typed so from
+    # its own words, or a guess on a heading that names the part).
     non_imrad_body_as_discussion: bool = Field(
         True,
-        description="Type the model/LLM-typed body headings of reviews and commentaries with no "
-        "Methods or Results heading as discussion.",
+        description="Type the guessed body headings of reviews and commentaries that print no "
+        "Methods or Results part as discussion.",
     )
 
     @field_validator("heap_trim", "mode", mode="before")
@@ -2767,6 +2786,16 @@ class GlobalSettings(_BibrSettings):
         description="With no LLM, read the city and country of each affiliation string with the "
         "local rules (the institution and department are left to the LLM). Fast mode sets it.",
     )
+    SELF_CITATION_METADATA: bool = Field(
+        True,
+        description="Read the citation a paper prints on its first page ('Citation: ...', 'To "
+        "cite this article: ...') with the reference parser, and fill the journal, volume, issue, "
+        "pages and publication year the extraction left empty, and the title and authors when it "
+        "found none, when the line is about this paper (same DOI, else same title, else a "
+        "matching first author, else a label that names this article). Never overwrites a "
+        "value. Runs with the local reference parser (REF_PARSE_STRATEGY=ner), not without an "
+        "LLM (--no-llm).",
+    )
     FIGURE_IMAGES: bool = Field(False, description="Extract figure images from PDFs.")
     # Reference extraction strategy — DECOUPLED segmentation + parsing axes
     # (resolved in bibr.extract.ref_extractor._resolve_ref_strategies; per-run
@@ -2893,6 +2922,21 @@ class GlobalSettings(_BibrSettings):
         "4d1702e2c766d96c8887bd4b30ef56637aa9b32c",
         description="Pinned commit revision for the geometry reference segmenter bundle.",
     )
+    # Opt-in line-sequence tagger the geom tier tries before the GBM
+    # (bibr/extract/geom_tagger.py). Unset by default: no model is published.
+    REF_GEOM_TAGGER_MODEL_ID: str | None = Field(
+        None,
+        description="Geometry line tagger: a Hub repo id or a local directory (gate.json plus "
+        "tagger.onnx and tagger.json, beside it or in onnx/). When set, the geom reference "
+        "segmentation tier asks it first and its answer is final when its gate accepts; otherwise "
+        "the tier goes on with REF_GEOM_SEG_MODEL_ID exactly as without it. Unset (default): "
+        "not used.",
+    )
+    REF_GEOM_TAGGER_REVISION: str | None = Field(
+        None,
+        description="Hub revision (commit, branch or tag) of REF_GEOM_TAGGER_MODEL_ID when it is "
+        "a Hub repo id; unset reads main. Ignored for a local directory.",
+    )
     # Per-paper geometry confidence below which segmentation cascades to the LLM.
     REF_GEOM_SEG_CASCADE_THRESHOLD: float = Field(
         0.90,
@@ -2968,6 +3012,21 @@ class GlobalSettings(_BibrSettings):
         "scienceverse/bibr-segmenter-v1",
         description="Local path or HF Hub repo id for the NER reference-segmenter checkpoint "
         "(optionally suffixed :filename.pt).",
+    )
+    # Opt-in ONNX token tagger that takes the CRF segmenter's place
+    # (bibr/extract/text_segmenter.py). Unset by default: no model is published.
+    REF_TEXT_SEG_MODEL_ID: str | None = Field(
+        None,
+        description="Text reference segmenter: a Hub repo id or a local directory (segmenter.json, "
+        "model.onnx and tokenizer.json, in it or in onnx/). When set, it replaces the CRF "
+        "segmenter (NER_SEG_CKPT) as the last-resort segmentation tier and needs no torch; the "
+        "CRF is then not loaded. Setting both this and NER_SEG_CKPT away from its default is an "
+        "error. Unset (default): not used.",
+    )
+    REF_TEXT_SEG_REVISION: str | None = Field(
+        None,
+        description="Hub revision (commit, branch or tag) of REF_TEXT_SEG_MODEL_ID when it is a "
+        "Hub repo id; unset reads main. Ignored for a local directory.",
     )
     # Parser default is v5.1: UltraBERT-150M + feature-gated CRF trained on the
     # reference markup of CC BY / CC0 JATS papers, LinkedBooks and the v4.5 gold

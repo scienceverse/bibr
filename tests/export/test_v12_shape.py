@@ -297,6 +297,115 @@ def test_section_classification_keeps_a_recorded_score(demo_paper):
     assert rows[0] == {"section_id": 1, "score": 0.93, "source": "model"}
 
 
+def test_a_heading_the_paper_does_not_print_is_marked(demo_paper):
+    """``section[].header`` of a section bibr named itself is not text of the paper; the
+    diagnostics row says so, and says nothing for a printed heading."""
+    from bibr.export.json_export import _export_paper_payload, validate_export
+
+    supplied = demo_paper.contents.sections[1]
+    supplied.header_is_synthetic = True
+    supplied.classification_source = "statement_tagger"
+    supplied.classification_score = 0.97
+    payload = _export_paper_payload(demo_paper)
+    rows = payload["extraction"]["diagnostics"]["section_classification"]
+    assert rows[0] == {
+        "section_id": 1,
+        "score": 0.97,
+        "source": "statement_tagger",
+        "header_supplied": True,
+    }
+    assert all("header_supplied" not in row for row in rows[1:])
+    assert validate_export(payload) == []
+    # A batch run reads every export back through the lenient reader, which opens closed
+    # vocabularies to strings: the mark has to survive that as the boolean it is.
+    from bibr.export.models import PaperExportReader
+
+    read_back = PaperExportReader.model_validate(payload).model_dump()
+    assert read_back["extraction"]["diagnostics"]["section_classification"] == rows
+
+
+def test_the_supplied_heading_mark_is_true_or_absent():
+    from bibr.export.models import SectionClassificationExport
+    from bibr.export.schema_artifact import build_export_schema
+
+    base = {"section_id": 1, "score": None, "source": None}
+    assert "header_supplied" not in SectionClassificationExport(**base).model_dump()
+    assert (
+        "header_supplied"
+        not in SectionClassificationExport(**base, header_supplied=False).model_dump()
+    )
+    assert (
+        SectionClassificationExport(**base, header_supplied=True).model_dump()["header_supplied"]
+        is True
+    )
+    # A 12.3 export has no such key, so the strict schema must not require it.
+    definition = build_export_schema()["$defs"]["SectionClassificationExport"]
+    assert "header_supplied" not in definition["required"]
+    assert "header_supplied" in definition["properties"]
+
+
+def test_the_printed_citation_receipt_and_its_fills_reach_the_export(demo_paper):
+    """A title read from the paper's printed citation is marked as such in the warnings,
+    the field record and the diagnostics, and the receipt survives the lenient reader."""
+    from bibr.export.json_export import _export_paper_payload, validate_export
+    from bibr.export.models import PaperExportReader
+    from bibr.extract.field_decisions import field_decisions_of
+    from bibr.extract.self_citation import PrintedCitation, apply_printed_citation
+    from bibr.field_states import FieldScope
+    from bibr.models import PaperReference
+
+    demo_paper.metadata.title = ""
+    demo_paper.metadata.doi = ""
+    demo_paper.field_scope = FieldScope()
+    demo_paper.field_decisions = field_decisions_of(demo_paper.metadata)
+    first_family = demo_paper.metadata.authors[0].family
+    reference = PaperReference(
+        bib_id=1,
+        title="A printed title of this paper",
+        authors=f"{first_family}, A.",
+        year=None,
+        container=None,
+        volume=None,
+        first_page=None,
+    )
+    demo_paper.contents.printed_citation = PrintedCitation(
+        (1,), "Citation:", False, "the line", reference
+    )
+    apply_printed_citation(demo_paper)
+    payload = _export_paper_payload(demo_paper)
+
+    assert payload["metadata"]["title"] == "A printed title of this paper"
+    extraction = payload["extraction"]
+    receipt = extraction["diagnostics"]["self_citation"]
+    assert receipt == {
+        "text_ids": [1],
+        "cue": "weak",
+        "check": "first_author_match",
+        "accepted": True,
+        "filled": ["title"],
+        "agreement": {"first_author": "agree"},
+    }
+    assert "SELF_CITATION_FILLED" in {w["code"] for w in extraction["warnings"]}
+    title = extraction["fields"]["title"]
+    assert (title["state"], title["source"], title["rule"]) == (
+        "extracted",
+        "self_citation",
+        "self_citation_fill",
+    )
+    assert validate_export(payload) == []
+    read_back = PaperExportReader.model_validate(payload).model_dump()
+    assert read_back["extraction"]["diagnostics"]["self_citation"] == receipt
+
+
+def test_the_printed_citation_receipt_is_omitted_without_a_line(export_payload):
+    from bibr.export.schema_artifact import build_export_schema
+
+    assert "self_citation" not in export_payload["extraction"]["diagnostics"]
+    definition = build_export_schema()["$defs"]["DiagnosticsExport"]
+    assert "self_citation" not in definition.get("required", [])
+    assert "self_citation" in definition["properties"]
+
+
 def test_xref_tier_moved_to_diagnostics_keyed_by_xref_id(export_payload):
     tiers = export_payload["extraction"]["diagnostics"]["xref_tier"]
     xref_ids = {x["xref_type"]: x["xref_id"] for x in export_payload["xref"]}

@@ -28,7 +28,11 @@ from bibr.clients.llm import LLMClient, incomplete_output_text
 from bibr.clients.llm_protocol import LlmClient
 from bibr.clients.skipped import is_skipped
 from bibr.config import GlobalSettings, snapshot_settings
-from bibr.exceptions import ProcessingError, UpstreamServiceError
+from bibr.exceptions import (
+    ModelOverrideError,
+    ProcessingError,
+    UpstreamServiceError,
+)
 from bibr.extract.anchor_snap import find_anchor_starts, segment_by_anchors
 from bibr.extract.footnote_citations import (
     MAX_LISTED_REFERENCES,
@@ -76,6 +80,14 @@ from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.schemas import PaperReferenceLLM
 from bibr.utils.json_salvage import salvage_array_objects
 from bibr.utils.locks import LOCAL_INFERENCE_LOCK
+from bibr.utils.model_overrides import (
+    is_model_override,
+    note_inference_failure,
+    note_inference_success,
+    override_load_error,
+    record_model_load,
+)
+from bibr.utils.printed_locator import read_prefixed_locator
 from bibr.utils.text import collapse_ws, normalize_doi
 from bibr.utils.transient import is_transient_network_error
 from bibr.validation import IssueSeverity, ValidationIssue
@@ -106,6 +118,9 @@ logger = logging.getLogger(__name__)
 # A GBM that confidently under-segments an OOD reference style (arXiv/ACL
 # bare-year) clears the confidence and align-yield gates, so this ratio is the
 # backstop. Module constant on purpose — not a tunable in config.py.
+# Errors no tier turns into a fallback: a typed processing failure, and an
+# overridden model that cannot load (bibr.utils.model_overrides).
+_PASS_THROUGH = (ProcessingError, ModelOverrideError)
 GEOM_MIN_REGION_RATIO = 0.6
 # When nearly every filtered layout onset aligns back to the exact reference
 # text, the layout denominator is much stronger than a raw label count.  In
@@ -133,7 +148,7 @@ _MARKER_LINE_RE = re.compile(r"(?m)^\s*(?:\[\d{1,3}\]|\d{1,3}[.)])\s+")
 # coverage times the share of entries that look like one complete reference,
 # scored alike for both. Module constants on purpose, like the geom gates
 # above.
-_STREAM_FALLBACK_TIERS = frozenset({"region", "crf", "marker_split"})
+_STREAM_FALLBACK_TIERS = frozenset({"region", "crf", "text_tagger", "marker_split"})
 _STREAM_OVERRIDE_MARGIN = 0.15
 # Pre-parse form of the receipt's credible-start check: segments below this
 # share of the section's credible entry starts.
@@ -455,6 +470,42 @@ def _rescue_doi_from_segment(segment: str | None) -> str | None:
     return None
 
 
+# A whole ``url`` value that is a DOI resolver link. The optional spaces are a
+# line wrap inside the printed host ("https://doi. org/10.…"); the missing
+# "org/" is a misprint ("https://doi.10.1016/…"), still unambiguous because no
+# host is named "doi.10.NNNN". The identifier itself must be one unbroken token
+# running to the end of the value.
+_DOI_RESOLVER_URL_RE = re.compile(
+    r"^https?://\s?(?:dx\.\s?)?doi\.\s?(?:org\s?/\s?)?(10\.\d{4,9}/\S+)$",
+    re.IGNORECASE,
+)
+
+# What marks a resolver-link identifier as carrying text that is not part of
+# it: a second DOI glued on, a closing quote, a number glued on after a comma
+# (a year or a page), or a query parameter. Each is legal inside a DOI but far
+# more often printed text that ran into the link.
+_URL_FIELD_DOI_GLUED_RE = re.compile(r"/.*10\.\d{4,9}/|['\"‘’“”]$|,\d+$|&[\w.-]+=")
+
+
+def _rescue_doi_from_url_field(url: str | None) -> str | None:
+    """Recover a DOI from a resolver link the parser filed under ``url``.
+
+    A reference that prints its DOI only as a link can come back with the link
+    as ``url`` and no ``doi``, most often when the printed link is broken by a
+    line wrap: the segment rescue then finds no clean marker in the text. Fires
+    only when the whole value is a resolver link; a publisher URL, or a link
+    followed by other text, is declined. So is an identifier with other text
+    glued on: a wrong DOI is worse than none, and nothing here repairs one.
+    """
+    if not url:
+        return None
+    m = _DOI_RESOLVER_URL_RE.match(url.strip())
+    doi = _clean_url_doi_token(m.group(1)) if m else None
+    if doi and _URL_FIELD_DOI_GLUED_RE.search(doi):
+        return None
+    return doi
+
+
 # An author-date publication year in parentheses ("(2014)", "(2012a)",
 # "(2014, March)"). It marks the end of the leading author block, so the text
 # before it is the printed byline. Vancouver / numbered styles (bare year at the
@@ -514,13 +565,29 @@ def _get_ner_segmenter(settings: GlobalSettings | None = None):
                 from bibr.ner.segmenter import RefSegmenter
 
                 logger.info("loading NER segmenter: %s", settings.NER_SEG_CKPT)
-                _NER_SEGMENTER = RefSegmenter(
-                    settings.NER_SEG_CKPT,
-                    device=settings.NER_DEVICE,
-                    revision=settings.NER_SEG_REVISION,
-                )
+                try:
+                    segmenter = RefSegmenter(
+                        settings.NER_SEG_CKPT,
+                        device=settings.NER_DEVICE,
+                        revision=settings.NER_SEG_REVISION,
+                    )
+                except Exception as e:
+                    # An override that cannot be loaded stops the run, whatever the
+                    # reason; the default goes on without the CRF as before.
+                    if (strict := override_load_error(settings, "NER_SEG_CKPT", e)) is not None:
+                        raise strict from e
+                    raise
+                _NER_SEGMENTER = segmenter
                 _NER_SEGMENTER_KEY = key
+    if is_model_override(settings, "NER_SEG_CKPT"):
+        record_model_load(settings, "NER_SEG_CKPT", lambda: [_seg_checkpoint(settings)])
     return _NER_SEGMENTER
+
+
+def _seg_checkpoint(settings: GlobalSettings):
+    from bibr.ner.checkpoint import resolve_checkpoint
+
+    return resolve_checkpoint(settings.NER_SEG_CKPT, revision=settings.NER_SEG_REVISION)
 
 
 _GEOM_SEGMENTER = None
@@ -550,12 +617,18 @@ def _get_geom_segmenter(settings: GlobalSettings | None = None):
 
                 logger.info("loading geom segmenter: %s", settings.REF_GEOM_SEG_MODEL_ID)
                 try:
-                    _GEOM_SEGMENTER = GeomSegmenter(
+                    segmenter = GeomSegmenter(
                         settings.REF_GEOM_SEG_MODEL_ID,
                         revision=settings.REF_GEOM_SEG_REVISION,
                     )
+                    _GEOM_SEGMENTER = segmenter
                     _GEOM_SEGMENTER_KEY = key
                 except Exception as e:  # noqa: BLE001 — unavailable deps/artifact → cascade
+                    # An overridden model never cascades past itself: the run
+                    # would measure the next tier under the candidate's name.
+                    strict = override_load_error(settings, "REF_GEOM_SEG_MODEL_ID", e)
+                    if strict is not None:
+                        raise strict from e
                     # Only a *definitive* failure is cached. A missing extra or
                     # absent artifact will fail identically forever, so the
                     # sticky flag saves repeated load attempts. A network-shaped
@@ -569,7 +642,106 @@ def _get_geom_segmenter(settings: GlobalSettings | None = None):
                     logger.warning(
                         "geom segmenter unavailable (%r); cascading to LLM segmentation", e
                     )
+    loaded = _GEOM_SEGMENTER is not None and key == _GEOM_SEGMENTER_KEY
+    if loaded and is_model_override(settings, "REF_GEOM_SEG_MODEL_ID"):
+        record_model_load(settings, "REF_GEOM_SEG_MODEL_ID", [_GEOM_SEGMENTER.path])
     return _GEOM_SEGMENTER
+
+
+_GEOM_TAGGER = None
+_GEOM_TAGGER_KEY: tuple[str, str | None] | None = None
+
+
+def _get_geom_tagger(settings: GlobalSettings | None = None):
+    """The opt-in geometry line tagger (``REF_GEOM_TAGGER_MODEL_ID``), or ``None``.
+
+    ``None`` when it is unset. It exists only as an override, so a tagger that
+    cannot be loaded, for any reason (a Hub that cannot be reached with the
+    files not cached included), raises
+    :class:`~bibr.exceptions.ModelOverrideError`.
+    """
+    global _GEOM_TAGGER, _GEOM_TAGGER_KEY
+    settings = settings if settings is not None else snapshot_settings()
+    path = getattr(settings, "REF_GEOM_TAGGER_MODEL_ID", None)
+    if not isinstance(path, str) or not path:
+        return None
+    revision = getattr(settings, "REF_GEOM_TAGGER_REVISION", None)
+    revision = revision if isinstance(revision, str) and revision else None
+    key = (path, revision)
+    if _GEOM_TAGGER is None or key != _GEOM_TAGGER_KEY:
+        with _NER_LOCK:
+            if _GEOM_TAGGER is None or key != _GEOM_TAGGER_KEY:
+                from bibr.extract.geom_tagger import GeomLineTagger
+
+                logger.info("loading geometry line tagger: %s", path)
+                try:
+                    tagger = GeomLineTagger(path, revision)
+                except Exception as e:
+                    if (
+                        strict := override_load_error(settings, "REF_GEOM_TAGGER_MODEL_ID", e)
+                    ) is not None:
+                        raise strict from e
+                    logger.warning(
+                        "geometry line tagger %s unavailable (%r); this paper runs without it",
+                        path,
+                        e,
+                    )
+                    return None
+                _GEOM_TAGGER = tagger
+                _GEOM_TAGGER_KEY = key
+    record_model_load(settings, "REF_GEOM_TAGGER_MODEL_ID", _GEOM_TAGGER.files)
+    return _GEOM_TAGGER
+
+
+_TEXT_SEGMENTER = None
+_TEXT_SEGMENTER_KEY: tuple[str, str | None] | None = None
+
+
+def _get_text_segmenter(settings: GlobalSettings | None = None):
+    """The opt-in text segmenter (``REF_TEXT_SEG_MODEL_ID``), or ``None``.
+
+    ``None`` when it is unset. It exists only as an override, so a segmenter
+    that cannot be loaded, for any reason (a Hub that cannot be reached with the
+    files not cached included), raises
+    :class:`~bibr.exceptions.ModelOverrideError`, as does setting it together
+    with an overridden ``NER_SEG_CKPT``.
+    """
+    global _TEXT_SEGMENTER, _TEXT_SEGMENTER_KEY
+    settings = settings if settings is not None else snapshot_settings()
+    path = getattr(settings, "REF_TEXT_SEG_MODEL_ID", None)
+    if not isinstance(path, str) or not path:
+        return None
+    from bibr.utils.model_overrides import text_segmenter_conflict
+
+    if (conflict := text_segmenter_conflict(settings)) is not None:
+        raise ModelOverrideError(conflict)
+    revision = getattr(settings, "REF_TEXT_SEG_REVISION", None)
+    revision = revision if isinstance(revision, str) and revision else None
+    key = (path, revision)
+    if _TEXT_SEGMENTER is None or key != _TEXT_SEGMENTER_KEY:
+        with _NER_LOCK:
+            if _TEXT_SEGMENTER is None or key != _TEXT_SEGMENTER_KEY:
+                from bibr.extract.text_segmenter import OnnxTextSegmenter
+
+                logger.info("loading text reference segmenter: %s", path)
+                try:
+                    segmenter = OnnxTextSegmenter(path, revision)
+                except Exception as e:
+                    if (
+                        strict := override_load_error(settings, "REF_TEXT_SEG_MODEL_ID", e)
+                    ) is not None:
+                        raise strict from e
+                    logger.warning(
+                        "text reference segmenter %s unavailable (%r); this paper goes on "
+                        "without it",
+                        path,
+                        e,
+                    )
+                    return None
+                _TEXT_SEGMENTER = segmenter
+                _TEXT_SEGMENTER_KEY = key
+    record_model_load(settings, "REF_TEXT_SEG_MODEL_ID", _TEXT_SEGMENTER.files)
+    return _TEXT_SEGMENTER
 
 
 def _get_ner_parser(settings: GlobalSettings | None = None, memory_mode: str | None = None):
@@ -597,14 +769,35 @@ def _get_ner_parser(settings: GlobalSettings | None = None, memory_mode: str | N
                 from bibr.ner.runtime import load_ref_parser
 
                 logger.info("loading NER parser: %s", settings.NER_PARSER_CKPT)
-                _NER_PARSER = load_ref_parser(
-                    settings.NER_PARSER_CKPT,
-                    device=device,
-                    revision=settings.NER_PARSER_REVISION,
-                    settings=settings,
-                )
+                try:
+                    parser = load_ref_parser(
+                        settings.NER_PARSER_CKPT,
+                        device=device,
+                        revision=settings.NER_PARSER_REVISION,
+                        settings=settings,
+                    )
+                except Exception as e:
+                    if (strict := override_load_error(settings, "NER_PARSER_CKPT", e)) is not None:
+                        raise strict from e
+                    raise
+                _NER_PARSER = parser
                 _NER_PARSER_KEY = key
+    if is_model_override(settings, "NER_PARSER_CKPT"):
+        parser = _NER_PARSER
+        record_model_load(settings, "NER_PARSER_CKPT", lambda: _parser_files(parser, settings))
     return _NER_PARSER
+
+
+def _parser_files(parser, settings: GlobalSettings) -> list:
+    """The files a loaded reference parser was read from (its ONNX bundle, or the checkpoint)."""
+    bundle_dir = getattr(parser, "bundle_dir", None)
+    if bundle_dir is not None:
+        from bibr.utils.model_overrides import onnx_bundle_files
+
+        return onnx_bundle_files(bundle_dir)
+    from bibr.ner.checkpoint import resolve_checkpoint
+
+    return [resolve_checkpoint(settings.NER_PARSER_CKPT, revision=settings.NER_PARSER_REVISION)]
 
 
 def resolve_ner_device(settings: GlobalSettings, memory_mode: str | None = None) -> str | None:
@@ -1118,11 +1311,32 @@ def _backfill_page_range(fields: dict[str, Any], segment: str | None) -> None:
             fields["first_page"] = partner
 
 
+def _read_prefixed_locator(fields: dict[str, Any]) -> None:
+    """Keep an article number whole.
+
+    A parser (or ``_backfill_page_range``) that splits "e00376-18" at the
+    hyphen leaves first_page "e00376" and last_page "18": an ASM article number
+    and its year suffix, not a page range. A letter-prefixed first page followed
+    by a shorter bare number is read by :func:`read_prefixed_locator`; when it
+    is one article number, that number is kept whole as first_page with no
+    last_page. An abbreviated prefixed range ("S163"/"9") keeps the last page
+    as printed.
+    """
+    first = str(fields.get("first_page") or "").strip()
+    last = str(fields.get("last_page") or "").strip()
+    if not (first and last):
+        return
+    pair = read_prefixed_locator(first, last)
+    if pair is not None and pair.last is None:
+        fields["first_page"], fields["last_page"] = pair
+
+
 def _finalize_reference_fields(fields: dict[str, Any], segment: str | None) -> dict[str, Any]:
     """Strategy-independent reference finalize shared by every parse path.
 
     DOI rescue: a clean printed doi:/doi.org token in the ref's own segment
-    covers a DOI the parser under-emitted, but never overrides an emitted one.
+    covers a DOI the parser under-emitted, but never overrides an emitted one;
+    failing that, a resolver link the parser filed under ``url`` gives the DOI.
     Also completes a half-emitted page range from the segment, expands compact
     last pages ("782-92" → "792"), backfills a dropped Vancouver year/container
     from the segment, and migrates/infers ``bib_type``.
@@ -1130,11 +1344,16 @@ def _finalize_reference_fields(fields: dict[str, Any], segment: str | None) -> d
     """
     _backfill_vancouver_tail(fields, segment)
     _backfill_page_range(fields, segment)
+    _read_prefixed_locator(fields)
     if fields.get("year") is not None and not fields.get("year_suffix") and segment:
         suffixes = set(re.findall(rf"(?<!\d){fields['year']}([a-z])(?!\w)", segment))
         if len(suffixes) == 1:
             fields["year_suffix"] = suffixes.pop()
-    fields["doi"] = normalize_doi(fields.get("doi")) or _rescue_doi_from_segment(segment)
+    fields["doi"] = (
+        normalize_doi(fields.get("doi"))
+        or _rescue_doi_from_segment(segment)
+        or _rescue_doi_from_url_field(fields.get("url"))
+    )
     fields["last_page"] = _expand_compact_last_page(
         fields.get("first_page"), fields.get("last_page")
     )
@@ -2331,6 +2550,10 @@ class ReferenceExtractor:
                 else "no ref-line geometry (DOCX/non-native)",
             )
             return None
+        if getattr(self._settings, "REF_GEOM_TAGGER_MODEL_ID", None):
+            tagged = self._segment_geom_tagger(ref_text, lines)
+            if tagged is not None:
+                return tagged
         with LOCAL_INFERENCE_LOCK:
             segmenter = _get_geom_segmenter(self._settings)
         if segmenter is None:
@@ -2349,7 +2572,9 @@ class ReferenceExtractor:
                 "geom", ref_text, selected=False, reason_flags=("segmentation_error",)
             )
             self._record_warning(WarningCode.REF_SEG_GEOM_CASCADE, f"geom error: {e!r}")
+            self._override_inference_failed("REF_GEOM_SEG_MODEL_ID", e)
             return None
+        self._override_inference_ran("REF_GEOM_SEG_MODEL_ID")
         # Alignment-yield gate: see REF_GEOM_MIN_ALIGN_YIELD in config.py for
         # the OOD rationale. Rides the same cascade path as a sub-threshold
         # confidence result.
@@ -2391,14 +2616,7 @@ class ReferenceExtractor:
         # layout reference-onset count is an independent lower bound — when geom
         # emits fewer than GEOM_MIN_REGION_RATIO of it, decline and cascade like a
         # low-confidence result rather than trust the merged spans.
-        region_onsets = self._region_onset_count()
-        receipt_region_onsets = self._aligned_region_onset_count(ref_text) if region_onsets else 0
-        min_region_ratio = GEOM_MIN_REGION_RATIO
-        if (
-            region_onsets
-            and receipt_region_onsets >= GEOM_STRONG_REGION_ALIGN_FRACTION * region_onsets
-        ):
-            min_region_ratio = GEOM_STRONG_REGION_RATIO
+        region_onsets, receipt_region_onsets, min_region_ratio = self._geom_region_floor(ref_text)
         if region_onsets and len(spans) < min_region_ratio * region_onsets:
             self._record_segmentation_attempt(
                 "geom",
@@ -2436,6 +2654,91 @@ class ReferenceExtractor:
             f"{self._settings.REF_GEOM_SEG_CASCADE_THRESHOLD}) or empty",
         )
         return None
+
+    def _geom_region_floor(self, ref_text: str) -> tuple[int, int, float]:
+        """Layout onsets, the onsets that align onto *ref_text*, and the segment-count floor.
+
+        A geometry result with fewer than ``ratio × onsets`` spans is declined.
+        The floor rises to ``GEOM_STRONG_REGION_RATIO`` when nearly every onset
+        aligns, since the onset count is then a reliable lower bound.
+        """
+        region_onsets = self._region_onset_count()
+        receipt_region_onsets = self._aligned_region_onset_count(ref_text) if region_onsets else 0
+        min_region_ratio = GEOM_MIN_REGION_RATIO
+        if (
+            region_onsets
+            and receipt_region_onsets >= GEOM_STRONG_REGION_ALIGN_FRACTION * region_onsets
+        ):
+            min_region_ratio = GEOM_STRONG_REGION_RATIO
+        return region_onsets, receipt_region_onsets, min_region_ratio
+
+    def _segment_geom_tagger(self, ref_text: str, lines: list[dict]) -> list[str] | None:
+        """The opt-in geometry line tagger, asked before the GBM.
+
+        Returns ref strings when its calibrated paper confidence clears the
+        bundle's gate and the geometry tier's own checks pass; that answer is
+        final (the line stream does not run over it). Otherwise ``None``, and
+        the shipped geometry tier runs exactly as without the tagger, so a
+        decline has no effect on the references. The declined ``geom_tagger``
+        attempt is still listed in the receipt (``reference_yield.attempts``)
+        with its reason, confidence and counts in ``reason_flags``, but carries
+        no spans or credible starts that later code reads, and adds no warning.
+        An error on one paper is a decline (``tagger_error``) that also adds a
+        ``MODEL_OVERRIDE_INFERENCE_FAILED`` warning; errors on
+        ``INFERENCE_FAILURE_LIMIT`` papers in a row stop the run.
+        """
+        try:
+            with LOCAL_INFERENCE_LOCK:
+                tagger = _get_geom_tagger(self._settings)
+                if tagger is None:
+                    self._decline_geom_tagger(ref_text, "tagger_unavailable")
+                    return None
+                spans, confidence, labeled, aligned = tagger.segment_spans(ref_text, lines)
+        except _PASS_THROUGH:
+            raise
+        except Exception as e:  # noqa: BLE001 — one paper's tagger failure is a decline
+            logger.warning("geometry line tagger failed on this paper (%r); declining", e)
+            self._decline_geom_tagger(ref_text, "tagger_error", f"error={type(e).__name__}")
+            # Unlike a decline, an error is recorded on the paper; several in a row stop the run.
+            self._override_inference_failed("REF_GEOM_TAGGER_MODEL_ID", e)
+            return None
+        self._override_inference_ran("REF_GEOM_TAGGER_MODEL_ID")
+        counts = (
+            f"confidence={confidence:.4f}",
+            f"threshold={tagger.threshold:.4f}",
+            f"labeled={labeled}",
+            f"aligned={aligned}",
+            f"spans={len(spans)}",
+        )
+        if labeled == 0:
+            self._decline_geom_tagger(ref_text, "zero_labeled_starts", *counts)
+            return None
+        if aligned / labeled < self._settings.REF_GEOM_MIN_ALIGN_YIELD:
+            self._decline_geom_tagger(ref_text, "low_alignment_yield", *counts)
+            return None
+        region_onsets, _receipt_onsets, min_region_ratio = self._geom_region_floor(ref_text)
+        if region_onsets and len(spans) < min_region_ratio * region_onsets:
+            self._decline_geom_tagger(ref_text, "low_segment_count", *counts)
+            return None
+        # ``accepts`` is False for a NaN confidence.
+        if not spans or not tagger.accepts(confidence):
+            self._decline_geom_tagger(ref_text, "low_confidence_or_empty", *counts)
+            return None
+        self._record_segmentation_attempt(
+            "geom_tagger",
+            ref_text,
+            spans=spans,
+            credible_starts=aligned or None,
+            selected=True,
+            reason_flags=("final", *counts),
+        )
+        return [ref_text[s:e] for s, e in spans]
+
+    def _decline_geom_tagger(self, ref_text: str, reason: str, *detail: str) -> None:
+        """List a declined tagger answer in the receipt; it has no effect on the references."""
+        self._record_segmentation_attempt(
+            "geom_tagger", ref_text, selected=False, reason_flags=(reason, *detail)
+        )
 
     def _region_onset_count(self) -> int:
         """Count of layout reference-onset anchors, or 0 when unavailable.
@@ -2506,7 +2809,7 @@ class ReferenceExtractor:
             self._record_segmentation_attempt(
                 "llm_anchor", ref_text, selected=False, reason_flags=("no_usable_spans",)
             )
-        except ProcessingError:
+        except _PASS_THROUGH:
             raise
         except Exception as e:  # noqa: BLE001 — any seg failure triggers fallback
             self._record_segmentation_attempt(
@@ -2611,25 +2914,19 @@ class ReferenceExtractor:
         checkpoint), try a zero-LLM marker split; if that also fails on a
         substantial region, surface a HIGH-severity warning instead of 0 refs.
         """
-        failure_reason = "no_segments"
-        try:
-            with LOCAL_INFERENCE_LOCK:
-                ref_strings = _get_ner_segmenter(self._settings).segment(ref_text)
-        except Exception as e:  # noqa: BLE001 — a CRF load/inference failure must not 0 the refs
-            ref_strings = []
-            if self._llm_skipped and isinstance(e, ImportError):
-                # A fast run on an install without the torch extra: the CRF was never
-                # going to be there, so this is a missing optional dependency, not an error.
-                failure_reason = "crf_unavailable"
-                logger.info("CRF segmenter not installed; falling through (%s)", e)
-            else:
-                failure_reason = "segmentation_error"
-                self._record_warning(WarningCode.REF_SEG_CRF_ERROR, f"CRF segmenter error: {e!r}")
+        if getattr(self._settings, "REF_TEXT_SEG_MODEL_ID", None):
+            strategy = "text_tagger"
+            ref_strings, failure_reason, flags = self._text_tagger_segment(ref_text)
+        else:
+            strategy, flags = "crf", ()
+            ref_strings, failure_reason = self._crf_segment(ref_text)
         if ref_strings:
-            self._record_segmentation_attempt("crf", ref_text, segments=ref_strings, selected=True)
+            self._record_segmentation_attempt(
+                strategy, ref_text, segments=ref_strings, selected=True, reason_flags=flags
+            )
             return ref_strings
         self._record_segmentation_attempt(
-            "crf", ref_text, selected=False, reason_flags=(failure_reason,)
+            strategy, ref_text, selected=False, reason_flags=(failure_reason, *flags)
         )
         if len(ref_text.strip()) >= _REF_REGION_NONEMPTY_MIN_CHARS:
             recovered = _marker_split_refs(ref_text)
@@ -2651,6 +2948,86 @@ class ReferenceExtractor:
                 f"references region present ({len(ref_text.strip())} chars) but 0 segments",
             )
         return ref_strings
+
+    def _crf_segment(self, ref_text: str) -> tuple[list[str], str]:
+        """The CRF segmenter's references, and the reason when there are none."""
+        failure_reason = "no_segments"
+        try:
+            with LOCAL_INFERENCE_LOCK:
+                ref_strings = _get_ner_segmenter(self._settings).segment(ref_text)
+        except ModelOverrideError:
+            # An overridden CRF that cannot be loaded stops the run.
+            raise
+        except Exception as e:  # noqa: BLE001 — a CRF load/inference failure must not 0 the refs
+            ref_strings = []
+            if self._llm_skipped and isinstance(e, ImportError):
+                # A fast run on an install without the torch extra: the CRF was never
+                # going to be there, so this is a missing optional dependency, not an error.
+                failure_reason = "crf_unavailable"
+                logger.info("CRF segmenter not installed; falling through (%s)", e)
+            else:
+                failure_reason = "segmentation_error"
+                self._record_warning(WarningCode.REF_SEG_CRF_ERROR, f"CRF segmenter error: {e!r}")
+                self._override_inference_failed("NER_SEG_CKPT", e)
+        else:
+            self._override_inference_ran("NER_SEG_CKPT")
+        return ref_strings, failure_reason
+
+    def _text_tagger_segment(self, ref_text: str) -> tuple[list[str], str, tuple[str, ...]]:
+        """The text segmenter's references (``REF_TEXT_SEG_MODEL_ID``), in the CRF's place.
+
+        Returns ``(references, reason when there are none, the model's figures)``.
+        The segmenter answers a text that is not blank: when it finds no
+        reference start in a list found by its heading, the list comes back as
+        one reference, with ``no_reference_start`` in the figures and a
+        ``REF_SEG_NOT_SPLIT`` warning, and no later tier runs. A list the
+        locator only guessed (``REF_SECTION_INFERRED``) in which it finds no
+        reference start is declined instead
+        (``inferred_list_without_reference_start``): the guess and the model
+        disagree, so the text is not exported as a reference, and the marker
+        split and the notes' citations get their turn as after the CRF. A
+        segmenter that cannot be loaded
+        stops the run. An error on this paper is a ``segmentation_error`` with a ``REF_SEG_CRF_ERROR`` and a
+        ``MODEL_OVERRIDE_INFERENCE_FAILED`` warning, and the paper goes on to the
+        CRF's own next tier; an error on several papers in a row stops the run
+        (:func:`~bibr.utils.model_overrides.note_inference_failure`).
+        """
+        try:
+            with LOCAL_INFERENCE_LOCK:
+                segmenter = _get_text_segmenter(self._settings)
+                if segmenter is None:
+                    return [], "tagger_unavailable", ()
+                result = segmenter.segment_text(ref_text)
+        except _PASS_THROUGH:
+            raise
+        except Exception as e:  # noqa: BLE001 — one paper's failure must not 0 the refs
+            logger.warning("text reference segmenter failed on this paper (%r); declining", e)
+            self._record_warning(
+                WarningCode.REF_SEG_CRF_ERROR, f"text reference segmenter error: {e!r}"
+            )
+            self._override_inference_failed("REF_TEXT_SEG_MODEL_ID", e)
+            return [], "segmentation_error", (f"error={type(e).__name__}",)
+        self._override_inference_ran("REF_TEXT_SEG_MODEL_ID")
+        if result.no_reference_start and result.segments:
+            if self._reference_list_was_inferred():
+                return [], "inferred_list_without_reference_start", result.receipt_flags()
+            self._record_warning(
+                WarningCode.REF_SEG_NOT_SPLIT,
+                f"the text reference segmenter found no reference start in the reference list "
+                f"({len(ref_text.strip())} chars); it could not be split into entries and is "
+                "exported as one block",
+            )
+        return list(result.segments), "no_segments", result.receipt_flags()
+
+    def _reference_list_was_inferred(self) -> bool:
+        """Whether the locator took the reference list on a layout guess, not by its heading."""
+        warnings = getattr(self.contents, "processing_warnings", None)
+        if not isinstance(warnings, list):
+            return False
+        return any(
+            getattr(warning, "code", None) == WarningCode.REF_SECTION_INFERRED
+            for warning in warnings
+        )
 
     def _authoritative_native_selected(self) -> bool:
         """Whether the selected segmentation is a JATS ref-list taken verbatim.
@@ -2682,6 +3059,19 @@ class ReferenceExtractor:
                 f"split merged reference strings into {n_new} more segment(s)",
             )
         return split
+
+    def _override_inference_failed(self, env: str, exc: BaseException) -> None:
+        """Record an overridden model's inference error on this paper; no-op for a default.
+
+        Raises :class:`~bibr.exceptions.ModelOverrideError` when the override has
+        raised on several papers in a row (:mod:`bibr.utils.model_overrides`).
+        """
+        warning = note_inference_failure(self._settings, env, exc, paper=self.file_hash or None)
+        if warning is not None:
+            self._record_warning(WarningCode(warning.code), warning.message)
+
+    def _override_inference_ran(self, env: str) -> None:
+        note_inference_success(self._settings, env, paper=self.file_hash or None)
 
     def _record_warning(self, code: WarningCode, message: str) -> None:
         """Log and persist a segmentation/parse fallback, recovery or loss so
@@ -2733,7 +3123,7 @@ class ReferenceExtractor:
             return refs, []
         except asyncio.CancelledError:
             raise
-        except ProcessingError:
+        except _PASS_THROUGH:
             raise
         except BaseException as exc:  # noqa: BLE001 — every failure lands in a NER span
             if depth > 0 and len(batch) > 1 and _is_degenerate_ref_failure(exc):
@@ -2771,7 +3161,7 @@ class ReferenceExtractor:
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for result in results:
-            if isinstance(result, ProcessingError):
+            if isinstance(result, _PASS_THROUGH):
                 raise result
         llm_refs = []
         failures: list[BaseException] = []
@@ -2792,7 +3182,7 @@ class ReferenceExtractor:
             """Recover a failed span's refs via the NER parser, tagged with
             their document position so they merge back in order. Logs and gives
             up on just this span if NER itself fails."""
-            if isinstance(cause, ProcessingError):
+            if isinstance(cause, _PASS_THROUGH):
                 raise cause
             failures.append(cause)
             last_index = offset + len(segs) - 1
@@ -2804,7 +3194,7 @@ class ReferenceExtractor:
                 # survivors — the filtered variant silently pulled every ref
                 # after a dropped slot one position earlier.
                 aligned = await asyncio.to_thread(self._parse_references_ner_aligned, segs)
-            except ProcessingError:
+            except _PASS_THROUGH:
                 raise
             except Exception as ner_exc:  # noqa: BLE001
                 logger.error(
@@ -2901,7 +3291,7 @@ class ReferenceExtractor:
                     # Cancellation is not a parse failure — propagate it so the
                     # cancelled coroutine actually stops, never divert to NER.
                     raise
-                except ProcessingError:
+                except _PASS_THROUGH:
                     raise
                 except BaseException as retry_exc:  # noqa: BLE001
                     await _fallback_to_ner(batch_offsets[bi], batches[bi], retry_exc)
@@ -3030,7 +3420,7 @@ class ReferenceExtractor:
             aligned = await asyncio.to_thread(
                 self._parse_references_ner_aligned, [ref_strings[i - 1] for i in missing]
             )
-        except ProcessingError:
+        except _PASS_THROUGH:
             raise
         except Exception as ner_exc:  # noqa: BLE001 — recovery is best-effort
             logger.error("NER recovery of %d skipped refs failed: %s", len(missing), ner_exc)
@@ -3105,7 +3495,7 @@ class ReferenceExtractor:
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for result in results:
-            if isinstance(result, ProcessingError):
+            if isinstance(result, _PASS_THROUGH):
                 raise result
 
         ordered_refs: list[PaperReference] = []
@@ -3117,7 +3507,7 @@ class ReferenceExtractor:
             chunk was built from raw region text with no matching segment
             (rare) — a zero-LLM marker split, or the whole chunk as a single
             entry as the last resort."""
-            if isinstance(cause, ProcessingError):
+            if isinstance(cause, _PASS_THROUGH):
                 raise cause
             failures.append(cause)
             chunk = chunks[ci]
@@ -3126,7 +3516,7 @@ class ReferenceExtractor:
                 # Same offload as _parse_refs_via_ner: keep the CRF forward
                 # pass off the shared serve event loop.
                 recovered = await asyncio.to_thread(self._parse_references_ner, members)
-            except ProcessingError:
+            except _PASS_THROUGH:
                 raise
             except Exception as ner_exc:  # noqa: BLE001
                 logger.error(
@@ -3168,7 +3558,7 @@ class ReferenceExtractor:
                     # Cancellation is not a parse failure — propagate it so the
                     # cancelled coroutine actually stops, never divert to NER.
                     raise
-                except ProcessingError:
+                except _PASS_THROUGH:
                     raise
                 except BaseException as retry_exc:  # noqa: BLE001
                     ordered_refs.extend(await _fallback_to_ner(ci, retry_exc))
@@ -3328,6 +3718,8 @@ class ReferenceExtractor:
                 )
                 for index, ref in zip(missing, recovered, strict=True):
                     aligned[index] = ref
+            except ModelOverrideError:
+                raise
             except Exception:  # noqa: BLE001 — keep successful model entries
                 self._record_warning(
                     WarningCode.REF_PARSE_LOST,
@@ -3359,7 +3751,14 @@ class ReferenceExtractor:
         with LOCAL_INFERENCE_LOCK:
             ref_parser = _get_ner_parser(self._settings, self._memory_mode)
             parser_inputs = _strip_enum_markers(ref_strings)
-            parsed = ref_parser.parse_batch(parser_inputs)
+            try:
+                parsed = ref_parser.parse_batch(parser_inputs)
+            except Exception as e:
+                # The callers record the lost references; an overridden parser's
+                # error is recorded on the paper too, and several stop the run.
+                self._override_inference_failed("NER_PARSER_CKPT", e)
+                raise
+            self._override_inference_ran("NER_PARSER_CKPT")
             truncated = getattr(ref_parser, "last_truncated_count", 0)
         if isinstance(truncated, int) and truncated > 0:
             self._record_warning(
@@ -3422,6 +3821,16 @@ class ReferenceExtractor:
             parsed_count += 1
         return aligned
 
+    def parse_printed_reference(self, text: str) -> PaperReference | None:
+        """Parse one printed citation with the NER parser, as an entry of the list is parsed.
+
+        The paper's own citation line (``bibr.extract.self_citation``) goes
+        through the same parser, repairs and finalize as a reference entry, and
+        no fine-tuned review. None when the parser reads neither a title nor
+        authors in it.
+        """
+        return self._parse_references_ner_aligned([text])[0]
+
     # ------------------------------------------------------------------
     # Reference line stream (bibr.extract.ref_line_stream)
     # ------------------------------------------------------------------
@@ -3452,6 +3861,8 @@ class ReferenceExtractor:
             return None
         try:
             return self._line_stream_choice(ref_df, ref_text, ref_strings)
+        except ModelOverrideError:
+            raise
         except Exception as e:  # noqa: BLE001 — an alternative must never break extraction
             logger.warning("Reference line stream failed: %r", e)
             return None
@@ -3477,7 +3888,11 @@ class ReferenceExtractor:
         cascade_quality = segmentation_quality(ref_strings, section_text, typical_length=typical)
         stream_quality = segmentation_quality(entries, section_text, typical_length=typical)
         tier, tier_spans = self._cascade_selected_tier()
-        if ref_strings and len(entries) < _distinct_count(ref_strings):
+        if tier == "geom_tagger":
+            # An accepted tagger answer is final: the stream only lends it the
+            # link DOIs it reads off the page, as for any kept cascade answer.
+            trigger, selected = "tagger_final", False
+        elif ref_strings and len(entries) < _distinct_count(ref_strings):
             trigger, selected = "fewer_entries", False
         elif ref_strings and stream.rotated:
             trigger, selected = "rotated_page", False
@@ -3635,7 +4050,13 @@ class ReferenceExtractor:
                 segmenter = _get_geom_segmenter(self._settings)
                 if segmenter is None:
                     return []
-                return list(segmenter.line_start_probabilities(records))
+                try:
+                    return list(segmenter.line_start_probabilities(records))
+                except Exception as e:
+                    # The line stream's caller keeps the cascade's result; an
+                    # overridden segmenter's error is recorded on the paper too.
+                    self._override_inference_failed("REF_GEOM_SEG_MODEL_ID", e)
+                    raise
 
         return predict
 

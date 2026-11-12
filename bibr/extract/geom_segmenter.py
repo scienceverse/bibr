@@ -68,6 +68,7 @@ class GeomSegmenter:
         from bibr.utils.safe_pickle import safe_joblib_load
 
         path = resolve_checkpoint(_resolve_spec(model_spec), revision=revision)
+        self.path = path
         # joblib.load executes arbitrary code in the file, and REF_GEOM_SEG_MODEL_ID
         # can point resolve_checkpoint at any local path — use the gadget-restricted
         # loader (audit M6). *_MODEL_ID settings remain a trust boundary.

@@ -670,3 +670,22 @@ def tiny_hf_v4_checkpoint(out: Path, *, labels: list[str], seed: int = 0) -> Pat
     model.save_pretrained(out)
     PPDocLayoutV4ImageProcessor(size={"height": 64, "width": 64}).save_pretrained(out)
     return out
+
+
+def fix_input_dims(model_path: Path, dims: dict[str, list[int | None]]) -> None:
+    """Rewrite ``model_path`` with the named inputs' axes fixed to ``dims`` (``None`` keeps one).
+
+    The shape of an export with a static batch size or sequence length: the
+    graph runs on that shape alone, and onnxruntime refuses any other.
+    """
+    import onnx
+
+    model = onnx.load(str(model_path))
+    for graph_input in model.graph.input:
+        for axis, size in zip(
+            graph_input.type.tensor_type.shape.dim, dims.get(graph_input.name, []), strict=False
+        ):
+            if size is not None:
+                axis.ClearField("dim_param")
+                axis.dim_value = size
+    onnx.save(model, str(model_path))

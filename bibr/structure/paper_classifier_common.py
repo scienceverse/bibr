@@ -74,6 +74,7 @@ def load_paper_classifier(
     is available.
     """
     from bibr.utils.ml_runtime import find_onnx_bundle, hub_bundle_hint, resolve_runtime
+    from bibr.utils.model_overrides import is_model_override
 
     if settings is None:
         from bibr.config import snapshot_settings
@@ -82,7 +83,13 @@ def load_paper_classifier(
     runtime, bundle = resolve_runtime(
         "paper classifier",
         settings=settings,
-        bundle=lambda: find_onnx_bundle(model_id, revision, label="paper classifier"),
+        # An override tells a network failure from a missing bundle (bibr.utils.model_overrides).
+        bundle=lambda: find_onnx_bundle(
+            model_id,
+            revision,
+            label="paper classifier",
+            raise_transient=is_model_override(settings, "ML_PAPER_CLASSIFIER_MODEL_ID"),
+        ),
         bundle_hint=hub_bundle_hint("ML_PAPER_CLASSIFIER_MODEL_ID", model_id, revision),
     )
     if runtime == "onnx":
@@ -90,7 +97,10 @@ def load_paper_classifier(
 
         logger.info("Paper classifier runtime: onnx")
         logger.debug("Paper classifier bundle: %s", bundle)
-        return OnnxPaperClassifierModel(bundle, device=device)
+        model = OnnxPaperClassifierModel(bundle, device=device)
+        if is_model_override(settings, "ML_PAPER_CLASSIFIER_MODEL_ID"):
+            model.check_graph()  # a candidate's graph is probed at load; the default is not
+        return model
 
     from bibr.structure.paper_classifier_model import PaperClassifierModel
 

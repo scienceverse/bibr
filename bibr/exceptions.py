@@ -7,6 +7,7 @@ distinguish at HTTP / CLI boundaries:
 - ``UpstreamServiceError`` (5xx) — third-party (LLM, OCR, Crossref) failed
 - ``ProcessingError``       (422 for stable processing failures) — processing failed mid-pipeline
 - ``ConfigurationError``          — invalid ``.env`` / environment settings
+- ``ModelOverrideError``          — a model setting names a model that cannot be loaded
 
 A failed LLM task call raises an ``LlmCallError``, an ``UpstreamServiceError``
 subclass whose class and ``error_code`` say how it failed: the service did not
@@ -397,3 +398,17 @@ class ConfigurationError(BibrError):
     def __init__(self, message: str, *, problems: list[str] | None = None) -> None:
         super().__init__(message)
         self.problems = problems or []
+
+
+class ModelOverrideError(ConfigurationError):
+    """A model setting set away from its shipped default names a model that cannot be loaded.
+
+    Raised for any failure to load it (a path or Hub file that does not exist,
+    a Hub that cannot be reached with nothing cached, an unreadable or
+    wrong-kind file, a failed load probe, a missing optional dependency), and
+    when it raised at inference on several papers in a row; see
+    :mod:`bibr.utils.model_overrides`. Unlike a load failure of a shipped
+    model, it is never turned into a degraded result: the pipeline passes it
+    to the caller and stops, so a run never reports the shipped path (or no
+    model) under the candidate's name.
+    """

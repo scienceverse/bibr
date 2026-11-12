@@ -177,6 +177,7 @@ _ERROR_KIND_TO_HTTP = {
     "input_validation": 400,
     "upstream_service": 502,
     "processing": 422,
+    "model_override": 500,
     "unexpected": 500,
 }
 
@@ -1337,10 +1338,22 @@ class BibrPipelineAPI(ls.LitAPI):
             ProcessingError,
             UpstreamServiceError,
         )
+        from bibr.utils.model_overrides import find_model_override_error
         from bibr.utils.redact import redact_urls
 
         detail = str(exc)
-        if isinstance(exc, InputValidationError):
+        override = find_model_override_error(exc)
+        if override is not None:
+            # The server's own setting names a model that does not load or keeps
+            # raising: not the paper's fault, and no retry helps. The text names
+            # the operator's model paths, so it stays in the log.
+            kind = "model_override"
+            message = (
+                "A model setting of this server names a model that cannot be used; "
+                "the server log says which (model_override_failed)"
+            )
+            detail = str(override)
+        elif isinstance(exc, InputValidationError):
             kind = "input_validation"
             message = detail
         elif isinstance(exc, (LlmTruncatedError, LlmInvalidOutputError)):
@@ -1359,6 +1372,10 @@ class BibrPipelineAPI(ls.LitAPI):
             kind = "unexpected"
             message = "Internal processing error"
         error_code = exc.error_code if isinstance(exc, (ProcessingError, LlmCallError)) else None
+        if override is not None:
+            from bibr.batch.ledger import MODEL_OVERRIDE_FAILED
+
+            error_code = MODEL_OVERRIDE_FAILED
         safe_diagnostics = exc.safe_diagnostics if isinstance(exc, ProcessingError) else None
         # Only a 422 needs this: clients already retry a 502.
         outage = isinstance(exc, ProcessingError) and exc.outage

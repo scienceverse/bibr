@@ -331,7 +331,9 @@ class ResourceManager:
         going on heuristics alone.
         """
         if self._front_role_resolved:
-            return self._front_role
+            from bibr.extract.front_role import _note_use
+
+            return _note_use(self._settings, self._front_role)
         from bibr.extract.front_role import load_front_role_classifier
 
         self._front_role = load_front_role_classifier(self._settings)
@@ -358,7 +360,9 @@ class ResourceManager:
         if getattr(settings.ml, "front_tagger_mode", "off") == "off":
             return None
         if self._front_tagger_resolved:
-            return self._front_tagger
+            from bibr.front_tagger.runtime import _note_use
+
+            return _note_use(settings, self._front_tagger)
         from bibr.front_tagger.runtime import load_front_tagger
 
         self._front_tagger = load_front_tagger(settings, device=self.device)

@@ -37,7 +37,20 @@ _SCHEMA_VERSION = "12.4"
 #   - New ``extraction.regions[].read_as`` (``text``, ``table_rebuilt``,
 #     ``formula_plain`` or ``unread``): how the text-layer OCR backend read
 #     the region. Omitted on every other route.
-#   Both keys are omitted when absent, so every 12.3 export is still a valid
+#   - New ``extraction.settings.models``: one row per model the run was set to
+#     load, {setting, model, id, revision, files, override}; a local model is
+#     a short name and the sha256 of its files, never its path.
+#   - New ``extraction.diagnostics.section_classification[].header_supplied``
+#     (``true``): the paper prints no heading for the section and
+#     ``section[].header`` is bibr's own wording. Omitted for a printed
+#     heading.
+#   - New ``extraction.diagnostics.self_citation``: the citation the paper
+#     prints of itself on its first page, {text_ids, cue, check, accepted,
+#     filled, agreement}. Omitted when no such line was found.
+#   - New ``extraction.warnings[].code`` ``SELF_CITATION_FILLED``, and the
+#     ``extraction.fields`` source ``self_citation`` with rule
+#     ``self_citation_fill`` (both open vocabularies).
+#   Every key is omitted when absent, so every 12.3 export is still a valid
 #   12.4 reader input.
 #
 # v12.3 (vs 12.2) — additive:
@@ -525,7 +538,8 @@ class MetadataExport(BaseModel):
     issue: str | None = Field(
         default=None,
         description="The paper's own issue, as printed. A fast run leaves it empty unless the "
-        "input declares it.",
+        "input declares it or the paper's printed citation gives it "
+        "(extraction.diagnostics.self_citation).",
     )
     first_page: str | None = Field(
         default=None, description="The paper's own first page or article number, as printed."
@@ -1691,9 +1705,33 @@ class SectionClassificationExport(BaseModel):
     source: str | None = Field(
         description="Which tier decided the type: 'exact_alias', 'substring_alias' or "
         "'alias_prior' (heading lookup), 'model' (trained classifier), 'llm', "
-        "'parent_context', 'title', 'implicit', 'positional', 'appendix_repair' or "
-        "'imrad_dedup'; null when unclassified."
+        "'parent_context', 'title', 'implicit', 'positional', 'appendix_repair', "
+        "'imrad_dedup' or 'statement_tagger' (the opt-in statement tagger); null when "
+        "unclassified."
     )
+    # A plain bool, not ``Literal[True]``: the lenient reader opens every Literal to
+    # ``str`` and would then refuse the value this model writes.
+    header_supplied: bool | None = Field(
+        default=None,
+        description="True when the paper prints no heading for this section, so section[].header "
+        "is bibr's own wording and not text of the paper: an abstract or introduction found by "
+        "its position ('Abstract', 'Introduction'), a section named after a layout region, or "
+        "a statement section the opt-in statement tagger added ('Acknowledgments', 'Author "
+        "contributions'). A list of the paper's printed headings leaves these sections out. "
+        "Omitted for a printed heading, and before schema 12.4.",
+    )
+
+    # A reader of a 12.3 export finds no such key. Written only when true: false and
+    # absent both mean a printed heading.
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("header_supplied",)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent(self, handler):
+        data = handler(self)
+        for key in self.OMITTED_WHEN_ABSENT:
+            if not data.get(key):
+                data.pop(key, None)
+        return data
 
 
 class XrefTierExport(BaseModel):
@@ -1784,6 +1822,7 @@ class FieldRecordExport(BaseModel):
     source: str | None = Field(
         description="The step that produced the value, e.g. 'llm', 'layout_title', "
         "'front_matter_candidate', 'doc_info', 'keywords_section', 'identity', 'classifier', "
+        "'self_citation' (the citation the paper prints of itself), "
         "'native' (declared by the input); for doi, the selected identity candidate's "
         "source_kind; for a failed field the step that failed. Null when unknown or when "
         "nothing was produced."
@@ -1796,7 +1835,8 @@ class FieldRecordExport(BaseModel):
         default=None,
         description="The rule of the field's decision that chose the value or its absence, "
         "e.g. 'extracted', 'selected_record_title', 'layout_title_fallback', "
-        "'abstract_section_fallback', 'correction_notice', 'abstained'. Omitted when the "
+        "'abstract_section_fallback', 'correction_notice', 'abstained', 'self_citation_fill'. "
+        "Omitted when the "
         "field has no such decision (doi, bib), and in exports that predate it.",
     )
 
@@ -1831,6 +1871,113 @@ class FieldStatesExport(BaseModel):
     )
     paper_type: FieldRecordExport = Field(description="metadata.paper_type.")
     bib: FieldRecordExport = Field(description="The bib table (the reference list).")
+
+
+AgreementLiteral = Literal["agree", "disagree"]
+SelfCitationCheckLiteral = Literal[
+    "doi_match",
+    "doi_mismatch",
+    "title_match",
+    "title_mismatch",
+    "first_author_match",
+    "first_author_mismatch",
+    "strong_cue",
+    "weak_cue",
+    "not_parsed",
+    "front_matter_abstained",
+]
+SelfCitationFieldLiteral = Literal[
+    "title",
+    "author",
+    "journal",
+    "volume",
+    "issue",
+    "first_page",
+    "last_page",
+    "published",
+]
+
+
+class SelfCitationAgreementExport(BaseModel):
+    """Whether the printed citation and the extraction agree, per field both carry.
+
+    Values as extracted, before the citation filled anything. A field one side
+    lacks is omitted.
+    """
+
+    model_config = _STRICT
+
+    title: AgreementLiteral | None = Field(
+        default=None,
+        description="metadata.title against the citation's title, case, accents and punctuation "
+        "set aside.",
+    )
+    first_author: AgreementLiteral | None = Field(
+        default=None,
+        description="The family name of the first author[] row against the citation's first "
+        "author.",
+    )
+    doi: AgreementLiteral | None = Field(
+        default=None, description="metadata.doi against the DOI the citation prints."
+    )
+    year: AgreementLiteral | None = Field(
+        default=None,
+        description="The year of metadata.published_date against the citation's year.",
+    )
+    volume: AgreementLiteral | None = Field(
+        default=None, description="metadata.volume against the citation's volume."
+    )
+
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = (
+        "title",
+        "first_author",
+        "doi",
+        "year",
+        "volume",
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_uncompared(self, handler):
+        data = handler(self)
+        for key in self.OMITTED_WHEN_ABSENT:
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
+
+
+class SelfCitationExport(BaseModel):
+    """The citation the paper prints of itself on its first page, and what bibr took from it."""
+
+    model_config = _STRICT
+
+    text_ids: list[Id] = Field(
+        description="text[].text_id of the rows the citation was read from, its label's row first."
+    )
+    cue: Literal["strong", "weak"] = Field(
+        description="'strong' when the label names this article ('To cite this article:', 'How "
+        "to cite this paper:', 'Full citation:'), 'weak' for a bare 'Citation:' or 'Cite as:'."
+    )
+    check: SelfCitationCheckLiteral = Field(
+        description="What decided whether the citation is about this paper, in this order: the "
+        "DOI it prints against metadata.doi ('doi_match', 'doi_mismatch'); else its title "
+        "against metadata.title ('title_match', 'title_mismatch'); else its first author "
+        "against the author[] family names ('first_author_match', 'first_author_mismatch'); "
+        "else the label ('strong_cue' accepts, 'weak_cue' does not). 'not_parsed': the parser "
+        "read neither a title nor authors in it. 'front_matter_abstained': it would be accepted, "
+        "but the front matter holds several records and the extraction chose none."
+    )
+    accepted: bool = Field(
+        description="Whether the citation was taken to be this paper's, so that it could fill "
+        "empty fields."
+    )
+    filled: list[SelfCitationFieldLiteral] = Field(
+        description="The fields the citation filled: metadata keys, and 'author' for the author "
+        "table. Only fields the extraction left empty are filled, the title and the authors "
+        "only when it found none; empty when nothing was filled."
+    )
+    agreement: SelfCitationAgreementExport = Field(
+        description="Per field both sides carry, whether the citation agrees with the extraction."
+    )
 
 
 class DiagnosticsExport(BaseModel):
@@ -1889,6 +2036,13 @@ class DiagnosticsExport(BaseModel):
         description="Per reference with a confident bib_match record, how its parsed volume, "
         "issue and pages compare with the record; omitted when verification did not run.",
     )
+    self_citation: SelfCitationExport | None = Field(
+        default=None,
+        description="The citation the paper prints of itself on its first page ('Citation: ...', "
+        "'To cite this article: ...'), read with the reference parser: whether it was taken to "
+        "be this paper's, the fields it filled, and where it agrees with the extraction. "
+        "Omitted when no such line was found or the reader did not run, and before schema 12.4.",
+    )
 
     OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = (
         "section_classification",
@@ -1900,6 +2054,7 @@ class DiagnosticsExport(BaseModel):
         "reference_review",
         "consolidation",
         "verification",
+        "self_citation",
     )
 
     @model_serializer(mode="wrap")
@@ -1935,6 +2090,61 @@ class LlmEngineExport(BaseModel):
     backend: str | None = Field(default=None, description="Structured-output backend.")
 
 
+class ModelFileExport(BaseModel):
+    """One file of a local model, by its name in the model's directory and its content."""
+
+    model_config = _STRICT
+
+    name: str = Field(
+        min_length=1, description="The file's path inside the model's directory, e.g. 'onnx/x'."
+    )
+    sha256: str | None = Field(
+        pattern=r"^[0-9a-f]{64}$", description="sha256 of the file's bytes; null for a directory."
+    )
+
+
+class ModelProvenanceExport(BaseModel):
+    """One model the run was set to load, by the setting that names it and its identity."""
+
+    model_config = _STRICT
+
+    setting: str = Field(
+        min_length=1, description="The setting that names the model, e.g. 'NER_PARSER_CKPT'."
+    )
+    model: str = Field(min_length=1, description="What the model does, e.g. 'reference parser'.")
+    id: str = Field(
+        min_length=1,
+        description="The Hub repo id of the model, or for a local model a short name: its "
+        "directory's own name and '@' the first 12 hex digits of a hash over its files, e.g. "
+        "'section-candidate@3f2a9c41d0b7'. The path is not recorded, and a name that is part "
+        "of the home directory or the user name is recorded as 'local-model'.",
+    )
+    revision: str | None = Field(
+        description="The Hub revision loaded: a commit SHA, or the configured branch or tag when "
+        "the local Hub cache does not name its commit; null for a local model or an unpinned one "
+        "the cache does not hold."
+    )
+    files: list[ModelFileExport] | None = Field(
+        default=None,
+        description="For a local model, each file it is read from with its sha256. Omitted for "
+        "a Hub model, which its id and revision identify.",
+    )
+    override: bool = Field(
+        description="Whether the setting differs from the shipped default (a candidate model, a "
+        "mirror or local copy, or another revision)."
+    )
+
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("files",)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent(self, handler):
+        data = handler(self)
+        for key in self.OMITTED_WHEN_ABSENT:
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
+
+
 class ExtractionSettingsExport(BaseModel):
     """Per-run resolutions of the reference/enrichment knobs."""
 
@@ -1961,13 +2171,22 @@ class ExtractionSettingsExport(BaseModel):
         "configured LLM is used). A --no-llm run is 'full' with extraction.llm null. Omitted "
         "before schema 12.4.",
     )
+    models: list[ModelProvenanceExport] | None = Field(
+        default=None,
+        description="The models the run was set to load (layout, sentence splitter, reference, "
+        "front-matter and classifier models), one row each with its setting and identity. A "
+        "paper need not reach every one; the reference receipts in extraction.diagnostics say "
+        "which segmentation tier ran. A model the install cannot run (the torch-only CRF "
+        "segmenter without torch) is left out. Omitted before schema 12.4.",
+    )
 
-    # A reader of a 12.2 export finds none of these keys (the two flags are 12.3, mode is
-    # 12.4).
+    # A reader of a 12.2 export finds none of these keys (the two flags are 12.3, mode and
+    # models are 12.4).
     OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = (
         "native_text_header_footer",
         "native_text_formula_number",
         "mode",
+        "models",
     )
 
     @model_serializer(mode="wrap")

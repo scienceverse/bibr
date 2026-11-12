@@ -434,6 +434,9 @@ def _dry_run_model_specs(
     # Fast mode answers title, authors and abstract from the front-matter tagger.
     if config.mode == "fast" and not config.no_llm and ml.front_tagger_model_id:
         specs.append(("front-matter tagger", _hub_or_local(ml.front_tagger_model_id)))
+    # The opt-in statement tagger runs in every mode except --no-llm.
+    if not config.no_llm and ml.statement_tagger_model_id:
+        specs.append(("statement tagger", _hub_or_local(ml.statement_tagger_model_id)))
 
     # Reference seg/parse models only load under LLM-enabled PDF/OCR runs —
     # --no-llm skips reference extraction entirely for OCR'd input (see
@@ -442,6 +445,8 @@ def _dry_run_model_specs(
     if not config.no_llm and parse_strategy != "off":
         if seg_strategy == "geom":
             specs.append(("ref segmenter (geom)", Settings.REF_GEOM_SEG_MODEL_ID))
+        elif seg_strategy == "crf" and Settings.REF_TEXT_SEG_MODEL_ID:
+            specs.append(("ref segmenter (text)", _hub_or_local(Settings.REF_TEXT_SEG_MODEL_ID)))
         elif seg_strategy == "crf":
             specs.append(("ref segmenter (crf)", Settings.NER_SEG_CKPT))
         if parse_strategy == "ner":

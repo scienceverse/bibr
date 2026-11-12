@@ -90,6 +90,172 @@ lowercasing and removing diacritics and punctuation. `authors_fullname_f1` is
 fuzzy and scores a name with an affiliation letter glued on, or with an extra
 word, as right. Neither the gate nor `metrics_version` changes.
 
+### Added — the paper's printed citation
+
+Many papers print on their first page how to cite them ("Citation: ...", "To
+cite this article: ...", "How to cite this paper: ...", or "Full citation:"
+with the citation on the next row). bibr used that line only for the paper's
+DOI; it now also reads the rest of it.
+
+- The line is found on page 1 (a cover page included), from a label at the
+  start of a row to its DOI or link, within its paragraph and at most four
+  rows; a label alone on its row takes the next row. The labels are the ones
+  bibr already knew, French, Spanish, Portuguese, Italian, German, Russian and
+  Ukrainian ones included. It is parsed with the reference parser that parsed
+  the reference list, through the same steps as an entry of the list: no other
+  model and no network.
+- The identity stage, once it has chosen the paper's DOI, decides whether the
+  line is about this paper: the DOI it prints must be the paper's; without a
+  DOI on both sides, its title must match the extracted title closely; without
+  either, its first author's family name must be one of the extracted
+  authors'; with nothing to compare, only a label that names this article
+  ("To cite this article:", "How to cite this ...", "Full citation:") is
+  enough, a bare "Citation:" is not.
+- A line about this paper fills what the extraction left empty: the journal,
+  volume, issue, first and last page and the publication year, and the title
+  and the authors only when the extraction found none. It never replaces a
+  value. The volume, issue and pages are taken only when the line agrees with
+  every one of them the extraction already has; the authors only from a list
+  with no "et al." whose every name can be read. A front matter the extraction
+  abstained on (several papers in one file) takes nothing.
+- A title or author list read this way adds a `SELF_CITATION_FILLED` warning
+  that names the fields and text rows, and its `extraction.fields` record has
+  source `self_citation` and rule `self_citation_fill`. A fast run can now
+  export an `issue` this way.
+- `extraction.diagnostics.self_citation` records the line's text rows, the
+  label's strength, the check that decided, whether it was accepted, the
+  fields it filled, and, for the title, first author, DOI, year and volume
+  where both sides have one, whether the line and the extraction agree.
+- `SELF_CITATION_METADATA` (on by default) turns it off. It runs with the
+  local reference parser (`REF_PARSE_STRATEGY=ner`, the default and what a
+  fast run uses), not with an LLM parse strategy and not with `--no-llm`.
+
+On two evaluation sets, 48 papers print such a line among their first rows.
+Parsed offline with a candidate reference-parser checkpoint (not yet a
+pipeline run with the default parser), the line gave the gold title on all 40 lines that carry one and the
+gold first author on all 46 that carry authors; on lines without "et al." it
+named 149 of 150 gold authors. Where the export already had the field, the
+line agreed on the DOI (28 of 28), year (35 of 35), volume (18 of 19), first
+page (10 of 10) and journal (31 of 31, an abbreviated name counted as the same
+journal), and it had a value where the export was empty for the first page in
+31 papers, the volume in 22, the year in 11 and the journal in 11.
+
+### Added — running a candidate model
+
+A model setting pointed at anything other than its shipped default is an
+override, for comparing a retrained model with the shipped one. A mirror, an
+offline copy or a pinned or `main` revision of a shipped model is an override
+too: it is recorded as one, and it loads and runs as before.
+
+- Who is affected: only a run whose model setting names a model that cannot
+  be loaded, for any reason: a missing path; a Hub repo, revision or file that
+  is not there; a Hub that cannot be reached for files that are not in the
+  local cache; an unreadable or wrong-kind file, or one that does not run on a
+  sample input; a missing `torch` extra. That run now stops with an error
+  naming the setting and the reason instead of going on without the model:
+  `bibr chew` exits 1, and `bibr batch` exits non-zero with `run_info.json`
+  `reason` `model_override_failed`, marks the running papers
+  `model_override_failed` (retried on resume) and records none of them as
+  failed. `bibr serve` answers such a request `500` with `error_code`
+  `model_override_failed`, and `bibr batch --serve-url` stops on it. The same
+  failures of a shipped default behave as before.
+- An overridden model that loads but raises on a paper sends that paper down
+  the tier's error path, which is not always what a run without the override
+  would do, and the paper's export carries a
+  `MODEL_OVERRIDE_INFERENCE_FAILED` warning naming the setting. When the same
+  model raises on three papers in a row on which it ran, the run stops as
+  above (`bibr serve` keeps that count across requests for the life of the
+  process; a paper the model runs on without an error ends it). A resumed
+  `bibr batch` runs the papers written with that warning again, without
+  `--retry-failed`, so they get the repaired model's answer (a paper that keeps
+  falling back waits for `--retry-failed` after three runs); the run's summary
+  names them with the re-runs each has left, and `run_info.json` lists them
+  under `override_fallbacks`. A paper that has fallen back three times in a
+  row is named as skipped, with the advice to rerun with `--retry-failed`
+  after fixing the model, and a run that processed nothing because of that
+  exits non-zero.
+- The `bibr batch` summary counts the papers a model override stopped as `not
+  finished`, says that the run stopped on a model override and that a resume
+  processes them, and no longer counts them as failed; `bibr batch report`
+  gives the counts as `papers.stopped_on_model_override` and
+  `papers.fell_back_on_model_override`.
+- `bibr chew` and `bibr batch` load every override the run will use, from a
+  local path or the Hub, before the first paper, for every kind of input
+  (`--dry-run` too). A setting for a model the run does not ask (under
+  `--no-llm`, the section and paper classifiers and the reference models; the
+  geometry models without `--ref-seg geom`) is neither checked nor loaded: the
+  run warns once at the start, naming the setting and why, and records it as
+  `not used in this run`. A `--no-llm` run no longer starts the section and
+  paper classifiers, which it never asks. Every overridden ONNX model (the
+  reference parser, the text segmenter, the geometry tagger, the front-matter
+  tagger, the section and paper classifiers, the statement tagger) runs when
+  it loads, at the
+  preflight and in the run, on inputs built as a paper's are, in the shapes
+  the run sends it: the longest window and a short one, and a batch of
+  several and a batch of one for the models that take a batch. Its output
+  shape is checked against the labels or tags of its manifest, so a graph
+  that opens but would fail on papers, an export fixed to one batch size or
+  one length included, stops the run before the first one. A shipped
+  default is not probed. The section and paper classifiers loaded outside the
+  pipeline's classifier resources (calling the classification functions of
+  the library directly) stop on such a failure too, instead of going on with
+  the LLM. A local torch directory for a classifier (`config.json` and its
+  weights) passes this check on an install with `torch`. `bibr serve` checks
+  the files of its local-path overrides at startup.
+- `bibr batch` writes one record per override to `run_info.json` under
+  `model_overrides`: `loaded` with the sha256 of every file read, or not
+  loaded and why.
+- A local ONNX bundle may now hold its files in the named directory itself,
+  not only in an `onnx/` subdirectory.
+- `REF_GEOM_TAGGER_MODEL_ID` (unset by default; a directory or a Hub id with
+  `REF_GEOM_TAGGER_REVISION`) adds a geometry line tagger that the `geom`
+  segmentation tier asks first. An answer it takes is final; when it declines
+  or fails on a paper, the shipped geometry segmenter runs exactly as without
+  it, so a decline has no effect on the references. The attempt is still
+  listed in the reference diagnostics (`reference_yield.attempts`).
+- `REF_TEXT_SEG_MODEL_ID` (unset by default; a directory or a Hub id with
+  `REF_TEXT_SEG_REVISION`) replaces the CRF reference segmenter, the last
+  resort of every segmentation strategy, with an ONNX token tagger that needs
+  no `torch`. The CRF is then not loaded; setting both is an error. Its
+  answer goes through the same receipt as the CRF's, and the receipt lists it
+  as `text_tagger`. For a list found by its heading it always answers: a list
+  in which it finds no reference start comes back as one reference, flagged
+  `no_reference_start` in the receipt and with a new `REF_SEG_NOT_SPLIT`
+  warning, and does not go on to the marker split. A list that was only
+  guessed from the layout (`REF_SECTION_INFERRED`) and holds no reference
+  start is declined instead, so a section that is not a reference list is not
+  exported as one reference and the citations in the notes can stand in.
+- `ML_STATEMENT_TAGGER_MODEL_ID` (unset by default; a directory or a Hub id
+  with `ML_STATEMENT_TAGGER_REVISION`) adds a statement tagger, an ONNX
+  classifier over the paper's paragraphs that needs no `torch`. Where it finds
+  a funding, competing interests, ethics or data availability statement, that
+  field takes its statements instead of the rules', with the source
+  `statement_tagger`; a field it finds nothing for, or reads exactly as the
+  rules did, keeps the rules' value and source. When the paper has no
+  acknowledgments or author contributions section, the paragraphs it finds
+  become one; a section under a printed body heading (a "Discussion") is never
+  retyped. Each adds a `STATEMENT_TAGGER` warning. A
+  `--no-llm` run does not use it. The runtime (`bibr.statement_tagger.runtime`)
+  needs nothing else from bibr: block texts in reading order in, typed
+  statements out. It follows the rules of every model override: a bundle that
+  does not load stops the run, and an error on a paper keeps the rules'
+  statements with a `MODEL_OVERRIDE_INFERENCE_FAILED` warning.
+- For maintainers, `scripts/switch_model_defaults.py SETTING=org/name@<commit>`
+  moves a default model to a new Hub pin: the defaults in `bibr/config.py`,
+  the matching `ARG`s in `Dockerfile.serve`, the default-model table and the
+  `blob`, `tree`, `resolve` and `commit` links in the docs. It stops, writing
+  nothing, when the old pin is written anywhere else in the tree (the old
+  revision or any abbreviation of it of seven or more characters, also inside
+  a URL, and the old repo
+  id when the repo changes; code, scripts, `.github/`, `evaluation/`, shell,
+  TOML, JSON and YAML files and the docs), lists every such place, and lists
+  the tests that name it.
+
+A run with every model setting at its default extracts what it did before; its
+exports gain the `extraction.settings.models` block, and the text reading joins
+more of the URLs and DOIs that a line break split. See "Running a candidate model" in the configuration
+guide.
+
 ### Added — the text-layer OCR route
 
 A fast run with no OCR route chosen (no `--ocr`, `--ocr-url`, `--ocr-model` or
@@ -147,7 +313,7 @@ server or a backend written to `.env` still reads scans.
 
 ### Added — export schema 12.4 (additive)
 
-The export moves to schema `12.4`, which adds two optional keys; every 12.x
+The export moves to schema `12.4`, which adds the optional keys below; every 12.x
 export, 12.3 included, is still valid input for the 12.x reader. A consumer that
 validates with the 12.3 strict schema rejects 12.4 exports (the version
 constant) and needs the 12.4 schema.
@@ -157,12 +323,100 @@ constant) and needs the 12.4 schema.
 - The opt-in `extraction.regions[]` rows carry `read_as` when the text-layer
   OCR backend read the region: `text`, `table_rebuilt`, `formula_plain` or
   `unread`. It is omitted on every other route.
+- `extraction.diagnostics.section_classification[]` rows carry
+  `header_supplied: true` for a section whose heading the paper does not
+  print: `section[].header` is then bibr's own wording ("Abstract" or
+  "Introduction" for a section found by its position, the name of a layout
+  region, "Acknowledgments" or "Author contributions" for a section the
+  statement tagger added). The key is absent for a printed heading, so a list
+  of a paper's printed headings can leave these sections out.
+- `extraction.diagnostics.self_citation` describes the citation a paper prints
+  of itself on its first page: `text_ids`, `cue` (`strong` or `weak`), `check`,
+  `accepted`, `filled` and `agreement` (see "the paper's printed citation"
+  above). It is omitted when no such line was found. The warning code
+  `SELF_CITATION_FILLED` and the `extraction.fields` source `self_citation`
+  and rule `self_citation_fill` are new values in open vocabularies.
+- `extraction.settings.models` names the models the run was set to load, so
+  one export says which models produced it: one row per model with the
+  setting that names it, what it does, its Hub repo id and revision (a branch
+  or tag resolved to its commit through the local Hub cache), and whether it
+  differs from the shipped default. A local model is recorded by a short name
+  and the sha256 of each of its files, never by its path. The short name is
+  the directory's own name and `@` the first 12 hex digits of a hash over its
+  files; a name that is a home directory or the user name, on Windows and
+  macOS paths too, is recorded as `local-model`. Each file is hashed once per process, and a model directory
+  is listed once, not per paper. The layout model is the one the runtime loads (the ONNX export, or
+  the torch checkpoint with `ML_RUNTIME=torch`); the CRF segmenter is listed
+  only on an install with `torch`. Rows are per run, not per paper: the
+  reference receipts say which segmentation tier ran. `bibr serve` exports
+  carry them too.
 
 Both keys are omitted when absent, so an export made outside the pipeline, or
 by an earlier version, carries neither.
 
 ### Changed
 
+- Supplementary-material headings have one section type. "Supplementary
+  material", "Supplemental material" and "Supporting information" were
+  typed `appendix` while "Supplementary materials", "Supplementary
+  information" and "Extended data" were typed `endnote`; all of them are
+  now `endnote`, and `appendix` is left with appendices. The classifier
+  guide states the definition of `endnote`, `appendix` and `footnote`. A
+  section under such a heading never holds the reference list, like the
+  other `endnote` sections.
+- Author-metadata headings are no longer typed `acknowledgment`. A heading
+  that says where to write to an author, or that opens author details,
+  affiliations, biographies or ORCID iDs ("Correspondence to:",
+  "*Corresponding author", "Author details", "About the authors",
+  "Affiliations", "ORCID iDs", and their common Russian, Spanish,
+  Portuguese, German and French forms) opens a note about the authors and
+  is typed `footnote`, with `classification_source` `exact_alias`. The alias
+  table had filed "Corresponding author" and "ORCID iDs" under
+  acknowledgments, so an address or an ORCID list counted as acknowledgment
+  text. The front-matter reader finds these blocks by position and by
+  heading and is unchanged. Such a section is exported as a section with its
+  rows, not in the `footnote` list, and the statement tagger still gives an
+  acknowledgment or an author-contribution statement printed inside it a
+  section of its own. "Author note" is left to the classifier.
+- The section-type list the LLM reads now gives the same definitions as
+  the classifier guide. It had placed conclusions and future work under
+  `endnote`, supplementary material under `appendix` and corresponding-author
+  and ORCID blocks under `acknowledgment`. Conclusions, outlook and future
+  work are `discussion`; a pointer to supplementary material, extended data
+  and a publisher's note are `endnote`; notes and author-metadata blocks are
+  `footnote`. The type table in the architecture guide says the same.
+- In a review or commentary, a methods or results guess on a topical heading
+  no longer keeps the body's guessed sections from being typed `discussion`
+  (`PIPELINE_NON_IMRAD_BODY_AS_DISCUSSION`). Before, one such guess anywhere
+  in the paper ("Accountability" typed results, "5.1 Sensory fields without
+  objects" typed methods) switched the rule off, and a retrained section
+  classifier, which guesses methods and results more often, switched it off
+  on most essays of a 190-paper development set. The rule still leaves a
+  paper alone when it prints a methods or results part: a heading typed from
+  its own words, a guess on a heading that names the part ("Data and
+  methods", "Результаты исследования") or a methods subsection name ("Data",
+  "Sample", "Study area", "Empirical strategy"). The cost: an empirical paper
+  that the paper-type model calls a review and whose methods and results are
+  printed only under topical headings now has those sections typed
+  `discussion`. A methods or results guess under the introduction of such a
+  paper takes the introduction's type, and a heading that names a framework
+  or the literature ("Theoretical framework", "Revisão da literatura") stays
+  introduction.
+- The section alias table knows the printed introduction, methods, results
+  and discussion or conclusion headings of research papers in Russian,
+  Ukrainian, Polish, Czech, German, Dutch, French, Spanish, Portuguese,
+  Italian, Indonesian, Turkish, Chinese, Japanese, Korean and Arabic, among
+  them the longer forms journals print whole ("Материалы и методы
+  исследования", "Результаты исследования и их обсуждение", "Resultados e
+  discussão", "Fazit für die Praxis"). A part name inside a longer heading is
+  trusted only when it covers most of it, so these were left to the
+  classifier, which could type them wrongly or below its threshold. Results
+  merged with discussion is `results` and conclusions are `discussion`
+  ("Заключение", "Simpulan", "Considerações finais"). "Schlüsselwörter" is a
+  keywords heading. The same labels printed inside a structured abstract
+  ("Métodos", "Material und Methoden", "Conclusão") stay part of the
+  abstract when a keywords line, a numbered heading or an introduction closes
+  it, as English labels did.
 - A fast `bibr serve` with no OCR route chosen no longer waits for an OCR
   server at the default `http://localhost:8080`: it reads the text layer (see
   the text-layer route above) and refuses scans. If you run an OCR server on
@@ -229,6 +483,63 @@ by an earlier version, carries neither.
 
 ### Fixed
 
+- A reference's article number with a year suffix, such as "e00376-18" in
+  ASM journals, is kept whole as the first page. The reference parsers and
+  the page-range backfill split it at the hyphen into first page "e00376"
+  and last page "18". A letter-prefixed first part followed by a shorter
+  bare number is an article number when the number, completed with the
+  leading digits of the first part, would not be larger ("00318" is below
+  "00376"); otherwise it is an abbreviated range ("S163-9"), which keeps its
+  printed last page as before.
+- The heading repair that restores spaces in a glued alias ("KeyWords" to
+  "Key Words") no longer keys aliases written without ASCII letters. Every
+  Cyrillic, CJK and Arabic alias had the same empty key, so the last one in
+  the table was offered for any heading in those scripts; that alias has no
+  space today, so no heading changed, but a spaced alias added after it
+  would have replaced such headings.
+- A reference whose DOI is printed only as a resolver link no longer loses the
+  DOI when the parser files the link under `url`. This happened when the
+  printed link was broken by a line wrap (`https://doi. org/10.…`) or misprinted
+  without `org/`. The DOI is now read from a `url` value that is, as a whole, a
+  resolver link; a DOI the parser emitted is never replaced.
+- A DOI or URL printed across a line break is joined again in more of the shapes
+  a PDF's text layer produces, and a line that is not part of it is no longer
+  glued on. A line that ends on "10." before the rest of the DOI, right after the
+  registrant slash, or inside a word of the suffix no longer leaves a space inside
+  the DOI, which cost the link the DOI makes. A long URL whose scheme lies far back
+  on the line is joined as a short one is, and a wrap after "/", "_", "=" or "&",
+  inside a word of the path or before a file extension is read as part of the path.
+  A dot that ends a DOI no longer pulls a following link or reference into it. A
+  hyphen at a line end printed as U+2010 or U+2011 is joined or kept by the rule an
+  ASCII hyphen follows.
+  - A wrap inside a link joins only when the first word of the next line is made
+    like the rest of it: it holds a path or query character, a file name, an
+    identifier (a run of digits among letters, a long mix of letters and digits,
+    several colons or dots), a hyphenated slug of three words or more, the end of a
+    word the wrap split, or it stands alone, that is, ends its line, is followed by
+    a citation ("accessed 2024") or by no word of prose. Prose ("results show",
+    "well-being"), a code ("COVID-19", "H1N1"), a name and its initials, a label
+    ("ISSN", "E-ISSN", "DOI:", "e-mail:"), a bracketed date or note, a new link or
+    DOI and the number of the next reference stay on their own line. This holds for
+    a link of any length: some wraps that the earlier releases joined after a
+    trailing "/", such as "/" before "(accessed on 3 March 2020)", "[Last accessed
+    ...]" or "2016 Volume 4", are now left as printed.
+  - A no-break or thin space ends a word of the text, as a space does, when the wrap
+    is read, and a host that a wrap splits at its dot is joined inside a link that
+    holds another address ("web/2012/http://www." and "communities.example.gov").
+  - The shapes that rejoin the suffix of a DOI after a closing bracket, an
+    underscore or a dot, and inside a word, run on reference entries and on text of
+    unknown kind. `fix_ocr_artifacts` takes `reference` (default `None`, unknown); the
+    PDF parser passes `False` for every region whose layout label is not a
+    reference, and the reference line stream passes `True`. In a replay over the
+    stored text of about 4,000 papers none of these shapes fired outside reference
+    entries, so they are not applied there. The other shapes run on every region.
+  - The work per link is bounded: the text before a wrap is read back to the last
+    space but at most 1,000 characters, and the text is scanned in one pass (at most
+    three when a pass changed something), so a link printed over thousands of short
+    lines is joined in time that grows with the number of lines. A link that holds a
+    word of more than 1,000 characters without a space is left as printed.
+  - Text without a DOI, a URL or such a hyphen at a line break comes out as before.
 - A region the cloud vision OCR (`--ocr anthropic`, `openai`, `gemini`) could not
   read after its retries, or whose answer was cut off at its output cap, now
   shows in the export as an `OCR_REGION_FAILED` warning with the page, the

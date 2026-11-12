@@ -20,6 +20,9 @@ class _Loaded:
     def __init__(self, bundle, device=None):
         self.bundle = bundle
 
+    def check_graph(self):
+        """The load probe an overridden model runs: this stand-in passes it."""
+
 
 def _onnx_runtime(label, *, settings, bundle, bundle_hint):  # noqa: ARG001
     return "onnx", _BUNDLE

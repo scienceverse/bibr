@@ -721,6 +721,16 @@ Reference parsing has its own strategy knob, `--refs` (or `REF_PARSE_STRATEGY`):
 independently of parsing. The full set of strategies and how they cascade is
 covered in [Architecture](architecture.md).
 
+With `ner`, the same parser also reads the citation a paper prints of itself
+on its first page ("Citation: ...", "To cite this article: ...") and fills
+the journal, volume, issue, pages and publication year the extraction left
+empty, and the title and authors when it found none, once the line is shown
+to be about this paper (same DOI, else same title, else a matching first
+author, else a label that names this article). It never replaces a value;
+`extraction.diagnostics.self_citation` says what it did. Set
+`SELF_CITATION_METADATA=false` to turn it off. The other strategies, and
+`--no-llm`, do not read the line.
+
 ### Dedicated fine-tuned reference parser
 
 To enable automatic NER-to-Qwen review, configure both the dedicated endpoint
@@ -764,9 +774,10 @@ through ONNX Runtime — with no `torch`, `transformers` or OpenCV in the
 environment. The `torch` extra remains the training-parity runtime, the Apple
 MPS path, and the `torch.compile` path `bibr serve` uses for layout.
 
-A bundle resolves from a local directory containing `onnx/` (point the model's
-existing `*_MODEL_ID` / `NER_PARSER_CKPT` setting at it) or from the Hub at the
-pinned revision, offline-tolerant through the Hub cache. A value shaped like a
+A bundle resolves from a local directory containing `onnx/`, or holding
+`bibr_onnx.json` and `model.onnx` itself (point the model's existing
+`*_MODEL_ID` / `NER_PARSER_CKPT` setting at it), or from the Hub at the pinned
+revision, offline-tolerant through the Hub cache. A value shaped like a
 Hub id (`org/name`) is always fetched from the Hub, even when a directory of
 that name exists in the working directory; write a local directory as a path —
 absolute, or starting with `./`, `../` or `~`. Layout is the one model
@@ -814,6 +825,199 @@ PyTorch stack — `torch.compile` on the layout model in particular — and sinc
 classifier revisions it bakes now also carry an `onnx/` bundle, leaving the
 setting unset would let `auto` move serve onto ONNX Runtime the next time the
 image is built. Switching it is a deliberate choice, not a build-time accident.
+
+### Running a candidate model
+
+To compare a retrained model with the shipped one, point the shipped model's
+own setting at the candidate and run the same papers twice, once without the
+setting and once with it. No other setting changes:
+
+| Model | Setting | Candidate format |
+|---|---|---|
+| Reference parser | `NER_PARSER_CKPT` | ONNX bundle directory (`model: ner_parser`) |
+| Geometry reference segmenter | `REF_GEOM_SEG_MODEL_ID` | `.joblib` bundle file |
+| Geometry line tagger | `REF_GEOM_TAGGER_MODEL_ID` | directory with `gate.json` and `tagger.onnx` + `tagger.json` (beside it or in `onnx/`), or a Hub repo id |
+| CRF reference segmenter | `NER_SEG_CKPT` | checkpoint file (`torch` extra) |
+| Text reference segmenter (replaces the CRF) | `REF_TEXT_SEG_MODEL_ID` | directory with `segmenter.json`, `model.onnx` and `tokenizer.json` (in it or in `onnx/`), or a Hub repo id |
+| Front-role classifier | `ML_FRONT_ROLE_MODEL_ID` | `.joblib` bundle file |
+| Front-matter tagger | `ML_FRONT_TAGGER_MODEL_ID` | ONNX bundle directory |
+| Statement tagger (adds a source) | `ML_STATEMENT_TAGGER_MODEL_ID` | ONNX bundle directory (`model: statement_tagger`), or a Hub repo id |
+| Section classifier | `ML_SECTION_CLASSIFIER_MODEL_ID` | ONNX bundle directory (`model: section_classifier`) |
+| Paper classifier | `ML_PAPER_CLASSIFIER_MODEL_ID` | ONNX bundle directory (`model: paper_classifier`) |
+
+A setting is an *override* when its value, or its revision, differs from the
+shipped default. That includes a mirror of a shipped model, an offline copy
+of it, and the shipped repo at another revision such as `main`: all of these
+are recorded as overrides, and all of them load and run as before. Four rules
+apply to overrides only. A run on the shipped models extracts what it did
+before; its exports differ in two ways that have nothing to do with these
+rules: they name the models the run was set to load in
+`extraction.settings.models`, and the text reading joins more of the URLs and
+DOIs that a line break split:
+
+- **A model that cannot be loaded stops the run.** Whatever the reason (the
+  path is missing; the Hub has no such repo, revision or file; the Hub cannot
+  be reached and the files are not in the local Hub cache; a file is
+  unreadable or of the wrong kind; the bundle fails its contract check or does
+  not run on a sample input; the `torch` extra that `NER_SEG_CKPT` needs is
+  not installed), the run stops with an error naming the setting and the
+  reason, instead of going on without the model, so a comparison never
+  measures the shipped path, or no model, under the candidate's name. `bibr
+  chew` exits with status 1. `bibr batch` exits non-zero with `run_info.json`
+  `reason` `model_override_failed`, and marks the papers it was running
+  `model_override_failed` (a resumed run takes them again) rather than failed,
+  so no paper is recorded as `extraction_failed` or `parse_failed` for it. A
+  `bibr batch --serve-url` run stops the same way when the server answers
+  `model_override_failed`.
+- **An error at inference is recorded, and a repeated one stops the run.**
+  When a loaded override raises on one paper, the paper takes that tier's
+  error path (the path the code takes when that model raises: a failing text
+  segmenter, for instance, sends the paper on to the split on printed
+  reference markers, not to the CRF a run without the override would use),
+  and its export carries a `MODEL_OVERRIDE_INFERENCE_FAILED` processing
+  warning naming the setting.
+  When the same overridden model raises on three papers in a row on which it
+  ran (a paper it is not asked about neither counts nor ends the row; one it
+  runs on without an error ends it), the run stops as for a model that cannot
+  be loaded. The papers written with the
+  fallback before the stop are named in the run's summary and in
+  `run_info.json` under `override_fallbacks`, and a resumed `bibr batch` runs
+  them again without `--retry-failed`, so once the model is repaired their
+  exports hold its answers (a paper that keeps falling back waits for
+  `--retry-failed` after three runs). The summary counts the papers the stop
+  left unfinished as `not finished`, not as failed. `bibr serve` keeps one
+  count per overridden model for the life of the process, across requests:
+  the request of the third paper in a row the model raised on answers `500`
+  with `error_code` `model_override_failed`, and so does every later one it
+  raises on, until a paper it runs on without an error ends the row.
+- **Checked first.** `bibr chew` and `bibr batch` load every override this run
+  will use (given its mode, `--no-llm`, `--refs` and `--ref-seg`), local or
+  Hub, before the first paper, whatever the input (PDF, DOCX, XML or HTML),
+  `--dry-run` included. Every overridden ONNX model (the reference parser, the
+  text segmenter, the geometry tagger, the front-matter tagger, the section
+  and paper classifiers and the statement tagger) is also run at the preflight
+  and whenever the run loads it on inputs built as a paper's are (its
+  tokenizer, its feature layout, the tokenizer's last id), in the shapes the
+  run sends it: the longest window and a short one, and, for the models that
+  take a batch, a batch of several and a batch of one. An export fixed to one
+  batch size or one length fails there. Each output shape is checked against
+  the labels or tags its manifest lists (for the parser and the tagger, also
+  the size of the CRF's scores); a model that fails the probe has not loaded.
+  A shipped default is not probed. A problem stops the run with one line per
+  setting. A setting for a model the run does not ask (the classifiers, the
+  statement tagger and the reference models under `--no-llm`, the geometry
+  models without `--ref-seg geom`, any reference model under `--refs off`) is
+  neither checked nor loaded: the run warns once at the start, naming the
+  setting and why, and records it as `not used in this run`.
+  `bibr serve` checks the files of every local-path override at startup and
+  loads a model when a request first needs it; an override that fails there
+  answers `500` with `error_code` `model_override_failed`.
+- **Recorded per run.** Each loaded override logs the sha256 of every file it
+  read, and `bibr batch` writes one record per override to `run_info.json`
+  under `model_overrides`: setting, value, revision (null for a local model),
+  `loaded` (`true` with each file's path, size and sha256, or `false` with a
+  short `reason` such as `not used in this run` or `torch extra not
+  installed`). The key is absent
+  for a run on the shipped models. Every export, from `bibr chew`, `bibr
+  batch` or `bibr serve`, also names the models its run was set to load in
+  `extraction.settings.models`: the setting, the Hub repo id and revision, and
+  `override`; for a local model, instead of the path, a short name (the
+  directory's own name and `@` the first 12 hex digits of a hash over its
+  files, `local-model@...` when that name is a home directory or the user
+  name) and the sha256 of each file, so an export shared with others does not
+  show how the producing machine is laid out or who ran it.
+
+`REF_GEOM_TAGGER_MODEL_ID` is unset by default and adds a tier rather than
+replacing one. It takes a local directory or a Hub repo id (with
+`REF_GEOM_TAGGER_REVISION`; `gate.json` at the top, `tagger.onnx` and
+`tagger.json` in `onnx/`); a Hub-shaped id is never read from the working
+directory, so write a local copy as a path (`./org/name`). With
+`REF_SEG_STRATEGY=geom` the tagger is asked first, and its answer is taken when
+its calibrated paper confidence reaches the threshold in its `gate.json` and
+the geometry tier's own checks (alignment yield, segment count against the
+layout's reference onsets) pass. An answer it takes is final: the reference
+line stream does not replace it. Otherwise, including an error on one paper,
+the shipped geometry segmenter and the rest of the cascade run exactly as
+without the tagger: a declined answer has no effect on the references. It is
+not invisible, though: the export's reference diagnostics list each attempt,
+declined or not, in `reference_yield.attempts` as `geom_tagger`, with its
+reason (`final`, `low_confidence_or_empty`, `tagger_error`, ...), confidence
+and counts in `reason_flags`; a declined attempt carries no spans or credible
+starts. An error (`tagger_error`) also adds a `MODEL_OVERRIDE_INFERENCE_FAILED`
+warning to the paper, and errors on three papers in a row stop the run. The
+tagger reads the same 29 line features as the shipped geometry segmenter, in
+sorted name order, and needs only ONNX Runtime; loading it runs the graph on
+the features of two short reference sections of different lengths and checks
+that it returns two logits per line.
+
+`REF_TEXT_SEG_MODEL_ID` is unset by default and replaces a tier: the CRF
+segmenter, the last resort of every segmentation strategy (and the whole of
+`REF_SEG_STRATEGY=crf`). When it is set, the CRF is not loaded at all, and
+setting it together with `NER_SEG_CKPT` away from its default is an error
+the run stops on. It takes a local directory or a Hub repo id (with
+`REF_TEXT_SEG_REVISION`; `segmenter.json`, `model.onnx` and `tokenizer.json`
+in `onnx/`) and needs only ONNX Runtime and `tokenizers`, not the `torch`
+extra. The model tags each token of the reference-section text, the same text
+the CRF reads, as outside a reference (`O`), opening one (`B-REF`) or inside
+one (`I-REF`), in windows and with the stride its `segmenter.json` names; a
+token read by two windows keeps the answer of the window it sits furthest
+from the edge of. A reference opens at every `B-REF` token and at the first
+character of the text, and runs to the next one. Its answer goes through the
+same receipt as the CRF's. Unlike the CRF, it answers for a reference
+list found by its heading whenever the list is not blank, and does not
+decline to the next tier (the split on printed reference markers): when it
+finds no reference start at all, the whole list comes back as one reference,
+with `no_reference_start` in its `reason_flags` and a `REF_SEG_NOT_SPLIT`
+warning on the paper, so one unsplit block is not read as a parsed list. A
+list that was only guessed from the layout (`REF_SECTION_INFERRED`) and holds
+no reference start is declined instead, with
+`inferred_list_without_reference_start` in the receipt: the text is not
+exported as a reference, the marker split runs, and the citations in the
+paper's notes can stand in for the list. The export's reference
+diagnostics list it as `text_tagger`, with its token and window counts, the
+references it opened, an uncalibrated `expected_entry_precision` and the
+lowest opening probability in `reason_flags`. When it cannot be loaded, the Hub being out of reach
+included, the run stops (it is always an override). An error on one paper is
+a `segmentation_error` with a `REF_SEG_CRF_ERROR` warning, as for the CRF, and
+a `MODEL_OVERRIDE_INFERENCE_FAILED` warning; errors on three papers in a row
+stop the run. The preflight checks the files, the manifest and the tokenizer,
+and runs the graph once on a full window of tokenised reference text,
+checking that it returns three label scores per token.
+
+`ML_STATEMENT_TAGGER_MODEL_ID` is unset by default and adds a source to
+statement resolution. It takes a local directory or a Hub repo id (with
+`ML_STATEMENT_TAGGER_REVISION`; `bibr_onnx.json`, `model.onnx` and
+`tokenizer.json` in `onnx/`) and needs only ONNX Runtime and `tokenizers`.
+The model reads the paper's paragraphs in order, each section heading a block
+of its own and the reference list left out, each block paired with the first
+200 characters of the block before it, and gives each block a probability per
+statement type; a block is of a type at or above that type's threshold in
+`bibr_onnx.json`, and neighbouring blocks of a type join into one statement.
+Where it finds a funding, competing interests, ethics or data availability
+statement, that field takes the tagger's statements (all of them, in reading
+order, each cut at the next statement label in its rows) instead of the
+rules'; a field it finds nothing for keeps the rules' value, and so does a
+field whose statements it reads exactly as the rules did (whitespace aside).
+Otherwise the field's source in `extraction.fields` is `statement_tagger`.
+When the paper has no acknowledgments or author contributions section and
+the tagger finds one, its paragraphs become that section: a section all of
+whose rows it tagged is retyped, unless its printed heading is one bibr's
+heading lookup reads as a body section (an introduction, methods, results,
+discussion or appendix heading; the section then stays as it is, and its
+rows still give the statement fields their values), otherwise the rows move
+to a new section with a synthetic heading right after the one they were in;
+`classification_source` is `statement_tagger` either way. Each field or section it supplied adds a
+`STATEMENT_TAGGER` warning. A `--no-llm` run does not use it. The setting
+has no default, so a bundle it names is always an override: when it cannot be
+loaded, the Hub being out of reach included, the run stops. The preflight
+(and `bibr serve` at startup, for a local directory) opens the bundle and runs
+the graph on a batch of three blocks that fills the manifest's `max_length`
+and holds the tokenizer's last id, and on one short block, checking that it
+returns one finite probability per type: a graph with fewer positions than
+`max_length`, a vocabulary smaller than the tokenizer's, or an export fixed to
+one batch size or one length is refused there. An error on one paper leaves that paper with the rules' statements
+and a `MODEL_OVERRIDE_INFERENCE_FAILED` warning; errors on three papers in a
+row stop the run.
 
 ### CPU threads
 

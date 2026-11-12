@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from bibr.document.model import DocumentLayer
     from bibr.extract.front_matter import FrontMatterResolution
     from bibr.extract.front_role import FrontRolePredictions
+    from bibr.extract.self_citation import PrintedCitation
     from bibr.front_tagger.assemble import TaggedFrontMatter
     from bibr.models import PaperMetadata, PaperReference
     from bibr.validation import ValidationIssue
@@ -139,8 +140,8 @@ CANONICAL_SECTION_ALIASES = {
         "concluding remarks",
         "summary and conclusions",
         # Closing sections that look ahead are the end of the argument, which
-        # is how section gold types them; endnotes are publisher's notes,
-        # supplementary-material pointers and author biographies.
+        # is how section gold types them; endnotes are publisher's notes and
+        # supplementary-material pointers.
         "future work",
         "outlook",
         "conclusions and future work",
@@ -163,14 +164,9 @@ CANONICAL_SECTION_ALIASES = {
         "acknowledgements",
         "transparency",
         "action editor",
-        # Author-metadata blocks — currently surface as standalone headings
-        # because PP-DocLayoutV3 emits them as `paragraph_title` regions.
-        # Acknowledgment is the closest existing bucket; ideally these would
-        # be parsed into PaperAuthor records and not become sections at all.
-        "corresponding author",
-        "corresponding authors",
-        "orcid id",
-        "orcid ids",
+        # Author-metadata headings ("Corresponding author", "ORCID iDs") are
+        # not listed: they name no section type, see
+        # ``is_author_metadata_heading``.
     ],
     CanonicalSection.AUTHOR_CONTRIBUTIONS: [
         "author contributions",
@@ -211,10 +207,20 @@ CANONICAL_SECTION_ALIASES = {
         "keywords",
         "key words",
     ],
+    # The three back-matter types that are neither a statement nor the reference
+    # list, one definition each:
+    # * ENDNOTE: end matter around the article: where the supplementary material
+    #   is (under any wording), publisher's notes, "Additional information".
+    # * APPENDIX: an appendix, content printed after the article's last part.
+    # * FOOTNOTE: notes, wherever printed ("Notes", "Endnotes", "Author note"),
+    #   and author-metadata blocks (see ``is_author_metadata_heading``).
     CanonicalSection.ENDNOTE: [
+        "supplementary material",
         "supplementary materials",
         "supplementary information",
+        "supplemental material",
         "supplemental data",
+        "supporting information",
         "extended data",
         "online supplement",
         "annexes",
@@ -223,9 +229,6 @@ CANONICAL_SECTION_ALIASES = {
     CanonicalSection.APPENDIX: [
         "appendix",
         "appendices",
-        "supplementary material",
-        "supplemental material",
-        "supporting information",
     ],
     CanonicalSection.OPEN_DATA: [
         "data availability",
@@ -300,6 +303,7 @@ _NON_ENGLISH_SECTION_ALIASES = {
         "mots-clés",
         "mots clés",
         "schlagwörter",
+        "schlüsselwörter",
         "słowa kluczowe",
         "キーワード",
         "关键词",
@@ -329,63 +333,218 @@ _NON_ENGLISH_SECTION_ALIASES = {
         "参考文献",
         "참고문헌",
     ],
+    # The printed part names of research papers, and the longer forms some
+    # journals print ("Материалы и методы исследования"): a part name inside
+    # a longer heading is trusted only when it covers most of it, so a
+    # common longer form is listed whole. Results merged with discussion is
+    # results; conclusions are discussion.
     CanonicalSection.INTRODUCTION: [
         "pendahuluan",
+        "latar belakang",
+        "tinjauan pustaka",
         "introducción",
+        "antecedentes",
         "introdução",
+        "referencial teórico",
+        "fundamentação teórica",
+        "revisão da literatura",
+        "revisão de literatura",
         "einleitung",
+        "einführung",
+        "hintergrund",
+        "hintergrund und fragestellung",
         "giriş",
         "введение",
         "вступ",
         "wstęp",
+        "wprowadzenie",
+        "úvod",
         "inleiding",
         "introduzione",
         "はじめに",
+        "緒言",
         "引言",
+        "前言",
+        "서론",
+        "مقدمة",
+        "المقدمة",
     ],
     CanonicalSection.METHODS: [
+        "metode",
         "metode penelitian",
+        "metodologi",
+        "metodologi penelitian",
+        "bahan dan metode",
         "metodología",
+        "método",
+        "métodos",
+        "materiales y métodos",
+        "material y métodos",
+        "material y método",
+        "participantes",
+        "instrumentos",
+        "análisis estadístico",
         "metodologia",
+        "material e métodos",
+        "material e método",
+        "materiais e métodos",
+        "procedimentos metodológicos",
+        "procedimentos",
+        "coleta de dados",
+        "análise estatística",
+        "tipo de estudo",
+        "desenho do estudo",
         "méthodologie",
+        "méthode",
+        "méthodes",
+        "matériel et méthodes",
+        "matériels et méthodes",
+        "matériel et méthode",
         "methodik",
+        "methode",
+        "methoden",
+        "material und methoden",
+        "material und methode",
+        "materiaal en methoden",
         "materiali e metodi",
         "metodi",
+        "metodo",
         "yöntem",
+        "yöntemler",
+        "gereç ve yöntem",
+        "gereç ve yöntemler",
+        "materyal ve yöntem",
+        "materyal ve metot",
+        "metody",
+        "metodyka",
+        "materiał i metody",
+        "materiały i metody",
+        "materiál a metody",
         "методы",
         "методика",
+        "методология",
+        "методы исследования",
+        "материалы и методы",
+        "материал и методы",
+        "материалы и методы исследования",
+        "методи",
+        "методи дослідження",
+        "матеріали та методи",
+        "матеріали і методи",
         "方法",
+        "材料与方法",
+        "资料与方法",
+        "研究方法",
+        "対象と方法",
+        "材料と方法",
+        "방법",
+        "연구 방법",
+        "연구방법",
+        "대상 및 방법",
+        "المنهجية",
+        "منهجية البحث",
     ],
     CanonicalSection.RESULTS: [
+        "hasil",
         "hasil dan pembahasan",
         "hasil penelitian",
+        "hasil penelitian dan pembahasan",
         "resultados",
+        "resultados y discusión",
+        "resultados e discussão",
+        "resultados e discussões",
         "résultats",
+        "résultats et discussion",
         "ergebnisse",
+        "ergebnisse und diskussion",
         "resultaten",
         "risultati",
+        "risultati e discussione",
         "bulgular",
+        "bulgular ve tartışma",
+        "wyniki",
+        "wyniki badań",
+        "wyniki i dyskusja",
+        "výsledky",
+        "výsledky a diskuse",
         "результаты",
+        "результаты исследования",
+        "результаты и обсуждение",
+        "результаты и их обсуждение",
+        "результаты исследования и их обсуждение",
         "результати",
+        "результати дослідження",
+        "результати та обговорення",
+        "результати і обговорення",
         "结果",
+        "结果与讨论",
+        "结果与分析",
+        "結果",
+        "結果と考察",
+        "결과",
+        "연구 결과",
+        "연구결과",
+        "결과 및 고찰",
+        "النتائج",
+        "النتائج والمناقشة",
     ],
     CanonicalSection.DISCUSSION: [
         "pembahasan",
+        "kesimpulan",
+        "kesimpulan dan saran",
+        "simpulan",
         "discusión",
+        "conclusiones",
+        "conclusión",
+        "consideraciones finales",
+        "limitaciones",
         "discussão",
+        "conclusões",
+        "conclusão",
+        "considerações finais",
+        "limitações",
+        "limitações do estudo",
         "diskussion",
+        "schlussfolgerung",
+        "schlussfolgerungen",
+        "fazit",
+        "fazit für die praxis",
+        "limitationen",
+        "ausblick",
         "discussie",
+        "conclusie",
+        "conclusies",
         "discussione",
         "discussione e conclusioni",
         "conclusioni",
-        "conclusiones",
-        "conclusões",
-        "kesimpulan",
-        "kesimpulan dan saran",
+        "conclusione",
         "tartışma",
+        "sonuç",
+        "tartışma ve sonuç",
+        "dyskusja",
+        "wnioski",
+        "diskuse",
+        "závěr",
+        "závěry",
         "обсуждение",
+        "обсуждение результатов",
+        "заключение",
+        "выводы",
+        "обговорення",
+        "обговорення результатів",
+        "висновки",
         "討論",
         "讨论",
+        "结论",
+        "考察",
+        "結論",
+        "おわりに",
+        "고찰",
+        "결론",
+        "논의",
+        "المناقشة",
+        "الخاتمة",
+        "الاستنتاجات",
     ],
 }
 
@@ -478,6 +637,31 @@ _SECTION_FURNITURE_RE = re.compile(
     r"manuscript (?:number|no|id)|authors?|corresponding authors?|disclaimer)\s*(?::.*)?$"
 )
 
+# Author-metadata labels printed as headings: where to write to an author, who
+# the authors are, their affiliations, biographies and ORCID iDs
+# ("Correspondence to:", "*Corresponding author", "Author details", "About the
+# authors", "Affiliations", "ORCID iDs"). They name no section type either. A
+# classifier that has to answer picks acknowledgments, and the address, the
+# biography or the affiliation list then counts as acknowledgment text. The
+# front-matter reader finds these blocks by position and by their heading, not
+# by a section type. "Author note" is left to the classifier: in APA
+# manuscripts it holds the acknowledgments and the funding statement.
+_AUTHOR_METADATA_HEADING_RE = re.compile(
+    r"^[\W_]*(?:"
+    r"(?:address(?:es)? for |authors? for |for )?correspondence(?: to| address(?:es)?)?"
+    r"|corresponding authors?(?:['’]s?)?(?: (?:address|e-?mail|information|details))?"
+    r"|authors?['’]?s?['’]? (?:details|information|affiliations?|biograph(?:y|ies))"
+    r"|authors? and affiliations?|affiliations?"
+    r"|about the authors?(?: ?\(s\))?|information about the authors?(?: ?\(s\))?"
+    r"|notes on (?:the )?contributors?|biographical notes?"
+    r"|orcid(?: ids?)?(?: of the authors?)?"
+    r"|(?:информация|сведения) об автор(?:е|ах)|об автор(?:е|ах)"
+    r"|(?:endere[cç]o para |direcci[oó]n (?:de|para) |autora? (?:de|para) )?correspond[eê]ncia"
+    r"|korrespondenzadresse|korrespondierende[rn]? autor(?:in)?"
+    r"|adresse de correspondance|correspondance|auteure? correspondante?"
+    r")\s*(?:[:/].*)?$"
+)
+
 
 def _heading_key(text: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
@@ -488,9 +672,22 @@ def is_section_container_heading(text: str) -> bool:
     return _heading_key(text).strip(" :.?!") in SECTION_CONTAINER_HEADINGS
 
 
+def is_author_metadata_heading(text: str) -> bool:
+    """Whether a heading labels author metadata (correspondence, details, affiliations, ORCID)."""
+    return _AUTHOR_METADATA_HEADING_RE.match(_heading_key(text).strip(" .")) is not None
+
+
 def is_section_furniture_heading(text: str) -> bool:
-    """Whether a heading is a manuscript or preprint cover-sheet label."""
-    return _SECTION_FURNITURE_RE.match(_heading_key(text).strip(" .")) is not None
+    """Whether a heading is a cover-sheet label or an author-metadata label.
+
+    Neither opens body text. The classifier answers UNKNOWN for a cover-sheet
+    label and FOOTNOTE for an author-metadata label.
+    """
+    key = _heading_key(text).strip(" .")
+    return (
+        _SECTION_FURNITURE_RE.match(key) is not None
+        or _AUTHOR_METADATA_HEADING_RE.match(key) is not None
+    )
 
 
 @dataclass
@@ -556,8 +753,9 @@ class PaperSection:
     # Provenance of the classification decision — which tier produced
     # ``section_type``/``classification_score``: "exact_alias", "substring_alias",
     # "alias_prior", "model", "llm", "parent_context", "title", "implicit",
-    # "positional", "appendix_repair", or "imrad_dedup" (type reset because a
-    # higher-trust duplicate kept it). None when unclassified. Exported, with
+    # "positional", "appendix_repair", "imrad_dedup" (type reset because a
+    # higher-trust duplicate kept it), or "statement_tagger" (the opt-in
+    # statement tagger). None when unclassified. Exported, with
     # the score, as ``extraction.diagnostics.section_classification``.
     classification_source: str | None = None
     # Optional signal from the trained section classifier — True/False when the
@@ -927,6 +1125,12 @@ class PaperContents:
     # PostParse (``DocumentLayer.columns_freed``). Keyword-only so positional
     # callers and the receipt staying last are unaffected; never exported.
     document: "DocumentLayer | None" = field(default=None, compare=False, repr=False, kw_only=True)
+    # The paper's own citation line on its first page and its parse
+    # (``bibr.extract.self_citation``), read in post-parse; the identity stage
+    # compares it with the extraction and records what it filled in the
+    # receipt, exported as ``extraction.diagnostics.self_citation``.
+    printed_citation: "PrintedCitation | None" = field(default=None, kw_only=True)
+    printed_citation_receipt: dict | None = field(default=None, kw_only=True)
     caption_assignment_receipt: CaptionAssignmentReceipt | None = None
 
     def invalidate_text_caches(self) -> None:

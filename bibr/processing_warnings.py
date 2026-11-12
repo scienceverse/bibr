@@ -66,7 +66,9 @@ class WarningCode(StrEnum):
     FRONT_TAGGER_UNAVAILABLE = "FRONT_TAGGER_UNAVAILABLE"
     FRONT_TAGGER_FLAGGED = "FRONT_TAGGER_FLAGGED"
     FRONT_MATTER_NOT_READ = "FRONT_MATTER_NOT_READ"
+    SELF_CITATION_FILLED = "SELF_CITATION_FILLED"
     STATEMENT_LEXICAL_FALLBACK = "STATEMENT_LEXICAL_FALLBACK"
+    STATEMENT_TAGGER = "STATEMENT_TAGGER"
     RESEARCH_INTEGRITY_LLM_FAILED = "RESEARCH_INTEGRITY_LLM_FAILED"
     EQUATION_LLM_FALLBACK_TIMEOUT = "EQUATION_LLM_FALLBACK_TIMEOUT"
     EQUATION_LLM_FALLBACK_FAILED = "EQUATION_LLM_FALLBACK_FAILED"
@@ -84,6 +86,7 @@ class WarningCode(StrEnum):
     REF_SEG_CRF_ERROR = "REF_SEG_CRF_ERROR"
     REF_SEG_MARKER_SPLIT_RECOVERY = "REF_SEG_MARKER_SPLIT_RECOVERY"
     REF_SEG_FAILED = "REF_SEG_FAILED"
+    REF_SEG_NOT_SPLIT = "REF_SEG_NOT_SPLIT"
     REF_SEG_MERGE_SPLIT = "REF_SEG_MERGE_SPLIT"
     # Reference parsing
     REF_PARSE_NER_FALLBACK = "REF_PARSE_NER_FALLBACK"
@@ -112,6 +115,8 @@ class WarningCode(StrEnum):
     DOCX_FIGURES_DROPPED = "DOCX_FIGURES_DROPPED"
     DOCX_FIGURE_IMAGES_OMITTED = "DOCX_FIGURE_IMAGES_OMITTED"
     TABLE_CONTENTS_OMITTED = "TABLE_CONTENTS_OMITTED"
+    # Model overrides
+    MODEL_OVERRIDE_INFERENCE_FAILED = "MODEL_OVERRIDE_INFERENCE_FAILED"
 
 
 DESCRIPTIONS: dict[WarningCode, str] = {
@@ -204,8 +209,15 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.FRONT_MATTER_NOT_READ: "A fast run has no page layout for the front-matter "
     "tagger to read (a DOCX, for one): the title and abstract come from the document's headings "
     "and sections where it has them, and the authors were not read.",
+    WarningCode.SELF_CITATION_FILLED: "The extraction found no title or no authors, and they "
+    "were read from the citation the paper prints on its first page ('To cite this article: "
+    "...', SELF_CITATION_METADATA); the message names the fields and the text rows.",
     WarningCode.STATEMENT_LEXICAL_FALLBACK: "A research-integrity statement was filled by "
     "lexical anchor matching.",
+    WarningCode.STATEMENT_TAGGER: "A funding, competing interests, ethics or data "
+    "availability statement, or an acknowledgments or author contributions section the "
+    "paper had none of, was taken from the opt-in statement tagger "
+    "(ML_STATEMENT_TAGGER_MODEL_ID); the message names it.",
     WarningCode.RESEARCH_INTEGRITY_LLM_FAILED: "The research-integrity LLM call failed; "
     "structured funding, author roles and parsed affiliation parts are missing.",
     WarningCode.EQUATION_LLM_FALLBACK_TIMEOUT: "The equation LLM fallback timed out; only "
@@ -236,6 +248,9 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.REF_SEG_MARKER_SPLIT_RECOVERY: "Every segmenter failed; the references were "
     "split on their printed markers.",
     WarningCode.REF_SEG_FAILED: "A non-empty reference section produced no references.",
+    WarningCode.REF_SEG_NOT_SPLIT: "The text reference segmenter found no reference start in "
+    "a reference list found by its heading, so the list could not be split into entries; it is "
+    "exported as one block (the merged-reference splitter may still cut it).",
     WarningCode.REF_SEG_MERGE_SPLIT: "Reference strings holding several references were split.",
     WarningCode.REF_PARSE_NER_FALLBACK: "LLM reference parsing failed or skipped entries; the "
     "local NER parser parsed them.",
@@ -287,6 +302,11 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     "cell's text once per cell it covers) or its cells passed the table limits; it is kept "
     "without contents when its caption labels it (JATS: when it has a label or caption) and "
     "dropped otherwise.",
+    WarningCode.MODEL_OVERRIDE_INFERENCE_FAILED: "A model set away from its shipped default "
+    "(a model override) loaded but raised on this paper; the paper took that tier's error "
+    "path, which is not always what a run without the override would do, so this export does "
+    "not show the candidate's answer. The run stops after the override raised on several "
+    "papers in a row on which it ran.",
 }
 
 
@@ -323,6 +343,7 @@ NOT_FINAL_CODES: frozenset[WarningCode] = frozenset(
         WarningCode.ROR_MATCHING_FAILED,
         WarningCode.ENRICHER_FAILED,
         WarningCode.ENRICHMENT_INCOMPLETE,
+        WarningCode.MODEL_OVERRIDE_INFERENCE_FAILED,
     }
 )
 

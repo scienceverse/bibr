@@ -24,6 +24,7 @@ from bibr.local.cli.run_config import (
     _apply_runtime_settings,
     _preflight_front_tagger,
     _preflight_local_backend,
+    _preflight_model_overrides,
     _preflight_ocr_runtime,
     _preflight_opencv,
     apply_text_layer_fallback,
@@ -546,6 +547,15 @@ async def _run_process(args) -> None:
         tagger_reason = _preflight_front_tagger(config)
         if tagger_reason is not None:
             ui.error(console, escape(tagger_reason))
+            sys.exit(1)
+    if not args.dry_run:
+        # Every input kind: a DOCX, XML or HTML paper loads the reference,
+        # classifier and statement models too.
+        override_reason = _preflight_model_overrides(
+            config, warn=lambda m: ui.warn(console, escape(m))
+        )
+        if override_reason is not None:
+            ui.error(console, escape(override_reason))
             sys.exit(1)
 
     # Fail fast on missing LLM credentials, after the inputs resolved so a

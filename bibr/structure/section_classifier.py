@@ -20,10 +20,11 @@ from pydantic import BaseModel, Field, model_validator
 from bibr.clients.nuextract_schema import NuExtractSchemaPolicy
 from bibr.clients.skipped import is_skipped
 from bibr.config import GlobalSettings, snapshot_settings
-from bibr.exceptions import ProcessingError
+from bibr.exceptions import ModelOverrideError, ProcessingError
 from bibr.paper_contents import (
     CANONICAL_SECTION_ALIASES,
     CanonicalSection,
+    is_author_metadata_heading,
     is_exact_front_matter_furniture,
     is_section_container_heading,
     is_section_furniture_heading,
@@ -34,6 +35,7 @@ from bibr.processing_warnings import ProcessingWarning, WarningCode
 # module, so building the composite dedup key never forces torch).
 from bibr.structure.section_classifier_common import _position_bucket
 from bibr.utils.locks import LOCAL_INFERENCE_LOCK
+from bibr.utils.model_overrides import note_inference_failure, note_inference_success
 from bibr.utils.text import normalize_text
 
 if TYPE_CHECKING:
@@ -154,7 +156,15 @@ def _get_trained_model(settings: GlobalSettings | None = None) -> SectionClassif
             _model_cache = load_section_classifier(
                 model_id, revision=revision, device=device, settings=effective
             )
-        except (ImportError, ConfigurationError) as e:
+        except Exception as e:
+            # An overridden classifier that cannot be loaded stops the run, whatever
+            # the reason (bibr.utils.model_overrides); nothing is cached for it.
+            from bibr.utils.model_overrides import override_load_error
+
+            if (strict := override_load_error(effective, _SECTION_SETTING, e)) is not None:
+                raise strict from e
+            if not isinstance(e, (ImportError, ConfigurationError)):
+                raise
             # No usable runtime (core install without a published ONNX bundle,
             # or the torch extra missing). Fall back to the LLM classifier
             # rather than aborting the structure stage.
@@ -162,6 +172,9 @@ def _get_trained_model(settings: GlobalSettings | None = None) -> SectionClassif
             _model_cache = False
             return None
         return _model_cache  # type: ignore[return-value]
+
+
+_SECTION_SETTING = "ML_SECTION_CLASSIFIER_MODEL_ID"
 
 
 async def _get_trained_model_async(
@@ -191,6 +204,10 @@ async def _get_trained_model_async(
 # collapse stays UNKNOWN, and the higher threshold only discards labels.
 _MIN_CONFIDENCE_WITH_ESCALATION = 0.9
 _MIN_CONFIDENCE_WITHOUT_ESCALATION = 0.5
+# A trained type at or above this probability is one the pipeline trusts without
+# asking the LLM. Below it, a type that a lower threshold kept is the model's
+# guess; readers that must not hinge on a guess compare against this.
+TRUSTED_TYPE_CONFIDENCE = _MIN_CONFIDENCE_WITH_ESCALATION
 
 
 def _min_confidence(settings: GlobalSettings) -> float:
@@ -282,13 +299,13 @@ _LLM_SECTION_TYPE_DESCRIPTIONS: tuple[tuple[str, str], ...] = (
     ("intro", "Introduction, background, related work, literature review"),
     ("method", "Methods, materials, experimental setup, procedures, participants"),
     ("results", "Results, findings, evaluation, experiments"),
-    ("discussion", "Discussion, interpretation, limitations"),
-    ("references", "References, bibliography"),
     (
-        "acknowledgment",
-        "General acknowledgments, transparency statements, action editor, "
-        "corresponding-author / ORCID author-metadata blocks",
+        "discussion",
+        "Discussion, interpretation, limitations, conclusions, concluding remarks, outlook, "
+        "future work",
     ),
+    ("references", "References, bibliography"),
+    ("acknowledgment", "General acknowledgments, transparency statements, action editor"),
     ("funding", "Funding, financial support, grants"),
     ("keywords", "Keywords, key words"),
     (
@@ -299,9 +316,17 @@ _LLM_SECTION_TYPE_DESCRIPTIONS: tuple[tuple[str, str], ...] = (
     ("author_contributions", "Author contributions, CRediT authorship contribution statement"),
     ("coi", "Conflict of interest, competing interests, declaration of conflicting interests"),
     ("ethics", "Ethics statement, ethical approval, IRB approval, informed consent"),
-    ("endnote", "Conclusion, future work, extended data"),
-    ("appendix", "Appendix, appendices, supplementary/supporting material"),
-    ("footnote", "Footnotes"),
+    (
+        "endnote",
+        "End matter around the article: a pointer to supplementary or supporting material, "
+        "extended data, publisher's note",
+    ),
+    ("appendix", "Appendix, appendices: content printed after the article's last part"),
+    (
+        "footnote",
+        "Notes, endnotes, author notes, and author-metadata blocks "
+        "(corresponding author, ORCID, author details)",
+    ),
     ("unknown", "Cannot determine the section type"),
 )
 
@@ -741,6 +766,13 @@ async def classify_headers_batch_async(
 
     for i, text in enumerate(header_texts):
         clean_text = normalize_text(text)
+        if is_author_metadata_heading(text):
+            # A block of author metadata ("Correspondence to", "Author details",
+            # "ORCID iDs") is a note about the authors: not body text and not an
+            # acknowledgment. The heading alone decides it, like an alias hit.
+            # Front matter still vetoes it as a title seed by the furniture list.
+            results[i] = (CanonicalSection.FOOTNOTE, 1.0, None, "exact_alias")
+            continue
         if (
             is_exact_front_matter_furniture(clean_text)
             or is_section_furniture_heading(text)
@@ -828,6 +860,8 @@ async def classify_headers_batch_async(
                     )
                 else:
                     trained_results = await _classify_trained_batch(items)
+            except ModelOverrideError:
+                raise  # an overridden classifier that cannot be used stops the run
             except Exception as exc:  # noqa: BLE001 - trained inference is an optional tier
                 logger.warning(
                     "Trained section classifier inference failed (%s); "
@@ -835,7 +869,16 @@ async def classify_headers_batch_async(
                     type(exc).__name__,
                 )
                 _note_section_classifier_degraded(degradation_warnings, llm_tier=llm_tier)
+                # An overridden classifier's error is recorded on the paper too, and
+                # several papers in a row stop the run (bibr.utils.model_overrides).
+                override_warning = note_inference_failure(
+                    effective, "ML_SECTION_CLASSIFIER_MODEL_ID", exc
+                )
+                if override_warning is not None:
+                    _note_once(degradation_warnings, override_warning)
                 trained_results = []
+            else:
+                note_inference_success(effective, "ML_SECTION_CLASSIFIER_MODEL_ID")
             if len(trained_results) != len(unique_keys):
                 logger.warning(
                     "Trained section classifier returned %d predictions for %d headers; "
@@ -988,6 +1031,9 @@ def classify_headers_batch(
     results = []
     for text in header_texts:
         clean_text = normalize_text(text)
+        if is_author_metadata_heading(text):
+            results.append((CanonicalSection.FOOTNOTE, 1.0))
+            continue
         if is_section_furniture_heading(text) or is_section_container_heading(clean_text):
             results.append((CanonicalSection.UNKNOWN, 0.0))
             continue
