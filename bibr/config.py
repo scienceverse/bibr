@@ -2074,10 +2074,10 @@ class MlOptions(_BibrSettings):
         "published multitask classifier (all-MiniLM-L6-v2 encoder; OECD L1/L2 + paper_type).",
     )
     paper_classifier_revision: str = Field(
-        "6046171b3198a255acb1f07f81a586a32f399ac4",
+        "600ef07f7e03a6d20e15da9bb28c6ed5b3eb45d3",
         description="HF Hub revision (commit SHA or branch) for the paper classifier. Pinned to "
-        "the audited commit (plus the additive ONNX bundle) so a hub push cannot change "
-        "output; 'main' tracks the repo head.",
+        "the 0.9.0 paper-type model (torch weights and ONNX bundle) so a hub push cannot "
+        "change output; 'main' tracks the repo head.",
     )
     # paper_type-head softmax probability below which a trained-model
     # prediction is escalated to the LLM fallback (see

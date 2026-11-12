@@ -190,10 +190,13 @@ classifier with a `sentence-transformers/all-MiniLM-L6-v2` encoder. It reads
 the resolved title and abstract and predicts paper type together with OECD
 L1/L2. `ML_PAPER_CLASSIFIER_MODEL_ID` selects the model, and
 `ML_PAPER_CLASSIFIER_REVISION` pins its revision. According to the
-[model card](https://huggingface.co/scienceverse/bibr-paper-classifier/blob/6046171b3198a255acb1f07f81a586a32f399ac4/README.md)
-for the pinned revision, its training supervision is labels from a
-DeepSeek-v4-Flash teacher, which changed 16,220 OECD L1 labels relative to a
-matched OpenAlex baseline.
+[model card](https://huggingface.co/scienceverse/bibr-paper-classifier/blob/600ef07f7e03a6d20e15da9bb28c6ed5b3eb45d3/README.md)
+for the pinned revision (bibr 0.9.0), it starts from the previous model
+(`6046171b`, whose OECD labels came from a DeepSeek-v4-Flash teacher) and
+learns paper types from PubMed Central papers, labelled from their JATS article
+type, MEDLINE publication types and title rules; its OECD heads get no new
+labels and follow the previous model's answers. Its paper types are weaker
+outside PubMed Central.
 
 When the paper-type confidence falls below
 `ML_PAPER_CLASSIFIER_MIN_CONFIDENCE` (default `0.5`), the pipeline can ask the

@@ -790,15 +790,17 @@ These bundles are published, so a core install needs no configuration (the front
 |---|---|---|
 | Layout | `scienceverse/bibr-layout-onnx` | `2bcb16a6` |
 | Section classifier | `scienceverse/bibr-section-classifier` | `cf7c2d85` |
-| Paper classifier | `scienceverse/bibr-paper-classifier` | `6046171b` |
+| Paper classifier | `scienceverse/bibr-paper-classifier` | `600ef07f` |
 | Reference parser | `scienceverse/bibr-parser-v7-mmbert-small` | `1045dc08` |
 | Geometry line tagger | `scienceverse/bibr-ref-line-tagger-v1` | `b0effede` |
 | Text reference segmenter | `scienceverse/bibr-ref-text-segmenter-v1` | `3c36a8c8` |
 | Statement tagger | `scienceverse/bibr-statement-tagger-v1` | `b446f943` |
 | Front-matter tagger | `scienceverse/bibr-front-tagger` | `13a0f5c3` |
 
-The paper-classifier pin is the commit that added `onnx/` to the previously
-audited weights, so its PyTorch weights are unchanged. The reference-parser pin
+The paper-classifier pin is the 0.9.0 model, which replaced the PyTorch weights
+and the ONNX bundle together; set
+`ML_PAPER_CLASSIFIER_REVISION=6046171b3198a255acb1f07f81a586a32f399ac4` to keep
+0.8.0's. The reference-parser pin
 is the v7 parser (mmBERT-small encoder), published as an ONNX bundle alone: it
 runs on ONNX Runtime whatever `ML_RUNTIME` says, as the front-matter tagger
 does, and needs no custom code. Set

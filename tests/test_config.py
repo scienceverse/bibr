@@ -440,7 +440,7 @@ def test_paper_classifier_defaults_to_published_model(monkeypatch):
 
     s = GlobalSettings()
     assert s.ml.paper_classifier_model_id == "scienceverse/bibr-paper-classifier"
-    assert s.ml.paper_classifier_revision == "6046171b3198a255acb1f07f81a586a32f399ac4"
+    assert s.ml.paper_classifier_revision == "600ef07f7e03a6d20e15da9bb28c6ed5b3eb45d3"
     assert s.ml.paper_classifier_min_confidence == 0.5
     assert s.ml.paper_classifier_l2_min_confidence == 0.5
     assert s.ml.paper_classifier_llm_escalation is True

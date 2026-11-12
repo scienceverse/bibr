@@ -14,7 +14,9 @@ and the front matter with local rules where a full run asks the LLM. Four
 models trained for this release become defaults, all ONNX bundles that need no
 `torch`: the v7 reference parser, a geometry line tagger, a text reference
 segmenter in the CRF's place, and a statement tagger. Each of the last three
-turns off with its setting set to null. bibr also reads the paper's printed
+turns off with its setting set to null. The paper classifier is pinned to a new
+model whose paper types are right for 0.768 of hand-labelled papers, against
+0.442. bibr also reads the paper's printed
 citation, runs a candidate model under the setting of the model it would
 replace with checks that stop a run on a broken bundle, and moves the export to
 schema 12.4, which only adds keys. See Changed for the new defaults.
@@ -380,6 +382,17 @@ by an earlier version, carries neither.
     `NER_PARSER_CKPT=scienceverse/bibr-parser-v5-1-ultrabert` with
     `NER_PARSER_REVISION=97b06cc7dd6511bdd53f8855c93a29020231d215` to keep the
     0.8.0 parser.
+  - The paper classifier, `scienceverse/bibr-paper-classifier`, is pinned to a
+    new model in the same repo (commit `600ef07f`), trained from the previous one
+    with paper types from PubMed Central (JATS article types, MEDLINE publication
+    types and title rules) while its OECD heads follow the previous model's
+    answers. On 362 hand-labelled papers it gets the paper type right for 0.768
+    against 0.442, and it now tells meta-analyses, errata and retractions apart
+    (recall about 0.9 or more, from near 0). Outside PubMed Central it is weaker
+    (0.565 on 92 papers, 0.391 before). OECD L1 agrees with the previous model on
+    97% of 10,000 held-out papers. Set
+    `ML_PAPER_CLASSIFIER_REVISION=6046171b3198a255acb1f07f81a586a32f399ac4` to
+    keep the 0.8.0 classifier.
   - The geometry line tagger, `scienceverse/bibr-ref-line-tagger-v1`, is asked
     first in the `geom` segmentation tier.
   - The text reference segmenter, `scienceverse/bibr-ref-text-segmenter-v1`,
