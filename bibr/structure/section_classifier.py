@@ -299,13 +299,13 @@ _LLM_SECTION_TYPE_DESCRIPTIONS: tuple[tuple[str, str], ...] = (
     ("intro", "Introduction, background, related work, literature review"),
     ("method", "Methods, materials, experimental setup, procedures, participants"),
     ("results", "Results, findings, evaluation, experiments"),
-    ("discussion", "Discussion, interpretation, limitations"),
-    ("references", "References, bibliography"),
     (
-        "acknowledgment",
-        "General acknowledgments, transparency statements, action editor, "
-        "corresponding-author / ORCID author-metadata blocks",
+        "discussion",
+        "Discussion, interpretation, limitations, conclusions, concluding remarks, outlook, "
+        "future work",
     ),
+    ("references", "References, bibliography"),
+    ("acknowledgment", "General acknowledgments, transparency statements, action editor"),
     ("funding", "Funding, financial support, grants"),
     ("keywords", "Keywords, key words"),
     (
@@ -316,9 +316,17 @@ _LLM_SECTION_TYPE_DESCRIPTIONS: tuple[tuple[str, str], ...] = (
     ("author_contributions", "Author contributions, CRediT authorship contribution statement"),
     ("coi", "Conflict of interest, competing interests, declaration of conflicting interests"),
     ("ethics", "Ethics statement, ethical approval, IRB approval, informed consent"),
-    ("endnote", "Conclusion, future work, extended data"),
-    ("appendix", "Appendix, appendices, supplementary/supporting material"),
-    ("footnote", "Footnotes"),
+    (
+        "endnote",
+        "End matter around the article: a pointer to supplementary or supporting material, "
+        "extended data, publisher's note",
+    ),
+    ("appendix", "Appendix, appendices: content printed after the article's last part"),
+    (
+        "footnote",
+        "Notes, endnotes, author notes, and author-metadata blocks "
+        "(corresponding author, ORCID, author details)",
+    ),
     ("unknown", "Cannot determine the section type"),
 )
 

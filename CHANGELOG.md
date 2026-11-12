@@ -372,6 +372,13 @@ by an earlier version, carries neither.
   rows, not in the `footnote` list, and the statement tagger still gives an
   acknowledgment or an author-contribution statement printed inside it a
   section of its own. "Author note" is left to the classifier.
+- The section-type list the LLM reads now gives the same definitions as
+  the classifier guide. It had placed conclusions and future work under
+  `endnote`, supplementary material under `appendix` and corresponding-author
+  and ORCID blocks under `acknowledgment`. Conclusions, outlook and future
+  work are `discussion`; a pointer to supplementary material, extended data
+  and a publisher's note are `endnote`; notes and author-metadata blocks are
+  `footnote`. The type table in the architecture guide says the same.
 - In a review or commentary, a methods or results guess on a topical heading
   no longer keeps the body's guessed sections from being typed `discussion`
   (`PIPELINE_NON_IMRAD_BODY_AS_DISCUSSION`). Before, one such guess anywhere

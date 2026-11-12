@@ -370,18 +370,18 @@ IMRaD+ section classification enum:
 | `intro` | Introduction / Background |
 | `method` | Methods / Materials |
 | `results` | Results / Findings |
-| `discussion` | Discussion / Conclusion |
+| `discussion` | Discussion / Conclusion / Outlook |
 | `references` | References / Bibliography |
 | `acknowledgment` | Acknowledgments |
 | `funding` | Funding information |
 | `keywords` | Keywords |
-| `endnote` | Supplementary material, future work, outlook |
-| `appendix` | Appendix / Supporting Information |
+| `endnote` | End matter around the article: supplementary-material pointer, extended data, publisher's note |
+| `appendix` | Appendix |
 | `data_availability` | Data availability / code availability |
 | `author_contributions` | Author Contributions / CRediT statement |
 | `coi` | Conflict of Interest / Competing Interests |
 | `ethics` | Ethics statement / IRB approval / Informed consent |
-| `footnote` | A printed Footnotes or Notes heading |
+| `footnote` | A printed Notes, Endnotes or Author note heading, or a block of author metadata |
 | `table` | A printed Tables heading (captions are not sections) |
 | `figure` | A printed Figures heading (captions are not sections) |
 | `unknown` | Unclassified (fallback) |
