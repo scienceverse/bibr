@@ -74,10 +74,10 @@ leave out the sections whose row has it.
 | Endnote | `endnote` | Supplementary Materials, Future Work, Outlook |
 | Appendix | `appendix` | Appendix, Supplementary Material, Supporting Information |
 | Data Availability | `data_availability` | Data Availability, Code Availability, Reproducibility Statement |
-| Footnote | `footnote` | Footnotes, Notes |
+| Footnote | `footnote` | Footnotes, Notes; also author-metadata labels such as Correspondence to, Corresponding author, Author details, Affiliations, About the authors, ORCID iDs |
 | Table | `table` | Tables (a heading; captions are not sections) |
 | Figure | `figure` | Figures (a heading; captions are not sections) |
-| Unknown | `unknown` | (fallback for unrecognized headers; also headings that name no section type: cover-sheet labels, grouping headings such as Declarations, and author-metadata labels such as Correspondence to, Author details, Affiliations, About the authors, ORCID iDs) |
+| Unknown | `unknown` | (fallback for unrecognized headers; also headings that name no section type: cover-sheet labels and grouping headings such as Declarations) |
 
 ### IMRaD enforcement
 

@@ -141,7 +141,6 @@ async def test_cover_sheet_labels_and_containers_never_reach_the_model_or_llm():
         "Running title: Sleep and memory",
         "Manuscript Number: ABC-D-26-00123",
         "Authors",
-        "Corresponding author",
         "Disclaimer: The manuscript is the authors' accepted version",
         "Declarations",
         "Statements and Declarations",
@@ -171,6 +170,7 @@ async def test_cover_label_guard_keeps_author_sections():
 _AUTHOR_METADATA_HEADINGS = (
     "Correspondence to:",
     "Correspondence to: Dr Jane Doe; jane@example.org",
+    "Corresponding author",
     "*Corresponding author",
     "* Corresponding author: jane@example.org",
     "† Corresponding author.",
@@ -228,9 +228,9 @@ _NOT_AUTHOR_METADATA_HEADINGS = (
 )
 
 
-async def test_author_metadata_headings_name_no_section_type():
+async def test_author_metadata_headings_are_notes_about_the_authors():
     """Where to write to an author, author details, affiliations, biographies
-    and ORCID iDs are not acknowledgments. The alias table used to file
+    and ORCID iDs are footnotes, not acknowledgments. The alias table used to file
     "Corresponding author" and "ORCID iDs" there, and a model that has to
     answer does the same for the other wordings; the address or the biography
     then counted as acknowledgment text."""
@@ -243,9 +243,11 @@ async def test_author_metadata_headings_name_no_section_type():
 
     out = await mod.classify_headers_batch_async(headings, llm_client=None)
 
-    assert [section for section, *_ in out] == [CanonicalSection.UNKNOWN] * len(headings)
-    assert all(source is None for *_, source in out)
-    assert mod.classify_headers_batch(headings) == [(CanonicalSection.UNKNOWN, 0.0)] * len(headings)
+    assert [section for section, *_ in out] == [CanonicalSection.FOOTNOTE] * len(headings)
+    assert all(source == "exact_alias" for *_, source in out)
+    assert mod.classify_headers_batch(headings) == [(CanonicalSection.FOOTNOTE, 1.0)] * len(
+        headings
+    )
 
 
 def test_headings_that_only_resemble_author_metadata_are_left_to_the_classifier():

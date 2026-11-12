@@ -762,6 +762,7 @@ async def classify_headers_batch_async(
             # A block of author metadata ("Correspondence to", "Author details",
             # "ORCID iDs") is a note about the authors: not body text and not an
             # acknowledgment. The heading alone decides it, like an alias hit.
+            # Front matter still vetoes it as a title seed by the furniture list.
             results[i] = (CanonicalSection.FOOTNOTE, 1.0, None, "exact_alias")
             continue
         if (

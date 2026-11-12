@@ -299,12 +299,15 @@ by an earlier version, carries neither.
   affiliations, biographies or ORCID iDs ("Correspondence to:",
   "*Corresponding author", "Author details", "About the authors",
   "Affiliations", "ORCID iDs", and their common Russian, Spanish,
-  Portuguese, German and French forms) names no section type and is typed
-  `unknown`, like a cover-sheet label. The alias table had filed
-  "Corresponding author" and "ORCID iDs" under acknowledgments, so an
-  address or an ORCID list counted as acknowledgment text. The front-matter
-  reader finds these blocks by position and by heading and is unchanged.
-  "Author note" is left to the classifier.
+  Portuguese, German and French forms) opens a note about the authors and
+  is typed `footnote`, with `classification_source` `exact_alias`. The alias
+  table had filed "Corresponding author" and "ORCID iDs" under
+  acknowledgments, so an address or an ORCID list counted as acknowledgment
+  text. The front-matter reader finds these blocks by position and by
+  heading and is unchanged. Such a section is exported as a section with its
+  rows, not in the `footnote` list, and the statement tagger still gives an
+  acknowledgment or an author-contribution statement printed inside it a
+  section of its own. "Author note" is left to the classifier.
 - A fast `bibr serve` with no OCR route chosen no longer waits for an OCR
   server at the default `http://localhost:8080`: it reads the text layer (see
   the text-layer route above) and refuses scans. If you run an OCR server on

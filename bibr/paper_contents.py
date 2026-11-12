@@ -516,7 +516,8 @@ def is_author_metadata_heading(text: str) -> bool:
 def is_section_furniture_heading(text: str) -> bool:
     """Whether a heading is a cover-sheet label or an author-metadata label.
 
-    Neither names a section type; the classifier answers UNKNOWN for both.
+    Neither opens body text. The classifier answers UNKNOWN for a cover-sheet
+    label and FOOTNOTE for an author-metadata label.
     """
     key = _heading_key(text).strip(" .")
     return (

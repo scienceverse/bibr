@@ -28,7 +28,11 @@ adds what they missed:
   a section whose rows all carry the type is retyped, unless its printed
   heading reads as a body section (it then stays as it is); otherwise the rows
   move to a new section right after the one they sat in, with a synthetic
-  heading.
+  heading. A footnote's rows stay where they are. A printed author-metadata
+  heading ("Author details", "Author affiliations"), typed footnote, is not a
+  footnote in that sense: publishers print statements under it without a
+  heading of their own, so its tagged rows move out like any section's, and
+  the section itself is never retyped.
   Either way ``classification_source`` is ``statement_tagger``.
 * Each statement the tagger supplied adds a ``STATEMENT_TAGGER`` warning naming
   the field or section type.
@@ -52,7 +56,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from bibr.paper_contents import CanonicalSection, PaperSection
+from bibr.paper_contents import CanonicalSection, PaperSection, is_author_metadata_heading
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 
 if TYPE_CHECKING:
@@ -168,7 +172,10 @@ def content_blocks(contents: PaperContents) -> list[ContentBlock]:
                 and header
                 and section.level > 0
                 and not section.header_is_synthetic
-                and section.section_type not in _LABEL_HEADING_TYPES
+                and (
+                    section.section_type not in _LABEL_HEADING_TYPES
+                    or _is_printed_author_metadata(section)
+                )
                 and section.section_type != CanonicalSection.TITLE
             ):
                 flush()
@@ -377,11 +384,17 @@ def apply_section_statements(
         changed = False
         for section_id, members in by_section.items():
             source = sections.get(section_id)
-            if source is None or source.section_type in _KEPT_SECTION_TYPES:
+            if source is None:
+                continue
+            author_metadata = _is_printed_author_metadata(source)
+            if source.section_type in _KEPT_SECTION_TYPES and not author_metadata:
                 continue
             own = [row.text_id for row in rows_of.get(section_id, []) if row.text.strip()]
             if set(own) <= set(members) and source.level > 0:
-                if _printed_heading_type(source, classify_header) in _BODY_HEADING_TYPES:
+                if (
+                    author_metadata
+                    or _printed_heading_type(source, classify_header) in _BODY_HEADING_TYPES
+                ):
                     continue
                 source.section_type = section_type
                 source.classification_source = METHOD
@@ -413,6 +426,21 @@ def apply_section_statements(
     if affected:
         _rebuild_sections_text(contents, affected)
     return done
+
+
+def _is_printed_author_metadata(section: PaperSection) -> bool:
+    """Whether the section opens with a printed author-metadata heading typed footnote.
+
+    Unlike a footnote's own section, it is exported as a section with its rows,
+    and publishers print acknowledgments and contributions inside it.
+    """
+    return (
+        section.section_type == CanonicalSection.FOOTNOTE
+        and section.level > 0
+        and not section.synthetic_kind
+        and not section.header_is_synthetic
+        and is_author_metadata_heading(section.header or "")
+    )
 
 
 def _printed_heading_type(section: PaperSection, classify_header) -> CanonicalSection | None:

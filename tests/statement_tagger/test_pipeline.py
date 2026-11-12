@@ -485,6 +485,50 @@ def test_rows_of_a_footnote_never_become_a_section():
     assert [r.section_id for r in contents.sentences] == [1, 2]
 
 
+def _author_details_paper(rows) -> PaperContents:
+    return _paper(
+        [
+            (1, "Body", 1, CanonicalSection.DISCUSSION, [("Text.", 1)]),
+            (2, "Author details", 1, CanonicalSection.FOOTNOTE, rows),
+        ]
+    )
+
+
+def test_a_printed_author_metadata_heading_is_a_block_though_typed_footnote():
+    contents = _author_details_paper([("1 Dept. of X, City.", 2)])
+    assert [b.text for b in content_blocks(contents)] == [
+        "Body",
+        "Text.",
+        "Author details",
+        "1 Dept. of X, City.",
+    ]
+    # A footnote's own section is still a label, not a printed heading.
+    contents.sections[2].synthetic_kind = "footnote"
+    assert "Author details" not in [b.text for b in content_blocks(contents)]
+
+
+def test_a_statement_under_an_author_metadata_heading_gets_a_section_of_its_own():
+    contents = _author_details_paper(
+        [("1 Dept. of X, City.", 2), ("Each author contributed equally.", 3)]
+    )
+    statements = KeywordTagger().tag([b.text for b in content_blocks(contents)])
+    done = apply_section_statements(contents, statements, content_blocks(contents))
+    assert done == ["author_contributions"]
+    details, added = contents.sections[2], contents.sections[3]
+    assert details.header == "Author details" and details.section_type == CanonicalSection.FOOTNOTE
+    assert added.section_type == CanonicalSection.AUTHOR_CONTRIBUTIONS and added.header_is_synthetic
+    assert [r.section_id for r in contents.sentences] == [1, 2, added.section_id]
+
+
+def test_a_section_under_an_author_metadata_heading_is_never_retyped():
+    contents = _author_details_paper([("Each author contributed equally.", 2)])
+    statements = KeywordTagger().tag([b.text for b in content_blocks(contents)])
+    assert statements
+    assert apply_section_statements(contents, statements, content_blocks(contents)) == []
+    assert contents.sections[2].section_type == CanonicalSection.FOOTNOTE
+    assert [r.section_id for r in contents.sentences] == [1, 2]
+
+
 def test_applying_twice_adds_each_warning_once():
     contents = _discussion_paper()
     resolution = resolve_integrity_statements(contents, mode="shadow")
