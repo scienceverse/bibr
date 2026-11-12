@@ -18,6 +18,18 @@ First, headers are matched against a dictionary of known aliases (`CANONICAL_SEC
 - **Substring match** -- a trusted alias appears as a word-boundary substring of the header (confidence: 0.95), also bypassing both later tiers
 - A generic alias hit that isn't trusted is kept as a low-confidence prior, used only if both later tiers return `unknown`
 
+A substring hit is trusted when the aliases of its type cover at least 60% of
+the normalized heading (lowercase, digits and dots removed). The table also
+holds the printed part names of research papers in other languages, among them
+Russian, Ukrainian, Polish, Czech, German, Dutch, French, Spanish, Portuguese,
+Italian, Indonesian, Turkish, Chinese, Japanese, Korean and Arabic, with the
+longer forms some journals print whole ("Материалы и методы исследования",
+"Resultados e discussão", "Fazit für die Praxis"), since a short part name
+inside them covers too little of the heading to be trusted. Results merged
+with discussion is `results`; conclusions are `discussion`. The same labels
+inside a structured abstract that a keywords line, a numbered heading or an
+introduction closes are typed `abstract`.
+
 ### Tier 2: Trained classifier
 
 For lookup misses, headers route through a trained MiniLM two-head model
@@ -94,6 +106,26 @@ are reset to `unknown` with `classification_source="imrad_dedup"`. A later
 clean alias heading can therefore supersede an earlier weak classification.
 Deduplication is global, including across study scopes. Every other canonical
 type is allowed to repeat, and section order is not forced into IMRaD order.
+
+### Reviews and commentaries
+
+A review or commentary argues rather than reports, and the classifier types
+each heading alone, so it reads many topical headings as introduction,
+methods or results. Once the paper type is known, the guessed introduction,
+methods and results sections after the first introduction of such a paper
+become `discussion` (source `positional`), as the convention for a paper with
+no methods or results part has it. The subsections of the introduction stay
+introduction, and so does a heading that names its own part ("Historical
+background", "Theoretical framework"). The setting
+`PIPELINE_NON_IMRAD_BODY_AS_DISCUSSION` (on by default) switches this off.
+
+The paper type is a guess too, so the rule leaves a paper alone when it prints
+a methods or results part: a heading typed from its own words ("Methods",
+"Participants", "Материалы и методы"), or a guess on a heading that names the
+part ("Data and methods", "Main findings") or is a methods subsection name
+("Data", "Sample", "Study area"). A guess on a topical heading
+("Accountability") does not count. Systematic, scoping and umbrella reviews
+and meta-analyses named in the title or abstract are left alone as well.
 
 ### Layout hints
 

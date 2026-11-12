@@ -14,8 +14,13 @@ Together these prevent silent regressions if either layer is removed.
 
 from __future__ import annotations
 
-from bibr.paper_contents import CanonicalSection
-from bibr.structure.section_classifier import _classify_lookup, _classify_lookup_full
+from bibr.paper_contents import CANONICAL_SECTION_ALIASES, CanonicalSection
+from bibr.structure.section_classifier import (
+    _classify_lookup,
+    _classify_lookup_full,
+    classify_header,
+)
+from bibr.utils.text import normalize_text
 
 
 def test_classify_lookup_is_case_insensitive():
@@ -317,3 +322,66 @@ def test_more_non_english_section_names_resolve_by_alias():
     ):
         section, score = _classify_lookup(header)
         assert (section, score) == (expected, 1.0), header
+
+
+def test_imrad_part_names_in_other_languages_resolve_by_alias():
+    """The printed part names of research papers in the languages the table
+    serves, including the longer forms some journals print. Results merged
+    with discussion is results; conclusions are discussion."""
+    for header, expected in (
+        ("Материалы и методы исследования", CanonicalSection.METHODS),
+        ("Материалы и методы", CanonicalSection.METHODS),
+        ("Результаты исследования и их обсуждение", CanonicalSection.RESULTS),
+        ("Результаты исследования", CanonicalSection.RESULTS),
+        ("Заключение", CanonicalSection.DISCUSSION),
+        ("Висновки", CanonicalSection.DISCUSSION),
+        ("Матеріали та методи", CanonicalSection.METHODS),
+        ("Wprowadzenie", CanonicalSection.INTRODUCTION),
+        ("Materiał i metody", CanonicalSection.METHODS),
+        ("Wyniki", CanonicalSection.RESULTS),
+        ("Wnioski", CanonicalSection.DISCUSSION),
+        ("Einführung", CanonicalSection.INTRODUCTION),
+        ("Material und Methoden", CanonicalSection.METHODS),
+        ("Fazit für die Praxis", CanonicalSection.DISCUSSION),
+        ("Matériel et méthodes", CanonicalSection.METHODS),
+        ("Résultats et discussion", CanonicalSection.RESULTS),
+        ("Materiales y métodos", CanonicalSection.METHODS),
+        ("Resultados y discusión", CanonicalSection.RESULTS),
+        ("Conclusión", CanonicalSection.DISCUSSION),
+        ("Referencial teórico", CanonicalSection.INTRODUCTION),
+        ("Métodos", CanonicalSection.METHODS),
+        ("Resultados e discussão", CanonicalSection.RESULTS),
+        ("Considerações finais", CanonicalSection.DISCUSSION),
+        ("Metodo", CanonicalSection.METHODS),
+        ("Latar belakang", CanonicalSection.INTRODUCTION),
+        ("Metode", CanonicalSection.METHODS),
+        ("Hasil", CanonicalSection.RESULTS),
+        ("Gereç ve yöntem", CanonicalSection.METHODS),
+        ("Sonuç", CanonicalSection.DISCUSSION),
+        ("材料与方法", CanonicalSection.METHODS),
+        ("结论", CanonicalSection.DISCUSSION),
+        ("المقدمة", CanonicalSection.INTRODUCTION),
+        ("النتائج", CanonicalSection.RESULTS),
+    ):
+        section, score = classify_header(header)
+        assert (section, score) == (expected, 1.0), header
+
+
+def test_numbered_and_merged_non_english_part_names_are_trusted():
+    for header, expected in (
+        ("2. Материалы и методы исследования", CanonicalSection.METHODS),
+        ("III. MATERIAL E MÉTODOS", CanonicalSection.METHODS),
+        ("一、材料与方法", CanonicalSection.METHODS),
+        ("Diskussion und Schlussfolgerungen", CanonicalSection.DISCUSSION),
+    ):
+        section, _score, trusted = _classify_lookup_full(normalize_text(header))
+        assert (section, trusted) == (expected, True), header
+
+
+def test_every_alias_is_normalized_and_names_one_type():
+    owners: dict[str, set[CanonicalSection]] = {}
+    for section, aliases in CANONICAL_SECTION_ALIASES.items():
+        for alias in aliases:
+            assert alias == normalize_text(alias), alias
+            owners.setdefault(alias, set()).add(section)
+    assert {alias for alias, types in owners.items() if len(types) > 1} == set()

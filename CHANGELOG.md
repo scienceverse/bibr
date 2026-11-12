@@ -308,6 +308,38 @@ by an earlier version, carries neither.
   rows, not in the `footnote` list, and the statement tagger still gives an
   acknowledgment or an author-contribution statement printed inside it a
   section of its own. "Author note" is left to the classifier.
+- In a review or commentary, a methods or results guess on a topical heading
+  no longer keeps the body's guessed sections from being typed `discussion`
+  (`PIPELINE_NON_IMRAD_BODY_AS_DISCUSSION`). Before, one such guess anywhere
+  in the paper ("Accountability" typed results, "5.1 Sensory fields without
+  objects" typed methods) switched the rule off, and a retrained section
+  classifier, which guesses methods and results more often, switched it off
+  on most essays of a 190-paper development set. The rule still leaves a
+  paper alone when it prints a methods or results part: a heading typed from
+  its own words, a guess on a heading that names the part ("Data and
+  methods", "Результаты исследования") or a methods subsection name ("Data",
+  "Sample", "Study area", "Empirical strategy"). The cost: an empirical paper
+  that the paper-type model calls a review and whose methods and results are
+  printed only under topical headings now has those sections typed
+  `discussion`. A methods or results guess under the introduction of such a
+  paper takes the introduction's type, and a heading that names a framework
+  or the literature ("Theoretical framework", "Revisão da literatura") stays
+  introduction.
+- The section alias table knows the printed introduction, methods, results
+  and discussion or conclusion headings of research papers in Russian,
+  Ukrainian, Polish, Czech, German, Dutch, French, Spanish, Portuguese,
+  Italian, Indonesian, Turkish, Chinese, Japanese, Korean and Arabic, among
+  them the longer forms journals print whole ("Материалы и методы
+  исследования", "Результаты исследования и их обсуждение", "Resultados e
+  discussão", "Fazit für die Praxis"). A part name inside a longer heading is
+  trusted only when it covers most of it, so these were left to the
+  classifier, which could type them wrongly or below its threshold. Results
+  merged with discussion is `results` and conclusions are `discussion`
+  ("Заключение", "Simpulan", "Considerações finais"). "Schlüsselwörter" is a
+  keywords heading. The same labels printed inside a structured abstract
+  ("Métodos", "Material und Methoden", "Conclusão") stay part of the
+  abstract when a keywords line, a numbered heading or an introduction closes
+  it, as English labels did.
 - A fast `bibr serve` with no OCR route chosen no longer waits for an OCR
   server at the default `http://localhost:8080`: it reads the text layer (see
   the text-layer route above) and refuses scans. If you run an OCR server on

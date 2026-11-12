@@ -59,11 +59,29 @@ _STRUCTURED_ABSTRACT_LABEL_RE = re.compile(
     r"|aims?(?: and objectives)?|purpose|methods?|methodology|materials and methods|design"
     r"|study design|setting|participants|patients|population studied|interventions?"
     r"|(?:main )?outcome measures?|measurements|results?|findings|conclusions?"
-    r"|conclusions? and relevance|interpretation|limitations|significance|implications)$",
+    r"|conclusions? and relevance|interpretation|limitations|significance|implications"
+    # The same labels in the languages whose part names the alias table
+    # holds: "Métodos", "Material und Methoden" or "Conclusão" in a
+    # structured abstract is the abstract's, not the body's part.
+    r"|hintergrund(?: und (?:fragestellung|zielsetzung))?|fragestellung|ziel(?:e|setzung)?"
+    r"|objetivos?|contexto|antecedentes|objectifs?|contexte|obiettiv[oi]|цель(?: исследования)?"
+    r"|мета|cel(?: pracy| badania)?|amaç|tujuan|latar belakang|目的|背景"
+    r"|m[ée]todos?|methoden?|methodik|méthodes?|metod[io]|metodolog[íi]a|metody|metode"
+    r"|material(?:es|e)? (?:und|e|y) (?:methoden?|métodos?)|materiais e métodos"
+    r"|matériels? et méthodes?|materiali e metodi|materiał(?:y)? i metody|bahan dan metode"
+    r"|методы|материал(?:ы)? и методы|методи|матеріали (?:та|і) методи"
+    r"|yöntem(?:ler)?|gereç ve yöntem(?:ler)?|方法|材料与方法|资料与方法"
+    r"|resultados|résultats|ergebnisse|risultati|результаты|результати|wyniki|bulgular|hasil|结果"
+    r"|conclus(?:ão|ões|ión|iones|ione|ioni)|schlussfolgerung(?:en)?|fazit|выводы|заключение"
+    r"|висновки|wnioski|sonuç|kesimpulan|simpulan|结论)$",
     re.IGNORECASE,
 )
 _ABSTRACT_LABEL_MAX_SENTENCES = 8
-_ABSTRACT_CLOSE_RE = re.compile(r"^(?:\d+(?:\.\d+)*\.?\s+\S|introduction$)", re.IGNORECASE)
+_ABSTRACT_CLOSE_RE = re.compile(
+    r"^(?:\d+(?:\.\d+)*\.?\s+\S|(?:introduction|introducción|introdução|introduzione|einleitung"
+    r"|einführung|inleiding|введение|вступ|wstęp|wprowadzenie|pendahuluan|giriş|引言)$)",
+    re.IGNORECASE,
+)
 # Paper types whose body is argument, not an IMRaD report. Case studies are
 # left out: they print their methods and results like a research paper.
 _NON_IMRAD_PAPER_TYPES = frozenset({"review", "commentary"})
@@ -107,11 +125,70 @@ def _title_match_share(header: str, paper_title: str | None) -> float:
     return 0.0
 
 
+# Words that name a part, in the languages whose part names the alias table
+# holds: "Treatment Methods", "Методы лечения", "Main findings".
 _PART_WORD_RES = {
-    "intro": re.compile(r"introduc|background|antecedentes", re.IGNORECASE),
-    "method": re.compile(r"method|metodolog|métod", re.IGNORECASE),
-    "results": re.compile(r"result|finding|hallazgo", re.IGNORECASE),
+    "intro": re.compile(
+        r"introdu|background|antecedentes|einleitung|einführung|hintergrund|inleiding|введени"
+        r"|вступ|wstęp|wprowadzeni|úvod|pendahuluan|latar belakang|giriş|引言|前言|はじめに|緒言"
+        r"|서론|مقدمة"
+        # The framework and the state of research an essay builds on.
+        r"|theoretical (?:framework|background|foundations?)|conceptual framework|literature review"
+        r"|review of (?:the )?literature"
+        r"|state of the art|related work|marco teórico|referencial teórico|fundamentação teórica"
+        r"|revis[ãi][oó]n? d[aeo] (?:la )?literatura|tinjauan pustaka|kajian pustaka"
+        r"|обзор литературы|stand der forschung",
+        re.IGNORECASE,
+    ),
+    "method": re.compile(r"m[eé]th?od|метод|yöntem|方法|방법", re.IGNORECASE),
+    "results": re.compile(
+        r"r[eé]sult|risultat|finding|hallazgo|achado|ergebnis|wynik|výsled|результат|bulgu"
+        r"|\bhasil\b|结果|結果|결과|النتائج",
+        re.IGNORECASE,
+    ),
 }
+# Methods subsections that are a heading of their own ("Data", "Subjects",
+# "Study area"): a methods guess on one is a report's methods, whatever the
+# paper type says. Matched against the whole normalised heading.
+_METHODS_PART_HEADING_RE = re.compile(
+    r"data(?:sets?| sets?| and (?:samples?|variables|measures|sources?))?|samples?|sampling"
+    r"|subjects|patients|respondents|procedures?|materials?|measures|measurements?"
+    r"|apparatus|stimuli|instruments?|setting|study (?:area|site|setting|population|sample)"
+    r"|(?:experimental|research|study) (?:design|set-?up|procedures?)"
+    r"|data (?:collection|analysis|sources?)|statistical analys[ie]s"
+    r"|empirical (?:strategy|approach|specification)|(?:identification|estimation) strategy"
+    r"|econometric (?:model|approach|specification)"
+    r"|amostra|muestra|sujetos|procedimientos?|probanden|stichprobe|выборка|участники"
+)
+
+
+def _names_its_part(section) -> bool:
+    """Whether a heading's own words name the part it is typed as: a part
+    word ("Data and methods", "Результаты исследования") or, for methods, a
+    methods subsection name ("Data", "Sample")."""
+    from bibr.paper_contents import CanonicalSection
+    from bibr.utils.text import normalize_text
+
+    header = section.header or ""
+    pattern = _PART_WORD_RES.get(section.section_type.value)
+    if pattern is not None and pattern.search(header):
+        return True
+    return section.section_type == CanonicalSection.METHODS and bool(
+        _METHODS_PART_HEADING_RE.fullmatch(normalize_text(header).strip(" :;-–—"))
+    )
+
+
+def _prints_a_study_part(section) -> bool:
+    """Whether a section is a methods or results part the paper prints: typed
+    from its heading's own words, or guessed on a heading that names the part.
+    A guess on a topical heading ("Accountability") is not one."""
+    from bibr.paper_contents import CanonicalSection
+
+    if section.section_type not in (CanonicalSection.METHODS, CanonicalSection.RESULTS):
+        return False
+    if section.classification_source in _HEADING_TYPE_SOURCES:
+        return True
+    return section.classification_source in _GUESSED_SOURCES and _names_its_part(section)
 
 
 def _references_from_notes(contents) -> bool:
@@ -284,14 +361,20 @@ def _gate_non_imrad_section_types(
       heading that follows a title-typed one), keeps it, also after a
       masthead or cover label; a running head before it, or the title
       repeated later, does not.
-    - With ``review_body`` on, in a review or commentary with no methods or
-      results heading (alias-, model- or LLM-typed), the introduction guesses
+    - With ``review_body`` on, in a review or commentary that prints no
+      methods or results part, the introduction, methods and results guesses
       after the first introduction become discussion: the body of such a
       paper is argument, not a report. The paper-type label is a guess, so a
-      paper with a methods or results heading is left alone, and so is a
-      systematic, scoping or umbrella review or a meta-analysis (named in the
-      title or abstract). The subsections of an introduction, and a heading
-      that names its own part ("Historical Background"), keep their type.
+      paper is left alone when it prints a methods or results part: a heading
+      typed so from its own words ("Methods", "Participants", "Материалы и
+      методы"), or a model, LLM or alias-prior guess on a heading that names
+      the part ("Data and methods", "Main findings") or is a methods
+      subsection name ("Data", "Sample"). A guess on a topical heading
+      ("Accountability") does not count. A systematic, scoping or umbrella
+      review or a meta-analysis (named in the title or abstract) is left
+      alone too. The subsections of an introduction, and a heading that names
+      its own part ("Historical Background"), keep their type; a methods or
+      results guess among those subsections takes the introduction's type.
     """
     from bibr.paper_contents import CanonicalSection
     from bibr.structure.section_tree import numbering_parent_ids
@@ -347,11 +430,7 @@ def _gate_non_imrad_section_types(
     kind = re.sub(r"[\s-]+", "_", (paper_type or "").strip().lower())
     if kind not in _NON_IMRAD_PAPER_TYPES:
         return
-    if any(
-        section.section_type in (CanonicalSection.METHODS, CanonicalSection.RESULTS)
-        and section.classification_source in _HEADING_TYPE_SOURCES | _GUESSED_SOURCES
-        for section in body
-    ):
+    if any(_prints_a_study_part(section) for section in body):
         return
     if _SYSTEMATIC_REVIEW_RE.search(title_abstract or ""):
         return
@@ -384,22 +463,38 @@ def _gate_non_imrad_section_types(
             section.section_id != first_intro
             and section.section_type in guessed
             and section.classification_source not in _HEADING_TYPE_SOURCES
-            and _PART_WORD_RES[section.section_type.value].search(section.header or "")
+            and _names_its_part(section)
         ):
             kept.add(section.section_id)
+    by_id = {section.section_id: section for section in body}
+    study_types = (CanonicalSection.METHODS, CanonicalSection.RESULTS)
     seen_intro = False
     for section in body:
         if section.section_type == CanonicalSection.INTRODUCTION and not seen_intro:
             seen_intro = True
             continue
         if (
-            seen_intro
-            and section.section_type in guessed
-            and section.classification_source not in _HEADING_TYPE_SOURCES
-            and section.section_id not in kept
+            not seen_intro
+            or section.section_type not in guessed
+            or section.classification_source in _HEADING_TYPE_SOURCES
         ):
+            continue
+        if section.section_id not in kept:
             section.section_type = CanonicalSection.DISCUSSION
             section.classification_source = "positional"
+            continue
+        # A kept subsection of an introduction is part of it: a methods or
+        # results guess there ("1.2 The data problem") is the classifier
+        # reading one heading alone. The parent was settled first.
+        parent = by_id.get(section.parent_section_id)
+        if (
+            section.section_type in study_types
+            and parent is not None
+            and parent.section_type == CanonicalSection.INTRODUCTION
+        ):
+            section.section_type = CanonicalSection.INTRODUCTION
+            section.classification_score = min(float(parent.classification_score or 0.7), 0.75)
+            section.classification_source = "parent_context"
 
 
 def _count_distinct_intext_citations(text: str) -> int:
