@@ -13,15 +13,16 @@ import difflib
 import logging
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pandas as pd
 from rapidfuzz.fuzz import partial_ratio
 
+from bibr.clients.skipped import is_skipped
 from bibr.config import snapshot_settings
-from bibr.exceptions import ProcessingError, UpstreamServiceError
+from bibr.exceptions import ModelOverrideError, ProcessingError, UpstreamServiceError
 from bibr.extract.archive_cover import reground_title_off_archive_cover
 from bibr.extract.author_email_harvester import _CORRESPONDING_MARKER_RE, AuthorEmailHarvester
 from bibr.extract.field_decisions import (
@@ -45,8 +46,9 @@ from bibr.models import ORGANIZATION_ROLE, ErrorCode
 from bibr.paper import PaperAuthor, PaperMetadata
 from bibr.paper_contents import FRONT_MATTER_FURNITURE_LABELS, CanonicalSection, PaperContents
 from bibr.processing_warnings import ProcessingWarning, WarningCode
-from bibr.schemas import PaperClassificationLLM
+from bibr.schemas import AuthorsLLM, CoreMetadataLLM, PaperClassificationLLM, TitleKeywordsLLM
 from bibr.utils.metadata import EXACT_GENERIC_ARTICLE_LABELS
+from bibr.utils.model_overrides import note_inference_failure, note_inference_success
 from bibr.validation import IssueSeverity, ValidationIssue
 
 if TYPE_CHECKING:
@@ -156,6 +158,19 @@ _LATE_AFFILIATION_SECTION_TYPES = (
     CanonicalSection.COI,
     CanonicalSection.ETHICS,
     CanonicalSection.OPEN_DATA,
+)
+# The heading an end-of-article affiliation list is printed under: "Author
+# details" in BMC journals, "Affiliations" and "Authors and Affiliations" in
+# Springer's, "Author information" and "Information about the authors"
+# elsewhere. No canonical section type stands for it, so a
+# classifier with no opinion calls the section unknown and the type list above
+# never admits it. The heading does, whatever the type. The same heading also
+# opens biographical notes ("KS is professor at ..."), which the marker-first
+# rule for late lines keeps out.
+_LATE_AFFILIATION_HEADING_RE = re.compile(
+    r"\s*(?:authors?['\u2019]?s?['\u2019]?\s+(?:and\s+)?(?:details|information|affiliations?)"
+    r"|affiliations?|information\s+about\s+the\s+authors?)\s*[:.]?\s*",
+    re.IGNORECASE,
 )
 _AFFILIATION_ORG_RE = re.compile(
     r"\b(?:department|faculty|institute|university|college|school|hospital|"
@@ -2028,6 +2043,11 @@ _AFFILIATION_ABBREVIATION_RE = re.compile(
 _IGNORECASE_I_TRANSLATION = str.maketrans({"İ": "i", "ı": "i"})
 
 
+# The fields a run with the tagger alone leaves empty: against the Crossref record
+# of papers with a DOI, fewer than nine in ten of its readings of them are right.
+_TAGGER_WITHHELD_FIELDS = ("issue", "publisher")
+
+
 def _ignorecase_key(word: str) -> str:
     """The lowercase ASCII key of a word an ignore-case pattern matched."""
     return word.translate(_IGNORECASE_I_TRANSLATION).casefold()
@@ -2394,11 +2414,14 @@ class CoreMetadataExtractor:
                     veto = "fabricated: absent from the extraction context"
                 elif authors and not self._drop_transliterated_authors(kept, full_text, resolution):
                     veto = "romanised: written in a script the byline does not print"
-            author_trail = [_AuthorProposal("llm", authors, transforms, veto)]
+            tagger_parts = getattr(llm_metadata, "_front_tagger_parts", frozenset())
+            author_source = "front_tagger" if "authors" in tagger_parts else "llm"
+            author_trail = [_AuthorProposal(author_source, authors, transforms, veto)]
             usable = authors if veto is None else []
             # Gate recovery on the sanitized author list: a nonempty raw response may contain no
             # usable names. Prefer the selected byline over repeating the same wide context.
-            if not usable:
+            # A fast run has no recovery to try, so it leaves no trace of one.
+            if not usable and not is_skipped(self.llm_client):
                 recovered = await self._recover_empty_authors(
                     context=byline_recovery_context(resolution) or authors_text or full_text,
                 )
@@ -2591,33 +2614,35 @@ class CoreMetadataExtractor:
             )
             metadata._abstract_explicitly_absent = llm_metadata._abstract_explicitly_absent
             ledger = metadata._field_decisions
+            # The title/keywords call's fields, or the tagger's answer in its place.
+            source = "front_tagger" if "title_keywords" in tagger_parts else "llm"
             ledger.propose(
                 FieldCandidate(
                     "title",
-                    "llm" if title == model_title else "title_grounding",
+                    source if title == model_title else "title_grounding",
                     title,
                     evidence_ids=tuple(title_evidence),
                     transforms=tuple(title_transforms),
                 )
             )
-            ledger.propose(FieldCandidate("abstract", "llm", abstract, veto=notice_veto))
-            ledger.propose(FieldCandidate("keywords", "llm", keywords, veto=notice_veto))
+            ledger.propose(FieldCandidate("abstract", source, abstract, veto=notice_veto))
+            ledger.propose(FieldCandidate("keywords", source, keywords, veto=notice_veto))
             for decision in (
                 author_decision,
                 decide_value(
                     "published",
                     FieldCandidate(
                         "published",
-                        "llm",
+                        source,
                         published,
                         transforms=(
                             ("precision_refined",) if published != llm_metadata.published else ()
                         ),
                     ),
                 ),
-                decide_value("journal", FieldCandidate("journal", "llm", llm_metadata.journal)),
+                decide_value("journal", FieldCandidate("journal", source, llm_metadata.journal)),
                 decide_value(
-                    "publisher", FieldCandidate("publisher", "llm", llm_metadata.publisher)
+                    "publisher", FieldCandidate("publisher", source, llm_metadata.publisher)
                 ),
                 decide_classification(classifications, notice=notice),
             ):
@@ -3072,6 +3097,127 @@ class CoreMetadataExtractor:
             )
         )
 
+    def _accepted_front_tagger(self, block_text: str):
+        """The parts of the front-matter tagger's answer that may replace LLM calls.
+
+        The tagger must be on (``ML_FRONT_TAGGER_MODE=primary``) and its title
+        printed in the front-matter record the resolver selected, so the tagger
+        and the LLM context read the same article on a multi-article page.
+        Each part (title/keywords, authors) must then be complete and
+        confident on its own; a part that is not goes to its LLM call, so a
+        paper whose affiliations are printed past page 2 still saves the
+        title/keywords call.
+        """
+        ml = self._settings.ml
+        result = getattr(self.contents, "front_tagger_result", None)
+        if result is None or getattr(ml, "front_tagger_mode", "off") != "primary":
+            return None
+        threshold = float(getattr(ml, "front_tagger_min_confidence", 0.9))
+        title = (result.title_keywords.title if result.title_keywords else None) or ""
+        if not title or _normalize_for_grounding(title) not in _normalize_for_grounding(block_text):
+            reasons = result.title_reasons(threshold) or ["title_outside_selected_record"]
+            logger.info(
+                "Front-matter tagger not used (hash=%s): %s", self.file_hash, ", ".join(reasons)
+            )
+            return None
+        title_reasons = result.title_reasons(threshold)
+        byline_reasons = result.byline_reasons(threshold)
+        if title_reasons and byline_reasons:
+            logger.info(
+                "Front-matter tagger not used (hash=%s): %s",
+                self.file_hash,
+                ", ".join(title_reasons + byline_reasons),
+            )
+            return None
+        logger.info(
+            "Front-matter tagger answer used for %s (hash=%s)%s",
+            " and ".join(
+                part
+                for part, reasons in (
+                    ("title/keywords", title_reasons),
+                    ("authors", byline_reasons),
+                )
+                if not reasons
+            ),
+            self.file_hash,
+            f"; LLM asked for the rest: {', '.join(title_reasons + byline_reasons)}"
+            if title_reasons or byline_reasons
+            else "",
+        )
+        return replace(
+            result,
+            title_keywords=None if title_reasons else result.title_keywords,
+            byline=None if byline_reasons else result.byline,
+        )
+
+    def _tagged_core_metadata(self) -> CoreMetadataLLM:
+        """The front-matter tagger's answer as the core-metadata record.
+
+        What ``ML_FRONT_TAGGER_MODE=only`` (fast mode) puts in place of the LLM
+        calls. The tagger's whole answer is taken whatever its confidence, and
+        the problems it reports become one ``FRONT_TAGGER_FLAGGED`` warning
+        rather than a reason to ask a model, so the author sanitising, the
+        fabrication vetoes and the field decisions run on it as they do on an
+        LLM answer. The "title printed in the selected record" check of
+        ``primary`` mode is not applied: with no LLM to defer to, the tagger's
+        reading is the best there is. Its issue and publisher are left out
+        (``_TAGGER_WITHHELD_FIELDS``).
+
+        With no answer the record is empty, and the warning says why: the tagger
+        did not answer (an input with page regions: its model did not load, or
+        it failed on this paper), or the input has no page layout for it to read.
+        """
+        parts = frozenset({"title_keywords", "authors"})
+        result = getattr(self.contents, "front_tagger_result", None)
+        if result is None:
+            if getattr(self.contents, "region_summaries", None):
+                logger.warning(
+                    "Front-matter tagger gave no answer (hash=%s); the front matter is empty",
+                    self.file_hash,
+                )
+                self._record_metadata_warning(
+                    WarningCode.FRONT_TAGGER_UNAVAILABLE,
+                    "the front-matter tagger did not answer (its model could not be loaded, or "
+                    "it failed on this paper); the title, authors and abstract were not read",
+                )
+            else:
+                logger.info(
+                    "No page layout for the front-matter tagger (hash=%s); front matter not read",
+                    self.file_hash,
+                )
+                self._record_metadata_warning(
+                    WarningCode.FRONT_MATTER_NOT_READ,
+                    "the input has no page layout for the front-matter tagger to read; the "
+                    "title and abstract come from the document's headings and sections where "
+                    "it has them, and the authors were not read",
+                )
+            return CoreMetadataLLM.from_calls(
+                TitleKeywordsLLM(),
+                AuthorsLLM(authors=[]),
+                PaperClassificationLLM(),
+                front_tagger_parts=parts,
+            )
+        flags = result.rejection_reasons(
+            float(getattr(self._settings.ml, "front_tagger_min_confidence", 0.9))
+        )
+        if flags:
+            logger.info(
+                "Front-matter tagger answer taken despite %s (hash=%s)",
+                ", ".join(flags),
+                self.file_hash,
+            )
+            self._record_metadata_warning(
+                WarningCode.FRONT_TAGGER_FLAGGED,
+                "the front-matter tagger's answer was taken despite: " + ", ".join(flags),
+            )
+        title_keywords = result.title_keywords or TitleKeywordsLLM()
+        return CoreMetadataLLM.from_calls(
+            title_keywords.model_copy(update=dict.fromkeys(_TAGGER_WITHHELD_FIELDS)),
+            result.byline or AuthorsLLM(authors=[]),
+            PaperClassificationLLM(),
+            front_tagger_parts=parts,
+        )
+
     async def _call_core_llm(
         self,
         full_text: str,
@@ -3082,7 +3228,10 @@ class CoreMetadataExtractor:
         """Call the core-metadata LLM.
 
         ``UpstreamServiceError`` propagates; non-systemic compatibility failures return ``None``.
+        With the front-matter tagger alone (``ML_FRONT_TAGGER_MODE=only``) no LLM is called.
         """
+        if getattr(self._settings.ml, "front_tagger_mode", "off") == "only":
+            return self._tagged_core_metadata()
         try:
             return await self.llm_client.extract_core_metadata(
                 full_text,
@@ -3090,6 +3239,7 @@ class CoreMetadataExtractor:
                 authors_text=authors_text,
                 classification_text=classification_text,
                 include_classification=not bool(self._settings.ml.paper_classifier_model_id),
+                tagged=self._accepted_front_tagger(full_text),
             )
         except (ProcessingError, UpstreamServiceError):
             raise
@@ -3372,13 +3522,20 @@ class CoreMetadataExtractor:
         # often as author_contributions. This third tier is read only for
         # numbers neither of the first two defines, even ambiguously, so the
         # page-1 and author-contributions behaviour is unchanged.
-        late_lines: list[str] = []
+        # The block's own heading ("Author details") admits it as well: a run
+        # with no LLM types that section unknown.
+        late = pd.Series(False, index=meta_df.index)
         if "section_type" in meta_df.columns:
-            late_rows = meta_df.loc[
-                (meta_df["page_number"] > _front_page(meta_df))
-                & meta_df["section_type"].isin(_LATE_AFFILIATION_SECTION_TYPES)
-            ]
-            late_lines = [str(value) for value in late_rows["text"].values if pd.notna(value)]
+            late |= meta_df["section_type"].isin(_LATE_AFFILIATION_SECTION_TYPES)
+        if "section_name" in meta_df.columns:
+            late |= meta_df["section_name"].map(
+                lambda name: (
+                    isinstance(name, str)
+                    and _LATE_AFFILIATION_HEADING_RE.fullmatch(name) is not None
+                )
+            )
+        late_rows = meta_df.loc[late & (meta_df["page_number"] > _front_page(meta_df))]
+        late_lines = [str(value) for value in late_rows["text"].values if pd.notna(value)]
         late_definitions = _definitions(
             [line for line in late_lines if _LATE_DEFINITION_LINE_RE.match(line)]
         )
@@ -3607,16 +3764,35 @@ class CoreMetadataExtractor:
                     )
                 else:
                     result = await paper_classifier.classify_paper_async(title, abstract)
-            except ProcessingError:
+            except (ProcessingError, ModelOverrideError):
                 raise
             except Exception as exc:
                 logger.warning("Trained paper classifier unavailable; using LLM fallback: %s", exc)
                 result = None
                 degraded_reason = type(exc).__name__
+                # An overridden classifier's error is recorded on the paper too, and
+                # several papers in a row stop the run (bibr.utils.model_overrides).
+                override_warning = note_inference_failure(
+                    self._settings, "ML_PAPER_CLASSIFIER_MODEL_ID", exc, paper=self.file_hash
+                )
+                if override_warning is not None:
+                    self._record_metadata_warning(
+                        WarningCode(override_warning.code), override_warning.message
+                    )
+            else:
+                note_inference_success(
+                    self._settings, "ML_PAPER_CLASSIFIER_MODEL_ID", paper=self.file_hash
+                )
         if result is None:
             fallback_failure: str | None = None
+            skipped = is_skipped(self.llm_client)
+            no_fallback = False
             if self._settings.llm.merged_core_metadata:
                 fallback = llm_metadata
+            elif skipped:
+                # Fast mode has no LLM to fall back on: the class stays empty.
+                fallback = PaperClassificationLLM()
+                no_fallback = True
             else:
                 try:
                     fallback = await self.llm_client.extract_paper_classification(
@@ -3645,6 +3821,8 @@ class CoreMetadataExtractor:
                     + (
                         f"; the LLM fallback failed too ({fallback_failure})"
                         if fallback_failure
+                        else "; fast mode has no LLM fallback"
+                        if skipped
                         else "; the LLM classified the paper"
                     ),
                 )
@@ -3653,6 +3831,13 @@ class CoreMetadataExtractor:
                     WarningCode.PAPER_CLASSIFICATION_FAILED,
                     f"{fallback_failure}: neither the trained classifier nor the LLM fallback "
                     "answered",
+                )
+            elif no_fallback and not empty_input:
+                # The classifier was set up and had a paper to read, so an empty class is an
+                # outage, not an answer: with no LLM to cover it the export is not final.
+                self._record_metadata_warning(
+                    WarningCode.PAPER_CLASSIFICATION_FAILED,
+                    "the trained classifier did not answer and fast mode has no LLM fallback",
                 )
             pt, l1, l2 = self._validate_classification(
                 oecd_domain=fallback.oecd_domain,
@@ -3696,7 +3881,11 @@ class CoreMetadataExtractor:
                 oecd_l2 = ""
 
         threshold = float(self._settings.ml.paper_classifier_min_confidence)
-        if pt_score < threshold and self._settings.ml.paper_classifier_llm_escalation:
+        if (
+            pt_score < threshold
+            and self._settings.ml.paper_classifier_llm_escalation
+            and not is_skipped(self.llm_client)
+        ):
             try:
                 label = await self.llm_client.label_paper_type(
                     title, abstract, file_hash=self.file_hash

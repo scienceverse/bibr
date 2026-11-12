@@ -18,11 +18,13 @@ from typing import TYPE_CHECKING, ClassVar
 from pydantic import BaseModel, Field, model_validator
 
 from bibr.clients.nuextract_schema import NuExtractSchemaPolicy
+from bibr.clients.skipped import is_skipped
 from bibr.config import GlobalSettings, snapshot_settings
-from bibr.exceptions import ProcessingError
+from bibr.exceptions import ModelOverrideError, ProcessingError
 from bibr.paper_contents import (
     CANONICAL_SECTION_ALIASES,
     CanonicalSection,
+    is_author_metadata_heading,
     is_exact_front_matter_furniture,
     is_section_container_heading,
     is_section_furniture_heading,
@@ -33,6 +35,7 @@ from bibr.processing_warnings import ProcessingWarning, WarningCode
 # module, so building the composite dedup key never forces torch).
 from bibr.structure.section_classifier_common import _position_bucket
 from bibr.utils.locks import LOCAL_INFERENCE_LOCK
+from bibr.utils.model_overrides import note_inference_failure, note_inference_success
 from bibr.utils.text import normalize_text
 
 if TYPE_CHECKING:
@@ -49,23 +52,44 @@ SECTION_CLASSIFIER_DEGRADED_WARNING = ProcessingWarning(
     "The trained section classifier is configured but did not answer; the LLM tier classified "
     "the section headers",
 )
+# A fast run has no LLM tier to take over. With no trained classifier set up, the
+# alias table and its prior are the whole classifier, which is a setting, not a
+# failure: the export stays final.
+SECTION_CLASSIFIER_DEGRADED_FAST_WARNING = ProcessingWarning(
+    WarningCode.SECTION_CLASSIFIER_DEGRADED,
+    "No trained section classifier is set up and fast mode has no LLM tier; headers the alias "
+    "table does not settle keep their alias prior or stay unknown",
+)
+# With one set up that did not answer (an outage, a failed load), nothing took its
+# place, so the export is not final and serve does not cache it.
+SECTION_CLASSIFIER_FAILED_WARNING = ProcessingWarning(
+    WarningCode.SECTION_CLASSIFIER_FAILED,
+    "The trained section classifier is configured but did not answer, and fast mode has no LLM "
+    "tier; headers the alias table does not settle keep their alias prior or stay unknown",
+)
+
+
+def _note_once(degradation_warnings: list[ProcessingWarning] | None, warning: ProcessingWarning):
+    if degradation_warnings is not None and warning not in degradation_warnings:
+        degradation_warnings.append(warning)
 
 
 def _note_section_classifier_degraded(
     degradation_warnings: list[ProcessingWarning] | None,
+    *,
+    llm_tier: bool = True,
 ) -> None:
     """Record once per paper that the configured trained tier did not answer.
 
     Whatever the cause — a core install without torch, weights that failed
     to load, a serve-side classifier resource in its degraded state, or an
-    inference error — the LLM tier decides instead, and the export must say
-    so rather than look like a healthy run.
+    inference error — the LLM tier decides instead (*llm_tier*). A fast run has
+    none, so nothing covered the gap and the failure is recorded as one.
     """
-    if (
-        degradation_warnings is not None
-        and SECTION_CLASSIFIER_DEGRADED_WARNING not in degradation_warnings
-    ):
-        degradation_warnings.append(SECTION_CLASSIFIER_DEGRADED_WARNING)
+    _note_once(
+        degradation_warnings,
+        SECTION_CLASSIFIER_DEGRADED_WARNING if llm_tier else SECTION_CLASSIFIER_FAILED_WARNING,
+    )
 
 
 def _normalize_header_echo(header: str | None) -> str:
@@ -132,7 +156,15 @@ def _get_trained_model(settings: GlobalSettings | None = None) -> SectionClassif
             _model_cache = load_section_classifier(
                 model_id, revision=revision, device=device, settings=effective
             )
-        except (ImportError, ConfigurationError) as e:
+        except Exception as e:
+            # An overridden classifier that cannot be loaded stops the run, whatever
+            # the reason (bibr.utils.model_overrides); nothing is cached for it.
+            from bibr.utils.model_overrides import override_load_error
+
+            if (strict := override_load_error(effective, _SECTION_SETTING, e)) is not None:
+                raise strict from e
+            if not isinstance(e, (ImportError, ConfigurationError)):
+                raise
             # No usable runtime (core install without a published ONNX bundle,
             # or the torch extra missing). Fall back to the LLM classifier
             # rather than aborting the structure stage.
@@ -140,6 +172,9 @@ def _get_trained_model(settings: GlobalSettings | None = None) -> SectionClassif
             _model_cache = False
             return None
         return _model_cache  # type: ignore[return-value]
+
+
+_SECTION_SETTING = "ML_SECTION_CLASSIFIER_MODEL_ID"
 
 
 async def _get_trained_model_async(
@@ -163,6 +198,32 @@ async def _get_trained_model_async(
     return await asyncio.to_thread(_locked_load)
 
 
+# Collapse thresholds for an unset ``ml.section_classifier_min_confidence``.
+# With LLM escalation on, every collapse goes to the LLM, which types the
+# headers the model is less sure of better than the model does; with it off a
+# collapse stays UNKNOWN, and the higher threshold only discards labels.
+_MIN_CONFIDENCE_WITH_ESCALATION = 0.9
+_MIN_CONFIDENCE_WITHOUT_ESCALATION = 0.5
+# A trained type at or above this probability is one the pipeline trusts without
+# asking the LLM. Below it, a type that a lower threshold kept is the model's
+# guess; readers that must not hinge on a guess compare against this.
+TRUSTED_TYPE_CONFIDENCE = _MIN_CONFIDENCE_WITH_ESCALATION
+
+
+def _min_confidence(settings: GlobalSettings) -> float:
+    """Type-head probability below which a trained prediction collapses to UNKNOWN.
+
+    An explicit ``ml.section_classifier_min_confidence`` applies as set; unset,
+    the threshold follows ``ml.section_classifier_llm_escalation``.
+    """
+    ml = settings.ml
+    if ml.section_classifier_min_confidence is not None:
+        return float(ml.section_classifier_min_confidence)
+    if ml.section_classifier_llm_escalation:
+        return _MIN_CONFIDENCE_WITH_ESCALATION
+    return _MIN_CONFIDENCE_WITHOUT_ESCALATION
+
+
 async def _classify_trained_batch(
     items: list[HeaderContext],
     *,
@@ -172,10 +233,10 @@ async def _classify_trained_batch(
     """Run the trained MiniLM classifier on document-context items.
 
     Returns ``(canonical, score, is_top_level)`` per item. When the type-head
-    softmax probability falls below ``Settings.ml.section_classifier_min_confidence``
-    the prediction collapses to ``UNKNOWN`` and ``is_top_level`` is set to
-    ``None`` — failures in the tail (rare classes) typically show up as
-    low-confidence spreads, and acting on them adds noise downstream.
+    softmax probability falls below :func:`_min_confidence` the prediction
+    collapses to ``UNKNOWN`` and ``is_top_level`` is set to ``None`` —
+    failures in the tail (rare classes) typically show up as low-confidence
+    spreads, and acting on them adds noise downstream.
     ``classify_batch`` is a synchronous PyTorch forward pass; we offload to a
     thread so the async caller stays non-blocking.
     """
@@ -200,7 +261,7 @@ async def _classify_trained_batch(
                 return model.classify_batch(items)
 
         preds = await asyncio.to_thread(_locked_classify)
-    threshold = float(effective.ml.section_classifier_min_confidence)
+    threshold = _min_confidence(effective)
     out: list[tuple[CanonicalSection, float, bool | None]] = []
     for p in preds:
         score = float(p.score)
@@ -238,13 +299,13 @@ _LLM_SECTION_TYPE_DESCRIPTIONS: tuple[tuple[str, str], ...] = (
     ("intro", "Introduction, background, related work, literature review"),
     ("method", "Methods, materials, experimental setup, procedures, participants"),
     ("results", "Results, findings, evaluation, experiments"),
-    ("discussion", "Discussion, interpretation, limitations"),
-    ("references", "References, bibliography"),
     (
-        "acknowledgment",
-        "General acknowledgments, transparency statements, action editor, "
-        "corresponding-author / ORCID author-metadata blocks",
+        "discussion",
+        "Discussion, interpretation, limitations, conclusions, concluding remarks, outlook, "
+        "future work",
     ),
+    ("references", "References, bibliography"),
+    ("acknowledgment", "General acknowledgments, transparency statements, action editor"),
     ("funding", "Funding, financial support, grants"),
     ("keywords", "Keywords, key words"),
     (
@@ -255,9 +316,17 @@ _LLM_SECTION_TYPE_DESCRIPTIONS: tuple[tuple[str, str], ...] = (
     ("author_contributions", "Author contributions, CRediT authorship contribution statement"),
     ("coi", "Conflict of interest, competing interests, declaration of conflicting interests"),
     ("ethics", "Ethics statement, ethical approval, IRB approval, informed consent"),
-    ("endnote", "Conclusion, future work, extended data"),
-    ("appendix", "Appendix, appendices, supplementary/supporting material"),
-    ("footnote", "Footnotes"),
+    (
+        "endnote",
+        "End matter around the article: a pointer to supplementary or supporting material, "
+        "extended data, publisher's note",
+    ),
+    ("appendix", "Appendix, appendices: content printed after the article's last part"),
+    (
+        "footnote",
+        "Notes, endnotes, author notes, and author-metadata blocks "
+        "(corresponding author, ORCID, author details)",
+    ),
     ("unknown", "Cannot determine the section type"),
 )
 
@@ -678,6 +747,8 @@ async def classify_headers_batch_async(
     """
     effective = settings if settings is not None else snapshot_settings()
     explicit_runtime = classifier_resources is not None or settings is not None
+    # A fast run asks no LLM: the trained model and the alias table decide.
+    llm_tier = not is_skipped(llm_client)
     n = len(header_texts)
     results: list[tuple[CanonicalSection, float, bool | None, str | None] | None] = [None] * n
     unknown_indices: list[int] = []
@@ -695,6 +766,13 @@ async def classify_headers_batch_async(
 
     for i, text in enumerate(header_texts):
         clean_text = normalize_text(text)
+        if is_author_metadata_heading(text):
+            # A block of author metadata ("Correspondence to", "Author details",
+            # "ORCID iDs") is a note about the authors: not body text and not an
+            # acknowledgment. The heading alone decides it, like an alias hit.
+            # Front matter still vetoes it as a title seed by the furniture list.
+            results[i] = (CanonicalSection.FOOTNOTE, 1.0, None, "exact_alias")
+            continue
         if (
             is_exact_front_matter_furniture(clean_text)
             or is_section_furniture_heading(text)
@@ -745,7 +823,7 @@ async def classify_headers_batch_async(
             )
             trained_available = model is not None
             if not trained_available and effective.ml.section_classifier_model_id:
-                _note_section_classifier_degraded(degradation_warnings)
+                _note_section_classifier_degraded(degradation_warnings, llm_tier=llm_tier)
         if trained_available:
             # Composite dedup key: header text alone collapses two headers
             # with the same wording but different document context (e.g. two
@@ -782,14 +860,25 @@ async def classify_headers_batch_async(
                     )
                 else:
                     trained_results = await _classify_trained_batch(items)
+            except ModelOverrideError:
+                raise  # an overridden classifier that cannot be used stops the run
             except Exception as exc:  # noqa: BLE001 - trained inference is an optional tier
                 logger.warning(
                     "Trained section classifier inference failed (%s); "
                     "falling back to alias/LLM classification",
                     type(exc).__name__,
                 )
-                _note_section_classifier_degraded(degradation_warnings)
+                _note_section_classifier_degraded(degradation_warnings, llm_tier=llm_tier)
+                # An overridden classifier's error is recorded on the paper too, and
+                # several papers in a row stop the run (bibr.utils.model_overrides).
+                override_warning = note_inference_failure(
+                    effective, "ML_SECTION_CLASSIFIER_MODEL_ID", exc
+                )
+                if override_warning is not None:
+                    _note_once(degradation_warnings, override_warning)
                 trained_results = []
+            else:
+                note_inference_success(effective, "ML_SECTION_CLASSIFIER_MODEL_ID")
             if len(trained_results) != len(unique_keys):
                 logger.warning(
                     "Trained section classifier returned %d predictions for %d headers; "
@@ -798,7 +887,7 @@ async def classify_headers_batch_async(
                     len(unique_keys),
                 )
                 if effective.ml.section_classifier_model_id:
-                    _note_section_classifier_degraded(degradation_warnings)
+                    _note_section_classifier_degraded(degradation_warnings, llm_tier=llm_tier)
                 trained_results = [(CanonicalSection.UNKNOWN, 0.0, None)] * len(unique_keys)
             unique_map: dict[str, tuple[CanonicalSection, float, bool | None, str | None]] = {
                 key: (
@@ -817,7 +906,7 @@ async def classify_headers_batch_async(
             # escalation to collapses-only needs a val-set measurement
             # showing it does not lose section types, which this change
             # does not attempt.
-            if effective.ml.section_classifier_llm_escalation:
+            if effective.ml.section_classifier_llm_escalation and llm_tier:
                 esc_keys = [k for k in unique_keys if unique_map[k][0] == CanonicalSection.UNKNOWN]
                 n_collapsed = sum(
                     1
@@ -902,7 +991,14 @@ async def classify_headers_batch_async(
                 llm_kwargs["settings"] = effective
             if degradation_warnings is not None:
                 llm_kwargs["degradation_warnings"] = degradation_warnings
-            llm_results_unique = await _classify_llm_batch(unique_texts, **llm_kwargs)
+            if llm_tier:
+                llm_results_unique = await _classify_llm_batch(unique_texts, **llm_kwargs)
+            else:
+                # No trained model and no LLM: the alias prior below is all there is.
+                # A configured model that did not answer was recorded above.
+                if not effective.ml.section_classifier_model_id:
+                    _note_once(degradation_warnings, SECTION_CLASSIFIER_DEGRADED_FAST_WARNING)
+                llm_results_unique = [(CanonicalSection.UNKNOWN, 0.0)] * len(unique_texts)
             unique_map_by_text = {
                 text: (canon, score, None, "llm" if canon != CanonicalSection.UNKNOWN else None)
                 for text, (canon, score) in zip(unique_texts, llm_results_unique, strict=True)
@@ -935,6 +1031,9 @@ def classify_headers_batch(
     results = []
     for text in header_texts:
         clean_text = normalize_text(text)
+        if is_author_metadata_heading(text):
+            results.append((CanonicalSection.FOOTNOTE, 1.0))
+            continue
         if is_section_furniture_heading(text) or is_section_container_heading(clean_text):
             results.append((CanonicalSection.UNKNOWN, 0.0))
             continue

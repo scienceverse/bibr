@@ -975,7 +975,21 @@ class OcrOptions(_BibrSettings):
         '"glm-mlx" (disabled — use glm-rapid-mlx), '
         '"glm-rapid-mlx" (Apple Silicon/Rapid-MLX), "glm-llama" (Windows default; llama.cpp), '
         'or "glm-http" (external GLM server) — plus the cloud vision-LLM providers "gemini", '
-        '"openai", and "anthropic".',
+        '"openai", and "anthropic", and "text-layer", which runs no OCR model and reads '
+        "born-digital PDFs from their embedded text layer (a scanned PDF is refused: it needs "
+        "a real OCR route). A fast run (no LLM call) with none of OCR_BACKEND, OCR_MODEL or "
+        "OCR_PROFILE set, and no --ocr or --ocr-url, uses the text-layer backend, whatever GPU "
+        "the machine has. A fast bibr serve does the same when OCR_BASE_URL is not set either.",
+    )
+    fallback_to_text_layer: Literal["off", "auto"] = Field(
+        "off",
+        description='When no runtime of the automatic OCR backend ("paddle") can start on this '
+        "machine (no NVIDIA GPU for vLLM, no llama.cpp, no Apple silicon for MLX; checked "
+        'without starting one): "off" (default) stops with an error; "auto" warns once and '
+        "reads born-digital PDFs from their embedded text layer instead, as the text-layer "
+        "backend does, and marks each export OCR_BACKEND_UNAVAILABLE. Scanned PDFs then fail, "
+        "since they need OCR. A runtime that is installed but fails to start is still an "
+        "error. Not the OCR_TEXT_LAYER_FALLBACK warning, which is about scanned pages.",
     )
     model: str | None = Field(None, description="OCR model name override.")
     profile: Literal["paddle", "glm"] | None = Field(
@@ -1095,6 +1109,16 @@ class OcrOptions(_BibrSettings):
         "the page is a page-sized image under invisible text (the searchable layer an "
         "OCR engine adds to a scan). The legacy layer is often worse than OCR; disable "
         "to trust it as before.",
+    )
+    text_layer_read_ocr_layer: bool = Field(
+        False,
+        description="With the text-layer backend (no OCR model), read a scanned page from the "
+        "OCR text layer the PDF carries, when it has one: invisible text over an image that "
+        "covers the page, as scanners and publishers add to make a scan searchable. Off by "
+        "default, so such a PDF is refused as a scan (scan_needs_ocr). The layer is somebody "
+        "else's OCR and is often less accurate than an OCR model; pages read this way are "
+        "named in a TEXT_LAYER_OCR_LAYER_READ warning. A scan with no such layer, or one "
+        "cropped to its text block, is still refused.",
     )
     # Scan path (bibr.scan.consensus): a second recognizer re-reads the text
     # regions of scanned pages and the regions where the two disagree most are
@@ -1232,7 +1256,9 @@ class OcrOptions(_BibrSettings):
         ge=0.0,
         le=1.0,
         description="Mark a file failed (code ocr_mostly_failed) when fewer than this fraction of "
-        "OCR-needed regions return content. Set to 0 to disable.",
+        "OCR-needed regions return content. With the text-layer backend, a file whose text "
+        "regions are read below this fraction fails as a scanned PDF (code scan_needs_ocr). "
+        "Set to 0 to disable.",
     )
     # When to tear down a local in-process OCR engine between batch chunks.
     # "auto" (default) keeps it resident in balanced mode unless a local LLM
@@ -1262,7 +1288,8 @@ class OcrOptions(_BibrSettings):
     @model_validator(mode="after")
     def validate_profile(self) -> "OcrOptions":
         """Require an explicit profile when a backend/model has no known OCR family."""
-        if self.backend.lower() in {"gemini", "openai", "anthropic"}:
+        # Cloud vision models take no OCR profile, and the text layer runs no model.
+        if self.backend.lower() in {"gemini", "openai", "anthropic", "text-layer"}:
             return self
 
         from bibr.ocr.profiles import resolve_ocr_profile
@@ -1961,6 +1988,25 @@ class MlOptions(_BibrSettings):
         "(require the torch extra).",
     )
 
+    # CPU sessions of bibr's own ONNX models (layout, sentence segmenter, NER
+    # parser, section/paper classifiers, front-matter tagger). onnxruntime sizes
+    # each session's thread pool from the machine's CPU count and ignores a CPU
+    # affinity mask or a cgroup CPU quota, and its idle workers spin-wait.
+    # See bibr/utils/onnx_providers.py.
+    onnx_threads: int = Field(
+        0,
+        ge=0,
+        description="Intra-op threads of each CPU ONNX session. 0 (default) uses the CPUs this "
+        "process may run on (the CPU affinity mask and any cgroup CPU quota applied to the "
+        "machine's CPU count), instead of onnxruntime's own count, which ignores both.",
+    )
+    onnx_spinning: bool = Field(
+        False,
+        description="Let idle onnxruntime worker threads spin-wait for the next operator "
+        "(onnxruntime's own default). Off by default: spinning burns CPU that the next "
+        "stage or a second batch process could use.",
+    )
+
     # Trained section classifier (MiniLM two-head, document-context input
     # template). When ``section_classifier_model_id`` is None, classification
     # falls back to the LLM path. Env: ``ML_SECTION_CLASSIFIER_MODEL_ID``,
@@ -1977,15 +2023,21 @@ class MlOptions(_BibrSettings):
         "output; 'main' tracks the repo head.",
     )
     # Type-head softmax probability below which a trained-model prediction
-    # collapses to UNKNOWN. With 16 classes the uniform baseline is ~0.06, so
-    # 0.5 keeps only predictions where the model is meaningfully decisive.
-    # Set to 0.0 to disable.
-    section_classifier_min_confidence: float = Field(
-        0.5,
+    # collapses to UNKNOWN. Unset, it follows section_classifier_llm_escalation
+    # (see section_classifier._min_confidence): 0.9 while escalation is on,
+    # because the LLM types the headers the model is less sure of better than
+    # the model does, and 0.5 when it is off, because there a collapse stays
+    # UNKNOWN and 0.9 discards labels the model mostly gets right. With 16
+    # classes the uniform baseline is ~0.06, so 0.5 keeps only predictions
+    # where the model is meaningfully decisive. Set to 0.0 to disable.
+    section_classifier_min_confidence: float | None = Field(
+        None,
         ge=0.0,
         le=1.0,
         description="Type-head softmax probability below which a section-classifier prediction "
-        "collapses to UNKNOWN. Set to 0.0 to disable.",
+        "collapses to UNKNOWN. Unset, it is 0.9 while ML_SECTION_CLASSIFIER_LLM_ESCALATION is "
+        "on (the LLM types the collapsed headers) and 0.5 when it is off. Set to 0.0 to "
+        "disable.",
     )
     # When the trained classifier's prediction is UNKNOWN — either collapsed
     # below ``section_classifier_min_confidence`` or confidently predicted as
@@ -1997,7 +2049,8 @@ class MlOptions(_BibrSettings):
         True,
         description="Escalate section headers the trained classifier leaves UNKNOWN "
         "(below-confidence collapses and confident unknown predictions) to the batched LLM "
-        "classifier instead of discarding them.",
+        "classifier instead of discarding them. Also sets the default of "
+        "ML_SECTION_CLASSIFIER_MIN_CONFIDENCE.",
     )
     # Override the device the classifier runs on. ``None`` picks automatically
     # (CUDA → CPU). MPS is opt-in via ``ML_SECTION_CLASSIFIER_DEVICE=mps`` —
@@ -2021,10 +2074,10 @@ class MlOptions(_BibrSettings):
         "published multitask classifier (all-MiniLM-L6-v2 encoder; OECD L1/L2 + paper_type).",
     )
     paper_classifier_revision: str = Field(
-        "6046171b3198a255acb1f07f81a586a32f399ac4",
+        "600ef07f7e03a6d20e15da9bb28c6ed5b3eb45d3",
         description="HF Hub revision (commit SHA or branch) for the paper classifier. Pinned to "
-        "the audited commit (plus the additive ONNX bundle) so a hub push cannot change "
-        "output; 'main' tracks the repo head.",
+        "the 0.9.0 paper-type model (torch weights and ONNX bundle) so a hub push cannot "
+        "change output; 'main' tracks the repo head.",
     )
     # paper_type-head softmax probability below which a trained-model
     # prediction is escalated to the LLM fallback (see
@@ -2115,6 +2168,53 @@ class MlOptions(_BibrSettings):
         le=1.0,
         description="Front-role probability of a non-title role above which a title seed cannot "
         "root a second front-matter record. 1.0 disables the veto.",
+    )
+    # Front-matter tagger (bibr/front_tagger/): an encoder + CRF that labels the
+    # printed title, names, affiliations and abstract on the first two pages, so
+    # the title/keywords and authors LLM calls run only when it is unsure.
+    # Off by default until it is measured against the LLM on the dev sets; fast
+    # mode (PIPELINE_MODE) sets 'only' for the run.
+    front_tagger_mode: Literal["off", "primary", "only"] = Field(
+        "off",
+        description="'primary' takes title, abstract, keywords and authors from the front-matter "
+        "tagger when it is confident and asks the LLM otherwise; 'only' takes the tagger's "
+        "answer whatever its confidence and never asks the LLM for them (what fast mode sets); "
+        "'off' always asks the LLM.",
+    )
+    front_tagger_model_id: str | None = Field(
+        "scienceverse/bibr-front-tagger",
+        description="HF Hub repo id or local directory of the front-matter tagger's ONNX bundle "
+        "(an onnx/ directory with bibr_onnx.json). Only read when ML_FRONT_TAGGER_MODE is "
+        "'primary' or 'only'; null leaves the tagger off.",
+    )
+    front_tagger_revision: str | None = Field(
+        "13a0f5c386ea9325e9197d789a93c2c39fdf336a",
+        description="Pinned revision of the front-matter tagger bundle on the Hub.",
+    )
+    # Statement tagger (bibr/statement_tagger/): a small encoder that types the
+    # paper's paragraphs as funding, competing interests, ethics, data
+    # availability, acknowledgments or author contributions. On by default since
+    # 0.9.0; set to null to read the statements with the rules alone.
+    statement_tagger_model_id: str | None = Field(
+        "scienceverse/bibr-statement-tagger-v1",
+        description="Statement tagger: a local directory or Hub repo id of its ONNX bundle "
+        "(bibr_onnx.json with model statement_tagger, model.onnx and tokenizer.json, in onnx/ or "
+        "the directory itself). When set, the statements it finds replace the rules' funding, "
+        "competing interests, ethics and data availability statements of their type, and give "
+        "acknowledgments and author contributions a section when the paper has none. Defaults "
+        "to the published tagger; null reads the statements with the rules alone.",
+    )
+    statement_tagger_revision: str | None = Field(
+        "b446f943102918b0cca34208296d787fc1e379bc",
+        description="Hub revision (commit, branch or tag) of ML_STATEMENT_TAGGER_MODEL_ID when it "
+        "is a Hub repo id; unset reads main. Ignored for a local directory.",
+    )
+    front_tagger_min_confidence: float = Field(
+        0.9,
+        ge=0.0,
+        le=1.0,
+        description="Lowest tag posterior on the title and author names (and mean on the "
+        "abstract) at which the tagger's answer replaces the LLM calls.",
     )
     classifiers_required: bool = Field(
         False,
@@ -2243,6 +2343,13 @@ class PipelineOptions(_BibrSettings):
     model_config = _section("PIPELINE_")
 
     timeout: int = Field(300, description="Pipeline timeout in seconds.")
+    mode: Literal["auto", "fast", "full"] = Field(
+        "auto",
+        description='Run mode: "fast" makes no LLM call (the front-matter tagger reads the title, '
+        'authors and abstract), "full" uses the configured LLM, and "auto" (default) runs fast '
+        "when no LLM is configured and full when one is. The --fast and --full flags override "
+        "it for one run.",
+    )
     bibr_sha: str | None = Field(
         None,
         description="Deployed bibr commit SHA surfaced in qualification_provenance "
@@ -2385,16 +2492,17 @@ class PipelineOptions(_BibrSettings):
     # Reviews and commentaries argue rather than report: their body headings
     # are discussion, not the introduction/methods/results the classifier
     # guesses one heading at a time. Applies only when the paper type says so
-    # and no heading is alias-typed methods or results.
+    # and the paper prints no methods or results part (a heading typed so from
+    # its own words, or a guess on a heading that names the part).
     non_imrad_body_as_discussion: bool = Field(
         True,
-        description="Type the model/LLM-typed body headings of reviews and commentaries with no "
-        "Methods or Results heading as discussion.",
+        description="Type the guessed body headings of reviews and commentaries that print no "
+        "Methods or Results part as discussion.",
     )
 
-    @field_validator("heap_trim", mode="before")
+    @field_validator("heap_trim", "mode", mode="before")
     @classmethod
-    def _lower_heap_trim(cls, v):
+    def _lower_choice(cls, v):
         """Case-insensitive, like the other choice settings."""
         return v.strip().lower() if isinstance(v, str) else v
 
@@ -2649,6 +2757,45 @@ class GlobalSettings(_BibrSettings):
     IMPLICIT_SECTION_DETECTION: bool = Field(
         True, description="Infer implicit sections from body text when headers are absent."
     )
+    FRONT_TAGGER_RULES: bool = Field(
+        False,
+        description="Read the front matter with the local rules that put right what the tagger "
+        "alone leaves wrong: author names and keywords it cut short, abstracts it split, "
+        "affiliations it left untagged, and the title's language. Fast mode sets it; a full "
+        "run leaves those readings to the LLM.",
+    )
+    EQUATION_REPAIR_GLITCHES: bool = Field(
+        False,
+        description="Read statistic text through the equation rules and leave out a value whose "
+        "power of ten was not read, as a run with no LLM fallback needs. Fast mode sets it.",
+    )
+    CITATION_RULE_TIER3: bool = Field(
+        False,
+        description="Link the author-year citations the exact reading leaves over with the "
+        "matcher's rules (family prefixes, a close spelling, et al. forms) where an LLM "
+        "would be asked. Fast mode sets it; a full run asks the LLM.",
+    )
+    FUNDING_RULES: bool = Field(
+        False,
+        description="With no LLM, read the funders and award numbers from the funding statement "
+        "with the local rules, so ``funding`` is not left empty. Fast mode sets it; a full run "
+        "asks the LLM, which reads long multi-agency statements better.",
+    )
+    AFFILIATION_RULES: bool = Field(
+        False,
+        description="With no LLM, read the city and country of each affiliation string with the "
+        "local rules (the institution and department are left to the LLM). Fast mode sets it.",
+    )
+    SELF_CITATION_METADATA: bool = Field(
+        True,
+        description="Read the citation a paper prints on its first page ('Citation: ...', 'To "
+        "cite this article: ...') with the reference parser, and fill the journal, volume, issue, "
+        "pages and publication year the extraction left empty, and the title and authors when it "
+        "found none, when the line is about this paper (same DOI, else same title, else a "
+        "matching first author, else a label that names this article). Never overwrites a "
+        "value. Runs with the local reference parser (REF_PARSE_STRATEGY=ner), not without an "
+        "LLM (--no-llm).",
+    )
     FIGURE_IMAGES: bool = Field(False, description="Extract figure images from PDFs.")
     # Reference extraction strategy — DECOUPLED segmentation + parsing axes
     # (resolved in bibr.extract.ref_extractor._resolve_ref_strategies; per-run
@@ -2775,6 +2922,21 @@ class GlobalSettings(_BibrSettings):
         "4d1702e2c766d96c8887bd4b30ef56637aa9b32c",
         description="Pinned commit revision for the geometry reference segmenter bundle.",
     )
+    # Line-sequence tagger the geom tier tries before the GBM
+    # (bibr/extract/geom_tagger.py). On by default since 0.9.0.
+    REF_GEOM_TAGGER_MODEL_ID: str | None = Field(
+        "scienceverse/bibr-ref-line-tagger-v1",
+        description="Geometry line tagger: a Hub repo id or a local directory (gate.json plus "
+        "tagger.onnx and tagger.json, beside it or in onnx/). When set, the geom reference "
+        "segmentation tier asks it first and its answer is final when its gate accepts; otherwise "
+        "the tier goes on with REF_GEOM_SEG_MODEL_ID exactly as without it. Defaults to the "
+        "published tagger; null leaves the tier to REF_GEOM_SEG_MODEL_ID alone.",
+    )
+    REF_GEOM_TAGGER_REVISION: str | None = Field(
+        "b0effede946cda95302efac0b0b1232cf361cf62",
+        description="Hub revision (commit, branch or tag) of REF_GEOM_TAGGER_MODEL_ID when it is "
+        "a Hub repo id; unset reads main. Ignored for a local directory.",
+    )
     # Per-paper geometry confidence below which segmentation cascades to the LLM.
     REF_GEOM_SEG_CASCADE_THRESHOLD: float = Field(
         0.90,
@@ -2851,15 +3013,30 @@ class GlobalSettings(_BibrSettings):
         description="Local path or HF Hub repo id for the NER reference-segmenter checkpoint "
         "(optionally suffixed :filename.pt).",
     )
-    # Parser default is v5.1: UltraBERT-150M + feature-gated CRF trained on the
-    # reference markup of CC BY / CC0 JATS papers, LinkedBooks and the v4.5 gold
-    # rows (refsets sealed test ref_exact 0.75 vs 0.42 for v4.5, RenoBench 0.73
-    # vs 0.56, v4.5 gold val entity F1 0.975 vs 0.966). The repo carries the encoder's config, modeling code and
-    # tokenizer, so they load from it at NER_PARSER_REVISION. The parser path
+    # ONNX token tagger that takes the CRF segmenter's place
+    # (bibr/extract/text_segmenter.py). On by default since 0.9.0.
+    REF_TEXT_SEG_MODEL_ID: str | None = Field(
+        "scienceverse/bibr-ref-text-segmenter-v1",
+        description="Text reference segmenter: a Hub repo id or a local directory (segmenter.json, "
+        "model.onnx and tokenizer.json, in it or in onnx/). When set, it replaces the CRF "
+        "segmenter (NER_SEG_CKPT) as the last-resort segmentation tier and needs no torch; the "
+        "CRF is then not loaded. Setting both this and NER_SEG_CKPT away from its default is an "
+        "error. Defaults to the published segmenter; null brings back the CRF segmenter.",
+    )
+    REF_TEXT_SEG_REVISION: str | None = Field(
+        "3c36a8c88acf57bbe6f76f0effe5cd0f63b883fd",
+        description="Hub revision (commit, branch or tag) of REF_TEXT_SEG_MODEL_ID when it is a "
+        "Hub repo id; unset reads main. Ignored for a local directory.",
+    )
+    # Parser default is v7 (0.9.0): mmBERT-small + feature-gated CRF, published as
+    # one ONNX file (onnx/model.onnx), so it loads with ONNX Runtime only. A torch
+    # run (ML_RUNTIME=torch) needs a torch checkpoint here, such as the earlier
+    # v5.1 default scienceverse/bibr-parser-v5-1-ultrabert (0.8.0 pins its
+    # revision). The torch parser path
     # (RefParser → FeatureGatedEncoderCRF, add_special_tokens=False) requires a
     # v4-format checkpoint; the legacy v1 parser is no longer loadable here.
     NER_PARSER_CKPT: str = Field(
-        "scienceverse/bibr-parser-v5-1-ultrabert",
+        "scienceverse/bibr-parser-v7-mmbert-small",
         description="Local path or HF Hub repo id for the NER reference-parser checkpoint "
         "(optionally suffixed :filename.pt). Requires a v4-format checkpoint.",
     )
@@ -2873,7 +3050,7 @@ class GlobalSettings(_BibrSettings):
         "track the latest revision instead.",
     )
     NER_PARSER_REVISION: str = Field(
-        "97b06cc7dd6511bdd53f8855c93a29020231d215",
+        "1045dc083ac10fc50bba2feedd3d8d3f06fdbad7",
         description='Pinned commit revision for the NER parser checkpoint. Set to "main" to track '
         "the latest revision instead; a parser repo that ships its own encoder code (v5) loads "
         "only from a commit SHA or a local directory.",

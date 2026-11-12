@@ -440,7 +440,7 @@ def test_paper_classifier_defaults_to_published_model(monkeypatch):
 
     s = GlobalSettings()
     assert s.ml.paper_classifier_model_id == "scienceverse/bibr-paper-classifier"
-    assert s.ml.paper_classifier_revision == "6046171b3198a255acb1f07f81a586a32f399ac4"
+    assert s.ml.paper_classifier_revision == "600ef07f7e03a6d20e15da9bb28c6ed5b3eb45d3"
     assert s.ml.paper_classifier_min_confidence == 0.5
     assert s.ml.paper_classifier_l2_min_confidence == 0.5
     assert s.ml.paper_classifier_llm_escalation is True
@@ -1396,3 +1396,20 @@ def test_llm_provider_swap_follows_an_unset_model():
     opts.provider = "groq"
     opts.apply_provider_default_model()
     assert opts.model == "llama-3.3-70b-versatile"
+
+
+def test_front_tagger_names_the_published_repo_and_stays_off_for_full_runs(monkeypatch):
+    """The id is ready for fast mode, which turns the tagger on for itself; a full run
+    keeps it off until ML_FRONT_TAGGER_MODE says otherwise."""
+    monkeypatch.delenv("ML_FRONT_TAGGER_MODEL_ID", raising=False)
+    monkeypatch.delenv("ML_FRONT_TAGGER_MODE", raising=False)
+    from bibr.config import GlobalSettings
+    from bibr.run_mode import fast_settings
+
+    s = GlobalSettings()
+    assert s.ml.front_tagger_model_id == "scienceverse/bibr-front-tagger"
+    assert s.ml.front_tagger_mode == "off"
+    fast = fast_settings(s)
+    assert fast.ml.front_tagger_mode == "only"
+    assert fast.ml.front_tagger_model_id == "scienceverse/bibr-front-tagger"
+    assert s.ml.front_tagger_mode == "off"

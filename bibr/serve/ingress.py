@@ -45,6 +45,7 @@ _FORM_OPTION_NAMES = (
     "consolidate",
     "refs",
     "ref_seg",
+    "mode",
 )
 #: Text parts one request may carry. Unknown names are ignored but still
 #: counted by the parser, so they get an allowance of their own on top of the
@@ -53,6 +54,7 @@ _FORM_OPTION_NAMES = (
 _MAX_FORM_FIELDS = len(_FORM_OPTION_NAMES) + 16
 _VALID_REF_PARSE = frozenset({"ner", "llm", "llm-chunked", "ref-llm", "off"})
 _VALID_REF_SEG = frozenset({"geom", "region", "llm", "crf"})
+_VALID_MODE = frozenset({"auto", "fast", "full"})
 
 MULTIPART_OPENAPI_EXTRA = {
     "requestBody": {
@@ -89,6 +91,16 @@ MULTIPART_OPENAPI_EXTRA = {
                         "consolidate": {"type": "string"},
                         "refs": {"type": "string"},
                         "ref_seg": {"type": "string"},
+                        "mode": {
+                            "type": "string",
+                            "enum": ["auto", "fast", "full"],
+                            "description": (
+                                "Run mode for this request: fast makes no LLM call (local "
+                                "models only), full uses the server's LLM and is refused "
+                                "(400) when the server has none. Omit or auto to follow "
+                                "the server's PIPELINE_MODE."
+                            ),
+                        },
                     },
                 }
             }
@@ -328,6 +340,7 @@ def _validate_upload_options(values: Mapping[str, str]) -> dict[str, str]:
         "consolidate": frozenset({"fill", "replace"}),
         "refs": _VALID_REF_PARSE,
         "ref_seg": _VALID_REF_SEG,
+        "mode": _VALID_MODE,
     }
     for name, valid in choices.items():
         value = bounded.get(name)
@@ -341,7 +354,41 @@ def _validate_upload_options(values: Mapping[str, str]) -> dict[str, str]:
                 detail = f"{name} must be one of: " + ", ".join(sorted(valid - {""}))
             raise InvalidUploadOptionError(detail)
 
+    _check_mode(bounded)
+
     return bounded
+
+
+def _check_mode(options: Mapping[str, str]) -> None:
+    """Refuse a request whose mode cannot run on this server, before anything is stored.
+
+    ``mode=full`` needs an LLM, and a fast request (its own ``mode=fast``, or the
+    server's mode when it names none) cannot also ask for an LLM reference parser
+    or segmenter. Both would otherwise be a failed or quietly downgraded run.
+    """
+    from bibr.config import Settings
+    from bibr.run_mode import LLM_PARSE_STRATEGIES, llm_configured, resolve_mode
+
+    requested = options.get("mode", "").lower()
+    if requested == "full" and not llm_configured(Settings, backend="cloud"):
+        raise InvalidUploadOptionError(
+            "mode=full needs an LLM and this server has none configured; "
+            "use mode=fast, or leave mode out to follow the server"
+        )
+    llm_options = [
+        f"{name}={options[name]}"
+        for name, llm_values in (("refs", LLM_PARSE_STRATEGIES), ("ref_seg", {"llm"}))
+        if options.get(name, "").lower() in llm_values
+    ]
+    if (
+        llm_options
+        and requested != "full"
+        and (requested == "fast" or resolve_mode(Settings, backend="cloud") == "fast")
+    ):
+        raise InvalidUploadOptionError(
+            f"{', '.join(llm_options)} calls an LLM, which fast mode never does; "
+            "send mode=full, or drop the option"
+        )
 
 
 @asynccontextmanager

@@ -112,6 +112,17 @@ _PROVIDER_STRINGS = {
 }
 
 
+class CloudOcrRegionError(Exception):
+    """The cloud model did not read one region, and its retries are spent.
+
+    Not a :class:`bibr.exceptions.BibrError` and with no chained cause: the OCR
+    stage ships the region blank and records ``OCR_REGION_FAILED`` in the
+    export, as it does for a region an OCR server failed on, and the file goes
+    on. The message is safe to export (no endpoint, no credential); the log
+    keeps the provider's own error.
+    """
+
+
 class CloudOcrClient:
     """OCR backend that delegates to a cloud vision LLM via Instructor.
 
@@ -248,7 +259,15 @@ class CloudOcrClient:
             prompt: GLM-OCR task prompt (e.g. "Text Recognition:").
 
         Returns:
-            Recognized text, or ``""`` on unrecoverable failure.
+            Recognized text (``""`` when the model read nothing in the region).
+
+        Raises:
+            CloudOcrRegionError: the call failed and is not retried further
+                (retries spent, an answer cut off at its cap, a request the
+                provider turned down). The stage ships the region blank with
+                an ``OCR_REGION_FAILED`` warning.
+            UpstreamServiceError: a failure every region would share (bad
+                key or model, quota used up), which fails the file.
         """
         from instructor.processing.multimodal import Image as InstructorImage
 
@@ -345,7 +364,16 @@ class CloudOcrClient:
                         cap_note,
                         exc,
                     )
-                    return ""
+                    from bibr.utils.redact import describe_error
+
+                    # Not an empty string: a blank region must show in the
+                    # export, not only in this log. No chained cause, so a
+                    # dropped connection still costs the region and not the
+                    # file, as before.
+                    raise CloudOcrRegionError(
+                        f"{self._provider} vision OCR failed after {attempt + 1} attempt(s)"
+                        f"{cap_note}: {describe_error(exc)}"
+                    ) from None
 
                 delay = min(
                     self._RETRY_BASE_DELAY * (2**attempt) + random.uniform(0, 0.5),  # noqa: S311
@@ -363,7 +391,7 @@ class CloudOcrClient:
 
         # Unreachable, but satisfies type checker
         logger.warning("CloudOcrClient(%s) exhausted retries: %s", self._provider, last_exc)
-        return ""
+        raise CloudOcrRegionError(f"{self._provider} vision OCR exhausted its retries")
 
     def _quota_error(self, original_error: BaseException | None = None) -> UpstreamServiceError:
         from bibr.exceptions import UpstreamServiceError

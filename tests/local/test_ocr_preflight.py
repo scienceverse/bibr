@@ -231,3 +231,84 @@ def test_the_dry_run_lists_the_chain_the_run_starts(monkeypatch, linux, llm_back
     )
 
     assert [c.backend for c in candidates] == chain
+
+
+# --- a fast run reads the text layer unless the user chose an OCR route -------------------
+
+
+def _fast_cfg(backend="paddle", *, llm_backend="vllm"):
+    return SimpleNamespace(
+        ocr_backend=backend,
+        ocr_url=None,
+        llm_backend=llm_backend,
+        no_llm=False,
+        mode="fast",
+    )
+
+
+@pytest.fixture
+def gpu_without_vllm(monkeypatch, linux):
+    monkeypatch.setattr(linux, "_cuda_vram_gb", lambda: 24.0)
+    monkeypatch.setattr(linux, "_nvidia_compute_capability", lambda: 8.9)
+    monkeypatch.setattr("shutil.which", lambda name, *a, **k: "/usr/bin/uv")
+    return linux
+
+
+def test_a_fast_run_with_no_route_chosen_needs_no_ocr_runtime(monkeypatch, gpu_without_vllm):
+    """The text layer starts nothing, so a GPU without llama.cpp or vLLM is no obstacle."""
+    from bibr.local.cli import run_config
+
+    monkeypatch.setattr("bibr.local.llama_cpp.find_llama_server", lambda: None)
+
+    assert run_config._preflight_ocr_runtime(_fast_cfg("text-layer")) is None
+
+
+def test_a_fast_run_that_chose_paddle_is_not_stopped_while_vllm_can_be_started(
+    monkeypatch, gpu_without_vllm
+):
+    from bibr.local.cli import run_config
+
+    monkeypatch.setattr("bibr.local.llama_cpp.find_llama_server", lambda: None)
+
+    assert run_config._preflight_ocr_runtime(_fast_cfg()) is None
+
+
+def test_a_fast_run_that_chose_paddle_with_no_launcher_at_all_is_refused(
+    monkeypatch, gpu_without_vllm
+):
+    import importlib.util
+
+    from bibr.local.cli import run_config
+
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, *a, **k: None if name == "vllm" else real_find_spec(name, *a, **k),
+    )
+    monkeypatch.setattr("bibr.local.llama_cpp.find_llama_server", lambda: None)
+    monkeypatch.setattr("shutil.which", lambda name, *a, **k: None)
+
+    message = run_config._preflight_ocr_runtime(_fast_cfg())
+
+    assert message is not None
+    assert "glm-llama" in message and "paddle-vllm" in message
+
+
+def test_an_explicit_paddle_vllm_is_judged_as_it_always_was(monkeypatch, gpu_without_vllm):
+    from bibr.local.cli import run_config
+
+    monkeypatch.setattr(gpu_without_vllm, "_cuda_vram_gb", lambda: None)
+
+    message = run_config._preflight_ocr_runtime(_fast_cfg("paddle-vllm"))
+
+    assert message is not None
+    assert "no NVIDIA GPU" in message
+
+
+def test_a_fast_run_is_vetted_against_the_cloud_chain_whatever_llm_is_configured():
+    from bibr.local.cli.run_config import _run_llm_backend
+
+    assert _run_llm_backend(_fast_cfg(llm_backend="vllm")) == "cloud"
+    assert _run_llm_backend(_cfg("paddle", llm_backend="vllm")) == "vllm"
+    assert _run_llm_backend(_cfg("paddle", llm_backend="vllm", no_llm=True)) == "cloud"

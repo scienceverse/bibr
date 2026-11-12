@@ -57,6 +57,7 @@ import httpx
 
 from bibr.batch.ledger import (
     INTERRUPTED,
+    MODEL_OVERRIDE_FAILED,
     UPSTREAM_UNAVAILABLE,
     Outcome,
     bounded_text,
@@ -67,6 +68,7 @@ from bibr.batch.manifest import BatchItem
 logger = logging.getLogger(__name__)
 
 TRANSIENT_HTTP = frozenset({502, 503, 504})
+_OVERRIDE_FATAL = "Model override problem on the serve: "
 AUTH_HTTP = frozenset({401, 403})
 TERMINAL = frozenset({"succeeded", "failed"})
 # Text of a failed job that describes the serve's dependencies, not the paper.
@@ -662,7 +664,9 @@ class RemoteExecutor:
         deadline: float | None = None,
         on_ready: Callable[[dict[str, Any]], None] | None = None,
     ) -> str:
-        """Process *items*; returns ``completed`` | ``deadline`` | ``stopped``.
+        """Process *items*; returns ``completed`` | ``deadline`` | ``stopped``, or
+        ``model_override_failed`` when the serve said a model setting of its own
+        names a model that cannot be used (with :attr:`fatal` set).
 
         ``stop`` halts submission (Ctrl-C); in-flight jobs get ``grace``
         seconds, then are recorded as interrupted. ``deadline`` (epoch
@@ -704,10 +708,16 @@ class RemoteExecutor:
                         if outcome.extra.get("http_status") in AUTH_HTTP:
                             self.fatal = f"serve rejected the token ({outcome.error_code})"
                             stop.set()
+                        elif outcome.error_code == MODEL_OVERRIDE_FAILED:
+                            # A model setting of the serve names a model that does not
+                            # load: every paper would fail the same way.
+                            self.fatal = f"{_OVERRIDE_FATAL}{outcome.error}"
+                            stop.set()
                     if stop.is_set() and tasks:
                         await self._drain(tasks, on_outcome)
                     if stop.is_set():
-                        reason = "stopped"
+                        override = (self.fatal or "").startswith(_OVERRIDE_FATAL)
+                        reason = MODEL_OVERRIDE_FAILED if override else "stopped"
                         break
             except asyncio.CancelledError:
                 for task in tasks:

@@ -35,9 +35,11 @@ parenthesized numeric groups but where regex extraction found nothing.
 import asyncio
 import logging
 import re
+import unicodedata
 from bisect import bisect_right
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
+from bibr.clients.skipped import is_skipped
 from bibr.exceptions import ProcessingError
 from bibr.paper_contents import PaperEquation, PaperSection, PaperSentence
 
@@ -362,12 +364,27 @@ _COUNT_NAMES = frozenset({"n", "N", "k"})
 _THOUSANDS_RE = re.compile(r"[−–-]?\s*\d{1,3}(?:,\d{3})+(?!\d)")
 
 
-def _misread(text: str, lhs: str, start: int, rhs: str, end: int) -> bool:
+# A power of ten whose exponent the value pattern could not read, because the
+# text layer printed it as boxes, spaces or a letter: "p = 1.57 × 10 □ⁿ". The
+# rhs stops before the "×" and is not the value printed. Something of an
+# exponent must follow the 10 (a sign, a superscript, one letter), or nothing
+# at all (a box is a space by then): "N = 20 × 10 trials" is a product.
+_CUT_POWER_RE = re.compile(
+    r"\s*×\s*10(?=\s*(?:[⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻ⁿ^−–-]|[A-Za-z](?![A-Za-z])|[,;.)\]]|$))"
+)
+
+
+def _misread(
+    text: str, lhs: str, start: int, rhs: str, end: int, *, cut_power: bool = False
+) -> bool:
     """Whether the match ``text[start:end]`` of *lhs* and *rhs* is not a statistic.
 
     See the patterns above: a spaced subscript read as a name, or a value
-    that runs on past *end*.
+    that runs on past *end*. With *cut_power*, also a value that is the
+    coefficient of a power of ten that was not read (``_CUT_POWER_RE``).
     """
+    if cut_power and _CUT_POWER_RE.match(text, end):
+        return True
     if len(lhs) == 1 and lhs.isascii() and lhs.islower():
         owner = _GREEK_SUBSCRIPT_OWNER_RE if lhs == "p" else _SUBSCRIPT_OWNER_RE
         if owner.search(text, max(0, start - 4), start):
@@ -671,6 +688,136 @@ def _single_char_line_breaks(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+# ---------------------------------------------------------------------------
+# Text-layer glitches
+# ---------------------------------------------------------------------------
+
+# A PDF text layer or OCR prints some statistics in a way the passes cannot
+# read: the "=" of "t(59) = 0.66" as a 5 (a font-encoding slip), the "<" of
+# "p < .01" as a comma, the "=" of "F(1, 208) = 5.01" not at all, math italics
+# as the mathematical alphanumerics ("𝑀", "𝜒2"), a space as a box, a Latin p
+# as the Cyrillic letter that looks like it. ``repair_statistic_glitches``
+# puts the usual ones right, one character for one character, so a position
+# in the repaired text is a position in the printed one.
+
+# Runs of the mathematical alphanumeric symbols: every one of them folds to a
+# single character under NFKC.
+_MATH_ALNUM_RE = re.compile("[\U0001d400-\U0001d7ff]+")
+_BOX = "\u25a1"  # □
+# The Cyrillic letter that looks like p, alone before a comparator
+_CYRILLIC_P_RE = re.compile(r"(?<!\w)\u0440(?=\s*[<>=≤≥])")
+
+# A name whose "=" is printed as a 5, with the df it may carry: "t(59) 5 0.66",
+# "p 5 .03", "M 5 3.2", "χ2 5 3.84". The 5 stands alone and a value follows, so
+# a 5 that is a value ("t(59) = 5.2", "N = 5 40") or part of one stays.
+_NAME_BEFORE_FIVE = r"\b(?:[tFrRZUHpPdgM]s?|x2|χ2|χ²)"
+# It is no name after a number ("7 d 5 10 mg/kg": days), and its value is no
+# first of a run of numbers ("M 5 3.2 2.1 4.0": a flattened table row). A p-value
+# is at most 1 (``_is_possible_p``).
+_FIVE_FOR_EQUALS_RE = re.compile(
+    r"(?<!\d\s)(" + _NAME_BEFORE_FIVE + r"\s*(?:\([^)]{1,20}\))?\s)5"
+    r"(\s+(?=[-−–]?(?:\d+\.\d+|\d+|\.\d+)(?!\d|\.\d)(?!\s+[-−–]?\.?\d)))"
+)
+# "p , .01", the "<" of "p < .01" printed as a comma
+_COMMA_FOR_LESS_RE = re.compile(r"(\bps?\s),(\s+(?=\.?\d))")
+# A name and a decimal whose "=" is not printed, when a p-value follows:
+# "F (1, 208) 5.01, p 0.026", "t 2.73, p .008"
+_NAME_BEFORE_DROPPED_EQUALS = r"\b(?:[tFZUWrdg]|χ2|χ²|X2)\s*(?:\([\d.,\s=]{1,24}\))?"
+_DROPPED_EQUALS_RE = re.compile(
+    r"(" + _NAME_BEFORE_DROPPED_EQUALS + r")\s(?=[-−]?(?:\d+)?\.\d+\s*[,;]\s*[pP]\b)"
+)
+# "p 0.026" after a number and a comma, the "=" of "p = 0.026" not printed. Not
+# after a year ("(Smith, 2010, p .5)"), and not for the values p is compared
+# with: the glyph lost in "p 0.001" is more likely a "<" than an "=", and it
+# cannot be recovered.
+_DROPPED_P_EQUALS_RE = re.compile(
+    r"(?<!\b(?:18|19|20)\d)(\d\s*[,;]\s*[pP])\s(?=0?\.\d)(?!0?\.(?:05|01|001|0001)0*(?!\d))"
+)
+_P_NAME_RE = re.compile(r"\bps?\s*$", re.IGNORECASE)
+_NUMBER_AT_RE = re.compile(r"[-−–]?\s*(?:\d+\.?\d*|\.\d+)")
+
+
+def _is_possible_p(text: str, end: int) -> bool:
+    """Whether the number at ``text[end:]`` can be a p-value, at most 1."""
+    match = _NUMBER_AT_RE.match(text, end)
+    if match is None:
+        return False
+    try:
+        value = float(match.group().replace("−", "-").replace("–", "-").replace(" ", ""))
+    except ValueError:
+        return False
+    return 0 <= value <= 1
+
+
+def _stand_in_for(glyph: str, pattern: re.Pattern[str]) -> Callable[[str], str]:
+    """A rule that replaces the stand-in character of *pattern*'s matches with *glyph*.
+
+    The pattern's first group is the name and what lies before the stand-in,
+    its second what lies after. A match naming a p-value that the number after
+    it cannot be is left as printed: "Smith J. Psychol Rev 12, p 5 10." has a
+    page, "p , 12" none either.
+    """
+
+    def put(match: re.Match[str]) -> str:
+        name, after = match.group(1), match.group(2)
+        if _P_NAME_RE.search(name) and not _is_possible_p(match.string, match.end(2)):
+            return match.group(0)
+        return name + glyph + after
+
+    return lambda text: pattern.sub(put, text)
+
+
+def _fold_math_alnum(text: str) -> str:
+    """*text* with each run of mathematical alphanumerics folded to plain characters.
+
+    A run that folds to one letter repeated ("𝑆𝑆𝑆𝑆" is "SSSS") is left as
+    printed: a text layer that prints each glyph over itself makes it, and
+    no statistic is named so.
+    """
+
+    def fold(match: re.Match[str]) -> str:
+        # One character for one: NFKC does not lengthen any of them, but a
+        # character it would lengthen stays as printed.
+        folded = "".join(
+            plain if len(plain := unicodedata.normalize("NFKC", char)) == 1 else char
+            for char in match.group()
+        )
+        letters = [char for char in folded if char.isalpha()]
+        if len(letters) > 1 and len(set(letters)) == 1:
+            return match.group()
+        return folded
+
+    return _MATH_ALNUM_RE.sub(fold, text)
+
+
+# The rules of ``repair_statistic_glitches``, in the order they apply
+_GLITCH_RULES: tuple[Callable[[str], str], ...] = (
+    _fold_math_alnum,
+    lambda text: text.replace(_BOX, " "),
+    lambda text: _CYRILLIC_P_RE.sub("p", text),
+    _stand_in_for("=", _FIVE_FOR_EQUALS_RE),
+    _stand_in_for("<", _COMMA_FOR_LESS_RE),
+    lambda text: _DROPPED_EQUALS_RE.sub(r"\1=", text),
+    lambda text: _DROPPED_P_EQUALS_RE.sub(r"\1=", text),
+)
+
+
+def repair_statistic_glitches(text: str) -> str:
+    """*text* with the usual text-layer glitches in reported statistics put right.
+
+    The result has as many characters as *text*, each in the position it was
+    printed at: a span found in one is a span of the other. Rewritten are
+    the mathematical alphanumerics (folded to the plain letters), a box
+    (to a space), the Cyrillic p before a comparator, a 5 between a
+    statistic's name and its value (to "="), a comma between "p" and a value
+    (to "<"), and the space that stands for a dropped "=" between a name and
+    a decimal before a p-value, or between "p" and its value after a number.
+    """
+    for rule in _GLITCH_RULES:
+        text = rule(text)
+    return text
+
+
 # A name, df or value printed across lines is exported on one, as late
 # clean-up prints the sentence: "Cohen’s \r\ndz" is "Cohen’s dz" and "[0.30,
 # \r\n0.42]" "[0.30, 0.42]", which a consumer folding names or reading values
@@ -709,6 +856,8 @@ class EquationExtractor:
         # ``extract_with_llm_fallback`` call, and how many batches it sent.
         self.llm_batch_failures: list[str] = []
         self.llm_batch_count = 0
+        # Sentences that call would have sent, when it was skipped (fast mode).
+        self.llm_skipped_candidates = 0
 
     def _next_grp_id(self) -> int:
         self._grp_counter += 1
@@ -718,6 +867,8 @@ class EquationExtractor:
         self,
         sentences: list[PaperSentence],
         sections: list[PaperSection],  # noqa: ARG002
+        *,
+        repair_glitches: bool = False,
     ) -> list[PaperEquation]:
         """Extract equations from sentences using regex only (synchronous).
 
@@ -727,6 +878,13 @@ class EquationExtractor:
             All sentences from the paper.
         sections : list[PaperSection]
             Section metadata (kept for API consistency with LLM fallback).
+        repair_glitches : bool
+            Read the text through :func:`repair_statistic_glitches` and leave
+            out a value whose power of ten was not read ("1.57 × 10 □ⁿ"). For
+            a run with no LLM, whose fallback would have read what the
+            glitches hide. The components are as read in the repaired text:
+            the "t" of "𝑡(59) 5 0.66" is "t" and its comparator "=". Off, the
+            text is read as printed.
 
         Returns
         -------
@@ -737,7 +895,9 @@ class EquationExtractor:
         equations: list[PaperEquation] = []
 
         for sent in sentences:
-            text = _single_char_line_breaks(sent.text)
+            text = printed = _single_char_line_breaks(sent.text)
+            if repair_glitches:
+                text = repair_statistic_glitches(printed)
             # Each pass marks the characters of the components it emitted,
             # and a later pass skips any match overlapping them. Only those
             # characters: a statistic the structured patterns do not know,
@@ -746,19 +906,20 @@ class EquationExtractor:
             taken = bytearray(len(text))
             parens = _ParenGroups(text)
             # Pass 1: parenthesized statistical groups
-            found = self._extract_stat_groups(sent, text, taken, parens)
+            found = self._extract_stat_groups(sent, text, taken, parens, repair_glitches)
             # Pass 2: bare statistical expressions
-            loose = self._extract_bare_stats(sent, text, taken, parens)
+            loose = self._extract_bare_stats(sent, text, taken, parens, repair_glitches)
             # Pass 3: LaTeX-delimited equations the structured passes did not
             # already decompose ("$t(28) = 2.10$" is pass 1's t)
             loose += self._extract_latex_equations(sent, text, taken)
             # Pass 4: broad equation detection for missed cases
-            loose += self._extract_broad_equations(sent, text, taken, parens)
+            loose += self._extract_broad_equations(sent, text, taken, parens, repair_glitches)
             # Grouped together, by where they are printed: "Z = 2.84; P =
             # 0.035" is one result though pass 2 reads Z and pass 4 P.
             found += self._group_by_position(text, loose, parens)
             for eq in found:
                 _print_on_one_line(eq)
+                eq.repaired = text != printed
             equations.extend(found)
 
         logger.info(
@@ -793,7 +954,9 @@ class EquationExtractor:
         sections : list[PaperSection]
             Section metadata.
         llm_client : LLMClient | None
-            Optional LLM client for fallback extraction.
+            Optional LLM client for fallback extraction. The fast-mode client
+            makes no call: the candidates are counted in
+            ``llm_skipped_candidates`` and the regex equations are returned.
         regex_equations : list[PaperEquation] | None
             Results of an already-completed regex pass. Callers that bound
             this coroutine with a timeout run step 1 themselves so a slow LLM
@@ -814,6 +977,7 @@ class EquationExtractor:
 
         self.llm_batch_failures = []
         self.llm_batch_count = 0
+        self.llm_skipped_candidates = 0
         # Step 1: regex extraction
         equations = (
             self.extract_from_sentences(sentences, sections)
@@ -876,6 +1040,12 @@ class EquationExtractor:
             )
 
         if not candidates:
+            return equations
+
+        if is_skipped(llm_client):
+            # Fast mode: the regex components stand. Count what the fallback
+            # would have read, so the export can say what was left.
+            self.llm_skipped_candidates = len(candidates)
             return equations
 
         # Step 3: LLM extraction in batches
@@ -954,7 +1124,12 @@ class EquationExtractor:
         return equations
 
     def _extract_stat_groups(
-        self, sent: PaperSentence, text: str, taken: bytearray, parens: "_ParenGroups"
+        self,
+        sent: PaperSentence,
+        text: str,
+        taken: bytearray,
+        parens: "_ParenGroups",
+        repair: bool = False,
     ) -> list[PaperEquation]:
         """Extract statistical equations from parenthesized groups in a sentence.
 
@@ -984,7 +1159,7 @@ class EquationExtractor:
             for m in _COMPONENT_RE.finditer(text, paren_start + 1, paren_end - 1):
                 if parens.in_df_argument(m.start(), m.end()):
                     continue  # "N = 100" of "($\chi^{2}(1, N = 100) = 3.84$)"
-                component = _structured_component(text, m)
+                component = _structured_component(text, m, cut_power=repair)
                 if component is None:
                     continue
                 (start, end), lhs, df, comp, rhs = component
@@ -1010,7 +1185,12 @@ class EquationExtractor:
         return results
 
     def _extract_bare_stats(
-        self, sent: PaperSentence, text: str, taken: bytearray, parens: "_ParenGroups"
+        self,
+        sent: PaperSentence,
+        text: str,
+        taken: bytearray,
+        parens: "_ParenGroups",
+        repair: bool = False,
     ) -> list[tuple[Span, PaperEquation]]:
         """Extract stat expressions the parenthesized-group pass did not.
 
@@ -1024,7 +1204,7 @@ class EquationExtractor:
         for m in _COMPONENT_RE.finditer(text):
             if _is_taken(taken, m.start(), m.end()) or parens.in_df_argument(m.start(), m.end()):
                 continue
-            component = _structured_component(text, m)
+            component = _structured_component(text, m, cut_power=repair)
             if component is None:
                 continue
             (start, end), lhs, df, comp, rhs = component
@@ -1097,7 +1277,12 @@ class EquationExtractor:
         return results
 
     def _extract_broad_equations(
-        self, sent: PaperSentence, text: str, taken: bytearray, parens: "_ParenGroups"
+        self,
+        sent: PaperSentence,
+        text: str,
+        taken: bytearray,
+        parens: "_ParenGroups",
+        repair: bool = False,
     ) -> list[tuple[Span, PaperEquation]]:
         """Broad regex pass to catch equations missed by the structured passes.
 
@@ -1130,7 +1315,7 @@ class EquationExtractor:
             if not _PLAUSIBLE_BROAD_LHS_RE.fullmatch(raw_lhs):
                 continue
 
-            if _misread(text, raw_lhs, start, rhs, end):
+            if _misread(text, raw_lhs, start, rhs, end, cut_power=repair):
                 continue
             rhs = _count_value(raw_lhs, rhs)
             end = m.start(3) + len(rhs)
@@ -1249,11 +1434,13 @@ _FORMULA_SEPARATORS = frozenset(" \t\n,;.")
 _RUN_SEPARATORS = " \t\n,;"
 
 
-def _structured_component(text: str, m: re.Match[str]) -> tuple[Span, str, str, str, str] | None:
+def _structured_component(
+    text: str, m: re.Match[str], *, cut_power: bool = False
+) -> tuple[Span, str, str, str, str] | None:
     """(span, lhs, df, comp, rhs) of a _COMPONENT_RE match, or None if misread."""
     lhs = m.group(1).strip()
     rhs = m.group(3).strip()
-    if _misread(text, lhs, m.start(), rhs, m.end()):
+    if _misread(text, lhs, m.start(), rhs, m.end(), cut_power=cut_power):
         return None
     rhs = _count_value(lhs, rhs)
     name, df = _split_lhs_df(lhs)

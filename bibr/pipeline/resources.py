@@ -19,7 +19,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from bibr.ocr.registry import CLOUD_VISION_OCR_BACKENDS
+from bibr.ocr.registry import CLOUD_VISION_OCR_BACKENDS, TEXT_LAYER_BACKEND
 from bibr.utils.async_tasks import await_owned
 
 if TYPE_CHECKING:
@@ -128,6 +128,12 @@ class ResourceManager:
         self.ocr_profile = ocr_profile
         self.ocr_runtime_identity = None
         self.ocr_fallback_reason: str | None = None
+        # Why no candidate of the automatic OCR chain can start on this
+        # machine, when OCR_FALLBACK_TO_TEXT_LAYER=auto switched the run to
+        # the PDF text layer (see check_text_layer_fallback). Kept for the
+        # life of these resources: every chunk reads the text layer.
+        self.ocr_text_layer_fallback: str | None = None
+        self._text_layer_fallback_checked = False
         self.device = device
 
         self.http_client = http_client
@@ -154,6 +160,8 @@ class ResourceManager:
         self._segmenter: SentenceSegmenter | None = segmenter
         self._front_role = None
         self._front_role_resolved = False
+        self._front_tagger = None
+        self._front_tagger_resolved = False
         self._ocr: OcrBackend | None = None
         self._ocr_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._ocr_future: concurrent.futures.Future[OcrBackend] | None = None
@@ -281,6 +289,19 @@ class ResourceManager:
             release_front_role_classifier(self._front_role)
         self._front_role = None
         self._front_role_resolved = False
+        if (
+            self._front_tagger is not None
+            and self._owns_models
+            and self.memory_mode == "aggressive"
+        ):
+            # Process-global like the NER parser below, and about half a gigabyte:
+            # balanced one-shot chew() calls share the process, and releasing it
+            # there would reload it on every file.
+            from bibr.front_tagger.runtime import release_front_tagger
+
+            release_front_tagger(self._front_tagger)
+        self._front_tagger = None
+        self._front_tagger_resolved = False
         if not self._owns_models:
             return
         # The NER parser singleton is process-global rather than an owned
@@ -310,7 +331,9 @@ class ResourceManager:
         going on heuristics alone.
         """
         if self._front_role_resolved:
-            return self._front_role
+            from bibr.extract.front_role import _note_use
+
+            return _note_use(self._settings, self._front_role)
         from bibr.extract.front_role import load_front_role_classifier
 
         self._front_role = load_front_role_classifier(self._settings)
@@ -324,7 +347,64 @@ class ResourceManager:
     def front_role(self):
         return self._front_role
 
+    def ensure_front_tagger(self, settings: GlobalSettings | None = None):
+        """Return the front-matter tagger, loading it on first use.
+
+        ``settings`` are the run's (default: the manager's own): a fast run
+        turns the tagger on for itself, and a full run on the same manager must
+        not get a loaded one. ``None`` when ``ML_FRONT_TAGGER_MODE`` is off or
+        the bundle cannot be loaded; a full run then leaves front matter to the
+        LLM.
+        """
+        settings = settings if settings is not None else self._settings
+        if getattr(settings.ml, "front_tagger_mode", "off") == "off":
+            return None
+        if self._front_tagger_resolved:
+            from bibr.front_tagger.runtime import _note_use
+
+            return _note_use(settings, self._front_tagger)
+        from bibr.front_tagger.runtime import load_front_tagger
+
+        self._front_tagger = load_front_tagger(settings, device=self.device)
+        self._front_tagger_resolved = self._front_tagger is not None
+        return self._front_tagger
+
     # -- OCR --
+
+    def check_text_layer_fallback(self) -> str | None:
+        """Why the run reads the PDF text layer instead of OCR, or None.
+
+        With ``OCR_FALLBACK_TO_TEXT_LAYER=auto``, the automatic ``paddle``
+        backend and no OCR server URL, a machine where no candidate of the
+        automatic chain can start (no NVIDIA GPU for vLLM, no llama.cpp, ...;
+        :func:`bibr.ocr.registry.automatic_chain_blockers`, the check the
+        ``bibr chew`` preflight makes) reads born-digital PDFs from their text
+        layer. The check starts nothing and runs once; its answer holds for
+        the life of these resources. A runtime that is installed but fails
+        to start is not a reason: its files fail as they do without the
+        setting, and a resumed batch retries them.
+        """
+        if self._text_layer_fallback_checked or self.ocr_text_layer_fallback is not None:
+            return self.ocr_text_layer_fallback
+        self._text_layer_fallback_checked = True
+        if (
+            getattr(self._settings.ocr, "fallback_to_text_layer", "off") != "auto"
+            or self._requested_ocr_backend != "paddle"
+            or self.ocr_url
+        ):
+            return None
+        from bibr.ocr.registry import automatic_chain_blockers
+
+        blockers = automatic_chain_blockers(self._settings, llm_backend=self._llm_backend)
+        if not blockers:
+            return None
+        self.ocr_text_layer_fallback = "; ".join(blockers)
+        logger.info(
+            "No OCR backend can start on this machine (%s). OCR_FALLBACK_TO_TEXT_LAYER=auto: "
+            "reading born-digital PDFs from their embedded text layer; scanned PDFs fail.",
+            self.ocr_text_layer_fallback,
+        )
+        return self.ocr_text_layer_fallback
 
     def _resolve_ocr_candidates(self):
         """Resolve startup candidates, retaining explicit request overrides."""
@@ -344,6 +424,9 @@ class ResourceManager:
             requested, self._settings, llm_backend=self._llm_backend
         )
         if len(candidates) != 1 or requested == "paddle":
+            return candidates
+        if candidates[0].backend == TEXT_LAYER_BACKEND:
+            # No model runs: a configured model or profile names nothing here.
             return candidates
         candidate = candidates[0]
         # A concrete backend is an explicit user choice: preserve its model
@@ -435,6 +518,8 @@ class ResourceManager:
         backend_name = backend_name or self._requested_ocr_backend
         if backend_name in self._VISION_BACKENDS:
             from bibr.local import ocr_cloud  # noqa: F401 — triggers @register
+        elif backend_name == TEXT_LAYER_BACKEND:
+            from bibr.ocr import text_layer  # noqa: F401 — triggers @register
         elif backend_name != "serve-http":
             from bibr.local import ocr as _ocr  # noqa: F401 — triggers @register
             from bibr.local import rapid_mlx as _rapid_mlx  # noqa: F401 — triggers @register
@@ -467,6 +552,8 @@ class ResourceManager:
         backend_name = self._resolve_ocr_backend_name(requested_name)
         if backend_name in self._VISION_BACKENDS:
             from bibr.local import ocr_cloud  # noqa: F401 — triggers @register
+        elif backend_name == TEXT_LAYER_BACKEND:
+            from bibr.ocr import text_layer  # noqa: F401 — triggers @register
         else:
             from bibr.local import ocr as _ocr  # noqa: F401 — triggers @register
             from bibr.local import rapid_mlx as _rapid_mlx  # noqa: F401 — triggers @register
@@ -586,8 +673,15 @@ class ResourceManager:
         return f"{candidate.backend}: {remedies.get(candidate.backend, 'check local OCR runtime setup')}"
 
     def _set_ocr_runtime_identity(self, candidate) -> None:
-        from bibr.ocr.profiles import OcrRuntimeIdentity, resolve_ocr_profile
+        from bibr.ocr.profiles import OcrRuntimeIdentity, resolve_ocr_profile, text_layer_identity
 
+        if candidate.backend == TEXT_LAYER_BACKEND:
+            identity = text_layer_identity()
+            self.ocr_backend = identity.backend
+            self.ocr_model = identity.model
+            self.ocr_profile = None
+            self.ocr_runtime_identity = identity
+            return
         profile = resolve_ocr_profile(
             explicit=candidate.profile,
             backend=candidate.backend,

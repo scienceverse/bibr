@@ -1,6 +1,7 @@
 """Tests for local pipeline chunked processing (FileState, _alive, _auto_batch_size)."""
 
 import concurrent.futures
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -431,6 +432,67 @@ class TestMemoryModeSetting:
         monkeypatch.setattr(lp, "_get_system_memory_gb", lambda: 32.0)
         assert lp._default_memory_mode() == "balanced"
 
+    @staticmethod
+    def _cgroup_tree(tmp_path, *, own="/", files=None):
+        """A fake /proc/self/cgroup and /sys/fs/cgroup; *files* maps relative path to content."""
+        proc = tmp_path / "proc_cgroup"
+        proc.write_text(f"0::{own}\n")
+        root = tmp_path / "cg"
+        root.mkdir()
+        for rel, content in (files or {}).items():
+            target = root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        return str(proc), str(root)
+
+    def test_cgroup_memory_limit_takes_the_smallest_limit_up_the_tree(self, tmp_path):
+        from bibr.local.pipeline import _cgroup_memory_limit_bytes
+
+        proc, root = self._cgroup_tree(
+            tmp_path,
+            own="/job/step",
+            files={
+                "job/step/memory.max": "max\n",
+                "job/memory.max": f"{6 * 1024**3}\n",
+                "memory.max": f"{16 * 1024**3}\n",
+            },
+        )
+        assert _cgroup_memory_limit_bytes(proc, root) == 6 * 1024**3
+
+    def test_cgroup_memory_limit_is_none_without_a_limit(self, tmp_path):
+        from bibr.local.pipeline import _cgroup_memory_limit_bytes
+
+        proc, root = self._cgroup_tree(tmp_path, files={"memory.max": "max\n"})
+        assert _cgroup_memory_limit_bytes(proc, root) is None
+        assert _cgroup_memory_limit_bytes(str(tmp_path / "absent"), str(tmp_path / "none")) is None
+
+    def test_cgroup_memory_limit_reads_cgroup_v1(self, tmp_path):
+        from bibr.local.pipeline import _cgroup_memory_limit_bytes
+
+        proc, root = self._cgroup_tree(
+            tmp_path, files={"memory/memory.limit_in_bytes": f"{4 * 1024**3}\n"}
+        )
+        assert _cgroup_memory_limit_bytes(proc, root) == 4 * 1024**3
+
+    @pytest.mark.skipif(not hasattr(os, "sysconf"), reason="reads RAM through os.sysconf")
+    def test_system_memory_is_the_cgroup_limit_when_that_is_smaller(self, monkeypatch):
+        import bibr.local.pipeline as lp
+
+        # A machine with 64 GB: 4 KiB pages. macOS and Windows never reach this branch.
+        monkeypatch.setattr(lp.os, "name", "posix")
+        monkeypatch.setattr(
+            lp.os, "sysconf", lambda key: 4096 if key == "SC_PAGE_SIZE" else 64 * 1024**3 // 4096
+        )
+        monkeypatch.setattr("subprocess.run", MagicMock(return_value=MagicMock(returncode=1)))
+        monkeypatch.setattr(lp, "_cgroup_memory_limit_bytes", lambda: 8 * 1024**3)
+        assert lp._get_system_memory_gb() == 8.0
+        assert lp._auto_memory_mode(None, None, lp._get_system_memory_gb()) == "aggressive"
+        # cgroup v1 writes "no limit" as a number near 2**63: the machine's RAM stands.
+        monkeypatch.setattr(lp, "_cgroup_memory_limit_bytes", lambda: 2**63 - 4096)
+        assert lp._get_system_memory_gb() == 64.0
+        monkeypatch.setattr(lp, "_cgroup_memory_limit_bytes", lambda: None)
+        assert lp._get_system_memory_gb() == 64.0
+
     def test_auto_memory_mode_rule(self):
         from bibr.local.pipeline import _auto_memory_mode
 
@@ -513,3 +575,180 @@ class TestMemoryModeSetting:
         monkeypatch.setattr(Settings.pipeline, "memory_mode", "keep_all")
         pipe = LocalPipeline(memory_mode="aggressive", llm_backend="cloud")
         assert pipe.memory_mode == "aggressive"
+
+
+# --- run mode: LocalPipeline(mode=...) ---
+
+_RUN_MODE_ENV = (
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "LANGEXTRACT_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_API_KEY",
+    "GROQ_API_KEY",
+    "OPENAI_API_KEY",
+    "LLM_API_KEY",
+    "LLM_BASE_URL",
+    "LLM_PROVIDER",
+    "LLM_MODEL",
+    "LLM_BACKEND",
+    "PIPELINE_MODE",
+    "OCR_BACKEND",
+)
+
+
+@pytest.fixture
+def keyless_settings(monkeypatch):
+    """Settings for a machine with no LLM configured, whatever the test environment holds."""
+    from bibr.config import GlobalSettings
+
+    for var in _RUN_MODE_ENV:
+        monkeypatch.delenv(var, raising=False)
+    return GlobalSettings()
+
+
+@pytest.fixture
+def keyed_settings(keyless_settings):
+    keyless_settings.GOOGLE_API_KEY = "test-key"
+    return keyless_settings
+
+
+class TestLocalPipelineMode:
+    def test_fast_takes_the_cloud_backends_semantics(self, keyless_settings):
+        pipe = LocalPipeline(mode="fast", settings=keyless_settings)
+        assert pipe.mode == "fast"
+        assert pipe._config.mode == "fast"
+        assert pipe.llm_backend == "cloud"
+        assert pipe._config.llm_backend == "cloud"
+
+    def test_fast_does_not_start_a_managed_llm_server(self, keyless_settings):
+        pipe = LocalPipeline(mode="fast", llm_backend="vllm", settings=keyless_settings)
+        assert pipe.llm_backend == "cloud"
+        assert pipe._resources._llm_backend == "cloud"
+
+    def test_full_keeps_the_requested_backend(self, keyless_settings):
+        pipe = LocalPipeline(mode="full", llm_backend="vllm", settings=keyless_settings)
+        assert pipe.mode == "full"
+        assert pipe.llm_backend == "vllm"
+
+    def test_no_llm_stays_full(self, keyless_settings):
+        """Structure only is not fast: it never takes the tagger overlay."""
+        pipe = LocalPipeline(no_llm=True, mode="fast", settings=keyless_settings)
+        assert pipe.mode == "full"
+        assert pipe._config.mode == "full"
+        assert pipe._settings_for(pipe._config) is pipe.settings
+
+    def test_auto_with_no_llm_configured_is_fast(self, keyless_settings):
+        for requested in (None, "auto"):
+            pipe = LocalPipeline(mode=requested, settings=keyless_settings)
+            assert pipe.mode == "fast"
+
+    def test_auto_with_a_key_is_full(self, keyed_settings):
+        for requested in (None, "auto"):
+            pipe = LocalPipeline(mode=requested, settings=keyed_settings)
+            assert pipe.mode == "full"
+
+    def test_pipeline_mode_setting_decides_when_no_flag_is_given(self, monkeypatch):
+        from bibr.config import GlobalSettings
+
+        for var in _RUN_MODE_ENV:
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("PIPELINE_MODE", "full")
+        assert LocalPipeline(settings=GlobalSettings()).mode == "full"
+        monkeypatch.setenv("PIPELINE_MODE", "fast")
+        monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+        assert LocalPipeline(settings=GlobalSettings()).mode == "fast"
+
+    def test_the_argument_wins_over_the_setting(self, monkeypatch):
+        from bibr.config import GlobalSettings
+
+        for var in _RUN_MODE_ENV:
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("PIPELINE_MODE", "fast")
+        assert LocalPipeline(mode="full", settings=GlobalSettings()).mode == "full"
+
+    def test_unknown_mode_is_rejected(self, keyless_settings):
+        from bibr.exceptions import InputValidationError
+
+        with pytest.raises(InputValidationError, match="Unknown run mode"):
+            LocalPipeline(mode="turbo", settings=keyless_settings)
+
+    def test_a_fast_run_turns_the_front_tagger_on_and_a_full_run_leaves_it(self, keyed_settings):
+        fast = LocalPipeline(mode="fast", settings=keyed_settings)
+        full = LocalPipeline(mode="full", settings=keyed_settings)
+        assert fast._settings_for(fast._config).ml.front_tagger_mode == "only"
+        assert full._settings_for(full._config) is full.settings
+        assert full.settings.ml.front_tagger_mode == keyed_settings.ml.front_tagger_mode
+
+    def test_the_fast_overlay_leaves_the_pipelines_own_settings_alone(self, keyless_settings):
+        pipe = LocalPipeline(mode="fast", settings=keyless_settings)
+        before = pipe.settings.ml.front_tagger_mode
+        assert pipe._settings_for(pipe._config) is not pipe.settings
+        assert pipe.settings.ml.front_tagger_mode == before
+
+    def test_a_fast_run_reports_no_llm_usage(self, keyless_settings):
+        """A fast run builds no client, so there is nothing to ask for token counts."""
+        pipe = LocalPipeline(mode="fast", settings=keyless_settings)
+        assert pipe.llm_usage_snapshot() == {}
+
+
+class TestLocalPipelineOcrRoute:
+    """A fast run reads the PDF text layer unless the caller chose an OCR route."""
+
+    def _route(self, pipe) -> str:
+        assert pipe._resources.ocr_backend == pipe.ocr_backend
+        return pipe.ocr_backend
+
+    def test_fast_without_an_ocr_choice_reads_the_text_layer(self, keyless_settings):
+        assert self._route(LocalPipeline(mode="fast", settings=keyless_settings)) == "text-layer"
+
+    @pytest.mark.parametrize(
+        ("kwargs", "backend"),
+        [
+            ({"ocr_backend": "paddle"}, "paddle"),
+            ({"ocr_backend": "glm-llama"}, "glm-llama"),
+            ({"ocr_url": "http://127.0.0.1:8118"}, "paddle-http"),
+            ({"ocr_requested": True}, "paddle"),
+            ({"ocr_profile": "glm"}, "paddle"),
+        ],
+        ids=["paddle", "glm-llama", "server-url", "caller-says-so", "profile"],
+    )
+    def test_fast_with_an_ocr_choice_keeps_that_route(self, keyless_settings, kwargs, backend):
+        pipe = LocalPipeline(mode="fast", settings=keyless_settings, **kwargs)
+        assert self._route(pipe) == backend
+
+    @pytest.mark.parametrize(
+        ("variable", "value", "backend"),
+        [("OCR_BACKEND", "paddle", "paddle"), ("OCR_PROFILE", "glm", "paddle")],
+    )
+    def test_fast_with_an_ocr_route_set_in_the_environment_keeps_it(
+        self, monkeypatch, variable, value, backend
+    ):
+        from bibr.config import GlobalSettings
+
+        for var in _RUN_MODE_ENV:
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv(variable, value)
+        pipe = LocalPipeline(mode="fast", settings=GlobalSettings())
+        assert self._route(pipe) == backend
+
+    def test_the_caller_can_say_no_even_when_a_backend_is_named(self, keyless_settings):
+        pipe = LocalPipeline(
+            mode="fast", ocr_backend="paddle", ocr_requested=False, settings=keyless_settings
+        )
+        assert self._route(pipe) == "text-layer"
+
+    def test_auto_with_no_llm_is_a_fast_run_and_reads_the_text_layer(self, keyless_settings):
+        assert self._route(LocalPipeline(settings=keyless_settings)) == "text-layer"
+
+    def test_full_keeps_the_automatic_chain(self, keyed_settings):
+        assert self._route(LocalPipeline(mode="full", settings=keyed_settings)) == "paddle"
+
+    def test_no_llm_is_a_full_run_and_keeps_the_automatic_chain(self, keyless_settings):
+        assert self._route(LocalPipeline(no_llm=True, settings=keyless_settings)) == "paddle"
+
+    def test_the_text_layer_route_leaves_the_gpu_to_the_classifiers(self, keyless_settings):
+        """No managed OCR server starts, so no share of the card is held back for one."""
+        from bibr.local.pipeline import _managed_gpu_fraction
+
+        assert _managed_gpu_fraction("cloud", "text-layer", keyless_settings) == 0.0

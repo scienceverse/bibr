@@ -833,6 +833,31 @@ def test_export_affiliations_roundtrips():
     ]
 
 
+def test_tagger_affiliation_rows_export_beside_the_byline_rows_with_no_authors():
+    """The rows the front tagger could not link ride in ``metadata.affiliations``:
+    the byline's rows keep their authors, the others name none, and a copy of
+    a byline row adds no second one."""
+    from bibr.front_tagger.assemble import TaggedFrontMatter
+
+    contents = _contents([(1, "Intro", CanonicalSection.INTRODUCTION, ["Hello."])])
+    tagged = TaggedFrontMatter(
+        title_keywords=None,
+        byline=None,
+        unattached_affiliations=["Univ Y", "UNIV X."],
+    )
+    metadata = PaperMetadata(
+        doi="10.1/x",
+        title="T",
+        authors=[_author(1, "Ann", "Lee", "Univ X")],
+        affiliations=tagged.affiliation_rows(),
+    )
+    out = export_paper_to_json(_paper(metadata, contents))
+    assert [(row["text"], row["author_ids"]) for row in out["affiliation"]] == [
+        ("Univ X", [1]),
+        ("Univ Y", []),
+    ]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 

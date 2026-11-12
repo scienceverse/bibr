@@ -54,6 +54,35 @@ def resolve_checkpoint(ckpt: str | Path, revision: str | None = None) -> str:
     return _download(repo_id, filename, revision)
 
 
+def has_torch_checkpoint(ckpt: str | Path, revision: str | None = None) -> bool:
+    """Whether ``ckpt`` carries a torch checkpoint file, as :func:`resolve_checkpoint` reads it.
+
+    ``org/repo:filename`` and a local file always do. A local directory does when
+    it holds a ``*.pt``, ``*.bin`` or ``*.safetensors`` file; a Hub repo when its
+    cached snapshot holds one, or else when the Hub lists one. A repo that ships
+    only an ONNX bundle (the 0.9.0 parser) does not. When the Hub cannot be asked,
+    the answer is ``True``, so the torch load runs and reports its own error.
+    """
+    ckpt_str = str(ckpt)
+    repo_id, _, filename = ckpt_str.partition(":")
+    if filename:
+        return True
+    if isinstance(ckpt, Path) or not is_hub_repo_id(repo_id):
+        local = Path(ckpt_str).expanduser()
+        if local.is_dir():
+            return bool(_pick_checkpoint(p.name for p in local.iterdir() if p.is_file()))
+        return True
+    snap = _local_snapshot_dir(repo_id, revision)
+    if snap is not None:
+        return bool(_pick_checkpoint(p.name for p in snap.iterdir() if p.is_file()))
+    try:
+        from huggingface_hub import list_repo_files
+
+        return bool(_pick_checkpoint(list_repo_files(repo_id, revision=revision)))
+    except Exception:  # noqa: BLE001 — the torch load that follows reports the cause
+        return True
+
+
 def _pick_checkpoint(files) -> list[str]:
     return [f for f in files if f.endswith(_CKPT_SUFFIXES)]
 

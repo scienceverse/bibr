@@ -30,6 +30,9 @@ _TOKENIZER_MODEL = "FacebookAI/xlm-roberta-base"
 #: SaT's own default tokenizer id, spelled as wtpsplit-lite spells it so the
 #: runtime opens the HF cache entry ``scripts/prefetch_segmenter.py`` bakes.
 _SAT_BASE_TOKENIZER = "facebookAI/xlm-roberta-base"
+# Pinned so a cached copy is used with no request: an unpinned ``main`` is asked
+# about on every start. The tokenizer files of this repo have not changed since.
+_SAT_BASE_TOKENIZER_REVISION = "e73636d4f797dec63c3081bb6ed5c7b0bb3f2089"
 _TOKENIZER_FILES = {
     "tokenizer/config.json",
     "tokenizer/tokenizer.json",
@@ -281,20 +284,22 @@ def materialize_hub_snapshot(repo_id: str, revision: str | None) -> tuple[str, s
     as wtpsplit-lite caches its own Hub lookups, so a reloaded segmenter does
     not ask the Hub again.
     """
-    from huggingface_hub import hf_hub_download
     from huggingface_hub.errors import EntryNotFoundError
 
-    onnx_path = Path(hf_hub_download(repo_id, "model_optimized.onnx", revision=revision))
-    config_path = Path(hf_hub_download(repo_id, "config.json", revision=revision))
+    from bibr.utils.hf_cache import hf_download_or_cached
+
+    onnx_path = Path(hf_download_or_cached(repo_id, "model_optimized.onnx", revision))
+    config_path = Path(hf_download_or_cached(repo_id, "config.json", revision))
     if config_path.parent != onnx_path.parent:
         raise RuntimeError(
             f"Pinned wtpsplit files for {repo_id}@{revision} resolved to different snapshots"
         )
     try:
-        tokenizer_path = Path(hf_hub_download(repo_id, "tokenizer.json", revision=revision))
+        tokenizer_path = Path(hf_download_or_cached(repo_id, "tokenizer.json", revision))
     except EntryNotFoundError:
-        # Covers both the remote 404 and the offline cache miss for a repo
-        # that has no tokenizer.json at this commit.
+        # Covers the remote 404, the offline cache miss, and the cache's own
+        # record (a pinned commit that 404ed once is not asked about again) for
+        # a repo that has no tokenizer.json at this commit.
         return str(onnx_path.parent), None
     return str(onnx_path.parent), str(tokenizer_path.parent)
 
@@ -306,9 +311,15 @@ def base_tokenizer_dir() -> str:
     Fetched here rather than left to ``SaT``'s default, which it would look up
     as a path relative to the working directory first.
     """
-    from huggingface_hub import hf_hub_download
+    from bibr.utils.hf_cache import hf_download_or_cached
 
-    return str(Path(hf_hub_download(_SAT_BASE_TOKENIZER, "tokenizer.json")).parent)
+    return str(
+        Path(
+            hf_download_or_cached(
+                _SAT_BASE_TOKENIZER, "tokenizer.json", _SAT_BASE_TOKENIZER_REVISION
+            )
+        ).parent
+    )
 
 
 def resolve_wtpsplit_model(model_name: str, revision: str | None = None) -> ResolvedSegmenterModel:
@@ -552,6 +563,13 @@ class BaseSentenceSegmenter:
         Processes texts in sub-batches of SEGMENTER_SUB_BATCH_SIZE to prevent
         GPU OOM when many texts are batched together (large papers or
         concurrent requests sharing the same GPU).
+
+        The texts are batched shortest first and the results put back in input
+        order. wtpsplit pads every text of a call to the longest one in it, so
+        in document order a single long paragraph made its 31 neighbours run at
+        its length; sorted, a sub-batch holds texts of similar length. A break's
+        score moves a little with the batch (about 0.002), so a break right at
+        the threshold can flip; almost every text keeps its sentences.
         """
         if not texts:
             return []
@@ -560,10 +578,17 @@ class BaseSentenceSegmenter:
         if len(texts) > sub_batch:
             logger.debug("Sub-batching %d texts into groups of %d", len(texts), sub_batch)
 
-        results: list[list[str]] = []
-        for start in range(0, len(texts), sub_batch):
-            batch = texts[start : start + sub_batch]
-            results.extend(self._split_batch_with_retry(batch))
+        # Stable sort on character length (a cheap stand-in for token count).
+        order = sorted(
+            range(len(texts)),
+            key=lambda i: len(texts[i]) if isinstance(texts[i], str | bytes) else 0,
+        )
+        results: list[list[str]] = [[] for _ in texts]
+        for start in range(0, len(order), sub_batch):
+            positions = order[start : start + sub_batch]
+            split = self._split_batch_with_retry([texts[i] for i in positions])
+            for position, sentences in zip(positions, split, strict=True):
+                results[position] = sentences
 
         return results
 

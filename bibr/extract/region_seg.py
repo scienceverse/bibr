@@ -94,9 +94,9 @@ def _looks_like_ref_onset(text: str) -> bool:
     typically lowercase or venue text).
 
     The patterns beyond the four trained-feature ones are local to this module
-    on purpose: ``_AUTHOR_DATE_START``/``_NUMBERED``/``_STARTS_YEAR`` are inputs
-    to the geometry GBM and must stay byte-for-byte stable, while anchor recall
-    here is free to improve.
+    on purpose: ``_NUMBERED``/``_STARTS_YEAR`` are inputs to the geometry GBM
+    and must stay byte-for-byte stable, while anchor recall here is free to
+    improve.
     """
     return bool(
         _looks_like_author_date_start(text)

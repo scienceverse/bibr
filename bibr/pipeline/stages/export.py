@@ -55,7 +55,7 @@ def _build_engines(ctx: PipelineContext, paper=None) -> tuple[dict | None, dict 
     """Resolve the OCR and core-LLM engine identities for ``extraction``.
 
     ``None`` is meaningful for both: no OCR engine ran (the DOCX/XML native
-    paths), or the run deliberately had no LLM (``--no-llm``).
+    paths), or the run made no LLM call (``--no-llm``, or fast mode).
 
     ``resolve_ocr_runtime_identity`` is pure config resolution — it answers
     "which backend *would* run", not "which one did" — so the native-parse
@@ -79,13 +79,38 @@ def _build_engines(ctx: PipelineContext, paper=None) -> tuple[dict | None, dict 
             }
 
     llm = None
-    if not ctx.config.no_llm:
+    if not ctx.config.skips_llm:
         llm = {
             "provider": ctx.settings.llm.provider,
             "model": ctx.settings.llm.model,
             "backend": getattr(ctx.settings.llm, "backend", None),
         }
     return ocr, llm
+
+
+class _RunSettings:
+    """``settings`` as the run resolved them: the per-run reference strategies applied."""
+
+    def __init__(self, settings, seg: str, parse: str) -> None:
+        self._settings = settings
+        self.REF_SEG_STRATEGY = seg
+        self.REF_PARSE_STRATEGY = parse
+
+    def __getattr__(self, name):
+        return getattr(self._settings, name)
+
+
+def _run_models(ctx: PipelineContext, seg: str, parse: str, *, laid_out: bool) -> list | None:
+    """``extraction.settings.models``: the models this run was set to load."""
+    from bibr.utils.model_provenance import export_models
+
+    return export_models(
+        _RunSettings(ctx.settings, seg, parse),
+        layout=laid_out,
+        # A --no-llm run extracts no metadata, references or section types with a
+        # model (post_parse.py): only layout and the sentence splitter run.
+        extraction=getattr(ctx.config, "no_llm", False) is not True,
+    )
 
 
 def _build_extraction(ctx: PipelineContext, paper, fs=None) -> dict:
@@ -151,6 +176,8 @@ def _build_extraction(ctx: PipelineContext, paper, fs=None) -> dict:
             "native_text_formula_number": (
                 getattr(ctx.settings.ocr, "native_text_formula_number", False) is True
             ),
+            "mode": ctx.config.mode,
+            "models": _run_models(ctx, seg_strategy, parse_strategy, laid_out=ocr is not None),
         },
         "timings": timings,
         "usage": build_usage_export(paper.llm_usage_labels or None),

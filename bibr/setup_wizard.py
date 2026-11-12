@@ -1,7 +1,10 @@
 """Interactive setup wizard for bibr.
 
 Run with ``bibr setup`` after installation for the recommended easy flow, or
-``bibr setup --advanced`` for the detailed provider/backend picker.
+``bibr setup --advanced`` for the detailed provider/backend picker. Both write
+``PIPELINE_MODE`` (``fast``: local models only, no LLM and no key; ``full``: the
+LLM they configured), so the mode a run takes never depends on which keys happen
+to be set later.
 """
 
 import importlib.metadata
@@ -19,7 +22,7 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
@@ -50,7 +53,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 EXTRAS = {
-    "ml": "Local ML models for layout detection and NER references (recommended; Windows uses this with glm-llama)",
+    "ml": "Torch for the local models: GPU/MPS inference and the CRF reference segmenter (the default ONNX models run without it)",
     "vllm": "Managed vLLM runtime for PaddleOCR-VL OCR and the local LLM on Linux/CUDA (Python 3.11-3.13)",
     "local": "In-process local OCR/LLM runtime (vllm-mlx) for Apple Silicon",
     "local-mlx": "Local OCR optimized for Apple Silicon Macs",
@@ -87,6 +90,10 @@ WTPSPLIT_MODELS: dict[str, str] = {
     "sat-3l-sm": "Faster, but 3l and lower produce more frequent text artifacts",
     "sat-1l-sm": "Fastest, but 3l and lower produce more frequent text artifacts",
 }
+
+# The first question of the easy flow. Yes writes PIPELINE_MODE=fast and finishes;
+# no goes on to the LLM tiers, which write PIPELINE_MODE=full.
+FAST_MODE_PROMPT = "Run in fast mode, with no LLM and no API key?"
 
 # Honest first-run download note per resolved OCR backend, for the smoke-test
 # step. Sizes are approximate. Cloud vision backends and external HTTP servers
@@ -141,8 +148,8 @@ def _available_extras() -> dict[str, str]:
         extras.pop("local-mlx", None)
         extras.pop("vllm", None)
         extras["ml"] = (
-            "Local ML models for layout detection and NER references "
-            "(recommended with Windows glm-llama OCR)"
+            "Torch for the local models: the CRF reference segmenter and torch inference "
+            "(the default ONNX models, and Windows glm-llama OCR, run without it)"
         )
     elif sys.platform == "linux":
         # ``local`` / ``local-mlx`` resolve to nothing on Linux (their only
@@ -203,7 +210,7 @@ def _caused_by_configuration_error(exc: BaseException) -> bool:
 
 
 SetupPrompt = Literal["install_extras", "cloud_api_key", "private_server_url", "smoke_test"]
-SetupTier = Literal["fully_local", "mostly_local", "private_server", "cloud_fallback"]
+SetupTier = Literal["fast", "fully_local", "mostly_local", "private_server", "cloud_fallback"]
 
 
 @dataclass(frozen=True)
@@ -453,8 +460,14 @@ def _build_recommended_setup(
     machine: str | None = None,
     allow_cloud: bool = False,
     llama_server: SetupLlamaServer | None = None,
+    fast: bool = False,
 ) -> RecommendedSetup:
     """Build the easy setup recommendation without touching terminal state.
+
+    ``fast`` asks for fast mode, which runs on any machine: local models, no LLM
+    and no key. Every other plan is an LLM tier and gets only what the hardware
+    allows (``viable_local``). Each plan carries its ``PIPELINE_MODE``, so what
+    setup writes says what the user chose whichever keys are set later.
 
     ``llama_server`` is the llama.cpp server found on PATH
     (``_llama_server_for_card``). When it is not given, PATH is read only when
@@ -493,6 +506,7 @@ def _build_recommended_setup(
         )
 
     base_env = {
+        "PIPELINE_MODE": "fast" if fast else "full",
         "WTPSPLIT_MODEL": "sat-6l-sm",
         "REF_SEG_STRATEGY": "geom",
         "REF_PARSE_STRATEGY": "ner",
@@ -500,9 +514,40 @@ def _build_recommended_setup(
         "CROSSREF_CONSOLIDATE": "off",
     }
 
+    # Only the optional LLM and OCR upgrades need a card or an Apple chip.
     viable_local = platform_key in {"cuda", "mlx"} and (
         accelerator_memory_gb is None or accelerator_memory_gb >= 5
     )
+    if fast:
+        # No OCR_BACKEND and no LLM settings: the OCR route stays automatic, and a
+        # fast run calls no LLM. Torch (the ml extra) is not needed either.
+        extras = {"demo"}
+        if platform_key == "cuda" and _recommends_gpu_extra(sys_platform_name, machine_name):
+            extras.add("gpu")
+        local = "a local model, " if viable_local else ""
+        return RecommendedSetup(
+            tier="fast",
+            env=base_env,
+            extras=extras,
+            preset_name="recommended-fast",
+            privacy_summary=(
+                "no LLM and no key; document contents stay on this machine unless you "
+                "configure a cloud OCR route"
+            ),
+            download_summary=(
+                "downloads about 2-3 GB of local layout, sentence, section, reference and "
+                "front-matter models on first use"
+            ),
+            runtime_summary=(
+                "No LLM calls: nothing to host and no per-paper cost, on the CPU or, with "
+                "the gpu extra, on an NVIDIA card."
+            ),
+            required_prompts=("install_extras", "smoke_test"),
+            note=(
+                f"Answer no to add an LLM instead ({local}a private server or Claude in "
+                "the cloud). `bibr setup` or `bibr chew --full` switches later."
+            ),
+        )
     if viable_local:
         ocr_backend = "paddle"
         env = {**base_env, "OCR_BACKEND": ocr_backend}
@@ -581,7 +626,6 @@ def _build_recommended_setup(
                 "not a hang; OCR-only stages are much faster."
             )
         extras = {
-            "ml",
             "demo",
             *_platform_local_extra(
                 sys_platform_name,
@@ -622,7 +666,7 @@ def _build_recommended_setup(
                 "LLM_PROVIDER": "anthropic",
                 "LLM_MODEL": LLM_DEFAULTS["anthropic"]["model"],
             },
-            extras={"ml", "demo"},
+            extras={"demo"},
             preset_name="recommended-cloud",
             privacy_summary="document contents are sent to the approved cloud provider (Anthropic)",
             download_summary=(
@@ -635,7 +679,7 @@ def _build_recommended_setup(
     return RecommendedSetup(
         tier="private_server",
         env={**base_env, "OCR_BACKEND": "glm-http"},
-        extras={"ml", "demo"},
+        extras={"demo"},
         preset_name="private-server",
         privacy_summary="document contents stay on your machine or your private server",
         download_summary="downloads local layout/reference models; OCR/LLM weights live on your server",
@@ -701,6 +745,23 @@ def _setup_env_file() -> Path:
 
     chain = _default_env_files()
     return (chain[-1] if chain else Path(".env")).absolute()
+
+
+# The settings that make a fast run use an OCR route instead of the PDF text layer
+# (bibr.ocr.registry.ocr_route_chosen).
+_OCR_ROUTE_KEYS = ("OCR_BACKEND", "OCR_MODEL", "OCR_PROFILE")
+
+
+def _earlier_ocr_route_keys(env_vars: dict[str, str]) -> tuple[str, ...]:
+    """The OCR route settings a merge must turn off for *env_vars* to mean what setup said.
+
+    A fast setup that picked no OCR route promises the text layer and no cloud
+    calls, but an ``OCR_BACKEND`` left by an earlier setup (the cloud plan
+    writes ``anthropic``) would still choose a route.
+    """
+    if env_vars.get("PIPELINE_MODE") != "fast" or any(k in env_vars for k in _OCR_ROUTE_KEYS):
+        return ()
+    return _OCR_ROUTE_KEYS
 
 
 def _with_llm_routing(env_vars: dict[str, str]) -> dict[str, str]:
@@ -889,6 +950,7 @@ def _select_model(models: list[str], default: str, console: Console) -> str | No
 def _write_env_fresh(path: Path, env_vars: dict[str, str]) -> None:
     """Write a new ``.env`` file with comment section headers."""
     sections: dict[str, list[str]] = {
+        "Run mode": ["PIPELINE_MODE"],
         "LLM Provider": [
             "LLM_PROVIDER",
             "LLM_MODEL",
@@ -1092,6 +1154,20 @@ class SetupWizard:
         system_gb = _get_system_memory_gb()
         self._print_detection(platform_key, accel_gb)
 
+        # Fast mode first: it needs no key, no server and no particular hardware, so
+        # every machine can finish setup with something that works. The LLM tiers
+        # below are the optional upgrade.
+        fast = _build_recommended_setup(
+            platform_key=platform_key,
+            accelerator_memory_gb=accel_gb,
+            system_memory_gb=system_gb,
+            fast=True,
+        )
+        self._print_recommendation(fast)
+        if Confirm.ask(FAST_MODE_PROMPT, default=True):
+            self._finish_recommended_setup(fast)
+            return
+
         llama_server = SetupLlamaServer()
         if _llama_pair_card(platform_key, accel_gb, sys.platform):
             # Up to two 8 s probes of the server on PATH (a CUDA build can be
@@ -1109,12 +1185,12 @@ class SetupWizard:
         if setup.tier == "fully_local":
             self._print_recommendation(setup)
             if not Confirm.ask("Use this configuration?", default=True):
-                self._handle_decline()
+                self._handle_decline(fast)
                 return
             self._finish_recommended_setup(setup)
             return
 
-        # Weak-hardware fork: local OCR/LLM models are not viable here.
+        # Local OCR/LLM models are not viable here, so an LLM needs a server.
         self.console.print(
             "\nLocal OCR and LLM models aren't a good fit for this machine's hardware."
         )
@@ -1123,14 +1199,14 @@ class SetupWizard:
             self._finish_recommended_setup(setup)
             return
 
-        # No local, no private server: the only remaining path is the cloud.
+        # No local, no private server: the only remaining LLM path is the cloud.
         self.console.print(
             "\nWithout a local or private server, bibr can process papers with Claude "
             "Haiku 5.5 in the cloud. This sends document-derived content (page images and "
             "extracted text) to Anthropic."
         )
         if not Confirm.ask("Send document-derived content to Anthropic Claude?", default=False):
-            self._handle_decline()
+            self._handle_decline(fast)
             return
 
         cloud_setup = _build_recommended_setup(
@@ -1150,19 +1226,26 @@ class SetupWizard:
             mem = f"{accel_gb:.0f} GB VRAM" if accel_gb is not None else "VRAM"
             line = f"Detected: NVIDIA GPU, {mem}"
         else:
-            line = (
-                "Detected: no NVIDIA GPU or Apple Silicon — local OCR/LLM models are "
-                "not recommended on this machine."
-            )
+            line = "Detected: no NVIDIA GPU or Apple Silicon — the local models run on the CPU."
         self.console.print(f"[dim]{line}[/dim]")
 
-    def _handle_decline(self) -> None:
-        """Declining a recommendation is a handoff to --advanced, not a dead end."""
+    def _handle_decline(self, fast: RecommendedSetup) -> None:
+        """No LLM route was chosen: hand off to --advanced, or settle on fast mode.
+
+        ``fast`` is the fast-mode plan the first question offered. Fast mode needs no
+        LLM, so declining every LLM route leaves it to set up instead of an empty
+        configuration; only a user who declines that too leaves nothing saved.
+        """
         if Confirm.ask("Switch to the advanced wizard for exact control now?", default=True):
             self.run_advanced()
             return
+        self.console.print("\nNo LLM route chosen. Fast mode needs none.")
+        if Confirm.ask("Set up fast mode instead?", default=True):
+            self._finish_recommended_setup(fast)
+            return
         self.console.print(
-            "[dim]No problem. Run [cyan]bibr setup --advanced[/cyan] when you're ready.[/dim]"
+            "[dim]Nothing was saved. Run [cyan]bibr setup[/cyan] or "
+            "[cyan]bibr setup --advanced[/cyan] when you're ready.[/dim]"
         )
 
     def _finish_recommended_setup(self, setup: RecommendedSetup) -> None:
@@ -1260,13 +1343,15 @@ class SetupWizard:
             "a little tuning.[/yellow]"
         )
         self.console.print(
-            "[dim]Setup will prefer private/local processing when possible, but fully "
-            "local runs can be slow and may download several GB.[/dim]"
+            "[dim]Setup starts with fast mode: local models only, no LLM and no key. An "
+            "LLM is an optional upgrade; fully local LLM runs can be slow and may download "
+            "several GB.[/dim]"
         )
         self.console.print()
 
     # Lowercase, human tier names for the plan preview (cloud_fallback -> "cloud").
     _TIER_LABELS = {
+        "fast": "fast mode",
         "fully_local": "fully local",
         "mostly_local": "mostly local",
         "private_server": "private server",
@@ -1300,6 +1385,8 @@ class SetupWizard:
 
     def _plan_ocr_value(self, setup: RecommendedSetup) -> str:
         backend = setup.env.get("OCR_BACKEND", "")
+        if setup.tier == "fast":
+            return "automatic (bibr picks the route for this machine)"
         if setup.tier == "private_server":
             return f"your configured OCR server ({backend})"
         if setup.tier == "cloud_fallback":
@@ -1312,6 +1399,8 @@ class SetupWizard:
         return f"{backend} (local OCR)"
 
     def _plan_llm_value(self, setup: RecommendedSetup) -> str:
+        if setup.tier == "fast":
+            return "none (fast mode makes no LLM call)"
         if setup.tier == "private_server":
             return "your OpenAI-compatible server"
         if setup.tier == "cloud_fallback":
@@ -1346,7 +1435,8 @@ class SetupWizard:
         else:
             lines.append(
                 "  [dim]bibr demo needs the demo extra — install it with[/dim] "
-                "[cyan]uv sync --extra demo[/cyan] [dim](or pip install 'bibr\\[demo]')[/dim]"
+                "[cyan]uv tool install 'bibr\\[demo]'[/cyan] "
+                "[dim](in a source checkout: uv sync --extra demo)[/dim]"
             )
         lines.append("  [cyan]bibr chew paper.pdf[/cyan]     — process a paper directly")
         lines.append("  [cyan]bibr doctor[/cyan]             — validate your setup")
@@ -1483,16 +1573,23 @@ class SetupWizard:
     def _step_llm_provider(self) -> None:
         ui.step(self.console, 2, 6, "LLM provider")
         self.console.print(
-            "[dim]tip: bibr's extraction tasks don't need a frontier model. hosted, the\n"
+            "[dim]none: fast mode, local models only, no LLM and no key (the default).\n"
+            "tip: bibr's extraction tasks don't need a frontier model. hosted, the\n"
             "recommended claude-haiku-5-5 is within a point of Qwen3.8-27B on bibr's\n"
             "dev set, at about $0.004 a paper. self-hosting? choose local for bibr's\n"
             "fine-tuned 4B or 2B model.[/dim]"
         )
         provider = Prompt.ask(
             "Provider",
-            choices=["google", "openai", "anthropic", "groq", "ollama", "local"],
-            default="anthropic",
+            choices=["none", "google", "openai", "anthropic", "groq", "ollama", "local"],
+            default="none",
         )
+        # The mode is written whichever way this goes: a later key, or one left in
+        # .env by an earlier setup, must not decide it.
+        if provider == "none":
+            self.env_vars["PIPELINE_MODE"] = "fast"
+            return
+        self.env_vars["PIPELINE_MODE"] = "full"
         if provider == "local":
             self._step_llm_local()
             return
@@ -1694,6 +1791,9 @@ class SetupWizard:
     def _step_test_connection(self) -> None:
         ui.step(self.console, 3, 6, "Test connection")
 
+        if self.env_vars.get("PIPELINE_MODE") == "fast":
+            self.console.print("[dim]Fast mode makes no LLM call — nothing to test.[/dim]")
+            return
         if self.env_vars.get("LLM_BACKEND") in ("vllm", "vllm-mlx", "rapid-mlx", "llama-cpp"):
             self._offer_local_server_test()
             return
@@ -1861,21 +1961,29 @@ class SetupWizard:
             self.env_vars["OCR_VISION_MODEL"] = CLOUD_OCR_MODELS[ocr_backend]
 
         # Reference parsing strategy (mirrors the ``--refs`` chew flag)
-        self.console.print("\n[dim]Reference parsing (bibliography → structured fields):[/dim]")
-        self.console.print(
-            "  [cyan]ner[/cyan] — local encoder-CRF parser (default): cuts most of\n"
-            "        bibr's LLM token use (references are the bulk of it); reference\n"
-            "        field precision is lower (requires the ml extra)\n"
-            "  [cyan]llm[/cyan] — batched LLM parsing: full reference precision, at the\n"
-            "        cost of more tokens"
-        )
-        refs = Prompt.ask(
-            "Reference parsing",
-            choices=["ner", "llm"],
-            default="ner",
-        )
-        if refs != "ner":
-            self.env_vars["REF_PARSE_STRATEGY"] = refs
+        if self.env_vars.get("PIPELINE_MODE") == "fast":
+            # The llm parser calls an LLM, which fast mode never does.
+            self.console.print(
+                "\n[dim]Reference parsing: the local ner parser (the llm parser needs an LLM, "
+                "which fast mode never calls).[/dim]"
+            )
+            refs = "ner"
+        else:
+            self.console.print("\n[dim]Reference parsing (bibliography → structured fields):[/dim]")
+            self.console.print(
+                "  [cyan]ner[/cyan] — local encoder-CRF parser (default): cuts most of\n"
+                "        bibr's LLM token use (references are the bulk of it); reference\n"
+                "        field precision is lower (runs on the ONNX runtime, no torch)\n"
+                "  [cyan]llm[/cyan] — batched LLM parsing: full reference precision, at the\n"
+                "        cost of more tokens"
+            )
+            refs = Prompt.ask(
+                "Reference parsing",
+                choices=["ner", "llm"],
+                default="ner",
+            )
+            if refs != "ner":
+                self.env_vars["REF_PARSE_STRATEGY"] = refs
 
         # `bibr setup` installs the full local stack: the ONNX runtime in core
         # serves these models too, but the ml (torch) extra is what gives this
@@ -1951,6 +2059,7 @@ class SetupWizard:
             self.console.print("[dim]Nothing to save — no settings were collected.[/dim]")
             return
 
+        self._announce_mode_change()
         if self.env_path.exists():
             action = Prompt.ask(
                 f"{self.env_path} already exists — what should I do?",
@@ -1959,11 +2068,23 @@ class SetupWizard:
             )
             if action == "skip":
                 self.console.print("[dim]Skipped — .env unchanged[/dim]")
+                self._note_mode_not_saved()
                 return
             if action == "merge":
-                _merge_env(self.env_path, _with_llm_routing(self.env_vars))
+                commented = _merge_env(
+                    self.env_path,
+                    _with_llm_routing(self.env_vars),
+                    comment_out=_earlier_ocr_route_keys(self.env_vars),
+                )
                 self._env_written = True
                 ui.ok(self.console, f"Merged new settings into {self.env_path}")
+                if commented:
+                    self.console.print(
+                        f"[yellow]Commented out {', '.join(commented)}, an OCR route from an "
+                        "earlier setup: fast mode reads the PDF's text layer, so document "
+                        "contents stay on this machine. `bibr chew --ocr <route>` picks an "
+                        "OCR route for one run.[/yellow]"
+                    )
                 self._warn_environment_overrides()
                 if save_preset_name:
                     self._save_preset(save_preset_name)
@@ -1979,6 +2100,41 @@ class SetupWizard:
             self._save_preset(save_preset_name)
         else:
             self._offer_save_preset()
+
+    def _announce_mode_change(self) -> None:
+        """Say when saving switches the mode bibr runs in today.
+
+        Setup run again over a working configuration (an LLM configured, no
+        ``PIPELINE_MODE``) and answered with Enter would otherwise move the
+        user to fast mode without a word. What bibr runs today is the resolver's
+        answer over the settings this process loaded: ``.env`` files and the shell.
+        """
+        new = self.env_vars.get("PIPELINE_MODE")
+        if new not in ("fast", "full"):
+            return
+        from bibr.config import snapshot_settings
+        from bibr.run_mode import resolve_mode
+
+        try:
+            today = resolve_mode(snapshot_settings())
+        except Exception:  # noqa: BLE001 — a bad setting is reported where it is used
+            return
+        if today != new:
+            kept = " Fast mode never calls an LLM; yours stay as they are." if new == "fast" else ""
+            self.console.print(
+                f"[yellow]With your current settings bibr runs in {today} mode; saving "
+                f"this switches it to {new}.{kept}[/yellow]"
+            )
+
+    def _note_mode_not_saved(self) -> None:
+        """After a skipped save: the mode this setup chose was not written."""
+        mode = self.env_vars.get("PIPELINE_MODE")
+        if mode in ("fast", "full"):
+            self.console.print(
+                f"[yellow]PIPELINE_MODE={mode} was not saved, so bibr keeps the mode your "
+                f"settings already give it. `bibr chew --{mode}` runs one paper in {mode} "
+                "mode.[/yellow]"
+            )
 
     def _redact(self, text: str) -> str:
         """*text* with every configured secret and anything key-shaped masked."""
@@ -2060,7 +2216,14 @@ class SetupWizard:
             self.console.print(f"[yellow]! Couldn't save preset:[/yellow] {escape(str(exc))}")
 
     def _smoke_test_note(self) -> str:
-        """Honest first-run download note for the configured OCR backend."""
+        """Honest first-run download note for what the smoke test runs."""
+        if self.env_vars.get("PIPELINE_MODE") == "fast":
+            return (
+                "[dim]Runs page 1 of the sample paper shipped with bibr in fast mode, the "
+                "pipeline a plain `bibr chew` runs. The layout, sentence, section, reference "
+                "and front-matter models download on first run (about 2-3 GB, once), and any "
+                "OCR route you configured reads pages that need one.[/dim]"
+            )
         from bibr.ocr.registry import resolve_backend_name
 
         backend = self.env_vars.get("OCR_BACKEND") or None
@@ -2071,6 +2234,17 @@ class SetupWizard:
             f"LLM/reference extraction for speed, and {note}. Layout and sentence "
             "models may also download on first run.[/dim]"
         )
+
+    def _smoke_test_options(self) -> dict[str, Any]:
+        """The ``chew`` options of the smoke test.
+
+        A fast setup runs the real fast pipeline, so the test verifies what a plain
+        ``bibr chew`` will run. The LLM tiers keep the structure-only check: a full
+        run would start the LLM server, which ``_run_validation`` tests on its own.
+        """
+        if self.env_vars.get("PIPELINE_MODE") == "fast":
+            return {"pages": "1", "mode": "fast"}
+        return {"pages": "1", "no_llm": True, "refs": "off"}
 
     def _ocr_unreachable_hint(self) -> str:
         """Hint text for an unreachable/failed OCR backend."""
@@ -2194,7 +2368,7 @@ class SetupWizard:
                 with self.console.status(
                     "Running test extraction (first run may download models) …"
                 ):
-                    result = chew(sample_path, pages="1", no_llm=True, refs="off")
+                    result = chew(sample_path, **self._smoke_test_options())
             except Exception as exc:  # noqa: BLE001 — must never crash the wizard
                 msg = self._redact(str(exc))
                 ui.error(self.console, f"Test extraction failed: {escape(msg)}")
@@ -2230,26 +2404,32 @@ Interactive setup wizard for bibr.
 By default this runs the short recommended flow:
 
   1. Detect your hardware (Apple Silicon / NVIDIA GPU / neither).
-  2. Show a concrete plan preview (OCR + LLM backends, extras, memory mode,
-     privacy, first-run download, speed) and ask a single confirmation.
-  3. If this machine can't run local models, fork: use a private OCR/LLM
-     server if you have one, otherwise give informed consent to cloud
-     (Anthropic Claude Haiku 5.5). Declining any recommendation offers a
-     handoff to --advanced rather than dead-ending.
+  2. Offer fast mode, the default: local models only, with no LLM and no API
+     key, on any machine. Yes writes PIPELINE_MODE=fast.
+  3. Answer no to add an LLM instead. Setup then shows a concrete plan preview
+     (OCR + LLM backends, extras, memory mode, privacy, first-run download,
+     speed) for a local model where this machine can run one, a private
+     OCR/LLM server, or Claude Haiku 5.5 in the cloud (with an informed consent
+     question). These write PIPELINE_MODE=full. Declining every LLM route offers
+     --advanced, then fast mode, rather than dead-ending.
   4. Write .env (and save a preset), then optionally install extras and run
      validation: a connection test for cloud, a local server health check for
-     managed local LLMs, and a smoke-test extraction on a bundled sample PDF.
+     managed local LLMs, and a smoke-test extraction on a bundled sample PDF
+     (the real fast pipeline when you chose fast mode).
 
-Use --advanced for step-by-step control over extras, LLM provider + API key,
-connection test, OCR backend, memory mode, and writing .env.
+Use --advanced for step-by-step control over extras, LLM provider + API key
+(or none, for fast mode), connection test, OCR backend, memory mode, and
+writing .env.
 
 Re-running is safe: the wizard does not take its answers from your existing
 .env and writes .env only at the save step. If one is present then, it asks
 whether to overwrite, merge, or skip (merge is the default, so hand-edited
-values are preserved). Choosing an LLM provider also writes LLM_BACKEND=cloud,
-and a blank LLM_API_KEY or LLM_BASE_URL where you entered none, so that an
-older key or server cannot override the one you entered. Press Ctrl+C at any
-time to quit without saving.
+values are preserved). Every run writes PIPELINE_MODE (fast or full), so a key
+added or removed later cannot change the mode; a .env from an earlier version
+has no entry and stays on auto until you run setup again. Choosing an LLM
+provider also writes LLM_BACKEND=cloud, and a blank LLM_API_KEY or LLM_BASE_URL
+where you entered none, so that an older key or server cannot override the one
+you entered. Press Ctrl+C at any time to quit without saving.
 
 The wizard writes ./.env, or the last file BIBR_ENV_FILE lists. It does not
 run while BIBR_DISABLE_DOTENV or an empty BIBR_ENV_FILE turns .env loading

@@ -177,6 +177,7 @@ _ERROR_KIND_TO_HTTP = {
     "input_validation": 400,
     "upstream_service": 502,
     "processing": 422,
+    "model_override": 500,
     "unexpected": 500,
 }
 
@@ -192,6 +193,21 @@ _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 def _escape_controls(text: str) -> str:
     """*text* with each control character spelled as its escape (``\\n``, ``\\x1b``)."""
     return _CONTROL_CHARS_RE.sub(lambda match: repr(match.group())[1:-1], text)
+
+
+#: What the refusal of a scan says to a client in place of the command-line
+#: routes: a client cannot pass ``--ocr``, the operator chooses the route.
+_SCAN_NEEDS_OCR_SERVER = (
+    "an OCR route, which this server did not use: it read the PDF text layer only, and "
+    "its operator chooses the route (OCR_BASE_URL points the server at an OCR server)"
+)
+
+
+def _scan_refusal_for_a_client(message: str) -> str:
+    """The pipeline's ``scan_needs_ocr`` message without its command-line flags."""
+    from bibr.ocr.registry import SCAN_NEEDS_OCR_ROUTES
+
+    return message.replace(SCAN_NEEDS_OCR_ROUTES, _SCAN_NEEDS_OCR_SERVER)
 
 
 def _client_processing_message(exc: ProcessingError) -> str:
@@ -211,6 +227,8 @@ def _client_processing_message(exc: ProcessingError) -> str:
     # The invalid-output error chains its own filtered diagnostic.
     if exc.__cause__ is None or type(exc.safe_diagnostics) is SafeLlmDiagnostics:
         message = str(exc)
+        if exc.error_code == "scan_needs_ocr":
+            message = _scan_refusal_for_a_client(message)
     else:
         stage = f" in {exc.failed_stage}" if exc.failed_stage else ""
         code = f" ({exc.error_code})" if exc.error_code else ""
@@ -224,6 +242,7 @@ def _client_processing_message(exc: ProcessingError) -> str:
 # `refs=llm` for full-precision parsing without redeploying the server.
 _VALID_REF_PARSE = frozenset({"ner", "llm", "llm-chunked", "ref-llm", "off"})
 _VALID_REF_SEG = frozenset({"geom", "region", "llm", "crf"})
+_VALID_MODE = frozenset({"auto", "fast", "full"})
 
 # Default in-flight LLM concurrency for serve. The library default
 # (LLM_MAX_CONCURRENCY=0 = unlimited) suits CLI/cloud batch, but a single
@@ -374,6 +393,10 @@ class BibrPipelineAPI(ls.LitAPI):
         ``off`` skips reference extraction entirely for a fast core-metadata pass.
       - ``ref_seg`` (optional, ``geom``/``region``/``llm``/``crf``): per-request
         reference segmentation strategy (absent → server-side REF_SEG_STRATEGY).
+      - ``mode`` (optional, ``auto``/``fast``/``full``): run this request without
+        any LLM call (``fast``) or with the configured one (``full``); absent or
+        ``auto`` → the deployment's mode (PIPELINE_MODE, which is fast when no
+        LLM is configured). The response cache keys on the effective mode.
     """
 
     def __init__(
@@ -396,7 +419,7 @@ class BibrPipelineAPI(ls.LitAPI):
 
         from bibr.serve.deployments.layout import LayoutDetector
         from bibr.serve.deployments.segmenter import SentenceSegmenter
-        from bibr.serve.pipeline import ServePipeline
+        from bibr.serve.pipeline import SERVE_HTTP_BACKEND, ServePipeline, serve_ocr_route
         from bibr.utils.circuit_breaker import AsyncCircuitBreaker
 
         # Bound LLM concurrency for serve unless the operator set it explicitly
@@ -439,29 +462,33 @@ class BibrPipelineAPI(ls.LitAPI):
         self._ocr_sem = asyncio.Semaphore(self._settings.ocr.max_concurrent_regions)
         self.ocr_base_url = self._settings.OCR_BASE_URL.rstrip("/")
 
-        from bibr.ocr.http_security import ocr_request_headers
+        # A deployment on the text-layer route contacts no OCR server, so
+        # whatever OCR_BASE_URL holds there is neither validated nor opened.
+        self._http_client: httpx.AsyncClient | None = None
+        if serve_ocr_route(self._settings) == SERVE_HTTP_BACKEND:
+            from bibr.ocr.http_security import ocr_request_headers
 
-        ocr_headers = ocr_request_headers(
-            self.ocr_base_url,
-            self._settings.ocr.api_key,
-            allow_insecure_http=self._settings.ocr.allow_insecure_http,
-        )
+            ocr_headers = ocr_request_headers(
+                self.ocr_base_url,
+                self._settings.ocr.api_key,
+                allow_insecure_http=self._settings.ocr.allow_insecure_http,
+            )
 
-        self._http_client = httpx.AsyncClient(
-            headers=ocr_headers,
-            timeout=httpx.Timeout(
-                connect=10.0,
-                read=float(self._settings.ocr.request_timeout),
-                write=30.0,
-                pool=10.0,
-            ),
-            http2=True,
-            limits=httpx.Limits(
-                max_connections=100,
-                max_keepalive_connections=50,
-                keepalive_expiry=30.0,
-            ),
-        )
+            self._http_client = httpx.AsyncClient(
+                headers=ocr_headers,
+                timeout=httpx.Timeout(
+                    connect=10.0,
+                    read=float(self._settings.ocr.request_timeout),
+                    write=30.0,
+                    pool=10.0,
+                ),
+                http2=True,
+                limits=httpx.Limits(
+                    max_connections=100,
+                    max_keepalive_connections=50,
+                    keepalive_expiry=30.0,
+                ),
+            )
 
         # Build the pipeline once per worker. Per-request fields (start_page /
         # end_page / include_figures) ride along on a fresh RunConfig in
@@ -497,11 +524,17 @@ class BibrPipelineAPI(ls.LitAPI):
             self._pipeline._resources,
         )
 
-        logger.info(
-            "BibrPipelineAPI ready (ocr via HTTP at %s, OCR sem=%d)",
-            self.ocr_base_url,
-            self._settings.ocr.max_concurrent_regions,
-        )
+        if self._pipeline.ocr_route == "text-layer":
+            logger.info(
+                "BibrPipelineAPI ready (text-layer route: PDFs are read from their own text, "
+                "no OCR server is contacted, a scanned PDF is refused)"
+            )
+        else:
+            logger.info(
+                "BibrPipelineAPI ready (ocr via HTTP at %s, OCR sem=%d)",
+                self.ocr_base_url,
+                self._settings.ocr.max_concurrent_regions,
+            )
 
     def _ensure_cache(self) -> None:
         if self._cache_inited:
@@ -615,6 +648,14 @@ class BibrPipelineAPI(ls.LitAPI):
             "ref_seg must be one of: " + ", ".join(sorted(_VALID_REF_SEG)),
         )
 
+        mode = self._opt_choice(
+            request.get("mode"),
+            _VALID_MODE,
+            "mode must be one of: " + ", ".join(sorted(_VALID_MODE)),
+        )
+        if mode == "auto":
+            mode = None  # follow the deployment, as an absent field does
+
         return {
             "filename": filename,
             "content": content,
@@ -628,6 +669,7 @@ class BibrPipelineAPI(ls.LitAPI):
             "consolidate": consolidate,
             "refs": refs,
             "ref_seg": ref_seg,
+            "mode": mode,
             "request_id": _link_id(request.get("request_id")),
             "job_id": _link_id(request.get("job_id")),
         }
@@ -676,6 +718,10 @@ class BibrPipelineAPI(ls.LitAPI):
         from bibr.extract.ref_extractor import _resolve_ref_strategies
 
         eff_ref_seg, eff_refs = _resolve_ref_strategies(ref_seg, refs)
+        # The effective run mode, for the same reason: an auto deployment flips
+        # between fast and full when an API key is added, and a request can name
+        # either, so a fast result must never answer a full request.
+        effective_mode = self._effective_mode(inputs.get("mode"))
 
         # decode_request computes this while streaming. Direct embedders that
         # bypass decode retain a compatibility fallback.
@@ -701,6 +747,8 @@ class BibrPipelineAPI(ls.LitAPI):
             crossref=effective_crossref,
             input_format=Path(filename).suffix,
             include_region_meta=include_region_meta,
+            mode=effective_mode,
+            ocr_route=getattr(getattr(self, "_pipeline", None), "ocr_route", None),
         )
 
         if not self._cache:
@@ -1084,6 +1132,7 @@ class BibrPipelineAPI(ls.LitAPI):
         refs = inputs.get("refs")
         ref_seg = inputs.get("ref_seg")
         crossref = inputs.get("crossref")
+        mode = inputs.get("mode")
 
         # Per-request fields ride on a fresh RunConfig; the pipeline is shared.
         overrides: dict[str, object] = {
@@ -1101,6 +1150,9 @@ class BibrPipelineAPI(ls.LitAPI):
         # with (normally None → CROSSREF_ENRICH).
         if crossref is not None:
             overrides["crossref"] = crossref
+        # Likewise the mode: absent keeps the deployment's.
+        if mode is not None:
+            overrides["mode"] = mode
         config = dataclasses.replace(self._pipeline._config, **overrides)
 
         # Gate entry into the expensive pipeline run. The async loop dispatches
@@ -1212,6 +1264,18 @@ class BibrPipelineAPI(ls.LitAPI):
             return bool(deployment_default)
         return bool(self._settings.crossref.enrich)
 
+    def _effective_mode(self, requested: str | None) -> str:
+        """Resolve a request's ``mode`` the way the pipeline will: its value, else the deployment's."""
+        if requested in ("fast", "full"):
+            return requested
+        pipeline = getattr(self, "_pipeline", None)
+        deployment_mode = getattr(getattr(pipeline, "_config", None), "mode", None)
+        if deployment_mode in ("fast", "full"):
+            return deployment_mode
+        from bibr.run_mode import resolve_mode
+
+        return resolve_mode(self._settings, backend="cloud")
+
     @staticmethod
     def _cache_key(
         content_hash: str,
@@ -1225,11 +1289,17 @@ class BibrPipelineAPI(ls.LitAPI):
         crossref: bool = False,
         input_format: str | None = None,
         include_region_meta: bool = False,
+        mode: str | None = None,
+        ocr_route: str | None = None,
     ) -> str:
         """Response-cache key: the full SHA-256 of the upload (never the 16-hex
         ``file_hash`` display id) plus every option that changes the export.
         An option at its default adds nothing, so a new option leaves every
-        existing key — and the results cached under it — as it was."""
+        existing key — and the results cached under it — as it was. A full-mode
+        run is the default and adds nothing; a fast run adds ``:fast``. A
+        deployment on the text-layer route adds ``:textlayer``, so one that
+        shares its cache with an OCR deployment never answers with the other's
+        reading of a PDF."""
         key = f"json:{content_hash}"
         if start_page is not None:
             key += f":sp{start_page}"
@@ -1249,6 +1319,10 @@ class BibrPipelineAPI(ls.LitAPI):
             key += f":rseg:{ref_seg}"
         if crossref:
             key += ":enrich"
+        if mode == "fast":
+            key += ":fast"
+        if ocr_route == "text-layer":
+            key += ":textlayer"
         if input_format:
             key += f":fmt:{input_format.lstrip('.').lower()}"
         return key
@@ -1264,10 +1338,22 @@ class BibrPipelineAPI(ls.LitAPI):
             ProcessingError,
             UpstreamServiceError,
         )
+        from bibr.utils.model_overrides import find_model_override_error
         from bibr.utils.redact import redact_urls
 
         detail = str(exc)
-        if isinstance(exc, InputValidationError):
+        override = find_model_override_error(exc)
+        if override is not None:
+            # The server's own setting names a model that does not load or keeps
+            # raising: not the paper's fault, and no retry helps. The text names
+            # the operator's model paths, so it stays in the log.
+            kind = "model_override"
+            message = (
+                "A model setting of this server names a model that cannot be used; "
+                "the server log says which (model_override_failed)"
+            )
+            detail = str(override)
+        elif isinstance(exc, InputValidationError):
             kind = "input_validation"
             message = detail
         elif isinstance(exc, (LlmTruncatedError, LlmInvalidOutputError)):
@@ -1286,6 +1372,10 @@ class BibrPipelineAPI(ls.LitAPI):
             kind = "unexpected"
             message = "Internal processing error"
         error_code = exc.error_code if isinstance(exc, (ProcessingError, LlmCallError)) else None
+        if override is not None:
+            from bibr.batch.ledger import MODEL_OVERRIDE_FAILED
+
+            error_code = MODEL_OVERRIDE_FAILED
         safe_diagnostics = exc.safe_diagnostics if isinstance(exc, ProcessingError) else None
         # Only a 422 needs this: clients already retry a 502.
         outage = isinstance(exc, ProcessingError) and exc.outage

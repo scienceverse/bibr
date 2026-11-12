@@ -138,6 +138,25 @@ region whose OCR request failed; the page then carries an
 Remaining regions use the selected OCR runtime.
 Disabling the bypass leaves metadata, outline, and geometry inspection available.
 
+**Text-layer backend.** `bibr/ocr/text_layer.py` is an OCR backend that runs no
+model: it fills every text, table and formula region from the PDF text layer.
+A fast run that names no OCR route uses it (the route is chosen by
+`bibr.ocr.registry.ocr_route_chosen`, which `bibr chew`, `bibr doctor`,
+`--dry-run`, `LocalPipeline` and the demo share), and `--ocr text-layer` or
+`OCR_BACKEND=text-layer` selects it on any run. A page is read only when its
+text layer passes the coverage, corrupt-text and lexical gates
+(`bibr/ocr/text_layer_quality.py`); any other page gets a
+`TEXT_LAYER_PAGE_UNUSABLE` warning and its regions stay unread. Tables are
+rebuilt from glyph positions (`bibr/ocr/text_layer_tables.py`), display formulas
+are read as plain text, private-use code points are always dropped and counted,
+and rare glyphs with no character mapping are shown as U+FFFD and counted
+(`TEXT_LAYER_GLYPHS_UNMAPPED`). A region bibr itself fails to read stays empty
+and is reported (`TEXT_LAYER_READ_ERROR`); the rest of the paper is read. `extraction.regions[].read_as` says which of these read each region
+(`text`, `table_rebuilt`, `formula_plain` or `unread`). A file with fewer than
+`OCR_MIN_SUCCESS_RATE` (0.5) of its text regions readable stops with
+`scan_needs_ocr`, which is not retryable. `OCR_FALLBACK_TO_TEXT_LAYER=auto` also
+swaps this backend in for an automatic chain that cannot start on the machine.
+
 **Scan path (`bibr/scan/`).** Each inspected page is classed as born-digital,
 born-digital with a broken text layer (most of its text regions failed the
 corruption gates), or a scan (no text layer, or an invisible OCR layer). Two
@@ -181,7 +200,7 @@ Post-parse pipeline runs after structure parsing:
 - **Equation extraction** -- regex + LLM fallback for statistical reporting decomposition (`equation_extractor.py`)
 - **IMRaD enforcement** -- deduplication of Abstract and References by classification-source trust; repeated Methods/Results/Discussion remain valid
 - **Source ownership** -- abstract spans, author grounding, and integrity-statement evidence are resolved against the selected article block. Ambiguous front matter can yield validation issues instead of metadata taken from another article in the file
-- **Field decisions** -- the title, authors, abstract, keywords, publication date, journal, publisher, paper type, integrity statements, structured funding and affiliations are each decided once, by one rule in `bibr/extract/field_decisions.py`, from the candidates their producers propose: the model's answer and its grounding repairs, the printed-row title fallbacks (`title_candidates.py`), the Abstract and Keywords sections, the PDF doc-info, the empty-author recovery and CRediT statement, the paper classifier, the integrity-statement resolver. The rule is the field's only writer; its receipt (the candidates considered, the one used, the rule) stays on `Paper.field_decisions` and gives `extraction.fields` its `source` and `rule`. The DOI is the identity stage's; the fields a record is built with (volume, issue, pages, ISSN, licence, language, identifiers) have one producer each; the JATS and HTML readers build the record they hand over; a run without an LLM decides no structured funding or affiliations. The structured-integrity call adds contribution roles to the decided authors afterwards, in place; the author receipt records it as a `contribution_roles` transform
+- **Field decisions** -- the title, authors, abstract, keywords, publication date, journal, publisher, paper type, integrity statements, structured funding and affiliations are each decided once, by one rule in `bibr/extract/field_decisions.py`, from the candidates their producers propose: the model's answer and its grounding repairs, the printed-row title fallbacks (`title_candidates.py`), the Abstract and Keywords sections, the PDF doc-info, the empty-author recovery and CRediT statement, the paper classifier, the integrity-statement resolver. The rule is the field's only writer; its receipt (the candidates considered, the one used, the rule) stays on `Paper.field_decisions` and gives `extraction.fields` its `source` and `rule`. The DOI is the identity stage's; the fields a record is built with (volume, issue, pages, ISSN, licence, language, identifiers) have one producer each; the JATS and HTML readers build the record they hand over; a run without an LLM decides no structured affiliations or funding, except what the fast-mode rules read: funders and award numbers (`bibr/extract/funding_rules.py`) and the city and country of each affiliation (`bibr/extract/affiliation_rules.py`). The structured-integrity call adds contribution roles to the decided authors afterwards, in place; the author receipt records it as a `contribution_roles` transform
 
 Identity validation and a core checkpoint run before enrichment. The identity
 stage alone sets the paper's DOI: it chooses among the DOIs the paper prints
@@ -189,7 +208,25 @@ stage alone sets the paper's DOI: it chooses among the DOIs the paper prints
 the text layer of pages 1 and 2) and records every candidate in
 `extraction.identity.receipt`. A DOI only the PDF's metadata or a link target
 carries is recorded in the receipt as an agreement-only row: it takes no part
-in the selection and is never exported. Extraction
+in the selection and is never exported.
+
+The identity stage also reads the citation a paper prints of itself on its
+first page ("Citation: ...", "To cite this article: ...";
+`bibr/extract/self_citation.py`). Post-parse finds the line and parses it with
+the reference parser right after the reference list, while that parser is
+still loaded (aggressive memory mode unloads it after post-parse); the
+identity stage compares it with the extraction once the DOI is chosen. It is
+taken to be this paper's when its DOI is the paper's, else when its title
+matches the extracted title, else when its first author is one of the
+extracted authors, else only when its label names this article. It then fills
+only what the extraction left empty (journal, volume, issue, pages, year; the
+title and authors only when none were found), through
+`field_decisions.fill_empty` for the decided fields, and records the check,
+the fields filled and where the two agree in
+`extraction.diagnostics.self_citation`. `SELF_CITATION_METADATA=false` turns
+it off; it runs only with the `ner` parse strategy.
+
+Extraction
 and enrichment have separate completion evidence, so a failed or delayed
 external lookup need not force OCR and extraction to run again. The
 integrity-statement resolver defaults to `PIPELINE_INTEGRITY_STATEMENT_MODE=shadow`:
@@ -333,18 +370,18 @@ IMRaD+ section classification enum:
 | `intro` | Introduction / Background |
 | `method` | Methods / Materials |
 | `results` | Results / Findings |
-| `discussion` | Discussion / Conclusion |
+| `discussion` | Discussion / Conclusion / Outlook |
 | `references` | References / Bibliography |
 | `acknowledgment` | Acknowledgments |
 | `funding` | Funding information |
 | `keywords` | Keywords |
-| `endnote` | Supplementary material, future work, outlook |
-| `appendix` | Appendix / Supporting Information |
+| `endnote` | End matter around the article: supplementary-material pointer, extended data, publisher's note |
+| `appendix` | Appendix |
 | `data_availability` | Data availability / code availability |
 | `author_contributions` | Author Contributions / CRediT statement |
 | `coi` | Conflict of Interest / Competing Interests |
 | `ethics` | Ethics statement / IRB approval / Informed consent |
-| `footnote` | A printed Footnotes or Notes heading |
+| `footnote` | A printed Notes, Endnotes or Author note heading, or a block of author metadata |
 | `table` | A printed Tables heading (captions are not sections) |
 | `figure` | A printed Figures heading (captions are not sections) |
 | `unknown` | Unclassified (fallback) |
@@ -377,7 +414,8 @@ Memory management modes control GPU VRAM usage: `aggressive` (load/unload per ph
 
 Auto-selection uses `aggressive` with ≤8 GB system RAM, a CUDA card below 12 GB
 that a managed local LLM server shares, or a CUDA card of 8 GB or less;
-otherwise it uses `balanced`. With a cloud LLM and non-aggressive memory
+otherwise it uses `balanced`. On Linux, system RAM is the machine's RAM or a
+smaller cgroup memory limit (a container, or a batch job's allocation). With a cloud LLM and non-aggressive memory
 mode, `PIPELINE_STREAM_BACKHALF=true` allows completed files' parsing,
 extraction, enrichment, and export to overlap subsequent OCR work. Managed
 local LLMs retain the stage barrier for the OCR-to-LLM memory handoff.

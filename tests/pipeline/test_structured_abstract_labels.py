@@ -113,3 +113,45 @@ def test_long_label_sections_are_the_body():
     asyncio.run(_classify_sections(contents, [], True, None))
     by = _by_header(contents)
     assert by["Methods"].section_type == CanonicalSection.METHODS
+
+
+def test_a_non_english_structured_abstract_keeps_its_labels():
+    """Portuguese and German labels ("Métodos", "Material und Methoden")
+    name body parts in the alias table; inside a structured abstract closed
+    by its keywords they are the abstract's."""
+    for headers in (
+        [
+            ("Resumo", 1),
+            ("Objetivo", 1),
+            ("Métodos", 1),
+            ("Resultados", 1),
+            ("Conclusão", 1),
+            ("Palavras-chave", 1),
+            ("Introdução", 1),
+            ("Métodos", 2),
+            ("Resultados", 3),
+            ("Discussão", 4),
+        ],
+        [
+            ("Zusammenfassung", 1),
+            ("Hintergrund", 1),
+            ("Material und Methoden", 1),
+            ("Ergebnisse", 1),
+            ("Schlussfolgerungen", 1),
+            ("Schlüsselwörter", 1),
+            ("Einleitung", 2),
+            ("Material und Methoden", 2),
+            ("Ergebnisse", 3),
+            ("Diskussion", 4),
+        ],
+    ):
+        contents = _contents(headers)
+        asyncio.run(_classify_sections(contents, [], True, None))
+        secs = [s for s in contents.sections if s.level > 0]
+        assert [s.section_type for s in secs[1:5]] == [CanonicalSection.ABSTRACT] * 4
+        assert [s.section_type for s in secs[6:]] == [
+            CanonicalSection.INTRODUCTION,
+            CanonicalSection.METHODS,
+            CanonicalSection.RESULTS,
+            CanonicalSection.DISCUSSION,
+        ]

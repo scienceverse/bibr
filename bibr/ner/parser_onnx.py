@@ -86,6 +86,67 @@ class OnnxRefParser:
         self._cpu_session = None
         self._cpu_session_lock = threading.Lock()
 
+    def check_graph(self) -> None:
+        """Run the graph on references, in two shapes ``parse_batch`` sends.
+
+        The load probe of an overridden parser (:mod:`bibr.utils.onnx_probe`):
+        reference strings through the bundle's tokenizer at ``max_seq_len``, as a
+        batch of four padded to the longest, which fills the length and holds
+        the tokenizer's last id, and as one reference alone, cut short
+        (:func:`~bibr.utils.onnx_probe.cut_short`): a paper's
+        references come in batches of any size up to ``batch_size``, padded to
+        their longest. On both the graph must give finite emissions, one per tag
+        of the manifest for every token, and the CRF's scores must match the tag
+        count; the paths are decoded as a paper's are. Raises
+        :class:`~bibr.exceptions.ConfigurationError`.
+        """
+        from bibr.utils.onnx_probe import (
+            PROBE_REFERENCES,
+            check_crf,
+            check_output,
+            cut_short,
+            run_probe,
+            with_last_token,
+        )
+
+        check_crf(
+            self.bundle_dir,
+            self.tags,
+            self.start_transitions,
+            self.end_transitions,
+            self.transitions,
+        )
+        long_ref = " ".join(PROBE_REFERENCES) * (1 + self.max_seq_len // 16)
+        full, short = [*PROBE_REFERENCES, long_ref], [PROBE_REFERENCES[1]]
+        for texts in (full, short):
+            batch = encode_batch(
+                self.tokenizer, texts, max_length=self.max_seq_len, add_special_tokens=False
+            )
+            ids = with_last_token(batch.input_ids, batch.attention_mask, self.tokenizer)
+            mask = batch.attention_mask
+            if texts is short:
+                ids, mask = cut_short(ids, mask, self.max_seq_len)
+            shape = f"a {ids.shape} batch of tokenised references"
+            emissions = check_output(
+                self._model_path,
+                "emissions",
+                run_probe(
+                    self._model_path, shape, lambda ids=ids, mask=mask: self._emissions(ids, mask)
+                ),
+                (len(texts), ids.shape[1], len(self.tags)),
+                shape,
+                f"one score per tag of the manifest's {len(self.tags)} bio_tags",
+            )
+            paths = viterbi_decode(
+                emissions,
+                mask,
+                start_transitions=self.start_transitions,
+                end_transitions=self.end_transitions,
+                transitions=self.transitions,
+            )
+            for path, offsets, text in zip(paths, batch.offsets, texts, strict=True):
+                self._decode(path, offsets[: len(path)], text)
+
     def parse(self, ref_text: str) -> dict[str, str | int]:
         """Parse one reference. Returns a dict with PaperReference field names."""
         if not ref_text or not ref_text.strip():

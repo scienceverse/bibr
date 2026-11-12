@@ -7,7 +7,10 @@ one with no verdict after it is a run killed outright (out of memory, a
 native crash). :meth:`Ledger.read` returns verdict lines unless asked for
 both. Resume semantics read the *latest* verdict per ``paper_id``:
 
-* ``ok`` → skipped (unless ``--force``, or the input is now other bytes);
+* ``ok`` → skipped (unless ``--force``, or the input is now other bytes),
+  except an export on which an overridden model raised and the paper fell
+  back (:func:`fell_back_on_override`), which is run again, as a crash is,
+  until it has fallen back :data:`MAX_UNSETTLED_FAILURES` times in a row;
 * ``failed`` → skipped unless ``--retry-failed`` (or ``--force``), except
   (:func:`reruns_by_default`) a paper that never got a verdict — the run was
   interrupted, or the serve refused the token — which is always picked up
@@ -51,10 +54,13 @@ CHUNK_ERROR = "chunk_error"
 # The export could not be written: usually the machine's (a full disk, a
 # permission), so it counts as a crash below.
 OUTPUT_WRITE_FAILED = "output_write_failed"
+# A model setting changed from its default names a model that does not exist;
+# the run stops (bibr.utils.model_overrides).
+MODEL_OVERRIDE_FAILED = "model_override_failed"
 # Failed lines that say nothing about the paper, which never got a verdict:
 # the run was stopped, or the serve refused the token. Resume always runs the
 # paper again.
-NEVER_RAN_CODES = frozenset({INTERRUPTED, "http_401", "http_403"})
+NEVER_RAN_CODES = frozenset({INTERRUPTED, MODEL_OVERRIDE_FAILED, "http_401", "http_403"})
 # A crash or a service outage (``chunk_error``, a run killed mid-paper, an
 # export that could not be written, ``upstream_unavailable``, or a remote line
 # whose transient retries ran out) is usually the machine's or the service's,
@@ -64,6 +70,27 @@ NEVER_RAN_CODES = frozenset({INTERRUPTED, "http_401", "http_403"})
 # success; then it waits for ``--retry-failed``, so a batch still converges.
 # Timeouts are not here at all: a paper can be too slow on its own.
 MAX_UNSETTLED_FAILURES = 3
+
+
+# The export warning of a paper on which an overridden model raised at inference:
+# the paper fell back, so its export does not hold the candidate's answer
+# (bibr.utils.model_overrides). Kept as text so the ledger does not import the
+# pipeline's warning codes.
+OVERRIDE_FALLBACK_WARNING = "MODEL_OVERRIDE_INFERENCE_FAILED"
+
+
+def fell_back_on_override(entry: Mapping[str, Any]) -> bool:
+    """Is this an ``ok`` line whose export fell back from an overridden model?
+
+    A run asked to use a candidate model either uses it or stops; an export
+    written with the fallback is not the candidate's answer, so a resumed run
+    takes the paper again (:meth:`Ledger.plan`).
+    """
+    if entry.get("status") != "ok":
+        return False
+    warnings = entry.get("warnings")
+    codes = warnings.get("codes") if isinstance(warnings, Mapping) else None
+    return isinstance(codes, Mapping) and bool(codes.get(OVERRIDE_FALLBACK_WARNING))
 
 
 def is_unsettled_failure(entry: Mapping[str, Any]) -> bool:
@@ -271,6 +298,12 @@ class ResumePlan:
     # Papers whose last attempt never finished: the local executor runs each
     # alone, so one that kills the run takes no chunk neighbours with it.
     unfinished: set[str] = field(default_factory=set)
+    # Papers in ``to_run`` whose last export fell back from an overridden model.
+    override_fallbacks: set[str] = field(default_factory=set)
+    # Papers skipped because their export fell back from an overridden model
+    # MAX_UNSETTLED_FAILURES times in a row: they wait for ``--retry-failed``.
+    # Not in ``skipped_failed``: none of them failed.
+    override_capped: list[BatchItem] = field(default_factory=list)
 
 
 def _same_input(entry: Mapping[str, Any], item: BatchItem) -> bool:
@@ -378,13 +411,17 @@ class Ledger:
         it recorded: a paper whose input is now another file runs again. A
         ``started`` line with no verdict after it is an attempt the run never
         finished — killed by the OOM killer or a native crash — and counts as
-        a crash.
+        a crash. An ``ok`` line whose export fell back from an overridden model
+        (:func:`fell_back_on_override`) runs again until the paper has fallen
+        back :data:`MAX_UNSETTLED_FAILURES` times in a row; then it waits for
+        ``--retry-failed`` in :attr:`ResumePlan.override_capped`.
         """
         entries = self.read(started=True) if entries is None else entries
         latest = self.latest(entries)
         self._attempts = self.attempts(entries)
         unsettled: dict[str, int] = {}
         unfinished: set[str] = set()
+        fallbacks = self.fallbacks_in_a_row(entries)
         for entry in entries:
             pid = str(entry["paper_id"])
             status = entry.get("status")
@@ -408,10 +445,16 @@ class Ledger:
             if last is not None and last.get("status") == "ok" and not force:
                 # The export of that ok line is intact: a later killed attempt
                 # (a --force re-run) never replaced it.
-                if _same_input(last, item):
-                    plan.skipped_ok.append(item)
-                else:
+                if not _same_input(last, item):
                     plan.to_run.append(item)
+                elif not fell_back_on_override(last):
+                    plan.skipped_ok.append(item)
+                elif retry_failed or fallbacks.get(pid, 0) < MAX_UNSETTLED_FAILURES:
+                    # Written with the fallback, not the candidate's answer.
+                    plan.to_run.append(item)
+                    plan.override_fallbacks.add(pid)
+                else:
+                    plan.override_capped.append(item)
                 continue
             if pid in unfinished:
                 plan.unfinished.add(pid)
@@ -425,6 +468,26 @@ class Ledger:
             else:
                 plan.skipped_failed.append(item)
         return plan
+
+    def fallbacks_in_a_row(
+        self, entries: Iterable[Mapping[str, Any]] | None = None
+    ) -> dict[str, int]:
+        """``ok`` lines in a row per ``paper_id`` whose export fell back from an overridden model.
+
+        Counted back from the paper's last ``ok`` line; an ``ok`` line the
+        candidate answered ends the run of them. Failed lines do not count and
+        do not end it.
+        """
+        fallbacks: dict[str, int] = {}
+        for entry in self.read() if entries is None else entries:
+            if entry.get("status") != "ok":
+                continue
+            pid = str(entry["paper_id"])
+            if fell_back_on_override(entry):
+                fallbacks[pid] = fallbacks.get(pid, 0) + 1
+            else:
+                fallbacks.pop(pid, None)
+        return fallbacks
 
     # -- writing ---------------------------------------------------------
 

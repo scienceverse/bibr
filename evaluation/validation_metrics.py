@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
@@ -459,6 +460,38 @@ def authors_fullname_f1(extracted: list[dict], ground_truth: list[dict]) -> floa
     ext_names = [n for n in (_full_name(d) for d in extracted) if n]
     gt_names = [n for n in (_full_name(d) for d in ground_truth) if n]
     return _fuzzy_name_f1(ext_names, gt_names, full_names=True)
+
+
+def _name_tokens(d: dict) -> tuple[str, ...]:
+    """The words of a full name, sorted. A one-word name the gold stores as given = family
+    ("Kardi Kardi") is that word once, so it equals an export of "Kardi"."""
+    given = _strip_punctuation(_normalize_name(d.get("given") or ""))
+    family = _strip_punctuation(_normalize_name(d.get("family") or ""))
+    if given == family:
+        given = ""
+    return tuple(sorted(f"{given} {family}".split()))
+
+
+def authors_exact_f1(extracted: list[dict], ground_truth: list[dict]) -> float:
+    """F1 over full names whose words match the gold's exactly, in any order.
+
+    ``authors_fullname_f1`` is fuzzy, so a surname with an affiliation letter
+    glued on ("Slaughterd" for "Slaughter") or a name carrying an extra word
+    ("James Larus EPFL") still scores 1.00 there. Here a name counts only when
+    its words equal the gold's after lowercasing and removing diacritics and
+    punctuation. Word order and the given/family boundary stay free, as in
+    ``authors_fullname_f1``; an initial does not match the full given name.
+    """
+    ext = Counter(k for k in map(_name_tokens, extracted) if k)
+    gt = Counter(k for k in map(_name_tokens, ground_truth) if k)
+    if not ext and not gt:
+        return 1.0
+    tp = sum((ext & gt).values())
+    if tp == 0:
+        return 0.0
+    precision = tp / sum(ext.values())
+    recall = tp / sum(gt.values())
+    return 2 * precision * recall / (precision + recall)
 
 
 # ---------------------------------------------------------------------------

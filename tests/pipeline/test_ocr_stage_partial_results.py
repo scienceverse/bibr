@@ -199,6 +199,36 @@ async def test_a_region_that_times_out_still_ships_blank_with_a_warning():
 
 
 @pytest.mark.asyncio
+async def test_a_region_the_cloud_model_failed_on_ships_blank_with_a_warning():
+    """The cloud vision client reports a region it could not read; it used to
+    return '' and the export showed nothing."""
+    from bibr.local.ocr_cloud import CloudOcrRegionError
+
+    fs = _real_pages(_make_fs(pages=3))
+    ctx = _make_ctx([fs], ocr_backend="anthropic")
+    calls = {"n": 0}
+
+    async def recognize(image, prompt):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise CloudOcrRegionError(
+                "anthropic vision OCR failed after 3 attempt(s): RateLimitError: HTTP 429"
+            )
+        return "text"
+
+    ctx.resources.ocr.recognize = recognize
+    await OcrStage().run(ctx)
+
+    assert fs.error is None
+    (warning,) = fs.warnings
+    assert warning.code == WarningCode.OCR_REGION_FAILED
+    assert "its text is missing" in warning.message
+    assert "anthropic vision OCR failed after 3 attempt(s)" in warning.message
+    blank = [r for page in fs.ocr_regions for r in page if not r.content.strip()]
+    assert len(blank) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", [429, 502, 503])
 async def test_a_busy_answer_for_one_region_still_ships_it_blank(status):
     """A server that answers 429/502/503 after the transport's retries is up,

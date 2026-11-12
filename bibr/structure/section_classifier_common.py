@@ -146,6 +146,7 @@ def load_section_classifier(
     is available.
     """
     from bibr.utils.ml_runtime import find_onnx_bundle, hub_bundle_hint, resolve_runtime
+    from bibr.utils.model_overrides import is_model_override
 
     if settings is None:
         from bibr.config import snapshot_settings
@@ -154,14 +155,24 @@ def load_section_classifier(
     runtime, bundle = resolve_runtime(
         "section classifier",
         settings=settings,
-        bundle=lambda: find_onnx_bundle(model_id, revision, label="section classifier"),
+        # An override tells a network failure from a missing bundle (bibr.utils.model_overrides).
+        bundle=lambda: find_onnx_bundle(
+            model_id,
+            revision,
+            label="section classifier",
+            raise_transient=is_model_override(settings, "ML_SECTION_CLASSIFIER_MODEL_ID"),
+        ),
         bundle_hint=hub_bundle_hint("ML_SECTION_CLASSIFIER_MODEL_ID", model_id, revision),
     )
     if runtime == "onnx":
         from bibr.structure.section_classifier_onnx import OnnxSectionClassifierModel
 
-        logger.info("Section classifier runtime: onnx (%s)", bundle)
-        return OnnxSectionClassifierModel(bundle, device=device)
+        logger.info("Section classifier runtime: onnx")
+        logger.debug("Section classifier bundle: %s", bundle)
+        model = OnnxSectionClassifierModel(bundle, device=device)
+        if is_model_override(settings, "ML_SECTION_CLASSIFIER_MODEL_ID"):
+            model.check_graph()  # a candidate's graph is probed at load; the default is not
+        return model
 
     from bibr.structure.section_classifier_model import SectionClassifierModel
 

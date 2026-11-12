@@ -1183,6 +1183,18 @@
             "null"
           ]
         },
+        "self_citation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SelfCitationExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The citation the paper prints of itself on its first page ('Citation: ...', 'To cite this article: ...'), read with the reference parser: whether it was taken to be this paper's, the fields it filled, and where it agrees with the extraction. Omitted when no such line was found or the reader did not run, and before schema 12.4."
+        },
         "text_quality": {
           "default": null,
           "description": "Text-layer quality score, 0\u20131; null when not measured.",
@@ -1798,6 +1810,32 @@
           "title": "Crossref Enrich",
           "type": "boolean"
         },
+        "mode": {
+          "default": null,
+          "description": "The run mode that produced this export: 'fast' (no LLM call: the local models read the title, authors, abstract, references and sections) or 'full' (the configured LLM is used). A --no-llm run is 'full' with extraction.llm null. Omitted before schema 12.4.",
+          "enum": [
+            "fast",
+            "full",
+            null
+          ],
+          "title": "Mode",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "models": {
+          "default": null,
+          "description": "The models the run was set to load (layout, sentence splitter, reference, front-matter and classifier models), one row each with its setting and identity. A paper need not reach every one; the reference receipts in extraction.diagnostics say which segmentation tier ran. A model the install cannot run (the torch-only CRF segmenter without torch) is left out. Omitted before schema 12.4.",
+          "items": {
+            "$ref": "#/$defs/ModelProvenanceExport"
+          },
+          "title": "Models",
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "native_text_formula_number": {
           "default": null,
           "description": "Whether formula_number regions could be read from the PDF text layer (OCR_NATIVE_TEXT_FORMULA_NUMBER). Omitted before schema 12.3.",
@@ -1850,7 +1888,7 @@
         },
         "rule": {
           "default": null,
-          "description": "The rule of the field's decision that chose the value or its absence, e.g. 'extracted', 'selected_record_title', 'layout_title_fallback', 'abstract_section_fallback', 'correction_notice', 'abstained'. Omitted when the field has no such decision (doi, bib), and in exports that predate it.",
+          "description": "The rule of the field's decision that chose the value or its absence, e.g. 'extracted', 'selected_record_title', 'layout_title_fallback', 'abstract_section_fallback', 'correction_notice', 'abstained', 'self_citation_fill'. Omitted when the field has no such decision (doi, bib), and in exports that predate it.",
           "title": "Rule",
           "type": [
             "string",
@@ -1858,7 +1896,7 @@
           ]
         },
         "source": {
-          "description": "The step that produced the value, e.g. 'llm', 'layout_title', 'front_matter_candidate', 'doc_info', 'keywords_section', 'identity', 'classifier', 'native' (declared by the input); for doi, the selected identity candidate's source_kind; for a failed field the step that failed. Null when unknown or when nothing was produced.",
+          "description": "The step that produced the value, e.g. 'llm', 'layout_title', 'front_matter_candidate', 'doc_info', 'keywords_section', 'identity', 'classifier', 'self_citation' (the citation the paper prints of itself), 'native' (declared by the input); for doi, the selected identity candidate's source_kind; for a failed field the step that failed. Null when unknown or when nothing was produced.",
           "title": "Source",
           "type": [
             "string",
@@ -2617,7 +2655,7 @@
         },
         "issue": {
           "default": null,
-          "description": "The paper's own issue, as printed.",
+          "description": "The paper's own issue, as printed. A fast run leaves it empty unless the input declares it or the paper's printed citation gives it (extraction.diagnostics.self_citation).",
           "title": "Issue",
           "type": [
             "string",
@@ -2812,7 +2850,7 @@
         },
         "publisher": {
           "default": null,
-          "description": "The publisher, as printed.",
+          "description": "The publisher, as printed. A fast run leaves it empty unless the input declares it.",
           "title": "Publisher",
           "type": [
             "string",
@@ -3129,6 +3167,91 @@
         "funder"
       ],
       "title": "MetadataMatchExport",
+      "type": "object"
+    },
+    "ModelFileExport": {
+      "additionalProperties": false,
+      "description": "One file of a local model, by its name in the model's directory and its content.",
+      "properties": {
+        "name": {
+          "description": "The file's path inside the model's directory, e.g. 'onnx/x'.",
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "sha256": {
+          "description": "sha256 of the file's bytes; null for a directory.",
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "sha256"
+      ],
+      "title": "ModelFileExport",
+      "type": "object"
+    },
+    "ModelProvenanceExport": {
+      "additionalProperties": false,
+      "description": "One model the run was set to load, by the setting that names it and its identity.",
+      "properties": {
+        "files": {
+          "default": null,
+          "description": "For a local model, each file it is read from with its sha256. Omitted for a Hub model, which its id and revision identify.",
+          "items": {
+            "$ref": "#/$defs/ModelFileExport"
+          },
+          "title": "Files",
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "The Hub repo id of the model, or for a local model a short name: its directory's own name and '@' the first 12 hex digits of a hash over its files, e.g. 'section-candidate@3f2a9c41d0b7'. The path is not recorded, and a name that is part of the home directory or the user name is recorded as 'local-model'.",
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "model": {
+          "description": "What the model does, e.g. 'reference parser'.",
+          "minLength": 1,
+          "title": "Model",
+          "type": "string"
+        },
+        "override": {
+          "description": "Whether the setting differs from the shipped default (a candidate model, a mirror or local copy, or another revision).",
+          "title": "Override",
+          "type": "boolean"
+        },
+        "revision": {
+          "description": "The Hub revision loaded: a commit SHA, or the configured branch or tag when the local Hub cache does not name its commit; null for a local model or an unpinned one the cache does not hold.",
+          "title": "Revision",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "setting": {
+          "description": "The setting that names the model, e.g. 'NER_PARSER_CKPT'.",
+          "minLength": 1,
+          "title": "Setting",
+          "type": "string"
+        }
+      },
+      "required": [
+        "setting",
+        "model",
+        "id",
+        "revision",
+        "override"
+      ],
+      "title": "ModelProvenanceExport",
       "type": "object"
     },
     "OcrEngineExport": {
@@ -3656,6 +3779,22 @@
             "null"
           ]
         },
+        "read_as": {
+          "default": null,
+          "description": "How the text-layer OCR backend (--ocr text-layer, or the automatic fallback to it) read the region: 'text' (the PDF's text), 'table_rebuilt' (a table rebuilt from glyph positions: merged cells and multi-line cells may be split), 'formula_plain' (a display formula as plain text, not LaTeX) or 'unread' (no usable text in the layer: the region is empty). Omitted on every other route, and before schema 12.4.",
+          "enum": [
+            "text",
+            "table_rebuilt",
+            "formula_plain",
+            "unread",
+            null
+          ],
+          "title": "Read As",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "section_id": {
           "default": null,
           "description": "section[].section_id the region was assigned to.",
@@ -3701,6 +3840,15 @@
       "additionalProperties": false,
       "description": "How one section's ``section_type`` was decided.",
       "properties": {
+        "header_supplied": {
+          "default": null,
+          "description": "True when the paper prints no heading for this section, so section[].header is bibr's own wording and not text of the paper: an abstract or introduction found by its position ('Abstract', 'Introduction'), a section named after a layout region, or a statement section the opt-in statement tagger added ('Acknowledgments', 'Author contributions'). A list of the paper's printed headings leaves these sections out. Omitted for a printed heading, and before schema 12.4.",
+          "title": "Header Supplied",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "score": {
           "description": "Classifier confidence, 0\u20131; null when not scored.",
           "maximum": 1,
@@ -3718,7 +3866,7 @@
           "type": "integer"
         },
         "source": {
-          "description": "Which tier decided the type: 'exact_alias', 'substring_alias' or 'alias_prior' (heading lookup), 'model' (trained classifier), 'llm', 'parent_context', 'title', 'implicit', 'positional', 'appendix_repair' or 'imrad_dedup'; null when unclassified.",
+          "description": "Which tier decided the type: 'exact_alias', 'substring_alias' or 'alias_prior' (heading lookup), 'model' (trained classifier), 'llm', 'parent_context', 'title', 'implicit', 'positional', 'appendix_repair', 'imrad_dedup' or 'statement_tagger' (the opt-in statement tagger); null when unclassified.",
           "title": "Source",
           "type": [
             "string",
@@ -3807,6 +3955,162 @@
         "section_type"
       ],
       "title": "SectionExport",
+      "type": "object"
+    },
+    "SelfCitationAgreementExport": {
+      "additionalProperties": false,
+      "description": "Whether the printed citation and the extraction agree, per field both carry.\n\nValues as extracted, before the citation filled anything. A field one side\nlacks is omitted.",
+      "properties": {
+        "doi": {
+          "default": null,
+          "description": "metadata.doi against the DOI the citation prints.",
+          "enum": [
+            "agree",
+            "disagree",
+            null
+          ],
+          "title": "Doi",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "first_author": {
+          "default": null,
+          "description": "The family name of the first author[] row against the citation's first author.",
+          "enum": [
+            "agree",
+            "disagree",
+            null
+          ],
+          "title": "First Author",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "default": null,
+          "description": "metadata.title against the citation's title, case, accents and punctuation set aside.",
+          "enum": [
+            "agree",
+            "disagree",
+            null
+          ],
+          "title": "Title",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "volume": {
+          "default": null,
+          "description": "metadata.volume against the citation's volume.",
+          "enum": [
+            "agree",
+            "disagree",
+            null
+          ],
+          "title": "Volume",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "year": {
+          "default": null,
+          "description": "The year of metadata.published_date against the citation's year.",
+          "enum": [
+            "agree",
+            "disagree",
+            null
+          ],
+          "title": "Year",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "SelfCitationAgreementExport",
+      "type": "object"
+    },
+    "SelfCitationExport": {
+      "additionalProperties": false,
+      "description": "The citation the paper prints of itself on its first page, and what bibr took from it.",
+      "properties": {
+        "accepted": {
+          "description": "Whether the citation was taken to be this paper's, so that it could fill empty fields.",
+          "title": "Accepted",
+          "type": "boolean"
+        },
+        "agreement": {
+          "$ref": "#/$defs/SelfCitationAgreementExport",
+          "description": "Per field both sides carry, whether the citation agrees with the extraction."
+        },
+        "check": {
+          "description": "What decided whether the citation is about this paper, in this order: the DOI it prints against metadata.doi ('doi_match', 'doi_mismatch'); else its title against metadata.title ('title_match', 'title_mismatch'); else its first author against the author[] family names ('first_author_match', 'first_author_mismatch'); else the label ('strong_cue' accepts, 'weak_cue' does not). 'not_parsed': the parser read neither a title nor authors in it. 'front_matter_abstained': it would be accepted, but the front matter holds several records and the extraction chose none.",
+          "enum": [
+            "doi_match",
+            "doi_mismatch",
+            "title_match",
+            "title_mismatch",
+            "first_author_match",
+            "first_author_mismatch",
+            "strong_cue",
+            "weak_cue",
+            "not_parsed",
+            "front_matter_abstained"
+          ],
+          "title": "Check",
+          "type": "string"
+        },
+        "cue": {
+          "description": "'strong' when the label names this article ('To cite this article:', 'How to cite this paper:', 'Full citation:'), 'weak' for a bare 'Citation:' or 'Cite as:'.",
+          "enum": [
+            "strong",
+            "weak"
+          ],
+          "title": "Cue",
+          "type": "string"
+        },
+        "filled": {
+          "description": "The fields the citation filled: metadata keys, and 'author' for the author table. Only fields the extraction left empty are filled, the title and the authors only when it found none; empty when nothing was filled.",
+          "items": {
+            "enum": [
+              "title",
+              "author",
+              "journal",
+              "volume",
+              "issue",
+              "first_page",
+              "last_page",
+              "published"
+            ],
+            "type": "string"
+          },
+          "title": "Filled",
+          "type": "array"
+        },
+        "text_ids": {
+          "description": "text[].text_id of the rows the citation was read from, its label's row first.",
+          "items": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "title": "Text Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "text_ids",
+        "cue",
+        "check",
+        "accepted",
+        "filled",
+        "agreement"
+      ],
+      "title": "SelfCitationExport",
       "type": "object"
     },
     "SourceExport": {
@@ -4762,7 +5066,7 @@
       "type": "string"
     },
     "schema_version": {
-      "const": "12.3",
+      "const": "12.4",
       "description": "Export schema version. Its presence at the root is how readers distinguish v11 and later from all earlier versions.",
       "title": "Schema Version",
       "type": "string"

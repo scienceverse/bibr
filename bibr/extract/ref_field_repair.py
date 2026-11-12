@@ -938,6 +938,22 @@ def _rule_author_trailing_colon(fields: dict[str, Any], _text: str) -> bool:
     return True
 
 
+# A hyphenated initial broken at the line end keeps the line break's space:
+# "Falk, L.- S.". Both sides are single initials, so "Adler, K.- Falk, L." stays.
+_INITIAL_HYPHEN_BREAK_RE = re.compile(r"(?<![^\W\d_])([A-ZÀ-ÖØ-Þ]\.-)\s+(?=[A-ZÀ-ÖØ-Þ]\.)")
+
+
+def _rule_author_initial_hyphen_break(fields: dict[str, Any], _text: str) -> bool:
+    authors = fields.get("authors")
+    if not isinstance(authors, str):
+        return False
+    closed = _INITIAL_HYPHEN_BREAK_RE.sub(r"\1", authors)
+    if closed == authors:
+        return False
+    fields["authors"] = closed
+    return True
+
+
 # A byline tagged as the title: "Surname, I. et al." and nothing else.
 _ET_AL_BYLINE_RE = re.compile(
     r"[A-ZÀ-ÖØ-Þ][^\W\d_]*[a-zß-öø-ÿ][^\W\d_]*(?:[-'’][^\W\d_]+)*,"
@@ -1040,6 +1056,7 @@ def _rule_title_quoted_after_byline(fields: dict[str, Any], text: str) -> bool:
 _RULES: tuple[tuple[str, Callable[[dict[str, Any], str], bool]], ...] = (
     ("author_final_initial", _rule_author_final_initial),
     ("author_trailing_colon", _rule_author_trailing_colon),
+    ("author_initial_hyphen_break", _rule_author_initial_hyphen_break),
     ("title_et_al_byline", _rule_title_et_al_byline),
     ("title_closing_quote", _rule_title_closing_quote),
     ("title_quoted_after_byline", _rule_title_quoted_after_byline),

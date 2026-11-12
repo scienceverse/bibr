@@ -113,6 +113,8 @@ def test_the_cached_page_inspection_keeps_its_fields():
         "char_count",
         "invisible_text_layer",
         "watermarks",
+        "text_layer_ok",
+        "text_layer_reason",
     ]
 
 

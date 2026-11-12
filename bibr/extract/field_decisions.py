@@ -23,6 +23,12 @@ paper (a run without an LLM decides no structured funding or affiliations):
 * the integrity steps decide the statements, structured funding and parsed
   affiliations.
 
+One source comes after the decisions: the paper's printed citation ("To cite
+this article: ..."), which the identity stage reads once the DOI is known
+(``bibr.extract.self_citation``). It only fills a field its decision left
+empty, through :func:`fill_empty`, and the field's receipt keeps what the
+decision considered.
+
 One step changes a decided value after its decision: the structured-integrity
 call adds contribution roles to the decided authors' ``role`` lists in place
 (``research_integrity._apply_contributions``). It writes no field and the
@@ -165,6 +171,17 @@ class FieldDecisions:
             self.superseded.append(previous)
         self._decisions[decision.field] = decision
 
+    def fill(self, decision: FieldDecision) -> None:
+        """Replace the receipt of a field its decision left empty with *decision*.
+
+        For :func:`fill_empty`: the new receipt carries the old one's verdicts,
+        so nothing is superseded.
+        """
+        previous = self._decisions.get(decision.field)
+        if previous is not None and not _empty(previous.value):
+            raise ValueError(f"{decision.field!r} has a value; a fill only replaces an empty one")
+        self._decisions[decision.field] = decision
+
     def amend(self, decision: FieldDecision) -> None:
         """Replace a field's receipt with one for the same written value.
 
@@ -227,6 +244,33 @@ def apply_decision(metadata: Any, decision: FieldDecision) -> None:
     ledger = field_decisions_of(metadata)
     if ledger is not None:
         ledger.record(decision)
+
+
+def fill_empty(metadata: Any, candidate: FieldCandidate, rule: str, reason: str) -> bool:
+    """Write *candidate* to a decided field that is empty; return whether it was written.
+
+    For a source read after the field's decision: the paper's printed citation,
+    read in the identity stage (``bibr.extract.self_citation``). A field with a
+    value is left alone. The field's receipt keeps what its decision considered,
+    adds *candidate* as the one used, and takes *rule*.
+    """
+    (attribute,) = FIELD_ATTRIBUTES[candidate.field]
+    if not _empty(getattr(metadata, attribute, None)) or _empty(candidate.value):
+        return False
+    ledger = field_decisions_of(metadata)
+    previous = ledger.get(candidate.field) if ledger is not None else None
+    decision = FieldDecision(
+        candidate.field,
+        candidate.value,
+        candidate,
+        rule,
+        (*(previous.considered if previous is not None else ()), Verdict(candidate, True, reason)),
+        flags=previous.flags if previous is not None else (),
+    )
+    setattr(metadata, attribute, candidate.value)
+    if ledger is not None:
+        ledger.fill(decision)
+    return True
 
 
 def with_transforms(decision: FieldDecision, *transforms: str) -> FieldDecision:
@@ -744,6 +788,7 @@ __all__ = [
     "decide_title",
     "decide_value",
     "field_decisions_of",
+    "fill_empty",
     "incumbent_candidate",
     "record_transforms",
     "with_transforms",

@@ -49,6 +49,7 @@ from bibr.utils.transient import is_transient_network_error
 if TYPE_CHECKING:
     from bibr.clients.providers.base import LlmProvider
     from bibr.clients.structured import StructuredBackend
+    from bibr.front_tagger.assemble import TaggedFrontMatter
     from bibr.utils.rate_limiter import AsyncLocalRateLimiter, AsyncRedisRateLimiter
 
 logger = logging.getLogger(__name__)
@@ -722,6 +723,11 @@ def llm_call_error(message: str, exc: BaseException) -> LlmCallError:
     """
     error_class = _classify_llm_failure(exc)
     return error_class(message, exc, cause=_failure_cause(error_class, exc))
+
+
+async def _ready(value):
+    """An awaitable that yields ``value``, to stand in a gather for a skipped call."""
+    return value
 
 
 def _recover_finished_response(
@@ -3028,6 +3034,7 @@ class LLMClient:
         authors_text: str | None = None,
         classification_text: str | None = None,
         include_classification: bool = True,
+        tagged: "TaggedFrontMatter | None" = None,
     ) -> CoreMetadataLLM:
         """Run title/keywords, authors, and optional classification concurrently.
 
@@ -3040,6 +3047,11 @@ class LLMClient:
         context slices for the authors and classification calls (see
         ``LLM_PER_TASK_CONTEXT``); ``None`` falls back to the full ``text``.
         Title/keywords always receives the full ``text``.
+
+        ``tagged`` is an accepted front-matter tagger answer
+        (``ML_FRONT_TAGGER_MODE=primary``): each part it carries stands in for
+        its call (title/keywords, authors); a part left ``None`` is asked of
+        the LLM as usual.
         """
         if getattr(self._settings.llm, "merged_core_metadata", False):
             try:
@@ -3074,9 +3086,15 @@ class LLMClient:
 
         # Start all three independent extraction calls together. They share the same fenced
         # front-matter prefix for provider cache reuse.
+        tagged_title = tagged.title_keywords if tagged is not None else None
+        tagged_byline = tagged.byline if tagged is not None else None
         tasks = [
-            self.extract_title_keywords(text, file_hash=file_hash, boundary=boundary),
-            self.extract_authors(authors_text, file_hash=file_hash, boundary=boundary),
+            _ready(tagged_title)
+            if tagged_title is not None
+            else self.extract_title_keywords(text, file_hash=file_hash, boundary=boundary),
+            _ready(tagged_byline)
+            if tagged_byline is not None
+            else self.extract_authors(authors_text, file_hash=file_hash, boundary=boundary),
         ]
         if include_classification:
             tasks.append(
@@ -3207,31 +3225,16 @@ class LLMClient:
                 )
             )
 
-        combined = CoreMetadataLLM(
-            title=title_kw.title,
-            **({"abstract": title_kw.abstract} if "abstract" in title_kw.model_fields_set else {}),
-            keywords=title_kw.keywords,
-            authors=authors.authors,
-            oecd_domain=classification.oecd_domain,
-            oecd_subdomain=classification.oecd_subdomain,
-            paper_type=classification.paper_type,
-            journal=title_kw.journal,
-            volume=title_kw.volume,
-            issue=title_kw.issue,
-            first_page=title_kw.first_page,
-            last_page=title_kw.last_page,
-            issn=title_kw.issn,
-            publisher=title_kw.publisher,
-            published=title_kw.published,
-            license=title_kw.license,
-        )
-
-        combined._abstract_explicitly_absent = title_kw._abstract_explicitly_absent
-        combined._repair_note = title_kw._repair_note
-        combined._field_failures = field_failures
-        salvaged_after = getattr(authors, "_salvaged_after", None)
-        combined._authors_salvaged_after = (
-            salvaged_after if isinstance(salvaged_after, str) else None
+        combined = CoreMetadataLLM.from_calls(
+            title_kw,
+            authors,
+            classification,
+            field_failures=field_failures,
+            front_tagger_parts=frozenset(
+                part
+                for part, answer in (("title_keywords", tagged_title), ("authors", tagged_byline))
+                if answer is not None
+            ),
         )
 
         logger.info(f"Successfully extracted core metadata (hash={file_hash})")

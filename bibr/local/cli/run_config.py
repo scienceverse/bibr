@@ -2,8 +2,8 @@
 
 import os
 import sys
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from bibr.local.cli.parser import normalize_ocr_backend
@@ -39,6 +39,40 @@ class ResolvedRunConfig:
     ref_seg: str | None = None
     refs: str | None = None
     ocr_summary_model: str | None = None
+    mode: str = "full"
+    """The run mode: ``fast`` makes no LLM call, ``full`` uses the configured LLM
+    (``--no-llm`` is a ``full`` run that skips the LLM stages, see ``skips_llm``)."""
+    ocr_summary_backend: str | None = None
+    """The first concrete OCR candidate (``paddle`` expands to an ordered chain)."""
+    ocr_requested: bool = True
+    """Whether the user chose the OCR route (``--ocr``, ``--ocr-url``, ``OCR_BACKEND``, ...).
+    A fast run that did not reads the PDF text layer."""
+    ocr_text_layer_fallback: str | None = None
+    """Why no automatic OCR runtime can start here, when
+    ``OCR_FALLBACK_TO_TEXT_LAYER=auto`` swapped ``ocr_backend`` to
+    ``text-layer`` (:func:`apply_text_layer_fallback`)."""
+
+    @property
+    def skips_llm(self) -> bool:
+        """Whether the run makes no LLM call: fast mode, or ``--no-llm``."""
+        return self.no_llm or self.mode == "fast"
+
+    @property
+    def uses_llm(self) -> bool:
+        """Whether the run calls the configured LLM (a full run without ``--no-llm``)."""
+        return not self.skips_llm
+
+    @property
+    def pipeline_ocr_backend(self) -> str:
+        """The OCR backend the pipeline is built with.
+
+        After the text-layer fallback the pipeline gets the automatic backend
+        back: it finds the same blocker, switches to the text layer itself and
+        marks each file it reads that way (``OCR_BACKEND_UNAVAILABLE``), as a
+        library run on this machine does. An explicit ``--ocr text-layer``
+        run carries no such warning.
+        """
+        return "paddle" if self.ocr_text_layer_fallback else self.ocr_backend
 
     def enrichment_enabled(self) -> bool:
         """Whether this run enriches references (mirrors ``RunConfig.enrichment_enabled``).
@@ -101,8 +135,13 @@ def resolve_run_config(args) -> ResolvedRunConfig:
     # --llm unset (None) falls back to the LLM_BACKEND setting (default "cloud").
     from bibr.config import Settings
 
+    mode = _resolve_run_mode(args, Settings)
     llm_backend = _resolve_llm_backend(args.llm or Settings.llm.backend)
-    # The LLM server the run starts: none under --no-llm.
+    if mode == "fast":
+        # A fast run starts no LLM server and calls no provider, so it runs with
+        # the cloud backend's memory, OCR-chain and streaming semantics.
+        llm_backend = "cloud"
+    # The LLM server the run starts: none under --no-llm or in a fast run.
     server_llm_backend = "cloud" if getattr(args, "no_llm", False) else llm_backend
 
     # Determine memory mode: on a CUDA card it depends on whether a managed
@@ -123,7 +162,7 @@ def resolve_run_config(args) -> ResolvedRunConfig:
 
     chunk_size = args.batch_size if args.batch_size > 0 else _auto_batch_size(memory_mode)
 
-    from bibr.ocr.registry import resolve_backend_candidates
+    from bibr.ocr.registry import TEXT_LAYER_BACKEND, resolve_backend_candidates
 
     explicit_profile = getattr(args, "ocr_profile", None)
     configured_profile = getattr(Settings.ocr, "profile", None)
@@ -132,6 +171,11 @@ def resolve_run_config(args) -> ResolvedRunConfig:
         if "paddle" not in model_name and "glm" not in model_name:
             raise ValueError("Custom --ocr-model aliases require --ocr-profile {paddle,glm}.")
 
+    ocr_requested = _ocr_requested(args, Settings)
+    if mode == "fast" and not ocr_requested:
+        # Nobody chose an OCR route: a fast run reads the PDF's own text layer
+        # whatever the machine has (LocalPipeline makes the same choice).
+        ocr_backend = TEXT_LAYER_BACKEND
     summary_candidate = resolve_backend_candidates(
         ocr_backend, Settings, llm_backend=server_llm_backend
     )[0]
@@ -156,6 +200,57 @@ def resolve_run_config(args) -> ResolvedRunConfig:
         ref_seg=getattr(args, "ref_seg", None) or None,
         refs=getattr(args, "refs", None) or None,
         ocr_summary_model=summary_candidate.model,
+        mode=mode,
+        ocr_summary_backend=summary_candidate.backend,
+        ocr_requested=ocr_requested,
+    )
+
+
+def _llm_only_flags(args) -> list[str]:
+    """The per-run flags in ``args`` that can only run with an LLM, as typed."""
+    from bibr.run_mode import LLM_PARSE_STRATEGIES
+
+    flags: list[str] = []
+    if getattr(args, "llm", None) is not None:
+        flags.append(f"--llm {args.llm}")
+    refs = getattr(args, "refs", None)
+    if refs in LLM_PARSE_STRATEGIES:
+        flags.append(f"--refs {refs}")
+    if getattr(args, "ref_seg", None) == "llm":
+        flags.append("--ref-seg llm")
+    return flags
+
+
+def _resolve_run_mode(args, settings) -> str:
+    """The mode this run takes: ``--fast`` / ``--full``, else ``PIPELINE_MODE``, else auto.
+
+    See :func:`bibr.run_mode.resolve_run_mode` for how ``--no-llm`` and the
+    LLM-only options (``--llm``, ``--refs llm``, ``--ref-seg llm``) take part.
+    """
+    from bibr.run_mode import resolve_run_mode
+
+    explicit = (
+        "fast" if getattr(args, "fast", False) else "full" if getattr(args, "full", False) else None
+    )
+    return resolve_run_mode(
+        settings,
+        explicit=explicit,
+        llm_backend=getattr(args, "llm", None),
+        llm_flags=_llm_only_flags(args),
+        no_llm=getattr(args, "no_llm", False),
+    )
+
+
+def _ocr_requested(args, settings) -> bool:
+    """Whether the user chose the OCR route (see :func:`bibr.ocr.registry.ocr_route_chosen`)."""
+    from bibr.ocr.registry import ocr_route_chosen
+
+    return ocr_route_chosen(
+        settings,
+        backend=getattr(args, "ocr", None),
+        url=getattr(args, "ocr_url", None),
+        model=getattr(args, "ocr_model", None),
+        profile=getattr(args, "ocr_profile", None),
     )
 
 
@@ -341,39 +436,13 @@ def _ocr_candidate_unavailable_reason(backend: str) -> str | None:
 
     Returns ``None`` for backends this function does not vet (HTTP and cloud
     backends validate themselves at startup) and for runtimes whose launcher
-    and hardware are present.
+    and hardware are present. The check itself is the library's
+    (:func:`bibr.ocr.registry.local_runtime_unavailable_reason`), which the
+    text-layer fallback also asks.
     """
-    if backend == "paddle-vllm":
-        import importlib.util
-        import shutil
+    from bibr.ocr.registry import local_runtime_unavailable_reason
 
-        from bibr.ocr.registry import paddle_vllm_unavailable_reason
-
-        reason = paddle_vllm_unavailable_reason()
-        if reason is not None:
-            return reason
-        if importlib.util.find_spec("vllm") is None and shutil.which("uv") is None:
-            return (
-                "vllm is not installed and uv is unavailable to bootstrap it "
-                "(install with: uv sync --extra vllm)"
-            )
-        return None
-    if backend == "glm-llama":
-        from bibr.local.llama_cpp import find_llama_server, missing_binary_message
-
-        if find_llama_server() is None:
-            return missing_binary_message()
-        return None
-    if backend in {"paddle-rapid-mlx", "glm-rapid-mlx"}:
-        from bibr.local.rapid_mlx import rapid_mlx_unavailable_reason
-
-        reason = rapid_mlx_unavailable_reason()
-        if reason is not None:
-            return f"rapid-mlx launcher not available ({reason}); pip install 'rapid-mlx[guided]'"
-        return None
-    if backend == "glm-mlx":
-        return "this backend is disabled (vllm-mlx produced corrupted text); use glm-rapid-mlx"
-    return None
+    return local_runtime_unavailable_reason(backend)
 
 
 def _preflight_ocr_runtime(config: ResolvedRunConfig) -> str | None:
@@ -386,12 +455,157 @@ def _preflight_ocr_runtime(config: ResolvedRunConfig) -> str | None:
     """
     if config.ocr_url:
         return None
+    from bibr.ocr.registry import TEXT_LAYER_BACKEND
+
+    if config.ocr_backend == TEXT_LAYER_BACKEND:
+        # Reads the PDF's own text layer: there is no runtime to start.
+        return None
     return _ocr_runtime_blocker(config.ocr_backend, llm_backend=_run_llm_backend(config))
 
 
+def _front_tagger_bundle(model_id: str, revision: str | None) -> Path | None:
+    """The tagger's ONNX bundle as the pipeline finds it; network failures are raised."""
+    from bibr.utils.ml_runtime import find_onnx_bundle
+
+    return find_onnx_bundle(model_id, revision, label="front-matter tagger", raise_transient=True)
+
+
+def _preflight_model_overrides(config: ResolvedRunConfig, warn=None) -> str | None:
+    """Fail fast when a model setting changed from its default cannot be loaded.
+
+    An override (see :mod:`bibr.utils.model_overrides`) that does not load
+    stops the run instead of falling back to the shipped model, so a bad
+    setting would otherwise stop it at its first paper, or, for a model only
+    some papers reach, part-way through. Every override this run loads (its
+    mode, ``--no-llm``, ``--refs`` and ``--ref-seg``), a local path or a Hub
+    id, is loaded here as the run loads it, probe included; with every model
+    setting at its default nothing is. An override this run never asks is not
+    loaded: ``warn`` receives one line for it, naming the setting and why.
+    """
+    from bibr.config import Settings, snapshot_settings
+    from bibr.utils.model_overrides import check_model_overrides
+
+    try:
+        settings = snapshot_settings(Settings)
+        if getattr(config, "mode", "full") == "fast" and not getattr(config, "no_llm", False):
+            from bibr.run_mode import fast_settings
+
+            settings = fast_settings(settings)
+        if getattr(config, "refs", None):
+            settings.REF_PARSE_STRATEGY = config.refs
+        if getattr(config, "ref_seg", None):
+            settings.REF_SEG_STRATEGY = config.ref_seg
+    except Exception as exc:  # noqa: BLE001 - the preflight reports, it never crashes
+        return f"Model override problem: the run's settings could not be read ({exc})"
+    problems, warnings = check_model_overrides(
+        settings,
+        load=True,
+        memory_mode=getattr(config, "memory_mode", None),
+        no_llm=getattr(config, "no_llm", False) is True,
+    )
+    for line in warnings:
+        if warn is not None:
+            warn(f"Model override: {line}")
+    if not problems:
+        return None
+    return "Model override problem: " + "; ".join(problems)
+
+
+def _preflight_front_tagger(config: ResolvedRunConfig) -> str | None:
+    """Fail fast when a fast run cannot load the front-matter tagger.
+
+    A fast run takes the title, the authors and the abstract from the tagger
+    alone. Without its bundle the pipeline goes on, exports every paper with
+    those fields empty and a warning, and exits 0. The bundle is resolved the
+    way the pipeline resolves it (a download on a first run, the cache after
+    that), so a run that passes the check does not download it twice. A null
+    ``ML_FRONT_TAGGER_MODEL_ID`` is a choice to run without the tagger and is
+    not checked.
+    """
+    if getattr(config, "mode", "full") != "fast" or config.no_llm:
+        return None
+    from bibr.config import Settings
+
+    ml = Settings.ml
+    model_id = ml.front_tagger_model_id
+    if not model_id:
+        return None
+    revision = ml.front_tagger_revision or None
+    name = f"{model_id}@{revision}" if revision else str(model_id)
+    lead = (
+        "Fast mode reads the title, the authors and the abstract with the front-matter "
+        f"tagger, and its model ({name}) "
+    )
+    tail = " Without it every paper would be exported with those fields empty."
+    try:
+        bundle = _front_tagger_bundle(str(model_id), revision)
+    except Exception as exc:  # noqa: BLE001 - raise_transient passes on network failures only
+        detail = str(exc).splitlines()[0][:200] if str(exc) else type(exc).__name__
+        return (
+            f"{lead}could not be downloaded ({detail}).{tail} Check the network connection "
+            "and run again; a bundle that is already downloaded is used offline."
+        )
+    if bundle is None:
+        return (
+            f"{lead}was not found.{tail} Check ML_FRONT_TAGGER_MODEL_ID (a Hub repo id or a "
+            "local directory that holds an onnx/ bundle) and ML_FRONT_TAGGER_REVISION, or "
+            "run without --fast to read the front matter with an LLM."
+        )
+    return None
+
+
 def _run_llm_backend(config: ResolvedRunConfig) -> str:
-    """The LLM backend whose server the run starts: ``cloud`` under ``--no-llm``."""
-    return "cloud" if config.no_llm else config.llm_backend
+    """The LLM backend whose server the run starts: ``cloud`` under ``--no-llm`` or fast."""
+    # ``getattr``: the preflights also take any object shaped like the config.
+    skips = config.no_llm or getattr(config, "mode", "full") == "fast"
+    return "cloud" if skips else config.llm_backend
+
+
+def apply_text_layer_fallback(
+    config: ResolvedRunConfig, preflight: Callable[[ResolvedRunConfig], str | None]
+) -> tuple[ResolvedRunConfig, str | None]:
+    """Swap an automatic OCR backend that cannot start for the text layer.
+
+    Only with ``OCR_FALLBACK_TO_TEXT_LAYER=auto``, the automatic ``paddle``
+    selector and no ``--ocr-url``. *preflight* is the caller's
+    :func:`_preflight_ocr_runtime` (each command module holds its own
+    reference). Returns the config to show and preflight, and, when it was
+    swapped, the warning to print once; otherwise the config unchanged and
+    None, and the caller's own preflight refuses the run as before. Build the
+    pipeline with :attr:`ResolvedRunConfig.pipeline_ocr_backend`.
+    """
+    from bibr.config import Settings
+    from bibr.ocr.registry import TEXT_LAYER_BACKEND, TEXT_LAYER_MODEL
+
+    if (
+        Settings.ocr.fallback_to_text_layer != "auto"
+        or config.ocr_url
+        or config.ocr_backend != "paddle"
+    ):
+        return config, None
+    refusal = preflight(config)
+    if refusal is None:
+        return config, None
+    # The refusal lists one "  - <backend>: <reason>" line per candidate and
+    # then the alternatives, one of which is this setting: keep the reasons.
+    blockers = [
+        line.strip()[2:] for line in refusal.splitlines() if line.strip().startswith("- ")
+    ] or [refusal.split("Alternatives:", 1)[0].strip()]
+    swapped = replace(
+        config,
+        ocr_backend=TEXT_LAYER_BACKEND,
+        ocr_model=None,
+        ocr_profile=None,
+        ocr_summary_model=TEXT_LAYER_MODEL,
+        ocr_text_layer_fallback="; ".join(blockers),
+    )
+    listed = "\n".join(f"  - {blocker}" for blocker in blockers)
+    warning = (
+        "No OCR backend can start on this machine, so PDFs are read from their embedded "
+        "text layer (OCR_FALLBACK_TO_TEXT_LAYER=auto). Born-digital PDFs work; scanned PDFs "
+        f"fail, since they need OCR:\n{listed}"
+    )
+    return swapped, warning
 
 
 def _ocr_runtime_blocker(ocr_backend: str, *, llm_backend: str | None = None) -> str | None:
@@ -414,8 +628,9 @@ def _ocr_runtime_blocker(ocr_backend: str, *, llm_backend: str | None = None) ->
     if not blockers:
         return None
     alternatives = (
-        "Alternatives: point --ocr-url at an external OCR server, or use a cloud vision "
-        "backend (--ocr gemini|openai|anthropic)."
+        "Alternatives: point --ocr-url at an external OCR server, use a cloud vision "
+        "backend (--ocr gemini|openai|anthropic), or read born-digital PDFs from their "
+        "text layer without OCR (--ocr text-layer, or OCR_FALLBACK_TO_TEXT_LAYER=auto)."
     )
     if len(blockers) == 1 and ocr_backend != "paddle":
         return f"OCR backend cannot start here — {blockers[0]}. {alternatives}"

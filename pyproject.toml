@@ -1,6 +1,6 @@
 [project]
 name = "bibr"
-version = "0.8.0"
+version = "0.9.0"
 description = "Scientific paper extraction to structured JSON: metadata, text, references, tables, figures, and equations from PDF, DOCX, JATS XML, HTML, and ePub."
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
@@ -295,6 +295,7 @@ ignore = [
 "tests/**/*.py" = ["S101", "S105", "S108", "S301", "S314", "S603", "ARG", "E402", "SIM117"]  # Allow asserts, hardcoded passwords, /tmp paths, pickle round-trip tests, xml.etree parsing of literal fixtures, subprocess calls, unused args, import order, nested with in tests
 "bibr/serve/**/*.py" = ["ARG002"]  # API-compatibility params in ingress routes
 "bibr/local/**/*.py" = ["ARG002"]  # Interface-compatibility params
+"bibr/clients/skipped.py" = ["ARG002"]  # The fast-mode client takes every LLMClient call's params and ignores them
 "evaluation/**/*.py" = ["S101", "ARG", "S301", "S108"]  # Evaluation scripts: asserts, unused args, pickle example-cache round-trip, /tmp cache paths
 "scripts/**" = ["S101", "S113", "S311", "ARG", "F841", "E402"]  # Dev/debug scripts
 "notebooks/**" = ["S101", "S113", "ARG", "F841", "E402"]  # Notebooks

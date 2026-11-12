@@ -69,6 +69,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable preset switching dropdown in the demo UI",
     )
+    run_mode = parser.add_mutually_exclusive_group()
+    run_mode.add_argument(
+        "--fast",
+        action="store_true",
+        help=(
+            "Fast mode: no LLM call and no API key, local models only (as for 'bibr chew'). "
+            "What the demo does with no LLM configured, without the flag. Overrides PIPELINE_MODE."
+        ),
+    )
+    run_mode.add_argument(
+        "--full",
+        action="store_true",
+        help=(
+            "Full mode: the configured LLM reads what the local models are unsure of "
+            "(as for 'bibr chew'). Overrides PIPELINE_MODE."
+        ),
+    )
     return parser
 
 
@@ -98,7 +115,8 @@ def main():
         ui.error(
             Console(stderr=True),
             "Gradio is not installed.",
-            hint="Install with: [cyan]uv sync --extra=demo[/cyan]",
+            hint="Install with: [cyan]uv tool install 'bibr\\[demo]'[/cyan] "
+            "(in a source checkout: [cyan]uv sync --extra=demo[/cyan])",
         )
         sys.exit(1)
 
@@ -166,13 +184,24 @@ def main():
     if password:
         launch_kwargs["auth"] = (username, password)
 
-    demo = create_local_demo(
-        ocr_backend=args.ocr,
-        memory_mode=args.memory,
-        llm_backend=args.llm,
-        presets_enabled=args.presets,
-        refs=args.refs,
-    )
+    try:
+        demo = create_local_demo(
+            ocr_backend=args.ocr,
+            memory_mode=args.memory,
+            llm_backend=args.llm,
+            presets_enabled=args.presets,
+            refs=args.refs,
+            mode="fast" if args.fast else "full" if args.full else None,
+        )
+    except ValueError as e:
+        # --fast together with --llm or --refs llm.
+        from rich.console import Console
+        from rich.markup import escape
+
+        from bibr.local.cli import ui
+
+        ui.error(Console(stderr=True), escape(str(e)))
+        sys.exit(2)
 
     demo.launch(**launch_kwargs)
 

@@ -1790,6 +1790,7 @@ class TestNerGetterConcurrency:
         import bibr.extract.ref_extractor as ex
 
         monkeypatch.setattr(ex, "_NER_PARSER", None, raising=False)
+        monkeypatch.setattr("bibr.ner.checkpoint.has_torch_checkpoint", lambda *a: True)
         counting_cls, calls = self._counting_cls()
         with mock.patch("bibr.ner.parser.RefParser", counting_cls):
             results = self._race(ex._get_ner_parser)
@@ -3543,8 +3544,13 @@ class TestLLMPathContiguousBibIds:
         ]
         ext.llm_client = mock.MagicMock()
         ext.llm_client.extract_references = mock.AsyncMock(return_value=mock_refs)
+        # The NER recovery of the empty answer reads nothing in the fragment.
+        no_fields = mock.Mock()
+        no_fields.parse_batch = mock.Mock(side_effect=lambda texts, **_k: [{} for _ in texts])
+        no_fields.parse = mock.Mock(return_value={})
 
-        result = await ext.refs._parse_references_llm("\n".join(ref_texts), ref_texts)
+        with mock.patch("bibr.extract.ref_extractor._get_ner_parser", return_value=no_fields):
+            result = await ext.refs._parse_references_llm("\n".join(ref_texts), ref_texts)
 
         assert [r.title for r in result] == ["Paper A", "Paper B"]
         assert [r.bib_id for r in result] == [1, 2]

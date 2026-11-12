@@ -74,6 +74,88 @@ async def test_pipeline_constructor_threads_settings_and_runner_cleans_up():
     fs.free_pre_parse.assert_called_once_with()
 
 
+class _SettingsRecorder:
+    name = "parse"
+
+    def __init__(self):
+        self.seen = []
+
+    async def run(self, ctx):
+        self.seen.append(ctx.settings)
+
+
+@pytest.mark.asyncio
+async def test_a_fast_chunk_runs_on_the_overlay_and_a_full_chunk_on_the_pipelines_own():
+    stage = _SettingsRecorder()
+    pipeline = _make_pipeline([stage])
+    pipeline.settings.ml.front_tagger_mode = "off"
+    pipeline.settings.IMPLICIT_SECTION_DETECTION = True
+
+    await pipeline.process_chunk([FileState(path=Path("a.pdf"))], progress=NullProgress())
+    await pipeline.process_chunk(
+        [FileState(path=Path("b.pdf"))], progress=NullProgress(), config=RunConfig(mode="fast")
+    )
+    await pipeline.process_chunk(
+        [FileState(path=Path("c.pdf"))], progress=NullProgress(), config=RunConfig(mode="full")
+    )
+
+    default, fast, full = stage.seen
+    assert default is pipeline.settings
+    assert full is pipeline.settings
+    assert fast is not pipeline.settings
+    assert fast.ml.front_tagger_mode == "only"
+    assert fast.IMPLICIT_SECTION_DETECTION is False
+    # The overlay is a snapshot: the pipeline's settings did not change.
+    assert pipeline.settings.ml.front_tagger_mode == "off"
+    assert pipeline.settings.IMPLICIT_SECTION_DETECTION is True
+
+
+@pytest.mark.asyncio
+async def test_the_pipeline_default_config_can_be_fast():
+    stage = _SettingsRecorder()
+    pipeline = _make_pipeline([stage])
+    pipeline._config = RunConfig(mode="fast")
+
+    await pipeline.process_chunk([FileState(path=Path("a.pdf"))], progress=NullProgress())
+    await pipeline.process_chunk(
+        [FileState(path=Path("b.pdf"))], progress=NullProgress(), config=RunConfig()
+    )
+
+    fast, full = stage.seen
+    assert fast.ml.front_tagger_mode == "only"
+    assert full is pipeline.settings
+
+
+@pytest.mark.asyncio
+async def test_no_llm_alone_keeps_the_pipelines_settings():
+    """``--no-llm`` is not the overlay: its settings and behaviour are unchanged."""
+    stage = _SettingsRecorder()
+    pipeline = _make_pipeline([stage])
+
+    await pipeline.process_chunk(
+        [FileState(path=Path("a.pdf"))], progress=NullProgress(), config=RunConfig(no_llm=True)
+    )
+
+    assert stage.seen == [pipeline.settings]
+
+
+@pytest.mark.asyncio
+async def test_no_llm_wins_over_fast_and_keeps_the_pipelines_settings():
+    """Structure only never turns the tagger on, so it loads or downloads no model."""
+    stage = _SettingsRecorder()
+    pipeline = _make_pipeline([stage])
+    pipeline.settings.ml.front_tagger_mode = "off"
+
+    await pipeline.process_chunk(
+        [FileState(path=Path("a.pdf"))],
+        progress=NullProgress(),
+        config=RunConfig(mode="fast", no_llm=True),
+    )
+
+    assert stage.seen == [pipeline.settings]
+    assert pipeline.settings.ml.front_tagger_mode == "off"
+
+
 @pytest.mark.asyncio
 async def test_pipeline_runner_cleans_up_when_stage_raises():
     class _RaisingParseStage:

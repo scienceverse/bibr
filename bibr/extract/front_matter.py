@@ -24,13 +24,16 @@ from bibr.paper_contents import (
     CanonicalSection,
     is_exact_front_matter_furniture,
 )
+from bibr.structure.section_classifier import TRUSTED_TYPE_CONFIDENCE
+from bibr.structure.section_tree import body_numbered_section_ids
 from bibr.utils.text import DOI_CANDIDATE_RE, normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
 if TYPE_CHECKING:
     from bibr.config import GlobalSettings
     from bibr.extract.front_role import FrontRolePredictions, RoleScores
-    from bibr.paper_contents import PaperContents, PaperSentence, RegionSummary
+    from bibr.models import PaperMetadata
+    from bibr.paper_contents import PaperContents, PaperSection, PaperSentence, RegionSummary
     from bibr.pipeline.identity import ExpectedIdentity
 
 logger = logging.getLogger(__name__)
@@ -349,11 +352,111 @@ def _first_page(contents: PaperContents) -> int | None:
     return min(pages) if pages else None
 
 
+# Where a section's type is the classifier's guess rather than an alias match
+# or the parser's title: the trained model, a type inherited from the parent
+# heading, and an untrusted alias hit taken as a fallback.
+_GUESSED_TYPE_SOURCES = frozenset({"model", "parent_context", "alias_prior"})
+
+
+@dataclass(frozen=True)
+class _SectionReading:
+    """Sections whose place in the paper overrides their classified type.
+
+    ``body`` holds sections read as body text whatever their type; ``untyped``
+    holds sections read as untyped, which is to say as front matter, whatever
+    their guessed type.
+    """
+
+    body: frozenset[int] = frozenset()
+    untyped: frozenset[int] = frozenset()
+
+    def reads_as_front_matter(self, section: PaperSection | None) -> bool:
+        if section is None:
+            return True
+        if section.section_id in self.body:
+            return False
+        return (
+            section.section_id in self.untyped
+            or section.section_type in _FRONT_MATTER_SECTION_TYPES
+        )
+
+
+def _on_page(section: PaperSection, page: int | None) -> bool:
+    return page is not None and any(item.page_no == page for item in section.provenance)
+
+
+def _section_reading(contents: PaperContents, first_page: int | None) -> _SectionReading:
+    """Read from position and printed numbering where front matter ends.
+
+    Front matter takes in every untyped section, and the section classifier
+    has no byline class and no idea where the front matter ends, so whether a
+    section's rows were front-matter candidates turned on a type the model was
+    often unsure of. A retrained classifier that leaves more numbered body
+    headings untyped ("II. MARKET RULES AND ...") fed whole body sections in:
+    a capitalised body heading is title-shaped and roots a second record,
+    short capitalised subheadings read as its byline, and with two bylines in
+    sight the paper abstains. One that guesses "introduction" for a
+    byline set as a heading under the title drops the byline with its section.
+    Two readings take precedence over the type:
+
+    - The body opens at the first section typed as body, a guess (below) aside.
+      From there on, a heading printed with a number of the document's body
+      numbering ("II.", "3.2") is body text whatever its type, and so is a
+      section nested under one.
+    - Before the body opens and before any abstract or keywords section, an
+      unnumbered first-page section whose body type is a guess -- a trained
+      type below :data:`TRUSTED_TYPE_CONFIDENCE`, an inherited type, a fallback
+      alias -- is read as untyped. Nothing between the title and the abstract
+      is body text. :func:`_read_front_gap_as_untyped` extends this to the
+      guessed back-matter types of the sections printed there.
+
+    Unnumbered headings after the body opens keep their type. An untyped one
+    there can be front matter printed late (an affiliation list or author
+    information after the conclusions) or the next paper of an abstract book,
+    whose title and byline must stay in sight for the multi-record checks.
+    """
+
+    numbered = body_numbered_section_ids(contents.sections)
+    body: set[int] = set()
+    untyped: set[int] = set()
+    opened = False
+    front_closed = False
+    for section in contents.sections:
+        if section.level <= 0:
+            continue
+        section_id = section.section_id
+        if not opened:
+            if section.section_type in {CanonicalSection.ABSTRACT, CanonicalSection.KEYWORDS}:
+                front_closed = True
+                continue
+            if section.section_type not in _BODY_SECTION_TYPES:
+                continue
+            if (
+                not front_closed
+                and section_id not in numbered
+                and section.classification_source in _GUESSED_TYPE_SOURCES
+                and section.classification_score < TRUSTED_TYPE_CONFIDENCE
+                and _on_page(section, first_page)
+            ):
+                untyped.add(section_id)
+                continue
+            opened = True
+        if section.classification_source != "title" and (
+            section_id in numbered or section.parent_section_id in body
+        ):
+            body.add(section_id)
+    return _SectionReading(body=frozenset(body), untyped=frozenset(untyped))
+
+
 # Section types that close the title-to-abstract gap on the first page.
 _FRONT_GAP_END_TYPES = _BODY_SECTION_TYPES | {CanonicalSection.ABSTRACT, CanonicalSection.KEYWORDS}
 
 
-def _front_gap_section_ids(contents: PaperContents, first_page: int | None) -> frozenset[int]:
+def _front_gap_section_ids(
+    contents: PaperContents,
+    first_page: int | None,
+    reading: _SectionReading | None = None,
+) -> frozenset[int]:
     """Sections printed between the first-page title and the abstract or body.
 
     The header classifier has no byline class. When the parser promotes the
@@ -369,12 +472,14 @@ def _front_gap_section_ids(contents: PaperContents, first_page: int | None) -> f
     parser's detected title: a body heading the classifier calls TITLE
     ("1.1.1. An Efficient ...") would otherwise open one over related-work
     citations. Without a closing abstract or body section the gap has no end,
-    and nothing is admitted.
+    and nothing is admitted. A body section that ``reading`` reads as untyped
+    does not close the gap.
     """
 
     detected_title = (contents.detected_title or "").strip()
     if first_page is None or not detected_title:
         return frozenset()
+    untyped = reading.untyped if reading is not None else frozenset()
     gap: list[int] = []
     title_seen = False
     for section in contents.sections:
@@ -385,7 +490,7 @@ def _front_gap_section_ids(contents: PaperContents, first_page: int | None) -> f
                 item.page_no == first_page for item in section.provenance
             )
             continue
-        if section.section_type in _FRONT_GAP_END_TYPES:
+        if section.section_type in _FRONT_GAP_END_TYPES and section.section_id not in untyped:
             return frozenset(gap)
         gap.append(section.section_id)
     return frozenset()
@@ -415,6 +520,34 @@ def _looks_like_name_email_cell(text: str) -> bool:
 
 
 _URL_TEXT_RE = re.compile(r"https?://|\bwww\.", re.IGNORECASE)
+
+
+def _read_front_gap_as_untyped(
+    reading: _SectionReading, contents: PaperContents, front_gap: frozenset[int]
+) -> _SectionReading:
+    """Read the front gap as front matter whatever type the classifier guessed.
+
+    What is printed between the first-page title and the abstract or body is
+    front matter: a byline, affiliations, a "Correspondence" or "Affiliations:"
+    block, an author note. The classifier types such headings as
+    acknowledgments, endnotes, footnotes or funding with high confidence, and
+    a confident guess dropped the corresponding author's e-mail with its
+    section. A gap section whose non-front type is the classifier's guess is
+    therefore read as untyped, whatever the confidence. A type matched from the
+    printed heading (an "Acknowledgments" alias) keeps its type, and so does
+    every section outside the gap.
+    """
+
+    guessed = frozenset(
+        section.section_id
+        for section in contents.sections
+        if section.section_id in front_gap
+        and section.classification_source in _GUESSED_TYPE_SOURCES
+        and section.section_type not in _FRONT_MATTER_SECTION_TYPES
+    )
+    if not guessed:
+        return reading
+    return replace(reading, untyped=reading.untyped | guessed)
 
 
 def _front_gap_byline_evidence(text: str, summary: RegionSummary | None, *, regions: int) -> bool:
@@ -882,8 +1015,10 @@ def _paragraph_drafts(
     allow_byline_probation: bool,
     policy: FrontRolePolicy | None = None,
     front_gap: frozenset[int] = frozenset(),
+    reading: _SectionReading | None = None,
 ) -> list[_CandidateDraft]:
     policy = policy or FrontRolePolicy()
+    reading = reading or _SectionReading()
     predictions = contents.front_role_predictions
     section_map = {section.section_id: section for section in contents.sections}
     groups: OrderedDict[tuple[int, int], list[tuple[int, PaperSentence]]] = OrderedDict()
@@ -894,9 +1029,8 @@ def _paragraph_drafts(
     byline_probation: set[tuple[int, int]] = set()
     for source_order, sentence in enumerate(contents.sentences):
         section = section_map.get(sentence.section_id)
-        section_type = section.section_type if section is not None else CanonicalSection.UNKNOWN
         key = (sentence.section_id, sentence.paragraph_id)
-        if section_type not in _FRONT_MATTER_SECTION_TYPES and sentence.section_id != 0:
+        if not reading.reads_as_front_matter(section) and sentence.section_id != 0:
             if not (allow_byline_probation or sentence.section_id in front_gap):
                 continue
             if first_page is None or first_page not in _sentence_pages(sentence):
@@ -995,8 +1129,10 @@ def _heading_drafts(
     allow_byline_probation: bool,
     policy: FrontRolePolicy | None = None,
     front_gap: frozenset[int] = frozenset(),
+    reading: _SectionReading | None = None,
 ) -> list[_CandidateDraft]:
     policy = policy or FrontRolePolicy()
+    reading = reading or _SectionReading()
     predictions = contents.front_role_predictions
     summaries = list(contents.region_summaries or [])
     drafts: list[_CandidateDraft] = []
@@ -1014,7 +1150,7 @@ def _heading_drafts(
             bbox=bbox,
             section_id=section.section_id,
         )
-        probation = section.section_type not in _FRONT_MATTER_SECTION_TYPES
+        probation = not reading.reads_as_front_matter(section)
         if probation:
             # A byline promoted to a section header (common for Cyrillic and
             # Latin-American layouts where the byline is set above the
@@ -1760,13 +1896,16 @@ def _collect_candidates(
     policy = policy or FrontRolePolicy()
     predictions = contents.front_role_predictions if use_model else None
     first_page = _first_page(contents)
-    front_gap = _front_gap_section_ids(contents, first_page)
+    reading = _section_reading(contents, first_page)
+    front_gap = _front_gap_section_ids(contents, first_page, reading)
+    reading = _read_front_gap_as_untyped(reading, contents, front_gap)
     paragraph_drafts = _paragraph_drafts(
         contents,
         first_page=first_page,
         allow_byline_probation=allow_byline_probation,
         policy=policy,
         front_gap=front_gap,
+        reading=reading,
     )
     drafts = paragraph_drafts + _heading_drafts(
         contents,
@@ -1775,6 +1914,7 @@ def _collect_candidates(
         allow_byline_probation=allow_byline_probation,
         policy=policy,
         front_gap=front_gap,
+        reading=reading,
     )
     if page_heads:
         # A page head counts as author text only on a first page that prints
@@ -2715,6 +2855,107 @@ def _title_language(text: str) -> str | None:
     return language if best > runner_up else None
 
 
+# Fewer words than this and one function word decides the language: too little
+# to write the language into the record.
+_MIN_LANGUAGE_WORDS = 4
+# What the record's language is guessed from. Polish "do" and "we" are English
+# and Portuguese words too ("where do we stand"), so they do not count there.
+_GUESS_WORDS: dict[str, frozenset[str]] = {
+    **_TITLE_FUNCTION_WORDS,
+    "pl": _TITLE_FUNCTION_WORDS["pl"] - {"do", "we"},
+}
+# Letters that mark Polish, and letters of the languages that share some of
+# them (Lithuanian, Czech, Turkish, Romanian, Portuguese, Spanish).
+_POLISH_LETTERS = frozenset("ąęłńśźż")
+_NOT_POLISH_LETTERS = frozenset("ėįųūčšžřěůťďňľĺŕığşăâîțșõãñ")
+# A Polish letter counts as this many function words.
+_POLISH_LETTER_HITS = 2
+# Cyrillic letters Russian and Ukrainian do not print: Kazakh, Uzbek, Tatar,
+# Mongolian, Belarusian, Serbian, Macedonian.
+_OTHER_CYRILLIC_LETTERS = frozenset("әғқңөұүһҳўӣӯҗҙҡҫӧӓђјљњћџѓќѕ")
+# Indonesian function words are not words of any other language in the table
+# or of English, so one of them is enough; elsewhere "Die Young" is not German.
+_ONE_WORD_LANGUAGES = frozenset({"id"})
+
+
+def _guess_cyrillic_language(text: str) -> str | None:
+    """Ukrainian or Russian by the letters only one of them prints, else None.
+
+    ъ is no evidence: Bulgarian prints it. A letter of any other Cyrillic
+    language, or Belarusian і beside Russian ы э ё, leaves the title unnamed.
+    """
+
+    letters = set(text.casefold())
+    if letters & _OTHER_CYRILLIC_LETTERS:
+        return None
+    if letters & set("їєґ") or ("і" in letters and "и" in letters and not letters & set("ыэёъ")):
+        return "uk"
+    return "ru" if letters & set("ыэё") and "і" not in letters else None
+
+
+def _guess_latin_language(text: str) -> str | None:
+    """The language whose function words a Latin-script title uses most, else None.
+
+    Stricter than :func:`_title_language`, which a title's translation is
+    compared with: the winner is unique and has a word of two or more letters
+    ("I", "D" and "O" are function words in several languages); a language
+    other than English needs two such words, or one with an accented letter
+    beside it; Polish letters count for Polish.
+    """
+
+    folded = text.casefold().replace("\u0307", "")
+    words = [part for word in _WORD_RE.findall(folded) for part in re.split(r"['’]", word)]
+    hits = {
+        language: sum(word in vocabulary for word in words)
+        for language, vocabulary in _GUESS_WORDS.items()
+    }
+    long_hits = {
+        language: sum(len(word) > 1 and word in vocabulary for word in words)
+        for language, vocabulary in _GUESS_WORDS.items()
+    }
+    letters = set(folded)
+    if letters & _POLISH_LETTERS and not letters & _NOT_POLISH_LETTERS:
+        hits["pl"] += _POLISH_LETTER_HITS
+        long_hits["pl"] += _POLISH_LETTER_HITS
+    ranked = sorted(hits.items(), key=lambda item: item[1], reverse=True)
+    (language, best), (_, runner_up) = ranked[0], ranked[1]
+    if best <= runner_up or long_hits[language] < 1:
+        return None
+    if language == "en" or language in _ONE_WORD_LANGUAGES:
+        return language
+    accented = any(char.isalpha() and not char.isascii() for char in text)
+    return language if best >= 2 or accented else None
+
+
+def language_from_title(title: str | None) -> str | None:
+    """The ISO 639-1 code of the paper's language read from its title, or None.
+
+    A guess from function words and script letters, from a title of at least
+    four words, that names only a language, never a script. Where the evidence
+    is thin it gives None: a title that no language's function words win, a
+    lone function word that English shares ("Die Young or Live Forever"), a
+    language outside the table, or a Cyrillic title without letters that tell
+    Russian from Ukrainian.
+    """
+    title = title or ""
+    if len(_WORD_RE.findall(title)) < _MIN_LANGUAGE_WORDS:
+        return None
+    script = _dominant_script(title)
+    if script == "CYRILLIC":
+        return _guess_cyrillic_language(title)
+    return _guess_latin_language(title) if script == "LATIN" else None
+
+
+def fill_language(metadata: PaperMetadata) -> None:
+    """Set ``metadata.language`` from the title when the record has none.
+
+    A PDF declares no language, so the field stays empty unless something
+    fills it; an input that declares its own (JATS, HTML) is kept as it is.
+    """
+    if not metadata.language:
+        metadata.language = language_from_title(metadata.title)
+
+
 def _person_surnames(text: str) -> frozenset[str]:
     """Surnames of the name-shaped chunks printed before any affiliation.
 
@@ -3328,6 +3569,65 @@ def _select_agreeing_record(
     return primary.block, tuple(flags)
 
 
+def _select_tagger_record(
+    blocks: tuple[FrontMatterBlock, ...],
+    by_id: dict[str, FrontMatterCandidate],
+    *,
+    contents: PaperContents,
+    settings: GlobalSettings | None,
+) -> tuple[FrontMatterBlock | None, tuple[str, ...]]:
+    """In fast mode, the block printing the title the tagger read, if one paper is in sight.
+
+    The abstention exists because a model reads the selected block only, so a
+    wrong block means another paper's metadata. Fast mode's tagger reads the
+    page and has already answered: a second title on its own (a translation, a
+    journal masthead, a running head) costs nothing there. Two blocks that each
+    print a byline can be two papers (an abstract book, a proceedings page), so
+    those still abstain, as does a tagger answer without a title or an author,
+    or a title that no block prints as a record: a title in a block without one
+    is the tail of the article before.
+    """
+
+    ml = getattr(settings, "ml", None)
+    if getattr(ml, "front_tagger_mode", "off") != "only":
+        return None, ()
+    tagged = getattr(contents, "front_tagger_result", None)
+    title = getattr(getattr(tagged, "title_keywords", None), "title", None)
+    if not title or not getattr(getattr(tagged, "byline", None), "authors", None):
+        return None, ("tagger_record_incomplete",)
+    identities = [
+        _record_identity(block, order, by_id, detected_title=contents.detected_title)
+        for order, block in enumerate(blocks)
+    ]
+    bylined = [identity for identity in identities if identity.byline]
+    if len(bylined) > 1:
+        return None, ("several_bylines",)
+    title_key = _identity_key(title)
+    for identity in identities:
+        printed = "".join(
+            _identity_key(row.raw_text) for row in _block_candidates(identity.block, by_id)
+        )
+        if title_key and title_key in printed:
+            if not identity.is_record:
+                return None, (f"tagger_title_outside_record:{identity.block.block_id}",)
+            # The one byline in sight is another block's: the title the tagger
+            # read can be a second paper's, with the first paper's authors and
+            # abstract around it.
+            if bylined and bylined[0] is not identity:
+                return None, (f"tagger_title_outside_byline:{identity.block.block_id}",)
+            # Every family name the tagger read must be printed in the block, or
+            # its byline took in names from a second byline the blocks missed.
+            families = [
+                key
+                for author in tagged.byline.authors
+                if (key := _identity_key(author.family or ""))
+            ]
+            if not families or any(key not in printed for key in families):
+                return None, (f"tagger_authors_outside_record:{identity.block.block_id}",)
+            return identity.block, (f"tagger_record:{identity.block.block_id}",)
+    return None, ("tagger_title_outside_blocks",)
+
+
 def _multi_item_issue(
     blocks: tuple[FrontMatterBlock, ...],
     expected_identity: ExpectedIdentity | None,
@@ -3420,7 +3720,22 @@ def resolve_front_matter(
                     agreed if block.block_id == agreed.block_id else block for block in blocks
                 )
             else:
-                reason_flags.append("multiple_plausible_blocks")
+                tagger_flags: tuple[str, ...] = ()
+                if not _has_expected_selectors(expected_identity):
+                    try:
+                        selected, tagger_flags = _select_tagger_record(
+                            blocks, by_id, contents=contents, settings=settings
+                        )
+                    except Exception:  # noqa: BLE001 — a fallback must never fail an abstaining paper
+                        logger.warning(
+                            "Front-matter tagger record failed; abstaining", exc_info=True
+                        )
+                        selected, tagger_flags = None, ("tagger_record_error",)
+                if selected is not None:
+                    method = "tagger_record"
+                else:
+                    reason_flags.append("multiple_plausible_blocks")
+                reason_flags.extend(tagger_flags)
             reason_flags.extend(agreement_flags)
     elif not blocks:
         reason_flags.append("no_candidates")
@@ -3461,7 +3776,9 @@ __all__ = [
     "FrontMatterResolution",
     "FrontRolePolicy",
     "collect_front_matter_candidates",
+    "fill_language",
     "group_front_matter_blocks",
     "is_exact_front_matter_furniture",
+    "language_from_title",
     "resolve_front_matter",
 ]

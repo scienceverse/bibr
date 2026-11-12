@@ -18,13 +18,28 @@ First, headers are matched against a dictionary of known aliases (`CANONICAL_SEC
 - **Substring match** -- a trusted alias appears as a word-boundary substring of the header (confidence: 0.95), also bypassing both later tiers
 - A generic alias hit that isn't trusted is kept as a low-confidence prior, used only if both later tiers return `unknown`
 
+A substring hit is trusted when the aliases of its type cover at least 60% of
+the normalized heading (lowercase, digits and dots removed). The table also
+holds the printed part names of research papers in other languages, among them
+Russian, Ukrainian, Polish, Czech, German, Dutch, French, Spanish, Portuguese,
+Italian, Indonesian, Turkish, Chinese, Japanese, Korean and Arabic, with the
+longer forms some journals print whole ("Материалы и методы исследования",
+"Resultados e discussão", "Fazit für die Praxis"), since a short part name
+inside them covers too little of the heading to be trusted. Results merged
+with discussion is `results`; conclusions are `discussion`. The same labels
+inside a structured abstract that a keywords line, a numbered heading or an
+introduction closes are typed `abstract`.
+
 ### Tier 2: Trained classifier
 
 For lookup misses, headers route through a trained MiniLM two-head model
 (`ML_SECTION_CLASSIFIER_MODEL_ID`, default `scienceverse/bibr-section-classifier`).
 It predicts the canonical type and whether the heading is top-level, using
 relative position and neighboring headings. Predictions below
-`ML_SECTION_CLASSIFIER_MIN_CONFIDENCE` (default `0.5`) collapse to `unknown`.
+`ML_SECTION_CLASSIFIER_MIN_CONFIDENCE` collapse to `unknown`. Left unset, the
+threshold is `0.9` while `ML_SECTION_CLASSIFIER_LLM_ESCALATION` is on, so the
+LLM types the headers the model is less sure of, and `0.5` when escalation is
+off, where a collapsed header stays `unknown`. A value you set applies either way.
 If the model is disabled or unavailable, the pipeline uses the LLM path.
 Classifier load and inference failures are recorded as degraded operation;
 `ML_CLASSIFIERS_REQUIRED=true` makes configured classifier availability a
@@ -42,6 +57,15 @@ The export records each section's `score` and `source` in
 consumers can distinguish model, lookup, LLM, and later hierarchy decisions. With `no_llm=True`, heading classification
 uses the lookup-only path.
 
+Some sections have no printed heading: an abstract or introduction found by its
+position, a section named after a layout region, and the acknowledgment and
+author-contribution sections the opt-in statement tagger adds. Their
+`section[].header` is bibr's own wording ("Abstract", "Introduction",
+"Acknowledgments", "Author contributions"), and their row in
+`extraction.diagnostics.section_classification` carries `header_supplied: true`.
+The key is absent for a printed heading. To list the headings a paper prints,
+leave out the sections whose row has it.
+
 ### Canonical section types
 
 | Type | Value | Examples |
@@ -53,19 +77,21 @@ uses the lookup-only path.
 | Results | `results` | Results, Findings, Experimental Results |
 | Discussion | `discussion` | Discussion, General Discussion, Limitations, Conclusion |
 | References | `references` | References, Bibliography, Works Cited |
-| Acknowledgment | `acknowledgment` | Acknowledgments, Declarations, Corresponding Author |
+| Acknowledgment | `acknowledgment` | Acknowledgments, Acknowledgements |
 | Author Contributions | `author_contributions` | Author Contributions, CRediT Authorship Contribution Statement |
 | Conflict of Interest | `coi` | Conflict of Interest, Competing Interests, Declaration of Interest |
 | Ethics | `ethics` | Ethics Statement, IRB Approval, Informed Consent |
 | Funding | `funding` | Funding, Financial Support |
 | Keywords | `keywords` | Keywords |
-| Endnote | `endnote` | Supplementary Materials, Future Work, Outlook |
-| Appendix | `appendix` | Appendix, Supplementary Material, Supporting Information |
+| Endnote | `endnote` | Supplementary Material(s), Supplementary Information, Supporting Information, Extended Data, Publisher's Note |
+| Appendix | `appendix` | Appendix, Appendices, Appendix A |
 | Data Availability | `data_availability` | Data Availability, Code Availability, Reproducibility Statement |
-| Footnote | `footnote` | Footnotes, Notes |
+| Footnote | `footnote` | Footnotes, Notes; also author-metadata labels such as Correspondence to, Corresponding author, Author details, Affiliations, About the authors, ORCID iDs |
 | Table | `table` | Tables (a heading; captions are not sections) |
 | Figure | `figure` | Figures (a heading; captions are not sections) |
-| Unknown | `unknown` | (fallback for unrecognized headers) |
+| Unknown | `unknown` | (fallback for unrecognized headers; also headings that name no section type: cover-sheet labels and grouping headings such as Declarations) |
+
+The three back-matter types that are neither a statement nor the reference list have one definition each. `endnote` is end matter around the article: the heading over a pointer to the supplementary material, under any wording, and publisher's notes. `appendix` is an appendix, content printed after the article's last part. `footnote` is a notes section wherever it is printed (Notes, Endnotes, Author note) and a block of author metadata. A printed heading "Endnotes" is therefore typed `footnote`, and "Supplementary material" is typed `endnote`, not `appendix`.
 
 ### IMRaD enforcement
 
@@ -82,6 +108,26 @@ are reset to `unknown` with `classification_source="imrad_dedup"`. A later
 clean alias heading can therefore supersede an earlier weak classification.
 Deduplication is global, including across study scopes. Every other canonical
 type is allowed to repeat, and section order is not forced into IMRaD order.
+
+### Reviews and commentaries
+
+A review or commentary argues rather than reports, and the classifier types
+each heading alone, so it reads many topical headings as introduction,
+methods or results. Once the paper type is known, the guessed introduction,
+methods and results sections after the first introduction of such a paper
+become `discussion` (source `positional`), as the convention for a paper with
+no methods or results part has it. The subsections of the introduction stay
+introduction, and so does a heading that names its own part ("Historical
+background", "Theoretical framework"). The setting
+`PIPELINE_NON_IMRAD_BODY_AS_DISCUSSION` (on by default) switches this off.
+
+The paper type is a guess too, so the rule leaves a paper alone when it prints
+a methods or results part: a heading typed from its own words ("Methods",
+"Participants", "Материалы и методы"), or a guess on a heading that names the
+part ("Data and methods", "Main findings") or is a methods subsection name
+("Data", "Sample", "Study area"). A guess on a topical heading
+("Accountability") does not count. Systematic, scoping and umbrella reviews
+and meta-analyses named in the title or abstract are left alone as well.
 
 ### Layout hints
 
@@ -144,10 +190,13 @@ classifier with a `sentence-transformers/all-MiniLM-L6-v2` encoder. It reads
 the resolved title and abstract and predicts paper type together with OECD
 L1/L2. `ML_PAPER_CLASSIFIER_MODEL_ID` selects the model, and
 `ML_PAPER_CLASSIFIER_REVISION` pins its revision. According to the
-[model card](https://huggingface.co/scienceverse/bibr-paper-classifier/blob/6046171b3198a255acb1f07f81a586a32f399ac4/README.md)
-for the pinned revision, its training supervision is labels from a
-DeepSeek-v4-Flash teacher, which changed 16,220 OECD L1 labels relative to a
-matched OpenAlex baseline.
+[model card](https://huggingface.co/scienceverse/bibr-paper-classifier/blob/600ef07f7e03a6d20e15da9bb28c6ed5b3eb45d3/README.md)
+for the pinned revision (bibr 0.9.0), it starts from the previous model
+(`6046171b`, whose OECD labels came from a DeepSeek-v4-Flash teacher) and
+learns paper types from PubMed Central papers, labelled from their JATS article
+type, MEDLINE publication types and title rules; its OECD heads get no new
+labels and follow the previous model's answers. Its paper types are weaker
+outside PubMed Central.
 
 When the paper-type confidence falls below
 `ML_PAPER_CLASSIFIER_MIN_CONFIDENCE` (default `0.5`), the pipeline can ask the

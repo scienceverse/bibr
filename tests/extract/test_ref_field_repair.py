@@ -722,6 +722,22 @@ def test_colon_closing_a_byline_is_dropped():
     assert "author_trailing_colon" in fired
 
 
+def test_line_break_inside_a_hyphenated_initial_is_closed():
+    fields, fired = _repair(
+        {"authors": "Adler, K., Falk, L.- S., Hart, A.- G. M., & Young, É.- J."},
+        "Adler, K., Falk, L.-\nS., Hart, A.-\nG. M., & Young, É.-\nJ. (2016). A title.",
+    )
+    assert fields["authors"] == "Adler, K., Falk, L.-S., Hart, A.-G. M., & Young, É.-J."
+    assert "author_initial_hyphen_break" in fired
+
+
+def test_spaced_dash_between_authors_is_not_an_initial_break():
+    for authors in ("Adler, K. - Falk, L.", "Adler, K.- Falk, L.", "Adler-Falk, L. S."):
+        fields, fired = _repair({"authors": authors}, f"{authors} (2016). A title.")
+        assert fields["authors"] == authors
+        assert "author_initial_hyphen_break" not in fired
+
+
 def test_byline_tagged_as_title_moves_to_the_authors():
     fields, fired = _repair(
         {"title": "Deppe, U. et al."}, "Deppe, U. et al. Nature 326, 1-2 (1987)."

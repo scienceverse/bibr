@@ -33,7 +33,14 @@ def test_cpu_device_keeps_coreml_out_of_the_session():
     available = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
 
     assert _session_providers(available, "cpu") == ["CPUExecutionProvider"]
-    assert _session_providers(available, None) == available
+
+
+@pytest.mark.parametrize("device", [None, "cuda"])
+def test_only_an_mps_request_puts_coreml_in_the_session(device):
+    """A Mac's default run stays on the CPU provider; ``--device mps`` opts in to CoreML."""
+    available = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+
+    assert _session_providers(available, device) == ["CPUExecutionProvider"]
     assert _session_providers(available, "mps") == available
 
 
@@ -82,6 +89,10 @@ def test_default_segmenter_id_ignores_a_cwd_directory(tmp_path, monkeypatch):
     # Written as a path, the same directory still loads.
     assert resolve_wtpsplit_model("./sat-6l-sm").is_local
     assert resolve_wtpsplit_model(str(tmp_path / "sat-6l-sm")).is_local
+
+
+#: The commit the segmenter pins for SaT's base tokenizer.
+_XLMR_REVISION = "e73636d4f797dec63c3081bb6ed5c7b0bb3f2089"
 
 
 @pytest.fixture
@@ -161,7 +172,7 @@ def test_segmenter_never_hands_sat_a_hub_id(sat_load, model_name, repo_id, revis
     model, tokenizer = sat_load(model_name)
 
     assert model == str(sat_load.hub / repo_id / str(revision))
-    assert tokenizer == str(sat_load.hub / "facebookAI/xlm-roberta-base/None")
+    assert tokenizer == str(sat_load.hub / "facebookAI/xlm-roberta-base" / _XLMR_REVISION)
 
 
 def test_segmenter_hub_lookups_are_cached_per_process(sat_load):
@@ -181,7 +192,7 @@ def test_explicit_local_segmenter_paths_still_load(sat_load, tmp_path):
     assert sat_load("./sat-3l-sm") == ("sat-3l-sm", "sat-3l-sm")
     assert sat_load("./bare") == (
         "bare",
-        str(sat_load.hub / "facebookAI/xlm-roberta-base/None"),
+        str(sat_load.hub / "facebookAI/xlm-roberta-base" / _XLMR_REVISION),
     )
     with pytest.raises(ValueError, match="symlink"):
         sat_load("./linked")

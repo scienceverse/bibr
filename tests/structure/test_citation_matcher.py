@@ -1,25 +1,32 @@
 """Tests for bibr.structure.citation_matcher — reference-anchored Tier 2."""
 
+import pytest
+
 from bibr.models import PaperReference
 from bibr.paper_contents import PaperSentence
 from bibr.structure.citation_matcher import (
     _family_keys_for,
     detect_author_year_xrefs,
     extract_families,
+    match_with_candidates,
 )
 
 
-def _ref(bib_id, authors, year=2020, year_suffix=None, is_in_press=False):
+def _rule_xrefs(sents, refs):
+    """Tier 2 as a run with no LLM reads it (``rules=True``)."""
+    return detect_author_year_xrefs(sents, refs, rules=True)
+
+
+def _ref(bib_id, authors, year=2020, year_suffix=None, is_in_press=False, title="", **printed):
     return PaperReference(
         bib_id=bib_id,
-        title="",
-        first_page=None,
-        volume=None,
+        title=title,
         authors=authors,
         year=year,
         container=None,
         year_suffix=year_suffix,
         is_in_press=is_in_press,
+        **{"first_page": None, "volume": None, **printed},
     )
 
 
@@ -52,6 +59,80 @@ class TestExtractFamilies:
     def test_hyphenated(self):
         assert extract_families("Fei-Fei, L.") == ["Fei-Fei"]
 
+    def test_all_caps_surname_is_not_initials(self):
+        assert extract_families("NGUYEN, T., & BERGSTROM, K.", rules=True) == [
+            "NGUYEN",
+            "BERGSTROM",
+        ]
+        assert extract_families("KOWALSKI T., LINDQVIST K.", rules=True) == [
+            "KOWALSKI",
+            "LINDQVIST",
+        ]
+
+    def test_all_caps_surname_is_initials_without_rules(self):
+        assert extract_families("NGUYEN, T., & BERGSTROM, K.") == ["BERGSTROM"]
+
+    @pytest.mark.parametrize(
+        ("authors", "families"),
+        [
+            ("LEE, J., NGUYEN, T.", ["LEE", "NGUYEN"]),
+            ("SÁ, J., SILVA, T.", ["SÁ", "SILVA"]),
+            ("LI, J.", ["LI"]),
+            ("MA, J. A., & LEE, K.", ["MA", "LEE"]),
+            ("DE LA CRUZ, M., LEE, K.", ["DE LA CRUZ", "LEE"]),
+        ],
+    )
+    def test_short_caps_surname_before_dotted_initials_is_a_surname(self, authors, families):
+        assert extract_families(authors, rules=True) == families
+
+    def test_short_caps_surname_is_initials_without_rules(self):
+        assert extract_families("LEE, J., NGUYEN, T.") == []
+
+    def test_short_caps_surname_does_not_link_its_coauthor_alone(self):
+        refs = [_ref(1, "LEE, J., NGUYEN, T.", year=2016, title="A")]
+        sents = [_sent(0, "As shown (Nguyen, 2016) here.")]
+        assert _rule_xrefs(sents, refs) == []
+        refs = [_ref(1, "SÁ, J., SILVA, T.", year=2016, title="A")]
+        sents = [_sent(0, "As shown (Silva, 2016) here.")]
+        assert _rule_xrefs(sents, refs) == []
+
+    def test_first_author_of_a_short_caps_pair_is_the_one_cited_first(self):
+        refs = [_ref(1, "LEE, J., NGUYEN, T.", year=2016, title="A")]
+        sents = [_sent(0, "As shown (Lee & Nguyen, 2016) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
+    def test_four_capital_initials_after_a_family_stay_initials(self):
+        for rules in (False, True):
+            assert extract_families("Li JAMK, Wu AB", rules=rules) == ["Li", "Wu"]
+            assert extract_families("Smith JAMK, Jones AB", rules=rules) == ["Smith", "Jones"]
+
+    def test_four_capital_initials_link_their_family(self):
+        refs = [_ref(1, "Li JAMK, Wu AB", year=2016, title="A")]
+        sents = [_sent(0, "As shown (Li & Wu, 2016) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
+    @pytest.mark.parametrize("name", ["MITRE ATLAS", "WORLD BANK", "CENTER TOSUCC"])
+    def test_a_two_word_name_in_capitals_is_not_a_family_and_initials(self, name):
+        assert extract_families(name, rules=True) == [name]
+        assert extract_families(name) == [name]
+
+    def test_a_two_word_capitalised_organisation_still_links(self):
+        refs = [_ref(1, "MITRE ATLAS", year=2026, title="A")]
+        sents = [_sent(0, "As shown (Mitre Atlas, 2026) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
+    def test_a_capitals_family_keeps_short_initials(self):
+        assert extract_families("NGUYEN TA, BERGSTROM K", rules=True) == ["NGUYEN", "BERGSTROM"]
+
+    def test_short_caps_runs_stay_initials(self):
+        for rules in (False, True):
+            assert extract_families("Smith, JA, & Jones, K. B.", rules=rules) == ["Smith", "Jones"]
+            assert extract_families("Smith, J. A. B. C.", rules=rules) == ["Smith"]
+            assert extract_families("Lindqvist AJB, Okafor CD", rules=rules) == [
+                "Lindqvist",
+                "Okafor",
+            ]
+
 
 class TestFamilyKeys:
     def test_simple(self):
@@ -65,6 +146,25 @@ class TestFamilyKeys:
 
     def test_della_sala(self):
         assert _family_keys_for("Della Sala") == {"della sala", "sala"}
+
+    def test_leading_marker_stripped_with_rules(self):
+        assert _family_keys_for("*Lindqvist", rules=True) == {"lindqvist"}
+        assert _family_keys_for("† Okafor", rules=True) == {"okafor"}
+        assert _family_keys_for("(van der Toorn", rules=True) == {"van der toorn", "toorn"}
+
+    def test_leading_marker_kept_without_rules(self):
+        assert _family_keys_for("*Lindqvist") == {"*lindqvist"}
+
+
+def test_reference_with_leading_marker_links():
+    refs = [
+        _ref(1, "*Lindqvist, K., & †Okafor, C.", year=2018),
+        _ref(2, "Brandt, H.", year=2018),
+    ]
+    sents = [_sent(0, "This holds (Lindqvist & Okafor, 2018) and elsewhere (Brandt, 2018).")]
+    assert sorted(x.xref_id for x in _rule_xrefs(sents, refs)) == [1, 2]
+    # the exact reading cannot place the marked entry
+    assert [x.xref_id for x in detect_author_year_xrefs(sents, refs)] == [2]
 
 
 class TestRefIndexKeySets:
@@ -172,6 +272,573 @@ class TestSameFirstAuthorYearDisambiguation:
         sents = [_sent(0, "As shown (Smith, 2020) this works.")]
         out = detect_author_year_xrefs(sents, refs)
         assert out == []
+
+
+class TestRulesAreOptIn:
+    """Off, the matcher reads names exactly as it always did; ``rules`` adds readings."""
+
+    TITLE = "Gradient methods for sparse signal recovery"
+
+    @pytest.mark.parametrize(
+        ("refs", "text", "with_rules"),
+        [
+            # a work listed twice
+            (
+                [
+                    _ref(1, "Lindqvist, K.", title=TITLE),
+                    _ref(2, "Lindqvist, K.", title=TITLE),
+                ],
+                "As shown (Lindqvist, 2020).",
+                [1],
+            ),
+            # author count settles a tie
+            (
+                [
+                    _ref(1, "Okafor, C., & Lund, K.", title="Two authors"),
+                    _ref(2, "Okafor, C., Lund, K., & Brandt, H.", title="Three authors"),
+                ],
+                "As Okafor et al. (2020) showed, this holds.",
+                [2],
+            ),
+            # a "Family Given" entry reached by its family
+            (
+                [_ref(1, "Okafor Chidi, Lund Karl, Brandt Hana", title="A")],
+                "As shown (Okafor et al., 2020) here.",
+                [1],
+            ),
+            # a misspelt family
+            (
+                [_ref(1, "Kowalczyk, A.", title="A"), _ref(2, "Brandt, H.", title="B")],
+                "As shown (Kowalchyk, 2020) here.",
+                [1],
+            ),
+            # a marker printed before the name
+            (
+                [_ref(1, "*Lindqvist, K.", title="A"), _ref(2, "Brandt, H.", title="B")],
+                "As shown (Lindqvist, 2020) here.",
+                [1],
+            ),
+            # a surname in capitals
+            (
+                [_ref(1, "NGUYEN, T.", title="A"), _ref(2, "Brandt, H.", title="B")],
+                "As shown (Nguyen, 2020) here.",
+                [1],
+            ),
+        ],
+    )
+    def test_readings_apply_only_with_rules(self, refs, text, with_rules):
+        sents = [_sent(0, text)]
+
+        assert detect_author_year_xrefs(sents, refs) == []
+        assert detect_author_year_xrefs(sents, refs, rules=False) == []
+        assert [x.xref_id for x in detect_author_year_xrefs(sents, refs, rules=True)] == with_rules
+
+    def test_a_reference_both_readings_place_is_linked_either_way(self):
+        refs = [_ref(1, "Okafor, C., & Lund, K.", title="A"), _ref(2, "Brandt, H.", title="B")]
+        sents = [_sent(0, "As shown (Okafor & Lund, 2020) and (Brandt, 2020).")]
+
+        assert [x.xref_id for x in detect_author_year_xrefs(sents, refs)] == [1, 2]
+        assert [x.xref_id for x in detect_author_year_xrefs(sents, refs, rules=True)] == [1, 2]
+
+
+class TestDuplicateReferences:
+    """A work listed twice is one work: citing it is not ambiguous."""
+
+    TITLE = "Gradient methods for sparse signal recovery"
+
+    def test_listed_twice_links_first_entry(self):
+        from bibr.structure.citation_matcher import match_with_ambiguous
+
+        refs = [
+            _ref(4, "Lindqvist, K.", title=self.TITLE),
+            _ref(9, "Brandt, H.", title="Another paper entirely"),
+            _ref(15, "Lindqvist, K.", title=self.TITLE),
+        ]
+        xrefs, ambiguous = match_with_ambiguous(
+            [_sent(0, "As shown (Lindqvist, 2020).")], refs, rules=True
+        )
+        assert [x.xref_id for x in xrefs] == [4]
+        assert ambiguous == []
+
+    def test_case_and_diacritics_do_not_hide_a_repeat(self):
+        refs = [
+            _ref(1, "Müller, K.", title=self.TITLE),
+            _ref(2, "MULLER, K.", title=self.TITLE.upper()),
+        ]
+        sents = [_sent(0, "As shown (Muller, 2020) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
+    def test_different_titles_stay_ambiguous(self):
+        from bibr.structure.citation_matcher import match_with_ambiguous
+
+        refs = [
+            _ref(1, "Lindqvist, K.", title=self.TITLE),
+            _ref(2, "Lindqvist, K.", title="A second study by the same author"),
+        ]
+        xrefs, ambiguous = match_with_ambiguous(
+            [_sent(0, "As shown (Lindqvist, 2020).")], refs, rules=True
+        )
+        assert xrefs == []
+        assert ambiguous[0].candidate_bib_ids == [1, 2]
+
+    def test_entries_without_a_title_are_not_merged(self):
+        refs = [_ref(1, "Lindqvist, K."), _ref(2, "Lindqvist, K.")]
+        out = _rule_xrefs([_sent(0, "As shown (Lindqvist, 2020).")], refs)
+        assert out == []
+
+    def test_repeat_under_another_year_suffix_stays_citable_by_it(self):
+        refs = [
+            _ref(1, "Lindqvist, K.", year_suffix="a", title=self.TITLE),
+            _ref(2, "Lindqvist, K.", year_suffix="b", title=self.TITLE),
+        ]
+        sents = [
+            _sent(0, "As shown (Lindqvist, 2020a) here."),
+            _sent(1, "As shown (Lindqvist, 2020b) here."),
+        ]
+        out = _rule_xrefs(sents, refs)
+        assert [(x.text_id, x.xref_id) for x in out] == [(0, 1), (1, 2)]
+
+    @pytest.mark.parametrize(
+        ("first", "second"),
+        [
+            # The first 40 characters are the same; the number that tells the
+            # reports apart comes after them.
+            (
+                "Weekly outbreak situation report number 51",
+                "Weekly outbreak situation report number 72",
+            ),
+            (
+                "Surveillance of respiratory infections in the clinic, Part I",
+                "Surveillance of respiratory infections in the clinic, Part II",
+            ),
+            (
+                "Surveillance of respiratory infections in the clinic: methods",
+                "Surveillance of respiratory infections in the clinic: results",
+            ),
+        ],
+    )
+    def test_titles_that_differ_after_the_first_forty_characters_are_two_works(self, first, second):
+        from bibr.structure.citation_matcher import match_with_ambiguous
+
+        refs = [_ref(1, "Lindqvist, K.", title=first), _ref(2, "Lindqvist, K.", title=second)]
+        xrefs, ambiguous = match_with_ambiguous(
+            [_sent(0, "As shown (Lindqvist, 2020).")], refs, rules=True
+        )
+        assert xrefs == []
+        assert ambiguous[0].candidate_bib_ids == [1, 2]
+
+    @pytest.mark.parametrize(
+        "printed",
+        [
+            ({"volume": "12"}, {"volume": "13"}),
+            ({"first_page": "101"}, {"first_page": "245"}),
+            ({"last_page": "120"}, {"last_page": "260"}),
+            ({"doi": "10.1000/abc.1"}, {"doi": "10.1000/abc.2"}),
+            ({"edition": "2nd"}, {"edition": "3rd"}),
+        ],
+    )
+    def test_one_title_with_another_volume_or_pages_is_two_works(self, printed):
+        from bibr.structure.citation_matcher import match_with_ambiguous
+
+        first, second = printed
+        refs = [
+            _ref(1, "Lindqvist, K.", title=self.TITLE, **first),
+            _ref(2, "Lindqvist, K.", title=self.TITLE, **second),
+        ]
+        xrefs, ambiguous = match_with_ambiguous(
+            [_sent(0, "As shown (Lindqvist, 2020).")], refs, rules=True
+        )
+        assert xrefs == []
+        assert ambiguous[0].candidate_bib_ids == [1, 2]
+
+    def test_a_volume_one_entry_prints_and_the_other_leaves_out_does_not_part_them(self):
+        refs = [
+            _ref(1, "Lindqvist, K.", title=self.TITLE, volume="12", first_page="101"),
+            _ref(2, "Lindqvist, K.", title=self.TITLE),
+        ]
+        sents = [_sent(0, "As shown (Lindqvist, 2020) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
+    def test_the_same_work_printed_with_other_punctuation_is_one_work(self):
+        refs = [
+            _ref(1, "Lindqvist, K.", title=self.TITLE, volume="12", first_page="101"),
+            _ref(2, "Lindqvist K", title=self.TITLE + ".", volume="12", first_page="101"),
+        ]
+        sents = [_sent(0, "As shown (Lindqvist, 2020) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
+    def test_index_keeps_every_entry_in_refs_list(self):
+        from bibr.structure.citation_matcher import _build_ref_index
+
+        refs, by_year, _ = _build_ref_index(
+            [
+                _ref(1, "Lindqvist, K.", title=self.TITLE),
+                _ref(2, "Lindqvist, K.", title=self.TITLE),
+            ],
+            rules=True,
+        )
+        assert [r.bib_id for r in refs] == [1, 2]
+        assert [r.bib_id for r in by_year[(2020, None)]] == [1]
+
+
+class TestTieBreak:
+    """Same first family and year: the author count and order can still settle it."""
+
+    def test_et_al_takes_the_reference_with_three_or_more_authors(self):
+        refs = [
+            _ref(1, "Okafor, C., & Lund, K.", title="Two authors"),
+            _ref(2, "Okafor, C., Lund, K., & Brandt, H.", title="Three authors"),
+        ]
+        sents = [_sent(0, "As Okafor et al. (2020) showed, this holds.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [2]
+
+    def test_et_al_between_two_long_lists_stays_ambiguous(self):
+        refs = [
+            _ref(1, "Okafor, C., Lund, K., & Brandt, H.", title="Three authors"),
+            _ref(2, "Okafor, C., Lund, K., Brandt, H., & Sato, M.", title="Four authors"),
+        ]
+        sents = [_sent(0, "As Okafor et al. (2020) showed, this holds.")]
+        assert _rule_xrefs(sents, refs) == []
+
+    def test_cited_order_follows_listed_order(self):
+        refs = [
+            _ref(1, "Okafor, C., & Lund, K.", title="Okafor first"),
+            _ref(2, "Lund, K., & Okafor, C.", title="Lund first"),
+        ]
+        sents = [_sent(0, "As shown (Lund & Okafor, 2020) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [2]
+
+    def test_equal_fit_stays_ambiguous(self):
+        refs = [
+            _ref(1, "Okafor, C., & Lund, K.", title="First paper"),
+            _ref(2, "Okafor, C., & Lund, K.", title="Second paper"),
+        ]
+        sents = [_sent(0, "As shown (Okafor & Lund, 2020) here.")]
+        assert _rule_xrefs(sents, refs) == []
+
+    def test_one_cited_family_needs_a_single_author_reference(self):
+        from bibr.structure import citation_matcher as cm
+
+        refs = [
+            _ref(1, "Okafor, C., & Lund, K.", title="Two authors"),
+            _ref(2, "Okafor, C.", title="One author"),
+        ]
+        _r, by_year, ip = cm._build_ref_index(refs, rules=True)
+        cand = next(c for c in cm._find_candidates("As Okafor (2020) showed,", 1) if c.year == 2020)
+        ref, tied = cm._match(cand, by_year, ip, rules=True)
+        assert ref is not None and ref.bib_id == 2
+        assert tied == []
+
+    def test_the_reference_led_by_the_first_cited_family_wins(self):
+        # Both organisation names end in "Education", the key a second cited
+        # word shares with each; only one begins with the first cited name.
+        refs = [
+            _ref(1, "Greenfield Digital Education", title="Lessons from remote teaching"),
+            _ref(2, "Harbor Ad Hoc Committee on Learning Education", title="Report"),
+        ]
+        sents = [_sent(0, "As reported (Greenfield Digital Education, 2020) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
+    def test_two_references_led_by_the_first_cited_family_are_ranked_by_fit(self):
+        refs = [
+            _ref(1, "Okafor Chidi, Lund Karl, Brandt Hana", title="Three authors"),
+            _ref(2, "Okafor Dayo, Lund Karl", title="Two authors"),
+        ]
+        sents = [_sent(0, "As shown (Okafor & Lund, 2020) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [2]
+
+    def test_one_cited_family_with_no_single_author_reference_stays_ambiguous(self):
+        refs = [
+            _ref(1, "Okafor, C., & Lund, K.", title="Pair one"),
+            _ref(2, "Okafor, D., & Brandt, H.", title="Pair two"),
+        ]
+        sents = [_sent(0, "As Okafor (2020) showed, this holds.")]
+        assert _rule_xrefs(sents, refs) == []
+
+
+class TestAndOthersMarkers:
+    """ "et al." is written many ways, and each of them says more than one author."""
+
+    _REFS = [
+        _ref(1, "Okafor, C.", year=2016, title="One author"),
+        _ref(2, "Okafor, C., Lund, K., & Brandt, H.", year=2016, title="Three authors"),
+    ]
+
+    @pytest.mark.parametrize(
+        "marker",
+        [
+            "et al.",
+            "et. al.",
+            "et.al.",
+            "etal",
+            "et\u00a0al.",
+            "et\nal.",
+            "et al",
+            "y cols.",
+            "y colaboradores",
+            "e col.",
+            "et coll.",
+            "und Kollegen",
+            "dkk.",
+            "ve ark.",
+            "and colleagues",
+            "and others",
+        ],
+    )
+    def test_the_marker_takes_the_reference_with_several_authors(self, marker):
+        sents = [_sent(0, f"As shown (Okafor {marker}, 2016) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, self._REFS)] == [2]
+
+    def test_a_bare_citation_still_takes_the_single_author_reference(self):
+        sents = [_sent(0, "As shown (Okafor, 2016) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, self._REFS)] == [1]
+
+    def test_a_narrative_citation_still_takes_the_single_author_reference(self):
+        sents = [_sent(0, "As Okafor (2016) showed, this holds.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, self._REFS)] == [1]
+
+    def test_words_after_the_name_that_are_no_marker_decline_the_single_author_win(self):
+        # "Okafor, C." might be a reference to the three-author work or to the
+        # one-author work: the initial after the name settles nothing.
+        sents = [_sent(0, "As shown (Okafor, C., 2016) here.")]
+        assert _rule_xrefs(sents, self._REFS) == []
+
+    def test_the_page_after_the_year_is_no_word_after_the_name(self):
+        sents = [_sent(0, "As shown (Okafor, 2016, p. 12) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, self._REFS)] == [1]
+
+    def test_the_words_before_the_name_are_no_word_after_it(self):
+        sents = [_sent(0, "As shown (see also Okafor, 2016) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, self._REFS)] == [1]
+
+    def test_off_by_default_only_the_literal_et_al_counts(self):
+        from bibr.structure import citation_matcher as cm
+
+        (plain,) = cm._find_candidates("As (Okafor etal, 2016).", 1)
+        (rules,) = cm._find_candidates("As (Okafor etal, 2016).", 1, rules=True)
+        assert (plain.has_et_al, rules.has_et_al) == (False, True)
+        (literal,) = cm._find_candidates("As (Okafor et al., 2016).", 1)
+        assert literal.has_et_al is True
+
+    def test_et_al_inside_a_word_is_no_marker(self):
+        from bibr.structure import citation_matcher as cm
+
+        (cand,) = cm._find_candidates("As (Ostetalova, 2016) said.", 1, rules=True)
+        assert cand.has_et_al is False
+
+
+class TestLooseFamilyMatch:
+    """Prefix reading of a family name, tried only when no exact key matches."""
+
+    def test_family_given_entry_is_reached_by_its_family(self):
+        refs = [_ref(1, "Okafor Chidi, Lund Karl, Brandt Hana", title="A")]
+        sents = [_sent(0, "As shown (Okafor et al., 2020) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
+    def test_spaces_and_hyphens_do_not_matter(self):
+        refs = [_ref(1, "Hernandez Lopez, M.", title="A"), _ref(2, "Brandt, H.", title="B")]
+        sents = [_sent(0, "As shown (Hernandez-Lopez, 2020) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
+    def test_prefix_needs_four_characters_on_both_sides(self):
+        refs = [_ref(1, "Leeuwen, A.", title="A"), _ref(2, "Lindqvist, K.", title="B")]
+        sents = [_sent(0, "As shown (Lee, 2020) and (Li, 2020) here.")]
+        assert _rule_xrefs(sents, refs) == []
+
+    def test_exact_key_wins_over_a_longer_name(self):
+        refs = [_ref(1, "Lundgren, K.", title="A"), _ref(2, "Lund, K.", title="B")]
+        sents = [_sent(0, "As shown (Lund, 2020) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [2]
+
+    def test_tie_between_loose_matches_links_nothing_and_offers_no_shortlist(self):
+        from bibr.structure.citation_matcher import match_with_ambiguous
+
+        refs = [
+            _ref(1, "Okafor Chidi, Lund Karl", title="A"),
+            _ref(2, "Okafor Dayo, Lund Karl", title="B"),
+        ]
+        xrefs, ambiguous = match_with_ambiguous(
+            [_sent(0, "As shown (Okafor & Lund, 2020).")], refs, rules=True
+        )
+        assert xrefs == []
+        assert ambiguous == []
+
+    def test_author_count_still_breaks_a_loose_tie(self):
+        refs = [
+            _ref(1, "Okafor Chidi, Lund Karl", title="A"),
+            _ref(2, "Okafor Dayo", title="B"),
+        ]
+        sents = [_sent(0, "As Okafor (2020) showed, this holds.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [2]
+
+
+class TestFuzzyFamilyMatch:
+    """A misspelt family links when one reference of the exact year is close."""
+
+    def test_close_spelling_links(self):
+        refs = [_ref(1, "Kowalczyk, A.", title="A"), _ref(2, "Brandt, H.", title="B")]
+        sents = [_sent(0, "As shown (Kowalchyk, 2020) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
+    def test_year_must_be_exact(self):
+        refs = [_ref(1, "Kowalczyk, A.", year=2019, title="A")]
+        sents = [_sent(0, "As shown (Kowalchyk, 2020) here.")]
+        assert _rule_xrefs(sents, refs) == []
+
+    def test_short_names_are_never_fuzzy(self):
+        refs = [_ref(1, "Smith, A.", title="A")]
+        sents = [_sent(0, "As shown (Smyth, 2020) here.")]
+        assert _rule_xrefs(sents, refs) == []
+
+    def test_dissimilar_names_do_not_link(self):
+        refs = [_ref(1, "Kowalczyk, A.", title="A")]
+        sents = [_sent(0, "As shown (Kowalski, 2020) here.")]
+        assert _rule_xrefs(sents, refs) == []
+
+    def test_two_close_references_link_nothing_and_offer_no_shortlist(self):
+        from bibr.structure.citation_matcher import match_with_ambiguous
+
+        refs = [_ref(1, "Nakamura, K.", title="A"), _ref(2, "Nakamora, T.", title="B")]
+        xrefs, ambiguous = match_with_ambiguous(
+            [_sent(0, "As shown (Nakamara, 2020).")], refs, rules=True
+        )
+        assert xrefs == []
+        assert ambiguous == []
+
+    def test_a_better_exact_candidate_is_not_overridden(self):
+        refs = [_ref(1, "Nakamura, K.", title="A"), _ref(2, "Nakamora, T.", title="B")]
+        sents = [_sent(0, "As shown (Nakamura, 2020) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
+
+class TestLooseLinksNeedAWholeName:
+    """A name that opens, ends or looks like another's is another's."""
+
+    @pytest.mark.parametrize(
+        ("cited", "listed"),
+        [
+            ("John", "Johnson, A."),
+            ("Johnson", "John, A."),
+            ("Park", "Parker, S."),
+            ("Rose", "Rosenberg, T."),
+            ("March", "Marchant, T."),
+            ("Gold", "Goldberg, T."),
+            ("Kant", "Kanter, T."),
+        ],
+    )
+    def test_a_name_is_not_the_opening_letters_of_a_longer_one(self, cited, listed):
+        refs = [_ref(1, listed, year=2016, title="A")]
+        sents = [_sent(0, f"As shown ({cited}, 2016) here.")]
+        assert _rule_xrefs(sents, refs) == []
+
+    def test_a_first_author_with_et_al_is_not_the_opening_letters_of_a_name(self):
+        refs = [_ref(1, "John, A., Lee, B., & Kim, C.", year=2016, title="A")]
+        sents = [_sent(0, "As shown (Johnson et al., 2016) here.")]
+        assert _rule_xrefs(sents, refs) == []
+
+    @pytest.mark.parametrize(
+        ("cited", "listed"),
+        [
+            ("European Commission", "Commission on Human Rights"),
+            ("Health Council", "Ministry of Health"),
+            ("Education Commission", "Department of Education"),
+        ],
+    )
+    def test_a_body_is_not_the_last_words_of_another(self, cited, listed):
+        refs = [_ref(1, listed, year=2016, title="A")]
+        sents = [_sent(0, f"As shown ({cited}, 2016) here.")]
+        assert _rule_xrefs(sents, refs) == []
+
+    def test_a_listed_family_given_entry_is_reached_by_its_whole_family(self):
+        refs = [_ref(1, "Berg Anna, Lund Karl", year=2016, title="A")]
+        sents = [_sent(0, "As shown (Berg & Lund, 2016) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
+    def test_a_name_printed_with_other_spaces_or_hyphens_is_the_same_name(self):
+        refs = [_ref(1, "Hernandez Lopez, M.", year=2016, title="A")]
+        sents = [_sent(0, "As shown (Hernandez-Lopez, 2016) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
+    def test_a_double_surname_is_reached_by_either_part_and_reaches_it(self):
+        listed_whole = [_ref(1, "Hedman-Lagerlof, E.", year=2016, title="A")]
+        listed_part = [_ref(1, "Lagerlof, E.", year=2016, title="A")]
+        assert [
+            x.xref_id for x in _rule_xrefs([_sent(0, "As (Lagerlof, 2016) said.")], listed_whole)
+        ] == [1]
+        assert [
+            x.xref_id
+            for x in _rule_xrefs([_sent(0, "As (Hedman-Lagerlof, 2016) said.")], listed_part)
+        ] == [1]
+
+    def test_a_short_part_does_not_stand_for_a_double_surname(self):
+        refs = [_ref(1, "Kim, A.", year=2016, title="A")]
+        sents = [_sent(0, "As shown (Kim-Lee, 2016) here.")]
+        assert _rule_xrefs(sents, refs) == []
+
+    def test_a_domain_name_is_reached_by_its_first_label(self):
+        refs = [_ref(1, "Calculator.net", year=2016, title="")]
+        sents = [_sent(0, "As shown (Calculator, 2016) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [1]
+
+    def test_off_by_default_none_of_the_loose_readings_apply(self):
+        refs = [_ref(1, "Berg Anna", year=2016, title="A")]
+        sents = [_sent(0, "As shown (Berg, 2016) here.")]
+        assert detect_author_year_xrefs(sents, refs) == []
+
+
+class TestLooseLinkEvidence:
+    """A link read loosely says so, and vouches for itself less."""
+
+    @staticmethod
+    def _candidate(text, refs):
+        _xrefs, _amb, candidates = match_with_candidates([_sent(0, text)], refs, rules=True)
+        (candidate,) = [c for c in candidates if c.accepted]
+        return candidate
+
+    def test_exact_link_keeps_its_evidence_and_confidence(self):
+        refs = [_ref(1, "Okafor, C.", year=2016, title="A")]
+        candidate = self._candidate("As shown (Okafor, 2016) here.", refs)
+        assert candidate.evidence == ("family_match", "year_match")
+        assert candidate.confidence == 0.95
+
+    def test_prefix_link_has_its_own_evidence_and_a_lower_confidence(self):
+        refs = [_ref(1, "Berg Anna", year=2016, title="A")]
+        candidate = self._candidate("As shown (Berg, 2016) here.", refs)
+        assert candidate.evidence == ("family_prefix_match", "year_match")
+        assert candidate.confidence == 0.8
+
+    def test_fuzzy_link_has_its_own_evidence_and_the_lowest_confidence(self):
+        refs = [_ref(1, "Kowalczyk, A.", year=2016, title="A")]
+        candidate = self._candidate("As shown (Kowalchyk, 2016) here.", refs)
+        assert candidate.evidence == ("family_fuzzy_match", "year_match")
+        assert candidate.confidence == 0.7
+
+    def test_tie_break_link_says_so(self):
+        refs = [
+            _ref(1, "Okafor, C., & Lund, K.", year=2016, title="Two authors"),
+            _ref(2, "Okafor, C., Lund, K., & Brandt, H.", year=2016, title="Three authors"),
+        ]
+        candidate = self._candidate("As Okafor et al. (2016) showed, this holds.", refs)
+        assert candidate.evidence == ("family_match", "year_match", "author_list_tie_break")
+        assert candidate.confidence == 0.9
+
+    def test_a_name_listed_as_cited_under_another_year_is_not_guessed_at(self):
+        # "Kowalchyk" is an author of the 2015 entry as spelt: the 2016 entry
+        # is not that author's work with a typo.
+        refs = [
+            _ref(1, "Kowalchyk, B.", year=2015, title="A"),
+            _ref(2, "Kowalczyk, A.", year=2016, title="B"),
+        ]
+        sents = [_sent(0, "As shown (Kowalchyk, 2016) here.")]
+        assert _rule_xrefs(sents, refs) == []
+
+    def test_a_second_cited_author_vouches_for_the_spelling(self):
+        refs = [
+            _ref(1, "Kowalchyk, B.", year=2015, title="A"),
+            _ref(2, "Kowalczyk, A., & Lund, K.", year=2016, title="B"),
+        ]
+        sents = [_sent(0, "As shown (Kowalchyk & Lund, 2016) here.")]
+        assert [x.xref_id for x in _rule_xrefs(sents, refs)] == [2]
 
 
 class TestYearSuffix:
@@ -459,3 +1126,152 @@ def test_nested_group_cite_inner_parens():
     assert (("Caves",), 1992) in pairs
     assert (("Green", "Mayes"), 1991) in pairs
     assert (("Hart", "Shipman"), 1992) in pairs
+
+
+class TestResolveCitationsByRules:
+    """Tier 3 without an LLM: citation texts the sentence-level matcher left over."""
+
+    def _resolve(self, refs, *texts):
+        from bibr.structure.citation_matcher import resolve_citations_by_rules
+
+        return resolve_citations_by_rules(list(enumerate(texts, start=10)), refs)
+
+    def test_bare_author_year_without_parentheses(self):
+        refs = [_ref(1, "Lindqvist, K., & Okafor, C.", year=2018, title="A")]
+        assert self._resolve(refs, "Lindqvist & Okafor, 2018") == [
+            (10, "Lindqvist & Okafor, 2018", (1,))
+        ]
+
+    def test_bracketed_and_narrative_forms(self):
+        refs = [_ref(1, "Lindqvist, K.", year=2018, title="A"), _ref(2, "Brandt, H.", year=2019)]
+        out = self._resolve(refs, "[Lindqvist, 2018]", "As Brandt (2019) found")
+        assert [bib_ids for _t, _c, bib_ids in out] == [(1,), (2,)]
+
+    def test_several_years_link_several_references(self):
+        refs = [
+            _ref(1, "Okafor, C.", year=2018, title="A"),
+            _ref(2, "Okafor, C.", year=2019, title="B"),
+            _ref(3, "Okafor, C.", year=2020, title="C"),
+        ]
+        assert self._resolve(refs, "Okafor, 2018, 2019")[0][2] == (1, 2)
+
+    def test_secondary_source_links_the_work_read(self):
+        refs = [
+            _ref(1, "Mendoza, F., Valdivia, S., & Rojas, S.", year=2015, title="A"),
+            _ref(2, "Harlow, C.", year=2010, title="B"),
+        ]
+        assert self._resolve(refs, "(Harlow, 2010, citado en Mendoza et al., 2015)")[0][2] == (1,)
+        assert self._resolve(refs, "(Harlow, 2010, as cited in Mendoza et al., 2015)")[0][2] == (1,)
+
+    def test_a_later_author_links_when_no_first_author_fits(self):
+        from bibr.structure.citation_matcher import detect_author_year_xrefs
+
+        refs = [_ref(1, "Okafor, C., & Brandt, H.", year=2018, title="A")]
+        assert detect_author_year_xrefs([_sent(0, "As Brandt (2018) found.")], refs) == []
+        assert self._resolve(refs, "Brandt (2018)")[0][2] == (1,)
+
+    def test_a_later_author_shared_by_two_references_links_nothing(self):
+        refs = [
+            _ref(1, "Okafor, C., & Brandt, H.", year=2018, title="A"),
+            _ref(2, "Lund, K., & Brandt, H.", year=2018, title="B"),
+        ]
+        assert self._resolve(refs, "Brandt (2018)")[0][2] == ()
+
+    def test_organisation_cited_by_its_initials(self):
+        refs = [
+            _ref(1, "Bureau of Coastal Survey", year=2022, title="A"),
+            _ref(2, "Council for Reef Studies", year=2022, title="B"),
+            _ref(3, "Okafor, C.", year=2022, title="C"),
+        ]
+        out = self._resolve(refs, "(BCS, 2022)", "e.g., CfRS, 2022", "CRS (2022)")
+        assert [bib_ids for _t, _c, bib_ids in out] == [(1,), (2,), (2,)]
+
+    def test_initials_must_read_as_initials_and_be_unique(self):
+        refs = [
+            _ref(1, "Nguyen Giang, Pham Binh", year=2022, title="A"),
+            _ref(2, "Bureau of Coastal Survey", year=2022, title="B"),
+            _ref(3, "Board of Cartographic Studies", year=2022, title="C"),
+            _ref(4, "Okafor", year=2022, title="D"),
+        ]
+        # lower-case "Ng", an ambiguous "BCS", and a one-word author link nothing
+        out = self._resolve(refs, "Ng (2022)", "BCS (2022)", "OK (2022)")
+        assert [bib_ids for _t, _c, bib_ids in out] == [(), (), ()]
+
+    @pytest.mark.parametrize(
+        ("cited", "listed"),
+        [
+            ("WHO", "Wang Hong Ou"),
+            ("NHS", "Nguyen Hong Son"),
+            ("AI", "Anna Ivanova"),
+            ("BA", "Berg Anna"),
+            ("SES", "Sa e Silva, J."),
+        ],
+    )
+    def test_initials_do_not_reach_a_person(self, cited, listed):
+        refs = [_ref(1, listed, year=2020, title="A")]
+        assert self._resolve(refs, f"({cited}, 2020)")[0][2] == ()
+
+    def test_initials_reach_a_body_of_any_kind(self):
+        refs = [
+            _ref(1, "World Health Organization", year=2020, title="A"),
+            _ref(2, "National Institute of Mental Health", year=2020, title="B"),
+            _ref(3, "Okafor, C.", year=2020, title="C"),
+        ]
+        out = self._resolve(refs, "(WHO, 2020)", "(NIMH, 2020)")
+        assert [bib_ids for _t, _c, bib_ids in out] == [(1,), (2,)]
+
+    def test_a_later_author_needs_the_name_as_cited(self):
+        # "Freedman" is near "Friedman" and "John" opens "Johnson": neither is
+        # the name of the second author.
+        refs = [_ref(1, "Okafor, C., & Friedman, H.", year=2018, title="A")]
+        assert self._resolve(refs, "Freedman (2018)")[0][2] == ()
+        refs = [_ref(1, "Okafor, C., & Johnson, H.", year=2018, title="A")]
+        assert self._resolve(refs, "John (2018)")[0][2] == ()
+
+    def test_every_marker_in_a_group_names_the_work_read(self):
+        refs = [
+            _ref(1, "Smith, A.", year=2010, title="A"),
+            _ref(2, "Jones, B.", year=2012, title="B"),
+            _ref(3, "Lee, C.", year=2013, title="C"),
+            _ref(4, "Kim, D.", year=2014, title="D"),
+        ]
+        text = "(Smith, 2010, cited in Jones, 2012; Lee, 2013, cited in Kim, 2014)"
+        assert self._resolve(refs, text)[0][2] == (2, 4)
+
+    def test_a_citation_without_a_marker_beside_one_that_has_it_is_read_whole(self):
+        refs = [
+            _ref(1, "Smith, A.", year=2010, title="A"),
+            _ref(2, "Jones, B.", year=2012, title="B"),
+            _ref(3, "Lee, C.", year=2013, title="C"),
+        ]
+        text = "(Lee, 2013; Smith, 2010, cited in Jones, 2012)"
+        assert self._resolve(refs, text)[0][2] == (2, 3)
+
+    def test_a_marker_followed_by_no_name_is_no_marker(self):
+        refs = [_ref(1, "Smith, A.", year=2010, title="A"), _ref(2, "Jones, B.", year=2012)]
+        text = "Smith (2010) is cited in many papers (Jones, 2012)."
+        assert self._resolve(refs, text)[0][2] == (1, 2)
+
+    def test_a_marker_followed_by_a_name_without_a_year_leaves_the_work_before_it(self):
+        refs = [_ref(1, "Smith, A.", year=2010, title="A"), _ref(2, "Jones, B.", year=2012)]
+        assert self._resolve(refs, "(Smith, 2010, as cited in Jones)")[0][2] == (1,)
+
+    def test_cited_by_is_no_marker_and_leaves_the_work_before_it(self):
+        refs = [_ref(1, "Smith, A.", year=2010, title="A"), _ref(2, "Jones, B.", year=2012)]
+        assert self._resolve(refs, "(Smith, 2010, cited by Jones, 2012)")[0][2] == (1,)
+
+    def test_unknown_citation_links_nothing(self):
+        refs = [_ref(1, "Okafor, C.", year=2018, title="A")]
+        assert self._resolve(refs, "Sato (2018)", "Okafor (2012)")[0][2] == ()
+        assert self._resolve(refs, "Sato (2018)", "Okafor (2012)")[1][2] == ()
+
+    def test_same_family_same_year_without_other_evidence_links_nothing(self):
+        refs = [
+            _ref(1, "Okafor, C.", year=2018, title="A"),
+            _ref(2, "Okafor, C.", year=2018, title="B"),
+        ]
+        assert self._resolve(refs, "Okafor (2018)")[0][2] == ()
+
+    def test_no_references_and_no_citations(self):
+        assert self._resolve([], "Okafor (2018)") == [(10, "Okafor (2018)", ())]
+        assert self._resolve([_ref(1, "Okafor, C.", year=2018)]) == []

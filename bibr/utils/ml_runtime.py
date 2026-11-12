@@ -30,6 +30,7 @@ from typing import Any, Literal
 
 from bibr.exceptions import ConfigurationError
 from bibr.utils.ml_extra import TORCH_EXTRA_HINT
+from bibr.utils.transient import is_transient_network_error
 
 logger = logging.getLogger(__name__)
 
@@ -98,40 +99,54 @@ def is_hub_repo_id(
     return True
 
 
-def _local_bundle(path: Path) -> Path | None:
+def local_onnx_bundle(path: str | Path) -> Path | None:
+    """The ONNX bundle a local model path names, or ``None``.
+
+    For a directory: its ``onnx/`` subdirectory, else the directory itself when
+    it holds the bundle (a directory named ``onnx`` is always read as the
+    bundle). For a file: the sibling ``onnx/`` directory.
+    """
+    path = Path(path).expanduser()
     if path.is_dir():
-        bundle = path if path.name == ONNX_DIRNAME else path / ONNX_DIRNAME
+        candidates = (path,) if path.name == ONNX_DIRNAME else (path / ONNX_DIRNAME, path)
     elif path.is_file():
-        bundle = path.parent / ONNX_DIRNAME
+        candidates = (path.parent / ONNX_DIRNAME,)
     else:
         return None
-    return (
-        bundle if (bundle / ONNX_MODEL).is_file() and (bundle / ONNX_MANIFEST).is_file() else None
+    return next(
+        (b for b in candidates if (b / ONNX_MODEL).is_file() and (b / ONNX_MANIFEST).is_file()),
+        None,
     )
 
 
 def find_onnx_bundle(
-    model_id: str | None, revision: str | None = None, *, label: str = "model"
+    model_id: str | None,
+    revision: str | None = None,
+    *,
+    label: str = "model",
+    raise_transient: bool = False,
 ) -> Path | None:
     """Locate the ``onnx/`` bundle for ``model_id``, or ``None``.
 
     ``model_id`` may be a Hub repo id — optionally ``org/repo:filename`` —
     resolved at ``revision``, or a local directory (the bundle is
-    ``<dir>/onnx``, or the directory itself when it is already named
-    ``onnx``) or file (a sibling ``onnx/`` directory, for ``NER_PARSER_CKPT``
-    style checkpoint paths); see :func:`is_hub_repo_id` for which is which.
+    ``<dir>/onnx``, or the directory itself when it holds one) or file (a
+    sibling ``onnx/`` directory, for ``NER_PARSER_CKPT`` style checkpoint
+    paths); see :func:`local_onnx_bundle` and :func:`is_hub_repo_id`.
     Hub lookups download the manifest first and then every file it lists, so
     a fully cached bundle resolves offline; a repo, revision or file that does
     not exist, or an unreachable Hub with nothing cached, yields ``None``
     (logged at INFO — this is the normal state until the artifacts are
-    published).
+    published). With ``raise_transient`` a network failure (see
+    :func:`~bibr.utils.transient.is_transient_network_error`) is raised
+    instead, for a caller that retries later and must not read a blip as "no
+    bundle"; a bundle that is confirmed missing still yields ``None``.
     """
     if not model_id:
         return None
     repo_id, _, filename = str(model_id).partition(":")
     if not is_hub_repo_id(repo_id, filename=filename):
-        local = Path(str(model_id)).expanduser()
-        return _local_bundle(local) if local.exists() else None
+        return local_onnx_bundle(str(model_id))
 
     from bibr.utils.hf_cache import hf_download_or_cached
 
@@ -144,6 +159,8 @@ def find_onnx_bundle(
         for name in files:
             hf_download_or_cached(repo_id, f"{ONNX_DIRNAME}/{name}", revision)
     except Exception as exc:  # noqa: BLE001 — absence is the expected outcome
+        if raise_transient and is_transient_network_error(exc):
+            raise
         logger.info(
             "No ONNX bundle for %s (%s@%s): %s: %s",
             label,

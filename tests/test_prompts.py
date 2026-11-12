@@ -269,8 +269,8 @@ class TestBuilders:
 
 
 class TestParallelLanguageFrontMatter:
-    """A title or byline printed in two languages keeps the version printed
-    first; the abstract keeps its preference for the printed English version."""
+    """A title, byline or abstract printed in two languages keeps the version
+    printed first."""
 
     @staticmethod
     def _instruction(task: str) -> str:
@@ -294,8 +294,11 @@ class TestParallelLanguageFrontMatter:
         assert "Never transliterate, romanise or translate a name" in instruction
 
     @pytest.mark.parametrize("task", ["title_keywords", "title_keywords_pointers", "core_metadata"])
-    def test_abstract_keeps_its_english_preference(self, task):
-        assert "prefer the printed English version" in self._instruction(task)
+    def test_abstract_keeps_the_version_printed_first(self, task):
+        instruction = self._instruction(task)
+        assert "use the first complete printed version" in instruction
+        assert "even when a later version is in English" in instruction
+        assert "prefer the printed English version" not in instruction
 
 
 class TestPointerPrompts:

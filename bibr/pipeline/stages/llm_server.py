@@ -36,9 +36,10 @@ class LlmServerStage:
     produces = ()
 
     async def run(self, ctx: PipelineContext) -> None:
-        # --no-llm never calls the LLM, so never start a managed local server
-        # (cheap guard, safe regardless of how llm_backend was resolved).
-        if ctx.config.no_llm:
+        # --no-llm and fast mode never call the LLM, so never start a managed
+        # local server (cheap guard, safe regardless of how llm_backend was
+        # resolved).
+        if ctx.config.skips_llm:
             return
         t_llm = time.monotonic()
         try:
@@ -68,7 +69,7 @@ class LlmServerPrecheckStage:
     produces = ()
 
     async def run(self, ctx: PipelineContext) -> None:
-        if ctx.config.no_llm or not ctx.alive():
+        if ctx.config.skips_llm or not ctx.alive():
             return
         try:
             refusal = await ctx.resources.llm_start_refusal(ctx.config.llm_backend)

@@ -30,6 +30,7 @@ if TYPE_CHECKING:
         MemoryMode,
         RefParseStrategy,
         RefSegStrategy,
+        RunMode,
     )
 
 logger = logging.getLogger(__name__)
@@ -40,8 +41,41 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _cgroup_memory_limit_bytes(
+    proc_cgroup: str = "/proc/self/cgroup", fs_root: str = "/sys/fs/cgroup"
+) -> int | None:
+    """Bytes a cgroup memory limit allows (``docker --memory``, Kubernetes, Slurm), or ``None``.
+
+    Reads cgroup v2 ``memory.max`` of the process's cgroup and of every parent (the
+    smallest limit wins), then cgroup v1 ``memory.limit_in_bytes``. cgroup v1 writes
+    "no limit" as a number near 2**63; the caller takes the smaller of this and the
+    machine's RAM, so that needs no special case here.
+    """
+    from bibr.utils.onnx_providers import _cgroup_v2_dirs
+
+    def read(path: str) -> int | None:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                value = int(fh.read().split()[0])  # "max" is no limit: ValueError
+        except (OSError, ValueError, IndexError):
+            return None
+        return value if value > 0 else None
+
+    limits = [
+        read(os.path.join(folder, "memory.max")) for folder in _cgroup_v2_dirs(proc_cgroup, fs_root)
+    ]
+    found = [limit for limit in limits if limit is not None]
+    if found:
+        return min(found)
+    return read(os.path.join(fs_root, "memory", "memory.limit_in_bytes"))
+
+
 def _get_system_memory_gb() -> float:
-    """Detect total system RAM in GB on Windows, macOS, and Linux."""
+    """RAM this process can use, in GB, on Windows, macOS and Linux.
+
+    The machine's physical RAM; on Linux, a smaller cgroup memory limit instead
+    (a container or a batch job given 8 GB on a 64 GB host has 8 GB).
+    """
     if os.name == "nt":
         try:
             import ctypes
@@ -82,9 +116,11 @@ def _get_system_memory_gb() -> float:
         pass
     # Linux: os.sysconf
     try:
-        pages = os.sysconf("SC_PHYS_PAGES")
-        page_size = os.sysconf("SC_PAGE_SIZE")
-        return (pages * page_size) / (1024**3)
+        total = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+        limit = _cgroup_memory_limit_bytes()
+        if limit is not None:
+            total = min(total, limit)
+        return total / (1024**3)
     except (ValueError, OSError):
         pass
     return 16.0  # safe default
@@ -247,7 +283,11 @@ def _auto_batch_size(memory_mode: str) -> int:
     return 8  # balanced default
 
 
-def _managed_gpu_fraction(llm_backend: str, ocr_backend: str, settings: GlobalSettings) -> float:
+def _managed_gpu_fraction(
+    llm_backend: str,
+    ocr_backend: str,
+    settings: GlobalSettings,
+) -> float:
     """Share of total VRAM the classifiers must leave to the managed vLLM servers.
 
     The classifiers load before these servers start (before Paddle OCR in the
@@ -326,6 +366,8 @@ class LocalPipeline(Pipeline):
         ref_seg_strategy: RefSegStrategy | None = None,
         ref_parse_strategy: RefParseStrategy | None = None,
         settings: GlobalSettings | None = None,
+        mode: str | None = None,
+        ocr_requested: bool | None = None,
     ):
         from bibr.config import snapshot_settings
         from bibr.local.vllm_share import llm_share_user_set
@@ -335,6 +377,8 @@ class LocalPipeline(Pipeline):
         # accepts everything `bibr chew --ocr` does.
         from bibr.ocr.registry import (
             CLOUD_VISION_OCR_BACKENDS,
+            TEXT_LAYER_BACKEND,
+            ocr_route_chosen,
             resolve_backend_name,
             resolve_url_backend,
             url_request,
@@ -343,6 +387,7 @@ class LocalPipeline(Pipeline):
         from bibr.pipeline.enricher import CrossrefEnricher, RorEnricher
         from bibr.pipeline.plans import build_stage_plan
         from bibr.pipeline.resources import ResourceManager
+        from bibr.run_mode import resolve_mode
 
         settings_snapshot = snapshot_settings(settings)
 
@@ -354,6 +399,14 @@ class LocalPipeline(Pipeline):
         configured_backend = (
             configured_ocr.backend if "backend" in configured_ocr.model_fields_set else None
         )
+        if ocr_requested is None:
+            ocr_requested = ocr_route_chosen(
+                settings_snapshot,
+                backend=ocr_backend,
+                url=ocr_url,
+                model=ocr_model,
+                profile=ocr_profile,
+            )
         if ocr_url:
             # A URL names one OCR server. The shared rule (as for
             # ``bibr chew --ocr-url``) picks its backend — Paddle unless GLM
@@ -370,6 +423,12 @@ class LocalPipeline(Pipeline):
                 )
                 # Unused, so it must not split the OCR cache key either.
                 ocr_url = None
+            elif ocr_backend == TEXT_LAYER_BACKEND:
+                logger.warning(
+                    "ocr_url is ignored by the text-layer OCR backend, which reads the PDF's "
+                    "embedded text layer and runs no OCR model."
+                )
+                ocr_url = None
         else:
             automatic_paddle = ocr_backend == "paddle" or (
                 ocr_backend is None
@@ -383,6 +442,20 @@ class LocalPipeline(Pipeline):
         llm_backend = resolve_llm_backend(
             llm_backend or settings_snapshot.llm.backend, settings=settings_snapshot
         )
+        # ``mode`` is "fast", "full" or "auto"/None (PIPELINE_MODE, then whether an
+        # LLM is configured). ``no_llm`` is a structure-only run and stays "full":
+        # it skips the LLM stages itself and never takes the fast overlay.
+        run_mode = "full" if no_llm else resolve_mode(settings_snapshot, mode, llm_backend)
+        if run_mode == "fast":
+            # No LLM call and no managed LLM server: the memory plan, OCR chain
+            # and streamed back half follow the cloud backend's.
+            llm_backend = "cloud"
+        if run_mode == "fast" and not ocr_requested:
+            # No OCR route was chosen, so a fast run reads each PDF's own text
+            # layer whatever the machine has: no GPU, server or multi-GB bootstrap
+            # is needed to start. A route the caller chose (``--ocr``, a server URL,
+            # OCR_BACKEND, a model or profile) is kept; a scan needs one of those.
+            ocr_backend = TEXT_LAYER_BACKEND
         # None → PIPELINE_MEMORY_MODE, else hardware auto-detect (which looks
         # at whether a managed LLM server shares the card) — same resolution
         # ladder as the CLI, so the library API behaves identically.
@@ -420,6 +493,7 @@ class LocalPipeline(Pipeline):
             consolidate=consolidate,
             ref_seg_strategy=ref_seg_strategy,
             ref_parse_strategy=ref_parse_strategy,
+            mode=cast("RunMode", run_mode),
         )
         resources = ResourceManager(
             memory_mode=memory_mode,
@@ -485,12 +559,16 @@ class LocalPipeline(Pipeline):
         self.end_page = end_page
         self.llm_backend = llm_backend
         self.no_llm = no_llm
+        self.mode = run_mode
 
     def llm_usage_snapshot(self) -> dict[str, dict[str, int]]:
         """Cumulative LLM token usage by model, captured before pipeline teardown.
 
         Returns an empty dict if no LLM client was instantiated (e.g. ``--no-llm``)
-        or if usage tracking is disabled (``LLM_TRACK_USAGE=false``).
+        or if usage tracking is disabled (``LLM_TRACK_USAGE=false``). A fast run
+        makes no call, so it builds no client to ask.
         """
+        if self._config.mode == "fast":
+            return {}
         client = self._resources.llm_client
         return {model: dict(counts) for model, counts in client.usage.items()}

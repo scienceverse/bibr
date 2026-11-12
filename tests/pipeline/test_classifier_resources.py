@@ -139,8 +139,14 @@ async def test_load_failure_is_sticky_and_degraded_when_fallback_allowed():
         attempts += 1
         raise RuntimeError("secret path /tmp/model exploded")
 
+    from bibr.config import MlOptions
+
+    settings = _settings(section_id=None)
+    # The shipped model: an overridden one never degrades (see the override tests).
+    for name in ("paper_classifier_model_id", "paper_classifier_revision"):
+        setattr(settings.ml, name, MlOptions.model_fields[name].default)
     resources = ClassifierResources(
-        _settings(section_id=None),
+        settings,
         memory_mode="balanced",
         managed_vllm_fraction=0.0,
         cuda_available=False,

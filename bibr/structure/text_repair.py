@@ -37,11 +37,23 @@ _NUMBERED_PREFIX_WITH_SPACES_RE = re.compile(r"^(\s*\d+(?:\.\s*\d+)+)")
 _LETTER_PREFIX_WITH_SPACES_RE = re.compile(r"^(\s*[A-Z](?:\.\s*\d+)+)")
 _CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z])(?=[A-Z])")
 _HEADING_COMPACT_RE = re.compile(r"[^a-z0-9]+")
-_COMPACT_ALIAS_DISPLAY: dict[str, str] = {
-    _HEADING_COMPACT_RE.sub("", alias.lower()): alias
-    for aliases in CANONICAL_SECTION_ALIASES.values()
-    for alias in aliases
-}
+
+
+def _compact_alias_display(alias_table) -> dict[str, str]:
+    """Compact key (ASCII letters and digits) -> alias. An alias with no ASCII
+    letter or digit (Cyrillic, CJK, Arabic) has an empty key and is left out:
+    every such alias would share it, and the last one would be offered for
+    any heading in those scripts."""
+    table: dict[str, str] = {}
+    for aliases in alias_table.values():
+        for alias in aliases:
+            key = _HEADING_COMPACT_RE.sub("", alias.lower())
+            if key:
+                table[key] = alias
+    return table
+
+
+_COMPACT_ALIAS_DISPLAY: dict[str, str] = _compact_alias_display(CANONICAL_SECTION_ALIASES)
 _ALIAS_LOWER_SET: set[str] = {
     alias.lower() for aliases in CANONICAL_SECTION_ALIASES.values() for alias in aliases
 }

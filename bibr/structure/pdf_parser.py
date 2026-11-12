@@ -133,6 +133,10 @@ LABEL_TREATMENT: dict[str, str] = {
 # keeps page furniture out of section content (notably the References block).
 _BODY_TEXT_LABELS: frozenset[str] = frozenset({"text", "content", "vertical_text"})
 
+# Layout labels of reference entries and lists: their text gets the line-break repairs that
+# are written for a printed reference (see ``fix_ocr_artifacts``).
+_REFERENCE_LABELS: frozenset[str] = frozenset({"reference", "reference_content"})
+
 # Max normalized length of a body region treated as a candidate running
 # header. Furniture (banners, footers, watermarks) is short; a real paragraph
 # that happens to repeat across pages is longer and must be preserved.
@@ -841,7 +845,9 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 native_label = region.native_label
                 label = region.label
                 effective = native_label if native_label in LABEL_TREATMENT else label
-                clean_content = fix_ocr_artifacts(region.content)
+                clean_content = fix_ocr_artifacts(
+                    region.content, reference=effective in _REFERENCE_LABELS
+                )
                 self._clean_region_content[(page_idx, region_idx)] = clean_content
                 content = clean_content.strip()
                 if not content:
@@ -1146,7 +1152,9 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         regions.extend(self.json_result[part_page][part_idx] for part_page, part_idx in parts)
         # Joined as lines, so a word wrapped across the columns is mended like
         # any line wrap.
-        joined = fix_ocr_artifacts("\n".join(region.content.strip() for region in regions))
+        joined = fix_ocr_artifacts(
+            "\n".join(region.content.strip() for region in regions), reference=False
+        )
         boxes = [box for region in regions if (box := bbox_to_tuple(region.bbox_2d)) is not None]
         if boxes:
             bbox = [
@@ -1183,7 +1191,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             key = (page_idx, region_idx)
             content = self._clean_region_content.get(key)
             if content is None:
-                content = fix_ocr_artifacts(region.content)
+                effective = native_label if native_label in LABEL_TREATMENT else label
+                content = fix_ocr_artifacts(
+                    region.content, reference=effective in _REFERENCE_LABELS
+                )
                 self._clean_region_content[key] = content
             bbox = region.bbox_2d
 
@@ -1221,6 +1232,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 estimated_line_height=est_lh,
                 source=("text_layer" if region.native_text_used else "ocr") if content else None,
                 ocr_backend=(region.ocr_consensus or {}).get("chosen_backend"),
+                read_as=region.text_layer_kind,
                 native_text_edge_cut=bool(region.native_text_used and region.native_text_edge_cut),
             )
             self.region_summaries.append(region_summary)
@@ -1320,7 +1332,13 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 )
 
             elif treatment == "formula":
-                self._handle_formula(content, page_number, bbox, region_meta=region_meta)
+                self._handle_formula(
+                    content,
+                    page_number,
+                    bbox,
+                    region_meta=region_meta,
+                    plain_text=region.formula_source == "text_layer",
+                )
 
             elif treatment == "table":
                 # A full-width table may sit below a two-column sentence whose

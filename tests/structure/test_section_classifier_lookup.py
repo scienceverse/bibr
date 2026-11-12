@@ -14,8 +14,13 @@ Together these prevent silent regressions if either layer is removed.
 
 from __future__ import annotations
 
-from bibr.paper_contents import CanonicalSection
-from bibr.structure.section_classifier import _classify_lookup, _classify_lookup_full
+from bibr.paper_contents import CANONICAL_SECTION_ALIASES, CanonicalSection
+from bibr.structure.section_classifier import (
+    _classify_lookup,
+    _classify_lookup_full,
+    classify_header,
+)
+from bibr.utils.text import normalize_text
 
 
 def test_classify_lookup_is_case_insensitive():
@@ -141,7 +146,6 @@ async def test_cover_sheet_labels_and_containers_never_reach_the_model_or_llm():
         "Running title: Sleep and memory",
         "Manuscript Number: ABC-D-26-00123",
         "Authors",
-        "Corresponding author",
         "Disclaimer: The manuscript is the authors' accepted version",
         "Declarations",
         "Statements and Declarations",
@@ -166,6 +170,105 @@ async def test_cover_label_guard_keeps_author_sections():
     )
 
     assert [section for section, *_ in out] == [CanonicalSection.AUTHOR_CONTRIBUTIONS] * 3
+
+
+_AUTHOR_METADATA_HEADINGS = (
+    "Correspondence to:",
+    "Correspondence to: Dr Jane Doe; jane@example.org",
+    "Corresponding author",
+    "*Corresponding author",
+    "* Corresponding author: jane@example.org",
+    "† Corresponding author.",
+    "Corresponding authors",
+    "Corresponding author’s address",
+    "Address for correspondence:",
+    "Author details",
+    "Authors’ information",
+    "Authors' information",
+    "Author information",
+    "Author Affiliations",
+    "Affiliations:",
+    "Authors and Affiliations",
+    "About the authors",
+    "About the Author(s)",
+    "Information about the authors",
+    "Информация об авторах:",
+    "Сведения об авторе",
+    "Информация об авторе / Information about the author",
+    "Notes on contributors",
+    "Biographical note",
+    "Author biographies",
+    "ORCID",
+    "ORCID iD",
+    "ORCID iDs",
+    "Endereço para correspondência",
+    "Correspondencia:",
+    "Autor para correspondência",
+    "Korrespondenzadresse",
+    "Auteur correspondant",
+)
+_NOT_AUTHOR_METADATA_HEADINGS = (
+    "Acknowledgments",
+    "Author contributions",
+    "Authors' contributions",
+    "Contributors",
+    "Author note",
+    "Author Notes",
+    "Author summary",
+    "Authorship",
+    "Correspondence analysis",
+    "Correspondence analysis of the survey",
+    "Correspondence between the scales",
+    "Corresponding author contributions",
+    "Affiliations of the participants",
+    "Institutional affiliations and funding",
+    "Biography",
+    "Information about the sample",
+    "About the study",
+    "ORCID coverage in the sample",
+    "Contact",
+    "Notes",
+    "Funding",
+    "Introduction",
+)
+
+
+async def test_author_metadata_headings_are_notes_about_the_authors():
+    """Where to write to an author, author details, affiliations, biographies
+    and ORCID iDs are footnotes, not acknowledgments. The alias table used to file
+    "Corresponding author" and "ORCID iDs" there, and a model that has to
+    answer does the same for the other wordings; the address or the biography
+    then counted as acknowledgment text."""
+    import bibr.structure.section_classifier as mod
+    from bibr.paper_contents import is_author_metadata_heading, is_section_furniture_heading
+
+    headings = list(_AUTHOR_METADATA_HEADINGS)
+    assert [h for h in headings if not is_author_metadata_heading(h)] == []
+    assert all(is_section_furniture_heading(h) for h in headings)
+
+    out = await mod.classify_headers_batch_async(headings, llm_client=None)
+
+    assert [section for section, *_ in out] == [CanonicalSection.FOOTNOTE] * len(headings)
+    assert all(source == "exact_alias" for *_, source in out)
+    assert mod.classify_headers_batch(headings) == [(CanonicalSection.FOOTNOTE, 1.0)] * len(
+        headings
+    )
+
+
+def test_headings_that_only_resemble_author_metadata_are_left_to_the_classifier():
+    """A method ("Correspondence analysis"), a body topic or an APA author note
+    is not an author-metadata label."""
+    from bibr.paper_contents import is_author_metadata_heading
+
+    assert [h for h in _NOT_AUTHOR_METADATA_HEADINGS if is_author_metadata_heading(h)] == []
+
+
+def test_the_acknowledgment_aliases_hold_no_author_metadata_heading():
+    for header in ("corresponding author", "corresponding authors", "orcid id", "orcid ids"):
+        section, _score, trusted = _classify_lookup_full(header)
+        assert not (section == CanonicalSection.ACKNOWLEDGMENT and trusted), header
+    for header in ("acknowledgments", "acknowledgements"):
+        assert _classify_lookup_full(header)[0] == CanonicalSection.ACKNOWLEDGMENT
 
 
 def test_declaration_block_subheadings_resolve_by_alias():
@@ -219,3 +322,66 @@ def test_more_non_english_section_names_resolve_by_alias():
     ):
         section, score = _classify_lookup(header)
         assert (section, score) == (expected, 1.0), header
+
+
+def test_imrad_part_names_in_other_languages_resolve_by_alias():
+    """The printed part names of research papers in the languages the table
+    serves, including the longer forms some journals print. Results merged
+    with discussion is results; conclusions are discussion."""
+    for header, expected in (
+        ("Материалы и методы исследования", CanonicalSection.METHODS),
+        ("Материалы и методы", CanonicalSection.METHODS),
+        ("Результаты исследования и их обсуждение", CanonicalSection.RESULTS),
+        ("Результаты исследования", CanonicalSection.RESULTS),
+        ("Заключение", CanonicalSection.DISCUSSION),
+        ("Висновки", CanonicalSection.DISCUSSION),
+        ("Матеріали та методи", CanonicalSection.METHODS),
+        ("Wprowadzenie", CanonicalSection.INTRODUCTION),
+        ("Materiał i metody", CanonicalSection.METHODS),
+        ("Wyniki", CanonicalSection.RESULTS),
+        ("Wnioski", CanonicalSection.DISCUSSION),
+        ("Einführung", CanonicalSection.INTRODUCTION),
+        ("Material und Methoden", CanonicalSection.METHODS),
+        ("Fazit für die Praxis", CanonicalSection.DISCUSSION),
+        ("Matériel et méthodes", CanonicalSection.METHODS),
+        ("Résultats et discussion", CanonicalSection.RESULTS),
+        ("Materiales y métodos", CanonicalSection.METHODS),
+        ("Resultados y discusión", CanonicalSection.RESULTS),
+        ("Conclusión", CanonicalSection.DISCUSSION),
+        ("Referencial teórico", CanonicalSection.INTRODUCTION),
+        ("Métodos", CanonicalSection.METHODS),
+        ("Resultados e discussão", CanonicalSection.RESULTS),
+        ("Considerações finais", CanonicalSection.DISCUSSION),
+        ("Metodo", CanonicalSection.METHODS),
+        ("Latar belakang", CanonicalSection.INTRODUCTION),
+        ("Metode", CanonicalSection.METHODS),
+        ("Hasil", CanonicalSection.RESULTS),
+        ("Gereç ve yöntem", CanonicalSection.METHODS),
+        ("Sonuç", CanonicalSection.DISCUSSION),
+        ("材料与方法", CanonicalSection.METHODS),
+        ("结论", CanonicalSection.DISCUSSION),
+        ("المقدمة", CanonicalSection.INTRODUCTION),
+        ("النتائج", CanonicalSection.RESULTS),
+    ):
+        section, score = classify_header(header)
+        assert (section, score) == (expected, 1.0), header
+
+
+def test_numbered_and_merged_non_english_part_names_are_trusted():
+    for header, expected in (
+        ("2. Материалы и методы исследования", CanonicalSection.METHODS),
+        ("III. MATERIAL E MÉTODOS", CanonicalSection.METHODS),
+        ("一、材料与方法", CanonicalSection.METHODS),
+        ("Diskussion und Schlussfolgerungen", CanonicalSection.DISCUSSION),
+    ):
+        section, _score, trusted = _classify_lookup_full(normalize_text(header))
+        assert (section, trusted) == (expected, True), header
+
+
+def test_every_alias_is_normalized_and_names_one_type():
+    owners: dict[str, set[CanonicalSection]] = {}
+    for section, aliases in CANONICAL_SECTION_ALIASES.items():
+        for alias in aliases:
+            assert alias == normalize_text(alias), alias
+            owners.setdefault(alias, set()).add(section)
+    assert {alias for alias, types in owners.items() if len(types) > 1} == set()

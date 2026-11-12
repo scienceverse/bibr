@@ -88,3 +88,26 @@ def test_enrichment_enabled_is_forced_off_by_no_llm():
     settings.crossref.enrich = True
     assert RunConfig(no_llm=True).enrichment_enabled(settings) is False
     assert RunConfig(no_llm=True, crossref=True).enrichment_enabled(settings) is False
+
+
+def test_run_config_mode_defaults_to_full():
+    assert RunConfig().mode == "full"
+    assert RunConfig(mode="fast").mode == "fast"
+
+
+def test_skips_llm_covers_fast_mode_and_no_llm():
+    assert RunConfig().skips_llm is False
+    assert RunConfig(mode="full").skips_llm is False
+    assert RunConfig(mode="fast").skips_llm is True
+    assert RunConfig(no_llm=True).skips_llm is True
+    assert RunConfig(mode="fast", no_llm=True).skips_llm is True
+
+
+def test_fast_mode_does_not_turn_enrichment_off():
+    """Crossref is not an LLM call; only ``no_llm`` forces it off."""
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.crossref.enrich = True
+    assert RunConfig(mode="fast").enrichment_enabled(settings) is True
+    assert RunConfig(no_llm=True).enrichment_enabled(settings) is False

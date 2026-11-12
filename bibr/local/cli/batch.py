@@ -42,8 +42,11 @@ def chew_options_from_config(config: Any) -> dict[str, Any]:
     field, through the public option names ``bibr.api`` accepts.
     """
     options: dict[str, Any] = {
-        "ocr_backend": config.ocr_backend,
-        "llm_backend": config.llm_backend,
+        # An OCR route nobody chose stays unset, so a fast run can tell the
+        # automatic chain from a request to bootstrap vLLM. After the text-layer
+        # fallback the pipeline gets the automatic backend back, so it marks the
+        # files it reads from the text layer (ResolvedRunConfig).
+        "ocr_backend": config.pipeline_ocr_backend if config.ocr_requested else None,
         "memory_mode": config.memory_mode,
         "ocr_url": config.ocr_url,
         "ocr_model": config.ocr_model,
@@ -58,6 +61,10 @@ def chew_options_from_config(config: Any) -> dict[str, Any]:
         "start_page": config.start_page,
         "end_page": config.end_page,
     }
+    options["mode"] = config.mode
+    if config.mode != "fast":
+        # A fast run starts no LLM; naming a backend beside it would be refused.
+        options["llm_backend"] = config.llm_backend
     if config.consolidate:
         options["consolidate"] = config.consolidate
     if config.ref_seg:
@@ -69,12 +76,17 @@ def chew_options_from_config(config: Any) -> dict[str, Any]:
 
 def _local_summary(config: Any) -> list[str]:
     """Dry-run lines describing the resolved local pipeline (no model loads)."""
-    from bibr.extract.ref_extractor import _resolve_ref_strategies
-    from bibr.local.cli.dry_run import _dry_run_enrichment_lines, _dry_run_llm_label
+    from bibr.local.cli.dry_run import (
+        _dry_run_enrichment_lines,
+        _dry_run_llm_label,
+        _dry_run_mode_label,
+        _dry_run_ref_strategies,
+    )
 
-    seg, parse = _resolve_ref_strategies(config.ref_seg, config.refs)
+    seg, parse = _dry_run_ref_strategies(config)
     model = config.ocr_model or config.ocr_summary_model or "(resolved at startup)"
     lines = [
+        f"mode {_dry_run_mode_label(config)}",
         f"ocr {config.ocr_backend} {ui.SEP} {model}",
         f"llm {_dry_run_llm_label(config)}",
         f"refs {'disabled (--no-llm)' if config.no_llm else f'seg {seg} {ui.SEP} parse {parse}'}",
@@ -100,6 +112,12 @@ def _form_fields(args: Any, console: Any) -> dict[str, str] | None:
         form["ref_seg"] = args.ref_seg
     if args.consolidate:
         form["consolidate"] = args.consolidate
+    # The serve runs each request in its own mode when asked: --fast / --full
+    # become the form field, and neither leaves it to the serve's PIPELINE_MODE.
+    if getattr(args, "fast", False):
+        form["mode"] = "fast"
+    elif getattr(args, "full", False):
+        form["mode"] = "full"
     # The serve honours a per-request enrichment switch; forward an explicit
     # --crossref / --no-crossref and let the serve's CROSSREF_ENRICH decide otherwise.
     if getattr(args, "crossref", False):
@@ -188,10 +206,14 @@ def _remote_options(args: Any, console: Any) -> Any:
 def _local_options(args: Any, console: Any) -> Any:
     """Resolve the local pipeline exactly as ``bibr chew`` does; ``None`` on error."""
     from bibr.batch.runner import LocalOptions
+    from bibr.local.cli.dry_run import announce_downloads
     from bibr.local.cli.run_config import (
         _apply_runtime_settings,
+        _preflight_front_tagger,
+        _preflight_model_overrides,
         _preflight_ocr_runtime,
         _preflight_opencv,
+        apply_text_layer_fallback,
         resolve_run_config,
     )
 
@@ -201,15 +223,39 @@ def _local_options(args: Any, console: Any) -> Any:
     except ValueError as exc:
         ui.error(console, f"Invalid option: {exc}")
         return None
+    # OCR_FALLBACK_TO_TEXT_LAYER=auto, decided before the options are built; the
+    # warning waits for the preflight, which knows whether there are PDFs.
+    config, fallback_warning = apply_text_layer_fallback(config, _preflight_ocr_runtime)
+    warned = False
+    announced = False
 
     def preflight(files: Sequence[Path]) -> str | None:
-        if not any(f.suffix.lower() == ".pdf" for f in files):
-            return None
-        opencv_problem = _preflight_opencv()
-        if opencv_problem is not None:
-            message, repair = opencv_problem
-            return f"{message} (repair with: {repair})"
-        return _preflight_ocr_runtime(config)
+        nonlocal announced, warned
+        if any(f.suffix.lower() == ".pdf" for f in files):
+            opencv_problem = _preflight_opencv()
+            if opencv_problem is not None:
+                message, repair = opencv_problem
+                return f"{message} (repair with: {repair})"
+            if fallback_warning is not None and not warned:
+                warned = True
+                ui.warn(console, fallback_warning)
+            problem = _preflight_ocr_runtime(config)
+            if problem is not None:
+                return problem
+            problem = _preflight_front_tagger(config)
+            if problem is not None:
+                return problem
+        # Every input kind: a DOCX, XML or HTML paper loads the reference,
+        # classifier and statement models too.
+        problem = _preflight_model_overrides(config, warn=lambda m: ui.warn(console, m))
+        if problem is not None:
+            return problem
+        if not announced:
+            # Once, and after the checks above: a run that cannot start has
+            # downloaded nothing to announce.
+            announced = True
+            announce_downloads(config, files, console)
+        return None
 
     return LocalOptions(
         chew_options=chew_options_from_config(config),

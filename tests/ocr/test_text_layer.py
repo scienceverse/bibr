@@ -1,0 +1,1009 @@
+"""The text-layer OCR backend fills regions from the PDF text layer, page-gated.
+
+Every PDF here is a fixture or hand-built (``tests/document/_pdfs.py``), and
+the layouts are synthetic region boxes: no layout model, no OCR model.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from bibr.ocr import registry
+from bibr.ocr.text_layer import read_text_layer
+from bibr.ocr.text_layer_quality import judge_page, lexical_profile
+from bibr.ocr.text_layer_tables import build_table_html
+from bibr.processing_warnings import WarningCode
+from tests.document._pdfs import FIXTURES, PAGE_H, PAGE_W, SAMPLE_PAPER, PageSpec, build_pdf, text
+
+
+@pytest.fixture(autouse=True)
+def _no_ocr_model(monkeypatch):
+    """Reading the text layer never creates an OCR backend."""
+
+    def create(*_args, **_kwargs):
+        raise AssertionError("the text-layer read must not create an OCR backend")
+
+    monkeypatch.setattr(registry, "create", create)
+
+
+def _box(x0: float, y0: float, x1: float, y1: float) -> list[float]:
+    """PDF points (y up) to the 0..1000 layout space (y down)."""
+    return [
+        x0 / PAGE_W * 1000,
+        (PAGE_H - y1) / PAGE_H * 1000,
+        x1 / PAGE_W * 1000,
+        (PAGE_H - y0) / PAGE_H * 1000,
+    ]
+
+
+def _region(label: str, box: list[float], task: str = "text") -> dict:
+    return {"label": label, "task_type": task, "bbox_2d": box, "content": ""}
+
+
+def _lines(lines: list[str], *, x: float = 72.0, top: float = 700.0, step: float = 14.0) -> bytes:
+    return b"".join(text(line, x, top - step * k) for k, line in enumerate(lines))
+
+
+def _paragraph_box(count: int, *, top: float = 700.0, step: float = 14.0) -> list[float]:
+    return _box(60, top - step * (count - 1) - 6, 560, top + 14)
+
+
+_PROSE = [
+    "We measured the reading speed of the participants in the two groups and",
+    "found that the effect of the training was larger than in the earlier work.",
+    "The results show that the method is robust to the choice of the stimuli,",
+    "and that it can be used with the samples that are common in the field.",
+    "This is in line with the theory of the authors, but it is not a proof of",
+    "the model, which was tested on a larger set of data from the same lab.",
+]
+
+
+def _caesar(line: str, shift: int = 3) -> str:
+    def rot(ch: str) -> str:
+        if "a" <= ch <= "z":
+            return chr((ord(ch) - 97 + shift) % 26 + 97)
+        if "A" <= ch <= "Z":
+            return chr((ord(ch) - 65 + shift) % 26 + 65)
+        return ch
+
+    return "".join(rot(ch) for ch in line)
+
+
+# --- Filling regions ---------------------------------------------------------
+
+
+def _sample_paper_layout() -> list[list[dict]]:
+    return [
+        [
+            _region("doc_title", [170, 70, 830, 118]),
+            _region("text", [370, 128, 630, 148]),
+            _region("paragraph_title", [98, 185, 185, 200]),
+            _region("abstract", [98, 206, 902, 316]),
+            _region("figure_title", [98, 573, 450, 590]),
+            _region("table", [240, 595, 815, 698], task="table"),
+            _region("image", [100, 700, 200, 710], task="skip"),
+        ],
+        [
+            _region("paragraph_title", [98, 118, 210, 133]),
+            _region("reference", [98, 140, 902, 455]),
+        ],
+    ]
+
+
+def test_sample_paper_fills_every_readable_region():
+    pdf = SAMPLE_PAPER.read_bytes()
+    layout = _sample_paper_layout()
+
+    read = read_text_layer(pdf, layout)
+
+    assert [(page.index, page.ok) for page in read.pages] == [(0, True), (1, True)]
+    first, second = read.layout_results
+    by_label = {region["label"]: region for region in first}
+    assert by_label["doc_title"]["content"].startswith("The Coefficient of Rodential Efficiency")
+    assert by_label["paragraph_title"]["content"] == "Abstract"
+    assert "Coefficient of Rodential Efficiency (CRE)" in by_label["abstract"]["content"]
+    assert (
+        by_label["figure_title"]["content"] == "Table 1. Simulated sample characteristics by group."
+    )
+    assert by_label["table"]["content"].startswith(
+        "<table><tr><td>Group</td><td>N</td><td>Mean CRE</td><td>SD</td></tr>"
+        "<tr><td>A</td><td>12</td><td>0.91</td><td>0.14</td></tr>"
+    )
+    assert by_label["table"]["_text_layer_table"] is True
+    # A figure is not read, and not counted unread.
+    assert by_label["image"]["content"] == ""
+    assert "_text_layer_unread" not in by_label["image"]
+    assert second[1]["content"].startswith("[1] Vole, A., & Capybarov, B. (2023).")
+    for region in (*first, *second):
+        if region["task_type"] != "skip":
+            assert region["_native_text_used"] is True, region["label"]
+    assert read.tables_rebuilt == 1
+    assert read.unread == {}
+    assert [w.code for w in read.warnings] == [WarningCode.TEXT_LAYER_TABLE_REBUILT]
+    # The input layout is left as it was.
+    assert layout[0][0]["content"] == ""
+
+
+def test_native_text_fixture_is_read():
+    pdf = (FIXTURES / "native_text_sample.pdf").read_bytes()
+
+    read = read_text_layer(pdf, [[_region("text", [50, 50, 950, 950])]])
+
+    assert read.pages[0].ok
+    assert read.layout_results[0][0]["content"] == (
+        "The quick brown fox jumps over the lazy dog.\r\nAnother line of text for robustness."
+    )
+    assert read.warnings == []
+
+
+def test_page_furniture_formulas_and_short_regions():
+    pdf = build_pdf(
+        [
+            PageSpec(
+                text("Journal of Tests 12 (2020) 1-10", 72, 760)
+                + _lines(_PROSE[:3])
+                + text("x = a + b", 200, 600)
+                + text("(1)", 500, 600)
+                + text("2.1", 72, 560, size=12)
+                + text("7", 300, 40)
+            )
+        ]
+    )
+    layout = [
+        [
+            _region("header", _box(60, 754, 300, 772)),
+            _region("text", _paragraph_box(3)),
+            _region("formula", _box(190, 594, 260, 612), task="formula"),
+            _region("formula_number", _box(495, 594, 520, 612)),
+            _region("paragraph_title", _box(60, 554, 100, 574)),
+            _region("footer", _box(290, 34, 320, 52)),
+        ]
+    ]
+
+    read = read_text_layer(pdf, layout)
+
+    header, body, formula, number, heading, footer = read.layout_results[0]
+    assert header["content"] == "Journal of Tests 12 (2020) 1-10"
+    assert body["content"].startswith("We measured the reading speed")
+    assert formula["content"] == "x = a + b"
+    assert formula["_formula_source"] == "text_layer"
+    assert [r["_text_layer_kind"] for r in read.layout_results[0]] == [
+        "text",
+        "text",
+        "formula_plain",
+        "text",
+        "text",
+        "unread",
+    ]
+    assert number["content"] == "(1)"
+    assert heading["content"] == "2.1"
+    # One digit is below the three-character allowance of a footer.
+    assert footer["content"] == ""
+    assert footer["_text_layer_unread"] is True
+    assert read.formulas_read == 1
+    assert read.unread == {"footer": 1}
+    codes = [w.code for w in read.warnings]
+    assert codes == [WarningCode.TEXT_LAYER_REGION_UNREAD, WarningCode.TEXT_LAYER_FORMULA_TEXT]
+    assert "footer x1" in read.warnings[0].message
+
+
+def test_native_filled_region_is_kept():
+    pdf = (FIXTURES / "native_text_sample.pdf").read_bytes()
+    region = _region("text", [50, 50, 950, 950])
+    region.update(content="already read", _native_text_used=True)
+
+    read = read_text_layer(pdf, [[region]])
+
+    assert read.layout_results[0][0]["content"] == "already read"
+    assert read.filled == {"text": 1}
+
+
+def test_page_indices_map_layout_to_absolute_pages():
+    pdf = build_pdf([PageSpec(text("First page text", 72, 700)), PageSpec(_lines(_PROSE[:2]))])
+
+    read = read_text_layer(pdf, [[_region("text", _paragraph_box(2))]], page_indices=[1])
+
+    assert read.pages[0].index == 1
+    assert read.layout_results[0][0]["content"].startswith("We measured the reading speed")
+
+
+def test_caption_box_drops_figure_text_above_the_caption():
+    pdf = build_pdf(
+        [
+            PageSpec(
+                text("0", 100, 440, size=7)
+                + text("10", 200, 440, size=7)
+                + text("20", 300, 440, size=7)
+                + text("Time (s)", 190, 428, size=7)
+                + text("Figure 2. Response time by condition in the two", 72, 410)
+                + text("experiments of the study.", 72, 397)
+            )
+        ]
+    )
+    caption = _region("figure_title", _box(60, 390, 400, 452))
+
+    read = read_text_layer(pdf, [[caption]])
+
+    assert read.layout_results[0][0]["content"] == (
+        "Figure 2. Response time by condition in the two\r\nexperiments of the study."
+    )
+    # The region keeps the layout model's box.
+    assert read.layout_results[0][0]["bbox_2d"] == caption["bbox_2d"]
+
+
+def test_caption_without_a_caption_start_reads_the_whole_box():
+    pdf = build_pdf(
+        [PageSpec(text("Mean scores", 72, 440, size=7) + text("Notes on the data.", 72, 420))]
+    )
+
+    read = read_text_layer(pdf, [[_region("figure_title", _box(60, 414, 400, 452))]])
+
+    assert read.layout_results[0][0]["content"] == "Mean scores\r\nNotes on the data."
+
+
+# --- Tables ------------------------------------------------------------------
+
+_TABLE_ROWS = [("Name", "Age", "Score"), ("Ann", "31", "0.82"), ("Bob", "27", "0.75")]
+
+
+def _table_pdf() -> bytes:
+    content = b"".join(
+        text(cell, 100 + 100 * col, 600 - 15 * row)
+        for row, cells in enumerate(_TABLE_ROWS)
+        for col, cell in enumerate(cells)
+    )
+    return build_pdf([PageSpec(content)])
+
+
+def test_three_by_three_table_becomes_html_the_table_parser_reads():
+    from bibr.structure.parse_media import MediaHandlersMixin
+
+    pdf = _table_pdf()
+
+    read = read_text_layer(pdf, [[_region("table", _box(90, 560, 360, 615), task="table")]])
+
+    html = read.layout_results[0][0]["content"]
+    assert read.layout_results[0][0]["_text_layer_kind"] == "table_rebuilt"
+    assert html == (
+        "<table>"
+        "<tr><td>Name</td><td>Age</td><td>Score</td></tr>"
+        "<tr><td>Ann</td><td>31</td><td>0.82</td></tr>"
+        "<tr><td>Bob</td><td>27</td><td>0.75</td></tr>"
+        "</table>"
+    )
+    frame = MediaHandlersMixin._parse_html_table(html)
+    assert list(frame.columns) == ["Name", "Age", "Score"]
+    assert frame.values.tolist() == [["Ann", "31", "0.82"], ["Bob", "27", "0.75"]]
+    assert [w.code for w in read.warnings] == [WarningCode.TEXT_LAYER_TABLE_REBUILT]
+
+
+def _glyphs(word: str, x: float, y: float, *, width: float = 6.0, height: float = 10.0):
+    return [
+        (ch, x + width * k, y, x + width * (k + 1) - 2.0, y + height) for k, ch in enumerate(word)
+    ]
+
+
+def test_table_builder_lets_a_spanning_header_cross_a_column_gap():
+    chars = _glyphs("Reaction time condition", 100, 10)
+    for row in range(1, 8):
+        y = 10 + 16 * row
+        chars += _glyphs(f"r{row}", 100, y) + [(" ", 0, 0, 0, 0)]
+        chars += _glyphs(f"{row}0", 200, y) + [(" ", 0, 0, 0, 0)]
+        chars += _glyphs(f"{row}.5", 300, y)
+
+    html = build_table_html(chars)
+
+    assert html is not None
+    # The header crosses the first gap: it spans columns, so it goes whole
+    # into the column it starts in, and the columns stay those of the data.
+    assert html.startswith("<table><tr><td>Reaction time condition</td><td></td><td></td></tr>")
+    assert "<tr><td>r1</td><td>10</td><td>1.5</td></tr>" in html
+    assert html.count("<tr>") == 8
+
+
+_SMALL_TABLE = [
+    [("Group", 100), ("N", 200), ("Mean", 300), ("SD", 400)],
+    *[[(f"G{k}", 100), ("12", 200), (f"0.9{k}", 300), ("0.14", 400)] for k in range(4)],
+]
+
+
+def _table_glyphs(rows: list[list[tuple[str, float]]], *, top: float = 10.0) -> list:
+    chars: list = []
+    for k, cells in enumerate(rows):
+        for cell, x in cells:
+            chars += _glyphs(cell, x, top + 16 * k) + [(" ", 0, 0, 0, 0)]
+    return chars
+
+
+def _cells(html: str) -> list[list[str]]:
+    import re
+
+    return [re.findall(r"<td>(.*?)</td>", row) for row in re.findall(r"<tr>(.*?)</tr>", html)]
+
+
+@pytest.mark.parametrize(
+    ("where", "row", "one_cell"),
+    [
+        # A note under a five-row table, one phrase across every column.
+        ("below", [("Note. Values are means across the four groups of the study.", 100)], True),
+        # A title line over it.
+        ("above", [("Table 2 Descriptive statistics of the four groups", 100)], True),
+        # A group header, one phrase over the Mean and SD columns.
+        ("above", [("Reaction time in ms", 290)], True),
+        # A group header row of two phrases, the second crossing Mean | SD.
+        ("above", [("Sample", 100), ("Reaction time in ms", 290)], False),
+    ],
+    ids=["note", "title", "group-header", "two-phrase-header"],
+)
+def test_a_small_table_keeps_its_columns_under_a_row_that_spans_them(where, row, one_cell):
+    from bibr.structure.parse_media import MediaHandlersMixin
+
+    rows = [*_SMALL_TABLE, row] if where == "below" else [row, *_SMALL_TABLE]
+
+    html = build_table_html(_table_glyphs(rows))
+
+    assert html is not None
+    cells = _cells(html)
+    assert all(len(cells_of_row) == 4 for cells_of_row in cells)
+    data = cells[:-1] if where == "below" else cells[1:]
+    assert data[0] == ["Group", "N", "Mean", "SD"]
+    assert data[1:] == [[f"G{k}", "12", f"0.9{k}", "0.14"] for k in range(4)]
+    if one_cell:
+        # The spanning row is one cell, in the column it starts in.
+        spanning = cells[-1] if where == "below" else cells[0]
+        assert [cell for cell in spanning if cell] == [row[0][0]]
+        assert spanning.index(row[0][0]) == (2 if row[0][1] > 250 else 0)
+    frame = MediaHandlersMixin._parse_html_table(html)
+    assert frame.shape[1] == 4
+
+
+def test_a_tight_data_row_is_split_word_by_word():
+    # The label runs close to the next cell, so the separator the other rows
+    # show falls inside its phrase; a row of several phrases is still split
+    # word by word.
+    rows = [*_SMALL_TABLE, [("Total sample", 100), ("1234567", 176), ("0.9", 300), ("0.1", 400)]]
+
+    html = build_table_html(_table_glyphs(rows))
+
+    assert html is not None
+    assert _cells(html)[-1] == ["Total sample", "1234567", "0.9", "0.1"]
+
+
+def test_table_builder_joins_tight_digit_boxes_and_escapes_cells():
+    # Narrow digits leave a gap of a third of a height between their boxes.
+    chars = [("1", 0, 0, 4, 10), ("2", 7, 0, 11, 10), (" ", 0, 0, 0, 0), ("<", 40, 0, 46, 10)]
+    chars += [(".", 46, 0, 48, 10), ("0", 48, 0, 54, 10), ("5", 54, 0, 60, 10)]
+
+    assert build_table_html(chars) == "<table><tr><td>12</td><td>&lt;.05</td></tr></table>"
+    assert build_table_html([(" ", 0, 0, 0, 0)]) is None
+
+
+def _placed(lines: list[list[tuple[str, float]]], tops: list[float]) -> list:
+    """Glyphs for printed lines of (text, x) cells, each line at its own top."""
+    chars: list = []
+    for cells, top in zip(lines, tops, strict=True):
+        for cell, x in cells:
+            chars += _glyphs(cell, x, top) + [(" ", 0, 0, 0, 0)]
+    return chars
+
+
+def test_a_wrapped_text_cell_stays_in_its_row():
+    # The description wraps onto a second line set closer than the rows are,
+    # and a word broken at the line end is joined again.
+    lines = [
+        [("Theme", 100), ("Description", 300)],
+        [("Access", 100), ("Long wait for infor-", 300)],
+        [("mation", 300)],
+        [("Cost", 100), ("Fees", 300)],
+    ]
+
+    html = build_table_html(_placed(lines, [10, 40, 54, 80]))
+
+    assert html is not None
+    assert _cells(html) == [
+        ["Theme", "Description"],
+        ["Access", "Long wait for information"],
+        ["Cost", "Fees"],
+    ]
+
+
+def test_a_table_set_solid_keeps_each_heading_line_a_row():
+    # Every line sits as close as wrapped text would, but the data rows show
+    # that is the table's row pitch: a heading in the stub is not glued to the
+    # data row next to it.
+    lines = [
+        [("Gender, n (%)", 100)],
+        [("Male", 110), ("100 (50.5)", 250), ("6 (24.0)", 350)],
+        [("Female", 110), ("98 (49.5)", 250), ("19 (76.0)", 350)],
+        [("Age (years)", 100)],
+        [("Mean (SD)", 110), ("74.4 (5.94)", 250), ("75.6 (4.93)", 350)],
+    ]
+
+    html = build_table_html(_placed(lines, [10 + 13 * k for k in range(5)]))
+
+    assert html is not None
+    assert [row[0] for row in _cells(html)] == [
+        "Gender, n (%)",
+        "Male",
+        "Female",
+        "Age (years)",
+        "Mean (SD)",
+    ]
+
+
+def test_a_glossary_set_solid_keeps_each_line_a_row():
+    # A table of text: every line fills every column, so each one is a row.
+    lines = [
+        [("Term", 100), ("Meaning", 160), ("Term", 400), ("Meaning", 460)],
+        [("BAM", 100), ("Beacon Alert Message", 160), ("CS", 400), ("Content Store", 460)],
+        [("CSR", 100), ("Camper Server", 160), ("DM", 400), ("Data Message", 460)],
+        [("FS", 100), ("Fire Sensor", 160), ("HC", 400), ("Hop Count", 460)],
+    ]
+
+    html = build_table_html(_placed(lines, [10 + 13 * k for k in range(4)]))
+
+    assert html is not None
+    assert _cells(html)[1:] == [
+        ["BAM", "Beacon Alert Message", "CS", "Content Store"],
+        ["CSR", "Camper Server", "DM", "Data Message"],
+        ["FS", "Fire Sensor", "HC", "Hop Count"],
+    ]
+
+
+def test_a_table_printed_turned_a_quarter_is_read_upright():
+    upright = _table_glyphs(_SMALL_TABLE)
+    # Turned anticlockwise: the text runs up the page.
+    turned = [(ch, y0, 1000.0 - x1, y1, 1000.0 - x0) for ch, x0, y0, x1, y1 in upright]
+
+    assert build_table_html(turned) == build_table_html(upright)
+    assert _cells(build_table_html(turned) or "")[1] == ["G0", "12", "0.90", "0.14"]
+
+
+def test_page_aspect_follows_the_rendered_page():
+    from types import SimpleNamespace
+
+    from bibr.ocr.text_layer import _page_aspect
+
+    assert _page_aspect(SimpleNamespace(crop_box=(0, 0, 595, 842), rotation=0)) == 842 / 595
+    assert _page_aspect(SimpleNamespace(crop_box=(0, 0, 595, 842), rotation=90)) == 595 / 842
+    assert _page_aspect(SimpleNamespace(crop_box=(0, 0, 0, 842), rotation=0)) is None
+    # The gap constants were set on A4, which reads as with no aspect at all.
+    chars = _table_glyphs(_SMALL_TABLE)
+    assert build_table_html(chars, aspect=2**0.5) == build_table_html(chars)
+
+
+def test_table_region_marks_unmapped_glyphs_and_drops_private_use():
+    from bibr.ocr.text_layer import _fill_region, _PageText
+
+    glyphs = _table_glyphs(_SMALL_TABLE)
+    # A math font's unmapped bracket, an icon from the private-use area, and a
+    # separator control, which only ends a word.
+    glyphs += _glyphs("\x05x", 100, 90) + [("", 120, 90, 124, 100)] + _glyphs("y\x1fz", 200, 90)
+    page = _PageText(
+        0, (0, 0, 595, 842), 0, len(glyphs), False, [], [(ch, box) for ch, *box in glyphs], []
+    )
+    region = _region("table", [0, 0, 1000, 1000], task="table")
+
+    assert _fill_region(page, region, min_printable_ratio=0.85) == "filled"
+
+    last = _cells(region["content"])[-1]
+    assert last[0] == "�x"
+    assert "y z" in " ".join(last)
+    assert "\x05" not in region["content"] and "" not in region["content"]
+    assert region["_unmapped_glyphs"] == 1
+    assert region["_private_use_dropped"] == 1
+
+
+def test_table_region_reads_a_letter_composed_with_its_accent():
+    # "x" under a circumflex has no single code point, so the page reader hands
+    # the pair over as one glyph of two characters (an estimate in a statistics
+    # table). Reading it as one character raised, and the paper lost its text layer.
+    from bibr.ocr.text_layer import _fill_region, _PageText
+
+    glyphs = _table_glyphs(_SMALL_TABLE)
+    glyphs += [("x\u0302", 100, 90, 104, 100)] + _glyphs("=1", 106, 90)
+    # A private-use glyph of two code points, right before a composed letter.
+    glyphs += [("\ue000\ue001", 200, 90, 204, 100), ("d\u0304", 206, 90, 210, 100)]
+    page = _PageText(
+        0, (0, 0, 595, 842), 0, len(glyphs), False, [], [(ch, box) for ch, *box in glyphs], []
+    )
+    region = _region("table", [0, 0, 1000, 1000], task="table")
+
+    assert _fill_region(page, region, min_printable_ratio=0.85) == "filled"
+
+    last = " ".join(_cells(region["content"])[-1])
+    assert "x\u0302=1" in last and "d\u0304" in last
+    assert "\ue000" not in region["content"]
+    assert region["_private_use_dropped"] == 1
+    assert region["_private_use_inside"] == 1
+    assert "_unmapped_glyphs" not in region
+
+
+def test_a_region_that_fails_inside_bibr_costs_only_itself(monkeypatch):
+    import bibr.ocr.text_layer as text_layer
+
+    def fail(*args, **kwargs):
+        raise TypeError("a fault in the table reader")
+
+    monkeypatch.setattr(text_layer, "_clean_table_chars", fail)
+    pdf = _prose_pdf(_PROSE)
+    layout = [
+        [
+            _region("text", _paragraph_box(6)),
+            _region("table", _box(60, 100, 560, 300), task="table"),
+        ]
+    ]
+
+    read = read_text_layer(pdf, layout)
+
+    prose, table = read.layout_results[0]
+    assert read.pages[0].ok
+    assert prose["content"] and prose["_native_text_used"]
+    assert table["content"] == "" and table["_text_layer_unread"]
+    assert read.unread == {"table": 1}
+    assert [w.code for w in read.warnings] == [WarningCode.TEXT_LAYER_READ_ERROR]
+    assert "table x1" in read.warnings[0].message
+
+
+# --- Page gates ----------------------------------------------------------------
+
+
+def _prose_pdf(lines: list[str], extra: bytes = b"") -> bytes:
+    return build_pdf([PageSpec(_lines(lines) + extra)])
+
+
+def test_good_prose_page_passes_every_gate():
+    pdf = _prose_pdf(_PROSE)
+
+    read = read_text_layer(pdf, [[_region("text", _paragraph_box(6))]])
+
+    page = read.pages[0]
+    assert page.ok, page.metrics
+    assert page.metrics["coverage"] == 1.0
+    assert page.metrics["stopword_share"] > 0.2
+
+
+def test_caesar_shifted_text_layer_fails():
+    pdf = _prose_pdf([_caesar(line) for line in _PROSE])
+
+    read = read_text_layer(pdf, [[_region("text", _paragraph_box(6))]])
+
+    page = read.pages[0]
+    assert (page.ok, page.reason) == (False, "implausible_text")
+    assert page.metrics["stopword_share"] < 0.04
+    assert read.layout_results[0][0]["_text_layer_kind"] == "unread"
+
+
+def test_text_layer_without_word_spaces_fails():
+    pdf = _prose_pdf([line.replace(" ", "") for line in _PROSE])
+
+    read = read_text_layer(pdf, [[_region("text", _paragraph_box(6))]])
+
+    assert read.pages[0].reason == "implausible_text"
+
+
+def _minus_29(line: str) -> str:
+    """A font whose codes sit 29 below Unicode: "The" reads as "7KH"."""
+    return "".join(chr(ord(ch) - 29) if 61 < ord(ch) < 127 else ch for ch in line)
+
+
+def test_text_layer_29_code_points_down_fails():
+    pdf = _prose_pdf([_minus_29(line) for line in _PROSE])
+
+    read = read_text_layer(pdf, [[_region("text", _paragraph_box(6))]])
+
+    page = read.pages[0]
+    assert (page.ok, page.reason) == (False, "implausible_text")
+    assert page.metrics["common_letter_share"] < 0.3
+
+
+_NAMES = (
+    "Charles R. Ebersole, Olivia E. Atherton, Aimee L. Belanger, Hayley M. Skulborstad, "
+    "Jill M. Allen, Jonathan B. Banks, Erica Baranski, Michael J. Bernstein, Diane B. V. "
+    "Bonfiglio, Leanne Boucher, Elizabeth R. Brown, Nancy I. Budiman, Athena H. Cairo, "
+    "Colin A. Capaldi, Christopher R. Chartier, Joanne M. Chung, David C. Cicero, Jennifer "
+    "A. Coleman, John G. Conway, William E. Davis, Thierry Devos, Melody M. Fletcher, "
+    "Komi German, Jon E. Grahe, Anthony D. Hermann, Joshua A. Hicks, Nathan Honeycutt"
+)
+_WORD_LIST = (
+    "apple chair river candle window garden pencil bottle mirror basket ladder blanket "
+    "hammer pillow kettle saddle wallet button carpet helmet lemon rocket violin tunnel "
+    "planet castle silver orange anchor feather magnet bucket jacket lantern statue "
+    "cabinet harbor trumpet compass meadow"
+)
+
+
+@pytest.mark.parametrize("text_", [_NAMES, _WORD_LIST], ids=["author-names", "word-list"])
+def test_text_without_function_words_still_passes(text_):
+    lexical = lexical_profile([text_])
+
+    assert lexical["stopword_share"] < 0.04
+    assert judge_page(coverage=1.0, rejected_regions=0, read_regions=1, lexical=lexical).ok
+
+
+def test_a_region_the_text_layer_has_nothing_for_leaves_the_page_read():
+    # A large block of printed matter drawn as paths (a screenshot of a form)
+    # under six lines of prose: its region is unread, the prose is read.
+    pdf = _prose_pdf(_PROSE, b"q 0 g 72 80 450 500 re f Q\n")
+    layout = [[_region("text", _paragraph_box(6)), _region("text", _box(60, 70, 560, 590))]]
+
+    read = read_text_layer(pdf, layout)
+
+    page = read.pages[0]
+    assert page.ok, page.metrics
+    assert page.metrics["coverage"] < 0.5 and page.metrics["region_coverage"] == 0.5
+    prose, block = read.layout_results[0]
+    assert prose["content"].startswith("We measured the reading speed")
+    assert block["_text_layer_unread"] is True
+    assert [w.code for w in read.warnings] == [WarningCode.TEXT_LAYER_REGION_UNREAD]
+
+
+def test_scanned_fixture_has_no_text_layer():
+    pdf = (FIXTURES / "scanned_sample.pdf").read_bytes()
+
+    read = read_text_layer(pdf, [[_region("text", [50, 50, 950, 950])]])
+
+    assert (read.pages[0].ok, read.pages[0].reason) == (False, "no_text_layer")
+    assert read.layout_results[0][0]["_text_layer_unread"] is True
+    assert read.unread == {"text": 1}
+    assert read.warnings[0].code == WarningCode.TEXT_LAYER_PAGE_UNUSABLE
+
+
+def test_page_with_nothing_to_read_and_no_text_layer_passes():
+    pdf = (FIXTURES / "scanned_sample.pdf").read_bytes()
+
+    read = read_text_layer(pdf, [[_region("image", [50, 50, 950, 950], task="skip")]])
+
+    assert read.pages[0].ok
+    assert read.warnings == []
+
+
+def test_a_stray_stamp_over_a_scan_is_low_coverage():
+    pdf = build_pdf([PageSpec(text("Downloaded from example.org on 1 May 2020", 72, 770, size=7))])
+    layout = [
+        [
+            _region("header", _box(60, 764, 300, 780)),
+            _region("text", _box(60, 100, 550, 700)),
+        ]
+    ]
+
+    read = read_text_layer(pdf, layout)
+
+    assert read.pages[0].reason == "low_coverage"
+    assert [region["content"] for region in read.layout_results[0]] == ["", ""]
+
+
+def test_cid_codes_in_most_regions_are_a_corrupt_text_layer():
+    cid = "(cid:12)(cid:15)(cid:3) (cid:7)(cid:9)"
+    pdf = build_pdf([PageSpec(text(cid, 72, 700) + text(cid, 72, 600))])
+    layout = [[_region("text", _box(60, 690, 550, 716)), _region("text", _box(60, 590, 550, 616))]]
+
+    read = read_text_layer(pdf, layout)
+
+    assert read.pages[0].reason == "corrupt_text"
+    assert all(region["_native_gate"] == "usability" for region in read.layout_results[0])
+
+
+@pytest.mark.parametrize(
+    "scan",
+    [(PAGE_W, PAGE_H, 0.0, 0.0), (400.0, 500.0, 100.0, 200.0)],
+    ids=["page-sized", "cropped-to-the-text-block"],
+)
+def test_invisible_ocr_layer_over_a_scan_is_not_read(scan):
+    from tests.document._pdfs import image
+
+    width, height, x, y = scan
+    pdf = build_pdf(
+        [PageSpec(image(width, height, x, y) + text("Scanned words", 120, 600, mode=3))]
+    )
+
+    read = read_text_layer(pdf, [[_region("text", _box(110, 590, 550, 616))]])
+
+    assert read.pages[0].reason == "invisible_ocr_layer"
+    assert read.layout_results[0][0]["content"] == ""
+
+
+def _invisible_lines(lines: list[str]) -> bytes:
+    return b"".join(text(line, 72.0, 700.0 - 14.0 * k, mode=3) for k, line in enumerate(lines))
+
+
+def test_the_ocr_layer_of_a_scan_is_read_when_asked_for():
+    from tests.document._pdfs import image
+
+    pdf = build_pdf([PageSpec(image(PAGE_W, PAGE_H) + _invisible_lines(_PROSE))])
+    layout = [[_region("text", _paragraph_box(len(_PROSE)))]]
+
+    unread = read_text_layer(pdf, layout)
+    assert unread.pages[0].reason == "invisible_ocr_layer"
+    assert unread.ocr_layer_pages == []
+
+    read = read_text_layer(pdf, layout, read_ocr_layer=True)
+
+    assert read.pages[0].ok
+    assert read.layout_results[0][0]["content"].startswith("We measured the reading speed")
+    assert read.ocr_layer_pages == [1]
+    (warning,) = [w for w in read.warnings if w.code == WarningCode.TEXT_LAYER_OCR_LAYER_READ]
+    assert "1 scanned page(s)" in warning.message and "(page 1)" in warning.message
+
+
+def test_invisible_text_without_a_page_sized_image_stays_unread_when_asked_for():
+    from tests.document._pdfs import image
+
+    hidden_on_purpose = build_pdf([PageSpec(_invisible_lines(_PROSE))])
+    cropped_scan = build_pdf(
+        [PageSpec(image(400.0, 500.0, 100.0, 200.0) + _invisible_lines(_PROSE))]
+    )
+    layout = [[_region("text", _paragraph_box(len(_PROSE)))]]
+
+    for pdf in (hidden_on_purpose, cropped_scan):
+        read = read_text_layer(pdf, layout, read_ocr_layer=True)
+
+        assert read.pages[0].reason == "invisible_ocr_layer"
+        assert read.layout_results[0][0]["content"] == ""
+        assert read.ocr_layer_pages == []
+        assert not [w for w in read.warnings if w.code == WarningCode.TEXT_LAYER_OCR_LAYER_READ]
+
+
+def test_an_ocr_layer_that_does_not_read_as_words_is_still_turned_down():
+    from tests.document._pdfs import image
+
+    garbage = ["xq zvk jjw qpx zzk vvq wxj kqz pqv jxw zqk vjx qqz kxv jzq wvx"] * len(_PROSE)
+    pdf = build_pdf([PageSpec(image(PAGE_W, PAGE_H) + _invisible_lines(garbage))])
+
+    read = read_text_layer(
+        pdf, [[_region("text", _paragraph_box(len(garbage)))]], read_ocr_layer=True
+    )
+
+    assert not read.pages[0].ok
+    assert read.ocr_layer_pages == []
+    assert read.layout_results[0][0]["content"] == ""
+
+
+def test_the_ocr_layer_warning_folds_page_runs():
+    from bibr.ocr.text_layer import _page_ranges
+
+    assert _page_ranges([3]) == "page 3"
+    assert _page_ranges([1, 2, 3, 4, 7]) == "pages 1-4, 7"
+    assert _page_ranges([5, 2, 1]) == "pages 1-2, 5"
+
+
+def test_a_little_invisible_text_on_a_born_digital_page_is_read():
+    lines = _lines(_PROSE)
+    pdf = build_pdf([PageSpec(lines + text("hidden", 72, 760, mode=3))])
+
+    read = read_text_layer(pdf, [[_region("text", _paragraph_box(6))]])
+
+    assert read.pages[0].ok
+
+
+# --- Gate units and page triage --------------------------------------------------
+
+
+def test_lexical_profile_leaves_other_scripts_and_short_text_alone():
+    assert lexical_profile(["Αυτό είναι ένα ελληνικό κείμενο για τη δοκιμή. " * 10]) == {}
+    assert lexical_profile(["Too short to judge."]) == {}
+    english = lexical_profile([" ".join(_PROSE)])
+    assert english["glued_letter_share"] == 0.0
+    assert english["stopword_share"] > 0.2
+
+
+def test_judge_page_names_the_first_failing_gate():
+    assert judge_page(coverage=None, rejected_regions=0, read_regions=0, lexical={}).ok
+    low = judge_page(coverage=0.1, rejected_regions=3, read_regions=3, lexical={})
+    assert low.reason == "low_coverage"
+    one_bad = judge_page(coverage=1.0, rejected_regions=1, read_regions=1, lexical={})
+    assert one_bad.ok
+    # Little area but most regions covered: one large region without text.
+    assert judge_page(
+        coverage=0.3, rejected_regions=0, read_regions=3, lexical={}, region_coverage=0.75
+    ).ok
+    assert (
+        judge_page(
+            coverage=0.3,
+            rejected_regions=0,
+            read_regions=1,
+            lexical={},
+            region_coverage=0.25,
+        ).reason
+        == "low_coverage"
+    )
+
+
+@pytest.mark.parametrize(
+    ("reason", "kind"),
+    [
+        ("no_text_layer", "scan"),
+        ("low_coverage", "scan"),
+        ("invisible_ocr_layer", "scan"),
+        ("implausible_text", "broken_text_layer"),
+        ("corrupt_text", "broken_text_layer"),
+    ],
+)
+def test_page_triage_follows_the_text_layer_verdict(reason, kind):
+    from bibr.ocr.pdf_inspection import PdfPageInspection
+    from bibr.scan.page_kind import classify_page
+
+    page = PdfPageInspection(
+        index=0,
+        width=PAGE_W,
+        height=PAGE_H,
+        crop_box=(0.0, 0.0, PAGE_W, PAGE_H),
+        char_count=500,
+        text_layer_ok=False,
+        text_layer_reason=reason,
+    )
+
+    assert classify_page(page, [{"label": "text", "_native_text_used": True}]).value == kind
+
+
+def test_private_use_code_points_are_dropped_and_counted(monkeypatch):
+    from bibr.ocr import text_layer
+
+    monkeypatch.setattr(
+        text_layer,
+        "_read_text",
+        lambda page, bbox: "Jane Doe \ue0a1 and Joe Roe \ue0a1, 2020 \ue001",
+    )
+    region = _region("text", [0, 0, 1000, 1000])
+    # The native-text pass set this region aside for OCR; the text layer reads it.
+    region["_native_text_candidate"] = "Jane Doe \ue0a1"
+    region["_native_text_rejection_reason"] = "private_use"
+
+    outcome = text_layer._fill_region(object(), region, min_printable_ratio=0.85)
+
+    assert outcome == "filled"
+    assert "_native_text_candidate" not in region
+    assert "_native_text_rejection_reason" not in region
+    assert region["content"] == "Jane Doe  and Joe Roe , 2020 "
+    assert region["_private_use_dropped"] == 3
+
+
+def test_private_use_code_point_inside_a_word_is_dropped_and_counted_separately(monkeypatch):
+    from bibr.ocr import text_layer
+
+    monkeypatch.setattr(text_layer, "_read_text", lambda page, bbox: "Ren\ue0a1e Smith, University")
+    region = _region("text", [0, 0, 1000, 1000])
+
+    assert text_layer._fill_region(object(), region, min_printable_ratio=0.85) == "filled"
+    assert region["content"] == "Rene Smith, University"
+    assert (region["_private_use_dropped"], region["_private_use_inside"]) == (1, 1)
+    assert region.get("_native_gate") is None
+
+
+def _fill_with_text_layer(monkeypatch, text, label="text"):
+    from bibr.ocr import text_layer
+
+    monkeypatch.setattr(text_layer, "_read_text", lambda page, bbox: text)
+    region = _region(label, [0, 0, 1000, 1000])
+    return text_layer._fill_region(object(), region, min_printable_ratio=0.85), region
+
+
+def test_a_rare_unmapped_glyph_is_shown_and_counted_rather_than_losing_the_region(monkeypatch):
+    # A glyph with no mapping comes out as a control character. Nothing reads the
+    # region after this route, so one of them must not empty a whole abstract.
+    text = (
+        "The conductivity reached 0.2 W m\x011 K\x011 at room temperature. " + "Plain text. " * 12
+    )
+
+    outcome, region = _fill_with_text_layer(monkeypatch, text)
+
+    assert outcome == "filled"
+    assert region["content"] == text.replace("\x01", "\ufffd")
+    assert region["_unmapped_glyphs"] == 2
+    assert region.get("_native_gate") is None
+
+
+def test_a_mark_stays_where_the_glyph_was_so_a_unit_cannot_read_as_another(monkeypatch):
+    _, region = _fill_with_text_layer(monkeypatch, "The flux was 400 W cm\x012 in every run.")
+
+    assert region["content"] == "The flux was 400 W cm\ufffd2 in every run."
+
+
+def test_a_short_region_may_carry_one_unmapped_glyph(monkeypatch):
+    outcome, region = _fill_with_text_layer(monkeypatch, "Jane Doe\x01")
+
+    assert outcome == "filled"
+    assert region["content"] == "Jane Doe\ufffd"
+    assert region["_unmapped_glyphs"] == 1
+
+
+def test_many_unmapped_glyphs_still_reject_the_region(monkeypatch):
+    # Two in a short paragraph, more than one per hundred characters: a broken font.
+    outcome, region = _fill_with_text_layer(monkeypatch, "Sev\x01ral gl\x03phs in a line of text")
+
+    assert outcome == "rejected"
+    assert region["_native_gate"] == "usability"
+    assert "_unmapped_glyphs" not in region
+
+
+def test_marking_does_not_excuse_the_other_usability_gates(monkeypatch):
+    text = "(cid:12) (cid:13) a line that a broken font left behind in the layer \x01"
+
+    outcome, region = _fill_with_text_layer(monkeypatch, text)
+
+    assert outcome == "rejected"
+    assert "_unmapped_glyphs" not in region
+
+
+def test_a_formula_with_an_unmapped_glyph_stays_unread(monkeypatch):
+    # A control character in a formula is usually a math symbol, and the result
+    # would read as another formula.
+    outcome, region = _fill_with_text_layer(monkeypatch, "x = \x0f + y", label="display_formula")
+
+    assert outcome == "rejected"
+    assert region["_native_gate"] == "usability"
+
+
+def test_whitespace_controls_are_not_unmapped_glyphs(monkeypatch):
+    outcome, region = _fill_with_text_layer(monkeypatch, "Plain words\r\non two lines\there.")
+
+    assert outcome == "filled"
+    assert "_unmapped_glyphs" not in region
+
+
+def test_unmapped_glyphs_are_reported_for_the_document():
+    from bibr.ocr.text_layer import _unmapped_glyph_warning
+
+    assert _unmapped_glyph_warning(0) is None
+    warning = _unmapped_glyph_warning(3)
+    assert warning.code == WarningCode.TEXT_LAYER_GLYPHS_UNMAPPED
+    assert warning.message.startswith("3 glyph(s)")
+
+
+def test_drop_private_use_counts_the_ones_inside_a_word():
+    from bibr.ocr.text_layer import _drop_private_use
+
+    assert _drop_private_use("plain text") == ("plain text", 0, 0)
+    assert _drop_private_use("a \ue000 b") == ("a  b", 1, 0)
+    assert _drop_private_use("\ue000x") == ("x", 1, 1)
+    assert _drop_private_use("end\ue000") == ("end", 1, 0)
+    assert _drop_private_use("fi\ue001nd \ue002.") == ("find .", 2, 1)
+
+
+def _page_verdicts(*verdicts: tuple[bool | None, str | None]):
+    """A file state whose inspected pages carry the given ``(text_layer_ok, reason)`` verdicts."""
+    from types import SimpleNamespace
+
+    from bibr.ocr.pdf_inspection import PdfPageInspection
+
+    pages = [
+        PdfPageInspection(
+            index=number,
+            width=PAGE_W,
+            height=PAGE_H,
+            crop_box=(0.0, 0.0, PAGE_W, PAGE_H),
+            char_count=0,
+            text_layer_ok=ok,
+            text_layer_reason=reason,
+        )
+        for number, (ok, reason) in enumerate(verdicts)
+    ]
+    return SimpleNamespace(pdf_inspection=SimpleNamespace(pages=pages))
+
+
+def test_page_verdict_summary_counts_the_failed_pages_by_reason():
+    from bibr.ocr.text_layer import page_verdict_summary
+
+    fs = _page_verdicts(
+        (False, "no_text_layer"),
+        (False, "no_text_layer"),
+        (False, "corrupt_text"),
+        (True, None),
+        (None, None),  # never judged: not counted in either part
+    )
+
+    assert page_verdict_summary(fs) == (
+        "2 of 4 pages: no text layer (a scanned page); "
+        "1 of 4 pages: most of its text is corrupt (a broken font encoding)"
+    )
+
+
+def test_page_verdict_summary_is_empty_without_a_failed_page():
+    from types import SimpleNamespace
+
+    from bibr.ocr.text_layer import page_verdict_summary
+
+    assert page_verdict_summary(_page_verdicts((True, None), (True, None))) == ""
+    assert page_verdict_summary(_page_verdicts()) == ""
+    assert page_verdict_summary(SimpleNamespace(pdf_inspection=None)) == ""
+    assert page_verdict_summary(SimpleNamespace()) == ""

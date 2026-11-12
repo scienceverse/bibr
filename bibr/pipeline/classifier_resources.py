@@ -7,10 +7,17 @@ import functools
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 from bibr.pipeline.inference_batcher import InferenceBatcher
 from bibr.utils.locks import LOCAL_INFERENCE_LOCK
+from bibr.utils.model_overrides import (
+    is_model_override,
+    onnx_bundle_files,
+    override_load_error,
+    record_model_load,
+)
 
 logger = logging.getLogger(__name__)
 _MIB = 1024 * 1024
@@ -31,6 +38,8 @@ class ClassifierStatus:
     device: str | None = None
     error: str | None = None
     peak_vram_bytes: int | None = None
+    # FAILED_REQUIRED because an overridden model does not exist (bibr.utils.model_overrides).
+    override: bool = False
 
 
 def choose_classifier_device(
@@ -128,9 +137,11 @@ class ClassifierResources:
         if self._closed:
             raise RuntimeError("classifier resources are closed")
         if self._started:
+            self._note_use()
             return
         async with self._start_lock:
             if self._started:
+                self._note_use()
                 return
             if self._cuda_available is None:
                 (
@@ -149,6 +160,21 @@ class ClassifierResources:
                 if resource.model is not None and _on_measured_device(resource.status.device):
                     placed += resource.estimated_peak_bytes
             self._started = True
+        self._note_use()
+
+    def _note_use(self) -> None:
+        """Write the loaded overridden classifiers into the run's record."""
+        for resource in (self._paper, self._section):
+            env = _MODEL_SETTINGS[resource.name]
+            if resource.model is None or not is_model_override(self._settings, env):
+                continue
+            # A torch model has no bundle directory; its record names the setting only.
+            bundle_dir = getattr(resource.model, "bundle_dir", None)
+            record_model_load(
+                self._settings,
+                env,
+                lambda d=bundle_dir: onnx_bundle_files(d) if isinstance(d, Path) else (),
+            )
 
     async def classify_paper(self, item):
         await self.start()
@@ -210,11 +236,20 @@ class ClassifierResources:
                 _locked_load, resource.loader, resource.model_id, resource.revision, device
             )
         except Exception as exc:  # noqa: BLE001 - sticky degraded startup state
+            env = _MODEL_SETTINGS[resource.name]
+            if (strict := override_load_error(self._settings, env, exc)) is not None:
+                # An overridden classifier that cannot be loaded stops the run,
+                # whatever the reason (bibr.utils.model_overrides); the papers get no
+                # verdict, so a resumed batch runs them again.
+                resource.status = ClassifierStatus(
+                    ClassifierState.FAILED_REQUIRED, device, str(strict)[:500], override=True
+                )
+                logger.warning("%s classifier load failed: %s", resource.name, strict)
+                return
             state = ClassifierState.FAILED_REQUIRED if self._required else ClassifierState.DEGRADED
             resource.status = ClassifierStatus(state, device, _safe_error(exc))
             logger.warning("%s classifier load failed: %s", resource.name, exc)
             return
-
         peak_vram = _peak_vram_bytes(device)
         resource.status = ClassifierStatus(ClassifierState.READY, device, peak_vram_bytes=peak_vram)
         resource.batcher = InferenceBatcher(
@@ -223,6 +258,12 @@ class ClassifierResources:
             resource.batch_timeout_ms,
             f"{resource.name}-classifier",
         )
+
+
+_MODEL_SETTINGS = {
+    "paper": "ML_PAPER_CLASSIFIER_MODEL_ID",
+    "section": "ML_SECTION_CLASSIFIER_MODEL_ID",
+}
 
 
 def _locked_load(loader, model_id: str, revision: str, device: str):

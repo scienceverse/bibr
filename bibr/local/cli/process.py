@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from rich.markup import escape
 
 from bibr.local.cli import ui
-from bibr.local.cli.dry_run import _dry_run_blockers, _print_dry_run_plan
+from bibr.local.cli.dry_run import _dry_run_blockers, _print_dry_run_plan, announce_downloads
 from bibr.local.cli.inputs import (
     _find_stem_collisions,
     _output_path_problem,
@@ -22,9 +22,12 @@ from bibr.local.cli.inputs import (
 from bibr.local.cli.run_config import (
     ResolvedRunConfig,
     _apply_runtime_settings,
+    _preflight_front_tagger,
     _preflight_local_backend,
+    _preflight_model_overrides,
     _preflight_ocr_runtime,
     _preflight_opencv,
+    apply_text_layer_fallback,
     resolve_run_config,
 )
 from bibr.validation import payload_validation
@@ -103,15 +106,48 @@ def _format_run_summary(config: ResolvedRunConfig) -> str:
     model = config.ocr_model or config.ocr_summary_model or "(resolved at startup)"
     profile = config.ocr_profile or "(resolved at startup)"
     backend = config.ocr_backend
+    if backend == "text-layer":
+        profile = "none (no OCR model; reads the PDF text layer)"
+        if config.ocr_text_layer_fallback:
+            backend = "text-layer (no OCR backend can start here)"
     if backend == "paddle":
         backend = "paddle (automatic; use --dry-run for ordered candidates)"
     return (
         f"  [dim]OCR backend:[/dim] {escape(str(backend))}\n"
         f"  [dim]OCR model:[/dim] {escape(str(model))}\n"
         f"  [dim]OCR profile:[/dim] {escape(str(profile))}\n"
-        f"  [dim]llm[/dim] {escape(str(config.llm_backend))} [dim]{ui.SEP}[/dim] "
-        f"[dim]memory[/dim] {escape(str(config.memory_mode))}"
+        f"{_format_mode_line(config)}"
     )
+
+
+def _ocr_route(config: ResolvedRunConfig) -> str:
+    """The OCR route in one phrase: the backend, or the first of the automatic chain."""
+    if config.ocr_url:
+        return f"{config.ocr_backend} at {config.ocr_url}"
+    if config.ocr_backend == "paddle" and config.ocr_summary_backend:
+        return f"{config.ocr_summary_backend} (automatic)"
+    return str(config.ocr_backend)
+
+
+def _format_mode_line(config: ResolvedRunConfig) -> str:
+    """One line: the run mode, the OCR route and what the mode leaves out."""
+    from bibr.run_mode import FAST_SKIPS
+
+    sep = f" [dim]{ui.SEP}[/dim] "
+    route = f"[dim]OCR[/dim] {escape(_ocr_route(config))}"
+    if config.no_llm:
+        head = "[dim]mode[/dim] structure only (--no-llm)"
+        tail = "skips authors, references, equations and Crossref"
+    elif config.mode == "fast":
+        head = "[dim]mode[/dim] fast"
+        tail = f"no LLM calls, skips {FAST_SKIPS}"
+    else:
+        return (
+            f"  [dim]mode[/dim] full{sep}{route}{sep}[dim]llm[/dim] "
+            f"{escape(str(config.llm_backend))}{sep}[dim]memory[/dim] "
+            f"{escape(str(config.memory_mode))}"
+        )
+    return f"  {head}{sep}{route}{sep}[dim]{escape(tail)}[/dim]"
 
 
 def _print_actual_ocr_summary(console, resources) -> None:
@@ -121,7 +157,7 @@ def _print_actual_ocr_summary(console, resources) -> None:
         return
     console.print(f"  [dim]OCR backend:[/dim] {escape(str(identity.backend))}")
     console.print(f"  [dim]OCR model:[/dim] {escape(str(identity.model))}")
-    console.print(f"  [dim]OCR profile:[/dim] {escape(str(identity.profile))}")
+    console.print(f"  [dim]OCR profile:[/dim] {escape(str(identity.profile or 'none'))}")
     fallback_reason = getattr(resources, "ocr_fallback_reason", None)
     if fallback_reason:
         console.print(f"  [dim]Fallback reason:[/dim] {escape(str(fallback_reason))}")
@@ -172,6 +208,11 @@ def _hint_for_file_error(fs) -> str:
         return "\n         [dim]Remove the password and try again[/dim]"
     if code in ("ocr_failed", "ocr_mostly_failed"):
         return "\n         [dim]Check your OCR backend with: bibr doctor[/dim]"
+    if code == "scan_needs_ocr":
+        return (
+            "\n         [dim]A scanned PDF needs an OCR backend; see which can run here "
+            "with: bibr doctor[/dim]"
+        )
     if code == "llm_server_failed":
         return "\n         [dim]Check your LLM backend with: bibr doctor[/dim]"
     if code is not None:
@@ -419,6 +460,11 @@ async def _run_process(args) -> None:
         ui.error(console, f"Invalid option: {escape(str(e))}")
         sys.exit(2)
 
+    # OCR_FALLBACK_TO_TEXT_LAYER=auto: an automatic OCR backend that cannot
+    # start here becomes the text layer before the summary names the backend;
+    # the warning waits until the inputs show there are PDFs to read.
+    config, fallback_warning = apply_text_layer_fallback(config, _preflight_ocr_runtime)
+
     console.print(_format_run_summary(config))
 
     # Collect files
@@ -467,37 +513,20 @@ async def _run_process(args) -> None:
             )
             sys.exit(2)
 
-    # Fail fast on missing LLM credentials, after the inputs resolved so a
-    # mistyped path is reported as such — the provider would otherwise
-    # raise only on the first LLM call, after the user already sat through OCR.
-    # Skipped under --dry-run: it constructs a real provider client (no
-    # network call, but --dry-run previews the plan without touching any
-    # client/model machinery at all — see ``_print_dry_run_plan``).
-    if not args.dry_run and not config.no_llm and config.llm_backend == "cloud":
-        try:
-            from bibr.clients.llm import preflight_credentials
-
-            preflight_credentials()
-        except ValueError as e:
-            ui.error(
-                console,
-                escape(str(e)),
-                hint="Run [cyan]bibr setup[/cyan] to configure an LLM provider, "
-                "or pass [cyan]--no-llm[/cyan] for structural output only.",
-            )
-            sys.exit(1)
-
     # Fail fast on a managed local backend that can't run here (unsupported
     # hardware or a missing launcher) — otherwise the run crashes deep in vLLM
     # after OCR. Skipped under --no-llm (no server is started) and --dry-run
     # (nothing is started).
     from bibr.local.pipeline import LOCAL_LLM_BACKENDS
 
-    if not args.dry_run and not config.no_llm and config.llm_backend in LOCAL_LLM_BACKENDS:
+    if not args.dry_run and config.uses_llm and config.llm_backend in LOCAL_LLM_BACKENDS:
         err = _preflight_local_backend(config.llm_backend)
         if err:
             ui.error(console, escape(err))
             sys.exit(1)
+
+    if fallback_warning is not None and any(p.suffix.lower() == ".pdf" for p in files):
+        ui.warn(console, escape(fallback_warning))
 
     if not args.dry_run and any(p.suffix.lower() == ".pdf" for p in files):
         opencv_problem = _preflight_opencv()
@@ -512,6 +541,45 @@ async def _run_process(args) -> None:
         ocr_reason = _preflight_ocr_runtime(config)
         if ocr_reason is not None:
             ui.error(console, escape(ocr_reason))
+            sys.exit(1)
+        # A fast run reads the front matter with the tagger alone; without its
+        # bundle every paper would come out with no title, authors or abstract.
+        tagger_reason = _preflight_front_tagger(config)
+        if tagger_reason is not None:
+            ui.error(console, escape(tagger_reason))
+            sys.exit(1)
+    if not args.dry_run:
+        # Every input kind: a DOCX, XML or HTML paper loads the reference,
+        # classifier and statement models too.
+        override_reason = _preflight_model_overrides(
+            config, warn=lambda m: ui.warn(console, escape(m))
+        )
+        if override_reason is not None:
+            ui.error(console, escape(override_reason))
+            sys.exit(1)
+
+    # Fail fast on missing LLM credentials, after the inputs resolved so a
+    # mistyped path is reported as such — the provider would otherwise
+    # raise only on the first LLM call, after the user already sat through OCR.
+    # It comes after the OCR check above: a machine that cannot OCR at all
+    # should hear that before it is asked for a key. A fast run calls no LLM and
+    # needs no key (it is what a run with none configured takes without a flag),
+    # so only a full run is asked. Skipped under --dry-run: it constructs a real
+    # provider client (no network call, but --dry-run previews the plan without
+    # touching any client/model machinery at all — see ``_print_dry_run_plan``).
+    if not args.dry_run and config.uses_llm and config.llm_backend == "cloud":
+        try:
+            from bibr.clients.llm import preflight_credentials
+
+            preflight_credentials()
+        except ValueError as e:
+            ui.error(
+                console,
+                escape(str(e)),
+                hint="Run [cyan]bibr setup[/cyan] to configure an LLM provider, "
+                "or pass [cyan]--fast[/cyan] to run on the local models alone "
+                "([cyan]--no-llm[/cyan] for structural output only).",
+            )
             sys.exit(1)
 
     # --dry-run: print the fully-resolved plan and exit — no pipeline is
@@ -552,12 +620,14 @@ async def _run_process(args) -> None:
             ui.error(console, escape(f"Cannot write output {args.output!r}: {exc}"))
             sys.exit(2)
 
+    announce_downloads(config, files, console)
+
     # Create pipeline
     from bibr.local.pipeline import LocalPipeline
 
     pipeline = LocalPipeline(
         memory_mode=config.memory_mode,
-        ocr_backend=config.ocr_backend,
+        ocr_backend=config.pipeline_ocr_backend,
         ocr_url=config.ocr_url,
         ocr_model=config.ocr_model,
         ocr_profile=config.ocr_profile,
@@ -568,6 +638,8 @@ async def _run_process(args) -> None:
         end_page=config.end_page,
         llm_backend=config.llm_backend,
         no_llm=config.no_llm,
+        mode=config.mode,
+        ocr_requested=config.ocr_requested,
         figure_images=config.figure_images,
         include_regions=config.include_regions,
         include_region_meta=config.include_region_meta,

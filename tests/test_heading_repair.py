@@ -136,3 +136,21 @@ def test_parser_opens_the_section_without_the_watermark_letter():
     parser.parse()
     headers = [s.header for s in parser.sections if s.section_id != 0]
     assert headers == ["Statistical Analyses", "References"]
+
+
+def test_aliases_without_ascii_letters_get_no_compact_key():
+    from bibr.structure import text_repair
+
+    table = text_repair._compact_alias_display(
+        {"a": ("Keywords",), "b": ("материалы и методы", "關鍵詞")}
+    )
+    assert table == {"keywords": "Keywords"}
+    assert "" not in text_repair._COMPACT_ALIAS_DISPLAY
+
+
+def test_a_cyrillic_heading_is_not_replaced_by_a_spaced_alias(monkeypatch):
+    from bibr.structure import text_repair
+
+    table = text_repair._compact_alias_display({"m": ("материалы и методы",)})
+    monkeypatch.setattr(text_repair, "_COMPACT_ALIAS_DISPLAY", table)
+    assert repair_heading_artifacts("Изинг") == "Изинг"
