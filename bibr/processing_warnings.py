@@ -66,6 +66,7 @@ class WarningCode(StrEnum):
     FRONT_TAGGER_UNAVAILABLE = "FRONT_TAGGER_UNAVAILABLE"
     FRONT_TAGGER_FLAGGED = "FRONT_TAGGER_FLAGGED"
     FRONT_MATTER_NOT_READ = "FRONT_MATTER_NOT_READ"
+    SELF_CITATION_FILLED = "SELF_CITATION_FILLED"
     STATEMENT_LEXICAL_FALLBACK = "STATEMENT_LEXICAL_FALLBACK"
     STATEMENT_TAGGER = "STATEMENT_TAGGER"
     RESEARCH_INTEGRITY_LLM_FAILED = "RESEARCH_INTEGRITY_LLM_FAILED"
@@ -208,6 +209,9 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.FRONT_MATTER_NOT_READ: "A fast run has no page layout for the front-matter "
     "tagger to read (a DOCX, for one): the title and abstract come from the document's headings "
     "and sections where it has them, and the authors were not read.",
+    WarningCode.SELF_CITATION_FILLED: "The extraction found no title or no authors, and they "
+    "were read from the citation the paper prints on its first page ('To cite this article: "
+    "...', SELF_CITATION_METADATA); the message names the fields and the text rows.",
     WarningCode.STATEMENT_LEXICAL_FALLBACK: "A research-integrity statement was filled by "
     "lexical anchor matching.",
     WarningCode.STATEMENT_TAGGER: "A funding, competing interests, ethics or data "

@@ -2786,6 +2786,16 @@ class GlobalSettings(_BibrSettings):
         description="With no LLM, read the city and country of each affiliation string with the "
         "local rules (the institution and department are left to the LLM). Fast mode sets it.",
     )
+    SELF_CITATION_METADATA: bool = Field(
+        True,
+        description="Read the citation a paper prints on its first page ('Citation: ...', 'To "
+        "cite this article: ...') with the reference parser, and fill the journal, volume, issue, "
+        "pages and publication year the extraction left empty, and the title and authors when it "
+        "found none, when the line is about this paper (same DOI, else same title, else a "
+        "matching first author, else a label that names this article). Never overwrites a "
+        "value. Runs with the local reference parser (REF_PARSE_STRATEGY=ner), not without an "
+        "LLM (--no-llm).",
+    )
     FIGURE_IMAGES: bool = Field(False, description="Extract figure images from PDFs.")
     # Reference extraction strategy — DECOUPLED segmentation + parsing axes
     # (resolved in bibr.extract.ref_extractor._resolve_ref_strategies; per-run

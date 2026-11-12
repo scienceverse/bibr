@@ -90,6 +90,56 @@ lowercasing and removing diacritics and punctuation. `authors_fullname_f1` is
 fuzzy and scores a name with an affiliation letter glued on, or with an extra
 word, as right. Neither the gate nor `metrics_version` changes.
 
+### Added — the paper's printed citation
+
+Many papers print on their first page how to cite them ("Citation: ...", "To
+cite this article: ...", "How to cite this paper: ...", or "Full citation:"
+with the citation on the next row). bibr used that line only for the paper's
+DOI; it now also reads the rest of it.
+
+- The line is found on page 1 (a cover page included), from a label at the
+  start of a row to its DOI or link, within its paragraph and at most four
+  rows; a label alone on its row takes the next row. The labels are the ones
+  bibr already knew, French, Spanish, Portuguese, Italian, German, Russian and
+  Ukrainian ones included. It is parsed with the reference parser that parsed
+  the reference list, through the same steps as an entry of the list: no other
+  model and no network.
+- The identity stage, once it has chosen the paper's DOI, decides whether the
+  line is about this paper: the DOI it prints must be the paper's; without a
+  DOI on both sides, its title must match the extracted title closely; without
+  either, its first author's family name must be one of the extracted
+  authors'; with nothing to compare, only a label that names this article
+  ("To cite this article:", "How to cite this ...", "Full citation:") is
+  enough, a bare "Citation:" is not.
+- A line about this paper fills what the extraction left empty: the journal,
+  volume, issue, first and last page and the publication year, and the title
+  and the authors only when the extraction found none. It never replaces a
+  value. The volume, issue and pages are taken only when the line agrees with
+  every one of them the extraction already has; the authors only from a list
+  with no "et al." whose every name can be read. A front matter the extraction
+  abstained on (several papers in one file) takes nothing.
+- A title or author list read this way adds a `SELF_CITATION_FILLED` warning
+  that names the fields and text rows, and its `extraction.fields` record has
+  source `self_citation` and rule `self_citation_fill`. A fast run can now
+  export an `issue` this way.
+- `extraction.diagnostics.self_citation` records the line's text rows, the
+  label's strength, the check that decided, whether it was accepted, the
+  fields it filled, and, for the title, first author, DOI, year and volume
+  where both sides have one, whether the line and the extraction agree.
+- `SELF_CITATION_METADATA` (on by default) turns it off. It runs with the
+  local reference parser (`REF_PARSE_STRATEGY=ner`, the default and what a
+  fast run uses), not with an LLM parse strategy and not with `--no-llm`.
+
+On two evaluation sets, 48 papers print such a line among their first rows.
+Parsed offline with a candidate reference-parser checkpoint (not yet a
+pipeline run with the default parser), the line gave the gold title on all 40 lines that carry one and the
+gold first author on all 46 that carry authors; on lines without "et al." it
+named 149 of 150 gold authors. Where the export already had the field, the
+line agreed on the DOI (28 of 28), year (35 of 35), volume (18 of 19), first
+page (10 of 10) and journal (31 of 31, an abbreviated name counted as the same
+journal), and it had a value where the export was empty for the first page in
+31 papers, the volume in 22, the year in 11 and the journal in 11.
+
 ### Added — running a candidate model
 
 A model setting pointed at anything other than its shipped default is an
@@ -257,7 +307,7 @@ server or a backend written to `.env` still reads scans.
 
 ### Added — export schema 12.4 (additive)
 
-The export moves to schema `12.4`, which adds three optional keys; every 12.x
+The export moves to schema `12.4`, which adds the optional keys below; every 12.x
 export, 12.3 included, is still valid input for the 12.x reader. A consumer that
 validates with the 12.3 strict schema rejects 12.4 exports (the version
 constant) and needs the 12.4 schema.
@@ -274,6 +324,12 @@ constant) and needs the 12.4 schema.
   region, "Acknowledgments" or "Author contributions" for a section the
   statement tagger added). The key is absent for a printed heading, so a list
   of a paper's printed headings can leave these sections out.
+- `extraction.diagnostics.self_citation` describes the citation a paper prints
+  of itself on its first page: `text_ids`, `cue` (`strong` or `weak`), `check`,
+  `accepted`, `filled` and `agreement` (see "the paper's printed citation"
+  above). It is omitted when no such line was found. The warning code
+  `SELF_CITATION_FILLED` and the `extraction.fields` source `self_citation`
+  and rule `self_citation_fill` are new values in open vocabularies.
 - `extraction.settings.models` names the models the run was set to load, so
   one export says which models produced it: one row per model with the
   setting that names it, what it does, its Hub repo id and revision (a branch

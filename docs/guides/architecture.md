@@ -208,7 +208,25 @@ stage alone sets the paper's DOI: it chooses among the DOIs the paper prints
 the text layer of pages 1 and 2) and records every candidate in
 `extraction.identity.receipt`. A DOI only the PDF's metadata or a link target
 carries is recorded in the receipt as an agreement-only row: it takes no part
-in the selection and is never exported. Extraction
+in the selection and is never exported.
+
+The identity stage also reads the citation a paper prints of itself on its
+first page ("Citation: ...", "To cite this article: ...";
+`bibr/extract/self_citation.py`). Post-parse finds the line and parses it with
+the reference parser right after the reference list, while that parser is
+still loaded (aggressive memory mode unloads it after post-parse); the
+identity stage compares it with the extraction once the DOI is chosen. It is
+taken to be this paper's when its DOI is the paper's, else when its title
+matches the extracted title, else when its first author is one of the
+extracted authors, else only when its label names this article. It then fills
+only what the extraction left empty (journal, volume, issue, pages, year; the
+title and authors only when none were found), through
+`field_decisions.fill_empty` for the decided fields, and records the check,
+the fields filled and where the two agree in
+`extraction.diagnostics.self_citation`. `SELF_CITATION_METADATA=false` turns
+it off; it runs only with the `ner` parse strategy.
+
+Extraction
 and enrichment have separate completion evidence, so a failed or delayed
 external lookup need not force OCR and extraction to run again. The
 integrity-statement resolver defaults to `PIPELINE_INTEGRITY_STATEMENT_MODE=shadow`:

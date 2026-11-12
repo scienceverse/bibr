@@ -443,3 +443,58 @@ async def test_identity_stage_leaves_bibliography_dois_alone_without_an_own_doi(
 
     assert paper.metadata.doi == ""
     assert paper.metadata.references[0].doi == "10.1234/stale"
+
+
+def _with_printed_citation(paper, doi: str):
+    from bibr.extract.self_citation import PrintedCitation
+
+    reference = _ref(
+        1,
+        title="A paper on identity",
+        doi=doi,
+        year=2020,
+        container="Journal of Tests",
+        volume="4",
+        first_page="7",
+    )
+    paper.contents.printed_citation = PrintedCitation(
+        (1,), "Citation:", False, "the line", reference
+    )
+    return paper
+
+
+async def test_identity_stage_fills_empty_fields_from_a_citation_with_the_selected_doi():
+    """The printed citation is checked against the DOI the identity stage selects."""
+    from bibr.pipeline.stages.identity import IdentityValidationStage
+
+    paper = _with_printed_citation(_paper("Article DOI: 10.1234/paper"), "10.1234/paper")
+    state = FileState(path=Path("paper.pdf"), paper=paper)
+
+    await IdentityValidationStage().run(_ctx(state))
+
+    assert paper.metadata.doi == "10.1234/paper"
+    receipt = paper.contents.printed_citation_receipt
+    assert (receipt["check"], receipt["accepted"]) == ("doi_match", True)
+    assert receipt["filled"] == ["journal", "published", "volume", "first_page"]
+    assert (paper.metadata.journal, paper.metadata.published) == ("Journal of Tests", "2020")
+    assert (paper.metadata.volume, paper.metadata.first_page) == ("4", "7")
+    # The title was extracted, so it stays and the line's title is only compared.
+    assert paper.metadata.title == "Paper"
+    assert receipt["agreement"] == {"doi": "agree", "title": "disagree"}
+
+
+async def test_identity_stage_takes_nothing_from_a_citation_with_another_doi():
+    from bibr.pipeline.stages.identity import IdentityValidationStage
+
+    paper = _with_printed_citation(_paper("Article DOI: 10.1234/paper"), "10.1234/other")
+    state = FileState(path=Path("paper.pdf"), paper=paper)
+
+    await IdentityValidationStage().run(_ctx(state))
+
+    receipt = paper.contents.printed_citation_receipt
+    assert (receipt["check"], receipt["accepted"], receipt["filled"]) == (
+        "doi_mismatch",
+        False,
+        [],
+    )
+    assert paper.metadata.journal is None

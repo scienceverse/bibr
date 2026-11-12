@@ -1089,6 +1089,48 @@ async def _extract_metadata_and_equations(
     return results[0]
 
 
+async def _read_printed_citation(
+    contents,
+    file_hash: str,
+    llm_client,
+    *,
+    no_llm: bool,
+    parse_strategy: str | None,
+    settings: GlobalSettings,
+    memory_mode: str | None,
+) -> None:
+    """Find and parse the paper's own citation line (``bibr.extract.self_citation``).
+
+    Only with ``SELF_CITATION_METADATA`` on, on an input that does not declare
+    its own metadata, and with the local reference parser (the ``ner``
+    strategy, which a fast run always uses): an LLM parse strategy would spend
+    a call on it, and a run without an LLM parses no references. A failure
+    leaves the paper without the line, never fails it.
+    """
+    if (
+        getattr(settings, "SELF_CITATION_METADATA", False) is not True
+        or no_llm
+        or parse_strategy != "ner"
+        or getattr(contents, "preparsed_metadata", None) is not None
+    ):
+        return
+    from bibr.extract.self_citation import read_printed_citation
+
+    try:
+        await asyncio.to_thread(
+            read_printed_citation,
+            contents,
+            file_hash=file_hash,
+            llm_client=llm_client,
+            settings=settings,
+            memory_mode=memory_mode,
+        )
+    except ModelOverrideError:
+        raise
+    except Exception:  # noqa: BLE001 - a second source must never break extraction
+        logger.warning("Reading the printed citation failed", exc_info=True)
+
+
 def _decide_record_fields(paper_metadata, *, native: bool, doc_info_authors=None) -> None:
     """Decide the fields the core extractor decides, when it did not run.
 
@@ -1719,6 +1761,19 @@ async def post_parse(
                 front_matter_resolution=contents.front_matter_resolution,
                 validation_issue_sink=metadata_issues,
                 on_references_ready=on_references_ready,
+                memory_mode=memory_mode,
+            )
+            # The paper's own printed citation, parsed now with the reference
+            # parser that just parsed its reference list (it may be unloaded
+            # after this stage). The identity stage, which knows the DOI,
+            # decides whether it is about this paper and what it fills.
+            await _read_printed_citation(
+                contents,
+                file_hash,
+                llm_client,
+                no_llm=no_llm,
+                parse_strategy=parse_strategy,
+                settings=effective_settings,
                 memory_mode=memory_mode,
             )
             # A fast run on an input with no page layout (a DOCX) has no

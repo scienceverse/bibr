@@ -3799,6 +3799,16 @@ class ReferenceExtractor:
             parsed_count += 1
         return aligned
 
+    def parse_printed_reference(self, text: str) -> PaperReference | None:
+        """Parse one printed citation with the NER parser, as an entry of the list is parsed.
+
+        The paper's own citation line (``bibr.extract.self_citation``) goes
+        through the same parser, repairs and finalize as a reference entry, and
+        no fine-tuned review. None when the parser reads neither a title nor
+        authors in it.
+        """
+        return self._parse_references_ner_aligned([text])[0]
+
     # ------------------------------------------------------------------
     # Reference line stream (bibr.extract.ref_line_stream)
     # ------------------------------------------------------------------
