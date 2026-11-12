@@ -794,7 +794,7 @@ These bundles are published, so a core install needs no configuration (the front
 | Reference parser | `scienceverse/bibr-parser-v7-mmbert-small` | `1045dc08` |
 | Geometry line tagger | `scienceverse/bibr-ref-line-tagger-v1` | `b0effede` |
 | Text reference segmenter | `scienceverse/bibr-ref-text-segmenter-v1` | `3c36a8c8` |
-| Statement tagger | `scienceverse/bibr-statement-tagger-v1` | `e5452308` |
+| Statement tagger | `scienceverse/bibr-statement-tagger-v1` | `b446f943` |
 | Front-matter tagger | `scienceverse/bibr-front-tagger` | `13a0f5c3` |
 
 The paper-classifier pin is the commit that added `onnx/` to the previously

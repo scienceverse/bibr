@@ -2205,7 +2205,7 @@ class MlOptions(_BibrSettings):
         "to the published tagger; null reads the statements with the rules alone.",
     )
     statement_tagger_revision: str | None = Field(
-        "e5452308cec66d089091360b0dd1930729835990",
+        "b446f943102918b0cca34208296d787fc1e379bc",
         description="Hub revision (commit, branch or tag) of ML_STATEMENT_TAGGER_MODEL_ID when it "
         "is a Hub repo id; unset reads main. Ignored for a local directory.",
     )
