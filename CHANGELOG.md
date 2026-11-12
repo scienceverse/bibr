@@ -294,6 +294,17 @@ by an earlier version, carries neither.
 
 ### Changed
 
+- Author-metadata headings are no longer typed `acknowledgment`. A heading
+  that says where to write to an author, or that opens author details,
+  affiliations, biographies or ORCID iDs ("Correspondence to:",
+  "*Corresponding author", "Author details", "About the authors",
+  "Affiliations", "ORCID iDs", and their common Russian, Spanish,
+  Portuguese, German and French forms) names no section type and is typed
+  `unknown`, like a cover-sheet label. The alias table had filed
+  "Corresponding author" and "ORCID iDs" under acknowledgments, so an
+  address or an ORCID list counted as acknowledgment text. The front-matter
+  reader finds these blocks by position and by heading and is unchanged.
+  "Author note" is left to the classifier.
 - A fast `bibr serve` with no OCR route chosen no longer waits for an OCR
   server at the default `http://localhost:8080`: it reads the text layer (see
   the text-layer route above) and refuses scans. If you run an OCR server on

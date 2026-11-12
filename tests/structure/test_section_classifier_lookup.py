@@ -168,6 +168,102 @@ async def test_cover_label_guard_keeps_author_sections():
     assert [section for section, *_ in out] == [CanonicalSection.AUTHOR_CONTRIBUTIONS] * 3
 
 
+_AUTHOR_METADATA_HEADINGS = (
+    "Correspondence to:",
+    "Correspondence to: Dr Jane Doe; jane@example.org",
+    "*Corresponding author",
+    "* Corresponding author: jane@example.org",
+    "† Corresponding author.",
+    "Corresponding authors",
+    "Corresponding author’s address",
+    "Address for correspondence:",
+    "Author details",
+    "Authors’ information",
+    "Authors' information",
+    "Author information",
+    "Author Affiliations",
+    "Affiliations:",
+    "Authors and Affiliations",
+    "About the authors",
+    "About the Author(s)",
+    "Information about the authors",
+    "Информация об авторах:",
+    "Сведения об авторе",
+    "Информация об авторе / Information about the author",
+    "Notes on contributors",
+    "Biographical note",
+    "Author biographies",
+    "ORCID",
+    "ORCID iD",
+    "ORCID iDs",
+    "Endereço para correspondência",
+    "Correspondencia:",
+    "Autor para correspondência",
+    "Korrespondenzadresse",
+    "Auteur correspondant",
+)
+_NOT_AUTHOR_METADATA_HEADINGS = (
+    "Acknowledgments",
+    "Author contributions",
+    "Authors' contributions",
+    "Contributors",
+    "Author note",
+    "Author Notes",
+    "Author summary",
+    "Authorship",
+    "Correspondence analysis",
+    "Correspondence analysis of the survey",
+    "Correspondence between the scales",
+    "Corresponding author contributions",
+    "Affiliations of the participants",
+    "Institutional affiliations and funding",
+    "Biography",
+    "Information about the sample",
+    "About the study",
+    "ORCID coverage in the sample",
+    "Contact",
+    "Notes",
+    "Funding",
+    "Introduction",
+)
+
+
+async def test_author_metadata_headings_name_no_section_type():
+    """Where to write to an author, author details, affiliations, biographies
+    and ORCID iDs are not acknowledgments. The alias table used to file
+    "Corresponding author" and "ORCID iDs" there, and a model that has to
+    answer does the same for the other wordings; the address or the biography
+    then counted as acknowledgment text."""
+    import bibr.structure.section_classifier as mod
+    from bibr.paper_contents import is_author_metadata_heading, is_section_furniture_heading
+
+    headings = list(_AUTHOR_METADATA_HEADINGS)
+    assert [h for h in headings if not is_author_metadata_heading(h)] == []
+    assert all(is_section_furniture_heading(h) for h in headings)
+
+    out = await mod.classify_headers_batch_async(headings, llm_client=None)
+
+    assert [section for section, *_ in out] == [CanonicalSection.UNKNOWN] * len(headings)
+    assert all(source is None for *_, source in out)
+    assert mod.classify_headers_batch(headings) == [(CanonicalSection.UNKNOWN, 0.0)] * len(headings)
+
+
+def test_headings_that_only_resemble_author_metadata_are_left_to_the_classifier():
+    """A method ("Correspondence analysis"), a body topic or an APA author note
+    is not an author-metadata label."""
+    from bibr.paper_contents import is_author_metadata_heading
+
+    assert [h for h in _NOT_AUTHOR_METADATA_HEADINGS if is_author_metadata_heading(h)] == []
+
+
+def test_the_acknowledgment_aliases_hold_no_author_metadata_heading():
+    for header in ("corresponding author", "corresponding authors", "orcid id", "orcid ids"):
+        section, _score, trusted = _classify_lookup_full(header)
+        assert not (section == CanonicalSection.ACKNOWLEDGMENT and trusted), header
+    for header in ("acknowledgments", "acknowledgements"):
+        assert _classify_lookup_full(header)[0] == CanonicalSection.ACKNOWLEDGMENT
+
+
 def test_declaration_block_subheadings_resolve_by_alias():
     """The BMC/Springer "Declarations" block's sub-headings type by alias (#121)."""
     for header, expected in (

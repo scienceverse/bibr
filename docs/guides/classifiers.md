@@ -65,7 +65,7 @@ leave out the sections whose row has it.
 | Results | `results` | Results, Findings, Experimental Results |
 | Discussion | `discussion` | Discussion, General Discussion, Limitations, Conclusion |
 | References | `references` | References, Bibliography, Works Cited |
-| Acknowledgment | `acknowledgment` | Acknowledgments, Declarations, Corresponding Author |
+| Acknowledgment | `acknowledgment` | Acknowledgments, Acknowledgements |
 | Author Contributions | `author_contributions` | Author Contributions, CRediT Authorship Contribution Statement |
 | Conflict of Interest | `coi` | Conflict of Interest, Competing Interests, Declaration of Interest |
 | Ethics | `ethics` | Ethics Statement, IRB Approval, Informed Consent |
@@ -77,7 +77,7 @@ leave out the sections whose row has it.
 | Footnote | `footnote` | Footnotes, Notes |
 | Table | `table` | Tables (a heading; captions are not sections) |
 | Figure | `figure` | Figures (a heading; captions are not sections) |
-| Unknown | `unknown` | (fallback for unrecognized headers) |
+| Unknown | `unknown` | (fallback for unrecognized headers; also headings that name no section type: cover-sheet labels, grouping headings such as Declarations, and author-metadata labels such as Correspondence to, Author details, Affiliations, About the authors, ORCID iDs) |
 
 ### IMRaD enforcement
 

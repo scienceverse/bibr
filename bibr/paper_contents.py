@@ -163,14 +163,9 @@ CANONICAL_SECTION_ALIASES = {
         "acknowledgements",
         "transparency",
         "action editor",
-        # Author-metadata blocks — currently surface as standalone headings
-        # because PP-DocLayoutV3 emits them as `paragraph_title` regions.
-        # Acknowledgment is the closest existing bucket; ideally these would
-        # be parsed into PaperAuthor records and not become sections at all.
-        "corresponding author",
-        "corresponding authors",
-        "orcid id",
-        "orcid ids",
+        # Author-metadata headings ("Corresponding author", "ORCID iDs") are
+        # not listed: they name no section type, see
+        # ``is_author_metadata_heading``.
     ],
     CanonicalSection.AUTHOR_CONTRIBUTIONS: [
         "author contributions",
@@ -478,6 +473,31 @@ _SECTION_FURNITURE_RE = re.compile(
     r"manuscript (?:number|no|id)|authors?|corresponding authors?|disclaimer)\s*(?::.*)?$"
 )
 
+# Author-metadata labels printed as headings: where to write to an author, who
+# the authors are, their affiliations, biographies and ORCID iDs
+# ("Correspondence to:", "*Corresponding author", "Author details", "About the
+# authors", "Affiliations", "ORCID iDs"). They name no section type either. A
+# classifier that has to answer picks acknowledgments, and the address, the
+# biography or the affiliation list then counts as acknowledgment text. The
+# front-matter reader finds these blocks by position and by their heading, not
+# by a section type. "Author note" is left to the classifier: in APA
+# manuscripts it holds the acknowledgments and the funding statement.
+_AUTHOR_METADATA_HEADING_RE = re.compile(
+    r"^[\W_]*(?:"
+    r"(?:address(?:es)? for |authors? for |for )?correspondence(?: to| address(?:es)?)?"
+    r"|corresponding authors?(?:['’]s?)?(?: (?:address|e-?mail|information|details))?"
+    r"|authors?['’]?s?['’]? (?:details|information|affiliations?|biograph(?:y|ies))"
+    r"|authors? and affiliations?|affiliations?"
+    r"|about the authors?(?: ?\(s\))?|information about the authors?(?: ?\(s\))?"
+    r"|notes on (?:the )?contributors?|biographical notes?"
+    r"|orcid(?: ids?)?(?: of the authors?)?"
+    r"|(?:информация|сведения) об автор(?:е|ах)|об автор(?:е|ах)"
+    r"|(?:endere[cç]o para |direcci[oó]n (?:de|para) |autora? (?:de|para) )?correspond[eê]ncia"
+    r"|korrespondenzadresse|korrespondierende[rn]? autor(?:in)?"
+    r"|adresse de correspondance|correspondance|auteure? correspondante?"
+    r")\s*(?:[:/].*)?$"
+)
+
 
 def _heading_key(text: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
@@ -488,9 +508,21 @@ def is_section_container_heading(text: str) -> bool:
     return _heading_key(text).strip(" :.?!") in SECTION_CONTAINER_HEADINGS
 
 
+def is_author_metadata_heading(text: str) -> bool:
+    """Whether a heading labels author metadata (correspondence, details, affiliations, ORCID)."""
+    return _AUTHOR_METADATA_HEADING_RE.match(_heading_key(text).strip(" .")) is not None
+
+
 def is_section_furniture_heading(text: str) -> bool:
-    """Whether a heading is a manuscript or preprint cover-sheet label."""
-    return _SECTION_FURNITURE_RE.match(_heading_key(text).strip(" .")) is not None
+    """Whether a heading is a cover-sheet label or an author-metadata label.
+
+    Neither names a section type; the classifier answers UNKNOWN for both.
+    """
+    key = _heading_key(text).strip(" .")
+    return (
+        _SECTION_FURNITURE_RE.match(key) is not None
+        or _AUTHOR_METADATA_HEADING_RE.match(key) is not None
+    )
 
 
 @dataclass
