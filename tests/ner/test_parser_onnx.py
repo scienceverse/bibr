@@ -86,3 +86,14 @@ def test_loader_selects_onnx_for_local_bundle(pair, monkeypatch):
     ckpt.write_bytes(b"")
     parser = load_ref_parser(str(ckpt), device="cpu", revision=None, settings=GlobalSettings())
     assert isinstance(parser, OnnxRefParser)
+
+
+def test_the_torch_runtime_runs_a_parser_that_has_no_torch_checkpoint_on_onnx(pair, monkeypatch):
+    _torch_parser, _onnx_parser, root = pair
+    from bibr.config import GlobalSettings
+    from bibr.ner.runtime import load_ref_parser
+
+    monkeypatch.setenv("ML_RUNTIME", "torch")
+    # The directory holds the ONNX bundle (onnx/) and no torch checkpoint file.
+    parser = load_ref_parser(str(root), device="cpu", revision=None, settings=GlobalSettings())
+    assert isinstance(parser, OnnxRefParser)

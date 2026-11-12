@@ -326,8 +326,8 @@ def test_unused_models_name_why_for_each_mode_and_strategy():
         "ML_FRONT_TAGGER_MODEL_ID": (
             "ML_FRONT_TAGGER_MODE=off; a fast run, or the mode primary or only, turns it on"
         ),
-        "REF_TEXT_SEG_MODEL_ID": "it is unset",
-        "ML_STATEMENT_TAGGER_MODEL_ID": "it is unset",
+        "REF_TEXT_SEG_MODEL_ID": "it is set to null",
+        "ML_STATEMENT_TAGGER_MODEL_ID": "it is set to null",
     }
     settings.ml.statement_tagger_model_id = "./statements"
     assert "ML_STATEMENT_TAGGER_MODEL_ID" not in unused_models(settings)

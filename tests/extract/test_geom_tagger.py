@@ -1,4 +1,4 @@
-"""The opt-in geometry line tagger (``REF_GEOM_TAGGER_MODEL_ID``) and its place in the geom tier.
+"""The geometry line tagger (``REF_GEOM_TAGGER_MODEL_ID``) and its place in the geom tier.
 
 The bundles here are built in the test: a one-layer ONNX graph over the 29 line
 features, with a constant or feature-weighted logit, and a gate.json.
@@ -128,6 +128,7 @@ def _extractor(lines, tagger_path, monkeypatch):
     ex = ReferenceExtractor(contents, file_hash="h", llm_client=MagicMock())
     ex.llm_client.segment_references = AsyncMock(return_value=[])
     monkeypatch.setattr(ex._settings, "REF_GEOM_TAGGER_MODEL_ID", str(tagger_path))
+    monkeypatch.setattr(ex._settings, "REF_GEOM_TAGGER_REVISION", None)
     return ex
 
 
@@ -408,7 +409,7 @@ def test_a_tagger_under_the_region_floor_declines(tmp_path, monkeypatch):
     assert _attempts(ex)[1][0] == "geom"
 
 
-def test_without_the_setting_the_tagger_is_never_built(monkeypatch):
+def test_set_to_null_the_tagger_is_never_built(monkeypatch):
     contents = PaperContents(
         sentences=[], sections=[], tables=[], links=[], sections_text={}, ref_line_geometry=_lines()
     )

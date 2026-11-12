@@ -531,11 +531,11 @@ def unused_models(settings: Any, *, no_llm: bool = False) -> dict[str, str]:
     and nothing else. Otherwise the reference models only when references are
     parsed (``REF_PARSE_STRATEGY`` other than ``off``): the reference parser and
     the last-resort text segmenter of every segmentation strategy (the CRF, or
-    the token tagger that replaces it when ``REF_TEXT_SEG_MODEL_ID`` is set),
+    the token tagger that replaces it unless ``REF_TEXT_SEG_MODEL_ID`` is null),
     and the geometry segmenter and the line tagger only for
     ``REF_SEG_STRATEGY=geom``. The front-matter tagger when its mode is on,
     the front-role classifier unless ``ML_FRONT_ROLE_ENABLED=false``, the
-    classifiers always, the statement tagger when it is set.
+    classifiers always, the statement tagger unless it is null.
     """
     ml = getattr(settings, "ml", None)
     unused: dict[str, str] = {}
@@ -546,7 +546,7 @@ def unused_models(settings: Any, *, no_llm: bool = False) -> dict[str, str]:
             "ML_FRONT_TAGGER_MODE=off; a fast run, or the mode primary or only, turns it on"
         )
     if not getattr(ml, "statement_tagger_model_id", None):
-        unused["ML_STATEMENT_TAGGER_MODEL_ID"] = "it is unset"
+        unused["ML_STATEMENT_TAGGER_MODEL_ID"] = "it is set to null"
     if no_llm:
         unused["ML_SECTION_CLASSIFIER_MODEL_ID"] = (
             "--no-llm types sections by the heading lookup alone"
@@ -564,7 +564,7 @@ def unused_models(settings: Any, *, no_llm: bool = False) -> dict[str, str]:
     if _text(getattr(settings, "REF_TEXT_SEG_MODEL_ID", None)):
         unused["NER_SEG_CKPT"] = "REF_TEXT_SEG_MODEL_ID is set and replaces the CRF segmenter"
     else:
-        unused["REF_TEXT_SEG_MODEL_ID"] = "it is unset"
+        unused["REF_TEXT_SEG_MODEL_ID"] = "it is set to null"
     seg = str(getattr(settings, "REF_SEG_STRATEGY", None) or "geom").lower()
     if seg != "geom":
         for env in ("REF_GEOM_SEG_MODEL_ID", "REF_GEOM_TAGGER_MODEL_ID"):
@@ -694,8 +694,8 @@ def text_segmenter_conflict(settings: Any) -> str | None:
     crf, _revision = setting_value(settings, "NER_SEG_CKPT")
     return (
         f"REF_TEXT_SEG_MODEL_ID={text_seg!r} and NER_SEG_CKPT={crf!r} are both set: the text "
-        "segmenter replaces the CRF segmenter, so set one of them (unset REF_TEXT_SEG_MODEL_ID "
-        "to run the CRF, or leave NER_SEG_CKPT at its default)"
+        "segmenter replaces the CRF segmenter, so set one of them (REF_TEXT_SEG_MODEL_ID=null "
+        "runs the CRF, or leave NER_SEG_CKPT at its default)"
     )
 
 

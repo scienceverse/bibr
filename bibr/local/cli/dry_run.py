@@ -65,11 +65,16 @@ _APPROX_MODEL_SIZES: dict[str, str] = {
     "scienceverse/bibr-front-tagger": "0.3 GB",
     # Frozen sklearn GBM bundle (joblib) — tabular model, negligible size.
     "scienceverse/bibr-geom-segmenter-v1": "1 MB",
+    # Line-sequence tagger the geometry tier asks first (onnx/tagger.onnx).
+    "scienceverse/bibr-ref-line-tagger-v1": "3 MB",
     # answerdotai/ModernBERT-base (~150M params) encoder + CRF head.
     "scienceverse/bibr-segmenter-v1": "300 MB",
-    # dmis-lab/UltraBERT-150M encoder + CRF head: best.pt (torch) or onnx/model.onnx
-    # (ONNX Runtime), 605 MB either way.
-    "scienceverse/bibr-parser-v5-1-ultrabert": "605 MB",
+    # jhu-clsp/mmBERT-small token tagger in the CRF segmenter's place (onnx/model.onnx).
+    "scienceverse/bibr-ref-text-segmenter-v1": "0.3 GB",
+    # jhu-clsp/mmBERT-small encoder + CRF head as one ONNX file (onnx/model.onnx).
+    "scienceverse/bibr-parser-v7-mmbert-small": "0.3 GB",
+    # Statement tagger: a MiniLM-size ONNX token classifier (onnx/model.onnx).
+    "scienceverse/bibr-statement-tagger-v1": "90 MB",
     # GLM-OCR weight repos — same figures as _OCR_BACKEND_DOWNLOAD_NOTES in
     # bibr/setup_wizard.py (bf16 ~2.7 GB, llama.cpp Q8_0 GGUF quant smaller).
     # Bare repo id — the ":Q8_0" quant suffix is stripped before lookup (see

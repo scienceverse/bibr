@@ -53,6 +53,13 @@ os.environ["ML_SECTION_CLASSIFIER_MODEL_ID"] = ""
 # front-matter tests don't pull the HF snapshot. Tests for the model path build
 # their own FrontRolePredictions or point at a local bundle.
 os.environ["ML_FRONT_ROLE_MODEL_ID"] = ""
+# Production defaults since 0.9.0 are the published geometry line tagger, text
+# reference segmenter and statement tagger; disabled here for the same reason.
+# Tests of those models point at local bundles, and the config-default tests
+# read the field defaults.
+os.environ["REF_GEOM_TAGGER_MODEL_ID"] = ""
+os.environ["REF_TEXT_SEG_MODEL_ID"] = ""
+os.environ["ML_STATEMENT_TAGGER_MODEL_ID"] = ""
 # Production default is "auto" (probe the Hub for a model's ONNX bundle, else
 # torch). Pinned to "torch" here so constructing a detector/classifier in a
 # test never makes a network round-trip; ONNX-runtime tests set ML_RUNTIME (or

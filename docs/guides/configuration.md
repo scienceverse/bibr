@@ -791,19 +791,32 @@ These bundles are published, so a core install needs no configuration (the front
 | Layout | `scienceverse/bibr-layout-onnx` | `2bcb16a6` |
 | Section classifier | `scienceverse/bibr-section-classifier` | `cf7c2d85` |
 | Paper classifier | `scienceverse/bibr-paper-classifier` | `6046171b` |
-| Reference parser | `scienceverse/bibr-parser-v5-1-ultrabert` | `97b06cc7` |
+| Reference parser | `scienceverse/bibr-parser-v7-mmbert-small` | `1045dc08` |
+| Geometry line tagger | `scienceverse/bibr-ref-line-tagger-v1` | `b0effede` |
+| Text reference segmenter | `scienceverse/bibr-ref-text-segmenter-v1` | `3c36a8c8` |
+| Statement tagger | `scienceverse/bibr-statement-tagger-v1` | `e5452308` |
 | Front-matter tagger | `scienceverse/bibr-front-tagger` | `13a0f5c3` |
 
 The paper-classifier pin is the commit that added `onnx/` to the previously
 audited weights, so its PyTorch weights are unchanged. The reference-parser pin
-is the v5.1 parser (UltraBERT-150M encoder); its repo also carries the encoder's
-`config.json`, modeling code and tokenizer, so the PyTorch runtime loads them
-from the same pinned commit with `trust_remote_code` and never runs unpinned
-code, while the ONNX bundle needs no custom code at all. For that reason the
-PyTorch runtime cannot load it at `NER_PARSER_REVISION=main`; pin a commit SHA. Set
-`NER_PARSER_CKPT=scienceverse/bibr-parser-v4-5-gold` and
-`NER_PARSER_REVISION=ff50a83e7f5b73dcf6f8f973a1a6e3847ec429e6` to keep the
-previous ModernBERT-base parser. `NER_PARSER_ENCODER` (and
+is the v7 parser (mmBERT-small encoder), published as an ONNX bundle alone: it
+runs on ONNX Runtime whatever `ML_RUNTIME` says, as the front-matter tagger
+does, and needs no custom code. Set
+`NER_PARSER_CKPT=scienceverse/bibr-parser-v5-1-ultrabert` and
+`NER_PARSER_REVISION=97b06cc7dd6511bdd53f8855c93a29020231d215` to keep the
+0.8.0 parser (UltraBERT-150M), which also has a PyTorch form; its repo carries
+the encoder's `config.json`, modeling code and tokenizer, so the PyTorch runtime
+loads them from the same pinned commit with `trust_remote_code` and cannot load
+it at `NER_PARSER_REVISION=main`.
+
+The geometry line tagger, the text reference segmenter and the statement
+tagger are defaults since 0.9.0. Each one turns off with its setting set to
+null (`REF_GEOM_TAGGER_MODEL_ID=null`, `REF_TEXT_SEG_MODEL_ID=null`, which
+brings back the CRF segmenter, and `ML_STATEMENT_TAGGER_MODEL_ID=null`), which
+reads a paper as 0.8.0 did at that step. As shipped defaults, a model that
+cannot be loaded (the Hub out of reach with nothing cached, for instance) does
+not stop a run: the paper goes on without it, as described below, and the
+log says so. `NER_PARSER_ENCODER` (and
 `NER_PARSER_ENCODER_REVISION`) override the encoder for a checkpoint that does
 not ship one; an encoder with its own modeling code runs it only from a local
 directory or a commit SHA. The section-classifier pin is the model retrained in 0.7.1; set
@@ -927,8 +940,9 @@ DOIs that a line break split:
   name) and the sha256 of each file, so an export shared with others does not
   show how the producing machine is laid out or who ran it.
 
-`REF_GEOM_TAGGER_MODEL_ID` is unset by default and adds a tier rather than
-replacing one. It takes a local directory or a Hub repo id (with
+`REF_GEOM_TAGGER_MODEL_ID` adds a tier to the geometry segmentation rather than
+replacing one; the shipped tagger that cannot be loaded leaves the paper to the
+shipped geometry segmenter. It takes a local directory or a Hub repo id (with
 `REF_GEOM_TAGGER_REVISION`; `gate.json` at the top, `tagger.onnx` and
 `tagger.json` in `onnx/`); a Hub-shaped id is never read from the working
 directory, so write a local copy as a path (`./org/name`). With
@@ -950,11 +964,11 @@ sorted name order, and needs only ONNX Runtime; loading it runs the graph on
 the features of two short reference sections of different lengths and checks
 that it returns two logits per line.
 
-`REF_TEXT_SEG_MODEL_ID` is unset by default and replaces a tier: the CRF
-segmenter, the last resort of every segmentation strategy (and the whole of
-`REF_SEG_STRATEGY=crf`). When it is set, the CRF is not loaded at all, and
-setting it together with `NER_SEG_CKPT` away from its default is an error
-the run stops on. It takes a local directory or a Hub repo id (with
+`REF_TEXT_SEG_MODEL_ID` replaces a tier: the CRF segmenter, the last resort of
+every segmentation strategy (and the whole of `REF_SEG_STRATEGY=crf`). While it
+is set the CRF is not loaded, unless the shipped segmenter cannot be loaded, in
+which case the CRF runs in its place. Setting `NER_SEG_CKPT` away from its
+default needs `REF_TEXT_SEG_MODEL_ID=null`; with both set the run stops. It takes a local directory or a Hub repo id (with
 `REF_TEXT_SEG_REVISION`; `segmenter.json`, `model.onnx` and `tokenizer.json`
 in `onnx/`) and needs only ONNX Runtime and `tokenizers`, not the `torch`
 extra. The model tags each token of the reference-section text, the same text
@@ -976,16 +990,15 @@ exported as a reference, the marker split runs, and the citations in the
 paper's notes can stand in for the list. The export's reference
 diagnostics list it as `text_tagger`, with its token and window counts, the
 references it opened, an uncalibrated `expected_entry_precision` and the
-lowest opening probability in `reason_flags`. When it cannot be loaded, the Hub being out of reach
-included, the run stops (it is always an override). An error on one paper is
+lowest opening probability in `reason_flags`. When an override cannot be loaded, the Hub being out
+of reach included, the run stops. An error on one paper is
 a `segmentation_error` with a `REF_SEG_CRF_ERROR` warning, as for the CRF, and
 a `MODEL_OVERRIDE_INFERENCE_FAILED` warning; errors on three papers in a row
 stop the run. The preflight checks the files, the manifest and the tokenizer,
 and runs the graph once on a full window of tokenised reference text,
 checking that it returns three label scores per token.
 
-`ML_STATEMENT_TAGGER_MODEL_ID` is unset by default and adds a source to
-statement resolution. It takes a local directory or a Hub repo id (with
+`ML_STATEMENT_TAGGER_MODEL_ID` adds a source to statement resolution. It takes a local directory or a Hub repo id (with
 `ML_STATEMENT_TAGGER_REVISION`; `bibr_onnx.json`, `model.onnx` and
 `tokenizer.json` in `onnx/`) and needs only ONNX Runtime and `tokenizers`.
 The model reads the paper's paragraphs in order, each section heading a block
@@ -1007,22 +1020,24 @@ discussion or appendix heading; the section then stays as it is, and its
 rows still give the statement fields their values), otherwise the rows move
 to a new section with a synthetic heading right after the one they were in;
 `classification_source` is `statement_tagger` either way. Each field or section it supplied adds a
-`STATEMENT_TAGGER` warning. A `--no-llm` run does not use it. The setting
-has no default, so a bundle it names is always an override: when it cannot be
-loaded, the Hub being out of reach included, the run stops. The preflight
+`STATEMENT_TAGGER` warning. A `--no-llm` run does not use it. When the shipped
+tagger cannot be loaded, the paper keeps the rules' statements; a bundle that
+replaces it is an override, and when that cannot be loaded, the Hub being out
+of reach included, the run stops. The preflight of an override
 (and `bibr serve` at startup, for a local directory) opens the bundle and runs
 the graph on a batch of three blocks that fills the manifest's `max_length`
 and holds the tokenizer's last id, and on one short block, checking that it
 returns one finite probability per type: a graph with fewer positions than
 `max_length`, a vocabulary smaller than the tokenizer's, or an export fixed to
 one batch size or one length is refused there. An error on one paper leaves that paper with the rules' statements
-and a `MODEL_OVERRIDE_INFERENCE_FAILED` warning; errors on three papers in a
-row stop the run.
+and, for an override, a `MODEL_OVERRIDE_INFERENCE_FAILED` warning; errors of an
+override on three papers in a row stop the run.
 
 ### CPU threads
 
 On the CPU provider every ONNX model (layout, sentence segmenter, reference
-parser, section and paper classifiers, front-matter tagger) opens its own
+parser, line tagger, text segmenter, statement tagger, section and paper
+classifiers, front-matter tagger) opens its own
 onnxruntime session with its own thread pool. onnxruntime sizes each pool from
 the machine's CPU count and ignores a CPU affinity mask (`taskset`, Slurm, a
 cpuset container) and a container CPU quota (`docker --cpus`, Kubernetes

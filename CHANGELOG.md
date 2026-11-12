@@ -207,13 +207,13 @@ too: it is recorded as one, and it loads and runs as before.
   loaded and why.
 - A local ONNX bundle may now hold its files in the named directory itself,
   not only in an `onnx/` subdirectory.
-- `REF_GEOM_TAGGER_MODEL_ID` (unset by default; a directory or a Hub id with
+- `REF_GEOM_TAGGER_MODEL_ID` (a default since this release, see Changed; a directory or a Hub id with
   `REF_GEOM_TAGGER_REVISION`) adds a geometry line tagger that the `geom`
   segmentation tier asks first. An answer it takes is final; when it declines
   or fails on a paper, the shipped geometry segmenter runs exactly as without
   it, so a decline has no effect on the references. The attempt is still
   listed in the reference diagnostics (`reference_yield.attempts`).
-- `REF_TEXT_SEG_MODEL_ID` (unset by default; a directory or a Hub id with
+- `REF_TEXT_SEG_MODEL_ID` (a default since this release, see Changed; a directory or a Hub id with
   `REF_TEXT_SEG_REVISION`) replaces the CRF reference segmenter, the last
   resort of every segmentation strategy, with an ONNX token tagger that needs
   no `torch`. The CRF is then not loaded; setting both is an error. Its
@@ -225,7 +225,7 @@ too: it is recorded as one, and it loads and runs as before.
   guessed from the layout (`REF_SECTION_INFERRED`) and holds no reference
   start is declined instead, so a section that is not a reference list is not
   exported as one reference and the citations in the notes can stand in.
-- `ML_STATEMENT_TAGGER_MODEL_ID` (unset by default; a directory or a Hub id
+- `ML_STATEMENT_TAGGER_MODEL_ID` (a default since this release, see Changed; a directory or a Hub id
   with `ML_STATEMENT_TAGGER_REVISION`) adds a statement tagger, an ONNX
   classifier over the paper's paragraphs that needs no `torch`. Where it finds
   a funding, competing interests, ethics or data availability statement, that
@@ -239,7 +239,9 @@ too: it is recorded as one, and it loads and runs as before.
   needs nothing else from bibr: block texts in reading order in, typed
   statements out. It follows the rules of every model override: a bundle that
   does not load stops the run, and an error on a paper keeps the rules'
-  statements with a `MODEL_OVERRIDE_INFERENCE_FAILED` warning.
+  statements with a `MODEL_OVERRIDE_INFERENCE_FAILED` warning. The shipped
+  tagger that does not load, or raises on a paper, leaves that paper the rules'
+  statements, with a warning in the log.
 - For maintainers, `scripts/switch_model_defaults.py SETTING=org/name@<commit>`
   moves a default model to a new Hub pin: the defaults in `bibr/config.py`,
   the matching `ARG`s in `Dockerfile.serve`, the default-model table and the
@@ -356,6 +358,34 @@ by an earlier version, carries neither.
 
 ### Changed
 
+- New default models, all ONNX bundles that need no `torch`, each pinned to a
+  Hub commit (the configuration guide's table):
+  - The reference parser is v7, `scienceverse/bibr-parser-v7-mmbert-small`
+    (mmBERT-small encoder, multilingual training rows), in place of v5.1.
+    It ships as an ONNX bundle alone, so it runs on ONNX Runtime under
+    `ML_RUNTIME=torch` too, as the front-matter tagger does. Set
+    `NER_PARSER_CKPT=scienceverse/bibr-parser-v5-1-ultrabert` with
+    `NER_PARSER_REVISION=97b06cc7dd6511bdd53f8855c93a29020231d215` to keep the
+    0.8.0 parser.
+  - The geometry line tagger, `scienceverse/bibr-ref-line-tagger-v1`, is asked
+    first in the `geom` segmentation tier.
+  - The text reference segmenter, `scienceverse/bibr-ref-text-segmenter-v1`,
+    takes the CRF segmenter's place as the last segmentation tier, so a core
+    install has that tier without `torch`. When it cannot be loaded, the CRF
+    runs in its place.
+  - The statement tagger, `scienceverse/bibr-statement-tagger-v1`, adds its
+    statements to the rules'. The acknowledgments and author contributions
+    sections it adds carry a synthetic heading that the export does not yet
+    mark as supplied, so heading detection reads about half a point lower on
+    papers that print such a statement without a heading of its own.
+
+  Each of the last three turns off with its setting set to null
+  (`REF_GEOM_TAGGER_MODEL_ID=null`, `REF_TEXT_SEG_MODEL_ID=null`,
+  `ML_STATEMENT_TAGGER_MODEL_ID=null`). As shipped defaults, none of them
+  stops a run when it cannot be loaded: the paper goes on without it and the
+  log says so. A setting changed to another model or revision is an override
+  and keeps the override rules. `NER_SEG_CKPT` away from its default now needs
+  `REF_TEXT_SEG_MODEL_ID=null`.
 - Supplementary-material headings have one section type. "Supplementary
   material", "Supplemental material" and "Supporting information" were
   typed `appendix` while "Supplementary materials", "Supplementary

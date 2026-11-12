@@ -1,4 +1,4 @@
-"""The opt-in text reference segmenter (``REF_TEXT_SEG_MODEL_ID``) and its place in the cascade.
+"""The text reference segmenter (``REF_TEXT_SEG_MODEL_ID``) and its place in the cascade.
 
 The bundles here are built in the test: a word-level ``tokenizer.json`` and a
 small ONNX graph whose logits come from a per-token table plus a term that grows
@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 
-from bibr.config import snapshot_settings
+from bibr.config import GlobalSettings, snapshot_settings
 from bibr.exceptions import ConfigurationError, ModelOverrideError
 from bibr.extract import ref_extractor, text_segmenter
 from bibr.extract.ref_extractor import ReferenceExtractor
@@ -369,6 +369,7 @@ def _extractor(monkeypatch, model: str | None, *, seg="crf"):
     )
     ex.llm_client.segment_references = AsyncMock(return_value=[])
     monkeypatch.setattr(ex._settings, "REF_TEXT_SEG_MODEL_ID", model)
+    monkeypatch.setattr(ex._settings, "REF_TEXT_SEG_REVISION", None)
     return ex
 
 
@@ -624,7 +625,7 @@ def test_the_preflight_checks_the_segmenter_files(tmp_path):
 
 def test_the_segmenter_replaces_the_crf_in_the_models_a_run_loads():
     settings = snapshot_settings()
-    assert "NER_SEG_CKPT" in models_in_use(settings)
+    assert "NER_SEG_CKPT" in models_in_use(settings)  # null, as the test session sets it
     assert "REF_TEXT_SEG_MODEL_ID" not in models_in_use(settings)
     settings.REF_TEXT_SEG_MODEL_ID = "org/seg"
     used = models_in_use(settings)
@@ -633,6 +634,39 @@ def test_the_segmenter_replaces_the_crf_in_the_models_a_run_loads():
     assert "REF_TEXT_SEG_MODEL_ID" not in models_in_use(settings)
 
 
-def test_the_setting_is_unset_by_default():
-    settings = snapshot_settings()
-    assert settings.REF_TEXT_SEG_MODEL_ID is None and settings.REF_TEXT_SEG_REVISION is None
+def _published_segmenter(settings):
+    """``settings`` with the shipped segmenter (the test session sets it to null)."""
+    fields = GlobalSettings.model_fields
+    settings.REF_TEXT_SEG_MODEL_ID = fields["REF_TEXT_SEG_MODEL_ID"].default
+    settings.REF_TEXT_SEG_REVISION = fields["REF_TEXT_SEG_REVISION"].default
+    return settings
+
+
+def test_the_setting_names_the_published_segmenter_at_a_commit():
+    fields = GlobalSettings.model_fields
+    assert fields["REF_TEXT_SEG_MODEL_ID"].default == "scienceverse/bibr-ref-text-segmenter-v1"
+    assert len(fields["REF_TEXT_SEG_REVISION"].default) == 40
+    settings = _published_segmenter(snapshot_settings())
+    used = models_in_use(settings)
+    assert "REF_TEXT_SEG_MODEL_ID" in used and "NER_SEG_CKPT" not in used
+
+
+def test_the_default_segmenter_that_cannot_load_hands_over_to_the_crf(monkeypatch):
+    def offline(*args, **kwargs):
+        raise OSError("the Hub cannot be reached")
+
+    monkeypatch.setattr("bibr.extract.text_segmenter.OnnxTextSegmenter", offline)
+    contents = PaperContents(sentences=[], sections=[], tables=[], links=[], sections_text={})
+    ex = ReferenceExtractor(
+        contents, file_hash="h", llm_client=MagicMock(), seg_strategy="crf", parse_strategy="ner"
+    )
+    _published_segmenter(ex._settings)
+    crf = MagicMock()
+    crf.segment.return_value = list(_REF_TEXT.split("\n"))
+    monkeypatch.setattr("bibr.extract.ref_extractor._get_ner_segmenter", lambda *_a: crf)
+    refs = ex._crf_segment_or_recover(_REF_TEXT)
+    assert refs == _REF_TEXT.split("\n")
+    assert [(a.strategy, a.selected, a.reason_flags[:1]) for a in ex._segmentation_attempts] == [
+        ("text_tagger", False, ("tagger_unavailable",)),
+        ("crf", True, ()),
+    ]

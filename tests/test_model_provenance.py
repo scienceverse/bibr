@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from bibr.config import snapshot_settings
+from bibr.config import GlobalSettings, snapshot_settings
 from bibr.export.models import ExtractionSettingsExport, ModelProvenanceExport
 from bibr.run_mode import fast_settings
 from bibr.utils import model_provenance
@@ -38,8 +38,17 @@ def _shipped():
         "paper_classifier_model_id",
         "front_role_model_id",
         "front_tagger_model_id",
+        "statement_tagger_model_id",
+        "statement_tagger_revision",
     ):
         setattr(settings.ml, name, MlOptions.model_fields[name].default)
+    for name in (
+        "REF_GEOM_TAGGER_MODEL_ID",
+        "REF_GEOM_TAGGER_REVISION",
+        "REF_TEXT_SEG_MODEL_ID",
+        "REF_TEXT_SEG_REVISION",
+    ):
+        setattr(settings, name, GlobalSettings.model_fields[name].default)
     return settings
 
 
@@ -54,8 +63,11 @@ def test_a_default_fast_run_lists_every_model_it_loads_by_hub_id_and_revision():
         "WTPSPLIT_MODEL",
         "NER_PARSER_CKPT",
         "REF_GEOM_SEG_MODEL_ID",
+        "REF_GEOM_TAGGER_MODEL_ID",
+        "REF_TEXT_SEG_MODEL_ID",
         "ML_FRONT_ROLE_MODEL_ID",
         "ML_FRONT_TAGGER_MODEL_ID",
+        "ML_STATEMENT_TAGGER_MODEL_ID",
         "ML_SECTION_CLASSIFIER_MODEL_ID",
         "ML_PAPER_CLASSIFIER_MODEL_ID",
     ]
@@ -228,6 +240,7 @@ def test_a_branch_revision_is_resolved_through_the_hub_cache(tmp_path, monkeypat
 
 def test_the_crf_is_listed_only_where_torch_can_run_it(monkeypatch):
     settings = _shipped()
+    settings.REF_TEXT_SEG_MODEL_ID = None  # the text segmenter replaces it by default
     monkeypatch.setattr("bibr.utils.ml_runtime.torch_available", lambda: False)
     assert "NER_SEG_CKPT" not in _by_setting(export_models(settings))
     monkeypatch.setattr("bibr.utils.ml_runtime.torch_available", lambda: True)

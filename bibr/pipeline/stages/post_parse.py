@@ -1863,8 +1863,8 @@ async def post_parse(
                 ),
             )
             if effective_settings.ml.statement_tagger_model_id and not no_llm:
-                # Opt-in statement tagger: its statements join the resolution
-                # (bibr/statement_tagger/pipeline.py). Unset, nothing loads; a
+                # The statement tagger: its statements join the resolution
+                # (bibr/statement_tagger/pipeline.py). Null, nothing loads; a
                 # --no-llm run, which uses no extraction model, does not run it.
                 from bibr.statement_tagger.pipeline import apply_statement_tagger
 

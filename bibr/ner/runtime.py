@@ -40,6 +40,22 @@ def load_ref_parser(
         ),
         bundle_hint=hub_bundle_hint("NER_PARSER_CKPT", ckpt_str, revision),
     )
+    if runtime == "torch":
+        from bibr.ner.checkpoint import has_torch_checkpoint
+
+        # A parser published as an ONNX bundle alone (the 0.9.0 default) has no
+        # torch form, so it runs on ONNX Runtime under ML_RUNTIME=torch too, as
+        # the front-matter tagger does.
+        if not has_torch_checkpoint(ckpt, revision):
+            onnx_bundle = find_onnx_bundle(
+                ckpt_str,
+                revision,
+                label="NER reference parser",
+                raise_transient=is_model_override(settings, "NER_PARSER_CKPT"),
+            )
+            if onnx_bundle is not None:
+                logger.info("NER parser %s has no torch checkpoint; it runs on ONNX", ckpt_str)
+                runtime, bundle = "onnx", onnx_bundle
     if runtime == "onnx":
         from bibr.ner.parser_onnx import OnnxRefParser
 

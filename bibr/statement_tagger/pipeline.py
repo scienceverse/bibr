@@ -1,9 +1,9 @@
-"""The statement tagger as one more source of bibr's statement resolution (opt-in).
+"""The statement tagger as one more source of bibr's statement resolution.
 
-Off by default: ``ML_STATEMENT_TAGGER_MODEL_ID`` is unset and nothing here runs
-(:func:`apply_statement_tagger` returns the resolution it was given). Set to a
-bundle (a local directory or a Hub repo id, at ``ML_STATEMENT_TAGGER_REVISION``),
-the tagger reads the paper's blocks after the rules resolved the statements and
+On by default since 0.9.0: ``ML_STATEMENT_TAGGER_MODEL_ID`` names the published
+bundle (a local directory or a Hub repo id, at ``ML_STATEMENT_TAGGER_REVISION``);
+set to null, nothing here runs (:func:`apply_statement_tagger` returns the
+resolution it was given). The tagger reads the paper's blocks after the rules resolved the statements and
 adds what they missed:
 
 * **Blocks** (:func:`content_blocks`): the post-parse rows grouped into their
@@ -464,9 +464,11 @@ _KEY: tuple[str, str | None] | None = None
 def get_statement_tagger(settings: Any) -> StatementTagger | None:
     """The configured tagger, loaded once per setting value; ``None`` when unset.
 
-    A bundle that cannot be loaded, the Hub being out of reach included,
-    raises :class:`~bibr.exceptions.ModelOverrideError` (the setting is always
-    an override). Each call writes the load into the run's record.
+    When an override cannot be loaded, the Hub being out of reach included, this
+    raises :class:`~bibr.exceptions.ModelOverrideError`. When the shipped default
+    cannot be loaded, it logs a warning and returns ``None``: the paper keeps the
+    rules' statements, and the next paper tries the load again. Each load is
+    written into the run's record.
     """
     global _TAGGER, _KEY
     from bibr.utils.model_overrides import override_load_error, record_model_load
@@ -485,9 +487,14 @@ def get_statement_tagger(settings: Any) -> StatementTagger | None:
                 _KEY = key
             except Exception as exc:
                 strict = override_load_error(settings, SETTING, exc)
-                if strict is None:  # only for a setting read as its default, which is unset
-                    raise
-                raise strict from exc
+                if strict is not None:
+                    raise strict from exc
+                logger.warning(
+                    "statement tagger %s unavailable (%r); this paper keeps the rules' statements",
+                    value,
+                    exc,
+                )
+                return None
         tagger = _TAGGER
     record_model_load(settings, SETTING, tagger.files)
     return tagger
@@ -548,9 +555,11 @@ def apply_statement_tagger(
 ) -> IntegrityStatementResolution:
     """Add the tagger's statements to the resolution and the sections; unset, a no-op.
 
-    Raises :class:`~bibr.exceptions.ModelOverrideError` when the tagger cannot
-    be loaded, or has raised on this paper and the ones before it
-    (:func:`~bibr.utils.model_overrides.note_inference_failure`).
+    Raises :class:`~bibr.exceptions.ModelOverrideError` when an overridden
+    tagger cannot be loaded, or has raised on this paper and the ones before it
+    (:func:`~bibr.utils.model_overrides.note_inference_failure`). The shipped
+    default that fails to load or raises on a paper leaves the paper the rules'
+    statements, with a warning in the log.
     """
     tagger = tagger if tagger is not None else get_statement_tagger(settings)
     if tagger is None:
@@ -568,7 +577,11 @@ def apply_statement_tagger(
         statements = tagger.tag([block.text for block in blocks])
     except Exception as exc:
         if not is_model_override(settings, SETTING):
-            raise
+            logger.warning(
+                "statement tagger raised on this paper (%r); it keeps the rules' statements",
+                exc,
+            )
+            return resolution
         # The paper keeps the rules' statements; several papers in a row stop the run.
         warning = note_inference_failure(settings, SETTING, exc)
         if warning is not None and warning not in contents.processing_warnings:

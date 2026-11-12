@@ -541,13 +541,26 @@ def test_applying_twice_adds_each_warning_once():
     assert len(codes) == len(set(codes))
 
 
-# -- off by default -------------------------------------------------------------------------
+# -- on by default, off when null ----------------------------------------------------------
 
 
-def test_the_tagger_is_off_by_default():
-    assert MlOptions.model_fields["statement_tagger_model_id"].default is None
-    settings = snapshot_settings()
-    assert settings.ml.statement_tagger_model_id is None
+def _published(settings):
+    """``settings`` with the shipped tagger (the test session sets it to null)."""
+    field = MlOptions.model_fields
+    settings.ml.statement_tagger_model_id = field["statement_tagger_model_id"].default
+    settings.ml.statement_tagger_revision = field["statement_tagger_revision"].default
+    return settings
+
+
+def test_the_tagger_is_on_by_default_at_a_pinned_commit():
+    field = MlOptions.model_fields
+    assert field["statement_tagger_model_id"].default == "scienceverse/bibr-statement-tagger-v1"
+    assert len(field["statement_tagger_revision"].default) == 40
+    assert "ML_STATEMENT_TAGGER_MODEL_ID" in models_in_use(_published(snapshot_settings()))
+
+
+def test_the_tagger_set_to_null_is_off():
+    settings = _settings(statement_tagger_model_id=None)
     assert "ML_STATEMENT_TAGGER_MODEL_ID" not in models_in_use(settings)
     assert get_statement_tagger(settings) is None
     contents = _discussion_paper()
@@ -559,13 +572,17 @@ def test_the_tagger_is_off_by_default():
     assert loaded_model_overrides() == []
 
 
-def test_the_dry_run_lists_the_tagger_only_when_set(monkeypatch, tmp_path):
+def test_the_dry_run_lists_the_tagger_unless_it_is_null(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
     from bibr.config import Settings
     from bibr.local.cli import dry_run
 
     config = SimpleNamespace(no_llm=False, mode="fast", uses_llm=False)
+    _published(Settings)
+    specs = dict(dry_run._dry_run_model_specs(config, "geom", "ner", needs_ocr=False))
+    assert "scienceverse/bibr-statement-tagger-v1" in specs["statement tagger"]
+    monkeypatch.setattr(Settings.ml, "statement_tagger_model_id", None)
     labels = [
         label for label, _ in dry_run._dry_run_model_specs(config, "geom", "ner", needs_ocr=False)
     ]
@@ -631,8 +648,15 @@ def test_the_export_lists_the_tagger_by_name_and_checksums(tmp_path):
 
     reset_model_provenance()
     bundle = write_bundle(tmp_path / "machine" / "statements-candidate")
+    (shipped,) = [
+        row
+        for row in export_models(_published(snapshot_settings()))
+        if row["setting"] == "ML_STATEMENT_TAGGER_MODEL_ID"
+    ]
+    assert shipped["id"] == "scienceverse/bibr-statement-tagger-v1"
+    assert shipped["override"] is False
     assert "ML_STATEMENT_TAGGER_MODEL_ID" not in {
-        row["setting"] for row in export_models(snapshot_settings())
+        row["setting"] for row in export_models(_settings(statement_tagger_model_id=None))
     }
     rows = export_models(_settings(statement_tagger_model_id=str(bundle)))
     (row,) = [r for r in rows if r["setting"] == "ML_STATEMENT_TAGGER_MODEL_ID"]
@@ -801,8 +825,30 @@ def test_a_paper_the_tagger_ran_on_ends_the_streak(tmp_path):
             apply_statement_tagger(contents, resolution, settings, tagger=tagger)
 
 
-def test_an_injected_tagger_without_the_setting_raises_as_before():
+def test_the_default_tagger_raising_on_a_paper_keeps_the_rules(caplog):
     contents = _discussion_paper()
     resolution = resolve_integrity_statements(contents, mode="shadow")
-    with pytest.raises(RuntimeError, match="the graph fails"):
-        apply_statement_tagger(contents, resolution, _settings(), tagger=RaisingTagger())
+    with caplog.at_level("WARNING", logger="bibr.statement_tagger.pipeline"):
+        out = apply_statement_tagger(
+            contents, resolution, _published(_settings()), tagger=RaisingTagger()
+        )
+    assert out is resolution
+    assert contents.processing_warnings == []
+    assert "statement tagger raised on this paper" in caplog.text
+
+
+def test_the_default_tagger_that_cannot_load_leaves_the_rules(monkeypatch, caplog):
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    def offline(repo_id, filename, revision=None):
+        raise LocalEntryNotFoundError("outgoing traffic has been disabled")
+
+    monkeypatch.setattr("bibr.utils.hf_cache.hf_download_or_cached", offline)
+    settings = _published(_settings())
+    contents = _discussion_paper()
+    resolution = resolve_integrity_statements(contents, mode="shadow")
+    with caplog.at_level("WARNING", logger="bibr.statement_tagger.pipeline"):
+        assert get_statement_tagger(settings) is None
+        assert apply_statement_tagger(contents, resolution, settings) is resolution
+    assert "keeps the rules' statements" in caplog.text
+    assert pipeline._TAGGER is None  # the next paper tries again

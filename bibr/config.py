@@ -2193,19 +2193,19 @@ class MlOptions(_BibrSettings):
     )
     # Statement tagger (bibr/statement_tagger/): a small encoder that types the
     # paper's paragraphs as funding, competing interests, ethics, data
-    # availability, acknowledgments or author contributions. Opt-in: no bundle is
-    # published, and unset nothing loads and exports are unchanged.
+    # availability, acknowledgments or author contributions. On by default since
+    # 0.9.0; set to null to read the statements with the rules alone.
     statement_tagger_model_id: str | None = Field(
-        None,
+        "scienceverse/bibr-statement-tagger-v1",
         description="Statement tagger: a local directory or Hub repo id of its ONNX bundle "
         "(bibr_onnx.json with model statement_tagger, model.onnx and tokenizer.json, in onnx/ or "
         "the directory itself). When set, the statements it finds replace the rules' funding, "
         "competing interests, ethics and data availability statements of their type, and give "
-        "acknowledgments and author contributions a section when the paper has none. Unset "
-        "(default): not used.",
+        "acknowledgments and author contributions a section when the paper has none. Defaults "
+        "to the published tagger; null reads the statements with the rules alone.",
     )
     statement_tagger_revision: str | None = Field(
-        None,
+        "e5452308cec66d089091360b0dd1930729835990",
         description="Hub revision (commit, branch or tag) of ML_STATEMENT_TAGGER_MODEL_ID when it "
         "is a Hub repo id; unset reads main. Ignored for a local directory.",
     )
@@ -2922,18 +2922,18 @@ class GlobalSettings(_BibrSettings):
         "4d1702e2c766d96c8887bd4b30ef56637aa9b32c",
         description="Pinned commit revision for the geometry reference segmenter bundle.",
     )
-    # Opt-in line-sequence tagger the geom tier tries before the GBM
-    # (bibr/extract/geom_tagger.py). Unset by default: no model is published.
+    # Line-sequence tagger the geom tier tries before the GBM
+    # (bibr/extract/geom_tagger.py). On by default since 0.9.0.
     REF_GEOM_TAGGER_MODEL_ID: str | None = Field(
-        None,
+        "scienceverse/bibr-ref-line-tagger-v1",
         description="Geometry line tagger: a Hub repo id or a local directory (gate.json plus "
         "tagger.onnx and tagger.json, beside it or in onnx/). When set, the geom reference "
         "segmentation tier asks it first and its answer is final when its gate accepts; otherwise "
-        "the tier goes on with REF_GEOM_SEG_MODEL_ID exactly as without it. Unset (default): "
-        "not used.",
+        "the tier goes on with REF_GEOM_SEG_MODEL_ID exactly as without it. Defaults to the "
+        "published tagger; null leaves the tier to REF_GEOM_SEG_MODEL_ID alone.",
     )
     REF_GEOM_TAGGER_REVISION: str | None = Field(
-        None,
+        "b0effede946cda95302efac0b0b1232cf361cf62",
         description="Hub revision (commit, branch or tag) of REF_GEOM_TAGGER_MODEL_ID when it is "
         "a Hub repo id; unset reads main. Ignored for a local directory.",
     )
@@ -3013,30 +3013,30 @@ class GlobalSettings(_BibrSettings):
         description="Local path or HF Hub repo id for the NER reference-segmenter checkpoint "
         "(optionally suffixed :filename.pt).",
     )
-    # Opt-in ONNX token tagger that takes the CRF segmenter's place
-    # (bibr/extract/text_segmenter.py). Unset by default: no model is published.
+    # ONNX token tagger that takes the CRF segmenter's place
+    # (bibr/extract/text_segmenter.py). On by default since 0.9.0.
     REF_TEXT_SEG_MODEL_ID: str | None = Field(
-        None,
+        "scienceverse/bibr-ref-text-segmenter-v1",
         description="Text reference segmenter: a Hub repo id or a local directory (segmenter.json, "
         "model.onnx and tokenizer.json, in it or in onnx/). When set, it replaces the CRF "
         "segmenter (NER_SEG_CKPT) as the last-resort segmentation tier and needs no torch; the "
         "CRF is then not loaded. Setting both this and NER_SEG_CKPT away from its default is an "
-        "error. Unset (default): not used.",
+        "error. Defaults to the published segmenter; null brings back the CRF segmenter.",
     )
     REF_TEXT_SEG_REVISION: str | None = Field(
-        None,
+        "3c36a8c88acf57bbe6f76f0effe5cd0f63b883fd",
         description="Hub revision (commit, branch or tag) of REF_TEXT_SEG_MODEL_ID when it is a "
         "Hub repo id; unset reads main. Ignored for a local directory.",
     )
-    # Parser default is v5.1: UltraBERT-150M + feature-gated CRF trained on the
-    # reference markup of CC BY / CC0 JATS papers, LinkedBooks and the v4.5 gold
-    # rows (refsets sealed test ref_exact 0.75 vs 0.42 for v4.5, RenoBench 0.73
-    # vs 0.56, v4.5 gold val entity F1 0.975 vs 0.966). The repo carries the encoder's config, modeling code and
-    # tokenizer, so they load from it at NER_PARSER_REVISION. The parser path
+    # Parser default is v7 (0.9.0): mmBERT-small + feature-gated CRF, published as
+    # one ONNX file (onnx/model.onnx), so it loads with ONNX Runtime only. A torch
+    # run (ML_RUNTIME=torch) needs a torch checkpoint here, such as the earlier
+    # v5.1 default scienceverse/bibr-parser-v5-1-ultrabert (0.8.0 pins its
+    # revision). The torch parser path
     # (RefParser → FeatureGatedEncoderCRF, add_special_tokens=False) requires a
     # v4-format checkpoint; the legacy v1 parser is no longer loadable here.
     NER_PARSER_CKPT: str = Field(
-        "scienceverse/bibr-parser-v5-1-ultrabert",
+        "scienceverse/bibr-parser-v7-mmbert-small",
         description="Local path or HF Hub repo id for the NER reference-parser checkpoint "
         "(optionally suffixed :filename.pt). Requires a v4-format checkpoint.",
     )
@@ -3050,7 +3050,7 @@ class GlobalSettings(_BibrSettings):
         "track the latest revision instead.",
     )
     NER_PARSER_REVISION: str = Field(
-        "97b06cc7dd6511bdd53f8855c93a29020231d215",
+        "1045dc083ac10fc50bba2feedd3d8d3f06fdbad7",
         description='Pinned commit revision for the NER parser checkpoint. Set to "main" to track '
         "the latest revision instead; a parser repo that ships its own encoder code (v5) loads "
         "only from a commit SHA or a local directory.",

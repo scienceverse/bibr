@@ -653,12 +653,12 @@ _GEOM_TAGGER_KEY: tuple[str, str | None] | None = None
 
 
 def _get_geom_tagger(settings: GlobalSettings | None = None):
-    """The opt-in geometry line tagger (``REF_GEOM_TAGGER_MODEL_ID``), or ``None``.
+    """The geometry line tagger (``REF_GEOM_TAGGER_MODEL_ID``), or ``None``.
 
-    ``None`` when it is unset. It exists only as an override, so a tagger that
-    cannot be loaded, for any reason (a Hub that cannot be reached with the
-    files not cached included), raises
-    :class:`~bibr.exceptions.ModelOverrideError`.
+    ``None`` when it is null. An override that cannot be loaded, for any reason
+    (a Hub that cannot be reached with the files not cached included), raises
+    :class:`~bibr.exceptions.ModelOverrideError`; the shipped default that cannot
+    be loaded is ``None`` for this paper, with a warning in the log.
     """
     global _GEOM_TAGGER, _GEOM_TAGGER_KEY
     settings = settings if settings is not None else snapshot_settings()
@@ -698,13 +698,13 @@ _TEXT_SEGMENTER_KEY: tuple[str, str | None] | None = None
 
 
 def _get_text_segmenter(settings: GlobalSettings | None = None):
-    """The opt-in text segmenter (``REF_TEXT_SEG_MODEL_ID``), or ``None``.
+    """The text segmenter (``REF_TEXT_SEG_MODEL_ID``), or ``None``.
 
-    ``None`` when it is unset. It exists only as an override, so a segmenter
-    that cannot be loaded, for any reason (a Hub that cannot be reached with the
-    files not cached included), raises
+    ``None`` when it is null. An override that cannot be loaded, for any reason
+    (a Hub that cannot be reached with the files not cached included), raises
     :class:`~bibr.exceptions.ModelOverrideError`, as does setting it together
-    with an overridden ``NER_SEG_CKPT``.
+    with an overridden ``NER_SEG_CKPT``; the shipped default that cannot be
+    loaded is ``None`` for this paper, with a warning in the log.
     """
     global _TEXT_SEGMENTER, _TEXT_SEGMENTER_KEY
     settings = settings if settings is not None else snapshot_settings()
@@ -2914,11 +2914,18 @@ class ReferenceExtractor:
         checkpoint), try a zero-LLM marker split; if that also fails on a
         substantial region, surface a HIGH-severity warning instead of 0 refs.
         """
+        strategy, flags = "crf", ()
         if getattr(self._settings, "REF_TEXT_SEG_MODEL_ID", None):
             strategy = "text_tagger"
             ref_strings, failure_reason, flags = self._text_tagger_segment(ref_text)
-        else:
-            strategy, flags = "crf", ()
+            if failure_reason == "tagger_unavailable":
+                # The shipped segmenter could not be loaded (an override that cannot
+                # be loaded stops the run instead): the CRF it replaces runs.
+                self._record_segmentation_attempt(
+                    strategy, ref_text, selected=False, reason_flags=(failure_reason,)
+                )
+                strategy, flags = "crf", ()
+        if strategy == "crf":
             ref_strings, failure_reason = self._crf_segment(ref_text)
         if ref_strings:
             self._record_segmentation_attempt(
@@ -2985,9 +2992,10 @@ class ReferenceExtractor:
         reference start is declined instead
         (``inferred_list_without_reference_start``): the guess and the model
         disagree, so the text is not exported as a reference, and the marker
-        split and the notes' citations get their turn as after the CRF. A
-        segmenter that cannot be loaded
-        stops the run. An error on this paper is a ``segmentation_error`` with a ``REF_SEG_CRF_ERROR`` and a
+        split and the notes' citations get their turn as after the CRF. An
+        overridden segmenter that cannot be loaded stops the run; the shipped one
+        that cannot be loaded answers ``tagger_unavailable`` and the CRF runs in
+        its place. An error on this paper is a ``segmentation_error`` with a ``REF_SEG_CRF_ERROR`` and a
         ``MODEL_OVERRIDE_INFERENCE_FAILED`` warning, and the paper goes on to the
         CRF's own next tier; an error on several papers in a row stops the run
         (:func:`~bibr.utils.model_overrides.note_inference_failure`).
