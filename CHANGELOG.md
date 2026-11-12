@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-12
+
+A fast run now needs no GPU, no OCR server and no LLM: with no OCR route chosen
+it reads each PDF from its own text layer, and it reads citations, statistics
+and the front matter with local rules where a full run asks the LLM. Four
+models trained for this release become defaults, all ONNX bundles that need no
+`torch`: the v7 reference parser, a geometry line tagger, a text reference
+segmenter in the CRF's place, and a statement tagger. Each of the last three
+turns off with its setting set to null. bibr also reads the paper's printed
+citation, runs a candidate model under the setting of the model it would
+replace with checks that stop a run on a broken bundle, and moves the export to
+schema 12.4, which only adds keys. See Changed for the new defaults.
+
 ### Added
 
 A fast run, which makes no LLM call, now reads citations, statistics and the
