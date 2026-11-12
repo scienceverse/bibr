@@ -87,6 +87,7 @@ from bibr.utils.model_overrides import (
     override_load_error,
     record_model_load,
 )
+from bibr.utils.printed_locator import read_prefixed_locator
 from bibr.utils.text import collapse_ws, normalize_doi
 from bibr.utils.transient import is_transient_network_error
 from bibr.validation import IssueSeverity, ValidationIssue
@@ -1310,6 +1311,25 @@ def _backfill_page_range(fields: dict[str, Any], segment: str | None) -> None:
             fields["first_page"] = partner
 
 
+def _read_prefixed_locator(fields: dict[str, Any]) -> None:
+    """Expand an abbreviated prefixed range and keep an article number whole.
+
+    A parser (or ``_backfill_page_range``) that splits "e00376-18" at the
+    hyphen leaves first_page "e00376" and last_page "18": an ASM article number
+    and its year suffix, not a page range. A letter-prefixed first page followed
+    by a shorter bare number is read by :func:`read_prefixed_locator`: an
+    abbreviated range ("S163"/"9" -> "S169") or one article number kept whole
+    as first_page with no last_page.
+    """
+    first = str(fields.get("first_page") or "").strip()
+    last = str(fields.get("last_page") or "").strip()
+    if not (first and last):
+        return
+    pair = read_prefixed_locator(first, last)
+    if pair is not None:
+        fields["first_page"], fields["last_page"] = pair
+
+
 def _finalize_reference_fields(fields: dict[str, Any], segment: str | None) -> dict[str, Any]:
     """Strategy-independent reference finalize shared by every parse path.
 
@@ -1323,6 +1343,7 @@ def _finalize_reference_fields(fields: dict[str, Any], segment: str | None) -> d
     """
     _backfill_vancouver_tail(fields, segment)
     _backfill_page_range(fields, segment)
+    _read_prefixed_locator(fields)
     if fields.get("year") is not None and not fields.get("year_suffix") and segment:
         suffixes = set(re.findall(rf"(?<!\d){fields['year']}([a-z])(?!\w)", segment))
         if len(suffixes) == 1:
