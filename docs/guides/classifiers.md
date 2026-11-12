@@ -83,13 +83,15 @@ leave out the sections whose row has it.
 | Ethics | `ethics` | Ethics Statement, IRB Approval, Informed Consent |
 | Funding | `funding` | Funding, Financial Support |
 | Keywords | `keywords` | Keywords |
-| Endnote | `endnote` | Supplementary Materials, Future Work, Outlook |
-| Appendix | `appendix` | Appendix, Supplementary Material, Supporting Information |
+| Endnote | `endnote` | Supplementary Material(s), Supplementary Information, Supporting Information, Extended Data, Publisher's Note |
+| Appendix | `appendix` | Appendix, Appendices, Appendix A |
 | Data Availability | `data_availability` | Data Availability, Code Availability, Reproducibility Statement |
 | Footnote | `footnote` | Footnotes, Notes; also author-metadata labels such as Correspondence to, Corresponding author, Author details, Affiliations, About the authors, ORCID iDs |
 | Table | `table` | Tables (a heading; captions are not sections) |
 | Figure | `figure` | Figures (a heading; captions are not sections) |
 | Unknown | `unknown` | (fallback for unrecognized headers; also headings that name no section type: cover-sheet labels and grouping headings such as Declarations) |
+
+The three back-matter types that are neither a statement nor the reference list have one definition each. `endnote` is end matter around the article: the heading over a pointer to the supplementary material, under any wording, and publisher's notes. `appendix` is an appendix, content printed after the article's last part. `footnote` is a notes section wherever it is printed (Notes, Endnotes, Author note) and a block of author metadata. A printed heading "Endnotes" is therefore typed `footnote`, and "Supplementary material" is typed `endnote`, not `appendix`.
 
 ### IMRaD enforcement
 

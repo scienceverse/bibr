@@ -91,8 +91,9 @@ _SKIPPED_SECTION_TYPES = frozenset({CanonicalSection.REFERENCES})
 _LABEL_HEADING_TYPES = frozenset(
     {CanonicalSection.TABLE, CanonicalSection.FIGURE, CanonicalSection.FOOTNOTE}
 )
-# Body section types: a section whose printed heading bibr's heading lookup reads
-# as one of these is that section, whatever its rows say. Notes and author notes
+# Body section types, and the heading over a pointer to the supplementary
+# material: a section whose printed heading bibr's heading lookup reads as one
+# of these is that section, whatever its rows say. Notes and author notes
 # ("Notes", "Author note" read as footnotes) are left out: they are where papers
 # print acknowledgments and contributions without a heading of their own.
 _BODY_HEADING_TYPES = frozenset(
@@ -102,6 +103,7 @@ _BODY_HEADING_TYPES = frozenset(
         CanonicalSection.RESULTS,
         CanonicalSection.DISCUSSION,
         CanonicalSection.APPENDIX,
+        CanonicalSection.ENDNOTE,
     }
 )
 #: Off, the design: where the tagger found a field's statements, they replace the
