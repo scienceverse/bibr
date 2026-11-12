@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Any
 
 from bibr.paper_contents import CanonicalSection
 from bibr.processing_warnings import ProcessingWarning, WarningCode
-from bibr.utils.text import normalize_doi
+from bibr.utils.text import collapse_ws, normalize_doi
 
 if TYPE_CHECKING:
     from bibr.models import PaperReference
@@ -414,8 +414,42 @@ def _year_of(published: str | None) -> int | None:
 def _clean(value: Any) -> str | None:
     if value is None:
         return None
-    text = str(value).strip(" \t,;:.")
+    # Line breaks inside a printed value ("Brain\r\nSci") are the layout's, not the text's.
+    text = collapse_ws(collapse_ws(str(value)).strip(" ,;:."))
     return text or None
+
+
+_ARTICLE_NUMBER_FIRST = re.compile(r"[A-Za-z]+(\d+)")
+_BARE_NUMBER = re.compile(r"\d+")
+
+
+def _is_article_number(first: str, last: str) -> bool:
+    """Whether "<first>-<last>" is one article number rather than a page range.
+
+    ASM-style locators ("e00376-18": article e00376, year suffix 18) carry a
+    letter prefix on the first part only, and a bare second part that is
+    shorter and smaller. Real ranges ("1262-1275", "1262-75", "e1-e12") are
+    not matched: the first part has no prefix, the second part is prefixed
+    too, or it is not smaller than the first part's number.
+    """
+    opening = _ARTICLE_NUMBER_FIRST.fullmatch(first)
+    if opening is None or _BARE_NUMBER.fullmatch(last) is None:
+        return False
+    digits = opening.group(1)
+    return len(last) < len(digits) and int(last) < int(digits)
+
+
+def _printed_pages(reference: PaperReference, line_text: str) -> tuple[str | None, str | None]:
+    """The first and last page the line prints; an article number is a first page alone."""
+    first = _clean(reference.first_page)
+    last = _clean(reference.last_page)
+    if first and last and _is_article_number(first, last):
+        printed = re.search(
+            rf"(?<![\w-]){re.escape(first)}\s*[-\u2010-\u2015]\s*{re.escape(last)}(?![\w-])",
+            line_text,
+        )
+        return (re.sub(r"\s+", "", printed.group()) if printed else f"{first}-{last}"), None
+    return first, last
 
 
 def _same_locator(left: Any, right: Any) -> bool:
@@ -499,7 +533,7 @@ def _decided_rule(metadata, name: str) -> str | None:
 def _filled_authors(reference: PaperReference) -> list | None:
     from bibr.models import PaperAuthor
 
-    names, et_al = split_printed_authors(reference.authors)
+    names, et_al = split_printed_authors(collapse_ws(reference.authors or ""))
     # A list cut short by "et al.", or one with a name the reader could not
     # split, would be a wrong author list, not a partial one.
     if et_al or not names or None in names or len(names) > _MAX_FILLED_AUTHORS:
@@ -540,7 +574,13 @@ def _fill(metadata, reference: PaperReference, line: PrintedCitation) -> list[st
     # The volume, issue and pages go together: when the line and the record
     # disagree on one they both carry, it names another version, and none is
     # taken from it.
-    printed = {name: _clean(getattr(reference, name, None)) for name in LOCATOR_FIELDS}
+    first_page, last_page = _printed_pages(reference, line.text)
+    printed = {
+        "volume": _clean(reference.volume),
+        "issue": _clean(reference.issue),
+        "first_page": first_page,
+        "last_page": last_page,
+    }
     current = {name: getattr(metadata, name, None) for name in LOCATOR_FIELDS}
     consistent = all(
         _same_locator(current[name], printed[name])

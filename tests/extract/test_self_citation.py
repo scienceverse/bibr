@@ -340,6 +340,68 @@ def test_a_matching_doi_fills_only_the_empty_fields():
     assert paper.processing_warnings == []
 
 
+def _fill_from(reference, text="the line") -> PaperMetadata:
+    contents = _contents(("row", 1, 1))
+    contents.printed_citation = PrintedCitation(
+        (4, 5), "To cite this article:", True, text, reference
+    )
+    metadata = PaperMetadata(doi="10.5555/polar.2017.9", title="", journal="")
+    apply_printed_citation(_paper(contents, metadata))
+    return metadata
+
+
+def test_filled_values_have_their_white_space_collapsed():
+    metadata = _fill_from(
+        _reference(
+            title="  Ice \r\n  cores of\tthe   north ",
+            container="Adv Sex Reprod \r\nHealth Res",
+            volume="9 \n",
+            issue="\r\n2",
+            first_page="10 ",
+            last_page=" 20",
+            authors="Moreau,\r\nL., & Okafor,\nN.",
+        )
+    )
+    assert metadata.title == "Ice cores of the north"
+    assert metadata.journal == "Adv Sex Reprod Health Res"
+    assert (metadata.volume, metadata.issue) == ("9", "2")
+    assert (metadata.first_page, metadata.last_page) == ("10", "20")
+    assert [(a.given, a.family) for a in metadata.authors] == [("L.", "Moreau"), ("N.", "Okafor")]
+
+
+@pytest.mark.parametrize("journal", ["Neurol.\r\nInt", "Brain\r\nSci"])
+def test_a_journal_name_broken_over_lines_is_one_line(journal):
+    metadata = _fill_from(_reference(container=journal))
+    assert metadata.journal == " ".join(journal.split())
+    assert "\r" not in metadata.journal and "\n" not in metadata.journal
+
+
+@pytest.mark.parametrize(
+    ("first", "last", "expected"),
+    [
+        ("1262", "1275", ("1262", "1275")),
+        ("60", "72", ("60", "72")),
+        ("1262", "75", ("1262", "75")),
+        ("e1", "e12", ("e1", "e12")),
+        ("e00376", "18", ("e00376-18", None)),
+        ("S163", "9", ("S163-9", None)),
+    ],
+)
+def test_only_a_page_range_is_split_into_first_and_last_page(first, last, expected):
+    metadata = _fill_from(_reference(first_page=first, last_page=last))
+    assert (metadata.first_page, metadata.last_page) == expected
+
+
+def test_an_article_number_keeps_the_printed_string():
+    text = "mSphere 3:e00376-18. https://doi.org/10.1128/msphere.00376-18."
+    metadata = _fill_from(
+        _reference(volume="3", first_page="e00376", last_page="18", year=2018), text
+    )
+    assert metadata.first_page == "e00376-18"
+    assert metadata.last_page is None
+    assert metadata.volume == "3"
+
+
 def test_a_different_doi_rejects_the_line_whatever_else_agrees():
     metadata = PaperMetadata(doi="10.5555/other", title=TITLE)
     paper = _paper(_with_line(_reference()), metadata)
