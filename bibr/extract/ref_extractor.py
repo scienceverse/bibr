@@ -1312,21 +1312,22 @@ def _backfill_page_range(fields: dict[str, Any], segment: str | None) -> None:
 
 
 def _read_prefixed_locator(fields: dict[str, Any]) -> None:
-    """Expand an abbreviated prefixed range and keep an article number whole.
+    """Keep an article number whole.
 
     A parser (or ``_backfill_page_range``) that splits "e00376-18" at the
     hyphen leaves first_page "e00376" and last_page "18": an ASM article number
     and its year suffix, not a page range. A letter-prefixed first page followed
-    by a shorter bare number is read by :func:`read_prefixed_locator`: an
-    abbreviated range ("S163"/"9" -> "S169") or one article number kept whole
-    as first_page with no last_page.
+    by a shorter bare number is read by :func:`read_prefixed_locator`; when it
+    is one article number, that number is kept whole as first_page with no
+    last_page. An abbreviated prefixed range ("S163"/"9") keeps the last page
+    as printed.
     """
     first = str(fields.get("first_page") or "").strip()
     last = str(fields.get("last_page") or "").strip()
     if not (first and last):
         return
     pair = read_prefixed_locator(first, last)
-    if pair is not None:
+    if pair is not None and pair.last is None:
         fields["first_page"], fields["last_page"] = pair
 
 

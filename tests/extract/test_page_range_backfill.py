@@ -99,7 +99,7 @@ class TestFillOnly:
         assert out["last_page"] is None
 
 
-class TestArticleNumbersAndAbbreviatedPrefixedRanges:
+class TestArticleNumbersAndPrefixedRanges:
     def test_asm_article_number_with_year_suffix_stays_whole(self):
         seg = "Doe A. Title. mSphere. 2018; 3: e00376-18."
         out = _finalize(seg, first_page="e00376", last_page="18")
@@ -120,15 +120,15 @@ class TestArticleNumbersAndAbbreviatedPrefixedRanges:
         once = _finalize(seg, first_page="e00376", last_page="18")
         assert _finalize(seg, **once) == once
 
-    def test_abbreviated_supplement_range_is_expanded(self):
+    def test_abbreviated_supplement_range_keeps_its_printed_last_page(self):
         seg = "Smith J. Title. J Clin Oncol. 2019; 37 (suppl): S163-9."
         out = _finalize(seg, first_page="S163", last_page="9")
-        assert (out["first_page"], out["last_page"]) == ("S163", "S169")
+        assert (out["first_page"], out["last_page"]) == ("S163", "9")
 
-    def test_abbreviated_prefixed_range_found_in_the_segment_is_expanded(self):
+    def test_abbreviated_prefixed_range_found_in_the_segment_keeps_its_last_page(self):
         seg = "Roe B. Title. Cell Rep. 2020; 12: e120-5."
         out = _finalize(seg, first_page="e120", last_page=None)
-        assert (out["first_page"], out["last_page"]) == ("e120", "e125")
+        assert (out["first_page"], out["last_page"]) == ("e120", "5")
 
     def test_abbreviated_plain_range_is_still_expanded(self):
         seg = "Smith, J. (2014). Title. Virulence, 5(1), 1262-75."
