@@ -3637,6 +3637,15 @@
       "additionalProperties": true,
       "description": "How one section's ``section_type`` was decided.",
       "properties": {
+        "header_supplied": {
+          "default": null,
+          "description": "True when the paper prints no heading for this section, so section[].header is bibr's own wording and not text of the paper: an abstract or introduction found by its position ('Abstract', 'Introduction'), a section named after a layout region, or a statement section the opt-in statement tagger added ('Acknowledgments', 'Author contributions'). A list of the paper's printed headings leaves these sections out. Omitted for a printed heading, and before schema 12.4.",
+          "title": "Header Supplied",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "score": {
           "description": "Classifier confidence, 0\u20131; null when not scored.",
           "maximum": 1,

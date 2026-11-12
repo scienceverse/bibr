@@ -1114,6 +1114,8 @@ def _export_paper_payload(
                 "section classification score",
             ),
             source=s.classification_source,
+            # Only said when true: a printed heading is the rule and carries no key.
+            header_supplied=True if s.header_is_synthetic else None,
         )
         for position, s in enumerate(ids.sections, start=1)
     ]

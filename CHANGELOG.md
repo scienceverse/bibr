@@ -267,6 +267,13 @@ constant) and needs the 12.4 schema.
 - The opt-in `extraction.regions[]` rows carry `read_as` when the text-layer
   OCR backend read the region: `text`, `table_rebuilt`, `formula_plain` or
   `unread`. It is omitted on every other route.
+- `extraction.diagnostics.section_classification[]` rows carry
+  `header_supplied: true` for a section whose heading the paper does not
+  print: `section[].header` is then bibr's own wording ("Abstract" or
+  "Introduction" for a section found by its position, the name of a layout
+  region, "Acknowledgments" or "Author contributions" for a section the
+  statement tagger added). The key is absent for a printed heading, so a list
+  of a paper's printed headings can leave these sections out.
 - `extraction.settings.models` names the models the run was set to load, so
   one export says which models produced it: one row per model with the
   setting that names it, what it does, its Hub repo id and revision (a branch
