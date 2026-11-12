@@ -617,7 +617,21 @@ def _metadata_extractor(settings, seg="geom", parse="ner"):
         ("NER_PARSER_CKPT", "/nonexistent/parser"),
     ],
 )
-async def test_an_override_that_does_not_exist_stops_extract_all_metadata(env, value):
+async def test_an_override_that_does_not_exist_stops_extract_all_metadata(env, value, monkeypatch):
+    if env != "REF_GEOM_SEG_MODEL_ID":
+        # The default geometry segmenter is a Hub model, and so is the CRF it
+        # would cascade to. Stand a segmenter in for it that finds both
+        # references, so the test stays off the network and reaches the parser.
+        from bibr.extract import ref_extractor
+
+        class _Segmenter:
+            def segment_spans(self, ref_text, lines):
+                spans = [(ref_text.index(r), ref_text.index(r) + len(r)) for r in _REFS]
+                return spans, 1.0, len(spans), len(spans)
+
+        monkeypatch.setattr(
+            ref_extractor, "_get_geom_segmenter", lambda settings=None: _Segmenter()
+        )
     settings = snapshot_settings()
     settings.ml.runtime = "onnx"
     setattr(settings, env, value)
