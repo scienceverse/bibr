@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any
 
 from bibr.paper_contents import CanonicalSection
 from bibr.processing_warnings import ProcessingWarning, WarningCode
+from bibr.utils.printed_locator import read_prefixed_locator
 from bibr.utils.text import collapse_ws, normalize_doi
 
 if TYPE_CHECKING:
@@ -419,37 +420,24 @@ def _clean(value: Any) -> str | None:
     return text or None
 
 
-_ARTICLE_NUMBER_FIRST = re.compile(r"[A-Za-z]+(\d+)")
-_BARE_NUMBER = re.compile(r"\d+")
-
-
-def _is_article_number(first: str, last: str) -> bool:
-    """Whether "<first>-<last>" is one article number rather than a page range.
-
-    ASM-style locators ("e00376-18": article e00376, year suffix 18) carry a
-    letter prefix on the first part only, and a bare second part that is
-    shorter and smaller. Real ranges ("1262-1275", "1262-75", "e1-e12") are
-    not matched: the first part has no prefix, the second part is prefixed
-    too, or it is not smaller than the first part's number.
-    """
-    opening = _ARTICLE_NUMBER_FIRST.fullmatch(first)
-    if opening is None or _BARE_NUMBER.fullmatch(last) is None:
-        return False
-    digits = opening.group(1)
-    return len(last) < len(digits) and int(last) < int(digits)
-
-
 def _printed_pages(reference: PaperReference, line_text: str) -> tuple[str | None, str | None]:
-    """The first and last page the line prints; an article number is a first page alone."""
+    """The first and last page the line prints.
+
+    An abbreviated prefixed range ("S163-9") is expanded ("S163", "S169"); an
+    article number ("e00376-18") is a first page alone, as the line prints it.
+    """
     first = _clean(reference.first_page)
     last = _clean(reference.last_page)
-    if first and last and _is_article_number(first, last):
+    pair = read_prefixed_locator(first, last) if first and last else None
+    if pair is None:
+        return first, last
+    if pair.last is None:
         printed = re.search(
             rf"(?<![\w-]){re.escape(first)}\s*[-\u2010-\u2015]\s*{re.escape(last)}(?![\w-])",
             line_text,
         )
-        return (re.sub(r"\s+", "", printed.group()) if printed else f"{first}-{last}"), None
-    return first, last
+        return (re.sub(r"\s+", "", printed.group()) if printed else pair.first), None
+    return pair
 
 
 def _same_locator(left: Any, right: Any) -> bool:

@@ -384,7 +384,9 @@ def test_a_journal_name_broken_over_lines_is_one_line(journal):
         ("1262", "75", ("1262", "75")),
         ("e1", "e12", ("e1", "e12")),
         ("e00376", "18", ("e00376-18", None)),
-        ("S163", "9", ("S163-9", None)),
+        ("S163", "9", ("S163", "S169")),
+        ("e120", "5", ("e120", "e125")),
+        ("e120", "20", ("e120-20", None)),
     ],
 )
 def test_only_a_page_range_is_split_into_first_and_last_page(first, last, expected):
