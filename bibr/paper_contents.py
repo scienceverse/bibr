@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from bibr.document.model import DocumentLayer
     from bibr.extract.front_matter import FrontMatterResolution
     from bibr.extract.front_role import FrontRolePredictions
+    from bibr.extract.self_citation import PrintedCitation
     from bibr.front_tagger.assemble import TaggedFrontMatter
     from bibr.models import PaperMetadata, PaperReference
     from bibr.validation import ValidationIssue
@@ -928,6 +929,12 @@ class PaperContents:
     # PostParse (``DocumentLayer.columns_freed``). Keyword-only so positional
     # callers and the receipt staying last are unaffected; never exported.
     document: "DocumentLayer | None" = field(default=None, compare=False, repr=False, kw_only=True)
+    # The paper's own citation line on its first page and its parse
+    # (``bibr.extract.self_citation``), read in post-parse; the identity stage
+    # compares it with the extraction and records what it filled in the
+    # receipt, exported as ``extraction.diagnostics.self_citation``.
+    printed_citation: "PrintedCitation | None" = field(default=None, kw_only=True)
+    printed_citation_receipt: dict | None = field(default=None, kw_only=True)
     caption_assignment_receipt: CaptionAssignmentReceipt | None = None
 
     def invalidate_text_caches(self) -> None:

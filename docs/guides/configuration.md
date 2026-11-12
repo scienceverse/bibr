@@ -684,6 +684,16 @@ Reference parsing has its own strategy knob, `--refs` (or `REF_PARSE_STRATEGY`):
 independently of parsing. The full set of strategies and how they cascade is
 covered in [Architecture](architecture.md).
 
+With `ner`, the same parser also reads the citation a paper prints of itself
+on its first page ("Citation: ...", "To cite this article: ...") and fills
+the journal, volume, issue, pages and publication year the extraction left
+empty, and the title and authors when it found none, once the line is shown
+to be about this paper (same DOI, else same title, else a matching first
+author, else a label that names this article). It never replaces a value;
+`extraction.diagnostics.self_citation` says what it did. Set
+`SELF_CITATION_METADATA=false` to turn it off. The other strategies, and
+`--no-llm`, do not read the line.
+
 ### Dedicated fine-tuned reference parser
 
 To enable automatic NER-to-Qwen review, configure both the dedicated endpoint

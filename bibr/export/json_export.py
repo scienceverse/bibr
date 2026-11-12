@@ -59,6 +59,7 @@ from bibr.export.models import (
     SectionClassificationExport,
     SectionExport,
     SectionTypeLiteral,
+    SelfCitationExport,
     SeverityLiteral,
     SourceExport,
     TableExport,
@@ -1191,6 +1192,9 @@ def _export_paper_payload(
         review = getattr(paper.contents, "reference_review_receipt", None)
         if isinstance(review, dict):
             diagnostics["reference_review"] = ReferenceReviewExport.model_validate(review)
+        self_citation = getattr(paper.contents, "printed_citation_receipt", None)
+        if isinstance(self_citation, dict):
+            diagnostics["self_citation"] = SelfCitationExport.model_validate(self_citation)
         extraction_data["diagnostics"] = diagnostics
         if identity := extraction_data.get("identity"):
             extraction_data["identity"] = _export_identity_sections(identity, ids)
