@@ -139,8 +139,8 @@ CANONICAL_SECTION_ALIASES = {
         "concluding remarks",
         "summary and conclusions",
         # Closing sections that look ahead are the end of the argument, which
-        # is how section gold types them; endnotes are publisher's notes,
-        # supplementary-material pointers and author biographies.
+        # is how section gold types them; endnotes are publisher's notes and
+        # supplementary-material pointers.
         "future work",
         "outlook",
         "conclusions and future work",
@@ -206,10 +206,20 @@ CANONICAL_SECTION_ALIASES = {
         "keywords",
         "key words",
     ],
+    # The three back-matter types that are neither a statement nor the reference
+    # list, one definition each:
+    # * ENDNOTE: end matter around the article: where the supplementary material
+    #   is (under any wording), publisher's notes, "Additional information".
+    # * APPENDIX: an appendix, content printed after the article's last part.
+    # * FOOTNOTE: notes, wherever printed ("Notes", "Endnotes", "Author note"),
+    #   and author-metadata blocks (see ``is_author_metadata_heading``).
     CanonicalSection.ENDNOTE: [
+        "supplementary material",
         "supplementary materials",
         "supplementary information",
+        "supplemental material",
         "supplemental data",
+        "supporting information",
         "extended data",
         "online supplement",
         "annexes",
@@ -218,9 +228,6 @@ CANONICAL_SECTION_ALIASES = {
     CanonicalSection.APPENDIX: [
         "appendix",
         "appendices",
-        "supplementary material",
-        "supplemental material",
-        "supporting information",
     ],
     CanonicalSection.OPEN_DATA: [
         "data availability",

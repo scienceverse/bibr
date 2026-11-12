@@ -294,6 +294,14 @@ by an earlier version, carries neither.
 
 ### Changed
 
+- Supplementary-material headings have one section type. "Supplementary
+  material", "Supplemental material" and "Supporting information" were
+  typed `appendix` while "Supplementary materials", "Supplementary
+  information" and "Extended data" were typed `endnote`; all of them are
+  now `endnote`, and `appendix` is left with appendices. The classifier
+  guide states the definition of `endnote`, `appendix` and `footnote`. A
+  section under such a heading never holds the reference list, like the
+  other `endnote` sections.
 - Author-metadata headings are no longer typed `acknowledgment`. A heading
   that says where to write to an author, or that opens author details,
   affiliations, biographies or ORCID iDs ("Correspondence to:",
