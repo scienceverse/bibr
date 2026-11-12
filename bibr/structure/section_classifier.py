@@ -24,6 +24,7 @@ from bibr.exceptions import ModelOverrideError, ProcessingError
 from bibr.paper_contents import (
     CANONICAL_SECTION_ALIASES,
     CanonicalSection,
+    is_author_metadata_heading,
     is_exact_front_matter_furniture,
     is_section_container_heading,
     is_section_furniture_heading,
@@ -757,6 +758,12 @@ async def classify_headers_batch_async(
 
     for i, text in enumerate(header_texts):
         clean_text = normalize_text(text)
+        if is_author_metadata_heading(text):
+            # A block of author metadata ("Correspondence to", "Author details",
+            # "ORCID iDs") is a note about the authors: not body text and not an
+            # acknowledgment. The heading alone decides it, like an alias hit.
+            results[i] = (CanonicalSection.FOOTNOTE, 1.0, None, "exact_alias")
+            continue
         if (
             is_exact_front_matter_furniture(clean_text)
             or is_section_furniture_heading(text)
@@ -1015,6 +1022,9 @@ def classify_headers_batch(
     results = []
     for text in header_texts:
         clean_text = normalize_text(text)
+        if is_author_metadata_heading(text):
+            results.append((CanonicalSection.FOOTNOTE, 1.0))
+            continue
         if is_section_furniture_heading(text) or is_section_container_heading(clean_text):
             results.append((CanonicalSection.UNKNOWN, 0.0))
             continue
