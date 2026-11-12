@@ -410,6 +410,14 @@ by an earlier version, carries neither.
 
 ### Fixed
 
+- A reference's article number with a year suffix, such as "e00376-18" in
+  ASM journals, is kept whole as the first page. The reference parsers and
+  the page-range backfill split it at the hyphen into first page "e00376"
+  and last page "18". A letter-prefixed first part followed by a shorter
+  bare number is an article number when the number, completed with the
+  leading digits of the first part, would not be larger ("00318" is below
+  "00376"); otherwise it is an abbreviated range ("S163-9"), which keeps its
+  printed last page as before.
 - A reference whose DOI is printed only as a resolver link no longer loses the
   DOI when the parser files the link under `url`. This happened when the
   printed link was broken by a line wrap (`https://doi. org/10.…`) or misprinted
