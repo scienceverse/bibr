@@ -481,6 +481,12 @@ by an earlier version, carries neither.
   leading digits of the first part, would not be larger ("00318" is below
   "00376"); otherwise it is an abbreviated range ("S163-9"), which keeps its
   printed last page as before.
+- The heading repair that restores spaces in a glued alias ("KeyWords" to
+  "Key Words") no longer keys aliases written without ASCII letters. Every
+  Cyrillic, CJK and Arabic alias had the same empty key, so the last one in
+  the table was offered for any heading in those scripts; that alias has no
+  space today, so no heading changed, but a spaced alias added after it
+  would have replaced such headings.
 - A reference whose DOI is printed only as a resolver link no longer loses the
   DOI when the parser files the link under `url`. This happened when the
   printed link was broken by a line wrap (`https://doi. org/10.…`) or misprinted
