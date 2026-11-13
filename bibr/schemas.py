@@ -473,10 +473,13 @@ class TitleKeywordsLLM(AbstractResponse):
     @classmethod
     def keywords_none_to_empty(cls, v: list[str] | None) -> list[str]:
         """None → [] ; drop placeholder tokens (e.g. "verbatim-string") and
-        non-str items defensively, preserving the order of the rest."""
+        non-str items defensively, preserving the order of the rest. A bare
+        string is one keyword as written (iterated, it gave one per character)."""
         if v is None:
             return []
-        if isinstance(v, int | float):
+        if isinstance(v, str):
+            v = [v]
+        if not isinstance(v, list):
             # Left for the list check to reject as a ValidationError, which
             # Instructor re-asks; iterating it raised a TypeError instead.
             return v
@@ -856,15 +859,7 @@ class CoreMetadataLLM(AbstractResponse):
     @field_validator("keywords", mode="before")
     @classmethod
     def keywords_none_to_empty(cls, v: list[str] | None) -> list[str]:
-        """None → [] ; drop placeholder tokens (e.g. "verbatim-string") and
-        non-str items defensively, preserving the order of the rest."""
-        if v is None:
-            return []
-        if isinstance(v, int | float):
-            # Left for the list check to reject as a ValidationError, which
-            # Instructor re-asks; iterating it raised a TypeError instead.
-            return v
-        return [kw for kw in v if isinstance(kw, str) and not _is_placeholder_token(kw)]
+        return TitleKeywordsLLM.keywords_none_to_empty(v)
 
     @model_validator(mode="before")
     @classmethod
@@ -1260,9 +1255,15 @@ class FundingEntryLLM(BaseModel):
     @classmethod
     def _award_ids_none_to_empty(cls, v: list[str] | None) -> list[str]:
         """None → [] ; drop NuExtract3 placeholder tokens (e.g. leaked
-        "verbatim-string" award ids), preserving the order of the rest."""
+        "verbatim-string" award ids), preserving the order of the rest. A bare
+        string is one award id; anything else that is not a list is left for
+        the type check to reject."""
         if v is None:
             return []
+        if isinstance(v, str):
+            v = [v]
+        if not isinstance(v, list):
+            return v
         return [a for a in v if not _is_placeholder_token(a)]
 
 
