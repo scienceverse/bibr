@@ -575,9 +575,14 @@ def render_json_response(content: object, accept_encoding: str) -> Response:
     FastAPI and GZipMiddleware would otherwise spend on the event loop. The
     middleware passes a body that is already gzipped through untouched.
     """
-    from fastapi.encoders import jsonable_encoder
+    try:
+        # An export is plain JSON data, which renders to the same bytes without
+        # jsonable_encoder's pure-Python copy (several times the encoding cost).
+        response = JSONResponse(content)
+    except (TypeError, ValueError):
+        from fastapi.encoders import jsonable_encoder
 
-    response = JSONResponse(jsonable_encoder(content))
+        response = JSONResponse(jsonable_encoder(content))
     # Starlette's own test for whether the client takes gzip.
     if "gzip" not in accept_encoding or len(response.body) < _GZIP_MIN_BYTES:
         return response
