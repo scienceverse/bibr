@@ -201,13 +201,14 @@ def _validate_sealed_manifest(
             "Sentence-segmenter manifest tokenizer_checksums must contain exactly: "
             + ", ".join(sorted(_TOKENIZER_FILES))
         )
+    # Every file was hashed against ``checksums`` above (the ONNX graphs are
+    # hundreds of MB); these two checks compare against that verified value.
     for relative, expected in tokenizer_checksums.items():
-        if expected != checksums[relative] or _sha256(model_dir / relative) != expected:
+        if expected != checksums[relative]:
             raise ValueError(f"Sentence-segmenter tokenizer checksum mismatch: {relative}")
 
     revision = manifest["model_revision"]
-    optimized_hash = _sha256(model_dir / "model_optimized.onnx")
-    if revision != optimized_hash:
+    if revision != checksums["model_optimized.onnx"]:
         raise ValueError(
             "Sentence-segmenter manifest model_revision does not match model_optimized.onnx"
         )

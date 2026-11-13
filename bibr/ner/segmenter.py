@@ -118,6 +118,10 @@ class RefSegmenter:
                 if current_start is not None:
                     refs.append(text[current_start:ts].strip())
                     current_start = None
+            elif current_start is None:
+                # I-REF after O: only where two windows' votes meet (one CRF path
+                # never makes it), the later window having opened this reference.
+                current_start = ts
         if current_start is not None:
             refs.append(text[current_start:].strip())
         return [r for r in refs if r]
