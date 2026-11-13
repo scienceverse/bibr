@@ -1,4 +1,4 @@
-"""Tests for research-integrity extraction: verbatim statement copy (no LLM),
+"""Tests for research-integrity extraction:
 structured funding/contributions LLM schema, role mapping, export, skip logic.
 """
 
@@ -11,7 +11,6 @@ import pytest
 from bibr.export.json_export import export_paper_to_json
 from bibr.extract.research_integrity import (
     collect_affiliations,
-    copy_integrity_statements,
     extract_structured_integrity,
 )
 from bibr.input.file import InputFile, InputFormat
@@ -70,56 +69,6 @@ def _paper(metadata: PaperMetadata, contents: PaperContents) -> Paper:
         ),
     )
     return Paper(input_file=input_file, metadata=metadata, contents=contents)
-
-
-# ── A) verbatim statement copy (no LLM) ─────────────────────────────────
-
-
-def test_copy_statements_each_type_populated():
-    contents = _contents(
-        [
-            (1, "Funding", CanonicalSection.FUNDING, ["This work was funded by the NSF."]),
-            (2, "Conflicts", CanonicalSection.COI, ["The authors declare no conflict."]),
-            (3, "Ethics", CanonicalSection.ETHICS, ["Approved by the IRB."]),
-            (4, "Data", CanonicalSection.OPEN_DATA, ["Data are available on OSF."]),
-        ]
-    )
-    metadata = PaperMetadata(doi="", title="T")
-    copy_integrity_statements(contents, metadata)
-    assert metadata.funding_statement == "This work was funded by the NSF."
-    assert metadata.coi_statement == "The authors declare no conflict."
-    assert metadata.ethics_statement == "Approved by the IRB."
-    assert metadata.data_availability == "Data are available on OSF."
-
-
-def test_copy_statements_absent_is_none():
-    contents = _contents([(1, "Intro", CanonicalSection.INTRODUCTION, ["Hello."])])
-    metadata = PaperMetadata(doi="", title="T")
-    copy_integrity_statements(contents, metadata)
-    assert metadata.funding_statement is None
-    assert metadata.coi_statement is None
-    assert metadata.ethics_statement is None
-    assert metadata.data_availability is None
-
-
-def test_copy_statements_multiple_same_type_joined():
-    contents = _contents(
-        [
-            (1, "Funding", CanonicalSection.FUNDING, ["Grant A."]),
-            (2, "Funding", CanonicalSection.FUNDING, ["Grant B."]),
-        ]
-    )
-    metadata = PaperMetadata(doi="", title="T")
-    copy_integrity_statements(contents, metadata)
-    assert metadata.funding_statement == "Grant A.\n\nGrant B."
-
-
-def test_copy_statements_works_without_llm_client():
-    # The copy is a pure function — no client involved.
-    contents = _contents([(1, "Funding", CanonicalSection.FUNDING, ["Funded by X."])])
-    metadata = PaperMetadata(doi="", title="T")
-    copy_integrity_statements(contents, metadata)
-    assert metadata.funding_statement == "Funded by X."
 
 
 # ── B) LLM schema parsing ───────────────────────────────────────────────

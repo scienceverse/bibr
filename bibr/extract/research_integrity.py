@@ -1,8 +1,7 @@
-"""Structured research-integrity metadata extraction and compatibility helpers.
+"""Structured research-integrity metadata extraction.
 
 The pipeline resolves scalar statement ownership in
-``bibr.extract.integrity_statements``.  This module retains
-``copy_integrity_statements`` for direct legacy callers and provides
+``bibr.extract.integrity_statements``. This module provides
 ``extract_structured_integrity``: one LLM call that parses the selected funding
 statement into structured ``FundingEntry`` records, maps the
 author-contributions statement onto ``PaperAuthor.role``, and parses the
@@ -35,14 +34,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# PaperMetadata statement field → the canonical section type it copies from.
-_STATEMENT_SECTION_TYPES: dict[str, CanonicalSection] = {
-    "funding_statement": CanonicalSection.FUNDING,
-    "coi_statement": CanonicalSection.COI,
-    "ethics_statement": CanonicalSection.ETHICS,
-    "data_availability": CanonicalSection.OPEN_DATA,
-}
-
 
 def _build_section_text_map(contents: PaperContents) -> dict[int, str]:
     """Join sentence text per ``section_id`` (display formulas excluded).
@@ -71,17 +62,6 @@ def _text_for_type(
             if text:
                 parts.append(text)
     return "\n\n".join(parts) if parts else None
-
-
-def copy_integrity_statements(contents: PaperContents, metadata: PaperMetadata) -> None:
-    """Copy FUNDING / COI / ETHICS / OPEN_DATA section bodies verbatim onto the
-    corresponding ``PaperMetadata`` statement fields. Pure copy — no LLM."""
-    from bibr.extract.field_decisions import FieldCandidate, apply_decision, decide_value
-
-    text_map = _build_section_text_map(contents)
-    for field, section_type in _STATEMENT_SECTION_TYPES.items():
-        text = _text_for_type(contents, text_map, section_type)
-        apply_decision(metadata, decide_value(field, FieldCandidate(field, "section_copy", text)))
 
 
 def _initials(name: str) -> str:

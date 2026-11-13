@@ -37,6 +37,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from bibr.export.names import PrintedName, split_printed_names
 from bibr.paper_contents import CanonicalSection
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.printed_locator import read_prefixed_locator
@@ -130,10 +131,18 @@ def _cue(text: str) -> tuple[re.Match[str] | None, bool]:
 
 
 def _first_page_rows(contents) -> list[Any]:
+    # Page numbers stay absolute under page slicing, so the front page is the
+    # lowest one present, not page 1.
+    first_page = min(
+        (sentence.page_number for sentence in contents.sentences if sentence.page_number),
+        default=None,
+    )
+    if first_page is None:
+        return []
     sections = {section.section_id: section for section in contents.sections}
     rows = []
     for sentence in contents.sentences:
-        if sentence.page_number != 1 or sentence.is_display_formula or not sentence.text:
+        if sentence.page_number != first_page or sentence.is_display_formula or not sentence.text:
             continue
         section = sections.get(sentence.section_id)
         if section is not None and (
@@ -266,139 +275,21 @@ def _same_family(left: str | None, right: str | None) -> bool:
     return bool(_family_keys(left) & _family_keys(right))
 
 
-_HONORIFIC_RE = re.compile(r"^(?:dr|prof|mr|mrs|ms)\.?$", re.IGNORECASE)
-# "A.", "S. A.", "V.M.", "J.-P.", "SE", "CRL", "MÁ": initials, as a reference
-# list prints them after or before a family name.
-_INITIALS_RE = re.compile(r"^(?:[^\W\d_]\.?\s*-?\s*){1,4}$")
-_PARTICLES = frozenset(
-    [
-        "van",
-        "der",
-        "den",
-        "von",
-        "de",
-        "del",
-        "della",
-        "di",
-        "da",
-        "das",
-        "dos",
-        "du",
-        "la",
-        "le",
-        "el",
-        "al",
-        "ten",
-        "ter",
-        "bin",
-        "ben",
-    ]
-)
 _ET_AL_RE = re.compile(r"[,;]?\s*(?:\.{2,}|…)?\s*\bet\.?\s*al\b.*$", re.IGNORECASE | re.DOTALL)
 
 
-def _is_initials(token: str) -> bool:
-    letters = [char for char in token if char.isalpha()]
-    return bool(
-        letters
-        and _INITIALS_RE.match(token.strip())
-        and all(char.isupper() for char in letters)
-        and (len(letters) <= 4)
-    )
-
-
-def _name_token_ok(token: str) -> bool:
-    if token.casefold() in _PARTICLES:
-        return True
-    return bool(token[:1].isupper() and not any(char.isdigit() for char in token)) and not any(
-        char in token for char in "*@#()[]{}<>=+/"
-    )
-
-
-def _single_name(part: str) -> tuple[str, str] | None:
-    """(given, family) of one name printed on its own: "Westcot SE", "Xiao Li", "A. Smith"."""
-    tokens = [token for token in part.split() if not _HONORIFIC_RE.match(token)]
-    if len(tokens) < 2 or len(tokens) > 6 or not all(_name_token_ok(t) for t in tokens):
+def _person_family(name: PrintedName) -> str | None:
+    """The family name of a person the splitter read whole, its suffix kept ("King Jr.")."""
+    if name.literal or not name.family or not name.given:
         return None
-    if _is_initials(tokens[-1]) and not _is_initials(tokens[0]):
-        # "Westcot SE", "De la Casa LG"
-        given, family = tokens[-1], " ".join(tokens[:-1])
-    elif _is_initials(tokens[0]) and not _is_initials(tokens[-1]):
-        # "A. Smith", "J.-P. Sartre"
-        given, family = tokens[0], " ".join(tokens[1:])
-    elif not any(_is_initials(token) for token in tokens):
-        # "Hasan Borke Birgin", "Ludwig van Beethoven"
-        start = len(tokens) - 1
-        while start > 1 and tokens[start - 1].casefold() in _PARTICLES:
-            start -= 1
-        given, family = " ".join(tokens[:start]), " ".join(tokens[start:])
-    else:
-        return None
-    family = family.strip(" ,.")
-    if sum(char.isalpha() for char in family) < 2 or "." in family:
-        return None
-    return given.strip(" ,"), family
-
-
-def split_printed_authors(authors: str | None) -> tuple[list[tuple[str, str] | None], bool]:
-    """The names of a citation's author string, in order, and whether it ends in "et al.".
-
-    Reads "Family, I., Family, I. & Family, I.", "Family I, Family I and
-    Family I", "Family, I.; Family, I." and "Given Family, Given Family". A
-    name it cannot read is None, so a caller can refuse a list it read only
-    in part.
-    """
-    if not authors or not authors.strip():
-        return [], False
-    text = authors.strip()
-    et_al = bool(re.search(r"\bet\.?\s*al\b", text, re.IGNORECASE))
-    text = _ET_AL_RE.sub("", text).strip(" ,;")
-    if not text:
-        return [], et_al
-    names: list[tuple[str, str] | None] = []
-    if ";" in text:
-        for part in (p.strip(" ,") for p in text.split(";")):
-            if not part:
-                continue
-            if "," in part:
-                family, _, given = part.partition(",")
-                family, given = family.strip(), given.strip()
-                ok = (
-                    family
-                    and given
-                    and all(_name_token_ok(t) for t in family.split())
-                    and "." not in family
-                    and sum(char.isalpha() for char in family) >= 2
-                )
-                names.append((given, family) if ok else None)
-            else:
-                names.append(_single_name(part))
-        return names, et_al
-    text = re.sub(r"\s*(?:&|\band\b)\s*", ", ", text)
-    parts = [part.strip() for part in text.split(",") if part.strip()]
-    paired = (
-        len(parts) >= 2
-        and len(parts) % 2 == 0
-        and all(_is_initials(part) for part in parts[1::2])
-        and not any(_is_initials(part) for part in parts[0::2])
-    )
-    if paired:
-        for family, given in zip(parts[0::2], parts[1::2], strict=True):
-            ok = (
-                all(_name_token_ok(t) for t in family.split())
-                and "." not in family
-                and sum(char.isalpha() for char in family) >= 2
-            )
-            names.append((given, family) if ok else None)
-        return names, et_al
-    return [_single_name(part) for part in parts], et_al
+    return f"{name.family} {name.suffix}" if name.suffix else name.family
 
 
 def _first_family(authors: str | None) -> str | None:
     """The first author's family name in a citation's author string."""
-    names, _ = split_printed_authors(authors)
-    if names and names[0] is not None:
-        return names[0][1]
+    names, _ = split_printed_names(collapse_ws(authors or ""))
+    if names and not names[0].literal and names[0].family:
+        return names[0].family
     from bibr.structure.citation_matcher import extract_families
 
     families = extract_families(_ET_AL_RE.sub("", authors or ""))
@@ -521,16 +412,16 @@ def _decided_rule(metadata, name: str) -> str | None:
 def _filled_authors(reference: PaperReference) -> list | None:
     from bibr.models import PaperAuthor
 
-    names, et_al = split_printed_authors(collapse_ws(reference.authors or ""))
-    # A list cut short by "et al.", or one with a name the reader could not
-    # split, would be a wrong author list, not a partial one.
-    if et_al or not names or None in names or len(names) > _MAX_FILLED_AUTHORS:
+    names, et_al = split_printed_names(collapse_ws(reference.authors or ""))
+    families = [_person_family(name) for name in names]
+    # A list cut short by "et al.", or one with a name the splitter could not
+    # read (an organization, or a list it left whole), would be a wrong author
+    # list, not a partial one.
+    if et_al or not names or None in families or len(names) > _MAX_FILLED_AUTHORS:
         return None
     return [
-        PaperAuthor(author_id=position, given=given, family=family, affiliation="")
-        for position, (given, family) in enumerate(
-            (name for name in names if name is not None), start=1
-        )
+        PaperAuthor(author_id=position, given=name.given, family=family, affiliation="")
+        for position, (name, family) in enumerate(zip(names, families, strict=True), start=1)
     ]
 
 
@@ -654,5 +545,4 @@ __all__ = [
     "find_printed_citation",
     "read_printed_citation",
     "same_title",
-    "split_printed_authors",
 ]

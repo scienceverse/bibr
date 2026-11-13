@@ -13,9 +13,9 @@ plus back-compat access to their internals:
   ``REF_PARSE_STRATEGIES``).
 
 Training capture lives in :mod:`bibr.extract.training_capture`. The
-re-exports below keep ``from bibr.extract.extractor import X`` working for
-every name this module historically defined; new code should import from the
-owning module directly.
+re-exports below keep ``from bibr.extract.extractor import X`` working for the
+names still imported from here; new code should import from the owning module
+directly.
 """
 
 from __future__ import annotations
@@ -30,46 +30,29 @@ from typing import TYPE_CHECKING
 from bibr.clients.llm import LLMClient
 from bibr.clients.llm_protocol import LlmClient
 from bibr.exceptions import BibrError, ModelOverrideError, ProcessingError
-from bibr.extract.core_metadata import (  # noqa: F401 — re-exported for back-compat
-    _CORRECTION_NOTICE_TITLE_RE,
-    CoreMetadataExtractor,
-)
+from bibr.extract.core_metadata import CoreMetadataExtractor
 from bibr.extract.ref_extractor import (  # noqa: F401 — re-exported for back-compat
     REF_PARSE_STRATEGIES,
-    IncompleteOutputException,
     ReferenceExtractor,
     _backfill_issue,
     _build_ref_text,
     _chunk,
-    _clean_bib_field,
     _expand_compact_last_page,
     _finalize_reference_fields,
-    _get_geom_segmenter,
-    _get_ner_parser,
-    _get_ner_segmenter,
     _infer_bibtype,
-    _is_degenerate_ref_failure,
     _is_in_press,
     _map_bib_text_ids,
     _marker_split_refs,
-    _normalize_vol_issue,
-    _parse_refs_via_llm,
     _parse_refs_via_ner,
     _parse_year,
     _rescue_authors_from_segment,
     _rescue_doi_from_segment,
     _resolve_ref_strategies,
-    _resolve_repeated_authors,
     _sequence_references,
     _split_vol_issue,
     _strip_enum_markers,
 )
-from bibr.extract.ref_locator import (  # noqa: F401 — re-exported for back-compat
-    _ENTRY_NUMBERING_RE,
-    _REF_HEADER_RE,
-    RefLocator,
-    _looks_like_complete_entry_start,
-)
+from bibr.extract.ref_locator import RefLocator
 from bibr.paper import PaperMetadata, PaperReference
 from bibr.paper_contents import PaperContents
 from bibr.processing_warnings import ProcessingWarning, WarningCode
@@ -462,7 +445,3 @@ class MetadataExtractor:
             warnings = []
             self.contents.processing_warnings = warnings
         warnings.append(warning)
-
-    _should_suppress_commentary_abstract = staticmethod(
-        CoreMetadataExtractor._should_suppress_commentary_abstract
-    )
