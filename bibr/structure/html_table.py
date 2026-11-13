@@ -259,10 +259,18 @@ def _cells(row: Tag) -> list[Tag]:
 def _sections(
     table: Tag, budget: TableBudget
 ) -> tuple[list[list[str]], list[list[str]], list[list[str]]]:
-    """Header, body and footer rows of *table* as text, spans expanded."""
-    head_rows: list[Tag] = table.select("thead tr")
-    body_rows = table.select("tbody tr") + table.find_all("tr", recursive=False)
-    foot_rows = table.select("tfoot tr")
+    """Header, body and footer rows of *table* as text, spans expanded.
+
+    The rows of a table nested in a cell are that cell's text, not rows of
+    *table* (``read_html`` read them as both).
+    """
+
+    def own(rows: list[Tag]) -> list[Tag]:
+        return [row for row in rows if row.find_parent("table") is table]
+
+    head_rows: list[Tag] = own(table.select("thead tr"))
+    body_rows = own(table.select("tbody tr")) + table.find_all("tr", recursive=False)
+    foot_rows = own(table.select("tfoot tr"))
     if not head_rows:
         # No <thead>: the leading rows made only of <th> are the header.
         lead = 0

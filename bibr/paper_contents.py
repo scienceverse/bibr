@@ -1182,9 +1182,7 @@ class PaperContents:
                     "text_id": link.text_id,
                 }
             )
-        if not rows:
-            return pd.DataFrame(columns=["url", "link_text", "text_id"])
-        return pd.DataFrame(rows)
+        return pd.DataFrame(rows, columns=["url", "link_text", "text_id"])
 
     @cached_property
     def text_df(self) -> pd.DataFrame:
@@ -1201,11 +1199,9 @@ class PaperContents:
                     "page_number": sent.page_number,
                 }
             )
-        if not rows:
-            return pd.DataFrame(
-                columns=["text_id", "section_id", "paragraph_id", "text", "page_number"]
-            )
-        return pd.DataFrame(rows)
+        return pd.DataFrame(
+            rows, columns=["text_id", "section_id", "paragraph_id", "text", "page_number"]
+        )
 
     @cached_property
     def equations_df(self) -> pd.DataFrame:
@@ -1222,7 +1218,7 @@ class PaperContents:
                     "rhs": eq.rhs,
                 }
             )
-        return pd.DataFrame(rows)
+        return pd.DataFrame(rows, columns=["text_id", "grp_id", "lhs", "df", "comp", "rhs"])
 
     @cached_property
     def sentences_df(self) -> pd.DataFrame:
@@ -1248,4 +1244,15 @@ class PaperContents:
                     "page_number": sent.page_number,
                 }
             )
-        return pd.DataFrame(rows)
+        return pd.DataFrame(
+            rows,
+            columns=[
+                "text_id",
+                "section_id",
+                "paragraph_id",
+                "text",
+                "section_name",
+                "section_type",
+                "page_number",
+            ],
+        )

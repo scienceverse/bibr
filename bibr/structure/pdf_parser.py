@@ -59,7 +59,7 @@ from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.structure.assembler import DocumentAssembler
 from bibr.structure.caption_continuations import find_caption_continuations
 from bibr.structure.carry_over_manager import CarryOverState
-from bibr.structure.float_labels import LABEL, SUPPLEMENT_WORD
+from bibr.structure.float_labels import LABEL, OTHER_FIGURE_WORD, OTHER_TABLE_WORD, SUPPLEMENT_WORD
 from bibr.structure.floats_normalize import (
     merge_figure_panels_with_remap,
     merge_table_continuations_with_remap,
@@ -103,8 +103,6 @@ LABEL_TREATMENT: dict[str, str] = {
     "vision_footnote": "footnote",
     # tables → PaperTable (markdown → DataFrame)
     "table": "table",
-    # table captions (not produced by PP-DocLayoutV3, kept for compat)
-    "table_title": "table_caption",
     # formulas → wrap in $$...$$ and treat as body text
     "display_formula": "formula",
     "inline_formula": "formula",
@@ -115,9 +113,7 @@ LABEL_TREATMENT: dict[str, str] = {
     "image": "figure",
     # captions — figure_title is the only caption label PP-DocLayoutV3
     # produces; smart-routed to figure or table handler based on content.
-    # chart_title kept for compat (not produced by PP-DocLayoutV3).
     "figure_title": "caption",
-    "chart_title": "caption",
     # structural → metadata (headers/footers)
     "header": "structural",
     "footer": "structural",
@@ -246,20 +242,22 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
     # loose caption discriminator (MediaHandlersMixin._handle_caption), so it
     # stays on PDFParser and the mixins reach it via ``self``.
     _TABLE_CAPTION_RE = re.compile(
-        rf"^({SUPPLEMENT_WORD}?Table\s+{LABEL}\s*(?:[:–\-—|]|\.(?!\d)).*)$",
+        rf"^({SUPPLEMENT_WORD}?(?:Table|{OTHER_TABLE_WORD})\s+{LABEL}\s*(?:[:–\-—|]|\.(?!\d)).*)$",
         re.IGNORECASE | re.DOTALL,
     )
     _FIGURE_CAPTION_RE = re.compile(
-        rf"^({SUPPLEMENT_WORD}?(?:Figure\s+|Fig\.\s*|Fig\s+){LABEL}\s*(?:[:–\-—|]|\.(?!\d)).*)$",
+        rf"^({SUPPLEMENT_WORD}?(?:Figure\s+|Fig\.\s*|Fig\s+|{OTHER_FIGURE_WORD}\s+){LABEL}"
+        r"\s*(?:[:–\-—|]|\.(?!\d)).*)$",
         re.IGNORECASE | re.DOTALL,
     )
 
     # Loose discriminator used ONLY on regions the layout model already labelled
-    # as a caption (figure_title/chart_title).  No separator required — some
+    # as a caption (figure_title).  No separator required — some
     # backends emit "Table 1 Overview" (space) or "Table 1 | Overview" (pipe).
     # Any printed label counts, so "Table S1" is routed to the tables too.
     _LOOSE_TABLE_CAPTION_RE = re.compile(
-        rf"^{SUPPLEMENT_WORD}?Table\s+(?:{LABEL}|contin(?:ued|uation)\b)", re.IGNORECASE
+        rf"^{SUPPLEMENT_WORD}?(?:Table|{OTHER_TABLE_WORD})\s+(?:{LABEL}|contin(?:ued|uation)\b)",
+        re.IGNORECASE,
     )
 
     def __init__(
@@ -1166,13 +1164,9 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         return joined, bbox
 
     def _process_page(
-        self, regions: list[OcrRegionResult], page_number: int, page_idx: int = -1
+        self, regions: list[OcrRegionResult], page_number: int, page_idx: int
     ) -> None:
-        """Process all regions on a single page."""
-        # ``page_idx`` defaults to -1 for backwards compatibility with any
-        # external caller; the running-header lookup uses the 0-based index.
-        if page_idx < 0:
-            page_idx = page_number - 1
+        """Process all regions on a single page (``page_idx`` is its 0-based index)."""
         for region_idx, region in enumerate(regions):
             if region.page_w and region.page_h and page_number not in self.page_sizes:
                 self.page_sizes[page_number] = (region.page_w, region.page_h)
