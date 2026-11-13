@@ -211,7 +211,7 @@ def test_resolve_memory_mode_sees_the_llm_backend(monkeypatch, argv, passed):
     """The auto memory mode depends on whether bibr's own LLM server shares the card."""
     seen = []
 
-    def fake_default(settings=None, *, llm_backend=None):
+    def fake_default(settings=None, *, llm_backend=None, **_route):
         seen.append(llm_backend)
         return "balanced"
 
@@ -633,7 +633,7 @@ def test_fast_runs_with_the_cloud_backends_semantics(keyed, monkeypatch):
     keyed.llm.backend = "vllm"
     seen = []
 
-    def fake_default(settings=None, *, llm_backend=None):
+    def fake_default(settings=None, *, llm_backend=None, **_route):
         seen.append(llm_backend)
         return "balanced"
 

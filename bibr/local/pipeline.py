@@ -250,12 +250,20 @@ def _auto_memory_mode(
 
 
 def _default_memory_mode(
-    settings: GlobalSettings | None = None, *, llm_backend: str | None = None
+    settings: GlobalSettings | None = None,
+    *,
+    llm_backend: str | None = None,
+    ocr_backend: str | None = None,
+    ocr_url: str | None = None,
 ) -> MemoryMode:
     """Default memory mode: ``PIPELINE_MEMORY_MODE`` if set, else hardware auto-detect.
 
     ``llm_backend`` is the run's resolved ``--llm`` / ``LLM_BACKEND`` (``"cloud"``
-    for ``--no-llm``); see ``_auto_memory_mode``.
+    for ``--no-llm``); see ``_auto_memory_mode``. ``ocr_backend`` and ``ocr_url``
+    are the run's resolved OCR route: a CUDA card nothing in the run can load
+    onto (see ``_cuda_card_stays_empty``) is planned for as if it were absent,
+    so a small card beside a CPU-only install does not put a text-layer run in
+    the aggressive mode (3 papers a chunk, the layout model reloaded for each).
     """
     from bibr.config import snapshot_settings
 
@@ -266,9 +274,39 @@ def _default_memory_mode(
     from bibr.local.llm_models import detect_hardware
 
     platform_key, memory_gb = detect_hardware()
-    return _auto_memory_mode(
-        platform_key, memory_gb, _get_system_memory_gb(), llm_backend=llm_backend
-    )
+    system_ram_gb = _get_system_memory_gb()
+    mode = _auto_memory_mode(platform_key, memory_gb, system_ram_gb, llm_backend=llm_backend)
+    if (
+        mode == "aggressive"
+        and platform_key == "cuda"
+        and _cuda_card_stays_empty(ocr_backend, ocr_url, llm_backend)
+    ):
+        return _auto_memory_mode(None, None, system_ram_gb)
+    return mode
+
+
+def _cuda_card_stays_empty(
+    ocr_backend: str | None, ocr_url: str | None, llm_backend: str | None
+) -> bool:
+    """Whether nothing this run starts can load onto the machine's CUDA card.
+
+    True only when all three hold: bibr manages no LLM server on the card, the
+    OCR route starts no engine (the text-layer backend, a cloud vision backend,
+    or a server behind a URL), and bibr's own models cannot leave the CPU
+    because onnxruntime has no CUDA provider and torch could not use the card
+    either (see ``torch_cuda_possible``). An unknown OCR route counts as one
+    that uses the card.
+    """
+    from bibr.ocr.registry import CLOUD_VISION_OCR_BACKENDS, TEXT_LAYER_BACKEND
+
+    if llm_backend in GPU_LLM_SERVER_BACKENDS:
+        return False
+    if not ocr_url and ocr_backend not in {TEXT_LAYER_BACKEND, *CLOUD_VISION_OCR_BACKENDS}:
+        return False
+    from bibr.utils.device import torch_cuda_possible
+    from bibr.utils.onnx_providers import cuda_provider_available
+
+    return not cuda_provider_available() and not torch_cuda_possible()
 
 
 def _auto_batch_size(memory_mode: str) -> int:
@@ -461,7 +499,10 @@ class LocalPipeline(Pipeline):
         # ladder as the CLI, so the library API behaves identically.
         if memory_mode is None:
             memory_mode = _default_memory_mode(
-                settings_snapshot, llm_backend="cloud" if no_llm else llm_backend
+                settings_snapshot,
+                llm_backend="cloud" if no_llm else llm_backend,
+                ocr_backend=ocr_backend,
+                ocr_url=ocr_url,
             )
 
         # --no-llm implies no Crossref and no equation extraction, and no

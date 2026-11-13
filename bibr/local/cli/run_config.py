@@ -144,23 +144,10 @@ def resolve_run_config(args) -> ResolvedRunConfig:
     # The LLM server the run starts: none under --no-llm or in a fast run.
     server_llm_backend = "cloud" if getattr(args, "no_llm", False) else llm_backend
 
-    # Determine memory mode: on a CUDA card it depends on whether a managed
-    # local LLM server shares the card.
-    memory_mode = args.memory
-    if memory_mode is None:
-        from bibr.local.pipeline import _default_memory_mode
-
-        memory_mode = _default_memory_mode(llm_backend=server_llm_backend)
-
     # Parse page range
     start_page, end_page = None, None
     if args.pages:
         start_page, end_page = _parse_pages(args.pages)
-
-    # Determine chunk size for batch processing
-    from bibr.local.pipeline import _auto_batch_size
-
-    chunk_size = args.batch_size if args.batch_size > 0 else _auto_batch_size(memory_mode)
 
     from bibr.ocr.registry import TEXT_LAYER_BACKEND, resolve_backend_candidates
 
@@ -176,6 +163,23 @@ def resolve_run_config(args) -> ResolvedRunConfig:
         # Nobody chose an OCR route: a fast run reads the PDF's own text layer
         # whatever the machine has (LocalPipeline makes the same choice).
         ocr_backend = TEXT_LAYER_BACKEND
+
+    # Determine memory mode: on a CUDA card it depends on whether a managed
+    # local LLM server shares the card, and on whether the OCR route or bibr's
+    # own models can load onto it at all.
+    memory_mode = args.memory
+    if memory_mode is None:
+        from bibr.local.pipeline import _default_memory_mode
+
+        memory_mode = _default_memory_mode(
+            llm_backend=server_llm_backend, ocr_backend=ocr_backend, ocr_url=args.ocr_url
+        )
+
+    # Determine chunk size for batch processing
+    from bibr.local.pipeline import _auto_batch_size
+
+    chunk_size = args.batch_size if args.batch_size > 0 else _auto_batch_size(memory_mode)
+
     summary_candidate = resolve_backend_candidates(
         ocr_backend, Settings, llm_backend=server_llm_backend
     )[0]
