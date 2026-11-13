@@ -51,6 +51,7 @@ __all__ = [
     "TextLayerOcrClient",
     "TextLayerPage",
     "TextLayerRead",
+    "TextLayerStream",
     "apply_text_layer_read",
     "is_text_layer_mode",
     "note_text_layer_fallback",
@@ -58,6 +59,7 @@ __all__ = [
     "read_text_layer",
     "text_layer_fallback_reason",
     "text_layer_requested",
+    "text_layer_stream",
 ]
 
 logger = logging.getLogger(__name__)
@@ -256,19 +258,7 @@ def _load_page(doc: Any, page_index: int, *, read_ocr_layer: bool = False) -> _P
     other page stays unread: it was hidden on purpose, or the scan is cropped
     and the test cannot tell it from that.
     """
-    from bibr.ocr.native_text import (
-        _build_page_char_records,
-        _coverage_qualifies,
-        _invisible_text_share,
-        _page_crop_box,
-        _page_image_coverage,
-        _page_rotation,
-        _pdf_points_to_normalized_bbox,
-        _share_qualifies,
-        open_text_page,
-    )
-    from bibr.ocr.pdf_inspection import _break_wrapped_lines
-    from bibr.ocr.ref_geometry import _extract_page_chars, group_chars_into_lines
+    from bibr.ocr.native_text import _page_crop_box, _page_rotation, open_text_page
 
     page = doc[page_index]
     try:
@@ -276,34 +266,66 @@ def _load_page(doc: Any, page_index: int, *, read_ocr_layer: bool = False) -> _P
         rotation = _page_rotation(page)
         textpage = open_text_page(page)
         try:
-            char_count = textpage.count_chars()
-            if not char_count:
-                return _PageText(page_index, crop_box, rotation, 0, False, [], [], [])
-            try:
-                # Mostly invisible text is a hidden OCR layer, not printed text.
-                # The native pass also asks for a page-sized image; scans
-                # cropped to their text block have smaller ones (dev scans:
-                # 0.55 and 0.67 of the page), and no OCR reads them here.
-                invisible = _share_qualifies(_invisible_text_share(textpage))
-            except Exception:  # noqa: BLE001 - an unreadable check keeps the layer
-                logger.debug("Invisible-layer check failed on page %d", page_index, exc_info=True)
-                invisible = False
-            ocr_layer = False
-            if invisible and read_ocr_layer:
-                try:
-                    ocr_layer = _coverage_qualifies(_page_image_coverage(page, crop_box))
-                except Exception:  # noqa: BLE001 - an unreadable check leaves the page unread
-                    logger.debug(
-                        "Image-coverage check failed on page %d", page_index, exc_info=True
-                    )
-            if invisible and not ocr_layer:
-                return _PageText(page_index, crop_box, rotation, char_count, True, [], [], [])
-            records = _build_page_char_records(textpage)
-            chars = _extract_page_chars(textpage)
+            return _page_text(
+                page, textpage, page_index, crop_box, rotation, read_ocr_layer=read_ocr_layer
+            )
         finally:
             textpage.close()
     finally:
         page.close()
+
+
+def _page_text(
+    page: Any,
+    textpage: Any,
+    page_index: int,
+    crop_box: tuple[float, float, float, float],
+    rotation: int,
+    *,
+    read_ocr_layer: bool,
+    records: list[tuple[str, float, float, bool]] | None = None,
+    chars: list[tuple[str, tuple[float, float, float, float]]] | None = None,
+) -> _PageText:
+    """One page's text layer from its open text page (see :func:`_load_page`).
+
+    *records* and *chars*, when the caller already read them from *textpage*,
+    are used as they are.
+    """
+    from bibr.ocr.native_text import (
+        _build_page_char_records,
+        _coverage_qualifies,
+        _invisible_text_share,
+        _page_image_coverage,
+        _pdf_points_to_normalized_bbox,
+        _share_qualifies,
+    )
+    from bibr.ocr.pdf_inspection import _break_wrapped_lines
+    from bibr.ocr.ref_geometry import _extract_page_chars, group_chars_into_lines
+
+    char_count = textpage.count_chars()
+    if not char_count:
+        return _PageText(page_index, crop_box, rotation, 0, False, [], [], [])
+    try:
+        # Mostly invisible text is a hidden OCR layer, not printed text.
+        # The native pass also asks for a page-sized image; scans
+        # cropped to their text block have smaller ones (dev scans:
+        # 0.55 and 0.67 of the page), and no OCR reads them here.
+        invisible = _share_qualifies(_invisible_text_share(textpage))
+    except Exception:  # noqa: BLE001 - an unreadable check keeps the layer
+        logger.debug("Invisible-layer check failed on page %d", page_index, exc_info=True)
+        invisible = False
+    ocr_layer = False
+    if invisible and read_ocr_layer:
+        try:
+            ocr_layer = _coverage_qualifies(_page_image_coverage(page, crop_box))
+        except Exception:  # noqa: BLE001 - an unreadable check leaves the page unread
+            logger.debug("Image-coverage check failed on page %d", page_index, exc_info=True)
+    if invisible and not ocr_layer:
+        return _PageText(page_index, crop_box, rotation, char_count, True, [], [], [])
+    if records is None:
+        records = _build_page_char_records(textpage)
+    if chars is None:
+        chars = _extract_page_chars(textpage)
 
     def to_layout(box: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
         return _pdf_points_to_normalized_bbox(box, crop_box, rotation)
@@ -496,8 +518,9 @@ def _fill_region(
         )
         text = "".join(" " if g[0].isspace() else g[0] for g in chars)
         if region.get("_unmapped_glyphs"):
-            # The other gates judge the text around the marks, which are not its own fault.
-            text = text.replace(_UNMAPPED_GLYPH, "")
+            # The other gates judge the text around the marks, which are not its own fault;
+            # a U+FFFD the text layer itself carries still counts.
+            text = text.replace(_UNMAPPED_GLYPH, "", region["_unmapped_glyphs"])
         if not _is_native_text_usable(text, min_printable_ratio):
             region["_native_gate"] = "usability"
             return "rejected"
@@ -539,7 +562,7 @@ def _fill_region(
         marked, unmapped = (text, 0) if is_formula else _mark_unmapped_glyphs(text)
         # The other gates judge the text around the marks, which are not its own fault.
         if not unmapped or not _is_native_text_usable(
-            marked.replace(_UNMAPPED_GLYPH, ""), min_printable_ratio
+            marked.replace(_UNMAPPED_GLYPH, "", unmapped), min_printable_ratio
         ):
             region["_native_gate"] = "usability"
             return "rejected"
@@ -659,7 +682,94 @@ def read_text_layer(
     finally:
         with pdfium_lock:
             doc.close()
+    return _finish_read(result)
 
+
+class TextLayerStream:
+    """:func:`read_text_layer` done page by page inside ``inspect_pdf``'s own walk.
+
+    ``inspect_pdf`` hands over each page's open text page, with the char
+    records and chars it read from it, once the native pass is done with the
+    page's regions, so the PDF is not opened, stripped and read a second time.
+    :meth:`finish` returns what :func:`read_text_layer` would return for the
+    inspection's layout, or None when any page could not be read here; the
+    caller then reads the text layer the usual way, which fails or succeeds
+    as it always did.
+    """
+
+    def __init__(
+        self,
+        page_indices: Sequence[int] | None,
+        *,
+        min_printable_ratio: float = 0.85,
+        read_ocr_layer: bool = False,
+    ) -> None:
+        self._indices = list(page_indices) if page_indices is not None else None
+        self._min_printable_ratio = min_printable_ratio
+        self._read_ocr_layer = read_ocr_layer
+        self._read: dict[int, list[dict[str, Any]]] = {}
+        self._result = TextLayerRead(layout_results=[], pages=[], warnings=[])
+        self._failed = False
+
+    def add_page(
+        self,
+        slot: int,
+        page: Any,
+        textpage: Any,
+        page_index: int,
+        crop_box: tuple[float, float, float, float],
+        rotation: int,
+        regions: list[dict[str, Any]],
+        *,
+        records: list[tuple[str, float, float, bool]] | None = None,
+        chars: list[tuple[str, tuple[float, float, float, float]]] | None = None,
+    ) -> None:
+        """Read one page, under the caller's PDFium lock; *regions* are left as they are."""
+        if self._failed:
+            return
+        expected = len(self._read)
+        if slot != expected or (self._indices is not None and self._indices[slot] != page_index):
+            self._failed = True
+            return
+        try:
+            text = _page_text(
+                page,
+                textpage,
+                page_index,
+                crop_box,
+                rotation,
+                read_ocr_layer=self._read_ocr_layer,
+                records=records,
+                chars=chars,
+            )
+            copied = deepcopy(regions)
+            verdict = _read_page(
+                text, copied, self._result, min_printable_ratio=self._min_printable_ratio
+            )
+        except Exception:  # noqa: BLE001 - the caller reads the text layer again
+            logger.debug("Streamed text-layer read failed on page %d", page_index, exc_info=True)
+            self._failed = True
+            return
+        self._read[slot] = copied
+        self._result.pages.append(verdict)
+        if text.ocr_layer and verdict.ok:
+            self._result.ocr_layer_pages.append(page_index + 1)
+
+    def finish(self, layout_results: list[list[dict[str, Any]]]) -> TextLayerRead | None:
+        """The read of *layout_results* (the inspection's), or None to read it again."""
+        indices = self._indices if self._indices is not None else range(len(layout_results))
+        if self._failed or len(self._read) != min(len(indices), len(layout_results)):
+            return None
+        self._result.layout_results = [
+            self._read[slot] if slot in self._read else deepcopy(regions)
+            for slot, regions in enumerate(layout_results)
+        ]
+        self._failed = True  # a stream is finished once
+        return _finish_read(self._result)
+
+
+def _finish_read(result: TextLayerRead) -> TextLayerRead:
+    """Add the file's warnings to a read whose pages are all done."""
     if result.ocr_layer_pages:
         result.warnings.append(
             ProcessingWarning(
@@ -879,14 +989,34 @@ def note_text_layer_fallback(fs: Any, reason: str | None) -> None:
     )
 
 
+def text_layer_stream(fs: Any, settings: GlobalSettings) -> TextLayerStream | None:
+    """A stream for ``inspect_pdf`` to read *fs*'s text layer in its own walk, or None.
+
+    None when :func:`read_file_text_layer` would not read the file.
+    """
+    if getattr(fs, "text_layer_read", False) or not fs.pdf_bytes or fs.layout_results is None:
+        return None
+    return TextLayerStream(
+        getattr(fs, "page_indices", None),
+        min_printable_ratio=settings.ocr.native_text_min_printable_ratio,
+        read_ocr_layer=settings.ocr.text_layer_read_ocr_layer is True,
+    )
+
+
 async def read_file_text_layer(
-    fs: Any, settings: GlobalSettings, *, fallback_reason: str | None = None
+    fs: Any,
+    settings: GlobalSettings,
+    *,
+    fallback_reason: str | None = None,
+    read: TextLayerRead | None = None,
 ) -> None:
     """Read one file's layout regions from its text layer (no OCR), in place.
 
     Used by the native-text stage when the run reads the text layer from the
     start, and by the OCR stage for files the automatic backend's fallback
     reaches after their native-text pass. A file read once is not read again.
+    *read*, when given, is the file's read already done (a
+    :class:`TextLayerStream`'s) and is applied as it is.
     """
     import asyncio
 
@@ -895,14 +1025,15 @@ async def read_file_text_layer(
     name = getattr(getattr(fs, "path", None), "name", "?")
     note_text_layer_fallback(fs, fallback_reason)
     try:
-        read = await asyncio.to_thread(
-            read_text_layer,
-            fs.pdf_bytes,
-            fs.layout_results,
-            page_indices=fs.page_indices,
-            min_printable_ratio=settings.ocr.native_text_min_printable_ratio,
-            read_ocr_layer=settings.ocr.text_layer_read_ocr_layer is True,
-        )
+        if read is None:
+            read = await asyncio.to_thread(
+                read_text_layer,
+                fs.pdf_bytes,
+                fs.layout_results,
+                page_indices=fs.page_indices,
+                min_printable_ratio=settings.ocr.native_text_min_printable_ratio,
+                read_ocr_layer=settings.ocr.text_layer_read_ocr_layer is True,
+            )
     except Exception:  # noqa: BLE001 - an unreadable layer leaves the regions empty
         logger.warning("Could not read the text layer of %s", name, exc_info=True)
         unread = _mark_all_unread(fs)

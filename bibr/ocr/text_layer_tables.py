@@ -360,7 +360,9 @@ def build_table_html(chars: Sequence[Glyph], aspect: float | None = None) -> str
     # height in x units; the gap constants were set on A4 pages.
     width = height * (aspect or _A4_ASPECT) / _A4_ASPECT
     if turn:
-        width = height * _A4_ASPECT / (aspect or _A4_ASPECT)
+        # Turned, the table's x runs along the page's y and its y along the
+        # page's x, so a glyph height is height / aspect in its x units.
+        width = height / ((aspect or _A4_ASPECT) * _A4_ASPECT)
     lines = _lines(_words(chars, height, width), height)
     bounds = _column_bounds(lines, width)
     out = ["<table>"]

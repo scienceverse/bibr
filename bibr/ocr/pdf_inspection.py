@@ -13,6 +13,7 @@ from bibr.ocr.native_text import (
     DEFAULT_ELIGIBLE_LABELS,
     _attach_bbox_pdf_pts,
     _attach_page_dimensions,
+    _build_page_char_records,
     _fill_page_regions_from_textpage,
     _is_invisible_text_layer_page,
     _page_crop_box,
@@ -35,6 +36,7 @@ from bibr.ocr.utils import pdfium_lock
 if TYPE_CHECKING:
     from bibr.document.harvest import LayerBuilder, RenderBudget
     from bibr.document.model import DocumentLayer
+    from bibr.ocr.text_layer import TextLayerStream
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +101,7 @@ def inspect_pdf(
     reject_invisible_text_layer: bool = False,
     include_doc_layer: bool = False,
     render_budget: RenderBudget | None = None,
+    text_layer: TextLayerStream | None = None,
 ) -> PdfInspection:
     """Inspect a PDF under one lock/open and return plain detached values.
 
@@ -113,6 +116,11 @@ def inspect_pdf(
     for *render_budget*. The harvest only reads: every other field is the
     same with it on or off, and its failures go to the layer's own
     ``component_errors``.
+
+    With *text_layer*, each page whose text layer is read here is also handed
+    to that stream once its regions are final, with the char records and chars
+    read from it (see :class:`bibr.ocr.text_layer.TextLayerStream`). Nothing
+    else changes.
     """
     import pypdfium2
 
@@ -177,7 +185,7 @@ def inspect_pdf(
                     # shares with the native fill.
                     furniture: list[tuple] = []
                     walk: list[tuple] | None = None
-                    trace = records = None
+                    trace = records = page_chars = None
                     if needs_text:
                         if layer_builder is None:
                             textpage = open_text_page(page, watermarks)
@@ -197,6 +205,18 @@ def inspect_pdf(
                                     component_errors[f"invisible_text_layer:{page_index}"] = (
                                         _error_text(exc)
                                     )
+                            if (
+                                text_layer is not None
+                                and records is None
+                                and fill_native_text
+                                and not invisible_text_layer
+                            ):
+                                # Built once for the fill and the stream; a
+                                # failure is the fill's to report.
+                                try:
+                                    records = _build_page_char_records(textpage)
+                                except Exception:  # noqa: BLE001
+                                    records = None
                             if fill_native_text and not invisible_text_layer:
                                 try:
                                     _fill_page_regions_from_textpage(
@@ -243,7 +263,7 @@ def inspect_pdf(
                                     full_text = textpage.get_text_range() or ""
                                     if header_page is None and _REF_HEADER_RE.search(full_text):
                                         header_page = page_index
-                                    chars = _extract_page_chars(textpage)
+                                    chars = page_chars = _extract_page_chars(textpage)
                                     if header_page is not None:
                                         page_lines[page_index] = group_chars_into_lines(
                                             chars, page_index
@@ -274,6 +294,18 @@ def inspect_pdf(
                                     records,
                                     furniture,
                                     walk,
+                                )
+                            if text_layer is not None and layout_slot < len(layouts):
+                                text_layer.add_page(
+                                    layout_slot,
+                                    page,
+                                    textpage,
+                                    page_index,
+                                    crop_box,
+                                    rotation,
+                                    regions,
+                                    records=records,
+                                    chars=page_chars,
                                 )
                         finally:
                             textpage.close()
@@ -308,7 +340,7 @@ def inspect_pdf(
                     page.close()
             # The last page's char records and object walk would otherwise
             # stay alive through the layer's finish().
-            trace = records = walk = None
+            trace = records = walk = page_chars = None
 
             if include_outline:
                 try:
