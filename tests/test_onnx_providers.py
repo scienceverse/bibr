@@ -1,6 +1,7 @@
 """Tests for bibr.utils.onnx_providers — provider chain construction."""
 
 import logging
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -316,14 +317,46 @@ def test_create_session_disables_cpu_arena_for_cpu_only_when_asked():
     assert recorded.get("enable_cpu_mem_arena") is False
 
 
-def test_create_session_keeps_cpu_arena_by_default():
-    """Without the opt-in, CPU sessions keep ORT's default arena behavior."""
+def test_create_session_turns_the_cpu_arena_off_by_default(monkeypatch):
+    """CPU sessions run without ORT's CPU arena unless ML_ONNX_CPU_ARENA asks for it:
+    an arena keeps its largest allocation, so a long batch grew from paper to paper."""
+    monkeypatch.delenv("ML_ONNX_CPU_ARENA", raising=False)
     mock_ort, recorded = _cpu_only_ort_with_recording_options()
     with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
-        _, device = onnx_providers.create_session("model.onnx", device="cpu", model_name="layout")
+        _, device = onnx_providers.create_session("model.onnx", device="cpu", model_name="parser")
 
     assert device == "cpu"
+    assert recorded.get("enable_cpu_mem_arena") is False
+
+
+def test_create_session_keeps_the_cpu_arena_when_the_setting_asks(monkeypatch):
+    """ML_ONNX_CPU_ARENA=true restores ORT's default arena, except where the caller
+    keeps it off (layout, the sentence segmenter, single-input CPU fallbacks)."""
+    monkeypatch.setenv("ML_ONNX_CPU_ARENA", "true")
+    mock_ort, recorded = _cpu_only_ort_with_recording_options()
+    with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
+        onnx_providers.create_session("model.onnx", device="cpu", model_name="parser")
     assert "enable_cpu_mem_arena" not in recorded
+
+    mock_ort, recorded = _cpu_only_ort_with_recording_options()
+    with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
+        onnx_providers.create_session(
+            "model.onnx", device="cpu", model_name="layout", disable_cpu_arena=True
+        )
+    assert recorded.get("enable_cpu_mem_arena") is False
+
+
+def test_apply_cpu_memory_falls_back_to_no_arena_when_settings_fail(monkeypatch):
+    """An unreadable setting must not stop a session from opening; the default (off) holds."""
+
+    class _Broken:
+        def __init__(self):
+            raise ValueError("bad .env")
+
+    monkeypatch.setattr("bibr.config.MlOptions", _Broken)
+    options = SimpleNamespace()
+    onnx_providers.apply_cpu_memory(options)
+    assert options.enable_cpu_mem_arena is False
 
 
 def test_create_session_cpu_arena_opt_in_is_noop_for_cuda():
@@ -427,13 +460,14 @@ def test_create_session_opens_on_cpu_when_the_cuda_session_is_out_of_memory(
         ["CUDAExecutionProvider", "CPUExecutionProvider"],
         ["CPUExecutionProvider"],
     ]
+    # The CPU session runs without the arena either way: by default (ML_ONNX_CPU_ARENA
+    # unset), and when the caller keeps it off.
     expected = {
         "log_severity_level": 3,
         "intra_op_num_threads": onnx_providers.available_cpu_count(),
         "config:session.intra_op.allow_spinning": "0",
+        "enable_cpu_mem_arena": False,
     }
-    if disable_cpu_arena:
-        expected["enable_cpu_mem_arena"] = False
     assert opened[1]["options"] == expected
     # The CUDA attempt is not sized: only CPU sessions take the thread settings.
     assert "intra_op_num_threads" not in opened[0]["options"]

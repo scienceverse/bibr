@@ -2006,6 +2006,13 @@ class MlOptions(_BibrSettings):
         "(onnxruntime's own default). Off by default: spinning burns CPU that the next "
         "stage or a second batch process could use.",
     )
+    onnx_cpu_arena: bool = Field(
+        False,
+        description="Keep onnxruntime's CPU memory arena on bibr's CPU ONNX sessions "
+        "(onnxruntime's own default). Off by default: an arena keeps the largest allocation "
+        "its session has made, so a long batch grew from paper to paper. Layout and the "
+        "sentence segmenter run without one either way.",
+    )
 
     # Trained section classifier (MiniLM two-head, document-context input
     # template). When ``section_classifier_model_id`` is None, classification
@@ -2435,6 +2442,17 @@ class PipelineOptions(_BibrSettings):
         'after each chunk, "window" also between the render/OCR windows inside a chunk (lower '
         'footprint in large chunks, some throughput cost), "off" never. Single-paper calls and '
         "serve requests never trim; no effect off glibc.",
+    )
+    # glibc gives threads up to eight malloc arenas per CPU core, and each one
+    # keeps its own free memory (bibr.utils.heap). Batch drivers only, like
+    # heap_trim.
+    malloc_arenas: int = Field(
+        2,
+        ge=0,
+        description="malloc arenas a batch process may use (glibc's M_ARENA_MAX, set when the "
+        "batch starts). 0 leaves glibc's default of eight per CPU core. Ignored when "
+        "MALLOC_ARENA_MAX is set in the environment; single-paper calls and serve requests "
+        "keep glibc's default; no effect off glibc Linux.",
     )
     # Max requests running the pipeline concurrently per worker (0 = unlimited).
     # The LitServe async loop dispatches unbounded concurrent predicts; this

@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-13
+
+0.9.0 was tagged but never published: its release run failed tests on macOS and
+Windows, which pull request checks do not run. Those failures were in the tests and
+in the paths `scripts/switch_model_defaults.py` reports, not in what bibr extracts.
+0.9.1 is the first 0.9 release on PyPI and contains everything listed under 0.9.0,
+plus the memory fix and the soupsieve floor below.
+
+### Fixed
+
+- A long batch no longer grows in memory from paper to paper. The growth came from
+  onnxruntime's CPU memory arenas: each model's session kept its largest allocation
+  for the rest of the run. glibc's per-thread malloc arenas added to it. bibr's CPU
+  sessions now run without an arena (`ML_ONNX_CPU_ARENA=true` restores it), and a
+  batch limits glibc to two malloc arenas before it starts (`PIPELINE_MALLOC_ARENAS`,
+  default `2`; Linux with glibc only; a `MALLOC_ARENA_MAX` in the environment wins).
+  A fast batch of 60 papers under an 8 GB limit with swap off, which 0.9.0 could
+  not finish (it stopped after 33 to 51 papers), now runs to the end at a peak of
+  4.7 GB. The memory it keeps between papers stays at 1.6 to 2.0 GB instead of
+  climbing from 3.4 to 5.3 GB. Without a memory limit, the peak of the same batch
+  fell from 7.8–9.5 GB to 4.2–4.8 GB, at about 1% more CPU time and 2–3% more wall
+  time per paper (two runs of each, alternated, on 4 cores). Exports are unchanged.
+
+### Security
+
+- The lock moves to soupsieve 4.1 on Python 3.11.5 and later, with a constraint
+  floor of 4.0 in `pyproject.toml`. Earlier releases take polynomial time to match
+  a selector with descendant combinators on deeply nested markup (CVE-2026-126190),
+  and bibr runs such selectors (`thead tr`) on the tables of HTML it is given.
+  soupsieve 4 needs Python 3.11.5, so Python 3.11.0 to 3.11.4 keep 2.10. soupsieve
+  4.0 also stops looking inside `template` elements, which bibr does not select in.
+
 ## [0.9.0] - 2026-11-12
 
 A fast run now needs no GPU, no OCR server and no LLM: with no OCR route chosen
@@ -636,7 +668,8 @@ by an earlier version, carries neither.
   `bibr setup` reports the same figure. That is not yet enough for a long fast-mode
   batch with no swap: under an 8 GB limit with swap off, runs of 60 papers stopped for
   memory after 33 to 51 of them, with 0.8.0's models as well as this release's,
-  because the batch's memory rises from paper to paper (see LIMITATIONS.md).
+  because the batch's memory rose from paper to paper. The cause was onnxruntime's
+  CPU memory arenas; 0.9.1 fixes it.
 - Choosing fast mode when `bibr setup` merges into an existing `.env` now comments
   out an `OCR_BACKEND`, `OCR_MODEL` or `OCR_PROFILE` left by an earlier setup, and
   says so. Fast mode reads the PDF's text layer and setup says document contents

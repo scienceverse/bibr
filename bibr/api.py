@@ -481,9 +481,12 @@ async def _process_batch(
     from bibr.batch.manifest import assign_paper_ids
     from bibr.local.pipeline import _auto_batch_size
     from bibr.pipeline.state import FileState
+    from bibr.utils.heap import limit_arenas_for_batch
     from bibr.utils.model_overrides import find_model_override_error
     from bibr.utils.transient import is_service_outage
 
+    # PIPELINE_MALLOC_ARENAS; a no-op when `bibr batch` already applied it.
+    limit_arenas_for_batch(getattr(pipeline, "settings", None))
     if not batch_size or batch_size < 1:
         batch_size = _auto_batch_size(getattr(pipeline, "memory_mode", "balanced"))
     states = [

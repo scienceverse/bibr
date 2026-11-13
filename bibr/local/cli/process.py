@@ -479,6 +479,11 @@ async def _run_process(args) -> None:
     # directory holding one paper still writes <dir>/<stem>.json, as it does
     # with two, instead of a file named after the directory.
     is_batch = source_mode == "manifest" or len(files) > 1 or _names_a_batch(args.input)
+    if is_batch:
+        # PIPELINE_MALLOC_ARENAS, before the pipeline starts any thread.
+        from bibr.utils.heap import limit_arenas_for_batch
+
+        limit_arenas_for_batch()
 
     # --paper-id only makes sense when writing a single result — silently
     # discarding it for batch input used to hide the mistake entirely.

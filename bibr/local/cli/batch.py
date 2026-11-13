@@ -311,7 +311,10 @@ def _run_batch(args: Any) -> int:
         return 2
 
     from bibr.batch.runner import BatchOptions, parse_deadline, run_batch
+    from bibr.utils.heap import limit_arenas_for_batch
 
+    # Before any pipeline exists, so the cap holds for every thread it starts.
+    limit_arenas_for_batch()
     deadline = None
     if args.deadline:
         try:
