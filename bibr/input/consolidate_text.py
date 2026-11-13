@@ -1214,11 +1214,40 @@ def unwrap_latex_text(text: str) -> str:
     wraps the content in ``\text{}``.  This extracts the plain text.
     Returns the original string if the pattern doesn't match.
     """
-    m = _LATEX_TEXT_WRAP_RE.match(text.strip())
+    stripped = text.strip()
+    m = _LATEX_TEXT_WRAP_RE.match(stripped)
     if m:
         parts = _iter_latex_text_inners(m.group(1))
-        return " ".join(p.strip() for p in parts if p.strip())
-    return text
+    else:
+        parts = _balanced_wrapped_text_inners(stripped)
+        if parts is None:
+            return text
+    return " ".join(p.strip() for p in parts if p.strip())
+
+
+def _balanced_wrapped_text_inners(text: str) -> list[str] | None:
+    r"""The ``\text{...}`` arguments of a ``$$\text{...}$$`` whose arguments
+    nest braces (``[^}]*`` in :data:`_LATEX_TEXT_WRAP_RE` stops at the first
+    ``}``), or ``None`` when *text* is not such a wrapper."""
+    if not (text.startswith("$$") and text.endswith("$$")):
+        return None
+    body, parts, pos = text[:-2], [], 2
+    while True:
+        while pos < len(body) and body[pos].isspace():
+            pos += 1
+        if pos == len(body):
+            return parts or None
+        m = _LATEX_TEXT_PREFIX_RE.match(body, pos)
+        if m is None:
+            return None
+        depth, i = 1, m.end()
+        while i < len(body) and depth:
+            depth += (body[i] == "{") - (body[i] == "}")
+            i += 1
+        if depth:
+            return None
+        parts.append(body[m.end() : i - 1])
+        pos = i
 
 
 def _inline_math_spans(text: str, *, strict: bool = False) -> Iterator[re.Match[str]]:

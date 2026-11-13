@@ -707,7 +707,7 @@ class TestTableParsing:
     def test_table_with_caption(self, mock_wtpsplit):
         json_result = [
             [
-                _region(0, "table_title", "Table 1: Results"),
+                _region(0, "figure_title", "Table 1: Results"),
                 _region(1, "table", "| X | Y |\n|---|---|\n| a | b |"),
             ]
         ]
@@ -840,10 +840,10 @@ class TestFigures:
 
         assert contents.figures[0].caption == "Figure 1: Architecture"
 
-    def test_chart_title_also_works(self, mock_wtpsplit):
+    def test_a_caption_without_a_figure_word_goes_to_the_figure(self, mock_wtpsplit):
         json_result = [
             [
-                _region(0, "chart_title", "Chart: Performance"),
+                _region(0, "figure_title", "Chart: Performance"),
                 _region(1, "chart", ""),
             ]
         ]
@@ -864,7 +864,7 @@ class TestBboxCaptionMatching:
         """Forward match: caption before table on same page attaches."""
         json_result = [
             [
-                _region(0, "table_title", "Table 1: Data", bbox=[100, 200, 500, 230]),
+                _region(0, "figure_title", "Table 1: Data", bbox=[100, 200, 500, 230]),
                 _region(1, "table", "| A |\n|---|\n| 1 |", bbox=[100, 240, 500, 400]),
             ]
         ]
@@ -888,7 +888,7 @@ class TestBboxCaptionMatching:
         """Caption on page 1 should not attach to table on page 2."""
         json_result = [
             [
-                _region(0, "table_title", "Table 1: Orphan", bbox=[100, 900, 500, 930]),
+                _region(0, "figure_title", "Table 1: Orphan", bbox=[100, 900, 500, 930]),
             ],
             [
                 _region(0, "table", "| X |\n|---|\n| 1 |", bbox=[100, 50, 500, 200]),
@@ -902,7 +902,7 @@ class TestBboxCaptionMatching:
         """Caption far from table vertically (>200 units) should not attach."""
         json_result = [
             [
-                _region(0, "table_title", "Table 1: Far", bbox=[100, 50, 500, 80]),
+                _region(0, "figure_title", "Table 1: Far", bbox=[100, 50, 500, 80]),
                 _region(1, "text", "Intervening paragraph.", bbox=[100, 100, 500, 300]),
                 _region(2, "table", "| A |\n|---|\n| 1 |", bbox=[100, 700, 500, 900]),
             ]
@@ -930,7 +930,7 @@ class TestBboxCaptionMatching:
         """Missing geometry is not enough evidence even for one sequential target."""
         json_result = [
             [
-                {"index": 0, "label": "table_title", "content": "Table 1: No bbox"},
+                {"index": 0, "label": "figure_title", "content": "Table 1: No bbox"},
                 {"index": 1, "label": "table", "content": "| A |\n|---|\n| 1 |"},
             ]
         ]
@@ -964,7 +964,7 @@ class TestBboxCaptionMatching:
         json_result = [
             [
                 _region(0, "table", "| A |\n|---|\n| 1 |", bbox=[100, 100, 500, 300]),
-                _region(1, "table_title", "Table 1: After", bbox=[100, 310, 500, 340]),
+                _region(1, "figure_title", "Table 1: After", bbox=[100, 310, 500, 340]),
             ]
         ]
         contents = _parse_and_segment(json_result)
@@ -1153,7 +1153,7 @@ class TestFullDocument:
                 _region(0, "header", "Journal of Tests"),
                 _region(1, "paragraph_title", "Methods"),
                 _region(2, "text", "We used pytest."),
-                _region(3, "table_title", "Table 1: Results"),
+                _region(3, "figure_title", "Table 1: Results"),
                 _region(4, "table", "| Test | Pass |\n|------|------|\n| A | Yes |\n| B | No |"),
                 _region(5, "footer", "Page 2"),
             ],
@@ -1989,7 +1989,7 @@ class TestCaptionEdgeCases:
         json_result = [
             [
                 _region(0, "text", "Body text."),
-                _region(1, "table_title", "Table 1: Orphan caption"),
+                _region(1, "figure_title", "Table 1: Orphan caption"),
             ]
         ]
         contents = _parse_and_segment(json_result)
@@ -2000,7 +2000,7 @@ class TestCaptionEdgeCases:
         """Caption on page 1 should not attach to element on page 2."""
         json_result = [
             [
-                _region(0, "table_title", "Table 1: Results", bbox=[0, 0, 500, 50]),
+                _region(0, "figure_title", "Table 1: Results", bbox=[0, 0, 500, 50]),
             ],
             [
                 _region(0, "table", "| A |\n|---|\n| 1 |", bbox=[0, 100, 500, 300]),
@@ -2015,9 +2015,9 @@ class TestCaptionEdgeCases:
         """Two tables with preceding captions should each get the right caption."""
         json_result = [
             [
-                _region(0, "table_title", "Table 1: First"),
+                _region(0, "figure_title", "Table 1: First"),
                 _region(1, "table", "| A |\n|---|\n| 1 |", bbox=[0, 100, 500, 200]),
-                _region(2, "table_title", "Table 2: Second"),
+                _region(2, "figure_title", "Table 2: Second"),
                 _region(3, "table", "| B |\n|---|\n| 2 |", bbox=[0, 300, 500, 400]),
             ]
         ]
@@ -2101,7 +2101,7 @@ class TestMixedContentSinglePage:
             [
                 _region(0, "paragraph_title", "3. Results"),
                 _region(1, "text", "Results are shown in Table 1."),
-                _region(2, "table_title", "Table 1: Descriptive statistics"),
+                _region(2, "figure_title", "Table 1: Descriptive statistics"),
                 _region(3, "table", "| M | SD |\n|---|---|\n| 3.5 | 1.2 |"),
                 _region(4, "text", "The regression equation was:"),
                 _region(5, "formula", "y = \\beta_0 + \\beta_1 x"),

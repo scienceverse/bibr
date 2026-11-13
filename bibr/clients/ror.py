@@ -93,7 +93,10 @@ class RorClient:
         self._timeout = ror.request_timeout
         self._client = client
         self._owns_client = client is None
-        self._client_loop: asyncio.AbstractEventLoop | None = None
+        # The shared client outlives one ``asyncio.run`` and serves every
+        # thread's loop (two Chewers, bibr.chew() from a threadpool); an httpx
+        # pool is bound to the loop that opened it, so each loop gets its own.
+        self._loop_clients: dict[asyncio.AbstractEventLoop, httpx.AsyncClient] = {}
         self._cache_size = ror.cache_size
         self._cache: OrderedDict[str, OrganizationMatch | None] = OrderedDict()
         self._blocked_until = 0.0
@@ -101,22 +104,26 @@ class RorClient:
         self._last_429: float | None = None
 
     async def aclose(self) -> None:
-        if self._owns_client and self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        """Close this loop's HTTP client; other running loops keep theirs."""
+        client = self._loop_clients.pop(asyncio.get_running_loop(), None)
+        if client is not None:
+            await client.aclose()
 
     def _http(self) -> httpx.AsyncClient:
-        # The shared client outlives one ``asyncio.run``; an httpx pool is
-        # bound to the loop that opened it, so an owned client is rebuilt when
-        # the loop changes.
+        if not self._owns_client:
+            assert self._client is not None
+            return self._client
         loop = asyncio.get_running_loop()
-        if self._owns_client and (self._client is None or self._client_loop is not loop):
-            self._client = httpx.AsyncClient(
+        client = self._loop_clients.get(loop)
+        if client is None:
+            # A closed loop's pool cannot be closed any more, only dropped.
+            for other in list(self._loop_clients):
+                if other.is_closed():
+                    self._loop_clients.pop(other, None)
+            client = self._loop_clients[loop] = httpx.AsyncClient(
                 headers=self._headers, timeout=httpx.Timeout(self._timeout)
             )
-            self._client_loop = loop
-        assert self._client is not None
-        return self._client
+        return client
 
     def _remember(self, key: str, value: OrganizationMatch | None) -> None:
         if self._cache_size <= 0:

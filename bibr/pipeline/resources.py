@@ -160,6 +160,7 @@ class ResourceManager:
         self._segmenter: SentenceSegmenter | None = segmenter
         self._front_role = None
         self._front_role_resolved = False
+        self._front_role_lock = threading.Lock()
         self._front_tagger = None
         self._front_tagger_resolved = False
         self._ocr: OcrBackend | None = None
@@ -330,18 +331,20 @@ class ResourceManager:
         bundle cannot be loaded — the loader logs once and the pipeline keeps
         going on heuristics alone.
         """
+        from bibr.extract.front_role import _note_use, load_front_role_classifier
+
         if self._front_role_resolved:
-            from bibr.extract.front_role import _note_use
-
             return _note_use(self._settings, self._front_role)
-        from bibr.extract.front_role import load_front_role_classifier
-
-        self._front_role = load_front_role_classifier(self._settings)
-        # Pin only a loaded model. The loader caches every definitive miss, so
-        # asking again is free, and a load that failed on the network is
-        # retried by the next paper instead of being given up for the process.
-        self._front_role_resolved = self._front_role is not None
-        return self._front_role
+        # Concurrent papers call this from worker threads: one loads, the rest wait.
+        with self._front_role_lock:
+            if self._front_role_resolved:
+                return _note_use(self._settings, self._front_role)
+            self._front_role = load_front_role_classifier(self._settings)
+            # Pin only a loaded model. The loader caches every definitive miss, so
+            # asking again is free, and a load that failed on the network is
+            # retried by the next paper instead of being given up for the process.
+            self._front_role_resolved = self._front_role is not None
+            return self._front_role
 
     @property
     def front_role(self):

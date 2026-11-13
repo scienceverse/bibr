@@ -55,9 +55,9 @@ def _name_matches(detected_norm: str, name: str | None) -> bool:
     n = _normalize_for_match(name)
     if len(n) < _MASTHEAD_MIN_NAME_CHARS:
         return False
-    return n in detected_norm or difflib.SequenceMatcher(None, detected_norm, n).ratio() >= (
-        _MASTHEAD_NAME_RATIO
-    )
+    if re.search(rf"(?<!\w){re.escape(n)}(?!\w)", detected_norm):
+        return True
+    return difflib.SequenceMatcher(None, detected_norm, n).ratio() >= _MASTHEAD_NAME_RATIO
 
 
 def _detected_title_is_masthead(detected: str, journal: str | None, publisher: str | None) -> bool:

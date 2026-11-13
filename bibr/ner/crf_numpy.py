@@ -23,8 +23,9 @@ def viterbi_decode(
 
     Args:
         emissions: ``(B, L, T)`` float scores.
-        mask: ``(B, L)`` bool/int; ``mask[:, 0]`` must be all True and each row
-            must be a prefix (right padding), as torchcrf requires.
+        mask: ``(B, L)`` bool/int; each row must be a prefix (right padding)
+            and, unless it is all off (decoded as ``[]``), start on, as torchcrf
+            requires.
         start_transitions: ``(T,)``.
         end_transitions: ``(T,)``.
         transitions: ``(T, T)`` ``transitions[i, j]`` = score of ``i → j``.
@@ -40,7 +41,10 @@ def viterbi_decode(
         raise ValueError("emissions must be (B, L, T) and mask (B, L)")
     if mask.shape[1] == 0:
         return [[] for _ in range(mask.shape[0])]
-    if not mask[:, 0].all():
+    # A text the tokenizer reduces to no tokens (a BERT normalizer drops
+    # zero-width characters) is an all-off row in a padded batch.
+    empty = ~mask.any(axis=1)
+    if not (mask[:, 0] | empty).all():
         raise ValueError("mask of the first timestep must all be on")
 
     batch, length, _num_tags = emissions.shape
@@ -60,6 +64,9 @@ def viterbi_decode(
 
     best_tags_list: list[list[int]] = []
     for idx in range(batch):
+        if empty[idx]:
+            best_tags_list.append([])
+            continue
         best_last = int(score[idx].argmax())
         best_tags = [best_last]
         for hist in reversed(history[: int(seq_ends[idx])]):

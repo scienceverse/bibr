@@ -1885,10 +1885,22 @@ async def detect_bib_xrefs_with_receipt(
         # the same reference twice in different surface forms the second form
         # never entered this set and was re-offered to the Tier-3 LLM — which
         # could attach a second, different link to an already-linked citation.
+        # A span the matcher split by year ("(Smith, 2020, 2021)": one
+        # candidate per year, all with that raw) is not resolved while a year
+        # is left on a same-surname tie: a linked 2020 must not hide the 2021
+        # the shortlist could not pick. (A year with no reference at all is
+        # offered through the bracket spans inside, see _inside_linked_work.)
+        unresolved_spans = {
+            (candidate.text_id, candidate.start, candidate.end)
+            for candidate in candidates
+            if not candidate.accepted
+            and "ambiguous_same_surname_year" in candidate.rejection_reasons
+        }
         resolved_pairs = {
             (candidate.text_id, _normalize_citation_text(candidate.raw))
             for candidate in candidates
             if candidate.accepted
+            and (candidate.text_id, candidate.start, candidate.end) not in unresolved_spans
         }
         # By position as well as by text: the matcher's narrative span absorbs
         # a preceding word or name list ("In Smith (2020)"), so a regex span
@@ -2042,7 +2054,8 @@ async def detect_bib_xrefs_with_receipt(
                 one_work = _names_one_work(normalized_contents)
                 linked: set[int] = set()
                 matched_candidate = False
-                for index in indices_by_span.get((text_id, start, end), ()):
+                span_indices = indices_by_span.get((text_id, start, end), ())
+                for index in span_indices:
                     candidate = candidates[index]
                     if (
                         candidate.accepted
@@ -2050,10 +2063,20 @@ async def detect_bib_xrefs_with_receipt(
                     ):
                         continue
                     matched_candidate = True
+                    # A year sibling already linked in this span is not this year's work.
+                    taken = {
+                        bib_id
+                        for other in span_indices
+                        if candidates[other].accepted
+                        for bib_id in candidates[other].bib_ids
+                    }
+                    if set(picks) <= taken:
+                        continue
                     fitting = tuple(
                         bib_id
                         for bib_id in picks
-                        if _llm_pick_fits_candidate(candidate, references_by_id[bib_id])
+                        if bib_id not in taken
+                        and _llm_pick_fits_candidate(candidate, references_by_id[bib_id])
                     )
                     refusal = None
                     if not fitting:

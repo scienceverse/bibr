@@ -6,6 +6,176 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- A CUDA card that nothing in a run can load onto no longer decides the memory mode.
+  The automatic rule put every machine with an NVIDIA card of 8 GB or less in the
+  aggressive mode (3 papers a chunk, the layout model unloaded and loaded again
+  around each), even when the run started no OCR engine and no LLM server and the
+  install had no CUDA onnxruntime and no torch, so the card stayed empty. Such a run
+  is now planned as on a machine without a card: balanced unless system RAM is 8 GB
+  or less. On 20 papers in fast mode on 12 cores the balanced mode took 295 s against
+  337 s, at a peak of 4.4 GB against 4.0 GB, with identical exports. A pinned
+  `PIPELINE_MEMORY_MODE` (which `bibr setup` writes) and `--memory` are followed as
+  before.
+- A fast run that reads the PDF's text layer opens each PDF once. The text-layer read
+  used to open the file a second time and repeat the furniture strip and the
+  character read that the inspection had just done, about 40% of the native-text
+  stage's CPU time (2 to 4% of a fast batch's wall time). Exports are unchanged.
+- `bibr serve` renders a JSON result without FastAPI's `jsonable_encoder` copy when
+  the result is plain JSON data, which an export is: 11 ms against 81 ms for a
+  0.77 MB export, with the same bytes.
+- A sealed local sentence-segmenter bundle is hashed once when it is resolved, not
+  twice, and an export no longer resolves it again for every paper (about a second
+  per paper for the default model's two graphs).
+- `bibr chew` serializes a result for stdout only when it prints it there.
+- `bibr setup` no longer writes `PIPELINE_MEMORY_MODE`. It shows the memory mode a
+  run will get, and bibr chooses the mode for each run as it does without setup (a
+  test already held the two to the same answer). A line in `.env` held every later
+  run to the answer of the day setup ran: a run with another `--llm` or `--ocr`, on
+  a different card, or under a container's memory limit kept a mode that no longer
+  fit it. Merging into an existing `.env` comments out the line an earlier setup
+  wrote and says so; a value the rule never gives on that machine (`keep_all`, or
+  `aggressive` where there is room) is yours and stays. Set `PIPELINE_MEMORY_MODE`
+  or pass `--memory` to hold runs to one mode.
+- An ONNX run no longer imports torch to place the section and paper classifiers.
+  Where torch is installed that import cost about 480 MB of resident memory for a
+  model torch never ran; where it is not (the gpu extra alone), the classifiers
+  were told there was no card and stayed on the CPU. onnxruntime's CUDA provider
+  and nvidia-smi now answer for an ONNX run, and torch for `ML_RUNTIME=torch` or an
+  overridden classifier.
+- The reference parser no longer waits for the process-wide inference lock when it
+  runs on onnxruntime's CPU provider, so the papers of a chunk parse their
+  references at the same time. The lock stays for every other provider and for
+  torch models, which it was written for. Four threads parsing the references of 20
+  papers took 96 s against 164 s on three cores, with identical output.
+- A model file missing from the Hub cache under `HF_HUB_OFFLINE` is reported as
+  that: a warning naming the repository and revision, where an INFO line said no
+  ONNX bundle existed and the torch fallback's unrelated error was the only
+  warning; and the first-run notice no longer says it is downloading.
+- Removed code nothing called: `citation_matcher.match_year_less`,
+  `self_citation.split_printed_authors` (the export's name splitter does its job),
+  `research_integrity.copy_integrity_statements`,
+  `statement_tagger.pipeline.tagger_confirms_rules`, `merge_split.detect_merges`,
+  the classifiers' `from_pretrained` constructors, and the `table_title` and
+  `chart_title` caption labels, which the layout model does not emit.
+
+### Fixed
+
+- A word hyphenated at a page or column break is joined like one hyphenated at a
+  line end: "edu-" and "cated" on two pages read "educated", where they read
+  "edu- cated".
+- Table and figure captions in Dutch, German, French, Spanish, Portuguese, Italian,
+  Polish and the Scandinavian languages ("Tabel 1", "Tabelle 1", "Tableau 1",
+  "Figura 1", "Abbildung 1") reach their table or figure. They were left in the
+  body text, and the tables had no caption or label.
+- A title printed in two languages on rows of their own is exported in its first
+  language in fast mode, not as one title running through both, and the subtitle of
+  the second version is no longer joined to the first.
+- A subtitle opening with "A" ("A systematic review") is kept; names such as "Li
+  Wei" are not read as roman numerals of a series; the "*" of "A*" stays in a
+  title; and a journal's name inside a word of the title ("Nature" in "signature")
+  no longer marks the title as a masthead.
+- Only the author whose symbol stands at the correspondence note is flagged as
+  corresponding. With "* Corresponding author … † These authors contributed
+  equally" in one footnote, the † authors were flagged too.
+- E-mail lists in braces (`{alice, bob}@uni.edu`) give one address per name; an
+  author with a compound given name ("Mary Ann", "Mary-Ann") matches
+  `mary.smith@`; and a "pg" that OCR read for an envelope keeps marking the
+  corresponding author's address.
+- "Correspondence to:", "Corresponding author:" and "E-mails:" lines are cut from
+  affiliations, a UK postcode no longer costs an affiliation its city, and
+  "supported by NSF and NIH" names two funders where the pair was dropped as
+  author initials.
+- A printed byline of more than 64 authors is no longer cut to 64 in fast mode.
+  The cap is for a generative model that loops on its output; it now applies to
+  model output only.
+- A name suffix stays with the family name ("Smith Jr.") in the authors read from a
+  CRediT statement or a printed "How to cite" line, a group name there fills no
+  person, and that line is found on the first page read, not only on page 1 of the
+  PDF (`--pages 5-12`).
+- "(Smith, 2020a, b)" and "Lansbury and Mayes (1996a,b)" link both works;
+  "O’Brien" and "O'Brien" are one name; and "Eqs. (1)-(3)" and "Equations (2) and
+  (3)" link every equation they name.
+- Two references that share a title, or whose titles one contains the other, no
+  longer take the same row of the reference list. Both lost their numbered
+  citations when they did.
+- A reference wrapped across a column or page no longer exports the line break
+  inside its title, authors or container.
+- A single reference whose title opens with a number ("24 Hours in A&E") keeps the
+  number; a year in the title of a work "in press" is not taken as its year;
+  "retrieved" inside a title is not read as an access date; and a numbered entry is
+  not split at "2. überarb. Aufl.".
+- A footnote whose number the text layer joins to its first word ("10Beginning …")
+  or that is marked with "∗" (U+2217) gets its label and its link from the text.
+- The rows of a table nested in a cell of an HTML table are no longer read a second
+  time as rows of the outer table.
+- An eLife article's own DOI is selected over the numbered DOIs of its abstract and
+  digest (`…/eLife.00013.001`), and "Let F(x) = 3" is not exported as an F statistic
+  with `x` degrees of freedom.
+- `bibr.Chewer`: a `chew()` from a second thread while another is running waits for
+  it. It used to start on the running loop, process the file beside the other, and
+  raise, so the file was read and its result thrown away.
+- An LLM that answers `keywords` or a funder's `award_ids` with one string is read
+  as one keyword or award, not one per character.
+- Two more inputs that took too long: a first page of thousands of tiny regions
+  (2,000 took 20 s in the front-matter region lookup), and a footnote-mark range
+  such as "1 – 3000000".
+- A DOI printed with typeset hyphens (U+2010, U+2011, an en dash or a minus sign) is
+  read whole. The DOI pattern stopped at the first of them, so
+  `10.1234/s1‐2020‐01838‐x` was selected as `10.1234/s1`.
+- A text-layer region whose font is broken is no longer accepted because it also
+  holds one unmapped glyph: only the marks bibr inserts are left out of the
+  usability check, not the U+FFFD characters the PDF itself carries.
+- "(Smith, 2020, 2021)" links both years when one of them is ambiguous between two
+  Smiths. The year already linked hid the other from the resolver.
+- JATS tables: a cell spanning columns or rows fills every slot it covers, as in HTML
+  and DOCX tables, instead of shifting the rows below it to the left. A JATS body
+  with several reference lists and no back matter reads all of them, not the first.
+- DOCX: text boxes written by Word 2010 and later (`mc:AlternateContent`) and VML
+  text boxes are read; a word split across formatting runs inside a text box stays
+  one word.
+- EPUB: a self-closing `<title/>`, `<script/>`, `<style/>`, `<ul/>` or `<textarea/>`
+  in a chapter no longer swallows the text after it (the whole book, for the first
+  three).
+- A DOCX reference list with a long hyphenated run of capitals ("A-B-C-…") no longer
+  takes exponential time in the entry-start pattern (24 hyphens took 10 s), and an
+  unbroken CJK row of several thousand characters no longer takes seconds in the
+  front-matter address pattern.
+- `$$\text{hello {world} foo}$$` is unwrapped like any other `\text{}` wrapper.
+- A display formula holding a statistic that an earlier pass already read
+  (`$$t = 2.1, p = .03$$`) no longer yields `t = "2.1, p = .03"` and a duplicate `p`.
+- "10 pg ml" near an e-mail address is not read as a corresponding-author marker.
+- The geometric reference tagger's gate declines a NaN score instead of reading it
+  as zero.
+- A reference the parser's tokenizer reduces to no tokens (zero-width characters
+  only, with a BERT-normalizer bundle) no longer fails its whole batch, and the CRF
+  segmentation fallback keeps a reference whose first tag is lost where two windows
+  meet.
+- `CROSSREF_REDIS_CACHE` works across `asyncio.run` calls and across threads with
+  their own loops. The shared client's Redis connection belonged to the first loop,
+  and later lookups failed with "Event loop is closed" and went to Crossref again.
+  The ROR client likewise keeps one HTTP pool per live loop instead of dropping and
+  rebuilding it on every switch.
+- The native NuExtract backend connects with the 5 s connect timeout of the other
+  providers, not twice `LLM_TIMEOUT_SECONDS`.
+- Shutdown and cancellation: classifier resources closed while they are still
+  loading no longer end up loaded; Ctrl-C while the OCR consensus server starts
+  closes the progress display and the recognizers already built; a managed
+  llama.cpp or Rapid-MLX OCR server is stopped even when closing its HTTP client
+  fails; the cloud OCR client closes its SDK connection pool; `bibr demo` stops the
+  model servers it started when Gradio exits; a second Ctrl-C during a remote
+  batch's drain keeps the outcomes of the jobs that had finished.
+- The front-role classifier loads off the event loop (about 4 s on the first request
+  of each `bibr serve` worker), and cloud OCR encodes page crops off it.
+
+### Security
+
+- The lock moves the OpenTelemetry packages to 1.45.2 (0.66b2 for the beta ones).
+  `opentelemetry-api` 1.45.1 takes polynomial time on a crafted `traceparent`
+  header in `TraceContextTextMapPropagator.extract()` (CVE-2026-126360). bibr does
+  not import OpenTelemetry itself; the `mcp` and `vllm` extras bring it in.
+
 ## [0.9.1] - 2026-11-13
 
 0.9.0 was tagged but never published: its release run failed tests on macOS and

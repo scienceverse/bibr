@@ -262,7 +262,6 @@ def _write_chunk_results(
             continue
 
         processed += 1
-        json_str = json.dumps(fs.result_json, **json_kwargs)
 
         sink = fs.artifact_sink
         sink_path = sink.destination_path(fs) if sink is not None else None
@@ -289,7 +288,7 @@ def _write_chunk_results(
             console.print(f"  [green]✓ {escape(fs.path.name)}[/green] → {escape(str(out_file))}")
             _print_validation_line(console, fs.result_json)
         elif output_path is None:
-            _write_stdout_json(json_str)
+            _write_stdout_json(json.dumps(fs.result_json, **json_kwargs))
             if not is_batch:
                 total_elapsed = time.monotonic() - total_t0
                 console.print(f"  [green]✓[/green] Done ({total_elapsed:.1f}s)")

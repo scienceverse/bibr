@@ -776,10 +776,12 @@ class _ManagedRapidMlxOcrClient:
         server = self._server
         self._http_client = None
         self._server = None
-        if http_client is not None:
-            await http_client.shutdown()
-        if server is not None:
-            server.shutdown()
+        try:
+            if http_client is not None:
+                await http_client.shutdown()
+        finally:
+            if server is not None:
+                server.shutdown()
 
 
 @register

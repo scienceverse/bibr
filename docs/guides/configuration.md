@@ -307,7 +307,7 @@ Silicon when that executable is available, otherwise vllm-mlx; llama.cpp on
 Windows, CUDA cards below 10 GB and CUDA cards older than Ampere (compute
 capability below 8.0); and vLLM on other Linux/CUDA systems with at least
 10 GB (or when VRAM detection is unavailable). With the same card it picks the
-model, the memory mode and the OCR that `bibr setup` writes, except on a 10–11 GB
+model and the OCR that `bibr setup` writes and the memory mode it shows, except on a 10–11 GB
 card where setup found a CUDA llama.cpp server and wrote `LLM_BACKEND=llama-cpp`
 (see [choosing an extraction model](extraction-models.md#on-10-and-11-gb-cards)):
 `--llm local` never reads `PATH` and keeps vLLM there. After such a setup, run
@@ -424,7 +424,9 @@ chain does the same whenever the LLM runs on llama.cpp. Cards below 12 GB
 whose LLM server bibr manages get the aggressive memory mode
 (`PIPELINE_MEMORY_MODE=aggressive`, 3 papers a chunk), which unloads bibr's
 own models before each start of the LLM; with a cloud or remote LLM, only
-cards of 8 GB or less do. A managed llama.cpp LLM server stops before each
+cards of 8 GB or less do, and not even those when nothing in the run can load
+onto the card (no OCR engine to start, and an install without a CUDA
+onnxruntime or torch). A managed llama.cpp LLM server stops before each
 start of GLM-OCR on llama.cpp in the aggressive mode, and in the others only
 when the memory free cannot also hold GLM-OCR (2.25 GiB) and 1 GiB for bibr's
 models. In the balanced mode, when the memory free cannot

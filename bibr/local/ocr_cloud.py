@@ -276,7 +276,8 @@ class CloudOcrClient:
         if time.monotonic() < getattr(self, "_rate_limited_until", 0.0):
             raise self._quota_error()
 
-        image_b64 = pil_to_base64_glmocr(image)
+        # Pillow work, threaded off the loop as the HTTP OCR clients do.
+        image_b64 = await asyncio.to_thread(pil_to_base64_glmocr, image)
         vision_prompt = self._resolve_prompt(prompt)
         img = InstructorImage.from_raw_base64(image_b64)
 
@@ -421,8 +422,11 @@ class CloudOcrClient:
 
     async def shutdown(self) -> None:
         """Release resources."""
+        from bibr.clients.llm import _aclose_sdk_client
+
         self._loaded = False
-        self._client = None
+        client, self._client = self._client, None
+        await _aclose_sdk_client(getattr(client, "client", None))
         await self._rate_limiter.close()
         logger.info("CloudOcrClient(%s) shut down", self._provider)
 

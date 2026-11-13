@@ -46,6 +46,47 @@ _XML_DECLARED_ENCODING_RE = re.compile(
 )
 
 
+# A self-closing tag in XHTML is an empty element; HTML ignores the slash, so
+# "<title/>", "<script src=.../>" or "<a id=x/>" would open an element that
+# swallows what follows (to the end of the book, for the text-only elements).
+_HTML_VOID_ELEMENTS = frozenset(
+    [
+        "area",
+        "base",
+        "basefont",
+        "bgsound",
+        "br",
+        "col",
+        "command",
+        "embed",
+        "frame",
+        "hr",
+        "img",
+        "input",
+        "keygen",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    ]
+)
+_SELF_CLOSING_TAG_RE = re.compile(
+    r"<([A-Za-z][^\s/>]*)((?:[^>\"'/]|\"[^\"]*\"|'[^']*'|/(?!>))*+)/>"
+)
+
+
+def _expand_self_closing_tags(text: str) -> str:
+    def expand(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name.lower() in _HTML_VOID_ELEMENTS:
+            return match.group(0)
+        return f"<{name}{match.group(2).rstrip()}></{name}>"
+
+    return _SELF_CLOSING_TAG_RE.sub(expand, text)
+
+
 @dataclass
 class EpubDocument:
     html_bytes: bytes
@@ -101,7 +142,7 @@ def _decode_spine_document(data: bytes) -> str:
         if declared is not None and not declared.name.startswith("utf-16"):
             encoding = declared.name
     text: str = webencodings.decode(data, encoding, errors="replace")[0]
-    return text
+    return _expand_self_closing_tags(text)
 
 
 def _read_zip_member(zf: zipfile.ZipFile, name: str) -> bytes:

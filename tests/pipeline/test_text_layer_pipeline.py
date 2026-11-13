@@ -93,13 +93,13 @@ async def test_text_layer_run_reads_every_region_without_ocr(
     from bibr.ocr import text_layer
 
     reads = []
-    real_read = text_layer.read_text_layer
+    real_apply = text_layer.apply_text_layer_read
 
-    def read_text_layer(*args, **kwargs):
-        reads.append(real_read(*args, **kwargs))
-        return reads[-1]
+    def apply_text_layer_read(fs, read):
+        reads.append(read)
+        real_apply(fs, read)
 
-    monkeypatch.setattr(text_layer, "read_text_layer", read_text_layer)
+    monkeypatch.setattr(text_layer, "apply_text_layer_read", apply_text_layer_read)
     pdf = tmp_path / "smoke.pdf"
     pdf.write_bytes(smoke._build_pdf(smoke._LINES))
     pipeline, rm = _pipeline(monkeypatch, ocr_backend="text-layer")

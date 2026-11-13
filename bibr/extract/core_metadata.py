@@ -119,9 +119,6 @@ _CONTACT_DETAILS_RE = re.compile(r"correspond|e-?mail", re.IGNORECASE)
 # as an end-of-article affiliation list does. Acknowledgment and funding prose
 # ("We thank the 2 University hospitals in Oslo") mentions numbers mid-sentence.
 _LATE_DEFINITION_LINE_RE = re.compile(r"\s*\d{1,2}\s*[A-Z\u00c0-\u00de]")
-_CORRESPONDENCE_SUFFIX_RE = re.compile(
-    r"\s+(?:corresponding\s+author|correspondence)\s*:", re.IGNORECASE
-)
 # What a byline may print between an author's name and their affiliation
 # numbers: degrees ("Doe MSci1,2", "Roe, MD,1"), one comma ("Poe ,1,2,3" where an
 # ORCID icon was dropped) and symbol markers ("Moe#*1", "Hale*,\u2020,1").
@@ -1862,6 +1859,7 @@ _NAME_PARTICLES = frozenset(
     }
 )
 _CREDIT_NAME_MAX_TOKENS = 5
+_NAME_SUFFIXES = frozenset({"jr", "sr", "ii", "iii", "iv"})
 
 
 def _is_credit_name(value: str) -> bool:
@@ -1880,16 +1878,22 @@ def _is_credit_name(value: str) -> bool:
 
 
 def _split_person_name(value: str) -> tuple[str, str] | None:
-    """Split a printed full name into (given, family), carrying particles."""
+    """Split a printed full name into (given, family), carrying particles and a suffix."""
 
     tokens = value.split()
     if len(tokens) < 2:
         return None
+    # "Kim II" is a family and a given name; only a third token makes a suffix.
+    suffix = (
+        [tokens.pop()]
+        if len(tokens) > 2 and tokens[-1].casefold().rstrip(".") in _NAME_SUFFIXES
+        else []
+    )
     start = len(tokens) - 1
     while start > 1 and tokens[start - 1].casefold().strip(".") in _NAME_PARTICLES:
         start -= 1
     given = " ".join(tokens[:start])
-    family = " ".join(tokens[start:])
+    family = " ".join(tokens[start:] + suffix)
     if not given or not family:
         return None
     return given, family
@@ -1961,7 +1965,8 @@ _NOT_A_KEYWORD_ROW_RE = re.compile(
 # "@". Retried from every position, a run of "," or "@." took seconds.
 _AFFILIATION_CONTACT_TAIL_RE = re.compile(
     r"(?<![\s,;.])[\s,;.]*(?:"
-    r"\b(?:e-?mail(?:\s+address(?:es)?)?|tel(?:ephone)?|phone|fax|mob(?:ile)?)\s*[:.]+(?:\s|$)"
+    r"\b(?:e-?mails?(?:\s+address(?:es)?)?|tel(?:ephone)?|phone|fax|mob(?:ile)?"
+    r"|correspondence(?:\s+to)?|corresponding\s+author)\s*[:.]+(?:\s|$)"
     r"|\be-?mail\s+(?=\S+@)"
     r"|(?<!\S)\S[^\s@]*@\S+\.\w"
     r").*$",
@@ -2404,8 +2409,12 @@ class CoreMetadataExtractor:
             # Author candidates in precedence order. The recovery and the CRediT
             # harvest are produced only while no usable list is in hand, so they
             # can never replace or reorder what the extraction found.
-            authors = self._convert_llm_authors(llm_metadata.authors)
-            self._record_author_anomaly(llm_metadata.authors, authors)
+            tagger_parts = getattr(llm_metadata, "_front_tagger_parts", frozenset())
+            # The tagger labels printed tokens and cannot loop: its byline is
+            # not trimmed like a model's.
+            cap = None if "authors" in tagger_parts else _MAX_LLM_AUTHORS
+            authors = self._convert_llm_authors(llm_metadata.authors, cap=cap)
+            self._record_author_anomaly(llm_metadata.authors, authors, cap=cap)
             authors, transforms = self._sanitize_authors(authors, full_text)
             veto = None
             if resolution is not None:
@@ -2414,7 +2423,6 @@ class CoreMetadataExtractor:
                     veto = "fabricated: absent from the extraction context"
                 elif authors and not self._drop_transliterated_authors(kept, full_text, resolution):
                     veto = "romanised: written in a script the byline does not print"
-            tagger_parts = getattr(llm_metadata, "_front_tagger_parts", frozenset())
             author_source = "front_tagger" if "authors" in tagger_parts else "llm"
             author_trail = [_AuthorProposal(author_source, authors, transforms, veto)]
             usable = authors if veto is None else []
@@ -2924,7 +2932,9 @@ class CoreMetadataExtractor:
             transforms.append("glued_names_split")
         return kept, transforms
 
-    def _record_author_anomaly(self, llm_authors, cleaned: list[PaperAuthor]) -> None:
+    def _record_author_anomaly(
+        self, llm_authors, cleaned: list[PaperAuthor], *, cap: int | None = _MAX_LLM_AUTHORS
+    ) -> None:
         """Record ONE ``AUTHORS_ANOMALY`` warning when the author sanitizer had
         to intervene beyond trivially — a runaway repetition loop (incoming over
         the cap, e.g. NuExtract3-FP8 emitting the same fragment to the token
@@ -2933,10 +2943,10 @@ class CoreMetadataExtractor:
         See :meth:`_convert_llm_authors`."""
         incoming = len(llm_authors)
         kept = len(cleaned)
-        if incoming > _MAX_LLM_AUTHORS:
+        if cap is not None and incoming > cap:
             self._record_metadata_warning(
                 WarningCode.AUTHORS_ANOMALY,
-                f"{incoming} LLM authors exceeds cap {_MAX_LLM_AUTHORS}; kept leading {kept}",
+                f"{incoming} LLM authors exceeds cap {cap}; kept leading {kept}",
             )
         elif incoming and not kept:
             # Total wipeout is always worth a warning even below the drop
@@ -3289,7 +3299,9 @@ class CoreMetadataExtractor:
         return self._format_meta_text(meta_df.iloc[:30])
 
     @staticmethod
-    def _convert_llm_authors(llm_authors) -> list[PaperAuthor]:
+    def _convert_llm_authors(
+        llm_authors, *, cap: int | None = _MAX_LLM_AUTHORS
+    ) -> list[PaperAuthor]:
         """Convert LLM author models to PaperAuthor; strip affiliation markers,
         collapse same-name given/family pairs (consortium echoes), and sanitise
         degenerate output provider-independently.
@@ -3363,8 +3375,8 @@ class CoreMetadataExtractor:
             )
 
         # (d) runaway repetition loop — keep the leading distinct run.
-        if len(authors) > _MAX_LLM_AUTHORS:
-            authors = authors[:_MAX_LLM_AUTHORS]
+        if cap is not None and len(authors) > cap:
+            authors = authors[:cap]
         return authors
 
     def _printed_rows(self) -> dict[int, str]:
@@ -3479,8 +3491,7 @@ class CoreMetadataExtractor:
                     if number not in wanted:
                         continue
                     end = matches[index + 1].start() if index + 1 < len(matches) else len(line)
-                    value = _CORRESPONDENCE_SUFFIX_RE.split(line[match.end() : end], maxsplit=1)[0]
-                    value = _clean_affiliation_value(value)
+                    value = _clean_affiliation_value(line[match.end() : end])
                     # "<digit> <Capital>" is also the shape of a figure or
                     # table caption and of a publication-history line, so the
                     # captured run has to look like an institution before it
@@ -3999,13 +4010,3 @@ class CoreMetadataExtractor:
         if notice_type is None:
             return False, ""
         return True, notice_type
-
-    @staticmethod
-    def _should_suppress_commentary_abstract(
-        paper_type: str | None,
-        abstract: str | None,
-        keywords: list[str] | None,
-    ) -> bool:
-        """Compatibility shim: length/share suspicion never authorizes deletion."""
-        del paper_type, abstract, keywords
-        return False

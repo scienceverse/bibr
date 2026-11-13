@@ -8,7 +8,18 @@ import pandas as pd
 import pytest
 
 from bibr.paper_contents import PaperFigure, PaperTable, Provenance
-from bibr.structure.floats_normalize import merge_figure_panels, merge_table_continuations
+from bibr.structure.floats_normalize import (
+    merge_figure_panels_with_remap,
+    merge_table_continuations_with_remap,
+)
+
+
+def merge_figure_panels(figures):
+    return merge_figure_panels_with_remap(figures)[0]
+
+
+def merge_table_continuations(tables):
+    return merge_table_continuations_with_remap(tables)[0]
 
 
 def _fig(fid: int, page: int, caption: str | None, image: str | None = None) -> PaperFigure:

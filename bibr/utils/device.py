@@ -185,6 +185,23 @@ def detect_torch_device() -> str:
     return "cpu"
 
 
+def torch_cuda_possible() -> bool:
+    """Whether torch could put a model on a CUDA device in this process.
+
+    False without torch. An installed torch that is not imported yet counts as
+    able to: asking it would import it, which the ONNX runtime path never does.
+    """
+    loaded = _torch_module(required=False)
+    if loaded is None:
+        from bibr.utils.ml_runtime import torch_available
+
+        return torch_available()
+    with warnings.catch_warnings():
+        # An old driver makes is_available() warn on every call.
+        warnings.simplefilter("ignore")
+        return bool(loaded.cuda.is_available())
+
+
 def report_device(component: str, device: str, *, gpu_capable: bool = True) -> None:
     """Log where a model loaded, escalating the silent slow-path to WARNING.
 

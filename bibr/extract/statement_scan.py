@@ -1,16 +1,15 @@
-"""Lexical-anchor fallback for research-integrity statements.
+"""Lexical anchors for research-integrity statements.
 
-:func:`copy_integrity_statements` (research_integrity.py) is a pure copy that
-only fires when the section classifier tagged a section as FUNDING / COI /
-ETHICS / OPEN_DATA. Real papers routinely bury these statements inside a
-mis-typed section — run-in bold labels ("Declaration of conflicting interests:")
+Real papers routinely bury these statements inside a section typed as
+something else: run-in bold labels ("Declaration of conflicting interests:")
 inside a Conclusions/Discussion block, an ethics sentence in the Methods, a
 funding sentence in the Acknowledgments. This module scans every sentence for
-word-boundary anchor phrases and recovers the verbatim statement for any field
-the copy pass left ``None``.
+word-boundary anchor phrases and recovers the verbatim statement.
+:mod:`bibr.extract.integrity_statements` resolves the fields with these
+anchors and checks; :func:`scan_statements_fallback` is the standalone form,
+which fills only the fields still ``None``.
 
-Pure lexical (no LLM), so it is safe to run alongside the copy pass, including
-under ``--no-llm``. Each recovered field appends a ``STATEMENT_LEXICAL_FALLBACK``
+Pure lexical (no LLM), so it also runs under ``--no-llm``. Each recovered field appends a ``STATEMENT_LEXICAL_FALLBACK``
 warning naming the field to ``contents.processing_warnings`` (surfaced onto
 ``Paper.processing_warnings`` in post_parse).
 """
@@ -704,8 +703,7 @@ def lexical_fallback_warning(field: str) -> ProcessingWarning:
 def scan_statements_fallback(contents: PaperContents, metadata: PaperMetadata) -> None:
     """Fill still-``None`` statement fields from lexical anchors in the body.
 
-    Runs after :func:`copy_integrity_statements`; only touches fields the copy
-    pass left unset. Records a ``STATEMENT_LEXICAL_FALLBACK`` warning for each
+    Only touches fields that are still unset. Records a ``STATEMENT_LEXICAL_FALLBACK`` warning for each
     field it fills."""
     sentences = [s for s in contents.sentences if not s.is_display_formula]
     if not sentences:

@@ -1,7 +1,7 @@
 import pytest
 
 from bibr.extract import merge_split
-from bibr.extract.merge_split import detect_merges, find_interior_onsets, split_merged_refs
+from bibr.extract.merge_split import find_interior_onsets, split_merged_refs
 
 # --- merged segments that MUST split (one onset each) ---
 P_PERSONAL = (
@@ -306,10 +306,8 @@ def test_numbered_merge_with_next_author_named_like_an_edition_word_still_splits
 
 
 def test_numbered_bibliography_does_not_split_journal_year_tails():
-    candidates = detect_merges(NUMBERED_VANCOUVER_SINGLES)
     out, n_new = split_merged_refs(NUMBERED_VANCOUVER_SINGLES)
 
-    assert candidates == []
     assert out == NUMBERED_VANCOUVER_SINGLES
     assert n_new == 0
 
@@ -317,10 +315,8 @@ def test_numbered_bibliography_does_not_split_journal_year_tails():
 def test_numbered_bibliography_still_splits_sequential_numbered_merge():
     refs = [P_NUM_MIDLIST, N_NUM_SINGLE]
 
-    candidates = detect_merges(refs)
     out, n_new = split_merged_refs(refs)
 
-    assert [candidate.index for candidate in candidates] == [0]
     assert n_new == 2
     assert out[0].startswith("6. Bateson")
     assert out[1].startswith("7. ten Cate")
@@ -454,13 +450,6 @@ def test_onset_lands_at_the_second_reference_start():
 def test_single_references_yield_no_onset():
     for s in SINGLES:
         assert find_interior_onsets(s) == [], f"false split on: {s[:60]}..."
-
-
-def test_detect_merges_flags_only_merged():
-    cands = detect_merges([P_PERSONAL, N_CLEAN_SINGLE, P_CORP2])
-    assert [c.index for c in cands] == [0, 2]
-    assert all(c.offsets for c in cands)
-    assert all(len(c.contexts) == len(c.offsets) for c in cands)
 
 
 def test_split_separates_a_merged_pair():

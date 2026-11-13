@@ -1,7 +1,7 @@
-"""The CUDA tier table: what ``bibr setup`` writes equals what the runtime picks.
+"""The CUDA tier table: what ``bibr setup`` plans equals what the runtime picks.
 
 For each card row, setup's recommended plan (``LLM_BACKEND``, ``LLM_LOCAL_MODEL``,
-``PIPELINE_MEMORY_MODE``, the OCR its ``OCR_BACKEND`` resolves to, and the
+the memory mode it shows, the OCR its ``OCR_BACKEND`` resolves to, and the
 managed vLLM server's speculative decoding) must equal the runtime's own
 resolution with nothing set but ``--llm local``: the ``local`` alias, the
 default model, the auto memory mode, the automatic ``paddle`` OCR chain and
@@ -122,17 +122,22 @@ def _runtime(gb: float) -> tuple[str, str, str, str, str | None]:
 
 
 def _setup(gb: float) -> tuple[str, str, str, str, str | None]:
-    env = _build_recommended_setup(
-        platform_key="cuda",
-        accelerator_memory_gb=gb,
-        system_memory_gb=32.0,
-        sys_platform="linux",
-        machine="x86_64",
-    ).env
-    return _plan(env, gb)
+    return _plan(
+        _build_recommended_setup(
+            platform_key="cuda",
+            accelerator_memory_gb=gb,
+            system_memory_gb=32.0,
+            sys_platform="linux",
+            machine="x86_64",
+        ),
+        gb,
+    )
 
 
-def _plan(env: dict[str, str], gb: float) -> tuple[str, str, str, str, str | None]:
+def _plan(setup, gb: float) -> tuple[str, str, str, str, str | None]:
+    env = setup.env
+    # The memory mode is the plan's to show and the run's to choose: never written.
+    assert "PIPELINE_MEMORY_MODE" not in env
     ocr = env["OCR_BACKEND"]
     if ocr == "paddle":
         ocr = registry.automatic_backend_names(llm_backend=env["LLM_BACKEND"])[0]
@@ -142,7 +147,7 @@ def _plan(env: dict[str, str], gb: float) -> tuple[str, str, str, str, str | Non
     return (
         backend,
         model,
-        env["PIPELINE_MEMORY_MODE"],
+        setup.memory_mode,
         ocr,
         _spec_decode(backend, model, ocr, gb, "auto"),
     )
@@ -367,7 +372,7 @@ def test_setup_with_a_llama_server_on_path(card, llama_server, row, expected):
 
     setup = _setup_with_server(gb)
 
-    assert _plan(setup.env, gb) == expected
+    assert _plan(setup, gb) == expected
     # The runtime given setup's .env serves setup's plan.
     assert _runtime_with_env(setup.env, gb) == expected
     pair_card = name in ("RTX 3080 10 GB", "11 GB card")
@@ -411,7 +416,7 @@ def test_setup_reads_path_when_it_probes_the_machine_itself(card, llama_server, 
     llama_server("cuda b11282")
     monkeypatch.setattr(setup_wizard, "detect_hardware", lambda: ("cuda", gb))
     monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 32.0)
-    assert _plan(_build_recommended_setup().env, gb) == _PAIR
+    assert _plan(_build_recommended_setup(), gb) == _PAIR
 
 
 def test_a_described_machine_never_reads_path(card, llama_server):
@@ -445,7 +450,7 @@ def test_a_unified_llama_binary_qualifies_through_llama_serve(card, llama_server
     gb = card(10240, 8.6)
     record = llama_server("cuda b11282", prefix=("/usr/local/bin/llama", "serve"))
     setup = _setup_with_server(gb)
-    assert _plan(setup.env, gb) == _PAIR
+    assert _plan(setup, gb) == _PAIR
     assert "/usr/local/bin/llama serve (build 11282)" in setup.runtime_summary
     assert record.commands == [
         ["/usr/local/bin/llama", "serve", "--list-devices"],

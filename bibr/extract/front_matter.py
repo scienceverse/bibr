@@ -7,6 +7,7 @@ its deliberately short content preview is never promoted into candidate text.
 
 from __future__ import annotations
 
+import bisect
 import difflib
 import hashlib
 import logging
@@ -26,7 +27,7 @@ from bibr.paper_contents import (
 )
 from bibr.structure.section_classifier import TRUSTED_TYPE_CONFIDENCE
 from bibr.structure.section_tree import body_numbered_section_ids
-from bibr.utils.text import DOI_CANDIDATE_RE, normalize_doi
+from bibr.utils.text import DOI_CANDIDATE_RE, DOI_HYPHENS, normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
 if TYPE_CHECKING:
@@ -313,8 +314,50 @@ def _same_bbox(
     return all(abs(a - b) <= 1e-6 for a, b in zip(left, right, strict=True))
 
 
+class _RegionIndex:
+    """Region summaries bucketed by page and top-left corner, for geometry lookups.
+
+    Every sentence and heading looks its region up, so a scan over all regions
+    per lookup made a page of a few thousand small regions take minutes.
+    """
+
+    # Much wider than ``_same_bbox``'s tolerance, so a match is always in the
+    # cell of the looked-up corner or a neighbouring one; ``_same_bbox`` decides.
+    _CELL = 1e-3
+
+    def __init__(self, summaries: list[RegionSummary]) -> None:
+        self._cells: dict[tuple[int, int, int], list[RegionSummary]] = {}
+        for summary in summaries:
+            key = self._key(summary.page, summary.bbox)
+            if key is not None:
+                self._cells.setdefault(key, []).append(summary)
+
+    @classmethod
+    def _key(cls, page: int, bbox: object) -> tuple[int, int, int] | None:
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            return None
+        if not all(isinstance(part, (int, float)) and math.isfinite(part) for part in bbox):
+            return None
+        return page, math.floor(bbox[0] / cls._CELL), math.floor(bbox[1] / cls._CELL)
+
+    def same_bbox(
+        self, page: int, bbox: tuple[float, float, float, float] | None
+    ) -> list[RegionSummary]:
+        key = self._key(page, bbox)
+        if key is None:
+            return []
+        _, x, y = key
+        return [
+            summary
+            for dx in (-1, 0, 1)
+            for dy in (-1, 0, 1)
+            for summary in self._cells.get((page, x + dx, y + dy), ())
+            if _same_bbox(summary.bbox, bbox)
+        ]
+
+
 def _matching_region_summary(
-    summaries: list[RegionSummary],
+    summaries: _RegionIndex,
     *,
     page: int | None,
     bbox: tuple[float, float, float, float] | None,
@@ -324,8 +367,7 @@ def _matching_region_summary(
 
     if page is None:
         return None
-    page_rows = [summary for summary in summaries if summary.page == page]
-    bbox_rows = [summary for summary in page_rows if _same_bbox(summary.bbox, bbox)]
+    bbox_rows = summaries.same_bbox(page, bbox)
     if section_id is not None:
         section_rows = [summary for summary in bbox_rows if summary.section_id == section_id]
         if len(section_rows) == 1:
@@ -781,9 +823,10 @@ _INSTITUTION_WORD_RE = re.compile(
 )
 # A token of an e-mail address or a link ("jan.peeters[at]example.org",
 # "https://…", "www.…", "example.org"): its lower-case words are names and
-# hosts, not the paper's prose.
+# hosts, not the paper's prose. Anchored at the start of a token, so an unbroken
+# CJK row is scanned once instead of once per character.
 _ADDRESS_TOKEN_RE = re.compile(
-    r"\S*(?:@|\[at\]|\(at\)|://|www\.|[^\W\d_]\.[^\W\d_])\S*", re.IGNORECASE
+    r"(?<!\S)\S*(?:@|\[at\]|\(at\)|://|www\.|[^\W\d_]\.[^\W\d_])\S*", re.IGNORECASE
 )
 
 
@@ -1039,7 +1082,7 @@ def _paragraph_drafts(
         groups.setdefault(key, []).append((source_order, sentence))
 
     drafts: list[_CandidateDraft] = []
-    summaries = list(contents.region_summaries or [])
+    summaries = _RegionIndex(contents.region_summaries or [])
     for (section_id, paragraph_id), members in groups.items():
         raw_text = " ".join(
             sentence.text.strip() for _, sentence in members if sentence.text.strip()
@@ -1134,7 +1177,20 @@ def _heading_drafts(
     policy = policy or FrontRolePolicy()
     reading = reading or _SectionReading()
     predictions = contents.front_role_predictions
-    summaries = list(contents.region_summaries or [])
+    summaries = _RegionIndex(contents.region_summaries or [])
+    # A heading is placed just before the first paragraph of its own or any
+    # later section: the earliest paragraph order from each section id on.
+    first_order_by_section: dict[int, int] = {}
+    for draft in paragraph_drafts:
+        if draft.section_id is not None:
+            first_order_by_section[draft.section_id] = min(
+                draft.source_order, first_order_by_section.get(draft.section_id, draft.source_order)
+            )
+    paragraph_section_ids = sorted(first_order_by_section)
+    first_order_from = [first_order_by_section[section_id] for section_id in paragraph_section_ids]
+    for position in range(len(first_order_from) - 2, -1, -1):
+        first_order_from[position] = min(first_order_from[position], first_order_from[position + 1])
+    last_paragraph_order = max((draft.source_order for draft in paragraph_drafts), default=-1)
     drafts: list[_CandidateDraft] = []
     for section_order, section in enumerate(contents.sections):
         if section.header_is_synthetic:
@@ -1177,19 +1233,11 @@ def _heading_drafts(
                 admitted = _front_gap_heading_is_byline(header, summary, predictions, policy)
             if not admitted:
                 continue
-        following_orders = [
-            draft.source_order
-            for draft in paragraph_drafts
-            if draft.section_id is not None and draft.section_id >= section.section_id
-        ]
-        if following_orders:
-            source_order = min(following_orders) - 1
+        position = bisect.bisect_left(paragraph_section_ids, section.section_id)
+        if position < len(paragraph_section_ids):
+            source_order = first_order_from[position] - 1
         else:
-            source_order = (
-                max((draft.source_order for draft in paragraph_drafts), default=-1)
-                + section_order
-                + 1
-            )
+            source_order = last_paragraph_order + section_order + 1
         drafts.append(
             _CandidateDraft(
                 source_kind="heading",
@@ -2278,7 +2326,7 @@ def _matching_doi_blocks(
         visible = {
             normalized
             for candidate in _block_candidates(block, by_id)
-            for match in _DOI_RE.finditer(candidate.raw_text)
+            for match in _DOI_RE.finditer(candidate.raw_text.translate(DOI_HYPHENS))
             if (normalized := normalize_doi(match.group(0))) is not None
         }
         doi_matches = bool(
@@ -2625,11 +2673,6 @@ _UNVERIFIED = "unverified"
 
 # Funder-registry DOIs name a funder, not a paper.
 _FUNDER_DOI_PREFIX = "10.13039/"
-# Typeset hyphens (U+2010 and kin) stop the DOI pattern early, which cut two
-# different DOIs down to one shared prefix; read them as ASCII hyphens.
-_DOI_HYPHENS = str.maketrans(
-    {"\u00ad": None, **dict.fromkeys("\u2010\u2011\u2012\u2013\u2212\ufe63\uff0d", "-")}
-)
 # Anchored at the start of a token and possessive, so an unbroken CJK row is
 # scanned once instead of once per character.
 _URL_OR_EMAIL_RE = re.compile(r"(?<!\S)[^\s@]*+@\S*|https?://\S*|www\.\S*", re.IGNORECASE)
@@ -3116,7 +3159,7 @@ def _record_identity(
     dois = frozenset(
         doi.casefold()
         for row in window
-        for match in _DOI_RE.finditer(row.raw_text.translate(_DOI_HYPHENS))
+        for match in _DOI_RE.finditer(row.raw_text.translate(DOI_HYPHENS))
         if (doi := normalize_doi(match.group(0))) is not None
         and not doi.startswith(_FUNDER_DOI_PREFIX)
     )

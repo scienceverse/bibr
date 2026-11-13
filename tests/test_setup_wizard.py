@@ -1285,7 +1285,7 @@ def test_recommended_setup_cuda_uses_fully_local_defaults():
     assert setup.env["REF_SEG_STRATEGY"] == "geom"
     assert setup.env["WTPSPLIT_MODEL"] == "sat-6l-sm"
     assert "OCR_ENABLE_LAYOUT" not in setup.env
-    assert setup.env["PIPELINE_MEMORY_MODE"] == "balanced"
+    assert setup.memory_mode == "balanced"
     assert setup.env["CROSSREF_CONSOLIDATE"] == "off"
     # Linux/CUDA needs the vllm extra (paddle-vllm OCR + the managed local LLM);
     # ``local`` resolves to nothing on Linux and used to leave the first chew
@@ -1394,7 +1394,7 @@ def test_recommended_setup_8_gb_cuda_runs_both_halves_on_llama_cpp(vram_gb, ocr_
     assert setup.env["LLM_BACKEND"] == "llama-cpp"
     assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
     assert setup.env["OCR_BACKEND"] == ocr_backend
-    assert setup.env["PIPELINE_MEMORY_MODE"] == "aggressive"
+    assert setup.memory_mode == "aggressive"
     assert "vllm" not in setup.extras
     assert "llama-server" in setup.runtime_summary
 
@@ -1415,7 +1415,7 @@ def test_recommended_setup_runs_cards_below_12_gb_aggressive(vram_gb, mode):
     )
     assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-W4A16"
     assert setup.env["OCR_BACKEND"] == "paddle"
-    assert setup.env["PIPELINE_MEMORY_MODE"] == mode
+    assert setup.memory_mode == mode
 
 
 def test_recommended_setup_windows_uses_the_4b_gguf():
@@ -1483,7 +1483,7 @@ def test_recommended_setup_apple_silicon_warns_about_runtime():
     assert setup.env["OCR_BACKEND"] == "paddle"
     # A 16 GB Mac resolves to balanced (OCR/LLM never coexist; models are small)
     # per the current _auto_memory_mode rule.
-    assert setup.env["PIPELINE_MEMORY_MODE"] == "balanced"
+    assert setup.memory_mode == "balanced"
     assert "demo" in setup.extras
     assert "Apple Silicon" in setup.runtime_summary
     assert "slow" in setup.runtime_summary
@@ -1984,14 +1984,19 @@ def test_smoke_test_real_extraction_no_llm():
         ((None, None), 4.0, "aggressive"),  # no accelerator, low RAM
     ],
 )
-def test_step_memory_mode_persists_resolved_mode(monkeypatch, hardware, ram, expected):
+def test_step_memory_mode_shows_the_resolved_mode_and_writes_nothing(
+    monkeypatch, hardware, ram, expected
+):
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: hardware)
     monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: ram)
+    monkeypatch.setattr("bibr.local.pipeline._cuda_card_stays_empty", lambda *_: False)
 
     wizard = SetupWizard()
-    wizard._step_memory_mode()
+    with wizard.console.capture() as shown:
+        wizard._step_memory_mode()
 
-    assert wizard.env_vars["PIPELINE_MEMORY_MODE"] == expected
+    assert f"Memory mode: {expected}" in shown.get()
+    assert "PIPELINE_MEMORY_MODE" not in wizard.env_vars
 
 
 @pytest.mark.parametrize(
@@ -2010,12 +2015,16 @@ def test_step_memory_mode_follows_the_llm_step(monkeypatch, llm_backend, expecte
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 10.0))
     monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 32.0)
 
+    monkeypatch.setattr("bibr.local.pipeline._cuda_card_stays_empty", lambda *_: False)
+
     wizard = SetupWizard()
     if llm_backend is not None:
         wizard.env_vars["LLM_BACKEND"] = llm_backend
-    wizard._step_memory_mode()
+    with wizard.console.capture() as shown:
+        wizard._step_memory_mode()
 
-    assert wizard.env_vars["PIPELINE_MEMORY_MODE"] == expected
+    assert f"Memory mode: {expected}" in shown.get()
+    assert "PIPELINE_MEMORY_MODE" not in wizard.env_vars
 
 
 # ---------------------------------------------------------------------------
@@ -2614,7 +2623,7 @@ def test_recommended_setup_10_gb_runs_the_pair_on_a_qualifying_llama_server():
     assert setup.env["LLM_BACKEND"] == "llama-cpp"
     assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
     assert setup.env["OCR_BACKEND"] == "glm-llama"
-    assert setup.env["PIPELINE_MEMORY_MODE"] == "aggressive"
+    assert setup.memory_mode == "aggressive"
     assert "vllm" not in setup.extras
     summary = setup.runtime_summary
     assert f"{_LLAMA_SERVER} (build 11282)" in summary
@@ -3070,7 +3079,6 @@ def test_pressing_enter_everywhere_finishes_setup_in_fast_mode(monkeypatch, tmp_
         "WTPSPLIT_MODEL",
         "REF_SEG_STRATEGY",
         "REF_PARSE_STRATEGY",
-        "PIPELINE_MEMORY_MODE",
         "CROSSREF_CONSOLIDATE",
     }
     settings = _read_back(monkeypatch, wizard.env_path)
@@ -3538,7 +3546,6 @@ def test_fast_over_an_existing_env_when_overwriting_writes_only_the_new_settings
         "WTPSPLIT_MODEL",
         "REF_SEG_STRATEGY",
         "REF_PARSE_STRATEGY",
-        "PIPELINE_MEMORY_MODE",
         "CROSSREF_CONSOLIDATE",
     }
     assert "sk-ant-old-key" not in env.read_text()

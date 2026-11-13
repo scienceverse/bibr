@@ -307,7 +307,7 @@ def _pipeline_devices(monkeypatch, *, free_gib, total_gib, **pipeline_kwargs):
     _recording_loaders(monkeypatch, devices)
     monkeypatch.setattr(
         "bibr.pipeline.classifier_resources._cuda_memory_info",
-        lambda: (True, int(free_gib * _GIB), int(total_gib * _GIB)),
+        lambda _settings=None: (True, int(free_gib * _GIB), int(total_gib * _GIB)),
     )
     settings = GlobalSettings()
     # The suite blanks the model ids so nothing downloads; the loaders are fakes.

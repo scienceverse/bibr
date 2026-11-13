@@ -469,8 +469,10 @@ class LlamaCppOcrClient:
         return None
 
     async def shutdown(self) -> None:
-        await self._http_client.shutdown()
-        self._server.shutdown()
+        try:
+            await self._http_client.shutdown()
+        finally:
+            self._server.shutdown()
 
 
 @register

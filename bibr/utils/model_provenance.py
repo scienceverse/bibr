@@ -40,6 +40,8 @@ _LOCK = threading.Lock()
 _ROWS: dict[tuple, dict[str, Any]] = {}
 # (setting, value) -> (root, files) of a local model; listed once per process.
 _FILES: dict[tuple[str, str], tuple[Path, list[Path]]] = {}
+# (WTPSPLIT_MODEL, revision) -> ((value, revision, is_local), bundle file identity).
+_SAT: dict[tuple[str, str | None], tuple[tuple[str, str | None, bool], tuple | None]] = {}
 # The short name of a local model whose own name is empty or private.
 _NEUTRAL_NAME = "local-model"
 # The directories that hold one directory per user (compared without case:
@@ -236,6 +238,39 @@ def _layout_spec(settings: Any) -> tuple[str, str, str | None, str | None, bool]
     return "LAYOUT_MODEL_ID", value, revision, *default
 
 
+def _sat_spec(model: str, revision: str | None) -> tuple[str, str | None, bool]:
+    """The sentence splitter's ``(value, revision, is_local)``.
+
+    Resolving a sealed local bundle hashes every file in it (both ONNX graphs,
+    about a second for the default model), and this runs for every export, so
+    the answer is kept until a file of the bundle changes.
+    """
+    from bibr.segmenter_base import resolve_wtpsplit_model
+
+    key = (model, revision)
+    with _LOCK:
+        cached = _SAT.get(key)
+    if cached is not None:
+        spec, identity = cached
+        if identity is None or identity == _bundle_identity(spec[0]):
+            return spec
+    sat = resolve_wtpsplit_model(model, revision=revision)
+    if sat.is_local:
+        spec = (sat.model_name, None, True)
+        identity = _bundle_identity(sat.model_name)
+    else:
+        prefix = f"{sat.hub_prefix}/" if sat.hub_prefix else ""
+        spec = (f"{prefix}{sat.model_name}", sat.revision, False)
+        identity = None
+    with _LOCK:
+        _SAT[key] = (spec, identity)
+    return spec
+
+
+def _bundle_identity(root: str) -> tuple:
+    return _file_identity(sorted(p for p in Path(root).rglob("*") if p.is_file()))
+
+
 def _rows(settings: Any, *, layout: bool, extraction: bool) -> list[Callable[[], dict[str, Any]]]:
     from bibr.utils.ml_runtime import torch_available
     from bibr.utils.model_overrides import (
@@ -255,14 +290,10 @@ def _rows(settings: Any, *, layout: bool, extraction: bool) -> list[Callable[[],
             )
         )
     from bibr.config import GlobalSettings
-    from bibr.segmenter_base import resolve_wtpsplit_model
 
-    sat = resolve_wtpsplit_model(settings.WTPSPLIT_MODEL, revision=settings.WTPSPLIT_MODEL_REVISION)
-    if sat.is_local:
-        sat_value, sat_revision = sat.model_name, None
-    else:
-        prefix = f"{sat.hub_prefix}/" if sat.hub_prefix else ""
-        sat_value, sat_revision = f"{prefix}{sat.model_name}", sat.revision
+    sat_value, sat_revision, sat_local = _sat_spec(
+        settings.WTPSPLIT_MODEL, settings.WTPSPLIT_MODEL_REVISION
+    )
     sat_default = GlobalSettings.model_fields["WTPSPLIT_MODEL"].default
     sat_override = sat_default != settings.WTPSPLIT_MODEL or bool(settings.WTPSPLIT_MODEL_REVISION)
     builders.append(
@@ -272,7 +303,7 @@ def _rows(settings: Any, *, layout: bool, extraction: bool) -> list[Callable[[],
             sat_value,
             sat_revision,
             sat_override,
-            local=sat.is_local,
+            local=sat_local,
         )
     )
     used = models_in_use(settings) if extraction else set()
@@ -322,6 +353,7 @@ def reset_model_provenance() -> None:
     with _LOCK:
         _ROWS.clear()
         _FILES.clear()
+        _SAT.clear()
 
 
 __all__ = ["export_models", "reset_model_provenance"]

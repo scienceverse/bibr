@@ -24,7 +24,6 @@ from bibr.extract.self_citation import (
     find_printed_citation,
     read_printed_citation,
     same_title,
-    split_printed_authors,
 )
 from bibr.input.file import InputFile
 from bibr.models import PaperAuthor, PaperMetadata, PaperReference
@@ -155,38 +154,6 @@ def test_no_line(rows):
 
 
 # ── Names and titles ────────────────────────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    ("authors", "names", "et_al"),
-    [
-        (
-            "Moreau, L., Okafor, N. A., & Lind, P.",
-            [("L.", "Moreau"), ("N. A.", "Okafor"), ("P.", "Lind")],
-            False,
-        ),
-        (
-            "Moreau L, Okafor NA and De la Cruz P",
-            [("L", "Moreau"), ("NA", "Okafor"), ("P", "De la Cruz")],
-            False,
-        ),
-        ("Moreau, L.; Okafor, N.A.", [("L.", "Moreau"), ("N.A.", "Okafor")], False),
-        ("Lena Moreau, Nkem Okafor", [("Lena", "Moreau"), ("Nkem", "Okafor")], False),
-        (
-            "Moreau L, Okafor N, Lind P, et al.",
-            [("L", "Moreau"), ("N", "Okafor"), ("P", "Lind")],
-            True,
-        ),
-    ],
-)
-def test_author_strings_split_into_names(authors, names, et_al):
-    assert split_printed_authors(authors) == (names, et_al)
-
-
-def test_a_name_that_cannot_be_read_is_none():
-    names, _ = split_printed_authors("Lena Moreau,a Nkem Okafor *b")
-    assert names[0] == ("Lena", "Moreau")
-    assert None in names
 
 
 def test_titles_match_across_case_accents_and_punctuation():

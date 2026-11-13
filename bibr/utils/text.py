@@ -106,6 +106,13 @@ DOI_CANDIDATE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Typeset hyphens (U+2010 and kin) stop DOI_CANDIDATE_RE early, which cuts a DOI
+# down to its first hyphen-free stretch; read them as ASCII hyphens, and drop
+# soft hyphens.
+DOI_HYPHENS = str.maketrans(
+    {"\u00ad": None, **dict.fromkeys("\u2010\u2011\u2012\u2013\u2212\ufe63\uff0d", "-")}
+)
+
 # Bare DOI pattern: registrant body then a non-whitespace suffix that does not
 # end on a hyphen. A DOI printed across a line wrap breaks at one of its own
 # hyphens ("10.1037/0033-" / "2909.115.1.102") and the leading fragment would

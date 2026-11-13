@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, Unpack, cast
@@ -733,6 +734,7 @@ class Chewer:
         self._kwargs["mode"] = _preflight_llm(self._settings, self._kwargs)
         self._pipeline: Any = None
         self._runner: asyncio.Runner | None = None
+        self._loop_lock = threading.Lock()
         self._closed = False
 
     def _ensure_pipeline(self) -> Any:
@@ -809,16 +811,23 @@ class Chewer:
                 "Chewer.chew() cannot run inside an active event loop "
                 "(e.g. Jupyter) — use 'await chewer.achew(...)' instead."
             )
-        if self._runner is None:
-            # One loop for the session's lifetime, so loop-bound resources
-            # (HTTP clients etc.) stay valid across calls. A Runner, not a bare
-            # loop: Ctrl-C cancels the call's task and waits for it to unwind,
-            # where run_until_complete left it pending, to resume inside the
-            # teardown that close() runs on the same loop.
-            self._runner = _private_runner()
-        return self._runner.run(
-            self.achew(path, paper_id=paper_id, batch_size=batch_size, progress=progress)
-        )
+        # The loop runs in one thread at a time. Without the lock a second
+        # thread's Runner.run schedules its chew on the loop the first thread
+        # is running, then raises: the file is processed anyway, alongside the
+        # other, and its result thrown away.
+        with self._loop_lock:
+            if self._closed:
+                raise RuntimeError("this Chewer is closed — create a new one")
+            if self._runner is None:
+                # One loop for the session's lifetime, so loop-bound resources
+                # (HTTP clients etc.) stay valid across calls. A Runner, not a bare
+                # loop: Ctrl-C cancels the call's task and waits for it to unwind,
+                # where run_until_complete left it pending, to resume inside the
+                # teardown that close() runs on the same loop.
+                self._runner = _private_runner()
+            return self._runner.run(
+                self.achew(path, paper_id=paper_id, batch_size=batch_size, progress=progress)
+            )
 
     def chew_file(
         self,
@@ -871,11 +880,16 @@ class Chewer:
                 "Chewer.close() cannot run inside an active event loop "
                 "(e.g. Jupyter) — use 'await chewer.aclose()' instead."
             )
-        runner, self._runner = self._runner or _private_runner(), None
-        try:
-            runner.run(self.aclose())
-        finally:
-            runner.close()  # cancels and drains anything still pending
+        # Waits for a chew running in another thread instead of closing the
+        # pipeline under it.
+        with self._loop_lock:
+            if self._closed:
+                return
+            runner, self._runner = self._runner or _private_runner(), None
+            try:
+                runner.run(self.aclose())
+            finally:
+                runner.close()  # cancels and drains anything still pending
 
     def __enter__(self) -> Chewer:
         return self

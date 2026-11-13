@@ -13,6 +13,7 @@ from collections.abc import Set as AbstractSet
 
 from bibr.input.consolidate_text import (
     DOI_URL_CONTEXT_RE,
+    _dehyphenate_word_linewraps,
     clean_formula_text,
     clean_text_content,
     strip_affiliation_markers,
@@ -54,6 +55,10 @@ _BARRIER_MIN_REGION_WIDTH = 200
 # Roe^{3}"); body prose usually ends in terminal punctuation. Only rows of
 # this shape are stripped on a sliced front page before its first heading.
 _BYLINE_SHAPED_MAX_CHARS = 200
+# A region ending in one of these after a word may end in a line wrap. The
+# text either side the keep-or-join rule reads (its language, the token).
+_WRAP_HYPHENS = frozenset("-‐‑")
+_WRAP_CONTEXT_CHARS = 200
 
 
 class TextHandlersMixin:
@@ -212,17 +217,15 @@ class TextHandlersMixin:
                 same_page and self._should_join(self._carry_over.text, text) and crosses_barrier_ok
             )
             if same_page_join or cross_page_continuation:
-                joiner = "" if self._is_url_wrap_join(self._carry_over.text, text) else " "
+                prefix, joiner = self._join_parts(self._carry_over.text, text)
                 if not same_page and isinstance(self._carry_over.page, int):
                     # Record where this page's text starts so the flushed
                     # sentences are attributed to the page they were printed on
                     # rather than to the page the paragraph started on.
                     if not self._carry_over.page_spans:
                         self._carry_over.page_spans.append((0, self._carry_over.page))
-                    self._carry_over.page_spans.append(
-                        (len(self._carry_over.text) + len(joiner), page_number)
-                    )
-                self._carry_over.text += joiner + text
+                    self._carry_over.page_spans.append((len(prefix) + len(joiner), page_number))
+                self._carry_over.text = prefix + joiner + text
                 self._carry_over.provenance.append(prov)
                 self._carry_over.from_ocr = self._carry_over.from_ocr or from_ocr
                 # Advance the cursor to the page just appended. Left stale, a
@@ -514,6 +517,29 @@ class TextHandlersMixin:
         avoiding accidental joins to a new heading or capitalized paragraph.
         """
         return next((char.islower() for char in text if char.isalpha()), False)
+
+    @staticmethod
+    def _join_parts(prev_text: str, next_text: str) -> tuple[str, str]:
+        """The carry-over text and the joiner to put before *next_text*.
+
+        A word hyphenated at the end of a region ("inter-" / "national" across
+        a page or column break) is a line wrap like one inside a region, so it
+        follows the same keep-or-join rule (``_dehyphenate_word_linewraps``):
+        "international", but "well-known".
+        """
+        if TextHandlersMixin._is_url_wrap_join(prev_text, next_text):
+            return prev_text, ""
+        prev = prev_text.rstrip()
+        nxt = next_text.lstrip()
+        if prev[-1:] in _WRAP_HYPHENS and nxt[:1].isalpha():
+            before = " ".join(prev[-_WRAP_CONTEXT_CHARS:].split())
+            after = " ".join(nxt[:_WRAP_CONTEXT_CHARS].split())
+            resolved = _dehyphenate_word_linewraps(f"{before}\n{after}")
+            if resolved == f"{before[:-1]}-{after}":
+                return prev, ""
+            if resolved == before[:-1] + after:
+                return prev[:-1], ""
+        return prev_text, " "
 
     @staticmethod
     def _is_url_wrap_join(prev_text: str, next_text: str) -> bool:

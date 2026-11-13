@@ -106,7 +106,11 @@ class NativeTextStage:
             layer_kwargs = {"include_doc_layer": True, "render_budget": render_budget(settings)}
         native_skip_total = 0
         invisible_layer_pages = 0
-        from bibr.ocr.text_layer import is_text_layer_mode, text_layer_fallback_reason
+        from bibr.ocr.text_layer import (
+            is_text_layer_mode,
+            text_layer_fallback_reason,
+            text_layer_stream,
+        )
 
         text_layer_mode = is_text_layer_mode(ctx)
         fallback_reason = text_layer_fallback_reason(getattr(ctx, "resources", None))
@@ -115,6 +119,8 @@ class NativeTextStage:
                 continue
             if layer_kwargs:
                 fs.doc_layer_attempted = True
+            # The text-layer read rides on the inspection's page walk.
+            stream = text_layer_stream(fs, settings) if text_layer_mode else None
             try:
                 inspection = await asyncio.to_thread(
                     inspect_pdf,
@@ -130,6 +136,7 @@ class NativeTextStage:
                     eligible_labels=eligible_labels,
                     reject_invisible_text_layer=settings.ocr.native_text_reject_invisible_layer,
                     **layer_kwargs,
+                    **({"text_layer": stream} if stream is not None else {}),
                 )
             except Exception:  # noqa: BLE001 — complete open failure falls back to OCR
                 for page in fs.layout_results or []:
@@ -169,7 +176,8 @@ class NativeTextStage:
                 )
             _log_invisible_layer_errors(fs.path.name, inspection.component_errors)
             if text_layer_mode:
-                await self._read_text_layer(fs, settings, fallback_reason)
+                read = stream.finish(inspection.layout_results) if stream is not None else None
+                await self._read_text_layer(fs, settings, fallback_reason, read)
 
         if native_skip_total:
             logger.info(
@@ -185,9 +193,9 @@ class NativeTextStage:
         ctx.progress.stage_end(self.name)
 
     @staticmethod
-    async def _read_text_layer(fs, settings, fallback_reason: str | None) -> None:
+    async def _read_text_layer(fs, settings, fallback_reason: str | None, read=None) -> None:
         from bibr.ocr.text_layer import read_file_text_layer
 
         t0 = time.monotonic()
-        await read_file_text_layer(fs, settings, fallback_reason=fallback_reason)
+        await read_file_text_layer(fs, settings, fallback_reason=fallback_reason, read=read)
         fs.stage_times["text_layer"] = time.monotonic() - t0

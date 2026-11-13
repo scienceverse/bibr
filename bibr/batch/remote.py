@@ -723,8 +723,10 @@ class RemoteExecutor:
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
-                for item in tasks.values():
-                    on_outcome(item, _interrupted())
+                # A job that finished while the drain waited keeps its outcome;
+                # only the ones cancelled here are interrupted.
+                for task, item in tasks.items():
+                    on_outcome(item, self._outcome_of(task))
                 raise
             finally:
                 stop_waiter.cancel()

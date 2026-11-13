@@ -44,13 +44,6 @@ logger = logging.getLogger(__name__)
 
 _BUNDLE_FILENAME = "front_role.joblib"
 MODEL_KIND_FRONT_ROLE_V1 = "front_role_v1"
-ROLE_TITLE = "title"
-ROLE_BYLINE = "byline"
-ROLE_AFFILIATION = "affiliation"
-ROLE_ABSTRACT = "abstract"
-ROLE_KEYWORDS = "keywords"
-ROLE_MASTHEAD = "masthead"
-ROLE_REF_HEADER = "ref_header"
 
 
 @dataclass(frozen=True)

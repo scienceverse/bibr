@@ -13,7 +13,7 @@ from bibr.extract.ref_locator import _REF_HEADER_RE, _looks_like_terminal_refere
 from bibr.input.consolidate_text import fix_ocr_artifacts
 from bibr.paper_contents import CanonicalSection
 from bibr.pipeline.identity import DoiCandidate, DoiSelection, ExpectedIdentity
-from bibr.utils.text import CONTROL_CHAR_RE, DOI_CANDIDATE_RE, normalize_doi
+from bibr.utils.text import CONTROL_CHAR_RE, DOI_CANDIDATE_RE, DOI_HYPHENS, normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
 if TYPE_CHECKING:
@@ -52,10 +52,13 @@ _REFERENCE_PREFIX_RE = re.compile(r"^\s*(?:\[\d+[A-Za-z]?\]|\d+[.)]\s)")
 # BMJ's 2013-14 article DOIs (``bmj.f1049``, ``bmj.g2276``), whose e-locators use
 # the same letters. Supplements append a token instead: APA ``.supp``,
 # Copernicus ``-supplement``, MDPI ``/s1`` and PeerJ ``/supp-1`` (PeerJ also
-# prints ``/fig-1`` and ``/table-1``).
+# prints ``/fig-1`` and ``/table-1``). eLife numbered the abstract, digest,
+# figures and decision letters of its 2012-2017 articles with three digits
+# (``eLife.00013.001``); its version DOIs take one (``eLife.88888.3``).
 _COMPONENT_SUFFIX_RE = re.compile(
     r"(?:\.(?:[fgst]0\d{2}|fig\d+|table\d+)[A-Za-z]*"
-    r"|\.supp|-supplement|/[^/]+/s\d+|/(?:fig|table|supp)-\d+)$",
+    r"|\.supp|-supplement|/[^/]+/s\d+|/(?:fig|table|supp)-\d+)$"
+    r"|^10\.7554/elife\.\d+\.\d{3}$",
     re.IGNORECASE,
 )
 # A sentence that labels a figure, table or supplement is a caption, and a DOI in
@@ -410,7 +413,14 @@ _DOI_REGISTRANT_WRAP_RE = re.compile(
 )
 
 
+_DOI_RUN_RE = re.compile(r"\b10\.\d{4,9}/\S*")
+
+
 def _repair_doi_text(text: str) -> str:
+    # Typeset hyphens end the DOI pattern early: read them as ASCII inside a
+    # DOI-shaped run, before the wrap repairs below look for a trailing hyphen.
+    if "10." in text:
+        text = _DOI_RUN_RE.sub(lambda m: m.group().translate(DOI_HYPHENS), text)
     # Bridge the registrant wrap first: the downstream ``consolidate_text``
     # bridges (dot wrap, slash-space) only engage on an intact registrant.
     bridged = _DOI_REGISTRANT_WRAP_RE.sub(r"\1", text) if "10." in text else text
@@ -1202,16 +1212,16 @@ def _agreement_rows(evidence: PdfDoiEvidence) -> list[DoiCandidate]:
         normalized = _canonical_doi(link.doi)
         if normalized is None:
             continue
-        printed = normalized in "".join(link.printed_text.split()).casefold()
+        printed = normalized in "".join(link.printed_text.translate(DOI_HYPHENS).split()).casefold()
         context = "printed_link" if printed else "link_target"
         row(link.uri, normalized, LINK_ANNOTATION, link.page, "link_uri", context)
     for item in evidence.metadata:
-        for match in _DOI_RE.finditer(item.value):
+        for match in _DOI_RE.finditer(item.value.translate(DOI_HYPHENS)):
             normalized = _canonical_doi(match.group(0))
             if normalized is not None:
                 row(match.group(0), normalized, item.source, None, item.key, "pdf_metadata")
     for hidden in getattr(evidence, "hidden", ()):
-        for match in _DOI_RE.finditer(hidden.text):
+        for match in _DOI_RE.finditer(hidden.text.translate(DOI_HYPHENS)):
             normalized = _canonical_doi(match.group(0))
             if normalized is not None:
                 row(match.group(0), normalized, HIDDEN_TEXT, hidden.page, HIDDEN_TEXT, HIDDEN_TEXT)
@@ -1231,7 +1241,7 @@ def _overruns_line(
     """
 
     rest = parsed.normalized[len(reading.normalized) :]
-    joined = ("".join(tail.split()) + line.next_text.lstrip()).casefold()
+    joined = ("".join(tail.split()) + line.next_text.lstrip()).translate(DOI_HYPHENS).casefold()
     if not rest or not joined.startswith(rest):
         return None
     after = joined[len(rest) : len(rest) + 1]

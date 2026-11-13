@@ -65,18 +65,6 @@ class OnnxSectionClassifierModel:
         self._cpu_session = None
         self._cpu_session_lock = threading.Lock()
 
-    @classmethod
-    def from_pretrained(
-        cls, repo_id: str, revision: str = "main", device: str | None = None
-    ) -> OnnxSectionClassifierModel:
-        from bibr.exceptions import ConfigurationError
-        from bibr.utils.ml_runtime import find_onnx_bundle
-
-        bundle = find_onnx_bundle(repo_id, revision, label="section classifier")
-        if bundle is None:
-            raise ConfigurationError(f"No ONNX bundle for section classifier {repo_id}@{revision}")
-        return cls(bundle, device=device)
-
     def check_graph(self) -> None:
         """Run the graph on headings in context, in two shapes ``classify_batch`` sends.
 

@@ -1262,10 +1262,12 @@ class EquationExtractor:
         for content, fmt, span, content_span in latex_spans:
             if _covered(text, content_span, taken):
                 continue
-            if fmt == "inline" and _is_taken(taken, *content_span):
+            if _is_taken(taken, *content_span):
                 # "$p < 0.001^{***}$" is the structured passes' "p < 0.001",
                 # and "$t = 2.1, p = .03$" no t of "2.1, p = .03"
+                # What is left of a formula is a fragment whatever its delimiters.
                 pieces = list(_untaken_runs(text, taken, *content_span))
+                fmt = "inline"
             else:
                 pieces = [(content, span)]
             for piece, piece_span in pieces:
@@ -1329,8 +1331,11 @@ class EquationExtractor:
                 continue
 
             # Split parenthesized df off the LHS ("t(28)" -> "t", "28"),
-            # as the structured passes do.
+            # as the structured passes do. A parenthesis of variables is a
+            # function's argument: "F(x) = 3" is no F test with df "x".
             lhs, df = _split_lhs_df(raw_lhs)
+            if _FUNCTION_ARGUMENT_RE.fullmatch(df):
+                lhs, df = raw_lhs, ""
             results.append(
                 (
                     (start, end),
@@ -1592,6 +1597,9 @@ def _normalize_comp(comp: str) -> str:
 # group that could end anywhere in a run of spaces rescanned the run from
 # each place, quadratic on "t(1 … 2)" or a long LaTeX LHS.
 _LHS_DF_RE = re.compile(r"^(?P<name>.*?\S)\s*\((?P<df>[^()]*)\)\s*$")
+# The variables of a function value, "x" of "F(x)" and "x, y" of "f(x, y)"; a
+# qualifier such as "FWE-corrected" of "P (FWE-corrected)" is longer.
+_FUNCTION_ARGUMENT_RE = re.compile(r"[A-Za-zα-ω](?:\s*,\s*[A-Za-zα-ω])*")
 
 
 def _split_lhs_df(lhs: str) -> tuple[str, str]:

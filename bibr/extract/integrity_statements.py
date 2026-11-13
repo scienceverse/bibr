@@ -220,6 +220,12 @@ _LEGACY_ANCHORS: dict[str, tuple[re.Pattern[str], ...]] = {
         r"code (?:is|are) available",
     ),
 }
+# Whether any of a field's legacy anchors matches, in one pass (see
+# statement_scan._ANCHOR_ANY); positions still come from the single patterns.
+_LEGACY_ANCHOR_ANY: dict[str, re.Pattern[str]] = {
+    field: re.compile("|".join(f"(?:{p.pattern})" for p in patterns), re.IGNORECASE)
+    for field, patterns in _LEGACY_ANCHORS.items()
+}
 _LEGACY_FUNDING_STRONG_ANCHORS = _legacy_compile(
     r"this work was supported",
     r"funded by",
@@ -594,11 +600,7 @@ def _section_rows(contents: PaperContents) -> dict[int, list[PaperSentence]]:
 
 
 def _legacy_categories_in(text: str) -> set[str]:
-    return {
-        field
-        for field, patterns in _LEGACY_ANCHORS.items()
-        if any(pattern.search(text) for pattern in patterns)
-    }
+    return {field for field, anchor in _LEGACY_ANCHOR_ANY.items() if anchor.search(text)}
 
 
 def _legacy_has_funder_hint(text: str) -> bool:
@@ -923,11 +925,7 @@ def _legacy_body_copy_passes(field: str, rows: list[PaperSentence]) -> bool:
         or len(" ".join(row.text for row in rows)) > _MAX_COMPACT_CHARS
     ):
         return False
-    anchored = [
-        row.text
-        for row in rows
-        if any(pattern.search(row.text) for pattern in _LEGACY_ANCHORS[field])
-    ]
+    anchored = [row.text for row in rows if _LEGACY_ANCHOR_ANY[field].search(row.text)]
     if not all(_legacy_anchor_row_passes(field, text) for text in anchored):
         return False
     # Something in it must declare the field, not just sit under the heading.
@@ -959,7 +957,7 @@ def _legacy_capture_at(
         label = _REFERENCE_STATEMENT_LABEL[field].match(sentence.text)
         if not label or not _REFERENCE_STATEMENT_CUE[field].search(sentence.text[label.end() :]):
             return []
-    if not any(pattern.search(sentence.text) for pattern in _LEGACY_ANCHORS[field]):
+    if not _LEGACY_ANCHOR_ANY[field].search(sentence.text):
         return []
     if not _legacy_anchor_row_passes(field, sentence.text):
         return []
@@ -1017,9 +1015,7 @@ def _heading_declaration_tail(field: str, header: str | None) -> str | None:
             return None
         if re.search(r"[.!?]", label) or not _FIELD_HEADING_WORD[field].search(label):
             continue
-        if not tail.endswith(".") or not any(
-            pattern.search(tail) for pattern in _LEGACY_ANCHORS[field]
-        ):
+        if not tail.endswith(".") or not _LEGACY_ANCHOR_ANY[field].search(tail):
             return None
         if field == "coi_statement" and not _legacy_coi_declares(tail):
             return None

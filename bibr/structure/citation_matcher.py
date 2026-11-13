@@ -256,6 +256,9 @@ _POSSESSIVE_RE = re.compile("[" + _APOS + "]s?$")
 
 # Footnote and equal-contribution marks a reference list prints before a name.
 _LEADING_NON_WORD_RE = re.compile(r"^\W+")
+# The text layer and OCR print one name's apostrophe differently ("O'Brien",
+# "O’Brien"), within one paper too.
+_APOS_FOLD = str.maketrans({"‘": "'", "’": "'"})
 
 
 def _family_key(family: str, *, rules: bool = False) -> str:
@@ -269,7 +272,7 @@ def _family_key(family: str, *, rules: bool = False) -> str:
     s = family.strip()
     if rules:
         s = _LEADING_NON_WORD_RE.sub("", s)
-    s = s.rstrip(",.").lower()
+    s = s.rstrip(",.").lower().translate(_APOS_FOLD)
     s = _POSSESSIVE_RE.sub("", s)
     # Citations often omit reference-list diacritics (Garcia vs García). Keep
     # the displayed family untouched, but compare on a decomposed ASCII key.
@@ -406,6 +409,12 @@ _YEAR_PAREN_OPEN_RE = re.compile(r"\(\s*(\d{4})([a-z])?(?=[\s;,:)])")
 # Plausible publication years only (19xx/20xx) — avoids harvesting bogus
 # 4-digit numbers like sample sizes ("n=2500") inside a citation paren.
 _EXTRA_YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})([a-z])?\b")
+# A bare suffix after a suffixed year cites another work of that year: the "b"
+# of "2020a, b", "2020a,b", "2020a b", "2020b and c". Only where the letter ends
+# the citation or the list ("p. 5", "n = 12" and "a review" are not suffixes).
+_SUFFIX_CONTINUATION_RE = re.compile(
+    r"(?:\s*,?\s*(?:and|&)\s*|\s*,\s*|\s+)([a-z])(?=\s*(?:[,;)\]&]|and\b|$))"
+)
 _IN_PRESS_RE = re.compile(r"\b(" + IN_PRESS_LABEL + r")\b", re.IGNORECASE)
 _IN_PRESS_PAREN_RE = re.compile(r"\(\s*(" + IN_PRESS_LABEL + r")\s*\)", re.IGNORECASE)
 _SENTENCE_BOUNDARY_RE = re.compile(r"[.!?]\s+(?=[A-Z])")
@@ -546,6 +555,20 @@ def _is_bare(before_year: str) -> bool:
     return re.search(r"[^\W\d_]", before_year[last_end:]) is None
 
 
+def _suffixes(text: str, end: int, suffix: str | None) -> list[str | None]:
+    """A year's suffix and the bare suffixes printed after it, in order, each
+    later in the alphabet than the one before: "2020a, b" gives ``a, b``."""
+    suffixes: list[str | None] = [suffix]
+    last = suffix
+    while last is not None and (m := _SUFFIX_CONTINUATION_RE.match(text, end)):
+        if m.group(1) <= last:
+            break
+        last = m.group(1)
+        suffixes.append(last)
+        end = m.end()
+    return suffixes
+
+
 def _find_candidates(text: str, text_id: int, *, rules: bool = False) -> list[_Candidate]:
     """Walk a sentence; return all parenthetical + narrative citation candidates.
 
@@ -580,19 +603,20 @@ def _find_candidates(text: str, text_id: int, *, rules: bool = False) -> list[_C
             raw_span = text[start:end]
             if years:
                 for ym in years:
-                    out.append(
-                        _Candidate(
-                            text_id=text_id,
-                            start=start,
-                            end=end,
-                            raw=raw_span,
-                            year=int(ym.group("year")),
-                            year_suffix=ym.group("suffix"),
-                            families=families,
-                            has_et_al=_has_et_al(sub, rules=rules),
-                            bare=_is_bare(_YEAR_RE.split(sub, maxsplit=1)[0]),
+                    for suffix in _suffixes(sub, ym.end(), ym.group("suffix")):
+                        out.append(
+                            _Candidate(
+                                text_id=text_id,
+                                start=start,
+                                end=end,
+                                raw=raw_span,
+                                year=int(ym.group("year")),
+                                year_suffix=suffix,
+                                families=families,
+                                has_et_al=_has_et_al(sub, rules=rules),
+                                bare=_is_bare(_YEAR_RE.split(sub, maxsplit=1)[0]),
+                            )
                         )
-                    )
             else:
                 out.append(
                     _Candidate(
@@ -661,24 +685,25 @@ def _find_candidates(text: str, text_id: int, *, rules: bool = False) -> list[_C
         paren_body = text[ym.start() : close if close != -1 else ym.end()]
         seen_years: set[tuple[int, str | None]] = set()
         for yr in _EXTRA_YEAR_RE.finditer(paren_body):
-            key = (int(yr.group(1)), yr.group(2))
-            if key in seen_years:
-                continue
-            seen_years.add(key)
-            out.append(
-                _Candidate(
-                    text_id=text_id,
-                    start=prefix_start,
-                    end=span_end,
-                    raw=text[prefix_start:span_end],
-                    year=int(yr.group(1)),
-                    year_suffix=yr.group(2),
-                    families=families,
-                    has_et_al=_has_et_al(prefix, rules=rules),
-                    surface_kind=surface_kind,
-                    bare=surface_kind == "standard" and _is_bare(prefix),
+            for suffix in _suffixes(paren_body, yr.end(), yr.group(2)):
+                key = (int(yr.group(1)), suffix)
+                if key in seen_years:
+                    continue
+                seen_years.add(key)
+                out.append(
+                    _Candidate(
+                        text_id=text_id,
+                        start=prefix_start,
+                        end=span_end,
+                        raw=text[prefix_start:span_end],
+                        year=int(yr.group(1)),
+                        year_suffix=suffix,
+                        families=families,
+                        has_et_al=_has_et_al(prefix, rules=rules),
+                        surface_kind=surface_kind,
+                        bare=surface_kind == "standard" and _is_bare(prefix),
+                    )
                 )
-            )
 
     # Narrative in-press: "Smith (in press)".
     for ipm in _IN_PRESS_PAREN_RE.finditer(text):
@@ -1501,68 +1526,3 @@ def resolve_citations_by_rules(
                 linked.add(ref.bib_id)
         resolved.append((text_id, text, tuple(sorted(linked))))
     return resolved
-
-
-# ---------------------------------------------------------------------------
-# D2: constrained year-less back-reference resolver
-# ---------------------------------------------------------------------------
-
-# Capitalised name token(s) optionally joined by "and"/"&", optionally
-# followed by "et al.", optionally followed by possessive "'s".
-_YEAR_LESS_NAME_RE = re.compile(
-    r"\b([A-Z][a-zA-ZÀ-ɏ"
-    + _APOS
-    + r"\-]+(?:\s+(?:and|&)\s+[A-Z][a-zA-ZÀ-ɏ"
-    + _APOS
-    + r"\-]+)?(?:\s+et\s+al\.?)?)(?:["
-    + _APOS
-    + r"]s)?"
-)
-
-
-def match_year_less(
-    body_sents,
-    references: list[PaperReference],
-    cited_bib_ids: set[int],
-) -> list[tuple[int, int]]:
-    """Resolve bare (year-less) narrative author mentions to refs ALREADY cited
-    with a year (``cited_bib_ids``). Returns [(text_id, bib_id)].
-
-    NOT CURRENTLY WIRED into detect_bib_xrefs: on the v1 gold, wiring this dropped
-    precision 0.9973→0.9401 (70 new spurious) — single-surname-saturation papers
-    (every "Andersson's" fires), leakage into bylines/author-contributions, and the
-    gold does not exhaustively annotate year-less back-references. Kept as a building
-    block pending: a >=2-family match constraint, a strict body-only section filter,
-    and year-less annotations in the gold.
-    """
-    refs_by_id = {r.bib_id: r for r in references if r.bib_id in cited_bib_ids}
-    if not refs_by_id:
-        return []
-    key_sets = {
-        bid: [_family_keys_for(f) for f in extract_families(r.authors or "")]
-        for bid, r in refs_by_id.items()
-    }
-    out: list[tuple[int, int]] = []
-    seen: set[tuple[int, int]] = set()
-    for sent in body_sents:
-        text = getattr(sent, "text", "")
-        if not text or re.search(r"\b\d{4}\b", text):
-            continue  # year-less only; year-bearing sentences go through Tier 2
-        for nm in _YEAR_LESS_NAME_RE.finditer(text):
-            fams = _extract_families_from_span(nm.group(1))
-            if not fams:
-                continue
-            cand_keys: set[str] = set()
-            for f in fams:
-                cand_keys |= _family_keys_for(f)
-            matches = [
-                bid
-                for bid, ksets in key_sets.items()
-                if ksets and all(ks & cand_keys for ks in ksets)
-            ]
-            if len(matches) == 1:  # unique only — never guess on ties
-                key = (sent.text_id, matches[0])
-                if key not in seen:
-                    seen.add(key)
-                    out.append(key)
-    return out

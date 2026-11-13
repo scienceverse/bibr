@@ -131,7 +131,7 @@ _POSTAL = re.compile(
 )
 _POSTAL_IN = re.compile(
     r"(?:^|\s)\d{4}\s?[A-Z]{2}(?=\s|$)|(?:^|\s)(?:[A-Z]{1,2}-)?\d{4,6}(?:-\d{3,4})?(?=\s|$)"
-    r"|\s+[A-Z]\d[A-Z] ?\d[A-Z]\d$"
+    r"|\s+[A-Z]\d[A-Z] ?\d[A-Z]\d$|\s+[A-Z]{1,2}\d[A-Z\d]? ?\d[A-Z]{2}$"
 )
 _EMAIL = re.compile(r"\S+@\S+")
 _ROLE = re.compile(

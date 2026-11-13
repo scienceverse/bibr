@@ -111,6 +111,14 @@ _IN_PRESS_RE = re.compile(
 # Mirrors bibr.extract.ref_extractor._VANCOUVER_YEAR_RE (not imported:
 # ref_extractor imports this module).
 _VANCOUVER_YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})\s*[;:]\s*[eE]?\d")
+# "n.d.": the reference says it prints no date.
+_NO_DATE_RE = re.compile(r"(?<![^\W\d_])n\.\s?d\.", re.IGNORECASE)
+
+
+def _undated(text: str) -> bool:
+    """True when the reference is in press or marked "n.d.": a year it prints is not its own."""
+    return _IN_PRESS_RE.search(text) is not None or _NO_DATE_RE.search(text) is not None
+
 
 _YEAR_TOKEN_RE = re.compile(r"(?<![\w.,/-])(1[5-9]\d\d|20\d\d)(?!\d)")
 # A full numeric date ("21-01-1983", "18.11.2011", "3/5/2011") prints its year.
@@ -169,6 +177,25 @@ def _dated_years(text: str, shielded: list[tuple[int, int]]) -> set[int]:
     return years
 
 
+def _title_span(fields: dict[str, Any], text: str) -> tuple[int, int] | None:
+    """Where the tagged title stands in ``text``, if it is found verbatim."""
+    title = fields.get("title")
+    if isinstance(title, str) and title.strip():
+        at = text.find(title.strip())
+        if at >= 0:
+            return at, at + len(title.strip())
+    return None
+
+
+def _access_spans(text: str, title: tuple[int, int] | None) -> list[tuple[int, int]]:
+    """Access-date phrases of ``text``, leaving out the title's own words
+    ("… how memories are retrieved", "… paintings viewed by visitors")."""
+    spans = [m.span() for m in _ACCESS_PHRASE_RE.finditer(text)]
+    if title is None:
+        return spans
+    return [(a, b) for a, b in spans if not title[0] <= a < title[1]]
+
+
 def _year_shields(fields: dict[str, Any], text: str) -> list[tuple[int, int]]:
     """Spans of ``text`` whose years are not the reference's own.
 
@@ -176,13 +203,11 @@ def _year_shields(fields: dict[str, Any], text: str) -> list[tuple[int, int]]:
     title's ("… in China, 2016", "Cassiopea xamachana (Bigelow, 1892)
     jellyfish").
     """
-    shielded = [m.span() for m in _ACCESS_PHRASE_RE.finditer(text)]
+    title = _title_span(fields, text)
+    shielded = _access_spans(text, title)
     shielded += [m.span() for m in _URL_RE.finditer(text)]
-    title = fields.get("title")
-    if isinstance(title, str) and title.strip():
-        at = text.find(title.strip())
-        if at >= 0:
-            shielded.append((at, at + len(title.strip())))
+    if title is not None:
+        shielded.append(title)
     return shielded
 
 
@@ -657,9 +682,10 @@ def _rule_title_year_tail(fields: dict[str, Any], text: str) -> bool:
     capitalised phrase follows the year and the reference prints a different
     year as a date outside the title ("… Niigata Earthquake of June 16, 1964.
     Part 2. … Bull. Earthq. Res. Inst. 43, 237–239 (1965)."), the year is the
-    title's own and the rule leaves it to ``year_from_text``.
+    title's own and the rule leaves it to ``year_from_text``. An in-press or
+    "n.d." reference has no year of its own, so the year stays in its title.
     """
-    if fields.get("year"):
+    if fields.get("year") or _undated(text):
         return False
     title = fields.get("title")
     if not isinstance(title, str):
@@ -690,15 +716,16 @@ _IMPRINT_TAIL_RE = re.compile(
 )
 
 
-def _rule_title_imprint_tail(fields: dict[str, Any], _text: str) -> bool:
+def _rule_title_imprint_tail(fields: dict[str, Any], text: str) -> bool:
     """ "Title. Brasília, DF, 2011" when no year was tagged: cut the imprint.
 
     Place-and-year (or place, publisher and year) imprints close book and
     report references; the tagger kept one inside the title and found no year.
     Fires only when no year was tagged and the title ends in a sentence of at
-    most six words that starts with a capital and ends in ", YYYY".
+    most six words that starts with a capital and ends in ", YYYY", and the
+    reference is neither in press nor "n.d." (its title then holds the year).
     """
-    if fields.get("year"):
+    if fields.get("year") or _undated(text):
         return False
     title = fields.get("title")
     if not isinstance(title, str):
@@ -724,12 +751,14 @@ def _rule_year_not_access_date(fields: dict[str, Any], text: str) -> bool:
     "... Belo Horizonte, 31 dez. 1969. Disponível em: <...>. Acesso em: 14
     abr. 2022." — the tagger took 2022 from the access date. Fires only when
     every occurrence of the tagged year sits inside an access-date phrase or a
-    URL, and exactly one other year value is printed outside them.
+    URL, and exactly one other year value is printed outside them and the
+    tagged title (whose own "retrieved" or "viewed" is no access phrase).
     """
     year = fields.get("year")
     if not isinstance(year, int):
         return False
-    shielded: list[tuple[int, int]] = [m.span() for m in _ACCESS_PHRASE_RE.finditer(text)]
+    title = _title_span(fields, text)
+    shielded = _access_spans(text, title)
     if not shielded:
         return False
     shielded += [m.span() for m in _URL_RE.finditer(text)]
@@ -740,7 +769,7 @@ def _rule_year_not_access_date(fields: dict[str, Any], text: str) -> bool:
     hits = _year_positions(text, year)
     if not hits or not all(inside(p) for p in hits):
         return False
-    others = _dated_years(text, shielded)
+    others = _dated_years(text, shielded if title is None else [*shielded, title])
     others.discard(year)
     if len(others) != 1:
         return False

@@ -48,7 +48,12 @@ from bibr.paper_contents import (
     PaperTable,
 )
 from bibr.structure.float_images import composite_panel_image
-from bibr.structure.float_labels import caption_label, normalize_label
+from bibr.structure.float_labels import (
+    OTHER_FIGURE_WORD,
+    OTHER_TABLE_WORD,
+    caption_label,
+    normalize_label,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,13 +63,14 @@ logger = logging.getLogger(__name__)
 _BARE_PANEL_RE = re.compile(r"^\(?(?:[A-Za-z]|\d{1,2})[\).]?$")
 
 # A caption that names its figure ("Figure 2:", "FIGURE 1 …", "Fig. 3").
-_FIGURE_LABEL_RE = re.compile(r"^fig(?:ure)?\.?\s*\d+\b", re.IGNORECASE)
-_FIGURE_LABEL_NUMBER_RE = re.compile(r"^fig(?:ure)?\.?\s*(\d+)\b", re.IGNORECASE)
+_FIGURE_LABEL_NUMBER_RE = re.compile(
+    rf"^(?:fig(?:ure)?\.?|{OTHER_FIGURE_WORD})\s*(\d+)\b", re.IGNORECASE
+)
 
 # The printed number the renumbering keeps as a table's id. Continuations
 # match on the whole printed label instead (``caption_label``), so "Table 3.2
 # (continued)" never joins "Table 3.1".
-_TABLE_LABEL_RE = re.compile(r"^table\s+(\d+)\b", re.IGNORECASE)
+_TABLE_LABEL_RE = re.compile(rf"^(?:table|{OTHER_TABLE_WORD})\s+(\d+)\b", re.IGNORECASE)
 
 # Trailing continuation marker; parenthesized/bracketed only — a bare
 # trailing word "continued" is too likely to be caption prose.
@@ -140,15 +146,6 @@ def _renumber_honouring_printed_labels(objects, id_attribute: str, label_re) -> 
         claimed.add(next_free)
 
 
-def merge_figure_panels(figures: list[PaperFigure]) -> list[PaperFigure]:
-    """Merged-list-only view of :func:`merge_figure_panels_with_remap`.
-
-    Kept for callers that hold no caption receipt and so have nothing to
-    repoint at the renumbered survivors.
-    """
-    return merge_figure_panels_with_remap(figures)[0]
-
-
 def merge_figure_panels_with_remap(
     figures: list[PaperFigure],
 ) -> tuple[list[PaperFigure], dict[str, str]]:
@@ -177,7 +174,9 @@ def merge_figure_panels_with_remap(
     # above the next figure would become that figure's "following" panel.
     document_position = {id(fig): index for index, fig in enumerate(figures)}
     figures = sorted(figures, key=lambda fig: fig.figure_id)
-    is_target = [_FIGURE_LABEL_RE.match((f.caption or "").strip()) is not None for f in figures]
+    is_target = [
+        _FIGURE_LABEL_NUMBER_RE.match((f.caption or "").strip()) is not None for f in figures
+    ]
     absorbed: dict[int, int] = {}  # index -> target index
     group_bbox: dict[int, list[float] | None] = {}  # target index -> union bbox
 
@@ -297,15 +296,6 @@ def merge_figure_panels_with_remap(
     for i, target_idx in absorbed.items():
         remap[old_object_ids[i]] = f"figure:{figures[target_idx].figure_id}"
     return merged, remap
-
-
-def merge_table_continuations(tables: list[PaperTable]) -> list[PaperTable]:
-    """Merged-list-only view of :func:`merge_table_continuations_with_remap`.
-
-    Kept for callers that hold no caption receipt and so have nothing to
-    repoint at the renumbered survivors.
-    """
-    return merge_table_continuations_with_remap(tables)[0]
 
 
 def merge_table_continuations_with_remap(

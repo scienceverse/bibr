@@ -1062,41 +1062,41 @@ class OcrStage:
             total_regions = 0
         ctx.progress.ocr_start(total_regions)
 
-        raw_ocr_fn = rm.ocr.recognize if engine_needed else _no_engine_recognize
-        # The text-layer backend has no model profile; no prompt is ever sent,
-        # so the GLM profile only fills the slot the region code expects.
-        profile = (
-            GLM_PROFILE
-            if text_layer
-            else resolve_ocr_profile(
-                explicit=identity.profile,
-                backend=identity.backend,
-                model=identity.model,
-                max_tokens=settings.ocr.generation_max_tokens,
-                temperature=settings.ocr.generation_temperature,
-            )
-        )
-        ctx.scratch["ocr_profile"] = profile
-
-        async def tracked_ocr_fn(image, prompt: str) -> str:
-            result: str = await raw_ocr_fn(image, prompt)
-            ctx.progress.ocr_region_done()
-            return result
-
-        ocr_fn = tracked_ocr_fn
-        is_remote = _is_remote_ocr(cfg)
-
-        # The scan path's second (and escalation) recognizer, when configured.
-        # Started only when OCR itself runs: a native-only window has no
-        # scanned region to compare.
         recognizers = None
-        if engine_needed and settings.ocr.consensus_backend:
-            from bibr.scan.consensus import start_recognizers
-
-            recognizers = await start_recognizers(settings)
-        ctx.scratch["scan_recognizers"] = recognizers
-
         try:
+            raw_ocr_fn = rm.ocr.recognize if engine_needed else _no_engine_recognize
+            # The text-layer backend has no model profile; no prompt is ever sent,
+            # so the GLM profile only fills the slot the region code expects.
+            profile = (
+                GLM_PROFILE
+                if text_layer
+                else resolve_ocr_profile(
+                    explicit=identity.profile,
+                    backend=identity.backend,
+                    model=identity.model,
+                    max_tokens=settings.ocr.generation_max_tokens,
+                    temperature=settings.ocr.generation_temperature,
+                )
+            )
+            ctx.scratch["ocr_profile"] = profile
+
+            async def tracked_ocr_fn(image, prompt: str) -> str:
+                result: str = await raw_ocr_fn(image, prompt)
+                ctx.progress.ocr_region_done()
+                return result
+
+            ocr_fn = tracked_ocr_fn
+            is_remote = _is_remote_ocr(cfg)
+
+            # The scan path's second (and escalation) recognizer, when configured.
+            # Started only when OCR itself runs: a native-only window has no
+            # scanned region to compare.
+            if engine_needed and settings.ocr.consensus_backend:
+                from bibr.scan.consensus import start_recognizers
+
+                recognizers = await start_recognizers(settings)
+            ctx.scratch["scan_recognizers"] = recognizers
+
             if is_remote:
                 await self._run_remote(ctx, ocr_fn)
             else:

@@ -124,6 +124,11 @@ _W_DRAWING = f"{{{_NS['w']}}}drawing"
 _A_BLIP = f"{{{_NS['a']}}}blip"
 _M_OMATH = f"{{{_NS['m']}}}oMath"
 _W_TXBX_CONTENT = f"{{{_NS['w']}}}txbxContent"
+_W_PICT = f"{{{_NS['w']}}}pict"
+_MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+_MC_ALTERNATE_CONTENT = f"{{{_MC}}}AlternateContent"
+_MC_CHOICE = f"{{{_MC}}}Choice"
+_MC_FALLBACK = f"{{{_MC}}}Fallback"
 _W_T = f"{{{_NS['w']}}}t"
 _W_BR = f"{{{_NS['w']}}}br"
 _W_CR = f"{{{_NS['w']}}}cr"
@@ -283,6 +288,21 @@ def _heading_level_from_style(style_name: str | None) -> int | None:
     if not style_name:
         return None
     return _HEADING_STYLE_LEVELS.get(style_name)
+
+
+def _run_children(run_el):
+    """A run's children, with each ``mc:AlternateContent`` (how Word 2010+
+    stores a text box or shape) replaced by what its ``mc:Choice`` holds; its
+    ``mc:Fallback`` is the same content again, in the VML older readers use."""
+    for child in run_el.iterchildren():
+        if child.tag != _MC_ALTERNATE_CONTENT:
+            yield child
+            continue
+        chosen = next(child.iterchildren(_MC_CHOICE), None)
+        if chosen is None:
+            chosen = next(child.iterchildren(_MC_FALLBACK), None)
+        if chosen is not None:
+            yield from chosen.iterchildren()
 
 
 def _image_parts(paragraph, doc) -> list:
@@ -1248,7 +1268,7 @@ class DocxParser:
                     if extra_buf is not None:
                         extra_buf.append(" ")
 
-            for run_child in run_el.iterchildren():
+            for run_child in _run_children(run_el):
                 rt = run_child.tag
                 if rt == f"{{{w}}}t" and run_child.text:
                     text_buf.append(run_child.text)
@@ -1276,8 +1296,8 @@ class DocxParser:
                         pending_note_refs.append(("endnote", en_id))
                 elif rt == f"{{{m}}}oMath":
                     inline_math(run_child, extra_buf)
-                elif rt == f"{{{w}}}drawing":
-                    had_image = True
+                elif rt == f"{{{w}}}drawing" or rt == _W_PICT:
+                    had_image = had_image or rt != _W_PICT
                     # A drawing can be a text box rather than a picture, and
                     # its paragraphs are real document text — pull quotes,
                     # boxed methods notes, poster-style layouts. Nothing walked
@@ -1287,8 +1307,15 @@ class DocxParser:
                     for txbx in run_child.iter(_W_TXBX_CONTENT):
                         if next(txbx.iterancestors(_W_TXBX_CONTENT), None) is not None:
                             continue
+                        # Word splits a word across runs for formatting, so the
+                        # runs of a paragraph concatenate; paragraphs are
+                        # separated by a space.
+                        paragraphs: dict[object, list[str]] = {}
+                        for t in txbx.iter(f"{{{w}}}t"):
+                            owner = next(t.iterancestors(f"{{{w}}}p"), txbx)
+                            paragraphs.setdefault(owner, []).append(t.text or "")
                         boxed = " ".join(
-                            t.text.strip() for t in txbx.iter(f"{{{w}}}t") if t.text
+                            " ".join("".join(runs).split()) for runs in paragraphs.values()
                         ).strip()
                         if boxed:
                             text_buf.append(boxed)

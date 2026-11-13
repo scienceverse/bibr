@@ -408,8 +408,9 @@ models are loaded and unloaded to fit available GPU/RAM:
 | Mode | Description | Use when |
 |---|---|---|
 | `balanced` | Keeps layout + segmenter loaded; OCR stays resident unless a local LLM needs the memory | Default when neither low-memory condition below applies |
-| `aggressive` | Loads/unloads models between phases | Auto-selected for ≤8 GB system RAM, a CUDA GPU below 12 GB of VRAM that a managed local LLM server shares, or one of 8 GB or less |
+| `aggressive` | Loads/unloads models between phases | Auto-selected for ≤8 GB system RAM, a CUDA GPU below 12 GB of VRAM that a managed local LLM server shares, or one of 8 GB or less (unless nothing in the run can load onto the card: a CPU-only install reading the text layer, or with cloud or remote OCR) |
 | `keep_all` | Keeps models loaded for the duration of the run | Explicit opt-in when all selected models fit in memory |
 
 Leave `memory` unset to get the auto-detected default; pass it explicitly
-(or set `PIPELINE_MEMORY_MODE`) to override.
+(or set `PIPELINE_MEMORY_MODE`) to override. `bibr setup` does not write
+`PIPELINE_MEMORY_MODE`: the mode is chosen for each run.
