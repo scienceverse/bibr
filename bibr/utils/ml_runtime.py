@@ -161,13 +161,31 @@ def find_onnx_bundle(
     except Exception as exc:  # noqa: BLE001 — absence is the expected outcome
         if raise_transient and is_transient_network_error(exc):
             raise
+        from bibr.utils.hf_cache import hub_offline
+
+        reason = str(exc).splitlines()[0][:200] if str(exc) else ""
+        if hub_offline():
+            # Not "no bundle published": the files are not in this machine's
+            # cache and nothing may be fetched. The caller's torch fallback
+            # would otherwise report its own, unrelated error.
+            logger.warning(
+                "The ONNX bundle of the %s (%s@%s) is not complete in the Hub cache and "
+                "HF_HUB_OFFLINE is set, so it cannot be downloaded: %s: %s. Run once "
+                "online, or fetch that revision into the cache.",
+                label,
+                repo_id,
+                revision or "main",
+                type(exc).__name__,
+                reason,
+            )
+            return None
         logger.info(
             "No ONNX bundle for %s (%s@%s): %s: %s",
             label,
             repo_id,
             revision or "main",
             type(exc).__name__,
-            str(exc).splitlines()[0][:200] if str(exc) else "",
+            reason,
         )
         return None
     return manifest_path.parent

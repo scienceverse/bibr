@@ -164,3 +164,12 @@ def hf_download_or_cached(repo_id: str, filename: str, revision: str | None = No
         except Exception as cache_exc:  # noqa: BLE001 — surface the original error below
             logger.debug("%s/%s not in the local HF cache: %s", repo_id, filename, cache_exc)
         raise
+
+
+def hub_offline() -> bool:
+    """Whether the Hub library is in offline mode (``HF_HUB_OFFLINE``): nothing can be downloaded."""
+    try:
+        from huggingface_hub import constants
+    except ImportError:
+        return False
+    return bool(getattr(constants, "HF_HUB_OFFLINE", False))

@@ -21,6 +21,7 @@ from bibr.utils.model_overrides import (
 
 logger = logging.getLogger(__name__)
 _MIB = 1024 * 1024
+_GIB = 1024 * _MIB
 
 
 class ClassifierState(StrEnum):
@@ -150,7 +151,7 @@ class ClassifierResources:
                     self._cuda_available,
                     self._free_vram_bytes,
                     self._total_vram_bytes,
-                ) = await asyncio.to_thread(_cuda_memory_info)
+                ) = await asyncio.to_thread(_cuda_memory_info, self._settings)
             # Free VRAM is measured once, before either model loads, so each
             # model loaded on that device comes off the budget of the next.
             placed = 0
@@ -289,7 +290,34 @@ def _safe_error(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"[:500]
 
 
-def _cuda_memory_info() -> tuple[bool, int | None, int | None]:
+def _cuda_memory_info(settings=None) -> tuple[bool, int | None, int | None]:
+    """Whether CUDA can take a classifier, and the card's free and total bytes.
+
+    onnxruntime's CUDA provider and nvidia-smi answer for an ONNX run: it never
+    imports torch (about half a gigabyte of resident memory) to place a model
+    torch does not run, and with the gpu extra and no torch it still finds the
+    card. torch answers when it will run the classifiers or is loaded already:
+    ``ML_RUNTIME=torch``, or an overridden classifier, which may be a torch
+    checkpoint, in an install whose onnxruntime has no CUDA provider.
+    """
+    import sys
+
+    from bibr.utils.onnx_providers import cuda_provider_available
+
+    ml = getattr(settings, "ml", None)
+    runtime = getattr(ml, "runtime", "auto")
+    if runtime != "torch" and "torch" not in sys.modules:
+        if cuda_provider_available():
+            from bibr.ocr.registry import managed_gpu_memory
+
+            memory = managed_gpu_memory()
+            if memory is None:
+                return (True, None, None)
+            return (True, int(memory.free_gb * _GIB), int(memory.total_gb * _GIB))
+        if runtime == "onnx" or not any(
+            is_model_override(settings, env) for env in _MODEL_SETTINGS.values()
+        ):
+            return (False, None, None)
     try:
         import torch
 
@@ -304,11 +332,16 @@ def _cuda_memory_info() -> tuple[bool, int | None, int | None]:
 def _peak_vram_bytes(device: str) -> int | None:
     if not device.startswith("cuda"):
         return None
-    try:
-        import torch
+    import sys
 
+    # torch counts its own allocations only: nothing to ask it, and no reason
+    # to import it, when the model runs on onnxruntime.
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return None
+    try:
         return int(torch.cuda.max_memory_allocated())
-    except (ImportError, RuntimeError):
+    except RuntimeError:
         return None
 
 

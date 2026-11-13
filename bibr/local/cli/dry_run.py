@@ -519,10 +519,22 @@ def format_download_notice(pending: list[tuple[str, str, str]]) -> list[str]:
     """Rich lines announcing the downloads in *pending*, with the total and each model's size."""
     if not pending:
         return []
-    lines = [
-        f"  [yellow]↓[/yellow] First run: downloading {_download_total([s for *_, s in pending])}. "
-        "They are cached, so later runs start without this."
-    ]
+    from bibr.utils.hf_cache import hub_offline
+
+    if hub_offline():
+        count = len(pending)
+        lines = [
+            f"  [yellow]![/yellow] {count} model{'s are' if count != 1 else ' is'} not in the "
+            "cache and HF_HUB_OFFLINE is set, so nothing can be downloaded: what needs "
+            f"{'them' if count != 1 else 'it'} runs without or fails. Run once online to "
+            "fetch."
+        ]
+    else:
+        lines = [
+            "  [yellow]↓[/yellow] First run: downloading "
+            f"{_download_total([s for *_, s in pending])}. "
+            "They are cached, so later runs start without this."
+        ]
     for label, repo_id, status in pending:
         found = _SIZE_TEXT.search(status)
         shown = found.group(0) if found else "size unknown"
