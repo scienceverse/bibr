@@ -81,6 +81,8 @@ async def _predict_front_roles(
     Never raises, except for an overridden classifier that cannot be loaded, or
     that raised on several papers in a row. An overridden classifier's error on
     this paper adds a warning to ``warnings`` (``settings`` are the run's).
+    Loading it is off the loop too: the first paper reads the bundle (a
+    download, on a first run).
     """
     from bibr.extract.front_role import FrontRolePredictions
 
@@ -88,7 +90,7 @@ async def _predict_front_roles(
     if ensure is None:
         return None
     try:
-        classifier = ensure()
+        classifier = await asyncio.to_thread(ensure)
         if classifier is None:
             return None
         predictions = await asyncio.to_thread(

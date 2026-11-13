@@ -140,6 +140,8 @@ class ClassifierResources:
             self._note_use()
             return
         async with self._start_lock:
+            if self._closed:
+                raise RuntimeError("classifier resources are closed")
             if self._started:
                 self._note_use()
                 return
@@ -208,12 +210,14 @@ class ClassifierResources:
         if self._closed:
             return
         self._closed = True
-        for resource in (self._paper, self._section):
-            if resource.batcher is not None:
-                await resource.batcher.close()
-                resource.batcher = None
-            resource.model = None
-            resource.status = ClassifierStatus(ClassifierState.CLOSED, resource.status.device)
+        # A start in flight would load its models after the teardown below.
+        async with self._start_lock:
+            for resource in (self._paper, self._section):
+                if resource.batcher is not None:
+                    await resource.batcher.close()
+                    resource.batcher = None
+                resource.model = None
+                resource.status = ClassifierStatus(ClassifierState.CLOSED, resource.status.device)
 
     async def _start_one(self, resource: _ManagedClassifier, *, placed_vram_bytes: int) -> None:
         if not resource.model_id:
