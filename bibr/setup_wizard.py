@@ -225,6 +225,10 @@ class RecommendedSetup:
     required_prompts: tuple[SetupPrompt, ...]
     #: One line printed under the plan (a llama.cpp server found but not used).
     note: str = ""
+    #: The memory mode bibr picks for this plan's runs on this machine. Shown in
+    #: the plan and not written to ``.env``: the mode is chosen for each run, so
+    #: it follows the run's own LLM and OCR route and the memory it finds.
+    memory_mode: str = "balanced"
     #: Printed when the LLM server test or the smoke test fails.
     fallback_hint: str = ""
 
@@ -498,9 +502,12 @@ def _build_recommended_setup(
         system_memory_gb = _get_system_memory_gb()
     from bibr.local.pipeline import _auto_memory_mode
 
-    def memory_mode_for(llm_backend: str | None) -> str:
+    def memory_mode_for(llm_backend: str | None, *, card_in_use: bool = True) -> str:
         # The runtime's rule: on a CUDA card it depends on whether the LLM
-        # server bibr manages shares the card.
+        # server bibr manages shares the card, and a card nothing of the plan
+        # loads onto is left out (bibr.local.pipeline._cuda_card_stays_empty).
+        if not card_in_use:
+            return _auto_memory_mode(None, None, system_memory_gb)
         return _auto_memory_mode(
             platform_key, accelerator_memory_gb, system_memory_gb, llm_backend=llm_backend
         )
@@ -510,7 +517,6 @@ def _build_recommended_setup(
         "WTPSPLIT_MODEL": "sat-6l-sm",
         "REF_SEG_STRATEGY": "geom",
         "REF_PARSE_STRATEGY": "ner",
-        "PIPELINE_MEMORY_MODE": memory_mode_for(None),
         "CROSSREF_CONSOLIDATE": "off",
     }
 
@@ -547,6 +553,9 @@ def _build_recommended_setup(
                 f"Answer no to add an LLM instead ({local}a private server or Claude in "
                 "the cloud). `bibr setup` or `bibr chew --full` switches later."
             ),
+            # A fast run reads the text layer; only the gpu extra puts bibr's
+            # models on the card.
+            memory_mode=memory_mode_for(None, card_in_use="gpu" in extras),
         )
     if viable_local:
         ocr_backend = "paddle"
@@ -561,7 +570,6 @@ def _build_recommended_setup(
                 llama_server_ok=llama_pair,
             )
         )
-        env["PIPELINE_MEMORY_MODE"] = memory_mode_for(env.get("LLM_BACKEND"))
         # On Linux each half has its own VRAM gate: the automatic OCR chain
         # runs paddle-vllm from 8 GB (bibr.ocr.registry), and the LLM runs on
         # vLLM only from the card size where a vLLM variant of a recommended
@@ -652,6 +660,7 @@ def _build_recommended_setup(
             required_prompts=("install_extras", "smoke_test"),
             note=note,
             fallback_hint=fallback_hint,
+            memory_mode=memory_mode_for(env.get("LLM_BACKEND")),
         )
 
     if allow_cloud:
@@ -674,6 +683,7 @@ def _build_recommended_setup(
             ),
             runtime_summary="Usually faster on weak local hardware than fully local processing.",
             required_prompts=("install_extras", "cloud_api_key", "smoke_test"),
+            memory_mode=memory_mode_for(None, card_in_use=False),
         )
 
     return RecommendedSetup(
@@ -685,6 +695,7 @@ def _build_recommended_setup(
         download_summary="downloads local layout/reference models; OCR/LLM weights live on your server",
         runtime_summary="Best when this machine is too weak for fully local models.",
         required_prompts=("install_extras", "private_server_url", "smoke_test"),
+        memory_mode=memory_mode_for(None, card_in_use=False),
     )
 
 
@@ -746,6 +757,8 @@ def _setup_env_file() -> Path:
     chain = _default_env_files()
     return (chain[-1] if chain else Path(".env")).absolute()
 
+
+_MEMORY_MODE_KEY = "PIPELINE_MEMORY_MODE"
 
 # The settings that make a fast run use an OCR route instead of the PDF text layer
 # (bibr.ocr.registry.ocr_route_chosen).
@@ -1413,10 +1426,10 @@ class SetupWizard:
         return f"{name} — {hf_id} via {backend}, local"
 
     def _plan_memory_value(self, setup: RecommendedSetup) -> str:
-        mode = setup.env.get("PIPELINE_MEMORY_MODE", "")
-        if mode == "aggressive":
-            return "aggressive — models load one at a time to fit limited memory"
-        return mode or "balanced"
+        chosen = "chosen for each run; --memory or PIPELINE_MEMORY_MODE overrides"
+        if setup.memory_mode == "aggressive":
+            return f"aggressive — models load one at a time to fit limited memory ({chosen})"
+        return f"{setup.memory_mode} ({chosen})"
 
     def _demo_available(self) -> bool:
         """Whether ``bibr demo`` can run: demo extra actually installed this run
@@ -2017,36 +2030,39 @@ class SetupWizard:
                 self._install_selected_extras(reason)
 
     def _step_memory_mode(self) -> None:
-        """Pin the auto-detected memory mode into .env so it is visible/editable.
+        """Say which memory mode bibr picks for a run with these answers.
 
-        The runtime already auto-detects this each chew, but persisting it here
-        makes the choice explicit for a first-time tester — and lets low-memory
-        machines (a CUDA card below 12 GB that runs bibr's own LLM server, one of
-        8 GB or less, or an 8 GB Apple Silicon Mac running fully local) see why
-        they are in ``aggressive`` mode. It runs after the LLM step, whose
-        ``LLM_BACKEND`` the rule depends on.
+        Nothing is written: the mode is chosen for each run from the machine's
+        memory, the LLM server bibr manages and the OCR route, so one run's
+        ``--llm`` or ``--ocr`` and a container's memory limit are followed. A
+        line in ``.env`` would hold every later run to today's answer. It runs
+        after the LLM step, whose ``LLM_BACKEND`` the rule depends on, and lets
+        a low-memory machine see why it is in ``aggressive`` mode.
         """
-        from bibr.local.pipeline import _auto_memory_mode, _get_system_memory_gb
+        from bibr.local.pipeline import _get_system_memory_gb, _run_memory_mode
+        from bibr.ocr.registry import TEXT_LAYER_BACKEND
 
         platform_key, accel_gb = detect_hardware()
-        mode = _auto_memory_mode(
+        ocr_backend = self.env_vars.get("OCR_BACKEND")
+        if not ocr_backend and self.env_vars.get("PIPELINE_MODE") == "fast":
+            ocr_backend = TEXT_LAYER_BACKEND
+        mode = _run_memory_mode(
             platform_key,
             accel_gb,
             _get_system_memory_gb(),
             llm_backend=self.env_vars.get("LLM_BACKEND"),
+            ocr_backend=ocr_backend,
+            ocr_url=self.env_vars.get("OCR_BASE_URL") or None,
         )
-        self.env_vars["PIPELINE_MEMORY_MODE"] = mode
-        if mode == "aggressive":
-            self.console.print(
-                f"\n[dim]Memory mode: [cyan]{mode}[/cyan] — models are loaded one at a "
-                "time to fit limited memory. Edit PIPELINE_MEMORY_MODE in .env to "
-                "override.[/dim]"
-            )
-        else:
-            self.console.print(
-                f"\n[dim]Memory mode: [cyan]{mode}[/cyan] (set PIPELINE_MEMORY_MODE in "
-                ".env to override).[/dim]"
-            )
+        why = (
+            " — models are loaded one at a time to fit limited memory"
+            if mode == "aggressive"
+            else ""
+        )
+        self.console.print(
+            f"\n[dim]Memory mode: [cyan]{mode}[/cyan]{why}. bibr chooses it for each run; "
+            "--memory or PIPELINE_MEMORY_MODE overrides.[/dim]"
+        )
 
     def _step_write_env(
         self,
@@ -2071,13 +2087,21 @@ class SetupWizard:
                 self._note_mode_not_saved()
                 return
             if action == "merge":
+                memory_pin = self._memory_pin_of_an_earlier_setup()
                 commented = _merge_env(
                     self.env_path,
                     _with_llm_routing(self.env_vars),
-                    comment_out=_earlier_ocr_route_keys(self.env_vars),
+                    comment_out=(*_earlier_ocr_route_keys(self.env_vars), *memory_pin),
                 )
                 self._env_written = True
                 ui.ok(self.console, f"Merged new settings into {self.env_path}")
+                if _MEMORY_MODE_KEY in commented:
+                    commented.remove(_MEMORY_MODE_KEY)
+                    self.console.print(
+                        f"[yellow]Commented out {_MEMORY_MODE_KEY}, written by an earlier "
+                        "setup: bibr now chooses the memory mode for each run. Uncomment the "
+                        "line to hold every run to it.[/yellow]"
+                    )
                 if commented:
                     self.console.print(
                         f"[yellow]Commented out {', '.join(commented)}, an OCR route from an "
@@ -2100,6 +2124,34 @@ class SetupWizard:
             self._save_preset(save_preset_name)
         else:
             self._offer_save_preset()
+
+    def _memory_pin_of_an_earlier_setup(self) -> tuple[str, ...]:
+        """``PIPELINE_MEMORY_MODE`` when the ``.env`` being merged into holds setup's own value.
+
+        Setup used to write the automatic rule's answer for this machine. Such
+        a line now only stops a run from following its own LLM and OCR route,
+        so a merge comments it out. A value the rule never gives on this
+        machine (``keep_all``, or ``aggressive`` where there is room) is the
+        user's choice and stays.
+        """
+        from bibr.env_utils import parse_env
+        from bibr.local.pipeline import _auto_memory_mode, _get_system_memory_gb
+
+        if _MEMORY_MODE_KEY in self.env_vars:
+            return ()
+        try:
+            pinned = parse_env(self.env_path).get(_MEMORY_MODE_KEY)
+        except OSError:
+            return ()
+        if not pinned:
+            return ()
+        platform_key, accel_gb = detect_hardware()
+        system_ram_gb = _get_system_memory_gb()
+        setup_values = {
+            _auto_memory_mode(platform_key, accel_gb, system_ram_gb, llm_backend=backend)
+            for backend in (None, "local")
+        }
+        return (_MEMORY_MODE_KEY,) if pinned in setup_values else ()
 
     def _announce_mode_change(self) -> None:
         """Say when saving switches the mode bibr runs in today.

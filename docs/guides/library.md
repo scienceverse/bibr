@@ -412,4 +412,5 @@ models are loaded and unloaded to fit available GPU/RAM:
 | `keep_all` | Keeps models loaded for the duration of the run | Explicit opt-in when all selected models fit in memory |
 
 Leave `memory` unset to get the auto-detected default; pass it explicitly
-(or set `PIPELINE_MEMORY_MODE`) to override.
+(or set `PIPELINE_MEMORY_MODE`) to override. `bibr setup` does not write
+`PIPELINE_MEMORY_MODE`: the mode is chosen for each run.

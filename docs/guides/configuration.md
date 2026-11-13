@@ -307,7 +307,7 @@ Silicon when that executable is available, otherwise vllm-mlx; llama.cpp on
 Windows, CUDA cards below 10 GB and CUDA cards older than Ampere (compute
 capability below 8.0); and vLLM on other Linux/CUDA systems with at least
 10 GB (or when VRAM detection is unavailable). With the same card it picks the
-model, the memory mode and the OCR that `bibr setup` writes, except on a 10–11 GB
+model and the OCR that `bibr setup` writes and the memory mode it shows, except on a 10–11 GB
 card where setup found a CUDA llama.cpp server and wrote `LLM_BACKEND=llama-cpp`
 (see [choosing an extraction model](extraction-models.md#on-10-and-11-gb-cards)):
 `--llm local` never reads `PATH` and keeps vLLM there. After such a setup, run

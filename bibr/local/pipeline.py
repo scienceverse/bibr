@@ -274,8 +274,27 @@ def _default_memory_mode(
     from bibr.local.llm_models import detect_hardware
 
     platform_key, memory_gb = detect_hardware()
-    system_ram_gb = _get_system_memory_gb()
-    mode = _auto_memory_mode(platform_key, memory_gb, system_ram_gb, llm_backend=llm_backend)
+    return _run_memory_mode(
+        platform_key,
+        memory_gb,
+        _get_system_memory_gb(),
+        llm_backend=llm_backend,
+        ocr_backend=ocr_backend,
+        ocr_url=ocr_url,
+    )
+
+
+def _run_memory_mode(
+    platform_key: str | None,
+    accel_gb: float | None,
+    system_ram_gb: float,
+    *,
+    llm_backend: str | None,
+    ocr_backend: str | None,
+    ocr_url: str | None,
+) -> MemoryMode:
+    """``_auto_memory_mode`` for one run: its route decides whether the card counts."""
+    mode = _auto_memory_mode(platform_key, accel_gb, system_ram_gb, llm_backend=llm_backend)
     if (
         mode == "aggressive"
         and platform_key == "cuda"
