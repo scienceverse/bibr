@@ -3,9 +3,8 @@
 A merged reference segment — two adjacent references glued into one string by an
 under-segmenting segmenter — carries a structural tell that is independent of the
 segmenter's own confidence: a *second* author-date onset mid-string. This module
-finds those interior onsets (``find_interior_onsets``), reports them flag-only for
-measurement (``detect_merges``), and splits at them (``split_merged_refs``, added
-in a later task). Pure stdlib; no network, no LLM.
+finds those interior onsets (``find_interior_onsets``) and splits at them
+(``split_merged_refs``). Pure stdlib; no network, no LLM.
 """
 
 from __future__ import annotations
@@ -13,7 +12,6 @@ from __future__ import annotations
 import re
 from bisect import bisect_left
 from collections.abc import Callable
-from dataclasses import dataclass
 
 # Parenthesized date anchor — mirrors geom_features.early_year_paren's date body,
 # extended with "(in press)". The date must sit immediately after "(", so a year
@@ -104,24 +102,25 @@ _NUM_ABBREV_REACH = 16
 # "3. udg.", "2. uppl.", "2. ed.", "5. baskı") in German, Nordic, Slavic,
 # Hungarian, Turkish and Romance bibliographies. An interior "M. " followed by
 # one of these continues the same reference even when M is the next entry
-# number.
+# number. Up to three qualifiers may stand between the number and the edition
+# word ("2. überarb. Aufl.", "2. vollständig überarbeitete Auflage", "2. rev. ed.").
+# They are matched in lowercase only: a capitalised one is the next entry's
+# author ("2. Verbeek ED, …", "2. Neumann B. …").
+_EDITION_QUALIFIER = (
+    r"(?:(?-i:überarb|erw|vollst|neu|durchges|aktual|verb|unver|korr|ergänz|bearb|rev"
+    r"|expanded|enlarged|updated|přeprac|doplněn|rozšíř|popr|uzup|átdolg|bőv|augm)"
+    r"[^\W\d_]*\.?,?\s+(?:(?:und|u\.|and|a|i|és|et)\s+)?)"
+)
 _NUM_EDITION_AFTER = re.compile(
-    r"(?:aufl(?:age)?|ausg(?:abe)?|udg(?:ave)?|utg(?:ave)?|uppl(?:aga)?|oppl(?:ag)?"
-    r"|painos|ed|edn|izd|изд|vyd|wyd|kiad(?:ás)?|bask[ıi]|bd|jg|jahrg(?:ang)?|hrsg)\b",
+    rf"{_EDITION_QUALIFIER}{{0,3}}"
+    r"(?:aufl(?:age)?|ausg(?:abe)?|udg(?:ave)?|utg(?:ave)?|uppl(?:aga|agan)?|oppl(?:ag)?"
+    r"|painos|ed|edn|edition|éd|édition|edici[oó]n|edi[çc][ãa]o|edizione|izd|izdanje"
+    r"|изд|издание|vyd|vydání|wyd|wydanie|kiad(?:ás)?|bask[ıi]|bd|jg|jahrg(?:ang)?|hrsg)\b",
     re.IGNORECASE,
 )
 
 # Any letter: the title text that separates two references' date anchors.
 _LETTER = re.compile(r"[^\W\d_]")
-
-
-@dataclass(frozen=True)
-class MergeCandidate:
-    """A ref string flagged as containing >1 reference (flag-only, non-mutating)."""
-
-    index: int
-    offsets: list[int]
-    contexts: list[str]
 
 
 def _last_cap_run_start(
@@ -375,18 +374,6 @@ def _onset_finder_for_bibliography(
     if nonempty and marked * 2 > len(nonempty):
         return _numbered_interior_onsets
     return find_interior_onsets
-
-
-def detect_merges(ref_strings: list[str]) -> list[MergeCandidate]:
-    """Flag-only: one MergeCandidate per string that has interior onsets."""
-    find_onsets = _onset_finder_for_bibliography(ref_strings)
-    out: list[MergeCandidate] = []
-    for i, s in enumerate(ref_strings):
-        offsets = find_onsets(s)
-        if offsets:
-            contexts = [s[max(0, o - 20) : o + 20] for o in offsets]
-            out.append(MergeCandidate(index=i, offsets=offsets, contexts=contexts))
-    return out
 
 
 def split_merged_refs(ref_strings: list[str]) -> tuple[list[str], int]:

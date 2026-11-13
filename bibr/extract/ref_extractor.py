@@ -13,6 +13,7 @@ capture in ``bibr.extract.training_capture``.
 """
 
 import asyncio
+import copy
 import dataclasses
 import logging
 import re
@@ -79,7 +80,7 @@ from bibr.paper_contents import (
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.schemas import PaperReferenceLLM
 from bibr.utils.json_salvage import salvage_array_objects
-from bibr.utils.locks import LOCAL_INFERENCE_LOCK
+from bibr.utils.locks import LOCAL_INFERENCE_LOCK, inference_lock_for
 from bibr.utils.model_overrides import (
     is_model_override,
     note_inference_failure,
@@ -211,6 +212,12 @@ def _strip_enum_markers(ref_strings: list[str]) -> list[str]:
     marked = sum(1 for s in ref_strings if _ENTRY_NUMBERING_RE.match(s))
     if marked * 2 <= len(ref_strings):
         return _strip_roman_markers(ref_strings)
+    # One entry is no evidence of a numbered list: an unpunctuated number is
+    # its list number only as entry 1, else it opens the title ("24 Hours in
+    # A&E (2011)").
+    bare = _BARE_NUMBER_RE.match(ref_strings[0]) if len(ref_strings) == 1 else None
+    if bare and int(bare.group(1)) != 1:
+        return ref_strings
     return [
         _ENTRY_NUMBERING_RE.sub("", s, count=1)
         if _ENTRY_NUMBERING_RE.match(s)
@@ -228,6 +235,9 @@ _PARTICLE_NUMBERING_RE = re.compile(
     r"\s+)+[A-ZÀ-ÖØ-Þ])"
 )
 
+
+# A list number set off by a space alone ("12 Smith J"), not by "[ ]", "( )", "." or a dash.
+_BARE_NUMBER_RE = re.compile(r"^\s*(\d{1,3})\s+(?![-–—])")
 
 # A roman list number opening a reference ("IV. Bergasa, L.M., ...").
 _ROMAN_ENTRY_RE = re.compile(r"^\s*([IVXLC]{1,7}|[ivxlc]{1,7})[.)]\s+")
@@ -764,7 +774,9 @@ def _get_ner_parser(settings: GlobalSettings | None = None, memory_mode: str | N
         settings.NER_PARSER_ENCODER_REVISION,
     )
     if _NER_PARSER is None or key != _NER_PARSER_KEY:
-        with _NER_LOCK:
+        # A load runs under the shared inference lock (taken before _NER_LOCK, the
+        # order every caller uses); a cached parser is returned without it.
+        with LOCAL_INFERENCE_LOCK, _NER_LOCK:
             if _NER_PARSER is None or key != _NER_PARSER_KEY:
                 from bibr.ner.runtime import load_ref_parser
 
@@ -1331,6 +1343,10 @@ def _read_prefixed_locator(fields: dict[str, Any]) -> None:
         fields["first_page"], fields["last_page"] = pair
 
 
+_PROSE_FIELDS = ("title", "authors", "editors", "container", "publisher", "series", "edition")
+_LINE_BREAK_RE = re.compile(r"[\n\r\t]")
+
+
 def _finalize_reference_fields(fields: dict[str, Any], segment: str | None) -> dict[str, Any]:
     """Strategy-independent reference finalize shared by every parse path.
 
@@ -1341,7 +1357,13 @@ def _finalize_reference_fields(fields: dict[str, Any], segment: str | None) -> d
     last pages ("782-92" → "792"), backfills a dropped Vancouver year/container
     from the segment, and migrates/infers ``bib_type``.
     Parser-specific steps (issue handling, author rescue) stay in each parse path.
+    A line break the segment carries (a reference wrapped across a column or
+    page) is a space in the text fields.
     """
+    for key in _PROSE_FIELDS:
+        value = fields.get(key)
+        if isinstance(value, str) and _LINE_BREAK_RE.search(value):
+            fields[key] = collapse_ws(value) or None
     _backfill_vancouver_tail(fields, segment)
     _backfill_page_range(fields, segment)
     _read_prefixed_locator(fields)
@@ -1798,6 +1820,12 @@ def _map_bib_text_ids(refs: list[PaperReference], contents: PaperContents) -> No
 
     Falls back to fuzzy matching via ``rapidfuzz.fuzz.partial_ratio``
     when exact substring match fails.
+
+    A sentence another reference already took is used only when no other one
+    matches, and longer titles choose first: two works of one title (2010a,
+    2010b) or a short title inside a longer one ("Autonomous driving" in
+    "Legal aspects of autonomous driving") must not share a row, or the
+    citation linker reads that row's printed number on both and links neither.
     """
     if not refs:
         return
@@ -1815,33 +1843,48 @@ def _map_bib_text_ids(refs: list[PaperReference], contents: PaperContents) -> No
 
     from rapidfuzz import fuzz, process
 
-    sent_lower_texts = [s.text.lower() for s in ref_sentences]
+    sent_lower_texts = [collapse_ws(s.text).lower() for s in ref_sentences]
     sent_text_ids = [s.text_id for s in ref_sentences]
+    taken = {ref.text_id for ref in refs if ref.text_id is not None}
 
-    for ref in refs:
-        if not ref.title or ref.text_id is not None:
+    pending = [ref for ref in refs if ref.title and ref.text_id is None]
+    pending.sort(key=lambda ref: -len(ref.title or ""))
+    for ref in pending:
+        title_lower = collapse_ws(ref.title or "").lower()
+        if not title_lower:
             continue
 
-        title_lower = ref.title.lower()
-
-        # Exact substring fast path
-        matched_id = next(
-            (sent_text_ids[i] for i, t in enumerate(sent_lower_texts) if title_lower in t),
-            None,
-        )
-        if matched_id is not None:
-            ref.text_id = matched_id
+        # Exact substring fast path: the first free row, else the first row
+        hits = []
+        for i, text in enumerate(sent_lower_texts):
+            if title_lower in text:
+                hits.append(i)
+                if sent_text_ids[i] not in taken:
+                    hits = [i]
+                    break
+        if not hits:
+            # Vectorized fuzzy fallback (rapidfuzz runs in C); the next best
+            # rows are scored only when the best one is taken
+            best = process.extractOne(
+                title_lower, sent_lower_texts, scorer=fuzz.partial_ratio, score_cutoff=75
+            )
+            hits = [best[2]] if best is not None else []
+            if best is not None and sent_text_ids[best[2]] in taken:
+                hits += [
+                    index
+                    for _text, _score, index in process.extract(
+                        title_lower,
+                        sent_lower_texts,
+                        scorer=fuzz.partial_ratio,
+                        score_cutoff=75,
+                        limit=8,
+                    )
+                ]
+        if not hits:
             continue
-
-        # Vectorized fuzzy fallback (rapidfuzz process.extractOne runs in C)
-        result = process.extractOne(
-            title_lower,
-            sent_lower_texts,
-            scorer=fuzz.partial_ratio,
-            score_cutoff=75,
-        )
-        if result is not None:
-            ref.text_id = sent_text_ids[result[2]]
+        chosen = next((i for i in hits if sent_text_ids[i] not in taken), hits[0])
+        ref.text_id = sent_text_ids[chosen]
+        taken.add(ref.text_id)
 
 
 def _group_segments_into_chunks(ref_strings: list[str], target_chars: int) -> list[str]:
@@ -3753,12 +3796,14 @@ class ReferenceExtractor:
         :meth:`_parse_references_ner`; evaluation uses the alignment to keep
         invalid outputs in metric denominators.
         """
-        # Load + forward under the shared inference lock: concurrent native
-        # model work from sibling post-parse threads intermittently
-        # segfaulted the process on MPS (see bibr.utils.locks).
-        with LOCAL_INFERENCE_LOCK:
-            ref_parser = _get_ner_parser(self._settings, self._memory_mode)
-            parser_inputs = _strip_enum_markers(ref_strings)
+        ref_parser = _get_ner_parser(self._settings, self._memory_mode)
+        parser_inputs = _strip_enum_markers(ref_strings)
+        lock = inference_lock_for(getattr(ref_parser, "session", None))
+        if lock is not LOCAL_INFERENCE_LOCK:
+            # Sibling papers parse at once: their own copy keeps each one's
+            # last_truncated_count, which parse_batch writes on the instance.
+            ref_parser = copy.copy(ref_parser)
+        with lock:
             try:
                 parsed = ref_parser.parse_batch(parser_inputs)
             except Exception as e:
