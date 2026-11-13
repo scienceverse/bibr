@@ -912,6 +912,24 @@ def test_batch_stem_collisions_get_ids_the_tables_can_join(tmp_path):
     assert bibr.write_tables(results, tmp_path / "tables").papers == 3
 
 
+def test_a_library_batch_caps_the_malloc_arenas_before_its_first_chunk(tmp_path, monkeypatch):
+    """chew() on a list applies PIPELINE_MALLOC_ARENAS itself (bibr batch does it earlier)."""
+    from bibr.api import _process_batch
+    from bibr.utils import heap
+
+    events: list[str] = []
+    monkeypatch.setattr(heap, "limit_arenas_for_batch", lambda settings=None: events.append("cap"))
+
+    class _Recording(_ScriptedPipeline):
+        async def process_chunk(self, file_states, progress=None, config=None):
+            events.append("chunk")
+            await super().process_chunk(file_states, progress=progress, config=config)
+
+    files = _touch_pdfs(tmp_path, "a.pdf", "b.pdf")
+    asyncio.run(_process_batch(_Recording(), files, batch_size=1))
+    assert events == ["cap", "chunk", "chunk"]
+
+
 def test_write_tables_names_the_files_behind_a_duplicate_paper_id(tmp_path):
     one, two = _export_fixture(), _export_fixture()
     two["source"] = {**two["source"], "file_name": "paper.xml"}

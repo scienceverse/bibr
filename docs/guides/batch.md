@@ -142,7 +142,11 @@ stay in the allocator and a long run keeps every chunk's high-water mark.
 `PIPELINE_HEAP_TRIM` sets when this happens: `chunk` (the default), `window`
 (also between the render windows inside a chunk: a lower footprint with a large
 `--batch-size`, at a speed cost; a 24-paper chunk ran 20-30% slower) or
-`off`.
+`off`. Before the first chunk it also limits the allocator to two arenas
+(`PIPELINE_MALLOC_ARENAS`, default `2`; `0` keeps glibc's default of eight per
+CPU core). Each arena keeps the memory freed into it, and a batch's threads
+otherwise spread over dozens of them. A `MALLOC_ARENA_MAX` already set in the
+environment wins. Both run only on Linux with glibc.
 
 **Remote** (`--serve-url URL`) submits papers to a
 [`bibr serve`](deployment.md) async job API (`POST /papers/jobs`, poll

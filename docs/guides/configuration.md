@@ -1062,6 +1062,23 @@ machine. Neither setting
 changes a result: thread count and spinning only change how the same operators
 are scheduled. CUDA sessions are not touched.
 
+### CPU memory arenas
+
+onnxruntime gives each CPU session a memory arena that keeps the largest
+allocation the session has made for as long as the session lives. Every model
+sees inputs of many sizes in a batch, so with arenas a long batch grew from
+paper to paper: in a fast batch of 60 papers, the memory held between papers
+went from 3.3 GB to 5.3 GB, and the peak reached 7.8 to 9.5 GB (4.2 to 4.8 GB
+without arenas). bibr's CPU sessions therefore run without one:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `ML_ONNX_CPU_ARENA` | `false` | `true` gives the CPU sessions onnxruntime's arena back. Layout and the sentence segmenter run without one either way: their arenas alone held gigabytes. |
+
+The setting does not change a result, only where tensors are allocated. CUDA
+sessions are not touched; they have their own arena, which bibr shrinks after
+every run.
+
 ### Layout model generation
 
 bibr ships with PP-DocLayoutV3 and can also run PP-DocLayoutV4, which keeps
