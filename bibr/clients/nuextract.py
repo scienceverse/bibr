@@ -580,11 +580,16 @@ class NuExtractNativeBackend:
     def _get_client(self):
         sig = self._settings_signature()
         if self._client is None or self._client_sig != sig:
+            import httpx
             from openai import AsyncOpenAI
+
+            from bibr.clients.providers.base import _CONNECT_TIMEOUT, sdk_timeout_seconds
 
             kwargs: dict[str, Any] = {
                 "api_key": self._settings.llm.api_key or "not-needed",
-                "timeout": self._settings.llm.timeout_seconds * 2,
+                "timeout": httpx.Timeout(
+                    sdk_timeout_seconds(self._settings), connect=_CONNECT_TIMEOUT
+                ),
                 # LLMClient retries transient failures itself, through the
                 # rate limiter and breaker; SDK retries would bypass both.
                 "max_retries": 0,

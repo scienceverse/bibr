@@ -13,8 +13,10 @@ and hit/miss bookkeeping on top.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import threading
 from typing import Any
 
 from bibr.cache import _REDIS_ERROR, ResponseCache
@@ -45,11 +47,37 @@ class RedisResponseCache(ResponseCache):
         )
         self.hits = 0
         self.misses = 0
+        # The CrossRef client that holds this cache is process-wide, so it
+        # outlives one ``asyncio.run`` and serves threads that run their own
+        # loops, and a redis.asyncio connection belongs to the loop that opened
+        # it: on any other loop its first command fails with "Event loop is
+        # closed". The client built above serves the first loop; every other
+        # loop gets its own.
+        self._redis_url = redis_url
+        self._loop_clients: dict[asyncio.AbstractEventLoop, Any] = {}
+        self._loop_clients_lock = threading.Lock()
+        self._redis_claimed = False
 
     def _connect(self, redis_url: str):
         from redis.asyncio import Redis
 
         return Redis.from_url(redis_url, **self._redis_client_kwargs())
+
+    def _client(self):
+        loop = asyncio.get_running_loop()
+        client = self._loop_clients.get(loop)
+        if client is not None:
+            return client
+        with self._loop_clients_lock:
+            client = self._loop_clients.get(loop)
+            if client is None:
+                for other in list(self._loop_clients):
+                    if other.is_closed():
+                        self._loop_clients.pop(other, None)
+                client = self._connect(self._redis_url) if self._redis_claimed else self._redis
+                self._redis_claimed = True
+                self._loop_clients[loop] = client
+        return client
 
     def _full_key(self, key: str) -> str:
         return self._prefix + key

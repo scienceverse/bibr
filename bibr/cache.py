@@ -106,6 +106,10 @@ class ResponseCache:
 
         return aioredis.from_url(redis_url, **self._redis_client_kwargs())
 
+    def _client(self):
+        """The Redis client for the running event loop."""
+        return self._redis
+
     def _full_key(self, key: str) -> str:
         return f"{self._prefix}:{key}"
 
@@ -126,7 +130,7 @@ class ResponseCache:
         ``_log_get_error``).
         """
         try:
-            return await self._redis.get(self._full_key(key))
+            return await self._client().get(self._full_key(key))
         except Exception as e:
             self._log_get_error(key, e)
             return _REDIS_ERROR
@@ -141,7 +145,7 @@ class ResponseCache:
         """
         ttl = self._ttl if ttl_seconds is None else ttl_seconds
         try:
-            await self._redis.set(self._full_key(key), raw, ex=ttl if ttl > 0 else None)
+            await self._client().set(self._full_key(key), raw, ex=ttl if ttl > 0 else None)
         except Exception as e:
             self._log_set_error(key, e)
 
@@ -157,7 +161,7 @@ class ResponseCache:
     async def delete(self, key: str) -> None:
         """Delete cached bytes. Silently ignores errors."""
         try:
-            await self._redis.delete(self._full_key(key))
+            await self._client().delete(self._full_key(key))
         except Exception as e:
             logger.warning("Cache delete error: %s", e)
 
@@ -167,10 +171,11 @@ class ResponseCache:
         """Atomically acquire a token-owned flight lease, or return ``None``."""
         token = ownership_id or uuid.uuid4().hex
         lease_key = self._flight_key(key)
-        acquired = await self._redis.set(lease_key, token, nx=True, ex=ttl_seconds)
+        redis = self._client()
+        acquired = await redis.set(lease_key, token, nx=True, ex=ttl_seconds)
         if not acquired:
             return None
-        return RedisLease(self._redis, lease_key, token, ttl_seconds)
+        return RedisLease(redis, lease_key, token, ttl_seconds)
 
     def _flight_key(self, key: str) -> str:
         return f"{self._prefix}:flight:{key}"
@@ -181,11 +186,11 @@ class ResponseCache:
         Raises on Redis errors — waiters treat that as fail-open (extract
         normally) rather than as an owner death.
         """
-        return bool(await self._redis.exists(self._flight_key(key)))
+        return bool(await self._client().exists(self._flight_key(key)))
 
     async def close(self) -> None:
         """Shut down the Redis connection."""
         try:
-            await self._redis.aclose()
+            await self._client().aclose()
         except Exception as e:
             self._log_close_error(e)
