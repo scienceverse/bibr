@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Windows, which pull request checks do not run. Those failures were in the tests and
 in the paths `scripts/switch_model_defaults.py` reports, not in what bibr extracts.
 0.9.1 is the first 0.9 release on PyPI and contains everything listed under 0.9.0,
-plus the memory fix below.
+plus the memory fix and the soupsieve floor below.
 
 ### Fixed
 
@@ -28,6 +28,15 @@ plus the memory fix below.
   climbing from 3.4 to 5.3 GB. Without a memory limit, the peak of the same batch
   fell from 7.8–9.5 GB to 4.2–4.8 GB, at about 1% more CPU time and 2–3% more wall
   time per paper (two runs of each, alternated, on 4 cores). Exports are unchanged.
+
+### Security
+
+- The lock moves to soupsieve 4.1 on Python 3.11.5 and later, with a constraint
+  floor of 4.0 in `pyproject.toml`. Earlier releases take polynomial time to match
+  a selector with descendant combinators on deeply nested markup (CVE-2026-126190),
+  and bibr runs such selectors (`thead tr`) on the tables of HTML it is given.
+  soupsieve 4 needs Python 3.11.5, so Python 3.11.0 to 3.11.4 keep 2.10. soupsieve
+  4.0 also stops looking inside `template` elements, which bibr does not select in.
 
 ## [0.9.0] - 2026-11-12
 
