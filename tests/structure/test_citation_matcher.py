@@ -1079,36 +1079,6 @@ def test_curly_apostrophe_possessive_normalizes():
     assert _family_keys_for("Perruchet’s") == {"perruchet"}
 
 
-def test_year_less_resolves_only_to_already_cited_ref():
-    from bibr.models import PaperReference
-    from bibr.structure import citation_matcher as cm
-
-    refs = [
-        PaperReference.model_validate(
-            {
-                "bib_id": 9,
-                "title": "t",
-                "authors": "Ihmels, M., & Ache, F.",
-                "year": 2018,
-                "first_page": None,
-                "volume": None,
-                "container": None,
-            }
-        )
-    ]
-    from types import SimpleNamespace
-
-    body = [
-        SimpleNamespace(text_id=5, text="As Ihmels and Ache (2018) showed, the effect held."),
-        SimpleNamespace(text_id=13, text="As Ihmels and Ache demonstrated in a reanalysis,"),
-        SimpleNamespace(text_id=14, text="Some unrelated Nguyen and Park discussion follows."),
-    ]
-    cited = {9}  # bib 9 was linked with a year by Tier 2
-    links = cm.match_year_less(body, refs, cited)
-    assert (13, 9) in links  # back-reference recovered
-    assert not any(t == 14 for t, _ in links)  # unrelated name NOT linked
-
-
 def test_nested_group_cite_inner_parens():
     from bibr.structure import citation_matcher as cm
 

@@ -57,18 +57,6 @@ class OnnxPaperClassifierModel:
         )
         self._input_names = [i.name for i in self.session.get_inputs()]
 
-    @classmethod
-    def from_pretrained(
-        cls, repo_id: str, revision: str = "main", device: str | None = None
-    ) -> OnnxPaperClassifierModel:
-        from bibr.exceptions import ConfigurationError
-        from bibr.utils.ml_runtime import find_onnx_bundle
-
-        bundle = find_onnx_bundle(repo_id, revision, label="paper classifier")
-        if bundle is None:
-            raise ConfigurationError(f"No ONNX bundle for paper classifier {repo_id}@{revision}")
-        return cls(bundle, device=device)
-
     def check_graph(self) -> None:
         """Run the graph on titles and abstracts, in two shapes ``classify_batch`` sends.
 
