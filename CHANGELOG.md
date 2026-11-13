@@ -6,6 +6,83 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- A CUDA card that nothing in a run can load onto no longer decides the memory mode.
+  The automatic rule put every machine with an NVIDIA card of 8 GB or less in the
+  aggressive mode (3 papers a chunk, the layout model unloaded and loaded again
+  around each), even when the run started no OCR engine and no LLM server and the
+  install had no CUDA onnxruntime and no torch, so the card stayed empty. Such a run
+  is now planned as on a machine without a card: balanced unless system RAM is 8 GB
+  or less. On 20 papers in fast mode on 12 cores the balanced mode took 295 s against
+  337 s, at a peak of 4.4 GB against 4.0 GB, with identical exports. A pinned
+  `PIPELINE_MEMORY_MODE` (which `bibr setup` writes) and `--memory` are followed as
+  before.
+- A fast run that reads the PDF's text layer opens each PDF once. The text-layer read
+  used to open the file a second time and repeat the furniture strip and the
+  character read that the inspection had just done, about 40% of the native-text
+  stage's CPU time (2 to 4% of a fast batch's wall time). Exports are unchanged.
+- `bibr serve` renders a JSON result without FastAPI's `jsonable_encoder` copy when
+  the result is plain JSON data, which an export is: 11 ms against 81 ms for a
+  0.77 MB export, with the same bytes.
+- A sealed local sentence-segmenter bundle is hashed once when it is resolved, not
+  twice, and an export no longer resolves it again for every paper (about a second
+  per paper for the default model's two graphs).
+- `bibr chew` serializes a result for stdout only when it prints it there.
+
+### Fixed
+
+- A DOI printed with typeset hyphens (U+2010, U+2011, an en dash or a minus sign) is
+  read whole. The DOI pattern stopped at the first of them, so
+  `10.1234/s1‐2020‐01838‐x` was selected as `10.1234/s1`.
+- A table printed sideways on a portrait page keeps its columns. The glyph width
+  used to find column gaps was twice what it should be for a turned table, so
+  neighbouring cells merged ("Aan- Accepdacht tatie" for "Aandacht" and "Acceptatie").
+- A text-layer region whose font is broken is no longer accepted because it also
+  holds one unmapped glyph: only the marks bibr inserts are left out of the
+  usability check, not the U+FFFD characters the PDF itself carries.
+- "(Smith, 2020, 2021)" links both years when one of them is ambiguous between two
+  Smiths. The year already linked hid the other from the resolver.
+- JATS tables: a cell spanning columns or rows fills every slot it covers, as in HTML
+  and DOCX tables, instead of shifting the rows below it to the left. A JATS body
+  with several reference lists and no back matter reads all of them, not the first.
+- DOCX: text boxes written by Word 2010 and later (`mc:AlternateContent`) and VML
+  text boxes are read; a word split across formatting runs inside a text box stays
+  one word.
+- EPUB: a self-closing `<title/>`, `<script/>`, `<style/>`, `<ul/>` or `<textarea/>`
+  in a chapter no longer swallows the text after it (the whole book, for the first
+  three).
+- A DOCX reference list with a long hyphenated run of capitals ("A-B-C-…") no longer
+  takes exponential time in the entry-start pattern (24 hyphens took 10 s), and an
+  unbroken CJK row of several thousand characters no longer takes seconds in the
+  front-matter address pattern.
+- `$$\text{hello {world} foo}$$` is unwrapped like any other `\text{}` wrapper.
+- A display formula holding a statistic that an earlier pass already read
+  (`$$t = 2.1, p = .03$$`) no longer yields `t = "2.1, p = .03"` and a duplicate `p`.
+- "10 pg ml" near an e-mail address is not read as a corresponding-author marker.
+- The geometric reference tagger's gate declines a NaN score instead of reading it
+  as zero.
+- A reference the parser's tokenizer reduces to no tokens (zero-width characters
+  only, with a BERT-normalizer bundle) no longer fails its whole batch, and the CRF
+  segmentation fallback keeps a reference whose first tag is lost where two windows
+  meet.
+- `CROSSREF_REDIS_CACHE` works across `asyncio.run` calls and across threads with
+  their own loops. The shared client's Redis connection belonged to the first loop,
+  and later lookups failed with "Event loop is closed" and went to Crossref again.
+  The ROR client likewise keeps one HTTP pool per live loop instead of dropping and
+  rebuilding it on every switch.
+- The native NuExtract backend connects with the 5 s connect timeout of the other
+  providers, not twice `LLM_TIMEOUT_SECONDS`.
+- Shutdown and cancellation: classifier resources closed while they are still
+  loading no longer end up loaded; Ctrl-C while the OCR consensus server starts
+  closes the progress display and the recognizers already built; a managed
+  llama.cpp or Rapid-MLX OCR server is stopped even when closing its HTTP client
+  fails; the cloud OCR client closes its SDK connection pool; `bibr demo` stops the
+  model servers it started when Gradio exits; a second Ctrl-C during a remote
+  batch's drain keeps the outcomes of the jobs that had finished.
+- The front-role classifier loads off the event loop (about 4 s on the first request
+  of each `bibr serve` worker), and cloud OCR encodes page crops off it.
+
 ## [0.9.1] - 2026-11-13
 
 0.9.0 was tagged but never published: its release run failed tests on macOS and
