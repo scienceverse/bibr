@@ -523,13 +523,14 @@ def _bundle_path(value: str, revision: str | None) -> Path:
 
 def _load(value: str, revision: str | None) -> StatementTagger:
     from bibr.statement_tagger.runtime import StatementTagger
-    from bibr.utils.onnx_providers import apply_cpu_threading
+    from bibr.utils.onnx_providers import apply_cpu_memory, apply_cpu_threading
 
     bundle = _bundle_path(value, revision)
     import onnxruntime as ort
 
     options = ort.SessionOptions()
     apply_cpu_threading(options)
+    apply_cpu_memory(options)
     options.inter_op_num_threads = 1
     logger.info("loading statement tagger: %s", value)
     # Opens the graph and runs it once on two blocks (StatementTagger._check_graph).

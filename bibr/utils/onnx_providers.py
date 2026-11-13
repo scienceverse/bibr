@@ -554,6 +554,32 @@ def apply_cpu_threading(options) -> None:
 _INTRA_OP_SPINNING = "session.intra_op.allow_spinning"
 
 
+def _onnx_cpu_arena_setting() -> bool:
+    """``ML_ONNX_CPU_ARENA``: the environment, then bibr's ``.env`` chain; ``False`` when unreadable."""
+    try:
+        from bibr.config import MlOptions
+
+        # pydantic-settings fills every field from the environment; mypy cannot see that.
+        return bool(MlOptions().onnx_cpu_arena)  # type: ignore[call-arg]
+    except Exception:  # noqa: BLE001 — as _onnx_thread_settings: a bad .env never stops a session
+        return False
+
+
+def apply_cpu_memory(options, *, disable_arena: bool = False) -> None:
+    """Choose a CPU session's memory arena on ``options`` (an ``ort.SessionOptions``).
+
+    onnxruntime's CPU arena keeps the largest allocation a session has made
+    for the rest of the session. Every model sees inputs of many sizes in a
+    batch, so a long batch kept growing from paper to paper (about 3 GB more
+    after 55 papers with the 0.9.0 defaults). So bibr's CPU sessions run
+    without it, unless ``ML_ONNX_CPU_ARENA=true`` asks for it back.
+    ``disable_arena`` keeps it off even then, for the models whose arena alone
+    costs gigabytes (layout, the sentence segmenter).
+    """
+    if disable_arena or not _onnx_cpu_arena_setting():
+        options.enable_cpu_mem_arena = False
+
+
 def cpu_ort_session_options():
     """``SessionOptions`` with ORT's CPU memory arena disabled, if available.
 
@@ -590,14 +616,14 @@ def create_session(
     left at ORT's default (all), which is what the wtpsplit segmenter already
     runs with.
 
-    ``disable_cpu_arena`` opts a CPU-only session out of ORT's CPU memory
-    arena (see :func:`cpu_ort_session_options`). It is a no-op for sessions
-    whose provider chain includes CUDA: the CUDA EP has its own arena
-    (``kSameAsRequested`` plus per-run shrinkage) and disabling the CPU arena
-    there is unverified. Only pass it for models where the arena cost was
-    measured (layout, SaT) and for the CPU sessions that run single inputs
+    A CPU-only session runs without ORT's CPU memory arena unless
+    ``ML_ONNX_CPU_ARENA=true`` (see :func:`apply_cpu_memory`).
+    ``disable_cpu_arena`` keeps the arena off even then: layout and SaT, whose
+    arena alone costs gigabytes, and the CPU sessions that run single inputs
     after a GPU out-of-memory failure (layout, NER parser, section
-    classifier), not blindly for every model.
+    classifier). Sessions whose provider chain includes CUDA are not touched:
+    the CUDA EP has its own arena (``kSameAsRequested`` plus per-run
+    shrinkage) and disabling the CPU arena there is unverified.
 
     CoreML joins the chain only when ``device`` asks for ``mps`` (see
     :func:`coreml_requested`). ``allow_coreml=False`` refuses even that, for a
@@ -624,8 +650,7 @@ def create_session(
     options.log_severity_level = 3  # errors only; ORT's warnings are noisy at load
     if selected_device(providers) != "cuda":
         apply_cpu_threading(options)
-        if disable_cpu_arena:
-            options.enable_cpu_mem_arena = False
+        apply_cpu_memory(options, disable_arena=disable_cpu_arena)
     session = None
     try:
         session = ort.InferenceSession(str(model_path), sess_options=options, providers=providers)
@@ -641,8 +666,7 @@ def create_session(
         options = ort.SessionOptions()
         options.log_severity_level = 3
         apply_cpu_threading(options)
-        if disable_cpu_arena:
-            options.enable_cpu_mem_arena = False
+        apply_cpu_memory(options, disable_arena=disable_cpu_arena)
         session = ort.InferenceSession(str(model_path), sess_options=options, providers=providers)
     device = session_device(session, providers, model_name=model_name)
     return shrink_arena_after_runs(session), device

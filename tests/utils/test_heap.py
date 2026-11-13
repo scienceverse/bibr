@@ -257,3 +257,105 @@ def test_a_real_forked_child_trims_on_a_fresh_thread(fake_trim):
             pytest.fail("the forked child's trim did not finish within 10 s")
         time.sleep(0.05)
     assert os.waitstatus_to_exitcode(status) == 0
+
+
+# --- malloc arena cap (PIPELINE_MALLOC_ARENAS) ---
+
+
+@pytest.fixture
+def fake_libc(monkeypatch):
+    """A C library whose mallopt records (param, value); ``state["result"]`` is its return."""
+    state = {"calls": [], "result": 1, "has_mallopt": True}
+
+    class _Libc:
+        def __init__(self, name):
+            pass
+
+        def __getattr__(self, name):
+            if name != "mallopt" or not state["has_mallopt"]:
+                raise AttributeError(name)
+
+            def mallopt(param, value):
+                state["calls"].append((param, value))
+                return state["result"]
+
+            return mallopt
+
+    monkeypatch.setattr(heap.sys, "platform", "linux")
+    monkeypatch.setattr(heap.ctypes, "CDLL", _Libc)
+    monkeypatch.delenv("MALLOC_ARENA_MAX", raising=False)
+    return state
+
+
+def test_the_arena_cap_sets_m_arena_max(fake_libc):
+    assert heap.limit_malloc_arenas(2) is True
+    assert fake_libc["calls"] == [(-8, 2)]
+
+
+def test_malloc_arena_max_in_the_environment_wins(fake_libc, monkeypatch):
+    monkeypatch.setenv("MALLOC_ARENA_MAX", "4")
+    assert heap.limit_malloc_arenas(2) is False
+    assert fake_libc["calls"] == []
+
+
+def test_zero_leaves_the_glibc_default(fake_libc):
+    assert heap.limit_malloc_arenas(0) is False
+    assert fake_libc["calls"] == []
+
+
+@pytest.mark.parametrize("system", ["darwin", "win32"])
+def test_the_arena_cap_is_a_noop_off_linux(fake_libc, monkeypatch, system):
+    monkeypatch.setattr(heap.sys, "platform", system)
+    assert heap.limit_malloc_arenas(2) is False
+    assert fake_libc["calls"] == []
+
+
+def test_a_libc_without_mallopt_or_refusing_it_is_skipped(fake_libc):
+    fake_libc["result"] = 0
+    assert heap.limit_malloc_arenas(2) is False
+    fake_libc["has_mallopt"] = False
+    assert heap.limit_malloc_arenas(2) is False
+
+
+def test_the_batch_cap_reads_the_setting_and_applies_once(fake_libc, monkeypatch):
+    monkeypatch.setattr(heap, "_arena_limit_applied", False)
+    monkeypatch.setenv("PIPELINE_MALLOC_ARENAS", "3")
+    assert heap.limit_arenas_for_batch() is True
+    assert heap.limit_arenas_for_batch() is False
+    assert fake_libc["calls"] == [(-8, 3)]
+
+
+def test_the_batch_cap_prefers_the_settings_it_is_given(fake_libc, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(heap, "_arena_limit_applied", False)
+    settings = SimpleNamespace(pipeline=SimpleNamespace(malloc_arenas=0))
+    assert heap.limit_arenas_for_batch(settings) is False
+    assert fake_libc["calls"] == []
+
+
+def test_the_arena_setting_defaults_to_two(monkeypatch):
+    from pydantic import ValidationError
+
+    from bibr.config import PipelineOptions
+
+    monkeypatch.delenv("PIPELINE_MALLOC_ARENAS", raising=False)
+    assert PipelineOptions().malloc_arenas == 2
+    monkeypatch.setenv("PIPELINE_MALLOC_ARENAS", "-1")
+    with pytest.raises(ValidationError):
+        PipelineOptions()
+
+
+@pytest.mark.skipif(
+    platform.system() != "Linux" or platform.libc_ver()[0] != "glibc", reason="glibc only"
+)
+def test_real_mallopt_accepts_the_cap_on_glibc():
+    """In a child process, so the test run itself keeps the glibc default."""
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if k != "MALLOC_ARENA_MAX"}
+    code = (
+        "import sys; from bibr.utils import heap; sys.exit(0 if heap.limit_malloc_arenas(2) else 1)"
+    )
+    assert subprocess.run([sys.executable, "-c", code], env=env, timeout=60).returncode == 0
