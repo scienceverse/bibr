@@ -169,6 +169,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The front-role classifier loads off the event loop (about 4 s on the first request
   of each `bibr serve` worker), and cloud OCR encodes page crops off it.
 
+### Security
+
+- The lock moves the OpenTelemetry packages to 1.45.2 (0.66b2 for the beta ones).
+  `opentelemetry-api` 1.45.1 takes polynomial time on a crafted `traceparent`
+  header in `TraceContextTextMapPropagator.extract()` (CVE-2026-126360). bibr does
+  not import OpenTelemetry itself; the `mcp` and `vllm` extras bring it in.
+
 ## [0.9.1] - 2026-11-13
 
 0.9.0 was tagged but never published: its release run failed tests on macOS and
