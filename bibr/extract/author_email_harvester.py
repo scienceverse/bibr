@@ -37,7 +37,9 @@ _PG_PREFIX_RE = re.compile(r"^\s*pg\s+(?=[A-Z])")
 _CORRESPONDING_MARKER_RE = re.compile(
     r"\bcorrespond"  # corresponding, correspondence
     r"|✉"  # envelope glyph
-    r"|\bpg\s+(?=[A-Z])",  # GLM-OCR misread of envelope at line start
+    # GLM-OCR misread of envelope at line start; the capital stays case-sensitive so
+    # a unit ("10 pg ml-1") is not read as a marker.
+    r"|\b(?i:pg)\s+(?-i:(?=[A-Z]))",
     re.IGNORECASE,
 )
 

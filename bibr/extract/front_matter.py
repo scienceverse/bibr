@@ -26,7 +26,7 @@ from bibr.paper_contents import (
 )
 from bibr.structure.section_classifier import TRUSTED_TYPE_CONFIDENCE
 from bibr.structure.section_tree import body_numbered_section_ids
-from bibr.utils.text import DOI_CANDIDATE_RE, normalize_doi
+from bibr.utils.text import DOI_CANDIDATE_RE, DOI_HYPHENS, normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
 if TYPE_CHECKING:
@@ -781,9 +781,10 @@ _INSTITUTION_WORD_RE = re.compile(
 )
 # A token of an e-mail address or a link ("jan.peeters[at]example.org",
 # "https://…", "www.…", "example.org"): its lower-case words are names and
-# hosts, not the paper's prose.
+# hosts, not the paper's prose. Anchored at the start of a token, so an unbroken
+# CJK row is scanned once instead of once per character.
 _ADDRESS_TOKEN_RE = re.compile(
-    r"\S*(?:@|\[at\]|\(at\)|://|www\.|[^\W\d_]\.[^\W\d_])\S*", re.IGNORECASE
+    r"(?<!\S)\S*(?:@|\[at\]|\(at\)|://|www\.|[^\W\d_]\.[^\W\d_])\S*", re.IGNORECASE
 )
 
 
@@ -2278,7 +2279,7 @@ def _matching_doi_blocks(
         visible = {
             normalized
             for candidate in _block_candidates(block, by_id)
-            for match in _DOI_RE.finditer(candidate.raw_text)
+            for match in _DOI_RE.finditer(candidate.raw_text.translate(DOI_HYPHENS))
             if (normalized := normalize_doi(match.group(0))) is not None
         }
         doi_matches = bool(
@@ -2625,11 +2626,6 @@ _UNVERIFIED = "unverified"
 
 # Funder-registry DOIs name a funder, not a paper.
 _FUNDER_DOI_PREFIX = "10.13039/"
-# Typeset hyphens (U+2010 and kin) stop the DOI pattern early, which cut two
-# different DOIs down to one shared prefix; read them as ASCII hyphens.
-_DOI_HYPHENS = str.maketrans(
-    {"\u00ad": None, **dict.fromkeys("\u2010\u2011\u2012\u2013\u2212\ufe63\uff0d", "-")}
-)
 # Anchored at the start of a token and possessive, so an unbroken CJK row is
 # scanned once instead of once per character.
 _URL_OR_EMAIL_RE = re.compile(r"(?<!\S)[^\s@]*+@\S*|https?://\S*|www\.\S*", re.IGNORECASE)
@@ -3116,7 +3112,7 @@ def _record_identity(
     dois = frozenset(
         doi.casefold()
         for row in window
-        for match in _DOI_RE.finditer(row.raw_text.translate(_DOI_HYPHENS))
+        for match in _DOI_RE.finditer(row.raw_text.translate(DOI_HYPHENS))
         if (doi := normalize_doi(match.group(0))) is not None
         and not doi.startswith(_FUNDER_DOI_PREFIX)
     )

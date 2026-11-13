@@ -216,7 +216,8 @@ def expected_entry_precision(probs: np.ndarray) -> float:
     starts[0] = True
     wrong = np.minimum(p, 1.0 - p)
     wrong[0] = 0.0
-    return float(max(0.0, 1.0 - 2.0 * wrong.sum() / max(1, int(starts.sum()))))
+    # np.maximum, unlike max(), carries a NaN score through to the gate, which declines it.
+    return float(np.maximum(0.0, 1.0 - 2.0 * wrong.sum() / max(1, int(starts.sum()))))
 
 
 def feature_matrix(lines: list[LineRecord]) -> np.ndarray:

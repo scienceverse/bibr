@@ -1262,10 +1262,12 @@ class EquationExtractor:
         for content, fmt, span, content_span in latex_spans:
             if _covered(text, content_span, taken):
                 continue
-            if fmt == "inline" and _is_taken(taken, *content_span):
+            if _is_taken(taken, *content_span):
                 # "$p < 0.001^{***}$" is the structured passes' "p < 0.001",
                 # and "$t = 2.1, p = .03$" no t of "2.1, p = .03"
+                # What is left of a formula is a fragment whatever its delimiters.
                 pieces = list(_untaken_runs(text, taken, *content_span))
+                fmt = "inline"
             else:
                 pieces = [(content, span)]
             for piece, piece_span in pieces:
