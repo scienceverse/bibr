@@ -30,6 +30,7 @@ import re
 import unicodedata
 from typing import TYPE_CHECKING, Any
 
+from bibr.extract.title_subtitle import _selected_candidates
 from bibr.validation import IssueSeverity, ValidationIssue
 
 if TYPE_CHECKING:
@@ -107,19 +108,6 @@ def _unwrap_latex(text: str) -> str:
 
 def _numbers(marks: str) -> set[int]:
     return {int(number) for number in re.findall(r"\d+", marks)}
-
-
-def _selected(resolution: FrontMatterResolution) -> tuple[FrontMatterCandidate, ...]:
-    block = next(
-        (block for block in resolution.blocks if block.block_id == resolution.selected_block_id),
-        None,
-    )
-    if block is None:
-        return ()
-    by_id = {candidate.candidate_id: candidate for candidate in resolution.candidates}
-    return tuple(
-        by_id[candidate_id] for candidate_id in block.candidate_ids if candidate_id in by_id
-    )
 
 
 def _title_page(selected: tuple[FrontMatterCandidate, ...]) -> int | None:
@@ -275,7 +263,7 @@ def drop_title_note_marker(
 
     if resolution is None or not title.strip():
         return title, None
-    selected = _selected(resolution)
+    selected = _selected_candidates(resolution)
     if not selected:
         return title, None
     stripped = title.rstrip()

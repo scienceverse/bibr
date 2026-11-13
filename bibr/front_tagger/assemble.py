@@ -376,7 +376,7 @@ def _mark_keys(words: list[str]) -> list[str]:
             continue
         if previous_symbol and _is_symbol(word) and set(word) == set(keys[-1]):
             keys[-1] += word
-        elif pending_range and word.isdigit() and int(word) > int(keys[-1]):
+        elif pending_range and _NUMBER_KEY_RE.fullmatch(word) and int(word) > int(keys[-1]):
             keys.extend(str(n) for n in range(int(keys[-1]) + 1, int(word) + 1))
         else:
             keys.append(word)
@@ -457,11 +457,52 @@ def _title_text_problems(inp: TaggerInput, tags, first_word: int, last_word: int
     return problems
 
 
-def _title(spans: list[Span], tags, inp: TaggerInput, conf) -> tuple[str | None, float, list[str]]:
+def _second_version_start(inp: TaggerInput, group: list[Span]) -> int | None:
+    """The first word of a translation the title's tags run on into, if they do.
+
+    A title printed in two languages on rows of their own is often tagged as
+    one ("Severity levels of ... analysis" "Níveis de gravidade da ..."). A row
+    that starts a new region and reads as another language than the rows
+    before it, both of a title's length, starts the second version.
+    """
+    from bibr.extract.front_matter import language_from_title
+
+    words = [i for span in group for i in span.words]
+    starts = [
+        n
+        for n in range(1, len(words))
+        if inp.words[words[n]].region != inp.words[words[n - 1]].region
+    ]
+    for n in starts:
+        before = inp.text[inp.words[words[0]].start : inp.words[words[n - 1]].end]
+        after = inp.text[inp.words[words[n]].start : inp.words[words[-1]].end]
+        first, other = language_from_title(before), language_from_title(after)
+        if first and other and first != other:
+            return words[n]
+    return None
+
+
+def _cut_spans(group: list[Span], inp: TaggerInput, stop: int) -> list[Span]:
+    """The spans of ``group`` with their words from word ``stop`` on dropped."""
+    kept: list[Span] = []
+    for span in group:
+        words = tuple(i for i in span.words if i < stop)
+        if words:
+            text = inp.text[inp.words[words[0]].start : inp.words[words[-1]].end]
+            kept.append(replace(span, words=words, text=re.sub(r"\s+", " ", text).strip()))
+    return kept
+
+
+def _title(
+    spans: list[Span], tags, inp: TaggerInput, conf, *, rules: bool = False
+) -> tuple[str | None, float, list[str]]:
     groups = _clusters(spans, tags, inp, "TITLE")
     if not groups:
         return None, 0.0, ["no_title"]
     group = groups[0]  # the version printed first
+    second = _second_version_start(inp, group) if rules else None
+    if second is not None:
+        group = _cut_spans(group, inp, second)
     title = _joined(group)
     first_word, last_word = group[0].words[0], group[-1].words[-1]
     problems = _title_text_problems(inp, tags, first_word, last_word)
@@ -469,7 +510,13 @@ def _title(spans: list[Span], tags, inp: TaggerInput, conf) -> tuple[str | None,
     # head the model was unsure about counts against the title.
     edge = [i for i in (first_word - 1, last_word + 1) if 0 <= i < len(inp.words)]
     confidence = min([span.confidence for span in group] + [conf[i] for i in edge])
-    subtitle = next((s for s in spans if s.field == "SUBTITLE" and s.words[0] > last_word), None)
+    # A subtitle after the next version of the title is that version's.
+    next_title = groups[1][0].words[0] if len(groups) > 1 else len(inp.words)
+    if second is not None:
+        next_title = second
+    subtitle = next(
+        (s for s in spans if s.field == "SUBTITLE" and last_word < s.words[0] < next_title), None
+    )
     if subtitle is not None and subtitle.text:
         from bibr.extract.title_subtitle import _separator
 
@@ -1383,7 +1430,7 @@ def assemble(
     problems: list[str] = []
     confidence: dict[str, float] = {}
 
-    title, title_conf, title_problems = _title(spans, tags, inp, confidences)
+    title, title_conf, title_problems = _title(spans, tags, inp, confidences, rules=rules)
     problems.extend(title_problems)
     confidence["title"] = title_conf
     abstract, abstract_conf = _abstract(spans, tags, inp, confidences, rules=rules)
@@ -1702,30 +1749,77 @@ def _flag_corresponding(authors: list[_Author], inp: TaggerInput, tags) -> None:
     region_words: dict[int, list[int]] = {}
     for i, word in enumerate(inp.words):
         region_words.setdefault(word.region, []).append(i)
-    cue_regions = [
-        indices
-        for indices in region_words.values()
-        if _CORRESPONDING_RE.search(" ".join(inp.words[i].text for i in indices))
-    ]
+    cue_regions: list[list[int]] = []
+    symbols: set[str] = set()
+    for indices in region_words.values():
+        cues = _cue_positions(inp, indices)
+        if cues:
+            cue_regions.append(indices)
+            symbols.update(_cue_symbol(inp, tags, indices, pos) for pos in cues)
     if not cue_regions:
         return
-    symbols = {
-        key
-        for indices in cue_regions
-        for key in _mark_keys(
-            [
-                inp.words[i].text
-                for i in indices
-                if _is_symbol(inp.words[i].text) and _field(tags[i]) != "AUTHOR_MARK"
-            ]
-        )
-        if key in _SYMBOL_MARKS or len(set(key)) == 1 and key[0] in _SYMBOL_MARKS
-    }
+    symbols.discard("")
     cue_text = _fold("".join(inp.words[i].text for indices in cue_regions for i in indices))
     for author in authors:
         by_symbol = bool(symbols.intersection(author.marks))
         by_email = bool(author.email) and _fold(author.email or "") in cue_text
         author.corresponding = by_symbol or by_email
+
+
+# How far from a correspondence cue its note's symbol may stand, in words:
+# "* To whom correspondence", "Corresponding author *".
+_CUE_SYMBOL_BEFORE = 4
+_CUE_SYMBOL_AFTER = 3
+
+
+def _cue_positions(inp: TaggerInput, indices: list[int]) -> list[int]:
+    """Positions in ``indices`` of the words a correspondence cue starts on."""
+    starts: list[int] = []
+    offset = 0
+    for i in indices:
+        starts.append(offset)
+        offset += len(inp.words[i].text) + 1
+    text = " ".join(inp.words[i].text for i in indices)
+    return sorted(
+        {
+            max(pos for pos, start in enumerate(starts) if start <= m.start())
+            for m in _CORRESPONDING_RE.finditer(text)
+        }
+    )
+
+
+def _cue_symbol(inp: TaggerInput, tags, indices: list[int], cue: int) -> str:
+    """The symbol the note of the cue at ``indices[cue]`` is keyed by, or "".
+
+    A footnote region often holds several notes ("* Corresponding author ...
+    † Equal contribution"): only the symbol printed next to the cue, before it
+    in the same sentence or just after it, keys the corresponding author.
+    """
+
+    texts = [inp.words[i].text for i in indices]
+
+    def symbol_at(pos: int) -> bool:
+        return set(texts[pos]) <= _SYMBOL_MARKS and _field(tags[indices[pos]]) != "AUTHOR_MARK"
+
+    def run_at(pos: int) -> str:
+        """The symbol at ``pos`` with its repeats around it: "*" "*" is "**"."""
+        same = {pos}
+        for step in (-1, 1):
+            p = pos + step
+            while 0 <= p < len(texts) and texts[p] == texts[pos] and symbol_at(p):
+                same.add(p)
+                p += step
+        return texts[pos] * len(same)
+
+    for pos in range(cue - 1, max(-1, cue - 1 - _CUE_SYMBOL_BEFORE), -1):
+        if symbol_at(pos):
+            return run_at(pos)
+        if inp.words[indices[pos]].text in {".", ";"}:
+            break
+    for pos in range(cue + 1, min(len(indices), cue + 1 + _CUE_SYMBOL_AFTER)):
+        if symbol_at(pos):
+            return run_at(pos)
+    return ""
 
 
 __all__ = ["Span", "TaggedFrontMatter", "assemble"]

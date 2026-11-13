@@ -145,6 +145,7 @@ _ACRONYM_LEADS = re.compile(r"\s*\(([A-Z][A-Za-z&.\-]{1,12})\s*[,;]\s*([^()]{1,9
 # The EU named as the owner of a programme ("... Council under the European Union's Horizon 2020
 # programme"), not as a funder of its own.
 _PROGRAMME_OWNER = re.compile(r"[’']s\s+(?:Horizon|Seventh|FP7|H2020|Framework)\b")
+_ACRONYM_PAIR = re.compile(r"(\S+)\s+(?:and|&)\s+(\S+)")
 _JOIN = re.compile(r"\s+(?:and|&)\s+(?:the|The)\s+|\s+(?:and|&)\s+(?=[A-Z])")
 _STRONG_CUE = re.compile(
     r"\b(?:supported|funded|financed|sponsored|supplied|provided)\s+(?:in part\s+|partly\s+|partially\s+)?by\s+"
@@ -244,7 +245,8 @@ def parse_funding_statement(
             target = _award_target(sentence, award, funders)
             if target is not None:
                 assigned[target].append(award[2])
-            elif result:  # an award in a sentence of its own goes to the last funder named
+            elif result and award[2] not in result[-1][1]:
+                # an award in a sentence of its own goes to the last funder named
                 result[-1][1].append(award[2])
         for k, (_, _, name) in enumerate(funders):
             keys = _name_keys(name)
@@ -379,7 +381,14 @@ def _split_joined(text: str, spans: list[Span]) -> list[Span]:
 def _funder_spans(text: str, initials: set[str], families: set[str]) -> list[Span]:
     out: list[Span] = []
     for start, end, name in _split_joined(text, _candidate_names(text)):
-        if _is_funder(text, start, end, name, initials, families):
+        if not _is_funder(text, start, end, name, initials, families):
+            continue
+        pair = _ACRONYM_PAIR.fullmatch(name)
+        if pair and _ACRONYM.match(pair.group(1)) and _ACRONYM.match(pair.group(2)):
+            # "NSF and NIH" is two funders
+            out.append((start, start + pair.end(1), pair.group(1)))
+            out.append((start + pair.start(2), start + pair.end(2), pair.group(2)))
+        else:
             out.append((start, end, name))
     return out
 
@@ -401,8 +410,16 @@ def _is_funder(
     ):
         return False  # a person: an author, or a name after "awarded to"
     parts = [x for x in re.split(r"\s+(?:and|&)\s+|\s*,\s*", bare) if x]
-    if len(parts) > 1 and all(_INITIALS.fullmatch(x.strip()) for x in parts):
-        return False  # "JH and NM"
+    if (
+        len(parts) > 1
+        and all(_INITIALS.fullmatch(x.strip()) for x in parts)
+        and (
+            any(x.strip().replace(".", "").upper() in initials for x in parts)
+            or _INITIALS_SUBJECT.match(text, end)
+            or _PERSON_CUE.search(before)
+        )
+    ):
+        return False  # "JH and NM", not "NSF and NIH"
     if len(words) == 1:
         word = words[0].strip(".")
         is_acronym = bool(_ACRONYM.match(word))

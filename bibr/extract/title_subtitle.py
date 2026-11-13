@@ -32,6 +32,7 @@ from bibr.extract.front_matter import (
     AFFILIATION_MARKER_RE,
     BYLINE_PROBATION_ROLE,
     CLASSIFIED_BYLINE_TITLE_ROLE,
+    _dominant_script,
     _has_person_name_evidence,
     _looks_like_byline,
     _looks_like_separator_name_list,
@@ -67,8 +68,12 @@ _NOT_SUBTITLE_ROLES = frozenset(
 # follows: join with a space, as printed.
 _PRINTED_SEPARATOR_END = tuple(":;.?!…–—-")
 _PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+# A roman numeral without a full stop or bracket after it is read only in
+# capitals or after "Part": "Li", "Xi" and "Vic" open names.
 _LEADING_NUMBERING_RE = re.compile(
-    r"^\s*(?:(?:part|teil|partie|parte)\s+)?(?:\d+(?:\.\d+)*|[ivxlc]+)[.):]?\s+", re.IGNORECASE
+    r"^\s*(?:(?:part|teil|partie|parte)\s+[ivxlc]+[.):]?"
+    r"|(?:(?:part|teil|partie|parte)\s+)?(?:\d+(?:\.\d+)*[.):]?|[ivxlc]+[.):]|(?-i:[IVXLC]+)))\s+",
+    re.IGNORECASE,
 )
 # Opening characters no subtitle row starts with: list bullets and dashes,
 # correspondence stars, presenter marks, bracketed notes.
@@ -105,8 +110,10 @@ _YEAR_RE = re.compile(r"\b(?:1[6-9]|20)\d{2}\b")
 _DIGIT_GROUP_RE = re.compile(r"\d+")
 # "14:1197170", "32(4)": a volume:article or volume(issue) locator.
 _LOCATOR_RE = re.compile(r"\d+\s*(?::\s*\d+|\(\s*\d+\s*\))")
-# A title footnote marker printed after the subtitle ("... Regions*").
+# A title footnote marker printed after the subtitle ("... Regions*"), unless
+# it ends a name ("A*", "IDA*").
 _TRAILING_NOTE_MARK_RE = re.compile(r"\s*[*†‡§¶]+$")
+_TRAILING_LETTERS_RE = re.compile(r"[^\W\d_]+$")
 # Two language versions of a title as a model joins them ("<one> / <other>"),
 # and a translation printed in brackets after the title on its row.
 _VERSION_JOIN_RE = re.compile(r"\s+/\s+")
@@ -182,7 +189,7 @@ _FUNCTION_WORDS: dict[str, frozenset[str]] = {
     language: frozenset(words.split())
     for language, words in {
         "en": "the of and in for on with to from by an at among between through toward towards "
-        "into its their how what why does is are",
+        "into its their how what why does is are a",
         "de": "der die das und in im von zu zur zum für mit bei ein eine einer eines des den dem "
         "auf über als zwischen aus nach",
         "fr": "le la les de des du et en à pour dans sur une un aux au par entre leur leurs d l",
@@ -218,18 +225,6 @@ def _selected_candidates(
     return tuple(
         by_id[candidate_id] for candidate_id in block.candidate_ids if candidate_id in by_id
     )
-
-
-def _dominant_script(text: str) -> str | None:
-    counts: dict[str, int] = {}
-    for char in text:
-        if char.isalpha():
-            script = unicodedata.name(char, "").split(" ", 1)[0]
-            counts[script] = counts.get(script, 0) + 1
-    if not counts:
-        return None
-    script, count = max(counts.items(), key=lambda item: item[1])
-    return script if count * 5 >= sum(counts.values()) * 3 else None
 
 
 def _function_word_evidence(text: str) -> tuple[frozenset[str], int]:
@@ -404,6 +399,20 @@ def _is_subtitle_row(
     return not _is_parallel_title(text, title)
 
 
+def _drop_trailing_note_mark(text: str) -> str:
+    mark = _TRAILING_NOTE_MARK_RE.search(text)
+    if mark is None:
+        return text
+    stem = text[: mark.start()]
+    word = _TRAILING_LETTERS_RE.search(stem)
+    if word is not None and (
+        len(word.group()) < 3
+        or (stem != stem.upper() and any(letter.isupper() for letter in word.group()[1:]))
+    ):
+        return text
+    return stem
+
+
 def _separator(stem: str, subtitle: str) -> str:
     """Return ": " before a subtitle, or a space where the rows read as one phrase."""
 
@@ -473,7 +482,7 @@ def fold_printed_subtitle(
     if len(subtitles) != 1:
         return title, None
     row = next(iter(subtitles.values()))
-    subtitle = _TRAILING_NOTE_MARK_RE.sub("", strip_affiliation_markers(row.raw_text))
+    subtitle = _drop_trailing_note_mark(strip_affiliation_markers(row.raw_text))
     stem = title.rstrip()
     return f"{stem}{_separator(stem, subtitle)}{subtitle}", ValidationIssue(
         code="VAL_TITLE_REGROUNDED",
