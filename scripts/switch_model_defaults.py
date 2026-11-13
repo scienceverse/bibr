@@ -354,12 +354,12 @@ def plan(
             continue
         for number, line in enumerate(text.splitlines(), 1):
             if names_old_pin(line):
-                stale.append(f"{path.relative_to(root)}:{number}: {line.strip()[:120]}")
+                stale.append(f"{path.relative_to(root).as_posix()}:{number}: {line.strip()[:120]}")
     tests = []
     for path in sorted((root / "tests").glob("**/*.py")):
         text = path.read_text(encoding="utf-8")
         if names_old_pin(text):
-            tests.append(str(path.relative_to(root)))
+            tests.append(path.relative_to(root).as_posix())
     changed = {p: t for p, t in files.items() if t != p.read_text(encoding="utf-8")}
     return changed, stale, tests
 
@@ -389,7 +389,7 @@ def main(argv: list[str] | None = None) -> int:
         print("Update them by hand (or teach the script), then run it again.", file=sys.stderr)
         return 1
     for path, text in changed.items():
-        rel = str(path.relative_to(root))
+        rel = path.relative_to(root).as_posix()
         old = path.read_text(encoding="utf-8").splitlines(keepends=True)
         sys.stdout.writelines(difflib.unified_diff(old, text.splitlines(keepends=True), rel, rel))
         if not args.check:

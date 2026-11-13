@@ -1652,13 +1652,17 @@ async def test_a_fast_run_loads_the_tagger_from_its_own_settings_and_device(tmp_
     result = await fast_page_run(tmp_path, monkeypatch, tagger=PageTagger(), tagger_loads=loads)
 
     # The pipeline's settings have the tagger off; the fast overlay turned it on, with the
-    # configured model, and the session opened on the device the run uses.
+    # configured model, and the session opened on the device the run uses (on macOS the
+    # tagger always runs on the CPU).
+    import sys
+
+    device = "cpu" if sys.platform == "darwin" else LocalPipeline(crossref=False).device
     assert GlobalSettings().ml.front_tagger_mode == "off"
     assert loads == [
         (
             GlobalSettings().ml.front_tagger_model_id,
             GlobalSettings().ml.front_tagger_revision,
-            LocalPipeline(crossref=False).device,
+            device,
         )
     ]
     assert result["metadata"]["title"] == _TITLE

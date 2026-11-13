@@ -13,6 +13,7 @@ from bibr.setup_wizard import (
     _fetch_models,
     _merge_env,
     _ml_extra_available,
+    _recommends_gpu_extra,
     _select_model,
     _write_env_fresh,
 )
@@ -3078,9 +3079,13 @@ def test_pressing_enter_everywhere_finishes_setup_in_fast_mode(monkeypatch, tmp_
     assert settings.pipeline.mode == "fast"
     assert resolve_mode(settings) == "fast"
     assert not llm_configured(settings)
-    # The install is asked for the demo, and the GPU build on a card; never torch.
+    # The install is asked for the demo, and the GPU build on a card where bibr
+    # recommends it (not macOS or Windows); never torch.
+    import platform
+
+    gpu = hardware[0] == "cuda" and _recommends_gpu_extra(sys.platform, platform.machine())
     [extras] = wizard.installed
-    assert extras == ({"demo", "gpu"} if hardware[0] == "cuda" else {"demo"})
+    assert extras == ({"demo", "gpu"} if gpu else {"demo"})
     assert "Setup complete" in wizard.console.export_text()
 
 

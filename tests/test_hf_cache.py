@@ -123,7 +123,9 @@ def test_a_file_cached_at_a_pinned_commit_is_returned_without_a_request(hub_cach
 def test_a_nested_filename_is_found_in_the_pinned_snapshot(hub_cache):
     cached = hub_cache.put("org/repo", "tokenizer/config.json")
 
-    assert hf_cache.hf_download_or_cached("org/repo", "tokenizer/config.json", _SHA) == cached
+    # Compared as paths: on Windows the Hub library joins the nested name with "/".
+    found = hf_cache.hf_download_or_cached("org/repo", "tokenizer/config.json", _SHA)
+    assert Path(found) == Path(cached)
     assert hub_cache.requests == []
 
 
