@@ -52,7 +52,13 @@ from bibr.paper_contents import (
 )
 from bibr.structure.assembler import DocumentAssembler
 from bibr.structure.float_labels import FloatKind, caption_label, label_element_label
-from bibr.structure.html_table import TableBudget, max_table_width
+from bibr.structure.html_table import (
+    _MAX_COLSPAN,
+    _MAX_ROWSPAN,
+    TableBudget,
+    _span,
+    max_table_width,
+)
 from bibr.structure.xref_utils import URL_RE, detect_xrefs
 from bibr.utils.text import CollapsedLength, clean_extracted_url, collapse_ws
 
@@ -1602,16 +1608,57 @@ class JatsParser:
             if not all_trs:
                 return None
 
-            def cells(tr) -> list[str]:
+            # The table a row belongs to, for the rowspans that run down it:
+            # its parent, or that section's parent (<thead>, <tbody>).
+            owners = {
+                tr: parent if _ln(parent) == "table" else parent.getparent()
+                for tr in all_trs
+                for parent in (tr.getparent(),)
+            }
+            row_cells = [[c for c in tr if _ln(c) in ("td", "th")] for tr in all_trs]
+            max_width = max_table_width(
+                len(all_trs), sum(map(len, row_cells)), max(map(len, row_cells), default=0)
+            )
+            # The rowspans still open below each table's rows so far.
+            pending: dict[object, list[tuple[int, str, int]]] = {}
+
+            def cells(tr, row_els) -> list[str] | None:
                 # A nested table's rows, and a <tr> put straight in a cell, are
                 # rows of their own, so their text is left out of the cell
                 # around them: every cell up the nesting repeated it, and
-                # walked it again.
-                return [
-                    collapse_ws(_Walker(None, cut=("table", "tr")).run(c)).strip()
-                    for c in tr
-                    if _ln(c) in ("td", "th")
-                ]
+                # walked it again. A cell spanning columns or rows repeats its
+                # text in every slot it covers, as the HTML tables do.
+                above = pending.get(owners[tr], [])
+                if len(row_els) + len(above) > max_width:
+                    return None
+                texts: list[str] = []
+                still_open: list[tuple[int, str, int]] = []
+                index = placed = 0
+
+                def take_open() -> None:
+                    nonlocal index, placed
+                    col, text, left = above[placed]
+                    placed += 1
+                    texts.append(text)
+                    if left > 1:
+                        still_open.append((col, text, left - 1))
+                    index += 1
+
+                for k, c in enumerate(row_els):
+                    while placed < len(above) and above[placed][0] <= index:
+                        take_open()
+                    text = collapse_ws(_Walker(None, cut=("table", "tr")).run(c)).strip()
+                    rowspan = _span(c.get("rowspan"), _MAX_ROWSPAN)
+                    room = max_width - len(texts) - (len(row_els) - k - 1) - (len(above) - placed)
+                    for _ in range(min(_span(c.get("colspan"), _MAX_COLSPAN), room)):
+                        texts.append(text)
+                        if rowspan > 1:
+                            still_open.append((index, text, rowspan - 1))
+                        index += 1
+                while placed < len(above):
+                    take_open()
+                pending[owners[tr]] = still_open
+                return texts
 
             thead = _first_desc(tables[0], "thead")
             header_tr = None
@@ -1619,28 +1666,27 @@ class JatsParser:
                 header_tr = next((tr for tr in thead.iter() if _ln(tr) == "tr"), None)
             if header_tr is None:
                 header_tr = all_trs[0]
-                body_trs = all_trs[1:]
-            else:
-                body_trs = [tr for tr in all_trs if tr is not header_tr]
-
-            header = cells(header_tr) if header_tr is not None else []
-            # Later tables repeat the header print; a repeated header row adds
-            # no tokens beyond the header itself, so drop exact repeats while
-            # keeping any differing header as a data row. The table is
-            # measured as to_html renders it, row by row.
+            # The table is measured as to_html renders it, row by row.
             size = budget.size()
-            if not size.add(header):
-                refuse("text passes the table size limits")
-                return None
-            data: list[list[str]] = []
-            for tr in body_trs:
-                row = cells(tr)
-                if header and row == header:
-                    continue
+            grid: dict = {}
+            for tr, row_els in zip(all_trs, row_cells, strict=True):
+                row = cells(tr, row_els)
+                if row is None:
+                    refuse("pads its rows far past its cells")
+                    return None
                 if not size.add(row):
                     refuse("text passes the table size limits")
                     return None
-                data.append(row)
+                grid[tr] = row
+            header = grid[header_tr]
+            # Later tables repeat the header print; a repeated header row adds
+            # no tokens beyond the header itself, so drop exact repeats while
+            # keeping any differing header as a data row.
+            data: list[list[str]] = [
+                row
+                for tr, row in grid.items()
+                if tr is not header_tr and not (header and row == header)
+            ]
             width = max([len(header), *[len(r) for r in data]], default=0)
             if width == 0:
                 return None
@@ -1841,10 +1887,10 @@ class JatsParser:
             return
         if not self._body_ref_lists:
             return
-        ref_list, section_id = self._body_ref_lists[0]
-        # The enclosing <sec> is the references heading the producer already
-        # emitted; reuse it rather than appending a second, competing one.
-        self._handle_ref_list(ref_list, section_id=section_id or None)
+        for ref_list, section_id in self._body_ref_lists:
+            # The enclosing <sec> is the references heading the producer already
+            # emitted; reuse it rather than appending a second, competing one.
+            self._handle_ref_list(ref_list, section_id=section_id or None)
 
     def _collect_refs(self, ref_list) -> list:
         """Direct ``<ref>`` children plus those of nested ``<ref-list>``s, in order."""
