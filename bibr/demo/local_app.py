@@ -1077,11 +1077,19 @@ def create_local_demo(
             # The JSON tree viewer shows the image-free copy (base64 blobs are
             # unreadable and heavy in-browser); downloads carry the real bytes.
             stripped_json = _strip_figure_images(paper_json)
-            download_updates = [gr.DownloadButton(value=_write_json_file(paper_json), visible=True)]
+            # Serializing an export takes tens of ms (more with figure images):
+            # off the loop that serves every other demo user.
+            download_updates = [
+                gr.DownloadButton(
+                    value=await asyncio.to_thread(_write_json_file, paper_json), visible=True
+                )
+            ]
             if figures_enabled:
                 download_updates.append(
                     gr.DownloadButton(
-                        value=_write_json_file(stripped_json, suffix=".no-images"),
+                        value=await asyncio.to_thread(
+                            _write_json_file, stripped_json, suffix=".no-images"
+                        ),
                         visible=True,
                     )
                 )
@@ -1106,6 +1114,14 @@ def create_local_demo(
         download_outputs = [download_btn]
         if download_btn_noimg is not None:
             download_outputs.append(download_btn_noimg)
+
+        async def _aclose_pipeline() -> None:
+            await pipeline_state["pipeline"].aclose()
+
+        # For whoever stops the demo (``bibr demo`` once Gradio returns): the
+        # managed OCR/LLM servers run in their own session and would otherwise
+        # outlive the process.
+        demo.aclose_pipeline = _aclose_pipeline
 
         run_btn.click(
             fn=_process_file,

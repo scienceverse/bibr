@@ -344,6 +344,7 @@ async def start_recognizers(
     ocr = settings.ocr
     if not ocr.consensus_backend:
         return None
+    second = None
     try:
         second = _build_recognizer(
             "consensus",
@@ -354,7 +355,12 @@ async def start_recognizers(
             settings=settings,
         )
         await second.backend.wait_for_server()
-    except Exception as exc:  # noqa: BLE001
+    except BaseException as exc:
+        # Cancellation too: the caller closes only the recognizers it was handed.
+        if second is not None:
+            await second.shutdown()
+        if not isinstance(exc, Exception):
+            raise
         logger.warning("OCR consensus disabled: the consensus recognizer did not start: %s", exc)
         return None
     escalation = None
@@ -369,7 +375,12 @@ async def start_recognizers(
                 settings=settings,
             )
             await escalation.backend.wait_for_server()
-        except Exception as exc:  # noqa: BLE001
+        except BaseException as exc:
+            if escalation is not None:
+                await escalation.shutdown()
+            if not isinstance(exc, Exception):
+                await second.shutdown()
+                raise
             logger.warning(
                 "OCR escalation disabled: the escalation recognizer did not start: %s", exc
             )

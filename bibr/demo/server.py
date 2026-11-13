@@ -203,7 +203,15 @@ def main():
         ui.error(Console(stderr=True), escape(str(e)))
         sys.exit(2)
 
-    demo.launch(**launch_kwargs)
+    try:
+        # Returns once Ctrl-C (or SIGTERM, routed to it) stops the server.
+        demo.launch(**launch_kwargs)
+    finally:
+        aclose_pipeline = getattr(demo, "aclose_pipeline", None)
+        if aclose_pipeline is not None:
+            import asyncio
+
+            asyncio.run(aclose_pipeline())
 
 
 if __name__ == "__main__":
