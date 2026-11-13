@@ -52,10 +52,13 @@ _REFERENCE_PREFIX_RE = re.compile(r"^\s*(?:\[\d+[A-Za-z]?\]|\d+[.)]\s)")
 # BMJ's 2013-14 article DOIs (``bmj.f1049``, ``bmj.g2276``), whose e-locators use
 # the same letters. Supplements append a token instead: APA ``.supp``,
 # Copernicus ``-supplement``, MDPI ``/s1`` and PeerJ ``/supp-1`` (PeerJ also
-# prints ``/fig-1`` and ``/table-1``).
+# prints ``/fig-1`` and ``/table-1``). eLife numbered the abstract, digest,
+# figures and decision letters of its 2012-2017 articles with three digits
+# (``eLife.00013.001``); its version DOIs take one (``eLife.88888.3``).
 _COMPONENT_SUFFIX_RE = re.compile(
     r"(?:\.(?:[fgst]0\d{2}|fig\d+|table\d+)[A-Za-z]*"
-    r"|\.supp|-supplement|/[^/]+/s\d+|/(?:fig|table|supp)-\d+)$",
+    r"|\.supp|-supplement|/[^/]+/s\d+|/(?:fig|table|supp)-\d+)$"
+    r"|^10\.7554/elife\.\d+\.\d{3}$",
     re.IGNORECASE,
 )
 # A sentence that labels a figure, table or supplement is a caption, and a DOI in

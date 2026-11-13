@@ -1331,8 +1331,11 @@ class EquationExtractor:
                 continue
 
             # Split parenthesized df off the LHS ("t(28)" -> "t", "28"),
-            # as the structured passes do.
+            # as the structured passes do. A parenthesis of variables is a
+            # function's argument: "F(x) = 3" is no F test with df "x".
             lhs, df = _split_lhs_df(raw_lhs)
+            if _FUNCTION_ARGUMENT_RE.fullmatch(df):
+                lhs, df = raw_lhs, ""
             results.append(
                 (
                     (start, end),
@@ -1594,6 +1597,9 @@ def _normalize_comp(comp: str) -> str:
 # group that could end anywhere in a run of spaces rescanned the run from
 # each place, quadratic on "t(1 … 2)" or a long LaTeX LHS.
 _LHS_DF_RE = re.compile(r"^(?P<name>.*?\S)\s*\((?P<df>[^()]*)\)\s*$")
+# The variables of a function value, "x" of "F(x)" and "x, y" of "f(x, y)"; a
+# qualifier such as "FWE-corrected" of "P (FWE-corrected)" is longer.
+_FUNCTION_ARGUMENT_RE = re.compile(r"[A-Za-zα-ω](?:\s*,\s*[A-Za-zα-ω])*")
 
 
 def _split_lhs_df(lhs: str) -> tuple[str, str]:

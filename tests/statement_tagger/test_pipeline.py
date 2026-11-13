@@ -282,45 +282,15 @@ def test_rows_that_differ_in_whitespace_only_read_as_the_same_statement():
     assert pipeline.unchanged_fields(contents, resolution, [("funding_statement", other)]) == set()
 
 
-@pytest.mark.parametrize("confirms", [False, True])
-def test_a_tagger_that_confirms_the_rules_bound_statement_replaces_it_only_while_off(
-    monkeypatch, confirms
-):
-    monkeypatch.setattr(pipeline, "_TAGGER_CONFIRMS_RULES_BOUND", confirms)
+def test_a_tagger_statement_holding_the_rules_sentence_replaces_it():
     contents = _shared_paragraph_paper()
-    before, resolution, metadata = _resolve(contents, KeywordTagger())
-    statements = KeywordTagger().tag([b.text for b in content_blocks(_shared_paragraph_paper())])
-    # The rules' sentence lies inside the tagger's funding paragraph.
-    assert "funding_statement" in pipeline.tagger_confirms_rules(
-        before, statements, content_blocks(_shared_paragraph_paper())
-    )
+    _before, _resolution, metadata = _resolve(contents, KeywordTagger())
     source = field_decisions_of(metadata).sources()["funding_statement"]
     messages = [w.message for w in contents.processing_warnings]
-    if confirms:
-        assert metadata.funding_statement == "This study was funded by the Science Council."
-        assert source != "statement_tagger"
-        assert resolution.selected_indices("funding_statement") == before.selected_indices(
-            "funding_statement"
-        )
-        assert "funding_statement filled by the statement tagger" not in messages
-    else:
-        assert metadata.funding_statement.startswith("We thank the staff")
-        assert source == "statement_tagger"
-        assert "funding_statement filled by the statement tagger" in messages
-    # The acknowledgment section is the tagger's either way.
+    assert metadata.funding_statement.startswith("We thank the staff")
+    assert source == "statement_tagger"
+    assert "funding_statement filled by the statement tagger" in messages
     assert "acknowledgment filled by the statement tagger" in messages
-
-
-def test_the_confirm_rule_needs_every_rules_statement_inside_a_tagger_statement():
-    contents = _shared_paragraph_paper()
-    resolution = resolve_integrity_statements(contents, mode="shadow")
-    blocks = content_blocks(contents)
-    tagged = KeywordTagger().tag([b.text for b in blocks])
-    assert "funding_statement" in pipeline.tagger_confirms_rules(resolution, tagged, blocks)
-    # A funding statement over another paragraph does not hold the rules' row.
-    other = next(k for k, block in enumerate(blocks) if block.text == "The results hold.")
-    elsewhere = [TaggedStatement("funding", other, other, 0.9)]
-    assert pipeline.tagger_confirms_rules(resolution, elsewhere, blocks) == set()
 
 
 def test_the_rules_value_stays_where_the_tagger_found_nothing():
