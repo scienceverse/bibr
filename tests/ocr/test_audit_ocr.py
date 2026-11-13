@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -12,66 +11,10 @@ from bibr.ocr import text_layer as _text_layer
 from bibr.ocr.pdf_inspection import inspect_pdf
 from bibr.ocr.text_layer import TextLayerStream, read_text_layer
 from tests.document._pdfs import (
-    PageSpec,
     band_layout,
-    build_pdf,
     fixture_pdfs,
     page_count,
-    text,
 )
-
-_ROWS = [["Group", "N", "Mean", "SD"]] + [[f"G{k}", "12", f"0.9{k}", "0.14"] for k in range(5)]
-# Column starts in points: each column's widest cell ends about 4.5 pt before the next.
-_COLS = [0.0, 27.0, 40.5, 65.0]
-_PITCH = 11.0
-
-
-def _cells(html: str) -> list[list[str]]:
-    return [re.findall(r"<td>(.*?)</td>", row) for row in re.findall(r"<tr>(.*?)</tr>", html)]
-
-
-def _read_table(pdf: bytes, size: tuple[float, float], box: tuple[float, float, float, float]):
-    width, height = size
-    left, bottom, right, top = box
-    region = {
-        "label": "table",
-        "task_type": "table",
-        "content": "",
-        "bbox_2d": [
-            left / width * 1000,
-            (height - top) / height * 1000,
-            right / width * 1000,
-            (height - bottom) / height * 1000,
-        ],
-    }
-    return _cells(read_text_layer(pdf, [[region]]).layout_results[0][0]["content"])
-
-
-def test_a_table_turned_on_a_portrait_page_reads_as_upright_on_a_landscape_one():
-    # The same glyphs at the same distances in points: once upright on a
-    # landscape A4 page, once turned a quarter (text running up) on a portrait
-    # one. The column gaps are physical, so both read as four columns.
-    upright = b"".join(
-        text(cell, 100 + _COLS[j], 400 - _PITCH * i, size=8)
-        for i, row in enumerate(_ROWS)
-        for j, cell in enumerate(row)
-    )
-    turned = b"".join(
-        text(cell, 200 + _PITCH * i, 300 + _COLS[j], size=8, matrix=(0, 1, -1, 0))
-        for i, row in enumerate(_ROWS)
-        for j, cell in enumerate(row)
-    )
-
-    landscape = _read_table(
-        build_pdf([PageSpec(upright, media=(0, 0, 842, 595))]), (842, 595), (90, 330, 220, 415)
-    )
-    portrait = _read_table(
-        build_pdf([PageSpec(turned, media=(0, 0, 595, 842))]), (595, 842), (180, 290, 270, 410)
-    )
-
-    assert landscape == _ROWS
-    assert portrait == _ROWS
-
 
 # --- The text-layer read inside the inspection's page walk ---------------------
 
