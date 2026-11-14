@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-16
+
+0.9.0 was tagged but never published: its release run failed tests on macOS and
+Windows, which pull request checks do not run. Those failures were in the tests and
+in the paths `scripts/switch_model_defaults.py` reports, not in what bibr extracts.
+0.9.1 is the first 0.9 release on PyPI and contains everything listed under 0.9.0,
+plus what is listed here: a fix for memory growth in long batches, the fixes and
+speed-ups of an audit of the whole code base, and two dependency updates.
+
 ### Changed
 
 - A CUDA card that nothing in a run can load onto no longer decides the memory mode.
@@ -15,9 +24,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   install had no CUDA onnxruntime and no torch, so the card stayed empty. Such a run
   is now planned as on a machine without a card: balanced unless system RAM is 8 GB
   or less. On 20 papers in fast mode on 12 cores the balanced mode took 295 s against
-  337 s, at a peak of 4.4 GB against 4.0 GB, with identical exports. A pinned
-  `PIPELINE_MEMORY_MODE` (which `bibr setup` writes) and `--memory` are followed as
-  before.
+  337 s, at a peak of 4.4 GB against 4.0 GB, with identical exports. A
+  `PIPELINE_MEMORY_MODE` you set and `--memory` are followed as before.
 - A fast run that reads the PDF's text layer opens each PDF once. The text-layer read
   used to open the file a second time and repeat the furniture strip and the
   character read that the inspection had just done, about 40% of the native-text
@@ -61,6 +69,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `chart_title` caption labels, which the layout model does not emit.
 
 ### Fixed
+
+- A long batch no longer grows in memory from paper to paper. The growth came from
+  onnxruntime's CPU memory arenas: each model's session kept its largest allocation
+  for the rest of the run. glibc's per-thread malloc arenas added to it. bibr's CPU
+  sessions now run without an arena (`ML_ONNX_CPU_ARENA=true` restores it), and a
+  batch limits glibc to two malloc arenas before it starts (`PIPELINE_MALLOC_ARENAS`,
+  default `2`; Linux with glibc only; a `MALLOC_ARENA_MAX` in the environment wins).
+  A fast batch of 60 papers under an 8 GB limit with swap off, which 0.9.0 could
+  not finish (it stopped after 33 to 51 papers), now runs to the end at a peak of
+  4.7 GB. The memory it keeps between papers stays at 1.6 to 2.0 GB instead of
+  climbing from 3.4 to 5.3 GB. Without a memory limit, the peak of the same batch
+  fell from 7.8–9.5 GB to 4.2–4.8 GB, at about 1% more CPU time and 2–3% more wall
+  time per paper (two runs of each, alternated, on 4 cores). Exports are unchanged.
 
 - A word hyphenated at a page or column break is joined like one hyphenated at a
   line end: "edu-" and "cated" on two pages read "educated", where they read
@@ -171,42 +192,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
-- The lock moves the OpenTelemetry packages to 1.45.2 (0.66b2 for the beta ones).
-  `opentelemetry-api` 1.45.1 takes polynomial time on a crafted `traceparent`
-  header in `TraceContextTextMapPropagator.extract()` (CVE-2026-126360). bibr does
-  not import OpenTelemetry itself; the `mcp` and `vllm` extras bring it in.
-
-## [0.9.1] - 2026-11-13
-
-0.9.0 was tagged but never published: its release run failed tests on macOS and
-Windows, which pull request checks do not run. Those failures were in the tests and
-in the paths `scripts/switch_model_defaults.py` reports, not in what bibr extracts.
-0.9.1 is the first 0.9 release on PyPI and contains everything listed under 0.9.0,
-plus the memory fix and the soupsieve floor below.
-
-### Fixed
-
-- A long batch no longer grows in memory from paper to paper. The growth came from
-  onnxruntime's CPU memory arenas: each model's session kept its largest allocation
-  for the rest of the run. glibc's per-thread malloc arenas added to it. bibr's CPU
-  sessions now run without an arena (`ML_ONNX_CPU_ARENA=true` restores it), and a
-  batch limits glibc to two malloc arenas before it starts (`PIPELINE_MALLOC_ARENAS`,
-  default `2`; Linux with glibc only; a `MALLOC_ARENA_MAX` in the environment wins).
-  A fast batch of 60 papers under an 8 GB limit with swap off, which 0.9.0 could
-  not finish (it stopped after 33 to 51 papers), now runs to the end at a peak of
-  4.7 GB. The memory it keeps between papers stays at 1.6 to 2.0 GB instead of
-  climbing from 3.4 to 5.3 GB. Without a memory limit, the peak of the same batch
-  fell from 7.8–9.5 GB to 4.2–4.8 GB, at about 1% more CPU time and 2–3% more wall
-  time per paper (two runs of each, alternated, on 4 cores). Exports are unchanged.
-
-### Security
-
 - The lock moves to soupsieve 4.1 on Python 3.11.5 and later, with a constraint
   floor of 4.0 in `pyproject.toml`. Earlier releases take polynomial time to match
   a selector with descendant combinators on deeply nested markup (CVE-2026-126190),
   and bibr runs such selectors (`thead tr`) on the tables of HTML it is given.
   soupsieve 4 needs Python 3.11.5, so Python 3.11.0 to 3.11.4 keep 2.10. soupsieve
   4.0 also stops looking inside `template` elements, which bibr does not select in.
+
+- The lock moves the OpenTelemetry packages to 1.45.2 (0.66b2 for the beta ones).
+  `opentelemetry-api` 1.45.1 takes polynomial time on a crafted `traceparent`
+  header in `TraceContextTextMapPropagator.extract()` (CVE-2026-126360). bibr does
+  not import OpenTelemetry itself; the `mcp` and `vllm` extras bring it in.
 
 ## [0.9.0] - 2026-11-12
 
