@@ -10,6 +10,7 @@ is reached through ``self``.
 import logging
 import re
 from collections.abc import Set as AbstractSet
+from typing import TYPE_CHECKING
 
 from bibr.input.consolidate_text import (
     DOI_URL_CONTEXT_RE,
@@ -30,6 +31,9 @@ from bibr.structure.reference_boundaries import is_publisher_note_boundary
 from bibr.structure.text_repair import bbox_to_tuple
 from bibr.structure.xref_utils import URL_RE
 from bibr.utils.text import clean_extracted_url, normalize_text
+
+if TYPE_CHECKING:
+    from bibr.utils.link_targets import LinkTargets
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +221,9 @@ class TextHandlersMixin:
                 same_page and self._should_join(self._carry_over.text, text) and crosses_barrier_ok
             )
             if same_page_join or cross_page_continuation:
-                prefix, joiner = self._join_parts(self._carry_over.text, text)
+                prefix, joiner = self._join_parts(
+                    self._carry_over.text, text, getattr(self, "_link_targets", None)
+                )
                 if not same_page and isinstance(self._carry_over.page, int):
                     # Record where this page's text starts so the flushed
                     # sentences are attributed to the page they were printed on
@@ -519,18 +525,32 @@ class TextHandlersMixin:
         return next((char.islower() for char in text if char.isalpha()), False)
 
     @staticmethod
-    def _join_parts(prev_text: str, next_text: str) -> tuple[str, str]:
+    def _join_parts(
+        prev_text: str, next_text: str, links: "LinkTargets | None" = None
+    ) -> tuple[str, str]:
         """The carry-over text and the joiner to put before *next_text*.
 
         A word hyphenated at the end of a region ("inter-" / "national" across
         a page or column break) is a line wrap like one inside a region, so it
         follows the same keep-or-join rule (``_dehyphenate_word_linewraps``):
-        "international", but "well-known".
+        "international", but "well-known". A link that one of the document's
+        link targets (*links*) runs on through joins with no space, and a wrap
+        hyphen the target does not have is dropped ("github.com/Betha-" /
+        "nyL/DeepKoopman").
         """
-        if TextHandlersMixin._is_url_wrap_join(prev_text, next_text):
-            return prev_text, ""
         prev = prev_text.rstrip()
         nxt = next_text.lstrip()
+        if links and prev and nxt:
+            before = prev.rsplit(maxsplit=1)[-1]
+            after = nxt.split(maxsplit=1)[0]
+            rest = nxt[len(after) :]
+            ends = not rest or rest[0] in "\r\n"
+            if links.spans(before, after, line_ends=ends):
+                return prev, ""
+            if before[-1:] in _WRAP_HYPHENS and links.spans(before[:-1], after, line_ends=ends):
+                return prev[:-1], ""
+        if TextHandlersMixin._is_url_wrap_join(prev_text, next_text):
+            return prev_text, ""
         if prev[-1:] in _WRAP_HYPHENS and nxt[:1].isalpha():
             before = " ".join(prev[-_WRAP_CONTEXT_CHARS:].split())
             after = " ".join(nxt[:_WRAP_CONTEXT_CHARS].split())

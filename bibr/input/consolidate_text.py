@@ -7,8 +7,12 @@ in text content.
 import logging
 import re
 from collections.abc import Iterable, Iterator
+from typing import TYPE_CHECKING
 
 from bibr.utils.text import CONTROL_CHAR_RE, DOI_BODY, URL_RE, normalize_unicode
+
+if TYPE_CHECKING:
+    from bibr.utils.link_targets import LinkTargets
 
 logger = logging.getLogger(__name__)
 
@@ -898,11 +902,19 @@ def _wrap_joins(left: str, right: str, following: str, reference: bool = True) -
     )
 
 
-def _bridge_doi_url_crlf_wraps(text: str, reference: bool = True) -> str:
+def _bridge_doi_url_crlf_wraps(
+    text: str, reference: bool = True, links: "LinkTargets | None" = None
+) -> str:
     """Re-join CRLF wraps inside a URL/DOI token at positions the mid-word DOI
     bridge does not cover. Additive to :func:`_bridge_doi_midword_wraps`; never
     joins a 10.NNNN/ DOI-body letter->letter wrap (that function's domain, incl.
     the annurev structural-hyphen guard).
+
+    With *links*, the document's link targets, a wrap that one of them runs
+    through joins whatever the words around it look like
+    (:meth:`~bibr.utils.link_targets.LinkTargets.spans`), so a link printed
+    without a scheme joins too ("osf." + "io/2y34r/"); every other wrap is
+    judged by its shape (:func:`_wrap_joins`).
 
     One pass carries the token before each wrap (back to the last white space of the text as
     bridged so far, at most ``_URL_TOKEN_WINDOW`` characters) from wrap to wrap, so a URL
@@ -910,19 +922,24 @@ def _bridge_doi_url_crlf_wraps(text: str, reference: bool = True) -> str:
     wraps, not with its square. A further pass runs only where the first changed something,
     and no more than ``_URL_BRIDGE_PASSES`` run.
     """
-    if "\n" not in text or not (
-        DOI_URL_CONTEXT_RE.search(text) or _DOI_SPLIT_START_RE.search(text)
-    ):
+    if "\n" not in text:
         return text
     for _ in range(_URL_BRIDGE_PASSES):
-        joined = _bridge_url_crlf_pass(text, reference)
+        # The shape rules read only text that holds a URL or DOI; the link targets
+        # read every wrap.
+        shapes = bool(DOI_URL_CONTEXT_RE.search(text) or _DOI_SPLIT_START_RE.search(text))
+        if not (shapes or links):
+            break
+        joined = _bridge_url_crlf_pass(text, reference, links if links else None, shapes=shapes)
         if joined == text:
             break
         text = joined
     return text
 
 
-def _bridge_url_crlf_pass(text: str, reference: bool) -> str:
+def _bridge_url_crlf_pass(
+    text: str, reference: bool, links: "LinkTargets | None" = None, *, shapes: bool = True
+) -> str:
     parts: list[str] = []
     pos = 0
     token = ""
@@ -937,7 +954,11 @@ def _bridge_url_crlf_pass(text: str, reference: bool) -> str:
         while rend < len(text) and text[rend] not in _WORD_END:
             rend += 1
         right = text[end:rend]
-        if _wrap_joins(token, right, _next_token(text, rend), reference):
+        if links is not None and links.spans(
+            token, right, line_ends=rend >= len(text) or text[rend] in "\r\n"
+        ):
+            continue  # a link target runs through the wrap
+        if shapes and _wrap_joins(token, right, _next_token(text, rend), reference):
             continue  # the token goes on through the wrap
         parts.append(m.group(0))
         token = ""
@@ -1108,7 +1129,9 @@ _LATEX_SYMBOL_RE = re.compile(
 _LATEX_BACKSLASH_CMD_RE = re.compile(r"\\([a-zA-Z]+)")
 
 
-def fix_ocr_artifacts(text: str, *, reference: bool | None = None) -> str:
+def fix_ocr_artifacts(
+    text: str, *, reference: bool | None = None, links: "LinkTargets | None" = None
+) -> str:
     """Replace common OCR artifacts with correct characters.
 
     Handles ligatures (ff, fi, fl, ffi, ffl), soft hyphens, and the
@@ -1121,6 +1144,9 @@ def fix_ocr_artifacts(text: str, *, reference: bool | None = None) -> str:
             a DOI broken after a bracket, an underscore or a dot, or inside a word
             that opens upper-case, run on reference text and on text of unknown
             kind, not on a body paragraph, a caption or a title.
+        links: The link targets of the text's document, from its PDF's link
+            annotations, or None. A line break that one of them runs through is
+            joined with no space, whatever the shape rules say of it.
 
     Returns:
         Cleaned text.
@@ -1132,7 +1158,7 @@ def fix_ocr_artifacts(text: str, *, reference: bool | None = None) -> str:
     for artifact, replacement in _OCR_ARTIFACT_MAP.items():
         text = text.replace(artifact, replacement)
     text = _bridge_url_linewraps(text)
-    text = _bridge_doi_url_crlf_wraps(text, ref_shapes)
+    text = _bridge_doi_url_crlf_wraps(text, ref_shapes, links)
     # Wraps bridged above can bring a hyphen wrap into a URL that began on an earlier line.
     text = _bridge_url_linewraps(text)
     text = _bridge_doi_midword_wraps(text, ref_shapes)

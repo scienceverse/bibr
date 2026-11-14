@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from bibr.input.pdf_outline import OutlineItem
+    from bibr.utils.link_targets import LinkTargets
 
 from bibr.input.consolidate_text import fix_ocr_artifacts
 from bibr.ocr.ref_patterns import (
@@ -267,6 +268,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         *,
         settings=None,
         first_page_index: int = 0,
+        link_targets: "LinkTargets | None" = None,
     ) -> None:
         from bibr.config import snapshot_settings
 
@@ -280,6 +282,9 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         # :meth:`_is_front_page` instead, so "front page" is threaded once
         # rather than re-derived from an absolute index in five places.
         self._first_page_index = max(0, first_page_index)
+        # The targets of the PDF's link annotations: a line break one of them runs
+        # through is inside a printed link and joins with no space.
+        self._link_targets = link_targets or None
         # Normalize to the typed Region IR at entry: the pipeline hands over
         # OcrRegionResult objects; dict pages (frozen eval JSONs, hand-built
         # fixtures) go through the wire-format adapter.
@@ -844,7 +849,9 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 label = region.label
                 effective = native_label if native_label in LABEL_TREATMENT else label
                 clean_content = fix_ocr_artifacts(
-                    region.content, reference=effective in _REFERENCE_LABELS
+                    region.content,
+                    reference=effective in _REFERENCE_LABELS,
+                    links=self._link_targets,
                 )
                 self._clean_region_content[(page_idx, region_idx)] = clean_content
                 content = clean_content.strip()
@@ -1151,7 +1158,9 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         # Joined as lines, so a word wrapped across the columns is mended like
         # any line wrap.
         joined = fix_ocr_artifacts(
-            "\n".join(region.content.strip() for region in regions), reference=False
+            "\n".join(region.content.strip() for region in regions),
+            reference=False,
+            links=self._link_targets,
         )
         boxes = [box for region in regions if (box := bbox_to_tuple(region.bbox_2d)) is not None]
         if boxes:
@@ -1187,7 +1196,9 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             if content is None:
                 effective = native_label if native_label in LABEL_TREATMENT else label
                 content = fix_ocr_artifacts(
-                    region.content, reference=effective in _REFERENCE_LABELS
+                    region.content,
+                    reference=effective in _REFERENCE_LABELS,
+                    links=self._link_targets,
                 )
                 self._clean_region_content[key] = content
             bbox = region.bbox_2d

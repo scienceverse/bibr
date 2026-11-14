@@ -169,13 +169,18 @@ _DOI_EMBEDDED_URL_RE = re.compile(r"(https?://|www\.)", re.IGNORECASE)
 # has a ``/-/`` segment, so truncate there.
 _DOI_SUPPLEMENT_PATH_RE = re.compile(r"/-/DC(?:Supplemental|\d+)\b.*$", re.IGNORECASE)
 
+# A publisher link that carries a DOI often adds a query to it ("…/10.12968/bjca.2019.0072
+# ?journalCode=bjca", "?via%3Dihub", "?download=true"); a DOI holds no "?name=", so the
+# DOI ends before it.
+_DOI_URL_QUERY_RE = re.compile(r"\?[A-Za-z_][\w.%-]*(?:=|%3D).*$", re.DOTALL)
+
 
 def normalize_doi(doi: str | None) -> str | None:
     """Normalize a DOI string to its bare form (e.g. ``10.1016/j.foo.2024``).
 
     Strips URL prefixes (https://doi.org/..., doi:, etc.), trailing punctuation,
     embedded URL suffixes (from OCR concatenation), HighWire supplement paths
-    (``/-/DCSupplemental``), and validates the result looks
+    (``/-/DCSupplemental``), a link's query (``?journalCode=…``), and validates the result looks
     like a real DOI (starts with ``10.NNNN/``).
 
     Returns None if the input is empty or not a valid DOI after cleanup.
@@ -209,6 +214,8 @@ def normalize_doi(doi: str | None) -> str | None:
     # pattern from every "/-/DC1" before a newline is quadratic.
     last_line = cleaned.rfind("\n", 0, len(cleaned) - 1) + 1
     cleaned = cleaned[:last_line] + _DOI_SUPPLEMENT_PATH_RE.sub("", cleaned[last_line:])
+
+    cleaned = _DOI_URL_QUERY_RE.sub("", cleaned)
 
     # Strip trailing punctuation again (embedded URL removal may expose new junk)
     cleaned = _DOI_TRAILING_JUNK_RE.sub("", cleaned)
