@@ -3612,6 +3612,57 @@ def _select_agreeing_record(
     return primary.block, tuple(flags)
 
 
+# How much of a record's first abstract row its language is read from.
+_ABSTRACT_LANGUAGE_CHARS = 400
+
+
+def _record_text_language(
+    record: _RecordIdentity, by_id: dict[str, FrontMatterCandidate]
+) -> str | None:
+    """The language of the record's own abstract, else of its first title row.
+
+    The abstract's is the strict guess (:func:`language_from_title`): a short
+    English sentence opening with "We" is no Polish.
+
+    A title row that took in the byline and affiliations (one text-layer
+    paragraph) reads as the affiliations' language; the abstract printed under
+    the byline is the record's own text.
+    """
+
+    for row in _block_candidates(record.block, by_id):
+        if _is_abstract_content(row) and "doi" not in row.roles:
+            language = language_from_title(row.raw_text[:_ABSTRACT_LANGUAGE_CHARS])
+            if language is not None:
+                return language
+    return record.language
+
+
+def _tagger_title_translates(
+    title: str,
+    presentation: _RecordIdentity,
+    record: _RecordIdentity,
+    by_id: dict[str, FrontMatterCandidate],
+) -> bool:
+    """Whether the tagger's title, printed in a byline-less block, translates *record*.
+
+    The block printing it comes after the record, prints no byline, no DOI the
+    record does not print and no cover cue, and the title is in another
+    language than the record's own text. Two papers in one language (an
+    abstract book, the article before) never pass.
+    """
+
+    if not record.is_record or presentation.byline or presentation.cover:
+        return False
+    if presentation.order <= record.order:
+        return False
+    if presentation.dois and not presentation.dois <= record.dois:
+        return False
+    title_language = _title_language(title)
+    return title_language == presentation.language and _languages_differ(
+        title_language, _record_text_language(record, by_id)
+    )
+
+
 def _select_tagger_record(
     blocks: tuple[FrontMatterBlock, ...],
     by_id: dict[str, FrontMatterCandidate],
@@ -3655,9 +3706,23 @@ def _select_tagger_record(
                 return None, (f"tagger_title_outside_record:{identity.block.block_id}",)
             # The one byline in sight is another block's: the title the tagger
             # read can be a second paper's, with the first paper's authors and
-            # abstract around it.
+            # abstract around it -- unless the title is in another language
+            # than that record and its block prints nothing of a paper of its
+            # own: then it is the record's translated presentation, and the
+            # record is the bylined block.
+            selected, flags = identity, (f"tagger_record:{identity.block.block_id}",)
             if bylined and bylined[0] is not identity:
-                return None, (f"tagger_title_outside_byline:{identity.block.block_id}",)
+                record = bylined[0]
+                if not _tagger_title_translates(title, identity, record, by_id):
+                    return None, (f"tagger_title_outside_byline:{identity.block.block_id}",)
+                selected = record
+                printed = "".join(
+                    _identity_key(row.raw_text) for row in _block_candidates(record.block, by_id)
+                )
+                flags = (
+                    f"tagger_record:{record.block.block_id}",
+                    f"tagger_title_translated:{identity.block.block_id}",
+                )
             # Every family name the tagger read must be printed in the block, or
             # its byline took in names from a second byline the blocks missed.
             families = [
@@ -3666,9 +3731,64 @@ def _select_tagger_record(
                 if (key := _identity_key(author.family or ""))
             ]
             if not families or any(key not in printed for key in families):
-                return None, (f"tagger_authors_outside_record:{identity.block.block_id}",)
-            return identity.block, (f"tagger_record:{identity.block.block_id}",)
+                return None, (f"tagger_authors_outside_record:{selected.block.block_id}",)
+            return selected.block, flags
     return None, ("tagger_title_outside_blocks",)
+
+
+def translated_record_title(resolution: FrontMatterResolution | None, contents) -> str | None:
+    """The selected record's own printed title when the tagger read a translation.
+
+    Only after :func:`_select_tagger_record` selected a bylined record for a
+    tagger title printed in its translated presentation
+    (``tagger_title_translated``). The record's first title row can be one
+    text-layer paragraph that took in the byline and affiliations; the layout
+    region its first sentence came from holds the title alone. None when that
+    region is not a title of three words or more.
+    """
+
+    if resolution is None or resolution.selected_block_id is None:
+        return None
+    if not any(flag.startswith("tagger_title_translated:") for flag in resolution.reason_flags):
+        return None
+    block = next((b for b in resolution.blocks if b.block_id == resolution.selected_block_id), None)
+    if block is None:
+        return None
+    by_id = {candidate.candidate_id: candidate for candidate in resolution.candidates}
+    row = next(
+        (
+            candidate
+            for candidate_id in block.title_candidate_ids
+            if (candidate := by_id.get(candidate_id)) is not None
+            and _is_identity_title(candidate, None)
+        ),
+        None,
+    )
+    if row is None or not row.text_ids:
+        return None
+    first = next(
+        (s for s in getattr(contents, "sentences", None) or [] if s.text_id == row.text_ids[0]),
+        None,
+    )
+    meta = (first.region_meta or {}) if first is not None else {}
+    key = (meta.get("region_page"), meta.get("region_index"))
+    summary = next(
+        (
+            summary
+            for summary in getattr(contents, "region_summaries", None) or []
+            if (summary.page, summary.index) == key
+        ),
+        None,
+    )
+    if summary is None or not summary.content:
+        return None
+    title = " ".join(summary.content.split())
+    # The region must open the row: a title, not a fragment of the byline.
+    if not _normalize_text(row.raw_text).startswith(_normalize_text(title)):
+        return None
+    if _title_word_count(title) < 3 or _URL_OR_EMAIL_RE.search(title):
+        return None
+    return title
 
 
 def _multi_item_issue(
@@ -3824,4 +3944,5 @@ __all__ = [
     "is_exact_front_matter_furniture",
     "language_from_title",
     "resolve_front_matter",
+    "translated_record_title",
 ]

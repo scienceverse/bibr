@@ -95,6 +95,79 @@ def test_a_title_beside_another_blocks_byline_keeps_abstaining():
     assert [issue.code for issue in issues] == ["VAL_METADATA_MULTI_ITEM"]
 
 
+PT_TITLE = "Solidão entre os imigrantes idosos nos bairros da cidade"
+
+
+def _translated_presentation(abstract: str) -> PaperContents:
+    # An English record on page 1, its Portuguese title and abstract on page 2.
+    return _contents(
+        [
+            _row(1, FIRST_TITLE, y=60.0, label="paragraph_title"),
+            _row(2, "Mei Lin, Jordan Smith", y=100.0),
+            _row(3, abstract, y=140.0, label="abstract"),
+            _row(4, PT_TITLE, y=60.0, label="doc_title", page=2),
+            _row(
+                5,
+                "Entrevistamos os imigrantes idosos sobre a solidão nas cidades.",
+                y=100.0,
+                label="abstract",
+                page=2,
+            ),
+        ]
+    )
+
+
+def test_a_translated_title_beside_the_byline_reads_the_bylined_record():
+    contents = _tagged(
+        _translated_presentation(
+            "We interviewed the older immigrants of the city about their loneliness and "
+            "the support of their families."
+        ),
+        title=PT_TITLE,
+        authors=("Lin", "Smith"),
+    )
+
+    resolution, issues = resolve_front_matter(contents, target_required=True, settings=_fast())
+
+    assert resolution.selected_block_id == "front-matter-block-1"
+    assert "tagger_title_translated:front-matter-block-2" in resolution.reason_flags
+    assert issues == ()
+
+
+def test_a_translated_title_printed_before_the_record_keeps_abstaining():
+    # A title ahead of the one byline is the article before's, whatever its language.
+    contents = _tagged(
+        _contents(
+            [
+                _row(1, PT_TITLE, y=60.0, label="doc_title"),
+                _row(
+                    2,
+                    "Entrevistamos os imigrantes idosos sobre a solidão nas cidades.",
+                    y=100.0,
+                    label="abstract",
+                ),
+                _row(3, FIRST_TITLE, y=60.0, label="paragraph_title", page=2),
+                _row(4, "Mei Lin, Jordan Smith", y=100.0, page=2),
+                _row(
+                    5,
+                    "We interviewed the older immigrants of the city about their loneliness.",
+                    y=140.0,
+                    label="abstract",
+                    page=2,
+                ),
+            ]
+        ),
+        title=PT_TITLE,
+        authors=("Lin", "Smith"),
+    )
+
+    resolution, issues = resolve_front_matter(contents, target_required=True, settings=_fast())
+
+    assert resolution.selected_block_id is None
+    assert "tagger_title_outside_byline:front-matter-block-1" in resolution.reason_flags
+    assert [issue.code for issue in issues] == ["VAL_METADATA_MULTI_ITEM"]
+
+
 def test_tagged_authors_the_record_does_not_print_keep_abstaining():
     # The tagger took in a second byline that no block shows as one.
     contents = _tagged(_two_abstracts(None), authors=("Lin", "Smith", "Reader", "Writer"))

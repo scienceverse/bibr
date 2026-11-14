@@ -15,6 +15,7 @@ confidence bar, the caller asks the LLM as before.
 
 from __future__ import annotations
 
+import bisect
 import re
 import unicodedata
 from collections.abc import Collection, Sequence
@@ -1382,6 +1383,177 @@ def _byline_under_title(inp: TaggerInput, tags: list[str], spans: list[Span]) ->
         _tag_whole_name(inp, tags, units)
 
 
+# A patronymic printed lower-case at the end of a name ("Sarvinoz Xayrulla qizi").
+_PATRONYMICS = frozenset(
+    {"qizi", "qizı", "kizi", "ugli", "o‘g‘li", "o'g'li", "ogli", "oglu", "uulu", "kyzy"}
+)
+
+
+def _word_lines(inp: TaggerInput) -> list[tuple[int, int]]:
+    """(region, printed line) of every word.
+
+    The tagger input joins a region's lines with spaces (``contract._region_text``),
+    so where a line ends is read back from the region's own text: the same
+    substitution, with the offsets of the joins kept.
+    """
+    region_start: dict[int, int] = {}
+    for word in inp.words:
+        region_start.setdefault(word.region, word.start)
+    cuts: dict[int, list[int]] = {}
+    for pos, region in enumerate(inp.regions):
+        parts = re.split(r"\s*\n\s*", region.text or "")
+        joined = " ".join(parts)
+        lead = len(joined) - len(joined.lstrip())
+        at, marks = 0, []
+        for part in parts[:-1]:
+            at += len(part)
+            marks.append(at - lead)
+            at += 1
+        cuts[pos] = marks
+    return [
+        (w.region, bisect.bisect_right(cuts.get(w.region, []), w.start - region_start[w.region]))
+        for w in inp.words
+    ]
+
+
+def _name_or_patronymic(text: str) -> bool:
+    return _is_name_word(text) or text.casefold() in _PATRONYMICS
+
+
+def _one_name_per_line(inp: TaggerInput, tags: list[str], lines: list[tuple[int, int]]) -> None:
+    """Retag a byline that prints one whole name per line and no separators.
+
+    The tagger cannot see the line breaks, so "Nikolai Haahjem Eftedal / Thomas
+    Haarklau Kleppestø" comes out as "Nikolai Haahjem" and "Eftedal Thomas
+    Haarklau Kleppestø". Only when a tagged name runs over a line break and every
+    line of the region reads as one whole name.
+    """
+    words = inp.words
+    by_region: dict[int, list[int]] = {}
+    for i, word in enumerate(words):
+        by_region.setdefault(word.region, []).append(i)
+    for members in by_region.values():
+        if not any(_field(tags[i]) in _NAME_FIELDS for i in members):
+            continue
+        if any(_field(tags[i]) not in (None, "GIVEN", "FAMILY") for i in members):
+            continue
+        if any(words[i].text in _LIST_SEPARATORS or _is_connective(words[i].text) for i in members):
+            continue
+        rows: dict[tuple[int, int], list[int]] = {}
+        for i in members:
+            rows.setdefault(lines[i], []).append(i)
+        if len(rows) < _MIN_NAME_UNITS:
+            continue
+        crosses = any(
+            _field(tags[i]) in _NAME_FIELDS
+            and tags[i].startswith("I-")
+            and lines[i] != lines[i - 1]
+            for i in members[1:]
+        ) or any(
+            # a given name at a line end whose family starts the next line
+            _field(tags[a]) == "GIVEN" and _field(tags[b]) == "FAMILY" and lines[a] != lines[b]
+            for a, b in zip(members, members[1:], strict=False)
+        )
+        if not crosses:
+            continue
+        readings = []
+        for row in rows.values():
+            units = _name_units(inp, tags, row[0], row[-1] + 1)
+            if not units or units[-1][-1] != row[-1] or not _whole_name(inp, units):
+                break
+            readings.append(units)
+        else:
+            for units in readings:
+                _tag_whole_name(inp, tags, units)
+
+
+def _complete_lines(
+    inp: TaggerInput, tags: list[str], authors: list[_Author], lines: list[tuple[int, int]]
+) -> None:
+    """Finish the last name on a printed line from the words left on that line.
+
+    "Agung/GIVEN Nugraha/FAMILY Nursya’bana", "Suhaila/GIVEN Saleem/FAMILY
+    Kareem/AFFILIATION" (the affiliation starting on the next line) and
+    "Faried/FAMILY Dirgantara Putra": name words that run on to the end of the
+    author's line are the rest of the name. An author with one part only, starting
+    its line, takes the name words after it even when the line goes on
+    ("Imamul/FAMILY Arifin S,Sy."). A given name alone printed right after a
+    whole name on the same line, ending it, is the rest of that name's family
+    ("Camila V. Bordón Gabriele/GIVEN").
+    """
+    words = inp.words
+    n = len(words)
+    for pos, author in enumerate(authors):
+        line = lines[author.first_word]
+        if lines[author.last_word] != line or _is_publisher(author):
+            continue
+        nxt = authors[pos + 1] if pos + 1 < len(authors) else None
+        if nxt is not None and lines[nxt.first_word] == line:
+            joinable = (
+                nxt.first_word == author.last_word + 1
+                and nxt.given
+                and not nxt.family
+                and not _is_publisher(nxt)
+                and author.given
+                and author.family
+                and lines[nxt.last_word] == line
+                and (pos + 2 >= len(authors) or lines[authors[pos + 2].first_word] != line)
+                and (nxt.last_word + 1 >= n or lines[nxt.last_word + 1] != line)
+                and all(
+                    _name_or_patronymic(words[i].text)
+                    for s in (*nxt.given, *nxt.family)
+                    for i in s.words
+                )
+            )
+            if joinable:
+                last = _field(tags[author.last_word])
+                for s in (*nxt.given, *nxt.family):
+                    for i in s.words:
+                        tags[i] = f"I-{last}"
+            continue
+        i = author.last_word + 1
+        run: list[int] = []
+        while (
+            i < n
+            and lines[i] == line
+            and _field(tags[i]) in (None, "AFFILIATION")
+            and _name_or_patronymic(words[i].text)
+        ):
+            run.append(i)
+            i += 1
+        if not run:
+            continue
+        at_line_end = i >= n or lines[i] != line
+        affiliated = [j for j in run if _field(tags[j]) == "AFFILIATION"]
+        # Only the head of an affiliation that goes on past the line: the
+        # tagger glued the line's last name word onto the next line's text.
+        if affiliated and (
+            not at_line_end or i >= n or tags[i] != "I-AFFILIATION" or affiliated[0] != run[0]
+        ):
+            continue
+        one_part = bool(author.given) != bool(author.family)
+        starts_line = author.first_word == 0 or lines[author.first_word - 1] != line
+        if len(run) > _MAX_GIVEN_UNITS or not (
+            at_line_end or (one_part and starts_line and not affiliated)
+        ):
+            continue
+        if one_part and author.family and not author.given:
+            # "Faried/FAMILY Dirgantara Putra": the tagged word starts the name.
+            for s in author.family:
+                for j in s.words:
+                    tags[j] = "B-GIVEN" if j == author.family[0].words[0] else "I-GIVEN"
+            for k, j in enumerate(run):
+                tags[j] = "I-FAMILY" if k else "B-FAMILY"
+            continue
+        if one_part and author.given and not author.family:
+            for k, j in enumerate(run):
+                tags[j] = "I-FAMILY" if k else "B-FAMILY"
+            continue
+        last = _field(tags[author.last_word])
+        for j in run:
+            tags[j] = f"I-{last}"
+
+
 def _repair_byline(inp: TaggerInput, tags: Sequence[str], conf: Sequence[float]) -> list[str]:
     """The tags with the name parts in print that the tagger left out added back."""
     repaired = list(tags)
@@ -1392,6 +1564,9 @@ def _repair_byline(inp: TaggerInput, tags: Sequence[str], conf: Sequence[float])
         _byline_under_title(inp, repaired, spans)
         return repaired
     _complete_names(inp, repaired, authors)
+    lines = _word_lines(inp)
+    _one_name_per_line(inp, repaired, lines)
+    _complete_lines(inp, repaired, _group_authors(_spans(inp, repaired, conf)), lines)
     _names_between(inp, repaired, _group_authors(_spans(inp, repaired, conf)))
     return repaired
 
