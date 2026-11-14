@@ -228,7 +228,7 @@ Known caveats:
   its accuracy on tables and formulas is not measured on its own.
 - Memory. Under an 8 GB limit bibr runs batches of 3, and a fast batch of 60
   papers now finishes with swap off: it peaked at 4.7 GB, and the memory it keeps
-  between papers stayed at 1.6 to 2.0 GB. In 0.9.0 the same runs stopped after 33
+  between papers stayed at 1.6 to 2.0 GB. Before 0.9.1 the same runs stopped after 33
   to 51 papers, because each model's onnxruntime CPU memory arena kept its largest
   allocation and the batch grew from paper to paper (see the changelog).
   `ML_ONNX_CPU_ARENA=true` brings those arenas back, and with them that growth.
