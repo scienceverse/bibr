@@ -30,9 +30,7 @@
 To try bibr on one paper without installing anything, upload it at
 [try.bibr.org](https://try.bibr.org).
 
-Requires Python 3.11–3.14 and the
-[system prerequisites](https://bibr.org/getting-started/install/#system-prerequisites).
-Install from PyPI in a project managed by [uv](https://docs.astral.sh/uv/):
+Requires Python 3.11–3.14. Install from PyPI in a project managed by [uv](https://docs.astral.sh/uv/):
 
 ```bash
 uv init --python 3.12 paper-extraction

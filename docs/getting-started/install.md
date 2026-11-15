@@ -7,23 +7,6 @@ a current release: it fails, or picks the empty early placeholder 0.0.2, after
 which `bibr` is not a command. The uv commands below avoid this, because
 `uv init --python 3.12` fetches its own Python 3.12.
 
-## System prerequisites
-
-bibr identifies input files by content, through the `python-magic` binding to the system
-**libmagic** library. `python-magic` is only the binding — on macOS and most Linux distros
-libmagic itself has to be installed separately, or the first file bibr reads fails with
-`failed to find libmagic`:
-
-| Platform | Command |
-|---|---|
-| macOS | `brew install libmagic` |
-| Debian / Ubuntu | `sudo apt install libmagic1` |
-| Fedora / RHEL | `sudo dnf install file-libs` |
-| Windows | nothing to do — the `python-magic-bin` wheel bundles it |
-
-`bibr doctor` reports this as its own check, so run it if an extraction fails on a fresh
-machine.
-
 ## Install from PyPI
 
 ```bash
