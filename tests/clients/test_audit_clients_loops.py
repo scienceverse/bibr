@@ -8,18 +8,45 @@ import threading
 import pytest
 
 
+def _bounded(fn, seconds: float = 60.0):
+    """Run *fn* in a thread: a hang on real sockets fails the test, not the suite."""
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the test's thread
+            box["error"] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    assert not thread.is_alive(), f"still running after {seconds:.0f} s"
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
 @pytest.fixture
 def redis_url():
     from fakeredis import TcpFakeServer
 
     server = TcpFakeServer(("127.0.0.1", 0), server_type="redis")
+    # A connection whose event loop is gone is closed when it is collected, not
+    # before: server_close() must not wait for the handler thread serving it
+    # (on Windows it waited for the rest of the run).
+    server.daemon_threads = True
+    server.block_on_close = False
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
         yield f"redis://127.0.0.1:{server.server_address[1]}/0"
     finally:
-        server.shutdown()
-        server.server_close()
+        closer = threading.Thread(
+            target=lambda: (server.shutdown(), server.server_close()), daemon=True
+        )
+        closer.start()
+        closer.join(10)
 
 
 def test_crossref_redis_cache_answers_from_every_asyncio_run(redis_url):
@@ -28,9 +55,12 @@ def test_crossref_redis_cache_answers_from_every_asyncio_run(redis_url):
     from bibr.clients.response_cache import RedisResponseCache
 
     cache = RedisResponseCache(redis_url, connect_timeout=2, socket_timeout=2)
-    asyncio.run(cache.set("works:10.1/x", {"message": {"DOI": "10.1/x"}}))
 
-    answers = [asyncio.run(cache.get("works:10.1/x")) for _ in range(3)]
+    def calls() -> list:
+        asyncio.run(cache.set("works:10.1/x", {"message": {"DOI": "10.1/x"}}))
+        return [asyncio.run(cache.get("works:10.1/x")) for _ in range(3)]
+
+    answers = _bounded(calls)
 
     assert answers == [{"message": {"DOI": "10.1/x"}}] * 3
     assert cache.misses == 0
@@ -40,7 +70,7 @@ def test_crossref_redis_cache_serves_threads_with_their_own_loops(redis_url):
     from bibr.clients.response_cache import RedisResponseCache
 
     cache = RedisResponseCache(redis_url, connect_timeout=2, socket_timeout=2)
-    asyncio.run(cache.set("k", {"v": 1}))
+    _bounded(lambda: asyncio.run(cache.set("k", {"v": 1})))
     results: list = []
 
     def worker() -> None:
@@ -51,8 +81,9 @@ def test_crossref_redis_cache_serves_threads_with_their_own_loops(redis_url):
     for t in threads:
         t.start()
     for t in threads:
-        t.join(15)
+        t.join(30)
 
+    assert not any(t.is_alive() for t in threads)
     assert results == [{"v": 1}] * 6
 
 

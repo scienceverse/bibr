@@ -799,7 +799,7 @@ These bundles are published, so a core install needs no configuration (the front
 | Statement tagger | `scienceverse/bibr-statement-tagger-v1` | `b446f943` |
 | Front-matter tagger | `scienceverse/bibr-front-tagger` | `13a0f5c3` |
 
-The paper-classifier pin is the 0.9.0 model, which replaced the PyTorch weights
+The paper-classifier pin is the 0.9 model, which replaced the PyTorch weights
 and the ONNX bundle together; set
 `ML_PAPER_CLASSIFIER_REVISION=6046171b3198a255acb1f07f81a586a32f399ac4` to keep
 0.8.0's. The reference-parser pin
@@ -814,7 +814,7 @@ loads them from the same pinned commit with `trust_remote_code` and cannot load
 it at `NER_PARSER_REVISION=main`.
 
 The geometry line tagger, the text reference segmenter and the statement
-tagger are defaults since 0.9.0. Each one turns off with its setting set to
+tagger are defaults since 0.9. Each one turns off with its setting set to
 null (`REF_GEOM_TAGGER_MODEL_ID=null`, `REF_TEXT_SEG_MODEL_ID=null`, which
 brings back the CRF segmenter, and `ML_STATEMENT_TAGGER_MODEL_ID=null`), which
 reads a paper as 0.8.0 did at that step. As shipped defaults, a model that
