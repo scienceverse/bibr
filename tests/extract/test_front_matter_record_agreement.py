@@ -679,6 +679,29 @@ def test_citation_line_agrees_only_when_it_prints_the_whole_title(citation, agre
 
 
 @pytest.mark.parametrize(
+    ("citing", "agree"),
+    [
+        # Frontiers' CITATION box beside the title page, taken for a title.
+        (
+            "Example AJ and Sample B (1991) Delayed recall of household losses after regional "
+            "flooding. Front. Invent. Stud. 4:575.",
+            True,
+        ),
+        (
+            "Example AJ and Sample B (1991) Delayed recall of household losses after regional "
+            "flooding in coastal towns.",
+            False,
+        ),
+        # A longer title with a year in it is a different title, not a citation.
+        ("Floods of 1991: Delayed recall of household losses after regional flooding", False),
+    ],
+)
+def test_a_citation_box_read_as_a_title_agrees_when_it_prints_the_whole_title(citing, agree):
+    assert front_matter._titles_agree(_identity(TITLE), _identity(citing)) is agree
+    assert front_matter._titles_agree(_identity(citing), _identity(TITLE)) is agree
+
+
+@pytest.mark.parametrize(
     ("title", "language"),
     [
         (EN_TITLE, "en"),
