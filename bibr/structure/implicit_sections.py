@@ -171,9 +171,9 @@ def select_abstract_span(contents: PaperContents, resolution) -> AbstractSelecti
 
     Section labels are context, never bulk authorization.  The selected block's
     candidate order opens an abstract at explicit evidence on the first
-    processed page and closes permanently at the first ownership, metadata,
-    structural, page, or body boundary.  Page-less (native) input skips the page
-    tests.
+    processed page (or at an Abstract heading on the next, behind a title
+    page) and closes permanently at the first ownership, metadata, structural,
+    page, or body boundary.  Page-less (native) input skips the page tests.
     """
 
     if resolution is None or resolution.selected_block_id is None:
@@ -289,7 +289,14 @@ def select_abstract_span(contents: PaperContents, resolution) -> AbstractSelecti
                 break
             if not explicit:
                 continue
-            if front_page is not None and candidate.page != front_page:
+            # A manuscript's title page (title, byline, author note) puts the
+            # printed Abstract heading at the top of the next page. Only that
+            # heading opens there: page-two prose may be another record's.
+            if (
+                front_page is not None
+                and candidate.page != front_page
+                and not (is_abstract_heading and candidate.page == front_page + 1)
+            ):
                 state = "stopped"
                 break
             if is_abstract_heading and not candidate_ids:
