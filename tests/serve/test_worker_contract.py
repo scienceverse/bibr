@@ -32,6 +32,33 @@ class Harness:
     client: TestClient
     store: object
     worker_pids: list[int]
+    worker: object = None
+
+
+@contextlib.contextmanager
+def _bibr_harness(*, timeout: float, restart: bool = False):
+    from fastapi import FastAPI
+
+    from bibr.serve.app import _register_health_route
+    from bibr.serve.ingress import InferenceDispatchTracker, UploadStore, register_extract_route
+    from bibr.serve.worker import InferenceWorker
+    from tests.serve._worker_stub import STUB_MAX_SIZE, StubBehaviour
+
+    store = UploadStore.create(
+        max_size=STUB_MAX_SIZE, spool_memory_bytes=1 << 20, stale_after_seconds=600
+    )
+    worker = InferenceWorker(StubBehaviour(str(store.root)), timeout=timeout, restart=restart)
+    try:
+        worker.start()
+        app = FastAPI()
+        tracker = InferenceDispatchTracker(dispatch=worker.dispatch, store=store)
+        register_extract_route(app, store, tracker)
+        _register_health_route(app, worker)
+        with TestClient(app) as client:
+            yield Harness(client, store, [worker.pid], worker)
+    finally:
+        worker.stop()
+        store.close_sync()
 
 
 @contextlib.contextmanager
@@ -39,13 +66,12 @@ def _litserve_harness(*, timeout: float):
     ls = pytest.importorskip("litserve")
     import litserve.server as ls_server
 
-    from bibr.serve.ingress import (
-        InferenceDispatchTracker,
-        UploadStore,
-        register_extract_route,
-        resolve_litserve_dispatch,
-    )
+    from bibr.serve.ingress import InferenceDispatchTracker, UploadStore, register_extract_route
     from tests.serve._worker_stub import STUB_MAX_SIZE, LitServeStubAPI
+
+    def resolve_litserve_dispatch(app):
+        (route,) = [r for r in app.routes if getattr(r, "path", None) == "/_bibr/inference"]
+        return route.endpoint
 
     ls_server._MCP_AVAILABLE = False
     store = UploadStore.create(
@@ -73,7 +99,7 @@ def _litserve_harness(*, timeout: float):
         store.close_sync()
 
 
-HARNESSES = {"litserve": _litserve_harness}
+HARNESSES = {"litserve": _litserve_harness, "bibr": _bibr_harness}
 
 
 @pytest.fixture(params=sorted(HARNESSES))
@@ -151,3 +177,80 @@ def test_a_request_that_waited_past_the_timeout_is_a_504(impl):
             response = late.result(timeout=30)
     assert response.status_code == 504
     assert response.json() == {"detail": "Request timed out"}
+
+
+# ---------------------------------------------------------------- bibr's own worker
+#
+# LitServe 0.2.x leaves a request stranded when its worker dies (the waiter
+# never hears back) and replaces workers only as an unsupported opt-in; these
+# pin what bibr's worker does instead.
+
+
+def test_worker_death_answers_the_waiter_and_calls_on_fatal():
+    from bibr.serve.worker import WORKER_STOPPED_DETAIL, WORKER_UNAVAILABLE_DETAIL
+
+    fatal = []
+    with _bibr_harness(timeout=30) as h:
+        h.worker.on_fatal = lambda: fatal.append(True)
+        started = time.monotonic()
+        response = _post(h.client, "die.pdf")
+        assert response.status_code == 500
+        assert response.json() == {"detail": WORKER_STOPPED_DETAIL}
+        assert time.monotonic() - started < 10
+        deadline = time.monotonic() + 10
+        while not fatal and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert fatal == [True]
+        assert h.worker.died
+        assert h.client.get("/health").status_code == 503
+        later = _post(h.client, "ok.pdf")
+        assert later.status_code == 503
+        assert later.json() == {"detail": WORKER_UNAVAILABLE_DETAIL}
+
+
+def test_worker_death_answers_every_waiter_in_flight():
+    with _bibr_harness(timeout=30) as h:
+        h.worker.on_fatal = lambda: None
+        with concurrent.futures.ThreadPoolExecutor(3) as pool:
+            slow = [pool.submit(_post, h.client, "slow.pdf") for _ in range(2)]
+            time.sleep(0.5)
+            dying = pool.submit(_post, h.client, "die.pdf")
+            statuses = [f.result(timeout=20).status_code for f in (*slow, dying)]
+    assert statuses == [500, 500, 500]
+
+
+def test_restart_replaces_the_dead_worker():
+    with _bibr_harness(timeout=30, restart=True) as h:
+        first_pid = h.worker.pid
+        assert _post(h.client, "die.pdf").status_code == 500
+        deadline = time.monotonic() + 30
+        while not (h.worker.ready and h.worker.pid != first_pid):
+            assert time.monotonic() < deadline, "no replacement worker"
+            time.sleep(0.05)
+        response = _post(h.client, "ok.pdf")
+        assert response.status_code == 200
+        assert response.json()["pid"] == h.worker.pid != first_pid
+        assert not h.worker.died
+
+
+def test_a_failed_setup_fails_start(tmp_path):
+    from bibr.serve.worker import InferenceWorker, WorkerStartError
+    from tests.serve._worker_stub import FailingSetupStub
+
+    worker = InferenceWorker(FailingSetupStub(str(tmp_path)), timeout=30)
+    with pytest.raises(WorkerStartError, match="setup failed: RuntimeError"):
+        worker.start()
+    assert not worker.ready
+
+
+def test_stop_answers_a_request_still_in_flight():
+    from bibr.serve.worker import WORKER_STOPPED_DETAIL
+
+    with _bibr_harness(timeout=30) as h:
+        with concurrent.futures.ThreadPoolExecutor(1) as pool:
+            pending = pool.submit(_post, h.client, "slow.pdf")
+            time.sleep(0.5)
+            h.worker.stop()
+            response = pending.result(timeout=20)
+    assert response.status_code == 500
+    assert response.json() == {"detail": WORKER_STOPPED_DETAIL}

@@ -62,6 +62,13 @@ class StubBehaviour:
         return output
 
 
+class FailingSetupStub(StubBehaviour):
+    """A stub whose model load fails."""
+
+    def setup(self, device) -> None:
+        raise RuntimeError("model bundle missing")
+
+
 try:  # The LitServe flavour exists only while LitServe is installed.
     import litserve as _ls
 except ImportError:  # pragma: no cover - core installs

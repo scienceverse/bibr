@@ -93,16 +93,14 @@ def test_warmup_skipped_on_cpu():
 
 
 # -- setup() device resolution -------------------------------------------------
-# LitServe's accelerator="auto" only returns a GPU backend when torch is already
-# imported in the *master* process (litserve Connector._choose_auto_accelerator).
-# bibr lazy-imports torch in the worker, so auto always resolves to "cpu" and the
-# worker's setup() receives device="cpu" even on a GPU box — pinning the layout
-# model to the ~197s-vs-~0.7s slow path. The serve layer must not trust that
-# verdict: a CPU device from LitServe means "auto-detect", not "force CPU".
+# The API process never imports torch, so it cannot tell a GPU box from a CPU
+# one: the worker's setup() gets no device (or "cpu" from an older caller), and
+# pinning the layout model there would be the ~197s-vs-~0.7s slow path. A CPU or
+# absent device means "auto-detect", not "force CPU".
 
 
-def test_litserve_cpu_verdict_falls_through_to_autodetect():
-    """The core fix: device='cpu' from LitServe → None (auto-detect via the
+def test_cpu_verdict_falls_through_to_autodetect():
+    """The core fix: device='cpu' → None (auto-detect via the
     shared cuda→mps→cpu ladder), NOT a forced CPU placement."""
     from bibr.serve.deployments.pipeline import _resolve_layout_device
 
@@ -117,8 +115,7 @@ def test_none_and_auto_autodetect():
 
 
 def test_explicit_gpu_device_is_honored():
-    """An explicit non-CPU device (e.g. a multi-GPU LitServe assigning cuda:1)
-    is passed straight through."""
+    """An explicit non-CPU device (e.g. cuda:1) is passed straight through."""
     from bibr.serve.deployments.pipeline import _resolve_layout_device
 
     assert _resolve_layout_device("cuda:1", use_gpu=None) == "cuda:1"
@@ -135,8 +132,8 @@ def test_use_gpu_false_forces_cpu():
 
 
 def test_use_gpu_true_overrides_cpu_verdict():
-    """An explicit LAYOUT_USE_GPU=true also rejects LitServe's CPU verdict,
-    deferring to auto-detection."""
+    """An explicit LAYOUT_USE_GPU=true also rejects a CPU verdict, deferring to
+    auto-detection."""
     from bibr.serve.deployments.pipeline import _resolve_layout_device
 
     assert _resolve_layout_device("cpu", use_gpu=True) is None

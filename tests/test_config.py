@@ -72,7 +72,7 @@ def test_pipeline_default_upload_limit_is_50_mib(monkeypatch):
     assert GlobalSettings().pipeline.max_file_size == 50 * 1024 * 1024
 
 
-def test_pipeline_litserve_hardening_defaults(monkeypatch):
+def test_pipeline_serve_hardening_defaults(monkeypatch):
     monkeypatch.delenv("PIPELINE_MULTIPART_OVERHEAD_BYTES", raising=False)
     monkeypatch.delenv("PIPELINE_RESTART_WORKERS", raising=False)
     from bibr.config import GlobalSettings

@@ -3,7 +3,7 @@
 Builds the same stage list as ``LocalPipeline`` but with an
 ``OcrBackend`` of type ``"serve-http"`` and a ``ResourceManager``
 populated with HTTP client + semaphores + breaker injected from the
-LitServe worker. A deployment on the text-layer route
+inference worker. A deployment on the text-layer route
 (:func:`serve_ocr_route`) uses the ``"text-layer"`` backend instead and
 contacts no OCR server.
 """
@@ -90,7 +90,7 @@ def serve_ocr_route(settings: GlobalSettings, mode: str | None = None) -> str:
 class ServePipeline(Pipeline):
     """Serve-flavoured stage pipeline.
 
-    Layout + segmenter are pre-constructed by the LitServe worker (loaded
+    Layout + segmenter are pre-constructed by the inference worker (loaded
     once per process) and handed to the ``ResourceManager`` as-is. OCR
     runs over HTTP against a co-located OCR server via
     ``BibrServeOcrBackend`` registered as ``"serve-http"``, or not at all on

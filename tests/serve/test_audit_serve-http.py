@@ -150,7 +150,7 @@ def test_extract_leaves_a_small_body_to_the_middleware():
 
 @pytest.fixture
 def server(monkeypatch):
-    pytest.importorskip("litserve")
+    pytest.importorskip("fastapi")
     from bibr.config import Settings
     from bibr.serve.app import build_server
 

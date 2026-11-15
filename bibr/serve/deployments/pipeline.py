@@ -1,4 +1,4 @@
-"""BibrPipelineAPI — LitServe inference API wrapping the bibr pipeline.
+"""BibrPipelineAPI — the inference worker's API wrapping the bibr pipeline.
 
 Delegates to :class:`bibr.serve.pipeline.ServePipeline`. This module owns
 the HTTP surface (multipart decode, error-code mapping, Redis response
@@ -18,7 +18,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import litserve as ls
 from fastapi import HTTPException
 
 from bibr.config import GlobalSettings, snapshot_settings
@@ -321,19 +320,17 @@ def _apply_serve_llm_concurrency_default(settings) -> bool:
 def _resolve_layout_device(device: str | None, *, use_gpu: bool | None) -> str | None:
     """Resolve the torch device string for the serve ``LayoutDetector``.
 
-    LitServe's ``accelerator="auto"`` only returns a GPU backend when torch is
-    already imported in the *master* process (see litserve
-    ``Connector._choose_auto_accelerator``). bibr lazy-imports torch inside the
-    worker's ``setup()``, so ``device`` arrives as ``"cpu"`` even on a GPU box —
-    and pinning PP-DocLayoutV3 there is the dramatically-slower path. So a CPU
-    verdict from LitServe is treated as "auto-detect", not "force CPU":
+    The worker passes no device (``bibr.serve.worker`` never imports torch in
+    the API process, so it cannot tell a GPU box from a CPU one), and a CPU or
+    absent device is treated as "auto-detect", not "force CPU" — pinning
+    PP-DocLayoutV3 to the CPU on a GPU box is the dramatically slower path:
 
     - ``use_gpu is False`` → ``"cpu"`` (force CPU on VRAM-tight, OCR-co-located
       boxes; mirrors ``SEGMENTER_USE_GPU``).
-    - LitServe gave ``None``/``"auto"``/``"cpu"`` → ``None`` so the detector
-      auto-detects via the shared ``cuda→mps→cpu`` ladder.
-    - an explicit non-CPU device (e.g. ``"cuda:1"`` from a multi-GPU LitServe,
-      or ``"mps"``) is honored as-is.
+    - ``None``/``"auto"``/``"cpu"`` → ``None`` so the detector auto-detects via
+      the shared ``cuda→mps→cpu`` ladder.
+    - an explicit non-CPU device (e.g. ``"cuda:1"`` or ``"mps"``) is honored
+      as-is.
     """
     if use_gpu is False:
         return "cpu"
@@ -362,8 +359,13 @@ def _raise_for_required_classifier_failure(statuses) -> None:
         raise RuntimeError("Required classifier startup failed: " + "; ".join(failures))
 
 
-class BibrPipelineAPI(ls.LitAPI):
-    """Full bibr extraction pipeline exposed as a single LitServe API.
+class BibrPipelineAPI:
+    """Full bibr extraction pipeline, run by the ``bibr serve`` inference worker.
+
+    ``bibr.serve.worker`` pickles it into the spawned worker, calls
+    :meth:`setup` once there, then ``decode_request`` → ``predict`` →
+    ``encode_response`` for each descriptor; an ``HTTPException`` from any of
+    them is the client's status and detail.
 
     Consumes disk-backed upload descriptors produced by ``bibr.serve.ingress``.
     HTTP multipart parsing remains owned by the public ingress layer. Descriptor
@@ -401,12 +403,10 @@ class BibrPipelineAPI(ls.LitAPI):
 
     def __init__(
         self,
-        *args,
+        *,
         upload_root: str | Path,
         settings: GlobalSettings | None = None,
-        **kwargs,
     ) -> None:
-        super().__init__(*args, **kwargs)
         self._settings = snapshot_settings(settings)
         self._upload_root = str(upload_root)
 
@@ -436,10 +436,8 @@ class BibrPipelineAPI(ls.LitAPI):
         n_inflight = self._settings.pipeline.max_inflight_requests
         self._inflight_sem = asyncio.Semaphore(n_inflight) if n_inflight > 0 else None
 
-        # Don't trust LitServe's device verdict for the GPU-capable layout model:
-        # accelerator="auto" resolves to "cpu" when torch isn't pre-imported in
-        # the master (which bibr never does), so this would otherwise pin layout
-        # to CPU on a GPU box. Auto-detect in the worker instead (see
+        # The API process cannot tell the device (it never imports torch), so
+        # the layout model auto-detects it here in the worker (see
         # _resolve_layout_device); LAYOUT_USE_GPU=false forces CPU.
         layout_device = _resolve_layout_device(device, use_gpu=self._settings.layout.use_gpu)
         self.layout = LayoutDetector(device=layout_device, settings=self._settings)
@@ -503,7 +501,7 @@ class BibrPipelineAPI(ls.LitAPI):
             ocr_profile=self._settings.ocr.profile,
             settings=self._settings,
         )
-        # LitAPI setup runs before the worker accepts requests. Loading here
+        # setup runs before the worker accepts requests. Loading here
         # verifies baked artifacts and prevents first-request downloads.
         classifier_start = self._pipeline._resources.start_classifiers()
         if asyncio.iscoroutine(classifier_start):

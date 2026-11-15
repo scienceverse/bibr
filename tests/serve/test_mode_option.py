@@ -16,7 +16,7 @@ import hashlib
 import pytest
 
 pytest.importorskip("fastapi")
-pytest.importorskip("litserve")
+pytest.importorskip("fastapi")
 
 from fastapi import FastAPI, HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -716,7 +716,6 @@ def _run_main(monkeypatch, settings, argv):
     monkeypatch.setattr(app_mod, "build_server", lambda: _Server())
     monkeypatch.setattr("bibr.serve.auth.validate_bind_auth", lambda *_a, **_k: None)
     monkeypatch.setattr("bibr.serve.logsetup.configure_serve_logging", lambda *_a, **_k: None)
-    monkeypatch.setattr("bibr.serve.logsetup.install_litserve_logging_hook", lambda: None)
     app_mod.main()
     return ran
 
