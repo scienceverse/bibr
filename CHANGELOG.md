@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- The geometry reference segmenter and the front-role classifier read a
+  pickle-free bundle format, `bibr-gbm/1`: a JSON manifest (`geom_segmenter.json`,
+  `front_role.json`) and the trees as arrays in an `.npz` file beside it, read
+  with numpy alone and checked against the SHA-256 the manifest records
+  (`bibr/utils/gbm_bundle.py`). The reader reproduces scikit-learn's arithmetic,
+  so the probabilities are the same floats the joblib bundles give.
+  `scripts/export_gbm_bundle.py` converts a joblib bundle and checks the result
+  against scikit-learn before it finishes.
+- A model repo read at a revision that holds the manifest uses it; a revision
+  without one, such as the ones pinned today, reads the joblib bundle as before.
+  `REF_GEOM_SEG_MODEL_ID` and `ML_FRONT_ROLE_MODEL_ID` also take a local `.json`
+  manifest, or a directory holding the manifest or the `.joblib` bundle.
+
 ## [0.9.1] - 2026-11-16
 
 The first 0.9 release; this section lists every change since 0.8.0. 0.9.0 was
