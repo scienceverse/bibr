@@ -9,6 +9,7 @@ import instructor
 
 from bibr.clients.providers import register
 from bibr.clients.providers.base import sdk_timeout_seconds
+from bibr.clients.sdk_extras import missing_llm_sdk
 from bibr.config import snapshot_settings
 
 if TYPE_CHECKING:
@@ -85,6 +86,11 @@ class GoogleProvider:
             raise ValueError(
                 "Google API key required. Set LLM_API_KEY or GOOGLE_API_KEY environment variable."
             )
+        missing = missing_llm_sdk(self.name)
+        if missing:
+            # The SDKs are the ``google`` extra: say so before Instructor's own
+            # ImportError, which names neither the extra nor the setting.
+            raise ValueError(missing)
         model_string = f"google/{self._settings.llm.model}"
         # google-genai does not retry unless asked to, but sets no request
         # timeout either; its timeout is in milliseconds.

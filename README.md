@@ -74,7 +74,8 @@ LLM, or `--refs off` to skip them. More options: [CLI reference](https://bibr.or
 `bibr setup` picks a local model when your hardware can run one. Otherwise it offers
 Claude Haiku 5.5, which receives the page images and extracted text and needs an Anthropic
 API key. Without a `.env` from `bibr setup` (in the current folder or `~/.bibr/`), metadata
-extraction uses Google Gemini and needs `GOOGLE_API_KEY`.
+extraction uses Google Gemini and needs `GOOGLE_API_KEY` and the `google` extra
+(`uv add 'bibr[google]'`). `bibr setup` installs the provider SDK it configures.
 `bibr chew paper.pdf --dry-run` shows where each stage runs before anything is sent.
 
 ### Python

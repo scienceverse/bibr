@@ -505,9 +505,11 @@ calls to them carry none and the model samples at its own default; the same
 paper can then come back slightly different between runs. They take adaptive
 thinking instead of a token budget, which bibr does not send yet, so
 `LLM_THINKING_BUDGET` is ignored for them and a warning is logged. The
-`anthropic` provider needs the anthropic SDK below 1.0, which every install
-of bibr includes. With 1.0 or later, bibr stops before the first call with an error
-that names the fix.
+`anthropic` provider needs the anthropic SDK below 1.0, which the `anthropic`
+extra installs (`uv add 'bibr[anthropic]'`; `bibr setup` installs it when you pick
+Anthropic). Without it, or with 1.0 or later, bibr stops before the first call
+with an error that names the fix. The `google` provider likewise needs the
+`google` extra (google-genai).
 
 `CACHE_LLM=true` keeps structured LLM responses on disk (`CACHE_LLM_DIR`,
 default `~/.cache/bibr/llm`), readable by your user only. An entry is reused

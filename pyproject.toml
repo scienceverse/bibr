@@ -23,12 +23,11 @@ dependencies = [
     "beautifulsoup4>=4.14.3",
     "html5lib>=1.1",
     "httpx[http2]>=0.28.1",
-    "google-genai>=1.0.0",
-    # Claude is the hosted recommendation of `bibr setup` (LLM_PROVIDER and
-    # OCR_BACKEND=anthropic). Below 1.0: see the batch extra.
-    "anthropic>=0.40.0,<1",
+    # Instructor is the structured-output layer for every LLM provider, local
+    # OpenAI-compatible servers included; its own dependency is the openai SDK.
+    # The Google and Anthropic SDKs are the `google` and `anthropic` extras
+    # (bibr/clients/sdk_extras.py).
     "instructor>=1.7.0",
-    "jsonref>=1.1.0", # instructor's Gemini provider imports it to map response models to GenAI tool schemas (default LLM path)
     "tenacity>=8.0.0", # validation-retry policy for the LLM client (imported directly)
     "pandas>=2.3.3",
     "pyarrow>=23.0.1", # Parquet corpus tables (bibr tables, bibr batch); >=23.0.1 fixes PYSEC-2026-113
@@ -166,12 +165,22 @@ torch = [
 # and `bibr setup` plan asks for, and it still means "the local PyTorch stack".
 ml = ["bibr[torch]"]
 demo = ["gradio>=6.15.0"]  # fixes CVE-2026-48545 shared-client cookie injection
-# Offline batch LLM layer (Anthropic Message Batches) — see bibr/clients/batch.py.
-# Message Batches is not exposed by Instructor, so we use the official SDK directly.
-# The same SDK serves LLM_PROVIDER=anthropic. Below 1.0: anthropic 1.x dropped
+# Cloud provider SDKs. `bibr setup` installs the one the chosen provider needs,
+# and a run that needs a missing one stops before any work with the extra to
+# install (bibr/clients/sdk_extras.py).
+# google: LLM_PROVIDER=google, which a run without a .env uses, and the gemini
+# vision OCR backend. jsonref: Instructor's Gemini path imports it to map
+# response models to GenAI tool schemas.
+google = ["google-genai>=1.0.0", "jsonref>=1.1.0"]
+# anthropic: LLM_PROVIDER=anthropic and the anthropic vision OCR backend, the
+# hosted recommendation of `bibr setup`. Below 1.0: anthropic 1.x dropped
 # `temperature` from `messages.create` and moved to httpx2, and every call through
 # the Anthropic adapter failed (bibr/clients/providers/anthropic.py).
-batch = ["anthropic>=0.40.0,<1"]
+anthropic = ["anthropic>=0.40.0,<1"]
+# Offline batch LLM layer (Anthropic Message Batches) — see bibr/clients/batch.py.
+# Message Batches is not exposed by Instructor, so it uses the official SDK
+# directly: the anthropic extra, under the name existing installs ask for.
+batch = ["bibr[anthropic]"]
 # NOTE: onnxruntime-gpu and the core onnxruntime dep are separate packages that
 # write the same `onnxruntime/` directory, and when one install writes both,
 # either build can end up loaded. After `uv sync --extra gpu`, reinstall the GPU
@@ -191,7 +200,7 @@ local = [
 # MCP server (`bibr mcp`) — agent-facing extraction tools over stdio.
 # Floor matches the constraint-dependencies security floor below.
 mcp = ["mcp>=2.2.0,<3"]
-all = ["bibr[batch,cache,demo,mcp,torch]"]
+all = ["bibr[anthropic,batch,cache,demo,google,mcp,torch]"]
 
 [project.scripts]
 bibr = "bibr.local.cli:main"
@@ -320,6 +329,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "network: marks tests that intentionally reach the network (they opt out of the socket guard)",
+    "real_cloud_sdks: tests of the cloud-SDK extra check itself (they opt out of the conftest stand-in)",
 ]
 
 [tool.coverage.run]

@@ -40,11 +40,18 @@ Python environment, `python -m pip install bibr` installs the same package; use
 
 The commands above install core bibr. Add `bibr[all]` for the full cloud + ML
 dependency set, or choose the extras below for your use case. Core includes the
-`bibr` CLI, cloud-backed LLM extraction, native
+`bibr` CLI, LLM extraction through any OpenAI-compatible endpoint (OpenAI, Groq,
+Ollama, a local model server), native
 DOCX, JATS, HTML, and ePub processing, and bibr's own trained models — layout
 detection, the section and paper classifiers, the NER reference parser — served
 through **ONNX Runtime**. It is deliberately light: no `torch`, no `transformers`,
 no OpenCV, so it installs fast and stays small in containers and CI.
+
+The Google and Anthropic SDKs are extras too: `google` for `LLM_PROVIDER=google`
+(what a run without a `.env` uses) and the `gemini` OCR backend, `anthropic` for
+`LLM_PROVIDER=anthropic` and the `anthropic` OCR backend. `bibr setup` installs the
+one the provider you choose needs. A run that needs a missing one stops before any
+work and names the extra, and so do `bibr doctor` and `--dry-run`.
 
 All four models are downloaded from the Hub on first use, as ONNX bundles at the
 same pinned revisions the PyTorch weights use — nothing to configure. If a bundle
@@ -78,10 +85,12 @@ extra syntax is `uv add 'bibr[<extra>]'`.
 | `gpu` | `onnxruntime-gpu[cuda,cudnn]` (Linux/Windows) | GPU execution providers for ONNX Runtime — sentence segmentation, and on a core install layout, the classifiers and the NER parser too. It needs one more command after syncing; see [GPU ONNX Runtime](#gpu-onnx-runtime). |
 | `cache` | `redis>=5.0.0` | Redis-backed response caching — set `REDIS_URL` to enable it (the result cache is on by default, but only uses Redis once a URL is configured). |
 | `demo` | `gradio>=6.15.0` | The interactive Gradio demo app. |
-| `batch` | `anthropic>=0.40.0,<1` | Offline processing via the Anthropic Message Batches API — bulk paper-type/OECD labeling and similar bulk LLM workflows. The SDK itself is a core dependency, since `LLM_PROVIDER=anthropic` (the hosted default `bibr setup` recommends) needs it; this extra keeps existing installs working. |
+| `google` | `google-genai>=1.0.0`, `jsonref>=1.1.0` | Google Gemini: `LLM_PROVIDER=google` (the provider a run without a `.env` uses) and `OCR_BACKEND=gemini`. `jsonref` is what Instructor's Gemini path imports to map response models to tool schemas. |
+| `anthropic` | `anthropic>=0.40.0,<1` | Anthropic Claude: `LLM_PROVIDER=anthropic` and `OCR_BACKEND=anthropic`, the hosted route `bibr setup` recommends. Below 1.0, because anthropic 1.x changed `messages.create` in a way the adapter cannot call through. |
+| `batch` | `bibr[anthropic]` | Offline processing via the Anthropic Message Batches API — bulk paper-type/OECD labeling and similar bulk LLM workflows. The same SDK as `anthropic`, under the name existing installs ask for. |
 | `nuextract` | `numind>=0.3,<0.3.1` | The experimental `LLM_STRUCTURED_BACKEND=nuextract-native` backend for NuExtract servers. bibr no longer installs numind otherwise, and that backend stops with an error naming this extra. |
 | `mcp` | `mcp>=2.2.0,<3` | The `bibr mcp` server — extraction as [Model Context Protocol tools](../guides/mcp.md) for agents (Claude Code, Claude Desktop, any MCP client). |
-| `all` | `batch` + `cache` + `demo` + `mcp` + `torch` | The cloud + ML set for a full local-dev setup. Does **not** include `vllm`, `local`, `local-mlx`, or `gpu` — add whichever match your hardware. |
+| `all` | `anthropic` + `batch` + `cache` + `demo` + `google` + `mcp` + `torch` | The cloud + ML set for a full local-dev setup. Does **not** include `vllm`, `local`, `local-mlx`, or `gpu` — add whichever match your hardware. |
 
 ## Choosing serving extras
 
@@ -91,7 +100,7 @@ optional.
 
 The serving extras are still hardware-specific, so most people want a subset:
 
-- **`--extra all` is the superset to reach for.** It bundles `batch` + `cache` + `demo` + `mcp` + `torch` — everything that is useful regardless of hardware.
+- **`--extra all` is the superset to reach for.** It bundles `anthropic` + `batch` + `cache` + `demo` + `google` + `mcp` + `torch` — everything that is useful regardless of hardware.
 - Add **`vllm`** on Linux/CUDA (managed vLLM for `--llm local`, and the
   `paddle-vllm` GPU OCR backend), **`local`** or **`local-mlx`** on Apple
   Silicon, and **`gpu`** for ONNX Runtime's GPU build, which layout, sentence

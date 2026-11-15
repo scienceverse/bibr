@@ -283,6 +283,21 @@ def _front_tagger_bundle_present(monkeypatch, tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _cloud_sdks_count_as_installed(monkeypatch, request):
+    """Let the cloud-SDK extra check pass in every test that does not test it.
+
+    The Google and Anthropic SDKs are extras (``bibr.clients.sdk_extras``), and a
+    provider, the dry run, doctor and the cloud OCR backends refuse to start
+    without them. Most tests that reach those paths replace the client
+    (``instructor.from_provider``) and never touch the SDK, so they run in the
+    core-only environment too. A test that needs the real SDK skips without it;
+    a test of the check itself takes ``@pytest.mark.real_cloud_sdks``."""
+    if request.node.get_closest_marker("real_cloud_sdks") is not None:
+        return
+    monkeypatch.setattr("bibr.clients.sdk_extras.missing_packages", lambda extra: [])
+
+
+@pytest.fixture(autouse=True)
 def _no_llm_server_context_probe(monkeypatch):
     """Keep ``LLMClient`` from asking an ``LLM_BASE_URL`` server for its
     context window before the first call. Tests that point a client at a
