@@ -139,6 +139,11 @@ def test_join_follows_the_printed_punctuation(model_title, row, expected):
         _row("c2", "Competing Interests: The authors declare no conflict of interests."),
         _row("c2", "Conflict of interest statement"),
         _row("c2", "Funding: None"),
+        # Summary-box headings printed under the title on a Cell Press-style page.
+        _row("c2", "Graphical abstract"),
+        _row("c2", "Highlights"),
+        _row("c2", "In brief"),
+        _row("c2", "Visual Abstract"),
         _row("c2", "Supplemental Materials: https://example.org/s1"),
         _row("c2", "*Correspondence"),
         _row("c2", "Journal of Classroom Gardening"),
