@@ -197,7 +197,7 @@ pipeline; concurrent `chew_paper` calls queue.
 ## Remote MCP on `bibr serve`
 
 A [self-hosted deployment](deployment.md) can expose the same tool surface
-over the network: set `MCP_ENABLED=true` (with the `mcp` extra installed)
+over the network: set `MCP_ENABLED=true` (with the `serve` and `mcp` extras installed)
 and `bibr serve` mounts a streamable-HTTP MCP endpoint at `/mcp`, e.g. for
 Claude Code:
 

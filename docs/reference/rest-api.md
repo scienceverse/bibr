@@ -187,7 +187,7 @@ Redis runs out), or `{"detail": "replica shut down before the job finished"}` af
 a clean shutdown. The service always pins one HTTP
 API process per instance—even with jobs disabled—because upload ownership and
 dispatch tracking are process-local. A job running when the inference worker
-dies fails with `500` and `error_code` `inference_worker_stopped`.
+dies fails with `503` and `error_code` `inference_worker_stopped`.
 `PIPELINE_RESTART_WORKERS=false` then stops the server; `true` starts a new
 worker. Neither makes jobs durable.
 

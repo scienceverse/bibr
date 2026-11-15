@@ -94,8 +94,10 @@ application shutdown removes remaining entries and the temporary root.
 The API process binds the port, starts the worker and waits for its models to
 load before it takes connections; a worker whose setup fails stops the start.
 When the worker dies, every request in flight on it is answered at once with a
-`500` whose detail has the code `inference_worker_stopped`, `/health` answers
-`503`, and new requests get a `503` until a worker is ready again. With
+`503` whose detail has the code `inference_worker_stopped` (so `bibr batch
+--serve-url` resubmits it, a bounded number of times, as it does a job whose
+replica died), `/health` answers `503`, and new requests get a `503` until a
+worker is ready again. With
 `PIPELINE_RESTART_WORKERS=false` (the default) the server then stops with exit
 status 1, for an external supervisor to restart; with `true` a new worker is
 started in place. Neither replays a lost request: uploads and dispatch are
@@ -127,7 +129,7 @@ Scale concurrency with these settings:
 |---|---|---|
 | `PIPELINE_MAX_ACTIVE_UPLOADS` | `8` | Fail-fast API-server admission cap applied before multipart parsing; excess uploads receive `429`. Also covers the MCP chew tools: a large `/mcp` body holds a slot while it is received, and the tool holds one during extraction. |
 | `PIPELINE_MAX_INFLIGHT_REQUESTS` | `8` | Max requests running the pipeline concurrently per worker (`0` = unlimited). Bounds peak host RAM (page images) under an upload flood. |
-| `PIPELINE_RESTART_WORKERS` | `false` | On worker death, stop the server for a supervisor to restart (`false`) or start a new worker in place (`true`). The requests in flight on the dead worker get a `500` either way. |
+| `PIPELINE_RESTART_WORKERS` | `false` | On worker death, stop the server for a supervisor to restart (`false`) or start a new worker in place (`true`). The requests in flight on the dead worker get a `503` either way. |
 | `PIPELINE_MAX_PAGES` | `200` | Hard per-file processing cap for compact many-page PDF protection. |
 | `LAYOUT_MAX_RENDER_PIXELS` | `25000000` | Pixel budget for one rasterized PDF page. A page over it (or over `LAYOUT_MAX_RENDER_DIMENSION` on a side) at the configured DPI renders at the largest DPI that fits, down to 24, with a `PAGE_DPI_REDUCED` warning; a page that does not fit even at 24 DPI is rejected before rasterization. |
 | `LAYOUT_MAX_RENDER_DIMENSION` | `10000` | Largest rasterized width or height for one PDF page, handled like `LAYOUT_MAX_RENDER_PIXELS`. |

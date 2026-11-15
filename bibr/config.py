@@ -2402,7 +2402,7 @@ class PipelineOptions(_BibrSettings):
     restart_workers: bool = Field(
         False,
         description="Start a new inference worker when it dies, instead of stopping bibr serve. "
-        "Either way the requests in flight on the dead worker are answered with a 500 at once; "
+        "Either way the requests in flight on the dead worker are answered with a 503 at once; "
         "the default (false) stops the server so a supervisor restarts it.",
     )
     upload_spool_memory_bytes: int = Field(

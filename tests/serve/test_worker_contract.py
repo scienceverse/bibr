@@ -158,7 +158,7 @@ def test_worker_death_answers_the_waiter_and_calls_on_fatal():
         h.worker.on_fatal = lambda: fatal.append(True)
         started = time.monotonic()
         response = _post(h.client, "die.pdf")
-        assert response.status_code == 500
+        assert response.status_code == 503
         assert response.json() == {"detail": WORKER_STOPPED_DETAIL}
         assert time.monotonic() - started < 10
         deadline = time.monotonic() + 10
@@ -180,13 +180,13 @@ def test_worker_death_answers_every_waiter_in_flight():
             time.sleep(0.5)
             dying = pool.submit(_post, h.client, "die.pdf")
             statuses = [f.result(timeout=20).status_code for f in (*slow, dying)]
-    assert statuses == [500, 500, 500]
+    assert statuses == [503, 503, 503]
 
 
 def test_restart_replaces_the_dead_worker():
     with _bibr_harness(timeout=30, restart=True) as h:
         first_pid = h.worker.pid
-        assert _post(h.client, "die.pdf").status_code == 500
+        assert _post(h.client, "die.pdf").status_code == 503
         deadline = time.monotonic() + 30
         while not (h.worker.ready and h.worker.pid != first_pid):
             assert time.monotonic() < deadline, "no replacement worker"
@@ -284,7 +284,7 @@ def test_the_server_stops_with_status_1_when_its_worker_dies():
     with _stub_server_process() as (process, base):
         response = _post_url(base, "die.pdf")
         assert process.wait(timeout=30) == 1
-    assert response.status_code == 500
+    assert response.status_code == 503
     assert response.json() == {"detail": WORKER_STOPPED_DETAIL}
 
 
@@ -297,5 +297,5 @@ def test_stop_answers_a_request_still_in_flight():
             time.sleep(0.5)
             h.worker.stop()
             response = pending.result(timeout=20)
-    assert response.status_code == 500
+    assert response.status_code == 503
     assert response.json() == {"detail": WORKER_STOPPED_DETAIL}

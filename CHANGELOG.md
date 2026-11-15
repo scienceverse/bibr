@@ -26,15 +26,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 
 - **A request no longer hangs when the inference worker dies under it.** Every
-  request in flight on the worker is answered at once with a `500` whose detail
-  has the code `inference_worker_stopped`, `/health` answers `503` instead of
+  request in flight on the worker is answered at once with a `503` whose detail
+  has the code `inference_worker_stopped` (which `bibr batch --serve-url`
+  resubmits, as it does a job whose replica died), `/health` answers `503` instead of
   `ok`, and new requests get a `503` until a worker is ready. With
   `PIPELINE_RESTART_WORKERS=false` (the default) the server then stops with exit
   status 1 for its supervisor to restart; `PIPELINE_RESTART_WORKERS=true`, an
   unsupported opt-in under LitServe, now starts a new worker in place.
-- Ctrl+C on `bibr serve` lets the requests in flight finish (uvicorn's 30-second
-  graceful shutdown) before the worker stops, and the worker then exits cleanly,
-  running its teardown, instead of being terminated.
+- Ctrl+C on `bibr serve` lets the requests in flight finish (within uvicorn's
+  30-second graceful shutdown) before the worker stops: the worker no longer
+  takes the terminal's SIGINT itself, and is asked to exit rather than
+  terminated.
 
 ## [0.9.1] - 2026-11-16
 

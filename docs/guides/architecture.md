@@ -460,7 +460,7 @@ and `GpuBatcher`, so batches shrink as workers rise. Async I/O and the GPU
 batchers provide concurrency within that one worker, and the heavy CPU stages
 already use every core from one process — see
 [Production deployment](deployment.md#why-there-is-no-worker-count-setting).
-When the worker dies, the requests in flight on it are answered with a `500`
+When the worker dies, the requests in flight on it are answered with a `503`
 (`inference_worker_stopped`) at once; the server then stops for a supervisor to
 restart (`PIPELINE_RESTART_WORKERS=false`, the default) or starts a new worker
 (`true`).

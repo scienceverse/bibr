@@ -47,7 +47,7 @@ In an existing Python environment, you can also install with
 
 The setup wizard detects your hardware, configures OCR and the LLM, and offers to
 install any additional dependencies. Core installs run bibr's trained models through
-ONNX Runtime; PyTorch, the demo, MCP, and hardware-specific serving runtimes are
+ONNX Runtime; PyTorch, the HTTP API, the demo, MCP, and hardware-specific serving runtimes are
 [optional extras](https://bibr.org/getting-started/install/#extras). The first run may
 download models and runtimes. See the [tester guide](https://bibr.org/tester-guide/)
 for platform-specific instructions and the

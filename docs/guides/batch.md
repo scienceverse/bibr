@@ -150,7 +150,8 @@ environment wins. Both run only on Linux with glibc.
 
 **Remote** (`--serve-url URL`) submits papers to a
 [`bibr serve`](deployment.md) async job API (`POST /papers/jobs`, poll
-`GET /papers/jobs/{id}`, fetch `…/result`). The bearer token comes from
+`GET /papers/jobs/{id}`, fetch `…/result`); the client needs only core bibr, the
+server the `serve` extra. The bearer token comes from
 `--token`, else `AUTH_API_KEY` / `BIBR_SERVE_TOKEN` in the environment, else
 `AUTH_API_KEY` in bibr's `.env`. The token rides every request, so a plain
 `http://` serve URL is accepted only for a loopback or private-network host

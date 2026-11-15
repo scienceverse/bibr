@@ -16,8 +16,11 @@ the client. A request the worker's loop picks up more than ``timeout`` seconds
 after it was sent is answered 504 without running.
 
 The API process watches the worker: when it exits, every request still waiting
-on it is answered with a 500 (``inference_worker_stopped``) at once, and new
-requests get a 503 until a worker is ready again. With ``restart`` a new
+on it is answered with a 503 (``inference_worker_stopped``) at once, and new
+requests get a 503 until a worker is ready again. 503 because the requests in
+flight are mostly bystanders of whatever killed the worker: ``bibr batch
+--serve-url`` resubmits a 503 a bounded number of times, as it does a job whose
+replica died, and takes a 500 as the paper's own failure. With ``restart`` a new
 worker is started; without it (the default) ``on_fatal`` is called so the
 server can stop and let its supervisor restart the service.
 
@@ -28,6 +31,7 @@ The worker is an API object with ``setup(device)``, ``decode_request``,
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import multiprocessing
@@ -182,7 +186,7 @@ class InferenceWorker:
         if kind == "http_error":
             raise HTTPException(status_code=reply[1], detail=reply[2])
         if kind == "worker_stopped":
-            raise HTTPException(status_code=500, detail=WORKER_STOPPED_DETAIL)
+            raise HTTPException(status_code=503, detail=WORKER_STOPPED_DETAIL)
         raise HTTPException(status_code=500, detail="Internal server error")
 
     def stop(self) -> None:
@@ -192,7 +196,7 @@ class InferenceWorker:
             self._ready = False
             process, requests = self._process, self._requests
         if process is not None:
-            _end_process(process, requests)
+            _end_process(process, requests, send_lock=self._send_lock)
         if self._reader is not None:
             self._reader.join(timeout=_STOP_GRACE_SECONDS)
         self._fail_pending(None)
@@ -276,7 +280,8 @@ def _await_first_message(connection, process) -> tuple:
         ready = multiprocessing.connection.wait([connection, process.sentinel])
         if connection in ready or connection.poll():
             try:
-                return connection.recv()
+                message: tuple = connection.recv()
+                return message
             except (EOFError, OSError):
                 pass
         process.join()
@@ -285,12 +290,15 @@ def _await_first_message(connection, process) -> tuple:
         )
 
 
-def _end_process(process, requests) -> None:
+def _end_process(process, requests, *, send_lock: threading.Lock | None = None) -> None:
     if requests is not None:
-        try:
-            requests.send(("stop",))
-        except (OSError, EOFError, ValueError):
-            pass
+        # Under the dispatch threads' lock: two writers interleaved on one pipe
+        # would corrupt both messages.
+        with send_lock if send_lock is not None else contextlib.nullcontext():
+            try:
+                requests.send(("stop",))
+            except (OSError, EOFError, ValueError):
+                pass
     process.join(timeout=_STOP_GRACE_SECONDS)
     if process.is_alive():
         logger.warning("Inference worker (pid %s) did not stop; terminating it", process.pid)
