@@ -425,6 +425,21 @@ async def test_full_run_does_not_carry_the_fast_run_warning():
 
 
 @pytest.mark.asyncio
+async def test_the_title_loses_the_running_head_printed_above_it():
+    head = "INFERENCES FROM PRIOR POSSESSION"
+    title = "Infants Use Physical Size to Predict Conflict Outcomes"
+    contents = _minimal_contents()
+    contents.detected_title = f"{head} {title}"
+    contents.detected_headers = [head, f"{head} {title}", head, head]
+
+    paper = await post_parse(
+        contents=contents, file_name="x.pdf", file_hash="deadbeef", no_llm=True
+    )
+
+    assert paper.metadata.title == title
+
+
+@pytest.mark.asyncio
 async def test_no_llm_empty_authors_keep_author_specific_funding_conservative():
     from bibr.config import snapshot_settings
 
