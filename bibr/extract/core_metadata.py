@@ -3221,6 +3221,15 @@ class CoreMetadataExtractor:
                 "the front-matter tagger's answer was taken despite: " + ", ".join(flags),
             )
         title_keywords = result.title_keywords or TitleKeywordsLLM()
+        # The tagger read the record's translated title (see
+        # front_matter._select_tagger_record): print the record's own.
+        from bibr.extract.front_matter import translated_record_title
+
+        own_title = translated_record_title(
+            getattr(self, "_front_matter_resolution", None), getattr(self, "contents", None)
+        )
+        if own_title:
+            title_keywords = title_keywords.model_copy(update={"title": own_title})
         return CoreMetadataLLM.from_calls(
             title_keywords.model_copy(update=dict.fromkeys(_TAGGER_WITHHELD_FIELDS)),
             result.byline or AuthorsLLM(authors=[]),

@@ -603,6 +603,19 @@ by an earlier version, carries neither.
 
 ### Fixed
 
+- A fast run reads a byline that prints one author per line, or breaks a name
+  across lines, as the printed authors. The front-matter tagger's rules saw the
+  byline with its line breaks turned into spaces, so they ran two authors'
+  names together, cut a name short or filed its last word under the next
+  line's affiliation. They now read each word's line from the region's text: a
+  line that prints one whole name is one author, and the last author on a line
+  takes the name words left on it.
+- A fast run no longer leaves the title, authors and abstract empty when the
+  tagger reads the paper's title from a translation printed in a later block
+  without a byline. When that title is in another language than the bylined
+  record's abstract, the bylined record is selected and its own printed title
+  is exported. Same-language blocks, such as an abstract book's, still leave
+  the front matter empty.
 - A reference's article number with a year suffix, such as "e00376-18" in
   ASM journals, is kept whole as the first page. The reference parsers and
   the page-range backfill split it at the hyphen into first page "e00376"

@@ -2199,3 +2199,65 @@ def test_a_number_inside_untagged_prose_keys_nothing():
     )
     assert _linked(got) == [("Morn", "Department of Forestry, Norland University"), ("Tess", "")]
     assert got.unattached_affiliations == ["Naval Command, Norland"]
+
+
+def _given_family(got):
+    return [(a.given, a.family) for a in got.byline.authors]
+
+
+def test_a_byline_with_one_whole_name_per_line_reads_one_author_per_line():
+    # The tagger sees the region with its line breaks as spaces and cuts the
+    # first name short; each printed line is one author.
+    inp = tagger_input(
+        ("doc_title", "Title words here"),
+        ("text", "Nikolai Haahjem Eftedal\nThomas Haarklau Kleppestø"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words here"),
+        ("GIVEN", "Nikolai"),
+        ("FAMILY", "Haahjem"),
+        ("GIVEN", "Eftedal Thomas Haarklau"),
+        ("FAMILY", "Kleppestø"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags), rules=True)
+    assert _given_family(got) == [("Nikolai Haahjem", "Eftedal"), ("Thomas Haarklau", "Kleppestø")]
+    # Without rules the tagger's reading stands.
+    assert _given_family(assemble(inp, tags, [1.0] * len(tags))) == [
+        ("Nikolai", "Haahjem"),
+        ("Eftedal Thomas Haarklau", "Kleppestø"),
+    ]
+
+
+def test_the_last_author_on_a_line_takes_the_name_words_left_on_it():
+    inp = tagger_input(
+        ("doc_title", "Title words here"),
+        ("text", "Ann Lee\nSuhaila Saleem Kareem\nCollege of Medicine, Baghdad"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words here"),
+        ("GIVEN", "Ann"),
+        ("FAMILY", "Lee"),
+        ("GIVEN", "Suhaila"),
+        ("FAMILY", "Saleem"),
+        ("AFFILIATION", "Kareem College of Medicine, Baghdad"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags), rules=True)
+    assert _given_family(got) == [("Ann", "Lee"), ("Suhaila", "Saleem Kareem")]
+
+
+def test_an_author_tagged_with_one_part_takes_the_rest_of_its_line():
+    inp = tagger_input(
+        ("doc_title", "Title words here"),
+        ("text", "Imamul Arifin S,Sy.\nAgung Nugraha Nursya’bana"),
+    )
+    tags = label(
+        inp,
+        ("TITLE", "Title words here"),
+        ("FAMILY", "Imamul"),
+        ("GIVEN", "Agung"),
+        ("FAMILY", "Nugraha"),
+    )
+    got = assemble(inp, tags, [1.0] * len(tags), rules=True)
+    assert _given_family(got) == [("Imamul", "Arifin"), ("Agung", "Nugraha Nursya’bana")]
