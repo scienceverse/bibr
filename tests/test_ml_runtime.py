@@ -147,6 +147,24 @@ def test_find_bundle_on_hub_missing_returns_none(monkeypatch):
     assert find_onnx_bundle("org/repo:best.pt", "main") is None
 
 
+def test_find_bundle_hands_a_network_failure_to_a_caller_that_asks_for_it(monkeypatch):
+    def fake_download(repo_id, filename, revision=None):
+        raise ConnectionError("network is unreachable")
+
+    monkeypatch.setattr("bibr.utils.hf_cache.hf_download_or_cached", fake_download)
+    assert find_onnx_bundle("org/repo") is None  # the default reads it as "no bundle"
+    with pytest.raises(ConnectionError):
+        find_onnx_bundle("org/repo", raise_transient=True)
+
+
+def test_find_bundle_that_is_confirmed_missing_is_none_even_when_transient_is_raised(monkeypatch):
+    def fake_download(repo_id, filename, revision=None):
+        raise FileNotFoundError(f"{repo_id}/{filename} not found")
+
+    monkeypatch.setattr("bibr.utils.hf_cache.hf_download_or_cached", fake_download)
+    assert find_onnx_bundle("org/repo", raise_transient=True) is None
+
+
 # -- manifest --------------------------------------------------------------
 
 

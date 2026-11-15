@@ -491,6 +491,89 @@ def test_the_late_tier_is_not_read_for_body_sections():
     assert authors[0].affiliation == "Example University, Oslo"
 
 
+def _headed_frame(*rows: tuple[int, str, str | None, str]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "text_id": list(range(len(rows))),
+            "page_number": [page for page, _, _, _ in rows],
+            "section_type": [section for _, section, _, _ in rows],
+            "section_name": [name for _, _, name, _ in rows],
+            "text": [text for _, _, _, text in rows],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "heading",
+    [
+        "Author details",
+        "Author information",
+        "Authors\u2019 affiliations:",
+        "Affiliations",
+        "Authors and Affiliations",
+        "Information about the authors",
+    ],
+)
+def test_an_end_of_article_list_is_read_under_its_own_heading_whatever_its_type(heading):
+    """A run with no LLM types the "Author details" section unknown. Page 1
+    defines nothing here, so every author stayed without an affiliation."""
+    frame = _headed_frame(
+        (1, "title", None, "Erik Berg1* , Cato Moe2,3 and Ann Lee3"),
+        (
+            1,
+            "footnote",
+            None,
+            "Full list of author information is available at the end of the article",
+        ),
+        (13, "unknown", heading, "1 Example Care Unit, Example University, Oslo, Norway."),
+        (13, "unknown", heading, "2 Department of Example Research, Nord College, Bodø, Norway."),
+        (13, "unknown", heading, "3 Example Brookes University, Oxford, UK."),
+    )
+    authors = [_author(1, "Erik", "Berg"), _author(2, "Cato", "Moe"), _author(3, "Ann", "Lee")]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+    CoreMetadataExtractor._normalize_author_affiliations(authors, frame)
+
+    assert [author.affiliation for author in authors] == [
+        "Example Care Unit, Example University, Oslo, Norway",
+        "Department of Example Research, Nord College, Bodø, Norway; "
+        "Example Brookes University, Oxford, UK",
+        "Example Brookes University, Oxford, UK",
+    ]
+
+
+def test_biographies_under_the_author_heading_define_no_marker():
+    """ "Authors' information" also opens biographical notes, which mention a
+    number mid-sentence and never open with a marker."""
+    frame = _headed_frame(
+        (1, "title", None, "Erik Berg3"),
+        (
+            9,
+            "unknown",
+            "Authors' information",
+            "EB leads 3 Example University departments and is professor at the Example "
+            "Hospital, Oslo, Norway.",
+        ),
+    )
+    authors = [_author(1, "Erik", "Berg", "kept")]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+
+    assert authors[0].affiliation == "kept"
+
+
+def test_an_unknown_section_with_another_heading_stays_unread():
+    frame = _headed_frame(
+        (1, "title", None, "Erik Berg3"),
+        (5, "unknown", "Experiment 2", "3 University departments of Example College took part."),
+    )
+    authors = [_author(1, "Erik", "Berg", "kept")]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+
+    assert authors[0].affiliation == "kept"
+
+
 # ── #107: markers glued to the institution ────────────────────────────────
 
 _GLUED_BYLINE = (

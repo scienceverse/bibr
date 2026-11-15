@@ -67,6 +67,24 @@ def test_emission_sites_name_registered_codes():
     assert not unused, f"registered but never emitted: {sorted(unused)}"
 
 
+def test_only_a_failure_a_retry_could_cure_keeps_an_export_out_of_the_cache():
+    from bibr.processing_warnings import NOT_FINAL_CODES
+
+    assert WarningCode.FRONT_TAGGER_UNAVAILABLE in NOT_FINAL_CODES
+    # A classifier outage no LLM tier covered.
+    assert WarningCode.SECTION_CLASSIFIER_FAILED in NOT_FINAL_CODES
+    assert WarningCode.PAPER_CLASSIFICATION_FAILED in NOT_FINAL_CODES
+    for code in (
+        WarningCode.LLM_SKIPPED,
+        WarningCode.FRONT_TAGGER_FLAGGED,
+        WarningCode.FRONT_MATTER_NOT_READ,
+        # The LLM tier took over, so the answer is complete.
+        WarningCode.SECTION_CLASSIFIER_DEGRADED,
+        WarningCode.PAPER_CLASSIFIER_DEGRADED,
+    ):
+        assert code not in NOT_FINAL_CODES, code
+
+
 def test_warnings_dedupe_by_value():
     first = ProcessingWarning(WarningCode.OCR_PAGE_FAILED, "page 3")
     same = ProcessingWarning("OCR_PAGE_FAILED", "page 3")

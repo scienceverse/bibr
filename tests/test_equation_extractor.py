@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from bibr.extract.equation_extractor import EquationExtractor
+from bibr.extract.equation_extractor import EquationExtractor, repair_statistic_glitches
 from bibr.paper_contents import PaperSection, PaperSentence
 
 
@@ -2178,3 +2178,338 @@ class TestLlmFallbackCitationFilter:
         start = time.perf_counter()
         _has_statistical_paren(comma_run)
         assert time.perf_counter() - start < 0.05, "comma-year run took too long"
+
+
+def _extract_repaired(text: str):
+    return EquationExtractor().extract_from_sentences(
+        [_make_sentence(1, text)], _make_sections(), repair_glitches=True
+    )
+
+
+class TestRepairStatisticGlitches:
+    """A text layer or OCR prints some statistics in a way the passes cannot read.
+
+    The repair puts the usual ones right, one character for one character.
+    The sentences are made up; the glitches are the ones text layers show.
+    """
+
+    @pytest.mark.parametrize(
+        ("printed", "repaired"),
+        [
+            # the "=" printed as a 5
+            ("t(59) 5 0.66", "t(59) = 0.66"),
+            ("M 5 3.2 and r 5 \u2212.41", "M = 3.2 and r = \u2212.41"),
+            ("x2(1) 5 7.28, p 5 .01", "x2(1) = 7.28, p = .01"),
+            # the "<" printed as a comma
+            ("p , .01", "p < .01"),
+            ("ps , .05", "ps < .05"),
+            # the "=" not printed: before a p-value, and after one
+            ("t 2.73, p .008", "t=2.73, p=.008"),
+            ("F (1, 208) 5.01, p 0.026", "F (1, 208)=5.01, p=0.026"),
+            ("the value 5.01, p 0.026", "the value 5.01, p=0.026"),
+            # a box for a space
+            ("p\u25a1=\u25a1.03", "p = .03"),
+            # the Cyrillic letter that looks like p, before a comparator
+            ("\u0440 < .05", "p < .05"),
+            ("(\u0440 = 0,01)", "(p = 0,01)"),
+            # math italics fold to the plain letters
+            ("\U0001d440 = 3.2, \U0001d45d < .01", "M = 3.2, p < .01"),
+            ("\U0001d712\u00b2(1) = 3.84", "\u03c7\u00b2(1) = 3.84"),
+            ("\U0001d7d0 = \U0001d7d1", "2 = 3"),
+        ],
+    )
+    def test_the_glitch_is_put_right(self, printed, repaired):
+        assert repair_statistic_glitches(printed) == repaired
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # a 5 that is a value, not a "="
+            "t(59) = 5.2, p = .001",
+            "F(1, 208) = 5.01, p = .026",
+            "t(5) 5.2",
+            "N = 5 40",
+            "N 5 40",
+            "d = 5 12 cells",
+            "group M 5 men",
+            "Table 5 10 shows it",
+            "r = .5 5 times",
+            # a comma that is a comma
+            "(n, p, 0.5)",
+            "the p, .05 level",
+            # a Cyrillic word that ends in the letter, not a symbol
+            "\u043f\u0430\u0440 = 3",
+            "\u0440\u0430\u0431\u043e\u0442\u0430 = 3",
+            # a plain "=" and a plain "<"
+            "t(28) = 3.42, p < .001",
+            "",
+        ],
+    )
+    def test_text_with_nothing_to_repair_is_returned_as_printed(self, text):
+        assert repair_statistic_glitches(text) == text
+
+    def test_every_character_stays_in_its_position(self):
+        printed = (
+            "\U0001d440 = 3.2\u25a1\u25a1t(59) 5 0.66, p , .01; "
+            "F (1, 208) 5.01, p 0.026 \u0440 < .05 \U0001d712\u00b2(1) 5 3.84"
+        )
+
+        repaired = repair_statistic_glitches(printed)
+
+        assert len(repaired) == len(printed)
+        # The 5 of "t(59) 5" is the "=" of "t(59) =", at the same index
+        assert repaired.index("t(59) =") + len("t(59) ") == printed.index("t(59) 5") + len("t(59) ")
+        assert repaired[printed.index("t(59) 5") + len("t(59) ")] == "="
+        changed = {i for i, (a, b) in enumerate(zip(printed, repaired, strict=True)) if a != b}
+        assert changed
+        # Whatever is not one of the glitches is where it was printed
+        assert all(printed[i] in "\U0001d440\u25a15,\u0440\U0001d712 " for i in changed)
+
+    def test_the_repair_is_idempotent(self):
+        printed = "\U0001d440 5 3.2, p , .01, F (1, 20) 4.5, p 0.03, \u0440 < .05\u25a1"
+
+        once = repair_statistic_glitches(printed)
+
+        assert repair_statistic_glitches(once) == once
+
+
+class TestRepairedExtraction:
+    """``repair_glitches`` reads the repaired text; off, the text is read as printed."""
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                "The groups differed, t(59) 5 0.66, p , .01.",
+                [("t", "59", "=", "0.66"), ("p", "", "<", ".01")],
+            ),
+            (
+                "Both held (F (1, 208) 5.01, p 0.026) in the sample.",
+                [("F", "1, 208", "=", "5.01"), ("p", "", "=", "0.026")],
+            ),
+            (
+                "Here t 2.73, p .008 and r .73, p .02.",
+                [("t", "", "=", "2.73"), ("p", "", "=", ".008"), ("r", "", "=", ".73")]
+                + [("p", "", "=", ".02")],
+            ),
+            (
+                "It rose, M 5 3.2, p 5 .02.",
+                [("M", "", "=", "3.2"), ("p", "", "=", ".02")],
+            ),
+            (
+                "A gap was found (\u0440 < .05) and (\u0440 = 0,01).",
+                [("p", "", "<", ".05"), ("p", "", "=", "0,01")],
+            ),
+            (
+                "Scores were \U0001d440 = 3.2 and \U0001d712\u00b2(1) = 3.84, \U0001d45d < .01.",
+                [("M", "", "=", "3.2"), ("\u03c7\u00b2", "1", "=", "3.84"), ("p", "", "<", ".01")],
+            ),
+            (
+                "Scores were t\u25a1(28)\u25a1=\u25a12.10,\u25a1p\u25a1=\u25a1.04.",
+                [("t", "28", "=", "2.10"), ("p", "", "=", ".04")],
+            ),
+        ],
+    )
+    def test_a_glitch_the_passes_could_not_read_is_read(self, text, expected):
+        assert _components(_extract(text)) == []
+
+        eqs = _extract_repaired(text)
+
+        assert [(eq.lhs, eq.df, eq.comp, eq.rhs) for eq in eqs] == expected
+
+    def test_the_components_of_one_result_share_a_group(self):
+        eqs = _extract_repaired("The groups differed, t(59) 5 0.66, p , .01.")
+
+        assert len({eq.grp_id for eq in eqs}) == 1
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "The effect was t(59) = 5.2, p = .001.",
+            "It held (F(1, 208) = 5.01, p = .026) and N = 5 40 and N 5 40.",
+            "The test (t(28) = 3.42, p < .001, d = 0.45) was significant.",
+            "Of M = 3.2 (SD = 1.1), r = -.41, p = .02, 95% CI [0.30, 0.42] there were n = 12.",
+            "Z = 2.84; P = 0.035, and \u03b2 = 0.2, \u03b1 = .05.",
+            "Cell counts were N = 25 40 and table 5 shows t = 5.2, p, .05.",
+        ],
+    )
+    def test_a_sentence_that_is_read_correctly_is_read_the_same(self, text):
+        plain = _extract(text)
+
+        repaired = _extract_repaired(text)
+
+        assert plain
+        assert [(e.grp_id, e.lhs, e.df, e.comp, e.rhs) for e in repaired] == [
+            (e.grp_id, e.lhs, e.df, e.comp, e.rhs) for e in plain
+        ]
+
+    def test_a_value_whose_power_of_ten_was_not_read_is_left_out(self):
+        text = "The rate was p = 1.57 \u00d7 10 \u25a1\u207f in the group."
+
+        # As printed, the coefficient is read as the value
+        assert _components(_extract(text)) == [("p", "", "=", "1.57")]
+        assert _extract_repaired(text) == []
+
+    def test_a_value_whose_power_of_ten_was_read_is_kept(self):
+        eqs = _extract_repaired("The rate was (p = 1.57 \u00d7 10\u207b\u2075).")
+
+        assert _components(eqs) == [("p", "", "=", "1.57 \u00d7 10\u207b\u2075")]
+
+    def test_a_count_before_a_product_is_kept(self):
+        eqs = _extract_repaired("The N = 20 \u00d7 4 trials were run.")
+
+        assert _components(eqs) == [("N", "", "=", "20")]
+
+    def test_the_default_reads_the_text_as_printed(self):
+        text = "The groups differed, t(59) 5 0.66, p , .01."
+
+        extractor = EquationExtractor()
+        sentence = _make_sentence(1, text)
+
+        assert extractor.extract_from_sentences([sentence], _make_sections()) == []
+        assert (
+            extractor.extract_from_sentences([sentence], _make_sections(), repair_glitches=False)
+            == []
+        )
+
+
+class TestRepairGuards:
+    """Where a repair would put in a value the text does not hold, it leaves the text as printed."""
+
+    @pytest.mark.parametrize("value", [".05", "0.05", ".01", "0.01", ".001", "0.001", ".0001"])
+    def test_a_dropped_comparator_before_a_threshold_is_not_made_an_equals(self, value):
+        text = f"The model fit (F (1, 208) 16.23, p {value}) in the sample."
+
+        assert ("p", "", "=", value) not in _components(_extract_repaired(text))
+        assert _components(_extract_repaired(text))[:1] == [("F", "1, 208", "=", "16.23")]
+
+    @pytest.mark.parametrize("value", [".026", ".03", ".0011", ".002", ".049", "0.5"])
+    def test_a_dropped_comparator_before_another_value_is_an_equals(self, value):
+        text = f"The model fit (F (1, 208) 16.23, p {value}) in the sample."
+
+        assert ("p", "", "=", value) in _components(_extract_repaired(text))
+
+    def test_a_page_after_a_year_is_no_p_value(self):
+        assert _extract_repaired("As argued (Smith, 2010, p .5) before.") == []
+        assert _extract_repaired("As argued (Smith, 1998; Lee, 2010, p .45) before.") == []
+
+    def test_a_p_value_after_a_count_is_one(self):
+        eqs = _extract_repaired("In the group (n = 12, p .03) it held.")
+
+        assert ("p", "", "=", ".03") in _components(eqs)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "See Smith J. Psychol Rev 12, p 5 10.",
+            "See Smith J. Psychol Rev 12, p , 12.",
+            "A value of p 5 1.5 was read.",
+        ],
+    )
+    def test_a_p_value_over_one_is_not_repaired_into_one(self, text):
+        assert not [eq for eq in _extract_repaired(text) if eq.lhs == "p"]
+
+    @pytest.mark.parametrize(
+        ("text", "repaired"),
+        [
+            ("It held, p 5 .03.", "It held, p = .03."),
+            ("It held, p , .01.", "It held, p < .01."),
+            ("It held, p 5 1.", "It held, p = 1."),
+            ("It held, p 5 1.0, ok", "It held, p = 1.0, ok"),
+            ("It held, ps , 0.05.", "It held, ps < 0.05."),
+        ],
+    )
+    def test_a_p_value_up_to_one_is_still_repaired(self, text, repaired):
+        assert repair_statistic_glitches(text) == repaired
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "See Smith J. Psychol Rev 12, p 5 10.",
+            "See Smith J. Psychol Rev 12, p , 12.",
+            "A value of p 5 1.5 was read.",
+            "A value of p 5 -.5 was read.",
+        ],
+    )
+    def test_the_text_of_a_p_value_over_one_is_left_as_printed(self, text):
+        assert repair_statistic_glitches(text) == text
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "M 5 3.2 2.1 4.0",
+            "Age M (SD) 5 3.2 1.2",
+            "The row M 5 3.2 2.1 4.0 was flattened.",
+        ],
+    )
+    def test_a_flattened_table_row_is_not_a_mean(self, text):
+        assert not [eq for eq in _extract_repaired(text) if eq.lhs == "M"]
+
+    def test_a_unit_before_the_name_is_no_name(self):
+        assert _extract_repaired("Treated for 7 d 5 10 mg/kg per day.") == []
+
+    def test_a_name_after_a_number_is_a_name_when_a_comma_separates_them(self):
+        eqs = _extract_repaired("In study 2, t(59) 5 0.66 and n = 60, d 5 0.45, it held.")
+
+        assert [c for c in _components(eqs) if c[0] in ("t", "d")] == [
+            ("t", "59", "=", "0.66"),
+            ("d", "", "=", "0.45"),
+        ]
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Then \U0001d446\U0001d446\U0001d446\U0001d446 = 1.65 was found.",
+            "Then \U0001d43c\U0001d43c\U0001d43c\U0001d43c\U0001d43c\U0001d43c = 0.83.",
+            "Then \U0001d440\U0001d440 = 304.15 here.",
+            "Then \U0001d435\U0001d435\U0001d435\U0001d435\U0001d7ce\U0001d7cf = 1.46.",
+        ],
+    )
+    def test_a_run_of_one_repeated_math_letter_is_left_as_printed(self, text):
+        assert repair_statistic_glitches(text) == text
+        assert _extract_repaired(text) == []
+
+    def test_a_math_letter_that_names_a_statistic_is_folded(self):
+        assert repair_statistic_glitches("\U0001d440 = 3.2, \U0001d446\U0001d437 = 1.1") == (
+            "M = 3.2, SD = 1.1"
+        )
+        assert repair_statistic_glitches("\U0001d712\U0001d7d0 = 3.84") == "\u03c72 = 3.84"
+
+    def test_a_count_before_a_product_keeps_its_count_whatever_follows_the_ten(self):
+        eqs = _extract_repaired("The N = 20 \u00d7 10 trials were run.")
+
+        assert _components(eqs) == [("N", "", "=", "20")]
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "The rate was p = 1.57 \u00d7 10 \u25a1\u207f in the group.",
+            "The rate was p = 1.57 \u00d7 10 n in the group.",
+            "The rate was (p = 1.57 \u00d7 10 \u25a1).",
+            "The rate was p = 1.57 \u00d7 10 \u2212 in the group.",
+        ],
+    )
+    def test_a_power_of_ten_that_lost_its_exponent_is_left_out(self, text):
+        assert _extract_repaired(text) == []
+
+
+class TestRepairedRows:
+    """A row says whether it was read from repaired text."""
+
+    def test_rows_of_a_repaired_sentence_say_so(self):
+        eqs = _extract_repaired("The groups differed, t(59) 5 0.66, p , .01.")
+
+        assert eqs
+        assert all(eq.repaired for eq in eqs)
+
+    def test_rows_of_a_sentence_that_needed_no_repair_do_not(self):
+        eqs = _extract_repaired("The groups differed, t(59) = 0.66, p < .01.")
+
+        assert eqs
+        assert not any(eq.repaired for eq in eqs)
+
+    def test_rows_of_a_run_that_repairs_nothing_do_not(self):
+        eqs = _extract("The groups differed, t(59) = 0.66, p < .01.")
+
+        assert eqs
+        assert not any(eq.repaired for eq in eqs)

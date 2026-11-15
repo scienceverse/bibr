@@ -178,7 +178,7 @@ def test_replayed_table_label_fragment_keeps_its_source():
         [
             [
                 _region("paragraph_title", "Results", 50, native=True),
-                _region("table_title", "Table 3", 100, native=False),
+                _region("figure_title", "Table 3", 100, native=False),
                 _region("text", "Scores for items 1 2 3 by age_group", 145, native=True),
                 _region("text", "Body: items 1 2 3 by age_group were scored.", 400, native=True),
             ]

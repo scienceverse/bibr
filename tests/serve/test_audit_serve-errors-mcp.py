@@ -128,6 +128,35 @@ async def test_failure_messages_bibr_wrote_itself_are_kept(message, code, stage)
     assert failure["error_code"] == code
 
 
+async def test_a_scan_refusal_names_no_command_line_flag():
+    """The pipeline words the refusal for ``bibr chew``; a client cannot pass ``--ocr``."""
+    from bibr.ocr.registry import SCAN_NEEDS_OCR_ROUTES
+
+    refusal = (
+        "no usable text layer: only 0/158 text regions could be read from the PDF text layer "
+        f"(0% < 50% threshold). This looks like a scanned PDF, and needs {SCAN_NEEDS_OCR_ROUTES}"
+        ". The PDF carries its own OCR text layer: OCR_TEXT_LAYER_READ_OCR_LAYER=true reads "
+        "that instead (less accurate than an OCR model)"
+    )
+
+    class _Stage:
+        name = "ocr"
+
+        async def run(self, ctx):
+            for fs in ctx.file_states:
+                fs.set_error(refusal, code="scan_needs_ocr", stage="ocr")
+
+    failure = await _client_failure(_pipeline([_Stage()]), "scan.pdf")
+
+    assert failure["error_code"] == "scan_needs_ocr"
+    message = failure["error"]
+    assert message.startswith("no usable text layer: only 0/158 text regions")
+    assert "--ocr" not in message and "try.bibr.org" not in message
+    assert "needs an OCR route, which this server did not use" in message
+    assert "OCR_BASE_URL points the server at an OCR server" in message
+    assert message.endswith("(less accurate than an OCR model)")
+
+
 async def test_configuration_error_beneath_a_stage_failure_stays_in_the_log(caplog):
     """A ConfigurationError is bibr's text, but written for the operator: it
     names the server's model bundle paths."""

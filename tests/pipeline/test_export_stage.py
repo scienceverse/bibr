@@ -118,6 +118,21 @@ def test_ocr_engine_reports_default_sglang_glm_model(monkeypatch):
     assert _build_engines(ctx)[0]["model"] == "glm-ocr"
 
 
+@pytest.mark.parametrize(
+    ("config", "has_llm"),
+    [
+        (RunConfig(), True),
+        (RunConfig(no_llm=True), False),
+        # Fast mode makes no call, so there is no model to name.
+        (RunConfig(mode="fast"), False),
+    ],
+)
+def test_llm_engine_is_named_only_when_the_run_could_call_one(config, has_llm):
+    _ocr, llm = _build_engines(_ctx([], config=config))
+
+    assert (llm is not None) is has_llm
+
+
 def test_ocr_engine_uses_concrete_runtime_identity_from_scratch():
     from bibr.ocr.profiles import OcrRuntimeIdentity
 

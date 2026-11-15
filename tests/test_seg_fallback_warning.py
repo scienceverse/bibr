@@ -196,6 +196,59 @@ class TestCrfHardFailureGuard:
         assert refs == []
         assert any(w.code == WarningCode.REF_SEG_FAILED for w in ext.contents.processing_warnings)
 
+    @staticmethod
+    def _without_torch(monkeypatch):
+        from bibr.utils.ml_extra import ml_import_error
+
+        def _missing(*_a):
+            raise ml_import_error("NER reference segmentation")
+
+        monkeypatch.setattr("bibr.extract.ref_extractor._get_ner_segmenter", _missing)
+
+    def test_fast_run_without_torch_recovers_without_a_crf_error(self, monkeypatch):
+        from bibr.clients.skipped import SkippedLlmClient
+
+        self._without_torch(monkeypatch)
+        ext = self._ext(SkippedLlmClient())
+
+        refs = ext.refs._crf_segment_or_recover(self.NUMBERED)
+
+        # The marker split still rescues the references; the missing extra is not an error.
+        assert len(refs) == 12
+        codes = [w.code for w in ext.contents.processing_warnings]
+        assert WarningCode.REF_SEG_CRF_ERROR not in codes
+        assert codes == [WarningCode.REF_SEG_MARKER_SPLIT_RECOVERY]
+        crf = [a for a in ext.refs._segmentation_attempts if a.strategy == "crf"]
+        assert [a.reason_flags for a in crf] == [("crf_unavailable",)]
+
+    def test_fast_run_still_reports_a_crf_that_broke_for_another_reason(self, monkeypatch):
+        from bibr.clients.skipped import SkippedLlmClient
+
+        monkeypatch.setattr(
+            "bibr.extract.ref_extractor._get_ner_segmenter",
+            lambda *_a: (_ for _ in ()).throw(RuntimeError("NER_SEG_CKPT load failed")),
+        )
+        ext = self._ext(SkippedLlmClient())
+
+        ext.refs._crf_segment_or_recover(self.NUMBERED)
+
+        codes = [w.code for w in ext.contents.processing_warnings]
+        assert WarningCode.REF_SEG_CRF_ERROR in codes
+
+    def test_full_run_without_torch_keeps_the_crf_error(self, monkeypatch):
+        # Full mode is unchanged: a missing extra there is still reported.
+        self._without_torch(monkeypatch)
+        ext = self._ext(mock.Mock())
+
+        refs = ext.refs._crf_segment_or_recover(self.NUMBERED)
+
+        assert len(refs) == 12
+        crf_errors = [
+            w for w in ext.contents.processing_warnings if w.code == WarningCode.REF_SEG_CRF_ERROR
+        ]
+        assert len(crf_errors) == 1
+        assert "requires the 'torch' extra" in crf_errors[0].message
+
     def test_marker_split_refs_pure(self):
         from bibr.extract.extractor import _marker_split_refs
 

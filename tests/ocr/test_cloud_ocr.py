@@ -13,6 +13,7 @@ from bibr.local.ocr_cloud import (
     _PROMPT_MAP,
     _VISION_PROMPTS,
     CloudOcrClient,
+    CloudOcrRegionError,
     OcrResult,
     _make_provider_backend,
 )
@@ -367,14 +368,55 @@ async def test_aget_client_drops_placeholder_llm_key(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-async def test_recognize_returns_empty_on_failure(mock_cloud_client, _mock_image_utils):
-    """recognize() returns '' on unrecoverable failure instead of raising."""
+async def test_recognize_reports_a_region_it_could_not_read(mock_cloud_client, _mock_image_utils):
+    """A failed region raises the region error, which the OCR stage turns into a
+    blank region with an OCR_REGION_FAILED warning; it never returns '' as if the
+    region were empty."""
     mock_instructor = AsyncMock()
-    mock_instructor.create = AsyncMock(side_effect=ValueError("bad request"))
+    mock_instructor.create = AsyncMock(
+        side_effect=ValueError("bad request to https://api.example.org/v1?key=secret")
+    )
     mock_cloud_client._client = mock_instructor
 
-    result = await mock_cloud_client.recognize(MagicMock(), "Text Recognition:")
-    assert result == ""
+    with pytest.raises(CloudOcrRegionError) as raised:
+        await mock_cloud_client.recognize(MagicMock(), "Text Recognition:")
+
+    message = str(raised.value)
+    assert "vision OCR failed after 1 attempt(s): ValueError: bad request" in message
+    # Safe to export: the endpoint is gone, and no cause is chained.
+    assert "api.example.org" not in message and "secret" not in message
+    assert raised.value.__cause__ is None and raised.value.__suppress_context__
+
+
+async def test_a_region_error_is_no_outage_and_no_bibr_error(mock_cloud_client, _mock_image_utils):
+    """The stage fails the page for a BibrError or a server that is gone; a
+    region the cloud model failed on must stay a blank region with a warning."""
+    import httpx
+
+    from bibr.exceptions import BibrError
+    from bibr.pipeline.stages.ocr import _ocr_server_gone
+
+    mock_instructor = AsyncMock()
+    mock_instructor.create = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
+    mock_cloud_client._client = mock_instructor
+    mock_cloud_client._rate_limiter = AsyncMock()
+
+    with (
+        patch("bibr.local.ocr_cloud.asyncio.sleep", new_callable=AsyncMock),
+        pytest.raises(CloudOcrRegionError) as raised,
+    ):
+        await mock_cloud_client.recognize(MagicMock(), "Text Recognition:")
+
+    assert not isinstance(raised.value, BibrError)
+    assert not _ocr_server_gone(raised.value)
+
+
+async def test_an_empty_answer_is_still_an_empty_region(mock_cloud_client, _mock_image_utils):
+    mock_instructor = AsyncMock()
+    mock_instructor.create = AsyncMock(return_value=OcrResult(text=""))
+    mock_cloud_client._client = mock_instructor
+
+    assert await mock_cloud_client.recognize(MagicMock(), "Text Recognition:") == ""
 
 
 async def test_recognize_retries_on_transient_error(mock_cloud_client, _mock_image_utils):
@@ -395,8 +437,8 @@ async def test_recognize_retries_on_transient_error(mock_cloud_client, _mock_ima
     assert mock_instructor.create.await_count == 3
 
 
-async def test_recognize_returns_empty_after_max_retries(mock_cloud_client, _mock_image_utils):
-    """recognize() returns '' after exhausting retries on transient errors."""
+async def test_recognize_reports_the_region_after_max_retries(mock_cloud_client, _mock_image_utils):
+    """recognize() raises the region error after exhausting retries on transient errors."""
     exc = Exception("server error")
     exc.status_code = 500
 
@@ -405,10 +447,12 @@ async def test_recognize_returns_empty_after_max_retries(mock_cloud_client, _moc
     mock_cloud_client._client = mock_instructor
     mock_cloud_client._rate_limiter = AsyncMock()
 
-    with patch("bibr.local.ocr_cloud.asyncio.sleep", new_callable=AsyncMock):
-        result = await mock_cloud_client.recognize(MagicMock(), "Text Recognition:")
+    with (
+        patch("bibr.local.ocr_cloud.asyncio.sleep", new_callable=AsyncMock),
+        pytest.raises(CloudOcrRegionError, match=r"failed after 3 attempt\(s\)"),
+    ):
+        await mock_cloud_client.recognize(MagicMock(), "Text Recognition:")
 
-    assert result == ""
     assert mock_instructor.create.await_count == 3  # _MAX_RETRIES
 
 
@@ -431,7 +475,8 @@ async def test_recognize_fails_fast_once_quota_is_used_up(mock_cloud_client, _mo
 
     with patch("bibr.local.ocr_cloud.asyncio.sleep", new_callable=AsyncMock):
         for _ in range(trip - 1):
-            assert await mock_cloud_client.recognize(MagicMock(), "Text Recognition:") == ""
+            with pytest.raises(CloudOcrRegionError):
+                await mock_cloud_client.recognize(MagicMock(), "Text Recognition:")
         with pytest.raises(UpstreamServiceError, match="quota"):
             await mock_cloud_client.recognize(MagicMock(), "Text Recognition:")
         calls = mock_instructor.create.await_count
@@ -455,13 +500,15 @@ async def test_recognize_rate_limit_run_resets_on_success(mock_cloud_client, _mo
         side_effect += exhausted * (trip - 1) + [OcrResult(text="ok")]
     mock_instructor.create = AsyncMock(side_effect=side_effect)
 
+    results = []
     with patch("bibr.local.ocr_cloud.asyncio.sleep", new_callable=AsyncMock):
-        results = [
-            await mock_cloud_client.recognize(MagicMock(), "Text Recognition:")
-            for _ in range(3 * trip)
-        ]
+        for _ in range(3 * trip):
+            try:
+                results.append(await mock_cloud_client.recognize(MagicMock(), "Text Recognition:"))
+            except CloudOcrRegionError:
+                results.append(None)
     assert results.count("ok") == 3
-    assert results.count("") == 3 * (trip - 1)
+    assert results.count(None) == 3 * (trip - 1)
 
 
 @pytest.mark.parametrize("status", [401, 403, 404])
@@ -634,10 +681,12 @@ async def test_cut_off_answer_logs_its_cap_and_crop(_mock_image_utils, caplog):
     client._client = AsyncMock()
     client._client.create = AsyncMock(side_effect=IncompleteOutputException())
 
-    with caplog.at_level("WARNING", logger="bibr.local.ocr_cloud"):
-        text = await client.recognize(Image.new("RGB", (708, 28)), "Text Recognition:")
+    with (
+        caplog.at_level("WARNING", logger="bibr.local.ocr_cloud"),
+        pytest.raises(CloudOcrRegionError, match="output cap 2048 tokens"),
+    ):
+        await client.recognize(Image.new("RGB", (708, 28)), "Text Recognition:")
 
-    assert text == ""
     assert client._client.create.await_count == 1  # not retried
     assert "failed after 1 attempt(s) (output cap 2048 tokens, crop (708, 28)): " in caplog.text
     assert "max_tokens length limit" in caplog.text

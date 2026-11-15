@@ -166,3 +166,70 @@ async def trim_between_windows(settings: GlobalSettings | None) -> bool:
     if heap_trim_mode(settings) != "window":
         return False
     return await arelease_free_heap()
+
+
+#: ``M_ARENA_MAX`` in glibc's ``malloc.h``.
+_M_ARENA_MAX = -8
+_arena_limit_applied = False
+
+
+def limit_malloc_arenas(count: int) -> bool:
+    """Cap glibc's malloc arenas for this process at *count*; ``True`` when the cap was set.
+
+    glibc gives a thread that finds every arena locked a new one, up to eight
+    per CPU core, and each arena keeps the memory freed into it. A batch's
+    model and worker threads spread their buffers over dozens of arenas, so
+    free memory piles up in each of them. Two arenas lowered the peak of a
+    60-paper fast batch by 0.6 to 0.8 GB.
+
+    Skipped (``False``) when *count* is 0, when ``MALLOC_ARENA_MAX`` is set in
+    the environment (glibc read it at start-up), off Linux, and where the C
+    library has no ``mallopt`` or refuses the parameter (musl). Arenas made
+    before the call stay; the cap only stops new ones, so call it before the
+    batch starts its threads. Never raises.
+    """
+    if count <= 0 or "MALLOC_ARENA_MAX" in os.environ or not sys.platform.startswith("linux"):
+        return False
+    try:
+        mallopt = ctypes.CDLL(None).mallopt
+        mallopt.argtypes = [ctypes.c_int, ctypes.c_int]
+        mallopt.restype = ctypes.c_int
+        return bool(mallopt(_M_ARENA_MAX, int(count)))
+    except Exception:  # noqa: BLE001 — memory housekeeping must never fail a batch
+        logger.debug("mallopt(M_ARENA_MAX) failed", exc_info=True)
+        return False
+
+
+def _malloc_arenas_setting(settings: GlobalSettings | None) -> int:
+    """``pipeline.malloc_arenas`` from *settings*, else from the environment and ``.env`` chain."""
+    pipeline = getattr(settings, "pipeline", None)
+    if pipeline is None:
+        try:
+            from bibr.config import PipelineOptions
+
+            # pydantic-settings fills every field from the environment; mypy cannot see that.
+            pipeline = PipelineOptions()  # type: ignore[call-arg]
+        except Exception:  # noqa: BLE001 — a bad .env is reported by the CLI itself
+            return 2
+    count = getattr(pipeline, "malloc_arenas", 2)
+    return count if isinstance(count, int) and not isinstance(count, bool) else 2
+
+
+def limit_arenas_for_batch(settings: GlobalSettings | None = None) -> bool:
+    """Apply ``pipeline.malloc_arenas`` (default 2) once per process, for a batch driver.
+
+    The batch commands call it before they build a pipeline, so the cap is in
+    place before model sessions and worker pools start their threads; the
+    library's batch path calls it again (a no-op by then) for callers that
+    did not come through the command line.
+    """
+    global _arena_limit_applied
+    with _lock:
+        if _arena_limit_applied:
+            return False
+        _arena_limit_applied = True
+    count = _malloc_arenas_setting(settings)
+    applied = limit_malloc_arenas(count)
+    if applied:
+        logger.debug("malloc arenas capped at %s for this batch process", count)
+    return applied

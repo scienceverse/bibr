@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 
 from bibr.ocr.ref_geometry import LineRecord
-from bibr.ocr.ref_patterns import _AUTHOR_DATE_START, _YEAR
+from bibr.ocr.ref_patterns import _YEAR, _starts_with_surname
 
 _GEOM_KEYS = frozenset({"x0_rel_page", "dx_prev", "dy_gap", "font_size", "dfont", "is_first"})
 _TEXT_KEYS = frozenset(
@@ -37,8 +37,8 @@ _STARTS_YEAR = re.compile(r"^\(?(?:19|20)\d\d")
 _PREV_YEAR_END = re.compile(r"(?:19|20)\d\d[a-z]?\)?\.?$")
 # A parenthesized year or "(n.d.)" within the first ~70 chars — the author-date
 # cue at a reference start. Fires even when the hanging-indent geometry is flat
-# (dx_prev≈0) and the author-date regex misses the lead (corporate authors with
-# no comma, Unicode/diacritic surnames). Targets the geom psych merge failure.
+# (dx_prev≈0) and the author-date check misses the lead (corporate authors with
+# no comma). Targets the geom psych merge failure.
 _EARLY_YEAR_PAREN = re.compile(r"^.{0,70}?\((?:(?:19|20)\d\d[a-z]?|n\.?\s?d\.?)\)", re.IGNORECASE)
 # Page ranges: "123-456", "123–456", "123—456" optionally followed by "."
 _PAGE_RANGE_END = re.compile(r"\d+[-–—]\d+\.?$")
@@ -76,7 +76,11 @@ def line_features(lines: list[LineRecord]) -> list[dict]:
                 "is_first": i == 0,
                 "len_chars": len(t),
                 "caps_ratio": _caps_ratio(t),
-                "starts_author_date": bool(_AUTHOR_DATE_START.match(t)),
+                # The frozen model was trained when this feature missed non-ASCII
+                # surnames, and reads a flush "Novák, T. R., ..." line with no year
+                # as mid-entry but its ASCII spelling as a start. Both now read
+                # alike; every ASCII line keeps the value it was trained on.
+                "starts_author_date": _starts_with_surname(t),
                 "starts_numbered": bool(_NUMBERED.match(t)),
                 "starts_year": bool(_STARTS_YEAR.match(t)),
                 "contains_year": bool(_YEAR.search(t)),

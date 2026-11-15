@@ -15,10 +15,15 @@ import re
 from collections.abc import Iterator
 
 # The marker a footnote is printed with: a number, or one of the conventional
-# footnote symbols (optionally doubled, as in "††"). Anchored at the start and
-# required to be followed by whitespace or a bracket so an opening word is
-# never mistaken for a marker.
-_PRINTED_MARKER_RE = re.compile(r"^\s*([0-9]{1,3}|[*†‡§¶#]{1,3})\s*[).\]]?\s+")
+# footnote symbols (optionally doubled, as in "††"; "∗" is the asterisk
+# operator many typesets print). Anchored at the start and required to be
+# followed by whitespace or a bracket so an opening word is never mistaken for
+# a marker. A superscript number the text layer glued to the note's first word
+# ("10Beginning of …") counts too, but only before a capitalised word: "3D
+# printing", "5HT" and "19th" open with a number of their own.
+_PRINTED_MARKER_RE = re.compile(
+    r"^\s*(?:([0-9]{1,3}|[*∗†‡§¶#]{1,3})\s*[).\]]?\s+|([0-9]{1,3})(?=[A-Z][a-z]))"
+)
 
 
 def printed_marker(text: str) -> str | None:
@@ -31,7 +36,7 @@ def printed_marker(text: str) -> str | None:
     can see on the page.
     """
     match = _PRINTED_MARKER_RE.match(text)
-    return match.group(1) if match else None
+    return (match.group(1) or match.group(2)) if match else None
 
 
 class FootnoteBuffer:

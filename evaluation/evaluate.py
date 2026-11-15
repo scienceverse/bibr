@@ -33,6 +33,7 @@ from evaluation.validation_metrics import (
     ReferenceMatchResult,
     abstract_ned,
     abstract_rouge_l,
+    authors_exact_f1,
     authors_family_f1,
     authors_fullname_f1,
     doi_match,
@@ -644,6 +645,7 @@ ABSTENTION_SUPPRESSED_COLS = [
     "abstract_rouge_l",
     "abstract_ned",
     "authors_fullname_f1",
+    "authors_exact_f1",
     "authors_f1",
     "first_author",
     "keywords_f1",
@@ -1057,6 +1059,7 @@ def score_paper(extracted: dict, ground_truth: dict) -> dict[str, object]:
         "abstract_ned": abstract_ned(e_abstract, g_abstract),
         "authors_f1": authors_family_f1(e_authors, g_authors),
         "authors_fullname_f1": authors_fullname_f1(e_authors, g_authors),
+        "authors_exact_f1": authors_exact_f1(e_authors, g_authors),
         "first_author": first_author_match(e_authors, g_authors),
         "ref_count_ratio": references_count_ratio(e_ref_count, g_ref_count),
     }
@@ -1293,6 +1296,7 @@ PRIMARY_METRIC_COLS = [
 # would contradict the print-verbatim gold principle.
 DIAGNOSTIC_METRIC_COLS = [
     "abstract_ned",
+    "authors_exact_f1",
     "authors_f1",
     "first_author",
     "ref_count_ratio",

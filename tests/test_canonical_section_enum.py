@@ -51,25 +51,37 @@ def test_ethics_member_and_aliases():
 def test_appendix_member_and_aliases():
     assert CanonicalSection.APPENDIX.value == "appendix"
     aliases = CANONICAL_SECTION_ALIASES.get(CanonicalSection.APPENDIX, [])
-    for expected in (
-        "appendix",
-        "appendices",
-        "supplementary material",
-        "supplemental material",
-        "supporting information",
-    ):
-        assert expected in aliases, expected
+    assert sorted(aliases) == ["appendices", "appendix"]
 
 
-def test_appendix_aliases_moved_out_of_endnote():
+_SUPPLEMENTARY_HEADINGS = (
+    "supplementary material",
+    "supplementary materials",
+    "supplementary information",
+    "supplemental material",
+    "supplemental data",
+    "supporting information",
+    "extended data",
+    "online supplement",
+)
+
+
+def test_supplementary_material_has_one_type_under_every_wording():
+    """A pointer to the supplementary material is an endnote however it is
+    worded; the singular and plural forms used to have different types."""
+    from bibr.structure.section_classifier import _classify_lookup
+
     endnote = CANONICAL_SECTION_ALIASES.get(CanonicalSection.ENDNOTE, [])
-    for moved in (
-        "appendix",
-        "appendices",
-        "supplementary material",
-        "supplemental material",
-        "supporting information",
-    ):
+    appendix = CANONICAL_SECTION_ALIASES.get(CanonicalSection.APPENDIX, [])
+    for heading in _SUPPLEMENTARY_HEADINGS:
+        assert heading in endnote, heading
+        assert heading not in appendix, heading
+        assert _classify_lookup(heading) == (CanonicalSection.ENDNOTE, 1.0), heading
+
+
+def test_appendix_and_future_work_are_not_endnotes():
+    endnote = CANONICAL_SECTION_ALIASES.get(CanonicalSection.ENDNOTE, [])
+    for moved in ("appendix", "appendices"):
         assert moved not in endnote, f"{moved!r} should have moved to APPENDIX"
     # Conclusion/future-work-flavoured aliases are discussion, not endnotes.
     assert "conclusions and future work" not in endnote
@@ -80,7 +92,7 @@ def test_appendix_aliases_moved_out_of_endnote():
 def test_appendix_alias_lookup_routes_to_appendix():
     from bibr.structure.section_classifier import _classify_lookup
 
-    for header in ("appendix", "appendices", "supporting information"):
+    for header in ("appendix", "appendices"):
         section, score = _classify_lookup(header)
         assert section == CanonicalSection.APPENDIX, header
         assert score == 1.0

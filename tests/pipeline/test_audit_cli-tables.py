@@ -8,17 +8,22 @@ from types import SimpleNamespace
 
 
 def _classifier_resources():
+    from bibr.config import MlOptions
     from bibr.pipeline.classifier_resources import ClassifierResources
 
+    def shipped(name):
+        # The shipped models: an overridden one that fails stops the run instead.
+        return MlOptions.model_fields[name].default
+
     ml = SimpleNamespace(
-        paper_classifier_model_id="paper/model",
-        paper_classifier_revision="rev",
+        paper_classifier_model_id=shipped("paper_classifier_model_id"),
+        paper_classifier_revision=shipped("paper_classifier_revision"),
         paper_classifier_device=None,
         paper_classifier_batch_size=8,
         paper_classifier_batch_timeout_ms=2.0,
         paper_classifier_estimated_peak_mb=1,
-        section_classifier_model_id="section/model",
-        section_classifier_revision="rev",
+        section_classifier_model_id=shipped("section_classifier_model_id"),
+        section_classifier_revision=shipped("section_classifier_revision"),
         section_classifier_device=None,
         section_classifier_batch_size=8,
         section_classifier_batch_timeout_ms=2.0,

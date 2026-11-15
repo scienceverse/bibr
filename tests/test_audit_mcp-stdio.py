@@ -449,6 +449,143 @@ async def test_server_starts_and_queries_without_llm_credentials(monkeypatch, ca
     assert chews == []
 
 
+def _no_llm_at_all(monkeypatch):
+    """Settings for a machine that names no provider, model or endpoint and holds no key."""
+    from bibr.config import GlobalSettings
+
+    for var in (
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "LLM_API_KEY",
+        "LLM_PROVIDER",
+        "LLM_MODEL",
+        "LLM_BASE_URL",
+        "PIPELINE_MODE",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    return GlobalSettings()
+
+
+async def test_a_server_with_no_llm_configured_extracts_in_fast_mode(
+    monkeypatch, caplog, chews, root
+):
+    """Nothing to call is a fast server, not an unavailable one."""
+    paper = root / "paper.pdf"
+    paper.write_bytes(b"%PDF-1.4 stub")
+    with caplog.at_level(logging.WARNING, logger="bibr.mcp_server"):
+        server = build_server(allowed_dirs=[root], settings=_no_llm_at_all(monkeypatch))
+    assert "extraction is unavailable" not in caplog.text
+    async with client_session(server) as client:
+        _payload(await client.call_tool("chew_paper", {"path": str(paper)}))
+    assert chews == [paper]
+
+
+def test_the_server_pipeline_is_built_in_the_mode_the_settings_resolve(monkeypatch, root):
+    built = []
+
+    class _Recorder:
+        def __init__(self, **kwargs):
+            built.append(kwargs)
+
+    monkeypatch.setattr("bibr.mcp_server.Chewer", _Recorder)
+    build_server(allowed_dirs=[root], settings=_no_llm_at_all(monkeypatch))
+    build_server(allowed_dirs=[root], settings=_no_llm_at_all(monkeypatch), mode="full")
+
+    assert [kwargs.get("mode") for kwargs in built] == [None, "full"]
+
+
+def test_an_explicit_full_mode_with_no_llm_keeps_extraction_unavailable(monkeypatch, caplog, root):
+    with caplog.at_level(logging.WARNING, logger="bibr.mcp_server"):
+        build_server(allowed_dirs=[root], settings=_no_llm_at_all(monkeypatch), mode="full")
+    assert "extraction is unavailable" in caplog.text
+    assert "API key required" in caplog.text
+    assert "mode='fast'" in caplog.text
+
+
+def test_the_fallback_build_for_a_server_with_no_llm_is_a_fast_run(monkeypatch, root):
+    built = []
+
+    class _Recorder:
+        def __init__(self, **kwargs):
+            built.append(kwargs)
+            if len(built) == 1:
+                raise ValueError("API key required")
+
+    monkeypatch.setattr("bibr.mcp_server.Chewer", _Recorder)
+    build_server(
+        allowed_dirs=[root],
+        settings=_no_llm_at_all(monkeypatch),
+        mode="full",
+        llm="vllm",
+        ref_seg="llm",
+        refs="llm",
+    )
+
+    # The check that decides whether extraction is unavailable builds in fast mode,
+    # without the options that name an LLM (a fast run refuses them).
+    _, fallback = built
+    assert fallback["mode"] == "fast"
+    assert fallback["refs"] is None
+    assert "llm" not in fallback
+    assert "ref_seg" not in fallback or fallback["ref_seg"] != "llm"
+
+
+def test_an_llm_option_does_not_keep_a_server_with_no_llm_from_starting(monkeypatch, caplog, root):
+    """``--full --refs llm`` with no key disables extraction; it does not stop the server."""
+    with caplog.at_level(logging.WARNING, logger="bibr.mcp_server"):
+        build_server(
+            allowed_dirs=[root],
+            settings=_no_llm_at_all(monkeypatch),
+            mode="full",
+            refs="llm",
+            ref_seg="llm",
+        )
+    assert "extraction is unavailable" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [(["--fast"], "fast"), (["--full"], "full"), ([], None)],
+)
+def test_the_mcp_flags_pass_the_run_mode_to_the_server(monkeypatch, flags, expected):
+    from bibr.local.cli.parser import _build_parser
+
+    captured = {}
+
+    class FakeServer:
+        def run(self, transport):
+            captured["transport"] = transport
+
+    def fake_build_server(*, refs=None, settings=None, allowed_dirs=None, **options):  # noqa: ARG001
+        captured["options"] = options
+        return FakeServer()
+
+    monkeypatch.setattr("bibr.mcp_server.build_server", fake_build_server)
+    assert run_mcp(_build_parser().parse_args(["mcp", *flags])) == 0
+    assert captured["options"].get("mode") == expected
+    assert "no_llm" not in captured["options"]
+
+
+@pytest.mark.parametrize(
+    "pair", [["--fast", "--full"], ["--fast", "--no-llm"], ["--full", "--no-llm"]]
+)
+def test_the_mcp_run_mode_flags_are_mutually_exclusive(capsys, pair):
+    from bibr.local.cli.parser import _build_parser
+
+    with pytest.raises(SystemExit) as exc_info:
+        _build_parser().parse_args(["mcp", *pair])
+    assert exc_info.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
+
+
+def test_mcp_no_llm_is_relabelled_structure_only():
+    from bibr.local.cli.parser import _build_parser
+
+    help_text = _build_parser()._subparsers._group_actions[0].choices["mcp"].format_help()
+    assert "Structure only" in help_text
+    assert "--fast" in help_text
+
+
 @pytest.mark.parametrize("credentials", [True, False])
 def test_a_bad_pipeline_option_still_stops_the_server(root, credentials):
     settings = None if credentials else _no_credentials()

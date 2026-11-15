@@ -104,3 +104,24 @@ def test_run_mcp_leaves_session_value_errors_alone(monkeypatch):
     monkeypatch.setattr(bibr.mcp_server, "build_server", lambda **_kwargs: Server())
     with pytest.raises(ValueError, match="mid-session"):
         bibr.mcp_server.run_mcp(argparse.Namespace())
+
+
+def test_mcp_missing_extra_names_the_tool_install(monkeypatch, capsys):
+    """Without the optional ``mcp`` package the error says how to add it to the installed tool."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_mcp(name, *args, **kwargs):
+        if name == "bibr.mcp_server":
+            raise ModuleNotFoundError("No module named 'mcp'", name="mcp")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_mcp)
+    monkeypatch.setattr("sys.argv", ["bibr", "mcp"])
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "uv tool install 'bibr[mcp]'" in err
+    assert "Traceback" not in err

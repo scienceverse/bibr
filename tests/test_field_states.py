@@ -194,6 +194,119 @@ def test_degraded_core_call_fails_the_front_matter():
     assert states["doi"][0] == "absent"
 
 
+_TAGGER_FIELDS = ("title", "author", "abstract", "keywords", "published", "journal")
+
+
+def _warned(*codes):
+    return [ProcessingWarning(code, "m") for code in codes]
+
+
+def test_fast_run_has_no_structured_funding_to_attempt_without_a_statement():
+    # A full run reports this paper's funding as absent, and so does a fast one: with
+    # no statement there was nothing for the skipped call to parse.
+    skipped = _warned(WarningCode.LLM_SKIPPED)
+    states = _states(warnings=skipped)
+    for field in ("title", "author", "abstract", "bib", "funding_statement", "funding", "doi"):
+        assert states[field] == ("absent", None, []), field
+    assert states == _states()
+
+
+def test_fast_run_did_not_attempt_the_structured_funding():
+    skipped = _warned(WarningCode.LLM_SKIPPED)
+    present = {"funding_statement"}
+    states = _states(present, sources={"funding_statement": "lexical_anchor"}, warnings=skipped)
+    assert states["funding"] == ("not_attempted", None, ["LLM_SKIPPED"])
+    # Nothing else depends on the LLM that a fast run skipped.
+    for field in ("title", "author", "abstract", "bib", "doi"):
+        assert states[field] == ("absent", None, []), field
+
+    records = build_field_states(
+        present={**dict.fromkeys(TRACKED_FIELDS, False), "funding_statement": True},
+        sources={"funding_statement": "lexical_anchor"},
+        scope=FieldScope(),
+        issues=(),
+        warnings=skipped,
+        rules={"funding": "none"},
+    )
+    # The code, not the field's decision, names why nothing was attempted.
+    assert records["funding"].rule == "skipped_fast_mode"
+    assert records["funding"].state == FieldState.NOT_ATTEMPTED
+
+
+def test_fast_run_keeps_a_funding_statement_it_found_without_the_llm():
+    states = _states(
+        {"funding_statement"},
+        sources={"funding_statement": "lexical_anchor"},
+        warnings=_warned(WarningCode.LLM_SKIPPED),
+    )
+    assert states["funding_statement"] == ("extracted", "lexical_anchor", [])
+    assert states["funding"] == ("not_attempted", None, ["LLM_SKIPPED"])
+
+
+def test_fast_run_funding_read_by_the_rules_is_theirs():
+    skipped = _warned(WarningCode.LLM_SKIPPED)
+    sources = {"funding_statement": "lexical_anchor", "funding": "rules"}
+    states = _states({"funding_statement", "funding"}, sources=sources, warnings=skipped)
+    assert states["funding"] == ("extracted", "rules", [])
+    # A statement the rules found no funder in ("no funding was received") is absent.
+    states = _states({"funding_statement"}, sources=sources, warnings=skipped)
+    assert states["funding"] == ("absent", None, [])
+
+
+def test_unavailable_tagger_fails_the_front_matter_it_would_have_read():
+    states = _states(
+        {"doi", "bib"},
+        warnings=_warned(WarningCode.FRONT_TAGGER_UNAVAILABLE, WarningCode.LLM_SKIPPED),
+        doi=True,
+    )
+    for field in _TAGGER_FIELDS:
+        assert states[field] == ("failed", None, ["FRONT_TAGGER_UNAVAILABLE"]), field
+    # The paper type is the classifier's, and the rest is not front matter.
+    assert states["paper_type"][0] == "absent"
+    assert states["funding"] == ("absent", None, [])
+    assert states["doi"][0] == states["bib"][0] == "extracted"
+
+
+def test_unavailable_tagger_leaves_a_value_it_did_not_need_extracted():
+    # A layout title filled the field; the failure stays visible on it.
+    states = _states(
+        {"title"},
+        sources={"title": "layout_title"},
+        warnings=_warned(WarningCode.FRONT_TAGGER_UNAVAILABLE),
+    )
+    assert states["title"] == ("extracted", "layout_title", ["FRONT_TAGGER_UNAVAILABLE"])
+    assert states["author"][0] == "failed"
+
+
+def test_input_with_no_page_layout_did_not_attempt_the_front_matter():
+    states = _states(warnings=_warned(WarningCode.FRONT_MATTER_NOT_READ, WarningCode.LLM_SKIPPED))
+    for field in _TAGGER_FIELDS:
+        assert states[field] == ("not_attempted", None, ["FRONT_MATTER_NOT_READ"]), field
+    assert states["paper_type"][0] == "absent"
+
+
+def test_a_failed_tagger_outranks_a_front_page_that_was_not_read():
+    states = _states(
+        warnings=_warned(WarningCode.FRONT_MATTER_NOT_READ, WarningCode.FRONT_TAGGER_UNAVAILABLE)
+    )
+    assert states["title"][0] == "failed"
+    assert states["title"][2] == ["FRONT_TAGGER_UNAVAILABLE", "FRONT_MATTER_NOT_READ"]
+
+
+def test_a_flagged_tagger_answer_changes_no_field():
+    flagged = _warned(WarningCode.FRONT_TAGGER_FLAGGED)
+    assert _states(warnings=flagged) == _states()
+    present = _states({"title"}, sources={"title": "front_tagger"}, warnings=flagged)
+    assert present["title"] == ("extracted", "front_tagger", [])
+
+
+def test_abstention_outranks_a_field_the_run_did_not_attempt():
+    abstention = _issue("VAL_METADATA_MULTI_ITEM", blocking=True)
+    states = _states(issues=[abstention], warnings=_warned(WarningCode.FRONT_MATTER_NOT_READ))
+    assert states["title"][0] == "abstained"
+    assert states["title"][2] == ["FRONT_MATTER_NOT_READ", "VAL_METADATA_MULTI_ITEM"]
+
+
 # ---------------------------------------------------------------------------
 # Export and readers
 # ---------------------------------------------------------------------------
@@ -212,7 +325,7 @@ def test_export_outside_the_pipeline_has_no_fields(demo_paper):
     from bibr.export.json_export import export_paper_to_json
 
     payload = export_paper_to_json(demo_paper)
-    assert payload["schema_version"] == "12.3"
+    assert payload["schema_version"] == "12.4"
     assert "fields" not in payload["extraction"]
 
 
@@ -241,7 +354,7 @@ def test_pipeline_export_carries_valid_fields(demo_paper):
     PaperExport.model_validate(payload)
 
 
-@pytest.mark.parametrize("version", ["12.0", "12.1", "12.2", "12.3"])
+@pytest.mark.parametrize("version", ["12.0", "12.1", "12.2", "12.3", "12.4"])
 def test_readers_accept_old_and_new_minor_exports(version):
     """A 12.0 export has no fields; the reader, the evaluator and
     payload_validation read it exactly as before."""
@@ -269,7 +382,7 @@ def test_core_checkpoint_replay_accepts_the_current_minor():
     from bibr.export.models import _SCHEMA_VERSION
     from bibr.pipeline.artifacts import CORE_SCHEMA_VERSION
 
-    assert CORE_SCHEMA_VERSION == _SCHEMA_VERSION == "12.3"
+    assert CORE_SCHEMA_VERSION == _SCHEMA_VERSION == "12.4"
 
 
 # ---------------------------------------------------------------------------
@@ -373,3 +486,24 @@ def test_field_scope_is_only_set_by_the_pipeline():
     from bibr.paper import Paper
 
     assert Paper(input_file=SimpleNamespace()).field_scope is None
+
+
+async def test_fast_run_field_states(tmp_path, monkeypatch):
+    from tests.pipeline.test_fast_mode import PageTagger, fast_page_run
+
+    result = await fast_page_run(tmp_path, monkeypatch, tagger=PageTagger())
+
+    fields = result["extraction"]["fields"]
+    assert list(fields) == list(TRACKED_FIELDS)
+    assert fields["title"]["state"] == fields["author"]["state"] == "extracted"
+    assert fields["title"]["source"] == fields["author"]["source"] == "front_tagger"
+    assert fields["abstract"]["source"] == "front_tagger"
+    assert fields["bib"]["state"] == "extracted"
+    # The statement is found by the lexical pass; the funding rules read its funders.
+    assert fields["funding_statement"]["state"] == "extracted"
+    assert fields["funding"] == {
+        "state": "extracted",
+        "source": "rules",
+        "issues": [],
+        "rule": "extracted",
+    }

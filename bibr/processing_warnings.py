@@ -34,11 +34,22 @@ class WarningCode(StrEnum):
     OCR_NATIVE_TEXT_PUA_FALLBACK = "OCR_NATIVE_TEXT_PUA_FALLBACK"
     OCR_TEXT_LAYER_FALLBACK = "OCR_TEXT_LAYER_FALLBACK"
     OCR_RECOGNIZERS_DISAGREE = "OCR_RECOGNIZERS_DISAGREE"
+    # Text-layer reading (OCR backend "text-layer", or the fallback to it)
+    OCR_BACKEND_UNAVAILABLE = "OCR_BACKEND_UNAVAILABLE"
+    TEXT_LAYER_PAGE_UNUSABLE = "TEXT_LAYER_PAGE_UNUSABLE"
+    TEXT_LAYER_REGION_UNREAD = "TEXT_LAYER_REGION_UNREAD"
+    TEXT_LAYER_TABLE_REBUILT = "TEXT_LAYER_TABLE_REBUILT"
+    TEXT_LAYER_FORMULA_TEXT = "TEXT_LAYER_FORMULA_TEXT"
+    TEXT_LAYER_PRIVATE_USE_DROPPED = "TEXT_LAYER_PRIVATE_USE_DROPPED"
+    TEXT_LAYER_GLYPHS_UNMAPPED = "TEXT_LAYER_GLYPHS_UNMAPPED"
+    TEXT_LAYER_READ_ERROR = "TEXT_LAYER_READ_ERROR"
+    TEXT_LAYER_OCR_LAYER_READ = "TEXT_LAYER_OCR_LAYER_READ"
     SCAN_ARTICLE_SPLIT = "SCAN_ARTICLE_SPLIT"
     LOW_TEXT_QUALITY = "LOW_TEXT_QUALITY"
     PAGE_DPI_REDUCED = "PAGE_DPI_REDUCED"
     # Classifiers
     SECTION_CLASSIFIER_DEGRADED = "SECTION_CLASSIFIER_DEGRADED"
+    SECTION_CLASSIFIER_FAILED = "SECTION_CLASSIFIER_FAILED"
     SECTION_CLASSIFIER_LLM_FAILED = "SECTION_CLASSIFIER_LLM_FAILED"
     IMPLICIT_SECTIONS_LLM_FAILED = "IMPLICIT_SECTIONS_LLM_FAILED"
     PAPER_CLASSIFIER_DEGRADED = "PAPER_CLASSIFIER_DEGRADED"
@@ -51,7 +62,13 @@ class WarningCode(StrEnum):
     AUTHORS_TRUNCATED = "AUTHORS_TRUNCATED"
     AUTHORS_PARTIAL = "AUTHORS_PARTIAL"
     LLM_RESPONSE_REPAIRED = "LLM_RESPONSE_REPAIRED"
+    LLM_SKIPPED = "LLM_SKIPPED"
+    FRONT_TAGGER_UNAVAILABLE = "FRONT_TAGGER_UNAVAILABLE"
+    FRONT_TAGGER_FLAGGED = "FRONT_TAGGER_FLAGGED"
+    FRONT_MATTER_NOT_READ = "FRONT_MATTER_NOT_READ"
+    SELF_CITATION_FILLED = "SELF_CITATION_FILLED"
     STATEMENT_LEXICAL_FALLBACK = "STATEMENT_LEXICAL_FALLBACK"
+    STATEMENT_TAGGER = "STATEMENT_TAGGER"
     RESEARCH_INTEGRITY_LLM_FAILED = "RESEARCH_INTEGRITY_LLM_FAILED"
     EQUATION_LLM_FALLBACK_TIMEOUT = "EQUATION_LLM_FALLBACK_TIMEOUT"
     EQUATION_LLM_FALLBACK_FAILED = "EQUATION_LLM_FALLBACK_FAILED"
@@ -69,6 +86,7 @@ class WarningCode(StrEnum):
     REF_SEG_CRF_ERROR = "REF_SEG_CRF_ERROR"
     REF_SEG_MARKER_SPLIT_RECOVERY = "REF_SEG_MARKER_SPLIT_RECOVERY"
     REF_SEG_FAILED = "REF_SEG_FAILED"
+    REF_SEG_NOT_SPLIT = "REF_SEG_NOT_SPLIT"
     REF_SEG_MERGE_SPLIT = "REF_SEG_MERGE_SPLIT"
     # Reference parsing
     REF_PARSE_NER_FALLBACK = "REF_PARSE_NER_FALLBACK"
@@ -97,6 +115,8 @@ class WarningCode(StrEnum):
     DOCX_FIGURES_DROPPED = "DOCX_FIGURES_DROPPED"
     DOCX_FIGURE_IMAGES_OMITTED = "DOCX_FIGURE_IMAGES_OMITTED"
     TABLE_CONTENTS_OMITTED = "TABLE_CONTENTS_OMITTED"
+    # Model overrides
+    MODEL_OVERRIDE_INFERENCE_FAILED = "MODEL_OVERRIDE_INFERENCE_FAILED"
 
 
 DESCRIPTIONS: dict[WarningCode, str] = {
@@ -119,6 +139,28 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.OCR_RECOGNIZERS_DISAGREE: "On scanned pages, a second OCR recognizer read some "
     "regions differently; the regions that disagreed most were escalated or flagged "
     "(regions[]._ocr_consensus).",
+    WarningCode.OCR_BACKEND_UNAVAILABLE: "No OCR backend can start on this machine, so the PDF "
+    "was read from its embedded text layer alone (OCR_FALLBACK_TO_TEXT_LAYER=auto); scanned "
+    "pages are missing.",
+    WarningCode.TEXT_LAYER_PAGE_UNUSABLE: "A page has no usable text layer (a scan, or text "
+    "that is missing, corrupt or misplaced); with no OCR its text regions are empty.",
+    WarningCode.TEXT_LAYER_REGION_UNREAD: "Layout regions had no text in the PDF text layer "
+    "(text drawn as an image or as vector paths) and, with no OCR, are empty.",
+    WarningCode.TEXT_LAYER_TABLE_REBUILT: "Tables were rebuilt from text-layer glyph positions, "
+    "not read by an OCR model; merged cells and multi-line cells may be split.",
+    WarningCode.TEXT_LAYER_FORMULA_TEXT: "Display formulas were read from the PDF text layer as "
+    "plain text, not LaTeX; their formatted text may lose sub- and superscripts.",
+    WarningCode.TEXT_LAYER_PRIVATE_USE_DROPPED: "Private-use code points (publisher icons or "
+    "unmapped glyphs) were dropped from the PDF text layer; a letter drawn that way inside a "
+    "word is missing from it.",
+    WarningCode.TEXT_LAYER_GLYPHS_UNMAPPED: "Glyphs with no character mapping in the PDF text "
+    "layer are shown as U+FFFD; a letter or a symbol such as a minus or degree sign is missing "
+    "there.",
+    WarningCode.TEXT_LAYER_READ_ERROR: "bibr failed while reading layout regions from the PDF "
+    "text layer (a fault in bibr, not in the PDF); those regions are empty. Please report it.",
+    WarningCode.TEXT_LAYER_OCR_LAYER_READ: "Scanned pages were read from the OCR text layer the "
+    "PDF carries (OCR_TEXT_LAYER_READ_OCR_LAYER), not by an OCR model; that layer is the "
+    "scanner's or publisher's reading and is often less accurate than OCR.",
     WarningCode.SCAN_ARTICLE_SPLIT: "Regions of neighbouring articles on scanned pages (the "
     "previous article's tail, the next article's start, floats above the title) were dropped "
     "before parsing.",
@@ -127,6 +169,9 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     "DPI was rendered at a lower DPI for layout and OCR.",
     WarningCode.SECTION_CLASSIFIER_DEGRADED: "The trained section classifier did not answer; "
     "the LLM classified the section headers.",
+    WarningCode.SECTION_CLASSIFIER_FAILED: "A fast run's trained section classifier did not answer "
+    "(it failed to load or to classify), and fast mode has no LLM tier to take over; the headers "
+    "the alias table does not settle keep their alias prior or stay unknown.",
     WarningCode.SECTION_CLASSIFIER_LLM_FAILED: "The LLM section classification call failed; "
     "the headers it was asked about keep an alias prior or stay unknown.",
     WarningCode.IMPLICIT_SECTIONS_LLM_FAILED: "The LLM front-matter section detection call "
@@ -150,8 +195,29 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.LLM_RESPONSE_REPAIRED: "A finished core-metadata LLM response failed validation "
     "and was repaired locally (invalid backslash escapes, or prose around its JSON); the "
     "repaired response passed the same validation.",
+    WarningCode.LLM_SKIPPED: "A fast run made no LLM call, so what an LLM adds is missing: the "
+    "message lists what this paper's run left undone (author roles, affiliation parts the local "
+    "rules do not read, structured funders where they did not read them, ambiguous citations "
+    "left unlinked, statistics left to the regex pass). It is not a failure and an export carrying "
+    "it is final.",
+    WarningCode.FRONT_TAGGER_UNAVAILABLE: "A fast run could not read the front matter: the "
+    "front-matter tagger's model was missing, failed to load or failed on this paper, so the "
+    "title, authors and abstract are empty or come from fallbacks.",
+    WarningCode.FRONT_TAGGER_FLAGGED: "A fast run took the front-matter tagger's answer although "
+    "it reported problems with it (the message lists them); the title, authors or abstract may "
+    "be incomplete.",
+    WarningCode.FRONT_MATTER_NOT_READ: "A fast run has no page layout for the front-matter "
+    "tagger to read (a DOCX, for one): the title and abstract come from the document's headings "
+    "and sections where it has them, and the authors were not read.",
+    WarningCode.SELF_CITATION_FILLED: "The extraction found no title or no authors, and they "
+    "were read from the citation the paper prints on its first page ('To cite this article: "
+    "...', SELF_CITATION_METADATA); the message names the fields and the text rows.",
     WarningCode.STATEMENT_LEXICAL_FALLBACK: "A research-integrity statement was filled by "
     "lexical anchor matching.",
+    WarningCode.STATEMENT_TAGGER: "A funding, competing interests, ethics or data "
+    "availability statement, or an acknowledgments or author contributions section the "
+    "paper had none of, was taken from the opt-in statement tagger "
+    "(ML_STATEMENT_TAGGER_MODEL_ID); the message names it.",
     WarningCode.RESEARCH_INTEGRITY_LLM_FAILED: "The research-integrity LLM call failed; "
     "structured funding, author roles and parsed affiliation parts are missing.",
     WarningCode.EQUATION_LLM_FALLBACK_TIMEOUT: "The equation LLM fallback timed out; only "
@@ -176,12 +242,15 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.REF_SEG_REGION_ERROR: "Region-anchor reference segmentation raised an error.",
     WarningCode.REF_SEG_REGION_RECOVERY: "References were segmented from layout regions after "
     "another tier declined.",
-    WarningCode.REF_SEG_CRF_FALLBACK: "LLM reference segmentation failed or is disabled; "
-    "segmentation fell back to layout regions or the CRF.",
+    WarningCode.REF_SEG_CRF_FALLBACK: "LLM reference segmentation failed, is disabled, or is not "
+    "part of a fast run; segmentation fell back to layout regions or the CRF.",
     WarningCode.REF_SEG_CRF_ERROR: "The CRF reference segmenter raised an error.",
     WarningCode.REF_SEG_MARKER_SPLIT_RECOVERY: "Every segmenter failed; the references were "
     "split on their printed markers.",
     WarningCode.REF_SEG_FAILED: "A non-empty reference section produced no references.",
+    WarningCode.REF_SEG_NOT_SPLIT: "The text reference segmenter found no reference start in "
+    "a reference list found by its heading, so the list could not be split into entries; it is "
+    "exported as one block (the merged-reference splitter may still cut it).",
     WarningCode.REF_SEG_MERGE_SPLIT: "Reference strings holding several references were split.",
     WarningCode.REF_PARSE_NER_FALLBACK: "LLM reference parsing failed or skipped entries; the "
     "local NER parser parsed them.",
@@ -233,6 +302,11 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     "cell's text once per cell it covers) or its cells passed the table limits; it is kept "
     "without contents when its caption labels it (JATS: when it has a label or caption) and "
     "dropped otherwise.",
+    WarningCode.MODEL_OVERRIDE_INFERENCE_FAILED: "A model set away from its shipped default "
+    "(a model override) loaded but raised on this paper; the paper took that tier's error "
+    "path, which is not always what a run without the override would do, so this export does "
+    "not show the candidate's answer. The run stops after the override raised on several "
+    "papers in a row on which it ran.",
 }
 
 
@@ -245,10 +319,16 @@ NOT_FINAL_CODES: frozenset[WarningCode] = frozenset(
         WarningCode.OCR_REGION_FAILED,
         WarningCode.OCR_PAGE_FAILED,
         WarningCode.OCR_TEXT_LAYER_FALLBACK,
+        WarningCode.SECTION_CLASSIFIER_FAILED,
+        # An OCR engine that could not start may start next time. The other
+        # TEXT_LAYER_* codes are final: the same text layer gives the same
+        # empty regions on every run of the text-layer backend.
+        WarningCode.OCR_BACKEND_UNAVAILABLE,
         WarningCode.SECTION_CLASSIFIER_LLM_FAILED,
         WarningCode.IMPLICIT_SECTIONS_LLM_FAILED,
         WarningCode.PAPER_CLASSIFICATION_FAILED,
         WarningCode.AUTHORS_LLM_FAILED,
+        WarningCode.FRONT_TAGGER_UNAVAILABLE,
         WarningCode.RESEARCH_INTEGRITY_LLM_FAILED,
         WarningCode.EQUATION_LLM_FALLBACK_TIMEOUT,
         WarningCode.EQUATION_LLM_FALLBACK_FAILED,
@@ -263,6 +343,7 @@ NOT_FINAL_CODES: frozenset[WarningCode] = frozenset(
         WarningCode.ROR_MATCHING_FAILED,
         WarningCode.ENRICHER_FAILED,
         WarningCode.ENRICHMENT_INCOMPLETE,
+        WarningCode.MODEL_OVERRIDE_INFERENCE_FAILED,
     }
 )
 

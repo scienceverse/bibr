@@ -102,8 +102,7 @@ class TestEquationXrefRecallPreserved:
         # OCR-flattened footnote marker glued to the word: "9Equations (1)"
         # (observed in de Gruyter econ outputs) — still a real reference.
         xrefs = _eq_xrefs(_sent("9Equations (1) and (2) are still exact."))
-        assert len(xrefs) == 1
-        assert xrefs[0].xref_id == 1
+        assert [x.xref_id for x in xrefs] == [1, 2]
 
 
 class TestEquationXrefUnitAndSoftwareNames:

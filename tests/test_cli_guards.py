@@ -299,3 +299,371 @@ async def test_paper_id_with_single_file_directory_exits_2(tmp_path, monkeypatch
     with pytest.raises(SystemExit) as exc_info:
         await _run_process(args)
     assert exc_info.value.code == 2
+
+
+# --- Guard 4: the first-run walls (no key, no OCR runtime, no vLLM) -----------------
+
+_KEY_VARS = (
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "LANGEXTRACT_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_API_KEY",
+    "GROQ_API_KEY",
+    "OPENAI_API_KEY",
+    "LLM_API_KEY",
+    "LLM_BASE_URL",
+    "LLM_PROVIDER",
+    "LLM_MODEL",
+    "LLM_BACKEND",
+    "PIPELINE_MODE",
+    "OCR_BACKEND",
+)
+
+
+class _RecordingPipeline(_FakePipeline):
+    """A fake pipeline that keeps the kwargs ``bibr chew`` built it with."""
+
+    built: list[dict] = []
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        _RecordingPipeline.built.append(kwargs)
+
+
+@pytest.fixture
+def first_run(monkeypatch):
+    """A machine with no LLM configured, a fake pipeline and a credential check that fails.
+
+    Returns the list of credential-check calls: a run that must not ask for a key leaves it empty.
+    """
+    from bibr.config import GlobalSettings
+
+    for var in _KEY_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr("bibr.config.Settings", GlobalSettings())
+    _disable_ocr_runtime_preflight(monkeypatch)
+    # What the real download announcement would say depends on this machine's cache.
+    monkeypatch.setattr("bibr.local.cli.process.announce_downloads", lambda *a, **k: None)
+    _RecordingPipeline.built = []
+    monkeypatch.setattr("bibr.local.pipeline.LocalPipeline", _RecordingPipeline)
+
+    asked: list[str] = []
+
+    def no_key(settings=None):  # noqa: ARG001
+        asked.append("asked")
+        raise ValueError("Google API key required: set GOOGLE_API_KEY")
+
+    monkeypatch.setattr("bibr.clients.llm.preflight_credentials", no_key)
+    return asked
+
+
+def _pdf(tmp_path):
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    return pdf
+
+
+async def test_a_run_with_no_key_and_no_flag_runs_fast_without_asking_for_one(
+    tmp_path, first_run, capsys
+):
+    """The credential check was the first wall of a fresh install; with nothing to call it is moot."""
+    from bibr.local.cli import _build_parser, _run_process
+
+    await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path))]))
+
+    assert first_run == []
+    (kwargs,) = _RecordingPipeline.built
+    assert kwargs["mode"] == "fast"
+    assert kwargs["llm_backend"] == "cloud"
+    assert kwargs["no_llm"] is False
+    assert kwargs["ocr_requested"] is False
+    err = capsys.readouterr().err
+    assert "mode fast" in err
+    assert "no LLM calls" in err
+
+
+async def test_fast_flag_runs_fast_even_with_a_key(tmp_path, first_run, monkeypatch):
+    from bibr.local.cli import _build_parser, _run_process
+
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--fast"]))
+
+    assert first_run == []
+    assert _RecordingPipeline.built[0]["mode"] == "fast"
+
+
+async def test_full_flag_with_no_key_stops_at_the_credential_check_and_suggests_fast(
+    tmp_path, first_run, capsys
+):
+    from bibr.local.cli import _build_parser, _run_process
+
+    with pytest.raises(SystemExit) as exc_info:
+        await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--full"]))
+
+    assert exc_info.value.code == 1
+    assert first_run == ["asked"]
+    assert _RecordingPipeline.built == []
+    err = capsys.readouterr().err
+    assert "Google API key required" in err
+    assert "--fast" in err
+    assert "--no-llm" in err
+
+
+async def test_a_configured_llm_with_no_flag_still_asks_for_its_key(
+    tmp_path, first_run, monkeypatch
+):
+    """Naming a provider is choosing an LLM: the run is full and a missing key is an error."""
+    from bibr.config import GlobalSettings
+    from bibr.local.cli import _build_parser, _run_process
+
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setattr("bibr.config.Settings", GlobalSettings())
+
+    with pytest.raises(SystemExit) as exc_info:
+        await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path))]))
+
+    assert exc_info.value.code == 1
+    assert first_run == ["asked"]
+
+
+async def test_no_llm_does_not_ask_for_a_key_and_stays_structure_only(tmp_path, first_run):
+    from bibr.local.cli import _build_parser, _run_process
+
+    await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--no-llm"]))
+
+    assert first_run == []
+    (kwargs,) = _RecordingPipeline.built
+    assert kwargs["no_llm"] is True
+    assert kwargs["mode"] == "full"
+
+
+async def test_the_ocr_check_comes_before_the_credential_check(
+    tmp_path, first_run, monkeypatch, capsys
+):
+    """A machine that cannot OCR at all hears that before it is asked for a key."""
+    from bibr.local.cli import _build_parser, _run_process
+
+    monkeypatch.setattr(
+        "bibr.local.cli.process._preflight_ocr_runtime",
+        lambda config: "No local OCR runtime can start on this machine for PDF input",
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--full"]))
+
+    assert exc_info.value.code == 1
+    assert first_run == []
+    err = capsys.readouterr().err
+    assert "No local OCR runtime" in err
+    assert "API key" not in err
+
+
+async def test_fast_refuses_an_llm_only_option_before_doing_anything(tmp_path, first_run, capsys):
+    from bibr.local.cli import _build_parser, _run_process
+
+    with pytest.raises(SystemExit) as exc_info:
+        await _run_process(
+            _build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--fast", "--refs", "llm"])
+        )
+
+    assert exc_info.value.code == 2
+    assert "calls an LLM" in capsys.readouterr().err
+    assert _RecordingPipeline.built == []
+    assert first_run == []
+
+
+async def test_a_fast_run_announces_the_downloads_before_the_pipeline_is_built(
+    tmp_path, first_run, monkeypatch
+):
+    from bibr.local.cli import _build_parser, _run_process
+
+    order: list[str] = []
+    monkeypatch.setattr(
+        "bibr.local.cli.process.announce_downloads", lambda *a, **k: order.append("announce")
+    )
+
+    class _Ordered(_RecordingPipeline):
+        def __init__(self, **kwargs):
+            order.append("pipeline")
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr("bibr.local.pipeline.LocalPipeline", _Ordered)
+    await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path))]))
+
+    assert order == ["announce", "pipeline"]
+
+
+# --- a fast run reads the text layer unless the user chose an OCR route ---------------
+
+
+@pytest.fixture
+def gpu_without_vllm(monkeypatch):
+    """A Linux x86 box with a roomy GPU, where vLLM is not installed."""
+    from bibr.ocr import registry
+
+    monkeypatch.setattr(registry.sys, "platform", "linux")
+    monkeypatch.setattr(registry.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: 24.0)
+    monkeypatch.setattr(registry, "paddle_vllm_unavailable_reason", lambda: None)
+    monkeypatch.setattr(registry, "vllm_compute_capability_blocker", lambda: None)
+
+
+async def test_a_fast_run_with_no_chosen_ocr_route_reads_the_text_layer_on_a_gpu_box(
+    tmp_path, first_run, gpu_without_vllm, capsys
+):
+    from bibr.local.cli import _build_parser, _run_process
+
+    await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path))]))
+
+    err = capsys.readouterr().err
+    assert "OCR backend: text-layer" in err
+    assert "mode fast" in err and "OCR text-layer" in err
+    assert "paddle-vllm" not in err
+    built = _RecordingPipeline.built[0]
+    assert built["ocr_backend"] == "text-layer"
+    assert built["ocr_requested"] is False
+
+
+async def test_a_fast_run_that_chose_paddle_ocr_keeps_the_gpu_route(
+    tmp_path, first_run, gpu_without_vllm, capsys
+):
+    from bibr.local.cli import _build_parser, _run_process
+
+    await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--ocr", "paddle"]))
+
+    err = capsys.readouterr().err
+    assert "text-layer" not in err
+    assert "paddle-vllm (automatic)" in err
+    built = _RecordingPipeline.built[0]
+    assert built["ocr_backend"] == "paddle"
+    assert built["ocr_requested"] is True
+
+
+# --- Fast mode needs the front-matter tagger ----------------------------------
+
+
+async def test_fast_refuses_to_start_when_the_tagger_bundle_is_missing(
+    tmp_path, first_run, monkeypatch, capsys
+):
+    """Without the bundle every paper would come out with no title, authors or abstract."""
+    from bibr.local.cli import _build_parser, _run_process
+
+    monkeypatch.setattr(
+        "bibr.local.cli.run_config._front_tagger_bundle", lambda model_id, revision: None
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--fast"]))
+
+    assert exc_info.value.code == 1
+    assert _RecordingPipeline.built == []
+    err = " ".join(capsys.readouterr().err.split())
+    assert "front-matter tagger" in err
+    assert "scienceverse/bibr-front-tagger" in err
+    assert "was not found" in err
+    assert "ML_FRONT_TAGGER_MODEL_ID" in err
+
+
+async def test_fast_reports_a_network_failure_as_one(tmp_path, first_run, monkeypatch, capsys):
+    from bibr.local.cli import _build_parser, _run_process
+
+    def unreachable(model_id, revision):
+        raise ConnectionError("Hub unreachable")
+
+    monkeypatch.setattr("bibr.local.cli.run_config._front_tagger_bundle", unreachable)
+
+    with pytest.raises(SystemExit) as exc_info:
+        await _run_process(_build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--fast"]))
+
+    assert exc_info.value.code == 1
+    err = " ".join(capsys.readouterr().err.split())
+    assert "could not be downloaded (Hub unreachable)" in err
+    assert "network connection" in err
+
+
+def test_the_tagger_check_names_the_pinned_revision(monkeypatch):
+    from types import SimpleNamespace
+
+    from bibr.config import GlobalSettings
+    from bibr.local.cli.run_config import _preflight_front_tagger
+
+    settings = GlobalSettings()
+    settings.ml.front_tagger_revision = "abc123"
+    monkeypatch.setattr("bibr.config.Settings", settings)
+    asked = []
+
+    def missing(model_id, revision):
+        asked.append((model_id, revision))
+        return None
+
+    monkeypatch.setattr("bibr.local.cli.run_config._front_tagger_bundle", missing)
+
+    problem = _preflight_front_tagger(SimpleNamespace(mode="fast", no_llm=False))
+
+    assert asked == [("scienceverse/bibr-front-tagger", "abc123")]
+    assert "scienceverse/bibr-front-tagger@abc123" in problem
+
+
+@pytest.mark.parametrize(
+    ("mode", "no_llm", "model_id"),
+    [
+        ("full", False, "scienceverse/bibr-front-tagger"),  # an LLM reads the front matter
+        ("fast", True, "scienceverse/bibr-front-tagger"),  # --no-llm never loads the tagger
+        ("fast", False, None),  # a null id is a choice to run without it
+    ],
+)
+def test_the_tagger_check_is_skipped_when_the_run_does_not_load_it(
+    monkeypatch, mode, no_llm, model_id
+):
+    from types import SimpleNamespace
+
+    from bibr.config import GlobalSettings
+    from bibr.local.cli.run_config import _preflight_front_tagger
+
+    settings = GlobalSettings()
+    settings.ml.front_tagger_model_id = model_id
+    monkeypatch.setattr("bibr.config.Settings", settings)
+
+    def never(model_id, revision):
+        raise AssertionError("the bundle must not be looked up")
+
+    monkeypatch.setattr("bibr.local.cli.run_config._front_tagger_bundle", never)
+
+    assert _preflight_front_tagger(SimpleNamespace(mode=mode, no_llm=no_llm)) is None
+
+
+# --- A model setting changed from its default ---------------------------------
+
+
+async def test_chew_refuses_a_model_override_that_does_not_exist(
+    tmp_path, first_run, monkeypatch, capsys
+):
+    from bibr.config import Settings
+    from bibr.local.cli import _build_parser, _run_process
+
+    monkeypatch.setattr(Settings, "REF_GEOM_TAGGER_MODEL_ID", str(tmp_path / "no-tagger"))
+    with pytest.raises(SystemExit) as exc_info:
+        await _run_process(
+            _build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--fast", "--ref-seg", "geom"])
+        )
+    assert exc_info.value.code == 1
+    assert _RecordingPipeline.built == []
+    err = " ".join(capsys.readouterr().err.split())
+    assert "Model override problem: REF_GEOM_TAGGER_MODEL_ID=" in err
+    assert "no such file or directory" in err
+
+
+async def test_chew_ignores_a_stale_setting_the_run_does_not_use(
+    tmp_path, first_run, monkeypatch, capsys
+):
+    from bibr.config import Settings
+    from bibr.local.cli import _build_parser, _run_process
+
+    monkeypatch.setattr(Settings, "REF_GEOM_TAGGER_MODEL_ID", str(tmp_path / "no-tagger"))
+    # --ref-seg crf never asks the geometry tier, so the tagger is not loaded.
+    await _run_process(
+        _build_parser().parse_args(["chew", str(_pdf(tmp_path)), "--fast", "--ref-seg", "crf"])
+    )
+    assert len(_RecordingPipeline.built) == 1
+    assert "Model override problem" not in capsys.readouterr().err

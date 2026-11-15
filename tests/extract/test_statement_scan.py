@@ -1,5 +1,5 @@
-"""Lexical-anchor statement fallback: when copy_integrity_statements finds no
-FUNDING/COI/ETHICS/OPEN_DATA section, scan the body for verbatim statements
+"""Lexical-anchor statement fallback: with no FUNDING/COI/ETHICS/OPEN_DATA
+section to read, scan the body for verbatim statements
 that live inside mis-typed sections (run-in bold labels, method-embedded ethics,
 acknowledgment-embedded funding).
 """

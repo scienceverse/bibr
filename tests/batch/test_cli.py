@@ -200,7 +200,15 @@ def test_report_subcommand_text_and_json(tmp_path, capsys):
         == 0
     )
     report = json.loads(capsys.readouterr().out)
-    assert report["papers"] == {"total": 2, "ok": 1, "failed": 1, "attempts": 2}
+    assert report["papers"] == {
+        "total": 2,
+        "ok": 1,
+        "failed": 1,
+        "stopped_on_model_override": 0,
+        "fell_back_on_model_override": 0,
+        "fell_back_capped": 0,
+        "attempts": 2,
+    }
     assert report["references"]["match_rate"] == 0.5
 
 
@@ -440,6 +448,19 @@ def test_form_fields_map_flags_to_the_job_api(tmp_path):
     assert _form_fields(parse([*base, "--pages", "0-3"]), console) is None
 
 
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [(["--fast"], {"mode": "fast"}), (["--full"], {"mode": "full"}), ([], {})],
+)
+def test_form_fields_map_the_run_mode_flags_to_mode(flags, expected):
+    from rich.console import Console
+
+    args = _build_parser().parse_args(
+        ["batch", "x", "--out", "y", "--serve-url", "http://s", *flags]
+    )
+    assert _form_fields(args, Console(stderr=True)) == expected
+
+
 def test_chew_options_from_config_mirrors_the_pipeline_construction():
     config = ResolvedRunConfig(
         ocr_backend="glm-http",
@@ -572,3 +593,263 @@ def test_remote_without_a_token_may_use_plain_http_to_any_host(tmp_path, capsys,
     assert code == 0
     assert "Refusing" not in output
     assert "the bearer token goes to" not in output
+
+
+# --- run mode: --fast / --full on bibr batch ----------------------------------------------
+
+_BATCH_KEY_VARS = (
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "LANGEXTRACT_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_API_KEY",
+    "GROQ_API_KEY",
+    "OPENAI_API_KEY",
+    "LLM_API_KEY",
+    "LLM_BASE_URL",
+    "LLM_PROVIDER",
+    "LLM_MODEL",
+    "LLM_BACKEND",
+    "PIPELINE_MODE",
+    "OCR_BACKEND",
+)
+
+
+@pytest.fixture
+def keyless(monkeypatch):
+    """No LLM configured, the OCR and opencv preflights out of the way, downloads silent."""
+    from bibr.config import GlobalSettings
+
+    for var in _BATCH_KEY_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr("bibr.config.Settings", GlobalSettings())
+    monkeypatch.setattr("bibr.local.cli._opencv_unavailable_reason", lambda: None)
+    monkeypatch.setattr("bibr.local.cli.run_config._preflight_ocr_runtime", lambda config: None)
+    announced = []
+    monkeypatch.setattr(
+        "bibr.local.cli.dry_run.announce_downloads",
+        lambda config, files, console: announced.append(list(files)),
+    )
+    return announced
+
+
+def _capture_local(monkeypatch):
+    """Record the ``LocalOptions`` the batch run opens its pipeline with."""
+    seen = {}
+    chewed = _stub_chew_many(monkeypatch)
+    stub_factory = importlib.import_module("bibr.batch.runner").open_chew_many
+
+    def factory(local):
+        seen["local"] = local
+        return stub_factory(local)
+
+    monkeypatch.setattr("bibr.batch.runner.open_chew_many", factory)
+    seen["chewed"] = chewed
+    return seen
+
+
+def test_batch_parser_takes_fast_and_full_and_refuses_both():
+    parse = _build_parser().parse_args
+    assert parse(["batch", "p.pdf", "--out", "o", "--fast"]).fast is True
+    assert parse(["batch", "p.pdf", "--out", "o", "--full"]).full is True
+    assert parse(["batch", "p.pdf", "--out", "o"]).fast is False
+    for flags in (["--fast", "--full"], ["--fast", "--no-llm"], ["--full", "--no-llm"]):
+        with pytest.raises(SystemExit):
+            parse(["batch", "p.pdf", "--out", "o", *flags])
+
+
+def test_chew_options_carry_the_mode():
+    full = chew_options_from_config(ResolvedRunConfig("glm-http", "balanced", "vllm", mode="full"))
+    assert full["mode"] == "full"
+    assert full["llm_backend"] == "vllm"
+
+    structure_only = chew_options_from_config(
+        ResolvedRunConfig("glm-http", "balanced", "cloud", no_llm=True)
+    )
+    assert structure_only["mode"] == "full"
+    assert structure_only["no_llm"] is True
+
+
+def test_fast_chew_options_name_no_llm_backend():
+    """A fast run starts no LLM, so naming a backend beside it would be refused by the API."""
+    from bibr.api import _pipeline_kwargs
+
+    options = chew_options_from_config(
+        ResolvedRunConfig("glm-http", "balanced", "cloud", mode="fast")
+    )
+
+    assert options["mode"] == "fast"
+    assert "llm_backend" not in options
+    assert _pipeline_kwargs(options)["mode"] == "fast"
+
+
+def test_an_ocr_route_nobody_chose_stays_unset_in_the_chew_options():
+    """So a fast run can tell the automatic chain from a request to bootstrap vLLM."""
+    automatic = chew_options_from_config(
+        ResolvedRunConfig("paddle", "balanced", "cloud", mode="fast", ocr_requested=False)
+    )
+    chosen = chew_options_from_config(
+        ResolvedRunConfig("paddle", "balanced", "cloud", mode="fast", ocr_requested=True)
+    )
+
+    assert automatic["ocr_backend"] is None
+    assert chosen["ocr_backend"] == "paddle"
+
+
+def test_batch_without_an_llm_runs_fast_and_asks_for_no_key(tmp_path, keyless, monkeypatch):
+    seen = _capture_local(monkeypatch)
+    monkeypatch.setattr(
+        "bibr.clients.llm.preflight_credentials",
+        lambda settings=None: pytest.fail("a fast run must not ask for a key"),
+    )
+    args = _build_parser().parse_args(["batch", str(_pdf(tmp_path)), "--out", str(tmp_path / "o")])
+
+    _run_batch(args)
+
+    options = seen["local"].chew_options
+    assert options["mode"] == "fast"
+    assert "llm_backend" not in options
+    assert options["ocr_backend"] is None
+
+
+def test_batch_full_flag_is_carried_to_the_pipeline(tmp_path, keyless, monkeypatch):
+    seen = _capture_local(monkeypatch)
+    args = _build_parser().parse_args(
+        ["batch", str(_pdf(tmp_path)), "--out", str(tmp_path / "o"), "--full"]
+    )
+
+    _run_batch(args)
+
+    options = seen["local"].chew_options
+    assert options["mode"] == "full"
+    assert options["llm_backend"] == "cloud"
+
+
+def test_batch_fast_with_an_llm_only_option_is_a_usage_error(tmp_path, keyless, capsys):
+    args = _build_parser().parse_args(
+        ["batch", str(_pdf(tmp_path)), "--out", str(tmp_path / "o"), "--fast", "--refs", "llm"]
+    )
+
+    assert _run_batch(args) == 2
+    assert "calls an LLM" in capsys.readouterr().err
+
+
+def test_batch_dry_run_states_the_mode(tmp_path, keyless, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "bibr.batch.runner.open_chew_many",
+        lambda local: pytest.fail("dry-run must not open a pipeline"),
+    )
+    args = _build_parser().parse_args(
+        ["batch", str(_pdf(tmp_path)), "--out", str(tmp_path / "o"), "--dry-run"]
+    )
+
+    assert _run_batch(args) == 0
+
+    printed = capsys.readouterr().out
+    assert "mode fast: no LLM calls" in printed
+    assert "llm disabled (fast mode)" in printed
+
+
+def test_batch_announces_the_downloads_once_for_the_whole_run(tmp_path, keyless, monkeypatch):
+    _stub_chew_many(monkeypatch)
+    first, second = _pdf(tmp_path, "one"), _pdf(tmp_path, "two")
+    args = _build_parser().parse_args(
+        ["batch", str(first), str(second), "--out", str(tmp_path / "o"), "--batch-size", "1"]
+    )
+
+    _run_batch(args)
+
+    assert len(keyless) == 1
+
+
+def test_batch_announces_no_download_for_a_run_that_cannot_start(tmp_path, keyless, monkeypatch):
+    """A refused run has fetched nothing, so there is nothing to announce."""
+    monkeypatch.setattr(
+        "bibr.local.cli.run_config._preflight_ocr_runtime",
+        lambda config: "No local OCR runtime can start on this machine for PDF input",
+    )
+    _stub_chew_many(monkeypatch)
+    args = _build_parser().parse_args(["batch", str(_pdf(tmp_path)), "--out", str(tmp_path / "o")])
+
+    assert _run_batch(args) == 1
+    assert keyless == []
+
+
+def _remote_dry_run(tmp_path, *flags):
+    return _build_parser().parse_args(
+        [
+            "batch",
+            str(_pdf(tmp_path)),
+            "--out",
+            str(tmp_path / "out"),
+            "--dry-run",
+            "--serve-url",
+            "http://serve:8000/",
+            "--token",
+            "t0k",
+            *flags,
+        ]
+    )
+
+
+@pytest.mark.parametrize("flag", ["--fast", "--full"])
+def test_remote_batch_sends_the_run_mode_as_a_form_field(tmp_path, capsys, monkeypatch, flag):
+    """The serve takes a mode per request, so the flag is sent and not reported as ignored."""
+    monkeypatch.delenv("AUTH_API_KEY", raising=False)
+
+    assert _run_batch(_remote_dry_run(tmp_path, flag)) == 0
+
+    captured = capsys.readouterr()
+    assert f"mode={flag[2:]}" in captured.out
+    assert flag not in captured.err
+
+
+def test_remote_batch_without_a_mode_flag_leaves_the_mode_to_the_serve(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.delenv("AUTH_API_KEY", raising=False)
+
+    assert _run_batch(_remote_dry_run(tmp_path)) == 0
+
+    assert "mode=" not in capsys.readouterr().out
+
+
+def test_remote_batch_still_warns_that_no_llm_is_ignored(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("AUTH_API_KEY", raising=False)
+
+    assert _run_batch(_remote_dry_run(tmp_path, "--no-llm")) == 0
+
+    assert "--no-llm" in capsys.readouterr().err
+
+
+def test_batch_refuses_a_model_override_that_does_not_exist(tmp_path, monkeypatch, capsys):
+    from bibr.config import Settings
+
+    monkeypatch.setattr("bibr.local.cli._opencv_unavailable_reason", lambda: None)
+    monkeypatch.setattr("bibr.local.cli.run_config._preflight_ocr_runtime", lambda config: None)
+    # The front-role classifier is the one model a --no-llm run on a PDF asks.
+    monkeypatch.setattr(Settings.ml, "front_role_model_id", str(tmp_path / "no-front-role"))
+    pdf = _pdf(tmp_path)
+    out = tmp_path / "out"
+    args = _build_parser().parse_args(["batch", str(pdf), "--out", str(out), "--no-llm"])
+    assert _run_batch(args) == 1
+    err = " ".join(capsys.readouterr().err.split())
+    assert "Model override problem: ML_FRONT_ROLE_MODEL_ID=" in err
+    assert not out.exists()
+    # A --no-llm run extracts no references: a stale parser setting does not block it,
+    # and one warning says so.
+    monkeypatch.setattr(Settings.ml, "front_role_model_id", None)
+    monkeypatch.setattr(Settings, "NER_PARSER_CKPT", str(tmp_path / "no-parser"))
+    monkeypatch.setattr("bibr.batch.runner.open_chew_many", lambda local: _no_pipeline())
+    args = _build_parser().parse_args(
+        ["batch", str(pdf), "--out", str(out), "--no-llm", "--dry-run"]
+    )
+    assert _run_batch(args) == 0
+    err = " ".join(capsys.readouterr().err.split())
+    assert "Model override problem" not in err
+    assert err.count("Model override: NER_PARSER_CKPT=") == 1
+    assert "--no-llm extracts no references" in err
+
+
+def _no_pipeline():
+    raise AssertionError("dry-run must not open a pipeline")

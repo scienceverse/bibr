@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from bibr.input.pdf_outline import OutlineItem
+    from bibr.utils.link_targets import LinkTargets
 
 from bibr.input.consolidate_text import fix_ocr_artifacts
 from bibr.ocr.ref_patterns import (
@@ -59,7 +60,7 @@ from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.structure.assembler import DocumentAssembler
 from bibr.structure.caption_continuations import find_caption_continuations
 from bibr.structure.carry_over_manager import CarryOverState
-from bibr.structure.float_labels import LABEL, SUPPLEMENT_WORD
+from bibr.structure.float_labels import LABEL, OTHER_FIGURE_WORD, OTHER_TABLE_WORD, SUPPLEMENT_WORD
 from bibr.structure.floats_normalize import (
     merge_figure_panels_with_remap,
     merge_table_continuations_with_remap,
@@ -103,8 +104,6 @@ LABEL_TREATMENT: dict[str, str] = {
     "vision_footnote": "footnote",
     # tables → PaperTable (markdown → DataFrame)
     "table": "table",
-    # table captions (not produced by PP-DocLayoutV3, kept for compat)
-    "table_title": "table_caption",
     # formulas → wrap in $$...$$ and treat as body text
     "display_formula": "formula",
     "inline_formula": "formula",
@@ -115,9 +114,7 @@ LABEL_TREATMENT: dict[str, str] = {
     "image": "figure",
     # captions — figure_title is the only caption label PP-DocLayoutV3
     # produces; smart-routed to figure or table handler based on content.
-    # chart_title kept for compat (not produced by PP-DocLayoutV3).
     "figure_title": "caption",
-    "chart_title": "caption",
     # structural → metadata (headers/footers)
     "header": "structural",
     "footer": "structural",
@@ -132,6 +129,10 @@ LABEL_TREATMENT: dict[str, str] = {
 # header misclassified as body text repeats verbatim across pages; demoting it
 # keeps page furniture out of section content (notably the References block).
 _BODY_TEXT_LABELS: frozenset[str] = frozenset({"text", "content", "vertical_text"})
+
+# Layout labels of reference entries and lists: their text gets the line-break repairs that
+# are written for a printed reference (see ``fix_ocr_artifacts``).
+_REFERENCE_LABELS: frozenset[str] = frozenset({"reference", "reference_content"})
 
 # Max normalized length of a body region treated as a candidate running
 # header. Furniture (banners, footers, watermarks) is short; a real paragraph
@@ -242,20 +243,22 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
     # loose caption discriminator (MediaHandlersMixin._handle_caption), so it
     # stays on PDFParser and the mixins reach it via ``self``.
     _TABLE_CAPTION_RE = re.compile(
-        rf"^({SUPPLEMENT_WORD}?Table\s+{LABEL}\s*(?:[:–\-—|]|\.(?!\d)).*)$",
+        rf"^({SUPPLEMENT_WORD}?(?:Table|{OTHER_TABLE_WORD})\s+{LABEL}\s*(?:[:–\-—|]|\.(?!\d)).*)$",
         re.IGNORECASE | re.DOTALL,
     )
     _FIGURE_CAPTION_RE = re.compile(
-        rf"^({SUPPLEMENT_WORD}?(?:Figure\s+|Fig\.\s*|Fig\s+){LABEL}\s*(?:[:–\-—|]|\.(?!\d)).*)$",
+        rf"^({SUPPLEMENT_WORD}?(?:Figure\s+|Fig\.\s*|Fig\s+|{OTHER_FIGURE_WORD}\s+){LABEL}"
+        r"\s*(?:[:–\-—|]|\.(?!\d)).*)$",
         re.IGNORECASE | re.DOTALL,
     )
 
     # Loose discriminator used ONLY on regions the layout model already labelled
-    # as a caption (figure_title/chart_title).  No separator required — some
+    # as a caption (figure_title).  No separator required — some
     # backends emit "Table 1 Overview" (space) or "Table 1 | Overview" (pipe).
     # Any printed label counts, so "Table S1" is routed to the tables too.
     _LOOSE_TABLE_CAPTION_RE = re.compile(
-        rf"^{SUPPLEMENT_WORD}?Table\s+(?:{LABEL}|contin(?:ued|uation)\b)", re.IGNORECASE
+        rf"^{SUPPLEMENT_WORD}?(?:Table|{OTHER_TABLE_WORD})\s+(?:{LABEL}|contin(?:ued|uation)\b)",
+        re.IGNORECASE,
     )
 
     def __init__(
@@ -265,6 +268,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         *,
         settings=None,
         first_page_index: int = 0,
+        link_targets: "LinkTargets | None" = None,
     ) -> None:
         from bibr.config import snapshot_settings
 
@@ -278,6 +282,9 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         # :meth:`_is_front_page` instead, so "front page" is threaded once
         # rather than re-derived from an absolute index in five places.
         self._first_page_index = max(0, first_page_index)
+        # The targets of the PDF's link annotations: a line break one of them runs
+        # through is inside a printed link and joins with no space.
+        self._link_targets = link_targets or None
         # Normalize to the typed Region IR at entry: the pipeline hands over
         # OcrRegionResult objects; dict pages (frozen eval JSONs, hand-built
         # fixtures) go through the wire-format adapter.
@@ -841,7 +848,11 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 native_label = region.native_label
                 label = region.label
                 effective = native_label if native_label in LABEL_TREATMENT else label
-                clean_content = fix_ocr_artifacts(region.content)
+                clean_content = fix_ocr_artifacts(
+                    region.content,
+                    reference=effective in _REFERENCE_LABELS,
+                    links=self._link_targets,
+                )
                 self._clean_region_content[(page_idx, region_idx)] = clean_content
                 content = clean_content.strip()
                 if not content:
@@ -1146,7 +1157,11 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         regions.extend(self.json_result[part_page][part_idx] for part_page, part_idx in parts)
         # Joined as lines, so a word wrapped across the columns is mended like
         # any line wrap.
-        joined = fix_ocr_artifacts("\n".join(region.content.strip() for region in regions))
+        joined = fix_ocr_artifacts(
+            "\n".join(region.content.strip() for region in regions),
+            reference=False,
+            links=self._link_targets,
+        )
         boxes = [box for region in regions if (box := bbox_to_tuple(region.bbox_2d)) is not None]
         if boxes:
             bbox = [
@@ -1158,13 +1173,9 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         return joined, bbox
 
     def _process_page(
-        self, regions: list[OcrRegionResult], page_number: int, page_idx: int = -1
+        self, regions: list[OcrRegionResult], page_number: int, page_idx: int
     ) -> None:
-        """Process all regions on a single page."""
-        # ``page_idx`` defaults to -1 for backwards compatibility with any
-        # external caller; the running-header lookup uses the 0-based index.
-        if page_idx < 0:
-            page_idx = page_number - 1
+        """Process all regions on a single page (``page_idx`` is its 0-based index)."""
         for region_idx, region in enumerate(regions):
             if region.page_w and region.page_h and page_number not in self.page_sizes:
                 self.page_sizes[page_number] = (region.page_w, region.page_h)
@@ -1183,7 +1194,12 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             key = (page_idx, region_idx)
             content = self._clean_region_content.get(key)
             if content is None:
-                content = fix_ocr_artifacts(region.content)
+                effective = native_label if native_label in LABEL_TREATMENT else label
+                content = fix_ocr_artifacts(
+                    region.content,
+                    reference=effective in _REFERENCE_LABELS,
+                    links=self._link_targets,
+                )
                 self._clean_region_content[key] = content
             bbox = region.bbox_2d
 
@@ -1221,6 +1237,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 estimated_line_height=est_lh,
                 source=("text_layer" if region.native_text_used else "ocr") if content else None,
                 ocr_backend=(region.ocr_consensus or {}).get("chosen_backend"),
+                read_as=region.text_layer_kind,
                 native_text_edge_cut=bool(region.native_text_used and region.native_text_edge_cut),
             )
             self.region_summaries.append(region_summary)
@@ -1320,7 +1337,13 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 )
 
             elif treatment == "formula":
-                self._handle_formula(content, page_number, bbox, region_meta=region_meta)
+                self._handle_formula(
+                    content,
+                    page_number,
+                    bbox,
+                    region_meta=region_meta,
+                    plain_text=region.formula_source == "text_layer",
+                )
 
             elif treatment == "table":
                 # A full-width table may sit below a two-column sentence whose

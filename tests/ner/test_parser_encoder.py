@@ -137,6 +137,7 @@ def test_explicit_encoder_setting_reaches_refparser(monkeypatch):
         "bibr.utils.ml_runtime.resolve_runtime", lambda *a, **k: ("torch", None), raising=True
     )
     monkeypatch.setattr(parser_mod, "RefParser", lambda ckpt, **k: seen.update(k) or "parser")
+    monkeypatch.setattr("bibr.ner.checkpoint.has_torch_checkpoint", lambda *a: True)
     settings = SimpleNamespace(NER_PARSER_ENCODER="org/enc", NER_PARSER_ENCODER_REVISION=SHA)
 
     assert runtime.load_ref_parser("org/parser", revision="r", settings=settings) == "parser"
@@ -179,3 +180,29 @@ def test_model_fetches_custom_encoder_code_at_the_config_revision(monkeypatch, t
     # Without code_revision, from_config would fetch the modeling code from `main`.
     expected = {"trust_remote_code": True, "code_revision": SHA} if trust else {}
     assert seen["from_config"] == ("cfg", expected)
+
+
+def test_a_parser_without_a_torch_checkpoint_is_known_before_the_torch_load(tmp_path, monkeypatch):
+    from bibr.ner.checkpoint import has_torch_checkpoint
+
+    (tmp_path / "onnx").mkdir()
+    (tmp_path / "onnx" / "model.onnx").write_bytes(b"")
+    assert has_torch_checkpoint(tmp_path) is False
+    (tmp_path / "best.pt").write_bytes(b"")
+    assert has_torch_checkpoint(tmp_path) is True
+    assert has_torch_checkpoint(tmp_path / "best.pt") is True
+    assert has_torch_checkpoint("org/parser:best.pt") is True
+
+    import huggingface_hub
+
+    monkeypatch.setattr("bibr.ner.checkpoint._local_snapshot_dir", lambda repo, rev: None)
+    monkeypatch.setattr(
+        huggingface_hub, "list_repo_files", lambda repo, revision=None: ["onnx/model.onnx"]
+    )
+    assert has_torch_checkpoint("org/parser-v7", SHA) is False
+
+    def unreachable(repo, revision=None):
+        raise OSError("the Hub cannot be reached")
+
+    monkeypatch.setattr(huggingface_hub, "list_repo_files", unreachable)
+    assert has_torch_checkpoint("org/parser-v7", SHA) is True  # the torch load says why

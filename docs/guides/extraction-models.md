@@ -40,7 +40,10 @@ build. Speculative decoding needs more and is off in these default plans (see
 `bibr setup` writes the default for your card to `.env`. `--llm local` without
 setup resolves the same default from the card it detects: the model, the
 runtime, the memory mode and the OCR (a test checks that the two agree on every
-row). The one exception is a 10–11 GB card where setup finds a CUDA build of
+row). The memory mode is the one thing setup shows without writing it: bibr
+chooses it for each run, so a run with another `--llm` or `--ocr`, or under a
+container's memory limit, gets the mode that fits it. Set
+`PIPELINE_MEMORY_MODE` to hold every run to one mode. The one exception is a 10–11 GB card where setup finds a CUDA build of
 llama.cpp ([below](#on-10-and-11-gb-cards)): setup looks on your PATH, the runtime
 never does. A card that reports up to 0.25 GiB under a size counts as that size (an
 RTX 4060 reports 8,188 MiB, an RTX 5070 12,227 MiB).

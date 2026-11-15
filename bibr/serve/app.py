@@ -21,6 +21,7 @@ on by default and independently toggleable.
 import functools
 import json
 import logging
+import os
 import time
 import uuid
 from pathlib import Path
@@ -40,45 +41,71 @@ _CLASSIFIER_CHECK_RETRY_SECONDS = 30.0
 #: request cost two OCR requests and the store pings.
 _READINESS_PROBE_TTL_SECONDS = 2.0
 
+#: The ``ocr`` check of a deployment on the text-layer route, which has no OCR
+#: server: nothing was probed, so it does not say ``ok``.
+_TEXT_LAYER_OCR_CHECK = "not_used (text layer)"
 
-def classifier_artifact_readiness(settings, *, snapshot_download=None) -> tuple[str, bool]:
-    """Verify configured classifier snapshots exist locally without downloading."""
+
+def classifier_artifact_readiness(
+    settings, *, snapshot_download=None, fast: bool = False
+) -> tuple[str, bool]:
+    """Verify configured classifier snapshots exist locally without downloading.
+
+    A fast deployment (``fast=True``) also needs the front-matter tagger, which
+    reads the title, authors and abstract there, so its bundle is checked too,
+    and first. Nothing stands in for it: without the bundle every paper comes
+    back with those fields empty, so a fast deployment that cannot find a
+    configured tagger is not ready, whatever ``ML_CLASSIFIERS_REQUIRED`` says
+    (``bibr chew --fast`` stops for the same reason). A null
+    ``ML_FRONT_TAGGER_MODEL_ID`` is a choice to serve without the tagger and is
+    not checked.
+    """
     if snapshot_download is None:
         from huggingface_hub import snapshot_download
 
-    configured = (
-        (
-            settings.ml.paper_classifier_model_id,
-            settings.ml.paper_classifier_revision,
-        ),
-        (
-            settings.ml.section_classifier_model_id,
-            settings.ml.section_classifier_revision,
-        ),
-    )
-    try:
-        for model_id, revision in configured:
-            if not model_id:
-                continue
-            # A local directory or file counts as present when the
-            # configured runtime could load from it (resolve_runtime)
-            # without loading any model: torch loads the directory
-            # itself, so the ONNX bundle is required only when
-            # ML_RUNTIME=onnx. snapshot_download rejects
-            # filesystem paths outright, so without this a baked-in
-            # classifier is reported missing. Local-only: no Hub access,
-            # so this never slows the readiness probe.
-            if Path(str(model_id)).expanduser().exists():
-                from bibr.utils.ml_runtime import find_onnx_bundle, resolve_runtime
+    def present(model_id, revision, *, onnx_only: bool) -> None:
+        """Raise when the model is not available locally."""
+        # A local directory or file counts as present when the
+        # configured runtime could load from it (resolve_runtime)
+        # without loading any model: torch loads the directory
+        # itself, so the ONNX bundle is required only when
+        # ML_RUNTIME=onnx. snapshot_download rejects
+        # filesystem paths outright, so without this a baked-in
+        # classifier is reported missing. Local-only: no Hub access,
+        # so this never slows the readiness probe.
+        if Path(str(model_id)).expanduser().exists():
+            from bibr.utils.ml_runtime import find_onnx_bundle, resolve_runtime
 
-                resolve_runtime(
-                    "classifier",
-                    settings=settings,
-                    bundle=functools.partial(find_onnx_bundle, model_id, revision),
-                    bundle_hint="publish an onnx/ bundle or run a torch runtime",
-                )
-                continue
-            snapshot_download(model_id, revision=revision, local_files_only=True)
+            if onnx_only:
+                # The tagger has no torch form: only an onnx/ bundle will load.
+                if find_onnx_bundle(model_id, revision) is None:
+                    raise FileNotFoundError(model_id)
+                return
+            resolve_runtime(
+                "classifier",
+                settings=settings,
+                bundle=functools.partial(find_onnx_bundle, model_id, revision),
+                bundle_hint="publish an onnx/ bundle or run a torch runtime",
+            )
+            return
+        snapshot_download(model_id, revision=revision, local_files_only=True)
+
+    if fast and settings.ml.front_tagger_model_id:
+        try:
+            present(
+                settings.ml.front_tagger_model_id,
+                settings.ml.front_tagger_revision,
+                onnx_only=True,
+            )
+        except Exception:  # noqa: BLE001 - readiness reports missing/corrupt cache
+            return ("failed_required", False)
+    try:
+        for model_id, revision in (
+            (settings.ml.paper_classifier_model_id, settings.ml.paper_classifier_revision),
+            (settings.ml.section_classifier_model_id, settings.ml.section_classifier_revision),
+        ):
+            if model_id:
+                present(model_id, revision, onnx_only=False)
     except Exception:  # noqa: BLE001 - readiness reports missing/corrupt cache
         if settings.ml.classifiers_required:
             return ("failed_required", False)
@@ -103,7 +130,12 @@ def _request_metering_line(
 
 
 def readiness_payload(
-    status: str, checks: dict[str, str], settings, *, include_detail: bool = True
+    status: str,
+    checks: dict[str, str],
+    settings,
+    *,
+    include_detail: bool = True,
+    mode: str | None = None,
 ) -> dict[str, object]:
     """Build the readiness body.
 
@@ -111,14 +143,18 @@ def readiness_payload(
     health and the deployment ``build_sha`` are disclosed only to authenticated
     callers — anonymous callers get just the overall status (audit L1). Probes
     rely on the HTTP status code, not the body, so nothing operational is lost.
+    The deployment's run ``mode`` (fast or full) is detail of the same kind.
     """
     if not include_detail:
         return {"status": status}
-    return {
+    payload: dict[str, object] = {
         "status": status,
         "checks": checks,
         "build_sha": settings.BIBR_BUILD_SHA,
     }
+    if mode is not None:
+        payload["mode"] = mode
+    return payload
 
 
 # Metering records (one JSON line each) go through ``bibr.serve.logsetup``; the
@@ -144,6 +180,23 @@ def _safe_cors_credentials(origins: list[str], allow_credentials: bool) -> bool:
         )
         return False
     return allow_credentials
+
+
+def _check_model_overrides(settings) -> None:
+    """Refuse to start when a model override's local files cannot be used."""
+    from bibr.run_mode import fast_settings
+    from bibr.utils.model_overrides import check_model_overrides
+
+    problems: list[str] = []
+    for effective in (settings, fast_settings(settings)):
+        found, _warnings = check_model_overrides(effective, load=False)
+        problems.extend(line for line in found if line not in problems)
+    if problems:
+        from bibr.exceptions import ConfigurationError
+
+        raise ConfigurationError(
+            "Model override problem: " + "; ".join(problems), problems=problems
+        )
 
 
 def _compose_lifespan_cleanup(app, cleanup) -> None:
@@ -217,6 +270,28 @@ def _build_server(upload_stores):
     # Fail fast on misconfigured production deployments (missing Redis
     # password / API key, wildcard CORS) before any model loads.
     validate_production_settings(Settings)
+
+    # An explicit full mode (--full, PIPELINE_MODE=full) with no LLM would answer
+    # every request with a credential error. Auto never gets here: with no LLM
+    # it is fast.
+    from bibr.run_mode import llm_configured, resolve_mode
+
+    if resolve_mode(Settings, backend="cloud") == "full" and not llm_configured(
+        Settings, backend="cloud"
+    ):
+        from bibr.exceptions import ConfigurationError
+
+        raise ConfigurationError(
+            "bibr serve was told to run in full mode, but no LLM is configured. "
+            "Set LLM_API_KEY (or a provider, model and base URL), or run in fast mode "
+            "(bibr serve --fast, PIPELINE_MODE=fast), which needs none."
+        )
+
+    # A model setting changed from its default whose local files are missing or
+    # wrong would fail every request (bibr.utils.model_overrides). The workers
+    # load the models, so only the files are checked here, for full and fast
+    # requests alike; a model that fails later answers model_override_failed.
+    _check_model_overrides(Settings)
 
     # The outer body cap is the file limit plus multipart headroom — except that the
     # MCP endpoint carries its file base64-encoded inside a JSON-RPC body, so with
@@ -410,8 +485,8 @@ def _build_server(upload_stores):
 
                 raise ConfigurationError(
                     "MCP_ENABLED=true requires the optional 'mcp' dependency — install "
-                    "it with 'uv sync --extra mcp' (source checkout) or "
-                    "pip install 'bibr[mcp]'."
+                    "it with: uv tool install 'bibr[mcp]' "
+                    "(in a source checkout: uv sync --extra mcp)."
                 ) from e
             raise
         mount_mcp(
@@ -459,8 +534,9 @@ def _register_readiness_route(server, Settings) -> None:
 
     Layout/segmenter readiness is covered by LitServe's own worker lifecycle
     (requests simply queue until workers are ready), so this only probes
-    external dependencies: the SGLang OCR server, Redis (when the cache is
-    enabled), and the shared job store (when ``JOBS_STORE=redis``).
+    external dependencies: the OCR server (unless the deployment reads the
+    text layer, see ``serve_ocr_route``), Redis (when the cache is enabled),
+    and the shared job store (when ``JOBS_STORE=redis``).
     """
     import asyncio
     import json
@@ -470,15 +546,23 @@ def _register_readiness_route(server, Settings) -> None:
 
     from bibr.ocr.http_security import normalize_ocr_base_url, ocr_request_headers
     from bibr.ocr.profiles import GLM_SERVED_MODEL_ALIAS
+    from bibr.ocr.registry import TEXT_LAYER_BACKEND
+    from bibr.run_mode import resolve_mode
     from bibr.serve.auth import check_bearer
-    from bibr.serve.pipeline import serve_ocr_defaults
+    from bibr.serve.pipeline import serve_ocr_defaults, serve_ocr_route
 
-    ocr_base_url = normalize_ocr_base_url(Settings.OCR_BASE_URL)
-    ocr_headers = ocr_request_headers(
-        ocr_base_url,
-        Settings.ocr.api_key,
-        allow_insecure_http=Settings.ocr.allow_insecure_http,
-    )
+    # A deployment on the text-layer route has no OCR server to probe, and
+    # whatever OCR_BASE_URL holds there is neither validated nor contacted.
+    text_layer_route = serve_ocr_route(Settings) == TEXT_LAYER_BACKEND
+    ocr_base_url = ""
+    ocr_headers: dict[str, str] = {}
+    if not text_layer_route:
+        ocr_base_url = normalize_ocr_base_url(Settings.OCR_BASE_URL)
+        ocr_headers = ocr_request_headers(
+            ocr_base_url,
+            Settings.ocr.api_key,
+            allow_insecure_http=Settings.ocr.allow_insecure_http,
+        )
     # The served-model alias extraction requires on /v1/models — the same
     # alias ServePipeline asks the server for, so /ready fails while the
     # server is still loading it or serves a different name.
@@ -516,6 +600,15 @@ def _register_readiness_route(server, Settings) -> None:
         """Check OCR, Redis and the job store: the probes that cost requests."""
         checks: dict[str, str] = {}
         check_results: list[bool] = []
+        if text_layer_route:
+            checks["ocr"] = _TEXT_LAYER_OCR_CHECK
+            check_results.append(True)
+        else:
+            await _probe_ocr(checks, check_results)
+        await _probe_stores(checks, check_results)
+        return checks, check_results
+
+    async def _probe_ocr(checks: dict[str, str], check_results: list[bool]) -> None:
         client = await _get_http_client()
         try:
             resp = await client.get(f"{ocr_base_url}/health")
@@ -556,6 +649,7 @@ def _register_readiness_route(server, Settings) -> None:
             checks["ocr"] = "unreachable"
             check_results.append(False)
 
+    async def _probe_stores(checks: dict[str, str], check_results: list[bool]) -> None:
         cache = await _get_cache()
         if cache is not None:
             try:
@@ -582,7 +676,6 @@ def _register_readiness_route(server, Settings) -> None:
                 logger.warning("Readiness job-store check failed", exc_info=True)
                 checks["jobs_store"] = "error"
                 check_results.append(False)
-        return checks, check_results
 
     async def _refresh_services() -> tuple[dict[str, str], list[bool]]:
         result = await _probe_services()
@@ -627,7 +720,13 @@ def _register_readiness_route(server, Settings) -> None:
                 and time.monotonic() - classifier_checked_at >= _CLASSIFIER_CHECK_RETRY_SECONDS
             )
         ):
-            classifier_check = await asyncio.to_thread(classifier_artifact_readiness, Settings)
+            classifier_check = await asyncio.to_thread(
+                functools.partial(
+                    classifier_artifact_readiness,
+                    Settings,
+                    fast=resolve_mode(Settings, backend="cloud") == "fast",
+                )
+            )
             state["classifier_check"] = classifier_check
             state["classifier_check_at"] = time.monotonic()
         classifier_status, classifier_ok = classifier_check
@@ -639,7 +738,13 @@ def _register_readiness_route(server, Settings) -> None:
         status = "ready" if all_ok else "not_ready"
         return Response(
             content=json.dumps(
-                readiness_payload(status, checks, Settings, include_detail=include_detail)
+                readiness_payload(
+                    status,
+                    checks,
+                    Settings,
+                    include_detail=include_detail,
+                    mode=resolve_mode(Settings, backend="cloud"),
+                )
             ),
             media_type="application/json",
             status_code=200 if all_ok else 503,
@@ -660,12 +765,48 @@ def main():
     parser.add_argument(
         "--port", type=int, default=8000, help="Port to bind to (default: %(default)s)"
     )
+    run_mode = parser.add_mutually_exclusive_group()
+    run_mode.add_argument(
+        "--fast",
+        action="store_true",
+        help="Serve in fast mode: no LLM call and no API key, local models only "
+        "(PIPELINE_MODE=fast). This is what a server with no LLM configured does by default. "
+        "A request's mode field can still ask for full where an LLM is configured.",
+    )
+    run_mode.add_argument(
+        "--full",
+        action="store_true",
+        help="Serve in full mode: the configured LLM reads what the local models are unsure of "
+        "(PIPELINE_MODE=full). Refuses to start with no LLM configured.",
+    )
+    parser.add_argument(
+        "--ocr",
+        choices=["text-layer"],
+        help="text-layer: read each PDF's own text layer and contact no OCR server "
+        "(OCR_BACKEND=text-layer). Born-digital PDFs only: a scanned PDF is refused with the "
+        "code scan_needs_ocr. A fast server with none of OCR_BACKEND, OCR_MODEL, OCR_PROFILE "
+        "and OCR_BASE_URL set does this by default. An OCR server is chosen with OCR_BASE_URL.",
+    )
 
     args = parser.parse_args()
+
+    # The workers (a fresh interpreter each) read the mode from the environment.
+    chosen_mode = "fast" if args.fast else "full" if args.full else None
+    if chosen_mode:
+        os.environ["PIPELINE_MODE"] = chosen_mode
+    if args.ocr:
+        os.environ["OCR_BACKEND"] = args.ocr
 
     from bibr.config import Settings
     from bibr.serve.auth import validate_bind_auth
     from bibr.serve.logsetup import configure_serve_logging, install_litserve_logging_hook
+
+    if chosen_mode:
+        # Settings may have been built before the flag was parsed; the master's
+        # own copy follows the flag too.
+        Settings.pipeline.mode = chosen_mode
+    if args.ocr:
+        Settings.ocr.backend = args.ocr
 
     # The CLI's own logging setup never runs for `serve`; install the serve sink
     # first so every warning below (and every bibr.* record) is formatted and
@@ -676,6 +817,15 @@ def main():
     validate_bind_auth(args.host, Settings.auth.api_key)
 
     server = build_server()
+    from bibr.serve.pipeline import SERVE_HTTP_BACKEND, serve_ocr_route
+
+    if serve_ocr_route(Settings) == SERVE_HTTP_BACKEND:
+        logger.info("OCR route: the OCR server at OCR_BASE_URL")
+    else:
+        logger.info(
+            "OCR route: text layer (no OCR server; a scanned PDF is refused). "
+            "Set OCR_BASE_URL to send regions to an OCR server instead."
+        )
     logger.info("bibr serving on %s:%d", args.host, args.port)
 
     # Upload-root ownership, dispatch tracking, admission, readiness state, and

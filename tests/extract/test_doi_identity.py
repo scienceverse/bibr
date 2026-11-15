@@ -954,9 +954,10 @@ def test_structured_article_doi_wins_over_component_dois_in_body_text():
     assert selection.selected is not None
     assert selection.selected.normalized == "10.7554/elife.00013"
     assert selection.selected.source_kind == "structured_metadata"
-    # A DOI label in the body, outside the front matter, marks a cited or
-    # component DOI: it no longer ties with the article's own.
-    assert {c.selection_tier for c in selection.candidates if c.source_kind == "sentence"} == {1}
+    # eLife's numbered DOIs are components: they never tie with the article's own.
+    assert {c.rejection_reason for c in selection.candidates if c.source_kind == "sentence"} == {
+        "component_candidate"
+    }
     assert selection.issues == ()
 
 

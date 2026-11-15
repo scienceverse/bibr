@@ -284,7 +284,7 @@ def abstract_text(source: str, span: AbstractSpan) -> str:
         ):
             continue
         kept.append(_without_repeat(kept[-1], block) if kept else block)
-    text = fix_ocr_artifacts(_WRAP_HYPHEN_RE.sub("-", "\n".join(kept)))
+    text = fix_ocr_artifacts(_WRAP_HYPHEN_RE.sub("-", "\n".join(kept)), reference=False)
     return _ODD_SPACE_RE.sub(" ", text).strip()
 
 

@@ -25,7 +25,7 @@ class FieldState(StrEnum):
     ABSENT = "absent"  # the extractor ran and found none
     ABSTAINED = "abstained"  # the extractor declined to choose between candidates
     FAILED = "failed"  # the step that produces it failed; the value is missing
-    NOT_ATTEMPTED = "not_attempted"  # the run did not try (no LLM, references off)
+    NOT_ATTEMPTED = "not_attempted"  # the run did not try (no LLM, fast mode, references off)
 
 
 # Export name of each tracked field: a ``metadata`` key, or a root table.
@@ -49,6 +49,9 @@ _FRONT_MATTER_FIELDS = frozenset(
 )
 # Produced by LLM calls unless the input declares them (JATS, HTML meta tags).
 _LLM_FIELDS = _FRONT_MATTER_FIELDS | {"funding"}
+# Read by the front-matter tagger of a fast run. The paper type is not: the
+# paper classifier decides it.
+_TAGGER_FIELDS = frozenset({"title", "author", "abstract", "keywords", "published", "journal"})
 
 # Codes whose presence means a field's producing step failed.
 _FAILURE_CODES: Mapping[str, frozenset[str]] = {
@@ -56,9 +59,19 @@ _FAILURE_CODES: Mapping[str, frozenset[str]] = {
     "AUTHORS_LLM_FAILED": frozenset({"author"}),
     "PAPER_CLASSIFICATION_FAILED": frozenset({"paper_type"}),
     "RESEARCH_INTEGRITY_LLM_FAILED": frozenset({"funding"}),
+    "FRONT_TAGGER_UNAVAILABLE": _TAGGER_FIELDS,
     "VAL_REFERENCES_INCOMPLETE": frozenset({"bib"}),
     "REF_SEG_FAILED": frozenset({"bib"}),
 }
+# Codes whose presence means the run did not try a field. A fast run made no
+# LLM call, so it parsed no structured funding; an input with no page layout
+# gave the tagger nothing to read.
+_NOT_ATTEMPTED_CODES: Mapping[str, frozenset[str]] = {
+    "LLM_SKIPPED": frozenset({"funding"}),
+    "FRONT_MATTER_NOT_READ": _TAGGER_FIELDS,
+}
+# The rule a field's record carries when such a code, not a decision, says so.
+_NOT_ATTEMPTED_RULES: Mapping[str, str] = {"LLM_SKIPPED": "skipped_fast_mode"}
 # Codes that qualify a field's state without deciding it.
 _QUALIFYING_CODES: Mapping[str, frozenset[str]] = {
     "AUTHORS_EMPTY": frozenset({"author"}),
@@ -116,7 +129,12 @@ def _issue_fields(code: str, evidence_ids: Iterable[str]) -> frozenset[str]:
             for evidence in evidence_ids
             if evidence.startswith("field:")
         )
-    return _FAILURE_CODES.get(code) or _QUALIFYING_CODES.get(code) or frozenset()
+    return (
+        _FAILURE_CODES.get(code)
+        or _QUALIFYING_CODES.get(code)
+        or _NOT_ATTEMPTED_CODES.get(code)
+        or frozenset()
+    )
 
 
 def build_field_states(
@@ -137,10 +155,12 @@ def build_field_states(
     validation issues (``code``, ``blocking``, ``evidence_ids``) and
     *warnings* the processing warnings (``code``). A present value is always
     ``extracted``; otherwise a failure beats an abstention, which beats a step
-    the run did not attempt.
+    the run did not attempt (the scope's, or a warning that says the run
+    skipped it).
     """
     failed: dict[str, list[str]] = {field: [] for field in TRACKED_FIELDS}
     qualified: dict[str, list[str]] = {field: [] for field in TRACKED_FIELDS}
+    not_attempted: dict[str, str | None] = {}
     abstained_front_matter = False
     doi_abstained = False
     for issue in issues:
@@ -158,10 +178,22 @@ def build_field_states(
         for field in _issue_fields(code, ()):
             target = failed if code in _FAILURE_CODES else qualified
             target[field].append(code)
+            if code in _NOT_ATTEMPTED_CODES:
+                not_attempted[field] = _NOT_ATTEMPTED_RULES.get(code)
     # Structured funding is parsed from the funding statement; without one
-    # there was nothing for the failed call to parse.
+    # there was nothing for a failed call to parse, or for a skipped one to.
     if not present.get("funding_statement"):
         failed["funding"].clear()
+        if "funding" in not_attempted:
+            del not_attempted["funding"]
+            skipped = {code for code, fields in _NOT_ATTEMPTED_CODES.items() if "funding" in fields}
+            qualified["funding"] = [c for c in qualified["funding"] if c not in skipped]
+    # The funding rules read the statement without an LLM: what they found, or
+    # that they found nothing, is theirs, not a step the run skipped.
+    if sources.get("funding") == "rules" and "funding" in not_attempted:
+        del not_attempted["funding"]
+        skipped = {code for code, fields in _NOT_ATTEMPTED_CODES.items() if "funding" in fields}
+        qualified["funding"] = [c for c in qualified["funding"] if c not in skipped]
 
     sources = {**sources, **({"bib": scope.references_source} if scope.references_source else {})}
     rules = rules or {}
@@ -185,6 +217,10 @@ def build_field_states(
                 None,
                 tuple(dict.fromkeys([*codes, *([_ABSTENTION] if field != "doi" else [])])),
                 rule,
+            )
+        elif field in not_attempted:
+            records[field] = FieldRecord(
+                FieldState.NOT_ATTEMPTED, None, codes, not_attempted[field] or rule
             )
         elif (
             field in _LLM_FIELDS

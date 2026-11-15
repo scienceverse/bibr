@@ -723,3 +723,27 @@ def test_segmenter_still_raises_other_session_creation_failures(monkeypatch):
     with pytest.raises(RuntimeError, match="INVALID_PROTOBUF"):
         BaseSentenceSegmenter(model_name="sat-6l-sm", use_gpu=True)
     assert len(opened) == 1
+
+
+def test_split_many_batches_shortest_first_and_keeps_input_order():
+    """wtpsplit pads each call to its longest text, so the sub-batches hold texts of similar length;
+    the results still come back in the order the texts were given."""
+    seg = object.__new__(BaseSentenceSegmenter)
+    model = _EchoSplitModel()
+    seen: list[list[str]] = []
+
+    def split(batch, **kwargs):
+        seen.append(list(batch))
+        return [[f"s:{item}"] for item in batch]
+
+    model.split = split  # type: ignore[method-assign]
+    seg.model = model
+    seg._threshold = None
+    seg._settings = SimpleNamespace(SEGMENTER_SUB_BATCH_SIZE=2)
+    texts = ["cccc", "a", "bbb", "dd", "ee", "fffffff"]
+
+    out = seg._split_many(texts)
+
+    assert out == [[f"s:{t}"] for t in texts]
+    assert seen == [["a", "dd"], ["ee", "bbb"], ["cccc", "fffffff"]]
+    assert seg._split_many([]) == []

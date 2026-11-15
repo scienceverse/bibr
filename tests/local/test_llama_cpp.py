@@ -1705,7 +1705,7 @@ def test_pinned_registry_build_launches_from_the_downloaded_file(monkeypatch):
     server = llama_cpp.LlamaCppServer(model=_PINNED_Q8_0, port=8770, role="llm")
 
     (cmd,) = launched
-    assert cmd[cmd.index("-m") + 1] == _PINNED_Q8_0_FILE
+    assert Path(cmd[cmd.index("-m") + 1]) == Path(_PINNED_Q8_0_FILE)
     assert cmd[cmd.index("--alias") + 1] == _PINNED_Q8_0
     assert "-hf" not in cmd
     assert server.model == _PINNED_Q8_0
@@ -1729,7 +1729,7 @@ def test_conservative_retry_keeps_the_downloaded_file(monkeypatch):
     server = llama_cpp.LlamaCppServer(model=_PINNED_Q8_0, port=8770, role="llm")
 
     assert len(launched) == 2
-    assert all(cmd[cmd.index("-m") + 1] == _PINNED_Q8_0_FILE for cmd in launched)
+    assert all(Path(cmd[cmd.index("-m") + 1]) == Path(_PINNED_Q8_0_FILE) for cmd in launched)
     server._process = None
     server.shutdown()
 
