@@ -118,6 +118,21 @@ def _clear_own_doi_from_references(paper) -> int:
     return cleared
 
 
+def _apply_printed_citation(paper) -> None:
+    """Fill empty metadata from the paper's printed citation, now that its DOI is known.
+
+    Post-parse found and parsed the line (``bibr.extract.self_citation``); its
+    DOI is compared with the DOI selected here. A failure leaves the metadata
+    as extracted.
+    """
+    from bibr.extract.self_citation import apply_printed_citation
+
+    try:
+        apply_printed_citation(paper)
+    except Exception:  # noqa: BLE001 - a second source must never fail the paper
+        logger.warning("Could not apply the printed citation", exc_info=True)
+
+
 def doi_field_source(source_kind: str) -> str:
     """``extraction.fields.doi.source`` for a selected candidate's source kind."""
     return "native" if source_kind == "structured_metadata" else source_kind
@@ -169,6 +184,7 @@ class IdentityValidationStage:
                 # A scalar DOI without selected source evidence contradicts the receipt.
                 paper.metadata.doi = ""
             _clear_own_doi_from_references(paper)
+            _apply_printed_citation(paper)
 
         issues = list(selection.issues)
         if expected is not None:

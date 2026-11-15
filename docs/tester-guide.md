@@ -146,8 +146,8 @@ For the first test:
 1. Choose a cloud LLM provider, such as Anthropic (the default, with Claude
    Haiku 5.5), and enter its API key. This sends document text to that
    provider for metadata extraction.
-2. Choose `glm-llama` for OCR on this Windows machine. Setup pins `aggressive`
-   memory mode on a 6 GB GPU. Keep the default NER reference parser. Enter a Crossref email if
+2. Choose `glm-llama` for OCR on this Windows machine. On a 6 GB GPU bibr runs
+   in the `aggressive` memory mode; setup shows it and each run picks it. Keep the default NER reference parser. Enter a Crossref email if
    desired; Crossref enrichment is a separate network service.
 3. When the wizard offers to install extras, accept — `uv sync --extra all`
    already installed the relevant ones, and the install step uses
@@ -178,8 +178,8 @@ uv run bibr demo
 ```
 
 Upload a small paper and confirm that extraction starts. The demo uses the
-`.env` settings written by `bibr setup`, including `PIPELINE_MEMORY_MODE` and
-`LLM_BACKEND`. Stop the demo with `Ctrl+C` when you are done.
+`.env` settings written by `bibr setup`, including `LLM_BACKEND`, and picks its
+memory mode as `bibr chew` does. Stop the demo with `Ctrl+C` when you are done.
 
 ### 5. Run a command-line smoke test
 
@@ -398,8 +398,8 @@ Launch a local drag-and-drop interface with:
 uv run bibr demo
 ```
 
-The demo uses `PIPELINE_MEMORY_MODE` and `LLM_BACKEND` from the `.env` created
-by `bibr setup`; pass `--memory aggressive` or `--llm llama-cpp` only when you
+The demo uses `LLM_BACKEND` from the `.env` created by `bibr setup` and picks
+its memory mode from the machine (a `PIPELINE_MEMORY_MODE` you set is kept); pass `--memory aggressive` or `--llm llama-cpp` only when you
 want to override that setup for this run.
 
 Two more settings control what the demo keeps. They are process environment

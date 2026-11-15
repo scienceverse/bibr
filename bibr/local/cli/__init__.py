@@ -22,6 +22,7 @@ import os
 import signal
 import sys
 import threading
+import warnings
 from typing import NoReturn
 
 from bibr.exceptions import BibrError, ConfigurationError
@@ -123,6 +124,33 @@ __all__ = [
     "normalize_ocr_backend",
     "resolve_run_config",
 ]
+
+
+class _ShowOnceFilter(logging.Filter):
+    """Let the first record whose message contains a marker through and drop the repeats.
+
+    Hugging Face Hub warns that requests are unauthenticated once per process in
+    each library that talks to it (and per worker), so a first run printed the
+    same advice several times between the progress bars.
+    """
+
+    def __init__(self, *markers: str) -> None:
+        super().__init__()
+        self._markers = markers
+        self._shown: set[str] = set()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        for marker in self._markers:
+            if marker in message:
+                if marker in self._shown:
+                    return False
+                self._shown.add(marker)
+        return True
+
+
+#: Messages that are advice repeated by every client of a library, shown once.
+_REPEATED_ADVICE = ("unauthenticated requests",)
 
 
 class _LiveStderrHandler(logging.StreamHandler):
@@ -315,6 +343,10 @@ def _main():
     from bibr.utils.redact import install_secret_scrubbing
 
     install_secret_scrubbing(*logging.getLogger().handlers)
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(_ShowOnceFilter(*_REPEATED_ADVICE))
+    # The same advice raised as a Python warning rather than a log record.
+    warnings.filterwarnings("once", message=".*unauthenticated requests.*")
     # Always show INFO for bibr.* even without --verbose so the user sees stage
     # transitions (native-text bypass, OCR readiness) without enabling -v.
     if log_level > logging.INFO:
@@ -398,8 +430,8 @@ def _main():
                 if e.name and e.name.split(".")[0] == "mcp":
                     _print_error(
                         "bibr mcp requires the optional 'mcp' dependency — install it "
-                        "with 'uv sync --extra mcp' (source checkout) or "
-                        "pip install 'bibr[mcp]'."
+                        "with: uv tool install 'bibr[mcp]' "
+                        "(in a source checkout: uv sync --extra mcp)."
                     )
                     sys.exit(1)
                 raise

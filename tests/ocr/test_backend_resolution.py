@@ -742,3 +742,64 @@ class TestManagedServersCard:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
         assert registry._nvidia_gpu_inventory.__wrapped__() is None
+
+
+class TestOcrRouteChosen:
+    """A fast run reads the text layer unless the caller chose an OCR route.
+
+    ``ocr_route_chosen`` is the one rule the CLI and the library share: a backend, a
+    server URL, a model or a profile, given directly or set in the settings.
+    """
+
+    @staticmethod
+    def _settings(**ocr):
+        from bibr.config import GlobalSettings
+
+        return GlobalSettings(ocr=ocr)
+
+    def test_nothing_named_or_set_is_no_choice(self):
+        from bibr.ocr.registry import ocr_route_chosen
+
+        assert ocr_route_chosen(self._settings()) is False
+
+    @pytest.mark.parametrize(
+        "named",
+        [
+            {"backend": "paddle"},
+            {"url": "http://ocr.example:8080"},
+            {"model": "some/model"},
+            {"profile": "paddle"},
+        ],
+        ids=["backend", "url", "model", "profile"],
+    )
+    def test_a_route_named_directly_is_a_choice(self, named):
+        from bibr.ocr.registry import ocr_route_chosen
+
+        assert ocr_route_chosen(self._settings(), **named) is True
+
+    @pytest.mark.parametrize("field", ["backend", "model", "profile"])
+    def test_a_route_set_in_the_settings_is_a_choice(self, field):
+        from bibr.ocr.registry import ocr_route_chosen
+
+        value = {"backend": "glm-llama", "model": "some/model", "profile": "glm"}[field]
+        assert ocr_route_chosen(self._settings(**{field: value})) is True
+
+    @pytest.mark.parametrize("field", ["model", "profile"])
+    def test_a_setting_left_blank_or_null_is_not_a_choice(self, field):
+        from bibr.ocr.registry import ocr_route_chosen
+
+        assert ocr_route_chosen(self._settings(**{field: None})) is False
+        if field == "model":
+            assert ocr_route_chosen(self._settings(model="")) is False
+
+    def test_a_tuning_setting_is_not_a_choice(self):
+        from bibr.ocr.registry import ocr_route_chosen
+
+        assert ocr_route_chosen(self._settings(request_timeout=30)) is False
+
+    def test_the_scan_routes_name_the_cloud_the_gpu_server_and_the_demo(self):
+        from bibr.ocr.registry import SCAN_NEEDS_OCR_ROUTES
+
+        for route in ("--ocr anthropic", "--ocr paddle", "--ocr-url", "try.bibr.org"):
+            assert route in SCAN_NEEDS_OCR_ROUTES
+        assert "llama.cpp" not in SCAN_NEEDS_OCR_ROUTES

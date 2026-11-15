@@ -334,7 +334,7 @@ def test_vllm_mlx_serves_a_pinned_build_from_its_snapshot_under_the_hub_id(monke
 
     cmd = _vllm_mlx_launch_cmd(monkeypatch, model)
 
-    assert cmd[cmd.index("--model") + 1] == (
+    assert pathlib.Path(cmd[cmd.index("--model") + 1]) == pathlib.Path(
         "/nonexistent-hf-cache/models--scienceverse--bibr-extract-qwen35-4b-mlx-8bit/"
         "snapshots/432b8cd80ea920919ef26c48401473c6d8c8a3e1"
     )

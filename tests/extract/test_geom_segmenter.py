@@ -210,3 +210,50 @@ def test_segment_spans_labeled_count_survives_collapsed_alignment(tmp_path):
     assert labeled == 2  # GBM still labels both boundary lines B-REF
     assert aligned == 1  # only the first boundary line locates in the text
     assert len(spans) == 1
+
+
+# --- An author list left open at a line break ---
+
+
+@pytest.mark.parametrize("ending", ["Ware, J. J., &", "Ware, J. J., and", "Ware, J. J., & "])
+def test_line_after_an_open_author_list_is_not_a_boundary(tmp_path, ending):
+    bundle = tmp_path / "geom_segmenter.joblib"
+    _train_tiny_bundle(bundle)
+    seg = GeomSegmenter(str(bundle))
+    seg.model = _FakeModel([0.9, 0.1, 0.9])
+    lines = [
+        _ln("Novak, T. R., Ostrom, B. A.,", 72.0, y=700),
+        _ln(ending, 108.0, y=688),
+        _ln("Ibarra, J. P. A. (2017). A charter for open methods.", 108.0, y=676),
+    ]
+
+    labels, probs = seg._predict(lines)
+
+    assert labels == ["B-REF", "I-REF", "I-REF"]
+    assert probs == [0.9, 0.1, 0.9]  # the rule must not alter confidence
+
+
+@pytest.mark.parametrize(
+    "ending",
+    [
+        # A DOI can end in "-y", which a bare \by connector takes for Spanish "y".
+        "https://doi.org/10.1000/abc-0035-y",
+        "Brand",
+        "Springer-et",
+        "Journal of Tests, 12(3), 101-110.",
+    ],
+)
+def test_line_after_a_complete_line_can_still_be_a_boundary(tmp_path, ending):
+    bundle = tmp_path / "geom_segmenter.joblib"
+    _train_tiny_bundle(bundle)
+    seg = GeomSegmenter(str(bundle))
+    seg.model = _FakeModel([0.9, 0.1, 0.9])
+    lines = [
+        _ln("Novak, T. R. (2015). An earlier finding.", 72.0, y=700),
+        _ln(ending, 108.0, y=688),
+        _ln("Ibarra, J. P. A. (2017). A charter for open methods.", 72.0, y=676),
+    ]
+
+    labels, _ = seg._predict(lines)
+
+    assert labels == ["B-REF", "I-REF", "B-REF"]

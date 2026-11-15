@@ -112,13 +112,20 @@ def _key(
 ) -> str:
     effective = _effective_settings(settings)
     layout = effective.layout
-    profile = resolve_ocr_profile(
-        explicit=identity.profile,
-        backend=identity.backend,
-        model=identity.model,
-        max_tokens=effective.ocr.generation_max_tokens,
-        temperature=effective.ocr.generation_temperature,
-    )
+    if identity.profile is None:
+        # The text-layer backend runs no model: its normalizer version names
+        # its reading rules, and a fixed profile keeps the other parts stable.
+        from bibr.ocr.profiles import GLM_PROFILE
+
+        profile = GLM_PROFILE
+    else:
+        profile = resolve_ocr_profile(
+            explicit=identity.profile,
+            backend=identity.backend,
+            model=identity.model,
+            max_tokens=effective.ocr.generation_max_tokens,
+            temperature=effective.ocr.generation_temperature,
+        )
     request = profile.request
     # The incomplete-table retry re-runs truncated Paddle tables at this
     # higher budget, but only on the transports that run it (the paddle-*
@@ -146,7 +153,7 @@ def _key(
         identity.backend,
         cfg.ocr_url or "",
         identity.model,
-        identity.profile,
+        identity.profile or "",
         identity.normalizer_version,
         f"generation_max_tokens_text={request.max_tokens_for('text')}",
         f"generation_max_tokens_table={request.max_tokens_for('table')}",
@@ -183,6 +190,12 @@ def _key(
         f"native_text_hidden={HIDDEN_TEXT_RULE}",
         "native_text_reject_invisible_layer="
         f"{int(effective.ocr.native_text_reject_invisible_layer)}",
+        # Off adds nothing, so every key written before the option stays valid.
+        *(
+            ["text_layer_read_ocr_layer=1"]
+            if effective.ocr.text_layer_read_ocr_layer is True
+            else []
+        ),
         f"outline_headings={int(effective.pipeline.outline_headings)}",
         f"ref_seg={_effective_ref_seg(cfg, effective)}",
         # Which *weights* produced the cached artifacts. A complete entry lets

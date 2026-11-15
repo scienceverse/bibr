@@ -18,6 +18,8 @@ def _defaults(monkeypatch) -> GlobalSettings:
         "LAYOUT_ONNX_REVISION",
         "NER_PARSER_REVISION",
         "ML_FRONT_ROLE_REVISION",
+        "ML_FRONT_TAGGER_MODEL_ID",
+        "ML_FRONT_TAGGER_REVISION",
         "WTPSPLIT_MODEL_REVISION",
     ):
         monkeypatch.delenv(var, raising=False)
@@ -33,6 +35,7 @@ def test_config_defaults_pin_every_hub_model(monkeypatch):
         s.layout.model_revision,
         s.layout.onnx_revision,
         s.ml.front_role_revision,
+        s.ml.front_tagger_revision,
         s.NER_PARSER_REVISION,
         s.NER_SEG_REVISION,
     ):
@@ -61,8 +64,41 @@ def test_serve_image_pins_the_torch_runtime():
     the torch one (it exists for torch.compile on layout). Leaving ML_RUNTIME unset
     would let "auto" silently move serve onto ONNX Runtime the next time it is built."""
     dockerfile = Path("Dockerfile.serve").read_text()
-    assert "ENV ML_RUNTIME=torch" in dockerfile
+    # The default stack is the torch one; the runtime the image pins is the stack's.
+    assert "ARG ML_STACK=torch" in dockerfile
+    assert "ENV ML_RUNTIME=${ML_STACK}" in dockerfile
     assert dockerfile.count("ignore_patterns=['onnx/*']") == 2
+
+
+def _dockerfile_code() -> str:
+    """Dockerfile.serve without its comment lines."""
+    lines = Path("Dockerfile.serve").read_text().splitlines()
+    return "\n".join(line for line in lines if not line.lstrip().startswith("#"))
+
+
+def test_serve_image_torch_stack_keeps_the_ml_extra_in_every_sync():
+    """The torch stack is the unchanged image: every uv sync and the lock export
+    carry --extra ml, through $ml_extra, which the ONNX stack leaves empty."""
+    code = _dockerfile_code()
+    assert 'torch) ml_extra="--extra ml"' in code
+    assert 'onnx) ml_extra=""' in code
+    assert "ML_STACK must be torch or onnx" in code
+    # Two syncs in the first RUN, two in the second, and the export; none spells the extra out.
+    assert code.count("$ml_extra") == 5
+    assert code.count("--extra ml") == 2  # the two places $ml_extra is set
+
+
+def test_serve_image_bakes_the_front_tagger_onnx_bundle_on_both_stacks():
+    """Fast mode reads the front matter with the tagger, which has no torch form: only its
+    onnx/ files are baked, from bibr's own default id and revision so a re-pin there
+    needs no edit in the image."""
+    code = _dockerfile_code()
+    assert code.count("allow_patterns=['onnx/*']") == 1
+    assert "ml.front_tagger_model_id, revision=ml.front_tagger_revision" in code
+    assert "bibr-front-tagger" not in code  # no id or revision of its own to keep in step
+    # The bake sits outside the ML_STACK branches that split the classifier downloads.
+    (bake,) = [run for run in code.split("\nRUN ") if "allow_patterns=['onnx/*']" in run]
+    assert "ML_STACK" not in bake
 
 
 def test_docs_and_dry_run_mirror_the_parser_pin():
@@ -75,3 +111,11 @@ def test_docs_and_dry_run_mirror_the_parser_pin():
     row = f"| Reference parser | `{Settings.NER_PARSER_CKPT}` | `{Settings.NER_PARSER_REVISION[:8]}` |"
     assert row in docs
     assert Settings.NER_PARSER_CKPT in _APPROX_MODEL_SIZES
+
+
+def test_docs_mirror_the_front_tagger_pin(monkeypatch):
+    """The configuration guide names the front-matter tagger bundle and its pinned commit."""
+    s = _defaults(monkeypatch)
+    docs = Path("docs/guides/configuration.md").read_text()
+    row = f"| Front-matter tagger | `{s.ml.front_tagger_model_id}` | `{s.ml.front_tagger_revision[:8]}` |"
+    assert row in docs

@@ -10,7 +10,8 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from bibr.exceptions import LlmCallError, ProcessingError
+from bibr.clients.skipped import SkippedLlmClient, is_skipped, note_skipped
+from bibr.exceptions import LlmCallError, ModelOverrideError, ProcessingError
 from bibr.field_states import FieldScope
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.semaphore import clamped_semaphore
@@ -58,11 +59,29 @@ _STRUCTURED_ABSTRACT_LABEL_RE = re.compile(
     r"|aims?(?: and objectives)?|purpose|methods?|methodology|materials and methods|design"
     r"|study design|setting|participants|patients|population studied|interventions?"
     r"|(?:main )?outcome measures?|measurements|results?|findings|conclusions?"
-    r"|conclusions? and relevance|interpretation|limitations|significance|implications)$",
+    r"|conclusions? and relevance|interpretation|limitations|significance|implications"
+    # The same labels in the languages whose part names the alias table
+    # holds: "Métodos", "Material und Methoden" or "Conclusão" in a
+    # structured abstract is the abstract's, not the body's part.
+    r"|hintergrund(?: und (?:fragestellung|zielsetzung))?|fragestellung|ziel(?:e|setzung)?"
+    r"|objetivos?|contexto|antecedentes|objectifs?|contexte|obiettiv[oi]|цель(?: исследования)?"
+    r"|мета|cel(?: pracy| badania)?|amaç|tujuan|latar belakang|目的|背景"
+    r"|m[ée]todos?|methoden?|methodik|méthodes?|metod[io]|metodolog[íi]a|metody|metode"
+    r"|material(?:es|e)? (?:und|e|y) (?:methoden?|métodos?)|materiais e métodos"
+    r"|matériels? et méthodes?|materiali e metodi|materiał(?:y)? i metody|bahan dan metode"
+    r"|методы|материал(?:ы)? и методы|методи|матеріали (?:та|і) методи"
+    r"|yöntem(?:ler)?|gereç ve yöntem(?:ler)?|方法|材料与方法|资料与方法"
+    r"|resultados|résultats|ergebnisse|risultati|результаты|результати|wyniki|bulgular|hasil|结果"
+    r"|conclus(?:ão|ões|ión|iones|ione|ioni)|schlussfolgerung(?:en)?|fazit|выводы|заключение"
+    r"|висновки|wnioski|sonuç|kesimpulan|simpulan|结论)$",
     re.IGNORECASE,
 )
 _ABSTRACT_LABEL_MAX_SENTENCES = 8
-_ABSTRACT_CLOSE_RE = re.compile(r"^(?:\d+(?:\.\d+)*\.?\s+\S|introduction$)", re.IGNORECASE)
+_ABSTRACT_CLOSE_RE = re.compile(
+    r"^(?:\d+(?:\.\d+)*\.?\s+\S|(?:introduction|introducción|introdução|introduzione|einleitung"
+    r"|einführung|inleiding|введение|вступ|wstęp|wprowadzenie|pendahuluan|giriş|引言)$)",
+    re.IGNORECASE,
+)
 # Paper types whose body is argument, not an IMRaD report. Case studies are
 # left out: they print their methods and results like a research paper.
 _NON_IMRAD_PAPER_TYPES = frozenset({"review", "commentary"})
@@ -106,11 +125,70 @@ def _title_match_share(header: str, paper_title: str | None) -> float:
     return 0.0
 
 
+# Words that name a part, in the languages whose part names the alias table
+# holds: "Treatment Methods", "Методы лечения", "Main findings".
 _PART_WORD_RES = {
-    "intro": re.compile(r"introduc|background|antecedentes", re.IGNORECASE),
-    "method": re.compile(r"method|metodolog|métod", re.IGNORECASE),
-    "results": re.compile(r"result|finding|hallazgo", re.IGNORECASE),
+    "intro": re.compile(
+        r"introdu|background|antecedentes|einleitung|einführung|hintergrund|inleiding|введени"
+        r"|вступ|wstęp|wprowadzeni|úvod|pendahuluan|latar belakang|giriş|引言|前言|はじめに|緒言"
+        r"|서론|مقدمة"
+        # The framework and the state of research an essay builds on.
+        r"|theoretical (?:framework|background|foundations?)|conceptual framework|literature review"
+        r"|review of (?:the )?literature"
+        r"|state of the art|related work|marco teórico|referencial teórico|fundamentação teórica"
+        r"|revis[ãi][oó]n? d[aeo] (?:la )?literatura|tinjauan pustaka|kajian pustaka"
+        r"|обзор литературы|stand der forschung",
+        re.IGNORECASE,
+    ),
+    "method": re.compile(r"m[eé]th?od|метод|yöntem|方法|방법", re.IGNORECASE),
+    "results": re.compile(
+        r"r[eé]sult|risultat|finding|hallazgo|achado|ergebnis|wynik|výsled|результат|bulgu"
+        r"|\bhasil\b|结果|結果|결과|النتائج",
+        re.IGNORECASE,
+    ),
 }
+# Methods subsections that are a heading of their own ("Data", "Subjects",
+# "Study area"): a methods guess on one is a report's methods, whatever the
+# paper type says. Matched against the whole normalised heading.
+_METHODS_PART_HEADING_RE = re.compile(
+    r"data(?:sets?| sets?| and (?:samples?|variables|measures|sources?))?|samples?|sampling"
+    r"|subjects|patients|respondents|procedures?|materials?|measures|measurements?"
+    r"|apparatus|stimuli|instruments?|setting|study (?:area|site|setting|population|sample)"
+    r"|(?:experimental|research|study) (?:design|set-?up|procedures?)"
+    r"|data (?:collection|analysis|sources?)|statistical analys[ie]s"
+    r"|empirical (?:strategy|approach|specification)|(?:identification|estimation) strategy"
+    r"|econometric (?:model|approach|specification)"
+    r"|amostra|muestra|sujetos|procedimientos?|probanden|stichprobe|выборка|участники"
+)
+
+
+def _names_its_part(section) -> bool:
+    """Whether a heading's own words name the part it is typed as: a part
+    word ("Data and methods", "Результаты исследования") or, for methods, a
+    methods subsection name ("Data", "Sample")."""
+    from bibr.paper_contents import CanonicalSection
+    from bibr.utils.text import normalize_text
+
+    header = section.header or ""
+    pattern = _PART_WORD_RES.get(section.section_type.value)
+    if pattern is not None and pattern.search(header):
+        return True
+    return section.section_type == CanonicalSection.METHODS and bool(
+        _METHODS_PART_HEADING_RE.fullmatch(normalize_text(header).strip(" :;-–—"))
+    )
+
+
+def _prints_a_study_part(section) -> bool:
+    """Whether a section is a methods or results part the paper prints: typed
+    from its heading's own words, or guessed on a heading that names the part.
+    A guess on a topical heading ("Accountability") is not one."""
+    from bibr.paper_contents import CanonicalSection
+
+    if section.section_type not in (CanonicalSection.METHODS, CanonicalSection.RESULTS):
+        return False
+    if section.classification_source in _HEADING_TYPE_SOURCES:
+        return True
+    return section.classification_source in _GUESSED_SOURCES and _names_its_part(section)
 
 
 def _references_from_notes(contents) -> bool:
@@ -283,14 +361,20 @@ def _gate_non_imrad_section_types(
       heading that follows a title-typed one), keeps it, also after a
       masthead or cover label; a running head before it, or the title
       repeated later, does not.
-    - With ``review_body`` on, in a review or commentary with no methods or
-      results heading (alias-, model- or LLM-typed), the introduction guesses
+    - With ``review_body`` on, in a review or commentary that prints no
+      methods or results part, the introduction, methods and results guesses
       after the first introduction become discussion: the body of such a
       paper is argument, not a report. The paper-type label is a guess, so a
-      paper with a methods or results heading is left alone, and so is a
-      systematic, scoping or umbrella review or a meta-analysis (named in the
-      title or abstract). The subsections of an introduction, and a heading
-      that names its own part ("Historical Background"), keep their type.
+      paper is left alone when it prints a methods or results part: a heading
+      typed so from its own words ("Methods", "Participants", "Материалы и
+      методы"), or a model, LLM or alias-prior guess on a heading that names
+      the part ("Data and methods", "Main findings") or is a methods
+      subsection name ("Data", "Sample"). A guess on a topical heading
+      ("Accountability") does not count. A systematic, scoping or umbrella
+      review or a meta-analysis (named in the title or abstract) is left
+      alone too. The subsections of an introduction, and a heading that names
+      its own part ("Historical Background"), keep their type; a methods or
+      results guess among those subsections takes the introduction's type.
     """
     from bibr.paper_contents import CanonicalSection
     from bibr.structure.section_tree import numbering_parent_ids
@@ -346,11 +430,7 @@ def _gate_non_imrad_section_types(
     kind = re.sub(r"[\s-]+", "_", (paper_type or "").strip().lower())
     if kind not in _NON_IMRAD_PAPER_TYPES:
         return
-    if any(
-        section.section_type in (CanonicalSection.METHODS, CanonicalSection.RESULTS)
-        and section.classification_source in _HEADING_TYPE_SOURCES | _GUESSED_SOURCES
-        for section in body
-    ):
+    if any(_prints_a_study_part(section) for section in body):
         return
     if _SYSTEMATIC_REVIEW_RE.search(title_abstract or ""):
         return
@@ -383,22 +463,38 @@ def _gate_non_imrad_section_types(
             section.section_id != first_intro
             and section.section_type in guessed
             and section.classification_source not in _HEADING_TYPE_SOURCES
-            and _PART_WORD_RES[section.section_type.value].search(section.header or "")
+            and _names_its_part(section)
         ):
             kept.add(section.section_id)
+    by_id = {section.section_id: section for section in body}
+    study_types = (CanonicalSection.METHODS, CanonicalSection.RESULTS)
     seen_intro = False
     for section in body:
         if section.section_type == CanonicalSection.INTRODUCTION and not seen_intro:
             seen_intro = True
             continue
         if (
-            seen_intro
-            and section.section_type in guessed
-            and section.classification_source not in _HEADING_TYPE_SOURCES
-            and section.section_id not in kept
+            not seen_intro
+            or section.section_type not in guessed
+            or section.classification_source in _HEADING_TYPE_SOURCES
         ):
+            continue
+        if section.section_id not in kept:
             section.section_type = CanonicalSection.DISCUSSION
             section.classification_source = "positional"
+            continue
+        # A kept subsection of an introduction is part of it: a methods or
+        # results guess there ("1.2 The data problem") is the classifier
+        # reading one heading alone. The parent was settled first.
+        parent = by_id.get(section.parent_section_id)
+        if (
+            section.section_type in study_types
+            and parent is not None
+            and parent.section_type == CanonicalSection.INTRODUCTION
+        ):
+            section.section_type = CanonicalSection.INTRODUCTION
+            section.classification_score = min(float(parent.classification_score or 0.7), 0.75)
+            section.classification_source = "parent_context"
 
 
 def _count_distinct_intext_citations(text: str) -> int:
@@ -777,7 +873,7 @@ async def _resolve_preparsed_references(
                 paper_metadata.references = await extractor.refs.extract_from_notes(from_notes, [])
             except asyncio.CancelledError:
                 raise
-            except ProcessingError:
+            except (ProcessingError, ModelOverrideError):
                 raise
             except Exception as exc:  # noqa: BLE001 — refs are best-effort, never fatal
                 from bibr.validation import mark_references_incomplete
@@ -794,7 +890,7 @@ async def _resolve_preparsed_references(
         logger.warning(f"Reference section not found: {e}")
         contents.processing_warnings.append(reference_section_not_found(e, from_notes=False))
         return paper_metadata
-    except ProcessingError:
+    except (ProcessingError, ModelOverrideError):
         raise
     except Exception as e:  # noqa: BLE001 — core metadata already exists
         from bibr.validation import mark_references_incomplete
@@ -811,7 +907,7 @@ async def _resolve_preparsed_references(
             _notify_references(on_references_ready, paper_metadata.references)
         except asyncio.CancelledError:
             raise
-        except ProcessingError:
+        except (ProcessingError, ModelOverrideError):
             raise
         except Exception as e:  # noqa: BLE001 — refs are best-effort, never fatal
             from bibr.validation import mark_references_incomplete
@@ -919,7 +1015,10 @@ async def _extract_metadata_and_equations(
         # export shipped "eq": [] with nothing in the log. Threaded because
         # this runs on the shared serve event loop.
         regex_equations = await asyncio.to_thread(
-            eq_extractor.extract_from_sentences, contents.sentences, contents.sections
+            eq_extractor.extract_from_sentences,
+            contents.sentences,
+            contents.sections,
+            repair_glitches=effective_settings.EQUATION_REPAIR_GLITCHES,
         )
         eq_coro = asyncio.wait_for(
             eq_extractor.extract_with_llm_fallback(
@@ -972,6 +1071,8 @@ async def _extract_metadata_and_equations(
         contents.equations = regex_equations
     else:
         contents.equations = results[1]
+    if is_skipped(llm_client):
+        note_skipped(contents, "equations", eq_extractor.llm_skipped_candidates)
     failed_batches = eq_extractor.llm_batch_failures
     if failed_batches:
         # Each failed batch kept only its regex equations; say how many and why.
@@ -986,6 +1087,48 @@ async def _extract_metadata_and_equations(
     if validation_issue_sink is not None and extractor is not None:
         validation_issue_sink.extend(extractor.validation_issues)
     return results[0]
+
+
+async def _read_printed_citation(
+    contents,
+    file_hash: str,
+    llm_client,
+    *,
+    no_llm: bool,
+    parse_strategy: str | None,
+    settings: GlobalSettings,
+    memory_mode: str | None,
+) -> None:
+    """Find and parse the paper's own citation line (``bibr.extract.self_citation``).
+
+    Only with ``SELF_CITATION_METADATA`` on, on an input that does not declare
+    its own metadata, and with the local reference parser (the ``ner``
+    strategy, which a fast run always uses): an LLM parse strategy would spend
+    a call on it, and a run without an LLM parses no references. A failure
+    leaves the paper without the line, never fails it.
+    """
+    if (
+        getattr(settings, "SELF_CITATION_METADATA", False) is not True
+        or no_llm
+        or parse_strategy != "ner"
+        or getattr(contents, "preparsed_metadata", None) is not None
+    ):
+        return
+    from bibr.extract.self_citation import read_printed_citation
+
+    try:
+        await asyncio.to_thread(
+            read_printed_citation,
+            contents,
+            file_hash=file_hash,
+            llm_client=llm_client,
+            settings=settings,
+            memory_mode=memory_mode,
+        )
+    except ModelOverrideError:
+        raise
+    except Exception:  # noqa: BLE001 - a second source must never break extraction
+        logger.warning("Reading the printed citation failed", exc_info=True)
 
 
 def _decide_record_fields(paper_metadata, *, native: bool, doc_info_authors=None) -> None:
@@ -1034,6 +1177,42 @@ def _decide_record_fields(paper_metadata, *, native: bool, doc_info_authors=None
             "not_classified",
         ),
     )
+
+
+def _apply_front_matter_rules(contents, paper_metadata, *, abstained: bool = False) -> None:
+    """What the local front-matter rules add to the tagger's answer, in a run with no LLM.
+
+    The title's language, which a PDF does not declare, and the affiliations the
+    tagger printed that no author carries, which the LLM parse would have listed.
+    When front-matter selection *abstained*, the tagger's rows can be two papers',
+    so no affiliation is added.
+    """
+    from bibr.extract.field_decisions import FieldCandidate, apply_decision, decide_value
+    from bibr.extract.front_matter import fill_language
+
+    fill_language(paper_metadata)
+    if abstained:
+        return
+    tagged = getattr(contents, "front_tagger_result", None)
+    rows = tagged.affiliation_rows() if tagged is not None else []
+    if rows and not paper_metadata.affiliations:
+        apply_decision(
+            paper_metadata,
+            decide_value("affiliations", FieldCandidate("affiliations", "front_tagger", rows)),
+        )
+
+
+def _masthead_publisher(contents, paper_metadata, settings) -> str | None:
+    """The publisher a title must not be.
+
+    A run with the tagger alone does not export the publisher it read, but the
+    reading still tells a masthead from a title.
+    """
+    if paper_metadata.publisher or settings.ml.front_tagger_mode != "only":
+        return paper_metadata.publisher
+    tagged = getattr(contents, "front_tagger_result", None)
+    read = tagged.title_keywords if tagged is not None else None
+    return read.publisher if read is not None else None
 
 
 def _body_text_excluding_references(contents) -> str:
@@ -1246,6 +1425,7 @@ async def _link_citations(
     file_hash: str,
     llm_client,
     *,
+    rule_tier3: bool = False,
     validation_issue_sink: list[ValidationIssue] | None = None,
 ) -> None:
     """Inline citation → bib linking.
@@ -1269,9 +1449,21 @@ async def _link_citations(
         file_hash=file_hash,
         receipt_sink=receipt_sink,
         references_from_notes=_references_from_notes(contents),
+        rule_tier3=rule_tier3,
     )
     contents.xrefs.extend(bib_xrefs)
     contents.citation_receipt = receipt_sink[0] if receipt_sink else None
+    if is_skipped(llm_client) and contents.citation_receipt is not None:
+        # Tier 3 never ran: these are the author-year citations it would have been offered.
+        note_skipped(
+            contents,
+            "citations",
+            sum(
+                1
+                for candidate in contents.citation_receipt.candidates
+                if candidate.style == "author-year" and not candidate.accepted
+            ),
+        )
     if contents.citation_receipt is not None:
         failed = [
             reason.removeprefix("llm_failed:")
@@ -1317,6 +1509,39 @@ def _usage_totals_by_label(
         for name, value in counts.items():
             bucket[name] = bucket.get(name, 0) + value
     return collapsed
+
+
+def _llm_skipped_warning(contents) -> ProcessingWarning:
+    """The one warning a fast run carries: no LLM call was made, and what that left undone.
+
+    The counts come from the guards that skipped a call (``PaperContents.llm_skipped``),
+    so a paper that gave them nothing to skip says only that no call was made.
+    """
+    skipped = contents.llm_skipped
+    left = []
+    if skipped.get("integrity"):
+        left.append("structured funders, author roles and affiliation parts")
+    elif skipped.get("integrity_parts"):  # the local rules read some of them
+        parts = ["structured funders"] if skipped.get("integrity_funders") else []
+        parts.append("author roles")
+        if skipped.get("integrity_affiliations"):
+            parts.append("affiliation parts")
+        elif skipped.get("integrity_institutions"):
+            parts.append("affiliation institutions and departments")
+        left.append(", ".join(parts[:-1]) + " and " + parts[-1] if len(parts) > 1 else parts[0])
+    if citations := skipped.get("citations"):
+        left.append(
+            f"{citations} ambiguous {'citation' if citations == 1 else 'citations'} left unlinked"
+        )
+    if equations := skipped.get("equations"):
+        left.append(
+            f"statistics in {equations} {'sentence' if equations == 1 else 'sentences'} "
+            "left to the regex pass"
+        )
+    message = "Fast mode made no LLM calls."
+    if left:
+        message += f" Not produced: {'; '.join(left)}."
+    return ProcessingWarning(WarningCode.LLM_SKIPPED, message)
 
 
 def _build_paper(contents, paper_metadata, file_name: str, file_hash: str, paper_id: str | None):
@@ -1469,6 +1694,7 @@ async def post_parse(
         ref_seg_strategy,
         ref_parse_strategy,
         settings=effective_settings,
+        llm_skipped=is_skipped(llm_client),
     )
 
     file_usage: dict[str, dict[str, int]] = {}
@@ -1537,9 +1763,31 @@ async def post_parse(
                 on_references_ready=on_references_ready,
                 memory_mode=memory_mode,
             )
+            # The paper's own printed citation, parsed now with the reference
+            # parser that just parsed its reference list (it may be unloaded
+            # after this stage). The identity stage, which knows the DOI,
+            # decides whether it is about this paper and what it fills.
+            await _read_printed_citation(
+                contents,
+                file_hash,
+                llm_client,
+                no_llm=no_llm,
+                parse_strategy=parse_strategy,
+                settings=effective_settings,
+                memory_mode=memory_mode,
+            )
+            # A fast run on an input with no page layout (a DOCX) has no
+            # tagger reading to put in the front-matter record's place, so the
+            # record owns nothing: the title and abstract come from the
+            # document's headings and sections, and any doc-info can fill.
+            front_matter_not_read = any(
+                warning.code == WarningCode.FRONT_MATTER_NOT_READ
+                for warning in contents.processing_warnings
+            )
             metadata_ownership_scoped = bool(
                 contents.preparsed_metadata is None
                 and contents.front_matter_resolution is not None
+                and not front_matter_not_read
                 and (not no_llm or any(issue.blocking for issue in front_matter_issues))
             )
             metadata_abstained = bool(
@@ -1575,7 +1823,7 @@ async def post_parse(
                 detected_title=contents.detected_title,
                 sections=contents.sections,
                 journal=paper_metadata.journal,
-                publisher=paper_metadata.publisher,
+                publisher=_masthead_publisher(contents, paper_metadata, effective_settings),
                 scoped=metadata_ownership_scoped,
                 abstained=metadata_abstained,
                 prefer_byline_adjacent=bool(
@@ -1589,6 +1837,8 @@ async def post_parse(
             )
             apply_decision(paper_metadata, title_decision)
             metadata_issues.extend(title_decision.issues)
+            if effective_settings.FRONT_TAGGER_RULES:
+                _apply_front_matter_rules(contents, paper_metadata, abstained=metadata_abstained)
 
             # Build statement candidates while section labels and source IDs
             # are stable, but delay materialization until after late cleaning.
@@ -1612,6 +1862,15 @@ async def post_parse(
                     (author.given, author.family) for author in paper_metadata.authors
                 ),
             )
+            if effective_settings.ml.statement_tagger_model_id and not no_llm:
+                # The statement tagger: its statements join the resolution
+                # (bibr/statement_tagger/pipeline.py). Null, nothing loads; a
+                # --no-llm run, which uses no extraction model, does not run it.
+                from bibr.statement_tagger.pipeline import apply_statement_tagger
+
+                integrity_resolution = await asyncio.to_thread(
+                    apply_statement_tagger, contents, integrity_resolution, effective_settings
+                )
 
             # Citation linking must see the raw superscript/LaTeX patterns.
             # Structured integrity is intentionally sequenced later because it
@@ -1622,6 +1881,7 @@ async def post_parse(
                     paper_metadata,
                     file_hash,
                     llm_client,
+                    rule_tier3=effective_settings.CITATION_RULE_TIER3,
                     validation_issue_sink=metadata_issues,
                 )
 
@@ -1681,6 +1941,8 @@ async def post_parse(
                     llm_client,
                     file_hash,
                     integrity_resolution=integrity_resolution,
+                    funding_rules=effective_settings.FUNDING_RULES,
+                    affiliation_rules=effective_settings.AFFILIATION_RULES,
                 )
             extraction_completed = True
 
@@ -1771,6 +2033,10 @@ async def post_parse(
 
     build_section_tree(contents.sections)
 
+    if is_skipped(llm_client):
+        # Every guard that skipped a call has counted it by now.
+        contents.processing_warnings.append(_llm_skipped_warning(contents))
+
     paper = _build_paper(contents, paper_metadata, file_name, file_hash, paper_id)
     paper.field_scope = FieldScope(
         no_llm=no_llm,
@@ -1854,27 +2120,41 @@ class PostParseStage:
         enrichment_prefetch = bool(ctx.config.enrichment_enabled(ctx.settings))
 
         async def _gated(fs):
+            from bibr.pipeline.stages.parse_segment import paper_key
+            from bibr.utils.model_overrides import paper_scope
+
             async with sem:
                 fs_t0 = time.monotonic()
                 file_hash = fs.file_hash or ""
-                result = await post_parse(
-                    contents=fs.contents,
-                    file_name=fs.path.name,
-                    file_hash=file_hash,
-                    paper_id=fs.paper_id,
-                    ocr_metadata=fs.native_metadata,
-                    layout_hints=fs.contents.layout_hints or None if fs.contents else None,
-                    no_llm=ctx.config.no_llm,
-                    extract_equations=ctx.config.equations,
-                    llm_client=None if ctx.config.no_llm else ctx.resources.llm_client,
-                    ref_seg_strategy=ctx.config.ref_seg_strategy,
-                    ref_parse_strategy=ctx.config.ref_parse_strategy,
-                    settings=ctx.settings,
-                    classifier_resources=ctx.resources.classifiers,
-                    expected_identity=fs.expected_identity,
-                    enrichment_prefetch=enrichment_prefetch,
-                    memory_mode=ctx.config.memory_mode,
-                )
+                # Names the paper an overridden model's inference error is counted
+                # under (bibr.utils.model_overrides.note_inference_failure).
+                with paper_scope(paper_key(fs)):
+                    result = await post_parse(
+                        contents=fs.contents,
+                        file_name=fs.path.name,
+                        file_hash=file_hash,
+                        paper_id=fs.paper_id,
+                        ocr_metadata=fs.native_metadata,
+                        layout_hints=fs.contents.layout_hints or None if fs.contents else None,
+                        no_llm=ctx.config.no_llm,
+                        extract_equations=ctx.config.equations,
+                        # --no-llm passes none; a fast run, the client that makes no
+                        # call, so that nothing builds a real one.
+                        llm_client=(
+                            None
+                            if ctx.config.no_llm
+                            else SkippedLlmClient()
+                            if ctx.config.mode == "fast"
+                            else ctx.resources.llm_client
+                        ),
+                        ref_seg_strategy=ctx.config.ref_seg_strategy,
+                        ref_parse_strategy=ctx.config.ref_parse_strategy,
+                        settings=ctx.settings,
+                        classifier_resources=ctx.resources.classifiers,
+                        expected_identity=fs.expected_identity,
+                        enrichment_prefetch=enrichment_prefetch,
+                        memory_mode=ctx.config.memory_mode,
+                    )
                 fs.stage_times[self.name] = time.monotonic() - fs_t0
                 return result
 

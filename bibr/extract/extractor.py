@@ -13,9 +13,9 @@ plus back-compat access to their internals:
   ``REF_PARSE_STRATEGIES``).
 
 Training capture lives in :mod:`bibr.extract.training_capture`. The
-re-exports below keep ``from bibr.extract.extractor import X`` working for
-every name this module historically defined; new code should import from the
-owning module directly.
+re-exports below keep ``from bibr.extract.extractor import X`` working for the
+names still imported from here; new code should import from the owning module
+directly.
 """
 
 from __future__ import annotations
@@ -29,47 +29,30 @@ from typing import TYPE_CHECKING
 
 from bibr.clients.llm import LLMClient
 from bibr.clients.llm_protocol import LlmClient
-from bibr.exceptions import BibrError, ProcessingError
-from bibr.extract.core_metadata import (  # noqa: F401 — re-exported for back-compat
-    _CORRECTION_NOTICE_TITLE_RE,
-    CoreMetadataExtractor,
-)
+from bibr.exceptions import BibrError, ModelOverrideError, ProcessingError
+from bibr.extract.core_metadata import CoreMetadataExtractor
 from bibr.extract.ref_extractor import (  # noqa: F401 — re-exported for back-compat
     REF_PARSE_STRATEGIES,
-    IncompleteOutputException,
     ReferenceExtractor,
     _backfill_issue,
     _build_ref_text,
     _chunk,
-    _clean_bib_field,
     _expand_compact_last_page,
     _finalize_reference_fields,
-    _get_geom_segmenter,
-    _get_ner_parser,
-    _get_ner_segmenter,
     _infer_bibtype,
-    _is_degenerate_ref_failure,
     _is_in_press,
     _map_bib_text_ids,
     _marker_split_refs,
-    _normalize_vol_issue,
-    _parse_refs_via_llm,
     _parse_refs_via_ner,
     _parse_year,
     _rescue_authors_from_segment,
     _rescue_doi_from_segment,
     _resolve_ref_strategies,
-    _resolve_repeated_authors,
     _sequence_references,
     _split_vol_issue,
     _strip_enum_markers,
 )
-from bibr.extract.ref_locator import (  # noqa: F401 — re-exported for back-compat
-    _ENTRY_NUMBERING_RE,
-    _REF_HEADER_RE,
-    RefLocator,
-    _looks_like_complete_entry_start,
-)
+from bibr.extract.ref_locator import RefLocator
 from bibr.paper import PaperMetadata, PaperReference
 from bibr.paper_contents import PaperContents
 from bibr.processing_warnings import ProcessingWarning, WarningCode
@@ -139,7 +122,7 @@ async def _await_core_and_reference_tasks(
                 await _cancel_and_await(core_task)
                 raise asyncio.CancelledError
             ref_error = ref_task.exception()
-            if isinstance(ref_error, ProcessingError):
+            if isinstance(ref_error, (ProcessingError, ModelOverrideError)):
                 await _cancel_and_await(core_task)
                 raise ref_error
             if ref_error is not None and not isinstance(ref_error, Exception):
@@ -156,7 +139,8 @@ async def _await_core_and_reference_tasks(
             return await ref_task
         except asyncio.CancelledError:
             raise
-        except ProcessingError:
+        except (ProcessingError, ModelOverrideError):
+            # An overridden model that cannot load is the run's fault, not the paper's.
             raise
         except Exception as exc:  # noqa: BLE001 — caller marks references incomplete
             return exc
@@ -215,7 +199,10 @@ class MetadataExtractor:
         self.contents = contents
         self.sentences_df = contents.sentences_df
         self._settings = settings if settings is not None else snapshot_settings()
-        self._llm_client = llm_client or LLMClient(settings=self._settings)
+        # ``is None``, not ``or``: the fast-mode client is falsy and must be kept.
+        self._llm_client = (
+            llm_client if llm_client is not None else LLMClient(settings=self._settings)
+        )
         self.metadata: PaperMetadata | None = None
         self.file_hash = file_hash
         self._ref_seg_strategy = ref_seg_strategy
@@ -458,7 +445,3 @@ class MetadataExtractor:
             warnings = []
             self.contents.processing_warnings = warnings
         warnings.append(warning)
-
-    _should_suppress_commentary_abstract = staticmethod(
-        CoreMetadataExtractor._should_suppress_commentary_abstract
-    )

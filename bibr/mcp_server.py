@@ -48,13 +48,14 @@ import time
 from collections.abc import Callable, Sequence
 from contextlib import asynccontextmanager, redirect_stdout
 from pathlib import Path
-from typing import Any, Literal, Unpack
+from typing import Any, Literal, Unpack, cast
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from bibr.api import Chewer, ChewOptions
 from bibr.exceptions import BibrError
+from bibr.run_mode import LLM_PARSE_STRATEGIES
 from bibr.utils.redact import scrub_secrets
 from bibr.validation import payload_validation
 
@@ -632,6 +633,25 @@ def _exit_if_terminating() -> None:
         cli._exit_now(128 + signum)
 
 
+def _without_llm_choices(
+    options: ChewOptions, refs: str | bool | None
+) -> tuple[ChewOptions, str | bool | None]:
+    """``options`` and ``refs`` as a fast run takes them: nothing that calls an LLM.
+
+    A fast run makes no LLM call, so it checks no credentials and refuses the
+    options that name one (``llm``, an LLM reference parser or segmenter). The
+    server's start-up check builds with those set aside and ``mode="fast"``, so a
+    missing LLM disables extraction while a bad option still stops the server.
+    """
+    kept: dict[str, Any] = {
+        k: v
+        for k, v in options.items()
+        if k not in ("llm", "llm_backend") and not (k.startswith("ref_seg") and v == "llm")
+    }
+    kept["mode"] = "fast"
+    return cast("ChewOptions", kept), None if refs in LLM_PARSE_STRATEGIES else refs
+
+
 def build_server(
     *,
     refs: str | bool | None = None,
@@ -662,8 +682,8 @@ def build_server(
     except (ValueError, BibrError) as e:
         # Only the preflight may fail softly: the same options with it
         # skipped must build, so a bad option still stops the server.
-        without_llm: ChewOptions = {**options, "no_llm": True}
-        Chewer(refs=refs, settings=settings, **without_llm)
+        fast_options, fast_refs = _without_llm_choices(options, refs)
+        Chewer(refs=fast_refs, settings=settings, **fast_options)
         chew_unavailable = scrub_secrets(str(e))
         logger.warning(
             "extraction is unavailable (%s); load_paper and the query tools still work",
@@ -928,6 +948,10 @@ def run_mcp(args: argparse.Namespace) -> int:
         options["equations"] = False
     if getattr(args, "no_llm", False):
         options["no_llm"] = True
+    if getattr(args, "fast", False):
+        options["mode"] = "fast"
+    elif getattr(args, "full", False):
+        options["mode"] = "full"
     if getattr(args, "figure_images", False):
         options["figure_images"] = True
     if getattr(args, "consolidate", None):

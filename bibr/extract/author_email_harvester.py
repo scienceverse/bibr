@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -26,9 +27,29 @@ logger = logging.getLogger(__name__)
 
 # Email pattern — covers most ASCII addresses; rejects bare-domain mentions.
 _EMAIL_RE = re.compile(r"\b([\w.+-]+@[\w.-]+\.[A-Za-z]{2,})\b")
-# GLM-OCR emits "pg " in place of an envelope glyph (✉) at the start of
-# corresponding-author lines.  Strip when it precedes an uppercase letter.
-_PG_PREFIX_RE = re.compile(r"^\s*pg\s+(?=[A-Z])")
+# One domain shared by several local parts, as LaTeX bylines print it: "{alice, bob}@uni.edu".
+_BRACED_EMAILS_RE = re.compile(
+    r"\{\s*([\w.+-]+(?:\s*[,;|]\s*[\w.+-]+)*)\s*\}\s*@\s*([\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,})\b"
+)
+
+
+def _expand_braced_emails(sentences: list) -> list:
+    """*sentences*, with each braced address list written out as one address per local part."""
+
+    def expand(m: re.Match) -> str:
+        return ", ".join(f"{local}@{m.group(2)}" for local in re.split(r"\s*[,;|]\s*", m.group(1)))
+
+    out = []
+    for sent in sentences:
+        text = sent.text or ""
+        if "}" in text and "@" in text:
+            expanded = _BRACED_EMAILS_RE.sub(expand, text)
+            if expanded != text:
+                sent = SimpleNamespace(text=expanded, section_id=sent.section_id)
+        out.append(sent)
+    return out
+
+
 # Anchors that indicate a "Corresponding Author" footer (vs. a plain byline
 # listing every author's email).  Used to gate the corresponding=True
 # promotion — without this gate, papers like "Attention Is All You Need"
@@ -37,7 +58,9 @@ _PG_PREFIX_RE = re.compile(r"^\s*pg\s+(?=[A-Z])")
 _CORRESPONDING_MARKER_RE = re.compile(
     r"\bcorrespond"  # corresponding, correspondence
     r"|✉"  # envelope glyph
-    r"|\bpg\s+(?=[A-Z])",  # GLM-OCR misread of envelope at line start
+    # GLM-OCR misread of envelope at line start; the capital stays case-sensitive so
+    # a unit ("10 pg ml-1") is not read as a marker.
+    r"|\b(?i:pg)\s+(?-i:(?=[A-Z]))",
     re.IGNORECASE,
 )
 
@@ -70,7 +93,11 @@ def _given_name_affinity(given: str | None, local_compact: str) -> int:
     itself cannot discriminate. A full given name inside the local part
     ("jane.smith") is strong; a leading initial ("jsmith") is weak.
     """
-    tokens = [token for token in _folds(given) if token]
+    tokens = [
+        token
+        for spelling in _letter_spellings(given)
+        for token in re.findall(r"[a-z0-9]+", spelling)
+    ]
     if not tokens or not local_compact:
         return 0
     if any(len(token) >= 3 and token in local_compact for token in tokens):
@@ -359,9 +386,8 @@ class AuthorEmailHarvester:
         """
         out: set[str] = set()
         for sent in sentences:
-            cleaned = _PG_PREFIX_RE.sub("", sent.text)
-            if _CORRESPONDING_MARKER_RE.search(cleaned):
-                out.update(m.group(1).lower() for m in _EMAIL_RE.finditer(cleaned))
+            if _CORRESPONDING_MARKER_RE.search(sent.text):
+                out.update(m.group(1).lower() for m in _EMAIL_RE.finditer(sent.text))
         return out
 
     @staticmethod
@@ -377,8 +403,7 @@ class AuthorEmailHarvester:
         Many psych-journal PDFs print a "Corresponding Author:" footer that
         names the author and gives their email — but the LLM metadata pass
         rarely surfaces those emails into ``PaperAuthor.email``.  This pass
-        scans body sentences for email patterns, strips the OCR ``pg ``
-        artifact (a misread of the envelope glyph), and assigns each email to
+        scans body sentences for email patterns and assigns each email to
         the best-matching author within a small window of surrounding
         sentences.
 
@@ -420,11 +445,13 @@ class AuthorEmailHarvester:
 
         # Skip references section so reference URLs/DOIs/emails don't bleed in.
         section_type_by_id = {s.section_id: s.section_type for s in self.contents.sections}
-        sentences = [
-            s
-            for s in self.contents.sentences
-            if section_type_by_id.get(s.section_id) != CanonicalSection.REFERENCES
-        ]
+        sentences = _expand_braced_emails(
+            [
+                s
+                for s in self.contents.sentences
+                if section_type_by_id.get(s.section_id) != CanonicalSection.REFERENCES
+            ]
+        )
 
         # Only fill gaps — never overwrite an LLM-extracted email.
         # Surname → every still-emailless author carrying it. Keeping a single
@@ -458,7 +485,7 @@ class AuthorEmailHarvester:
             joined_window = " ".join(sentences[j].text for j in window_indices)
             window_has_marker = bool(_CORRESPONDING_MARKER_RE.search(joined_window))
 
-            for email_match in _EMAIL_RE.finditer(_PG_PREFIX_RE.sub("", sent.text)):
+            for email_match in _EMAIL_RE.finditer(sent.text):
                 email = email_match.group(1)
                 if email.lower() in claimed_emails:
                     continue
@@ -475,7 +502,7 @@ class AuthorEmailHarvester:
                     family_pat = re.compile(r"\b" + re.escape(family) + r"\b", re.IGNORECASE)
                     best_dist: int | None = None
                     for j in window_indices:
-                        if family_pat.search(_PG_PREFIX_RE.sub("", sentences[j].text)):
+                        if family_pat.search(sentences[j].text):
                             dist = abs(j - i)
                             if best_dist is None or dist < best_dist:
                                 best_dist = dist
@@ -723,10 +750,10 @@ class AuthorEmailHarvester:
         if not owner_by_email:
             return
 
-        in_series = any(_SERIES_ADDRESS_RE.search(_PG_PREFIX_RE.sub("", s.text)) for s in printing)
+        in_series = any(_SERIES_ADDRESS_RE.search(s.text) for s in printing)
         groups: list[list[PaperAuthor]] = []
         for sent in printing:
-            text = _PG_PREFIX_RE.sub("", sent.text)
+            text = sent.text
             for m in _BARE_LIST_RE.finditer(text):
                 if in_series and not m.group(0).startswith("✉"):
                     continue  # the star is the first of a * † ‡ series, not "corresponding"
@@ -819,7 +846,7 @@ class AuthorEmailHarvester:
             anchor_in_window = bool(_CORRESPONDING_MARKER_RE.search(joined_window))
             anchor_in_header = bool(_CORRESPONDING_MARKER_RE.search(section_header))
 
-            for m in _EMAIL_RE.finditer(_PG_PREFIX_RE.sub("", sent.text)):
+            for m in _EMAIL_RE.finditer(sent.text):
                 email = m.group(1).lower()
                 author = email_to_author.get(email)
                 if author is None:

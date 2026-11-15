@@ -163,6 +163,29 @@ def test_backend_matches_torch_module_end_to_end(layout_bundle):
         np.testing.assert_array_equal(e["order_seq"], g["order_seq"])
 
 
+@pytest.mark.parametrize("device", [None, "mps"])
+def test_backend_never_asks_for_coreml(layout_bundle, monkeypatch, device):
+    """Every CoreML configuration fails on the layout graph, so ``--device mps`` stays on CPU."""
+    import onnxruntime as ort
+
+    _module, _out, bundle = layout_bundle
+    requested = []
+    real_session = ort.InferenceSession
+
+    def recording_session(path, *, sess_options=None, providers=None):
+        requested.append(providers)
+        return real_session(path, sess_options=sess_options, providers=["CPUExecutionProvider"])
+
+    monkeypatch.setattr(
+        ort, "get_available_providers", lambda: ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    )
+    monkeypatch.setattr(ort, "InferenceSession", recording_session)
+
+    OnnxLayoutBackend(bundle, device=device, threshold=0.3)
+
+    assert requested == [["CPUExecutionProvider"]]
+
+
 def test_local_detector_selects_onnx_runtime_and_unloads(layout_bundle, monkeypatch):
     _module, out, _bundle = layout_bundle
     from bibr.config import GlobalSettings

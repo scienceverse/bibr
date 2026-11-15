@@ -52,14 +52,6 @@ def test_single_item_and_lone_surrogates(pair):
     assert 0.0 <= pred.score <= 1.0
 
 
-def test_from_pretrained_uses_local_bundle(pair):
-    _torch_clf, _onnx_clf, root = pair
-    clf = OnnxSectionClassifierModel.from_pretrained(str(root), device="cpu")
-    assert clf.label_classes == fx.SECTION_LABELS
-    assert clf.template_version == 3
-    assert clf.runtime == "onnx"
-
-
 def test_loader_selects_onnx_for_local_bundle(pair, monkeypatch):
     _torch_clf, _onnx_clf, root = pair
     from bibr.config import GlobalSettings

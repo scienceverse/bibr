@@ -452,6 +452,7 @@ _EVERY_OPTION = {
     "consolidate": "fill",
     "refs": "ner",
     "ref_seg": "geom",
+    "mode": "fast",
 }
 
 

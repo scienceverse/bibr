@@ -53,6 +53,13 @@ os.environ["ML_SECTION_CLASSIFIER_MODEL_ID"] = ""
 # front-matter tests don't pull the HF snapshot. Tests for the model path build
 # their own FrontRolePredictions or point at a local bundle.
 os.environ["ML_FRONT_ROLE_MODEL_ID"] = ""
+# Production defaults since 0.9.0 are the published geometry line tagger, text
+# reference segmenter and statement tagger; disabled here for the same reason.
+# Tests of those models point at local bundles, and the config-default tests
+# read the field defaults.
+os.environ["REF_GEOM_TAGGER_MODEL_ID"] = ""
+os.environ["REF_TEXT_SEG_MODEL_ID"] = ""
+os.environ["ML_STATEMENT_TAGGER_MODEL_ID"] = ""
 # Production default is "auto" (probe the Hub for a model's ONNX bundle, else
 # torch). Pinned to "torch" here so constructing a detector/classifier in a
 # test never makes a network round-trip; ONNX-runtime tests set ML_RUNTIME (or
@@ -259,6 +266,20 @@ def _no_pinned_build_downloads(monkeypatch, request):
 
     monkeypatch.setattr(hub_pins, "_cached_file", lambda *args, **kwargs: None)
     monkeypatch.setattr(hub_pins, "_download_files", _fake_pinned_download)
+
+
+@pytest.fixture(autouse=True)
+def _front_tagger_bundle_present(monkeypatch, tmp_path_factory):
+    """Keep ``bibr chew --fast`` and ``bibr batch --fast`` off the Hub.
+
+    Before a fast run starts, the CLI resolves the front-matter tagger's bundle
+    (``bibr.local.cli.run_config._preflight_front_tagger``), which downloads it
+    on a first run. Tests that run those commands with a fake pipeline get a
+    path that is never opened; tests of the check replace this themselves."""
+    monkeypatch.setattr(
+        "bibr.local.cli.run_config._front_tagger_bundle",
+        lambda model_id, revision: Path("front-tagger-bundle-for-tests") / "onnx",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -546,3 +567,18 @@ def _block_non_loopback_sockets(monkeypatch, request):
         )
         monkeypatch.setattr(socket, "getaddrinfo", _guarded_getaddrinfo(socket.getaddrinfo))
         monkeypatch.setattr(socket, "gethostbyname", _guarded_gethostbyname(socket.gethostbyname))
+
+
+@pytest.fixture(autouse=True)
+def _no_pinned_cache_lookups(monkeypatch, request):
+    """A file cached at a pinned commit is not served from the developer's real HF cache.
+
+    ``hf_download_or_cached`` returns a file the cache holds at a full commit
+    hash without asking the Hub (``bibr.utils.hf_cache``). Unit tests stub the
+    download to see what is fetched, so a hit in the real cache would hide it
+    and make the result depend on the machine. tests/test_hf_cache.py restores
+    the real lookup against a cache it builds.
+    """
+    if request.node.get_closest_marker("slow") is not None:
+        return
+    monkeypatch.setattr("bibr.utils.hf_cache.cached_at_pinned_revision", lambda *args: None)

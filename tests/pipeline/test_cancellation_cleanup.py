@@ -29,6 +29,10 @@ async def test_close_waits_for_startup_and_cleans_late_server(monkeypatch, backe
 
     rm = ResourceManager(ocr_backend="glm-http", settings=GlobalSettings())
     if backend == "llm":
+        # Nothing listens on the vLLM port here. The start first probes it for a
+        # server to reuse, and on Windows a connect to a closed port takes about
+        # 2 s, past the wait for the constructor below.
+        monkeypatch.setattr(rm, "_reuses_llm_server", AsyncMock(return_value=False))
         monkeypatch.setattr("bibr.local.vllm_llm.VllmLlmServer", construct)
         start = rm.start_llm_server("vllm")
         close = rm.close_llm_server

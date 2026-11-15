@@ -433,6 +433,26 @@ async def test_rejected_token_stops_the_run(tmp_path):
     assert serve.requests.count(("POST", "/papers/jobs")) == 1
 
 
+async def test_a_model_override_failure_on_the_serve_stops_the_run(tmp_path):
+    from bibr.batch.ledger import MODEL_OVERRIDE_FAILED
+
+    error = {
+        "message": "A model setting of this server names a model that cannot be used; the "
+        "server log says which (model_override_failed)",
+        "error_code": MODEL_OVERRIDE_FAILED,
+    }
+    serve = FakeServe(fail={"a": (error, 500)})
+    executor, _ = _executor(serve, concurrency=1, max_concurrency=1)
+    items = _items(tmp_path, "a", "b")
+
+    reason, seen = await _run(executor, items)
+
+    assert reason == MODEL_OVERRIDE_FAILED
+    assert [(i.paper_id, o.error_code) for i, o in seen] == [("a", MODEL_OVERRIDE_FAILED)]
+    assert executor.fatal and "Model override problem on the serve" in executor.fatal
+    assert serve.requests.count(("POST", "/papers/jobs")) == 1
+
+
 async def test_stop_drains_in_flight_with_grace_then_records_interrupted(tmp_path):
     serve = FakeServe(stuck={"slow"})
     executor, _ = _executor(serve, concurrency=2, grace=0.0)

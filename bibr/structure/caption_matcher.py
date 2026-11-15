@@ -9,9 +9,12 @@ from dataclasses import dataclass
 import numpy as np
 
 from bibr.paper_contents import CaptionAssignment, CaptionCandidate
+from bibr.structure.float_labels import OTHER_FIGURE_WORD, OTHER_TABLE_WORD
 
 _NUMBERED_CAPTION_RE = re.compile(
-    r"^(?:fig(?:ure)?\.?|table)\s+(?P<number>\d+|[ivxlcdm]+)\b", re.IGNORECASE
+    rf"^(?:fig(?:ure)?\.?|table|{OTHER_FIGURE_WORD}|{OTHER_TABLE_WORD})\s+"
+    r"(?P<number>\d+|[ivxlcdm]+)\b",
+    re.IGNORECASE,
 )
 
 

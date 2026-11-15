@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Collection, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,12 +36,15 @@ from bibr.batch.ledger import (
     CHUNK_ERROR,
     INTERRUPTED,
     LEDGER_FILENAME,
+    MAX_UNSETTLED_FAILURES,
+    MODEL_OVERRIDE_FAILED,
     OUTPUT_WRITE_FAILED,
     UPSTREAM_UNAVAILABLE,
     Ledger,
     LedgerContext,
     Outcome,
     ResumePlan,
+    fell_back_on_override,
     summarize_export,
     utc_now_iso,
 )
@@ -54,6 +57,7 @@ from bibr.batch.manifest import (
 )
 from bibr.batch.remote import RemoteAuthError, RemoteExecutor, RemoteOptions, configured_value
 from bibr.batch.report import compute_report, render_report
+from bibr.utils.model_overrides import find_model_override_error
 from bibr.utils.transient import is_service_outage
 
 logger = logging.getLogger(__name__)
@@ -424,6 +428,8 @@ class LocalExecutor:
     ):
         self._chew_many = chew_many
         self.batch_size = max(1, batch_size)
+        # Why the run stopped early, for a model override that does not load.
+        self.fatal: str | None = None
         self._clock = clock
         self._wall = wall
 
@@ -437,7 +443,9 @@ class LocalExecutor:
         on_chunk: Callable[[int, int, Sequence[BatchItem]], None] | None = None,
         alone: Collection[str] = (),
     ) -> str:
-        """Returns ``completed`` | ``deadline`` | ``stopped`` | ``interrupted``.
+        """Returns ``completed`` | ``deadline`` | ``stopped`` | ``interrupted``, or
+        ``model_override_failed`` (with :attr:`fatal` set) when a model setting
+        changed from its default names a model that does not exist.
 
         Papers whose ids are in *alone* (their last attempt killed the run)
         come last, each in a chunk of its own: one that kills the run again
@@ -474,24 +482,44 @@ class LocalExecutor:
                         ),
                     )
                 return "interrupted"
-            except Exception as exc:  # noqa: BLE001 — a crashed chunk is N failed papers
-                logger.exception("chunk %d/%d crashed", index, total_chunks)
-                elapsed = self._clock() - t0
+            except Exception as raised:  # noqa: BLE001 — sorted below
+                exc = find_model_override_error(raised)
+                if exc is None:
+                    logger.exception("chunk %d/%d crashed", index, total_chunks)
+                    elapsed = self._clock() - t0
+                    finished_at = utc_now_iso()
+                    code = UPSTREAM_UNAVAILABLE if is_service_outage(raised) else CHUNK_ERROR
+                    for item in chunk:
+                        on_outcome(
+                            item,
+                            Outcome(
+                                "failed",
+                                error_code=code,
+                                error=f"{type(raised).__name__}: {raised}",
+                                started_at=started_at,
+                                finished_at=finished_at,
+                                duration_s=elapsed,
+                            ),
+                        )
+                    continue
+                # A model the settings name does not load, or keeps raising: every
+                # later paper would fail the same way, so the run stops; the chunk
+                # never got a verdict, and a resumed run runs it again.
                 finished_at = utc_now_iso()
-                code = UPSTREAM_UNAVAILABLE if is_service_outage(exc) else CHUNK_ERROR
                 for item in chunk:
                     on_outcome(
                         item,
                         Outcome(
                             "failed",
-                            error_code=code,
-                            error=f"{type(exc).__name__}: {exc}",
+                            error_code=MODEL_OVERRIDE_FAILED,
+                            error=str(exc),
                             started_at=started_at,
                             finished_at=finished_at,
-                            duration_s=elapsed,
+                            duration_s=self._clock() - t0,
                         ),
                     )
-                continue
+                self.fatal = f"Model override problem: {exc}"
+                return "model_override_failed"
             elapsed = self._clock() - t0
             finished_at = utc_now_iso()
             if len(results) != len(chunk):
@@ -570,6 +598,16 @@ def _print_plan(options: BatchOptions, plan: BatchPlan, ledger: Ledger) -> None:
     console.print(kv("skip ok", str(len(plan.resume.skipped_ok))))
     hint = " (use --retry-failed)" if plan.resume.skipped_failed else ""
     console.print(kv("skip failed", f"{len(plan.resume.skipped_failed)}{hint}"))
+    if plan.resume.override_fallbacks:
+        console.print(
+            kv(
+                "rerun",
+                f"{len(plan.resume.override_fallbacks)} ok but fell back from an overridden "
+                "model (MODEL_OVERRIDE_INFERENCE_FAILED)",
+            )
+        )
+    if plan.resume.override_capped:
+        console.print(kv("skip fell back", override_capped_text(plan.resume.override_capped)))
     detail = []
     if options.limit:
         detail.append(f"limit {options.limit}")
@@ -782,6 +820,7 @@ def _execute(
         "n_planned": len(plan.to_run),
         "n_skipped_ok": len(plan.resume.skipped_ok),
         "n_skipped_failed": len(plan.resume.skipped_failed),
+        "n_skipped_override_capped": len(plan.resume.override_capped),
         "shuffle_seed": plan.seed if options.shuffle else None,
         "deadline": (
             datetime.fromtimestamp(options.deadline, tz=UTC).isoformat(timespec="seconds")
@@ -802,15 +841,24 @@ def _execute(
             "form": dict(options.remote.form),
             "ready": None,
         }
+    if options.remote is None:
+        from bibr.config import snapshot_settings
+        from bibr.utils.model_overrides import begin_run
+
+        begin_run(snapshot_settings())
     write_run_info(options.out, info, append_history=True)
 
     n_ok = 0
     n_failed = 0
+    # Papers the run stopped on a model override before they finished: no verdict.
+    n_not_finished = 0
     done = 0
     total = len(plan.to_run)
+    # Papers of this run whose export fell back from an overridden model.
+    fell_back: list[str] = []
 
     def record(item: BatchItem, outcome: Outcome) -> None:
-        nonlocal n_ok, n_failed, done
+        nonlocal n_ok, n_failed, n_not_finished, done
         if outcome.ok and outcome.export is not None:
             # The batch's own id is the corpus key: unique by construction and
             # the name of the JSON file, where the export's default (the input
@@ -839,9 +887,20 @@ def _execute(
             detail = f"{duration:.1f}s" if isinstance(duration, (int, float)) else ""
             if isinstance(refs, int):
                 detail += f" {ui.SEP} {refs} refs"
+            if fell_back_on_override(entry):
+                fell_back.append(item.paper_id)
+                detail += f" {ui.SEP} fell back from an overridden model"
             console.print(
                 f"  [green]{ui.OK}[/green] [dim]\\[{done}/{total}][/dim] {item.paper_id}"
                 f"  [dim]{detail}[/dim]",
+                soft_wrap=True,
+            )
+        elif outcome.error_code == MODEL_OVERRIDE_FAILED:
+            # Not the paper's failure: the run stops, and the reason is printed once.
+            n_not_finished += 1
+            console.print(
+                f"  [yellow]-[/yellow] [dim]\\[{done}/{total}][/dim] {item.paper_id}: "
+                "not finished, the run stopped on a model override",
                 soft_wrap=True,
             )
         else:
@@ -852,10 +911,12 @@ def _execute(
                 soft_wrap=True,
             )
 
+    capped = plan.resume.override_capped
     console.print(
         f"  [dim]{total} to run {ui.SEP} {len(plan.resume.skipped_ok)} already ok "
         f"{ui.SEP} {len(plan.resume.skipped_failed)} skipped failed {ui.SEP} "
-        f"{options.executor} {ui.SEP} run {run_id}[/dim]"
+        + (f"{len(capped)} skipped, fell back on a model override {ui.SEP} " if capped else "")
+        + f"{options.executor} {ui.SEP} run {run_id}[/dim]"
     )
 
     reason = "completed"
@@ -923,8 +984,9 @@ def _execute(
                 # (out of memory, a native crash) leaves no verdict to resume by.
                 ledger.start(item, context=context_holder["context"])
 
+        local_executor = LocalExecutor(chew_many, batch_size=batch_size)
         try:
-            reason = LocalExecutor(chew_many, batch_size=batch_size).run(
+            reason = local_executor.run(
                 plan.to_run,
                 on_outcome=record,
                 deadline=options.deadline,
@@ -940,6 +1002,7 @@ def _execute(
                 except Exception:  # noqa: BLE001 — teardown must not mask the run's result
                     logger.warning("pipeline teardown failed", exc_info=True)
         interrupted = reason == "interrupted"
+        fatal = local_executor.fatal
 
     finished_at = utc_now_iso()
     info.update(
@@ -951,6 +1014,20 @@ def _execute(
             "fatal": fatal,
         }
     )
+    if reason == MODEL_OVERRIDE_FAILED:
+        info["n_not_finished"] = n_not_finished
+        info["n_not_attempted"] = total - done
+    if fell_back:
+        # Exports written with the fallback of an overridden model; a resume runs them again.
+        info["override_fallbacks"] = list(fell_back)
+    if options.remote is None:
+        from bibr.utils.model_overrides import run_records
+
+        # Each overridden model of this run: loaded (with the sha256 of the files
+        # read) or not, and why. Absent for a run on the shipped models, and for
+        # --serve, whose models load in the server.
+        if overrides := run_records():
+            info["model_overrides"] = overrides
     write_run_info(options.out, info, append_history=False)
 
     entries = ledger.read()
@@ -968,10 +1045,75 @@ def _execute(
                 "  [dim]interrupted — re-run the same command to continue "
                 "(interrupted papers are retried by default)[/dim]"
             )
+        elif reason == MODEL_OVERRIDE_FAILED:
+            console.print(
+                f"  the run stopped on a model override: {n_not_finished} "
+                f"{'paper' if n_not_finished == 1 else 'papers'} not finished and "
+                f"{total - done} not attempted, none of them through a fault of its PDF; "
+                "fix or unset the setting below and re-run the same command to process them",
+                soft_wrap=True,
+            )
+        if fell_back:
+            for line in _fell_back_lines(fell_back, ledger.fallbacks_in_a_row(entries)):
+                console.print(f"  {line}", soft_wrap=True)
+        if capped:
+            console.print(f"  {override_capped_text(capped)}", soft_wrap=True)
 
     if fatal:
         ui.error(console, fatal)
         return EXIT_USAGE
     if interrupted or reason == "stopped":
         return EXIT_INTERRUPTED
+    if total == 0 and capped:
+        # Nothing ran, and the papers left are waiting on a model that failed them.
+        return EXIT_FAILURES
     return EXIT_FAILURES if n_failed else EXIT_OK
+
+
+def _names(paper_ids: Sequence[str]) -> str:
+    return ", ".join(paper_ids[:10]) + (" …" if len(paper_ids) > 10 else "")
+
+
+def override_capped_text(items: Sequence[BatchItem]) -> str:
+    """The line for papers a resume skips because they fell back on an override too often."""
+    n = len(items)
+    return (
+        f"{n} {'paper' if n == 1 else 'papers'} fell back on a model override "
+        f"{MAX_UNSETTLED_FAILURES} times in a row and {'is' if n == 1 else 'are'} skipped: "
+        f"{_names([item.paper_id for item in items])}; rerun with --retry-failed after fixing "
+        "the model"
+    )
+
+
+def _fell_back_lines(fell_back: Sequence[str], in_a_row: Mapping[str, int]) -> list[str]:
+    """What happens next to this run's papers that fell back, grouped by the reruns left."""
+    by_left: dict[int, list[str]] = {}
+    for pid in fell_back:
+        left = max(MAX_UNSETTLED_FAILURES - in_a_row.get(pid, 1), 0)
+        by_left.setdefault(left, []).append(pid)
+    lines = []
+    for left in sorted(by_left, reverse=True):
+        pids = by_left[left]
+        n = len(pids)
+        head = (
+            f"{n} {'paper' if n == 1 else 'papers'} fell back from an overridden model "
+            f"(MODEL_OVERRIDE_INFERENCE_FAILED): {_names(pids)}; "
+            f"{'its export does' if n == 1 else 'their exports do'} not hold the candidate's "
+            "answer"
+        )
+        if left:
+            lines.append(
+                f"{head}, and a re-run of the same command processes "
+                f"{'it' if n == 1 else 'them'} again ({left} "
+                f"{'re-run' if left == 1 else 're-runs'} left before "
+                f"{'it waits' if n == 1 else 'they wait'} for --retry-failed)"
+            )
+        else:
+            lines.append(
+                f"{head}; {'it' if n == 1 else 'they'} fell back on a model override "
+                f"{MAX_UNSETTLED_FAILURES} times in a row, so a re-run of the same command "
+                "skips them: rerun with --retry-failed after fixing the model"
+            )
+    if lines:
+        lines[-1] += " (run_info.json override_fallbacks lists them all)"
+    return lines

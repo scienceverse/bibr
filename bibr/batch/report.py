@@ -12,6 +12,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
+from bibr.batch.ledger import MAX_UNSETTLED_FAILURES, MODEL_OVERRIDE_FAILED, fell_back_on_override
 from bibr.pipeline.stages.export import _OVERLAPPED_TIMINGS
 
 TOP_WARNINGS = 10
@@ -51,13 +52,32 @@ def compute_report(
     run_id: str | None = None,
 ) -> dict[str, Any]:
     """Aggregate ledger *entries* (optionally only those from *run_id*)."""
+    entries = list(entries)
     rows = [dict(e) for e in entries if run_id is None or e.get("run_id") == run_id]
+    # Fallbacks in a row per paper over the whole ledger: a resume runs a paper
+    # whose export fell back again until it has fallen back the cap's times.
+    in_a_row: dict[str, int] = {}
+    for entry in entries:
+        if entry.get("status") == "ok":
+            pid = str(entry.get("paper_id"))
+            in_a_row[pid] = in_a_row.get(pid, 0) + 1 if fell_back_on_override(entry) else 0
 
     latest: dict[str, dict] = {}
     for row in rows:
         latest[str(row.get("paper_id"))] = row
     ok_latest = [r for r in latest.values() if r.get("status") == "ok"]
-    failed_latest = [r for r in latest.values() if r.get("status") != "ok"]
+    # A paper the run stopped on a model override before it finished has no
+    # verdict of its own (bibr.utils.model_overrides): not a failed paper.
+    not_finished = [
+        r
+        for r in latest.values()
+        if r.get("status") != "ok" and r.get("error_code") == MODEL_OVERRIDE_FAILED
+    ]
+    failed_latest = [
+        r
+        for r in latest.values()
+        if r.get("status") != "ok" and r.get("error_code") != MODEL_OVERRIDE_FAILED
+    ]
     ok_attempts = [r for r in rows if r.get("status") == "ok"]
 
     # Run window: earliest start to latest finish across every attempt.
@@ -139,6 +159,18 @@ def compute_report(
             "total": len(latest),
             "ok": len(ok_latest),
             "failed": len(failed_latest),
+            # Not finished because the run stopped on a model override; a resume runs them.
+            "stopped_on_model_override": len(not_finished),
+            # ok, but an overridden model raised on them and they fell back; a resume runs
+            # them, until they have fallen back MAX_UNSETTLED_FAILURES times in a row.
+            "fell_back_on_model_override": sum(1 for r in ok_latest if fell_back_on_override(r)),
+            # Of those, the papers that have reached that cap: they wait for --retry-failed.
+            "fell_back_capped": sum(
+                1
+                for r in ok_latest
+                if fell_back_on_override(r)
+                and in_a_row.get(str(r.get("paper_id")), 0) >= MAX_UNSETTLED_FAILURES
+            ),
             "attempts": len(rows),
         },
         "window": {
@@ -177,6 +209,10 @@ def compute_report(
     }
 
 
+def _papers(n: int) -> str:
+    return "paper" if n == 1 else "papers"
+
+
 def _round(value: float | None, digits: int = 3) -> float | None:
     return None if value is None else round(value, digits)
 
@@ -203,13 +239,42 @@ def render_report(report: Mapping[str, Any], *, title: str = "bibr batch report"
     warnings = report["warnings"]
 
     rows: list[tuple[str, str]] = []
+    stopped = papers.get("stopped_on_model_override") or 0
+    capped = papers.get("fell_back_capped") or 0
+    fell_back = (papers.get("fell_back_on_model_override") or 0) - capped
     rows.append(
         (
             "papers",
-            f"{papers['ok']} ok · {papers['failed']} failed · {papers['total']} total "
-            f"({papers['attempts']} attempts)",
+            f"{papers['ok']} ok · {papers['failed']} failed · "
+            + (f"{stopped} not finished · " if stopped else "")
+            + f"{papers['total']} total ({papers['attempts']} attempts)",
         )
     )
+    if stopped or fell_back:
+        parts = []
+        if stopped:
+            parts.append(
+                f"the run stopped on a model override: {stopped} "
+                f"{_papers(stopped)} not finished, through no fault of the PDF"
+            )
+        if fell_back:
+            parts.append(
+                f"{fell_back} {_papers(fell_back)} fell back from an overridden model "
+                "(MODEL_OVERRIDE_INFERENCE_FAILED)"
+            )
+        tail = "a resumed run processes them again"
+        if fell_back:
+            tail += f", until each has fallen back {MAX_UNSETTLED_FAILURES} times in a row"
+        rows.append(("override", "; ".join(parts) + "; " + tail))
+    if capped:
+        rows.append(
+            (
+                "override",
+                f"{capped} {_papers(capped)} fell back on a model override "
+                f"{MAX_UNSETTLED_FAILURES} times in a row; a resumed run skips them: rerun with "
+                "--retry-failed after fixing the model",
+            )
+        )
     if window["started_at"]:
         rows.append(
             (

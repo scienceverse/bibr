@@ -14,8 +14,11 @@ boundary and should only point at artifacts you control.
 
 from __future__ import annotations
 
+import contextlib
 import pickle
 import threading
+import warnings
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -145,6 +148,25 @@ def _refuse_legacy_format(*_args: object, **_kwargs: object) -> Any:
     raise RestrictedUnpicklingError("refusing a pre-0.10 joblib file: re-export the bundle")
 
 
+@contextlib.contextmanager
+def _quiet_sklearn_version_warnings() -> Iterator[None]:
+    """Keep scikit-learn's ``InconsistentVersionWarning`` blocks off the terminal.
+
+    A bundle written by another scikit-learn release than the installed one makes
+    every estimator in it print a multi-line warning on load. This is where bibr
+    loads such bundles, so the filter is scoped to this load and to that one
+    category; any other warning the load raises still shows.
+    """
+    try:
+        from sklearn.exceptions import InconsistentVersionWarning
+    except ImportError:
+        yield
+        return
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", InconsistentVersionWarning)
+        yield
+
+
 def safe_joblib_load(path: str | Path) -> Any:
     """Load a joblib artifact with the gadget-restricted unpickler.
 
@@ -168,7 +190,8 @@ def safe_joblib_load(path: str | Path) -> Any:
         jnp.NumpyUnpickler = _RestrictedNumpyUnpickler
         jnp.load_compatibility = _refuse_legacy_format
         try:
-            return joblib.load(path)
+            with _quiet_sklearn_version_warnings():
+                return joblib.load(path)
         finally:
             jnp.NumpyUnpickler = original
             jnp.load_compatibility = original_legacy

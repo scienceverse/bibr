@@ -444,6 +444,19 @@ def test_key_changes_with_invisible_layer_setting(monkeypatch):
     assert ocr_cache._key(fs, cfg, _identity()) != base
 
 
+def test_key_changes_only_when_the_ocr_layer_is_read(monkeypatch):
+    fs = _fs()
+    cfg = RunConfig(ocr_backend="text-layer")
+    base = ocr_cache._key(fs, cfg, _identity())
+
+    # Off is what every key before the option meant: it adds nothing.
+    monkeypatch.setattr(Settings.ocr, "text_layer_read_ocr_layer", False)
+    assert ocr_cache._key(fs, cfg, _identity()) == base
+
+    monkeypatch.setattr(Settings.ocr, "text_layer_read_ocr_layer", True)
+    assert ocr_cache._key(fs, cfg, _identity()) != base
+
+
 def test_key_changes_with_effective_reference_segmentation_strategy():
     fs = _fs()
     geom = ocr_cache._key(

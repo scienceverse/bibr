@@ -445,13 +445,28 @@ def test_review_body_gate_needs_the_setting_the_paper_type_and_no_methods_headin
         secs = _review_sections()
         _gate_non_imrad_section_types(secs, paper_type, review_body=review_body)
         assert secs[3].section_type == CanonicalSection.INTRODUCTION
-    # Any methods or results heading, printed or guessed, means the paper
-    # reports a study: "Data" / "Empirical strategy" / "Estimates".
-    for source in ("exact_alias", "model", "llm"):
+    # A methods or results part the paper prints means it reports a study: a
+    # heading typed from its own words, or a guess on a heading that names
+    # the part or is a methods subsection name.
+    for header, type_, source in (
+        ("Methods", CanonicalSection.METHODS, "exact_alias"),
+        ("Results of the survey", CanonicalSection.RESULTS, "substring_alias"),
+        ("Empirical strategy", CanonicalSection.METHODS, "model"),
+        ("Data", CanonicalSection.METHODS, "llm"),
+        ("2.1 Study area", CanonicalSection.METHODS, "model"),
+        ("Subjects", CanonicalSection.METHODS, "alias_prior"),
+        ("Data and methods", CanonicalSection.METHODS, "model"),
+        ("Main findings", CanonicalSection.RESULTS, "llm"),
+        ("Материалы и методы исследования", CanonicalSection.METHODS, "model"),
+        ("Результаты исследования и их обсуждение", CanonicalSection.RESULTS, "model"),
+        ("Métodos de análisis", CanonicalSection.METHODS, "model"),
+        ("Hasil uji normalitas", CanonicalSection.RESULTS, "model"),
+    ):
         secs = _review_sections()
-        secs.append(_typed(7, "Empirical strategy", CanonicalSection.METHODS, source))
+        secs.append(_typed(7, header, type_, source))
         _gate_non_imrad_section_types(secs, "commentary", review_body=True)
-        assert secs[3].section_type == CanonicalSection.INTRODUCTION
+        assert secs[3].section_type == CanonicalSection.INTRODUCTION, header
+        assert secs[6].section_type == type_, header
     # Systematic and scoping reviews and meta-analyses report a search.
     for text in (
         "Bleeding risk: a systematic review",
@@ -466,6 +481,71 @@ def test_review_body_gate_needs_the_setting_the_paper_type_and_no_methods_headin
     secs = _review_sections()
     _gate_non_imrad_section_types(secs, "case-study", review_body=True)
     assert secs[3].section_type == CanonicalSection.INTRODUCTION
+
+
+def test_a_bare_methods_or_results_guess_does_not_stop_the_review_body_rule():
+    """A guess on a topical heading is the classifier reading argument as a
+    report: it becomes discussion like the other body guesses."""
+    secs = [
+        _typed(1, "1 Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _typed(2, "5.1 Sensory fields without objects", CanonicalSection.METHODS, "model"),
+        _typed(3, "Accountability", CanonicalSection.RESULTS, "model", score=0.91),
+        _typed(4, "These elements include:", CanonicalSection.METHODS, "llm"),
+        _typed(5, "Risk assessment and management", CanonicalSection.RESULTS, "alias_prior"),
+        _typed(6, "Soil science", CanonicalSection.METHODS, "parent_context", 5, 2),
+        _typed(7, "Conclusion", CanonicalSection.DISCUSSION, "exact_alias"),
+    ]
+    _gate_non_imrad_section_types(secs, "review", review_body=True)
+    assert [(s.section_type, s.classification_source) for s in secs] == [
+        (CanonicalSection.INTRODUCTION, "exact_alias"),
+        (CanonicalSection.DISCUSSION, "positional"),
+        (CanonicalSection.DISCUSSION, "positional"),
+        (CanonicalSection.DISCUSSION, "positional"),
+        (CanonicalSection.DISCUSSION, "positional"),
+        (CanonicalSection.DISCUSSION, "positional"),
+        (CanonicalSection.DISCUSSION, "exact_alias"),
+    ]
+    # The setting switches it off, and an empirical paper is never touched.
+    for paper_type, review_body in (("review", False), ("empirical", True)):
+        secs = [
+            _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+            _typed(2, "Accountability", CanonicalSection.RESULTS, "model"),
+        ]
+        _gate_non_imrad_section_types(secs, paper_type, review_body=review_body)
+        assert secs[1].section_type == CanonicalSection.RESULTS
+
+
+def test_a_methods_or_results_guess_inside_a_kept_introduction_is_introduction():
+    secs = [
+        _typed(1, "1 Introduction", CanonicalSection.INTRODUCTION, "exact_alias", score=1.0),
+        _typed(2, "1.1 The data problem", CanonicalSection.METHODS, "model", 1, 2),
+        _typed(3, "1.2 What earlier accounts found", CanonicalSection.RESULTS, "model", 1, 2),
+        _typed(4, "1.2.1 Two readings", CanonicalSection.RESULTS, "parent_context", 3, 3),
+        _typed(5, "2 Against the received view", CanonicalSection.RESULTS, "model"),
+    ]
+    _gate_non_imrad_section_types(secs, "commentary", review_body=True)
+    assert [(s.section_type, s.classification_source) for s in secs] == [
+        (CanonicalSection.INTRODUCTION, "exact_alias"),
+        (CanonicalSection.INTRODUCTION, "parent_context"),
+        (CanonicalSection.INTRODUCTION, "parent_context"),
+        (CanonicalSection.INTRODUCTION, "parent_context"),
+        (CanonicalSection.DISCUSSION, "positional"),
+    ]
+    assert secs[1].classification_score == 0.75
+
+
+def test_review_headings_naming_the_framework_or_the_literature_stay_introduction():
+    secs = [
+        _typed(1, "1 Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _typed(2, "2.1 Theoretical framework", CanonicalSection.INTRODUCTION, "model"),
+        _typed(3, "Revisão da literatura", CanonicalSection.INTRODUCTION, "llm"),
+        _typed(4, "Обзор литературы", CanonicalSection.INTRODUCTION, "model"),
+        _typed(5, "Theoretical implications", CanonicalSection.INTRODUCTION, "model"),
+    ]
+    _gate_non_imrad_section_types(secs, "review", review_body=True)
+    assert [s.section_type for s in secs] == [CanonicalSection.INTRODUCTION] * 4 + [
+        CanonicalSection.DISCUSSION
+    ]
 
 
 def test_review_headings_naming_their_part_keep_it_with_their_subsections():

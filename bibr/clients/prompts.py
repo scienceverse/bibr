@@ -154,12 +154,12 @@ An abstract may be unheaded or use structured subheadings, but must be a distinc
 summary of the paper. Return null when no such summary is present; do not write
 a summary yourself. Stop at the end of the abstract, before body text, keywords,
 funding, disclosures, or a separate plain-language or significance statement.
-If parallel language abstracts are printed, prefer the printed English version
-when available; otherwise use the first complete printed version. Copy it
+If parallel language abstracts are printed, use the first complete printed
+version, even when a later version is in English. Copy it
 verbatim; do not concatenate or translate the versions.
 """
 
-# Shared by the title/keywords and merged core-metadata prompts. Unlike the
+# Shared by the title/keywords and merged core-metadata prompts. Like the
 # abstract, a parallel-language title keeps the version printed first; a
 # translation printed after it is a variant, not the paper's title.
 _TITLE_RULES = """Title: the paper's title as written. If the title is printed in more than one
