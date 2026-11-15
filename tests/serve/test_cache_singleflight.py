@@ -2,9 +2,14 @@
 
 import asyncio
 
+import pytest
+
 from bibr.extract.ref_extractor import _resolve_ref_strategies
 from bibr.pipeline.context import RunConfig
-from bibr.serve.deployments.pipeline import BibrPipelineAPI
+
+pytest.importorskip("fastapi")  # the serve extra
+
+from bibr.serve.deployments.pipeline import BibrPipelineAPI  # noqa: E402
 
 
 class _MemoryCache:

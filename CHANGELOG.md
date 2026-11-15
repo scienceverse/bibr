@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`bibr serve` no longer runs on LitServe.** The HTTP API is a FastAPI app
+  under uvicorn, and bibr starts and watches its one inference worker itself
+  (`bibr/serve/worker.py`). Requests, responses and status codes are unchanged:
+  a worker error keeps its status and detail, any other worker failure is a
+  generic `500`, a request that waited past `PIPELINE_TIMEOUT` for the worker is
+  a `504`, bodies over the cap are a `413`, and responses from 1000 bytes are
+  gzipped. LitServe's undocumented `GET /` and `GET /info` routes are gone (they
+  answer `404`, or `401` without the bearer when auth is on), as is its
+  `LIT_SERVER_API_KEY` and `LIGHTNING_CERT_PEM` handling, which bibr never
+  configured.
+- **The serve stack is an extra.** FastAPI, uvicorn and python-multipart move from
+  the core dependencies to the new `serve` extra, which `all` includes; litserve
+  is no longer installed. `bibr serve` without the extra exits with an install
+  hint (`uv tool install 'bibr[serve]'`). The serve image installs it.
+
+### Fixed
+
+- **A request no longer hangs when the inference worker dies under it.** Every
+  request in flight on the worker is answered at once with a `500` whose detail
+  has the code `inference_worker_stopped`, `/health` answers `503` instead of
+  `ok`, and new requests get a `503` until a worker is ready. With
+  `PIPELINE_RESTART_WORKERS=false` (the default) the server then stops with exit
+  status 1 for its supervisor to restart; `PIPELINE_RESTART_WORKERS=true`, an
+  unsupported opt-in under LitServe, now starts a new worker in place.
+- Ctrl+C on `bibr serve` lets the requests in flight finish (uvicorn's 30-second
+  graceful shutdown) before the worker stops, and the worker then exits cleanly,
+  running its teardown, instead of being terminated.
+
 ## [0.9.1] - 2026-11-16
 
 The first 0.9 release; this section lists every change since 0.8.0. 0.9.0 was

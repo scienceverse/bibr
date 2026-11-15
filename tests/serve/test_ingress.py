@@ -6,9 +6,12 @@ import stat
 import time
 
 import pytest
-from starlette.datastructures import UploadFile
 
-from bibr.serve.ingress import _FORM_OPTION_NAMES, _MAX_FORM_FIELDS
+pytest.importorskip("fastapi")  # the serve extra
+
+from starlette.datastructures import UploadFile  # noqa: E402
+
+from bibr.serve.ingress import _FORM_OPTION_NAMES, _MAX_FORM_FIELDS  # noqa: E402
 
 
 def _upload(content: bytes, filename: str = "paper.pdf") -> UploadFile:

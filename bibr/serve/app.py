@@ -806,6 +806,33 @@ def _register_readiness_route(server, Settings) -> None:
         )
 
 
+#: The import names the ``serve`` extra provides, and the packages they come from.
+_SERVE_EXTRA_MODULES = {
+    "fastapi": "fastapi",
+    "uvicorn": "uvicorn",
+    "python_multipart": "python-multipart",
+}
+
+
+def require_serve_extra() -> None:
+    """Stop with an install hint when the ``serve`` extra is not installed."""
+    import importlib.util
+
+    missing = [
+        package
+        for module, package in _SERVE_EXTRA_MODULES.items()
+        if importlib.util.find_spec(module) is None
+    ]
+    if missing:
+        from bibr.exceptions import ConfigurationError
+
+        raise ConfigurationError(
+            f"bibr serve needs the optional 'serve' dependencies (missing: {', '.join(missing)}) "
+            "— install them with: uv tool install 'bibr[serve]' "
+            "(in a source checkout: uv sync --extra serve; with pip: pip install 'bibr[serve]')."
+        )
+
+
 def main():
     """CLI entry point for ``bibr serve``."""
     import argparse
@@ -844,6 +871,7 @@ def main():
     )
 
     args = parser.parse_args()
+    require_serve_extra()
 
     # The worker (a fresh interpreter) reads the mode from the environment.
     chosen_mode = "fast" if args.fast else "full" if args.full else None

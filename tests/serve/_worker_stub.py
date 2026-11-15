@@ -67,18 +67,3 @@ class FailingSetupStub(StubBehaviour):
 
     def setup(self, device) -> None:
         raise RuntimeError("model bundle missing")
-
-
-try:  # The LitServe flavour exists only while LitServe is installed.
-    import litserve as _ls
-except ImportError:  # pragma: no cover - core installs
-    _ls = None
-
-if _ls is not None:
-
-    class LitServeStubAPI(StubBehaviour, _ls.LitAPI):
-        """The stub as a LitServe API on bibr's private descriptor route."""
-
-        def __init__(self, root: str) -> None:
-            _ls.LitAPI.__init__(self, api_path="/_bibr/inference", enable_async=True)
-            StubBehaviour.__init__(self, root)

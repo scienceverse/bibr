@@ -76,12 +76,13 @@ extra syntax is `uv add 'bibr[<extra>]'`.
 | `local-mlx` | `vllm-mlx` (macOS, Apple Silicon only) | Pinning the vLLM-MLX local-LLM backend directly on Apple Silicon (`local` covers this automatically on macOS). |
 | `vllm` | `vllm==0.32.0`, `openai>=2.54.0,<3` (requires Python <3.14) | The *managed* local vLLM server bibr starts for `--llm local` on Linux/CUDA (the path `bibr setup`'s "fully local" flow configures). |
 | `gpu` | `onnxruntime-gpu[cuda,cudnn]` (Linux/Windows) | GPU execution providers for ONNX Runtime — sentence segmentation, and on a core install layout, the classifiers and the NER parser too. It needs one more command after syncing; see [GPU ONNX Runtime](#gpu-onnx-runtime). |
+| `serve` | `fastapi`, `uvicorn[standard]`, `python-multipart` | The `bibr serve` HTTP API. Without it, `bibr serve` exits with an install hint. |
 | `cache` | `redis>=5.0.0` | Redis-backed response caching — set `REDIS_URL` to enable it (the result cache is on by default, but only uses Redis once a URL is configured). |
 | `demo` | `gradio>=6.15.0` | The interactive Gradio demo app. |
 | `batch` | `anthropic>=0.40.0,<1` | Offline processing via the Anthropic Message Batches API — bulk paper-type/OECD labeling and similar bulk LLM workflows. The SDK itself is a core dependency, since `LLM_PROVIDER=anthropic` (the hosted default `bibr setup` recommends) needs it; this extra keeps existing installs working. |
 | `nuextract` | `numind>=0.3,<0.3.1` | The experimental `LLM_STRUCTURED_BACKEND=nuextract-native` backend for NuExtract servers. bibr no longer installs numind otherwise, and that backend stops with an error naming this extra. |
 | `mcp` | `mcp>=2.2.0,<3` | The `bibr mcp` server — extraction as [Model Context Protocol tools](../guides/mcp.md) for agents (Claude Code, Claude Desktop, any MCP client). |
-| `all` | `batch` + `cache` + `demo` + `mcp` + `torch` | The cloud + ML set for a full local-dev setup. Does **not** include `vllm`, `local`, `local-mlx`, or `gpu` — add whichever match your hardware. |
+| `all` | `batch` + `cache` + `demo` + `mcp` + `serve` + `torch` | The cloud + ML set for a full local-dev setup. Does **not** include `vllm`, `local`, `local-mlx`, or `gpu` — add whichever match your hardware. |
 
 ## Choosing serving extras
 
@@ -91,7 +92,7 @@ optional.
 
 The serving extras are still hardware-specific, so most people want a subset:
 
-- **`--extra all` is the superset to reach for.** It bundles `batch` + `cache` + `demo` + `mcp` + `torch` — everything that is useful regardless of hardware.
+- **`--extra all` is the superset to reach for.** It bundles `batch` + `cache` + `demo` + `mcp` + `serve` + `torch` — everything that is useful regardless of hardware.
 - Add **`vllm`** on Linux/CUDA (managed vLLM for `--llm local`, and the
   `paddle-vllm` GPU OCR backend), **`local`** or **`local-mlx`** on Apple
   Silicon, and **`gpu`** for ONNX Runtime's GPU build, which layout, sentence

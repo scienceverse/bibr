@@ -55,6 +55,7 @@ ARG ML_STACK
 # Those live in the optional `ml` extra (pyproject.toml); without it the
 # model-cache steps below fail at build time with ModuleNotFoundError. The
 # ONNX stack leaves the extra out, and with it about 5.5 GB of torch and CUDA wheels.
+# --extra serve is the HTTP API itself (FastAPI, uvicorn, python-multipart).
 # --extra mcp ships the optional MCP server so an operator can flip
 # MCP_ENABLED=true on the Compose stack without a custom image; it is a small
 # pure-Python dependency and stays inert unless enabled.
@@ -63,16 +64,16 @@ COPY pyproject.toml uv.lock README.md ./
 RUN case "$ML_STACK" in torch) ml_extra="--extra ml";; onnx) ml_extra="";; \
       *) echo "ML_STACK must be torch or onnx, got '$ML_STACK'" >&2; exit 1;; esac && \
     if [ "$WITH_GPU" = "true" ]; then \
-      uv sync --locked --no-install-project --extra cache --extra gpu $ml_extra --extra mcp --no-dev; \
+      uv sync --locked --no-install-project --extra serve --extra cache --extra gpu $ml_extra --extra mcp --no-dev; \
     else \
-      uv sync --locked --no-install-project --extra cache $ml_extra --extra mcp --no-dev; \
+      uv sync --locked --no-install-project --extra serve --extra cache $ml_extra --extra mcp --no-dev; \
     fi
 
 # Install the project, then swap onnxruntime → onnxruntime-gpu on GPU builds.
 COPY bibr ./bibr
 RUN if [ "$ML_STACK" = "onnx" ]; then ml_extra=""; else ml_extra="--extra ml"; fi && \
     if [ "$WITH_GPU" = "true" ]; then \
-      uv sync --locked --extra cache --extra gpu $ml_extra --extra mcp --no-dev && \
+      uv sync --locked --extra serve --extra cache --extra gpu $ml_extra --extra mcp --no-dev && \
       # onnxruntime (CPU) and onnxruntime-gpu share an `onnxruntime/` import
       # namespace, so installing both leaves a broken venv where the CPU
       # pybind11_state.so shadows the GPU one. Uninstall both and reinstall just
@@ -89,7 +90,7 @@ RUN if [ "$ML_STACK" = "onnx" ]; then ml_extra=""; else ml_extra="--extra ml"; f
       # commit could ship different ORT binaries and CUDA/cuDNN wheels. The
       # export pins onnxruntime-gpu and its nvidia-* wheels to the locked versions.
       uv export --quiet --locked --no-dev --no-emit-project --no-hashes \
-        --extra cache --extra gpu $ml_extra --extra mcp -o /tmp/locked-requirements.txt && \
+        --extra serve --extra cache --extra gpu $ml_extra --extra mcp -o /tmp/locked-requirements.txt && \
       uv pip install --python /app/.venv/bin/python \
         --constraint /tmp/locked-requirements.txt 'onnxruntime-gpu[cuda,cudnn]' && \
       # Assert the swap actually took. get_available_providers() can't be used
@@ -102,7 +103,7 @@ RUN if [ "$ML_STACK" = "onnx" ]; then ml_extra=""; else ml_extra="--extra ml"; f
         assert got == ['onnxruntime-gpu'], \
         f'GPU build must ship onnxruntime-gpu alone — got {got}.'"; \
     else \
-      uv sync --locked --extra cache $ml_extra --extra mcp --no-dev; \
+      uv sync --locked --extra serve --extra cache $ml_extra --extra mcp --no-dev; \
     fi
 
 # ===========================================================================
@@ -290,7 +291,7 @@ ENV BIBR_BUILD_SHA=${BIBR_BUILD_SHA}
 
 EXPOSE 8000
 
-# /ready probes OCR + Redis upstream; /health is just LitServe liveness.
+# /ready probes OCR + Redis upstream; /health is inference-worker liveness.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=600s --retries=5 \
     CMD curl -sf http://localhost:8000/ready || exit 1
 

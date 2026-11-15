@@ -5,7 +5,10 @@ import asyncio
 import pytest
 
 from bibr.pipeline.context import RunConfig
-from bibr.serve.deployments.pipeline import BibrPipelineAPI
+
+pytest.importorskip("fastapi")  # the serve extra
+
+from bibr.serve.deployments.pipeline import BibrPipelineAPI  # noqa: E402
 
 
 class _Lease:

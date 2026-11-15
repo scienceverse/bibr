@@ -69,7 +69,7 @@ services:
     restart: unless-stopped
 
   # ---------- bibr serve node ----------
-  # LitServe HTTP API + pipeline orchestrator + GPU models (layout, segmenter)
+  # bibr serve HTTP API + pipeline orchestrator + GPU models (layout, segmenter)
   bibr-serve:
     build:
       context: .
@@ -119,7 +119,7 @@ services:
     # that path, and an empty named volume would mask the baked content and
     # force a multi-GB re-download on first start.
     healthcheck:
-      # /ready probes OCR + Redis upstream; /health is just LitServe liveness.
+      # /ready probes OCR + Redis upstream; /health is inference-worker liveness.
       test: ["CMD-SHELL", "curl -sf http://localhost:8000/ready"]
       interval: 30s
       timeout: 10s

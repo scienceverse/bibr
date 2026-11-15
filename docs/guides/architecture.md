@@ -21,7 +21,7 @@ File / bytes --> Validate
 Two runtime options are available:
 
 - **`bibr chew` / Python library** (`bibr/local/pipeline.py`) -- `LocalPipeline` manages model lifetimes on one machine. OCR uses the selected Paddle-first runtime, an explicit HTTP backend, or a cloud vision provider.
-- **`bibr serve`** (`bibr/serve/app.py`) -- LitServe HTTP API with disk-backed
+- **`bibr serve`** (`bibr/serve/app.py`) -- FastAPI HTTP API with disk-backed
   multipart ingress and one spawned inference worker hosting the pipeline GPU
   models (layout, segmenter).
 
@@ -408,7 +408,7 @@ Pipeline orchestrator (`bibr/local/pipeline.py`). Loads models sequentially to f
 | `bibr/local/layout.py` | PP-DocLayoutV3 layout detector |
 | `bibr/local/segmenter.py` | wtpsplit-lite sentence segmenter |
 | `bibr/local/ocr.py`, `bibr/local/vllm_ocr.py`, `bibr/local/mlx_vlm_ocr.py`, `bibr/local/rapid_mlx.py`, `bibr/local/ocr_cloud.py` | OCR backends behind `bibr/ocr/registry.py`: managed `paddle-vllm` / `glm-llama` / `paddle-*-mlx` / `glm-rapid-mlx` servers, `paddle-http` / `glm-http` external servers, and the cloud vision LLMs |
-| `bibr/pipeline/` | The stage pipeline (`stages/`), run context, resources and caches shared by the local and LitServe entry points |
+| `bibr/pipeline/` | The stage pipeline (`stages/`), run context, resources and caches shared by the local and serve entry points |
 
 Memory management modes control GPU VRAM usage: `aggressive` (load/unload per phase), `balanced` (keep layout + segmenter resident; OCR also stays resident across chunks unless a local LLM server needs the VRAM), `keep_all` (everything loaded).
 
@@ -423,9 +423,10 @@ mode, `PIPELINE_STREAM_BACKHALF=true` allows completed files' parsing,
 extraction, enrichment, and export to overlap subsequent OCR work. Managed
 local LLMs retain the stage barrier for the OCR-to-LLM memory handoff.
 
-### `bibr serve` (LitServe)
+### `bibr serve`
 
-LitServe separates the HTTP API process from its spawned inference worker.
+`bibr serve` runs the HTTP API (FastAPI under uvicorn) in one process and the
+pipeline in one spawned inference worker (`bibr/serve/worker.py`).
 Public multipart bodies never cross that process boundary. The request flow is:
 
 ```
@@ -435,18 +436,19 @@ POST /papers/extract
   -> one multipart spool (at most 1 MiB in memory)
   -> owner-only disk file (50 MiB file limit; 51 MiB body envelope)
   -> leased UUID/size/SHA-256/options descriptor
-  -> LitServe multiprocessing queue
+  -> pipe to the inference worker
   -> worker verifies one read, deletes file, and runs the pipeline
 ```
 
-`/_bibr/inference` is the private LitServe descriptor route and returns `404`
-when called over HTTP. It exists only so the API process can dispatch the
-opaque descriptor through LitServe's in-process route adapter. A descriptor
-contains no file bytes and no filesystem path.
+A descriptor contains no file bytes and no filesystem path. The worker
+answers each with the encoded result, or with the status and detail of an
+`HTTPException`; any other worker error is logged there and answered with a
+generic `500`.
 
 | Component | Module | Purpose |
 |---|---|---|
-| `build_server()` | `bibr/serve/app.py` | Builds the `litserve.LitServer`, public multipart route, private descriptor dispatch, and owned upload lifecycle |
+| `build_server()` | `bibr/serve/app.py` | Builds the FastAPI app, public multipart route, private descriptor dispatch, and owned upload lifecycle; `BibrServer.run()` binds, starts the worker and serves |
+| `InferenceWorker` | `bibr/serve/worker.py` | Spawns the worker, dispatches descriptors to it, answers its waiters when it dies, and restarts or fail-stops |
 | `UploadStore` / `InferenceDispatchTracker` | `bibr/serve/ingress.py` | Persists bounded uploads, queues opaque descriptors, and cleans files on consumption, cancellation, failure, or shutdown |
 | `BibrPipelineAPI` | `bibr/serve/deployments/pipeline.py` | Main processing orchestrator |
 | `LayoutDetector` | `bibr/serve/deployments/layout.py` | PP-DocLayoutV3 layout detection (GPU/CPU) |
@@ -458,21 +460,17 @@ and `GpuBatcher`, so batches shrink as workers rise. Async I/O and the GPU
 batchers provide concurrency within that one worker, and the heavy CPU stages
 already use every core from one process — see
 [Production deployment](deployment.md#why-there-is-no-worker-count-setting).
-Failed inference workers
-fail-stop by default (`PIPELINE_RESTART_WORKERS=false`). LitServe 0.2.17 worker
-replacement cannot reliably notify the API waiter owned by a dead worker, so
-`true` remains an unsupported opt-in until the locked real-process death-path
-gate proves completion notification.
+When the worker dies, the requests in flight on it are answered with a `500`
+(`inference_worker_stopped`) at once; the server then stops for a supervisor to
+restart (`PIPELINE_RESTART_WORKERS=false`, the default) or starts a new worker
+(`true`).
 
 Async jobs persist through the same upload store and submit the same descriptor
-to LitServe. The queue remains in the HTTP API process;
+to the worker. The queue remains in the HTTP API process;
 `JOBS_STORE=memory` keeps results there too, while `JOBS_STORE=redis` shares
 status and results between replicas. The server pins exactly one API process
 per instance, including with jobs disabled.
 Upload leases keep queued and dispatched descriptors out of stale sweeping.
-LitServe is pinned below 0.3 because this boundary relies on 0.2.x
-manager/worker helpers; the spawned success and death-path compatibility tests
-must be migrated before that version constraint is relaxed.
 
 ## Configuration
 

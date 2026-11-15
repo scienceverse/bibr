@@ -1,7 +1,7 @@
 # REST API
 
-`bibr serve` runs a [LitServe](https://lightning.ai/docs/litserve/home)
-application exposing the bibr extraction pipeline over HTTP. See
+`bibr serve` runs a FastAPI application (under uvicorn, from the `serve`
+extra) exposing the bibr extraction pipeline over HTTP. See
 [Production deployment](../guides/deployment.md) for running the server
 (Docker, concurrency, hardware sizing); this page documents the REST
 surface — endpoints, request/response shapes, caching, and error codes.
@@ -16,7 +16,7 @@ bearer token as extraction when authentication is enabled.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/health` | Liveness probe -- LitServe's built-in endpoint; returns plain-text `ok` (status `200`) |
+| `GET` | `/health` | Liveness probe -- plain-text `ok` (status `200`) while the inference worker is ready, `not ready` (`503`) otherwise |
 | `GET` | `/ready` | Readiness probe -- checks OCR service (not on the text-layer route, where `checks.ocr` reads `not_used (text layer)`), configured classifier artifacts, and Redis when response caching is enabled; `200` when ready, `503` otherwise |
 
 The probes are public. With authentication enabled, an anonymous `/ready`
@@ -78,10 +78,9 @@ curl -X POST http://localhost:8000/papers/extract \
   -F "crossref=true"
 ```
 
-LitServe's internal `POST /_bibr/inference` route accepts only the API
-process's opaque disk descriptor and returns `404` to direct HTTP callers.
-Only the upload UUID, filename, size, SHA-256, and extraction options cross the
-worker queue; neither bytes nor a filesystem path do. Worker decode securely
+The API process hands the inference worker an opaque disk descriptor; there
+is no HTTP route for it. Only the upload UUID, filename, size, SHA-256, and
+extraction options cross to the worker; neither bytes nor a filesystem path do. Worker decode securely
 reads and verifies the owned file once, then deletes it.
 
 ### Async jobs
@@ -95,7 +94,7 @@ fire-and-poll alternative instead:
 Accepts the same `multipart/form-data` fields as `/papers/extract`.
 Returns `202` immediately with `{"job_id", "status": "queued",
 "status_url"}` and runs the extraction in the background. It persists the
-upload once and dispatches the same opaque descriptor through LitServe; it
+upload once and dispatches the same opaque descriptor to the worker; it
 does not rebuild or self-proxy a multipart request.
 
 #### `GET /papers/jobs/{id}`
@@ -187,10 +186,10 @@ it finished is failed with `503`, so the client resubmits it: with `error_code`
 Redis runs out), or `{"detail": "replica shut down before the job finished"}` after
 a clean shutdown. The service always pins one HTTP
 API process per instance—even with jobs disabled—because upload ownership and
-dispatch tracking are process-local. `PIPELINE_RESTART_WORKERS=false`
-fail-stops on worker death; `true` is an unsupported opt-in until the locked
-LitServe compatibility gate proves reliable completion notification and does
-not make jobs durable.
+dispatch tracking are process-local. A job running when the inference worker
+dies fails with `500` and `error_code` `inference_worker_stopped`.
+`PIPELINE_RESTART_WORKERS=false` then stops the server; `true` starts a new
+worker. Neither makes jobs durable.
 
 ## Authentication
 

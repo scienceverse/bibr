@@ -61,45 +61,9 @@ def _bibr_harness(*, timeout: float, restart: bool = False):
         store.close_sync()
 
 
-@contextlib.contextmanager
-def _litserve_harness(*, timeout: float):
-    ls = pytest.importorskip("litserve")
-    import litserve.server as ls_server
-
-    from bibr.serve.ingress import InferenceDispatchTracker, UploadStore, register_extract_route
-    from tests.serve._worker_stub import STUB_MAX_SIZE, LitServeStubAPI
-
-    def resolve_litserve_dispatch(app):
-        (route,) = [r for r in app.routes if getattr(r, "path", None) == "/_bibr/inference"]
-        return route.endpoint
-
-    ls_server._MCP_AVAILABLE = False
-    store = UploadStore.create(
-        max_size=STUB_MAX_SIZE, spool_memory_bytes=1 << 20, stale_after_seconds=600
-    )
-    api = LitServeStubAPI(str(store.root))
-    server = ls.LitServer(api, accelerator="cpu", devices=1, timeout=timeout)
-    server.inference_workers = []
-    manager = server._init_manager(1)
-    try:
-        server.inference_workers.extend(server.launch_inference_worker(api))
-        deadline = time.monotonic() + 30
-        while not all(s == "ready" for s in server.workers_setup_status.values()):
-            assert time.monotonic() < deadline, "worker did not start"
-            time.sleep(0.05)
-        server.app.response_queue_id = 0
-        tracker = InferenceDispatchTracker(
-            dispatch=resolve_litserve_dispatch(server.app), store=store
-        )
-        register_extract_route(server.app, store, tracker)
-        with TestClient(server.app) as client:
-            yield Harness(client, store, [w.pid for w in server.inference_workers])
-    finally:
-        server._perform_graceful_shutdown(manager, {}, "test")
-        store.close_sync()
-
-
-HARNESSES = {"litserve": _litserve_harness, "bibr": _bibr_harness}
+# The LitServe flavour that pinned these behaviours before the swap ran the same
+# assertions; it went with the dependency.
+HARNESSES = {"bibr": _bibr_harness}
 
 
 @pytest.fixture(params=sorted(HARNESSES))
@@ -179,11 +143,11 @@ def test_a_request_that_waited_past_the_timeout_is_a_504(impl):
     assert response.json() == {"detail": "Request timed out"}
 
 
-# ---------------------------------------------------------------- bibr's own worker
+# ---------------------------------------------------------------- death and restart
 #
-# LitServe 0.2.x leaves a request stranded when its worker dies (the waiter
-# never hears back) and replaces workers only as an unsupported opt-in; these
-# pin what bibr's worker does instead.
+# LitServe 0.2.x left a request stranded when its worker died (the waiter never
+# heard back) and replaced workers only as an unsupported opt-in; these pin what
+# bibr's worker does instead.
 
 
 def test_worker_death_answers_the_waiter_and_calls_on_fatal():
@@ -241,6 +205,87 @@ def test_a_failed_setup_fails_start(tmp_path):
     with pytest.raises(WorkerStartError, match="setup failed: RuntimeError"):
         worker.start()
     assert not worker.ready
+
+
+@contextlib.contextmanager
+def _stub_server_process():
+    """``BibrServer.run`` over the stub worker in its own process group."""
+    import socket
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    import httpx
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    root = Path(__file__).resolve().parents[2]
+    process = subprocess.Popen(  # noqa: S603 - fixed argv
+        [sys.executable, "-m", "tests.serve._stub_server", str(port)],
+        cwd=root,
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    base = f"http://127.0.0.1:{port}"
+    try:
+        deadline = time.monotonic() + 60
+        while True:
+            assert process.poll() is None, process.stdout.read()
+            try:
+                if httpx.get(f"{base}/health", timeout=1).status_code == 200:
+                    break
+            except httpx.HTTPError:
+                pass
+            assert time.monotonic() < deadline, "stub server did not start"
+            time.sleep(0.1)
+        yield process, base
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=30)
+
+
+def _post_url(base: str, name: str):
+    import httpx
+
+    return httpx.post(
+        f"{base}/papers/extract",
+        files={"file": (name, PDF, "application/pdf")},
+        timeout=60,
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="sends SIGINT to a POSIX process group")
+def test_ctrl_c_lets_the_request_in_flight_finish():
+    import signal
+
+    with _stub_server_process() as (process, base):
+        with concurrent.futures.ThreadPoolExecutor(1) as pool:
+            pending = pool.submit(_post_url, base, "slow.pdf")
+            time.sleep(0.5)
+            # What a terminal's Ctrl+C does: SIGINT to the whole group.
+            os.killpg(process.pid, signal.SIGINT)
+            response = pending.result(timeout=30)
+        # uvicorn re-raises the signal once it has shut down: Ctrl+C's status.
+        assert process.wait(timeout=30) == -signal.SIGINT
+        output = process.stdout.read()
+    assert "Inference worker" not in output or "exited with code" not in output
+    assert response.status_code == 200
+    assert response.json()["name"] == "slow.pdf"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="kills a POSIX process")
+def test_the_server_stops_with_status_1_when_its_worker_dies():
+    from bibr.serve.worker import WORKER_STOPPED_DETAIL
+
+    with _stub_server_process() as (process, base):
+        response = _post_url(base, "die.pdf")
+        assert process.wait(timeout=30) == 1
+    assert response.status_code == 500
+    assert response.json() == {"detail": WORKER_STOPPED_DETAIL}
 
 
 def test_stop_answers_a_request_still_in_flight():
