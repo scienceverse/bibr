@@ -17,10 +17,12 @@ def test_missing_serve_packages_stop_with_the_install_hint(monkeypatch):
     from bibr.serve import app as app_mod
 
     real_find_spec = importlib.util.find_spec
+    # Whatever this environment has: two of the extra's modules gone, one there.
+    present = {"fastapi": None, "python_multipart": None, "uvicorn": object()}
 
     def find_spec(name, *args, **kwargs):
-        if name in ("fastapi", "python_multipart"):
-            return None
+        if name in present:
+            return present[name]
         return real_find_spec(name, *args, **kwargs)
 
     monkeypatch.setattr(importlib.util, "find_spec", find_spec)
