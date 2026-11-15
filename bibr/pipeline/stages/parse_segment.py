@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from bibr.exceptions import ModelOverrideError
 from bibr.processing_warnings import ProcessingWarning, WarningCode
+from bibr.utils.link_targets import LinkTargets
 
 if TYPE_CHECKING:
     from bibr.pipeline.context import PipelineContext
@@ -17,13 +18,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _parse_pdf(ocr_regions, outline=None, *, settings=None, first_page_index=0):
+def _parse_pdf(ocr_regions, outline=None, *, settings=None, first_page_index=0, link_targets=None):
     """Build PDFParser and run parse() — sync, CPU-heavy.
 
     ``outline`` (PDF bookmarks) is threaded through only when present, so the
     default (outline-off) construction stays ``PDFParser(ocr_regions)``.
     ``first_page_index`` tells the parser which absolute page the slice starts
     at, so front-matter heuristics keep firing under ``--pages``/``start_page``.
+    ``link_targets`` (the targets of the PDF's link annotations) is passed only
+    when the PDF has any.
     """
     from bibr.structure.pdf_parser import PDFParser
 
@@ -32,6 +35,7 @@ def _parse_pdf(ocr_regions, outline=None, *, settings=None, first_page_index=0):
         outline=outline,
         settings=settings,
         first_page_index=first_page_index,
+        **({"link_targets": link_targets} if link_targets else {}),
     )
     contents = parser.parse()
     return parser, contents
@@ -227,11 +231,14 @@ class ParseSegmentStage:
                     # default path is unchanged.
                     outline = getattr(fs, "pdf_outline", None)
                     parse_args = (fs.ocr_regions,) if outline is None else (fs.ocr_regions, outline)
+                    # The PDF's link targets ride along only when it has any.
+                    links = LinkTargets.from_uri_dicts(getattr(fs, "pdf_uri_links", None))
                     parser, contents = await asyncio.to_thread(
                         _parse_pdf,
                         *parse_args,
                         settings=ctx.settings,
                         first_page_index=ctx.config.start_page or 0,
+                        **({"link_targets": links} if links else {}),
                     )
                     fs.contents = contents
 

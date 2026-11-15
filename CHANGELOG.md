@@ -836,6 +836,39 @@ by an earlier version, carries neither.
   fell from 7.8–9.5 GB to 4.2–4.8 GB, at about 1% more CPU time and 2–3% more wall
   time per paper (two runs of each, alternated, on 4 cores). Exports are unchanged.
 
+- A link that a PDF prints over two lines is joined from the PDF's own link
+  annotation when it is clickable, so it no longer keeps a space at the line break
+  ("https://osf.io/ 5s8kv", "github.com/fishR-Core-Team/ FSA", "osf. io/2y34r/",
+  "htt ps://github.com/..."). The rules that judge a break by the words around it
+  read a short identifier with prose after it, a word in capitals, a file extension
+  they do not list, a value broken inside its digits and letters, and a link printed
+  without "https://" as the end of the link. A break is now joined, with no space,
+  when the target of one of the PDF's link annotations runs on through it: inside a
+  region, between two regions (a column or page break) and in a reference entry.
+  Where no target runs through a break, the rules decide as before, so a link that
+  is not clickable reads as it did. A wrap hyphen that the target does not have is
+  dropped at a region break ("github.com/Betha-" + "nyL/…"). A target that runs on
+  past the next word joins only when that word ends its line and the text joined
+  is shaped like a link, so two words of prose that spell the start of a host
+  ("Creative" + "Commons" beside a creativecommons.org licence link, "The" +
+  "Guardian") stay apart. In a fast text-layer run of 290 papers (the 190 of the
+  gold cohort and 100 of the scienceverse/papers corpora that cite a repository),
+  86 sentences change, each inside a link and none in prose; 22 reference DOIs
+  that the wrap had cut ("10.1016/j.j", "10.1146/ann") are read whole. One
+  reference that links a book chapter's page now gets the DOI with the chapter's
+  name after it ("10.4324/9780203113110-6/governing-biosecurity-…"), where it had
+  none, as a DOI may hold a "/". Against the gold cohort's URL labels, 13 wrapped
+  links keep a space, against 17, and the core metrics are unchanged but for the
+  reference DOI recall (0.900 to 0.901). Of the 73
+  wrapped repository links the 100 papers annotate, 72 are whole, against 68; the
+  other is lost to a text-layer region that reads the next line's tall letters.
+  metacheck's own link repair (scienceverse/metacheck#640) changes none of their
+  40,313 sentences, against 4.
+- A DOI read from a publisher link no longer keeps the link's query:
+  "…/doi/abs/10.12968/bjca.2019.0072?journalCode=bjca" gives
+  10.12968/bjca.2019.0072, as do "?via%3Dihub", "?download=true" and
+  "?casa_token=…" (one reference of the gold cohort). A DOI holds no "?name=". A
+  link joined whole across a line break exposed it.
 - A word hyphenated at a page or column break is joined like one hyphenated at a
   line end: "edu-" and "cated" on two pages read "educated", where they read
   "edu- cated".
