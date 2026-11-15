@@ -26,7 +26,14 @@ from bibr.paper_contents import (
 )
 from bibr.structure.caption_matcher import CaptionTarget, assign_captions
 from bibr.structure.float_images import composite_panel_image
-from bibr.structure.float_labels import LABEL, SUPPLEMENT_WORD, caption_label, normalize_label
+from bibr.structure.float_labels import (
+    LABEL,
+    OTHER_FIGURE_WORD,
+    OTHER_TABLE_WORD,
+    SUPPLEMENT_WORD,
+    caption_label,
+    normalize_label,
+)
 from bibr.structure.floats_normalize import continuation_frame
 from bibr.structure.html_table import html_table_frame
 from bibr.structure.text_repair import bbox_to_tuple
@@ -68,18 +75,21 @@ class MediaHandlersMixin:
     # "Table 3", "Table 3.1", "Table S2", "Figure A1", "TABLE IV", and the
     # "Supplementary Table 4" spelling.
     _BARE_TABLE_LABEL_RE = re.compile(
-        rf"^{SUPPLEMENT_WORD}?Table\s+{LABEL}\s*[.:]?\s*$", re.IGNORECASE
+        rf"^{SUPPLEMENT_WORD}?(?:Table|{OTHER_TABLE_WORD})\s+{LABEL}\s*[.:]?\s*$", re.IGNORECASE
     )
     _EXPLICIT_FIGURE_RE = re.compile(
-        rf"^(?P<supplement>{SUPPLEMENT_WORD})?(?:Figure|Fig\.?)\s+(?P<label>{LABEL})",
+        rf"^(?P<supplement>{SUPPLEMENT_WORD})?(?:Figure|Fig\.?|{OTHER_FIGURE_WORD})\s+(?P<label>{LABEL})",
         re.IGNORECASE,
     )
     _TABLE_LABEL_RE = re.compile(
-        rf"^(?P<supplement>{SUPPLEMENT_WORD})?Table\s+(?P<label>{LABEL})", re.IGNORECASE
+        rf"^(?P<supplement>{SUPPLEMENT_WORD})?(?:Table|{OTHER_TABLE_WORD})\s+(?P<label>{LABEL})",
+        re.IGNORECASE,
     )
     # A caption region that opens with the word "Table" is a table's even when
     # OCR garbled the label ("Table Il", "T able |"); it never captions a figure.
-    _TABLE_WORD_CAPTION_RE = re.compile(rf"^{SUPPLEMENT_WORD}?T\s?able\b", re.IGNORECASE)
+    _TABLE_WORD_CAPTION_RE = re.compile(
+        rf"^{SUPPLEMENT_WORD}?(?:T\s?able|{OTHER_TABLE_WORD})\b", re.IGNORECASE
+    )
     _ROMAN_LABEL_RE = re.compile(r"[IVXLCDM]+")
     _DOTTED_NUMBER_RE = re.compile(r"(?P<major>\d+)(?:\.\d+)*")
     # Parenthesized continuation marker, mirroring
@@ -433,7 +443,7 @@ class MediaHandlersMixin:
             source_index,
             from_ocr,
         ) = staged
-        if source_label in {"figure_title", "chart_title"}:
+        if source_label == "figure_title":
             self._handle_figure_caption(
                 content,
                 bbox,
@@ -1932,7 +1942,6 @@ class MediaHandlersMixin:
         self,
         candidate: CaptionCandidate,
         target: CaptionTarget | None,
-        reasons: tuple[str, ...],
     ) -> str | None:
         """Why the parse refuses a matcher edge, or ``None`` when it stands.
 
@@ -1954,8 +1963,6 @@ class MediaHandlersMixin:
             for barrier in self._caption_barriers
         ):
             return "heading_boundary"
-        if "adjacent_page" in reasons and candidate.page_number != target.page_number:
-            return "adjacent_page_not_authorized"
         return None
 
     def _suppress_unowned_decoration_figures(
@@ -2071,9 +2078,9 @@ class MediaHandlersMixin:
             and candidate.caption_id not in confirmed_table_caption_owners
             and candidate.caption_id not in self._non_caption_candidate_reasons
         ]
-        # Every cross-page assignment is vetoed below, so cross-page edges
+        # A caption owns a float on its own page only, so cross-page edges
         # stay out of the solve: one that outscored a caption's same-page
-        # edge won, was vetoed, and left the caption with no owner at all.
+        # edge would win and leave the caption with no owner at all.
         # A figure that already owns its panel caption is not a target
         # either: the solve would hand it a second caption, and the figure
         # that caption belongs to would stay uncaptioned.
@@ -2191,7 +2198,7 @@ class MediaHandlersMixin:
         for assignment in assignments:
             candidate = candidate_by_id[assignment.caption_id]
             target = target_by_id.get(assignment.object_id or "")
-            veto_reason = self._assignment_veto_reason(candidate, target, assignment.reasons)
+            veto_reason = self._assignment_veto_reason(candidate, target)
             if veto_reason is not None:
                 assignment = CaptionAssignment(
                     assignment.caption_id,

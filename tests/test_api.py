@@ -15,7 +15,7 @@ from bibr.api import Records, Result, _pipeline_kwargs
 def _export_fixture() -> dict:
     return {
         "paper_id": "10.1234/example",
-        "schema_version": "12.2",
+        "schema_version": "12.4",
         "source": {
             "file_name": "paper.pdf",
             "sha256": "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12",
@@ -173,6 +173,157 @@ def test_chew_skips_the_llm_preflight_with_no_llm(stub_pipeline, monkeypatch):
     assert len(stub_pipeline.instances) == 1
 
 
+_NO_KEY_VARS = (
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "LANGEXTRACT_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_API_KEY",
+    "GROQ_API_KEY",
+    "OPENAI_API_KEY",
+    "LLM_API_KEY",
+    "LLM_BASE_URL",
+    "LLM_PROVIDER",
+    "LLM_MODEL",
+    "PIPELINE_MODE",
+)
+
+
+@pytest.fixture
+def keyless(monkeypatch):
+    """Settings for a machine with no LLM configured: no key, no provider, model or endpoint."""
+    from bibr.config import GlobalSettings
+
+    for var in _NO_KEY_VARS:
+        monkeypatch.delenv(var, raising=False)
+    return GlobalSettings()
+
+
+def test_chew_with_no_llm_configured_runs_fast_and_asks_for_no_key(
+    stub_pipeline, keyless, monkeypatch
+):
+    import bibr
+
+    _fail_preflight(monkeypatch)
+    result = bibr.chew("paper.pdf", settings=keyless)
+
+    assert result.ok
+    assert stub_pipeline.instances[0].kwargs["mode"] == "fast"
+
+
+def test_chew_with_a_configured_llm_runs_full(stub_pipeline, keyless):
+    import bibr
+
+    keyless.GOOGLE_API_KEY = "test-key"
+    bibr.chew("paper.pdf", settings=keyless)
+
+    assert stub_pipeline.instances[0].kwargs["mode"] == "full"
+
+
+def test_chew_mode_fast_skips_the_llm_preflight_even_with_a_key(stub_pipeline, monkeypatch):
+    import bibr
+
+    _fail_preflight(monkeypatch)
+    result = bibr.chew("paper.pdf", mode="fast")
+
+    assert result.ok
+    assert stub_pipeline.instances[0].kwargs["mode"] == "fast"
+
+
+def test_chew_mode_full_without_a_key_fails_and_points_at_fast(stub_pipeline, keyless):
+    import bibr
+
+    with pytest.raises(ValueError, match="mode='fast'") as exc_info:
+        bibr.chew("paper.pdf", mode="full", settings=keyless)
+
+    assert "Google API key required" in str(exc_info.value)
+    assert stub_pipeline.instances == []
+
+
+def test_chew_mode_auto_is_the_default(stub_pipeline, keyless):
+    import bibr
+
+    bibr.chew("paper.pdf", mode="auto", settings=keyless)
+    bibr.chew("paper.pdf", settings=keyless)
+
+    assert [p.kwargs["mode"] for p in stub_pipeline.instances] == ["fast", "fast"]
+
+
+def test_chew_rejects_an_unknown_mode(stub_pipeline):
+    import bibr
+
+    with pytest.raises(ValueError, match="mode must be 'auto', 'fast' or 'full'"):
+        bibr.chew("paper.pdf", mode="turbo")
+    assert stub_pipeline.instances == []
+
+
+@pytest.mark.parametrize(
+    ("option", "name"),
+    [
+        ({"llm": "vllm"}, "llm='vllm'"),
+        ({"refs": "llm"}, "refs='llm'"),
+        ({"ref_seg": "llm"}, "ref_seg='llm'"),
+    ],
+)
+def test_chew_mode_fast_refuses_an_option_that_needs_an_llm(stub_pipeline, option, name):
+    import bibr
+
+    with pytest.raises(ValueError, match="fast mode") as exc_info:
+        bibr.chew("paper.pdf", mode="fast", **option)
+
+    assert name in str(exc_info.value)
+    assert stub_pipeline.instances == []
+
+
+def test_an_llm_only_option_with_no_mode_asks_for_an_llm(stub_pipeline, keyless, monkeypatch):
+    """refs='llm' on a keyless machine is a full run that reaches the credential error."""
+    import bibr
+
+    with pytest.raises(ValueError, match="Google API key required"):
+        bibr.chew("paper.pdf", refs="llm", settings=keyless)
+    assert stub_pipeline.instances == []
+
+
+@pytest.mark.parametrize("mode", [None, "fast", "full"])
+def test_no_llm_is_structure_only_whatever_the_mode_says(stub_pipeline, keyless, mode):
+    import bibr
+
+    options = {} if mode is None else {"mode": mode}
+    bibr.chew("paper.pdf", no_llm=True, settings=keyless, **options)
+
+    kwargs = stub_pipeline.instances[0].kwargs
+    assert kwargs["mode"] == "full"
+    assert kwargs["no_llm"] is True
+
+
+def test_chewer_resolves_its_mode_at_construction(stub_pipeline, keyless, monkeypatch):
+    import bibr
+
+    _fail_preflight(monkeypatch)
+    chewer = bibr.Chewer(settings=keyless)
+    try:
+        assert chewer._kwargs["mode"] == "fast"
+    finally:
+        chewer.close()
+
+
+def test_preflight_llm_returns_the_mode(keyless):
+    import bibr.api as api_mod
+
+    assert api_mod._preflight_llm(keyless, {}) == "fast"
+    assert api_mod._preflight_llm(keyless, {"mode": "fast"}) == "fast"
+    assert api_mod._preflight_llm(keyless, {"no_llm": True}) == "full"
+    keyless.GOOGLE_API_KEY = "test-key"
+    assert api_mod._preflight_llm(keyless, {}) == "full"
+
+
+def test_chew_documents_the_mode_option():
+    import bibr
+
+    assert "mode" in (bibr.chew.__doc__ or "")
+    assert "fast" in (bibr.chew.__doc__ or "")
+
+
 def test_chew_preflights_a_managed_local_backend(stub_pipeline, monkeypatch):
     import bibr
     from bibr.exceptions import ConfigurationError
@@ -316,7 +467,7 @@ def _next_minor_export_fixture() -> dict:
     """A valid export as a later 12.x writer might emit it: the next minor
     ``schema_version`` plus fields this bibr does not know, at several depths."""
     data = _export_fixture()
-    data["schema_version"] = "12.3"
+    data["schema_version"] = "12.5"
     data["future_block"] = {"enabled": True, "items": [1, 2]}
     data["metadata"]["subtitle"] = "A sequel"
     data["section"][0]["numbering"] = "1."
@@ -374,7 +525,7 @@ def test_result_loads_a_newer_minor_export_with_unknown_fields():
 
     model = result.model
     assert isinstance(model, PaperExport)
-    assert model.schema_version == "12.3"
+    assert model.schema_version == "12.5"
     assert model.metadata.title == "A Paper"
     assert model.section[0].section_type == "intro"
     assert model.bib[0].title == "Ref One"
@@ -456,7 +607,7 @@ def test_result_still_rejects_a_known_field_of_the_wrong_type():
         ("section", lambda d: d["section"][0].update(numbering="1.")),
         ("bib", lambda d: d["bib"][0].update(raw="Doe J.")),
         ("extraction", lambda d: d["extraction"]["settings"].update(future_knob="on")),
-        ("schema_version", lambda d: d.update(schema_version="12.3")),
+        ("schema_version", lambda d: d.update(schema_version="12.5")),
     ],
 )
 def test_producer_models_still_reject_fields_they_do_not_define(location, mutate):
@@ -759,6 +910,24 @@ def test_batch_stem_collisions_get_ids_the_tables_can_join(tmp_path):
 
     assert [r.paper_id for r in results] == [f"paper-{sha256_file(f)[:8]}" for f in files]
     assert bibr.write_tables(results, tmp_path / "tables").papers == 3
+
+
+def test_a_library_batch_caps_the_malloc_arenas_before_its_first_chunk(tmp_path, monkeypatch):
+    """chew() on a list applies PIPELINE_MALLOC_ARENAS itself (bibr batch does it earlier)."""
+    from bibr.api import _process_batch
+    from bibr.utils import heap
+
+    events: list[str] = []
+    monkeypatch.setattr(heap, "limit_arenas_for_batch", lambda settings=None: events.append("cap"))
+
+    class _Recording(_ScriptedPipeline):
+        async def process_chunk(self, file_states, progress=None, config=None):
+            events.append("chunk")
+            await super().process_chunk(file_states, progress=progress, config=config)
+
+    files = _touch_pdfs(tmp_path, "a.pdf", "b.pdf")
+    asyncio.run(_process_batch(_Recording(), files, batch_size=1))
+    assert events == ["cap", "chunk", "chunk"]
 
 
 def test_write_tables_names_the_files_behind_a_duplicate_paper_id(tmp_path):
@@ -1213,3 +1382,97 @@ def test_chew_ref_seg_rides_run_config(stub_pipeline, monkeypatch):
 def test_chew_ref_seg_invalid_raises():
     with pytest.raises(ValueError, match="ref_seg must be"):
         bibr.chew("paper.pdf", ref_seg="bogus")
+
+
+@pytest.fixture
+def heap_trims(monkeypatch):
+    from bibr.utils import heap
+
+    calls: list[int] = []
+    pipelines: list = []
+
+    async def trim():
+        calls.append(len(pipelines[0].chunks) if pipelines else -1)
+        return True
+
+    monkeypatch.setattr(heap, "arelease_free_heap", trim)
+    return calls, pipelines
+
+
+def test_a_batch_hands_freed_heap_back_after_each_chunk(heap_trims):
+    from bibr.api import _process_batch
+
+    calls, pipelines = heap_trims
+    pipeline = _ScriptedPipeline()
+    pipelines.append(pipeline)
+
+    asyncio.run(_process_batch(pipeline, [Path(f"p{i}.pdf") for i in range(10)], batch_size=4))
+
+    assert calls == [1, 2, 3]
+
+
+def test_a_crashed_chunk_trims_once_after_its_files_ran_again(heap_trims):
+    from bibr.api import _process_batch
+
+    def script(stems, states):
+        if "p5" in stems:
+            raise RuntimeError("CUDA error: an illegal memory access was encountered")
+
+    calls, pipelines = heap_trims
+    pipeline = _ScriptedPipeline(script)
+    pipelines.append(pipeline)
+
+    asyncio.run(_process_batch(pipeline, [Path(f"p{i}.pdf") for i in range(8)], batch_size=4))
+
+    # Chunk 1, then chunk 2 crashes and its four files run alone (chunks 3-6).
+    assert calls == [1, 6]
+
+
+def test_heap_trim_off_never_trims(heap_trims):
+    from types import SimpleNamespace
+
+    from bibr.api import _process_batch
+
+    calls, pipelines = heap_trims
+    pipeline = _ScriptedPipeline()
+    pipeline.settings = SimpleNamespace(pipeline=SimpleNamespace(heap_trim="off"))
+    pipelines.append(pipeline)
+
+    asyncio.run(_process_batch(pipeline, [Path(f"p{i}.pdf") for i in range(8)], batch_size=4))
+
+    assert calls == []
+
+
+def test_a_single_file_chew_never_trims(stub_pipeline, heap_trims):
+    calls, _ = heap_trims
+
+    bibr.chew("paper.pdf")
+    with bibr.Chewer() as chewer:
+        chewer.chew("a.pdf")
+        chewer.chew("b.pdf")
+
+    assert calls == []
+    chewer_batch = bibr.Chewer()
+    try:
+        chewer_batch.chew(["a.pdf", "b.pdf"])
+    finally:
+        chewer_batch.close()
+    assert len(calls) == 1
+
+
+def test_a_trim_that_cannot_be_scheduled_keeps_the_batch_results(monkeypatch):
+    from bibr.api import _process_batch
+    from bibr.utils import heap
+
+    class _NoThread:
+        def submit(self, *args, **kwargs):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(heap, "_trim_executor", lambda: _NoThread())
+    monkeypatch.setattr(heap, "_malloc_trim", lambda pad: 1)
+    monkeypatch.setattr(heap, "_last_trim", float("-inf"))
+    results = asyncio.run(
+        _process_batch(_ScriptedPipeline(), [Path(f"p{i}.pdf") for i in range(6)], batch_size=4)
+    )
+    assert len(results) == 6
+    assert not any(isinstance(r, bibr.ChewFailure) for r in results)

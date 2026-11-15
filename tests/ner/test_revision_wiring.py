@@ -95,6 +95,8 @@ def test_extractor_passes_configured_revisions(monkeypatch):
 
     monkeypatch.setattr(parser_mod, "RefParser", rec_parser)
     monkeypatch.setattr(seg_mod, "RefSegmenter", rec_seg)
+    # The torch load, whatever the cache holds of the (ONNX-only) default parser.
+    monkeypatch.setattr("bibr.ner.checkpoint.has_torch_checkpoint", lambda *a: True)
     monkeypatch.setattr(ex, "_NER_PARSER", None)
     monkeypatch.setattr(ex, "_NER_SEGMENTER", None)
 

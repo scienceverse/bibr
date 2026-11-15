@@ -252,6 +252,60 @@ def test_dropped_publisher_box_retains_complete_source_identity_evidence():
     assert selected.normalized == "10.4321/journal.2025.42"
 
 
+async def test_glm_ocr_publisher_box_keeps_complete_identity_evidence():
+    """GLM-profile OCR (GLM-OCR, cloud vision models) must retain the box's complete text."""
+    from PIL import Image
+
+    from bibr.extract.front_matter import resolve_front_matter
+    from bibr.ocr.profiles import GLM_PROFILE
+    from bibr.pipeline.stages.ocr import ocr_page_regions
+    from bibr.structure.pdf_parser import PDFParser
+
+    html = f"<table><tr><td>{BOX}</td><td>Journal of Examples</td></tr></table>"
+
+    async def ocr_fn(_cropped, prompt):
+        assert prompt == GLM_PROFILE.prompt_for("table")
+        return html
+
+    box = await ocr_page_regions(
+        Image.new("RGB", (1000, 1000)),
+        [{"index": 0, "label": "table", "bbox_2d": [80, 50, 950, 180], "task_type": "table"}],
+        0,
+        "f.pdf",
+        ocr_fn,
+        profile=GLM_PROFILE,
+    )
+    parser = PDFParser(
+        [
+            [
+                *box,
+                {
+                    "index": 1,
+                    "label": "text",
+                    "native_label": "doc_title",
+                    "content": "Independent scientific article title",
+                    "bbox_2d": [100, 250, 900, 320],
+                },
+                {
+                    "index": 2,
+                    "label": "text",
+                    "content": "Alice Smith and Bob Jones",
+                    "bbox_2d": [100, 340, 900, 380],
+                },
+            ]
+        ]
+    )
+    contents = parser.parse()
+    parser.apply_segmentation(contents, [[text] for text in parser.assembler.segmentable_texts])
+    parser.create_content_sections(contents)
+    contents.front_matter_resolution, _ = resolve_front_matter(contents)
+
+    selected = select_doi_candidates(collect_doi_candidates(contents)).selected
+    assert selected is not None
+    assert selected.normalized == "10.4321/journal.2025.42"
+    assert selected.source_kind == "publication_region"
+
+
 def test_single_cell_label_is_not_promoted_to_a_data_table():
     from bibr.structure.pdf_parser import PDFParser
 

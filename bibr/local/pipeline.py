@@ -30,6 +30,7 @@ if TYPE_CHECKING:
         MemoryMode,
         RefParseStrategy,
         RefSegStrategy,
+        RunMode,
     )
 
 logger = logging.getLogger(__name__)
@@ -40,8 +41,41 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _cgroup_memory_limit_bytes(
+    proc_cgroup: str = "/proc/self/cgroup", fs_root: str = "/sys/fs/cgroup"
+) -> int | None:
+    """Bytes a cgroup memory limit allows (``docker --memory``, Kubernetes, Slurm), or ``None``.
+
+    Reads cgroup v2 ``memory.max`` of the process's cgroup and of every parent (the
+    smallest limit wins), then cgroup v1 ``memory.limit_in_bytes``. cgroup v1 writes
+    "no limit" as a number near 2**63; the caller takes the smaller of this and the
+    machine's RAM, so that needs no special case here.
+    """
+    from bibr.utils.onnx_providers import _cgroup_v2_dirs
+
+    def read(path: str) -> int | None:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                value = int(fh.read().split()[0])  # "max" is no limit: ValueError
+        except (OSError, ValueError, IndexError):
+            return None
+        return value if value > 0 else None
+
+    limits = [
+        read(os.path.join(folder, "memory.max")) for folder in _cgroup_v2_dirs(proc_cgroup, fs_root)
+    ]
+    found = [limit for limit in limits if limit is not None]
+    if found:
+        return min(found)
+    return read(os.path.join(fs_root, "memory", "memory.limit_in_bytes"))
+
+
 def _get_system_memory_gb() -> float:
-    """Detect total system RAM in GB on Windows, macOS, and Linux."""
+    """RAM this process can use, in GB, on Windows, macOS and Linux.
+
+    The machine's physical RAM; on Linux, a smaller cgroup memory limit instead
+    (a container or a batch job given 8 GB on a 64 GB host has 8 GB).
+    """
     if os.name == "nt":
         try:
             import ctypes
@@ -82,9 +116,11 @@ def _get_system_memory_gb() -> float:
         pass
     # Linux: os.sysconf
     try:
-        pages = os.sysconf("SC_PHYS_PAGES")
-        page_size = os.sysconf("SC_PAGE_SIZE")
-        return (pages * page_size) / (1024**3)
+        total = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+        limit = _cgroup_memory_limit_bytes()
+        if limit is not None:
+            total = min(total, limit)
+        return total / (1024**3)
     except (ValueError, OSError):
         pass
     return 16.0  # safe default
@@ -147,8 +183,38 @@ def resolve_llm_backend(raw: str, settings: GlobalSettings | None = None) -> str
     return raw
 
 
+#: CUDA cards below this size (GiB of nvidia-smi's ``memory.total``, within the
+#: registry's ``CARD_SIZE_TOLERANCE_GB``) run the aggressive memory mode when
+#: bibr manages the LLM server on the same card (``GPU_LLM_SERVER_BACKENDS``).
+#: There the managed vLLM LLM server starts every chunk with only about 1 GiB
+#: to spare (the 4B's W4A16 build needed 8 GiB free on vLLM 0.31, 7.75 on
+#: vLLM 0.32; a 10 GB card beside a desktop has about 9 GiB), and aggressive
+#: mode unloads bibr's GPU sessions
+#: before it starts (0.27 GiB left, against about 2.4 GiB once balanced
+#: mode's have grown). A 12 GB card finished 100 papers in balanced mode
+#: beside a desktop, its last starts finding 8.6 GiB free. Without a local LLM
+#: server on the card (a cloud or remote LLM, or ``--no-llm``) nothing needs
+#: that room, and the rule is the one before: aggressive up to 8 GB.
+CUDA_BALANCED_MIN_GB = 12
+
+#: The ``--llm`` / ``LLM_BACKEND`` values for which bibr starts and manages the
+#: LLM server on the CUDA card itself (``local`` resolves to one of them
+#: there). Other managed backends (``llmster``) and every remote one keep the
+#: card-size rule from before ``CUDA_BALANCED_MIN_GB``.
+GPU_LLM_SERVER_BACKENDS = frozenset({"local", "vllm", "llama-cpp"})
+
+#: The largest CUDA card (GiB) that runs aggressive mode when no LLM server of
+#: bibr's shares the card: OCR alone (PaddleOCR-VL needs 8 GB) and bibr's own
+#: GPU sessions.
+CUDA_AGGRESSIVE_MAX_GB_WITHOUT_LOCAL_LLM = 8
+
+
 def _auto_memory_mode(
-    platform_key: str | None, accel_gb: float | None, system_ram_gb: float
+    platform_key: str | None,
+    accel_gb: float | None,
+    system_ram_gb: float,
+    *,
+    llm_backend: str | None = None,
 ) -> MemoryMode:
     """Pure hardware → memory-mode rule (shared by runtime default and setup).
 
@@ -161,16 +227,44 @@ def _auto_memory_mode(
     keeps layout+segmenter resident; only ≤8 GB machines still need
     ``aggressive`` (caught by the ``system_ram_gb`` rule below, since
     ``accel_gb`` is unified memory on mlx).
+
+    On CUDA the rule depends on ``llm_backend``, the run's ``--llm`` /
+    ``LLM_BACKEND``: when bibr manages the LLM server on the card
+    (``GPU_LLM_SERVER_BACKENDS``), cards below ``CUDA_BALANCED_MIN_GB`` run
+    ``aggressive``; otherwise (a cloud or remote LLM, ``--no-llm``, or None)
+    only cards of ``CUDA_AGGRESSIVE_MAX_GB_WITHOUT_LOCAL_LLM`` or less do, so
+    such runs keep batches of 8, a resident OCR server and the streaming back
+    half.
     """
-    if platform_key == "cuda" and accel_gb is not None and accel_gb <= 8:
-        return "aggressive"
+    if platform_key == "cuda" and accel_gb is not None:
+        if llm_backend in GPU_LLM_SERVER_BACKENDS:
+            from bibr.local.llm_models import fits_card
+
+            if not fits_card(CUDA_BALANCED_MIN_GB, accel_gb):
+                return "aggressive"
+        elif accel_gb <= CUDA_AGGRESSIVE_MAX_GB_WITHOUT_LOCAL_LLM:
+            return "aggressive"
     if system_ram_gb <= 8:
         return "aggressive"
     return "balanced"
 
 
-def _default_memory_mode(settings: GlobalSettings | None = None) -> MemoryMode:
-    """Default memory mode: ``PIPELINE_MEMORY_MODE`` if set, else RAM auto-detect."""
+def _default_memory_mode(
+    settings: GlobalSettings | None = None,
+    *,
+    llm_backend: str | None = None,
+    ocr_backend: str | None = None,
+    ocr_url: str | None = None,
+) -> MemoryMode:
+    """Default memory mode: ``PIPELINE_MEMORY_MODE`` if set, else hardware auto-detect.
+
+    ``llm_backend`` is the run's resolved ``--llm`` / ``LLM_BACKEND`` (``"cloud"``
+    for ``--no-llm``); see ``_auto_memory_mode``. ``ocr_backend`` and ``ocr_url``
+    are the run's resolved OCR route: a CUDA card nothing in the run can load
+    onto (see ``_cuda_card_stays_empty``) is planned for as if it were absent,
+    so a small card beside a CPU-only install does not put a text-layer run in
+    the aggressive mode (3 papers a chunk, the layout model reloaded for each).
+    """
     from bibr.config import snapshot_settings
 
     effective = settings if settings is not None else snapshot_settings()
@@ -180,7 +274,58 @@ def _default_memory_mode(settings: GlobalSettings | None = None) -> MemoryMode:
     from bibr.local.llm_models import detect_hardware
 
     platform_key, memory_gb = detect_hardware()
-    return _auto_memory_mode(platform_key, memory_gb, _get_system_memory_gb())
+    return _run_memory_mode(
+        platform_key,
+        memory_gb,
+        _get_system_memory_gb(),
+        llm_backend=llm_backend,
+        ocr_backend=ocr_backend,
+        ocr_url=ocr_url,
+    )
+
+
+def _run_memory_mode(
+    platform_key: str | None,
+    accel_gb: float | None,
+    system_ram_gb: float,
+    *,
+    llm_backend: str | None,
+    ocr_backend: str | None,
+    ocr_url: str | None,
+) -> MemoryMode:
+    """``_auto_memory_mode`` for one run: its route decides whether the card counts."""
+    mode = _auto_memory_mode(platform_key, accel_gb, system_ram_gb, llm_backend=llm_backend)
+    if (
+        mode == "aggressive"
+        and platform_key == "cuda"
+        and _cuda_card_stays_empty(ocr_backend, ocr_url, llm_backend)
+    ):
+        return _auto_memory_mode(None, None, system_ram_gb)
+    return mode
+
+
+def _cuda_card_stays_empty(
+    ocr_backend: str | None, ocr_url: str | None, llm_backend: str | None
+) -> bool:
+    """Whether nothing this run starts can load onto the machine's CUDA card.
+
+    True only when all three hold: bibr manages no LLM server on the card, the
+    OCR route starts no engine (the text-layer backend, a cloud vision backend,
+    or a server behind a URL), and bibr's own models cannot leave the CPU
+    because onnxruntime has no CUDA provider and torch could not use the card
+    either (see ``torch_cuda_possible``). An unknown OCR route counts as one
+    that uses the card.
+    """
+    from bibr.ocr.registry import CLOUD_VISION_OCR_BACKENDS, TEXT_LAYER_BACKEND
+
+    if llm_backend in GPU_LLM_SERVER_BACKENDS:
+        return False
+    if not ocr_url and ocr_backend not in {TEXT_LAYER_BACKEND, *CLOUD_VISION_OCR_BACKENDS}:
+        return False
+    from bibr.utils.device import torch_cuda_possible
+    from bibr.utils.onnx_providers import cuda_provider_available
+
+    return not cuda_provider_available() and not torch_cuda_possible()
 
 
 def _auto_batch_size(memory_mode: str) -> int:
@@ -195,30 +340,44 @@ def _auto_batch_size(memory_mode: str) -> int:
     return 8  # balanced default
 
 
-def _managed_gpu_fraction(llm_backend: str, ocr_backend: str, settings: GlobalSettings) -> float:
-    """Share of total VRAM the managed vLLM servers of this run claim.
+def _managed_gpu_fraction(
+    llm_backend: str,
+    ocr_backend: str,
+    settings: GlobalSettings,
+) -> float:
+    """Share of total VRAM the classifiers must leave to the managed vLLM servers.
 
     The classifiers load before these servers start (before Paddle OCR in the
     streaming plan, before the LLM in the barrier plan), and a vLLM server will
     not start unless its whole share is still free. With a local vLLM LLM and
     Paddle OCR vLLM both managed, the barrier plan can run them at once (OCR
     kept resident under ``keep_all``, or a later chunk's OCR beside the LLM),
-    so both shares are claimed when they fit together. When they do not (the
-    defaults, 0.85 + 0.92), only one is ever up and the larger share is what
-    the classifiers must leave free.
+    so both shares are claimed when they fit together with bibr's ONNX reserve
+    (``managed_vllm_shares_fit``). When they do not (the defaults, 0.85 and
+    PaddleOCR-VL's ~5 GB, on cards up to 64 GB), one server stops for the
+    other and restarts every chunk beside bibr's resident ONNX sessions: the
+    larger share and that reserve are what the classifiers must leave free.
     """
-    from bibr.ocr.registry import PADDLE_VLLM_GPU_MEMORY_UTILIZATION, automatic_backend_names
+    from bibr.ocr.registry import (
+        automatic_backend_names,
+        managed_vllm_onnx_reserve_share,
+        managed_vllm_shares_fit,
+        paddle_vllm_gpu_memory_utilization,
+    )
 
     llm_share = settings.llm.local_mem_fraction if llm_backend in ("local", "vllm") else 0.0
     # The automatic ``paddle`` chain lists paddle-vllm only on hardware that
     # can run it, so a small GPU keeps its room for the classifiers.
     starts_paddle_vllm = ocr_backend == "paddle-vllm" or (
-        ocr_backend == "paddle" and "paddle-vllm" in automatic_backend_names()
+        ocr_backend == "paddle"
+        and "paddle-vllm" in automatic_backend_names(llm_backend=llm_backend)
     )
-    ocr_share = PADDLE_VLLM_GPU_MEMORY_UTILIZATION if starts_paddle_vllm else 0.0
-    if llm_share + ocr_share <= 1.0:
+    ocr_share = paddle_vllm_gpu_memory_utilization() if starts_paddle_vllm else 0.0
+    if not (llm_share and ocr_share):
         return llm_share + ocr_share
-    return max(llm_share, ocr_share)
+    if managed_vllm_shares_fit(llm_share, ocr_share):
+        return llm_share + ocr_share
+    return min(1.0, max(llm_share, ocr_share) + managed_vllm_onnx_reserve_share())
 
 
 class LocalPipeline(Pipeline):
@@ -235,7 +394,9 @@ class LocalPipeline(Pipeline):
       but the weights stay resident across files by design.
     - ``"keep_all"``: Keep everything loaded (24+ GB GPU or cloud LLM only)
     - ``None`` (default): ``PIPELINE_MEMORY_MODE`` if set, else auto-detect
-      from system RAM (≤8 GB → aggressive, else balanced)
+      (≤8 GB of system RAM, a CUDA card below ``CUDA_BALANCED_MIN_GB`` that a
+      managed local LLM server shares, or one of 8 GB or less → aggressive,
+      else balanced)
 
     For batch processing, use ``process_chunk()`` which loads each model once
     per chunk and loops over files within each stage.
@@ -262,14 +423,19 @@ class LocalPipeline(Pipeline):
         ref_seg_strategy: RefSegStrategy | None = None,
         ref_parse_strategy: RefParseStrategy | None = None,
         settings: GlobalSettings | None = None,
+        mode: str | None = None,
+        ocr_requested: bool | None = None,
     ):
         from bibr.config import snapshot_settings
+        from bibr.local.vllm_share import llm_share_user_set
 
         # Alias/platform resolution ("glm", None → OCR_BACKEND or
         # platform default) — same table as the CLI, so the library API
         # accepts everything `bibr chew --ocr` does.
         from bibr.ocr.registry import (
             CLOUD_VISION_OCR_BACKENDS,
+            TEXT_LAYER_BACKEND,
+            ocr_route_chosen,
             resolve_backend_name,
             resolve_url_backend,
             url_request,
@@ -278,6 +444,7 @@ class LocalPipeline(Pipeline):
         from bibr.pipeline.enricher import CrossrefEnricher, RorEnricher
         from bibr.pipeline.plans import build_stage_plan
         from bibr.pipeline.resources import ResourceManager
+        from bibr.run_mode import resolve_mode
 
         settings_snapshot = snapshot_settings(settings)
 
@@ -289,6 +456,14 @@ class LocalPipeline(Pipeline):
         configured_backend = (
             configured_ocr.backend if "backend" in configured_ocr.model_fields_set else None
         )
+        if ocr_requested is None:
+            ocr_requested = ocr_route_chosen(
+                settings_snapshot,
+                backend=ocr_backend,
+                url=ocr_url,
+                model=ocr_model,
+                profile=ocr_profile,
+            )
         if ocr_url:
             # A URL names one OCR server. The shared rule (as for
             # ``bibr chew --ocr-url``) picks its backend — Paddle unless GLM
@@ -305,6 +480,12 @@ class LocalPipeline(Pipeline):
                 )
                 # Unused, so it must not split the OCR cache key either.
                 ocr_url = None
+            elif ocr_backend == TEXT_LAYER_BACKEND:
+                logger.warning(
+                    "ocr_url is ignored by the text-layer OCR backend, which reads the PDF's "
+                    "embedded text layer and runs no OCR model."
+                )
+                ocr_url = None
         else:
             automatic_paddle = ocr_backend == "paddle" or (
                 ocr_backend is None
@@ -318,10 +499,30 @@ class LocalPipeline(Pipeline):
         llm_backend = resolve_llm_backend(
             llm_backend or settings_snapshot.llm.backend, settings=settings_snapshot
         )
-        # None → PIPELINE_MEMORY_MODE, else RAM auto-detect — same resolution
+        # ``mode`` is "fast", "full" or "auto"/None (PIPELINE_MODE, then whether an
+        # LLM is configured). ``no_llm`` is a structure-only run and stays "full":
+        # it skips the LLM stages itself and never takes the fast overlay.
+        run_mode = "full" if no_llm else resolve_mode(settings_snapshot, mode, llm_backend)
+        if run_mode == "fast":
+            # No LLM call and no managed LLM server: the memory plan, OCR chain
+            # and streamed back half follow the cloud backend's.
+            llm_backend = "cloud"
+        if run_mode == "fast" and not ocr_requested:
+            # No OCR route was chosen, so a fast run reads each PDF's own text
+            # layer whatever the machine has: no GPU, server or multi-GB bootstrap
+            # is needed to start. A route the caller chose (``--ocr``, a server URL,
+            # OCR_BACKEND, a model or profile) is kept; a scan needs one of those.
+            ocr_backend = TEXT_LAYER_BACKEND
+        # None → PIPELINE_MEMORY_MODE, else hardware auto-detect (which looks
+        # at whether a managed LLM server shares the card) — same resolution
         # ladder as the CLI, so the library API behaves identically.
         if memory_mode is None:
-            memory_mode = _default_memory_mode(settings_snapshot)
+            memory_mode = _default_memory_mode(
+                settings_snapshot,
+                llm_backend="cloud" if no_llm else llm_backend,
+                ocr_backend=ocr_backend,
+                ocr_url=ocr_url,
+            )
 
         # --no-llm implies no Crossref and no equation extraction, and no
         # managed local LLM server (which would never be called — forcing
@@ -352,6 +553,7 @@ class LocalPipeline(Pipeline):
             consolidate=consolidate,
             ref_seg_strategy=ref_seg_strategy,
             ref_parse_strategy=ref_parse_strategy,
+            mode=cast("RunMode", run_mode),
         )
         resources = ResourceManager(
             memory_mode=memory_mode,
@@ -366,6 +568,8 @@ class LocalPipeline(Pipeline):
                 else 0.0
             ),
             managed_gpu_fraction=_managed_gpu_fraction(llm_backend, ocr_backend, settings_snapshot),
+            managed_llm_share_fixed=llm_share_user_set(settings_snapshot),
+            llm_backend=llm_backend,
             settings=settings_snapshot,
         )
 
@@ -415,12 +619,16 @@ class LocalPipeline(Pipeline):
         self.end_page = end_page
         self.llm_backend = llm_backend
         self.no_llm = no_llm
+        self.mode = run_mode
 
     def llm_usage_snapshot(self) -> dict[str, dict[str, int]]:
         """Cumulative LLM token usage by model, captured before pipeline teardown.
 
         Returns an empty dict if no LLM client was instantiated (e.g. ``--no-llm``)
-        or if usage tracking is disabled (``LLM_TRACK_USAGE=false``).
+        or if usage tracking is disabled (``LLM_TRACK_USAGE=false``). A fast run
+        makes no call, so it builds no client to ask.
         """
+        if self._config.mode == "fast":
+            return {}
         client = self._resources.llm_client
         return {model: dict(counts) for model, counts in client.usage.items()}

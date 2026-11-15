@@ -13,6 +13,12 @@ guarantee. The three read-only harvests this stage also performs (doc-info
 metadata, PDF outline, geom reference-line geometry) need only ``pdf_bytes``,
 not the fill, so they run regardless of that flag — each behind its own
 best-effort guard.
+
+With the text-layer OCR backend (``--ocr text-layer``, or the automatic
+backend's ``OCR_FALLBACK_TO_TEXT_LAYER=auto`` fallback) this stage also reads
+every other region OCR would read from the text layer, page-gated
+(:mod:`bibr.ocr.text_layer`), so the OCR stage has nothing left to send to a
+model.
 """
 
 from __future__ import annotations
@@ -84,7 +90,12 @@ class NativeTextStage:
             getattr(run_config, "ref_seg_strategy", None),
             settings=settings,
         )[0]
-        eligible_labels = resolve_eligible_labels(bool(settings.ocr.native_text_header_footer))
+        # "is True", not truthiness, for the formula-number setting: tests run
+        # stages with Mock settings, whose attributes are all truthy.
+        eligible_labels = resolve_eligible_labels(
+            bool(settings.ocr.native_text_header_footer),
+            getattr(settings.ocr, "native_text_formula_number", False) is True,
+        )
         # The document layer's arguments are passed only when it is on, so the
         # default call is unchanged. "is True", not truthiness: tests run
         # stages with Mock settings, whose attributes are all truthy.
@@ -95,11 +106,21 @@ class NativeTextStage:
             layer_kwargs = {"include_doc_layer": True, "render_budget": render_budget(settings)}
         native_skip_total = 0
         invisible_layer_pages = 0
+        from bibr.ocr.text_layer import (
+            is_text_layer_mode,
+            text_layer_fallback_reason,
+            text_layer_stream,
+        )
+
+        text_layer_mode = is_text_layer_mode(ctx)
+        fallback_reason = text_layer_fallback_reason(getattr(ctx, "resources", None))
         for fs in ctx.alive():
             if not fs.pdf_bytes or fs.layout_results is None:
                 continue
             if layer_kwargs:
                 fs.doc_layer_attempted = True
+            # The text-layer read rides on the inspection's page walk.
+            stream = text_layer_stream(fs, settings) if text_layer_mode else None
             try:
                 inspection = await asyncio.to_thread(
                     inspect_pdf,
@@ -115,6 +136,7 @@ class NativeTextStage:
                     eligible_labels=eligible_labels,
                     reject_invisible_text_layer=settings.ocr.native_text_reject_invisible_layer,
                     **layer_kwargs,
+                    **({"text_layer": stream} if stream is not None else {}),
                 )
             except Exception:  # noqa: BLE001 — complete open failure falls back to OCR
                 for page in fs.layout_results or []:
@@ -122,6 +144,8 @@ class NativeTextStage:
                         if region.pop("_native_text_used", False):
                             region["content"] = ""
                 logger.warning("PDF inspection failed for %s", fs.path.name, exc_info=True)
+                if text_layer_mode:
+                    await self._read_text_layer(fs, settings, fallback_reason)
                 continue
             fs.pdf_inspection = inspection
             fs.layout_results = inspection.layout_results
@@ -151,6 +175,9 @@ class NativeTextStage:
                     sorted({text for page in watermark_pages for text in page.watermarks})[:5],
                 )
             _log_invisible_layer_errors(fs.path.name, inspection.component_errors)
+            if text_layer_mode:
+                read = stream.finish(inspection.layout_results) if stream is not None else None
+                await self._read_text_layer(fs, settings, fallback_reason, read)
 
         if native_skip_total:
             logger.info(
@@ -164,3 +191,11 @@ class NativeTextStage:
 
         logger.debug("Native-text stage: %.1fs", time.monotonic() - t0)
         ctx.progress.stage_end(self.name)
+
+    @staticmethod
+    async def _read_text_layer(fs, settings, fallback_reason: str | None, read=None) -> None:
+        from bibr.ocr.text_layer import read_file_text_layer
+
+        t0 = time.monotonic()
+        await read_file_text_layer(fs, settings, fallback_reason=fallback_reason, read=read)
+        fs.stage_times["text_layer"] = time.monotonic() - t0

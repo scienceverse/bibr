@@ -74,7 +74,7 @@ extra syntax is `uv add 'bibr[<extra>]'`.
 | `ml` | `bibr[torch]` | Back-compat alias for `torch`. Every existing install, Dockerfile and `bibr setup` plan asks for `ml`, and it keeps meaning the same thing. |
 | `local` | `vllm-mlx` on Apple Silicon | Local-runtime dependencies. The default `OCR_BACKEND=paddle` selector uses PaddleOCR-VL-1.6 first; Linux/CUDA can use `paddle-vllm`, while Apple Silicon can use the Paddle MLX candidates. On Linux/CUDA, GPU OCR comes from `paddle-vllm` (part of `vllm`) rather than this extra. |
 | `local-mlx` | `vllm-mlx` (macOS, Apple Silicon only) | Pinning the vLLM-MLX local-LLM backend directly on Apple Silicon (`local` covers this automatically on macOS). |
-| `vllm` | `vllm==0.31.0`, `openai>=2.54.0,<3` (requires Python <3.14) | The *managed* local vLLM server bibr starts for `--llm local` on Linux/CUDA (the path `bibr setup`'s "fully local" flow configures). |
+| `vllm` | `vllm==0.32.0`, `openai>=2.54.0,<3` (requires Python <3.14) | The *managed* local vLLM server bibr starts for `--llm local` on Linux/CUDA (the path `bibr setup`'s "fully local" flow configures). |
 | `gpu` | `onnxruntime-gpu[cuda,cudnn]` (Linux/Windows) | GPU execution providers for ONNX Runtime — sentence segmentation, and on a core install layout, the classifiers and the NER parser too. It needs one more command after syncing; see [GPU ONNX Runtime](#gpu-onnx-runtime). |
 | `cache` | `redis>=5.0.0` | Redis-backed response caching — set `REDIS_URL` to enable it (the result cache is on by default, but only uses Redis once a URL is configured). |
 | `demo` | `gradio>=6.15.0` | The interactive Gradio demo app. |
@@ -94,22 +94,26 @@ The serving extras are still hardware-specific, so most people want a subset:
 - **`--extra all` is the superset to reach for.** It bundles `batch` + `cache` + `demo` + `mcp` + `torch` — everything that is useful regardless of hardware.
 - Add **`vllm`** on Linux/CUDA (managed vLLM for `--llm local`, and the
   `paddle-vllm` GPU OCR backend), **`local`** or **`local-mlx`** on Apple
-  Silicon, and **`gpu`** for GPU-accelerated ONNX sentence segmentation
-  (see [GPU ONNX Runtime](#gpu-onnx-runtime)).
+  Silicon, and **`gpu`** for ONNX Runtime's GPU build, which layout, sentence
+  splitting, the NER parser and the classifiers can run on (see
+  [GPU ONNX Runtime](#gpu-onnx-runtime)).
 
 If `vllm` isn't installed, bibr's managed vLLM server falls back to launching it
-via `uv tool run --from vllm==0.31.0 --with 'openai>=2.54.0,<3' vllm serve ...` in an isolated environment,
+via `uv tool run --from vllm==0.32.0 --with 'openai>=2.54.0,<3' vllm serve ...` in an isolated environment,
 instead of your project's virtual environment. That bootstrap downloads several
 GB on first use, so it logs a warning naming `uv sync --extra vllm`, and
 `bibr setup` adds `vllm` to its Linux/CUDA plan. It only runs on an NVIDIA GPU
 with at least 8 GB of VRAM; smaller GPUs and CPU-only Linux machines take the
 llama.cpp path (`glm-llama`) for OCR instead. The managed local LLM uses the
-same bootstrap from 8 GB of VRAM (the fine-tuned 2B's vLLM build); below that,
-`--llm local` uses llama.cpp. On Python 3.14, where `vllm==0.31.0` cannot install from wheels
-(its `llguidance` dependency publishes none for 3.14) and the `vllm` extra
-therefore installs nothing, both launchers run the bootstrap
-inside a managed Python 3.13, and `bibr doctor` says so; a 3.11-3.13
-interpreter for the project avoids the detour.
+same bootstrap from 10 GB of VRAM (the fine-tuned 4B's W4A16 build); below that,
+`--llm local` uses llama.cpp. On a 10–11 GB card, `bibr setup` runs the LLM and
+OCR on llama.cpp instead, without `vllm`, when it finds a CUDA `llama-server` of
+build 11282 or newer (see
+[choosing an extraction model](../guides/extraction-models.md#on-10-and-11-gb-cards)).
+On Python 3.14, where the `vllm` extra installs
+nothing (its requirements are marked `python_version < '3.14'`), both launchers
+run the bootstrap inside a managed Python 3.13, and `bibr doctor` says so; a
+3.11-3.13 interpreter for the project avoids the detour.
 
 ## GPU ONNX Runtime
 
@@ -130,7 +134,10 @@ PyPI built for CUDA 12. In a project that installed `bibr[gpu]` from PyPI, use
 the version that install chose (`uv pip show onnxruntime-gpu`). With pip, the
 command is `python -m pip install --force-reinstall --no-deps
 "onnxruntime-gpu==<version>"`. `bibr setup` runs this step itself when it
-installs the `gpu` extra.
+installs the `gpu` extra. Its recommended plan for an NVIDIA card installs the
+extra on Linux (x86_64, Ampere or newer), where every run behind the plan's
+defaults had it; on Windows, on Arm Linux and on older cards, which no run has
+measured with it, the plan leaves it out.
 
 Leave `onnxruntime` installed too. `uv run` reinstalls it when it is missing,
 and its files would then replace the GPU build's. For the same reason, repeat

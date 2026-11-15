@@ -1025,3 +1025,45 @@ def test_roman_list_numbers_are_stripped_for_the_parser_only_in_a_roman_list():
     ]
     initials = ["V. Lal, S. 2003.", "Smith J. 2004.", "Jones K. 2005."]
     assert _strip_enum_markers(initials) == initials
+
+
+def test_box_opening_after_an_open_author_list_does_not_open_an_entry():
+    # A layout box can break between the "&" and the last author, whose line then
+    # reads like a one-author entry and would take the date, title and DOI with it.
+    stream = _boxed_stream(
+        [
+            [
+                "Adams, R. T., & Baker, L. (2015). An earlier finding about tests.",
+                "Journal of Tests, 12(3), 101-110.",
+            ],
+            [
+                "Novak, T. R., Ostrom, B. A., Bishop, D. V., Burton, K. S.,",
+                "Chalmers, C. D., Simons, U., Wagner, E.-J., Ware, J. J., &",
+            ],
+            ["Ibarra, J. P. A. (2017). A charter for open methods. Human Methods, 1(1), 21."],
+            [
+                "Young, P. Q., & Zeller, M. (2018). A later report on sample sizes.",
+                "Methods Quarterly, 4(1), 1-9.",
+            ],
+        ]
+    )
+
+    entries = segment_line_stream(stream).entries
+
+    assert len(entries) == 3
+    assert entries[1].startswith("Novak, T. R.")
+    assert "& Ibarra, J. P. A. (2017). A charter" in entries[1]
+
+
+def test_numbered_entry_after_an_open_author_list_still_opens():
+    # The numbering decides; a truncated entry must not swallow the next number.
+    stream = _stream(
+        [
+            "1. Adams, R. T., & Baker, L. (2015). A finding. J Tests 12, 101.",
+            "2. Novak, T. R., Ostrom, B. A., &",
+            "3. Ibarra, J. P. A. (2017). A charter. Hum Methods 1, 21.",
+            "4. Young, P. Q. (2018). A report. Methods Q 4, 1.",
+        ]
+    )
+
+    assert len(segment_line_stream(stream).entries) == 4

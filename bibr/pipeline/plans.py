@@ -42,7 +42,7 @@ def build_stage_plan(
     )
 
     if mode == "local":
-        from bibr.pipeline.stages.llm_server import LlmServerStage
+        from bibr.pipeline.stages.llm_server import LlmServerPrecheckStage, LlmServerStage
         from bibr.pipeline.stages.render_ocr import (
             InterleavedRenderOcrStage,
             StreamingRenderOcrStage,
@@ -61,6 +61,9 @@ def build_stage_plan(
                 ),
             )
         return common_front + (
+            # Before OCR: a chunk whose managed LLM server start is sure to be
+            # refused fails here instead of after OCR.
+            LlmServerPrecheckStage(),
             RequiredClassifierGate(),
             InterleavedRenderOcrStage(),
             ClassifierStage(),

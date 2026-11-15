@@ -51,13 +51,19 @@ _OTHER_OBJECTS = {
     ("extract/footnote_citations.py", "ref.authors"),
     # The model's response, before any candidate is built from it.
     ("extract/core_metadata.py", "llm_metadata.model_copy"),
+    # The front-matter tagger's answer, which stands in for that response: a
+    # later window's abstract replaces the missing one before the extractor
+    # builds any candidate from it.
+    ("front_tagger/runtime.py", "result.title_keywords.model_copy"),
+    # The same answer without what a run with the tagger alone does not export.
+    ("extract/core_metadata.py", "title_keywords.model_copy"),
     # PaperMetadata's own copy, which drops the receipts of the fields an
     # update rewrites.
     ("models.py", "super().model_copy"),
     # References, their candidates and matches, the model's responses, the
     # doc-info parse: lists handed to helpers that are not the paper's.
-    ("clients/llm.py", "authors.authors"),
-    ("clients/llm.py", "title_kw.keywords"),
+    ("schemas.py", "authors.authors"),
+    ("schemas.py", "title_kw.keywords"),
     ("enrich/references.py", "cand.authors"),
     ("enrich/references.py", "ref.authors"),
     ("export/json_export.py", "m.authors"),
@@ -70,6 +76,8 @@ _OTHER_OBJECTS = {
     ("extract/core_metadata.py", "recovered.authors"),
     ("extract/research_integrity.py", "result.affiliations"),
     ("structure/citation_linker.py", "reference.authors"),
+    # The paper's printed citation, parsed as a reference: its author string.
+    ("extract/self_citation.py", "reference.authors"),
     ("structure/citation_matcher.py", "r.authors"),
 }
 _MUTATORS = {"append", "extend", "insert", "remove", "clear", "pop", "sort", "reverse"}

@@ -134,10 +134,13 @@ SUPP_NAMED_XREF_RE = re.compile(
 _EQ_NUM = r"\d+(?:\.\d+)*"
 _EQ_NUM_RANGE = rf"(?:\s*[-–]\s*{_EQ_NUM})?"
 _EQ_NUM_LIST = rf"(?:\s*(?:[,&]|\band\b)\s*{_EQ_NUM}{_EQ_NUM_RANGE})*"
+# Each number of a parenthesised list or range printed in its own parens:
+# "Eqs. (1)-(3)", "Equations (2) and (3)", "Eqs. (4), (5) and (7)".
+_EQ_PAREN_MORE = rf"(?:\s*(?:[-–]|,?\s*(?:&|\band\b)|,)\s*\({_EQ_NUM}\))*"
 EQUATION_XREF_RE = re.compile(
     r"(?<![A-Za-z])(?<!-(?=(?-i:eq)))(?P<word>(?:Equations?|Eqs?\.?))\s*(?P<open>\()?"
     rf"(?P<nums>{_EQ_NUM}{_EQ_NUM_RANGE}{_EQ_NUM_LIST})"
-    r"(?(open)\)?)"
+    rf"(?(open)(?:\)(?P<more>{_EQ_PAREN_MORE}))?)"
     r"(?![\d.]*\s*%)",
     re.IGNORECASE,
 )
@@ -472,7 +475,7 @@ def detect_xrefs(
         for m in EQUATION_XREF_RE.finditer(sent.text):
             if _is_software_version_mention(m):
                 continue
-            nums = _expand_nums(m.group("nums"))
+            nums = _expand_nums(m.group("nums") + re.sub(r"[()]", "", m.group("more") or ""))
             for num in nums:
                 xrefs.append(
                     PaperXref(

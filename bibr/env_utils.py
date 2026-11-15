@@ -1,6 +1,7 @@
 """Shared .env file read/write helpers."""
 
 import os
+from collections.abc import Collection
 from pathlib import Path
 
 
@@ -61,7 +62,9 @@ def parse_env(path: Path) -> dict[str, str]:
     return {k: v for k, v in read_dotenv(path).items() if v is not None}
 
 
-def merge_env(path: Path, new_vars: dict[str, str]) -> None:
+def merge_env(
+    path: Path, new_vars: dict[str, str], *, comment_out: Collection[str] = ()
+) -> list[str]:
     """Merge *new_vars* into an existing ``.env``, preserving unknown keys.
 
     Comments and blank lines retain their original positions. Every
@@ -72,9 +75,14 @@ def merge_env(path: Path, new_vars: dict[str, str]) -> None:
     which dotenv reads identically. New keys are appended at the end. This
     keeps any "# Section header / KEY=val" structure intact across re-runs
     of `bibr setup`.
+
+    Lines of the keys in *comment_out* that *new_vars* does not set are
+    turned into comments, so the old value stays readable but no longer
+    applies. Returns those keys, in the order they first appear.
     """
     remaining = dict(new_vars)
     written: set[str] = set()
+    commented: list[str] = []
     out_lines: list[str] = []
 
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -89,7 +97,11 @@ def merge_env(path: Path, new_vars: dict[str, str]) -> None:
         # runtime parser does.
         if lookup.startswith("export "):
             lookup = lookup[len("export ") :].strip()
-        if lookup in remaining and lookup not in written:
+        if lookup in comment_out and lookup not in remaining:
+            out_lines.append(f"# {stripped}")
+            if lookup not in commented:
+                commented.append(lookup)
+        elif lookup in remaining and lookup not in written:
             out_lines.append(f"{lookup}={_format_env_value(remaining[lookup])}")
             written.add(lookup)
         elif lookup in written:
@@ -108,3 +120,4 @@ def merge_env(path: Path, new_vars: dict[str, str]) -> None:
 
     out_lines.append("")
     write_env_text(path, "\n".join(out_lines))
+    return commented

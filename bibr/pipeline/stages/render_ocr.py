@@ -40,6 +40,7 @@ from bibr.pipeline.stages.ocr import (
     fail_ocr_targets,
     resolve_ocr_identity,
 )
+from bibr.utils.heap import trim_between_windows
 
 if TYPE_CHECKING:
     from bibr.pipeline.context import PipelineContext
@@ -124,9 +125,16 @@ class InterleavedRenderOcrStage:
             # so there is no bundle to look up here.
             return []
         if cache_on:
+            from bibr.ocr.registry import TEXT_LAYER_BACKEND
+            from bibr.ocr.text_layer import note_text_layer_fallback, text_layer_fallback_reason
+
             for fs in pending:
                 if ocr_cache.load_bundle(fs, ctx.config, identity, ctx.settings):
                     fs.free_pre_ocr()
+                    if identity.backend == TEXT_LAYER_BACKEND:
+                        # Read through OCR_FALLBACK_TO_TEXT_LAYER=auto: say so,
+                        # as a fresh read does (the cache entry does not).
+                        note_text_layer_fallback(fs, text_layer_fallback_reason(ctx.resources))
             # Cached output must satisfy this run's quality policy too. In
             # particular, failed pages cannot become invisible on a cache hit.
             OcrStage._check_ocr_success(ctx)
@@ -163,6 +171,11 @@ class InterleavedRenderOcrStage:
             # before the next window renders — the memory cap.
             for fs in group:
                 fs.free_pre_ocr()
+            # ...and, with PIPELINE_HEAP_TRIM=window, hand the freed pages back
+            # to the OS before the next window (the last window's go at the
+            # chunk-end trim).
+            if start + window < len(pending):
+                await trim_between_windows(ctx.settings)
 
         # Single per-chunk teardown, matching what OcrStage would have done once
         # had it processed the whole chunk in one pass.
@@ -278,6 +291,8 @@ class StreamingRenderOcrStage(InterleavedRenderOcrStage):
                 for fs in group:
                     fs.free_pre_ocr()
                 _spawn(group)
+                if start + window < len(pending):
+                    await trim_between_windows(ctx.settings)
         finally:
             # Settle every spawned back half before the stage returns — no
             # window task may outlive run(), even when a front-half stage

@@ -851,6 +851,16 @@ def numbering_parent_ids(sections: list[PaperSection]) -> dict[int, int]:
     return parents
 
 
+def body_numbered_section_ids(sections: list[PaperSection]) -> frozenset[int]:
+    """Ids of the headings printed with a body section number ("2.3", "IV",
+    "Chapter 3"), in the document's own numbering scheme. Lettered appendix
+    numbers ("A.1") are not body numbers."""
+    numbers = _document_section_numbers(sections)
+    return frozenset(
+        section_id for section_id, number in numbers.items() if number.kind in _BODY_NUMBER_KINDS
+    )
+
+
 def assign_hierarchy_from_top_level(
     sections: list[PaperSection],
     scope_ids: dict[int, int] | None = None,

@@ -81,9 +81,19 @@ def test_local_resolves_to_vllm_once_a_student_fits():
     with (
         patch("platform.system", return_value="Linux"),
         patch("sys.platform", "linux"),
-        patch("bibr.local.llm_models.detect_hardware", return_value=("cuda", 8.0)),
+        patch("bibr.local.llm_models.detect_hardware", return_value=("cuda", 10.0)),
     ):
         assert resolve_llm_backend("local") == "vllm"
+
+
+def test_local_resolves_to_llama_cpp_on_an_8_gb_card():
+    # Every managed vLLM start was refused on an emulated 8 GB card with a desktop.
+    with (
+        patch("platform.system", return_value="Linux"),
+        patch("sys.platform", "linux"),
+        patch("bibr.local.llm_models.detect_hardware", return_value=("cuda", 8.0)),
+    ):
+        assert resolve_llm_backend("local") == "llama-cpp"
 
 
 def test_local_resolves_to_llama_cpp_on_small_cuda_gpu():
@@ -125,10 +135,14 @@ async def test_start_llm_server_vllm_branch(monkeypatch):
     factory = MagicMock(return_value=instance)
     monkeypatch.setattr(vllm_llm, "VllmLlmServer", factory)
     custom = GlobalSettings()
-    resources = ResourceManager(settings=custom)
+    resources = ResourceManager(settings=custom, ocr_backend="paddle-vllm")
     await resources.start_llm_server(backend="vllm")
     assert resources._llm_server is instance
-    factory.assert_called_once_with(settings=custom, stop_event=ANY)
+    # The share is sized from the VRAM free at start (the user set none), and
+    # the default 0.85 cannot share the card with PaddleOCR-VL: they swap.
+    factory.assert_called_once_with(
+        settings=custom, stop_event=ANY, share_from_free_memory=True, swaps_with_ocr=True
+    )
     assert isinstance(factory.call_args.kwargs["stop_event"], threading.Event)
     instance.configure_llm_client.assert_called_once()
 
@@ -290,3 +304,33 @@ def test_preflight_llama_cpp_cpu_only_still_passes():
         patch("bibr.local.llama_cpp.probe_gpu_backend", return_value=False),
     ):
         assert cli._preflight_local_backend("llama-cpp") is None
+
+
+@pytest.mark.parametrize(
+    ("llm_backend", "expected"),
+    [
+        # Beside a llama.cpp LLM the automatic chain runs GLM-OCR on llama.cpp:
+        # no managed vLLM server starts, so the classifiers keep the card.
+        ("llama-cpp", 0.0),
+        # Beside a cloud LLM the same chain starts PaddleOCR-VL on vLLM, which
+        # claims 0.21 of a 24 GB card.
+        ("cloud", 0.21),
+    ],
+)
+def test_the_classifiers_leave_room_only_for_the_ocr_the_run_starts(
+    monkeypatch, llm_backend, expected
+):
+    """``_managed_gpu_fraction`` resolves the automatic ``paddle`` chain beside
+    the run's LLM backend. On a Linux 24 GB Ampere card the chain resolved
+    without it lists paddle-vllm, so a llama.cpp run would keep its classifiers
+    off PaddleOCR-VL's share for a server it never starts."""
+    from bibr.config import GlobalSettings
+    from bibr.local.pipeline import _managed_gpu_fraction
+    from bibr.ocr import registry
+
+    monkeypatch.setattr(registry.sys, "platform", "linux")
+    monkeypatch.setattr(registry.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: 24.0)
+    monkeypatch.setattr(registry, "_nvidia_compute_capability", lambda: 8.6)
+    fraction = _managed_gpu_fraction(llm_backend, "paddle", GlobalSettings())
+    assert fraction == pytest.approx(expected)

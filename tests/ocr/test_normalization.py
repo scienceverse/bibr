@@ -44,13 +44,13 @@ def test_paddle_formula_normalization_removes_one_balanced_outer_wrapper(raw, ex
     assert normalized.raw_content == raw
 
 
-def test_glm_output_remains_unchanged():
+def test_glm_output_remains_unchanged_and_keeps_raw_content():
     raw = "  \\[x^2\\]  "
 
     normalized = normalize_ocr_output(GLM_PROFILE, "formula", raw)
 
     assert normalized.content == raw
-    assert normalized.raw_content is None
+    assert normalized.raw_content == raw
 
 
 def test_paddle_table_output_is_decoded_and_retains_raw_content():
@@ -66,13 +66,13 @@ def test_paddle_table_output_is_decoded_and_retains_raw_content():
     assert normalized.raw_content == raw
 
 
-def test_glm_table_output_remains_unchanged():
+def test_glm_table_output_remains_unchanged_and_keeps_raw_content():
     raw = "<table><tr><td>DOI:\\n10.1000/example</td></tr></table>"
 
     normalized = normalize_ocr_output(GLM_PROFILE, "table", raw)
 
     assert normalized.content == raw
-    assert normalized.raw_content is None
+    assert normalized.raw_content == raw
 
 
 def test_non_paddle_profile_table_output_is_not_decoded():

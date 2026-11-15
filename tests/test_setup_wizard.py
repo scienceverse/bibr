@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from bibr.setup_wizard import (
+    FAST_MODE_PROMPT,
     LLM_DEFAULTS,
     RecommendedSetup,
     SetupWizard,
@@ -12,6 +13,7 @@ from bibr.setup_wizard import (
     _fetch_models,
     _merge_env,
     _ml_extra_available,
+    _recommends_gpu_extra,
     _select_model,
     _write_env_fresh,
 )
@@ -27,6 +29,21 @@ def _ml_extra_installed(monkeypatch):
     mid-suite. Tests of that auto-install path pin False and stub the install.
     """
     monkeypatch.setattr("bibr.setup_wizard._ml_extra_available", lambda: True)
+
+
+def _no_to_fast(confirm):
+    """A ``Confirm.ask`` stub that answers the fast-mode offer no and everything else with *confirm*.
+
+    The first question of the easy flow is the fast-mode offer; a test of one of the
+    LLM tiers has to get past it.
+    """
+
+    def ask(prompt, *args, **kwargs):
+        if prompt == FAST_MODE_PROMPT:
+            return False
+        return confirm(prompt, *args, **kwargs)
+
+    return ask
 
 
 @pytest.mark.parametrize("missing", [None, "torch", "cv2"])
@@ -908,7 +925,7 @@ def test_easy_setup_accepts_recommendation_writes_env_and_preset(tmp_path, monke
     monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 64.0)
     monkeypatch.setattr("bibr.setup_wizard._build_recommended_setup", lambda **k: setup)
     monkeypatch.setattr("bibr.setup_wizard._ml_extra_available", lambda: True)
-    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: True)
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", _no_to_fast(lambda *a, **k: True))
     monkeypatch.setattr(wizard, "_install_selected_extras", lambda *a, **k: None)
     monkeypatch.setattr(wizard, "_test_local_server", lambda: None)
     monkeypatch.setattr(wizard, "_step_smoke_test", lambda *a, **k: None)
@@ -978,7 +995,7 @@ def test_easy_private_server_prompts_for_urls(tmp_path, monkeypatch):
     monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 8.0)
     monkeypatch.setattr("bibr.setup_wizard._build_recommended_setup", lambda **k: setup)
     monkeypatch.setattr("bibr.setup_wizard.PresetManager", MagicMock())
-    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: True)
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", _no_to_fast(lambda *a, **k: True))
     monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *a, **k: next(prompts))
     # The private-server tier now gets the LLM connection test too.
     monkeypatch.setattr("bibr.clients.llm.ping_llm", lambda settings: "OK")
@@ -1261,20 +1278,25 @@ def test_recommended_setup_cuda_uses_fully_local_defaults():
 
     assert setup.tier == "fully_local"
     assert setup.preset_name == "recommended-local"
+    assert setup.env["PIPELINE_MODE"] == "full"
     assert setup.env["LLM_BACKEND"] == "vllm"
     assert setup.env["OCR_BACKEND"] == "paddle"
     assert setup.env["REF_PARSE_STRATEGY"] == "ner"
     assert setup.env["REF_SEG_STRATEGY"] == "geom"
     assert setup.env["WTPSPLIT_MODEL"] == "sat-6l-sm"
     assert "OCR_ENABLE_LAYOUT" not in setup.env
-    assert setup.env["PIPELINE_MEMORY_MODE"] == "balanced"
+    assert setup.memory_mode == "balanced"
     assert setup.env["CROSSREF_CONSOLIDATE"] == "off"
     # Linux/CUDA needs the vllm extra (paddle-vllm OCR + the managed local LLM);
     # ``local`` resolves to nothing on Linux and used to leave the first chew
     # to bootstrap vLLM through ``uv tool run``.
-    assert {"ml", "vllm"} <= setup.extras
+    assert "vllm" in setup.extras
     assert "local" not in setup.extras
     assert "demo" in setup.extras
+    # No torch: the default ONNX models run without the ml extra.
+    assert "ml" not in setup.extras
+    # onnxruntime-gpu, or layout, SaT and the NER parser run on the CPU.
+    assert "gpu" in setup.extras
     assert setup.required_prompts == ("install_extras", "smoke_test")
 
 
@@ -1293,19 +1315,23 @@ def test_recommended_setup_low_vram_cuda_keeps_paddle_automatic_ocr():
     assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-GGUF:Q4_K_M"
     assert setup.env["LLM_CHAT_TEMPLATE_KWARGS"] == '{"enable_thinking": false}'
     assert "demo" in setup.extras
-    assert "ml" in setup.extras
-    # At 6 GB the automatic chain runs OCR and the LLM through llama.cpp, so no
-    # GPU-runtime extra is installed and the plan says what to install instead.
+    assert "ml" not in setup.extras
+    # At 6 GB the automatic chain runs OCR and the LLM through llama.cpp, so the
+    # vLLM runtime is not installed and the plan says what to install instead.
     assert "vllm" not in setup.extras
     assert "local" not in setup.extras
     assert "local-cuda" not in setup.extras
     assert "llama.cpp" in setup.runtime_summary
+    # Layout and the sentence segmenter still run on the GPU, as in the 6 and
+    # 8 GB runs.
+    assert "gpu" in setup.extras
 
 
-def test_recommended_setup_mid_vram_cuda_runs_the_2b_student_on_vllm():
-    """8-11 GB: paddle-vllm OCR (8 GB gate) and the 2B student's vLLM build (8 GB)
-    both fit, so no llama.cpp split is needed. Under NuExtract 3 (11 GB) these
-    cards had to run the LLM through llama.cpp."""
+def test_recommended_setup_mid_vram_cuda_runs_the_4b_w4a16_build_on_vllm():
+    """10-19 GB: paddle-vllm OCR (8 GB gate) and the 4B student's W4A16 vLLM build
+    (10 GB tier) both run on vLLM, so no llama.cpp split is needed. Under
+    NuExtract 3 (11 GB) these cards had to run the LLM through llama.cpp, and
+    until the W4A16 build was listed they got the 2B student."""
     setup = _build_recommended_setup(
         platform_key="cuda",
         accelerator_memory_gb=10.0,
@@ -1315,7 +1341,7 @@ def test_recommended_setup_mid_vram_cuda_runs_the_2b_student_on_vllm():
     )
     assert setup.env["OCR_BACKEND"] == "paddle"
     assert setup.env["LLM_BACKEND"] == "vllm"
-    assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-2b"
+    assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-W4A16"
     assert "vllm" in setup.extras
     assert "llama-server" not in setup.runtime_summary
 
@@ -1323,8 +1349,11 @@ def test_recommended_setup_mid_vram_cuda_runs_the_2b_student_on_vllm():
 @pytest.mark.parametrize(
     ("vram_gb", "expected"),
     [
-        (11.0, "scienceverse/bibr-extract-qwen35-2b"),
-        (12.0, "scienceverse/bibr-extract-qwen35-4b"),
+        (10.0, "scienceverse/bibr-extract-qwen35-4b-W4A16"),
+        (11.0, "scienceverse/bibr-extract-qwen35-4b-W4A16"),
+        (12.0, "scienceverse/bibr-extract-qwen35-4b-W4A16"),
+        (16.0, "scienceverse/bibr-extract-qwen35-4b-W4A16"),
+        (20.0, "scienceverse/bibr-extract-qwen35-4b"),
         (24.0, "scienceverse/bibr-extract-qwen35-4b"),
     ],
 )
@@ -1341,6 +1370,54 @@ def test_recommended_setup_cuda_picks_the_student_that_fits(vram_gb, expected):
     assert "llama-server" not in setup.runtime_summary
 
 
+@pytest.mark.parametrize(
+    ("vram_gb", "ocr_backend"),
+    [
+        # An RTX 3070 (8,192 MiB) could run PaddleOCR-VL on vLLM, but bibr does
+        # not hand GPU memory between it and a llama.cpp LLM: GLM-OCR instead.
+        (8.0, "glm-llama"),
+        (9.5, "glm-llama"),
+        # An RTX 4060 (8,188 MiB): the automatic chain is GLM-OCR alone.
+        (8188 / 1024, "paddle"),
+    ],
+)
+def test_recommended_setup_8_gb_cuda_runs_both_halves_on_llama_cpp(vram_gb, ocr_backend):
+    """Every managed vLLM start was refused on an emulated 8 GB card with a
+    desktop; the GGUF 4B and GLM-OCR on llama.cpp finished the batch."""
+    setup = _build_recommended_setup(
+        platform_key="cuda",
+        accelerator_memory_gb=vram_gb,
+        system_memory_gb=32.0,
+        sys_platform="linux",
+        machine="x86_64",
+    )
+    assert setup.env["LLM_BACKEND"] == "llama-cpp"
+    assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
+    assert setup.env["OCR_BACKEND"] == ocr_backend
+    assert setup.memory_mode == "aggressive"
+    assert "vllm" not in setup.extras
+    assert "llama-server" in setup.runtime_summary
+
+
+@pytest.mark.parametrize(
+    ("vram_gb", "mode"),
+    [(10.0, "aggressive"), (11.0, "aggressive"), (12227 / 1024, "balanced"), (12.0, "balanced")],
+)
+def test_recommended_setup_runs_cards_below_12_gb_aggressive(vram_gb, mode):
+    """The W4A16 build's starts need 8 GiB free; below 12 GB only aggressive
+    mode, which unloads bibr's GPU sessions before each start, was measured."""
+    setup = _build_recommended_setup(
+        platform_key="cuda",
+        accelerator_memory_gb=vram_gb,
+        system_memory_gb=32.0,
+        sys_platform="linux",
+        machine="x86_64",
+    )
+    assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-W4A16"
+    assert setup.env["OCR_BACKEND"] == "paddle"
+    assert setup.memory_mode == mode
+
+
 def test_recommended_setup_windows_uses_the_4b_gguf():
     """Windows runs llama.cpp, so it gets the 4B student's GGUF build."""
     setup = _build_recommended_setup(
@@ -1355,6 +1432,37 @@ def test_recommended_setup_windows_uses_the_4b_gguf():
     # bibr cannot install llama.cpp itself, so the plan says how to get it.
     assert "winget install llama.cpp" in setup.runtime_summary
     assert "llama-server" in setup.runtime_summary
+    # No run with onnxruntime-gpu has been measured on Windows: left as it was.
+    assert "gpu" not in setup.extras
+
+
+@pytest.mark.parametrize(
+    ("machine", "capability", "installs_gpu"),
+    [
+        ("x86_64", None, True),  # nvidia-smi cannot tell: as in routing
+        ("x86_64", 12.0, True),  # RTX 5090
+        ("x86_64", 8.6, True),  # RTX 3090, the card cut to each tier's memory
+        ("x86_64", 8.0, True),
+        ("x86_64", 7.5, False),  # Turing: never measured with it
+        ("x86_64", 6.1, False),  # Pascal
+        ("aarch64", None, False),  # never measured; the locked build has no Arm wheel
+    ],
+)
+def test_recommended_setup_installs_the_gpu_extra_where_it_was_measured(
+    monkeypatch, machine, capability, installs_gpu
+):
+    from bibr.ocr import registry
+
+    monkeypatch.setattr(registry, "_nvidia_compute_capability", lambda: capability)
+    setup = _build_recommended_setup(
+        platform_key="cuda",
+        accelerator_memory_gb=24.0,
+        system_memory_gb=32.0,
+        sys_platform="linux",
+        machine=machine,
+    )
+    assert setup.tier == "fully_local"
+    assert ("gpu" in setup.extras) is installs_gpu
 
 
 def test_recommended_setup_apple_silicon_warns_about_runtime():
@@ -1375,10 +1483,11 @@ def test_recommended_setup_apple_silicon_warns_about_runtime():
     assert setup.env["OCR_BACKEND"] == "paddle"
     # A 16 GB Mac resolves to balanced (OCR/LLM never coexist; models are small)
     # per the current _auto_memory_mode rule.
-    assert setup.env["PIPELINE_MEMORY_MODE"] == "balanced"
+    assert setup.memory_mode == "balanced"
     assert "demo" in setup.extras
     assert "Apple Silicon" in setup.runtime_summary
     assert "slow" in setup.runtime_summary
+    assert "gpu" not in setup.extras
     # Honest about the real cost: a full extraction is tens of minutes.
     assert "15-30" in setup.runtime_summary
 
@@ -1492,7 +1601,9 @@ def test_print_done_demo_hint_when_install_declined(monkeypatch):
     declined = _recording_wizard()
     declined.selected_extras = {"demo", "ml"}
     declined._print_done()
-    assert "needs the demo extra" in declined.console.export_text()
+    declined_text = declined.console.export_text()
+    assert "needs the demo extra" in declined_text
+    assert "uv tool install 'bibr[demo]'" in declined_text
 
     installed = _recording_wizard()
     installed.selected_extras = {"demo", "ml"}
@@ -1518,10 +1629,20 @@ def test_local_provider_cuda_can_select_the_students_llama_variant(monkeypatch):
     monkeypatch.setattr("bibr.setup_wizard.sys.platform", "linux")
     wizard = _recording_wizard()
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 24.0))
-    _feed_prompts(monkeypatch, ["local", "bibr-extract-4b", "2"])
+    _feed_prompts(monkeypatch, ["local", "bibr-extract-4b", "3"])
     wizard._step_llm_provider()
     assert wizard.env_vars["LLM_BACKEND"] == "llama-cpp"
     assert wizard.env_vars["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
+
+
+def test_local_provider_cuda_can_select_the_4b_w4a16_build(monkeypatch):
+    monkeypatch.setattr("bibr.setup_wizard.sys.platform", "linux")
+    wizard = _recording_wizard()
+    monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 24.0))
+    _feed_prompts(monkeypatch, ["local", "bibr-extract-4b", "2"])
+    wizard._step_llm_provider()
+    assert wizard.env_vars["LLM_BACKEND"] == "vllm"
+    assert wizard.env_vars["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-W4A16"
 
 
 def test_local_provider_custom_hf_id(monkeypatch):
@@ -1863,14 +1984,47 @@ def test_smoke_test_real_extraction_no_llm():
         ((None, None), 4.0, "aggressive"),  # no accelerator, low RAM
     ],
 )
-def test_step_memory_mode_persists_resolved_mode(monkeypatch, hardware, ram, expected):
+def test_step_memory_mode_shows_the_resolved_mode_and_writes_nothing(
+    monkeypatch, hardware, ram, expected
+):
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: hardware)
     monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: ram)
+    monkeypatch.setattr("bibr.local.pipeline._cuda_card_stays_empty", lambda *_: False)
 
     wizard = SetupWizard()
-    wizard._step_memory_mode()
+    with wizard.console.capture() as shown:
+        wizard._step_memory_mode()
 
-    assert wizard.env_vars["PIPELINE_MEMORY_MODE"] == expected
+    assert f"Memory mode: {expected}" in shown.get()
+    assert "PIPELINE_MEMORY_MODE" not in wizard.env_vars
+
+
+@pytest.mark.parametrize(
+    ("llm_backend", "expected"),
+    [
+        ("cloud", "balanced"),
+        (None, "balanced"),
+        ("local", "aggressive"),
+        ("vllm", "aggressive"),
+        ("llama-cpp", "aggressive"),
+    ],
+)
+def test_step_memory_mode_follows_the_llm_step(monkeypatch, llm_backend, expected):
+    """A 10 GB card runs aggressive only when bibr's own LLM server shares it;
+    a cloud LLM with local OCR keeps balanced (batches of 8)."""
+    monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 10.0))
+    monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 32.0)
+
+    monkeypatch.setattr("bibr.local.pipeline._cuda_card_stays_empty", lambda *_: False)
+
+    wizard = SetupWizard()
+    if llm_backend is not None:
+        wizard.env_vars["LLM_BACKEND"] = llm_backend
+    with wizard.console.capture() as shown:
+        wizard._step_memory_mode()
+
+    assert f"Memory mode: {expected}" in shown.get()
+    assert "PIPELINE_MEMORY_MODE" not in wizard.env_vars
 
 
 # ---------------------------------------------------------------------------
@@ -2002,7 +2156,7 @@ def test_install_failure_after_env_written_keeps_config(tmp_path, monkeypatch):
         "bibr.setup_wizard.subprocess.run",
         MagicMock(return_value=MagicMock(returncode=1, stderr="No solution found", stdout="")),
     )
-    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: True)
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", _no_to_fast(lambda *a, **k: True))
 
     with pytest.raises(SystemExit):
         wizard.run()
@@ -2058,6 +2212,16 @@ def test_write_env_fresh_section_placement(tmp_path):
     assert section_of("OCR_BASE_URL") == "Models"
 
 
+def test_write_env_fresh_puts_the_run_mode_first(tmp_path):
+    env_path = tmp_path / ".env"
+    _write_env_fresh(env_path, {"LLM_PROVIDER": "anthropic", "PIPELINE_MODE": "full"})
+
+    lines = env_path.read_text().splitlines()
+
+    assert lines.index("# --- Run mode ---") < lines.index("# --- LLM Provider ---")
+    assert lines[lines.index("# --- Run mode ---") + 1] == "PIPELINE_MODE=full"
+
+
 def test_help_text_describes_new_flow():
     """Help text must drop the false 'reads existing .env' claim and describe the flow."""
     from bibr.setup_wizard import _HELP_TEXT
@@ -2066,6 +2230,11 @@ def test_help_text_describes_new_flow():
     assert "plan preview" in _HELP_TEXT.lower()
     assert "overwrite, merge, or skip" in _HELP_TEXT
     assert "does not take its answers from your existing\n.env" in _HELP_TEXT
+    # The flow starts with fast mode, writes the mode, and no longer dead-ends.
+    assert "Offer fast mode, the default" in _HELP_TEXT
+    assert "PIPELINE_MODE=fast" in _HELP_TEXT and "PIPELINE_MODE=full" in _HELP_TEXT
+    assert "(or none, for fast mode)" in _HELP_TEXT
+    assert "stays on auto" in _HELP_TEXT
 
 
 def test_plan_preview_shows_paddle_default_and_model(monkeypatch):
@@ -2426,3 +2595,1125 @@ def test_run_validation_tests_the_private_server_llm(monkeypatch):
     wizard._run_validation(setup)
 
     assert calls == ["llm"]
+
+
+# --- the 10–11 GB llama.cpp pair -------------------------------------------
+
+_LLAMA_SERVER = "/opt/llama.cpp/llama-server"
+
+
+def _pair_setup(**server):
+    from bibr.setup_wizard import SetupLlamaServer
+
+    return _build_recommended_setup(
+        platform_key="cuda",
+        accelerator_memory_gb=10.0,
+        system_memory_gb=32.0,
+        sys_platform="linux",
+        machine="x86_64",
+        llama_server=SetupLlamaServer(**server),
+    )
+
+
+def test_recommended_setup_10_gb_runs_the_pair_on_a_qualifying_llama_server():
+    """An RTX 3080 10 GB with a CUDA llama-server of build 11282 or newer gets
+    the 4B GGUF Q8_0 and GLM-OCR on it: 148 against 85 papers an hour on the
+    same 48 papers, passing 40 against W4A16's 39."""
+    setup = _pair_setup(command=(_LLAMA_SERVER,), build=11282)
+    assert setup.env["LLM_BACKEND"] == "llama-cpp"
+    assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
+    assert setup.env["OCR_BACKEND"] == "glm-llama"
+    assert setup.memory_mode == "aggressive"
+    assert "vllm" not in setup.extras
+    summary = setup.runtime_summary
+    assert f"{_LLAMA_SERVER} (build 11282)" in summary
+    assert "GLM-OCR both run on the CUDA llama.cpp server" in summary
+    assert "148 papers an hour against 85" in summary
+    assert "40 and 39 of 48" in summary
+    assert "150" in summary and "141" in summary
+    assert "`bibr setup --advanced` sets up the W4A16 build on vLLM" in summary
+    # --llm local resolves vLLM on this card, which cannot serve the GGUF build.
+    assert "Run plain `bibr chew`: `--llm local` picks vLLM on this card" in summary
+    assert "--advanced" in setup.fallback_hint and "W4A16" in setup.fallback_hint
+    assert setup.note == ""
+
+
+def test_recommended_setup_10_gb_keeps_w4a16_beside_a_rejected_llama_server():
+    setup = _pair_setup(command=(_LLAMA_SERVER,), rejected="build 11000 below 11282")
+    assert setup.env["LLM_BACKEND"] == "vllm"
+    assert setup.env["LLM_LOCAL_MODEL"] == "scienceverse/bibr-extract-qwen35-4b-W4A16"
+    assert "vllm" in setup.extras
+    assert setup.note == (
+        f"Found llama.cpp at {_LLAMA_SERVER} but not using it: build 11000 below 11282. "
+        "The 4B W4A16 build runs on vLLM instead."
+    )
+    assert setup.fallback_hint == ""
+
+
+def test_recommended_setup_10_gb_without_a_llama_server_is_unchanged():
+    setup = _pair_setup()
+    assert setup.env["LLM_BACKEND"] == "vllm"
+    assert setup.note == "" and setup.fallback_hint == ""
+
+
+@pytest.mark.parametrize("vram_gb", [12.0, 16.0, 24.0])
+def test_a_qualifying_llama_server_changes_nothing_from_12_gb(vram_gb):
+    from bibr.setup_wizard import SetupLlamaServer
+
+    setup = _build_recommended_setup(
+        platform_key="cuda",
+        accelerator_memory_gb=vram_gb,
+        system_memory_gb=32.0,
+        sys_platform="linux",
+        machine="x86_64",
+        llama_server=SetupLlamaServer(command=(_LLAMA_SERVER,), build=11282),
+    )
+    assert setup.env["LLM_BACKEND"] == "vllm"
+    assert "vllm" in setup.extras
+    assert _LLAMA_SERVER not in setup.runtime_summary
+
+
+def _run_easy_setup(monkeypatch, probe, *, build=11282, wizard=None):
+    """Run the easy wizard on an RTX 3080 10 GB up to the plan, then decline."""
+    wizard = wizard or _recording_wizard()
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 10.0))
+    monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 32.0)
+    monkeypatch.setattr("bibr.setup_wizard._probe_llama_server", probe)
+    monkeypatch.setattr("bibr.local.llama_cpp.probe_build_number", lambda prefix: build)
+    monkeypatch.setattr("bibr.local.llama_cpp.find_llama_server", lambda: [_LLAMA_SERVER])
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: False)
+    wizard.run()
+    return wizard.console.export_text()
+
+
+def test_easy_setup_prints_the_llama_server_it_runs_the_pair_on(monkeypatch):
+    text = " ".join(_run_easy_setup(monkeypatch, lambda: ([_LLAMA_SERVER], None)).split())
+    assert "bibr-extract-qwen35-4b-GGUF:Q8_0 via llama-cpp" in text
+    assert "glm-llama" in text
+    assert f"{_LLAMA_SERVER} (build 11282)" in text
+    assert "bibr setup --advanced" in text
+    assert "vllm" not in text.split("Extras", 1)[1].split("Memory", 1)[0]
+
+
+def test_easy_setup_prints_one_line_for_a_rejected_llama_server(monkeypatch):
+    reason = "CUDA could not start in this build (driver older than the build's CUDA?)"
+    text = " ".join(_run_easy_setup(monkeypatch, lambda: (None, reason)).split())
+    assert "bibr-extract-qwen35-4b-W4A16 via vllm" in text
+    assert f"Found llama.cpp at {_LLAMA_SERVER} but not using it: {reason}." in text
+
+
+def _record_statuses(monkeypatch, wizard, events):
+    """Record the wizard's status lines, and what ran while each was up."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def status(message, *args, **kwargs):
+        events.append(("status", message))
+        yield
+        events.append(("done", message))
+
+    monkeypatch.setattr(wizard.console, "status", status)
+
+
+def test_easy_setup_shows_a_status_line_while_it_probes_the_llama_server(monkeypatch):
+    events = []
+    wizard = _recording_wizard()
+    _record_statuses(monkeypatch, wizard, events)
+    _run_easy_setup(
+        monkeypatch,
+        lambda: events.append(("probe",)) or ([_LLAMA_SERVER], None),
+        wizard=wizard,
+    )
+    message = "Checking the llama.cpp server on PATH …"
+    assert events == [("status", message), ("probe",), ("done", message)]
+
+
+def test_easy_setup_on_a_12_gb_card_never_looks_for_a_llama_server(monkeypatch):
+    probed = []
+    events = []
+    wizard = _recording_wizard()
+    _record_statuses(monkeypatch, wizard, events)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 12.0))
+    monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 32.0)
+    monkeypatch.setattr(
+        "bibr.setup_wizard._probe_llama_server", lambda: probed.append(1) or ([_LLAMA_SERVER], None)
+    )
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: False)
+    wizard.run()
+    assert probed == []
+    assert events == []
+
+
+def test_smoke_test_failure_after_the_pair_names_the_w4a16_alternative(monkeypatch):
+    wizard = _recording_wizard()
+    setup = _pair_setup(command=(_LLAMA_SERVER,), build=11282)
+    monkeypatch.setattr(wizard, "_collect_required_prompts", lambda s: None)
+    monkeypatch.setattr(wizard, "_step_write_env", lambda **k: None)
+    monkeypatch.setattr(wizard, "_offer_extras_install", lambda: None)
+    monkeypatch.setattr(wizard, "_run_validation", lambda s: None)
+    monkeypatch.setattr(wizard, "_print_done", lambda: None)
+    with (
+        patch("bibr.setup_wizard.Confirm.ask", return_value=True),
+        patch("bibr.api.chew", side_effect=RuntimeError("GLM-OCR server failed to start")),
+    ):
+        wizard._finish_recommended_setup(setup)
+    text = " ".join(wizard.console.export_text().split())
+    assert "Test extraction failed" in text
+    assert "`bibr setup --advanced` sets up the 4B W4A16 build on vLLM instead" in text
+
+
+def test_smoke_test_failure_without_the_pair_names_no_alternative(monkeypatch):
+    wizard = _recording_wizard()
+    with (
+        patch("bibr.setup_wizard.Confirm.ask", return_value=True),
+        patch("bibr.api.chew", side_effect=RuntimeError("boom")),
+    ):
+        wizard._step_smoke_test()
+    assert "--advanced" not in wizard.console.export_text()
+
+
+def test_local_server_test_failure_after_the_pair_names_the_w4a16_alternative(monkeypatch):
+    wizard = _recording_wizard()
+    wizard._fallback_hint = _pair_setup(command=(_LLAMA_SERVER,), build=11282).fallback_hint
+    wizard.env_vars = {
+        "LLM_BACKEND": "llama-cpp",
+        "LLM_LOCAL_MODEL": "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0",
+    }
+
+    class _Failing:
+        def __init__(self):
+            raise RuntimeError("unknown model architecture: 'qwen35'")
+
+    monkeypatch.setattr("bibr.local.llama_cpp.LlamaCppLlmServer", _Failing)
+    # The test sets LLM_LOCAL_MODEL itself; setenv makes monkeypatch restore it.
+    monkeypatch.setenv("LLM_LOCAL_MODEL", "unset")
+    wizard._test_local_server()
+    text = " ".join(wizard.console.export_text().split())
+    assert "Local server test failed" in text
+    assert "retry with `bibr chew`." in text
+    assert "`bibr setup --advanced` sets up the 4B W4A16 build on vLLM instead" in text
+
+
+def test_windows_keeps_its_own_llama_cpp_plan_beside_a_qualifying_server():
+    """Windows runs llama.cpp at every size already; the pair's summary, which
+    compares it with vLLM, is for Linux."""
+    from bibr.setup_wizard import SetupLlamaServer
+
+    setup = _build_recommended_setup(
+        platform_key="cuda",
+        accelerator_memory_gb=10.0,
+        system_memory_gb=32.0,
+        sys_platform="win32",
+        machine="AMD64",
+        llama_server=SetupLlamaServer(command=(_LLAMA_SERVER,), build=11282),
+    )
+    assert setup.env["LLM_BACKEND"] == "llama-cpp"
+    assert "winget install llama.cpp" in setup.runtime_summary
+    assert "--advanced" not in setup.runtime_summary
+    assert setup.fallback_hint == ""
+
+
+@pytest.mark.parametrize(
+    ("vram_gb", "pair"),
+    [(9.74, False), (9.75, True), (10.0, True), (11.0, True), (11.74, True), (11.75, False)],
+)
+def test_the_pair_band_is_the_aggressive_vllm_band(vram_gb, pair):
+    from bibr.setup_wizard import _llama_pair_card
+
+    assert _llama_pair_card("cuda", vram_gb, "linux") is pair
+
+
+def test_the_pair_band_keeps_its_own_floor_if_vllm_reaches_smaller_cards(monkeypatch):
+    """The band starts at VLLM_LLM_MIN_CARD_GB, not wherever the registry's
+    smallest vLLM build happens to fit."""
+    from bibr.setup_wizard import _llama_pair_card
+
+    monkeypatch.setattr("bibr.setup_wizard.cuda_llm_backend_for", lambda memory_gb: "vllm")
+    assert _llama_pair_card("cuda", 9.5, "linux") is False
+    assert _llama_pair_card("cuda", 10.0, "linux") is True
+
+
+# ---------------------------------------------------------------------------
+# Fast mode first: the easy flow offers it, writes PIPELINE_MODE, and never a wrong .env
+# ---------------------------------------------------------------------------
+
+# What a machine with nothing configured holds: none of these in the shell.
+_MODE_ENV_VARS = (
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "LANGEXTRACT_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_API_KEY",
+    "GROQ_API_KEY",
+    "OPENAI_API_KEY",
+    "LLM_API_KEY",
+    "LLM_BASE_URL",
+    "LLM_PROVIDER",
+    "LLM_MODEL",
+    "LLM_BACKEND",
+    "PIPELINE_MODE",
+)
+
+_PRIVATE_SERVER_PROMPT = "Do you have a private OCR/LLM server bibr can use?"
+_CLOUD_PROMPT = "Send document-derived content to Anthropic Claude?"
+_ADVANCED_PROMPT = "Switch to the advanced wizard for exact control now?"
+_FAST_INSTEAD_PROMPT = "Set up fast mode instead?"
+
+# (platform_key, accelerator GB, sys.platform, machine) of machines the plan is built for.
+_MACHINES = {
+    "linux cpu": (None, None, "linux", "x86_64"),
+    "windows cpu": (None, None, "win32", "AMD64"),
+    "apple silicon": ("mlx", 16.0, "darwin", "arm64"),
+    "cuda 3 GB": ("cuda", 3.0, "linux", "x86_64"),
+    "cuda 8 GB": ("cuda", 8.0, "linux", "x86_64"),
+    "cuda 24 GB": ("cuda", 24.0, "linux", "x86_64"),
+    "windows cuda 12 GB": ("cuda", 12.0, "win32", "AMD64"),
+}
+
+
+def _fast_setup(machine: str, monkeypatch=None, **kwargs) -> RecommendedSetup:
+    platform_key, accel_gb, sys_platform, arch = _MACHINES[machine]
+    if monkeypatch is not None:
+        # The GPU-build rule asks nvidia-smi otherwise.
+        monkeypatch.setattr("bibr.ocr.registry._nvidia_compute_capability", lambda: 8.6)
+    return _build_recommended_setup(
+        platform_key=platform_key,
+        accelerator_memory_gb=accel_gb,
+        system_memory_gb=16.0,
+        sys_platform=sys_platform,
+        machine=arch,
+        fast=True,
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("machine", list(_MACHINES))
+def test_fast_setup_is_the_same_plan_on_every_machine(machine, monkeypatch):
+    """Fast mode needs no card, key, server or runtime, so no machine gets less than it."""
+    setup = _fast_setup(machine, monkeypatch)
+
+    assert setup.tier == "fast"
+    assert setup.preset_name == "recommended-fast"
+    assert setup.env["PIPELINE_MODE"] == "fast"
+    assert setup.env["REF_PARSE_STRATEGY"] == "ner"
+    assert setup.env["REF_SEG_STRATEGY"] == "geom"
+    # Nothing to configure: no provider, key, endpoint or OCR route; the OCR route
+    # stays automatic (a configured server or the machine's default).
+    assert not {k for k in setup.env if k.startswith(("LLM_", "OCR_")) or k.endswith("_API_KEY")}
+    # Nothing to install beyond the demo (and the GPU build of ONNX Runtime).
+    assert not setup.extras & {"ml", "vllm", "local", "local-mlx"}
+    assert "demo" in setup.extras
+    assert setup.required_prompts == ("install_extras", "smoke_test")
+    assert "private" not in setup.privacy_summary and "Anthropic" not in setup.privacy_summary
+
+
+@pytest.mark.parametrize(
+    ("machine", "capability", "installs_gpu"),
+    [
+        ("cuda 24 GB", None, True),  # nvidia-smi cannot tell: as in routing
+        ("cuda 24 GB", 8.6, True),
+        ("cuda 8 GB", 8.0, True),
+        ("cuda 8 GB", 7.5, False),  # Turing: never measured with it
+        ("windows cuda 12 GB", 8.6, False),  # none measured on Windows
+        ("linux cpu", 8.6, False),
+        ("apple silicon", 8.6, False),
+    ],
+)
+def test_fast_setup_installs_the_gpu_extra_only_where_it_was_measured(
+    monkeypatch, machine, capability, installs_gpu
+):
+    from bibr.ocr import registry
+
+    monkeypatch.setattr(registry, "_nvidia_compute_capability", lambda: capability)
+    assert ("gpu" in _fast_setup(machine).extras) is installs_gpu
+
+
+@pytest.mark.parametrize(
+    ("machine", "offers_local"),
+    [
+        ("cuda 24 GB", True),
+        ("cuda 8 GB", True),
+        ("apple silicon", True),
+        ("cuda 3 GB", False),  # below the 5 GB floor of a local LLM and OCR
+        ("linux cpu", False),
+    ],
+)
+def test_viable_local_gates_only_the_optional_llm_upgrade(machine, offers_local, monkeypatch):
+    """The hardware floor decides what the note offers beyond fast mode, not fast mode itself."""
+    setup = _fast_setup(machine, monkeypatch)
+
+    assert setup.tier == "fast"
+    assert ("a local model" in setup.note) is offers_local
+    assert "a private server or Claude in the cloud" in setup.note
+    assert "`bibr chew --full`" in setup.note
+
+
+@pytest.mark.parametrize(
+    ("machine", "allow_cloud", "tier"),
+    [
+        ("cuda 24 GB", False, "fully_local"),
+        ("linux cpu", False, "private_server"),
+        ("linux cpu", True, "cloud_fallback"),
+    ],
+)
+def test_the_llm_tiers_write_full_mode_and_recommend_no_torch(machine, allow_cloud, tier):
+    platform_key, accel_gb, sys_platform, arch = _MACHINES[machine]
+    setup = _build_recommended_setup(
+        platform_key=platform_key,
+        accelerator_memory_gb=accel_gb,
+        system_memory_gb=32.0,
+        sys_platform=sys_platform,
+        machine=arch,
+        allow_cloud=allow_cloud,
+    )
+
+    assert setup.tier == tier
+    assert setup.env["PIPELINE_MODE"] == "full"
+    assert "ml" not in setup.extras
+    assert "demo" in setup.extras
+
+
+def test_the_ml_extra_is_no_longer_called_recommended():
+    from bibr.setup_wizard import EXTRAS
+
+    assert "recommended" not in EXTRAS["ml"]
+    assert "recommended" not in _available_extras()["ml"]
+
+
+# --- the easy flow -----------------------------------------------------------
+
+
+def _drive_easy_setup(
+    monkeypatch,
+    tmp_path,
+    *,
+    hardware=(None, None),
+    answers=None,
+    typed=None,
+    existing=None,
+    log=None,
+):
+    """Run ``SetupWizard.run`` on a described Linux machine and return the wizard.
+
+    ``answers`` maps a confirmation's text to the answer; every other question gets
+    its default, as pressing Enter would. ``typed`` does the same for prompts. The
+    extras install and the smoke test are stubbed (the install would run uv, the
+    test a real extraction); ``wizard.installed`` holds the extras the install was
+    asked for. ``log`` collects every confirmation asked, with its default.
+    """
+    answers = answers or {}
+    typed = typed or {}
+    wizard = _recording_wizard()
+    wizard.env_path = tmp_path / ".env"
+    if existing is not None:
+        wizard.env_path.write_text(existing, encoding="utf-8")
+    wizard.installed = []
+
+    def confirm(prompt, *args, **kwargs):
+        if log is not None:
+            log.append((prompt, kwargs.get("default")))
+        return answers.get(prompt, kwargs.get("default", False))
+
+    def prompt(question, *args, **kwargs):
+        for text, value in typed.items():
+            if question.startswith(text):
+                return value
+        return kwargs.get("default", "")
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: hardware)
+    monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 32.0)
+    monkeypatch.setattr("bibr.setup_wizard._probe_llama_server", lambda: (None, None))
+    monkeypatch.setattr("bibr.ocr.registry._nvidia_compute_capability", lambda: 8.6)
+    monkeypatch.setattr("bibr.setup_wizard.PresetManager", MagicMock())
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", confirm)
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", prompt)
+    monkeypatch.setattr("bibr.clients.llm.ping_llm", lambda settings: "OK")
+    monkeypatch.setattr(
+        wizard,
+        "_install_selected_extras",
+        lambda *a, **k: wizard.installed.append(set(wizard.selected_extras)),
+    )
+    monkeypatch.setattr(wizard, "_step_smoke_test", lambda *a, **k: None)
+    wizard.run()
+    return wizard
+
+
+def _written_keys(path) -> set[str]:
+    return {line.partition("=")[0] for line in path.read_text().splitlines() if "=" in line.strip()}
+
+
+def _read_back(monkeypatch, env_file):
+    """What bibr reads from *env_file*: settings loaded from it, with nothing in the shell."""
+    from bibr.config import GlobalSettings
+
+    for var in _MODE_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("BIBR_ENV_FILE", str(env_file))
+    return GlobalSettings()
+
+
+def test_easy_setup_offers_fast_mode_first_with_yes_as_the_default(monkeypatch, tmp_path):
+    log: list = []
+    _drive_easy_setup(monkeypatch, tmp_path, log=log)
+
+    assert log[0] == (FAST_MODE_PROMPT, True)
+    # The questions of the old dead end are never asked of someone who takes fast mode.
+    assert not [p for p, _d in log if "private" in p or "Anthropic" in p or "advanced" in p]
+
+
+@pytest.mark.parametrize(
+    "hardware",
+    [(None, None), ("cuda", 3.0), ("cuda", 8.0), ("cuda", 24.0)],
+    ids=["cpu", "cuda 3 GB", "cuda 8 GB", "cuda 24 GB"],
+)
+def test_pressing_enter_everywhere_finishes_setup_in_fast_mode(monkeypatch, tmp_path, hardware):
+    """A user with no key and no GPU, or any other machine, ends with fast mode working."""
+    wizard = _drive_easy_setup(monkeypatch, tmp_path, hardware=hardware)
+
+    assert wizard.env_path.exists()
+    assert _written_keys(wizard.env_path) == {
+        "PIPELINE_MODE",
+        "WTPSPLIT_MODEL",
+        "REF_SEG_STRATEGY",
+        "REF_PARSE_STRATEGY",
+        "CROSSREF_CONSOLIDATE",
+    }
+    settings = _read_back(monkeypatch, wizard.env_path)
+    from bibr.run_mode import llm_configured, resolve_mode
+
+    assert settings.pipeline.mode == "fast"
+    assert resolve_mode(settings) == "fast"
+    assert not llm_configured(settings)
+    # The install is asked for the demo, and the GPU build on a card where bibr
+    # recommends it (not macOS or Windows); never torch.
+    import platform
+
+    gpu = hardware[0] == "cuda" and _recommends_gpu_extra(sys.platform, platform.machine())
+    [extras] = wizard.installed
+    assert extras == ({"demo", "gpu"} if gpu else {"demo"})
+    assert "Setup complete" in wizard.console.export_text()
+
+
+@pytest.mark.parametrize(
+    ("hardware", "answers", "typed", "keys"),
+    [
+        pytest.param(
+            ("cuda", 24.0),
+            {FAST_MODE_PROMPT: False},
+            {},
+            {"LLM_BACKEND", "LLM_LOCAL_MODEL", "OCR_BACKEND"},
+            id="local",
+        ),
+        pytest.param(
+            (None, None),
+            {FAST_MODE_PROMPT: False, _PRIVATE_SERVER_PROMPT: True},
+            {"Private LLM API key": "private-key-000000"},
+            {"LLM_PROVIDER", "LLM_BASE_URL", "OCR_BASE_URL"},
+            id="private server",
+        ),
+        pytest.param(
+            (None, None),
+            {FAST_MODE_PROMPT: False, _CLOUD_PROMPT: True},
+            {"Anthropic API key": "sk-ant-typed-000000"},
+            {"LLM_PROVIDER", "ANTHROPIC_API_KEY", "OCR_BACKEND"},
+            id="cloud",
+        ),
+    ],
+)
+def test_no_to_fast_enters_the_llm_tiers_and_writes_full(
+    monkeypatch, tmp_path, hardware, answers, typed, keys
+):
+    wizard = _drive_easy_setup(
+        monkeypatch, tmp_path, hardware=hardware, answers=answers, typed=typed
+    )
+
+    assert keys <= _written_keys(wizard.env_path)
+    settings = _read_back(monkeypatch, wizard.env_path)
+    from bibr.run_mode import llm_configured, resolve_mode
+
+    assert settings.pipeline.mode == "full"
+    assert resolve_mode(settings) == "full"
+    assert llm_configured(settings)
+    # None of these tiers installs torch for the user.
+    assert all("ml" not in extras for extras in wizard.installed)
+
+
+def test_declining_every_llm_route_ends_in_fast_mode_not_an_empty_setup(monkeypatch, tmp_path):
+    """The dead end: no private server, no cloud, no advanced wizard, and nothing saved."""
+    log: list = []
+    wizard = _drive_easy_setup(
+        monkeypatch,
+        tmp_path,
+        answers={
+            FAST_MODE_PROMPT: False,
+            _PRIVATE_SERVER_PROMPT: False,
+            _CLOUD_PROMPT: False,
+            _ADVANCED_PROMPT: False,
+        },
+        log=log,
+    )
+
+    assert (_FAST_INSTEAD_PROMPT, True) in log
+    assert "PIPELINE_MODE=fast" in wizard.env_path.read_text()
+    assert "No LLM route chosen" in wizard.console.export_text()
+
+
+def test_declining_the_local_plan_also_ends_in_fast_mode(monkeypatch, tmp_path):
+    wizard = _drive_easy_setup(
+        monkeypatch,
+        tmp_path,
+        hardware=("cuda", 24.0),
+        answers={
+            FAST_MODE_PROMPT: False,
+            "Use this configuration?": False,
+            _ADVANCED_PROMPT: False,
+        },
+    )
+
+    assert "PIPELINE_MODE=fast" in wizard.env_path.read_text()
+    assert "LLM_BACKEND" not in wizard.env_path.read_text()
+
+
+def test_a_user_who_declines_every_offer_saves_nothing(monkeypatch, tmp_path):
+    """Only an explicit no to fast mode, every LLM route and the handoff leaves .env alone."""
+    wizard = _drive_easy_setup(
+        monkeypatch,
+        tmp_path,
+        answers={
+            FAST_MODE_PROMPT: False,
+            _PRIVATE_SERVER_PROMPT: False,
+            _CLOUD_PROMPT: False,
+            _ADVANCED_PROMPT: False,
+            _FAST_INSTEAD_PROMPT: False,
+        },
+    )
+
+    assert not wizard.env_path.exists()
+    assert wizard.env_vars == {}
+    assert "Nothing was saved" in wizard.console.export_text()
+
+
+def test_the_handoff_from_the_decline_path_still_reaches_the_advanced_wizard(monkeypatch, tmp_path):
+    called = []
+    monkeypatch.setattr(
+        "bibr.setup_wizard.SetupWizard.run_advanced", lambda self: called.append(True)
+    )
+    wizard = _drive_easy_setup(
+        monkeypatch,
+        tmp_path,
+        answers={FAST_MODE_PROMPT: False, _PRIVATE_SERVER_PROMPT: False, _CLOUD_PROMPT: False},
+    )
+
+    assert called == [True]
+    assert not wizard.env_path.exists()
+
+
+def test_the_fast_plan_shows_what_it_runs_and_what_it_leaves_for_later(monkeypatch, tmp_path):
+    wizard = _drive_easy_setup(monkeypatch, tmp_path, answers={FAST_MODE_PROMPT: False})
+    text = " ".join(wizard.console.export_text().split())
+
+    assert "Recommended for this machine: fast mode" in text
+    assert "none (fast mode makes no LLM call)" in text
+    assert "no LLM and no key" in text
+    assert "Answer no to add an LLM instead" in text
+
+
+# --- advanced: the none provider ---------------------------------------------
+
+
+def test_advanced_provider_none_writes_fast_and_asks_for_no_key():
+    wizard = _recording_wizard()
+    asked: list = []
+
+    def prompt(question, *args, **kwargs):
+        asked.append((question, kwargs.get("default")))
+        return "none"
+
+    with (
+        patch("bibr.setup_wizard.Prompt.ask", prompt),
+        patch("bibr.setup_wizard._fetch_models") as fetch,
+    ):
+        wizard._step_llm_provider()
+
+    assert wizard.env_vars == {"PIPELINE_MODE": "fast"}
+    assert asked == [("Provider", "none")]
+    fetch.assert_not_called()
+
+
+def test_advanced_provider_defaults_to_none():
+    wizard = _recording_wizard()
+    seen: dict = {}
+
+    def prompt(question, *args, **kwargs):
+        seen.update(kwargs)
+        return kwargs["default"]
+
+    with patch("bibr.setup_wizard.Prompt.ask", prompt):
+        wizard._step_llm_provider()
+
+    assert seen["default"] == "none"
+    assert seen["choices"][0] == "none"
+    assert wizard.env_vars == {"PIPELINE_MODE": "fast"}
+
+
+@pytest.mark.parametrize("provider", ["google", "openai", "anthropic", "groq", "ollama"])
+def test_advanced_hosted_providers_write_full(monkeypatch, provider):
+    wizard = _recording_wizard()
+    answers = iter([provider, "a-key", "", "a-model"])
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *a, **k: next(answers))
+    monkeypatch.setattr("bibr.setup_wizard._fetch_models", lambda *a, **k: [])
+
+    wizard._step_llm_provider()
+
+    assert wizard.env_vars["PIPELINE_MODE"] == "full"
+    assert wizard.env_vars["LLM_PROVIDER"] == provider
+
+
+def test_advanced_local_provider_writes_full(monkeypatch):
+    wizard = _recording_wizard()
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *a, **k: "local")
+    monkeypatch.setattr(wizard, "_step_llm_local", lambda: None)
+
+    wizard._step_llm_provider()
+
+    assert wizard.env_vars == {"PIPELINE_MODE": "full"}
+
+
+def test_advanced_fast_mode_has_no_connection_to_test(monkeypatch):
+    wizard = _recording_wizard()
+    wizard.env_vars = {"PIPELINE_MODE": "fast"}
+    monkeypatch.setattr(
+        "bibr.setup_wizard.Confirm.ask", lambda *a, **k: pytest.fail("asked a question")
+    )
+    monkeypatch.setattr("bibr.clients.llm.ping_llm", lambda s: pytest.fail("pinged an LLM"))
+
+    wizard._step_test_connection()
+
+    assert "nothing to test" in wizard.console.export_text()
+
+
+def test_advanced_fast_mode_does_not_offer_the_llm_reference_parser(monkeypatch):
+    """The llm parser calls an LLM, which fast mode never does; a written ``llm`` would be a lie."""
+    wizard = _recording_wizard()
+    wizard.env_vars = {"PIPELINE_MODE": "fast"}
+    asked: list[str] = []
+
+    def prompt(question, *args, **kwargs):
+        asked.append(question)
+        return kwargs.get("default", "")
+
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", prompt)
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: False)
+
+    wizard._step_external_services()
+
+    assert "Reference parsing" not in asked
+    assert "REF_PARSE_STRATEGY" not in wizard.env_vars
+    assert "ner parser" in wizard.console.export_text()
+
+
+def test_advanced_with_provider_none_writes_a_fast_env(monkeypatch, tmp_path):
+    """The whole advanced wizard, Enter at every question: a fast .env and no LLM settings."""
+    wizard = _recording_wizard()
+    wizard.env_path = tmp_path / ".env"
+    monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: (None, None))
+    monkeypatch.setattr("bibr.local.pipeline._get_system_memory_gb", lambda: 16.0)
+    monkeypatch.setattr("bibr.setup_wizard.PresetManager", MagicMock())
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *a, **k: k.get("default", ""))
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: False)
+
+    wizard.run_advanced()
+
+    keys = _written_keys(wizard.env_path)
+    assert "PIPELINE_MODE" in keys
+    assert not {k for k in keys if k.startswith("LLM_") or k.endswith("_API_KEY")}
+    settings = _read_back(monkeypatch, wizard.env_path)
+    from bibr.run_mode import llm_configured, resolve_mode
+
+    assert resolve_mode(settings) == "fast"
+    assert not llm_configured(settings)
+
+
+# --- the smoke test ------------------------------------------------------------
+
+
+class _SmokePipeline:
+    """Stands in for ``LocalPipeline`` under the real ``bibr.chew``; records how it was built."""
+
+    built: list = []
+    memory_mode = "balanced"
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        _SmokePipeline.built.append(kwargs)
+
+    async def process_file(self, path, paper_id=None, progress=None):
+        return _smoke_export(n_authors=2, n_refs=0)
+
+    async def aclose(self):
+        pass
+
+
+def test_smoke_test_runs_the_real_fast_pipeline_with_no_key(monkeypatch):
+    """``chew(mode="fast")`` checks no credential: the old ``no_llm=True`` never reached this path."""
+    from bibr.clients import llm as llm_client
+
+    def no_key(settings=None):
+        raise ValueError("GOOGLE_API_KEY is not set")
+
+    _SmokePipeline.built = []
+    monkeypatch.setattr("bibr.local.pipeline.LocalPipeline", _SmokePipeline)
+    monkeypatch.setattr(llm_client, "preflight_credentials", no_key)
+    for var in _MODE_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    wizard = _recording_wizard()
+    wizard.env_vars = {"PIPELINE_MODE": "fast"}
+
+    with patch("bibr.setup_wizard.Confirm.ask", return_value=True):
+        wizard._step_smoke_test()
+
+    [kwargs] = _SmokePipeline.built
+    assert kwargs["mode"] == "fast"
+    # The real path: references stay on, and nothing is switched to structure only.
+    assert not kwargs.get("no_llm")
+    assert "ref_parse_strategy" not in kwargs
+    text = wizard.console.export_text()
+    assert "smoke test succeeded" in text
+    assert "fast mode" in text
+
+
+def test_smoke_test_options_follow_the_mode_setup_chose():
+    wizard = _recording_wizard()
+
+    wizard.env_vars = {"PIPELINE_MODE": "fast"}
+    assert wizard._smoke_test_options() == {"pages": "1", "mode": "fast"}
+
+    # The LLM tiers keep the structure-only check: a full run starts the LLM server,
+    # which has its own test.
+    wizard.env_vars = {"PIPELINE_MODE": "full"}
+    assert wizard._smoke_test_options() == {"pages": "1", "no_llm": True, "refs": "off"}
+
+
+def test_fast_smoke_test_note_names_the_downloads_and_not_an_ocr_server():
+    wizard = _recording_wizard()
+    wizard.env_vars = {"PIPELINE_MODE": "fast"}
+
+    note = " ".join(wizard._smoke_test_note().split())
+
+    assert "fast mode" in note
+    assert "about 2-3 GB" in note
+    assert "skips" not in note  # the structure-only note says it skips LLM/reference extraction
+
+
+# --- never a wrong .env ----------------------------------------------------------
+
+_OLD_FULL_ENV = (
+    "# my settings\n"
+    "export PIPELINE_MODE=full\n"
+    "LLM_PROVIDER=anthropic\n"
+    "ANTHROPIC_API_KEY=sk-ant-old-key-000000\n"
+    "REF_PARSE_STRATEGY=llm\n"
+    "PIPELINE_MODE=full\n"
+    "MY_OWN_SETTING=keep-me\n"
+)
+_OLD_FAST_ENV = "PIPELINE_MODE=fast\nMY_OWN_SETTING=keep-me\n"
+# An .env from before the mode existed: no PIPELINE_MODE, an LLM configured.
+_OLD_ENV_WITH_LLM = "LLM_PROVIDER=anthropic\nANTHROPIC_API_KEY=sk-ant-old-key-000000\n"
+_OLD_ENV_WITHOUT_LLM = "WTPSPLIT_MODEL=sat-6l-sm\nREF_PARSE_STRATEGY=ner\n"
+
+
+def _mode_lines(path) -> list[str]:
+    return [line for line in path.read_text().splitlines() if "PIPELINE_MODE" in line]
+
+
+def _settings_as_of(monkeypatch, env_file):
+    """Make the settings the wizard consults for what bibr runs today those in *env_file*."""
+    monkeypatch.setattr(
+        "bibr.config.snapshot_settings", lambda *a, **k: _read_back(monkeypatch, env_file)
+    )
+
+
+def test_fast_over_an_existing_full_env_leaves_one_fast_entry(monkeypatch, tmp_path):
+    from bibr.run_mode import resolve_mode
+
+    env = tmp_path / ".env"
+    env.write_text(_OLD_FULL_ENV, encoding="utf-8")
+    before = _read_back(monkeypatch, env)
+    # Without an explicit entry the old file's LLM would decide: this is the failure.
+    assert resolve_mode(_read_back(monkeypatch, env)) == "full"
+    assert before.pipeline.mode == "full"
+    _settings_as_of(monkeypatch, env)
+
+    wizard = _drive_easy_setup(monkeypatch, tmp_path, existing=_OLD_FULL_ENV)
+
+    text = env.read_text()
+    assert _mode_lines(env) == ["PIPELINE_MODE=fast"]  # both old entries, one new one
+    assert "MY_OWN_SETTING=keep-me" in text and "# my settings" in text
+    assert "ANTHROPIC_API_KEY=sk-ant-old-key-000000" in text  # the user's key is not deleted
+    assert "REF_PARSE_STRATEGY=ner" in text  # an LLM parser would only be coerced at run time
+    assert "REF_PARSE_STRATEGY=llm" not in text
+    assert resolve_mode(_read_back(monkeypatch, env)) == "fast"
+    assert "runs in full mode; saving this switches it to fast" in " ".join(
+        wizard.console.export_text().split()
+    )
+
+
+def test_fast_over_an_old_env_with_an_llm_and_no_mode_stays_fast(monkeypatch, tmp_path):
+    """Enter at every question on a working LLM setup: saved as fast, and said to switch."""
+    from bibr.run_mode import resolve_mode
+
+    env = tmp_path / ".env"
+    env.write_text(_OLD_ENV_WITH_LLM, encoding="utf-8")
+    assert _read_back(monkeypatch, env).pipeline.mode == "auto"
+    assert resolve_mode(_read_back(monkeypatch, env)) == "full"
+    _settings_as_of(monkeypatch, env)
+
+    wizard = _drive_easy_setup(monkeypatch, tmp_path, existing=_OLD_ENV_WITH_LLM)
+
+    assert _mode_lines(env) == ["PIPELINE_MODE=fast"]
+    assert "LLM_PROVIDER=anthropic" in env.read_text()
+    assert resolve_mode(_read_back(monkeypatch, env)) == "fast"
+    assert "switches it to fast" in " ".join(wizard.console.export_text().split())
+
+
+_OLD_CLOUD_ENV = (
+    "PIPELINE_MODE=full\n"
+    "LLM_PROVIDER=anthropic\n"
+    "ANTHROPIC_API_KEY=sk-ant-old-key-000000\n"
+    "OCR_BACKEND=anthropic\n"
+    "OCR_VISION_MODEL=claude-haiku-5-5\n"
+    "MY_OWN_SETTING=keep-me\n"
+)
+
+
+def test_fast_over_an_earlier_cloud_ocr_route_turns_the_route_off(monkeypatch, tmp_path):
+    """Fast setup says contents stay local: an earlier OCR_BACKEND must not still apply."""
+    from bibr.ocr.registry import ocr_route_chosen
+
+    env = tmp_path / ".env"
+    env.write_text(_OLD_CLOUD_ENV, encoding="utf-8")
+    assert ocr_route_chosen(_read_back(monkeypatch, env))
+    _settings_as_of(monkeypatch, env)
+
+    wizard = _drive_easy_setup(monkeypatch, tmp_path, existing=_OLD_CLOUD_ENV)
+
+    lines = env.read_text().splitlines()
+    assert "# OCR_BACKEND=anthropic" in lines
+    assert "OCR_BACKEND=anthropic" not in lines
+    assert "MY_OWN_SETTING=keep-me" in lines
+    assert not ocr_route_chosen(_read_back(monkeypatch, env))
+    assert "Commented out OCR_BACKEND" in " ".join(wizard.console.export_text().split())
+
+
+def test_merge_env_comments_out_only_keys_it_does_not_set(tmp_path):
+    from bibr.env_utils import merge_env
+
+    env = tmp_path / ".env"
+    env.write_text("OCR_BACKEND=anthropic\nexport OCR_MODEL=x\nOCR_PROFILE=glm\nA=1\n")
+
+    commented = merge_env(
+        env, {"OCR_PROFILE": "paddle"}, comment_out=("OCR_BACKEND", "OCR_MODEL", "OCR_PROFILE")
+    )
+
+    assert commented == ["OCR_BACKEND", "OCR_MODEL"]
+    assert env.read_text().splitlines() == [
+        "# OCR_BACKEND=anthropic",
+        "# export OCR_MODEL=x",
+        "OCR_PROFILE=paddle",
+        "A=1",
+    ]
+
+
+def test_fast_over_an_existing_env_when_overwriting_writes_only_the_new_settings(
+    monkeypatch, tmp_path
+):
+    env = tmp_path / ".env"
+    env.write_text(_OLD_FULL_ENV, encoding="utf-8")
+
+    _drive_easy_setup(
+        monkeypatch,
+        tmp_path,
+        existing=_OLD_FULL_ENV,
+        typed={f"{env} already exists": "overwrite"},
+    )
+
+    assert _mode_lines(env) == ["PIPELINE_MODE=fast"]
+    assert _written_keys(env) == {
+        "PIPELINE_MODE",
+        "WTPSPLIT_MODEL",
+        "REF_SEG_STRATEGY",
+        "REF_PARSE_STRATEGY",
+        "CROSSREF_CONSOLIDATE",
+    }
+    assert "sk-ant-old-key" not in env.read_text()
+
+
+def test_skipping_the_save_leaves_the_file_and_says_the_mode_was_not_saved(monkeypatch, tmp_path):
+    env = tmp_path / ".env"
+    env.write_text(_OLD_FULL_ENV, encoding="utf-8")
+
+    wizard = _drive_easy_setup(
+        monkeypatch, tmp_path, existing=_OLD_FULL_ENV, typed={f"{env} already exists": "skip"}
+    )
+
+    assert env.read_text() == _OLD_FULL_ENV
+    text = " ".join(wizard.console.export_text().split())
+    assert "PIPELINE_MODE=fast was not saved" in text
+    assert "`bibr chew --fast`" in text
+
+
+def test_a_full_answer_over_an_existing_fast_env_writes_full(monkeypatch, tmp_path):
+    from bibr.run_mode import llm_configured, resolve_mode
+
+    env = tmp_path / ".env"
+    env.write_text(_OLD_FAST_ENV, encoding="utf-8")
+    _settings_as_of(monkeypatch, env)
+
+    wizard = _drive_easy_setup(
+        monkeypatch,
+        tmp_path,
+        existing=_OLD_FAST_ENV,
+        answers={FAST_MODE_PROMPT: False, _CLOUD_PROMPT: True},
+        typed={"Anthropic API key": "sk-ant-typed-000000"},
+    )
+
+    assert _mode_lines(env) == ["PIPELINE_MODE=full"]
+    assert "MY_OWN_SETTING=keep-me" in env.read_text()
+    settings = _read_back(monkeypatch, env)
+    assert resolve_mode(settings) == "full" and llm_configured(settings)
+    assert "runs in fast mode; saving this switches it to full" in " ".join(
+        wizard.console.export_text().split()
+    )
+
+
+def test_the_local_plan_over_an_existing_fast_env_writes_full(monkeypatch, tmp_path):
+    from bibr.run_mode import resolve_mode
+
+    env = tmp_path / ".env"
+    env.write_text(_OLD_FAST_ENV, encoding="utf-8")
+
+    _drive_easy_setup(
+        monkeypatch,
+        tmp_path,
+        hardware=("cuda", 24.0),
+        existing=_OLD_FAST_ENV,
+        answers={FAST_MODE_PROMPT: False},
+    )
+
+    assert _mode_lines(env) == ["PIPELINE_MODE=full"]
+    assert "LLM_BACKEND=vllm" in env.read_text()
+    assert resolve_mode(_read_back(monkeypatch, env)) == "full"
+
+
+@pytest.mark.parametrize(
+    ("old", "runs_as"),
+    [(_OLD_ENV_WITH_LLM, "full"), (_OLD_ENV_WITHOUT_LLM, "fast")],
+    ids=["llm configured", "no llm"],
+)
+def test_an_old_env_with_no_entry_stays_on_auto(monkeypatch, tmp_path, old, runs_as):
+    """Setup does not migrate a file it does not write: no entry means auto, as before."""
+    from bibr.run_mode import resolve_mode
+
+    env = tmp_path / ".env"
+
+    _drive_easy_setup(monkeypatch, tmp_path, existing=old, typed={f"{env} already exists": "skip"})
+
+    assert env.read_text() == old
+    settings = _read_back(monkeypatch, env)
+    assert settings.pipeline.mode == "auto"
+    assert resolve_mode(settings) == runs_as
+
+
+def test_no_mode_change_is_announced_when_the_mode_stays_the_same(monkeypatch, tmp_path):
+    env = tmp_path / ".env"
+    env.write_text(_OLD_ENV_WITHOUT_LLM, encoding="utf-8")
+    _settings_as_of(monkeypatch, env)
+
+    wizard = _drive_easy_setup(monkeypatch, tmp_path, existing=_OLD_ENV_WITHOUT_LLM)
+
+    assert "switches it to" not in " ".join(wizard.console.export_text().split())
+
+
+def test_a_mode_exported_in_the_shell_is_named_because_it_beats_the_file(monkeypatch, tmp_path):
+    """``PIPELINE_MODE=full`` in the shell overrides a ``fast`` .env; setup says so."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BIBR_ENV_FILE", str(tmp_path / ".env"))
+    monkeypatch.setenv("PIPELINE_MODE", "full")
+    wizard = _recording_wizard()
+    wizard.env_vars = {"PIPELINE_MODE": "fast"}
+
+    with patch("bibr.setup_wizard.Confirm.ask", return_value=False):
+        wizard._step_write_env()
+
+    assert "PIPELINE_MODE=fast" in wizard.env_path.read_text()
+    assert "Your shell exports PIPELINE_MODE with a different value." in " ".join(
+        wizard.console.export_text().split()
+    )
+    from bibr.config import GlobalSettings
+
+    # The reason it matters: what bibr reads is the exported value.
+    assert GlobalSettings().pipeline.mode == "full"
+
+
+@pytest.mark.parametrize(
+    ("hardware", "answers", "typed", "mode"),
+    [
+        pytest.param((None, None), {}, {}, "fast", id="fast"),
+        pytest.param(("cuda", 24.0), {FAST_MODE_PROMPT: False}, {}, "full", id="local"),
+        pytest.param(
+            (None, None),
+            {FAST_MODE_PROMPT: False, _PRIVATE_SERVER_PROMPT: True},
+            {},
+            "full",
+            id="private server",
+        ),
+        pytest.param(
+            (None, None),
+            {FAST_MODE_PROMPT: False, _CLOUD_PROMPT: True},
+            {"Anthropic API key": "sk-ant-typed-000000"},
+            "full",
+            id="cloud",
+        ),
+        pytest.param(
+            (None, None),
+            {
+                FAST_MODE_PROMPT: False,
+                _PRIVATE_SERVER_PROMPT: False,
+                _CLOUD_PROMPT: False,
+                _ADVANCED_PROMPT: False,
+            },
+            {},
+            "fast",
+            id="every LLM route declined",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "existing", [None, _OLD_FULL_ENV, _OLD_FAST_ENV, _OLD_ENV_WITH_LLM, _OLD_ENV_WITHOUT_LLM]
+)
+def test_an_answer_written_over_any_earlier_file_carries_its_own_mode(
+    monkeypatch, tmp_path, hardware, answers, typed, mode, existing
+):
+    """Every answer, over a fresh file and each kind of earlier one: one entry, the right one.
+
+    The file is read back through the settings bibr loads: the mode it resolves to is the
+    mode answered, and a full answer resolves with an LLM configured.
+    """
+    from bibr.run_mode import llm_configured, resolve_mode
+
+    wizard = _drive_easy_setup(
+        monkeypatch, tmp_path, hardware=hardware, answers=answers, typed=typed, existing=existing
+    )
+
+    assert _mode_lines(wizard.env_path) == [f"PIPELINE_MODE={mode}"]
+    settings = _read_back(monkeypatch, wizard.env_path)
+    assert settings.pipeline.mode == mode
+    assert resolve_mode(settings) == mode
+    if mode == "full":
+        assert llm_configured(settings)
+    # A fast answer written over a file with no earlier LLM settings configures none.
+    if mode == "fast" and existing in (None, _OLD_FAST_ENV, _OLD_ENV_WITHOUT_LLM):
+        assert not llm_configured(settings)

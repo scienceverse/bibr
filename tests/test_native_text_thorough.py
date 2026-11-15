@@ -1059,7 +1059,7 @@ class TestEligibleLabels:
             "seal",
         }
         assert expected == DEFAULT_ELIGIBLE_LABELS
-        # Running headers/footers are opt-in behind OCR_NATIVE_TEXT_HEADER_FOOTER.
+        # Running headers/footers are behind OCR_NATIVE_TEXT_HEADER_FOOTER (on by default).
         assert {"header", "footer"} == HEADER_FOOTER_LABELS
         assert resolve_eligible_labels(False) == DEFAULT_ELIGIBLE_LABELS
         assert resolve_eligible_labels(True) == DEFAULT_ELIGIBLE_LABELS | {

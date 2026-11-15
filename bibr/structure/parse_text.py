@@ -10,9 +10,11 @@ is reached through ``self``.
 import logging
 import re
 from collections.abc import Set as AbstractSet
+from typing import TYPE_CHECKING
 
 from bibr.input.consolidate_text import (
     DOI_URL_CONTEXT_RE,
+    _dehyphenate_word_linewraps,
     clean_formula_text,
     clean_text_content,
     strip_affiliation_markers,
@@ -29,6 +31,9 @@ from bibr.structure.reference_boundaries import is_publisher_note_boundary
 from bibr.structure.text_repair import bbox_to_tuple
 from bibr.structure.xref_utils import URL_RE
 from bibr.utils.text import clean_extracted_url, normalize_text
+
+if TYPE_CHECKING:
+    from bibr.utils.link_targets import LinkTargets
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +59,10 @@ _BARRIER_MIN_REGION_WIDTH = 200
 # Roe^{3}"); body prose usually ends in terminal punctuation. Only rows of
 # this shape are stripped on a sliced front page before its first heading.
 _BYLINE_SHAPED_MAX_CHARS = 200
+# A region ending in one of these after a word may end in a line wrap. The
+# text either side the keep-or-join rule reads (its language, the token).
+_WRAP_HYPHENS = frozenset("-‐‑")
+_WRAP_CONTEXT_CHARS = 200
 
 
 class TextHandlersMixin:
@@ -212,17 +221,17 @@ class TextHandlersMixin:
                 same_page and self._should_join(self._carry_over.text, text) and crosses_barrier_ok
             )
             if same_page_join or cross_page_continuation:
-                joiner = "" if self._is_url_wrap_join(self._carry_over.text, text) else " "
+                prefix, joiner = self._join_parts(
+                    self._carry_over.text, text, getattr(self, "_link_targets", None)
+                )
                 if not same_page and isinstance(self._carry_over.page, int):
                     # Record where this page's text starts so the flushed
                     # sentences are attributed to the page they were printed on
                     # rather than to the page the paragraph started on.
                     if not self._carry_over.page_spans:
                         self._carry_over.page_spans.append((0, self._carry_over.page))
-                    self._carry_over.page_spans.append(
-                        (len(self._carry_over.text) + len(joiner), page_number)
-                    )
-                self._carry_over.text += joiner + text
+                    self._carry_over.page_spans.append((len(prefix) + len(joiner), page_number))
+                self._carry_over.text = prefix + joiner + text
                 self._carry_over.provenance.append(prov)
                 self._carry_over.from_ocr = self._carry_over.from_ocr or from_ocr
                 # Advance the cursor to the page just appended. Left stale, a
@@ -259,35 +268,45 @@ class TextHandlersMixin:
         page_number: int,
         bbox: list | None = None,
         region_meta: dict | None = None,
+        *,
+        plain_text: bool = False,
     ) -> None:
-        """Process formula content and emit as a display-formula sentence."""
+        """Process formula content and emit as a display-formula sentence.
+
+        ``plain_text`` marks a formula read from the PDF text layer by the
+        text-layer backend: it is kept as printed, since the LaTeX cleanup
+        below would read its spacing and symbols as OCR damage.
+        """
         self._expire_pending_table_label_fragment()
         text = content.strip()
         if not text:
             return
 
-        # Wrap in display math temporarily for clean_formula_text, which
-        # expects $$ delimiters to detect \text{} wrappers and broken blocks.
-        if not text.startswith("$"):
-            text = f"$${text}$$"
+        if plain_text:
+            inner = " ".join(text.split())
+        else:
+            # Wrap in display math temporarily for clean_formula_text, which
+            # expects $$ delimiters to detect \text{} wrappers and broken blocks.
+            if not text.startswith("$"):
+                text = f"$${text}$$"
 
-        # Clean formulas that are actually garbled OCR or \text{} wrappers.
-        # clean_formula_text returns None for broken blocks that should be
-        # discarded, or unwrapped plain text for \text{} wrappers.
-        cleaned = clean_formula_text(text)
-        if cleaned is None:
-            return
+            # Clean formulas that are actually garbled OCR or \text{} wrappers.
+            # clean_formula_text returns None for broken blocks that should be
+            # discarded, or unwrapped plain text for \text{} wrappers.
+            cleaned = clean_formula_text(text)
+            if cleaned is None:
+                return
 
-        # If the formula was unwrapped to plain text (no longer a formula),
-        # route it through the normal content handler instead.
-        if not cleaned.startswith("$"):
-            self._handle_content(cleaned, page_number, bbox, region_meta=region_meta)
-            return
+            # If the formula was unwrapped to plain text (no longer a formula),
+            # route it through the normal content handler instead.
+            if not cleaned.startswith("$"):
+                self._handle_content(cleaned, page_number, bbox, region_meta=region_meta)
+                return
 
-        # Strip the $$ delimiters — the is_display_formula flag replaces them.
-        inner = cleaned
-        if inner.startswith("$$") and inner.endswith("$$"):
-            inner = inner[2:-2].strip()
+            # Strip the $$ delimiters — the is_display_formula flag replaces them.
+            inner = cleaned
+            if inner.startswith("$$") and inner.endswith("$$"):
+                inner = inner[2:-2].strip()
 
         # Flush carry-over before formula
         self._flush_carry_over()
@@ -504,6 +523,43 @@ class TextHandlersMixin:
         avoiding accidental joins to a new heading or capitalized paragraph.
         """
         return next((char.islower() for char in text if char.isalpha()), False)
+
+    @staticmethod
+    def _join_parts(
+        prev_text: str, next_text: str, links: "LinkTargets | None" = None
+    ) -> tuple[str, str]:
+        """The carry-over text and the joiner to put before *next_text*.
+
+        A word hyphenated at the end of a region ("inter-" / "national" across
+        a page or column break) is a line wrap like one inside a region, so it
+        follows the same keep-or-join rule (``_dehyphenate_word_linewraps``):
+        "international", but "well-known". A link that one of the document's
+        link targets (*links*) runs on through joins with no space, and a wrap
+        hyphen the target does not have is dropped ("github.com/Betha-" /
+        "nyL/DeepKoopman").
+        """
+        prev = prev_text.rstrip()
+        nxt = next_text.lstrip()
+        if links and prev and nxt:
+            before = prev.rsplit(maxsplit=1)[-1]
+            after = nxt.split(maxsplit=1)[0]
+            rest = nxt[len(after) :]
+            ends = not rest or rest[0] in "\r\n"
+            if links.spans(before, after, line_ends=ends):
+                return prev, ""
+            if before[-1:] in _WRAP_HYPHENS and links.spans(before[:-1], after, line_ends=ends):
+                return prev[:-1], ""
+        if TextHandlersMixin._is_url_wrap_join(prev_text, next_text):
+            return prev_text, ""
+        if prev[-1:] in _WRAP_HYPHENS and nxt[:1].isalpha():
+            before = " ".join(prev[-_WRAP_CONTEXT_CHARS:].split())
+            after = " ".join(nxt[:_WRAP_CONTEXT_CHARS].split())
+            resolved = _dehyphenate_word_linewraps(f"{before}\n{after}")
+            if resolved == f"{before[:-1]}-{after}":
+                return prev, ""
+            if resolved == before[:-1] + after:
+                return prev[:-1], ""
+        return prev_text, " "
 
     @staticmethod
     def _is_url_wrap_join(prev_text: str, next_text: str) -> bool:

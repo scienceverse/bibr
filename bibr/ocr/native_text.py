@@ -75,6 +75,9 @@ _CITATION_CRITICAL_NATIVE_LABELS = frozenset(
     {"text", "content", "vertical_text", "reference", "reference_content"}
 )
 _PRIVATE_USE_REJECTION_REASON = "private_use"
+# Layout labels of reference entries and lists, whose text gets the line-break repairs
+# written for a printed reference (see ``fix_ocr_artifacts``).
+_REFERENCE_LABELS = frozenset({"reference", "reference_content"})
 
 # Backward-compat alias — callers that imported _pdfium_lock from this module
 # continue to work and share the same canonical lock object.
@@ -961,9 +964,11 @@ def get_native_text_in_bbox(
 #   - figure_title / table_title / chart_title: captions are often adjacent to
 #     figures/tables with fuzzy bbox boundaries — OCR is safer.
 #   - formula_number: short inline text (typically 1-3 chars) that is better
-#     handled by OCR than by the min_chars threshold.
-#   - header / footer: only eligible when OCR_NATIVE_TEXT_HEADER_FOOTER is on
-#     (see HEADER_FOOTER_LABELS). Their only consumers (detected_headers /
+#     handled by OCR than by the min_chars threshold. Eligible only when
+#     OCR_NATIVE_TEXT_FORMULA_NUMBER is on (see FORMULA_NUMBER_LABELS), with
+#     its own short-text allowance (1..16 characters).
+#   - header / footer: eligible when OCR_NATIVE_TEXT_HEADER_FOOTER is on, the
+#     default (see HEADER_FOOTER_LABELS). Their only consumers (detected_headers /
 #     detected_footers feeding DOI furniture candidates and front-matter
 #     masthead checks) need plain text, which the native layer returns exactly
 #     on born-digital PDFs — about half of all OCR calls there. The
@@ -985,21 +990,32 @@ DEFAULT_ELIGIBLE_LABELS: frozenset[str] = frozenset(
     }
 )
 
-# Header/footer labels, eligible only when the header/footer native-text
-# setting is on (off by default, so default output is unchanged).
+# Header/footer labels, eligible when the header/footer native-text setting
+# is on (the default; see furniture_to_ocr for the regions that stay on OCR).
 HEADER_FOOTER_LABELS: frozenset[str] = frozenset({"header", "footer"})
 
 
-def resolve_eligible_labels(include_header_footer: bool) -> frozenset[str]:
-    """Eligible native-text labels for the header/footer setting.
+# Equation numbers, eligible only when the formula-number native-text setting
+# is on (off by default, so default output is unchanged).
+FORMULA_NUMBER_LABELS: frozenset[str] = frozenset({"formula_number"})
 
-    Takes a plain bool (not Settings) to keep this module free of the
+
+def resolve_eligible_labels(
+    include_header_footer: bool, include_formula_number: bool = False
+) -> frozenset[str]:
+    """Eligible native-text labels for the header/footer and formula-number settings.
+
+    Takes plain bools (not Settings) to keep this module free of the
     config import cycle; callers pass
-    ``settings.ocr.native_text_header_footer``.
+    ``settings.ocr.native_text_header_footer`` and
+    ``settings.ocr.native_text_formula_number``.
     """
+    labels = DEFAULT_ELIGIBLE_LABELS
     if include_header_footer:
-        return DEFAULT_ELIGIBLE_LABELS | HEADER_FOOTER_LABELS
-    return DEFAULT_ELIGIBLE_LABELS
+        labels = labels | HEADER_FOOTER_LABELS
+    if include_formula_number:
+        labels = labels | FORMULA_NUMBER_LABELS
+    return labels
 
 
 # Short running heads ("Cell Biology", "Benartzi et al.") are shorter than
@@ -1010,6 +1026,26 @@ _SHORT_NATIVE_TEXT_LABELS: frozenset[str] = frozenset(
     {"doc_title", "paragraph_title", "header", "footer"}
 )
 _SHORT_NATIVE_TEXT_MIN_CHARS = 3
+# Equation numbers ("1", "(3)", "(2.14a)") have their own allowance: one
+# character is enough, and anything longer than _FORMULA_NUMBER_MAX_CHARS means
+# the box caught part of the formula, so that region goes to OCR instead.
+_FORMULA_NUMBER_MIN_CHARS = 1
+_FORMULA_NUMBER_MAX_CHARS = 16
+# Text-layer equation numbers must also look like one once whitespace is
+# removed: an optional bracket, up to four letters (a section or appendix
+# prefix, a roman numeral), digits with up to two dotted or dashed parts, an
+# optional letter suffix and an optional closing bracket, with a digit
+# somewhere or, without one, a roman numeral of i, v and x between the
+# brackets ("(ii)", "(ix)", "(XII)"), the numerals equation numbering uses.
+# Anything else, such as brackets from a symbol font ("ð1Þ" for "(1)"), a
+# formula glyph the box caught ("g (3)"), a bare letter ("(a)", also "(c)" and
+# "(d)", which are roman digits too) or a word ("(mid)"), goes to OCR.
+_FORMULA_NUMBER_RE = re.compile(
+    r"[(\[]?[A-Za-z]{0,4}[.\-]?\d{0,3}(?:[.\-\u2013]\d{1,3}){0,2}[a-z]?[)\]]?"
+)
+_ROMAN_NUMERAL_RE = re.compile(
+    r"(?=[ivx])x{0,3}(?:ix|iv|v?i{0,3})|(?=[IVX])X{0,3}(?:IX|IV|V?I{0,3})"
+)
 
 _FONT_SAMPLE_SIZE = 15
 _FONT_BBOX_TOLERANCE = 5.0  # PDF points
@@ -1221,6 +1257,161 @@ def _sample_page_font_metadata(
             region["_is_italic"] = is_italic
 
 
+# Text-layer headers and footers go to OCR where the text layer is known to
+# miss or garble them:
+# - right-to-left scripts (Arabic, Hebrew): pdfium hands the glyphs over in
+#   visual order, so an Arabic journal's running heads read "(14)" as
+#   ")41(" and "2024" as "1 202", with the words scrambled;
+# - a first-page masthead drawn partly as an image: a header or footer box on
+#   the first page that images cover by at least _MASTHEAD_MAX_IMAGE_COVERAGE,
+#   or whose native glyphs span less than _MASTHEAD_MIN_GLYPH_COVERAGE of its
+#   height. On the 390 dev exports (2026-10-26) that sends 11 of the 690
+#   fillable first-page header/footer boxes to OCR, a Brazilian journal's
+#   raster "DOI: ..." line among them. The check runs on the PDF's first page
+#   only: behind a repository or download cover (HAL, ResearchGate,
+#   Taylor & Francis) the article's own first page is a later one, but bibr
+#   tells a cover page only from the parsed front matter
+#   (bibr.extract.front_matter._without_cover_pages), after this fill;
+# - a page whose text is mostly invisible (render mode 3/7), an OCR layer the
+#   scan check did not accept: its furniture stays with OCR like a scan's;
+# - a page images cover as a scan does (_coverage_qualifies) whose text is
+#   visible: a scanning service's OCR layer drawn in a filling mode, so the
+#   scan check keeps it as text. Its running heads read worse than our OCR
+#   (a scanned paper from the evaluation set: "althof ef af.i" for
+#   "Althof et al.:", a scanned Lancet paper: "1025" for the whole Lancet
+#   running head), so they go to OCR; body text keeps its route. On the 392
+#   dev PDFs (2026-10-26) only that journal's first page and one other paper
+#   qualify; on the 80 scans of the evaluation set, 7 PDFs.
+# A box that cuts a printed line is filled but marked (_box_cuts_a_line).
+# The OCR cache keeps the regions after the fill, so the routing has a version
+# in its key (bibr.pipeline.ocr_cache): bump FURNITURE_ROUTE_RULE with any
+# change to which header and footer boxes the text layer fills or marks.
+FURNITURE_ROUTE_RULE = "furniture_route/1"
+_MASTHEAD_MAX_IMAGE_COVERAGE = 0.5
+_MASTHEAD_MIN_GLYPH_COVERAGE = 0.2
+_RTL_BIDI_CLASSES = frozenset({"R", "AL"})
+
+
+def _has_rtl(text: str) -> bool:
+    return any(unicodedata.bidirectional(ch) in _RTL_BIDI_CLASSES for ch in text)
+
+
+def _covered_length(spans: list[tuple[float, float]]) -> float:
+    """Total length of the union of the 1-D *spans*."""
+    total = 0.0
+    run_start = run_end = None
+    for start, end in sorted(spans):
+        if run_end is None or start > run_end:
+            if run_end is not None:
+                total += run_end - run_start
+            run_start, run_end = start, end
+        elif end > run_end:
+            run_end = end
+    if run_end is not None:
+        total += run_end - run_start
+    return total
+
+
+def _masthead_needs_ocr(
+    textpage, box_pts: tuple[float, float, float, float], image_boxes: list
+) -> bool:
+    """Whether a first-page header/footer box is partly raster (see the rule above)."""
+    left, bottom, right, top = box_pts
+    area = (right - left) * (top - bottom)
+    if area <= 0:
+        return False
+    clipped = [
+        (max(left, x0), max(bottom, y0), min(right, x1), min(top, y1))
+        for x0, y0, x1, y1 in image_boxes
+    ]
+    clipped = [box for box in clipped if box[2] > box[0] and box[3] > box[1]]
+    if clipped and _union_area(clipped) >= _MASTHEAD_MAX_IMAGE_COVERAGE * area:
+        return True
+    spans = []
+    for index in range(textpage.count_chars()):
+        char_left, char_bottom, char_right, char_top = textpage.get_charbox(index)
+        centre_x, centre_y = (char_left + char_right) / 2, (char_bottom + char_top) / 2
+        if char_top > char_bottom and left <= centre_x <= right and bottom <= centre_y <= top:
+            spans.append((max(bottom, char_bottom), min(top, char_top)))
+    return _covered_length(spans) < _MASTHEAD_MIN_GLYPH_COVERAGE * (top - bottom)
+
+
+# A text-layer header or footer whose box cuts a printed line: the glyph
+# after the box's last glyph on a line continues the word past the right edge
+# (within _EDGE_CUT_MAX_GAP of the glyph height), or a glyph line straddles the
+# bottom edge with its centres outside. The region text then ends mid-token,
+# and a DOI there is a truncated reading ("...311603" for "...31160397"); the
+# region is marked ``_native_text_edge_cut`` so identity never lets such a DOI
+# outrank the full one (bibr.extract.doi_identity).
+_EDGE_CUT_MAX_GAP = 0.5
+
+
+def _char_geometry(textpage) -> list[tuple[float, float, float, float, bool]]:
+    """``(left, bottom, right, top, blank)`` of every char of *textpage*."""
+    import pypdfium2.raw as pdfium_c
+
+    out = []
+    for index in range(textpage.count_chars()):
+        left, bottom, right, top = textpage.get_charbox(index)
+        code = pdfium_c.FPDFText_GetUnicode(textpage.raw, index)
+        blank = code in _UNCOUNTED_CHAR_CODES or (
+            code <= 0x10FFFF and not 0xD800 <= code <= 0xDFFF and chr(code).isspace()
+        )
+        out.append((left, bottom, right, top, blank or top <= bottom))
+    return out
+
+
+def _box_cuts_a_line(
+    chars: list[tuple[float, float, float, float, bool]], box: tuple[float, float, float, float]
+) -> bool:
+    """Whether *box* cuts a printed line at its right or bottom edge (see above)."""
+    left, bottom, right, top = box
+    previous_inside = None
+    for char_left, char_bottom, char_right, char_top, blank in chars:
+        if blank:
+            previous_inside = None
+            continue
+        centre_x, centre_y = (char_left + char_right) / 2, (char_bottom + char_top) / 2
+        inside = left <= centre_x <= right and bottom <= centre_y <= top
+        if not inside and previous_inside is not None and centre_x > right:
+            p_left, p_bottom, p_right, p_top = previous_inside
+            height = p_top - p_bottom
+            if abs(centre_y - (p_bottom + p_top) / 2) <= 0.5 * height and (
+                char_left - p_right <= _EDGE_CUT_MAX_GAP * height
+            ):
+                return True
+        if (
+            not inside
+            and centre_y < bottom < char_top
+            and left <= centre_x <= right
+            and char_top - bottom >= 0.3 * (char_top - char_bottom)
+        ):
+            return True
+        previous_inside = (char_left, char_bottom, char_right, char_top) if inside else None
+    return False
+
+
+def _page_image_boxes(page) -> list:
+    import pypdfium2.raw as pdfium_c
+
+    boxes: list = []
+    top_level = [
+        pdfium_c.FPDFPage_GetObject(page.raw, index)
+        for index in range(pdfium_c.FPDFPage_CountObjects(page.raw))
+    ]
+    _collect_image_boxes(pdfium_c, top_level, None, 0, boxes)
+    return boxes
+
+
+def _looks_like_equation_number(compact: str) -> bool:
+    """Whether whitespace-free *compact* reads as an equation number (see _FORMULA_NUMBER_RE)."""
+    if not _FORMULA_NUMBER_RE.fullmatch(compact):
+        return False
+    return any(ch.isdigit() for ch in compact) or bool(
+        _ROMAN_NUMERAL_RE.fullmatch(compact.strip("()[]"))
+    )
+
+
 def _fill_page_regions_from_textpage(
     textpage,
     crop_box: tuple[float, float, float, float],
@@ -1232,11 +1423,14 @@ def _fill_page_regions_from_textpage(
     page_idx: int,
     rotation: int = 0,
     records: list[tuple[str, float, float, bool]] | None = None,
+    page=None,
 ) -> None:
     """Pre-fill eligible regions' ``content`` from an already-open textpage.
 
     Operates on a caller-provided (lock-held) textpage; does not open or lock
     anything. See :func:`fill_regions_from_native_text` for eligibility rules.
+    Header and footer regions also pass the furniture routing above; its
+    first-page masthead check needs the *page* (without one it is skipped).
 
     Per-page char records (center coordinates for center-containment) are
     computed ONCE and reused across every region on the page, avoiding
@@ -1245,6 +1439,38 @@ def _fill_page_regions_from_textpage(
     """
     if records is None:
         records = _build_page_char_records(textpage)
+    furniture_state: dict[str, object] = {}
+
+    def furniture_to_ocr(region: dict, text: str) -> bool:
+        if _has_rtl(text):
+            return True
+        if "invisible" not in furniture_state:
+            try:
+                share = _invisible_text_share(textpage)
+            except Exception:  # noqa: BLE001 - without the rule the page reads as visible
+                share = None
+            furniture_state["invisible"] = share is not None and share >= (
+                _SCAN_PAGE_MIN_INVISIBLE_SHARE
+            )
+        if furniture_state["invisible"]:
+            return True
+        if page is None:
+            return False
+        if "scan_like" not in furniture_state:
+            try:
+                coverage = _page_image_coverage(page, crop_box)
+            except Exception:  # noqa: BLE001 - without the rule the page reads as born-digital
+                coverage = 0.0
+            furniture_state["scan_like"] = _coverage_qualifies(coverage)
+        if furniture_state["scan_like"]:
+            return True
+        if page_idx != 0:
+            return False
+        if "images" not in furniture_state:
+            furniture_state["images"] = _page_image_boxes(page)
+        box_pts = _normalized_bbox_to_pdf_points(region["bbox_2d"], crop_box, rotation)
+        return _masthead_needs_ocr(textpage, box_pts, furniture_state["images"])
+
     for region in regions:
         label = region.get("label")
         if label not in eligible_labels:
@@ -1264,7 +1490,7 @@ def _fill_page_regions_from_textpage(
         # the control-character corruption gate, otherwise one benign marker
         # sends an entire, otherwise clean region through the vision model.
         if "\x02" in native_text:
-            native_text = fix_ocr_artifacts(native_text)
+            native_text = fix_ocr_artifacts(native_text, reference=label in _REFERENCE_LABELS)
         if label in _CITATION_CRITICAL_NATIVE_LABELS and any(
             unicodedata.category(ch) == "Co" for ch in native_text
         ):
@@ -1282,6 +1508,25 @@ def _fill_page_regions_from_textpage(
         effective_min_chars = min_chars
         if label in _SHORT_NATIVE_TEXT_LABELS:
             effective_min_chars = min(min_chars, _SHORT_NATIVE_TEXT_MIN_CHARS)
+        elif label in FORMULA_NUMBER_LABELS:
+            effective_min_chars = min(min_chars, _FORMULA_NUMBER_MIN_CHARS)
+            if len(native_text.strip()) > _FORMULA_NUMBER_MAX_CHARS:
+                continue
+            compact = "".join(native_text.split())
+            if not _looks_like_equation_number(compact):
+                continue
+            native_text = compact
+        if label in HEADER_FOOTER_LABELS and furniture_to_ocr(region, native_text):
+            logger.debug("Text-layer %s on page %d left to OCR", label, page_idx)
+            continue
+        edge_cut = False
+        if label in HEADER_FOOTER_LABELS:
+            if "chars" not in furniture_state:
+                furniture_state["chars"] = _char_geometry(textpage)
+            edge_cut = _box_cuts_a_line(
+                furniture_state["chars"],
+                _normalized_bbox_to_pdf_points(region["bbox_2d"], crop_box, rotation),
+            )
         if len(native_text.strip()) < effective_min_chars:
             continue
         if not _is_native_text_usable(native_text, min_printable_ratio):
@@ -1296,6 +1541,8 @@ def _fill_page_regions_from_textpage(
         region.pop("_native_gate", None)
         region["content"] = native_text
         region["_native_text_used"] = True
+        if edge_cut:
+            region["_native_text_edge_cut"] = True
 
 
 def fill_font_metadata(
@@ -1391,6 +1638,11 @@ _CID_ARTIFACT_MIN_COUNT = 2
 _FFFD_MAX_DENSITY = 0.05
 
 
+def _is_disallowed_control_char(ch: str) -> bool:
+    """Return True for a Unicode category-Cc char other than the whitespace controls."""
+    return ch not in _REASONABLE_WHITESPACE_CONTROLS and unicodedata.category(ch) == "Cc"
+
+
 def _has_disallowed_control_char(text: str) -> bool:
     """Return True if *text* contains any Unicode category-Cc char other than
     the common whitespace controls (tab/newline/CR/FF/VT).
@@ -1401,10 +1653,7 @@ def _has_disallowed_control_char(text: str) -> bool:
     never contains raw control bytes, so any occurrence is disqualifying.
     Known STX soft-hyphen markers are resolved before this function is called.
     """
-    return any(
-        ch not in _REASONABLE_WHITESPACE_CONTROLS and unicodedata.category(ch) == "Cc"
-        for ch in text
-    )
+    return any(_is_disallowed_control_char(ch) for ch in text)
 
 
 def _printable_ratio(text: str) -> float:
@@ -1846,6 +2095,1073 @@ def _line_number_column(
     return found
 
 
+# --- Hidden text ------------------------------------------------------------
+#
+# Some text objects sit in the text layer but never print: Springer's glyph-set
+# runs ("Vol.:(0123456789)" in white, "(0123456789().,-volV)" at 0.1 pt),
+# repository stamps and whole abstracts set in white on white, TCPDF's
+# invisible "Powered by" line. Native text took them into headers, footers,
+# reference strings and DOIs ("...0654-7(0123456789().,-volV)"), so they are
+# removed from the in-memory page like the watermark (rule hidden_text/4) and
+# every reader of the text layer drops them. pdfium keeps the render mode, fill
+# colour, font size and matrix per text object, so the rule judges objects:
+# - invisible: render mode 3 or 7, on a page that is not covered by images
+#   as a scan is (_coverage_qualifies) and whose kept characters would not
+#   pass the scan check's own share test (_invisible_share and
+#   _share_qualifies: characters, not objects, once the other removed objects
+#   are left out). A hidden OCR layer over a scan, or one the scan check
+#   counts as mostly invisible, stays for the invisible-layer check and its
+#   OCR fallback: a count of objects dropped a scan's six long OCR lines
+#   beside ten one-glyph stamps, and the page lost its scan route.
+# - tiny: an effective size (Tf size times the matrix scale) under
+#   _HIDDEN_TEXT_MAX_SIZE_PT, so a reader at 100% sees a grey line, not words,
+#   and an LLM reads whatever it says. The object's own height on the page
+#   (_ink_height, across the line whatever its rotation) must be under
+#   _HIDDEN_TEXT_MAX_INK_HEIGHT_PT too: a Type 3 font can draw 7 pt glyphs at
+#   Tf 0.75. Not relative to the page's body size: a payload longer than the
+#   page's other text would become the body. See _is_tiny_text. A mark of at
+#   most _HIDDEN_TEXT_MAX_MARK_CHARS, printed in an opaque colour that is not
+#   light, beside readable text no more than 1/_HIDDEN_TEXT_MIN_MARK_RATIO its
+#   size that is not hidden itself, stays (_marks_beside_small_print): a 5 pt
+#   table's p-values read "10-5" with the exponent and "10" without.
+# - squeezed (reported as tiny): one axis under _HIDDEN_TEXT_MAX_SIZE_PT and under
+#   _HIDDEN_TEXT_MAX_SQUEEZE of the other. Some PDFs slip hairline letters into
+#   words at a horizontal scale of 5% ("lalin" prints as "lain"), the same trick
+#   that shows any string as a thin bar.
+# - transparent: a fill alpha of 0 in a filling render mode, unless the page's
+#   vector or image ink under it has the shape of its glyphs (_without_ink).
+#   Chromium's PDF writer draws fake-bold text as outlines and sets the words
+#   over them with alpha 0, so that they can be selected: a preprint server's
+#   cover page keeps its title and author names only there. Ink of any other
+#   shape (a band, a rule, a different line) and visible text under it do not
+#   count. Whitespace stays with the words around it. A fill alpha above
+#   0 goes through the background test below with the light fills, so black at
+#   1/255 goes as "background" and black at 50% stays.
+# - off the page: a box that misses the CropBox.
+# - background: a light fill (luma >= _HIDDEN_TEXT_MIN_LUMA) whose drawing
+#   changes at most _HIDDEN_TEXT_MAX_SHOWN_SHARE of its box's pixels (beyond
+#   _HIDDEN_TEXT_BACKGROUND_TOLERANCE on a channel; see _on_own_colour). The
+#   page is rendered with and without the light text: white on white, or white
+#   under a logo or line painted over it, changes nothing (Springer's
+#   "Vol.:(0123456789)" under its logo, SAGE's white DOI link under the printed
+#   DOI, PLOS's white placeholders under its update badge). The render also
+#   sees a clip path that hides the glyphs, which the clip points read below
+#   could not. White text on a coloured masthead band changes its pixels and
+#   stays, also when the band covers only part of its box (the median of the
+#   box, the rule before hidden_text/2, judged a line half on a band as all
+#   background), and so does text filled white but outlined in a dark stroke
+#   (render modes 2 and 6). On the 392 dev PDFs (2026-10-26) every light object
+#   changed either no pixel of its box or at least 13% of it (BMC's white
+#   "RESEARCH ARTICLE Open Access" on its band). Not on a page images cover as
+#   a scan does (_coverage_qualifies):
+#   there the light text is the scan's OCR layer filled white, and the
+#   "background" the render shows is the scan's paper around its ink, so the
+#   test kept some words and dropped others (a scanned Lancet paper from the
+#   evaluation set: 318 of 1078 objects on page 1). The page keeps its layer
+#   whole, as before the rule.
+# - faint: the same test with a tolerance of _HIDDEN_TEXT_FAINT_TOLERANCE, for an
+#   effective size under _HIDDEN_TEXT_MAX_FAINT_SIZE_PT and a fill within that
+#   tolerance of what lies behind it, unless the glyphs' shapes still print
+#   (_without_printed_shape). Grey 0.9 on white goes. Grey 0.75 to 0.85 stays: on
+#   real PDFs it is titles, table cells and repository stamps. Larger pale text
+#   stays too: a journal's name set large in a pale grey can be read.
+# - covered: every pixel of the box unchanged without the object, under later
+#   vector or image objects that overlap at least _HIDDEN_TEXT_MIN_COVER_SHARE of
+#   its box, unless the glyphs' shapes still print (a logo or a figure's picture of
+#   the same words). Overlays on real PDFs hide a previous running head or a
+#   wrong-language label this way, and visible replacement text may lie on top. Not
+#   on a page images cover as a scan does: some scanners paint their OCR layer under
+#   the page image in a visible render mode. Others paint it under an image per
+#   block, at less page coverage and in a font that does not match the scan's
+#   glyphs, so under images the box must also print nothing at all.
+# - overprint: a later copy of an earlier object, the same text at the same
+#   size, whose box covers at least _OVERPRINT_MIN_OVERLAP of the smaller box.
+#   "Fake bold" draws a running head two or three times a fraction of a point
+#   apart; the text layer read it as "Vol. 3, No. 12 Vol. 3, No. 12 ...".
+# - clipped: a text object with at most _HIDDEN_TEXT_MAX_CLIP_SHARE of its box
+#   inside its clip's bounding box, its forms' clips included, or under a clip that
+#   is not one rectangle, and without a single pixel of ink when only such objects
+#   are rendered, in opaque black. A figure cropped from a whole page brings that
+#   page's text along, hidden by the crop. Clip points are in the object's own
+#   frame, before its forms' matrices. Text a clip only cuts stays. So does text
+#   inside a clip made of glyphs, which pdfium's clip API does not show.
+# On the 392 dev PDFs (2026-10-26) the rule removes the Springer and Nature
+# glyph-set markers, white-on-white blocks, PLOS's placeholders, a grey title
+# painted over by later drawing and TCPDF's line; no visible masthead, page number
+# or figure label it was checked against. On the 80 scans it removes only
+# overprinted copies, one tiny and one off-page object, as hidden_text/1 did.
+# hidden_text/3 (2026-11-03) raised the tiny limit from 1 pt, and on 6,690 real
+# PDFs with a text layer, 336 million characters, it removes 273,000 more, 0.08%,
+# in 238 PDFs: 206,000 from one PDF's heatmaps, the rest mostly plot labels and
+# diagram text, and squeezed objects in 15 PDFs, which repairs the words of 7. At
+# 3.0 pt the first whole table appears, so the limit stops just short of it
+# (float noise puts a 3 pt object at 2.9999). It also takes a few table cells
+# shrunk to fit a column and small cover-page lines. It drops 10 objects from the
+# OCR layers of 100 scans.
+# hidden_text/4 (2026-11-03) added the covered and faint tests and tests any fill
+# alpha. On 11,544 real PDFs, 677 million characters, it removes 32,500 more, 0.005%,
+# in 414 PDFs: 31,750 covered, 131 faint, 643 at a near-zero alpha. Covered text is
+# mostly a running head or value an overlay replaced, the wrong abstract under a
+# patch and the leftovers of a figure drawn twice; about a third of its characters
+# also appear elsewhere on the page. It costs the pale top copy of one embossed ISSN
+# and a few pale chart labels. It leaves the OCR layers of 100 scans as they were. A
+# pattern search found no instruction to an LLM among the objects it removes.
+# The clipped test, in the same version, removes about 209,000 more characters of
+# text on 604 pages of 283 of those PDFs, mostly whole draft pages behind cropped
+# figures. On those pages the word count falls from 133,000 to 113,000 and moves
+# closer to an OCR of the page on 207 of 257 pages checked, farther on 46. It costs
+# about 0.75 ms per page. Of 3,177 words gone per page, OCR still reads 104, mostly
+# labels of figures and tables printed as pictures; an embedded clipped copy draws
+# no glyphs to compare, so those cannot be told from a stale copy. Scans are unchanged.
+_HIDDEN_TEXT_MAX_SIZE_PT = 2.95
+_HIDDEN_TEXT_MAX_INK_HEIGHT_PT = 4.5
+_HIDDEN_TEXT_MAX_SQUEEZE = 0.5
+_HIDDEN_TEXT_MAX_MARK_CHARS = 4
+_HIDDEN_TEXT_MIN_MARK_RATIO = 0.5
+_HIDDEN_TEXT_MAX_MARK_PAIRS = 1_000_000
+_HIDDEN_TEXT_MIN_LUMA = 0.6
+_HIDDEN_TEXT_BACKGROUND_TOLERANCE = 16
+_HIDDEN_TEXT_MAX_SHOWN_SHARE = 0.01
+_HIDDEN_TEXT_RENDER_SCALE = 1.0
+_HIDDEN_TEXT_FAINT_TOLERANCE = 32
+_HIDDEN_TEXT_MAX_FAINT_SIZE_PT = 14.0
+_HIDDEN_TEXT_MIN_COVER_SHARE = 0.8
+# Past this many comparisons every text object is rendered as if covered.
+_HIDDEN_TEXT_MAX_COVER_PAIRS = 200_000
+# The glyph-shape test, for transparent text over its own outlines (_without_ink)
+# and for covered text whose words still print (_painted_over). On about 37,000
+# transparent objects in real PDFs it hides 87, in 3 PDFs. A band behind single
+# letters of 9 pt or more mostly fails it; at smaller sizes, or with a box the
+# size of each letter, it can pass: at this scale that ink looks like bold.
+_HIDDEN_TEXT_SHAPE_RENDER_SCALE = 4.0
+_HIDDEN_TEXT_MAX_SHAPE_RENDER_PX = 6000.0
+_HIDDEN_TEXT_MIN_GLYPHS_ON_INK = 0.6
+_HIDDEN_TEXT_MIN_INK_NEAR_GLYPHS = 0.7
+_HIDDEN_TEXT_MIN_PAPER_MARGIN_PX = 16
+_HIDDEN_TEXT_PAINT_COLOURS = ((255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 0, 255))
+_HIDDEN_TEXT_MAX_CLIP_SHARE = 0.05
+# Clip points read per page; past them the page's remaining text keeps its clips unread
+# and stays. Every object of a page can carry the same long clip path.
+_HIDDEN_TEXT_MAX_CLIP_POINTS = 100_000
+_FILLING_RENDER_MODES = frozenset({0, 2, 4, 6})
+_FILL_AND_STROKE_RENDER_MODES = frozenset({2, 6})
+_OVERPRINT_MIN_OVERLAP = 0.5
+
+
+def _fill_rgba(pdfium_c, obj, *, stroke: bool = False) -> tuple[int, int, int, int] | None:
+    channels = [ctypes.c_uint() for _ in range(4)]
+    getter = pdfium_c.FPDFPageObj_GetStrokeColor if stroke else pdfium_c.FPDFPageObj_GetFillColor
+    if not getter(obj, *(ctypes.byref(c) for c in channels)):
+        return None
+    red, green, blue, alpha = (c.value for c in channels)
+    return (red, green, blue, alpha)
+
+
+def _is_light(rgba: tuple[int, int, int, int]) -> bool:
+    luma = (0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]) / 255
+    return luma >= _HIDDEN_TEXT_MIN_LUMA
+
+
+def _glyph_sizes(pdfium_c, obj, matrix: tuple[float, ...] | None) -> tuple[float, float] | None:
+    """Tf size times the scale of the matrix composed through its forms: (along, across) the line."""
+    own = _object_matrix(pdfium_c, obj)
+    if own is None:
+        return None
+    a, b, c, d, _e, _f = _compose(own, matrix)
+    size = ctypes.c_float(0.0)
+    if not pdfium_c.FPDFTextObj_GetFontSize(obj, ctypes.byref(size)):
+        return None
+    return size.value * math.hypot(a, b), size.value * math.hypot(c, d)
+
+
+def _ink_height(pdfium_c, obj, matrix: tuple[float, ...] | None, box: _Box | None) -> float | None:
+    """The object's height across its line in points, whatever its rotation.
+
+    The page-space box says nothing about a rotated object, whose box grows with
+    its length. Without FPDFPageObj_GetRotatedBounds the box's short side stands in.
+    """
+    short_side = None if box is None else min(box[2] - box[0], box[3] - box[1])
+    get_quad = getattr(pdfium_c, "FPDFPageObj_GetRotatedBounds", None)
+    if get_quad is None:
+        return short_side
+    quad = pdfium_c.FS_QUADPOINTSF()
+    if not get_quad(obj, ctypes.byref(quad)):
+        return short_side
+    a, b, c, d, _e, _f = _compose((1.0, 0.0, 0.0, 1.0, 0.0, 0.0), matrix)
+    across_x, across_y = quad.x4 - quad.x1, quad.y4 - quad.y1
+    return math.hypot(a * across_x + c * across_y, b * across_x + d * across_y)
+
+
+def _is_tiny_text(pdfium_c, obj, matrix: tuple[float, ...] | None, box: _Box | None) -> bool:
+    """Whether the object's glyphs are too small or too squeezed to read (see the rule above)."""
+    sizes = _glyph_sizes(pdfium_c, obj, matrix)
+    if sizes is None or min(sizes) >= _HIDDEN_TEXT_MAX_SIZE_PT:
+        return False
+    if min(sizes) < _HIDDEN_TEXT_MAX_SQUEEZE * max(sizes):
+        return True
+    if math.sqrt(sizes[0] * sizes[1]) >= _HIDDEN_TEXT_MAX_SIZE_PT:
+        return False
+    height = _ink_height(pdfium_c, obj, matrix, box)
+    return height is not None and height < _HIDDEN_TEXT_MAX_INK_HEIGHT_PT
+
+
+def _prints_in_ink(pdfium_c, obj, mode: int) -> bool:
+    """Whether *obj* is filled, or outlined, in an opaque colour that is not light."""
+    if mode in _FILL_AND_STROKE_RENDER_MODES:
+        stroke = _fill_rgba(pdfium_c, obj, stroke=True)
+        if stroke is not None and stroke[3] == 255 and not _is_light(stroke):
+            return True
+    if mode not in _FILLING_RENDER_MODES:
+        return False
+    rgba = _fill_rgba(pdfium_c, obj)
+    return rgba is not None and rgba[3] == 255 and not _is_light(rgba)
+
+
+def _marks_beside_small_print(
+    pdfium_c, page, objects: list, tiny: list, unreadable: set[int]
+) -> set[int]:
+    """``id()`` of the *tiny* entries that are a sub- or superscript of readable small print.
+
+    A neighbour must be readable itself: no entry whose ``id()`` is in
+    *unreadable* (tiny or hidden text) counts, so tiny text cannot anchor tiny
+    text and white small print anchors nothing. It must also be at most
+    1/_HIDDEN_TEXT_MIN_MARK_RATIO the mark's size, so ordinary body text
+    anchors nothing under half of it. Squeezed objects never count. Past
+    _HIDDEN_TEXT_MAX_MARK_PAIRS comparisons the page keeps no marks.
+    """
+    readable: list[tuple[_Box, float]] = []
+    for entry in objects:
+        _parent, obj, matrix = entry
+        if id(entry) in unreadable:
+            continue
+        if pdfium_c.FPDFTextObj_GetTextRenderMode(obj) in _INVISIBLE_TEXT_RENDER_MODES:
+            continue
+        bounds = _object_bounds(pdfium_c, obj)
+        sizes = _glyph_sizes(pdfium_c, obj, matrix)
+        if bounds is None or sizes is None:
+            continue
+        readable.append((_transform_box(matrix, bounds) if matrix else bounds, sizes[1]))
+    if len(tiny) * len(readable) > _HIDDEN_TEXT_MAX_MARK_PAIRS:
+        return set()
+    beside: list[tuple] = []
+    for entry, box in tiny:
+        sizes = _glyph_sizes(pdfium_c, entry[1], entry[2])
+        if box is None or sizes is None or min(sizes) < _HIDDEN_TEXT_MAX_SQUEEZE * max(sizes):
+            continue
+        size = math.sqrt(sizes[0] * sizes[1])
+        for other, other_size in readable:
+            if (
+                size >= _HIDDEN_TEXT_MIN_MARK_RATIO * other_size
+                and max(other[0] - box[2], box[0] - other[2]) <= size
+                and min(box[3], other[3]) - max(box[1], other[1]) >= -0.5 * size
+            ):
+                beside.append(entry)
+                break
+    if not beside:
+        return set()
+    textpage = page.get_textpage()
+    try:
+        return {
+            id(entry)
+            for entry in beside
+            if len(_text_object_text(pdfium_c, entry[1], textpage).strip())
+            <= _HIDDEN_TEXT_MAX_MARK_CHARS
+        }
+    finally:
+        textpage.close()
+
+
+def _boxes_meet(box: _Box, other: _Box) -> bool:
+    return box[0] <= other[2] and other[0] <= box[2] and box[1] <= other[3] and other[1] <= box[3]
+
+
+def _object_address(obj) -> int | None:
+    """The pdfium handle of a page object as an int, to match it across APIs."""
+    return ctypes.cast(obj, ctypes.c_void_p).value
+
+
+def _kept_invisible_share(pdfium_c, page, dropped: list) -> float | None:
+    """The scan check's invisible share of *page* once the *dropped* entries are gone.
+
+    :func:`_invisible_share` over the page's characters, with the characters
+    of the ``(parent, object, matrix)`` entries in *dropped* left out, as the
+    text page built after their removal will have them.
+    """
+    text_object_of = getattr(pdfium_c, "FPDFText_GetTextObject", None)
+    if text_object_of is None:
+        raise RuntimeError("this PDFium build has no FPDFText_GetTextObject")
+    is_generated = getattr(pdfium_c, "FPDFText_IsGenerated", None)
+    gone = {_object_address(entry[1]) for entry in dropped}
+    textpage = page.get_textpage()
+    try:
+        handle = textpage.raw
+
+        def render_mode_of(index: int) -> int | None:
+            obj = text_object_of(handle, index)
+            if not obj or _object_address(obj) in gone:
+                return None
+            return pdfium_c.FPDFTextObj_GetTextRenderMode(obj)
+
+        return _invisible_share(
+            textpage.count_chars(),
+            lambda index: pdfium_c.FPDFText_GetUnicode(handle, index),
+            lambda index: is_generated is not None and is_generated(handle, index) == 1,
+            render_mode_of,
+        )
+    finally:
+        textpage.close()
+
+
+def _find_hidden_text(
+    pdfium_c, page, objects: list, removed: list | None = None
+) -> list[tuple[tuple, str, _Box | None]]:
+    """``(entry, reason, page-space box)`` for every hidden text object in *objects*.
+
+    *objects* are ``(parent, object, matrix)`` entries as collected by
+    :func:`_collect_text_objects`; *removed* are entries the furniture strip
+    removes anyway (watermarks, line numbers), which the invisible test leaves
+    out of its share. Nothing is removed here. See the rule above.
+    """
+    crop_box = _page_crop_box(page)
+    hidden: list[tuple[tuple, str, _Box | None]] = []
+    invisible: list[tuple[tuple, str, _Box | None]] = []
+    light: list[tuple[tuple, tuple[int, int, int, int], _Box]] = []
+    transparent: list[tuple[tuple, tuple[int, int, int, int], _Box]] = []
+    tiny: list[tuple[tuple, _Box | None, bool]] = []
+    boxes: list[tuple[tuple, _Box]] = []
+    for entry in objects:
+        _parent, obj, matrix = entry
+        bounds = _object_bounds(pdfium_c, obj)
+        box = None if bounds is None else _transform_box(matrix, bounds) if matrix else bounds
+        if box is not None:
+            boxes.append((entry, box))
+        mode = pdfium_c.FPDFTextObj_GetTextRenderMode(obj)
+        if mode in _INVISIBLE_TEXT_RENDER_MODES:
+            invisible.append((entry, "invisible", box))
+            continue
+        if box is not None and not _boxes_meet(box, crop_box):
+            hidden.append((entry, "off_page", box))
+            continue
+        if _is_tiny_text(pdfium_c, obj, matrix, box):
+            tiny.append((entry, box, _prints_in_ink(pdfium_c, obj, mode)))
+            continue
+        if mode not in _FILLING_RENDER_MODES:
+            continue
+        rgba = _fill_rgba(pdfium_c, obj)
+        if rgba is None:
+            continue
+        if mode in _FILL_AND_STROKE_RENDER_MODES:
+            stroke = _fill_rgba(pdfium_c, obj, stroke=True)
+            if stroke is not None and stroke[3] > 0 and not _is_light(stroke):
+                continue  # outlined in a dark colour: it prints whatever the fill
+        if rgba[3] == 0:
+            if box is not None:
+                transparent.append((entry, rgba, box))
+            else:
+                hidden.append((entry, "transparent", box))
+        elif box is not None and (_is_light(rgba) or rgba[3] < 255):
+            light.append((entry, rgba, box))
+    scan_like: list[bool] = []
+
+    def covered_as_a_scan() -> bool:
+        if not scan_like:
+            scan_like.append(_coverage_qualifies(_page_image_coverage(page, crop_box)))
+        return scan_like[0]
+
+    if light and not covered_as_a_scan():
+        hidden.extend(_on_own_colour(pdfium_c, page, light, crop_box))
+    if transparent:
+        hidden.extend(_without_ink(pdfium_c, page, objects, transparent, crop_box))
+    if tiny:
+        # A mark is printed in ink beside small print that is not hidden itself:
+        # a white or alpha-0 piece is hidden as tiny whatever stands beside it.
+        unreadable = {id(entry) for entry, _box, _inked in tiny}
+        unreadable.update(id(entry) for entry, _reason, _box in hidden)
+        inked = [(entry, box) for entry, box, in_ink in tiny if in_ink]
+        marks = (
+            _marks_beside_small_print(pdfium_c, page, objects, inked, unreadable)
+            if inked
+            else set()
+        )
+        hidden.extend((entry, "tiny", box) for entry, box, _inked in tiny if id(entry) not in marks)
+    taken = {id(entry) for entry, _reason, _box in hidden}
+    hidden.extend(_overprints(pdfium_c, page, [e for e in objects if id(e) not in taken]))
+    taken = {id(entry) for entry, _reason, _box in hidden}
+    invisible = [item for item in invisible if id(item[0]) not in taken]
+    taken.update(id(item[0]) for item in invisible)
+    outside = _outside_their_clips(
+        pdfium_c, page, [item for item in boxes if id(item[0]) not in taken]
+    )
+    if outside and not covered_as_a_scan():
+        clipped = _clipped_away(pdfium_c, page, outside, crop_box)
+        hidden.extend(clipped)
+        taken.update(id(entry) for entry, _reason, _box in clipped)
+    covered = _under_later_objects(
+        pdfium_c, page, [item for item in boxes if id(item[0]) not in taken]
+    )
+    if covered and not covered_as_a_scan():
+        hidden.extend(_painted_over(pdfium_c, page, covered, crop_box))
+    if invisible and not covered_as_a_scan():
+        dropped = [*(removed or ()), *(entry for entry, _reason, _box in hidden)]
+        try:
+            share = _kept_invisible_share(pdfium_c, page, dropped)
+        except Exception:  # noqa: BLE001 - without the share the invisible text stays
+            logger.debug("Invisible-text share unavailable; the page keeps it", exc_info=True)
+        else:
+            if not _share_qualifies(share):
+                hidden.extend(invisible)
+    return hidden
+
+
+def _overlap_share(box: _Box, other: _Box) -> float:
+    """The intersection of two boxes as a share of the smaller one's area."""
+    width = min(box[2], other[2]) - max(box[0], other[0])
+    height = min(box[3], other[3]) - max(box[1], other[1])
+    if width <= 0 or height <= 0:
+        return 0.0
+    smaller = min(
+        (box[2] - box[0]) * (box[3] - box[1]), (other[2] - other[0]) * (other[3] - other[1])
+    )
+    return width * height / smaller if smaller > 0 else 0.0
+
+
+def _overprints(pdfium_c, page, objects: list) -> list[tuple[tuple, str, _Box]]:
+    """Later copies of an earlier text object drawn over it (see the overprint rule).
+
+    Copies have the same box size, so only objects whose rounded box size
+    matches are compared, and only overlapping pairs pay for their text.
+    """
+    groups: dict[tuple[float, float], list[tuple[int, tuple, _Box]]] = {}
+    for order, entry in enumerate(objects):
+        _parent, obj, matrix = entry
+        bounds = _object_bounds(pdfium_c, obj)
+        if bounds is None:
+            continue
+        box = _transform_box(matrix, bounds) if matrix else bounds
+        if box[2] - box[0] <= 0 or box[3] - box[1] <= 0:
+            continue
+        key = (round(box[2] - box[0], 1), round(box[3] - box[1], 1))
+        groups.setdefault(key, []).append((order, entry, box))
+    pairs = []
+    for members in groups.values():
+        members.sort(key=lambda member: member[2][0])
+        for k, first in enumerate(members):
+            for second in members[k + 1 :]:
+                if second[2][0] >= first[2][2]:
+                    break
+                if _overlap_share(first[2], second[2]) >= _OVERPRINT_MIN_OVERLAP:
+                    earlier, later = sorted((first, second), key=lambda member: member[0])
+                    pairs.append((earlier[0], earlier[1:], later[1:]))
+    if not pairs:
+        return []
+    pairs.sort(key=lambda pair: pair[0])
+    textpage = page.get_textpage()
+    try:
+        texts: dict[int, str] = {}
+
+        def text_of(entry: tuple) -> str:
+            if id(entry) not in texts:
+                texts[id(entry)] = " ".join(_text_object_text(pdfium_c, entry[1], textpage).split())
+            return texts[id(entry)]
+
+        found: list[tuple[tuple, str, _Box]] = []
+        dropped: set[int] = set()
+        for _order, (earlier, _earlier_box), (later, later_box) in pairs:
+            if id(later) in dropped or id(earlier) in dropped:
+                continue
+            text = text_of(later)
+            if text and text == text_of(earlier):
+                dropped.add(id(later))
+                found.append((later, "overprint", later_box))
+        return found
+    finally:
+        textpage.close()
+
+
+def _pixel_area(
+    box: _Box, crop_box: tuple[float, float, float, float], rotation: int, size: tuple[int, int]
+) -> tuple[int, int, int, int]:
+    """*box* (PDF points) as a non-empty pixel area of a render of the page, of *size*."""
+    width, height = size
+    x1, y1, x2, y2 = _pdf_points_to_normalized_bbox(box, crop_box, rotation)
+    left = max(0, min(width - 1, int(x1 / 1000.0 * width)))
+    top = max(0, min(height - 1, int(y1 / 1000.0 * height)))
+    right = max(left + 1, min(width, math.ceil(x2 / 1000.0 * width)))
+    bottom = max(top + 1, min(height, math.ceil(y2 / 1000.0 * height)))
+    return left, top, right, bottom
+
+
+def _on_own_colour(
+    pdfium_c, page, light: list, crop_box: tuple[float, float, float, float]
+) -> list[tuple[tuple, str, _Box]]:
+    """The *light* entries whose drawing leaves the page as it is (the background and faint reasons).
+
+    The page is rendered as it is and with the light text hidden (render
+    mode 3). An object is hidden when the two renders differ (beyond
+    :data:`_HIDDEN_TEXT_BACKGROUND_TOLERANCE` on a channel) in at most
+    :data:`_HIDDEN_TEXT_MAX_SHOWN_SHARE` of its box's pixels: white on white,
+    or white under a logo painted over it or a clip that hides it. Text that
+    shows on any part of its box, such as white on a band that covers half
+    of it, changes more of its box and stays. Small text that only passes at
+    :data:`_HIDDEN_TEXT_FAINT_TOLERANCE` goes too, unless its shapes still print.
+    """
+    set_mode = getattr(pdfium_c, "FPDFTextObj_SetTextRenderMode", None)
+    if set_mode is None:
+        return []
+    shown = _render_rgb(page)
+    saved = []
+    try:
+        for entry, _rgba, _box in light:
+            obj = entry[1]
+            saved.append((obj, pdfium_c.FPDFTextObj_GetTextRenderMode(obj)))
+            set_mode(obj, 3)
+        bare = _render_rgb(page)
+    finally:
+        for obj, mode in saved:
+            set_mode(obj, mode)
+    shows = _changed_pixels(shown, bare)
+    shows_faintly = _changed_pixels(shown, bare, _HIDDEN_TEXT_FAINT_TOLERANCE)
+    rotation = _page_rotation(page)
+    hidden = []
+    faint = []
+    for entry, rgba, box in light:
+        area = _pixel_area(box, crop_box, rotation, bare.size)
+        limit = _HIDDEN_TEXT_MAX_SHOWN_SHARE * (area[2] - area[0]) * (area[3] - area[1])
+        if shows.crop(area).histogram()[255] <= limit:
+            hidden.append((entry, "background", box))
+        elif shows_faintly.crop(area).histogram()[255] <= limit:
+            sizes = _glyph_sizes(pdfium_c, entry[1], entry[2])
+            if (
+                sizes is not None
+                and math.sqrt(sizes[0] * sizes[1]) < _HIDDEN_TEXT_MAX_FAINT_SIZE_PT
+                and _contrast(rgba, bare.crop(area)) <= _HIDDEN_TEXT_FAINT_TOLERANCE
+            ):
+                faint.append((entry, box))
+    if faint:
+        hidden.extend(
+            (entry, "faint", box)
+            for entry, box in _without_printed_shape(pdfium_c, page, faint, crop_box)
+        )
+    return hidden
+
+
+def _without_ink(
+    pdfium_c, page, objects: list, transparent: list, crop_box: tuple[float, float, float, float]
+) -> list[tuple[tuple, str, _Box]]:
+    """The *transparent* entries not printed as outlines under them (the transparent reason).
+
+    The page is rendered with its visible text off, so only vector and image
+    ink remains, and again with the transparent text painted in a colour the
+    page hardly uses. An object stays when at least
+    :data:`_HIDDEN_TEXT_MIN_GLYPHS_ON_INK` of its glyph pixels lie on ink and
+    at least :data:`_HIDDEN_TEXT_MIN_INK_NEAR_GLYPHS` of the ink in its box
+    lies within a pixel of a glyph (fake bold is a little wider than the font,
+    and a band also fills the gaps in a letter). Ink is what differs from the
+    most common colour around the box (the box alone can be mostly ink, on one
+    bold letter or a hyphen). On a page that cannot be rendered they all count
+    as hidden.
+    """
+    from PIL import Image, ImageChops, ImageFilter
+
+    def everything() -> list[tuple[tuple, str, _Box]]:
+        return [(entry, "transparent", box) for entry, _rgba, box in transparent]
+
+    set_mode = getattr(pdfium_c, "FPDFTextObj_SetTextRenderMode", None)
+    set_fill = getattr(pdfium_c, "FPDFPageObj_SetFillColor", None)
+    if set_mode is None or set_fill is None:
+        return everything()
+    painted_ids = {id(entry) for entry, _rgba, _box in transparent}
+    saved_modes = []
+    saved_fills = []
+    try:
+        for entry in objects:
+            if id(entry) not in painted_ids:
+                saved_modes.append((entry[1], pdfium_c.FPDFTextObj_GetTextRenderMode(entry[1])))
+                set_mode(entry[1], 3)
+        scale = _shape_render_scale(page)
+        bare = page.render(scale=scale).to_pil().convert("RGB")
+        colour = min(
+            _HIDDEN_TEXT_PAINT_COLOURS,
+            key=lambda c: _changed_pixels(bare, Image.new("RGB", bare.size, c)).histogram()[0],
+        )
+        for entry, rgba, _box in transparent:
+            saved_fills.append((entry[1], rgba))
+            set_fill(entry[1], *colour, 255)
+        painted = page.render(scale=scale).to_pil().convert("RGB")
+    except Exception:  # noqa: BLE001 - no render, no evidence of ink
+        logger.debug("Render for the transparent-text check failed", exc_info=True)
+        return everything()
+    finally:
+        for obj, rgba in saved_fills:
+            set_fill(obj, *rgba)
+        for obj, mode in saved_modes:
+            set_mode(obj, mode)
+    glyphs = _changed_pixels(painted, bare)
+    width, height = bare.size
+    rotation = _page_rotation(page)
+    textpage = None
+    hidden = []
+    try:
+        for entry, _rgba, box in transparent:
+            x1, y1, x2, y2 = _pdf_points_to_normalized_bbox(box, crop_box, rotation)
+            left = max(0, min(width - 1, int(x1 / 1000.0 * width)))
+            top = max(0, min(height - 1, int(y1 / 1000.0 * height)))
+            right = max(left + 1, min(width, math.ceil(x2 / 1000.0 * width)))
+            bottom = max(top + 1, min(height, math.ceil(y2 / 1000.0 * height)))
+            margin = max(bottom - top, _HIDDEN_TEXT_MIN_PAPER_MARGIN_PX)
+            around = bare.crop(
+                (
+                    max(0, left - margin),
+                    max(0, top - margin),
+                    min(width, right + margin),
+                    min(height, bottom + margin),
+                )
+            )
+            colours = around.getcolors(around.size[0] * around.size[1])
+            paper = max(colours)[1] if colours else (255, 255, 255)
+            area = (left, top, right, bottom)
+            in_box = bare.crop(area)
+            ink = _changed_pixels(in_box, Image.new("RGB", in_box.size, paper))
+            shape = glyphs.crop(area)
+            near = (
+                glyphs.crop((left - 1, top - 1, right + 1, bottom + 1))
+                .filter(ImageFilter.MaxFilter(3))
+                .crop((1, 1, right - left + 1, bottom - top + 1))
+            )
+            shared = ImageChops.multiply(shape, ink).histogram()[255]
+            if shared and (
+                shared >= _HIDDEN_TEXT_MIN_GLYPHS_ON_INK * shape.histogram()[255]
+                and ImageChops.multiply(near, ink).histogram()[255]
+                >= _HIDDEN_TEXT_MIN_INK_NEAR_GLYPHS * ink.histogram()[255]
+            ):
+                continue
+            if textpage is None:
+                textpage = page.get_textpage()
+            if _text_object_text(pdfium_c, entry[1], textpage).strip():
+                hidden.append((entry, "transparent", box))
+    finally:
+        if textpage is not None:
+            textpage.close()
+    return hidden
+
+
+def _contrast(rgba: tuple[int, int, int, int], behind) -> float:
+    """The largest channel difference a fill makes over the most common colour of *behind*.
+
+    A render at 100% blurs thin glyphs, so the pixels alone rate white on a mid-grey
+    bar as faint.
+    """
+    colours = behind.getcolors(behind.size[0] * behind.size[1])
+    paper = max(colours)[1] if colours else (255, 255, 255)
+    return rgba[3] / 255 * max(abs(rgba[i] - paper[i]) for i in range(3))
+
+
+def _collect_paint_order(pdfium_c, objects, matrix, depth: int, found: list) -> None:
+    """Append ``(object, kind, page-space box)`` in paint order, through the forms (text: no box)."""
+    for obj in objects:
+        kind = pdfium_c.FPDFPageObj_GetType(obj)
+        if kind == pdfium_c.FPDF_PAGEOBJ_FORM:
+            if depth >= _SCAN_PAGE_MAX_FORM_DEPTH:
+                continue
+            own = _object_matrix(pdfium_c, obj)
+            if own is None:
+                continue
+            children = [
+                pdfium_c.FPDFFormObj_GetObject(obj, index)
+                for index in range(pdfium_c.FPDFFormObj_CountObjects(obj))
+            ]
+            _collect_paint_order(pdfium_c, children, _compose(own, matrix), depth + 1, found)
+        elif kind == pdfium_c.FPDF_PAGEOBJ_TEXT:
+            found.append((obj, kind, None))
+        else:
+            bounds = _object_bounds(pdfium_c, obj)
+            box = None if bounds is None else _transform_box(matrix, bounds) if matrix else bounds
+            found.append((obj, kind, box))
+
+
+def _paint_order(pdfium_c, page) -> list:
+    painted: list = []
+    top = [
+        pdfium_c.FPDFPage_GetObject(page.raw, index)
+        for index in range(pdfium_c.FPDFPage_CountObjects(page.raw))
+    ]
+    _collect_paint_order(pdfium_c, top, None, 0, painted)
+    return painted
+
+
+def _under_later_objects(pdfium_c, page, items: list) -> list[tuple[tuple, _Box, bool]]:
+    """``(entry, box, by vector ink alone)`` for ``(entry, box)`` *items* under later objects.
+
+    Overlaps are added up, so strips that overlap each other can count twice and
+    a stack of thin rectangles still counts. The render decides. Without vector
+    ink over most of the box, images count, and so does every object once the
+    page is past :data:`_HIDDEN_TEXT_MAX_COVER_PAIRS`: its pixels must then be blank.
+    """
+    entries = {_object_address(entry[1]): (entry, box) for entry, box in items}
+    later: list[tuple[_Box, bool]] = []
+    found: list[tuple[tuple, _Box, bool]] = []
+    pairs = 0
+    for obj, kind, other_box in reversed(_paint_order(pdfium_c, page)):
+        if kind != pdfium_c.FPDF_PAGEOBJ_TEXT:
+            if other_box is not None:
+                later.append((other_box, kind == pdfium_c.FPDF_PAGEOBJ_IMAGE))
+            continue
+        if not later:
+            continue
+        item = entries.get(_object_address(obj))
+        if item is None:
+            continue
+        entry, box = item
+        pairs += len(later)
+        if pairs > _HIDDEN_TEXT_MAX_COVER_PAIRS:
+            found.append((entry, box, False))
+            continue
+        needed = _HIDDEN_TEXT_MIN_COVER_SHARE * (box[2] - box[0]) * (box[3] - box[1])
+        vector = image = 0.0
+        for other, is_image in later:
+            width = min(box[2], other[2]) - max(box[0], other[0])
+            height = min(box[3], other[3]) - max(box[1], other[1])
+            if width > 0 and height > 0:
+                if is_image:
+                    image += width * height
+                else:
+                    vector += width * height
+        if needed > 0 and vector + image >= needed:
+            found.append((entry, box, vector >= needed))
+    return found
+
+
+def _clip_box(pdfium_c, obj, budget: list[int]) -> tuple[_Box | None, bool]:
+    """*obj*'s clip in its own frame: its bounding box, and whether it is not one rectangle.
+
+    Reading the clip spends its point count from *budget*; one the budget no
+    longer covers reads as no clip.
+    """
+    clip = pdfium_c.FPDFPageObj_GetClipPath(obj)
+    if not clip:
+        return None, False
+    paths = range(pdfium_c.FPDFClipPath_CountPaths(clip))
+    points_in_clip = sum(max(0, pdfium_c.FPDFClipPath_CountPathSegments(clip, p)) for p in paths)
+    if points_in_clip > budget[0]:
+        budget[0] = 0
+        return None, False
+    budget[0] -= points_in_clip
+    found = None
+    shaped = False
+    x, y = ctypes.c_float(), ctypes.c_float()
+    for path in paths:
+        points: list[tuple[float, float]] = []
+        for index in range(pdfium_c.FPDFClipPath_CountPathSegments(clip, path)):
+            segment = pdfium_c.FPDFClipPath_GetPathSegment(clip, path, index)
+            if segment and pdfium_c.FPDFPathSegment_GetPoint(
+                segment, ctypes.byref(x), ctypes.byref(y)
+            ):
+                points.append((x.value, y.value))
+        if points:
+            shaped = shaped or not _is_rectangle(points)
+            xs, ys = zip(*points, strict=True)
+            found = _intersection(found, (min(xs), min(ys), max(xs), max(ys)))
+    return found, shaped
+
+
+def _is_rectangle(points: list[tuple[float, float]]) -> bool:
+    """Whether *points* walk one axis-aligned rectangle, closing point or not."""
+    if len(points) not in (4, 5) or (len(points) == 5 and points[0] != points[4]):
+        return False
+    return all(
+        (first[0] == second[0]) != (first[1] == second[1])
+        for first, second in zip(points[:4], [*points[1:4], points[0]], strict=True)
+    )
+
+
+def _intersection(box: _Box | None, other: _Box | None) -> _Box | None:
+    """Both boxes in one; it can come out inside out, which overlaps nothing."""
+    if box is None or other is None:
+        return box or other
+    return (
+        max(box[0], other[0]),
+        max(box[1], other[1]),
+        min(box[2], other[2]),
+        min(box[3], other[3]),
+    )
+
+
+def _collect_clips(
+    pdfium_c,
+    objects,
+    matrix,
+    inherited: tuple[_Box | None, bool],
+    depth: int,
+    found: dict,
+    budget: list[int],
+) -> None:
+    """Add each clipped text object's page-space clip to *found*, its forms' clips included."""
+    for obj in objects:
+        kind = pdfium_c.FPDFPageObj_GetType(obj)
+        if kind not in (pdfium_c.FPDF_PAGEOBJ_FORM, pdfium_c.FPDF_PAGEOBJ_TEXT):
+            continue
+        own, shaped = _clip_box(pdfium_c, obj, budget)
+        if own is not None and matrix:
+            own = _transform_box(matrix, own)
+        clip = (_intersection(inherited[0], own), inherited[1] or shaped)
+        if kind == pdfium_c.FPDF_PAGEOBJ_FORM:
+            if depth >= _SCAN_PAGE_MAX_FORM_DEPTH:
+                continue
+            own_matrix = _object_matrix(pdfium_c, obj)
+            if own_matrix is None:
+                continue
+            children = [
+                pdfium_c.FPDFFormObj_GetObject(obj, index)
+                for index in range(pdfium_c.FPDFFormObj_CountObjects(obj))
+            ]
+            _collect_clips(
+                pdfium_c, children, _compose(own_matrix, matrix), clip, depth + 1, found, budget
+            )
+        elif kind == pdfium_c.FPDF_PAGEOBJ_TEXT and clip[0] is not None:
+            found[_object_address(obj)] = clip
+
+
+def _outside_their_clips(pdfium_c, page, items: list) -> list[tuple[tuple, _Box]]:
+    """The ``(entry, box)`` *items* a clip may hide: box next to nothing inside, or shaped."""
+    clips: dict = {}
+    top = [
+        pdfium_c.FPDFPage_GetObject(page.raw, index)
+        for index in range(pdfium_c.FPDFPage_CountObjects(page.raw))
+    ]
+    _collect_clips(pdfium_c, top, None, (None, False), 0, clips, [_HIDDEN_TEXT_MAX_CLIP_POINTS])
+    outside = []
+    for entry, box in items:
+        clip, shaped = clips.get(_object_address(entry[1]), (None, False))
+        if clip is None:
+            continue
+        area = (box[2] - box[0]) * (box[3] - box[1])
+        width = min(box[2], clip[2]) - max(box[0], clip[0])
+        height = min(box[3], clip[3]) - max(box[1], clip[1])
+        inside = width * height if width > 0 and height > 0 else 0.0
+        if area > 0 and (shaped or inside <= _HIDDEN_TEXT_MAX_CLIP_SHARE * area):
+            outside.append((entry, box))
+    return outside
+
+
+def _clipped_away(
+    pdfium_c, page, outside: list, crop_box: tuple[float, float, float, float]
+) -> list[tuple[tuple, str, _Box]]:
+    """The *outside* entries that draw nothing rendered alone in black (the clipped reason)."""
+    set_active = getattr(pdfium_c, "FPDFPageObj_SetIsActive", None)
+    set_fill = getattr(pdfium_c, "FPDFPageObj_SetFillColor", None)
+    if set_active is None or set_fill is None:
+        return []
+    from PIL import Image
+
+    item_ids = {_object_address(entry[1]) for entry, _box in outside}
+    others = [
+        obj
+        for obj, _kind, _box in _paint_order(pdfium_c, page)
+        if _object_address(obj) not in item_ids
+    ]
+    saved_fills = []
+    try:
+        for entry, _box in outside:
+            rgba = _fill_rgba(pdfium_c, entry[1])
+            if rgba is not None:
+                saved_fills.append((entry[1], rgba))
+                set_fill(entry[1], 0, 0, 0, 255)
+        for obj in others:
+            set_active(obj, False)
+        alone = _render_rgb(page)
+    except Exception:  # noqa: BLE001 - no render, no evidence: the text stays
+        logger.debug("Render for the clipped-text check failed", exc_info=True)
+        return []
+    finally:
+        for obj in others:
+            set_active(obj, True)
+        for obj, rgba in saved_fills:
+            set_fill(obj, *rgba)
+    ink = _changed_pixels(alone, Image.new("RGB", alone.size, (255, 255, 255)))
+    rotation = _page_rotation(page)
+    found = []
+    for entry, box in outside:
+        if not ink.crop(_pixel_area(box, crop_box, rotation, alone.size)).histogram()[255]:
+            found.append((entry, "clipped", box))
+    return found
+
+
+def _painted_over(
+    pdfium_c, page, covered: list, crop_box: tuple[float, float, float, float]
+) -> list[tuple[tuple, str, _Box]]:
+    """The *covered* entries the page looks the same without (the covered reason)."""
+    set_active = getattr(pdfium_c, "FPDFPageObj_SetIsActive", None)
+    if set_active is None:
+        return []
+    try:
+        shown = _render_rgb(page)
+        try:
+            for entry, _box, _by_vector in covered:
+                set_active(entry[1], False)
+            bare = _render_rgb(page)
+        finally:
+            for entry, _box, _by_vector in covered:
+                set_active(entry[1], True)
+    except Exception:  # noqa: BLE001 - no render, no evidence: the text stays
+        logger.debug("Render for the covered-text check failed", exc_info=True)
+        return []
+    shows = _changed_pixels(shown, bare)
+    rotation = _page_rotation(page)
+    unchanged = []
+    for entry, box, by_vector in covered:
+        area = _pixel_area(box, crop_box, rotation, bare.size)
+        limit = _HIDDEN_TEXT_MAX_SHOWN_SHARE * (area[2] - area[0]) * (area[3] - area[1])
+        if shows.crop(area).histogram()[255] > limit:
+            continue
+        if not by_vector and not _is_blank(bare.crop(area), limit):
+            continue
+        unchanged.append((entry, box))
+    if not unchanged:
+        return []
+    return [
+        (entry, "covered", box)
+        for entry, box in _without_printed_shape(pdfium_c, page, unchanged, crop_box)
+    ]
+
+
+def _is_blank(image, limit: float) -> bool:
+    """Whether at most *limit* pixels of *image* differ from its most common colour."""
+    from PIL import Image
+
+    colours = image.getcolors(image.size[0] * image.size[1])
+    if not colours:
+        return False
+    plain = Image.new("RGB", image.size, max(colours)[1])
+    return _changed_pixels(image, plain).histogram()[255] <= limit
+
+
+def _without_printed_shape(
+    pdfium_c, page, items: list, crop_box: tuple[float, float, float, float]
+) -> list[tuple[tuple, _Box]]:
+    """The ``(entry, box)`` *items* that draw glyphs, none of which the page prints without them.
+
+    The page is rendered without the items, and with only the items, in opaque
+    black. An item is printed when at least :data:`_HIDDEN_TEXT_MIN_GLYPHS_ON_INK`
+    of its glyph pixels lie on ink and at least
+    :data:`_HIDDEN_TEXT_MIN_INK_NEAR_GLYPHS` of the ink in its box lies within a
+    pixel of a glyph: outlines of the same words, or a picture of them. Ink is what
+    differs from the most common colour around the box. An item that draws nothing
+    on its own stays: its font may just be missing here.
+    """
+    from PIL import Image, ImageChops, ImageFilter
+
+    set_active = getattr(pdfium_c, "FPDFPageObj_SetIsActive", None)
+    set_fill = getattr(pdfium_c, "FPDFPageObj_SetFillColor", None)
+    if set_active is None or set_fill is None:
+        return []
+    item_ids = {_object_address(entry[1]) for entry, _box in items}
+    others = [
+        obj
+        for obj, _kind, _box in _paint_order(pdfium_c, page)
+        if _object_address(obj) not in item_ids
+    ]
+    scale = _shape_render_scale(page)
+    saved_fills = []
+    try:
+        for entry, _box in items:
+            set_active(entry[1], False)
+        bare = page.render(scale=scale).to_pil().convert("RGB")
+        for entry, _box in items:
+            set_active(entry[1], True)
+            rgba = _fill_rgba(pdfium_c, entry[1])
+            if rgba is not None:
+                saved_fills.append((entry[1], rgba))
+                set_fill(entry[1], 0, 0, 0, 255)
+        for obj in others:
+            set_active(obj, False)
+        alone = page.render(scale=scale).to_pil().convert("RGB")
+    except Exception:  # noqa: BLE001 - no render, no evidence: the text stays
+        logger.debug("Render for the printed-shape check failed", exc_info=True)
+        return []
+    finally:
+        for obj in others:
+            set_active(obj, True)
+        for entry, _box in items:
+            set_active(entry[1], True)
+        for obj, rgba in saved_fills:
+            set_fill(obj, *rgba)
+    glyphs = _changed_pixels(alone, Image.new("RGB", alone.size, (255, 255, 255)))
+    width, height = bare.size
+    rotation = _page_rotation(page)
+    kept = []
+    for entry, box in items:
+        area = left, top, right, bottom = _pixel_area(box, crop_box, rotation, bare.size)
+        shape = glyphs.crop(area)
+        glyph_pixels = shape.histogram()[255]
+        if not glyph_pixels:
+            continue
+        margin = max(bottom - top, _HIDDEN_TEXT_MIN_PAPER_MARGIN_PX)
+        around = bare.crop(
+            (
+                max(0, left - margin),
+                max(0, top - margin),
+                min(width, right + margin),
+                min(height, bottom + margin),
+            )
+        )
+        colours = around.getcolors(around.size[0] * around.size[1])
+        paper = max(colours)[1] if colours else (255, 255, 255)
+        in_box = bare.crop(area)
+        ink = _changed_pixels(in_box, Image.new("RGB", in_box.size, paper))
+        near = (
+            glyphs.crop((left - 1, top - 1, right + 1, bottom + 1))
+            .filter(ImageFilter.MaxFilter(3))
+            .crop((1, 1, right - left + 1, bottom - top + 1))
+        )
+        shared = ImageChops.multiply(shape, ink).histogram()[255]
+        if (
+            shared >= _HIDDEN_TEXT_MIN_GLYPHS_ON_INK * glyph_pixels
+            and ImageChops.multiply(near, ink).histogram()[255]
+            >= _HIDDEN_TEXT_MIN_INK_NEAR_GLYPHS * ink.histogram()[255]
+        ):
+            continue
+        kept.append((entry, box))
+    return kept
+
+
+def _shape_render_scale(page) -> float:
+    """The glyph-shape render scale, lowered so the page's long side stays under the pixel cap."""
+    width, height = page.get_size()
+    return min(
+        _HIDDEN_TEXT_SHAPE_RENDER_SCALE, _HIDDEN_TEXT_MAX_SHAPE_RENDER_PX / max(width, height, 1.0)
+    )
+
+
+def _render_rgb(page):
+    return page.render(scale=_HIDDEN_TEXT_RENDER_SCALE).to_pil().convert("RGB")
+
+
+def _changed_pixels(image, base, tolerance: int = _HIDDEN_TEXT_BACKGROUND_TOLERANCE):
+    """An 8-bit mask: 255 where *image* differs from *base* beyond *tolerance* on a channel."""
+    from PIL import ImageChops
+
+    red, green, blue = ImageChops.difference(image, base).split()
+    worst = ImageChops.lighter(ImageChops.lighter(red, green), blue)
+    return worst.point(lambda value: 255 if value > tolerance else 0)
+
+
+def _hidden_text_details(pdfium_c, page, hidden: list) -> list[tuple]:
+    """``("hidden_text", entry, page-space box, text)`` for each hidden entry."""
+    textpage = page.get_textpage()
+    try:
+        return [
+            (
+                "hidden_text",
+                entry,
+                box,
+                " ".join(_text_object_text(pdfium_c, entry[1], textpage).split()),
+            )
+            for entry, _reason, box in hidden
+        ]
+    finally:
+        textpage.close()
+
+
 def _remove_objects(pdfium_c, page, found: list, outcomes: list[bool] | None = None) -> None:
     """Remove the ``(parent, object)`` entries in *found* from *page*.
 
@@ -2049,7 +3365,7 @@ def _document_is_line_numbered(pdf) -> bool:
 def strip_furniture_objects(
     page, furniture: list | None = None, walk: list | None = None
 ) -> tuple[list[str], int]:
-    """Remove diagonal watermark text and manuscript line numbers from *page* in memory.
+    """Remove watermark text, manuscript line numbers and hidden text from *page* in memory.
 
     Returns the removed watermark strings (whitespace-normalised, one per
     object that had text) and the number of line-number objects removed.
@@ -2058,10 +3374,14 @@ def strip_furniture_objects(
     changes: nothing is written back, and the callers open the document from
     bytes for their own pass. Operates on a caller-provided (lock-held) page.
 
+    Hidden text objects (see the hidden_text/4 rule above
+    :func:`_find_hidden_text`) go on every page.
+
     *furniture*, when given, gets ``(kind, box, text)`` for every object
-    removed: ``kind`` is ``"watermark"`` or ``"line_number"``, ``box`` its
-    page-space box (PDF points, y up; None when pdfium has none) and
-    ``text`` its whitespace-normalised string (the digits of a line number).
+    removed: ``kind`` is ``"watermark"``, ``"line_number"`` or
+    ``"hidden_text"``, ``box`` its page-space box (PDF points, y up; None
+    when pdfium has none) and ``text`` its whitespace-normalised string (the
+    digits of a line number).
     Recording them never changes what is removed: when they cannot be read,
     *furniture* gets one ``("error", None, message)`` entry instead.
 
@@ -2073,17 +3393,28 @@ def strip_furniture_objects(
     import pypdfium2.raw as pdfium_c
 
     details: list | None = [] if furniture is not None else None
-    found: list | None = [] if walk is not None else None
+    found: list = []
     watermarks, texts, line_numbers, _n_text = _find_furniture(page, details=details, walk=found)
     pdf = getattr(page, "pdf", None)
     if line_numbers and (pdf is None or not _document_is_line_numbered(pdf)):
         line_numbers = []
     entries = watermarks + line_numbers
+    taken = {id(entry) for entry in entries}
+    try:
+        hidden = _find_hidden_text(
+            pdfium_c, page, [e for e in found if id(e) not in taken], removed=entries
+        )
+    except Exception:  # noqa: BLE001 - the hidden-text pass never costs the furniture strip
+        logger.debug("Hidden-text scan failed; the page keeps its hidden text", exc_info=True)
+        hidden = []
+    if hidden:
+        entries = entries + [entry for entry, _reason, _box in hidden]
+        _extend_details(details, lambda: _hidden_text_details(pdfium_c, page, hidden))
     outcomes: list[bool] | None = [] if furniture is not None or walk is not None else None
     _remove_objects(pdfium_c, page, [(parent, obj) for parent, obj, _ in entries], outcomes)
     if furniture is not None and details is not None and outcomes is not None:
         furniture.extend(_removed_furniture(entries, outcomes, details))
-    if walk is not None and found is not None and outcomes is not None:
+    if walk is not None and outcomes is not None:
         # A removed object is destroyed; its entry must not outlive it.
         removed = {id(entry) for entry, done in zip(entries, outcomes, strict=True) if done}
         walk.extend(entry for entry in found if id(entry) not in removed)
@@ -2096,7 +3427,7 @@ def open_text_page(
     furniture: list | None = None,
     walk: list | None = None,
 ):
-    """Build *page*'s pdfium text page without its watermark text and line numbers.
+    """Build *page*'s pdfium text page without its watermark text, line numbers and hidden text.
 
     Every native-text reader goes through this, so region text, font
     metadata, reference geometry and DOI evidence see the same characters.
@@ -2335,6 +3666,7 @@ def fill_regions_from_native_text(
                             min_printable_ratio=min_printable_ratio,
                             page_idx=page_idx,
                             rotation=rotation,
+                            page=page,
                         )
                     finally:
                         textpage.close()
@@ -2403,6 +3735,7 @@ def fill_native_text_and_fonts(
                             min_printable_ratio=min_printable_ratio,
                             page_idx=page_idx,
                             rotation=rotation,
+                            page=page,
                         )
                         # Pass 2: font metadata — best-effort. A failure here
                         # must NOT discard the native-text fill above.

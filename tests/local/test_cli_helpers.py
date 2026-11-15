@@ -277,6 +277,32 @@ async def test_chunk_processor_filters_mixed_batch_progress_for_each_chunk():
     ]
 
 
+@pytest.mark.parametrize(("is_batch", "trims"), [(True, ["trim"]), (False, [])])
+async def test_chunk_processor_trims_the_heap_after_batch_chunks_only(monkeypatch, is_batch, trims):
+    from bibr.local.cli import ChunkProcessor
+    from bibr.utils import heap
+
+    calls: list[str] = []
+
+    async def trim():
+        calls.append("trim")
+        return True
+
+    async def fake_chunk(states, **kw):
+        for s in states:
+            s.result_json = {"info": {"title": s.path.name}}
+
+    monkeypatch.setattr(heap, "arelease_free_heap", trim)
+    pipeline = MagicMock()
+    pipeline.process_chunk = fake_chunk
+    pipeline.settings.pipeline.heap_trim = "chunk"
+    cp = ChunkProcessor(pipeline=pipeline, paper_id=None, is_batch=is_batch, active_stages=[])
+
+    await cp.run([Path("/tmp/a.pdf")], chunk_index=1, total_chunks=1, console=MagicMock())
+
+    assert calls == trims
+
+
 # ---- _parse_pages ------------------------------------------------------------
 
 

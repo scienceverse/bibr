@@ -124,7 +124,7 @@ class TestOrderingValidation:
         local = build_stage_plan(mode="local", stream_backhalf=False, enrichers=[])
         serve = build_stage_plan(mode="serve", stream_backhalf=False, enrichers=[])
 
-        local_only = {"classifier_gate", "render_ocr", "llm_server"}
+        local_only = {"classifier_gate", "llm_server_precheck", "render_ocr", "llm_server"}
         local_names = [s.name for s in local if s.name not in local_only]
         serve_names = [s.name for s in serve if s.name not in {"layout", "native_text", "ocr"}]
 

@@ -15,6 +15,7 @@ from evaluation.validation_metrics import (
     FLOORS,
     abstract_ned,
     abstract_rouge_l,
+    authors_exact_f1,
     authors_family_f1,
     authors_fullname_f1,
     doi_match,
@@ -303,10 +304,44 @@ class TestAuthorFullnameMetrics:
         assert authors_fullname_f1(ext, gold) == 1.0
 
 
+class TestAuthorExactMetric:
+    def test_order_and_boundary_are_free(self):
+        gold = [{"given": "Amélia Campos", "family": "de Exemplo"}, {"given": "B.", "family": "Ng"}]
+        ext = [{"given": "Ng", "family": "B"}, {"given": "Amelia", "family": "Campos de Exemplo"}]
+        assert authors_exact_f1(ext, gold) == 1.0
+
+    @pytest.mark.parametrize(
+        "ext_name",
+        [
+            {"given": "Jane", "family": "Slaughterd"},  # an affiliation letter glued on
+            {"given": "Jane", "family": "Slaughter EPFL"},  # an extra word
+            {"given": "J.", "family": "Slaughter"},  # an initial for the printed given name
+        ],
+    )
+    def test_a_name_that_is_not_the_printed_one_misses(self, ext_name):
+        gold = [{"given": "Jane", "family": "Slaughter"}]
+        assert authors_fullname_f1([ext_name], gold) == 1.0  # the fuzzy metric forgives all three
+        assert authors_exact_f1([ext_name], gold) == 0.0
+
+    def test_a_one_word_name_stored_as_given_and_family_is_that_word(self):
+        gold = [{"given": "Kardi", "family": "Kardi"}]
+        assert authors_exact_f1([{"given": "", "family": "Kardi"}], gold) == 1.0
+
+    def test_counts_repeated_names_once_each(self):
+        gold = [{"given": "Li", "family": "Wang"}, {"given": "Li", "family": "Wang"}]
+        assert authors_exact_f1(gold[:1], gold) == pytest.approx(2 / 3)
+
+    def test_empty_sides(self):
+        assert authors_exact_f1([], []) == 1.0
+        assert authors_exact_f1([], [{"given": "J", "family": "Smith"}]) == 0.0
+        assert authors_exact_f1([{"given": "J", "family": "Smith"}], []) == 0.0
+
+
 class TestFloorsGateOnFullname:
     def test_floors_key_is_fullname(self):
         assert "authors_fullname_f1" in FLOORS
         assert "authors_f1" not in FLOORS
+        assert "authors_exact_f1" not in FLOORS
         assert FLOORS["authors_fullname_f1"] == 0.9
 
 
@@ -768,6 +803,7 @@ class TestScorePaper:
         assert scores["doi_match"] == 1.0
         assert scores["abstract_rouge_l"] == 1.0
         assert scores["authors_f1"] == 1.0
+        assert scores["authors_exact_f1"] == 1.0
         assert scores["first_author"] == 1.0
         assert scores["ref_count_ratio"] == 1.0
         assert scores["ref_matching_f1"] == 1.0

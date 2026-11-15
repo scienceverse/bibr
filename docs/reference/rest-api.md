@@ -17,7 +17,7 @@ bearer token as extraction when authentication is enabled.
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/health` | Liveness probe -- LitServe's built-in endpoint; returns plain-text `ok` (status `200`) |
-| `GET` | `/ready` | Readiness probe -- checks OCR service, configured classifier artifacts, and Redis when response caching is enabled; `200` when ready, `503` otherwise |
+| `GET` | `/ready` | Readiness probe -- checks OCR service (not on the text-layer route, where `checks.ocr` reads `not_used (text layer)`), configured classifier artifacts, and Redis when response caching is enabled; `200` when ready, `503` otherwise |
 
 The probes are public. With authentication enabled, an anonymous `/ready`
 response contains only `{"status": "ready"}` or `{"status": "not_ready"}`.
@@ -265,7 +265,7 @@ do not count the original extraction's LLM tokens as new usage.
 | `413` | Upload limit exceeded (50 MiB file / 51 MiB multipart envelope) |
 | `422` | Extraction processing error, including an LLM response that was truncated at its token limit (`error_code: llm_truncated`) or failed validation (`llm_invalid_output`); retrying the same request fails the same way. A failure caused by an internal or library exception only names its stage and code (`Processing failed in layout (layout_failed)`); the exception text goes to the server log, not the response. When a service or model the pipeline needs was down (an OCR server that refused or dropped the connection, a layout model or LLM server that could not start), the detail also carries `"outage": true` and the message ends in `: service temporarily unavailable`: the same request may succeed later |
 | `429` | Upload admission or async-job active cap reached |
-| `500` | Unexpected internal error |
+| `500` | Unexpected internal error, or a model setting of the server that names a model that cannot be loaded or keeps raising (`error_code: model_override_failed`; the server log names the setting). No retry helps, and `bibr batch --serve-url` stops on it |
 | `502` | Upstream service failed (OCR server, LLM API); an LLM failure carries `error_code` `llm_timeout` or `llm_failed` |
 | `503` | `/ready` reports an unavailable dependency or required classifier artifact |
 | `504` | The request ran out of `PIPELINE_TIMEOUT`, counted from when the worker took it up: waiting for an in-flight slot or for an identical extraction counts too |

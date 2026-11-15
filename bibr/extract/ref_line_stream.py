@@ -59,6 +59,8 @@ from bibr.extract.region_seg import (
 )
 from bibr.input.consolidate_text import fix_ocr_artifacts
 from bibr.ocr.pdf_links import doi_from_uri
+from bibr.ocr.ref_patterns import _OPEN_AUTHOR_LIST
+from bibr.utils.link_targets import LinkTargets
 from bibr.utils.text import DOI_BODY, YEARISH_RE, collapse_ws, normalize_doi
 
 if TYPE_CHECKING:
@@ -166,6 +168,9 @@ class LineStream:
     # layout frame, but their point geometry (indent, gaps, the geometry
     # model's features) is not, so the stream's votes there are unreliable.
     rotated: bool = False
+    # The targets of the PDF's link annotations: a line break one of them runs
+    # through is inside a printed link and joins with no space.
+    link_targets: LinkTargets | None = None
 
 
 @dataclass(frozen=True)
@@ -622,7 +627,9 @@ def build_line_stream(contents: PaperContents, ref_df: pd.DataFrame) -> LineStre
     stream.rotated = any((line.geometry or {}).get("rotation") for line in stream.lines)
     _assign_columns(stream, regions)
     _cut_end_of_list(stream)
-    _attach_link_dois(stream, getattr(contents, "pdf_uri_links", None) or [])
+    uri_links = getattr(contents, "pdf_uri_links", None)
+    _attach_link_dois(stream, uri_links or [])
+    stream.link_targets = LinkTargets.from_uri_dicts(uri_links)
     return stream
 
 
@@ -1027,6 +1034,8 @@ _W_INDENTED = -0.4
 _W_GAP = 0.35
 _W_PREV_ENDS_ENTRY = 0.2
 _W_PREV_CONTINUES = -0.4
+# Outvotes every other cue together: no reference ends on a dangling "&".
+_W_PREV_OPEN_AUTHOR_LIST = -5.0
 _W_LOWER = -0.7
 _W_LOWER_ENTRY_BOX = -0.4
 _W_PUNCT = -0.6
@@ -1152,7 +1161,9 @@ def _start_scores(
             score += _W_GAP
         if i > 0:
             previous = collapse_ws(lines[i - 1].text)
-            if _ENDS_WITH_LOCATOR.search(previous) or lines[i - 1].link_dois:
+            if _OPEN_AUTHOR_LIST.search(previous):
+                score += _W_PREV_OPEN_AUTHOR_LIST
+            elif _ENDS_WITH_LOCATOR.search(previous) or lines[i - 1].link_dois:
                 score += _W_PREV_ENDS_ENTRY
             elif _CONTINUES_NEXT.search(previous) or _ENDS_WITH_BYLINE.search(previous):
                 score += _W_PREV_CONTINUES
@@ -1182,8 +1193,10 @@ def _printed_dois(text: str) -> list[str]:
     return found
 
 
-def _entry_text(lines: Sequence[StreamLine]) -> str:
-    return collapse_ws(fix_ocr_artifacts("\r\n".join(line.text for line in lines)))
+def _entry_text(lines: Sequence[StreamLine], links: LinkTargets | None = None) -> str:
+    return collapse_ws(
+        fix_ocr_artifacts("\r\n".join(line.text for line in lines), reference=True, links=links)
+    )
 
 
 def segment_line_stream(
@@ -1258,7 +1271,7 @@ def segment_line_stream(
     numbered: list[bool] = []
     link_dois: list[str | None] = []
     for group in groups:
-        text = _entry_text([lines[i] for i in group])
+        text = _entry_text([lines[i] for i in group], stream.link_targets)
         if not text:
             continue
         entries.append(text)

@@ -103,6 +103,85 @@ def detect_mime_type(file_content: bytes) -> str:
     return magic.from_buffer(file_content, mime=True)
 
 
+# Signatures the built-in sniff recognizes when libmagic is missing: the formats
+# bibr reads (PDF, OOXML in a zip, EPUB, XML, HTML) plus the executable headers
+# ``validate_input_file`` refuses by content.
+_OOXML_DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_UNKNOWN_MIME = "application/octet-stream"
+
+
+def sniff_mime_type(file_content: bytes) -> str:
+    """Name the content type of *file_content* from its first bytes, without libmagic.
+
+    The fallback ``validate_input_file`` uses when the system libmagic is
+    missing. It knows only what bibr can read: PDF, DOCX and EPUB (told apart
+    inside the zip), XML, HTML, and executable headers (for the refusal in
+    ``validate_input_file``). Anything else is ``application/octet-stream``,
+    which the extension cross-check lets through to the format-specific
+    corruption checks, as it does an unmapped libmagic answer.
+    """
+    head = file_content[:2048]
+    if b"%PDF-" in head[:1024]:
+        return "application/pdf"
+    if head.startswith(b"PK\x03\x04"):
+        return _sniff_zip_mime(file_content)
+    if head.startswith(b"MZ"):
+        return "application/x-msdownload"
+    if head.startswith(b"\x7fELF"):
+        return "application/x-executable"
+    if head.startswith(_OLE_MAGIC):
+        return "application/CDFV2"
+    text = head.removeprefix(b"\xef\xbb\xbf").lstrip().lower()
+    if text.startswith(b"<?xml"):
+        return "application/xhtml+xml" if b"<html" in text[:1024] else "text/xml"
+    if text.startswith((b"<!doctype html", b"<html")) or (
+        text.startswith(b"<") and b"<html" in text[:1024]
+    ):
+        return "text/html"
+    if text.startswith(b"<"):
+        return "text/xml"
+    return _UNKNOWN_MIME
+
+
+def _sniff_zip_mime(file_content: bytes) -> str:
+    """``docx``, ``epub`` or plain ``zip``, from the entries of a zip archive."""
+    import io
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_content)) as archive:
+            names = set(archive.namelist())
+            if "[Content_Types].xml" in names and any(n.startswith("word/") for n in names):
+                return _OOXML_DOCX_MIME
+            if (
+                "mimetype" in names
+                and archive.getinfo("mimetype").file_size <= 64
+                and archive.read("mimetype").strip() == b"application/epub+zip"
+            ):
+                return "application/epub+zip"
+    except (zipfile.BadZipFile, OSError, KeyError, RuntimeError, NotImplementedError):
+        pass
+    return "application/zip"
+
+
+_sniff_notice_shown = False
+
+
+def _detect_mime_or_sniff(file_content: bytes) -> str:
+    """libmagic's answer, or the built-in sniff's with a one-time install hint when it is missing."""
+    global _sniff_notice_shown
+    try:
+        return detect_mime_type(file_content)
+    except ImportError:
+        if not _sniff_notice_shown:
+            _sniff_notice_shown = True
+            logger.warning(
+                "%s Meanwhile bibr checks file types itself (PDF, DOCX, EPUB, XML, HTML only).",
+                libmagic_unavailable_reason(),
+            )
+        return sniff_mime_type(file_content)
+
+
 def _check_extension_mime_consistency(extension: str, detected_mime: str) -> bool:
     """Check whether the file extension is consistent with the detected MIME type.
 
@@ -475,7 +554,7 @@ def validate_input_file(
     input_file.is_supported = extension in SUPPORTED_EXTENSIONS
 
     # Detect MIME type from content
-    detected_mime = detect_mime_type(file_content)
+    detected_mime = _detect_mime_or_sniff(file_content)
 
     # Resolve file type from extension
     file_type = "UNKNOWN"

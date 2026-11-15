@@ -422,7 +422,7 @@ async def test_dry_run_automatic_paddle_checks_weight_repo_not_served_alias(
     # Pin the Linux/CUDA chain itself: on macOS arm64 and Windows the
     # automatic chain has no paddle-vllm candidate at all.
     monkeypatch.setattr(
-        "bibr.ocr.registry.automatic_backend_names", lambda: ("paddle-vllm", "glm-llama")
+        "bibr.ocr.registry.automatic_backend_names", lambda **_: ("paddle-vllm", "glm-llama")
     )
 
     class _FakeRepo:
@@ -458,7 +458,7 @@ def test_dry_run_ocr_model_separates_served_identity_from_weights(monkeypatch):
     # Pin the Linux/CUDA chain itself: on macOS arm64 and Windows the
     # automatic chain has no paddle-vllm candidate at all.
     monkeypatch.setattr(
-        "bibr.ocr.registry.automatic_backend_names", lambda: ("paddle-vllm", "glm-llama")
+        "bibr.ocr.registry.automatic_backend_names", lambda **_: ("paddle-vllm", "glm-llama")
     )
     args = _build_parser().parse_args(["chew", "paper.pdf", "--no-llm"])
     config = resolve_run_config(args)

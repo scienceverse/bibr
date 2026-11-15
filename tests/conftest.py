@@ -53,6 +53,13 @@ os.environ["ML_SECTION_CLASSIFIER_MODEL_ID"] = ""
 # front-matter tests don't pull the HF snapshot. Tests for the model path build
 # their own FrontRolePredictions or point at a local bundle.
 os.environ["ML_FRONT_ROLE_MODEL_ID"] = ""
+# Production defaults since 0.9.0 are the published geometry line tagger, text
+# reference segmenter and statement tagger; disabled here for the same reason.
+# Tests of those models point at local bundles, and the config-default tests
+# read the field defaults.
+os.environ["REF_GEOM_TAGGER_MODEL_ID"] = ""
+os.environ["REF_TEXT_SEG_MODEL_ID"] = ""
+os.environ["ML_STATEMENT_TAGGER_MODEL_ID"] = ""
 # Production default is "auto" (probe the Hub for a model's ONNX bundle, else
 # torch). Pinned to "torch" here so constructing a detector/classifier in a
 # test never makes a network round-trip; ONNX-runtime tests set ML_RUNTIME (or
@@ -176,8 +183,44 @@ def _pin_cuda_probe_for_platform_tests(monkeypatch):
     """The automatic Linux OCR chain now asks the hardware before listing
     ``paddle-vllm``. Tests that pin ``sys.platform`` to linux were written
     against the old unconditional chain, so pin a roomy GPU here; tests that
-    exercise the CPU-only / small-GPU paths patch the probe themselves."""
-    monkeypatch.setattr("bibr.ocr.registry._cuda_vram_gb", lambda: 24.0)
+    exercise the CPU-only / small-GPU paths patch the probe themselves.
+
+    The managed vLLM servers' card (``_managed_gpu_vram_gb``, which reads
+    ``CUDA_VISIBLE_DEVICES``) follows whatever a test pins ``_cuda_vram_gb``
+    to, so the suite never sizes shares from the host's own GPU. The compute
+    capability reads as unknown (routing as before the guard), so the host's
+    card never decides between vLLM and llama.cpp; tests of the guard pin it."""
+    from bibr.ocr import registry
+
+    monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: 24.0)
+    monkeypatch.setattr(registry, "_managed_gpu_vram_gb", lambda: registry._cuda_vram_gb())
+    monkeypatch.setattr(registry, "_nvidia_compute_capability", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_llama_server_for_setup(monkeypatch):
+    """``bibr setup`` looks on PATH for a CUDA llama.cpp server on a 10–11 GB
+    card (``bibr.setup_wizard._probe_llama_server``) and runs its LLM and OCR
+    there when one qualifies. Pin it to none found, so the host's PATH never
+    changes a recommendation; tests of that pick pin it themselves."""
+    monkeypatch.setattr("bibr.setup_wizard._probe_llama_server", lambda: (None, None))
+
+
+@pytest.fixture(autouse=True)
+def _no_live_gpu_memory_reading(monkeypatch):
+    """Keep the suite off the host GPU's free memory.
+
+    The managed vLLM LLM server sizes its share from ``managed_gpu_memory``
+    (None keeps the configured share), and a bare ORT ``cudaError`` counts as
+    out-of-memory only on a nearly full card or after a recent recognised
+    out-of-memory failure, which ``bibr.utils.gpu_oom`` remembers per process.
+    Tests that exercise either patch them back themselves.
+    """
+    from bibr.ocr import registry
+    from bibr.utils import gpu_oom
+
+    monkeypatch.setattr(registry, "managed_gpu_memory", lambda: None)
+    monkeypatch.setattr(gpu_oom, "_last_oom_at", None)
 
 
 @pytest.fixture(autouse=True)
@@ -191,6 +234,65 @@ def _skip_installed_onnxruntime_builds_check(monkeypatch):
     tests/test_onnx_providers_builds.py resets it with stubbed metadata.
     """
     monkeypatch.setattr("bibr.utils.onnx_providers._gpu_build_shadowed", False)
+
+
+#: Where the stub below puts pinned registry builds; nothing is created there.
+FAKE_PINNED_HF_CACHE = "/nonexistent-hf-cache"
+
+
+def _fake_pinned_download(repo_id, files, revision, cache_dir):
+    snapshot = (
+        Path(cache_dir or FAKE_PINNED_HF_CACHE)
+        / f"models--{repo_id.replace('/', '--')}"
+        / "snapshots"
+        / revision
+    )
+    return [str(snapshot / name) for name in files]
+
+
+@pytest.fixture(autouse=True)
+def _no_pinned_build_downloads(monkeypatch, request):
+    """Pinned registry builds resolve to paths in a fake Hugging Face cache.
+
+    A managed llama.cpp or MLX server given a registry build pinned to a Hub
+    commit downloads it before launching (``bibr.local.hub_pins``). Unit tests
+    get its would-be cache path instead of a download, and the real HF cache
+    is not read. Opt-in ``slow`` tests launch real servers and keep the real
+    download; tests/local/test_hub_pins.py restores the real functions.
+    """
+    if request.node.get_closest_marker("slow") is not None:
+        return
+    from bibr.local import hub_pins
+
+    monkeypatch.setattr(hub_pins, "_cached_file", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hub_pins, "_download_files", _fake_pinned_download)
+
+
+@pytest.fixture(autouse=True)
+def _front_tagger_bundle_present(monkeypatch, tmp_path_factory):
+    """Keep ``bibr chew --fast`` and ``bibr batch --fast`` off the Hub.
+
+    Before a fast run starts, the CLI resolves the front-matter tagger's bundle
+    (``bibr.local.cli.run_config._preflight_front_tagger``), which downloads it
+    on a first run. Tests that run those commands with a fake pipeline get a
+    path that is never opened; tests of the check replace this themselves."""
+    monkeypatch.setattr(
+        "bibr.local.cli.run_config._front_tagger_bundle",
+        lambda model_id, revision: Path("front-tagger-bundle-for-tests") / "onnx",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _no_llm_server_context_probe(monkeypatch):
+    """Keep ``LLMClient`` from asking an ``LLM_BASE_URL`` server for its
+    context window before the first call. Tests that point a client at a
+    made-up or loopback URL and stub the call would otherwise send real GETs
+    there; tests/clients/test_server_context.py drives the probe itself."""
+
+    async def no_probe(settings, *, transport=None):
+        return None
+
+    monkeypatch.setattr("bibr.clients.server_context.probe_server_context", no_probe)
 
 
 # ---------------------------------------------------------------------------
@@ -465,3 +567,18 @@ def _block_non_loopback_sockets(monkeypatch, request):
         )
         monkeypatch.setattr(socket, "getaddrinfo", _guarded_getaddrinfo(socket.getaddrinfo))
         monkeypatch.setattr(socket, "gethostbyname", _guarded_gethostbyname(socket.gethostbyname))
+
+
+@pytest.fixture(autouse=True)
+def _no_pinned_cache_lookups(monkeypatch, request):
+    """A file cached at a pinned commit is not served from the developer's real HF cache.
+
+    ``hf_download_or_cached`` returns a file the cache holds at a full commit
+    hash without asking the Hub (``bibr.utils.hf_cache``). Unit tests stub the
+    download to see what is fetched, so a hit in the real cache would hide it
+    and make the result depend on the machine. tests/test_hf_cache.py restores
+    the real lookup against a cache it builds.
+    """
+    if request.node.get_closest_marker("slow") is not None:
+        return
+    monkeypatch.setattr("bibr.utils.hf_cache.cached_at_pinned_revision", lambda *args: None)

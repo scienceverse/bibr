@@ -9,6 +9,8 @@ install (no torch/transformers) classifies section headers locally.
 from __future__ import annotations
 
 import logging
+import threading
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -22,10 +24,14 @@ from bibr.structure.section_classifier_common import (
     _build_input_text,
     _coerce_header_context,
 )
+from bibr.utils.gpu_oom import split_on_gpu_oom
 from bibr.utils.ml_runtime import ONNX_MODEL, read_onnx_manifest
 from bibr.utils.onnx_tokenizer import encode_batch, load_tokenizer, require_added_token
 
 logger = logging.getLogger(__name__)
+
+#: The token length callers classify at: ``classify_batch``'s default, which none overrides.
+RUNTIME_MAX_LENGTH = 256
 
 
 def _softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
@@ -49,37 +55,147 @@ class OnnxSectionClassifierModel:
         self.max_length = int(self.manifest.get("max_length", 256))
         self.tokenizer = load_tokenizer(self.bundle_dir, self.manifest)
         require_added_token(self.tokenizer, TEMPLATE_SEPARATOR, label="section classifier")
+        self._model_path = self.bundle_dir / self.manifest.get("model_file", ONNX_MODEL)
         self.session, self.device = create_session(
-            self.bundle_dir / self.manifest.get("model_file", ONNX_MODEL),
+            self._model_path,
             device=device,
             model_name="section classifier (ONNX)",
         )
         self._input_names = [i.name for i in self.session.get_inputs()]
+        self._cpu_session = None
+        self._cpu_session_lock = threading.Lock()
 
-    @classmethod
-    def from_pretrained(
-        cls, repo_id: str, revision: str = "main", device: str | None = None
-    ) -> OnnxSectionClassifierModel:
+    def check_graph(self) -> None:
+        """Run the graph on headings in context, in two shapes ``classify_batch`` sends.
+
+        The load probe of an overridden classifier (:mod:`bibr.utils.onnx_probe`):
+        headings with their neighbours, position and a body through the bundle's
+        template and tokenizer at :data:`RUNTIME_MAX_LENGTH` tokens, as a batch of
+        three padded to the longest, which fills the length and holds the
+        tokenizer's last id, and as one heading alone, cut short
+        (:func:`~bibr.utils.onnx_probe.cut_short`): a paper's headings
+        come in batches of any size, padded to their longest. On both the graph
+        must give finite type logits, one per class of the manifest's
+        ``label_classes``, and one top-level logit per heading; every class must
+        be a section type bibr knows. Raises :class:`~bibr.exceptions.ConfigurationError`.
+        """
         from bibr.exceptions import ConfigurationError
-        from bibr.utils.ml_runtime import find_onnx_bundle
+        from bibr.utils.onnx_probe import (
+            PROBE_BODY,
+            check_output,
+            cut_short,
+            run_probe,
+            with_last_token,
+        )
 
-        bundle = find_onnx_bundle(repo_id, revision, label="section classifier")
-        if bundle is None:
-            raise ConfigurationError(f"No ONNX bundle for section classifier {repo_id}@{revision}")
-        return cls(bundle, device=device)
+        known = {section.value for section in CanonicalSection}
+        unknown = [label for label in self.label_classes if label not in known]
+        if unknown:
+            raise ConfigurationError(
+                f"{self.bundle_dir}: the manifest's label_classes name section types bibr does "
+                f"not know: {unknown[:5]}"
+            )
+        full = [
+            HeaderContext(
+                heading="2. Methods",
+                body=PROBE_BODY * 8,
+                relative_position=0.3,
+                prev_heading="1. Introduction",
+                next_heading="3. Results",
+            ),
+            HeaderContext(heading="Abstract", body=PROBE_BODY[:200], relative_position=0.0),
+            HeaderContext(
+                heading="References", body="[1] Smith, J. (2019).", relative_position=1.0
+            ),
+        ]
+        short = [HeaderContext(heading="Funding", body="None.", relative_position=0.9)]
+        for contexts in (full, short):
+            texts = [_build_input_text(ctx, self.template_version) for ctx in contexts]
+            batch = encode_batch(self.tokenizer, texts, max_length=RUNTIME_MAX_LENGTH)
+            ids = with_last_token(batch.input_ids, batch.attention_mask, self.tokenizer)
+            mask = batch.attention_mask
+            if contexts is short:
+                ids, mask = cut_short(ids, mask, RUNTIME_MAX_LENGTH)
+            feeds = {"input_ids": ids, "attention_mask": mask}
+            feeds = {k: v for k, v in feeds.items() if k in self._input_names}
+            shape = f"a {ids.shape} batch of headings in context"
+            type_logits, top_logits = run_probe(
+                self._model_path,
+                shape,
+                lambda feeds=feeds: self.session.run(["type_logits", "top_level_logits"], feeds),
+            )
+            n = len(contexts)
+            check_output(
+                self._model_path,
+                "type_logits",
+                type_logits,
+                (n, len(self.label_classes)),
+                shape,
+                f"one per class of the manifest's {len(self.label_classes)} label_classes",
+            )
+            top = np.asarray(top_logits)
+            check_output(
+                self._model_path,
+                "top_level_logits",
+                top.reshape(-1) if top.size == n else top,
+                (n,),
+                shape,
+                "one per heading",
+            )
 
     def classify_batch(
-        self, items: list[HeaderContext] | list[tuple[str, str]], max_length: int = 256
+        self,
+        items: list[HeaderContext] | list[tuple[str, str]],
+        max_length: int = RUNTIME_MAX_LENGTH,
     ) -> list[SectionPrediction]:
         contexts = [_coerce_header_context(item) for item in items]
         results: list[SectionPrediction] = []
         for start in range(0, len(contexts), _MAX_INFERENCE_BATCH):
             chunk = contexts[start : start + _MAX_INFERENCE_BATCH]
-            results.extend(self._forward_chunk(chunk, max_length))
+            # A GPU out-of-memory failure halves the chunk and finally runs a
+            # single header on the CPU, instead of failing the whole paper's
+            # headers over to the alias/LLM tier. A CPU session's failure is
+            # raised as before.
+            on_gpu = getattr(self, "device", None) == "cuda"
+            results.extend(
+                split_on_gpu_oom(
+                    chunk,
+                    lambda part: self._forward_chunk(part, max_length),
+                    label="Section classifier",
+                    run_on_cpu=(
+                        (
+                            lambda one: self._forward_chunk(
+                                one, max_length, session=self._session_on_cpu()
+                            )
+                        )
+                        if on_gpu
+                        else None
+                    ),
+                    on_gpu=on_gpu,
+                )
+            )
         return results
 
+    def _session_on_cpu(self):
+        """A CPU session on the same graph, opened on first use (GPU OOM last resort).
+
+        Without ORT's CPU arena, as layout's: it runs one heading at a time,
+        and an arena would keep its peak allocation for the rest of the run.
+        """
+        with self._cpu_session_lock:
+            if self._cpu_session is None:
+                from bibr.utils.onnx_providers import create_session
+
+                self._cpu_session, _device = create_session(
+                    self._model_path,
+                    device="cpu",
+                    model_name="section classifier (ONNX, CPU)",
+                    disable_cpu_arena=True,
+                )
+            return self._cpu_session
+
     def _forward_chunk(
-        self, contexts: list[HeaderContext], max_length: int
+        self, contexts: Sequence[HeaderContext], max_length: int, *, session=None
     ) -> list[SectionPrediction]:
         if not contexts:
             return []
@@ -87,7 +203,9 @@ class OnnxSectionClassifierModel:
         batch = encode_batch(self.tokenizer, texts, max_length=max_length)
         feeds = {"input_ids": batch.input_ids, "attention_mask": batch.attention_mask}
         feeds = {k: v for k, v in feeds.items() if k in self._input_names}
-        type_logits, top_logits = self.session.run(["type_logits", "top_level_logits"], feeds)
+        type_logits, top_logits = (session or self.session).run(
+            ["type_logits", "top_level_logits"], feeds
+        )
         type_probs = _softmax(np.asarray(type_logits, dtype=np.float32))
         top_probs = 1.0 / (1.0 + np.exp(-np.asarray(top_logits, dtype=np.float32).reshape(-1)))
         results: list[SectionPrediction] = []

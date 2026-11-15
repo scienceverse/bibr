@@ -138,6 +138,25 @@ region whose OCR request failed; the page then carries an
 Remaining regions use the selected OCR runtime.
 Disabling the bypass leaves metadata, outline, and geometry inspection available.
 
+**Text-layer backend.** `bibr/ocr/text_layer.py` is an OCR backend that runs no
+model: it fills every text, table and formula region from the PDF text layer.
+A fast run that names no OCR route uses it (the route is chosen by
+`bibr.ocr.registry.ocr_route_chosen`, which `bibr chew`, `bibr doctor`,
+`--dry-run`, `LocalPipeline` and the demo share), and `--ocr text-layer` or
+`OCR_BACKEND=text-layer` selects it on any run. A page is read only when its
+text layer passes the coverage, corrupt-text and lexical gates
+(`bibr/ocr/text_layer_quality.py`); any other page gets a
+`TEXT_LAYER_PAGE_UNUSABLE` warning and its regions stay unread. Tables are
+rebuilt from glyph positions (`bibr/ocr/text_layer_tables.py`), display formulas
+are read as plain text, private-use code points are always dropped and counted,
+and rare glyphs with no character mapping are shown as U+FFFD and counted
+(`TEXT_LAYER_GLYPHS_UNMAPPED`). A region bibr itself fails to read stays empty
+and is reported (`TEXT_LAYER_READ_ERROR`); the rest of the paper is read. `extraction.regions[].read_as` says which of these read each region
+(`text`, `table_rebuilt`, `formula_plain` or `unread`). A file with fewer than
+`OCR_MIN_SUCCESS_RATE` (0.5) of its text regions readable stops with
+`scan_needs_ocr`, which is not retryable. `OCR_FALLBACK_TO_TEXT_LAYER=auto` also
+swaps this backend in for an automatic chain that cannot start on the machine.
+
 **Scan path (`bibr/scan/`).** Each inspected page is classed as born-digital,
 born-digital with a broken text layer (most of its text regions failed the
 corruption gates), or a scan (no text layer, or an invisible OCR layer). Two
@@ -181,7 +200,7 @@ Post-parse pipeline runs after structure parsing:
 - **Equation extraction** -- regex + LLM fallback for statistical reporting decomposition (`equation_extractor.py`)
 - **IMRaD enforcement** -- deduplication of Abstract and References by classification-source trust; repeated Methods/Results/Discussion remain valid
 - **Source ownership** -- abstract spans, author grounding, and integrity-statement evidence are resolved against the selected article block. Ambiguous front matter can yield validation issues instead of metadata taken from another article in the file
-- **Field decisions** -- the title, authors, abstract, keywords, publication date, journal, publisher, paper type, integrity statements, structured funding and affiliations are each decided once, by one rule in `bibr/extract/field_decisions.py`, from the candidates their producers propose: the model's answer and its grounding repairs, the printed-row title fallbacks (`title_candidates.py`), the Abstract and Keywords sections, the PDF doc-info, the empty-author recovery and CRediT statement, the paper classifier, the integrity-statement resolver. The rule is the field's only writer; its receipt (the candidates considered, the one used, the rule) stays on `Paper.field_decisions` and gives `extraction.fields` its `source` and `rule`. The DOI is the identity stage's; the fields a record is built with (volume, issue, pages, ISSN, licence, language, identifiers) have one producer each; the JATS and HTML readers build the record they hand over; a run without an LLM decides no structured funding or affiliations. The structured-integrity call adds contribution roles to the decided authors afterwards, in place; the author receipt records it as a `contribution_roles` transform
+- **Field decisions** -- the title, authors, abstract, keywords, publication date, journal, publisher, paper type, integrity statements, structured funding and affiliations are each decided once, by one rule in `bibr/extract/field_decisions.py`, from the candidates their producers propose: the model's answer and its grounding repairs, the printed-row title fallbacks (`title_candidates.py`), the Abstract and Keywords sections, the PDF doc-info, the empty-author recovery and CRediT statement, the paper classifier, the integrity-statement resolver. The rule is the field's only writer; its receipt (the candidates considered, the one used, the rule) stays on `Paper.field_decisions` and gives `extraction.fields` its `source` and `rule`. The DOI is the identity stage's; the fields a record is built with (volume, issue, pages, ISSN, licence, language, identifiers) have one producer each; the JATS and HTML readers build the record they hand over; a run without an LLM decides no structured affiliations or funding, except what the fast-mode rules read: funders and award numbers (`bibr/extract/funding_rules.py`) and the city and country of each affiliation (`bibr/extract/affiliation_rules.py`). The structured-integrity call adds contribution roles to the decided authors afterwards, in place; the author receipt records it as a `contribution_roles` transform
 
 Identity validation and a core checkpoint run before enrichment. The identity
 stage alone sets the paper's DOI: it chooses among the DOIs the paper prints
@@ -189,7 +208,25 @@ stage alone sets the paper's DOI: it chooses among the DOIs the paper prints
 the text layer of pages 1 and 2) and records every candidate in
 `extraction.identity.receipt`. A DOI only the PDF's metadata or a link target
 carries is recorded in the receipt as an agreement-only row: it takes no part
-in the selection and is never exported. Extraction
+in the selection and is never exported.
+
+The identity stage also reads the citation a paper prints of itself on its
+first page ("Citation: ...", "To cite this article: ...";
+`bibr/extract/self_citation.py`). Post-parse finds the line and parses it with
+the reference parser right after the reference list, while that parser is
+still loaded (aggressive memory mode unloads it after post-parse); the
+identity stage compares it with the extraction once the DOI is chosen. It is
+taken to be this paper's when its DOI is the paper's, else when its title
+matches the extracted title, else when its first author is one of the
+extracted authors, else only when its label names this article. It then fills
+only what the extraction left empty (journal, volume, issue, pages, year; the
+title and authors only when none were found), through
+`field_decisions.fill_empty` for the decided fields, and records the check,
+the fields filled and where the two agree in
+`extraction.diagnostics.self_citation`. `SELF_CITATION_METADATA=false` turns
+it off; it runs only with the `ner` parse strategy.
+
+Extraction
 and enrichment have separate completion evidence, so a failed or delayed
 external lookup need not force OCR and extraction to run again. The
 integrity-statement resolver defaults to `PIPELINE_INTEGRITY_STATEMENT_MODE=shadow`:
@@ -203,7 +240,7 @@ Opt-in Crossref (and optional bibr-resolver) enrichment of extracted references:
 - Bibliographic search as fallback (fuzzy title matching)
 - Matches stay in `bib_match` and `metadata_match`; explicit `fill`/`replace` consolidation can merge accepted reference fields into `bib`
 - Crossref records also bring identifiers: author ORCIDs and affiliation ROR IDs, funders (Open Funder Registry DOI, ROR ID, awards) and the version-of-record license, which land on the match rows
-- With enrichment on, affiliation strings and funder names are matched to ROR (`bibr/clients/ror.py`, `ROR_ENRICH`, default on) into `affiliation_match` and `funding_match`. Only ROR's own `chosen` match is kept. Set `ROR_CLIENT_ID` for ROR's higher rate limit (2000 instead of 50 requests per 5 minutes); strings not matched within `ROR_ENRICH_TIMEOUT`, or whose lookup failed, stay unmatched with a warning, and a malformed ROR record counts as no match. ROR never marks enrichment partial
+- With enrichment on, affiliation strings and funder names are matched to ROR (`bibr/clients/ror.py`, `ROR_ENRICH`, default on) into `affiliation_match` and `funding_match`. Only ROR's own `chosen` match is kept. Each process sends at most 1000 ROR requests per 5 minutes (2000 with `ROR_CLIENT_ID`; `ROR_REQUESTS_PER_5MIN` sets it), half ROR's limit of 2000 per IP address; a 429 from ROR pauses ROR lookups in the process for its `Retry-After` (at most 5 minutes) and halves the process's budget (not below 50), and the first lookup after an hour without a 429 doubles it back, one doubling per such hour; a 403 means ROR has blocked the address and pauses ROR lookups for 5 minutes without halving; a string whose request could not start within the paper's ROR time budget is left unmatched at once instead of waiting; strings not matched within `ROR_ENRICH_TIMEOUT`, or whose lookup failed, stay unmatched with a warning, and a malformed ROR record counts as no match. ROR never marks enrichment partial
 - Off by default. `CROSSREF_ENRICH=true` enables it for a deployment; per run, `bibr chew --crossref` / `--no-crossref`, `chew(crossref=True|False)` and the serve API's `crossref` form field override the setting either way (`extraction.settings.crossref_enrich` in the output records the effective value)
 - A served request can enable both reference parsing and Crossref even when
   `REF_PARSE_STRATEGY=off` is the deployment default. Enrichment is skipped when
@@ -227,7 +264,7 @@ Opt-in Crossref (and optional bibr-resolver) enrichment of extracted references:
 - Captions and footnotes are not sections. Their sentences are `text` rows after the body, with a null `section_id`; `figure` and `table` rows point at their caption row with `text_id`, and their `section_id` is the section they are printed in; `footnote` has one row per footnote or endnote (printed `label`, `text_id`), which `foot` references target
 - Enrichment matches are in a separate top-level `bib_match` array (flat, keyed by `bib_id` + `service`)
 - `paper_id` is required: the `--paper-id`, else the input file's stem (its name without the extension); `bibr batch` sets it to the corpus-unique id its JSON file is named after.
-- Optional `extraction.regions` debug payload (per-region bbox/font/content) is opt-in via `include_regions=True` on `Paper.export_to_json()` / `export_paper_to_json()` / the `include_regions` form field on `POST /papers/extract` / the `--regions` CLI flag. It also preserves `raw_ocr_content` when Paddle normalization changed a table or formula response, so diagnostics can compare the original model output with canonical content.
+- Optional `extraction.regions` debug payload (per-region bbox/font/content) is opt-in via `include_regions=True` on `Paper.export_to_json()` / `export_paper_to_json()` / the `include_regions` form field on `POST /papers/extract` / the `--regions` CLI flag. It also carries `raw_ocr_content`, the unmodified model response of each OCR'd region, so diagnostics can compare the original model output with canonical content (they differ where Paddle normalization decoded a table or formula).
 
 **Parquet** (`bibr/export/tables.py`): `bibr tables <exports> --out DIR`,
 `bibr.write_tables()`, and `bibr batch` (into `<out>/tables/`, after every run)
@@ -285,8 +322,9 @@ which stores the warnings with their codes, invalidates older entries.
 Paddle table output uses OTSL markers (such as `<fcel>`, `<lcel>`, `<nl>`, and
 `<ecel>`) that bibr decodes into canonical HTML. Paddle formula output has one
 outer Markdown/LaTeX fence or balanced display delimiter removed; the LaTeX
-body is otherwise preserved. The normalized value feeds parsing, while raw
-Paddle output remains available in `raw_ocr_content` through `extraction.regions`.
+body is otherwise preserved. The normalized value feeds parsing, while the raw
+model output of either profile remains available in `raw_ocr_content` through
+`extraction.regions`.
 
 ## Key data structures
 
@@ -332,18 +370,18 @@ IMRaD+ section classification enum:
 | `intro` | Introduction / Background |
 | `method` | Methods / Materials |
 | `results` | Results / Findings |
-| `discussion` | Discussion / Conclusion |
+| `discussion` | Discussion / Conclusion / Outlook |
 | `references` | References / Bibliography |
 | `acknowledgment` | Acknowledgments |
 | `funding` | Funding information |
 | `keywords` | Keywords |
-| `endnote` | Supplementary material, future work, outlook |
-| `appendix` | Appendix / Supporting Information |
+| `endnote` | End matter around the article: supplementary-material pointer, extended data, publisher's note |
+| `appendix` | Appendix |
 | `data_availability` | Data availability / code availability |
 | `author_contributions` | Author Contributions / CRediT statement |
 | `coi` | Conflict of Interest / Competing Interests |
 | `ethics` | Ethics statement / IRB approval / Informed consent |
-| `footnote` | A printed Footnotes or Notes heading |
+| `footnote` | A printed Notes, Endnotes or Author note heading, or a block of author metadata |
 | `table` | A printed Tables heading (captions are not sections) |
 | `figure` | A printed Figures heading (captions are not sections) |
 | `unknown` | Unclassified (fallback) |
@@ -374,8 +412,13 @@ Pipeline orchestrator (`bibr/local/pipeline.py`). Loads models sequentially to f
 
 Memory management modes control GPU VRAM usage: `aggressive` (load/unload per phase), `balanced` (keep layout + segmenter resident; OCR also stays resident across chunks unless a local LLM server needs the VRAM), `keep_all` (everything loaded).
 
-Auto-selection uses `aggressive` with ≤8 GB system RAM or ≤8 GB CUDA VRAM;
-otherwise it uses `balanced`. With a cloud LLM and non-aggressive memory
+Auto-selection uses `aggressive` with ≤8 GB system RAM, a CUDA card below 12 GB
+that a managed local LLM server shares, or a CUDA card of 8 GB or less;
+otherwise it uses `balanced`. A card that nothing in the run can load onto is
+left out of the rule: no managed LLM server, an OCR route that starts no engine
+(the text layer, a cloud vision backend or an OCR URL), and an install whose
+onnxruntime has no CUDA provider and that has no torch. On Linux, system RAM is the machine's RAM or a
+smaller cgroup memory limit (a container, or a batch job's allocation). With a cloud LLM and non-aggressive memory
 mode, `PIPELINE_STREAM_BACKHALF=true` allows completed files' parsing,
 extraction, enrichment, and export to overlap subsequent OCR work. Managed
 local LLMs retain the stage barrier for the OCR-to-LLM memory handoff.

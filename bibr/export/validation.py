@@ -742,6 +742,12 @@ def _check_xref_low_coverage(payload: dict) -> list[ValidationIssue]:
 
 
 def _check_ref_count_mismatch(payload: dict) -> list[ValidationIssue]:
+    # A run that did not try to parse references (refs off, or --no-llm) has an
+    # empty bib table by design; the field state says so, and the gap between a
+    # references section and no bib rows is then not a finding.
+    fields = _as_dict(_as_dict(payload, "extraction"), "fields")
+    if _as_dict(fields, "bib").get("state") == "not_attempted":
+        return []
     ref_ids = {
         s.get("section_id")
         for s in _as_list(payload, "section")

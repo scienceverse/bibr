@@ -50,6 +50,7 @@ PROCESS_BOUNDARY_SETTINGS_MODULES = {
     "bibr/local/cli/run_config.py",
     "bibr/serve/app.py",
     "bibr/serve/auth.py",
+    "bibr/serve/ingress.py",  # API process only: refuses a mode this server cannot run
     "bibr/serve/jobs.py",
     "bibr/serve/jobs_redis.py",  # same API-process boundary as jobs.py (Settings.jobs)
     "bibr/setup_wizard.py",

@@ -301,7 +301,8 @@ def _map_heading(header: str) -> CanonicalSection:
         CanonicalSection.COI: {"conflict of interest", "competing interests"},
         CanonicalSection.ETHICS: {"ethics", "ethical approval"},
         CanonicalSection.AUTHOR_CONTRIBUTIONS: {"author contributions"},
-        CanonicalSection.APPENDIX: {"appendix", "supplementary material"},
+        CanonicalSection.APPENDIX: {"appendix"},
+        CanonicalSection.ENDNOTE: {"supplementary material"},
     }.items():
         if norm in aliases:
             return canon

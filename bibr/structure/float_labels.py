@@ -24,6 +24,18 @@ FIGURE_WORD = r"(?:Figures?|Figs?\.?)"
 TABLE_WORD = r"(?:Tables?|Tab\.?|Tbl\.?)"
 _WORDS: dict[str, str] = {"figure": FIGURE_WORD, "table": TABLE_WORD}
 
+# The words a caption opens with in papers written in Dutch, a Scandinavian
+# language, Spanish, French, Portuguese, Polish, German or Italian. Captions
+# only: mentions are read with the words above. The longer spellings come
+# first, and none may run on into a letter, so "TABELA 1" is not read as
+# "TABEL" with a label "A", nor "FIGURE LEGENDS" as "FIGUR" with "E".
+OTHER_TABLE_WORD = r"(?:Tabella|Tabelle|Tabela|Tabell|Tabel|Tableau|Tabla)(?![A-Za-z])"
+OTHER_FIGURE_WORD = r"(?:Figura|Figuur|Figur|Abbildung|Abb\.)(?![A-Za-z])"
+_CAPTION_WORDS: dict[str, str] = {
+    "figure": rf"(?:{FIGURE_WORD}|{OTHER_FIGURE_WORD})",
+    "table": rf"(?:{TABLE_WORD}|{OTHER_TABLE_WORD})",
+}
+
 # "Supplementary Table 4", "Supplemental Figure 2", "Suppl. Fig. 1", "Sup. Fig. 1".
 SUPPLEMENT_WORD = r"(?:(?:Online\s+)?(?:Supplementa(?:ry|l)\s+|Sup(?:pl?)?\.\s*))"
 
@@ -63,7 +75,7 @@ _CAPTION_LABEL_RES = {
         rf"|{SUPPLEMENT_WORD}{_SINGULAR_WORDS[kind]}\s*(?P<named>{_NAMED_SUPPLEMENT_LABEL})",
         re.IGNORECASE,
     )
-    for kind, word in _WORDS.items()
+    for kind, word in _CAPTION_WORDS.items()
 }
 
 # A label element on its own (JATS ``<label>``): "Table 2", "Fig. 3.", a bare

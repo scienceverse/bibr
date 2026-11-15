@@ -6,6 +6,1567 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-16
+
+The first 0.9 release; this section lists every change since 0.8.0. 0.9.0 was
+tagged but never published: its release run failed tests on macOS and Windows,
+which pull request checks do not run. Those failures were in the tests and in the
+paths `scripts/switch_model_defaults.py` reports, not in what bibr extracts.
+
+A fast run now needs no GPU, no OCR server and no LLM: with no OCR route chosen
+it reads each PDF from its own text layer, and it reads citations, statistics
+and the front matter with local rules where a full run asks the LLM. Four
+models trained for this release become defaults, all ONNX bundles that need no
+`torch`: the v7 reference parser, a geometry line tagger, a text reference
+segmenter in the CRF's place, and a statement tagger. Each of the last three
+turns off with its setting set to null. The paper classifier is pinned to a new
+model whose paper types are right for 0.768 of hand-labelled papers, against
+0.442. bibr also reads the paper's printed
+citation, runs a candidate model under the setting of the model it would
+replace with checks that stop a run on a broken bundle, and moves the export to
+schema 12.4, which only adds keys. See Changed for the new defaults.
+
+A long batch no longer grows in memory from paper to paper, and an audit of
+the whole code base brings the fixes and speed-ups listed under Changed and Fixed.
+
+### Added
+
+A fast run, which makes no LLM call, now reads citations, statistics and the
+front matter with local rules where a full run asks the LLM. Each has a setting
+that is off by default and that fast mode turns on, so a full run, and a
+`--no-llm` run, read them as before.
+
+- `CITATION_RULE_TIER3` links the author-year citations that the exact reading
+  of the names leaves over, in place of the LLM question. It reads a family
+  printed with other spaces or hyphens, or as the opening words of a listed name
+  (never as the first letters of a longer one), a name of six letters or more
+  misspelt when one reference of that year fits, "et al." in the ways papers
+  write it, and an organisation cited by its initials. A work listed twice
+  counts once. A link from a looser reading keeps the `author-year` tier and
+  records its reading and a lower confidence in the citation receipt.
+- `EQUATION_REPAIR_GLITCHES` reads statistics through the damage a PDF's text
+  layer does to them: math italic letters, a box in place of a space, a Cyrillic
+  "р" for "p", a "5" or a comma printed where "=" or "<" belongs, and a dropped
+  "=". A p-value whose power of ten was not read is left out instead of reading
+  its coefficient. The exported expression is located where it is printed.
+- `FRONT_TAGGER_RULES` puts right what the front-matter tagger leaves wrong:
+  a keyword cut off before its closing bracket, a publisher's name read as an
+  author, a letter key printed against a name read as part of it, and the
+  affiliations it printed but no author carries or left untagged where no
+  author has one, which the export lists as affiliations with no author.
+- `FRONT_TAGGER_RULES` also reads back the parts of a byline the tagger left
+  out when they are in print: the rest of a name it found one part of ("Marise
+  Ph. Born", "Kevin le Roux", "Myeong‑Ha Hwang"), a whole name it skipped in a
+  list, and a list of names right under the title that it read as page
+  furniture, when it tagged no author at all. Titles such as "Dr." and a trailing
+  "and" or mark come off a name part, and a family name tagged in two parts is
+  joined.
+- `FRONT_TAGGER_RULES` also keeps an abstract whole when an email, a date, a
+  volume, an affiliation or a licence line is set into its column. A title, an
+  author, keywords or a printed abstract heading still end it.
+- `FRONT_TAGGER_RULES` also reads the paper's `language` from its title (a PDF
+  declares none). The title's function words or letters decide it; a title they
+  do not decide leaves it empty, and an input that declares a language keeps it.
+- `FUNDING_RULES` reads `funding` (each funder and the award numbers printed for
+  it) from the funding statement, where a fast run left it empty. A funder is a
+  run of capitalised words that names an organisation, an acronym, or a name
+  with its grant number after it; an award goes to the funder right after it
+  when only "from", "by" or "of" stands between them, and otherwise to the
+  nearest one before it. An acronym and its expansion are one funder. Author
+  initials and names, places, years and call identifiers are not read, and a
+  statement saying no funding was received gives none. An input that declares
+  its funders (JATS) keeps them. Against an LLM's reading
+  of 150 statements the rules were not tuned on, they found nine in ten of its
+  funders, and the award numbers matched with an F1 of 0.83; they also name
+  funders the LLM missed, and some that are not funders (a programme, an
+  affiliation). The
+  field's `extraction.fields` source is `rules`.
+- `AFFILIATION_RULES` fills the `city` and `country` of each `affiliation` row,
+  which a fast run left empty. The string is cut at its commas; the country is
+  the last part when it names one ("USA", "Deutschland", "Cambridge MA USA"),
+  streets, boxes, postcodes and state codes are dropped, and the city is the
+  first place after the university, or without one the last place, never a
+  region after it ("Muncie, Indiana"). No country is inferred from a city.
+  Against an LLM's parse of affiliation strings the rules were not tuned on,
+  the country agreed in more than nine in ten rows and the city in about three
+  in four; the institution and department agreed less often, so they stay
+  empty for the LLM.
+- `python -m bibr.export.compare RUN_A RUN_B` compares two folders of exports by
+  content and counts what differs per place in the schema. It leaves out the run
+  stamps (`extraction.completed_at`, `timings`, `producer`), treats numbers
+  closer than 0.0001 as equal, and exits 1 when anything else differs. Fast
+  runs of one build on the text-layer route gave the same content for 60 papers
+  on two machines, so there the comparison works as a regression check. See
+  "Comparing two runs" in the batch guide.
+- The `LLM_SKIPPED` message now names only what the run left undone: author
+  roles, and the funders and affiliation parts the rules did not read.
+
+A fast run leaves `metadata.issue` and `metadata.publisher` empty on an input it
+reads with the front-matter tagger: checked against the Crossref record of papers
+with a DOI, fewer than nine in ten of those readings were right. An input that
+declares them (JATS, HTML, ePub) keeps them, and `metadata_match` still reports
+what the registry holds. A full run is unchanged.
+
+The evaluator reports `authors_exact_f1`, a diagnostic that counts an author
+only when the words of the name equal the gold's, in any order and after
+lowercasing and removing diacritics and punctuation. `authors_fullname_f1` is
+fuzzy and scores a name with an affiliation letter glued on, or with an extra
+word, as right. Neither the gate nor `metrics_version` changes.
+
+### Added — the paper's printed citation
+
+Many papers print on their first page how to cite them ("Citation: ...", "To
+cite this article: ...", "How to cite this paper: ...", or "Full citation:"
+with the citation on the next row). bibr used that line only for the paper's
+DOI; it now also reads the rest of it.
+
+- The line is found on page 1 (a cover page included), from a label at the
+  start of a row to its DOI or link, within its paragraph and at most four
+  rows; a label alone on its row takes the next row. The labels are the ones
+  bibr already knew, French, Spanish, Portuguese, Italian, German, Russian and
+  Ukrainian ones included. It is parsed with the reference parser that parsed
+  the reference list, through the same steps as an entry of the list: no other
+  model and no network.
+- The identity stage, once it has chosen the paper's DOI, decides whether the
+  line is about this paper: the DOI it prints must be the paper's; without a
+  DOI on both sides, its title must match the extracted title closely; without
+  either, its first author's family name must be one of the extracted
+  authors'; with nothing to compare, only a label that names this article
+  ("To cite this article:", "How to cite this ...", "Full citation:") is
+  enough, a bare "Citation:" is not.
+- A line about this paper fills what the extraction left empty: the journal,
+  volume, issue, first and last page and the publication year, and the title
+  and the authors only when the extraction found none. It never replaces a
+  value. The volume, issue and pages are taken only when the line agrees with
+  every one of them the extraction already has; the authors only from a list
+  with no "et al." whose every name can be read. A front matter the extraction
+  abstained on (several papers in one file) takes nothing.
+- A title or author list read this way adds a `SELF_CITATION_FILLED` warning
+  that names the fields and text rows, and its `extraction.fields` record has
+  source `self_citation` and rule `self_citation_fill`. A fast run can now
+  export an `issue` this way.
+- `extraction.diagnostics.self_citation` records the line's text rows, the
+  label's strength, the check that decided, whether it was accepted, the
+  fields it filled, and, for the title, first author, DOI, year and volume
+  where both sides have one, whether the line and the extraction agree.
+- `SELF_CITATION_METADATA` (on by default) turns it off. It runs with the
+  local reference parser (`REF_PARSE_STRATEGY=ner`, the default and what a
+  fast run uses), not with an LLM parse strategy and not with `--no-llm`.
+
+On two evaluation sets, 48 papers print such a line among their first rows.
+Parsed offline with a candidate reference-parser checkpoint (not yet a
+pipeline run with the default parser), the line gave the gold title on all 40 lines that carry one and the
+gold first author on all 46 that carry authors; on lines without "et al." it
+named 149 of 150 gold authors. Where the export already had the field, the
+line agreed on the DOI (28 of 28), year (35 of 35), volume (18 of 19), first
+page (10 of 10) and journal (31 of 31, an abbreviated name counted as the same
+journal), and it had a value where the export was empty for the first page in
+31 papers, the volume in 22, the year in 11 and the journal in 11.
+
+### Added — running a candidate model
+
+A model setting pointed at anything other than its shipped default is an
+override, for comparing a retrained model with the shipped one. A mirror, an
+offline copy or a pinned or `main` revision of a shipped model is an override
+too: it is recorded as one, and it loads and runs as before.
+
+- Who is affected: only a run whose model setting names a model that cannot
+  be loaded, for any reason: a missing path; a Hub repo, revision or file that
+  is not there; a Hub that cannot be reached for files that are not in the
+  local cache; an unreadable or wrong-kind file, or one that does not run on a
+  sample input; a missing `torch` extra. That run now stops with an error
+  naming the setting and the reason instead of going on without the model:
+  `bibr chew` exits 1, and `bibr batch` exits non-zero with `run_info.json`
+  `reason` `model_override_failed`, marks the running papers
+  `model_override_failed` (retried on resume) and records none of them as
+  failed. `bibr serve` answers such a request `500` with `error_code`
+  `model_override_failed`, and `bibr batch --serve-url` stops on it. The same
+  failures of a shipped default behave as before.
+- An overridden model that loads but raises on a paper sends that paper down
+  the tier's error path, which is not always what a run without the override
+  would do, and the paper's export carries a
+  `MODEL_OVERRIDE_INFERENCE_FAILED` warning naming the setting. When the same
+  model raises on three papers in a row on which it ran, the run stops as
+  above (`bibr serve` keeps that count across requests for the life of the
+  process; a paper the model runs on without an error ends it). A resumed
+  `bibr batch` runs the papers written with that warning again, without
+  `--retry-failed`, so they get the repaired model's answer (a paper that keeps
+  falling back waits for `--retry-failed` after three runs); the run's summary
+  names them with the re-runs each has left, and `run_info.json` lists them
+  under `override_fallbacks`. A paper that has fallen back three times in a
+  row is named as skipped, with the advice to rerun with `--retry-failed`
+  after fixing the model, and a run that processed nothing because of that
+  exits non-zero.
+- The `bibr batch` summary counts the papers a model override stopped as `not
+  finished`, says that the run stopped on a model override and that a resume
+  processes them, and no longer counts them as failed; `bibr batch report`
+  gives the counts as `papers.stopped_on_model_override` and
+  `papers.fell_back_on_model_override`.
+- `bibr chew` and `bibr batch` load every override the run will use, from a
+  local path or the Hub, before the first paper, for every kind of input
+  (`--dry-run` too). A setting for a model the run does not ask (under
+  `--no-llm`, the section and paper classifiers and the reference models; the
+  geometry models without `--ref-seg geom`) is neither checked nor loaded: the
+  run warns once at the start, naming the setting and why, and records it as
+  `not used in this run`. A `--no-llm` run no longer starts the section and
+  paper classifiers, which it never asks. Every overridden ONNX model (the
+  reference parser, the text segmenter, the geometry tagger, the front-matter
+  tagger, the section and paper classifiers, the statement tagger) runs when
+  it loads, at the
+  preflight and in the run, on inputs built as a paper's are, in the shapes
+  the run sends it: the longest window and a short one, and a batch of
+  several and a batch of one for the models that take a batch. Its output
+  shape is checked against the labels or tags of its manifest, so a graph
+  that opens but would fail on papers, an export fixed to one batch size or
+  one length included, stops the run before the first one. A shipped
+  default is not probed. The section and paper classifiers loaded outside the
+  pipeline's classifier resources (calling the classification functions of
+  the library directly) stop on such a failure too, instead of going on with
+  the LLM. A local torch directory for a classifier (`config.json` and its
+  weights) passes this check on an install with `torch`. `bibr serve` checks
+  the files of its local-path overrides at startup.
+- `bibr batch` writes one record per override to `run_info.json` under
+  `model_overrides`: `loaded` with the sha256 of every file read, or not
+  loaded and why.
+- A local ONNX bundle may now hold its files in the named directory itself,
+  not only in an `onnx/` subdirectory.
+- `REF_GEOM_TAGGER_MODEL_ID` (a default since this release, see Changed; a directory or a Hub id with
+  `REF_GEOM_TAGGER_REVISION`) adds a geometry line tagger that the `geom`
+  segmentation tier asks first. An answer it takes is final; when it declines
+  or fails on a paper, the shipped geometry segmenter runs exactly as without
+  it, so a decline has no effect on the references. The attempt is still
+  listed in the reference diagnostics (`reference_yield.attempts`).
+- `REF_TEXT_SEG_MODEL_ID` (a default since this release, see Changed; a directory or a Hub id with
+  `REF_TEXT_SEG_REVISION`) replaces the CRF reference segmenter, the last
+  resort of every segmentation strategy, with an ONNX token tagger that needs
+  no `torch`. The CRF is then not loaded; setting both is an error. Its
+  answer goes through the same receipt as the CRF's, and the receipt lists it
+  as `text_tagger`. For a list found by its heading it always answers: a list
+  in which it finds no reference start comes back as one reference, flagged
+  `no_reference_start` in the receipt and with a new `REF_SEG_NOT_SPLIT`
+  warning, and does not go on to the marker split. A list that was only
+  guessed from the layout (`REF_SECTION_INFERRED`) and holds no reference
+  start is declined instead, so a section that is not a reference list is not
+  exported as one reference and the citations in the notes can stand in.
+- `ML_STATEMENT_TAGGER_MODEL_ID` (a default since this release, see Changed; a directory or a Hub id
+  with `ML_STATEMENT_TAGGER_REVISION`) adds a statement tagger, an ONNX
+  classifier over the paper's paragraphs that needs no `torch`. Where it finds
+  a funding, competing interests, ethics or data availability statement, that
+  field takes its statements instead of the rules', with the source
+  `statement_tagger`; a field it finds nothing for, or reads exactly as the
+  rules did, keeps the rules' value and source. When the paper has no
+  acknowledgments or author contributions section, the paragraphs it finds
+  become one; a section under a printed body heading (a "Discussion") is never
+  retyped. Each adds a `STATEMENT_TAGGER` warning. A
+  `--no-llm` run does not use it. The runtime (`bibr.statement_tagger.runtime`)
+  needs nothing else from bibr: block texts in reading order in, typed
+  statements out. It follows the rules of every model override: a bundle that
+  does not load stops the run, and an error on a paper keeps the rules'
+  statements with a `MODEL_OVERRIDE_INFERENCE_FAILED` warning. The shipped
+  tagger that does not load, or raises on a paper, leaves that paper the rules'
+  statements, with a warning in the log.
+- For maintainers, `scripts/switch_model_defaults.py SETTING=org/name@<commit>`
+  moves a default model to a new Hub pin: the defaults in `bibr/config.py`,
+  the matching `ARG`s in `Dockerfile.serve`, the default-model table and the
+  `blob`, `tree`, `resolve` and `commit` links in the docs. It stops, writing
+  nothing, when the old pin is written anywhere else in the tree (the old
+  revision or any abbreviation of it of seven or more characters, also inside
+  a URL, and the old repo
+  id when the repo changes; code, scripts, `.github/`, `evaluation/`, shell,
+  TOML, JSON and YAML files and the docs), lists every such place, and lists
+  the tests that name it.
+
+A run with every model setting at its default extracts what it did before; its
+exports gain the `extraction.settings.models` block, and the text reading joins
+more of the URLs and DOIs that a line break split. See "Running a candidate model" in the configuration
+guide.
+
+### Added — the text-layer OCR route
+
+A fast run with no OCR route chosen (no `--ocr`, `--ocr-url`, `--ocr-model` or
+`--ocr-profile`, and none of `OCR_BACKEND`, `OCR_MODEL` or `OCR_PROFILE` set)
+reads each PDF from its own text layer with the new `text-layer` OCR backend,
+whatever GPU the machine has, so it starts with no OCR server, no GPU and no
+multi-GB download. `bibr chew`, the library, `bibr doctor`, `--dry-run` and the
+local demo choose the route by the same rule, and the run summary says
+`OCR text-layer`. A route you choose is kept: `--ocr paddle`, a configured OCR
+server or a backend written to `.env` still reads scans.
+
+- `--ocr text-layer` (or `OCR_BACKEND=text-layer`) reads born-digital PDFs from
+  their embedded text with no OCR model, on any run. Tables are rebuilt from
+  glyph positions, display formulas are read as plain text, and private-use
+  glyphs are dropped; each says so in a warning (`TEXT_LAYER_TABLE_REBUILT`,
+  `TEXT_LAYER_FORMULA_TEXT`, `TEXT_LAYER_PRIVATE_USE_DROPPED`, which also counts
+  the glyphs next to a letter or digit). A page with no usable text layer gets a
+  `TEXT_LAYER_PAGE_UNUSABLE` warning and its regions `read_as: unread`.
+- A PDF with fewer than half of its text regions readable is refused as
+  `scan_needs_ocr`. The failure is not retryable now, and its message gives the
+  page verdicts and names the routes that read a scan: `--ocr anthropic`, a GPU
+  OCR server, or the hosted demo.
+- `OCR_FALLBACK_TO_TEXT_LAYER=auto` makes a run whose automatic OCR chain cannot
+  start on the machine (no NVIDIA GPU, no llama.cpp, no Apple silicon) read the
+  text layer instead of stopping, and marks the export `OCR_BACKEND_UNAVAILABLE`.
+  It is off by default.
+- `LIMITATIONS.md` lists what the text-layer route reads less well: tables,
+  formulas, private-use glyphs and scans.
+- The configuration guide has a section on what leaves the machine: what each
+  setup sends and where, the model downloads of a first run, and that a
+  Google or `LLM_API_KEY` key in the environment alone makes a plain run a
+  full-mode run that sends the paper's text to the LLM provider.
+- `bibr serve` follows the same rule, so a CPU-only machine can serve: a fast
+  server with none of `OCR_BACKEND`, `OCR_MODEL`, `OCR_PROFILE` and
+  `OCR_BASE_URL` set reads each PDF from its text layer and contacts no OCR
+  server, and `bibr serve --ocr text-layer` (or `OCR_BACKEND=text-layer`) asks
+  for that route in any mode. `/ready` then reports `ocr: not_used (text layer)`
+  without probing anything, the start-up log names the route, and a scanned PDF
+  is answered with a 422 and `error_code: scan_needs_ocr`, in words for a
+  client: the message names the server's `OCR_BASE_URL` setting, not the
+  command-line flags. The route belongs to
+  the server: a request's `mode` field does not change it. Responses cached on
+  this route have their own keys, so a server that shares its Redis cache with
+  an OCR deployment never answers with the other's reading.
+- `OCR_TEXT_LAYER_READ_OCR_LAYER=true` lets the text-layer route read a scan
+  from the OCR text layer the PDF carries (invisible text over an image that
+  covers the page, as scanners and publishers add to make a scan searchable)
+  instead of refusing it. It is off by default: that layer is somebody else's
+  OCR and is often less accurate than an OCR model. A page read this way passes
+  the same checks as printed text, and the export names such pages in a
+  `TEXT_LAYER_OCR_LAYER_READ` warning. Invisible text on a page with no
+  page-sized image stays unread. The refusal of a scan that has such a layer
+  now names the setting. On 70 development scans a fast run read 64 with the
+  setting and 5 without; `LIMITATIONS.md` has the scores.
+
+### Added — export schema 12.4 (additive)
+
+The export moves to schema `12.4`, which adds the optional keys below; every 12.x
+export, 12.3 included, is still valid input for the 12.x reader. A consumer that
+validates with the 12.3 strict schema rejects 12.4 exports (the version
+constant) and needs the 12.4 schema.
+
+- `extraction.settings.mode` is `fast` or `full`: the run mode that produced
+  the export. A `--no-llm` run is `full` with `extraction.llm` null.
+- The opt-in `extraction.regions[]` rows carry `read_as` when the text-layer
+  OCR backend read the region: `text`, `table_rebuilt`, `formula_plain` or
+  `unread`. It is omitted on every other route.
+- `extraction.diagnostics.section_classification[]` rows carry
+  `header_supplied: true` for a section whose heading the paper does not
+  print: `section[].header` is then bibr's own wording ("Abstract" or
+  "Introduction" for a section found by its position, the name of a layout
+  region, "Acknowledgments" or "Author contributions" for a section the
+  statement tagger added). The key is absent for a printed heading, so a list
+  of a paper's printed headings can leave these sections out.
+- `extraction.diagnostics.self_citation` describes the citation a paper prints
+  of itself on its first page: `text_ids`, `cue` (`strong` or `weak`), `check`,
+  `accepted`, `filled` and `agreement` (see "the paper's printed citation"
+  above). It is omitted when no such line was found. The warning code
+  `SELF_CITATION_FILLED` and the `extraction.fields` source `self_citation`
+  and rule `self_citation_fill` are new values in open vocabularies.
+- `extraction.settings.models` names the models the run was set to load, so
+  one export says which models produced it: one row per model with the
+  setting that names it, what it does, its Hub repo id and revision (a branch
+  or tag resolved to its commit through the local Hub cache), and whether it
+  differs from the shipped default. A local model is recorded by a short name
+  and the sha256 of each of its files, never by its path. The short name is
+  the directory's own name and `@` the first 12 hex digits of a hash over its
+  files; a name that is a home directory or the user name, on Windows and
+  macOS paths too, is recorded as `local-model`. Each file is hashed once per process, and a model directory
+  is listed once, not per paper. The layout model is the one the runtime loads (the ONNX export, or
+  the torch checkpoint with `ML_RUNTIME=torch`); the CRF segmenter is listed
+  only on an install with `torch`. Rows are per run, not per paper: the
+  reference receipts say which segmentation tier ran. `bibr serve` exports
+  carry them too.
+
+Both keys are omitted when absent, so an export made outside the pipeline, or
+by an earlier version, carries neither.
+
+### Changed
+
+- New default models, all ONNX bundles that need no `torch`, each pinned to a
+  Hub commit (the configuration guide's table):
+  - The reference parser is v7, `scienceverse/bibr-parser-v7-mmbert-small`
+    (mmBERT-small encoder, multilingual training rows), in place of v5.1.
+    It ships as an ONNX bundle alone, so it runs on ONNX Runtime under
+    `ML_RUNTIME=torch` too, as the front-matter tagger does. Set
+    `NER_PARSER_CKPT=scienceverse/bibr-parser-v5-1-ultrabert` with
+    `NER_PARSER_REVISION=97b06cc7dd6511bdd53f8855c93a29020231d215` to keep the
+    0.8.0 parser.
+  - The paper classifier, `scienceverse/bibr-paper-classifier`, is pinned to a
+    new model in the same repo (commit `600ef07f`), trained from the previous one
+    with paper types from PubMed Central (JATS article types, MEDLINE publication
+    types and title rules) while its OECD heads follow the previous model's
+    answers. On 362 hand-labelled papers it gets the paper type right for 0.768
+    against 0.442, and it now tells meta-analyses, errata and retractions apart
+    (recall about 0.9 or more, from near 0). Outside PubMed Central it is weaker
+    (0.565 on 92 papers, 0.391 before). OECD L1 agrees with the previous model on
+    97% of 10,000 held-out papers. Set
+    `ML_PAPER_CLASSIFIER_REVISION=6046171b3198a255acb1f07f81a586a32f399ac4` to
+    keep the 0.8.0 classifier.
+  - The geometry line tagger, `scienceverse/bibr-ref-line-tagger-v1`, is asked
+    first in the `geom` segmentation tier.
+  - The text reference segmenter, `scienceverse/bibr-ref-text-segmenter-v1`,
+    takes the CRF segmenter's place as the last segmentation tier, so a core
+    install has that tier without `torch`. When it cannot be loaded, the CRF
+    runs in its place.
+  - The statement tagger, `scienceverse/bibr-statement-tagger-v1`, adds its
+    statements to the rules'. The acknowledgments and author contributions
+    sections it adds carry a heading bibr supplies; the export marks it
+    (`header_supplied` in `extraction.diagnostics.section_classification`) but
+    does not carry the printed run-in label ("Author Contributions:") instead,
+    so heading detection reads about half a point lower on papers that print
+    such a statement without a heading of its own.
+
+  On 60 papers on four CPU cores, with bibr's batches of 8, the new models cost
+  about 4% more CPU time than 0.8.0's (124 against 119 CPU seconds a paper) and
+  raise the batch's peak memory from 8.7 to 10.3 GB; the median stays at 6.5 GB.
+
+  Each of the last three turns off with its setting set to null
+  (`REF_GEOM_TAGGER_MODEL_ID=null`, `REF_TEXT_SEG_MODEL_ID=null`,
+  `ML_STATEMENT_TAGGER_MODEL_ID=null`). As shipped defaults, none of them
+  stops a run when it cannot be loaded: the paper goes on without it and the
+  log says so. A setting changed to another model or revision is an override
+  and keeps the override rules. `NER_SEG_CKPT` away from its default now needs
+  `REF_TEXT_SEG_MODEL_ID=null`.
+- Supplementary-material headings have one section type. "Supplementary
+  material", "Supplemental material" and "Supporting information" were
+  typed `appendix` while "Supplementary materials", "Supplementary
+  information" and "Extended data" were typed `endnote`; all of them are
+  now `endnote`, and `appendix` is left with appendices. The classifier
+  guide states the definition of `endnote`, `appendix` and `footnote`. A
+  section under such a heading never holds the reference list, like the
+  other `endnote` sections.
+- Author-metadata headings are no longer typed `acknowledgment`. A heading
+  that says where to write to an author, or that opens author details,
+  affiliations, biographies or ORCID iDs ("Correspondence to:",
+  "*Corresponding author", "Author details", "About the authors",
+  "Affiliations", "ORCID iDs", and their common Russian, Spanish,
+  Portuguese, German and French forms) opens a note about the authors and
+  is typed `footnote`, with `classification_source` `exact_alias`. The alias
+  table had filed "Corresponding author" and "ORCID iDs" under
+  acknowledgments, so an address or an ORCID list counted as acknowledgment
+  text. The front-matter reader finds these blocks by position and by
+  heading and is unchanged. Such a section is exported as a section with its
+  rows, not in the `footnote` list, and the statement tagger still gives an
+  acknowledgment or an author-contribution statement printed inside it a
+  section of its own. "Author note" is left to the classifier.
+- The section-type list the LLM reads now gives the same definitions as
+  the classifier guide. It had placed conclusions and future work under
+  `endnote`, supplementary material under `appendix` and corresponding-author
+  and ORCID blocks under `acknowledgment`. Conclusions, outlook and future
+  work are `discussion`; a pointer to supplementary material, extended data
+  and a publisher's note are `endnote`; notes and author-metadata blocks are
+  `footnote`. The type table in the architecture guide says the same.
+- In a review or commentary, a methods or results guess on a topical heading
+  no longer keeps the body's guessed sections from being typed `discussion`
+  (`PIPELINE_NON_IMRAD_BODY_AS_DISCUSSION`). Before, one such guess anywhere
+  in the paper ("Accountability" typed results, "5.1 Sensory fields without
+  objects" typed methods) switched the rule off, and a retrained section
+  classifier, which guesses methods and results more often, switched it off
+  on most essays of a 190-paper development set. The rule still leaves a
+  paper alone when it prints a methods or results part: a heading typed from
+  its own words, a guess on a heading that names the part ("Data and
+  methods", "Результаты исследования") or a methods subsection name ("Data",
+  "Sample", "Study area", "Empirical strategy"). The cost: an empirical paper
+  that the paper-type model calls a review and whose methods and results are
+  printed only under topical headings now has those sections typed
+  `discussion`. A methods or results guess under the introduction of such a
+  paper takes the introduction's type, and a heading that names a framework
+  or the literature ("Theoretical framework", "Revisão da literatura") stays
+  introduction.
+- The section alias table knows the printed introduction, methods, results
+  and discussion or conclusion headings of research papers in Russian,
+  Ukrainian, Polish, Czech, German, Dutch, French, Spanish, Portuguese,
+  Italian, Indonesian, Turkish, Chinese, Japanese, Korean and Arabic, among
+  them the longer forms journals print whole ("Материалы и методы
+  исследования", "Результаты исследования и их обсуждение", "Resultados e
+  discussão", "Fazit für die Praxis"). A part name inside a longer heading is
+  trusted only when it covers most of it, so these were left to the
+  classifier, which could type them wrongly or below its threshold. Results
+  merged with discussion is `results` and conclusions are `discussion`
+  ("Заключение", "Simpulan", "Considerações finais"). "Schlüsselwörter" is a
+  keywords heading. The same labels printed inside a structured abstract
+  ("Métodos", "Material und Methoden", "Conclusão") stay part of the
+  abstract when a keywords line, a numbered heading or an introduction closes
+  it, as English labels did.
+- A fast `bibr serve` with no OCR route chosen no longer waits for an OCR
+  server at the default `http://localhost:8080`: it reads the text layer (see
+  the text-layer route above) and refuses scans. If you run an OCR server on
+  that default address and relied on the default, set
+  `OCR_BASE_URL=http://localhost:8080` to keep sending regions to it. Docker
+  Compose sets `OCR_BASE_URL` and is unchanged, as is every full-mode server.
+- `bibr chew --fast` and `bibr batch --fast` now check, before the first PDF,
+  that the front-matter tagger's model can be loaded, and stop with exit code 1
+  when it cannot. A fast run reads the title, the authors and the abstract with
+  that model alone. Before, a run that could not find or download it went on,
+  exported every paper with those three fields empty and a
+  `FRONT_TAGGER_UNAVAILABLE` warning, and exited 0. The message says whether
+  the model was not found or could not be downloaded. The check resolves the
+  model the way the run does, so nothing is downloaded twice, and a model that
+  is already downloaded passes offline. A null `ML_FRONT_TAGGER_MODEL_ID` still
+  runs without the tagger. Library calls are unchanged. A fast `bibr serve`
+  whose tagger model is not on the machine now answers `/ready` with 503 and
+  `classifiers: failed_required`, whatever `ML_CLASSIFIERS_REQUIRED` says;
+  before, it reported `degraded`, stayed ready and returned papers with
+  those fields empty.
+- On the CPU, bibr's ONNX models (layout, sentence segmenter, reference parser,
+  section and paper classifiers, front-matter tagger) now size each session's
+  thread pool to the CPUs the process may run on, and idle workers block
+  instead of spin-waiting. onnxruntime sizes each pool from the machine's CPU
+  count, ignores a CPU affinity mask and a container CPU quota, and spins its
+  idle workers, so a process pinned to four CPUs on a 16-thread machine ran 16
+  workers in each of its six sessions. On 20 open-access papers (373 pages)
+  in fast mode on four pinned CPUs, the whole pipeline used 1,381 CPU-seconds
+  instead of 7,506 (5.4 times less), and all 20 results are identical. In full
+  mode with a stubbed LLM and the text-layer route, 10 papers (186 pages) took
+  175 s instead of 540 on four pinned CPUs and 123 s instead of 219 on 16, with
+  identical results and no clear change in peak memory. `ML_ONNX_THREADS`
+  (default `0`, the CPUs the process may use) and `ML_ONNX_SPINNING` (default
+  `false`) set either back; see
+  [Configuration](docs/guides/configuration.md#cpu-threads).
+- The sentence segmenter batches its texts shortest first, because it pads every
+  text in a batch to the longest one. On 24 papers (1,183 texts) on four threads
+  this took 345 CPU-seconds instead of 464 and 651 MB instead of 902. In the
+  full-mode runs above, the parse stage took about a third less time. A break's
+  score moves slightly with its batch, so a break right at the threshold can
+  flip: over 534 papers, 5 changed one sentence boundary.
+- The layout detector's page resize works on uint8 planes block by block, at 28
+  CPU-ms a page instead of 111 on 59 test pages, with identical bytes.
+- With LLM section escalation on (the default), the section classifier now
+  sends every heading it labels with less than 0.9 probability to the LLM (was
+  0.5). `ML_SECTION_CLASSIFIER_MIN_CONFIDENCE` is unset by default: 0.9 while
+  `ML_SECTION_CLASSIFIER_LLM_ESCALATION` is on, and 0.5 when it is off, where a
+  collapsed heading stays `unknown` and 0.9 lost 1.3 to 2.8 points. A value you
+  set applies either way. On 388 open-access PMC papers held out from the
+  classifier's training and from the choice of 0.9 (10,074 headings labelled in
+  their JATS XML), heading accuracy rises from 0.822 to 0.831 (+0.9 points
+  [+0.5, +1.4]), while the headings sent to the LLM rise from 430 to 1,026 and
+  the papers with a section LLM call from 232 to 305. On the 119 development
+  papers and 86 psychology and social-science papers the threshold was chosen
+  on, accuracy rises by 2.4 and 2.9 points. Qwen3.8-27B answered the
+  escalations in these runs.
+- A paper that prints its abstract in more than one language now gets the
+  version printed first, even when a later version is in English. The
+  front-matter prompts used to ask for the printed English version; the title,
+  the byline and the keywords already kept the version printed first, and the
+  abstract now follows the same rule, in the prompts and in the front-matter
+  tagger. Re-extracting a paper that prints a non-English abstract before an
+  English one changes its `abstract` field.
+- A CUDA card that nothing in a run can load onto no longer decides the memory mode.
+  The automatic rule put every machine with an NVIDIA card of 8 GB or less in the
+  aggressive mode (3 papers a chunk, the layout model unloaded and loaded again
+  around each), even when the run started no OCR engine and no LLM server and the
+  install had no CUDA onnxruntime and no torch, so the card stayed empty. Such a run
+  is now planned as on a machine without a card: balanced unless system RAM is 8 GB
+  or less. On 20 papers in fast mode on 12 cores the balanced mode took 295 s against
+  337 s, at a peak of 4.4 GB against 4.0 GB, with identical exports. A
+  `PIPELINE_MEMORY_MODE` you set and `--memory` are followed as before.
+- A fast run that reads the PDF's text layer opens each PDF once. The text-layer read
+  used to open the file a second time and repeat the furniture strip and the
+  character read that the inspection had just done, about 40% of the native-text
+  stage's CPU time (2 to 4% of a fast batch's wall time). Exports are unchanged.
+- `bibr serve` renders a JSON result without FastAPI's `jsonable_encoder` copy when
+  the result is plain JSON data, which an export is: 11 ms against 81 ms for a
+  0.77 MB export, with the same bytes.
+- A sealed local sentence-segmenter bundle is hashed once when it is resolved, not
+  twice, and an export no longer resolves it again for every paper (about a second
+  per paper for the default model's two graphs).
+- `bibr chew` serializes a result for stdout only when it prints it there.
+- `bibr setup` no longer writes `PIPELINE_MEMORY_MODE`. It shows the memory mode a
+  run will get, and bibr chooses the mode for each run as it does without setup (a
+  test already held the two to the same answer). A line in `.env` held every later
+  run to the answer of the day setup ran: a run with another `--llm` or `--ocr`, on
+  a different card, or under a container's memory limit kept a mode that no longer
+  fit it. Merging into an existing `.env` comments out the line an earlier setup
+  wrote and says so; a value the rule never gives on that machine (`keep_all`, or
+  `aggressive` where there is room) is yours and stays. Set `PIPELINE_MEMORY_MODE`
+  or pass `--memory` to hold runs to one mode.
+- An ONNX run no longer imports torch to place the section and paper classifiers.
+  Where torch is installed that import cost about 480 MB of resident memory for a
+  model torch never ran; where it is not (the gpu extra alone), the classifiers
+  were told there was no card and stayed on the CPU. onnxruntime's CUDA provider
+  and nvidia-smi now answer for an ONNX run, and torch for `ML_RUNTIME=torch` or an
+  overridden classifier.
+- The reference parser no longer waits for the process-wide inference lock when it
+  runs on onnxruntime's CPU provider, so the papers of a chunk parse their
+  references at the same time. The lock stays for every other provider and for
+  torch models, which it was written for. Four threads parsing the references of 20
+  papers took 96 s against 164 s on three cores, with identical output.
+- A model file missing from the Hub cache under `HF_HUB_OFFLINE` is reported as
+  that: a warning naming the repository and revision, where an INFO line said no
+  ONNX bundle existed and the torch fallback's unrelated error was the only
+  warning; and the first-run notice no longer says it is downloading.
+- Removed code nothing called: `citation_matcher.match_year_less`,
+  `self_citation.split_printed_authors` (the export's name splitter does its job),
+  `research_integrity.copy_integrity_statements`,
+  `statement_tagger.pipeline.tagger_confirms_rules`, `merge_split.detect_merges`,
+  the classifiers' `from_pretrained` constructors, and the `table_title` and
+  `chart_title` caption labels, which the layout model does not emit.
+
+### Fixed
+
+- A fast run reads a byline that prints one author per line, or breaks a name
+  across lines, as the printed authors. The front-matter tagger's rules saw the
+  byline with its line breaks turned into spaces, so they ran two authors'
+  names together, cut a name short or filed its last word under the next
+  line's affiliation. They now read each word's line from the region's text: a
+  line that prints one whole name is one author, and the last author on a line
+  takes the name words left on it.
+- A fast run no longer leaves the title, authors and abstract empty when the
+  tagger reads the paper's title from a translation printed in a later block
+  without a byline. When that title is in another language than the bylined
+  record's abstract, the bylined record is selected and its own printed title
+  is exported. Same-language blocks, such as an abstract book's, still leave
+  the front matter empty.
+- A reference's article number with a year suffix, such as "e00376-18" in
+  ASM journals, is kept whole as the first page. The reference parsers and
+  the page-range backfill split it at the hyphen into first page "e00376"
+  and last page "18". A letter-prefixed first part followed by a shorter
+  bare number is an article number when the number, completed with the
+  leading digits of the first part, would not be larger ("00318" is below
+  "00376"); otherwise it is an abbreviated range ("S163-9"), which keeps its
+  printed last page as before.
+- The heading repair that restores spaces in a glued alias ("KeyWords" to
+  "Key Words") no longer keys aliases written without ASCII letters. Every
+  Cyrillic, CJK and Arabic alias had the same empty key, so the last one in
+  the table was offered for any heading in those scripts; that alias has no
+  space today, so no heading changed, but a spaced alias added after it
+  would have replaced such headings.
+- A reference whose DOI is printed only as a resolver link no longer loses the
+  DOI when the parser files the link under `url`. This happened when the
+  printed link was broken by a line wrap (`https://doi. org/10.…`) or misprinted
+  without `org/`. The DOI is now read from a `url` value that is, as a whole, a
+  resolver link; a DOI the parser emitted is never replaced.
+- A DOI or URL printed across a line break is joined again in more of the shapes
+  a PDF's text layer produces, and a line that is not part of it is no longer
+  glued on. A line that ends on "10." before the rest of the DOI, right after the
+  registrant slash, or inside a word of the suffix no longer leaves a space inside
+  the DOI, which cost the link the DOI makes. A long URL whose scheme lies far back
+  on the line is joined as a short one is, and a wrap after "/", "_", "=" or "&",
+  inside a word of the path or before a file extension is read as part of the path.
+  A dot that ends a DOI no longer pulls a following link or reference into it. A
+  hyphen at a line end printed as U+2010 or U+2011 is joined or kept by the rule an
+  ASCII hyphen follows.
+  - A wrap inside a link joins only when the first word of the next line is made
+    like the rest of it: it holds a path or query character, a file name, an
+    identifier (a run of digits among letters, a long mix of letters and digits,
+    several colons or dots), a hyphenated slug of three words or more, the end of a
+    word the wrap split, or it stands alone, that is, ends its line, is followed by
+    a citation ("accessed 2024") or by no word of prose. Prose ("results show",
+    "well-being"), a code ("COVID-19", "H1N1"), a name and its initials, a label
+    ("ISSN", "E-ISSN", "DOI:", "e-mail:"), a bracketed date or note, a new link or
+    DOI and the number of the next reference stay on their own line. This holds for
+    a link of any length: some wraps that the earlier releases joined after a
+    trailing "/", such as "/" before "(accessed on 3 March 2020)", "[Last accessed
+    ...]" or "2016 Volume 4", are now left as printed.
+  - A no-break or thin space ends a word of the text, as a space does, when the wrap
+    is read, and a host that a wrap splits at its dot is joined inside a link that
+    holds another address ("web/2012/http://www." and "communities.example.gov").
+  - The shapes that rejoin the suffix of a DOI after a closing bracket, an
+    underscore or a dot, and inside a word, run on reference entries and on text of
+    unknown kind. `fix_ocr_artifacts` takes `reference` (default `None`, unknown); the
+    PDF parser passes `False` for every region whose layout label is not a
+    reference, and the reference line stream passes `True`. In a replay over the
+    stored text of about 4,000 papers none of these shapes fired outside reference
+    entries, so they are not applied there. The other shapes run on every region.
+  - The work per link is bounded: the text before a wrap is read back to the last
+    space but at most 1,000 characters, and the text is scanned in one pass (at most
+    three when a pass changed something), so a link printed over thousands of short
+    lines is joined in time that grows with the number of lines. A link that holds a
+    word of more than 1,000 characters without a space is left as printed.
+  - Text without a DOI, a URL or such a hyphen at a line break comes out as before.
+- A region the cloud vision OCR (`--ocr anthropic`, `openai`, `gemini`) could not
+  read after its retries, or whose answer was cut off at its output cap, now
+  shows in the export as an `OCR_REGION_FAILED` warning with the page, the
+  region and the reason. Before, the region was exported blank and only the log
+  said so, so a paper could lose paragraphs behind a clean export and exit
+  code 0. The file still goes on, a key with no quota left still fails it after
+  five such regions in a row, and a region the model reads as empty is not a
+  failure.
+- An affiliation list printed at the end of the article under its own heading
+  ("Author details" in BMC journals, "Affiliations" in Springer's, also "Author
+  information" and "Author affiliations") is now read whatever section type the
+  heading was given.
+  In fast mode that section is typed `unknown`, so the list was skipped: authors
+  whose affiliation is defined only there were exported without one, or with the
+  corresponding author's.
+- Fast mode now links an affiliation to its authors by the key printed in front
+  of it ("a Department of ...", "1. Department of ...") and after the author's name
+  ("Tan a,b,d") when the front-matter tagger read the names and the affiliations and
+  left the keys untagged. Such affiliations were exported with no author. A key is
+  read only directly in front of an affiliation, where it opens the line or follows
+  a name, a mark or another affiliation, and in the run of keys after a name; on a
+  paper where the tagger marked no key at all, only when every author carries one.
+- A fault inside bibr while it reads one layout region from the PDF text layer now
+  leaves that region empty and reports it (`TEXT_LAYER_READ_ERROR`, with the page and
+  the kind of region); the rest of the paper is read. Before, the whole paper lost its
+  text layer and stopped with `scan_needs_ocr`, which told the user to run OCR on a
+  PDF that had a good text layer.
+- On Linux, the memory mode and the batch size chosen from it now follow a cgroup
+  memory limit when it is smaller than the machine's RAM. In a container or a batch
+  job given 8 GB on a larger host, bibr read the host's RAM, chose `balanced` and
+  could be killed for memory; it now chooses `aggressive`, as on an 8 GB machine.
+  `bibr setup` reports the same figure. That is not yet enough for a long fast-mode
+  batch with no swap: under an 8 GB limit with swap off, runs of 60 papers stopped for
+  memory after 33 to 51 of them, with 0.8.0's models as well as this release's,
+  because the batch's memory rose from paper to paper. The cause was onnxruntime's
+  CPU memory arenas, which the arena entry below ends.
+- Choosing fast mode when `bibr setup` merges into an existing `.env` now comments
+  out an `OCR_BACKEND`, `OCR_MODEL` or `OCR_PROFILE` left by an earlier setup, and
+  says so. Fast mode reads the PDF's text layer and setup says document contents
+  stay on the machine, but an `OCR_BACKEND=anthropic` written by the cloud plan
+  still sent page images to Anthropic. A fast setup that picks an OCR route keeps it.
+- A fast run no longer empties a paper's title, authors and abstract because its
+  first pages print a second title, such as a translation, a journal masthead or a
+  running head. Abstaining protects a model that reads only the selected block, and
+  the tagger has read the page by then, so the block printing the tagger's title is
+  selected. Two blocks that each print a byline can be two papers, so they still
+  abstain, as does a tagger answer with no title or no author, a title no block
+  prints, or a title in a block that is no record. So does a title in a block
+  without a byline while another block prints one, and a tagger author whose
+  family name the selected block doesn't print, since both can mean the tagger
+  joined two papers. A full run, and a run given an expected identity, abstain as
+  before.
+- A byline printed under a title no longer ends up in the title when the names are
+  written in Han, kana or Hangul with no space inside them. The check that a row
+  names an author looked for separate words of more than two letters, so it missed
+  such names and took the row for a subtitle. It now also looks for the whole name
+  in the row. One character of a name does not count, and a two-character name
+  counts only where no other Han, kana or Hangul touches it, so a real subtitle
+  still folds.
+- Under the front-matter rules, an affiliation key glued to a family name now comes
+  off when the paper shows the letter is a key, also where the model tagged none of
+  them: "Tessb" reads "Tess". The letters count when they run in order through the
+  affiliation block, lone or glued to a word in any script ("bÉcole"), when a line
+  opens with one after a footnote symbol, or, for a capital, when the byline prints
+  it alone. A symbol after the name no longer hides the key, a key printed apart
+  ("Silva a", "Silva ᵇ", or a letter in marks after a space, "Silva *,b") keeps the
+  name's last letter, and a lower letter leaves a run only if
+  the byline has not shown it yet, so "Moreirab" after a name keyed "a" keeps its
+  "a". An all-capitals name still keeps a final "I". A key taken this way that the
+  tagged affiliations do not hold reports `affiliation_mark_unresolved`, as any such
+  key does. A mark glued to an affiliation's first word ("aUniversità") keys it with
+  the letter, and a loose email goes to the longer of two family names it holds.
+  These apply with `FRONT_TAGGER_RULES`, which fast mode turns on.
+- On the text-layer route, one glyph with no character mapping no longer empties
+  its whole region. Such a glyph reads as a control character, and any control
+  character made the region unusable, which suited a route where OCR reads it next
+  but here left abstracts blank. A region with one, or at most one per 100
+  characters, is now read with U+FFFD in place of each, and a
+  `TEXT_LAYER_GLYPHS_UNMAPPED` warning counts them. The mark stays because what the
+  glyph stood for cannot be recovered and leaving it out can change the meaning
+  (a superscript minus in "W m-1"). More of them, and any in a display formula,
+  still reject the region. A region with U+FFFD rates 0 in
+  `extraction.diagnostics.text_quality`, so many of them can lower that score and
+  raise `LOW_TEXT_QUALITY`.
+- Tables rebuilt from the text layer keep a cell whose text wraps in its row:
+  a line set closer under the text above it than the table's rows sit to each
+  other continues that cell, and a word broken at the line end is joined again.
+  Before, every printed line became a row. A line of numbers always starts a
+  row, and in a table set solid, where every line sits that close, each line
+  stays a row. A table printed turned a quarter is read upright, a comma or full
+  stop no longer makes a row of its own, and gaps along a line are measured for
+  the page's shape, so a Letter or landscape page splits words and columns as an
+  A4 page does. A table region gets the text checks other regions get: private-
+  use glyphs are dropped and counted, a glyph with no character mapping shows as
+  U+FFFD and is counted in `TEXT_LAYER_GLYPHS_UNMAPPED` (in a table however many
+  there are, since a math font can map none of its brackets), and a region of
+  broken text is left unread.
+- Text drawn with alpha 0 over its own printed outlines is no longer dropped as
+  hidden text. PDFs written by Chromium draw fake bold as vector outlines and lay
+  transparent text over them to keep it selectable, so on preprint cover pages
+  the title, the author names and the labels disappeared. The ink under the text
+  has to have the shape of its glyphs: transparent text over an empty part of the
+  page, a band, a rule, other outlines or visible text still counts as hidden.
+  The check can be fooled by single letters under about 9 pt over a band, or by a
+  filled box the size of each letter.
+- On a Mac, `bibr chew` no longer fails every PDF with `Layout analysis failed`
+  unless you pass `--device cpu` (#257). ONNX Runtime's CoreML provider came
+  before the CPU in the default chain, and the layout model fails on every
+  CoreML configuration. The local ONNX models now run on the CPU provider by
+  default. Setting a model's own device to `mps` still opts in to CoreML, except
+  for layout, which stays on the CPU provider.
+- A long author list no longer loses all but its last author when it wraps right
+  after its "&" or "and" (#217). The geometry segmenter could take the last
+  author's line, which reads like a one-author entry, for the start of a
+  reference, and that entry then took the date, title and DOI. A line after one
+  ending in "&" or "and" no longer opens an entry, in the geometry segmenter and
+  in the reference line stream.
+- A reference whose first surname has a non-ASCII letter ("Novák,", "Šimić,") is
+  now read as opening an entry even when its first line holds no year. The
+  geometry model's `starts_author_date` feature only knew ASCII surnames, so such
+  a line was glued to the entry before it. The model is not retrained, and every
+  ASCII line keeps the value it was trained on. On 330 PDFs with reference lines
+  the two fixes change 23 line labels, all of which read as correct by hand, and
+  the model's boundary F1 on 86 gold papers stays at 0.996.
+- A hyphenated initial broken at a line end ("Falk, L.-" / "S.") no longer keeps
+  the line break's space in `authors` ("L.- S."), which is now "L.-S.".
+- Text too small to read no longer reaches the text layer, where an LLM would
+  read it. Visible text under 3 pt, measured through the text, page and form
+  matrices, whatever its rotation, and hairline letters squeezed to a sliver
+  now count as hidden (rule `hidden_text/3`); the limit was 1 pt, and rotation
+  could escape it. A short exponent or subscript printed in ink beside readable
+  small print stays; one in white or at alpha 0, or beside small print that is
+  hidden itself, goes. Small plot and diagram labels leave the text layer too, as do some
+  table cells shrunk below 3 pt. PDFs that insert hairline letters into words
+  ("lalin" printed as "lain") now read correctly. The new rule version changes
+  the OCR cache key, so cached papers are read again.
+- Text painted over by a later rectangle, image or form, text too pale to read and
+  text at a near-zero fill alpha no longer reach the text layer (rule
+  `hidden_text/4`). The page is rendered without such an object, and the object
+  goes only when nothing changes. Grey of about 0.88 and paler goes under 14 pt;
+  darker grey stays, and so does larger pale text. Words the page still prints, as
+  outlines or a picture of them, stay, and so does a scan's OCR layer under its
+  images. Replaced running heads and corrected values now read as printed. Across a
+  large mixed corpus the removed text is 0.005% of the characters, in about 4% of
+  the PDFs. Rendering adds about 3.5 ms per page.
+- Text a clip hides no longer reaches the text layer (also rule `hidden_text/4`). A
+  figure cropped from a whole page used to bring that page's text along, so pages
+  read twice. An object goes when its box lies outside its clip, or its clip is not
+  one rectangle, and it draws no ink rendered alone. A few labels of figures printed
+  as pictures go with such copies, because the copy was their only text.
+- A long batch no longer grows in memory from paper to paper. The growth came from
+  onnxruntime's CPU memory arenas: each model's session kept its largest allocation
+  for the rest of the run. glibc's per-thread malloc arenas added to it. bibr's CPU
+  sessions now run without an arena (`ML_ONNX_CPU_ARENA=true` restores it), and a
+  batch limits glibc to two malloc arenas before it starts (`PIPELINE_MALLOC_ARENAS`,
+  default `2`; Linux with glibc only; a `MALLOC_ARENA_MAX` in the environment wins).
+  A fast batch of 60 papers under an 8 GB limit with swap off, which bibr could not
+  finish before this fix (it stopped after 33 to 51 papers), now runs to the end at a
+  peak of 4.7 GB. The memory it keeps between papers stays at 1.6 to 2.0 GB instead of
+  climbing from 3.4 to 5.3 GB. Without a memory limit, the peak of the same batch
+  fell from 7.8–9.5 GB to 4.2–4.8 GB, at about 1% more CPU time and 2–3% more wall
+  time per paper (two runs of each, alternated, on 4 cores). Exports are unchanged.
+
+- A link that a PDF prints over two lines is joined from the PDF's own link
+  annotation when it is clickable, so it no longer keeps a space at the line break
+  ("https://osf.io/ 5s8kv", "github.com/fishR-Core-Team/ FSA", "osf. io/2y34r/",
+  "htt ps://github.com/..."). The rules that judge a break by the words around it
+  read a short identifier with prose after it, a word in capitals, a file extension
+  they do not list, a value broken inside its digits and letters, and a link printed
+  without "https://" as the end of the link. A break is now joined, with no space,
+  when the target of one of the PDF's link annotations runs on through it: inside a
+  region, between two regions (a column or page break) and in a reference entry.
+  Where no target runs through a break, the rules decide as before, so a link that
+  is not clickable reads as it did. A wrap hyphen that the target does not have is
+  dropped at a region break ("github.com/Betha-" + "nyL/…"). A target that runs on
+  past the next word joins only when that word ends its line and the text joined
+  is shaped like a link, so two words of prose that spell the start of a host
+  ("Creative" + "Commons" beside a creativecommons.org licence link, "The" +
+  "Guardian") stay apart. In a fast text-layer run of 290 papers (the 190 of the
+  gold cohort and 100 of the scienceverse/papers corpora that cite a repository),
+  86 sentences change, each inside a link and none in prose; 22 reference DOIs
+  that the wrap had cut ("10.1016/j.j", "10.1146/ann") are read whole. One
+  reference that links a book chapter's page now gets the DOI with the chapter's
+  name after it ("10.4324/9780203113110-6/governing-biosecurity-…"), where it had
+  none, as a DOI may hold a "/". Against the gold cohort's URL labels, 13 wrapped
+  links keep a space, against 17, and the core metrics are unchanged but for the
+  reference DOI recall (0.900 to 0.901). Of the 73
+  wrapped repository links the 100 papers annotate, 72 are whole, against 68; the
+  other is lost to a text-layer region that reads the next line's tall letters.
+  metacheck's own link repair (scienceverse/metacheck#640) changes none of their
+  40,313 sentences, against 4.
+- A DOI read from a publisher link no longer keeps the link's query:
+  "…/doi/abs/10.12968/bjca.2019.0072?journalCode=bjca" gives
+  10.12968/bjca.2019.0072, as do "?via%3Dihub", "?download=true" and
+  "?casa_token=…" (one reference of the gold cohort). A DOI holds no "?name=". A
+  link joined whole across a line break exposed it.
+- A word hyphenated at a page or column break is joined like one hyphenated at a
+  line end: "edu-" and "cated" on two pages read "educated", where they read
+  "edu- cated".
+- Table and figure captions in Dutch, German, French, Spanish, Portuguese, Italian,
+  Polish and the Scandinavian languages ("Tabel 1", "Tabelle 1", "Tableau 1",
+  "Figura 1", "Abbildung 1") reach their table or figure. They were left in the
+  body text, and the tables had no caption or label.
+- A title printed in two languages on rows of their own is exported in its first
+  language in fast mode, not as one title running through both, and the subtitle of
+  the second version is no longer joined to the first.
+- A subtitle opening with "A" ("A systematic review") is kept; names such as "Li
+  Wei" are not read as roman numerals of a series; the "*" of "A*" stays in a
+  title; and a journal's name inside a word of the title ("Nature" in "signature")
+  no longer marks the title as a masthead.
+- Only the author whose symbol stands at the correspondence note is flagged as
+  corresponding. With "* Corresponding author … † These authors contributed
+  equally" in one footnote, the † authors were flagged too.
+- E-mail lists in braces (`{alice, bob}@uni.edu`) give one address per name; an
+  author with a compound given name ("Mary Ann", "Mary-Ann") matches
+  `mary.smith@`; and a "pg" that OCR read for an envelope keeps marking the
+  corresponding author's address.
+- "Correspondence to:", "Corresponding author:" and "E-mails:" lines are cut from
+  affiliations, a UK postcode no longer costs an affiliation its city, and
+  "supported by NSF and NIH" names two funders where the pair was dropped as
+  author initials.
+- A printed byline of more than 64 authors is no longer cut to 64 in fast mode.
+  The cap is for a generative model that loops on its output; it now applies to
+  model output only.
+- A name suffix stays with the family name ("Smith Jr.") in the authors read from a
+  CRediT statement or a printed "How to cite" line, a group name there fills no
+  person, and that line is found on the first page read, not only on page 1 of the
+  PDF (`--pages 5-12`).
+- "(Smith, 2020a, b)" and "Lansbury and Mayes (1996a,b)" link both works;
+  "O’Brien" and "O'Brien" are one name; and "Eqs. (1)-(3)" and "Equations (2) and
+  (3)" link every equation they name.
+- Two references that share a title, or whose titles one contains the other, no
+  longer take the same row of the reference list. Both lost their numbered
+  citations when they did.
+- A reference wrapped across a column or page no longer exports the line break
+  inside its title, authors or container.
+- A single reference whose title opens with a number ("24 Hours in A&E") keeps the
+  number; a year in the title of a work "in press" is not taken as its year;
+  "retrieved" inside a title is not read as an access date; and a numbered entry is
+  not split at "2. überarb. Aufl.".
+- A footnote whose number the text layer joins to its first word ("10Beginning …")
+  or that is marked with "∗" (U+2217) gets its label and its link from the text.
+- The rows of a table nested in a cell of an HTML table are no longer read a second
+  time as rows of the outer table.
+- An eLife article's own DOI is selected over the numbered DOIs of its abstract and
+  digest (`…/eLife.00013.001`), and "Let F(x) = 3" is not exported as an F statistic
+  with `x` degrees of freedom.
+- `bibr.Chewer`: a `chew()` from a second thread while another is running waits for
+  it. It used to start on the running loop, process the file beside the other, and
+  raise, so the file was read and its result thrown away.
+- An LLM that answers `keywords` or a funder's `award_ids` with one string is read
+  as one keyword or award, not one per character.
+- Two more inputs that took too long: a first page of thousands of tiny regions
+  (2,000 took 20 s in the front-matter region lookup), and a footnote-mark range
+  such as "1 – 3000000".
+- A DOI printed with typeset hyphens (U+2010, U+2011, an en dash or a minus sign) is
+  read whole. The DOI pattern stopped at the first of them, so
+  `10.1234/s1‐2020‐01838‐x` was selected as `10.1234/s1`.
+- A text-layer region whose font is broken is no longer accepted because it also
+  holds one unmapped glyph: only the marks bibr inserts are left out of the
+  usability check, not the U+FFFD characters the PDF itself carries.
+- "(Smith, 2020, 2021)" links both years when one of them is ambiguous between two
+  Smiths. The year already linked hid the other from the resolver.
+- JATS tables: a cell spanning columns or rows fills every slot it covers, as in HTML
+  and DOCX tables, instead of shifting the rows below it to the left. A JATS body
+  with several reference lists and no back matter reads all of them, not the first.
+- DOCX: text boxes written by Word 2010 and later (`mc:AlternateContent`) and VML
+  text boxes are read; a word split across formatting runs inside a text box stays
+  one word.
+- EPUB: a self-closing `<title/>`, `<script/>`, `<style/>`, `<ul/>` or `<textarea/>`
+  in a chapter no longer swallows the text after it (the whole book, for the first
+  three).
+- A DOCX reference list with a long hyphenated run of capitals ("A-B-C-…") no longer
+  takes exponential time in the entry-start pattern (24 hyphens took 10 s), and an
+  unbroken CJK row of several thousand characters no longer takes seconds in the
+  front-matter address pattern.
+- `$$\text{hello {world} foo}$$` is unwrapped like any other `\text{}` wrapper.
+- A display formula holding a statistic that an earlier pass already read
+  (`$$t = 2.1, p = .03$$`) no longer yields `t = "2.1, p = .03"` and a duplicate `p`.
+- "10 pg ml" near an e-mail address is not read as a corresponding-author marker.
+- The geometric reference tagger's gate declines a NaN score instead of reading it
+  as zero.
+- A reference the parser's tokenizer reduces to no tokens (zero-width characters
+  only, with a BERT-normalizer bundle) no longer fails its whole batch, and the CRF
+  segmentation fallback keeps a reference whose first tag is lost where two windows
+  meet.
+- `CROSSREF_REDIS_CACHE` works across `asyncio.run` calls and across threads with
+  their own loops. The shared client's Redis connection belonged to the first loop,
+  and later lookups failed with "Event loop is closed" and went to Crossref again.
+  The ROR client likewise keeps one HTTP pool per live loop instead of dropping and
+  rebuilding it on every switch.
+- The native NuExtract backend connects with the 5 s connect timeout of the other
+  providers, not twice `LLM_TIMEOUT_SECONDS`.
+- Shutdown and cancellation: classifier resources closed while they are still
+  loading no longer end up loaded; Ctrl-C while the OCR consensus server starts
+  closes the progress display and the recognizers already built; a managed
+  llama.cpp or Rapid-MLX OCR server is stopped even when closing its HTTP client
+  fails; the cloud OCR client closes its SDK connection pool; `bibr demo` stops the
+  model servers it started when Gradio exits; a second Ctrl-C during a remote
+  batch's drain keeps the outcomes of the jobs that had finished.
+- The front-role classifier loads off the event loop (about 4 s on the first request
+  of each `bibr serve` worker), and cloud OCR encodes page crops off it.
+
+### Security
+
+- The lock moves to soupsieve 4.1 on Python 3.11.5 and later, with a constraint
+  floor of 4.0 in `pyproject.toml`. Earlier releases take polynomial time to match
+  a selector with descendant combinators on deeply nested markup (CVE-2026-126190),
+  and bibr runs such selectors (`thead tr`) on the tables of HTML it is given.
+  soupsieve 4 needs Python 3.11.5, so Python 3.11.0 to 3.11.4 keep 2.10. soupsieve
+  4.0 also stops looking inside `template` elements, which bibr does not select in.
+
+- The lock moves the OpenTelemetry packages to 1.45.2 (0.66b2 for the beta ones).
+  `opentelemetry-api` 1.45.1 takes polynomial time on a crafted `traceparent`
+  header in `TraceContextTextMapPropagator.extract()` (CVE-2026-126360). bibr does
+  not import OpenTelemetry itself; the `mcp` and `vllm` extras bring it in.
+
+## [0.8.0] - 2026-10-30
+
+bibr's 4B extraction student is now the revision retrained with pointer answers,
+pinned to a Hub commit in every build, and the `vllm` extra moves to vLLM 0.32.0,
+which fixes a published advisory in 0.31.0. `bibr setup` now picks the local LLM,
+OCR and memory mode from the GPU card, and bibr sizes its prompts to the context
+window of an external Ollama or llama.cpp server. Word reference lists, running
+heads read from the PDF text layer and a long batch's memory are fixed too. The
+export moves to schema 12.3, which only adds keys. See Changed for the new
+defaults.
+
+### Added
+
+- The 4B student's W4A16 build (`scienceverse/bibr-extract-qwen35-4b-W4A16`,
+  4-bit weights, a 3.8 GB download) is in bibr's model registry, served by
+  vLLM with at most 64 sequences. It passed 218 of 252 development papers,
+  level with the bf16 build of the same revision on the same machine, and
+  needs half its memory. `bibr setup` now recommends it for Linux NVIDIA cards with 10–19 GB,
+  where it replaces the 2B student, and recommends the bf16 4B from 20 GB
+  (was 12).
+- `LLM_LOCAL_MIN_VRAM_GB` sets the minimum budget of the managed vLLM LLM
+  server's model, for a model bibr's registry does not list (a local path has
+  no minimum, so a start that cannot fit used to be launched and fail inside
+  vLLM). For a local copy of the 4B student's W4A16 build it is 6.0 GiB on
+  vLLM 0.32 (6.25 on 0.31), served with `--max-num-seqs 64`; the configuration
+  guide has the settings. For a model the registry lists it can raise the
+  minimum but not lower it: a lower value is ignored with a warning, so a
+  value left from a local build never starts the bf16 4B student below its
+  own minimum.
+- `LLM_VLLM_SPEC_DECODE` sets speculative decoding for the managed vLLM LLM
+  server: `auto` (the default), `none`, `mtp` or `dflash`. With `auto`, the 4B
+  student's builds start with MTP (3 tokens drafted by the model's own
+  multi-token-prediction layers, with `--no-async-scheduling`) when the server
+  stays up for the whole run and its budget is at least MTP's minimum, 12.0 GiB
+  for the bf16 build and 7.25 GiB for the W4A16 build; otherwise without it,
+  and `auto` never refuses a start. The server stays up when no managed
+  PaddleOCR-VL server takes turns with it (cloud OCR, an OCR server at
+  `OCR_BASE_URL`, or OCR on llama.cpp). With one server for the run on the 252
+  development papers (vLLM 0.32.0, OCR read from a cache, the pinned bf16
+  build), MTP passed 218 against 219 without it on an RTX 3090 and 218
+  against 218 on an RTX 5090, the LLM stage took 0.80x and 0.74x as long, and
+  papers an hour rose 5.7% and 12.1%. In bibr's default plan on cards up to
+  64 GB, where the LLM server restarts every chunk to take turns with
+  PaddleOCR-VL, `auto` leaves MTP off: on emulated 12 and 16 GB cards (the
+  previous revision's W4A16 build) each MTP start took 51 s instead of 37 s
+  and 48-paper batches ran 5.0% and 8.6% slower, with the same scores (40 and
+  39 of 48 against 39 and 40). It has not been measured in the 24 GB swap
+  plan. `mtp` uses MTP at every start and needs its minimum. `dflash`
+  (opt-in) uses DFlash with 7 drafted tokens from `z-lab/Qwen3.5-4B-DFlash`, a
+  separate 1.27 GB model pinned to revision `9a1996cc`, for the bf16 4B only,
+  with a 13.5 GiB minimum: 220 against 219 and 217 against 218 on the same
+  runs, the LLM stage 0.72x and 0.64x as long, but about half the KV cache
+  capacity. A `--speculative-config` in `LLM_VLLM_EXTRA_ARGS` replaces bibr's
+  choice.
+
+### Added — export schema 12.3 (additive)
+
+The export moves to schema `12.3`, which adds optional keys and receipt values;
+every 12.2 export is still valid input for the 12.x reader.
+
+- `OCR_NATIVE_TEXT_HEADER_FOOTER=true` reads running heads and page footers
+  from the PDF's text layer instead of OCR, and `OCR_NATIVE_TEXT_FORMULA_NUMBER=true`
+  does the same for equation numbers that read like "(12)", "(3a)" or "(iv)".
+  The header/footer setting is on by default (see Changed); the formula-number
+  one stays off. A header or footer stays with OCR when its text is
+  in a right-to-left script (the text layer reverses brackets and digits), when
+  it is a first-page masthead drawn partly as an image or barely covered by the
+  text layer's glyphs, and on a scanned page: one whose text is mostly an
+  invisible OCR layer, or one a page-sized image covers under a visible OCR
+  layer.
+- The opt-in `extraction.regions[]` rows name where each region's text came
+  from: `source` is `text_layer` or `ocr`, and `ocr_backend` names the OCR
+  backend that read an `ocr` region, including a consensus or escalation
+  recognizer whose reading replaced the primary one.
+  `extraction.settings` records `native_text_header_footer` and
+  `native_text_formula_number`. The keys are new in schema 12.3 and omitted
+  when absent.
+- A DOI that the PDF carries only in text it never prints (white on white,
+  under a logo) on page 1 or 2 is kept in the identity receipt as an
+  agreement-only `hidden_text` candidate; on a later page it is removed with
+  the rest of the hidden text and leaves no row. It never names the paper on
+  its own; when it matches the DOI chosen from printed evidence, its
+  `semantic_context` is `hidden_text_agreement`.
+
+### Changed
+- bibr's 4B extraction student is now the revision retrained with pointer
+  answers for the two front-matter calls, from each repository's `pointer-v1`
+  branch: bf16 `9199424d`, W4A16 `a32f2048`, GGUF `0aa228e8` and MLX 8-bit
+  `432b8cd8`. On the 252 development papers the bf16 build passes 218, against
+  217 for the previous revision (`6ab47a4e`) on the same machine (+0.4 points
+  [−0.8, +2.0]); the W4A16, GGUF Q8_0 and GGUF Q4_K_M builds pass 218, 218 and
+  217, each within the −4 point rule of the bf16 build. The 216/252 and the
+  2.8 points behind Qwen3.8-27B in the docs belong to the previous revision.
+  `LLM_POINTER_OUTPUTS` stays off by default: with it on, first-author
+  accuracy is lower (−0.015 [−0.031, −0.003]), and on 3 papers bibr's
+  resolver took a wrong span of the text as the abstract without a warning.
+- Every 4B build is pinned to a Hub commit. `llama-server -hf` and the MLX
+  servers (vllm-mlx, Rapid-MLX) always download a repository's `main`, which
+  still holds the previous builds, so bibr now downloads the pinned GGUF and
+  MLX files into the Hugging Face cache itself and starts the server on the
+  local copy, under the same model id. vllm-mlx serves that copy, and any
+  local MLX directory in `LLM_LOCAL_MODEL`, as a text model: on its own it
+  would take the `image_token_id` in the build's `config.json` for a vision
+  model and fail to load it. A cached build starts offline; an uncached one
+  offline stops with the `hf download` command that fetches it.
+  `LLM_LOCAL_MODEL` may now be a local `.gguf` file for llama.cpp, and
+  `bibr chew --dry-run` counts a pinned build as cached only at its commit.
+  The configuration guide shows how to run the previous revision.
+- The `vllm` extra and bibr's `uv tool run` fallback now use vLLM 0.32.0 (was
+  0.31.0) for the managed LLM and PaddleOCR-VL servers. The 4B student's vLLM
+  builds now run with at most 64 sequences (the bf16 build had 128), and their
+  minimums, measured again with vLLM 0.32.0 as below, are 11.0 GiB for the bf16
+  build (was 12.25) and 6.0 GiB for the W4A16 build (was 6.25); the 2B's 6.25
+  GiB is the vLLM 0.31.0 figure. On the swap path a start needs 12.75 GiB free
+  for the bf16 4B and 7.75 GiB for the W4A16 build; a server that stays up for
+  the run needs 17.25 and 12.25 GiB while bibr's models hold 0.5 GiB. So on a
+  24 GB card with no desktop, the bf16 4B now starts beside a PaddleOCR-VL
+  server of about 5.4 GB at `--ocr-url` (0.48 of the card, 11.3 GiB, below
+  MTP's minimum, so without MTP). With a 0.5 GiB desktop on the card as well
+  it is still refused (17.16 GiB free, 17.25 needed). Beside bibr's models at
+  0.5 GiB, a free 24 GB card now gives 0.71 and a
+  free 32 GB card 0.78 (0.70 and 0.77 on 0.31). With one server for the run on
+  the 252 development papers (the pinned bf16 build), vLLM 0.32 at 64 sequences
+  passed 219 against 220 on 0.31 at vLLM's default 256 (−0.4 points [−1.2, 0]),
+  at the same speed. On emulated 12 and 16 GB cards in the default plan (with
+  the previous revision's W4A16 build and its minimum still at 6.25 GiB),
+  PaddleOCR-VL and the W4A16 build on vLLM 0.32 finished 48 of 48 papers each
+  beside a 0.5 GiB desktop. vLLM 0.32 no longer rejects a request whose prompt
+  plus completion cap runs past the context window, as 0.31 did with HTTP 400:
+  it lowers the cap to what is left. A prompt longer than the window is still
+  rejected, with the message bibr reads the window from. Where bibr does not
+  know the window (a server at `LLM_BASE_URL`, or a model outside the registry
+  started without `--max-model-len`) and an answer stops at it, the call failed
+  as truncated where 0.31's 400 let bibr cut the input and ask again. bibr now
+  reads the window then from the server's `/v1/models` (vLLM's
+  `max_model_len`, once per server and model) and asks again with the input cut
+  to fit. An answer that stops short of the window, and a server that lists no
+  window, still fail the call as truncated.
+- The managed vLLM LLM server's minimum is now the budget each published
+  model was measured to need on an RTX 3090 with vLLM 0.31.0: a first start,
+  before vLLM has filled its compile cache, that serves one 32,768-token
+  request. It is 12.25 GiB for the 4B student and 6.25 GiB for its W4A16 build
+  and for the 2B (it was the card sizes setup offers them on, 12 and 8 GB).
+  On the swap path a start needs that budget free, plus what vLLM takes beyond
+  it while starting and 1 GB for bibr's models: 14.25 GiB for the 4B, which a
+  16 GB card no longer has once bibr's models have grown, and 8 GiB for the
+  W4A16 build. A server that stays up for the run (any other OCR) needs 6 GB
+  less what bibr's models hold in place of that 1 GB: 18.75 GiB for the 4B and
+  12.5 GiB for the W4A16 build while they hold 0.5 GiB. An 8 GB card, with
+  about 7.6 GiB free to CUDA (about 7 GiB beside a desktop), cannot start any
+  of them unless you set the share yourself (`LLM_LOCAL_MEM_FRACTION`), and
+  that works only when nothing else, such as a desktop, uses the card. (These
+  are the vLLM 0.31.0 figures; the vLLM 0.32.0 entry above has this
+  release's.)
+- On Linux NVIDIA cards below 10 GB, `bibr setup` now runs both OCR (GLM-OCR)
+  and the 4B student's Q8_0 GGUF build on llama.cpp, which you install. Such
+  cards used to get the 2B student on vLLM from 8 GB, whose starts need more
+  memory than an 8 GB card has free. On an emulated 8 GB card with 0.5 GiB
+  taken by a desktop, the llama.cpp pair finished 48- and 100-paper batches
+  (with the fix below), and the Q4_K_M build that cards below 7 GB get
+  finished 48 papers on an emulated 6 GB card. Emulated means an RTX 3090
+  with its free memory cut to the card's: the sizes were tested, not the
+  speeds of those cards.
+- CUDA cards below 12 GB now run bibr's aggressive memory mode (was 8 GB and
+  below) when bibr manages the LLM server on the same card (`--llm local`,
+  `vllm` or `llama-cpp`). Aggressive mode unloads bibr's own models before each
+  start of the LLM and processes 3 papers a chunk. A cloud or remote LLM with
+  local OCR, or `--no-llm`, keeps the rule from before: balanced from above
+  8 GB, with batches of 8 and the streaming back half. On an emulated 10 GB
+  card with a desktop, the W4A16 build's 16 starts found 8.76 GiB free each
+  time (8 GiB needed) and the 48-paper batch finished. In balanced mode
+  bibr's models held 2.0–2.4 GiB at the LLM's later starts on an emulated
+  12 GB card, which on a 10 GB card would leave less than 8 GiB from the
+  second chunk. The 12 GB card stays balanced:
+  it finished 100 papers with a desktop, its last starts finding 8.6 GiB free.
+- In the aggressive memory mode, a managed llama.cpp LLM server now always
+  stops before a managed GLM-OCR server starts (the LLM stage restarts it).
+  Under the free-memory rule (under Fixed) it stayed up whenever 3.25 GiB was
+  free, which left bibr's own GPU models too little room while OCR ran: on an
+  emulated 10 GB card with a 0.5 GiB desktop the LLM stayed up, bibr's models
+  had about 1.97 GiB against the 3.1 GiB or so they reach in aggressive mode,
+  and the layout model split its batches on running out of memory 75 times
+  over 48 papers. An emulated 8 GB card, which stopped the LLM in every chunk
+  after the first, split 26 times on the same papers and ran 149.5 papers an
+  hour, against 148.2 for the 10 GB card with the LLM resident, so stopping
+  cost no measured speed. Both runs read the model files from a warm page
+  cache; on a machine with little RAM and a slow disk each restart reads the
+  GGUF again. This changes Windows 10–11 GB NVIDIA cards, pre-Ampere 11 GB
+  cards (RTX 2080 Ti, GTX 1080 Ti), `--llm llama-cpp` below 12 GB and any run
+  that sets the aggressive mode itself (`--memory aggressive` or
+  `PIPELINE_MEMORY_MODE=aggressive`) with a managed llama.cpp LLM, on a card
+  of any size; on 6–9 GB cards the LLM already stopped in every measured chunk
+  after the first. The balanced and keep_all modes keep the free-memory rule.
+- On Linux and an Ampere or newer NVIDIA card of 10–11 GB, `bibr setup` now
+  runs the 4B's GGUF Q8_0 build and GLM-OCR on llama.cpp, in the aggressive
+  memory mode and without the `vllm` extra, when it finds on PATH a CUDA build
+  of `llama-server` (or of the unified `llama` binary) that can start CUDA and
+  whose `--version` build is 11282 or newer, the build behind every llama.cpp
+  batch run for the defaults. On an RTX 3090 cut to 10 GB beside a 0.5 GiB
+  desktop, that pair ran 148 papers an hour against 85 for the W4A16 build on
+  vLLM, which restarts two vLLM servers every chunk, and passed 40 of the same
+  48 papers against 39. That run kept the LLM up between chunks; stopping it
+  for each chunk's OCR, as above, the same pair cut to 8 GB ran 150 papers an
+  hour over 48 papers and 141 over 100. Setup prints the server and its build,
+  and `bibr setup --advanced` gives the W4A16 build instead. A server it finds
+  but does not use (a Vulkan, HIP or CPU build, a CUDA build that cannot start
+  CUDA on the installed driver, an older or unreadable build, or a probe that
+  timed out) gets one line saying why, and setup keeps W4A16. `--llm local`
+  never reads PATH and keeps W4A16 on these cards, so after setup picked the
+  pair, run plain `bibr chew` (or `--llm llama-cpp`): `--llm local` would start
+  vLLM with the GGUF build setup wrote, which vLLM cannot serve. After a
+  failed local server test the wizard now suggests `bibr chew`, which uses the
+  backend setup wrote, instead of `bibr chew --llm local`.
+- On Linux the automatic OCR chain (`OCR_BACKEND` unset or `paddle`) now runs
+  GLM-OCR on llama.cpp whenever the run's LLM runs on llama.cpp, the pair
+  `bibr setup` writes: bibr hands GPU memory between two vLLM servers or two
+  llama.cpp servers, but not between PaddleOCR-VL on vLLM and a llama.cpp LLM.
+  `--llm local` on a card of 8.0–9.75 GiB used to start PaddleOCR-VL on vLLM
+  beside the llama.cpp LLM, a pair no run measured. An explicit
+  `OCR_BACKEND=paddle-vllm` still starts PaddleOCR-VL.
+- NVIDIA cards older than Ampere (compute capability below 8.0: Turing,
+  Volta, Pascal) now run the extraction LLM and the automatic OCR on
+  llama.cpp, in `bibr setup` and for `--llm local`. bibr's vLLM models are
+  bf16, which vLLM 0.31 and 0.32 serve only from compute capability 8.0; on an older
+  card it does not refuse them but casts them to float16 with a warning, a
+  path bibr has not been tested on. No batch on a Turing or Pascal card has
+  been recorded with either runtime: this is a conservative routing rule.
+  When nvidia-smi cannot report the compute capability, routing is as before;
+  an explicit `--llm vllm` or `OCR_BACKEND=paddle-vllm` still starts vLLM.
+- Setup counts a card that reports up to 0.25 GiB under a size (an RTX 5070
+  reports 12,227 MiB) as that size, for the model it recommends and for its
+  memory mode. Such cards used to get the next smaller tier. PaddleOCR-VL's
+  8 GB minimum has no such slack, so an RTX 4060 (8,188 MiB) keeps GLM-OCR.
+- `bibr setup`'s recommended plan for an NVIDIA card on Linux (x86_64,
+  compute capability 8.0 or newer, or unreadable) now installs the `gpu`
+  extra and makes `onnxruntime-gpu` the onnxruntime build that loads. Without
+  it, every ONNX model ran on the CPU beside an idle GPU (169 against 591
+  papers an hour on an RTX 5090, without and with the extra). Every run
+  behind the plan's defaults had the extra: layout and sentence splitting ran
+  on the GPU, and the NER reference parser did too in the balanced memory
+  mode, while the classifiers stayed on the CPU. In a source checkout with
+  `uv.lock` the plan now installs what was measured (`onnxruntime-gpu`
+  1.26.0); an install from PyPI gets the newest `onnxruntime-gpu`, which no
+  run has used. Windows, Linux on Arm and cards older than Ampere, where no
+  run with `onnxruntime-gpu` has been measured, are left as they were. After
+  an update, keep `--extra gpu` on `uv sync` (see the tester guide's
+  "Updating").
+
+- ROR matching no longer throttles itself to 50 requests per 5 minutes when no
+  client ID is set. ROR limits each IP address to 2000 requests per 5 minutes
+  and does not enforce its lower anonymous limit, so the default budget is now
+  1000 requests per 5 minutes per process, half the per-address limit (2000
+  with `ROR_CLIENT_ID`; `ROR_REQUESTS_PER_5MIN` still sets it). With
+  enrichment on, a batch spent the 50 requests in its first minute, and later
+  papers that needed a new ROR request waited out the 60 s
+  `ROR_ENRICH_TIMEOUT` and kept few affiliation matches. A string whose lookup
+  cannot start before the paper's ROR time budget ends is now left unmatched
+  at once instead of holding the paper until the timeout. The
+  `ROR_MATCHING_FAILED` warning gives its reason as "request budget spent", so
+  it is not confused with "rate limited", the backoff after ROR answers 429.
+- A 429 from ROR now also halves that process's ROR request budget, not below
+  50 (or `ROR_REQUESTS_PER_5MIN`, if lower); the first lookup after an hour
+  without a 429 doubles it back, and the next doubling needs another such
+  hour, up to the configured budget. Several bibr processes behind one IP
+  address then settle under ROR's 2000 requests per 5 minutes instead of
+  drawing a 429 every window. The pause after a 429 is unchanged: its
+  `Retry-After`, at most 5 minutes (api.ror.org sends none, so 5 minutes). A
+  403, which ROR answers only for addresses it has blocked, now pauses ROR
+  lookups for 5 minutes without halving, logs a warning that quotes ROR's
+  answer, and reads "blocked (HTTP 403)" in `ROR_MATCHING_FAILED`; before,
+  every later lookup was still sent and logged only at debug level. The
+  deployment guide now says the budget is per process: with N bibr processes
+  behind one address, set `ROR_REQUESTS_PER_5MIN` to at most 2000/N.
+
+- A Word manuscript's reference list is now segmented by its own paragraphs,
+  one entry each, instead of by the configured reference segmenter (by
+  default an LLM call), when the list is under a heading that is a reference
+  list's name ("References", "7. Literature Cited") and its paragraphs pass a
+  structure check: at least three entries, nine in ten with a year, the list
+  ending at the first table, figure, appendix or supplement heading under the
+  references heading. On 936 PsyArXiv Word manuscripts run with the 4B model
+  on a GPU, that LLM call produced a median of 1,277 output tokens per
+  manuscript (mean 1,600). Entries joined by line breaks within one paragraph
+  are split at them when every line opens like an entry and gives a date. A
+  list that fails the check (entries hard-wrapped into several paragraphs,
+  floats the end rule missed) goes to the configured segmenter as before.
+
+- Running heads and page footers of born-digital PDFs are now read from the
+  text layer by default (`OCR_NATIVE_TEXT_HEADER_FOOTER=true`), which cuts OCR
+  requests per born-digital paper by about 42% with no change in the scored
+  fields on born-digital papers or scans. Set it to `false` to OCR them as
+  before.
+- A DOI found only in text the PDF never prints is agreement-only and is never
+  selected on its own. A paper that prints no DOI and carries one only in
+  hidden text, such as a white-on-white banner, now gets a null DOI; before,
+  that white text was read like any other text-layer DOI. Such a banner can
+  hold another paper's DOI, left in a reused template. For a manifest that
+  expects the hidden DOI, identity now raises the blocking
+  `VAL_EXPECTED_ID_MISSING`, or `VAL_EXPECTED_ID_MISMATCH` when the pages print
+  another DOI that could name the paper. A manifest that only requires a DOI
+  gets the blocking `VAL_EXPECTED_ID_MISSING` when no printed DOI can name the
+  paper. In both cases the export goes to `_quarantine/identity_conflict/`,
+  and its receipt records the `identity_conflict` disposition. A hidden DOI
+  that differs from the printed one no longer makes the selection
+  `VAL_DOI_AMBIGUOUS` with no DOI, so the printed DOI is selected.
+
+- Anthropic vision OCR (`--ocr anthropic`) asks for one output token per 32 pixels of
+  each region crop at 200 DPI (scaled with `LAYOUT_DPI`), at least 2,048 and never more
+  than `OCR_VISION_MAX_TOKENS`, instead of the full setting for every region. A model
+  that loops on a small region now stops after 2,048 tokens instead of 16,384 (one
+  footer line took 43 s and was discarded). The log line of a cut-off answer names the
+  cap and the crop size. Gemini and the OpenAI backend keep the full setting, because
+  their thinking or reasoning tokens count against the same limit.
+
+### Security
+
+- vLLM 0.31.0, which the `vllm` extra pinned, has a published advisory
+  (PYSEC-2026-4319, a denial of service through its penalty handling), fixed
+  in 0.32.0, which the extra now pins. CI's dependency audit does not install
+  the `vllm` extra and did not report it; `pip-audit` on the extra's locked
+  requirements now finds no known vulnerability (the two already documented
+  exceptions aside).
+- The lock moves to pyasn1 0.6.5, and the constraint floor in `pyproject.toml` with it.
+  0.6.4 and earlier spend quadratic time decoding some BER input (CVE-2026-119194,
+  -119195, -119196, -119197).
+- The serve image upgrades apt and libapt-pkg6.0 to 2.4.15ubuntu0.1 from jammy-security
+  (CVE-2026-109518, code execution via hard-link reuse); the CUDA base ships 2.4.14.
+
+### Fixed
+- Release validation and the weekly Maintenance check run their macOS core suite on
+  `macos-15`, since GitHub retired the `macos-14` runner and those jobs no longer
+  started. The Windows core suite passes again: its local-model, cancellation and
+  ROR tests no longer assume POSIX paths.
+- In the balanced memory mode, bibr no longer refuses a managed vLLM LLM
+  server start that would fit once its own GPU models were released. When
+  the memory free cannot start the model, bibr first releases what the
+  aggressive mode releases (the layout, sentence-segmenter and NER
+  reference-parser sessions, reloaded when next needed, and a resident local
+  OCR server), reads the card again, and refuses only if it is still short.
+  The release is logged once per chunk as a warning. On an emulated 12 GB
+  card beside a 1.5 GiB desktop, 3 of a 48-paper batch's 6 starts needed it,
+  each at the LLM start after the chunk's OCR (7.98, 7.85 and 7.86 GiB free
+  of the 8.00 needed before the release, 9.6 after), and the batch finished.
+- `--llm local` (or `LLM_BACKEND=local`) without `bibr setup` now serves the
+  build setup recommends for the card when `LLM_LOCAL_MODEL` is unset. It
+  served the bf16 4B on every NVIDIA card that runs vLLM, whose start bibr
+  refuses below 20 GB; on a 10–19 GB card it is now the W4A16 build, and on
+  llama.cpp a card below 7 GB gets the Q4_K_M build instead of Q8_0. The
+  runtime and setup now pick the model, the backend, the memory mode and the
+  OCR through the same rules on every card, except where setup found a CUDA
+  llama.cpp server on a 10–11 GB card (above).
+- On a small card, a fully local batch with both servers on llama.cpp no longer
+  fails every paper after the first chunk. The LLM server outlived the chunk,
+  and the next chunk's GLM-OCR server started beside it, could not allocate
+  its compute buffer and refused every page (on an emulated 8 GB card with a
+  desktop, 3 of 3 papers failed in each later chunk). bibr now stops the LLM
+  server before that start when the memory free then cannot also hold GLM-OCR
+  (2.25 GiB) and 1 GiB for its own models, and always in the aggressive
+  memory mode (see above); the LLM stage restarts it.
+- When the layout, sentence, reference-parser or a classifier model could not
+  even open its CUDA session for lack of GPU memory, the whole chunk failed
+  (`parse_failed` for the sentence segmenter). Such a model now opens on the
+  CPU, with a warning, like a batch that runs out of memory later.
+- The error for a model without a minimum whose free memory sat just above
+  what bibr needs beside it, so that its share rounded down to 0, said it
+  needed less than was free. It now counts the smallest share too.
+- When a model without a minimum could not start because PaddleOCR-VL takes
+  turns with it, the error said it needed the startup reserve plus 1 GB, less
+  than the room bibr keeps for its own models there (6 GB less what they
+  already hold). It now names that room.
+- After the managed vLLM LLM server could not start for lack of GPU memory,
+  every later chunk of a batch still started PaddleOCR-VL and OCRed its papers
+  before the LLM start was refused again (on an emulated 16 GB card, 40 papers
+  OCRed for nothing). While the LLM server is down, bibr now checks before each
+  chunk's OCR whether the memory free then could start it; when it could not,
+  the chunk's papers fail at once with the same error and outcome, and the
+  next chunk checks again. A server already serving the model on the LLM
+  server's port, which the start reuses, is never checked.
+- A fully local batch on one NVIDIA card with `onnxruntime-gpu` installed no
+  longer fails every paper after the first chunk. The managed PaddleOCR-VL
+  server asked vLLM for 92% of the card, which vLLM needs free before it
+  starts, and from the second chunk bibr's own layout, sentence and reference
+  models held more than the 8% left (on an RTX 5090, 28.52 GiB free of the
+  28.93 GiB asked for), so OCR could not restart. PaddleOCR-VL now asks for
+  about 5 GB of the card the servers run on (0.16 of a 32 GB card, 0.21 of
+  24 GB, 0.32 of 16 GB, read from the card `CUDA_VISIBLE_DEVICES` exposes),
+  which also leaves room for the layout model beside it. The managed LLM and
+  OCR servers run side by side only when their shares leave 6 GB of the card
+  for bibr's own models; otherwise they still take turns, and the paper and
+  section classifiers use the GPU only beyond the larger share and those 6 GB,
+  so each restart finds its share free.
+- The managed vLLM LLM server no longer fails to restart part-way through a
+  fully local batch when it takes turns with PaddleOCR-VL on one card. It
+  restarted at a fixed 0.85 of the card beside bibr's own GPU models, which
+  grow over a batch (from about 0.5 to 3 GiB on an RTX 3090); vLLM's startup
+  check still passed, but CUDA graph capture, which takes about 1.3 GiB beyond
+  the share after the KV cache is allocated, then ran out of memory once bibr
+  held more than about 2.2 GiB, and every paper of that chunk failed. Unless
+  you set `LLM_LOCAL_MEM_FRACTION` (or `--gpu-memory-utilization` in
+  `LLM_VLLM_EXTRA_ARGS`), which still wins, the share is now worked out at
+  every start from the memory free then, less what vLLM takes beyond its share
+  while starting and room for bibr's models to grow, with the configured share
+  as the cap. That room is 6 GB less what bibr's models already hold, and at
+  least 1 GB, with any OCR: 0.70 of a free 24 GB card, 0.77 of 32 GB. A server
+  that stays up for the run (with cloud OCR, an OCR server at `--ocr-url` or
+  GLM-OCR) usually starts in the first chunk, before bibr's models have grown;
+  when it left them only 1 GB beside a PaddleOCR-VL server at `--ocr-url` on an
+  RTX 5090, they ran out of memory at about 3.3 GiB, and 31 and 30 of 48 papers
+  failed in two runs. Only a start that takes turns with PaddleOCR-VL, and so
+  starts again next chunk, is squeezed to the model's minimum with 1 GB left
+  for bibr's models. When even that does not fit, that start fails at once with
+  a clear error instead of launching vLLM to crash, and while the server is
+  down the chunk fails before its OCR. So the bf16 4B student cannot start
+  beside a PaddleOCR-VL server of about 5.4 GB at `--ocr-url` on the same 24 GB
+  card (it needs 18.75 GiB, and about 17.7 are free); its W4A16 build can. The
+  error names what still runs: a model with a lower minimum, only where one
+  would start (on a 10–12 GB card beside cloud OCR neither the W4A16 build nor
+  the 2B does), `LLM_LOCAL_MEM_FRACTION` to choose the share yourself, or a
+  llama.cpp LLM (`--llm llama-cpp`). The Qwen3.5 students now run at most 128
+  sequences at once, which halves vLLM's capture sizes and lets them start on a
+  smaller share. (These are the vLLM 0.31.0 figures; the vLLM 0.32.0 entry
+  above has this release's, with which the bf16 4B does start beside that OCR
+  server when no desktop shares the card. Beside a 0.5 GiB desktop it is still
+  refused: 17.16 GiB free, 17.25 needed.)
+- A nearly full GPU no longer fails papers, drops their references or sends
+  their headings to the LLM. bibr's layout, sentence, reference-parser and
+  section-classifier models now treat each GPU out-of-memory failure alike:
+  they retry with smaller batches and, for a single page, text, reference or
+  heading that still does not fit, run it on the CPU. This includes the bare
+  `cudaError` that ONNX Runtime raised for a layout convolution on a nearly
+  full card (the paper failed with `layout_failed`), reference-parser memory
+  errors (the paper shipped without references) and section-classifier ones
+  (its headings fell back to the LLM tier). Other CUDA errors still fail as
+  before.
+
+- Text that never prints no longer enters what bibr reads from the PDF text
+  layer, for any region and for the DOI evidence: light text whose drawing
+  changes no pixel of the page (white on white, or under a logo painted over
+  it), text in invisible render mode on a born-digital page, glyphs under 1 pt,
+  text outside the page's crop box, and the extra copies of a line overprinted
+  for a bold look ("Sensors 2024, 24, 572" three times). Springer's hidden
+  "(0123456789().,-volV)" run no longer sticks to the DOI in the running head,
+  and SAGE's hidden white DOI link no longer gives a second, cut-off DOI. A
+  scan's OCR layer is kept, whether hidden or filled white over the page
+  image: invisible text stays on a page images cover as a scan does, and on a
+  page whose characters the scan check counts as mostly invisible. White text
+  on a coloured band, also one that covers only part of the line, or with a
+  dark outline still counts as printed. The removed objects are reported as
+  `hidden_text` furniture (rule `hidden_text/2`).
+- A DOI read from a text-layer header or footer whose box cuts the printed line
+  ("10.1177/117793222311603" for "10.1177/11779322231160397") no longer
+  outranks the full DOI it is a prefix of. It is kept in the identity receipt
+  with `rejection_reason` `edge_truncated`.
+
+- A long `bibr batch` run no longer grows its memory from chunk to chunk.
+  Freed page images and model buffers stayed in glibc's malloc arenas instead of
+  going back to the system, so the process kept the high-water mark of every
+  chunk: with layout on a GPU it held about 11 GiB after 48 papers and peaked at
+  16-19 GiB over 200, while its heap in use stayed near 2 GiB. bibr now hands
+  free heap back with `malloc_trim` after each chunk of a batch (`bibr batch`,
+  `bibr chew` on several files, `chew()` or `Chewer` on a list; Linux with glibc
+  only). In a 32-paper GPU batch at the default batch size of 8, the process now
+  averages 6.6 GiB over the last third of the run instead of 8.4 GiB, peaks at
+  7.4 GiB instead of 8.9 GiB, and no longer climbs from chunk to chunk. With
+  real OCR and LLM servers on a 24 GB card the trim had no measurable
+  throughput cost (-0.5%, 95% CI -3.4 to +2.2%).
+  `PIPELINE_HEAP_TRIM=window` also trims between the render windows inside a
+  chunk, which keeps large chunks (`--batch-size` 24 and up) lower but ran a
+  24-paper chunk 20-30% slower; `PIPELINE_HEAP_TRIM=off` turns trimming off.
+  Single-paper calls and `bibr serve` requests never trim.
+
+- Each LLM call now sends the same prompt on every run. Every prompt fences
+  the paper's text between marker lines whose 32-character hex boundary keeps
+  a document from posing as instructions. That boundary was random per call,
+  and at temperature 0 a local model's answer can depend on it: in two
+  identical runs of 10 papers with a 2B model on llama.cpp (CPU, one request
+  at a time), 7 of 57 LLM requests got different answers, each where the two
+  prompts differed only in the boundary. With the boundary now derived from
+  the fenced text (SHA-256), two such runs got the same answers to all 58
+  requests they shared. Which calls run can still change between runs: the
+  equation LLM fallback stops after 90 seconds
+  (`EQUATION_EXTRACTION_TIMEOUT_SECONDS`) and keeps the regex equations, so a
+  slower run can send fewer equation prompts. Servers that batch concurrent
+  requests were not measured, such as vLLM, or bibr's managed llama.cpp
+  server, which serves two requests at once (`--parallel 2`) when the build
+  supports it. The boundary never occurs in the fenced text and keeps its
+  shape, so LLM cache entries from earlier releases still hit. A paper whose
+  text changes still gets a new boundary.
+
+- A DOI printed in a publisher's box above the article title is found again
+  when the OCR runs with the GLM profile: GLM-OCR, the Gemini, OpenAI and
+  Anthropic vision backends, and any backend set to `OCR_PROFILE=glm`. The
+  layout model often labels such a box as a
+  table, and bibr reads the DOI from the region's complete OCR text, because
+  the region summary keeps only its first 200 characters. The GLM profile
+  dropped that text after normalization, so these runs never saw the box. It
+  now keeps it, as the PaddleOCR-VL profile always did. Region exports
+  (`--regions`) now also carry `raw_ocr_content` for GLM-profile regions. The
+  GLM normalizer version moves to `glm-canonical-v2`, so OCR cache entries
+  written without the complete text are not reused.
+
+- bibr now sizes its prompts to the context window of an Ollama or llama.cpp
+  server it did not start itself. The input cap is sized for cloud models
+  (`LLM_MAX_INPUT_CHARS` 300,000 characters), so on an Ollama server with a
+  16,384-token context a long front matter either failed the paper with HTTP
+  400 "exceeds the available context size" (models run with their GGUF chat
+  template) or came back without its title or authors (Ollama library models,
+  which shorten an over-long prompt and answer anyway). Before the first call,
+  bibr asks an `LLM_BASE_URL` server, or the `ollama` provider's server, what
+  it is and how long its context is: Ollama's `/api/ps` (or the model's
+  `num_ctx`), llama.cpp's `/props`. Ollama and llama.cpp then get the caps the
+  managed llama.cpp server uses (`LLM_MAX_INPUT_CHARS` 24,000,
+  `LLM_REF_SEG_WINDOW_CHARS` 12,000 and `LLM_MAX_TOKENS` 4,096 at 16,384
+  tokens, scaled with the context), and inputs are cut to fit the window.
+  When Ollama does not give its window (the model is not loaded and sets no
+  `num_ctx`), or the `ollama` provider's server cannot be reached, the caps
+  for 16,384 tokens apply. While the server cannot be reached or has not
+  given its window, bibr asks again on a later call: after 30 seconds, then
+  after twice as long each time it still has no answer, up to once every 10
+  minutes. Values you set yourself are kept. A warning says when one of them
+  exceeds the cap for the window; it is logged only when the window is known
+  (reported by the server, set in `LLM_CONTEXT_TOKENS` or named in a
+  rejection), not while the caps for an assumed 16,384 tokens apply.
+- `LLM_CONTEXT_TOKENS` now also sizes those caps: for an Ollama or llama.cpp
+  server, the caps follow the window you set, which wins over the window the
+  server reports. `LLM_MAX_INPUT_CHARS`, `LLM_MAX_TOKENS` and
+  `LLM_REF_SEG_WINDOW_CHARS` set explicitly still win over the caps.
+- An external vLLM server is not sized in advance; it keeps today's
+  behaviour, in which bibr learns its window from a rejected request. bibr
+  asks its `/v1/models` once to tell it apart from Ollama and llama.cpp.
+- llama.cpp's and Ollama's "request (N tokens) exceeds the available context
+  size (M tokens)" is now read like vLLM's "maximum context length". When the
+  window M is smaller than the one the call's input was cut to (or the call
+  had none), the call is sent once more with its input cut, by a conservative
+  token estimate, to M tokens minus the completion reserve (the call's
+  `max_tokens`, or a quarter of the window when it sends none, at most half
+  the window) minus 2,048 tokens for the instructions and chat template. When
+  several concurrent calls overflow, each is sent again, not only the first to
+  fail. A title/keywords call that still runs past the window leaves its
+  fields empty and marked failed, as a truncated response does, instead of
+  failing the paper. Reference-segmentation windows are also split to fit a
+  known window, so the second attempt after such a rejection sends smaller
+  windows instead of the same ones. For an Ollama or llama.cpp server, a
+  window learned from a rejection also moves the caps to it, as the server's
+  own answer would. Before, a 4,096-token window learned while the caps for
+  16,384 tokens applied (Ollama's model not loaded when bibr asked) kept
+  `LLM_MAX_TOKENS` at 4,096 and left the title and author calls no room for
+  input: their prompts went out without any paper text and were answered.
+- A call whose context window leaves fewer than 256 tokens for its input, when
+  its text would have to be cut, is no longer sent. It fails as a
+  context-length rejection does (`llm_failed`; core metadata keeps the record
+  and marks that call's fields failed). This holds for every provider.
+- The LLM section-classification call is split into parts that fit
+  `LLM_MAX_INPUT_CHARS` and the server's context window. A paper with 80
+  unrecognised headings sent them in one 17,332-token prompt, which a
+  16,384-token server rejected. The paper-classification, paper-type and
+  implicit-section calls are cut to the same limits; the implicit-section call
+  read the process settings and missed the caps set for the pipeline's server.
+- Prompts that carry several texts now share one input budget between them,
+  by need: citation resolution (reference list and citations), research
+  integrity (funding, contributions, affiliations and the author list) and
+  the paper-type label (title and abstract). Together the texts get
+  `LLM_MAX_INPUT_CHARS` and the context window's room; a text shorter than an
+  equal share is kept whole, and the rest goes to the longer ones. Before,
+  each text was cut to the whole budget on its own (the integrity author list
+  not at all), so a long reference list with many citations could still run
+  past the window. This applies to every provider, cloud ones included: the
+  texts of one prompt are now cut to `LLM_MAX_INPUT_CHARS` (300,000 characters
+  by default) in total rather than each, and the paper-type label's title and
+  abstract, which were not cut at all, are now cut to it too. Only prompts
+  whose texts together run past that limit change.
+- Not changed: the experimental single-call core metadata
+  (`LLM_MERGED_CORE_METADATA`, off by default) still fails the paper when its
+  prompt runs past the window. With `OLLAMA_NUM_PARALLEL` above 1, whether
+  Ollama's `/api/ps` reports one slot's context or all slots' has not been
+  checked.
+
 ## [0.7.4] - 2026-10-23
 
 The reference parser is now v5.1 (UltraBERT-150M), which matches references far better

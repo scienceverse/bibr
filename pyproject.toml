@@ -1,6 +1,6 @@
 [project]
 name = "bibr"
-version = "0.7.4"
+version = "0.9.1"
 description = "Scientific paper extraction to structured JSON: metadata, text, references, tables, figures, and equations from PDF, DOCX, JATS XML, HTML, and ePub."
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
@@ -136,8 +136,10 @@ nuextract = ["numind>=0.3,<0.3.1"]
 # PYSEC-2026-3985, a trust_remote_code bypass); the `uv tool run` bootstrap in
 # bibr/local/vllm_*.py repeats this pin. vLLM 0.27 imported NamespaceTool under an
 # openai>=2.0 floor that was too low; the openai pair keeps the floor bibr validated.
+# The 4B student's budget floors and speculative decoding configs
+# (bibr/local/llm_models.py) were measured on 0.32.0.
 vllm = [
-    "vllm==0.31.0; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version < '3.14'",
+    "vllm==0.32.0; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version < '3.14'",
     "openai>=2.54.0,<3; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version < '3.14'",
 ]
 # The PyTorch path. Core installs already run layout, both classifiers and the
@@ -203,7 +205,8 @@ environments = [
 # Floors on transitive deps to clear known CVEs without adding them as direct
 # deps. idna>=3.15: CVE-2026-45409 (idna.encode DoS). urllib3>=2.7.0:
 # PYSEC-2026-141/142 (redirect header leak / decompression DoS).
-# click>=8.3.3: PYSEC-2026-2132. pyasn1>=0.6.4: PYSEC-2026-3455/3456/3457.
+# click>=8.3.3: PYSEC-2026-2132. pyasn1>=0.6.5: PYSEC-2026-3455/3456/3457 and
+# CVE-2026-119194/119195/119196/119197 (quadratic BER decoding).
 # mcp>=2.2.0: the migrated v2 server API; keep new major versions explicit.
 # pymdown-extensions>=11.0.0: path traversal in the b64 extension.
 # h2>=4.4.1: PYSEC-2026-3628 (duplicate Host headers forwarded to the consuming
@@ -218,12 +221,16 @@ environments = [
 # (WebSocket-upgrade request smuggling), CVE-2026-69244 (OOB read in the C
 # response parser). cryptography>=50.0.0: CVE-2026-69247 (PKCS#7 Bleichenbacher
 # oracle).
+# soupsieve>=4.0: CVE-2026-126190 (descendant-combinator selectors take
+# polynomial time on deeply nested markup). bibr selects `thead tr` and the like
+# in tables of uploaded HTML, so this is runtime exposure. soupsieve 4 needs
+# Python 3.11.5 or later, hence the marker: earlier 3.11 releases keep 2.x.
 # setuptools>=80.10.2 is a floor on what setuptools *vendors*, not on setuptools
 # itself: 79.0.1 ships setuptools/_vendor/jaraco.context-5.3.0 (CVE-2026-23949,
 # HIGH) and wheel-0.45.1 (CVE-2026-24049, HIGH), which Trivy finds in the serve
 # image via their dist-info METADATA. 80.10.2 vendors jaraco.context 6.1.0 and
 # wheel 0.46.3 — both fixed — and stays under vllm's setuptools<81.0.0 pin
-# (still in vllm 0.31.0, on Python >3.11), so the linux/x86_64 Python 3.12-3.13
+# (still in vllm 0.32.0, on Python >3.11), so the linux/x86_64 Python 3.12-3.13
 # branch of the lock still resolves. Do not raise this floor past 81 without
 # checking that pin.
 # (setuptools' own PYSEC-2026-3447 and GHSA-xmj3-9gf7-h52w can't be floored —
@@ -247,9 +254,10 @@ constraint-dependencies = [
     "mcp>=2.2.0,<3",
     "msgpack>=1.2.1",
     "pip>=26.2",
-    "pyasn1>=0.6.4",
+    "pyasn1>=0.6.5",
     "pymdown-extensions>=11.0.0",
     "setuptools>=80.10.2",
+    "soupsieve>=4.0; python_full_version >= '3.11.5'",
     "starlette>=0.40.0",
     "urllib3>=2.7.0",
 ]
@@ -292,6 +300,7 @@ ignore = [
 "tests/**/*.py" = ["S101", "S105", "S108", "S301", "S314", "S603", "ARG", "E402", "SIM117"]  # Allow asserts, hardcoded passwords, /tmp paths, pickle round-trip tests, xml.etree parsing of literal fixtures, subprocess calls, unused args, import order, nested with in tests
 "bibr/serve/**/*.py" = ["ARG002"]  # API-compatibility params in ingress routes
 "bibr/local/**/*.py" = ["ARG002"]  # Interface-compatibility params
+"bibr/clients/skipped.py" = ["ARG002"]  # The fast-mode client takes every LLMClient call's params and ignores them
 "evaluation/**/*.py" = ["S101", "ARG", "S301", "S108"]  # Evaluation scripts: asserts, unused args, pickle example-cache round-trip, /tmp cache paths
 "scripts/**" = ["S101", "S113", "S311", "ARG", "F841", "E402"]  # Dev/debug scripts
 "notebooks/**" = ["S101", "S113", "ARG", "F841", "E402"]  # Notebooks

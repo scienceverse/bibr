@@ -103,6 +103,22 @@ class Pipeline:
         """Concrete immutable-by-convention settings snapshot owned by this pipeline."""
         return self._settings
 
+    def _settings_for(self, config: RunConfig) -> GlobalSettings:
+        """The settings one chunk runs under.
+
+        A fast-mode run gets the pipeline's settings with the LLM paths turned
+        off (:func:`bibr.run_mode.fast_settings`); every other run gets the
+        pipeline's own. Deciding it here, from the chunk's ``RunConfig``, lets a
+        long-lived pipeline (serve) run fast and full requests side by side.
+        ``no_llm`` is structure only and wins over fast: it never turns the
+        front-matter tagger on, so it never loads or downloads it.
+        """
+        if config.mode != "fast" or config.no_llm:
+            return self._settings
+        from bibr.run_mode import fast_settings
+
+        return fast_settings(self._settings)
+
     async def process_file(
         self,
         path: str | Path,
@@ -189,19 +205,30 @@ class Pipeline:
         from bibr.pipeline.context import PipelineContext
 
         prog = progress or NullProgress()
+        run_config = config or self._config
         ctx = PipelineContext(
             file_states=file_states,
             progress=prog,
             resources=self._resources,
-            config=config or self._config,
-            settings=self._settings,
+            config=run_config,
+            settings=self._settings_for(run_config),
         )
 
+        from bibr.utils.model_overrides import override_failure_scope, pending_override_failure
+
         try:
-            for stage in self._stages:
-                await run_stage(ctx, stage)
-                if not ctx.alive() and stage.name != "export":
-                    break
+            # A model override that does not load, or keeps raising, stops the run
+            # (bibr.utils.model_overrides): whether a stage passed the error on,
+            # recorded it on a paper or swallowed it, the chunk raises it after
+            # the stage, so no paper gets a verdict for it.
+            with override_failure_scope() as override_failures:
+                for stage in self._stages:
+                    await run_stage(ctx, stage)
+                    failure = pending_override_failure(override_failures, file_states)
+                    if failure is not None:
+                        raise failure
+                    if not ctx.alive() and stage.name != "export":
+                        break
         finally:
             # A file that errored after post-parse but kept its result (so it
             # was not freed at a stage boundary) never reaches the enrich

@@ -123,6 +123,7 @@ abstract-typed sections because some gold records store their abstract there.
 | Metric | Tier | Description |
 |---|---|---|
 | `authors_fullname_f1` | primary | F1 on full printed names ("given family") using fuzzy similarity — boundary-insensitive to the given/family split |
+| `authors_exact_f1` | diagnostic | F1 on full names whose words equal the gold's after lowercasing and removing diacritics and punctuation, in any order. Unlike `authors_fullname_f1`, a glued letter or an extra word makes the name a miss |
 | `authors_f1` | diagnostic | F1 on normalized family names with fuzzy, globally greedy bipartite matching |
 | `first_author` | diagnostic | Fuzzy similarity (token_sort_ratio) on the first author's family name |
 

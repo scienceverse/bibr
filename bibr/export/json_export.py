@@ -59,6 +59,7 @@ from bibr.export.models import (
     SectionClassificationExport,
     SectionExport,
     SectionTypeLiteral,
+    SelfCitationExport,
     SeverityLiteral,
     SourceExport,
     TableExport,
@@ -944,6 +945,8 @@ def _export_paper_payload(
     regions_data: list[RegionExport] | None = None
     if include_regions and paper.contents.region_summaries:
         regions_data = []
+        run_ocr = paper.extraction.get("ocr") if isinstance(paper.extraction, dict) else None
+        run_ocr_backend = run_ocr.get("backend") if isinstance(run_ocr, dict) else None
         for region in paper.contents.region_summaries:
             # The summary measures in layout units; the export in points.
             scale = geometry.scale(region.page)
@@ -968,6 +971,11 @@ def _export_paper_payload(
                     raw_ocr_content=region.raw_ocr_content,
                     char_density=char_density,
                     estimated_line_height=line_height,
+                    source=region.source,
+                    read_as=region.read_as,
+                    ocr_backend=(
+                        (region.ocr_backend or run_ocr_backend) if region.source == "ocr" else None
+                    ),
                 )
             )
 
@@ -1107,6 +1115,8 @@ def _export_paper_payload(
                 "section classification score",
             ),
             source=s.classification_source,
+            # Only said when true: a printed heading is the rule and carries no key.
+            header_supplied=True if s.header_is_synthetic else None,
         )
         for position, s in enumerate(ids.sections, start=1)
     ]
@@ -1182,6 +1192,9 @@ def _export_paper_payload(
         review = getattr(paper.contents, "reference_review_receipt", None)
         if isinstance(review, dict):
             diagnostics["reference_review"] = ReferenceReviewExport.model_validate(review)
+        self_citation = getattr(paper.contents, "printed_citation_receipt", None)
+        if isinstance(self_citation, dict):
+            diagnostics["self_citation"] = SelfCitationExport.model_validate(self_citation)
         extraction_data["diagnostics"] = diagnostics
         if identity := extraction_data.get("identity"):
             extraction_data["identity"] = _export_identity_sections(identity, ids)

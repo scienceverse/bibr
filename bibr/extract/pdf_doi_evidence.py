@@ -5,10 +5,12 @@ furniture and the input's structured metadata. A PDF carries it in places the
 parse never reads. Text-layer lines the layout did not turn into a region (a
 repository banner rotated into the page margin, a masthead) never reach the
 text. Link annotations and the document-information dictionary are not text
-at all. :func:`read_pdf_doi_evidence` reads those, best effort, from the input
-bytes. ``doi_identity`` decides what each is worth: a
-DOI the pages print can name the paper, one found only in metadata or in a
-link target can only agree with a printed one.
+at all. Text the furniture strip removes as hidden (white on white, off the
+page, invisible on a born-digital page; rule hidden_text in
+``bibr.ocr.native_text``) never prints. :func:`read_pdf_doi_evidence` reads
+those, best effort, from the input bytes. ``doi_identity`` decides what each is
+worth: a DOI the pages print can name the paper, one found only in metadata, in
+a link target or in hidden text can only agree with a printed one.
 
 Positions are in the 0..1000 frame the layout regions use (``bbox_2d``: y
 down, origin top-left, the page's ``/Rotate`` applied), so a text-layer line
@@ -81,11 +83,20 @@ class MetadataDoi:
 
 
 @dataclass(frozen=True)
+class HiddenDoi:
+    """A DOI-bearing text object the furniture strip removed as hidden text."""
+
+    page: int  # 1-based
+    text: str  # the object's text, whitespace-normalised
+
+
+@dataclass(frozen=True)
 class PdfDoiEvidence:
     pages: tuple[int, ...]  # 1-based pages that were read
     lines: tuple[TextLayerLine, ...]
     links: tuple[LinkDoi, ...]
     metadata: tuple[MetadataDoi, ...]
+    hidden: tuple[HiddenDoi, ...] = ()
 
 
 def is_pdf(data: bytes | None) -> bool:
@@ -195,7 +206,7 @@ def _text_near(records, rect_pts: tuple[float, float, float, float]) -> str:
 
 
 def read_pdf_doi_evidence(pdf_bytes: bytes, pages: Iterable[int]) -> PdfDoiEvidence:
-    """Read the text-layer DOI lines and DOI links of *pages*, and the Info DOIs.
+    """Read the text-layer DOI lines, DOI links and hidden-text DOIs of *pages*, and the Info DOIs.
 
     *pages* are 1-based; pages the PDF does not have are skipped. Only the
     character and link records are read under the process-wide PDFium lock;
@@ -209,6 +220,7 @@ def read_pdf_doi_evidence(pdf_bytes: bytes, pages: Iterable[int]) -> PdfDoiEvide
     from bibr.ocr.utils import pdfium_lock
 
     metadata: list[MetadataDoi] = []
+    hidden: list[HiddenDoi] = []
     read: list[tuple[int, tuple, int, list, list]] = []
     with pdfium_lock:
         document = pypdfium2.PdfDocument(pdf_bytes)
@@ -223,11 +235,19 @@ def read_pdf_doi_evidence(pdf_bytes: bytes, pages: Iterable[int]) -> PdfDoiEvide
                     continue
                 page = document[page_number - 1]
                 try:
-                    textpage = open_text_page(page)
+                    furniture: list[tuple] = []
+                    textpage = open_text_page(page, None, furniture)
                     try:
                         records = _printed_char_records(textpage)
                     finally:
                         textpage.close()
+                    hidden.extend(
+                        HiddenDoi(page_number, text[:300])
+                        for kind, _box, text in furniture
+                        if kind == "hidden_text"
+                        and isinstance(text, str)
+                        and DOI_CANDIDATE_RE.search(text)
+                    )
                     page_links = page_uri_links(document, page, page_number - 1)
                     read.append(
                         (
@@ -273,4 +293,4 @@ def read_pdf_doi_evidence(pdf_bytes: bytes, pages: Iterable[int]) -> PdfDoiEvide
             )
             links.append(LinkDoi(page_number, doi, link.uri, rect, _text_near(records, link.rect)))
     pages_read = tuple(page_number for page_number, *_rest in read)
-    return PdfDoiEvidence(pages_read, tuple(lines), tuple(links), tuple(metadata))
+    return PdfDoiEvidence(pages_read, tuple(lines), tuple(links), tuple(metadata), tuple(hidden))

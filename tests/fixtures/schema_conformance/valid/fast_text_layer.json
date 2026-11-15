@@ -1,0 +1,170 @@
+{
+  "paper_id": "fast-example",
+  "schema_version": "12.4",
+  "source": {
+    "file_name": "fast-example.pdf",
+    "sha256": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+    "input_format": "pdf"
+  },
+  "metadata": {
+    "title": null,
+    "abstract": null,
+    "keywords": [],
+    "doi": null,
+    "pmid": null,
+    "pmcid": null,
+    "arxiv": null,
+    "language": null,
+    "paper_type": null,
+    "oecd_l1": null,
+    "oecd_l2": null,
+    "journal": null,
+    "volume": null,
+    "issue": null,
+    "first_page": null,
+    "last_page": null,
+    "issn": null,
+    "publisher": null,
+    "published": null,
+    "published_date": null,
+    "license": null,
+    "license_url": null,
+    "license_spdx": null,
+    "funding_statement": null,
+    "coi_statement": null,
+    "ethics_statement": null,
+    "data_availability": null
+  },
+  "author": [],
+  "affiliation": [],
+  "funding": [],
+  "text": [],
+  "section": [],
+  "url": [],
+  "bib": [],
+  "xref": [],
+  "figure": [],
+  "table": [],
+  "footnote": [],
+  "eq": [],
+  "metadata_match": [],
+  "affiliation_match": [],
+  "funding_match": [],
+  "bib_match": [],
+  "extraction": {
+    "producer": {
+      "name": "bibr",
+      "version": "0.9.0",
+      "build_sha": null
+    },
+    "converter": null,
+    "completed_at": "2026-11-01T12:00:00Z",
+    "ocr": {
+      "backend": "text-layer",
+      "model": null,
+      "profile": null
+    },
+    "llm": null,
+    "warnings": [
+      {
+        "code": "LLM_SKIPPED",
+        "message": "Fast mode made no LLM calls. Not produced: structured funders, author roles and affiliation parts."
+      }
+    ],
+    "settings": {
+      "ref_seg": "geom",
+      "ref_parse": "ner",
+      "crossref_enrich": false,
+      "consolidate": "off",
+      "mode": "fast"
+    },
+    "regions": [
+      {
+        "page": 1,
+        "index": 0,
+        "label": "text",
+        "bbox": [
+          72.0,
+          90.0,
+          520.0,
+          130.0
+        ],
+        "font_size": null,
+        "font_weight": null,
+        "font_bold": null,
+        "section_id": null,
+        "content": "Attention in toddlers.",
+        "raw_ocr_content": null,
+        "char_density": null,
+        "estimated_line_height": null,
+        "source": "ocr",
+        "ocr_backend": "text-layer",
+        "read_as": "text"
+      },
+      {
+        "page": 1,
+        "index": 1,
+        "label": "table",
+        "bbox": [
+          72.0,
+          140.0,
+          520.0,
+          300.0
+        ],
+        "font_size": null,
+        "font_weight": null,
+        "font_bold": null,
+        "section_id": null,
+        "content": "a | b",
+        "raw_ocr_content": null,
+        "char_density": null,
+        "estimated_line_height": null,
+        "source": "ocr",
+        "ocr_backend": "text-layer",
+        "read_as": "table_rebuilt"
+      },
+      {
+        "page": 1,
+        "index": 2,
+        "label": "display_formula",
+        "bbox": [
+          72.0,
+          310.0,
+          520.0,
+          340.0
+        ],
+        "font_size": null,
+        "font_weight": null,
+        "font_bold": null,
+        "section_id": null,
+        "content": "p < .001",
+        "raw_ocr_content": null,
+        "char_density": null,
+        "estimated_line_height": null,
+        "source": "ocr",
+        "ocr_backend": "text-layer",
+        "read_as": "formula_plain"
+      },
+      {
+        "page": 2,
+        "index": 0,
+        "label": "text",
+        "bbox": [
+          72.0,
+          90.0,
+          520.0,
+          130.0
+        ],
+        "font_size": null,
+        "font_weight": null,
+        "font_bold": null,
+        "section_id": null,
+        "content": null,
+        "raw_ocr_content": null,
+        "char_density": null,
+        "estimated_line_height": null,
+        "read_as": "unread"
+      }
+    ]
+  }
+}

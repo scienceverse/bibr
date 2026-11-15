@@ -293,6 +293,7 @@ def build_serve_mcp(
         refs: str | None,
         consolidate: str | None,
         crossref: bool | None = None,
+        mode: str | None = None,
     ) -> dict[str, str]:
         raw_options = {
             "start_page": "" if start_page is None else str(start_page),
@@ -301,6 +302,7 @@ def build_serve_mcp(
             "consolidate": consolidate or "",
             # Tri-state like the form field: absent → "" → dropped → server default.
             "crossref": "" if crossref is None else ("true" if crossref else "false"),
+            "mode": mode or "",
         }
         try:
             return _validate_upload_options(raw_options)
@@ -378,6 +380,7 @@ def build_serve_mcp(
         refs: str | None = None,
         consolidate: str | None = None,
         crossref: bool | None = None,
+        mode: str | None = None,
         *,
         ctx: Context,
     ) -> dict[str, Any]:
@@ -390,10 +393,11 @@ def build_serve_mcp(
         start_page/end_page (0-indexed, inclusive — the first page is 0),
         refs (ner|llm|llm-chunked|ref-llm|off), consolidate (fill|replace), and
         crossref (true runs Crossref/resolver reference enrichment, false skips
-        it; omit for the server default, which is off). Large papers can take
-        minutes.
+        it; omit for the server default, which is off), and mode (fast makes no
+        LLM call, full uses the server's LLM and is refused where it has none;
+        omit for the server's own mode). Large papers can take minutes.
         """
-        options = _validated_options(start_page, end_page, refs, consolidate, crossref)
+        options = _validated_options(start_page, end_page, refs, consolidate, crossref, mode)
         async with _admission_slots() as admission:
             if len(content_base64) > base64_envelope(upload_store.max_size):
                 max_mib = upload_store.max_size / 1024 / 1024
@@ -422,6 +426,7 @@ def build_serve_mcp(
             refs: str | None = None,
             consolidate: str | None = None,
             crossref: bool | None = None,
+            mode: str | None = None,
             *,
             ctx: Context,
         ) -> dict[str, Any]:
@@ -435,7 +440,7 @@ def build_serve_mcp(
             this over chew_paper for anything you would otherwise download
             just to re-upload.
             """
-            options = _validated_options(start_page, end_page, refs, consolidate, crossref)
+            options = _validated_options(start_page, end_page, refs, consolidate, crossref, mode)
             started = time.monotonic()
             async with _admission_slots() as admission:
                 try:

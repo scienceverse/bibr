@@ -345,7 +345,7 @@ async def test_automatic_paddle_falls_back_only_during_startup_and_records_ident
     accepted.wait_for_server = AsyncMock()
 
     monkeypatch.setattr(
-        "bibr.ocr.registry.resolve_backend_candidates", lambda name, settings: candidates
+        "bibr.ocr.registry.resolve_backend_candidates", lambda name, settings, **_: candidates
     )
     with patch.object(
         rm,
@@ -378,7 +378,7 @@ async def test_automatic_paddle_aggregates_all_startup_failures(monkeypatch):
         _candidate("glm-llama", "glm/llama", "glm"),
     )
     monkeypatch.setattr(
-        "bibr.ocr.registry.resolve_backend_candidates", lambda name, settings: candidates
+        "bibr.ocr.registry.resolve_backend_candidates", lambda name, settings, **_: candidates
     )
     with (
         patch.object(
@@ -404,7 +404,7 @@ async def test_selected_automatic_candidate_does_not_fallback_after_recognize_fa
         _candidate("glm-llama", "glm/llama", "glm"),
     )
     monkeypatch.setattr(
-        "bibr.ocr.registry.resolve_backend_candidates", lambda name, settings: candidates
+        "bibr.ocr.registry.resolve_backend_candidates", lambda name, settings, **_: candidates
     )
     with patch.object(rm, "_create_ocr_client_for", return_value=selected) as create:
         await rm.await_ocr()
@@ -423,7 +423,7 @@ async def test_explicit_paddle_rapid_preserves_request_model_and_profile(monkeyp
     client.wait_for_server = AsyncMock()
     monkeypatch.setattr(
         "bibr.ocr.registry.resolve_backend_candidates",
-        lambda name, settings: (_candidate("paddle-rapid-mlx", "paddle/default", "paddle"),),
+        lambda name, settings, **_: (_candidate("paddle-rapid-mlx", "paddle/default", "paddle"),),
     )
     with patch.object(rm, "_create_ocr_client_for", return_value=client) as create:
         await rm.await_ocr()
@@ -444,7 +444,7 @@ async def test_explicit_paddle_vllm_keeps_source_model_but_records_served_alias(
     client.wait_for_server = AsyncMock()
     monkeypatch.setattr(
         "bibr.ocr.registry.resolve_backend_candidates",
-        lambda name, settings: (_candidate("paddle-vllm", "paddle-ocr-vl-1.6", "paddle"),),
+        lambda name, settings, **_: (_candidate("paddle-vllm", "paddle-ocr-vl-1.6", "paddle"),),
     )
     with patch.object(rm, "_create_ocr_client_for", return_value=client) as create:
         await rm.await_ocr()
@@ -466,7 +466,7 @@ async def test_explicit_backend_uses_settings_profile_for_runtime_and_cache_iden
     client.wait_for_server = AsyncMock()
     monkeypatch.setattr(
         "bibr.ocr.registry.resolve_backend_candidates",
-        lambda name, settings: (_candidate("paddle-rapid-mlx", "paddle/default", "paddle"),),
+        lambda name, settings, **_: (_candidate("paddle-rapid-mlx", "paddle/default", "paddle"),),
     )
     with patch.object(rm, "_create_ocr_client_for", return_value=client) as create:
         await rm.await_ocr()
@@ -489,7 +489,7 @@ async def test_automatic_fallback_reason_is_bounded_actionable_and_redacted(monk
         _candidate("glm-llama", "glm/llama", "glm"),
     )
     monkeypatch.setattr(
-        "bibr.ocr.registry.resolve_backend_candidates", lambda name, settings: candidates
+        "bibr.ocr.registry.resolve_backend_candidates", lambda name, settings, **_: candidates
     )
     with (
         patch.object(
@@ -669,3 +669,95 @@ def test_shutdown_survives_a_preload_that_raised():
     asyncio.run(rm.shutdown_ocr())
 
     assert rm._ocr_future is None
+
+
+# ---------------------------------------------------------------------------
+# The front-matter tagger follows the run's settings, not the manager's
+# ---------------------------------------------------------------------------
+
+
+def _tagger_manager(mode="off", **kwargs):
+    from bibr.config import GlobalSettings
+
+    return ResourceManager(
+        settings=GlobalSettings(ml={"front_tagger_mode": mode}), device="cpu", **kwargs
+    )
+
+
+def test_ensure_front_tagger_loads_nothing_while_the_mode_is_off():
+    rm = _tagger_manager("off")
+    with patch("bibr.front_tagger.runtime.load_front_tagger") as load:
+        assert rm.ensure_front_tagger() is None
+    load.assert_not_called()
+
+
+def test_a_run_can_turn_the_tagger_on_for_itself():
+    from bibr.run_mode import fast_settings
+
+    rm = _tagger_manager("off")
+    run_settings = fast_settings(rm._settings)
+    with patch("bibr.front_tagger.runtime.load_front_tagger", return_value="tagger") as load:
+        assert rm.ensure_front_tagger(run_settings) == "tagger"
+        assert rm.ensure_front_tagger(run_settings) == "tagger"
+    load.assert_called_once_with(run_settings, device="cpu")
+
+
+def test_a_full_run_gets_no_tagger_from_a_manager_a_fast_run_loaded_it_on():
+    from bibr.run_mode import fast_settings
+
+    rm = _tagger_manager("off")
+    with patch("bibr.front_tagger.runtime.load_front_tagger", return_value="tagger"):
+        assert rm.ensure_front_tagger(fast_settings(rm._settings)) == "tagger"
+        assert rm.ensure_front_tagger() is None
+        assert rm.ensure_front_tagger(rm._settings) is None
+
+
+def test_the_manager_falls_back_to_its_own_settings():
+    rm = _tagger_manager("primary")
+    with patch("bibr.front_tagger.runtime.load_front_tagger", return_value="tagger") as load:
+        assert rm.ensure_front_tagger() == "tagger"
+    load.assert_called_once_with(rm._settings, device="cpu")
+
+
+@pytest.mark.asyncio
+async def test_closing_the_manager_releases_the_cached_tagger():
+    rm = _tagger_manager("primary", memory_mode="aggressive")
+    with patch("bibr.front_tagger.runtime.load_front_tagger", return_value="tagger"):
+        rm.ensure_front_tagger()
+    with patch("bibr.front_tagger.runtime.release_front_tagger") as release:
+        await rm.close_models()
+    release.assert_called_once_with("tagger")
+    assert rm._front_tagger is None
+    with patch("bibr.front_tagger.runtime.load_front_tagger", return_value="again") as load:
+        assert rm.ensure_front_tagger() == "again"
+    load.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({"memory_mode": "balanced"}, id="balanced"),
+        pytest.param({"memory_mode": "aggressive", "owns_models": False}, id="not-the-owner"),
+    ],
+)
+async def test_closing_the_manager_keeps_the_tagger_loaded_for_the_next_one_shot_call(kwargs):
+    rm = _tagger_manager("primary", **kwargs)
+    with patch("bibr.front_tagger.runtime.load_front_tagger", return_value="tagger"):
+        rm.ensure_front_tagger()
+    with patch("bibr.front_tagger.runtime.release_front_tagger") as release:
+        await rm.close_models()
+    release.assert_not_called()
+    # The manager lets go of it either way; the process-wide cache keeps it.
+    assert rm._front_tagger is None
+    with patch("bibr.front_tagger.runtime.load_front_tagger", return_value="tagger") as load:
+        assert rm.ensure_front_tagger() == "tagger"
+    load.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_closing_a_manager_that_never_loaded_the_tagger_releases_nothing():
+    rm = _tagger_manager("primary")
+    with patch("bibr.front_tagger.runtime.release_front_tagger") as release:
+        await rm.close_models()
+    release.assert_not_called()

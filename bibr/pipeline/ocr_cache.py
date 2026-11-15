@@ -112,13 +112,20 @@ def _key(
 ) -> str:
     effective = _effective_settings(settings)
     layout = effective.layout
-    profile = resolve_ocr_profile(
-        explicit=identity.profile,
-        backend=identity.backend,
-        model=identity.model,
-        max_tokens=effective.ocr.generation_max_tokens,
-        temperature=effective.ocr.generation_temperature,
-    )
+    if identity.profile is None:
+        # The text-layer backend runs no model: its normalizer version names
+        # its reading rules, and a fixed profile keeps the other parts stable.
+        from bibr.ocr.profiles import GLM_PROFILE
+
+        profile = GLM_PROFILE
+    else:
+        profile = resolve_ocr_profile(
+            explicit=identity.profile,
+            backend=identity.backend,
+            model=identity.model,
+            max_tokens=effective.ocr.generation_max_tokens,
+            temperature=effective.ocr.generation_temperature,
+        )
     request = profile.request
     # The incomplete-table retry re-runs truncated Paddle tables at this
     # higher budget, but only on the transports that run it (the paddle-*
@@ -130,6 +137,8 @@ def _key(
     )
     table_recovery_limit = PADDLE_TABLE_RECOVERY_MAX_TOKENS if runs_table_recovery else 0
     from bibr import __version__
+    from bibr.document.model import HIDDEN_TEXT_RULE
+    from bibr.ocr.native_text import FURNITURE_ROUTE_RULE
 
     parts = [
         str(_CACHE_FORMAT_VERSION),
@@ -144,7 +153,7 @@ def _key(
         identity.backend,
         cfg.ocr_url or "",
         identity.model,
-        identity.profile,
+        identity.profile or "",
         identity.normalizer_version,
         f"generation_max_tokens_text={request.max_tokens_for('text')}",
         f"generation_max_tokens_table={request.max_tokens_for('table')}",
@@ -172,9 +181,21 @@ def _key(
         f"native_text={int(effective.ocr.native_text_enabled)}",
         f"native_text_min_chars={effective.ocr.native_text_min_chars}",
         f"native_text_min_printable_ratio={effective.ocr.native_text_min_printable_ratio}",
-        f"native_text_header_footer={int(effective.ocr.native_text_header_footer)}",
+        # With headers and footers on, their routing (right-to-left text, the
+        # first-page masthead, scanned and mostly invisible pages, edge cuts)
+        # decides which of them the cached regions hold as text-layer text.
+        "native_text_header_footer="
+        + (f"1:{FURNITURE_ROUTE_RULE}" if effective.ocr.native_text_header_footer else "0"),
+        # The hidden-text strip decides which text-layer glyphs exist at all.
+        f"native_text_hidden={HIDDEN_TEXT_RULE}",
         "native_text_reject_invisible_layer="
         f"{int(effective.ocr.native_text_reject_invisible_layer)}",
+        # Off adds nothing, so every key written before the option stays valid.
+        *(
+            ["text_layer_read_ocr_layer=1"]
+            if effective.ocr.text_layer_read_ocr_layer is True
+            else []
+        ),
         f"outline_headings={int(effective.pipeline.outline_headings)}",
         f"ref_seg={_effective_ref_seg(cfg, effective)}",
         # Which *weights* produced the cached artifacts. A complete entry lets
@@ -198,6 +219,9 @@ def _key(
         f"ocr_paddle_model={effective.ocr.paddle_model}",
         f"ocr_paddle_revision={effective.ocr.paddle_revision}",
     ]
+    # Appended only when on, so existing cache entries (flag off) keep their keys.
+    if effective.ocr.native_text_formula_number:
+        parts.append("native_text_formula_number=1")
     # Scan-path consensus rewrites scanned regions. Appended only when it is
     # on, so turning it on does not invalidate the entries of runs without it.
     if effective.ocr.consensus_backend:

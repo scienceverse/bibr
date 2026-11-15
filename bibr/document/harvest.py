@@ -36,6 +36,7 @@ from bibr.document.model import (
     GLYPH_NO_BOX,
     GLYPH_NO_LOOSE_BOX,
     GLYPH_NO_ORIGIN,
+    HIDDEN_TEXT_RULE,
     INDEX_FRAME,
     INVISIBLE_LAYER_RULE,
     LAYER_VERSION,
@@ -110,6 +111,7 @@ _RENDER_FLAGS = ("pypdfium2.render", "FPDF_ANNOT", "fill=255,255,255,255", "no_f
 _FURNITURE_DECIDED = {
     "watermark": Decided("furniture.watermark", WATERMARK_RULE),
     "line_number": Decided("furniture.line_number", LINE_NUMBER_RULE),
+    "hidden_text": Decided("furniture.hidden_text", HIDDEN_TEXT_RULE),
 }
 
 # The Page.text_source values of a page with a text layer.

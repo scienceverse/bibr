@@ -20,7 +20,7 @@ import re
 from collections.abc import Callable
 
 from bibr.ocr.types import OcrRegionResult
-from bibr.structure.float_labels import LABEL, SUPPLEMENT_WORD
+from bibr.structure.float_labels import LABEL, OTHER_FIGURE_WORD, OTHER_TABLE_WORD, SUPPLEMENT_WORD
 from bibr.structure.text_repair import bbox_to_tuple
 
 RegionKey = tuple[int, int]
@@ -28,26 +28,29 @@ Box = tuple[float, float, float, float]
 
 # Labels a caption region can carry, and the ones the content re-router turns
 # into a caption when the text reads as one (``PDFParser._FIGURE_CAPTION_RE``).
-_CAPTION_LABELS = frozenset({"figure_title", "chart_title"})
+_CAPTION_LABELS = frozenset({"figure_title"})
 _CONTENT_LABELS = frozenset({"text", "content"})
 # What a continuation can be: a caption region, or the text and footnote
 # regions a caption's second column is often read as. ``text`` only beside
 # the caption: below it, a ``text`` region is the next body paragraph.
-_SIDE_LABELS = frozenset({"figure_title", "chart_title", "text", "content", "vision_footnote"})
-_BELOW_LABELS = frozenset({"figure_title", "chart_title", "vision_footnote"})
+_SIDE_LABELS = frozenset({"figure_title", "text", "content", "vision_footnote"})
+_BELOW_LABELS = frozenset({"figure_title", "vision_footnote"})
 _FLOAT_LABELS = frozenset({"image", "chart", "table"})
 
 # A fragment that opens with a float label starts a caption of its own.
+_FLOAT_WORD = rf"(?:Figure|Fig\.?|Table|{OTHER_FIGURE_WORD}|{OTHER_TABLE_WORD})"
 _LABEL_START_RE = re.compile(
-    rf"^\s*{SUPPLEMENT_WORD}?(?:Figures?|Figs?\.?|Tables?|Tab\.)\s*{LABEL}", re.IGNORECASE
+    rf"^\s*{SUPPLEMENT_WORD}?(?:Figures?|Figs?\.?|Tables?|Tab\.|{OTHER_FIGURE_WORD}|"
+    rf"{OTHER_TABLE_WORD})\s*{LABEL}",
+    re.IGNORECASE,
 )
-_EXPLICIT_CAPTION_RE = re.compile(
-    rf"^\s*{SUPPLEMENT_WORD}?(?:Figure|Fig\.?|Table)\s+{LABEL}", re.IGNORECASE
-)
+_EXPLICIT_CAPTION_RE = re.compile(rf"^\s*{SUPPLEMENT_WORD}?{_FLOAT_WORD}\s+{LABEL}", re.IGNORECASE)
 _BARE_LABEL_RE = re.compile(
-    rf"^\s*{SUPPLEMENT_WORD}?(?:Figure|Fig\.?|Table)\s+{LABEL}\s*[.:]?\s*$", re.IGNORECASE
+    rf"^\s*{SUPPLEMENT_WORD}?{_FLOAT_WORD}\s+{LABEL}\s*[.:]?\s*$", re.IGNORECASE
 )
-_BARE_TABLE_LABEL_RE = re.compile(rf"^\s*{SUPPLEMENT_WORD}?Table\s+{LABEL}\s*[.:]?\s*$", re.I)
+_BARE_TABLE_LABEL_RE = re.compile(
+    rf"^\s*{SUPPLEMENT_WORD}?(?:Table|{OTHER_TABLE_WORD})\s+{LABEL}\s*[.:]?\s*$", re.I
+)
 _DOI_OR_URL_ONLY_RE = re.compile(r"^\s*(?:doi:\s*|https?://)\S+\s*$", re.IGNORECASE)
 _TERMINAL_RE = re.compile(r"[.!?][\"'”’)\]]*\s*$")
 

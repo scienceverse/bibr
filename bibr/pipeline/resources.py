@@ -14,11 +14,12 @@ import importlib
 import inspect
 import logging
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from bibr.ocr.registry import CLOUD_VISION_OCR_BACKENDS
+from bibr.ocr.registry import CLOUD_VISION_OCR_BACKENDS, TEXT_LAYER_BACKEND
 from bibr.utils.async_tasks import await_owned
 
 if TYPE_CHECKING:
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
     from bibr.local.layout import LayoutDetector
     from bibr.local.llm import VllmMlxLlmServer
     from bibr.local.segmenter import SentenceSegmenter
+    from bibr.local.vllm_share import ManagedLlmVramError
     from bibr.ocr.backend import OcrBackend
 
 logger = logging.getLogger(__name__)
@@ -95,6 +97,8 @@ class ResourceManager:
         ocr_breaker=None,
         managed_vllm_fraction: float = 0.0,
         managed_gpu_fraction: float | None = None,
+        managed_llm_share_fixed: bool | None = None,
+        llm_backend: str | None = None,
         settings: GlobalSettings | None = None,
         layout=None,
         segmenter=None,
@@ -114,18 +118,38 @@ class ResourceManager:
         self._requested_ocr_backend = ocr_backend
         self._requested_ocr_model = ocr_model
         self._requested_ocr_profile = ocr_profile
+        # The run's resolved LLM backend ("cloud" for --no-llm; None when the
+        # owner does not say): the automatic ``paddle`` OCR chain leaves
+        # paddle-vllm out beside a llama.cpp LLM (``automatic_backend_names``).
+        self._llm_backend = llm_backend
         self.ocr_backend = ocr_backend
         self.ocr_url = ocr_url
         self.ocr_model = ocr_model
         self.ocr_profile = ocr_profile
         self.ocr_runtime_identity = None
         self.ocr_fallback_reason: str | None = None
+        # Why no candidate of the automatic OCR chain can start on this
+        # machine, when OCR_FALLBACK_TO_TEXT_LAYER=auto switched the run to
+        # the PDF text layer (see check_text_layer_fallback). Kept for the
+        # life of these resources: every chunk reads the text layer.
+        self.ocr_text_layer_fallback: str | None = None
+        self._text_layer_fallback_checked = False
         self.device = device
 
         self.http_client = http_client
         self.ocr_sem_global = ocr_sem_global
         self.ocr_breaker = ocr_breaker
         self._managed_vllm_fraction = managed_vllm_fraction
+        # Whether the managed vLLM LLM server starts at exactly that share
+        # (the user chose it) or sizes it from the VRAM free at each start,
+        # with it as the cap (see ``bibr.local.vllm_share``). None reads the
+        # user's choice from the settings; a caller that writes a planned
+        # share onto them first passes what the user set.
+        if managed_llm_share_fixed is None:
+            from bibr.local.vllm_share import llm_share_user_set
+
+            managed_llm_share_fixed = llm_share_user_set(self._settings)
+        self._llm_share_fixed = managed_llm_share_fixed
         self._layout_factory = layout_factory
         self._segmenter_factory = segmenter_factory
         # Injected models transfer ownership by default. Embedders sharing
@@ -136,6 +160,9 @@ class ResourceManager:
         self._segmenter: SentenceSegmenter | None = segmenter
         self._front_role = None
         self._front_role_resolved = False
+        self._front_role_lock = threading.Lock()
+        self._front_tagger = None
+        self._front_tagger_resolved = False
         self._ocr: OcrBackend | None = None
         self._ocr_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._ocr_future: concurrent.futures.Future[OcrBackend] | None = None
@@ -146,6 +173,14 @@ class ResourceManager:
         self._llm_server: VllmMlxLlmServer | None = None
         self._llm_server_backend: str | None = None
         self._llm_init_lock = asyncio.Lock()
+        #: Times bibr released its own GPU models (and a resident OCR server)
+        #: in balanced mode because the managed vLLM LLM server's start would
+        #: otherwise have been refused (``_release_for_llm_start``).
+        self.llm_start_releases = 0
+        # Chunks seen by ``llm_start_refusal`` (called once before each
+        # chunk's OCR), so a release is logged once per chunk.
+        self._chunk_serial = 0
+        self._release_logged_chunk = -1
         self._llm_client: LLMClient | None = None
         if classifier_resources is None:
             from bibr.pipeline.classifier_resources import ClassifierResources
@@ -255,6 +290,19 @@ class ResourceManager:
             release_front_role_classifier(self._front_role)
         self._front_role = None
         self._front_role_resolved = False
+        if (
+            self._front_tagger is not None
+            and self._owns_models
+            and self.memory_mode == "aggressive"
+        ):
+            # Process-global like the NER parser below, and about half a gigabyte:
+            # balanced one-shot chew() calls share the process, and releasing it
+            # there would reload it on every file.
+            from bibr.front_tagger.runtime import release_front_tagger
+
+            release_front_tagger(self._front_tagger)
+        self._front_tagger = None
+        self._front_tagger_resolved = False
         if not self._owns_models:
             return
         # The NER parser singleton is process-global rather than an owned
@@ -283,22 +331,83 @@ class ResourceManager:
         bundle cannot be loaded — the loader logs once and the pipeline keeps
         going on heuristics alone.
         """
-        if self._front_role_resolved:
-            return self._front_role
-        from bibr.extract.front_role import load_front_role_classifier
+        from bibr.extract.front_role import _note_use, load_front_role_classifier
 
-        self._front_role = load_front_role_classifier(self._settings)
-        # Pin only a loaded model. The loader caches every definitive miss, so
-        # asking again is free, and a load that failed on the network is
-        # retried by the next paper instead of being given up for the process.
-        self._front_role_resolved = self._front_role is not None
-        return self._front_role
+        if self._front_role_resolved:
+            return _note_use(self._settings, self._front_role)
+        # Concurrent papers call this from worker threads: one loads, the rest wait.
+        with self._front_role_lock:
+            if self._front_role_resolved:
+                return _note_use(self._settings, self._front_role)
+            self._front_role = load_front_role_classifier(self._settings)
+            # Pin only a loaded model. The loader caches every definitive miss, so
+            # asking again is free, and a load that failed on the network is
+            # retried by the next paper instead of being given up for the process.
+            self._front_role_resolved = self._front_role is not None
+            return self._front_role
 
     @property
     def front_role(self):
         return self._front_role
 
+    def ensure_front_tagger(self, settings: GlobalSettings | None = None):
+        """Return the front-matter tagger, loading it on first use.
+
+        ``settings`` are the run's (default: the manager's own): a fast run
+        turns the tagger on for itself, and a full run on the same manager must
+        not get a loaded one. ``None`` when ``ML_FRONT_TAGGER_MODE`` is off or
+        the bundle cannot be loaded; a full run then leaves front matter to the
+        LLM.
+        """
+        settings = settings if settings is not None else self._settings
+        if getattr(settings.ml, "front_tagger_mode", "off") == "off":
+            return None
+        if self._front_tagger_resolved:
+            from bibr.front_tagger.runtime import _note_use
+
+            return _note_use(settings, self._front_tagger)
+        from bibr.front_tagger.runtime import load_front_tagger
+
+        self._front_tagger = load_front_tagger(settings, device=self.device)
+        self._front_tagger_resolved = self._front_tagger is not None
+        return self._front_tagger
+
     # -- OCR --
+
+    def check_text_layer_fallback(self) -> str | None:
+        """Why the run reads the PDF text layer instead of OCR, or None.
+
+        With ``OCR_FALLBACK_TO_TEXT_LAYER=auto``, the automatic ``paddle``
+        backend and no OCR server URL, a machine where no candidate of the
+        automatic chain can start (no NVIDIA GPU for vLLM, no llama.cpp, ...;
+        :func:`bibr.ocr.registry.automatic_chain_blockers`, the check the
+        ``bibr chew`` preflight makes) reads born-digital PDFs from their text
+        layer. The check starts nothing and runs once; its answer holds for
+        the life of these resources. A runtime that is installed but fails
+        to start is not a reason: its files fail as they do without the
+        setting, and a resumed batch retries them.
+        """
+        if self._text_layer_fallback_checked or self.ocr_text_layer_fallback is not None:
+            return self.ocr_text_layer_fallback
+        self._text_layer_fallback_checked = True
+        if (
+            getattr(self._settings.ocr, "fallback_to_text_layer", "off") != "auto"
+            or self._requested_ocr_backend != "paddle"
+            or self.ocr_url
+        ):
+            return None
+        from bibr.ocr.registry import automatic_chain_blockers
+
+        blockers = automatic_chain_blockers(self._settings, llm_backend=self._llm_backend)
+        if not blockers:
+            return None
+        self.ocr_text_layer_fallback = "; ".join(blockers)
+        logger.info(
+            "No OCR backend can start on this machine (%s). OCR_FALLBACK_TO_TEXT_LAYER=auto: "
+            "reading born-digital PDFs from their embedded text layer; scanned PDFs fail.",
+            self.ocr_text_layer_fallback,
+        )
+        return self.ocr_text_layer_fallback
 
     def _resolve_ocr_candidates(self):
         """Resolve startup candidates, retaining explicit request overrides."""
@@ -314,8 +423,13 @@ class ResourceManager:
             requested = resolve_url_backend(
                 url_request(requested, self._settings.ocr.backend), self.ocr_url
             )
-        candidates = resolve_backend_candidates(requested, self._settings)
+        candidates = resolve_backend_candidates(
+            requested, self._settings, llm_backend=self._llm_backend
+        )
         if len(candidates) != 1 or requested == "paddle":
+            return candidates
+        if candidates[0].backend == TEXT_LAYER_BACKEND:
+            # No model runs: a configured model or profile names nothing here.
             return candidates
         candidate = candidates[0]
         # A concrete backend is an explicit user choice: preserve its model
@@ -407,6 +521,8 @@ class ResourceManager:
         backend_name = backend_name or self._requested_ocr_backend
         if backend_name in self._VISION_BACKENDS:
             from bibr.local import ocr_cloud  # noqa: F401 — triggers @register
+        elif backend_name == TEXT_LAYER_BACKEND:
+            from bibr.ocr import text_layer  # noqa: F401 — triggers @register
         elif backend_name != "serve-http":
             from bibr.local import ocr as _ocr  # noqa: F401 — triggers @register
             from bibr.local import rapid_mlx as _rapid_mlx  # noqa: F401 — triggers @register
@@ -439,6 +555,8 @@ class ResourceManager:
         backend_name = self._resolve_ocr_backend_name(requested_name)
         if backend_name in self._VISION_BACKENDS:
             from bibr.local import ocr_cloud  # noqa: F401 — triggers @register
+        elif backend_name == TEXT_LAYER_BACKEND:
+            from bibr.ocr import text_layer  # noqa: F401 — triggers @register
         else:
             from bibr.local import ocr as _ocr  # noqa: F401 — triggers @register
             from bibr.local import rapid_mlx as _rapid_mlx  # noqa: F401 — triggers @register
@@ -558,8 +676,15 @@ class ResourceManager:
         return f"{candidate.backend}: {remedies.get(candidate.backend, 'check local OCR runtime setup')}"
 
     def _set_ocr_runtime_identity(self, candidate) -> None:
-        from bibr.ocr.profiles import OcrRuntimeIdentity, resolve_ocr_profile
+        from bibr.ocr.profiles import OcrRuntimeIdentity, resolve_ocr_profile, text_layer_identity
 
+        if candidate.backend == TEXT_LAYER_BACKEND:
+            identity = text_layer_identity()
+            self.ocr_backend = identity.backend
+            self.ocr_model = identity.model
+            self.ocr_profile = None
+            self.ocr_runtime_identity = identity
+            return
         profile = resolve_ocr_profile(
             explicit=candidate.profile,
             backend=candidate.backend,
@@ -600,8 +725,10 @@ class ResourceManager:
                 try:
                     if self._llm_server_blocks_ocr(candidate.backend):
                         logger.info(
-                            "Stopping the managed vLLM LLM server to free VRAM for "
-                            "PaddleOCR-VL vLLM; the LLM stage restarts it"
+                            "Stopping the managed %s LLM server to free VRAM for %s OCR; "
+                            "the LLM stage restarts it",
+                            self._llm_server_backend,
+                            candidate.backend,
                         )
                         await self.close_llm_server()
                     client = await self._construct_ocr_candidate(candidate)
@@ -739,13 +866,47 @@ class ResourceManager:
         """Whether the managed vLLM LLM and PaddleOCR-VL servers cannot run together.
 
         Each vLLM server claims a fixed share of total VRAM when it starts and
-        refuses to start while less is free, so with shares summing above 1
-        (the defaults, 0.85 + 0.92) the one starting must stop the other.
+        refuses to start while less is free, and bibr's own GPU sessions stay
+        on the card between chunks. So unless both shares plus
+        ``MANAGED_VLLM_ONNX_RESERVE_GB`` fit (the defaults, 0.85 and
+        PaddleOCR-VL's ~5 GB, do not on cards up to 64 GB), the one starting
+        must stop the other.
         """
-        from bibr.ocr.registry import PADDLE_VLLM_GPU_MEMORY_UTILIZATION
+        from bibr.ocr.registry import managed_vllm_shares_fit, paddle_vllm_gpu_memory_utilization
 
         llm_share = self._managed_vllm_fraction or self._settings.llm.local_mem_fraction
-        return llm_share + PADDLE_VLLM_GPU_MEMORY_UTILIZATION > 1.0
+        return not managed_vllm_shares_fit(llm_share, paddle_vllm_gpu_memory_utilization())
+
+    def _starts_managed_paddle_vllm(self) -> bool:
+        """Whether this run's OCR is, or may resolve to, a managed paddle-vllm server.
+
+        The OCR backend once one was constructed, else the requested one; the
+        automatic ``paddle`` chain lists paddle-vllm only on hardware that can
+        run it. An OCR URL names someone else's server.
+        """
+        if self.ocr_url:
+            return False
+        if self.ocr_backend == "paddle-vllm":
+            return True
+        if self.ocr_backend != "paddle":
+            return False
+        from bibr.ocr.registry import automatic_backend_names
+
+        return "paddle-vllm" in automatic_backend_names(llm_backend=self._llm_backend)
+
+    def _llm_swaps_with_ocr(self) -> bool:
+        """Whether a managed PaddleOCR-VL server takes turns with the vLLM LLM server.
+
+        Only then does the LLM restart every chunk beside bibr's grown GPU
+        sessions, so a start short of the model's floor may be squeezed to it,
+        leaving them ``LLM_ONNX_MIN_HEADROOM_GB`` for that chunk. With any
+        other OCR (an OCR URL, cloud OCR, GLM-OCR, or shares planned to fit
+        side by side) the LLM stays up for the run, usually from the first
+        chunk on, before bibr's sessions have grown: its share always leaves
+        them ``MANAGED_VLLM_ONNX_RESERVE_GB`` less what they hold, and a start
+        that cannot is refused (``bibr.local.vllm_share``).
+        """
+        return self._starts_managed_paddle_vllm() and self._vllm_shares_overcommit()
 
     def _llm_server_blocks_ocr(self, ocr_backend: str) -> bool:
         """Whether starting ``ocr_backend`` must first stop the managed LLM server.
@@ -753,13 +914,200 @@ class ResourceManager:
         The LLM server outlives a chunk while a balanced run tears OCR down
         after each one, so a later chunk's ``paddle-vllm`` restart found the
         LLM still holding its share: explicit ``paddle-vllm`` failed every file
-        and the automatic chain fell back to GLM mid-batch.
+        and the automatic chain fell back to GLM mid-batch. A managed llama.cpp
+        LLM server outlives the chunk the same way, and on a small card the
+        next chunk's GLM-OCR llama.cpp server started beside it could not
+        allocate its compute buffer and failed every page (an emulated 8 GB
+        card with a desktop on it, from the second chunk on), so it stops
+        in the aggressive memory mode, and in any other when the memory free
+        then cannot also hold GLM-OCR (``_llama_cpp_llm_blocks_glm_ocr``).
         """
+        if ocr_backend == "glm-llama" and self._llm_server_backend == "llama-cpp":
+            return self._llama_cpp_llm_blocks_glm_ocr()
         return (
             ocr_backend == "paddle-vllm"
             and self._llm_server_backend == "vllm"
             and self._vllm_shares_overcommit()
         )
+
+    def _llama_cpp_llm_blocks_glm_ocr(self) -> bool:
+        """Whether a managed GLM-OCR start needs the llama.cpp LLM server's memory.
+
+        The aggressive memory mode, which bibr picks for CUDA cards below
+        12 GB whose LLM server it manages, always stops it. Beside a resident
+        LLM, an emulated 10 GB card with a 0.5 GiB desktop left bibr about
+        1.97 GiB for its own GPU sessions while OCR ran, against their
+        aggressive-mode peak of about 3.1 GiB, and the layout model split its
+        batches on running out of memory 75 times. Stopping costs no measured
+        speed: on the same 48 papers that card ran 148.2 papers an hour with
+        the LLM resident, and an emulated 8 GB card that stopped it before
+        every chunk's OCR after the first ran 149.5, with 26 layout splits
+        (each restart read the GGUF from a warm page cache). The rule covers
+        Windows 10–11 GB cards, pre-Ampere 11 GB cards, ``--llm llama-cpp``
+        below 12 GB and any run that sets the aggressive mode itself
+        (``--memory aggressive`` or ``PIPELINE_MEMORY_MODE=aggressive``, on a
+        card of any size), which kept the LLM resident whenever the
+        free-memory rule below allowed it; 6–9 GB cards already stopped it in
+        every measured chunk after the first.
+
+        Any other mode stops it when less is free than GLM-OCR holds
+        (``GLM_LLAMA_OCR_VRAM_GB``) plus the minimum room bibr keeps for its
+        own GPU sessions (``LLM_ONNX_MIN_HEADROOM_GB``), and keeps it with no
+        reading of the card (no NVIDIA GPU visible to nvidia-smi). An OCR URL
+        names someone else's server, which bibr does not start.
+        """
+        if self.ocr_url:
+            return False
+        if self.memory_mode == "aggressive":
+            return True
+        from bibr.local.vllm_share import LLM_ONNX_MIN_HEADROOM_GB
+        from bibr.ocr.registry import GLM_LLAMA_OCR_VRAM_GB, managed_gpu_memory
+
+        reading = managed_gpu_memory()
+        if reading is None:
+            return False
+        return reading.free_gb < GLM_LLAMA_OCR_VRAM_GB + LLM_ONNX_MIN_HEADROOM_GB
+
+    async def llm_start_refusal(self, backend: str) -> ManagedLlmVramError | None:
+        """The refusal the managed vLLM LLM server's next start is sure to meet, if any.
+
+        Checked before a chunk's OCR. The start comes after OCR, and on the
+        swap path PaddleOCR-VL has stopped by then, so the memory free at the
+        start is about what is free now, or less: bibr's own GPU sessions only
+        grow within a chunk, and the room a start leaves them is their reserve
+        less what they hold, so their growth cannot raise the budget. So when
+        what is free now cannot meet the model's floor beside that room (or,
+        on the swap path only, beside the minimum room), the start would raise
+        ``ManagedLlmVramError``, and the chunk's OCR is skipped. That error is
+        returned (raised, so it carries a traceback) to fail the chunk exactly
+        as the start would; ``None`` means the chunk goes ahead. Read again
+        before every chunk, since memory that other processes held can come
+        back.
+
+        No prediction (``None``) when the share is the user's (it is launched
+        as given), when the LLM server is up (it is reused, or restarted after
+        OCR from memory not free now), while an OCR preload is in flight, when
+        an OCR engine that holds GPU memory is resident (it may be stopped
+        before the start), or when a server already listens on the LLM
+        server's port. The start's own check decides that
+        (``vllm_llm.reuses_running_server``): a server for the model, one a
+        sibling pipeline in this process started included, is reused before
+        any share is sized, however little memory is free, and any other
+        listener fails the start with its own error.
+
+        In balanced mode a predicted refusal first releases what aggressive
+        mode would (``_release_for_llm_start``) and reads the card again; only
+        a start still short is refused. The start does the same, since from
+        the second chunk the LLM server is up at this check.
+        """
+        self._chunk_serial += 1
+        if backend != "vllm" or self._llm_share_fixed or self._llm_server is not None:
+            return None
+        if self._ocr_future is not None:
+            return None
+        if self._ocr is not None:
+            from bibr.pipeline.stages.ocr import REMOTE_OCR_BACKENDS
+
+            if not (self.ocr_url or self.ocr_backend in REMOTE_OCR_BACKENDS):
+                return None
+        if await self._reuses_llm_server():
+            return None
+        refusal = await self._llm_start_refusal_now()
+        if refusal is not None and await self._release_for_llm_start(refusal):
+            refusal = await self._llm_start_refusal_now()
+        return refusal
+
+    async def _reuses_llm_server(self) -> bool:
+        """Whether the managed vLLM LLM start would reuse a server already listening.
+
+        True when the check itself fails too: the start then reports it.
+        """
+        from bibr.exceptions import UpstreamServiceError
+        from bibr.local import vllm_llm, vllm_share
+
+        model = vllm_share.managed_llm_model(self._settings)
+        try:
+            return await asyncio.to_thread(
+                vllm_llm.reuses_running_server, model, self._settings.llm.vllm_port
+            )
+        except UpstreamServiceError:
+            return True
+
+    async def _llm_start_refusal_now(self) -> ManagedLlmVramError | None:
+        """The refusal a managed vLLM LLM start would meet with the memory free now."""
+        from bibr.local import vllm_share
+        from bibr.ocr import registry
+
+        reading = await asyncio.to_thread(
+            vllm_share.settled_gpu_memory, registry.managed_gpu_memory, wait=time.sleep
+        )
+        if reading is None:
+            return None
+        try:
+            vllm_share.managed_llm_share(
+                reading,
+                self._settings,
+                vllm_share.managed_llm_model(self._settings),
+                cap=self._managed_vllm_fraction or self._settings.llm.local_mem_fraction,
+                swaps_with_ocr=self._llm_swaps_with_ocr(),
+            )
+        except vllm_share.ManagedLlmVramError as exc:
+            return exc
+        return None
+
+    async def _release_for_llm_start(self, refusal: ManagedLlmVramError) -> bool:
+        """In balanced mode, release what aggressive mode would before a refused start.
+
+        That is bibr's own GPU models (the layout detector, the sentence
+        segmenter and the NER reference parser, each reloaded when next
+        needed) and a resident local OCR server. The paper and section
+        classifiers are left alone: with a managed vLLM LLM server they stay
+        off the GPU's managed share anyway. Returns whether anything was
+        released, so the caller reads the free memory again. Only the
+        balanced mode does this: aggressive mode has released them already,
+        and ``keep_all`` keeps them by definition.
+        """
+        if self.memory_mode != "balanced":
+            return False
+        released: list[str] = []
+        layout = self._layout
+        if layout is not None and getattr(layout, "loaded", False) and hasattr(layout, "unload"):
+            await asyncio.to_thread(layout.unload)
+            released.append("layout")
+        segmenter = self._segmenter
+        if (
+            segmenter is not None
+            and getattr(segmenter, "loaded", False)
+            and hasattr(segmenter, "unload")
+        ):
+            await asyncio.to_thread(segmenter.unload)
+            released.append("sentence segmenter")
+        from bibr.extract.ref_extractor import ner_parser_loaded
+
+        if ner_parser_loaded():
+            self.unload_ner_parser()
+            released.append("NER reference parser")
+        if self._ocr is not None or self._ocr_future is not None:
+            from bibr.pipeline.stages.ocr import REMOTE_OCR_BACKENDS
+
+            if not (self.ocr_url or self.ocr_backend in REMOTE_OCR_BACKENDS):
+                await self.shutdown_ocr()
+                released.append(f"OCR server ({self.ocr_backend})")
+        if not released:
+            return False
+        self.llm_start_releases += 1
+        level = logging.DEBUG
+        if self._release_logged_chunk != self._chunk_serial:
+            self._release_logged_chunk = self._chunk_serial
+            level = logging.WARNING
+        logger.log(
+            level,
+            "Released %s before the managed vLLM LLM server start (release %d): %s",
+            ", ".join(released),
+            self.llm_start_releases,
+            refusal,
+        )
+        return True
 
     async def _construct_llm_server(self, factory):
         """Run *factory(stop_event)* off the loop; cancellation sets the event."""
@@ -793,6 +1141,20 @@ class ResourceManager:
             # outside the LLM lock: await_ocr takes the locks the other way.
             logger.info("Stopping PaddleOCR-VL vLLM to free VRAM for the vLLM LLM server")
             await self.shutdown_ocr()
+        if (
+            backend == "vllm"
+            and self._llm_server is None
+            and self.memory_mode == "balanced"
+            and not self._llm_share_fixed
+            and not await self._reuses_llm_server()
+        ):
+            # bibr's own GPU models grow over a batch; when what they hold
+            # would leave the start short, release them as aggressive mode
+            # does, then start (the start's own check decides). Outside the
+            # LLM lock, like the OCR stop above.
+            refusal = await self._llm_start_refusal_now()
+            if refusal is not None:
+                await self._release_for_llm_start(refusal)
         async with self._llm_init_lock:
             if self._llm_server is not None:
                 return
@@ -817,12 +1179,22 @@ class ResourceManager:
                 # Module (not class) import so tests can monkeypatch the symbol.
                 import bibr.local.vllm_llm as vllm_llm
 
+                # Unless the user set the share, it is sized at every start
+                # from the VRAM free then: bibr's own GPU sessions grow over a
+                # batch, and a restart at the fixed 0.85 beside them ran out
+                # of memory in CUDA graph capture after its startup check.
+                # Whether it swaps with PaddleOCR-VL also decides the automatic
+                # speculative decoding choice, so it is passed either way.
+                share_from_free = not self._llm_share_fixed
+                swaps_with_ocr = self._llm_swaps_with_ocr()
                 server = await self._construct_llm_server(
                     lambda stop: _make_settings_aware(
                         vllm_llm.VllmLlmServer,
                         self._settings,
                         mem_fraction=self._managed_vllm_fraction or None,
                         stop_event=stop,
+                        share_from_free_memory=share_from_free,
+                        swaps_with_ocr=swaps_with_ocr,
                     ),
                 )
             elif backend == "llama-cpp":

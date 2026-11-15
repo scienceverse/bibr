@@ -127,6 +127,11 @@ class InferenceBatcher(Generic[T, R]):
         if not active:
             return
         try:
+            # The forward runs without any caller's context: a batch mixes the items
+            # of concurrent chunks, so it must not report into one chunk's model
+            # override scope (bibr.utils.model_overrides). A model's failure reaches
+            # every caller as an exception on its future, below, and each caller
+            # records it in its own chunk.
             results = await loop.run_in_executor(None, self._fn, [entry.item for entry in active])
             if len(results) != len(active):
                 raise RuntimeError(

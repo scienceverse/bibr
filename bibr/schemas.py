@@ -473,10 +473,13 @@ class TitleKeywordsLLM(AbstractResponse):
     @classmethod
     def keywords_none_to_empty(cls, v: list[str] | None) -> list[str]:
         """None → [] ; drop placeholder tokens (e.g. "verbatim-string") and
-        non-str items defensively, preserving the order of the rest."""
+        non-str items defensively, preserving the order of the rest. A bare
+        string is one keyword as written (iterated, it gave one per character)."""
         if v is None:
             return []
-        if isinstance(v, int | float):
+        if isinstance(v, str):
+            v = [v]
+        if not isinstance(v, list):
             # Left for the list check to reject as a ValidationError, which
             # Instructor re-asks; iterating it raised a TypeError instead.
             return v
@@ -787,6 +790,53 @@ class CoreMetadataLLM(AbstractResponse):
     _field_failures: dict[str, str] = PrivateAttr(default_factory=dict)
     # ``AuthorsLLM._salvaged_after`` of the author call, carried through.
     _authors_salvaged_after: str | None = PrivateAttr(default=None)
+    # The calls the front-matter tagger answered instead of the model
+    # ("title_keywords", "authors"); their fields' source is "front_tagger".
+    _front_tagger_parts: frozenset[str] = PrivateAttr(default_factory=frozenset)
+
+    @classmethod
+    def from_calls(
+        cls,
+        title_kw: TitleKeywordsLLM,
+        authors: AuthorsLLM,
+        classification: PaperClassificationLLM,
+        *,
+        field_failures: dict[str, str] | None = None,
+        front_tagger_parts: frozenset[str] = frozenset(),
+    ) -> "CoreMetadataLLM":
+        """The record the three focused answers make together.
+
+        Shared by the LLM fan-out and the front-matter tagger alone, so both
+        carry the answers' private notes (an abstract the model found absent,
+        a repair, an author salvage) the same way.
+        """
+        combined = cls(
+            title=title_kw.title,
+            **({"abstract": title_kw.abstract} if "abstract" in title_kw.model_fields_set else {}),
+            keywords=title_kw.keywords,
+            authors=authors.authors,
+            oecd_domain=classification.oecd_domain,
+            oecd_subdomain=classification.oecd_subdomain,
+            paper_type=classification.paper_type,
+            journal=title_kw.journal,
+            volume=title_kw.volume,
+            issue=title_kw.issue,
+            first_page=title_kw.first_page,
+            last_page=title_kw.last_page,
+            issn=title_kw.issn,
+            publisher=title_kw.publisher,
+            published=title_kw.published,
+            license=title_kw.license,
+        )
+        combined._abstract_explicitly_absent = title_kw._abstract_explicitly_absent
+        combined._repair_note = title_kw._repair_note
+        combined._field_failures = field_failures if field_failures is not None else {}
+        combined._front_tagger_parts = front_tagger_parts
+        salvaged_after = getattr(authors, "_salvaged_after", None)
+        combined._authors_salvaged_after = (
+            salvaged_after if isinstance(salvaged_after, str) else None
+        )
+        return combined
 
     _coerce_title = field_validator("title", mode="before")(_scrub_str_placeholder)
     _canon_oecd_domain = field_validator("oecd_domain", mode="before")(_canonicalize_oecd_domain)
@@ -809,15 +859,7 @@ class CoreMetadataLLM(AbstractResponse):
     @field_validator("keywords", mode="before")
     @classmethod
     def keywords_none_to_empty(cls, v: list[str] | None) -> list[str]:
-        """None → [] ; drop placeholder tokens (e.g. "verbatim-string") and
-        non-str items defensively, preserving the order of the rest."""
-        if v is None:
-            return []
-        if isinstance(v, int | float):
-            # Left for the list check to reject as a ValidationError, which
-            # Instructor re-asks; iterating it raised a TypeError instead.
-            return v
-        return [kw for kw in v if isinstance(kw, str) and not _is_placeholder_token(kw)]
+        return TitleKeywordsLLM.keywords_none_to_empty(v)
 
     @model_validator(mode="before")
     @classmethod
@@ -1213,9 +1255,15 @@ class FundingEntryLLM(BaseModel):
     @classmethod
     def _award_ids_none_to_empty(cls, v: list[str] | None) -> list[str]:
         """None → [] ; drop NuExtract3 placeholder tokens (e.g. leaked
-        "verbatim-string" award ids), preserving the order of the rest."""
+        "verbatim-string" award ids), preserving the order of the rest. A bare
+        string is one award id; anything else that is not a list is left for
+        the type check to reject."""
         if v is None:
             return []
+        if isinstance(v, str):
+            v = [v]
+        if not isinstance(v, list):
+            return v
         return [a for a in v if not _is_placeholder_token(a)]
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -51,11 +52,14 @@ async def enrich_organizations(
         return OrganizationReport()
 
     failures: list[str] = []
+    # A string whose request could not start before the paper's budget ends
+    # fails at once ("request budget spent") rather than waiting out the budget.
+    deadline = time.monotonic() + timeout
 
     async def run() -> None:
         # Stored as they arrive, so a timeout keeps what was already matched.
         async def one(text: str, into: dict) -> None:
-            result, failure = await client.lookup(text)
+            result, failure = await client.lookup(text, deadline=deadline)
             if failure is not None:
                 failures.append(failure)
             if result is not None:

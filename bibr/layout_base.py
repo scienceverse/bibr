@@ -22,6 +22,7 @@ rectangle becomes ``bbox_2d``) and decodes reading order from two order heads
 import logging
 import time
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 
@@ -96,14 +97,19 @@ def _maybe_empty_cache() -> None:
     torch.cuda.empty_cache()
 
 
-def _is_oom_error(exc: BaseException) -> bool:
-    """True for a torch CUDA OOM or an ORT arena allocation failure."""
-    message = str(exc).lower()
-    return (
-        "out of memory" in message
-        or "bfcarena" in message
-        or "failed to allocate memory" in message
-    )
+def _is_oom_error(exc: BaseException, *, on_gpu: bool = True) -> bool:
+    """True for an allocation failure that a smaller batch may avoid.
+
+    On the GPU, a torch CUDA OOM or an ORT GPU allocation failure, including
+    the bare ORT ``cudaError`` a cuDNN convolution raised on a nearly full
+    card (see ``bibr.utils.gpu_oom``), which used to fail the paper with
+    ``layout_failed`` instead of splitting the batch. On a CPU session, the
+    arena and out-of-memory failures layout always split on, which are not
+    GPU failures.
+    """
+    from bibr.utils.gpu_oom import is_memory_error
+
+    return is_memory_error(exc, on_gpu=on_gpu)
 
 
 def _check_label_map(id2label, source: str) -> None:
@@ -190,7 +196,9 @@ class BaseLayoutDetector:
         # Set True by variants that wrap the model in torch.compile — gates the
         # fixed-size batch padding (only compiled graphs recompile on new shapes).
         self._compiled: bool = False
-        self._model = None
+        # The ORT backend (``OnnxLayoutBackend``) or the torch module, set by
+        # ``_install_model``.
+        self._model: Any = None
         self._image_processor = None
 
         # Pre-allocate a dummy image for batch padding (avoids per-call PIL
@@ -297,37 +305,65 @@ class BaseLayoutDetector:
                 return self._detect_onnx(images, orig_sizes)
             return self._detect_pytorch(images, orig_sizes)
         except Exception as exc:
-            if not _is_oom_error(exc) or len(images) <= 1:
+            on_gpu = self._runs_on_gpu()
+            if not _is_oom_error(exc, on_gpu=on_gpu):
                 raise
+            if len(images) <= 1:
+                # One page that still does not fit on the GPU runs on the CPU
+                # when the ONNX backend can (a slow page instead of a failed
+                # paper). A CPU session's own failure is raised as before.
+                if not (on_gpu and self._can_detect_on_cpu()):
+                    raise
+                single_on_cpu = True
+            else:
+                single_on_cpu = False
 
-            # Compiled inference pads every call back to the configured maximum.
-            # Disable that padding before retrying or the smaller logical batch
-            # would consume exactly the same memory and OOM again. Restored
-            # afterwards: the compiled graph is still resident, so later
-            # batches must keep padding or every new shape recompiles.
-            compiled = self._compiled
-            if compiled:
-                self._compiled = False
-                logger.warning("Layout OOM disabled fixed-size compiled padding for retries")
-            half = max(1, len(images) // 2)
-            logger.warning(
-                "Layout OOM with batch size %d, retrying as %d + %d",
-                len(images),
-                half,
-                len(images) - half,
-            )
-            first, second = images[:half], images[half:]
+        if single_on_cpu:
+            logger.warning("Layout OOM on a single page; running it on the CPU")
+            return self._detect_onnx(images, orig_sizes, on_cpu=True)
+        return self._detect_split(images)
 
-        # Retry after leaving the exception handler: Python then clears the
-        # traceback (which may retain failed-forward tensors and their VRAM).
+    def _runs_on_gpu(self) -> bool:
+        """Whether the layout model runs on a GPU (False for a CPU session)."""
+        if getattr(self, "_runtime", "torch") == "onnx":
+            return getattr(self._model, "device", None) == "cuda"
+        return getattr(getattr(self, "_device", None), "type", None) != "cpu"
+
+    def _can_detect_on_cpu(self) -> bool:
+        return getattr(self, "_runtime", "torch") == "onnx" and hasattr(self._model, "run_on_cpu")
+
+    def _detect_split(self, images: list) -> list[list[dict]]:
+        """Detect ``images`` as two halves after an OOM on the whole batch.
+
+        Called after leaving the exception handler: Python then clears the
+        traceback (which may retain failed-forward tensors and their VRAM).
+        """
+        # Compiled inference pads every call back to the configured maximum.
+        # Disable that padding before retrying or the smaller logical batch
+        # would consume exactly the same memory and OOM again. Restored
+        # afterwards: the compiled graph is still resident, so later
+        # batches must keep padding or every new shape recompiles.
+        compiled = self._compiled
+        if compiled:
+            self._compiled = False
+            logger.warning("Layout OOM disabled fixed-size compiled padding for retries")
+        half = max(1, len(images) // 2)
+        logger.warning(
+            "Layout OOM with batch size %d, retrying as %d + %d",
+            len(images),
+            half,
+            len(images) - half,
+        )
         try:
-            return self._detect_images(first) + self._detect_images(second)
+            return self._detect_images(images[:half]) + self._detect_images(images[half:])
         finally:
             self._compiled = compiled
 
-    def _detect_onnx(self, pil_images: list, orig_sizes: list[tuple[int, int]]) -> list[list[dict]]:
+    def _detect_onnx(
+        self, pil_images: list, orig_sizes: list[tuple[int, int]], *, on_cpu: bool = False
+    ) -> list[list[dict]]:
         """ONNX Runtime inference path: numpy pre/post-processing around one session run."""
-        results = self._model.run(pil_images)
+        results = self._model.run_on_cpu(pil_images) if on_cpu else self._model.run(pil_images)
         return [
             self._postprocess(result, orig_w, orig_h)
             for result, (orig_h, orig_w) in zip(results, orig_sizes, strict=True)

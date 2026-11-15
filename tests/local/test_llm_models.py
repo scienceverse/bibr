@@ -1,5 +1,6 @@
 """Registry invariants + hardware detection for local LLM onboarding."""
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -22,8 +23,13 @@ def test_cuda_llm_backend_follows_the_registry_fit():
 
     assert cuda_llm_backend_for(None) == "vllm"  # unknown VRAM keeps the fast path
     assert cuda_llm_backend_for(6.0) == "llama-cpp"
-    assert cuda_llm_backend_for(7.9) == "llama-cpp"
-    assert cuda_llm_backend_for(8.0) == "vllm"  # the 2B student fits
+    assert cuda_llm_backend_for(7.7) == "llama-cpp"
+    # 8 GB cards (an RTX 4060 reports 8,188 MiB) refuse every managed vLLM
+    # start beside a desktop, so their default is the GGUF build on llama.cpp.
+    assert cuda_llm_backend_for(8188 / 1024) == "llama-cpp"
+    assert cuda_llm_backend_for(8.0) == "llama-cpp"
+    assert cuda_llm_backend_for(9.5) == "llama-cpp"
+    assert cuda_llm_backend_for(10.0) == "vllm"  # an RTX 3080: the W4A16 build
     assert cuda_llm_backend_for(11.0) == "vllm"
 
 
@@ -32,9 +38,14 @@ def test_cuda_llm_backend_follows_the_registry_fit():
     [
         ("cuda", None, "vllm", "scienceverse/bibr-extract-qwen35-4b"),
         ("cuda", 24.0, "vllm", "scienceverse/bibr-extract-qwen35-4b"),
-        ("cuda", 12.0, "vllm", "scienceverse/bibr-extract-qwen35-4b"),
-        ("cuda", 11.0, "vllm", "scienceverse/bibr-extract-qwen35-2b"),
-        ("cuda", 8.0, "vllm", "scienceverse/bibr-extract-qwen35-2b"),
+        ("cuda", 20.0, "vllm", "scienceverse/bibr-extract-qwen35-4b"),
+        ("cuda", 16.0, "vllm", "scienceverse/bibr-extract-qwen35-4b-W4A16"),
+        ("cuda", 12.0, "vllm", "scienceverse/bibr-extract-qwen35-4b-W4A16"),
+        ("cuda", 12227 / 1024, "vllm", "scienceverse/bibr-extract-qwen35-4b-W4A16"),  # RTX 5070
+        ("cuda", 11.0, "vllm", "scienceverse/bibr-extract-qwen35-4b-W4A16"),
+        ("cuda", 10.0, "vllm", "scienceverse/bibr-extract-qwen35-4b-W4A16"),  # RTX 3080
+        ("cuda", 8.0, "llama-cpp", "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"),
+        ("cuda", 8188 / 1024, "llama-cpp", "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"),
         ("cuda", 24.0, "llama-cpp", "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"),
         ("cuda", 7.0, "llama-cpp", "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"),
         ("cuda", 6.0, "llama-cpp", "scienceverse/bibr-extract-qwen35-4b-GGUF:Q4_K_M"),
@@ -61,20 +72,227 @@ def test_recommended_variant_none_when_nothing_fits():
     assert recommended_variant("cuda", 2.0, "llama-cpp") is None
 
 
-def test_students_are_merged_vllm_checkpoints_with_thinking_off():
-    for key in ("bibr-extract-4b", "bibr-extract-2b"):
-        model = get_model(key)
-        assert [v.runtime for v in model.variants][:3] == ["vllm", "llama-cpp", "llama-cpp"]
-        assert {v.platform for v in model.variants[3:]} == {"mlx"}
-        # llama.cpp and MLX servers do not read server_args: thinking goes off per request.
-        assert model.env == {"LLM_CHAT_TEMPLATE_KWARGS": '{"enable_thinking": false}'}
-        args = registry_server_args(model.variants[0].hf_id)
+@pytest.mark.parametrize(
+    ("key", "runtimes"),
+    [
+        ("bibr-extract-4b", ["vllm", "vllm", "llama-cpp", "llama-cpp"]),
+        ("bibr-extract-2b", ["vllm", "llama-cpp", "llama-cpp"]),
+    ],
+)
+def test_students_are_merged_vllm_checkpoints_with_thinking_off(key, runtimes):
+    model = get_model(key)
+    assert [v.runtime for v in model.variants][: len(runtimes)] == runtimes
+    assert {v.platform for v in model.variants[len(runtimes) :]} == {"mlx"}
+    # llama.cpp and MLX servers do not read server_args: thinking goes off per request.
+    assert model.env == {"LLM_CHAT_TEMPLATE_KWARGS": '{"enable_thinking": false}'}
+    for variant in model.variants[: runtimes.count("vllm")]:
+        args = registry_server_args(variant.hf_id)
         assert "--enable-lora" not in args  # merged, so spec decoding stays usable
         assert "--language-model-only" in args
         revision = args[args.index("--revision") + 1]
         assert len(revision) == 40  # a pinned Hub commit, not a branch
         kwargs_idx = args.index("--default-chat-template-kwargs")
         assert args[kwargs_idx + 1] == '{"enable_thinking": false}'
+
+
+def _vllm_variants():
+    return [v for m in REGISTRY for v in m.variants if v.runtime == "vllm"]
+
+
+@pytest.mark.parametrize("variant", _vllm_variants(), ids=lambda v: v.hf_id)
+def test_students_cap_running_sequences_below_their_mamba_blocks(variant):
+    """vLLM 0.31 refused the 4B at 0.54 of a 24 GB card: "max_num_seqs (256)
+    exceeds available Mamba cache blocks (165)". bibr ran at most 19 at once."""
+    args = registry_server_args(variant.hf_id)
+    max_num_seqs = int(args[len(args) - 1 - args[::-1].index("--max-num-seqs") + 1])
+    assert 19 < max_num_seqs <= 165
+
+
+@pytest.mark.parametrize("variant", _vllm_variants(), ids=lambda v: v.hf_id)
+def test_vllm_variants_have_a_measured_budget_floor_below_their_tier(variant):
+    # The floor is a budget (a share of CUDA's total), the tier a card size.
+    assert variant.min_budget_gb is not None
+    assert 0 < variant.min_budget_gb < variant.min_vram_gb
+
+
+def test_budget_floors_and_tiers():
+    by_id = {v.hf_id: v for v in _vllm_variants()}
+    floors = {h: (v.min_budget_gb, v.min_vram_gb) for h, v in by_id.items()}
+    # The 4B's: cold vLLM 0.32.0 probes at 64 sequences (on an RTX 3090); the 2B's
+    # from vLLM 0.31.0 at 128.
+    assert floors == {
+        "scienceverse/bibr-extract-qwen35-4b": (11.0, 20),
+        "scienceverse/bibr-extract-qwen35-4b-W4A16": (6.0, 10),
+        "scienceverse/bibr-extract-qwen35-2b": (6.25, 12),
+    }
+
+
+#: The 4B student retrained with pointer answers (2026-10-26): every build's
+#: commit on its repository's ``pointer-v1`` branch. ``main`` still holds the
+#: previous 4B's builds.
+_POINTER_V1_REVISIONS = {
+    "scienceverse/bibr-extract-qwen35-4b": "9199424d4bd200feb247e26e4a860b63da73cbaf",
+    "scienceverse/bibr-extract-qwen35-4b-W4A16": "a32f20485181574d849cfb32f8eac1f266c4143d",
+    "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0": "0aa228e8c908512ad5e5e13fa55e7e7d3180c7d3",
+    "scienceverse/bibr-extract-qwen35-4b-GGUF:Q4_K_M": "0aa228e8c908512ad5e5e13fa55e7e7d3180c7d3",
+    "scienceverse/bibr-extract-qwen35-4b-mlx-8bit": "432b8cd80ea920919ef26c48401473c6d8c8a3e1",
+}
+
+
+def test_every_4b_build_is_pinned_to_its_pointer_v1_commit():
+    from bibr.local.llm_models import variant_revision
+
+    variants = get_model("bibr-extract-4b").variants
+    assert {v.hf_id: variant_revision(v) for v in variants} == _POINTER_V1_REVISIONS
+
+
+def test_runtimes_without_a_revision_option_name_the_files_bibr_downloads():
+    """llama.cpp's -hf and the MLX servers read main; bibr downloads these files itself."""
+    from bibr.local.llm_models import pinned_download_variant
+
+    for variant in get_model("bibr-extract-4b").variants:
+        if variant.runtime == "vllm":
+            assert (variant.revision, variant.hub_files) == (None, ())
+            assert pinned_download_variant(variant.hf_id) is None
+            continue
+        assert pinned_download_variant(variant.hf_id) is variant
+        if variant.runtime == "llama-cpp":
+            quant = variant.hf_id.rsplit(":", 1)[1]
+            assert variant.hub_files == (f"bibr-extract-qwen35-4b-{quant}.gguf",)
+        else:
+            assert variant.platform == "mlx"
+            assert {"config.json", "tokenizer.json", "model.safetensors"} <= set(variant.hub_files)
+            assert "README.md" not in variant.hub_files
+    # The 2B's GGUF and MLX builds follow main; its bf16 is pinned in server_args.
+    for variant in get_model("bibr-extract-2b").variants:
+        assert pinned_download_variant(variant.hf_id) is None
+    assert pinned_download_variant("org/custom:Q4") is None
+
+
+def test_speculative_configs_and_their_floors():
+    by_id = {v.hf_id: v for v in _vllm_variants()}
+    # Configs are looked up by method, so their order does not matter, but a
+    # method listed twice would hide the second config.
+    for variant in by_id.values():
+        methods = [c.method for c in variant.speculative]
+        assert len(set(methods)) == len(methods), variant.hf_id
+    configs = {
+        h: {(c.method, c.num_speculative_tokens, c.min_budget_gb) for c in v.speculative}
+        for h, v in by_id.items()
+    }
+    assert configs == {
+        "scienceverse/bibr-extract-qwen35-4b": {("mtp", 3, 12.0), ("dflash", 7, 13.5)},
+        # DFlash with the W4A16 build was floor-probed only, never scored.
+        "scienceverse/bibr-extract-qwen35-4b-W4A16": {("mtp", 3, 7.25)},
+        # The 2B was not measured with either.
+        "scienceverse/bibr-extract-qwen35-2b": set(),
+    }
+    for variant in by_id.values():
+        for config in variant.speculative:
+            assert config.min_budget_gb > variant.min_budget_gb
+            assert config.min_budget_gb < variant.min_vram_gb
+
+
+def test_speculative_server_args():
+    four_b = get_model("bibr-extract-4b").variants[0]
+    mtp = four_b.speculative_config("mtp")
+    assert mtp is not None
+    assert mtp.server_args() == (
+        "--speculative-config",
+        '{"method":"mtp","num_speculative_tokens":3}',
+        "--no-async-scheduling",
+    )
+    dflash = four_b.speculative_config("dflash")
+    assert dflash is not None
+    flag, config, sync = dflash.server_args()
+    assert (flag, sync) == ("--speculative-config", "--no-async-scheduling")
+    assert json.loads(config) == {
+        "method": "dflash",
+        "model": "z-lab/Qwen3.5-4B-DFlash",
+        # Pinned to the drafter revision that was measured, not a branch.
+        "revision": "9a1996ccf887b79ab3af4fcbf8c1d1f4b5658bcf",
+        "num_speculative_tokens": 7,
+    }
+    assert four_b.speculative_config("eagle") is None
+    w4a16 = get_model("bibr-extract-4b").variants[1]
+    assert w4a16.speculative_config("dflash") is None
+
+
+def test_vllm_registry_variant_finds_only_vllm_builds():
+    from bibr.local.llm_models import vllm_registry_variant
+
+    assert vllm_registry_variant(_4B) is get_model("bibr-extract-4b").variants[0]
+    assert vllm_registry_variant(_4B_Q8) is None
+    assert vllm_registry_variant("/models/local-copy") is None
+
+
+def test_w4a16_build_is_listed_at_its_published_revision():
+    variant = get_model("bibr-extract-4b").variants[1]
+    assert variant.hf_id == "scienceverse/bibr-extract-qwen35-4b-W4A16"
+    assert (variant.platform, variant.quant, variant.runtime) == ("cuda", "w4a16", "vllm")
+    assert variant.approx_download_gb == 3.8
+    args = registry_server_args(variant.hf_id)
+    assert args[:2] == ("--revision", "a32f20485181574d849cfb32f8eac1f266c4143d")
+    assert args[-2:] == ("--max-num-seqs", "64")
+
+
+def test_both_4b_vllm_builds_run_64_sequences_and_the_2b_128():
+    """The 4B's floors were measured at 64 sequences on vLLM 0.32; the 2B's at 128 on 0.31."""
+    for hf_id, seqs in (
+        ("scienceverse/bibr-extract-qwen35-4b", "64"),
+        ("scienceverse/bibr-extract-qwen35-4b-W4A16", "64"),
+        ("scienceverse/bibr-extract-qwen35-2b", "128"),
+    ):
+        args = registry_server_args(hf_id)
+        assert args[-2:] == ("--max-num-seqs", seqs)
+        assert args.count("--max-num-seqs") == 1
+    # Same flags apart from the revision.
+    assert (
+        registry_server_args("scienceverse/bibr-extract-qwen35-4b")[2:]
+        == registry_server_args("scienceverse/bibr-extract-qwen35-4b-W4A16")[2:]
+    )
+
+
+class TestCardSizeTolerance:
+    """Cards report a few MiB under their nominal size and still get its tier."""
+
+    @pytest.mark.parametrize(
+        ("mib", "tier"),
+        [
+            (8188, 8),  # RTX 4060
+            (8151, 8),  # RTX 5060 laptop
+            (12227, 12),  # RTX 5070
+            (32607, 32),  # RTX 5090
+            (24576, 24),  # RTX 3090
+        ],
+    )
+    def test_real_card_totals_fit_their_size(self, mib, tier):
+        assert llm_models.fits_card(tier, mib / 1024)
+
+    @pytest.mark.parametrize(("mib", "tier"), [(11264, 12), (7680, 8), (10240, 11)])
+    def test_the_next_smaller_sizes_do_not(self, mib, tier):
+        assert not llm_models.fits_card(tier, mib / 1024)
+
+    def test_the_tolerance_is_a_quarter_gib(self):
+        assert llm_models.CARD_SIZE_TOLERANCE_GB == 0.25
+        assert llm_models.fits_card(8, 7.75)
+        assert not llm_models.fits_card(8, 7.74)
+
+    def test_variants_for_uses_it(self):
+        model = get_model("bibr-extract-4b")
+        hf_ids = [v.hf_id for v in variants_for(model, "cuda", 9.8, "vllm")]
+        assert hf_ids == ["scienceverse/bibr-extract-qwen35-4b-W4A16"]
+        assert variants_for(model, "cuda", 9.7, "vllm") == []
+        # An RTX 5070 (12,227 MiB) is a 12 GB card for the 2B's vLLM build.
+        assert variants_for(get_model("bibr-extract-2b"), "cuda", 12227 / 1024, "vllm")
+        assert not variants_for(get_model("bibr-extract-2b"), "cuda", 11.0, "vllm")
+
+    def test_no_vllm_variant_reaches_an_8_gb_card(self):
+        # Every managed vLLM start was refused on an emulated 8 GB card with a
+        # desktop (two rounds of runs), so the tolerance must not lift one onto it.
+        for key in ("bibr-extract-4b", "bibr-extract-2b"):
+            assert variants_for(get_model(key), "cuda", 8188 / 1024, "vllm") == []
+            assert variants_for(get_model(key), "cuda", 8.0, "vllm") == []
 
 
 def test_default_local_model_follows_the_backend_runtime():
@@ -85,6 +303,88 @@ def test_default_local_model_follows_the_backend_runtime():
     assert default_local_model("rapid-mlx") == "scienceverse/bibr-extract-qwen35-4b-mlx-8bit"
     with pytest.raises(ValueError, match="cloud"):
         default_local_model("cloud")
+
+
+_4B = "scienceverse/bibr-extract-qwen35-4b"
+_4B_W4A16 = "scienceverse/bibr-extract-qwen35-4b-W4A16"
+_4B_Q8 = "scienceverse/bibr-extract-qwen35-4b-GGUF:Q8_0"
+_4B_Q4 = "scienceverse/bibr-extract-qwen35-4b-GGUF:Q4_K_M"
+
+
+@pytest.mark.parametrize(
+    ("memory_gb", "vllm_model", "llama_model"),
+    [
+        (32607 / 1024, _4B, _4B_Q8),  # RTX 5090
+        (24.0, _4B, _4B_Q8),  # RTX 3090 / 4090
+        (20475 / 1024, _4B, _4B_Q8),  # RTX 4000 Ada (20 GB)
+        (19.75, _4B, _4B_Q8),  # within the 0.25 GiB tolerance of 20
+        (19.7, _4B_W4A16, _4B_Q8),
+        (16.0, _4B_W4A16, _4B_Q8),
+        (12227 / 1024, _4B_W4A16, _4B_Q8),  # RTX 5070
+        (11.0, _4B_W4A16, _4B_Q8),  # RTX 2080 Ti / 1080 Ti size
+        (10.0, _4B_W4A16, _4B_Q8),  # RTX 3080 10 GB
+        (9.75, _4B_W4A16, _4B_Q8),
+        # Below every vLLM tier the vLLM answer is the variant that comes
+        # closest (its start is refused by the server's own check); the
+        # card's own default is llama.cpp (cuda_llm_backend_for).
+        (8188 / 1024, _4B_W4A16, _4B_Q8),  # RTX 4060
+        (6.0, _4B_W4A16, _4B_Q4),  # RTX 2060 / 3050 6 GB
+        (4.0, _4B_W4A16, "scienceverse/bibr-extract-qwen35-2b-GGUF:Q8_0"),
+        (None, _4B, _4B_Q8),  # unknown memory: the best build
+    ],
+)
+def test_default_local_model_follows_the_card(memory_gb, vllm_model, llama_model):
+    """``--llm local`` without setup serves the build setup writes for the card;
+    it used to serve the bf16 build everywhere, refused below 20 GB."""
+    assert default_local_model("vllm", memory_gb=memory_gb) == vllm_model
+    assert default_local_model("llama-cpp", memory_gb=memory_gb) == llama_model
+
+
+def test_default_local_model_probes_the_card(monkeypatch):
+    from bibr.ocr import registry
+
+    monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: 12227 / 1024)
+    assert default_local_model("vllm") == _4B_W4A16
+    monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: 6.0)
+    assert default_local_model("llama-cpp") == _4B_Q4
+    monkeypatch.setattr(registry, "_cuda_vram_gb", lambda: None)
+    assert default_local_model("vllm") == _4B
+
+
+def test_default_local_model_mlx_follows_the_ram(monkeypatch):
+    monkeypatch.setattr(llm_models.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(llm_models.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(llm_models, "_system_memory_gb", lambda: 16.0)
+    assert default_local_model("vllm-mlx") == "scienceverse/bibr-extract-qwen35-4b-mlx-8bit"
+    monkeypatch.setattr(llm_models, "_system_memory_gb", lambda: 4.0)
+    assert default_local_model("rapid-mlx") == "scienceverse/bibr-extract-qwen35-2b-mlx-8bit"
+
+
+@pytest.mark.parametrize("capability", [6.1, 7.0, 7.5])
+def test_pre_ampere_cards_run_the_llm_on_llama_cpp(capability):
+    from bibr.local.llm_models import cuda_llm_backend_for
+
+    for memory_gb in (None, 11.0, 16.0, 24.0, 48.0):
+        assert cuda_llm_backend_for(memory_gb, compute_capability=capability) == "llama-cpp"
+
+
+@pytest.mark.parametrize("capability", [8.0, 8.6, 12.0, None])
+def test_ampere_and_newer_or_unknown_keep_the_size_rule(capability):
+    from bibr.local.llm_models import cuda_llm_backend_for
+
+    assert cuda_llm_backend_for(24.0, compute_capability=capability) == "vllm"
+    assert cuda_llm_backend_for(10.0, compute_capability=capability) == "vllm"
+    assert cuda_llm_backend_for(8.0, compute_capability=capability) == "llama-cpp"
+
+
+def test_cuda_llm_backend_probes_the_compute_capability(monkeypatch):
+    from bibr.local.llm_models import cuda_llm_backend_for
+    from bibr.ocr import registry
+
+    monkeypatch.setattr(registry, "_nvidia_compute_capability", lambda: 7.5)
+    assert cuda_llm_backend_for(24.0) == "llama-cpp"
+    monkeypatch.setattr(registry, "_nvidia_compute_capability", lambda: 8.6)
+    assert cuda_llm_backend_for(24.0) == "vllm"
 
 
 def test_registry_server_args_unknown_model_empty():
