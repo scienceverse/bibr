@@ -72,7 +72,8 @@ class ModelSetting:
     attr: tuple[str, ...]
     revision_attr: tuple[str, ...] | None
     # "onnx" (an onnx/ bundle; ``onnx_model`` is the manifest's ``model`` field, or None for a
-    # bundle checked otherwise), "joblib" (one bundle file), "geom_tagger", "text_segmenter",
+    # bundle checked otherwise), "joblib" (a GBM bundle: its bibr-gbm/1 .json manifest, a
+    # .joblib file, or the directory holding one), "geom_tagger", "text_segmenter",
     # "checkpoint" (a file).
     kind: str
     onnx_model: str | None = None
@@ -667,8 +668,16 @@ def _check_local(spec: ModelSetting, value: str, settings: Any = None) -> None:
         read_segmenter_manifest(manifest)
         Tokenizer.from_file(str(tokenizer))
     elif spec.kind == "joblib":
-        if not path.is_file():
-            raise ConfigurationError("name the .joblib bundle file itself")
+        stem = "geom_segmenter" if spec.env == "REF_GEOM_SEG_MODEL_ID" else "front_role"
+        if path.is_dir():
+            if not ((path / f"{stem}.json").is_file() or (path / f"{stem}.joblib").is_file()):
+                raise ConfigurationError(
+                    f"the directory holds neither {stem}.json (with its .npz) nor {stem}.joblib"
+                )
+        elif not path.is_file():
+            raise ConfigurationError(
+                "name the bundle: its .json manifest, its .joblib file, or the directory holding them"
+            )
         # The loaders check the bundle's kind and feature contract; both bundles are small.
         if spec.env == "REF_GEOM_SEG_MODEL_ID":
             from bibr.extract.geom_segmenter import GeomSegmenter

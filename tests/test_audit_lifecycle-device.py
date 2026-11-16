@@ -271,15 +271,30 @@ def test_bundle_spec_ignores_a_cwd_directory(tmp_path, monkeypatch, caplog, modu
     so the optional model failed to resolve and dropped out."""
     import importlib
 
+    import bibr.ner.checkpoint as ckpt
+    from bibr.utils import gbm_bundle
+
     mod = importlib.import_module(module)
+    stem = mod._BUNDLE_STEM
     monkeypatch.chdir(tmp_path)
     (tmp_path / "org" / "repo").mkdir(parents=True)
+    asked: list[str] = []
 
-    assert mod._resolve_spec("org/repo") == f"org/repo:{mod._BUNDLE_FILENAME}"
+    def fake_resolve(spec, revision=None):
+        asked.append(spec)
+        raise FileNotFoundError(spec)
+
+    monkeypatch.setattr(ckpt, "resolve_checkpoint", fake_resolve)
+    monkeypatch.setattr(gbm_bundle, "_from_joblib", lambda spec, revision: asked.append(spec))
+
+    gbm_bundle.load_gbm_bundle("org/repo", None, stem=stem)
+    # The Hub manifest first, then the Hub pickle; the cwd directory is never read.
+    assert asked == [f"org/repo:{stem}.json", f"org/repo:{stem}.joblib"]
     assert not caplog.records  # resolve_checkpoint warns, naming the file
-    assert mod._resolve_spec("org/repo:other.joblib") == "org/repo:other.joblib"
-    assert mod._resolve_spec("./org/repo/b.joblib") == "./org/repo/b.joblib"
-    assert mod._resolve_spec(str(tmp_path / "b.joblib")) == str(tmp_path / "b.joblib")
+    asked.clear()
+    gbm_bundle.load_gbm_bundle("org/repo:other.joblib", None, stem=stem)
+    gbm_bundle.load_gbm_bundle("./org/repo/b.joblib", None, stem=stem)
+    assert asked == ["org/repo:other.joblib", "./org/repo/b.joblib"]
 
 
 def test_tilde_checkpoint_path_expands(tmp_path, monkeypatch):

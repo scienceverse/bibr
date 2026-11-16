@@ -388,3 +388,17 @@ def test_a_cached_override_is_recorded_in_each_run(bundle_path):
         assert record["loaded"] is True
     reset_front_role_cache()
     reset_loaded_model_overrides()
+
+
+def test_converted_bundle_gives_the_joblib_bundles_scores(bundle_path, tmp_path):
+    """The bibr-gbm/1 export reads without scikit-learn and scores every region
+    exactly as the pickle does."""
+    from scripts.export_gbm_bundle import main as export_main
+
+    out = tmp_path / "converted"
+    assert export_main([str(bundle_path), str(out), "--stem", "front_role"]) == 0
+    old = FrontRoleClassifier(str(bundle_path))
+    new = FrontRoleClassifier(str(out / "front_role.json"))
+    assert new.roles == old.roles and new.version == old.version
+    feats, _labels = _synthetic_rows()
+    assert new._score_rows(feats) == old._score_rows(feats)
