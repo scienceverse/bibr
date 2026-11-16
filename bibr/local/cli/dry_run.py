@@ -136,7 +136,10 @@ def _dry_run_ocr_model(config: ResolvedRunConfig) -> tuple[str, str | None]:
         )
         return served, None
     if backend in ("gemini", "openai", "anthropic"):
-        return config.ocr_model or Settings.ocr_vision.model, None
+        from bibr.config import snapshot_settings
+        from bibr.ocr.profiles import cloud_vision_model
+
+        return config.ocr_model or cloud_vision_model(backend, snapshot_settings()), None
     if backend == "text-layer":
         from bibr.ocr.registry import TEXT_LAYER_MODEL
 
