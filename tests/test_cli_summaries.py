@@ -20,7 +20,9 @@ from bibr.pipeline.state import FileState
 
 
 def _printed(console: MagicMock) -> str:
-    return "\n".join(str(c) for c in console.print.call_args_list)
+    # The printed text itself, not the call's repr: a repr doubles the
+    # backslashes of a Windows path.
+    return "\n".join(" ".join(map(str, c.args)) for c in console.print.call_args_list)
 
 
 # --- per-file review line: absence on clean payloads ------------------------------
