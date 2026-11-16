@@ -8,9 +8,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-import joblib
 import numpy as np
 import pytest
+
+# The reference models are trained and converted with scikit-learn and joblib
+# (the dev group); the reader under test needs neither.
+joblib = pytest.importorskip("joblib")
+pytest.importorskip("sklearn")
+
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.feature_extraction import DictVectorizer
 
@@ -145,35 +150,33 @@ def test_manifest_must_name_a_sibling_npz(tmp_path):
         load_gbm_bundle(str(manifest), None, stem="model")
 
 
-def test_local_directory_prefers_the_manifest_and_falls_back_to_joblib(tmp_path):
+def test_a_directory_names_its_manifest_and_a_pickle_is_refused(tmp_path):
     (tmp_path / "dir").mkdir()
     src = _fit_bundle(tmp_path / "dir", 2)
-    path, bundle = load_gbm_bundle(str(tmp_path / "dir"), None, stem="model")
-    assert path.endswith("model.joblib")
-    assert type(bundle["model"]).__name__ == "HistGradientBoostingClassifier"
+    # A directory with only the pickle has no bundle bibr reads.
+    with pytest.raises(ValueError, match="not a file"):
+        load_gbm_bundle(str(tmp_path / "dir"), None, stem="model")
 
     _export(src, tmp_path / "dir")
     path, bundle = load_gbm_bundle(str(tmp_path / "dir"), None, stem="model")
     assert path.endswith("model.json")
     assert isinstance(bundle["model"], gbm_bundle.TreeEnsemble)
-    # A file spec reads what it names.
-    path, bundle = load_gbm_bundle(str(src), None, stem="model")
-    assert path.endswith("model.joblib")
+    # A pickle, local or on the Hub, is refused with how to convert it.
+    for spec in (str(src), "org/repo:model.joblib"):
+        with pytest.raises(GbmBundleError, match="export_gbm_bundle"):
+            load_gbm_bundle(spec, None, stem="model")
 
 
-def test_hub_id_reads_the_manifest_at_the_revision_when_it_has_one(tmp_path, monkeypatch):
+def test_hub_id_reads_the_manifest_at_the_revision(tmp_path, monkeypatch):
     src = _fit_bundle(tmp_path, 2)
     manifest, arrays = _export(src, tmp_path / "out")
     asked = []
 
     def fake_resolve(spec, revision=None):
         asked.append((spec, revision))
-        name = spec.split(":", 1)[1]
-        local = tmp_path / "out" / name
-        if name.endswith(".joblib"):
-            return str(src)
+        local = tmp_path / "out" / spec.split(":", 1)[1]
         if not local.is_file():
-            raise FileNotFoundError(name)
+            raise FileNotFoundError(spec)
         return str(local)
 
     import bibr.ner.checkpoint as ckpt
@@ -184,14 +187,14 @@ def test_hub_id_reads_the_manifest_at_the_revision_when_it_has_one(tmp_path, mon
     assert isinstance(bundle["model"], gbm_bundle.TreeEnsemble)
     assert asked == [("org/repo:model.json", "abc123"), ("org/repo:model.npz", "abc123")]
 
-    # A revision without the manifest reads the joblib bundle.
+    # A revision without the manifest fails as the Hub failed: no pickle is tried.
     asked.clear()
-    path, bundle = load_gbm_bundle("org/repo", "abc123", stem="absent")
-    assert path == str(src)
-    assert asked == [("org/repo:absent.json", "abc123"), ("org/repo:absent.joblib", "abc123")]
+    with pytest.raises(FileNotFoundError):
+        load_gbm_bundle("org/repo", "abc123", stem="absent")
+    assert asked == [("org/repo:absent.json", "abc123")]
 
 
-def test_a_broken_manifest_on_the_hub_is_not_hidden_by_the_joblib_fallback(tmp_path, monkeypatch):
+def test_a_broken_manifest_on_the_hub_is_reported(tmp_path, monkeypatch):
     bad = tmp_path / "model.json"
     bad.write_text(json.dumps({"format": "something-else"}))
     import bibr.ner.checkpoint as ckpt

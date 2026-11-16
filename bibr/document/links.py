@@ -227,14 +227,10 @@ def _read_link(
     A quadrilateral that is not finite is dropped.
     """
     pdfium_c = api.c
-    rect = pdfium_c.FS_RECTF()
-    if not api.FPDFLink_GetAnnotRect(link, ctypes.byref(rect)):
-        return None, "a link annotation with no rectangle, left out"
-    corners = (float(rect.left), float(rect.right), float(rect.bottom), float(rect.top))
-    if not all(map(math.isfinite, corners)):
-        return None, "a link annotation with a rectangle that is not finite, left out"
-    left, right = sorted(corners[:2])
-    bottom, top = sorted(corners[2:])
+    box, note = _link_rect(api, link)
+    if box is None:
+        return None, note
+    left, bottom, right, top = box
     quads = []
     n_quads = api.FPDFLink_CountQuadPoints(link)
     for index in range(min(n_quads, MAX_QUADS)):
@@ -291,6 +287,71 @@ def _read_link(
     )
     cut = f"a link with more than {MAX_QUADS} quadrilaterals, the rest unread"
     return raw, (cut if n_quads > MAX_QUADS else None)
+
+
+def _link_rect(api: _Api, link) -> tuple[Box | None, str | None]:
+    """The link's rectangle, corners sorted; None, with a note, when it has none or one not finite."""
+    rect = api.c.FS_RECTF()
+    if not api.FPDFLink_GetAnnotRect(link, ctypes.byref(rect)):
+        return None, "a link annotation with no rectangle, left out"
+    corners = (float(rect.left), float(rect.right), float(rect.bottom), float(rect.top))
+    if not all(map(math.isfinite, corners)):
+        return None, "a link annotation with a rectangle that is not finite, left out"
+    left, right = sorted(corners[:2])
+    bottom, top = sorted(corners[2:])
+    return (left, bottom, right, top), None
+
+
+class _ReaderApi:
+    """The pdfium functions a link read calls, for a reader that is not the layer's harvest."""
+
+    def __init__(self) -> None:
+        import pypdfium2.raw as pdfium_c
+
+        self.c = pdfium_c
+        for name in APIS + NAME_APIS:
+            setattr(self, name, getattr(pdfium_c, name))
+
+    if TYPE_CHECKING:
+
+        def __getattr__(self, name: str): ...
+
+
+_READER_API: _ReaderApi | None = None
+
+
+def reader_api() -> _ReaderApi:
+    """The pdfium functions :func:`read_page_uri_links` needs, resolved once per process."""
+    global _READER_API
+    if _READER_API is None:
+        _READER_API = _ReaderApi()
+    return _READER_API
+
+
+def read_page_uri_links(api, doc, page) -> list[tuple[Box, str]]:
+    """The rectangle and target of every URI link annotation on an open *page* of *doc*.
+
+    The URI-only read the PDF inspection's ``uri_links`` come from: the same pdfium reads as
+    :func:`read_page_links` (rectangle, action, URI), without the destinations, names and
+    quadrilaterals only the layer keeps, so it runs whether or not the layer is built. A link
+    whose action is not a URI, that has no rectangle or one that is not finite, or whose URI is
+    empty or longer than ``destinations.MAX_TEXT``, is skipped. The caller holds the
+    ``pdfium_lock``; an error reading the page raises.
+    """
+    found: list[tuple[Box, str]] = []
+    position = ctypes.c_int(0)
+    link = api.c.FPDF_LINK()
+    while api.FPDFLink_Enumerate(page.raw, ctypes.byref(position), ctypes.byref(link)):
+        action = api.FPDFLink_GetAction(link)
+        if not action or _ACTIONS.get(api.FPDFAction_GetType(action)) != "uri":
+            continue
+        box, _note = _link_rect(api, link)
+        if box is None:
+            continue
+        uri = _action_uri(api, doc, action)
+        if uri is not None:
+            found.append((box, uri))
+    return found
 
 
 def _annotation_dest(api: _Api, page, link) -> tuple[str | None, bool]:

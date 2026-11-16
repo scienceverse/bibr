@@ -52,7 +52,7 @@ def _json_safe(value: Any) -> Any:
 def _load_joblib(spec: str, revision: str | None, stem: str) -> tuple[str, dict]:
     from bibr.ner.checkpoint import resolve_checkpoint
     from bibr.utils.ml_runtime import is_hub_repo_id
-    from bibr.utils.safe_pickle import safe_joblib_load
+    from scripts._safe_joblib import safe_joblib_load
 
     if ":" not in spec and is_hub_repo_id(spec, warn=False):
         spec = f"{spec}:{stem}.joblib"

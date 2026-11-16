@@ -11,9 +11,6 @@ cd paper-extraction
 uv add bibr
 ```
 
-On macOS and Linux, install the system libmagic library first (see
-[Installation](install.md#system-prerequisites)).
-
 This installs core bibr, including the ONNX runtime for its trained models.
 The setup wizard offers any additional runtime extras your hardware needs;
 see [Installation](install.md) for prerequisites, the optional demo, and source installs.

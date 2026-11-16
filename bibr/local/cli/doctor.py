@@ -588,14 +588,8 @@ def _check_ref_strategies(ok, fail) -> None:
         # fetched from the Hub on first use — nothing to verify offline here.
         ok(f"{label} (ONNX Runtime)")
         return
-    if seg_strategy == "geom" and importlib.util.find_spec("sklearn") is None:
-        # scikit-learn is a core dependency, so this only fires on a damaged
-        # environment. geom cascades to LLM seg, hence a soft failure.
-        fail(
-            f"{label}: geom segmenter unavailable, will cascade to LLM seg",
-            hint="Reinstall bibr, or set REF_SEG_STRATEGY=llm",
-        )
-        return
+    # The geom segmenter is a bibr-gbm/1 bundle read with numpy, a core
+    # dependency: nothing to check before it is fetched.
     ok(label)
 
 
@@ -822,22 +816,6 @@ def _run_doctor() -> None:
             "uv not on PATH",
             hint="Only the uv-managed vLLM and MLX-VLM runners need it. "
             "Install from https://docs.astral.sh/uv/",
-        )
-
-    # libmagic is a system library python-magic only binds to; a fresh install
-    # on macOS/Linux can be missing it and every extraction dies on the first
-    # file sniff (issue #64). Name it here, where users come to find it.
-    from bibr.input.validate import libmagic_unavailable_reason
-
-    libmagic_problem = libmagic_unavailable_reason()
-    if libmagic_problem is None:
-        ok("libmagic available")
-    else:
-        # bibr falls back to its own signature check for the formats it reads
-        # (PDF, DOCX, EPUB, XML, HTML), so this no longer stops a run.
-        warn(
-            "libmagic not found; bibr checks file types itself (PDF, DOCX, EPUB, XML, HTML)",
-            hint=libmagic_problem,
         )
 
     # --- Configuration -------------------------------------------------------

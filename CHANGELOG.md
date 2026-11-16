@@ -16,10 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   so the probabilities are the same floats the joblib bundles give.
   `scripts/export_gbm_bundle.py` converts a joblib bundle and checks the result
   against scikit-learn before it finishes.
-- A model repo read at a revision that holds the manifest uses it; a revision
-  without one reads the joblib bundle as before. `REF_GEOM_SEG_MODEL_ID` and
-  `ML_FRONT_ROLE_MODEL_ID` also take a local `.json` manifest, or a directory
-  holding the manifest or the `.joblib` bundle.
+- `REF_GEOM_SEG_MODEL_ID` and `ML_FRONT_ROLE_MODEL_ID` take a local `.json`
+  manifest or the directory holding it.
 
 ### Changed
 
@@ -37,10 +35,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the core dependencies to the new `serve` extra, which `all` includes; litserve
   is no longer installed. `bibr serve` without the extra exits with an install
   hint (`uv tool install 'bibr[serve]'`). The serve image installs it.
+- Input validation no longer needs the system libmagic library, so a plain
+  `pip install bibr` on macOS or Linux works without installing it first.
+  Built-in content checks in `bibr/input/sniff.py` identify PDF, DOCX, JATS
+  XML, HTML (including UTF-16) and ePub inputs, and executables, the same way
+  on every host; libmagic is no longer consulted even when it is installed.
+  `python-magic` and `python-magic-bin` are no longer dependencies, the serve
+  image no longer installs `libmagic1`, `bibr doctor` drops its libmagic
+  check, and the install docs drop the system prerequisite.
+- An HTML or JATS XML file that mentions the PDF header (`%PDF-1.7`) near its
+  start is accepted; it was rejected as a mislabelled PDF.
+- A file that starts with a DOS or Windows (`MZ`) or Linux (ELF) executable
+  header is refused under every extension (`unsupported_format`). With
+  libmagic such files reached the format checks, and a PDF placed behind an
+  `MZ` header was accepted.
+- Error codes only: an ePub whose `mimetype` member is not first, renamed to
+  another supported extension, is `unsupported_format` (was
+  `corrupted_file`); a truncated DOCX, or a text file that mentions `%PDF-`
+  without a version, renamed to another supported extension, is
+  `corrupted_file` (was `unsupported_format`).
 - `REF_GEOM_SEG_REVISION` and `ML_FRONT_ROLE_REVISION` default to new revisions
-  of the two model repos (`88a292ff`, `a1fd6637`) that add the `bibr-gbm/1` files
-  beside the unchanged joblib bundles, so the default models load without
-  unpickling. Their scores are bit-identical to the joblib bundles'.
+  of the two model repos (`88a292ff`, `a1fd6637`) that hold the `bibr-gbm/1`
+  files. Their scores are bit-identical to the joblib bundles'.
+- scikit-learn and joblib are no longer bibr dependencies, and bibr reads no
+  pickles. A `.joblib` bundle named by either setting is refused with how to
+  convert it (`scripts/export_gbm_bundle.py`, which needs the dev group).
+  `bibr doctor` no longer checks for scikit-learn.
 - The text-layer route reads a scan's own OCR layer (invisible text over a
   page-sized image) in place of refusing the file as `scan_needs_ocr`, when the
   scans are the only reason for the refusal and most of the layer's words are
