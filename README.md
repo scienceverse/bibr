@@ -45,7 +45,7 @@ In an existing Python environment, you can also install with
 
 The setup wizard detects your hardware, configures OCR and the LLM, and offers to
 install any additional dependencies. Core installs run bibr's trained models through
-ONNX Runtime; PyTorch, the demo, MCP, and hardware-specific serving runtimes are
+ONNX Runtime; PyTorch, the HTTP API, the demo, MCP, and hardware-specific serving runtimes are
 [optional extras](https://bibr.org/getting-started/install/#extras). The first run may
 download models and runtimes. See the [tester guide](https://bibr.org/tester-guide/)
 for platform-specific instructions and the
@@ -146,7 +146,7 @@ We are grateful to the open-source projects that bibr builds on:
 - [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) (Z.ai / Tsinghua University) — explicit compatibility backend and fallback
 - [Qwen3.5](https://huggingface.co/Qwen) (Alibaba Qwen) — base of bibr's fine-tuned extraction models
 - [GROBID](https://github.com/kermitt2/grobid) — a major source of inspiration for structured scientific document parsing
-- [LitServe](https://lightning.ai/docs/litserve/home) (Lightning AI) — serving infrastructure
+- [FastAPI](https://fastapi.tiangolo.com) and [Uvicorn](https://www.uvicorn.org) — the `bibr serve` HTTP API
 - [PP-DocLayoutV3](https://github.com/PaddlePaddle/PaddleOCR) (PaddlePaddle) — document layout analysis
 - [wtpsplit](https://github.com/segment-any-text/wtpsplit) — sentence segmentation
 - [Crossref](https://www.crossref.org/) — reference metadata enrichment

@@ -36,7 +36,7 @@ def _compute_code_hash() -> str:
     Returns a deterministic hash that changes only when Python source files
     change, so container restarts without code changes preserve the cache.
 
-    Memoized after first call — under LitServe each worker imports
+    Memoized after first call — every serve process imports
     ``bibr.config`` independently, so eager evaluation at import time used
     to walk every ``*.py`` under the package per worker startup. Most
     callers never read ``CacheOptions.version``, so deferring keeps the
@@ -1482,9 +1482,8 @@ class LayoutOptions(_BibrSettings):
     )
     torch_compile: bool = Field(False, description="Enable torch.compile for the layout model.")
     # Run the serve layout model on GPU. None = auto-detect (cuda→mps→cpu in the
-    # worker). LitServe's accelerator="auto" can't be trusted here — it resolves
-    # to CPU whenever torch isn't pre-imported in the master process, which bibr
-    # never does — so the serve layer auto-detects independently. PP-DocLayout
+    # worker). The API process never imports torch, so it cannot tell the
+    # device; the worker auto-detects it. PP-DocLayout
     # on CPU is dramatically slower; force CPU with LAYOUT_USE_GPU=false only on
     # VRAM-tight boxes that co-locate OCR (mirrors SEGMENTER_USE_GPU).
     use_gpu: bool | None = Field(
@@ -2392,7 +2391,7 @@ class PipelineOptions(_BibrSettings):
     )
     # There is deliberately no workers-per-device setting: bibr serve pins one
     # inference worker (see bibr/serve/app.py). Concurrency comes from the
-    # LitServe async loop and the layout/segmenter GpuBatcher; a second worker
+    # worker's async loop and the layout/segmenter GpuBatcher; a second worker
     # would duplicate the models (~1.5 GB RSS each), split the batcher, and
     # parallelize only GIL-bound Python, since the heavy stages already use
     # every core from one process.
@@ -2405,9 +2404,9 @@ class PipelineOptions(_BibrSettings):
     )
     restart_workers: bool = Field(
         False,
-        description="Opt in to LitServe worker replacement after a critical worker-loop failure. "
-        "The safe default is fail-stop because LitServe 0.2.x cannot reliably notify an API "
-        "process whose in-flight request belonged to the dead worker.",
+        description="Start a new inference worker when it dies, instead of stopping bibr serve. "
+        "Either way the requests in flight on the dead worker are answered with a 503 at once; "
+        "the default (false) stops the server so a supervisor restarts it.",
     )
     upload_spool_memory_bytes: int = Field(
         1024 * 1024,
@@ -2458,7 +2457,7 @@ class PipelineOptions(_BibrSettings):
         "keep glibc's default; no effect off glibc Linux.",
     )
     # Max requests running the pipeline concurrently per worker (0 = unlimited).
-    # The LitServe async loop dispatches unbounded concurrent predicts; this
+    # The worker's async loop runs unbounded concurrent predicts; this
     # bounds peak host RAM (page images) under an upload flood. GPU peak VRAM is
     # bounded separately by the layout/segmenter GpuBatcher.
     max_inflight_requests: int = Field(
@@ -2723,8 +2722,8 @@ class GlobalSettings(_BibrSettings):
     )
     SERVE_LOG_LEVEL: str = Field(
         "info",
-        description="Log level for bibr serve's own loggers (bibr.*), also handed to uvicorn "
-        "and LitServe: debug, info, warning or error. Metering records (METER_ENABLED) are "
+        description="Log level for bibr serve's own loggers (bibr.*), also handed to uvicorn: "
+        "debug, info, warning or error. Metering records (METER_ENABLED) are "
         "emitted regardless of this level.",
     )
 

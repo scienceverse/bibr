@@ -21,6 +21,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`bibr serve` no longer runs on LitServe.** The HTTP API is a FastAPI app
+  under uvicorn, and bibr starts and watches its one inference worker itself
+  (`bibr/serve/worker.py`). Requests, responses and status codes are unchanged:
+  a worker error keeps its status and detail, any other worker failure is a
+  generic `500`, a request that waited past `PIPELINE_TIMEOUT` for the worker is
+  a `504`, bodies over the cap are a `413`, and responses from 1000 bytes are
+  gzipped. LitServe's undocumented `GET /` and `GET /info` routes are gone (they
+  answer `404`, or `401` without the bearer when auth is on), as is its
+  `LIT_SERVER_API_KEY` and `LIGHTNING_CERT_PEM` handling, which bibr never
+  configured.
+- **The serve stack is an extra.** FastAPI, uvicorn and python-multipart move from
+  the core dependencies to the new `serve` extra, which `all` includes; litserve
+  is no longer installed. `bibr serve` without the extra exits with an install
+  hint (`uv tool install 'bibr[serve]'`). The serve image installs it.
 - Input validation no longer needs the system libmagic library, so a plain
   `pip install bibr` on macOS or Linux works without installing it first.
   Built-in content checks in `bibr/input/sniff.py` identify PDF, DOCX, JATS
@@ -57,6 +71,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A request no longer hangs when the inference worker dies under it.** Every
+  request in flight on the worker is answered at once with a `503` whose detail
+  has the code `inference_worker_stopped` (which `bibr batch --serve-url`
+  resubmits, as it does a job whose replica died), `/health` answers `503` instead of
+  `ok`, and new requests get a `503` until a worker is ready. With
+  `PIPELINE_RESTART_WORKERS=false` (the default) the server then stops with exit
+  status 1 for its supervisor to restart; `PIPELINE_RESTART_WORKERS=true`, an
+  unsupported opt-in under LitServe, now starts a new worker in place.
+- Ctrl+C on `bibr serve` lets the requests in flight finish (within uvicorn's
+  30-second graceful shutdown) before the worker stops: the worker no longer
+  takes the terminal's SIGINT itself, and is asked to exit rather than
+  terminated.
 - A fast run's abstract no longer takes in a companion summary printed under
   its own heading (such as Highlights or a Simple Summary), a version in
   another language or script printed right after it, or its own "Abstract"

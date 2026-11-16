@@ -23,7 +23,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-pytest.importorskip("litserve")
+pytest.importorskip("fastapi")
 
 from fastapi import HTTPException  # noqa: E402
 

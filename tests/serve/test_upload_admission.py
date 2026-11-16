@@ -1,3 +1,5 @@
+import pytest
+
 from bibr.serve.admission import UploadAdmissionGate
 
 
@@ -22,6 +24,7 @@ def test_gate_rejects_unbalanced_release():
 
 
 async def test_middleware_rejects_before_second_upload_is_processed():
+    pytest.importorskip("fastapi")  # the serve extra
     import asyncio
 
     import httpx
@@ -93,6 +96,7 @@ def _body_gated_app(limit: int, *, threshold: int = 16, max_body: int | None = 1
 
 
 async def test_body_gate_holds_a_slot_only_while_a_large_body_is_received():
+    pytest.importorskip("fastapi")  # the serve extra
     import asyncio
 
     import httpx
@@ -133,6 +137,7 @@ async def test_body_gate_holds_a_slot_only_while_a_large_body_is_received():
 
 
 async def test_body_gate_refuses_a_declared_oversize_body_before_reading_it():
+    pytest.importorskip("fastapi")  # the serve extra
     import httpx
 
     app, gate, handled = _body_gated_app(4, max_body=1000)
@@ -150,6 +155,7 @@ async def test_body_gate_refuses_a_declared_oversize_body_before_reading_it():
 
 
 async def test_body_gate_ignores_other_paths_and_methods():
+    pytest.importorskip("fastapi")  # the serve extra
     import httpx
     from fastapi import FastAPI
 
@@ -182,6 +188,7 @@ async def test_spooled_upload_frees_its_slot_without_dropping_the_inflight_cap()
     once the body is on disk — but still holds an inflight slot, so a flood of
     synchronous extracts is told to back off rather than queueing unboundedly.
     """
+    pytest.importorskip("fastapi")  # the serve extra
     import asyncio
 
     import httpx
@@ -237,6 +244,7 @@ async def test_spooled_upload_frees_its_slot_without_dropping_the_inflight_cap()
 
 async def test_middleware_releases_the_spool_slot_when_a_route_never_does():
     """A route that forgets the early release must not leak a slot."""
+    pytest.importorskip("fastapi")  # the serve extra
     import httpx
     from fastapi import FastAPI
 
@@ -257,6 +265,7 @@ async def test_middleware_releases_the_spool_slot_when_a_route_never_does():
 
 
 def test_release_spool_slot_is_a_no_op_off_route():
+    pytest.importorskip("fastapi")  # the serve extra
     from starlette.requests import Request
 
     from bibr.serve.admission import release_spool_slot

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # entrypoint.sh — bibr server container startup
-# Runs the LitServe application in the foreground.
+# Runs the bibr serve HTTP API in the foreground.
 # OCR runs in a separate container (bibr-ocr).
 set -euo pipefail
 
